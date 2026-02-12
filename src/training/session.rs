@@ -7,15 +7,70 @@ use std::io::Write;
 use bevy::prelude::*;
 use burn::backend::ndarray::{NdArray, NdArrayDevice};
 use burn::backend::Autodiff;
+use burn::module::AutodiffModule;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::grad_clipping::GradientClippingConfig;
 use burn::prelude::*;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+
+use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
 use crate::bot::brain::{CrabBrain, ACTION_SIZE};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
+
+/// Running observation normalizer using Welford's online algorithm.
+/// Normalizes observations to zero mean, unit variance.
+struct ObsNormalizer {
+    mean: [f64; OBS_SIZE],
+    var: [f64; OBS_SIZE],   // running variance (M2 / count)
+    m2: [f64; OBS_SIZE],    // sum of squared differences from mean
+    count: u64,
+    clip: f32,              // max absolute normalized value
+}
+
+impl ObsNormalizer {
+    fn new(clip: f32) -> Self {
+        Self {
+            mean: [0.0; OBS_SIZE],
+            var: [1.0; OBS_SIZE],
+            m2: [0.0; OBS_SIZE],
+            count: 0,
+            clip,
+        }
+    }
+
+    /// Update running stats and return normalized observation.
+    fn normalize(&mut self, obs: &[f32; OBS_SIZE]) -> [f32; OBS_SIZE] {
+        self.count += 1;
+        let n = self.count as f64;
+
+        // Welford update
+        for i in 0..OBS_SIZE {
+            let x = obs[i] as f64;
+            let delta = x - self.mean[i];
+            self.mean[i] += delta / n;
+            let delta2 = x - self.mean[i];
+            self.m2[i] += delta * delta2;
+
+            if self.count > 1 {
+                self.var[i] = self.m2[i] / (n - 1.0);
+            }
+        }
+
+        // Normalize
+        let mut normalized = [0.0f32; OBS_SIZE];
+        for i in 0..OBS_SIZE {
+            let std = (self.var[i] as f32).sqrt().max(1e-6);
+            let val = (obs[i] - self.mean[i] as f32) / std;
+            normalized[i] = val.clamp(-self.clip, self.clip);
+        }
+        normalized
+    }
+}
 
 use super::algorithm::{
     compute_log_prob, sample_action, PpoConfig, PpoMetrics, RolloutBuffer, Transition,
@@ -122,6 +177,12 @@ pub struct TrainingState {
     // Total physics steps for throughput tracking
     pub total_steps: u64,
     last_log_time: std::time::Instant,
+
+    // Observation normalizer
+    obs_normalizer: ObsNormalizer,
+
+    // Checkpointing
+    checkpoint_interval: u32, // save every N PPO updates
 }
 
 impl TrainingState {
@@ -148,7 +209,25 @@ impl TrainingState {
             logger: MetricsLogger::new(),
             total_steps: 0,
             last_log_time: std::time::Instant::now(),
+            obs_normalizer: ObsNormalizer::new(5.0),
+            checkpoint_interval: 50, // save every 50 PPO updates
         }
+    }
+
+    /// Save brain weights to disk.
+    fn save_checkpoint(&self) {
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+        let path = std::path::PathBuf::from(format!(
+            "tmp/brain_update_{}",
+            self.logger.update_count
+        ));
+        match recorder.record(self.brain.clone().into_record(), path.clone()) {
+            Ok(()) => info!("Saved checkpoint to tmp/brain_update_{}", self.logger.update_count),
+            Err(e) => warn!("Failed to save checkpoint: {e}"),
+        }
+        // Also save as "latest" for easy resume
+        let latest_path = std::path::PathBuf::from("tmp/brain_latest");
+        let _ = recorder.record(self.brain.clone().into_record(), latest_path);
     }
 
     /// Compute rolling average of recent rewards.
@@ -218,19 +297,35 @@ impl TrainingState {
         let bs = self.config.batch_size;
         let half_log_2pi = 0.5 * (2.0 * std::f32::consts::PI).ln();
 
+        let mut rng = thread_rng();
+
         for _epoch in 0..self.config.epochs_per_update {
+            // Shuffle indices for random mini-batches
+            let mut indices: Vec<usize> = (0..n).collect();
+            indices.shuffle(&mut rng);
+
             let num_batches = n.div_ceil(bs);
 
             for batch_idx in 0..num_batches {
                 let start = batch_idx * bs;
                 let end = (start + bs).min(n);
                 let batch_n = end - start;
+                let batch_indices = &indices[start..end];
 
-                let obs = obs_all.clone().slice([start..end, 0..OBS_SIZE]);
-                let actions = actions_all.clone().slice([start..end, 0..ACTION_SIZE]);
-                let old_lp = old_log_probs_all.clone().slice([start..end]);
-                let advs = advantages_all.clone().slice([start..end]);
-                let rets = returns_all.clone().slice([start..end]);
+                // Gather shuffled batch via index tensor
+                let idx_tensor = Tensor::<TrainBackend, 1, Int>::from_data(
+                    TensorData::new(
+                        batch_indices.iter().map(|&i| i as i64).collect::<Vec<_>>(),
+                        [batch_n],
+                    ),
+                    device,
+                );
+
+                let obs = obs_all.clone().select(0, idx_tensor.clone());
+                let actions = actions_all.clone().select(0, idx_tensor.clone());
+                let old_lp = old_log_probs_all.clone().select(0, idx_tensor.clone());
+                let advs = advantages_all.clone().select(0, idx_tensor.clone());
+                let rets = returns_all.clone().select(0, idx_tensor);
 
                 // Policy forward
                 let (means, log_std) = self.brain.policy(obs.clone());
@@ -297,20 +392,47 @@ impl TrainingState {
     }
 }
 
-/// Phase 1 reward: learn to stand.
-fn compute_reward(carapace_pos: Vec3, carapace_up: Vec3) -> f32 {
+/// Phase 1 reward: learn to stand stably.
+///
+/// Components:
+///   +1.0 alive bonus (always, for surviving)
+///   +height: smooth bonus peaking at target_height=0.5m
+///   +uprightness: dot(body_up, world_Y) scaled
+///   -action_cost: penalise large motor commands (energy efficiency)
+///   -velocity_cost: penalise body wobble (stability)
+///   -step_cost: small per-step cost to prefer efficient behaviour
+fn compute_reward(
+    carapace_pos: Vec3,
+    carapace_up: Vec3,
+    linvel: Vec3,
+    angvel: Vec3,
+    actions: &[f32],
+) -> f32 {
     let mut reward = 0.0f32;
 
-    let height = carapace_pos.y;
-    if height > 0.3 {
-        reward += 1.0;
-        reward += (1.0 - (height - 0.5).abs()).max(0.0) * 0.5;
-    } else {
-        reward -= 1.0;
-    }
+    // Alive bonus
+    reward += 1.0;
 
-    let uprightness = carapace_up.dot(Vec3::Y);
+    // Height bonus: Gaussian-like around target height of 0.5m
+    let height = carapace_pos.y;
+    let target_height = 0.5;
+    let height_bonus = (-2.0 * (height - target_height).powi(2)).exp();
+    reward += height_bonus;
+
+    // Uprightness: how aligned is body-up with world-up
+    let uprightness = carapace_up.dot(Vec3::Y); // -1 to 1
     reward += uprightness * 0.5;
+
+    // Action cost: penalise large motor outputs (L2 norm)
+    let action_sq_sum: f32 = actions.iter().map(|a| a * a).sum();
+    let action_cost = 0.01 * action_sq_sum;
+    reward -= action_cost;
+
+    // Velocity cost: penalise excessive body motion
+    let vel_cost = 0.01 * (linvel.length_squared() + 0.1 * angvel.length_squared());
+    reward -= vel_cost;
+
+    // Small step cost
     reward -= 0.01;
 
     reward
@@ -323,24 +445,31 @@ pub fn brain_step(
     mut actions: ResMut<CrabActions>,
     carapace_q: Query<(&Transform, &bevy_rapier3d::prelude::Velocity), With<CrabCarapace>>,
 ) {
-    let obs_array = obs.values;
+    let raw_obs = obs.values;
     let device = training.device;
 
-    let obs_tensor = Tensor::<TrainBackend, 1>::from_floats(obs_array.as_slice(), &device);
+    // Normalize observations using running mean/std
+    let obs_array = training.obs_normalizer.normalize(&raw_obs);
+
+    // Use the inner (non-autodiff) backend for inference — avoids building
+    // a computation graph every step, which was the main perf bottleneck.
+    let inference_brain = training.brain.valid();
+
+    let obs_tensor = Tensor::<NdArray, 1>::from_floats(obs_array.as_slice(), &device);
     let obs_batch = obs_tensor.clone().unsqueeze::<2>();
 
-    // Policy forward
-    let (means_batch, log_std) = training.brain.policy(obs_batch);
-    let means: Tensor<TrainBackend, 1> = means_batch.flatten(0, 1);
+    // Policy forward (no autodiff graph)
+    let (means_batch, log_std) = inference_brain.policy(obs_batch);
+    let means: Tensor<NdArray, 1> = means_batch.flatten(0, 1);
 
-    // Value forward
+    // Value forward (no autodiff graph)
     let obs_batch2 = obs_tensor.clone().unsqueeze::<2>();
-    let value = training.brain.value(obs_batch2)
+    let value = inference_brain.value(obs_batch2)
         .flatten::<1>(0, 1)
         .into_scalar()
         .elem::<f32>();
 
-    // Sample action
+    // Sample action (on inner backend)
     let action_tensor = sample_action(&means, &log_std, &device);
     let log_prob = compute_log_prob(&means, &log_std, &action_tensor);
     // Clamp log_prob to prevent extreme values that cause ratio explosion in PPO
@@ -369,9 +498,15 @@ pub fn brain_step(
     actions.values = action_array;
 
     // Compute reward
-    let (reward, done) = if let Ok((transform, _vel)) = carapace_q.single() {
+    let (reward, done) = if let Ok((transform, vel)) = carapace_q.single() {
         let up = transform.rotation * Vec3::Y;
-        let r = compute_reward(transform.translation, up);
+        let r = compute_reward(
+            transform.translation,
+            up,
+            vel.linvel,
+            vel.angvel,
+            &action_array,
+        );
         let done = transform.translation.y < 0.1
             || up.dot(Vec3::Y) < 0.0
             || training.episode_steps > 500;
@@ -442,6 +577,11 @@ pub fn brain_step(
         training.recent_metrics = Some(metrics);
         training.rollout.clear();
         training.current_rollout_steps = 0;
+
+        // Checkpoint periodically
+        if training.logger.update_count % training.checkpoint_interval == 0 {
+            training.save_checkpoint();
+        }
     }
 }
 

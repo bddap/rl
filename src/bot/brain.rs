@@ -84,13 +84,16 @@ impl<B: Backend> CrabBrain<B> {
 
     /// Returns (action_means, action_log_std) for the policy.
     /// Input shape: [batch, OBS_SIZE]
-    /// Output: means [batch, ACTION_SIZE], log_std [ACTION_SIZE]
+    /// Output: means [batch, ACTION_SIZE], log_std [ACTION_SIZE] (clamped to [-2, 0.5])
     pub fn policy(&self, obs: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 1>) {
         let trunk = self.trunk(obs);
         let means = self.policy_fc.forward(trunk);
         // Tanh to bound action means to [-1, 1]
         let means = burn::tensor::activation::tanh(means);
-        (means, self.log_std.val())
+        // Clamp log_std to prevent entropy divergence.
+        // exp(-2) ≈ 0.14 (focused), exp(0.5) ≈ 1.65 (exploratory).
+        let log_std = self.log_std.val().clamp(-2.0, 0.5);
+        (means, log_std)
     }
 
     /// Returns the value estimate.
