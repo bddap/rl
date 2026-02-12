@@ -2,14 +2,17 @@
 //!
 //! Manages the RL training loop integrated with the Bevy game loop.
 
+use std::io::Write;
+
 use bevy::prelude::*;
 use burn::backend::ndarray::{NdArray, NdArrayDevice};
 use burn::backend::Autodiff;
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
+use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
+use burn::optim::adaptor::OptimizerAdaptor;
 use burn::prelude::*;
 
 use crate::bot::actuator::CrabActions;
-use crate::bot::body::CrabCarapace;
+use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
 use crate::bot::brain::{CrabBrain, ACTION_SIZE};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 
@@ -21,6 +24,75 @@ use super::algorithm::{
 /// Backend type aliases.
 pub type TrainBackend = Autodiff<NdArray>;
 
+/// Concrete optimizer type.
+type CrabOptimizer = OptimizerAdaptor<Adam, CrabBrain<TrainBackend>, TrainBackend>;
+
+/// CSV logger for training metrics.
+struct MetricsLogger {
+    episode_file: std::fs::File,
+    update_file: std::fs::File,
+    update_count: u32,
+}
+
+impl MetricsLogger {
+    fn new() -> Self {
+        std::fs::create_dir_all("tmp").expect("failed to create tmp/");
+
+        let mut episode_file = std::fs::File::create("tmp/episodes.csv")
+            .expect("failed to create tmp/episodes.csv");
+        writeln!(episode_file, "episode,reward,steps,avg_reward_10")
+            .expect("failed to write header");
+
+        let mut update_file = std::fs::File::create("tmp/ppo_updates.csv")
+            .expect("failed to create tmp/ppo_updates.csv");
+        writeln!(
+            update_file,
+            "update,policy_loss,value_loss,entropy,avg_reward,buffer_size"
+        )
+        .expect("failed to write header");
+
+        Self {
+            episode_file,
+            update_file,
+            update_count: 0,
+        }
+    }
+
+    fn log_episode(&mut self, episode: u32, reward: f32, steps: u32, avg_reward: f32) {
+        writeln!(
+            self.episode_file,
+            "{},{:.4},{},{}",
+            episode, reward, steps, avg_reward
+        )
+        .ok();
+        // Flush periodically
+        if episode % 10 == 0 {
+            self.episode_file.flush().ok();
+        }
+    }
+
+    fn log_update(
+        &mut self,
+        metrics: &PpoMetrics,
+        avg_reward: f32,
+        buffer_size: usize,
+    ) {
+        self.update_count += 1;
+        writeln!(
+            self.update_file,
+            "{},{:.6},{:.6},{:.6},{:.4},{}",
+            self.update_count,
+            metrics.policy_loss,
+            metrics.value_loss,
+            metrics.entropy,
+            avg_reward,
+            buffer_size,
+        )
+        .ok();
+        self.update_file.flush().ok();
+    }
+}
+
 /// The RL training state. Stored as a non-send resource because burn
 /// tensors use `OnceCell` which is not `Sync`.
 pub struct TrainingState {
@@ -28,6 +100,7 @@ pub struct TrainingState {
     pub config: PpoConfig,
     pub rollout: RolloutBuffer,
     pub device: NdArrayDevice,
+    optimizer: CrabOptimizer,
 
     // Episode tracking
     pub episode_reward: f32,
@@ -41,18 +114,27 @@ pub struct TrainingState {
     // Metrics
     pub recent_rewards: Vec<f32>,
     pub recent_metrics: Option<PpoMetrics>,
+
+    // Logging
+    logger: MetricsLogger,
+
+    // Total physics steps for throughput tracking
+    pub total_steps: u64,
+    last_log_time: std::time::Instant,
 }
 
 impl TrainingState {
     pub fn new() -> Self {
         let device = NdArrayDevice::Cpu;
         let brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let optimizer: CrabOptimizer = AdamConfig::new().init();
 
         Self {
             brain,
             config: PpoConfig::default(),
             rollout: RolloutBuffer::new(),
             device,
+            optimizer,
             episode_reward: 0.0,
             episode_steps: 0,
             episode_count: 0,
@@ -60,13 +142,24 @@ impl TrainingState {
             current_rollout_steps: 0,
             recent_rewards: Vec::new(),
             recent_metrics: None,
+            logger: MetricsLogger::new(),
+            total_steps: 0,
+            last_log_time: std::time::Instant::now(),
         }
     }
 
-    /// Run PPO update. Creates a fresh optimizer each time.
-    /// This loses Adam momentum between updates, which is suboptimal but
-    /// avoids needing to name the concrete optimizer type (it's not publicly
-    /// exported from burn). TODO: find a way to persist optimizer state.
+    /// Compute rolling average of recent rewards.
+    fn avg_reward(&self, window: usize) -> f32 {
+        if self.recent_rewards.is_empty() {
+            return 0.0;
+        }
+        let n = self.recent_rewards.len();
+        let start = n.saturating_sub(window);
+        let slice = &self.recent_rewards[start..];
+        slice.iter().sum::<f32>() / slice.len() as f32
+    }
+
+    /// Run PPO update using the persistent Adam optimizer.
     fn ppo_update(&mut self) -> PpoMetrics {
         let n = self.rollout.len();
         if n == 0 {
@@ -82,7 +175,7 @@ impl TrainingState {
         } else {
             let obs = Tensor::<TrainBackend, 1>::from_floats(last_t.obs.as_slice(), device)
                 .unsqueeze::<2>();
-            self.brain.value(obs).squeeze::<1>().into_scalar().elem::<f32>()
+            self.brain.value(obs).flatten::<1>(0, 1).into_scalar().elem::<f32>()
         };
 
         let (advantages, returns) =
@@ -113,9 +206,6 @@ impl TrainingState {
             TensorData::new(advantages_norm, [n]), device);
         let returns_all = Tensor::<TrainBackend, 1>::from_data(
             TensorData::new(returns, [n]), device);
-
-        // Create optimizer fresh each update
-        let mut optimizer = AdamConfig::new().init::<TrainBackend, CrabBrain<TrainBackend>>();
 
         let mut total_policy_loss = 0.0f32;
         let mut total_value_loss = 0.0f32;
@@ -152,7 +242,7 @@ impl TrainingState {
                             .log()
                             .unsqueeze_dim::<2>(0)
                             .expand([batch_n, ACTION_SIZE]);
-                let new_lp: Tensor<TrainBackend, 1> = log_probs_per_dim.sum_dim(1).squeeze();
+                let new_lp: Tensor<TrainBackend, 1> = log_probs_per_dim.sum_dim(1).flatten(0, 1);
 
                 // Entropy
                 let entropy = (std.clone()
@@ -169,7 +259,7 @@ impl TrainingState {
                 let policy_loss = surr1.min_pair(surr2).mean().neg();
 
                 // Value loss
-                let values: Tensor<TrainBackend, 1> = self.brain.value(obs).squeeze();
+                let values: Tensor<TrainBackend, 1> = self.brain.value(obs).flatten(0, 1);
                 let value_loss = (values - rets).powf_scalar(2.0).mean();
 
                 // Total loss
@@ -185,7 +275,7 @@ impl TrainingState {
                 // Backward + step
                 let grads = loss.backward();
                 let grads = GradientsParams::from_grads(grads, &self.brain);
-                self.brain = optimizer.step(self.config.learning_rate, self.brain.clone(), grads);
+                self.brain = self.optimizer.step(self.config.learning_rate, self.brain.clone(), grads);
             }
         }
 
@@ -231,12 +321,12 @@ pub fn brain_step(
 
     // Policy forward
     let (means_batch, log_std) = training.brain.policy(obs_batch);
-    let means: Tensor<TrainBackend, 1> = means_batch.squeeze();
+    let means: Tensor<TrainBackend, 1> = means_batch.flatten(0, 1);
 
     // Value forward
     let obs_batch2 = obs_tensor.clone().unsqueeze::<2>();
     let value = training.brain.value(obs_batch2)
-        .squeeze::<1>()
+        .flatten::<1>(0, 1)
         .into_scalar()
         .elem::<f32>();
 
@@ -277,23 +367,30 @@ pub fn brain_step(
     training.episode_reward += reward;
     training.episode_steps += 1;
     training.current_rollout_steps += 1;
+    training.total_steps += 1;
 
     if done {
         let ep_reward = training.episode_reward;
+        let ep_steps = training.episode_steps;
         training.recent_rewards.push(ep_reward);
         training.episode_count += 1;
 
+        let avg = training.avg_reward(10);
+        let ep_count = training.episode_count;
+
+        // Log every episode to CSV
+        training.logger.log_episode(ep_count, ep_reward, ep_steps, avg);
+
         if training.episode_count % 10 == 0 {
-            let avg: f32 = if training.recent_rewards.len() > 10 {
-                let s = &training.recent_rewards[training.recent_rewards.len() - 10..];
-                s.iter().sum::<f32>() / 10.0
+            let elapsed = training.last_log_time.elapsed().as_secs_f32();
+            let sps = if elapsed > 0.0 {
+                training.total_steps as f32 / elapsed
             } else {
-                training.recent_rewards.iter().sum::<f32>()
-                    / training.recent_rewards.len() as f32
+                0.0
             };
             info!(
-                "Ep {} | Avg reward: {:.2} | Steps: {} | Buffer: {}",
-                training.episode_count, avg, training.episode_steps, training.rollout.len(),
+                "Ep {} | Avg reward: {:.2} | Steps: {} | Buffer: {} | {:.0} steps/s",
+                training.episode_count, avg, ep_steps, training.rollout.len(), sps,
             );
         }
 
@@ -303,13 +400,18 @@ pub fn brain_step(
 
     // PPO update
     if training.current_rollout_steps >= training.steps_per_rollout {
-        info!("Running PPO update on {} transitions...", training.rollout.len());
+        let buffer_size = training.rollout.len();
+        let avg = training.avg_reward(10);
+
+        info!("Running PPO update on {} transitions...", buffer_size);
         let metrics = training.ppo_update();
 
         info!(
             "PPO | Policy loss: {:.4} | Value loss: {:.4} | Entropy: {:.4}",
             metrics.policy_loss, metrics.value_loss, metrics.entropy,
         );
+
+        training.logger.log_update(&metrics, avg, buffer_size);
 
         training.recent_metrics = Some(metrics);
         training.rollout.clear();
@@ -318,21 +420,63 @@ pub fn brain_step(
 }
 
 /// System: resets the crab when an episode ends.
+/// Resets carapace position/rotation, all body part velocities,
+/// and drives all joints back to their default motor positions.
 pub fn reset_crab(
     training: NonSend<TrainingState>,
+    mut actions: ResMut<CrabActions>,
     mut carapace_q: Query<
         (&mut Transform, &mut bevy_rapier3d::prelude::Velocity),
         With<CrabCarapace>,
     >,
+    mut body_parts: Query<
+        &mut bevy_rapier3d::prelude::Velocity,
+        (With<CrabBodyPart>, Without<CrabCarapace>),
+    >,
+    mut joints: Query<(&CrabJoint, &mut bevy_rapier3d::prelude::MultibodyJoint)>,
 ) {
     if let Some(last) = training.rollout.transitions.last() {
         if last.done {
+            // Reset carapace position and velocity
             if let Ok((mut transform, mut vel)) = carapace_q.single_mut() {
-                transform.translation = Vec3::new(0.0, 0.6, 0.0);
+                transform.translation = Vec3::new(0.0, 1.0, 0.0);
                 transform.rotation = Quat::IDENTITY;
                 vel.linvel = Vec3::ZERO;
                 vel.angvel = Vec3::ZERO;
             }
+
+            // Zero velocities on all child body parts
+            for mut vel in body_parts.iter_mut() {
+                vel.linvel = Vec3::ZERO;
+                vel.angvel = Vec3::ZERO;
+            }
+
+            // Reset joint motors to default positions
+            for (crab_joint, mut mj) in joints.iter_mut() {
+                let default_pos = crab_joint.id.default_position();
+                let generic: &mut bevy_rapier3d::prelude::GenericJoint = mj.data.as_mut();
+
+                let axis = match &crab_joint.id {
+                    crate::bot::body::CrabJointId::ClawPincer(_) => {
+                        bevy_rapier3d::prelude::JointAxis::LinX
+                    }
+                    _ => bevy_rapier3d::prelude::JointAxis::AngX,
+                };
+
+                // Use the same stiffness/damping as initial spawn
+                let (stiffness, damping) = match &crab_joint.id {
+                    crate::bot::body::CrabJointId::EyeStalk(_) => (25.0, 5.0),
+                    crate::bot::body::CrabJointId::ClawUpper(_)
+                    | crate::bot::body::CrabJointId::ClawFore(_)
+                    | crate::bot::body::CrabJointId::ClawPincer(_) => (250.0, 25.0),
+                    _ => (200.0, 20.0), // legs
+                };
+
+                generic.set_motor_position(axis, default_pos, stiffness, damping);
+            }
+
+            // Reset action vector to zero
+            actions.values = [0.0; CrabJointId::COUNT];
         }
     }
 }

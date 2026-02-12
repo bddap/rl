@@ -29,38 +29,38 @@ fn motor_params(id: &CrabJointId) -> MotorParams {
     match id {
         CrabJointId::LegCoxa(_, _) => MotorParams {
             range: [-0.78, 0.78], // ~±45°
-            stiffness: 400.0,
-            damping: 40.0,
+            stiffness: 200.0,
+            damping: 20.0,
         },
         CrabJointId::LegFemur(_, _) => MotorParams {
             range: [-1.57, 0.78], // -90° to +45°
-            stiffness: 400.0,
-            damping: 40.0,
+            stiffness: 200.0,
+            damping: 20.0,
         },
         CrabJointId::LegTibia(_, _) => MotorParams {
             range: [-0.1, 1.88], // ~0° to ~108°
-            stiffness: 400.0,
-            damping: 40.0,
+            stiffness: 200.0,
+            damping: 20.0,
         },
         CrabJointId::ClawUpper(_) => MotorParams {
             range: [-0.78, 1.57],
-            stiffness: 500.0,
-            damping: 50.0,
+            stiffness: 250.0,
+            damping: 25.0,
         },
         CrabJointId::ClawFore(_) => MotorParams {
             range: [-1.57, 1.57],
-            stiffness: 500.0,
-            damping: 50.0,
+            stiffness: 250.0,
+            damping: 25.0,
         },
         CrabJointId::ClawPincer(_) => MotorParams {
             range: [0.0, 0.06], // prismatic: 0 to 6cm
-            stiffness: 500.0,
-            damping: 50.0,
+            stiffness: 250.0,
+            damping: 25.0,
         },
         CrabJointId::EyeStalk(_) => MotorParams {
             range: [-0.3, 0.78],
-            stiffness: 50.0,
-            damping: 10.0,
+            stiffness: 25.0,
+            damping: 5.0,
         },
     }
 }
@@ -97,6 +97,7 @@ pub fn apply_actions(
 
 /// Test system: generates sine-wave actions to verify motors work.
 /// Add this system temporarily to see the crab wiggle.
+#[allow(dead_code)]
 pub fn test_wiggle(time: Res<Time>, mut actions: ResMut<CrabActions>) {
     let t = time.elapsed_secs();
 

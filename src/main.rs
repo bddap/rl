@@ -7,13 +7,68 @@ mod training;
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
+/// Resource indicating whether we're running headless (no rendering).
+#[derive(Resource, Clone, Copy)]
+pub struct HeadlessMode(pub bool);
+
 fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
+    // Abort on panic instead of unwinding, so thread pool panics crash immediately.
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("PANIC: {info}");
+        if let Ok(v) = std::env::var("RUST_BACKTRACE") {
+            if v == "1" || v == "full" {
+                let bt = std::backtrace::Backtrace::force_capture();
+                eprintln!("{bt}");
+            }
+        }
+        std::process::abort();
+    }));
+
+    let headless = std::env::args().any(|a| a == "--headless");
+
+    let mut app = App::new();
+
+    if headless {
+        // Headless: use DefaultPlugins but skip window creation and rendering.
+        // Set WGPU to skip GPU initialization entirely.
+        app.add_plugins(
+            DefaultPlugins
+                .set(bevy::window::WindowPlugin {
+                    primary_window: None,
+                    exit_condition: bevy::window::ExitCondition::DontExit,
+                    ..default()
+                })
+                .set(bevy::render::RenderPlugin {
+                    render_creation: bevy::render::settings::RenderCreation::Automatic(
+                        bevy::render::settings::WgpuSettings {
+                            backends: None,
+                            ..default()
+                        },
+                    ),
+                    ..default()
+                })
+                .disable::<bevy::winit::WinitPlugin>(),
+        );
+        // Drive the main schedule without a window event loop.
+        // Use a small non-zero duration so Time advances and FixedUpdate fires.
+        app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
+            std::time::Duration::from_millis(1),
+        ));
+    } else {
+        // Windowed: full rendering
+        app.add_plugins(DefaultPlugins);
+        app.add_plugins(RapierDebugRenderPlugin::default());
+    }
+
+    app.insert_resource(HeadlessMode(headless))
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
-        .add_plugins(RapierDebugRenderPlugin::default())
         .add_plugins(physics::PhysicsWorldPlugin)
         .add_plugins(bot::BotPlugin)
         .add_plugins(training::TrainingPlugin)
+        .add_systems(Startup, move || {
+            if headless {
+                info!("Headless training mode — no window, max speed physics");
+            }
+        })
         .run();
 }

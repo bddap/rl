@@ -33,7 +33,7 @@ const CARAPACE_HALF_H: f32 = 0.12; // y (up-down) — very flat
 const CARAPACE_HALF_D: f32 = 0.35; // z (front-back)
 
 /// Spawn height: how high above ground the carapace center starts.
-const SPAWN_HEIGHT: f32 = 0.6;
+const SPAWN_HEIGHT: f32 = 1.0;
 
 /// Leg segment dimensions (capsule half-height, radius).
 const COXA_LEN: f32 = 0.15;
@@ -61,17 +61,17 @@ const EYE_BALL_RAD: f32 = 0.03;
 // Motor parameters
 // ---------------------------------------------------------------------------
 
-const LEG_STIFFNESS: f32 = 400.0;
-const LEG_DAMPING: f32 = 40.0;
-const LEG_MAX_FORCE: f32 = 200.0;
+const LEG_STIFFNESS: f32 = 200.0;
+const LEG_DAMPING: f32 = 20.0;
+const LEG_MAX_FORCE: f32 = 100.0;
 
-const CLAW_STIFFNESS: f32 = 500.0;
-const CLAW_DAMPING: f32 = 50.0;
-const CLAW_MAX_FORCE: f32 = 300.0;
+const CLAW_STIFFNESS: f32 = 250.0;
+const CLAW_DAMPING: f32 = 25.0;
+const CLAW_MAX_FORCE: f32 = 150.0;
 
-const EYE_STIFFNESS: f32 = 50.0;
-const EYE_DAMPING: f32 = 10.0;
-const EYE_MAX_FORCE: f32 = 20.0;
+const EYE_STIFFNESS: f32 = 25.0;
+const EYE_DAMPING: f32 = 5.0;
+const EYE_MAX_FORCE: f32 = 10.0;
 
 // ---------------------------------------------------------------------------
 // Marker components for querying
@@ -80,6 +80,10 @@ const EYE_MAX_FORCE: f32 = 20.0;
 /// Marker for the crab's root carapace entity.
 #[derive(Component)]
 pub struct CrabCarapace;
+
+/// Marker applied to ALL crab body parts (carapace + limb segments).
+#[derive(Component)]
+pub struct CrabBodyPart;
 
 /// Identifies a specific joint on the crab for the sensor/actuator system.
 #[derive(Component, Clone, Copy, Debug)]
@@ -129,6 +133,24 @@ impl CrabJointId {
             CrabJointId::ClawPincer(side) => 24 + side_offset(*side) * 3 + 2,
             // Eyes: 2 joints
             CrabJointId::EyeStalk(side) => 30 + side_offset(*side),
+        }
+    }
+}
+
+impl CrabJointId {
+    /// Returns the default (rest) motor position for this joint.
+    pub fn default_position(&self) -> f32 {
+        match self {
+            CrabJointId::LegCoxa(_, leg_idx) => {
+                let splay_angles = [0.3_f32, 0.1, -0.1, -0.3];
+                splay_angles[*leg_idx as usize]
+            }
+            CrabJointId::LegFemur(_, _) => -0.4,
+            CrabJointId::LegTibia(_, _) => 0.8,
+            CrabJointId::ClawUpper(_) => 0.3,
+            CrabJointId::ClawFore(_) => 0.0,
+            CrabJointId::ClawPincer(_) => 0.0,
+            CrabJointId::EyeStalk(_) => 0.2,
         }
     }
 }
@@ -184,6 +206,7 @@ pub fn spawn_crab(
     let carapace = commands
         .spawn((
             CrabCarapace,
+            CrabBodyPart,
             RigidBody::Dynamic,
             Collider::cuboid(CARAPACE_HALF_W, CARAPACE_HALF_H, CARAPACE_HALF_D),
             ColliderMassProperties::Density(5.0),
@@ -264,6 +287,7 @@ fn spawn_leg(
 
     let coxa = commands
         .spawn((
+            CrabBodyPart,
             CrabJoint {
                 id: CrabJointId::LegCoxa(side, leg_idx),
             },
@@ -288,6 +312,7 @@ fn spawn_leg(
 
     let femur = commands
         .spawn((
+            CrabBodyPart,
             CrabJoint {
                 id: CrabJointId::LegFemur(side, leg_idx),
             },
@@ -311,6 +336,7 @@ fn spawn_leg(
         .motor_model(MotorModel::AccelerationBased);
 
     commands.spawn((
+        CrabBodyPart,
         CrabJoint {
             id: CrabJointId::LegTibia(side, leg_idx),
         },
@@ -352,6 +378,7 @@ fn spawn_claw(
 
     let upper = commands
         .spawn((
+            CrabBodyPart,
             CrabJoint {
                 id: CrabJointId::ClawUpper(side),
             },
@@ -376,6 +403,7 @@ fn spawn_claw(
 
     let forearm = commands
         .spawn((
+            CrabBodyPart,
             CrabJoint {
                 id: CrabJointId::ClawFore(side),
             },
@@ -399,6 +427,7 @@ fn spawn_claw(
         .motor_model(MotorModel::AccelerationBased);
 
     commands.spawn((
+        CrabBodyPart,
         CrabJoint {
             id: CrabJointId::ClawPincer(side),
         },
@@ -441,6 +470,7 @@ fn spawn_eye(
         .motor_model(MotorModel::AccelerationBased);
 
     commands.spawn((
+        CrabBodyPart,
         CrabJoint {
             id: CrabJointId::EyeStalk(side),
         },
