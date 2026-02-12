@@ -4,6 +4,8 @@ pub mod session;
 
 use bevy::prelude::*;
 
+use crate::bot::BotSet;
+
 /// Plugin that manages RL training.
 pub struct TrainingPlugin;
 
@@ -16,7 +18,8 @@ impl Plugin for TrainingPlugin {
                     session::brain_step,
                     session::reset_crab,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(BotSet::Think),
             );
     }
 }

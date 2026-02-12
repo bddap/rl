@@ -356,9 +356,10 @@ impl TrainingState {
                     - half_log_2pi;
                 let new_lp: Tensor<TrainBackend, 1> = log_probs_per_dim.sum_dim(1).flatten(0, 1);
 
-                // Entropy: 0.5 * log(2*pi*e) + log_std, summed over dims
+                // Entropy: 0.5 * log(2*pi*e) + log_std, averaged over dims
+                // (mean, not sum, so entropy_coeff is scale-invariant w.r.t. ACTION_SIZE)
                 let entropy_per_dim = log_std_clamped.clone() + (0.5 * (2.0 * std::f32::consts::PI * std::f32::consts::E).ln());
-                let entropy = entropy_per_dim.sum();
+                let entropy = entropy_per_dim.mean();
 
                 // PPO clipped objective
                 // Clamp log-ratio to prevent exp() overflow
@@ -631,24 +632,9 @@ pub fn reset_crab(
             // Reset joint motors to default positions
             for (crab_joint, mut mj) in joints.iter_mut() {
                 let default_pos = crab_joint.id.default_position();
+                let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
+                let axis = crab_joint.id.joint_axis();
                 let generic: &mut bevy_rapier3d::prelude::GenericJoint = mj.data.as_mut();
-
-                let axis = match &crab_joint.id {
-                    crate::bot::body::CrabJointId::ClawPincer(_) => {
-                        bevy_rapier3d::prelude::JointAxis::LinX
-                    }
-                    _ => bevy_rapier3d::prelude::JointAxis::AngX,
-                };
-
-                // Use the same stiffness/damping as initial spawn
-                let (stiffness, damping) = match &crab_joint.id {
-                    crate::bot::body::CrabJointId::EyeStalk(_) => (25.0, 5.0),
-                    crate::bot::body::CrabJointId::ClawUpper(_)
-                    | crate::bot::body::CrabJointId::ClawFore(_)
-                    | crate::bot::body::CrabJointId::ClawPincer(_) => (250.0, 25.0),
-                    _ => (200.0, 20.0), // legs
-                };
-
                 generic.set_motor_position(axis, default_pos, stiffness, damping);
             }
 

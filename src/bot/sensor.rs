@@ -14,7 +14,7 @@ use super::body::{CrabCarapace, CrabJoint, CrabJointId};
 use super::actuator::CrabActions;
 
 /// Total observation size.
-/// Per-joint: 2 floats (last_action, angular_velocity_magnitude)
+/// Per-joint: 2 floats (last_action, joint_velocity_magnitude)
 /// Body: 3 (pos) + 4 (quat) + 3 (linvel) + 3 (angvel) = 13
 pub const OBS_SIZE: usize = CrabJointId::COUNT * 2 + 13;
 
@@ -49,10 +49,13 @@ pub fn build_observation(
         // Last action (what the NN commanded)
         v[base] = actions.values[idx];
 
-        // Angular velocity magnitude (scalar proxy for joint velocity)
-        // For a revolute joint, this is the projection of angvel onto the joint axis.
-        // As an approximation, we use the magnitude.
-        v[base + 1] = vel.angvel.length();
+        // Joint velocity: use the DOF-appropriate velocity.
+        // Prismatic joints (ClawPincer) → linear velocity magnitude.
+        // Revolute joints (everything else) → angular velocity magnitude.
+        v[base + 1] = match &crab_joint.id {
+            CrabJointId::ClawPincer(_) => vel.linvel.length(),
+            _ => vel.angvel.length(),
+        };
     }
 
     // -- Body state (carapace) -------------------------------------------------

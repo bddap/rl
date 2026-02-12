@@ -138,6 +138,25 @@ impl CrabJointId {
 }
 
 impl CrabJointId {
+    /// Returns (stiffness, damping) for this joint's PD motor.
+    pub fn motor_stiffness_damping(&self) -> (f32, f32) {
+        match self {
+            CrabJointId::EyeStalk(_) => (EYE_STIFFNESS, EYE_DAMPING),
+            CrabJointId::ClawUpper(_)
+            | CrabJointId::ClawFore(_)
+            | CrabJointId::ClawPincer(_) => (CLAW_STIFFNESS, CLAW_DAMPING),
+            _ => (LEG_STIFFNESS, LEG_DAMPING),
+        }
+    }
+
+    /// Returns the Rapier joint axis for this DOF.
+    pub fn joint_axis(&self) -> JointAxis {
+        match self {
+            CrabJointId::ClawPincer(_) => JointAxis::LinX,
+            _ => JointAxis::AngX,
+        }
+    }
+
     /// Returns the default (rest) motor position for this joint.
     pub fn default_position(&self) -> f32 {
         match self {
