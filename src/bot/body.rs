@@ -150,10 +150,16 @@ impl CrabJointId {
     }
 
     /// Returns the Rapier joint axis for this DOF.
+    /// Must match the axis used in the RevoluteJointBuilder / PrismaticJointBuilder.
     pub fn joint_axis(&self) -> JointAxis {
         match self {
-            CrabJointId::ClawPincer(_) => JointAxis::LinX,
-            _ => JointAxis::AngX,
+            CrabJointId::LegCoxa(_, _) => JointAxis::AngY,   // RevoluteJointBuilder::new(Vec3::Y)
+            CrabJointId::LegFemur(_, _) => JointAxis::AngZ,  // RevoluteJointBuilder::new(Vec3::Z)
+            CrabJointId::LegTibia(_, _) => JointAxis::AngZ,  // RevoluteJointBuilder::new(Vec3::Z)
+            CrabJointId::ClawUpper(_) => JointAxis::AngZ,    // RevoluteJointBuilder::new(Vec3::Z)
+            CrabJointId::ClawFore(_) => JointAxis::AngY,     // RevoluteJointBuilder::new(Vec3::Y)
+            CrabJointId::ClawPincer(_) => JointAxis::LinZ,   // PrismaticJointBuilder::new(Vec3::Z)
+            CrabJointId::EyeStalk(_) => JointAxis::AngX,     // RevoluteJointBuilder::new(Vec3::X)
         }
     }
 
