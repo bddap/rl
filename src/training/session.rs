@@ -48,25 +48,36 @@ impl ObsNormalizer {
         self.count += 1;
         let n = self.count as f64;
 
-        // Welford update
+        // Welford update (skip NaN/Inf inputs to avoid poisoning stats)
         for i in 0..OBS_SIZE {
-            let x = obs[i] as f64;
+            let raw = obs[i];
+            if !raw.is_finite() {
+                continue;
+            }
+            let x = raw as f64;
             let delta = x - self.mean[i];
             self.mean[i] += delta / n;
             let delta2 = x - self.mean[i];
             self.m2[i] += delta * delta2;
 
             if self.count > 1 {
-                self.var[i] = self.m2[i] / (n - 1.0);
+                self.var[i] = (self.m2[i] / (n - 1.0)).max(0.0);
             }
         }
 
         // Normalize
+        let clip = self.clip;
         let mut normalized = [0.0f32; OBS_SIZE];
         for i in 0..OBS_SIZE {
+            let raw = obs[i];
+            if !raw.is_finite() {
+                normalized[i] = 0.0;
+                continue;
+            }
             let std = (self.var[i] as f32).sqrt().max(1e-6);
-            let val = (obs[i] - self.mean[i] as f32) / std;
-            normalized[i] = val.clamp(-self.clip, self.clip);
+            let val = (raw - self.mean[i] as f32) / std;
+            // Use manual clamp to avoid panic on NaN
+            normalized[i] = if val != val { 0.0 } else { val.max(-clip).min(clip) };
         }
         normalized
     }

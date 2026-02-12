@@ -67,7 +67,9 @@ fn motor_params(id: &CrabJointId) -> MotorParams {
 
 /// Maps action value in [-1, 1] to a target position within the joint's range.
 fn action_to_target(action: f32, params: &MotorParams) -> f32 {
-    let t = (action.clamp(-1.0, 1.0) + 1.0) * 0.5; // [0, 1]
+    // Guard against NaN/Inf — treat as zero (default position)
+    let a = if action.is_finite() { action.max(-1.0).min(1.0) } else { 0.0 };
+    let t = (a + 1.0) * 0.5; // [0, 1]
     params.range[0] + t * (params.range[1] - params.range[0])
 }
 
