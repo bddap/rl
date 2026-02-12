@@ -6,9 +6,41 @@ let
 in
 pkgs.mkShell {
   buildInputs = with pkgs; [
+    # Rust toolchain
     cargo
     rustc
     clippy
     rustfmt
+
+    # Bevy system dependencies
+    pkg-config
+    udev
+    alsa-lib
+    vulkan-loader
+    vulkan-headers
+    vulkan-validation-layers
+
+    # X11
+    libx11
+    libxcursor
+    libxi
+    libxrandr
+
+    # Wayland
+    libxkbcommon
+    wayland
+
+    # Build tools
+    clang
+    mold
   ];
+
+  # Point Vulkan ICD loader at the right drivers
+  LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
+    vulkan-loader
+    udev
+    alsa-lib
+    libxkbcommon
+    wayland
+  ]);
 }
