@@ -5,7 +5,7 @@ pub mod sensor;
 
 use bevy::prelude::*;
 
-/// Plugin that manages bot spawning and per-frame brain/actuator updates.
+/// Plugin that manages bot spawning and per-frame sensor/actuator updates.
 pub struct BotPlugin;
 
 impl Plugin for BotPlugin {
@@ -18,8 +18,7 @@ impl Plugin for BotPlugin {
                 (
                     // 1. Build observation from physics state
                     sensor::build_observation,
-                    // 2. Brain decides actions (test wiggle for now)
-                    actuator::test_wiggle,
+                    // 2. Brain step happens in TrainingPlugin (between sensor and actuator)
                     // 3. Apply actions to joint motors
                     actuator::apply_actions,
                 )

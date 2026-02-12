@@ -14,5 +14,6 @@ fn main() {
         .add_plugins(RapierDebugRenderPlugin::default())
         .add_plugins(physics::PhysicsWorldPlugin)
         .add_plugins(bot::BotPlugin)
+        .add_plugins(training::TrainingPlugin)
         .run();
 }
