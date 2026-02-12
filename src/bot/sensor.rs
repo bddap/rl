@@ -79,5 +79,12 @@ pub fn build_observation(
         v[body_base + 12] = vel.angvel.z;
     }
 
+    // Sanitize: replace any NaN/Inf with 0 to prevent NN corruption
+    for val in v.iter_mut() {
+        if val.is_nan() || val.is_infinite() {
+            *val = 0.0;
+        }
+    }
+
     obs.values = v;
 }

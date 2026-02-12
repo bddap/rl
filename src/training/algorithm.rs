@@ -15,6 +15,7 @@ pub struct PpoConfig {
     pub learning_rate: f64,
     pub epochs_per_update: u32,
     pub batch_size: usize,
+    pub value_loss_clip: f32,
 }
 
 impl Default for PpoConfig {
@@ -28,6 +29,7 @@ impl Default for PpoConfig {
             learning_rate: 3e-4,
             epochs_per_update: 4,
             batch_size: 64,
+            value_loss_clip: 10.0,
         }
     }
 }
@@ -95,16 +97,19 @@ pub fn compute_gae(
 }
 
 /// Compute log probability of actions under Gaussian policy.
+/// Uses log-space computation to avoid division by tiny variance.
 pub fn compute_log_prob<B: Backend>(
     means: &Tensor<B, 1>,
     log_std: &Tensor<B, 1>,
     actions: &Tensor<B, 1>,
 ) -> f32 {
-    let std = log_std.clone().exp();
+    let log_std_clamped = log_std.clone().clamp(-5.0, 2.0);
     let diff = actions.clone() - means.clone();
-    let var = std.clone().powf_scalar(2.0);
-    let log_probs = (diff.powf_scalar(2.0) / (var * 2.0)).neg()
-        - (std * (2.0 * std::f32::consts::PI).sqrt()).log();
+    // log p = -0.5 * ((a - mu) / sigma)^2 - log(sigma) - 0.5 * log(2*pi)
+    let scaled_diff = diff / log_std_clamped.clone().exp();
+    let log_probs = scaled_diff.powf_scalar(2.0).neg() * 0.5
+        - log_std_clamped
+        - 0.5 * (2.0 * std::f32::consts::PI).ln();
     log_probs.sum().into_scalar().elem::<f32>()
 }
 

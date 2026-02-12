@@ -9,6 +9,7 @@ use burn::backend::ndarray::{NdArray, NdArrayDevice};
 use burn::backend::Autodiff;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::optim::adaptor::OptimizerAdaptor;
+use burn::grad_clipping::GradientClippingConfig;
 use burn::prelude::*;
 
 use crate::bot::actuator::CrabActions;
@@ -127,7 +128,9 @@ impl TrainingState {
     pub fn new() -> Self {
         let device = NdArrayDevice::Cpu;
         let brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
-        let optimizer: CrabOptimizer = AdamConfig::new().init();
+        let optimizer: CrabOptimizer = AdamConfig::new()
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
+            .init();
 
         Self {
             brain,
@@ -213,6 +216,7 @@ impl TrainingState {
         let mut update_count = 0u32;
 
         let bs = self.config.batch_size;
+        let half_log_2pi = 0.5 * (2.0 * std::f32::consts::PI).ln();
 
         for _epoch in 0..self.config.epochs_per_update {
             let num_batches = n.div_ceil(bs);
@@ -230,37 +234,43 @@ impl TrainingState {
 
                 // Policy forward
                 let (means, log_std) = self.brain.policy(obs.clone());
-                let std = log_std.clone().exp();
 
-                // Gaussian log prob
-                let diff = actions - means;
-                let var = std.clone().powf_scalar(2.0)
-                    .unsqueeze_dim::<2>(0).expand([batch_n, ACTION_SIZE]);
-                let log_probs_per_dim =
-                    (diff.clone().powf_scalar(2.0) / (var.clone() * 2.0)).neg()
-                        - (std.clone() * (2.0 * std::f32::consts::PI).sqrt())
-                            .log()
-                            .unsqueeze_dim::<2>(0)
-                            .expand([batch_n, ACTION_SIZE]);
+                // Clamp log_std for numerical stability: exp(-5)≈0.007, exp(2)≈7.4
+                let log_std_clamped = log_std.clone().clamp(-5.0, 2.0);
+
+                // Gaussian log-prob: -0.5 * ((a - mu) / sigma)^2 - log(sigma) - 0.5*log(2*pi)
+                // Compute in log-space to avoid division by tiny variance
+                let diff = actions - means; // [batch, ACTION_SIZE]
+                let log_std_2d = log_std_clamped.clone()
+                    .unsqueeze_dim::<2>(0)
+                    .expand([batch_n, ACTION_SIZE]);
+                let scaled_diff = diff / log_std_2d.clone().exp(); // (a - mu) / sigma
+                let log_probs_per_dim = scaled_diff.powf_scalar(2.0).neg() * 0.5
+                    - log_std_2d
+                    - half_log_2pi;
                 let new_lp: Tensor<TrainBackend, 1> = log_probs_per_dim.sum_dim(1).flatten(0, 1);
 
-                // Entropy
-                let entropy = (std.clone()
-                    * (2.0 * std::f32::consts::PI * std::f32::consts::E).sqrt())
-                .log()
-                .sum();
+                // Entropy: 0.5 * log(2*pi*e) + log_std, summed over dims
+                let entropy_per_dim = log_std_clamped.clone() + (0.5 * (2.0 * std::f32::consts::PI * std::f32::consts::E).ln());
+                let entropy = entropy_per_dim.sum();
 
                 // PPO clipped objective
-                let ratio = (new_lp.clone() - old_lp.clone()).exp();
+                // Clamp log-ratio to prevent exp() overflow
+                let log_ratio = (new_lp - old_lp).clamp(-20.0, 20.0);
+                let ratio = log_ratio.exp();
                 let surr1 = ratio.clone() * advs.clone();
                 let surr2 = ratio
                     .clamp(1.0 - self.config.clip_epsilon, 1.0 + self.config.clip_epsilon)
                     * advs;
                 let policy_loss = surr1.min_pair(surr2).mean().neg();
 
-                // Value loss
+                // Value loss (clipped to prevent huge gradients)
                 let values: Tensor<TrainBackend, 1> = self.brain.value(obs).flatten(0, 1);
-                let value_loss = (values - rets).powf_scalar(2.0).mean();
+                let value_diff = (values - rets).clamp(
+                    -self.config.value_loss_clip,
+                    self.config.value_loss_clip,
+                );
+                let value_loss = value_diff.powf_scalar(2.0).mean();
 
                 // Total loss
                 let loss = policy_loss.clone()
@@ -272,7 +282,7 @@ impl TrainingState {
                 total_entropy += entropy.clone().into_scalar().elem::<f32>();
                 update_count += 1;
 
-                // Backward + step
+                // Backward + step (optimizer applies gradient clipping)
                 let grads = loss.backward();
                 let grads = GradientsParams::from_grads(grads, &self.brain);
                 self.brain = self.optimizer.step(self.config.learning_rate, self.brain.clone(), grads);
@@ -333,12 +343,28 @@ pub fn brain_step(
     // Sample action
     let action_tensor = sample_action(&means, &log_std, &device);
     let log_prob = compute_log_prob(&means, &log_std, &action_tensor);
+    // Clamp log_prob to prevent extreme values that cause ratio explosion in PPO
+    let log_prob = if log_prob.is_nan() || log_prob.is_infinite() {
+        0.0
+    } else {
+        log_prob.clamp(-20.0, 2.0)
+    };
+    let value = if value.is_nan() || value.is_infinite() { 0.0 } else { value };
 
-    // Extract actions
+    // Extract actions, with NaN guard
     let action_data: Vec<f32> = action_tensor.to_data().to_vec().unwrap();
     let mut action_array = [0.0f32; ACTION_SIZE];
+    let mut has_nan = false;
     for (i, &v) in action_data.iter().enumerate().take(ACTION_SIZE) {
-        action_array[i] = v;
+        if v.is_nan() || v.is_infinite() {
+            has_nan = true;
+            action_array[i] = 0.0;
+        } else {
+            action_array[i] = v.clamp(-1.0, 1.0);
+        }
+    }
+    if has_nan {
+        warn!("NaN/Inf detected in NN output, clamping to zero");
     }
     actions.values = action_array;
 
