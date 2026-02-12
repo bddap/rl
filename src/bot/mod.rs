@@ -10,7 +10,21 @@ pub struct BotPlugin;
 
 impl Plugin for BotPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_initial_crab);
+        app.init_resource::<actuator::CrabActions>()
+            .init_resource::<sensor::CrabObservation>()
+            .add_systems(Startup, spawn_initial_crab)
+            .add_systems(
+                FixedUpdate,
+                (
+                    // 1. Build observation from physics state
+                    sensor::build_observation,
+                    // 2. Brain decides actions (test wiggle for now)
+                    actuator::test_wiggle,
+                    // 3. Apply actions to joint motors
+                    actuator::apply_actions,
+                )
+                    .chain(),
+            );
     }
 }
 
