@@ -9,8 +9,8 @@ bevy_rapier3d = "0.32"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 
-# burn added later when we wire up the NN (M1)
-# burn = { version = "0.20", features = ["autodiff", "ndarray", "wgpu"] }
+burn = { version = "0.20", features = ["autodiff", "ndarray"] }
+rand_distr = "0.5"
 
 # Enable optimizations in dev for physics sim performance
 [profile.dev]

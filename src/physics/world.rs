@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
+use crate::HeadlessMode;
+
 /// Plugin that sets up the physics world: ground plane, lighting, camera.
 pub struct PhysicsWorldPlugin;
 
@@ -16,54 +18,64 @@ const GROUND_THICKNESS: f32 = 0.1;
 
 fn setup_arena(
     mut commands: Commands,
+    headless: Res<HeadlessMode>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Camera — overhead-ish view looking down at the arena
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(0.0, 15.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
+    if !headless.0 {
+        // Camera — overhead-ish view looking down at the arena
+        commands.spawn((
+            Camera3d::default(),
+            Transform::from_xyz(0.0, 15.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ));
 
-    // Directional light (sun)
-    commands.spawn((
-        DirectionalLight {
-            shadows_enabled: true,
-            illuminance: 10000.0,
+        // Directional light (sun)
+        commands.spawn((
+            DirectionalLight {
+                shadows_enabled: true,
+                illuminance: 10000.0,
+                ..default()
+            },
+            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.3, 0.0)),
+        ));
+
+        // Ambient light so shadows aren't pitch black
+        commands.insert_resource(AmbientLight {
+            color: Color::WHITE,
+            brightness: 300.0,
             ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.3, 0.0)),
-    ));
+        });
+    }
 
-    // Ambient light so shadows aren't pitch black
-    commands.insert_resource(AmbientLight {
-        color: Color::WHITE,
-        brightness: 300.0,
-        ..default()
-    });
+    // Ground plane — static rigid body with collider
+    if headless.0 {
+        commands.spawn((
+            RigidBody::Fixed,
+            Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
+            Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
+        ));
+    } else {
+        commands.spawn((
+            RigidBody::Fixed,
+            Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
+            Mesh3d(meshes.add(Cuboid::new(
+                ARENA_HALF_SIZE * 2.0,
+                GROUND_THICKNESS * 2.0,
+                ARENA_HALF_SIZE * 2.0,
+            ))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.35, 0.55, 0.35),
+                perceptual_roughness: 0.9,
+                ..default()
+            })),
+            Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
+        ));
+    }
 
-    // Ground plane — static rigid body with collider and visible mesh
-    commands.spawn((
-        RigidBody::Fixed,
-        Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
-        Mesh3d(meshes.add(Cuboid::new(
-            ARENA_HALF_SIZE * 2.0,
-            GROUND_THICKNESS * 2.0,
-            ARENA_HALF_SIZE * 2.0,
-        ))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.35, 0.55, 0.35),
-            perceptual_roughness: 0.9,
-            ..default()
-        })),
-        Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
-    ));
-
-    // Arena walls (invisible, just colliders to keep things in bounds)
+    // Arena walls (just colliders, no visuals needed)
     let wall_height = 2.0;
     let wall_thickness = 0.5;
     let walls = [
-        // (position, half-extents)
         (
             Vec3::new(0.0, wall_height / 2.0, ARENA_HALF_SIZE + wall_thickness),
             Vec3::new(ARENA_HALF_SIZE, wall_height / 2.0, wall_thickness),
@@ -89,16 +101,4 @@ fn setup_arena(
             Transform::from_translation(pos),
         ));
     }
-
-    // Drop a test cube to prove physics is working
-    commands.spawn((
-        RigidBody::Dynamic,
-        Collider::cuboid(0.5, 0.5, 0.5),
-        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.8, 0.2, 0.2),
-            ..default()
-        })),
-        Transform::from_xyz(0.0, 5.0, 0.0),
-    ));
 }
