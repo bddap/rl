@@ -173,6 +173,7 @@ pub struct TrainingState {
     pub episode_reward: f32,
     pub episode_steps: u32,
     pub episode_count: u32,
+    pub needs_reset: bool,
 
     // Rollout settings
     pub steps_per_rollout: u32,
@@ -213,6 +214,7 @@ impl TrainingState {
             episode_reward: 0.0,
             episode_steps: 0,
             episode_count: 0,
+            needs_reset: false,
             steps_per_rollout: 1024,
             current_rollout_steps: 0,
             recent_rewards: Vec::new(),
@@ -547,6 +549,7 @@ pub fn brain_step(
         let ep_steps = training.episode_steps;
         training.recent_rewards.push(ep_reward);
         training.episode_count += 1;
+        training.needs_reset = true;
 
         let avg = training.avg_reward(10);
         let ep_count = training.episode_count;
@@ -601,7 +604,7 @@ pub fn brain_step(
 /// Resets carapace position/rotation, all body part velocities,
 /// and drives all joints back to their default motor positions.
 pub fn reset_crab(
-    training: NonSend<TrainingState>,
+    mut training: NonSendMut<TrainingState>,
     mut actions: ResMut<CrabActions>,
     mut carapace_q: Query<
         (&mut Transform, &mut bevy_rapier3d::prelude::Velocity),
@@ -613,33 +616,34 @@ pub fn reset_crab(
     >,
     mut joints: Query<(&CrabJoint, &mut bevy_rapier3d::prelude::MultibodyJoint)>,
 ) {
-    if let Some(last) = training.rollout.transitions.last() {
-        if last.done {
-            // Reset carapace position and velocity
-            if let Ok((mut transform, mut vel)) = carapace_q.single_mut() {
-                transform.translation = Vec3::new(0.0, 1.0, 0.0);
-                transform.rotation = Quat::IDENTITY;
-                vel.linvel = Vec3::ZERO;
-                vel.angvel = Vec3::ZERO;
-            }
-
-            // Zero velocities on all child body parts
-            for mut vel in body_parts.iter_mut() {
-                vel.linvel = Vec3::ZERO;
-                vel.angvel = Vec3::ZERO;
-            }
-
-            // Reset joint motors to default positions
-            for (crab_joint, mut mj) in joints.iter_mut() {
-                let default_pos = crab_joint.id.default_position();
-                let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
-                let axis = crab_joint.id.joint_axis();
-                let generic: &mut bevy_rapier3d::prelude::GenericJoint = mj.data.as_mut();
-                generic.set_motor_position(axis, default_pos, stiffness, damping);
-            }
-
-            // Reset action vector to zero
-            actions.values = [0.0; CrabJointId::COUNT];
-        }
+    if !training.needs_reset {
+        return;
     }
+    training.needs_reset = false;
+
+    // Reset carapace position and velocity
+    if let Ok((mut transform, mut vel)) = carapace_q.single_mut() {
+        transform.translation = Vec3::new(0.0, 1.0, 0.0);
+        transform.rotation = Quat::IDENTITY;
+        vel.linvel = Vec3::ZERO;
+        vel.angvel = Vec3::ZERO;
+    }
+
+    // Zero velocities on all child body parts
+    for mut vel in body_parts.iter_mut() {
+        vel.linvel = Vec3::ZERO;
+        vel.angvel = Vec3::ZERO;
+    }
+
+    // Reset joint motors to default positions
+    for (crab_joint, mut mj) in joints.iter_mut() {
+        let default_pos = crab_joint.id.default_position();
+        let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
+        let axis = crab_joint.id.joint_axis();
+        let generic: &mut bevy_rapier3d::prelude::GenericJoint = mj.data.as_mut();
+        generic.set_motor_position(axis, default_pos, stiffness, damping);
+    }
+
+    // Reset action vector to zero
+    actions.values = [0.0; CrabJointId::COUNT];
 }
