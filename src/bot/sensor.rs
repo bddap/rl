@@ -10,8 +10,8 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use super::body::{CrabCarapace, CrabJoint, CrabJointId};
 use super::actuator::CrabActions;
+use super::body::{CrabCarapace, CrabJoint, CrabJointId};
 
 /// Total observation size.
 /// Per-joint: 2 floats (last_action, joint_velocity_magnitude)
