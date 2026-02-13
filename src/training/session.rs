@@ -705,14 +705,14 @@ mod tests {
             Vec3::Y,
             Vec3::ZERO,
             Vec3::ZERO,
-            &[0.0; 32],
+            &[0.0; ACTION_SIZE],
         );
         let moving = compute_reward(
             Vec3::new(0.0, 0.5, 0.0),
             Vec3::Y,
             Vec3::new(5.0, 0.0, 0.0),
             Vec3::ZERO,
-            &[0.0; 32],
+            &[0.0; ACTION_SIZE],
         );
         let ratio = moving / stationary;
         // With vel_cost=0.2, a 5 m/s crab should lose substantial reward.
