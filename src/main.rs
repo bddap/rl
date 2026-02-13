@@ -11,7 +11,7 @@ use bevy_rapier3d::prelude::*;
 use clap::Parser;
 
 /// Crab Combat — RL-trained crab bots learn to stand, walk, and fight.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct Args {
     /// Run without a window at maximum simulation speed.

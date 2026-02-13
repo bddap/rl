@@ -72,6 +72,10 @@ impl ObsNormalizer {
             );
             return None;
         }
+        if d.clip <= 0.0 || d.var.iter().any(|&v| v < 0.0) {
+            warn!("Normalizer contains invalid values (clip <= 0 or negative variance)");
+            return None;
+        }
         let mut n = Self::new(d.clip);
         n.mean.copy_from_slice(&d.mean);
         n.var.copy_from_slice(&d.var);
@@ -232,7 +236,9 @@ impl MetricsLogger {
     }
 }
 
-const BRAIN_FILENAME: &str = "brain";
+/// Stem for brain checkpoint files. `BinFileRecorder` appends `.bin` automatically,
+/// so the actual file on disk is `brain.bin`.
+const BRAIN_STEM: &str = "brain";
 const NORMALIZER_FILENAME: &str = "normalizer.bin";
 
 /// The RL training state. Stored as a non-send resource because burn
@@ -277,9 +283,10 @@ impl TrainingState {
 
         let mut obs_normalizer = ObsNormalizer::new(5.0);
 
-        let brain_path = args.checkpoint_dir.join(BRAIN_FILENAME);
+        let brain_path = args.checkpoint_dir.join(BRAIN_STEM);
         let norm_path = args.checkpoint_dir.join(NORMALIZER_FILENAME);
 
+        // BinFileRecorder appends .bin to the stem, so check for that.
         if brain_path.with_extension("bin").exists() {
             let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
             match recorder.load(brain_path.clone(), &device) {
@@ -336,7 +343,7 @@ impl TrainingState {
             return;
         }
 
-        let brain_path = self.checkpoint_dir.join(BRAIN_FILENAME);
+        let brain_path = self.checkpoint_dir.join(BRAIN_STEM);
         let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
         match recorder.record(self.brain.clone().into_record(), brain_path.clone()) {
             Ok(()) => info!("Saved brain to {}", brain_path.display()),
@@ -831,6 +838,51 @@ mod tests {
             (clamped - 18.6).abs() < 1e-6,
             "log_prob {log_prob} was clipped to {clamped} — symmetric clamp should preserve it"
         );
+    }
+
+    #[test]
+    fn brain_checkpoint_round_trips() {
+        let dir = std::env::temp_dir().join("rl_test_brain_checkpoint");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let device = NdArrayDevice::Cpu;
+        let brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+
+        let stem = dir.join(BRAIN_STEM);
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+        recorder
+            .record(brain.clone().into_record(), stem.clone())
+            .expect("save brain");
+
+        assert!(
+            stem.with_extension("bin").exists(),
+            "brain.bin should exist"
+        );
+
+        let loaded_record = recorder.load(stem, &device).expect("load brain");
+        let loaded = CrabBrain::<TrainBackend>::new(&device).load_record(loaded_record);
+
+        let test_obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
+        let (orig_means, orig_log_std) = brain.policy(test_obs.clone());
+        let (loaded_means, loaded_log_std) = loaded.policy(test_obs);
+
+        let orig_m: Vec<f32> = orig_means.to_data().to_vec().unwrap();
+        let loaded_m: Vec<f32> = loaded_means.to_data().to_vec().unwrap();
+        for (i, (a, b)) in orig_m.iter().zip(loaded_m.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "policy mean[{i}] diverged: {a} vs {b}"
+            );
+        }
+
+        let orig_s: Vec<f32> = orig_log_std.to_data().to_vec().unwrap();
+        let loaded_s: Vec<f32> = loaded_log_std.to_data().to_vec().unwrap();
+        for (i, (a, b)) in orig_s.iter().zip(loaded_s.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "log_std[{i}] diverged: {a} vs {b}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
