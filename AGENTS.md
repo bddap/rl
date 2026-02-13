@@ -13,5 +13,5 @@ Your human is knowlegable, but not infinitely so. Question him, teach him, this 
 
 # Pre-submition checks
 - `cargo fmt --check`
-- `cargo clippy --quiet -- --deny warning`
+- `cargo clippy --quiet -- --deny warnings`
 - `cargo test -q`
