@@ -3,7 +3,9 @@
 //! Manages the RL training loop integrated with the Bevy game loop.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
+use bevy::app::AppExit;
 use bevy::prelude::*;
 use burn::backend::Autodiff;
 use burn::backend::ndarray::{NdArray, NdArrayDevice};
@@ -12,15 +14,20 @@ use burn::module::AutodiffModule;
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::prelude::*;
+use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use serde::{Deserialize, Serialize};
 
-use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
-
+use crate::Args;
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
+
+use super::algorithm::{
+    PpoConfig, PpoMetrics, RolloutBuffer, Transition, compute_gae, compute_log_prob, sample_action,
+};
 
 /// Running observation normalizer using Welford's online algorithm.
 /// Normalizes observations to zero mean, unit variance.
@@ -30,6 +37,52 @@ struct ObsNormalizer {
     m2: [f64; OBS_SIZE],    // sum of squared differences from mean
     count: [u64; OBS_SIZE], // per-element count (NaN-skipped elements don't inflate others)
     clip: f32,              // max absolute normalized value
+}
+
+/// Serde-friendly mirror of `ObsNormalizer` (arrays > 32 don't auto-derive).
+#[derive(Serialize, Deserialize)]
+struct ObsNormalizerData {
+    mean: Vec<f64>,
+    var: Vec<f64>,
+    m2: Vec<f64>,
+    count: Vec<u64>,
+    clip: f32,
+}
+
+impl ObsNormalizer {
+    fn to_data(&self) -> ObsNormalizerData {
+        ObsNormalizerData {
+            mean: self.mean.to_vec(),
+            var: self.var.to_vec(),
+            m2: self.m2.to_vec(),
+            count: self.count.to_vec(),
+            clip: self.clip,
+        }
+    }
+
+    fn from_data(d: ObsNormalizerData) -> Option<Self> {
+        if d.mean.len() != OBS_SIZE
+            || d.var.len() != OBS_SIZE
+            || d.m2.len() != OBS_SIZE
+            || d.count.len() != OBS_SIZE
+        {
+            warn!(
+                "Normalizer size mismatch: expected {OBS_SIZE}, got {}",
+                d.mean.len()
+            );
+            return None;
+        }
+        if d.clip <= 0.0 || d.var.iter().any(|&v| v < 0.0) {
+            warn!("Normalizer contains invalid values (clip <= 0 or negative variance)");
+            return None;
+        }
+        let mut n = Self::new(d.clip);
+        n.mean.copy_from_slice(&d.mean);
+        n.var.copy_from_slice(&d.var);
+        n.m2.copy_from_slice(&d.m2);
+        n.count.copy_from_slice(&d.count);
+        Some(n)
+    }
 }
 
 impl ObsNormalizer {
@@ -45,7 +98,6 @@ impl ObsNormalizer {
 
     /// Update running stats and return normalized observation.
     fn normalize(&mut self, obs: &[f32; OBS_SIZE]) -> [f32; OBS_SIZE] {
-        // Welford update (skip NaN/Inf inputs to avoid poisoning stats)
         for (i, &raw) in obs.iter().enumerate() {
             if !raw.is_finite() {
                 continue;
@@ -63,7 +115,6 @@ impl ObsNormalizer {
             }
         }
 
-        // Normalize
         let clip = self.clip;
         let mut normalized = [0.0f32; OBS_SIZE];
         for i in 0..OBS_SIZE {
@@ -82,11 +133,42 @@ impl ObsNormalizer {
         }
         normalized
     }
-}
 
-use super::algorithm::{
-    PpoConfig, PpoMetrics, RolloutBuffer, Transition, compute_gae, compute_log_prob, sample_action,
-};
+    fn save(&self, path: &Path) {
+        let data = self.to_data();
+        let bytes = match bincode::serialize(&data) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Failed to serialize normalizer: {e}");
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(path, bytes) {
+            warn!("Failed to write normalizer to {}: {e}", path.display());
+        }
+    }
+
+    fn load(path: &Path) -> Option<Self> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Failed to read normalizer from {}: {e}", path.display());
+                return None;
+            }
+        };
+        let data: ObsNormalizerData = match bincode::deserialize(&bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(
+                    "Failed to deserialize normalizer from {}: {e}",
+                    path.display()
+                );
+                return None;
+            }
+        };
+        Self::from_data(data)
+    }
+}
 
 /// Backend type aliases.
 pub type TrainBackend = Autodiff<NdArray>;
@@ -132,7 +214,6 @@ impl MetricsLogger {
             episode, reward, steps, avg_reward
         )
         .ok();
-        // Flush periodically
         if episode.is_multiple_of(10) {
             self.episode_file.flush().ok();
         }
@@ -155,6 +236,11 @@ impl MetricsLogger {
     }
 }
 
+/// Stem for brain checkpoint files. `BinFileRecorder` appends `.bin` automatically,
+/// so the actual file on disk is `brain.bin`.
+const BRAIN_STEM: &str = "brain";
+const NORMALIZER_FILENAME: &str = "normalizer.bin";
+
 /// The RL training state. Stored as a non-send resource because burn
 /// tensors use `OnceCell` which is not `Sync`.
 pub struct TrainingState {
@@ -164,41 +250,65 @@ pub struct TrainingState {
     pub device: NdArrayDevice,
     optimizer: CrabOptimizer,
 
-    // Episode tracking
     pub episode_reward: f32,
     pub episode_steps: u32,
     pub episode_count: u32,
     pub needs_reset: bool,
 
-    // Rollout settings
     pub steps_per_rollout: u32,
     pub current_rollout_steps: u32,
 
-    // Metrics
     pub recent_rewards: Vec<f32>,
     pub recent_metrics: Option<PpoMetrics>,
 
-    // Logging
     logger: MetricsLogger,
 
-    // Total physics steps for throughput tracking
     pub total_steps: u64,
     last_log_time: std::time::Instant,
 
-    // Observation normalizer
     obs_normalizer: ObsNormalizer,
 
-    // Checkpointing
-    checkpoint_interval: u32, // save every N PPO updates
+    checkpoint_dir: PathBuf,
+    checkpoint_interval: u32,
+    saved_on_exit: bool,
 }
 
 impl TrainingState {
-    pub fn new() -> Self {
+    pub fn new(args: &Args) -> Self {
         let device = NdArrayDevice::Cpu;
-        let brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let mut brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
         let optimizer: CrabOptimizer = AdamConfig::new()
             .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
             .init();
+
+        let mut obs_normalizer = ObsNormalizer::new(5.0);
+
+        let brain_path = args.checkpoint_dir.join(BRAIN_STEM);
+        let norm_path = args.checkpoint_dir.join(NORMALIZER_FILENAME);
+
+        // BinFileRecorder appends .bin to the stem, so check for that.
+        if brain_path.with_extension("bin").exists() {
+            let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+            match recorder.load(brain_path.clone(), &device) {
+                Ok(record) => {
+                    brain = brain.load_record(record);
+                    info!("Loaded brain weights from {}", brain_path.display());
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to load brain from {}: {e} — starting fresh",
+                        brain_path.display()
+                    );
+                }
+            }
+        }
+
+        if norm_path.exists()
+            && let Some(loaded) = ObsNormalizer::load(&norm_path)
+        {
+            info!("Loaded normalizer state from {}", norm_path.display());
+            obs_normalizer = loaded;
+        }
 
         Self {
             brain,
@@ -217,29 +327,33 @@ impl TrainingState {
             logger: MetricsLogger::new(),
             total_steps: 0,
             last_log_time: std::time::Instant::now(),
-            obs_normalizer: ObsNormalizer::new(5.0),
-            checkpoint_interval: 50, // save every 50 PPO updates
+            obs_normalizer,
+            checkpoint_dir: args.checkpoint_dir.clone(),
+            checkpoint_interval: args.save_interval,
+            saved_on_exit: false,
         }
     }
 
-    /// Save brain weights to disk.
     fn save_checkpoint(&self) {
-        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-        let path =
-            std::path::PathBuf::from(format!("tmp/brain_update_{}", self.logger.update_count));
-        match recorder.record(self.brain.clone().into_record(), path.clone()) {
-            Ok(()) => info!(
-                "Saved checkpoint to tmp/brain_update_{}",
-                self.logger.update_count
-            ),
-            Err(e) => warn!("Failed to save checkpoint: {e}"),
+        if let Err(e) = std::fs::create_dir_all(&self.checkpoint_dir) {
+            warn!(
+                "Failed to create checkpoint dir {}: {e}",
+                self.checkpoint_dir.display()
+            );
+            return;
         }
-        // Also save as "latest" for easy resume
-        let latest_path = std::path::PathBuf::from("tmp/brain_latest");
-        let _ = recorder.record(self.brain.clone().into_record(), latest_path);
+
+        let brain_path = self.checkpoint_dir.join(BRAIN_STEM);
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+        match recorder.record(self.brain.clone().into_record(), brain_path.clone()) {
+            Ok(()) => info!("Saved brain to {}", brain_path.display()),
+            Err(e) => warn!("Failed to save brain: {e}"),
+        }
+
+        let norm_path = self.checkpoint_dir.join(NORMALIZER_FILENAME);
+        self.obs_normalizer.save(&norm_path);
     }
 
-    /// Compute rolling average of recent rewards.
     fn avg_reward(&self, window: usize) -> f32 {
         if self.recent_rewards.is_empty() {
             return 0.0;
@@ -259,7 +373,6 @@ impl TrainingState {
 
         let device = &self.device;
 
-        // Compute last value for GAE
         let last_t = &self.rollout.transitions[n - 1];
         let last_value = if last_t.done {
             0.0
@@ -280,7 +393,6 @@ impl TrainingState {
             self.config.lambda,
         );
 
-        // Normalize advantages
         let adv_mean: f32 = advantages.iter().sum::<f32>() / n as f32;
         let adv_var: f32 = advantages
             .iter()
@@ -293,7 +405,6 @@ impl TrainingState {
             .map(|a| (a - adv_mean) / adv_std)
             .collect();
 
-        // Build tensors
         let obs_data: Vec<f32> = self
             .rollout
             .transitions
@@ -337,7 +448,6 @@ impl TrainingState {
         let mut rng = thread_rng();
 
         for _epoch in 0..self.config.epochs_per_update {
-            // Shuffle indices for random mini-batches
             let mut indices: Vec<usize> = (0..n).collect();
             indices.shuffle(&mut rng);
 
@@ -349,7 +459,6 @@ impl TrainingState {
                 let batch_n = end - start;
                 let batch_indices = &indices[start..end];
 
-                // Gather shuffled batch via index tensor
                 let idx_tensor = Tensor::<TrainBackend, 1, Int>::from_data(
                     TensorData::new(
                         batch_indices.iter().map(|&i| i as i64).collect::<Vec<_>>(),
@@ -364,32 +473,24 @@ impl TrainingState {
                 let advs = advantages_all.clone().select(0, idx_tensor.clone());
                 let rets = returns_all.clone().select(0, idx_tensor);
 
-                // Policy forward
                 let (means, log_std) = self.brain.policy(obs.clone());
 
-                // Clamp log_std for numerical stability: exp(-5)≈0.007, exp(2)≈7.4
                 let log_std_clamped = log_std.clone().clamp(-5.0, 2.0);
 
-                // Gaussian log-prob: -0.5 * ((a - mu) / sigma)^2 - log(sigma) - 0.5*log(2*pi)
-                // Compute in log-space to avoid division by tiny variance
-                let diff = actions - means; // [batch, ACTION_SIZE]
+                let diff = actions - means;
                 let log_std_2d = log_std_clamped
                     .clone()
                     .unsqueeze_dim::<2>(0)
                     .expand([batch_n, ACTION_SIZE]);
-                let scaled_diff = diff / log_std_2d.clone().exp(); // (a - mu) / sigma
+                let scaled_diff = diff / log_std_2d.clone().exp();
                 let log_probs_per_dim =
                     scaled_diff.powf_scalar(2.0).neg() * 0.5 - log_std_2d - half_log_2pi;
                 let new_lp: Tensor<TrainBackend, 1> = log_probs_per_dim.sum_dim(1).flatten(0, 1);
 
-                // Entropy: 0.5 * log(2*pi*e) + log_std, averaged over dims
-                // (mean, not sum, so entropy_coeff is scale-invariant w.r.t. ACTION_SIZE)
                 let entropy_per_dim = log_std_clamped.clone()
                     + (0.5 * (2.0 * std::f32::consts::PI * std::f32::consts::E).ln());
                 let entropy = entropy_per_dim.mean();
 
-                // PPO clipped objective
-                // Clamp log-ratio to prevent exp() overflow
                 let log_ratio = (new_lp - old_lp).clamp(-20.0, 20.0);
                 let ratio = log_ratio.exp();
                 let surr1 = ratio.clone() * advs.clone();
@@ -399,13 +500,11 @@ impl TrainingState {
                 ) * advs;
                 let policy_loss = surr1.min_pair(surr2).mean().neg();
 
-                // Value loss (clipped to prevent huge gradients)
                 let values: Tensor<TrainBackend, 1> = self.brain.value(obs).flatten(0, 1);
                 let value_diff = (values - rets)
                     .clamp(-self.config.value_loss_clip, self.config.value_loss_clip);
                 let value_loss = value_diff.powf_scalar(2.0).mean();
 
-                // Total loss
                 let loss = policy_loss.clone() + value_loss.clone() * self.config.value_coeff
                     - entropy.clone() * self.config.entropy_coeff;
 
@@ -414,7 +513,6 @@ impl TrainingState {
                 total_entropy += entropy.clone().into_scalar().elem::<f32>();
                 update_count += 1;
 
-                // Backward + step (optimizer applies gradient clipping)
                 let grads = loss.backward();
                 let grads = GradientsParams::from_grads(grads, &self.brain);
                 self.brain =
@@ -432,14 +530,6 @@ impl TrainingState {
 }
 
 /// Phase 1 reward: learn to stand stably.
-///
-/// Components:
-///   +1.0 alive bonus (always, for surviving)
-///   +height: smooth bonus peaking at target_height=0.5m
-///   +uprightness: dot(body_up, world_Y) scaled
-///   -action_cost: penalise large motor commands (energy efficiency)
-///   -velocity_cost: penalise body wobble (stability)
-///   -step_cost: small per-step cost to prefer efficient behaviour
 fn compute_reward(
     carapace_pos: Vec3,
     carapace_up: Vec3,
@@ -449,29 +539,23 @@ fn compute_reward(
 ) -> f32 {
     let mut reward = 0.0f32;
 
-    // Alive bonus
     reward += 1.0;
 
-    // Height bonus: Gaussian-like around target height of 0.5m
     let height = carapace_pos.y;
     let target_height = 0.5;
     let height_bonus = (-2.0 * (height - target_height).powi(2)).exp();
     reward += height_bonus;
 
-    // Uprightness: how aligned is body-up with world-up
-    let uprightness = carapace_up.dot(Vec3::Y); // -1 to 1
+    let uprightness = carapace_up.dot(Vec3::Y);
     reward += uprightness * 0.5;
 
-    // Action cost: penalise large motor outputs (L2 norm)
     let action_sq_sum: f32 = actions.iter().map(|a| a * a).sum();
     let action_cost = 0.01 * action_sq_sum;
     reward -= action_cost;
 
-    // Velocity cost: penalise excessive body motion
     let vel_cost = 0.2 * (linvel.length_squared() + 0.1 * angvel.length_squared());
     reward -= vel_cost;
 
-    // Small step cost
     reward -= 0.01;
 
     reward
@@ -487,21 +571,16 @@ pub fn brain_step(
     let raw_obs = obs.values;
     let device = training.device;
 
-    // Normalize observations using running mean/std
     let obs_array = training.obs_normalizer.normalize(&raw_obs);
 
-    // Use the inner (non-autodiff) backend for inference — avoids building
-    // a computation graph every step, which was the main perf bottleneck.
     let inference_brain = training.brain.valid();
 
     let obs_tensor = Tensor::<NdArray, 1>::from_floats(obs_array.as_slice(), &device);
     let obs_batch = obs_tensor.clone().unsqueeze::<2>();
 
-    // Policy forward (no autodiff graph)
     let (means_batch, log_std) = inference_brain.policy(obs_batch);
     let means: Tensor<NdArray, 1> = means_batch.flatten(0, 1);
 
-    // Value forward (no autodiff graph)
     let obs_batch2 = obs_tensor.clone().unsqueeze::<2>();
     let value = inference_brain
         .value(obs_batch2)
@@ -509,10 +588,8 @@ pub fn brain_step(
         .into_scalar()
         .elem::<f32>();
 
-    // Sample action (on inner backend)
     let action_tensor = sample_action(&means, &log_std, &device);
     let log_prob = compute_log_prob(&means, &log_std, &action_tensor);
-    // Clamp log_prob to prevent extreme values that cause ratio explosion in PPO
     let log_prob = if log_prob.is_nan() || log_prob.is_infinite() {
         0.0
     } else {
@@ -524,7 +601,6 @@ pub fn brain_step(
         value
     };
 
-    // Extract actions, with NaN guard
     let action_data: Vec<f32> = action_tensor.to_data().to_vec().unwrap();
     let mut action_array = [0.0f32; ACTION_SIZE];
     let mut has_nan = false;
@@ -541,7 +617,6 @@ pub fn brain_step(
     }
     actions.values = action_array;
 
-    // Compute reward
     let (reward, done) = if let Ok((transform, vel)) = carapace_q.single() {
         let up = transform.rotation * Vec3::Y;
         let r = compute_reward(
@@ -560,7 +635,6 @@ pub fn brain_step(
         (0.0, false)
     };
 
-    // Store transition
     training.rollout.push(Transition {
         obs: obs_array,
         action: action_array,
@@ -585,7 +659,6 @@ pub fn brain_step(
         let avg = training.avg_reward(10);
         let ep_count = training.episode_count;
 
-        // Log every episode to CSV
         training
             .logger
             .log_episode(ep_count, ep_reward, ep_steps, avg);
@@ -611,7 +684,6 @@ pub fn brain_step(
         training.episode_steps = 0;
     }
 
-    // PPO update
     if training.current_rollout_steps >= training.steps_per_rollout {
         let buffer_size = training.rollout.len();
         let avg = training.avg_reward(10);
@@ -630,11 +702,11 @@ pub fn brain_step(
         training.rollout.clear();
         training.current_rollout_steps = 0;
 
-        // Checkpoint periodically
-        if training
-            .logger
-            .update_count
-            .is_multiple_of(training.checkpoint_interval)
+        if training.checkpoint_interval > 0
+            && training
+                .logger
+                .update_count
+                .is_multiple_of(training.checkpoint_interval)
         {
             training.save_checkpoint();
         }
@@ -642,8 +714,6 @@ pub fn brain_step(
 }
 
 /// System: resets the crab when an episode ends.
-/// Resets carapace position/rotation, all body part velocities,
-/// and drives all joints back to their default motor positions.
 pub fn reset_crab(
     mut training: NonSendMut<TrainingState>,
     mut actions: ResMut<CrabActions>,
@@ -666,7 +736,6 @@ pub fn reset_crab(
     }
     training.needs_reset = false;
 
-    // Reset carapace position, velocity, and external forces
     if let Ok((mut transform, mut vel, mut ext_force)) = carapace_q.single_mut() {
         transform.translation = Vec3::new(0.0, 1.0, 0.0);
         transform.rotation = Quat::IDENTITY;
@@ -676,13 +745,11 @@ pub fn reset_crab(
         ext_force.torque = Vec3::ZERO;
     }
 
-    // Zero velocities on all child body parts
     for mut vel in body_parts.iter_mut() {
         vel.linvel = Vec3::ZERO;
         vel.angvel = Vec3::ZERO;
     }
 
-    // Reset joint motors to default positions and re-apply motor_max_force
     for (crab_joint, mut mj) in joints.iter_mut() {
         let default_pos = crab_joint.id.default_position();
         let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
@@ -692,8 +759,22 @@ pub fn reset_crab(
         generic.set_motor_max_force(axis, crab_joint.id.motor_max_force());
     }
 
-    // Reset action vector to zero
     actions.values = [0.0; CrabJointId::COUNT];
+}
+
+/// System: saves a final checkpoint when the app is about to exit.
+pub fn save_on_exit(
+    mut training: NonSendMut<TrainingState>,
+    mut exit_events: bevy::prelude::MessageReader<AppExit>,
+) {
+    if training.saved_on_exit {
+        return;
+    }
+    if exit_events.read().next().is_some() {
+        info!("App exiting — saving final checkpoint...");
+        training.save_checkpoint();
+        training.saved_on_exit = true;
+    }
 }
 
 #[cfg(test)]
@@ -717,8 +798,6 @@ mod tests {
             &[0.0; ACTION_SIZE],
         );
         let ratio = moving / stationary;
-        // With vel_cost=0.2, a 5 m/s crab should lose substantial reward.
-        // ratio should be well below 0.5 (was 0.9 with the old 0.01 coeff).
         assert!(
             ratio < 0.5,
             "velocity penalty too weak: moving/stationary ratio = {ratio:.3} (expected < 0.5)"
@@ -729,9 +808,6 @@ mod tests {
     fn welford_per_element_count_correctness() {
         let mut norm = ObsNormalizer::new(5.0);
 
-        // Feed 100 samples where element 0 is always 1.0 but element 1 is
-        // NaN half the time. With per-element counts, element 1's mean should
-        // converge correctly despite missing half the data.
         for i in 0..100 {
             let mut obs = [0.0f32; OBS_SIZE];
             obs[0] = 1.0;
@@ -739,7 +815,6 @@ mod tests {
             norm.normalize(&obs);
         }
 
-        // Element 0: count=100, mean≈1.0
         assert!(
             (norm.mean[0] - 1.0).abs() < 0.01,
             "element 0 mean should be ~1.0, got {}",
@@ -747,7 +822,6 @@ mod tests {
         );
         assert_eq!(norm.count[0], 100);
 
-        // Element 1: count=50 (only even iterations), mean≈1.0
         assert!(
             (norm.mean[1] - 1.0).abs() < 0.01,
             "element 1 mean should be ~1.0, got {}",
@@ -758,14 +832,89 @@ mod tests {
 
     #[test]
     fn log_prob_clamp_does_not_destroy_valid_values() {
-        // For a 32-dim Gaussian, log_prob of a sample near the mean with
-        // moderate std can legitimately be around -30 to +5 or so.
-        // The old clamp(-20, 2) would clip valid positive log-probs.
         let log_prob: f32 = 18.6;
         let clamped = log_prob.clamp(-20.0, 20.0);
         assert!(
             (clamped - 18.6).abs() < 1e-6,
             "log_prob {log_prob} was clipped to {clamped} — symmetric clamp should preserve it"
         );
+    }
+
+    #[test]
+    fn brain_checkpoint_round_trips() {
+        let dir = std::env::temp_dir().join("rl_test_brain_checkpoint");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let device = NdArrayDevice::Cpu;
+        let brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+
+        let stem = dir.join(BRAIN_STEM);
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+        recorder
+            .record(brain.clone().into_record(), stem.clone())
+            .expect("save brain");
+
+        assert!(
+            stem.with_extension("bin").exists(),
+            "brain.bin should exist"
+        );
+
+        let loaded_record = recorder.load(stem, &device).expect("load brain");
+        let loaded = CrabBrain::<TrainBackend>::new(&device).load_record(loaded_record);
+
+        let test_obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
+        let (orig_means, orig_log_std) = brain.policy(test_obs.clone());
+        let (loaded_means, loaded_log_std) = loaded.policy(test_obs);
+
+        let orig_m: Vec<f32> = orig_means.to_data().to_vec().unwrap();
+        let loaded_m: Vec<f32> = loaded_means.to_data().to_vec().unwrap();
+        for (i, (a, b)) in orig_m.iter().zip(loaded_m.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "policy mean[{i}] diverged: {a} vs {b}"
+            );
+        }
+
+        let orig_s: Vec<f32> = orig_log_std.to_data().to_vec().unwrap();
+        let loaded_s: Vec<f32> = loaded_log_std.to_data().to_vec().unwrap();
+        for (i, (a, b)) in orig_s.iter().zip(loaded_s.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "log_std[{i}] diverged: {a} vs {b}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn normalizer_round_trips_through_bincode() {
+        let mut norm = ObsNormalizer::new(5.0);
+        for i in 0..50 {
+            let mut obs = [0.0f32; OBS_SIZE];
+            obs[0] = i as f32;
+            obs[1] = (i as f32) * 0.5;
+            norm.normalize(&obs);
+        }
+
+        let data = norm.to_data();
+        let bytes = bincode::serialize(&data).expect("serialize");
+        let loaded_data: ObsNormalizerData = bincode::deserialize(&bytes).expect("deserialize");
+        let loaded = ObsNormalizer::from_data(loaded_data).expect("from_data");
+
+        assert_eq!(norm.count, loaded.count);
+        for i in 0..OBS_SIZE {
+            assert!(
+                (norm.mean[i] - loaded.mean[i]).abs() < 1e-10,
+                "mean[{i}] mismatch"
+            );
+            assert!(
+                (norm.var[i] - loaded.var[i]).abs() < 1e-10,
+                "var[{i}] mismatch"
+            );
+            assert!(
+                (norm.m2[i] - loaded.m2[i]).abs() < 1e-10,
+                "m2[{i}] mismatch"
+            );
+        }
+        assert_eq!(norm.clip, loaded.clip);
     }
 }
