@@ -46,8 +46,7 @@ impl ObsNormalizer {
     /// Update running stats and return normalized observation.
     fn normalize(&mut self, obs: &[f32; OBS_SIZE]) -> [f32; OBS_SIZE] {
         // Welford update (skip NaN/Inf inputs to avoid poisoning stats)
-        for i in 0..OBS_SIZE {
-            let raw = obs[i];
+        for (i, &raw) in obs.iter().enumerate() {
             if !raw.is_finite() {
                 continue;
             }
@@ -75,11 +74,10 @@ impl ObsNormalizer {
             }
             let std = (self.var[i] as f32).sqrt().max(1e-6);
             let val = (raw - self.mean[i] as f32) / std;
-            // Use manual clamp to avoid panic on NaN
-            normalized[i] = if val != val {
+            normalized[i] = if val.is_nan() {
                 0.0
             } else {
-                val.max(-clip).min(clip)
+                val.clamp(-clip, clip)
             };
         }
         normalized
@@ -135,7 +133,7 @@ impl MetricsLogger {
         )
         .ok();
         // Flush periodically
-        if episode % 10 == 0 {
+        if episode.is_multiple_of(10) {
             self.episode_file.flush().ok();
         }
     }
@@ -592,7 +590,7 @@ pub fn brain_step(
             .logger
             .log_episode(ep_count, ep_reward, ep_steps, avg);
 
-        if training.episode_count % 10 == 0 {
+        if training.episode_count.is_multiple_of(10) {
             let elapsed = training.last_log_time.elapsed().as_secs_f32();
             let sps = if elapsed > 0.0 {
                 training.total_steps as f32 / elapsed
@@ -633,7 +631,11 @@ pub fn brain_step(
         training.current_rollout_steps = 0;
 
         // Checkpoint periodically
-        if training.logger.update_count % training.checkpoint_interval == 0 {
+        if training
+            .logger
+            .update_count
+            .is_multiple_of(training.checkpoint_interval)
+        {
             training.save_checkpoint();
         }
     }
