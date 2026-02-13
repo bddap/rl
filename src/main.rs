@@ -15,11 +15,11 @@ fn main() {
     // Abort on panic instead of unwinding, so thread pool panics crash immediately.
     std::panic::set_hook(Box::new(|info| {
         eprintln!("PANIC: {info}");
-        if let Ok(v) = std::env::var("RUST_BACKTRACE") {
-            if v == "1" || v == "full" {
-                let bt = std::backtrace::Backtrace::force_capture();
-                eprintln!("{bt}");
-            }
+        if let Ok(v) = std::env::var("RUST_BACKTRACE")
+            && (v == "1" || v == "full")
+        {
+            let bt = std::backtrace::Backtrace::force_capture();
+            eprintln!("{bt}");
         }
         std::process::abort();
     }));

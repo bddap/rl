@@ -34,7 +34,7 @@ fn action_range(id: &CrabJointId) -> [f32; 2] {
 fn action_to_target(action: f32, range: &[f32; 2]) -> f32 {
     // Guard against NaN/Inf — treat as zero (default position)
     let a = if action.is_finite() {
-        action.max(-1.0).min(1.0)
+        action.clamp(-1.0, 1.0)
     } else {
         0.0
     };
