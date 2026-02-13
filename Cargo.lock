@@ -6696,6 +6696,7 @@ dependencies = [
  "either",
  "ena",
  "foldhash 0.2.0",
+ "glam 0.30.10",
  "hashbrown 0.16.1",
  "log",
  "nalgebra",
@@ -7208,10 +7209,12 @@ dependencies = [
  "ordered-float 5.1.0",
  "parry3d",
  "profiling",
+ "rayon",
  "rustc-hash 2.1.1",
  "simba",
  "static_assertions",
  "thiserror 2.0.18",
+ "vec_map",
  "wide",
 ]
 

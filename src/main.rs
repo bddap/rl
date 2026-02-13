@@ -41,30 +41,12 @@ fn main() {
 
     if headless {
         app.add_plugins(
-            DefaultPlugins
-                .set(bevy::window::WindowPlugin {
-                    primary_window: None,
-                    exit_condition: bevy::window::ExitCondition::DontExit,
-                    ..default()
-                })
-                .set(bevy::render::RenderPlugin {
-                    render_creation: bevy::render::settings::RenderCreation::Automatic(
-                        bevy::render::settings::WgpuSettings {
-                            backends: None,
-                            ..default()
-                        },
-                    ),
-                    ..default()
-                })
-                .disable::<bevy::winit::WinitPlugin>(),
+            MinimalPlugins.set(bevy::app::ScheduleRunnerPlugin::run_loop(
+                std::time::Duration::ZERO,
+            )),
         );
-        app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
-            std::time::Duration::ZERO,
-        ));
-        let mut virtual_time = bevy::time::Time::<bevy::time::Virtual>::default();
-        virtual_time.set_relative_speed(100.0);
-        virtual_time.set_max_delta(std::time::Duration::from_secs(10));
-        app.insert_resource(virtual_time);
+        app.add_plugins(bevy::log::LogPlugin::default());
+        app.add_plugins(TransformPlugin);
     } else {
         app.add_plugins(DefaultPlugins);
         app.add_plugins(RapierDebugRenderPlugin::default());

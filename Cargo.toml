@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.17"
-bevy_rapier3d = "0.32"
+bevy_rapier3d = { version = "0.32", features = ["parallel", "simd-stable"] }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 

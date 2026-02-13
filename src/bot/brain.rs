@@ -82,23 +82,32 @@ impl<B: Backend> CrabBrain<B> {
         burn::tensor::activation::relu(x)
     }
 
+    /// Combined forward pass: computes policy and value from a single trunk evaluation.
+    /// Returns (means [batch, ACTION_SIZE], log_std [ACTION_SIZE], value [batch, 1]).
+    pub fn forward(&self, obs: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 1>, Tensor<B, 2>) {
+        let trunk = self.trunk(obs);
+
+        let means = self.policy_fc.forward(trunk.clone());
+        let means = burn::tensor::activation::tanh(means);
+        let log_std = self.log_std.val().clamp(-2.0, 0.5);
+
+        let x = self.value_fc1.forward(trunk);
+        let x = burn::tensor::activation::relu(x);
+        let value = self.value_fc2.forward(x);
+
+        (means, log_std, value)
+    }
+
     /// Returns (action_means, action_log_std) for the policy.
-    /// Input shape: [batch, OBS_SIZE]
-    /// Output: means [batch, ACTION_SIZE], log_std [ACTION_SIZE] (clamped to [-2, 0.5])
     pub fn policy(&self, obs: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 1>) {
         let trunk = self.trunk(obs);
         let means = self.policy_fc.forward(trunk);
-        // Tanh to bound action means to [-1, 1]
         let means = burn::tensor::activation::tanh(means);
-        // Clamp log_std to prevent entropy divergence.
-        // exp(-2) ≈ 0.14 (focused), exp(0.5) ≈ 1.65 (exploratory).
         let log_std = self.log_std.val().clamp(-2.0, 0.5);
         (means, log_std)
     }
 
     /// Returns the value estimate.
-    /// Input shape: [batch, OBS_SIZE]
-    /// Output: [batch, 1]
     pub fn value(&self, obs: Tensor<B, 2>) -> Tensor<B, 2> {
         let trunk = self.trunk(obs);
         let x = self.value_fc1.forward(trunk);
