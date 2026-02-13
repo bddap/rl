@@ -40,10 +40,5 @@ fn spawn_initial_crab(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    body::spawn_crab(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        Vec3::ZERO,
-    );
+    body::spawn_crab(&mut commands, &mut meshes, &mut materials, Vec3::ZERO);
 }
