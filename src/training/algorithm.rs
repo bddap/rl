@@ -24,7 +24,7 @@ impl Default for PpoConfig {
             gamma: 0.99,
             lambda: 0.95,
             clip_epsilon: 0.2,
-            entropy_coeff: 0.01,  // Per-dim mean entropy (not sum), so this is scale-invariant
+            entropy_coeff: 0.01, // Per-dim mean entropy (not sum), so this is scale-invariant
             value_coeff: 0.5,
             learning_rate: 3e-4,
             epochs_per_update: 4,

@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 use crate::HeadlessMode;
+use crate::bot::body::ARENA_COLLISION;
 
 /// Plugin that sets up the physics world: ground plane, lighting, camera.
 pub struct PhysicsWorldPlugin;
@@ -52,12 +53,14 @@ fn setup_arena(
         commands.spawn((
             RigidBody::Fixed,
             Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
+            ARENA_COLLISION,
             Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
         ));
     } else {
         commands.spawn((
             RigidBody::Fixed,
             Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
+            ARENA_COLLISION,
             Mesh3d(meshes.add(Cuboid::new(
                 ARENA_HALF_SIZE * 2.0,
                 GROUND_THICKNESS * 2.0,
@@ -98,6 +101,7 @@ fn setup_arena(
         commands.spawn((
             RigidBody::Fixed,
             Collider::cuboid(half_extents.x, half_extents.y, half_extents.z),
+            ARENA_COLLISION,
             Transform::from_translation(pos),
         ));
     }

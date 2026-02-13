@@ -20,12 +20,12 @@ pub struct CrabActions {
 /// Target position range per joint type, in radians (or meters for prismatic).
 fn action_range(id: &CrabJointId) -> [f32; 2] {
     match id {
-        CrabJointId::LegCoxa(_, _) => [-0.78, 0.78],   // ~±45°
-        CrabJointId::LegFemur(_, _) => [-1.57, 0.78],   // -90° to +45°
-        CrabJointId::LegTibia(_, _) => [-0.1, 1.88],    // ~0° to ~108°
+        CrabJointId::LegCoxa(_, _) => [-0.78, 0.78],  // ~±45°
+        CrabJointId::LegFemur(_, _) => [-1.57, 0.78], // -90° to +45°
+        CrabJointId::LegTibia(_, _) => [-0.1, 1.88],  // ~0° to ~108°
         CrabJointId::ClawUpper(_) => [-0.78, 1.57],
         CrabJointId::ClawFore(_) => [-1.57, 1.57],
-        CrabJointId::ClawPincer(_) => [0.0, 0.06],      // prismatic: 0 to 6cm
+        CrabJointId::ClawPincer(_) => [0.0, 0.06], // prismatic: 0 to 6cm
         CrabJointId::EyeStalk(_) => [-0.3, 0.78],
     }
 }
@@ -33,7 +33,11 @@ fn action_range(id: &CrabJointId) -> [f32; 2] {
 /// Maps action value in [-1, 1] to a target position within the joint's range.
 fn action_to_target(action: f32, range: &[f32; 2]) -> f32 {
     // Guard against NaN/Inf — treat as zero (default position)
-    let a = if action.is_finite() { action.max(-1.0).min(1.0) } else { 0.0 };
+    let a = if action.is_finite() {
+        action.max(-1.0).min(1.0)
+    } else {
+        0.0
+    };
     let t = (a + 1.0) * 0.5; // [0, 1]
     range[0] + t * (range[1] - range[0])
 }
@@ -53,6 +57,7 @@ pub fn apply_actions(
 
         let generic: &mut GenericJoint = mj.data.as_mut();
         generic.set_motor_position(axis, target, stiffness, damping);
+        generic.set_motor_max_force(axis, crab_joint.id.motor_max_force());
     }
 }
 

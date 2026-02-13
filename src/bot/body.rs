@@ -24,6 +24,15 @@ use bevy_rapier3d::prelude::*;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 
 // ---------------------------------------------------------------------------
+// Collision groups — prevent self-collision within the crab
+// ---------------------------------------------------------------------------
+
+/// Group 1: arena (ground + walls). Interacts with crab.
+pub const ARENA_COLLISION: CollisionGroups = CollisionGroups::new(Group::GROUP_1, Group::GROUP_2);
+/// Group 2: crab body parts. Interact with arena but NOT with each other.
+pub const CRAB_COLLISION: CollisionGroups = CollisionGroups::new(Group::GROUP_2, Group::GROUP_1);
+
+// ---------------------------------------------------------------------------
 // Dimensions — tuned for a ~1m wide crab (game scale, not real life)
 // ---------------------------------------------------------------------------
 
@@ -121,12 +130,8 @@ impl CrabJointId {
         match self {
             // Legs: 24 joints (8 legs × 3 segments)
             CrabJointId::LegCoxa(side, leg) => side_offset(*side) * 12 + (*leg as usize) * 3,
-            CrabJointId::LegFemur(side, leg) => {
-                side_offset(*side) * 12 + (*leg as usize) * 3 + 1
-            }
-            CrabJointId::LegTibia(side, leg) => {
-                side_offset(*side) * 12 + (*leg as usize) * 3 + 2
-            }
+            CrabJointId::LegFemur(side, leg) => side_offset(*side) * 12 + (*leg as usize) * 3 + 1,
+            CrabJointId::LegTibia(side, leg) => side_offset(*side) * 12 + (*leg as usize) * 3 + 2,
             // Claws: 6 joints (2 claws × 3)
             CrabJointId::ClawUpper(side) => 24 + side_offset(*side) * 3,
             CrabJointId::ClawFore(side) => 24 + side_offset(*side) * 3 + 1,
@@ -142,9 +147,9 @@ impl CrabJointId {
     pub fn motor_stiffness_damping(&self) -> (f32, f32) {
         match self {
             CrabJointId::EyeStalk(_) => (EYE_STIFFNESS, EYE_DAMPING),
-            CrabJointId::ClawUpper(_)
-            | CrabJointId::ClawFore(_)
-            | CrabJointId::ClawPincer(_) => (CLAW_STIFFNESS, CLAW_DAMPING),
+            CrabJointId::ClawUpper(_) | CrabJointId::ClawFore(_) | CrabJointId::ClawPincer(_) => {
+                (CLAW_STIFFNESS, CLAW_DAMPING)
+            }
             _ => (LEG_STIFFNESS, LEG_DAMPING),
         }
     }
@@ -153,13 +158,24 @@ impl CrabJointId {
     /// Must match the axis used in the RevoluteJointBuilder / PrismaticJointBuilder.
     pub fn joint_axis(&self) -> JointAxis {
         match self {
-            CrabJointId::LegCoxa(_, _) => JointAxis::AngY,   // RevoluteJointBuilder::new(Vec3::Y)
-            CrabJointId::LegFemur(_, _) => JointAxis::AngZ,  // RevoluteJointBuilder::new(Vec3::Z)
-            CrabJointId::LegTibia(_, _) => JointAxis::AngZ,  // RevoluteJointBuilder::new(Vec3::Z)
-            CrabJointId::ClawUpper(_) => JointAxis::AngZ,    // RevoluteJointBuilder::new(Vec3::Z)
-            CrabJointId::ClawFore(_) => JointAxis::AngY,     // RevoluteJointBuilder::new(Vec3::Y)
-            CrabJointId::ClawPincer(_) => JointAxis::LinZ,   // PrismaticJointBuilder::new(Vec3::Z)
-            CrabJointId::EyeStalk(_) => JointAxis::AngX,     // RevoluteJointBuilder::new(Vec3::X)
+            CrabJointId::LegCoxa(_, _) => JointAxis::AngY, // RevoluteJointBuilder::new(Vec3::Y)
+            CrabJointId::LegFemur(_, _) => JointAxis::AngZ, // RevoluteJointBuilder::new(Vec3::Z)
+            CrabJointId::LegTibia(_, _) => JointAxis::AngZ, // RevoluteJointBuilder::new(Vec3::Z)
+            CrabJointId::ClawUpper(_) => JointAxis::AngZ,  // RevoluteJointBuilder::new(Vec3::Z)
+            CrabJointId::ClawFore(_) => JointAxis::AngY,   // RevoluteJointBuilder::new(Vec3::Y)
+            CrabJointId::ClawPincer(_) => JointAxis::LinZ, // PrismaticJointBuilder::new(Vec3::Z)
+            CrabJointId::EyeStalk(_) => JointAxis::AngX,   // RevoluteJointBuilder::new(Vec3::X)
+        }
+    }
+
+    /// Returns the motor_max_force for this joint type.
+    pub fn motor_max_force(&self) -> f32 {
+        match self {
+            CrabJointId::EyeStalk(_) => EYE_MAX_FORCE,
+            CrabJointId::ClawUpper(_) | CrabJointId::ClawFore(_) | CrabJointId::ClawPincer(_) => {
+                CLAW_MAX_FORCE
+            }
+            _ => LEG_MAX_FORCE,
         }
     }
 
@@ -234,6 +250,7 @@ pub fn spawn_crab(
             CrabBodyPart,
             RigidBody::Dynamic,
             Collider::cuboid(CARAPACE_HALF_W, CARAPACE_HALF_H, CARAPACE_HALF_D),
+            CRAB_COLLISION,
             ColliderMassProperties::Density(5.0),
             Mesh3d(meshes.add(Cuboid::new(
                 CARAPACE_HALF_W * 2.0,
@@ -254,14 +271,7 @@ pub fn spawn_crab(
     // -- Legs (4 per side) -------------------------------------------------
     for side in [Side::Left, Side::Right] {
         for leg_idx in 0u8..4 {
-            spawn_leg(
-                commands,
-                meshes,
-                &leg_color,
-                carapace,
-                side,
-                leg_idx,
-            );
+            spawn_leg(commands, meshes, &leg_color, carapace, side, leg_idx);
         }
     }
 
@@ -318,6 +328,7 @@ fn spawn_leg(
             },
             RigidBody::Dynamic,
             Collider::capsule_y(COXA_LEN, COXA_RAD),
+            CRAB_COLLISION,
             ColliderMassProperties::Density(2.0),
             Mesh3d(meshes.add(Capsule3d::new(COXA_RAD, COXA_LEN * 2.0))),
             MeshMaterial3d(color.clone()),
@@ -343,6 +354,7 @@ fn spawn_leg(
             },
             RigidBody::Dynamic,
             Collider::capsule_y(FEMUR_LEN, FEMUR_RAD),
+            CRAB_COLLISION,
             ColliderMassProperties::Density(1.5),
             Mesh3d(meshes.add(Capsule3d::new(FEMUR_RAD, FEMUR_LEN * 2.0))),
             MeshMaterial3d(color.clone()),
@@ -367,10 +379,11 @@ fn spawn_leg(
         },
         RigidBody::Dynamic,
         Collider::capsule_y(TIBIA_LEN, TIBIA_RAD),
+        CRAB_COLLISION,
         ColliderMassProperties::Density(1.0),
         Mesh3d(meshes.add(Capsule3d::new(TIBIA_RAD, TIBIA_LEN * 2.0))),
         MeshMaterial3d(color.clone()),
-            MultibodyJoint::new(femur, tibia_joint.into()),
+        MultibodyJoint::new(femur, tibia_joint.into()),
         Friction::coefficient(1.5), // grippy feet
         Velocity::default(),
     ));
@@ -409,6 +422,7 @@ fn spawn_claw(
             },
             RigidBody::Dynamic,
             Collider::capsule_y(CLAW_UPPER_LEN, CLAW_UPPER_RAD),
+            CRAB_COLLISION,
             ColliderMassProperties::Density(3.0),
             Mesh3d(meshes.add(Capsule3d::new(CLAW_UPPER_RAD, CLAW_UPPER_LEN * 2.0))),
             MeshMaterial3d(color.clone()),
@@ -434,6 +448,7 @@ fn spawn_claw(
             },
             RigidBody::Dynamic,
             Collider::capsule_y(CLAW_FORE_LEN, CLAW_FORE_RAD),
+            CRAB_COLLISION,
             ColliderMassProperties::Density(2.5),
             Mesh3d(meshes.add(Capsule3d::new(CLAW_FORE_RAD, CLAW_FORE_LEN * 2.0))),
             MeshMaterial3d(color.clone()),
@@ -458,6 +473,7 @@ fn spawn_claw(
         },
         RigidBody::Dynamic,
         Collider::cuboid(PINCER_HALF_W, PINCER_HALF_H, PINCER_HALF_D),
+        CRAB_COLLISION,
         ColliderMassProperties::Density(4.0),
         Mesh3d(meshes.add(Cuboid::new(
             PINCER_HALF_W * 2.0,
@@ -501,6 +517,7 @@ fn spawn_eye(
         },
         RigidBody::Dynamic,
         Collider::ball(EYE_BALL_RAD),
+        CRAB_COLLISION,
         ColliderMassProperties::Density(0.5),
         Mesh3d(meshes.add(Sphere::new(EYE_BALL_RAD))),
         MeshMaterial3d(color.clone()),
