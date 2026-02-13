@@ -5,23 +5,19 @@ pub mod sensor;
 
 use bevy::prelude::*;
 
-/// System sets that enforce Sense → Think → Act ordering across plugins.
+use crate::HeadlessMode;
+
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BotSet {
-    /// Build observations from physics state.
     Sense,
-    /// Neural network forward pass and RL bookkeeping.
     Think,
-    /// Apply motor commands to joints.
     Act,
 }
 
-/// Plugin that manages bot spawning and per-frame sensor/actuator updates.
 pub struct BotPlugin;
 
 impl Plugin for BotPlugin {
     fn build(&self, app: &mut App) {
-        // Enforce ordering: Sense → Think → Act
         app.configure_sets(
             FixedUpdate,
             (BotSet::Sense, BotSet::Think, BotSet::Act).chain(),
@@ -37,8 +33,15 @@ impl Plugin for BotPlugin {
 
 fn spawn_initial_crab(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    headless: Res<HeadlessMode>,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    materials: Option<ResMut<Assets<StandardMaterial>>>,
 ) {
-    body::spawn_crab(&mut commands, &mut meshes, &mut materials, Vec3::ZERO);
+    if headless.0 {
+        body::spawn_crab_headless(&mut commands, Vec3::ZERO);
+    } else {
+        let mut meshes = meshes.expect("Assets<Mesh> missing in graphical mode");
+        let mut materials = materials.expect("Assets<StandardMaterial> missing in graphical mode");
+        body::spawn_crab(&mut commands, &mut meshes, &mut materials, Vec3::ZERO);
+    }
 }

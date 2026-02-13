@@ -576,17 +576,11 @@ pub fn brain_step(
     let inference_brain = training.brain.valid();
 
     let obs_tensor = Tensor::<NdArray, 1>::from_floats(obs_array.as_slice(), &device);
-    let obs_batch = obs_tensor.clone().unsqueeze::<2>();
+    let obs_batch = obs_tensor.unsqueeze::<2>();
 
-    let (means_batch, log_std) = inference_brain.policy(obs_batch);
+    let (means_batch, log_std, value_batch) = inference_brain.forward(obs_batch);
     let means: Tensor<NdArray, 1> = means_batch.flatten(0, 1);
-
-    let obs_batch2 = obs_tensor.clone().unsqueeze::<2>();
-    let value = inference_brain
-        .value(obs_batch2)
-        .flatten::<1>(0, 1)
-        .into_scalar()
-        .elem::<f32>();
+    let value = value_batch.flatten::<1>(0, 1).into_scalar().elem::<f32>();
 
     let action_tensor = sample_action(&means, &log_std, &device);
     let log_prob = compute_log_prob(&means, &log_std, &action_tensor);

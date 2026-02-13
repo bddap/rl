@@ -20,17 +20,15 @@ const GROUND_THICKNESS: f32 = 0.1;
 fn setup_arena(
     mut commands: Commands,
     headless: Res<HeadlessMode>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    materials: Option<ResMut<Assets<StandardMaterial>>>,
 ) {
     if !headless.0 {
-        // Camera — overhead-ish view looking down at the arena
         commands.spawn((
             Camera3d::default(),
             Transform::from_xyz(0.0, 15.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
         ));
 
-        // Directional light (sun)
         commands.spawn((
             DirectionalLight {
                 shadows_enabled: true,
@@ -40,7 +38,6 @@ fn setup_arena(
             Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.3, 0.0)),
         ));
 
-        // Ambient light so shadows aren't pitch black
         commands.insert_resource(AmbientLight {
             color: Color::WHITE,
             brightness: 300.0,
@@ -48,7 +45,6 @@ fn setup_arena(
         });
     }
 
-    // Ground plane — static rigid body with collider
     if headless.0 {
         commands.spawn((
             RigidBody::Fixed,
@@ -57,6 +53,8 @@ fn setup_arena(
             Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
         ));
     } else {
+        let mut meshes = meshes.expect("Assets<Mesh> missing in graphical mode");
+        let mut materials = materials.expect("Assets<StandardMaterial> missing in graphical mode");
         commands.spawn((
             RigidBody::Fixed,
             Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
@@ -75,7 +73,6 @@ fn setup_arena(
         ));
     }
 
-    // Arena walls (just colliders, no visuals needed)
     let wall_height = 2.0;
     let wall_thickness = 0.5;
     let walls = [

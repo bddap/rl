@@ -214,50 +214,61 @@ fn side_sign(side: Side) -> f32 {
 // Spawn the crab
 // ---------------------------------------------------------------------------
 
-/// Spawns a complete crab body at the given position.
-/// Returns the carapace entity.
+struct Visuals<'a> {
+    meshes: &'a mut Assets<Mesh>,
+    body_color: Handle<StandardMaterial>,
+    leg_color: Handle<StandardMaterial>,
+    claw_color: Handle<StandardMaterial>,
+    eye_color: Handle<StandardMaterial>,
+}
+
+/// Spawns a crab with full visual components (meshes + materials).
 pub fn spawn_crab(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     position: Vec3,
 ) -> Entity {
-    let body_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.2, 0.45, 0.55), // blue-grey carapace
-        perceptual_roughness: 0.7,
-        ..default()
-    });
-    let leg_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.85, 0.4, 0.15), // orange legs (Sally Lightfoot!)
-        perceptual_roughness: 0.6,
-        ..default()
-    });
-    let claw_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.7, 0.15, 0.15), // deep red claws
-        perceptual_roughness: 0.5,
-        ..default()
-    });
-    let eye_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.9, 0.85, 0.7), // pale eye stalks
-        perceptual_roughness: 0.3,
-        ..default()
-    });
+    let vis = Visuals {
+        meshes: meshes.as_mut(),
+        body_color: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.2, 0.45, 0.55),
+            perceptual_roughness: 0.7,
+            ..default()
+        }),
+        leg_color: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.85, 0.4, 0.15),
+            perceptual_roughness: 0.6,
+            ..default()
+        }),
+        claw_color: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.7, 0.15, 0.15),
+            perceptual_roughness: 0.5,
+            ..default()
+        }),
+        eye_color: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.9, 0.85, 0.7),
+            perceptual_roughness: 0.3,
+            ..default()
+        }),
+    };
+    spawn_crab_inner(commands, Some(vis), position)
+}
 
-    // -- Carapace (root) ---------------------------------------------------
-    let carapace = commands
-        .spawn((
+/// Spawns a crab with physics only (no meshes or materials).
+pub fn spawn_crab_headless(commands: &mut Commands, position: Vec3) -> Entity {
+    spawn_crab_inner(commands, None, position)
+}
+
+fn spawn_crab_inner(commands: &mut Commands, mut vis: Option<Visuals>, position: Vec3) -> Entity {
+    let carapace = {
+        let mut e = commands.spawn((
             CrabCarapace,
             CrabBodyPart,
             RigidBody::Dynamic,
             Collider::cuboid(CARAPACE_HALF_W, CARAPACE_HALF_H, CARAPACE_HALF_D),
             CRAB_COLLISION,
             ColliderMassProperties::Density(5.0),
-            Mesh3d(meshes.add(Cuboid::new(
-                CARAPACE_HALF_W * 2.0,
-                CARAPACE_HALF_H * 2.0,
-                CARAPACE_HALF_D * 2.0,
-            ))),
-            MeshMaterial3d(body_color.clone()),
             Transform::from_translation(position + Vec3::new(0.0, SPAWN_HEIGHT, 0.0)),
             Velocity::default(),
             ExternalForce::default(),
@@ -265,24 +276,32 @@ pub fn spawn_crab(
                 linear_damping: 0.5,
                 angular_damping: 1.0,
             },
-        ))
-        .id();
+        ));
+        if let Some(v) = &mut vis {
+            e.insert((
+                Mesh3d(v.meshes.add(Cuboid::new(
+                    CARAPACE_HALF_W * 2.0,
+                    CARAPACE_HALF_H * 2.0,
+                    CARAPACE_HALF_D * 2.0,
+                ))),
+                MeshMaterial3d(v.body_color.clone()),
+            ));
+        }
+        e.id()
+    };
 
-    // -- Legs (4 per side) -------------------------------------------------
     for side in [Side::Left, Side::Right] {
         for leg_idx in 0u8..4 {
-            spawn_leg(commands, meshes, &leg_color, carapace, side, leg_idx);
+            spawn_leg(commands, &mut vis, carapace, side, leg_idx);
         }
     }
 
-    // -- Claws (1 per side) ------------------------------------------------
     for side in [Side::Left, Side::Right] {
-        spawn_claw(commands, meshes, &claw_color, carapace, side);
+        spawn_claw(commands, &mut vis, carapace, side);
     }
 
-    // -- Eyes (1 per side) -------------------------------------------------
     for side in [Side::Left, Side::Right] {
-        spawn_eye(commands, meshes, &eye_color, carapace, side);
+        spawn_eye(commands, &mut vis, carapace, side);
     }
 
     carapace
@@ -294,24 +313,19 @@ pub fn spawn_crab(
 
 fn spawn_leg(
     commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    color: &Handle<StandardMaterial>,
+    vis: &mut Option<Visuals>,
     carapace: Entity,
     side: Side,
     leg_idx: u8,
 ) {
     let s = side_sign(side);
 
-    // Leg attachment points spread along the side of the carapace.
-    // Legs numbered 0 (front) to 3 (back).
     let z_positions = [0.22, 0.08, -0.08, -0.22];
     let z = z_positions[leg_idx as usize];
 
-    // Angle the legs outward and slightly backward/forward
-    let splay_angles = [0.3_f32, 0.1, -0.1, -0.3]; // radians from perpendicular
+    let splay_angles = [0.3_f32, 0.1, -0.1, -0.3];
     let splay = splay_angles[leg_idx as usize];
 
-    // -- Coxa: rotates around Y (yaw — leg swings forward/back) -----------
     let coxa_joint = RevoluteJointBuilder::new(Vec3::Y)
         .local_anchor1(Vec3::new(s * CARAPACE_HALF_W, -0.02, z))
         .local_anchor2(Vec3::new(-s * COXA_LEN, 0.0, 0.0))
@@ -320,8 +334,8 @@ fn spawn_leg(
         .motor_max_force(LEG_MAX_FORCE)
         .motor_model(MotorModel::AccelerationBased);
 
-    let coxa = commands
-        .spawn((
+    let coxa = {
+        let mut e = commands.spawn((
             CrabBodyPart,
             CrabJoint {
                 id: CrabJointId::LegCoxa(side, leg_idx),
@@ -330,14 +344,18 @@ fn spawn_leg(
             Collider::capsule_y(COXA_LEN, COXA_RAD),
             CRAB_COLLISION,
             ColliderMassProperties::Density(2.0),
-            Mesh3d(meshes.add(Capsule3d::new(COXA_RAD, COXA_LEN * 2.0))),
-            MeshMaterial3d(color.clone()),
             MultibodyJoint::new(carapace, coxa_joint.into()),
             Velocity::default(),
-        ))
-        .id();
+        ));
+        if let Some(v) = vis {
+            e.insert((
+                Mesh3d(v.meshes.add(Capsule3d::new(COXA_RAD, COXA_LEN * 2.0))),
+                MeshMaterial3d(v.leg_color.clone()),
+            ));
+        }
+        e.id()
+    };
 
-    // -- Femur: rotates around Z (pitch — leg lifts up/down) ---------------
     let femur_joint = RevoluteJointBuilder::new(Vec3::Z)
         .local_anchor1(Vec3::new(s * COXA_LEN, 0.0, 0.0))
         .local_anchor2(Vec3::new(0.0, FEMUR_LEN, 0.0))
@@ -346,8 +364,8 @@ fn spawn_leg(
         .motor_max_force(LEG_MAX_FORCE)
         .motor_model(MotorModel::AccelerationBased);
 
-    let femur = commands
-        .spawn((
+    let femur = {
+        let mut e = commands.spawn((
             CrabBodyPart,
             CrabJoint {
                 id: CrabJointId::LegFemur(side, leg_idx),
@@ -356,14 +374,18 @@ fn spawn_leg(
             Collider::capsule_y(FEMUR_LEN, FEMUR_RAD),
             CRAB_COLLISION,
             ColliderMassProperties::Density(1.5),
-            Mesh3d(meshes.add(Capsule3d::new(FEMUR_RAD, FEMUR_LEN * 2.0))),
-            MeshMaterial3d(color.clone()),
             MultibodyJoint::new(coxa, femur_joint.into()),
             Velocity::default(),
-        ))
-        .id();
+        ));
+        if let Some(v) = vis {
+            e.insert((
+                Mesh3d(v.meshes.add(Capsule3d::new(FEMUR_RAD, FEMUR_LEN * 2.0))),
+                MeshMaterial3d(v.leg_color.clone()),
+            ));
+        }
+        e.id()
+    };
 
-    // -- Tibia: rotates around Z (pitch — lower leg bends) ----------------
     let tibia_joint = RevoluteJointBuilder::new(Vec3::Z)
         .local_anchor1(Vec3::new(0.0, -FEMUR_LEN, 0.0))
         .local_anchor2(Vec3::new(0.0, TIBIA_LEN, 0.0))
@@ -372,7 +394,7 @@ fn spawn_leg(
         .motor_max_force(LEG_MAX_FORCE)
         .motor_model(MotorModel::AccelerationBased);
 
-    commands.spawn((
+    let mut e = commands.spawn((
         CrabBodyPart,
         CrabJoint {
             id: CrabJointId::LegTibia(side, leg_idx),
@@ -381,31 +403,26 @@ fn spawn_leg(
         Collider::capsule_y(TIBIA_LEN, TIBIA_RAD),
         CRAB_COLLISION,
         ColliderMassProperties::Density(1.0),
-        Mesh3d(meshes.add(Capsule3d::new(TIBIA_RAD, TIBIA_LEN * 2.0))),
-        MeshMaterial3d(color.clone()),
         MultibodyJoint::new(femur, tibia_joint.into()),
-        Friction::coefficient(1.5), // grippy feet
+        Friction::coefficient(1.5),
         Velocity::default(),
     ));
+    if let Some(v) = vis {
+        e.insert((
+            Mesh3d(v.meshes.add(Capsule3d::new(TIBIA_RAD, TIBIA_LEN * 2.0))),
+            MeshMaterial3d(v.leg_color.clone()),
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Claw: upper arm → forearm → pincer
 // ---------------------------------------------------------------------------
 
-fn spawn_claw(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    color: &Handle<StandardMaterial>,
-    carapace: Entity,
-    side: Side,
-) {
+fn spawn_claw(commands: &mut Commands, vis: &mut Option<Visuals>, carapace: Entity, side: Side) {
     let s = side_sign(side);
-
-    // Claws attach at the front corners of the carapace
     let attach_point = Vec3::new(s * CARAPACE_HALF_W * 0.7, 0.05, CARAPACE_HALF_D * 0.9);
 
-    // -- Upper arm: revolute around Z (pitch — raises/lowers claw) ---------
     let upper_joint = RevoluteJointBuilder::new(Vec3::Z)
         .local_anchor1(attach_point)
         .local_anchor2(Vec3::new(0.0, -CLAW_UPPER_LEN * 0.5, 0.0))
@@ -414,8 +431,8 @@ fn spawn_claw(
         .motor_max_force(CLAW_MAX_FORCE)
         .motor_model(MotorModel::AccelerationBased);
 
-    let upper = commands
-        .spawn((
+    let upper = {
+        let mut e = commands.spawn((
             CrabBodyPart,
             CrabJoint {
                 id: CrabJointId::ClawUpper(side),
@@ -424,14 +441,21 @@ fn spawn_claw(
             Collider::capsule_y(CLAW_UPPER_LEN, CLAW_UPPER_RAD),
             CRAB_COLLISION,
             ColliderMassProperties::Density(3.0),
-            Mesh3d(meshes.add(Capsule3d::new(CLAW_UPPER_RAD, CLAW_UPPER_LEN * 2.0))),
-            MeshMaterial3d(color.clone()),
             MultibodyJoint::new(carapace, upper_joint.into()),
             Velocity::default(),
-        ))
-        .id();
+        ));
+        if let Some(v) = vis {
+            e.insert((
+                Mesh3d(
+                    v.meshes
+                        .add(Capsule3d::new(CLAW_UPPER_RAD, CLAW_UPPER_LEN * 2.0)),
+                ),
+                MeshMaterial3d(v.claw_color.clone()),
+            ));
+        }
+        e.id()
+    };
 
-    // -- Forearm: revolute around Y (yaw — swings claw left/right) ---------
     let fore_joint = RevoluteJointBuilder::new(Vec3::Y)
         .local_anchor1(Vec3::new(0.0, CLAW_UPPER_LEN * 0.5, 0.0))
         .local_anchor2(Vec3::new(0.0, 0.0, -CLAW_FORE_LEN * 0.5))
@@ -440,8 +464,8 @@ fn spawn_claw(
         .motor_max_force(CLAW_MAX_FORCE)
         .motor_model(MotorModel::AccelerationBased);
 
-    let forearm = commands
-        .spawn((
+    let forearm = {
+        let mut e = commands.spawn((
             CrabBodyPart,
             CrabJoint {
                 id: CrabJointId::ClawFore(side),
@@ -450,23 +474,30 @@ fn spawn_claw(
             Collider::capsule_y(CLAW_FORE_LEN, CLAW_FORE_RAD),
             CRAB_COLLISION,
             ColliderMassProperties::Density(2.5),
-            Mesh3d(meshes.add(Capsule3d::new(CLAW_FORE_RAD, CLAW_FORE_LEN * 2.0))),
-            MeshMaterial3d(color.clone()),
             MultibodyJoint::new(upper, fore_joint.into()),
             Velocity::default(),
-        ))
-        .id();
+        ));
+        if let Some(v) = vis {
+            e.insert((
+                Mesh3d(
+                    v.meshes
+                        .add(Capsule3d::new(CLAW_FORE_RAD, CLAW_FORE_LEN * 2.0)),
+                ),
+                MeshMaterial3d(v.claw_color.clone()),
+            ));
+        }
+        e.id()
+    };
 
-    // -- Pincer: prismatic along Z (open/close) ----------------------------
     let pincer_joint = PrismaticJointBuilder::new(Vec3::Z)
         .local_anchor1(Vec3::new(0.0, 0.0, CLAW_FORE_LEN * 0.5))
         .local_anchor2(Vec3::new(0.0, 0.0, -PINCER_HALF_D))
-        .limits([0.0, 0.06]) // slightly opens
+        .limits([0.0, 0.06])
         .motor_position(0.0, CLAW_STIFFNESS, CLAW_DAMPING)
         .motor_max_force(CLAW_MAX_FORCE)
         .motor_model(MotorModel::AccelerationBased);
 
-    commands.spawn((
+    let mut e = commands.spawn((
         CrabBodyPart,
         CrabJoint {
             id: CrabJointId::ClawPincer(side),
@@ -475,33 +506,29 @@ fn spawn_claw(
         Collider::cuboid(PINCER_HALF_W, PINCER_HALF_H, PINCER_HALF_D),
         CRAB_COLLISION,
         ColliderMassProperties::Density(4.0),
-        Mesh3d(meshes.add(Cuboid::new(
-            PINCER_HALF_W * 2.0,
-            PINCER_HALF_H * 2.0,
-            PINCER_HALF_D * 2.0,
-        ))),
-        MeshMaterial3d(color.clone()),
         MultibodyJoint::new(forearm, pincer_joint.into()),
         Velocity::default(),
     ));
+    if let Some(v) = vis {
+        e.insert((
+            Mesh3d(v.meshes.add(Cuboid::new(
+                PINCER_HALF_W * 2.0,
+                PINCER_HALF_H * 2.0,
+                PINCER_HALF_D * 2.0,
+            ))),
+            MeshMaterial3d(v.claw_color.clone()),
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Eye stalk
 // ---------------------------------------------------------------------------
 
-fn spawn_eye(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    color: &Handle<StandardMaterial>,
-    carapace: Entity,
-    side: Side,
-) {
+fn spawn_eye(commands: &mut Commands, vis: &mut Option<Visuals>, carapace: Entity, side: Side) {
     let s = side_sign(side);
-
     let attach = Vec3::new(s * 0.12, CARAPACE_HALF_H, CARAPACE_HALF_D * 0.7);
 
-    // Eye stalk: revolute around X (pitch — looks up/down)
     let eye_joint = RevoluteJointBuilder::new(Vec3::X)
         .local_anchor1(attach)
         .local_anchor2(Vec3::new(0.0, -EYE_STALK_LEN, 0.0))
@@ -510,7 +537,7 @@ fn spawn_eye(
         .motor_max_force(EYE_MAX_FORCE)
         .motor_model(MotorModel::AccelerationBased);
 
-    commands.spawn((
+    let mut e = commands.spawn((
         CrabBodyPart,
         CrabJoint {
             id: CrabJointId::EyeStalk(side),
@@ -519,9 +546,13 @@ fn spawn_eye(
         Collider::ball(EYE_BALL_RAD),
         CRAB_COLLISION,
         ColliderMassProperties::Density(0.5),
-        Mesh3d(meshes.add(Sphere::new(EYE_BALL_RAD))),
-        MeshMaterial3d(color.clone()),
         MultibodyJoint::new(carapace, eye_joint.into()),
         Velocity::default(),
     ));
+    if let Some(v) = vis {
+        e.insert((
+            Mesh3d(v.meshes.add(Sphere::new(EYE_BALL_RAD))),
+            MeshMaterial3d(v.eye_color.clone()),
+        ));
+    }
 }
