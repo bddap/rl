@@ -12,18 +12,6 @@ use bevy_rapier3d::prelude::*;
 pub struct HeadlessMode(pub bool);
 
 fn main() {
-    // Abort on panic instead of unwinding, so thread pool panics crash immediately.
-    std::panic::set_hook(Box::new(|info| {
-        eprintln!("PANIC: {info}");
-        if let Ok(v) = std::env::var("RUST_BACKTRACE")
-            && (v == "1" || v == "full")
-        {
-            let bt = std::backtrace::Backtrace::force_capture();
-            eprintln!("{bt}");
-        }
-        std::process::abort();
-    }));
-
     let headless = std::env::args().any(|a| a == "--headless");
 
     let mut app = App::new();
