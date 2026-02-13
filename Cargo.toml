@@ -11,6 +11,8 @@ serde = { version = "1", features = ["derive"] }
 
 burn = { version = "0.20", features = ["autodiff", "ndarray"] }
 rand_distr = "0.5"
+clap = { version = "4", features = ["derive"] }
+bincode = "1"
 
 # Enable optimizations in dev for physics sim performance
 [profile.dev]
