@@ -4,6 +4,7 @@ pub mod brain;
 pub mod sensor;
 
 use bevy::prelude::*;
+use bevy_rapier3d::plugin::PhysicsSet;
 
 /// System sets that enforce Sense → Think → Act ordering across plugins.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -21,10 +22,15 @@ pub struct BotPlugin;
 
 impl Plugin for BotPlugin {
     fn build(&self, app: &mut App) {
-        // Enforce ordering: Sense → Think → Act
+        // Enforce ordering: Sense → Think → Act, and run the whole loop BEFORE the
+        // physics step (Rapier now lives in FixedUpdate too). So each tick observes
+        // last step's state, picks an action, writes motor targets, THEN physics
+        // integrates — one clean RL step per physics step.
         app.configure_sets(
             FixedUpdate,
-            (BotSet::Sense, BotSet::Think, BotSet::Act).chain(),
+            (BotSet::Sense, BotSet::Think, BotSet::Act)
+                .chain()
+                .before(PhysicsSet::SyncBackend),
         );
 
         app.init_resource::<actuator::CrabActions>()
