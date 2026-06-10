@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use bevy::app::AppExit;
 use bevy::prelude::*;
 use burn::backend::Autodiff;
-use burn::backend::ndarray::{NdArray, NdArrayDevice};
 use burn::grad_clipping::GradientClippingConfig;
 use burn::module::AutodiffModule;
 use burn::optim::adaptor::OptimizerAdaptor;
@@ -170,8 +169,17 @@ impl ObsNormalizer {
     }
 }
 
-/// Backend type aliases.
-pub type TrainBackend = Autodiff<NdArray>;
+/// Training backend. CPU (ndarray) by default — fast for small models and needs
+/// no GPU; build with `--features cuda` to train on the GPU (cubecl-cuda), which
+/// pays off as models grow. `InferBackend` and `Device` derive from the choice,
+/// so the rest of the code is backend-agnostic.
+#[cfg(not(feature = "cuda"))]
+pub type TrainBackend = Autodiff<burn::backend::ndarray::NdArray>;
+#[cfg(feature = "cuda")]
+pub type TrainBackend = Autodiff<burn::backend::cuda::Cuda>;
+
+pub type InferBackend = <TrainBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend;
+pub type Device = <TrainBackend as burn::tensor::backend::Backend>::Device;
 
 /// Concrete optimizer type.
 type CrabOptimizer = OptimizerAdaptor<Adam, CrabBrain<TrainBackend>, TrainBackend>;
@@ -247,7 +255,7 @@ pub struct TrainingState {
     pub brain: CrabBrain<TrainBackend>,
     pub config: PpoConfig,
     pub rollout: RolloutBuffer,
-    pub device: NdArrayDevice,
+    pub device: Device,
     optimizer: CrabOptimizer,
 
     pub episode_reward: f32,
@@ -275,7 +283,7 @@ pub struct TrainingState {
 
 impl TrainingState {
     pub fn new(args: &Args) -> Self {
-        let device = NdArrayDevice::Cpu;
+        let device = Device::default();
         let mut brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
         let optimizer: CrabOptimizer = AdamConfig::new()
             .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
@@ -568,17 +576,20 @@ pub fn brain_step(
     carapace_q: Query<(&Transform, &bevy_rapier3d::prelude::Velocity), With<CrabCarapace>>,
 ) {
     let raw_obs = obs.values;
-    let device = training.device;
+    // Clone needed under --features cuda (CudaDevice isn't Copy); a no-op copy
+    // for the default NdArrayDevice, hence the allow.
+    #[allow(clippy::clone_on_copy)]
+    let device = training.device.clone();
 
     let obs_array = training.obs_normalizer.normalize(&raw_obs);
 
     let inference_brain = training.brain.valid();
 
-    let obs_tensor = Tensor::<NdArray, 1>::from_floats(obs_array.as_slice(), &device);
+    let obs_tensor = Tensor::<InferBackend, 1>::from_floats(obs_array.as_slice(), &device);
     let obs_batch = obs_tensor.clone().unsqueeze::<2>();
 
     let (means_batch, log_std) = inference_brain.policy(obs_batch);
-    let means: Tensor<NdArray, 1> = means_batch.flatten(0, 1);
+    let means: Tensor<InferBackend, 1> = means_batch.flatten(0, 1);
 
     let obs_batch2 = obs_tensor.clone().unsqueeze::<2>();
     let value = inference_brain
@@ -779,6 +790,10 @@ pub fn save_on_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use burn::backend::ndarray::{NdArray, NdArrayDevice};
+
+    // Backend-agnostic tests run on CPU so `cargo test` needs no GPU.
+    type TestBackend = Autodiff<NdArray>;
 
     #[test]
     fn reward_velocity_penalty_is_significant() {
@@ -846,7 +861,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let device = NdArrayDevice::Cpu;
-        let brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let brain: CrabBrain<TestBackend> = CrabBrain::new(&device);
 
         let stem = dir.join(BRAIN_STEM);
         let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
@@ -860,9 +875,9 @@ mod tests {
         );
 
         let loaded_record = recorder.load(stem, &device).expect("load brain");
-        let loaded = CrabBrain::<TrainBackend>::new(&device).load_record(loaded_record);
+        let loaded = CrabBrain::<TestBackend>::new(&device).load_record(loaded_record);
 
-        let test_obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
+        let test_obs = Tensor::<TestBackend, 2>::zeros([1, OBS_SIZE], &device);
         let (orig_means, orig_log_std) = brain.policy(test_obs.clone());
         let (loaded_means, loaded_log_std) = loaded.policy(test_obs);
 
