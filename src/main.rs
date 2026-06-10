@@ -1,10 +1,12 @@
 mod bot;
 mod combat;
 mod physics;
+mod play;
 mod player;
 mod training;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
@@ -14,9 +16,31 @@ use clap::Parser;
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct Args {
-    /// Run without a window at maximum simulation speed.
+    /// Train headless: no window, maximum simulation speed.
     #[arg(long)]
     headless: bool,
+
+    /// Play with a trained crab: load the checkpoint, drive it with the policy
+    /// (no learning), orbit camera + poke/reset controls.
+    #[arg(long)]
+    demo: bool,
+
+    /// Render one frame to this PNG and exit (windowless, GPU on). For inspecting
+    /// the trained crab without a display.
+    #[arg(long, value_name = "PATH")]
+    screenshot: Option<PathBuf>,
+
+    /// Physics steps to simulate before taking the screenshot.
+    #[arg(long, default_value_t = 200)]
+    screenshot_settle: u32,
+
+    /// Screenshot width in pixels.
+    #[arg(long, default_value_t = 1280)]
+    width: u32,
+
+    /// Screenshot height in pixels.
+    #[arg(long, default_value_t = 720)]
+    height: u32,
 
     /// Directory for checkpoint files. On startup, if the directory contains a
     /// previous checkpoint it will be loaded automatically. During training,
@@ -29,57 +53,136 @@ pub struct Args {
     save_interval: u32,
 }
 
-/// Resource indicating whether we're running headless (no rendering).
+/// What the process is doing this run. Train can be headless or windowed; demo
+/// and screenshot always render.
+#[derive(Clone)]
+enum AppMode {
+    Train,
+    Demo,
+    Screenshot { path: PathBuf, settle: u32 },
+}
+
+/// Whether to spawn visual assets (meshes, lights). False only for headless
+/// training, where rendering is off entirely.
 #[derive(Resource, Clone, Copy)]
-pub struct HeadlessMode(pub bool);
+pub struct Visuals(pub bool);
 
 fn main() {
     let args = Args::parse();
-    let headless = args.headless;
+
+    let mode = if let Some(path) = args.screenshot.clone() {
+        AppMode::Screenshot {
+            path,
+            settle: args.screenshot_settle,
+        }
+    } else if args.demo {
+        AppMode::Demo
+    } else {
+        AppMode::Train
+    };
+
+    // Headless training is the only mode without visuals.
+    let visuals = !(matches!(mode, AppMode::Train) && args.headless);
 
     let mut app = App::new();
 
-    if headless {
-        app.add_plugins(
-            DefaultPlugins
-                .set(bevy::window::WindowPlugin {
-                    primary_window: None,
-                    exit_condition: bevy::window::ExitCondition::DontExit,
-                    ..default()
-                })
-                .set(bevy::render::RenderPlugin {
-                    render_creation: bevy::render::settings::RenderCreation::Automatic(
-                        bevy::render::settings::WgpuSettings {
-                            backends: None,
-                            ..default()
-                        },
-                    ),
-                    ..default()
-                })
-                .disable::<bevy::winit::WinitPlugin>(),
-        );
-        app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
-            std::time::Duration::ZERO,
-        ));
-        let mut virtual_time = bevy::time::Time::<bevy::time::Virtual>::default();
-        virtual_time.set_relative_speed(100.0);
-        virtual_time.set_max_delta(std::time::Duration::from_secs(10));
-        app.insert_resource(virtual_time);
-    } else {
-        app.add_plugins(DefaultPlugins);
-        app.add_plugins(RapierDebugRenderPlugin::default());
+    match &mode {
+        AppMode::Train if args.headless => {
+            // No window, GPU off, run the schedule as fast as possible.
+            app.add_plugins(
+                DefaultPlugins
+                    .set(bevy::window::WindowPlugin {
+                        primary_window: None,
+                        exit_condition: bevy::window::ExitCondition::DontExit,
+                        ..default()
+                    })
+                    .set(bevy::render::RenderPlugin {
+                        render_creation: bevy::render::settings::RenderCreation::Automatic(
+                            bevy::render::settings::WgpuSettings {
+                                backends: None,
+                                ..default()
+                            },
+                        ),
+                        ..default()
+                    })
+                    .disable::<bevy::winit::WinitPlugin>(),
+            );
+            app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(Duration::ZERO));
+            app.insert_resource(fast_virtual_time());
+        }
+        AppMode::Screenshot { .. } => {
+            // No window, but GPU ON so we can render to an image. Real-time 60 Hz
+            // loop at default 1x: one physics step + one render per frame, so the
+            // capture counter (render frames) also tracks simulated time and the
+            // GPU pipeline warms over the same frames. (A fast/100x clock decouples
+            // them — physics races while render frames crawl, and early frames
+            // render black before the pipeline warms up.)
+            app.add_plugins(
+                DefaultPlugins
+                    .set(bevy::window::WindowPlugin {
+                        primary_window: None,
+                        exit_condition: bevy::window::ExitCondition::DontExit,
+                        ..default()
+                    })
+                    .disable::<bevy::winit::WinitPlugin>(),
+            );
+            app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
+                Duration::from_secs_f64(1.0 / 60.0),
+            ));
+        }
+        _ => {
+            // Windowed: train-with-viz or demo.
+            app.add_plugins(DefaultPlugins);
+            if matches!(mode, AppMode::Train) {
+                app.add_plugins(RapierDebugRenderPlugin::default());
+            }
+        }
     }
 
-    app.insert_resource(HeadlessMode(headless))
+    app.insert_resource(Visuals(visuals))
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         .add_plugins(physics::PhysicsWorldPlugin)
-        .add_plugins(bot::BotPlugin)
-        .add_plugins(training::TrainingPlugin::new(args))
-        .add_systems(Startup, move || {
-            if headless {
-                info!("Headless training mode — no window, max speed physics");
+        .add_plugins(bot::BotPlugin);
+
+    match mode {
+        AppMode::Train => {
+            app.add_plugins(training::TrainingPlugin::new(args.clone()));
+            if !args.headless {
+                app.add_systems(Startup, spawn_fixed_camera);
             }
-        });
+        }
+        AppMode::Demo => {
+            app.add_plugins(play::DemoPlugin {
+                checkpoint_dir: args.checkpoint_dir.clone(),
+            });
+        }
+        AppMode::Screenshot { path, settle } => {
+            app.add_plugins(play::ScreenshotPlugin {
+                checkpoint_dir: args.checkpoint_dir.clone(),
+                path,
+                settle,
+                width: args.width,
+                height: args.height,
+            });
+        }
+    }
 
     app.run();
+}
+
+/// Virtual clock that runs 100× wall speed for headless/offscreen modes, so a
+/// fixed number of physics steps elapses in a fraction of the real time.
+fn fast_virtual_time() -> Time<Virtual> {
+    let mut t = Time::<Virtual>::default();
+    t.set_relative_speed(100.0);
+    t.set_max_delta(Duration::from_secs(10));
+    t
+}
+
+/// Fixed overhead camera for windowed training visualization.
+fn spawn_fixed_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(0.0, 15.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
 }

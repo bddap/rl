@@ -1,10 +1,12 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use crate::HeadlessMode;
+use crate::Visuals;
 use crate::bot::body::ARENA_COLLISION;
 
-/// Plugin that sets up the physics world: ground plane, lighting, camera.
+/// Plugin that sets up the physics world: ground plane, lighting. Cameras are
+/// spawned per app mode (fixed for training, orbit for demo, offscreen for
+/// screenshots).
 pub struct PhysicsWorldPlugin;
 
 impl Plugin for PhysicsWorldPlugin {
@@ -19,17 +21,11 @@ const GROUND_THICKNESS: f32 = 0.1;
 
 fn setup_arena(
     mut commands: Commands,
-    headless: Res<HeadlessMode>,
+    visuals: Res<Visuals>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if !headless.0 {
-        // Camera — overhead-ish view looking down at the arena
-        commands.spawn((
-            Camera3d::default(),
-            Transform::from_xyz(0.0, 15.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ));
-
+    if visuals.0 {
         // Directional light (sun)
         commands.spawn((
             DirectionalLight {
@@ -48,15 +44,8 @@ fn setup_arena(
         });
     }
 
-    // Ground plane — static rigid body with collider
-    if headless.0 {
-        commands.spawn((
-            RigidBody::Fixed,
-            Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
-            ARENA_COLLISION,
-            Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
-        ));
-    } else {
+    // Ground plane — static rigid body with collider; add a mesh only when rendering.
+    if visuals.0 {
         commands.spawn((
             RigidBody::Fixed,
             Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
@@ -71,6 +60,13 @@ fn setup_arena(
                 perceptual_roughness: 0.9,
                 ..default()
             })),
+            Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
+        ));
+    } else {
+        commands.spawn((
+            RigidBody::Fixed,
+            Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
+            ARENA_COLLISION,
             Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
         ));
     }

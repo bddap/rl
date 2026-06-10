@@ -31,7 +31,7 @@ use super::algorithm::{
 
 /// Running observation normalizer using Welford's online algorithm.
 /// Normalizes observations to zero mean, unit variance.
-struct ObsNormalizer {
+pub(crate) struct ObsNormalizer {
     mean: [f64; OBS_SIZE],
     var: [f64; OBS_SIZE],   // running variance (M2 / count)
     m2: [f64; OBS_SIZE],    // sum of squared differences from mean
@@ -86,7 +86,7 @@ impl ObsNormalizer {
 }
 
 impl ObsNormalizer {
-    fn new(clip: f32) -> Self {
+    pub(crate) fn new(clip: f32) -> Self {
         Self {
             mean: [0.0; OBS_SIZE],
             var: [1.0; OBS_SIZE],
@@ -96,8 +96,8 @@ impl ObsNormalizer {
         }
     }
 
-    /// Update running stats and return normalized observation.
-    fn normalize(&mut self, obs: &[f32; OBS_SIZE]) -> [f32; OBS_SIZE] {
+    /// Update running stats, then return the normalized observation.
+    pub(crate) fn normalize(&mut self, obs: &[f32; OBS_SIZE]) -> [f32; OBS_SIZE] {
         for (i, &raw) in obs.iter().enumerate() {
             if !raw.is_finite() {
                 continue;
@@ -114,7 +114,13 @@ impl ObsNormalizer {
                 self.var[i] = (self.m2[i] / (n - 1.0)).max(0.0);
             }
         }
+        self.normalize_frozen(obs)
+    }
 
+    /// Normalize against the current statistics WITHOUT updating them. Inference
+    /// (play/demo) uses this so the running mean/var stay fixed at the values
+    /// learned during training rather than drifting toward demo observations.
+    pub(crate) fn normalize_frozen(&self, obs: &[f32; OBS_SIZE]) -> [f32; OBS_SIZE] {
         let clip = self.clip;
         let mut normalized = [0.0f32; OBS_SIZE];
         for i in 0..OBS_SIZE {
@@ -148,7 +154,7 @@ impl ObsNormalizer {
         }
     }
 
-    fn load(path: &Path) -> Option<Self> {
+    pub(crate) fn load(path: &Path) -> Option<Self> {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
@@ -170,8 +176,10 @@ impl ObsNormalizer {
     }
 }
 
-/// Backend type aliases.
+/// Backend type aliases. Training carries autodiff; inference (play/demo) uses
+/// the bare inner backend — `AutodiffModule::valid()` converts one to the other.
 pub type TrainBackend = Autodiff<NdArray>;
+pub type InferBackend = NdArray;
 
 /// Concrete optimizer type.
 type CrabOptimizer = OptimizerAdaptor<Adam, CrabBrain<TrainBackend>, TrainBackend>;
@@ -250,8 +258,8 @@ impl MetricsLogger {
 
 /// Stem for brain checkpoint files. `BinFileRecorder` appends `.bin` automatically,
 /// so the actual file on disk is `brain.bin`.
-const BRAIN_STEM: &str = "brain";
-const NORMALIZER_FILENAME: &str = "normalizer.bin";
+pub(crate) const BRAIN_STEM: &str = "brain";
+pub(crate) const NORMALIZER_FILENAME: &str = "normalizer.bin";
 
 /// The RL training state. Stored as a non-send resource because burn
 /// tensors use `OnceCell` which is not `Sync`.
