@@ -62,8 +62,8 @@ pub fn build_observation(
         // Prismatic joints (ClawPincer) → linear velocity magnitude.
         // Revolute joints (everything else) → angular velocity magnitude.
         v[base + 1] = match &crab_joint.id {
-            CrabJointId::ClawPincer(_) => vel.linvel.length(),
-            _ => vel.angvel.length(),
+            CrabJointId::ClawPincer(_) => vel.linear.length(),
+            _ => vel.angular.length(),
         };
     }
 
@@ -89,13 +89,13 @@ pub fn build_observation(
         v[body_base + 5] = rot.z;
         v[body_base + 6] = rot.w;
 
-        v[body_base + 7] = vel.linvel.x;
-        v[body_base + 8] = vel.linvel.y;
-        v[body_base + 9] = vel.linvel.z;
+        v[body_base + 7] = vel.linear.x;
+        v[body_base + 8] = vel.linear.y;
+        v[body_base + 9] = vel.linear.z;
 
-        v[body_base + 10] = vel.angvel.x;
-        v[body_base + 11] = vel.angvel.y;
-        v[body_base + 12] = vel.angvel.z;
+        v[body_base + 10] = vel.angular.x;
+        v[body_base + 11] = vel.angular.y;
+        v[body_base + 12] = vel.angular.z;
     }
 
     // Sanitize: replace any NaN/Inf with 0 to prevent NN corruption

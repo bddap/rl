@@ -690,8 +690,8 @@ pub fn brain_step(
     let mut max_speeds: Vec<f32> = vec![0.0; n];
     for (env, vel) in parts_q.iter() {
         if let Some(m) = max_speeds.get_mut(env.0) {
-            let lin = vel.linvel.length();
-            let ang = vel.angvel.length();
+            let lin = vel.linear.length();
+            let ang = vel.angular.length();
             let s = if lin.is_finite() && ang.is_finite() {
                 // Angular blowups (rad/s) run ~3x the linear scale before the
                 // solver NaNs; fold both into one number on the linear scale.
@@ -888,8 +888,8 @@ pub fn reset_crab(
         let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
         transform.translation = origin + Vec3::new(0.0, SPAWN_HEIGHT, 0.0);
         transform.rotation = Quat::IDENTITY;
-        vel.linvel = Vec3::ZERO;
-        vel.angvel = Vec3::ZERO;
+        vel.linear = Vec3::ZERO;
+        vel.angular = Vec3::ZERO;
         ext_force.force = Vec3::ZERO;
         ext_force.torque = Vec3::ZERO;
     }
@@ -898,8 +898,8 @@ pub fn reset_crab(
         if !resetting(env) {
             continue;
         }
-        vel.linvel = Vec3::ZERO;
-        vel.angvel = Vec3::ZERO;
+        vel.linear = Vec3::ZERO;
+        vel.angular = Vec3::ZERO;
     }
 
     for (crab_joint, env, mut mj) in joints.iter_mut() {

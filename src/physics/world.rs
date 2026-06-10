@@ -37,7 +37,7 @@ fn setup_arena(
         ));
 
         // Ambient light so shadows aren't pitch black
-        commands.insert_resource(AmbientLight {
+        commands.insert_resource(GlobalAmbientLight {
             color: Color::WHITE,
             brightness: 300.0,
             ..default()

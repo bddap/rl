@@ -305,8 +305,8 @@ fn demo_controls(
         let shove = Vec3::new(rng.gen_range(-1.0..1.0), 0.25, rng.gen_range(-1.0..1.0))
             .normalize_or_zero()
             * 3.5;
-        vel.linvel += shove;
-        vel.angvel += Vec3::new(rng.gen_range(-2.5..2.5), 0.0, rng.gen_range(-2.5..2.5));
+        vel.linear += shove;
+        vel.angular += Vec3::new(rng.gen_range(-2.5..2.5), 0.0, rng.gen_range(-2.5..2.5));
     }
 }
 
@@ -320,14 +320,14 @@ fn reset_crab(
     if let Ok((mut transform, mut vel, mut ext_force)) = carapace_q.single_mut() {
         transform.translation = Vec3::new(0.0, 1.0, 0.0);
         transform.rotation = Quat::IDENTITY;
-        vel.linvel = Vec3::ZERO;
-        vel.angvel = Vec3::ZERO;
+        vel.linear = Vec3::ZERO;
+        vel.angular = Vec3::ZERO;
         ext_force.force = Vec3::ZERO;
         ext_force.torque = Vec3::ZERO;
     }
     for mut vel in parts_q.iter_mut() {
-        vel.linvel = Vec3::ZERO;
-        vel.angvel = Vec3::ZERO;
+        vel.linear = Vec3::ZERO;
+        vel.angular = Vec3::ZERO;
     }
     for (crab_joint, mut mj) in joints_q.iter_mut() {
         let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
@@ -429,7 +429,8 @@ fn spawn_offscreen_camera(
     mut images: ResMut<Assets<Image>>,
     cfg: Res<ShotConfig>,
 ) {
-    let mut image = Image::new_target_texture(cfg.width, cfg.height, TextureFormat::bevy_default());
+    let mut image =
+        Image::new_target_texture(cfg.width, cfg.height, TextureFormat::bevy_default(), None);
     // COPY_SRC so the screenshot machinery can read the rendered texture back.
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let handle = images.add(image);
@@ -437,10 +438,10 @@ fn spawn_offscreen_camera(
     commands.spawn((
         Camera3d::default(),
         Camera {
-            target: RenderTarget::Image(handle.clone().into()),
             clear_color: ClearColorConfig::Custom(Color::srgb(0.25, 0.45, 0.75)),
             ..default()
         },
+        RenderTarget::Image(handle.clone().into()),
         // Default tonemapping needs a LUT asset that may not be ready in a
         // windowless render; None keeps the offscreen pass simple.
         Tonemapping::None,
