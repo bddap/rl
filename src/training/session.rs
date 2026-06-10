@@ -554,7 +554,19 @@ impl TrainingState {
     }
 }
 
-/// Phase 1 reward: learn to stand stably.
+/// Phase 1 reward: hold an upright stance at the target height, on the spot.
+///
+/// The crab spawns at carapace y=1.0 (origin in x/z). Getting this reward right
+/// is mostly about avoiding two degenerate optima:
+/// - freezing tall at the spawn pose (high CoG → drifts, bounces, launches), and
+/// - flopping flat belly-down with legs up (low and still, but not "standing" —
+///   and `uprightness` can't tell it apart from a real stand since the carapace
+///   top still faces +Y).
+/// So HEIGHT is the dominant, sharply-peaked term: it pays off only near the
+/// target, heavily penalizing both the tall spawn pose AND a low flop, forcing
+/// the crab to actively hold itself up at the target. The velocity penalty is
+/// kept light so the policy can move its legs to balance rather than going limp;
+/// a drift term pins it to the spawn spot (origin).
 fn compute_reward(
     carapace_pos: Vec3,
     carapace_up: Vec3,
@@ -568,17 +580,23 @@ fn compute_reward(
 
     let height = carapace_pos.y;
     let target_height = 0.5;
-    let height_bonus = (-2.0 * (height - target_height).powi(2)).exp();
+    let height_bonus = 2.5 * (-15.0 * (height - target_height).powi(2)).exp();
     reward += height_bonus;
 
     let uprightness = carapace_up.dot(Vec3::Y);
     reward += uprightness * 0.5;
 
+    // Stay put: quadratic pull back to the spawn spot (origin in x/z).
+    let drift_sq = carapace_pos.x.powi(2) + carapace_pos.z.powi(2);
+    reward -= 0.2 * drift_sq;
+
     let action_sq_sum: f32 = actions.iter().map(|a| a * a).sum();
     let action_cost = 0.01 * action_sq_sum;
     reward -= action_cost;
 
-    let vel_cost = 0.2 * (linvel.length_squared() + 0.1 * angvel.length_squared());
+    // Light damping only — enough to discourage thrashing, not so much that
+    // going limp (and collapsing) becomes the optimum.
+    let vel_cost = 0.15 * linvel.length_squared() + 0.05 * angvel.length_squared();
     reward -= vel_cost;
 
     reward -= 0.01;
@@ -653,7 +671,11 @@ pub fn brain_step(
             vel.angvel,
             &action_array,
         );
-        let done = !(0.1..=5.0).contains(&height) || upright < 0.0 || training.episode_steps > 500;
+        // ~25s episodes (was ~8s): a short horizon let the policy "stand" just
+        // long enough to end the episode, then drift/tip in a longer demo run.
+        // The longer horizon (plus the per-step drift penalty accruing over it)
+        // teaches it to actually hold the stance in place.
+        let done = !(0.1..=5.0).contains(&height) || upright < 0.0 || training.episode_steps > 1500;
         (r, done, height, upright)
     } else {
         (0.0, false, 0.0, 0.0)
