@@ -51,6 +51,20 @@ pub struct Args {
     /// Save a checkpoint every N PPO updates (0 to disable periodic saves).
     #[arg(long, default_value_t = 50)]
     save_interval: u32,
+
+    /// Stop headless training after exactly this many physics ticks (0 = run
+    /// until killed). The budget is counted in ticks, never wall-clock, so a run
+    /// simulates an identical amount regardless of machine speed or load — the
+    /// "fixed ticks, not real time" guarantee an assumed time↔tick relation can't
+    /// give.
+    #[arg(long, default_value_t = 0)]
+    ticks: u64,
+
+    /// Benchmark only: skip NN inference in the train loop (hold zero actions),
+    /// isolating physics + engine overhead from network cost. Training is
+    /// meaningless under this flag — it exists to measure the per-step bottleneck.
+    #[arg(long)]
+    bench_skip_nn: bool,
 }
 
 /// What the process is doing this run. Train can be headless or windowed; demo
@@ -109,6 +123,17 @@ fn main() {
             );
             app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(Duration::ZERO));
             app.insert_resource(fast_virtual_time());
+            // Advance the clock by a FIXED amount per update instead of reading the
+            // wall clock. With the 100x virtual speed + 10s max_delta above, each
+            // update drains a fixed ~640 physics ticks regardless of how long the
+            // frame actually took — so tick count is a function of updates, not
+            // machine speed or load. Without this, a slow frame (e.g. a PPO update)
+            // makes the next frame's wall-clock delta — and thus its tick count —
+            // balloon, and a stall could spiral. Paired with --ticks, a run
+            // simulates an exact, reproducible amount.
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Duration::from_secs_f64(0.1),
+            ));
         }
         AppMode::Screenshot { .. } => {
             // No window, but GPU ON so we can render to an image. Real-time 60 Hz

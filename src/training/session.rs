@@ -295,6 +295,11 @@ pub struct TrainingState {
     checkpoint_dir: PathBuf,
     checkpoint_interval: u32,
     saved_on_exit: bool,
+
+    /// Stop after this many physics ticks (0 = unlimited). See `Args::ticks`.
+    tick_budget: u64,
+    /// Benchmark: skip NN inference to measure the physics/overhead floor.
+    skip_nn: bool,
 }
 
 impl TrainingState {
@@ -357,6 +362,8 @@ impl TrainingState {
             checkpoint_dir: args.checkpoint_dir.clone(),
             checkpoint_interval: args.save_interval,
             saved_on_exit: false,
+            tick_budget: args.ticks,
+            skip_nn: args.bench_skip_nn,
         }
     }
 
@@ -576,26 +583,33 @@ pub fn brain_step(
     mut actions: ResMut<CrabActions>,
     carapace_q: Query<(&Transform, &bevy_rapier3d::prelude::Velocity), With<CrabCarapace>>,
     eyes_q: Query<(&CrabJoint, &Transform)>,
+    mut exit: MessageWriter<AppExit>,
 ) {
     let raw_obs = obs.values;
     let device = training.device;
 
     let obs_array = training.obs_normalizer.normalize(&raw_obs);
 
-    let inference_brain = training.brain.valid();
-
-    let obs_tensor = Tensor::<NdArray, 1>::from_floats(obs_array.as_slice(), &device);
-    let obs_batch = obs_tensor.clone().unsqueeze::<2>();
-
-    let (means_batch, log_std) = inference_brain.policy(obs_batch);
-    let means: Tensor<NdArray, 1> = means_batch.flatten(0, 1);
-
-    let obs_batch2 = obs_tensor.clone().unsqueeze::<2>();
-    let value = inference_brain
-        .value(obs_batch2)
-        .flatten::<1>(0, 1)
-        .into_scalar()
-        .elem::<f32>();
+    let (means, log_std, value): (Tensor<NdArray, 1>, Tensor<NdArray, 1>, f32) = if training.skip_nn
+    {
+        // Bench mode: no forward pass. The sampling below is cheap and what it
+        // produces is irrelevant — we are isolating physics + engine overhead.
+        let z = Tensor::<NdArray, 1>::zeros([ACTION_SIZE], &device);
+        (z.clone(), z, 0.0)
+    } else {
+        let inference_brain = training.brain.valid();
+        let obs_tensor = Tensor::<NdArray, 1>::from_floats(obs_array.as_slice(), &device);
+        let obs_batch = obs_tensor.clone().unsqueeze::<2>();
+        let (means_batch, log_std) = inference_brain.policy(obs_batch);
+        let means: Tensor<NdArray, 1> = means_batch.flatten(0, 1);
+        let obs_batch2 = obs_tensor.unsqueeze::<2>();
+        let value = inference_brain
+            .value(obs_batch2)
+            .flatten::<1>(0, 1)
+            .into_scalar()
+            .elem::<f32>();
+        (means, log_std, value)
+    };
 
     let action_tensor = sample_action(&means, &log_std, &device);
     let log_prob = compute_log_prob(&means, &log_std, &action_tensor);
@@ -672,6 +686,18 @@ pub fn brain_step(
     training.episode_upright_sum += upright;
     training.current_rollout_steps += 1;
     training.total_steps += 1;
+
+    // Fixed-tick stop: exactly `tick_budget` physics ticks, then save+exit. Tick
+    // count, never wall-clock, so the run is reproducible across machines/load.
+    // `==` (steps increment by one) so the catch-up burst that crosses the budget
+    // logs/requests exit once, not once per remaining tick in the burst.
+    if training.tick_budget != 0 && training.total_steps == training.tick_budget {
+        info!(
+            "Tick budget reached ({} ticks) — stopping training.",
+            training.tick_budget
+        );
+        exit.write(AppExit::Success);
+    }
 
     if done {
         let ep_reward = training.episode_reward;
