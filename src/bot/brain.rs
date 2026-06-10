@@ -15,6 +15,14 @@ use super::sensor::OBS_SIZE;
 pub const ACTION_SIZE: usize = CrabJointId::COUNT;
 const HIDDEN_SIZE: usize = 256;
 
+/// Initial policy log-std (std ≈ 0.2): start with low exploration, see `new`.
+const LOG_STD_INIT: f32 = -1.6;
+/// Bounds the learnable log-std so entropy can't diverge or collapse. Single
+/// source of truth: `policy` clamps to this range, so downstream log-prob /
+/// entropy never re-clamp. exp(-2) ≈ 0.14 (focused), exp(0.5) ≈ 1.65 (wide).
+const LOG_STD_MIN: f32 = -2.0;
+const LOG_STD_MAX: f32 = 0.5;
+
 /// Actor-Critic network for PPO.
 #[derive(Module, Debug)]
 pub struct CrabBrain<B: Backend> {
@@ -57,8 +65,14 @@ impl<B: Backend> CrabBrain<B> {
             .with_bias(true)
             .init(device);
 
-        // Initialize log_std to -0.5 (std ≈ 0.6, moderate exploration)
-        let log_std = Param::from_tensor(Tensor::full([ACTION_SIZE], -0.5, device));
+        // Actions are absolute joint-position targets applied every physics
+        // step, so per-step noise is per-step jitter. std ≈ 0.6 (log_std -0.5)
+        // resampled each of 35 joints at 60 Hz makes the body convulse and fall
+        // before any pose-holding reward accrues — it can never learn to stand.
+        // Start near-deterministic (std ≈ 0.2) so a stable pose persists long
+        // enough to earn the height/uprightness signal; the policy can widen
+        // exploration itself via the learnable log_std if it pays off.
+        let log_std = Param::from_tensor(Tensor::full([ACTION_SIZE], LOG_STD_INIT, device));
 
         Self {
             trunk_fc1,
@@ -90,9 +104,10 @@ impl<B: Backend> CrabBrain<B> {
         let means = self.policy_fc.forward(trunk);
         // Tanh to bound action means to [-1, 1]
         let means = burn::tensor::activation::tanh(means);
-        // Clamp log_std to prevent entropy divergence.
-        // exp(-2) ≈ 0.14 (focused), exp(0.5) ≈ 1.65 (exploratory).
-        let log_std = self.log_std.val().clamp(-2.0, 0.5);
+        let log_std = self
+            .log_std
+            .val()
+            .clamp(LOG_STD_MIN as f64, LOG_STD_MAX as f64);
         (means, log_std)
     }
 

@@ -475,10 +475,9 @@ impl TrainingState {
 
                 let (means, log_std) = self.brain.policy(obs.clone());
 
-                let log_std_clamped = log_std.clone().clamp(-5.0, 2.0);
-
+                // log_std is pre-clamped by policy (single source of truth).
                 let diff = actions - means;
-                let log_std_2d = log_std_clamped
+                let log_std_2d = log_std
                     .clone()
                     .unsqueeze_dim::<2>(0)
                     .expand([batch_n, ACTION_SIZE]);
@@ -487,7 +486,7 @@ impl TrainingState {
                     scaled_diff.powf_scalar(2.0).neg() * 0.5 - log_std_2d - half_log_2pi;
                 let new_lp: Tensor<TrainBackend, 1> = log_probs_per_dim.sum_dim(1).flatten(0, 1);
 
-                let entropy_per_dim = log_std_clamped.clone()
+                let entropy_per_dim = log_std.clone()
                     + (0.5 * (2.0 * std::f32::consts::PI * std::f32::consts::E).ln());
                 let entropy = entropy_per_dim.mean();
 

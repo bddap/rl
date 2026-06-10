@@ -103,12 +103,12 @@ pub fn compute_log_prob<B: Backend>(
     log_std: &Tensor<B, 1>,
     actions: &Tensor<B, 1>,
 ) -> f32 {
-    let log_std_clamped = log_std.clone().clamp(-5.0, 2.0);
+    // log_std arrives pre-clamped from CrabBrain::policy (single source of truth).
     let diff = actions.clone() - means.clone();
     // log p = -0.5 * ((a - mu) / sigma)^2 - log(sigma) - 0.5 * log(2*pi)
-    let scaled_diff = diff / log_std_clamped.clone().exp();
+    let scaled_diff = diff / log_std.clone().exp();
     let log_probs = scaled_diff.powf_scalar(2.0).neg() * 0.5
-        - log_std_clamped
+        - log_std.clone()
         - 0.5 * (2.0 * std::f32::consts::PI).ln();
     log_probs.sum().into_scalar().elem::<f32>()
 }
