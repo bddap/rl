@@ -640,7 +640,11 @@ pub fn brain_step(
                     n += 1;
                 }
             }
-            if n > 0 { sum / n as f32 } else { transform.translation.y }
+            if n > 0 {
+                sum / n as f32
+            } else {
+                transform.translation.y
+            }
         };
         let r = compute_reward(mean_eye_height);
         // Long ~25 s episodes mean sustained eye height (a real stand, or a held
