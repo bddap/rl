@@ -7,14 +7,20 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use super::body::{CrabJoint, CrabJointId};
+use super::body::{CrabEnvId, CrabJoint, CrabJointId};
 
-/// Resource holding the current action vector for the crab.
+/// Resource holding the current action vector for each environment's crab.
 /// Written by the brain (NN or test controller), read by the actuator system.
 #[derive(Resource, Default)]
 pub struct CrabActions {
-    /// One float per DOF in [-1, 1]. Indexed by `CrabJointId::index()`.
-    pub values: [f32; CrabJointId::COUNT],
+    /// `envs[e][CrabJointId::index()]` = env e's commanded value in [-1, 1].
+    pub envs: Vec<[f32; CrabJointId::COUNT]>,
+}
+
+impl CrabActions {
+    pub fn resize(&mut self, n: usize) {
+        self.envs = vec![[0.0; CrabJointId::COUNT]; n];
+    }
 }
 
 /// Target position range per joint type, in radians (or meters for prismatic).
@@ -42,14 +48,17 @@ fn action_to_target(action: f32, range: &[f32; 2]) -> f32 {
     range[0] + t * (range[1] - range[0])
 }
 
-/// System that applies the current `CrabActions` to all crab joints.
+/// System that applies each env's `CrabActions` to that env's crab joints.
 pub fn apply_actions(
     actions: Res<CrabActions>,
-    mut joints: Query<(&CrabJoint, &mut MultibodyJoint)>,
+    mut joints: Query<(&CrabJoint, &CrabEnvId, &mut MultibodyJoint)>,
 ) {
-    for (crab_joint, mut mj) in joints.iter_mut() {
+    for (crab_joint, env, mut mj) in joints.iter_mut() {
+        let Some(values) = actions.envs.get(env.0) else {
+            continue;
+        };
         let idx = crab_joint.id.index();
-        let action = actions.values[idx];
+        let action = values[idx];
         let range = action_range(&crab_joint.id);
         let target = action_to_target(action, &range);
         let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
@@ -58,19 +67,5 @@ pub fn apply_actions(
         let generic: &mut GenericJoint = mj.data.as_mut();
         generic.set_motor_position(axis, target, stiffness, damping);
         generic.set_motor_max_force(axis, crab_joint.id.motor_max_force());
-    }
-}
-
-/// Test system: generates sine-wave actions to verify motors work.
-/// Add this system temporarily to see the crab wiggle.
-#[allow(dead_code)]
-pub fn test_wiggle(time: Res<Time>, mut actions: ResMut<CrabActions>) {
-    let t = time.elapsed_secs();
-
-    for i in 0..CrabJointId::COUNT {
-        // Each joint gets a slightly different phase so it looks organic
-        let phase = i as f32 * 0.5;
-        let freq = 1.5; // Hz
-        actions.values[i] = (t * freq * std::f32::consts::TAU + phase).sin() * 0.3;
     }
 }

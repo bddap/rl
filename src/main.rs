@@ -65,6 +65,12 @@ pub struct Args {
     /// meaningless under this flag — it exists to measure the per-step bottleneck.
     #[arg(long)]
     bench_skip_nn: bool,
+
+    /// Number of crab environments trained in parallel in one world (one batched
+    /// NN pass per tick). Crabs sit on a 4 m grid; 16 is the most the ±10 m
+    /// arena holds. Demo/screenshot modes always run 1.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=16))]
+    envs: u64,
 }
 
 /// What the process is doing this run. Train can be headless or windowed; demo
@@ -164,7 +170,15 @@ fn main() {
         }
     }
 
+    // Parallel envs are a training concept; the interactive/render modes drive
+    // exactly one crab.
+    let num_envs = match &mode {
+        AppMode::Train => args.envs as usize,
+        AppMode::Demo | AppMode::Screenshot { .. } => 1,
+    };
+
     app.insert_resource(Visuals(visuals))
+        .insert_resource(bot::NumEnvs(num_envs))
         // Fixed physics dt: each Bevy tick advances the sim by exactly 1/64 s, so
         // physics is identical in headless training and the real-time demo and is
         // reproducible run-to-run. The default Variable timestep keys off
