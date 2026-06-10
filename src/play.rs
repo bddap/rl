@@ -127,7 +127,9 @@ fn policy_step(
     obs: Res<CrabObservation>,
     mut actions: ResMut<CrabActions>,
 ) {
-    actions.values = policy.act(&obs.values);
+    if let (Some(o), Some(a)) = (obs.envs.first(), actions.envs.first_mut()) {
+        *a = policy.act(o);
+    }
 }
 
 fn add_inference(app: &mut App, checkpoint_dir: &Path) {
@@ -294,7 +296,9 @@ fn demo_controls(
     }
     if reset {
         reset_crab(&mut carapace_q, &mut parts_q, &mut joints_q);
-        actions.values = [0.0; ACTION_SIZE];
+        if let Some(a) = actions.envs.first_mut() {
+            *a = [0.0; ACTION_SIZE];
+        }
     }
     if poke && let Ok((_, mut vel, _)) = carapace_q.single_mut() {
         let mut rng = rand::thread_rng();

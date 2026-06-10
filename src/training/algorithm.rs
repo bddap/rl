@@ -136,3 +136,54 @@ pub struct PpoMetrics {
     pub value_loss: f32,
     pub entropy: f32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(reward: f32, value: f32, done: bool) -> Transition {
+        Transition {
+            obs: [0.0; OBS_SIZE],
+            action: [0.0; ACTION_SIZE],
+            reward,
+            value,
+            log_prob: 0.0,
+            done,
+        }
+    }
+
+    /// GAE must be computed per env. Sweeping one concatenated buffer lets env
+    /// A's last step bootstrap from env B's first value — silent advantage
+    /// corruption that still "trains". This pins the per-env results and proves
+    /// the concatenated sweep actually diverges (i.e. the split is load-bearing).
+    #[test]
+    fn gae_per_env_differs_from_concatenated_sweep() {
+        let gamma = 0.5;
+        let lambda = 0.5;
+
+        let mut env_a = RolloutBuffer::new();
+        env_a.push(t(1.0, 0.5, false));
+        env_a.push(t(1.0, 0.5, false));
+        let mut env_b = RolloutBuffer::new();
+        env_b.push(t(0.0, 1.0, false));
+        env_b.push(t(0.0, 1.0, true));
+
+        // Per-env, hand-computed: A bootstraps from ITS next value (2.0).
+        let (adv_a, _) = compute_gae(&env_a, 2.0, gamma, lambda);
+        assert!((adv_a[1] - 1.5).abs() < 1e-6, "A[1]: {}", adv_a[1]);
+        assert!((adv_a[0] - 1.125).abs() < 1e-6, "A[0]: {}", adv_a[0]);
+
+        // Naive concatenated sweep: A's last step bootstraps from B's value.
+        let mut concat = RolloutBuffer::new();
+        for tr in env_a.transitions.iter().chain(env_b.transitions.iter()) {
+            concat.push(tr.clone());
+        }
+        let (adv_concat, _) = compute_gae(&concat, 0.0, gamma, lambda);
+        assert!(
+            (adv_concat[1] - adv_a[1]).abs() > 1e-3,
+            "concatenated sweep should corrupt A's advantages (got {} vs {})",
+            adv_concat[1],
+            adv_a[1]
+        );
+    }
+}

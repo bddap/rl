@@ -20,8 +20,11 @@ use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 
 use crate::Args;
+use crate::bot::CrabSpawns;
 use crate::bot::actuator::CrabActions;
-use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
+use crate::bot::body::{
+    CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId, SPAWN_HEIGHT,
+};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 
@@ -263,21 +266,30 @@ pub(crate) const NORMALIZER_FILENAME: &str = "normalizer.bin";
 
 /// The RL training state. Stored as a non-send resource because burn
 /// tensors use `OnceCell` which is not `Sync`.
+/// Per-env episode accumulators. Each env's episode runs and resets
+/// independently; pose sums (carapace height, up·Y) are averaged at episode
+/// end to quantify stance quality.
+#[derive(Clone, Default)]
+pub struct EnvEpisode {
+    pub reward: f32,
+    pub steps: u32,
+    pub height_sum: f32,
+    pub upright_sum: f32,
+    pub needs_reset: bool,
+}
+
 pub struct TrainingState {
     pub brain: CrabBrain<TrainBackend>,
     pub config: PpoConfig,
-    pub rollout: RolloutBuffer,
+    /// One rollout buffer per env. Kept separate so GAE never sweeps across an
+    /// env boundary — interleaving transitions from different envs in one
+    /// buffer would bootstrap each env's advantages from another env's values.
+    pub rollouts: Vec<RolloutBuffer>,
     pub device: NdArrayDevice,
     optimizer: CrabOptimizer,
 
-    pub episode_reward: f32,
-    pub episode_steps: u32,
-    // Per-episode pose accumulators (averaged at episode end) — quantify stance
-    // quality: mean carapace height and mean uprightness (up·Y, 1 = level).
-    pub episode_height_sum: f32,
-    pub episode_upright_sum: f32,
+    pub envs: Vec<EnvEpisode>,
     pub episode_count: u32,
-    pub needs_reset: bool,
 
     pub steps_per_rollout: u32,
     pub current_rollout_steps: u32,
@@ -339,18 +351,15 @@ impl TrainingState {
             obs_normalizer = loaded;
         }
 
+        let n = args.envs.max(1) as usize;
         Self {
             brain,
             config: PpoConfig::default(),
-            rollout: RolloutBuffer::new(),
+            rollouts: (0..n).map(|_| RolloutBuffer::new()).collect(),
             device,
             optimizer,
-            episode_reward: 0.0,
-            episode_steps: 0,
-            episode_height_sum: 0.0,
-            episode_upright_sum: 0.0,
+            envs: vec![EnvEpisode::default(); n],
             episode_count: 0,
-            needs_reset: false,
             steps_per_rollout: 1024,
             current_rollout_steps: 0,
             recent_rewards: Vec::new(),
@@ -399,32 +408,44 @@ impl TrainingState {
 
     /// Run PPO update using the persistent Adam optimizer.
     fn ppo_update(&mut self) -> PpoMetrics {
-        let n = self.rollout.len();
+        let n: usize = self.rollouts.iter().map(|b| b.len()).sum();
         if n == 0 {
             return PpoMetrics::default();
         }
 
         let device = &self.device;
 
-        let last_t = &self.rollout.transitions[n - 1];
-        let last_value = if last_t.done {
-            0.0
-        } else {
-            let obs = Tensor::<TrainBackend, 1>::from_floats(last_t.obs.as_slice(), device)
-                .unsqueeze::<2>();
-            self.brain
-                .value(obs)
-                .flatten::<1>(0, 1)
-                .into_scalar()
-                .elem::<f32>()
-        };
+        // GAE strictly per env: each buffer is one env's contiguous trajectory
+        // segment, bootstrapped from ITS last observation. Advantages/returns are
+        // then concatenated in the same env-major order as the transitions below.
+        let mut advantages = Vec::with_capacity(n);
+        let mut returns = Vec::with_capacity(n);
+        for buf in &self.rollouts {
+            let Some(last_t) = buf.transitions.last() else {
+                continue;
+            };
+            let last_value = if last_t.done {
+                0.0
+            } else {
+                let obs = Tensor::<TrainBackend, 1>::from_floats(last_t.obs.as_slice(), device)
+                    .unsqueeze::<2>();
+                self.brain
+                    .value(obs)
+                    .flatten::<1>(0, 1)
+                    .into_scalar()
+                    .elem::<f32>()
+            };
+            let (a, r) = compute_gae(buf, last_value, self.config.gamma, self.config.lambda);
+            advantages.extend(a);
+            returns.extend(r);
+        }
 
-        let (advantages, returns) = compute_gae(
-            &self.rollout,
-            last_value,
-            self.config.gamma,
-            self.config.lambda,
-        );
+        // Env-major transition view matching the advantages/returns order.
+        let transitions: Vec<&Transition> = self
+            .rollouts
+            .iter()
+            .flat_map(|b| b.transitions.iter())
+            .collect();
 
         let adv_mean: f32 = advantages.iter().sum::<f32>() / n as f32;
         let adv_var: f32 = advantages
@@ -438,24 +459,15 @@ impl TrainingState {
             .map(|a| (a - adv_mean) / adv_std)
             .collect();
 
-        let obs_data: Vec<f32> = self
-            .rollout
-            .transitions
+        let obs_data: Vec<f32> = transitions
             .iter()
             .flat_map(|t| t.obs.iter().copied())
             .collect();
-        let actions_data: Vec<f32> = self
-            .rollout
-            .transitions
+        let actions_data: Vec<f32> = transitions
             .iter()
             .flat_map(|t| t.action.iter().copied())
             .collect();
-        let old_log_probs_data: Vec<f32> = self
-            .rollout
-            .transitions
-            .iter()
-            .map(|t| t.log_prob)
-            .collect();
+        let old_log_probs_data: Vec<f32> = transitions.iter().map(|t| t.log_prob).collect();
 
         let obs_all =
             Tensor::<TrainBackend, 2>::from_data(TensorData::new(obs_data, [n, OBS_SIZE]), device);
@@ -581,110 +593,202 @@ pub fn brain_step(
     mut training: NonSendMut<TrainingState>,
     obs: Res<CrabObservation>,
     mut actions: ResMut<CrabActions>,
-    carapace_q: Query<(&Transform, &bevy_rapier3d::prelude::Velocity), With<CrabCarapace>>,
-    eyes_q: Query<(&CrabJoint, &Transform)>,
+    carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
+    parts_q: Query<(&CrabEnvId, &bevy_rapier3d::prelude::Velocity), With<CrabBodyPart>>,
+    eyes_q: Query<(&CrabJoint, &CrabEnvId, &Transform)>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let raw_obs = obs.values;
+    let n = training.envs.len();
+    if obs.envs.len() != n || actions.envs.len() != n {
+        // Resources are sized by the spawn system; skip the tick(s) before that.
+        return;
+    }
     let device = training.device;
 
-    let obs_array = training.obs_normalizer.normalize(&raw_obs);
+    // Normalize every env's observation (each row also updates the shared
+    // running stats — N envs feed the same normalizer, just more samples).
+    let mut obs_arrays: Vec<[f32; OBS_SIZE]> = Vec::with_capacity(n);
+    for e in 0..n {
+        let normalized = training.obs_normalizer.normalize(&obs.envs[e]);
+        obs_arrays.push(normalized);
+    }
 
-    let (means, log_std, value): (Tensor<NdArray, 1>, Tensor<NdArray, 1>, f32) = if training.skip_nn
-    {
-        // Bench mode: no forward pass. The sampling below is cheap and what it
-        // produces is irrelevant — we are isolating physics + engine overhead.
-        let z = Tensor::<NdArray, 1>::zeros([ACTION_SIZE], &device);
-        (z.clone(), z, 0.0)
-    } else {
-        let inference_brain = training.brain.valid();
-        let obs_tensor = Tensor::<NdArray, 1>::from_floats(obs_array.as_slice(), &device);
-        let obs_batch = obs_tensor.clone().unsqueeze::<2>();
-        let (means_batch, log_std) = inference_brain.policy(obs_batch);
-        let means: Tensor<NdArray, 1> = means_batch.flatten(0, 1);
-        let obs_batch2 = obs_tensor.unsqueeze::<2>();
-        let value = inference_brain
-            .value(obs_batch2)
-            .flatten::<1>(0, 1)
-            .into_scalar()
-            .elem::<f32>();
-        (means, log_std, value)
-    };
-
-    let action_tensor = sample_action(&means, &log_std, &device);
-    let log_prob = compute_log_prob(&means, &log_std, &action_tensor);
-    let log_prob = if log_prob.is_nan() || log_prob.is_infinite() {
-        0.0
-    } else {
-        log_prob.clamp(-20.0, 20.0)
-    };
-    let value = if value.is_nan() || value.is_infinite() {
-        0.0
-    } else {
-        value
-    };
-
-    let action_data: Vec<f32> = action_tensor.to_data().to_vec().unwrap();
-    let mut action_array = [0.0f32; ACTION_SIZE];
-    let mut has_nan = false;
-    for (i, &v) in action_data.iter().enumerate().take(ACTION_SIZE) {
-        if v.is_nan() || v.is_infinite() {
-            has_nan = true;
-            action_array[i] = 0.0;
+    // ONE batched forward pass for all envs: [n, OBS_SIZE] through the trunk
+    // once — this is what makes N crabs cheaper than N apps.
+    let (means_rows, log_std, values): (Vec<Tensor<NdArray, 1>>, Tensor<NdArray, 1>, Vec<f32>) =
+        if training.skip_nn {
+            // Bench mode: no forward pass. The sampling below is cheap and what
+            // it produces is irrelevant — we are isolating physics + overhead.
+            let z = Tensor::<NdArray, 1>::zeros([ACTION_SIZE], &device);
+            (vec![z.clone(); n], z, vec![0.0; n])
         } else {
-            action_array[i] = v.clamp(-1.0, 1.0);
+            let inference_brain = training.brain.valid();
+            let flat: Vec<f32> = obs_arrays.iter().flat_map(|a| a.iter().copied()).collect();
+            let obs_batch = Tensor::<NdArray, 2>::from_data(
+                burn::tensor::TensorData::new(flat, [n, OBS_SIZE]),
+                &device,
+            );
+            let (means_batch, log_std) = inference_brain.policy(obs_batch.clone());
+            let values: Vec<f32> = inference_brain
+                .value(obs_batch)
+                .flatten::<1>(0, 1)
+                .to_data()
+                .to_vec()
+                .unwrap();
+            let means_rows = (0..n)
+                .map(|e| {
+                    means_batch
+                        .clone()
+                        .slice([e..e + 1, 0..ACTION_SIZE])
+                        .flatten(0, 1)
+                })
+                .collect();
+            (means_rows, log_std, values)
+        };
+
+    // Per-env action sampling + NaN guards.
+    let mut action_arrays: Vec<[f32; ACTION_SIZE]> = Vec::with_capacity(n);
+    let mut log_probs: Vec<f32> = Vec::with_capacity(n);
+    for means in &means_rows {
+        let action_tensor = sample_action(means, &log_std, &device);
+        let log_prob = compute_log_prob(means, &log_std, &action_tensor);
+        log_probs.push(if log_prob.is_nan() || log_prob.is_infinite() {
+            0.0
+        } else {
+            log_prob.clamp(-20.0, 20.0)
+        });
+
+        let action_data: Vec<f32> = action_tensor.to_data().to_vec().unwrap();
+        let mut action_array = [0.0f32; ACTION_SIZE];
+        let mut has_nan = false;
+        for (i, &v) in action_data.iter().enumerate().take(ACTION_SIZE) {
+            if v.is_nan() || v.is_infinite() {
+                has_nan = true;
+                action_array[i] = 0.0;
+            } else {
+                action_array[i] = v.clamp(-1.0, 1.0);
+            }
+        }
+        if has_nan {
+            warn!("NaN/Inf detected in NN output, clamping to zero");
+        }
+        action_arrays.push(action_array);
+    }
+    actions.envs.copy_from_slice(&action_arrays);
+
+    // Gather per-env body state: carapace pose + mean eye-tip height.
+    let mut poses: Vec<Option<(f32, f32)>> = vec![None; n]; // (height, upright)
+    for (env, transform) in carapace_q.iter() {
+        if let Some(p) = poses.get_mut(env.0) {
+            let up = transform.rotation * Vec3::Y;
+            *p = Some((transform.translation.y, up.dot(Vec3::Y)));
         }
     }
-    if has_nan {
-        warn!("NaN/Inf detected in NN output, clamping to zero");
-    }
-    actions.values = action_array;
-
-    let (reward, done, height, upright) = if let Ok((transform, _vel)) = carapace_q.single() {
-        let up = transform.rotation * Vec3::Y;
-        let height = transform.translation.y;
-        let upright = up.dot(Vec3::Y);
-        // Mean world-space height of the eye tips — the entire reward signal.
-        let mean_eye_height = {
-            let mut sum = 0.0f32;
-            let mut n = 0u32;
-            for (joint, eye) in eyes_q.iter() {
-                if matches!(joint.id, CrabJointId::EyeStalk(_)) {
-                    sum += eye.translation.y;
-                    n += 1;
-                }
-            }
-            if n > 0 {
-                sum / n as f32
+    // Fastest body part per env — limbs, not the carapace, blow up first (tiny
+    // eye-stalk balls + acceleration motors), so the blowup guard must watch
+    // every body. NaN poisons the max, so fold it in as +inf.
+    let mut max_speeds: Vec<f32> = vec![0.0; n];
+    for (env, vel) in parts_q.iter() {
+        if let Some(m) = max_speeds.get_mut(env.0) {
+            let lin = vel.linvel.length();
+            let ang = vel.angvel.length();
+            let s = if lin.is_finite() && ang.is_finite() {
+                // Angular blowups (rad/s) run ~3x the linear scale before the
+                // solver NaNs; fold both into one number on the linear scale.
+                lin.max(ang / 3.0)
             } else {
-                transform.translation.y
-            }
+                f32::INFINITY
+            };
+            *m = m.max(s);
+        }
+    }
+    let mut eye_sums: Vec<(f32, u32)> = vec![(0.0, 0); n];
+    for (joint, env, eye) in eyes_q.iter() {
+        if matches!(joint.id, CrabJointId::EyeStalk(_))
+            && let Some(s) = eye_sums.get_mut(env.0)
+        {
+            s.0 += eye.translation.y;
+            s.1 += 1;
+        }
+    }
+
+    // Per-env reward, termination, rollout push, and episode bookkeeping.
+    for e in 0..n {
+        let (reward, done, height, upright) = if let Some((height, upright)) = poses[e] {
+            // Mean world-space height of the eye tips — the entire reward signal.
+            let (sum, cnt) = eye_sums[e];
+            let mean_eye_height = if cnt > 0 { sum / cnt as f32 } else { height };
+            let r = compute_reward(mean_eye_height);
+            // Long ~25 s episodes mean sustained eye height (a real stand, or a
+            // held rear) outscores a brief launch-and-crash. End early only on a
+            // fall — tipping past horizontal or leaving a sane height band — the
+            // one structural guard, not a shaped reward term. The blowup check
+            // isn't shaping either: the acceleration-based motors can pump in
+            // energy until the solver NaNs and Rapier panics the whole app —
+            // ending the episode resets velocities before it gets there.
+            let blowing_up = max_speeds[e] > 30.0 || !height.is_finite();
+            let done = !(0.1..=5.0).contains(&height)
+                || upright < 0.0
+                || blowing_up
+                || training.envs[e].steps > 1500;
+            (r, done, height, upright)
+        } else {
+            (0.0, false, 0.0, 0.0)
         };
-        let r = compute_reward(mean_eye_height);
-        // Long ~25 s episodes mean sustained eye height (a real stand, or a held
-        // rear) outscores a brief launch-and-crash. End early only on a fall —
-        // tipping past horizontal or leaving a sane height band — the one
-        // structural guard, not a shaped reward term.
-        let done = !(0.1..=5.0).contains(&height) || upright < 0.0 || training.episode_steps > 1500;
-        (r, done, height, upright)
-    } else {
-        (0.0, false, 0.0, 0.0)
-    };
 
-    training.rollout.push(Transition {
-        obs: obs_array,
-        action: action_array,
-        reward,
-        value,
-        log_prob,
-        done,
-    });
+        training.rollouts[e].push(Transition {
+            obs: obs_arrays[e],
+            action: action_arrays[e],
+            reward,
+            value: values[e],
+            log_prob: log_probs[e],
+            done,
+        });
 
-    training.episode_reward += reward;
-    training.episode_steps += 1;
-    training.episode_height_sum += height;
-    training.episode_upright_sum += upright;
-    training.current_rollout_steps += 1;
+        let ep = &mut training.envs[e];
+        ep.reward += reward;
+        ep.steps += 1;
+        ep.height_sum += height;
+        ep.upright_sum += upright;
+
+        if done {
+            let ep_reward = ep.reward;
+            let ep_steps = ep.steps;
+            let ep_height = ep.height_sum / ep_steps.max(1) as f32;
+            let ep_upright = ep.upright_sum / ep_steps.max(1) as f32;
+            *ep = EnvEpisode {
+                needs_reset: true,
+                ..EnvEpisode::default()
+            };
+
+            training.recent_rewards.push(ep_reward);
+            training.episode_count += 1;
+            let avg = training.avg_reward(10);
+            let ep_count = training.episode_count;
+
+            training
+                .logger
+                .log_episode(ep_count, ep_reward, ep_steps, avg, ep_height, ep_upright);
+
+            if training.episode_count.is_multiple_of(10) {
+                let elapsed = training.last_log_time.elapsed().as_secs_f32();
+                let total_transitions =
+                    training.total_steps * n as u64 + (e as u64 + 1).min(n as u64);
+                let sps = if elapsed > 0.0 {
+                    total_transitions as f32 / elapsed
+                } else {
+                    0.0
+                };
+                let buffered: usize = training.rollouts.iter().map(|b| b.len()).sum();
+                info!(
+                    "Ep {} | Avg reward: {:.2} | Steps: {} | Height: {:.2} | Upright: {:.2} | Buffer: {} | {:.0} steps/s",
+                    training.episode_count, avg, ep_steps, ep_height, ep_upright, buffered, sps,
+                );
+            }
+        }
+    }
+
+    training.current_rollout_steps += n as u32;
     training.total_steps += 1;
 
     // Fixed-tick stop: exactly `tick_budget` physics ticks, then save+exit. Tick
@@ -699,49 +803,8 @@ pub fn brain_step(
         exit.write(AppExit::Success);
     }
 
-    if done {
-        let ep_reward = training.episode_reward;
-        let ep_steps = training.episode_steps;
-        let ep_height = training.episode_height_sum / ep_steps.max(1) as f32;
-        let ep_upright = training.episode_upright_sum / ep_steps.max(1) as f32;
-        training.recent_rewards.push(ep_reward);
-        training.episode_count += 1;
-        training.needs_reset = true;
-
-        let avg = training.avg_reward(10);
-        let ep_count = training.episode_count;
-
-        training
-            .logger
-            .log_episode(ep_count, ep_reward, ep_steps, avg, ep_height, ep_upright);
-
-        if training.episode_count.is_multiple_of(10) {
-            let elapsed = training.last_log_time.elapsed().as_secs_f32();
-            let sps = if elapsed > 0.0 {
-                training.total_steps as f32 / elapsed
-            } else {
-                0.0
-            };
-            info!(
-                "Ep {} | Avg reward: {:.2} | Steps: {} | Height: {:.2} | Upright: {:.2} | Buffer: {} | {:.0} steps/s",
-                training.episode_count,
-                avg,
-                ep_steps,
-                ep_height,
-                ep_upright,
-                training.rollout.len(),
-                sps,
-            );
-        }
-
-        training.episode_reward = 0.0;
-        training.episode_steps = 0;
-        training.episode_height_sum = 0.0;
-        training.episode_upright_sum = 0.0;
-    }
-
     if training.current_rollout_steps >= training.steps_per_rollout {
-        let buffer_size = training.rollout.len();
+        let buffer_size: usize = training.rollouts.iter().map(|b| b.len()).sum();
         let avg = training.avg_reward(10);
 
         info!("Running PPO update on {} transitions...", buffer_size);
@@ -755,7 +818,9 @@ pub fn brain_step(
         training.logger.log_update(&metrics, avg, buffer_size);
 
         training.recent_metrics = Some(metrics);
-        training.rollout.clear();
+        for buf in training.rollouts.iter_mut() {
+            buf.clear();
+        }
         training.current_rollout_steps = 0;
 
         if training.checkpoint_interval > 0
@@ -769,31 +834,59 @@ pub fn brain_step(
     }
 }
 
-/// System: resets the crab when an episode ends.
+/// Query data for resetting a carapace: pose, velocity, accumulated force.
+type CarapaceResetQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static CrabEnvId,
+        &'static mut Transform,
+        &'static mut bevy_rapier3d::prelude::Velocity,
+        &'static mut bevy_rapier3d::prelude::ExternalForce,
+    ),
+    With<CrabCarapace>,
+>;
+
+/// Query data for zeroing limb velocities on reset.
+type BodyPartResetQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static CrabEnvId,
+        &'static mut bevy_rapier3d::prelude::Velocity,
+    ),
+    (With<CrabBodyPart>, Without<CrabCarapace>),
+>;
+
+/// System: resets each env's crab when that env's episode ends.
 pub fn reset_crab(
     mut training: NonSendMut<TrainingState>,
     mut actions: ResMut<CrabActions>,
-    mut carapace_q: Query<
-        (
-            &mut Transform,
-            &mut bevy_rapier3d::prelude::Velocity,
-            &mut bevy_rapier3d::prelude::ExternalForce,
-        ),
-        With<CrabCarapace>,
-    >,
-    mut body_parts: Query<
-        &mut bevy_rapier3d::prelude::Velocity,
-        (With<CrabBodyPart>, Without<CrabCarapace>),
-    >,
-    mut joints: Query<(&CrabJoint, &mut bevy_rapier3d::prelude::MultibodyJoint)>,
+    spawns: Res<CrabSpawns>,
+    mut carapace_q: CarapaceResetQuery,
+    mut body_parts: BodyPartResetQuery,
+    mut joints: Query<(
+        &CrabJoint,
+        &CrabEnvId,
+        &mut bevy_rapier3d::prelude::MultibodyJoint,
+    )>,
 ) {
-    if !training.needs_reset {
+    if training.envs.iter().all(|e| !e.needs_reset) {
         return;
     }
-    training.needs_reset = false;
+    let needs: Vec<bool> = training
+        .envs
+        .iter_mut()
+        .map(|e| std::mem::take(&mut e.needs_reset))
+        .collect();
+    let resetting = |env: &CrabEnvId| needs.get(env.0).copied().unwrap_or(false);
 
-    if let Ok((mut transform, mut vel, mut ext_force)) = carapace_q.single_mut() {
-        transform.translation = Vec3::new(0.0, 1.0, 0.0);
+    for (env, mut transform, mut vel, mut ext_force) in carapace_q.iter_mut() {
+        if !resetting(env) {
+            continue;
+        }
+        let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
+        transform.translation = origin + Vec3::new(0.0, SPAWN_HEIGHT, 0.0);
         transform.rotation = Quat::IDENTITY;
         vel.linvel = Vec3::ZERO;
         vel.angvel = Vec3::ZERO;
@@ -801,12 +894,18 @@ pub fn reset_crab(
         ext_force.torque = Vec3::ZERO;
     }
 
-    for mut vel in body_parts.iter_mut() {
+    for (env, mut vel) in body_parts.iter_mut() {
+        if !resetting(env) {
+            continue;
+        }
         vel.linvel = Vec3::ZERO;
         vel.angvel = Vec3::ZERO;
     }
 
-    for (crab_joint, mut mj) in joints.iter_mut() {
+    for (crab_joint, env, mut mj) in joints.iter_mut() {
+        if !resetting(env) {
+            continue;
+        }
         let default_pos = crab_joint.id.default_position();
         let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
         let axis = crab_joint.id.joint_axis();
@@ -815,7 +914,11 @@ pub fn reset_crab(
         generic.set_motor_max_force(axis, crab_joint.id.motor_max_force());
     }
 
-    actions.values = [0.0; CrabJointId::COUNT];
+    for (e, reset) in needs.iter().enumerate() {
+        if *reset && let Some(v) = actions.envs.get_mut(e) {
+            *v = [0.0; CrabJointId::COUNT];
+        }
+    }
 }
 
 /// System: saves a final checkpoint when the app is about to exit.

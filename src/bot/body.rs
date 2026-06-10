@@ -42,7 +42,7 @@ const CARAPACE_HALF_H: f32 = 0.12; // y (up-down) — very flat
 const CARAPACE_HALF_D: f32 = 0.35; // z (front-back)
 
 /// Spawn height: how high above ground the carapace center starts.
-const SPAWN_HEIGHT: f32 = 1.0;
+pub const SPAWN_HEIGHT: f32 = 1.0;
 
 /// Leg segment dimensions (capsule half-height, radius).
 const COXA_LEN: f32 = 0.15;
@@ -93,6 +93,12 @@ pub struct CrabCarapace;
 /// Marker applied to ALL crab body parts (carapace + limb segments).
 #[derive(Component)]
 pub struct CrabBodyPart;
+
+/// Which training environment (crab instance) an entity belongs to. Every crab
+/// entity carries one; systems group by it so N crabs sharing the world stay
+/// independent samples. Demo/screenshot run a single env 0.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrabEnvId(pub usize);
 
 /// Identifies a specific joint on the crab for the sensor/actuator system.
 #[derive(Component, Clone, Copy, Debug)]
@@ -221,6 +227,7 @@ pub fn spawn_crab(
     meshes: &mut ResMut<Assets<Mesh>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
     position: Vec3,
+    env: usize,
 ) -> Entity {
     let body_color = materials.add(StandardMaterial {
         base_color: Color::srgb(0.2, 0.45, 0.55), // blue-grey carapace
@@ -248,6 +255,7 @@ pub fn spawn_crab(
         .spawn((
             CrabCarapace,
             CrabBodyPart,
+            CrabEnvId(env),
             RigidBody::Dynamic,
             Collider::cuboid(CARAPACE_HALF_W, CARAPACE_HALF_H, CARAPACE_HALF_D),
             CRAB_COLLISION,
@@ -271,18 +279,18 @@ pub fn spawn_crab(
     // -- Legs (4 per side) -------------------------------------------------
     for side in [Side::Left, Side::Right] {
         for leg_idx in 0u8..4 {
-            spawn_leg(commands, meshes, &leg_color, carapace, side, leg_idx);
+            spawn_leg(commands, meshes, &leg_color, carapace, side, leg_idx, env);
         }
     }
 
     // -- Claws (1 per side) ------------------------------------------------
     for side in [Side::Left, Side::Right] {
-        spawn_claw(commands, meshes, &claw_color, carapace, side);
+        spawn_claw(commands, meshes, &claw_color, carapace, side, env);
     }
 
     // -- Eyes (1 per side) -------------------------------------------------
     for side in [Side::Left, Side::Right] {
-        spawn_eye(commands, meshes, &eye_color, carapace, side);
+        spawn_eye(commands, meshes, &eye_color, carapace, side, env);
     }
 
     carapace
@@ -299,6 +307,7 @@ fn spawn_leg(
     carapace: Entity,
     side: Side,
     leg_idx: u8,
+    env: usize,
 ) {
     let s = side_sign(side);
 
@@ -329,6 +338,7 @@ fn spawn_leg(
     let coxa = commands
         .spawn((
             CrabBodyPart,
+            CrabEnvId(env),
             CrabJoint {
                 id: CrabJointId::LegCoxa(side, leg_idx),
             },
@@ -358,6 +368,7 @@ fn spawn_leg(
     let femur = commands
         .spawn((
             CrabBodyPart,
+            CrabEnvId(env),
             CrabJoint {
                 id: CrabJointId::LegFemur(side, leg_idx),
             },
@@ -385,6 +396,7 @@ fn spawn_leg(
 
     commands.spawn((
         CrabBodyPart,
+        CrabEnvId(env),
         CrabJoint {
             id: CrabJointId::LegTibia(side, leg_idx),
         },
@@ -410,6 +422,7 @@ fn spawn_claw(
     color: &Handle<StandardMaterial>,
     carapace: Entity,
     side: Side,
+    env: usize,
 ) {
     let s = side_sign(side);
 
@@ -428,6 +441,7 @@ fn spawn_claw(
     let upper = commands
         .spawn((
             CrabBodyPart,
+            CrabEnvId(env),
             CrabJoint {
                 id: CrabJointId::ClawUpper(side),
             },
@@ -458,6 +472,7 @@ fn spawn_claw(
     let forearm = commands
         .spawn((
             CrabBodyPart,
+            CrabEnvId(env),
             CrabJoint {
                 id: CrabJointId::ClawFore(side),
             },
@@ -483,6 +498,7 @@ fn spawn_claw(
 
     commands.spawn((
         CrabBodyPart,
+        CrabEnvId(env),
         CrabJoint {
             id: CrabJointId::ClawPincer(side),
         },
@@ -511,6 +527,7 @@ fn spawn_eye(
     color: &Handle<StandardMaterial>,
     carapace: Entity,
     side: Side,
+    env: usize,
 ) {
     let s = side_sign(side);
 
@@ -527,6 +544,7 @@ fn spawn_eye(
 
     commands.spawn((
         CrabBodyPart,
+        CrabEnvId(env),
         CrabJoint {
             id: CrabJointId::EyeStalk(side),
         },

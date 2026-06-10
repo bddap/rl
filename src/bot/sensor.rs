@@ -10,44 +10,53 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
+use super::CrabSpawns;
 use super::actuator::CrabActions;
-use super::body::{CrabCarapace, CrabJoint, CrabJointId};
+use super::body::{CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
 
 /// Total observation size.
 /// Per-joint: 2 floats (last_action, joint_velocity_magnitude)
 /// Body: 3 (pos) + 4 (quat) + 3 (linvel) + 3 (angvel) = 13
 pub const OBS_SIZE: usize = CrabJointId::COUNT * 2 + 13;
 
-/// Resource holding the current observation vector.
-#[derive(Resource)]
+/// Resource holding the current observation vector for each environment.
+#[derive(Resource, Default)]
 pub struct CrabObservation {
-    pub values: [f32; OBS_SIZE],
+    /// `envs[e]` = env e's observation.
+    pub envs: Vec<[f32; OBS_SIZE]>,
 }
 
-impl Default for CrabObservation {
-    fn default() -> Self {
-        Self {
-            values: [0.0; OBS_SIZE],
-        }
+impl CrabObservation {
+    pub fn resize(&mut self, n: usize) {
+        self.envs = vec![[0.0; OBS_SIZE]; n];
     }
 }
 
-/// System that builds the observation vector each frame.
+/// System that builds every env's observation vector each frame.
 pub fn build_observation(
     actions: Res<CrabActions>,
+    spawns: Res<CrabSpawns>,
     mut obs: ResMut<CrabObservation>,
-    carapace_q: Query<(&Transform, &Velocity), With<CrabCarapace>>,
-    joint_q: Query<(&CrabJoint, &Velocity)>,
+    carapace_q: Query<(&CrabEnvId, &Transform, &Velocity), With<CrabCarapace>>,
+    joint_q: Query<(&CrabJoint, &CrabEnvId, &Velocity)>,
 ) {
-    let mut v = [0.0f32; OBS_SIZE];
+    for v in obs.envs.iter_mut() {
+        *v = [0.0; OBS_SIZE];
+    }
 
     // -- Per-joint observations ------------------------------------------------
-    for (crab_joint, vel) in joint_q.iter() {
+    for (crab_joint, env, vel) in joint_q.iter() {
+        let Some(acts) = actions.envs.get(env.0) else {
+            continue;
+        };
+        let Some(v) = obs.envs.get_mut(env.0) else {
+            continue;
+        };
         let idx = crab_joint.id.index();
         let base = idx * 2;
 
         // Last action (what the NN commanded)
-        v[base] = actions.values[idx];
+        v[base] = acts[idx];
 
         // Joint velocity: use the DOF-appropriate velocity.
         // Prismatic joints (ClawPincer) → linear velocity magnitude.
@@ -61,8 +70,15 @@ pub fn build_observation(
     // -- Body state (carapace) -------------------------------------------------
     let body_base = CrabJointId::COUNT * 2;
 
-    if let Ok((transform, vel)) = carapace_q.single() {
-        let pos = transform.translation;
+    for (env, transform, vel) in carapace_q.iter() {
+        let Some(v) = obs.envs.get_mut(env.0) else {
+            continue;
+        };
+        // Position relative to this env's spawn origin: every crab observes
+        // "how far have I drifted", not its absolute grid slot — otherwise x/z
+        // would encode env identity and the policy could specialise per slot.
+        let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
+        let pos = transform.translation - origin;
         v[body_base] = pos.x;
         v[body_base + 1] = pos.y;
         v[body_base + 2] = pos.z;
@@ -83,11 +99,11 @@ pub fn build_observation(
     }
 
     // Sanitize: replace any NaN/Inf with 0 to prevent NN corruption
-    for val in v.iter_mut() {
-        if val.is_nan() || val.is_infinite() {
-            *val = 0.0;
+    for v in obs.envs.iter_mut() {
+        for val in v.iter_mut() {
+            if val.is_nan() || val.is_infinite() {
+                *val = 0.0;
+            }
         }
     }
-
-    obs.values = v;
 }
