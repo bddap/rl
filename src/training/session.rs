@@ -189,8 +189,11 @@ impl MetricsLogger {
 
         let mut episode_file =
             std::fs::File::create("tmp/episodes.csv").expect("failed to create tmp/episodes.csv");
-        writeln!(episode_file, "episode,reward,steps,avg_reward_10")
-            .expect("failed to write header");
+        writeln!(
+            episode_file,
+            "episode,reward,steps,avg_reward_10,mean_height,mean_upright"
+        )
+        .expect("failed to write header");
 
         let mut update_file = std::fs::File::create("tmp/ppo_updates.csv")
             .expect("failed to create tmp/ppo_updates.csv");
@@ -207,11 +210,20 @@ impl MetricsLogger {
         }
     }
 
-    fn log_episode(&mut self, episode: u32, reward: f32, steps: u32, avg_reward: f32) {
+    #[allow(clippy::too_many_arguments)]
+    fn log_episode(
+        &mut self,
+        episode: u32,
+        reward: f32,
+        steps: u32,
+        avg_reward: f32,
+        mean_height: f32,
+        mean_upright: f32,
+    ) {
         writeln!(
             self.episode_file,
-            "{},{:.4},{},{}",
-            episode, reward, steps, avg_reward
+            "{},{:.4},{},{},{:.4},{:.4}",
+            episode, reward, steps, avg_reward, mean_height, mean_upright
         )
         .ok();
         if episode.is_multiple_of(10) {
@@ -252,6 +264,10 @@ pub struct TrainingState {
 
     pub episode_reward: f32,
     pub episode_steps: u32,
+    // Per-episode pose accumulators (averaged at episode end) — quantify stance
+    // quality: mean carapace height and mean uprightness (up·Y, 1 = level).
+    pub episode_height_sum: f32,
+    pub episode_upright_sum: f32,
     pub episode_count: u32,
     pub needs_reset: bool,
 
@@ -318,6 +334,8 @@ impl TrainingState {
             optimizer,
             episode_reward: 0.0,
             episode_steps: 0,
+            episode_height_sum: 0.0,
+            episode_upright_sum: 0.0,
             episode_count: 0,
             needs_reset: false,
             steps_per_rollout: 1024,
@@ -616,8 +634,10 @@ pub fn brain_step(
     }
     actions.values = action_array;
 
-    let (reward, done) = if let Ok((transform, vel)) = carapace_q.single() {
+    let (reward, done, height, upright) = if let Ok((transform, vel)) = carapace_q.single() {
         let up = transform.rotation * Vec3::Y;
+        let height = transform.translation.y;
+        let upright = up.dot(Vec3::Y);
         let r = compute_reward(
             transform.translation,
             up,
@@ -625,13 +645,10 @@ pub fn brain_step(
             vel.angvel,
             &action_array,
         );
-        let done = transform.translation.y < 0.1
-            || transform.translation.y > 5.0
-            || up.dot(Vec3::Y) < 0.0
-            || training.episode_steps > 500;
-        (r, done)
+        let done = !(0.1..=5.0).contains(&height) || upright < 0.0 || training.episode_steps > 500;
+        (r, done, height, upright)
     } else {
-        (0.0, false)
+        (0.0, false, 0.0, 0.0)
     };
 
     training.rollout.push(Transition {
@@ -645,12 +662,16 @@ pub fn brain_step(
 
     training.episode_reward += reward;
     training.episode_steps += 1;
+    training.episode_height_sum += height;
+    training.episode_upright_sum += upright;
     training.current_rollout_steps += 1;
     training.total_steps += 1;
 
     if done {
         let ep_reward = training.episode_reward;
         let ep_steps = training.episode_steps;
+        let ep_height = training.episode_height_sum / ep_steps.max(1) as f32;
+        let ep_upright = training.episode_upright_sum / ep_steps.max(1) as f32;
         training.recent_rewards.push(ep_reward);
         training.episode_count += 1;
         training.needs_reset = true;
@@ -660,7 +681,7 @@ pub fn brain_step(
 
         training
             .logger
-            .log_episode(ep_count, ep_reward, ep_steps, avg);
+            .log_episode(ep_count, ep_reward, ep_steps, avg, ep_height, ep_upright);
 
         if training.episode_count.is_multiple_of(10) {
             let elapsed = training.last_log_time.elapsed().as_secs_f32();
@@ -670,10 +691,12 @@ pub fn brain_step(
                 0.0
             };
             info!(
-                "Ep {} | Avg reward: {:.2} | Steps: {} | Buffer: {} | {:.0} steps/s",
+                "Ep {} | Avg reward: {:.2} | Steps: {} | Height: {:.2} | Upright: {:.2} | Buffer: {} | {:.0} steps/s",
                 training.episode_count,
                 avg,
                 ep_steps,
+                ep_height,
+                ep_upright,
                 training.rollout.len(),
                 sps,
             );
@@ -681,6 +704,8 @@ pub fn brain_step(
 
         training.episode_reward = 0.0;
         training.episode_steps = 0;
+        training.episode_height_sum = 0.0;
+        training.episode_upright_sum = 0.0;
     }
 
     if training.current_rollout_steps >= training.steps_per_rollout {
