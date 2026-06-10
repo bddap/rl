@@ -47,9 +47,9 @@ const SPAWN_HEIGHT: f32 = 1.0;
 /// Leg segment dimensions (capsule half-height, radius).
 const COXA_LEN: f32 = 0.15;
 const COXA_RAD: f32 = 0.045;
-const FEMUR_LEN: f32 = 0.25;
+const FEMUR_LEN: f32 = 0.18;
 const FEMUR_RAD: f32 = 0.035;
-const TIBIA_LEN: f32 = 0.3;
+const TIBIA_LEN: f32 = 0.2;
 const TIBIA_RAD: f32 = 0.025;
 
 /// Claw segment dimensions.
@@ -307,12 +307,18 @@ fn spawn_leg(
     let z_positions = [0.22, 0.08, -0.08, -0.22];
     let z = z_positions[leg_idx as usize];
 
-    // Angle the legs outward and slightly backward/forward
-    let splay_angles = [0.3_f32, 0.1, -0.1, -0.3]; // radians from perpendicular
+    // Angle the legs outward and slightly backward/forward. Wider fan = broader
+    // front-back support, the axis the (front-heavy) crab tips over.
+    let splay_angles = [0.5_f32, 0.2, -0.2, -0.5]; // radians from perpendicular
     let splay = splay_angles[leg_idx as usize];
 
     // -- Coxa: rotates around Y (yaw — leg swings forward/back) -----------
-    let coxa_joint = RevoluteJointBuilder::new(Vec3::Y)
+    // Coxa yaw axis is side-mirrored (s·Y), like the femur/tibia s·Z. The
+    // actuator overwrites motor targets every step with a per-joint-type value
+    // (no side term), so symmetry MUST come from the joint axis, not the spawn
+    // motor_position: a fixed +Y made the same target fan the legs opposite ways
+    // (the left looked un-splayed). With s·Y the same target mirrors correctly.
+    let coxa_joint = RevoluteJointBuilder::new(Vec3::new(0.0, s, 0.0))
         .local_anchor1(Vec3::new(s * CARAPACE_HALF_W, -0.02, z))
         .local_anchor2(Vec3::new(-s * COXA_LEN, 0.0, 0.0))
         .limits([-FRAC_PI_4, FRAC_PI_4])
@@ -337,8 +343,11 @@ fn spawn_leg(
         ))
         .id();
 
-    // -- Femur: rotates around Z (pitch — leg lifts up/down) ---------------
-    let femur_joint = RevoluteJointBuilder::new(Vec3::Z)
+    // -- Femur: rotates around ±Z by side (pitch — leg lifts up/down) ------
+    // Side-dependent axis (s·Z), like the tibia, so the actuator's per-joint
+    // target mirrors into a symmetric leg on both sides. Limits MUST match the
+    // actuator's femur action_range [-1.57, 0.78] or the reachable lift is clipped.
+    let femur_joint = RevoluteJointBuilder::new(Vec3::new(0.0, 0.0, s))
         .local_anchor1(Vec3::new(s * COXA_LEN, 0.0, 0.0))
         .local_anchor2(Vec3::new(0.0, FEMUR_LEN, 0.0))
         .limits([-FRAC_PI_2, FRAC_PI_4])
@@ -363,8 +372,10 @@ fn spawn_leg(
         ))
         .id();
 
-    // -- Tibia: rotates around Z (pitch — lower leg bends) ----------------
-    let tibia_joint = RevoluteJointBuilder::new(Vec3::Z)
+    // -- Tibia: rotates around ±Z by side (pitch — lower leg bends) -------
+    // Side-dependent axis (s·Z), matching the femur, so the knee bends the same
+    // way on both sides.
+    let tibia_joint = RevoluteJointBuilder::new(Vec3::new(0.0, 0.0, s))
         .local_anchor1(Vec3::new(0.0, -FEMUR_LEN, 0.0))
         .local_anchor2(Vec3::new(0.0, TIBIA_LEN, 0.0))
         .limits([-0.1, PI * 0.6])
@@ -423,7 +434,11 @@ fn spawn_claw(
             RigidBody::Dynamic,
             Collider::capsule_y(CLAW_UPPER_LEN, CLAW_UPPER_RAD),
             CRAB_COLLISION,
-            ColliderMassProperties::Density(3.0),
+            // Claws are light: the upper/forearm/pincer assemblies hang off the
+            // front (+Z), and dense ones (was 3.0/2.5/4.0) put the centre of mass
+            // ahead of the leg support so the crab pitched forward and couldn't
+            // stand. Keep them low-mass so the CoM sits over the feet.
+            ColliderMassProperties::Density(1.0),
             Mesh3d(meshes.add(Capsule3d::new(CLAW_UPPER_RAD, CLAW_UPPER_LEN * 2.0))),
             MeshMaterial3d(color.clone()),
             MultibodyJoint::new(carapace, upper_joint.into()),
@@ -449,7 +464,7 @@ fn spawn_claw(
             RigidBody::Dynamic,
             Collider::capsule_y(CLAW_FORE_LEN, CLAW_FORE_RAD),
             CRAB_COLLISION,
-            ColliderMassProperties::Density(2.5),
+            ColliderMassProperties::Density(1.0),
             Mesh3d(meshes.add(Capsule3d::new(CLAW_FORE_RAD, CLAW_FORE_LEN * 2.0))),
             MeshMaterial3d(color.clone()),
             MultibodyJoint::new(upper, fore_joint.into()),
@@ -474,7 +489,7 @@ fn spawn_claw(
         RigidBody::Dynamic,
         Collider::cuboid(PINCER_HALF_W, PINCER_HALF_H, PINCER_HALF_D),
         CRAB_COLLISION,
-        ColliderMassProperties::Density(4.0),
+        ColliderMassProperties::Density(1.0),
         Mesh3d(meshes.add(Cuboid::new(
             PINCER_HALF_W * 2.0,
             PINCER_HALF_H * 2.0,

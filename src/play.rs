@@ -41,31 +41,37 @@ pub struct Policy {
     brain: CrabBrain<InferBackend>,
     normalizer: ObsNormalizer,
     device: NdArrayDevice,
+    /// False when no checkpoint loaded — `act` then returns zero actions (a
+    /// neutral, deterministic rest pose) instead of an untrained brain's noise,
+    /// so a no-checkpoint render shows the body geometry cleanly.
+    loaded: bool,
 }
 
 impl Policy {
     /// Load brain + normalizer from a checkpoint dir. Missing/corrupt files fall
-    /// back to a random policy so the app still launches (useful before the
-    /// first checkpoint exists, and to inspect the untrained baseline).
+    /// back to a zero-action policy so the app still launches (useful before the
+    /// first checkpoint exists, and to inspect the body's neutral rest pose).
     pub fn load(checkpoint_dir: &Path) -> Self {
         let device = NdArrayDevice::Cpu;
 
         // Checkpoints are saved from the autodiff backend; load into it, then
         // `.valid()` down to the bare inference backend — the path training uses.
         let mut train_brain = CrabBrain::<TrainBackend>::new(&device);
+        let mut loaded = false;
         let brain_path = checkpoint_dir.join(BRAIN_STEM);
         if brain_path.with_extension("bin").exists() {
             let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
             match recorder.load(brain_path.clone(), &device) {
                 Ok(record) => {
                     train_brain = train_brain.load_record(record);
+                    loaded = true;
                     info!("play: loaded brain from {}", brain_path.display());
                 }
-                Err(e) => warn!("play: failed to load brain ({e}) — using random policy"),
+                Err(e) => warn!("play: failed to load brain ({e}) — using zero-action pose"),
             }
         } else {
             warn!(
-                "play: no checkpoint at {} — using random policy",
+                "play: no checkpoint at {} — using zero-action pose",
                 brain_path.with_extension("bin").display()
             );
         }
@@ -84,12 +90,18 @@ impl Policy {
             brain,
             normalizer,
             device,
+            loaded,
         }
     }
 
     /// Deterministic action: the policy mean (no exploration noise), so the crab
     /// holds a steady pose instead of jittering.
     fn act(&self, raw_obs: &[f32; OBS_SIZE]) -> [f32; ACTION_SIZE] {
+        // No checkpoint → hold the neutral (zero-action) pose: a deterministic
+        // view of the body geometry, not an untrained brain's noise.
+        if !self.loaded {
+            return [0.0; ACTION_SIZE];
+        }
         let obs = self.normalizer.normalize_frozen(raw_obs);
         let input =
             Tensor::<InferBackend, 1>::from_floats(obs.as_slice(), &self.device).unsqueeze();
