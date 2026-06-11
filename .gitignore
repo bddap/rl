@@ -1,3 +1,6 @@
 /target
 /tmp
 /checkpoints
+.cargo-home/
+.sandbox-env
+*.png

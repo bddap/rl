@@ -291,8 +291,15 @@ impl CrabJointId {
         match self {
             // Fan the legs front-to-back for a wide support polygon.
             CrabJointId::LegCoxa(_, leg_idx) => [-0.9_f32, -0.35, 0.35, 0.9][*leg_idx as usize],
-            CrabJointId::LegFemur(_, _) => 0.5,
-            CrabJointId::LegTibia(_, _) => 0.9,
+            // Femur out near-horizontal + tibia folded back to vertical puts
+            // the knee at the silhouette's high-out point with the foot
+            // planted wide — the crab Λ. Tibia angle 0 = straight knee;
+            // NEGATIVE folds crab-correct (down-under). Positive is the
+            // backward "inward knee" bend (owner report, twice) — the femur
+            // and tibia hinges share the +Z axis, so a positive tibia angle
+            // rotates the shin up-and-out past the femur line.
+            CrabJointId::LegFemur(_, _) => 1.2,
+            CrabJointId::LegTibia(_, _) => -1.2,
             CrabJointId::ClawUpper(_) => 0.3,
             CrabJointId::ClawFore(_) => 0.0,
             CrabJointId::ClawPincer(_) => 0.03,
@@ -303,17 +310,16 @@ impl CrabJointId {
     /// Joint limits `[lo, hi]`: the commandable range. The actuator maps
     /// action -1 → lo, 0 → rest, +1 → hi (piecewise), so limits and reachable
     /// motion can never disagree. Leg ranges are ASYMMETRIC around rest where
-    /// crab anatomy is one-directional: the femur never sweeps below
-    /// straight-down (legs tucking under the body read as broken), and the
-    /// tibia is a one-way knee that always keeps some bend — letting it
-    /// hyper-extend past straight is the "knees bending inward" look (owner
-    /// report, repeatedly).
+    /// crab anatomy is one-directional: the femur sweeps straight-down to
+    /// just past horizontal (never under the body), and the tibia is a
+    /// one-way knee — angle 0 is a straight knee, the fold is strictly
+    /// NEGATIVE (see default_position), and it always keeps some bend.
     pub fn limits(&self) -> [f32; 2] {
         let c = self.default_position();
         match self {
             CrabJointId::LegCoxa(_, _) => [c - 0.78, c + 0.78],
-            CrabJointId::LegFemur(_, _) => [0.0, 1.67],
-            CrabJointId::LegTibia(_, _) => [0.25, 1.89],
+            CrabJointId::LegFemur(_, _) => [0.0, 1.8],
+            CrabJointId::LegTibia(_, _) => [-1.89, -0.25],
             CrabJointId::ClawUpper(_) => [c - 1.17, c + 1.17],
             CrabJointId::ClawFore(_) => [c - 1.57, c + 1.57],
             CrabJointId::ClawPincer(_) => [0.0, 0.06],
@@ -447,8 +453,7 @@ fn spawn_leg(
 
     // -- Femur: rotates around ±Z by side (pitch — leg lifts up/down) ------
     // Side-dependent axis (s·Z), like the tibia, so the actuator's per-joint
-    // target mirrors into a symmetric leg on both sides. Limits MUST match the
-    // actuator's femur action_range [-1.57, 0.78] or the reachable lift is clipped.
+    // target mirrors into a symmetric leg on both sides.
     let femur_joint = RevoluteJointBuilder::new(Vec3::new(0.0, 0.0, s))
         .local_anchor1(Vec3::new(s * COXA_LEN, 0.0, 0.0))
         .local_anchor2(Vec3::new(0.0, FEMUR_LEN, 0.0))
