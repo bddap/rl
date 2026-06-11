@@ -300,26 +300,25 @@ impl CrabJointId {
         }
     }
 
-    /// Half-width of the commandable range around [`Self::default_position`].
-    /// Joint limits and the actuator's action scaling both use this, so the
-    /// reachable motion is never clipped by mismatched limits.
-    pub fn action_half_width(&self) -> f32 {
-        match self {
-            CrabJointId::LegCoxa(_, _) => 0.78,
-            CrabJointId::LegFemur(_, _) => 1.17,
-            CrabJointId::LegTibia(_, _) => 0.99,
-            CrabJointId::ClawUpper(_) => 1.17,
-            CrabJointId::ClawFore(_) => 1.57,
-            CrabJointId::ClawPincer(_) => 0.03, // prismatic: rest 0.03 ± 0.03 → 0..6 cm
-            CrabJointId::EyeStalk(_) => 0.54,
-        }
-    }
-
-    /// Joint limits: the commandable range, centered on the rest pose.
+    /// Joint limits `[lo, hi]`: the commandable range. The actuator maps
+    /// action -1 → lo, 0 → rest, +1 → hi (piecewise), so limits and reachable
+    /// motion can never disagree. Leg ranges are ASYMMETRIC around rest where
+    /// crab anatomy is one-directional: the femur never sweeps below
+    /// straight-down (legs tucking under the body read as broken), and the
+    /// tibia is a one-way knee that always keeps some bend — letting it
+    /// hyper-extend past straight is the "knees bending inward" look (owner
+    /// report, repeatedly).
     pub fn limits(&self) -> [f32; 2] {
         let c = self.default_position();
-        let hw = self.action_half_width();
-        [c - hw, c + hw]
+        match self {
+            CrabJointId::LegCoxa(_, _) => [c - 0.78, c + 0.78],
+            CrabJointId::LegFemur(_, _) => [0.0, 1.67],
+            CrabJointId::LegTibia(_, _) => [0.25, 1.89],
+            CrabJointId::ClawUpper(_) => [c - 1.17, c + 1.17],
+            CrabJointId::ClawFore(_) => [c - 1.57, c + 1.57],
+            CrabJointId::ClawPincer(_) => [0.0, 0.06],
+            CrabJointId::EyeStalk(_) => [c - 0.54, c + 0.54],
+        }
     }
 }
 
