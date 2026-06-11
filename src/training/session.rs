@@ -203,7 +203,7 @@ impl MetricsLogger {
             std::fs::File::create("tmp/episodes.csv").expect("failed to create tmp/episodes.csv");
         writeln!(
             episode_file,
-            "episode,reward,steps,avg_reward_10,mean_height,mean_upright"
+            "episode,reward,steps,avg_reward_10,mean_height,mean_upright,mean_energy"
         )
         .expect("failed to write header");
 
@@ -231,11 +231,12 @@ impl MetricsLogger {
         avg_reward: f32,
         mean_height: f32,
         mean_upright: f32,
+        mean_energy: f32,
     ) {
         writeln!(
             self.episode_file,
-            "{},{:.4},{},{},{:.4},{:.4}",
-            episode, reward, steps, avg_reward, mean_height, mean_upright
+            "{},{:.4},{},{},{:.4},{:.4},{:.4}",
+            episode, reward, steps, avg_reward, mean_height, mean_upright, mean_energy
         )
         .ok();
         if episode.is_multiple_of(10) {
@@ -276,6 +277,7 @@ pub struct EnvEpisode {
     pub steps: u32,
     pub height_sum: f32,
     pub upright_sum: f32,
+    pub energy_sum: f32,
     pub needs_reset: bool,
     /// Settle ticks remaining before the episode starts recording. A reset
     /// teleports the carapace but the limbs keep their dying pose (rapier 0.32
@@ -582,19 +584,29 @@ impl TrainingState {
     }
 }
 
-/// Phase 1 reward: mean eye height. ONE signal — kept deliberately minimal so the
-/// behaviour EMERGES rather than being hand-specified (owner's call: mechanical
-/// terms like "feet on the ground" don't scale to complex emergent behaviour).
+/// Energy penalty coefficient. Quadratic in angular speed, so a calm stance or
+/// a slow step costs ~nothing (Σω² ≈ 10 → penalty 0.001) while a violent launch
+/// spike (limbs at 30+ rad/s, Σω² ≈ 30k) costs more than the height it buys.
+/// First cut — tune from the per-episode Energy log, not by eye.
+const ENERGY_COST: f32 = 1e-4;
+
+/// Reward: mean eye height minus an energy tax. Two signals, both global —
+/// behaviour still EMERGES rather than being hand-specified (owner's call:
+/// mechanical terms like "feet on the ground" don't scale).
 ///
 /// The eyes sit at the top of the kinematic chain (carapace → stalk → eye), so a
 /// high eye reading needs the carapace both LEVEL (stalks point up) and HIGH (legs
 /// extended underneath) — i.e. standing. Over a long (~25 s) episode the summed
-/// return favours SUSTAINED height: a launch-and-crash spikes briefly then scores
-/// low for the rest of the episode, while a steady stand scores high throughout.
-/// The fall-over episode termination is the only structural guard; no shaped stance
-/// terms, no drift/velocity/foot penalties.
-fn compute_reward(mean_eye_height: f32) -> f32 {
-    mean_eye_height
+/// return favours SUSTAINED height.
+///
+/// `energy` is Σ|ω|² over every body part (world angular speed). It is a proxy
+/// for actuation effort, not true joint work — rapier 0.32 exposes neither joint
+/// torques nor multibody coordinates (coords() lands in 0.33), so segment
+/// angular speed is the most honest observable stand-in. Owner's goal is
+/// believable, economical movement ("flying is cool, but…"); the tax prices
+/// flailing without prescribing any gait.
+fn compute_reward(mean_eye_height: f32, energy: f32) -> f32 {
+    mean_eye_height - ENERGY_COST * energy
 }
 
 /// System: runs the brain to produce actions each physics step.
@@ -706,6 +718,7 @@ pub fn brain_step(
     // eye-stalk balls + acceleration motors), so the blowup guard must watch
     // every body. NaN poisons the max, so fold it in as +inf.
     let mut max_speeds: Vec<f32> = vec![0.0; n];
+    let mut energies: Vec<f32> = vec![0.0; n];
     for (env, vel) in parts_q.iter() {
         if let Some(m) = max_speeds.get_mut(env.0) {
             let lin = vel.linear.length();
@@ -718,6 +731,10 @@ pub fn brain_step(
                 f32::INFINITY
             };
             *m = m.max(s);
+            // Non-finite ω is the blowup guard's problem, not the tax's.
+            if ang.is_finite() {
+                energies[env.0] += ang * ang;
+            }
         }
     }
     let mut eye_sums: Vec<(f32, u32)> = vec![(0.0, 0); n];
@@ -738,10 +755,10 @@ pub fn brain_step(
             continue;
         }
         let (reward, done, height, upright) = if let Some((height, upright)) = poses[e] {
-            // Mean world-space height of the eye tips — the entire reward signal.
+            // Mean world-space height of the eye tips, taxed by Σω².
             let (sum, cnt) = eye_sums[e];
             let mean_eye_height = if cnt > 0 { sum / cnt as f32 } else { height };
-            let r = compute_reward(mean_eye_height);
+            let r = compute_reward(mean_eye_height, energies[e]);
             // Termination is survival guards only — jumping, flipping, and
             // any other strategy the policy invents are legitimate solutions
             // (owner call: emergent behavior is the point). The height band
@@ -772,12 +789,14 @@ pub fn brain_step(
         ep.steps += 1;
         ep.height_sum += height;
         ep.upright_sum += upright;
+        ep.energy_sum += energies[e];
 
         if done {
             let ep_reward = ep.reward;
             let ep_steps = ep.steps;
             let ep_height = ep.height_sum / ep_steps.max(1) as f32;
             let ep_upright = ep.upright_sum / ep_steps.max(1) as f32;
+            let ep_energy = ep.energy_sum / ep_steps.max(1) as f32;
             *ep = EnvEpisode {
                 needs_reset: true,
                 ..EnvEpisode::default()
@@ -788,9 +807,9 @@ pub fn brain_step(
             let avg = training.avg_reward(10);
             let ep_count = training.episode_count;
 
-            training
-                .logger
-                .log_episode(ep_count, ep_reward, ep_steps, avg, ep_height, ep_upright);
+            training.logger.log_episode(
+                ep_count, ep_reward, ep_steps, avg, ep_height, ep_upright, ep_energy,
+            );
 
             if training.episode_count.is_multiple_of(10) {
                 let elapsed = training.last_log_time.elapsed().as_secs_f32();
@@ -803,8 +822,8 @@ pub fn brain_step(
                 };
                 let buffered: usize = training.rollouts.iter().map(|b| b.len()).sum();
                 info!(
-                    "Ep {} | Avg reward: {:.2} | Steps: {} | Height: {:.2} | Upright: {:.2} | Buffer: {} | {:.0} steps/s",
-                    training.episode_count, avg, ep_steps, ep_height, ep_upright, buffered, sps,
+                    "Ep {} | Avg reward: {:.2} | Steps: {} | Height: {:.2} | Upright: {:.2} | Energy: {:.0} | Buffer: {} | {:.0} steps/s",
+                    training.episode_count, avg, ep_steps, ep_height, ep_upright, ep_energy, buffered, sps,
                 );
             }
         }
@@ -991,12 +1010,25 @@ mod tests {
 
     #[test]
     fn reward_increases_with_eye_height() {
-        // The whole reward is mean eye height: higher eyes (standing/reared) must
-        // score strictly above low eyes (collapsed/flat).
+        // Higher eyes (standing/reared) must score strictly above low eyes
+        // (collapsed/flat) at equal effort.
         assert!(
-            compute_reward(1.2) > compute_reward(0.2),
+            compute_reward(1.2, 0.0) > compute_reward(0.2, 0.0),
             "reward must increase with eye height"
         );
+    }
+
+    #[test]
+    fn energy_tax_calibration() {
+        // A calm stance (Σω² ~ 10) must cost a rounding error relative to its
+        // height signal, while launch-grade violence (limbs near the 30 rad/s
+        // blowup guard, Σω² ~ 30k) must cost more than the height it buys —
+        // otherwise the tax either distorts standing or fails to price
+        // flailing. Pins ENERGY_COST's order of magnitude.
+        let calm = compute_reward(0.5, 10.0);
+        assert!((calm - 0.5).abs() < 0.01, "standing must be ~untaxed: {calm}");
+        let launch = compute_reward(3.0, 30_000.0);
+        assert!(launch < 0.5, "launch spike must not out-earn a stand: {launch}");
     }
 
     #[test]
