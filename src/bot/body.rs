@@ -96,12 +96,12 @@ const EYE_BALL_RAD: f32 = 0.03;
 // Motor parameters
 // ---------------------------------------------------------------------------
 
-const LEG_STIFFNESS: f32 = 200.0;
-const LEG_DAMPING: f32 = 20.0;
+const LEG_STIFFNESS: f32 = 50.0;
+const LEG_DAMPING: f32 = 6.0;
 const LEG_MAX_FORCE: f32 = 100.0;
 
-const CLAW_STIFFNESS: f32 = 250.0;
-const CLAW_DAMPING: f32 = 25.0;
+const CLAW_STIFFNESS: f32 = 60.0;
+const CLAW_DAMPING: f32 = 8.0;
 const CLAW_MAX_FORCE: f32 = 150.0;
 
 const EYE_STIFFNESS: f32 = 25.0;
