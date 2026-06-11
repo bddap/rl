@@ -276,6 +276,13 @@ pub struct EnvEpisode {
     pub height_sum: f32,
     pub upright_sum: f32,
     pub needs_reset: bool,
+    /// Settle ticks remaining before the episode starts recording. A reset
+    /// teleports the carapace but the limbs keep their dying pose (rapier 0.32
+    /// can't rebuild or re-coordinate a multibody — its joint removal panics,
+    /// upstream #927). During grace the motors hold the rest pose, velocities
+    /// are pinned to zero, and no transitions/termination are evaluated, so
+    /// the crab unfolds mid-air into the planted stance before step 0.
+    pub grace: u32,
 }
 
 pub struct TrainingState {
@@ -675,6 +682,15 @@ pub fn brain_step(
         action_arrays.push(action_array);
     }
     actions.envs.copy_from_slice(&action_arrays);
+    // Settling envs hold the rest pose (action 0); the policy takes over at
+    // step 0 of the new episode.
+    for (e, ep) in training.envs.iter().enumerate() {
+        if ep.grace > 0
+            && let Some(v) = actions.envs.get_mut(e)
+        {
+            *v = [0.0; ACTION_SIZE];
+        }
+    }
 
     // Gather per-env body state: carapace pose + mean eye-tip height.
     let mut poses: Vec<Option<(f32, f32)>> = vec![None; n]; // (height, upright)
@@ -714,6 +730,11 @@ pub fn brain_step(
 
     // Per-env reward, termination, rollout push, and episode bookkeeping.
     for e in 0..n {
+        // No transitions while the env is settling into its start pose (or, as
+        // a guard, if its crab is somehow absent this tick).
+        if training.envs[e].grace > 0 || poses[e].is_none() {
+            continue;
+        }
         let (reward, done, height, upright) = if let Some((height, upright)) = poses[e] {
             // Mean world-space height of the eye tips — the entire reward signal.
             let (sum, cnt) = eye_sums[e];
@@ -834,6 +855,14 @@ pub fn brain_step(
     }
 }
 
+/// Settle ticks after a reset: long enough for the motors to pull the limbs
+/// from any dying pose back to the rest stance (~0.6 s at 64 Hz).
+const RESET_GRACE_TICKS: u32 = 40;
+
+/// Extra teleport height during the settle, so folded limbs unfold in the air
+/// instead of grinding through the ground.
+const RESET_LIFT: f32 = 0.25;
+
 /// Query data for resetting a carapace: pose, velocity, accumulated force.
 type CarapaceResetQuery<'w, 's> = Query<
     'w,
@@ -847,7 +876,7 @@ type CarapaceResetQuery<'w, 's> = Query<
     With<CrabCarapace>,
 >;
 
-/// Query data for zeroing limb velocities on reset.
+/// Query data for pinning limb velocities during the settle.
 type BodyPartResetQuery<'w, 's> = Query<
     'w,
     's,
@@ -859,35 +888,44 @@ type BodyPartResetQuery<'w, 's> = Query<
 >;
 
 /// System: resets each env's crab when that env's episode ends.
+///
+/// The reset teleports the carapace and then holds a short grace period (see
+/// [`EnvEpisode::grace`]): motors at the rest pose (action 0), all body
+/// velocities pinned to zero each tick. The limbs keep their dying joint
+/// angles through the teleport — rapier 0.32 can neither rewrite multibody
+/// joint coordinates nor survive removing the joints (upstream #927) — so
+/// they must physically unfold; pinning velocities swallows the contact kicks
+/// that unfolding under self-collision produces.
 pub fn reset_crab(
     mut training: NonSendMut<TrainingState>,
     mut actions: ResMut<CrabActions>,
     spawns: Res<CrabSpawns>,
     mut carapace_q: CarapaceResetQuery,
     mut body_parts: BodyPartResetQuery,
-    mut joints: Query<(
-        &CrabJoint,
-        &CrabEnvId,
-        &mut bevy_rapier3d::prelude::MultibodyJoint,
-    )>,
 ) {
-    if training.envs.iter().all(|e| !e.needs_reset) {
-        return;
+    // Start a settle for envs whose episode just ended.
+    for (e, ep) in training.envs.iter_mut().enumerate() {
+        if std::mem::take(&mut ep.needs_reset) {
+            ep.grace = RESET_GRACE_TICKS;
+            if let Some(v) = actions.envs.get_mut(e) {
+                *v = [0.0; CrabJointId::COUNT];
+            }
+        }
     }
-    let needs: Vec<bool> = training
-        .envs
-        .iter_mut()
-        .map(|e| std::mem::take(&mut e.needs_reset))
-        .collect();
-    let resetting = |env: &CrabEnvId| needs.get(env.0).copied().unwrap_or(false);
 
+    let grace_of = |envs: &[EnvEpisode], e: usize| envs.get(e).map(|ep| ep.grace).unwrap_or(0);
+
+    // Teleport at the START of the settle; keep velocities pinned through it.
     for (env, mut transform, mut vel, mut ext_force) in carapace_q.iter_mut() {
-        if !resetting(env) {
+        let g = grace_of(&training.envs, env.0);
+        if g == 0 {
             continue;
         }
-        let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
-        transform.translation = origin + Vec3::new(0.0, SPAWN_HEIGHT, 0.0);
-        transform.rotation = Quat::IDENTITY;
+        if g == RESET_GRACE_TICKS {
+            let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
+            transform.translation = origin + Vec3::new(0.0, SPAWN_HEIGHT + RESET_LIFT, 0.0);
+            transform.rotation = Quat::IDENTITY;
+        }
         vel.linear = Vec3::ZERO;
         vel.angular = Vec3::ZERO;
         ext_force.force = Vec3::ZERO;
@@ -895,28 +933,16 @@ pub fn reset_crab(
     }
 
     for (env, mut vel) in body_parts.iter_mut() {
-        if !resetting(env) {
+        if grace_of(&training.envs, env.0) == 0 {
             continue;
         }
         vel.linear = Vec3::ZERO;
         vel.angular = Vec3::ZERO;
     }
 
-    for (crab_joint, env, mut mj) in joints.iter_mut() {
-        if !resetting(env) {
-            continue;
-        }
-        let default_pos = crab_joint.id.default_position();
-        let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
-        let axis = crab_joint.id.joint_axis();
-        let generic: &mut bevy_rapier3d::prelude::GenericJoint = mj.data.as_mut();
-        generic.set_motor_position(axis, default_pos, stiffness, damping);
-        generic.set_motor_max_force(axis, crab_joint.id.motor_max_force());
-    }
-
-    for (e, reset) in needs.iter().enumerate() {
-        if *reset && let Some(v) = actions.envs.get_mut(e) {
-            *v = [0.0; CrabJointId::COUNT];
+    for ep in training.envs.iter_mut() {
+        if ep.grace > 0 {
+            ep.grace -= 1;
         }
     }
 }
