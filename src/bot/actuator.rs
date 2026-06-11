@@ -23,10 +23,12 @@ impl CrabActions {
     }
 }
 
-/// Maps action value in [-1, 1] to a motor target: the joint's rest pose plus
-/// the action scaled by its half-width. Action 0 = the planted rest stance, so
-/// the policy's neutral output (and a fresh episode) starts standing instead of
-/// sprawling at an arbitrary range midpoint.
+/// Maps action value in [-1, 1] to a motor target: -1 → the joint's lower
+/// limit, 0 → the rest pose, +1 → the upper limit, linear on each side. The
+/// two sides scale independently because crab joints have asymmetric ranges
+/// (a knee bends far one way and not at all the other); action 0 = the
+/// planted rest stance either way, so the policy's neutral output (and a
+/// fresh episode) starts standing instead of sprawling at a range midpoint.
 fn action_to_target(action: f32, id: &CrabJointId) -> f32 {
     // Guard against NaN/Inf — treat as zero (rest position)
     let a = if action.is_finite() {
@@ -34,7 +36,13 @@ fn action_to_target(action: f32, id: &CrabJointId) -> f32 {
     } else {
         0.0
     };
-    id.default_position() + a * id.action_half_width()
+    let rest = id.default_position();
+    let [lo, hi] = id.limits();
+    if a >= 0.0 {
+        rest + a * (hi - rest)
+    } else {
+        rest + a * (rest - lo)
+    }
 }
 
 /// System that applies each env's `CrabActions` to that env's crab joints.

@@ -26,7 +26,9 @@ use rand::Rng;
 
 use crate::bot::BotSet;
 use crate::bot::actuator::CrabActions;
-use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint};
+use crate::bot::body::{
+    CRAB_COLLISION, CRAB_SETTLING_COLLISION, CrabBodyPart, CrabCarapace, CrabJoint, SPAWN_HEIGHT,
+};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 use crate::training::session::{
@@ -149,8 +151,10 @@ pub struct DemoPlugin {
 impl Plugin for DemoPlugin {
     fn build(&self, app: &mut App) {
         add_inference(app, &self.checkpoint_dir);
-        app.add_systems(Startup, (spawn_orbit_camera, spawn_hud))
-            .add_systems(Update, (orbit_camera, demo_controls));
+        app.init_resource::<DemoSettle>()
+            .add_systems(Startup, (spawn_orbit_camera, spawn_hud))
+            .add_systems(Update, (orbit_camera, demo_controls))
+            .add_systems(FixedUpdate, demo_settle.after(BotSet::Think));
     }
 }
 
@@ -272,15 +276,49 @@ fn orbit_camera(
     *transform = camera_transform(&orbit);
 }
 
+/// Settle ticks remaining after an R-reset. The multibody's generalized
+/// (joint-space) velocities are not publicly writable in rapier 0.32, so
+/// zeroing the `Velocity` components can't actually stop the limbs — without
+/// a settle, the crab keeps its internal momentum through the teleport
+/// (visibly "reset fails to reset velocity"). This mirrors the training
+/// reset: motors hold the rest pose contact-free for ~1 s, then collisions
+/// return and velocities are zeroed once at the handoff.
+#[derive(Resource, Default)]
+struct DemoSettle(u32);
+
+const DEMO_SETTLE_TICKS: u32 = 64;
+
+/// Carapace state touched by reset/settle: pose, velocity, force, contacts.
+type DemoCarapaceQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Transform,
+        &'static mut Velocity,
+        &'static mut ExternalForce,
+        &'static mut CollisionGroups,
+    ),
+    With<CrabCarapace>,
+>;
+
+/// Limb state touched by reset/settle: velocity pinning + contact swap.
+type DemoPartsQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Velocity, &'static mut CollisionGroups),
+    (With<CrabBodyPart>, Without<CrabCarapace>),
+>;
+
 #[allow(clippy::too_many_arguments)]
 fn demo_controls(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     mut exit: MessageWriter<AppExit>,
-    mut carapace_q: Query<(&mut Transform, &mut Velocity, &mut ExternalForce), With<CrabCarapace>>,
-    mut parts_q: Query<&mut Velocity, (With<CrabBodyPart>, Without<CrabCarapace>)>,
+    mut carapace_q: DemoCarapaceQuery,
+    mut parts_q: DemoPartsQuery,
     mut joints_q: Query<(&CrabJoint, &mut MultibodyJoint)>,
     mut actions: ResMut<CrabActions>,
+    mut settle: ResMut<DemoSettle>,
 ) {
     let mut reset = keys.just_pressed(KeyCode::KeyR);
     let mut poke = keys.just_pressed(KeyCode::Space);
@@ -295,12 +333,35 @@ fn demo_controls(
         exit.write(AppExit::Success);
     }
     if reset {
-        reset_crab(&mut carapace_q, &mut parts_q, &mut joints_q);
+        // Teleport up with the dying pose, drop self-collision, and let the
+        // rest motors unfold the limbs for DEMO_SETTLE_TICKS.
+        if let Ok((mut transform, mut vel, mut ext_force, mut groups)) = carapace_q.single_mut() {
+            transform.translation = Vec3::new(0.0, SPAWN_HEIGHT + 0.25, 0.0);
+            transform.rotation = Quat::IDENTITY;
+            vel.linear = Vec3::ZERO;
+            vel.angular = Vec3::ZERO;
+            ext_force.force = Vec3::ZERO;
+            ext_force.torque = Vec3::ZERO;
+            *groups = CRAB_SETTLING_COLLISION;
+        }
+        for (mut vel, mut groups) in parts_q.iter_mut() {
+            vel.linear = Vec3::ZERO;
+            vel.angular = Vec3::ZERO;
+            *groups = CRAB_SETTLING_COLLISION;
+        }
+        for (crab_joint, mut mj) in joints_q.iter_mut() {
+            let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
+            let axis = crab_joint.id.joint_axis();
+            let generic: &mut GenericJoint = mj.data.as_mut();
+            generic.set_motor_position(axis, crab_joint.id.default_position(), stiffness, damping);
+            generic.set_motor_max_force(axis, crab_joint.id.motor_max_force());
+        }
+        settle.0 = DEMO_SETTLE_TICKS;
         if let Some(a) = actions.envs.first_mut() {
             *a = [0.0; ACTION_SIZE];
         }
     }
-    if poke && let Ok((_, mut vel, _)) = carapace_q.single_mut() {
+    if poke && let Ok((_, mut vel, _, _)) = carapace_q.single_mut() {
         let mut rng = rand::thread_rng();
         let shove = Vec3::new(rng.gen_range(-1.0..1.0), 0.25, rng.gen_range(-1.0..1.0))
             .normalize_or_zero()
@@ -310,32 +371,36 @@ fn demo_controls(
     }
 }
 
-/// Snap the crab back to its spawn pose with zeroed velocities and rest motors.
-/// Mirrors the training reset so "play" recovers identically.
-fn reset_crab(
-    carapace_q: &mut Query<(&mut Transform, &mut Velocity, &mut ExternalForce), With<CrabCarapace>>,
-    parts_q: &mut Query<&mut Velocity, (With<CrabBodyPart>, Without<CrabCarapace>)>,
-    joints_q: &mut Query<(&CrabJoint, &mut MultibodyJoint)>,
+/// System (FixedUpdate, after Think): while a demo settle is active, hold
+/// zero actions so the motors pull to rest, and on the final tick restore
+/// self-collision and zero what's zeroable for a clean episode-style handoff.
+fn demo_settle(
+    mut settle: ResMut<DemoSettle>,
+    mut actions: ResMut<CrabActions>,
+    mut carapace_q: DemoCarapaceQuery,
+    mut parts_q: DemoPartsQuery,
 ) {
-    if let Ok((mut transform, mut vel, mut ext_force)) = carapace_q.single_mut() {
-        transform.translation = Vec3::new(0.0, 1.0, 0.0);
-        transform.rotation = Quat::IDENTITY;
-        vel.linear = Vec3::ZERO;
-        vel.angular = Vec3::ZERO;
-        ext_force.force = Vec3::ZERO;
-        ext_force.torque = Vec3::ZERO;
+    if settle.0 == 0 {
+        return;
     }
-    for mut vel in parts_q.iter_mut() {
-        vel.linear = Vec3::ZERO;
-        vel.angular = Vec3::ZERO;
+    if let Some(a) = actions.envs.first_mut() {
+        *a = [0.0; ACTION_SIZE];
     }
-    for (crab_joint, mut mj) in joints_q.iter_mut() {
-        let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
-        let axis = crab_joint.id.joint_axis();
-        let generic: &mut GenericJoint = mj.data.as_mut();
-        generic.set_motor_position(axis, crab_joint.id.default_position(), stiffness, damping);
-        generic.set_motor_max_force(axis, crab_joint.id.motor_max_force());
+    if settle.0 == 1 {
+        for (_, mut vel, mut ext_force, mut groups) in carapace_q.iter_mut() {
+            vel.linear = Vec3::ZERO;
+            vel.angular = Vec3::ZERO;
+            ext_force.force = Vec3::ZERO;
+            ext_force.torque = Vec3::ZERO;
+            *groups = CRAB_COLLISION;
+        }
+        for (mut vel, mut groups) in parts_q.iter_mut() {
+            vel.linear = Vec3::ZERO;
+            vel.angular = Vec3::ZERO;
+            *groups = CRAB_COLLISION;
+        }
     }
+    settle.0 -= 1;
 }
 
 fn spawn_hud(mut commands: Commands) {
