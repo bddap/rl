@@ -290,7 +290,7 @@ impl CrabJointId {
     pub fn default_position(&self) -> f32 {
         match self {
             // Fan the legs front-to-back for a wide support polygon.
-            CrabJointId::LegCoxa(_, leg_idx) => [0.5_f32, 0.2, -0.2, -0.5][*leg_idx as usize],
+            CrabJointId::LegCoxa(_, leg_idx) => [-0.9_f32, -0.35, 0.35, 0.9][*leg_idx as usize],
             CrabJointId::LegFemur(_, _) => 0.5,
             CrabJointId::LegTibia(_, _) => 0.9,
             CrabJointId::ClawUpper(_) => 0.3,

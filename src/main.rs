@@ -199,7 +199,8 @@ fn main() {
         // in both.
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
         .add_plugins(physics::PhysicsWorldPlugin)
-        .add_plugins(bot::BotPlugin);
+        .add_plugins(bot::BotPlugin)
+        .add_systems(FixedUpdate, contact_audit);
 
     match mode {
         AppMode::Train => {
@@ -225,6 +226,65 @@ fn main() {
     }
 
     app.run();
+}
+
+/// Diagnostic (enable with RL_CONTACT_AUDIT=1): every 64 ticks, prints every
+/// crab-part-vs-crab-part contact pair currently penetrating more than 5 mm,
+/// deepest first. Ground contacts are excluded. Answers "are the legs
+/// actually intersecting" with numbers instead of squinting at renders.
+fn contact_audit(
+    sim: Query<&bevy_rapier3d::plugin::context::RapierContextSimulation>,
+    cols: Query<&bevy_rapier3d::plugin::context::RapierContextColliders>,
+    parts: Query<
+        (Option<&bot::body::CrabJoint>, Has<bot::body::CrabCarapace>),
+        With<bot::body::CrabBodyPart>,
+    >,
+    mut tick: Local<u32>,
+) {
+    if std::env::var_os("RL_CONTACT_AUDIT").is_none() {
+        return;
+    }
+    *tick += 1;
+    if *tick % 64 != 2 {
+        return;
+    }
+    let (Ok(sim), Ok(cols)) = (sim.single(), cols.single()) else {
+        return;
+    };
+    let name = |p: (Option<&bot::body::CrabJoint>, bool)| {
+        p.0.map(|j| format!("{:?}", j.id))
+            .unwrap_or_else(|| "Carapace".to_string())
+    };
+    let mut worst: Vec<(f32, String, String)> = Vec::new();
+    for pair in sim.narrow_phase.contact_pairs() {
+        let (Some(e1), Some(e2)) = (
+            cols.collider_entity(pair.collider1),
+            cols.collider_entity(pair.collider2),
+        ) else {
+            continue;
+        };
+        let (Ok(p1), Ok(p2)) = (parts.get(e1), parts.get(e2)) else {
+            continue;
+        };
+        let mut depth = 0.0f32;
+        for m in &pair.manifolds {
+            for pt in &m.points {
+                depth = depth.max(-pt.dist);
+            }
+        }
+        if depth > 0.005 {
+            worst.push((depth, name(p1), name(p2)));
+        }
+    }
+    worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    println!(
+        "AUDIT tick {}: {} crab-crab pairs >5mm penetration",
+        *tick,
+        worst.len()
+    );
+    for (d, a, b) in worst.iter().take(6) {
+        println!("  {:>4.0}mm {a} vs {b}", d * 1000.0);
+    }
 }
 
 /// Virtual clock that runs 100× wall speed for headless/offscreen modes, so a
