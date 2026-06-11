@@ -742,18 +742,17 @@ pub fn brain_step(
             let (sum, cnt) = eye_sums[e];
             let mean_eye_height = if cnt > 0 { sum / cnt as f32 } else { height };
             let r = compute_reward(mean_eye_height);
-            // Long ~25 s episodes mean sustained eye height (a real stand, or a
-            // held rear) outscores a brief launch-and-crash. End early only on a
-            // fall — tipping past horizontal or leaving a sane height band — the
-            // one structural guard, not a shaped reward term. The blowup check
-            // isn't shaping either: the acceleration-based motors can pump in
-            // energy until the solver NaNs and Rapier panics the whole app —
-            // ending the episode resets velocities before it gets there.
+            // Termination is survival guards only — jumping, flipping, and
+            // any other strategy the policy invents are legitimate solutions
+            // (owner call: emergent behavior is the point). The height band
+            // is sim sanity (clipped through the floor / left the playfield),
+            // not a behavior bound. The blowup check isn't shaping either:
+            // the acceleration-based motors can pump in energy until the
+            // solver NaNs and Rapier panics the whole app — ending the
+            // episode resets velocities before it gets there.
             let blowing_up = max_speeds[e] > 30.0 || !height.is_finite();
-            let done = !(0.1..=5.0).contains(&height)
-                || upright < 0.0
-                || blowing_up
-                || training.envs[e].steps > 1500;
+            let done =
+                !(0.02..=50.0).contains(&height) || blowing_up || training.envs[e].steps > 1500;
             (r, done, height, upright)
         } else {
             (0.0, false, 0.0, 0.0)
