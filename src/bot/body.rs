@@ -38,6 +38,15 @@ pub const ARENA_COLLISION: CollisionGroups = CollisionGroups::new(Group::GROUP_1
 pub const CRAB_COLLISION: CollisionGroups =
     CollisionGroups::new(Group::GROUP_2, Group::GROUP_1.union(Group::GROUP_2));
 
+/// Crab groups during a post-reset settle: arena only, no crab-crab contacts.
+/// A reset can't rewrite multibody joint coordinates (rapier 0.32), so the
+/// limbs keep their dying pose and the motors must physically unfold them;
+/// doing that under self-collision rams overlapping segments through each
+/// other hard enough to NaN the solver. Settling crabs unfold contact-free,
+/// then get [`CRAB_COLLISION`] back for the episode proper.
+pub const CRAB_SETTLING_COLLISION: CollisionGroups =
+    CollisionGroups::new(Group::GROUP_2, Group::GROUP_1);
+
 /// Disable contacts between the two segments a joint connects. The joint
 /// already constrains that pair, and their colliders overlap at the anchor by
 /// construction — contacts there would only fight the articulation. All other

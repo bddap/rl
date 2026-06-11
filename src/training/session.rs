@@ -23,7 +23,8 @@ use crate::Args;
 use crate::bot::CrabSpawns;
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{
-    CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId, SPAWN_HEIGHT,
+    CRAB_COLLISION, CRAB_SETTLING_COLLISION, CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint,
+    CrabJointId, SPAWN_HEIGHT,
 };
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
@@ -279,9 +280,10 @@ pub struct EnvEpisode {
     /// Settle ticks remaining before the episode starts recording. A reset
     /// teleports the carapace but the limbs keep their dying pose (rapier 0.32
     /// can't rebuild or re-coordinate a multibody — its joint removal panics,
-    /// upstream #927). During grace the motors hold the rest pose, velocities
-    /// are pinned to zero, and no transitions/termination are evaluated, so
-    /// the crab unfolds mid-air into the planted stance before step 0.
+    /// upstream #927). During grace the motors hold the rest pose, self
+    /// contacts are off (see `reset_crab`), and no transitions/termination
+    /// are evaluated, so the crab unfolds into the planted stance before
+    /// step 0.
     pub grace: u32,
 }
 
@@ -856,14 +858,15 @@ pub fn brain_step(
 }
 
 /// Settle ticks after a reset: long enough for the motors to pull the limbs
-/// from any dying pose back to the rest stance (~0.6 s at 64 Hz).
-const RESET_GRACE_TICKS: u32 = 40;
+/// from any dying pose back to the rest stance (1 s at 64 Hz).
+const RESET_GRACE_TICKS: u32 = 64;
 
 /// Extra teleport height during the settle, so folded limbs unfold in the air
 /// instead of grinding through the ground.
 const RESET_LIFT: f32 = 0.25;
 
-/// Query data for resetting a carapace: pose, velocity, accumulated force.
+/// Query data for resetting a carapace: pose, velocity, accumulated force,
+/// collision groups.
 type CarapaceResetQuery<'w, 's> = Query<
     'w,
     's,
@@ -872,17 +875,19 @@ type CarapaceResetQuery<'w, 's> = Query<
         &'static mut Transform,
         &'static mut bevy_rapier3d::prelude::Velocity,
         &'static mut bevy_rapier3d::prelude::ExternalForce,
+        &'static mut bevy_rapier3d::prelude::CollisionGroups,
     ),
     With<CrabCarapace>,
 >;
 
-/// Query data for pinning limb velocities during the settle.
+/// Query data for settling limbs: velocity pinning + collision-group swap.
 type BodyPartResetQuery<'w, 's> = Query<
     'w,
     's,
     (
         &'static CrabEnvId,
         &'static mut bevy_rapier3d::prelude::Velocity,
+        &'static mut bevy_rapier3d::prelude::CollisionGroups,
     ),
     (With<CrabBodyPart>, Without<CrabCarapace>),
 >;
@@ -890,12 +895,14 @@ type BodyPartResetQuery<'w, 's> = Query<
 /// System: resets each env's crab when that env's episode ends.
 ///
 /// The reset teleports the carapace and then holds a short grace period (see
-/// [`EnvEpisode::grace`]): motors at the rest pose (action 0), all body
-/// velocities pinned to zero each tick. The limbs keep their dying joint
-/// angles through the teleport — rapier 0.32 can neither rewrite multibody
-/// joint coordinates nor survive removing the joints (upstream #927) — so
-/// they must physically unfold; pinning velocities swallows the contact kicks
-/// that unfolding under self-collision produces.
+/// [`EnvEpisode::grace`]). The limbs keep their dying joint angles through
+/// the teleport — rapier 0.32 can neither rewrite multibody joint coordinates
+/// nor survive removing the joints (upstream #927) — so the motors must
+/// physically unfold them back to the rest pose (action 0). Unfolding happens
+/// contact-free ([`CRAB_SETTLING_COLLISION`]): folded segments overlap, and
+/// motoring them through their own contacts kicks hard enough to NaN the
+/// solver. Normal groups return on the last grace tick, with the pose at rest
+/// and therefore overlap-free.
 pub fn reset_crab(
     mut training: NonSendMut<TrainingState>,
     mut actions: ResMut<CrabActions>,
@@ -915,8 +922,15 @@ pub fn reset_crab(
 
     let grace_of = |envs: &[EnvEpisode], e: usize| envs.get(e).map(|ep| ep.grace).unwrap_or(0);
 
-    // Teleport at the START of the settle; keep velocities pinned through it.
-    for (env, mut transform, mut vel, mut ext_force) in carapace_q.iter_mut() {
+    // Zero velocities only at the settle's endpoints: once at the teleport (kill
+    // the dying momentum) and once on the last grace tick (clean handoff to the
+    // episode). In between the motors must be free to actually unfold the limbs
+    // — pinning every tick re-zeroed each tick's motor work, so the pose never
+    // changed, the blowup guard fired at grace end, and the env cycled grace
+    // forever without recording a single transition.
+    let pin = |g: u32| g == RESET_GRACE_TICKS || g == 1;
+
+    for (env, mut transform, mut vel, mut ext_force, mut groups) in carapace_q.iter_mut() {
         let g = grace_of(&training.envs, env.0);
         if g == 0 {
             continue;
@@ -925,19 +939,29 @@ pub fn reset_crab(
             let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
             transform.translation = origin + Vec3::new(0.0, SPAWN_HEIGHT + RESET_LIFT, 0.0);
             transform.rotation = Quat::IDENTITY;
+            *groups = CRAB_SETTLING_COLLISION;
+        } else if g == 1 {
+            *groups = CRAB_COLLISION;
         }
-        vel.linear = Vec3::ZERO;
-        vel.angular = Vec3::ZERO;
-        ext_force.force = Vec3::ZERO;
-        ext_force.torque = Vec3::ZERO;
+        if pin(g) {
+            vel.linear = Vec3::ZERO;
+            vel.angular = Vec3::ZERO;
+            ext_force.force = Vec3::ZERO;
+            ext_force.torque = Vec3::ZERO;
+        }
     }
 
-    for (env, mut vel) in body_parts.iter_mut() {
-        if grace_of(&training.envs, env.0) == 0 {
-            continue;
+    for (env, mut vel, mut groups) in body_parts.iter_mut() {
+        let g = grace_of(&training.envs, env.0);
+        if g == RESET_GRACE_TICKS {
+            *groups = CRAB_SETTLING_COLLISION;
+        } else if g == 1 {
+            *groups = CRAB_COLLISION;
         }
-        vel.linear = Vec3::ZERO;
-        vel.angular = Vec3::ZERO;
+        if pin(g) {
+            vel.linear = Vec3::ZERO;
+            vel.angular = Vec3::ZERO;
+        }
     }
 
     for ep in training.envs.iter_mut() {
