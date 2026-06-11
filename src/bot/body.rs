@@ -23,13 +23,31 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 // ---------------------------------------------------------------------------
-// Collision groups — prevent self-collision within the crab
+// Collision groups
 // ---------------------------------------------------------------------------
 
 /// Group 1: arena (ground + walls). Interacts with crab.
 pub const ARENA_COLLISION: CollisionGroups = CollisionGroups::new(Group::GROUP_1, Group::GROUP_2);
-/// Group 2: crab body parts. Interact with arena but NOT with each other.
-pub const CRAB_COLLISION: CollisionGroups = CollisionGroups::new(Group::GROUP_2, Group::GROUP_1);
+/// Group 2: crab body parts. Interact with the arena AND with each other —
+/// without self-collision the policy "tucks" legs through one another (free
+/// interpenetration is an exploit, not a stance). Segments connected by a
+/// joint are still contact-filtered per joint (`set_contacts_enabled(false)`),
+/// so articulations don't fight their own contacts. N training crabs share
+/// this group: their 4 m grid spacing exceeds any reach, so cross-crab
+/// contact is geometrically impossible until we deliberately close the gap.
+pub const CRAB_COLLISION: CollisionGroups =
+    CollisionGroups::new(Group::GROUP_2, Group::GROUP_1.union(Group::GROUP_2));
+
+/// Disable contacts between the two segments a joint connects. The joint
+/// already constrains that pair, and their colliders overlap at the anchor by
+/// construction — contacts there would only fight the articulation. All other
+/// (non-adjacent) crab-part pairs DO collide; see [`CRAB_COLLISION`].
+fn no_adjacent_contacts(joint: impl Into<TypedJoint>) -> TypedJoint {
+    let mut joint = joint.into();
+    let generic: &mut GenericJoint = joint.as_mut();
+    generic.set_contacts_enabled(false);
+    joint
+}
 
 // ---------------------------------------------------------------------------
 // Dimensions — tuned for a ~1m wide crab (game scale, not real life)
@@ -84,6 +102,77 @@ const EYE_MAX_FORCE: f32 = 10.0;
 // ---------------------------------------------------------------------------
 // Marker components for querying
 // ---------------------------------------------------------------------------
+
+/// Shared mesh/material handles for crab bodies, created once at startup.
+/// Spawning goes through these because episode resets RESPAWN the whole crab
+/// (a teleport keeps the dying pose's joint angles, which interpenetrate under
+/// self-collision and explode) — per-spawn `Assets::add` would leak an asset
+/// per body part per episode, unbounded over an overnight run.
+#[derive(Resource)]
+pub struct CrabAssets {
+    body_mat: Handle<StandardMaterial>,
+    leg_mat: Handle<StandardMaterial>,
+    claw_mat: Handle<StandardMaterial>,
+    eye_mat: Handle<StandardMaterial>,
+    carapace_mesh: Handle<Mesh>,
+    coxa_mesh: Handle<Mesh>,
+    femur_mesh: Handle<Mesh>,
+    tibia_mesh: Handle<Mesh>,
+    claw_upper_mesh: Handle<Mesh>,
+    claw_fore_mesh: Handle<Mesh>,
+    pincer_mesh: Handle<Mesh>,
+    eye_mesh: Handle<Mesh>,
+}
+
+impl FromWorld for CrabAssets {
+    fn from_world(world: &mut World) -> Self {
+        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+        let body_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.2, 0.45, 0.55), // blue-grey carapace
+            perceptual_roughness: 0.7,
+            ..default()
+        });
+        let leg_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.85, 0.4, 0.15), // orange legs (Sally Lightfoot!)
+            perceptual_roughness: 0.6,
+            ..default()
+        });
+        let claw_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.7, 0.15, 0.15), // deep red claws
+            perceptual_roughness: 0.5,
+            ..default()
+        });
+        let eye_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.9, 0.85, 0.7), // pale eye stalks
+            perceptual_roughness: 0.3,
+            ..default()
+        });
+
+        let mut meshes = world.resource_mut::<Assets<Mesh>>();
+        Self {
+            body_mat,
+            leg_mat,
+            claw_mat,
+            eye_mat,
+            carapace_mesh: meshes.add(Cuboid::new(
+                CARAPACE_HALF_W * 2.0,
+                CARAPACE_HALF_H * 2.0,
+                CARAPACE_HALF_D * 2.0,
+            )),
+            coxa_mesh: meshes.add(Capsule3d::new(COXA_RAD, COXA_LEN * 2.0)),
+            femur_mesh: meshes.add(Capsule3d::new(FEMUR_RAD, FEMUR_LEN * 2.0)),
+            tibia_mesh: meshes.add(Capsule3d::new(TIBIA_RAD, TIBIA_LEN * 2.0)),
+            claw_upper_mesh: meshes.add(Capsule3d::new(CLAW_UPPER_RAD, CLAW_UPPER_LEN * 2.0)),
+            claw_fore_mesh: meshes.add(Capsule3d::new(CLAW_FORE_RAD, CLAW_FORE_LEN * 2.0)),
+            pincer_mesh: meshes.add(Cuboid::new(
+                PINCER_HALF_W * 2.0,
+                PINCER_HALF_H * 2.0,
+                PINCER_HALF_D * 2.0,
+            )),
+            eye_mesh: meshes.add(Sphere::new(EYE_BALL_RAD)),
+        }
+    }
+}
 
 /// Marker for the crab's root carapace entity.
 #[derive(Component)]
@@ -247,32 +336,10 @@ fn side_sign(side: Side) -> f32 {
 /// Returns the carapace entity.
 pub fn spawn_crab(
     commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
+    assets: &CrabAssets,
     position: Vec3,
     env: usize,
 ) -> Entity {
-    let body_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.2, 0.45, 0.55), // blue-grey carapace
-        perceptual_roughness: 0.7,
-        ..default()
-    });
-    let leg_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.85, 0.4, 0.15), // orange legs (Sally Lightfoot!)
-        perceptual_roughness: 0.6,
-        ..default()
-    });
-    let claw_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.7, 0.15, 0.15), // deep red claws
-        perceptual_roughness: 0.5,
-        ..default()
-    });
-    let eye_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.9, 0.85, 0.7), // pale eye stalks
-        perceptual_roughness: 0.3,
-        ..default()
-    });
-
     // -- Carapace (root) ---------------------------------------------------
     let carapace = commands
         .spawn((
@@ -283,12 +350,8 @@ pub fn spawn_crab(
             Collider::cuboid(CARAPACE_HALF_W, CARAPACE_HALF_H, CARAPACE_HALF_D),
             CRAB_COLLISION,
             ColliderMassProperties::Density(5.0),
-            Mesh3d(meshes.add(Cuboid::new(
-                CARAPACE_HALF_W * 2.0,
-                CARAPACE_HALF_H * 2.0,
-                CARAPACE_HALF_D * 2.0,
-            ))),
-            MeshMaterial3d(body_color.clone()),
+            Mesh3d(assets.carapace_mesh.clone()),
+            MeshMaterial3d(assets.body_mat.clone()),
             Transform::from_translation(position + Vec3::new(0.0, SPAWN_HEIGHT, 0.0)),
             Velocity::default(),
             ExternalForce::default(),
@@ -302,18 +365,18 @@ pub fn spawn_crab(
     // -- Legs (4 per side) -------------------------------------------------
     for side in [Side::Left, Side::Right] {
         for leg_idx in 0u8..4 {
-            spawn_leg(commands, meshes, &leg_color, carapace, side, leg_idx, env);
+            spawn_leg(commands, assets, carapace, side, leg_idx, env);
         }
     }
 
     // -- Claws (1 per side) ------------------------------------------------
     for side in [Side::Left, Side::Right] {
-        spawn_claw(commands, meshes, &claw_color, carapace, side, env);
+        spawn_claw(commands, assets, carapace, side, env);
     }
 
     // -- Eyes (1 per side) -------------------------------------------------
     for side in [Side::Left, Side::Right] {
-        spawn_eye(commands, meshes, &eye_color, carapace, side, env);
+        spawn_eye(commands, assets, carapace, side, env);
     }
 
     carapace
@@ -325,8 +388,7 @@ pub fn spawn_crab(
 
 fn spawn_leg(
     commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    color: &Handle<StandardMaterial>,
+    assets: &CrabAssets,
     carapace: Entity,
     side: Side,
     leg_idx: u8,
@@ -368,9 +430,9 @@ fn spawn_leg(
             Collider::capsule_y(COXA_LEN, COXA_RAD),
             CRAB_COLLISION,
             ColliderMassProperties::Density(2.0),
-            Mesh3d(meshes.add(Capsule3d::new(COXA_RAD, COXA_LEN * 2.0))),
-            MeshMaterial3d(color.clone()),
-            MultibodyJoint::new(carapace, coxa_joint.into()),
+            Mesh3d(assets.coxa_mesh.clone()),
+            MeshMaterial3d(assets.leg_mat.clone()),
+            MultibodyJoint::new(carapace, no_adjacent_contacts(coxa_joint)),
             Velocity::default(),
         ))
         .id();
@@ -398,9 +460,9 @@ fn spawn_leg(
             Collider::capsule_y(FEMUR_LEN, FEMUR_RAD),
             CRAB_COLLISION,
             ColliderMassProperties::Density(1.5),
-            Mesh3d(meshes.add(Capsule3d::new(FEMUR_RAD, FEMUR_LEN * 2.0))),
-            MeshMaterial3d(color.clone()),
-            MultibodyJoint::new(coxa, femur_joint.into()),
+            Mesh3d(assets.femur_mesh.clone()),
+            MeshMaterial3d(assets.leg_mat.clone()),
+            MultibodyJoint::new(coxa, no_adjacent_contacts(femur_joint)),
             Velocity::default(),
         ))
         .id();
@@ -426,9 +488,9 @@ fn spawn_leg(
         Collider::capsule_y(TIBIA_LEN, TIBIA_RAD),
         CRAB_COLLISION,
         ColliderMassProperties::Density(1.0),
-        Mesh3d(meshes.add(Capsule3d::new(TIBIA_RAD, TIBIA_LEN * 2.0))),
-        MeshMaterial3d(color.clone()),
-        MultibodyJoint::new(femur, tibia_joint.into()),
+        Mesh3d(assets.tibia_mesh.clone()),
+        MeshMaterial3d(assets.leg_mat.clone()),
+        MultibodyJoint::new(femur, no_adjacent_contacts(tibia_joint)),
         Friction::coefficient(1.5), // grippy feet
         Velocity::default(),
     ));
@@ -440,8 +502,7 @@ fn spawn_leg(
 
 fn spawn_claw(
     commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    color: &Handle<StandardMaterial>,
+    assets: &CrabAssets,
     carapace: Entity,
     side: Side,
     env: usize,
@@ -479,9 +540,9 @@ fn spawn_claw(
             // ahead of the leg support so the crab pitched forward and couldn't
             // stand. Keep them low-mass so the CoM sits over the feet.
             ColliderMassProperties::Density(1.0),
-            Mesh3d(meshes.add(Capsule3d::new(CLAW_UPPER_RAD, CLAW_UPPER_LEN * 2.0))),
-            MeshMaterial3d(color.clone()),
-            MultibodyJoint::new(carapace, upper_joint.into()),
+            Mesh3d(assets.claw_upper_mesh.clone()),
+            MeshMaterial3d(assets.claw_mat.clone()),
+            MultibodyJoint::new(carapace, no_adjacent_contacts(upper_joint)),
             Velocity::default(),
         ))
         .id();
@@ -510,9 +571,9 @@ fn spawn_claw(
             Collider::capsule_y(CLAW_FORE_LEN, CLAW_FORE_RAD),
             CRAB_COLLISION,
             ColliderMassProperties::Density(1.0),
-            Mesh3d(meshes.add(Capsule3d::new(CLAW_FORE_RAD, CLAW_FORE_LEN * 2.0))),
-            MeshMaterial3d(color.clone()),
-            MultibodyJoint::new(upper, fore_joint.into()),
+            Mesh3d(assets.claw_fore_mesh.clone()),
+            MeshMaterial3d(assets.claw_mat.clone()),
+            MultibodyJoint::new(upper, no_adjacent_contacts(fore_joint)),
             Velocity::default(),
         ))
         .id();
@@ -540,13 +601,9 @@ fn spawn_claw(
         Collider::cuboid(PINCER_HALF_W, PINCER_HALF_H, PINCER_HALF_D),
         CRAB_COLLISION,
         ColliderMassProperties::Density(1.0),
-        Mesh3d(meshes.add(Cuboid::new(
-            PINCER_HALF_W * 2.0,
-            PINCER_HALF_H * 2.0,
-            PINCER_HALF_D * 2.0,
-        ))),
-        MeshMaterial3d(color.clone()),
-        MultibodyJoint::new(forearm, pincer_joint.into()),
+        Mesh3d(assets.pincer_mesh.clone()),
+        MeshMaterial3d(assets.claw_mat.clone()),
+        MultibodyJoint::new(forearm, no_adjacent_contacts(pincer_joint)),
         Velocity::default(),
     ));
 }
@@ -557,8 +614,7 @@ fn spawn_claw(
 
 fn spawn_eye(
     commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    color: &Handle<StandardMaterial>,
+    assets: &CrabAssets,
     carapace: Entity,
     side: Side,
     env: usize,
@@ -590,9 +646,9 @@ fn spawn_eye(
         Collider::ball(EYE_BALL_RAD),
         CRAB_COLLISION,
         ColliderMassProperties::Density(0.5),
-        Mesh3d(meshes.add(Sphere::new(EYE_BALL_RAD))),
-        MeshMaterial3d(color.clone()),
-        MultibodyJoint::new(carapace, eye_joint.into()),
+        Mesh3d(assets.eye_mesh.clone()),
+        MeshMaterial3d(assets.eye_mat.clone()),
+        MultibodyJoint::new(carapace, no_adjacent_contacts(eye_joint)),
         Velocity::default(),
     ));
 }

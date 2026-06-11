@@ -63,6 +63,7 @@ impl Plugin for BotPlugin {
         app.init_resource::<actuator::CrabActions>()
             .init_resource::<sensor::CrabObservation>()
             .init_resource::<CrabSpawns>()
+            .init_resource::<body::CrabAssets>()
             .add_systems(Startup, spawn_initial_crabs)
             .add_systems(FixedUpdate, sensor::build_observation.in_set(BotSet::Sense))
             .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act));
@@ -71,8 +72,7 @@ impl Plugin for BotPlugin {
 
 fn spawn_initial_crabs(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    assets: Res<body::CrabAssets>,
     num_envs: Res<NumEnvs>,
     mut spawns: ResMut<CrabSpawns>,
     mut actions: ResMut<actuator::CrabActions>,
@@ -84,6 +84,6 @@ fn spawn_initial_crabs(
     for env in 0..n {
         let origin = grid_offset(env, n);
         spawns.0.push(origin);
-        body::spawn_crab(&mut commands, &mut meshes, &mut materials, origin, env);
+        body::spawn_crab(&mut commands, &assets, origin, env);
     }
 }
