@@ -150,11 +150,12 @@ impl Plugin for DemoPlugin {
     fn build(&self, app: &mut App) {
         add_inference(app, &self.checkpoint_dir);
         app.init_resource::<DemoSettle>()
+            .init_resource::<PokeBurst>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_hud))
             .add_systems(Update, (orbit_camera, demo_controls))
             .add_systems(
                 FixedUpdate,
-                (demo_settle.after(BotSet::Think), demo_fall_rescue),
+                (demo_settle.after(BotSet::Think), demo_fall_rescue, demo_poke),
             );
     }
 }
@@ -285,6 +286,43 @@ struct DemoSettle(u32);
 
 const DEMO_SETTLE_TICKS: u32 = 32;
 
+/// A poke is a short force burst, not a velocity write: a multibody link's
+/// velocity lives in the multibody's generalized coordinates, which the
+/// `Velocity` component writeback never touches (issue #14 — the old poke
+/// was a silent no-op). Per-link external forces, by contrast, are mapped
+/// through the body Jacobians into generalized accelerations, so force is
+/// the one channel that actually reaches a multibody root. Rapier never
+/// auto-clears user forces, hence the countdown that zeroes them.
+#[derive(Resource, Default)]
+struct PokeBurst {
+    ticks: u32,
+    force: Vec3,
+    torque: Vec3,
+}
+
+const POKE_TICKS: u32 = 8;
+const POKE_FORCE: f32 = 70.0;
+const POKE_TORQUE: f32 = 4.0;
+
+/// System (FixedUpdate): applies the active poke burst to the carapace and
+/// zeroes the force when the burst ends.
+fn demo_poke(
+    mut burst: ResMut<PokeBurst>,
+    mut carapace_q: Query<&mut ExternalForce, With<CrabCarapace>>,
+) {
+    let Ok(mut f) = carapace_q.single_mut() else {
+        return;
+    };
+    if burst.ticks > 0 {
+        burst.ticks -= 1;
+        f.force = burst.force;
+        f.torque = burst.torque;
+    } else if f.force != Vec3::ZERO || f.torque != Vec3::ZERO {
+        f.force = Vec3::ZERO;
+        f.torque = Vec3::ZERO;
+    }
+}
+
 /// Demo reset: rebuild the crab fresh at spawn — the only reset that
 /// survives a corrupted multibody (see [`respawn_crab`]) — and hold zero
 /// actions while it takes load.
@@ -313,7 +351,7 @@ fn demo_controls(
     assets: Res<CrabAssets>,
     spawns: Res<CrabSpawns>,
     parts_q: Query<Entity, With<CrabBodyPart>>,
-    mut poke_q: Query<&mut Velocity, With<CrabCarapace>>,
+    mut poke_burst: ResMut<PokeBurst>,
     mut actions: ResMut<CrabActions>,
     mut settle: ResMut<DemoSettle>,
 ) {
@@ -339,13 +377,16 @@ fn demo_controls(
             &mut actions,
         );
     }
-    if poke && let Ok(mut vel) = poke_q.single_mut() {
+    if poke {
         let mut rng = rand::thread_rng();
-        let shove = Vec3::new(rng.gen_range(-1.0..1.0), 0.25, rng.gen_range(-1.0..1.0))
-            .normalize_or_zero()
-            * 3.5;
-        vel.linear += shove;
-        vel.angular += Vec3::new(rng.gen_range(-2.5..2.5), 0.0, rng.gen_range(-2.5..2.5));
+        let dir = Vec3::new(rng.gen_range(-1.0..1.0), 0.25, rng.gen_range(-1.0..1.0))
+            .normalize_or_zero();
+        *poke_burst = PokeBurst {
+            ticks: POKE_TICKS,
+            force: dir * POKE_FORCE,
+            torque: Vec3::new(rng.gen_range(-1.0..1.0), 0.0, rng.gen_range(-1.0..1.0))
+                * POKE_TORQUE,
+        };
     }
 }
 
