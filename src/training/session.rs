@@ -20,12 +20,9 @@ use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 
 use crate::Args;
-use crate::bot::CrabSpawns;
 use crate::bot::actuator::CrabActions;
-use crate::bot::body::{
-    CRAB_COLLISION, CRAB_SETTLING_COLLISION, CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint,
-    CrabJointId, SPAWN_HEIGHT,
-};
+use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
+use crate::bot::{CrabRescued, CrabSpawns, respawn_crab};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 
@@ -280,12 +277,9 @@ pub struct EnvEpisode {
     pub energy_sum: f32,
     pub needs_reset: bool,
     /// Settle ticks remaining before the episode starts recording. A reset
-    /// teleports the carapace but the limbs keep their dying pose (rapier 0.32
-    /// can't rebuild or re-coordinate a multibody — its joint removal panics,
-    /// upstream #927). During grace the motors hold the rest pose, self
-    /// contacts are off (see `reset_crab`), and no transitions/termination
-    /// are evaluated, so the crab unfolds into the planted stance before
-    /// step 0.
+    /// respawns a fresh crab in the rest pose ([`crate::bot::respawn_crab`]);
+    /// during grace no transitions/termination are evaluated while it drops
+    /// from spawn height and the motors take the load.
     pub grace: u32,
 }
 
@@ -618,8 +612,13 @@ pub fn brain_step(
     parts_q: Query<(&CrabEnvId, &bevy_rapier3d::prelude::Velocity), With<CrabBodyPart>>,
     eyes_q: Query<(&CrabJoint, &CrabEnvId, &Transform)>,
     mut exit: MessageWriter<AppExit>,
+    mut rescued: MessageReader<CrabRescued>,
 ) {
     let n = training.envs.len();
+    // Envs whose crab went non-finite and was force-respawned this tick: the
+    // pose this step reads is already the fresh crab back at spawn, so the
+    // episode must end here or the teleport bleeds into the reward stream.
+    let rescued_envs: Vec<usize> = rescued.read().map(|m| m.env).collect();
     if obs.envs.len() != n || actions.envs.len() != n {
         // Resources are sized by the spawn system; skip the tick(s) before that.
         return;
@@ -768,8 +767,10 @@ pub fn brain_step(
             // solver NaNs and Rapier panics the whole app — ending the
             // episode resets velocities before it gets there.
             let blowing_up = max_speeds[e] > 30.0 || !height.is_finite();
-            let done =
-                !(0.02..=50.0).contains(&height) || blowing_up || training.envs[e].steps > 1500;
+            let done = !(0.02..=50.0).contains(&height)
+                || blowing_up
+                || training.envs[e].steps > 1500
+                || rescued_envs.contains(&e);
             (r, done, height, upright)
         } else {
             (0.0, false, 0.0, 0.0)
@@ -875,110 +876,42 @@ pub fn brain_step(
     }
 }
 
-/// Settle ticks after a reset: long enough for the motors to pull the limbs
-/// from any dying pose back to the rest stance (1 s at 64 Hz).
-const RESET_GRACE_TICKS: u32 = 64;
+/// Settle ticks after a respawn: the fresh crab spawns in the rest pose with
+/// the builder motors already holding it, so this only covers the drop from
+/// spawn height onto the ground and the motors taking the load (0.5 s).
+const RESET_GRACE_TICKS: u32 = 32;
 
-/// Extra teleport height during the settle, so folded limbs unfold in the air
-/// instead of grinding through the ground.
-const RESET_LIFT: f32 = 0.25;
-
-/// Query data for resetting a carapace: pose, velocity, accumulated force,
-/// collision groups.
-type CarapaceResetQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static CrabEnvId,
-        &'static mut Transform,
-        &'static mut bevy_rapier3d::prelude::Velocity,
-        &'static mut bevy_rapier3d::prelude::ExternalForce,
-        &'static mut bevy_rapier3d::prelude::CollisionGroups,
-    ),
-    With<CrabCarapace>,
->;
-
-/// Query data for settling limbs: velocity pinning + collision-group swap.
-type BodyPartResetQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static CrabEnvId,
-        &'static mut bevy_rapier3d::prelude::Velocity,
-        &'static mut bevy_rapier3d::prelude::CollisionGroups,
-    ),
-    (With<CrabBodyPart>, Without<CrabCarapace>),
->;
-
-/// System: resets each env's crab when that env's episode ends.
+/// System: rebuilds each env's crab when that env's episode ends.
 ///
-/// The reset teleports the carapace and then holds a short grace period (see
-/// [`EnvEpisode::grace`]). The limbs keep their dying joint angles through
-/// the teleport — rapier 0.32 can neither rewrite multibody joint coordinates
-/// nor survive removing the joints (upstream #927) — so the motors must
-/// physically unfold them back to the rest pose (action 0). Unfolding happens
-/// contact-free ([`CRAB_SETTLING_COLLISION`]): folded segments overlap, and
-/// motoring them through their own contacts kicks hard enough to NaN the
-/// solver. Normal groups return on the last grace tick, with the pose at rest
-/// and therefore overlap-free.
+/// A reset is a full despawn + respawn ([`respawn_crab`]): teleporting bodies
+/// cannot repair a multibody whose joint state went non-finite — rapier 0.32
+/// offers no way to rewrite multibody joint coordinates in place — and one
+/// crab that tunnels through the floor would otherwise wedge its env forever.
+/// The respawned crab starts in the overlap-free rest pose, so no unfold or
+/// collision-group dance is needed; the grace just skips recording while it
+/// takes load (see [`EnvEpisode::grace`]).
 pub fn reset_crab(
+    mut commands: Commands,
     mut training: NonSendMut<TrainingState>,
     mut actions: ResMut<CrabActions>,
+    assets: Res<CrabAssets>,
     spawns: Res<CrabSpawns>,
-    mut carapace_q: CarapaceResetQuery,
-    mut body_parts: BodyPartResetQuery,
+    parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>,
 ) {
-    // Start a settle for envs whose episode just ended.
     for (e, ep) in training.envs.iter_mut().enumerate() {
         if std::mem::take(&mut ep.needs_reset) {
             ep.grace = RESET_GRACE_TICKS;
             if let Some(v) = actions.envs.get_mut(e) {
                 *v = [0.0; CrabJointId::COUNT];
             }
-        }
-    }
-
-    let grace_of = |envs: &[EnvEpisode], e: usize| envs.get(e).map(|ep| ep.grace).unwrap_or(0);
-
-    // Zero velocities only at the settle's endpoints: once at the teleport (kill
-    // the dying momentum) and once on the last grace tick (clean handoff to the
-    // episode). In between the motors must be free to actually unfold the limbs
-    // — pinning every tick re-zeroed each tick's motor work, so the pose never
-    // changed, the blowup guard fired at grace end, and the env cycled grace
-    // forever without recording a single transition.
-    let pin = |g: u32| g == RESET_GRACE_TICKS || g == 1;
-
-    for (env, mut transform, mut vel, mut ext_force, mut groups) in carapace_q.iter_mut() {
-        let g = grace_of(&training.envs, env.0);
-        if g == 0 {
-            continue;
-        }
-        if g == RESET_GRACE_TICKS {
-            let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
-            transform.translation = origin + Vec3::new(0.0, SPAWN_HEIGHT + RESET_LIFT, 0.0);
-            transform.rotation = Quat::IDENTITY;
-            *groups = CRAB_SETTLING_COLLISION;
-        } else if g == 1 {
-            *groups = CRAB_COLLISION;
-        }
-        if pin(g) {
-            vel.linear = Vec3::ZERO;
-            vel.angular = Vec3::ZERO;
-            ext_force.force = Vec3::ZERO;
-            ext_force.torque = Vec3::ZERO;
-        }
-    }
-
-    for (env, mut vel, mut groups) in body_parts.iter_mut() {
-        let g = grace_of(&training.envs, env.0);
-        if g == RESET_GRACE_TICKS {
-            *groups = CRAB_SETTLING_COLLISION;
-        } else if g == 1 {
-            *groups = CRAB_COLLISION;
-        }
-        if pin(g) {
-            vel.linear = Vec3::ZERO;
-            vel.angular = Vec3::ZERO;
+            let origin = spawns.0.get(e).copied().unwrap_or(Vec3::ZERO);
+            respawn_crab(
+                &mut commands,
+                &assets,
+                parts.iter().filter(|(_, id)| id.0 == e).map(|(ent, _)| ent),
+                origin,
+                e,
+            );
         }
     }
 

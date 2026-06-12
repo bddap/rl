@@ -4,3 +4,4 @@
 .cargo-home/
 .sandbox-env
 *.png
+vendor/

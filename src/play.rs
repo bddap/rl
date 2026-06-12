@@ -24,12 +24,10 @@ use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::Tensor;
 use rand::Rng;
 
-use crate::bot::BotSet;
 use crate::bot::actuator::CrabActions;
-use crate::bot::body::{
-    CRAB_COLLISION, CRAB_SETTLING_COLLISION, CrabBodyPart, CrabCarapace, CrabJoint, SPAWN_HEIGHT,
-};
+use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
+use crate::bot::{BotSet, CrabSpawns, respawn_crab};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 use crate::training::session::{
     BRAIN_STEM, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend,
@@ -154,7 +152,10 @@ impl Plugin for DemoPlugin {
         app.init_resource::<DemoSettle>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_hud))
             .add_systems(Update, (orbit_camera, demo_controls))
-            .add_systems(FixedUpdate, demo_settle.after(BotSet::Think));
+            .add_systems(
+                FixedUpdate,
+                (demo_settle.after(BotSet::Think), demo_fall_rescue),
+            );
     }
 }
 
@@ -276,47 +277,43 @@ fn orbit_camera(
     *transform = camera_transform(&orbit);
 }
 
-/// Settle ticks remaining after an R-reset. The multibody's generalized
-/// (joint-space) velocities are not publicly writable in rapier 0.32, so
-/// zeroing the `Velocity` components can't actually stop the limbs — without
-/// a settle, the crab keeps its internal momentum through the teleport
-/// (visibly "reset fails to reset velocity"). This mirrors the training
-/// reset: motors hold the rest pose contact-free for ~1 s, then collisions
-/// return and velocities are zeroed once at the handoff.
+/// Settle ticks remaining after a reset. The respawned crab starts in the
+/// rest pose with the builder motors already holding it; the settle just
+/// holds zero actions while it drops onto the ground and takes load.
 #[derive(Resource, Default)]
 struct DemoSettle(u32);
 
-const DEMO_SETTLE_TICKS: u32 = 64;
+const DEMO_SETTLE_TICKS: u32 = 32;
 
-/// Carapace state touched by reset/settle: pose, velocity, force, contacts.
-type DemoCarapaceQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static mut Transform,
-        &'static mut Velocity,
-        &'static mut ExternalForce,
-        &'static mut CollisionGroups,
-    ),
-    With<CrabCarapace>,
->;
-
-/// Limb state touched by reset/settle: velocity pinning + contact swap.
-type DemoPartsQuery<'w, 's> = Query<
-    'w,
-    's,
-    (&'static mut Velocity, &'static mut CollisionGroups),
-    (With<CrabBodyPart>, Without<CrabCarapace>),
->;
+/// Demo reset: rebuild the crab fresh at spawn — the only reset that
+/// survives a corrupted multibody (see [`respawn_crab`]) — and hold zero
+/// actions while it takes load.
+fn demo_respawn(
+    commands: &mut Commands,
+    assets: &CrabAssets,
+    spawns: &CrabSpawns,
+    parts: impl Iterator<Item = Entity>,
+    settle: &mut DemoSettle,
+    actions: &mut CrabActions,
+) {
+    let origin = spawns.0.first().copied().unwrap_or(Vec3::ZERO);
+    respawn_crab(commands, assets, parts, origin, 0);
+    settle.0 = DEMO_SETTLE_TICKS;
+    if let Some(a) = actions.envs.first_mut() {
+        *a = [0.0; ACTION_SIZE];
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn demo_controls(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     mut exit: MessageWriter<AppExit>,
-    mut carapace_q: DemoCarapaceQuery,
-    mut parts_q: DemoPartsQuery,
-    mut joints_q: Query<(&CrabJoint, &mut MultibodyJoint)>,
+    mut commands: Commands,
+    assets: Res<CrabAssets>,
+    spawns: Res<CrabSpawns>,
+    parts_q: Query<Entity, With<CrabBodyPart>>,
+    mut poke_q: Query<&mut Velocity, With<CrabCarapace>>,
     mut actions: ResMut<CrabActions>,
     mut settle: ResMut<DemoSettle>,
 ) {
@@ -333,35 +330,16 @@ fn demo_controls(
         exit.write(AppExit::Success);
     }
     if reset {
-        // Teleport up with the dying pose, drop self-collision, and let the
-        // rest motors unfold the limbs for DEMO_SETTLE_TICKS.
-        if let Ok((mut transform, mut vel, mut ext_force, mut groups)) = carapace_q.single_mut() {
-            transform.translation = Vec3::new(0.0, SPAWN_HEIGHT + 0.25, 0.0);
-            transform.rotation = Quat::IDENTITY;
-            vel.linear = Vec3::ZERO;
-            vel.angular = Vec3::ZERO;
-            ext_force.force = Vec3::ZERO;
-            ext_force.torque = Vec3::ZERO;
-            *groups = CRAB_SETTLING_COLLISION;
-        }
-        for (mut vel, mut groups) in parts_q.iter_mut() {
-            vel.linear = Vec3::ZERO;
-            vel.angular = Vec3::ZERO;
-            *groups = CRAB_SETTLING_COLLISION;
-        }
-        for (crab_joint, mut mj) in joints_q.iter_mut() {
-            let (stiffness, damping) = crab_joint.id.motor_stiffness_damping();
-            let axis = crab_joint.id.joint_axis();
-            let generic: &mut GenericJoint = mj.data.as_mut();
-            generic.set_motor_position(axis, crab_joint.id.default_position(), stiffness, damping);
-            generic.set_motor_max_force(axis, crab_joint.id.motor_max_force());
-        }
-        settle.0 = DEMO_SETTLE_TICKS;
-        if let Some(a) = actions.envs.first_mut() {
-            *a = [0.0; ACTION_SIZE];
-        }
+        demo_respawn(
+            &mut commands,
+            &assets,
+            &spawns,
+            parts_q.iter(),
+            &mut settle,
+            &mut actions,
+        );
     }
-    if poke && let Ok((_, mut vel, _, _)) = carapace_q.single_mut() {
+    if poke && let Ok(mut vel) = poke_q.single_mut() {
         let mut rng = rand::thread_rng();
         let shove = Vec3::new(rng.gen_range(-1.0..1.0), 0.25, rng.gen_range(-1.0..1.0))
             .normalize_or_zero()
@@ -371,34 +349,41 @@ fn demo_controls(
     }
 }
 
-/// System (FixedUpdate, after Think): while a demo settle is active, hold
-/// zero actions so the motors pull to rest, and on the final tick restore
-/// self-collision and zero what's zeroable for a clean episode-style handoff.
-fn demo_settle(
-    mut settle: ResMut<DemoSettle>,
+/// System: the arena is finite and the policy can walk off it. A crab in
+/// free fall under the world is lost to the viewer — rebuild it at spawn,
+/// same as a training episode reset would.
+fn demo_fall_rescue(
+    mut commands: Commands,
+    assets: Res<CrabAssets>,
+    spawns: Res<CrabSpawns>,
+    parts_q: Query<Entity, With<CrabBodyPart>>,
+    carapace_q: Query<&Transform, With<CrabCarapace>>,
     mut actions: ResMut<CrabActions>,
-    mut carapace_q: DemoCarapaceQuery,
-    mut parts_q: DemoPartsQuery,
+    mut settle: ResMut<DemoSettle>,
 ) {
+    let Ok(t) = carapace_q.single() else { return };
+    if t.translation.y > -2.0 {
+        return;
+    }
+    demo_respawn(
+        &mut commands,
+        &assets,
+        &spawns,
+        parts_q.iter(),
+        &mut settle,
+        &mut actions,
+    );
+}
+
+/// System (FixedUpdate, after Think): while a demo settle is active, hold
+/// zero actions so the motors keep the rest pose while the fresh crab takes
+/// load.
+fn demo_settle(mut settle: ResMut<DemoSettle>, mut actions: ResMut<CrabActions>) {
     if settle.0 == 0 {
         return;
     }
     if let Some(a) = actions.envs.first_mut() {
         *a = [0.0; ACTION_SIZE];
-    }
-    if settle.0 == 1 {
-        for (_, mut vel, mut ext_force, mut groups) in carapace_q.iter_mut() {
-            vel.linear = Vec3::ZERO;
-            vel.angular = Vec3::ZERO;
-            ext_force.force = Vec3::ZERO;
-            ext_force.torque = Vec3::ZERO;
-            *groups = CRAB_COLLISION;
-        }
-        for (mut vel, mut groups) in parts_q.iter_mut() {
-            vel.linear = Vec3::ZERO;
-            vel.angular = Vec3::ZERO;
-            *groups = CRAB_COLLISION;
-        }
     }
     settle.0 -= 1;
 }
