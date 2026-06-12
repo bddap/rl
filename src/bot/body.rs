@@ -258,16 +258,18 @@ impl CrabJointId {
     }
 
     /// Returns the Rapier joint axis for this DOF.
-    /// Must match the axis used in the RevoluteJointBuilder / PrismaticJointBuilder.
+    ///
+    /// NOT the world axis the builder was given: `RevoluteJointBuilder::new(axis)`
+    /// rotates the joint's local frame so its X axis lines up with `axis`, and
+    /// the joint's one free DOF — the slot limits and motors must target — is
+    /// always `AngX` of that frame (`LinX` for prismatic). Motors set on any
+    /// other axis land on a locked axis and are silently dropped by the solver
+    /// (`motor_axes & !locked_axes`), leaving the spawn rest-pose motor in
+    /// charge forever.
     pub fn joint_axis(&self) -> JointAxis {
         match self {
-            CrabJointId::LegCoxa(_, _) => JointAxis::AngY, // RevoluteJointBuilder::new(Vec3::Y)
-            CrabJointId::LegFemur(_, _) => JointAxis::AngZ, // RevoluteJointBuilder::new(Vec3::Z)
-            CrabJointId::LegTibia(_, _) => JointAxis::AngZ, // RevoluteJointBuilder::new(Vec3::Z)
-            CrabJointId::ClawUpper(_) => JointAxis::AngZ,  // RevoluteJointBuilder::new(Vec3::Z)
-            CrabJointId::ClawFore(_) => JointAxis::AngY,   // RevoluteJointBuilder::new(Vec3::Y)
-            CrabJointId::ClawPincer(_) => JointAxis::LinZ, // PrismaticJointBuilder::new(Vec3::Z)
-            CrabJointId::EyeStalk(_) => JointAxis::AngX,   // RevoluteJointBuilder::new(Vec3::X)
+            CrabJointId::ClawPincer(_) => JointAxis::LinX,
+            _ => JointAxis::AngX,
         }
     }
 

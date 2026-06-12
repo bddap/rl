@@ -2,6 +2,8 @@ pub mod actuator;
 pub mod body;
 pub mod brain;
 pub mod sensor;
+#[cfg(test)]
+mod sim_truth_test;
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;
