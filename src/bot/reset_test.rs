@@ -96,6 +96,57 @@ fn despawn_respawn_survives_rapier_and_lands_sane() {
 }
 
 #[test]
+fn external_force_shoves_a_multibody_root() {
+    // Velocity writes to a multibody root are silently ignored — its velocity
+    // lives in the multibody's generalized coordinates, which the component
+    // writeback never touches (the demo's poke was a no-op for exactly that
+    // reason, issue #14). Per-link external FORCES, by contrast, are mapped
+    // through the body Jacobians into generalized accelerations. Pin the
+    // working channel: a sideways force burst on the settled crab must
+    // actually move it.
+    use bevy_rapier3d::prelude::ExternalForce;
+
+    let mut app = headless_app();
+    tick(&mut app, 192);
+
+    let x0 = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, With<CrabCarapace>>();
+        q.single(app.world()).expect("carapace").translation.x
+    };
+
+    // 70 N for 8 ticks (0.125 s), the demo poke's burst.
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut ExternalForce, With<CrabCarapace>>();
+        let mut f = q.single_mut(app.world_mut()).expect("carapace force");
+        f.force = Vec3::new(70.0, 0.0, 0.0);
+    }
+    tick(&mut app, 8);
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut ExternalForce, With<CrabCarapace>>();
+        let mut f = q.single_mut(app.world_mut()).expect("carapace force");
+        f.force = Vec3::ZERO;
+    }
+    tick(&mut app, 16);
+
+    let x1 = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, With<CrabCarapace>>();
+        q.single(app.world()).expect("carapace").translation.x
+    };
+    assert!(
+        x1 - x0 > 0.05,
+        "a 70 N / 0.125 s shove must visibly move the crab: x {x0:+.3} -> {x1:+.3}"
+    );
+}
+
+#[test]
 fn rescue_system_recovers_a_nan_poisoned_crab() {
     let mut app = headless_app();
     tick(&mut app, 192);
