@@ -7410,7 +7410,7 @@ checksum = "973443cf09a9c8656b574a866ab68dfa19f0867d0340648c7d2f6a71b8a8ea68"
 [[package]]
 name = "rapier3d"
 version = "0.32.0"
-source = "git+https://github.com/bddap-bot/rapier?rev=89383d33f5f0b6459d559bc345de440ad2fff467#89383d33f5f0b6459d559bc345de440ad2fff467"
+source = "git+https://github.com/bddap-bot/rapier?rev=3ccc03d91ec0cff7ddd370c8e9a34240991f9875#3ccc03d91ec0cff7ddd370c8e9a34240991f9875"
 dependencies = [
  "approx",
  "arrayvec",
