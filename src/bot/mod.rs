@@ -1,11 +1,12 @@
 pub mod actuator;
 pub mod body;
 pub mod brain;
-pub mod sensor;
 #[cfg(test)]
 mod reset_test;
+pub mod sensor;
 #[cfg(test)]
 mod sim_truth_test;
+pub mod skin;
 #[cfg(test)]
 mod test_util;
 
@@ -72,12 +73,19 @@ impl Plugin for BotPlugin {
             .init_resource::<body::CrabAssets>()
             .add_message::<CrabRescued>()
             .add_systems(Startup, spawn_initial_crabs)
-            .add_systems(
-                FixedUpdate,
-                rescue_nonfinite_crabs.before(BotSet::Sense),
-            )
+            .add_systems(FixedUpdate, rescue_nonfinite_crabs.before(BotSet::Sense))
             .add_systems(FixedUpdate, sensor::build_observation.in_set(BotSet::Sense))
             .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act));
+
+        // The optional skinned model only makes sense with rendering on; in
+        // headless training there is no AssetServer to load it with.
+        if app
+            .world()
+            .get_resource::<crate::Visuals>()
+            .is_some_and(|v| v.0)
+        {
+            skin::register(app);
+        }
     }
 }
 

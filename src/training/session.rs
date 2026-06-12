@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use crate::Args;
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
-use crate::bot::{CrabRescued, CrabSpawns, respawn_crab};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
+use crate::bot::{CrabRescued, CrabSpawns, respawn_crab};
 
 use super::algorithm::{
     PpoConfig, PpoMetrics, RolloutBuffer, Transition, compute_gae, compute_log_prob, sample_action,
@@ -604,6 +604,7 @@ fn compute_reward(mean_eye_height: f32, energy: f32) -> f32 {
 }
 
 /// System: runs the brain to produce actions each physics step.
+#[allow(clippy::too_many_arguments)]
 pub fn brain_step(
     mut training: NonSendMut<TrainingState>,
     obs: Res<CrabObservation>,
@@ -824,7 +825,14 @@ pub fn brain_step(
                 let buffered: usize = training.rollouts.iter().map(|b| b.len()).sum();
                 info!(
                     "Ep {} | Avg reward: {:.2} | Steps: {} | Height: {:.2} | Upright: {:.2} | Energy: {:.0} | Buffer: {} | {:.0} steps/s",
-                    training.episode_count, avg, ep_steps, ep_height, ep_upright, ep_energy, buffered, sps,
+                    training.episode_count,
+                    avg,
+                    ep_steps,
+                    ep_height,
+                    ep_upright,
+                    ep_energy,
+                    buffered,
+                    sps,
                 );
             }
         }
@@ -959,9 +967,15 @@ mod tests {
         // otherwise the tax either distorts standing or fails to price
         // flailing. Pins ENERGY_COST's order of magnitude.
         let calm = compute_reward(0.5, 10.0);
-        assert!((calm - 0.5).abs() < 0.01, "standing must be ~untaxed: {calm}");
+        assert!(
+            (calm - 0.5).abs() < 0.01,
+            "standing must be ~untaxed: {calm}"
+        );
         let launch = compute_reward(3.0, 30_000.0);
-        assert!(launch < 0.5, "launch spike must not out-earn a stand: {launch}");
+        assert!(
+            launch < 0.5,
+            "launch spike must not out-earn a stand: {launch}"
+        );
     }
 
     #[test]
