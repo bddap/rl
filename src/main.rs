@@ -25,6 +25,10 @@ pub struct Args {
     #[arg(long)]
     demo: bool,
 
+    /// Run the demo in a window instead of the default borderless fullscreen.
+    #[arg(long)]
+    windowed: bool,
+
     /// Render one frame to this PNG and exit (windowless, GPU on). For inspecting
     /// the trained crab without a display.
     #[arg(long, value_name = "PATH")]
@@ -162,8 +166,24 @@ fn main() {
             ));
         }
         _ => {
-            // Windowed: train-with-viz or demo.
-            app.add_plugins(DefaultPlugins);
+            // Train-with-viz stays windowed; the demo defaults to borderless
+            // fullscreen (the Steam launch target is a couch screen) unless
+            // --windowed.
+            let fullscreen = matches!(mode, AppMode::Demo) && !args.windowed;
+            app.add_plugins(DefaultPlugins.set(bevy::window::WindowPlugin {
+                primary_window: Some(bevy::window::Window {
+                    title: "Crab RL".into(),
+                    mode: if fullscreen {
+                        bevy::window::WindowMode::BorderlessFullscreen(
+                            bevy::window::MonitorSelection::Primary,
+                        )
+                    } else {
+                        bevy::window::WindowMode::Windowed
+                    },
+                    ..default()
+                }),
+                ..default()
+            }));
             if matches!(mode, AppMode::Train) {
                 app.add_plugins(RapierDebugRenderPlugin::default());
             }
