@@ -7410,8 +7410,7 @@ checksum = "973443cf09a9c8656b574a866ab68dfa19f0867d0340648c7d2f6a71b8a8ea68"
 [[package]]
 name = "rapier3d"
 version = "0.32.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a576251c9dc2d6aff08470b7433096a04019c8b7bea9bbb7087f092c180feaea"
+source = "git+https://github.com/bddap-bot/rapier?rev=89383d33f5f0b6459d559bc345de440ad2fff467#89383d33f5f0b6459d559bc345de440ad2fff467"
 dependencies = [
  "approx",
  "arrayvec",

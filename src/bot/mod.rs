@@ -3,7 +3,11 @@ pub mod body;
 pub mod brain;
 pub mod sensor;
 #[cfg(test)]
+mod reset_test;
+#[cfg(test)]
 mod sim_truth_test;
+#[cfg(test)]
+mod test_util;
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;
@@ -66,10 +70,81 @@ impl Plugin for BotPlugin {
             .init_resource::<sensor::CrabObservation>()
             .init_resource::<CrabSpawns>()
             .init_resource::<body::CrabAssets>()
+            .add_message::<CrabRescued>()
             .add_systems(Startup, spawn_initial_crabs)
+            .add_systems(
+                FixedUpdate,
+                rescue_nonfinite_crabs.before(BotSet::Sense),
+            )
             .add_systems(FixedUpdate, sensor::build_observation.in_set(BotSet::Sense))
             .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act));
     }
+}
+
+/// Sent when [`rescue_nonfinite_crabs`] had to rebuild an env's crab.
+/// Training must treat it as an episode terminator: the replacement crab is
+/// back at spawn, and letting the episode run on would smear that teleport
+/// into the reward stream.
+#[derive(Message)]
+pub struct CrabRescued {
+    pub env: usize,
+}
+
+/// System: rebuilds any crab whose pose has gone non-finite (solver blowup,
+/// tunneling). Runs ahead of Sense — so observations never see NaN — and
+/// ahead of the physics sync, so the poisoned multibody is removed before
+/// rapier's solver touches it again: NaN joint coordinates make the motor
+/// constraint clamp on NaN bounds and panic the app. This catches corruption
+/// on the tick after it happens; a NaN that panics the solver within the very
+/// step that created it is still fatal, and the outer auto-resume loop is the
+/// backstop for that rarer case.
+pub fn rescue_nonfinite_crabs(
+    mut commands: Commands,
+    assets: Res<body::CrabAssets>,
+    spawns: Res<CrabSpawns>,
+    parts: Query<(Entity, &body::CrabEnvId, &Transform), With<body::CrabBodyPart>>,
+    mut rescued: MessageWriter<CrabRescued>,
+) {
+    let mut sick: Vec<usize> = Vec::new();
+    for (_, id, t) in parts.iter() {
+        if (!t.translation.is_finite() || !t.rotation.is_finite()) && !sick.contains(&id.0) {
+            sick.push(id.0);
+        }
+    }
+    for env in sick {
+        let origin = spawns.0.get(env).copied().unwrap_or(Vec3::ZERO);
+        respawn_crab(
+            &mut commands,
+            &assets,
+            parts
+                .iter()
+                .filter(|(_, id, _)| id.0 == env)
+                .map(|(e, _, _)| e),
+            origin,
+            env,
+        );
+        rescued.write(CrabRescued { env });
+    }
+}
+
+/// Tears down every entity of one env's crab and spawns a fresh one at
+/// `origin`. This is the only reliable reset: rapier 0.32 cannot rewrite
+/// multibody joint coordinates in place, so a crab whose multibody state has
+/// gone non-finite (e.g. tunneled through the floor at speed) is
+/// unrecoverable by teleport-and-zero — the poisoned joint state survives any
+/// amount of Transform/Velocity writing and every "reset" reproduces the same
+/// wedged pose. Dropping the whole tree and rebuilding always works.
+pub fn respawn_crab(
+    commands: &mut Commands,
+    assets: &body::CrabAssets,
+    parts: impl Iterator<Item = Entity>,
+    origin: Vec3,
+    env: usize,
+) {
+    for e in parts {
+        commands.entity(e).despawn();
+    }
+    body::spawn_crab(commands, assets, origin, env);
 }
 
 fn spawn_initial_crabs(
