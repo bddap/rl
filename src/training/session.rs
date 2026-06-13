@@ -578,32 +578,37 @@ impl TrainingState {
     }
 }
 
-/// Energy penalty coefficient. Quadratic in angular speed — a calm stance costs
-/// ~nothing while gratuitous flailing is taxed. Direct torque drives the limbs
-/// far harder than the old position servos (random-policy Σω² is ~100k vs a few
-/// hundred), so this is scaled down accordingly. Provisional — tune from the
-/// per-episode Energy log once the policy-head init fix lets training settle
-/// (the early "helicopter" was an untrained-policy launch, not this tax being
-/// too weak).
-const ENERGY_COST: f32 = 1e-5;
+/// Height reward scale (S) and effort cost (K) in `reward = S·h − K·y`.
+/// K is small so a calm stand is barely taxed; the exponential effort term
+/// makes a saturated command (helicoptering, launching) expensive enough that
+/// standing wins. Provisional — tune from the per-episode effort log.
+const HEIGHT_SCALE: f32 = 1.0;
+const EFFORT_COST: f32 = 0.05;
 
-/// Reward: mean eye height minus an energy tax. Two signals, both global —
-/// behaviour still EMERGES rather than being hand-specified (owner's call:
-/// mechanical terms like "feet on the ground" don't scale).
+/// Per-output effort weight: `f(a) = e^|a| − 1`, summed over the action vector.
+/// Exponential (owner's call) so a gentle command costs ~nothing (f(0.1) ≈ 0.1)
+/// while a saturated one costs dearly (f(1) ≈ 1.72) — it prices the *commanded*
+/// torque directly, discouraging the max-torque flailing that spins a limb past
+/// the blow-up guard, rather than taxing the resulting motion after the fact.
+pub(crate) fn action_effort(actions: &[f32; ACTION_SIZE]) -> f32 {
+    actions
+        .iter()
+        .map(|a| a.clamp(-1.0, 1.0).abs().exp() - 1.0)
+        .sum()
+}
+
+/// Reward: mean eye height rewarded, commanded effort taxed —
+/// `reward = S·h − K·y`. Both signals are global, so behaviour still EMERGES
+/// rather than being hand-specified (owner's call: mechanical terms like "feet
+/// on the ground" don't scale).
 ///
 /// The eyes sit at the top of the kinematic chain (carapace → stalk → eye), so a
 /// high eye reading needs the carapace both LEVEL (stalks point up) and HIGH (legs
-/// extended underneath) — i.e. standing. Over a long (~25 s) episode the summed
-/// return favours SUSTAINED height.
-///
-/// `energy` is Σ|ω|² over every body part (world angular speed). It is a proxy
-/// for actuation effort, not true joint work — rapier 0.32 exposes neither joint
-/// torques nor multibody coordinates (coords() lands in 0.33), so segment
-/// angular speed is the most honest observable stand-in. Owner's goal is
-/// believable, economical movement ("flying is cool, but…"); the tax prices
-/// flailing without prescribing any gait.
-fn compute_reward(mean_eye_height: f32, energy: f32) -> f32 {
-    mean_eye_height - ENERGY_COST * energy
+/// extended underneath) — i.e. standing. Over a long episode the summed return
+/// favours SUSTAINED height. `effort` is [`action_effort`]: the policy is
+/// charged for how hard it commands, so flailing costs whatever motion it buys.
+fn compute_reward(mean_eye_height: f32, effort: f32) -> f32 {
+    HEIGHT_SCALE * mean_eye_height - EFFORT_COST * effort
 }
 
 /// System: runs the brain to produce actions each physics step.
@@ -749,6 +754,8 @@ pub fn brain_step(
             s.1 += 1;
         }
     }
+    // Commanded effort this step (the reward's tax term), per env.
+    let efforts: Vec<f32> = action_arrays.iter().map(action_effort).collect();
 
     // Per-env reward, termination, rollout push, and episode bookkeeping.
     for e in 0..n {
@@ -758,10 +765,10 @@ pub fn brain_step(
             continue;
         }
         let (reward, done, height, upright) = if let Some((height, upright)) = poses[e] {
-            // Mean world-space height of the eye tips, taxed by Σω².
+            // Mean world-space height of the eye tips, taxed by commanded effort.
             let (sum, cnt) = eye_sums[e];
             let mean_eye_height = if cnt > 0 { sum / cnt as f32 } else { height };
-            let r = compute_reward(mean_eye_height, energies[e]);
+            let r = compute_reward(mean_eye_height, efforts[e]);
             // Termination is survival guards only — jumping, flipping, and
             // any other strategy the policy invents are legitimate solutions
             // (owner call: emergent behavior is the point). The height band
@@ -965,22 +972,22 @@ mod tests {
     }
 
     #[test]
-    fn energy_tax_calibration() {
-        // Pins ENERGY_COST's order of magnitude for the torque regime: a calm
-        // stance (Σω² ~ 100) costs a rounding error against its height signal,
-        // while explosion-grade violence (Σω² ~ 1e6, far past any real motion)
-        // is net-negative no matter how high it flings the eyes. The rear-vs-
-        // stand balance in between is the open tuning question, deliberately
-        // not asserted here.
-        let calm = compute_reward(0.5, 100.0);
+    fn effort_cost_calibration() {
+        // A still policy (zero command) pays no effort tax, so its reward is
+        // pure height; a fully-saturated command (max torque on every joint —
+        // what launching/helicoptering takes) is taxed enough to go net-negative
+        // even at a stand's height. The exact rear-vs-stand balance in between is
+        // the open tuning question, deliberately not asserted.
+        let still = compute_reward(0.5, action_effort(&[0.0; ACTION_SIZE]));
         assert!(
-            (calm - 0.5).abs() < 0.01,
-            "standing must be ~untaxed: {calm}"
+            (still - 0.5).abs() < 1e-6,
+            "a still policy is untaxed: {still}"
         );
-        let explosion = compute_reward(3.0, 1_000_000.0);
+
+        let saturated = compute_reward(1.2, action_effort(&[1.0; ACTION_SIZE]));
         assert!(
-            explosion < 0.0,
-            "explosion-grade violence must be net-negative: {explosion}"
+            saturated < 0.0,
+            "max-torque-everywhere must be net-negative at stand height: {saturated}"
         );
     }
 
