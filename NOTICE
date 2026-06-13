@@ -1,0 +1,21 @@
+Third-party assets
+==================
+
+This project's own source code is licensed under the repository's terms, which
+cover the code only. Optional art assets the code can load are licensed
+separately by their authors and are NOT redistributed in this repository.
+
+Sally Lightfoot crab model (sally.glb / grapsus_grapsus_crab_280.blend)
+-----------------------------------------------------------------------
+Purchased from Superhive (Blender Market). Royalty-free for use in a shipped
+product, but redistribution of the source asset is not permitted — so it is
+not committed here. The build falls back to the primitive-mesh crab when the
+asset is absent, so `cargo run` works with no purchase.
+
+To use the model if you own it, fetch it into `assets/` (gitignored):
+
+    scripts/fetch-sally.sh        # pulls from the private bddap-bot/rl-assets release
+
+then run with `CRAB_MODEL_PATH=sally.glb`. The Steam demo binary may bake the
+model in (incorporated into the product, which the license allows); the loose
+file never enters this public repo.
