@@ -10,8 +10,6 @@
 //! #927) is about removing joints from a live multibody; dropping the whole
 //! tree at once must work, and the first test pins exactly that.
 
-#![cfg(test)]
-
 use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
@@ -53,22 +51,21 @@ fn respawn_env0(app: &mut App) {
         .expect("respawn system");
 }
 
-/// A healthy, settled crab: every part finite and near the spawn point, body
-/// standing at roughly rest height.
+/// A healthy crab after a reset: every part finite and near the spawn point,
+/// the body resting on the ground. There's no position servo now, so an
+/// un-driven crab collapses rather than standing — "sane" means intact and
+/// grounded, not upright.
 fn assert_crab_sane(app: &mut App, n_parts: usize, context: &str) {
     let translations = part_translations(app);
     assert_eq!(translations.len(), n_parts, "{context}: part count");
     for t in &translations {
         assert!(t.is_finite(), "{context}: non-finite part at {t:?}");
-        assert!(
-            t.length() < 3.0,
-            "{context}: part {t:?} far from spawn"
-        );
+        assert!(t.length() < 3.0, "{context}: part {t:?} far from spawn");
     }
     let h = carapace_height(app);
     assert!(
-        (0.3..0.9).contains(&h),
-        "{context}: carapace height {h} not a stand"
+        (-0.2..1.5).contains(&h),
+        "{context}: carapace height {h} not grounded (tunneled or launched)"
     );
     assert_transforms_match_rapier(app);
 }
@@ -76,7 +73,7 @@ fn assert_crab_sane(app: &mut App, n_parts: usize, context: &str) {
 #[test]
 fn despawn_respawn_survives_rapier_and_lands_sane() {
     let mut app = headless_app();
-    tick(&mut app, 192); // settle into the motor-held stance
+    tick(&mut app, 192); // let the spawned crab settle onto the ground
 
     let n_parts = part_translations(&mut app).len();
     assert!(n_parts > 10, "expected a whole crab, got {n_parts} parts");
@@ -95,51 +92,57 @@ fn despawn_respawn_survives_rapier_and_lands_sane() {
     assert_crab_sane(&mut app, n_parts, "after respawn");
 }
 
+/// Sideways shove to add to the carapace, after the actuator has written its
+/// torques — the channel the demo poke uses.
+#[derive(Resource, Default)]
+struct TestShove(Vec3);
+
+fn apply_test_shove(
+    shove: Res<TestShove>,
+    mut q: Query<&mut bevy_rapier3d::prelude::ExternalForce, With<CrabCarapace>>,
+) {
+    if let Ok(mut f) = q.single_mut() {
+        f.force += shove.0;
+    }
+}
+
 #[test]
 fn external_force_shoves_a_multibody_root() {
     // Velocity writes to a multibody root are silently ignored — its velocity
     // lives in the multibody's generalized coordinates, which the component
     // writeback never touches (the demo's poke was a no-op for exactly that
     // reason, issue #14). Per-link external FORCES, by contrast, are mapped
-    // through the body Jacobians into generalized accelerations. Pin the
-    // working channel: a sideways force burst on the settled crab must
-    // actually move it.
-    use bevy_rapier3d::prelude::ExternalForce;
+    // through the body Jacobians into generalized accelerations. The actuator
+    // now overwrites every part's ExternalForce each step, so a shove has to be
+    // *added* after it runs (the demo poke's path); pin that the shove moves
+    // the root.
+    use bevy_rapier3d::plugin::PhysicsSet;
 
     let mut app = headless_app();
+    app.init_resource::<TestShove>();
+    app.add_systems(
+        FixedUpdate,
+        apply_test_shove
+            .after(crate::bot::BotSet::Act)
+            .before(PhysicsSet::SyncBackend),
+    );
     tick(&mut app, 192);
 
-    let x0 = {
+    let carapace_x = |app: &mut App| {
         let mut q = app
             .world_mut()
             .query_filtered::<&Transform, With<CrabCarapace>>();
         q.single(app.world()).expect("carapace").translation.x
     };
+    let x0 = carapace_x(&mut app);
 
     // 70 N for 8 ticks (0.125 s), the demo poke's burst.
-    {
-        let mut q = app
-            .world_mut()
-            .query_filtered::<&mut ExternalForce, With<CrabCarapace>>();
-        let mut f = q.single_mut(app.world_mut()).expect("carapace force");
-        f.force = Vec3::new(70.0, 0.0, 0.0);
-    }
+    app.world_mut().resource_mut::<TestShove>().0 = Vec3::new(70.0, 0.0, 0.0);
     tick(&mut app, 8);
-    {
-        let mut q = app
-            .world_mut()
-            .query_filtered::<&mut ExternalForce, With<CrabCarapace>>();
-        let mut f = q.single_mut(app.world_mut()).expect("carapace force");
-        f.force = Vec3::ZERO;
-    }
+    app.world_mut().resource_mut::<TestShove>().0 = Vec3::ZERO;
     tick(&mut app, 16);
 
-    let x1 = {
-        let mut q = app
-            .world_mut()
-            .query_filtered::<&Transform, With<CrabCarapace>>();
-        q.single(app.world()).expect("carapace").translation.x
-    };
+    let x1 = carapace_x(&mut app);
     assert!(
         x1 - x0 > 0.05,
         "a 70 N / 0.125 s shove must visibly move the crab: x {x0:+.3} -> {x1:+.3}"

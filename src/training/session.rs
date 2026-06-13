@@ -578,11 +578,15 @@ impl TrainingState {
     }
 }
 
-/// Energy penalty coefficient. Quadratic in angular speed, so a calm stance or
-/// a slow step costs ~nothing (Σω² ≈ 10 → penalty 0.001) while a violent launch
-/// spike (limbs at 30+ rad/s, Σω² ≈ 30k) costs more than the height it buys.
-/// First cut — tune from the per-episode Energy log, not by eye.
-const ENERGY_COST: f32 = 1e-4;
+/// Energy penalty coefficient. Quadratic in angular speed. Direct torque
+/// control drives the limbs ~200x harder than the old position servos did
+/// (random-policy Σω² ≈ 100k now vs a few hundred before), so the coefficient
+/// is scaled down to match: at 1e-5 a random flail (Σω² ≈ 100k) costs ~1/step
+/// — about what a clean stand earns in eye height, so flailing roughly breaks
+/// even and a calm stand (Σω² in the low thousands → penalty ≈ 0.01) clearly
+/// wins, without the penalty so harsh the policy just goes limp. Provisional —
+/// tune from the per-episode Energy log once training settles.
+const ENERGY_COST: f32 = 1e-5;
 
 /// Reward: mean eye height minus an energy tax. Two signals, both global —
 /// behaviour still EMERGES rather than being hand-specified (owner's call:
@@ -763,11 +767,13 @@ pub fn brain_step(
             // any other strategy the policy invents are legitimate solutions
             // (owner call: emergent behavior is the point). The height band
             // is sim sanity (clipped through the floor / left the playfield),
-            // not a behavior bound. The blowup check isn't shaping either:
-            // the acceleration-based motors can pump in energy until the
-            // solver NaNs and Rapier panics the whole app — ending the
-            // episode resets velocities before it gets there.
-            let blowing_up = max_speeds[e] > 30.0 || !height.is_finite();
+            // not a behavior bound. The blowup check only catches a genuine
+            // numerical explosion before the solver NaNs and Rapier panics the
+            // whole app; the threshold is high because direct torque is bounded
+            // (no acceleration-motor energy pump), so ordinary vigorous,
+            // limb-flinging motion is legal — only a part moving at clearly
+            // unphysical speed ends the episode.
+            let blowing_up = max_speeds[e] > 100.0 || !height.is_finite();
             let done = !(0.02..=50.0).contains(&height)
                 || blowing_up
                 || training.envs[e].steps > 1500
@@ -961,20 +967,21 @@ mod tests {
 
     #[test]
     fn energy_tax_calibration() {
-        // A calm stance (Σω² ~ 10) must cost a rounding error relative to its
-        // height signal, while launch-grade violence (limbs near the 30 rad/s
-        // blowup guard, Σω² ~ 30k) must cost more than the height it buys —
-        // otherwise the tax either distorts standing or fails to price
-        // flailing. Pins ENERGY_COST's order of magnitude.
-        let calm = compute_reward(0.5, 10.0);
+        // Pins ENERGY_COST's order of magnitude for the torque regime: a calm
+        // stance (Σω² ~ 100) costs a rounding error against its height signal,
+        // while explosion-grade violence (Σω² ~ 1e6, far past any real motion)
+        // is net-negative no matter how high it flings the eyes. The rear-vs-
+        // stand balance in between is the open tuning question, deliberately
+        // not asserted here.
+        let calm = compute_reward(0.5, 100.0);
         assert!(
             (calm - 0.5).abs() < 0.01,
             "standing must be ~untaxed: {calm}"
         );
-        let launch = compute_reward(3.0, 30_000.0);
+        let explosion = compute_reward(3.0, 1_000_000.0);
         assert!(
-            launch < 0.5,
-            "launch spike must not out-earn a stand: {launch}"
+            explosion < 0.0,
+            "explosion-grade violence must be net-negative: {explosion}"
         );
     }
 
