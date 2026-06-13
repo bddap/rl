@@ -17,6 +17,7 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
+use bevy_rapier3d::plugin::PhysicsSet;
 use bevy_rapier3d::prelude::*;
 use burn::backend::ndarray::NdArrayDevice;
 use burn::module::{AutodiffModule, Module};
@@ -159,7 +160,7 @@ impl Plugin for DemoPlugin {
                 (
                     demo_settle.after(BotSet::Think),
                     demo_fall_rescue,
-                    demo_poke,
+                    demo_poke.after(BotSet::Act).before(PhysicsSet::SyncBackend),
                 ),
             );
     }
@@ -309,23 +310,24 @@ const POKE_TICKS: u32 = 8;
 const POKE_FORCE: f32 = 70.0;
 const POKE_TORQUE: f32 = 4.0;
 
-/// System (FixedUpdate): applies the active poke burst to the carapace and
-/// zeroes the force when the burst ends.
+/// System (FixedUpdate, after the actuator): adds the active poke burst on top
+/// of the carapace's joint-reaction torques. The actuator overwrites every
+/// link's `ExternalForce` each step, so the poke must run after it and *add*
+/// rather than set — and it needs no cleanup, the actuator zeroes the baseline
+/// next step.
 fn demo_poke(
     mut burst: ResMut<PokeBurst>,
     mut carapace_q: Query<&mut ExternalForce, With<CrabCarapace>>,
 ) {
+    if burst.ticks == 0 {
+        return;
+    }
+    burst.ticks -= 1;
     let Ok(mut f) = carapace_q.single_mut() else {
         return;
     };
-    if burst.ticks > 0 {
-        burst.ticks -= 1;
-        f.force = burst.force;
-        f.torque = burst.torque;
-    } else if f.force != Vec3::ZERO || f.torque != Vec3::ZERO {
-        f.force = Vec3::ZERO;
-        f.torque = Vec3::ZERO;
-    }
+    f.force += burst.force;
+    f.torque += burst.torque;
 }
 
 /// Demo reset: rebuild the crab fresh at spawn — the only reset that

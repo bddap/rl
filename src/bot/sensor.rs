@@ -1,8 +1,7 @@
 //! Builds the observation vector from physics state.
 //!
 //! The observation vector contains:
-//! - Per-joint: target position (last action), current angular velocity (3 floats per joint
-//!   would be ideal, but we approximate with 1 relevant component)
+//! - Per-joint: current joint angle and joint velocity magnitude
 //! - Body state: carapace position, orientation, linear/angular velocity
 //!
 //! For phase 1 (stand up), we don't need enemy state.
@@ -11,11 +10,10 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 use super::CrabSpawns;
-use super::actuator::CrabActions;
-use super::body::{CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
+use super::body::{CrabCarapace, CrabEnvId, CrabJoint, CrabJointId, joint_angle};
 
 /// Total observation size.
-/// Per-joint: 2 floats (last_action, joint_velocity_magnitude)
+/// Per-joint: 2 floats (joint_angle, joint_velocity_magnitude)
 /// Body: 3 (pos) + 4 (quat) + 3 (linvel) + 3 (angvel) = 13
 pub const OBS_SIZE: usize = CrabJointId::COUNT * 2 + 13;
 
@@ -34,29 +32,35 @@ impl CrabObservation {
 
 /// System that builds every env's observation vector each frame.
 pub fn build_observation(
-    actions: Res<CrabActions>,
     spawns: Res<CrabSpawns>,
     mut obs: ResMut<CrabObservation>,
     carapace_q: Query<(&CrabEnvId, &Transform, &Velocity), With<CrabCarapace>>,
-    joint_q: Query<(&CrabJoint, &CrabEnvId, &Velocity)>,
+    joint_q: Query<(
+        &CrabJoint,
+        &CrabEnvId,
+        &MultibodyJoint,
+        &Transform,
+        &Velocity,
+    )>,
+    transforms: Query<&Transform>,
 ) {
     for v in obs.envs.iter_mut() {
         *v = [0.0; OBS_SIZE];
     }
 
     // -- Per-joint observations ------------------------------------------------
-    for (crab_joint, env, vel) in joint_q.iter() {
-        let Some(acts) = actions.envs.get(env.0) else {
-            continue;
-        };
+    for (crab_joint, env, mj, transform, vel) in joint_q.iter() {
         let Some(v) = obs.envs.get_mut(env.0) else {
             continue;
         };
         let idx = crab_joint.id.index();
         let base = idx * 2;
 
-        // Last action (what the NN commanded)
-        v[base] = acts[idx];
+        // Current joint angle (the coordinate the policy now controls by torque).
+        v[base] = match transforms.get(mj.parent) {
+            Ok(parent) => joint_angle(crab_joint.id, parent.rotation, transform.rotation),
+            Err(_) => 0.0,
+        };
 
         // Joint velocity: use the DOF-appropriate velocity.
         // Prismatic joints (ClawPincer) → linear velocity magnitude.

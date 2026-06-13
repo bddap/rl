@@ -1,8 +1,6 @@
 //! Shared harness for sim-level tests: a windowless, GPU-less app that runs
 //! the real physics + bot plugins one fixed tick per `app.update()`.
 
-#![cfg(test)]
-
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -60,16 +58,17 @@ pub fn tick(app: &mut App, n: u32) {
 /// Render truthfulness at the transform level: every crab body part's bevy
 /// `Transform` (what the mesh renders at) must equal rapier's rigid-body pose.
 pub fn assert_transforms_match_rapier(app: &mut App) {
-    let mut parts_q = app.world_mut().query_filtered::<(
+    let mut parts_q = app
+        .world_mut()
+        .query_filtered::<(Entity, &Transform, &RapierRigidBodyHandle), With<CrabBodyPart>>();
+    let parts: Vec<(
         Entity,
-        &Transform,
-        &RapierRigidBodyHandle,
-    ), With<CrabBodyPart>>();
-    let parts: Vec<(Entity, Transform, bevy_rapier3d::rapier::dynamics::RigidBodyHandle)> =
-        parts_q
-            .iter(app.world())
-            .map(|(e, t, h)| (e, *t, h.0))
-            .collect();
+        Transform,
+        bevy_rapier3d::rapier::dynamics::RigidBodyHandle,
+    )> = parts_q
+        .iter(app.world())
+        .map(|(e, t, h)| (e, *t, h.0))
+        .collect();
     assert!(!parts.is_empty());
 
     let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();

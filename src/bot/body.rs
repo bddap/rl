@@ -49,6 +49,19 @@ fn no_adjacent_contacts(joint: impl Into<TypedJoint>) -> TypedJoint {
     joint
 }
 
+/// Signed joint coordinate read off the two links' world orientations: the
+/// twist of child-in-parent about the joint's free axis. Shared by the
+/// observation and the telemetry overlay so both report the same angle the
+/// policy acts on. (The prismatic pincer barely twists, so it reads ~0 here;
+/// its open/close shows up in the velocity term instead — it is the one joint
+/// whose coordinate is a translation, and it is the least balance-relevant.)
+pub fn joint_angle(id: CrabJointId, parent_rot: Quat, child_rot: Quat) -> f32 {
+    let n = id.joint_axis_local();
+    let q = (parent_rot.inverse() * child_rot).normalize();
+    let v = Vec3::new(q.x, q.y, q.z);
+    2.0 * v.dot(n).atan2(q.w)
+}
+
 // ---------------------------------------------------------------------------
 // Dimensions — tuned for a ~1m wide crab (game scale, not real life)
 // ---------------------------------------------------------------------------
@@ -84,20 +97,28 @@ const _EYE_STALK_RAD: f32 = 0.02; // reserved for stalk mesh when we upgrade fro
 const EYE_BALL_RAD: f32 = 0.03;
 
 // ---------------------------------------------------------------------------
-// Motor parameters
+// Torque ceilings — the magnitude an action of ±1 commands on each joint type.
+// These are DIRECT-DRIVE torques (the policy's output is the torque), not the
+// force caps of a position servo, so they are an order of magnitude smaller
+// than the old motor ceilings: a leg holds its share of the body with a few
+// N·m, and anything near the old 100 N·m flings light limbs past the blow-up
+// speed guard in a step or two, so a random initial policy never gets an
+// episode long enough to learn from.
 // ---------------------------------------------------------------------------
 
-const LEG_STIFFNESS: f32 = 50.0;
-const LEG_DAMPING: f32 = 6.0;
-const LEG_MAX_FORCE: f32 = 100.0;
+const LEG_MAX_FORCE: f32 = 20.0;
+const CLAW_MAX_FORCE: f32 = 15.0;
+const EYE_MAX_FORCE: f32 = 2.0;
 
-const CLAW_STIFFNESS: f32 = 60.0;
-const CLAW_DAMPING: f32 = 8.0;
-const CLAW_MAX_FORCE: f32 = 150.0;
-
-const EYE_STIFFNESS: f32 = 25.0;
-const EYE_DAMPING: f32 = 5.0;
-const EYE_MAX_FORCE: f32 = 10.0;
+/// Viscous friction on every limb. Direct torque control has no position
+/// servo's derivative term to bleed off motion, so an un-damped limb just keeps
+/// accelerating under any torque until it hits a stop — light segments spin to
+/// absurd speeds and every episode trips the blow-up guard. A little angular
+/// damping stands in for real joint friction and makes the plant learnable.
+const LIMB_DAMPING: Damping = Damping {
+    linear_damping: 0.5,
+    angular_damping: 4.0,
+};
 
 // ---------------------------------------------------------------------------
 // Marker components for querying
@@ -237,30 +258,23 @@ impl CrabJointId {
 }
 
 impl CrabJointId {
-    /// Returns (stiffness, damping) for this joint's PD motor.
-    pub fn motor_stiffness_damping(&self) -> (f32, f32) {
+    /// The joint's free axis as a unit vector in the PARENT link's local frame
+    /// — exactly the vector handed to `RevoluteJointBuilder::new` / the
+    /// prismatic builder at spawn. Rotate it by the parent's world rotation to
+    /// get the world axis a torque/force acts along, or to read the joint angle
+    /// off the relative orientation. The left/right sign is baked in (the same
+    /// action mirrors correctly across the body), so it is the single source
+    /// for axis direction shared by the actuator, the sensor, and the overlay.
+    pub fn joint_axis_local(&self) -> Vec3 {
         match self {
-            CrabJointId::EyeStalk(_) => (EYE_STIFFNESS, EYE_DAMPING),
-            CrabJointId::ClawUpper(_) | CrabJointId::ClawFore(_) | CrabJointId::ClawPincer(_) => {
-                (CLAW_STIFFNESS, CLAW_DAMPING)
+            CrabJointId::LegCoxa(side, _) => Vec3::new(0.0, side_sign(*side), 0.0),
+            CrabJointId::LegFemur(side, _) | CrabJointId::LegTibia(side, _) => {
+                Vec3::new(0.0, 0.0, side_sign(*side))
             }
-            _ => (LEG_STIFFNESS, LEG_DAMPING),
-        }
-    }
-
-    /// Returns the Rapier joint axis for this DOF.
-    ///
-    /// NOT the world axis the builder was given: `RevoluteJointBuilder::new(axis)`
-    /// rotates the joint's local frame so its X axis lines up with `axis`, and
-    /// the joint's one free DOF — the slot limits and motors must target — is
-    /// always `AngX` of that frame (`LinX` for prismatic). Motors set on any
-    /// other axis land on a locked axis and are silently dropped by the solver
-    /// (`motor_axes & !locked_axes`), leaving the spawn rest-pose motor in
-    /// charge forever.
-    pub fn joint_axis(&self) -> JointAxis {
-        match self {
-            CrabJointId::ClawPincer(_) => JointAxis::LinX,
-            _ => JointAxis::AngX,
+            CrabJointId::ClawUpper(_) => Vec3::Z,
+            CrabJointId::ClawFore(_) => Vec3::Y,
+            CrabJointId::ClawPincer(_) => Vec3::Z,
+            CrabJointId::EyeStalk(_) => Vec3::X,
         }
     }
 
@@ -421,10 +435,7 @@ fn spawn_leg(
     let coxa_joint = RevoluteJointBuilder::new(Vec3::new(0.0, s, 0.0))
         .local_anchor1(Vec3::new(s * CARAPACE_HALF_W, -0.02, z))
         .local_anchor2(Vec3::new(-s * COXA_LEN, 0.0, 0.0))
-        .limits(coxa_id.limits())
-        .motor_position(coxa_id.default_position(), LEG_STIFFNESS, LEG_DAMPING)
-        .motor_max_force(LEG_MAX_FORCE)
-        .motor_model(MotorModel::AccelerationBased);
+        .limits(coxa_id.limits());
 
     let coxa = commands
         .spawn((
@@ -441,6 +452,8 @@ fn spawn_leg(
             MeshMaterial3d(assets.leg_mat.clone()),
             MultibodyJoint::new(carapace, no_adjacent_contacts(coxa_joint)),
             Velocity::default(),
+            ExternalForce::default(),
+            LIMB_DAMPING,
         ))
         .id();
 
@@ -450,10 +463,7 @@ fn spawn_leg(
     let femur_joint = RevoluteJointBuilder::new(Vec3::new(0.0, 0.0, s))
         .local_anchor1(Vec3::new(s * COXA_LEN, 0.0, 0.0))
         .local_anchor2(Vec3::new(0.0, FEMUR_LEN, 0.0))
-        .limits(femur_id.limits())
-        .motor_position(femur_id.default_position(), LEG_STIFFNESS, LEG_DAMPING)
-        .motor_max_force(LEG_MAX_FORCE)
-        .motor_model(MotorModel::AccelerationBased);
+        .limits(femur_id.limits());
 
     let femur = commands
         .spawn((
@@ -470,6 +480,8 @@ fn spawn_leg(
             MeshMaterial3d(assets.leg_mat.clone()),
             MultibodyJoint::new(coxa, no_adjacent_contacts(femur_joint)),
             Velocity::default(),
+            ExternalForce::default(),
+            LIMB_DAMPING,
         ))
         .id();
 
@@ -479,10 +491,7 @@ fn spawn_leg(
     let tibia_joint = RevoluteJointBuilder::new(Vec3::new(0.0, 0.0, s))
         .local_anchor1(Vec3::new(0.0, -FEMUR_LEN, 0.0))
         .local_anchor2(Vec3::new(0.0, TIBIA_LEN, 0.0))
-        .limits(tibia_id.limits())
-        .motor_position(tibia_id.default_position(), LEG_STIFFNESS, LEG_DAMPING)
-        .motor_max_force(LEG_MAX_FORCE)
-        .motor_model(MotorModel::AccelerationBased);
+        .limits(tibia_id.limits());
 
     commands.spawn((
         CrabBodyPart,
@@ -499,6 +508,8 @@ fn spawn_leg(
         MultibodyJoint::new(femur, no_adjacent_contacts(tibia_joint)),
         Friction::coefficient(1.5), // grippy feet
         Velocity::default(),
+        ExternalForce::default(),
+        LIMB_DAMPING,
     ));
 }
 
@@ -522,14 +533,7 @@ fn spawn_claw(
     let upper_joint = RevoluteJointBuilder::new(Vec3::Z)
         .local_anchor1(attach_point)
         .local_anchor2(Vec3::new(0.0, -CLAW_UPPER_LEN * 0.5, 0.0))
-        .limits(CrabJointId::ClawUpper(side).limits())
-        .motor_position(
-            CrabJointId::ClawUpper(side).default_position(),
-            CLAW_STIFFNESS,
-            CLAW_DAMPING,
-        )
-        .motor_max_force(CLAW_MAX_FORCE)
-        .motor_model(MotorModel::AccelerationBased);
+        .limits(CrabJointId::ClawUpper(side).limits());
 
     let upper = commands
         .spawn((
@@ -550,6 +554,8 @@ fn spawn_claw(
             MeshMaterial3d(assets.claw_mat.clone()),
             MultibodyJoint::new(carapace, no_adjacent_contacts(upper_joint)),
             Velocity::default(),
+            ExternalForce::default(),
+            LIMB_DAMPING,
         ))
         .id();
 
@@ -557,14 +563,7 @@ fn spawn_claw(
     let fore_joint = RevoluteJointBuilder::new(Vec3::Y)
         .local_anchor1(Vec3::new(0.0, CLAW_UPPER_LEN * 0.5, 0.0))
         .local_anchor2(Vec3::new(0.0, 0.0, -CLAW_FORE_LEN * 0.5))
-        .limits(CrabJointId::ClawFore(side).limits())
-        .motor_position(
-            CrabJointId::ClawFore(side).default_position(),
-            CLAW_STIFFNESS,
-            CLAW_DAMPING,
-        )
-        .motor_max_force(CLAW_MAX_FORCE)
-        .motor_model(MotorModel::AccelerationBased);
+        .limits(CrabJointId::ClawFore(side).limits());
 
     let forearm = commands
         .spawn((
@@ -581,6 +580,8 @@ fn spawn_claw(
             MeshMaterial3d(assets.claw_mat.clone()),
             MultibodyJoint::new(upper, no_adjacent_contacts(fore_joint)),
             Velocity::default(),
+            ExternalForce::default(),
+            LIMB_DAMPING,
         ))
         .id();
 
@@ -588,14 +589,7 @@ fn spawn_claw(
     let pincer_joint = PrismaticJointBuilder::new(Vec3::Z)
         .local_anchor1(Vec3::new(0.0, 0.0, CLAW_FORE_LEN * 0.5))
         .local_anchor2(Vec3::new(0.0, 0.0, -PINCER_HALF_D))
-        .limits(CrabJointId::ClawPincer(side).limits())
-        .motor_position(
-            CrabJointId::ClawPincer(side).default_position(),
-            CLAW_STIFFNESS,
-            CLAW_DAMPING,
-        )
-        .motor_max_force(CLAW_MAX_FORCE)
-        .motor_model(MotorModel::AccelerationBased);
+        .limits(CrabJointId::ClawPincer(side).limits());
 
     commands.spawn((
         CrabBodyPart,
@@ -611,6 +605,8 @@ fn spawn_claw(
         MeshMaterial3d(assets.claw_mat.clone()),
         MultibodyJoint::new(forearm, no_adjacent_contacts(pincer_joint)),
         Velocity::default(),
+        ExternalForce::default(),
+        LIMB_DAMPING,
     ));
 }
 
@@ -633,14 +629,7 @@ fn spawn_eye(
     let eye_joint = RevoluteJointBuilder::new(Vec3::X)
         .local_anchor1(attach)
         .local_anchor2(Vec3::new(0.0, -EYE_STALK_LEN, 0.0))
-        .limits(CrabJointId::EyeStalk(side).limits())
-        .motor_position(
-            CrabJointId::EyeStalk(side).default_position(),
-            EYE_STIFFNESS,
-            EYE_DAMPING,
-        )
-        .motor_max_force(EYE_MAX_FORCE)
-        .motor_model(MotorModel::AccelerationBased);
+        .limits(CrabJointId::EyeStalk(side).limits());
 
     commands.spawn((
         CrabBodyPart,
@@ -656,5 +645,7 @@ fn spawn_eye(
         MeshMaterial3d(assets.eye_mat.clone()),
         MultibodyJoint::new(carapace, no_adjacent_contacts(eye_joint)),
         Velocity::default(),
+        ExternalForce::default(),
+        LIMB_DAMPING,
     ));
 }

@@ -1,13 +1,12 @@
 //! Togglable transparent joint telemetry overlay for the demo.
 //!
 //! Two scrolling line graphs drawn over the scene: every joint's **angle**
-//! (the revolute coordinate, radians) on top and its **motor effort** on the
-//! bottom. Effort is the spring-damper control signal the position motor
-//! applies — `stiffness·(target − angle) − damping·angular_velocity`, clamped
-//! to the joint's max force — normalized to [-1, 1]. That is the honest "how
-//! hard is this joint working" signal: Rapier 0.32 does not expose the solved
-//! reaction torque (its `coords()` accessor lands in 0.33), so this is the
-//! control effort, not a measured Nm.
+//! (the revolute coordinate, radians) on top and its **commanded torque** on
+//! the bottom. The crab is torque-controlled, so the torque trace is the
+//! policy's actual normalized output [-1, 1] — the real command, not a
+//! reconstructed proxy. The angle is read off the links' orientations with the
+//! same helper the observation uses, so the plot shows exactly what the policy
+//! senses.
 //!
 //! Lines are drawn with gizmos through a dedicated 2D overlay camera on its own
 //! render layer, so they composite on top of the 3D view without a second
@@ -24,8 +23,8 @@ use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy_rapier3d::prelude::*;
 
-use crate::bot::actuator::{CrabActions, action_to_target};
-use crate::bot::body::{CrabEnvId, CrabJoint, CrabJointId};
+use crate::bot::actuator::CrabActions;
+use crate::bot::body::{CrabEnvId, CrabJoint, CrabJointId, joint_angle};
 
 /// Samples kept per joint trace (~4 s at 60 Hz).
 const CAPACITY: usize = 240;
@@ -109,7 +108,7 @@ fn setup_overlay(
     commands.spawn((
         GraphUi,
         vis,
-        Text::new("joint telemetry (G)\ntop: angle (rad)   bottom: motor effort"),
+        Text::new("joint telemetry (G)\ntop: angle (rad)   bottom: commanded torque"),
         TextFont {
             font_size: 14.0,
             ..default()
@@ -143,24 +142,18 @@ fn toggle_graph(
     }
 }
 
-/// Samples each joint's angle and motor effort for env 0 every physics step.
-/// Runs unconditionally so toggling the overlay on shows recent history.
+/// Samples each joint's angle and commanded torque for env 0 every physics
+/// step. Runs unconditionally so toggling the overlay on shows recent history.
 fn sample_graph(
     actions: Res<CrabActions>,
     mut graph: ResMut<JointGraph>,
-    joints: Query<(
-        &CrabJoint,
-        &CrabEnvId,
-        &MultibodyJoint,
-        &Transform,
-        &Velocity,
-    )>,
+    joints: Query<(&CrabJoint, &CrabEnvId, &MultibodyJoint, &Transform)>,
     transforms: Query<&Transform>,
 ) {
     let Some(action) = actions.envs.first() else {
         return;
     };
-    for (joint, env, mj, child_tf, vel) in joints.iter() {
+    for (joint, env, mj, child_tf) in joints.iter() {
         if env.0 != 0 {
             continue;
         }
@@ -170,24 +163,13 @@ fn sample_graph(
         let id = joint.id;
         let idx = id.index();
 
-        // Joint coordinate = twist of child-in-parent about the joint's local
-        // X axis (every revolute joint here is built with AngX as its free
-        // DOF). 2·atan2(q.x, q.w) is the signed rotation about local X.
-        let q = (parent_tf.rotation.inverse() * child_tf.rotation).normalize();
-        let angle = 2.0 * q.x.atan2(q.w);
-
-        // Effort: the position motor's spring-damper law, in the joint frame.
-        let axis_world = parent_tf.rotation * Vec3::X;
-        let ang_vel = vel.angular.dot(axis_world);
-        let target = action_to_target(action[idx], &id);
-        let (stiffness, damping) = id.motor_stiffness_damping();
-        let max_force = id.motor_max_force().max(1e-3);
-        let effort = (stiffness * (target - angle) - damping * ang_vel)
-            .clamp(-max_force, max_force)
-            / max_force;
+        let angle = joint_angle(id, parent_tf.rotation, child_tf.rotation);
+        // Under torque control the NN output IS the signed torque (normalized),
+        // so the "torque" plot is the real command, not a reconstructed proxy.
+        let torque = action[idx].clamp(-1.0, 1.0);
 
         push(&mut graph.angle[idx], angle);
-        push(&mut graph.effort[idx], effort);
+        push(&mut graph.effort[idx], torque);
     }
 }
 
