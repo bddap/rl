@@ -87,6 +87,12 @@ impl Policy {
             normalizer = loaded;
         }
 
+        // Diagnostic: RL_RANDOM_POLICY drives the crab with the untrained
+        // random-init brain even without a checkpoint, to see what a FRESH
+        // policy does (vs the zero-action rest pose) — distinguishes a learned
+        // behaviour from one the dynamics produce on their own.
+        let loaded = loaded || std::env::var("RL_RANDOM_POLICY").is_ok_and(|v| v == "1");
+
         Self {
             brain,
             normalizer,

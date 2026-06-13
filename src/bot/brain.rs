@@ -54,8 +54,19 @@ impl<B: Backend> CrabBrain<B> {
         let trunk_ln1 = nn::LayerNormConfig::new(HIDDEN_SIZE).init(device);
         let trunk_ln2 = nn::LayerNormConfig::new(HIDDEN_SIZE).init(device);
 
+        // Small-gain init on the policy head. The trunk ends in a LayerNorm
+        // (unit-scale output), so a default-initialised head emits means ~±1 —
+        // and since the action IS the joint torque now, an untrained crab would
+        // command near-max torque on every joint and launch itself. With tiny
+        // weights a fresh policy outputs ~zero torque (a near-limp crab) and
+        // learns to push up from there. (Position control hid this: ±1 was just
+        // a target angle the servo eased toward, not a torque.)
         let policy_fc = nn::LinearConfig::new(HIDDEN_SIZE, ACTION_SIZE)
             .with_bias(true)
+            .with_initializer(nn::Initializer::Normal {
+                mean: 0.0,
+                std: 0.01,
+            })
             .init(device);
 
         let value_fc1 = nn::LinearConfig::new(HIDDEN_SIZE, HIDDEN_SIZE / 2)

@@ -578,16 +578,14 @@ impl TrainingState {
     }
 }
 
-/// Energy penalty coefficient. Quadratic in angular speed. It has to overcome a
-/// real reward exploit: the eyes ride stalks on the carapace, so a crab that
-/// SPINS flings its eyes high and scores eye height for free — at too weak a
-/// coefficient PPO learns to helicopter (Σω² ≈ 130k, eyes flung to ~3) instead
-/// of standing. At 5e-5 a helicopter costs ~6.5/step — more than the ~3 of eye
-/// height it buys, so it's firmly net-negative — while a calm stand (Σω² in the
-/// low thousands → penalty ≈ 0.1) still nets clearly positive. Tune from the
-/// per-episode Energy log; the standing optimum should out-score both the
-/// helicopter and a limp collapse.
-const ENERGY_COST: f32 = 5e-5;
+/// Energy penalty coefficient. Quadratic in angular speed — a calm stance costs
+/// ~nothing while gratuitous flailing is taxed. Direct torque drives the limbs
+/// far harder than the old position servos (random-policy Σω² is ~100k vs a few
+/// hundred), so this is scaled down accordingly. Provisional — tune from the
+/// per-episode Energy log once the policy-head init fix lets training settle
+/// (the early "helicopter" was an untrained-policy launch, not this tax being
+/// too weak).
+const ENERGY_COST: f32 = 1e-5;
 
 /// Reward: mean eye height minus an energy tax. Two signals, both global —
 /// behaviour still EMERGES rather than being hand-specified (owner's call:
