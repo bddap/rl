@@ -29,7 +29,7 @@ impl CrabActions {
 /// (a knee bends far one way and not at all the other); action 0 = the
 /// planted rest stance either way, so the policy's neutral output (and a
 /// fresh episode) starts standing instead of sprawling at a range midpoint.
-fn action_to_target(action: f32, id: &CrabJointId) -> f32 {
+pub(crate) fn action_to_target(action: f32, id: &CrabJointId) -> f32 {
     // Guard against NaN/Inf — treat as zero (rest position)
     let a = if action.is_finite() {
         action.clamp(-1.0, 1.0)
