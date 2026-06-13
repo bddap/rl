@@ -84,3 +84,46 @@ fn commanded_torque_moves_the_joints() {
          {minus:+.3} — opposite commands should split the joint angle"
     );
 }
+
+/// Joint friction must keep every limb's angular speed bounded under load.
+///
+/// The failure this guards: a directly-torqued light segment with no working
+/// damping is a pure double-integrator, so the distal tibia ramped to 300–600
+/// rad/s and tripped the blow-up speed guard every episode — training never got
+/// an episode long enough to learn from. The friction has to live on the joint
+/// (a velocity motor), because Rapier's per-body `Damping` is a no-op on
+/// multibody links. Slamming every joint to full torque — harder than any policy
+/// command — must still leave the limbs at a sane speed.
+#[test]
+fn joint_friction_bounds_limb_speed() {
+    use super::body::CrabBodyPart;
+    use bevy_rapier3d::prelude::Velocity;
+
+    let mut app = headless_app();
+    tick(&mut app, 1);
+    {
+        let mut actions = app.world_mut().resource_mut::<CrabActions>();
+        for v in actions.envs[0].iter_mut() {
+            *v = 1.0;
+        }
+    }
+    tick(&mut app, 160);
+
+    let mut max_ang = 0.0f32;
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&Velocity, With<CrabBodyPart>>();
+    for vel in q.iter(app.world()) {
+        max_ang = max_ang.max(vel.angular.length());
+    }
+    println!("max limb angular speed under full torque: {max_ang:.1} rad/s");
+    // Healthy is ~13 rad/s (friction reaches a low terminal speed); pre-fix was
+    // 300–600. 100 leaves an 8x margin over healthy yet trips well before the
+    // ~300 rad/s blow-up guard.
+    assert!(
+        max_ang < 100.0,
+        "a limb is spinning at {max_ang:.1} rad/s under full torque — joint \
+         friction regressed (pre-fix the tibia hit 300–600 rad/s and the blow-up \
+         guard then killed every episode in ~8 steps)"
+    );
+}
