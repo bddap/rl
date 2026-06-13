@@ -42,11 +42,19 @@ pub struct CrabModel {
 #[derive(Component)]
 pub struct CrabSkin {
     env: usize,
-    /// Set once the scene instance has children (next frame we can pair).
-    scene_seen: bool,
+    /// Frames since the scene instance got children. Pairing waits for
+    /// [`SETTLE_FRAMES`]: offsets captured against the crab still up at spawn
+    /// height bake the subsequent ~0.2 m settle into every carapace-bound bone
+    /// and sink the shell into the ground. The skin stays hidden (primitives
+    /// showing) until it pairs.
+    scene_frames: Option<u32>,
     /// Pairing done; `BoneDrive`s exist below this root.
     paired: bool,
 }
+
+/// Render frames between scene readiness and offset capture — enough for the
+/// spawned crab to settle onto its feet (~1.5 s at 60 fps).
+const SETTLE_FRAMES: u32 = 90;
 
 /// A driven bone: follow `link`'s world transform with a fixed local offset.
 #[derive(Component)]
@@ -110,9 +118,11 @@ fn attach_skins(
             SceneRoot(model.scene.clone()),
             Transform::from_translation(Vec3::new(t.translation.x, 0.0, t.translation.z))
                 .with_scale(Vec3::splat(model.scale)),
+            // Hidden until paired: until then it would be a bind-pose statue.
+            Visibility::Hidden,
             CrabSkin {
                 env: env.0,
-                scene_seen: false,
+                scene_frames: None,
                 paired: false,
             },
         ));
@@ -156,11 +166,18 @@ fn pair_bones(
         if skin.paired {
             continue;
         }
-        if !skin.scene_seen {
-            if children.get(root).is_ok_and(|c| !c.is_empty()) {
-                skin.scene_seen = true;
+        match skin.scene_frames {
+            None => {
+                if children.get(root).is_ok_and(|c| !c.is_empty()) {
+                    skin.scene_frames = Some(0);
+                }
+                continue;
             }
-            continue;
+            Some(n) if n < SETTLE_FRAMES => {
+                skin.scene_frames = Some(n + 1);
+                continue;
+            }
+            Some(_) => {}
         }
 
         let link_of: std::collections::HashMap<LinkKey, Entity> = links
@@ -201,7 +218,11 @@ fn pair_bones(
             paired += 1;
         }
 
-        // The skin replaces the primitive look unless overlaying for debug.
+        // Reveal the now-driven skin; it replaces the primitive look unless
+        // overlaying for debug.
+        if let Ok(mut vis) = visibility.get_mut(root) {
+            *vis = Visibility::Visible;
+        }
         if !model.overlay {
             for (e, env, ..) in links.iter() {
                 if env.0 == skin.env
