@@ -27,8 +27,8 @@ use rand::Rng;
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
-use crate::bot::{BotSet, CrabSpawns, respawn_crab};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
+use crate::bot::{BotSet, CrabSpawns, respawn_crab};
 use crate::training::session::{
     BRAIN_STEM, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend,
 };
@@ -149,13 +149,18 @@ pub struct DemoPlugin {
 impl Plugin for DemoPlugin {
     fn build(&self, app: &mut App) {
         add_inference(app, &self.checkpoint_dir);
+        crate::player::graph::register(app);
         app.init_resource::<DemoSettle>()
             .init_resource::<PokeBurst>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_hud))
             .add_systems(Update, (orbit_camera, demo_controls))
             .add_systems(
                 FixedUpdate,
-                (demo_settle.after(BotSet::Think), demo_fall_rescue, demo_poke),
+                (
+                    demo_settle.after(BotSet::Think),
+                    demo_fall_rescue,
+                    demo_poke,
+                ),
             );
     }
 }
@@ -379,8 +384,8 @@ fn demo_controls(
     }
     if poke {
         let mut rng = rand::thread_rng();
-        let dir = Vec3::new(rng.gen_range(-1.0..1.0), 0.25, rng.gen_range(-1.0..1.0))
-            .normalize_or_zero();
+        let dir =
+            Vec3::new(rng.gen_range(-1.0..1.0), 0.25, rng.gen_range(-1.0..1.0)).normalize_or_zero();
         *poke_burst = PokeBurst {
             ticks: POKE_TICKS,
             force: dir * POKE_FORCE,
