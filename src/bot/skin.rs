@@ -22,6 +22,7 @@
 //! `RL_SKIN_OVERLAY=1` keeps the primitive meshes visible under the skin —
 //! the render-vs-physics debug view.
 
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
 
 use super::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId, Side};
@@ -161,6 +162,7 @@ fn pair_bones(
         Option<&CrabCarapace>,
     )>,
     mut visibility: Query<&mut Visibility>,
+    meshes: Query<(), With<Mesh3d>>,
 ) {
     for (root, mut skin) in skins.iter_mut() {
         if skin.paired {
@@ -198,6 +200,13 @@ fn pair_bones(
         while let Some(e) = stack.pop() {
             if let Ok(c) = children.get(e) {
                 stack.extend(c.iter());
+            }
+            // A skinned mesh keeps the AABB of its bind pose; once the crab
+            // walks far enough that those stale bounds leave the frustum, the
+            // whole mesh is culled and the model vanishes mid-scene. One crab
+            // is cheap to always draw.
+            if meshes.get(e).is_ok() {
+                commands.entity(e).insert(NoFrustumCulling);
             }
             let Ok(name) = names.get(e) else { continue };
             let Some(key) = bone_target(name.as_str()) else {
