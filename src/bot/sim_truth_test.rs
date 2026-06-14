@@ -117,14 +117,17 @@ fn joint_friction_bounds_limb_speed() {
         max_ang = max_ang.max(vel.angular.length());
     }
     println!("max limb angular speed under full torque: {max_ang:.1} rad/s");
-    // Healthy is ~13 rad/s (friction reaches a low terminal speed); pre-fix was
-    // 300–600. 100 leaves an 8x margin over healthy yet trips well before the
-    // ~300 rad/s blow-up guard.
+    // Healthy is ~28 rad/s under the capped-friction + inertia-graded-ceiling +
+    // tapered-mass regime: the small force-capped friction barely slows a limb, so
+    // what bounds the speed is the hard joint limit a limb reaches in a couple of
+    // ticks (and the heavier, weaker-driven distal links no longer snap). Pre-fix
+    // was 300–600. 60 keeps ~2x margin over healthy and trips well before the ~300
+    // rad/s blow-up guard.
     assert!(
-        max_ang < 100.0,
+        max_ang < 60.0,
         "a limb is spinning at {max_ang:.1} rad/s under full torque — joint \
-         friction regressed (pre-fix the tibia hit 300–600 rad/s and the blow-up \
-         guard then killed every episode in ~8 steps)"
+         friction/ceiling/mass regressed (pre-fix the tibia hit 300–600 rad/s and \
+         the blow-up guard then killed every episode in ~8 steps)"
     );
 }
 
@@ -254,5 +257,80 @@ fn actuator_injects_no_net_wrench() {
         "actuator injects net torque {net_torque:?} ({:.3} N·m) — a momentum leak: \
          the crab can spin itself up mid-air with no external torque",
         net_torque.length()
+    );
+}
+
+/// Joints must YIELD to load above the friction cap — the legs crumple rather
+/// than hold the body up as a rigid frame. With ZERO actuation the only thing
+/// resisting a joint is the small force-capped friction (~0.3 N·m), below the
+/// ~0.5 N·m a leg joint needs to bear its share of the body, so an unactuated
+/// crab sags onto the ground. Standing must be ACTIVE: the policy holds the crab
+/// up, physics does not do it for free — a joint stiff enough to hold the pose
+/// passively would let training cheat by optimizing a frozen statue.
+#[test]
+fn unactuated_crab_crumples_under_load() {
+    use super::body::CrabCarapace;
+    use bevy_rapier3d::prelude::MultibodyJoint;
+    use std::collections::HashMap;
+
+    fn carapace_y(app: &mut App) -> f32 {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, With<CrabCarapace>>();
+        q.iter(app.world()).next().expect("carapace").translation.y
+    }
+    // Largest |angle − rest| over all leg femur/tibia joints. Asserting on this —
+    // not just the carapace height — is what proves a JOINT yielded (legs folding),
+    // distinguishing compliant crumple from a rigid-body tip-over (which also drops
+    // the carapace) or a blow-up respawn (which would reset every joint to rest, so
+    // the deflection collapses to ~0 and this test fails rather than false-passes).
+    fn max_leg_joint_deflection(app: &mut App) -> f32 {
+        let rot: HashMap<Entity, Quat> = {
+            let mut q = app.world_mut().query::<(Entity, &Transform)>();
+            q.iter(app.world()).map(|(e, t)| (e, t.rotation)).collect()
+        };
+        let mut q = app
+            .world_mut()
+            .query::<(&CrabJoint, &MultibodyJoint, &Transform)>();
+        let mut max_def = 0.0f32;
+        for (joint, mj, tf) in q.iter(app.world()) {
+            if !matches!(
+                joint.id,
+                CrabJointId::LegFemur(..) | CrabJointId::LegTibia(..)
+            ) {
+                continue;
+            }
+            let angle = joint_angle(joint.id, rot[&mj.parent], tf.rotation);
+            max_def = max_def.max((angle - joint.id.default_position()).abs());
+        }
+        max_def
+    }
+
+    let mut app = headless_app();
+    // Build the crab and let Rapier write the spawn pose back, then read height
+    // and joint angles before it can sag.
+    tick(&mut app, 3);
+    let start_y = carapace_y(&mut app);
+
+    // ~2 s with no actions (CrabActions default to all-zero torque).
+    tick(&mut app, 128);
+    let end_y = carapace_y(&mut app);
+    let leg_deflection = max_leg_joint_deflection(&mut app);
+    println!(
+        "carapace y: spawn {start_y:.3} -> unactuated+2s {end_y:.3} (sag {:.3}); \
+         max leg-joint deflection {leg_deflection:.3} rad",
+        start_y - end_y
+    );
+    assert!(
+        end_y < start_y - 0.10,
+        "unactuated crab did not sag (carapace {start_y:.3} -> {end_y:.3}): the joints \
+         hold the body up rigidly instead of yielding to load — friction too stiff to \
+         crumple (a passive standing statue, the bug this fix removes)"
+    );
+    assert!(
+        leg_deflection > 0.15,
+        "no leg JOINT yielded ({leg_deflection:.3} rad max from rest) — a carapace drop \
+         with no joint bending is a rigid-body tip/fall, not compliant crumple; the \
+         joints are too stiff to yield under load"
     );
 }

@@ -64,7 +64,7 @@ pub fn apply_actions(
         // the world. The couple is equal and opposite, so it is a pure internal
         // joint torque — no net external wrench on the crab.
         let world_axis = parent_tf.rotation * id.joint_axis_local();
-        let wrench = world_axis * (a * id.motor_max_force());
+        let wrench = world_axis * (a * id.drive_torque_ceiling());
         match id {
             // Prismatic pincer: a linear force couple. +F on the child and −F on
             // the parent act at the two bodies' COMs, which are offset by `d`, so

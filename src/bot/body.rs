@@ -80,8 +80,9 @@ fn revolute_joint(id: CrabJointId, anchor1: Vec3, anchor2: Vec3) -> TypedJoint {
             .local_anchor1(anchor1)
             .local_anchor2(anchor2)
             .limits([lo - rest, hi - rest])
-            .motor_velocity(0.0, JOINT_DAMPING)
-            .motor_model(MotorModel::AccelerationBased),
+            .motor_velocity(0.0, FRICTION_RAMP)
+            .motor_max_force(id.friction_cap())
+            .motor_model(MotorModel::ForceBased),
     );
     let generic: &mut GenericJoint = joint.as_mut();
     generic.set_local_basis1(Quat::from_axis_angle(axis, rest) * generic.local_basis1());
@@ -121,6 +122,16 @@ const FEMUR_RAD: f32 = 0.035;
 const TIBIA_LEN: f32 = 0.2;
 const TIBIA_RAD: f32 = 0.025;
 
+/// Leg-segment densities, tapered UP (denser toward the tip). At game scale the
+/// distal links came out SUB-GRAM at density ~1 (the tibia under a gram) —
+/// physically implausible and numerically twitchy: at tiny inertia, any
+/// load-bearing torque produces five-figure angular acceleration. Denser distal
+/// segments compensate the shrinking cross-section, landing each at ~10–14 g with a
+/// gentle inertia gradient up the leg. Geometry is unchanged, so the spawn pose holds.
+const COXA_DENSITY: f32 = 6.0;
+const FEMUR_DENSITY: f32 = 8.0;
+const TIBIA_DENSITY: f32 = 14.0;
+
 /// Claw segment dimensions.
 const CLAW_UPPER_LEN: f32 = 0.2;
 const CLAW_UPPER_RAD: f32 = 0.055;
@@ -137,29 +148,43 @@ const EYE_BALL_RAD: f32 = 0.03;
 
 // ---------------------------------------------------------------------------
 // Torque ceilings — the magnitude an action of ±1 commands on each joint type.
-// These are DIRECT-DRIVE torques (the policy's output is the torque), not the
-// force caps of a position servo, so they are an order of magnitude smaller
-// than the old motor ceilings: a leg holds its share of the body with a few
-// N·m, and anything near the old 100 N·m flings light limbs past the blow-up
-// speed guard in a step or two, so a random initial policy never gets an
-// episode long enough to learn from.
+// DIRECT-DRIVE torques (the policy's output IS the torque), and GRADED BY INERTIA:
+// the lighter and more distal a link, the smaller its ceiling. A joint's
+// snappiness is torque/inertia, so a flat ceiling makes a feather-light shin a
+// hair-trigger while it's modest on the hip — the old flat 20 N·m on a sub-gram
+// tibia was ~400,000 rad/s² of headroom and fed the mid-air helicopter. Each
+// ceiling here is still 5-12x the ~0.5 N·m a joint needs to bear its share of the
+// body, so standing keeps ample authority; only the absurd surplus is cut.
 // ---------------------------------------------------------------------------
 
-const LEG_MAX_FORCE: f32 = 20.0;
-const CLAW_MAX_FORCE: f32 = 15.0;
-const EYE_MAX_FORCE: f32 = 2.0;
+const COXA_TORQUE_CEILING: f32 = 6.0;
+const FEMUR_TORQUE_CEILING: f32 = 4.0;
+const TIBIA_TORQUE_CEILING: f32 = 2.5;
+const CLAW_TORQUE_CEILING: f32 = 8.0;
+const EYE_TORQUE_CEILING: f32 = 0.5;
 
-/// Pure viscous friction on every revolute joint: an acceleration-based velocity
-/// motor toward zero speed (stiffness 0 — no position servo; the policy still
-/// commands all torque via `ExternalForce`). Direct torque control has no servo
-/// derivative term to bleed off motion, so without this an un-damped limb just
-/// accelerates under any torque until it hits a stop — the light distal tibia
-/// spun to the blow-up guard every episode. The friction has to live on the
-/// *joint*: Rapier's per-body `Damping` is a no-op on multibody links (only joint
-/// constraints and external forces reach them, see #14), which is why the limbs
-/// were effectively undamped despite carrying a `Damping`. Acceleration-based so
-/// one value damps a light tibia and a heavy coxa alike.
-const JOINT_DAMPING: f32 = 50.0;
+/// Joint friction: a velocity-0 motor (stiffness 0 — no position servo; the policy
+/// still commands all torque via `ExternalForce`), but FORCE-CAPPED by
+/// [`CrabJointId::friction_cap`] so it saturates almost at once into a small
+/// CONSTANT opposing torque — dry/Coulomb friction, not a viscous brake. This
+/// coefficient is just the slope of the RAMP into that cap (hence the name): steep
+/// enough to regularize the zero-velocity crossing, after which the cap binds and
+/// the friction is the same small torque whether a joint creeps or flails — it is
+/// NOT a damping gain. ForceBased so the cap is an honest N·m, not rescaled by the
+/// link's effective mass. The friction must live on the joint: Rapier's per-body
+/// `Damping` is a no-op on multibody links (only joint constraints and external
+/// forces reach them, see #14). The free-flail speed it does NOT bound is caught by
+/// the hard joint limits, which a limb reaches within a couple of ticks.
+const FRICTION_RAMP: f32 = 4.0;
+
+/// Breakaway level of the joint-friction motor (see [`FRICTION_RAMP`]) — the
+/// constant torque an external load must exceed to back-drive the joint. Kept
+/// below the ~0.5 N·m a foot-strike puts through a knee, so legs yield (crumple)
+/// under ground load instead of staying rigid, and small enough that a modest
+/// actuator command overcomes it, so the policy needn't saturate to actuate.
+const LEG_FRICTION_CAP: f32 = 0.3;
+const CLAW_FRICTION_CAP: f32 = 0.3;
+const EYE_FRICTION_CAP: f32 = 0.1;
 
 // ---------------------------------------------------------------------------
 // Marker components for querying
@@ -342,14 +367,36 @@ impl CrabJointId {
         }
     }
 
-    /// Returns the motor_max_force for this joint type.
-    pub fn motor_max_force(&self) -> f32 {
+    /// Peak DIRECT-DRIVE torque an action of ±1 commands on this joint — the
+    /// magnitude the actuator applies via `ExternalForce`, graded by inertia (see
+    /// the ceiling constants): weakest on the lightest, most distal links. Distinct
+    /// from [`Self::friction_cap`] (the joint's friction motor) and from Rapier's
+    /// own `motor_max_force` builder — this is the policy's drive authority, not a
+    /// motor force.
+    pub fn drive_torque_ceiling(&self) -> f32 {
         match self {
-            CrabJointId::EyeStalk(_) => EYE_MAX_FORCE,
+            CrabJointId::LegCoxa(..) => COXA_TORQUE_CEILING,
+            CrabJointId::LegFemur(..) => FEMUR_TORQUE_CEILING,
+            CrabJointId::LegTibia(..) => TIBIA_TORQUE_CEILING,
             CrabJointId::ClawUpper(_) | CrabJointId::ClawFore(_) | CrabJointId::ClawPincer(_) => {
-                CLAW_MAX_FORCE
+                CLAW_TORQUE_CEILING
             }
-            _ => LEG_MAX_FORCE,
+            CrabJointId::EyeStalk(_) => EYE_TORQUE_CEILING,
+        }
+    }
+
+    /// Breakaway torque of this joint's friction motor (see [`FRICTION_RAMP`]):
+    /// the constant an external load must beat to back-drive the joint, so legs
+    /// crumple under ground contact and a modest command still actuates.
+    pub fn friction_cap(&self) -> f32 {
+        match self {
+            CrabJointId::LegCoxa(..) | CrabJointId::LegFemur(..) | CrabJointId::LegTibia(..) => {
+                LEG_FRICTION_CAP
+            }
+            CrabJointId::ClawUpper(_) | CrabJointId::ClawFore(_) | CrabJointId::ClawPincer(_) => {
+                CLAW_FRICTION_CAP
+            }
+            CrabJointId::EyeStalk(_) => EYE_FRICTION_CAP,
         }
     }
 
@@ -509,7 +556,7 @@ fn spawn_leg(
             RigidBody::Dynamic,
             Collider::capsule_y(COXA_LEN, COXA_RAD),
             CRAB_COLLISION,
-            ColliderMassProperties::Density(2.0),
+            ColliderMassProperties::Density(COXA_DENSITY),
             Mesh3d(assets.coxa_mesh.clone()),
             MeshMaterial3d(assets.leg_mat.clone()),
             MultibodyJoint::new(
@@ -538,7 +585,7 @@ fn spawn_leg(
             RigidBody::Dynamic,
             Collider::capsule_y(FEMUR_LEN, FEMUR_RAD),
             CRAB_COLLISION,
-            ColliderMassProperties::Density(1.5),
+            ColliderMassProperties::Density(FEMUR_DENSITY),
             Mesh3d(assets.femur_mesh.clone()),
             MeshMaterial3d(assets.leg_mat.clone()),
             MultibodyJoint::new(
@@ -566,7 +613,7 @@ fn spawn_leg(
         RigidBody::Dynamic,
         Collider::capsule_y(TIBIA_LEN, TIBIA_RAD),
         CRAB_COLLISION,
-        ColliderMassProperties::Density(1.0),
+        ColliderMassProperties::Density(TIBIA_DENSITY),
         Mesh3d(assets.tibia_mesh.clone()),
         MeshMaterial3d(assets.leg_mat.clone()),
         MultibodyJoint::new(
