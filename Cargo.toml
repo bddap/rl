@@ -14,6 +14,14 @@ rand_distr = "0.5"
 clap = { version = "4", features = ["derive"] }
 bincode = "1"
 
+[dev-dependencies]
+# Mesh-fit spike (src/bot/meshfit.rs): read the skinned glTF's skeleton + skin
+# weights to auto-derive colliders. `utils` enables the accessor readers;
+# `names` keeps node names (the bone↔part mapping keys on them). No `import`
+# (it would drag in `image`); we feed the GLB bytes to `Gltf::from_slice`.
+# Already in the tree via bevy at this version, so this adds no new crate.
+gltf = { version = "1.4.1", default-features = false, features = ["utils", "names"] }
+
 # Enable optimizations in dev for physics sim performance
 [profile.dev]
 opt-level = 1
