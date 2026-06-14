@@ -127,3 +127,59 @@ fn joint_friction_bounds_limb_speed() {
          guard then killed every episode in ~8 steps)"
     );
 }
+
+/// The crab must spawn already standing in its rest pose, every joint inside its
+/// own limits.
+///
+/// A Rapier multibody initialises each joint coordinate to 0. Pre-bake that put
+/// every limb at angle 0 — a flat splay that for the knees and coxae is *outside*
+/// their limits, so the solver snapped them on the first tick (the helicopter the
+/// owner saw, and the reason training never settled). `revolute_joint` bakes the
+/// rest pose into each joint frame so coordinate 0 is the planted stance; this
+/// pins that. The prismatic pincer is excluded — its coordinate is a translation,
+/// so `joint_angle` reads only the (near-zero) twist, not the DOF.
+#[test]
+fn crab_spawns_in_rest_pose_inside_limits() {
+    use bevy_rapier3d::prelude::MultibodyJoint;
+    use std::collections::HashMap;
+
+    let mut app = headless_app();
+    // Tick 1 builds the crab; Rapier writes the multibody spawn pose back into
+    // the child Transforms on tick 2 (before that they hold a default identity
+    // Transform, reading angle 0). A couple more ticks let the solver relax onto
+    // the limits without the whole crab gravity-settling away from spawn.
+    tick(&mut app, 3);
+
+    let mut tf_q = app.world_mut().query::<(Entity, &Transform)>();
+    let rot: HashMap<Entity, Quat> = tf_q
+        .iter(app.world())
+        .map(|(e, t)| (e, t.rotation))
+        .collect();
+
+    let mut joint_q = app
+        .world_mut()
+        .query::<(&CrabJoint, &MultibodyJoint, &Transform)>();
+    let mut checked = 0;
+    for (joint, mj, tf) in joint_q.iter(app.world()) {
+        let id = joint.id;
+        if matches!(id, CrabJointId::ClawPincer(_)) {
+            continue;
+        }
+        let angle = joint_angle(id, rot[&mj.parent], tf.rotation);
+        let rest = id.default_position();
+        let [lo, hi] = id.limits();
+        assert!(
+            (angle - rest).abs() < 0.15,
+            "{id:?} spawned at {angle:+.3} rad, not its rest pose {rest:+.3} — the \
+             rest-pose frame bake is wrong (Rapier starts multibody joints at \
+             coordinate 0, not default_position)"
+        );
+        assert!(
+            angle >= lo - 1e-3 && angle <= hi + 1e-3,
+            "{id:?} spawned at {angle:+.3} rad, outside its limits [{lo:+.3}, {hi:+.3}]"
+        );
+        checked += 1;
+    }
+    // 32 DOFs − 2 prismatic pincers = 30 revolute joints, every one verified.
+    assert_eq!(checked, CrabJointId::COUNT - 2);
+}
