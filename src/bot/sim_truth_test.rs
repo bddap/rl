@@ -436,19 +436,19 @@ fn crab_settles_quietly_at_rest() {
          leg crumple {crumple:.3} rad, max anchor gap {max_gap:.4} m"
     );
 
-    // Shipped at substeps=2 + 12 Hz contact spring: ~0.6 rad/s, ~0.32 cm. The
-    // regressions these bars catch, all with margin: the prior 16 Hz spring sits
-    // ~0.82 / ~0.6 cm, the 30 Hz default ~1.44 / ~3.6 cm, substeps=1 ~1.54 / ~3.0 cm.
-    // The sim is deterministic, so these are exact.
+    // Shipped at substeps=2 + 5 Hz contact spring: ~0.11 rad/s, ~0.15 cm. The bars
+    // sit below the stiffer-contact regressions they catch: 12 Hz ~0.61 / ~0.32 cm,
+    // the 30 Hz default ~1.44 / ~3.6 cm, substeps=1 ~1.54 / ~3.0 cm. The sim is
+    // deterministic, so these are exact.
     assert!(
-        ang_mean < 0.75,
+        ang_mean < 0.3,
         "carapace still twitching at rest: angular speed mean {ang_mean:.3} rad/s \
-         (want <0.75; 16 Hz contact sits ~0.82, the 30 Hz / substeps=1 regressions ~1.5)"
+         (want <0.3; 12 Hz contact sits ~0.61, the 30 Hz / substeps=1 regressions ~1.5)"
     );
     assert!(
-        bounce < 0.005,
-        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.005; 16 Hz \
-         contact ~0.006, the 30 Hz regression ~0.036, substeps=1 ~0.030)"
+        bounce < 0.003,
+        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.003; 12 Hz \
+         contact ~0.0032, the 30 Hz regression ~0.036, substeps=1 ~0.030)"
     );
     assert!(
         crumple > 0.4,
@@ -463,6 +463,66 @@ fn crab_settles_quietly_at_rest() {
         "a limb is separating from its parent: max anchor gap {max_gap:.4} m under \
          standing load (want <0.08; the joint positional lock has been softened too \
          far and the limbs are detaching)"
+    );
+}
+
+/// Owner-reported "pincers get wiggity whack": the claw links must sit still at
+/// rest. The claws are the crab's lightest links, so a stiff contact spring rings
+/// THEM the hardest — a foot-touchdown impulse that barely stirs the heavy carapace
+/// throws the near-massless pincer around. It is the same contact ringing as the
+/// carapace jitter ([`crab_settles_quietly_at_rest`]), just read on the most
+/// sensitive part, so softening the contact spring (`physics::CONTACT_SOFTNESS`)
+/// quiets it. (Measured: at the old 12 Hz spring a claw link averages ~0.59 rad/s
+/// here; at 5 Hz ~0.11. The collision config does NOT move this — the shake is the
+/// contact spring, not the collider groups — so that is what this guards.)
+#[test]
+fn claws_quiet_at_rest() {
+    use bevy_rapier3d::prelude::Velocity;
+
+    let mut app = headless_app();
+    tick(&mut app, 1);
+    tick(&mut app, 320); // fall + settle onto the ground under zero torque
+
+    // Mean over a ~3 s window of the worst claw-link speed each tick. A shaking
+    // pincer keeps this high long after the carapace has gone still; a settled claw
+    // leaves it near zero. Linear and angular are tracked separately so either kind
+    // of shake trips it.
+    let (mut lin_sum, mut ang_sum) = (0.0f32, 0.0f32);
+    let window = 192u32;
+    for _ in 0..window {
+        tick(&mut app, 1);
+        let (mut lin, mut ang) = (0.0f32, 0.0f32);
+        let mut q = app.world_mut().query::<(&CrabJoint, &Velocity)>();
+        for (joint, v) in q.iter(app.world()) {
+            if matches!(
+                joint.id,
+                CrabJointId::ClawUpper(_) | CrabJointId::ClawFore(_) | CrabJointId::ClawPincer(_)
+            ) {
+                lin = lin.max(v.linear.length());
+                ang = ang.max(v.angular.length());
+            }
+        }
+        lin_sum += lin;
+        ang_sum += ang;
+    }
+    let lin_mean = lin_sum / window as f32;
+    let ang_mean = ang_sum / window as f32;
+    println!(
+        "claws at rest: mean worst-link linear {lin_mean:.3} m/s, angular {ang_mean:.3} rad/s"
+    );
+    // At 5 Hz the worst claw link sits ~0.09 m/s / ~0.11 rad/s; the 12 Hz contact
+    // spring rings it to ~0.40 / ~0.59 (and stiffer is worse). The sim is
+    // deterministic, so these bars fail loudly on a contact-spring regression.
+    assert!(
+        lin_mean < 0.2,
+        "claw links shaking at rest: mean worst-link linear speed {lin_mean:.3} m/s \
+         (want <0.2; the 12 Hz contact spring rings them to ~0.40) — the contact \
+         spring regressed stiffer"
+    );
+    assert!(
+        ang_mean < 0.3,
+        "claw links shaking at rest: mean worst-link angular speed {ang_mean:.3} rad/s \
+         (want <0.3; 12 Hz rings them to ~0.59)"
     );
 }
 
@@ -640,21 +700,21 @@ fn airborne_crab_conserves_angular_momentum() {
         "airborne window had {total_contacts} contact-points — not contact-free, \
          so the momentum check isn't isolating internal forces"
     );
-    // No runaway: an airborne crab must not be able to pump its own spin up.
-    // Pre-fix (rigid limits) this ratio was ~68×; the soft-limit fix holds it to
-    // a bounded few×. 8× fails loudly on the old behaviour with margin to spare.
+    // No runaway: an airborne crab must not be able to pump its own spin up. The
+    // window is contact-free, so |L| is conserved up to the solver's small drift
+    // floor — the peak measures ~0.08 here. Crucially that ABSOLUTE peak is the same
+    // across 5/12/30 Hz contact, because no contact acts inside the window; pre-fix
+    // (rigid limits) the limit-snap pumped it into a runaway many× larger.
     //
-    // The ratio reads ~2.3× here, not 1.0×, and that is NOT new spin: l0 is sampled
-    // after a short respawn settle during which crab-vs-crab contacts are briefly
-    // live (collisions are filtered off only afterwards), so the softer contact
-    // spring (#19) leaves a smaller post-settle l0 — a smaller denominator inflates
-    // the ratio. The ABSOLUTE peak |L| is ~unchanged (slightly lower) vs the old
-    // 30 Hz contact, so conservation is intact; only the normalisation moved.
+    // We bound the absolute peak, NOT peak/l0: l0 is sampled after the brief respawn
+    // settle where crab-vs-crab contacts ARE live, so a softer contact spring leaves
+    // a smaller l0 and the ratio would swing with that unrelated parameter (it reads
+    // 2.3× at 12 Hz, 13× at 5 Hz, for the same physical conservation). 0.3 is ~3.6×
+    // the drift floor and far below the pre-fix runaway. The sim is deterministic.
     assert!(
-        peak < l0 * 8.0,
-        "airborne crab spun ITSELF up: |L| grew from {l0:.4} to {peak:.4} \
-         ({:.1}×) with zero contacts and no external torque — angular momentum is \
-         being injected by the joint constraint solver (issue #17)",
-        peak / l0.max(1e-9)
+        peak < 0.3,
+        "airborne crab spun ITSELF up: |L| grew from {l0:.4} to {peak:.4} with zero \
+         contacts and no external torque — angular momentum is being injected by the \
+         joint constraint solver (issue #17)"
     );
 }
