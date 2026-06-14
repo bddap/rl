@@ -183,3 +183,76 @@ fn crab_spawns_in_rest_pose_inside_limits() {
     // 32 DOFs − 2 prismatic pincers = 30 revolute joints, every one verified.
     assert_eq!(checked, CrabJointId::COUNT - 2);
 }
+
+/// The actuator must be INTERNAL: every wrench it applies to the crab sums to
+/// zero net force AND zero net torque, so it can never inject linear or angular
+/// momentum. A crab in free-fall may reorient by swinging limbs (a falling-cat
+/// turn conserves momentum), but it must NOT be able to spin itself UP — that
+/// needs an external torque. Revolute joints push equal-and-opposite torque
+/// couples (zero net by construction); the prismatic pincer pushes a *force*
+/// couple, which only stays torque-free if the two forces share a line of action.
+/// This pins that — a nonzero net torque here is the crab spinning itself out of
+/// nothing (owner-reported "rotates mid-air in a way that shouldn't be possible").
+#[test]
+fn actuator_injects_no_net_wrench() {
+    use super::actuator::CrabActions;
+    use super::body::CrabBodyPart;
+    use bevy_rapier3d::prelude::ExternalForce;
+
+    use std::collections::HashMap;
+
+    let mut app = headless_app();
+    tick(&mut app, 1);
+    // Drive every joint, pincers included, and let the claws rotate for a while
+    // so the pincer slide axis is no longer aligned with the COM offset — the
+    // configuration that turns its force couple into a net torque.
+    {
+        let mut actions = app.world_mut().resource_mut::<CrabActions>();
+        for v in actions.envs[0].iter_mut() {
+            *v = 1.0;
+        }
+    }
+    tick(&mut app, 40);
+
+    // ExternalForce and positions MUST be sampled at the same instant: the
+    // actuator sets the wrench from the pre-step pose, so reading positions a
+    // step later would show a spurious residual (one tick of motion × the force).
+    // Snapshot the poses, then tick once more — that tick's actuator runs on
+    // exactly these poses — and read the wrench it produced against the snapshot.
+    let pos: HashMap<Entity, Vec3> = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(Entity, &Transform), With<CrabBodyPart>>();
+        q.iter(app.world())
+            .map(|(e, t)| (e, t.translation))
+            .collect()
+    };
+    tick(&mut app, 1);
+
+    let mut net_force = Vec3::ZERO;
+    let mut net_torque = Vec3::ZERO;
+    let mut q = app
+        .world_mut()
+        .query_filtered::<(Entity, &ExternalForce), With<CrabBodyPart>>();
+    for (e, ef) in q.iter(app.world()) {
+        net_force += ef.force;
+        // Net force is ~0 (couples), so torque about the origin equals torque
+        // about the COM — no mass weighting needed.
+        net_torque += pos[&e].cross(ef.force) + ef.torque;
+    }
+    println!(
+        "actuator net force {:.5} N, net torque {:.5} N·m",
+        net_force.length(),
+        net_torque.length()
+    );
+    assert!(
+        net_force.length() < 1e-2,
+        "actuator injects net force {net_force:?} — not an internal wrench"
+    );
+    assert!(
+        net_torque.length() < 1e-2,
+        "actuator injects net torque {net_torque:?} ({:.3} N·m) — a momentum leak: \
+         the crab can spin itself up mid-air with no external torque",
+        net_torque.length()
+    );
+}
