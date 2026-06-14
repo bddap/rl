@@ -401,3 +401,189 @@ fn crab_settles_quietly_at_rest() {
          stiffen the legs into a rigid brace; keep them floppy"
     );
 }
+
+/// Total angular momentum of env-0's crab about its own center of mass, in the
+/// world frame: `L = Σ_parts ( I_world·ω + m·(r−r_com)×(v−v_com) )`, with
+/// `I_world = R·I_local·Rᵀ`. This is the conserved quantity the
+/// `airborne_crab_conserves_angular_momentum` invariant watches.
+#[cfg(test)]
+fn crab_angular_momentum(app: &mut App) -> Vec3 {
+    use super::body::CrabBodyPart;
+    use bevy_rapier3d::plugin::context::RapierRigidBodySet;
+    use bevy_rapier3d::prelude::RapierRigidBodyHandle;
+
+    let handles: Vec<bevy_rapier3d::rapier::dynamics::RigidBodyHandle> = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&RapierRigidBodyHandle, With<CrabBodyPart>>();
+        q.iter(app.world()).map(|h| h.0).collect()
+    };
+    let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();
+    let set = set_q.single(app.world()).expect("rapier set");
+
+    struct Part {
+        m: f32,
+        r: Vec3,
+        v: Vec3,
+        i_world: Mat3,
+        w: Vec3,
+    }
+    let (mut m_tot, mut mr, mut mv) = (0.0f32, Vec3::ZERO, Vec3::ZERO);
+    let mut parts = Vec::with_capacity(handles.len());
+    for h in &handles {
+        let rb = set.bodies.get(*h).expect("rapier body");
+        let m = rb.mass();
+        let r = rb.center_of_mass();
+        let v = rb.linvel(); // velocity of the COM
+        let rmat = Mat3::from_quat(rb.position().rotation);
+        let i_world = rmat
+            * rb.mass_properties()
+                .local_mprops
+                .reconstruct_inertia_matrix()
+            * rmat.transpose();
+        m_tot += m;
+        mr += m * r;
+        mv += m * v;
+        parts.push(Part {
+            m,
+            r,
+            v,
+            i_world,
+            w: rb.angvel(),
+        });
+    }
+    let (r_com, v_com) = (mr / m_tot, mv / m_tot);
+    parts.iter().fold(Vec3::ZERO, |l, p| {
+        l + p.i_world * p.w + p.m * (p.r - r_com).cross(p.v - v_com)
+    })
+}
+
+/// THE momentum invariant: a driven, airborne crab cannot gain angular momentum.
+///
+/// With no external torque, the total angular momentum L of the whole multibody
+/// about its center of mass is conserved — a falling-cat reorientation swings
+/// limbs to *re-aim* a fixed L, it cannot grow |L|. |L| growing from nothing is
+/// the owner-reported bug: the crab "spins itself up mid-air in a way that
+/// shouldn't be possible" (#17).
+///
+/// This is the TRUE invariant that [`actuator_injects_no_net_wrench`] only
+/// half-covers. That test sums the actuator's `ExternalForce` couples and finds
+/// them balanced to ~1e-5 N·m — necessary but not sufficient, because it is
+/// blind to forces the solver applies internally: the joint friction motors and
+/// the hard joint-LIMIT constraints. Those are where the leak actually lived.
+/// Driven hard into a near-rigid limit, a limb overshot by ~2.3 rad in a tick
+/// and the violent position-correction snapping it back did not conserve L in
+/// the reduced-coordinate solver; with all 30 joints slammed at once the
+/// residual accumulated into real spin. Softening the joint limits
+/// ([`LIMIT_SOFTNESS`]) caps the overshoot and removes the runaway.
+///
+/// The harness makes the airborne window unambiguous: gravity OFF (so the crab
+/// never falls to the ground during the long measurement) and crab collision
+/// OFF (so flailing limbs can't push off each other) — the test asserts ZERO
+/// contacts throughout, so whatever L does is provably down to internal forces
+/// alone. Gravity would in any case act through the COM and not change L about
+/// it; removing it just buys an arbitrarily long contact-free window.
+///
+/// Drive is a temporally-correlated full-range random walk (like a real policy,
+/// not white noise), the regime under which the bug shows. The bound is on
+/// RUNAWAY, not machine-zero: the iterative solver has a small irreducible drift
+/// floor, but it must not *pump*. Pre-fix this run grew |L| ~68×; post-fix it
+/// stays a bounded few×.
+#[test]
+fn airborne_crab_conserves_angular_momentum() {
+    use super::body::{CrabAssets, CrabBodyPart, CrabEnvId};
+    use super::respawn_crab;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy_rapier3d::plugin::context::RapierContextSimulation;
+    use bevy_rapier3d::prelude::{CollisionGroups, Group, RapierConfiguration};
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    let mut app = headless_app();
+    tick(&mut app, 1);
+
+    // Gravity off — no fall, so the crab stays airborne for the whole window.
+    {
+        let mut q = app.world_mut().query::<&mut RapierConfiguration>();
+        for mut cfg in q.iter_mut(app.world_mut()) {
+            cfg.gravity = Vec3::ZERO;
+        }
+    }
+    // Respawn env-0 high up, far from the ground/walls.
+    app.world_mut()
+        .run_system_once(
+            |mut commands: Commands,
+             assets: Res<CrabAssets>,
+             parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>| {
+                respawn_crab(
+                    &mut commands,
+                    &assets,
+                    parts.iter().filter(|(_, id)| id.0 == 0).map(|(e, _)| e),
+                    Vec3::new(0.0, 80.0, 0.0),
+                    0,
+                );
+            },
+        )
+        .expect("airborne respawn");
+    tick(&mut app, 4); // let rapier digest the respawn and write the spawn pose
+
+    // Crab parts collide with nothing — guarantees the window is contact-free.
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut CollisionGroups, With<CrabBodyPart>>();
+        for mut g in q.iter_mut(app.world_mut()) {
+            g.filters = Group::NONE;
+        }
+    }
+    tick(&mut app, 1);
+
+    let contacts = |app: &mut App| -> usize {
+        let mut q = app.world_mut().query::<&RapierContextSimulation>();
+        let sim = q.single(app.world()).expect("sim");
+        sim.narrow_phase
+            .contact_pairs()
+            .flat_map(|p| p.manifolds.iter())
+            .flat_map(|m| m.points.iter())
+            .filter(|pt| -pt.dist > 0.0)
+            .count()
+    };
+
+    let l0 = crab_angular_momentum(&mut app).length();
+    let mut rng = StdRng::seed_from_u64(3);
+    let mut action = [0.0f32; CrabJointId::COUNT];
+    let mut peak = l0;
+    let mut total_contacts = 0usize;
+    for _ in 0..800u32 {
+        // Correlated random walk: nudge each action a little and clamp.
+        for (i, a) in action.iter_mut().enumerate() {
+            *a = (*a + rng.gen_range(-0.02..0.02)).clamp(-1.0, 1.0);
+            app.world_mut().resource_mut::<CrabActions>().envs[0][i] = *a;
+        }
+        tick(&mut app, 1);
+        peak = peak.max(crab_angular_momentum(&mut app).length());
+        total_contacts += contacts(&mut app);
+    }
+
+    println!(
+        "airborne crab: |L| start={l0:.4}  peak={peak:.4}  ratio={:.1}x  contacts={total_contacts}",
+        peak / l0.max(1e-9)
+    );
+    // The window must be genuinely contact-free, or "no external torque" is a
+    // lie and a ground/self push could masquerade as conservation.
+    assert_eq!(
+        total_contacts, 0,
+        "airborne window had {total_contacts} contact-points — not contact-free, \
+         so the momentum check isn't isolating internal forces"
+    );
+    // No runaway: an airborne crab must not be able to pump its own spin up.
+    // Pre-fix (rigid limits) this ratio was ~68×; the soft-limit fix holds it to
+    // a bounded few×. 8× fails loudly on the old behaviour with margin to spare.
+    assert!(
+        peak < l0 * 8.0,
+        "airborne crab spun ITSELF up: |L| grew from {l0:.4} to {peak:.4} \
+         ({:.1}×) with zero contacts and no external torque — angular momentum is \
+         being injected by the joint constraint solver (issue #17)",
+        peak / l0.max(1e-9)
+    );
+}

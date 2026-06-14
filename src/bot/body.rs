@@ -86,6 +86,7 @@ fn revolute_joint(id: CrabJointId, anchor1: Vec3, anchor2: Vec3) -> TypedJoint {
     );
     let generic: &mut GenericJoint = joint.as_mut();
     generic.set_local_basis1(Quat::from_axis_angle(axis, rest) * generic.local_basis1());
+    generic.raw.softness = LIMIT_SOFTNESS;
     joint
 }
 
@@ -186,6 +187,29 @@ const FRICTION_RAMP: f32 = 4.0;
 const LEG_FRICTION_CAP: f32 = 0.1;
 const CLAW_FRICTION_CAP: f32 = 0.1;
 const EYE_FRICTION_CAP: f32 = 0.05;
+
+/// Spring stiffness (natural frequency Hz, damping ratio) of every revolute
+/// joint's constraint — the lock that holds the limb attached AND the hard end
+/// stops. Rapier's joint default is `1e6` Hz: a near-rigid Baumgarte stop. At
+/// that stiffness a limb driven hard into its limit overshoots it by up to
+/// ~2.3 rad (130°!) in one tick, and the violent position-correction that snaps
+/// it back is not momentum-conserving in the reduced-coordinate multibody
+/// solver — with 30 joints slammed at once that residual *accumulates* into net
+/// angular momentum, letting an airborne crab spin itself up from nothing
+/// (issue #17: the ExternalForce couples are balanced to ~1e-5 N·m and contact
+/// is ruled out, so the joint-LIMIT impulse was the leak, NOT the actuator).
+/// 400 Hz keeps the stop firm — under standing/ground load the limb still holds
+/// within ~0.1 rad of its limit, same as the rigid default — while capping the
+/// airborne overshoot at ~0.2 rad, which cuts the spurious spin-up ~10× (a 68×
+/// runaway under realistic drive becomes a bounded ~5× wobble). Damping 2.0
+/// (> the default 1.0) softens the snap further without letting the limb sag
+/// through its stop. It does NOT fully conserve L — the iterative solver has a
+/// small irreducible drift floor — but it removes the runaway pumping.
+const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f32> =
+    bevy_rapier3d::rapier::dynamics::SpringCoefficients {
+        natural_frequency: 400.0,
+        damping_ratio: 2.0,
+    };
 
 // ---------------------------------------------------------------------------
 // Marker components for querying
