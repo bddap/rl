@@ -436,19 +436,19 @@ fn crab_settles_quietly_at_rest() {
          leg crumple {crumple:.3} rad, max anchor gap {max_gap:.4} m"
     );
 
-    // Shipped at substeps=2 + soft contacts (16 Hz): ~0.82 rad/s, ~0.6 cm. The two
-    // regressions these bars catch, both with margin: reverting the contact spring
-    // to the 30 Hz default takes it to ~1.44 rad/s / ~3.6 cm, and dropping to
-    // substeps=1 to ~1.54 / ~3.0 cm. The sim is deterministic, so these are exact.
+    // Shipped at substeps=2 + 12 Hz contact spring: ~0.6 rad/s, ~0.32 cm. The
+    // regressions these bars catch, all with margin: the prior 16 Hz spring sits
+    // ~0.82 / ~0.6 cm, the 30 Hz default ~1.44 / ~3.6 cm, substeps=1 ~1.54 / ~3.0 cm.
+    // The sim is deterministic, so these are exact.
     assert!(
-        ang_mean < 1.1,
+        ang_mean < 0.75,
         "carapace still twitching at rest: angular speed mean {ang_mean:.3} rad/s \
-         (want <1.1; the 30 Hz-contact and substeps=1 regressions both sit ~1.5)"
+         (want <0.75; 16 Hz contact sits ~0.82, the 30 Hz / substeps=1 regressions ~1.5)"
     );
     assert!(
-        bounce < 0.018,
-        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.018; the \
-         30 Hz-contact regression is ~0.036, substeps=1 ~0.030)"
+        bounce < 0.005,
+        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.005; 16 Hz \
+         contact ~0.006, the 30 Hz regression ~0.036, substeps=1 ~0.030)"
     );
     assert!(
         crumple > 0.4,
