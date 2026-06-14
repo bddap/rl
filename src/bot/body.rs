@@ -184,7 +184,7 @@ const FRICTION_RAMP: f32 = 4.0;
 /// crumple under the lightest ground load instead of propping the body up, yet
 /// nonzero because real joints have a little stiction and a touch of it regularizes
 /// the zero-velocity crossing.
-const LEG_FRICTION_CAP: f32 = 0.1;
+pub const LEG_FRICTION_CAP: f32 = 0.1;
 const CLAW_FRICTION_CAP: f32 = 0.1;
 const EYE_FRICTION_CAP: f32 = 0.05;
 
@@ -205,7 +205,7 @@ const EYE_FRICTION_CAP: f32 = 0.05;
 /// (> the default 1.0) softens the snap further without letting the limb sag
 /// through its stop. It does NOT fully conserve L — the iterative solver has a
 /// small irreducible drift floor — but it removes the runaway pumping.
-const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f32> =
+pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f32> =
     bevy_rapier3d::rapier::dynamics::SpringCoefficients {
         natural_frequency: 400.0,
         damping_ratio: 2.0,

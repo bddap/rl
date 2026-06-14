@@ -10,7 +10,7 @@ pub mod sensor;
 mod sim_truth_test;
 pub mod skin;
 #[cfg(test)]
-mod test_util;
+pub(crate) mod test_util;
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;

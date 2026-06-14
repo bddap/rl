@@ -1,5 +1,6 @@
 mod bot;
 mod combat;
+mod debug_sliders;
 mod physics;
 mod play;
 mod player;
@@ -65,6 +66,13 @@ pub struct Args {
     /// zero. A physics feel-test, not a learned driver.
     #[arg(long)]
     manual_control: bool,
+
+    /// Demo only: show a TEMPORARY egui panel of physics sliders (contact spring,
+    /// length_unit, joint limit spring + leg friction, restitution, substeps) that
+    /// live-tune the running crab. A throwaway feel-tuning aid; off by default and
+    /// never wired into training/headless. See `src/debug_sliders.rs`.
+    #[arg(long)]
+    debug_sliders: bool,
 
     /// Save a checkpoint every N PPO updates (0 to disable periodic saves).
     #[arg(long, default_value_t = 50)]
@@ -250,6 +258,10 @@ fn main() {
                 live_checkpoint_dir: args.live_checkpoint_dir.clone(),
                 manual_control: args.manual_control,
             });
+            // TEMPORARY physics-tuning overlay, demo-only and off by default.
+            if args.debug_sliders {
+                app.add_plugins(debug_sliders::DebugSlidersPlugin);
+            }
         }
         AppMode::Screenshot { path, settle } => {
             app.add_plugins(play::ScreenshotPlugin {
