@@ -764,11 +764,27 @@ pub fn brain_step(
         if training.envs[e].grace > 0 || poses[e].is_none() {
             continue;
         }
-        let (reward, done, height, upright) = if let Some((height, upright)) = poses[e] {
+        // Does the episode end this tick? Three paths: rescued (no transition),
+        // true terminal (done), truncation (cut by the step cap).
+        let ends = if rescued_envs.contains(&e) {
+            // Rescued: the crab went non-finite and was force-respawned this tick
+            // (rescue runs .before(Sense)), so every pose read above is the FRESH
+            // crab back at spawn, not the state the last action produced.
+            // Recording it would credit a blow-up with the spawn pose's height —
+            // a positive reward on a failure. End the episode WITHOUT pushing a
+            // transition; the pre-blowup step was recorded last tick (done=false,
+            // a rare and harmless missed terminal).
+            true
+        } else {
+            let (height, upright) = poses[e].expect("poses[e].is_none() handled above");
             // Mean world-space height of the eye tips, taxed by commanded effort.
             let (sum, cnt) = eye_sums[e];
             let mean_eye_height = if cnt > 0 { sum / cnt as f32 } else { height };
-            let r = compute_reward(mean_eye_height, efforts[e]);
+            // NOTE: the height term reads s_t (this tick is pre-physics), so it
+            // is one tick out of phase with the action it pairs with; the effort
+            // term is correctly phased. Small, deliberately deferred — see
+            // https://github.com/bddap/rl/issues/15.
+            let reward = compute_reward(mean_eye_height, efforts[e]);
             // Termination is survival guards only — jumping, flipping, and
             // any other strategy the policy invents are legitimate solutions
             // (owner call: emergent behavior is the point). The height band
@@ -780,38 +796,40 @@ pub fn brain_step(
             // limb-flinging motion is legal — only a part moving at clearly
             // unphysical speed ends the episode.
             let blowing_up = max_speeds[e] > 100.0 || !height.is_finite();
-            let done = !(0.02..=50.0).contains(&height)
-                || blowing_up
-                || training.envs[e].steps > 1500
-                || rescued_envs.contains(&e);
-            (r, done, height, upright)
-        } else {
-            (0.0, false, 0.0, 0.0)
+            let done = !(0.02..=50.0).contains(&height) || blowing_up;
+            // The step cap is a TRUNCATION, not a failure: a crab still standing
+            // at the cap was cut short, so GAE must bootstrap its value rather
+            // than learn the cap is a dead end (see Transition::truncated).
+            let truncated = !done && training.envs[e].steps > 1500;
+
+            training.rollouts[e].push(Transition {
+                obs: obs_arrays[e],
+                action: action_arrays[e],
+                reward,
+                value: values[e],
+                log_prob: log_probs[e],
+                done,
+                truncated,
+            });
+
+            let ep = &mut training.envs[e];
+            ep.reward += reward;
+            ep.steps += 1;
+            ep.height_sum += height;
+            ep.upright_sum += upright;
+            ep.energy_sum += energies[e];
+
+            done || truncated
         };
 
-        training.rollouts[e].push(Transition {
-            obs: obs_arrays[e],
-            action: action_arrays[e],
-            reward,
-            value: values[e],
-            log_prob: log_probs[e],
-            done,
-        });
-
-        let ep = &mut training.envs[e];
-        ep.reward += reward;
-        ep.steps += 1;
-        ep.height_sum += height;
-        ep.upright_sum += upright;
-        ep.energy_sum += energies[e];
-
-        if done {
+        if ends {
+            let ep = &training.envs[e];
             let ep_reward = ep.reward;
             let ep_steps = ep.steps;
             let ep_height = ep.height_sum / ep_steps.max(1) as f32;
             let ep_upright = ep.upright_sum / ep_steps.max(1) as f32;
             let ep_energy = ep.energy_sum / ep_steps.max(1) as f32;
-            *ep = EnvEpisode {
+            training.envs[e] = EnvEpisode {
                 needs_reset: true,
                 ..EnvEpisode::default()
             };
