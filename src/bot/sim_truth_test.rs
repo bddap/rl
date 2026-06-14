@@ -384,12 +384,13 @@ fn crab_settles_quietly_at_rest() {
          leg crumple {crumple:.3} rad"
     );
 
-    // Measured: substeps=4 (the fix) ~1.0 rad/s & ~0.03 m; substeps=1 (the bug) ~2.3
-    // rad/s & ~0.076 m. Thresholds sit between, with margin for the deterministic sim.
+    // Shipped at substeps=2 + soft limits: ~1.44 rad/s, ~3.6 cm. Dropping to
+    // substeps=1 takes it back to ~2.0 rad/s — the angular bar below catches that
+    // regression. The sim is deterministic, so these are exact, not noisy.
     assert!(
         ang_mean < 1.6,
         "carapace still twitching at rest: angular speed mean {ang_mean:.3} rad/s \
-         (want <1.6; the substeps=1 bug sits ~2.3)"
+         (want <1.6; the substeps=1 regression sits ~2.0)"
     );
     assert!(
         bounce < 0.055,
