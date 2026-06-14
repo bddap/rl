@@ -766,15 +766,26 @@ pub fn brain_step(
         }
         // Does the episode end this tick? Three paths: rescued (no transition),
         // true terminal (done), truncation (cut by the step cap).
-        let ends = if rescued_envs.contains(&e) {
+        let episode_ended = if rescued_envs.contains(&e) {
             // Rescued: the crab went non-finite and was force-respawned this tick
             // (rescue runs .before(Sense)), so every pose read above is the FRESH
             // crab back at spawn, not the state the last action produced.
             // Recording it would credit a blow-up with the spawn pose's height —
-            // a positive reward on a failure. End the episode WITHOUT pushing a
-            // transition; the pre-blowup step was recorded last tick (done=false,
-            // a rare and harmless missed terminal).
-            true
+            // a positive reward on a failure — so push nothing. Instead mark the
+            // previously recorded step terminal: it was the real final step
+            // before the blow-up, and leaving it done=false would let GAE
+            // bootstrap it across the reset seam from the NEXT episode's value.
+            // If this episode recorded nothing yet (rescued during settle), there
+            // is no step to mark and no episode to log.
+            if training.envs[e].steps > 0 {
+                if let Some(last) = training.rollouts[e].transitions.last_mut() {
+                    last.done = true;
+                    last.truncated = false;
+                }
+                true
+            } else {
+                false
+            }
         } else {
             let (height, upright) = poses[e].expect("poses[e].is_none() handled above");
             // Mean world-space height of the eye tips, taxed by commanded effort.
@@ -822,7 +833,7 @@ pub fn brain_step(
             done || truncated
         };
 
-        if ends {
+        if episode_ended {
             let ep = &training.envs[e];
             let ep_reward = ep.reward;
             let ep_steps = ep.steps;
@@ -853,11 +864,8 @@ pub fn brain_step(
                     0.0
                 };
                 let buffered: usize = training.rollouts.iter().map(|b| b.len()).sum();
-                // Honest labels: avg reward is the 10-episode mean; the pose
-                // stats are the single episode that just ended on ONE env (n=1,
-                // not an average); Σω² is the raw summed squared angular speed
-                // (telemetry only, not in the reward); the rate is a lifetime
-                // average (elapsed runs from training start).
+                // Σω² is telemetry only — never enters the reward. (The other
+                // labels spell out their scope inline.)
                 info!(
                     "Ep {} | avg reward(10): {:.2} | last ep (1 env): {} steps, height {:.2}, upright {:.2}, Σω² {:.0} | buffer {} | {:.0} steps/s (lifetime avg)",
                     training.episode_count,
