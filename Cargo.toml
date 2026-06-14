@@ -6,6 +6,12 @@ edition = "2024"
 [dependencies]
 bevy = "0.18"
 bevy_rapier3d = "0.34"
+# Immediate-mode GUI for the TEMPORARY in-demo `--debug-sliders` physics panel
+# (src/debug_sliders.rs). 0.39 is the bevy_egui release series that tracks bevy
+# 0.18. The panel plugin is only added behind the flag, so training/headless never
+# instantiate it — zero runtime cost; the crate is compiled into the one binary
+# regardless of mode.
+bevy_egui = "0.39"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 
