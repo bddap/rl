@@ -213,16 +213,13 @@ fn main() {
 
     app.insert_resource(Visuals(visuals))
         .insert_resource(bot::NumEnvs(num_envs))
-        // Fixed physics dt: each Bevy tick advances the sim by exactly 1/64 s, so
-        // physics is identical in headless training and the real-time demo and is
-        // reproducible run-to-run. The default Variable timestep keys off
+        // Why a FIXED timestep at all: the default Variable timestep keys off
         // wall-clock delta, which in a headless loop with no render clock collapses
         // to ~0 dt — the crab never falls, training optimises a frozen spawn pose,
         // and the policy faceplants the moment real-time physics actually steps it.
-        .insert_resource(TimestepMode::Fixed {
-            dt: 1.0 / 64.0,
-            substeps: 1,
-        })
+        // The dt + sub-steps (shared with every headless test) live in one place,
+        // physics::fixed_timestep, so production and test physics can't drift.
+        .insert_resource(physics::fixed_timestep())
         // Run physics IN FixedUpdate, lockstep with the Sense→Think→Act brain loop
         // (which also lives in FixedUpdate). Rapier's default schedule is PostUpdate
         // — one physics step per rendered frame — while FixedUpdate runs as many

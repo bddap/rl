@@ -39,10 +39,9 @@ pub fn headless_app() -> App {
     ));
     app.insert_resource(Visuals(false))
         .insert_resource(NumEnvs(1))
-        .insert_resource(TimestepMode::Fixed {
-            dt: 1.0 / 64.0,
-            substeps: 1,
-        })
+        // Same fixed timestep as production (one source — see physics::fixed_timestep)
+        // so tests can't pass under physics the demo/training run never uses.
+        .insert_resource(crate::physics::fixed_timestep())
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
         .add_plugins(PhysicsWorldPlugin)
         .add_plugins(BotPlugin);
