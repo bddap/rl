@@ -31,33 +31,36 @@ pub fn fixed_timestep() -> TimestepMode {
 }
 
 /// Contact constraint spring (natural frequency Hz, damping ratio), overriding
-/// Rapier's 30 Hz / 5.0 default. The resting-crab bounce (issue #19) is a CONTACT
+/// Rapier's 30 Hz / 5.0 default. The resting-crab jitter (issue #19) is a CONTACT
 /// event, not a joint one: at rest the floppy legs hang slack *off* their limit
 /// stops (they crumple ~0.7 rad from rest), so the joint-limit spring is not even
-/// engaged and softening it does nothing measurable to the bounce — a parameter
-/// sweep found rest jitter completely flat across limit frequencies 30–400 Hz.
-/// What the bounce *is* sensitive to is this contact spring: at 2 sub-steps the
-/// 30 Hz default is under-resolved against a foot touchdown, so the impulse rings
-/// up through the body. Lowering it to 12 Hz absorbs the touchdown locally —
-/// carapace bounce 3.6 cm → 0.32 cm (it roughly halves at each step 30 → 16 → 12)
-/// and rest angular speed to ~0.6 rad/s, feet still penetrating < 4 mm. 12 Hz is
-/// the floor: 10 Hz climbs back as the over-soft contact lets the body wallow.
-/// Legs still crumple (the rest-quiet fix must not stiffen them into a brace).
+/// engaged and softening it does nothing measurable — a parameter sweep found rest
+/// jitter flat across limit frequencies 30–400 Hz. The jitter lives in this contact
+/// spring: at 2 sub-steps a stiff (high-frequency) spring is under-resolved against a
+/// foot touchdown, so the corrective impulse rings up through the body. The fix is to
+/// drop the frequency until the spring's period is long relative to a sub-step
+/// (~7.8 ms): 5 Hz has a 200 ms period and the solver resolves it cleanly. Measured
+/// rest: carapace angular speed ~0.11 rad/s, bounce ~0.15 cm — quieter than any
+/// stiffer setting tested; legs still crumple (the quiet must not come from stiffening
+/// them into a brace).
 ///
-/// This contact spring is the ONLY lever that moves the bounce — a measured sweep
-/// ruled out two other guesses: `length_unit` is flat from 1.0 down to 0.1 (the
-/// touchdown is not tolerance-limited, it's contact-spring stiffness), and scaling
-/// the whole model up makes the bounce relative to size WORSE and would force a
-/// retrain. So `length_unit` stays 1.0 and the model is not rescaled.
+/// The cost is visual: a softer contact lets the feet sink further into the floor
+/// before it pushes back. The owner judged that sink preferable to the residual
+/// wobble a stiffer contact leaves, so this sits at the soft end. It does shift the
+/// standing/contact dynamics the policy trains against (unlike the airborne phase
+/// below), so changing this frequency wants a training resume.
 ///
-/// Crucially this is FREE for the #17 mid-air invariant: an airborne crab is
-/// contact-free, so the contact spring is dead code there — `airborne_crab_…`
-/// stays well under its runaway guard. That sidesteps the joint-limit tension (a
-/// stop soft enough to cap mid-air overshoot vs stiff enough not to jitter at
-/// rest); the rest jitter never lived in the joint limit, so #17's limit softness
-/// is untouched.
+/// This contact spring is the ONLY lever that moves the jitter — a measured sweep
+/// ruled out two other guesses: `length_unit` is flat from 1.0 down to 0.1 (not
+/// tolerance-limited), and scaling the whole model up makes the jitter relative to
+/// size WORSE and would force a retrain. So `length_unit` stays 1.0 and the model is
+/// not rescaled.
+///
+/// Crucially the contact spring is dead code mid-air (an airborne crab makes no
+/// contact), so this is FREE for the #17 mid-air invariant — `airborne_crab_…` stays
+/// well under its runaway guard, and #17's joint-limit softness is untouched.
 pub const CONTACT_SOFTNESS: SpringCoefficients<f32> = SpringCoefficients {
-    natural_frequency: 12.0,
+    natural_frequency: 5.0,
     damping_ratio: 5.0,
 };
 
