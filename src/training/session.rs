@@ -840,9 +840,22 @@ pub fn brain_step(
             let ep_height = ep.height_sum / ep_steps.max(1) as f32;
             let ep_upright = ep.upright_sum / ep_steps.max(1) as f32;
             let ep_energy = ep.energy_sum / ep_steps.max(1) as f32;
-            training.envs[e] = EnvEpisode {
-                needs_reset: true,
-                ..EnvEpisode::default()
+            // A rescued env was already despawned+respawned this tick by
+            // rescue_nonfinite_crabs (runs .before(Sense)); asking reset_crab for
+            // a second respawn would tear down that fresh crab — which has lived
+            // zero ticks — and rebuild an identical one (issue #16). So the rescue
+            // path owns the reset: take its grace here and leave needs_reset clear,
+            // so reset_crab respawns only envs that ended a NORMAL episode.
+            training.envs[e] = if rescued_envs.contains(&e) {
+                EnvEpisode {
+                    grace: RESET_GRACE_TICKS,
+                    ..EnvEpisode::default()
+                }
+            } else {
+                EnvEpisode {
+                    needs_reset: true,
+                    ..EnvEpisode::default()
+                }
             };
 
             training.recent_rewards.push(ep_reward);
@@ -932,7 +945,12 @@ pub fn brain_step(
 /// spawn height onto the ground and the motors taking the load (0.5 s).
 const RESET_GRACE_TICKS: u32 = 32;
 
-/// System: rebuilds each env's crab when that env's episode ends.
+/// System: rebuilds each env's crab when that env's episode ends by a normal
+/// terminal/truncation (the `needs_reset` flag [`brain_step`] sets). An episode
+/// ended by a non-finite *rescue* is deliberately NOT handled here — that crab
+/// was already respawned this tick by [`rescue_nonfinite_crabs`], so the rescue
+/// path takes the grace itself and leaves `needs_reset` clear (issue #16); a
+/// respawn here would just rebuild the fresh crab a second time.
 ///
 /// A reset is a full despawn + respawn ([`respawn_crab`]): teleporting bodies
 /// cannot repair a multibody whose joint state went non-finite — rapier 0.32
@@ -1134,5 +1152,181 @@ mod tests {
             );
         }
         assert_eq!(norm.clip, loaded.clip);
+    }
+
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy_rapier3d::prelude::*;
+
+    /// Headless training app (physics + bot + training), one fixed tick per
+    /// `update()`, one env. Mirrors `bot::test_util::headless_app` plus the
+    /// training systems; that helper is private to `bot`, so we rebuild it here.
+    fn headless_training_app(checkpoint_dir: &std::path::Path) -> App {
+        use crate::Visuals;
+        use crate::bot::{BotPlugin, NumEnvs};
+        use crate::physics::PhysicsWorldPlugin;
+        use crate::training::TrainingPlugin;
+        use clap::Parser;
+        use std::time::Duration;
+
+        // Point the checkpoint dir at an empty scratch path so no real checkpoint
+        // loads; every other arg keeps its default (tick budget 0 = unlimited, so
+        // brain_step never writes AppExit during the test).
+        let args = Args::try_parse_from([
+            "rl",
+            "--checkpoint-dir",
+            checkpoint_dir.to_str().expect("utf-8 checkpoint dir"),
+        ])
+        .expect("parse default Args");
+
+        let mut app = App::new();
+        app.add_plugins(
+            DefaultPlugins
+                .set(bevy::window::WindowPlugin {
+                    primary_window: None,
+                    exit_condition: bevy::window::ExitCondition::DontExit,
+                    ..default()
+                })
+                .set(bevy::render::RenderPlugin {
+                    render_creation: bevy::render::settings::RenderCreation::Automatic(
+                        bevy::render::settings::WgpuSettings {
+                            backends: None,
+                            ..default()
+                        },
+                    ),
+                    ..default()
+                })
+                .disable::<bevy::winit::WinitPlugin>()
+                .disable::<bevy::log::LogPlugin>(),
+        );
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            Duration::from_secs_f64(1.0 / 64.0),
+        ));
+        app.insert_resource(Visuals(false))
+            .insert_resource(NumEnvs(1))
+            .insert_resource(TimestepMode::Fixed {
+                dt: 1.0 / 64.0,
+                substeps: 1,
+            })
+            .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
+            .add_plugins(PhysicsWorldPlugin)
+            .add_plugins(BotPlugin)
+            .add_plugins(TrainingPlugin::new(args));
+        app
+    }
+
+    fn body_part_entities(app: &mut App) -> std::collections::HashSet<Entity> {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<Entity, With<CrabBodyPart>>();
+        q.iter(app.world()).collect()
+    }
+
+    /// Issue #16: a crab that goes non-finite is rescued (despawn+respawn) by
+    /// `rescue_nonfinite_crabs` BEFORE Sense; the same tick, `brain_step` ends the
+    /// episode and `reset_crab` used to honor `needs_reset` and respawn a SECOND
+    /// time — so the rescue's fresh crab lived zero ticks. This pins the fix: a
+    /// rescued env respawns EXACTLY ONCE (the rescue's), reset_crab leaves it
+    /// alone, and the episode still terminates for training.
+    ///
+    /// The post-tick *episode state* is identical with or without the bug (both
+    /// end at grace = RESET_GRACE_TICKS-1, needs_reset = false), so the only thing
+    /// that distinguishes "respawned once" from "twice" is ENTITY IDENTITY: the
+    /// crab present after the tick must be the exact set the rescue spawned. We
+    /// therefore drive the rescue tick by hand, capture the rescued entity set,
+    /// then run brain_step + reset_crab and assert the set is untouched.
+    #[test]
+    fn rescued_env_respawns_exactly_once() {
+        let checkpoint_dir =
+            std::env::temp_dir().join(format!("rl_test_rescue_once_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&checkpoint_dir);
+        let mut app = headless_training_app(&checkpoint_dir);
+
+        // Settle past grace (RESET_GRACE_TICKS) and record a few real steps, so
+        // the rescued branch has a recorded step to mark terminal (steps > 0).
+        for _ in 0..(RESET_GRACE_TICKS + 8) {
+            app.update();
+        }
+        {
+            let st = app.world().non_send_resource::<TrainingState>();
+            assert_eq!(st.envs[0].grace, 0, "grace should have elapsed");
+            assert!(st.envs[0].steps > 0, "episode should have recorded steps");
+            assert!(!st.envs[0].needs_reset, "no pending reset before NaN");
+        }
+        let episodes_before = app
+            .world()
+            .non_send_resource::<TrainingState>()
+            .episode_count;
+
+        // Poison the multibody the way a tunneling blowup does: a non-finite root
+        // pose (the path rescue_nonfinite_crabs detects).
+        {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&mut Transform, With<CrabCarapace>>();
+            let mut t = q.single_mut(app.world_mut()).expect("carapace");
+            t.translation = Vec3::splat(f32::NAN);
+        }
+
+        // --- Drive the rescue tick by hand, all within one frame (no update() in
+        // between, so the CrabRescued message survives for brain_step to read). ---
+
+        // Phase A: rescue runs (.before(Sense) in the real schedule) — despawns the
+        // NaN crab, spawns a fresh one, emits CrabRescued. Capture the fresh set.
+        app.world_mut()
+            .run_system_once(crate::bot::rescue_nonfinite_crabs)
+            .expect("rescue system");
+        let rescued_set = body_part_entities(&mut app);
+        assert!(
+            rescued_set.iter().all(|&e| {
+                app.world()
+                    .get::<Transform>(e)
+                    .is_some_and(|t| t.translation.is_finite())
+            }),
+            "rescue must leave a finite crab"
+        );
+
+        // Phase B: Sense → brain_step → reset_crab, the rest of the tick.
+        app.world_mut()
+            .run_system_once(crate::bot::sensor::build_observation)
+            .expect("build observation");
+        app.world_mut()
+            .run_system_once(brain_step)
+            .expect("brain_step");
+
+        // After brain_step the rescued env must be set up for the rescue to own the
+        // reset: grace taken, needs_reset NOT set (that is what stops reset_crab
+        // from respawning again).
+        {
+            let st = app.world().non_send_resource::<TrainingState>();
+            assert!(
+                !st.envs[0].needs_reset,
+                "rescued env must not request a second respawn (needs_reset stays clear)"
+            );
+            assert_eq!(
+                st.envs[0].grace, RESET_GRACE_TICKS,
+                "rescue path must take the settle grace itself"
+            );
+            assert_eq!(
+                st.episode_count,
+                episodes_before + 1,
+                "the rescue must still terminate the episode for training"
+            );
+        }
+
+        app.world_mut()
+            .run_system_once(reset_crab)
+            .expect("reset_crab");
+
+        // The crux: reset_crab must NOT have torn the rescue's crab down and built a
+        // third one. The body-part entities after the full tick are EXACTLY the set
+        // the rescue spawned.
+        let after_set = body_part_entities(&mut app);
+        assert_eq!(
+            after_set, rescued_set,
+            "rescued env was respawned twice in one tick (issue #16): reset_crab \
+             replaced the rescue's crab instead of leaving it alone"
+        );
+
+        let _ = std::fs::remove_dir_all(&checkpoint_dir);
     }
 }
