@@ -60,6 +60,12 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     live_checkpoint_dir: Option<PathBuf>,
 
+    /// Demo only: replace the trained policy with hands-on gamepad control — D-pad
+    /// up/down picks a joint, the right stick drives its torque, all else held at
+    /// zero. A physics feel-test, not a learned driver.
+    #[arg(long)]
+    manual_control: bool,
+
     /// Save a checkpoint every N PPO updates (0 to disable periodic saves).
     #[arg(long, default_value_t = 50)]
     save_interval: u32,
@@ -241,6 +247,7 @@ fn main() {
             app.add_plugins(play::DemoPlugin {
                 checkpoint_dir: args.checkpoint_dir.clone(),
                 live_checkpoint_dir: args.live_checkpoint_dir.clone(),
+                manual_control: args.manual_control,
             });
         }
         AppMode::Screenshot { path, settle } => {

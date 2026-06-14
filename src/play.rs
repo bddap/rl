@@ -26,7 +26,7 @@ use burn::tensor::Tensor;
 use rand::Rng;
 
 use crate::bot::actuator::CrabActions;
-use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace};
+use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 use crate::bot::{BotSet, CrabSpawns, respawn_crab};
@@ -170,23 +170,119 @@ impl Policy {
     }
 }
 
-/// System (BotSet::Think): run the policy and write the actions the actuator
-/// will apply.
+/// System (BotSet::Think): run the policy and write the actions the actuator will
+/// apply — unless manual control has taken over (then `manual_control_step` drives).
 fn policy_step(
     policy: NonSend<Policy>,
+    manual: Option<Res<ManualControl>>,
     obs: Res<CrabObservation>,
     mut actions: ResMut<CrabActions>,
 ) {
+    if manual.is_some_and(|m| m.active) {
+        return;
+    }
     if let (Some(o), Some(a)) = (obs.envs.first(), actions.envs.first_mut()) {
         *a = policy.act(o);
     }
 }
 
+/// Load the trained policy as a resource. The driver system that turns it into
+/// actions (`policy_step`) is added by the caller, so `--manual-control` can swap
+/// in [`manual_control_step`] instead.
 fn add_inference(app: &mut App, checkpoint_dir: &Path, live_dir: Option<PathBuf>) {
     let mut policy = Policy::load(checkpoint_dir);
     policy.live_dir = live_dir;
     app.insert_non_send_resource(policy);
-    app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
+}
+
+/// Hands-on gamepad control state. `active` is toggled live with Y/triangle (and
+/// seeded by `--manual-control`); `selected` is the joint the right stick drives
+/// ([`CrabJointId::index`]), None = all joints at zero torque until the D-pad picks one.
+#[derive(Resource)]
+struct ManualControl {
+    active: bool,
+    selected: Option<usize>,
+}
+
+/// Marker for the on-screen manual-control readout (the mode + the live joint).
+#[derive(Component)]
+struct ManualHud;
+
+/// System (BotSet::Think): hands-on gamepad control as an alternative to the policy.
+/// Y/triangle toggles it; while active the D-pad up/down cycles which joint is live
+/// and the right stick's Y drives THAT joint's torque (effort, not a target angle),
+/// every other joint held at zero — a human feeling the joint dynamics by hand. When
+/// inactive it only refreshes the HUD; `policy_step` drives.
+fn manual_control_step(
+    gamepads: Query<&Gamepad>,
+    joint_ids: Query<&CrabJoint>,
+    mut manual: ResMut<ManualControl>,
+    mut actions: ResMut<CrabActions>,
+    mut hud: Query<&mut Text, With<ManualHud>>,
+) {
+    let Some(gp) = gamepads.iter().next() else {
+        return;
+    };
+    if gp.just_pressed(GamepadButton::North) {
+        manual.active = !manual.active;
+        manual.selected = None;
+    }
+
+    let n = CrabJointId::COUNT;
+    let mut line = "POLICY  (press Y / triangle for hands-on manual control)".to_string();
+    if manual.active {
+        if gp.just_pressed(GamepadButton::DPadUp) {
+            manual.selected = Some(manual.selected.map_or(0, |i| (i + 1) % n));
+        }
+        if gp.just_pressed(GamepadButton::DPadDown) {
+            manual.selected = Some(manual.selected.map_or(0, |i| (i + n - 1) % n));
+        }
+        if let Some(a) = actions.envs.first_mut() {
+            // Drive only the selected joint; hold everything else at zero torque.
+            *a = [0.0; CrabJointId::COUNT];
+            line = match manual.selected {
+                Some(sel) => {
+                    let v = gp.right_stick().y.clamp(-1.0, 1.0);
+                    a[sel] = v;
+                    let name = joint_ids
+                        .iter()
+                        .find(|j| j.id.index() == sel)
+                        .map(|j| format!("{:?}", j.id))
+                        .unwrap_or_else(|| format!("#{sel}"));
+                    format!(
+                        "MANUAL  (Y: exit   D-pad: pick joint   R-stick Y: torque)\n\
+                         joint {sel}/{n}  {name}   torque {v:+.2}"
+                    )
+                }
+                None => {
+                    "MANUAL  (Y: exit   D-pad up/down: pick a joint, then R-stick Y to actuate)"
+                        .to_string()
+                }
+            };
+        }
+    }
+    if let Ok(mut text) = hud.single_mut() {
+        **text = line;
+    }
+}
+
+/// Top-left readout of the active driver (policy vs manual) and the live joint.
+fn spawn_manual_hud(mut commands: Commands) {
+    commands.spawn((
+        Text::new("MANUAL CONTROL  (D-pad up/down: pick a joint, then R-stick Y to actuate it)"),
+        TextFont {
+            font_size: 18.0,
+            ..default()
+        },
+        TextColor(Color::srgb(1.0, 0.9, 0.4)),
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(12.0),
+            left: Val::Px(12.0),
+            ..default()
+        },
+        ManualHud,
+    ));
 }
 
 /// Interval between demo hot-reload checks. Loading the brain is cheap but not
@@ -217,6 +313,9 @@ fn hot_reload_policy(time: Res<Time>, mut policy: NonSendMut<Policy>, mut since:
 pub struct DemoPlugin {
     pub checkpoint_dir: PathBuf,
     pub live_checkpoint_dir: Option<PathBuf>,
+    /// Start in hands-on gamepad control instead of the policy (toggle live with
+    /// Y). See [`manual_control_step`] — a physics feel-test, not a learned driver.
+    pub manual_control: bool,
 }
 
 impl Plugin for DemoPlugin {
@@ -226,7 +325,7 @@ impl Plugin for DemoPlugin {
         app.init_resource::<DemoSettle>()
             .init_resource::<PokeBurst>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_hud))
-            .add_systems(Update, (orbit_camera, demo_controls, hot_reload_policy))
+            .add_systems(Update, (orbit_camera, demo_controls))
             .add_systems(
                 FixedUpdate,
                 (
@@ -235,6 +334,18 @@ impl Plugin for DemoPlugin {
                     demo_poke.after(BotSet::Act).before(PhysicsSet::SyncBackend),
                 ),
             );
+        // Both drivers are always present; `ManualControl.active` (seeded by the
+        // flag, toggled live with Y) decides which one writes the actions each tick.
+        app.insert_resource(ManualControl {
+            active: self.manual_control,
+            selected: None,
+        })
+        .add_systems(Startup, spawn_manual_hud)
+        .add_systems(
+            FixedUpdate,
+            (policy_step, manual_control_step).in_set(BotSet::Think),
+        )
+        .add_systems(Update, hot_reload_policy);
     }
 }
 
@@ -329,12 +440,13 @@ fn orbit_camera(
         d_zoom -= dt * 3.0;
     }
 
-    // Gamepad: right stick orbits, triggers zoom.
+    // Gamepad: left stick orbits, triggers zoom. (The RIGHT stick is reserved for
+    // --manual-control joint actuation; left-stick orbit is the convention anyway.)
     for gp in gamepads.iter() {
-        let rs = gp.right_stick();
-        if rs.length() > 0.15 {
-            d_yaw -= rs.x * dt * 2.5;
-            d_pitch += rs.y * dt * 2.5;
+        let ls = gp.left_stick();
+        if ls.length() > 0.15 {
+            d_yaw -= ls.x * dt * 2.5;
+            d_pitch += ls.y * dt * 2.5;
         }
         if gp.pressed(GamepadButton::RightTrigger2) {
             d_zoom += dt * 4.0;
@@ -564,6 +676,7 @@ struct ShotProgress {
 impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
         add_inference(app, &self.checkpoint_dir, None);
+        app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
         app.insert_resource(ShotConfig {
             path: self.path.clone(),
             settle: self.settle,
