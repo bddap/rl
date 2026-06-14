@@ -223,13 +223,15 @@ fn manual_control_step(
     let Some(gp) = gamepads.iter().next() else {
         return;
     };
-    if gp.just_pressed(GamepadButton::North) {
+    // East (B / circle), NOT North: North already toggles the joint-telemetry
+    // graph (player::graph), so sharing it fired both on one press.
+    if gp.just_pressed(GamepadButton::East) {
         manual.active = !manual.active;
         manual.selected = None;
     }
 
     let n = CrabJointId::COUNT;
-    let mut line = "POLICY  (press Y / triangle for hands-on manual control)".to_string();
+    let mut line = "POLICY  (press B / circle for hands-on manual control)".to_string();
     if manual.active {
         if gp.just_pressed(GamepadButton::DPadUp) {
             manual.selected = Some(manual.selected.map_or(0, |i| (i + 1) % n));
@@ -250,12 +252,12 @@ fn manual_control_step(
                         .map(|j| format!("{:?}", j.id))
                         .unwrap_or_else(|| format!("#{sel}"));
                     format!(
-                        "MANUAL  (Y: exit   D-pad: pick joint   R-stick Y: torque)\n\
+                        "MANUAL  (B: exit   D-pad: pick joint   R-stick Y: torque)\n\
                          joint {sel}/{n}  {name}   torque {v:+.2}"
                     )
                 }
                 None => {
-                    "MANUAL  (Y: exit   D-pad up/down: pick a joint, then R-stick Y to actuate)"
+                    "MANUAL  (B: exit   D-pad up/down: pick a joint, then R-stick Y to actuate)"
                         .to_string()
                 }
             };
@@ -266,10 +268,13 @@ fn manual_control_step(
     }
 }
 
-/// Top-left readout of the active driver (policy vs manual) and the live joint.
+/// Top-right readout of the active driver (policy vs manual) and the live joint.
+/// Top-right because the joint-telemetry graph owns the top-left corner.
 fn spawn_manual_hud(mut commands: Commands) {
     commands.spawn((
-        Text::new("MANUAL CONTROL  (D-pad up/down: pick a joint, then R-stick Y to actuate it)"),
+        // Overwritten every frame by `manual_control_step`; seed it with the idle
+        // (policy) line so the pre-first-update frame doesn't flash a stale label.
+        Text::new("POLICY  (press B / circle for hands-on manual control)"),
         TextFont {
             font_size: 18.0,
             ..default()
@@ -278,7 +283,7 @@ fn spawn_manual_hud(mut commands: Commands) {
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(12.0),
-            left: Val::Px(12.0),
+            right: Val::Px(12.0),
             ..default()
         },
         ManualHud,
