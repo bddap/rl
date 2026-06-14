@@ -133,11 +133,11 @@ fn joint_friction_bounds_limb_speed() {
 ///
 /// A Rapier multibody initialises each joint coordinate to 0. Pre-bake that put
 /// every limb at angle 0 — a flat splay that for the knees and coxae is *outside*
-/// their limits, so the solver snapped them on the first tick (the helicopter the
-/// owner saw, and the reason training never settled). `revolute_joint` bakes the
-/// rest pose into each joint frame so coordinate 0 is the planted stance; this
-/// pins that. The prismatic pincer is excluded — its coordinate is a translation,
-/// so `joint_angle` reads only the (near-zero) twist, not the DOF.
+/// their limits, so the solver snapped them on the first tick instead of settling
+/// from the intended stance. `revolute_joint` bakes the rest pose into each joint
+/// frame so coordinate 0 is the planted stance; this pins that. The prismatic
+/// pincer is excluded — its coordinate is a translation, so `joint_angle` reads
+/// only the (near-zero) twist, not the DOF.
 #[test]
 fn crab_spawns_in_rest_pose_inside_limits() {
     use bevy_rapier3d::prelude::MultibodyJoint;

@@ -47,9 +47,11 @@ pub struct Transition {
     pub done: bool,
     /// Truncation: the episode was cut by the step cap, not ended — the crab was
     /// still standing. The value must be bootstrapped (see [`compute_gae`]), or
-    /// the policy is taught that surviving to the cap is worth nothing. Mutually
-    /// exclusive with `done`. (A rollout-window boundary mid-episode is neither:
-    /// the episode continues into the next buffer, bootstrapped via `last_value`.)
+    /// the policy is taught that surviving to the cap is worth nothing. Never set
+    /// together with `done`: the one site that builds a real transition computes
+    /// `truncated = !done && over_cap`. (A rollout-window boundary mid-episode is
+    /// neither: the episode continues into the next buffer, bootstrapped via
+    /// `last_value`.)
     pub truncated: bool,
 }
 

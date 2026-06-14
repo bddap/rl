@@ -49,16 +49,19 @@ fn no_adjacent_contacts(joint: impl Into<TypedJoint>) -> TypedJoint {
     joint
 }
 
-/// Finish a revolute leg/claw/eye joint: viscous friction, no contact with the
-/// adjacent segment, and — the point of this helper — bake the rest pose into
-/// the joint frame so the crab spawns *standing*.
+/// Build a revolute leg/claw/eye joint between the given anchors: viscous
+/// friction, no contact with the adjacent segment, and — the point of this
+/// helper — the rest pose baked into the joint frame so the crab spawns
+/// *standing*. Everything but the two anchors derives from `id`, so the free
+/// axis used for the constraint, the actuator, the sensor, and the bake is one
+/// value (passing a mismatched axis is not expressible).
 ///
 /// A Rapier multibody initialises every joint coordinate to 0. With identity
 /// frames that puts each child at angle 0 relative to its parent — a flat splay
 /// that, for the knees and coxae, is *outside* the joint's own limits, so the
-/// solver snapped them on the first tick (the helicopter the owner saw). Nothing
-/// drives a joint to [`CrabJointId::default_position`] either: control is direct
-/// torque, not a position servo. So we install the rest pose geometrically.
+/// solver snapped them on the first tick. Nothing drives a joint to
+/// [`CrabJointId::default_position`] either: control is direct torque, not a
+/// position servo. So we install the rest pose geometrically.
 ///
 /// Rotating the parent frame by `Rot(axis, rest)` makes coordinate 0 *be* the
 /// rest angle; the coordinate limits then shift by `−rest` to keep the physical
@@ -68,18 +71,20 @@ fn no_adjacent_contacts(joint: impl Into<TypedJoint>) -> TypedJoint {
 /// coordinate, and are untouched — only the spawn pose and the coordinate zero
 /// move. The prismatic pincer is left alone (its coordinate-0 closed stop is
 /// already legal), so this helper is revolute-only.
-fn revolute_joint(id: CrabJointId, builder: RevoluteJointBuilder) -> TypedJoint {
+fn revolute_joint(id: CrabJointId, anchor1: Vec3, anchor2: Vec3) -> TypedJoint {
+    let axis = id.joint_axis_local();
     let rest = id.default_position();
     let [lo, hi] = id.limits();
-    let mut joint: TypedJoint = builder
-        .limits([lo - rest, hi - rest])
-        .motor_velocity(0.0, JOINT_DAMPING)
-        .motor_model(MotorModel::AccelerationBased)
-        .into();
+    let mut joint = no_adjacent_contacts(
+        RevoluteJointBuilder::new(axis)
+            .local_anchor1(anchor1)
+            .local_anchor2(anchor2)
+            .limits([lo - rest, hi - rest])
+            .motor_velocity(0.0, JOINT_DAMPING)
+            .motor_model(MotorModel::AccelerationBased),
+    );
     let generic: &mut GenericJoint = joint.as_mut();
-    let baked = Quat::from_axis_angle(id.joint_axis_local(), rest) * generic.local_basis1();
-    generic.set_local_basis1(baked);
-    generic.set_contacts_enabled(false);
+    generic.set_local_basis1(Quat::from_axis_angle(axis, rest) * generic.local_basis1());
     joint
 }
 
@@ -294,10 +299,9 @@ impl CrabJointId {
 
     /// Every joint, once. Order is irrelevant (callers needing a stable slot use
     /// [`index`](Self::index)); this lets a test enumerate the set without
-    /// re-deriving it by hand. Yields exactly `COUNT` items. Test-only for now —
-    /// un-gate if a non-test sweep ever needs it.
+    /// re-deriving it by hand. Yields exactly `COUNT` items.
     #[cfg(test)]
-    pub fn all() -> impl Iterator<Item = CrabJointId> {
+    fn all() -> impl Iterator<Item = CrabJointId> {
         [Side::Left, Side::Right].into_iter().flat_map(|side| {
             (0u8..4)
                 .flat_map(move |leg| {
@@ -490,16 +494,11 @@ fn spawn_leg(
     let tibia_id = CrabJointId::LegTibia(side, leg_idx);
 
     // -- Coxa: rotates around Y (yaw — leg swings forward/back) -----------
-    // Axis comes from joint_axis_local (the single source the actuator and
-    // sensor share). It is side-mirrored (s·Y, like the femur/tibia s·Z): the
-    // policy emits one torque per joint *type* with no side term, and the
-    // rest-pose bake applies one `rest` per type, so both mirror into a
-    // symmetric stance only if the axis carries the side sign — a fixed +Y fans
-    // the two sides opposite ways (one leg comes out un-splayed).
-    let coxa_joint = RevoluteJointBuilder::new(coxa_id.joint_axis_local())
-        .local_anchor1(Vec3::new(s * CARAPACE_HALF_W, -0.02, z))
-        .local_anchor2(Vec3::new(-s * COXA_LEN, 0.0, 0.0));
-
+    // The joint axis (from joint_axis_local) is side-mirrored — s·Y here, s·Z
+    // for the femur/tibia. The policy emits one torque per joint *type* with no
+    // side term and the rest bake applies one `rest` per type, so both mirror
+    // into a symmetric stance only because the axis carries the side sign; a
+    // fixed +Y would fan the two sides opposite ways.
     let coxa = commands
         .spawn((
             CrabBodyPart,
@@ -513,7 +512,14 @@ fn spawn_leg(
             ColliderMassProperties::Density(2.0),
             Mesh3d(assets.coxa_mesh.clone()),
             MeshMaterial3d(assets.leg_mat.clone()),
-            MultibodyJoint::new(carapace, revolute_joint(coxa_id, coxa_joint)),
+            MultibodyJoint::new(
+                carapace,
+                revolute_joint(
+                    coxa_id,
+                    Vec3::new(s * CARAPACE_HALF_W, -0.02, z),
+                    Vec3::new(-s * COXA_LEN, 0.0, 0.0),
+                ),
+            ),
             Velocity::default(),
             ExternalForce::default(),
         ))
@@ -522,10 +528,6 @@ fn spawn_leg(
     // -- Femur: rotates around ±Z by side (pitch — leg lifts up/down) ------
     // Side-dependent axis (s·Z), like the tibia, so the per-joint-type torque
     // and rest bake mirror into a symmetric leg on both sides.
-    let femur_joint = RevoluteJointBuilder::new(femur_id.joint_axis_local())
-        .local_anchor1(Vec3::new(s * COXA_LEN, 0.0, 0.0))
-        .local_anchor2(Vec3::new(0.0, FEMUR_LEN, 0.0));
-
     let femur = commands
         .spawn((
             CrabBodyPart,
@@ -539,7 +541,14 @@ fn spawn_leg(
             ColliderMassProperties::Density(1.5),
             Mesh3d(assets.femur_mesh.clone()),
             MeshMaterial3d(assets.leg_mat.clone()),
-            MultibodyJoint::new(coxa, revolute_joint(femur_id, femur_joint)),
+            MultibodyJoint::new(
+                coxa,
+                revolute_joint(
+                    femur_id,
+                    Vec3::new(s * COXA_LEN, 0.0, 0.0),
+                    Vec3::new(0.0, FEMUR_LEN, 0.0),
+                ),
+            ),
             Velocity::default(),
             ExternalForce::default(),
         ))
@@ -548,10 +557,6 @@ fn spawn_leg(
     // -- Tibia: rotates around ±Z by side (pitch — lower leg bends) -------
     // Side-dependent axis (s·Z), matching the femur, so the knee bends the same
     // way on both sides.
-    let tibia_joint = RevoluteJointBuilder::new(tibia_id.joint_axis_local())
-        .local_anchor1(Vec3::new(0.0, -FEMUR_LEN, 0.0))
-        .local_anchor2(Vec3::new(0.0, TIBIA_LEN, 0.0));
-
     commands.spawn((
         CrabBodyPart,
         CrabEnvId(env),
@@ -564,7 +569,14 @@ fn spawn_leg(
         ColliderMassProperties::Density(1.0),
         Mesh3d(assets.tibia_mesh.clone()),
         MeshMaterial3d(assets.leg_mat.clone()),
-        MultibodyJoint::new(femur, revolute_joint(tibia_id, tibia_joint)),
+        MultibodyJoint::new(
+            femur,
+            revolute_joint(
+                tibia_id,
+                Vec3::new(0.0, -FEMUR_LEN, 0.0),
+                Vec3::new(0.0, TIBIA_LEN, 0.0),
+            ),
+        ),
         Friction::coefficient(1.5), // grippy feet
         Velocity::default(),
         ExternalForce::default(),
@@ -591,10 +603,6 @@ fn spawn_claw(
     let attach_point = Vec3::new(s * CARAPACE_HALF_W * 0.7, 0.05, CARAPACE_HALF_D * 0.9);
 
     // -- Upper arm: revolute around Z (pitch — raises/lowers claw) ---------
-    let upper_joint = RevoluteJointBuilder::new(upper_id.joint_axis_local())
-        .local_anchor1(attach_point)
-        .local_anchor2(Vec3::new(0.0, -CLAW_UPPER_LEN * 0.5, 0.0));
-
     let upper = commands
         .spawn((
             CrabBodyPart,
@@ -612,17 +620,20 @@ fn spawn_claw(
             ColliderMassProperties::Density(1.0),
             Mesh3d(assets.claw_upper_mesh.clone()),
             MeshMaterial3d(assets.claw_mat.clone()),
-            MultibodyJoint::new(carapace, revolute_joint(upper_id, upper_joint)),
+            MultibodyJoint::new(
+                carapace,
+                revolute_joint(
+                    upper_id,
+                    attach_point,
+                    Vec3::new(0.0, -CLAW_UPPER_LEN * 0.5, 0.0),
+                ),
+            ),
             Velocity::default(),
             ExternalForce::default(),
         ))
         .id();
 
     // -- Forearm: revolute around Y (yaw — swings claw left/right) ---------
-    let fore_joint = RevoluteJointBuilder::new(fore_id.joint_axis_local())
-        .local_anchor1(Vec3::new(0.0, CLAW_UPPER_LEN * 0.5, 0.0))
-        .local_anchor2(Vec3::new(0.0, 0.0, -CLAW_FORE_LEN * 0.5));
-
     let forearm = commands
         .spawn((
             CrabBodyPart,
@@ -636,7 +647,14 @@ fn spawn_claw(
             ColliderMassProperties::Density(1.0),
             Mesh3d(assets.claw_fore_mesh.clone()),
             MeshMaterial3d(assets.claw_mat.clone()),
-            MultibodyJoint::new(upper, revolute_joint(fore_id, fore_joint)),
+            MultibodyJoint::new(
+                upper,
+                revolute_joint(
+                    fore_id,
+                    Vec3::new(0.0, CLAW_UPPER_LEN * 0.5, 0.0),
+                    Vec3::new(0.0, 0.0, -CLAW_FORE_LEN * 0.5),
+                ),
+            ),
             Velocity::default(),
             ExternalForce::default(),
         ))
@@ -686,10 +704,6 @@ fn spawn_eye(
     let attach = Vec3::new(s * 0.12, CARAPACE_HALF_H, CARAPACE_HALF_D * 0.7);
 
     // Eye stalk: revolute around X (pitch — looks up/down)
-    let eye_joint = RevoluteJointBuilder::new(eye_id.joint_axis_local())
-        .local_anchor1(attach)
-        .local_anchor2(Vec3::new(0.0, -EYE_STALK_LEN, 0.0));
-
     commands.spawn((
         CrabBodyPart,
         CrabEnvId(env),
@@ -702,7 +716,10 @@ fn spawn_eye(
         ColliderMassProperties::Density(0.5),
         Mesh3d(assets.eye_mesh.clone()),
         MeshMaterial3d(assets.eye_mat.clone()),
-        MultibodyJoint::new(carapace, revolute_joint(eye_id, eye_joint)),
+        MultibodyJoint::new(
+            carapace,
+            revolute_joint(eye_id, attach, Vec3::new(0.0, -EYE_STALK_LEN, 0.0)),
+        ),
         Velocity::default(),
         ExternalForce::default(),
     ));
