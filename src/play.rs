@@ -46,6 +46,38 @@ pub struct Policy {
     /// neutral, deterministic rest pose) instead of an untrained brain's noise,
     /// so a no-checkpoint render shows the body geometry cleanly.
     loaded: bool,
+    /// Live training checkpoint dir the demo hot-reloads from while running (None
+    /// disables). `last_loaded` is the mtime of the brain file last swapped in, so
+    /// we reload only when training has written a newer one. See [`Self::try_hot_reload`].
+    live_dir: Option<PathBuf>,
+    last_loaded: Option<std::time::SystemTime>,
+}
+
+/// Load a brain + normalizer from `dir`, or `None` if the brain file is absent or
+/// fails to parse. Returning `None` (rather than a zero-action fallback) lets a
+/// hot-reload keep the policy it has when it races a mid-save write, instead of
+/// blanking the running demo to a rest pose on a torn read.
+fn load_brain_normalizer(
+    dir: &Path,
+    device: &NdArrayDevice,
+) -> Option<(CrabBrain<InferBackend>, ObsNormalizer)> {
+    let brain_stem = dir.join(BRAIN_STEM);
+    if !brain_stem.with_extension("bin").exists() {
+        return None;
+    }
+    let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+    let record = recorder.load(brain_stem, device).ok()?;
+    let brain = CrabBrain::<TrainBackend>::new(device)
+        .load_record(record)
+        .valid();
+    let mut normalizer = ObsNormalizer::new(5.0);
+    let norm_path = dir.join(NORMALIZER_FILENAME);
+    if norm_path.exists()
+        && let Some(loaded) = ObsNormalizer::load(&norm_path)
+    {
+        normalizer = loaded;
+    }
+    Some((brain, normalizer))
 }
 
 impl Policy {
@@ -54,38 +86,22 @@ impl Policy {
     /// first checkpoint exists, and to inspect the body's neutral rest pose).
     pub fn load(checkpoint_dir: &Path) -> Self {
         let device = NdArrayDevice::Cpu;
-
-        // Checkpoints are saved from the autodiff backend; load into it, then
-        // `.valid()` down to the bare inference backend — the path training uses.
-        let mut train_brain = CrabBrain::<TrainBackend>::new(&device);
-        let mut loaded = false;
-        let brain_path = checkpoint_dir.join(BRAIN_STEM);
-        if brain_path.with_extension("bin").exists() {
-            let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-            match recorder.load(brain_path.clone(), &device) {
-                Ok(record) => {
-                    train_brain = train_brain.load_record(record);
-                    loaded = true;
-                    info!("play: loaded brain from {}", brain_path.display());
-                }
-                Err(e) => warn!("play: failed to load brain ({e}) — using zero-action pose"),
+        let (brain, normalizer, loaded) = match load_brain_normalizer(checkpoint_dir, &device) {
+            Some((brain, normalizer)) => {
+                info!("play: loaded checkpoint from {}", checkpoint_dir.display());
+                (brain, normalizer, true)
             }
-        } else {
-            warn!(
-                "play: no checkpoint at {} — using zero-action pose",
-                brain_path.with_extension("bin").display()
-            );
-        }
-        let brain = train_brain.valid();
-
-        let mut normalizer = ObsNormalizer::new(5.0);
-        let norm_path = checkpoint_dir.join(NORMALIZER_FILENAME);
-        if norm_path.exists()
-            && let Some(loaded) = ObsNormalizer::load(&norm_path)
-        {
-            info!("play: loaded normalizer from {}", norm_path.display());
-            normalizer = loaded;
-        }
+            None => {
+                warn!(
+                    "play: no usable checkpoint at {} — using zero-action pose",
+                    checkpoint_dir.display()
+                );
+                // Random-init brain; `act` ignores it (returns the rest pose) while
+                // `loaded` is false, unless RL_RANDOM_POLICY opts in below.
+                let brain = CrabBrain::<TrainBackend>::new(&device).valid();
+                (brain, ObsNormalizer::new(5.0), false)
+            }
+        };
 
         // Diagnostic: RL_RANDOM_POLICY drives the crab with the untrained
         // random-init brain even without a checkpoint, to see what a FRESH
@@ -98,7 +114,34 @@ impl Policy {
             normalizer,
             device,
             loaded,
+            live_dir: None,
+            last_loaded: None,
         }
+    }
+
+    /// If the live training dir holds a brain file newer than the one we're
+    /// running, swap it in; returns whether it did. Safe against a mid-save race:
+    /// a torn read makes [`load_brain_normalizer`] return `None` and we keep the
+    /// current policy rather than blanking the demo to a rest pose.
+    fn try_hot_reload(&mut self) -> bool {
+        let Some(dir) = self.live_dir.clone() else {
+            return false;
+        };
+        let brain_bin = dir.join(BRAIN_STEM).with_extension("bin");
+        let Ok(mtime) = std::fs::metadata(&brain_bin).and_then(|m| m.modified()) else {
+            return false; // no live brain file yet
+        };
+        if self.last_loaded == Some(mtime) {
+            return false; // already running this checkpoint
+        }
+        let Some((brain, normalizer)) = load_brain_normalizer(&dir, &self.device) else {
+            return false; // mid-save / unreadable — keep the current policy
+        };
+        self.brain = brain;
+        self.normalizer = normalizer;
+        self.loaded = true;
+        self.last_loaded = Some(mtime);
+        true
     }
 
     /// Deterministic action: the policy mean (no exploration noise), so the crab
@@ -139,9 +182,31 @@ fn policy_step(
     }
 }
 
-fn add_inference(app: &mut App, checkpoint_dir: &Path) {
-    app.insert_non_send_resource(Policy::load(checkpoint_dir));
+fn add_inference(app: &mut App, checkpoint_dir: &Path, live_dir: Option<PathBuf>) {
+    let mut policy = Policy::load(checkpoint_dir);
+    policy.live_dir = live_dir;
+    app.insert_non_send_resource(policy);
     app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
+}
+
+/// Interval between demo hot-reload checks. Loading the brain is cheap but not
+/// free, and training saves no faster than its PPO-update cadence, so a couple of
+/// seconds keeps the demo live without re-reading the file every frame.
+const HOT_RELOAD_INTERVAL_S: f32 = 2.0;
+
+/// System (demo only): every [`HOT_RELOAD_INTERVAL_S`], swap in a newer checkpoint
+/// from the live training dir so a left-open demo tracks training without a
+/// relaunch. No-op unless `--live-checkpoint-dir` was given. See
+/// [`Policy::try_hot_reload`].
+fn hot_reload_policy(time: Res<Time>, mut policy: NonSendMut<Policy>, mut since: Local<f32>) {
+    *since += time.delta_secs();
+    if *since < HOT_RELOAD_INTERVAL_S {
+        return;
+    }
+    *since = 0.0;
+    if policy.try_hot_reload() {
+        info!("play: hot-reloaded a newer checkpoint from live training");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,16 +216,17 @@ fn add_inference(app: &mut App, checkpoint_dir: &Path) {
 /// Windowed "play with the trained crab" mode.
 pub struct DemoPlugin {
     pub checkpoint_dir: PathBuf,
+    pub live_checkpoint_dir: Option<PathBuf>,
 }
 
 impl Plugin for DemoPlugin {
     fn build(&self, app: &mut App) {
-        add_inference(app, &self.checkpoint_dir);
+        add_inference(app, &self.checkpoint_dir, self.live_checkpoint_dir.clone());
         crate::player::graph::register(app);
         app.init_resource::<DemoSettle>()
             .init_resource::<PokeBurst>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_hud))
-            .add_systems(Update, (orbit_camera, demo_controls))
+            .add_systems(Update, (orbit_camera, demo_controls, hot_reload_policy))
             .add_systems(
                 FixedUpdate,
                 (
@@ -497,7 +563,7 @@ struct ShotProgress {
 
 impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
-        add_inference(app, &self.checkpoint_dir);
+        add_inference(app, &self.checkpoint_dir, None);
         app.insert_resource(ShotConfig {
             path: self.path.clone(),
             settle: self.settle,
@@ -603,4 +669,72 @@ fn capture_when_settled(
     progress.captured = true;
     // Give the GPU readback + PNG encode a few frames to finish.
     progress.exit_countdown = 30;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::prelude::Module;
+
+    /// Save a freshly-initialised brain into `dir` the way training does, so a
+    /// hot-reload has a real checkpoint file to pick up.
+    fn save_brain(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let device = NdArrayDevice::Cpu;
+        let brain = CrabBrain::<TrainBackend>::new(&device);
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+        recorder
+            .record(brain.into_record(), dir.join(BRAIN_STEM))
+            .unwrap();
+    }
+
+    /// The demo's "always fresh" guarantee: when training writes a new checkpoint
+    /// into the live dir, the running policy swaps it in (flipping to `loaded`),
+    /// and it does NOT reload the same file twice. Also pins the safe no-ops: no
+    /// `live_dir`, and a live dir with no brain yet, both leave the policy alone.
+    #[test]
+    fn hot_reload_swaps_in_a_new_checkpoint() {
+        let tmp = std::env::temp_dir();
+        let live = tmp.join(format!("rl-hotreload-live-{}", std::process::id()));
+        let empty = tmp.join(format!("rl-hotreload-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&live);
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap();
+
+        // No checkpoint anywhere → unloaded (holds the zero-action rest pose).
+        let mut policy = Policy::load(&empty);
+        assert!(
+            !policy.loaded,
+            "empty checkpoint dir should give an unloaded policy"
+        );
+        assert!(
+            !policy.try_hot_reload(),
+            "no live_dir set → nothing to reload"
+        );
+
+        // Point at a live dir that has no brain yet → still a no-op.
+        policy.live_dir = Some(live.clone());
+        assert!(
+            !policy.try_hot_reload(),
+            "live dir without a brain → no reload"
+        );
+
+        // Training writes a checkpoint → the policy picks it up exactly once.
+        save_brain(&live);
+        assert!(
+            policy.try_hot_reload(),
+            "a new brain in the live dir must reload"
+        );
+        assert!(
+            policy.loaded,
+            "a successful hot-reload marks the policy loaded"
+        );
+        assert!(
+            !policy.try_hot_reload(),
+            "the same checkpoint must not reload again"
+        );
+
+        let _ = std::fs::remove_dir_all(&live);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
 }

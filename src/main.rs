@@ -52,6 +52,14 @@ pub struct Args {
     #[arg(long, default_value = "checkpoints")]
     checkpoint_dir: PathBuf,
 
+    /// Directory the DEMO hot-reloads the policy from while running — the LIVE
+    /// training output. The demo loads its initial policy from `--checkpoint-dir`
+    /// (a stable copy) and then, every couple of seconds, swaps in a newer
+    /// checkpoint that appears here, so a left-open demo tracks training without a
+    /// relaunch. Unset, or a missing/half-written dir, = no swap. Demo mode only.
+    #[arg(long, value_name = "PATH")]
+    live_checkpoint_dir: Option<PathBuf>,
+
     /// Save a checkpoint every N PPO updates (0 to disable periodic saves).
     #[arg(long, default_value_t = 50)]
     save_interval: u32,
@@ -232,6 +240,7 @@ fn main() {
         AppMode::Demo => {
             app.add_plugins(play::DemoPlugin {
                 checkpoint_dir: args.checkpoint_dir.clone(),
+                live_checkpoint_dir: args.live_checkpoint_dir.clone(),
             });
         }
         AppMode::Screenshot { path, settle } => {
