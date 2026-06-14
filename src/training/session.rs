@@ -853,8 +853,13 @@ pub fn brain_step(
                     0.0
                 };
                 let buffered: usize = training.rollouts.iter().map(|b| b.len()).sum();
+                // Honest labels: avg reward is the 10-episode mean; the pose
+                // stats are the single episode that just ended on ONE env (n=1,
+                // not an average); Σω² is the raw summed squared angular speed
+                // (telemetry only, not in the reward); the rate is a lifetime
+                // average (elapsed runs from training start).
                 info!(
-                    "Ep {} | Avg reward: {:.2} | Steps: {} | Height: {:.2} | Upright: {:.2} | Energy: {:.0} | Buffer: {} | {:.0} steps/s",
+                    "Ep {} | avg reward(10): {:.2} | last ep (1 env): {} steps, height {:.2}, upright {:.2}, Σω² {:.0} | buffer {} | {:.0} steps/s (lifetime avg)",
                     training.episode_count,
                     avg,
                     ep_steps,

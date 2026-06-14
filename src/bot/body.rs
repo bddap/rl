@@ -291,6 +291,30 @@ impl CrabJointId {
             CrabJointId::EyeStalk(side) => 30 + side_offset(*side),
         }
     }
+
+    /// Every joint, once. Order is irrelevant (callers needing a stable slot use
+    /// [`index`](Self::index)); this lets a test enumerate the set without
+    /// re-deriving it by hand. Yields exactly `COUNT` items. Test-only for now —
+    /// un-gate if a non-test sweep ever needs it.
+    #[cfg(test)]
+    pub fn all() -> impl Iterator<Item = CrabJointId> {
+        [Side::Left, Side::Right].into_iter().flat_map(|side| {
+            (0u8..4)
+                .flat_map(move |leg| {
+                    [
+                        CrabJointId::LegCoxa(side, leg),
+                        CrabJointId::LegFemur(side, leg),
+                        CrabJointId::LegTibia(side, leg),
+                    ]
+                })
+                .chain([
+                    CrabJointId::ClawUpper(side),
+                    CrabJointId::ClawFore(side),
+                    CrabJointId::ClawPincer(side),
+                    CrabJointId::EyeStalk(side),
+                ])
+        })
+    }
 }
 
 impl CrabJointId {
@@ -682,4 +706,49 @@ fn spawn_eye(
         Velocity::default(),
         ExternalForce::default(),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `index` must be a bijection onto `0..COUNT`. Every action, observation,
+    /// and per-joint array is keyed by it, so a collision would silently alias
+    /// two joints — one never actuated, the other actuated twice — and still
+    /// "train". Pin that every joint maps to a distinct slot covering the range.
+    #[test]
+    fn index_is_a_bijection() {
+        let mut seen = [false; CrabJointId::COUNT];
+        let mut count = 0;
+        for id in CrabJointId::all() {
+            let i = id.index();
+            assert!(i < CrabJointId::COUNT, "{id:?} index {i} out of range");
+            assert!(!seen[i], "{id:?} aliases slot {i}");
+            seen[i] = true;
+            count += 1;
+        }
+        assert_eq!(
+            count,
+            CrabJointId::COUNT,
+            "all() yielded the wrong joint count"
+        );
+        assert!(seen.iter().all(|&s| s), "index leaves a slot unfilled");
+    }
+
+    /// The rest pose must be legal: every joint's `default_position` lies inside
+    /// its own limits. The spawn bakes coordinate 0 onto `default_position` (see
+    /// `revolute_joint`), so a rest angle outside the limits would spawn the crab
+    /// pre-violated — the very bug the frame bake fixed. This is the static,
+    /// sim-free half of `crab_spawns_in_rest_pose_inside_limits`.
+    #[test]
+    fn rest_pose_is_inside_limits() {
+        for id in CrabJointId::all() {
+            let rest = id.default_position();
+            let [lo, hi] = id.limits();
+            assert!(
+                (lo..=hi).contains(&rest),
+                "{id:?} rest {rest:+.3} outside limits [{lo:+.3}, {hi:+.3}]"
+            );
+        }
+    }
 }
