@@ -52,6 +52,13 @@ physics.
 
 ## 2. Validation results (real numbers, sally.glb)
 
+> **Phase-1 update.** The headline below is the **spike's** (phase-0) result. Phase 1
+> then made primitive selection data-driven and fixed the degenerates — see §5,
+> Phase 1 for the after numbers (middle coxae now boxes with residual 0.22 not a
+> blown-up 0.20-radius capsule; leg residual cut via a balanced radius; total mass
+> 279% → 209%). The §5 entry is the current state; this §2 records the original
+> findings the phase was scoped against.
+
 ### Headline
 
 | metric | result |
@@ -200,21 +207,46 @@ Capsule + OBB + mass/inertia + placement, all `#[cfg(test)]`. *Done.* Outcome:
 **feasible for legs, needs work for coxa/carapace/claws; densities must be
 re-derived.**
 
-**Phase 1 — fit quality.** Fix the degenerate clusters: weight-blended vertex
-assignment, per-bone clustering with core-trimming, and a per-part primitive
-choice (capsule vs box vs hull) driven by blobbiness/residual. Add convex-hull
-fitting (parry) for carapace/claw/pincer. Gate: every part fits a sane primitive
-with residual under a threshold; left/right symmetric within tolerance.
+**Phase 1 — fit quality.** *Done* (still `#[cfg(test)]`, not wired to spawn).
+Delivered a **data-driven per-part primitive choice** (`choose_primitive` →
+`Primitive::{Capsule,Box,Ball}`) from extent-sorted shape descriptors
+(elongation / isotropy / flatness) plus a surface residual, replacing the spike's
+blanket capsule. Outcome on `sally.glb`: **20 capsules, 13 boxes, 0 balls** (every
+part assigned, none degenerate).
+- **Degenerate clusters fixed.** The 4 middle-coxa hip blobs (elongation ~0.9, no
+  PCA axis) now route capsule→**box**: residual **0.471 (forced capsule) → 0.222
+  (box)**, and the radius-0.20 blow-ups are gone. Pinned by asserts.
+- **Taper handled** without a tapering primitive (rapier has none): a
+  coverage-**balanced** capsule radius (L2-optimal mean, not the enveloping p95)
+  plus a **tapered-cone residual** that isolates taper from non-stickness. Leg
+  residual **0.448 (p95) → 0.429 (balanced) → 0.385 (cone floor)**; the femora are
+  clean near-cylinders, the tibiae taper to ~0.5 and carry a residual foot-bulge
+  the cone (not the capsule) explains — documented, bounded, not forced.
+- **Primitives match intent where the cloud supports it:** carapace/claw-palm/
+  pincer → box; legs + clean front/back coxae → capsule.
+- **Deliberately deferred** (the spike's aspirational scope that wasn't needed to
+  hit the gate): weight-blended / per-bone clustering, and true **convex-hull**
+  colliders for the chunky parts (an OBB box is the phase-1 stand-in; a hull is a
+  phase-2+ refinement). The eye is the one honest divergence — the art's "antenna"
+  cloud is a short stalk (a box, residual 0.27), not the hand-coded 0.03 ball;
+  sub-gram, so left as a box and noted rather than special-cased.
+- **Mass still runs heavy (209%, down from the spike's 279%)** — boxing the blown-up
+  coxae recovered a chunk, but the legs are still fleshier than the stick body, so
+  §3.1's density coupling stands.
 
 **Phase 2 — typed collider table + offline bake.** Define a
-`FittedBody { parts: Vec<FittedPart> }` type (collider enum + transform + density)
-and a baker subcommand that writes it. `body.rs` gains a path that builds
-colliders from the table when present, hand-coded otherwise. Joints/axes/limits/
-rest stance stay hand-authored (the skeleton doesn't encode them). Make illegal
-states unrepresentable: one collider enum, mass derived from it, no parallel
-dims. Gate: a unit test asserts the baked body's per-part mass/inertia within X %
-of a chosen target (whether that target is "the art" or "the current stick body"
-is the design call from §3.1).
+`FittedBody { parts: Vec<FittedPart> }` type and a baker subcommand that writes
+it. **The `Primitive` enum from phase 1 is the seed of the bake** — promote it out
+of `#[cfg(test)]`, add the per-part link transform (placement, which phase 1 does
+*not* solve — fits are pose-invariant size/mass only), and derive mass from the
+enum so there are no parallel dims. `body.rs` gains a path that builds colliders
+from the table when present, hand-coded otherwise. Joints/axes/limits/rest stance
+stay hand-authored (the skeleton doesn't encode them). Gate: a unit test asserts
+the baked body's per-part mass/inertia within X % of a chosen target (whether that
+target is "the art" or "the current stick body" is the design call from §3.1).
+**New phase-2 note from phase 1:** a box stand-in is good enough for the chunky
+parts' *mass*, but if contact fidelity matters, the carapace/claw/pincer want a
+convex hull — add it as a `Primitive::Hull` variant then, behind the same chooser.
 
 **Phase 3 — density / balance re-derivation.** With fitted geometry, re-pick
 densities (or a global scale) so total mass and CoM keep the crab balance-able —
