@@ -1203,10 +1203,9 @@ mod tests {
         ));
         app.insert_resource(Visuals(false))
             .insert_resource(NumEnvs(1))
-            .insert_resource(TimestepMode::Fixed {
-                dt: 1.0 / 64.0,
-                substeps: 1,
-            })
+            // Same fixed timestep as production (one source — see physics::fixed_timestep)
+            // so this test runs the physics the demo/training loop actually uses.
+            .insert_resource(crate::physics::fixed_timestep())
             .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
             .add_plugins(PhysicsWorldPlugin)
             .add_plugins(BotPlugin)

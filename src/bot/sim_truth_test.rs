@@ -272,40 +272,12 @@ fn actuator_injects_no_net_wrench() {
 #[test]
 fn unactuated_crab_crumples_under_load() {
     use super::body::CrabCarapace;
-    use bevy_rapier3d::prelude::MultibodyJoint;
-    use std::collections::HashMap;
 
     fn carapace_y(app: &mut App) -> f32 {
         let mut q = app
             .world_mut()
             .query_filtered::<&Transform, With<CrabCarapace>>();
         q.iter(app.world()).next().expect("carapace").translation.y
-    }
-    // Largest |angle − rest| over all leg femur/tibia joints. Asserting on this —
-    // not just the carapace height — is what proves a JOINT yielded (legs folding),
-    // distinguishing compliant crumple from a rigid-body tip-over (which also drops
-    // the carapace) or a blow-up respawn (which would reset every joint to rest, so
-    // the deflection collapses to ~0 and this test fails rather than false-passes).
-    fn max_leg_joint_deflection(app: &mut App) -> f32 {
-        let rot: HashMap<Entity, Quat> = {
-            let mut q = app.world_mut().query::<(Entity, &Transform)>();
-            q.iter(app.world()).map(|(e, t)| (e, t.rotation)).collect()
-        };
-        let mut q = app
-            .world_mut()
-            .query::<(&CrabJoint, &MultibodyJoint, &Transform)>();
-        let mut max_def = 0.0f32;
-        for (joint, mj, tf) in q.iter(app.world()) {
-            if !matches!(
-                joint.id,
-                CrabJointId::LegFemur(..) | CrabJointId::LegTibia(..)
-            ) {
-                continue;
-            }
-            let angle = joint_angle(joint.id, rot[&mj.parent], tf.rotation);
-            max_def = max_def.max((angle - joint.id.default_position()).abs());
-        }
-        max_def
     }
 
     let mut app = headless_app();
@@ -334,5 +306,98 @@ fn unactuated_crab_crumples_under_load() {
         "no leg JOINT yielded ({leg_deflection:.3} rad max from rest) — a carapace drop \
          with no joint bending is a rigid-body tip/fall, not compliant crumple; the \
          joints are too stiff to yield under load"
+    );
+}
+
+/// Largest |angle − rest| over all leg femur/tibia joints — proof that a JOINT
+/// yielded (legs folding), distinguishing compliant crumple from a rigid-body
+/// tip-over (which also drops the carapace) or a blow-up respawn (every joint reset
+/// to rest, so deflection ~0). Shared by the crumple and rest-quiet tests so their
+/// "the legs are still floppy" check can't drift apart.
+fn max_leg_joint_deflection(app: &mut App) -> f32 {
+    use bevy_rapier3d::prelude::MultibodyJoint;
+    use std::collections::HashMap;
+
+    let rot: HashMap<Entity, Quat> = {
+        let mut q = app.world_mut().query::<(Entity, &Transform)>();
+        q.iter(app.world()).map(|(e, t)| (e, t.rotation)).collect()
+    };
+    let mut q = app
+        .world_mut()
+        .query::<(&CrabJoint, &MultibodyJoint, &Transform)>();
+    let mut max_def = 0.0f32;
+    for (joint, mj, tf) in q.iter(app.world()) {
+        if !matches!(
+            joint.id,
+            CrabJointId::LegFemur(..) | CrabJointId::LegTibia(..)
+        ) {
+            continue;
+        }
+        let angle = joint_angle(joint.id, rot[&mj.parent], tf.rotation);
+        max_def = max_def.max((angle - joint.id.default_position()).abs());
+    }
+    max_def
+}
+
+/// Issue #18: under the all-zero policy the crab must SETTLE and sit still, not
+/// jiggle and bounce. The floppy legs collapse onto their joint limits at rest, and
+/// with too few solver sub-steps the solver can't converge those unilateral
+/// constraints so the whole body buzzes. This pins the quiet: after settling, the
+/// carapace barely rotates and barely bounces. The crumple assert is the
+/// counterweight — a "fix" that quieted the body by stiffening the legs back into a
+/// rigid brace would drop the deflection and FAIL here rather than pass.
+#[test]
+fn crab_settles_quietly_at_rest() {
+    use super::body::CrabCarapace;
+    use bevy_rapier3d::prelude::Velocity;
+
+    fn carapace(app: &mut App) -> (f32, f32) {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&Velocity, &Transform), With<CrabCarapace>>();
+        let (v, t) = q.iter(app.world()).next().expect("carapace");
+        (v.angular.length(), t.translation.y)
+    }
+
+    let mut app = headless_app();
+    tick(&mut app, 1);
+
+    // Fall and settle onto the ground under zero torque (~5 s), then read the legs.
+    tick(&mut app, 320);
+    let crumple = max_leg_joint_deflection(&mut app);
+
+    // Watch a ~3 s window: a settled crab should be nearly motionless.
+    let mut ang_sum = 0.0f32;
+    let (mut y_min, mut y_max) = (f32::INFINITY, f32::NEG_INFINITY);
+    let window = 192u32;
+    for _ in 0..window {
+        tick(&mut app, 1);
+        let (ang, y) = carapace(&mut app);
+        ang_sum += ang;
+        y_min = y_min.min(y);
+        y_max = y_max.max(y);
+    }
+    let ang_mean = ang_sum / window as f32;
+    let bounce = y_max - y_min;
+    println!(
+        "rest: carapace angular speed mean {ang_mean:.3} rad/s, bounce {bounce:.4} m, \
+         leg crumple {crumple:.3} rad"
+    );
+
+    // Measured: substeps=4 (the fix) ~1.0 rad/s & ~0.03 m; substeps=1 (the bug) ~2.3
+    // rad/s & ~0.076 m. Thresholds sit between, with margin for the deterministic sim.
+    assert!(
+        ang_mean < 1.6,
+        "carapace still twitching at rest: angular speed mean {ang_mean:.3} rad/s \
+         (want <1.6; the substeps=1 bug sits ~2.3)"
+    );
+    assert!(
+        bounce < 0.055,
+        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.055; bug ~0.076)"
+    );
+    assert!(
+        crumple > 0.4,
+        "legs no longer crumple ({crumple:.3} rad) — the rest-quiet fix must not \
+         stiffen the legs into a rigid brace; keep them floppy"
     );
 }
