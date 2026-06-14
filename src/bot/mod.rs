@@ -2,6 +2,8 @@ pub mod actuator;
 pub mod body;
 pub mod brain;
 #[cfg(test)]
+mod meshfit;
+#[cfg(test)]
 mod reset_test;
 pub mod sensor;
 #[cfg(test)]

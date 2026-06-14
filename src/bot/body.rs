@@ -797,6 +797,41 @@ fn spawn_eye(
     ));
 }
 
+/// Test-only re-export of the hand-coded collider dimensions and densities, so
+/// the mesh-fit spike ([`super::meshfit`]) can compare its auto-derived colliders
+/// against the live body's numbers without copying them (which would drift). The
+/// `5.0`/`1.0`/`0.5` densities are inline at the spawn sites below; surface them
+/// here as named consts to keep a single source.
+#[cfg(test)]
+pub mod reference {
+    pub const CARAPACE_HALF_W: f32 = super::CARAPACE_HALF_W;
+    pub const CARAPACE_HALF_H: f32 = super::CARAPACE_HALF_H;
+    pub const CARAPACE_HALF_D: f32 = super::CARAPACE_HALF_D;
+    pub const CARAPACE_DENSITY: f32 = 5.0; // inline at the carapace spawn
+
+    pub const COXA_LEN: f32 = super::COXA_LEN;
+    pub const COXA_RAD: f32 = super::COXA_RAD;
+    pub const FEMUR_LEN: f32 = super::FEMUR_LEN;
+    pub const FEMUR_RAD: f32 = super::FEMUR_RAD;
+    pub const TIBIA_LEN: f32 = super::TIBIA_LEN;
+    pub const TIBIA_RAD: f32 = super::TIBIA_RAD;
+    pub const COXA_DENSITY: f32 = super::COXA_DENSITY;
+    pub const FEMUR_DENSITY: f32 = super::FEMUR_DENSITY;
+    pub const TIBIA_DENSITY: f32 = super::TIBIA_DENSITY;
+
+    pub const CLAW_UPPER_LEN: f32 = super::CLAW_UPPER_LEN;
+    pub const CLAW_UPPER_RAD: f32 = super::CLAW_UPPER_RAD;
+    pub const CLAW_FORE_LEN: f32 = super::CLAW_FORE_LEN;
+    pub const CLAW_FORE_RAD: f32 = super::CLAW_FORE_RAD;
+    pub const PINCER_HALF_W: f32 = super::PINCER_HALF_W;
+    pub const PINCER_HALF_H: f32 = super::PINCER_HALF_H;
+    pub const PINCER_HALF_D: f32 = super::PINCER_HALF_D;
+    pub const CLAW_DENSITY: f32 = 1.0; // inline at all three claw spawns
+
+    pub const EYE_BALL_RAD: f32 = super::EYE_BALL_RAD;
+    pub const EYE_DENSITY: f32 = 0.5; // inline at the eye spawn
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
