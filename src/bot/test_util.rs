@@ -42,6 +42,8 @@ pub fn headless_app() -> App {
         // Same fixed timestep as production (one source — see physics::fixed_timestep)
         // so tests can't pass under physics the demo/training run never uses.
         .insert_resource(crate::physics::fixed_timestep())
+        // Same softened contact spring as production (physics::CONTACT_SOFTNESS).
+        .insert_resource(crate::physics::rapier_context_init())
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
         .add_plugins(PhysicsWorldPlugin)
         .add_plugins(BotPlugin);

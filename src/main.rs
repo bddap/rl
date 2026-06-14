@@ -220,6 +220,10 @@ fn main() {
         // The dt + sub-steps (shared with every headless test) live in one place,
         // physics::fixed_timestep, so production and test physics can't drift.
         .insert_resource(physics::fixed_timestep())
+        // Seed Rapier's context with the softened contact spring (physics::
+        // CONTACT_SOFTNESS) — one source, shared with training + tests — before the
+        // plugin spawns the context from it.
+        .insert_resource(physics::rapier_context_init())
         // Run physics IN FixedUpdate, lockstep with the Sense→Think→Act brain loop
         // (which also lives in FixedUpdate). Rapier's default schedule is PostUpdate
         // — one physics step per rendered frame — while FixedUpdate runs as many

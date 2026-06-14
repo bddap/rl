@@ -339,13 +339,61 @@ fn max_leg_joint_deflection(app: &mut App) -> f32 {
     max_def
 }
 
-/// Issue #18: under the all-zero policy the crab must SETTLE and sit still, not
-/// jiggle and bounce. The floppy legs collapse onto their joint limits at rest, and
-/// with too few solver sub-steps the solver can't converge those unilateral
-/// constraints so the whole body buzzes. This pins the quiet: after settling, the
-/// carapace barely rotates and barely bounces. The crumple assert is the
-/// counterweight — a "fix" that quieted the body by stiffening the legs back into a
-/// rigid brace would drop the deflection and FAIL here rather than pass.
+/// Largest gap, in metres, between the two world anchor points every multibody
+/// joint pins together. A revolute joint forces `world(anchor1) == world(anchor2)`,
+/// so this is ~0 for an attached limb; it grows only if the joint's positional
+/// lock sags under load — the visible "limb detaching from its parent" failure.
+/// The #17 limit softness deliberately softens the WHOLE joint (positional lock
+/// included) to cap mid-air overshoot, so this is the metric that says how much
+/// slack that bought: softening further to chase rest-quiet would pull the anchors
+/// apart here first. Computed from the two rapier bodies' poses through the local
+/// anchors the joint was built with.
+fn max_anchor_separation(app: &mut App) -> f32 {
+    use bevy_rapier3d::plugin::context::RapierRigidBodySet;
+    use bevy_rapier3d::prelude::{GenericJoint, MultibodyJoint, RapierRigidBodyHandle};
+    use bevy_rapier3d::rapier::dynamics::RigidBodyHandle;
+    use std::collections::HashMap;
+
+    let handles: HashMap<Entity, RigidBodyHandle> = {
+        let mut q = app.world_mut().query::<(Entity, &RapierRigidBodyHandle)>();
+        q.iter(app.world()).map(|(e, h)| (e, h.0)).collect()
+    };
+    let joints: Vec<(Entity, Entity, Vec3, Vec3)> = {
+        let mut q = app.world_mut().query::<(Entity, &MultibodyJoint)>();
+        q.iter(app.world())
+            .map(|(child, mj)| {
+                let g: &GenericJoint = mj.data.as_ref();
+                (child, mj.parent, g.local_anchor1(), g.local_anchor2())
+            })
+            .collect()
+    };
+    let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();
+    let set = set_q.single(app.world()).expect("rapier set");
+    let mut max_gap = 0.0f32;
+    for (child, parent, a1, a2) in joints {
+        let (Some(&ph), Some(&ch)) = (handles.get(&parent), handles.get(&child)) else {
+            continue;
+        };
+        let w1: Vec3 = set.bodies.get(ph).expect("parent body").position() * a1;
+        let w2: Vec3 = set.bodies.get(ch).expect("child body").position() * a2;
+        max_gap = max_gap.max((w1 - w2).length());
+    }
+    max_gap
+}
+
+/// Issues #18/#19: under the all-zero policy the crab must SETTLE and sit still,
+/// not jiggle and bounce. The residual bounce (#19) is a CONTACT event — at rest
+/// the floppy legs hang slack OFF their limit stops (crumple ~0.7 rad), so the
+/// joint-limit spring is not engaged and does nothing to the bounce; it is the
+/// foot-touchdown contact ringing up through the body. Softening the contact
+/// spring (physics::CONTACT_SOFTNESS) absorbs the touchdown locally. This pins the
+/// quiet: after settling, the carapace barely rotates and barely bounces.
+///
+/// Three counterweights keep a cheap "fix" from passing:
+/// - crumple > 0.4: a fix that quiets the body by stiffening the legs into a rigid
+///   brace would DROP the deflection and fail here (legs must stay floppy).
+/// - anchor gap < 0.08 m: the rest-quiet lever must not be "soften the joint
+///   positional lock until the limbs detach" — that pulls the anchors apart (#19).
 #[test]
 fn crab_settles_quietly_at_rest() {
     use super::body::CrabCarapace;
@@ -366,9 +414,12 @@ fn crab_settles_quietly_at_rest() {
     tick(&mut app, 320);
     let crumple = max_leg_joint_deflection(&mut app);
 
-    // Watch a ~3 s window: a settled crab should be nearly motionless.
+    // Watch a ~3 s window: a settled crab should be nearly motionless. Track the
+    // worst limb-to-parent anchor gap across the window too — standing load is when
+    // a soft positional lock sags most.
     let mut ang_sum = 0.0f32;
     let (mut y_min, mut y_max) = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut max_gap = 0.0f32;
     let window = 192u32;
     for _ in 0..window {
         tick(&mut app, 1);
@@ -376,30 +427,42 @@ fn crab_settles_quietly_at_rest() {
         ang_sum += ang;
         y_min = y_min.min(y);
         y_max = y_max.max(y);
+        max_gap = max_gap.max(max_anchor_separation(&mut app));
     }
     let ang_mean = ang_sum / window as f32;
     let bounce = y_max - y_min;
     println!(
         "rest: carapace angular speed mean {ang_mean:.3} rad/s, bounce {bounce:.4} m, \
-         leg crumple {crumple:.3} rad"
+         leg crumple {crumple:.3} rad, max anchor gap {max_gap:.4} m"
     );
 
-    // Shipped at substeps=2 + soft limits: ~1.44 rad/s, ~3.6 cm. Dropping to
-    // substeps=1 takes it back to ~2.0 rad/s — the angular bar below catches that
-    // regression. The sim is deterministic, so these are exact, not noisy.
+    // Shipped at substeps=2 + soft contacts (16 Hz): ~0.82 rad/s, ~0.6 cm. The two
+    // regressions these bars catch, both with margin: reverting the contact spring
+    // to the 30 Hz default takes it to ~1.44 rad/s / ~3.6 cm, and dropping to
+    // substeps=1 to ~1.54 / ~3.0 cm. The sim is deterministic, so these are exact.
     assert!(
-        ang_mean < 1.6,
+        ang_mean < 1.1,
         "carapace still twitching at rest: angular speed mean {ang_mean:.3} rad/s \
-         (want <1.6; the substeps=1 regression sits ~2.0)"
+         (want <1.1; the 30 Hz-contact and substeps=1 regressions both sit ~1.5)"
     );
     assert!(
-        bounce < 0.055,
-        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.055; bug ~0.076)"
+        bounce < 0.018,
+        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.018; the \
+         30 Hz-contact regression is ~0.036, substeps=1 ~0.030)"
     );
     assert!(
         crumple > 0.4,
         "legs no longer crumple ({crumple:.3} rad) — the rest-quiet fix must not \
          stiffen the legs into a rigid brace; keep them floppy"
+    );
+    // The #17 joint softness already drifts the anchors ~4.8 cm under standing load;
+    // this bounds it well clear of visible detachment. Softening the joint
+    // positional lock further to chase rest-quiet would trip here first.
+    assert!(
+        max_gap < 0.08,
+        "a limb is separating from its parent: max anchor gap {max_gap:.4} m under \
+         standing load (want <0.08; the joint positional lock has been softened too \
+         far and the limbs are detaching)"
     );
 }
 
@@ -580,6 +643,13 @@ fn airborne_crab_conserves_angular_momentum() {
     // No runaway: an airborne crab must not be able to pump its own spin up.
     // Pre-fix (rigid limits) this ratio was ~68×; the soft-limit fix holds it to
     // a bounded few×. 8× fails loudly on the old behaviour with margin to spare.
+    //
+    // The ratio reads ~2.3× here, not 1.0×, and that is NOT new spin: l0 is sampled
+    // after a short respawn settle during which crab-vs-crab contacts are briefly
+    // live (collisions are filtered off only afterwards), so the softer contact
+    // spring (#19) leaves a smaller post-settle l0 — a smaller denominator inflates
+    // the ratio. The ABSOLUTE peak |L| is ~unchanged (slightly lower) vs the old
+    // 30 Hz contact, so conservation is intact; only the normalisation moved.
     assert!(
         peak < l0 * 8.0,
         "airborne crab spun ITSELF up: |L| grew from {l0:.4} to {peak:.4} \
