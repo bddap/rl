@@ -178,13 +178,14 @@ const EYE_TORQUE_CEILING: f32 = 0.5;
 const FRICTION_RAMP: f32 = 4.0;
 
 /// Breakaway level of the joint-friction motor (see [`FRICTION_RAMP`]) — the
-/// constant torque an external load must exceed to back-drive the joint. Kept
-/// below the ~0.5 N·m a foot-strike puts through a knee, so legs yield (crumple)
-/// under ground load instead of staying rigid, and small enough that a modest
-/// actuator command overcomes it, so the policy needn't saturate to actuate.
-const LEG_FRICTION_CAP: f32 = 0.3;
-const CLAW_FRICTION_CAP: f32 = 0.3;
-const EYE_FRICTION_CAP: f32 = 0.1;
+/// constant torque an external load must exceed to back-drive the joint. Kept WELL
+/// below the ~0.5 N·m needed to hold a leg (only ~1/5) so the legs flop loosely and
+/// crumple under the lightest ground load instead of propping the body up, yet
+/// nonzero because real joints have a little stiction and a touch of it regularizes
+/// the zero-velocity crossing.
+const LEG_FRICTION_CAP: f32 = 0.1;
+const CLAW_FRICTION_CAP: f32 = 0.1;
+const EYE_FRICTION_CAP: f32 = 0.05;
 
 // ---------------------------------------------------------------------------
 // Marker components for querying

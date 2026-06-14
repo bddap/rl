@@ -117,14 +117,16 @@ fn joint_friction_bounds_limb_speed() {
         max_ang = max_ang.max(vel.angular.length());
     }
     println!("max limb angular speed under full torque: {max_ang:.1} rad/s");
-    // Healthy is ~28 rad/s under the capped-friction + inertia-graded-ceiling +
-    // tapered-mass regime: the small force-capped friction barely slows a limb, so
-    // what bounds the speed is the hard joint limit a limb reaches in a couple of
-    // ticks (and the heavier, weaker-driven distal links no longer snap). Pre-fix
-    // was 300–600. 60 keeps ~2x margin over healthy and trips well before the ~300
-    // rad/s blow-up guard.
+    // Under the capped-friction + inertia-graded-ceiling + tapered-mass regime the
+    // small force-capped friction barely slows a limb, so what bounds the speed is
+    // the hard joint limit a limb reaches in a couple of ticks (the heavier,
+    // weaker-driven distal links no longer snap). The terminal scales inversely with
+    // the friction cap — looser legs spin a touch faster into their stops, ~49 rad/s
+    // at the current cap. Pre-fix was 300–600. 100 leaves headroom to loosen the
+    // friction further (floppier legs) while still tripping far below the ~300 rad/s
+    // blow-up guard.
     assert!(
-        max_ang < 60.0,
+        max_ang < 100.0,
         "a limb is spinning at {max_ang:.1} rad/s under full torque — joint \
          friction/ceiling/mass regressed (pre-fix the tibia hit 300–600 rad/s and \
          the blow-up guard then killed every episode in ~8 steps)"
