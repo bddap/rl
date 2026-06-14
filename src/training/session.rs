@@ -1206,6 +1206,7 @@ mod tests {
             // Same fixed timestep as production (one source — see physics::fixed_timestep)
             // so this test runs the physics the demo/training loop actually uses.
             .insert_resource(crate::physics::fixed_timestep())
+            .insert_resource(crate::physics::rapier_context_init())
             .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
             .add_plugins(PhysicsWorldPlugin)
             .add_plugins(BotPlugin)
