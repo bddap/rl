@@ -65,14 +65,32 @@ pub fn apply_actions(
         // joint torque — no net external wrench on the crab.
         let world_axis = parent_tf.rotation * id.joint_axis_local();
         let wrench = world_axis * (a * id.motor_max_force());
-        // Revolute joints push a torque couple; the prismatic pincer pushes a
-        // linear force couple.
-        let map = match id {
-            CrabJointId::ClawPincer(_) => &mut force,
-            _ => &mut torque,
-        };
-        *map.entry(child).or_default() += wrench;
-        *map.entry(mj.parent).or_default() -= wrench;
+        match id {
+            // Prismatic pincer: a linear force couple. +F on the child and −F on
+            // the parent act at the two bodies' COMs, which are offset by `d`, so
+            // the pair carries a net torque d×F — a momentum leak that lets the
+            // policy pump the pincers to spin the whole crab mid-air. Cancel it by
+            // shifting the parent's −F onto the child's line of action: −F at the
+            // parent COM plus the torque (child_COM − parent_COM)×(−F) is
+            // equivalent to −F acting through the child COM, collinear with the +F
+            // there, so the couple's net torque is zero. (COMs ≈ the entity
+            // origins: every crab collider is centred on its body.)
+            CrabJointId::ClawPincer(_) => {
+                let Ok(child_tf) = transforms.get(child) else {
+                    continue;
+                };
+                let d = child_tf.translation - parent_tf.translation;
+                *force.entry(child).or_default() += wrench;
+                *force.entry(mj.parent).or_default() -= wrench;
+                *torque.entry(mj.parent).or_default() += d.cross(-wrench);
+            }
+            // Revolute joints push an equal-and-opposite torque couple — a free
+            // vector, so it is internal (zero net torque) by construction.
+            _ => {
+                *torque.entry(child).or_default() += wrench;
+                *torque.entry(mj.parent).or_default() -= wrench;
+            }
+        }
     }
 
     for (e, mut ef) in forces.iter_mut() {
