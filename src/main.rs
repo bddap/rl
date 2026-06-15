@@ -1,4 +1,5 @@
 mod bot;
+mod collider_editor;
 mod combat;
 mod debug_sliders;
 mod physics;
@@ -154,6 +155,13 @@ pub struct Args {
     #[arg(long, value_name = "OUT.ron")]
     bake_colliders: Option<PathBuf>,
 
+    /// DEV: open the interactive collider-placement editor on this RON table, then
+    /// exit. The table is seeded from the auto-fit (or resumed if it already exists);
+    /// step bone-by-bone and hand-place each collider against the bind-pose mesh.
+    /// Needs a window + GPU. See `collider_editor`.
+    #[arg(long, value_name = "OUT.ron")]
+    edit_colliders: Option<PathBuf>,
+
     /// Collider geometry + mass the body spawns with. `hand-coded` (default) is the
     /// tuned, trained-on body; `fitted` loads the baked `--body-table`, replacing only
     /// collider shape/mass/placement (joints/axes/limits/rest stance stay hand-coded).
@@ -246,6 +254,13 @@ fn main() {
     // DEV bake: fit colliders once, write the table, exit — no bevy app needed.
     if let Some(out) = args.bake_colliders.clone() {
         bake_colliders(&out);
+        return;
+    }
+
+    // DEV editor: open the interactive collider-placement window, then exit. Builds
+    // its own minimal app (mesh + gizmos + egui), no physics or BotPlugin.
+    if let Some(table) = args.edit_colliders.clone() {
+        collider_editor::run(&table);
         return;
     }
 
@@ -452,17 +467,25 @@ fn bake_colliders(out: &std::path::Path) {
     );
     for r in &report {
         let c = &r.choice;
+        // Show the BAKED primitive + why, not the chooser's: every jointed part is
+        // baked as a bone-stretched capsule regardless of the cloud descriptors, so
+        // the chooser's tag/reason would be stale for those.
+        let reason = if r.fitted.part == bot::meshfit::PartId::Carapace {
+            c.reason
+        } else {
+            "jointed → capsule stretched along its bone (red→green)"
+        };
         println!(
             "  {:<20} {:>7} {:>6.2} | {:>6.4} {:>5.2} {:>5.2} {:>5.2} | {:>7.3}  {}",
             format!("{:?}", r.fitted.part),
-            c.primitive().tag(),
+            r.fitted.primitive.tag(),
             c.chosen_residual,
             r.fitted.mass_properties().0,
             c.elongation,
             c.isotropy,
             c.flatness,
             r.span_len,
-            c.reason,
+            reason,
         );
     }
 

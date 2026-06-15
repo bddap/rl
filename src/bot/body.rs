@@ -281,29 +281,6 @@ fn fitted_collider(prim: &Primitive, place: &Placement) -> Collider {
     }
 }
 
-/// Re-order a box's OBB-principal half-extents onto world axes for an axis-
-/// aligned (unrotated) collider. `rotation` carries the OBB principal axes as its
-/// columns (`rotation * X` = first principal direction, etc.); each extent is
-/// placed on the world axis its principal direction points most strongly along.
-/// Only meaningful when that mapping is a bijection — true for a near-world-
-/// aligned box like the carapace; a box tilted ~45° has no honest axis-aligned
-/// representation and should keep its rotation instead (jointed boxes do).
-fn world_axis_aligned_extents(half_extents: Vec3, rotation: Quat) -> Vec3 {
-    let mut world = Vec3::ZERO;
-    for k in 0..3 {
-        let dir = (rotation * Vec3::AXES[k]).abs();
-        let dom = if dir.x >= dir.y && dir.x >= dir.z {
-            0
-        } else if dir.y >= dir.z {
-            1
-        } else {
-            2
-        };
-        world[dom] = half_extents[k];
-    }
-    world
-}
-
 /// A bevy debug mesh matching a fitted primitive's *size* (shown in the Physics
 /// render view). Centred and unposed — it does not honour the collider's
 /// [`Placement`] offset/rotation, so a placed box's wireframe sits at the link
@@ -372,23 +349,17 @@ impl CrabAssets {
 
     /// The fitted carapace as a centred, **axis-aligned** root collider (size +
     /// mass only). The root has no joint to place against — it spawns identity-in-
-    /// world — so the collider is world-axis-aligned and the placement *offset* is
-    /// dropped. The placement *rotation* is not dropped but consumed: a box's
-    /// fitted extents are in OBB principal-axis order, which is NOT world order
-    /// (the carapace's longest principal axis runs front-back, not left-right), so
-    /// laying them on world x/y/z verbatim would stand the shell on edge. Each
-    /// principal extent is mapped onto the world axis its principal direction —
-    /// read off the placement rotation, which carries the OBB axes — is dominant
-    /// on. (The dome-vs-slab *height* difference is a separate, deliberate stance
-    /// choice, not this remap.) `None` when hand-coded or the table omits it.
+    /// world — so the placement *offset* is dropped. Its *rotation* is identity by
+    /// construction: a fitted box is axis-aligned in its bone frame, and the root's
+    /// bone basis is identity (world), so the carapace box's extents are already in
+    /// world x/y/z order and drop onto the collider verbatim — no principal-axis
+    /// remap, no risk of standing the shell on edge. `None` when hand-coded or the
+    /// table omits it.
     fn fitted_root(&self) -> Option<(Collider, Handle<Mesh>, f32)> {
         let fitted = self.fitted.as_ref()?;
         let fp = fitted.body.part(PartId::Carapace)?;
         let collider = match fp.primitive {
-            Primitive::Cuboid { half_extents: e } => {
-                let w = world_axis_aligned_extents(e, fp.placement.rotation);
-                Collider::cuboid(w.x, w.y, w.z)
-            }
+            Primitive::Cuboid { half_extents: e } => Collider::cuboid(e.x, e.y, e.z),
             Primitive::Ball { radius } => Collider::ball(radius),
             Primitive::Capsule {
                 half_height,
