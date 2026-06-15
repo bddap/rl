@@ -19,6 +19,11 @@ burn = { version = "0.20", features = ["autodiff", "ndarray"] }
 rand_distr = "0.5"
 clap = { version = "4", features = ["derive"] }
 bincode = "1"
+# POSIX syscalls the multiprocess trainer needs and std doesn't expose:
+# setpriority (nice the learner + workers so a foreground game preempts them) and
+# setpgid/killpg (put workers in one process group, kill the group on shutdown so
+# none are orphaned). Already in the tree transitively, so it adds no new crate.
+libc = "0.2"
 
 [dev-dependencies]
 # Mesh-fit spike (src/bot/meshfit.rs): read the skinned glTF's skeleton + skin

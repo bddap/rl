@@ -11,12 +11,92 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
-use clap::Parser;
+use clap::{Parser, Subcommand};
+
+use training::session::STEPS_PER_ROLLOUT;
 
 /// Crab Combat — RL-trained crab bots learn to stand, walk, and fight.
+///
+/// With no subcommand the binary runs the single-process path (train headless or
+/// windowed, demo, or screenshot) from these flags — the established entrypoint.
+/// The `learn` subcommand is the in-process multi-threaded trainer; its flags live
+/// on the subcommand, so a stray `--workers` on a single-process run is a parse
+/// error rather than a silent no-op.
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
+pub struct Cli {
+    #[command(flatten)]
+    args: Args,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// The in-process multi-threaded training mode. One learner (the main thread) owns
+/// the policy + optimizer + normalizer; K rollout THREADS each step their own
+/// rapier world on their own core and feed buffers back over a channel. This buys
+/// the wall-clock speedup the single-world `--envs` path can't (one world steps
+/// single-threaded) without any multiprocess IPC. See `training::inproc`.
+#[derive(Subcommand, Debug, Clone)]
+enum Command {
+    /// Run the in-process trainer: spawn K rollout threads, snapshot the policy to
+    /// each, collect their rollouts, and run the PPO update. Resumes from
+    /// `--checkpoint-dir` and stops at the `--ticks` budget, exactly as a
+    /// single-process headless run does.
+    Learn(LearnArgs),
+}
+
+/// Training/app config shared by the single-process path and the in-process
+/// learner+rollout-thread (all of which build a `TrainingState`). The `learn` mode
+/// flattens it so e.g. `--checkpoint-dir` / `--ticks` mean the same thing
+/// everywhere.
+#[derive(Parser, Debug, Clone)]
+pub struct TrainConfig {
+    /// Directory for checkpoint files. On startup, if the directory contains a
+    /// previous checkpoint it will be loaded automatically. During training,
+    /// checkpoints are saved here periodically and on exit.
+    #[arg(long, default_value = "checkpoints")]
+    pub checkpoint_dir: PathBuf,
+
+    /// Stop training after this many physics ticks (0 = run until killed). The budget
+    /// is counted in ticks, never wall-clock, so a run simulates an identical amount
+    /// regardless of machine speed or load — the "fixed ticks, not real time"
+    /// guarantee an assumed time↔tick relation can't give. The single-process path
+    /// stops exactly at N; `learn` checks the budget once per PPO iteration, so it
+    /// stops at the first iteration boundary at or after N (overshooting by up to one
+    /// K·(--envs)·H iteration's worth of ticks).
+    #[arg(long, default_value_t = 0)]
+    pub ticks: u64,
+
+    /// Benchmark only: skip NN inference in the train loop (hold zero actions),
+    /// isolating physics + engine overhead from network cost. Training is
+    /// meaningless under this flag — it exists to measure the per-step bottleneck.
+    #[arg(long)]
+    pub bench_skip_nn: bool,
+
+    /// Number of crab environments trained in parallel in one world (one batched
+    /// NN pass per tick). Crabs sit on a 4 m grid; 16 is the most the ±10 m
+    /// arena holds. Demo/screenshot modes always run 1. (Under `learn` this is M,
+    /// the env count PER rollout thread; total parallel envs = `--workers` × M.)
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=16))]
+    pub envs: u64,
+}
+
+/// Single-process / interactive config: the shared training config plus the
+/// demo/screenshot/window knobs and the periodic-save cadence that only the
+/// single-process path uses.
+#[derive(Parser, Debug, Clone)]
 pub struct Args {
+    #[command(flatten)]
+    pub train: TrainConfig,
+
+    /// Save a checkpoint every N PPO updates (0 disables periodic saves). Lives only
+    /// on the single-process path: it is read at the rollout boundary in `brain_step`,
+    /// which `learn` never reaches — that learner checkpoints every iteration directly,
+    /// so an interval would be dead there.
+    #[arg(long, default_value_t = 50)]
+    pub save_interval: u32,
+
     /// Train headless: no window, maximum simulation speed.
     #[arg(long)]
     headless: bool,
@@ -47,12 +127,6 @@ pub struct Args {
     #[arg(long, default_value_t = 720)]
     height: u32,
 
-    /// Directory for checkpoint files. On startup, if the directory contains a
-    /// previous checkpoint it will be loaded automatically. During training,
-    /// checkpoints are saved here periodically and on exit.
-    #[arg(long, default_value = "checkpoints")]
-    checkpoint_dir: PathBuf,
-
     /// Directory the DEMO hot-reloads the policy from while running — the LIVE
     /// training output. The demo loads its initial policy from `--checkpoint-dir`
     /// (a stable copy) and then, every couple of seconds, swaps in a newer
@@ -73,30 +147,41 @@ pub struct Args {
     /// never wired into training/headless. See `src/debug_sliders.rs`.
     #[arg(long)]
     debug_sliders: bool,
+}
 
-    /// Save a checkpoint every N PPO updates (0 to disable periodic saves).
-    #[arg(long, default_value_t = 50)]
-    save_interval: u32,
+/// Learner orchestration: the shared training config plus how many rollout threads
+/// to fan out.
+#[derive(Parser, Debug, Clone)]
+struct LearnArgs {
+    #[command(flatten)]
+    train: TrainConfig,
 
-    /// Stop headless training after exactly this many physics ticks (0 = run
-    /// until killed). The budget is counted in ticks, never wall-clock, so a run
-    /// simulates an identical amount regardless of machine speed or load — the
-    /// "fixed ticks, not real time" guarantee an assumed time↔tick relation can't
-    /// give.
-    #[arg(long, default_value_t = 0)]
-    ticks: u64,
-
-    /// Benchmark only: skip NN inference in the train loop (hold zero actions),
-    /// isolating physics + engine overhead from network cost. Training is
-    /// meaningless under this flag — it exists to measure the per-step bottleneck.
+    /// Number of rollout threads K, each stepping its own world on its own core.
+    /// Default is PHYSICAL cores minus 2 (floored at one) — physical, not logical,
+    /// so it never oversubscribes a hyperthreaded pair onto one core — leaving the
+    /// rest of the machine a couple of cores. Pass an explicit value to use more.
+    /// Clamped to 1..=64.
     #[arg(long)]
-    bench_skip_nn: bool,
+    workers: Option<usize>,
 
-    /// Number of crab environments trained in parallel in one world (one batched
-    /// NN pass per tick). Crabs sit on a 4 m grid; 16 is the most the ±10 m
-    /// arena holds. Demo/screenshot modes always run 1.
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=16))]
-    envs: u64,
+    /// Rollout horizon H: physics ticks each thread rolls per iteration before
+    /// handing its buffers back. Per-iteration sample count is K·(--envs)·H.
+    #[arg(long, default_value_t = STEPS_PER_ROLLOUT as u64)]
+    horizon: u64,
+
+    /// Stop after this many PPO iterations (0 = unbounded). A benchmark / A-B knob;
+    /// the production budget is `--ticks` (total physics ticks). Whichever limit is
+    /// hit first stops the run.
+    #[arg(long, default_value_t = 0)]
+    iters: u64,
+
+    /// Niceness applied to the whole process — the learner and its rollout threads
+    /// share it (POSIX priority is per-process; higher = yields more CPU). Positive
+    /// so a foreground game always preempts training even when the threads saturate
+    /// their cores. Clamped to 0..=19 (0 disables; a negative nice would raise
+    /// priority and needs privilege, so it is floored to 0 rather than attempted).
+    #[arg(long, default_value_t = 10)]
+    nice: i32,
 }
 
 /// What the process is doing this run. Train can be headless or windowed; demo
@@ -114,8 +199,25 @@ enum AppMode {
 pub struct Visuals(pub bool);
 
 fn main() {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
+    // The `learn` entry point short-circuits the normal Bevy app: the learner steps
+    // no world itself (it owns the policy and runs PPO), and spawns K rollout
+    // threads that each drive their own headless app by hand. See `training::inproc`.
+    if let Some(Command::Learn(l)) = cli.command {
+        // run_learner owns nicing (it lowers process priority before building any
+        // world) so a foreground game preempts training.
+        training::inproc::run_learner(
+            &l.train,
+            training::inproc::default_workers(l.workers),
+            l.horizon,
+            l.iters,
+            l.nice,
+        );
+        return;
+    }
+
+    let args = cli.args;
     let mode = if let Some(path) = args.screenshot.clone() {
         AppMode::Screenshot {
             path,
@@ -215,7 +317,7 @@ fn main() {
     // Parallel envs are a training concept; the interactive/render modes drive
     // exactly one crab.
     let num_envs = match &mode {
-        AppMode::Train => args.envs as usize,
+        AppMode::Train => args.train.envs as usize,
         AppMode::Demo | AppMode::Screenshot { .. } => 1,
     };
 
@@ -247,14 +349,17 @@ fn main() {
 
     match mode {
         AppMode::Train => {
-            app.add_plugins(training::TrainingPlugin::new(args.clone()));
+            app.add_plugins(training::TrainingPlugin::new(
+                args.train.clone(),
+                args.save_interval,
+            ));
             if !args.headless {
                 app.add_systems(Startup, spawn_fixed_camera);
             }
         }
         AppMode::Demo => {
             app.add_plugins(play::DemoPlugin {
-                checkpoint_dir: args.checkpoint_dir.clone(),
+                checkpoint_dir: args.train.checkpoint_dir.clone(),
                 live_checkpoint_dir: args.live_checkpoint_dir.clone(),
                 manual_control: args.manual_control,
             });
@@ -265,7 +370,7 @@ fn main() {
         }
         AppMode::Screenshot { path, settle } => {
             app.add_plugins(play::ScreenshotPlugin {
-                checkpoint_dir: args.checkpoint_dir.clone(),
+                checkpoint_dir: args.train.checkpoint_dir.clone(),
                 path,
                 settle,
                 width: args.width,
@@ -338,7 +443,7 @@ fn contact_audit(
 
 /// Virtual clock that runs 100× wall speed for headless/offscreen modes, so a
 /// fixed number of physics steps elapses in a fraction of the real time.
-fn fast_virtual_time() -> Time<Virtual> {
+pub(crate) fn fast_virtual_time() -> Time<Virtual> {
     let mut t = Time::<Virtual>::default();
     t.set_relative_speed(100.0);
     t.set_max_delta(Duration::from_secs(10));

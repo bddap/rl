@@ -1,10 +1,12 @@
 //! Builds the observation vector from physics state.
 //!
 //! The observation vector contains:
-//! - Per-joint: current joint angle and joint velocity magnitude
+//! - Per-joint: current joint angle and signed joint DOF velocity
 //! - Body state: carapace position, orientation, linear/angular velocity
 //!
 //! For phase 1 (stand up), we don't need enemy state.
+
+use std::collections::HashMap;
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
@@ -13,7 +15,7 @@ use super::CrabSpawns;
 use super::body::{CrabCarapace, CrabEnvId, CrabJoint, CrabJointId, joint_angle};
 
 /// Total observation size.
-/// Per-joint: 2 floats (joint_angle, joint_velocity_magnitude)
+/// Per-joint: 2 floats (joint_angle, signed joint DOF velocity)
 /// Body: 3 (pos) + 4 (quat) + 3 (linvel) + 3 (angvel) = 13
 pub const OBS_SIZE: usize = CrabJointId::COUNT * 2 + 13;
 
@@ -34,47 +36,65 @@ impl CrabObservation {
 pub fn build_observation(
     spawns: Res<CrabSpawns>,
     mut obs: ResMut<CrabObservation>,
-    carapace_q: Query<(&CrabEnvId, &Transform, &Velocity), With<CrabCarapace>>,
+    carapace_q: Query<(Entity, &CrabEnvId, &Transform, &Velocity), With<CrabCarapace>>,
     joint_q: Query<(
+        Entity,
         &CrabJoint,
         &CrabEnvId,
         &MultibodyJoint,
         &Transform,
         &Velocity,
     )>,
-    transforms: Query<&Transform>,
 ) {
     for v in obs.envs.iter_mut() {
         *v = [0.0; OBS_SIZE];
     }
 
+    // World rotation + velocity of every part, keyed by entity. A joint reads its
+    // PARENT's motion from here: the velocity input is the signed DOF rate (the
+    // joint coordinate's velocity), which is the part's motion RELATIVE to its
+    // parent about the joint axis — that needs the parent's world rotation and
+    // velocity. The carapace is included because it parents the coxae/claws/eyes.
+    let mut motion: HashMap<Entity, (Quat, Vec3, Vec3)> = HashMap::new();
+    for (e, _, _, _, t, vel) in joint_q.iter() {
+        motion.insert(e, (t.rotation, vel.linear, vel.angular));
+    }
+    for (e, _, t, vel) in carapace_q.iter() {
+        motion.insert(e, (t.rotation, vel.linear, vel.angular));
+    }
+
     // -- Per-joint observations ------------------------------------------------
-    for (crab_joint, env, mj, transform, vel) in joint_q.iter() {
+    for (_, crab_joint, env, mj, transform, vel) in joint_q.iter() {
         let Some(v) = obs.envs.get_mut(env.0) else {
             continue;
         };
         let idx = crab_joint.id.index();
         let base = idx * 2;
 
-        // Current joint angle (the coordinate the policy now controls by torque).
-        v[base] = match transforms.get(mj.parent) {
-            Ok(parent) => joint_angle(crab_joint.id, parent.rotation, transform.rotation),
-            Err(_) => 0.0,
-        };
+        let (parent_rot, parent_lin, parent_ang) =
+            motion
+                .get(&mj.parent)
+                .copied()
+                .unwrap_or((Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO));
 
-        // Joint velocity: use the DOF-appropriate velocity.
-        // Prismatic joints (ClawPincer) → linear velocity magnitude.
-        // Revolute joints (everything else) → angular velocity magnitude.
+        // Current joint angle (the coordinate the policy controls by torque).
+        v[base] = joint_angle(crab_joint.id, parent_rot, transform.rotation);
+
+        // SIGNED joint DOF rate = d(angle)/dt: the part's velocity relative to its
+        // parent, projected onto the joint axis in world. Signed (not a magnitude)
+        // so the policy can tell which way a joint is moving and damp it — an
+        // unsigned magnitude hides the direction the controller needs to oppose.
+        let axis_world = parent_rot * crab_joint.id.joint_axis_local();
         v[base + 1] = match &crab_joint.id {
-            CrabJointId::ClawPincer(_) => vel.linear.length(),
-            _ => vel.angular.length(),
+            CrabJointId::ClawPincer(_) => (vel.linear - parent_lin).dot(axis_world),
+            _ => (vel.angular - parent_ang).dot(axis_world),
         };
     }
 
     // -- Body state (carapace) -------------------------------------------------
     let body_base = CrabJointId::COUNT * 2;
 
-    for (env, transform, vel) in carapace_q.iter() {
+    for (_, env, transform, vel) in carapace_q.iter() {
         let Some(v) = obs.envs.get_mut(env.0) else {
             continue;
         };

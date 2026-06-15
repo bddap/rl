@@ -14,12 +14,12 @@ use burn::module::AutodiffModule;
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::prelude::*;
-use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
+use burn::record::{BinBytesRecorder, BinFileRecorder, FullPrecisionSettings, Recorder};
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 
-use crate::Args;
+use crate::TrainConfig;
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
@@ -27,24 +27,33 @@ use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns, respawn_crab};
 
 use super::algorithm::{
-    PpoConfig, PpoMetrics, RolloutBuffer, Transition, compute_gae, compute_log_prob, sample_action,
+    PpoConfig, PpoMetrics, ReturnNormalizer, ReturnNormalizerData, RolloutBuffer, Transition,
+    compute_gae, compute_log_prob, sample_action,
 };
 
 /// Running observation normalizer using Welford's online algorithm.
 /// Normalizes observations to zero mean, unit variance.
+///
+/// Variance is NOT stored: it is `m2 / (count-1)`, derived on demand in
+/// [`Self::variance`]. Keeping a separate `var` array would be a second source
+/// of truth that can silently drift from `m2`/`count` across save/merge.
 pub(crate) struct ObsNormalizer {
     mean: [f64; OBS_SIZE],
-    var: [f64; OBS_SIZE],   // running variance (M2 / count)
     m2: [f64; OBS_SIZE],    // sum of squared differences from mean
     count: [u64; OBS_SIZE], // per-element count (NaN-skipped elements don't inflate others)
     clip: f32,              // max absolute normalized value
 }
 
-/// Serde-friendly mirror of `ObsNormalizer` (arrays > 32 don't auto-derive).
-#[derive(Serialize, Deserialize)]
-struct ObsNormalizerData {
+/// Serde-friendly mirror of `ObsNormalizer` (arrays > 32 don't auto-derive). Also
+/// the form the learner snapshots to / merges from across rollout threads (passed
+/// in-process, not over a wire) and the on-disk checkpoint format, so it is
+/// `pub(crate)`.
+///
+/// No `var` field: variance is recomputed from `m2`/`count` on load, so carrying it
+/// would be OBS_SIZE redundant f64s per snapshot/checkpoint and a drift hazard.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ObsNormalizerData {
     mean: Vec<f64>,
-    var: Vec<f64>,
     m2: Vec<f64>,
     count: Vec<u64>,
     clip: f32,
@@ -54,7 +63,6 @@ impl ObsNormalizer {
     fn to_data(&self) -> ObsNormalizerData {
         ObsNormalizerData {
             mean: self.mean.to_vec(),
-            var: self.var.to_vec(),
             m2: self.m2.to_vec(),
             count: self.count.to_vec(),
             clip: self.clip,
@@ -62,60 +70,83 @@ impl ObsNormalizer {
     }
 
     fn from_data(d: ObsNormalizerData) -> Option<Self> {
-        if d.mean.len() != OBS_SIZE
-            || d.var.len() != OBS_SIZE
-            || d.m2.len() != OBS_SIZE
-            || d.count.len() != OBS_SIZE
-        {
+        if d.mean.len() != OBS_SIZE || d.m2.len() != OBS_SIZE || d.count.len() != OBS_SIZE {
             warn!(
                 "Normalizer size mismatch: expected {OBS_SIZE}, got {}",
                 d.mean.len()
             );
             return None;
         }
-        if d.clip <= 0.0 || d.var.iter().any(|&v| v < 0.0) {
-            warn!("Normalizer contains invalid values (clip <= 0 or negative variance)");
+        if d.clip <= 0.0 || d.m2.iter().any(|&v| v < 0.0) {
+            warn!("Normalizer contains invalid values (clip <= 0 or negative M2)");
             return None;
         }
         let mut n = Self::new(d.clip);
         n.mean.copy_from_slice(&d.mean);
-        n.var.copy_from_slice(&d.var);
         n.m2.copy_from_slice(&d.m2);
         n.count.copy_from_slice(&d.count);
         Some(n)
     }
 }
 
+/// Max absolute normalized observation value (Welford clip). One source of truth
+/// for every `ObsNormalizer::new`, so the learner's master and a rollout thread's
+/// per-horizon increment share the same clip and can't drift.
+pub(crate) const NORMALIZER_CLIP: f32 = 5.0;
+
 impl ObsNormalizer {
     pub(crate) fn new(clip: f32) -> Self {
         Self {
             mean: [0.0; OBS_SIZE],
-            var: [1.0; OBS_SIZE],
             m2: [0.0; OBS_SIZE],
             count: [0; OBS_SIZE],
             clip,
         }
     }
 
+    /// Per-element variance `m2 / (count-1)`, the value `normalize_frozen` scales
+    /// by. Defaults to 1.0 for an element seen at most once (no spread estimate
+    /// yet), matching the unit-variance starting point a fresh normalizer used.
+    fn variance(&self, i: usize) -> f64 {
+        if self.count[i] > 1 {
+            (self.m2[i] / (self.count[i] as f64 - 1.0)).max(0.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Fold one finite sample of element `i` into the running (count, mean, m2)
+    /// — the inner Welford step, shared by the full normalizer and the worker's
+    /// per-horizon increment accumulator so they cannot compute it differently.
+    fn observe_element(&mut self, i: usize, raw: f32) {
+        if !raw.is_finite() {
+            return;
+        }
+        self.count[i] += 1;
+        let n = self.count[i] as f64;
+        let x = raw as f64;
+        let delta = x - self.mean[i];
+        self.mean[i] += delta / n;
+        let delta2 = x - self.mean[i];
+        self.m2[i] += delta * delta2;
+    }
+
     /// Update running stats, then return the normalized observation.
     pub(crate) fn normalize(&mut self, obs: &[f32; OBS_SIZE]) -> [f32; OBS_SIZE] {
         for (i, &raw) in obs.iter().enumerate() {
-            if !raw.is_finite() {
-                continue;
-            }
-            self.count[i] += 1;
-            let n = self.count[i] as f64;
-            let x = raw as f64;
-            let delta = x - self.mean[i];
-            self.mean[i] += delta / n;
-            let delta2 = x - self.mean[i];
-            self.m2[i] += delta * delta2;
-
-            if self.count[i] > 1 {
-                self.var[i] = (self.m2[i] / (n - 1.0)).max(0.0);
-            }
+            self.observe_element(i, raw);
         }
         self.normalize_frozen(obs)
+    }
+
+    /// Fold one observation into the running stats WITHOUT normalizing it. The
+    /// worker's per-horizon increment uses this: it must count exactly the same
+    /// samples the master sees this horizon, but the normalized value is produced
+    /// by the master (with the full baseline+horizon stats), not by the increment.
+    pub(crate) fn observe(&mut self, obs: &[f32; OBS_SIZE]) {
+        for (i, &raw) in obs.iter().enumerate() {
+            self.observe_element(i, raw);
+        }
     }
 
     /// Normalize against the current statistics WITHOUT updating them. Inference
@@ -130,7 +161,7 @@ impl ObsNormalizer {
                 normalized[i] = 0.0;
                 continue;
             }
-            let std = (self.var[i] as f32).sqrt().max(1e-6);
+            let std = (self.variance(i) as f32).sqrt().max(1e-6);
             let val = (raw - self.mean[i] as f32) / std;
             normalized[i] = if val.is_nan() {
                 0.0
@@ -150,8 +181,59 @@ impl ObsNormalizer {
                 return;
             }
         };
-        if let Err(e) = std::fs::write(path, bytes) {
+        if let Err(e) = atomic_write(path, &bytes) {
             warn!("Failed to write normalizer to {}: {e}", path.display());
+        }
+    }
+
+    /// Snapshot the running stats as the serde mirror. Used to hand the master's
+    /// stats to a rollout thread, ship a thread's increment back, and persist the
+    /// checkpoint.
+    pub(crate) fn snapshot(&self) -> ObsNormalizerData {
+        self.to_data()
+    }
+
+    /// Replace this normalizer's stats with `data` (e.g. the learner's merged
+    /// master, handed to a rollout thread before its next rollout). Returns false on
+    /// a size/validity mismatch, leaving self unchanged.
+    pub(crate) fn load_snapshot(&mut self, data: ObsNormalizerData) -> bool {
+        match Self::from_data(data) {
+            Some(n) => {
+                *self = n;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Parallel Welford merge: fold another accumulator's per-element
+    /// (count, mean, M2) into this one. This is the exact combination of two
+    /// INDEPENDENT streams — so it is only valid when `other` shares no samples
+    /// with `self`. The in-process path upholds that by merging a per-horizon
+    /// INCREMENT (only the samples this iteration added, never the snapshot baseline
+    /// the master already counted); merging a cumulative snapshot that re-included
+    /// the baseline would double-count it. (The per-element NaN-skip
+    /// means counts can differ across elements, which is why the merge is per
+    /// element; variance is derived from the merged M2 on demand.)
+    pub(crate) fn merge(&mut self, other: &ObsNormalizerData) {
+        if other.mean.len() != OBS_SIZE {
+            warn!("normalizer merge: size mismatch, skipping");
+            return;
+        }
+        for i in 0..OBS_SIZE {
+            let na = self.count[i] as f64;
+            let nb = other.count[i];
+            if nb == 0 {
+                continue;
+            }
+            let nb = nb as f64;
+            let total = na + nb;
+            let delta = other.mean[i] - self.mean[i];
+            let mean = self.mean[i] + delta * nb / total;
+            let m2 = self.m2[i] + other.m2[i] + delta * delta * na * nb / total;
+            self.count[i] += other.count[i];
+            self.mean[i] = mean;
+            self.m2[i] = m2;
         }
     }
 
@@ -193,19 +275,25 @@ struct MetricsLogger {
 }
 
 impl MetricsLogger {
-    fn new() -> Self {
-        std::fs::create_dir_all("tmp").expect("failed to create tmp/");
+    /// `dir` is where the two CSVs land. The single-process trainer and the
+    /// in-process learner use "tmp" (the established location the plotting scripts
+    /// read); a rollout thread passes its own scratch dir so K threads don't clobber
+    /// one shared CSV (and the learner keeps owning "tmp").
+    fn new(dir: &Path) -> Self {
+        std::fs::create_dir_all(dir).expect("failed to create metrics dir");
 
+        let ep_path = dir.join("episodes.csv");
         let mut episode_file =
-            std::fs::File::create("tmp/episodes.csv").expect("failed to create tmp/episodes.csv");
+            std::fs::File::create(&ep_path).expect("failed to create episodes.csv");
         writeln!(
             episode_file,
             "episode,reward,steps,avg_reward_10,mean_height,mean_upright,mean_energy"
         )
         .expect("failed to write header");
 
-        let mut update_file = std::fs::File::create("tmp/ppo_updates.csv")
-            .expect("failed to create tmp/ppo_updates.csv");
+        let up_path = dir.join("ppo_updates.csv");
+        let mut update_file =
+            std::fs::File::create(&up_path).expect("failed to create ppo_updates.csv");
         writeln!(
             update_file,
             "update,policy_loss,value_loss,entropy,avg_reward,buffer_size"
@@ -262,6 +350,66 @@ impl MetricsLogger {
 /// so the actual file on disk is `brain.bin`.
 pub(crate) const BRAIN_STEM: &str = "brain";
 pub(crate) const NORMALIZER_FILENAME: &str = "normalizer.bin";
+/// Return (value-target) normalizer checkpoint, beside the obs normalizer, so a
+/// resumed run de-normalizes value predictions against the same scale it trained
+/// with (a cold scale on resume would briefly mis-scale the value head).
+pub(crate) const RETURN_NORMALIZER_FILENAME: &str = "return_normalizer.bin";
+
+/// Write `bytes` to `path` atomically: a sibling temp file then a rename, so a crash
+/// mid-write leaves the previous file intact rather than a torn one. The overnight
+/// trainer is killed and resumed, so a torn checkpoint would be silently discarded on
+/// load and the run would resume from random weights.
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Persist the return normalizer's running stats (bincode, like the obs normalizer).
+/// A write failure is logged, not fatal — the run continues, only resume loses the
+/// scale.
+fn save_return_normalizer(norm: &ReturnNormalizer, path: &Path) {
+    match bincode::serialize(&norm.to_data()) {
+        Ok(bytes) => {
+            if let Err(e) = atomic_write(path, &bytes) {
+                warn!(
+                    "Failed to write return normalizer to {}: {e}",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => warn!("Failed to serialize return normalizer: {e}"),
+    }
+}
+
+/// Load the return normalizer from a checkpoint, or `None` on a read/parse error or
+/// a corrupt (negative-M2) record — a missing/bad file leaves a fresh identity scale.
+fn load_return_normalizer(path: &Path) -> Option<ReturnNormalizer> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| {
+            warn!(
+                "Failed to read return normalizer from {}: {e}",
+                path.display()
+            )
+        })
+        .ok()?;
+    let data: ReturnNormalizerData = bincode::deserialize(&bytes)
+        .map_err(|e| {
+            warn!(
+                "Failed to deserialize return normalizer from {}: {e}",
+                path.display()
+            )
+        })
+        .ok()?;
+    ReturnNormalizer::from_data(data)
+}
+
+/// Physics ticks per PPO update in single-process / windowed training: the
+/// rollout window `brain_step` fills before running an update. Also the default
+/// for the in-process learner's `--horizon` (one source, so the two can't silently
+/// diverge). Worker mode deliberately ignores `steps_per_rollout` — the learner's
+/// `--horizon` sets the window and reads the buffers out itself.
+pub(crate) const STEPS_PER_ROLLOUT: u32 = 1024;
 
 /// The RL training state. Stored as a non-send resource because burn
 /// tensors use `OnceCell` which is not `Sync`.
@@ -296,6 +444,9 @@ pub struct TrainingState {
     pub envs: Vec<EnvEpisode>,
     pub episode_count: u32,
 
+    /// Ticks per PPO update ([`STEPS_PER_ROLLOUT`]). Worker mode bypasses this:
+    /// the learner's `--horizon` bounds the window and the driver reads the
+    /// buffers out, so `brain_step`'s rollout-boundary update never fires there.
     pub steps_per_rollout: u32,
     pub current_rollout_steps: u32,
 
@@ -309,6 +460,14 @@ pub struct TrainingState {
 
     obs_normalizer: ObsNormalizer,
 
+    /// Running mean/std of the value targets (GAE returns), normalizing what the
+    /// value head regresses to unit scale so it can track large-magnitude returns
+    /// (see [`ReturnNormalizer`]). The LEARNER owns the single copy: rollout threads
+    /// never update it — they emit raw value predictions, which the learner
+    /// de-normalizes with this scale in `ppo_update_core` — so there is no second
+    /// instance to drift. Persisted in the checkpoint beside `obs_normalizer`.
+    return_normalizer: ReturnNormalizer,
+
     checkpoint_dir: PathBuf,
     checkpoint_interval: u32,
     saved_on_exit: bool,
@@ -317,20 +476,67 @@ pub struct TrainingState {
     tick_budget: u64,
     /// Benchmark: skip NN inference to measure the physics/overhead floor.
     skip_nn: bool,
+    /// Rollout-thread (worker) mode: `brain_step` collects transitions exactly as
+    /// in single-process but does NOT run the PPO update at the rollout boundary —
+    /// the learner owns the update. The in-process rollout thread (`training::inproc`)
+    /// reads the buffers out directly each horizon. Default false, so a no-flag run
+    /// is byte-for-byte the original loop.
+    worker_mode: bool,
+    /// Count of `recent_rewards` already handed to the learner (worker mode). The
+    /// drain returns the tail past this, so each finished episode's reward reaches
+    /// the learner's reward curve exactly once. Stays 0 in single-process.
+    reported_episodes: usize,
+    /// Worker mode only: a fresh Welford accumulator over ONLY the observations
+    /// seen since the last `reset_horizon_counter` (i.e. this horizon's samples).
+    /// The thread ships THIS — not the cumulative `obs_normalizer` — so the learner
+    /// merges an increment the master hasn't already counted (the snapshot baseline
+    /// lives in `obs_normalizer`, never re-merged). `None` in
+    /// single-process, where the normalizer is never shipped or merged.
+    normalizer_increment: Option<ObsNormalizer>,
 }
 
 impl TrainingState {
-    pub fn new(args: &Args) -> Self {
+    /// The in-process learner's policy host (and the test fixtures): logs to "tmp".
+    /// The learner steps no world, so the rollout-boundary periodic checkpoint never
+    /// fires here — it checkpoints every iteration directly — hence interval 0.
+    pub fn new(config: &TrainConfig) -> Self {
+        Self::build(config, Path::new("tmp"), false, 0)
+    }
+
+    /// Single-process trainer: logs to "tmp", runs the PPO update at each rollout
+    /// boundary and checkpoints there every `save_interval` updates.
+    pub fn new_single_process(config: &TrainConfig, save_interval: u32) -> Self {
+        Self::build(config, Path::new("tmp"), false, save_interval)
+    }
+
+    /// In-process rollout thread: collects transitions but never runs the PPO
+    /// update locally, and logs to its own `metrics_dir` so K threads don't fight
+    /// over one CSV. Everything else — env count, reset/grace/rescue, reward,
+    /// normalizer — is identical to single-process, which is what makes a K=1
+    /// rollout match an `--envs M` rollout. Never reaches the rollout boundary, so
+    /// the periodic-checkpoint interval is irrelevant (0).
+    pub fn new_worker(config: &TrainConfig, metrics_dir: &Path) -> Self {
+        Self::build(config, metrics_dir, true, 0)
+    }
+
+    fn build(
+        config: &TrainConfig,
+        metrics_dir: &Path,
+        worker_mode: bool,
+        checkpoint_interval: u32,
+    ) -> Self {
         let device = NdArrayDevice::Cpu;
         let mut brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
         let optimizer: CrabOptimizer = AdamConfig::new()
             .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
             .init();
 
-        let mut obs_normalizer = ObsNormalizer::new(5.0);
+        let mut obs_normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
+        let mut return_normalizer = ReturnNormalizer::new();
 
-        let brain_path = args.checkpoint_dir.join(BRAIN_STEM);
-        let norm_path = args.checkpoint_dir.join(NORMALIZER_FILENAME);
+        let brain_path = config.checkpoint_dir.join(BRAIN_STEM);
+        let norm_path = config.checkpoint_dir.join(NORMALIZER_FILENAME);
+        let ret_norm_path = config.checkpoint_dir.join(RETURN_NORMALIZER_FILENAME);
 
         // BinFileRecorder appends .bin to the stem, so check for that.
         if brain_path.with_extension("bin").exists() {
@@ -356,7 +562,20 @@ impl TrainingState {
             obs_normalizer = loaded;
         }
 
-        let n = args.envs.max(1) as usize;
+        if ret_norm_path.exists()
+            && let Some(loaded) = load_return_normalizer(&ret_norm_path)
+        {
+            info!(
+                "Loaded return normalizer state from {}",
+                ret_norm_path.display()
+            );
+            return_normalizer = loaded;
+        }
+
+        let n = config.envs.max(1) as usize;
+        // A worker accumulates a per-horizon increment over the same clip; the
+        // learner/single-process host never ships a normalizer, so it stays None.
+        let normalizer_increment = worker_mode.then(|| ObsNormalizer::new(obs_normalizer.clip));
         Self {
             brain,
             config: PpoConfig::default(),
@@ -365,23 +584,35 @@ impl TrainingState {
             optimizer,
             envs: vec![EnvEpisode::default(); n],
             episode_count: 0,
-            steps_per_rollout: 1024,
+            steps_per_rollout: STEPS_PER_ROLLOUT,
             current_rollout_steps: 0,
             recent_rewards: Vec::new(),
             recent_metrics: None,
-            logger: MetricsLogger::new(),
+            logger: MetricsLogger::new(metrics_dir),
             total_steps: 0,
             last_log_time: std::time::Instant::now(),
             obs_normalizer,
-            checkpoint_dir: args.checkpoint_dir.clone(),
-            checkpoint_interval: args.save_interval,
+            return_normalizer,
+            checkpoint_dir: config.checkpoint_dir.clone(),
+            checkpoint_interval,
             saved_on_exit: false,
-            tick_budget: args.ticks,
-            skip_nn: args.bench_skip_nn,
+            tick_budget: config.ticks,
+            skip_nn: config.bench_skip_nn,
+            worker_mode,
+            reported_episodes: 0,
+            normalizer_increment,
         }
     }
 
-    fn save_checkpoint(&self) {
+    // FOLLOW-UP (out of scope): the checkpoint persists brain + normalizer but NOT
+    // the Adam optimizer moments, so a restart resumes the policy with cold moment
+    // estimates (a brief, self-correcting transient on the first updates after a
+    // resume). Persisting optimizer state would remove it.
+    //
+    // `pub(crate)` so the in-process learner can persist the latest weights each
+    // iteration (for a live demo hot-reload + restart resume); the single-process
+    // path calls it internally at the rollout boundary.
+    pub(crate) fn save_checkpoint(&self) {
         if let Err(e) = std::fs::create_dir_all(&self.checkpoint_dir) {
             warn!(
                 "Failed to create checkpoint dir {}: {e}",
@@ -392,13 +623,154 @@ impl TrainingState {
 
         let brain_path = self.checkpoint_dir.join(BRAIN_STEM);
         let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-        match recorder.record(self.brain.clone().into_record(), brain_path.clone()) {
-            Ok(()) => info!("Saved brain to {}", brain_path.display()),
+        // Record to a temp stem then rename into place, so a crash mid-write can't
+        // leave a torn brain.bin (silently discarded on load → resume from random
+        // weights). The stem must be dot-free: BinFileRecorder sets the extension to
+        // `.bin`, so a "brain.tmp" stem would become brain.bin and clobber the live
+        // file before the rename.
+        let brain_tmp_stem = self.checkpoint_dir.join("brain-tmp");
+        match recorder.record(self.brain.clone().into_record(), brain_tmp_stem.clone()) {
+            Ok(()) => {
+                let tmp_file = brain_tmp_stem.with_extension("bin");
+                let final_file = brain_path.with_extension("bin");
+                match std::fs::rename(&tmp_file, &final_file) {
+                    Ok(()) => info!("Saved brain to {}", final_file.display()),
+                    Err(e) => warn!("Failed to finalize brain checkpoint: {e}"),
+                }
+            }
             Err(e) => warn!("Failed to save brain: {e}"),
         }
 
         let norm_path = self.checkpoint_dir.join(NORMALIZER_FILENAME);
         self.obs_normalizer.save(&norm_path);
+
+        let ret_norm_path = self.checkpoint_dir.join(RETURN_NORMALIZER_FILENAME);
+        save_return_normalizer(&self.return_normalizer, &ret_norm_path);
+    }
+
+    // ---- In-process rollout-thread / learner hooks ------------------------
+    //
+    // These let `training::inproc` drive a worker-mode TrainingState by hand on a
+    // rollout thread: load the learner's snapshot weights + master normalizer, roll
+    // a horizon (via the normal systems), then hand the buffers + per-horizon
+    // normalizer increment + finished rewards back. The learner side reuses
+    // `brain`/`optimizer`/`config` through accessors. Reusing this struct (rather
+    // than a parallel one) is what guarantees a rollout thread's collection is the
+    // *same* code as single-process — the K=1 == single-process parity anchor.
+
+    /// Load brain weights from the learner's in-memory snapshot bytes (the same
+    /// `FullPrecisionSettings` bincode the on-disk checkpoint uses, produced by the
+    /// in-process learner once per iteration). Replaces a file load: weights move
+    /// thread-to-thread as `Send` bytes, never as the `!Send` live tensors. Leaves
+    /// the brain unchanged on a decode error (logged), the same fail-safe as the
+    /// demo hot-reload against a torn write.
+    pub fn load_brain_bytes(&mut self, bytes: &[u8]) {
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        match recorder.load(bytes.to_vec(), &self.device) {
+            Ok(record) => self.brain = self.brain.clone().load_record(record),
+            Err(e) => warn!("rollout thread: failed to load snapshot brain: {e}"),
+        }
+    }
+
+    /// Overwrite this state's normalizer from the learner's master snapshot. The
+    /// per-horizon increment is reset separately in `reset_horizon_counter`, so the
+    /// increment always starts fresh each horizon regardless of this call.
+    pub fn set_normalizer(&mut self, data: ObsNormalizerData) {
+        self.obs_normalizer.load_snapshot(data);
+    }
+
+    /// Snapshot the master normalizer's full stats (learner → rollout threads), so
+    /// each thread's policy normalizes observations against the same baseline the
+    /// learner holds.
+    pub fn normalizer_snapshot(&self) -> ObsNormalizerData {
+        self.obs_normalizer.snapshot()
+    }
+
+    /// Snapshot the per-horizon normalizer INCREMENT (rollout thread → learner):
+    /// only the samples this horizon added, so merging it into the learner's master
+    /// — which already holds the snapshot baseline handed back to the thread —
+    /// counts every sample exactly once. Empty (count 0) outside worker mode.
+    pub fn normalizer_increment_snapshot(&self) -> ObsNormalizerData {
+        match self.normalizer_increment.as_ref() {
+            Some(inc) => inc.snapshot(),
+            None => self.obs_normalizer.snapshot(),
+        }
+    }
+
+    /// Merge a rollout thread's normalizer increment into this (learner's)
+    /// normalizer. The data merged here is ONLY samples the master has not already
+    /// counted (the thread ships a per-horizon increment, never the snapshot
+    /// baseline).
+    pub fn merge_normalizer(&mut self, data: &ObsNormalizerData) {
+        self.obs_normalizer.merge(data);
+    }
+
+    /// Move the collected transitions out, leaving the buffers empty for the next
+    /// horizon. The per-env episode accumulators (`envs`) are deliberately left
+    /// untouched: an episode that spans a horizon boundary must continue, exactly
+    /// as the single-process 1024-step window cuts mid-episode and keeps going.
+    pub fn take_rollouts(&mut self) -> Vec<Vec<Transition>> {
+        self.rollouts
+            .iter_mut()
+            .map(|buf| std::mem::take(&mut buf.transitions))
+            .collect()
+    }
+
+    /// Reset the per-horizon rollout-step counter AND the normalizer increment
+    /// (rollout thread, called at the start of each horizon). `total_steps` stays
+    /// monotonic — it is the thread's tick odometer the learner diffs to measure the
+    /// horizon length. Resetting the increment here, separate from `set_normalizer`,
+    /// keeps the two concerns independent and guarantees the increment is always
+    /// exactly this horizon's samples.
+    pub fn reset_horizon_counter(&mut self) {
+        self.current_rollout_steps = 0;
+        if let Some(inc) = self.normalizer_increment.as_mut() {
+            *inc = ObsNormalizer::new(self.obs_normalizer.clip);
+        }
+    }
+
+    /// Drain the rewards of episodes that finished since the last drain, so the
+    /// worker ships each finished episode's reward to the learner exactly once
+    /// (the learner's reward-vs-samples curve aggregates all workers').
+    pub fn drain_finished_episode_rewards(&mut self) -> Vec<f32> {
+        let out = self.recent_rewards[self.reported_episodes..].to_vec();
+        self.reported_episodes = self.recent_rewards.len();
+        out
+    }
+
+    /// Learner-side accessors: hand the PPO update its pieces (see
+    /// `ppo_update_core`). The learner builds rollouts from the threads' returned
+    /// buffers rather than stepping any world, so it reaches into the same
+    /// brain/optimizer/config/return-normalizer. The return normalizer is the
+    /// learner's single copy (rollout threads never touch it), so it is handed out
+    /// `&mut` here for the update to fold the iteration's returns into.
+    pub fn learner_parts(
+        &mut self,
+    ) -> (
+        &mut CrabBrain<TrainBackend>,
+        &mut CrabOptimizer,
+        &PpoConfig,
+        &NdArrayDevice,
+        &mut ReturnNormalizer,
+    ) {
+        (
+            &mut self.brain,
+            &mut self.optimizer,
+            &self.config,
+            &self.device,
+            &mut self.return_normalizer,
+        )
+    }
+
+    /// Record a finished episode's reward (the learner aggregates these from every
+    /// rollout thread for the reward-vs-samples curve).
+    pub fn record_episode_reward(&mut self, reward: f32) {
+        self.recent_rewards.push(reward);
+        self.episode_count += 1;
+    }
+
+    pub fn avg_reward_pub(&self, window: usize) -> f32 {
+        self.avg_reward(window)
     }
 
     fn avg_reward(&self, window: usize) -> f32 {
@@ -413,44 +785,102 @@ impl TrainingState {
 
     /// Run PPO update using the persistent Adam optimizer.
     fn ppo_update(&mut self) -> PpoMetrics {
-        let n: usize = self.rollouts.iter().map(|b| b.len()).sum();
+        ppo_update_core(
+            &mut self.brain,
+            &mut self.optimizer,
+            &self.config,
+            &self.rollouts,
+            &self.device,
+            &mut self.return_normalizer,
+        )
+    }
+}
+
+/// PPO update shared by the single-process trainer and the in-process learner.
+///
+/// `rollouts` is one buffer per env (GAE is computed strictly per env, never
+/// across a buffer boundary). The per-env trailing bootstrap — V of each buffer's
+/// non-`done` tail observation — is computed HERE from `brain`, the single owner
+/// of that logic: the single-process path already holds the brain it rolled with,
+/// and the in-process learner holds the brain it snapshotted to the threads (which
+/// is what they rolled with), so neither needs a precomputed value. Mutating
+/// `brain`/`optimizer` in place keeps Adam's moment estimates persistent across
+/// updates.
+///
+/// `ret_norm` is the learner's running return scale (see [`ReturnNormalizer`]): the
+/// value head's outputs (stored per-step values and the trailing bootstrap) are
+/// de-normalized by it so GAE/advantages stay in real reward units, then this
+/// update's real-unit returns are folded in and the value-loss targets normalized by
+/// the refreshed scale. It is `&mut` because the update advances it; the single
+/// learner owns the one copy, so passing it in keeps a single source of truth.
+///
+/// Factored out (rather than duplicated) so the two callers can never drift: the
+/// correctness claim "K=1 in-process == single-process" rests on this being the
+/// *same* code, byte for byte.
+pub(crate) fn ppo_update_core(
+    brain: &mut CrabBrain<TrainBackend>,
+    optimizer: &mut CrabOptimizer,
+    config: &PpoConfig,
+    rollouts: &[RolloutBuffer],
+    device: &NdArrayDevice,
+    ret_norm: &mut ReturnNormalizer,
+) -> PpoMetrics {
+    {
+        let n: usize = rollouts.iter().map(|b| b.len()).sum();
         if n == 0 {
             return PpoMetrics::default();
         }
 
-        let device = &self.device;
+        // Return-normalization stats from BEFORE this update (PopArt ordering): GAE
+        // de-normalizes the value head's outputs with the scale the head was trained
+        // against, computes advantages/returns in REAL reward units, and only after
+        // does `ret_norm.update` fold THIS update's returns in. The first update sees
+        // the identity (no returns yet), so it is byte-identical to un-normalized PPO.
+        let ret_norm_pre = ret_norm.clone();
 
         // GAE strictly per env: each buffer is one env's contiguous trajectory
         // segment, bootstrapped from ITS last observation. Advantages/returns are
         // then concatenated in the same env-major order as the transitions below.
         let mut advantages = Vec::with_capacity(n);
         let mut returns = Vec::with_capacity(n);
-        for buf in &self.rollouts {
+        for buf in rollouts.iter() {
             let Some(last_t) = buf.transitions.last() else {
                 continue;
             };
+            // A `done` tail genuinely ended → 0 future return; otherwise bootstrap
+            // V(s_tail) with the brain (the trailing obs continues into the next
+            // horizon's buffer, so its value carries the cut-off return). The head
+            // outputs a NORMALIZED value; `compute_gae` de-normalizes it (and every
+            // stored value) so GAE runs in real units. A `done` tail's 0 is a true
+            // zero return, not a normalized value — pass it through `normalize` so
+            // `compute_gae`'s `denormalize` recovers 0.0 (up to f32 rounding)
+            // regardless of μ/σ.
             let last_value = if last_t.done {
-                0.0
+                ret_norm_pre.normalize(0.0)
             } else {
                 let obs = Tensor::<TrainBackend, 1>::from_floats(last_t.obs.as_slice(), device)
                     .unsqueeze::<2>();
-                self.brain
+                brain
                     .value(obs)
                     .flatten::<1>(0, 1)
                     .into_scalar()
                     .elem::<f32>()
             };
-            let (a, r) = compute_gae(buf, last_value, self.config.gamma, self.config.lambda);
+            let (a, r) = compute_gae(buf, last_value, config.gamma, config.lambda, &ret_norm_pre);
             advantages.extend(a);
             returns.extend(r);
         }
 
+        // Fold this update's REAL-unit returns into the running scale, then normalize
+        // the value-loss targets by the refreshed scale. The value head's raw output
+        // is in the same normalized space, so the loss `(V' - R')²` below is unit-
+        // scale and `value_loss_clip` is a σ-count (see PpoConfig::value_loss_clip).
+        ret_norm.update(&returns);
+        let returns: Vec<f32> = returns.iter().map(|&r| ret_norm.normalize(r)).collect();
+
         // Env-major transition view matching the advantages/returns order.
-        let transitions: Vec<&Transition> = self
-            .rollouts
-            .iter()
-            .flat_map(|b| b.transitions.iter())
-            .collect();
+        let transitions: Vec<&Transition> =
+            rollouts.iter().flat_map(|b| b.transitions.iter()).collect();
 
         let adv_mean: f32 = advantages.iter().sum::<f32>() / n as f32;
         let adv_var: f32 = advantages
@@ -492,12 +922,12 @@ impl TrainingState {
         let mut total_entropy = 0.0f32;
         let mut update_count = 0u32;
 
-        let bs = self.config.batch_size;
+        let bs = config.batch_size;
         let half_log_2pi = 0.5 * (2.0 * std::f32::consts::PI).ln();
 
         let mut rng = thread_rng();
 
-        for _epoch in 0..self.config.epochs_per_update {
+        for _epoch in 0..config.epochs_per_update {
             let mut indices: Vec<usize> = (0..n).collect();
             indices.shuffle(&mut rng);
 
@@ -523,7 +953,7 @@ impl TrainingState {
                 let advs = advantages_all.clone().select(0, idx_tensor.clone());
                 let rets = returns_all.clone().select(0, idx_tensor);
 
-                let (means, log_std) = self.brain.policy(obs.clone());
+                let (means, log_std) = brain.policy(obs.clone());
 
                 // log_std is pre-clamped by policy (single source of truth).
                 let diff = actions - means;
@@ -543,19 +973,22 @@ impl TrainingState {
                 let log_ratio = (new_lp - old_lp).clamp(-20.0, 20.0);
                 let ratio = log_ratio.exp();
                 let surr1 = ratio.clone() * advs.clone();
-                let surr2 = ratio.clamp(
-                    1.0 - self.config.clip_epsilon,
-                    1.0 + self.config.clip_epsilon,
-                ) * advs;
+                let surr2 =
+                    ratio.clamp(1.0 - config.clip_epsilon, 1.0 + config.clip_epsilon) * advs;
                 let policy_loss = surr1.min_pair(surr2).mean().neg();
 
-                let values: Tensor<TrainBackend, 1> = self.brain.value(obs).flatten(0, 1);
-                let value_diff = (values - rets)
-                    .clamp(-self.config.value_loss_clip, self.config.value_loss_clip);
+                // The value head's raw output is in NORMALIZED units, and `rets` was
+                // normalized by the same running scale above, so this residual is in
+                // σ-units and `value_loss_clip` is a σ-count. The head therefore fits
+                // unit-scale targets regardless of the reward magnitude — the whole
+                // point of return normalization.
+                let values: Tensor<TrainBackend, 1> = brain.value(obs).flatten(0, 1);
+                let value_diff =
+                    (values - rets).clamp(-config.value_loss_clip, config.value_loss_clip);
                 let value_loss = value_diff.powf_scalar(2.0).mean();
 
-                let loss = policy_loss.clone() + value_loss.clone() * self.config.value_coeff
-                    - entropy.clone() * self.config.entropy_coeff;
+                let loss = policy_loss.clone() + value_loss.clone() * config.value_coeff
+                    - entropy.clone() * config.entropy_coeff;
 
                 total_policy_loss += policy_loss.clone().into_scalar().elem::<f32>();
                 total_value_loss += value_loss.clone().into_scalar().elem::<f32>();
@@ -563,10 +996,8 @@ impl TrainingState {
                 update_count += 1;
 
                 let grads = loss.backward();
-                let grads = GradientsParams::from_grads(grads, &self.brain);
-                self.brain =
-                    self.optimizer
-                        .step(self.config.learning_rate, self.brain.clone(), grads);
+                let grads = GradientsParams::from_grads(grads, brain);
+                *brain = optimizer.step(config.learning_rate, brain.clone(), grads);
             }
         }
 
@@ -578,27 +1009,29 @@ impl TrainingState {
     }
 }
 
-/// Height reward scale (S) and effort cost (K) in `reward = S·h − K·y`.
-/// K is small so a calm stand is barely taxed; the exponential effort term
-/// makes a saturated command (helicoptering, launching) expensive enough that
-/// standing wins. Provisional — tune from the per-episode effort log.
-const HEIGHT_SCALE: f32 = 1.0;
-const EFFORT_COST: f32 = 0.05;
+/// Effort tax weight `K` and exponent `L` in `reward = h − K·Σ|aᵢ|^L` (owner's
+/// form): eye height rewarded directly, commanded effort taxed. `K` is small so a
+/// calm stand is barely taxed; `L`=2 is cheap for honest moderate commands and
+/// steep for max-torque flailing. `K` is provisional — tune from the per-episode
+/// effort log so a moderate stand clears a lie-down while saturation-seeking stays
+/// punished.
+const EFFORT_COST: f32 = 0.02;
+const EFFORT_EXP: f32 = 2.0;
 
-/// Per-output effort weight: `f(a) = e^|a| − 1`, summed over the action vector.
-/// Exponential (owner's call) so a gentle command costs ~nothing (f(0.1) ≈ 0.1)
-/// while a saturated one costs dearly (f(1) ≈ 1.72) — it prices the *commanded*
-/// torque directly, discouraging the max-torque flailing that spins a limb past
-/// the blow-up guard, rather than taxing the resulting motion after the fact.
-pub(crate) fn action_effort(actions: &[f32; ACTION_SIZE]) -> f32 {
-    actions
-        .iter()
-        .map(|a| a.clamp(-1.0, 1.0).abs().exp() - 1.0)
-        .sum()
+/// Per-output effort tax `f(a) = |a|^L`, summed over the RAW network outputs
+/// (the sampled pre-clamp actions — see [`brain_step`]). The point is the gradient
+/// past the clamp: the sim clamps actions to ±1, but `|a|^L` keeps rising beyond
+/// ±1, so an action that overshoots the usable range is taxed in proportion to the
+/// overshoot. The old `e^|clamp(a)|−1` taxed the *clamped* value, so its gradient
+/// went flat at ±1 — the policy paid a fixed toll but felt no pull back into range,
+/// and the toll was steep enough to make lying down out-reward standing. Quadratic
+/// (L=2) is cheap for honest moderate commands and steep for the max-torque flailing.
+pub(crate) fn action_effort(raw_actions: &[f32; ACTION_SIZE]) -> f32 {
+    raw_actions.iter().map(|a| a.abs().powf(EFFORT_EXP)).sum()
 }
 
 /// Reward: mean eye height rewarded, commanded effort taxed —
-/// `reward = S·h − K·y`. Both signals are global, so behaviour still EMERGES
+/// `reward = h − K·Σ|aᵢ|^L`. Both signals are global, so behaviour still EMERGES
 /// rather than being hand-specified (owner's call: mechanical terms like "feet
 /// on the ground" don't scale).
 ///
@@ -608,7 +1041,7 @@ pub(crate) fn action_effort(actions: &[f32; ACTION_SIZE]) -> f32 {
 /// favours SUSTAINED height. `effort` is [`action_effort`]: the policy is
 /// charged for how hard it commands, so flailing costs whatever motion it buys.
 fn compute_reward(mean_eye_height: f32, effort: f32) -> f32 {
-    HEIGHT_SCALE * mean_eye_height - EFFORT_COST * effort
+    mean_eye_height - EFFORT_COST * effort
 }
 
 /// System: runs the brain to produce actions each physics step.
@@ -635,10 +1068,16 @@ pub fn brain_step(
     let device = training.device;
 
     // Normalize every env's observation (each row also updates the shared
-    // running stats — N envs feed the same normalizer, just more samples).
+    // running stats — N envs feed the same normalizer, just more samples). In
+    // worker mode the SAME raw rows feed a per-horizon increment accumulator, so
+    // the thread ships only this horizon's samples (the master's baseline, already
+    // on the learner, is never re-merged — see `normalizer_increment`).
     let mut obs_arrays: Vec<[f32; OBS_SIZE]> = Vec::with_capacity(n);
     for e in 0..n {
         let normalized = training.obs_normalizer.normalize(&obs.envs[e]);
+        if let Some(inc) = training.normalizer_increment.as_mut() {
+            inc.observe(&obs.envs[e]);
+        }
         obs_arrays.push(normalized);
     }
 
@@ -677,6 +1116,10 @@ pub fn brain_step(
 
     // Per-env action sampling + NaN guards.
     let mut action_arrays: Vec<[f32; ACTION_SIZE]> = Vec::with_capacity(n);
+    // Raw (pre-clamp) actions, kept only to compute the effort tax: the tax must
+    // see the unbounded network output so it can push a saturating logit back, not
+    // the ±1-clamped value the sim is fed.
+    let mut raw_action_arrays: Vec<[f32; ACTION_SIZE]> = Vec::with_capacity(n);
     let mut log_probs: Vec<f32> = Vec::with_capacity(n);
     for means in &means_rows {
         let action_tensor = sample_action(means, &log_std, &device);
@@ -689,12 +1132,15 @@ pub fn brain_step(
 
         let action_data: Vec<f32> = action_tensor.to_data().to_vec().unwrap();
         let mut action_array = [0.0f32; ACTION_SIZE];
+        let mut raw_action_array = [0.0f32; ACTION_SIZE];
         let mut has_nan = false;
         for (i, &v) in action_data.iter().enumerate().take(ACTION_SIZE) {
             if v.is_nan() || v.is_infinite() {
                 has_nan = true;
                 action_array[i] = 0.0;
+                raw_action_array[i] = 0.0;
             } else {
+                raw_action_array[i] = v;
                 action_array[i] = v.clamp(-1.0, 1.0);
             }
         }
@@ -702,6 +1148,7 @@ pub fn brain_step(
             warn!("NaN/Inf detected in NN output, clamping to zero");
         }
         action_arrays.push(action_array);
+        raw_action_arrays.push(raw_action_array);
     }
     actions.envs.copy_from_slice(&action_arrays);
     // Settling envs hold the rest pose (action 0); the policy takes over at
@@ -754,8 +1201,9 @@ pub fn brain_step(
             s.1 += 1;
         }
     }
-    // Commanded effort this step (the reward's tax term), per env.
-    let efforts: Vec<f32> = action_arrays.iter().map(action_effort).collect();
+    // Commanded effort this step (the reward's tax term), per env — taxed on the
+    // RAW outputs, not the clamped actions the sim ran.
+    let efforts: Vec<f32> = raw_action_arrays.iter().map(action_effort).collect();
 
     // Per-env reward, termination, rollout push, and episode bookkeeping.
     for e in 0..n {
@@ -909,7 +1357,11 @@ pub fn brain_step(
         exit.write(AppExit::Success);
     }
 
-    if training.current_rollout_steps >= training.steps_per_rollout {
+    // Worker mode never runs a local PPO update: the learner owns it. The rollout
+    // thread (`training::inproc`) reads the buffers out after its fixed horizon and
+    // clears them, so this boundary must not fire (it would consume the rollout the
+    // learner is about to collect).
+    if !training.worker_mode && training.current_rollout_steps >= training.steps_per_rollout {
         let buffer_size: usize = training.rollouts.iter().map(|b| b.len()).sum();
         let avg = training.avg_reward(10);
 
@@ -1022,21 +1474,33 @@ mod tests {
 
     #[test]
     fn effort_cost_calibration() {
-        // A still policy (zero command) pays no effort tax, so its reward is
-        // pure height; a fully-saturated command (max torque on every joint —
-        // what launching/helicoptering takes) is taxed enough to go net-negative
-        // even at a stand's height. The exact rear-vs-stand balance in between is
-        // the open tuning question, deliberately not asserted.
+        // The tax `K·Σ|a|^L` must leave the optimum at a standing pose, not a
+        // lie-down, while still punishing a policy that drives its outputs into
+        // saturation. Three checkpoints (exact K is tuned from the effort log; the
+        // ordering is what must hold):
+        // 1. A still policy (zero command) pays no tax — reward is pure height.
         let still = compute_reward(0.5, action_effort(&[0.0; ACTION_SIZE]));
         assert!(
             (still - 0.5).abs() < 1e-6,
             "a still policy is untaxed: {still}"
         );
 
-        let saturated = compute_reward(1.2, action_effort(&[1.0; ACTION_SIZE]));
+        // 2. A moderate stand (raw |a| well inside the usable ±1) at stand height
+        //    out-rewards a low, still crouch — so standing, not lying down, wins.
+        let moderate_stand = compute_reward(1.2, action_effort(&[0.4; ACTION_SIZE]));
         assert!(
-            saturated < 0.0,
-            "max-torque-everywhere must be net-negative at stand height: {saturated}"
+            moderate_stand > still,
+            "moderate stand must beat a still crouch: {moderate_stand} vs {still}"
+        );
+
+        // 3. A saturation-seeking command (raw outputs driven far past the ±1 the
+        //    sim clamps to) is taxed below the moderate stand — the |a|^L gradient
+        //    pushes the policy OUT of saturation, where the old flat-at-clamp tax
+        //    let it sit pinned for free.
+        let oversaturated = compute_reward(1.2, action_effort(&[3.0; ACTION_SIZE]));
+        assert!(
+            oversaturated < moderate_stand,
+            "saturation-seeking must be taxed below a moderate stand: {oversaturated}"
         );
     }
 
@@ -1143,7 +1607,7 @@ mod tests {
                 "mean[{i}] mismatch"
             );
             assert!(
-                (norm.var[i] - loaded.var[i]).abs() < 1e-10,
+                (norm.variance(i) - loaded.variance(i)).abs() < 1e-10,
                 "var[{i}] mismatch"
             );
             assert!(
@@ -1152,6 +1616,131 @@ mod tests {
             );
         }
         assert_eq!(norm.clip, loaded.clip);
+    }
+
+    /// The normalizer merge must be exact: K rollout threads each normalizing their
+    /// own slice of samples, then merged on the learner, must give the same running
+    /// stats as one stream that saw every sample. This is what lets a K>1 run claim
+    /// the same observation normalization as single-process — so it is the
+    /// load-bearing correctness check for the multi-threaded path. Includes a
+    /// NaN-skipped element to exercise the per-element count bookkeeping.
+    #[test]
+    fn parallel_normalizer_merge_matches_single_stream() {
+        let sample = |i: usize| {
+            let mut o = [0.0f32; OBS_SIZE];
+            o[0] = i as f32;
+            o[1] = (i as f32) * 0.5 - 3.0;
+            o[2] = ((i * 7) % 11) as f32;
+            // Element 3 is present only on even i: counts diverge across elements,
+            // so the merge must combine them per element, not with a shared count.
+            o[3] = if i.is_multiple_of(2) {
+                i as f32
+            } else {
+                f32::NAN
+            };
+            o
+        };
+
+        // One stream over all 80 samples.
+        let mut whole = ObsNormalizer::new(5.0);
+        for i in 0..80 {
+            whole.normalize(&sample(i));
+        }
+
+        // Two independent half-streams, then merge B's stats into A.
+        let mut a = ObsNormalizer::new(5.0);
+        for i in 0..40 {
+            a.normalize(&sample(i));
+        }
+        let mut b = ObsNormalizer::new(5.0);
+        for i in 40..80 {
+            b.normalize(&sample(i));
+        }
+        a.merge(&b.to_data());
+
+        for i in 0..OBS_SIZE {
+            assert_eq!(a.count[i], whole.count[i], "count[{i}]");
+            assert!(
+                (a.mean[i] - whole.mean[i]).abs() < 1e-9,
+                "mean[{i}]: merged {} vs whole {}",
+                a.mean[i],
+                whole.mean[i]
+            );
+            // M2 (and hence variance) is the part a naive mean-only merge gets
+            // wrong; assert it directly. Relative tolerance because M2 grows large.
+            let scale = whole.m2[i].abs().max(1.0);
+            assert!(
+                (a.m2[i] - whole.m2[i]).abs() / scale < 1e-9,
+                "m2[{i}]: merged {} vs whole {}",
+                a.m2[i],
+                whole.m2[i]
+            );
+        }
+    }
+
+    /// CRITICAL regression: the snapshot→roll→merge LOOP must not double-count the
+    /// re-handed baseline. Each iteration the learner's master is snapshotted to the
+    /// rollout thread, the thread rolls (mutating its copy with this horizon's
+    /// samples) and hands back ONLY the per-horizon increment, which the master
+    /// merges. After N iterations the master must equal a single stream over every
+    /// sample — no doubling. The classic bug ships the cumulative snapshot, so the
+    /// master re-merges its own baseline every iteration (C → 2C+S → 4C+3S …); this
+    /// models that exact loop with one thread and pins it.
+    #[test]
+    fn snapshot_roll_merge_loop_matches_single_stream() {
+        let sample = |i: usize| {
+            let mut o = [0.0f32; OBS_SIZE];
+            o[0] = i as f32;
+            o[1] = (i as f32) * 0.5 - 2.0;
+            o[2] = ((i * 5) % 7) as f32;
+            o
+        };
+
+        // Ground truth: one normalizer that sees every sample exactly once.
+        let mut whole = ObsNormalizer::new(5.0);
+        // The learner's master, updated only by merging per-horizon increments.
+        let mut master = ObsNormalizer::new(5.0);
+
+        let iters = 5;
+        let per_iter = 8;
+        let mut next = 0usize;
+        for _ in 0..iters {
+            // Snapshot: the thread loads the master, and starts a fresh increment
+            // over only the samples it is about to see this horizon. The thread's
+            // full copy keeps normalizing against baseline+horizon, but only the
+            // increment is handed back.
+            let mut worker_full = ObsNormalizer::from_data(master.to_data()).expect("snapshot");
+            let mut increment = ObsNormalizer::new(master.clip);
+            for _ in 0..per_iter {
+                let obs = sample(next);
+                next += 1;
+                whole.normalize(&obs);
+                worker_full.normalize(&obs); // policy normalizes with full stats
+                increment.observe(&obs); // but only this horizon's samples ship
+            }
+            // Ship the increment; the master merges samples it has not counted.
+            master.merge(&increment.to_data());
+        }
+
+        for i in 0..OBS_SIZE {
+            assert_eq!(
+                master.count[i], whole.count[i],
+                "count[{i}] diverged — baseline double-counted?"
+            );
+            assert!(
+                (master.mean[i] - whole.mean[i]).abs() < 1e-9,
+                "mean[{i}]: master {} vs single-stream {}",
+                master.mean[i],
+                whole.mean[i]
+            );
+            let scale = whole.m2[i].abs().max(1.0);
+            assert!(
+                (master.m2[i] - whole.m2[i]).abs() / scale < 1e-9,
+                "m2[{i}]: master {} vs single-stream {}",
+                master.m2[i],
+                whole.m2[i]
+            );
+        }
     }
 
     use bevy::ecs::system::RunSystemOnce;
@@ -1169,14 +1758,14 @@ mod tests {
         use std::time::Duration;
 
         // Point the checkpoint dir at an empty scratch path so no real checkpoint
-        // loads; every other arg keeps its default (tick budget 0 = unlimited, so
-        // brain_step never writes AppExit during the test).
-        let args = Args::try_parse_from([
+        // loads; every other field keeps its default (tick budget 0 = unlimited,
+        // so brain_step never writes AppExit during the test).
+        let config = TrainConfig::try_parse_from([
             "rl",
             "--checkpoint-dir",
             checkpoint_dir.to_str().expect("utf-8 checkpoint dir"),
         ])
-        .expect("parse default Args");
+        .expect("parse default TrainConfig");
 
         let mut app = App::new();
         app.add_plugins(
@@ -1210,7 +1799,7 @@ mod tests {
             .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
             .add_plugins(PhysicsWorldPlugin)
             .add_plugins(BotPlugin)
-            .add_plugins(TrainingPlugin::new(args));
+            .add_plugins(TrainingPlugin::new(config, 0));
         app
     }
 
