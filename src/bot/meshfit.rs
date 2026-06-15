@@ -178,7 +178,7 @@ impl LoadedModel {
     /// the world-space vertex positions and the mean dominant-weight (a
     /// skinning-cleanliness proxy). Vertices whose bone maps to no part (none,
     /// here — every bone routes somewhere) are dropped.
-    fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)> {
+    pub(crate) fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)> {
         let mut out: HashMap<PartId, (Vec<Vec3>, f32)> = HashMap::new();
         for v in &self.verts {
             let Some(name) = self.node_name.get(&v.dominant_node) else {
@@ -332,7 +332,10 @@ impl FittedCapsule {
     }
 
     /// Rapier/Bevy `capsule_y` half-height convention: half the *segment*
-    /// (cylinder) length, excluding the hemispherical caps.
+    /// (cylinder) length, excluding the hemispherical caps. Only the validation
+    /// table reads this now (the bake sizes capsules in `fit_capsule_redgreen`);
+    /// pending classifier removal (bddap/rl#25).
+    #[cfg(test)]
     pub fn half_height(&self) -> f32 {
         self.segment_len() * 0.5
     }
@@ -826,10 +829,13 @@ impl Primitive {
 }
 
 /// The world-space shape fitted to a vertex cloud, before it is distilled into a
-/// pose-invariant [`Primitive`]. Carries absolute positions/axes; used only to
-/// compute the surface residual and to read a box's fitted orientation when
-/// solving its [`Placement`]. Not serialized.
+/// pose-invariant [`Primitive`]. Carries absolute positions/axes. Production no
+/// longer poses parts from this (the bake sizes/orients in the bone frame via
+/// [`fit_part`]); the payloads survive only to drive the `#[cfg(test)]` validation
+/// table's reported shape + residual, so they read as dead in a release build —
+/// pending classifier removal (bddap/rl#25). Not serialized.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub enum FittedShape {
     Capsule(FittedCapsule),
     Box(ObbFit),
@@ -837,7 +843,9 @@ pub enum FittedShape {
 }
 
 impl FittedShape {
-    /// Distil to pose-invariant dimensions (the thing that gets baked).
+    /// Distil to pose-invariant dimensions. Validation-table only now (the bake
+    /// goes through `fit_part`); see bddap/rl#25.
+    #[cfg(test)]
     pub fn dims(&self) -> Primitive {
         match self {
             FittedShape::Capsule(c) => Primitive::Capsule {
@@ -859,9 +867,10 @@ impl FittedShape {
 #[derive(Clone, Debug)]
 pub struct PrimitiveChoice {
     /// The world-space fit the choice was distilled from (carries the residual and
-    /// the box's fitted axes). The pose-invariant dimensions the bake stores are
-    /// [`Self::primitive`] — `shape.dims()`, derived, never stored, so the two can
-    /// never disagree.
+    /// the box's fitted axes). Drives the `#[cfg(test)]` validation table's reported
+    /// shape; the production bake goes through [`fit_part`], not this — so it's
+    /// written but unread in a release build (bddap/rl#25).
+    #[allow(dead_code)]
     pub shape: FittedShape,
     /// Surface residual (normalised RMS) of the chosen primitive.
     pub chosen_residual: f32,
@@ -874,8 +883,9 @@ pub struct PrimitiveChoice {
 }
 
 impl PrimitiveChoice {
-    /// The pose-invariant dimensions to bake — the chosen shape distilled. Derived
-    /// from `shape` on read, so there is no second copy to fall out of sync with it.
+    /// The chosen shape distilled to its dimensions — a validation/reporting helper
+    /// (the production bake sizes parts via [`fit_part`], not this). Test-only.
+    #[cfg(test)]
     pub fn primitive(&self) -> Primitive {
         self.shape.dims()
     }
@@ -1128,10 +1138,10 @@ pub fn ball_mass(radius: f32, density: f32) -> (f32, f32) {
 /// the joint pivot (the proximal bind-pose bone origin) and whose axes are the
 /// body's, so it drops onto `body.rs`'s hand-authored parent anchor for that
 /// joint. `center` is the collider centre relative to the pivot; `rotation`
-/// orients the collider's canonical axes (capsule along +Y, box along its fitted
-/// principal axes) into the link frame. The pivot-relative encoding is why
-/// placement survives the runtime joint pose: only *where on the parent* the
-/// joint attaches is hand-authored; how the collider hangs off it is this.
+/// orients the collider's canonical axes into the link frame (capsule +Y along the
+/// bone; box identity, its axes being the bone frame's). The pivot-relative
+/// encoding is why placement survives the runtime joint pose: only *where on the
+/// parent* the joint attaches is hand-authored; how the collider hangs off it is this.
 ///
 /// Stored as a translation+rotation rather than a [`Transform`] because the scale
 /// is always 1 (a collider is its own size) and a bake artifact should carry no
@@ -1144,18 +1154,18 @@ pub struct Placement {
 
 /// The bind-pose bone span that defines a part's segment, in glTF world space:
 /// the proximal (pivot) and distal origins plus the proximal bone's bind-world
-/// basis. The basis is what makes [`solve_placement`] frame-correct — the
-/// collider is posed relative to *this bone's* rest orientation, the same frame
-/// `body.rs` rebuilds when it bakes the link's rest pose; without it the
-/// placement would be in raw glTF world and land rotated off the limb. For the
-/// chunky parts the "segment" is just the pivot bone and a direction hint;
-/// placement there leans on the fitted OBB (still re-expressed via the basis).
-struct BoneSpan {
-    proximal: Vec3,
+/// basis. The basis is what makes [`fit_part`] frame-correct — the collider is
+/// posed relative to *this bone's* rest orientation, the same frame `body.rs`
+/// rebuilds when it bakes the link's rest pose; without it the placement would be
+/// in raw glTF world and land rotated off the limb. For the carapace the "segment"
+/// is just the pivot bone and a +Z hint; its box is measured in the basis frame
+/// (which, the root being identity, is world).
+pub(crate) struct BoneSpan {
+    pub(crate) proximal: Vec3,
     /// Bind-world rotation of the proximal bone — the link-local frame placement
     /// is expressed in.
-    proximal_basis: Quat,
-    distal: Vec3,
+    pub(crate) proximal_basis: Quat,
+    pub(crate) distal: Vec3,
 }
 
 impl LoadedModel {
@@ -1165,7 +1175,7 @@ impl LoadedModel {
     /// proximal origin is the joint pivot; the distal sets the segment direction
     /// and length. `None` if either bone is missing (e.g. a part with no skeleton
     /// correspondence).
-    fn bone_span(&self, part: PartId) -> Option<BoneSpan> {
+    pub(crate) fn bone_span(&self, part: PartId) -> Option<BoneSpan> {
         // Resolve a span from its proximal/distal bone names: the proximal bone
         // gives the pivot AND the link-local basis; the distal gives direction.
         let span = |prox: &str, dist: &str| {
@@ -1247,74 +1257,109 @@ fn side_tag(side: Side) -> &'static str {
     }
 }
 
-/// Solve a part's [`Placement`] in its **link-local frame** from the bind-pose
-/// bone span and the world-space fit.
-///
-/// The fit and the bone origins are in glTF *bind-pose world*, but `body.rs`
-/// consumes the placement in the link's own rest frame (the proximal bone's
-/// orientation, which the joint rest bake re-establishes down the chain). Those
-/// two frames differ — the bind pose is a flat splay, the physics rest a planted
-/// Λ — so a placement left in world lands the collider rotated off the limb (the
-/// bug this fixes). Every world-relative-to-pivot quantity is therefore mapped
-/// into the link frame by `basis⁻¹`, where `basis` is the proximal bone's
-/// bind-world rotation. Then at spawn `body.rs` applies the link's rest world
-/// rotation `L`, recovering `L · basis⁻¹ · (world vector)` — the fitted geometry
-/// as the limb actually sits, instead of `L · (world vector)`.
-///
-/// - **Capsule:** rides the bone segment — `rotation` turns +Y (the `capsule_y`
-///   axis) onto the proximal→distal direction *in the link frame*, `center` sits
-///   at the segment midpoint (link frame). Size is the cloud fit's, already in
-///   the primitive; the skeleton only places it.
-/// - **Box / ball:** no clean segment, so placement uses the fitted shape's own
-///   centre and (for the box) principal axes, mapped into the link frame. This
-///   keeps a chunky part's collider where its mesh is rather than on the bone line.
-fn solve_placement(span: &BoneSpan, shape: &FittedShape) -> Placement {
-    let pivot = span.proximal;
-    // Map a bind-world rotation/offset into the link-local frame.
+/// Fit a box **axis-aligned in the proximal bone's frame**: its orientation is
+/// the rig's (identity rotation in the link frame, exactly as a capsule rides its
+/// bone) and its half-extents are the cloud's robust (p98) spread measured along
+/// the bone axes. Bounding the cloud in the bone frame — the frame the mesh is
+/// skinned into — keeps the box on the mesh by construction, where the old
+/// point-cloud OBB drifted: a near-isotropic or flat cloud has no stable
+/// eigenframe, so its principal axes (and the box with them) span off the limb.
+/// The carapace root's basis is identity, so this reduces to a world-axis-aligned
+/// box.
+fn fit_box_bone_aligned(points: &[Vec3], span: &BoneSpan) -> (Primitive, Placement) {
     let to_local = span.proximal_basis.inverse();
-    match shape {
-        FittedShape::Capsule(_) => {
-            let seg = span.distal - pivot;
-            let dir = seg.normalize_or_zero();
-            // Align the capsule's +Y axis to the bone direction. `from_rotation_arc`
-            // is stable except at the antipode (dir ≈ −Y), where any perpendicular
-            // axis is correct — pick X.
-            let world_rot = if dir.dot(Vec3::Y) < -0.9999 {
-                Quat::from_axis_angle(Vec3::X, std::f32::consts::PI)
-            } else {
-                Quat::from_rotation_arc(Vec3::Y, dir)
-            };
-            Placement {
-                center: to_local * (0.5 * seg),
-                rotation: to_local * world_rot,
-            }
+    // Cloud into the link-local (bone) frame, pivot-relative.
+    let local: Vec<Vec3> = points
+        .iter()
+        .map(|&p| to_local * (p - span.proximal))
+        .collect();
+    let center = local.iter().copied().sum::<Vec3>() / local.len() as f32;
+    // Robust half-extent per bone axis (p98 of the centred |offset|), mirroring
+    // `fit_obb` so a few skinning-bleed verts don't balloon the box.
+    let mut proj: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for q in &local {
+        let d = (*q - center).abs();
+        for k in 0..3 {
+            proj[k].push(d[k]);
         }
-        FittedShape::Box(o) => Placement {
-            center: to_local * (o.center - pivot),
-            // The OBB axes form an orthonormal basis (Jacobi eigenvectors);
-            // `obb_rotation` enforces right-handedness before reading it off.
-            rotation: to_local * obb_rotation(o),
-        },
-        FittedShape::Ball(b) => Placement {
-            center: to_local * (b.center - pivot),
+    }
+    let mut he = Vec3::ZERO;
+    for k in 0..3 {
+        proj[k].sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        he[k] = percentile(&proj[k], 0.98).max(1e-4);
+    }
+    (
+        Primitive::Cuboid { half_extents: he },
+        Placement {
+            center,
             rotation: Quat::IDENTITY,
         },
-    }
+    )
 }
 
-/// A box's principal-axis frame as a rotation. The three OBB axes are orthonormal
-/// but arbitrary-handed/-signed out of the eigensolver; flip the third to enforce
-/// right-handedness so `Quat::from_mat3` yields a proper rotation (a reflection
-/// would denormalise the quat and mirror the collider).
-fn obb_rotation(o: &ObbFit) -> Quat {
-    let x = o.axes[0];
-    let y = o.axes[1];
-    let z = if x.cross(y).dot(o.axes[2]) < 0.0 {
-        -o.axes[2]
+/// Fit a capsule stretched along the bone segment (proximal→distal) — the
+/// "red→green" capsule: it spans exactly the bone, fattened by `radius` to cover
+/// the cloud's spread perpendicular to the bone line. Orientation is the rig's
+/// (the bone direction), never the point cloud, so it can't splay off the limb the
+/// way a point-cloud box does. This is the fit for every *jointed* part; only the
+/// carapace — whose "bone" is a single point with no segment to stretch along —
+/// stays a box.
+fn fit_capsule_redgreen(points: &[Vec3], span: &BoneSpan) -> (Primitive, Placement) {
+    let pivot = span.proximal;
+    let seg = span.distal - pivot;
+    let len = seg.length();
+    let axis = if len > 1e-6 { seg / len } else { Vec3::Y };
+    // Radius = robust (p90) distance from the bone line, so a few skinning-bleed
+    // verts don't inflate it.
+    let mut perp: Vec<f32> = points
+        .iter()
+        .map(|&p| {
+            let d = p - pivot;
+            (d - axis * d.dot(axis)).length()
+        })
+        .collect();
+    perp.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let radius = percentile(&perp, 0.90).max(1e-3);
+    // The capsule spans the whole bone: its hemispherical caps (each `radius` long)
+    // reach the endpoints, so the cylinder half-length is the bone half-length less
+    // one cap. Clamp at 0 for a stub shorter than its own radius (a near-sphere).
+    let half_height = (0.5 * len - radius).max(0.0);
+    let to_local = span.proximal_basis.inverse();
+    let world_rot = if axis.dot(Vec3::Y) < -0.9999 {
+        Quat::from_axis_angle(Vec3::X, std::f32::consts::PI)
     } else {
-        o.axes[2]
+        Quat::from_rotation_arc(Vec3::Y, axis)
     };
-    Quat::from_mat3(&Mat3::from_cols(x, y, z)).normalize()
+    (
+        Primitive::Capsule {
+            half_height,
+            radius,
+        },
+        Placement {
+            center: to_local * (0.5 * seg),
+            rotation: to_local * world_rot,
+        },
+    )
+}
+
+/// The canonical per-part collider fit, dispatched by the body plan the `PartId`
+/// already encodes: the carapace is a bone-frame box (its "bone" is a single
+/// point, no segment to stretch along), every jointed part a bone-stretched
+/// capsule. Shared by the offline bake and the editor's seed so the two can't
+/// drift.
+///
+/// Both shapes take their orientation from the rig, in the proximal bone's
+/// bind-world frame. That matters because `body.rs` consumes the [`Placement`] in
+/// the link's *rest* frame, not the bind pose the fit ran in: every
+/// world-relative-to-pivot quantity is mapped into the link frame by `basis⁻¹`
+/// (the proximal bone's bind rotation), and at spawn `body.rs` re-applies the
+/// link's rest world rotation `L`, recovering `L · basis⁻¹ · (world vector)` — the
+/// geometry as the limb actually sits, never rotated off the limb.
+pub(crate) fn fit_part(part: PartId, points: &[Vec3], span: &BoneSpan) -> (Primitive, Placement) {
+    match part {
+        PartId::Carapace => fit_box_bone_aligned(points, span),
+        PartId::Joint(_) => fit_capsule_redgreen(points, span),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1451,11 +1496,11 @@ pub fn bake_report(model: &LoadedModel) -> Vec<PartReport> {
         let (Some(choice), Some(span)) = (choose_primitive(points), model.bone_span(part)) else {
             continue;
         };
-        let placement = solve_placement(&span, &choice.shape);
+        let (primitive, placement) = fit_part(part, points, &span);
         out.push(PartReport {
             fitted: FittedPart {
                 part,
-                primitive: choice.primitive(),
+                primitive,
                 placement,
                 density,
             },
@@ -2411,15 +2456,31 @@ mod tests {
             }
         }
 
-        // (C) The baked primitive is the chooser's choice (shape is preserved).
+        // (C) Body plan, by construction: the carapace is a box (bone-frame
+        // aligned, i.e. identity rotation, the root basis being world); every
+        // jointed part is a capsule stretched along its bone. The capsule's
+        // dimensions are the red→green fit's, not the chooser's, so only the kind
+        // is asserted here — the world-pose gate checks the axes.
         for r in &reports {
             let baked = parsed.part(r.fitted.part).expect("part present");
-            assert_eq!(
-                baked.primitive,
-                r.choice.primitive(),
-                "{:?} baked primitive differs from the chooser's",
-                r.fitted.part
-            );
+            if r.fitted.part == PartId::Carapace {
+                assert!(
+                    matches!(baked.primitive, Primitive::Cuboid { .. }),
+                    "carapace baked {:?}, expected a box",
+                    baked.primitive
+                );
+                assert!(
+                    baked.placement.rotation.abs_diff_eq(Quat::IDENTITY, 1e-6),
+                    "carapace box is not bone-frame aligned (rotation ≠ identity)",
+                );
+            } else {
+                assert!(
+                    matches!(baked.primitive, Primitive::Capsule { .. }),
+                    "{:?} baked {:?}, expected a bone-stretched capsule",
+                    r.fitted.part,
+                    baked.primitive
+                );
+            }
         }
     }
 
@@ -2456,10 +2517,11 @@ mod tests {
     ///      placement was built from exactly the expected bone basis + segment. A
     ///      placement left in glTF world (the bug) fails both — 36–82° off (a) and
     ///      far from the segment in (b).
-    ///   2. **Carapace box axes.** The fitted root collider's world half-extents
-    ///      must be a flat slab (height the smallest) with each extent on the world
-    ///      axis the OBB says it belongs on — not the on-edge box that assigning
-    ///      principal extents to world x/y/z verbatim produced.
+    ///   2. **Carapace box frame.** The fitted root collider must be a flat slab
+    ///      (height the smallest) and bone-frame aligned (identity rotation, the
+    ///      root basis being world), so its extents land on world x/y/z verbatim —
+    ///      structurally ruling out the on-edge box a drifting principal frame once
+    ///      produced.
     ///
     /// Self-skips without a model. Uses the real `headless_app` physics, so it can't
     /// pass under a pose the demo/training never sees.
@@ -2543,8 +2605,9 @@ mod tests {
             checked += 1;
         }
         assert_eq!(
-            checked, 20,
-            "expected 20 leg-capsule axes checked (8 femur + 8 tibia + 4 end coxae), got {checked}"
+            checked, 24,
+            "expected 24 leg-capsule axes checked (8 coxa + 8 femur + 8 tibia — every leg \
+             segment is a bone-stretched capsule now), got {checked}"
         );
 
         // (2) The carapace box, posed through the real fitted spawn. Read the root
@@ -2564,48 +2627,39 @@ mod tests {
             let he = col.raw.compute_local_aabb().half_extents();
             Vec3::new(he.x, he.y, he.z)
         };
-        // The carapace is a flat shell: its up (Y) extent is the smallest. The bug
-        // assigned the front-back principal extent (the largest) to Y, standing it
-        // on edge ~0.78 m tall.
+        // The carapace is a flat shell: its up (Y) extent is the smallest. The box
+        // is fit axis-aligned in its bone frame — identity for the root, i.e. world
+        // — so standing it on edge (the old PCA fit could put the front-back extent
+        // on Y) is structurally impossible.
         assert!(
             world_ext.y < world_ext.x && world_ext.y < world_ext.z,
-            "carapace world half-extents {world_ext:?}: up-axis (y) is not the smallest \
-             — box is on edge (extent→world-axis swap)",
+            "carapace world half-extents {world_ext:?}: up-axis (y) is not the smallest",
         );
-        // And each world extent lands on the axis the OBB says it should. Derive the
-        // expectation from the fitted OBB independently of `fitted_root`'s mapping.
-        let carapace = bake_report(&model)
-            .into_iter()
-            .find(|r| r.fitted.part == PartId::Carapace)
-            .expect("carapace baked");
-        if let FittedShape::Box(obb) = carapace.choice.shape {
-            // Map each principal extent onto the world axis its (world) axis is
-            // dominant on — the carapace OBB is near world-aligned, so this is a
-            // clean bijection. `obb.axes` are in world (the root frame is world).
-            let mut expect = Vec3::ZERO;
-            for k in 0..3 {
-                let a = obb.axes[k].abs();
-                let dom = if a.x >= a.y && a.x >= a.z {
-                    0
-                } else if a.y >= a.z {
-                    1
-                } else {
-                    2
-                };
-                expect[dom] = obb.half_extents[k];
-            }
-            for k in 0..3 {
-                assert!(
-                    (world_ext[k] - expect[k]).abs() < 1e-3,
-                    "carapace world half-extent on axis {} is {:.3}, expected {:.3} (OBB \
-                     principal extent dominant on that axis)",
-                    ["x", "y", "z"][k],
-                    world_ext[k],
-                    expect[k],
-                );
-            }
-        } else {
+        // The root box is identity-rotation by construction, and `fitted_root` lays
+        // its extents on world x/y/z verbatim, so the spawned collider's world
+        // half-extents are the baked box's in order — no principal-axis remap.
+        let carapace = body.part(PartId::Carapace).expect("carapace baked");
+        let Primitive::Cuboid {
+            half_extents: baked,
+        } = carapace.primitive
+        else {
             panic!("carapace fit is not a box");
+        };
+        assert!(
+            carapace
+                .placement
+                .rotation
+                .abs_diff_eq(Quat::IDENTITY, 1e-6),
+            "carapace box is not bone-frame aligned (rotation ≠ identity)",
+        );
+        for k in 0..3 {
+            assert!(
+                (world_ext[k] - baked[k]).abs() < 1e-3,
+                "carapace world half-extent on axis {} is {:.3}, expected baked {:.3}",
+                ["x", "y", "z"][k],
+                world_ext[k],
+                baked[k],
+            );
         }
 
         // (3) The whole fitted body spawns: all 33 parts (carapace + 24 leg + 6
