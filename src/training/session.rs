@@ -1792,6 +1792,7 @@ mod tests {
         ));
         app.insert_resource(Visuals(false))
             .insert_resource(NumEnvs(1))
+            // No CrabBodySource inserted: CrabAssets defaults to hand-coded.
             // Same fixed timestep as production (one source — see physics::fixed_timestep)
             // so this test runs the physics the demo/training loop actually uses.
             .insert_resource(crate::physics::fixed_timestep())

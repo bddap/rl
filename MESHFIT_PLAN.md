@@ -1,16 +1,21 @@
 # Mesh-fit: auto-deriving physics colliders from the skinned glTF
 
-**Status:** spike / feasibility kickoff. Prototype lives in `src/bot/meshfit.rs`
-(`#[cfg(test)]`, zero release-build impact). Run the validation table with:
+**Status:** landed through phase 2. `src/bot/meshfit.rs` is production: it loads
+`sally.glb`, chooses a per-part collider primitive, solves placement in each
+link's frame, and bakes a typed [`FittedBody`] table (`--bake-colliders`) that
+`body.rs` spawns from behind `--body fitted`. The hand-coded body remains the
+default and the trained-on physics. Run the validation table (and the bake/world-
+pose gates) with:
 
 ```
 cd /tmp/wt-meshfit && ( set -a; source /tmp/rl/.sandbox-env; set +a; \
   export HOME=/tmp; cargo test --release meshfit_validation -- --nocapture )
 ```
 
-Nothing here is wired into `spawn_crab`. This document records what the spike
-proved, where the auto-fit diverges from the hand-coded body and why, the hard
-problems, and a phased plan to land it.
+This document records what the fit proved, where the auto-fit diverges from the
+hand-coded body and why, the hard problems, and the phased plan. Remaining:
+phase 3 (re-derive densities / balance the fitted body) and phase 4 (policy
+parity before fitted could become the default).
 
 ---
 
