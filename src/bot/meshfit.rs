@@ -1,47 +1,53 @@
-//! Spike → phase 1: auto-derive physics colliders from the skinned glTF mesh.
+//! Auto-derive physics colliders from the skinned glTF mesh, and bake them to a
+//! typed, serializable table the body can spawn from.
 //!
-//! This is a *prototype/validation* module, not part of the live physics. It
-//! loads the same `sally.glb` the cosmetic skin uses ([`super::skin`]), then for
-//! each physics body part:
+//! It loads the same `sally.glb` the cosmetic skin uses ([`super::skin`]), then
+//! for each physics body part:
 //!   1. gathers the mesh vertices whose dominant skin bone maps to that part
 //!      (same bone→part mapping the skin drives with),
 //!   2. **chooses a collider primitive from the cloud's shape** — capsule, box,
-//!      or ball — via [`choose_primitive`], instead of forcing a capsule on
-//!      everything (the phase-0 spike's limitation), and
-//!   3. computes that primitive's mass properties under the hand-coded density.
+//!      or ball — via [`choose_primitive`], and
+//!   3. solves the part's **placement** (where the collider sits + which way it
+//!      points) from the bind-pose bone chain, then
+//!   4. derives mass from the chosen [`Primitive`] under the hand-coded density.
 //!
-//! Phase 1 adds, over the spike: data-driven primitive selection (elongation /
-//! isotropy / flatness descriptors + surface residual), leg-taper handling (a
-//! coverage-balanced capsule radius plus a tapered-cone residual that isolates
-//! taper from non-stickness), and an explicit fix for the degenerate middle-coxa
-//! blobs (routed to a box/ball, not a blown-up capsule).
+//! [`bake_report`] fits those per-part choices and [`FittedBody::from_reports`]
+//! assembles the typed table; it serializes to RON (the `--bake-colliders`
+//! subcommand) and `body.rs` rebuilds colliders from it behind `--body fitted`,
+//! with the hand-coded body the default. The bake is deterministic and offline —
+//! never run at spawn or in `build.rs` (see `MESHFIT_PLAN.md` §4).
 //!
-//! The point is the *comparison* against the hand-coded body in [`super::body`]:
-//! [`fit_report`] returns one [`PartFit`] per part with the chosen primitive, its
-//! residual, and both the fitted and hand-coded numbers; the `meshfit_validation`
-//! integration-style test prints the table and asserts the fit quality. Nothing
-//! here is wired into `spawn_crab`; see `MESHFIT_PLAN.md` for landing it for real
-//! (phase 2: a typed `FittedBody` bake consuming exactly these choices).
+//! **Size vs placement are fit from different sources, on purpose.** The cloud
+//! fit gives pose-invariant *size* (a capsule's half-height/radius, a box's
+//! half-extents) — it does not know where the part sits. *Placement* comes from
+//! the skeleton: the proximal→distal bind-pose bone origins give each segment's
+//! pivot and direction (§2 shows these recover the leg spans cleanly). So a
+//! re-fit of the mesh changes size; a re-rig changes placement; neither silently
+//! perturbs the other.
 //!
-//! Coordinate frames: the fit works in the glTF's *bind-pose world* frame (mesh
-//! space). The hand-coded colliders live in each link's *local* frame, posed by
-//! joint anchors into a different rest stance — so size/mass/inertia compare
-//! directly (they are pose-invariant) while *placement* only compares after a
-//! forward-kinematics pass, which we do for a representative subset.
+//! Coordinate frames: the cloud fit and the bone origins are in the glTF's
+//! *bind-pose world* frame. A [`Placement`] re-expresses a part's collider in its
+//! link-local frame (origin at the joint pivot), so it drops onto `body.rs`'s
+//! hand-authored joint anchors. Size/mass/inertia are pose-invariant and compare
+//! to the hand-coded body directly; placement compares as bone *spans* vs the
+//! hand-coded segment lengths (the comparison [`PlacementCheck`] reports).
 //!
-//! The whole module is `#[cfg(test)]`-gated at its `mod` declaration, so it adds
-//! nothing to release builds.
+//! [`fit_report`] pairs every part's fit with its hand-coded reference for the
+//! `meshfit_validation` test (kept `#[cfg(test)]`); the production path is
+//! [`bake_report`] → [`FittedBody`].
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use super::body::{CrabJointId, Side};
 
-/// Which physics link a mesh vertex (or fitted collider) belongs to. Mirrors
-/// the skin's `LinkKey` but lives here so the spike is self-contained; the
-/// carapace is the root, every other part is a joint's child link.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// Which physics link a fitted collider belongs to: the carapace is the root,
+/// every other part is a joint's child link. Mirrors the skin's `LinkKey` but
+/// carries [`CrabJointId`] so a baked [`FittedPart`] names the exact joint whose
+/// link it replaces.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum PartId {
     Carapace,
     Joint(CrabJointId),
@@ -49,6 +55,7 @@ pub enum PartId {
 
 impl PartId {
     /// Human-readable label for the validation table.
+    #[cfg(test)]
     fn label(self) -> String {
         match self {
             PartId::Carapace => "Carapace".to_string(),
@@ -80,8 +87,9 @@ pub struct LoadedModel {
     verts: Vec<SkinnedVertex>,
 }
 
-/// Where the spike looks for the model: `CRAB_MODEL_PATH` if set (same var the
-/// skin uses), else the dev box's checkout. Absent → the test self-skips.
+/// Where to find the model for an offline bake: `CRAB_MODEL_PATH` if set (same
+/// var the skin uses), else the dev box's checkout. Absent → the bake/validation
+/// tests self-skip.
 pub fn model_path() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("CRAB_MODEL_PATH") {
         let p = std::path::PathBuf::from(p);
@@ -193,19 +201,41 @@ impl LoadedModel {
     /// the translation column of its bind-world transform — i.e. where the joint
     /// pivot sits in the rest skeleton.
     pub fn bone_origin(&self, name: &str) -> Option<Vec3> {
+        self.bone_bind_pose(name).map(|(o, _)| o)
+    }
+
+    /// Bind-pose world (origin, basis) of a bone by name. The basis is the bone's
+    /// bind-world rotation — the orientation the physics link inherits, since each
+    /// link rotates *with* its bone. Solving a [`Placement`] needs both: the origin
+    /// is the joint pivot, and the basis is the frame the placement is expressed
+    /// relative to (so `body.rs`'s rest bake re-applies it consistently).
+    fn bone_bind_pose(&self, name: &str) -> Option<(Vec3, Quat)> {
         let idx = self
             .node_name
             .iter()
             .find(|(_, nm)| nm.as_str() == name)
             .map(|(i, _)| *i)?;
-        self.bind_world.get(&idx).map(|m| m.w_axis.truncate())
+        self.bind_world.get(&idx).map(|m| {
+            let (_, rot, trans) = m.to_scale_rotation_translation();
+            (trans, rot)
+        })
+    }
+
+    /// Bind-world rotation (basis) of a bone — the link-local frame a [`Placement`]
+    /// is expressed in. The world-pose gate reads it to derive, independently of
+    /// the bake, where a fitted collider's axis *should* land.
+    #[cfg(test)]
+    pub fn bone_bind_basis(&self, name: &str) -> Option<Quat> {
+        self.bone_bind_pose(name).map(|(_, b)| b)
     }
 
     /// Skeleton-derived segment lengths for one left leg, from the bind-pose bone
     /// origins: (coxa, femur, tibia) spans following the skin's bone→segment
-    /// grouping (coxa = 000→001, femur = 001→003, tibia = 003→005). This is what
-    /// a from-skeleton joint-chain build would read instead of the hand-coded
-    /// COXA_LEN/FEMUR_LEN/TIBIA_LEN. `leg` is 1..=4 (the model's numbering).
+    /// grouping (coxa = 000→001, femur = 001→003, tibia = 003→005). The validation
+    /// table prints these against the hand-coded lengths; production placement uses
+    /// the per-part [`LoadedModel::bone_span`] (this is the leg-only, all-three
+    /// convenience the table reads). `leg` is 1..=4 (the model's numbering).
+    #[cfg(test)]
     pub fn leg_segment_spans(&self, leg: u8) -> Option<[f32; 3]> {
         let o = |seg: &str| self.bone_origin(&format!("Def_leg_0{leg}.{seg}.L"));
         let p000 = o("000")?;
@@ -236,12 +266,12 @@ fn compose_world(node: &gltf::Node, parent_world: Mat4, out: &mut HashMap<usize,
 // Bone → physics part mapping (mirrors super::skin::bone_target)
 // ---------------------------------------------------------------------------
 
-/// Map a glTF deform-bone name to the physics part it should drive. This is the
-/// spike's copy of [`super::skin`]'s `bone_target` rules, returning the spike's
-/// [`PartId`]. `bone_map_covers_all_model_bones` asserts every deform/control
-/// bone in the model routes to *some* part (no silently-dropped cloud); keeping
-/// the two functions byte-for-byte in sync is by construction (a real landing
-/// would share one mapping, see MESHFIT_PLAN.md).
+/// Map a glTF deform-bone name to the physics part it should drive — the bake's
+/// copy of [`super::skin`]'s `bone_target` rules, returning a [`PartId`].
+/// `bone_map_covers_all_model_bones` asserts every deform/control bone in the
+/// model routes to *some* part (no silently-dropped cloud); the two functions are
+/// kept in sync by hand (sharing one mapping is a future cleanup, see
+/// MESHFIT_PLAN.md).
 fn bone_to_part(name: &str) -> Option<PartId> {
     if !(name.starts_with("Def_") || name.starts_with("Ctrl_")) {
         return None;
@@ -399,7 +429,10 @@ pub fn capsule_fit_residual(points: &[Vec3], cap: &FittedCapsule) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// A cloud's taper along a capsule axis: the perpendicular radius at the `a` end
-/// vs the `b` end, from a least-squares line through per-station radii.
+/// vs the `b` end, from a least-squares line through per-station radii. A
+/// validation diagnostic (it isolates taper from non-stickness in the residual);
+/// rapier has no tapered primitive, so the bake never stores it.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct TaperFit {
     /// Fitted cone radius at the segment's `a` endpoint.
@@ -408,6 +441,7 @@ pub struct TaperFit {
     pub r_b: f32,
 }
 
+#[cfg(test)]
 impl TaperFit {
     /// Thin-end / fat-end radius ratio in `0..=1`. 1.0 = no taper (a true
     /// cylinder); 0.5 = the thin end is half the fat end. The legs sit ~0.3–0.5.
@@ -423,6 +457,7 @@ impl TaperFit {
 /// perpendicular distance (its local cone radius); a least-squares line through
 /// those bin radii gives the end radii. Caps are excluded by only binning points
 /// whose projection lands on the segment interior.
+#[cfg(test)]
 fn fit_taper(points: &[Vec3], cap: &FittedCapsule) -> Option<TaperFit> {
     let seg = cap.b - cap.a;
     let seg_len2 = seg.length_squared();
@@ -479,6 +514,7 @@ fn fit_taper(points: &[Vec3], cap: &FittedCapsule) -> Option<TaperFit> {
 /// shape that could taper would leave; a constant-radius capsule cannot beat it,
 /// so the gap between this and the capsule residual is exactly the cost of
 /// taper. Cap regions are excluded (a cone has flat ends, not hemispheres).
+#[cfg(test)]
 fn cone_fit_residual(points: &[Vec3], cap: &FittedCapsule, taper: &TaperFit) -> f32 {
     let seg = cap.b - cap.a;
     let seg_len2 = seg.length_squared();
@@ -702,43 +738,131 @@ fn obb_fit_residual(points: &[Vec3], obb: &ObbFit) -> f32 {
 // Data-driven primitive selection
 // ---------------------------------------------------------------------------
 
-/// The collider primitive chosen for a part, with the fitted shape inside. This
-/// is the phase-1 output: instead of a blanket capsule, every cloud is matched
-/// to the primitive its own geometry supports, decided by the shape descriptors
-/// below (elongation, isotropy, flatness) plus the surface residual.
-#[derive(Clone, Copy, Debug)]
+/// The collider shape a part wants, **dimensions only** — pose-invariant, with no
+/// position or orientation (those live in a [`Placement`]). This is the canonical
+/// baked output: mass derives from it ([`Primitive::mass_properties`]) and the
+/// body spawns a collider of exactly these dims, so there is one source for a
+/// part's size and nothing to drift out of sync. The world-space cloud fit it is
+/// distilled from is [`FittedShape`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Primitive {
-    /// Elongated, one dominant axis: legs, claw arms.
-    Capsule(FittedCapsule),
+    /// Elongated, one dominant axis: legs, claw arms. `half_height` is the
+    /// cylinder half-length (caps excluded), matching rapier's `capsule_y`.
+    Capsule { half_height: f32, radius: f32 },
     /// Chunky or flat, no single sweep axis: carapace, claw palm, pincer, the
     /// degenerate coxa blobs (a box hugs them; a capsule blows its radius up).
-    Box(ObbFit),
+    Cuboid { half_extents: Vec3 },
     /// Round in all three axes — no axis to sweep *or* to lay a slab against. No
     /// `sally.glb` part is this round (even the eye is a short stalk → box), so
     /// it's the principled fallback for a future near-spherical cloud, not a
     /// current output. Kept so the chooser degrades sensibly rather than forcing
     /// a ball-shaped blob into a box.
-    Ball(FittedBall),
+    Ball { radius: f32 },
 }
 
 impl Primitive {
-    /// One-word tag for the validation table.
+    /// One-word tag for the validation table and the bake reason lines.
     pub fn tag(&self) -> &'static str {
         match self {
-            Primitive::Capsule(_) => "capsule",
-            Primitive::Box(_) => "box",
-            Primitive::Ball(_) => "ball",
+            Primitive::Capsule { .. } => "capsule",
+            Primitive::Cuboid { .. } => "box",
+            Primitive::Ball { .. } => "ball",
+        }
+    }
+
+    /// Mass + transverse principal inertia under `density`. The transverse moment
+    /// is the table's `i_perp` convention: for the box, the larger of the two
+    /// non-vertical principal inertias; the ball is isotropic so all three
+    /// coincide. The single source for a part's mass — there are no stored mass
+    /// fields to disagree with the dims.
+    pub fn mass_properties(&self, density: f32) -> (f32, f32) {
+        match *self {
+            Primitive::Capsule {
+                half_height,
+                radius,
+            } => {
+                let m = capsule_mass(radius, half_height, density);
+                (m.mass, m.i_perp)
+            }
+            Primitive::Cuboid { half_extents: e } => {
+                let (m, i) = cuboid_mass(e.x, e.y, e.z, density);
+                (m, i.x.max(i.y).max(i.z))
+            }
+            Primitive::Ball { radius } => ball_mass(radius, density),
+        }
+    }
+
+    /// Reject dimensions that are non-finite or non-positive — the ones a foreign/
+    /// hand-edited table can carry that serde accepts but rapier cannot build into a
+    /// sane collider. A radius or extent must be strictly positive; a capsule's
+    /// half-height may be 0 (that capsule is a sphere) but not negative.
+    fn validate(&self) -> Result<(), String> {
+        let positive = |label: &str, v: f32| {
+            (v.is_finite() && v > 0.0)
+                .then_some(())
+                .ok_or_else(|| format!("{label} must be finite and > 0, got {v}"))
+        };
+        let non_negative = |label: &str, v: f32| {
+            (v.is_finite() && v >= 0.0)
+                .then_some(())
+                .ok_or_else(|| format!("{label} must be finite and >= 0, got {v}"))
+        };
+        match *self {
+            Primitive::Capsule {
+                half_height,
+                radius,
+            } => {
+                non_negative("capsule half_height", half_height)?;
+                positive("capsule radius", radius)
+            }
+            Primitive::Cuboid { half_extents: e } => {
+                positive("cuboid half_extent x", e.x)?;
+                positive("cuboid half_extent y", e.y)?;
+                positive("cuboid half_extent z", e.z)
+            }
+            Primitive::Ball { radius } => positive("ball radius", radius),
         }
     }
 }
 
-/// Why a primitive was chosen: the winning primitive, its surface residual, and
-/// the extent-sorted shape descriptors that drove the decision — so the
-/// validation table can show the *decision*, not just its outcome, and assert on
-/// it.
+/// The world-space shape fitted to a vertex cloud, before it is distilled into a
+/// pose-invariant [`Primitive`]. Carries absolute positions/axes; used only to
+/// compute the surface residual and to read a box's fitted orientation when
+/// solving its [`Placement`]. Not serialized.
+#[derive(Clone, Copy, Debug)]
+pub enum FittedShape {
+    Capsule(FittedCapsule),
+    Box(ObbFit),
+    Ball(FittedBall),
+}
+
+impl FittedShape {
+    /// Distil to pose-invariant dimensions (the thing that gets baked).
+    pub fn dims(&self) -> Primitive {
+        match self {
+            FittedShape::Capsule(c) => Primitive::Capsule {
+                half_height: c.half_height(),
+                radius: c.radius,
+            },
+            FittedShape::Box(o) => Primitive::Cuboid {
+                half_extents: o.half_extents,
+            },
+            FittedShape::Ball(b) => Primitive::Ball { radius: b.radius },
+        }
+    }
+}
+
+/// Why a primitive was chosen: the dimensioned primitive, the world-space fit it
+/// came from, its surface residual, and the extent-sorted shape descriptors that
+/// drove the decision — so the validation table can show the *decision*, not just
+/// its outcome, and assert on it.
 #[derive(Clone, Debug)]
 pub struct PrimitiveChoice {
-    pub primitive: Primitive,
+    /// The world-space fit the choice was distilled from (carries the residual and
+    /// the box's fitted axes). The pose-invariant dimensions the bake stores are
+    /// [`Self::primitive`] — `shape.dims()`, derived, never stored, so the two can
+    /// never disagree.
+    pub shape: FittedShape,
     /// Surface residual (normalised RMS) of the chosen primitive.
     pub chosen_residual: f32,
     /// Extent-sorted descriptors that drove the choice (see [`ObbFit`]).
@@ -747,6 +871,14 @@ pub struct PrimitiveChoice {
     pub flatness: f32,
     /// Human-readable one-liner: the rule that fired.
     pub reason: &'static str,
+}
+
+impl PrimitiveChoice {
+    /// The pose-invariant dimensions to bake — the chosen shape distilled. Derived
+    /// from `shape` on read, so there is no second copy to fall out of sync with it.
+    pub fn primitive(&self) -> Primitive {
+        self.shape.dims()
+    }
 }
 
 /// Selection thresholds. Picked from the measured descriptors on `sally.glb`
@@ -799,29 +931,29 @@ pub fn choose_primitive(points: &[Vec3]) -> Option<PrimitiveChoice> {
         .unwrap_or(f32::INFINITY);
 
     let is_stick = elongation < thresh::ELONGATION_STICK && isotropy < thresh::ISOTROPY_NO_AXIS;
-    let (primitive, chosen_residual, reason) = if let Some(c) = capsule.filter(|_| is_stick) {
+    let (shape, chosen_residual, reason) = if let Some(c) = capsule.filter(|_| is_stick) {
         (
-            Primitive::Capsule(c),
+            FittedShape::Capsule(c),
             capsule_residual,
             "elongated, one dominant axis → capsule",
         )
     } else if isotropy >= thresh::ISOTROPY_BALL && flatness >= thresh::FLATNESS_BALL {
         let ball = fit_ball(points)?;
         (
-            Primitive::Ball(ball),
+            FittedShape::Ball(ball),
             ball_fit_residual(points, &ball),
             "round in all three axes → ball (no axis for a capsule)",
         )
     } else {
         (
-            Primitive::Box(obb),
+            FittedShape::Box(obb),
             obb_fit_residual(points, &obb),
             "chunky / flat slab, no clean sweep axis → box",
         )
     };
 
     Some(PrimitiveChoice {
-        primitive,
+        shape,
         chosen_residual,
         elongation,
         isotropy,
@@ -912,13 +1044,17 @@ fn covariance_eigenframe(points: &[Vec3], centroid: Vec3) -> ([Vec3; 3], Vec3) {
 // ---------------------------------------------------------------------------
 
 /// Rigid-body mass properties of a capsule, computed analytically (cylinder +
-/// two hemispheres) so the spike doesn't depend on constructing a rapier
-/// collider. `i_axial` is the moment about the capsule's own long axis;
+/// two hemispheres) so mass derives from the dimensions without constructing a
+/// rapier collider. `i_axial` is the moment about the capsule's own long axis;
 /// `i_perp` about a transverse axis through the centre of mass. For comparison
 /// with the hand-coded body these are the principal inertias of the part.
 #[derive(Clone, Copy, Debug)]
 pub struct CapsuleMass {
     pub mass: f32,
+    /// Moment about the capsule's own long axis. Production reads only `i_perp`
+    /// (the transverse moment the table compares); `i_axial` rounds out the
+    /// principal inertias and pins the sphere-reduction test's isotropy check.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub i_axial: f32,
     pub i_perp: f32,
 }
@@ -976,7 +1112,7 @@ pub fn cuboid_mass(hx: f32, hy: f32, hz: f32, density: f32) -> (f32, Vec3) {
 
 /// Analytic solid-ball mass properties: mass and the (isotropic) principal
 /// inertia ⅖mr². Returned in the same `(mass, i_perp)` shape as the other
-/// primitives so [`primitive_mass`] can stay uniform.
+/// primitives so [`Primitive::mass_properties`] can stay uniform.
 pub fn ball_mass(radius: f32, density: f32) -> (f32, f32) {
     let (r, rho) = (radius as f64, density as f64);
     let mass = rho * (4.0 / 3.0) * std::f64::consts::PI * r.powi(3);
@@ -984,24 +1120,350 @@ pub fn ball_mass(radius: f32, density: f32) -> (f32, f32) {
     (mass as f32, i as f32)
 }
 
-/// Mass + transverse principal inertia of whichever primitive was chosen, under
-/// the part's hand-coded density — so fitted and reference mass/inertia compare
-/// at equal density. For the box the transverse inertia is the larger of the two
-/// non-vertical principal inertias (the table's `i_perp` convention); the ball is
-/// isotropic so all three coincide.
-pub fn primitive_mass(prim: &Primitive, density: f32) -> (f32, f32) {
-    match prim {
-        Primitive::Capsule(c) => {
-            let m = capsule_mass(c.radius, c.half_height(), density);
-            (m.mass, m.i_perp)
+// ---------------------------------------------------------------------------
+// Placement: where each part's collider sits, from the bind-pose skeleton
+// ---------------------------------------------------------------------------
+
+/// A part's collider pose in its **link-local frame**: the frame whose origin is
+/// the joint pivot (the proximal bind-pose bone origin) and whose axes are the
+/// body's, so it drops onto `body.rs`'s hand-authored parent anchor for that
+/// joint. `center` is the collider centre relative to the pivot; `rotation`
+/// orients the collider's canonical axes (capsule along +Y, box along its fitted
+/// principal axes) into the link frame. The pivot-relative encoding is why
+/// placement survives the runtime joint pose: only *where on the parent* the
+/// joint attaches is hand-authored; how the collider hangs off it is this.
+///
+/// Stored as a translation+rotation rather than a [`Transform`] because the scale
+/// is always 1 (a collider is its own size) and a bake artifact should carry no
+/// field that is only ever the identity.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Placement {
+    pub center: Vec3,
+    pub rotation: Quat,
+}
+
+/// The bind-pose bone span that defines a part's segment, in glTF world space:
+/// the proximal (pivot) and distal origins plus the proximal bone's bind-world
+/// basis. The basis is what makes [`solve_placement`] frame-correct — the
+/// collider is posed relative to *this bone's* rest orientation, the same frame
+/// `body.rs` rebuilds when it bakes the link's rest pose; without it the
+/// placement would be in raw glTF world and land rotated off the limb. For the
+/// chunky parts the "segment" is just the pivot bone and a direction hint;
+/// placement there leans on the fitted OBB (still re-expressed via the basis).
+struct BoneSpan {
+    proximal: Vec3,
+    /// Bind-world rotation of the proximal bone — the link-local frame placement
+    /// is expressed in.
+    proximal_basis: Quat,
+    distal: Vec3,
+}
+
+impl LoadedModel {
+    /// The proximal/distal bind-pose bone origins bounding a part's segment, by
+    /// the same bone→segment grouping the skin and the fit cluster with (coxa
+    /// 000→001, femur 001→003, tibia 003→005; claw/eye chains analogously). The
+    /// proximal origin is the joint pivot; the distal sets the segment direction
+    /// and length. `None` if either bone is missing (e.g. a part with no skeleton
+    /// correspondence).
+    fn bone_span(&self, part: PartId) -> Option<BoneSpan> {
+        // Resolve a span from its proximal/distal bone names: the proximal bone
+        // gives the pivot AND the link-local basis; the distal gives direction.
+        let span = |prox: &str, dist: &str| {
+            let (proximal, proximal_basis) = self.bone_bind_pose(prox)?;
+            Some(BoneSpan {
+                proximal,
+                proximal_basis,
+                distal: self.bone_origin(dist)?,
+            })
+        };
+        let leg = |leg: u8, side: Side, prox: &str, dist: &str| {
+            let s = side_tag(side);
+            span(
+                &format!("Def_leg_0{}.{prox}.{s}", leg + 1),
+                &format!("Def_leg_0{}.{dist}.{s}", leg + 1),
+            )
+        };
+        match part {
+            // Root: the carapace bone is the pivot; the distal hint points front
+            // (+Z) so a degenerate direction never leaves the frame undefined.
+            // The basis is IDENTITY, not the thorax bone's: the root link has no
+            // rest bake — `body.rs` spawns it axis-aligned in world — so its link
+            // frame IS world. That keeps the carapace's [`Placement`] (and the OBB
+            // axes its rotation carries) in world, which `fitted_root` reads to map
+            // each principal extent onto the world axis it's dominant on.
+            PartId::Carapace => {
+                let proximal = self
+                    .bone_origin("Def_thorax_back")
+                    .or_else(|| self.bone_origin("Def_thorax_front"))?;
+                Some(BoneSpan {
+                    proximal,
+                    proximal_basis: Quat::IDENTITY,
+                    distal: proximal + Vec3::Z,
+                })
+            }
+            PartId::Joint(id) => match id {
+                CrabJointId::LegCoxa(side, l) => leg(l, side, "000", "001"),
+                CrabJointId::LegFemur(side, l) => leg(l, side, "001", "003"),
+                CrabJointId::LegTibia(side, l) => leg(l, side, "003", "005"),
+                CrabJointId::ClawUpper(side) => {
+                    let s = side_tag(side);
+                    span(
+                        &format!("Def_pincer.000a.{s}"),
+                        &format!("Def_pincer.001.{s}"),
+                    )
+                }
+                CrabJointId::ClawFore(side) => {
+                    let s = side_tag(side);
+                    span(
+                        &format!("Def_pincer.001.{s}"),
+                        &format!("Def_pincer.005.{s}"),
+                    )
+                }
+                CrabJointId::ClawPincer(side) => {
+                    let s = side_tag(side);
+                    span(
+                        &format!("Def_pincer.005.{s}"),
+                        &format!("Def_pincer.006.{s}"),
+                    )
+                }
+                CrabJointId::EyeStalk(side) => {
+                    let s = side_tag(side);
+                    span(
+                        &format!("Def_antennae.{s}"),
+                        &format!("Def_antennae_top.{s}"),
+                    )
+                }
+            },
         }
-        Primitive::Box(o) => {
-            let e = o.half_extents;
-            let (m, i) = cuboid_mass(e.x, e.y, e.z, density);
-            (m, i.x.max(i.y).max(i.z))
-        }
-        Primitive::Ball(b) => ball_mass(b.radius, density),
     }
+}
+
+/// glTF side suffix (`.L`/`.R`) for a [`Side`], the way the deform bones are
+/// named.
+fn side_tag(side: Side) -> &'static str {
+    match side {
+        Side::Left => "L",
+        Side::Right => "R",
+    }
+}
+
+/// Solve a part's [`Placement`] in its **link-local frame** from the bind-pose
+/// bone span and the world-space fit.
+///
+/// The fit and the bone origins are in glTF *bind-pose world*, but `body.rs`
+/// consumes the placement in the link's own rest frame (the proximal bone's
+/// orientation, which the joint rest bake re-establishes down the chain). Those
+/// two frames differ — the bind pose is a flat splay, the physics rest a planted
+/// Λ — so a placement left in world lands the collider rotated off the limb (the
+/// bug this fixes). Every world-relative-to-pivot quantity is therefore mapped
+/// into the link frame by `basis⁻¹`, where `basis` is the proximal bone's
+/// bind-world rotation. Then at spawn `body.rs` applies the link's rest world
+/// rotation `L`, recovering `L · basis⁻¹ · (world vector)` — the fitted geometry
+/// as the limb actually sits, instead of `L · (world vector)`.
+///
+/// - **Capsule:** rides the bone segment — `rotation` turns +Y (the `capsule_y`
+///   axis) onto the proximal→distal direction *in the link frame*, `center` sits
+///   at the segment midpoint (link frame). Size is the cloud fit's, already in
+///   the primitive; the skeleton only places it.
+/// - **Box / ball:** no clean segment, so placement uses the fitted shape's own
+///   centre and (for the box) principal axes, mapped into the link frame. This
+///   keeps a chunky part's collider where its mesh is rather than on the bone line.
+fn solve_placement(span: &BoneSpan, shape: &FittedShape) -> Placement {
+    let pivot = span.proximal;
+    // Map a bind-world rotation/offset into the link-local frame.
+    let to_local = span.proximal_basis.inverse();
+    match shape {
+        FittedShape::Capsule(_) => {
+            let seg = span.distal - pivot;
+            let dir = seg.normalize_or_zero();
+            // Align the capsule's +Y axis to the bone direction. `from_rotation_arc`
+            // is stable except at the antipode (dir ≈ −Y), where any perpendicular
+            // axis is correct — pick X.
+            let world_rot = if dir.dot(Vec3::Y) < -0.9999 {
+                Quat::from_axis_angle(Vec3::X, std::f32::consts::PI)
+            } else {
+                Quat::from_rotation_arc(Vec3::Y, dir)
+            };
+            Placement {
+                center: to_local * (0.5 * seg),
+                rotation: to_local * world_rot,
+            }
+        }
+        FittedShape::Box(o) => Placement {
+            center: to_local * (o.center - pivot),
+            // The OBB axes form an orthonormal basis (Jacobi eigenvectors);
+            // `obb_rotation` enforces right-handedness before reading it off.
+            rotation: to_local * obb_rotation(o),
+        },
+        FittedShape::Ball(b) => Placement {
+            center: to_local * (b.center - pivot),
+            rotation: Quat::IDENTITY,
+        },
+    }
+}
+
+/// A box's principal-axis frame as a rotation. The three OBB axes are orthonormal
+/// but arbitrary-handed/-signed out of the eigensolver; flip the third to enforce
+/// right-handedness so `Quat::from_mat3` yields a proper rotation (a reflection
+/// would denormalise the quat and mirror the collider).
+fn obb_rotation(o: &ObbFit) -> Quat {
+    let x = o.axes[0];
+    let y = o.axes[1];
+    let z = if x.cross(y).dot(o.axes[2]) < 0.0 {
+        -o.axes[2]
+    } else {
+        o.axes[2]
+    };
+    Quat::from_mat3(&Mat3::from_cols(x, y, z)).normalize()
+}
+
+// ---------------------------------------------------------------------------
+// Typed collider table (the offline-bake artifact)
+// ---------------------------------------------------------------------------
+
+/// One part of the baked body: which physics link it is, the dimensioned
+/// collider [`Primitive`] to build there, its [`Placement`] in the link frame,
+/// and the density mass is derived under. Mass is intentionally *not* stored —
+/// it is `primitive.mass_properties(density)`, so the artifact cannot carry a
+/// mass that disagrees with its own dimensions.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FittedPart {
+    pub part: PartId,
+    pub primitive: Primitive,
+    pub placement: Placement,
+    pub density: f32,
+}
+
+impl FittedPart {
+    /// Mass + transverse principal inertia, derived from the primitive + density.
+    pub fn mass_properties(&self) -> (f32, f32) {
+        self.primitive.mass_properties(self.density)
+    }
+
+    /// Reject a part whose dimensions, placement, or density are non-finite or
+    /// non-positive (see [`FittedBody::from_ron`]). Names the part so a bad table
+    /// points at the offending entry.
+    fn validate(&self) -> Result<(), String> {
+        let label = || format!("{:?}", self.part);
+        self.primitive
+            .validate()
+            .map_err(|e| format!("{}: {e}", label()))?;
+        if !self.placement.center.is_finite() || !self.placement.rotation.is_finite() {
+            return Err(format!("{}: non-finite placement", label()));
+        }
+        if !(self.density.is_finite() && self.density > 0.0) {
+            return Err(format!(
+                "{}: density must be finite and > 0, got {}",
+                label(),
+                self.density
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The offline-baked collider table: one [`FittedPart`] per physics link. Built
+/// by [`bake_report`] from `sally.glb`, serialized to RON by `--bake-colliders`, and
+/// consumed by `body.rs` behind `--body fitted` (the hand-coded body stays the
+/// default). A `version` guards against a stale artifact silently feeding a body
+/// whose format moved on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FittedBody {
+    /// Artifact schema version. Bump when the meaning of a field changes so an
+    /// old `.ron` is rejected loudly instead of mis-spawned.
+    pub version: u32,
+    pub parts: Vec<FittedPart>,
+}
+
+impl FittedBody {
+    /// Current artifact schema version.
+    pub const VERSION: u32 = 1;
+
+    /// Look up a part's fit, if present.
+    pub fn part(&self, part: PartId) -> Option<&FittedPart> {
+        self.parts.iter().find(|p| p.part == part)
+    }
+
+    /// Serialize to pretty RON (the on-disk bake format).
+    pub fn to_ron(&self) -> Result<String, String> {
+        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
+            .map_err(|e| format!("serialize FittedBody: {e}"))
+    }
+
+    /// Assemble from per-part [`bake_report`] rows — drops the reasoning, keeping
+    /// just the [`FittedPart`]s the artifact stores.
+    pub fn from_reports(reports: &[PartReport]) -> Self {
+        FittedBody {
+            version: Self::VERSION,
+            parts: reports.iter().map(|r| r.fitted).collect(),
+        }
+    }
+
+    /// Parse from RON, rejecting a version mismatch *and* structurally-valid but
+    /// physically-impossible values. `--body-table` is a trust boundary (the file
+    /// may be hand-edited or foreign), and a serde-valid table with a zero/negative/
+    /// NaN dimension parses fine yet spawns a degenerate collider — a 0-radius
+    /// capsule, a mirrored box — that detonates rapier deep inside the solver. Fail
+    /// here, at the edge, with the offending part named.
+    pub fn from_ron(s: &str) -> Result<Self, String> {
+        let body: FittedBody = ron::from_str(s).map_err(|e| format!("parse FittedBody: {e}"))?;
+        if body.version != Self::VERSION {
+            return Err(format!(
+                "FittedBody version {} != expected {} — re-bake the collider table",
+                body.version,
+                Self::VERSION
+            ));
+        }
+        for fp in &body.parts {
+            fp.validate()?;
+        }
+        Ok(body)
+    }
+}
+
+/// One part's fit with the reasoning behind it: the baked [`FittedPart`], the
+/// chooser's decision (primitive + residual + shape descriptors + the rule that
+/// fired), and the bind-pose bone span the placement was solved from. Returned by
+/// [`bake_report`] so the dev bake can print a reviewable why-this-shape summary
+/// that the lean [`FittedBody`] artifact doesn't carry.
+#[derive(Clone, Debug)]
+pub struct PartReport {
+    pub fitted: FittedPart,
+    pub choice: PrimitiveChoice,
+    /// Proximal→distal bind-pose bone-span length (m) the placement derived from.
+    pub span_len: f32,
+}
+
+/// Fit the whole body from a loaded model, returning each part's [`FittedPart`]
+/// alongside the reasoning behind it. Per part: choose the primitive from its
+/// vertex cloud, solve placement from the skeleton bone span, and pair it with
+/// the hand-coded density (mass is derived from those, not stored). Parts whose
+/// cloud is too small to fit *or* whose skeleton span is missing are skipped —
+/// the body loader falls back to the hand-coded link for any part the table
+/// omits, so an incomplete fit degrades gracefully instead of spawning a hole.
+pub fn bake_report(model: &LoadedModel) -> Vec<PartReport> {
+    let by_part = model.vertices_by_part();
+    let mut out = Vec::new();
+    for (part, density) in super::body::part_densities() {
+        let Some((points, _)) = by_part.get(&part) else {
+            continue;
+        };
+        let (Some(choice), Some(span)) = (choose_primitive(points), model.bone_span(part)) else {
+            continue;
+        };
+        let placement = solve_placement(&span, &choice.shape);
+        out.push(PartReport {
+            fitted: FittedPart {
+                part,
+                primitive: choice.primitive(),
+                placement,
+                density,
+            },
+            choice,
+            span_len: (span.distal - span.proximal).length(),
+        });
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,6 +1473,8 @@ pub fn primitive_mass(prim: &Primitive, density: f32) -> (f32, f32) {
 /// One row of the validation table: a part's chosen primitive + mass/inertia
 /// next to the hand-coded reference, plus the evidence behind the choice.
 /// Optional fields are `None` when the cloud was too small to fit (< 4 vertices).
+/// Validation-only — the production bake emits a [`FittedBody`], not this.
+#[cfg(test)]
 pub struct PartFit {
     pub part: PartId,
     pub vertex_count: usize,
@@ -1024,9 +1488,9 @@ pub struct PartFit {
     /// Normalised RMS residual of the cloud to the *constant-radius* (spike p95)
     /// capsule surface: the baseline the balanced/cone residuals improve on.
     pub capsule_residual: f32,
-    /// The phase-1 data-driven primitive choice (capsule/box/ball) + the residual
-    /// it left and the rule that fired. `None` only for clouds too small to fit.
-    /// This is what phase 2 will bake.
+    /// The data-driven primitive choice (capsule/box/ball) + the residual it left
+    /// and the rule that fired — the same choice the bake stores. `None` only for
+    /// clouds too small to fit.
     pub choice: Option<PrimitiveChoice>,
     /// Linear taper of the cloud along the (capsule) axis, when one could be
     /// measured. `None` for non-elongated parts where taper is meaningless.
@@ -1045,6 +1509,7 @@ pub struct PartFit {
     pub ref_i_perp: f32,
 }
 
+#[cfg(test)]
 impl PartFit {
     fn label(&self) -> String {
         self.part.label()
@@ -1055,6 +1520,7 @@ impl PartFit {
 /// reference. Every part gets a data-driven primitive choice (capsule/box/ball
 /// from [`choose_primitive`]), plus the raw capsule/OBB fits and a taper
 /// analysis, so the caller sees both the decision and the evidence behind it.
+#[cfg(test)]
 pub fn fit_report(model: &LoadedModel) -> Vec<PartFit> {
     let by_part = model.vertices_by_part();
     let mut rows = Vec::new();
@@ -1081,7 +1547,7 @@ pub fn fit_report(model: &LoadedModel) -> Vec<PartFit> {
             };
         let (fitted_mass, fitted_i_perp) = match &choice {
             Some(ch) => {
-                let (m, i) = primitive_mass(&ch.primitive, part.density);
+                let (m, i) = ch.primitive().mass_properties(part.density);
                 (Some(m), Some(i))
             }
             None => (None, None),
@@ -1106,7 +1572,8 @@ pub fn fit_report(model: &LoadedModel) -> Vec<PartFit> {
 
 /// Hand-coded reference for one part: the live body's collider dims, density,
 /// and derived mass/inertia. Built from [`super::body`]'s own constants (via the
-/// test-only `reference` re-export) so this table can't drift from the physics.
+/// `reference` re-export) so this table can't drift from the physics.
+#[cfg(test)]
 struct RefPart {
     part: PartId,
     ref_mass: f32,
@@ -1119,6 +1586,7 @@ struct RefPart {
 /// mass; box parts (carapace, pincer) the box; the eye the ball. Mass/inertia
 /// are pose-invariant, so they compare to the fit regardless of which primitive
 /// the fit chose — that comparison, not raw dimensions, is the table's point.
+#[cfg(test)]
 fn reference_parts() -> Vec<RefPart> {
     use super::body::reference as r;
     let mut v = Vec::new();
@@ -1241,6 +1709,71 @@ mod tests {
         );
     }
 
+    /// `from_ron` is the `--body-table` trust boundary: a serde-valid table with a
+    /// non-finite or non-positive dimension/density must be rejected, not spawned
+    /// into a degenerate collider. A clean part round-trips; each poisoned field
+    /// fails loudly and names the part.
+    #[test]
+    fn from_ron_rejects_nonphysical_dims() {
+        let good = FittedPart {
+            part: PartId::Joint(CrabJointId::LegCoxa(Side::Left, 0)),
+            primitive: Primitive::Capsule {
+                half_height: 0.1,
+                radius: 0.05,
+            },
+            placement: Placement {
+                center: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+            },
+            density: 1.0,
+        };
+        let body = |fp: FittedPart| FittedBody {
+            version: FittedBody::VERSION,
+            parts: vec![fp],
+        };
+        // A clean table parses.
+        FittedBody::from_ron(&body(good).to_ron().unwrap()).expect("clean table parses");
+
+        // Each poisoned field is rejected.
+        let poison = [
+            Primitive::Capsule {
+                half_height: 0.1,
+                radius: 0.0,
+            }, // zero radius
+            Primitive::Capsule {
+                half_height: 0.1,
+                radius: -0.05,
+            }, // negative radius
+            Primitive::Cuboid {
+                half_extents: Vec3::new(0.1, f32::NAN, 0.1),
+            }, // NaN extent
+            Primitive::Ball { radius: 0.0 }, // zero radius
+        ];
+        for prim in poison {
+            let ron = body(FittedPart {
+                primitive: prim,
+                ..good
+            })
+            .to_ron()
+            .unwrap();
+            assert!(
+                FittedBody::from_ron(&ron).is_err(),
+                "from_ron accepted a non-physical primitive: {prim:?}"
+            );
+        }
+        // …and a bad density too.
+        let ron = body(FittedPart {
+            density: 0.0,
+            ..good
+        })
+        .to_ron()
+        .unwrap();
+        assert!(
+            FittedBody::from_ron(&ron).is_err(),
+            "from_ron accepted a zero density"
+        );
+    }
+
     /// Capsule mass formula sanity: a capsule with zero half-height is a sphere,
     /// so its mass and (isotropic) inertia must match the sphere closed forms.
     #[test]
@@ -1353,7 +1886,7 @@ mod tests {
         for row in &rows {
             total_ref_mass += row.ref_mass;
             let (tag, res) = match &row.choice {
-                Some(ch) => (ch.primitive.tag(), ch.chosen_residual),
+                Some(ch) => (ch.primitive().tag(), ch.chosen_residual),
                 None => ("none", f32::NAN),
             };
             let fm = match row.fitted_mass {
@@ -1407,10 +1940,10 @@ mod tests {
         // --- Phase-1 aggregate scorecard (the deliverable, in three numbers) ---
         let (mut caps, mut boxes, mut balls) = (0, 0, 0);
         for row in &rows {
-            match row.choice.as_ref().map(|c| &c.primitive) {
-                Some(Primitive::Capsule(_)) => caps += 1,
-                Some(Primitive::Box(_)) => boxes += 1,
-                Some(Primitive::Ball(_)) => balls += 1,
+            match row.choice.as_ref().map(|c| c.primitive()) {
+                Some(Primitive::Capsule { .. }) => caps += 1,
+                Some(Primitive::Cuboid { .. }) => boxes += 1,
+                Some(Primitive::Ball { .. }) => balls += 1,
                 None => {}
             }
         }
@@ -1429,8 +1962,8 @@ mod tests {
                     r.part,
                     PartId::Joint(CrabJointId::LegFemur(..) | CrabJointId::LegTibia(..))
                 ) && matches!(
-                    r.choice.as_ref().map(|c| &c.primitive),
-                    Some(Primitive::Capsule(_))
+                    r.choice.as_ref().map(|c| c.primitive()),
+                    Some(Primitive::Capsule { .. })
                 )
             })
             .collect();
@@ -1483,7 +2016,7 @@ mod tests {
                 println!(
                     "  {:<18} {:>7}  — {}",
                     row.label(),
-                    ch.primitive.tag(),
+                    ch.primitive().tag(),
                     ch.reason
                 );
             } else {
@@ -1538,6 +2071,36 @@ mod tests {
             );
         }
 
+        // --- Baked placement vs hand-coded link layout (where it diverges) ----
+        // The solved Placement is pivot-relative; the hand-coded link centres its
+        // collider at the pivot offset by `local_anchor2`. For the front-left leg,
+        // print the baked capsule centre + reach beside the hand-coded values so
+        // the divergence is concrete. Femur/tibia land close (the segment lengths
+        // match within §2's ~15 %); the coxa centre is shorter (the model tucks the
+        // hip — see the spans above) and the boxed middle coxae carry an OBB pose,
+        // not a segment, so their "centre" is the cluster centroid, not a midpoint.
+        let baked = bake_report(&model);
+        println!("\nbaked placement (front-left leg), centre = collider centre vs joint pivot:");
+        for id in [
+            CrabJointId::LegCoxa(Side::Left, 0),
+            CrabJointId::LegFemur(Side::Left, 0),
+            CrabJointId::LegTibia(Side::Left, 0),
+        ] {
+            if let Some(r) = baked.iter().find(|r| r.fitted.part == PartId::Joint(id)) {
+                let c = r.fitted.placement.center;
+                println!(
+                    "  {:<18} {:>7} centre [{:+.3} {:+.3} {:+.3}] |span| {:.3} m (bone span {:.3})",
+                    format!("{id:?}"),
+                    r.fitted.primitive.tag(),
+                    c.x,
+                    c.y,
+                    c.z,
+                    2.0 * c.length(),
+                    r.span_len,
+                );
+            }
+        }
+
         // --- Assertions: pin the phase-1 fit-quality guarantees. --------------
         // The spike asserted only "a clean stick fits / the carapace footprint
         // matches"; phase 1 pins the whole decision: every part gets a primitive,
@@ -1566,10 +2129,10 @@ mod tests {
             if let PartId::Joint(CrabJointId::LegFemur(..) | CrabJointId::LegTibia(..)) = row.part {
                 let ch = row.choice.as_ref().unwrap();
                 assert!(
-                    matches!(ch.primitive, Primitive::Capsule(_)),
+                    matches!(ch.primitive(), Primitive::Capsule { .. }),
                     "{} should fit a capsule, got {} (elong {:.2}, iso {:.2})",
                     row.label(),
-                    ch.primitive.tag(),
+                    ch.primitive().tag(),
                     ch.elongation,
                     ch.isotropy
                 );
@@ -1593,21 +2156,14 @@ mod tests {
         // that means a blob got forced into a capsule — the exact failure phase 1
         // removes. (Box/ball parts are exempt; this guards only capsules.)
         for row in &rows {
-            if let Some(PrimitiveChoice {
-                primitive: Primitive::Capsule(c),
-                ..
-            }) = &row.choice
+            if let Some(Primitive::Capsule { radius, .. }) =
+                row.choice.as_ref().map(|c| c.primitive())
             {
                 assert!(
-                    c.radius > 0.005 && c.radius < 0.12,
+                    radius > 0.005 && radius < 0.12,
                     "{} capsule radius {:.3} is degenerate (blob forced into a capsule)",
                     row.label(),
-                    c.radius
-                );
-                assert!(
-                    c.segment_len() >= 0.0,
-                    "{} negative capsule segment",
-                    row.label()
+                    radius
                 );
             }
         }
@@ -1621,11 +2177,11 @@ mod tests {
             {
                 let ch = row.choice.as_ref().unwrap();
                 assert!(
-                    !matches!(ch.primitive, Primitive::Capsule(_)),
+                    !matches!(ch.primitive(), Primitive::Capsule { .. }),
                     "{} is a degenerate isotropic blob (iso {:.2}) and must NOT be a capsule, got {}",
                     row.label(),
                     ch.isotropy,
-                    ch.primitive.tag()
+                    ch.primitive().tag()
                 );
             }
         }
@@ -1637,10 +2193,10 @@ mod tests {
             if let PartId::Joint(CrabJointId::ClawFore(_)) = row.part {
                 let ch = row.choice.as_ref().unwrap();
                 assert!(
-                    matches!(ch.primitive, Primitive::Box(_)),
+                    matches!(ch.primitive(), Primitive::Cuboid { .. }),
                     "{} (claw palm) should be a box, got {}",
                     row.label(),
-                    ch.primitive.tag()
+                    ch.primitive().tag()
                 );
             }
         }
@@ -1707,14 +2263,14 @@ mod tests {
             .expect("carapace row");
         assert!(
             matches!(
-                carapace.choice.as_ref().map(|c| &c.primitive),
-                Some(Primitive::Box(_))
+                carapace.choice.as_ref().map(|c| c.primitive()),
+                Some(Primitive::Cuboid { .. })
             ),
             "carapace should be a box, got {}",
             carapace
                 .choice
                 .as_ref()
-                .map(|c| c.primitive.tag())
+                .map(|c| c.primitive().tag())
                 .unwrap_or("none")
         );
         let obb = carapace.obb.expect("carapace OBB");
@@ -1739,5 +2295,336 @@ mod tests {
             total_fit_mass.is_finite() && total_fit_mass > 0.0,
             "total fitted mass {total_fit_mass}"
         );
+    }
+
+    /// THE PHASE-2 GATE: bake the typed table and assert it is self-consistent and
+    /// faithful to the skeleton.
+    ///
+    /// Three properties, all on `sally.glb`:
+    ///   (A) **Serialization round-trips losslessly.** `bake → RON → parse` must
+    ///       reproduce the `FittedBody` byte-for-byte (`PartialEq`), and every
+    ///       part's mass/inertia (derived from its primitive) must match what the
+    ///       fit produced — so the artifact a reviewer reads IS the physics that
+    ///       spawns.
+    ///   (B) **Placement matches the bind-pose spans, within §2 tolerances.** Each
+    ///       leg segment's baked span (2·|placement.centre|, the pivot→distal
+    ///       reach) lands within a stated band of the hand-coded segment length:
+    ///       femur/tibia tight (±25 %, the plan's "~15 %" with margin), coxa loose
+    ///       and one-sided (the model splits the hip shorter — a documented
+    ///       divergence, §2). And the capsule's placement axis points along the
+    ///       bone segment, i.e. placement is consistent with the span it came from.
+    ///   (C) **The chooser's primitive survives the bake** (a capsule stays a
+    ///       capsule, etc.) — the per-part shape the validation pinned is what the
+    ///       table carries.
+    ///
+    /// This is phase 2's scope: self-consistency + fidelity to the skeleton /
+    /// hand-coded geometry. It does NOT assert balance or re-derived densities
+    /// (phase 3) or policy parity (phase 4).
+    #[test]
+    fn bake_gate() {
+        let Some(path) = model_path() else {
+            eprintln!("meshfit: no model — skipping bake gate");
+            return;
+        };
+        let model = LoadedModel::load(&path).expect("load model");
+        let reports = bake_report(&model);
+        let body = FittedBody::from_reports(&reports);
+        assert_eq!(body.version, FittedBody::VERSION);
+
+        // Every part that fit a primitive and has a skeleton span is in the table;
+        // on sally.glb that is all 33.
+        assert_eq!(
+            body.parts.len(),
+            33,
+            "expected every part baked, got {}",
+            body.parts.len()
+        );
+
+        // (A) Lossless RON round-trip: the parsed body equals the baked one.
+        let ron = body.to_ron().expect("serialize");
+        let parsed = FittedBody::from_ron(&ron).expect("parse round-trip");
+        assert_eq!(
+            parsed, body,
+            "FittedBody changed across RON serialize→parse"
+        );
+        // …and mass/inertia survive it: each part's derived numbers match the fit.
+        for r in &reports {
+            let baked = parsed.part(r.fitted.part).expect("part present");
+            let (m_fit, i_fit) = r.fitted.mass_properties();
+            let (m_ron, i_ron) = baked.mass_properties();
+            assert_eq!(
+                m_fit, m_ron,
+                "{:?} mass changed on round-trip",
+                r.fitted.part
+            );
+            assert_eq!(
+                i_fit, i_ron,
+                "{:?} inertia changed on round-trip",
+                r.fitted.part
+            );
+            assert!(
+                m_fit.is_finite() && m_fit > 0.0,
+                "{:?} non-physical mass {m_fit}",
+                r.fitted.part
+            );
+        }
+
+        // (B) Placement vs hand-coded spans, per leg segment. The span is the
+        // bind-pose bone segment the placement was solved from (primitive-
+        // independent — a boxed middle coxa still has the same hip span), checked
+        // against the hand-coded length within the §2 band.
+        use crate::bot::body::reference as ref_;
+        for fp in &body.parts {
+            let PartId::Joint(id) = fp.part else { continue };
+            let (hand_len, lo, hi, name) = match id {
+                // Coxa: the model tucks the hip short — one-sided, loose, documented.
+                CrabJointId::LegCoxa(..) => (2.0 * ref_::COXA_LEN, 0.45, 1.15, "coxa"),
+                CrabJointId::LegFemur(..) => (2.0 * ref_::FEMUR_LEN, 0.75, 1.25, "femur"),
+                CrabJointId::LegTibia(..) => (2.0 * ref_::TIBIA_LEN, 0.75, 1.25, "tibia"),
+                _ => continue,
+            };
+            let span = model
+                .bone_span(fp.part)
+                .map(|s| (s.distal - s.proximal).length())
+                .expect("leg segment has a bone span");
+            let ratio = span / hand_len;
+            assert!(
+                (lo..=hi).contains(&ratio),
+                "{:?} {name} span {span:.3} m vs hand-coded {hand_len:.3} m (ratio {ratio:.2}) outside [{lo}, {hi}]",
+                fp.part
+            );
+
+            // For a capsule, the placement centre sits at the segment midpoint, so
+            // 2·|centre| recovers the bone span (the rotation into the link frame is
+            // length-preserving, so this holds in any frame). That its *axis* points
+            // down the segment is NOT asserted here — in the link frame that reduces
+            // to `dir·dir = 1`, true regardless of where the collider lands. The real
+            // axis check is `fitted_collider_world_pose_matches_handcoded`, which
+            // poses the collider through the actual forward kinematics.
+            if let Primitive::Capsule { .. } = fp.primitive {
+                let placed_span = 2.0 * fp.placement.center.length();
+                assert!(
+                    (placed_span - span).abs() < 0.02,
+                    "{:?} capsule placement span {placed_span:.3} ≠ bone span {span:.3}",
+                    fp.part
+                );
+            }
+        }
+
+        // (C) The baked primitive is the chooser's choice (shape is preserved).
+        for r in &reports {
+            let baked = parsed.part(r.fitted.part).expect("part present");
+            assert_eq!(
+                baked.primitive,
+                r.choice.primitive(),
+                "{:?} baked primitive differs from the chooser's",
+                r.fitted.part
+            );
+        }
+    }
+
+    /// The proximal/distal bone names of a leg segment's bind-pose span, and the
+    /// proximal bone whose bind basis defines that link's frame. (The world-pose
+    /// gate re-derives the intended collider axis from these, independently of the
+    /// bake.) Leg segments only — the chunky/leaf parts have no clean axis to gate.
+    fn leg_span_bones(id: CrabJointId) -> Option<(String, String)> {
+        let (side, l, prox, dist) = match id {
+            CrabJointId::LegCoxa(side, l) => (side, l, "000", "001"),
+            CrabJointId::LegFemur(side, l) => (side, l, "001", "003"),
+            CrabJointId::LegTibia(side, l) => (side, l, "003", "005"),
+            _ => return None,
+        };
+        let s = side_tag(side);
+        Some((
+            format!("Def_leg_0{}.{prox}.{s}", l + 1),
+            format!("Def_leg_0{}.{dist}.{s}", l + 1),
+        ))
+    }
+
+    /// THE REAL WORLD-POSE GATE (what `bake_gate` (B)'s tautology could not test):
+    /// assemble the crab and check each fitted collider's *world* pose against the
+    /// hand-coded link it replaces, posed through the **actual forward kinematics**.
+    ///
+    /// This catches the two frame bugs the weak gate shipped:
+    ///   1. **Placement frame.** A fitted capsule's world axis is `L · place.rot ·
+    ///      Y`, where `L` is the link's rest world rotation read off an assembled
+    ///      crab. Two checks: (a) the load-bearing, fully independent one — it must
+    ///      align with the *hand-coded collider's own world axis* (`L · capsule_y`),
+    ///      which references nothing from the bake or the skeleton; and (b) a
+    ///      tighter consistency check that it equals the bind-pose bone segment
+    ///      carried into the rest frame (`L · basis⁻¹ · seg`), pinning that the
+    ///      placement was built from exactly the expected bone basis + segment. A
+    ///      placement left in glTF world (the bug) fails both — 36–82° off (a) and
+    ///      far from the segment in (b).
+    ///   2. **Carapace box axes.** The fitted root collider's world half-extents
+    ///      must be a flat slab (height the smallest) with each extent on the world
+    ///      axis the OBB says it belongs on — not the on-edge box that assigning
+    ///      principal extents to world x/y/z verbatim produced.
+    ///
+    /// Self-skips without a model. Uses the real `headless_app` physics, so it can't
+    /// pass under a pose the demo/training never sees.
+    #[test]
+    fn fitted_collider_world_pose_matches_handcoded() {
+        use crate::bot::body::{CrabBodySource, CrabCarapace, CrabJoint};
+        use bevy_rapier3d::plugin::context::RapierRigidBodySet;
+        use bevy_rapier3d::prelude::{Collider, RapierRigidBodyHandle};
+
+        let Some(path) = model_path() else {
+            eprintln!("meshfit: no model — skipping world-pose gate");
+            return;
+        };
+        let model = LoadedModel::load(&path).expect("load model");
+        let body = FittedBody::from_reports(&bake_report(&model));
+
+        // A jointed link's rest world rotation, read off an assembled crab. The
+        // rest bake (and so this rotation) is identical hand-coded vs fitted — only
+        // the anchor *offsets* differ — so the hand-coded crab gives the `L` that
+        // poses BOTH colliders.
+        let mut hand_app = crate::bot::test_util::headless_app();
+        crate::bot::test_util::tick(&mut hand_app, 3);
+        let link_world_rot = |app: &mut bevy::prelude::App, id: CrabJointId| -> Quat {
+            let mut q = app
+                .world_mut()
+                .query::<(&CrabJoint, &RapierRigidBodyHandle)>();
+            let h = q
+                .iter(app.world())
+                .find(|(j, _)| j.id == id)
+                .map(|(_, h)| h.0)
+                .expect("crab joint body");
+            let mut set_q = app.world_mut().query::<&RapierRigidBodySet>();
+            let set = set_q.single(app.world()).expect("rapier context");
+            set.bodies.get(h).expect("rapier body").position().rotation
+        };
+
+        // (1) Every fitted leg capsule: world axis aligned with the limb. Boxed
+        // middle coxae and the chunky claws have no single axis, so they are gated
+        // by mass/placement elsewhere, not here.
+        let mut checked = 0;
+        for fp in &body.parts {
+            let PartId::Joint(id) = fp.part else { continue };
+            let Primitive::Capsule { .. } = fp.primitive else {
+                continue;
+            };
+            let Some((prox, dist)) = leg_span_bones(id) else {
+                continue;
+            };
+            let l = link_world_rot(&mut hand_app, id);
+            // Actual fitted capsule axis in world, exactly as `fitted_collider`
+            // builds it (`axis = place.rotation * Y`).
+            let actual = (l * fp.placement.rotation * Vec3::Y).normalize();
+
+            // (a) Hand-coded leg colliders are all `capsule_y` → local axis +Y.
+            let hand_axis = (l * Vec3::Y).normalize();
+            let dot_hand = actual.dot(hand_axis).abs(); // capsule axis is sign-free
+            assert!(
+                dot_hand > 0.90,
+                "{id:?}: fitted capsule world axis {actual:?} is {:.1}° off the hand-coded \
+                 collider axis {hand_axis:?} (|dot| {dot_hand:.3}) — placement frame bug",
+                dot_hand.acos().to_degrees(),
+            );
+
+            // (b) Tighter consistency check: the collider axis must equal the bone
+            // segment carried into the rest frame, `L · basis⁻¹ · seg`, recomputed
+            // here from the model. (a) already proves the axis is physically right;
+            // this pins it was built from exactly this bone basis + segment, so a
+            // re-rig that moved the proximal bone is caught, not absorbed by (a)'s
+            // looser cone.
+            let basis = model.bone_bind_basis(&prox).expect("proximal bind basis");
+            let seg = (model.bone_origin(&dist).expect("distal")
+                - model.bone_origin(&prox).expect("proximal"))
+            .normalize();
+            let target = ((l * basis.inverse()) * seg).normalize();
+            let dot_target = actual.dot(target).abs();
+            assert!(
+                dot_target > 0.97,
+                "{id:?}: fitted capsule world axis {actual:?} does not track the skeleton \
+                 segment in the rest frame {target:?} (|dot| {dot_target:.3})",
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 20,
+            "expected 20 leg-capsule axes checked (8 femur + 8 tibia + 4 end coxae), got {checked}"
+        );
+
+        // (2) The carapace box, posed through the real fitted spawn. Read the root
+        // collider's local AABB: the root is axis-aligned, so its AABB half-extents
+        // ARE the box's world half-extents.
+        let mut fit_app =
+            crate::bot::test_util::headless_app_with_body(CrabBodySource::Fitted(body.clone()));
+        crate::bot::test_util::tick(&mut fit_app, 1);
+        let world_ext = {
+            let mut q = fit_app
+                .world_mut()
+                .query_filtered::<&Collider, With<CrabCarapace>>();
+            let col = q
+                .iter(fit_app.world())
+                .next()
+                .expect("fitted carapace collider");
+            let he = col.raw.compute_local_aabb().half_extents();
+            Vec3::new(he.x, he.y, he.z)
+        };
+        // The carapace is a flat shell: its up (Y) extent is the smallest. The bug
+        // assigned the front-back principal extent (the largest) to Y, standing it
+        // on edge ~0.78 m tall.
+        assert!(
+            world_ext.y < world_ext.x && world_ext.y < world_ext.z,
+            "carapace world half-extents {world_ext:?}: up-axis (y) is not the smallest \
+             — box is on edge (extent→world-axis swap)",
+        );
+        // And each world extent lands on the axis the OBB says it should. Derive the
+        // expectation from the fitted OBB independently of `fitted_root`'s mapping.
+        let carapace = bake_report(&model)
+            .into_iter()
+            .find(|r| r.fitted.part == PartId::Carapace)
+            .expect("carapace baked");
+        if let FittedShape::Box(obb) = carapace.choice.shape {
+            // Map each principal extent onto the world axis its (world) axis is
+            // dominant on — the carapace OBB is near world-aligned, so this is a
+            // clean bijection. `obb.axes` are in world (the root frame is world).
+            let mut expect = Vec3::ZERO;
+            for k in 0..3 {
+                let a = obb.axes[k].abs();
+                let dom = if a.x >= a.y && a.x >= a.z {
+                    0
+                } else if a.y >= a.z {
+                    1
+                } else {
+                    2
+                };
+                expect[dom] = obb.half_extents[k];
+            }
+            for k in 0..3 {
+                assert!(
+                    (world_ext[k] - expect[k]).abs() < 1e-3,
+                    "carapace world half-extent on axis {} is {:.3}, expected {:.3} (OBB \
+                     principal extent dominant on that axis)",
+                    ["x", "y", "z"][k],
+                    world_ext[k],
+                    expect[k],
+                );
+            }
+        } else {
+            panic!("carapace fit is not a box");
+        }
+
+        // (3) The whole fitted body spawns: all 33 parts (carapace + 24 leg + 6
+        // claw + 2 eye), each with a finite world pose. This exercises the boxed
+        // coxae, the claw boxes, the pincer, and the eye stalks — whose frame-mapped
+        // placement has no single axis to gate above — and would catch a NaN
+        // placement detonating the spawn.
+        use crate::bot::body::CrabBodyPart;
+        let mut parts_q = fit_app
+            .world_mut()
+            .query_filtered::<&GlobalTransform, With<CrabBodyPart>>();
+        let poses: Vec<_> = parts_q.iter(fit_app.world()).collect();
+        assert_eq!(poses.len(), 33, "fitted crab spawned {} parts", poses.len());
+        for gt in poses {
+            assert!(
+                gt.translation().is_finite(),
+                "fitted crab part has a non-finite world pose {:?}",
+                gt.translation()
+            );
+        }
     }
 }

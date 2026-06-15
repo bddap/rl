@@ -19,8 +19,12 @@
 //!       tibia ─ revolute (pitch)
 //! ```
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
+
+use super::meshfit::{FittedBody, FittedPart, PartId, Placement, Primitive};
 
 // ---------------------------------------------------------------------------
 // Collision groups
@@ -133,6 +137,16 @@ const COXA_DENSITY: f32 = 6.0;
 const FEMUR_DENSITY: f32 = 8.0;
 const TIBIA_DENSITY: f32 = 14.0;
 
+/// Carapace density. Heaviest part: the body's mass sits in the shell, over the
+/// feet.
+const CARAPACE_DENSITY: f32 = 5.0;
+/// Every claw segment (upper/forearm/pincer). Kept LOW: the claw assembly hangs
+/// off the front (+Z), and a dense one (was 3.0/2.5/4.0) put the CoM ahead of the
+/// leg support so the crab pitched forward and couldn't stand.
+const CLAW_DENSITY: f32 = 1.0;
+/// Eye stalk — negligible, just enough not to be zero-mass.
+const EYE_DENSITY: f32 = 0.5;
+
 /// Claw segment dimensions.
 const CLAW_UPPER_LEN: f32 = 0.2;
 const CLAW_UPPER_RAD: f32 = 0.055;
@@ -215,6 +229,99 @@ pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f3
 // Marker components for querying
 // ---------------------------------------------------------------------------
 
+/// Where the per-part collider geometry + mass comes from. The hand-coded body
+/// is the default and the shipped, trained-on physics; the offline-baked
+/// [`FittedBody`] is opt-in (`--body fitted`) and unproven, so it never becomes
+/// the default by config alone (see `MESHFIT_PLAN.md` phase 4). Inserted before
+/// [`CrabAssets`] builds, since the assets pre-bake per-part meshes from it.
+#[derive(Resource, Clone, Default)]
+pub enum CrabBodySource {
+    /// The tuned hand-coded body in this file.
+    #[default]
+    HandCoded,
+    /// A baked collider table; only the per-part collider shape, mass, and
+    /// placement come from it — joints/axes/limits/rest stance stay hand-coded.
+    Fitted(FittedBody),
+}
+
+/// The fitted collider for one part, ready to spawn: the rapier collider (already
+/// posed in the link frame by its [`Placement`]), the matching debug mesh, and
+/// the density mass is taken under. Returned by [`fitted_link`] so the spawn
+/// sites stay a thin fork over the hand-coded path.
+struct FittedLink {
+    collider: Collider,
+    mesh: Handle<Mesh>,
+    density: f32,
+}
+
+/// Build the rapier collider for a fitted part, posed in its link-local frame by
+/// the [`Placement`]. A capsule is laid along its placement axis between the two
+/// swept-sphere endpoints; a box/ball is a single-shape compound offset+rotated
+/// to the placement (rapier centres a bare `cuboid`/`ball` at the body origin, so
+/// the compound is how a non-zero local pose is expressed). The fitted link's
+/// joint sets `local_anchor2 = 0`, so the link origin IS the joint pivot and
+/// `Placement` (which is pivot-relative) drops in directly.
+fn fitted_collider(prim: &Primitive, place: &Placement) -> Collider {
+    match *prim {
+        Primitive::Capsule {
+            half_height,
+            radius,
+        } => {
+            let axis = place.rotation * Vec3::Y * half_height;
+            Collider::capsule(place.center - axis, place.center + axis, radius)
+        }
+        Primitive::Cuboid { half_extents: e } => Collider::compound(vec![(
+            place.center,
+            place.rotation,
+            Collider::cuboid(e.x, e.y, e.z),
+        )]),
+        Primitive::Ball { radius } => {
+            Collider::compound(vec![(place.center, place.rotation, Collider::ball(radius))])
+        }
+    }
+}
+
+/// Re-order a box's OBB-principal half-extents onto world axes for an axis-
+/// aligned (unrotated) collider. `rotation` carries the OBB principal axes as its
+/// columns (`rotation * X` = first principal direction, etc.); each extent is
+/// placed on the world axis its principal direction points most strongly along.
+/// Only meaningful when that mapping is a bijection — true for a near-world-
+/// aligned box like the carapace; a box tilted ~45° has no honest axis-aligned
+/// representation and should keep its rotation instead (jointed boxes do).
+fn world_axis_aligned_extents(half_extents: Vec3, rotation: Quat) -> Vec3 {
+    let mut world = Vec3::ZERO;
+    for k in 0..3 {
+        let dir = (rotation * Vec3::AXES[k]).abs();
+        let dom = if dir.x >= dir.y && dir.x >= dir.z {
+            0
+        } else if dir.y >= dir.z {
+            1
+        } else {
+            2
+        };
+        world[dom] = half_extents[k];
+    }
+    world
+}
+
+/// A bevy debug mesh matching a fitted primitive's *size* (shown in the Physics
+/// render view). Centred and unposed — it does not honour the collider's
+/// [`Placement`] offset/rotation, so a placed box's wireframe sits at the link
+/// origin, not exactly over its collider. Acceptable: these primitive meshes are
+/// a coarse physics-truth overlay; the skinned model is the shipped look.
+fn fitted_mesh(prim: &Primitive) -> Mesh {
+    match *prim {
+        Primitive::Capsule {
+            half_height,
+            radius,
+        } => Capsule3d::new(radius, half_height * 2.0).into(),
+        Primitive::Cuboid { half_extents: e } => {
+            Cuboid::new(e.x * 2.0, e.y * 2.0, e.z * 2.0).into()
+        }
+        Primitive::Ball { radius } => Sphere::new(radius).into(),
+    }
+}
+
 /// Shared mesh/material handles for crab bodies, created once at startup.
 /// Spawning goes through these because episode resets RESPAWN the whole crab
 /// (a teleport keeps the dying pose's joint angles, which interpenetrate under
@@ -234,10 +341,102 @@ pub struct CrabAssets {
     claw_fore_mesh: Handle<Mesh>,
     pincer_mesh: Handle<Mesh>,
     eye_mesh: Handle<Mesh>,
+    /// Present only under `--body fitted`: the baked table plus one pre-built
+    /// debug mesh per part (a part's fitted primitive varies per leg — a middle
+    /// coxa is a box where a front one is a capsule — so meshes are keyed by
+    /// part, not by segment type as the hand-coded ones above). Pre-built here,
+    /// not per-spawn, for the same no-leak reason the struct exists.
+    fitted: Option<FittedAssets>,
+}
+
+/// The fitted body's table + its per-part debug meshes (see [`CrabAssets`]).
+struct FittedAssets {
+    body: FittedBody,
+    meshes: HashMap<PartId, Handle<Mesh>>,
+}
+
+impl CrabAssets {
+    /// The fitted link to spawn for `part`, or `None` to use the hand-coded path.
+    /// `None` whenever the body source is hand-coded, or the table simply omits
+    /// this part (an incomplete bake falls back per-part rather than spawning a
+    /// hole).
+    fn fitted_link(&self, part: PartId) -> Option<FittedLink> {
+        let fitted = self.fitted.as_ref()?;
+        let fp: &FittedPart = fitted.body.part(part)?;
+        Some(FittedLink {
+            collider: fitted_collider(&fp.primitive, &fp.placement),
+            mesh: fitted.meshes.get(&part)?.clone(),
+            density: fp.density,
+        })
+    }
+
+    /// The fitted carapace as a centred, **axis-aligned** root collider (size +
+    /// mass only). The root has no joint to place against — it spawns identity-in-
+    /// world — so the collider is world-axis-aligned and the placement *offset* is
+    /// dropped. The placement *rotation* is not dropped but consumed: a box's
+    /// fitted extents are in OBB principal-axis order, which is NOT world order
+    /// (the carapace's longest principal axis runs front-back, not left-right), so
+    /// laying them on world x/y/z verbatim would stand the shell on edge. Each
+    /// principal extent is mapped onto the world axis its principal direction —
+    /// read off the placement rotation, which carries the OBB axes — is dominant
+    /// on. (The dome-vs-slab *height* difference is a separate, deliberate stance
+    /// choice, not this remap.) `None` when hand-coded or the table omits it.
+    fn fitted_root(&self) -> Option<(Collider, Handle<Mesh>, f32)> {
+        let fitted = self.fitted.as_ref()?;
+        let fp = fitted.body.part(PartId::Carapace)?;
+        let collider = match fp.primitive {
+            Primitive::Cuboid { half_extents: e } => {
+                let w = world_axis_aligned_extents(e, fp.placement.rotation);
+                Collider::cuboid(w.x, w.y, w.z)
+            }
+            Primitive::Ball { radius } => Collider::ball(radius),
+            Primitive::Capsule {
+                half_height,
+                radius,
+            } => Collider::capsule_y(half_height, radius),
+        };
+        Some((
+            collider,
+            fitted.meshes.get(&PartId::Carapace)?.clone(),
+            fp.density,
+        ))
+    }
+
+    /// Resolve the collider geometry for one link: the fitted table's entry if
+    /// `--body fitted` supplies one for `part`, else the hand-coded fallback. The
+    /// hand collider/mesh/density are built lazily, so the fitted path costs
+    /// nothing extra. Returns the collider, debug mesh, mass density, and the
+    /// joint's **child-side anchor** — `Vec3::ZERO` for a fitted link (its origin
+    /// is the joint pivot, which the pivot-relative [`Placement`] assumes), the
+    /// hand-coded anchor otherwise. The parent-side anchor, axis, limits, rest
+    /// bake, and motor are the caller's and identical either way.
+    fn link_geom(
+        &self,
+        part: PartId,
+        hand_anchor2: Vec3,
+        hand: impl FnOnce() -> (Collider, Handle<Mesh>, f32),
+    ) -> (Collider, Handle<Mesh>, f32, Vec3) {
+        match self.fitted_link(part) {
+            Some(l) => (l.collider, l.mesh, l.density, Vec3::ZERO),
+            None => {
+                let (c, m, d) = hand();
+                (c, m, d, hand_anchor2)
+            }
+        }
+    }
 }
 
 impl FromWorld for CrabAssets {
     fn from_world(world: &mut World) -> Self {
+        // Absent resource = the default (hand-coded), which is the common case: only
+        // the single-process/demo path that supports `--body fitted` inserts a
+        // non-default source (before `BotPlugin` builds). The in-process trainer and
+        // the tests never set it, so they get hand-coded without each having to wire
+        // it in — `--body fitted` is the one path that opts out of the default.
+        let source = world
+            .get_resource::<CrabBodySource>()
+            .cloned()
+            .unwrap_or_default();
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
         let body_mat = materials.add(StandardMaterial {
             base_color: Color::srgb(0.2, 0.45, 0.55), // blue-grey carapace
@@ -261,6 +460,21 @@ impl FromWorld for CrabAssets {
         });
 
         let mut meshes = world.resource_mut::<Assets<Mesh>>();
+        // Under `--body fitted`, pre-build one debug mesh per fitted part.
+        let fitted = match source {
+            CrabBodySource::Fitted(body) => {
+                let part_meshes = body
+                    .parts
+                    .iter()
+                    .map(|fp| (fp.part, meshes.add(fitted_mesh(&fp.primitive))))
+                    .collect();
+                Some(FittedAssets {
+                    body,
+                    meshes: part_meshes,
+                })
+            }
+            CrabBodySource::HandCoded => None,
+        };
         Self {
             body_mat,
             leg_mat,
@@ -282,6 +496,7 @@ impl FromWorld for CrabAssets {
                 PINCER_HALF_D * 2.0,
             )),
             eye_mesh: meshes.add(Sphere::new(EYE_BALL_RAD)),
+            fitted,
         }
     }
 }
@@ -307,7 +522,7 @@ pub struct CrabJoint {
 }
 
 /// Every actuated joint on the crab.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CrabJointId {
     // Legs: side (L/R), leg index (0-3 front to back), segment
     LegCoxa(Side, u8),
@@ -321,7 +536,7 @@ pub enum CrabJointId {
     EyeStalk(Side),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Side {
     Left,
     Right,
@@ -501,16 +716,28 @@ pub fn spawn_crab(
     env: usize,
 ) -> Entity {
     // -- Carapace (root) ---------------------------------------------------
+    // The root has no joint to place against — its frame IS the body frame — so
+    // a fitted carapace takes only the table's *size* and *mass*, kept centred
+    // and axis-aligned (its `Placement` is meaningful only for jointed links).
+    // The dome-vs-slab height mismatch is a deliberate stance decision, not a fit
+    // to honour here (see `MESHFIT_PLAN.md` §2).
+    let (carapace_col, carapace_mesh, carapace_den) = assets.fitted_root().unwrap_or_else(|| {
+        (
+            Collider::cuboid(CARAPACE_HALF_W, CARAPACE_HALF_H, CARAPACE_HALF_D),
+            assets.carapace_mesh.clone(),
+            CARAPACE_DENSITY,
+        )
+    });
     let carapace = commands
         .spawn((
             CrabCarapace,
             CrabBodyPart,
             CrabEnvId(env),
             RigidBody::Dynamic,
-            Collider::cuboid(CARAPACE_HALF_W, CARAPACE_HALF_H, CARAPACE_HALF_D),
+            carapace_col,
             CRAB_COLLISION,
-            ColliderMassProperties::Density(5.0),
-            Mesh3d(assets.carapace_mesh.clone()),
+            ColliderMassProperties::Density(carapace_den),
+            Mesh3d(carapace_mesh),
             MeshMaterial3d(assets.body_mat.clone()),
             Transform::from_translation(position + Vec3::new(0.0, SPAWN_HEIGHT, 0.0)),
             Velocity::default(),
@@ -571,6 +798,17 @@ fn spawn_leg(
     // side term and the rest bake applies one `rest` per type, so both mirror
     // into a symmetric stance only because the axis carries the side sign; a
     // fixed +Y would fan the two sides opposite ways.
+    let (coxa_col, coxa_mesh, coxa_den, coxa_a2) = assets.link_geom(
+        PartId::Joint(coxa_id),
+        Vec3::new(-s * COXA_LEN, 0.0, 0.0),
+        || {
+            (
+                Collider::capsule_y(COXA_LEN, COXA_RAD),
+                assets.coxa_mesh.clone(),
+                COXA_DENSITY,
+            )
+        },
+    );
     let coxa = commands
         .spawn((
             CrabBodyPart,
@@ -579,18 +817,14 @@ fn spawn_leg(
                 id: CrabJointId::LegCoxa(side, leg_idx),
             },
             RigidBody::Dynamic,
-            Collider::capsule_y(COXA_LEN, COXA_RAD),
+            coxa_col,
             CRAB_COLLISION,
-            ColliderMassProperties::Density(COXA_DENSITY),
-            Mesh3d(assets.coxa_mesh.clone()),
+            ColliderMassProperties::Density(coxa_den),
+            Mesh3d(coxa_mesh),
             MeshMaterial3d(assets.leg_mat.clone()),
             MultibodyJoint::new(
                 carapace,
-                revolute_joint(
-                    coxa_id,
-                    Vec3::new(s * CARAPACE_HALF_W, -0.02, z),
-                    Vec3::new(-s * COXA_LEN, 0.0, 0.0),
-                ),
+                revolute_joint(coxa_id, Vec3::new(s * CARAPACE_HALF_W, -0.02, z), coxa_a2),
             ),
             Velocity::default(),
             ExternalForce::default(),
@@ -600,6 +834,17 @@ fn spawn_leg(
     // -- Femur: rotates around ±Z by side (pitch — leg lifts up/down) ------
     // Side-dependent axis (s·Z), like the tibia, so the per-joint-type torque
     // and rest bake mirror into a symmetric leg on both sides.
+    let (femur_col, femur_mesh, femur_den, femur_a2) = assets.link_geom(
+        PartId::Joint(femur_id),
+        Vec3::new(0.0, FEMUR_LEN, 0.0),
+        || {
+            (
+                Collider::capsule_y(FEMUR_LEN, FEMUR_RAD),
+                assets.femur_mesh.clone(),
+                FEMUR_DENSITY,
+            )
+        },
+    );
     let femur = commands
         .spawn((
             CrabBodyPart,
@@ -608,18 +853,14 @@ fn spawn_leg(
                 id: CrabJointId::LegFemur(side, leg_idx),
             },
             RigidBody::Dynamic,
-            Collider::capsule_y(FEMUR_LEN, FEMUR_RAD),
+            femur_col,
             CRAB_COLLISION,
-            ColliderMassProperties::Density(FEMUR_DENSITY),
-            Mesh3d(assets.femur_mesh.clone()),
+            ColliderMassProperties::Density(femur_den),
+            Mesh3d(femur_mesh),
             MeshMaterial3d(assets.leg_mat.clone()),
             MultibodyJoint::new(
                 coxa,
-                revolute_joint(
-                    femur_id,
-                    Vec3::new(s * COXA_LEN, 0.0, 0.0),
-                    Vec3::new(0.0, FEMUR_LEN, 0.0),
-                ),
+                revolute_joint(femur_id, Vec3::new(s * COXA_LEN, 0.0, 0.0), femur_a2),
             ),
             Velocity::default(),
             ExternalForce::default(),
@@ -629,6 +870,17 @@ fn spawn_leg(
     // -- Tibia: rotates around ±Z by side (pitch — lower leg bends) -------
     // Side-dependent axis (s·Z), matching the femur, so the knee bends the same
     // way on both sides.
+    let (tibia_col, tibia_mesh, tibia_den, tibia_a2) = assets.link_geom(
+        PartId::Joint(tibia_id),
+        Vec3::new(0.0, TIBIA_LEN, 0.0),
+        || {
+            (
+                Collider::capsule_y(TIBIA_LEN, TIBIA_RAD),
+                assets.tibia_mesh.clone(),
+                TIBIA_DENSITY,
+            )
+        },
+    );
     commands.spawn((
         CrabBodyPart,
         CrabEnvId(env),
@@ -636,18 +888,14 @@ fn spawn_leg(
             id: CrabJointId::LegTibia(side, leg_idx),
         },
         RigidBody::Dynamic,
-        Collider::capsule_y(TIBIA_LEN, TIBIA_RAD),
+        tibia_col,
         CRAB_COLLISION,
-        ColliderMassProperties::Density(TIBIA_DENSITY),
-        Mesh3d(assets.tibia_mesh.clone()),
+        ColliderMassProperties::Density(tibia_den),
+        Mesh3d(tibia_mesh),
         MeshMaterial3d(assets.leg_mat.clone()),
         MultibodyJoint::new(
             femur,
-            revolute_joint(
-                tibia_id,
-                Vec3::new(0.0, -FEMUR_LEN, 0.0),
-                Vec3::new(0.0, TIBIA_LEN, 0.0),
-            ),
+            revolute_joint(tibia_id, Vec3::new(0.0, -FEMUR_LEN, 0.0), tibia_a2),
         ),
         Friction::coefficient(1.5), // grippy feet
         Velocity::default(),
@@ -675,6 +923,22 @@ fn spawn_claw(
     let attach_point = Vec3::new(s * CARAPACE_HALF_W * 0.7, 0.05, CARAPACE_HALF_D * 0.9);
 
     // -- Upper arm: revolute around Z (pitch — raises/lowers claw) ---------
+    // Claws are light: the upper/forearm/pincer assemblies hang off the front
+    // (+Z), and dense ones (was 3.0/2.5/4.0) put the centre of mass ahead of the
+    // leg support so the crab pitched forward and couldn't stand. The hand-coded
+    // density keeps them low-mass so the CoM sits over the feet. (The fitted
+    // table carries its own claw density; balancing the fitted body is phase 3.)
+    let (upper_col, upper_mesh, upper_den, upper_a2) = assets.link_geom(
+        PartId::Joint(upper_id),
+        Vec3::new(0.0, -CLAW_UPPER_LEN * 0.5, 0.0),
+        || {
+            (
+                Collider::capsule_y(CLAW_UPPER_LEN, CLAW_UPPER_RAD),
+                assets.claw_upper_mesh.clone(),
+                CLAW_DENSITY,
+            )
+        },
+    );
     let upper = commands
         .spawn((
             CrabBodyPart,
@@ -683,29 +947,29 @@ fn spawn_claw(
                 id: CrabJointId::ClawUpper(side),
             },
             RigidBody::Dynamic,
-            Collider::capsule_y(CLAW_UPPER_LEN, CLAW_UPPER_RAD),
+            upper_col,
             CRAB_COLLISION,
-            // Claws are light: the upper/forearm/pincer assemblies hang off the
-            // front (+Z), and dense ones (was 3.0/2.5/4.0) put the centre of mass
-            // ahead of the leg support so the crab pitched forward and couldn't
-            // stand. Keep them low-mass so the CoM sits over the feet.
-            ColliderMassProperties::Density(1.0),
-            Mesh3d(assets.claw_upper_mesh.clone()),
+            ColliderMassProperties::Density(upper_den),
+            Mesh3d(upper_mesh),
             MeshMaterial3d(assets.claw_mat.clone()),
-            MultibodyJoint::new(
-                carapace,
-                revolute_joint(
-                    upper_id,
-                    attach_point,
-                    Vec3::new(0.0, -CLAW_UPPER_LEN * 0.5, 0.0),
-                ),
-            ),
+            MultibodyJoint::new(carapace, revolute_joint(upper_id, attach_point, upper_a2)),
             Velocity::default(),
             ExternalForce::default(),
         ))
         .id();
 
     // -- Forearm: revolute around Y (yaw — swings claw left/right) ---------
+    let (fore_col, fore_mesh, fore_den, fore_a2) = assets.link_geom(
+        PartId::Joint(fore_id),
+        Vec3::new(0.0, 0.0, -CLAW_FORE_LEN * 0.5),
+        || {
+            (
+                Collider::capsule_y(CLAW_FORE_LEN, CLAW_FORE_RAD),
+                assets.claw_fore_mesh.clone(),
+                CLAW_DENSITY,
+            )
+        },
+    );
     let forearm = commands
         .spawn((
             CrabBodyPart,
@@ -714,18 +978,14 @@ fn spawn_claw(
                 id: CrabJointId::ClawFore(side),
             },
             RigidBody::Dynamic,
-            Collider::capsule_y(CLAW_FORE_LEN, CLAW_FORE_RAD),
+            fore_col,
             CRAB_COLLISION,
-            ColliderMassProperties::Density(1.0),
-            Mesh3d(assets.claw_fore_mesh.clone()),
+            ColliderMassProperties::Density(fore_den),
+            Mesh3d(fore_mesh),
             MeshMaterial3d(assets.claw_mat.clone()),
             MultibodyJoint::new(
                 upper,
-                revolute_joint(
-                    fore_id,
-                    Vec3::new(0.0, CLAW_UPPER_LEN * 0.5, 0.0),
-                    Vec3::new(0.0, 0.0, -CLAW_FORE_LEN * 0.5),
-                ),
+                revolute_joint(fore_id, Vec3::new(0.0, CLAW_UPPER_LEN * 0.5, 0.0), fore_a2),
             ),
             Velocity::default(),
             ExternalForce::default(),
@@ -735,10 +995,23 @@ fn spawn_claw(
     // -- Pincer: prismatic along Z (open/close) ----------------------------
     // Not rest-baked like the revolute joints: its coordinate-0 spawn is the
     // closed stop (limit lo = 0), which is already legal, so a frame bake would
-    // only complicate the one translational joint for no gain.
+    // only complicate the one translational joint for no gain. The fitted path
+    // (anchor2 = 0) keeps the joint axis/limits hand-coded and only swaps the jaw
+    // collider.
+    let (pincer_col, pincer_mesh, pincer_den, pincer_a2) = assets.link_geom(
+        PartId::Joint(pincer_id),
+        Vec3::new(0.0, 0.0, -PINCER_HALF_D),
+        || {
+            (
+                Collider::cuboid(PINCER_HALF_W, PINCER_HALF_H, PINCER_HALF_D),
+                assets.pincer_mesh.clone(),
+                CLAW_DENSITY,
+            )
+        },
+    );
     let pincer_joint = PrismaticJointBuilder::new(pincer_id.joint_axis_local())
         .local_anchor1(Vec3::new(0.0, 0.0, CLAW_FORE_LEN * 0.5))
-        .local_anchor2(Vec3::new(0.0, 0.0, -PINCER_HALF_D))
+        .local_anchor2(pincer_a2)
         .limits(pincer_id.limits());
 
     commands.spawn((
@@ -748,10 +1021,10 @@ fn spawn_claw(
             id: CrabJointId::ClawPincer(side),
         },
         RigidBody::Dynamic,
-        Collider::cuboid(PINCER_HALF_W, PINCER_HALF_H, PINCER_HALF_D),
+        pincer_col,
         CRAB_COLLISION,
-        ColliderMassProperties::Density(1.0),
-        Mesh3d(assets.pincer_mesh.clone()),
+        ColliderMassProperties::Density(pincer_den),
+        Mesh3d(pincer_mesh),
         MeshMaterial3d(assets.claw_mat.clone()),
         MultibodyJoint::new(forearm, no_adjacent_contacts(pincer_joint)),
         Velocity::default(),
@@ -776,6 +1049,17 @@ fn spawn_eye(
     let attach = Vec3::new(s * 0.12, CARAPACE_HALF_H, CARAPACE_HALF_D * 0.7);
 
     // Eye stalk: revolute around X (pitch — looks up/down)
+    let (eye_col, eye_mesh, eye_den, eye_a2) = assets.link_geom(
+        PartId::Joint(eye_id),
+        Vec3::new(0.0, -EYE_STALK_LEN, 0.0),
+        || {
+            (
+                Collider::ball(EYE_BALL_RAD),
+                assets.eye_mesh.clone(),
+                EYE_DENSITY,
+            )
+        },
+    );
     commands.spawn((
         CrabBodyPart,
         CrabEnvId(env),
@@ -783,31 +1067,63 @@ fn spawn_eye(
             id: CrabJointId::EyeStalk(side),
         },
         RigidBody::Dynamic,
-        Collider::ball(EYE_BALL_RAD),
+        eye_col,
         CRAB_COLLISION,
-        ColliderMassProperties::Density(0.5),
-        Mesh3d(assets.eye_mesh.clone()),
+        ColliderMassProperties::Density(eye_den),
+        Mesh3d(eye_mesh),
         MeshMaterial3d(assets.eye_mat.clone()),
-        MultibodyJoint::new(
-            carapace,
-            revolute_joint(eye_id, attach, Vec3::new(0.0, -EYE_STALK_LEN, 0.0)),
-        ),
+        MultibodyJoint::new(carapace, revolute_joint(eye_id, attach, eye_a2)),
         Velocity::default(),
         ExternalForce::default(),
     ));
 }
 
+/// Every physics part with the hand-coded density its mass is computed under, in
+/// a deterministic order (carapace, legs L/R, claws L/R, eyes L/R). The single
+/// source of the part list + density shared by the offline [`super::meshfit::bake_report`]
+/// and the validation: the fit keeps the hand-coded density per part so fitted
+/// mass compares to the reference at equal density (re-deriving density for the
+/// fitted geometry is `MESHFIT_PLAN.md` phase 3). Lives here because body.rs owns
+/// the joint set and these densities.
+pub fn part_densities() -> Vec<(PartId, f32)> {
+    let mut v = vec![(PartId::Carapace, CARAPACE_DENSITY)];
+    for side in [Side::Left, Side::Right] {
+        for leg in 0u8..4 {
+            v.push((PartId::Joint(CrabJointId::LegCoxa(side, leg)), COXA_DENSITY));
+            v.push((
+                PartId::Joint(CrabJointId::LegFemur(side, leg)),
+                FEMUR_DENSITY,
+            ));
+            v.push((
+                PartId::Joint(CrabJointId::LegTibia(side, leg)),
+                TIBIA_DENSITY,
+            ));
+        }
+    }
+    for side in [Side::Left, Side::Right] {
+        v.push((PartId::Joint(CrabJointId::ClawUpper(side)), CLAW_DENSITY));
+        v.push((PartId::Joint(CrabJointId::ClawFore(side)), CLAW_DENSITY));
+        v.push((PartId::Joint(CrabJointId::ClawPincer(side)), CLAW_DENSITY));
+    }
+    for side in [Side::Left, Side::Right] {
+        v.push((PartId::Joint(CrabJointId::EyeStalk(side)), EYE_DENSITY));
+    }
+    v
+}
+
 /// Test-only re-export of the hand-coded collider dimensions and densities, so
-/// the mesh-fit spike ([`super::meshfit`]) can compare its auto-derived colliders
-/// against the live body's numbers without copying them (which would drift). The
-/// `5.0`/`1.0`/`0.5` densities are inline at the spawn sites below; surface them
-/// here as named consts to keep a single source.
+/// the mesh-fit validation ([`super::meshfit`]) can compare its auto-derived
+/// colliders against the live body's numbers without copying the values (which
+/// would drift). The `5.0`/`1.0`/`0.5` densities are inline at the spawn sites
+/// above; surfaced here as named consts to keep a single source. (Production
+/// reads densities via [`part_densities`]; only the validation needs the
+/// dimensions.)
 #[cfg(test)]
 pub mod reference {
     pub const CARAPACE_HALF_W: f32 = super::CARAPACE_HALF_W;
     pub const CARAPACE_HALF_H: f32 = super::CARAPACE_HALF_H;
     pub const CARAPACE_HALF_D: f32 = super::CARAPACE_HALF_D;
-    pub const CARAPACE_DENSITY: f32 = 5.0; // inline at the carapace spawn
+    pub const CARAPACE_DENSITY: f32 = super::CARAPACE_DENSITY;
 
     pub const COXA_LEN: f32 = super::COXA_LEN;
     pub const COXA_RAD: f32 = super::COXA_RAD;
@@ -826,10 +1142,10 @@ pub mod reference {
     pub const PINCER_HALF_W: f32 = super::PINCER_HALF_W;
     pub const PINCER_HALF_H: f32 = super::PINCER_HALF_H;
     pub const PINCER_HALF_D: f32 = super::PINCER_HALF_D;
-    pub const CLAW_DENSITY: f32 = 1.0; // inline at all three claw spawns
+    pub const CLAW_DENSITY: f32 = super::CLAW_DENSITY;
 
     pub const EYE_BALL_RAD: f32 = super::EYE_BALL_RAD;
-    pub const EYE_DENSITY: f32 = 0.5; // inline at the eye spawn
+    pub const EYE_DENSITY: f32 = super::EYE_DENSITY;
 }
 
 #[cfg(test)]
