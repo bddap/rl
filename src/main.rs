@@ -560,8 +560,8 @@ fn verify_colliders() -> i32 {
                     || (s.radius_ratio.is_finite() && !(0.85..=1.4).contains(&s.radius_ratio));
                 (s, radius.max(1e-3), fail)
             }
-            RestShape::Cuboid { center, half } => {
-                let s = score_box(&trunk, center, half);
+            RestShape::Cuboid { center, half, rot } => {
+                let s = score_box(&trunk, center, half, rot);
                 // A box over-covering the shell is cosmetically fine; only flag flesh
                 // escaping it (absolute, since a box has no single radius).
                 let fail = s.frac_outside > 0.03 || s.poke_out_p95 > 0.02;
@@ -848,9 +848,11 @@ fn verify_pivots() -> i32 {
                     label, pwn, pdist, yn(pin), awn, adist, yn(ain), bwn, bdist, yn(bin)
                 );
             }
-            RestShape::Cuboid { center, half } => {
+            RestShape::Cuboid { center, half, rot } => {
                 // The carapace box has no segment endpoints; test its 8 corners + the
                 // center so we still learn whether the box surface escapes the shell.
+                // The box is oriented, so each corner is the signed half-extent vector
+                // rotated by `rot` then offset from the centre.
                 println!(
                     "  {:<24} | {:>+7.3} {:>+8.4} {:>4} | {:>7} {:>8} {:>4} | {:>7} {:>8} {:>4}",
                     label, pwn, pdist, yn(pin), "(box)", "corners", "↓", "", "", ""
@@ -858,7 +860,7 @@ fn verify_pivots() -> i32 {
                 for sx in [-1.0f32, 1.0] {
                     for sy in [-1.0f32, 1.0] {
                         for sz in [-1.0f32, 1.0] {
-                            let corner = center + half * Vec3::new(sx, sy, sz);
+                            let corner = center + rot * (half * Vec3::new(sx, sy, sz));
                             let (cwn, cdist, cin) = probe(corner);
                             windings.push(cwn);
                             if !cin {

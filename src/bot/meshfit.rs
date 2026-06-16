@@ -554,12 +554,16 @@ pub(crate) fn score_capsule(points: &[Vec3], a: Vec3, b: Vec3, radius: f32) -> C
     s
 }
 
-/// Score a cloud against a world-axis-aligned box (centre + half-extents).
-pub(crate) fn score_box(points: &[Vec3], center: Vec3, half: Vec3) -> ColliderScore {
+/// Score a cloud against an oriented box (centre + half-extents + box→world
+/// rotation). Each point is brought into the box's own frame (`rot⁻¹·(p−center)`)
+/// before the half-extent test, so the signed surface distance is measured against
+/// the *oriented* faces. Pass `Quat::IDENTITY` for an axis-aligned box.
+pub(crate) fn score_box(points: &[Vec3], center: Vec3, half: Vec3, rot: Quat) -> ColliderScore {
+    let to_local = rot.inverse();
     let sd: Vec<f32> = points
         .iter()
         .map(|&p| {
-            let local = (p - center).abs() - half;
+            let local = (to_local * (p - center)).abs() - half;
             let outside = local.max(Vec3::ZERO).length();
             let inside = local.max_element().min(0.0);
             outside + inside
@@ -688,6 +692,44 @@ pub fn fit_obb(points: &[Vec3]) -> Option<ObbFit> {
         axes,
         half_extents: he,
     })
+}
+
+/// Tightest oriented box that *contains* every point, as `(half_extents, center,
+/// rotation)` where `rotation` maps a canonical axis-aligned box's local axes onto
+/// the cloud's principal axes (so `rapier`'s `Collider::cuboid` + this rotation
+/// reproduces the fit). Unlike [`fit_obb`] this uses the full min/max span per
+/// principal axis — no percentile trimming — and recentres on the span midpoint
+/// rather than the centroid: the carapace box must enclose the shell so the mesh
+/// never pokes out, and a skewed dome's centroid isn't its span centre. The
+/// principal frame is forced right-handed (eigenvectors can come out left-handed)
+/// so the basis is a valid rotation.
+pub(crate) fn containing_obb(points: &[Vec3]) -> Option<(Vec3, Vec3, Quat)> {
+    if points.len() < 4 {
+        return None;
+    }
+    let centroid = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+    let (axes_pca, _vars) = covariance_eigenframe(points, centroid);
+    // A left-handed eigenframe (det < 0) would make `from_mat3` yield a reflection,
+    // not a rotation; flip the least-significant axis to restore right-handedness.
+    let axes = if axes_pca[0].cross(axes_pca[1]).dot(axes_pca[2]) < 0.0 {
+        [axes_pca[0], axes_pca[1], -axes_pca[2]]
+    } else {
+        axes_pca
+    };
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for &p in points {
+        let d = p - centroid;
+        let proj = Vec3::new(d.dot(axes[0]), d.dot(axes[1]), d.dot(axes[2]));
+        lo = lo.min(proj);
+        hi = hi.max(proj);
+    }
+    let half = ((hi - lo) * 0.5).max(Vec3::splat(1e-4));
+    let mid = (hi + lo) * 0.5; // span centre, in principal coords relative to centroid
+    let rotation = Quat::from_mat3(&Mat3::from_cols(axes[0], axes[1], axes[2]));
+    // Map the principal-frame span centre back to world: centroid + Σ axis_k·mid_k.
+    let center = centroid + axes[0] * mid.x + axes[1] * mid.y + axes[2] * mid.z;
+    Some((half, center, rotation))
 }
 
 // ---------------------------------------------------------------------------
