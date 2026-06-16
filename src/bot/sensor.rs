@@ -71,24 +71,21 @@ pub fn build_observation(
         let idx = crab_joint.id.index();
         let base = idx * 2;
 
-        let (parent_rot, parent_lin, parent_ang) =
+        let (parent_rot, _parent_lin, parent_ang) =
             motion
                 .get(&mj.parent)
                 .copied()
                 .unwrap_or((Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO));
 
         // Current joint angle (the coordinate the policy controls by torque).
-        v[base] = joint_angle(crab_joint.id, parent_rot, transform.rotation);
+        v[base] = joint_angle(crab_joint.axis_local, parent_rot, transform.rotation);
 
-        // SIGNED joint DOF rate = d(angle)/dt: the part's velocity relative to its
-        // parent, projected onto the joint axis in world. Signed (not a magnitude)
-        // so the policy can tell which way a joint is moving and damp it — an
-        // unsigned magnitude hides the direction the controller needs to oppose.
-        let axis_world = parent_rot * crab_joint.id.joint_axis_local();
-        v[base + 1] = match &crab_joint.id {
-            CrabJointId::ClawPincer(_) => (vel.linear - parent_lin).dot(axis_world),
-            _ => (vel.angular - parent_ang).dot(axis_world),
-        };
+        // SIGNED joint DOF rate = d(angle)/dt: the link's angular velocity relative
+        // to its parent, projected onto the joint axis in world. Signed (not a
+        // magnitude) so the policy can tell which way a joint is moving and damp it.
+        // Every joint is revolute now (the pincer too), so this is always angular.
+        let axis_world = parent_rot * crab_joint.axis_local;
+        v[base + 1] = (vel.angular - parent_ang).dot(axis_world);
     }
 
     // -- Body state (carapace) -------------------------------------------------

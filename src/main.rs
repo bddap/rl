@@ -151,7 +151,7 @@ pub struct Args {
 
     /// DEV: fit colliders from the glTF model once, write the typed table to this RON
     /// path, then exit (no window, no physics) — the only place the fit runs. Model is
-    /// `CRAB_MODEL_PATH`, else the dev `sally.glb`. Load it with `--body fitted`.
+    /// `CRAB_MODEL_PATH`, else the dev `sally.glb`. Refine it with `--edit-colliders`.
     #[arg(long, value_name = "OUT.ron")]
     bake_colliders: Option<PathBuf>,
 
@@ -161,17 +161,6 @@ pub struct Args {
     /// Needs a window + GPU. See `collider_editor`.
     #[arg(long, value_name = "OUT.ron")]
     edit_colliders: Option<PathBuf>,
-
-    /// Collider geometry + mass the body spawns with. `hand-coded` (default) is the
-    /// tuned, trained-on body; `fitted` loads the baked `--body-table`, replacing only
-    /// collider shape/mass/placement (joints/axes/limits/rest stance stay hand-coded).
-    /// Unproven — never the default (see MESHFIT_PLAN.md phase 4).
-    #[arg(long, value_enum, default_value_t = BodySel::HandCoded)]
-    body: BodySel,
-
-    /// Baked collider table that `--body fitted` loads (written by `--bake-colliders`).
-    #[arg(long, value_name = "PATH", default_value = "colliders.ron")]
-    body_table: PathBuf,
 }
 
 /// Learner orchestration: the shared training config plus how many rollout threads
@@ -207,13 +196,6 @@ struct LearnArgs {
     /// priority and needs privilege, so it is floored to 0 rather than attempted).
     #[arg(long, default_value_t = 10)]
     nice: i32,
-}
-
-/// `--body` selector: which collider source the crab spawns with.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq)]
-enum BodySel {
-    HandCoded,
-    Fitted,
 }
 
 /// What the process is doing this run. Train can be headless or windowed; demo
@@ -262,6 +244,34 @@ fn main() {
     if let Some(table) = args.edit_colliders.clone() {
         collider_editor::run(&table);
         return;
+    }
+
+    // Every remaining mode spawns the rig-derived body, which needs the glTF
+    // skeleton. Resolve + load it now so a missing or corrupt model fails fast with
+    // the real reason, instead of panicking deep in Startup (or blaming
+    // CRAB_MODEL_PATH for a parse error in a model that was actually present).
+    match bot::meshfit::model_path() {
+        None => {
+            eprintln!(
+                "crab model not found: set CRAB_MODEL_PATH or place sally.glb at the dev path"
+            );
+            std::process::exit(1);
+        }
+        Some(p) => match bot::meshfit::LoadedModel::load(&p) {
+            Err(e) => {
+                eprintln!("crab model {p:?}: {e}");
+                std::process::exit(1);
+            }
+            // A model that loads but lacks the expected crab bones builds no recipe.
+            // Reject it here, not as `spawn_crab`'s expect deep in Startup with a
+            // message that wrongly blames a missing/corrupt file.
+            Ok(model) => {
+                if bot::rig::build_recipe(&model).is_none() {
+                    eprintln!("crab model {p:?}: loaded but has none of the expected crab bones (e.g. Def_leg_01.000.L)");
+                    std::process::exit(1);
+                }
+            }
+        },
     }
 
     let mode = if let Some(path) = args.screenshot.clone() {
@@ -367,18 +377,8 @@ fn main() {
         AppMode::Demo | AppMode::Screenshot { .. } => 1,
     };
 
-    // Resolve the collider source up front so it is present before `BotPlugin`
-    // builds `CrabAssets` from it (`--body fitted` reads the baked table now,
-    // failing loudly if it is missing rather than silently spawning hand-coded).
-    let body_source = resolve_body_source(args.body, &args.body_table);
-
     app.insert_resource(Visuals(visuals))
         .insert_resource(bot::NumEnvs(num_envs))
-        // ORDER matters for `--body fitted`: this must precede `BotPlugin` (below),
-        // whose `CrabAssets` eager-reads it at build to pre-bake the fitted meshes.
-        // Inserted after it, `from_world` sees no source and uses the hand-coded
-        // default — correct for hand-coded, wrong for a requested fitted body.
-        .insert_resource(body_source)
         // Why a FIXED timestep at all: the default Variable timestep keys off
         // wall-clock delta, which in a headless loop with no render clock collapses
         // to ~0 dt — the crab never falls, training optimises a frozen spawn pose,
@@ -508,32 +508,6 @@ fn bake_colliders(out: &std::path::Path) {
         "baked {} parts → {out:?} (total fitted mass {total_mass:.3} kg)",
         body.parts.len()
     );
-}
-
-/// Resolve `--body` into the runtime [`bot::body::CrabBodySource`]. For `fitted`
-/// this reads and validates the baked table now; a missing or stale table is a
-/// hard error (exit) rather than a silent fall back to hand-coded, so an
-/// explicit `--body fitted` can't quietly run the wrong physics.
-fn resolve_body_source(sel: BodySel, table: &std::path::Path) -> bot::body::CrabBodySource {
-    match sel {
-        BodySel::HandCoded => bot::body::CrabBodySource::HandCoded,
-        BodySel::Fitted => {
-            let ron = std::fs::read_to_string(table).unwrap_or_else(|e| {
-                eprintln!(
-                    "--body fitted: read {table:?}: {e} (run `--bake-colliders {}` first)",
-                    table.display()
-                );
-                std::process::exit(1);
-            });
-            match bot::meshfit::FittedBody::from_ron(&ron) {
-                Ok(body) => bot::body::CrabBodySource::Fitted(body),
-                Err(e) => {
-                    eprintln!("--body fitted: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
 }
 
 /// Diagnostic (enable with RL_CONTACT_AUDIT=1): every 64 ticks, prints every

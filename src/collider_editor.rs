@@ -7,15 +7,13 @@
 //! bone segment drawn) so it's obvious which part is being placed and where.
 //!
 //! Authoring is in **raw glTF coordinates at scale 1.0** — the exact frame the fit
-//! runs in (`meshfit`). The physics-skin's `CRAB_MODEL_SCALE` (1.2, which seats the
-//! visual on the trained hand-coded body) is deliberately NOT applied here: the
-//! editor is not the physics crab, it is the mesh the colliders are fit to, so mesh
-//! and colliders share one frame and the overlay aligns exactly with no scale
-//! reconciliation.
+//! runs in (`meshfit`): the editor is not the physics crab, it is the mesh the
+//! colliders are fit to, so mesh and colliders share one frame and the overlay
+//! aligns exactly with no scale reconciliation.
 //!
 //! Frames: a [`Placement`] is stored in the link-local frame (relative to the
-//! proximal bone's bind basis `B` and pivot `p`), because that is what `body.rs`
-//! consumes at spawn. The editor works in bind-pose **world** instead — collider
+//! proximal bone's bind basis `B` and pivot `p`) — the frame the [`FittedBody`]
+//! table records. The editor works in bind-pose **world** instead — collider
 //! world pose `= (p + B·center, B·rotation)` — which is where the mesh actually is,
 //! and converts back to link-local only when saving. So the file format never
 //! changes (one [`FittedBody`] RON, no second representation); the editor is purely

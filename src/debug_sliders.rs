@@ -136,19 +136,19 @@ fn debug_sliders_ui(mut contexts: EguiContexts, mut params: ResMut<DebugPhysicsP
     Ok(())
 }
 
-/// Whether a revolute joint's `softness` (limit spring) should track the limit
-/// sliders. The prismatic pincer spawns without a limit spring, so leaving it out
-/// keeps its behaviour identical to a no-flag run.
-fn is_revolute(id: CrabJointId) -> bool {
-    !matches!(id, CrabJointId::ClawPincer(_))
+/// Whether a joint's `softness` (limit spring) should track the limit sliders.
+/// Every actuated joint is revolute now (the pincer too), all spawned with a limit
+/// spring, so they all track.
+fn is_revolute(_id: CrabJointId) -> bool {
+    true
 }
 
-/// Whether a joint takes the leg friction-cap slider. Claw/eye motors keep their
-/// own spawn caps (out of scope), matching the slider's "floppier legs" intent.
+/// Whether a joint takes the leg friction-cap slider. Claw motors keep their own
+/// spawn caps (out of scope), matching the slider's "floppier legs" intent.
 fn is_leg(id: CrabJointId) -> bool {
     matches!(
         id,
-        CrabJointId::LegCoxa(..) | CrabJointId::LegFemur(..) | CrabJointId::LegTibia(..)
+        CrabJointId::LegCoxa(..) | CrabJointId::LegMerus(..) | CrabJointId::LegCarpus(..)
     )
 }
 
