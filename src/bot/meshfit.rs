@@ -12,10 +12,12 @@
 //! assembles a typed table serialized to RON by `--bake-colliders` and hand-tuned by
 //! `--edit-colliders`.
 //!
-//! NOTE: the rig body currently spawns PLACEHOLDER capsule colliders (see
-//! [`super::rig`]); nothing loads a baked [`FittedBody`] at runtime. This fitting
-//! half is offline tooling kept for the phase-2 rig collider re-fit (bddap/rl#16) —
-//! run deterministically offline, never at spawn or in `build.rs`.
+//! NOTE: the live body fits its own capsule colliders from these clouds at spawn
+//! ([`super::rig::derive_link`] calls [`fit_capsule`]); nothing loads a baked
+//! [`FittedBody`] at runtime. This whole fitting/baking half — [`bake_report`],
+//! [`FittedBody`], [`choose_primitive`], the collider editor — is offline dev
+//! tooling with no runtime consumer, reachable only from `--bake-colliders` /
+//! `--edit-colliders`, kept for the phase-2 rig collider re-fit (bddap/rl#16).
 //!
 //! **Size vs placement are fit from different sources, on purpose.** The cloud fit
 //! gives pose-invariant *size* (capsule half-height/radius, box half-extents) — it
@@ -1395,10 +1397,11 @@ impl FittedPart {
 }
 
 /// The offline-baked collider table: one [`FittedPart`] per physics link. Built
-/// by [`bake_report`] from `sally.glb`, serialized to RON by `--bake-colliders`, and
-/// consumed by `body.rs` behind `--body fitted` (the hand-coded body stays the
-/// default). A `version` guards against a stale artifact silently feeding a body
-/// whose format moved on.
+/// by [`bake_report`] from `sally.glb` and serialized to RON by `--bake-colliders`.
+/// No runtime loader consumes it — the live body fits capsules directly in
+/// [`super::rig`] — so this is a bake artifact for offline inspection / the rl#16
+/// re-fit, not a body source. A `version` guards a stale artifact against a format
+/// that moved on, should a loader ever read it back.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FittedBody {
     /// Artifact schema version. Bump when the meaning of a field changes so an
@@ -1427,10 +1430,11 @@ impl FittedBody {
     }
 
     /// Parse from RON, rejecting a version mismatch *and* structurally-valid but
-    /// physically-impossible values. `--body-table` is a trust boundary (the file
-    /// may be hand-edited or foreign), and a serde-valid table with a zero/negative/
-    /// NaN dimension parses fine yet spawns a degenerate collider — a 0-radius
-    /// capsule, a mirrored box — that detonates rapier deep inside the solver. Fail
+    /// physically-impossible values. The table is a trust boundary — the editor
+    /// resumes from a previously-saved file (`--edit-colliders`) that may be
+    /// hand-edited or foreign — and a serde-valid table with a zero/negative/NaN
+    /// dimension parses fine yet would build a degenerate collider (a 0-radius
+    /// capsule, a mirrored box) that detonates rapier deep inside the solver. Fail
     /// here, at the edge, with the offending part named.
     pub fn from_ron(s: &str) -> Result<Self, String> {
         let body: FittedBody = ron::from_str(s).map_err(|e| format!("parse FittedBody: {e}"))?;
@@ -1525,10 +1529,10 @@ mod tests {
         );
     }
 
-    /// `from_ron` is the `--body-table` trust boundary: a serde-valid table with a
-    /// non-finite or non-positive dimension/density must be rejected, not spawned
-    /// into a degenerate collider. A clean part round-trips; each poisoned field
-    /// fails loudly and names the part.
+    /// `from_ron` is the saved-table trust boundary (the editor reads its own RON
+    /// back on resume): a serde-valid table with a non-finite or non-positive
+    /// dimension/density must be rejected, not built into a degenerate collider. A
+    /// clean part round-trips; each poisoned field fails loudly and names the part.
     #[test]
     fn from_ron_rejects_nonphysical_dims() {
         let good = FittedPart {
