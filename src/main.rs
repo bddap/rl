@@ -382,6 +382,9 @@ fn main() {
                     mode: DebugRenderMode::COLLIDER_SHAPES,
                     ..default()
                 });
+                // Bright always-in-front markers at each joint pivot — the companion
+                // to the collider cage, gated on the same flag (see body.rs).
+                bot::body::register_pivot_markers(&mut app);
             }
         }
         _ => {
@@ -414,6 +417,11 @@ fn main() {
                     mode: DebugRenderMode::COLLIDER_SHAPES,
                     ..default()
                 });
+            }
+            // Pivot markers gate on RL_DEBUG_COLLIDERS ALONE, not the always-on
+            // training-viz cage: they're a deliberate diagnostic, not default chrome.
+            if std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
+                bot::body::register_pivot_markers(&mut app);
             }
         }
     }
