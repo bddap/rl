@@ -4,6 +4,7 @@ pub mod brain;
 pub mod meshfit;
 #[cfg(test)]
 mod reset_test;
+pub mod rig;
 pub mod sensor;
 #[cfg(test)]
 mod sim_truth_test;

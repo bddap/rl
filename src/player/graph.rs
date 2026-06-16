@@ -163,7 +163,7 @@ fn sample_graph(
         let id = joint.id;
         let idx = id.index();
 
-        let angle = joint_angle(id, parent_tf.rotation, child_tf.rotation);
+        let angle = joint_angle(joint.axis_local, parent_tf.rotation, child_tf.rotation);
         // Under torque control the NN output IS the signed torque (normalized),
         // so the "torque" plot is the real command, not a reconstructed proxy.
         let torque = action[idx].clamp(-1.0, 1.0);

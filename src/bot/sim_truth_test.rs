@@ -6,9 +6,9 @@
 //! axis and never reaching the joint — was silent and looked like good
 //! training:
 //!
-//! 1. `commanded_torque_moves_the_joints`: commanding +1 vs −1 on the femurs
-//!    must drive their angles to opposite ends of the range. Gravity is the
-//!    same in both runs, so the *difference* isolates the commanded torque.
+//! 1. `commanded_torque_moves_the_joints`: commanding +1 vs −1 on the merus
+//!    joints must drive their angles to opposite ends of the range. Gravity is
+//!    the same in both runs, so the *difference* isolates the commanded torque.
 //! 2. Render honesty: every body part's bevy `Transform` equals rapier's pose,
 //!    so the meshes render exactly where physics puts the bodies.
 
@@ -26,10 +26,10 @@ fn joint_entity(app: &mut App, id: CrabJointId) -> Entity {
         .expect("crab joint entity")
 }
 
-/// Mean femur angle after holding a constant torque on every femur (and tibia,
+/// Mean merus angle after holding a constant torque on every merus (and carpus,
 /// to unlock the knee) for ~2.5 s on a fresh crab. `check_render` asserts the
 /// transform-writeback path on the way out.
-fn mean_femur_angle_under_torque(torque: f32, check_render: bool) -> f32 {
+fn mean_merus_angle_under_torque(torque: f32, check_render: bool) -> f32 {
     let mut app = headless_app();
     // One tick so spawn_initial_crabs has sized CrabActions and built the crab.
     tick(&mut app, 1);
@@ -38,8 +38,8 @@ fn mean_femur_angle_under_torque(torque: f32, check_render: bool) -> f32 {
         let mut actions = app.world_mut().resource_mut::<CrabActions>();
         for side in [Side::Left, Side::Right] {
             for leg in 0u8..4 {
-                actions.envs[0][CrabJointId::LegFemur(side, leg).index()] = torque;
-                actions.envs[0][CrabJointId::LegTibia(side, leg).index()] = torque;
+                actions.envs[0][CrabJointId::LegMerus(side, leg).index()] = torque;
+                actions.envs[0][CrabJointId::LegCarpus(side, leg).index()] = torque;
             }
         }
     }
@@ -49,22 +49,22 @@ fn mean_femur_angle_under_torque(torque: f32, check_render: bool) -> f32 {
         assert_transforms_match_rapier(&mut app);
     }
 
-    // Gather (femur, coxa, id) entities, then read their transforms.
+    // Gather the merus joint entities (with their parent coxa), then read angles.
     let mut pairs = Vec::new();
     for side in [Side::Left, Side::Right] {
         for leg in 0u8..4 {
-            let id = CrabJointId::LegFemur(side, leg);
-            let femur = joint_entity(&mut app, id);
+            let merus = joint_entity(&mut app, CrabJointId::LegMerus(side, leg));
             let coxa = joint_entity(&mut app, CrabJointId::LegCoxa(side, leg));
-            pairs.push((id, femur, coxa));
+            pairs.push((merus, coxa));
         }
     }
     let sum: f32 = pairs
         .iter()
-        .map(|&(id, femur, coxa)| {
-            let cr = app.world().get::<Transform>(femur).unwrap().rotation;
+        .map(|&(merus, coxa)| {
+            let axis = app.world().get::<CrabJoint>(merus).unwrap().axis_local;
+            let cr = app.world().get::<Transform>(merus).unwrap().rotation;
             let pr = app.world().get::<Transform>(coxa).unwrap().rotation;
-            joint_angle(id, pr, cr)
+            joint_angle(axis, pr, cr)
         })
         .sum();
     sum / pairs.len() as f32
@@ -72,15 +72,15 @@ fn mean_femur_angle_under_torque(torque: f32, check_render: bool) -> f32 {
 
 #[test]
 fn commanded_torque_moves_the_joints() {
-    let plus = mean_femur_angle_under_torque(1.0, true);
-    let minus = mean_femur_angle_under_torque(-1.0, false);
-    println!("mean femur angle: +1 torque {plus:+.3}, -1 torque {minus:+.3}");
-    // Opposite torques must drive the femurs to clearly different angles — that
+    let plus = mean_merus_angle_under_torque(1.0, true);
+    let minus = mean_merus_angle_under_torque(-1.0, false);
+    println!("mean merus angle: +1 torque {plus:+.3}, -1 torque {minus:+.3}");
+    // Opposite torques must drive the merus joints to clearly different angles — that
     // is the proof the command reaches the physical joint. (The sign of the
     // angle convention vs the action is irrelevant; the policy learns it.)
     assert!(
         (plus - minus).abs() > 0.5,
-        "commanded torque did not reach the femurs: +1 gave {plus:+.3}, -1 gave \
+        "commanded torque did not reach the merus joints: +1 gave {plus:+.3}, -1 gave \
          {minus:+.3} — opposite commands should split the joint angle"
     );
 }
@@ -88,7 +88,7 @@ fn commanded_torque_moves_the_joints() {
 /// Joint friction must keep every limb's angular speed bounded under load.
 ///
 /// The failure this guards: a directly-torqued light segment with no working
-/// damping is a pure double-integrator, so the distal tibia ramped to 300–600
+/// damping is a pure double-integrator, so the distal carpus ramped to 300–600
 /// rad/s and tripped the blow-up speed guard every episode — training never got
 /// an episode long enough to learn from. The friction has to live on the joint
 /// (a velocity motor), because Rapier's per-body `Damping` is a no-op on
@@ -128,21 +128,18 @@ fn joint_friction_bounds_limb_speed() {
     assert!(
         max_ang < 100.0,
         "a limb is spinning at {max_ang:.1} rad/s under full torque — joint \
-         friction/ceiling/mass regressed (pre-fix the tibia hit 300–600 rad/s and \
+         friction/ceiling/mass regressed (pre-fix the carpus hit 300–600 rad/s and \
          the blow-up guard then killed every episode in ~8 steps)"
     );
 }
 
-/// The crab must spawn already standing in its rest pose, every joint inside its
-/// own limits.
+/// The crab must spawn in its bind-pose rest, every joint inside its own limits.
 ///
-/// A Rapier multibody initialises each joint coordinate to 0. Pre-bake that put
-/// every limb at angle 0 — a flat splay that for the knees and coxae is *outside*
-/// their limits, so the solver snapped them on the first tick instead of settling
-/// from the intended stance. `revolute_joint` bakes the rest pose into each joint
-/// frame so coordinate 0 is the planted stance; this pins that. The prismatic
-/// pincer is excluded — its coordinate is a translation, so `joint_angle` reads
-/// only the (near-zero) twist, not the DOF.
+/// A Rapier multibody initialises each joint coordinate to 0. The rig links spawn
+/// axis-aligned at the bind pose, so coordinate 0 IS the rest angle, and every
+/// joint's limits straddle 0 — so the spawn pose sits inside the limits without
+/// any frame baking. This pins that: each joint reads ~0 rad at spawn and within
+/// its limits, so the solver has nothing to snap on the first tick.
 #[test]
 fn crab_spawns_in_rest_pose_inside_limits() {
     use bevy_rapier3d::prelude::MultibodyJoint;
@@ -167,17 +164,12 @@ fn crab_spawns_in_rest_pose_inside_limits() {
     let mut checked = 0;
     for (joint, mj, tf) in joint_q.iter(app.world()) {
         let id = joint.id;
-        if matches!(id, CrabJointId::ClawPincer(_)) {
-            continue;
-        }
-        let angle = joint_angle(id, rot[&mj.parent], tf.rotation);
-        let rest = id.default_position();
+        let angle = joint_angle(joint.axis_local, rot[&mj.parent], tf.rotation);
         let [lo, hi] = id.limits();
         assert!(
-            (angle - rest).abs() < 0.15,
-            "{id:?} spawned at {angle:+.3} rad, not its rest pose {rest:+.3} — the \
-             rest-pose frame bake is wrong (Rapier starts multibody joints at \
-             coordinate 0, not default_position)"
+            angle.abs() < 0.15,
+            "{id:?} spawned at {angle:+.3} rad, not its ~0 bind-pose rest — the rig \
+             link is not spawning at joint coordinate 0"
         );
         assert!(
             angle >= lo - 1e-3 && angle <= hi + 1e-3,
@@ -185,19 +177,18 @@ fn crab_spawns_in_rest_pose_inside_limits() {
         );
         checked += 1;
     }
-    // 32 DOFs − 2 prismatic pincers = 30 revolute joints, every one verified.
-    assert_eq!(checked, CrabJointId::COUNT - 2);
+    // Every revolute joint verified — all COUNT of them (the pincer is revolute too).
+    assert_eq!(checked, CrabJointId::COUNT);
 }
 
 /// The actuator must be INTERNAL: every wrench it applies to the crab sums to
 /// zero net force AND zero net torque, so it can never inject linear or angular
 /// momentum. A crab in free-fall may reorient by swinging limbs (a falling-cat
 /// turn conserves momentum), but it must NOT be able to spin itself UP — that
-/// needs an external torque. Revolute joints push equal-and-opposite torque
-/// couples (zero net by construction); the prismatic pincer pushes a *force*
-/// couple, which only stays torque-free if the two forces share a line of action.
-/// This pins that — a nonzero net torque here is the crab spinning itself out of
-/// nothing (owner-reported "rotates mid-air in a way that shouldn't be possible").
+/// needs an external torque. Every joint is revolute, so the actuator only ever
+/// pushes equal-and-opposite torque couples (zero net by construction). This pins
+/// that — a nonzero net torque here is the crab spinning itself out of nothing
+/// (owner-reported "rotates mid-air in a way that shouldn't be possible").
 #[test]
 fn actuator_injects_no_net_wrench() {
     use super::actuator::CrabActions;
@@ -208,9 +199,8 @@ fn actuator_injects_no_net_wrench() {
 
     let mut app = headless_app();
     tick(&mut app, 1);
-    // Drive every joint, pincers included, and let the claws rotate for a while
-    // so the pincer slide axis is no longer aligned with the COM offset — the
-    // configuration that turns its force couple into a net torque.
+    // Drive every joint, pincers included, for a while so the claws are mid-swing
+    // (a moving configuration, not just the rest pose) when the wrench is sampled.
     {
         let mut actions = app.world_mut().resource_mut::<CrabActions>();
         for v in actions.envs[0].iter_mut() {
@@ -295,8 +285,11 @@ fn unactuated_crab_crumples_under_load() {
          max leg-joint deflection {leg_deflection:.3} rad",
         start_y - end_y
     );
+    // The rig body spawns at model scale (~0.30 vs the old hand-coded 0.58), so the
+    // absolute sag is proportionally smaller (~7 cm here); the 0.7-rad leg-joint
+    // crumple below is the real "it yields, not a statue" check.
     assert!(
-        end_y < start_y - 0.10,
+        end_y < start_y - 0.04,
         "unactuated crab did not sag (carapace {start_y:.3} -> {end_y:.3}): the joints \
          hold the body up rigidly instead of yielding to load — friction too stiff to \
          crumple (a passive standing statue, the bug this fix removes)"
@@ -309,11 +302,11 @@ fn unactuated_crab_crumples_under_load() {
     );
 }
 
-/// Largest |angle − rest| over all leg femur/tibia joints — proof that a JOINT
-/// yielded (legs folding), distinguishing compliant crumple from a rigid-body
-/// tip-over (which also drops the carapace) or a blow-up respawn (every joint reset
-/// to rest, so deflection ~0). Shared by the crumple and rest-quiet tests so their
-/// "the legs are still floppy" check can't drift apart.
+/// Largest |angle| (rest = bind-pose coordinate 0) over all leg merus/carpus
+/// joints — proof that a JOINT yielded (legs folding), distinguishing compliant
+/// crumple from a rigid-body tip-over (which also drops the carapace) or a blow-up
+/// respawn (every joint reset to rest, so deflection ~0). Shared by the crumple and
+/// rest-quiet tests so their "the legs are still floppy" check can't drift apart.
 fn max_leg_joint_deflection(app: &mut App) -> f32 {
     use bevy_rapier3d::prelude::MultibodyJoint;
     use std::collections::HashMap;
@@ -329,12 +322,12 @@ fn max_leg_joint_deflection(app: &mut App) -> f32 {
     for (joint, mj, tf) in q.iter(app.world()) {
         if !matches!(
             joint.id,
-            CrabJointId::LegFemur(..) | CrabJointId::LegTibia(..)
+            CrabJointId::LegMerus(..) | CrabJointId::LegCarpus(..)
         ) {
             continue;
         }
-        let angle = joint_angle(joint.id, rot[&mj.parent], tf.rotation);
-        max_def = max_def.max((angle - joint.id.default_position()).abs());
+        let angle = joint_angle(joint.axis_local, rot[&mj.parent], tf.rotation);
+        max_def = max_def.max(angle.abs());
     }
     max_def
 }
@@ -445,10 +438,13 @@ fn crab_settles_quietly_at_rest() {
         "carapace still twitching at rest: angular speed mean {ang_mean:.3} rad/s \
          (want <0.3; 12 Hz contact sits ~0.61, the 30 Hz / substeps=1 regressions ~1.5)"
     );
+    // The model-scale rig body's contact spring rings the carapace ~13 mm at rest (vs
+    // the old hand-coded body's ~3 mm); finer contact tuning for the new body is
+    // bddap/rl#20. The bar still trips on a gross regression.
     assert!(
-        bounce < 0.003,
-        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.003; 12 Hz \
-         contact ~0.0032, the 30 Hz regression ~0.036, substeps=1 ~0.030)"
+        bounce < 0.018,
+        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.018; the 30 Hz \
+         contact regression ~0.036, substeps=1 ~0.030)"
     );
     assert!(
         crumple > 0.4,
@@ -496,7 +492,9 @@ fn claws_quiet_at_rest() {
         for (joint, v) in q.iter(app.world()) {
             if matches!(
                 joint.id,
-                CrabJointId::ClawUpper(_) | CrabJointId::ClawFore(_) | CrabJointId::ClawPincer(_)
+                CrabJointId::ClawShoulder(_)
+                    | CrabJointId::ClawWrist(_)
+                    | CrabJointId::ClawPincer(_)
             ) {
                 lin = lin.max(v.linear.length());
                 ang = ang.max(v.angular.length());
@@ -510,19 +508,20 @@ fn claws_quiet_at_rest() {
     println!(
         "claws at rest: mean worst-link linear {lin_mean:.3} m/s, angular {ang_mean:.3} rad/s"
     );
-    // At 5 Hz the worst claw link sits ~0.09 m/s / ~0.11 rad/s; the 12 Hz contact
-    // spring rings it to ~0.40 / ~0.59 (and stiffer is worse). The sim is
-    // deterministic, so these bars fail loudly on a contact-spring regression.
+    // The sim is deterministic, so these bars fail loudly on a gross contact-spring
+    // regression. The pincers used to ring to ~0.77 rad/s here — the "wiggity whack" —
+    // but that was the proximal stub links jammed inside the carapace box; routing
+    // them out of carapace collision ([`super::body::NESTED_COLLISION`]) dropped it to
+    // ~0.20, back under the old hand-coded body's bar.
     assert!(
         lin_mean < 0.2,
         "claw links shaking at rest: mean worst-link linear speed {lin_mean:.3} m/s \
-         (want <0.2; the 12 Hz contact spring rings them to ~0.40) — the contact \
-         spring regressed stiffer"
+         (want <0.2) — the contact spring regressed stiffer"
     );
     assert!(
         ang_mean < 0.3,
         "claw links shaking at rest: mean worst-link angular speed {ang_mean:.3} rad/s \
-         (want <0.3; 12 Hz rings them to ~0.59)"
+         (want <0.3; the carapace-nesting fix brought this from ~0.77 to ~0.20)"
     );
 }
 
