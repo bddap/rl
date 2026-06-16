@@ -4,17 +4,18 @@
 //!
 //! The body is a Rapier multibody tree rooted at the carapace. Only the locomotion
 //! joints are policy-actuated and carry a [`CrabJointId`]: each leg's
-//! coxa/merus/carpus and each claw's shoulder/wrist/pincer (all revolute). The rest
-//! of the rig — proximal leg stubs, claw mid-segments, eye-stalks, palpi — spawns as
-//! locked (fixed-joint) links with no `CrabJointId`, present in the body but
-//! invisible to the policy. Promote a locked joint by adding a `CrabJointId` variant
-//! and a rig actuation mapping ([`super::rig`]).
+//! coxa/merus/carpus and each claw's shoulder/wrist/pincer (all revolute). Each
+//! limb collapses to those joints — a leg's proximal bones ride its coxa link, so
+//! there are no locked stubs. Only the eye-stalks spawn as locked (fixed-joint)
+//! links (they carry the reward's eye-height marker but no `CrabJointId`); the rest
+//! of the rig (shell, palpi, mouthparts) rides the carapace. Add articulation by
+//! adding a `CrabJointId` variant and a [`super::rig`] `JointSpec`.
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 use super::meshfit::{LoadedModel, PartId};
-use super::rig::{self, RigLink, RigRecipe};
+use super::rig::{self, RigRecipe};
 
 // ---------------------------------------------------------------------------
 // Collision groups
@@ -35,11 +36,11 @@ pub const ARENA_COLLISION: CollisionGroups =
 /// contact is geometrically impossible until we deliberately close the gap.
 pub const CRAB_COLLISION: CollisionGroups =
     CollisionGroups::new(Group::GROUP_2, Group::GROUP_1.union(Group::GROUP_2));
-/// Group 3: links whose collider center falls inside the carapace box — the
-/// proximal stubs, and on this model the actuated coxa/claw-shoulder that ride
-/// just under the shell. Membership is purely geometric (see `spawn_crab`), so it
-/// catches actuated joints too, not only fixed stubs. They keep their mass but
-/// collide only with the arena — never with the carapace or each other. A link
+/// Group 3: links whose collider center falls inside the carapace box — on this
+/// model the actuated coxa/claw-shoulder (and the eye-stalks) that ride just under
+/// the shell. Membership is purely geometric (see `spawn_crab`), so it catches
+/// actuated joints, not only locked links. They keep their mass but collide only
+/// with the arena — never with the carapace or each other. A link
 /// jammed inside the carapace collider just fights the solver every tick (the
 /// near-massless pincers ring it as rest jitter, bddap/rl#20), and
 /// `no_adjacent_contacts` can't filter it because its joint parent is another
@@ -71,23 +72,11 @@ pub fn joint_angle(axis_local: Vec3, parent_rot: Quat, child_rot: Quat) -> f32 {
 // Dimensions — tuned for a ~1m wide crab (game scale, not real life)
 // ---------------------------------------------------------------------------
 
-/// Carapace: wide, flat, slightly domed.
-const CARAPACE_HALF_W: f32 = 0.5; // x (left-right)
-const CARAPACE_HALF_H: f32 = 0.12; // y (up-down) — very flat
-const CARAPACE_HALF_D: f32 = 0.35; // z (front-back)
-
 /// Spawn height: how high above ground the carapace center starts. Model-scale:
 /// in the bind pose the feet sit ~0.22 below the carapace centre, so ~0.3 drops
 /// the crab onto its feet with a little clearance. (Was 0.58 for the larger
 /// hand-coded body.)
 pub const SPAWN_HEIGHT: f32 = 0.3;
-
-/// Placeholder link-capsule dimensions (half-height, radius): `link_mesh` is one
-/// uniformly-sized debug capsule reused for every rig link. The skinned model is the
-/// real visual and the physics colliders are sized per-link from the rig recipe, so
-/// this mesh is only a coarse stand-in in the debug render.
-const COXA_LEN: f32 = 0.15;
-const COXA_RAD: f32 = 0.045;
 
 /// Leg-segment densities for the OFFLINE collider bake (`part_densities`); the live
 /// rig body's masses come from `rig.rs`'s own densities. Tapered UP (denser toward
@@ -173,19 +162,13 @@ pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f3
 // Marker components for querying
 // ---------------------------------------------------------------------------
 
-/// Shared mesh/material handles for crab bodies, created once at startup.
-/// Spawning goes through these because episode resets RESPAWN the whole crab
-/// (a teleport keeps the dying pose's joint angles, which interpenetrate under
-/// self-collision and explode) — per-spawn `Assets::add` would leak an asset
-/// per body part per episode, unbounded over an overnight run.
+/// The crab body recipe, derived once at startup. Held in a resource because
+/// episode resets RESPAWN the whole crab (a teleport keeps the dying pose's joint
+/// angles, which interpenetrate under self-collision and explode), so every spawn
+/// re-instantiates this. The visible body is the skinned glTF and the colliders
+/// are Rapier's debug-render; there are no per-body meshes to cache here.
 #[derive(Resource)]
 pub struct CrabAssets {
-    body_mat: Handle<StandardMaterial>,
-    leg_mat: Handle<StandardMaterial>,
-    claw_mat: Handle<StandardMaterial>,
-    eye_mat: Handle<StandardMaterial>,
-    carapace_mesh: Handle<Mesh>,
-    link_mesh: Handle<Mesh>,
     /// The rig-derived body recipe (the one model): every link's joint + capsule,
     /// read off the bind-pose skeleton once at startup. `spawn_crab` instantiates
     /// it. `None` only when the glTF model is unavailable.
@@ -193,48 +176,13 @@ pub struct CrabAssets {
 }
 
 impl FromWorld for CrabAssets {
-    fn from_world(world: &mut World) -> Self {
-        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-        let body_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.2, 0.45, 0.55), // blue-grey carapace
-            perceptual_roughness: 0.7,
-            ..default()
-        });
-        let leg_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.85, 0.4, 0.15), // orange legs (Sally Lightfoot!)
-            perceptual_roughness: 0.6,
-            ..default()
-        });
-        let claw_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.7, 0.15, 0.15), // deep red claws
-            perceptual_roughness: 0.5,
-            ..default()
-        });
-        let eye_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.9, 0.85, 0.7), // pale eye stalks
-            perceptual_roughness: 0.3,
-            ..default()
-        });
-
-        let mut meshes = world.resource_mut::<Assets<Mesh>>();
+    fn from_world(_world: &mut World) -> Self {
         // The one model: derive the whole body's geometry from the glTF bind pose
         // once at startup. `spawn_crab` instantiates this recipe for every crab.
         let recipe = super::meshfit::model_path()
             .and_then(|p| LoadedModel::load(&p).ok())
             .and_then(|m| rig::build_recipe(&m));
-        Self {
-            body_mat,
-            leg_mat,
-            claw_mat,
-            eye_mat,
-            carapace_mesh: meshes.add(Cuboid::new(
-                CARAPACE_HALF_W * 2.0,
-                CARAPACE_HALF_H * 2.0,
-                CARAPACE_HALF_D * 2.0,
-            )),
-            link_mesh: meshes.add(Capsule3d::new(COXA_RAD, COXA_LEN * 2.0)),
-            recipe,
-        }
+        Self { recipe }
     }
 }
 
@@ -252,6 +200,15 @@ pub struct CrabEyeTip;
 #[derive(Component)]
 pub struct CrabBodyPart;
 
+/// A part's REST (bind) world transform, captured at spawn before any physics
+/// settle. The skin pairs its bones against this, not the live (already-settling)
+/// transform, so the visual mesh reproduces the bind pose exactly and then tracks
+/// the physics faithfully — without baking the limp body's sag into every bone (the
+/// sag was the source of the skin riding above the colliders). A respawn re-creates
+/// the identical rest, so the captured offsets stay valid across episode resets.
+#[derive(Component, Clone, Copy)]
+pub struct CrabRestPose(pub Transform);
+
 /// Which training environment (crab instance) an entity belongs to. Every crab
 /// entity carries one; systems group by it so N crabs sharing the world stay
 /// independent samples. Demo/screenshot run a single env 0.
@@ -261,9 +218,9 @@ pub struct CrabEnvId(pub usize);
 /// A policy-driven joint on the crab: its observation/action slot key ([`id`](Self::id))
 /// plus the per-instance data the sensor and actuator read. The free axis is
 /// rig-derived — it varies per leg/side with the bind-pose bone geometry — so it
-/// rides on the component, not a type-level constant. Locked rig joints (the
-/// proximal leg stubs, claw mid-segments, eye-stalks, palpi) carry NO `CrabJoint`,
-/// so they are invisible to the policy: present in the physics, out of the action space.
+/// rides on the component, not a type-level constant. Locked rig links (the
+/// eye-stalks) carry NO `CrabJoint`, so they are invisible to the policy: present
+/// in the physics, out of the action space.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct CrabJoint {
     pub id: CrabJointId,
@@ -274,10 +231,10 @@ pub struct CrabJoint {
 }
 
 /// Every POLICY-ACTUATED joint — the locomotion-relevant subset of the crab's
-/// articulation. The body has many more *physical* joints (the proximal leg
-/// stubs, claw mid-segments, eye-stalks, palpi) that spawn from the rig as locked
-/// links with no [`CrabJoint`]; promoting one to policy control means adding a
-/// variant here (which grows the observation/action vector and the net).
+/// articulation. The body also spawns the eye-stalks as locked links with no
+/// [`CrabJoint`]; restoring finer articulation (bddap/rl#31) means adding a variant
+/// here (which grows the observation/action vector and the net) plus a rig
+/// [`super::rig::JointSpec`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CrabJointId {
     // Legs (8 = side L/R × leg 0..3 front→back). Coxa swings the leg off the
@@ -413,10 +370,9 @@ pub fn spawn_crab(
     // Unreachable in normal runs: `main`'s preflight rejects a missing model or one
     // that builds no recipe (exit 1) before any spawn. The expect guards the path
     // that constructs `CrabAssets` without that preflight (e.g. a future caller).
-    let recipe = assets
-        .recipe
-        .as_ref()
-        .expect("CrabAssets built without a rig recipe — main's model preflight should have caught this");
+    let recipe = assets.recipe.as_ref().expect(
+        "CrabAssets built without a rig recipe — main's model preflight should have caught this",
+    );
     let origin = position + Vec3::new(0.0, SPAWN_HEIGHT, 0.0);
 
     // -- Carapace (root): the rigid trunk; shell/thorax/rostrum/abdomen ride it.
@@ -426,16 +382,25 @@ pub fn spawn_crab(
             CrabBodyPart,
             CrabEnvId(env),
             RigidBody::Dynamic,
-            Collider::cuboid(
-                recipe.carapace_half.x,
-                recipe.carapace_half.y,
-                recipe.carapace_half.z,
-            ),
+            // Offset cuboid: the trunk's bounding box isn't centred on the leg hub
+            // the body root sits at, so the box rides at `carapace_offset` to cover
+            // the shell without engulfing the legs.
+            Collider::compound(vec![(
+                recipe.carapace_offset,
+                Quat::IDENTITY,
+                Collider::cuboid(
+                    recipe.carapace_half.x,
+                    recipe.carapace_half.y,
+                    recipe.carapace_half.z,
+                ),
+            )]),
             CRAB_COLLISION,
             ColliderMassProperties::Density(recipe.carapace_density),
-            Mesh3d(assets.carapace_mesh.clone()),
-            MeshMaterial3d(assets.body_mat.clone()),
+            // No stand-in Mesh3d: the visible body is the skin, and the true colliders
+            // are shown by Rapier's debug-render (RL_DEBUG_COLLIDERS). A primitive mesh
+            // here only risked drifting out of sync with the actual collider.
             Transform::from_translation(origin),
+            CrabRestPose(Transform::from_translation(origin)),
             Velocity::default(),
             ExternalForce::default(),
             // No `Damping`: Rapier applies per-body damping only to non-multibody
@@ -445,8 +410,13 @@ pub fn spawn_crab(
 
     let mut ents: Vec<Entity> = Vec::with_capacity(recipe.links.len());
     let mut world_pos: Vec<Vec3> = Vec::with_capacity(recipe.links.len());
-    // A world point inside the carapace box (centred at the spawn `origin`).
-    let inside_carapace = |p: Vec3| (p - origin).abs().cmple(recipe.carapace_half).all();
+    // A world point inside the carapace box (centred at `origin + carapace_offset`).
+    let inside_carapace = |p: Vec3| {
+        (p - origin - recipe.carapace_offset)
+            .abs()
+            .cmple(recipe.carapace_half)
+            .all()
+    };
     for link in &recipe.links {
         let (parent_ent, parent_pos) = if link.parent == rig::CARAPACE {
             (carapace, origin)
@@ -475,10 +445,11 @@ pub fn spawn_crab(
             collider,
             groups,
             ColliderMassProperties::Density(link.density),
-            Mesh3d(assets.link_mesh.clone()),
-            MeshMaterial3d(link_material(link, assets)),
+            // No stand-in Mesh3d (see carapace): skin + Rapier debug-render are the
+            // truthful views; a fixed per-link capsule mesh misrepresented the colliders.
             MultibodyJoint::new(parent_ent, joint),
             Transform::from_translation(here),
+            CrabRestPose(Transform::from_translation(here)),
             Velocity::default(),
             ExternalForce::default(),
         ));
@@ -547,18 +518,6 @@ fn rig_fixed(anchor1: Vec3) -> TypedJoint {
 fn capsule_collider(center: Vec3, rot: Quat, half_height: f32, radius: f32) -> Collider {
     let axis = rot * Vec3::Y * half_height;
     Collider::capsule(center - axis, center + axis, radius)
-}
-
-/// Debug material for a link, by limb family (legs orange, claws red, eye-stalks
-/// and palpi pale) — read off the bone name.
-fn link_material(link: &RigLink, assets: &CrabAssets) -> Handle<StandardMaterial> {
-    if link.bone.starts_with("Def_leg") {
-        assets.leg_mat.clone()
-    } else if link.bone.starts_with("Def_pincer") {
-        assets.claw_mat.clone()
-    } else {
-        assets.eye_mat.clone()
-    }
 }
 
 /// Every physics part with the hand-coded density its mass is computed under, in

@@ -36,7 +36,8 @@
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
 
-use super::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId, Side};
+use super::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabRestPose};
+use super::meshfit::PartId;
 
 /// Present only when a model path was configured; all systems key off this.
 #[derive(Resource)]
@@ -113,13 +114,6 @@ pub struct BoneDrive {
     offset: Mat4,
 }
 
-/// Which physics body a deform bone follows.
-#[derive(PartialEq, Eq, Hash, Debug)]
-enum LinkKey {
-    Carapace,
-    Joint(CrabJointId),
-}
-
 /// The physics-link query shared by pairing and re-pairing: every part entity
 /// of every crab, tagged with its env and its role (joint id or carapace).
 type LinkQuery<'w, 's> = Query<
@@ -134,15 +128,17 @@ type LinkQuery<'w, 's> = Query<
 >;
 
 /// Map one env's physics parts by the role a deform bone keys off. Built fresh
-/// each time because a reset replaces the entities; `bone_target` resolves a
-/// bone name to a [`LinkKey`], this resolves that key to the live entity.
-fn link_map(links: &LinkQuery, env: usize) -> std::collections::HashMap<LinkKey, Entity> {
+/// each time because a reset replaces the entities; [`super::rig::part_for_bone`]
+/// resolves a bone name to a [`PartId`], this resolves that part to the live
+/// entity. Eye-stalk links carry neither component, so they're absent here — the
+/// eye bones ride the carapace cosmetically (the eye link is fixed to it).
+fn link_map(links: &LinkQuery, env: usize) -> std::collections::HashMap<PartId, Entity> {
     links
         .iter()
         .filter(|(_, e, ..)| e.0 == env)
         .filter_map(|(e, _, joint, carapace)| match (joint, carapace) {
-            (Some(j), _) => Some((LinkKey::Joint(j.id), e)),
-            (_, Some(_)) => Some((LinkKey::Carapace, e)),
+            (Some(j), _) => Some((PartId::Joint(j.id), e)),
+            (_, Some(_)) => Some((PartId::Carapace, e)),
             _ => None,
         })
         .collect()
@@ -152,12 +148,15 @@ pub fn register(app: &mut App) {
     let Ok(path) = std::env::var("CRAB_MODEL_PATH") else {
         return;
     };
-    // RL_SKIN_OVERLAY=1 starts in the BOTH (debug overlay) view; otherwise the
-    // shipped PRETTY look. The demo cycles it live from here either way.
-    let view = if std::env::var("RL_SKIN_OVERLAY").is_ok_and(|v| v == "1") {
-        RenderView::Both
-    } else {
-        RenderView::Pretty
+    // RL_VIEW=pretty|physics|both sets the initial view; physics = skin hidden,
+    // colliders only (a readable headless collider screenshot). RL_SKIN_OVERLAY=1
+    // is the old alias for `both`. The demo cycles the view live from here either way.
+    let view = match std::env::var("RL_VIEW").ok().as_deref() {
+        Some("physics") => RenderView::Physics,
+        Some("both") => RenderView::Both,
+        Some("pretty") => RenderView::Pretty,
+        _ if std::env::var("RL_SKIN_OVERLAY").is_ok_and(|v| v == "1") => RenderView::Both,
+        _ => RenderView::Pretty,
     };
     // 1.2 seats the Sally model's shorter legs/shell on this physics body best
     // (judged by RL_SKIN_OVERLAY screenshots at 1.0/1.2).
@@ -238,6 +237,7 @@ fn pair_bones(
     children: Query<&Children>,
     names: Query<&Name>,
     globals: Query<&GlobalTransform>,
+    rest_poses: Query<&CrabRestPose>,
     links: LinkQuery,
     meshes: Query<(), With<Mesh3d>>,
 ) {
@@ -278,16 +278,22 @@ fn pair_bones(
                 commands.entity(e).insert(NoFrustumCulling);
             }
             let Ok(name) = names.get(e) else { continue };
-            let Some(key) = bone_target(name.as_str()) else {
+            let Some(key) = super::rig::part_for_bone(name.as_str()) else {
                 continue;
             };
             let Some(&link) = link_of.get(&key) else {
                 continue;
             };
-            let (Ok(bone_g), Ok(link_g)) = (globals.get(e), globals.get(link)) else {
+            let (Ok(bone_g), Ok(link_rest)) = (globals.get(e), rest_poses.get(link)) else {
                 continue;
             };
-            let offset = link_g.to_matrix().inverse() * bone_g.to_matrix();
+            // Pair against the link's REST (bind) pose, not its live transform: the
+            // body has already begun settling by now, and using the live pose would
+            // bake that sag into the offset, leaving the skin riding above the
+            // colliders. `drive_bones` then composes the LIVE link pose with this
+            // bind offset, so the mesh reproduces the bind pose at rest and tracks
+            // the physics exactly as it moves.
+            let offset = link_rest.0.to_matrix().inverse() * bone_g.to_matrix();
             commands.entity(e).insert((
                 BoneDrive { link, offset },
                 ChildOf(root),
@@ -302,6 +308,13 @@ fn pair_bones(
             "crab skin paired: env {} ({} bones driven)",
             skin.env, paired
         );
+        // Driven bones now carry absolute world poses (see module docs), so the
+        // root must be identity. attach_skins gave it the spawn translation + model
+        // scale; left in place that transform is applied a SECOND time on top of the
+        // already-world bone poses, rendering the skin offset from the physics body
+        // it drives. The model scale is already baked into each captured offset, so
+        // the skin keeps its intended size.
+        commands.entity(root).insert(Transform::default());
         skin.paired = true;
     }
 }
@@ -338,7 +351,7 @@ fn repair_skins(
             let Ok((mut drive, name)) = bones.get_mut(bone) else {
                 continue;
             };
-            if let Some(key) = bone_target(name.as_str())
+            if let Some(key) = super::rig::part_for_bone(name.as_str())
                 && let Some(&link) = link_of.get(&key)
             {
                 drive.link = link;
@@ -403,59 +416,6 @@ fn drive_bones(
     }
 }
 
-/// Map a glTF deform-bone name to the physics link it follows.
-///
-/// Model chains are finer than the physics body (6 bones per leg vs 3 links),
-/// so consecutive bones share a link: 000/000b→coxa, 001/002→femur,
-/// 003/004/005→tibia. The store's "antennae" sit where the eye stalks are —
-/// mapped to them. Everything else deformable (shell, thorax, mouth, abdomen,
-/// rostrum, palpi…) rides the carapace rigidly.
-fn bone_target(name: &str) -> Option<LinkKey> {
-    if !(name.starts_with("Def_") || name.starts_with("Ctrl_")) {
-        return None;
-    }
-    let side = if name.ends_with(".L") || name.contains(".L.") {
-        Some(Side::Left)
-    } else if name.ends_with(".R") || name.contains(".R.") {
-        Some(Side::Right)
-    } else {
-        None
-    };
-
-    if let Some(rest) = name.strip_prefix("Def_leg_0") {
-        // "N.SEG[b].SIDE", N 1-4 front to back — same order as physics 0-3.
-        let leg = rest.chars().next()?.to_digit(10)? as u8 - 1;
-        let seg = rest.get(2..5)?;
-        let side = side?;
-        // Each cosmetic bone rides the nearest policy-actuated leg link (coxa,
-        // merus, carpus); the locked stubs between them have no LinkKey, so the
-        // skin follows the closest driven link. (Driving the visual mesh off the
-        // locked links too is phase 2.)
-        let id = match seg {
-            "000" | "000b" => CrabJointId::LegCoxa(side, leg),
-            "001" | "002" | "003" => CrabJointId::LegMerus(side, leg),
-            _ => CrabJointId::LegCarpus(side, leg),
-        };
-        return Some(LinkKey::Joint(id));
-    }
-    if name.starts_with("Def_pincer") || name.starts_with("Ctrl_pincer_tail") {
-        let side = side?;
-        // 000a/000/001 = arm (shoulder), 002-005 = palm (wrist), 006* = movable jaw.
-        let id = if name.contains("006") || name.starts_with("Ctrl_pincer_tail") {
-            CrabJointId::ClawPincer(side)
-        } else if name.contains("000") || name.contains("001") {
-            CrabJointId::ClawShoulder(side)
-        } else {
-            CrabJointId::ClawWrist(side)
-        };
-        return Some(LinkKey::Joint(id));
-    }
-    // Eye-stalks and palpi are locked rig links with no actuated LinkKey, so they
-    // ride the carapace cosmetically for now (phase 2 drives them off their links).
-    // Shell, thorax, abdomen, mouth, rostrum, neck… ride the carapace too.
-    Some(LinkKey::Carapace)
-}
-
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
@@ -466,20 +426,30 @@ mod tests {
     };
     use super::super::test_util::{headless_app, tick};
     use super::super::{CrabSpawns, respawn_crab};
-    use super::{BoneDrive, CrabSkin, RenderView, SETTLE_FRAMES, apply_render_view, repair_skins};
+    use super::{
+        BoneDrive, CrabSkin, PartId, RenderView, SETTLE_FRAMES, apply_render_view, repair_skins,
+    };
 
     /// The role-resolving half of pairing: a bone name must map to the physics
-    /// link the re-pair then targets. Pins the two cases the test relies on so a
-    /// `bone_target` change can't make the re-pair test pass against the wrong link.
+    /// link the re-pair then targets. Pins the cases the test relies on so a
+    /// mapping change can't make the re-pair test pass against the wrong link —
+    /// including a now-coxa bone (`002`) that the old divergent map sent to the
+    /// merus, which is what forked the rendered legs.
     #[test]
     fn bone_names_resolve_to_expected_links() {
+        use super::super::rig::part_for_bone;
+        assert_eq!(part_for_bone("Def_shell"), Some(PartId::Carapace));
         assert_eq!(
-            super::bone_target("Def_shell"),
-            Some(super::LinkKey::Carapace)
+            part_for_bone("Def_leg_01.000.L"),
+            Some(PartId::Joint(CrabJointId::LegCoxa(Side::Left, 0)))
         );
         assert_eq!(
-            super::bone_target("Def_leg_01.000.L"),
-            Some(super::LinkKey::Joint(CrabJointId::LegCoxa(Side::Left, 0)))
+            part_for_bone("Def_leg_01.002.L"),
+            Some(PartId::Joint(CrabJointId::LegCoxa(Side::Left, 0)))
+        );
+        assert_eq!(
+            part_for_bone("Def_leg_01.003.L"),
+            Some(PartId::Joint(CrabJointId::LegMerus(Side::Left, 0)))
         );
     }
 
