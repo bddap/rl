@@ -162,6 +162,14 @@ pub struct Args {
     #[arg(long)]
     verify_colliders: bool,
 
+    /// DEV: test whether every joint pivot and collider endpoint lies INSIDE the
+    /// bind-pose mesh, via the generalized winding number against the model's
+    /// triangle soup, then exit (no window). Reports per-point winding number +
+    /// signed nearest-surface distance and ranks the worst out-of-mesh offenders.
+    /// Model is `CRAB_MODEL_PATH`, else the dev `sally.glb`.
+    #[arg(long)]
+    verify_pivots: bool,
+
     /// DEV: open the interactive collider-placement editor on this RON table, then
     /// exit. The table is seeded from the auto-fit (or resumed if it already exists);
     /// step bone-by-bone and hand-place each collider against the bind-pose mesh.
@@ -249,6 +257,11 @@ fn main() {
     // DEV verify: score the live colliders against the mesh, print, exit.
     if args.verify_colliders {
         std::process::exit(verify_colliders());
+    }
+
+    // DEV verify: test joint pivots + collider endpoints for mesh containment, exit.
+    if args.verify_pivots {
+        std::process::exit(verify_pivots());
     }
 
     // DEV editor: open the interactive collider-placement window, then exit. Builds
@@ -580,6 +593,330 @@ fn verify_colliders() -> i32 {
         }
     );
     i32::from(any_fail)
+}
+
+/// Generalized winding number of a triangle soup at `p`: `(1/4π)·Σ` of each
+/// triangle's signed solid angle, via the Van Oosterom–Strackee `atan2` formula.
+/// ≈1 (or ≈−1 for the opposite global winding) inside a closed surface, ≈0 outside,
+/// and — unlike parity ray-casting — degrades gracefully on a non-watertight mesh
+/// (fractional values reveal exactly how open it is). Sign depends on triangle
+/// orientation; the caller normalises it via the soup's signed volume sign so an
+/// interior point reads +1 regardless of CW/CCW winding.
+fn winding_number(p: Vec3, positions: &[Vec3], tris: &[[u32; 3]]) -> f32 {
+    let mut acc = 0.0f64;
+    for t in tris {
+        let a = positions[t[0] as usize] - p;
+        let b = positions[t[1] as usize] - p;
+        let c = positions[t[2] as usize] - p;
+        let (la, lb, lc) = (
+            a.length() as f64,
+            b.length() as f64,
+            c.length() as f64,
+        );
+        let num = a.dot(b.cross(c)) as f64;
+        let den = la * lb * lc
+            + (a.dot(b) as f64) * lc
+            + (b.dot(c) as f64) * la
+            + (c.dot(a) as f64) * lb;
+        acc += 2.0 * num.atan2(den);
+    }
+    (acc / (4.0 * std::f64::consts::PI)) as f32
+}
+
+/// Signed volume of the triangle soup (∑ of per-triangle tetrahedron volumes
+/// `v0·(v1×v2)/6`). Its SIGN fixes the global winding convention without needing an
+/// interior reference point: CCW-outward triangles give a positive volume and make
+/// interior winding numbers read +1; CW give negative and −1. Robust where a single
+/// "is this point inside?" probe isn't — the crab's vertex centroid lands in a
+/// cavity, so it can't be trusted to orient the sign.
+fn mesh_signed_volume(positions: &[Vec3], tris: &[[u32; 3]]) -> f64 {
+    let mut acc = 0.0f64;
+    for t in tris {
+        let v0 = positions[t[0] as usize];
+        let v1 = positions[t[1] as usize];
+        let v2 = positions[t[2] as usize];
+        acc += v0.dot(v1.cross(v2)) as f64 / 6.0;
+    }
+    acc
+}
+
+/// Unsigned distance from `p` to a triangle (`v0`,`v1`,`v2`) — the standard
+/// closest-point-on-triangle clamp. Used to report HOW FAR a query point sits from
+/// the mesh surface (the winding number gives inside/outside; this gives the depth).
+fn point_tri_distance(p: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> f32 {
+    let ab = v1 - v0;
+    let ac = v2 - v0;
+    let ap = p - v0;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return ap.length();
+    }
+    let bp = p - v1;
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return bp.length();
+    }
+    let cp = p - v2;
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return cp.length();
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return (v0 + ab * v - p).length();
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return (v0 + ac * w - p).length();
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (v1 + (v2 - v1) * w - p).length();
+    }
+    // Interior of the face: project onto its plane via barycentric weights.
+    let denom = 1.0 / (va + vb + vc);
+    let v = vb * denom;
+    let w = vc * denom;
+    (v0 + ab * v + ac * w - p).length()
+}
+
+/// Nearest unsigned surface distance from `p` over the whole triangle soup.
+fn nearest_surface_distance(p: Vec3, positions: &[Vec3], tris: &[[u32; 3]]) -> f32 {
+    let mut best = f32::INFINITY;
+    for t in tris {
+        let d = point_tri_distance(
+            p,
+            positions[t[0] as usize],
+            positions[t[1] as usize],
+            positions[t[2] as usize],
+        );
+        if d < best {
+            best = d;
+        }
+    }
+    best
+}
+
+/// DEV `--verify-pivots`: empirically test whether each joint pivot and each fitted
+/// collider endpoint lies INSIDE the crab's bind-pose visual mesh. Loads the model's
+/// triangle soup (bind-world-skinned, same frame as the bone origins + clouds), then
+/// for every query point computes the generalized winding number (inside/outside,
+/// robust to a non-watertight mesh) and the signed nearest-surface distance (how far
+/// in/out). Prints a per-link table + a worst-offender ranking, and exits 0/1.
+fn verify_pivots() -> i32 {
+    use bot::rig::RestShape;
+
+    let Some(model_path) = bot::meshfit::model_path() else {
+        eprintln!("verify-pivots: no model — set CRAB_MODEL_PATH or place sally.glb at the dev path");
+        return 1;
+    };
+    let model = match bot::meshfit::LoadedModel::load(&model_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("verify-pivots: load {model_path:?}: {e}");
+            return 1;
+        }
+    };
+    let mesh = match bot::meshfit::load_bind_mesh(&model_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("verify-pivots: load mesh {model_path:?}: {e}");
+            return 1;
+        }
+    };
+    let Some(recipe) = bot::rig::build_recipe(&model) else {
+        eprintln!("verify-pivots: model built no rig recipe");
+        return 1;
+    };
+    let pos = &mesh.positions;
+    let tris = &mesh.triangles;
+
+    let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for p in pos {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+
+    // Global winding sign from the soup's signed volume: makes interior points read
+    // +1 whatever the triangle order, without trusting any single "is this inside?"
+    // probe. The crab's vertex centroid sits in a cavity (legs splayed, hollow
+    // shell), so it reads ~0 and is useless as the orientation reference — the
+    // earlier bug. The carapace pivot (leg-hub centroid, deep in the thorax) is the
+    // honest interior probe, used below only to *report* the self-check, not to set
+    // the sign.
+    let signed_vol = mesh_signed_volume(pos, tris);
+    let orient = if signed_vol < 0.0 { -1.0 } else { 1.0 };
+
+    // A query point: its winding number normalised so inside is +1 (inside if
+    // wn>0.5), nearest surface distance, and that distance signed (+ = OUTSIDE).
+    let probe = |p: Vec3| -> (f32, f32, bool) {
+        let wn = winding_number(p, pos, tris) * orient;
+        let d = nearest_surface_distance(p, pos, tris);
+        let inside = wn > 0.5;
+        (wn, if inside { -d } else { d }, inside)
+    };
+
+    // Self-checks. Interior reference = the leg-hub centroid (the carapace pivot the
+    // rig anchors every limb to), which is solidly inside the body shell; it must
+    // read ~+1. A point 10 units past the bbox must read ~0.
+    let hub = bot::rig::rest_colliders(&model, &recipe)
+        .iter()
+        .find(|rc| rc.part == bot::meshfit::PartId::Carapace)
+        .map(|rc| rc.pivot)
+        .unwrap_or((lo + hi) * 0.5);
+    let centroid = pos.iter().copied().sum::<Vec3>() / pos.len().max(1) as f32;
+    let far = hi + (hi - lo).max(Vec3::splat(1.0)) + Vec3::splat(10.0);
+    let (hub_wn, _, _) = probe(hub);
+    let (cen_wn, _, _) = probe(centroid);
+    let (far_wn, _, _) = probe(far);
+
+    println!(
+        "mesh: {} verts, {} triangles, bbox {:.3}..{:.3}, signed_vol={:.4}",
+        pos.len(),
+        tris.len(),
+        lo,
+        hi,
+        signed_vol
+    );
+    println!(
+        "self-check: hub(interior) wn={:+.3} (expect ~+1), vertex-centroid wn={:+.3} (in a cavity → ~0 ok), far-point wn={:+.3} (expect ~0){}",
+        hub_wn,
+        cen_wn,
+        far_wn,
+        if orient < 0.0 {
+            "  [triangle winding is CW/flipped — normalised via signed volume]"
+        } else {
+            ""
+        }
+    );
+
+    println!();
+    println!("per-link containment (signed dist: + = OUTSIDE mesh, - = inside):");
+    println!(
+        "  {:<24} | {:>7} {:>8} {:>4} | {:>7} {:>8} {:>4} | {:>7} {:>8} {:>4}",
+        "link", "piv.wn", "piv.dist", "in?", "a.wn", "a.dist", "in?", "b.wn", "b.dist", "in?"
+    );
+
+    // (label, signed outside distance) for the worst-offender ranking; only OUTSIDE
+    // points (positive signed distance) are offenders. `windings` collects every
+    // query point's winding so the watertight verdict can measure how tightly they
+    // cluster at integers (clean) vs scatter fractionally (open/non-manifold).
+    let mut pivots_out = 0usize;
+    let mut endpoints_out = 0usize;
+    let mut offenders: Vec<(String, f32)> = Vec::new();
+    let mut windings: Vec<f32> = Vec::new();
+    let yn = |b: bool| if b { "IN" } else { "OUT" };
+
+    for rc in bot::rig::rest_colliders(&model, &recipe) {
+        let label = format!("{:?}", rc.part);
+        let (pwn, pdist, pin) = probe(rc.pivot);
+        windings.push(pwn);
+        if !pin {
+            pivots_out += 1;
+            offenders.push((format!("{label} pivot"), pdist));
+        }
+        match rc.shape {
+            RestShape::Capsule { a, b, .. } => {
+                let (awn, adist, ain) = probe(a);
+                let (bwn, bdist, bin) = probe(b);
+                windings.push(awn);
+                windings.push(bwn);
+                for (tag, inside, dist) in
+                    [("a", ain, adist), ("b", bin, bdist)]
+                {
+                    if !inside {
+                        endpoints_out += 1;
+                        offenders.push((format!("{label} {tag}"), dist));
+                    }
+                }
+                println!(
+                    "  {:<24} | {:>+7.3} {:>+8.4} {:>4} | {:>+7.3} {:>+8.4} {:>4} | {:>+7.3} {:>+8.4} {:>4}",
+                    label, pwn, pdist, yn(pin), awn, adist, yn(ain), bwn, bdist, yn(bin)
+                );
+            }
+            RestShape::Cuboid { center, half } => {
+                // The carapace box has no segment endpoints; test its 8 corners + the
+                // center so we still learn whether the box surface escapes the shell.
+                println!(
+                    "  {:<24} | {:>+7.3} {:>+8.4} {:>4} | {:>7} {:>8} {:>4} | {:>7} {:>8} {:>4}",
+                    label, pwn, pdist, yn(pin), "(box)", "corners", "↓", "", "", ""
+                );
+                for sx in [-1.0f32, 1.0] {
+                    for sy in [-1.0f32, 1.0] {
+                        for sz in [-1.0f32, 1.0] {
+                            let corner = center + half * Vec3::new(sx, sy, sz);
+                            let (cwn, cdist, cin) = probe(corner);
+                            windings.push(cwn);
+                            if !cin {
+                                endpoints_out += 1;
+                                offenders.push((
+                                    format!("{label} corner({sx:+.0},{sy:+.0},{sz:+.0})"),
+                                    cdist,
+                                ));
+                            }
+                            println!(
+                                "      corner ({:+.0},{:+.0},{:+.0})         | {:>+7.3} {:>+8.4} {:>4}",
+                                sx, sy, sz, cwn, cdist, yn(cin)
+                            );
+                        }
+                    }
+                }
+                let (ccwn, ccdist, ccin) = probe(center);
+                println!(
+                    "      center                       | {:>+7.3} {:>+8.4} {:>4}",
+                    ccwn, ccdist, yn(ccin)
+                );
+            }
+        }
+    }
+
+    // Watertight verdict: a clean closed mesh makes every winding land near an
+    // integer (0 outside, ±1 inside). Count query points whose winding is clearly
+    // fractional (off the nearest integer by >0.1) — many ⇒ the surface is open or
+    // non-manifold and the IN/OUT calls near the boundary are soft.
+    let fractional = windings
+        .iter()
+        .filter(|&&w| (w - w.round()).abs() > 0.1)
+        .count();
+    let clean = (hub_wn > 0.9) && (far_wn.abs() < 0.1) && fractional == 0;
+
+    offenders.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+    println!();
+    println!(
+        "watertight: {} — {}/{} query windings are fractional (off integer by >0.1); interior wn={:+.3}, exterior wn={:+.3}",
+        if clean { "CLEAN/closed" } else { "MESSY/open" },
+        fractional,
+        windings.len(),
+        hub_wn,
+        far_wn
+    );
+    println!(
+        "SUMMARY: {pivots_out} pivot(s) OUTSIDE mesh, {endpoints_out} endpoint/corner(s) OUTSIDE mesh"
+    );
+    println!("worst offenders (model units outside the surface):");
+    for (label, d) in offenders.iter().take(12) {
+        println!("  {:<34} {:+.4}", label, d);
+    }
+    if offenders.is_empty() {
+        println!("  (none — every query point is inside the mesh)");
+    }
+
+    let pass = pivots_out == 0;
+    println!(
+        "VERDICT: {}",
+        if pass {
+            "all joint pivots lie INSIDE the mesh"
+        } else {
+            "some joint pivots lie OUTSIDE the mesh — see ranking"
+        }
+    );
+    i32::from(!pass)
 }
 
 /// DEV `--bake-colliders`: load the glTF model, fit the typed collider table, and

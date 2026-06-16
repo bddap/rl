@@ -457,6 +457,12 @@ fn carapace_box(model: &LoadedModel, center: Vec3) -> (Vec3, Vec3) {
 pub(crate) struct RestCollider {
     pub part: PartId,
     pub shape: RestShape,
+    /// The link's bind-pose-world origin — where its revolute joint actually
+    /// pivots (a leaf-most link's pivot is its own bone origin). This is the
+    /// physical pivot the body spawns at, recovered from the same world walk that
+    /// builds the shape, so it can't drift from `joint_specs`'s pivot bone names.
+    /// For the carapace it's the leg-hub root the box is offset from.
+    pub pivot: Vec3,
 }
 
 pub(crate) enum RestShape {
@@ -493,6 +499,7 @@ pub(crate) fn rest_colliders(model: &LoadedModel, recipe: &RigRecipe) -> Vec<Res
                     b: c + axis,
                     radius: link.radius,
                 },
+                pivot: origin,
             });
         }
     }
@@ -502,6 +509,7 @@ pub(crate) fn rest_colliders(model: &LoadedModel, recipe: &RigRecipe) -> Vec<Res
             center: o_root + recipe.carapace_offset,
             half: recipe.carapace_half,
         },
+        pivot: o_root,
     });
     out
 }
