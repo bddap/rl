@@ -144,26 +144,7 @@ impl LoadedModel {
                 .collect();
             for ((p, j), w) in positions.iter().zip(&joints).zip(&weights) {
                 let raw = Vec3::from_array(*p);
-                // Bind-pose WORLD position: blend the influencing joints' bind
-                // transforms (bindWorld · invBind) by skin weight — the same skinning
-                // math the renderer uses, so the cloud sits where the visible mesh is.
-                let mut world = Vec3::ZERO;
-                let mut wsum = 0.0f32;
-                for lane in 0..4 {
-                    let wt = w[lane];
-                    if wt <= 0.0 {
-                        continue;
-                    }
-                    let ji = j[lane] as usize;
-                    let jm = bind_world
-                        .get(&joint_nodes[ji])
-                        .copied()
-                        .unwrap_or(Mat4::IDENTITY)
-                        * inv_binds[ji];
-                    world += wt * jm.transform_point3(raw);
-                    wsum += wt;
-                }
-                let pos = if wsum > 1e-6 { world / wsum } else { raw };
+                let pos = skin_to_bind_world(raw, *j, *w, &bind_world, &joint_nodes, &inv_binds);
                 // Dominant influence tags the vertex for per-part bucketing.
                 let (lane, &wmax) = w
                     .iter()
@@ -252,6 +233,125 @@ impl LoadedModel {
             (trans, rot)
         })
     }
+}
+
+/// The model's surface as a triangle soup in bind-pose WORLD space: every vertex
+/// skinned to where the renderer puts it, plus the triangle index list. Unlike
+/// [`LoadedModel`]'s per-part `verts` (bucketed, no connectivity), this keeps the
+/// global vertex order and the indices, so the triangles can be reconstructed for a
+/// point-in-mesh test. Multiple mesh primitives are concatenated with their indices
+/// offset, yielding one global soup.
+pub struct BindMesh {
+    pub positions: Vec<Vec3>,
+    pub triangles: Vec<[u32; 3]>,
+}
+
+/// Parse a GLB into its bind-pose-world triangle soup ([`BindMesh`]): same skin math
+/// as [`LoadedModel::load`] (via [`skin_to_bind_world`]) so the surface lands in the
+/// exact frame the per-part clouds and bone origins live in, but retaining triangle
+/// connectivity. A primitive with no index buffer is treated as a flat triangle list
+/// (indices 0,1,2,…); per-primitive indices are offset by the running vertex base so
+/// the concatenated soup stays consistent.
+pub fn load_bind_mesh(path: &std::path::Path) -> Result<BindMesh, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path:?}: {e}"))?;
+    let gltf = gltf::Gltf::from_slice(&bytes).map_err(|e| format!("parse glb: {e}"))?;
+    let blob = gltf.blob.as_deref().ok_or("GLB has no binary chunk")?;
+
+    let mut bind_world: HashMap<usize, Mat4> = HashMap::new();
+    for scene in gltf.scenes() {
+        for node in scene.nodes() {
+            compose_world(&node, Mat4::IDENTITY, &mut bind_world);
+        }
+    }
+
+    let skin = gltf.skins().next().ok_or("model has no skin")?;
+    let joint_nodes: Vec<usize> = skin.joints().map(|j| j.index()).collect();
+    let inv_binds: Vec<Mat4> = skin
+        .reader(|buf| (buf.index() == 0).then_some(blob))
+        .read_inverse_bind_matrices()
+        .map(|it| it.map(|m| Mat4::from_cols_array_2d(&m)).collect())
+        .unwrap_or_else(|| vec![Mat4::IDENTITY; joint_nodes.len()]);
+
+    let mesh = gltf.meshes().next().ok_or("model has no mesh")?;
+    let mut positions: Vec<Vec3> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    for prim in mesh.primitives() {
+        let reader = prim.reader(|buf| (buf.index() == 0).then_some(blob));
+        let raw_positions: Vec<[f32; 3]> = reader
+            .read_positions()
+            .ok_or("primitive has no POSITION")?
+            .collect();
+        let joints: Vec<[u16; 4]> = reader
+            .read_joints(0)
+            .ok_or("primitive has no JOINTS_0")?
+            .into_u16()
+            .collect();
+        let weights: Vec<[f32; 4]> = reader
+            .read_weights(0)
+            .ok_or("primitive has no WEIGHTS_0")?
+            .into_f32()
+            .collect();
+
+        let base = positions.len() as u32;
+        for ((p, j), w) in raw_positions.iter().zip(&joints).zip(&weights) {
+            positions.push(skin_to_bind_world(
+                Vec3::from_array(*p),
+                *j,
+                *w,
+                &bind_world,
+                &joint_nodes,
+                &inv_binds,
+            ));
+        }
+
+        // Offset this primitive's indices into the global vertex range. An indexless
+        // primitive is an implicit 0,1,2,… triangle list over its own vertices.
+        let local: Vec<u32> = match reader.read_indices() {
+            Some(idx) => idx.into_u32().collect(),
+            None => (0..raw_positions.len() as u32).collect(),
+        };
+        for tri in local.chunks_exact(3) {
+            triangles.push([base + tri[0], base + tri[1], base + tri[2]]);
+        }
+    }
+
+    Ok(BindMesh {
+        positions,
+        triangles,
+    })
+}
+
+/// Skin one raw mesh vertex to its bind-pose WORLD position: the weighted blend of
+/// each influencing joint's `bindWorld · invBind`, the same linear-blend skinning
+/// the renderer runs. Factored out so the per-part cloud ([`LoadedModel::load`]) and
+/// the triangle-soup loader ([`load_bind_mesh`]) skin identically — a point-in-mesh
+/// test is only meaningful if its query points and its surface share one frame, so
+/// the two paths must not drift.
+fn skin_to_bind_world(
+    raw: Vec3,
+    joints: [u16; 4],
+    weights: [f32; 4],
+    bind_world: &HashMap<usize, Mat4>,
+    joint_nodes: &[usize],
+    inv_binds: &[Mat4],
+) -> Vec3 {
+    let mut world = Vec3::ZERO;
+    let mut wsum = 0.0f32;
+    for lane in 0..4 {
+        let wt = weights[lane];
+        if wt <= 0.0 {
+            continue;
+        }
+        let ji = joints[lane] as usize;
+        let jm = bind_world
+            .get(&joint_nodes[ji])
+            .copied()
+            .unwrap_or(Mat4::IDENTITY)
+            * inv_binds[ji];
+        world += wt * jm.transform_point3(raw);
+        wsum += wt;
+    }
+    if wsum > 1e-6 { world / wsum } else { raw }
 }
 
 /// Recursively compose `parent_world * node_local` for a node and its subtree,
