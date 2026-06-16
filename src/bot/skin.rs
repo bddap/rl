@@ -427,29 +427,32 @@ fn bone_target(name: &str) -> Option<LinkKey> {
         let leg = rest.chars().next()?.to_digit(10)? as u8 - 1;
         let seg = rest.get(2..5)?;
         let side = side?;
+        // Each cosmetic bone rides the nearest policy-actuated leg link (coxa,
+        // merus, carpus); the locked stubs between them have no LinkKey, so the
+        // skin follows the closest driven link. (Driving the visual mesh off the
+        // locked links too is phase 2.)
         let id = match seg {
-            "000" => CrabJointId::LegCoxa(side, leg),
-            "001" | "002" => CrabJointId::LegFemur(side, leg),
-            _ => CrabJointId::LegTibia(side, leg),
+            "000" | "000b" => CrabJointId::LegCoxa(side, leg),
+            "001" | "002" | "003" => CrabJointId::LegMerus(side, leg),
+            _ => CrabJointId::LegCarpus(side, leg),
         };
         return Some(LinkKey::Joint(id));
     }
     if name.starts_with("Def_pincer") || name.starts_with("Ctrl_pincer_tail") {
         let side = side?;
-        // 000a/000/001 = arm, 002-005 = palm + fixed jaw, 006* = movable jaw.
+        // 000a/000/001 = arm (shoulder), 002-005 = palm (wrist), 006* = movable jaw.
         let id = if name.contains("006") || name.starts_with("Ctrl_pincer_tail") {
             CrabJointId::ClawPincer(side)
         } else if name.contains("000") || name.contains("001") {
-            CrabJointId::ClawUpper(side)
+            CrabJointId::ClawShoulder(side)
         } else {
-            CrabJointId::ClawFore(side)
+            CrabJointId::ClawWrist(side)
         };
         return Some(LinkKey::Joint(id));
     }
-    if name.starts_with("Def_antennae") {
-        return Some(LinkKey::Joint(CrabJointId::EyeStalk(side?)));
-    }
-    // Shell, thorax, abdomen, mouth, palpi, rostrum, neck… ride the carapace.
+    // Eye-stalks and palpi are locked rig links with no actuated LinkKey, so they
+    // ride the carapace cosmetically for now (phase 2 drives them off their links).
+    // Shell, thorax, abdomen, mouth, rostrum, neck… ride the carapace too.
     Some(LinkKey::Carapace)
 }
 

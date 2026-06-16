@@ -7,20 +7,14 @@ use bevy::prelude::*;
 use bevy_rapier3d::plugin::context::RapierRigidBodySet;
 use bevy_rapier3d::prelude::*;
 
-use super::body::{CrabBodyPart, CrabBodySource};
+use super::body::CrabBodyPart;
 use super::{BotPlugin, NumEnvs};
 use crate::Visuals;
 use crate::physics::PhysicsWorldPlugin;
 
-/// The default hand-coded headless app.
+/// A windowless, GPU-less app running the real physics + bot plugins, one fixed
+/// tick per `app.update()`. The crab is the rig-derived one model.
 pub fn headless_app() -> App {
-    headless_app_with_body(CrabBodySource::HandCoded)
-}
-
-/// Headless app with an explicit body source — `Fitted` exercises the baked
-/// collider path (e.g. the mesh-fit world-pose gate). The source is inserted
-/// before `BotPlugin`, the ordering `CrabAssets::from_world` requires.
-pub fn headless_app_with_body(source: CrabBodySource) -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -47,8 +41,6 @@ pub fn headless_app_with_body(source: CrabBodySource) -> App {
     ));
     app.insert_resource(Visuals(false))
         .insert_resource(NumEnvs(1))
-        // Body source before BotPlugin: CrabAssets reads it at build (FromWorld).
-        .insert_resource(source)
         // Same fixed timestep as production (one source — see physics::fixed_timestep)
         // so tests can't pass under physics the demo/training run never uses.
         .insert_resource(crate::physics::fixed_timestep())

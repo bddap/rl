@@ -21,7 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::TrainConfig;
 use crate::bot::actuator::CrabActions;
-use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
+use crate::bot::body::{
+    CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId, CrabEyeTip, CrabJointId,
+};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns, respawn_crab};
@@ -1010,12 +1012,16 @@ pub(crate) fn ppo_update_core(
 }
 
 /// Effort tax weight `K` and exponent `L` in `reward = h − K·Σ|aᵢ|^L` (owner's
-/// form): eye height rewarded directly, commanded effort taxed. `K` is small so a
+/// form): carapace pose (height × uprightness) rewarded directly, commanded effort
+/// taxed. `K` is small so a
 /// calm stand is barely taxed; `L`=2 is cheap for honest moderate commands and
 /// steep for max-torque flailing. `K` is provisional — tune from the per-episode
 /// effort log so a moderate stand clears a lie-down while saturation-seeking stays
-/// punished.
-const EFFORT_COST: f32 = 0.02;
+/// punished. The rig body holds itself up by ACTIVE leg actuation (no penetration
+/// prop welding the legs into the carapace, as the old hand-coded body had), so a
+/// true stand's Σ|aᵢ|² is large — too steep a `K` makes a low-effort list
+/// out-reward standing, and the policy correctly learns to lie there.
+const EFFORT_COST: f32 = 0.007;
 const EFFORT_EXP: f32 = 2.0;
 
 /// Per-output effort tax `f(a) = |a|^L`, summed over the RAW network outputs
@@ -1030,18 +1036,21 @@ pub(crate) fn action_effort(raw_actions: &[f32; ACTION_SIZE]) -> f32 {
     raw_actions.iter().map(|a| a.abs().powf(EFFORT_EXP)).sum()
 }
 
-/// Reward: mean eye height rewarded, commanded effort taxed —
-/// `reward = h − K·Σ|aᵢ|^L`. Both signals are global, so behaviour still EMERGES
-/// rather than being hand-specified (owner's call: mechanical terms like "feet
-/// on the ground" don't scale).
+/// Reward: carapace pose rewarded, commanded effort taxed —
+/// `reward = (h·u) − K·Σ|aᵢ|^L`, where `h` is the carapace's world height and `u`
+/// its uprightness (carapace up · world Y). Both signals are global, so behaviour
+/// still EMERGES rather than being hand-specified (owner's call: mechanical terms
+/// like "feet on the ground" don't scale).
 ///
-/// The eyes sit at the top of the kinematic chain (carapace → stalk → eye), so a
-/// high eye reading needs the carapace both LEVEL (stalks point up) and HIGH (legs
-/// extended underneath) — i.e. standing. Over a long episode the summed return
-/// favours SUSTAINED height. `effort` is [`action_effort`]: the policy is
-/// charged for how hard it commands, so flailing costs whatever motion it buys.
-fn compute_reward(mean_eye_height: f32, effort: f32) -> f32 {
-    mean_eye_height - EFFORT_COST * effort
+/// `h·u` is high only when the carapace is BOTH elevated (legs extended underneath)
+/// and LEVEL (up·Y → 1) — i.e. standing. An earlier eye-tip-height proxy was gamed:
+/// the policy reared the body to point the long eye-stalks up (cheap height) without
+/// standing level. Reading the carapace instead, gated by uprightness, removes that
+/// stalk lever. Over a long episode the summed return favours a SUSTAINED pose.
+/// `effort` is [`action_effort`]: the policy is charged for how hard it commands, so
+/// flailing costs whatever motion it buys.
+fn compute_reward(pose_height: f32, effort: f32) -> f32 {
+    pose_height - EFFORT_COST * effort
 }
 
 /// System: runs the brain to produce actions each physics step.
@@ -1052,7 +1061,7 @@ pub fn brain_step(
     mut actions: ResMut<CrabActions>,
     carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
     parts_q: Query<(&CrabEnvId, &bevy_rapier3d::prelude::Velocity), With<CrabBodyPart>>,
-    eyes_q: Query<(&CrabJoint, &CrabEnvId, &Transform)>,
+    eyes_q: Query<(&CrabEnvId, &Transform), With<CrabEyeTip>>,
     mut exit: MessageWriter<AppExit>,
     mut rescued: MessageReader<CrabRescued>,
 ) {
@@ -1193,10 +1202,8 @@ pub fn brain_step(
         }
     }
     let mut eye_sums: Vec<(f32, u32)> = vec![(0.0, 0); n];
-    for (joint, env, eye) in eyes_q.iter() {
-        if matches!(joint.id, CrabJointId::EyeStalk(_))
-            && let Some(s) = eye_sums.get_mut(env.0)
-        {
+    for (env, eye) in eyes_q.iter() {
+        if let Some(s) = eye_sums.get_mut(env.0) {
             s.0 += eye.translation.y;
             s.1 += 1;
         }
@@ -1236,14 +1243,17 @@ pub fn brain_step(
             }
         } else {
             let (height, upright) = poses[e].expect("poses[e].is_none() handled above");
-            // Mean world-space height of the eye tips, taxed by commanded effort.
-            let (sum, cnt) = eye_sums[e];
-            let mean_eye_height = if cnt > 0 { sum / cnt as f32 } else { height };
+            // Carapace pose reward: world height scaled by uprightness. The earlier
+            // eye-tip-height proxy was gamed — the policy reared the body up to lift
+            // the long eye-stalks (cheap height) instead of standing level — so reward
+            // the carapace pose directly: only a LEVEL (up·Y → 1) and HIGH carapace
+            // scores, and a tilted rear-brace is discounted by its low up·Y. (eye_sums
+            // is still gathered above, unused, while this proxy is on trial.)
             // NOTE: the height term reads s_t (this tick is pre-physics), so it
             // is one tick out of phase with the action it pairs with; the effort
             // term is correctly phased. Small, deliberately deferred — see
             // https://github.com/bddap/rl/issues/15.
-            let reward = compute_reward(mean_eye_height, efforts[e]);
+            let reward = compute_reward(height * upright.max(0.0), efforts[e]);
             // Termination is survival guards only — jumping, flipping, and
             // any other strategy the policy invents are legitimate solutions
             // (owner call: emergent behavior is the point). The height band
@@ -1463,12 +1473,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reward_increases_with_eye_height() {
-        // Higher eyes (standing/reared) must score strictly above low eyes
-        // (collapsed/flat) at equal effort.
+    fn reward_increases_with_pose_height() {
+        // A higher carapace pose score `h·u` (standing) must score strictly above a
+        // low one (collapsed/flat/tilted) at equal effort.
         assert!(
             compute_reward(1.2, 0.0) > compute_reward(0.2, 0.0),
-            "reward must increase with eye height"
+            "reward must increase with carapace pose height"
         );
     }
 
@@ -1792,7 +1802,7 @@ mod tests {
         ));
         app.insert_resource(Visuals(false))
             .insert_resource(NumEnvs(1))
-            // No CrabBodySource inserted: CrabAssets defaults to hand-coded.
+            // CrabAssets builds the rig-derived one model (no body-source switch).
             // Same fixed timestep as production (one source — see physics::fixed_timestep)
             // so this test runs the physics the demo/training loop actually uses.
             .insert_resource(crate::physics::fixed_timestep())

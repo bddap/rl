@@ -39,7 +39,12 @@ impl Default for PpoConfig {
             gamma: 0.99,
             lambda: 0.95,
             clip_epsilon: 0.2,
-            entropy_coeff: 0.01, // Per-dim mean entropy (not sum), so this is scale-invariant
+            // Per-dim mean entropy (not sum), so scale-invariant. Kept small: near a
+            // converged pose the reward gradient goes flat, and a larger bonus then
+            // overpowers it and inflates the action distribution until the stand
+            // dissolves into noise (observed at 0.01 — entropy ran away late-training,
+            // reward eroded). 0.003 still explores early but won't run away.
+            entropy_coeff: 0.003,
             value_coeff: 0.5,
             learning_rate: 3e-4,
             epochs_per_update: 4,

@@ -44,7 +44,6 @@ pub fn apply_actions(
     mut forces: Query<(Entity, &mut ExternalForce), With<CrabBodyPart>>,
 ) {
     let mut torque: HashMap<Entity, Vec3> = HashMap::new();
-    let mut force: HashMap<Entity, Vec3> = HashMap::new();
 
     for (child, joint, env, mj) in joints.iter() {
         let Some(values) = actions.envs.get(env.0) else {
@@ -60,41 +59,20 @@ pub fn apply_actions(
         let Ok(parent_tf) = transforms.get(mj.parent) else {
             continue;
         };
-        // The joint's free axis lives in the parent body frame; rotate it into
-        // the world. The couple is equal and opposite, so it is a pure internal
-        // joint torque — no net external wrench on the crab.
-        let world_axis = parent_tf.rotation * id.joint_axis_local();
+        // Every joint is revolute (the pincer too): the free axis lives in the
+        // parent body frame, so rotate it into world and push an equal-and-opposite
+        // torque couple on child and parent — a free vector, internal by
+        // construction (zero net torque/force on the crab).
+        let world_axis = parent_tf.rotation * joint.axis_local;
         let wrench = world_axis * (a * id.drive_torque_ceiling());
-        match id {
-            // Prismatic pincer: a linear force couple. +F on the child and −F on
-            // the parent act at the two bodies' COMs, which are offset by `d`, so
-            // the pair carries a net torque d×F — a momentum leak that lets the
-            // policy pump the pincers to spin the whole crab mid-air. Cancel it by
-            // shifting the parent's −F onto the child's line of action: −F at the
-            // parent COM plus the torque (child_COM − parent_COM)×(−F) is
-            // equivalent to −F acting through the child COM, collinear with the +F
-            // there, so the couple's net torque is zero. (COMs ≈ the entity
-            // origins: every crab collider is centred on its body.)
-            CrabJointId::ClawPincer(_) => {
-                let Ok(child_tf) = transforms.get(child) else {
-                    continue;
-                };
-                let d = child_tf.translation - parent_tf.translation;
-                *force.entry(child).or_default() += wrench;
-                *force.entry(mj.parent).or_default() -= wrench;
-                *torque.entry(mj.parent).or_default() += d.cross(-wrench);
-            }
-            // Revolute joints push an equal-and-opposite torque couple — a free
-            // vector, so it is internal (zero net torque) by construction.
-            _ => {
-                *torque.entry(child).or_default() += wrench;
-                *torque.entry(mj.parent).or_default() -= wrench;
-            }
-        }
+        *torque.entry(child).or_default() += wrench;
+        *torque.entry(mj.parent).or_default() -= wrench;
     }
 
+    // Force stays zero here (no linear actuators); the carapace's demo poke runs
+    // after this system and adds to it.
     for (e, mut ef) in forces.iter_mut() {
-        ef.force = force.get(&e).copied().unwrap_or(Vec3::ZERO);
+        ef.force = Vec3::ZERO;
         ef.torque = torque.get(&e).copied().unwrap_or(Vec3::ZERO);
     }
 }
