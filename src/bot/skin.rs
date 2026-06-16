@@ -43,10 +43,6 @@ use super::meshfit::PartId;
 #[derive(Resource)]
 pub struct CrabModel {
     scene: Handle<Scene>,
-    /// Uniform model scale; the bind pose is captured scaled, so bone offsets
-    /// inherit it. The model's own proportions don't exactly match the physics
-    /// body — this trades carapace fit against leg reach (`CRAB_MODEL_SCALE`).
-    scale: f32,
 }
 
 /// Which render layers are shown. The crab is drawn twice — primitive part
@@ -158,17 +154,11 @@ pub fn register(app: &mut App) {
         _ if std::env::var("RL_SKIN_OVERLAY").is_ok_and(|v| v == "1") => RenderView::Both,
         _ => RenderView::Pretty,
     };
-    // 1.2 seats the Sally model's shorter legs/shell on this physics body best
-    // (judged by RL_SKIN_OVERLAY screenshots at 1.0/1.2).
-    let scale = std::env::var("CRAB_MODEL_SCALE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1.2);
     let scene = app
         .world()
         .resource::<AssetServer>()
         .load(GltfAssetLabel::Scene(0).from_asset(path));
-    app.insert_resource(CrabModel { scene, scale });
+    app.insert_resource(CrabModel { scene });
     app.insert_resource(view);
     app.add_systems(Update, (attach_skins, reap_orphan_skins, apply_render_view));
     app.add_systems(
@@ -199,8 +189,7 @@ fn attach_skins(
         // physics crab, so the root sits on the ground under the carapace.
         commands.spawn((
             SceneRoot(model.scene.clone()),
-            Transform::from_translation(Vec3::new(t.translation.x, 0.0, t.translation.z))
-                .with_scale(Vec3::splat(model.scale)),
+            Transform::from_translation(Vec3::new(t.translation.x, 0.0, t.translation.z)),
             // Hidden until paired: until then it would be a bind-pose statue.
             Visibility::Hidden,
             CrabSkin {
@@ -309,11 +298,9 @@ fn pair_bones(
             skin.env, paired
         );
         // Driven bones now carry absolute world poses (see module docs), so the
-        // root must be identity. attach_skins gave it the spawn translation + model
-        // scale; left in place that transform is applied a SECOND time on top of the
-        // already-world bone poses, rendering the skin offset from the physics body
-        // it drives. The model scale is already baked into each captured offset, so
-        // the skin keeps its intended size.
+        // root must be identity. attach_skins gave it the spawn translation; left in
+        // place that transform would be applied a SECOND time on top of the
+        // already-world bone poses, rendering the skin offset from the physics body.
         commands.entity(root).insert(Transform::default());
         skin.paired = true;
     }
