@@ -300,8 +300,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, scene: Res<Scen
         },
         Transform::from_xyz(4.0, 8.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
-    // Raw glTF scene at scale 1.0 (NOT the skin's 1.2) — no animation drives the
-    // bones, so it renders in bind pose, the frame the colliders are authored in.
+    // Raw glTF scene at native scale — no animation drives the bones, so it renders
+    // in bind pose, the frame the colliders are authored in.
     commands.spawn((
         SceneRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(scene.0.clone()))),
         Transform::IDENTITY,
@@ -716,10 +716,10 @@ fn drag3(
 
 /// Serialize the current placements to the output RON. The output IS the session's
 /// accumulated work, so two guards protect it: (1) the table is re-parsed with the
-/// loader's own validation before anything is written — a save that `--body fitted`
-/// or a re-open couldn't load back is silently-lost work, so it's blocked, not
-/// written; (2) the write is atomic (temp + rename) so a crash mid-write can't
-/// truncate the existing file. Mirrors `training::session`'s checkpoint writes.
+/// loader's own validation before anything is written — a save a re-open couldn't
+/// load back is silently-lost work, so it's blocked, not written; (2) the write is
+/// atomic (temp + rename) so a crash mid-write can't truncate the existing file.
+/// Mirrors `training::session`'s checkpoint writes.
 fn save(editor: &mut Editor) {
     let parts: Vec<FittedPart> = editor.parts.iter().map(EditPart::to_fitted).collect();
     let body = FittedBody {
