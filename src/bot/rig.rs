@@ -1,33 +1,39 @@
-//! Derives the crab's physics body straight from the bind-pose skeleton of the
-//! glTF model: one physics link per deform bone, with joint anchors, free axes,
-//! and capsule colliders read off the rig. This is the single source of the
-//! body's geometry — replacing the old hand-coded segment lengths — so the visual
-//! mesh and the physics share one coordinate space.
+//! Derives the crab's physics body from the bind-pose skeleton of the glTF model:
+//! one rigid link per actuated joint, each with a capsule collider fitted to that
+//! joint's vertex cloud, plus a carapace box for the trunk. This is the single
+//! source of the body's geometry, so the physics, the visual skin, and the
+//! collider fit all share one coordinate space.
 //!
-//! Only the locomotion-relevant joints (a leg's coxa/merus/carpus, a claw's
-//! shoulder/wrist/pincer) are policy-actuated; those carry a [`CrabJointId`]. The
-//! rest of the rig (the proximal leg stubs, claw mid-segments, eye-stalks, palpi)
-//! spawn as locked links, so the body articulates like a real Sally without
-//! ballooning the action space. Promote a locked joint by giving its segment an
-//! actuation mapping below and a [`CrabJointId`] variant.
+//! [`joint_specs`] is the canonical decomposition of the rig into physics parts:
+//! every consumer — the body spawn here, the skin ([`super::skin`]), and the
+//! per-part vertex bucketing ([`super::meshfit`]) — derives its bone→part view
+//! from it via [`part_for_bone`]. They can't drift, because there is only one
+//! mapping; mismatched hand-kept copies of it are what forked the rendered legs.
+//!
+//! A leg's six rig bones collapse to three physics links: the proximal cluster
+//! (`000`/`000b`/`001`/`002`) is one rigid coxa that swings at the body, then the
+//! merus and carpus bend. Only those three joints articulate in a real Sally, so
+//! the intermediate bones ride their link rather than spawning as locked stubs —
+//! that bookkeeping bought nothing and left the skin with undriven bones.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use bevy::prelude::*;
 
 use super::body::{CrabJointId, Side};
-use super::meshfit::LoadedModel;
-
-// Capsule radii by limb family (model units). Rough placeholders; the fitted
-// collider pass (bddap/rl#16) refines them against the vertex cloud.
-const LEG_RADIUS: f32 = 0.03;
-const CLAW_RADIUS: f32 = 0.04;
-const EYE_RADIUS: f32 = 0.03;
-const PALP_RADIUS: f32 = 0.02;
+use super::meshfit::{LoadedModel, PartId};
 
 const LEG_DENSITY: f32 = 8.0;
 const CLAW_DENSITY: f32 = 1.0;
 const EYE_DENSITY: f32 = 0.5;
-const PALP_DENSITY: f32 = 0.5;
 const CARAPACE_DENSITY: f32 = 5.0;
+
+/// Eye-stalks carry no policy joint and aren't load-bearing, so there's no cloud
+/// worth fitting — a fixed thin radius is honest for a cosmetic stalk.
+const EYE_RADIUS: f32 = 0.03;
+/// Fallback radius when a joint's vertex cloud is too sparse to fit.
+const FALLBACK_RADIUS: f32 = 0.03;
 
 /// A [`RigLink::parent`] of `CARAPACE` means the link hangs off the carapace root
 /// rather than another link.
@@ -36,7 +42,7 @@ pub const CARAPACE: usize = usize::MAX;
 /// One physics link to spawn, fully derived from the bind pose. Links are emitted
 /// parent-before-child, so `parent` indexes an earlier entry (or [`CARAPACE`]).
 pub struct RigLink {
-    /// The deform bone this link stands in for (skin mapping + debugging).
+    /// The deform bone at this link's joint pivot (skin mapping + debugging).
     pub bone: String,
     pub parent: usize,
     /// Joint pivot relative to the parent link's origin. Links spawn axis-aligned
@@ -57,15 +63,31 @@ pub struct RigLink {
     pub density: f32,
     /// `Some` → policy-actuated: carries a `CrabJoint`, a revolute joint, and an
     /// observation/action slot. `None` → locked (fixed joint, no `CrabJoint`,
-    /// invisible to the policy).
+    /// invisible to the policy — the eye-stalks).
     pub actuated: Option<CrabJointId>,
 }
 
 /// The full body recipe: a carapace root box plus the derived link chain.
 pub struct RigRecipe {
     pub carapace_half: Vec3,
+    /// Box centre relative to the body root (the leg-hub centroid the links anchor
+    /// to). The trunk's bounding box isn't centred on the leg hub, so the carapace
+    /// collider is offset to sit on the shell instead of engulfing the limbs.
+    pub carapace_offset: Vec3,
     pub carapace_density: f32,
     pub links: Vec<RigLink>,
+}
+
+/// One actuated joint, located against the bind-pose skeleton. The capsule runs
+/// from `pivot` to `tip` (or stubs forward when `tip` is `None`, for a leaf like
+/// the pincer finger); `members` are every deform bone whose flesh and skin ride
+/// this link, used to bucket the vertex cloud the collider radius is fitted to.
+struct JointSpec {
+    id: CrabJointId,
+    pivot: String,
+    tip: Option<String>,
+    members: Vec<String>,
+    density: f32,
 }
 
 fn side_tag(side: Side) -> &'static str {
@@ -75,43 +97,197 @@ fn side_tag(side: Side) -> &'static str {
     }
 }
 
-/// Leg chain proximal→distal. `005` is the root-parented foot-tip helper (not a
-/// serial joint), used only as the distal target for the last segment's collider.
-const LEG_BONES: [&str; 6] = ["000", "000b", "001", "002", "003", "004"];
-/// Claw chain proximal→distal: arm (`000a`..`006b`) then the movable pincer finger.
-const CLAW_BONES: [&str; 9] = [
-    "000a", "000", "001", "002", "003", "004", "005", "006b", "006",
-];
-
-/// Which joint a leg-chain segment actuates (`None` = locked). Coxa swings the leg
-/// off the body; the merus and carpus are the two load-bearing bends. The three
-/// proximal stubs barely move in a real crab, so they ride locked.
-fn leg_actuation(side: Side, leg: u8, seg: usize) -> Option<CrabJointId> {
-    match seg {
-        0 => Some(CrabJointId::LegCoxa(side, leg)),
-        4 => Some(CrabJointId::LegMerus(side, leg)),
-        5 => Some(CrabJointId::LegCarpus(side, leg)),
-        _ => None,
+/// The canonical rig decomposition: one chain of actuated joints per limb. Bones
+/// are bracketed by chain position — a joint owns every deform bone from its pivot
+/// up to the next joint's pivot — so flesh, skin, and collider all agree on which
+/// link a bone belongs to. Bracket choices are verified against the collider
+/// screenshots, not derived; adjust a `members`/`tip` if a capsule misses its mesh.
+fn joint_specs() -> Vec<Vec<JointSpec>> {
+    let mut chains = Vec::new();
+    for side in [Side::Left, Side::Right] {
+        let s = side_tag(side);
+        // Legs: front→back, same 0..3 order as the policy. The long coxa swings at
+        // the body; the merus and carpus are the two load-bearing distal bends.
+        for leg in 0u8..4 {
+            let b = |seg: &str| format!("Def_leg_0{}.{}.{}", leg + 1, seg, s);
+            chains.push(vec![
+                JointSpec {
+                    id: CrabJointId::LegCoxa(side, leg),
+                    pivot: b("000"),
+                    tip: Some(b("003")),
+                    members: vec![b("000"), b("000b"), b("001"), b("002")],
+                    density: LEG_DENSITY,
+                },
+                JointSpec {
+                    id: CrabJointId::LegMerus(side, leg),
+                    pivot: b("003"),
+                    tip: Some(b("004")),
+                    members: vec![b("003")],
+                    density: LEG_DENSITY,
+                },
+                JointSpec {
+                    id: CrabJointId::LegCarpus(side, leg),
+                    pivot: b("004"),
+                    tip: Some(b("005")),
+                    members: vec![b("004"), b("005")],
+                    density: LEG_DENSITY,
+                },
+            ]);
+        }
+        // Claw: the long arm (shoulder) swings at the body, the wrist bends the
+        // hand, and the pincer is the movable finger (`006`) against the fixed
+        // pollex (`006b`).
+        let p = |seg: &str| format!("Def_pincer.{}.{}", seg, s);
+        chains.push(vec![
+            JointSpec {
+                id: CrabJointId::ClawShoulder(side),
+                pivot: p("000a"),
+                tip: Some(p("006b")),
+                members: vec![
+                    p("000a"),
+                    p("000"),
+                    p("001"),
+                    p("002"),
+                    p("003"),
+                    p("004"),
+                    p("005"),
+                ],
+                density: CLAW_DENSITY,
+            },
+            JointSpec {
+                id: CrabJointId::ClawWrist(side),
+                pivot: p("006b"),
+                tip: Some(p("006")),
+                members: vec![p("006b")],
+                density: CLAW_DENSITY,
+            },
+            JointSpec {
+                id: CrabJointId::ClawPincer(side),
+                pivot: p("006"),
+                tip: None,
+                members: vec![p("006"), format!("Ctrl_pincer_tail.{s}")],
+                density: CLAW_DENSITY,
+            },
+        ]);
     }
+    chains
 }
 
-/// Which joint a claw-chain segment actuates: shoulder at the body, wrist at the
-/// hand, and the movable pincer finger. The arm mid-segments ride locked.
-fn claw_actuation(side: Side, seg: usize) -> Option<CrabJointId> {
-    match seg {
-        0 => Some(CrabJointId::ClawShoulder(side)),
-        7 => Some(CrabJointId::ClawWrist(side)),
-        8 => Some(CrabJointId::ClawPincer(side)),
-        _ => None,
+/// The bone→part lookup, built once from [`joint_specs`]. A bone that names a
+/// joint member maps to that joint; this is the live half of the one mapping.
+fn member_map() -> &'static HashMap<String, PartId> {
+    static MAP: OnceLock<HashMap<String, PartId>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut m = HashMap::new();
+        for chain in joint_specs() {
+            for spec in chain {
+                for bone in spec.members {
+                    m.insert(bone, PartId::Joint(spec.id));
+                }
+            }
+        }
+        m
+    })
+}
+
+/// Map a deform/control bone to the physics part it drives — the one mapping every
+/// consumer shares. A bone listed in a [`JointSpec`] rides that joint's link;
+/// every other rig bone (shell, thorax, eyes, palpi, mouth…) rides the carapace.
+/// Returns `None` only for non-rig nodes (no `Def_`/`Ctrl_` prefix).
+pub fn part_for_bone(name: &str) -> Option<PartId> {
+    if !(name.starts_with("Def_") || name.starts_with("Ctrl_")) {
+        return None;
     }
+    Some(member_map().get(name).copied().unwrap_or(PartId::Carapace))
 }
 
 /// Build the whole-body recipe from the model's bind pose, or `None` if the model
 /// lacks the expected bones.
 pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
-    // Body centre = the centroid of the eight leg roots (bone `000`), the hub the
-    // limbs hang off: symmetric in x, mid-height in y. Carapace-relative anchors
-    // are measured from here.
+    let carapace_center = leg_hub_centroid(model)?;
+    let clouds = model.vertices_by_part();
+
+    let mut links: Vec<RigLink> = Vec::new();
+    for chain in joint_specs() {
+        let mut parent_idx = CARAPACE;
+        let mut parent_pivot = carapace_center;
+        for spec in &chain {
+            let Some(pivot) = model.bone_origin(&spec.pivot) else {
+                break; // a missing bone truncates this limb, not the whole body
+            };
+            let cloud = clouds
+                .get(&PartId::Joint(spec.id))
+                .map(|(pts, _)| pts.as_slice());
+            let Some(link) = derive_link(
+                model,
+                &spec.pivot,
+                spec.tip.as_deref(),
+                parent_pivot,
+                parent_idx,
+                cloud,
+                FALLBACK_RADIUS,
+                spec.density,
+                Some(spec.id),
+            ) else {
+                break;
+            };
+            parent_pivot = pivot;
+            parent_idx = links.len();
+            links.push(link);
+        }
+    }
+
+    // Eye-stalks (locked): base (carapace-parented) + tip. The eye rides the stalk,
+    // so the tip is re-parented onto the base here. The tip carries the reward's
+    // eye-height marker (`CrabEyeTip`, set by bone name in the spawn).
+    for side in [Side::Left, Side::Right] {
+        let s = side_tag(side);
+        let base = format!("Def_antennae.{s}");
+        let tip = format!("Def_antennae_top.{s}");
+        let Some(base_link) = derive_link(
+            model,
+            &base,
+            Some(&tip),
+            carapace_center,
+            CARAPACE,
+            None,
+            EYE_RADIUS,
+            EYE_DENSITY,
+            None,
+        ) else {
+            continue;
+        };
+        let base_idx = links.len();
+        let base_origin = model.bone_origin(&base).unwrap_or(carapace_center);
+        links.push(base_link);
+        if let Some(tip_link) = derive_link(
+            model,
+            &tip,
+            None,
+            base_origin,
+            base_idx,
+            None,
+            EYE_RADIUS,
+            EYE_DENSITY,
+            None,
+        ) {
+            links.push(tip_link);
+        }
+    }
+
+    let (carapace_half, carapace_offset) = carapace_box(model, carapace_center);
+    Some(RigRecipe {
+        carapace_half,
+        carapace_offset,
+        carapace_density: CARAPACE_DENSITY,
+        links,
+    })
+}
+
+/// Body centre = the centroid of the eight leg roots (bone `000`), the hub the
+/// limbs hang off: symmetric in x, mid-height in y. Carapace-relative anchors are
+/// measured from here, and the carapace box is offset relative to it.
+fn leg_hub_centroid(model: &LoadedModel) -> Option<Vec3> {
     let mut sum = Vec3::ZERO;
     let mut n = 0u32;
     for side in [Side::Left, Side::Right] {
@@ -124,199 +300,76 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
             }
         }
     }
-    if n == 0 {
-        return None;
-    }
-    let carapace_center = sum / n as f32;
-
-    let mut links: Vec<RigLink> = Vec::new();
-
-    // -- Legs: 4 per side, the full 6-bone chain (3 actuated, 3 locked) ----------
-    for side in [Side::Left, Side::Right] {
-        let s = side_tag(side);
-        for leg in 0u8..4 {
-            let mut parent_idx = CARAPACE;
-            let mut parent_name: Option<String> = None;
-            for (seg, suffix) in LEG_BONES.iter().enumerate() {
-                let bone = format!("Def_leg_0{}.{}.{}", leg + 1, suffix, s);
-                // The last segment reaches to the foot tip (`005`) for its collider.
-                let next = match LEG_BONES.get(seg + 1) {
-                    Some(nb) => format!("Def_leg_0{}.{}.{}", leg + 1, nb, s),
-                    None => format!("Def_leg_0{}.005.{}", leg + 1, s),
-                };
-                let Some(link) = derive_link(
-                    model,
-                    &bone,
-                    parent_name.as_deref(),
-                    carapace_center,
-                    Some(&next),
-                    leg_actuation(side, leg, seg),
-                    LEG_RADIUS,
-                    LEG_DENSITY,
-                    parent_idx,
-                ) else {
-                    continue;
-                };
-                parent_idx = links.len();
-                parent_name = Some(bone);
-                links.push(link);
-            }
-        }
-    }
-
-    // -- Claws: the 9-bone arm+pincer chain (shoulder/wrist/pincer actuated) ------
-    for side in [Side::Left, Side::Right] {
-        let s = side_tag(side);
-        let mut parent_idx = CARAPACE;
-        let mut parent_name: Option<String> = None;
-        for (seg, suffix) in CLAW_BONES.iter().enumerate() {
-            let bone = format!("Def_pincer.{}.{}", suffix, s);
-            let next = CLAW_BONES
-                .get(seg + 1)
-                .map(|nb| format!("Def_pincer.{}.{}", nb, s));
-            let Some(link) = derive_link(
-                model,
-                &bone,
-                parent_name.as_deref(),
-                carapace_center,
-                next.as_deref(),
-                claw_actuation(side, seg),
-                CLAW_RADIUS,
-                CLAW_DENSITY,
-                parent_idx,
-            ) else {
-                continue;
-            };
-            parent_idx = links.len();
-            parent_name = Some(bone);
-            links.push(link);
-        }
-    }
-
-    // -- Eye-stalks (locked): base (carapace-parented) + tip. The rig parents both
-    // to the armature, but physically the eye rides on the stalk, so the tip is
-    // re-parented to the base here.
-    for side in [Side::Left, Side::Right] {
-        let s = side_tag(side);
-        let base = format!("Def_antennae.{}", s);
-        let tip = format!("Def_antennae_top.{}", s);
-        let Some(base_link) = derive_link(
-            model,
-            &base,
-            None,
-            carapace_center,
-            Some(&tip),
-            None,
-            EYE_RADIUS,
-            EYE_DENSITY,
-            CARAPACE,
-        ) else {
-            continue;
-        };
-        let base_idx = links.len();
-        links.push(base_link);
-        if let Some(tip_link) = derive_link(
-            model,
-            &tip,
-            Some(&base),
-            carapace_center,
-            None,
-            None,
-            EYE_RADIUS,
-            EYE_DENSITY,
-            base_idx,
-        ) {
-            links.push(tip_link);
-        }
-    }
-
-    // -- Palpi (locked): one mouthpart flap per side ----------------------------
-    for side in [Side::Left, Side::Right] {
-        let bone = format!("Def_palpi.001.{}", side_tag(side));
-        if let Some(link) = derive_link(
-            model,
-            &bone,
-            None,
-            carapace_center,
-            None,
-            None,
-            PALP_RADIUS,
-            PALP_DENSITY,
-            CARAPACE,
-        ) {
-            links.push(link);
-        }
-    }
-
-    let carapace_half = carapace_extent(model, carapace_center);
-    Some(RigRecipe {
-        carapace_half,
-        carapace_density: CARAPACE_DENSITY,
-        links,
-    })
+    (n > 0).then(|| sum / n as f32)
 }
 
-/// Derive one link's joint + collider geometry from the bind pose. `parent = None`
-/// hangs the link off the carapace root (identity basis at `carapace_center`).
+/// Derive one link's joint + collider geometry from the bind pose. `tip = None`
+/// makes a short stub along the incoming direction (a leaf bone). `cloud = Some`
+/// fits the capsule radius to that vertex cloud; `None` uses `fixed_radius`.
 #[allow(clippy::too_many_arguments)]
 fn derive_link(
     model: &LoadedModel,
-    child: &str,
-    parent: Option<&str>,
-    carapace_center: Vec3,
-    next: Option<&str>,
-    actuated: Option<CrabJointId>,
-    radius: f32,
-    density: f32,
+    pivot_name: &str,
+    tip_name: Option<&str>,
+    parent_pivot: Vec3,
     parent_idx: usize,
+    cloud: Option<&[Vec3]>,
+    fixed_radius: f32,
+    density: f32,
+    actuated: Option<CrabJointId>,
 ) -> Option<RigLink> {
-    let c_origin = model.bone_origin(child)?;
-    let p_origin = match parent {
-        Some(p) => model.bone_origin(p)?,
-        None => carapace_center,
+    let c_origin = model.bone_origin(pivot_name)?;
+    // Links spawn axis-aligned, so the parent frame is world: the anchor is a plain
+    // world delta between bind-pose bone origins.
+    let anchor1 = c_origin - parent_pivot;
+    let in_dir = anchor1.normalize_or_zero();
+
+    // The joint's free axis follows the KINEMATIC bone chain (toward the tip — the
+    // direction the limb bends), independent of the collider shape below.
+    let chain_dir = match tip_name.and_then(|t| model.bone_origin(t)) {
+        Some(g) => (g - c_origin).normalize_or_zero(),
+        None => in_dir,
     };
-    // Links spawn axis-aligned, so the parent frame is world: anchors and the
-    // collider are all plain world deltas between bind-pose bone origins.
-    let anchor1 = c_origin - p_origin;
+    let axis_local = bend_axis(actuated, in_dir, chain_dir);
 
-    // Segment direction: toward the next bone, else continue the incoming direction
-    // as a short stub (a leaf bone has no outgoing segment).
-    let in_dir = (c_origin - p_origin).normalize_or_zero();
-    let seg_world = match next.and_then(|nb| model.bone_origin(nb)) {
-        Some(g) => g - c_origin,
-        None => in_dir * (radius * 3.0),
+    // Collider shape. With the flesh cloud, fit the capsule to it (best-fit
+    // centre/axis/radius) so it hugs the actual limb — its curve and lateral offset
+    // from the straight bone line included. Placing the capsule on the bone line
+    // alone left 30–80% of the mesh poking out (see `--verify-colliders`). The joint
+    // pivot still sits at the bone origin (the link spawns there); the capsule is
+    // merely offset within the link, the same way a fitted collider hangs off its
+    // joint. A sparse/absent cloud (eye-stalks) falls back to a bone-line stub.
+    let fitted = match cloud {
+        Some(pts) if pts.len() >= 8 => super::meshfit::fit_capsule(pts),
+        _ => None,
     };
-    let seg_len = seg_world.length().max(1e-4);
-    let out_dir = seg_world / seg_len;
-
-    // Capsule from the pivot (link origin) down the segment, in the link's rest
-    // frame (= world): centre halfway, oriented Y→segment.
-    let half_height = (seg_len * 0.5 - radius).max(0.01);
-    let center = seg_world * 0.5;
-    let col_rot = arc_to(Vec3::Y, out_dir);
-
-    // Free axis: the natural bend axis is `in × out`; when the bind chain is
-    // near-straight that cross is tiny, so fall back to a horizontal axis
-    // perpendicular to the limb. The coxa swings the leg fore/aft, so force a
-    // vertical axis there regardless of the (degenerate) body→coxa direction.
-    let axis_local = if matches!(actuated, Some(CrabJointId::LegCoxa(..))) {
-        Vec3::Y
-    } else {
-        let cross = in_dir.cross(out_dir);
-        let axis = if cross.length() > 0.2 {
-            cross.normalize()
-        } else {
-            out_dir.cross(Vec3::Y).normalize_or_zero()
-        };
-        // Never hand Rapier a zero rotation axis: a vertical-and-straight bone
-        // collapses both `in×out` and `out×Y` to ~0, and a zero-axis revolute
-        // degenerates the joint frame into NaNs that poison the multibody and
-        // recur on every respawn. Fall back to a fixed horizontal perpendicular.
-        if axis.length() > 0.5 { axis } else { Vec3::X }
+    let (center, col_rot, half_height, radius) = match fitted {
+        Some(cap) => {
+            let seg = cap.b - cap.a;
+            (
+                (cap.a + cap.b) * 0.5 - c_origin,
+                arc_to(Vec3::Y, seg),
+                seg.length() * 0.5,
+                cap.radius,
+            )
+        }
+        None => {
+            let seg_world = match tip_name.and_then(|t| model.bone_origin(t)) {
+                Some(g) => g - c_origin,
+                None => in_dir * (fixed_radius * 3.0),
+            };
+            let seg_len = seg_world.length().max(1e-4);
+            (
+                seg_world * 0.5,
+                arc_to(Vec3::Y, seg_world / seg_len),
+                (seg_len * 0.5 - fixed_radius).max(0.01),
+                fixed_radius,
+            )
+        }
     };
 
     Some(RigLink {
-        bone: child.to_string(),
+        bone: pivot_name.to_string(),
         parent: parent_idx,
         anchor1,
         axis_local,
@@ -329,6 +382,25 @@ fn derive_link(
     })
 }
 
+/// The free rotation axis of a revolute joint. The coxa swings the leg fore/aft, so
+/// it gets a vertical axis regardless of the (degenerate) body→coxa direction.
+/// Otherwise the natural bend axis is `in × out`; when the bind chain is near-
+/// straight that cross collapses, so fall back to a horizontal perpendicular — and
+/// never a zero axis, which degenerates a revolute into NaNs that poison the
+/// multibody and recur on every respawn.
+fn bend_axis(actuated: Option<CrabJointId>, in_dir: Vec3, out_dir: Vec3) -> Vec3 {
+    if matches!(actuated, Some(CrabJointId::LegCoxa(..))) {
+        return Vec3::Y;
+    }
+    let cross = in_dir.cross(out_dir);
+    let axis = if cross.length() > 0.2 {
+        cross.normalize()
+    } else {
+        out_dir.cross(Vec3::Y).normalize_or_zero()
+    };
+    if axis.length() > 0.5 { axis } else { Vec3::X }
+}
+
 /// Rotation taking `from` onto `to`, guarding the degenerate (near-zero `to`)
 /// case `Quat::from_rotation_arc` would choke on.
 fn arc_to(from: Vec3, to: Vec3) -> Quat {
@@ -339,34 +411,143 @@ fn arc_to(from: Vec3, to: Vec3) -> Quat {
     }
 }
 
-/// Half-extents of the carapace box: the bounding half-size (about `center`) of
-/// the carapace-rigid bones (shell/thorax/rostrum/abdomen), so the root collider
-/// covers the trunk without engulfing the limbs.
-fn carapace_extent(model: &LoadedModel, center: Vec3) -> Vec3 {
-    const RIGID: [&str; 14] = [
-        "Def_shell.000.L",
-        "Def_shell.002.L",
-        "Def_shell.003.L",
-        "Def_shell.006.L",
-        "Def_shell.000.R",
-        "Def_shell.002.R",
-        "Def_shell.003.R",
-        "Def_shell.006.R",
-        "Def_thorax_back",
-        "Def_thorax_front",
-        "Def_Rostrum.L",
-        "Def_Rostrum.R",
-        "Ctrl_abdomen_end",
-        "Ctrl_Def_neck",
-    ];
-    let mut half = Vec3::splat(0.08); // floor so a sparse model still gets a box
-    for name in RIGID {
-        if let Some(o) = model.bone_origin(name) {
-            half = half.max((o - center).abs());
+/// The trunk bones whose vertex flesh defines the carapace box. Leg- and claw-root
+/// bones are excluded (their verts belong to the limb links), and so are the
+/// lateral shoulder bones `Def_shell.003`/`.006`, which sit out over the leg sockets
+/// and would stretch the box wide enough to swallow the legs.
+pub(crate) const TRUNK_BONES: [&str; 10] = [
+    "Def_shell.000.L",
+    "Def_shell.002.L",
+    "Def_shell.000.R",
+    "Def_shell.002.R",
+    "Def_thorax_back",
+    "Def_thorax_front",
+    "Def_Rostrum.L",
+    "Def_Rostrum.R",
+    "Ctrl_abdomen_end",
+    "Ctrl_Def_neck",
+];
+
+/// Carapace box from the trunk's vertex cloud: half-extents and the box centre as
+/// an offset from `center` (the leg hub the links anchor to). Using the actual
+/// shell vertices — not bone origins — covers the trunk's flesh without the old
+/// hand-tuned height clamp.
+fn carapace_box(model: &LoadedModel, center: Vec3) -> (Vec3, Vec3) {
+    let pts = model.vertices_for_bones(&TRUNK_BONES);
+    if pts.len() < 4 {
+        return (Vec3::splat(0.1), Vec3::ZERO); // sparse model: a small box at the hub
+    }
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for p in &pts {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    let half = (hi - lo) * 0.5;
+    let box_center = (hi + lo) * 0.5;
+    (half, box_center - center)
+}
+
+/// A collider reconstructed in bind-pose world (the rest stance), paired with the
+/// part whose vertex cloud it should hug. The verifier ([`crate::verify_colliders`])
+/// scores cloud-vs-collider, and the model's clouds live in bind-pose world, so the
+/// collider must too. This mirrors the world accumulation in [`super::body`]'s
+/// `spawn_crab` minus the constant spawn translation (it cancels — `anchor1` is a
+/// parent-relative delta, and the clouds are already in this frame).
+pub(crate) struct RestCollider {
+    pub part: PartId,
+    pub shape: RestShape,
+}
+
+pub(crate) enum RestShape {
+    Capsule { a: Vec3, b: Vec3, radius: f32 },
+    Cuboid { center: Vec3, half: Vec3 },
+}
+
+/// Reconstruct every scoreable collider of `recipe` in bind-pose world. Locked
+/// eye-stalk links are skipped (no fitted cloud to score). The carapace box is
+/// world-axis-aligned at the hub + offset.
+pub(crate) fn rest_colliders(model: &LoadedModel, recipe: &RigRecipe) -> Vec<RestCollider> {
+    let Some(o_root) = leg_hub_centroid(model) else {
+        return Vec::new();
+    };
+    let mut world_origin: Vec<Vec3> = Vec::with_capacity(recipe.links.len());
+    let mut out: Vec<RestCollider> = Vec::new();
+    for link in &recipe.links {
+        let base = if link.parent == CARAPACE {
+            o_root
+        } else {
+            world_origin[link.parent]
+        };
+        let origin = base + link.anchor1;
+        world_origin.push(origin);
+        // Only actuated links carry a PartId and a fitted cloud; eye-stalks (locked,
+        // fixed radius, cosmetic) have nothing to score against.
+        if let Some(id) = link.actuated {
+            let axis = link.col_rot * Vec3::Y * link.half_height;
+            let c = origin + link.center;
+            out.push(RestCollider {
+                part: PartId::Joint(id),
+                shape: RestShape::Capsule {
+                    a: c - axis,
+                    b: c + axis,
+                    radius: link.radius,
+                },
+            });
         }
     }
-    // Trim height: the shell bones sit above the body midline, which would make a
-    // tall box; keep it flattish like a real carapace.
-    half.y = half.y.min(0.14);
-    half
+    out.push(RestCollider {
+        part: PartId::Carapace,
+        shape: RestShape::Cuboid {
+            center: o_root + recipe.carapace_offset,
+            half: recipe.carapace_half,
+        },
+    });
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The chains must enumerate exactly the actuated joint set — same count, all
+    /// distinct. Guards the "add a joint" footgun: a new `CrabJointId` with no
+    /// matching `JointSpec` (or a duplicate) is caught here, not silently at runtime.
+    #[test]
+    fn joint_specs_cover_every_actuated_joint() {
+        let mut ids: Vec<CrabJointId> = joint_specs().into_iter().flatten().map(|s| s.id).collect();
+        let total = ids.len();
+        ids.sort_by_key(|id| id.index());
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            total,
+            "a joint id appears in more than one JointSpec"
+        );
+        assert_eq!(
+            total,
+            CrabJointId::COUNT,
+            "joint_specs count != CrabJointId::COUNT"
+        );
+    }
+
+    /// Every member bone resolves to its own joint — the canonical map and the
+    /// chains agree by construction. Pinned so a future edit can't route a limb
+    /// bone to the wrong joint or the carapace (the divergence that forked the
+    /// legs), including a member accidentally shared between two joints.
+    #[test]
+    fn members_route_to_their_joint() {
+        for chain in joint_specs() {
+            for spec in chain {
+                for bone in &spec.members {
+                    assert_eq!(
+                        part_for_bone(bone),
+                        Some(PartId::Joint(spec.id)),
+                        "{bone} should route to {:?}",
+                        spec.id
+                    );
+                }
+            }
+        }
+    }
 }

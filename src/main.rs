@@ -155,6 +155,13 @@ pub struct Args {
     #[arg(long, value_name = "OUT.ron")]
     bake_colliders: Option<PathBuf>,
 
+    /// DEV: score every live collider against the mesh it stands in for and print a
+    /// per-part agreement table (signed surface distance, in model units), then exit
+    /// (no window). Exits nonzero if any part fails, so it doubles as a regression
+    /// gate on rig changes. Model is `CRAB_MODEL_PATH`, else the dev `sally.glb`.
+    #[arg(long)]
+    verify_colliders: bool,
+
     /// DEV: open the interactive collider-placement editor on this RON table, then
     /// exit. The table is seeded from the auto-fit (or resumed if it already exists);
     /// step bone-by-bone and hand-place each collider against the bind-pose mesh.
@@ -239,6 +246,11 @@ fn main() {
         return;
     }
 
+    // DEV verify: score the live colliders against the mesh, print, exit.
+    if args.verify_colliders {
+        std::process::exit(verify_colliders());
+    }
+
     // DEV editor: open the interactive collider-placement window, then exit. Builds
     // its own minimal app (mesh + gizmos + egui), no physics or BotPlugin.
     if let Some(table) = args.edit_colliders.clone() {
@@ -267,7 +279,9 @@ fn main() {
             // message that wrongly blames a missing/corrupt file.
             Ok(model) => {
                 if bot::rig::build_recipe(&model).is_none() {
-                    eprintln!("crab model {p:?}: loaded but has none of the expected crab bones (e.g. Def_leg_01.000.L)");
+                    eprintln!(
+                        "crab model {p:?}: loaded but has none of the expected crab bones (e.g. Def_leg_01.000.L)"
+                    );
                     std::process::exit(1);
                 }
             }
@@ -344,6 +358,18 @@ fn main() {
             app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
                 Duration::from_secs_f64(1.0 / 60.0),
             ));
+            // Rapier collider wireframes draw via gizmos, which DO render into the
+            // offscreen screenshot camera (Bevy 0.18) — but only if the plugin is
+            // present. The other arms add it; Screenshot has its own arm, so gate it
+            // here on the same flag or the captured PNG never shows the colliders.
+            if std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
+                app.add_plugins(RapierDebugRenderPlugin {
+                    // Collider shapes only — the default also draws per-body axes +
+                    // joint markers, which on a 31-part body is an unreadable tangle.
+                    mode: DebugRenderMode::COLLIDER_SHAPES,
+                    ..default()
+                });
+            }
         }
         _ => {
             // Train-with-viz stays windowed; the demo defaults to borderless
@@ -364,8 +390,17 @@ fn main() {
                 }),
                 ..default()
             }));
-            if matches!(mode, AppMode::Train) {
-                app.add_plugins(RapierDebugRenderPlugin::default());
+            // RL_DEBUG_COLLIDERS=1 turns on Rapier's collider wireframes in the demo
+            // (windowed training-viz always gets them). With the stand-in primitive
+            // meshes removed, this debug-render is the only in-engine view of the true
+            // colliders, so the skin can be checked against the actual physics shapes.
+            if matches!(mode, AppMode::Train) || std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
+                app.add_plugins(RapierDebugRenderPlugin {
+                    // Collider shapes only — the default also draws per-body axes +
+                    // joint markers, which on a 31-part body is an unreadable tangle.
+                    mode: DebugRenderMode::COLLIDER_SHAPES,
+                    ..default()
+                });
             }
         }
     }
@@ -436,6 +471,115 @@ fn main() {
     }
 
     app.run();
+}
+
+/// DEV `--verify-colliders`: load the model, reconstruct every live collider in
+/// bind-pose world, and score it against the mesh vertices it stands in for. Prints
+/// a per-part agreement table (signed surface distance, model units) + a worst-
+/// offender ranking, and returns a process exit code (0 = all pass, 1 = a part
+/// fails or the model is unavailable) so it serves as both a diagnostic and a
+/// regression gate. Scores the LIVE `RigRecipe` geometry, not the offline fit.
+fn verify_colliders() -> i32 {
+    use bot::meshfit::{score_box, score_capsule};
+    use bot::rig::RestShape;
+
+    let Some(model_path) = bot::meshfit::model_path() else {
+        eprintln!(
+            "verify-colliders: no model — set CRAB_MODEL_PATH or place sally.glb at the dev path"
+        );
+        return 1;
+    };
+    let model = match bot::meshfit::LoadedModel::load(&model_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("verify-colliders: load {model_path:?}: {e}");
+            return 1;
+        }
+    };
+    let Some(recipe) = bot::rig::build_recipe(&model) else {
+        eprintln!("verify-colliders: model built no rig recipe");
+        return 1;
+    };
+    let clouds = model.vertices_by_part();
+    let trunk = model.vertices_for_bones(&bot::rig::TRUNK_BONES);
+
+    println!("collider<->mesh agreement (model units; +out = mesh pokes OUT of collider):");
+    println!(
+        "  {:<22} {:>5} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5} {:>6}  {:>7}",
+        "part", "n", "r", "fOut%", "pk95", "pkMax", "bulge", "skew", "rRat", "verdict"
+    );
+
+    let fmt = |x: f32| {
+        if x.is_finite() {
+            format!("{x:.2}")
+        } else {
+            "-".to_string()
+        }
+    };
+    // (label, severity = pk95/r, failed) for the worst-offender ranking.
+    let mut ranking: Vec<(String, f32, bool)> = Vec::new();
+    let mut any_fail = false;
+
+    for rc in bot::rig::rest_colliders(&model, &recipe) {
+        let label = format!("{:?}", rc.part);
+        let (score, rnorm, fail) = match rc.shape {
+            RestShape::Capsule { a, b, radius } => {
+                let pts = clouds
+                    .get(&rc.part)
+                    .map(|(p, _)| p.as_slice())
+                    .unwrap_or(&[]);
+                let s = score_capsule(pts, a, b, radius);
+                // Pass: little flesh escapes, the worst poke is shallow vs the part's
+                // own radius, the collider isn't grossly oversized, the axis tracks
+                // the limb, and the radius isn't starved/ballooned.
+                let fail = s.frac_outside > 0.05
+                    || s.poke_out_p95 > (0.15 * radius).max(0.005)
+                    || s.bulge_p95 > 0.5 * radius
+                    || (s.axis_skew_deg.is_finite() && s.axis_skew_deg > 15.0)
+                    || (s.radius_ratio.is_finite() && !(0.85..=1.4).contains(&s.radius_ratio));
+                (s, radius.max(1e-3), fail)
+            }
+            RestShape::Cuboid { center, half } => {
+                let s = score_box(&trunk, center, half);
+                // A box over-covering the shell is cosmetically fine; only flag flesh
+                // escaping it (absolute, since a box has no single radius).
+                let fail = s.frac_outside > 0.03 || s.poke_out_p95 > 0.02;
+                (s, half.min_element().max(1e-3), fail)
+            }
+        };
+        any_fail |= fail;
+        ranking.push((label.clone(), score.poke_out_p95 / rnorm, fail));
+        println!(
+            "  {:<22} {:>5} {:>6.3} {:>6.1} {:>6.3} {:>6.3} {:>6.3} {:>5} {:>6}  {}",
+            label,
+            score.n,
+            rnorm,
+            score.frac_outside * 100.0,
+            score.poke_out_p95,
+            score.poke_out_max,
+            score.bulge_p95,
+            fmt(score.axis_skew_deg),
+            fmt(score.radius_ratio),
+            if fail { "FAIL" } else { "pass" },
+        );
+    }
+
+    ranking.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let worst: Vec<String> = ranking
+        .iter()
+        .take(6)
+        .map(|(l, s, f)| format!("{l} {:.2}{}", s, if *f { "!" } else { "" }))
+        .collect();
+    println!("worst (pk95/r): {}", worst.join(", "));
+    println!(
+        "{}",
+        if any_fail {
+            "VERDICT: FAIL — some colliders sit off the mesh"
+        } else {
+            "VERDICT: pass"
+        }
+    );
+    i32::from(any_fail)
 }
 
 /// DEV `--bake-colliders`: load the glTF model, fit the typed collider table, and

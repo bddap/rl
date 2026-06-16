@@ -735,6 +735,8 @@ impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
         add_inference(app, &self.checkpoint_dir, None);
         app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
+        app.add_systems(FixedUpdate, apply_toss.after(BotSet::Think));
+        app.init_resource::<TossBurst>();
         app.insert_resource(ShotConfig {
             path: self.path.clone(),
             settle: self.settle,
@@ -745,8 +747,67 @@ impl Plugin for ScreenshotPlugin {
         .add_systems(Startup, spawn_offscreen_camera)
         .add_systems(
             Update,
-            (track_offscreen_camera, capture_when_settled).chain(),
+            (track_offscreen_camera, toss_once, capture_when_settled).chain(),
         );
+    }
+}
+
+/// Render frame at which the diagnostic toss fires — comfortably after the skin
+/// pairs (`SETTLE_FRAMES` = 90 scene frames) so the skin's per-bone offsets are
+/// captured against the clean rest pose and then track the tumble faithfully.
+const TOSS_AT_FRAME: u32 = 130;
+/// Physics ticks the toss force is spread over (a multibody root ignores a direct
+/// velocity write — only forces reach it through the body Jacobians, see #14).
+const TOSS_TICKS: u32 = 10;
+
+/// A pending diagnostic toss: a force + torque to add to the carapace each tick
+/// until `ticks` runs out.
+#[derive(Resource, Default)]
+struct TossBurst {
+    ticks: u32,
+    force: Vec3,
+    torque: Vec3,
+}
+
+/// Trigger (Update): once, after the skin has paired, queue a random toss
+/// (`RL_TOSS=1`). The settled screenshot then shows the collider/skin overlay from
+/// an arbitrary orientation, away from the origin — a movement stress-test that the
+/// two track together (both ride the same physics). Inert without the env var.
+fn toss_once(progress: Res<ShotProgress>, mut burst: ResMut<TossBurst>, mut done: Local<bool>) {
+    if *done || std::env::var_os("RL_TOSS").is_none() || progress.steps < TOSS_AT_FRAME {
+        return;
+    }
+    let mut rng = rand::thread_rng();
+    *burst = TossBurst {
+        ticks: TOSS_TICKS,
+        force: Vec3::new(
+            rng.gen_range(-70.0..70.0),
+            rng.gen_range(120.0..180.0),
+            rng.gen_range(-70.0..70.0),
+        ),
+        torque: Vec3::new(
+            rng.gen_range(-70.0..70.0),
+            rng.gen_range(-70.0..70.0),
+            rng.gen_range(-70.0..70.0),
+        ),
+    };
+    *done = true;
+}
+
+/// Apply (FixedUpdate, after the actuator zeroes the baseline): add the toss to the
+/// carapace's `ExternalForce` while the burst lasts — the same add-after-`Think`
+/// trick as the demo poke.
+fn apply_toss(
+    mut burst: ResMut<TossBurst>,
+    mut crabs: Query<&mut ExternalForce, With<CrabCarapace>>,
+) {
+    if burst.ticks == 0 {
+        return;
+    }
+    burst.ticks -= 1;
+    if let Ok(mut f) = crabs.single_mut() {
+        f.force += burst.force;
+        f.torque += burst.torque;
     }
 }
 

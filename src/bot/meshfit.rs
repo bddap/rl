@@ -110,6 +110,16 @@ impl LoadedModel {
         // the per-vertex JOINTS_0 *indices* (0..N) to actual node indices.
         let skin = gltf.skins().next().ok_or("model has no skin")?;
         let joint_nodes: Vec<usize> = skin.joints().map(|j| j.index()).collect();
+        // Inverse-bind matrices (skin-joint order). Combined with the joints'
+        // bind-world transforms they map a raw mesh vertex to its bind-pose WORLD
+        // position — the position Bevy actually skins the visible mesh to. Fitting
+        // colliders to that (not the raw, pre-skin POSITION attribute) is what keeps
+        // them on the rendered mesh rather than offset by the mesh/armature frame.
+        let inv_binds: Vec<Mat4> = skin
+            .reader(|buf| (buf.index() == 0).then_some(blob))
+            .read_inverse_bind_matrices()
+            .map(|it| it.map(|m| Mat4::from_cols_array_2d(&m)).collect())
+            .unwrap_or_else(|| vec![Mat4::IDENTITY; joint_nodes.len()]);
 
         let mesh = gltf.meshes().next().ok_or("model has no mesh")?;
         let mut verts = Vec::new();
@@ -133,16 +143,36 @@ impl LoadedModel {
                 .into_f32()
                 .collect();
             for ((p, j), w) in positions.iter().zip(&joints).zip(&weights) {
-                // Pick the influence with the largest weight.
+                let raw = Vec3::from_array(*p);
+                // Bind-pose WORLD position: blend the influencing joints' bind
+                // transforms (bindWorld · invBind) by skin weight — the same skinning
+                // math the renderer uses, so the cloud sits where the visible mesh is.
+                let mut world = Vec3::ZERO;
+                let mut wsum = 0.0f32;
+                for lane in 0..4 {
+                    let wt = w[lane];
+                    if wt <= 0.0 {
+                        continue;
+                    }
+                    let ji = j[lane] as usize;
+                    let jm = bind_world
+                        .get(&joint_nodes[ji])
+                        .copied()
+                        .unwrap_or(Mat4::IDENTITY)
+                        * inv_binds[ji];
+                    world += wt * jm.transform_point3(raw);
+                    wsum += wt;
+                }
+                let pos = if wsum > 1e-6 { world / wsum } else { raw };
+                // Dominant influence tags the vertex for per-part bucketing.
                 let (lane, &wmax) = w
                     .iter()
                     .enumerate()
                     .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                     .unwrap();
-                let node = joint_nodes[j[lane] as usize];
                 verts.push(SkinnedVertex {
-                    pos: Vec3::from_array(*p),
-                    dominant_node: node,
+                    pos,
+                    dominant_node: joint_nodes[j[lane] as usize],
                     dominant_weight: wmax,
                 });
             }
@@ -155,17 +185,17 @@ impl LoadedModel {
         })
     }
 
-    /// Group vertices by physics part via the bone→part map. Returns, per part,
-    /// the world-space vertex positions and the mean dominant-weight (a
-    /// skinning-cleanliness proxy). Vertices whose bone maps to no part (none,
-    /// here — every bone routes somewhere) are dropped.
+    /// Group vertices by physics part via [`super::rig::part_for_bone`] — the one
+    /// canonical bone→part mapping. Returns, per part, the world-space vertex
+    /// positions and the mean dominant-weight (a skinning-cleanliness proxy).
+    /// Vertices on a non-rig node (no part) are dropped.
     pub(crate) fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)> {
         let mut out: HashMap<PartId, (Vec<Vec3>, f32)> = HashMap::new();
         for v in &self.verts {
             let Some(name) = self.node_name.get(&v.dominant_node) else {
                 continue;
             };
-            let Some(part) = bone_to_part(name) else {
+            let Some(part) = super::rig::part_for_bone(name) else {
                 continue;
             };
             let e = out.entry(part).or_insert_with(|| (Vec::new(), 0.0));
@@ -176,6 +206,20 @@ impl LoadedModel {
             *wsum /= positions.len().max(1) as f32;
         }
         out
+    }
+
+    /// World-space positions of every vertex whose dominant bone is one of `names`.
+    /// Used to size the carapace box from the trunk's actual shell flesh.
+    pub(crate) fn vertices_for_bones(&self, names: &[&str]) -> Vec<Vec3> {
+        self.verts
+            .iter()
+            .filter(|v| {
+                self.node_name
+                    .get(&v.dominant_node)
+                    .is_some_and(|n| names.contains(&n.as_str()))
+            })
+            .map(|v| v.pos)
+            .collect()
     }
 
     /// Bind-pose world origin of a bone by name, if present. The bone origin is
@@ -220,56 +264,6 @@ fn compose_world(node: &gltf::Node, parent_world: Mat4, world: &mut HashMap<usiz
     for child in node.children() {
         compose_world(&child, w, world);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Bone → physics part mapping (mirrors super::skin::bone_target)
-// ---------------------------------------------------------------------------
-
-/// Map a glTF deform-bone name to the physics part it should drive — the bake's
-/// copy of [`super::skin`]'s `bone_target` rules, returning a [`PartId`].
-/// `bone_map_covers_all_model_bones` asserts every deform/control bone in the
-/// model routes to *some* part (no silently-dropped cloud); the two functions are
-/// kept in sync by hand (sharing one mapping is a future cleanup, see
-/// MESHFIT_PLAN.md).
-fn bone_to_part(name: &str) -> Option<PartId> {
-    if !(name.starts_with("Def_") || name.starts_with("Ctrl_")) {
-        return None;
-    }
-    let side = if name.ends_with(".L") || name.contains(".L.") {
-        Some(Side::Left)
-    } else if name.ends_with(".R") || name.contains(".R.") {
-        Some(Side::Right)
-    } else {
-        None
-    };
-
-    if let Some(rest) = name.strip_prefix("Def_leg_0") {
-        let leg = rest.chars().next()?.to_digit(10)? as u8 - 1;
-        let seg = rest.get(2..5)?;
-        let side = side?;
-        let id = match seg {
-            "000" => CrabJointId::LegCoxa(side, leg),
-            "001" | "002" => CrabJointId::LegMerus(side, leg),
-            _ => CrabJointId::LegCarpus(side, leg),
-        };
-        return Some(PartId::Joint(id));
-    }
-    if name.starts_with("Def_pincer") || name.starts_with("Ctrl_pincer_tail") {
-        let side = side?;
-        let id = if name.contains("006") || name.starts_with("Ctrl_pincer_tail") {
-            CrabJointId::ClawPincer(side)
-        } else if name.contains("000") || name.contains("001") {
-            CrabJointId::ClawShoulder(side)
-        } else {
-            CrabJointId::ClawWrist(side)
-        };
-        return Some(PartId::Joint(id));
-    }
-    // Eye-stalks and palpi are locked rig links with no actuated CrabJointId, so
-    // the fitted-collider bake (which keys on actuated parts) buckets them with the
-    // carapace. (The spawned body still gives them their own links via super::rig.)
-    Some(PartId::Carapace)
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +365,105 @@ pub fn capsule_fit_residual(points: &[Vec3], cap: &FittedCapsule) -> f32 {
         acc += (surf as f64) * (surf as f64);
     }
     ((acc / points.len() as f64).sqrt() as f32) / cap.radius
+}
+
+/// How well a *live* collider surface hugs the vertex cloud it stands in for, in
+/// model units, in the cloud's own (bind-pose world) frame. Unlike
+/// [`capsule_fit_residual`] (RMS, sign-collapsed, against a *re-fit* capsule), this
+/// keeps the sign and scores the geometry the body actually spawns with: positive
+/// surface distance = vertex OUTSIDE the collider (mesh pokes out → physics
+/// under-coverage), negative = inside (collider margin / bulge). The split lets
+/// `--verify-colliders` tell "mesh escapes the collider" from "collider oversized",
+/// and the axis/radius diagnostics say *why* a capsule misses its limb.
+pub(crate) struct ColliderScore {
+    pub n: usize,
+    /// Fraction of vertices more than 1 mm outside the collider.
+    pub frac_outside: f32,
+    /// 95th-percentile and max depth a vertex pokes out past the surface.
+    pub poke_out_p95: f32,
+    pub poke_out_max: f32,
+    /// 95th-percentile depth the surface sits past the mesh on the covered side.
+    pub bulge_p95: f32,
+    /// Angle (deg) between the capsule axis and the cloud's principal axis — large
+    /// = capsule pointed off the limb. `NaN` for a box or a too-small cloud.
+    pub axis_skew_deg: f32,
+    /// Live radius ÷ the cloud's p95 perpendicular spread about the live axis;
+    /// `>1` fat, `<1` starved. `NaN` for a box or a too-small cloud.
+    pub radius_ratio: f32,
+}
+
+impl ColliderScore {
+    /// Aggregate a set of signed surface distances (capsule diagnostics filled in
+    /// by [`score_capsule`]; left `NaN` for a box).
+    fn from_signed(sd: &[f32]) -> Self {
+        let inv = 1.0 / sd.len().max(1) as f32;
+        let mut outs: Vec<f32> = sd.iter().copied().filter(|&d| d > 0.0).collect();
+        let mut ins: Vec<f32> = sd
+            .iter()
+            .copied()
+            .filter(|&d| d < 0.0)
+            .map(f32::abs)
+            .collect();
+        let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+        outs.sort_by(cmp);
+        ins.sort_by(cmp);
+        let pctl = |s: &[f32], q| if s.is_empty() { 0.0 } else { percentile(s, q) };
+        ColliderScore {
+            n: sd.len(),
+            frac_outside: sd.iter().filter(|&&d| d > 0.001).count() as f32 * inv,
+            poke_out_p95: pctl(&outs, 0.95),
+            poke_out_max: outs.last().copied().unwrap_or(0.0),
+            bulge_p95: pctl(&ins, 0.95),
+            axis_skew_deg: f32::NAN,
+            radius_ratio: f32::NAN,
+        }
+    }
+}
+
+/// Score a cloud against a capsule given by its segment endpoints + radius (world).
+pub(crate) fn score_capsule(points: &[Vec3], a: Vec3, b: Vec3, radius: f32) -> ColliderScore {
+    let seg = b - a;
+    let seg_len2 = seg.length_squared().max(1e-12);
+    let sd: Vec<f32> = points
+        .iter()
+        .map(|&p| {
+            let t = ((p - a).dot(seg) / seg_len2).clamp(0.0, 1.0);
+            (p - (a + seg * t)).length() - radius
+        })
+        .collect();
+    let mut s = ColliderScore::from_signed(&sd);
+    // Diagnostics: how skewed is the live axis vs the cloud's true long axis, and
+    // is the radius fat/starved relative to the cloud's spread about that axis.
+    let axis = seg.normalize_or_zero();
+    if points.len() >= 4 && axis.length_squared() > 0.5 {
+        let centroid = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+        let (axes, _) = covariance_eigenframe(points, centroid);
+        s.axis_skew_deg = axis.dot(axes[0]).abs().clamp(0.0, 1.0).acos().to_degrees();
+        let mut perp: Vec<f32> = points
+            .iter()
+            .map(|&p| {
+                let d = p - a;
+                (d - axis * d.dot(axis)).length()
+            })
+            .collect();
+        perp.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        s.radius_ratio = radius / percentile(&perp, 0.95).max(1e-4);
+    }
+    s
+}
+
+/// Score a cloud against a world-axis-aligned box (centre + half-extents).
+pub(crate) fn score_box(points: &[Vec3], center: Vec3, half: Vec3) -> ColliderScore {
+    let sd: Vec<f32> = points
+        .iter()
+        .map(|&p| {
+            let local = (p - center).abs() - half;
+            let outside = local.max(Vec3::ZERO).length();
+            let inside = local.max_element().min(0.0);
+            outside + inside
+        })
+        .collect();
+    ColliderScore::from_signed(&sd)
 }
 
 /// Re-fit a capsule's *radius* to minimise the surface residual instead of
@@ -1321,7 +1414,7 @@ mod tests {
         let mut unmapped = Vec::new();
         for (idx, name) in &model.node_name {
             if (name.starts_with("Def_") || name.starts_with("Ctrl_"))
-                && bone_to_part(name).is_none()
+                && super::super::rig::part_for_bone(name).is_none()
             {
                 unmapped.push((*idx, name.clone()));
             }
