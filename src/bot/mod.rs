@@ -9,6 +9,7 @@ pub mod sensor;
 #[cfg(test)]
 mod sim_truth_test;
 pub mod skin;
+pub mod skin_diag;
 #[cfg(test)]
 pub(crate) mod test_util;
 
