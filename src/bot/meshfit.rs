@@ -665,7 +665,6 @@ pub fn capsule_mass(radius: f32, half_height: f32, density: f32) -> CapsuleMass 
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

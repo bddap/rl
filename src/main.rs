@@ -592,16 +592,10 @@ fn winding_number(p: Vec3, positions: &[Vec3], tris: &[[u32; 3]]) -> f32 {
         let a = positions[t[0] as usize] - p;
         let b = positions[t[1] as usize] - p;
         let c = positions[t[2] as usize] - p;
-        let (la, lb, lc) = (
-            a.length() as f64,
-            b.length() as f64,
-            c.length() as f64,
-        );
+        let (la, lb, lc) = (a.length() as f64, b.length() as f64, c.length() as f64);
         let num = a.dot(b.cross(c)) as f64;
-        let den = la * lb * lc
-            + (a.dot(b) as f64) * lc
-            + (b.dot(c) as f64) * la
-            + (c.dot(a) as f64) * lb;
+        let den =
+            la * lb * lc + (a.dot(b) as f64) * lc + (b.dot(c) as f64) * la + (c.dot(a) as f64) * lb;
         acc += 2.0 * num.atan2(den);
     }
     (acc / (4.0 * std::f64::consts::PI)) as f32
@@ -697,7 +691,9 @@ fn verify_pivots() -> i32 {
     use bot::rig::RestShape;
 
     let Some(model_path) = bot::meshfit::model_path() else {
-        eprintln!("verify-pivots: no model — set CRAB_MODEL_PATH or place sally.glb at the dev path");
+        eprintln!(
+            "verify-pivots: no model — set CRAB_MODEL_PATH or place sally.glb at the dev path"
+        );
         return 1;
     };
     let model = match bot::meshfit::LoadedModel::load(&model_path) {
@@ -811,9 +807,7 @@ fn verify_pivots() -> i32 {
                 let (bwn, bdist, bin) = probe(b);
                 windings.push(awn);
                 windings.push(bwn);
-                for (tag, inside, dist) in
-                    [("a", ain, adist), ("b", bin, bdist)]
-                {
+                for (tag, inside, dist) in [("a", ain, adist), ("b", bin, bdist)] {
                     if !inside {
                         endpoints_out += 1;
                         offenders.push((format!("{label} {tag}"), dist));
@@ -821,7 +815,16 @@ fn verify_pivots() -> i32 {
                 }
                 println!(
                     "  {:<24} | {:>+7.3} {:>+8.4} {:>4} | {:>+7.3} {:>+8.4} {:>4} | {:>+7.3} {:>+8.4} {:>4}",
-                    label, pwn, pdist, yn(pin), awn, adist, yn(ain), bwn, bdist, yn(bin)
+                    label,
+                    pwn,
+                    pdist,
+                    yn(pin),
+                    awn,
+                    adist,
+                    yn(ain),
+                    bwn,
+                    bdist,
+                    yn(bin)
                 );
             }
             RestShape::Cuboid { center, half } => {
@@ -829,7 +832,16 @@ fn verify_pivots() -> i32 {
                 // center so we still learn whether the box surface escapes the shell.
                 println!(
                     "  {:<24} | {:>+7.3} {:>+8.4} {:>4} | {:>7} {:>8} {:>4} | {:>7} {:>8} {:>4}",
-                    label, pwn, pdist, yn(pin), "(box)", "corners", "↓", "", "", ""
+                    label,
+                    pwn,
+                    pdist,
+                    yn(pin),
+                    "(box)",
+                    "corners",
+                    "↓",
+                    "",
+                    "",
+                    ""
                 );
                 for sx in [-1.0f32, 1.0] {
                     for sy in [-1.0f32, 1.0] {
@@ -846,7 +858,12 @@ fn verify_pivots() -> i32 {
                             }
                             println!(
                                 "      corner ({:+.0},{:+.0},{:+.0})         | {:>+7.3} {:>+8.4} {:>4}",
-                                sx, sy, sz, cwn, cdist, yn(cin)
+                                sx,
+                                sy,
+                                sz,
+                                cwn,
+                                cdist,
+                                yn(cin)
                             );
                         }
                     }
@@ -854,7 +871,9 @@ fn verify_pivots() -> i32 {
                 let (ccwn, ccdist, ccin) = probe(center);
                 println!(
                     "      center                       | {:>+7.3} {:>+8.4} {:>4}",
-                    ccwn, ccdist, yn(ccin)
+                    ccwn,
+                    ccdist,
+                    yn(ccin)
                 );
             }
         }
