@@ -86,6 +86,32 @@ pub struct RigRecipe {
     pub links: Vec<RigLink>,
 }
 
+impl RigRecipe {
+    /// Every geometric field across the recipe is finite. The spawn feeds these
+    /// straight into Rapier; a single NaN/inf reaches the solver as an
+    /// unrecoverable crash on the very first step, so this is the gate that keeps a
+    /// degenerate asset from ever getting that far.
+    fn is_finite(&self) -> bool {
+        self.hub_bind_world.is_finite()
+            && self.carapace_half.is_finite()
+            && self.carapace_offset.is_finite()
+            && self.carapace_density.is_finite()
+            && self.links.iter().all(RigLink::is_finite)
+    }
+}
+
+impl RigLink {
+    fn is_finite(&self) -> bool {
+        self.anchor1.is_finite()
+            && self.axis_local.is_finite()
+            && self.half_height.is_finite()
+            && self.radius.is_finite()
+            && self.center.is_finite()
+            && self.col_rot.is_finite()
+            && self.density.is_finite()
+    }
+}
+
 /// One actuated joint, located against the bind-pose skeleton. The capsule runs
 /// from `pivot` to `tip` (or stubs forward when `tip` is `None`, for a leaf like
 /// the pincer finger); `members` are every deform bone whose flesh and skin ride
@@ -210,9 +236,17 @@ pub fn part_for_bone(name: &str) -> Option<PartId> {
 }
 
 /// Build the whole-body recipe from the model's bind pose, or `None` if the model
-/// lacks the expected bones.
+/// lacks the expected bones or carries a non-finite bind transform.
 pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
     let carapace_center = leg_hub_centroid(model)?;
+    // The hub seeds every anchor (the link chain telescopes off it), so a NaN/inf
+    // leg-root translation here would poison the whole body and crash the solver on
+    // the spawn step — before `rescue_nonfinite_crabs` can ever see it. Reject the
+    // model now; the recipe is re-checked whole below to catch a non-finite origin
+    // on any other bone too.
+    if !carapace_center.is_finite() {
+        return None;
+    }
     let clouds = model.vertices_by_part();
 
     let mut links: Vec<RigLink> = Vec::new();
@@ -284,13 +318,19 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
     }
 
     let (carapace_half, carapace_offset) = carapace_box(model, carapace_center);
-    Some(RigRecipe {
+    let recipe = RigRecipe {
         hub_bind_world: carapace_center,
         carapace_half,
         carapace_offset,
         carapace_density: CARAPACE_DENSITY,
         links,
-    })
+    };
+    // A non-finite origin on any non-hub bone slips past the hub check above but
+    // still poisons that link's anchor. Make a non-finite recipe unrepresentable
+    // downstream: reject the whole thing once here so spawn only ever sees clean
+    // geometry (the degenerate-but-finite axis cases are already guarded in
+    // `derive_link`/`bend_axis`).
+    recipe.is_finite().then_some(recipe)
 }
 
 /// Body centre = the centroid of the eight leg roots (bone `000`), the hub the
