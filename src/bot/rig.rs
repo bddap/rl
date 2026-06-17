@@ -69,6 +69,14 @@ pub struct RigLink {
 
 /// The full body recipe: a carapace root box plus the derived link chain.
 pub struct RigRecipe {
+    /// Bind-pose world position of the leg-hub centroid — the point the link chain
+    /// anchors off (`anchor1` deltas telescope back to it). The body spawns its
+    /// carapace root here (plus the spawn point) so every link lands at its true
+    /// glTF bind-world origin, the same frame the cosmetic skin renders its bones
+    /// in. Without it the spawn pinned the hub at an arbitrary height and lost the
+    /// hub's lateral/forward bind offset, sliding the whole physics body ~0.1 off
+    /// the skin (pivots fell outside the rendered mesh).
+    pub hub_bind_world: Vec3,
     pub carapace_half: Vec3,
     /// Box centre relative to the body root (the leg-hub centroid the links anchor
     /// to). The trunk's bounding box isn't centred on the leg hub, so the carapace
@@ -283,6 +291,7 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
 
     let (carapace_half, carapace_offset, carapace_rot) = carapace_box(model, carapace_center);
     Some(RigRecipe {
+        hub_bind_world: carapace_center,
         carapace_half,
         carapace_offset,
         carapace_rot,

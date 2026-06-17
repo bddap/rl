@@ -72,11 +72,14 @@ pub fn joint_angle(axis_local: Vec3, parent_rot: Quat, child_rot: Quat) -> f32 {
 // Dimensions — tuned for a ~1m wide crab (game scale, not real life)
 // ---------------------------------------------------------------------------
 
-/// Spawn height: how high above ground the carapace center starts. Model-scale:
-/// in the bind pose the feet sit ~0.22 below the carapace centre, so ~0.3 drops
-/// the crab onto its feet with a little clearance. (Was 0.58 for the larger
-/// hand-coded body.)
-pub const SPAWN_HEIGHT: f32 = 0.3;
+/// Clearance the body is lifted above its bind pose at spawn, so it drops the
+/// last bit onto its feet rather than starting interpenetrating the ground. The
+/// body otherwise spawns in the glTF bind-world frame (feet already near y=0), so
+/// this is a small drop, not the full standing height — that height comes from the
+/// bind pose itself now. (Was 0.3 back when the spawn pinned the leg hub at this Y
+/// and discarded the hub's true bind-world position, which slid the whole body off
+/// the cosmetic skin.)
+pub const SPAWN_HEIGHT: f32 = 0.05;
 
 /// Leg-segment densities for the OFFLINE collider bake (`part_densities`); the live
 /// rig body's masses come from `rig.rs`'s own densities. Tapered UP (denser toward
@@ -173,6 +176,15 @@ pub struct CrabAssets {
     /// read off the bind-pose skeleton once at startup. `spawn_crab` instantiates
     /// it. `None` only when the glTF model is unavailable.
     recipe: Option<RigRecipe>,
+}
+
+impl CrabAssets {
+    /// Bind-pose world position of the leg hub the body spawns its root at. The skin
+    /// reads it to place its own root in the same frame the body uses, so the two
+    /// share one coordinate space (see [`super::skin::attach_skins`]).
+    pub fn hub_bind_world(&self) -> Option<Vec3> {
+        self.recipe.as_ref().map(|r| r.hub_bind_world)
+    }
 }
 
 impl FromWorld for CrabAssets {
@@ -373,7 +385,14 @@ pub fn spawn_crab(
     let recipe = assets.recipe.as_ref().expect(
         "CrabAssets built without a rig recipe — main's model preflight should have caught this",
     );
-    let origin = position + Vec3::new(0.0, SPAWN_HEIGHT, 0.0);
+    // Spawn in the glTF bind-world frame: the carapace root sits at the leg hub's
+    // true bind-world position (offset by the spawn point + a clearance drop), so
+    // every link's `anchor1` delta lands it at its real glTF bone origin — the exact
+    // frame the cosmetic skin renders its bones in. The skin is the truth; the
+    // physics aligns to it. Anchoring at a bare `(0, SPAWN_HEIGHT, 0)` instead pinned
+    // the hub at an arbitrary height and dropped the hub's lateral/forward bind
+    // offset, sliding the whole body ~0.1 (mostly −Z) off the skin.
+    let origin = position + recipe.hub_bind_world + Vec3::new(0.0, SPAWN_HEIGHT, 0.0);
 
     // -- Carapace (root): the rigid trunk; shell/thorax/rostrum/abdomen ride it.
     let carapace = commands
