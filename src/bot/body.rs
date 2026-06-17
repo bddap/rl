@@ -243,43 +243,62 @@ pub enum Side {
 }
 
 impl CrabJointId {
-    /// Total policy-actuated DOFs — sets the observation/action vector width and
-    /// the net's input/output size. Locked rig joints are excluded (no [`CrabJoint`]).
-    pub const COUNT: usize = 8 * 3 + 2 * 3; // 24 leg + 6 claw = 30
-
-    /// Flat observation/action slot for this joint (0..COUNT). A bijection — the
-    /// `index_is_a_bijection` test pins that no two joints alias a slot.
-    pub fn index(&self) -> usize {
-        match self {
-            CrabJointId::LegCoxa(side, leg) => side_offset(*side) * 12 + (*leg as usize) * 3,
-            CrabJointId::LegMerus(side, leg) => side_offset(*side) * 12 + (*leg as usize) * 3 + 1,
-            CrabJointId::LegCarpus(side, leg) => side_offset(*side) * 12 + (*leg as usize) * 3 + 2,
-            CrabJointId::ClawShoulder(side) => 24 + side_offset(*side) * 3,
-            CrabJointId::ClawWrist(side) => 24 + side_offset(*side) * 3 + 1,
-            CrabJointId::ClawPincer(side) => 24 + side_offset(*side) * 3 + 2,
-        }
+    /// Every policy-actuated joint, in observation/action slot order — the ONE
+    /// source of truth from which [`index`](Self::index) and [`COUNT`](Self::COUNT)
+    /// derive, so adding a variant means editing only this list (and a wrong array
+    /// length is a compile error, not the runtime slot-aliasing the bijection test
+    /// once had to catch). The order is load-bearing: PPO obs/action vectors and
+    /// saved checkpoints are keyed by a joint's position here, so reordering would
+    /// invalidate trained checkpoints. Legs first (front→back per side, both
+    /// sides), then claws (per side) — left side ahead of right within each.
+    const fn all() -> [CrabJointId; 30] {
+        [
+            CrabJointId::LegCoxa(Side::Left, 0),
+            CrabJointId::LegMerus(Side::Left, 0),
+            CrabJointId::LegCarpus(Side::Left, 0),
+            CrabJointId::LegCoxa(Side::Left, 1),
+            CrabJointId::LegMerus(Side::Left, 1),
+            CrabJointId::LegCarpus(Side::Left, 1),
+            CrabJointId::LegCoxa(Side::Left, 2),
+            CrabJointId::LegMerus(Side::Left, 2),
+            CrabJointId::LegCarpus(Side::Left, 2),
+            CrabJointId::LegCoxa(Side::Left, 3),
+            CrabJointId::LegMerus(Side::Left, 3),
+            CrabJointId::LegCarpus(Side::Left, 3),
+            CrabJointId::LegCoxa(Side::Right, 0),
+            CrabJointId::LegMerus(Side::Right, 0),
+            CrabJointId::LegCarpus(Side::Right, 0),
+            CrabJointId::LegCoxa(Side::Right, 1),
+            CrabJointId::LegMerus(Side::Right, 1),
+            CrabJointId::LegCarpus(Side::Right, 1),
+            CrabJointId::LegCoxa(Side::Right, 2),
+            CrabJointId::LegMerus(Side::Right, 2),
+            CrabJointId::LegCarpus(Side::Right, 2),
+            CrabJointId::LegCoxa(Side::Right, 3),
+            CrabJointId::LegMerus(Side::Right, 3),
+            CrabJointId::LegCarpus(Side::Right, 3),
+            CrabJointId::ClawShoulder(Side::Left),
+            CrabJointId::ClawWrist(Side::Left),
+            CrabJointId::ClawPincer(Side::Left),
+            CrabJointId::ClawShoulder(Side::Right),
+            CrabJointId::ClawWrist(Side::Right),
+            CrabJointId::ClawPincer(Side::Right),
+        ]
     }
 
-    /// Every joint, once. Order is irrelevant (callers needing a stable slot use
-    /// [`index`](Self::index)); this lets a test enumerate the set without
-    /// re-deriving it by hand. Yields exactly `COUNT` items.
-    #[cfg(test)]
-    fn all() -> impl Iterator<Item = CrabJointId> {
-        [Side::Left, Side::Right].into_iter().flat_map(|side| {
-            (0u8..4)
-                .flat_map(move |leg| {
-                    [
-                        CrabJointId::LegCoxa(side, leg),
-                        CrabJointId::LegMerus(side, leg),
-                        CrabJointId::LegCarpus(side, leg),
-                    ]
-                })
-                .chain([
-                    CrabJointId::ClawShoulder(side),
-                    CrabJointId::ClawWrist(side),
-                    CrabJointId::ClawPincer(side),
-                ])
-        })
+    /// Total policy-actuated DOFs — sets the observation/action vector width and
+    /// the net's input/output size. Locked rig joints are excluded (no [`CrabJoint`]).
+    pub const COUNT: usize = Self::all().len();
+
+    /// Flat observation/action slot for this joint (0..COUNT): its position in
+    /// [`all`](Self::all). A bijection because `all` lists each joint once; the
+    /// `index_is_a_bijection` test pins that no variant is duplicated there. O(COUNT)
+    /// and never on a hot path.
+    pub fn index(&self) -> usize {
+        Self::all()
+            .iter()
+            .position(|j| j == self)
+            .expect("every CrabJointId is listed in all()")
     }
 }
 
@@ -327,13 +346,6 @@ impl CrabJointId {
             CrabJointId::ClawWrist(_) => [-1.2, 1.2],
             CrabJointId::ClawPincer(_) => [-0.5, 0.2],
         }
-    }
-}
-
-fn side_offset(side: Side) -> usize {
-    match side {
-        Side::Left => 0,
-        Side::Right => 1,
     }
 }
 
@@ -412,10 +424,9 @@ pub fn spawn_crab(
             .all()
     };
     for link in &recipe.links {
-        let (parent_ent, parent_pos) = if link.parent == rig::CARAPACE {
-            (carapace, origin)
-        } else {
-            (ents[link.parent], world_pos[link.parent])
+        let (parent_ent, parent_pos) = match link.parent {
+            None => (carapace, origin),
+            Some(idx) => (ents[idx], world_pos[idx]),
         };
         let here = parent_pos + link.anchor1; // identity rest rotation → plain add
         let collider = capsule_collider(link.center, link.col_rot, link.half_height, link.radius);
@@ -573,10 +584,12 @@ pub fn register_pivot_markers(app: &mut App) {
 mod tests {
     use super::*;
 
-    /// `index` must be a bijection onto `0..COUNT`. Every action, observation,
-    /// and per-joint array is keyed by it, so a collision would silently alias
-    /// two joints — one never actuated, the other actuated twice — and still
-    /// "train". Pin that every joint maps to a distinct slot covering the range.
+    /// `index` must be a bijection onto `0..COUNT`. Slots key every action,
+    /// observation, and per-joint array, so a duplicated variant in [`all`] would
+    /// give two joints the same `position` — one never actuated, the other twice —
+    /// and the model would still "train". `all` being the lone source now makes
+    /// that a duplicate-list bug rather than three drifting copies, but pin it
+    /// regardless: every joint maps to a distinct slot covering the whole range.
     #[test]
     fn index_is_a_bijection() {
         let mut seen = [false; CrabJointId::COUNT];
