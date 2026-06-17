@@ -334,8 +334,16 @@ impl Plugin for DemoPlugin {
             .add_systems(
                 FixedUpdate,
                 (
-                    demo_settle.after(BotSet::Think),
-                    demo_fall_rescue,
+                    // Settle zeroes the actions a fresh crab holds, so it must land
+                    // before Act applies them (not merely after Think) — otherwise the
+                    // crab takes a tick of stale policy torque mid-drop. The
+                    // Sense→Think→Act chain alone leaves settle-vs-Act to Bevy's
+                    // implicit conflict ordering; pin it.
+                    demo_settle.after(BotSet::Think).before(BotSet::Act),
+                    // A fall-rescue rebuilds the crab; run it before Sense (as the
+                    // training rescue does) so the fresh pose is observed and the
+                    // zeroed actions reach Act this tick, not next.
+                    demo_fall_rescue.before(BotSet::Sense),
                     demo_poke.after(BotSet::Act).before(PhysicsSet::SyncBackend),
                 ),
             );
