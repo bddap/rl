@@ -379,18 +379,21 @@ fn main() {
                 }),
                 ..default()
             }));
-            // RL_DEBUG_COLLIDERS=1 turns on Rapier's collider wireframes in the demo
-            // (windowed training-viz always gets them). With the stand-in primitive
-            // meshes removed, this debug-render is the only in-engine view of the true
-            // colliders, so the skin can be checked against the actual physics shapes.
-            if matches!(mode, AppMode::Train) || std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
-                app.add_plugins(RapierDebugRenderPlugin {
-                    // Collider shapes only — the default also draws per-body axes +
-                    // joint markers, which on a 31-part body is an unreadable tangle.
-                    mode: DebugRenderMode::COLLIDER_SHAPES,
-                    ..default()
-                });
-            }
+            // With the stand-in primitive meshes removed, Rapier's debug-render is
+            // the only in-engine view of the true colliders, so the skin can be
+            // checked against the actual physics shapes. The plugin is added in BOTH
+            // viz modes so the demo's right-arrow can toggle `DebugRenderContext`
+            // live; `enabled` only sets the INITIAL state. Training-viz starts the
+            // cage on; the demo starts it on iff RL_DEBUG_COLLIDERS is set.
+            let colliders_on =
+                matches!(mode, AppMode::Train) || std::env::var_os("RL_DEBUG_COLLIDERS").is_some();
+            app.add_plugins(RapierDebugRenderPlugin {
+                enabled: colliders_on,
+                // Collider shapes only — the default also draws per-body axes +
+                // joint markers, which on a 31-part body is an unreadable tangle.
+                mode: DebugRenderMode::COLLIDER_SHAPES,
+                ..default()
+            });
             // Pivot markers gate on RL_DEBUG_COLLIDERS ALONE, not the always-on
             // training-viz cage: they're a deliberate diagnostic, not default chrome.
             if std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
