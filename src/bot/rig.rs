@@ -82,12 +82,6 @@ pub struct RigRecipe {
     /// to). The trunk's bounding box isn't centred on the leg hub, so the carapace
     /// collider is offset to sit on the shell instead of engulfing the limbs.
     pub carapace_offset: Vec3,
-    /// Orientation of the carapace box: maps its local (cuboid) axes onto the shell
-    /// vertices' principal axes. The dome's principal axes tilt slightly off world,
-    /// so pitching the box to match drops its top corners onto the curve instead of
-    /// floating them above it (the overshoot an axis-aligned box left). Half-extents
-    /// are measured in this rotated frame.
-    pub carapace_rot: Quat,
     pub carapace_density: f32,
     pub links: Vec<RigLink>,
 }
@@ -289,12 +283,11 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
         }
     }
 
-    let (carapace_half, carapace_offset, carapace_rot) = carapace_box(model, carapace_center);
+    let (carapace_half, carapace_offset) = carapace_box(model, carapace_center);
     Some(RigRecipe {
         hub_bind_world: carapace_center,
         carapace_half,
         carapace_offset,
-        carapace_rot,
         carapace_density: CARAPACE_DENSITY,
         links,
     })
@@ -444,20 +437,24 @@ pub(crate) const TRUNK_BONES: [&str; 10] = [
     "Ctrl_Def_neck",
 ];
 
-/// Carapace box from the trunk's vertex cloud: half-extents, the box centre as an
-/// offset from `center` (the leg hub the links anchor to), and the box→root
-/// rotation onto the shell's principal axes. The box is *oriented* — aligned to the
-/// dome's own axes rather than world — so its corners hug the curved shell instead
-/// of an axis-aligned box's corners poking proud of it. [`containing_obb`] uses the
-/// full vertex span (no trimming), so the box still encloses every shell vert.
-/// Using the actual shell vertices — not bone origins — covers the trunk's flesh
-/// without the old hand-tuned height clamp.
-fn carapace_box(model: &LoadedModel, center: Vec3) -> (Vec3, Vec3, Quat) {
+/// Carapace box from the trunk's vertex cloud: half-extents and the box centre as
+/// an offset from `center` (the leg hub the links anchor to). Using the actual
+/// shell vertices — not bone origins — covers the trunk's flesh without the old
+/// hand-tuned height clamp.
+fn carapace_box(model: &LoadedModel, center: Vec3) -> (Vec3, Vec3) {
     let pts = model.vertices_for_bones(&TRUNK_BONES);
-    let Some((half, box_center, rot)) = super::meshfit::containing_obb(&pts) else {
-        return (Vec3::splat(0.1), Vec3::ZERO, Quat::IDENTITY); // sparse model: small box at the hub
-    };
-    (half, box_center - center, rot)
+    if pts.len() < 4 {
+        return (Vec3::splat(0.1), Vec3::ZERO); // sparse model: a small box at the hub
+    }
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for p in &pts {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    let half = (hi - lo) * 0.5;
+    let box_center = (hi + lo) * 0.5;
+    (half, box_center - center)
 }
 
 /// A collider reconstructed in bind-pose world (the rest stance), paired with the
@@ -479,14 +476,12 @@ pub(crate) struct RestCollider {
 
 pub(crate) enum RestShape {
     Capsule { a: Vec3, b: Vec3, radius: f32 },
-    /// `rot` orients the box's half-extent axes onto the shell's principal axes; the
-    /// verifier must apply it to place corners and to score the cloud in-frame.
-    Cuboid { center: Vec3, half: Vec3, rot: Quat },
+    Cuboid { center: Vec3, half: Vec3 },
 }
 
 /// Reconstruct every scoreable collider of `recipe` in bind-pose world. Locked
-/// eye-stalk links are skipped (no fitted cloud to score). The carapace box sits at
-/// the hub + offset, oriented onto the shell's principal axes.
+/// eye-stalk links are skipped (no fitted cloud to score). The carapace box is
+/// world-axis-aligned at the hub + offset.
 pub(crate) fn rest_colliders(model: &LoadedModel, recipe: &RigRecipe) -> Vec<RestCollider> {
     let Some(o_root) = leg_hub_centroid(model) else {
         return Vec::new();
@@ -522,7 +517,6 @@ pub(crate) fn rest_colliders(model: &LoadedModel, recipe: &RigRecipe) -> Vec<Res
         shape: RestShape::Cuboid {
             center: o_root + recipe.carapace_offset,
             half: recipe.carapace_half,
-            rot: recipe.carapace_rot,
         },
         pivot: o_root,
     });
