@@ -57,6 +57,15 @@ impl Default for JointGraph {
 #[derive(Component)]
 struct GraphUi;
 
+/// The graph's own gizmo group, pinned to [`OVERLAY_LAYER`]. It must NOT share
+/// the default group: Rapier's collider debug-render draws into the default
+/// group, so forcing that group onto the overlay layer (as this used to) dragged
+/// the wireframes off the 3D camera and they vanished. A dedicated group keeps
+/// the plot on the 2D overlay while the wireframes stay on the scene camera.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+#[reflect(Default)]
+struct GraphGizmos;
+
 /// Drives the `RL_GRAPH_SHOT` self-check: capture the window once the scene has
 /// settled, then exit. Absent when the env var is unset.
 #[derive(Resource)]
@@ -67,6 +76,9 @@ struct GraphShot {
 
 pub fn register(app: &mut App) {
     app.init_resource::<JointGraph>();
+    // The graph's lines draw through this group (configured in `setup_overlay`),
+    // not the default group Rapier's wireframes use.
+    app.init_gizmo_group::<GraphGizmos>();
     if let Ok(path) = std::env::var("RL_GRAPH_SHOT") {
         app.insert_resource(GraphShot {
             path: path.into(),
@@ -84,9 +96,10 @@ fn setup_overlay(
     mut configs: ResMut<GizmoConfigStore>,
     graph: Res<JointGraph>,
 ) {
-    // Restrict gizmos to the overlay layer so they render through the 2D
-    // camera only, never the 3D scene camera.
-    let (config, _) = configs.config_mut::<DefaultGizmoConfigGroup>();
+    // Pin only the graph's OWN gizmo group to the overlay layer, so its lines
+    // render through the 2D camera. The default group is left alone — Rapier's
+    // collider wireframes live there and must stay on the 3D scene camera.
+    let (config, _) = configs.config_mut::<GraphGizmos>();
     config.render_layers = RenderLayers::layer(OVERLAY_LAYER);
     config.line.width = 1.5;
 
@@ -180,7 +193,7 @@ fn push(buf: &mut VecDeque<f32>, v: f32) {
     buf.push_back(v);
 }
 
-fn draw_graph(graph: Res<JointGraph>, windows: Query<&Window>, mut gizmos: Gizmos) {
+fn draw_graph(graph: Res<JointGraph>, windows: Query<&Window>, mut gizmos: Gizmos<GraphGizmos>) {
     if !graph.visible {
         return;
     }
@@ -219,7 +232,7 @@ fn draw_graph(graph: Res<JointGraph>, windows: Query<&Window>, mut gizmos: Gizmo
 /// `top` is the plot's top edge (center-origin, +y up); values map symmetric
 /// about the vertical midpoint with the given half-range.
 fn draw_plot(
-    gizmos: &mut Gizmos,
+    gizmos: &mut Gizmos<GraphGizmos>,
     series: &[VecDeque<f32>],
     left: f32,
     top: f32,

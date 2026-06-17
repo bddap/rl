@@ -3,8 +3,9 @@
 //! When `CRAB_MODEL_PATH` names a glTF inside the app's `assets/` directory
 //! (e.g. `sally.glb`, fetched from the private bddap-bot/rl-assets repo), each
 //! crab gets a skinned-mesh skin whose deform bones follow the physics links.
-//! Without the env var the primitive meshes render as before — the physics
-//! body stays the single source of truth, the model is cosmetic.
+//! The physics body stays the single source of truth; the model is cosmetic,
+//! and the colliders themselves are only ever shown by Rapier's debug-render
+//! (`RL_DEBUG_COLLIDERS`), never as stand-in meshes.
 //!
 //! How following works: when the scene instance is ready, every deform bone is
 //! matched to a physics link by name (`bone_target`), and the bone's world
@@ -18,9 +19,6 @@
 //! no per-frame parent-chain inversions. Non-bone scene nodes (the skinned
 //! mesh entity itself) are left alone; skinning reads joint GlobalTransforms,
 //! which keep working across the reparent.
-//!
-//! `RL_SKIN_OVERLAY=1` keeps the primitive meshes visible under the skin —
-//! the render-vs-physics debug view (and the demo's BOTH view mode).
 //!
 //! Re-pairing on reset: an episode reset ([`crate::bot::respawn_crab`]) despawns
 //! an env's physics parts and spawns fresh ones under the SAME env id. The skin
@@ -43,46 +41,6 @@ use super::meshfit::PartId;
 #[derive(Resource)]
 pub struct CrabModel {
     scene: Handle<Scene>,
-}
-
-/// Which render layers are shown. The crab is drawn twice — primitive part
-/// meshes (one per collider) and the skinned glTF — and this is the single
-/// source of truth for which is visible; [`apply_render_view`] enacts it on
-/// the skin root and the primitives, and the demo cycles it with a keypress.
-/// Toggling is just a [`Visibility`] flip (nothing despawns), so it's instant
-/// and stateless.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RenderView {
-    /// Skinned glTF only — the shipped look. Primitives hidden.
-    Pretty,
-    /// Primitive collider meshes only — the physics truth. Skin hidden.
-    Physics,
-    /// Both at once: primitives showing THROUGH/under the skin, the
-    /// render-vs-physics debug overlay (was `RL_SKIN_OVERLAY=1`).
-    Both,
-}
-
-impl RenderView {
-    /// PRETTY → PHYSICS → BOTH → PRETTY. The demo's view key steps this.
-    pub fn next(self) -> Self {
-        match self {
-            RenderView::Pretty => RenderView::Physics,
-            RenderView::Physics => RenderView::Both,
-            RenderView::Both => RenderView::Pretty,
-        }
-    }
-
-    /// Should the primitive collider meshes be drawn in this view?
-    fn show_primitives(self) -> bool {
-        matches!(self, RenderView::Physics | RenderView::Both)
-    }
-
-    /// Should the skinned glTF be drawn in this view? (Only takes effect once a
-    /// skin has paired; an unpaired skin stays hidden regardless — it would be
-    /// a bind-pose statue.)
-    fn show_skin(self) -> bool {
-        matches!(self, RenderView::Pretty | RenderView::Both)
-    }
 }
 
 /// One skin instance, attached to one crab (by env id).
@@ -144,23 +102,12 @@ pub fn register(app: &mut App) {
     let Ok(path) = std::env::var("CRAB_MODEL_PATH") else {
         return;
     };
-    // RL_VIEW=pretty|physics|both sets the initial view; physics = skin hidden,
-    // colliders only (a readable headless collider screenshot). RL_SKIN_OVERLAY=1
-    // is the old alias for `both`. The demo cycles the view live from here either way.
-    let view = match std::env::var("RL_VIEW").ok().as_deref() {
-        Some("physics") => RenderView::Physics,
-        Some("both") => RenderView::Both,
-        Some("pretty") => RenderView::Pretty,
-        _ if std::env::var("RL_SKIN_OVERLAY").is_ok_and(|v| v == "1") => RenderView::Both,
-        _ => RenderView::Pretty,
-    };
     let scene = app
         .world()
         .resource::<AssetServer>()
         .load(GltfAssetLabel::Scene(0).from_asset(path));
     app.insert_resource(CrabModel { scene });
-    app.insert_resource(view);
-    app.add_systems(Update, (attach_skins, reap_orphan_skins, apply_render_view));
+    app.add_systems(Update, (attach_skins, reap_orphan_skins, reveal_skin));
     app.add_systems(
         PostUpdate,
         (
@@ -224,7 +171,7 @@ fn reap_orphan_skins(
 /// Once the glTF instance exists (one frame after its children appear, so
 /// GlobalTransforms hold the bind pose), capture per-bone offsets and flatten
 /// driven bones under the root. Setting `paired` hands visibility to
-/// [`apply_render_view`], which reveals the now-driven skin.
+/// [`reveal_skin`], which shows the now-driven skin.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn pair_bones(
     mut commands: Commands,
@@ -297,8 +244,7 @@ fn pair_bones(
             paired += 1;
         }
 
-        // Visibility (reveal the skin, hide/show primitives) is owned by
-        // `apply_render_view`, which acts the moment `paired` flips true.
+        // `reveal_skin` shows the skin the moment `paired` flips true.
         info!(
             "crab skin paired: env {} ({} bones driven)",
             skin.env, paired
@@ -318,8 +264,7 @@ fn pair_bones(
 /// flags the whole skin stale — and re-resolves every bone from its name to
 /// the live part of the same role, keeping the captured offset (the respawn
 /// reproduces the same rest pose at the same origin, so it stays exact). No
-/// re-settle and no visibility change, so the skin never flickers; re-hiding
-/// the fresh primitives to match the view is left to [`apply_render_view`].
+/// re-settle and no visibility change, so the skin never flickers.
 fn repair_skins(
     mut bones: Query<(&mut BoneDrive, &Name)>,
     skins: Query<(&CrabSkin, &Children)>,
@@ -354,41 +299,15 @@ fn repair_skins(
     }
 }
 
-/// Enact [`RenderView`] on the skin root and the primitive part meshes — the
-/// single owner of crab visibility. An unpaired skin stays hidden (it would be
-/// a bind-pose statue) and its primitives stay shown, regardless of the view,
-/// so the pre-pair settle still looks right; once paired the view decides.
-/// Runs every frame so a reset's fresh (visible) primitives are re-corrected
-/// without any per-reset bookkeeping. Writes only on change.
-#[allow(clippy::type_complexity)]
-fn apply_render_view(
-    view: Res<RenderView>,
-    skins: Query<&CrabSkin>,
-    mut parts: Query<(&CrabEnvId, &mut Visibility), (With<CrabBodyPart>, With<Mesh3d>)>,
-    mut roots: Query<(&CrabSkin, &mut Visibility), Without<CrabBodyPart>>,
-) {
-    // Which envs have a paired skin — only those let the view hide primitives /
-    // show the skin; an env still waiting to pair shows primitives as a fallback.
-    let paired = |env: usize| skins.iter().any(|s| s.env == env && s.paired);
-
-    for (env, mut vis) in parts.iter_mut() {
-        let want = if paired(env.0) && !view.show_primitives() {
-            Visibility::Hidden
-        } else {
-            Visibility::Visible
-        };
-        if *vis != want {
-            *vis = want;
-        }
-    }
+/// Reveal a skin once it has paired. A skin spawns `Hidden` because an unpaired
+/// one is a bind-pose statue sitting off the physics body; the moment its bones
+/// are driven it should show. The colliders themselves are never rendered as
+/// meshes (Rapier's debug-render is the physics view), so the skin is the whole
+/// visible crab and just stays on after pairing. Writes only on change.
+fn reveal_skin(mut roots: Query<(&CrabSkin, &mut Visibility)>) {
     for (skin, mut vis) in roots.iter_mut() {
-        let want = if skin.paired && view.show_skin() {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-        if *vis != want {
-            *vis = want;
+        if skin.paired && *vis != Visibility::Visible {
+            *vis = Visibility::Visible;
         }
     }
 }
@@ -419,9 +338,7 @@ mod tests {
     };
     use super::super::test_util::{headless_app, tick};
     use super::super::{CrabSpawns, respawn_crab};
-    use super::{
-        BoneDrive, CrabSkin, PartId, RenderView, SETTLE_FRAMES, apply_render_view, repair_skins,
-    };
+    use super::{BoneDrive, CrabSkin, PartId, SETTLE_FRAMES, repair_skins, reveal_skin};
 
     /// The role-resolving half of pairing: a bone name must map to the physics
     /// link the re-pair then targets. Pins the cases the test relies on so a
@@ -524,18 +441,14 @@ mod tests {
         assert!(is_live(&mut app, new_carapace) && is_live(&mut app, new_coxa));
     }
 
-    /// `apply_render_view` is the sole owner of crab visibility; pin that each
-    /// view sets the skin root and the primitive parts as documented — and that
-    /// the system's parts/roots queries don't alias (Bevy panics on a conflict,
-    /// so merely running it is the disjointness check that the build can't give).
+    /// `reveal_skin` shows a skin only once it pairs: an unpaired root is a
+    /// bind-pose statue off the body, so it must stay hidden, and the moment
+    /// `paired` flips the skin must become (and remain) visible.
     #[test]
-    fn render_view_drives_primitive_and_skin_visibility() {
+    fn reveal_skin_shows_only_after_pairing() {
         let mut app = headless_app();
-        app.insert_resource(RenderView::Pretty);
-        app.add_systems(Update, apply_render_view);
-        tick(&mut app, 192);
+        app.add_systems(Update, reveal_skin);
 
-        // A paired skin root for env 0 (no glTF: visibility keys off `paired`).
         let root = app
             .world_mut()
             .run_system_once(|mut commands: Commands| -> Entity {
@@ -543,8 +456,8 @@ mod tests {
                     .spawn((
                         CrabSkin {
                             env: 0,
-                            scene_frames: Some(SETTLE_FRAMES),
-                            paired: true,
+                            scene_frames: None,
+                            paired: false,
                         },
                         Transform::default(),
                         Visibility::Hidden,
@@ -552,43 +465,23 @@ mod tests {
                     .id()
             })
             .unwrap();
-
-        let root_visible = |app: &App| {
+        let visible = |app: &App| {
             matches!(
                 app.world().get::<Visibility>(root),
                 Some(Visibility::Visible)
             )
         };
-        let any_part_visible = |app: &mut App| {
-            let mut q = app
-                .world_mut()
-                .query_filtered::<&Visibility, With<CrabBodyPart>>();
-            q.iter(app.world())
-                .any(|v| matches!(v, Visibility::Visible))
-        };
-        let all_parts_hidden = |app: &mut App| {
-            let mut q = app
-                .world_mut()
-                .query_filtered::<&Visibility, With<CrabBodyPart>>();
-            q.iter(app.world()).all(|v| matches!(v, Visibility::Hidden))
-        };
 
-        // PRETTY: skin shown, primitives hidden.
+        // Unpaired: stays hidden.
         tick(&mut app, 1);
-        assert!(root_visible(&app), "pretty: skin visible");
-        assert!(all_parts_hidden(&mut app), "pretty: primitives hidden");
+        assert!(!visible(&app), "unpaired skin must stay hidden");
 
-        // PHYSICS: skin hidden, primitives shown.
-        *app.world_mut().resource_mut::<RenderView>() = RenderView::Physics;
+        // Pair it; reveal_skin flips it visible and leaves it there.
+        app.world_mut().get_mut::<CrabSkin>(root).unwrap().paired = true;
         tick(&mut app, 1);
-        assert!(!root_visible(&app), "physics: skin hidden");
-        assert!(any_part_visible(&mut app), "physics: primitives shown");
-
-        // BOTH: skin shown AND primitives shown.
-        *app.world_mut().resource_mut::<RenderView>() = RenderView::Both;
+        assert!(visible(&app), "paired skin must become visible");
         tick(&mut app, 1);
-        assert!(root_visible(&app), "both: skin visible");
-        assert!(any_part_visible(&mut app), "both: primitives shown");
+        assert!(visible(&app), "paired skin must stay visible");
     }
 
     enum Role {

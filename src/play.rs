@@ -29,7 +29,6 @@ use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
 use crate::bot::brain::{ACTION_SIZE, CrabBrain};
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
-use crate::bot::skin::RenderView;
 use crate::bot::{BotSet, CrabSpawns, respawn_crab};
 use crate::training::session::{
     BRAIN_STEM, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend,
@@ -330,8 +329,8 @@ impl Plugin for DemoPlugin {
         crate::player::graph::register(app);
         app.init_resource::<DemoSettle>()
             .init_resource::<PokeBurst>()
-            .add_systems(Startup, (spawn_orbit_camera, spawn_hud, spawn_view_hud))
-            .add_systems(Update, (orbit_camera, demo_controls, view_hud))
+            .add_systems(Startup, (spawn_orbit_camera, spawn_hud))
+            .add_systems(Update, (orbit_camera, demo_controls))
             .add_systems(
                 FixedUpdate,
                 (
@@ -426,11 +425,13 @@ fn orbit_camera(
         d_zoom -= ev.y * 0.4;
     }
 
-    // Keyboard arrows orbit; -/= zoom.
+    // Keyboard orbit; -/= zoom. Right-yaw is the comma key, not the right arrow:
+    // the right arrow toggles the collider wireframes (see `demo_controls`), and
+    // mouse right-drag already covers free-look orbiting in every direction.
     if keys.pressed(KeyCode::ArrowLeft) {
         d_yaw += dt;
     }
-    if keys.pressed(KeyCode::ArrowRight) {
+    if keys.pressed(KeyCode::Comma) {
         d_yaw -= dt;
     }
     if keys.pressed(KeyCode::ArrowUp) {
@@ -551,29 +552,31 @@ fn demo_controls(
     mut poke_burst: ResMut<PokeBurst>,
     mut actions: ResMut<CrabActions>,
     mut settle: ResMut<DemoSettle>,
-    // Only present when a skinned model is loaded (`CRAB_MODEL_PATH`); without
-    // one there's nothing to switch between, so the view key is a no-op.
-    view: Option<ResMut<RenderView>>,
+    // Always present in the demo: the Rapier debug-render plugin is added
+    // unconditionally so this toggle works (RL_DEBUG_COLLIDERS only sets the
+    // initial on/off — see main.rs).
+    mut debug_render: ResMut<DebugRenderContext>,
 ) {
     let mut reset = keys.just_pressed(KeyCode::KeyR);
     let mut poke = keys.just_pressed(KeyCode::Space);
     let mut quit = keys.just_pressed(KeyCode::Escape);
-    // Cycle PRETTY → PHYSICS → BOTH. KeyV / D-pad Right are otherwise unbound
-    // (the face buttons and D-pad Up/Down are all taken — see the HUD).
-    let mut cycle_view = keys.just_pressed(KeyCode::KeyV);
+    // Right arrow / D-pad Right toggles the collider wireframes live. The arrow
+    // keys are otherwise the orbit camera, but its right-yaw moved to the comma
+    // key so this single binding isn't double-bound (mouse right-drag still orbits).
+    let mut toggle_colliders = keys.just_pressed(KeyCode::ArrowRight);
     for gp in gamepads.iter() {
         reset |= gp.just_pressed(GamepadButton::South);
         poke |= gp.just_pressed(GamepadButton::West);
         quit |= gp.just_pressed(GamepadButton::Start);
-        cycle_view |= gp.just_pressed(GamepadButton::DPadRight);
+        toggle_colliders |= gp.just_pressed(GamepadButton::DPadRight);
     }
 
     if quit {
         exit.write(AppExit::Success);
     }
-    if cycle_view && let Some(mut view) = view {
-        *view = view.next();
-        info!("demo render view: {:?}", *view);
+    if toggle_colliders {
+        debug_render.enabled = !debug_render.enabled;
+        info!("demo collider wireframes: {}", debug_render.enabled);
     }
     if reset {
         demo_respawn(
@@ -643,7 +646,7 @@ fn spawn_hud(mut commands: Commands) {
             "Crab RL — trained policy\n\
              Right-drag / right-stick: orbit    wheel / triggers: zoom\n\
              R or (A): reset    Space or (X): poke    Esc or Start: quit\n\
-             V or (D-pad Right): cycle render view (pretty / physics / both)",
+             Right arrow or (D-pad Right): collider wireframes    G: joint graph",
         ),
         TextFont {
             font_size: 16.0,
@@ -657,46 +660,6 @@ fn spawn_hud(mut commands: Commands) {
             ..default()
         },
     ));
-}
-
-/// Bottom-right live readout of the active render view. Empty (and so invisible)
-/// until a skinned model is loaded — without one there's nothing to switch.
-#[derive(Component)]
-struct ViewHud;
-
-fn spawn_view_hud(mut commands: Commands) {
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: 16.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.6, 0.95, 1.0)),
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(12.0),
-            right: Val::Px(12.0),
-            ..default()
-        },
-        ViewHud,
-    ));
-}
-
-/// Refresh the view readout when the view changes (and on first load). No-op
-/// without a model — the resource is then absent and the node stays empty.
-fn view_hud(view: Option<Res<RenderView>>, mut hud: Query<&mut Text, With<ViewHud>>) {
-    let Some(view) = view else { return };
-    if !view.is_changed() {
-        return;
-    }
-    let label = match *view {
-        RenderView::Pretty => "view: PRETTY (skin)",
-        RenderView::Physics => "view: PHYSICS (primitives)",
-        RenderView::Both => "view: BOTH (skin + primitives)",
-    };
-    if let Ok(mut text) = hud.single_mut() {
-        **text = label.to_string();
-    }
 }
 
 // ---------------------------------------------------------------------------
