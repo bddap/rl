@@ -14,18 +14,14 @@ bevy_rapier3d = "0.34"
 bevy_egui = "0.39"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
-# Serialize the offline-baked collider table (`--bake-colliders`) to a
-# human-diffable artifact the body loads behind `--body fitted`. Already in the
-# tree via bevy, so this pulls in no new crate.
-ron = "0.12"
 
 # Read the skinned glTF's skeleton (bind-pose bone transforms) + skin weights to
-# derive colliders for the offline bake (`src/bot/meshfit.rs`). `utils` enables
+# derive colliders (`src/bot/meshfit.rs`). `utils` enables
 # the accessor readers; `names` keeps node names (the bone↔part mapping keys on
 # them). No `import` (it would drag in `image`); we feed the GLB bytes to
 # `Gltf::from_slice`. Already in the tree via bevy at this version, so it adds no
-# new crate. A normal dependency, not dev-only: the bake runs in the shipped
-# binary as a dev subcommand, not under `cargo test`.
+# new crate. A normal dependency, not dev-only: the collider-fitting runs in the
+# shipped binary under dev subcommands (e.g. `--verify-colliders`), not `cargo test`.
 gltf = { version = "1.4.1", default-features = false, features = ["utils", "names"] }
 
 burn = { version = "0.20", features = ["autodiff", "ndarray"] }
