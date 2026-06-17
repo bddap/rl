@@ -95,30 +95,43 @@ mod model_path_tests {
     // path the AssetServer hands the skin (bddap/rl#30).
     #[test]
     fn relative_resolves_under_asset_root() {
-        let got = resolve(Some("sally.glb".as_ref()), Some("/srv/app".as_ref()), Path::new("/crate"), |p| {
-            p == Path::new("/srv/app/assets/sally.glb")
-        });
+        let got = resolve(
+            Some("sally.glb".as_ref()),
+            Some("/srv/app".as_ref()),
+            Path::new("/crate"),
+            |p| p == Path::new("/srv/app/assets/sally.glb"),
+        );
         assert_eq!(got, Some(PathBuf::from("/srv/app/assets/sally.glb")));
     }
 
     #[test]
     fn defaults_to_sally_under_crate_dir_when_unset() {
-        let got = resolve(None, None, Path::new("/crate"), |p| p == Path::new("/crate/assets/sally.glb"));
+        let got = resolve(None, None, Path::new("/crate"), |p| {
+            p == Path::new("/crate/assets/sally.glb")
+        });
         assert_eq!(got, Some(PathBuf::from("/crate/assets/sally.glb")));
     }
 
     #[test]
     fn absolute_path_used_as_is() {
-        let got = resolve(Some("/models/x.glb".as_ref()), Some("/srv".as_ref()), Path::new("/crate"), |p| {
-            p == Path::new("/models/x.glb")
-        });
+        let got = resolve(
+            Some("/models/x.glb".as_ref()),
+            Some("/srv".as_ref()),
+            Path::new("/crate"),
+            |p| p == Path::new("/models/x.glb"),
+        );
         assert_eq!(got, Some(PathBuf::from("/models/x.glb")));
     }
 
     #[test]
     fn none_when_missing() {
         assert_eq!(
-            resolve(Some("sally.glb".as_ref()), Some("/srv".as_ref()), Path::new("/crate"), |_| false),
+            resolve(
+                Some("sally.glb".as_ref()),
+                Some("/srv".as_ref()),
+                Path::new("/crate"),
+                |_| false
+            ),
             None
         );
     }
