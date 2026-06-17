@@ -35,16 +35,14 @@ const EYE_RADIUS: f32 = 0.03;
 /// Fallback radius when a joint's vertex cloud is too sparse to fit.
 const FALLBACK_RADIUS: f32 = 0.03;
 
-/// A [`RigLink::parent`] of `CARAPACE` means the link hangs off the carapace root
-/// rather than another link.
-pub const CARAPACE: usize = usize::MAX;
-
 /// One physics link to spawn, fully derived from the bind pose. Links are emitted
-/// parent-before-child, so `parent` indexes an earlier entry (or [`CARAPACE`]).
+/// parent-before-child, so `parent` indexes an earlier entry.
 pub struct RigLink {
     /// The deform bone at this link's joint pivot (skin mapping + debugging).
     pub bone: String,
-    pub parent: usize,
+    /// Index of the parent link in [`RigRecipe::links`], or `None` when the link
+    /// hangs off the carapace root — so "root" can't masquerade as a real index.
+    pub parent: Option<usize>,
     /// Joint pivot relative to the parent link's origin. Links spawn axis-aligned
     /// (identity orientation) at rest, so the parent frame is world and this is a
     /// plain world delta between bind-pose bone origins. (Reproducing each bone's
@@ -251,7 +249,7 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
 
     let mut links: Vec<RigLink> = Vec::new();
     for chain in joint_specs() {
-        let mut parent_idx = CARAPACE;
+        let mut parent_idx = None; // first link in each chain hangs off the carapace
         let mut parent_pivot = carapace_center;
         for spec in &chain {
             let Some(pivot) = model.bone_origin(&spec.pivot) else {
@@ -274,7 +272,7 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
                 break;
             };
             parent_pivot = pivot;
-            parent_idx = links.len();
+            parent_idx = Some(links.len());
             links.push(link);
         }
     }
@@ -291,7 +289,7 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
             &base,
             Some(&tip),
             carapace_center,
-            CARAPACE,
+            None,
             None,
             EYE_RADIUS,
             EYE_DENSITY,
@@ -307,7 +305,7 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
             &tip,
             None,
             base_origin,
-            base_idx,
+            Some(base_idx),
             None,
             EYE_RADIUS,
             EYE_DENSITY,
@@ -361,7 +359,7 @@ fn derive_link(
     pivot_name: &str,
     tip_name: Option<&str>,
     parent_pivot: Vec3,
-    parent_idx: usize,
+    parent_idx: Option<usize>,
     cloud: Option<&[Vec3]>,
     fixed_radius: f32,
     density: f32,
@@ -528,10 +526,9 @@ pub(crate) fn rest_colliders(model: &LoadedModel, recipe: &RigRecipe) -> Vec<Res
     let mut world_origin: Vec<Vec3> = Vec::with_capacity(recipe.links.len());
     let mut out: Vec<RestCollider> = Vec::new();
     for link in &recipe.links {
-        let base = if link.parent == CARAPACE {
-            o_root
-        } else {
-            world_origin[link.parent]
+        let base = match link.parent {
+            None => o_root,
+            Some(idx) => world_origin[idx],
         };
         let origin = base + link.anchor1;
         world_origin.push(origin);
