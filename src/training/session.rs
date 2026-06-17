@@ -25,8 +25,8 @@ use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns, respawn_crab};
 
 use super::algorithm::{
-    PpoConfig, PpoMetrics, ReturnNormalizer, ReturnNormalizerData, RolloutBuffer, Transition,
-    compute_gae, compute_log_prob, sample_action,
+    PpoConfig, PpoMetrics, ReturnNormalizer, ReturnNormalizerData, RolloutBuffer, StepEnd,
+    Transition, compute_gae, compute_log_prob, sample_action,
 };
 
 /// Running observation normalizer using Welford's online algorithm.
@@ -846,7 +846,7 @@ pub(crate) fn ppo_update_core(
             // zero return, not a normalized value — pass it through `normalize` so
             // `compute_gae`'s `denormalize` recovers 0.0 (up to f32 rounding)
             // regardless of μ/σ.
-            let last_value = if last_t.done {
+            let last_value = if matches!(last_t.end, StepEnd::Terminal) {
                 ret_norm_pre.normalize(0.0)
             } else {
                 let obs = Tensor::<TrainBackend, 1>::from_floats(last_t.obs.as_slice(), device)
@@ -1223,8 +1223,7 @@ pub fn brain_step(
             // is no step to mark and no episode to log.
             if training.envs[e].steps > 0 {
                 if let Some(last) = training.rollouts[e].transitions.last_mut() {
-                    last.done = true;
-                    last.truncated = false;
+                    last.end = StepEnd::Terminal;
                 }
                 true
             } else {
@@ -1260,14 +1259,20 @@ pub fn brain_step(
             // than learn the cap is a dead end (see Transition::truncated).
             let truncated = !done && training.envs[e].steps > 1500;
 
+            let end = if done {
+                StepEnd::Terminal
+            } else if truncated {
+                StepEnd::Truncated
+            } else {
+                StepEnd::Continues
+            };
             training.rollouts[e].push(Transition {
                 obs: obs_arrays[e],
                 action: action_arrays[e],
                 reward,
                 value: values[e],
                 log_prob: log_probs[e],
-                done,
-                truncated,
+                end,
             });
 
             let ep = &mut training.envs[e];

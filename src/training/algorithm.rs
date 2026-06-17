@@ -57,6 +57,31 @@ impl Default for PpoConfig {
     }
 }
 
+/// How a stored transition ends. Replaces the old `done`/`truncated` bool pair so
+/// the "never both set" invariant is structural rather than a comment the producer
+/// has to uphold by hand.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StepEnd {
+    /// The trajectory continues past this step — an in-episode step, or a
+    /// rollout-window boundary mid-episode (bootstrapped via `last_value`).
+    Continues,
+    /// True terminal: the episode genuinely ended here (a survival guard failed /
+    /// the sim died), so the future return is 0.
+    Terminal,
+    /// Truncation: the episode was cut by the step cap while the crab was still
+    /// standing. Its value must be bootstrapped (see [`compute_gae`]), or the policy
+    /// is taught that surviving to the cap is worth nothing.
+    Truncated,
+}
+
+impl StepEnd {
+    /// A terminal or a truncation ends the trajectory segment, so the GAE trace must
+    /// not fold future (next-episode) advantage back across it.
+    fn ends_segment(self) -> bool {
+        matches!(self, StepEnd::Terminal | StepEnd::Truncated)
+    }
+}
+
 #[derive(Clone)]
 pub struct Transition {
     pub obs: [f32; OBS_SIZE],
@@ -64,17 +89,7 @@ pub struct Transition {
     pub reward: f32,
     pub value: f32,
     pub log_prob: f32,
-    /// True terminal: the trajectory genuinely ended here (the crab failed a
-    /// survival guard / the sim died), so the future return is 0.
-    pub done: bool,
-    /// Truncation: the episode was cut by the step cap, not ended — the crab was
-    /// still standing. The value must be bootstrapped (see [`compute_gae`]), or
-    /// the policy is taught that surviving to the cap is worth nothing. Never set
-    /// together with `done`: the one site that builds a real transition computes
-    /// `truncated = !done && over_cap`. (A rollout-window boundary mid-episode is
-    /// neither: the episode continues into the next buffer, bootstrapped via
-    /// `last_value`.)
-    pub truncated: bool,
+    pub end: StepEnd,
 }
 
 pub struct RolloutBuffer {
@@ -280,18 +295,16 @@ pub fn compute_gae(
         //    isn't taught as a dead end.
         //  - otherwise: the next entry's value (an in-episode step, or a
         //    rollout-boundary cut bootstrapped via `last_value`).
-        let bootstrap = if t.done {
-            0.0
-        } else if t.truncated {
-            value
-        } else {
-            next_value
+        let bootstrap = match t.end {
+            StepEnd::Terminal => 0.0,
+            StepEnd::Truncated => value,
+            StepEnd::Continues => next_value,
         };
         let delta = t.reward + gamma * bootstrap - value;
         // The GAE trace cannot cross an episode boundary: a done or a truncation
         // ends this trajectory segment, so the future (next-episode) advantage
         // must not fold back across it.
-        last_gae = if t.done || t.truncated {
+        last_gae = if t.end.ends_segment() {
             delta
         } else {
             delta + gamma * lambda * last_gae
@@ -400,15 +413,14 @@ pub struct PpoMetrics {
 mod tests {
     use super::*;
 
-    fn t(reward: f32, value: f32, done: bool) -> Transition {
+    fn t(reward: f32, value: f32, end: StepEnd) -> Transition {
         Transition {
             obs: [0.0; OBS_SIZE],
             action: [0.0; ACTION_SIZE],
             reward,
             value,
             log_prob: 0.0,
-            done,
-            truncated: false,
+            end,
         }
     }
 
@@ -422,11 +434,11 @@ mod tests {
         let lambda = 0.5;
 
         let mut env_a = RolloutBuffer::new();
-        env_a.push(t(1.0, 0.5, false));
-        env_a.push(t(1.0, 0.5, false));
+        env_a.push(t(1.0, 0.5, StepEnd::Continues));
+        env_a.push(t(1.0, 0.5, StepEnd::Continues));
         let mut env_b = RolloutBuffer::new();
-        env_b.push(t(0.0, 1.0, false));
-        env_b.push(t(0.0, 1.0, true));
+        env_b.push(t(0.0, 1.0, StepEnd::Continues));
+        env_b.push(t(0.0, 1.0, StepEnd::Terminal));
 
         // Identity scale (no returns observed ⇒ μ=0, σ=1): GAE is in raw units, so
         // these hand-computed expectations are the un-normalized values.
@@ -464,14 +476,13 @@ mod tests {
         // Identity scale: GAE runs in raw units (see the sibling test).
         let id = ReturnNormalizer::new();
         let mut terminal = RolloutBuffer::new();
-        terminal.push(t(reward, value, true));
+        terminal.push(t(reward, value, StepEnd::Terminal));
         let (adv_term, _) = compute_gae(&terminal, 0.0, gamma, lambda, &id);
 
         let mut truncated = RolloutBuffer::new();
         truncated.push(Transition {
-            done: false,
-            truncated: true,
-            ..t(reward, value, false)
+            end: StepEnd::Truncated,
+            ..t(reward, value, StepEnd::Continues)
         });
         let (adv_trunc, ret_trunc) = compute_gae(&truncated, 0.0, gamma, lambda, &id);
 
@@ -527,7 +538,7 @@ mod tests {
         ];
         let mut buf_raw = RolloutBuffer::new();
         for &(reward, value) in &raw {
-            buf_raw.push(t(reward, value, false));
+            buf_raw.push(t(reward, value, StepEnd::Continues));
         }
         // Un-normalized baseline: identity scale, raw values, raw trailing bootstrap.
         let id = ReturnNormalizer::new();
@@ -546,7 +557,7 @@ mod tests {
         // The value head, trained against this scale, would emit normalized values.
         let mut buf_norm = RolloutBuffer::new();
         for &(reward, value) in &raw {
-            buf_norm.push(t(reward, (value - mu) / sigma, false));
+            buf_norm.push(t(reward, (value - mu) / sigma, StepEnd::Continues));
         }
         let last_value_norm = (last_value_raw - mu) / sigma;
         let (adv_norm, ret_norm_out) =
