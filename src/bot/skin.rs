@@ -178,18 +178,24 @@ pub fn register(app: &mut App) {
 fn attach_skins(
     mut commands: Commands,
     model: Res<CrabModel>,
+    assets: Res<super::body::CrabAssets>,
     crabs: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
     skins: Query<&CrabSkin>,
 ) {
+    // The body's carapace root spawns at the leg hub's bind-world position; the skin
+    // renders its bones at glTF bind-world from this root, so subtracting the hub puts
+    // the skin's skeleton in the body's exact frame — bone-for-link aligned at rest.
+    // (Skip if the recipe is absent; the skin needs the model anyway.)
+    let Some(hub) = assets.hub_bind_world() else {
+        return;
+    };
     for (env, t) in crabs.iter() {
         if skins.iter().any(|s| s.env == env.0) {
             continue;
         }
-        // Model rest pose has feet at y=0, facing +z — same convention as the
-        // physics crab, so the root sits on the ground under the carapace.
         commands.spawn((
             SceneRoot(model.scene.clone()),
-            Transform::from_translation(Vec3::new(t.translation.x, 0.0, t.translation.z)),
+            Transform::from_translation(t.translation - hub),
             // Hidden until paired: until then it would be a bind-pose statue.
             Visibility::Hidden,
             CrabSkin {
