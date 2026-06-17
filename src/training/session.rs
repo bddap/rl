@@ -407,6 +407,30 @@ fn load_return_normalizer(path: &Path) -> Option<ReturnNormalizer> {
 /// `--horizon` sets the window and reads the buffers out itself.
 pub(crate) const STEPS_PER_ROLLOUT: u32 = 1024;
 
+/// Where an env sits in the record → reset → settle lifecycle. One field in
+/// place of the old `needs_reset: bool` + `grace: u32` pair: those two booleans
+/// could spell a state that never legally coexists (a respawn pending *while*
+/// already settling), and the rescue-vs-normal fork that issue #16 fixed is now
+/// a single explicit phase assignment rather than a flag combination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EnvPhase {
+    /// Live episode: transitions are recorded and termination is evaluated.
+    #[default]
+    Recording,
+    /// Ended by a normal terminal/truncation; `reset_crab` will despawn+respawn
+    /// this env's crab on its next run and move it to `Settling`. Set by
+    /// `brain_step` and consumed by `reset_crab` in the same tick, so it is
+    /// never observed across a tick boundary.
+    AwaitingRespawn,
+    /// Fresh crab dropping into the rest pose: `grace` ticks remain in which no
+    /// transition is recorded and no termination is evaluated, while it lands
+    /// and the motors take the load. Reached from `AwaitingRespawn` (a normal
+    /// reset) or directly from a non-finite rescue, which respawns the crab
+    /// itself and so skips `AwaitingRespawn` (issue #16). `grace` is always ≥ 1
+    /// here — it returns to `Recording` the tick it would hit 0.
+    Settling { grace: u32 },
+}
+
 /// Per-env episode accumulators. Each env's episode runs and resets
 /// independently; pose sums (carapace height, up·Y) are averaged at episode
 /// end to quantify stance quality.
@@ -417,12 +441,7 @@ pub struct EnvEpisode {
     pub height_sum: f32,
     pub upright_sum: f32,
     pub sq_angvel_sum: f32,
-    pub needs_reset: bool,
-    /// Settle ticks remaining before the episode starts recording. A reset
-    /// respawns a fresh crab in the rest pose ([`crate::bot::respawn_crab`]);
-    /// during grace no transitions/termination are evaluated while it drops
-    /// from spawn height and the motors take the load.
-    pub grace: u32,
+    pub phase: EnvPhase,
 }
 
 /// Stored as a non-send resource because burn tensors use `OnceCell`, which is
@@ -1152,7 +1171,7 @@ pub fn brain_step(
     // Settling envs hold the rest pose (action 0); the policy takes over at
     // step 0 of the new episode.
     for (e, ep) in training.envs.iter().enumerate() {
-        if ep.grace > 0
+        if matches!(ep.phase, EnvPhase::Settling { .. })
             && let Some(v) = actions.envs.get_mut(e)
         {
             *v = [0.0; ACTION_SIZE];
@@ -1205,7 +1224,7 @@ pub fn brain_step(
     for e in 0..n {
         // No transitions while the env is settling into its start pose (or, as
         // a guard, if its crab is somehow absent this tick).
-        if training.envs[e].grace > 0 || poses[e].is_none() {
+        if matches!(training.envs[e].phase, EnvPhase::Settling { .. }) || poses[e].is_none() {
             continue;
         }
         // Does the episode end this tick? Three paths: rescued (no transition),
@@ -1296,18 +1315,18 @@ pub fn brain_step(
             // rescue_nonfinite_crabs (runs .before(Sense)); asking reset_crab for
             // a second respawn would tear down that fresh crab — which has lived
             // zero ticks — and rebuild an identical one (issue #16). So the rescue
-            // path owns the reset: take its grace here and leave needs_reset clear,
-            // so reset_crab respawns only envs that ended a NORMAL episode.
-            training.envs[e] = if rescued_envs.contains(&e) {
-                EnvEpisode {
-                    grace: RESET_GRACE_TICKS,
-                    ..EnvEpisode::default()
-                }
-            } else {
-                EnvEpisode {
-                    needs_reset: true,
-                    ..EnvEpisode::default()
-                }
+            // path owns the reset: it goes straight to `Settling` here, taking the
+            // grace itself, while a normal end goes to `AwaitingRespawn` for
+            // reset_crab to respawn.
+            training.envs[e] = EnvEpisode {
+                phase: if rescued_envs.contains(&e) {
+                    EnvPhase::Settling {
+                        grace: RESET_GRACE_TICKS,
+                    }
+                } else {
+                    EnvPhase::AwaitingRespawn
+                },
+                ..EnvEpisode::default()
             };
 
             training.recent_rewards.push(ep_reward);
@@ -1408,11 +1427,12 @@ pub fn brain_step(
 const RESET_GRACE_TICKS: u32 = 32;
 
 /// System: rebuilds each env's crab when that env's episode ends by a normal
-/// terminal/truncation (the `needs_reset` flag [`brain_step`] sets). An episode
-/// ended by a non-finite *rescue* is deliberately NOT handled here — that crab
-/// was already respawned this tick by [`rescue_nonfinite_crabs`], so the rescue
-/// path takes the grace itself and leaves `needs_reset` clear (issue #16); a
-/// respawn here would just rebuild the fresh crab a second time.
+/// terminal/truncation — `brain_step` leaves such an env in
+/// [`EnvPhase::AwaitingRespawn`], which this system consumes. An episode ended
+/// by a non-finite *rescue* is deliberately NOT handled here — that crab was
+/// already respawned this tick by [`rescue_nonfinite_crabs`], so the rescue path
+/// goes straight to [`EnvPhase::Settling`] and never enters `AwaitingRespawn`
+/// (issue #16); a respawn here would just rebuild the fresh crab a second time.
 ///
 /// A reset is a full despawn + respawn ([`respawn_crab`]): teleporting bodies
 /// cannot repair a multibody whose joint state went non-finite — rapier 0.32
@@ -1420,7 +1440,7 @@ const RESET_GRACE_TICKS: u32 = 32;
 /// crab that tunnels through the floor would otherwise wedge its env forever.
 /// The respawned crab starts in the overlap-free rest pose, so no unfold or
 /// collision-group dance is needed; the grace just skips recording while it
-/// takes load (see [`EnvEpisode::grace`]).
+/// takes load (see [`EnvPhase::Settling`]).
 pub fn reset_crab(
     mut commands: Commands,
     mut training: NonSendMut<TrainingState>,
@@ -1430,8 +1450,10 @@ pub fn reset_crab(
     parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>,
 ) {
     for (e, ep) in training.envs.iter_mut().enumerate() {
-        if std::mem::take(&mut ep.needs_reset) {
-            ep.grace = RESET_GRACE_TICKS;
+        if matches!(ep.phase, EnvPhase::AwaitingRespawn) {
+            ep.phase = EnvPhase::Settling {
+                grace: RESET_GRACE_TICKS,
+            };
             if let Some(v) = actions.envs.get_mut(e) {
                 *v = [0.0; ACTION_SIZE];
             }
@@ -1446,9 +1468,16 @@ pub fn reset_crab(
         }
     }
 
+    // Count the settle grace down on every settling env (including one just set
+    // above, which lands at RESET_GRACE_TICKS-1 this tick); at zero it returns to
+    // Recording and the policy takes back over.
     for ep in training.envs.iter_mut() {
-        if ep.grace > 0 {
-            ep.grace -= 1;
+        if let EnvPhase::Settling { grace } = ep.phase {
+            ep.phase = if grace > 1 {
+                EnvPhase::Settling { grace: grace - 1 }
+            } else {
+                EnvPhase::Recording
+            };
         }
     }
 }
@@ -1823,13 +1852,13 @@ mod tests {
 
     /// Issue #16: a crab that goes non-finite is rescued (despawn+respawn) by
     /// `rescue_nonfinite_crabs` BEFORE Sense; the same tick, `brain_step` ends the
-    /// episode and `reset_crab` used to honor `needs_reset` and respawn a SECOND
-    /// time — so the rescue's fresh crab lived zero ticks. This pins the fix: a
+    /// episode and `reset_crab` used to respawn it a SECOND time — so the rescue's
+    /// fresh crab lived zero ticks. This pins the fix: a
     /// rescued env respawns EXACTLY ONCE (the rescue's), reset_crab leaves it
     /// alone, and the episode still terminates for training.
     ///
     /// The post-tick *episode state* is identical with or without the bug (both
-    /// end at grace = RESET_GRACE_TICKS-1, needs_reset = false), so the only thing
+    /// end at `Settling { grace: RESET_GRACE_TICKS - 1 }`), so the only thing
     /// that distinguishes "respawned once" from "twice" is ENTITY IDENTITY: the
     /// crab present after the tick must be the exact set the rescue spawned. We
     /// therefore drive the rescue tick by hand, capture the rescued entity set,
@@ -1848,9 +1877,11 @@ mod tests {
         }
         {
             let st = app.world().non_send_resource::<TrainingState>();
-            assert_eq!(st.envs[0].grace, 0, "grace should have elapsed");
+            assert!(
+                matches!(st.envs[0].phase, EnvPhase::Recording),
+                "settle grace elapsed and no reset pending — env is recording"
+            );
             assert!(st.envs[0].steps > 0, "episode should have recorded steps");
-            assert!(!st.envs[0].needs_reset, "no pending reset before NaN");
         }
         let episodes_before = app
             .world()
@@ -1893,18 +1924,15 @@ mod tests {
             .run_system_once(brain_step)
             .expect("brain_step");
 
-        // After brain_step the rescued env must be set up for the rescue to own the
-        // reset: grace taken, needs_reset NOT set (that is what stops reset_crab
-        // from respawning again).
+        // After brain_step the rescued env must be in Settling (the rescue took the
+        // grace itself), NOT AwaitingRespawn — that is what stops reset_crab from
+        // respawning it again.
         {
             let st = app.world().non_send_resource::<TrainingState>();
             assert!(
-                !st.envs[0].needs_reset,
-                "rescued env must not request a second respawn (needs_reset stays clear)"
-            );
-            assert_eq!(
-                st.envs[0].grace, RESET_GRACE_TICKS,
-                "rescue path must take the settle grace itself"
+                matches!(st.envs[0].phase, EnvPhase::Settling { grace } if grace == RESET_GRACE_TICKS),
+                "rescue path takes the settle grace itself (Settling, not AwaitingRespawn) — \
+                 being in Settling and not AwaitingRespawn is what stops reset_crab respawning again"
             );
             assert_eq!(
                 st.episode_count,
