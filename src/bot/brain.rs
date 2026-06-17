@@ -5,10 +5,9 @@ use burn::module::Param;
 use burn::nn;
 use burn::prelude::*;
 
-use super::body::CrabJointId;
+use super::actuator::ACTION_SIZE;
 use super::sensor::OBS_SIZE;
 
-pub const ACTION_SIZE: usize = CrabJointId::COUNT;
 const HIDDEN_SIZE: usize = 256;
 
 /// Initial policy log-std (std ≈ 0.2): start with low exploration, see `new`.

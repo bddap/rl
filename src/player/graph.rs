@@ -38,7 +38,7 @@ const ANGLE_RANGE: f32 = std::f32::consts::PI;
 pub struct JointGraph {
     visible: bool,
     angle: Vec<VecDeque<f32>>,
-    effort: Vec<VecDeque<f32>>,
+    torque: Vec<VecDeque<f32>>,
 }
 
 impl Default for JointGraph {
@@ -47,7 +47,7 @@ impl Default for JointGraph {
             visible: std::env::var("RL_GRAPH").is_ok_and(|v| v == "1")
                 || std::env::var("RL_GRAPH_SHOT").is_ok(),
             angle: vec![VecDeque::with_capacity(CAPACITY); CrabJointId::COUNT],
-            effort: vec![VecDeque::with_capacity(CAPACITY); CrabJointId::COUNT],
+            torque: vec![VecDeque::with_capacity(CAPACITY); CrabJointId::COUNT],
         }
     }
 }
@@ -181,7 +181,7 @@ fn sample_graph(
         let torque = action[idx].clamp(-1.0, 1.0);
 
         push(&mut graph.angle[idx], angle);
-        push(&mut graph.effort[idx], torque);
+        push(&mut graph.torque[idx], torque);
     }
 }
 
@@ -217,7 +217,7 @@ fn draw_graph(graph: Res<JointGraph>, windows: Query<&Window>, mut gizmos: Gizmo
     );
     draw_plot(
         &mut gizmos,
-        &graph.effort,
+        &graph.torque,
         left,
         top - plot_h - 40.0,
         plot_w,

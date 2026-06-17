@@ -7,7 +7,7 @@ use rand::Rng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
-use crate::bot::brain::ACTION_SIZE;
+use crate::bot::actuator::ACTION_SIZE;
 use crate::bot::sensor::OBS_SIZE;
 
 pub struct PpoConfig {

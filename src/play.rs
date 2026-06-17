@@ -25,9 +25,9 @@ use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
 use burn::tensor::Tensor;
 use rand::Rng;
 
-use crate::bot::actuator::CrabActions;
+use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
-use crate::bot::brain::{ACTION_SIZE, CrabBrain};
+use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 use crate::bot::{BotSet, CrabSpawns, respawn_crab};
 use crate::training::session::{

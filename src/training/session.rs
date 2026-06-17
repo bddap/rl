@@ -18,11 +18,9 @@ use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 
 use crate::TrainConfig;
-use crate::bot::actuator::CrabActions;
-use crate::bot::body::{
-    CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId, CrabEyeTip, CrabJointId,
-};
-use crate::bot::brain::{ACTION_SIZE, CrabBrain};
+use crate::bot::actuator::{ACTION_SIZE, CrabActions};
+use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId, CrabEyeTip};
+use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns, respawn_crab};
 
@@ -285,7 +283,7 @@ impl MetricsLogger {
             std::fs::File::create(&ep_path).expect("failed to create episodes.csv");
         writeln!(
             episode_file,
-            "episode,reward,steps,avg_reward_10,mean_height,mean_upright,mean_energy"
+            "episode,reward,steps,avg_reward_10,mean_height,mean_upright,mean_sq_angvel"
         )
         .expect("failed to write header");
 
@@ -314,12 +312,12 @@ impl MetricsLogger {
         avg_reward: f32,
         mean_height: f32,
         mean_upright: f32,
-        mean_energy: f32,
+        mean_sq_angvel: f32,
     ) {
         writeln!(
             self.episode_file,
             "{},{:.4},{},{},{:.4},{:.4},{:.4}",
-            episode, reward, steps, avg_reward, mean_height, mean_upright, mean_energy
+            episode, reward, steps, avg_reward, mean_height, mean_upright, mean_sq_angvel
         )
         .ok();
         if episode.is_multiple_of(10) {
@@ -418,7 +416,7 @@ pub struct EnvEpisode {
     pub steps: u32,
     pub height_sum: f32,
     pub upright_sum: f32,
-    pub energy_sum: f32,
+    pub sq_angvel_sum: f32,
     pub needs_reset: bool,
     /// Settle ticks remaining before the episode starts recording. A reset
     /// respawns a fresh crab in the rest pose ([`crate::bot::respawn_crab`]);
@@ -767,11 +765,7 @@ impl TrainingState {
         self.episode_count += 1;
     }
 
-    pub fn avg_reward_pub(&self, window: usize) -> f32 {
-        self.avg_reward(window)
-    }
-
-    fn avg_reward(&self, window: usize) -> f32 {
+    pub(crate) fn avg_reward(&self, window: usize) -> f32 {
         if self.recent_rewards.is_empty() {
             return 0.0;
         }
@@ -1177,7 +1171,7 @@ pub fn brain_step(
     // eye-stalk balls + acceleration motors), so the blowup guard must watch
     // every body. NaN poisons the max, so fold it in as +inf.
     let mut max_speeds: Vec<f32> = vec![0.0; n];
-    let mut energies: Vec<f32> = vec![0.0; n];
+    let mut sq_angvels: Vec<f32> = vec![0.0; n];
     for (env, vel) in parts_q.iter() {
         if let Some(m) = max_speeds.get_mut(env.0) {
             let lin = vel.linear.length();
@@ -1192,7 +1186,7 @@ pub fn brain_step(
             *m = m.max(s);
             // Non-finite ω is the blowup guard's problem, not the tax's.
             if ang.is_finite() {
-                energies[env.0] += ang * ang;
+                sq_angvels[env.0] += ang * ang;
             }
         }
     }
@@ -1281,7 +1275,7 @@ pub fn brain_step(
             ep.steps += 1;
             ep.height_sum += height;
             ep.upright_sum += upright;
-            ep.energy_sum += energies[e];
+            ep.sq_angvel_sum += sq_angvels[e];
 
             done || truncated
         };
@@ -1292,7 +1286,7 @@ pub fn brain_step(
             let ep_steps = ep.steps;
             let ep_height = ep.height_sum / ep_steps.max(1) as f32;
             let ep_upright = ep.upright_sum / ep_steps.max(1) as f32;
-            let ep_energy = ep.energy_sum / ep_steps.max(1) as f32;
+            let ep_sq_angvel = ep.sq_angvel_sum / ep_steps.max(1) as f32;
             // A rescued env was already despawned+respawned this tick by
             // rescue_nonfinite_crabs (runs .before(Sense)); asking reset_crab for
             // a second respawn would tear down that fresh crab — which has lived
@@ -1317,7 +1311,13 @@ pub fn brain_step(
             let ep_count = training.episode_count;
 
             training.logger.log_episode(
-                ep_count, ep_reward, ep_steps, avg, ep_height, ep_upright, ep_energy,
+                ep_count,
+                ep_reward,
+                ep_steps,
+                avg,
+                ep_height,
+                ep_upright,
+                ep_sq_angvel,
             );
 
             if training.episode_count.is_multiple_of(10) {
@@ -1339,7 +1339,7 @@ pub fn brain_step(
                     ep_steps,
                     ep_height,
                     ep_upright,
-                    ep_energy,
+                    ep_sq_angvel,
                     buffered,
                     sps,
                 );
@@ -1428,7 +1428,7 @@ pub fn reset_crab(
         if std::mem::take(&mut ep.needs_reset) {
             ep.grace = RESET_GRACE_TICKS;
             if let Some(v) = actions.envs.get_mut(e) {
-                *v = [0.0; CrabJointId::COUNT];
+                *v = [0.0; ACTION_SIZE];
             }
             let origin = spawns.0.get(e).copied().unwrap_or(Vec3::ZERO);
             respawn_crab(
