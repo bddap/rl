@@ -32,6 +32,9 @@
 //! the skin stays visible the whole time — no re-settle, no flicker, no leak.
 
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::mesh::VertexAttributeValues;
+use bevy::mesh::skinning::SkinnedMesh;
+use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 
 use super::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabRestPose};
@@ -107,7 +110,16 @@ pub fn register(app: &mut App) {
         .resource::<AssetServer>()
         .load(GltfAssetLabel::Scene(0).from_asset(path));
     app.insert_resource(CrabModel { scene });
-    app.add_systems(Update, (attach_skins, reap_orphan_skins, reveal_skin));
+    app.init_resource::<StrippedMeshes>();
+    app.add_systems(
+        Update,
+        (
+            attach_skins,
+            reap_orphan_skins,
+            reveal_skin,
+            strip_cross_part_weights,
+        ),
+    );
     app.add_systems(
         PostUpdate,
         (
@@ -327,6 +339,174 @@ fn drive_bones(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cross-part skin-weight strip (bddap/rl#32)
+// ---------------------------------------------------------------------------
+
+/// Meshes whose weights have already been confined to each vertex's dominant
+/// part. The skinned mesh asset is shared across crab instances, so the rewrite
+/// must happen exactly once per asset; this records the ones done.
+#[derive(Resource, Default)]
+struct StrippedMeshes(HashSet<AssetId<Mesh>>);
+
+/// Confine every vertex's skin weights to its dominant physics part, once per
+/// mesh asset.
+///
+/// WHY: sally.glb's skin paints cross-part bleed — many CARAPACE/shell vertices
+/// carry stray `WEIGHTS_0` on arm bones (chiefly `ClawShoulder`, whose `members`
+/// span the whole arm). Our deform bones are driven RIGIDLY by the physics links
+/// ([`drive_bones`]), so standard GPU linear-blend skinning drags those shell
+/// verts along when the arm moves and rips the rigid carapace into a bulge
+/// ([`super::rig::part_for_bone`] is what assigns each bone its part). The physics
+/// carapace is a single rigid box and never deforms; this is purely a skinning
+/// artifact, so the fix lives entirely in the cosmetic mesh.
+///
+/// FIX: per vertex, sum weight per part across its (≤4) lanes, find the dominant
+/// part, zero every lane outside it, and renormalize. Symmetric: an arm vertex
+/// keeps its arm weights (the limb still articulates) and loses stray carapace
+/// weight; a shell vertex keeps Carapace and loses stray arm weight (the shell
+/// stays rigid). This only touches weights, so the bind pose is pixel-identical
+/// (a vertex at rest sits at the same place regardless of which bones could move
+/// it). It also fixes the minor leg-coxa bleed, not just ClawShoulder.
+///
+/// Runs in `Update` and waits until the mesh asset is loaded AND every joint
+/// entity has a `Name` (the scene finished spawning), since the strip maps each
+/// `joint_index` → joint entity → `Name` → part. Until then it no-ops and retries.
+fn strip_cross_part_weights(
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut stripped: ResMut<StrippedMeshes>,
+    skinned: Query<(&Mesh3d, &SkinnedMesh)>,
+    names: Query<&Name>,
+) {
+    for (mesh3d, skinned_mesh) in skinned.iter() {
+        let id = mesh3d.0.id();
+        if stripped.0.contains(&id) {
+            continue;
+        }
+        // Resolve every joint lane to its part. A joint without a `Name` yet means
+        // the scene is still spawning — bail and retry next frame rather than bake
+        // a wrong (all-Carapace) map. `part_for_bone` already maps unknown/non-rig
+        // bones to Carapace, so once names exist this never produces a missing lane.
+        let mut lane_parts: Vec<PartId> = Vec::with_capacity(skinned_mesh.joints.len());
+        let mut all_named = true;
+        for &joint in &skinned_mesh.joints {
+            let Ok(name) = names.get(joint) else {
+                all_named = false;
+                break;
+            };
+            lane_parts.push(super::rig::part_for_bone(name.as_str()).unwrap_or(PartId::Carapace));
+        }
+        if !all_named {
+            continue;
+        }
+
+        let Some(mesh) = meshes.get_mut(&mesh3d.0) else {
+            continue; // asset not loaded yet
+        };
+        let (Some(joints), Some(weights)) = (
+            read_u16x4(mesh, Mesh::ATTRIBUTE_JOINT_INDEX),
+            read_f32x4(mesh, Mesh::ATTRIBUTE_JOINT_WEIGHT),
+        ) else {
+            // Not a skinned crab mesh (no u16x4/f32x4 weight attrs) — nothing to
+            // confine. Still record it: this system re-runs each frame until a
+            // mesh is in `stripped`, so an unrecorded one would be re-read forever.
+            stripped.0.insert(id);
+            continue;
+        };
+
+        let new_weights: Vec<[f32; 4]> = joints
+            .iter()
+            .zip(&weights)
+            .map(|(j, w)| strip_to_dominant_part(*j, *w, &lane_parts))
+            .collect();
+        mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, new_weights);
+        stripped.0.insert(id);
+        info!(
+            "crab skin: stripped cross-part weights on {} verts (mesh {:?})",
+            joints.len(),
+            id
+        );
+    }
+}
+
+/// Read a `Uint16x4` mesh attribute as `[u16; 4]` lanes, or `None` for any other
+/// stored format. Shared with `skin_diag` (which also walks skin joints/weights).
+pub(crate) fn read_u16x4(
+    mesh: &Mesh,
+    attr: bevy::mesh::MeshVertexAttribute,
+) -> Option<Vec<[u16; 4]>> {
+    match mesh.attribute(attr)? {
+        VertexAttributeValues::Uint16x4(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+/// Read a `Float32x4` mesh attribute as `[f32; 4]` lanes, or `None` for any other
+/// stored format.
+pub(crate) fn read_f32x4(
+    mesh: &Mesh,
+    attr: bevy::mesh::MeshVertexAttribute,
+) -> Option<Vec<[f32; 4]>> {
+    match mesh.attribute(attr)? {
+        VertexAttributeValues::Float32x4(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+/// Confine one vertex's skin weights to its dominant part. `lane_parts[i]` is the
+/// part of skin-joint lane `i`; `joints`/`weights` are the vertex's (≤4)
+/// `(joint_index, weight)` lanes. Returns the rewritten weights: every lane whose
+/// joint's part ≠ the dominant part is zeroed, and the survivors are renormalized
+/// to sum to 1.0.
+///
+/// The dominant part is the one with the largest summed weight across the lanes.
+/// A vertex with no weight at all is returned unchanged.
+fn strip_to_dominant_part(joints: [u16; 4], weights: [f32; 4], lane_parts: &[PartId]) -> [f32; 4] {
+    let part_of = |lane: usize| -> PartId {
+        lane_parts
+            .get(joints[lane] as usize)
+            .copied()
+            .unwrap_or(PartId::Carapace)
+    };
+
+    // Sum weight per part, tracking the dominant (largest-sum) part.
+    let mut sums: Vec<(PartId, f32)> = Vec::new();
+    for (lane, &w) in weights.iter().enumerate() {
+        if w <= 0.0 {
+            continue;
+        }
+        let part = part_of(lane);
+        match sums.iter_mut().find(|(p, _)| *p == part) {
+            Some((_, s)) => *s += w,
+            None => sums.push((part, w)),
+        }
+    }
+    let Some(&(dominant, _)) = sums
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    else {
+        return weights; // all-zero vertex: leave it be
+    };
+
+    // Keep only lanes in the dominant part.
+    let mut kept = [0.0f32; 4];
+    let mut kept_sum = 0.0f32;
+    for lane in 0..4 {
+        if weights[lane] > 0.0 && part_of(lane) == dominant {
+            kept[lane] = weights[lane];
+            kept_sum += weights[lane];
+        }
+    }
+
+    // The dominant part has the max per-part sum, so at least one kept lane is
+    // > 0: survivors always exist to renormalize against.
+    debug_assert!(kept_sum > 0.0, "dominant part must carry positive weight");
+    for w in &mut kept {
+        *w /= kept_sum;
+    }
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
@@ -337,7 +517,80 @@ mod tests {
     };
     use super::super::test_util::{headless_app, tick};
     use super::super::{CrabSpawns, respawn_crab};
-    use super::{BoneDrive, CrabSkin, PartId, SETTLE_FRAMES, repair_skins, reveal_skin};
+    use super::{
+        BoneDrive, CrabSkin, PartId, SETTLE_FRAMES, repair_skins, reveal_skin,
+        strip_to_dominant_part,
+    };
+
+    /// The strip (bddap/rl#32): after confining each vertex to its dominant part,
+    /// every surviving weight must belong to one part, the lane weights still sum to
+    /// ~1.0, and a shell vertex carrying stray arm weight no longer drives the arm.
+    /// Pure (no GPU): a hand-built lane→part map stands in for the resolved joints.
+    #[test]
+    fn strip_confines_weights_to_dominant_part() {
+        let arm = PartId::Joint(CrabJointId::ClawShoulder(Side::Left));
+        // Lane layout: 0,1 → Carapace; 2,3 → the arm.
+        let lane_parts = [PartId::Carapace, PartId::Carapace, arm, arm];
+        // Lane→part for a vertex's joint indices, used to re-check the result.
+        let part_of = |joints: [u16; 4], lane: usize| lane_parts[joints[lane] as usize];
+
+        // Shell vertex: dominated by carapace (0.7+0.1) with stray arm weight (0.2).
+        // The arm lane (joint index 2) must end up at zero so ClawShoulder no longer
+        // drags it, and the carapace lanes renormalize to sum to 1.
+        let shell_joints = [0u16, 1, 2, 3];
+        let shell = strip_to_dominant_part(shell_joints, [0.7, 0.1, 0.15, 0.05], &lane_parts);
+        assert!(
+            (shell.iter().sum::<f32>() - 1.0).abs() < 1e-6,
+            "weights must renormalize to 1, got {shell:?}"
+        );
+        for (lane, &w) in shell.iter().enumerate() {
+            if w > 0.0 {
+                assert_eq!(
+                    part_of(shell_joints, lane),
+                    PartId::Carapace,
+                    "shell vertex must keep only carapace lanes, got {shell:?}"
+                );
+            }
+        }
+        assert_eq!(
+            shell[2], 0.0,
+            "stray arm weight must be zeroed on the shell"
+        );
+        assert_eq!(
+            shell[3], 0.0,
+            "stray arm weight must be zeroed on the shell"
+        );
+        // Original carapace ratio (0.7 : 0.1) is preserved after renormalizing.
+        assert!((shell[0] - 0.875).abs() < 1e-6 && (shell[1] - 0.125).abs() < 1e-6);
+
+        // Arm vertex: dominated by the arm (0.6+0.3) with stray carapace weight
+        // (0.1). It must keep its arm lanes (the limb still articulates) and drop
+        // the carapace lane.
+        let arm_joints = [0u16, 2, 3, 1];
+        let arm_v = strip_to_dominant_part(arm_joints, [0.1, 0.6, 0.3, 0.0], &lane_parts);
+        assert!((arm_v.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        for (lane, &w) in arm_v.iter().enumerate() {
+            if w > 0.0 {
+                assert_eq!(
+                    part_of(arm_joints, lane),
+                    arm,
+                    "arm vertex must keep arm lanes"
+                );
+            }
+        }
+        assert_eq!(
+            arm_v[0], 0.0,
+            "stray carapace weight must be zeroed on the arm"
+        );
+
+        // Single-part vertex is unchanged (already sums to 1, one part).
+        let solo = strip_to_dominant_part([0, 1, 0, 0], [0.5, 0.5, 0.0, 0.0], &lane_parts);
+        assert_eq!(solo, [0.5, 0.5, 0.0, 0.0]);
+
+        // All-zero vertex is left alone (no part to dominate).
+        let empty = strip_to_dominant_part([0, 0, 0, 0], [0.0; 4], &lane_parts);
+        assert_eq!(empty, [0.0; 4]);
+    }
 
     /// The role-resolving half of pairing: a bone name must map to the physics
     /// link the re-pair then targets. Pins the cases the test relies on so a

@@ -27,12 +27,12 @@
 //!  - an AABB size/offset check: live skinned mesh vs the physics link cloud.
 
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
-use bevy::mesh::{MeshVertexAttribute, VertexAttributeValues};
 use bevy::prelude::*;
 use std::collections::HashMap;
 
 use super::body::{CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
 use super::meshfit::{PartId, mesh_signed_volume, nearest_surface_distance, winding_number};
+use super::skin::{read_f32x4, read_u16x4};
 
 /// Fire the audit when the render-frame counter reaches this, matching the
 /// screenshot's settle so the table describes the frame that gets photographed.
@@ -452,26 +452,6 @@ fn load_bind_reference() -> Option<BindReference> {
         orient,
         pivots,
     })
-}
-
-// ---------------------------------------------------------------------------
-// Mesh attribute readers
-// ---------------------------------------------------------------------------
-
-/// Bevy stores joint indices as `Uint16x4`; nothing else is valid for
-/// `ATTRIBUTE_JOINT_INDEX`, so a different format is a malformed mesh and yields `None`.
-fn read_u16x4(mesh: &Mesh, attr: MeshVertexAttribute) -> Option<Vec<[u16; 4]>> {
-    match mesh.attribute(attr)? {
-        VertexAttributeValues::Uint16x4(v) => Some(v.clone()),
-        _ => None,
-    }
-}
-
-fn read_f32x4(mesh: &Mesh, attr: MeshVertexAttribute) -> Option<Vec<[f32; 4]>> {
-    match mesh.attribute(attr)? {
-        VertexAttributeValues::Float32x4(v) => Some(v.clone()),
-        _ => None,
-    }
 }
 
 fn aabb(pts: &[Vec3]) -> (Vec3, Vec3) {
