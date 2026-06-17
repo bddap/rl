@@ -250,7 +250,7 @@ fn main() {
     match bot::meshfit::model_path() {
         None => {
             eprintln!(
-                "crab model not found: set CRAB_MODEL_PATH or place sally.glb at the dev path"
+                "crab model not found: set CRAB_MODEL_PATH (an asset path under BEVY_ASSET_ROOT/assets), or place sally.glb there"
             );
             std::process::exit(1);
         }

@@ -50,18 +50,78 @@ pub struct LoadedModel {
     verts: Vec<SkinnedVertex>,
 }
 
-/// Where to find the model: `CRAB_MODEL_PATH` if set (same var the skin uses), else
-/// the dev box's checkout. Absent → the body spawn yields no recipe and the
-/// model-dependent tests/verifiers self-skip rather than fail.
+/// Where to find the model, resolved the SAME way Bevy's `AssetServer` resolves
+/// it for the skin (`crate::bot::skin`): `CRAB_MODEL_PATH` (default `sally.glb`)
+/// names an asset under `<asset root>/assets/`, asset root being `BEVY_ASSET_ROOT`
+/// or, unset, the crate dir. Sharing this resolution is the whole point — skin and
+/// collider-fit must agree on one model. The old code read the var raw against the
+/// CWD with a hardcoded `/tmp/rl` fallback, so on any host whose CWD wasn't the
+/// asset root the skin loaded but collider-fit missed and the demo exited fatally
+/// (bddap/rl#30). Missing model → `None`, and callers self-skip.
 pub fn model_path() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("CRAB_MODEL_PATH") {
-        let p = std::path::PathBuf::from(p);
-        if p.exists() {
-            return Some(p);
-        }
+    resolve(
+        std::env::var_os("CRAB_MODEL_PATH").as_deref(),
+        std::env::var_os("BEVY_ASSET_ROOT").as_deref(),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        |p| p.exists(),
+    )
+}
+
+/// Pure resolver, factored out so the path logic is testable without touching
+/// process env: an absolute model path is used as-is; otherwise the path (default
+/// `sally.glb`) is looked up under `<asset_root or crate_dir>/assets/`.
+fn resolve(
+    crab_model_path: Option<&std::ffi::OsStr>,
+    asset_root: Option<&std::ffi::OsStr>,
+    crate_dir: &std::path::Path,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let rel = crab_model_path.map_or_else(|| PathBuf::from("sally.glb"), PathBuf::from);
+    if rel.is_absolute() {
+        return exists(&rel).then_some(rel);
     }
-    let fallback = std::path::PathBuf::from("/tmp/rl/assets/sally.glb");
-    fallback.exists().then_some(fallback)
+    let root = asset_root.map_or_else(|| crate_dir.to_path_buf(), PathBuf::from);
+    let asset = root.join("assets").join(rel);
+    exists(&asset).then_some(asset)
+}
+
+#[cfg(test)]
+mod model_path_tests {
+    use super::resolve;
+    use std::path::{Path, PathBuf};
+
+    // A relative CRAB_MODEL_PATH must land under <asset root>/assets — the exact
+    // path the AssetServer hands the skin (bddap/rl#30).
+    #[test]
+    fn relative_resolves_under_asset_root() {
+        let got = resolve(Some("sally.glb".as_ref()), Some("/srv/app".as_ref()), Path::new("/crate"), |p| {
+            p == Path::new("/srv/app/assets/sally.glb")
+        });
+        assert_eq!(got, Some(PathBuf::from("/srv/app/assets/sally.glb")));
+    }
+
+    #[test]
+    fn defaults_to_sally_under_crate_dir_when_unset() {
+        let got = resolve(None, None, Path::new("/crate"), |p| p == Path::new("/crate/assets/sally.glb"));
+        assert_eq!(got, Some(PathBuf::from("/crate/assets/sally.glb")));
+    }
+
+    #[test]
+    fn absolute_path_used_as_is() {
+        let got = resolve(Some("/models/x.glb".as_ref()), Some("/srv".as_ref()), Path::new("/crate"), |p| {
+            p == Path::new("/models/x.glb")
+        });
+        assert_eq!(got, Some(PathBuf::from("/models/x.glb")));
+    }
+
+    #[test]
+    fn none_when_missing() {
+        assert_eq!(
+            resolve(Some("sally.glb".as_ref()), Some("/srv".as_ref()), Path::new("/crate"), |_| false),
+            None
+        );
+    }
 }
 
 impl LoadedModel {
@@ -784,7 +844,7 @@ mod tests {
     fn bone_map_covers_all_model_bones() {
         let Some(path) = model_path() else {
             eprintln!(
-                "meshfit: no model at CRAB_MODEL_PATH or /tmp/rl/assets/sally.glb — skipping"
+                "meshfit: no model (set CRAB_MODEL_PATH under BEVY_ASSET_ROOT/assets) — skipping"
             );
             return;
         };
