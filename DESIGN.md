@@ -221,7 +221,7 @@ Combat state:
 ### Action Space
 
 Continuous, one float per actuated DOF:
-- ~35 joint target velocities, each in [-1, 1], scaled to joint-specific max velocity
+- ~35 joint target torques, each in [-1, 1], scaled to a joint-specific torque limit
 
 **Total action dimension:** ~**35 floats**
 

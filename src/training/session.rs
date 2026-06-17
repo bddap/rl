@@ -803,7 +803,7 @@ impl TrainingState {
 ///
 /// `rollouts` is one buffer per env (GAE is computed strictly per env, never
 /// across a buffer boundary). The per-env trailing bootstrap — V of each buffer's
-/// non-`done` tail observation — is computed HERE from `brain`, the single owner
+/// non-`Terminal` tail observation — is computed HERE from `brain`, the single owner
 /// of that logic: the single-process path already holds the brain it rolled with,
 /// and the in-process learner holds the brain it snapshotted to the threads (which
 /// is what they rolled with), so neither needs a precomputed value. Mutating
@@ -850,11 +850,11 @@ pub(crate) fn ppo_update_core(
             let Some(last_t) = buf.transitions.last() else {
                 continue;
             };
-            // A `done` tail genuinely ended → 0 future return; otherwise bootstrap
+            // A `Terminal` tail genuinely ended → 0 future return; otherwise bootstrap
             // V(s_tail) with the brain (the trailing obs continues into the next
             // horizon's buffer, so its value carries the cut-off return). The head
             // outputs a NORMALIZED value; `compute_gae` de-normalizes it (and every
-            // stored value) so GAE runs in real units. A `done` tail's 0 is a true
+            // stored value) so GAE runs in real units. A `Terminal` tail's 0 is a true
             // zero return, not a normalized value — pass it through `normalize` so
             // `compute_gae`'s `denormalize` recovers 0.0 (up to f32 rounding)
             // regardless of μ/σ.
