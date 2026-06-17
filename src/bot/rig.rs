@@ -166,38 +166,44 @@ fn joint_specs() -> Vec<Vec<JointSpec>> {
                 },
             ]);
         }
-        // Claw: the long arm (shoulder) swings at the body, the wrist bends the
-        // hand, and the pincer is the movable finger (`006`) against the fixed
-        // pollex (`006b`).
+        // Claw (cheliped), distal segments read off the bind pose (see the
+        // `dump_left_cheliped_chain` diagnostic): the bone chain is linear
+        // `000a→…→003→004→005→006b→006`, where `003` is the long forearm, `004` a
+        // short narrow node (the carpus / true wrist), `005` the broad palm
+        // (propodus — by far the fattest cloud, y-extent ~0.34, with the FIXED
+        // finger/pollex baked into it as it has no own bone), and `006b→006` the
+        // single movable finger (dactyl) that folds off the palm.
+        //
+        // So the joints bracket as the anatomy dictates: the shoulder owns the arm
+        // up to and INCLUDING the carpus (`004`); the wrist pivots at the
+        // carpus↔propodus joint (base of the palm `005`) and owns the palm, so
+        // actuating it swings the whole hand — palm, pollex, and (as kinematic
+        // descendants) the dactyl — as one rigid unit; the pincer pivots at the
+        // propodus↔dactyl joint (`006b`) and owns only the movable finger. The old
+        // rig folded the palm into the rigid shoulder link and pivoted the wrist out
+        // at `006b`, so the wrist bent only the finger against a hand welded to the
+        // arm — the owner-reported "wrist moves just the thumb" with stretched chitin.
         let p = |seg: &str| format!("Def_pincer.{}.{}", seg, s);
         chains.push(vec![
             JointSpec {
                 id: CrabJointId::ClawShoulder(side),
                 pivot: p("000a"),
-                tip: Some(p("006b")),
-                members: vec![
-                    p("000a"),
-                    p("000"),
-                    p("001"),
-                    p("002"),
-                    p("003"),
-                    p("004"),
-                    p("005"),
-                ],
+                tip: Some(p("005")),
+                members: vec![p("000a"), p("000"), p("001"), p("002"), p("003"), p("004")],
                 density: CLAW_DENSITY,
             },
             JointSpec {
                 id: CrabJointId::ClawWrist(side),
-                pivot: p("006b"),
-                tip: Some(p("006")),
-                members: vec![p("006b")],
+                pivot: p("005"),
+                tip: Some(p("006b")),
+                members: vec![p("005")],
                 density: CLAW_DENSITY,
             },
             JointSpec {
                 id: CrabJointId::ClawPincer(side),
-                pivot: p("006"),
-                tip: None,
-                members: vec![p("006"), format!("Ctrl_pincer_tail.{s}")],
+                pivot: p("006b"),
+                tip: Some(p("006")),
+                members: vec![p("006b"), p("006")],
                 density: CLAW_DENSITY,
             },
         ]);
@@ -562,6 +568,132 @@ pub(crate) fn rest_colliders(model: &LoadedModel, recipe: &RigRecipe) -> Vec<Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bot::meshfit::{LoadedModel, model_path};
+
+    /// Diagnostic (run with `--nocapture`): dump the LEFT cheliped's bone chain from
+    /// the model's bind pose — each `Def_pincer.*.L` bone's parent and bind-world
+    /// origin, ordered proximal→distal — so the carpus/propodus/pollex/dactyl segment
+    /// identities can be read off the geometry rather than guessed. Re-parses the GLB
+    /// for the node parent links (the production [`LoadedModel`] keeps only world
+    /// transforms, not the hierarchy) and reads origins through `bone_origin`. Skips
+    /// cleanly when the model isn't present.
+    #[test]
+    fn dump_left_cheliped_chain() {
+        let Some(path) = model_path() else {
+            eprintln!("dump_left_cheliped_chain: no model — skipping");
+            return;
+        };
+        let model = LoadedModel::load(&path).expect("load model");
+        let bytes = std::fs::read(&path).expect("read glb");
+        let gltf = gltf::Gltf::from_slice(&bytes).expect("parse glb");
+
+        // node index -> parent node index, from the scene hierarchy.
+        let mut parent: HashMap<usize, usize> = HashMap::new();
+        let mut name_of: HashMap<usize, String> = HashMap::new();
+        for node in gltf.nodes() {
+            if let Some(nm) = node.name() {
+                name_of.insert(node.index(), nm.to_string());
+            }
+            for child in node.children() {
+                parent.insert(child.index(), node.index());
+            }
+        }
+
+        // Every left-cheliped bone, with its origin and parent name.
+        let mut rows: Vec<(String, String, Vec3)> = Vec::new();
+        for node in gltf.nodes() {
+            let Some(nm) = node.name() else { continue };
+            if !(nm.starts_with("Def_pincer.") && nm.ends_with(".L")) {
+                continue;
+            }
+            let origin = model.bone_origin(nm).unwrap_or(Vec3::ZERO);
+            let parent_nm = parent
+                .get(&node.index())
+                .and_then(|p| name_of.get(p))
+                .cloned()
+                .unwrap_or_else(|| "<root>".into());
+            rows.push((nm.to_string(), parent_nm, origin));
+        }
+
+        // Order proximal→distal by walking the parent chain from the root-most pincer
+        // bone, so the printed sequence is the actual kinematic order, not node order.
+        let names: std::collections::HashSet<&str> =
+            rows.iter().map(|(n, _, _)| n.as_str()).collect();
+        let mut child_of: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut root: Option<&str> = None;
+        for (n, p, _) in &rows {
+            if names.contains(p.as_str()) {
+                child_of.entry(p.as_str()).or_default().push(n.as_str());
+            } else {
+                root = Some(n.as_str()); // parent outside the pincer set = chain root
+            }
+        }
+        let mut order: Vec<&str> = Vec::new();
+        let mut stack: Vec<&str> = root.into_iter().collect();
+        while let Some(n) = stack.pop() {
+            order.push(n);
+            if let Some(kids) = child_of.get(n) {
+                // Deepest-last so siblings print in a stable order.
+                let mut kids = kids.clone();
+                kids.sort_unstable();
+                stack.extend(kids.into_iter().rev());
+            }
+        }
+
+        let origin_of = |name: &str| rows.iter().find(|(n, _, _)| n == name).map(|(_, _, o)| *o);
+        // Per-bone vertex cloud size + extent distinguishes the broad propodus (hand,
+        // bearing both fingers — many verts, fat box) from the thin arm segments.
+        let cloud_stats = |name: &str| -> (usize, Vec3) {
+            let pts = model.vertices_for_bones(&[name]);
+            if pts.is_empty() {
+                return (0, Vec3::ZERO);
+            }
+            let mut lo = Vec3::splat(f32::INFINITY);
+            let mut hi = Vec3::splat(f32::NEG_INFINITY);
+            for p in &pts {
+                lo = lo.min(*p);
+                hi = hi.max(*p);
+            }
+            (pts.len(), hi - lo)
+        };
+        eprintln!("\n=== LEFT cheliped (Def_pincer.*.L) bind-pose chain, proximal->distal ===");
+        let mut prev: Option<Vec3> = None;
+        for n in &order {
+            let o = origin_of(n).unwrap_or(Vec3::ZERO);
+            let parent_nm = &rows.iter().find(|(name, _, _)| name == n).unwrap().1;
+            let step = prev.map_or(0.0, |p| (o - p).length());
+            let (nv, ext) = cloud_stats(n);
+            eprintln!(
+                "{n:<18} parent={parent_nm:<22} origin=({:+.4},{:+.4},{:+.4}) step={step:.4} verts={nv:<5} ext=({:.3},{:.3},{:.3})",
+                o.x, o.y, o.z, ext.x, ext.y, ext.z
+            );
+            prev = Some(o);
+        }
+        // EVERY node carrying "pincer" (any case, both sides) — to surface any
+        // control/tail bone the `Def_pincer.NNN.L` chain dump doesn't cover, and to
+        // confirm whether a separate dactyl bone exists.
+        eprintln!("--- all nodes matching \"pincer\" (case-insensitive) ---");
+        let mut extras: Vec<(String, usize)> = gltf
+            .nodes()
+            .filter_map(|n| n.name().map(|nm| (nm.to_string(), n.index())))
+            .filter(|(nm, _)| nm.to_lowercase().contains("pincer"))
+            .collect();
+        extras.sort_by(|a, b| a.0.cmp(&b.0));
+        for (nm, idx) in &extras {
+            let o = model.bone_origin(nm);
+            let pnm = parent.get(idx).and_then(|p| name_of.get(p)).cloned();
+            eprintln!(
+                "{nm:<22} parent={:<22} origin={:?}",
+                pnm.unwrap_or_else(|| "<root>".into()),
+                o
+            );
+        }
+        eprintln!(
+            "=== {} Def_pincer.*.L bones, {} total pincer nodes ===\n",
+            rows.len(),
+            extras.len()
+        );
+    }
 
     /// The chains must enumerate exactly the actuated joint set — same count, all
     /// distinct. Guards the "add a joint" footgun: a new `CrabJointId` with no
