@@ -155,11 +155,7 @@ impl LoadedModel {
         // `parent_world * node_local`. The bind pose IS the node rest pose here
         // (no animation sampling) — the same pose the skin captures offsets in.
         let mut bind_world: HashMap<usize, Mat4> = HashMap::new();
-        for scene in gltf.scenes() {
-            for node in scene.nodes() {
-                compose_world(&node, Mat4::IDENTITY, &mut bind_world);
-            }
-        }
+        compose_world(gltf.scenes().flat_map(|s| s.nodes()), &mut bind_world);
 
         // Skin weights: dominant bone per vertex. A skin's `joints()` list maps
         // the per-vertex JOINTS_0 *indices* (0..N) to actual node indices.
@@ -199,16 +195,22 @@ impl LoadedModel {
                 .collect();
             for ((p, j), w) in positions.iter().zip(&joints).zip(&weights) {
                 let raw = Vec3::from_array(*p);
-                let pos = skin_to_bind_world(raw, *j, *w, &bind_world, &joint_nodes, &inv_binds);
+                let pos = skin_to_bind_world(raw, *j, *w, &bind_world, &joint_nodes, &inv_binds)?;
                 // Dominant influence tags the vertex for per-part bucketing.
                 let (lane, &wmax) = w
                     .iter()
                     .enumerate()
                     .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                     .unwrap();
+                let dom = j[lane] as usize;
                 verts.push(SkinnedVertex {
                     pos,
-                    dominant_node: joint_nodes[j[lane] as usize],
+                    dominant_node: *joint_nodes.get(dom).ok_or_else(|| {
+                        format!(
+                            "JOINTS_0 index {dom} out of range (skin has {} joints)",
+                            joint_nodes.len()
+                        )
+                    })?,
                     dominant_weight: wmax,
                 });
             }
@@ -310,11 +312,7 @@ pub fn load_bind_mesh(path: &std::path::Path) -> Result<BindMesh, String> {
     let blob = gltf.blob.as_deref().ok_or("GLB has no binary chunk")?;
 
     let mut bind_world: HashMap<usize, Mat4> = HashMap::new();
-    for scene in gltf.scenes() {
-        for node in scene.nodes() {
-            compose_world(&node, Mat4::IDENTITY, &mut bind_world);
-        }
-    }
+    compose_world(gltf.scenes().flat_map(|s| s.nodes()), &mut bind_world);
 
     let skin = gltf.skins().next().ok_or("model has no skin")?;
     let joint_nodes: Vec<usize> = skin.joints().map(|j| j.index()).collect();
@@ -353,7 +351,7 @@ pub fn load_bind_mesh(path: &std::path::Path) -> Result<BindMesh, String> {
                 &bind_world,
                 &joint_nodes,
                 &inv_binds,
-            ));
+            )?);
         }
 
         // Offset this primitive's indices into the global vertex range. An indexless
@@ -386,7 +384,7 @@ fn skin_to_bind_world(
     bind_world: &HashMap<usize, Mat4>,
     joint_nodes: &[usize],
     inv_binds: &[Mat4],
-) -> Vec3 {
+) -> Result<Vec3, String> {
     let mut world = Vec3::ZERO;
     let mut wsum = 0.0f32;
     for lane in 0..4 {
@@ -394,27 +392,49 @@ fn skin_to_bind_world(
         if wt <= 0.0 {
             continue;
         }
+        // `ji` is a raw JOINTS_0 value straight off the mesh stream; a malformed
+        // asset can put it past the skin's joint list, so bound it rather than let
+        // the slice index panic deep in the loader (both arrays are joint-indexed).
         let ji = joints[lane] as usize;
-        let jm = bind_world
-            .get(&joint_nodes[ji])
-            .copied()
-            .unwrap_or(Mat4::IDENTITY)
-            * inv_binds[ji];
+        let &node = joint_nodes.get(ji).ok_or_else(|| {
+            format!(
+                "JOINTS_0 index {ji} out of range (skin has {} joints)",
+                joint_nodes.len()
+            )
+        })?;
+        let inv_bind = inv_binds.get(ji).copied().unwrap_or(Mat4::IDENTITY);
+        let jm = bind_world.get(&node).copied().unwrap_or(Mat4::IDENTITY) * inv_bind;
         world += wt * jm.transform_point3(raw);
         wsum += wt;
     }
-    if wsum > 1e-6 { world / wsum } else { raw }
+    Ok(if wsum > 1e-6 { world / wsum } else { raw })
 }
 
-/// Recursively compose `parent_world * node_local` for a node and its subtree,
-/// recording each node's world matrix. glTF node transforms are TRS or a raw
-/// matrix; `node.transform().matrix()` normalises both to a column-major 4x4.
-fn compose_world(node: &gltf::Node, parent_world: Mat4, world: &mut HashMap<usize, Mat4>) {
-    let local = Mat4::from_cols_array_2d(&node.transform().matrix());
-    let w = parent_world * local;
-    world.insert(node.index(), w);
-    for child in node.children() {
-        compose_world(&child, w, world);
+/// Compose `parent_world * node_local` over every scene-root subtree, recording each
+/// node's bind-world matrix. glTF node transforms are TRS or a raw matrix;
+/// `node.transform().matrix()` normalises both to a column-major 4x4.
+///
+/// Iterative with an explicit work stack rather than recursion: glTF's `children()`
+/// is just an index list, so a malformed asset can encode a cycle (or a chain deep
+/// enough to blow the native stack), which recursion would turn into an abort the
+/// train's auto-resume loop can't escape. The `visited` set both breaks cycles and
+/// keeps the first (root-most) world transform a node gets — a valid scene is a
+/// forest, so this is identical to the recursive walk there.
+fn compose_world<'a>(
+    roots: impl Iterator<Item = gltf::Node<'a>>,
+    world: &mut HashMap<usize, Mat4>,
+) {
+    let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut stack: Vec<(gltf::Node<'a>, Mat4)> = roots.map(|n| (n, Mat4::IDENTITY)).collect();
+    while let Some((node, parent_world)) = stack.pop() {
+        if !visited.insert(node.index()) {
+            continue;
+        }
+        let w = parent_world * Mat4::from_cols_array_2d(&node.transform().matrix());
+        world.insert(node.index(), w);
+        for child in node.children() {
+            stack.push((child, w));
+        }
     }
 }
 
@@ -936,6 +956,30 @@ mod tests {
             (fit.segment_len() - expected_seg).abs() < 0.03,
             "seg {} vs {expected_seg}",
             fit.segment_len()
+        );
+    }
+
+    /// A JOINTS_0 value past the skin's joint list (the kind a malformed asset can
+    /// carry) must surface as `Err`, not a panic indexing the joint array — so the
+    /// `Result<_, String>` loaders can report it cleanly. Exercises the lookup
+    /// directly; hand-building a malformed GLB to drive it through `load` would be
+    /// far more code for the same guard.
+    #[test]
+    fn out_of_range_joint_index_errors() {
+        let joint_nodes = [7usize]; // one joint
+        let inv_binds = [Mat4::IDENTITY];
+        let bind_world = HashMap::new();
+        let got = skin_to_bind_world(
+            Vec3::ZERO,
+            [3, 0, 0, 0], // lane 0 points at joint 3 — out of range
+            [1.0, 0.0, 0.0, 0.0],
+            &bind_world,
+            &joint_nodes,
+            &inv_binds,
+        );
+        assert!(
+            got.is_err(),
+            "out-of-range joint index should Err, got {got:?}"
         );
     }
 }
