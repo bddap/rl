@@ -119,7 +119,7 @@ Modeled as a Rapier `MultibodyJointSet` tree:
    [Claw_L]                    [Claw_R]
    upper arm ─ revolute          upper arm ─ revolute
    forearm   ─ revolute          forearm   ─ revolute
-   pincer    ─ prismatic         pincer    ─ prismatic
+   pincer    ─ revolute         pincer    ─ revolute
         \                            /
      [Leg_L1..L4]            [Leg_R1..R4]
      each: coxa  ─ revolute (yaw)
@@ -134,9 +134,9 @@ Modeled as a Rapier `MultibodyJointSet` tree:
 - Mouth × 1 = 1
 - Carapace orientation relative to leg base = 2 (pitch/roll)
 
-Each joint has a Rapier `RevoluteJoint` (or `PrismaticJoint` for pincers) with
-`configure_motor_velocity()` or `configure_motor_position()`. The NN outputs target
-velocities or positions for every joint at each timestep.
+Every joint is a Rapier `RevoluteJoint` (the pincers included). The NN outputs a
+target torque per joint each timestep, applied directly to the joint — there is no
+velocity or position servo.
 
 ### Physical Properties
 

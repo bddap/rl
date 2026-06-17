@@ -461,7 +461,7 @@ pub struct TrainingState {
 
     /// Ticks per PPO update ([`STEPS_PER_ROLLOUT`]). Worker mode bypasses this:
     /// the learner's `--horizon` bounds the window and the driver reads the
-    /// buffers out, so `brain_step`'s rollout-boundary update never fires there.
+    /// buffers out, so `ppo_update_at_boundary` is never scheduled there.
     pub steps_per_rollout: u32,
     pub current_rollout_steps: u32,
 
@@ -1268,7 +1268,7 @@ pub fn brain_step(
             let done = !(0.02..=50.0).contains(&height) || blowing_up;
             // The step cap is a TRUNCATION, not a failure: a crab still standing
             // at the cap was cut short, so GAE must bootstrap its value rather
-            // than learn the cap is a dead end (see Transition::truncated).
+            // than learn the cap is a dead end (see StepEnd::Truncated).
             let truncated = !done && training.envs[e].steps > 1500;
 
             let end = if done {
