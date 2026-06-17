@@ -383,13 +383,12 @@ pub fn spawn_crab(
             CrabBodyPart,
             CrabEnvId(env),
             RigidBody::Dynamic,
-            // Offset, oriented cuboid: the trunk's bounding box isn't centred on the
-            // leg hub the body root sits at, so the box rides at `carapace_offset`;
-            // `carapace_rot` tilts it onto the shell's principal axes so its corners
-            // hug the dome rather than poking proud of it.
+            // Offset cuboid: the trunk's bounding box isn't centred on the leg hub
+            // the body root sits at, so the box rides at `carapace_offset` to cover
+            // the shell without engulfing the legs.
             Collider::compound(vec![(
                 recipe.carapace_offset,
-                recipe.carapace_rot,
+                Quat::IDENTITY,
                 Collider::cuboid(
                     recipe.carapace_half.x,
                     recipe.carapace_half.y,
@@ -412,13 +411,9 @@ pub fn spawn_crab(
 
     let mut ents: Vec<Entity> = Vec::with_capacity(recipe.links.len());
     let mut world_pos: Vec<Vec3> = Vec::with_capacity(recipe.links.len());
-    // A world point inside the carapace box (centred at `origin + carapace_offset`,
-    // oriented by `carapace_rot`). The box is no longer axis-aligned, so rotate the
-    // offset into the box's local frame before the half-extent test — otherwise the
-    // wrong proximal stubs get grouped as nested and fight the shell collider.
-    let to_box_local = recipe.carapace_rot.inverse();
+    // A world point inside the carapace box (centred at `origin + carapace_offset`).
     let inside_carapace = |p: Vec3| {
-        (to_box_local * (p - origin - recipe.carapace_offset))
+        (p - origin - recipe.carapace_offset)
             .abs()
             .cmple(recipe.carapace_half)
             .all()
