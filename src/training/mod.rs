@@ -30,7 +30,11 @@ impl Plugin for TrainingPlugin {
         app.insert_non_send_resource(training_state)
             .add_systems(
                 FixedUpdate,
-                (session::brain_step, session::reset_crab)
+                (
+                    session::brain_step,
+                    session::ppo_update_at_boundary,
+                    session::reset_crab,
+                )
                     .chain()
                     .in_set(BotSet::Think),
             )

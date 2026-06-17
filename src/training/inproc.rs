@@ -484,8 +484,10 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
         .add_plugins(BotPlugin);
 
     // Worker-mode training state + the same Sense→Think→Act systems the
-    // TrainingPlugin wires, minus the PPO-update path (worker_mode gates it off
-    // inside brain_step). save_on_exit stays harmless (no AppExit fires here).
+    // TrainingPlugin wires, minus the PPO-update boundary system: this app never
+    // adds `ppo_update_at_boundary` (the driver reads the buffers out each horizon
+    // and the learner owns the update). save_on_exit stays harmless (no AppExit
+    // fires here).
     let state = session::TrainingState::new_worker(config, &metrics_dir);
     app.insert_non_send_resource(state)
         .add_systems(

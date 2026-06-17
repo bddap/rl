@@ -90,9 +90,9 @@ pub struct Args {
     pub train: TrainConfig,
 
     /// Save a checkpoint every N PPO updates (0 disables periodic saves). Lives only
-    /// on the single-process path: it is read at the rollout boundary in `brain_step`,
-    /// which `learn` never reaches — that learner checkpoints every iteration directly,
-    /// so an interval would be dead there.
+    /// on the single-process path: it is read at the rollout boundary in
+    /// `ppo_update_at_boundary`, which `learn` never reaches — that learner
+    /// checkpoints every iteration directly, so an interval would be dead there.
     #[arg(long, default_value_t = 50)]
     pub save_interval: u32,
 

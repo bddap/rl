@@ -491,12 +491,6 @@ pub struct TrainingState {
     tick_budget: u64,
     /// Benchmark: skip NN inference to measure the physics/overhead floor.
     skip_nn: bool,
-    /// Rollout-thread (worker) mode: `brain_step` collects transitions exactly as
-    /// in single-process but does NOT run the PPO update at the rollout boundary —
-    /// the learner owns the update. The in-process rollout thread (`training::inproc`)
-    /// reads the buffers out directly each horizon. Default false, so a no-flag run
-    /// is byte-for-byte the original loop.
-    worker_mode: bool,
     /// Count of `recent_rewards` already handed to the learner (worker mode). The
     /// drain returns the tail past this, so each finished episode's reward reaches
     /// the learner's reward curve exactly once. Stays 0 in single-process.
@@ -613,7 +607,6 @@ impl TrainingState {
             saved_on_exit: false,
             tick_budget: config.ticks,
             skip_nn: config.bench_skip_nn,
-            worker_mode,
             reported_episodes: 0,
             normalizer_increment,
         }
@@ -1385,39 +1378,45 @@ pub fn brain_step(
         );
         exit.write(AppExit::Success);
     }
+}
 
-    // Worker mode never runs a local PPO update: the learner owns it. The rollout
-    // thread (`training::inproc`) reads the buffers out after its fixed horizon and
-    // clears them, so this boundary must not fire (it would consume the rollout the
-    // learner is about to collect).
-    if !training.worker_mode && training.current_rollout_steps >= training.steps_per_rollout {
-        let buffer_size: usize = training.rollouts.iter().map(|b| b.len()).sum();
-        let avg = training.avg_reward(10);
+/// System: at each rollout boundary, run one PPO update over the collected
+/// transitions, then clear the buffers and (periodically) checkpoint. Wired into
+/// the schedule ONLY by [`TrainingPlugin`] (single-process). The worker rollout
+/// app deliberately omits it — its driver thread reads the per-env buffers out
+/// each horizon and the learner owns the update — so "is this the learner?" is
+/// answered by the schedule, not a runtime flag in the per-step hot loop.
+pub fn ppo_update_at_boundary(mut training: NonSendMut<TrainingState>) {
+    if training.current_rollout_steps < training.steps_per_rollout {
+        return;
+    }
 
-        info!("Running PPO update on {} transitions...", buffer_size);
-        let metrics = training.ppo_update();
+    let buffer_size: usize = training.rollouts.iter().map(|b| b.len()).sum();
+    let avg = training.avg_reward(10);
 
-        info!(
-            "PPO | Policy loss: {:.4} | Value loss: {:.4} | Entropy: {:.4}",
-            metrics.policy_loss, metrics.value_loss, metrics.entropy,
-        );
+    info!("Running PPO update on {} transitions...", buffer_size);
+    let metrics = training.ppo_update();
 
-        training.logger.log_update(&metrics, avg, buffer_size);
+    info!(
+        "PPO | Policy loss: {:.4} | Value loss: {:.4} | Entropy: {:.4}",
+        metrics.policy_loss, metrics.value_loss, metrics.entropy,
+    );
 
-        training.recent_metrics = Some(metrics);
-        for buf in training.rollouts.iter_mut() {
-            buf.clear();
-        }
-        training.current_rollout_steps = 0;
+    training.logger.log_update(&metrics, avg, buffer_size);
 
-        if training.checkpoint_interval > 0
-            && training
-                .logger
-                .update_count
-                .is_multiple_of(training.checkpoint_interval)
-        {
-            training.save_checkpoint();
-        }
+    training.recent_metrics = Some(metrics);
+    for buf in training.rollouts.iter_mut() {
+        buf.clear();
+    }
+    training.current_rollout_steps = 0;
+
+    if training.checkpoint_interval > 0
+        && training
+            .logger
+            .update_count
+            .is_multiple_of(training.checkpoint_interval)
+    {
+        training.save_checkpoint();
     }
 }
 
