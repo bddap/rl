@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use super::body::CrabJointId;
 
 /// Which physics link a collider belongs to: the carapace is the root, every other
-/// part is a joint's child link. Mirrors the skin's `LinkKey` but carries
-/// [`CrabJointId`] so a part names the exact joint whose link it stands in for.
+/// part is a joint's child link. Carries [`CrabJointId`] so a part names the
+/// exact joint whose link it stands in for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum PartId {
     Carapace,

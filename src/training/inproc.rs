@@ -671,7 +671,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
             timed_wall_secs += wall_secs;
         }
 
-        let avg_reward = state.avg_reward_pub(20);
+        let avg_reward = state.avg_reward(20);
         let sps_iter = iter_samples as f64 / rollout_secs.max(1e-9);
         let sps_rollout = if timed_rollout_secs > 0.0 {
             timed_samples as f64 / timed_rollout_secs
