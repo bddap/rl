@@ -1,5 +1,4 @@
 mod bot;
-mod combat;
 mod debug_sliders;
 mod physics;
 mod play;
@@ -475,7 +474,7 @@ fn main() {
 /// a per-part agreement table (signed surface distance, model units) + a worst-
 /// offender ranking, and returns a process exit code (0 = all pass, 1 = a part
 /// fails or the model is unavailable) so it serves as both a diagnostic and a
-/// regression gate. Scores the LIVE `RigRecipe` geometry, not the offline fit.
+/// regression gate.
 fn verify_colliders() -> i32 {
     use bot::meshfit::{score_box, score_capsule};
     use bot::rig::RestShape;

@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use crate::bot::brain::ACTION_SIZE;
 use crate::bot::sensor::OBS_SIZE;
 
-/// PPO hyperparameters.
 pub struct PpoConfig {
     pub gamma: f32,
     pub lambda: f32,
@@ -58,7 +57,6 @@ impl Default for PpoConfig {
     }
 }
 
-/// A single transition.
 #[derive(Clone)]
 pub struct Transition {
     pub obs: [f32; OBS_SIZE],
@@ -79,7 +77,6 @@ pub struct Transition {
     pub truncated: bool,
 }
 
-/// Rollout buffer.
 pub struct RolloutBuffer {
     pub transitions: Vec<Transition>,
 }
@@ -190,8 +187,6 @@ impl ReturnNormalizer {
         }
     }
 
-    /// Running mean of observed returns (the affine shift). 0.0 until the first
-    /// return is seen.
     fn mean(&self) -> f32 {
         self.mean as f32
     }
@@ -249,8 +244,6 @@ impl ReturnNormalizer {
     }
 }
 
-/// Compute Generalized Advantage Estimation.
-///
 /// `ret_norm` carries the running return scale: the per-step values stored in the
 /// buffer and `last_value` are the value head's NORMALIZED outputs, so they are
 /// de-normalized here ([`ReturnNormalizer::denormalize`]) before entering the deltas.
@@ -311,8 +304,7 @@ pub fn compute_gae(
     (advantages, returns)
 }
 
-/// Compute log probability of actions under Gaussian policy.
-/// Uses log-space computation to avoid division by tiny variance.
+/// Log-space throughout to avoid dividing by a tiny variance.
 pub fn compute_log_prob<B: Backend>(
     means: &Tensor<B, 1>,
     log_std: &Tensor<B, 1>,
@@ -397,7 +389,6 @@ pub fn sample_action<B: Backend>(
     action.clamp(-1.0, 1.0)
 }
 
-/// Metrics from a PPO update.
 #[derive(Debug, Default, Clone)]
 pub struct PpoMetrics {
     pub policy_loss: f32,

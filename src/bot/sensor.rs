@@ -1,10 +1,4 @@
 //! Builds the observation vector from physics state.
-//!
-//! The observation vector contains:
-//! - Per-joint: current joint angle and signed joint DOF velocity
-//! - Body state: carapace position, orientation, linear/angular velocity
-//!
-//! For phase 1 (stand up), we don't need enemy state.
 
 use std::collections::HashMap;
 
@@ -32,7 +26,6 @@ impl CrabObservation {
     }
 }
 
-/// System that builds every env's observation vector each frame.
 pub fn build_observation(
     spawns: Res<CrabSpawns>,
     mut obs: ResMut<CrabObservation>,

@@ -50,9 +50,9 @@ pub struct LoadedModel {
     verts: Vec<SkinnedVertex>,
 }
 
-/// Where to find the model for an offline bake: `CRAB_MODEL_PATH` if set (same
-/// var the skin uses), else the dev box's checkout. Absent → the bake/validation
-/// tests self-skip.
+/// Where to find the model: `CRAB_MODEL_PATH` if set (same var the skin uses), else
+/// the dev box's checkout. Absent → the body spawn yields no recipe and the
+/// model-dependent tests/verifiers self-skip rather than fail.
 pub fn model_path() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("CRAB_MODEL_PATH") {
         let p = std::path::PathBuf::from(p);
@@ -192,9 +192,8 @@ impl LoadedModel {
         self.bone_bind_pose(name).map(|(o, _)| o)
     }
 
-    /// Index of a bone by name, or `None` if absent. Linear scan over the node
-    /// table; the model has a few hundred nodes, so callers that resolve many
-    /// bones stay cheap enough without an inverse map.
+    /// Linear scan over the node table; the model has a few hundred nodes, so callers
+    /// that resolve many bones stay cheap enough without an inverse map.
     fn node_index(&self, name: &str) -> Option<usize> {
         self.node_name
             .iter()
@@ -361,8 +360,8 @@ pub struct FittedCapsule {
 
 #[cfg(test)]
 impl FittedCapsule {
-    /// Distance between the segment endpoints. Test-only: production reads the
-    /// endpoints (`a`/`b`) directly; this is the convenience the capsule-fit test uses.
+    /// Test-only: production reads the endpoints (`a`/`b`) directly; this is the
+    /// convenience the capsule-fit test uses.
     pub fn segment_len(&self) -> f32 {
         (self.b - self.a).length()
     }
