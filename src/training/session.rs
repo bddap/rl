@@ -25,8 +25,8 @@ use crate::bot::sensor::{CrabObservation, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns, respawn_crab};
 
 use super::algorithm::{
-    PpoConfig, PpoMetrics, ReturnNormalizer, ReturnNormalizerData, RolloutBuffer, StepEnd,
-    Transition, compute_gae, compute_log_prob, sample_action,
+    NormalizedValue, PpoConfig, PpoMetrics, ReturnNormalizer, ReturnNormalizerData, RolloutBuffer,
+    StepEnd, Transition, compute_gae, compute_log_prob, sample_action,
 };
 
 /// Running observation normalizer using Welford's online algorithm.
@@ -850,24 +850,25 @@ pub(crate) fn ppo_update_core(
             let Some(last_t) = buf.transitions.last() else {
                 continue;
             };
-            // A `Terminal` tail genuinely ended → 0 future return; otherwise bootstrap
-            // V(s_tail) with the brain (the trailing obs continues into the next
-            // horizon's buffer, so its value carries the cut-off return). The head
-            // outputs a NORMALIZED value; `compute_gae` de-normalizes it (and every
-            // stored value) so GAE runs in real units. A `Terminal` tail's 0 is a true
-            // zero return, not a normalized value — pass it through `normalize` so
-            // `compute_gae`'s `denormalize` recovers 0.0 (up to f32 rounding)
-            // regardless of μ/σ.
+            // A `Terminal` tail genuinely ended → 0 future return; `compute_gae`
+            // hardcodes that step's bootstrap to `RealReturn(0.0)` and never reads
+            // `last_value`, so the value passed here is inert (any `NormalizedValue`
+            // would do). A non-terminal tail bootstraps V(s_tail) from the brain (the
+            // trailing obs continues into the next horizon's buffer, so its value
+            // carries the cut-off return); that output is in normalized units, which
+            // `compute_gae` de-normalizes like every stored value.
             let last_value = if matches!(last_t.end, StepEnd::Terminal) {
-                ret_norm_pre.normalize(0.0)
+                NormalizedValue(0.0)
             } else {
                 let obs = Tensor::<TrainBackend, 1>::from_floats(last_t.obs.as_slice(), device)
                     .unsqueeze::<2>();
-                brain
-                    .value(obs)
-                    .flatten::<1>(0, 1)
-                    .into_scalar()
-                    .elem::<f32>()
+                NormalizedValue(
+                    brain
+                        .value(obs)
+                        .flatten::<1>(0, 1)
+                        .into_scalar()
+                        .elem::<f32>(),
+                )
             };
             let (a, r) = compute_gae(buf, last_value, config.gamma, config.lambda, &ret_norm_pre);
             advantages.extend(a);
@@ -878,13 +879,17 @@ pub(crate) fn ppo_update_core(
         // the value-loss targets by the refreshed scale. The value head's raw output
         // is in the same normalized space, so the loss `(V' - R')²` below is unit-
         // scale and `value_loss_clip` is a σ-count (see PpoConfig::value_loss_clip).
-        ret_norm.update(&returns);
-        let returns: Vec<f32> = returns.iter().map(|&r| ret_norm.normalize(r)).collect();
+        let real_returns: Vec<f32> = returns.iter().map(|r| r.0).collect();
+        ret_norm.update(&real_returns);
+        let returns: Vec<f32> = returns.iter().map(|&r| ret_norm.normalize(r).0).collect();
 
         // Env-major transition view matching the advantages/returns order.
         let transitions: Vec<&Transition> =
             rollouts.iter().flat_map(|b| b.transitions.iter()).collect();
 
+        // Batch-normalizing the advantages strips their reward unit (centered and
+        // scaled to a unitless gradient signal), so they leave `RealReturn` here.
+        let advantages: Vec<f32> = advantages.iter().map(|a| a.0).collect();
         let adv_mean: f32 = advantages.iter().sum::<f32>() / n as f32;
         let adv_var: f32 = advantages
             .iter()
@@ -1092,37 +1097,45 @@ pub fn brain_step(
     }
 
     // ONE batched forward pass for all envs: [n, OBS_SIZE] through the trunk
-    // once — this is what makes N crabs cheaper than N apps.
-    let (means_rows, log_std, values): (Vec<Tensor<NdArray, 1>>, Tensor<NdArray, 1>, Vec<f32>) =
-        if training.skip_nn {
-            // Bench mode: no forward pass. The sampling below is cheap and what
-            // it produces is irrelevant — we are isolating physics + overhead.
-            let z = Tensor::<NdArray, 1>::zeros([ACTION_SIZE], &device);
-            (vec![z.clone(); n], z, vec![0.0; n])
-        } else {
-            let inference_brain = training.brain.valid();
-            let flat: Vec<f32> = obs_arrays.iter().flat_map(|a| a.iter().copied()).collect();
-            let obs_batch = Tensor::<NdArray, 2>::from_data(
-                burn::tensor::TensorData::new(flat, [n, OBS_SIZE]),
-                &device,
-            );
-            let (means_batch, log_std) = inference_brain.policy(obs_batch.clone());
-            let values: Vec<f32> = inference_brain
-                .value(obs_batch)
-                .flatten::<1>(0, 1)
-                .to_data()
-                .to_vec()
-                .unwrap();
-            let means_rows = (0..n)
-                .map(|e| {
-                    means_batch
-                        .clone()
-                        .slice([e..e + 1, 0..ACTION_SIZE])
-                        .flatten(0, 1)
-                })
-                .collect();
-            (means_rows, log_std, values)
-        };
+    // once — this is what makes N crabs cheaper than N apps. The value head's raw
+    // outputs enter the type system as `NormalizedValue` HERE, the single wrap point,
+    // so every value stored on a `Transition` is in the head's normalized space.
+    let (means_rows, log_std, values): (
+        Vec<Tensor<NdArray, 1>>,
+        Tensor<NdArray, 1>,
+        Vec<NormalizedValue>,
+    ) = if training.skip_nn {
+        // Bench mode: no forward pass. The sampling below is cheap and what
+        // it produces is irrelevant — we are isolating physics + overhead.
+        let z = Tensor::<NdArray, 1>::zeros([ACTION_SIZE], &device);
+        (vec![z.clone(); n], z, vec![NormalizedValue(0.0); n])
+    } else {
+        let inference_brain = training.brain.valid();
+        let flat: Vec<f32> = obs_arrays.iter().flat_map(|a| a.iter().copied()).collect();
+        let obs_batch = Tensor::<NdArray, 2>::from_data(
+            burn::tensor::TensorData::new(flat, [n, OBS_SIZE]),
+            &device,
+        );
+        let (means_batch, log_std) = inference_brain.policy(obs_batch.clone());
+        let values: Vec<NormalizedValue> = inference_brain
+            .value(obs_batch)
+            .flatten::<1>(0, 1)
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(NormalizedValue)
+            .collect();
+        let means_rows = (0..n)
+            .map(|e| {
+                means_batch
+                    .clone()
+                    .slice([e..e + 1, 0..ACTION_SIZE])
+                    .flatten(0, 1)
+            })
+            .collect();
+        (means_rows, log_std, values)
+    };
 
     // Per-env action sampling + NaN guards.
     let mut action_arrays: Vec<[f32; ACTION_SIZE]> = Vec::with_capacity(n);

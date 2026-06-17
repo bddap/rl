@@ -82,12 +82,50 @@ impl StepEnd {
     }
 }
 
+/// A value in the value head's NORMALIZED space — `(R-μ)/σ`, what the head emits and
+/// regresses against. The ONLY way to reach [`RealReturn`] is [`ReturnNormalizer::denormalize`],
+/// which is what makes "a value reaches GAE un-denormalized" a compile error rather
+/// than a silent training corruption.
+#[derive(Clone, Copy)]
+pub(crate) struct NormalizedValue(pub(crate) f32);
+
+/// A value in REAL reward units — the space GAE runs in (deltas, advantages,
+/// returns). Crossing back to [`NormalizedValue`] is only [`ReturnNormalizer::normalize`].
+/// Arithmetic is closed over real units (sum/difference of reals, real scaled by a
+/// scalar discount); there is deliberately no op that mixes it with `NormalizedValue`.
+#[derive(Clone, Copy)]
+pub(crate) struct RealReturn(pub(crate) f32);
+
+impl std::ops::Add for RealReturn {
+    type Output = RealReturn;
+    fn add(self, rhs: RealReturn) -> RealReturn {
+        RealReturn(self.0 + rhs.0)
+    }
+}
+
+impl std::ops::Sub for RealReturn {
+    type Output = RealReturn;
+    fn sub(self, rhs: RealReturn) -> RealReturn {
+        RealReturn(self.0 - rhs.0)
+    }
+}
+
+impl std::ops::Mul<f32> for RealReturn {
+    type Output = RealReturn;
+    /// Discounting (`γ`, `γλ`) is a unitless scalar, so it stays in real units.
+    fn mul(self, scalar: f32) -> RealReturn {
+        RealReturn(self.0 * scalar)
+    }
+}
+
 #[derive(Clone)]
 pub struct Transition {
     pub obs: [f32; OBS_SIZE],
     pub action: [f32; ACTION_SIZE],
     pub reward: f32,
-    pub value: f32,
+    /// The value head's raw output for this step — always NORMALIZED units, never
+    /// pre-de-normalized (GAE de-normalizes it).
+    pub(crate) value: NormalizedValue,
     pub log_prob: f32,
     pub end: StepEnd,
 }
@@ -207,17 +245,17 @@ impl ReturnNormalizer {
     }
 
     /// Map a real return to the unit-scale target the value head regresses:
-    /// `(R - μ)/σ`.
-    pub fn normalize(&self, ret: f32) -> f32 {
-        (ret - self.mean()) / self.std()
+    /// `(R - μ)/σ`. The sole crossing from real units into the value head's space.
+    pub(crate) fn normalize(&self, ret: RealReturn) -> NormalizedValue {
+        NormalizedValue((ret.0 - self.mean()) / self.std())
     }
 
     /// Inverse of [`Self::normalize`]: map a value-head output back to real reward
-    /// units, `V'·σ + μ`. Used everywhere a predicted value re-enters the algorithm
-    /// as a real quantity (GAE bootstrap, the stored per-step values) so GAE stays in
-    /// real units.
-    pub fn denormalize(&self, value_norm: f32) -> f32 {
-        value_norm * self.std() + self.mean()
+    /// units, `V'·σ + μ`. The sole crossing from the head's space into real units, so
+    /// every predicted value re-entering the algorithm (GAE bootstrap, stored per-step
+    /// values) is forced through here and GAE stays in real units by construction.
+    pub(crate) fn denormalize(&self, value: NormalizedValue) -> RealReturn {
+        RealReturn(value.0 * self.std() + self.mean())
     }
 
     /// Fold a batch of real returns into the running (count, mean, M2) via Welford.
@@ -259,26 +297,24 @@ impl ReturnNormalizer {
     }
 }
 
-/// `ret_norm` carries the running return scale: the per-step values stored in the
-/// buffer and `last_value` are the value head's NORMALIZED outputs, so they are
-/// de-normalized here ([`ReturnNormalizer::denormalize`]) before entering the deltas.
-/// Everything below — deltas, advantages, returns — is therefore in REAL reward
-/// units, identical to un-normalized GAE (an unobserved-stats normalizer is the
-/// identity, so this is a no-op until the value head is actually trained against a
-/// normalized target).
-pub fn compute_gae(
+/// `ret_norm` is the running return scale that de-normalizes the value-head outputs
+/// ([`ReturnNormalizer::denormalize`]) — the only path from [`NormalizedValue`] to the
+/// [`RealReturn`] arithmetic here, so GAE is in real reward units by construction.
+/// Until any return has been observed the scale is the identity, so this matches
+/// un-normalized GAE bit-for-bit before the head is trained against a normalized target.
+pub(crate) fn compute_gae(
     buffer: &RolloutBuffer,
-    last_value_norm: f32,
+    last_value: NormalizedValue,
     gamma: f32,
     lambda: f32,
     ret_norm: &ReturnNormalizer,
-) -> (Vec<f32>, Vec<f32>) {
+) -> (Vec<RealReturn>, Vec<RealReturn>) {
     let n = buffer.len();
-    let mut advantages = vec![0.0f32; n];
-    let mut returns = vec![0.0f32; n];
-    let mut last_gae = 0.0f32;
+    let mut advantages = vec![RealReturn(0.0); n];
+    let mut returns = vec![RealReturn(0.0); n];
+    let mut last_gae = RealReturn(0.0);
     // The trailing bootstrap is a value-head output (normalized) → real units.
-    let mut next_value = ret_norm.denormalize(last_value_norm);
+    let mut next_value = ret_norm.denormalize(last_value);
 
     for i in (0..n).rev() {
         let t = &buffer.transitions[i];
@@ -296,18 +332,19 @@ pub fn compute_gae(
         //  - otherwise: the next entry's value (an in-episode step, or a
         //    rollout-boundary cut bootstrapped via `last_value`).
         let bootstrap = match t.end {
-            StepEnd::Terminal => 0.0,
+            StepEnd::Terminal => RealReturn(0.0),
             StepEnd::Truncated => value,
             StepEnd::Continues => next_value,
         };
-        let delta = t.reward + gamma * bootstrap - value;
+        // Reward is already in real units, so the whole delta stays in real units.
+        let delta = RealReturn(t.reward) + bootstrap * gamma - value;
         // The GAE trace cannot cross an episode boundary: a done or a truncation
         // ends this trajectory segment, so the future (next-episode) advantage
         // must not fold back across it.
         last_gae = if t.end.ends_segment() {
             delta
         } else {
-            delta + gamma * lambda * last_gae
+            delta + last_gae * (gamma * lambda)
         };
         advantages[i] = last_gae;
         returns[i] = last_gae + value;
@@ -418,7 +455,7 @@ mod tests {
             obs: [0.0; OBS_SIZE],
             action: [0.0; ACTION_SIZE],
             reward,
-            value,
+            value: NormalizedValue(value),
             log_prob: 0.0,
             end,
         }
@@ -444,21 +481,21 @@ mod tests {
         // these hand-computed expectations are the un-normalized values.
         let id = ReturnNormalizer::new();
         // Per-env, hand-computed: A bootstraps from ITS next value (2.0).
-        let (adv_a, _) = compute_gae(&env_a, 2.0, gamma, lambda, &id);
-        assert!((adv_a[1] - 1.5).abs() < 1e-6, "A[1]: {}", adv_a[1]);
-        assert!((adv_a[0] - 1.125).abs() < 1e-6, "A[0]: {}", adv_a[0]);
+        let (adv_a, _) = compute_gae(&env_a, NormalizedValue(2.0), gamma, lambda, &id);
+        assert!((adv_a[1].0 - 1.5).abs() < 1e-6, "A[1]: {}", adv_a[1].0);
+        assert!((adv_a[0].0 - 1.125).abs() < 1e-6, "A[0]: {}", adv_a[0].0);
 
         // Naive concatenated sweep: A's last step bootstraps from B's value.
         let mut concat = RolloutBuffer::new();
         for tr in env_a.transitions.iter().chain(env_b.transitions.iter()) {
             concat.push(tr.clone());
         }
-        let (adv_concat, _) = compute_gae(&concat, 0.0, gamma, lambda, &id);
+        let (adv_concat, _) = compute_gae(&concat, NormalizedValue(0.0), gamma, lambda, &id);
         assert!(
-            (adv_concat[1] - adv_a[1]).abs() > 1e-3,
+            (adv_concat[1].0 - adv_a[1].0).abs() > 1e-3,
             "concatenated sweep should corrupt A's advantages (got {} vs {})",
-            adv_concat[1],
-            adv_a[1]
+            adv_concat[1].0,
+            adv_a[1].0
         );
     }
 
@@ -477,37 +514,38 @@ mod tests {
         let id = ReturnNormalizer::new();
         let mut terminal = RolloutBuffer::new();
         terminal.push(t(reward, value, StepEnd::Terminal));
-        let (adv_term, _) = compute_gae(&terminal, 0.0, gamma, lambda, &id);
+        let (adv_term, _) = compute_gae(&terminal, NormalizedValue(0.0), gamma, lambda, &id);
 
         let mut truncated = RolloutBuffer::new();
         truncated.push(Transition {
             end: StepEnd::Truncated,
             ..t(reward, value, StepEnd::Continues)
         });
-        let (adv_trunc, ret_trunc) = compute_gae(&truncated, 0.0, gamma, lambda, &id);
+        let (adv_trunc, ret_trunc) =
+            compute_gae(&truncated, NormalizedValue(0.0), gamma, lambda, &id);
 
         // Terminal: advantage = reward - value (no bootstrap).
         assert!(
-            (adv_term[0] - (reward - value)).abs() < 1e-6,
+            (adv_term[0].0 - (reward - value)).abs() < 1e-6,
             "term: {}",
-            adv_term[0]
+            adv_term[0].0
         );
         // Truncated: advantage = reward + gamma*value - value (bootstrap own value).
         assert!(
-            (adv_trunc[0] - (reward + gamma * value - value)).abs() < 1e-6,
+            (adv_trunc[0].0 - (reward + gamma * value - value)).abs() < 1e-6,
             "trunc: {}",
-            adv_trunc[0]
+            adv_trunc[0].0
         );
         // The whole point: the cap is not a dead end.
         assert!(
-            (adv_trunc[0] - adv_term[0] - gamma * value).abs() < 1e-6,
+            (adv_trunc[0].0 - adv_term[0].0 - gamma * value).abs() < 1e-6,
             "truncation must bootstrap gamma*value more than a true terminal"
         );
         // Return = bootstrapped one-step target.
         assert!(
-            (ret_trunc[0] - (reward + gamma * value)).abs() < 1e-6,
+            (ret_trunc[0].0 - (reward + gamma * value)).abs() < 1e-6,
             "ret: {}",
-            ret_trunc[0]
+            ret_trunc[0].0
         );
     }
 
@@ -543,7 +581,13 @@ mod tests {
         // Un-normalized baseline: identity scale, raw values, raw trailing bootstrap.
         let id = ReturnNormalizer::new();
         let last_value_raw = -100.0f32;
-        let (adv_raw, ret_raw) = compute_gae(&buf_raw, last_value_raw, gamma, lambda, &id);
+        let (adv_raw, ret_raw) = compute_gae(
+            &buf_raw,
+            NormalizedValue(last_value_raw),
+            gamma,
+            lambda,
+            &id,
+        );
 
         // A normalizer with a non-trivial, positive affine scale (built from a spread
         // of returns so μ and σ are both non-zero).
@@ -559,7 +603,7 @@ mod tests {
         for &(reward, value) in &raw {
             buf_norm.push(t(reward, (value - mu) / sigma, StepEnd::Continues));
         }
-        let last_value_norm = (last_value_raw - mu) / sigma;
+        let last_value_norm = NormalizedValue((last_value_raw - mu) / sigma);
         let (adv_norm, ret_norm_out) =
             compute_gae(&buf_norm, last_value_norm, gamma, lambda, &ret_norm);
 
@@ -567,22 +611,24 @@ mod tests {
         // the same real-unit values either way, so the policy gradient is unchanged.
         for (i, (a, b)) in adv_raw.iter().zip(adv_norm.iter()).enumerate() {
             assert!(
-                (a - b).abs() < 1e-3,
-                "advantage[{i}] changed under return normalization: {a} vs {b}"
+                (a.0 - b.0).abs() < 1e-3,
+                "advantage[{i}] changed under return normalization: {} vs {}",
+                a.0,
+                b.0
             );
         }
         // Hence sign and strict ordering are preserved (the weaker properties the
         // affine invariance implies, asserted directly so a regression is legible).
         for i in 0..adv_raw.len() {
             assert_eq!(
-                adv_raw[i].signum(),
-                adv_norm[i].signum(),
+                adv_raw[i].0.signum(),
+                adv_norm[i].0.signum(),
                 "advantage[{i}] sign flipped"
             );
             for j in (i + 1)..adv_raw.len() {
                 assert_eq!(
-                    adv_raw[i] < adv_raw[j],
-                    adv_norm[i] < adv_norm[j],
+                    adv_raw[i].0 < adv_raw[j].0,
+                    adv_norm[i].0 < adv_norm[j].0,
                     "advantage ordering of {i} vs {j} changed"
                 );
             }
@@ -592,19 +638,21 @@ mod tests {
         // target is `normalize(return)`, applied later in `ppo_update_core`).
         for (i, (a, b)) in ret_raw.iter().zip(ret_norm_out.iter()).enumerate() {
             assert!(
-                (a - b).abs() < 1e-2,
-                "return[{i}] changed under return normalization: {a} vs {b}"
+                (a.0 - b.0).abs() < 1e-2,
+                "return[{i}] changed under return normalization: {} vs {}",
+                a.0,
+                b.0
             );
         }
 
         // And the value-loss TARGET itself — `normalize(return)` — is a positive
         // affine image of the raw return, so it preserves order/sign too (this is the
         // only place the scale actually enters the regression).
-        let targets: Vec<f32> = ret_raw.iter().map(|&r| ret_norm.normalize(r)).collect();
+        let targets: Vec<f32> = ret_raw.iter().map(|&r| ret_norm.normalize(r).0).collect();
         for i in 0..ret_raw.len() {
             for j in (i + 1)..ret_raw.len() {
                 assert_eq!(
-                    ret_raw[i] < ret_raw[j],
+                    ret_raw[i].0 < ret_raw[j].0,
                     targets[i] < targets[j],
                     "value-target ordering of {i} vs {j} changed"
                 );
@@ -643,7 +691,7 @@ mod tests {
         // The user-visible behavior (normalize) must match across the round-trip.
         for &r in &[-2000.0f32, -1000.0, 0.0, 500.0] {
             assert!(
-                (norm.normalize(r) - loaded.normalize(r)).abs() < 1e-6,
+                (norm.normalize(RealReturn(r)).0 - loaded.normalize(RealReturn(r)).0).abs() < 1e-6,
                 "normalize({r}) diverged across checkpoint"
             );
         }
