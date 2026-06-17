@@ -1,5 +1,4 @@
 mod bot;
-mod collider_editor;
 mod combat;
 mod debug_sliders;
 mod physics;
@@ -149,12 +148,6 @@ pub struct Args {
     #[arg(long)]
     debug_sliders: bool,
 
-    /// DEV: fit colliders from the glTF model once, write the typed table to this RON
-    /// path, then exit (no window, no physics) — the only place the fit runs. Model is
-    /// `CRAB_MODEL_PATH`, else the dev `sally.glb`. Refine it with `--edit-colliders`.
-    #[arg(long, value_name = "OUT.ron")]
-    bake_colliders: Option<PathBuf>,
-
     /// DEV: score every live collider against the mesh it stands in for and print a
     /// per-part agreement table (signed surface distance, in model units), then exit
     /// (no window). Exits nonzero if any part fails, so it doubles as a regression
@@ -169,13 +162,6 @@ pub struct Args {
     /// Model is `CRAB_MODEL_PATH`, else the dev `sally.glb`.
     #[arg(long)]
     verify_pivots: bool,
-
-    /// DEV: open the interactive collider-placement editor on this RON table, then
-    /// exit. The table is seeded from the auto-fit (or resumed if it already exists);
-    /// step bone-by-bone and hand-place each collider against the bind-pose mesh.
-    /// Needs a window + GPU. See `collider_editor`.
-    #[arg(long, value_name = "OUT.ron")]
-    edit_colliders: Option<PathBuf>,
 }
 
 /// Learner orchestration: the shared training config plus how many rollout threads
@@ -248,12 +234,6 @@ fn main() {
 
     let args = cli.args;
 
-    // DEV bake: fit colliders once, write the table, exit — no bevy app needed.
-    if let Some(out) = args.bake_colliders.clone() {
-        bake_colliders(&out);
-        return;
-    }
-
     // DEV verify: score the live colliders against the mesh, print, exit.
     if args.verify_colliders {
         std::process::exit(verify_colliders());
@@ -262,13 +242,6 @@ fn main() {
     // DEV verify: test joint pivots + collider endpoints for mesh containment, exit.
     if args.verify_pivots {
         std::process::exit(verify_pivots());
-    }
-
-    // DEV editor: open the interactive collider-placement window, then exit. Builds
-    // its own minimal app (mesh + gizmos + egui), no physics or BotPlugin.
-    if let Some(table) = args.edit_colliders.clone() {
-        collider_editor::run(&table);
-        return;
     }
 
     // Every remaining mode spawns the rig-derived body, which needs the glTF
@@ -927,78 +900,6 @@ fn verify_pivots() -> i32 {
         }
     );
     i32::from(!pass)
-}
-
-/// DEV `--bake-colliders`: load the glTF model, fit the typed collider table, and
-/// write it to `out` as RON. Exits the process with a nonzero status on any
-/// failure (missing model, fit error, write error) so a broken bake fails the
-/// command instead of writing a half-table.
-fn bake_colliders(out: &std::path::Path) {
-    let Some(model_path) = bot::meshfit::model_path() else {
-        eprintln!(
-            "bake-colliders: no model — set CRAB_MODEL_PATH or place sally.glb at the dev path"
-        );
-        std::process::exit(1);
-    };
-    let model = match bot::meshfit::LoadedModel::load(&model_path) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("bake-colliders: load {model_path:?}: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    // Fit with the per-part reasoning, so the bake prints WHY each part got its
-    // shape — the reviewable summary the lean artifact itself doesn't carry.
-    let report = bot::meshfit::bake_report(&model);
-    println!("fitting {} parts from {model_path:?}:", report.len());
-    println!(
-        "  {:<20} {:>7} {:>6} | {:>6} {:>5} {:>5} {:>5} | {:>7} {:>6}",
-        "part", "prim", "res", "mass", "elong", "iso", "flat", "span_m", "reason"
-    );
-    for r in &report {
-        let c = &r.choice;
-        // Show the BAKED primitive + why, not the chooser's: every jointed part is
-        // baked as a bone-stretched capsule regardless of the cloud descriptors, so
-        // the chooser's tag/reason would be stale for those.
-        let reason = if r.fitted.part == bot::meshfit::PartId::Carapace {
-            c.reason
-        } else {
-            "jointed → capsule stretched along its bone (red→green)"
-        };
-        println!(
-            "  {:<20} {:>7} {:>6.2} | {:>6.4} {:>5.2} {:>5.2} {:>5.2} | {:>7.3}  {}",
-            format!("{:?}", r.fitted.part),
-            r.fitted.primitive.tag(),
-            c.chosen_residual,
-            r.fitted.mass_properties().0,
-            c.elongation,
-            c.isotropy,
-            c.flatness,
-            r.span_len,
-            reason,
-        );
-    }
-
-    let body = bot::meshfit::FittedBody::from_reports(&report);
-    let ron = match body.to_ron() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("bake-colliders: {e}");
-            std::process::exit(1);
-        }
-    };
-    if let Err(e) = std::fs::write(out, ron) {
-        eprintln!("bake-colliders: write {out:?}: {e}");
-        std::process::exit(1);
-    }
-    // Total mass is derived from each part's primitive + density — a one-line
-    // summary of what the table will weigh when spawned.
-    let total_mass: f32 = body.parts.iter().map(|p| p.mass_properties().0).sum();
-    println!(
-        "baked {} parts → {out:?} (total fitted mass {total_mass:.3} kg)",
-        body.parts.len()
-    );
 }
 
 /// Diagnostic (enable with RL_CONTACT_AUDIT=1): every 64 ticks, prints every

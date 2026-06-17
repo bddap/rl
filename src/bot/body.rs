@@ -14,7 +14,7 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use super::meshfit::{LoadedModel, PartId};
+use super::meshfit::LoadedModel;
 use super::rig::{self, RigRecipe};
 
 // ---------------------------------------------------------------------------
@@ -80,24 +80,6 @@ pub fn joint_angle(axis_local: Vec3, parent_rot: Quat, child_rot: Quat) -> f32 {
 /// and discarded the hub's true bind-world position, which slid the whole body off
 /// the cosmetic skin.)
 pub const SPAWN_HEIGHT: f32 = 0.05;
-
-/// Leg-segment densities for the OFFLINE collider bake (`part_densities`); the live
-/// rig body's masses come from `rig.rs`'s own densities. Tapered UP (denser toward
-/// the tip): at game scale the distal links came out SUB-GRAM at density ~1 (the
-/// tibia under a gram) — physically implausible and numerically twitchy (tiny inertia
-/// → five-figure angular acceleration under load) — so denser distal segments land
-/// each at ~10–14 g with a gentle inertia gradient up the leg.
-const COXA_DENSITY: f32 = 6.0;
-const FEMUR_DENSITY: f32 = 8.0;
-const TIBIA_DENSITY: f32 = 14.0;
-
-/// Carapace density. Heaviest part: the body's mass sits in the shell, over the
-/// feet.
-const CARAPACE_DENSITY: f32 = 5.0;
-/// Every claw segment (upper/forearm/pincer). Kept LOW: the claw assembly hangs
-/// off the front (+Z), and a dense one (was 3.0/2.5/4.0) put the CoM ahead of the
-/// leg support so the crab pitched forward and couldn't stand.
-const CLAW_DENSITY: f32 = 1.0;
 
 // ---------------------------------------------------------------------------
 // Torque ceilings — the magnitude an action of ±1 commands on each joint type.
@@ -542,35 +524,6 @@ fn rig_fixed(anchor1: Vec3) -> TypedJoint {
 fn capsule_collider(center: Vec3, rot: Quat, half_height: f32, radius: f32) -> Collider {
     let axis = rot * Vec3::Y * half_height;
     Collider::capsule(center - axis, center + axis, radius)
-}
-
-/// Every physics part with the hand-coded density its mass is computed under, in
-/// a deterministic order (carapace, legs L/R, claws L/R). The single source of the
-/// part list + density used by the offline collider bake
-/// ([`super::meshfit::bake_report`]): the fit keeps this density per part so a
-/// fitted primitive's mass matches the body's at equal density. Lives here because
-/// body.rs owns the joint set and these densities.
-pub fn part_densities() -> Vec<(PartId, f32)> {
-    let mut v = vec![(PartId::Carapace, CARAPACE_DENSITY)];
-    for side in [Side::Left, Side::Right] {
-        for leg in 0u8..4 {
-            v.push((PartId::Joint(CrabJointId::LegCoxa(side, leg)), COXA_DENSITY));
-            v.push((
-                PartId::Joint(CrabJointId::LegMerus(side, leg)),
-                FEMUR_DENSITY,
-            ));
-            v.push((
-                PartId::Joint(CrabJointId::LegCarpus(side, leg)),
-                TIBIA_DENSITY,
-            ));
-        }
-    }
-    for side in [Side::Left, Side::Right] {
-        v.push((PartId::Joint(CrabJointId::ClawShoulder(side)), CLAW_DENSITY));
-        v.push((PartId::Joint(CrabJointId::ClawWrist(side)), CLAW_DENSITY));
-        v.push((PartId::Joint(CrabJointId::ClawPincer(side)), CLAW_DENSITY));
-    }
-    v
 }
 
 // ---------------------------------------------------------------------------
