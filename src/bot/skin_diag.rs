@@ -154,7 +154,8 @@ fn audit(world: &mut World) {
     // ---- carapace + eye-stalks (the other CrabBodyPart markers), for completeness.
     let mut other_rows: Vec<(String, f32, f32, bool)> = Vec::new();
     {
-        let mut q = world.query_filtered::<&GlobalTransform, (With<CrabBodyPart>, Without<CrabJoint>)>();
+        let mut q =
+            world.query_filtered::<&GlobalTransform, (With<CrabBodyPart>, Without<CrabJoint>)>();
         let mut carapace = world.query_filtered::<&GlobalTransform, With<CrabCarapace>>();
         let carapace_set: Vec<Vec3> = carapace.iter(world).map(|g| g.translation()).collect();
         for gt in q.iter(world) {
@@ -248,7 +249,10 @@ fn live_skinned_soup(world: &mut World) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
         let Some(mesh) = assets.get(mesh_handle) else {
             continue;
         };
-        let Some(raw) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|a| a.as_float3()) else {
+        let Some(raw) = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|a| a.as_float3())
+        else {
             continue;
         };
         let (Some(joints), Some(weights)) = (
@@ -488,10 +492,8 @@ fn winding_number(p: Vec3, positions: &[Vec3], tris: &[[u32; 3]]) -> f32 {
         let c = positions[t[2] as usize] - p;
         let (la, lb, lc) = (a.length() as f64, b.length() as f64, c.length() as f64);
         let num = a.dot(b.cross(c)) as f64;
-        let den = la * lb * lc
-            + (a.dot(b) as f64) * lc
-            + (b.dot(c) as f64) * la
-            + (c.dot(a) as f64) * lb;
+        let den =
+            la * lb * lc + (a.dot(b) as f64) * lc + (b.dot(c) as f64) * la + (c.dot(a) as f64) * lb;
         acc += 2.0 * num.atan2(den);
     }
     (acc / (4.0 * std::f64::consts::PI)) as f32
@@ -620,7 +622,9 @@ fn print_report(
     );
 
     println!();
-    println!("per-pivot (signed dist: + = OUTSIDE settled skin, - = inside; bindΔ = settled - bind):");
+    println!(
+        "per-pivot (signed dist: + = OUTSIDE settled skin, - = inside; bindΔ = settled - bind):"
+    );
     println!(
         "  {:<26} | {:>7} {:>9} {:>4} | {:>9} {:>9} {:>9}",
         "joint", "wn", "settled.d", "in?", "bind.d", "bindΔ", "link↔bone"
@@ -697,7 +701,10 @@ fn print_report(
     let body_c = (blo + bhi) * 0.5;
     println!();
     println!("AABB size/offset check (cause (b): is the skin systematically smaller/offset?):");
-    println!("  skin   bbox {:.3}..{:.3}  size {:.3}  center {:.3}", lo, hi, skin_size, skin_c);
+    println!(
+        "  skin   bbox {:.3}..{:.3}  size {:.3}  center {:.3}",
+        lo, hi, skin_size, skin_c
+    );
     println!(
         "  body   bbox {:.3}..{:.3}  size {:.3}  center {:.3}  (link-pivot envelope)",
         blo, bhi, body_size, body_c
