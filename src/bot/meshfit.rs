@@ -1,46 +1,28 @@
-//! glTF skeleton loader + an offline collider-fitting library.
+//! glTF skeleton loader + the collider-fit primitives the live body is built from.
 //!
 //! [`LoadedModel`] parses `sally.glb` (the same model the cosmetic skin and the
-//! rig-derived body read) into bind-pose bone transforms + skinned vertices — the
-//! part the live body uses ([`super::rig`] reads bone origins from it).
+//! rig-derived body read) into bind-pose bone transforms + skinned vertices, and
+//! exposes the per-part vertex clouds and bone origins [`super::rig`] reads to spawn
+//! the body. The fit helpers operate on those clouds, all in the glTF's *bind-pose
+//! world* frame:
 //!
-//! The rest is an OFFLINE collider-fitting pass: for each physics part it gathers
-//! the mesh vertices whose dominant skin bone maps to that part, chooses a collider
-//! primitive from the cloud's shape (capsule/box/ball, via [`choose_primitive`]),
-//! solves the part's placement from the bind-pose bone chain, and derives mass from
-//! the chosen [`Primitive`]. [`bake_report`] runs the fit, [`FittedBody::from_reports`]
-//! assembles a typed table serialized to RON by `--bake-colliders` and hand-tuned by
-//! `--edit-colliders`.
-//!
-//! NOTE: the live body fits its own capsule colliders from these clouds at spawn
-//! ([`super::rig::derive_link`] calls [`fit_capsule`]); nothing loads a baked
-//! [`FittedBody`] at runtime. This whole fitting/baking half — [`bake_report`],
-//! [`FittedBody`], [`choose_primitive`], the collider editor — is offline dev
-//! tooling with no runtime consumer, reachable only from `--bake-colliders` /
-//! `--edit-colliders`, kept for the phase-2 rig collider re-fit (bddap/rl#16).
-//!
-//! **Size vs placement are fit from different sources, on purpose.** The cloud fit
-//! gives pose-invariant *size* (capsule half-height/radius, box half-extents) — it
-//! does not know where the part sits. *Placement* comes from the skeleton: the
-//! proximal→distal bind-pose bone origins give each segment's pivot and direction.
-//! So a re-fit of the mesh changes size; a re-rig changes placement; neither
-//! silently perturbs the other.
-//!
-//! Coordinate frames: the cloud fit and bone origins are in the glTF's *bind-pose
-//! world* frame; a [`Placement`] re-expresses a part's collider in its link-local
-//! frame (origin at the joint pivot).
+//! - [`fit_capsule`] — principal-axis capsule for a limb segment ([`super::rig`]
+//!   sizes each leg/claw link with it at spawn).
+//! - [`containing_obb`] — tightest oriented box enclosing a cloud ([`super::rig`]
+//!   fits the carapace shell with it).
+//! - [`score_capsule`]/[`score_box`] — signed surface agreement of a live collider
+//!   against the cloud it stands in for (the `--verify-colliders` regression gate).
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::body::{CrabJointId, Side};
+use super::body::CrabJointId;
 
-/// Which physics link a fitted collider belongs to: the carapace is the root,
-/// every other part is a joint's child link. Mirrors the skin's `LinkKey` but
-/// carries [`CrabJointId`] so a baked [`FittedPart`] names the exact joint whose
-/// link it replaces.
+/// Which physics link a collider belongs to: the carapace is the root, every other
+/// part is a joint's child link. Mirrors the skin's `LinkKey` but carries
+/// [`CrabJointId`] so a part names the exact joint whose link it stands in for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum PartId {
     Carapace,
@@ -224,10 +206,8 @@ impl LoadedModel {
 
     /// Bind-pose world (origin, basis) of a bone by name. The basis is the bone's
     /// bind-world rotation — the orientation the physics link inherits, since each
-    /// link rotates *with* its bone. Solving a [`Placement`] needs both: the origin
-    /// is the joint pivot, and the basis is the frame the placement is expressed
-    /// relative to (so `body.rs`'s rest bake re-applies it consistently). The
-    /// rig-driven body spawn ([`super::rig`]) reads it per bone to place each link.
+    /// link rotates *with* its bone. The rig-driven body spawn ([`super::rig`]) reads
+    /// the origin as the joint pivot to place each link.
     pub(crate) fn bone_bind_pose(&self, name: &str) -> Option<(Vec3, Quat)> {
         let idx = self.node_index(name)?;
         self.bind_world.get(&idx).map(|m| {
@@ -381,8 +361,10 @@ pub struct FittedCapsule {
     pub radius: f32,
 }
 
+#[cfg(test)]
 impl FittedCapsule {
-    /// Distance between the segment endpoints.
+    /// Distance between the segment endpoints. Test-only: production reads the
+    /// endpoints (`a`/`b`) directly; this is the convenience the capsule-fit test uses.
     pub fn segment_len(&self) -> f32 {
         (self.b - self.a).length()
     }
@@ -404,8 +386,9 @@ pub fn fit_capsule(points: &[Vec3]) -> Option<FittedCapsule> {
     let centroid = points.iter().copied().sum::<Vec3>() / n;
 
     // Principal axis = largest-variance eigenvector of the covariance. (When the
-    // top two variances are close — a chunky coxa cloud — this axis is
-    // ill-defined; `ObbFit::blobbiness` flags exactly that case.)
+    // top two variances are close — a chunky near-isotropic cloud — this axis is
+    // ill-defined, so a capsule is the wrong primitive there; the carapace takes a
+    // box instead.)
     let (axes, _vars) = covariance_eigenframe(points, centroid);
     let axis = axes[0];
 
@@ -448,31 +431,9 @@ fn percentile(sorted: &[f32], q: f32) -> f32 {
     sorted[lo] * (1.0 - frac) + sorted[hi] * frac
 }
 
-/// RMS distance from each point to the surface of a fitted capsule, normalised
-/// by the capsule radius. A faithful capsule fit sits near 0; a blob forced into
-/// a capsule (claw hand) or a coxa cloud with no clean axis runs high. This is
-/// the objective "is a capsule the right primitive here?" signal.
-pub fn capsule_fit_residual(points: &[Vec3], cap: &FittedCapsule) -> f32 {
-    if points.is_empty() || cap.radius <= 0.0 {
-        return f32::INFINITY;
-    }
-    let seg = cap.b - cap.a;
-    let seg_len2 = seg.length_squared().max(1e-12);
-    let mut acc = 0.0f64;
-    for &p in points {
-        // Distance from p to the segment, then to the swept surface.
-        let t = ((p - cap.a).dot(seg) / seg_len2).clamp(0.0, 1.0);
-        let closest = cap.a + seg * t;
-        let surf = (p - closest).length() - cap.radius;
-        acc += (surf as f64) * (surf as f64);
-    }
-    ((acc / points.len() as f64).sqrt() as f32) / cap.radius
-}
-
 /// How well a *live* collider surface hugs the vertex cloud it stands in for, in
-/// model units, in the cloud's own (bind-pose world) frame. Unlike
-/// [`capsule_fit_residual`] (RMS, sign-collapsed, against a *re-fit* capsule), this
-/// keeps the sign and scores the geometry the body actually spawns with: positive
+/// model units, in the cloud's own (bind-pose world) frame. It keeps the sign and
+/// scores the geometry the body actually spawns with: positive
 /// surface distance = vertex OUTSIDE the collider (mesh pokes out → physics
 /// under-coverage), negative = inside (collider margin / bulge). The split lets
 /// `--verify-colliders` tell "mesh escapes the collider" from "collider oversized",
@@ -572,135 +533,17 @@ pub(crate) fn score_box(points: &[Vec3], center: Vec3, half: Vec3, rot: Quat) ->
     ColliderScore::from_signed(&sd)
 }
 
-/// Re-fit a capsule's *radius* to minimise the surface residual instead of
-/// enveloping the cloud. The L2-optimal constant radius is the mean
-/// perpendicular distance (the residual `Σ(dist−r)²` is minimised at `r =
-/// mean(dist)`); a trimmed mean drops the skin-bleed tail. The axis and segment
-/// centre are kept from `cap`, but the endpoints are re-pulled by the new
-/// radius. This is the honest answer to "rapier can't taper": pick the single
-/// radius that balances over- and under-coverage rather than the p95 that only
-/// ever over-covers.
-fn rebalance_capsule_radius(points: &[Vec3], cap: &FittedCapsule) -> FittedCapsule {
-    let seg = cap.b - cap.a;
-    let seg_len2 = seg.length_squared().max(1e-12);
-    let axis = seg / seg.length().max(1e-9);
-    let mut perp: Vec<f32> = points
-        .iter()
-        .map(|&p| {
-            let t = ((p - cap.a).dot(seg) / seg_len2).clamp(0.0, 1.0);
-            (p - (cap.a + seg * t)).length()
-        })
-        .collect();
-    perp.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    // Trim the top 5% (bleed) before averaging; mean of the rest = L2-optimal r.
-    let keep = ((perp.len() as f32 * 0.95) as usize).max(1);
-    let radius = (perp[..keep].iter().sum::<f32>() / keep as f32).max(1e-4);
-    // Re-centre on the original axial midpoint and re-pull endpoints by the new
-    // radius so the caps still land near the tips.
-    let mid = 0.5 * (cap.a + cap.b);
-    let half_axial = 0.5 * cap.segment_len() + cap.radius; // original axial half-extent
-    let half_seg = (half_axial - radius).max(0.0);
-    FittedCapsule {
-        a: mid - axis * half_seg,
-        b: mid + axis * half_seg,
-        radius,
-    }
-}
-
 // ---------------------------------------------------------------------------
-// PCA frame + oriented bounding box (the capsule's non-elongated alternative)
+// PCA frame + oriented bounding box (the carapace's collider fit)
 // ---------------------------------------------------------------------------
-
-/// Oriented-box fit of a point cloud: principal axes (eigenvectors of the
-/// covariance, ordered by descending *variance*) and the half-extent along each.
-/// `axes[0]`/`half_extents.x` is the elongation direction. Variance order tracks
-/// extent order closely but not exactly for skewed clouds, so treat the extents
-/// as descriptive, not a hard sort.
-#[derive(Clone, Copy, Debug)]
-pub struct ObbFit {
-    pub center: Vec3,
-    pub axes: [Vec3; 3],
-    pub half_extents: Vec3,
-}
-
-impl ObbFit {
-    /// Half-extents sorted descending (longest first), regardless of which axis
-    /// carried the most *variance*. The covariance order tracks extent order only
-    /// loosely for skewed clouds (the carapace's top-variance axis comes out
-    /// near-vertical), so every shape descriptor reads from this, not the raw
-    /// `half_extents`/axis order — otherwise blobbiness mislabels exactly the
-    /// degenerate clouds it exists to catch.
-    pub fn sorted_half_extents(&self) -> [f32; 3] {
-        let mut e = self.half_extents.to_array();
-        e.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        e
-    }
-
-    /// How non-elongated the cloud is: the *second* half-extent over the longest
-    /// (both extent-sorted). ~0 = stick-like (a capsule fits), ~1 = chunky (wants
-    /// a box/hull). The validation table uses this to flag which primitive each
-    /// part wants.
-    pub fn blobbiness(&self) -> f32 {
-        let e = self.sorted_half_extents();
-        e[1] / e[0].max(1e-6)
-    }
-
-    /// Isotropy: the *shortest* half-extent over the longest (extent-sorted).
-    /// ~1 = a near-cube/ball with no dominant axis (the degenerate middle coxae);
-    /// ~0 = a thin slab or stick. PCA can't axis-align an isotropic blob, so this
-    /// is the signal that a capsule fit will go degenerate (radius blow-up).
-    pub fn isotropy(&self) -> f32 {
-        let e = self.sorted_half_extents();
-        e[2] / e[0].max(1e-6)
-    }
-
-    /// Flatness: the shortest half-extent over the *middle* one (extent-sorted).
-    /// ~0 = a flat slab (two long axes, one thin — the carapace dome footprint,
-    /// the claw palm); ~1 = chunky in all three. Distinguishes a box-worthy slab
-    /// from an isotropic ball.
-    pub fn flatness(&self) -> f32 {
-        let e = self.sorted_half_extents();
-        e[2] / e[1].max(1e-6)
-    }
-}
-
-/// Fit an oriented box: principal axes by eigendecomposition of the covariance,
-/// extents by the max absolute projection onto each axis. Uses a percentile
-/// (98th) on each axis so a couple of bled outliers don't balloon the box, then
-/// reports that as the half-extent.
-pub fn fit_obb(points: &[Vec3]) -> Option<ObbFit> {
-    if points.len() < 4 {
-        return None;
-    }
-    let n = points.len() as f32;
-    let center = points.iter().copied().sum::<Vec3>() / n;
-    let (axes, _vars) = covariance_eigenframe(points, center);
-    let mut proj: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    for &p in points {
-        let d = p - center;
-        for k in 0..3 {
-            proj[k].push(d.dot(axes[k]).abs());
-        }
-    }
-    let mut he = Vec3::ZERO;
-    for k in 0..3 {
-        proj[k].sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        he[k] = percentile(&proj[k], 0.98).max(1e-4);
-    }
-    Some(ObbFit {
-        center,
-        axes,
-        half_extents: he,
-    })
-}
 
 /// Tightest oriented box that *contains* every point, as `(half_extents, center,
 /// rotation)` where `rotation` maps a canonical axis-aligned box's local axes onto
 /// the cloud's principal axes (so `rapier`'s `Collider::cuboid` + this rotation
-/// reproduces the fit). Unlike [`fit_obb`] this uses the full min/max span per
-/// principal axis — no percentile trimming — and recentres on the span midpoint
-/// rather than the centroid: the carapace box must enclose the shell so the mesh
-/// never pokes out, and a skewed dome's centroid isn't its span centre. The
+/// reproduces the fit). Uses the full min/max span per principal axis — no
+/// percentile trimming — and recentres on the span midpoint rather than the
+/// centroid: the carapace box must enclose the shell so the mesh never pokes out,
+/// and a skewed dome's centroid isn't its span centre. The
 /// principal frame is forced right-handed (eigenvectors can come out left-handed)
 /// so the basis is a valid rotation.
 pub(crate) fn containing_obb(points: &[Vec3]) -> Option<(Vec3, Vec3, Quat)> {
@@ -730,284 +573,6 @@ pub(crate) fn containing_obb(points: &[Vec3]) -> Option<(Vec3, Vec3, Quat)> {
     // Map the principal-frame span centre back to world: centroid + Σ axis_k·mid_k.
     let center = centroid + axes[0] * mid.x + axes[1] * mid.y + axes[2] * mid.z;
     Some((half, center, rotation))
-}
-
-// ---------------------------------------------------------------------------
-// Ball fit (for isotropic blobs with no usable axis)
-// ---------------------------------------------------------------------------
-
-/// A ball fitted to a point cloud: centroid + a covering radius.
-#[derive(Clone, Copy, Debug)]
-pub struct FittedBall {
-    pub center: Vec3,
-    pub radius: f32,
-}
-
-/// Fit a ball: centroid centre, radius = a high percentile of the radial
-/// distance (p90, robust to bleed). For a genuinely isotropic blob this hugs
-/// the cloud about as well as anything; for an elongated cloud it over-covers
-/// (which is why selection only reaches for a ball when isotropy says there is
-/// no axis to exploit).
-pub fn fit_ball(points: &[Vec3]) -> Option<FittedBall> {
-    if points.len() < 4 {
-        return None;
-    }
-    let n = points.len() as f32;
-    let center = points.iter().copied().sum::<Vec3>() / n;
-    let mut rad: Vec<f32> = points.iter().map(|&p| (p - center).length()).collect();
-    rad.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Some(FittedBall {
-        center,
-        radius: percentile(&rad, 0.90).max(1e-4),
-    })
-}
-
-/// Normalised RMS residual of a cloud to a ball surface (same units as the
-/// capsule/cone residuals, so primitive residuals compare on one scale).
-fn ball_fit_residual(points: &[Vec3], ball: &FittedBall) -> f32 {
-    if points.is_empty() || ball.radius <= 0.0 {
-        return f32::INFINITY;
-    }
-    let mut acc = 0.0f64;
-    for &p in points {
-        let surf = (p - ball.center).length() - ball.radius;
-        acc += (surf as f64) * (surf as f64);
-    }
-    ((acc / points.len() as f64).sqrt() as f32) / ball.radius
-}
-
-/// Normalised RMS residual of a cloud to an oriented-box surface. Distance to a
-/// box is computed in the box's own frame; normalised by the mean half-extent so
-/// it shares the capsule/ball residual scale.
-fn obb_fit_residual(points: &[Vec3], obb: &ObbFit) -> f32 {
-    let e = Vec3::from_array(obb.sorted_half_extents());
-    let scale = (e.x + e.y + e.z) / 3.0;
-    if points.is_empty() || scale <= 0.0 {
-        return f32::INFINITY;
-    }
-    let mut acc = 0.0f64;
-    for &p in points {
-        let d = p - obb.center;
-        // Signed distance to an axis-aligned box in the OBB frame, summed over
-        // the three principal axes (exact outside, conservative inside).
-        let local = Vec3::new(
-            d.dot(obb.axes[0]).abs() - obb.half_extents[0],
-            d.dot(obb.axes[1]).abs() - obb.half_extents[1],
-            d.dot(obb.axes[2]).abs() - obb.half_extents[2],
-        );
-        let outside = local.max(Vec3::ZERO).length();
-        let inside = local.x.max(local.y.max(local.z)).min(0.0);
-        let surf = outside + inside;
-        acc += (surf as f64) * (surf as f64);
-    }
-    ((acc / points.len() as f64).sqrt() as f32) / scale
-}
-
-// ---------------------------------------------------------------------------
-// Data-driven primitive selection
-// ---------------------------------------------------------------------------
-
-/// The collider shape a part wants, **dimensions only** — pose-invariant, with no
-/// position or orientation (those live in a [`Placement`]). This is the canonical
-/// baked output: mass derives from it ([`Primitive::mass_properties`]) and the
-/// body spawns a collider of exactly these dims, so there is one source for a
-/// part's size and nothing to drift out of sync. The world-space cloud fit it is
-/// distilled from is [`FittedShape`].
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Primitive {
-    /// Elongated, one dominant axis: legs, claw arms. `half_height` is the
-    /// cylinder half-length (caps excluded), matching rapier's `capsule_y`.
-    Capsule { half_height: f32, radius: f32 },
-    /// Chunky or flat, no single sweep axis: carapace, claw palm, pincer, the
-    /// degenerate coxa blobs (a box hugs them; a capsule blows its radius up).
-    Cuboid { half_extents: Vec3 },
-    /// Round in all three axes — no axis to sweep *or* to lay a slab against. No
-    /// `sally.glb` part is this round (even the eye is a short stalk → box), so
-    /// it's the principled fallback for a future near-spherical cloud, not a
-    /// current output. Kept so the chooser degrades sensibly rather than forcing
-    /// a ball-shaped blob into a box.
-    Ball { radius: f32 },
-}
-
-impl Primitive {
-    /// One-word tag for the validation table and the bake reason lines.
-    pub fn tag(&self) -> &'static str {
-        match self {
-            Primitive::Capsule { .. } => "capsule",
-            Primitive::Cuboid { .. } => "box",
-            Primitive::Ball { .. } => "ball",
-        }
-    }
-
-    /// Mass + transverse principal inertia under `density`. The transverse moment
-    /// is the table's `i_perp` convention: for the box, the larger of the two
-    /// non-vertical principal inertias; the ball is isotropic so all three
-    /// coincide. The single source for a part's mass — there are no stored mass
-    /// fields to disagree with the dims.
-    pub fn mass_properties(&self, density: f32) -> (f32, f32) {
-        match *self {
-            Primitive::Capsule {
-                half_height,
-                radius,
-            } => {
-                let m = capsule_mass(radius, half_height, density);
-                (m.mass, m.i_perp)
-            }
-            Primitive::Cuboid { half_extents: e } => {
-                let (m, i) = cuboid_mass(e.x, e.y, e.z, density);
-                (m, i.x.max(i.y).max(i.z))
-            }
-            Primitive::Ball { radius } => ball_mass(radius, density),
-        }
-    }
-
-    /// Reject dimensions that are non-finite or non-positive — the ones a foreign/
-    /// hand-edited table can carry that serde accepts but rapier cannot build into a
-    /// sane collider. A radius or extent must be strictly positive; a capsule's
-    /// half-height may be 0 (that capsule is a sphere) but not negative.
-    fn validate(&self) -> Result<(), String> {
-        let positive = |label: &str, v: f32| {
-            (v.is_finite() && v > 0.0)
-                .then_some(())
-                .ok_or_else(|| format!("{label} must be finite and > 0, got {v}"))
-        };
-        let non_negative = |label: &str, v: f32| {
-            (v.is_finite() && v >= 0.0)
-                .then_some(())
-                .ok_or_else(|| format!("{label} must be finite and >= 0, got {v}"))
-        };
-        match *self {
-            Primitive::Capsule {
-                half_height,
-                radius,
-            } => {
-                non_negative("capsule half_height", half_height)?;
-                positive("capsule radius", radius)
-            }
-            Primitive::Cuboid { half_extents: e } => {
-                positive("cuboid half_extent x", e.x)?;
-                positive("cuboid half_extent y", e.y)?;
-                positive("cuboid half_extent z", e.z)
-            }
-            Primitive::Ball { radius } => positive("ball radius", radius),
-        }
-    }
-}
-
-/// The world-space shape fitted to a vertex cloud, before it is distilled into a
-/// pose-invariant [`Primitive`]. Carries absolute positions/axes. Production no
-/// longer poses parts from this (the bake sizes/orients in the bone frame via
-/// [`fit_part`]); the payloads survive only to drive the `#[cfg(test)]` validation
-/// table's reported shape + residual, so they read as dead in a release build —
-/// pending classifier removal (bddap/rl#25). Not serialized.
-#[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
-pub enum FittedShape {
-    Capsule(FittedCapsule),
-    Box(ObbFit),
-    Ball(FittedBall),
-}
-
-/// Why a primitive was chosen: the dimensioned primitive, the world-space fit it
-/// came from, its surface residual, and the extent-sorted shape descriptors that
-/// drove the decision — so the validation table can show the *decision*, not just
-/// its outcome, and assert on it.
-#[derive(Clone, Debug)]
-pub struct PrimitiveChoice {
-    /// The world-space fit the choice was distilled from (carries the residual and
-    /// the box's fitted axes). Drives the `#[cfg(test)]` validation table's reported
-    /// shape; the production bake goes through [`fit_part`], not this — so it's
-    /// written but unread in a release build (bddap/rl#25).
-    #[allow(dead_code)]
-    pub shape: FittedShape,
-    /// Surface residual (normalised RMS) of the chosen primitive.
-    pub chosen_residual: f32,
-    /// Extent-sorted descriptors that drove the choice (see [`ObbFit`]).
-    pub elongation: f32,
-    pub isotropy: f32,
-    pub flatness: f32,
-    /// Human-readable one-liner: the rule that fired.
-    pub reason: &'static str,
-}
-
-/// Selection thresholds. Picked from the measured descriptors on `sally.glb`
-/// (clean leg sticks: elongation 0.29–0.40, isotropy 0.14–0.21; degenerate
-/// middle coxae: isotropy 0.28–0.38 but elongation ~0.9; claw palm elongation
-/// 0.57) with margin.
-mod thresh {
-    /// Below this elongation (mid extent / longest extent) the cloud has ONE
-    /// clearly-dominant long axis — a stick a capsule can sweep. The clean leg
-    /// segments sit 0.29–0.40; the chunky parts (coxa blobs, claw palm) run
-    /// 0.5–0.9. This is the primary capsule gate.
-    pub const ELONGATION_STICK: f32 = 0.45;
-    /// At/above this isotropy (shortest extent / longest extent) even a cloud
-    /// with a long axis is too round to trust a single sweep — a ball or box. No
-    /// leg segment exceeds it; it's a backstop against a fat near-isotropic blob
-    /// that happens to squeak under the elongation gate.
-    pub const ISOTROPY_NO_AXIS: f32 = 0.45;
-    /// Among non-stick clouds, at/above this isotropy AND not flat → a ball
-    /// (round in all three); otherwise a box. Tuned so the genuine blobs round
-    /// off while flat slabs (carapace, claw palm) and chunky-but-faced parts
-    /// stay boxes.
-    pub const ISOTROPY_BALL: f32 = 0.6;
-    /// Flatness (shortest / middle extent) at/above which a non-stick cloud is
-    /// "round enough" in its two minor axes to be a ball rather than a slab box.
-    pub const FLATNESS_BALL: f32 = 0.7;
-}
-
-/// Choose the collider primitive for a vertex cloud from its shape, not a fixed
-/// assumption. Capsule is tried FIRST and accepted only for a genuine stick (one
-/// dominant long axis, not a round blob); everything else is a box, except a
-/// cloud round in all three axes, which is a ball. Order matters: the stick test
-/// must come before the box/ball split, or a flat slab's low flatness would be
-/// mistaken for stickness.
-///
-/// Deliberately conservative: a part lands as a capsule only when its elongation
-/// is low *and* it isn't isotropic. Returns `None` for clouds too small to fit
-/// anything (< 4 points).
-pub fn choose_primitive(points: &[Vec3]) -> Option<PrimitiveChoice> {
-    let obb = fit_obb(points)?;
-    let elongation = obb.blobbiness();
-    let isotropy = obb.isotropy();
-    let flatness = obb.flatness();
-
-    // Capsule candidate + its residual, balanced (mean radius) so the leg taper
-    // doesn't punish a genuine stick (see `rebalance_capsule_radius`).
-    let capsule = fit_capsule(points).map(|c| rebalance_capsule_radius(points, &c));
-    let capsule_residual = capsule
-        .map(|c| capsule_fit_residual(points, &c))
-        .unwrap_or(f32::INFINITY);
-
-    let is_stick = elongation < thresh::ELONGATION_STICK && isotropy < thresh::ISOTROPY_NO_AXIS;
-    let (shape, chosen_residual, reason) = if let Some(c) = capsule.filter(|_| is_stick) {
-        (
-            FittedShape::Capsule(c),
-            capsule_residual,
-            "elongated, one dominant axis → capsule",
-        )
-    } else if isotropy >= thresh::ISOTROPY_BALL && flatness >= thresh::FLATNESS_BALL {
-        let ball = fit_ball(points)?;
-        (
-            FittedShape::Ball(ball),
-            ball_fit_residual(points, &ball),
-            "round in all three axes → ball (no axis for a capsule)",
-        )
-    } else {
-        (
-            FittedShape::Box(obb),
-            obb_fit_residual(points, &obb),
-            "chunky / flat slab, no clean sweep axis → box",
-        )
-    };
-
-    Some(PrimitiveChoice {
-        shape,
-        chosen_residual,
-        elongation,
-        isotropy,
-        flatness,
-        reason,
-    })
 }
 
 /// Eigenframe (orthonormal eigenvectors, sorted by descending eigenvalue) of a
@@ -1094,15 +659,16 @@ fn covariance_eigenframe(points: &[Vec3], centroid: Vec3) -> ([Vec3; 3], Vec3) {
 /// Rigid-body mass properties of a capsule, computed analytically (cylinder +
 /// two hemispheres) so mass derives from the dimensions without constructing a
 /// rapier collider. `i_axial` is the moment about the capsule's own long axis;
-/// `i_perp` about a transverse axis through the centre of mass. For comparison
-/// with the hand-coded body these are the principal inertias of the part.
+/// `i_perp` about a transverse axis through the centre of mass.
+//
+// Test-only: the analytic mass formula has no production caller — the live body
+// lets rapier compute inertia from the spawned collider + density — but it is the
+// independent ground truth `capsule_reduces_to_sphere` checks the closed forms
+// against, so it stays gated to the test build rather than shipping unused.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct CapsuleMass {
     pub mass: f32,
-    /// Moment about the capsule's own long axis. Production reads only `i_perp`
-    /// (the transverse moment the table compares); `i_axial` rounds out the
-    /// principal inertias and pins the sphere-reduction test's isotropy check.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub i_axial: f32,
     pub i_perp: f32,
 }
@@ -1112,6 +678,7 @@ pub struct CapsuleMass {
 /// solid-capsule formulae (uniform density ρ): the cylinder contributes its
 /// usual terms; each hemisphere its own plus a parallel-axis shift for the
 /// transverse moment.
+#[cfg(test)]
 pub fn capsule_mass(radius: f32, half_height: f32, density: f32) -> CapsuleMass {
     let r = radius as f64;
     let h = (half_height * 2.0) as f64; // full cylinder length
@@ -1146,398 +713,6 @@ pub fn capsule_mass(radius: f32, half_height: f32, density: f32) -> CapsuleMass 
     }
 }
 
-/// Analytic solid-cuboid mass properties (for the carapace and pincer, which the
-/// hand-coded body models as boxes). Half-extents along x/y/z.
-pub fn cuboid_mass(hx: f32, hy: f32, hz: f32, density: f32) -> (f32, Vec3) {
-    let (hx, hy, hz, rho) = (hx as f64, hy as f64, hz as f64, density as f64);
-    let mass = rho * 8.0 * hx * hy * hz;
-    // Principal inertias of a solid box about its centre.
-    let ix = mass * ((2.0 * hy).powi(2) + (2.0 * hz).powi(2)) / 12.0;
-    let iy = mass * ((2.0 * hx).powi(2) + (2.0 * hz).powi(2)) / 12.0;
-    let iz = mass * ((2.0 * hx).powi(2) + (2.0 * hy).powi(2)) / 12.0;
-    (mass as f32, Vec3::new(ix as f32, iy as f32, iz as f32))
-}
-
-/// Analytic solid-ball mass properties: mass and the (isotropic) principal
-/// inertia ⅖mr². Returned in the same `(mass, i_perp)` shape as the other
-/// primitives so [`Primitive::mass_properties`] can stay uniform.
-pub fn ball_mass(radius: f32, density: f32) -> (f32, f32) {
-    let (r, rho) = (radius as f64, density as f64);
-    let mass = rho * (4.0 / 3.0) * std::f64::consts::PI * r.powi(3);
-    let i = 0.4 * mass * r * r;
-    (mass as f32, i as f32)
-}
-
-// ---------------------------------------------------------------------------
-// Placement: where each part's collider sits, from the bind-pose skeleton
-// ---------------------------------------------------------------------------
-
-/// A part's collider pose in its **link-local frame**: the frame whose origin is
-/// the joint pivot (the proximal bind-pose bone origin) and whose axes are the
-/// body's, so it drops onto `body.rs`'s hand-authored parent anchor for that
-/// joint. `center` is the collider centre relative to the pivot; `rotation`
-/// orients the collider's canonical axes into the link frame (capsule +Y along the
-/// bone; box identity, its axes being the bone frame's). The pivot-relative
-/// encoding is why placement survives the runtime joint pose: only *where on the
-/// parent* the joint attaches is hand-authored; how the collider hangs off it is this.
-///
-/// Stored as a translation+rotation rather than a [`Transform`] because the scale
-/// is always 1 (a collider is its own size) and a bake artifact should carry no
-/// field that is only ever the identity.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Placement {
-    pub center: Vec3,
-    pub rotation: Quat,
-}
-
-/// The bind-pose bone span that defines a part's segment, in glTF world space:
-/// the proximal (pivot) and distal origins plus the proximal bone's bind-world
-/// basis. The basis is what makes [`fit_part`] frame-correct — the collider is
-/// posed relative to *this bone's* rest orientation, the same frame `body.rs`
-/// rebuilds when it bakes the link's rest pose; without it the placement would be
-/// in raw glTF world and land rotated off the limb. For the carapace the "segment"
-/// is just the pivot bone and a +Z hint; its box is measured in the basis frame
-/// (which, the root being identity, is world).
-pub(crate) struct BoneSpan {
-    pub(crate) proximal: Vec3,
-    /// Bind-world rotation of the proximal bone — the link-local frame placement
-    /// is expressed in.
-    pub(crate) proximal_basis: Quat,
-    pub(crate) distal: Vec3,
-}
-
-impl LoadedModel {
-    /// The proximal/distal bind-pose bone origins bounding a part's segment, by
-    /// the same bone→segment grouping the skin and the fit cluster with (coxa
-    /// 000→001, femur 001→003, tibia 003→005; claw/eye chains analogously). The
-    /// proximal origin is the joint pivot; the distal sets the segment direction
-    /// and length. `None` if either bone is missing (e.g. a part with no skeleton
-    /// correspondence).
-    pub(crate) fn bone_span(&self, part: PartId) -> Option<BoneSpan> {
-        // Resolve a span from its proximal/distal bone names: the proximal bone
-        // gives the pivot AND the link-local basis; the distal gives direction.
-        let span = |prox: &str, dist: &str| {
-            let (proximal, proximal_basis) = self.bone_bind_pose(prox)?;
-            Some(BoneSpan {
-                proximal,
-                proximal_basis,
-                distal: self.bone_origin(dist)?,
-            })
-        };
-        let leg = |leg: u8, side: Side, prox: &str, dist: &str| {
-            let s = side_tag(side);
-            span(
-                &format!("Def_leg_0{}.{prox}.{s}", leg + 1),
-                &format!("Def_leg_0{}.{dist}.{s}", leg + 1),
-            )
-        };
-        match part {
-            // Root: the carapace bone is the pivot; the distal hint points front
-            // (+Z) so a degenerate direction never leaves the frame undefined.
-            // The basis is IDENTITY, not the thorax bone's: the root link has no
-            // rest bake — `body.rs` spawns it axis-aligned in world — so its link
-            // frame IS world. That keeps the carapace's [`Placement`] (and the OBB
-            // axes its rotation carries) in world, which `fitted_root` reads to map
-            // each principal extent onto the world axis it's dominant on.
-            PartId::Carapace => {
-                let proximal = self
-                    .bone_origin("Def_thorax_back")
-                    .or_else(|| self.bone_origin("Def_thorax_front"))?;
-                Some(BoneSpan {
-                    proximal,
-                    proximal_basis: Quat::IDENTITY,
-                    distal: proximal + Vec3::Z,
-                })
-            }
-            PartId::Joint(id) => match id {
-                CrabJointId::LegCoxa(side, l) => leg(l, side, "000", "001"),
-                CrabJointId::LegMerus(side, l) => leg(l, side, "002", "003"),
-                CrabJointId::LegCarpus(side, l) => leg(l, side, "003", "004"),
-                CrabJointId::ClawShoulder(side) => {
-                    let s = side_tag(side);
-                    span(
-                        &format!("Def_pincer.000a.{s}"),
-                        &format!("Def_pincer.001.{s}"),
-                    )
-                }
-                CrabJointId::ClawWrist(side) => {
-                    let s = side_tag(side);
-                    span(
-                        &format!("Def_pincer.005.{s}"),
-                        &format!("Def_pincer.006b.{s}"),
-                    )
-                }
-                CrabJointId::ClawPincer(side) => {
-                    let s = side_tag(side);
-                    span(
-                        &format!("Def_pincer.006b.{s}"),
-                        &format!("Def_pincer.006.{s}"),
-                    )
-                }
-            },
-        }
-    }
-}
-
-/// glTF side suffix (`.L`/`.R`) for a [`Side`], the way the deform bones are
-/// named.
-fn side_tag(side: Side) -> &'static str {
-    match side {
-        Side::Left => "L",
-        Side::Right => "R",
-    }
-}
-
-/// Fit a box **axis-aligned in the proximal bone's frame**: its orientation is
-/// the rig's (identity rotation in the link frame, exactly as a capsule rides its
-/// bone) and its half-extents are the cloud's robust (p98) spread measured along
-/// the bone axes. Bounding the cloud in the bone frame — the frame the mesh is
-/// skinned into — keeps the box on the mesh by construction, where the old
-/// point-cloud OBB drifted: a near-isotropic or flat cloud has no stable
-/// eigenframe, so its principal axes (and the box with them) span off the limb.
-/// The carapace root's basis is identity, so this reduces to a world-axis-aligned
-/// box.
-fn fit_box_bone_aligned(points: &[Vec3], span: &BoneSpan) -> (Primitive, Placement) {
-    let to_local = span.proximal_basis.inverse();
-    // Cloud into the link-local (bone) frame, pivot-relative.
-    let local: Vec<Vec3> = points
-        .iter()
-        .map(|&p| to_local * (p - span.proximal))
-        .collect();
-    let center = local.iter().copied().sum::<Vec3>() / local.len() as f32;
-    // Robust half-extent per bone axis (p98 of the centred |offset|), mirroring
-    // `fit_obb` so a few skinning-bleed verts don't balloon the box.
-    let mut proj: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    for q in &local {
-        let d = (*q - center).abs();
-        for k in 0..3 {
-            proj[k].push(d[k]);
-        }
-    }
-    let mut he = Vec3::ZERO;
-    for k in 0..3 {
-        proj[k].sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        he[k] = percentile(&proj[k], 0.98).max(1e-4);
-    }
-    (
-        Primitive::Cuboid { half_extents: he },
-        Placement {
-            center,
-            rotation: Quat::IDENTITY,
-        },
-    )
-}
-
-/// Fit a capsule stretched along the bone segment (proximal→distal) — the
-/// "red→green" capsule: it spans exactly the bone, fattened by `radius` to cover
-/// the cloud's spread perpendicular to the bone line. Orientation is the rig's
-/// (the bone direction), never the point cloud, so it can't splay off the limb the
-/// way a point-cloud box does. This is the fit for every *jointed* part; only the
-/// carapace — whose "bone" is a single point with no segment to stretch along —
-/// stays a box.
-fn fit_capsule_redgreen(points: &[Vec3], span: &BoneSpan) -> (Primitive, Placement) {
-    let pivot = span.proximal;
-    let seg = span.distal - pivot;
-    let len = seg.length();
-    let axis = if len > 1e-6 { seg / len } else { Vec3::Y };
-    // Radius = robust (p90) distance from the bone line, so a few skinning-bleed
-    // verts don't inflate it.
-    let mut perp: Vec<f32> = points
-        .iter()
-        .map(|&p| {
-            let d = p - pivot;
-            (d - axis * d.dot(axis)).length()
-        })
-        .collect();
-    perp.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let radius = percentile(&perp, 0.90).max(1e-3);
-    // The capsule spans the whole bone: its hemispherical caps (each `radius` long)
-    // reach the endpoints, so the cylinder half-length is the bone half-length less
-    // one cap. Clamp at 0 for a stub shorter than its own radius (a near-sphere).
-    let half_height = (0.5 * len - radius).max(0.0);
-    let to_local = span.proximal_basis.inverse();
-    let world_rot = if axis.dot(Vec3::Y) < -0.9999 {
-        Quat::from_axis_angle(Vec3::X, std::f32::consts::PI)
-    } else {
-        Quat::from_rotation_arc(Vec3::Y, axis)
-    };
-    (
-        Primitive::Capsule {
-            half_height,
-            radius,
-        },
-        Placement {
-            center: to_local * (0.5 * seg),
-            rotation: to_local * world_rot,
-        },
-    )
-}
-
-/// The canonical per-part collider fit, dispatched by the body plan the `PartId`
-/// already encodes: the carapace is a bone-frame box (its "bone" is a single
-/// point, no segment to stretch along), every jointed part a bone-stretched
-/// capsule. Shared by the offline bake and the editor's seed so the two can't
-/// drift.
-///
-/// Both shapes take their orientation from the rig, in the proximal bone's
-/// bind-world frame. That matters because `body.rs` consumes the [`Placement`] in
-/// the link's *rest* frame, not the bind pose the fit ran in: every
-/// world-relative-to-pivot quantity is mapped into the link frame by `basis⁻¹`
-/// (the proximal bone's bind rotation), and at spawn `body.rs` re-applies the
-/// link's rest world rotation `L`, recovering `L · basis⁻¹ · (world vector)` — the
-/// geometry as the limb actually sits, never rotated off the limb.
-pub(crate) fn fit_part(part: PartId, points: &[Vec3], span: &BoneSpan) -> (Primitive, Placement) {
-    match part {
-        PartId::Carapace => fit_box_bone_aligned(points, span),
-        PartId::Joint(_) => fit_capsule_redgreen(points, span),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Typed collider table (the offline-bake artifact)
-// ---------------------------------------------------------------------------
-
-/// One part of the baked body: which physics link it is, the dimensioned
-/// collider [`Primitive`] to build there, its [`Placement`] in the link frame,
-/// and the density mass is derived under. Mass is intentionally *not* stored —
-/// it is `primitive.mass_properties(density)`, so the artifact cannot carry a
-/// mass that disagrees with its own dimensions.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FittedPart {
-    pub part: PartId,
-    pub primitive: Primitive,
-    pub placement: Placement,
-    pub density: f32,
-}
-
-impl FittedPart {
-    /// Mass + transverse principal inertia, derived from the primitive + density.
-    pub fn mass_properties(&self) -> (f32, f32) {
-        self.primitive.mass_properties(self.density)
-    }
-
-    /// Reject a part whose dimensions, placement, or density are non-finite or
-    /// non-positive (see [`FittedBody::from_ron`]). Names the part so a bad table
-    /// points at the offending entry.
-    fn validate(&self) -> Result<(), String> {
-        let label = || format!("{:?}", self.part);
-        self.primitive
-            .validate()
-            .map_err(|e| format!("{}: {e}", label()))?;
-        if !self.placement.center.is_finite() || !self.placement.rotation.is_finite() {
-            return Err(format!("{}: non-finite placement", label()));
-        }
-        if !(self.density.is_finite() && self.density > 0.0) {
-            return Err(format!(
-                "{}: density must be finite and > 0, got {}",
-                label(),
-                self.density
-            ));
-        }
-        Ok(())
-    }
-}
-
-/// The offline-baked collider table: one [`FittedPart`] per physics link. Built
-/// by [`bake_report`] from `sally.glb` and serialized to RON by `--bake-colliders`.
-/// No runtime loader consumes it — the live body fits capsules directly in
-/// [`super::rig`] — so this is a bake artifact for offline inspection / the rl#16
-/// re-fit, not a body source. A `version` guards a stale artifact against a format
-/// that moved on, should a loader ever read it back.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FittedBody {
-    /// Artifact schema version. Bump when the meaning of a field changes so an
-    /// old `.ron` is rejected loudly instead of mis-spawned.
-    pub version: u32,
-    pub parts: Vec<FittedPart>,
-}
-
-impl FittedBody {
-    /// Current artifact schema version.
-    pub const VERSION: u32 = 1;
-
-    /// Serialize to pretty RON (the on-disk bake format).
-    pub fn to_ron(&self) -> Result<String, String> {
-        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
-            .map_err(|e| format!("serialize FittedBody: {e}"))
-    }
-
-    /// Assemble from per-part [`bake_report`] rows — drops the reasoning, keeping
-    /// just the [`FittedPart`]s the artifact stores.
-    pub fn from_reports(reports: &[PartReport]) -> Self {
-        FittedBody {
-            version: Self::VERSION,
-            parts: reports.iter().map(|r| r.fitted).collect(),
-        }
-    }
-
-    /// Parse from RON, rejecting a version mismatch *and* structurally-valid but
-    /// physically-impossible values. The table is a trust boundary — the editor
-    /// resumes from a previously-saved file (`--edit-colliders`) that may be
-    /// hand-edited or foreign — and a serde-valid table with a zero/negative/NaN
-    /// dimension parses fine yet would build a degenerate collider (a 0-radius
-    /// capsule, a mirrored box) that detonates rapier deep inside the solver. Fail
-    /// here, at the edge, with the offending part named.
-    pub fn from_ron(s: &str) -> Result<Self, String> {
-        let body: FittedBody = ron::from_str(s).map_err(|e| format!("parse FittedBody: {e}"))?;
-        if body.version != Self::VERSION {
-            return Err(format!(
-                "FittedBody version {} != expected {} — re-bake the collider table",
-                body.version,
-                Self::VERSION
-            ));
-        }
-        for fp in &body.parts {
-            fp.validate()?;
-        }
-        Ok(body)
-    }
-}
-
-/// One part's fit with the reasoning behind it: the baked [`FittedPart`], the
-/// chooser's decision (primitive + residual + shape descriptors + the rule that
-/// fired), and the bind-pose bone span the placement was solved from. Returned by
-/// [`bake_report`] so the dev bake can print a reviewable why-this-shape summary
-/// that the lean [`FittedBody`] artifact doesn't carry.
-#[derive(Clone, Debug)]
-pub struct PartReport {
-    pub fitted: FittedPart,
-    pub choice: PrimitiveChoice,
-    /// Proximal→distal bind-pose bone-span length (m) the placement derived from.
-    pub span_len: f32,
-}
-
-/// Fit the whole body from a loaded model, returning each part's [`FittedPart`]
-/// alongside the reasoning behind it. Per part: choose the primitive from its
-/// vertex cloud, solve placement from the skeleton bone span, and pair it with
-/// the hand-coded density (mass is derived from those, not stored). Parts whose
-/// cloud is too small to fit *or* whose skeleton span is missing are skipped —
-/// the body loader falls back to the hand-coded link for any part the table
-/// omits, so an incomplete fit degrades gracefully instead of spawning a hole.
-pub fn bake_report(model: &LoadedModel) -> Vec<PartReport> {
-    let by_part = model.vertices_by_part();
-    let mut out = Vec::new();
-    for (part, density) in super::body::part_densities() {
-        let Some((points, _)) = by_part.get(&part) else {
-            continue;
-        };
-        let (Some(choice), Some(span)) = (choose_primitive(points), model.bone_span(part)) else {
-            continue;
-        };
-        let (primitive, placement) = fit_part(part, points, &span);
-        out.push(PartReport {
-            fitted: FittedPart {
-                part,
-                primitive,
-                placement,
-                density,
-            },
-            choice,
-            span_len: (span.distal - span.proximal).length(),
-        });
-    }
-    out
-}
 
 #[cfg(test)]
 mod tests {
@@ -1568,71 +743,6 @@ mod tests {
         assert!(
             unmapped.is_empty(),
             "bones map to no physics part: {unmapped:?}"
-        );
-    }
-
-    /// `from_ron` is the saved-table trust boundary (the editor reads its own RON
-    /// back on resume): a serde-valid table with a non-finite or non-positive
-    /// dimension/density must be rejected, not built into a degenerate collider. A
-    /// clean part round-trips; each poisoned field fails loudly and names the part.
-    #[test]
-    fn from_ron_rejects_nonphysical_dims() {
-        let good = FittedPart {
-            part: PartId::Joint(CrabJointId::LegCoxa(Side::Left, 0)),
-            primitive: Primitive::Capsule {
-                half_height: 0.1,
-                radius: 0.05,
-            },
-            placement: Placement {
-                center: Vec3::ZERO,
-                rotation: Quat::IDENTITY,
-            },
-            density: 1.0,
-        };
-        let body = |fp: FittedPart| FittedBody {
-            version: FittedBody::VERSION,
-            parts: vec![fp],
-        };
-        // A clean table parses.
-        FittedBody::from_ron(&body(good).to_ron().unwrap()).expect("clean table parses");
-
-        // Each poisoned field is rejected.
-        let poison = [
-            Primitive::Capsule {
-                half_height: 0.1,
-                radius: 0.0,
-            }, // zero radius
-            Primitive::Capsule {
-                half_height: 0.1,
-                radius: -0.05,
-            }, // negative radius
-            Primitive::Cuboid {
-                half_extents: Vec3::new(0.1, f32::NAN, 0.1),
-            }, // NaN extent
-            Primitive::Ball { radius: 0.0 }, // zero radius
-        ];
-        for prim in poison {
-            let ron = body(FittedPart {
-                primitive: prim,
-                ..good
-            })
-            .to_ron()
-            .unwrap();
-            assert!(
-                FittedBody::from_ron(&ron).is_err(),
-                "from_ron accepted a non-physical primitive: {prim:?}"
-            );
-        }
-        // …and a bad density too.
-        let ron = body(FittedPart {
-            density: 0.0,
-            ..good
-        })
-        .to_ron()
-        .unwrap();
-        assert!(
-            FittedBody::from_ron(&ron).is_err(),
-            "from_ron accepted a zero density"
         );
     }
 
