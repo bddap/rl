@@ -76,9 +76,7 @@ pub fn joint_angle(axis_local: Vec3, parent_rot: Quat, child_rot: Quat) -> f32 {
 /// last bit onto its feet rather than starting interpenetrating the ground. The
 /// body otherwise spawns in the glTF bind-world frame (feet already near y=0), so
 /// this is a small drop, not the full standing height — that height comes from the
-/// bind pose itself now. (Was 0.3 back when the spawn pinned the leg hub at this Y
-/// and discarded the hub's true bind-world position, which slid the whole body off
-/// the cosmetic skin.)
+/// bind pose itself.
 pub const SPAWN_HEIGHT: f32 = 0.05;
 
 // ---------------------------------------------------------------------------
@@ -154,9 +152,7 @@ pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f3
 /// are Rapier's debug-render; there are no per-body meshes to cache here.
 #[derive(Resource)]
 pub struct CrabAssets {
-    /// The rig-derived body recipe (the one model): every link's joint + capsule,
-    /// read off the bind-pose skeleton once at startup. `spawn_crab` instantiates
-    /// it. `None` only when the glTF model is unavailable.
+    /// `None` only when the glTF model is unavailable.
     recipe: Option<RigRecipe>,
 }
 
@@ -171,8 +167,6 @@ impl CrabAssets {
 
 impl FromWorld for CrabAssets {
     fn from_world(_world: &mut World) -> Self {
-        // The one model: derive the whole body's geometry from the glTF bind pose
-        // once at startup. `spawn_crab` instantiates this recipe for every crab.
         let recipe = super::meshfit::model_path()
             .and_then(|p| LoadedModel::load(&p).ok())
             .and_then(|m| rig::build_recipe(&m));
@@ -180,7 +174,6 @@ impl FromWorld for CrabAssets {
     }
 }
 
-/// Marker for the crab's root carapace entity.
 #[derive(Component)]
 pub struct CrabCarapace;
 
@@ -476,10 +469,9 @@ pub fn spawn_crab(
 }
 
 /// Revolute joint for a policy-actuated link: free about `axis` (parent frame),
-/// hard-limited, with a viscous friction motor and no contact against the adjacent
+/// hard-limited, with a friction motor and no contact against the adjacent
 /// link. Coordinate 0 is the bind pose (links spawn axis-aligned), so the limits
-/// straddle 0 directly — no rest bake (the hand-coded body needed one because its
-/// flat-splay coordinate 0 sat outside the limits; the rig bind pose does not).
+/// straddle 0 directly — no rest bake needed.
 ///
 /// `RevoluteJointBuilder::new(axis)` writes `axis` into BOTH bodies' local frames,
 /// which is only correct while children spawn at identity (parent frame == child
@@ -535,9 +527,8 @@ fn capsule_collider(center: Vec3, rot: Quat, half_height: f32, radius: f32) -> C
 #[reflect(Default)]
 pub struct PivotGizmos;
 
-/// Marker sphere radius (model units): a hair larger than the eye-tip guide spheres
-/// in the collider editor, big enough to spot against the skin yet small enough not
-/// to swallow the joint it marks.
+/// Marker sphere radius (model units): big enough to spot against the skin yet
+/// small enough not to swallow the joint it marks.
 const PIVOT_MARKER_RADIUS: f32 = 0.02;
 
 /// Draw a bright sphere at every physics link's world origin — which, by

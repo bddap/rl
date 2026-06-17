@@ -8,7 +8,7 @@
 //! (`RL_DEBUG_COLLIDERS`), never as stand-in meshes.
 //!
 //! How following works: when the scene instance is ready, every deform bone is
-//! matched to a physics link by name (`bone_target`), and the bone's world
+//! matched to a physics link by name ([`super::rig::part_for_bone`]), and the bone's world
 //! pose relative to its link is captured once: `offset = link⁻¹ · bone`. Each
 //! frame after that the bone's world transform is set to `link · offset`, so
 //! bones reproduce link *motion* exactly while keeping the model's own
@@ -244,7 +244,6 @@ fn pair_bones(
             paired += 1;
         }
 
-        // `reveal_skin` shows the skin the moment `paired` flips true.
         info!(
             "crab skin paired: env {} ({} bones driven)",
             skin.env, paired
@@ -489,7 +488,6 @@ mod tests {
         Coxa,
     }
 
-    /// The single env-0 entity playing `role`.
     fn find_part(app: &mut App, role: Role) -> Entity {
         match role {
             Role::Carapace => {

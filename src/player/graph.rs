@@ -34,7 +34,6 @@ const OVERLAY_LAYER: usize = 1;
 /// Fixed y-extent of the angle plot (radians); joint coords stay within ±π.
 const ANGLE_RANGE: f32 = std::f32::consts::PI;
 
-/// Per-joint scrolling history plus the visibility toggle.
 #[derive(Resource)]
 pub struct JointGraph {
     visible: bool,
@@ -207,7 +206,6 @@ fn draw_graph(graph: Res<JointGraph>, windows: Query<&Window>, mut gizmos: Gizmo
     let left = -w / 2.0 + margin;
     let top = h / 2.0 - margin;
 
-    // angle plot, then effort plot below it.
     draw_plot(
         &mut gizmos,
         &graph.angle,

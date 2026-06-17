@@ -59,8 +59,8 @@ pub fn register_translucent(app: &mut App) {
 /// markers/colliders behind it, high enough to still read the body's surface.
 const SKIN_ALPHA: f32 = 0.4;
 
-/// Set every skinned mesh's standard material to alpha-blended `SKIN_ALPHA`. Keyed off
-/// the `SkinnedMesh` component so it touches only the crab skin, not the ground/props.
+/// Keyed off the `SkinnedMesh` component so it touches only the crab skin, not the
+/// ground/props.
 fn make_skin_translucent(
     skins: Query<&MeshMaterial3d<StandardMaterial>, With<SkinnedMesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -91,9 +91,8 @@ fn run_at_settle(world: &mut World, mut frame: Local<u32>, mut done: Local<bool>
     audit(world);
 }
 
-/// Assemble the live skinned triangle soup and run the point-in-mesh tests. Takes
-/// `&mut World` so it can resolve the `SkinnedMesh`'s joint entities against their
-/// live `GlobalTransform`s and pull the mesh asset — neither expressible as one
+/// Takes `&mut World` so it can resolve the `SkinnedMesh`'s joint entities against
+/// their live `GlobalTransform`s and pull the mesh asset — neither expressible as one
 /// system param without fighting the borrow checker over the entity indirection.
 fn audit(world: &mut World) {
     let Some((positions, triangles)) = live_skinned_soup(world) else {
@@ -333,7 +332,6 @@ fn link_skin_divergence(world: &mut World) -> Divergence {
         None => HashMap::new(),
     };
 
-    // joint → live link world position.
     let mut link_world: HashMap<CrabJointId, Vec3> = HashMap::new();
     {
         let mut q = world.query::<(&GlobalTransform, &CrabJoint)>();
@@ -460,9 +458,8 @@ fn load_bind_reference() -> Option<BindReference> {
 // Mesh attribute readers
 // ---------------------------------------------------------------------------
 
-/// Read a `[u16; 4]`-per-vertex attribute (glTF JOINTS_0). Bevy stores joint indices
-/// as `Uint16x4`; nothing else is valid for `ATTRIBUTE_JOINT_INDEX`, so a different
-/// format is a malformed mesh and yields `None`.
+/// Bevy stores joint indices as `Uint16x4`; nothing else is valid for
+/// `ATTRIBUTE_JOINT_INDEX`, so a different format is a malformed mesh and yields `None`.
 fn read_u16x4(mesh: &Mesh, attr: MeshVertexAttribute) -> Option<Vec<[u16; 4]>> {
     match mesh.attribute(attr)? {
         VertexAttributeValues::Uint16x4(v) => Some(v.clone()),
@@ -470,7 +467,6 @@ fn read_u16x4(mesh: &Mesh, attr: MeshVertexAttribute) -> Option<Vec<[u16; 4]>> {
     }
 }
 
-/// Read a `[f32; 4]`-per-vertex attribute (glTF WEIGHTS_0).
 fn read_f32x4(mesh: &Mesh, attr: MeshVertexAttribute) -> Option<Vec<[f32; 4]>> {
     match mesh.attribute(attr)? {
         VertexAttributeValues::Float32x4(v) => Some(v.clone()),

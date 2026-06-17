@@ -439,8 +439,7 @@ pub(crate) const TRUNK_BONES: [&str; 10] = [
 
 /// Carapace box from the trunk's vertex cloud: half-extents and the box centre as
 /// an offset from `center` (the leg hub the links anchor to). Using the actual
-/// shell vertices — not bone origins — covers the trunk's flesh without the old
-/// hand-tuned height clamp.
+/// shell vertices — not bone origins — covers the trunk's flesh directly.
 fn carapace_box(model: &LoadedModel, center: Vec3) -> (Vec3, Vec3) {
     let pts = model.vertices_for_bones(&TRUNK_BONES);
     if pts.len() < 4 {

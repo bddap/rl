@@ -1,9 +1,5 @@
-//! Neural network that maps observations to actions.
-//!
-//! Architecture for v1: simple MLP with shared trunk and separate
-//! policy (actor) and value (critic) heads.
-//!
-//! We'll upgrade to a transformer once the pipeline is proven.
+//! Actor-critic network for PPO: a shared MLP trunk feeding separate policy
+//! (actor) and value (critic) heads.
 
 use burn::module::Param;
 use burn::nn;
@@ -26,20 +22,18 @@ const LOG_STD_MAX: f32 = 0.5;
 /// Actor-Critic network for PPO.
 #[derive(Module, Debug)]
 pub struct CrabBrain<B: Backend> {
-    // Shared trunk
     trunk_fc1: nn::Linear<B>,
     trunk_fc2: nn::Linear<B>,
     trunk_ln1: nn::LayerNorm<B>,
     trunk_ln2: nn::LayerNorm<B>,
 
-    // Policy head (actor): outputs action means
     policy_fc: nn::Linear<B>,
 
-    // Value head (critic): outputs scalar value estimate
     value_fc1: nn::Linear<B>,
     value_fc2: nn::Linear<B>,
 
-    // Log standard deviation for the policy (learnable, not state-dependent)
+    // A free learnable parameter, not a head off the trunk: exploration spread is
+    // state-independent, so the policy can widen/narrow it globally as training pays.
     log_std: Param<Tensor<B, 1>>,
 }
 
@@ -76,13 +70,12 @@ impl<B: Backend> CrabBrain<B> {
             .with_bias(true)
             .init(device);
 
-        // Actions are absolute joint-position targets applied every physics
-        // step, so per-step noise is per-step jitter. std ≈ 0.6 (log_std -0.5)
-        // resampled each of 35 joints at 60 Hz makes the body convulse and fall
-        // before any pose-holding reward accrues — it can never learn to stand.
-        // Start near-deterministic (std ≈ 0.2) so a stable pose persists long
-        // enough to earn the height/uprightness signal; the policy can widen
-        // exploration itself via the learnable log_std if it pays off.
+        // The action is a per-step joint torque, so per-step noise is per-step
+        // jitter. A wide std (≈0.6, log_std -0.5) resampled on every joint each
+        // tick convulses the body and topples it before any pose-holding reward
+        // accrues — it can never learn to stand. Start near-deterministic (std ≈ 0.2)
+        // so a stable pose persists long enough to earn the height/uprightness
+        // signal; the policy can widen exploration itself via the learnable log_std.
         let log_std = Param::from_tensor(Tensor::full([ACTION_SIZE], LOG_STD_INIT, device));
 
         Self {
@@ -97,7 +90,6 @@ impl<B: Backend> CrabBrain<B> {
         }
     }
 
-    /// Forward pass through the shared trunk.
     fn trunk(&self, obs: Tensor<B, 2>) -> Tensor<B, 2> {
         let x = self.trunk_fc1.forward(obs);
         let x = self.trunk_ln1.forward(x);
@@ -107,13 +99,11 @@ impl<B: Backend> CrabBrain<B> {
         burn::tensor::activation::relu(x)
     }
 
-    /// Returns (action_means, action_log_std) for the policy.
-    /// Input shape: [batch, OBS_SIZE]
-    /// Output: means [batch, ACTION_SIZE], log_std [ACTION_SIZE] (clamped to [-2, 0.5])
+    /// Action means (tanh-bounded to [-1, 1]) and the log-std, pre-clamped to
+    /// [`LOG_STD_MIN`, `LOG_STD_MAX`] so downstream log-prob/entropy need not re-clamp.
     pub fn policy(&self, obs: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 1>) {
         let trunk = self.trunk(obs);
         let means = self.policy_fc.forward(trunk);
-        // Tanh to bound action means to [-1, 1]
         let means = burn::tensor::activation::tanh(means);
         let log_std = self
             .log_std
@@ -122,9 +112,7 @@ impl<B: Backend> CrabBrain<B> {
         (means, log_std)
     }
 
-    /// Returns the value estimate.
-    /// Input shape: [batch, OBS_SIZE]
-    /// Output: [batch, 1]
+    /// Critic value estimate, one scalar per batch row.
     pub fn value(&self, obs: Tensor<B, 2>) -> Tensor<B, 2> {
         let trunk = self.trunk(obs);
         let x = self.value_fc1.forward(trunk);

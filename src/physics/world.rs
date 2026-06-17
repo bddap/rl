@@ -15,7 +15,6 @@ impl Plugin for PhysicsWorldPlugin {
     }
 }
 
-/// Arena dimensions (half-extents).
 const ARENA_HALF_SIZE: f32 = 10.0;
 const GROUND_THICKNESS: f32 = 0.1;
 
@@ -26,7 +25,6 @@ fn setup_arena(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     if visuals.0 {
-        // Directional light (sun)
         commands.spawn((
             DirectionalLight {
                 shadows_enabled: true,
@@ -44,7 +42,7 @@ fn setup_arena(
         });
     }
 
-    // Ground plane — static rigid body with collider; add a mesh only when rendering.
+    // Ground plane: collider always, mesh only when rendering.
     if visuals.0 {
         commands.spawn((
             RigidBody::Fixed,

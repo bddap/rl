@@ -1,6 +1,4 @@
-//! Training session management.
-//!
-//! Manages the RL training loop integrated with the Bevy game loop.
+//! The RL training loop, integrated with the Bevy game loop as ECS systems.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -266,10 +264,8 @@ impl ObsNormalizer {
 pub type TrainBackend = Autodiff<NdArray>;
 pub type InferBackend = NdArray;
 
-/// Concrete optimizer type.
 type CrabOptimizer = OptimizerAdaptor<Adam, CrabBrain<TrainBackend>, TrainBackend>;
 
-/// CSV logger for training metrics.
 struct MetricsLogger {
     episode_file: std::fs::File,
     update_file: std::fs::File,
@@ -413,8 +409,6 @@ fn load_return_normalizer(path: &Path) -> Option<ReturnNormalizer> {
 /// `--horizon` sets the window and reads the buffers out itself.
 pub(crate) const STEPS_PER_ROLLOUT: u32 = 1024;
 
-/// The RL training state. Stored as a non-send resource because burn
-/// tensors use `OnceCell` which is not `Sync`.
 /// Per-env episode accumulators. Each env's episode runs and resets
 /// independently; pose sums (carapace height, up·Y) are averaged at episode
 /// end to quantify stance quality.
@@ -433,6 +427,8 @@ pub struct EnvEpisode {
     pub grace: u32,
 }
 
+/// Stored as a non-send resource because burn tensors use `OnceCell`, which is
+/// not `Sync`.
 pub struct TrainingState {
     pub brain: CrabBrain<TrainBackend>,
     pub config: PpoConfig,
@@ -785,7 +781,6 @@ impl TrainingState {
         slice.iter().sum::<f32>() / slice.len() as f32
     }
 
-    /// Run PPO update using the persistent Adam optimizer.
     fn ppo_update(&mut self) -> PpoMetrics {
         ppo_update_core(
             &mut self.brain,
@@ -1248,7 +1243,7 @@ pub fn brain_step(
             // the long eye-stalks (cheap height) instead of standing level — so reward
             // the carapace pose directly: only a LEVEL (up·Y → 1) and HIGH carapace
             // scores, and a tilted rear-brace is discounted by its low up·Y. (eye_sums
-            // is still gathered above, unused, while this proxy is on trial.)
+            // is gathered above but currently unused.)
             // NOTE: the height term reads s_t (this tick is pre-physics), so it
             // is one tick out of phase with the action it pairs with; the effort
             // term is correctly phased. Small, deliberately deferred — see

@@ -49,7 +49,6 @@ fn mean_merus_angle_under_torque(torque: f32, check_render: bool) -> f32 {
         assert_transforms_match_rapier(&mut app);
     }
 
-    // Gather the merus joint entities (with their parent coxa), then read angles.
     let mut pairs = Vec::new();
     for side in [Side::Left, Side::Right] {
         for leg in 0u8..4 {
@@ -285,9 +284,9 @@ fn unactuated_crab_crumples_under_load() {
          max leg-joint deflection {leg_deflection:.3} rad",
         start_y - end_y
     );
-    // The rig body spawns at model scale (~0.30 vs the old hand-coded 0.58), so the
-    // absolute sag is proportionally smaller (~7 cm here); the 0.7-rad leg-joint
-    // crumple below is the real "it yields, not a statue" check.
+    // The body is small (~0.30 m at model scale), so the absolute sag is small (~7 cm
+    // here) and a loose bar; the leg-joint crumple below is the real "it yields, not a
+    // statue" check.
     assert!(
         end_y < start_y - 0.04,
         "unactuated crab did not sag (carapace {start_y:.3} -> {end_y:.3}): the joints \
@@ -438,9 +437,9 @@ fn crab_settles_quietly_at_rest() {
         "carapace still twitching at rest: angular speed mean {ang_mean:.3} rad/s \
          (want <0.3; 12 Hz contact sits ~0.61, the 30 Hz / substeps=1 regressions ~1.5)"
     );
-    // The model-scale rig body's contact spring rings the carapace ~13 mm at rest (vs
-    // the old hand-coded body's ~3 mm); finer contact tuning for the new body is
-    // bddap/rl#20. The bar still trips on a gross regression.
+    // The contact spring rings the carapace ~13 mm at rest, so the bar sits above that
+    // with headroom; finer contact tuning is bddap/rl#20. It still trips on a gross
+    // regression.
     assert!(
         bounce < 0.018,
         "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.018; the 30 Hz \
@@ -509,10 +508,9 @@ fn claws_quiet_at_rest() {
         "claws at rest: mean worst-link linear {lin_mean:.3} m/s, angular {ang_mean:.3} rad/s"
     );
     // The sim is deterministic, so these bars fail loudly on a gross contact-spring
-    // regression. The pincers used to ring to ~0.77 rad/s here — the "wiggity whack" —
-    // but that was the proximal stub links jammed inside the carapace box; routing
-    // them out of carapace collision ([`super::body::NESTED_COLLISION`]) dropped it to
-    // ~0.20, back under the old hand-coded body's bar.
+    // regression. The pincers ring to ~0.77 rad/s here — the "wiggity whack" — when the
+    // proximal stub links are jammed inside the carapace box; routing them out of
+    // carapace collision ([`super::body::NESTED_COLLISION`]) drops it to ~0.20.
     assert!(
         lin_mean < 0.2,
         "claw links shaking at rest: mean worst-link linear speed {lin_mean:.3} m/s \
