@@ -349,8 +349,8 @@ fn drive_bones(
 #[derive(Resource, Default)]
 struct StrippedMeshes(HashSet<AssetId<Mesh>>);
 
-/// Confine every vertex's skin weights to its dominant physics part, once per
-/// mesh asset.
+/// Confine every vertex's skin weights to its dominant physics part's hinge
+/// cluster, once per mesh asset.
 ///
 /// WHY: sally.glb's skin paints cross-part bleed — many CARAPACE/shell vertices
 /// carry stray `WEIGHTS_0` on arm bones (chiefly `ClawShoulder`, whose `members`
@@ -361,13 +361,14 @@ struct StrippedMeshes(HashSet<AssetId<Mesh>>);
 /// carapace is a single rigid box and never deforms; this is purely a skinning
 /// artifact, so the fix lives entirely in the cosmetic mesh.
 ///
-/// FIX: per vertex, sum weight per part across its (≤4) lanes, find the dominant
-/// part, zero every lane outside it, and renormalize. Symmetric: an arm vertex
-/// keeps its arm weights (the limb still articulates) and loses stray carapace
-/// weight; a shell vertex keeps Carapace and loses stray arm weight (the shell
-/// stays rigid). This only touches weights, so the bind pose is pixel-identical
-/// (a vertex at rest sits at the same place regardless of which bones could move
-/// it). It also fixes the minor leg-coxa bleed, not just ClawShoulder.
+/// WHY NOT pure winner-take-all: zeroing *every* non-dominant lane also amputates
+/// the legitimate blend at an ADJACENT joint seam, welding a seam vertex rigidly to
+/// one link so it drags off the other when that link moves — the dactyl-knuckle and
+/// rear-leg/shell drag. [`strip_to_dominant_cluster`] (the per-vertex rule) keeps a
+/// lane on any part *hinged* to the dominant one, so a seam flexes, but still strips
+/// a disjoint cross-weight (and any limb lane on a carapace-dominant shell vertex, so
+/// the rigid trunk never bulges). Weights-only, so the bind pose stays pixel-identical
+/// (a vertex at rest sits at the same place regardless of which bones could move it).
 ///
 /// Runs in `Update` and waits until the mesh asset is loaded AND every joint
 /// entity has a `Name` (the scene finished spawning), since the strip maps each
@@ -417,7 +418,7 @@ fn strip_cross_part_weights(
         let new_weights: Vec<[f32; 4]> = joints
             .iter()
             .zip(&weights)
-            .map(|(j, w)| strip_to_dominant_part(*j, *w, &lane_parts))
+            .map(|(j, w)| strip_to_dominant_cluster(*j, *w, &lane_parts))
             .collect();
         mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, new_weights);
         stripped.0.insert(id);
@@ -453,15 +454,40 @@ pub(crate) fn read_f32x4(
     }
 }
 
-/// Confine one vertex's skin weights to its dominant part. `lane_parts[i]` is the
-/// part of skin-joint lane `i`; `joints`/`weights` are the vertex's (≤4)
-/// `(joint_index, weight)` lanes. Returns the rewritten weights: every lane whose
-/// joint's part ≠ the dominant part is zeroed, and the survivors are renormalized
-/// to sum to 1.0.
+/// Confine one vertex's skin weights to its dominant part *and the limb parts joined
+/// to it at a rig hinge*. `lane_parts[i]` is the part of skin-joint lane `i`;
+/// `joints`/`weights` are the vertex's (≤4) `(joint_index, weight)` lanes. Returns
+/// the rewritten weights, renormalized to sum to 1.0.
 ///
-/// The dominant part is the one with the largest summed weight across the lanes.
-/// A vertex with no weight at all is returned unchanged.
-fn strip_to_dominant_part(joints: [u16; 4], weights: [f32; 4], lane_parts: &[PartId]) -> [f32; 4] {
+/// The dominant part is the one with the largest summed weight across the lanes. A
+/// vertex with no weight at all is returned unchanged.
+///
+/// A lane survives iff its part is the dominant part or is
+/// [`adjacent`](super::rig::parts_adjacent) to it — with one asymmetry for the
+/// carapace, which alone among the parts is a single rigid box that never deforms:
+///
+/// - When a **limb joint** is dominant, keep every adjacent lane, the carapace
+///   included. Two parts that meet at a joint (claw-chain neighbours, a chain root
+///   and the carapace) share flesh the authored skin blends across the hinge;
+///   zeroing the loser there welds the seam rigidly to one link, so it drags off the
+///   other when that link moves — the #32 dactyl knuckle and the rear-leg/shell seam.
+///   Blending keeps the seam vertex on both, so it bends with the joint.
+/// - When the **carapace** is dominant (a shell vertex), keep ONLY the carapace and
+///   strip every limb lane, even an adjacent chain root's. The shell is rigid; a
+///   stray arm/leg lane there has the moving limb tug the shell into a bulge — the
+///   #262 artifact — and a shell vertex that legitimately blended would be limb-, not
+///   carapace-, dominant and is handled by the case above. So the rigid trunk is
+///   never deformed by a limb, while limb seams still flex.
+///
+/// Disjoint parts (the carapace and a distal arm bone; two different limbs) share no
+/// joint, so a cross-weight there is pure bleed and is stripped in either case. A
+/// surviving blend reproduces the renderer's bind-pose weights, so at rest the
+/// skinned surface is pixel-identical.
+fn strip_to_dominant_cluster(
+    joints: [u16; 4],
+    weights: [f32; 4],
+    lane_parts: &[PartId],
+) -> [f32; 4] {
     let part_of = |lane: usize| -> PartId {
         lane_parts
             .get(joints[lane] as usize)
@@ -488,11 +514,16 @@ fn strip_to_dominant_part(joints: [u16; 4], weights: [f32; 4], lane_parts: &[Par
         return weights; // all-zero vertex: leave it be
     };
 
-    // Keep only lanes in the dominant part.
+    // A lane is kept if it is the dominant part, or — unless the rigid carapace is
+    // what dominates — a part hinged to it. A seam vertex on a limb bends with both
+    // links; a shell vertex stays welded to the shell so no limb can deform it.
+    let keep = |p: PartId| -> bool {
+        p == dominant || (dominant != PartId::Carapace && super::rig::parts_adjacent(dominant, p))
+    };
     let mut kept = [0.0f32; 4];
     let mut kept_sum = 0.0f32;
     for lane in 0..4 {
-        if weights[lane] > 0.0 && part_of(lane) == dominant {
+        if weights[lane] > 0.0 && keep(part_of(lane)) {
             kept[lane] = weights[lane];
             kept_sum += weights[lane];
         }
@@ -519,26 +550,32 @@ mod tests {
     use super::super::{CrabSpawns, respawn_crab};
     use super::{
         BoneDrive, CrabSkin, PartId, SETTLE_FRAMES, repair_skins, reveal_skin,
-        strip_to_dominant_part,
+        strip_to_dominant_cluster,
     };
 
-    /// The strip (bddap/rl#32): after confining each vertex to its dominant part,
-    /// every surviving weight must belong to one part, the lane weights still sum to
-    /// ~1.0, and a shell vertex carrying stray arm weight no longer drives the arm.
-    /// Pure (no GPU): a hand-built lane→part map stands in for the resolved joints.
+    /// The strip (bddap/rl#32, refined for seams): a shell vertex carrying stray arm
+    /// weight no longer drives the arm (the rigid carapace can't bulge), a vertex on a
+    /// part DISJOINT from the carapace drops its stray carapace lane, and the survivors
+    /// still sum to 1.0. Adjacent-seam blending is covered separately
+    /// ([`strip_keeps_adjacent_seam_lanes_but_confines_disjoint`]). Pure (no GPU): a
+    /// hand-built lane→part map stands in for the resolved joints.
     #[test]
-    fn strip_confines_weights_to_dominant_part() {
-        let arm = PartId::Joint(CrabJointId::ClawShoulder(Side::Left));
+    fn strip_confines_disjoint_bleed_to_dominant_part() {
+        // A limb part DISJOINT from the carapace, so the cross-weight below is pure
+        // bleed (no shared hinge) and must be stripped from either side. (The chain
+        // roots ClawShoulder/LegCoxa DO hinge on the carapace — a real seam — so they'd
+        // blend; the merus is two links out and shares no joint with the shell.)
+        let arm = PartId::Joint(CrabJointId::LegMerus(Side::Left, 0));
         // Lane layout: 0,1 → Carapace; 2,3 → the arm.
         let lane_parts = [PartId::Carapace, PartId::Carapace, arm, arm];
         // Lane→part for a vertex's joint indices, used to re-check the result.
         let part_of = |joints: [u16; 4], lane: usize| lane_parts[joints[lane] as usize];
 
         // Shell vertex: dominated by carapace (0.7+0.1) with stray arm weight (0.2).
-        // The arm lane (joint index 2) must end up at zero so ClawShoulder no longer
-        // drags it, and the carapace lanes renormalize to sum to 1.
+        // The arm lanes must end up at zero so the limb no longer drags the rigid
+        // shell, and the carapace lanes renormalize to sum to 1.
         let shell_joints = [0u16, 1, 2, 3];
-        let shell = strip_to_dominant_part(shell_joints, [0.7, 0.1, 0.15, 0.05], &lane_parts);
+        let shell = strip_to_dominant_cluster(shell_joints, [0.7, 0.1, 0.15, 0.05], &lane_parts);
         assert!(
             (shell.iter().sum::<f32>() - 1.0).abs() < 1e-6,
             "weights must renormalize to 1, got {shell:?}"
@@ -563,11 +600,11 @@ mod tests {
         // Original carapace ratio (0.7 : 0.1) is preserved after renormalizing.
         assert!((shell[0] - 0.875).abs() < 1e-6 && (shell[1] - 0.125).abs() < 1e-6);
 
-        // Arm vertex: dominated by the arm (0.6+0.3) with stray carapace weight
-        // (0.1). It must keep its arm lanes (the limb still articulates) and drop
-        // the carapace lane.
+        // Arm vertex: dominated by the (disjoint) arm part (0.6+0.3) with stray
+        // carapace weight (0.1). With no shared hinge it must keep its arm lanes and
+        // drop the carapace lane.
         let arm_joints = [0u16, 2, 3, 1];
-        let arm_v = strip_to_dominant_part(arm_joints, [0.1, 0.6, 0.3, 0.0], &lane_parts);
+        let arm_v = strip_to_dominant_cluster(arm_joints, [0.1, 0.6, 0.3, 0.0], &lane_parts);
         assert!((arm_v.iter().sum::<f32>() - 1.0).abs() < 1e-6);
         for (lane, &w) in arm_v.iter().enumerate() {
             if w > 0.0 {
@@ -580,15 +617,15 @@ mod tests {
         }
         assert_eq!(
             arm_v[0], 0.0,
-            "stray carapace weight must be zeroed on the arm"
+            "stray carapace weight must be zeroed on the disjoint arm"
         );
 
         // Single-part vertex is unchanged (already sums to 1, one part).
-        let solo = strip_to_dominant_part([0, 1, 0, 0], [0.5, 0.5, 0.0, 0.0], &lane_parts);
+        let solo = strip_to_dominant_cluster([0, 1, 0, 0], [0.5, 0.5, 0.0, 0.0], &lane_parts);
         assert_eq!(solo, [0.5, 0.5, 0.0, 0.0]);
 
         // All-zero vertex is left alone (no part to dominate).
-        let empty = strip_to_dominant_part([0, 0, 0, 0], [0.0; 4], &lane_parts);
+        let empty = strip_to_dominant_cluster([0, 0, 0, 0], [0.0; 4], &lane_parts);
         assert_eq!(empty, [0.0; 4]);
     }
 
@@ -789,5 +826,245 @@ mod tests {
                 },
             )
             .expect("respawn system");
+    }
+
+    /// Two parts in the same limb chain (claw-chain neighbours, leg-chain neighbours)
+    /// and each chain root with the carapace must be adjacent; two parts on different
+    /// limbs, or the carapace with a non-root joint, must NOT be. Pins the adjacency
+    /// the strip keys off so a future chain edit can't silently re-confine a real seam
+    /// or fuse a disjoint pair.
+    #[test]
+    fn adjacency_matches_the_joint_chains() {
+        use super::super::rig::parts_adjacent;
+        let car = PartId::Carapace;
+        let coxa_r0 = PartId::Joint(CrabJointId::LegCoxa(Side::Right, 0));
+        let merus_r0 = PartId::Joint(CrabJointId::LegMerus(Side::Right, 0));
+        let carpus_r0 = PartId::Joint(CrabJointId::LegCarpus(Side::Right, 0));
+        let shoulder_r = PartId::Joint(CrabJointId::ClawShoulder(Side::Right));
+        let wrist_r = PartId::Joint(CrabJointId::ClawWrist(Side::Right));
+        let pincer_r = PartId::Joint(CrabJointId::ClawPincer(Side::Right));
+        let coxa_r1 = PartId::Joint(CrabJointId::LegCoxa(Side::Right, 1));
+
+        // Adjacent: chain roots to the carapace, and within-chain neighbours.
+        assert!(parts_adjacent(car, coxa_r0));
+        assert!(parts_adjacent(coxa_r0, car)); // symmetric
+        assert!(parts_adjacent(car, shoulder_r));
+        assert!(parts_adjacent(coxa_r0, merus_r0));
+        assert!(parts_adjacent(merus_r0, carpus_r0));
+        assert!(parts_adjacent(shoulder_r, wrist_r));
+        assert!(parts_adjacent(wrist_r, pincer_r)); // the #32 thumb seam
+
+        // NOT adjacent: the carapace to a non-root joint (the #262 bleed must stay
+        // confined), across-the-chain skips, and two unrelated limbs.
+        assert!(!parts_adjacent(car, merus_r0));
+        assert!(!parts_adjacent(car, wrist_r));
+        assert!(!parts_adjacent(car, pincer_r));
+        assert!(!parts_adjacent(coxa_r0, carpus_r0)); // skips the merus
+        assert!(!parts_adjacent(shoulder_r, pincer_r)); // skips the wrist
+        assert!(!parts_adjacent(coxa_r0, coxa_r1)); // different legs
+        assert!(!parts_adjacent(shoulder_r, coxa_r0)); // claw vs leg
+    }
+
+    /// Seam-only blending: at an ADJACENT hinge a vertex keeps both parts' lanes
+    /// (so it bends with the joint instead of rigidly dragging off one side), but a
+    /// vertex split across a NON-adjacent (disjoint) pair is still confined to its
+    /// dominant part — the #262 carapace-vs-arm bleed must not return.
+    #[test]
+    fn strip_keeps_adjacent_seam_lanes_but_confines_disjoint() {
+        let wrist = PartId::Joint(CrabJointId::ClawWrist(Side::Right));
+        let pincer = PartId::Joint(CrabJointId::ClawPincer(Side::Right));
+        let shoulder = PartId::Joint(CrabJointId::ClawShoulder(Side::Right));
+        let coxa = PartId::Joint(CrabJointId::LegCoxa(Side::Right, 3));
+        let carapace = PartId::Carapace;
+        // Lane layout: 0→wrist (hand), 1→pincer (dactyl), 2→carapace, 3→coxa, 4→shoulder.
+        let lane_parts = [wrist, pincer, carapace, coxa, shoulder];
+
+        // (a) Knuckle seam vertex: pincer dominant (0.6) but a real hand lane (0.4) —
+        // the #32 drag case. Both adjacent claw lanes survive; ratio preserved.
+        let knuckle = strip_to_dominant_cluster([1, 0, 0, 0], [0.6, 0.4, 0.0, 0.0], &lane_parts);
+        assert!((knuckle.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!(knuckle[0] > 0.0, "pincer (winner) lane kept: {knuckle:?}");
+        assert!(
+            knuckle[1] > 0.0,
+            "hand lane must survive at the adjacent seam (drag fix): {knuckle:?}"
+        );
+        assert!((knuckle[0] - 0.6).abs() < 1e-6 && (knuckle[1] - 0.4).abs() < 1e-6);
+
+        // (b) Rear-leg seam vertex: coxa dominant (0.65) with a carapace lane (0.35).
+        // The coxa hinges on the carapace (chain root), so the carapace lane survives
+        // and the vertex blends back toward the shell instead of dragging fully off it.
+        let leg_seam = strip_to_dominant_cluster([3, 2, 0, 0], [0.65, 0.35, 0.0, 0.0], &lane_parts);
+        assert!((leg_seam.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        assert!(
+            leg_seam[1] > 0.0,
+            "carapace lane must survive on a coxa-dominant seam vert: {leg_seam:?}"
+        );
+
+        // Pincer dominant with a DISJOINT carapace lane (skips wrist+shoulder, no shared
+        // hinge): the carapace lane is still zeroed — only adjacent neighbours blend.
+        let disjoint = strip_to_dominant_cluster([1, 2, 0, 0], [0.7, 0.3, 0.0, 0.0], &lane_parts);
+        assert_eq!(disjoint[1], 0.0, "disjoint carapace lane must be zeroed");
+        assert!((disjoint[0] - 1.0).abs() < 1e-6, "winner renormalized to 1");
+
+        // The #262 regression guard, the hard case: a shell vertex (carapace dominant)
+        // carrying a stray SHOULDER lane. The shoulder IS a chain root hinged to the
+        // carapace, yet because the rigid shell is what dominates, the limb lane is
+        // still stripped — the arm must never tug the trunk into a bulge. (Pincer too,
+        // which isn't even adjacent.)
+        let shell = strip_to_dominant_cluster([2, 4, 1, 0], [0.7, 0.2, 0.1, 0.0], &lane_parts);
+        assert_eq!(
+            shell[1], 0.0,
+            "adjacent shoulder lane on the shell is zeroed"
+        );
+        assert_eq!(
+            shell[2], 0.0,
+            "non-adjacent pincer lane on the shell is zeroed"
+        );
+        assert!((shell[0] - 1.0).abs() < 1e-6, "shell confined to carapace");
+    }
+
+    /// Quantitative seam audit on the real model (run with `--nocapture`): re-parses
+    /// `sally.glb` and, for every vertex that blends across a part boundary, contrasts
+    /// the old winner-take-all strip with the new cluster strip. Read off the file, so
+    /// it is independent of the Bevy spawn path.
+    ///
+    /// For each ADJACENT (winner → anchor) seam it prints the vertex count and the mean
+    /// weight the vertex keeps on its anchor (the part it sits on but does not win)
+    /// after each rule — the old rule zeroes it (drags fully off the anchor), the new
+    /// rule keeps it where the anchor is allowed to flex. Because drag distance under a
+    /// fixed joint rotation is proportional to the winning part's weight, the anchor
+    /// weight handed back IS the fractional drag removed. The carapace-as-winner rows
+    /// stay confined by design (the rigid shell never deforms), so their anchor weight
+    /// is zero under both rules — that is the #262 guarantee, not a miss. A disjoint
+    /// (non-adjacent) cross-weight must stay confined under both; the test fails if any
+    /// leaks through. Skips cleanly when the model isn't present.
+    #[test]
+    fn seam_drag_audit_on_model() {
+        use super::super::meshfit::model_path;
+        use super::super::rig::{part_for_bone, parts_adjacent};
+
+        let Some(path) = model_path() else {
+            eprintln!("seam_drag_audit_on_model: no model — skipping");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read glb");
+        let gltf = gltf::Gltf::from_slice(&bytes).expect("parse glb");
+        let blob = gltf.blob.as_deref().expect("glb blob");
+
+        // skin-joint index -> part, the same resolution the live strip does.
+        let skin = gltf.skins().next().expect("skin");
+        let names: std::collections::HashMap<usize, String> = gltf
+            .nodes()
+            .filter_map(|n| n.name().map(|nm| (n.index(), nm.to_string())))
+            .collect();
+        let lane_parts: Vec<PartId> = skin
+            .joints()
+            .map(|j| {
+                names
+                    .get(&j.index())
+                    .and_then(|nm| part_for_bone(nm))
+                    .unwrap_or(PartId::Carapace)
+            })
+            .collect();
+
+        // Summed weight on `target` across a vertex's lanes (for any weight array over
+        // the same joint indices — original or stripped).
+        let part_w = |js: [u16; 4], ws: [f32; 4], target: PartId| -> f32 {
+            (0..4)
+                .filter(|&l| lane_parts[js[l] as usize] == target)
+                .map(|l| ws[l])
+                .sum()
+        };
+        let dominant_of = |js: [u16; 4], ws: [f32; 4]| -> PartId {
+            let mut sums: Vec<(PartId, f32)> = Vec::new();
+            for l in 0..4 {
+                if ws[l] <= 0.0 {
+                    continue;
+                }
+                let p = lane_parts[js[l] as usize];
+                match sums.iter_mut().find(|(q, _)| *q == p) {
+                    Some((_, s)) => *s += ws[l],
+                    None => sums.push((p, ws[l])),
+                }
+            }
+            sums.iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .map(|(p, _)| *p)
+                .unwrap()
+        };
+
+        #[derive(Default)]
+        struct Seam {
+            verts: usize,
+            new_anchor_sum: f32, // anchor weight kept by the new rule (old rule = 0)
+        }
+        let mut seams: std::collections::HashMap<(PartId, PartId), Seam> =
+            std::collections::HashMap::new();
+        let mut disjoint_seen = 0usize; // non-adjacent cross-weights (the #262 case)
+        let mut disjoint_regressed = 0usize; // …that the new rule failed to confine
+
+        for prim in gltf.meshes().next().expect("mesh").primitives() {
+            let reader = prim.reader(|b| (b.index() == 0).then_some(blob));
+            let joints: Vec<[u16; 4]> = reader.read_joints(0).expect("joints").into_u16().collect();
+            let weights: Vec<[f32; 4]> = reader
+                .read_weights(0)
+                .expect("weights")
+                .into_f32()
+                .collect();
+            for (&j, &w) in joints.iter().zip(&weights) {
+                if w.iter().all(|&x| x <= 0.0) {
+                    continue;
+                }
+                let dom = dominant_of(j, w);
+                let new = strip_to_dominant_cluster(j, w, &lane_parts);
+                // Each OTHER part this vertex weighs on = a boundary it straddles.
+                let mut others: Vec<PartId> = Vec::new();
+                for l in 0..4 {
+                    let p = lane_parts[j[l] as usize];
+                    if w[l] > 0.0 && p != dom && !others.contains(&p) {
+                        others.push(p);
+                    }
+                }
+                for anchor in others {
+                    if parts_adjacent(dom, anchor) {
+                        let s = seams.entry((dom, anchor)).or_default();
+                        s.verts += 1;
+                        s.new_anchor_sum += part_w(j, new, anchor);
+                    } else {
+                        disjoint_seen += 1;
+                        if part_w(j, new, anchor) > 1e-6 {
+                            disjoint_regressed += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut rows: Vec<(&(PartId, PartId), &Seam)> = seams.iter().collect();
+        rows.sort_by_key(|(_, s)| std::cmp::Reverse(s.verts));
+        eprintln!("\n=== seam drag audit ({}) ===", path.display());
+        eprintln!(
+            "{:<48} {:>6} {:>16} {:>16}",
+            "seam (winner -> anchor)", "verts", "old anchor wt", "new anchor wt"
+        );
+        for ((winner, anchor), s) in &rows {
+            eprintln!(
+                "{:<48} {:>6} {:>16.4} {:>16.4}",
+                format!("{winner:?} -> {anchor:?}"),
+                s.verts,
+                0.0,
+                s.new_anchor_sum / s.verts.max(1) as f32,
+            );
+        }
+        eprintln!(
+            "\ndisjoint (non-adjacent) cross-weights seen: {disjoint_seen}; regressed (leaked): {disjoint_regressed}"
+        );
+        eprintln!("=== end seam drag audit ===\n");
+
+        // The regression gate: not one disjoint cross-weight may survive the new rule.
+        assert_eq!(
+            disjoint_regressed, 0,
+            "a disjoint (e.g. carapace-vs-distal-limb) bleed leaked through — #262 regressed"
+        );
     }
 }
