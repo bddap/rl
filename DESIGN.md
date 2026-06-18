@@ -51,31 +51,39 @@ Single crate to start. Split into modules, extract crates later if needed.
 
 ```
 src/
-  main.rs              — entry point, Bevy app setup
+  main.rs              — entry point, clap CLI, Bevy app setup; dispatches single-process modes vs the `learn` subcommand
+  play.rs              — interactive demo (policy-driven crab, orbit camera, poke/reset) + windowless render-one-PNG screenshot mode
+  debug_sliders.rs     — TEMPORARY demo-only egui physics-tuning panel (`--debug-sliders`); never wired into training/headless
+  wrist_tune.rs        — interactive wrist axis/amplitude tuner for the demo (`RL_WRIST_TUNE=1`)
   bot/
-    mod.rs             — bot module root
-    body.rs            — crab body definition (limbs, joints, colliders)
-    brain.rs           — neural network definition (burn)
-    actuator.rs        — maps NN outputs to joint motor commands
-    sensor.rs          — builds observation vector from physics state
+    mod.rs             — bot module root (`BotPlugin`)
+    body.rs            — crab body: the `CrabJointId` joint set, per-instance components, `spawn_crab` (instantiates the rig recipe)
+    rig.rs             — derives the physics body geometry from the glTF bind-pose skeleton; single source of body geometry
+    brain.rs           — actor-critic network for PPO: shared MLP trunk + policy/value heads (burn)
+    actuator.rs        — maps NN outputs to joint torques (signed couples, no position servo)
+    sensor.rs          — builds the observation vector from physics state
+    skin.rs            — optional skinned glTF model whose deform bones follow the physics links (cosmetic)
+    skin_diag.rs       — settled-pose point-in-mesh pivot audit (`--verify-pivots` / `RL_SKIN_DIAG`)
+    meshfit.rs         — glTF skeleton loader + collider-fit primitives the body is built from
+    collider_check.rs  — `--check-rest-colliders`: flags settled-pose collider interpenetration the solver is fighting
+    test_util.rs       — windowless, GPU-less physics+bot app builder (shared by sim tests and `--check-rest-colliders`)
+    reset_test.rs      — (test) pins the despawn+respawn crab reset
+    sim_truth_test.rs  — (test) pins the policy→physics→render torque path
   physics/
-    mod.rs             — physics module root
-    world.rs           — arena, gravity, physics pipeline config
-    damage.rs          — physics-based damage (impact forces → HP)
+    mod.rs             — physics module root; timestep + solver-substep constants
+    world.rs           — `PhysicsWorldPlugin`: ground plane, lighting
   player/
     mod.rs             — player module root
-    controller.rs      — 3rd person player input → character control
-    camera.rs          — 3rd person camera rig
+    graph.rs           — toggleable transparent joint angle/torque telemetry overlay for the demo (`G` / `RL_GRAPH`)
   training/
-    mod.rs             — training module root
-    session.rs         — episode management, reward calculation
-    algorithm.rs       — RL algorithm (algorithm-agnostic trait)
-    replay.rs          — experience replay buffer
-  combat/
-    mod.rs             — combat module root
-    arena.rs           — arena geometry, spawn points
-    scoring.rs         — damage tracking, round outcomes
+    mod.rs             — training module root (`TrainingPlugin`)
+    session.rs         — the RL training loop as Bevy ECS systems (single-process path)
+    algorithm.rs       — PPO support functions (GAE, clipped loss)
+    inproc.rs          — in-process, multi-threaded PPO: K rollout threads feed one learner, one process (`learn` subcommand)
 ```
+
+The player is not yet a controllable character — `player/` currently holds only the
+demo telemetry overlay. There is no `combat/` module yet (see Combat / Milestones).
 
 ### Tech Stack
 
@@ -87,16 +95,14 @@ src/
 | Neural networks      | burn                | Pure Rust, autodiff, GPU backends, transformers built-in |
 | RL algorithms        | Custom on burn      | No existing burn-rl crate; build PPO/SAC on primitives   |
 
-### Dependencies (Cargo.toml)
+### Dependencies
 
-```toml
-[dependencies]
-bevy = "0.15"
-bevy_rapier3d = "0.29"
-burn = { version = "0.20", features = ["autodiff", "ndarray", "wgpu"] }
-rand = "0.8"
-serde = { version = "1", features = ["derive"] }
-```
+The dependency set and exact version pins live in [`Cargo.toml`] — that is the single
+source of truth, deliberately not duplicated here so the two can't drift. The headline
+crates are Bevy (engine), `bevy_rapier3d` (physics), and `burn` (neural networks, on its
+`ndarray` CPU backend); see [`Cargo.toml`] for the rest and the rationale comments on each.
+
+[`Cargo.toml`]: ./Cargo.toml
 
 ## Crab Bot Body
 
