@@ -27,6 +27,18 @@ pub enum PartId {
     Joint(CrabJointId),
 }
 
+impl PartId {
+    /// The carapace is the one rigid part — a single fixed box that never deforms;
+    /// every other part is an articulated limb link. The skin strip leans on this: a
+    /// limb seam vertex may keep a lane on the rigid shell it abuts, but a shell vertex
+    /// must never keep a limb lane, or the limb would tug the rigid carapace (the #262
+    /// bleed). Naming it here keeps that asymmetry from hiding as a bare `== Carapace`
+    /// at the use site, and stays correct if a second rigid part is ever added.
+    pub fn is_rigid(self) -> bool {
+        matches!(self, PartId::Carapace)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // glTF loading: skeleton (bind-pose bone transforms) + skin (vertex weights)
 // ---------------------------------------------------------------------------
