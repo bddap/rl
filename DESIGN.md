@@ -113,30 +113,33 @@ Modeled as a Rapier `MultibodyJointSet` tree:
 
 ```
                     [Carapace]  (root, main body)
-                   /    |     \
-           [Eye_L] [Eye_R]  [Mouth]
+                   /          \
+           [Eye_L] [Eye_R]    (eye-stalks: LOCKED fixed joints, not actuated;
+            fixed   fixed       shell, mouthparts, palpi all ride the carapace)
           /                        \
    [Claw_L]                    [Claw_R]
-   upper arm ─ revolute          upper arm ─ revolute
-   forearm   ─ revolute          forearm   ─ revolute
-   pincer    ─ revolute         pincer    ─ revolute
+   shoulder ─ revolute           shoulder ─ revolute
+   wrist    ─ revolute           wrist    ─ revolute
+   pincer   ─ revolute           pincer   ─ revolute
         \                            /
-     [Leg_L1..L4]            [Leg_R1..R4]
-     each: coxa  ─ revolute (yaw)
-           femur ─ revolute (pitch)
-           tibia ─ revolute (pitch)
+     [Leg_L0..L3]            [Leg_R0..R3]
+     each: coxa   ─ revolute
+           merus  ─ revolute
+           carpus ─ revolute
 ```
 
-**Joint count:** ~35 actuated DOF
-- 8 legs × 3 joints = 24
-- 2 claws × 3 joints = 6
-- 2 eyes × 1 joint = 2
-- Mouth × 1 = 1
-- Carapace orientation relative to leg base = 2 (pitch/roll)
+**Joint count:** 30 actuated DOF (`CrabJointId::COUNT`)
+- 8 legs × 3 joints (coxa, merus, carpus) = 24
+- 2 claws × 3 joints (shoulder, wrist, pincer) = 6
 
-Every joint is a Rapier `RevoluteJoint` (the pincers included). The NN outputs a
-target torque per joint each timestep, applied directly to the joint — there is no
-velocity or position servo.
+The eye-stalks spawn as locked (fixed-joint) links: present in the physics, but
+they carry no `CrabJointId` and are invisible to the policy (they hold the reward's
+eye-height marker only). The mouth/mouthparts, shell, and palpi are not joints —
+they ride the carapace.
+
+Every actuated joint is a Rapier `RevoluteJoint` (the pincers included). The NN
+outputs a target torque per joint each timestep, applied directly to the joint —
+there is no velocity or position servo.
 
 ### Physical Properties
 
@@ -195,35 +198,32 @@ For the RL value function, a parallel head:
 
 ### Observation Space (State Vector)
 
-Per-limb proprioception (for each of ~35 joints):
-- Joint angle (1)
-- Joint angular velocity (1)
-- Motor torque applied last step (1)
+The current observation (`OBS_SIZE = CrabJointId::COUNT * 2 + 13`) is proprioception
+plus carapace body state — the enemy/combat fields below are planned, not yet built.
 
-Body state:
-- Carapace position (3) — relative to arena center
+Per-joint proprioception (for each of the 30 actuated joints):
+- Joint angle (1)
+- Signed joint angular velocity / DOF rate (1)
+
+Body state (carapace):
+- Carapace position (3) — relative to this env's spawn origin
 - Carapace orientation (4) — quaternion
 - Carapace linear velocity (3)
 - Carapace angular velocity (3)
 
-Enemy state (relative to bot):
-- Relative position (3)
-- Relative velocity (3)
-- Relative orientation (4)
+**Total observation dimension:** 30×2 + 13 = **73 floats**
 
-Combat state:
-- Own HP (1)
-- Enemy HP (1)
-- Contact forces on each body segment (per-segment scalar, ~20)
+Planned additions (not yet in `OBS_SIZE`):
 
-**Total observation dimension:** ~35×3 + 13 + 10 + 22 ≈ **150 floats**
+- Enemy state (relative to bot): relative position (3), velocity (3), orientation (4)
+- Combat state: own HP (1), enemy HP (1), per-segment contact forces (~20)
 
 ### Action Space
 
-Continuous, one float per actuated DOF:
-- ~35 joint target torques, each in [-1, 1], scaled to a joint-specific torque limit
+Continuous, one float per actuated DOF (`ACTION_SIZE = CrabJointId::COUNT`):
+- 30 joint target torques, each in [-1, 1], scaled to a joint-specific torque ceiling
 
-**Total action dimension:** ~**35 floats**
+**Total action dimension:** **30 floats**
 
 ## RL Training
 
