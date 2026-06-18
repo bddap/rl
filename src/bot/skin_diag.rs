@@ -31,7 +31,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 
 use super::body::{CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
-use super::meshfit::{PartId, mesh_signed_volume, nearest_surface_distance, winding_number};
+use super::meshfit::{MeshContainment, PartId, aabb};
 use super::skin::{read_f32x4, read_u16x4};
 
 /// Fire the audit when the render-frame counter reaches this, matching the
@@ -105,23 +105,16 @@ fn audit(world: &mut World) {
     }
 
     let (lo, hi) = aabb(&positions);
-    let signed_vol = mesh_signed_volume(&positions, &triangles);
-    let orient = if signed_vol < 0.0 { -1.0 } else { 1.0 };
-
-    // A query point against the LIVE soup: winding (normalised so inside reads +1),
-    // and the nearest-surface distance signed + for OUTSIDE. Same convention as
+    // The LIVE settled soup as a containment probe — same convention as
     // `--verify-pivots`, on the settled surface instead of the bind one.
-    let probe = |p: Vec3| -> (f32, f32, bool) {
-        let wn = winding_number(p, &positions, &triangles) * orient;
-        let d = nearest_surface_distance(p, &positions, &triangles);
-        let inside = wn > 0.5;
-        (wn, if inside { -d } else { d }, inside)
-    };
+    let live = MeshContainment::new(&positions, &triangles);
 
     // Bind-pose surface + bind-pose pivots, for the settled-vs-bind delta the
     // bind-only verifier can't show. Built from the model on disk; absent → skip the
-    // delta column rather than fail the whole audit.
+    // delta column rather than fail the whole audit. The probe is built once here so
+    // the per-joint loop reuses one orientation pass over the bind soup.
     let bind = load_bind_reference();
+    let bind_probe = bind.as_ref().map(|b| b.containment());
 
     // The 30 actuated link pivots = the marker positions for entities carrying a
     // CrabJoint (the carapace and the locked eye-stalks are reported separately).
@@ -130,14 +123,19 @@ fn audit(world: &mut World) {
         let mut q = world.query::<(&GlobalTransform, &CrabJoint)>();
         for (gt, joint) in q.iter(world) {
             let p = gt.translation();
-            let (wn, dist, inside) = probe(p);
-            let bind_dist = bind.as_ref().and_then(|b| b.pivot_signed_dist(joint.id));
+            let c = live.probe(p);
+            // Bind signed distance for the SAME joint's bind pivot (− inside), the
+            // settled-vs-bind delta column; `None` if no bind reference / no pivot.
+            let bind_dist = match (&bind, &bind_probe) {
+                (Some(b), Some(probe)) => b.pivot(joint.id).map(|piv| probe.signed_dist(piv)),
+                _ => None,
+            };
             joint_rows.push(JointRow {
                 id: joint.id,
                 world: p,
-                wn,
-                dist,
-                inside,
+                wn: c.wn,
+                dist: c.signed_dist,
+                inside: c.inside,
                 bind_dist,
             });
         }
@@ -159,13 +157,13 @@ fn audit(world: &mut World) {
         let carapace_set: Vec<Vec3> = carapace.iter(world).map(|g| g.translation()).collect();
         for gt in q.iter(world) {
             let p = gt.translation();
-            let (wn, dist, inside) = probe(p);
+            let c = live.probe(p);
             let label = if carapace_set.iter().any(|c| c.distance(p) < 1e-4) {
                 "carapace".to_string()
             } else {
                 "eye-stalk".to_string()
             };
-            other_rows.push((label, wn, dist, inside));
+            other_rows.push((label, c.wn, c.signed_dist, c.inside));
         }
     }
 
@@ -181,8 +179,8 @@ fn audit(world: &mut World) {
         &triangles,
         lo,
         hi,
-        signed_vol,
-        orient,
+        live.signed_vol(),
+        live.orient(),
         &joint_rows,
         &divergence,
         &other_rows,
@@ -417,18 +415,20 @@ fn all_body_points(world: &mut World) -> Vec<Vec3> {
 struct BindReference {
     positions: Vec<Vec3>,
     triangles: Vec<[u32; 3]>,
-    orient: f32,
     /// part → bind-pose pivot world position.
     pivots: HashMap<PartId, Vec3>,
 }
 
 impl BindReference {
-    /// Signed distance of a joint's bind pivot against the bind surface (− inside).
-    fn pivot_signed_dist(&self, id: CrabJointId) -> Option<f32> {
-        let p = *self.pivots.get(&PartId::Joint(id))?;
-        let wn = winding_number(p, &self.positions, &self.triangles) * self.orient;
-        let d = nearest_surface_distance(p, &self.positions, &self.triangles);
-        Some(if wn > 0.5 { -d } else { d })
+    /// The bind surface as a containment probe — built once per audit so the
+    /// orientation pass over the soup isn't repeated for each pivot.
+    fn containment(&self) -> MeshContainment<'_> {
+        MeshContainment::new(&self.positions, &self.triangles)
+    }
+
+    /// This joint's bind-pose pivot, if the recipe placed one.
+    fn pivot(&self, id: CrabJointId) -> Option<Vec3> {
+        self.pivots.get(&PartId::Joint(id)).copied()
     }
 }
 
@@ -440,8 +440,6 @@ fn load_bind_reference() -> Option<BindReference> {
     let model = super::meshfit::LoadedModel::load(&path).ok()?;
     let mesh = super::meshfit::load_bind_mesh(&path).ok()?;
     let recipe = super::rig::build_recipe(&model)?;
-    let signed_vol = mesh_signed_volume(&mesh.positions, &mesh.triangles);
-    let orient = if signed_vol < 0.0 { -1.0 } else { 1.0 };
     let mut pivots = HashMap::new();
     for rc in super::rig::rest_colliders(&model, &recipe) {
         pivots.insert(rc.part, rc.pivot);
@@ -449,19 +447,8 @@ fn load_bind_reference() -> Option<BindReference> {
     Some(BindReference {
         positions: mesh.positions,
         triangles: mesh.triangles,
-        orient,
         pivots,
     })
-}
-
-fn aabb(pts: &[Vec3]) -> (Vec3, Vec3) {
-    let mut lo = Vec3::splat(f32::INFINITY);
-    let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for &p in pts {
-        lo = lo.min(p);
-        hi = hi.max(p);
-    }
-    (lo, hi)
 }
 
 fn pctl(sorted: &[f32], q: f32) -> f32 {
