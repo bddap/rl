@@ -472,9 +472,24 @@ impl FittedCapsule {
     }
 }
 
+/// Perpendicular-spread percentile that sets the capsule radius. A high percentile
+/// (not the max) so a thin tail of skinning-bled vertices doesn't inflate the radius.
+/// 0.92 rather than 0.95 because the leg-coxa clouds carry a fatter outlier tail than
+/// 5%: from p90 to p95 the middle-leg (legs 1–2) coxa radius jumps ~15–20% on a bulk
+/// (p50) thickness that's near-identical across all eight legs — a fit artifact, not
+/// real flesh. That extra envelope made adjacent middle-leg coxae interpenetrate ~64mm
+/// at the settled rest pose, a penetration the solver fights into a visible body sag
+/// (`--check-rest-colliders`); trimming the tail deflates the over-fit capsules in
+/// proportion to their own tail (well-fit legs barely move), cutting that overlap ~28%
+/// and letting the body settle higher. 0.92 is the floor that stays self-consistent
+/// with the `--verify-colliders` radius-vs-spread gate: that gate measures the live
+/// radius against the cloud's p95 spread and flags it "starved" below 0.85×, so a fit
+/// percentile under ~0.90 would make a capsule fail the very gate that sized it.
+const RADIUS_PERCENTILE: f32 = 0.92;
+
 /// Fit a capsule to a point cloud:
 ///   - axis = first principal component (largest-variance direction),
-///   - radius = a high percentile of perpendicular distance to that axis
+///   - radius = [`RADIUS_PERCENTILE`] of perpendicular distance to that axis
 ///     (percentile, not max, so a few skinning-bleed outliers don't inflate it),
 ///   - segment = the axial extent shrunk by `radius` at each end, so the caps
 ///     cover the tips instead of the capsule overhanging by a full radius.
@@ -505,9 +520,10 @@ pub fn fit_capsule(points: &[Vec3]) -> Option<FittedCapsule> {
         tmax = tmax.max(t);
         perp.push((d - axis * t).length());
     }
-    // 95th-percentile radius: robust to a thin tail of bled vertices.
+    // Radius from a high perpendicular-spread percentile: robust to a tail of bled
+    // vertices (see RADIUS_PERCENTILE for why that exact percentile, not the max).
     perp.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let radius = percentile(&perp, 0.95).max(1e-4);
+    let radius = percentile(&perp, RADIUS_PERCENTILE).max(1e-4);
 
     // Pull the endpoints in by `radius` so the spherical caps land on the tips.
     // Clamp so a stubby cloud doesn't invert into a negative segment.
