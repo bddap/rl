@@ -514,11 +514,12 @@ fn strip_to_dominant_cluster(
         return weights; // all-zero vertex: leave it be
     };
 
-    // A lane is kept if it is the dominant part, or — unless the rigid carapace is
-    // what dominates — a part hinged to it. A seam vertex on a limb bends with both
-    // links; a shell vertex stays welded to the shell so no limb can deform it.
+    // A lane is kept if it is the dominant part, or — unless a rigid part (the
+    // carapace) is what dominates — a part hinged to it. A seam vertex on a limb bends
+    // with both links; a shell vertex stays welded to the shell so no limb can deform
+    // it (see `PartId::is_rigid`).
     let keep = |p: PartId| -> bool {
-        p == dominant || (dominant != PartId::Carapace && super::rig::parts_adjacent(dominant, p))
+        p == dominant || (!dominant.is_rigid() && super::rig::parts_adjacent(dominant, p))
     };
     let mut kept = [0.0f32; 4];
     let mut kept_sum = 0.0f32;
@@ -1061,6 +1062,12 @@ mod tests {
         );
         eprintln!("=== end seam drag audit ===\n");
 
+        // Keep the gate from going vacuous: if a future asset carries no disjoint
+        // bleed to confine, the `== 0` check below would pass while testing nothing.
+        assert!(
+            disjoint_seen > 0,
+            "audit saw no disjoint cross-weights — the #262 gate is vacuous"
+        );
         // The regression gate: not one disjoint cross-weight may survive the new rule.
         assert_eq!(
             disjoint_regressed, 0,
