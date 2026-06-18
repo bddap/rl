@@ -162,6 +162,14 @@ pub struct Args {
     /// Model is `CRAB_MODEL_PATH`, else the dev `sally.glb`.
     #[arg(long)]
     verify_pivots: bool,
+
+    /// DEV: spawn the crab, settle it to rest, then test every pair of body
+    /// colliders for interpenetration at the settled pose and flag any overlap the
+    /// solver is actively fighting — a collision the rig didn't suppress as a jointed
+    /// anchor or a group-filtered nested link. Those expected overlaps are reported
+    /// but never failed. Exits nonzero on any illegal one, so it gates rig changes.
+    #[arg(long)]
+    check_rest_colliders: bool,
 }
 
 /// Learner orchestration: the shared training config plus how many rollout threads
@@ -272,6 +280,13 @@ fn main() {
                 }
             }
         },
+    }
+
+    // DEV check: settle the crab and audit its rest-pose colliders for illegal
+    // interpenetration, then exit. Placed after the model preflight so a missing
+    // model fails with the message above, not a spawn panic deep in the check.
+    if args.check_rest_colliders {
+        std::process::exit(bot::collider_check::run());
     }
 
     let mode = if let Some(path) = args.screenshot.clone() {

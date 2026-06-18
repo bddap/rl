@@ -1,6 +1,7 @@
 pub mod actuator;
 pub mod body;
 pub mod brain;
+pub mod collider_check;
 pub mod meshfit;
 #[cfg(test)]
 mod reset_test;
@@ -10,7 +11,9 @@ pub mod sensor;
 mod sim_truth_test;
 pub mod skin;
 pub mod skin_diag;
-#[cfg(test)]
+// Not test-only: the `--check-rest-colliders` diagnostic ships in the binary and
+// reuses `headless_app`/`tick` to build and settle the same windowless physics
+// world the sim tests run, so one app builder serves both.
 pub(crate) mod test_util;
 
 use bevy::prelude::*;
