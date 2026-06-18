@@ -360,6 +360,20 @@ impl Plugin for DemoPlugin {
         )
         .add_systems(Update, hot_reload_policy);
 
+        // RL_WRIST_TUNE: the interactive wrist axis/amplitude tuner. It pins the body
+        // and kinematically drives the same right wrist as the claw demo, so the two
+        // are mutually exclusive — the tuner wins. When active it also borrows the
+        // arrow keys (see `WristTuneActive` below), so register it first and skip the
+        // claw demo entirely.
+        if std::env::var("RL_WRIST_TUNE").is_ok_and(|v| v.trim() == "1") {
+            // The tuner steers the axis with the arrow keys, so the orbit camera and
+            // demo controls must yield them; this marker is how they know to (mouse
+            // right-drag + comma/+/- still drive the camera).
+            app.insert_resource(WristTuneActive)
+                .add_plugins(crate::wrist_tune::WristTunePlugin);
+            return;
+        }
+
         // RL_CLAW_DEMO: the validated right-claw inspection sweep, on the demo's
         // wall-clock. The drive overwrites the wrist/pincer slots after the policy
         // wrote them (so it wins those two DOFs while the policy keeps the rest); the
@@ -381,6 +395,11 @@ impl Plugin for DemoPlugin {
         }
     }
 }
+
+/// Present only when the wrist tuner (`RL_WRIST_TUNE`) owns the arrow keys, so the
+/// orbit camera and demo controls release their arrow-key bindings to it.
+#[derive(Resource)]
+struct WristTuneActive;
 
 /// Orbit camera state. `focus` tracks the crab so it stays centered.
 #[derive(Component)]
@@ -431,6 +450,9 @@ fn orbit_camera(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     time: Res<Time>,
+    // Present iff the wrist tuner owns the arrow keys; then keyboard orbit drops the
+    // arrows (mouse right-drag still orbits, comma still yaws).
+    wrist_tune: Option<Res<WristTuneActive>>,
     carapace_q: Query<&Transform, (With<CrabCarapace>, Without<OrbitCamera>)>,
     mut cam_q: Query<(&mut OrbitCamera, &mut Transform), Without<CrabCarapace>>,
 ) {
@@ -455,18 +477,21 @@ fn orbit_camera(
 
     // Keyboard orbit; -/= zoom. Right-yaw is the comma key, not the right arrow:
     // the right arrow toggles the collider wireframes (see `demo_controls`), and
-    // mouse right-drag already covers free-look orbiting in every direction.
-    if keys.pressed(KeyCode::ArrowLeft) {
-        d_yaw += dt;
+    // mouse right-drag already covers free-look orbiting in every direction. The
+    // arrow keys go to the wrist tuner's axis controls when it's active.
+    if wrist_tune.is_none() {
+        if keys.pressed(KeyCode::ArrowLeft) {
+            d_yaw += dt;
+        }
+        if keys.pressed(KeyCode::ArrowUp) {
+            d_pitch += dt;
+        }
+        if keys.pressed(KeyCode::ArrowDown) {
+            d_pitch -= dt;
+        }
     }
     if keys.pressed(KeyCode::Comma) {
         d_yaw -= dt;
-    }
-    if keys.pressed(KeyCode::ArrowUp) {
-        d_pitch += dt;
-    }
-    if keys.pressed(KeyCode::ArrowDown) {
-        d_pitch -= dt;
     }
     if keys.pressed(KeyCode::Minus) {
         d_zoom += dt * 3.0;
@@ -580,6 +605,9 @@ fn demo_controls(
     mut poke_burst: ResMut<PokeBurst>,
     mut actions: ResMut<CrabActions>,
     mut settle: ResMut<DemoSettle>,
+    // Present iff the wrist tuner owns the arrow keys; then the keyboard collider
+    // toggle drops the right arrow (D-pad Right still toggles).
+    wrist_tune: Option<Res<WristTuneActive>>,
     // Always present in the demo: the Rapier debug-render plugin is added
     // unconditionally so this toggle works (RL_DEBUG_COLLIDERS only sets the
     // initial on/off — see main.rs).
@@ -591,7 +619,8 @@ fn demo_controls(
     // Right arrow / D-pad Right toggles the collider wireframes live. The arrow
     // keys are otherwise the orbit camera, but its right-yaw moved to the comma
     // key so this single binding isn't double-bound (mouse right-drag still orbits).
-    let mut toggle_colliders = keys.just_pressed(KeyCode::ArrowRight);
+    // The wrist tuner claims the right arrow for its axis controls when active.
+    let mut toggle_colliders = wrist_tune.is_none() && keys.just_pressed(KeyCode::ArrowRight);
     for gp in gamepads.iter() {
         reset |= gp.just_pressed(GamepadButton::South);
         poke |= gp.just_pressed(GamepadButton::West);
@@ -911,8 +940,8 @@ fn video_frame_path(base: &Path, n: u32) -> PathBuf {
 /// that actually pins the trunk. `target` is captured once, the render frame the
 /// settle completes; `None` until then.
 #[derive(Resource, Default)]
-struct PinBody {
-    target: Option<Transform>,
+pub(crate) struct PinBody {
+    pub(crate) target: Option<Transform>,
 }
 
 /// PD gains for the carapace hold. The damping (KD) terms do the real work —
@@ -933,7 +962,11 @@ const PIN_MAX_FORCE: f32 = 120.0;
 /// screenshot sweep and the interactive claw demo (both pin the body the same way;
 /// only their trigger and clock differ). Caller *adds* this onto `ExternalForce`
 /// after the actuator has written the baseline; see [`pin_body_hold`].
-fn pin_correction(target: &Transform, xform: &Transform, vel: &Velocity) -> (Vec3, Vec3) {
+pub(crate) fn pin_correction(
+    target: &Transform,
+    xform: &Transform,
+    vel: &Velocity,
+) -> (Vec3, Vec3) {
     // Rotational PD: error as the axis-angle of the rotation that takes the current
     // orientation to the target, fed back against the current angular velocity.
     let err_rot = target.rotation * xform.rotation.inverse();

@@ -4,6 +4,7 @@ mod physics;
 mod play;
 mod player;
 mod training;
+mod wrist_tune;
 
 use std::path::PathBuf;
 use std::time::Duration;
