@@ -118,4 +118,16 @@ impl<B: Backend> CrabBrain<B> {
         let x = burn::tensor::activation::relu(x);
         self.value_fc2.forward(x)
     }
+
+    /// The `(obs_dim, action_dim)` this brain's weights were built for, read off the
+    /// first trunk layer's input and the policy head's output (`Linear` weight is
+    /// `[d_input, d_output]`). After [`load_record`](burn::module::Module::load_record)
+    /// these reflect the *loaded* checkpoint, not [`OBS_SIZE`]/[`ACTION_SIZE`] — so a
+    /// caller can reject a checkpoint trained against a different rig before its
+    /// mismatched weights reach a forward pass and panic in the matmul.
+    pub fn io_dims(&self) -> (usize, usize) {
+        let [obs_dim, _hidden] = self.trunk_fc1.weight.shape().dims();
+        let [_hidden, action_dim] = self.policy_fc.weight.shape().dims();
+        (obs_dim, action_dim)
+    }
 }
