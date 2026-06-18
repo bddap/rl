@@ -70,6 +70,20 @@ fn load_brain_normalizer(
     let brain = CrabBrain::<TrainBackend>::new(device)
         .load_record(record)
         .valid();
+    // A checkpoint from a different rig (e.g. a stale 77-dim brain against the
+    // current OBS_SIZE) loads fine here but its mismatched first-layer weight would
+    // panic in the matmul at the first `policy()` call. Reject it as if it were
+    // missing — None routes to the same zero-action / keep-current fallback a missing
+    // brain takes — so a stale `checkpoints/` degrades to the rest pose instead of
+    // crashing the demo/screenshot window on launch (rl#36).
+    let (obs_dim, action_dim) = brain.io_dims();
+    if obs_dim != OBS_SIZE || action_dim != ACTION_SIZE {
+        warn!(
+            "play: checkpoint dims ({obs_dim} obs, {action_dim} act) don't match the \
+             current rig ({OBS_SIZE} obs, {ACTION_SIZE} act) — ignoring it",
+        );
+        return None;
+    }
     let mut normalizer = ObsNormalizer::new(5.0);
     let norm_path = dir.join(NORMALIZER_FILENAME);
     if norm_path.exists()
@@ -1415,5 +1429,51 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&live);
         let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// Save a brain whose first trunk layer expects `obs_dim` inputs instead of the
+    /// current `OBS_SIZE` — the on-disk shape a checkpoint from an older rig has. We
+    /// can't get one from `CrabBrain::new` (it bakes in today's `OBS_SIZE`), so swap
+    /// the `trunk_fc1` weight in the record for a `[obs_dim, HIDDEN]` tensor before
+    /// recording. This is exactly the file that used to reach the matmul and panic.
+    fn save_brain_with_obs_dim(dir: &Path, obs_dim: usize) {
+        use burn::module::{Param, ParamId};
+        std::fs::create_dir_all(dir).unwrap();
+        let device = NdArrayDevice::Cpu;
+        let mut record = CrabBrain::<TrainBackend>::new(&device).into_record();
+        let [_obs, hidden] = record.trunk_fc1.weight.shape().dims();
+        let weight = Tensor::<TrainBackend, 2>::zeros([obs_dim, hidden], &device);
+        record.trunk_fc1.weight = Param::initialized(ParamId::new(), weight);
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+        recorder.record(record, dir.join(BRAIN_STEM)).unwrap();
+    }
+
+    /// rl#36: a checkpoint built for a different `OBS_SIZE` must degrade to the
+    /// zero-action rest pose (as a missing checkpoint does), NOT panic in the matmul.
+    /// Loading must leave the policy unloaded and `act` must return zeros without ever
+    /// running the mismatched weights through a forward pass.
+    #[test]
+    fn dim_mismatched_checkpoint_falls_back_instead_of_panicking() {
+        let tmp = std::env::temp_dir();
+        let dir = tmp.join(format!("rl-dimmismatch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A stale brain expecting OBS_SIZE+4 inputs (mirrors the seen 77-vs-73 drift).
+        save_brain_with_obs_dim(&dir, OBS_SIZE + 4);
+
+        let policy = Policy::load(&dir);
+        assert!(
+            !policy.loaded,
+            "a dim-mismatched checkpoint must fall back to unloaded, not load"
+        );
+        // The real regression: this call hits the matmul for a loaded policy; with the
+        // fallback it returns zeros and never touches the mismatched weights.
+        assert_eq!(
+            policy.act(&[0.0; OBS_SIZE]),
+            [0.0; ACTION_SIZE],
+            "an unloaded policy holds the zero-action pose"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
