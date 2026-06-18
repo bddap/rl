@@ -173,7 +173,7 @@ impl Plugin for WristTunePlugin {
             .add_systems(Startup, spawn_overlay)
             // Input + overlay on the render clock (per-frame dt for the hold-to-adjust
             // rates), same as `orbit_camera`.
-            .add_systems(Update, (tune_input, update_overlay))
+            .add_systems(Update, (tune_input, update_overlay, toggle_physics))
             // Hold the body at rest: zero every action so the policy can't flail the
             // trunk, then PD-pin the carapace after the actuator writes its baseline.
             // After Think (so it wins over the policy) and before Act (so the actuator
@@ -358,6 +358,20 @@ fn tune_input(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut tune: ResMut
     }
 }
 
+/// Freeze/unfreeze the physics step on `F`. With physics live the carapace PD-pin still
+/// sags slightly under gravity, and since the hand is driven kinematically about the
+/// wrist's fixed spawn pivot, a drifting body leaves the swept hand behind. Pausing
+/// Rapier holds the whole body still for inspection; `drive_wrist` runs after writeback
+/// independent of the step, so the hand keeps sweeping while frozen.
+fn toggle_physics(keys: Res<ButtonInput<KeyCode>>, mut cfg: Query<&mut RapierConfiguration>) {
+    if !keys.just_pressed(KeyCode::KeyF) {
+        return;
+    }
+    if let Ok(mut cfg) = cfg.single_mut() {
+        cfg.physics_pipeline_active = !cfg.physics_pipeline_active;
+    }
+}
+
 /// Append the chosen values to the out file and echo the same line to stderr. Flushes
 /// (and fsyncs) immediately: the daemon may read the file the instant the owner saves,
 /// so a buffered write would race it.
@@ -408,28 +422,41 @@ fn spawn_overlay(mut commands: Commands) {
             font_size: 16.0,
             ..default()
         },
-        TextColor(Color::srgb(0.6, 1.0, 0.7)),
+        TextColor(Color::srgb(0.7, 1.0, 0.8)),
+        // Dark panel behind the text: the readout sits over the lit scene and pale
+        // carapace, where light glyphs alone washed out (the owner couldn't read it).
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
         Node {
             position_type: PositionType::Absolute,
             // Below the joint-graph label (top-left) and clear of the manual HUD
             // (top-right); the main demo HUD owns the bottom-left.
             top: Val::Px(96.0),
             left: Val::Px(12.0),
+            padding: UiRect::all(Val::Px(6.0)),
             ..default()
         },
     ));
 }
 
-fn update_overlay(tune: Res<WristTune>, mut overlay: Query<&mut Text, With<TuneOverlay>>) {
+fn update_overlay(
+    tune: Res<WristTune>,
+    cfg: Query<&RapierConfiguration>,
+    mut overlay: Query<&mut Text, With<TuneOverlay>>,
+) {
     let Ok(mut text) = overlay.single_mut() else {
         return;
     };
+    let frozen = cfg
+        .single()
+        .map(|c| !c.physics_pipeline_active)
+        .unwrap_or(false);
     let axis = tune.axis();
     **text = format!(
         "WRIST TUNER (RL_WRIST_TUNE)\n\
          amplitude: {amp:.1} deg   (max {max:.1})\n\
          axis: ({x:.3}, {y:.3}, {z:.3})   az {az:.1}  el {el:.1}   snap: {snap}\n\
-         [ / ] amplitude    arrows: az/el    X Y Z: snap world axis    B: snap bend_axis\n\
+         physics: {phys}\n\
+         [ / ] amplitude    arrows: az/el    X Y Z: snap world    B: snap bend_axis    F: freeze\n\
          Enter: save to {out}",
         amp = tune.amplitude.to_degrees(),
         max = tune.max_amp.to_degrees(),
@@ -439,6 +466,11 @@ fn update_overlay(tune: Res<WristTune>, mut overlay: Query<&mut Text, With<TuneO
         az = tune.az.to_degrees(),
         el = tune.el.to_degrees(),
         snap = tune.snap.label(),
+        phys = if frozen {
+            "FROZEN (F)"
+        } else {
+            "live (F to freeze)"
+        },
         out = tune.out_path.display(),
     );
 }
