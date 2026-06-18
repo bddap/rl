@@ -431,6 +431,28 @@ pub enum EnvPhase {
     Settling { grace: u32 },
 }
 
+/// A transition whose action has been chosen and obs/value/effort captured, but
+/// whose reward and end need NEXT tick's post-physics pose to finalize.
+///
+/// The reward for taking `aₜ` in `sₜ` must reflect the pose `aₜ` *produced*,
+/// `h(s_{t+1})` — but the schedule is Sense → Think (`brain_step`) → Act →
+/// physics, so when `brain_step` runs at tick `t` the carapace it can read is
+/// still `sₜ` (physics hasn't integrated `aₜ` yet). So everything known at tick
+/// `t` is stashed here and the transition is completed at tick `t+1`, when
+/// `h(s_{t+1})` is the carapace reading, pairing each action's effort with the
+/// height change that same action caused (issue #15). The effort tax was already
+/// phased to `aₜ`, so it travels here unchanged.
+#[derive(Clone)]
+struct Pending {
+    obs: [f32; OBS_SIZE],
+    action: [f32; ACTION_SIZE],
+    value: NormalizedValue,
+    log_prob: f32,
+    /// `K·Σ|aᵢ|^L` for this action — the reward's tax term, already correctly
+    /// phased to `aₜ`. Finalization adds the pose term `h(s_{t+1})·u(s_{t+1})`.
+    effort: f32,
+}
+
 /// Per-env episode accumulators. Each env's episode runs and resets
 /// independently; pose sums (carapace height, up·Y) are averaged at episode
 /// end to quantify stance quality.
@@ -442,6 +464,11 @@ pub struct EnvEpisode {
     pub upright_sum: f32,
     pub sq_angvel_sum: f32,
     pub phase: EnvPhase,
+    /// Tick `t`'s chosen action awaiting tick `t+1`'s post-physics pose to become
+    /// a finalized [`Transition`] (issue #15). `None` outside a live recording
+    /// stride — before the first action of an episode, and after its last action
+    /// is finalized or dropped at a reset/rescue boundary.
+    pending: Option<Pending>,
 }
 
 /// Stored as a non-send resource because burn tensors use `OnceCell`, which is
@@ -1226,89 +1253,119 @@ pub fn brain_step(
     // RAW outputs, not the clamped actions the sim ran.
     let efforts: Vec<f32> = raw_action_arrays.iter().map(action_effort).collect();
 
-    // Per-env reward, termination, rollout push, and episode bookkeeping.
+    // Per-env: finalize the PREVIOUS tick's pending transition with this tick's
+    // post-physics pose, then stash this tick's action as the next pending. The
+    // reward for taking `aₜ` lands on the pose `aₜ` produced — `h(s_{t+1})`, the
+    // carapace reading one tick later — so each action's effort and its height
+    // change occupy the SAME transition (issue #15). Termination is judged on the
+    // same post-physics pose, for the same reason.
     for e in 0..n {
-        // No transitions while the env is settling into its start pose (or, as
-        // a guard, if its crab is somehow absent this tick).
+        // A pending exists only across a live recording stride, so an env that is
+        // settling (or whose crab is momentarily absent) has none to finalize and
+        // nothing to stash — the policy is holding the rest pose, not acting.
         if matches!(training.envs[e].phase, EnvPhase::Settling { .. }) || poses[e].is_none() {
             continue;
         }
-        // Does the episode end this tick? Three paths: rescued (no transition),
-        // true terminal (done), truncation (cut by the step cap).
-        let episode_ended = if rescued_envs.contains(&e) {
-            // Rescued: the crab went non-finite and was force-respawned this tick
-            // (rescue runs .before(Sense)), so every pose read above is the FRESH
-            // crab back at spawn, not the state the last action produced.
-            // Recording it would credit a blow-up with the spawn pose's height —
-            // a positive reward on a failure — so push nothing. Instead mark the
-            // previously recorded step terminal: it was the real final step
-            // before the blow-up, and leaving it done=false would let GAE
-            // bootstrap it across the reset seam from the NEXT episode's value.
-            // If this episode recorded nothing yet (rescued during settle), there
-            // is no step to mark and no episode to log.
-            if training.envs[e].steps > 0 {
-                if let Some(last) = training.rollouts[e].transitions.last_mut() {
-                    last.end = StepEnd::Terminal;
-                }
+
+        // Finalize the action chosen last tick using this tick's pose. Three
+        // outcomes: rescued (the action drove the body non-finite — a failure),
+        // true terminal (a survival guard tripped on the post-physics pose), or a
+        // normal step (continues / truncated-at-cap).
+        let episode_ended = if let Some(pending) = training.envs[e].pending.take() {
+            if rescued_envs.contains(&e) {
+                // The pending action's result went non-finite and was force-
+                // respawned this tick (rescue runs .before(Sense)), so the pose
+                // read above is the FRESH spawn, not what the action produced.
+                // Finalize the action as the episode's terminal step but with a
+                // ZERO pose term: a blow-up is a failure, and crediting it the
+                // spawn pose's height would pay a positive reward for it (the same
+                // hazard the pre-deferral rescue path guarded against). The effort
+                // tax still applies — it priced the action, not its result.
+                let reward = compute_reward(0.0, pending.effort);
+                training.rollouts[e].push(Transition {
+                    obs: pending.obs,
+                    action: pending.action,
+                    reward,
+                    value: pending.value,
+                    log_prob: pending.log_prob,
+                    end: StepEnd::Terminal,
+                });
+                let ep = &mut training.envs[e];
+                ep.reward += reward;
+                ep.steps += 1;
+                // No finite pose to fold into the stance averages.
                 true
             } else {
-                false
+                let (height, upright) = poses[e].expect("poses[e].is_none() handled above");
+                // Carapace pose reward: world height scaled by uprightness. The earlier
+                // eye-tip-height proxy was gamed — the policy reared the body up to lift
+                // the long eye-stalks (cheap height) instead of standing level — so reward
+                // the carapace pose directly: only a LEVEL (up·Y → 1) and HIGH carapace
+                // scores, and a tilted rear-brace is discounted by its low up·Y. (eye_sums
+                // is gathered above but currently unused.) This is `h(s_{t+1})` — the pose
+                // the pending action produced — so it is now in phase with that action.
+                let reward = compute_reward(height * upright.max(0.0), pending.effort);
+                // Termination is survival guards only — jumping, flipping, and
+                // any other strategy the policy invents are legitimate solutions
+                // (owner call: emergent behavior is the point). The height band
+                // is sim sanity (clipped through the floor / left the playfield),
+                // not a behavior bound. The blowup check only catches a genuine
+                // numerical explosion before the solver NaNs and Rapier panics the
+                // whole app; the threshold is high because direct torque is bounded
+                // (no acceleration-motor energy pump), so ordinary vigorous,
+                // limb-flinging motion is legal — only a part moving at clearly
+                // unphysical speed ends the episode.
+                let blowing_up = max_speeds[e] > 100.0 || !height.is_finite();
+                let done = !(0.02..=50.0).contains(&height) || blowing_up;
+                // The step cap is a TRUNCATION, not a failure: a crab still standing
+                // at the cap was cut short, so GAE must bootstrap its value rather
+                // than learn the cap is a dead end (see StepEnd::Truncated).
+                let truncated = !done && training.envs[e].steps > 1500;
+
+                let end = if done {
+                    StepEnd::Terminal
+                } else if truncated {
+                    StepEnd::Truncated
+                } else {
+                    StepEnd::Continues
+                };
+                training.rollouts[e].push(Transition {
+                    obs: pending.obs,
+                    action: pending.action,
+                    reward,
+                    value: pending.value,
+                    log_prob: pending.log_prob,
+                    end,
+                });
+
+                let ep = &mut training.envs[e];
+                ep.reward += reward;
+                ep.steps += 1;
+                ep.height_sum += height;
+                ep.upright_sum += upright;
+                ep.sq_angvel_sum += sq_angvels[e];
+
+                done || truncated
             }
         } else {
-            let (height, upright) = poses[e].expect("poses[e].is_none() handled above");
-            // Carapace pose reward: world height scaled by uprightness. The earlier
-            // eye-tip-height proxy was gamed — the policy reared the body up to lift
-            // the long eye-stalks (cheap height) instead of standing level — so reward
-            // the carapace pose directly: only a LEVEL (up·Y → 1) and HIGH carapace
-            // scores, and a tilted rear-brace is discounted by its low up·Y. (eye_sums
-            // is gathered above but currently unused.)
-            // NOTE: the height term reads s_t (this tick is pre-physics), so it
-            // is one tick out of phase with the action it pairs with; the effort
-            // term is correctly phased. Small, deliberately deferred — see
-            // https://github.com/bddap/rl/issues/15.
-            let reward = compute_reward(height * upright.max(0.0), efforts[e]);
-            // Termination is survival guards only — jumping, flipping, and
-            // any other strategy the policy invents are legitimate solutions
-            // (owner call: emergent behavior is the point). The height band
-            // is sim sanity (clipped through the floor / left the playfield),
-            // not a behavior bound. The blowup check only catches a genuine
-            // numerical explosion before the solver NaNs and Rapier panics the
-            // whole app; the threshold is high because direct torque is bounded
-            // (no acceleration-motor energy pump), so ordinary vigorous,
-            // limb-flinging motion is legal — only a part moving at clearly
-            // unphysical speed ends the episode.
-            let blowing_up = max_speeds[e] > 100.0 || !height.is_finite();
-            let done = !(0.02..=50.0).contains(&height) || blowing_up;
-            // The step cap is a TRUNCATION, not a failure: a crab still standing
-            // at the cap was cut short, so GAE must bootstrap its value rather
-            // than learn the cap is a dead end (see StepEnd::Truncated).
-            let truncated = !done && training.envs[e].steps > 1500;
+            // No pending yet: the first recording tick of an episode only chooses
+            // an action (stashed below); its result, and thus its transition,
+            // arrives next tick.
+            false
+        };
 
-            let end = if done {
-                StepEnd::Terminal
-            } else if truncated {
-                StepEnd::Truncated
-            } else {
-                StepEnd::Continues
-            };
-            training.rollouts[e].push(Transition {
+        // Stash this tick's action to finalize next tick — but only if the env is
+        // still recording (a just-ended env is resetting below, and a rescued env
+        // is being respawned). Settling/absent envs already `continue`d above.
+        if !episode_ended && matches!(training.envs[e].phase, EnvPhase::Recording) {
+            training.envs[e].pending = Some(Pending {
                 obs: obs_arrays[e],
                 action: action_arrays[e],
-                reward,
                 value: values[e],
                 log_prob: log_probs[e],
-                end,
+                effort: efforts[e],
             });
-
-            let ep = &mut training.envs[e];
-            ep.reward += reward;
-            ep.steps += 1;
-            ep.height_sum += height;
-            ep.upright_sum += upright;
-            ep.sq_angvel_sum += sq_angvels[e];
-
-            done || truncated
-        };
+        }
 
         if episode_ended {
             let ep = &training.envs[e];
@@ -1965,6 +2022,114 @@ mod tests {
             after_set, rescued_set,
             "rescued env was respawned twice in one tick (issue #16): reset_crab \
              replaced the rescue's crab instead of leaving it alone"
+        );
+
+        let _ = std::fs::remove_dir_all(&checkpoint_dir);
+    }
+
+    /// Issue #15: each action's reward and the height change it produced must
+    /// occupy the SAME transition. The schedule is Sense → Think (`brain_step`) →
+    /// Act → physics, so the carapace `brain_step` reads at tick `t` is `sₜ` — the
+    /// state BEFORE this tick's action integrates. The reward for taking `aₜ` must
+    /// reflect the pose `aₜ` produced, `h(s_{t+1})`, read one tick later. The fix
+    /// defers each transition a tick, so the height read at tick `t+1` is glued to
+    /// the action chosen at tick `t`.
+    ///
+    /// This pins the phase at the unambiguous seam — a terminal. We hand-drive two
+    /// ticks: tick A chooses action `act_a` at a live height; then we drop the
+    /// carapace below the kill floor so tick B reads `h < 0.02` and terminates. The
+    /// terminal that the kill-floor height produces must carry `act_a` (the prior
+    /// tick's action — the one whose result that height IS), not tick B's action.
+    /// Under the pre-fix same-tick coupling the terminal carried tick B's action,
+    /// so `terminal.action == act_a` is exactly what the phase fix buys.
+    #[test]
+    fn height_reward_pairs_with_the_action_that_produced_it() {
+        let checkpoint_dir =
+            std::env::temp_dir().join(format!("rl_test_phase15_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&checkpoint_dir);
+        let mut app = headless_training_app(&checkpoint_dir);
+
+        // Settle past grace and record a few real steps so the env is Recording
+        // with a pending already primed (so tick A below is a steady-state tick).
+        for _ in 0..(RESET_GRACE_TICKS + 8) {
+            app.update();
+        }
+        assert!(
+            matches!(
+                app.world().non_send_resource::<TrainingState>().envs[0].phase,
+                EnvPhase::Recording
+            ),
+            "env must be recording before the hand-driven ticks"
+        );
+
+        // Tick A (carapace at its live, above-floor height): Sense → brain_step.
+        // This finalizes the pre-existing pending and stashes pending_A — whose
+        // action is what brain_step just wrote to CrabActions.
+        app.world_mut()
+            .run_system_once(crate::bot::sensor::build_observation)
+            .expect("build observation A");
+        app.world_mut()
+            .run_system_once(brain_step)
+            .expect("brain_step A");
+        let act_a = app.world().resource::<CrabActions>().envs[0];
+
+        // Drop the carapace below the kill floor (0.02 m) so tick B reads a
+        // terminal height. With physics not stepped here, this is the exact pose
+        // tick B's brain_step sees.
+        {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&mut Transform, With<CrabCarapace>>();
+            let mut t = q.single_mut(app.world_mut()).expect("carapace");
+            t.translation.y = -1.0;
+        }
+
+        let transitions_before = app.world().non_send_resource::<TrainingState>().rollouts[0].len();
+
+        // Tick B: Sense → brain_step. h(s_B) = -1 < 0.02 finalizes pending_A as a
+        // terminal. brain_step also writes tick B's own action — capture it to
+        // prove the terminal carries act_a, not act_b.
+        app.world_mut()
+            .run_system_once(crate::bot::sensor::build_observation)
+            .expect("build observation B");
+        app.world_mut()
+            .run_system_once(brain_step)
+            .expect("brain_step B");
+        let act_b = app.world().resource::<CrabActions>().envs[0];
+
+        let st = app.world().non_send_resource::<TrainingState>();
+        let last = st.rollouts[0]
+            .transitions
+            .last()
+            .expect("a transition was pushed");
+
+        // Exactly one transition pushed at tick B (the finalized pending_A).
+        assert_eq!(
+            st.rollouts[0].len(),
+            transitions_before + 1,
+            "tick B finalizes exactly the one pending transition"
+        );
+        assert_eq!(
+            last.end,
+            StepEnd::Terminal,
+            "the sub-floor height read at tick B must terminate the transition"
+        );
+        // The discriminator only means something if the two actions differ; with
+        // independent sampling on different observations they almost surely do.
+        assert_ne!(
+            act_a, act_b,
+            "consecutive sampled actions differ, so the pairing below is decisive"
+        );
+        assert_eq!(
+            last.action, act_a,
+            "the terminal height (read at tick B) is paired with act_a — the tick-A \
+             action whose physics result that height is — not tick B's action; this \
+             is the one-tick phase the fix restores (issue #15)"
+        );
+        // The env resets after a terminal — no pending may straddle the reset.
+        assert!(
+            st.envs[0].pending.is_none(),
+            "a terminated env carries no pending into its reset"
         );
 
         let _ = std::fs::remove_dir_all(&checkpoint_dir);
