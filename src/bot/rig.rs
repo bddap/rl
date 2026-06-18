@@ -239,6 +239,48 @@ pub fn part_for_bone(name: &str) -> Option<PartId> {
     Some(member_map().get(name).copied().unwrap_or(PartId::Carapace))
 }
 
+/// Unordered adjacency over the physics parts, derived from the joint graph — the
+/// pairs of parts that meet at a hinge a skin vertex may legitimately blend across.
+/// Two parts are adjacent iff their links are joined in the rig: consecutive joints
+/// in a limb chain (the parent/child kinematic link), and each chain's *first* joint
+/// with [`PartId::Carapace`], since that link hangs off the carapace root (see
+/// [`build_recipe`], where a chain's first link's parent is `None` = the carapace).
+/// Both `(a, b)` and `(b, a)` are present, so the lookup is a plain `contains`.
+///
+/// The skin weight strip ([`super::skin`]) keeps both parts' lanes at an adjacent
+/// seam — a vertex spanning a hinge must bend with both links, not rigidly drag with
+/// one — but still zeroes a lane on a NON-adjacent (spatially disjoint) part, so the
+/// carapace-vs-arm bleed it fixes stays fixed. This is the one place that knows which
+/// seams are real, and it reads the same [`joint_specs`] decomposition the body
+/// spawns from, so it cannot disagree with the rig about which links are joined.
+fn part_adjacency() -> &'static std::collections::HashSet<(PartId, PartId)> {
+    static ADJ: OnceLock<std::collections::HashSet<(PartId, PartId)>> = OnceLock::new();
+    ADJ.get_or_init(|| {
+        let mut adj = std::collections::HashSet::new();
+        let mut link = |a: PartId, b: PartId| {
+            adj.insert((a, b));
+            adj.insert((b, a));
+        };
+        for chain in joint_specs() {
+            // The chain's first link hangs off the carapace root.
+            if let Some(first) = chain.first() {
+                link(PartId::Carapace, PartId::Joint(first.id));
+            }
+            // Consecutive joints share a kinematic parent/child link.
+            for pair in chain.windows(2) {
+                link(PartId::Joint(pair[0].id), PartId::Joint(pair[1].id));
+            }
+        }
+        adj
+    })
+}
+
+/// Whether two physics parts meet at a rig hinge (see [`part_adjacency`]). A part is
+/// not adjacent to itself; the strip only consults this for two *distinct* parts.
+pub fn parts_adjacent(a: PartId, b: PartId) -> bool {
+    part_adjacency().contains(&(a, b))
+}
+
 /// Build the whole-body recipe from the model's bind pose, or `None` if the model
 /// lacks the expected bones or carries a non-finite bind transform.
 pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
