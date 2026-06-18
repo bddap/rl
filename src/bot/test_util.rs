@@ -1,13 +1,13 @@
-//! Shared harness for sim-level tests: a windowless, GPU-less app that runs
-//! the real physics + bot plugins one fixed tick per `app.update()`.
+//! Windowless, GPU-less app that runs the real physics + bot plugins one fixed tick
+//! per `app.update()`. Shared by the sim-level tests AND the shipped
+//! `--check-rest-colliders` diagnostic ([`super::collider_check`]), so both build and
+//! settle the identical physics world from one source.
 
 use std::time::Duration;
 
 use bevy::prelude::*;
-use bevy_rapier3d::plugin::context::RapierRigidBodySet;
 use bevy_rapier3d::prelude::*;
 
-use super::body::CrabBodyPart;
 use super::{BotPlugin, NumEnvs};
 use crate::Visuals;
 use crate::physics::PhysicsWorldPlugin;
@@ -60,7 +60,12 @@ pub fn tick(app: &mut App, n: u32) {
 
 /// Render truthfulness at the transform level: every crab body part's bevy
 /// `Transform` (what the mesh renders at) must equal rapier's rigid-body pose.
+#[cfg(test)]
 pub fn assert_transforms_match_rapier(app: &mut App) {
+    use bevy_rapier3d::plugin::context::RapierRigidBodySet;
+
+    use super::body::CrabBodyPart;
+
     let mut parts_q = app
         .world_mut()
         .query_filtered::<(Entity, &Transform, &RapierRigidBodyHandle), With<CrabBodyPart>>();
