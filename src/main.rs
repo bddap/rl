@@ -630,29 +630,23 @@ fn verify_pivots() -> i32 {
     let pos = &mesh.positions;
     let tris = &mesh.triangles;
 
-    let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
-    for p in pos {
-        lo = lo.min(*p);
-        hi = hi.max(*p);
-    }
+    let (lo, hi) = bot::meshfit::aabb(pos);
 
-    // Global winding sign from the soup's signed volume: makes interior points read
-    // +1 whatever the triangle order, without trusting any single "is this inside?"
-    // probe. The crab's vertex centroid sits in a cavity (legs splayed, hollow
-    // shell), so it reads ~0 and is useless as the orientation reference — the
-    // earlier bug. The carapace pivot (leg-hub centroid, deep in the thorax) is the
-    // honest interior probe, used below only to *report* the self-check, not to set
-    // the sign.
-    let signed_vol = bot::meshfit::mesh_signed_volume(pos, tris);
-    let orient = if signed_vol < 0.0 { -1.0 } else { 1.0 };
-
-    // A query point: its winding number normalised so inside is +1 (inside if
-    // wn>0.5), nearest surface distance, and that distance signed (+ = OUTSIDE).
-    let probe = |p: Vec3| -> (f32, f32, bool) {
-        let wn = bot::meshfit::winding_number(p, pos, tris) * orient;
-        let d = bot::meshfit::nearest_surface_distance(p, pos, tris);
-        let inside = wn > 0.5;
-        (wn, if inside { -d } else { d }, inside)
+    // Mesh-containment probe over the bind soup — the same single path the skin-diag
+    // audit uses. Its `orient` is the global winding sign from the soup's signed
+    // volume: makes interior points read +1 whatever the triangle order, without
+    // trusting any single "is this inside?" probe. The crab's vertex centroid sits in
+    // a cavity (legs splayed, hollow shell), so it reads ~0 and is useless as the
+    // orientation reference — the earlier bug. The carapace pivot (leg-hub centroid,
+    // deep in the thorax) is the honest interior probe, used below only to *report*
+    // the self-check, not to set the sign.
+    let soup = bot::meshfit::MeshContainment::new(pos, tris);
+    let signed_vol = soup.signed_vol();
+    let orient = soup.orient();
+    // Adapt the verdict to this reporter's `(wn, signed_dist, inside)` table layout.
+    let probe = |p: Vec3| {
+        let c = soup.probe(p);
+        (c.wn, c.signed_dist, c.inside)
     };
 
     // Self-checks. Interior reference = the leg-hub centroid (the carapace pivot the
