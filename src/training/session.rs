@@ -1520,11 +1520,10 @@ pub fn reset_crab(
     spawns: Res<CrabSpawns>,
     parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>,
 ) {
-    // Optional randomized-start curriculum (`RL_RANDOM_INIT`, off by default — the
-    // running A+B retrain binary doesn't set it). Each respawning env gets a fresh
-    // random orientation so the policy learns to stand (and right itself) from varied,
-    // even inverted, starts instead of memorising the one bind pose.
-    let randomize = std::env::var_os("RL_RANDOM_INIT").is_some();
+    // Randomized-start curriculum: each respawning env gets a fresh random orientation
+    // so the policy learns to stand (and right itself) from varied, even inverted,
+    // starts instead of memorising the one bind pose. This is training-only — reset_crab
+    // never runs in the demo (no `TrainingState`), which respawns upright.
     for (e, ep) in training.envs.iter_mut().enumerate() {
         if matches!(ep.phase, EnvPhase::AwaitingRespawn) {
             ep.phase = EnvPhase::Settling {
@@ -1534,11 +1533,7 @@ pub fn reset_crab(
                 *v = [0.0; ACTION_SIZE];
             }
             let origin = spawns.0.get(e).copied().unwrap_or(Vec3::ZERO);
-            let init_rotation = if randomize {
-                random_spawn_rotation(&mut thread_rng())
-            } else {
-                Quat::IDENTITY
-            };
+            let init_rotation = random_spawn_rotation(&mut thread_rng());
             respawn_crab_rotated(
                 &mut commands,
                 &assets,
