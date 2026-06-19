@@ -75,6 +75,10 @@ impl Plugin for BotPlugin {
 
         app.init_resource::<actuator::CrabActions>()
             .init_resource::<sensor::CrabObservation>()
+            // Always present so `build_observation` (shared with the demo) can read
+            // it; the training plugin populates a real target per env, the demo
+            // leaves it empty (a zero target vector in the obs).
+            .init_resource::<sensor::CrabTargets>()
             .init_resource::<CrabSpawns>()
             .init_resource::<body::CrabAssets>()
             .add_message::<CrabRescued>()
@@ -182,10 +186,12 @@ fn spawn_initial_crabs(
     mut spawns: ResMut<CrabSpawns>,
     mut actions: ResMut<actuator::CrabActions>,
     mut obs: ResMut<sensor::CrabObservation>,
+    mut targets: ResMut<sensor::CrabTargets>,
 ) {
     let n = num_envs.0;
     actions.resize(n);
     obs.resize(n);
+    targets.resize(n);
     for env in 0..n {
         let origin = grid_offset(env, n);
         spawns.0.push(origin);

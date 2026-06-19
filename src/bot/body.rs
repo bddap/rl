@@ -188,6 +188,13 @@ pub struct CrabCarapace;
 #[derive(Component)]
 pub struct CrabEyeTip;
 
+/// Marker on each claw's movable-finger link (the [`CrabJointId::ClawPincer`]
+/// link — the dactyl that folds off the palm). The target-touch reward reads
+/// these links' world positions as the crab's reach effectors, so it locates them
+/// by marker rather than re-deriving "which link is the claw tip" from joint ids.
+#[derive(Component)]
+pub struct CrabClawTip;
+
 /// Marker applied to ALL crab body parts (carapace + limb segments).
 #[derive(Component)]
 pub struct CrabBodyPart;
@@ -525,6 +532,10 @@ pub fn spawn_crab(
                 id,
                 axis_local: link.axis_local,
             });
+            // The movable-finger link is a claw tip (see [`CrabClawTip`]).
+            if matches!(id, CrabJointId::ClawPincer(_)) {
+                ec.insert(CrabClawTip);
+            }
         }
         // Grippy feet: the distal leg bone (`004`) is what plants on the ground.
         if link.bone.starts_with("Def_leg") && link.bone.contains(".004.") {
