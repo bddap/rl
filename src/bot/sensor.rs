@@ -11,7 +11,10 @@ use super::body::{CrabCarapace, CrabEnvId, CrabJoint, CrabJointId, joint_angle};
 /// Total observation size.
 /// Per-joint: 2 floats (joint_angle, signed joint DOF velocity)
 /// Body: 3 (pos) + 4 (quat) + 3 (linvel) + 3 (angvel) = 13
-pub const OBS_SIZE: usize = CrabJointId::COUNT * 2 + 13;
+/// Target: 3 (the touch target's position in the carapace's local frame) — the
+/// policy can only reach a target it can perceive, so the reach goal is part of
+/// the observation. See [`CrabTargets`].
+pub const OBS_SIZE: usize = CrabJointId::COUNT * 2 + 13 + 3;
 
 /// Resource holding the current observation vector for each environment.
 #[derive(Resource, Default)]
@@ -26,8 +29,32 @@ impl CrabObservation {
     }
 }
 
+/// The per-env touch target: a point in WORLD space the crab is rewarded for
+/// reaching with a claw tip (see the target-touch reward in `training::session`).
+/// Owned by the training plugin, which respawns a fresh target each episode; the
+/// observation reads it to tell the policy where to reach. Empty / `None` outside
+/// training (the demo), where `build_observation` then writes a zero target vector
+/// so the same `OBS_SIZE` is produced without a target system present.
+#[derive(Resource, Default)]
+pub struct CrabTargets {
+    /// `envs[e]` = env e's target world position, or `None` if unset for that env.
+    pub envs: Vec<Option<Vec3>>,
+}
+
+impl CrabTargets {
+    pub fn resize(&mut self, n: usize) {
+        self.envs = vec![None; n];
+    }
+
+    /// Env `e`'s target world position, or `None` if `e` is out of range or unset.
+    pub fn get(&self, e: usize) -> Option<Vec3> {
+        self.envs.get(e).copied().flatten()
+    }
+}
+
 pub fn build_observation(
     spawns: Res<CrabSpawns>,
+    targets: Res<CrabTargets>,
     mut obs: ResMut<CrabObservation>,
     carapace_q: Query<(Entity, &CrabEnvId, &Transform, &Velocity), With<CrabCarapace>>,
     joint_q: Query<(
@@ -110,6 +137,21 @@ pub fn build_observation(
         v[body_base + 10] = vel.angular.x;
         v[body_base + 11] = vel.angular.y;
         v[body_base + 12] = vel.angular.z;
+
+        // Touch target in the carapace's LOCAL frame: the displacement from the
+        // carapace to the target, rotated into body axes so "target is to my
+        // left / above my back" reads the same regardless of world yaw — the same
+        // orientation-invariance the policy needs to reach from any heading (the
+        // randomized-start curriculum spawns it facing anywhere). Zero when no
+        // target is set for this env (the demo, which runs no target system), so
+        // `OBS_SIZE` is unchanged either way.
+        let target_local = targets
+            .get(env.0)
+            .map(|t| transform.rotation.inverse() * (t - transform.translation))
+            .unwrap_or(Vec3::ZERO);
+        v[body_base + 13] = target_local.x;
+        v[body_base + 14] = target_local.y;
+        v[body_base + 15] = target_local.z;
     }
 
     // Sanitize: replace any NaN/Inf with 0 to prevent NN corruption
