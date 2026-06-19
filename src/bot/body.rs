@@ -368,11 +368,30 @@ impl CrabJointId {
 /// spawned parent entity. At rest every link is axis-aligned, so a link's world
 /// position is just its parent's plus the joint anchor — tracked here to seed each
 /// body's initial `Transform` near the pose the multibody solver will hold.
+/// A random spawn orientation for the `RL_RANDOM_INIT` curriculum: ~80% a mild tilt
+/// (≤ ~25°) off upright, ~20% a heavy tilt up to fully inverted — each about a random
+/// horizontal axis, with a random yaw on top. Forces the policy to stand and right
+/// itself from a varied start rather than memorising the one bind pose.
+pub(crate) fn random_spawn_rotation(rng: &mut impl rand::Rng) -> Quat {
+    use rand::Rng;
+    use std::f32::consts::{PI, TAU};
+    let yaw = rng.gen_range(0.0..TAU);
+    let tilt = if rng.gen::<f32>() < 0.8 {
+        rng.gen_range(0.0f32..0.44) // ≤ ~25°: upright, lightly perturbed
+    } else {
+        rng.gen_range(0.44..PI) // up to fully upside-down
+    };
+    let az = rng.gen_range(0.0..TAU);
+    let tilt_axis = Vec3::new(az.cos(), 0.0, az.sin());
+    Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(tilt_axis, tilt)
+}
+
 pub fn spawn_crab(
     commands: &mut Commands,
     assets: &CrabAssets,
     position: Vec3,
     env: usize,
+    init_rotation: Quat,
 ) -> Entity {
     // Unreachable in normal runs: `main`'s preflight rejects a missing model or one
     // that builds no recipe (exit 1) before any spawn. The expect guards the path
@@ -388,6 +407,39 @@ pub fn spawn_crab(
     // the hub at an arbitrary height and dropped the hub's lateral/forward bind
     // offset, sliding the whole body ~0.1 (mostly −Z) off the skin.
     let origin = position + recipe.hub_bind_world + Vec3::new(0.0, SPAWN_HEIGHT, 0.0);
+
+    // Every link's bind-pose world origin (unrotated), by chaining `anchor1` deltas
+    // down the tree — used both to chain children below and to size the clearance lift.
+    let mut world_pos: Vec<Vec3> = Vec::with_capacity(recipe.links.len());
+    for link in &recipe.links {
+        let parent_pos = match link.parent {
+            None => origin,
+            Some(idx) => world_pos[idx],
+        };
+        world_pos.push(parent_pos + link.anchor1);
+    }
+
+    // `init_rotation` rigidly rotates the whole bind pose about `origin`. Every body
+    // gets the SAME rotation, so parent-frame == child-frame still holds and the local
+    // joint axes/anchors stay valid (the invariant `rig_revolute` relies on). Rotating
+    // can swing limbs below the floor, so lift the assembly back to the upright pose's
+    // ground clearance: `lift` = how much lower the rotated lowest body sits than the
+    // unrotated one — exactly 0 for identity, so upright spawns are unchanged. Without
+    // it an inverted spawn interpenetrates the floor on tick 0 and the solver NaNs the
+    // env (a storm across every env on a randomized reset).
+    let carapace_r = recipe.carapace_offset.length() + recipe.carapace_half.length();
+    let mut low_unrot = origin.y - carapace_r;
+    let mut low_rot = origin.y - carapace_r;
+    for (link, &p) in recipe.links.iter().zip(&world_pos) {
+        let r = link.center.length() + link.half_height + link.radius;
+        low_unrot = low_unrot.min(p.y - r);
+        low_rot = low_rot.min((origin + init_rotation * (p - origin)).y - r);
+    }
+    let lift = (low_unrot - low_rot).max(0.0);
+    let place = |p: Vec3| {
+        Transform::from_translation(origin + init_rotation * (p - origin) + Vec3::Y * lift)
+            .with_rotation(init_rotation)
+    };
 
     // -- Carapace (root): the rigid trunk; shell/thorax/rostrum/abdomen ride it.
     let carapace = commands
@@ -413,8 +465,8 @@ pub fn spawn_crab(
             // No stand-in Mesh3d: the visible body is the skin, and the true colliders
             // are shown by Rapier's debug-render (RL_DEBUG_COLLIDERS). A primitive mesh
             // here only risked drifting out of sync with the actual collider.
-            Transform::from_translation(origin),
-            CrabRestPose(Transform::from_translation(origin)),
+            place(origin),
+            CrabRestPose(place(origin)),
             Velocity::default(),
             ExternalForce::default(),
             // No `Damping`: Rapier applies per-body damping only to non-multibody
@@ -423,20 +475,21 @@ pub fn spawn_crab(
         .id();
 
     let mut ents: Vec<Entity> = Vec::with_capacity(recipe.links.len());
-    let mut world_pos: Vec<Vec3> = Vec::with_capacity(recipe.links.len());
-    // A world point inside the carapace box (centred at `origin + carapace_offset`).
+    // A world point inside the carapace box (centred at `origin + carapace_offset`),
+    // tested in the unrotated bind frame — this "is the stub tucked under the shell"
+    // grouping is topological, hence rotation-invariant.
     let inside_carapace = |p: Vec3| {
         (p - origin - recipe.carapace_offset)
             .abs()
             .cmple(recipe.carapace_half)
             .all()
     };
-    for link in &recipe.links {
-        let (parent_ent, parent_pos) = match link.parent {
-            None => (carapace, origin),
-            Some(idx) => (ents[idx], world_pos[idx]),
+    for (i, link) in recipe.links.iter().enumerate() {
+        let parent_ent = match link.parent {
+            None => carapace,
+            Some(idx) => ents[idx],
         };
-        let here = parent_pos + link.anchor1; // identity rest rotation → plain add
+        let here = world_pos[i]; // unrotated bind-pose origin
         let collider = capsule_collider(link.center, link.col_rot, link.half_height, link.radius);
         // A link whose collider center sits inside the carapace box is a proximal
         // stub tucked under the shell; group it so it can't fight the carapace
@@ -461,8 +514,8 @@ pub fn spawn_crab(
             // No stand-in Mesh3d (see carapace): skin + Rapier debug-render are the
             // truthful views; a fixed per-link capsule mesh misrepresented the colliders.
             MultibodyJoint::new(parent_ent, joint),
-            Transform::from_translation(here),
-            CrabRestPose(Transform::from_translation(here)),
+            place(here),
+            CrabRestPose(place(here)),
             Velocity::default(),
             ExternalForce::default(),
         ));
@@ -481,7 +534,6 @@ pub fn spawn_crab(
             ec.insert(CrabEyeTip);
         }
         ents.push(ec.id());
-        world_pos.push(here);
     }
 
     carapace
