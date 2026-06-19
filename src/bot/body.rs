@@ -343,7 +343,10 @@ impl CrabJointId {
             CrabJointId::LegMerus(..) => [-1.0, 1.0],
             CrabJointId::LegCarpus(..) => [-1.1, 1.1],
             CrabJointId::ClawShoulder(_) => [-1.0, 1.0],
-            CrabJointId::ClawWrist(_) => [-1.2, 1.2],
+            // Owner-tuned wrist sweep amplitude (RL_WRIST_TUNE save, 13.7°): the
+            // reported feedback was that the wrist rotated too far, so the travel is
+            // clamped symmetrically to ±13.7° (= ±0.239110 rad) about the bind rest.
+            CrabJointId::ClawWrist(_) => [-0.239110, 0.239110],
             CrabJointId::ClawPincer(_) => [-0.5, 0.2],
         }
     }
