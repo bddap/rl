@@ -19,10 +19,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::TrainConfig;
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
-use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId, CrabEyeTip};
+use crate::bot::body::{
+    CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId, CrabEyeTip, random_spawn_rotation,
+};
 use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
-use crate::bot::{CrabRescued, CrabSpawns, respawn_crab};
+use crate::bot::{CrabRescued, CrabSpawns, respawn_crab_rotated};
 
 use super::algorithm::{
     NormalizedValue, PpoConfig, PpoMetrics, ReturnNormalizer, ReturnNormalizerData, RolloutBuffer,
@@ -1503,7 +1505,7 @@ const RESET_GRACE_TICKS: u32 = 32;
 /// goes straight to [`EnvPhase::Settling`] and never enters `AwaitingRespawn`
 /// (issue #16); a respawn here would just rebuild the fresh crab a second time.
 ///
-/// A reset is a full despawn + respawn ([`respawn_crab`]): teleporting bodies
+/// A reset is a full despawn + respawn ([`respawn_crab_rotated`]): teleporting bodies
 /// cannot repair a multibody whose joint state went non-finite — rapier 0.32
 /// offers no way to rewrite multibody joint coordinates in place — and one
 /// crab that tunnels through the floor would otherwise wedge its env forever.
@@ -1518,6 +1520,11 @@ pub fn reset_crab(
     spawns: Res<CrabSpawns>,
     parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>,
 ) {
+    // Optional randomized-start curriculum (`RL_RANDOM_INIT`, off by default — the
+    // running A+B retrain binary doesn't set it). Each respawning env gets a fresh
+    // random orientation so the policy learns to stand (and right itself) from varied,
+    // even inverted, starts instead of memorising the one bind pose.
+    let randomize = std::env::var_os("RL_RANDOM_INIT").is_some();
     for (e, ep) in training.envs.iter_mut().enumerate() {
         if matches!(ep.phase, EnvPhase::AwaitingRespawn) {
             ep.phase = EnvPhase::Settling {
@@ -1527,12 +1534,18 @@ pub fn reset_crab(
                 *v = [0.0; ACTION_SIZE];
             }
             let origin = spawns.0.get(e).copied().unwrap_or(Vec3::ZERO);
-            respawn_crab(
+            let init_rotation = if randomize {
+                random_spawn_rotation(&mut thread_rng())
+            } else {
+                Quat::IDENTITY
+            };
+            respawn_crab_rotated(
                 &mut commands,
                 &assets,
                 parts.iter().filter(|(_, id)| id.0 == e).map(|(ent, _)| ent),
                 origin,
                 e,
+                init_rotation,
             );
         }
     }

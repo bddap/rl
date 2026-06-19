@@ -155,10 +155,24 @@ pub fn respawn_crab(
     origin: Vec3,
     env: usize,
 ) {
+    respawn_crab_rotated(commands, assets, parts, origin, env, Quat::IDENTITY);
+}
+
+/// Like [`respawn_crab`] but spawns the fresh crab rigidly rotated by `init_rotation`
+/// (training's randomized-start curriculum — see `reset_crab`). `Quat::IDENTITY`
+/// reproduces the upright respawn exactly.
+pub fn respawn_crab_rotated(
+    commands: &mut Commands,
+    assets: &body::CrabAssets,
+    parts: impl Iterator<Item = Entity>,
+    origin: Vec3,
+    env: usize,
+    init_rotation: Quat,
+) {
     for e in parts {
         commands.entity(e).despawn();
     }
-    body::spawn_crab(commands, assets, origin, env);
+    body::spawn_crab(commands, assets, origin, env, init_rotation);
 }
 
 fn spawn_initial_crabs(
@@ -172,9 +186,15 @@ fn spawn_initial_crabs(
     let n = num_envs.0;
     actions.resize(n);
     obs.resize(n);
+    let randomize = std::env::var_os("RL_RANDOM_INIT").is_some();
     for env in 0..n {
         let origin = grid_offset(env, n);
         spawns.0.push(origin);
-        body::spawn_crab(&mut commands, &assets, origin, env);
+        let init_rotation = if randomize {
+            body::random_spawn_rotation(&mut rand::thread_rng())
+        } else {
+            Quat::IDENTITY
+        };
+        body::spawn_crab(&mut commands, &assets, origin, env, init_rotation);
     }
 }
