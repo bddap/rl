@@ -487,7 +487,7 @@ fn bend_axis(actuated: Option<CrabJointId>, in_dir: Vec3, out_dir: Vec3) -> Vec3
     if matches!(actuated, Some(CrabJointId::LegCoxa(..))) {
         return Vec3::Y;
     }
-    // Owner-tuned wrist sweep axis (RL_WRIST_TUNE save, az=63.5 el=-15.9). Same
+    // Owner-tuned wrist sweep axis (az=63.5 el=-15.9). Same
     // parent/world-at-rest frame as the derived `in × out`, so it drops straight in
     // here; the owner dialed it off the kinematic bend to get the hand swinging the
     // way he wants, overriding the auto-derived cross.
