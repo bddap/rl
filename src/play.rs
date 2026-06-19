@@ -26,10 +26,12 @@ use burn::tensor::Tensor;
 use rand::Rng;
 
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
-use crate::bot::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId, Side};
+use crate::bot::body::{
+    self, CrabAssets, CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId, Side,
+};
 use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, OBS_SIZE};
-use crate::bot::{BotSet, CrabSpawns, respawn_crab};
+use crate::bot::{BotSet, CrabSpawns, respawn_crab_rotated};
 use crate::training::session::{
     BRAIN_STEM, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend,
 };
@@ -342,6 +344,7 @@ impl Plugin for DemoPlugin {
         add_inference(app, &self.checkpoint_dir, self.live_checkpoint_dir.clone());
         crate::player::graph::register(app);
         app.init_resource::<DemoSettle>()
+            .init_resource::<DemoRetilt>()
             .init_resource::<PokeBurst>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_hud))
             .add_systems(Update, (orbit_camera, demo_controls))
@@ -354,10 +357,13 @@ impl Plugin for DemoPlugin {
                     // Sense→Think→Act chain alone leaves settle-vs-Act to Bevy's
                     // implicit conflict ordering; pin it.
                     demo_settle.after(BotSet::Think).before(BotSet::Act),
-                    // A fall-rescue rebuilds the crab; run it before Sense (as the
-                    // training rescue does) so the fresh pose is observed and the
-                    // zeroed actions reach Act this tick, not next.
+                    // Both rebuild the crab; run before Sense (as the training rescue
+                    // does) so the fresh pose is observed and the zeroed actions reach
+                    // Act this tick, not next. The periodic re-tilt keeps the passive
+                    // stream showing the goofy righting loop; the fall-rescue is the
+                    // safety net when the policy walks off the arena.
                     demo_fall_rescue.before(BotSet::Sense),
+                    demo_retilt.before(BotSet::Sense),
                     demo_poke.after(BotSet::Act).before(PhysicsSet::SyncBackend),
                 ),
             );
@@ -525,6 +531,33 @@ struct DemoSettle(u32);
 
 const DEMO_SETTLE_TICKS: u32 = 32;
 
+/// Wall-clock since the last demo re-tilt. A passive stream needs the goofy
+/// righting "journey" on a loop: a crab that lands on its feet (or never falls)
+/// would otherwise just stand there, so [`demo_retilt`] re-tilts on this timer
+/// regardless. See [`DEMO_RETILT_PERIOD_S`].
+#[derive(Resource)]
+struct DemoRetilt {
+    since: f32,
+}
+
+impl Default for DemoRetilt {
+    fn default() -> Self {
+        // Seed near the period so the first re-tilt fires a few seconds in — the
+        // initial spawn is upright (shared spawn path, see `spawn_initial_crabs`),
+        // so this is what makes the stream go goofy shortly after launch without
+        // touching that path.
+        Self {
+            since: DEMO_RETILT_PERIOD_S - 3.0,
+        }
+    }
+}
+
+/// How often the demo re-tilts the crab to a fresh random orientation. Long
+/// enough for a full righting attempt (succeed or, with current weights, flail and
+/// fail) to play out and read clearly; short enough that the passive stream never
+/// sits on a static pose.
+const DEMO_RETILT_PERIOD_S: f32 = 9.0;
+
 /// A poke is a short force burst, not a velocity write: a multibody link's
 /// velocity lives in the multibody's generalized coordinates, which the
 /// `Velocity` component writeback never touches (issue #14 — the old poke
@@ -564,8 +597,10 @@ fn demo_poke(
 }
 
 /// Demo reset: rebuild the crab fresh at spawn — the only reset that
-/// survives a corrupted multibody (see [`respawn_crab`]) — and hold zero
-/// actions while it takes load.
+/// survives a corrupted multibody (see [`respawn_crab_rotated`]) — and hold zero
+/// actions while it takes load. `init_rotation` is the spawn tilt: the demo feeds
+/// a fresh [`body::random_spawn_rotation`] every time so the crab lands at a random
+/// goofy angle and visibly tries to right itself, the "journey" the stream shows.
 fn demo_respawn(
     commands: &mut Commands,
     assets: &CrabAssets,
@@ -573,13 +608,21 @@ fn demo_respawn(
     parts: impl Iterator<Item = Entity>,
     settle: &mut DemoSettle,
     actions: &mut CrabActions,
+    init_rotation: Quat,
 ) {
     let origin = spawns.0.first().copied().unwrap_or(Vec3::ZERO);
-    respawn_crab(commands, assets, parts, origin, 0);
+    respawn_crab_rotated(commands, assets, parts, origin, 0, init_rotation);
     settle.0 = DEMO_SETTLE_TICKS;
     if let Some(a) = actions.envs.first_mut() {
         *a = [0.0; ACTION_SIZE];
     }
+}
+
+/// A fresh random goofy spawn tilt for a demo respawn (see
+/// [`body::random_spawn_rotation`]): mostly mild, sometimes fully inverted, random
+/// yaw — so the demo crab keeps landing at new angles to right itself from.
+fn random_demo_tilt() -> Quat {
+    body::random_spawn_rotation(&mut rand::thread_rng())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -621,6 +664,7 @@ fn demo_controls(
         info!("demo collider wireframes: {}", debug_render.enabled);
     }
     if reset {
+        // A manual reset re-tilts too, so the owner can re-roll the righting attempt.
         demo_respawn(
             &mut commands,
             &assets,
@@ -628,6 +672,7 @@ fn demo_controls(
             parts_q.iter(),
             &mut settle,
             &mut actions,
+            random_demo_tilt(),
         );
     }
     if poke {
@@ -655,6 +700,13 @@ fn demo_fall_rescue(
     mut actions: ResMut<CrabActions>,
     mut settle: ResMut<DemoSettle>,
 ) {
+    // A fresh respawn (this tick or a settling one) holds the crab near the origin,
+    // not fallen — skipping while it settles also stops a same-tick double-respawn
+    // racing `demo_retilt`, since despawns are deferred and the stale carapace would
+    // still read as fallen in this query until the command flush.
+    if settle.0 > 0 {
+        return;
+    }
     let Ok(t) = carapace_q.single() else { return };
     if t.translation.y > -2.0 {
         return;
@@ -666,6 +718,43 @@ fn demo_fall_rescue(
         parts_q.iter(),
         &mut settle,
         &mut actions,
+        random_demo_tilt(),
+    );
+}
+
+/// System: periodically re-tilt the demo crab to a fresh random orientation so the
+/// passive stream always shows the goofy righting "journey" — even when the crab
+/// lands on its feet or never falls (the fall-rescue alone wouldn't fire then). Held
+/// off while a settle is in progress so a re-tilt can't interrupt the previous spawn
+/// before it has landed and had its moment. See [`DemoRetilt`].
+fn demo_retilt(
+    time: Res<Time>,
+    mut retilt: ResMut<DemoRetilt>,
+    mut commands: Commands,
+    assets: Res<CrabAssets>,
+    spawns: Res<CrabSpawns>,
+    parts_q: Query<Entity, With<CrabBodyPart>>,
+    mut actions: ResMut<CrabActions>,
+    mut settle: ResMut<DemoSettle>,
+) {
+    if settle.0 > 0 {
+        // Don't advance the clock mid-settle: time the period from when the crab is
+        // actually up and acting, not from the spawn it hasn't landed from yet.
+        return;
+    }
+    retilt.since += time.delta_secs();
+    if retilt.since < DEMO_RETILT_PERIOD_S {
+        return;
+    }
+    retilt.since = 0.0;
+    demo_respawn(
+        &mut commands,
+        &assets,
+        &spawns,
+        parts_q.iter(),
+        &mut settle,
+        &mut actions,
+        random_demo_tilt(),
     );
 }
 

@@ -373,10 +373,11 @@ impl CrabJointId {
 /// horizontal axis, with a random yaw on top. Forces the policy to stand and right
 /// itself from a varied start rather than memorising the one bind pose.
 pub(crate) fn random_spawn_rotation(rng: &mut impl rand::Rng) -> Quat {
-    use rand::Rng;
     use std::f32::consts::{PI, TAU};
     let yaw = rng.gen_range(0.0..TAU);
-    let tilt = if rng.gen::<f32>() < 0.8 {
+    // `r#gen`: `gen` is a reserved keyword in edition 2024, so the rand 0.8 method
+    // needs the raw identifier to parse.
+    let tilt = if rng.r#gen::<f32>() < 0.8 {
         rng.gen_range(0.0f32..0.44) // ≤ ~25°: upright, lightly perturbed
     } else {
         rng.gen_range(0.44..PI) // up to fully upside-down
