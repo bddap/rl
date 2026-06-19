@@ -186,15 +186,12 @@ fn spawn_initial_crabs(
     let n = num_envs.0;
     actions.resize(n);
     obs.resize(n);
-    let randomize = std::env::var_os("RL_RANDOM_INIT").is_some();
     for env in 0..n {
         let origin = grid_offset(env, n);
         spawns.0.push(origin);
-        let init_rotation = if randomize {
-            body::random_spawn_rotation(&mut rand::thread_rng())
-        } else {
-            Quat::IDENTITY
-        };
-        body::spawn_crab(&mut commands, &assets, origin, env, init_rotation);
+        // Initial spawn stays upright; the randomized-start curriculum kicks in on the
+        // first reset (see `reset_crab`). A clean first frame also keeps any non-training
+        // caller of this system (the demo) upright.
+        body::spawn_crab(&mut commands, &assets, origin, env, Quat::IDENTITY);
     }
 }
