@@ -1047,15 +1047,15 @@ pub(crate) fn ppo_update_core(
 /// Effort tax weight `K` and exponent `L` in `reward = h − K·Σ|aᵢ|^L` (owner's
 /// form): carapace pose (height × uprightness) rewarded directly, commanded effort
 /// taxed. `K` is small so a
-/// calm stand is barely taxed; `L`=2 is cheap for honest moderate commands and
-/// steep for max-torque flailing. `K` is provisional — tune from the per-episode
+/// calm stand is barely taxed; `L`=3 pronounces the gap: honest moderate
+/// commands (|a|<1) get even cheaper while max-torque flailing turns cubic-steep. `K` is provisional — tune from the per-episode
 /// effort log so a moderate stand clears a lie-down while saturation-seeking stays
 /// punished. The rig body holds itself up by ACTIVE leg actuation (no penetration
 /// prop welding the legs into the carapace, as the old hand-coded body had), so a
 /// true stand's Σ|aᵢ|² is large — too steep a `K` makes a low-effort list
 /// out-reward standing, and the policy correctly learns to lie there.
 const EFFORT_COST: f32 = 0.007;
-const EFFORT_EXP: f32 = 2.0;
+const EFFORT_EXP: f32 = 3.0;
 
 /// Per-output effort tax `f(a) = |a|^L`, summed over the RAW network outputs
 /// (the sampled pre-clamp actions — see [`brain_step`]). The point is the gradient
@@ -1063,8 +1063,8 @@ const EFFORT_EXP: f32 = 2.0;
 /// ±1, so an action that overshoots the usable range is taxed in proportion to the
 /// overshoot. The old `e^|clamp(a)|−1` taxed the *clamped* value, so its gradient
 /// went flat at ±1 — the policy paid a fixed toll but felt no pull back into range,
-/// and the toll was steep enough to make lying down out-reward standing. Quadratic
-/// (L=2) is cheap for honest moderate commands and steep for the max-torque flailing.
+/// and the toll was steep enough to make lying down out-reward standing. A cubic tax
+/// (L=3) is cheap for honest moderate commands (|a|<1) and steeper still for the flailing.
 pub(crate) fn action_effort(raw_actions: &[f32; ACTION_SIZE]) -> f32 {
     raw_actions.iter().map(|a| a.abs().powf(EFFORT_EXP)).sum()
 }

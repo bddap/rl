@@ -93,7 +93,12 @@ pub const SPAWN_HEIGHT: f32 = 0.05;
 const COXA_TORQUE_CEILING: f32 = 6.0;
 const FEMUR_TORQUE_CEILING: f32 = 4.0;
 const TIBIA_TORQUE_CEILING: f32 = 2.5;
-const CLAW_TORQUE_CEILING: f32 = 8.0;
+// Cheliped joints, weighted by relative muscle mass: the closer (pincer) is the
+// dominant muscle of the claw, the wrist the smallest. Grapsus is a grazer with
+// modest symmetric claws, so these stay within the legs' range — not crusher-scale.
+const CLAW_PINCER_TORQUE_CEILING: f32 = 7.0;
+const CLAW_SHOULDER_TORQUE_CEILING: f32 = 4.0;
+const CLAW_WRIST_TORQUE_CEILING: f32 = 3.0;
 
 /// Joint friction: a velocity-0 motor (stiffness 0 — no position servo; the policy
 /// still commands all torque via `ExternalForce`), but FORCE-CAPPED by
@@ -312,9 +317,9 @@ impl CrabJointId {
             CrabJointId::LegCoxa(..) => COXA_TORQUE_CEILING,
             CrabJointId::LegMerus(..) => FEMUR_TORQUE_CEILING,
             CrabJointId::LegCarpus(..) => TIBIA_TORQUE_CEILING,
-            CrabJointId::ClawShoulder(_)
-            | CrabJointId::ClawWrist(_)
-            | CrabJointId::ClawPincer(_) => CLAW_TORQUE_CEILING,
+            CrabJointId::ClawShoulder(_) => CLAW_SHOULDER_TORQUE_CEILING,
+            CrabJointId::ClawWrist(_) => CLAW_WRIST_TORQUE_CEILING,
+            CrabJointId::ClawPincer(_) => CLAW_PINCER_TORQUE_CEILING,
         }
     }
 
