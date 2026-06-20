@@ -120,8 +120,8 @@ const FRICTION_RAMP: f32 = 4.0;
 /// crumple under the lightest ground load instead of propping the body up, yet
 /// nonzero because real joints have a little stiction and a touch of it regularizes
 /// the zero-velocity crossing.
-pub const LEG_FRICTION_CAP: f32 = 0.1;
-const CLAW_FRICTION_CAP: f32 = 0.1;
+pub const LEG_FRICTION_CAP: f32 = 0.04;
+const CLAW_FRICTION_CAP: f32 = 0.04;
 
 /// Spring stiffness (natural frequency Hz, damping ratio) of every revolute
 /// joint's constraint — the lock that holds the limb attached AND the hard end
