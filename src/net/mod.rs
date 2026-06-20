@@ -2,9 +2,11 @@
 //! iroh LAN transport. Multiplayer-first, so the whole game (rl#38) is built on top
 //! of these three pieces:
 //!
-//! - [`sim`] — the deterministic simulation core. The contract (pure step, complete
-//!   state hash, no nondeterminism) is what every later game system must honor.
-//!   Phase 1 swaps the trivial dot world here for the real world + giant crab.
+//! - [`sim`] — the deterministic simulation core: the Phase 1 gray-box Extraction
+//!   loop (first-person players + one giant crab + an extraction point). The contract
+//!   (pure step, complete state hash, no nondeterminism) is what every later game
+//!   system must honor; the render/vehicle subs build on the interface documented at
+//!   the top of [`sim`], they do not bypass it.
 //! - [`lockstep`] — the fixed-tick driver: exchange inputs (not state) with an
 //!   input-delay buffer, apply in a fixed peer order, advance, and compare state
 //!   hashes to catch desync. Transport-agnostic.
@@ -24,20 +26,30 @@ mod desync_test {
     //! The headless determinism proof (rl#39): replay ONE input log through two
     //! independently-constructed sims and assert their state hashes match
     //! tick-for-tick. If the sim ever acquires a nondeterminism bug (a `HashMap`
-    //! walk, a `thread_rng` draw, a wall-clock read), the two diverge and a tick's
-    //! hashes disagree — this test goes red. It is the empirical guard the issue
-    //! calls for: determinism is testable, so test it.
+    //! walk, a `thread_rng` draw, a wall-clock read, a raw `f32::sin`), the two
+    //! diverge and a tick's hashes disagree — this test goes red. It is the empirical
+    //! guard the issue calls for: determinism is testable, so test it.
+    //!
+    //! Phase 1 (rl#38) extends it past the old dot world: the log now exercises the
+    //! FULL [`Input`] surface (move + yaw-look + the action bit), and a long replay
+    //! drives the real gray-box — players turning and moving by facing, the giant crab
+    //! pursuing and grabbing, the round resolving — so the hash equality proves
+    //! determinism of the ACTUAL sim (player yaw, crab position, statuses, outcome),
+    //! not a trivial placeholder.
 
     use std::collections::BTreeMap;
 
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
-    use crate::net::sim::{Input, PlayerId, Sim};
+    use crate::net::sim::{buttons, Input, Outcome, PlayerId, Sim};
 
     /// Generate a deterministic pseudo-random input log: `ticks` ticks, each with one
-    /// input per player. Seeded so the log itself is reproducible (the test must be
-    /// deterministic too, or a failure couldn't be reproduced).
+    /// input per player, spanning every input field — move axes, yaw-look delta, and
+    /// the action button — so the replay drives turning, facing-relative movement,
+    /// and extraction attempts, not just the two move axes. Seeded so the log itself
+    /// is reproducible (the test must be deterministic too, or a failure couldn't be
+    /// reproduced).
     fn input_log(seed: u64, players: &[PlayerId], ticks: usize) -> Vec<BTreeMap<PlayerId, Input>> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         (0..ticks)
@@ -47,7 +59,11 @@ mod desync_test {
                     .map(|&p| {
                         let x: f32 = rng.gen_range(-1.0..=1.0);
                         let y: f32 = rng.gen_range(-1.0..=1.0);
-                        (p, Input::from_axes(x, y))
+                        let look: f32 = rng.gen_range(-1.0..=1.0);
+                        // Press action ~1/8 of ticks so extraction logic is exercised
+                        // without the button being held constantly.
+                        let act = if rng.gen_range(0..8) == 0 { buttons::ACTION } else { 0 };
+                        (p, Input::new(x, y, look, act))
                     })
                     .collect()
             })
@@ -77,6 +93,33 @@ mod desync_test {
         }
         // And both advanced exactly the log length.
         assert_eq!(a.tick(), log.len() as u64);
+    }
+
+    #[test]
+    fn long_replay_drives_the_real_loop_and_stays_in_lockstep() {
+        // Two players that hold still while the crab hunts them: a DETERMINISTIC
+        // scenario (neutral input every tick) that is guaranteed to resolve — the crab
+        // closes in and wipes the round. Two sims must agree EVERY tick, including
+        // across the outcome transition and the frozen-after-decided ticks, so
+        // determinism is proven for the crab pursuit, the grab, and the freeze — not
+        // just free movement. The guaranteed `Wiped` keeps the test honest (a no-op sim
+        // would also "stay in lockstep") WITHOUT leaning on random inputs happening to
+        // resolve, so it can't flake.
+        let players: Vec<PlayerId> = (0..2).map(PlayerId).collect();
+        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        let mut a = Sim::new(0x5EED, &players);
+        let mut b = Sim::new(0x5EED, &players);
+        let mut resolved_at = None;
+        for t in 0..1500u64 {
+            a.step(&neutral);
+            b.step(&neutral);
+            assert_eq!(a.state_hash(), b.state_hash(), "diverged at tick {t}");
+            if resolved_at.is_none() && a.outcome() != Outcome::Ongoing {
+                resolved_at = Some(t);
+            }
+        }
+        assert_eq!(a.outcome(), Outcome::Wiped, "still players must be wiped by the crab");
+        assert!(resolved_at.is_some(), "round must resolve mid-replay, then stay frozen");
     }
 
     #[test]

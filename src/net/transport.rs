@@ -39,9 +39,17 @@ pub const SERVICE_NAME: &str = "bddap-rl-game";
 /// honest `Option`.
 const NO_CONFIRMED_TICK: u64 = u64::MAX;
 
-/// Wire size of an encoded [`TickMsg`]: apply_tick(8) + input(4) + confirmed_tick(8)
-/// + confirmed_hash(8).
-const TICKMSG_LEN: usize = 8 + crate::net::sim::Input::WIRE_LEN + 8 + 8;
+/// Field offsets in the encoded [`TickMsg`], derived from the field widths so the
+/// input growing (Phase 1 widened [`Input`]) shifts the trailing fields automatically
+/// rather than silently corrupting them — the offsets can't drift from
+/// [`crate::net::sim::Input::WIRE_LEN`] because they're computed from it.
+const IN_LEN: usize = crate::net::sim::Input::WIRE_LEN;
+const OFF_INPUT: usize = 8; // after apply_tick(8)
+const OFF_CTICK: usize = OFF_INPUT + IN_LEN; // after input
+const OFF_CHASH: usize = OFF_CTICK + 8; // after confirmed_tick(8)
+/// Wire size of an encoded [`TickMsg`]: apply_tick(8) + input + confirmed_tick(8) +
+/// confirmed_hash(8).
+const TICKMSG_LEN: usize = OFF_CHASH + 8;
 
 /// Encode a [`TickMsg`] to its fixed-width little-endian wire form.
 fn encode_msg(m: &TickMsg) -> [u8; TICKMSG_LEN] {
@@ -50,20 +58,20 @@ fn encode_msg(m: &TickMsg) -> [u8; TICKMSG_LEN] {
         None => (NO_CONFIRMED_TICK, 0),
     };
     let mut b = [0u8; TICKMSG_LEN];
-    b[0..8].copy_from_slice(&m.apply_tick.to_le_bytes());
-    b[8..12].copy_from_slice(&m.input.to_bytes());
-    b[12..20].copy_from_slice(&ctick.to_le_bytes());
-    b[20..28].copy_from_slice(&chash.to_le_bytes());
+    b[0..OFF_INPUT].copy_from_slice(&m.apply_tick.to_le_bytes());
+    b[OFF_INPUT..OFF_CTICK].copy_from_slice(&m.input.to_bytes());
+    b[OFF_CTICK..OFF_CHASH].copy_from_slice(&ctick.to_le_bytes());
+    b[OFF_CHASH..].copy_from_slice(&chash.to_le_bytes());
     b
 }
 
 /// Inverse of [`encode_msg`].
 fn decode_msg(b: &[u8; TICKMSG_LEN]) -> TickMsg {
-    let ctick = u64::from_le_bytes(b[12..20].try_into().unwrap());
-    let chash = u64::from_le_bytes(b[20..28].try_into().unwrap());
+    let ctick = u64::from_le_bytes(b[OFF_CTICK..OFF_CHASH].try_into().unwrap());
+    let chash = u64::from_le_bytes(b[OFF_CHASH..].try_into().unwrap());
     TickMsg {
-        apply_tick: u64::from_le_bytes(b[0..8].try_into().unwrap()),
-        input: crate::net::sim::Input::from_bytes(b[8..12].try_into().unwrap()),
+        apply_tick: u64::from_le_bytes(b[0..OFF_INPUT].try_into().unwrap()),
+        input: crate::net::sim::Input::from_bytes(b[OFF_INPUT..OFF_CTICK].try_into().unwrap()),
         confirmed: (ctick != NO_CONFIRMED_TICK).then_some(Confirmed { tick: ctick, hash: chash }),
     }
 }
