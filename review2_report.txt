@@ -1,0 +1,54 @@
+===== FANOUT REPORT (/tmp/tmp.CewqegVmKs) =====
+
+----- correctness_determinism (ok=true cost=$0.82438975) -----
+All three verified. Findings:
+
+**Fix 1 — control-axis negation (render.rs:480-485): SOUND.**
+- Geometry holds at *every* yaw, not just yaw 0. Sim strafe-right vector = `(cos, −sin)`; Bevy camera-right = `(−cos, sin)` (rotating the yaw-0 case — test `camera_right_is_negative_x_facing_plus_z`:1086 — by yaw about +Y). They're exact negations, so `pending.strafe = -strafe` (480) sends D to screen-right at all facings. ✓
+- Yaw: increasing sim yaw moves forward `(sin,cos)` toward `(cos,−sin)` = camera-*left*, so mouse-right (d.x>0) must *decrease* yaw → `pending.yaw_delta -= d_yaw` (482). Same sign convention as strafe — self-consistent, no double-negation. ✓
+- Forward/pitch untouched: `move_forward` carries no X; pitch is client-side `d_pitch`/`look_direction` (unchanged). ✓
+- Camera turns the pushed way because it reads authoritative sim yaw, which is driven by the negated `look_yaw`. ✓
+- Determinism preserved: negation happens before `Input::new` quantization (render.rs:332) and before `submit_local_input`/broadcast (338) — the broadcast value *is* the negated one, so every peer applies an identical Input. Remote peers never re-negate. ✓
+
+**Fix 2 — InputSource enum + borrow split (render.rs:347-374): SOUND.**
+- `let st = &mut *state;` then `match &mut st.input_source` borrows only that field; the Scripted arm's `st.ls.sim().players()` is an immutable borrow of a *disjoint* field — NLL allows disjoint-field borrows through one reborrow, and `bot` is copied out (`let bot = *bot;`) so nothing escapes. Compiles (confirmed by build logs). ✓
+- Scripted feeds non-local pids at `apply_tick: msg.apply_tick` (369) = the same tick the local input was scheduled at via `submit_local_input` (338) — correct co-scheduling, single record per pid, no double-apply. ✓
+- `reported_outcome` as `Local<bool>` (317) is correct: per-system persistent state, fires the one-shot log once (393-396). ✓
+- Minor: the `from.pid != me` guard (376) is redundant for the Scripted arm (already filtered at 363) and harmless — not a bug.
+
+**Fix 3 — net_loop early-message stash/replay (net_loop.rs:102-140): SOUND.**
+- `early` is filled by draining `session.try_recv()` (105-107, 117-119); those messages are *removed* from the session inbox, so the game loop's later `drain_inbox` cannot re-deliver them — no double-apply. ✓
+- Replay (136-140) goes through `record_remote`, keyed by `apply_tick` into the input table; idempotent per message. At a fresh Lockstep (`next_tick()==0`, empty `applied_hashes`) any carried `confirmed` hits the `None if in_window` branch → stashed in `pending_peer_hashes`, never `Desync`/`Unverifiable` — so discarding the return (`let _ =`) is genuinely safe, matching the comment. ✓
+- Unknown senders dropped via `id_map.get` (137), same filter as `drain_inbox`. ✓
+- Messages arriving in the gap between the final drain (117-119) and driver construction stay in the session inbox and are picked up by the first `drain_inbox` — not lost, and `record_remote` tolerates arbitrary tick order. ✓
+
+No correctness or determinism regressions in any of the three fixes.
+
+----- taste (ok=true cost=$0.49431625) -----
+Niko here. Read all three files + both diffs. Verdict by item:
+
+## 1. `InputSource` enum — clean ✓
+- render.rs:203-216 — three variants, no both-at-once state possible. The old `Option<NetDriver>` + separate scripted resource is genuinely gone; `Scripted` carries its `Input` inline so "real peers AND fabricated bots" is unrepresentable. This is the right shape.
+- `drive_lockstep` match (render.rs:348-374) reads well — each arm returns `Vec<PeerMsg>`, single join point at `record_remote`. Good.
+- The `&mut *state` field-split + its comment (341-347) is legitimate WHY (non-send resource, two fields borrowed disjointly). Keep.
+- **Consider:** redundant `me` filtering — `Scripted` already filters `id != me` (361), then the record loop re-checks `from.pid != me` (376). Harmless, but the double-guard slightly muddies which layer owns the invariant. Minor.
+
+## 2. `ScreenshotConfig` collapse — clean ✓
+- render.rs:828 is now `#[derive(Resource, Clone)]` and consumed directly as `Res<ScreenshotConfig>` (881, 907, 932). No private twin. The builder (`with_cam_offset`) stays on the one type. Correct.
+
+## 3. `assign_player_ids` dedup — good, but the comment is NOT honest, and they should share more
+- The dedup itself is right: one `pub` home in net_loop.rs:156, both callers use it. ✓
+- **Must-fix (comment honesty):** the justification is wrong. net_loop.rs:14-18 + 78-79 claim the two discover loops can't be shared because "one is async-inline, one is sync-bridged." I diffed them — net_loop.rs:104-119 and game.rs:234-256 are **byte-for-byte identical async code** (both `.await`, both `tokio::time::sleep`; only `expect` vs `args.expect` differs). The sync-bridge difference happens *after* discovery (build `NetDriver` vs keep raw session), not in the loop. The comment frames inherent-duplication where there is none.
+- **Strong consider (extract the loop):** this isn't just a comment nit — it's ~16 lines of subtle cold-start (stash-and-replay early msgs, 500ms settle) that **must stay behaviorally identical for determinism**, now duplicated. The code even admits the hazard ("doing it here keeps the two cold-starts behaviorally identical"). An `async fn discover_and_freeze(&mut session, expect, discover_secs) -> Result<(id_map, me, early)>` drops cleanly into both: run_net `.await`s it; `connect_and_assign` `.await`s it inside its existing `rt.block_on`. That's the honest fix — share the loop, and the comment becomes true by construction. If you keep them split, the comment must say "duplicated, extractable, not yet extracted," not invent an async/sync reason.
+
+## 4. `MAX_YAW_PER_TICK_RADIANS` const — clean ✓
+- render.rs:279-280 — pure const expr, no runtime call. Integer `trig::TURN / 24` mirrors the sim's own integer clamp, so they can't drift; the doc says exactly that and it's accurate.
+
+## New comments that restate code / over-engineering
+- **Cut (consider):** render.rs:826-827 "(one struct, not a public wrapper around a private twin)" — describes the *refactor*, not the code. Same for the parenthetical at 199-202's tail. Historical "what this no longer is" notes read fine in a PR, but rot as code comments. The enum's WHY is already carried by the variant docs.
+- Nothing over-engineered. `Scripted(Input)` is the minimal honest representation of the screenshot bot; not a framework.
+
+**Net:** items 1, 2, 4 are clean and done. Item 3's mechanical dedup is fine but the surrounding comment now misrepresents why the discover loops stay separate — fix the comment, and ideally extract the loop since it's the determinism-critical duplication you most want gone.
+
+===== SUMMARY =====
+agents: 2/2 ok   total cost: $1.3187060000000002

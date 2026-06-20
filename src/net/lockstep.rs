@@ -72,7 +72,11 @@ pub enum Fault {
     /// in our history window, so we can't confirm it matched. Distinct from `Desync`
     /// (it may well have agreed) — it means our verification window was outrun, which
     /// under healthy play never happens, so it flags a sick link, not a sure divergence.
-    Unverifiable { tick: u64, peer: PlayerId, peer_hash: u64 },
+    Unverifiable {
+        tick: u64,
+        peer: PlayerId,
+        peer_hash: u64,
+    },
 }
 
 /// Drives one peer's deterministic sim: schedules inputs, advances only when every
@@ -141,7 +145,10 @@ impl Lockstep {
     pub fn submit_local_input(&mut self, input: Input) -> TickMsg {
         let apply_tick = self.next_issue_tick;
         self.next_issue_tick += 1;
-        self.inputs.entry(apply_tick).or_default().insert(self.me, input);
+        self.inputs
+            .entry(apply_tick)
+            .or_default()
+            .insert(self.me, input);
         TickMsg {
             apply_tick,
             input,
@@ -166,7 +173,10 @@ impl Lockstep {
         // is an already-applied tick `try_advance` will never consume; far above it is
         // a bug/attack — either would grow `inputs` without bound.
         if self.in_window(msg.apply_tick) {
-            self.inputs.entry(msg.apply_tick).or_default().insert(from, msg.input);
+            self.inputs
+                .entry(msg.apply_tick)
+                .or_default()
+                .insert(from, msg.input);
         }
 
         let c = msg.confirmed?;
@@ -174,7 +184,11 @@ impl Lockstep {
             Some(&local) => check(c.tick, from, local, c.hash), // already applied → compare now
             None if c.tick < self.next_tick() => {
                 // Applied but pruned from history — we can no longer verify it matched.
-                Some(Fault::Unverifiable { tick: c.tick, peer: from, peer_hash: c.hash })
+                Some(Fault::Unverifiable {
+                    tick: c.tick,
+                    peer: from,
+                    peer_hash: c.hash,
+                })
             }
             None if self.in_window(c.tick) => {
                 self.pending_peer_hashes.insert((c.tick, from), c.hash);
@@ -335,8 +349,14 @@ mod tests {
             // tick (record_remote) or when applying a tick whose peer hash is pending
             // (try_advance); check both sites for a Desync specifically.
             let is_desync = |f: &Fault| matches!(f, Fault::Desync { .. });
-            saw_desync |= a.record_remote(PlayerId(1), mb).as_ref().is_some_and(is_desync);
-            saw_desync |= b.record_remote(PlayerId(0), tampered).as_ref().is_some_and(is_desync);
+            saw_desync |= a
+                .record_remote(PlayerId(1), mb)
+                .as_ref()
+                .is_some_and(is_desync);
+            saw_desync |= b
+                .record_remote(PlayerId(0), tampered)
+                .as_ref()
+                .is_some_and(is_desync);
             saw_desync |= a.try_advance().iter().any(is_desync);
             saw_desync |= b.try_advance().iter().any(is_desync);
         }
@@ -363,7 +383,11 @@ mod tests {
             // confirmed: None → never a fault; we're only asserting buffer growth.
             let _ = ls.record_remote(
                 PlayerId(1),
-                TickMsg { apply_tick, input: Input::default(), confirmed: None },
+                TickMsg {
+                    apply_tick,
+                    input: Input::default(),
+                    confirmed: None,
+                },
             );
         }
         assert_eq!(
@@ -373,7 +397,11 @@ mod tests {
         );
         let _ = ls.record_remote(
             PlayerId(1),
-            TickMsg { apply_tick: next, input: Input::default(), confirmed: None },
+            TickMsg {
+                apply_tick: next,
+                input: Input::default(),
+                confirmed: None,
+            },
         );
         assert_eq!(
             ls.buffered_input_ticks(),
@@ -399,7 +427,10 @@ mod tests {
             TickMsg {
                 apply_tick: ls.next_tick(),
                 input: Input::default(),
-                confirmed: Some(Confirmed { tick: stale_tick, hash: 0xdead }),
+                confirmed: Some(Confirmed {
+                    tick: stale_tick,
+                    hash: 0xdead,
+                }),
             },
         );
         assert!(

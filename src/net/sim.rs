@@ -351,7 +351,10 @@ impl Sim {
             map.insert(
                 id,
                 Player {
-                    pos: Pos { x: (i - sorted.len() as i64 / 2) * 2 * UNIT, z: 0 },
+                    pos: Pos {
+                        x: (i - sorted.len() as i64 / 2) * 2 * UNIT,
+                        z: 0,
+                    },
                     yaw: 0,
                     status: PlayerStatus::Alive,
                 },
@@ -366,8 +369,16 @@ impl Sim {
             // it. The player is slightly faster than the crab (PLAYER_SPEED > CRAB_SPEED),
             // so a good dodge slips by while standing still or a clumsy line gets grabbed:
             // the tiny-vs-giant asymmetry the loop is built on (rl#38).
-            crab: Crab { pos: Pos { x: 6 * UNIT, z: 20 * UNIT }, yaw: 0 },
-            extraction: ExtractionPoint { pos: Pos { x: 0, z: 40 * UNIT } },
+            crab: Crab {
+                pos: Pos {
+                    x: 6 * UNIT,
+                    z: 20 * UNIT,
+                },
+                yaw: 0,
+            },
+            extraction: ExtractionPoint {
+                pos: Pos { x: 0, z: 40 * UNIT },
+            },
             outcome: Outcome::Ongoing,
             rng: ChaCha8Rng::seed_from_u64(seed),
         }
@@ -459,7 +470,11 @@ impl Sim {
         for (id, p) in self.players.iter_mut() {
             if p.status == PlayerStatus::Alive
                 && within(p.pos.x, p.pos.z, ex.x, ex.z, EXTRACT_RADIUS)
-                && inputs.get(id).copied().unwrap_or_default().pressed(buttons::ACTION)
+                && inputs
+                    .get(id)
+                    .copied()
+                    .unwrap_or_default()
+                    .pressed(buttons::ACTION)
             {
                 p.status = PlayerStatus::Extracted;
             }
@@ -494,11 +509,18 @@ impl Sim {
     /// Decide the round from current player statuses. Extraction (a win) takes
     /// priority over a wipe so a rescue on the same tick as the last grab still wins.
     fn settle_outcome(&self) -> Outcome {
-        if self.players.values().any(|p| p.status == PlayerStatus::Extracted) {
+        if self
+            .players
+            .values()
+            .any(|p| p.status == PlayerStatus::Extracted)
+        {
             return Outcome::Extracted;
         }
         if !self.players.is_empty()
-            && self.players.values().all(|p| p.status == PlayerStatus::Downed)
+            && self
+                .players
+                .values()
+                .all(|p| p.status == PlayerStatus::Downed)
         {
             return Outcome::Wiped;
         }
@@ -688,11 +710,34 @@ pub mod trig {
     /// asserts equality, so a typo fails the build rather than silently skewing every
     /// angle.
     const ATAN_TURNS: [i64; ITERS] = [
-        2199023255552, 1298159229407, 685911684590, 348179481054, 174765388006, 87467890064,
-        43744617923, 21873643805, 10936988781, 5468515251, 2734260233, 1367130443,
-        683565262, 341782636, 170891319, 85445659, 42722830, 21361415,
-        10680707, 5340354, 2670177, 1335088, 667544, 333772,
-        166886, 83443, 41722, 20861,
+        2199023255552,
+        1298159229407,
+        685911684590,
+        348179481054,
+        174765388006,
+        87467890064,
+        43744617923,
+        21873643805,
+        10936988781,
+        5468515251,
+        2734260233,
+        1367130443,
+        683565262,
+        341782636,
+        170891319,
+        85445659,
+        42722830,
+        21361415,
+        10680707,
+        5340354,
+        2670177,
+        1335088,
+        667544,
+        333772,
+        166886,
+        83443,
+        41722,
+        20861,
     ];
     /// CORDIC start X = `round(ONE / K · 2^PREC)`, where `K = Π sqrt(1 + 2^-2i)` is the
     /// CORDIC gain. Pre-dividing by the gain means the rotation's final Y is directly
@@ -743,7 +788,7 @@ pub mod trig {
         let q = QUARTER;
         match a / q {
             0 => sine_table()[a],
-            1 => sine_table()[2 * q - a], // sin(π−x)=sin x
+            1 => sine_table()[2 * q - a],  // sin(π−x)=sin x
             2 => -sine_table()[a - 2 * q], // sin(π+x)=−sin x
             _ => -sine_table()[4 * q - a], // sin(2π−x)=−sin x
         }
@@ -837,7 +882,7 @@ pub mod trig {
 /// the sim" is enforced by where things live, not by a comment a render edit can
 /// ignore. Only client/render code (never [`Sim::step`]) calls this.
 pub mod trig_client {
-    use super::trig::{wrap_turns, TURN};
+    use super::trig::{TURN, wrap_turns};
 
     /// Convert a turn-unit angle (e.g. [`super::Player::yaw`]) to radians for the FP
     /// camera. Returns `f32`, so by construction it can't be used in the sim.
@@ -934,7 +979,10 @@ mod tests {
         let p1 = sim.player(PlayerId(0)).unwrap().pos();
         assert_eq!(p1.x, p0.x, "no X drift facing +Z");
         let dz = p1.z - p0.z;
-        assert!((dz - PLAYER_SPEED).abs() <= 1, "forward step ≈ PLAYER_SPEED, got {dz}");
+        assert!(
+            (dz - PLAYER_SPEED).abs() <= 1,
+            "forward step ≈ PLAYER_SPEED, got {dz}"
+        );
     }
 
     #[test]
@@ -956,7 +1004,10 @@ mod tests {
         let after = sim.player(PlayerId(0)).unwrap().pos();
         let dx = after.x - before.x;
         let dz = after.z - before.z;
-        assert!(dx.abs() > dz.abs(), "after a ~quarter turn, forward should move mostly in X (dx={dx}, dz={dz})");
+        assert!(
+            dx.abs() > dz.abs(),
+            "after a ~quarter turn, forward should move mostly in X (dx={dx}, dz={dz})"
+        );
     }
 
     #[test]
@@ -978,8 +1029,15 @@ mod tests {
             }
             sim.step(&neutral);
         }
-        assert_eq!(sim.outcome(), Outcome::Wiped, "standing-still player gets caught");
-        assert_eq!(sim.player(PlayerId(0)).unwrap().status(), PlayerStatus::Downed);
+        assert_eq!(
+            sim.outcome(),
+            Outcome::Wiped,
+            "standing-still player gets caught"
+        );
+        assert_eq!(
+            sim.player(PlayerId(0)).unwrap().status(),
+            PlayerStatus::Downed
+        );
     }
 
     #[test]
@@ -995,8 +1053,14 @@ mod tests {
         let ex = sim.extraction().pos();
         // Waypoints: out to -X, up the far side, then the point itself.
         let route = [
-            Pos { x: -30 * UNIT, z: 0 },
-            Pos { x: -30 * UNIT, z: ex.z },
+            Pos {
+                x: -30 * UNIT,
+                z: 0,
+            },
+            Pos {
+                x: -30 * UNIT,
+                z: ex.z,
+            },
             ex,
         ];
         let mut wp = 0usize;
@@ -1030,7 +1094,10 @@ mod tests {
                 break;
             }
         }
-        assert!(won, "a player who dodges the crab, reaches the point, and holds ACTION should extract");
+        assert!(
+            won,
+            "a player who dodges the crab, reaches the point, and holds ACTION should extract"
+        );
     }
 
     #[test]
@@ -1047,7 +1114,11 @@ mod tests {
             }
             sim.step(&neutral);
         }
-        assert_ne!(sim.outcome(), Outcome::Ongoing, "round should have resolved");
+        assert_ne!(
+            sim.outcome(),
+            Outcome::Ongoing,
+            "round should have resolved"
+        );
         let snapshot = |s: &Sim| {
             (
                 s.players().collect::<Vec<_>>(),
@@ -1060,7 +1131,11 @@ mod tests {
         for _ in 0..10 {
             sim.step(&neutral);
         }
-        assert_eq!(snapshot(&sim), frozen, "a decided round must freeze the world");
+        assert_eq!(
+            snapshot(&sim),
+            frozen,
+            "a decided round must freeze the world"
+        );
     }
 
     #[test]
@@ -1095,7 +1170,7 @@ mod tests {
 
     #[test]
     fn trig_table_hits_cardinal_points() {
-        use trig::{cos, sin, ONE, TURN};
+        use trig::{ONE, TURN, cos, sin};
         // sin: 0 at 0/π, +ONE at quarter, −ONE at three-quarter.
         assert_eq!(sin(0), 0);
         assert_eq!(sin(TURN / 2), 0);
@@ -1109,7 +1184,7 @@ mod tests {
 
     #[test]
     fn trig_pythagorean_identity_holds() {
-        use trig::{cos, sin, ONE};
+        use trig::{ONE, cos, sin};
         // sin²+cos² ≈ ONE² across the circle (integer table → small rounding slack).
         for k in 0..64 {
             let a = k * (trig::TURN / 64);
@@ -1124,25 +1199,45 @@ mod tests {
 
     #[test]
     fn atan2_recovers_cardinal_and_diagonal_directions() {
-        use trig::{atan2_turns, TURN};
+        use trig::{TURN, atan2_turns};
         // Convention: angle from +Z toward +X.
         let near = |a: i32, b: i32| trig::wrap_turns(a - b).min(trig::wrap_turns(b - a));
         assert!(near(atan2_turns(0, 1), 0) <= 2, "+Z is yaw 0");
         assert!(near(atan2_turns(1, 0), TURN / 4) <= 2, "+X is quarter turn");
         assert!(near(atan2_turns(0, -1), TURN / 2) <= 2, "−Z is half turn");
-        assert!(near(atan2_turns(-1, 0), 3 * TURN / 4) <= 2, "−X is three-quarter turn");
-        assert!(near(atan2_turns(1, 1), TURN / 8) <= 2, "+X+Z diagonal is eighth turn");
+        assert!(
+            near(atan2_turns(-1, 0), 3 * TURN / 4) <= 2,
+            "−X is three-quarter turn"
+        );
+        assert!(
+            near(atan2_turns(1, 1), TURN / 8) <= 2,
+            "+X+Z diagonal is eighth turn"
+        );
     }
 
     #[test]
     fn isqrt_matches_floor_sqrt() {
         for n in [
-            0i128, 1, 2, 3, 4, 8, 15, 16, 17, 100, 1_000_000, 1_000_003,
+            0i128,
+            1,
+            2,
+            3,
+            4,
+            8,
+            15,
+            16,
+            17,
+            100,
+            1_000_000,
+            1_000_003,
             i64::MAX as i128, // a value far past i64-squared range, to exercise the marathon case
             (i64::MAX as i128) * (i64::MAX as i128),
         ] {
             let r = isqrt_i128(n);
-            assert!(r * r <= n && (r + 1) * (r + 1) > n, "isqrt({n})={r} not floor sqrt");
+            assert!(
+                r * r <= n && (r + 1) * (r + 1) > n,
+                "isqrt({n})={r} not floor sqrt"
+            );
         }
     }
 
@@ -1152,16 +1247,16 @@ mod tests {
         // different libm agree. This test is the ONLY place float trig appears, and only
         // to PROVE the integer table equals the rounded f64 truth at every entry — if
         // CORDIC drifts, this fails. (The sim never runs this; it pins the table.)
-        use trig::{cos, sin, ONE, TURN};
+        use trig::{ONE, TURN, cos, sin};
         for a in 0..TURN {
-            let want = ((a as f64 / TURN as f64 * std::f64::consts::TAU).sin() * ONE as f64)
-                .round() as i32;
+            let want = ((a as f64 / TURN as f64 * std::f64::consts::TAU).sin() * ONE as f64).round()
+                as i32;
             assert_eq!(sin(a), want, "sin table off at {a}");
         }
         // cos derived as sin(a+quarter) — spot-check it tracks the reference too.
         for a in (0..TURN).step_by(257) {
-            let want = ((a as f64 / TURN as f64 * std::f64::consts::TAU).cos() * ONE as f64)
-                .round() as i32;
+            let want = ((a as f64 / TURN as f64 * std::f64::consts::TAU).cos() * ONE as f64).round()
+                as i32;
             assert_eq!(cos(a), want, "cos off at {a}");
         }
     }
@@ -1177,7 +1272,10 @@ mod tests {
         for _ in 0..5 {
             sim.step(&neutral);
             let now = sim.state_hash();
-            assert_ne!(now, prev, "crab moving (and tick advancing) must change the hash");
+            assert_ne!(
+                now, prev,
+                "crab moving (and tick advancing) must change the hash"
+            );
             prev = now;
         }
     }

@@ -1,0 +1,34 @@
+=== CLIPPY ===
+CLIPPY_EXIT=0
+=== FMT ===
+Diff in /tmp/rl-fp-build/src/bin/game.rs:30:
+ 
+ use anyhow::Result;
+ use clap::{Parser, Subcommand};
+-use rl::net::lockstep::{Lockstep, INPUT_DELAY};
++use rl::net::lockstep::{INPUT_DELAY, Lockstep};
+ use rl::net::sim::{Input, PlayerId};
+ use rl::net::{net_loop, render, transport};
+ 
+Diff in /tmp/rl-fp-build/src/bin/game.rs:120:
+ // builds its runtime explicitly, and the sync modes (`solo`/`play`/`fp-screenshot`)
+ // never touch one they don't own.
+ fn main() -> Result<()> {
+-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
++    tracing_subscriber::fmt()
++        .with_writer(std::io::stderr)
++        .init();
+     // No subcommand → the networked mode with its own defaults (parsed from an empty
+     // arg list so the `default_value_t`s are the single source, not duplicated here).
+     let command = Cli::parse()
+Diff in /tmp/rl-fp-build/src/bin/game.rs:318:
+         total_desyncs,
+         ls.sim().state_hash()
+     );
+-    if all_ids.len() > 1 && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(INPUT_DELAY + TICK_HZ) {
++    if all_ids.len() > 1
++        && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(INPUT_DELAY + TICK_HZ)
++    {
+         // We applied far fewer ticks than wall time allowed → we spent the run
+         // stalled waiting for a peer's input. Flag it; a healthy link keeps pace.
+FMT_EXIT=0

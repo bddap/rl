@@ -12,12 +12,26 @@
 //!   hashes to catch desync. Transport-agnostic.
 //! - [`transport`] — iroh mDNS LAN discovery + per-tick message exchange over QUIC.
 //!
+//! Two client-side layers build ON those, consuming the sim read-only and producing
+//! [`sim::Input`] — they add NO nondeterminism (the sim contract at the top of
+//! [`sim`] spells out why this is the firewall it is):
+//! - [`net_loop`] — a synchronous bridge from the async [`transport`] to a game main
+//!   loop (pump broadcast/inbox without `.await`), plus the discover-and-assign
+//!   cold-start shared with the headless driver.
+//! - [`render`] — the windowed first-person Bevy client (rl#38): FP camera at the
+//!   local player, the gray-box scene (players, the giant crab, the extraction
+//!   point), WASD+mouse+gamepad → [`sim::Input`], tick interpolation, and a headless
+//!   screenshot mode for evidence.
+//!
 //! The determinism-critical code ([`sim`] + [`lockstep`]) is pure and sync; all the
-//! async/IO lives in [`transport`]. That separation is deliberate: it keeps the part
-//! that MUST be reproducible free of any source of nondeterminism, and it's why the
-//! desync test below can prove determinism without touching the network.
+//! async/IO lives in [`transport`]/[`net_loop`] and all the rendering in [`render`].
+//! That separation is deliberate: it keeps the part that MUST be reproducible free of
+//! any source of nondeterminism, and it's why the desync test below can prove
+//! determinism without touching the network or a GPU.
 
 pub mod lockstep;
+pub mod net_loop;
+pub mod render;
 pub mod sim;
 pub mod transport;
 
@@ -42,7 +56,7 @@ mod desync_test {
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
-    use crate::net::sim::{buttons, Input, Outcome, PlayerId, Sim};
+    use crate::net::sim::{Input, Outcome, PlayerId, Sim, buttons};
 
     /// Generate a deterministic pseudo-random input log: `ticks` ticks, each with one
     /// input per player, spanning every input field — move axes, yaw-look delta, and
@@ -62,7 +76,11 @@ mod desync_test {
                         let look: f32 = rng.gen_range(-1.0..=1.0);
                         // Press action ~1/8 of ticks so extraction logic is exercised
                         // without the button being held constantly.
-                        let act = if rng.gen_range(0..8) == 0 { buttons::ACTION } else { 0 };
+                        let act = if rng.gen_range(0..8) == 0 {
+                            buttons::ACTION
+                        } else {
+                            0
+                        };
                         (p, Input::new(x, y, look, act))
                     })
                     .collect()
@@ -118,8 +136,15 @@ mod desync_test {
                 resolved_at = Some(t);
             }
         }
-        assert_eq!(a.outcome(), Outcome::Wiped, "still players must be wiped by the crab");
-        assert!(resolved_at.is_some(), "round must resolve mid-replay, then stay frozen");
+        assert_eq!(
+            a.outcome(),
+            Outcome::Wiped,
+            "still players must be wiped by the crab"
+        );
+        assert!(
+            resolved_at.is_some(),
+            "round must resolve mid-replay, then stay frozen"
+        );
     }
 
     #[test]
@@ -136,6 +161,10 @@ mod desync_test {
             }
             s.state_hash()
         };
-        assert_eq!(run(), run(), "same inputs must yield the same final state hash");
+        assert_eq!(
+            run(),
+            run(),
+            "same inputs must yield the same final state hash"
+        );
     }
 }
