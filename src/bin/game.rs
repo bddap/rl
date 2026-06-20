@@ -1,22 +1,22 @@
 //! `game` — the giant-crab rescue game (rl#38), built multiplayer-first on the
 //! deterministic-lockstep + iroh netcode foundation (rl#39).
 //!
-//! Phase 0 (this binary) is the skeleton: a trivial sim (player dots on a plane)
-//! driven by [`rl::net::lockstep`] over [`rl::net::transport`] (iroh LAN discovery).
-//! It exists to prove the netcode — discovery, input exchange, deterministic tick,
-//! desync detection — before any game content. Phase 1 (world + giant crab,
-//! first-person player, plane/heli) replaces the trivial sim behind the same
-//! interfaces.
+//! This binary is the HEADLESS driver of the deterministic sim ([`rl::net::sim`] —
+//! now the Phase 1 gray-box Extraction loop: first-person players, one giant crab,
+//! an extraction point) over [`rl::net::lockstep`] and [`rl::net::transport`] (iroh
+//! LAN discovery). It proves the netcode end to end — discovery, input exchange,
+//! deterministic tick, desync detection — without a GPU (this box renders headlessly
+//! at best). The windowed first-person client + the plane/heli vehicles are separate
+//! later subs that plug into the same sim interface (documented on [`rl::net::sim`]);
+//! they consume the state this driver advances, they don't replace it.
 //!
 //! Modes:
 //! - `net` (default headless): bind an iroh endpoint, discover peers on the LAN,
 //!   and run the lockstep loop for a fixed duration, printing per-second sync state.
 //!   Run two copies on a LAN to see them find each other and stay in sync.
 //! - `solo`: run the lockstep+sim loop with no network (one peer), for a quick
-//!   smoke of the tick machinery.
-//!
-//! The windowed/first-person Bevy client is Phase 1; keeping Phase 0 headless makes
-//! the foundation testable without a GPU (this box renders headlessly at best).
+//!   smoke of the tick machinery (it stirs a placeholder input — real movement is
+//!   the client's job, not this headless smoke's).
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -104,12 +104,19 @@ fn run_solo(args: SoloArgs) -> Result<()> {
         next += tick_dt;
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
     }
-    let dot = ls.sim().dot(me).unwrap();
+    let p = ls.sim().player(me).unwrap();
+    let pos = p.pos();
+    let crab = ls.sim().crab().pos();
     println!(
-        "solo: {} ticks, dot=({}, {}), hash={:#018x}",
+        "solo: {} ticks, player=({}, {}) yaw={} status={:?}, crab=({}, {}), outcome={:?}, hash={:#018x}",
         ls.sim().tick(),
-        dot.x,
-        dot.y,
+        pos.x,
+        pos.z,
+        p.yaw(),
+        p.status(),
+        crab.x,
+        crab.z,
+        ls.sim().outcome(),
         ls.sim().state_hash()
     );
     Ok(())
