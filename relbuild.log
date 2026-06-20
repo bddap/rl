@@ -1,0 +1,9 @@
+   |
+96 | fn yaw_forward(yaw_radians: f32) -> Vec3 {
+   |    ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rl` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 5m 05s
+BUILD_EXIT=0

@@ -1,0 +1,4 @@
+CLIPPY_EXIT=0
+   Compiling rl v0.1.0 (/tmp/rl-fp-build)
+    Finished `release` profile [optimized] target(s) in 23.56s
+BUILD_EXIT=0

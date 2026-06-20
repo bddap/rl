@@ -692,7 +692,8 @@ fn target_ball(
     // dodges a race with `BotPlugin`'s Startup resize of `CrabTargets`.
     let mut target = match targets.get(0) {
         Some(t) => t,
-        None => target_ball_at_from_env().unwrap_or_else(|| sample_target(origin, &mut rand::thread_rng())),
+        None => target_ball_at_from_env()
+            .unwrap_or_else(|| sample_target(origin, &mut rand::thread_rng())),
     };
 
     // Closest distance from either claw tip to the target (the reward's `d`, env 0).

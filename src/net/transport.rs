@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
+use iroh::endpoint::{Connection, RecvStream, SendStream, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
@@ -72,7 +72,10 @@ fn decode_msg(b: &[u8; TICKMSG_LEN]) -> TickMsg {
     TickMsg {
         apply_tick: u64::from_le_bytes(b[0..OFF_INPUT].try_into().unwrap()),
         input: crate::net::sim::Input::from_bytes(b[OFF_INPUT..OFF_CTICK].try_into().unwrap()),
-        confirmed: (ctick != NO_CONFIRMED_TICK).then_some(Confirmed { tick: ctick, hash: chash }),
+        confirmed: (ctick != NO_CONFIRMED_TICK).then_some(Confirmed {
+            tick: ctick,
+            hash: chash,
+        }),
     }
 }
 
@@ -203,7 +206,10 @@ impl Session {
         // connected_peers); the per-`send` mutex still serializes that peer's frames.
         let targets: Vec<(EndpointId, Arc<tokio::sync::Mutex<SendStream>>)> = {
             let links = self.links.lock().await;
-            links.iter().map(|(id, link)| (*id, link.send.clone())).collect()
+            links
+                .iter()
+                .map(|(id, link)| (*id, link.send.clone()))
+                .collect()
         };
         let mut dead = Vec::new();
         for (id, send) in targets {
@@ -219,7 +225,10 @@ impl Session {
                 // Only drop the link if it's still the SAME send half that failed —
                 // a reconnect may have replaced it for this id between the write and
                 // here, and we must not evict the fresh link.
-                if links.get(&id).is_some_and(|l| Arc::ptr_eq(&l.send, &failed_send)) {
+                if links
+                    .get(&id)
+                    .is_some_and(|l| Arc::ptr_eq(&l.send, &failed_send))
+                {
                     links.remove(&id);
                 }
             }
@@ -321,8 +330,13 @@ struct LockstepProto {
 
 impl ProtocolHandler for LockstepProto {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        if let Err(e) =
-            wire_connection(self.my_id, connection, self.inbox.clone(), self.links.clone()).await
+        if let Err(e) = wire_connection(
+            self.my_id,
+            connection,
+            self.inbox.clone(),
+            self.links.clone(),
+        )
+        .await
         {
             tracing::warn!("accepting lockstep connection failed: {e:#}");
         }
@@ -370,7 +384,10 @@ async fn wire_connection(
     }
 
     let send = Arc::new(tokio::sync::Mutex::new(send));
-    links.lock().await.insert(peer, PeerLink { send: send.clone() });
+    links
+        .lock()
+        .await
+        .insert(peer, PeerLink { send: send.clone() });
 
     let links_for_reader = links.clone();
     tokio::spawn(async move {
@@ -381,7 +398,10 @@ async fn wire_connection(
         // only if it's still THIS connection's link: a reconnect may have replaced it
         // for the same id, and a late EOF from the old reader must not evict the new.
         let mut links = links_for_reader.lock().await;
-        if links.get(&peer).is_some_and(|l| Arc::ptr_eq(&l.send, &send)) {
+        if links
+            .get(&peer)
+            .is_some_and(|l| Arc::ptr_eq(&l.send, &send))
+        {
             links.remove(&peer);
         }
     });
@@ -390,7 +410,11 @@ async fn wire_connection(
 
 /// Read framed [`TickMsg`]s from a peer's recv stream until it closes, forwarding
 /// each into the shared inbox tagged with the authenticated peer id.
-async fn read_loop(mut recv: RecvStream, peer: EndpointId, inbox: mpsc::Sender<FromPeer>) -> Result<()> {
+async fn read_loop(
+    mut recv: RecvStream,
+    peer: EndpointId,
+    inbox: mpsc::Sender<FromPeer>,
+) -> Result<()> {
     loop {
         let mut lenb = [0u8; 4];
         if recv.read_exact(&mut lenb).await.is_err() {
@@ -399,7 +423,9 @@ async fn read_loop(mut recv: RecvStream, peer: EndpointId, inbox: mpsc::Sender<F
         let len = u32::from_le_bytes(lenb) as usize;
         anyhow::ensure!(len == TICKMSG_LEN, "unexpected frame length {len}");
         let mut body = [0u8; TICKMSG_LEN];
-        recv.read_exact(&mut body).await.context("reading frame body")?;
+        recv.read_exact(&mut body)
+            .await
+            .context("reading frame body")?;
         let msg = decode_msg(&body);
         if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
             return Ok(()); // session dropped
@@ -424,7 +450,10 @@ mod tests {
         // Both the confirmed-Some case and the None case (which uses the wire
         // sentinel) must round-trip exactly.
         for confirmed in [
-            Some(Confirmed { tick: 1232, hash: 0xdead_beef_cafe_f00d }),
+            Some(Confirmed {
+                tick: 1232,
+                hash: 0xdead_beef_cafe_f00d,
+            }),
             None,
         ] {
             let m = TickMsg {
