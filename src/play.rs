@@ -27,13 +27,14 @@ use rand::Rng;
 
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::bot::body::{
-    self, CrabAssets, CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId, Side,
+    self, CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabJoint, CrabJointId, Side,
 };
 use crate::bot::brain::CrabBrain;
-use crate::bot::sensor::{CrabObservation, OBS_SIZE};
+use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{BotSet, CrabSpawns, respawn_crab_rotated};
 use crate::training::session::{
-    BRAIN_STEM, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend,
+    BRAIN_STEM, DEMO_TOUCH_RADIUS, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend,
+    sample_target,
 };
 
 /// A loaded policy that maps observations to actions for inference (no learning).
@@ -346,7 +347,7 @@ impl Plugin for DemoPlugin {
         app.init_resource::<DemoSettle>()
             .init_resource::<DemoRetilt>()
             .init_resource::<PokeBurst>()
-            .add_systems(Startup, (spawn_orbit_camera, spawn_hud))
+            .add_systems(Startup, (spawn_orbit_camera, spawn_hud, spawn_target_ball))
             .add_systems(Update, (orbit_camera, demo_controls))
             .add_systems(
                 FixedUpdate,
@@ -365,6 +366,10 @@ impl Plugin for DemoPlugin {
                     demo_fall_rescue.before(BotSet::Sense),
                     demo_retilt.before(BotSet::Sense),
                     demo_poke.after(BotSet::Act).before(PhysicsSet::SyncBackend),
+                    // After Sense so it reads the same post-physics claw-tip and target
+                    // state the observation just consumed — touch detection and the ball
+                    // then agree with what the policy saw this tick.
+                    target_ball.after(BotSet::Sense),
                 ),
             );
         // Both drivers are always present; `ManualControl.active` (seeded by the
@@ -623,6 +628,93 @@ fn demo_respawn(
 /// yaw — so the demo crab keeps landing at new angles to right itself from.
 fn random_demo_tilt() -> Quat {
     body::random_spawn_rotation(&mut rand::thread_rng())
+}
+
+/// Marker on the demo's red target ball — the visible stand-in for the touch
+/// target the policy is reaching for. Demo-only: training renders nothing and
+/// reads the target straight from [`CrabTargets`].
+#[derive(Component)]
+struct TargetBall;
+
+/// Radius (m) of the demo target ball. Bigger than [`DEMO_TOUCH_RADIUS`] so the
+/// claw visibly reaches *into* the ball before it registers a touch and jumps —
+/// a marker you can see from the orbit camera, not a pinprick.
+const TARGET_BALL_RADIUS: f32 = 0.08;
+
+/// Startup (demo only): spawn the red target ball. Its world position is driven
+/// every tick by [`target_ball`] off [`CrabTargets`] — the same state the policy
+/// observes and the reward scores — so it is a pure marker, never a second source of
+/// truth. The target itself is seeded by `target_ball` (in FixedUpdate, after the
+/// Startup that sizes [`CrabTargets`]), so the ball starts at the origin and snaps to
+/// its target on the first tick.
+fn spawn_target_ball(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        Mesh3d(meshes.add(Sphere::new(TARGET_BALL_RADIUS))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.9, 0.05, 0.05),
+            // Emissive so the ball reads as a bright, self-lit dot regardless of
+            // where the scene lighting falls — unmistakable against the crab/ground.
+            emissive: LinearRgba::new(1.6, 0.0, 0.0, 1.0),
+            ..default()
+        })),
+        Transform::from_translation(Vec3::ZERO),
+        TargetBall,
+    ));
+}
+
+/// FixedUpdate (demo only): drive the red ball off env 0's target, and TELEPORT the
+/// target when a claw tip touches it. [`CrabTargets`] is the single source of truth —
+/// the same resource the observation reads and (in training) the reward scores; here
+/// we seed/relocate that resource and then snap the ball to it, so the ball can never
+/// disagree with the target the policy perceives. Seeding and relocation both reuse
+/// [`sample_target`], the exact box the training reward samples, so a demo target is
+/// always the same kind of reach the policy was trained on. Touch is the closest
+/// claw-tip-to-target distance falling within [`DEMO_TOUCH_RADIUS`] — the demo's
+/// discrete stand-in for the reward's smooth `exp(−d/S)` bump (which has no threshold).
+/// (The demo runs no training target system, so this is the only writer of env 0's
+/// target; the initial seed happens here rather than at Startup because `BotPlugin`'s
+/// Startup resize of [`CrabTargets`] would otherwise race and clear it.)
+fn target_ball(
+    spawns: Res<CrabSpawns>,
+    mut targets: ResMut<CrabTargets>,
+    claw_tips_q: Query<(&body::CrabEnvId, &Transform), With<CrabClawTip>>,
+    mut ball_q: Query<&mut Transform, (With<TargetBall>, Without<CrabClawTip>)>,
+) {
+    let origin = spawns.0.first().copied().unwrap_or(Vec3::ZERO);
+
+    // Seed on first tick (target unset) so the demo always has a reach to show. An
+    // explicit `RL_TARGET_BALL_AT` (screenshot evidence frames) pins the seed to a
+    // chosen point; otherwise sample the reach box. Seeding here, not at Startup,
+    // dodges a race with `BotPlugin`'s Startup resize of `CrabTargets`.
+    let mut target = match targets.get(0) {
+        Some(t) => t,
+        None => target_ball_at_from_env().unwrap_or_else(|| sample_target(origin, &mut rand::thread_rng())),
+    };
+
+    // Closest distance from either claw tip to the target (the reward's `d`, env 0).
+    let mut min_dist = f32::INFINITY;
+    for (env, tip) in claw_tips_q.iter() {
+        if env.0 == 0 && tip.translation.is_finite() {
+            min_dist = min_dist.min(tip.translation.distance(target));
+        }
+    }
+
+    // Touched → relocate to a fresh reach. The ball follows the new target below.
+    if min_dist <= DEMO_TOUCH_RADIUS {
+        target = sample_target(origin, &mut rand::thread_rng());
+    }
+
+    // Write the one source of truth (seed or relocation), then snap the ball to it.
+    if let Some(slot) = targets.envs.first_mut() {
+        *slot = Some(target);
+    }
+    if let Ok(mut ball) = ball_q.single_mut() {
+        ball.translation = target;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1118,10 +1210,35 @@ fn pose_drive_step(
     }
 }
 
+/// Read `RL_TARGET_BALL_AT="x,y,z"` into an explicit world target for the screenshot
+/// ball, so an evidence frame can place the red ball at a chosen reachable point next
+/// to the crab (and a second frame at a moved point) deterministically, instead of a
+/// random sample. `None` (the default) lets [`target_ball`] sample the reach box.
+fn target_ball_at_from_env() -> Option<Vec3> {
+    let raw = std::env::var("RL_TARGET_BALL_AT").ok()?;
+    let parts: Vec<f32> = raw
+        .split(',')
+        .filter_map(|s| s.trim().parse::<f32>().ok())
+        .collect();
+    match parts.as_slice() {
+        [x, y, z] => Some(Vec3::new(*x, *y, *z)),
+        _ => None,
+    }
+}
+
 impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
         add_inference(app, &self.checkpoint_dir, None);
         app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
+        // RL_TARGET_BALL=1: render the demo's red target ball in the screenshot too,
+        // off the same `CrabTargets` state, so the target-touch viz can be inspected
+        // headless. `target_ball` seeds (honoring RL_TARGET_BALL_AT), drives, and
+        // teleports the target exactly as in the demo. Inert by default — a plain
+        // screenshot is unchanged.
+        if std::env::var_os("RL_TARGET_BALL").is_some() {
+            app.add_systems(Startup, spawn_target_ball)
+                .add_systems(FixedUpdate, target_ball.after(BotSet::Sense));
+        }
         // RL_POSE_JOINT: drive one joint's motor in isolation for an anatomy check.
         // Runs after `policy_step` in the same set so its override wins over the
         // (zero-action, no-checkpoint) policy. Inert unless the env var is set.

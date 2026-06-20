@@ -1088,8 +1088,10 @@ const TARGET_Y_MAX: f32 = 0.7;
 /// reset so every episode poses a new reach. World-space (not carapace-relative)
 /// because the crab spawns at varied orientations and may drift: a point fixed in
 /// the world is an unambiguous goal the observation re-expresses in body axes each
-/// tick.
-fn sample_target(origin: Vec3, rng: &mut impl rand::Rng) -> Vec3 {
+/// tick. `pub(crate)` so the demo's red-ball marker (`play::target_ball`) relocates
+/// its target through the very same box the reward samples — one sampling rule, so
+/// the demo can never pose a target the trained reach wasn't shaped for.
+pub(crate) fn sample_target(origin: Vec3, rng: &mut impl rand::Rng) -> Vec3 {
     origin
         + Vec3::new(
             rng.gen_range(-TARGET_REACH_XZ..TARGET_REACH_XZ),
@@ -1126,6 +1128,14 @@ fn seed_target(targets: &mut CrabTargets, spawns: &CrabSpawns, e: usize) {
 /// reaching" tuning, not the hard constraint.)
 const TOUCH_WEIGHT: f32 = 0.4;
 const TOUCH_SCALE: f32 = 0.4;
+
+/// Contact radius (m) at which the DEMO counts the target as touched and teleports
+/// it (see `play::target_ball`). The training reward has no discrete threshold — it
+/// pays the smooth `exp(−d/S)` everywhere — so the demo needs its own "close enough
+/// to register a hit" distance. Set well inside `TOUCH_SCALE` so the ball only jumps
+/// when a claw tip is genuinely on it (near the peak of the reward bump), not merely
+/// in the reward's broad gradient. Demo-only: it changes no training reward math.
+pub(crate) const DEMO_TOUCH_RADIUS: f32 = 0.12;
 
 /// Shaped proximity bonus for reaching a claw tip to the target: `W·u·exp(−d/S)`,
 /// where `d` is the minimum distance over (claw tip, target) pairs and `u` is
@@ -1760,6 +1770,38 @@ mod tests {
             touch_bonus(Some(0.2), 1.0) > touch_bonus(Some(0.2), 0.3),
             "at equal distance, a more upright crab earns more touch reward"
         );
+    }
+
+    #[test]
+    fn demo_touch_radius_and_sampling_match_the_reward() {
+        // The demo's discrete "touched → teleport" radius (used by `play::target_ball`)
+        // must register a hit only when a claw tip is genuinely ON the target — near
+        // the PEAK of the reward's smooth `exp(−d/S)` bump — not anywhere in its broad
+        // gradient. So the contact radius sits well inside the reward's length scale.
+        assert!(
+            DEMO_TOUCH_RADIUS < TOUCH_SCALE,
+            "the demo contact radius ({DEMO_TOUCH_RADIUS}) must be inside the reward's \
+             length scale ({TOUCH_SCALE}) so a teleport fires only on a real touch"
+        );
+        // At the contact radius the reward is still paying most of the full touch
+        // weight — confirming the ball jumps where the policy was actually rewarded.
+        assert!(
+            touch_bonus(Some(DEMO_TOUCH_RADIUS), 1.0) > 0.5 * TOUCH_WEIGHT,
+            "a registered demo touch lands near the reward's peak, not in its tail"
+        );
+
+        // The demo relocates the target through `sample_target` — the SAME box the
+        // reward samples — so every demo target is a reach the policy was trained on.
+        // Check a batch lands inside that box around an arbitrary origin.
+        let origin = Vec3::new(3.0, 0.0, -2.0);
+        let mut rng = rand::thread_rng();
+        for _ in 0..256 {
+            let t = sample_target(origin, &mut rng);
+            assert!(t.is_finite(), "a sampled target is always finite");
+            assert!((t.x - origin.x).abs() <= TARGET_REACH_XZ);
+            assert!((t.z - origin.z).abs() <= TARGET_REACH_XZ);
+            assert!(t.y >= origin.y + TARGET_Y_MIN && t.y <= origin.y + TARGET_Y_MAX);
+        }
     }
 
     #[test]
