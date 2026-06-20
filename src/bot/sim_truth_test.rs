@@ -428,10 +428,10 @@ fn crab_settles_quietly_at_rest() {
          leg crumple {crumple:.3} rad, max anchor gap {max_gap:.4} m"
     );
 
-    // Shipped at substeps=2 + 5 Hz contact spring: ~0.11 rad/s, ~0.15 cm. The bars
-    // sit below the stiffer-contact regressions they catch: 12 Hz ~0.61 / ~0.32 cm,
-    // the 30 Hz default ~1.44 / ~3.6 cm, substeps=1 ~1.54 / ~3.0 cm. The sim is
-    // deterministic, so these are exact.
+    // Shipped at substeps=2 + 5 Hz contact spring, 0.04 friction cap: ~0.09 rad/s,
+    // ~2.1 cm bounce. The bars sit below the stiffer-contact regressions they catch:
+    // 12 Hz ~0.61 / ~0.32 cm, the 30 Hz default ~1.44 / ~3.6 cm, substeps=1 ~1.54 /
+    // ~3.0 cm. The sim is deterministic, so these are exact.
     assert!(
         ang_mean < 0.3,
         "carapace still twitching at rest: angular speed mean {ang_mean:.3} rad/s \
@@ -439,11 +439,17 @@ fn crab_settles_quietly_at_rest() {
     );
     // The contact spring rings the carapace ~13 mm at rest, so the bar sits above that
     // with headroom; finer contact tuning is bddap/rl#20. It still trips on a gross
-    // regression.
+    // regression. At the chosen 0.04 friction cap (rl#42 floppiness — the look the
+    // owner picked) the legs crumple harder (~1.10 rad here vs ~0.7 at 0.1), so the
+    // body settles a hair lower and the foot-touchdown contact rings ~2 mm more:
+    // measured 0.021 m, calm in every other axis (angular speed 0.092 rad/s, anchor
+    // gap 0.0). The bar tracks that floppier settle (<0.024) and still sits well below
+    // the genuine contact regressions it guards — substeps=1 ~0.030, the 30 Hz default
+    // ~0.036. The sim is deterministic, so this is exact.
     assert!(
-        bounce < 0.018,
-        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.018; the 30 Hz \
-         contact regression ~0.036, substeps=1 ~0.030)"
+        bounce < 0.024,
+        "carapace bouncing at rest: {bounce:.4} m peak-to-peak (want <0.024 at the 0.04 \
+         floppy cap; the 30 Hz contact regression ~0.036, substeps=1 ~0.030)"
     );
     assert!(
         crumple > 0.4,
