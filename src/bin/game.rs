@@ -155,7 +155,10 @@ fn run_play(args: PlayArgs) -> Result<()> {
     let (ls, net) = if args.solo {
         let me = PlayerId(0);
         let pilots = pilots_from_env(me);
-        (Lockstep::new_with_pilots(MATCH_SEED, &[me], me, &pilots), None)
+        (
+            Lockstep::new_with_pilots(MATCH_SEED, &[me], me, &pilots),
+            None,
+        )
     } else {
         let (ls, driver) =
             net_loop::connect_and_assign(MATCH_SEED, args.discover_secs, args.expect)?;
@@ -252,11 +255,10 @@ async fn run_net(args: NetArgs) -> Result<()> {
     let my_eid = session.endpoint_id();
     println!("game endpoint id: {my_eid}");
 
-    // Discover + freeze + assign ids via the shared cold-start (same code the windowed
+    // Form one agreed match via the shared cold-start barrier (same code the windowed
     // client runs, so the two can't drift apart and desync). Replay any inputs that
-    // arrived during discovery into the fresh sim.
-    let frozen =
-        net_loop::discover_and_freeze(&mut session, args.discover_secs, args.expect).await?;
+    // arrived during formation into the fresh sim.
+    let frozen = net_loop::form_match(&mut session, args.discover_secs, args.expect).await?;
     let me = frozen.me;
     let id_map = &frozen.id_map;
     let all_ids: Vec<PlayerId> = id_map.values().copied().collect();
@@ -282,11 +284,14 @@ async fn run_net(args: NetArgs) -> Result<()> {
     while Instant::now() < end {
         ticker.tick().await;
 
-        // Ingest everything the transport has for us this tick. A late-arriving hash
-        // for an already-applied tick can surface a fault right here.
+        // Ingest everything the transport has for us this tick. Only lockstep ticks
+        // matter now; a stray barrier beat from a peer still winding down its formation
+        // loop is ignored. A late-arriving hash for an already-applied tick can surface
+        // a fault right here.
         while let Some(m) = session.try_recv() {
-            if let Some(&pid) = id_map.get(&m.from)
-                && let Some(f) = ls.record_remote(pid, m.msg)
+            if let transport::PeerWire::Tick(msg) = m.msg
+                && let Some(&pid) = id_map.get(&m.from)
+                && let Some(f) = ls.record_remote(pid, msg)
             {
                 report_fault(&mut total_desyncs, f);
             }

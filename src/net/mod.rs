@@ -30,6 +30,7 @@
 //! determinism without touching the network or a GPU.
 
 pub mod lockstep;
+pub mod membership;
 pub mod net_loop;
 pub mod render;
 pub mod sim;

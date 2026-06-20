@@ -22,16 +22,52 @@ use n0_future::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::net::lockstep::{Confirmed, TickMsg};
+use crate::net::membership::{self, Beat};
 
-/// ALPN for the game's lockstep wire. `/0` is the framing in this module: a stream
-/// of `[len:u32 LE][TickMsg bytes]`. Bumped on any incompatible wire change so
-/// mismatched builds refuse to connect rather than desync.
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/0";
+/// ALPN for the game's wire. The framing is `[len:u32 LE][kind:u8][body]`, where
+/// `kind` ([`Frame`]) selects a per-tick [`TickMsg`] (the lockstep channel) or a
+/// [`Beat`] (the match-formation barrier channel — rl#44). Bumped on any incompatible
+/// wire change so mismatched builds refuse to connect rather than desync. `/1` adds the
+/// kind byte + the barrier channel over `/0`'s bare-TickMsg stream.
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/1";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
 /// apps). All peers must use the same name to find each other.
 pub const SERVICE_NAME: &str = "bddap-rl-game";
+
+/// Frame kind, the byte right after the length prefix. Selects how the body decodes so
+/// the lockstep channel ([`TickMsg`]) and the formation-barrier channel ([`Beat`]) can
+/// share one QUIC stream without ambiguity. An unknown kind is a wire mismatch and the
+/// frame is rejected (closing the link) rather than guessed at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Frame {
+    /// A per-tick lockstep [`TickMsg`] (the input/hash channel).
+    Tick = 0,
+    /// A [`Beat`]: heartbeat + roster advertisement for the formation barrier (rl#44).
+    Beat = 1,
+}
+
+impl Frame {
+    fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Frame::Tick),
+            1 => Some(Frame::Beat),
+            _ => None,
+        }
+    }
+}
+
+/// A decoded frame from a peer: which channel it arrived on. The barrier driver reads
+/// [`PeerWire::Beat`]s during formation; the lockstep driver reads
+/// [`PeerWire::Tick`]s during play. Tagging at the transport (not the consumer) keeps
+/// each driver from having to know the other's wire.
+#[derive(Debug, Clone)]
+pub enum PeerWire {
+    Tick(TickMsg),
+    Beat(Beat),
+}
 
 /// Wire sentinel for [`TickMsg::confirmed`] == `None`. `u64::MAX` as the tick can
 /// never occur in play (the sim would overflow long before), so it unambiguously
@@ -51,8 +87,9 @@ const OFF_CHASH: usize = OFF_CTICK + 8; // after confirmed_tick(8)
 /// confirmed_hash(8).
 const TICKMSG_LEN: usize = OFF_CHASH + 8;
 
-/// Encode a [`TickMsg`] to its fixed-width little-endian wire form.
-fn encode_msg(m: &TickMsg) -> [u8; TICKMSG_LEN] {
+/// Encode a [`TickMsg`] body to its fixed-width little-endian wire form (without the
+/// frame kind/length, which [`write_frame`] prepends).
+fn encode_tick_body(m: &TickMsg) -> [u8; TICKMSG_LEN] {
     let (ctick, chash) = match m.confirmed {
         Some(c) => (c.tick, c.hash),
         None => (NO_CONFIRMED_TICK, 0),
@@ -65,8 +102,8 @@ fn encode_msg(m: &TickMsg) -> [u8; TICKMSG_LEN] {
     b
 }
 
-/// Inverse of [`encode_msg`].
-fn decode_msg(b: &[u8; TICKMSG_LEN]) -> TickMsg {
+/// Inverse of [`encode_tick_body`].
+fn decode_tick_body(b: &[u8; TICKMSG_LEN]) -> TickMsg {
     let ctick = u64::from_le_bytes(b[OFF_CTICK..OFF_CHASH].try_into().unwrap());
     let chash = u64::from_le_bytes(b[OFF_CHASH..].try_into().unwrap());
     TickMsg {
@@ -79,13 +116,13 @@ fn decode_msg(b: &[u8; TICKMSG_LEN]) -> TickMsg {
     }
 }
 
-/// A message received from a specific peer. `from` is the QUIC-authenticated peer
-/// id — the trustworthy sender identity (never read the sender from the body), which
-/// the lockstep driver needs so a peer can't inject input as someone else.
-#[derive(Debug, Clone, Copy)]
+/// A frame received from a specific peer. `from` is the QUIC-authenticated peer id —
+/// the trustworthy sender identity (never read the sender from the body), which the
+/// drivers need so a peer can't inject input (or a roster vote) as someone else.
+#[derive(Debug, Clone)]
 pub struct FromPeer {
     pub from: EndpointId,
-    pub msg: TickMsg,
+    pub msg: PeerWire,
 }
 
 /// How long to wait for the endpoint to enumerate at least one local IP address
@@ -168,8 +205,11 @@ struct PeerLink {
 pub struct Session {
     endpoint: Endpoint,
     _router: Router,
-    /// Inbound messages from all peers, tagged with the authenticated sender.
+    /// Inbound frames from all peers, tagged with the authenticated sender.
     inbox: mpsc::Receiver<FromPeer>,
+    /// A clone of the inbox SENDER, so a direct dial ([`Session::connect_direct`]) can
+    /// wire its reader into the same shared inbox the discovery/accept paths feed.
+    inbox_tx: mpsc::Sender<FromPeer>,
     /// Outbound links keyed by peer id. Grows as peers connect (discovery or accept).
     links: Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>,
     /// The mDNS discovery loop. Held only to abort it on drop (it owns the mDNS
@@ -195,13 +235,57 @@ impl Session {
         self.links.lock().await.keys().copied().collect()
     }
 
-    /// Send our tick message to every connected peer. A send failure on one link is
-    /// logged and the link dropped — a dead peer must not block the others (lockstep
-    /// will stall on the missing input, which is the correct, visible failure).
+    /// This endpoint's dialable address (id + direct addresses) — what a peer passes to
+    /// [`Session::connect_direct`] to reach us without mDNS. A hook for the
+    /// multi-endpoint formation test and a future out-of-band "connect by code" path
+    /// (Steam), where peers exchange addresses some way other than LAN multicast.
+    pub fn local_addr(&self) -> iroh::EndpointAddr {
+        self.endpoint.addr()
+    }
+
+    /// Dial a peer directly by its [`iroh::EndpointAddr`], bypassing mDNS, and wire it
+    /// up exactly like a discovered/accepted peer (same `ALPN`, same reader into the
+    /// shared inbox, same link bookkeeping). For tests and out-of-band connection
+    /// setups; the normal LAN path is mDNS discovery in [`start_session`]. The id
+    /// tie-break (lower id opens the stream) is enforced inside [`wire_connection`], so
+    /// dialing the "wrong" direction still yields one correctly-oriented stream.
+    pub async fn connect_direct(&self, addr: impl Into<iroh::EndpointAddr>) -> Result<()> {
+        let conn = self
+            .endpoint
+            .connect(addr, ALPN)
+            .await
+            .context("direct-dialing peer")?;
+        wire_connection(
+            self.endpoint.id(),
+            conn,
+            self.inbox_tx.clone(),
+            self.links.clone(),
+        )
+        .await
+    }
+
+    /// Send our per-tick [`TickMsg`] (the lockstep channel) to every connected peer.
     pub async fn broadcast(&self, msg: &TickMsg) {
-        let bytes = encode_msg(msg);
+        self.broadcast_frame(Frame::Tick, &encode_tick_body(msg))
+            .await;
+    }
+
+    /// Send our [`Beat`] (the formation-barrier channel, rl#44) to every connected
+    /// peer. Used only during cold-start; once the match starts the lockstep channel
+    /// takes over. Separate from [`Session::broadcast`] so the barrier driver and the
+    /// tick driver each speak only their own channel.
+    pub async fn broadcast_beat(&self, beat: &Beat) {
+        self.broadcast_frame(Frame::Beat, &membership::encode_beat(beat))
+            .await;
+    }
+
+    /// Frame `body` with `kind` + length and send it to every connected peer. A send
+    /// failure on one link is logged and the link dropped — a dead peer must not block
+    /// the others (the lockstep stall on its missing input, or its expiry from the
+    /// barrier, is the correct visible failure).
+    async fn broadcast_frame(&self, kind: Frame, body: &[u8]) {
         // Snapshot the send halves under the map lock, then RELEASE it before any
-        // network write. Holding the map lock across `write_framed().await` would let
+        // network write. Holding the map lock across `write_frame().await` would let
         // one backpressured peer stall every other map user (link insert/remove,
         // connected_peers); the per-`send` mutex still serializes that peer's frames.
         let targets: Vec<(EndpointId, Arc<tokio::sync::Mutex<SendStream>>)> = {
@@ -214,7 +298,7 @@ impl Session {
         let mut dead = Vec::new();
         for (id, send) in targets {
             let mut s = send.lock().await;
-            if let Err(e) = write_framed(&mut s, &bytes).await {
+            if let Err(e) = write_frame(&mut s, kind, body).await {
                 tracing::warn!(%id, "peer send failed, dropping link: {e:#}");
                 dead.push((id, send.clone()));
             }
@@ -235,8 +319,8 @@ impl Session {
         }
     }
 
-    /// Pull the next peer message if one is ready, without blocking. The caller polls
-    /// this each tick to feed [`crate::net::lockstep::Lockstep::record_remote`].
+    /// Pull the next peer frame if one is ready, without blocking. The caller polls
+    /// this each tick (lockstep) or each barrier round to feed the relevant driver.
     pub fn try_recv(&mut self) -> Option<FromPeer> {
         self.inbox.try_recv().ok()
     }
@@ -272,6 +356,10 @@ pub async fn start_session() -> Result<Session> {
     let router = Router::builder(endpoint.clone())
         .accept(ALPN, handler)
         .spawn();
+
+    // Keep a sender clone for the session itself (direct-dial path) before the
+    // discovery loop takes ownership of the original.
+    let inbox_tx_for_session = inbox_tx.clone();
 
     // Discovery side: subscribe to mDNS events; for each newly-seen peer that we
     // should dial (our id < theirs, the tie-break that prevents a double connect),
@@ -315,6 +403,7 @@ pub async fn start_session() -> Result<Session> {
         endpoint,
         _router: router,
         inbox: inbox_rx,
+        inbox_tx: inbox_tx_for_session,
         links,
         discovery,
     })
@@ -408,8 +497,17 @@ async fn wire_connection(
     Ok(())
 }
 
-/// Read framed [`TickMsg`]s from a peer's recv stream until it closes, forwarding
-/// each into the shared inbox tagged with the authenticated peer id.
+/// Upper bound on a single frame body, to reject a hostile/garbled length before
+/// allocating. The largest legitimate frame is a full-roster [`Beat`]
+/// (kind + count + 256×32-byte ids ≈ 8 KiB); 16 KiB is generous slack and still bounds
+/// a bad length to a small allocation.
+const MAX_FRAME_LEN: usize = 16 * 1024;
+
+/// Read `[len:u32 LE][kind:u8][body]` frames from a peer's recv stream until it closes,
+/// decoding each into a [`PeerWire`] (a lockstep tick or a barrier beat) and forwarding
+/// it into the shared inbox tagged with the authenticated peer id. An unknown kind or a
+/// body that fails to decode is a wire mismatch: surfaced as an error (which closes the
+/// link) rather than silently skipped, so a mixed-version peer fails loudly.
 async fn read_loop(
     mut recv: RecvStream,
     peer: EndpointId,
@@ -421,21 +519,36 @@ async fn read_loop(
             return Ok(()); // clean EOF: peer closed the stream
         }
         let len = u32::from_le_bytes(lenb) as usize;
-        anyhow::ensure!(len == TICKMSG_LEN, "unexpected frame length {len}");
-        let mut body = [0u8; TICKMSG_LEN];
-        recv.read_exact(&mut body)
+        anyhow::ensure!(len >= 1, "frame length {len} has no room for a kind byte");
+        anyhow::ensure!(len <= MAX_FRAME_LEN, "frame length {len} exceeds cap");
+        let mut buf = vec![0u8; len];
+        recv.read_exact(&mut buf)
             .await
             .context("reading frame body")?;
-        let msg = decode_msg(&body);
+        let kind = Frame::from_byte(buf[0])
+            .with_context(|| format!("unknown frame kind {:#x}", buf[0]))?;
+        let body = &buf[1..];
+        let msg = match kind {
+            Frame::Tick => {
+                let arr: [u8; TICKMSG_LEN] = body.try_into().map_err(|_| {
+                    anyhow::anyhow!("tick frame body is {} B, want {TICKMSG_LEN}", body.len())
+                })?;
+                PeerWire::Tick(decode_tick_body(&arr))
+            }
+            Frame::Beat => PeerWire::Beat(membership::decode_beat(body)?),
+        };
         if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
             return Ok(()); // session dropped
         }
     }
 }
 
-/// Write one length-framed message to a send stream.
-async fn write_framed(send: &mut SendStream, body: &[u8]) -> Result<()> {
-    send.write_all(&(body.len() as u32).to_le_bytes()).await?;
+/// Write one `[len:u32 LE][kind:u8][body]` frame to a send stream. The length covers
+/// the kind byte plus the body, so the reader allocates exactly the right buffer.
+async fn write_frame(send: &mut SendStream, kind: Frame, body: &[u8]) -> Result<()> {
+    let len = (1 + body.len()) as u32;
+    send.write_all(&len.to_le_bytes()).await?;
+    send.write_all(&[kind as u8]).await?;
     send.write_all(body).await?;
     Ok(())
 }
@@ -446,7 +559,7 @@ mod tests {
     use crate::net::sim::Input;
 
     #[test]
-    fn tickmsg_wire_roundtrips() {
+    fn tick_body_wire_roundtrips() {
         // Both the confirmed-Some case and the None case (which uses the wire
         // sentinel) must round-trip exactly.
         for confirmed in [
@@ -461,7 +574,17 @@ mod tests {
                 input: Input::from_axes(0.5, -0.25),
                 confirmed,
             };
-            assert_eq!(decode_msg(&encode_msg(&m)), m);
+            assert_eq!(decode_tick_body(&encode_tick_body(&m)), m);
         }
+    }
+
+    #[test]
+    fn frame_kind_byte_roundtrips() {
+        // Each kind byte maps back to its variant; anything else is rejected (a wire
+        // mismatch the read loop surfaces as an error).
+        assert_eq!(Frame::from_byte(0), Some(Frame::Tick));
+        assert_eq!(Frame::from_byte(1), Some(Frame::Beat));
+        assert_eq!(Frame::from_byte(2), None);
+        assert_eq!(Frame::from_byte(0xff), None);
     }
 }
