@@ -42,8 +42,8 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowMode};
 use crate::net::lockstep::{Lockstep, TickMsg};
 use crate::net::net_loop::{NetDriver, PeerMsg};
 use crate::net::sim::{
-    CRAB_SCALE, Crab, EXTRACT_RADIUS, Input, Outcome, Player, PlayerId, PlayerStatus, Pos, Sim,
-    UNIT, buttons, trig, trig_client,
+    CRAB_SCALE, Crab, EXTRACT_RADIUS, Input, Outcome, Plane, Player, PlayerId, PlayerStatus, Pos,
+    Pos3, Sim, UNIT, buttons, trig, trig_client,
 };
 
 /// Sim tick rate (Hz). The deterministic sim advances at this fixed rate on every
@@ -68,6 +68,14 @@ const EYE_HEIGHT: f32 = 1.6;
 const PLAYER_RADIUS: f32 = 0.4;
 const PLAYER_HEIGHT: f32 = 1.8;
 
+/// Plane gray-box dimensions (meters): a fuselage box + a wider, thinner wing box.
+/// Just enough shape to read as an aircraft and show its facing — a placeholder, like
+/// the crab box.
+const PLANE_FUSELAGE_LEN: f32 = 6.0;
+const PLANE_FUSELAGE_W: f32 = 1.2;
+const PLANE_WINGSPAN: f32 = 9.0;
+const PLANE_WING_CHORD: f32 = 1.6;
+
 /// Mouse look sensitivity (radians per pixel of motion). Yaw feeds the sim as a
 /// per-tick delta; pitch stays client-side.
 const MOUSE_SENS: f32 = 0.0022;
@@ -89,6 +97,13 @@ fn meters(coord: i64) -> f32 {
 /// direct unit conversion with no axis remap.
 fn world(pos: Pos, y: f32) -> Vec3 {
     Vec3::new(meters(pos.x), y, meters(pos.z))
+}
+
+/// A sim 3D position ([`Pos3`], includes altitude) as a Bevy world point — the same
+/// direct unit conversion as [`world`], but with the entity's own Y (a flying plane),
+/// not an externally supplied ground height.
+fn world3(pos: Pos3) -> Vec3 {
+    Vec3::new(meters(pos.x), meters(pos.y), meters(pos.z))
 }
 
 /// Build the windowed first-person client app (no network = solo, `net = Some` =
@@ -238,6 +253,7 @@ struct GameState {
 #[derive(Clone, Default)]
 struct SimSnapshot {
     players: BTreeMap<PlayerId, Player>,
+    planes: BTreeMap<PlayerId, Plane>,
     crab: Option<Crab>,
 }
 
@@ -245,6 +261,7 @@ impl SimSnapshot {
     fn capture(sim: &Sim) -> Self {
         Self {
             players: sim.players().collect(),
+            planes: sim.planes().collect(),
             crab: Some(sim.crab()),
         }
     }
@@ -286,6 +303,11 @@ const MAX_YAW_PER_TICK_RADIANS: f32 =
 /// (we see from its eyes) but still spawned so status handling stays uniform.
 #[derive(Component)]
 struct PlayerAvatar(PlayerId);
+
+/// A rendered gray-box plane for the pilot with this id. The local pilot's own plane
+/// is hidden (we view from its cockpit), like the local player's capsule.
+#[derive(Component)]
+struct PlaneAvatar(PlayerId);
 
 /// The giant crab placeholder.
 #[derive(Component)]
@@ -595,6 +617,50 @@ fn spawn_world(
         ));
     }
 
+    // Pilot planes: one gray-box aircraft (fuselage + wing) per plane in the sim. The
+    // root holds the pose (placed every frame by apply_transforms); the children give
+    // it shape and a legible facing (+Z = nose, matching heading 0). The local pilot's
+    // is spawned too but hidden in apply_transforms (cockpit view).
+    let plane_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.62, 0.64, 0.67),
+        perceptual_roughness: 0.7,
+        ..default()
+    });
+    for (id, _plane) in state.ls.sim().planes() {
+        let root = commands
+            .spawn((
+                Transform::from_translation(world3(state.ls.sim().plane(id).unwrap().pos())),
+                Visibility::default(),
+                PlaneAvatar(id),
+            ))
+            .id();
+        // Fuselage: a long box down +Z (the nose direction).
+        let fuselage = commands
+            .spawn((
+                Mesh3d(meshes.add(Cuboid::new(
+                    PLANE_FUSELAGE_W,
+                    PLANE_FUSELAGE_W,
+                    PLANE_FUSELAGE_LEN,
+                ))),
+                MeshMaterial3d(plane_mat.clone()),
+                Transform::default(),
+            ))
+            .id();
+        // Wing: a wide, thin box across X, set a bit forward of center.
+        let wing = commands
+            .spawn((
+                Mesh3d(meshes.add(Cuboid::new(
+                    PLANE_WINGSPAN,
+                    PLANE_FUSELAGE_W * 0.25,
+                    PLANE_WING_CHORD,
+                ))),
+                MeshMaterial3d(plane_mat.clone()),
+                Transform::from_xyz(0.0, 0.0, PLANE_FUSELAGE_LEN * 0.1),
+            ))
+            .id();
+        commands.entity(root).add_children(&[fuselage, wing]);
+    }
+
     // The giant crab: a big menacing box, CRAB_SCALE× a player, with a "head" wedge
     // so its facing is legible. Gray-box placeholder — the trained RL crab body is a
     // later concern (per the sim interface note).
@@ -654,6 +720,20 @@ type CrabXf<'w, 's> = Query<
     &'static mut Transform,
     (With<CrabAvatar>, Without<PlayerAvatar>, Without<FpCamera>),
 >;
+type PlaneXf<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static PlaneAvatar,
+        &'static mut Transform,
+        &'static mut Visibility,
+    ),
+    (
+        Without<PlayerAvatar>,
+        Without<CrabAvatar>,
+        Without<FpCamera>,
+    ),
+>;
 type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
 
 /// Place the FP camera and the dynamic avatars each frame, INTERPOLATED between the
@@ -661,11 +741,13 @@ type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
 /// the smoothness layer: the sim jumps in 30 Hz steps, but every rendered frame
 /// shows a pose `alpha` of the way from last tick to this one. Reads sim state
 /// read-only; writes only Bevy `Transform`s.
+#[allow(clippy::too_many_arguments)]
 fn apply_transforms(
     state: NonSend<GameState>,
     pitch: Res<CameraPitch>,
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
+    mut planes_q: PlaneXf,
     mut cam_q: CamXf,
 ) {
     let sim = state.ls.sim();
@@ -708,16 +790,68 @@ fn apply_transforms(
             Transform::from_translation(world(pos, 0.0)).with_rotation(Quat::from_rotation_y(yaw));
     }
 
-    // FP camera: at the LOCAL player's interpolated eye, yaw from the AUTHORITATIVE
-    // sim (so what we see matches where the sim says we face), pitch client-side.
-    if let (Ok(mut cam), Some(now)) = (cam_q.single_mut(), sim.player(local)) {
-        let prev = state.prev.players.get(&local).copied().unwrap_or(now);
-        let pos = lerp_pos(prev.pos(), now.pos(), alpha);
-        let yaw = lerp_yaw(prev.yaw(), now.yaw(), alpha);
-        let eye = world(pos, EYE_HEIGHT);
-        let look_dir = look_direction(yaw, pitch.0);
-        *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
+    // Planes: interpolate pose (3D position + heading + pitch) and orient the gray box
+    // so +Z is the nose. Hide the local pilot's own plane (we fly from its cockpit).
+    for (avatar, mut tf, mut vis) in planes_q.iter_mut() {
+        let Some(now) = sim.plane(avatar.0) else {
+            continue;
+        };
+        let prev = state.prev.planes.get(&avatar.0).copied().unwrap_or(now);
+        *tf = plane_transform(prev, now, alpha);
+        *vis = if avatar.0 == local {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        };
     }
+
+    // FP camera. A PILOT flies from the cockpit: anchor the camera to the plane's
+    // interpolated pose, looking along its heading+pitch (the authoritative sim
+    // orientation), with the client pitch still added so the pilot can glance around.
+    // An on-foot player keeps the ground eye view. Either way the orientation comes
+    // from the sim, so what's seen matches where the sim says we point.
+    if let Ok(mut cam) = cam_q.single_mut() {
+        if let Some(plane_now) = sim.plane(local) {
+            let plane_prev = state.prev.planes.get(&local).copied().unwrap_or(plane_now);
+            let eye = lerp_pos3(plane_prev.pos(), plane_now.pos(), alpha);
+            let heading = lerp_yaw(plane_prev.heading(), plane_now.heading(), alpha);
+            // Pitch reuses lerp_yaw because it's a turn-unit angle too; since pitch is
+            // bounded (never wraps), the shortest-arc handling is a harmless no-op here.
+            let plane_pitch = lerp_yaw(plane_prev.pitch(), plane_now.pitch(), alpha);
+            let look_dir = look_direction(heading, plane_pitch + pitch.0);
+            *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
+        } else if let Some(now) = sim.player(local) {
+            let prev = state.prev.players.get(&local).copied().unwrap_or(now);
+            let pos = lerp_pos(prev.pos(), now.pos(), alpha);
+            let yaw = lerp_yaw(prev.yaw(), now.yaw(), alpha);
+            let eye = world(pos, EYE_HEIGHT);
+            let look_dir = look_direction(yaw, pitch.0);
+            *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
+        }
+    }
+}
+
+/// The interpolated world transform for a plane: position lerped in 3D, orientation
+/// from heading (about +Y) then pitch (nose up about the local right axis, +X). +Z is
+/// the nose, matching the sim's heading-0 = +Z convention and the gray box's long axis.
+/// Pitch is negated like the camera's: a positive sim pitch is nose-UP, but a positive
+/// rotation about +X sends +Z toward −Y, so negate to make nose-up tilt the box up.
+fn plane_transform(prev: Plane, now: Plane, alpha: f32) -> Transform {
+    let pos = lerp_pos3(prev.pos(), now.pos(), alpha);
+    let heading = lerp_yaw(prev.heading(), now.heading(), alpha);
+    let pitch = lerp_yaw(prev.pitch(), now.pitch(), alpha);
+    let rot = Quat::from_rotation_y(heading) * Quat::from_rotation_x(-pitch);
+    Transform::from_translation(pos).with_rotation(rot)
+}
+
+/// Linear-interpolate two sim 3D positions (to meters) by `alpha` — the [`Pos3`]
+/// analogue of [`lerp_pos`], including the altitude axis.
+fn lerp_pos3(a: Pos3, b: Pos3, alpha: f32) -> Vec3 {
+    Vec3::new(
+        meters(a.x) + (meters(b.x) - meters(a.x)) * alpha,
+        meters(a.y) + (meters(b.y) - meters(a.y)) * alpha,
+        meters(a.z) + (meters(b.z) - meters(a.z)) * alpha,
+    )
 }
 
 /// Linear-interpolate two sim positions (in meters) by `alpha`.

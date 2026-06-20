@@ -154,7 +154,8 @@ fn main() -> Result<()> {
 fn run_play(args: PlayArgs) -> Result<()> {
     let (ls, net) = if args.solo {
         let me = PlayerId(0);
-        (Lockstep::new(MATCH_SEED, &[me], me), None)
+        let pilots = pilots_from_env(me);
+        (Lockstep::new_with_pilots(MATCH_SEED, &[me], me, &pilots), None)
     } else {
         let (ls, driver) =
             net_loop::connect_and_assign(MATCH_SEED, args.discover_secs, args.expect)?;
@@ -171,7 +172,18 @@ fn run_play(args: PlayArgs) -> Result<()> {
 fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
     let me = PlayerId(0);
     let players: Vec<PlayerId> = (0..args.players.max(1)).map(PlayerId).collect();
-    let ls = Lockstep::new(MATCH_SEED, &players, me);
+    // RL_VEHICLE=plane: make the NON-local players pilots and keep the local (player 0)
+    // a ground observer, so the captured FP frame clearly shows a remote plane's gray
+    // box flying — the evidence the plane renders. (The local-pilot cockpit view is the
+    // play path; here a ground vantage makes the box unmistakable.) Needs `--players >= 2`:
+    // player 0 stays on foot and sees player 1's plane box. With only 1 player there's no
+    // remote plane to frame, so the shot stays on foot (a lone pilot would hide its own
+    // cockpit and show empty sky — worthless as evidence). Unset ⇒ the unchanged foot shot.
+    let pilots: Vec<PlayerId> = match std::env::var("RL_VEHICLE").as_deref() {
+        Ok("plane") if players.len() > 1 => players[1..].to_vec(),
+        _ => Vec::new(),
+    };
+    let ls = Lockstep::new_with_pilots(MATCH_SEED, &players, me, &pilots);
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(args.cam_yaw, args.cam_pitch);
     render::build_screenshot_app(ls, cfg).run();
@@ -182,6 +194,20 @@ fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
 /// peers agree without a handshake; Phase 1's session setup will negotiate it (the
 /// lower-id peer proposes, say) — the sim already takes it as a parameter.
 const MATCH_SEED: u64 = 0x6372_6162; // "crab"
+
+/// Which players spawn PILOTING a plane rather than on foot, from the `RL_VEHICLE` env
+/// flag (rl#38 vehicle first cut). `RL_VEHICLE=plane` makes the LOCAL player (`me`) a
+/// pilot; anything else (incl. unset) is the unchanged foot game (empty ⇒ byte-identical
+/// sim). Solo/screenshot only in this cut: the networked play path (`connect_and_assign`)
+/// builds the session with no pilots, so it ignores `RL_VEHICLE` entirely — no plane
+/// spawns over the wire yet. Wiring pilots into networked play needs the peers to agree
+/// on the pilot set (a wire negotiation), which is future work.
+fn pilots_from_env(me: PlayerId) -> Vec<PlayerId> {
+    match std::env::var("RL_VEHICLE").as_deref() {
+        Ok("plane") => vec![me],
+        _ => Vec::new(),
+    }
+}
 
 /// Drive the lockstep sim from a constant local input, ticking at [`TICK_HZ`]. Pure
 /// machinery check: no peers, so our own input completes every tick.
