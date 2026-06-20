@@ -209,6 +209,43 @@ pub const EXTRACT_RADIUS: i64 = 2 * UNIT;
 /// spin a peer wildly.
 const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
 
+// --- Plane flight tuning (rl#38 first cut) ---
+// All integer, all named, few: crude arcade flight, not a sim. Values are in
+// [`UNIT`]/tick for forces/speeds and [`trig`] turn units for the orientation rates.
+
+/// Forward thrust at full throttle, in [`UNIT`]/tick² (added to velocity along the
+/// facing each tick). Sized so full throttle climbs against [`PLANE_GRAVITY`] with
+/// margin — the plane can gain altitude, not just arrest its fall.
+const PLANE_THRUST: i64 = 40;
+
+/// Downward pull per tick, in [`UNIT`]/tick² (subtracted from `vel.y`). Constant —
+/// no lift model; throttle-along-facing is what holds altitude, so nose-up + throttle
+/// is "climb" and idle is "sink".
+const PLANE_GRAVITY: i64 = 16;
+
+/// Velocity retained per tick, as a fraction of [`PLANE_DAMP_DEN`]. `< 1` so speed
+/// bleeds off without thrust (drag) and the integrator can't run away to infinity —
+/// terminal speed is `thrust * DEN / (DEN - NUM)`. Applied to all three axes.
+const PLANE_DAMP_NUM: i64 = 98;
+const PLANE_DAMP_DEN: i64 = 100;
+
+/// Per-tick heading change at full yaw stick, in [`trig`] turn units. A touch brisker
+/// than a walker's turn (this is a banking aircraft, not feet); still bounded so one
+/// tick can't spin a peer.
+const PLANE_YAW_RATE: i32 = trig::TURN / 90;
+
+/// Per-tick pitch change at full pitch stick, in [`trig`] turn units.
+const PLANE_PITCH_RATE: i32 = trig::TURN / 120;
+
+/// Pitch clamp in [`trig`] turn units (≈±30°): the nose can climb or dive steeply but
+/// not loop. With no roll there's no way to recover from inverted, so we never let it
+/// get there — keeps the 2-angle orientation always upright.
+const PLANE_MAX_PITCH: i32 = trig::TURN * 5 / 60;
+
+/// Plane spawn altitude in [`UNIT`] (metres): start airborne so the pilot is flying
+/// from tick 0 (no takeoff roll in this cut).
+const PLANE_SPAWN_ALTITUDE: i64 = 30 * UNIT;
+
 /// What a player is doing in the round. Drives both sim logic (only `Alive` players
 /// move, get hunted, and can extract) and rendering (downed = ragdoll/marker,
 /// extracted = removed/safe).
@@ -280,6 +317,55 @@ impl Crab {
     }
 }
 
+/// A 3D point in [`UNIT`] fixed-point world coordinates — the flying entities' frame.
+/// Feet live on the Y=0 plane and use the 2D [`Pos`]; a plane leaves the ground, so it
+/// carries a full `(x, y, z)` (and so does its velocity). +Y is up. Integer only, like
+/// everything else the sim evolves, so it folds into [`Sim::state_hash`] bit-for-bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pos3 {
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+}
+
+/// A pilotable plane: a flying body with 3D position + velocity and a 2D orientation
+/// (heading yaw + pitch), all integer fixed-point so two peers evolve it identically.
+///
+/// Crude arcade flight, NOT a sim (rl#38 first cut): throttle thrusts along the
+/// heading-and-pitch facing, gravity pulls −Y every tick, and velocity damps so it
+/// can't integrate to infinity. Roll is omitted on purpose — yaw + pitch is enough to
+/// fly a gray box and keeps the orientation 2-angle (no integer quaternion yet, the
+/// thing the [`crate::net::sim`] interface note flags as a later concern).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Plane {
+    pos: Pos3,
+    vel: Pos3,
+    /// Heading in [`trig`] turn units (the horizontal facing, like a player's yaw).
+    heading: i32,
+    /// Pitch in [`trig`] turn units: nose up/down off the horizon. Clamped to
+    /// ±[`PLANE_MAX_PITCH`] so it can't loop (no roll to recover from inverted).
+    pitch: i32,
+}
+
+impl Plane {
+    /// World position (3D — includes altitude Y, unlike a player's ground [`Pos`]).
+    pub fn pos(self) -> Pos3 {
+        self.pos
+    }
+    /// World velocity in [`UNIT`]/tick (3D).
+    pub fn vel(self) -> Pos3 {
+        self.vel
+    }
+    /// Heading yaw in [`trig`] turn units; convert with [`trig_client::turns_to_radians`].
+    pub fn heading(self) -> i32 {
+        self.heading
+    }
+    /// Pitch in [`trig`] turn units (nose up = positive).
+    pub fn pitch(self) -> i32 {
+        self.pitch
+    }
+}
+
 /// The fixed pickup point a player reaches to clear the round. A constant in the
 /// gray-box, but carried in state (and hashed) so a later sub can move/randomize it
 /// per round without reworking the desync check.
@@ -316,6 +402,17 @@ pub struct Sim {
     /// First-person players. `BTreeMap` (per the determinism contract) so iteration
     /// is in `PlayerId` order on every peer.
     players: BTreeMap<PlayerId, Player>,
+    /// Pilotable planes, keyed by the [`PlayerId`] flying each one (rl#38 first cut).
+    /// A player is EITHER on foot (in `players`) OR piloting (here) — the two maps are
+    /// disjoint, decided once at [`Sim::new_with_pilots`] (an empty map ⇒ the foot-only
+    /// game, hashed to zero extra bytes, so the no-plane sim is byte-identical to before
+    /// planes existed). `BTreeMap` for `PlayerId`-ordered iteration, per the contract.
+    ///
+    /// Planes don't yet participate in the objective: the crab (`nearest_living_player`),
+    /// grabs, extraction, and `settle_outcome` all read only `players`, so a pilot can't
+    /// be hunted or extract, and an all-pilot round never resolves (stays `Ongoing`). A
+    /// flyable gray box this cut; making planes rescue (grab/carry/extract) is future work.
+    planes: BTreeMap<PlayerId, Plane>,
     crab: Crab,
     extraction: ExtractionPoint,
     /// The round result. Derived from the player statuses each tick by
@@ -340,29 +437,66 @@ impl Sim {
     /// is a pure function of the sorted id set, so the starting state is identical on
     /// every peer regardless of the order `players` arrives in.
     pub fn new(seed: u64, players: &[PlayerId]) -> Self {
+        Self::new_with_pilots(seed, players, &[])
+    }
+
+    /// Like [`Sim::new`], but each id in `pilots` spawns PILOTING a plane instead of
+    /// standing on foot (rl#38 vehicle first cut). A pilot is removed from the foot
+    /// `players` map and added to `planes`; the two stay disjoint. `pilots` not in the
+    /// `players` set are ignored. With `pilots` empty this is byte-for-byte [`Sim::new`]
+    /// (the plane map is empty, contributing nothing to [`Sim::state_hash`]), so the
+    /// foot-only game is unchanged.
+    ///
+    /// Callers must pass the SAME `pilots` on every peer or their sims diverge; in
+    /// THIS cut only the solo/screenshot paths pass a non-empty set — the networked
+    /// path (`connect_and_assign`) passes none, so planes don't yet fly in networked
+    /// play. Wire-negotiating the pilot set (and the tagged-`Input` redesign the
+    /// module note describes) is future work.
+    pub fn new_with_pilots(seed: u64, players: &[PlayerId], pilots: &[PlayerId]) -> Self {
         let mut sorted: Vec<PlayerId> = players.to_vec();
         sorted.sort();
         sorted.dedup();
         let mut map = BTreeMap::new();
+        let mut plane_map = BTreeMap::new();
         for (i, &id) in sorted.iter().enumerate() {
             // Spawn ring near the origin; spacing in world units, all facing +Z
-            // (yaw 0). Integer layout → identical everywhere.
+            // (yaw 0). Integer layout → identical everywhere. A pilot takes the same
+            // ground XZ slot but starts airborne over it (a plane, not feet).
             let i = i as i64;
-            map.insert(
-                id,
-                Player {
-                    pos: Pos {
-                        x: (i - sorted.len() as i64 / 2) * 2 * UNIT,
-                        z: 0,
+            let x = (i - sorted.len() as i64 / 2) * 2 * UNIT;
+            if pilots.contains(&id) {
+                plane_map.insert(
+                    id,
+                    Plane {
+                        pos: Pos3 {
+                            x,
+                            y: PLANE_SPAWN_ALTITUDE,
+                            z: 0,
+                        },
+                        vel: Pos3::default(),
+                        heading: 0,
+                        pitch: 0,
                     },
-                    yaw: 0,
-                    status: PlayerStatus::Alive,
-                },
-            );
+                );
+            } else {
+                map.insert(
+                    id,
+                    Player {
+                        pos: Pos { x, z: 0 },
+                        yaw: 0,
+                        status: PlayerStatus::Alive,
+                    },
+                );
+            }
         }
+        debug_assert!(
+            map.keys().all(|id| !plane_map.contains_key(id)),
+            "a participant is on foot XOR piloting — the two maps must stay disjoint"
+        );
         Self {
             tick: 0,
             players: map,
+            planes: plane_map,
             // Extraction is across the map at +Z; players spawn at the origin. The crab
             // sits BETWEEN them (around the midpoint, offset in X so it's an obstacle to
             // dodge, not a head-on instant grab) — so reaching safety means getting past
@@ -430,6 +564,13 @@ impl Sim {
             let denom = Input::AXIS_SCALE as i64 * trig::ONE as i64;
             p.pos.x += vx * PLAYER_SPEED / denom;
             p.pos.z += vz * PLAYER_SPEED / denom;
+        }
+
+        // 1b) Planes. Each pilot's plane integrates its own flight from its input,
+        //     in PlayerId order (BTreeMap). Pure integer math — see `step_plane`.
+        for (id, plane) in self.planes.iter_mut() {
+            let inp = inputs.get(id).copied().unwrap_or_default();
+            step_plane(plane, inp);
         }
 
         // 2) Crab: aim at and step toward the nearest living player. Pure arithmetic —
@@ -544,6 +685,16 @@ impl Sim {
             h.write(&p.yaw.to_le_bytes());
             h.write(&[status_tag(p.status)]);
         }
+        // Planes (PlayerId order): every evolving field — 3D pos, 3D velocity, heading,
+        // pitch. An empty plane map writes nothing, so the foot-only sim's hash is
+        // unchanged. A field omitted here is a field whose desync is invisible.
+        for (id, plane) in self.planes.iter() {
+            h.write(&[id.0]);
+            h.write_pos3(plane.pos);
+            h.write_pos3(plane.vel);
+            h.write(&plane.heading.to_le_bytes());
+            h.write(&plane.pitch.to_le_bytes());
+        }
         h.write_pos(self.crab.pos);
         h.write(&self.crab.yaw.to_le_bytes());
         h.write_pos(self.extraction.pos);
@@ -580,6 +731,18 @@ impl Sim {
     /// Read one player's state (for rendering its FP view / a remote avatar).
     pub fn player(&self, id: PlayerId) -> Option<Player> {
         self.players.get(&id).copied()
+    }
+
+    /// Read-only view of all planes in `PlayerId` order — for rendering each pilot's
+    /// gray box. Empty in the foot-only game. Never drives sim logic (read-only, like
+    /// [`Sim::players`]).
+    pub fn planes(&self) -> impl Iterator<Item = (PlayerId, Plane)> + '_ {
+        self.planes.iter().map(|(&id, &p)| (id, p))
+    }
+
+    /// The plane piloted by `id`, if that player is flying (for the FP camera / avatar).
+    pub fn plane(&self, id: PlayerId) -> Option<Plane> {
+        self.planes.get(&id).copied()
     }
 
     /// The giant crab (for rendering the threat).
@@ -633,6 +796,74 @@ fn dist2_i128(dx: i64, dz: i64) -> i128 {
 /// on unbounded positions.
 fn within(ax: i64, az: i64, bx: i64, bz: i64, r: i64) -> bool {
     dist2_i128(ax - bx, az - bz) <= (r as i128) * (r as i128)
+}
+
+/// Advance one plane one tick from its pilot input — crude arcade flight, pure integer
+/// fixed-point so two peers evolve it bit-identically (rl#38 first cut).
+///
+/// Control map (reuses the existing [`Input`] axes, no wire change):
+/// - [`Input::move_forward`] → throttle: thrust along the heading-and-pitch facing.
+/// - [`Input::look_yaw`] → yaw rate: turn the heading.
+/// - [`Input::move_strafe`] → pitch rate: nose up (climb) / down (dive).
+///
+/// Reusing the flat [`Input`] axes (throttle/yaw/pitch) is the INTERIM the module's
+/// seam note flags for a tagged-[`Input`] redesign — the proper next step, deferred
+/// to keep this cut small and the wire format unchanged.
+///
+/// Order per tick: turn (yaw + pitch, clamped) → accelerate (thrust along the new
+/// facing, minus gravity) → damp → integrate position. Forces are integers; the only
+/// "trig" is the integer CORDIC [`trig`] table, never a float.
+fn step_plane(plane: &mut Plane, inp: Input) {
+    // 1) Orientation: integrate bounded yaw + pitch rates from the stick axes. Same
+    //    descale pattern as the player's look (axis units of AXIS_SCALE → turn units).
+    let dyaw =
+        (inp.look_yaw as i64 * PLANE_YAW_RATE as i64 / Input::AXIS_SCALE as i64) as i32;
+    plane.heading = trig::wrap_turns(plane.heading + dyaw);
+    let dpitch =
+        (inp.move_strafe as i64 * PLANE_PITCH_RATE as i64 / Input::AXIS_SCALE as i64) as i32;
+    // Clamp pitch to ±MAX (no wrap — pitch is a bounded tilt, not a full circle; with no
+    // roll, letting it pass vertical would leave the plane inverted with no recovery).
+    plane.pitch = (plane.pitch + dpitch).clamp(-PLANE_MAX_PITCH, PLANE_MAX_PITCH);
+
+    // 2) Facing unit vector (scale trig::ONE) from heading + pitch. Horizontal part is
+    //    (sin,cos) of heading shrunk by cos(pitch); vertical is sin(pitch). At pitch 0
+    //    this is the player's ground facing with vy=0; nose-up tilts thrust toward +Y.
+    let (sh, ch) = trig::sin_cos(plane.heading); // heading sin/cos · ONE
+    let (sp, cp) = trig::sin_cos(plane.pitch); // pitch sin/cos · ONE
+    // fx,fz carry a trig::ONE² scale (two cosines/sines multiplied); fy carries ONE¹.
+    // Bring fy up to ONE² too so all three axes share one scale before thrusting.
+    let fx = sh * cp;
+    let fz = ch * cp;
+    let fy = sp * trig::ONE as i64;
+
+    // 3) Thrust along the facing at the throttle, then gravity. Descale the facing's
+    //    trig::ONE² and the throttle's AXIS_SCALE so the acceleration is in UNIT/tick².
+    let throttle = inp.move_forward as i64; // units of AXIS_SCALE, sign = fwd/reverse
+    let one2 = trig::ONE as i64 * trig::ONE as i64;
+    let denom = one2 * Input::AXIS_SCALE as i64;
+    plane.vel.x += fx * PLANE_THRUST * throttle / denom;
+    plane.vel.y += fy * PLANE_THRUST * throttle / denom;
+    plane.vel.z += fz * PLANE_THRUST * throttle / denom;
+    plane.vel.y -= PLANE_GRAVITY;
+
+    // 4) Damp (drag): bleed a fixed fraction of velocity so the integrator can't run
+    //    away. Integer truncation toward zero is identical on every target.
+    plane.vel.x = plane.vel.x * PLANE_DAMP_NUM / PLANE_DAMP_DEN;
+    plane.vel.y = plane.vel.y * PLANE_DAMP_NUM / PLANE_DAMP_DEN;
+    plane.vel.z = plane.vel.z * PLANE_DAMP_NUM / PLANE_DAMP_DEN;
+
+    // 5) Integrate position. Don't sink through the ground: clamp Y≥0 and kill a
+    //    downward velocity on contact, so a dive ends in a (crude) belly landing rather
+    //    than falling forever below the world.
+    plane.pos.x += plane.vel.x;
+    plane.pos.y += plane.vel.y;
+    plane.pos.z += plane.vel.z;
+    if plane.pos.y < 0 {
+        plane.pos.y = 0;
+        if plane.vel.y < 0 {
+            plane.vel.y = 0;
+        }
+    }
 }
 
 /// Integer square root (floor) of a non-negative `i128`, via Newton's method on
@@ -915,6 +1146,13 @@ impl Fnv {
         self.write(&p.x.to_le_bytes());
         self.write(&p.z.to_le_bytes());
     }
+    /// Fold a [`Pos3`] (all three coordinates) — one call per 3D position so a hashed
+    /// flying entity can't fold X/Z but forget the altitude Y.
+    fn write_pos3(&mut self, p: Pos3) {
+        self.write(&p.x.to_le_bytes());
+        self.write(&p.y.to_le_bytes());
+        self.write(&p.z.to_le_bytes());
+    }
     fn finish(&self) -> u64 {
         self.0
     }
@@ -1135,6 +1373,120 @@ mod tests {
             snapshot(&sim),
             frozen,
             "a decided round must freeze the world"
+        );
+    }
+
+    #[test]
+    fn no_pilots_is_byte_identical_to_plain_new() {
+        // The flag-OFF invariant: `new_with_pilots(.., &[])` is the foot-only game,
+        // hashed identically to `new` (empty plane map writes no bytes). If this ever
+        // breaks, every existing replay/desync hash shifts and the no-plane game is no
+        // longer the unchanged game.
+        let players = players(3);
+        let a = Sim::new(0xABCD, &players);
+        let b = Sim::new_with_pilots(0xABCD, &players, &[]);
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert_eq!(a.planes().count(), 0, "no pilots ⇒ no planes");
+        assert_eq!(a.players().count(), 3);
+    }
+
+    #[test]
+    fn pilot_replaces_foot_player_and_spawns_airborne() {
+        // A pilot is in `planes`, NOT `players` (the two are disjoint), and starts above
+        // the ground (positive altitude), flying from tick 0.
+        let ids = players(2);
+        let sim = Sim::new_with_pilots(7, &ids, &[PlayerId(1)]);
+        assert!(sim.player(PlayerId(1)).is_none(), "a pilot is not on foot");
+        assert!(sim.player(PlayerId(0)).is_some(), "non-pilot stays on foot");
+        let plane = sim.plane(PlayerId(1)).expect("player 1 is a pilot");
+        assert!(plane.pos().y > 0, "plane spawns airborne");
+        assert_eq!(plane.heading(), 0, "spawns facing +Z like a player");
+    }
+
+    #[test]
+    fn throttle_with_nose_up_gains_altitude() {
+        // Full throttle while pitched up must climb: nose-up tilts thrust toward +Y
+        // enough to beat gravity, so altitude rises over a few seconds. This is the
+        // controllability check — the plane responds to its pitch+throttle inputs.
+        let mut sim = Sim::new_with_pilots(0, &players(1), &players(1));
+        let y0 = sim.plane(PlayerId(0)).unwrap().pos().y;
+        let mut inp = BTreeMap::new();
+        // Pitch up (strafe +) at full throttle (forward +).
+        inp.insert(PlayerId(0), Input::new(1.0, 1.0, 0.0, 0));
+        for _ in 0..120 {
+            sim.step(&inp);
+        }
+        let y1 = sim.plane(PlayerId(0)).unwrap().pos().y;
+        assert!(y1 > y0, "nose-up full throttle should climb, {y0} -> {y1}");
+    }
+
+    #[test]
+    fn idle_plane_sinks_and_lands_without_falling_through() {
+        // No throttle: gravity wins, the plane descends, and the ground clamp catches it
+        // at Y=0 (never negative) — a crude belly landing, not an infinite fall.
+        let mut sim = Sim::new_with_pilots(0, &players(1), &players(1));
+        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        for _ in 0..400 {
+            sim.step(&neutral);
+        }
+        let p = sim.plane(PlayerId(0)).unwrap();
+        assert_eq!(p.pos().y, 0, "an idle plane sinks to the ground and stops there");
+    }
+
+    #[test]
+    fn hash_covers_plane_state() {
+        // Two pilot sims identical but for one tick of plane input must hash
+        // differently — proves the plane's state is folded into the hash (not just
+        // players/crab). One throttles, the other idles: their planes' velocity/pos
+        // diverge, so the hashes must.
+        let ids = players(1);
+        let mut a = Sim::new_with_pilots(0, &ids, &ids);
+        let mut b = Sim::new_with_pilots(0, &ids, &ids);
+        assert_eq!(a.state_hash(), b.state_hash(), "same start ⇒ same hash");
+        let mut throttle = BTreeMap::new();
+        throttle.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0));
+        a.step(&throttle);
+        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        b.step(&neutral);
+        assert_ne!(a.state_hash(), b.state_hash(), "plane motion must change the hash");
+    }
+
+    #[test]
+    fn mixed_foot_and_pilot_sims_stay_in_lockstep() {
+        // A round with BOTH a foot player and a pilot must evolve identically on two
+        // independent sims fed the same inputs — the determinism contract has to hold
+        // across the two entity kinds at once, not just foot-only or pilot-only. Step
+        // each tick with a movement input for the foot player AND a flight input for the
+        // pilot in the same map, asserting the hashes agree every tick, then prove BOTH
+        // actually moved (so a no-op match can't pass vacuously).
+        let mut a = Sim::new_with_pilots(0xF007, &players(2), &[PlayerId(1)]);
+        let mut b = Sim::new_with_pilots(0xF007, &players(2), &[PlayerId(1)]);
+        assert!(a.player(PlayerId(0)).is_some(), "player 0 is on foot");
+        assert!(a.plane(PlayerId(1)).is_some(), "player 1 is a pilot");
+        let foot_spawn = a.player(PlayerId(0)).unwrap().pos();
+        let plane_spawn = a.plane(PlayerId(1)).unwrap().pos();
+        for _ in 0..300 {
+            let mut inputs = BTreeMap::new();
+            // Foot player walks forward; pilot throttles up with some yaw + nose-up pitch.
+            inputs.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0));
+            inputs.insert(PlayerId(1), Input::new(0.5, 1.0, 0.3, 0));
+            a.step(&inputs);
+            b.step(&inputs);
+            assert_eq!(
+                a.state_hash(),
+                b.state_hash(),
+                "mixed foot+pilot sims must stay bit-identical tick-for-tick"
+            );
+        }
+        assert_ne!(
+            a.player(PlayerId(0)).unwrap().pos(),
+            foot_spawn,
+            "the foot player must have moved from spawn"
+        );
+        assert_ne!(
+            a.plane(PlayerId(1)).unwrap().pos(),
+            plane_spawn,
+            "the pilot's plane must have moved from spawn"
         );
     }
 

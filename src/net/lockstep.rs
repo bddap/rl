@@ -113,12 +113,22 @@ impl Lockstep {
     /// Start a session. `seed` is the shared match seed (identical on every peer);
     /// `peers` is the full participant set; `me` is this peer's id and must be in it.
     pub fn new(seed: u64, peers: &[PlayerId], me: PlayerId) -> Self {
+        Self::new_with_pilots(seed, peers, me, &[])
+    }
+
+    /// Like [`Lockstep::new`], but `pilots` spawn flying planes instead of on foot (the
+    /// rl#38 vehicle first cut). Forwarded to [`Sim::new_with_pilots`]; every peer must
+    /// pass the SAME `pilots` set or their sims diverge (pilot assignment is a launch
+    /// flag here, not yet wire-negotiated — and the networked driver currently passes
+    /// none, so this is solo/screenshot-only for now). With `pilots` empty this is
+    /// [`Lockstep::new`].
+    pub fn new_with_pilots(seed: u64, peers: &[PlayerId], me: PlayerId, pilots: &[PlayerId]) -> Self {
         let mut peers = peers.to_vec();
         peers.sort();
         peers.dedup();
         debug_assert!(peers.contains(&me), "local player must be in the peer set");
         Self {
-            sim: Sim::new(seed, &peers),
+            sim: Sim::new_with_pilots(seed, &peers, pilots),
             me,
             peers,
             inputs: BTreeMap::new(),
