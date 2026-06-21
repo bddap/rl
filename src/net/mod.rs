@@ -34,6 +34,7 @@ pub mod membership;
 pub mod net_loop;
 pub mod render;
 pub mod sim;
+pub mod telemetry;
 pub mod transport;
 
 #[cfg(test)]

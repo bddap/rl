@@ -45,6 +45,7 @@ use crate::net::sim::{
     CRAB_SCALE, Crab, EXTRACT_RADIUS, Input, Outcome, Plane, Player, PlayerId, PlayerStatus, Pos,
     Pos3, Sim, UNIT, buttons, trig, trig_client,
 };
+use crate::net::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
 
 /// Sim tick rate (Hz). The deterministic sim advances at this fixed rate on every
 /// peer; the client renders faster and interpolates between ticks. Matches the
@@ -336,8 +337,25 @@ fn drive_lockstep(
     mut pending: ResMut<PendingInput>,
     time: Res<Time>,
     mut reported_outcome: Local<bool>,
+    mut next_tel_tick: Local<u64>,
+    // Cumulative lockstep fault count across the whole round (persists between system
+    // runs), so telemetry reports the REAL running desync total — not a per-frame 0. This
+    // is the live-debug alarm: a non-zero value on any deck means it has diverged.
+    mut total_desyncs: Local<usize>,
 ) {
     state.accumulator += time.delta().as_secs_f64();
+
+    // Clone out the telemetry handle (cheap: an mpsc sender + id) + the roster size so we
+    // can READ the sim and push events without holding a borrow of `state.input_source`
+    // (where the NetDriver that owns it lives). `None` unless this is networked play with
+    // a collector. Telemetry never writes the sim — it only reports it.
+    let (tel, roster_len) = match &state.input_source {
+        InputSource::Networked(net) => (net.telemetry().cloned(), net.roster_len()),
+        _ => (None, 0),
+    };
+    if *next_tel_tick == 0 {
+        *next_tel_tick = TELEMETRY_TICK_EVERY;
+    }
 
     let mut applied = 0u32;
     while state.accumulator >= TICK_DT && applied < MAX_TICKS_PER_FRAME {
@@ -356,6 +374,7 @@ fn drive_lockstep(
         pending.action = false;
 
         let me = state.ls.me();
+        let issue_tick = state.ls.next_tick();
         let msg = state.ls.submit_local_input(input);
 
         // Supply the OTHER players' inputs for this tick from whichever source this run
@@ -397,12 +416,34 @@ fn drive_lockstep(
             if from.pid != me
                 && let Some(fault) = state.ls.record_remote(from.pid, from.msg)
             {
+                *total_desyncs += 1;
                 warn!("lockstep fault: {fault:?}");
+                if let Some(t) = &tel {
+                    t.send(TelemetryEvent::fault(&fault));
+                }
             }
         }
 
         for fault in state.ls.try_advance() {
+            *total_desyncs += 1;
             warn!("lockstep fault: {fault:?}");
+            if let Some(t) = &tel {
+                t.send(TelemetryEvent::fault(&fault));
+            }
+        }
+
+        // Sampled telemetry: a Tick snapshot + the local input every TELEMETRY_TICK_EVERY
+        // applied ticks. Read-only on the sim; best-effort (drops if the link can't keep
+        // up). `roster` is the agreed player count (sync + accurate), `desyncs` is the real
+        // running fault total, and the (tick, hash) is what the cross-peer desync check
+        // needs.
+        if let Some(t) = &tel
+            && state.ls.sim().tick() >= *next_tel_tick
+        {
+            *next_tel_tick =
+                (state.ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
+            t.send(TelemetryEvent::tick(state.ls.sim(), *total_desyncs, roster_len));
+            t.send(TelemetryEvent::input(issue_tick, input));
         }
     }
 
@@ -414,6 +455,9 @@ fn drive_lockstep(
     if !*reported_outcome && state.ls.sim().outcome() != Outcome::Ongoing {
         *reported_outcome = true;
         info!("round decided: {:?}", state.ls.sim().outcome());
+        if let Some(t) = &tel {
+            t.send(TelemetryEvent::round_decided(state.ls.sim()));
+        }
     }
 }
 
