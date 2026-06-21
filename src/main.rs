@@ -16,11 +16,10 @@ use training::session::STEPS_PER_ROLLOUT;
 
 /// Crab Combat — RL-trained crab bots learn to stand, walk, and fight.
 ///
-/// With no subcommand the binary runs the single-process path (train headless or
-/// windowed, demo, or screenshot) from these flags — the established entrypoint.
-/// The `learn` subcommand is the in-process multi-threaded trainer; its flags live
-/// on the subcommand, so a stray `--workers` on a single-process run is a parse
-/// error rather than a silent no-op.
+/// Training is the `learn` subcommand (the sole trainer). With no subcommand the
+/// binary only renders a trained policy — `--demo` or `--screenshot` — from the
+/// flags below. The training knobs live on the `learn` subcommand, so a stray
+/// `--workers` on a render invocation is a parse error rather than a silent no-op.
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct Cli {
@@ -31,22 +30,20 @@ pub struct Cli {
     command: Option<Command>,
 }
 
-/// The in-process multi-threaded training mode. One learner (the main thread) owns
-/// the policy + optimizer + normalizer; K rollout THREADS each step their own
-/// rapier world on their own core and feed buffers back over a channel. This buys
-/// the wall-clock speedup the single-world `--envs` path can't (one world steps
-/// single-threaded) without any multiprocess IPC. See `training::inproc`.
+/// The trainer. One learner (the main thread) owns the policy + optimizer +
+/// normalizer; K rollout THREADS each step their own rapier world on their own core
+/// and feed buffers back over a channel — wall-clock-parallel rollouts, crash-
+/// isolated per worker, with no multiprocess IPC. See `training::inproc`.
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
-    /// Run the in-process trainer: spawn K rollout threads, snapshot the policy to
-    /// each, collect their rollouts, and run the PPO update. Resumes from
-    /// `--checkpoint-dir` and stops at the `--ticks` budget, exactly as a
-    /// single-process headless run does.
+    /// Run the trainer: spawn K rollout threads, snapshot the policy to each, collect
+    /// their rollouts, and run the PPO update. Resumes from `--checkpoint-dir` and
+    /// stops at the `--ticks` budget.
     Learn(LearnArgs),
 }
 
-/// Training/app config shared by the single-process path and the in-process
-/// learner+rollout-thread (all of which build a `TrainingState`). The `learn` mode
+/// Training config (consumed by the learner and its rollout threads, which build a
+/// `TrainingState`) plus the render modes' shared knobs. The `learn` subcommand
 /// flattens it so e.g. `--checkpoint-dir` / `--ticks` mean the same thing
 /// everywhere.
 #[derive(Parser, Debug, Clone)]
@@ -60,10 +57,9 @@ pub struct TrainConfig {
     /// Stop training after this many physics ticks (0 = run until killed). The budget
     /// is counted in ticks, never wall-clock, so a run simulates an identical amount
     /// regardless of machine speed or load — the "fixed ticks, not real time"
-    /// guarantee an assumed time↔tick relation can't give. The single-process path
-    /// stops exactly at N; `learn` checks the budget once per PPO iteration, so it
-    /// stops at the first iteration boundary at or after N (overshooting by up to one
-    /// K·(--envs)·H iteration's worth of ticks).
+    /// guarantee an assumed time↔tick relation can't give. The learner checks the
+    /// budget once per PPO iteration, so it stops at the first iteration boundary at
+    /// or after N (overshooting by up to one K·(--envs)·H iteration's worth of ticks).
     #[arg(long, default_value_t = 0)]
     pub ticks: u64,
 
@@ -73,32 +69,20 @@ pub struct TrainConfig {
     #[arg(long)]
     pub bench_skip_nn: bool,
 
-    /// Number of crab environments trained in parallel in one world (one batched
-    /// NN pass per tick). Crabs sit on a 4 m grid; 16 is the most the ±10 m
-    /// arena holds. Demo/screenshot modes always run 1. (Under `learn` this is M,
-    /// the env count PER rollout thread; total parallel envs = `--workers` × M.)
+    /// Environments M each rollout thread steps in its one world per tick (one
+    /// batched NN pass over the M crabs, which sit on a 4 m grid). Total parallel
+    /// envs = `--workers` × M. Capped at 16 (the ±10 m arena's grid limit per world).
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=16))]
     pub envs: u64,
 }
 
-/// Single-process / interactive config: the shared training config plus the
-/// demo/screenshot/window knobs and the periodic-save cadence that only the
-/// single-process path uses.
+/// Render-mode config: the shared `TrainConfig` (for `--checkpoint-dir`, the policy
+/// the demo/screenshot loads) plus the demo/screenshot/window knobs. Training knobs
+/// live on the `learn` subcommand, not here.
 #[derive(Parser, Debug, Clone)]
 pub struct Args {
     #[command(flatten)]
     pub train: TrainConfig,
-
-    /// Save a checkpoint every N PPO updates (0 disables periodic saves). Lives only
-    /// on the single-process path: it is read at the rollout boundary in
-    /// `ppo_update_at_boundary`, which `learn` never reaches — that learner
-    /// checkpoints every iteration directly, so an interval would be dead there.
-    #[arg(long, default_value_t = 50)]
-    pub save_interval: u32,
-
-    /// Train headless: no window, maximum simulation speed.
-    #[arg(long)]
-    headless: bool,
 
     /// Play with a trained crab: load the checkpoint, drive it with the policy
     /// (no learning), orbit camera + poke/reset controls.
@@ -206,17 +190,16 @@ struct LearnArgs {
     nice: i32,
 }
 
-/// What the process is doing this run. Train can be headless or windowed; demo
-/// and screenshot always render.
+/// What the no-subcommand binary is rendering this run (training is `rl learn`,
+/// which never builds an `AppMode`). Both modes always render.
 #[derive(Clone)]
 enum AppMode {
-    Train,
     Demo,
     Screenshot { path: PathBuf, settle: u32 },
 }
 
-/// Whether to spawn visual assets (meshes, lights). False only for headless
-/// training, where rendering is off entirely.
+/// Whether to spawn visual assets (meshes, lights). The `rl learn` rollout worlds
+/// set this false (rendering off entirely); the rendering modes here set it true.
 #[derive(Resource, Clone, Copy)]
 pub struct Visuals(pub bool);
 
@@ -296,49 +279,18 @@ fn main() {
     } else if args.demo {
         AppMode::Demo
     } else {
-        AppMode::Train
+        // Training is `rl learn` (the sole trainer) — the no-subcommand binary only
+        // renders (demo/screenshot). A bare `rl` with no mode flag has nothing to do.
+        eprintln!(
+            "no mode selected. Train with `rl learn` (the sole trainer); the bare \
+             binary needs --demo or --screenshot."
+        );
+        std::process::exit(2);
     };
-
-    // Headless training is the only mode without visuals.
-    let visuals = !(matches!(mode, AppMode::Train) && args.headless);
 
     let mut app = App::new();
 
     match &mode {
-        AppMode::Train if args.headless => {
-            // No window, GPU off, run the schedule as fast as possible.
-            app.add_plugins(
-                DefaultPlugins
-                    .set(bevy::window::WindowPlugin {
-                        primary_window: None,
-                        exit_condition: bevy::window::ExitCondition::DontExit,
-                        ..default()
-                    })
-                    .set(bevy::render::RenderPlugin {
-                        render_creation: bevy::render::settings::RenderCreation::Automatic(
-                            bevy::render::settings::WgpuSettings {
-                                backends: None,
-                                ..default()
-                            },
-                        ),
-                        ..default()
-                    })
-                    .disable::<bevy::winit::WinitPlugin>(),
-            );
-            app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(Duration::ZERO));
-            app.insert_resource(fast_virtual_time());
-            // Advance the clock by a FIXED amount per update instead of reading the
-            // wall clock. With the 100x virtual speed + 10s max_delta above, each
-            // update drains a fixed ~640 physics ticks regardless of how long the
-            // frame actually took — so tick count is a function of updates, not
-            // machine speed or load. Without this, a slow frame (e.g. a PPO update)
-            // makes the next frame's wall-clock delta — and thus its tick count —
-            // balloon, and a stall could spiral. Paired with --ticks, a run
-            // simulates an exact, reproducible amount.
-            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-                Duration::from_secs_f64(0.1),
-            ));
-        }
         AppMode::Screenshot { .. } => {
             // No window, but GPU ON so we can render to an image. Real-time 60 Hz
             // loop at default 1x: one physics step + one render per frame, so the
@@ -374,11 +326,10 @@ fn main() {
                 bot::body::register_pivot_markers(&mut app);
             }
         }
-        _ => {
-            // Train-with-viz stays windowed; the demo defaults to borderless
-            // fullscreen (the Steam launch target is a couch screen) unless
-            // --windowed.
-            let fullscreen = matches!(mode, AppMode::Demo) && !args.windowed;
+        AppMode::Demo => {
+            // The demo defaults to borderless fullscreen (the Steam launch target is
+            // a couch screen) unless --windowed.
+            let fullscreen = !args.windowed;
             app.add_plugins(DefaultPlugins.set(bevy::window::WindowPlugin {
                 primary_window: Some(bevy::window::Window {
                     title: "Crab RL".into(),
@@ -395,70 +346,46 @@ fn main() {
             }));
             // With the stand-in primitive meshes removed, Rapier's debug-render is
             // the only in-engine view of the true colliders, so the skin can be
-            // checked against the actual physics shapes. The plugin is added in BOTH
-            // viz modes so the demo's right-arrow can toggle `DebugRenderContext`
-            // live; `enabled` only sets the INITIAL state. Training-viz starts the
-            // cage on; the demo starts it on iff RL_DEBUG_COLLIDERS is set.
-            let colliders_on =
-                matches!(mode, AppMode::Train) || std::env::var_os("RL_DEBUG_COLLIDERS").is_some();
+            // checked against the actual physics shapes. `enabled` only sets the
+            // INITIAL state — the demo's right-arrow toggles `DebugRenderContext`
+            // live — and the demo starts the cage on iff RL_DEBUG_COLLIDERS is set.
             app.add_plugins(RapierDebugRenderPlugin {
-                enabled: colliders_on,
+                enabled: std::env::var_os("RL_DEBUG_COLLIDERS").is_some(),
                 // Collider shapes only — the default also draws per-body axes +
                 // joint markers, which on a 31-part body is an unreadable tangle.
                 mode: DebugRenderMode::COLLIDER_SHAPES,
                 ..default()
             });
-            // Pivot markers gate on RL_DEBUG_COLLIDERS ALONE, not the always-on
-            // training-viz cage: they're a deliberate diagnostic, not default chrome.
+            // Pivot markers gate on RL_DEBUG_COLLIDERS: a deliberate diagnostic, not
+            // default chrome.
             if std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
                 bot::body::register_pivot_markers(&mut app);
             }
         }
     }
 
-    // Parallel envs are a training concept; the interactive/render modes drive
-    // exactly one crab.
-    let num_envs = match &mode {
-        AppMode::Train => args.train.envs as usize,
-        AppMode::Demo | AppMode::Screenshot { .. } => 1,
-    };
-
-    app.insert_resource(Visuals(visuals))
-        .insert_resource(bot::NumEnvs(num_envs))
-        // Why a FIXED timestep at all: the default Variable timestep keys off
-        // wall-clock delta, which in a headless loop with no render clock collapses
-        // to ~0 dt — the crab never falls, training optimises a frozen spawn pose,
-        // and the policy faceplants the moment real-time physics actually steps it.
-        // The dt + sub-steps (shared with every headless test) live in one place,
-        // physics::fixed_timestep, so production and test physics can't drift.
+    // Demo and screenshot always render and drive exactly one crab (visuals on,
+    // 1 env — parallel envs are a training concept, and training is `rl learn` only).
+    app.insert_resource(Visuals(true))
+        .insert_resource(bot::NumEnvs(1))
+        // The dt + sub-steps live in one place, physics::fixed_timestep, shared with
+        // every headless test and the `rl learn` rollout worlds, so the physics the
+        // demo/screenshot renders can't drift from the physics training optimizes.
         .insert_resource(physics::fixed_timestep())
         // Seed Rapier's context with the softened contact spring (physics::
         // CONTACT_SOFTNESS) — one source, shared with training + tests — before the
         // plugin spawns the context from it.
         .insert_resource(physics::rapier_context_init())
         // Run physics IN FixedUpdate, lockstep with the Sense→Think→Act brain loop
-        // (which also lives in FixedUpdate). Rapier's default schedule is PostUpdate
-        // — one physics step per rendered frame — while FixedUpdate runs as many
-        // catch-up ticks as the (100x, headless) virtual clock accumulates. That
-        // decouples them: the brain takes ~64 actions per single physics step, so
-        // the crab sees a near-frozen world during training yet real dynamics in the
-        // real-time demo. In FixedUpdate it's exactly one physics step per brain step
-        // in both.
+        // (which also lives in FixedUpdate): one physics step per brain step, the
+        // same coupling the `rl learn` rollout worlds use, so the demo replays the
+        // exact dynamics the policy trained under.
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
         .add_plugins(physics::PhysicsWorldPlugin)
         .add_plugins(bot::BotPlugin)
         .add_systems(FixedUpdate, contact_audit);
 
     match mode {
-        AppMode::Train => {
-            app.add_plugins(training::TrainingPlugin::new(
-                args.train.clone(),
-                args.save_interval,
-            ));
-            if !args.headless {
-                app.add_systems(Startup, spawn_fixed_camera);
-            }
-        }
         AppMode::Demo => {
             app.add_plugins(play::DemoPlugin {
                 checkpoint_dir: args.train.checkpoint_dir.clone(),
@@ -887,19 +814,3 @@ fn contact_audit(
     }
 }
 
-/// Virtual clock that runs 100× wall speed for headless/offscreen modes, so a
-/// fixed number of physics steps elapses in a fraction of the real time.
-pub(crate) fn fast_virtual_time() -> Time<Virtual> {
-    let mut t = Time::<Virtual>::default();
-    t.set_relative_speed(100.0);
-    t.set_max_delta(Duration::from_secs(10));
-    t
-}
-
-/// Fixed overhead camera for windowed training visualization.
-fn spawn_fixed_camera(mut commands: Commands) {
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(0.0, 15.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-}
