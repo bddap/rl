@@ -26,6 +26,7 @@ use iroh::EndpointId;
 use crate::net::lockstep::{Lockstep, TickMsg};
 use crate::net::membership::{BEAT_EVERY, Membership, Status};
 use crate::net::sim::PlayerId;
+use crate::net::telemetry::{self, TelemetryEvent, TelemetrySender};
 use crate::net::transport::{self, PeerWire, Session};
 
 /// A peer tick message tagged with the sender's already-resolved [`PlayerId`]. The
@@ -46,9 +47,27 @@ pub struct NetDriver {
     /// Frozen endpoint→PlayerId map (us + peers), agreed across peers by sorting the
     /// agreed participant set. Used to tag inbound messages with their author's id.
     id_map: BTreeMap<EndpointId, PlayerId>,
+    /// Optional live-telemetry stream (set iff the client was launched with a
+    /// collector). Best-effort and read-only — see [`crate::net::telemetry`]; the
+    /// windowed driver pushes Tick/Input/RoundDecided/Fault through it.
+    telemetry: Option<TelemetrySender>,
 }
 
 impl NetDriver {
+    /// The live-telemetry handle, if this client is streaming to a collector. The
+    /// render loop reads it to push events (Tick/Input/RoundDecided/Fault). `None` when
+    /// launched without `--telemetry`.
+    pub fn telemetry(&self) -> Option<&TelemetrySender> {
+        self.telemetry.as_ref()
+    }
+
+    /// Size of the frozen roster (us + peers) — the match's player count. A sync,
+    /// always-correct figure for telemetry's `peers` field (the live link count is async
+    /// via the session; the agreed roster size is what the operator wants anyway).
+    pub fn roster_len(&self) -> usize {
+        self.id_map.len()
+    }
+
     /// Broadcast our tick message to every connected peer. Non-blocking from the
     /// caller's view: it drives the async `broadcast` to completion on the runtime,
     /// which only does buffered QUIC writes (a dead peer is dropped inside, not
@@ -84,16 +103,22 @@ pub fn connect_and_assign(
     seed: u64,
     discover_secs: u64,
     expect: usize,
+    collector: Option<iroh::EndpointId>,
 ) -> Result<(Lockstep, NetDriver)> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
-    let (session, frozen) = rt.block_on(async {
+    let (session, frozen, telemetry) = rt.block_on(async {
         let mut session = transport::start_session().await?;
-        println!("fp client endpoint id: {}", session.endpoint_id());
-        let frozen = form_match(&mut session, discover_secs, expect).await?;
-        anyhow::Ok((session, frozen))
+        let my_eid = session.endpoint_id();
+        println!("fp client endpoint id: {my_eid}");
+        // Open the telemetry side-channel BEFORE forming the match, so the collector
+        // sees the roster fill (RosterForming/Agreed). Best-effort: a failure to bind
+        // the telemetry endpoint just runs the game without it.
+        let telemetry = connect_telemetry(collector, my_eid).await;
+        let frozen = form_match(&mut session, discover_secs, expect, telemetry.as_ref()).await?;
+        anyhow::Ok((session, frozen, telemetry))
     })?;
 
     let all_ids: Vec<PlayerId> = frozen.id_map.values().copied().collect();
@@ -108,8 +133,26 @@ pub fn connect_and_assign(
         rt,
         session,
         id_map: frozen.id_map,
+        telemetry,
     };
     Ok((ls, driver))
+}
+
+/// Open a [`TelemetrySender`] to `collector` if one was configured, tagging events with
+/// our game endpoint id. Best-effort: any bind failure logs and yields `None`, so the
+/// game runs unchanged without telemetry — telemetry can never gate a match.
+pub async fn connect_telemetry(
+    collector: Option<iroh::EndpointId>,
+    my_eid: iroh::EndpointId,
+) -> Option<TelemetrySender> {
+    let collector = collector?;
+    match TelemetrySender::connect(collector, *my_eid.as_bytes()).await {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::warn!("telemetry disabled (endpoint bind failed): {e:#}");
+            None
+        }
+    }
 }
 
 /// The outcome of the LAN cold-start: the frozen participant→[`PlayerId`] map (agreed
@@ -139,13 +182,26 @@ pub async fn form_match(
     session: &mut transport::Session,
     discover_secs: u64,
     expect: usize,
+    telemetry: Option<&TelemetrySender>,
 ) -> Result<Frozen> {
     let my_eid = session.endpoint_id();
     println!(
         "forming match on the LAN (need {expect} player(s), discovery hint {discover_secs}s)…"
     );
 
-    let outcome = run_barrier(session, my_eid, expect).await?;
+    let outcome = match run_barrier(session, my_eid, expect, telemetry).await {
+        Ok(o) => o,
+        Err(e) => {
+            // Mirror the formation failure to the collector (best-effort) before
+            // surfacing it — the operator sees WHY a deck never started its round.
+            if let Some(t) = telemetry {
+                t.send(TelemetryEvent::RosterFailed {
+                    reason: format!("{e:#}"),
+                });
+            }
+            return Err(e);
+        }
+    };
     let id_map = assign_player_ids(my_eid, &outcome.roster)?;
     let me = id_map[&my_eid];
     println!(
@@ -153,6 +209,13 @@ pub async fn form_match(
         id_map.len(),
         outcome.elapsed.as_secs_f64()
     );
+    if let Some(t) = telemetry {
+        t.send(TelemetryEvent::RosterAgreed {
+            members: telemetry::short_ids(&outcome.roster),
+            roster_hash: crate::net::membership::roster_hash(&outcome.roster),
+            me: me.0,
+        });
+    }
     Ok(Frozen {
         id_map,
         me,
@@ -179,6 +242,7 @@ async fn run_barrier(
     session: &mut Session,
     me: EndpointId,
     expect: usize,
+    telemetry: Option<&TelemetrySender>,
 ) -> Result<BarrierOutcome> {
     let start = Instant::now();
     let mut m = Membership::new(me, expect, start);
@@ -226,6 +290,9 @@ async fn run_barrier(
                 if live != last_live {
                     println!("forming: {live}/{expect} player(s) live, waiting for agreement…");
                     last_live = live;
+                    if let Some(t) = telemetry {
+                        t.send(TelemetryEvent::RosterForming { live, expect });
+                    }
                 }
             }
         }
@@ -345,14 +412,14 @@ mod tests {
 
         // Run all three barriers concurrently. s2's dials are issued from inside its
         // future after a short delay, so it shows up mid-formation.
-        let f0 = form_match(&mut s0, 1, 3);
-        let f1 = form_match(&mut s1, 1, 3);
+        let f0 = form_match(&mut s0, 1, 3, None);
+        let f1 = form_match(&mut s1, 1, 3, None);
         let f2 = async {
             // Stagger: let s0/s1 form their partial view first, then s2 meshes in.
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             s2.connect_direct(a0.clone()).await.expect("s2->s0");
             s2.connect_direct(a1.clone()).await.expect("s2->s1");
-            form_match(&mut s2, 1, 3).await
+            form_match(&mut s2, 1, 3, None).await
         };
         let (r0, r1, r2) = tokio::join!(f0, f1, f2);
         let (r0, r1, r2) = (

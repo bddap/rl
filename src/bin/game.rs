@@ -29,8 +29,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use iroh::EndpointId;
 use rl::net::lockstep::{INPUT_DELAY, Lockstep};
 use rl::net::sim::{Input, PlayerId};
+use rl::net::telemetry::{self, TELEMETRY_TICK_EVERY, TelemetryEvent, TelemetrySender};
 use rl::net::{net_loop, render, transport};
 
 /// Tick rate of the deterministic sim. 30 Hz is plenty for Phase 0's dots and keeps
@@ -54,6 +56,10 @@ enum Command {
     Play(PlayArgs),
     /// Render one frame of the first-person view to a PNG and exit (no window).
     FpScreenshot(FpScreenshotArgs),
+    /// Run the live-telemetry collector: bind a stable-id iroh endpoint, print its id,
+    /// and stream every connected game's events as a merged human feed (for remote
+    /// debugging — `Monitor` its stdout). Pass each game `--telemetry <printed id>`.
+    TelemetryCollector(TelemetryCollectorArgs),
 }
 
 #[derive(Parser)]
@@ -70,6 +76,12 @@ struct NetArgs {
     /// peer simply runs solo over the network stack).
     #[arg(long, default_value_t = 2)]
     expect: usize,
+    /// Stream live telemetry to the collector with this endpoint id (from
+    /// `game telemetry-collector`). Opens a SEPARATE iroh connection on a distinct ALPN
+    /// — the lockstep transport/determinism is untouched, and a telemetry failure never
+    /// affects the match. Omit to run with no telemetry.
+    #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
+    telemetry: Option<EndpointId>,
 }
 
 #[derive(Parser)]
@@ -91,6 +103,10 @@ struct PlayArgs {
     /// showed up after `discover_secs`.
     #[arg(long, default_value_t = 2)]
     expect: usize,
+    /// Stream live telemetry to this collector endpoint id (networked play only; see
+    /// `NetArgs::telemetry`). Separate ALPN/connection — never perturbs the lockstep.
+    #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
+    telemetry: Option<EndpointId>,
 }
 
 #[derive(Parser)]
@@ -124,6 +140,15 @@ struct FpScreenshotArgs {
     cam_pitch: f32,
 }
 
+#[derive(Parser)]
+struct TelemetryCollectorArgs {
+    /// Path to the collector's persistent secret key (generated on first run). Pinning
+    /// it keeps the collector's endpoint id STABLE across restarts, so the id baked into
+    /// each game's `--telemetry` never goes stale.
+    #[arg(long, default_value = rl::net::telemetry::DEFAULT_KEY_PATH)]
+    key: PathBuf,
+}
+
 // Plain `main` (not `#[tokio::main]`): the windowed/screenshot client builds a Bevy
 // app that owns the main thread and, for networked play, spins up its OWN tokio
 // runtime inside `net_loop` — nesting that under an ambient `#[tokio::main]` runtime
@@ -144,6 +169,9 @@ fn main() -> Result<()> {
         Command::Solo(args) => run_solo(args),
         Command::Play(args) => run_play(args),
         Command::FpScreenshot(args) => run_fp_screenshot(args),
+        Command::TelemetryCollector(args) => {
+            tokio::runtime::Runtime::new()?.block_on(telemetry::run_collector(&args.key))
+        }
     }
 }
 
@@ -160,8 +188,12 @@ fn run_play(args: PlayArgs) -> Result<()> {
             None,
         )
     } else {
-        let (ls, driver) =
-            net_loop::connect_and_assign(MATCH_SEED, args.discover_secs, args.expect)?;
+        let (ls, driver) = net_loop::connect_and_assign(
+            MATCH_SEED,
+            args.discover_secs,
+            args.expect,
+            args.telemetry,
+        )?;
         (ls, Some(driver))
     };
     render::build_windowed_app(ls, net).run();
@@ -255,10 +287,17 @@ async fn run_net(args: NetArgs) -> Result<()> {
     let my_eid = session.endpoint_id();
     println!("game endpoint id: {my_eid}");
 
+    // Open the telemetry side-channel (if configured) BEFORE forming the match, so the
+    // collector sees the roster fill. Best-effort + isolated: separate iroh endpoint,
+    // separate ALPN — see `rl::net::telemetry`. A failure yields `None` and the run is
+    // byte-for-byte the no-telemetry run.
+    let tel = net_loop::connect_telemetry(args.telemetry, my_eid).await;
+
     // Form one agreed match via the shared cold-start barrier (same code the windowed
     // client runs, so the two can't drift apart and desync). Replay any inputs that
     // arrived during formation into the fresh sim.
-    let frozen = net_loop::form_match(&mut session, args.discover_secs, args.expect).await?;
+    let frozen =
+        net_loop::form_match(&mut session, args.discover_secs, args.expect, tel.as_ref()).await?;
     let me = frozen.me;
     let id_map = &frozen.id_map;
     let all_ids: Vec<PlayerId> = id_map.values().copied().collect();
@@ -280,6 +319,10 @@ async fn run_net(args: NetArgs) -> Result<()> {
     // ticks — the `(tick, hash)` lines are then directly comparable across peers, an
     // external check on the internal desync cross-check.
     let mut next_report_tick = TICK_HZ;
+    // Telemetry-side sampling cursor (independent of the stdout report cadence) and a
+    // one-shot latch so RoundDecided is reported exactly once.
+    let mut next_tel_tick = TELEMETRY_TICK_EVERY;
+    let mut reported_outcome = false;
 
     while Instant::now() < end {
         ticker.tick().await;
@@ -293,18 +336,20 @@ async fn run_net(args: NetArgs) -> Result<()> {
                 && let Some(&pid) = id_map.get(&m.from)
                 && let Some(f) = ls.record_remote(pid, msg)
             {
-                report_fault(&mut total_desyncs, f);
+                report_fault(&mut total_desyncs, f, tel.as_ref());
             }
         }
 
         // Issue our input for this tick and tell every peer.
         let t = ls.next_tick() as f32 * 0.1;
-        let msg = ls.submit_local_input(Input::from_axes(t.cos(), t.sin()));
+        let issue_tick = ls.next_tick();
+        let input = Input::from_axes(t.cos(), t.sin());
+        let msg = ls.submit_local_input(input);
         session.broadcast(&msg).await;
 
         // Advance every ready tick; surface faults found as we apply.
         for f in ls.try_advance() {
-            report_fault(&mut total_desyncs, f);
+            report_fault(&mut total_desyncs, f, tel.as_ref());
         }
 
         // Report once the sim crosses each TICK_HZ boundary. The label is the actual
@@ -320,6 +365,24 @@ async fn run_net(args: NetArgs) -> Result<()> {
                 total_desyncs,
             );
         }
+
+        // Sampled telemetry: a Tick snapshot (+ the input we just issued) every
+        // TELEMETRY_TICK_EVERY ticks, and a one-shot RoundDecided when the round ends.
+        // All read-only on the sim; all best-effort (a send that can't keep up drops).
+        if let Some(t) = tel.as_ref() {
+            if ls.sim().tick() >= next_tel_tick {
+                next_tel_tick = (ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
+                // Agreed roster size (us + peers) — the same quantity render.rs and the
+                // final snapshot report, so the feed's `roster` field means one thing
+                // across every driver.
+                t.send(TelemetryEvent::tick(ls.sim(), total_desyncs, all_ids.len()));
+                t.send(TelemetryEvent::input(issue_tick, input));
+            }
+            if !reported_outcome && ls.sim().outcome() != rl::net::sim::Outcome::Ongoing {
+                reported_outcome = true;
+                t.send(TelemetryEvent::round_decided(ls.sim()));
+            }
+        }
     }
 
     println!(
@@ -328,6 +391,11 @@ async fn run_net(args: NetArgs) -> Result<()> {
         total_desyncs,
         ls.sim().state_hash()
     );
+    // A final snapshot so the collector records where this deck ended even if the round
+    // never "decided" within run_secs (the common case for a short headless run).
+    if let Some(t) = tel.as_ref() {
+        t.send(TelemetryEvent::tick(ls.sim(), total_desyncs, all_ids.len()));
+    }
     if all_ids.len() > 1
         && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(INPUT_DELAY + TICK_HZ)
     {
@@ -339,16 +407,27 @@ async fn run_net(args: NetArgs) -> Result<()> {
             args.run_secs
         );
     }
+    // Give the best-effort telemetry queue a moment to flush its tail before the
+    // process tears down the endpoint (the sender task drains on its own runtime). A
+    // no-op when telemetry is off.
+    if tel.is_some() {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    drop(tel); // close the telemetry channel so its task finishes the stream cleanly
     session.shutdown().await;
     Ok(())
 }
 
 /// Count and log a cross-check fault. A desync is unrecoverable in lockstep, but
 /// Phase 0 keeps running so the test harness can observe how many ticks faulted
-/// rather than aborting on the first.
-fn report_fault(total: &mut usize, f: rl::net::lockstep::Fault) {
+/// rather than aborting on the first. Also mirrored to telemetry (best-effort) so a
+/// remote operator sees the divergence the instant a deck does.
+fn report_fault(total: &mut usize, f: rl::net::lockstep::Fault, telemetry: Option<&TelemetrySender>) {
     use rl::net::lockstep::Fault;
     *total += 1;
+    if let Some(t) = telemetry {
+        t.send(TelemetryEvent::fault(&f));
+    }
     match f {
         Fault::Desync {
             tick,
