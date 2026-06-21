@@ -270,6 +270,10 @@ enum RollOutcome {
         increment: ObsNormalizerData,
         /// Rewards of episodes that finished during this horizon.
         rewards: Vec<f32>,
+        /// Carapace planar drift-from-spawn this horizon as `(sum, count)` over
+        /// recording-env ticks; the learner aggregates across threads into a mean (the
+        /// walking diagnostic).
+        drift: (f64, u64),
         /// Physics ticks actually rolled this horizon.
         ticks: u64,
     },
@@ -415,6 +419,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
         envs: st.take_rollouts(),
         increment: st.normalizer_increment_snapshot(),
         rewards: st.drain_finished_episode_rewards(),
+        drift: st.drain_drift(),
         ticks: rolled,
     }
 }
@@ -656,12 +661,16 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         let mut iter_samples = 0u64;
         let mut rolled_ticks = 0u64;
         let mut panics = 0u32;
+        // Drift summed across threads this iter; divided for the mean logged below.
+        let mut drift_sum = 0f64;
+        let mut drift_count = 0u64;
         for r in results {
             match r {
                 RollOutcome::Rolled {
                     envs,
                     increment,
                     rewards,
+                    drift,
                     ticks,
                 } => {
                     rolled_ticks += ticks;
@@ -669,6 +678,8 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
                     for reward in rewards {
                         state.record_episode_reward(reward);
                     }
+                    drift_sum += drift.0;
+                    drift_count += drift.1;
                     for env in envs {
                         iter_samples += env.len() as u64;
                         rollouts.push(RolloutBuffer { transitions: env });
@@ -700,6 +711,13 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         }
 
         let avg_reward = state.avg_reward(20);
+        // Mean carapace planar drift-from-spawn over recording-env ticks this iter — the
+        // walking diagnostic (climbs from ~0). 0 when no recording tick was sampled.
+        let drift = if drift_count > 0 {
+            drift_sum / drift_count as f64
+        } else {
+            0.0
+        };
         let sps_iter = iter_samples as f64 / rollout_secs.max(1e-9);
         let sps_rollout = if timed_rollout_secs > 0.0 {
             timed_samples as f64 / timed_rollout_secs
@@ -712,7 +730,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
             String::new()
         };
         eprintln!(
-            "[learner] iter {iter} | {iter_samples} samples | rollout {rollout_secs:.3}s ({rolled_ticks} ticks) update {update_secs:.3}s | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | ploss {:.3} vloss {:.3} ent {:.3}{panic_note}",
+            "[learner] iter {iter} | {iter_samples} samples | rollout {rollout_secs:.3}s ({rolled_ticks} ticks) update {update_secs:.3}s | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | ploss {:.3} vloss {:.3} ent {:.3}{panic_note}",
             metrics.policy_loss, metrics.value_loss, metrics.entropy,
         );
 
@@ -913,6 +931,7 @@ mod tests {
                 envs: vec![Vec::new()],
                 increment: empty_normalizer_increment(),
                 rewards: vec![1.5],
+                drift: (0.0, 0),
                 ticks: 64,
             },
             || panic!("rebuild must NOT run on a successful roll"),

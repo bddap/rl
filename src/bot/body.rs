@@ -21,36 +21,58 @@ use super::rig::{self, RigRecipe};
 // Collision groups
 // ---------------------------------------------------------------------------
 
-/// Group 1: arena (ground + walls). Interacts with the crab body (group 2) and
-/// the carapace-nested links (group 3) — the filter must name BOTH, or a nested
-/// link sinks through the floor: collision is an AND of both directions, so the
-/// arena listing group 3 is what lets a group-3 link contact the ground at all.
+/// Bit 0 (`GROUP_1`): the arena (ground + walls). Every crab — whichever env —
+/// must contact it, so its filter is "every group except my own" ([`Group::ALL`]
+/// minus arena): the arena collides with all per-env crab bits and the nested-link
+/// bit without having to enumerate them. Collision is an AND of both directions, so
+/// the arena naming a group is what lets a part on that group touch the ground at all.
 pub const ARENA_COLLISION: CollisionGroups =
-    CollisionGroups::new(Group::GROUP_1, Group::GROUP_2.union(Group::GROUP_3));
-/// Group 2: crab body parts. Interact with the arena AND with each other —
-/// without self-collision the policy "tucks" legs through one another (free
-/// interpenetration is an exploit, not a stance). Segments connected by a
-/// joint are still contact-filtered per joint (`set_contacts_enabled(false)`),
-/// so articulations don't fight their own contacts. N training crabs share
-/// this group: their 4 m grid spacing exceeds any reach, so cross-crab
-/// contact is geometrically impossible until we deliberately close the gap.
-pub const CRAB_COLLISION: CollisionGroups =
-    CollisionGroups::new(Group::GROUP_2, Group::GROUP_1.union(Group::GROUP_2));
-/// Group 3: links whose collider center falls inside the carapace box — on this
-/// model the actuated coxa/claw-shoulder (and the eye-stalks) that ride just under
-/// the shell. Membership is purely geometric (see `spawn_crab`), so it catches
-/// actuated joints, not only locked links. They keep their mass but collide only
-/// with the arena — never with the carapace or each other. A link
-/// jammed inside the carapace collider just fights the solver every tick (the
-/// near-massless pincers ring it as rest jitter, bddap/rl#20), and
-/// `no_adjacent_contacts` can't filter it because its joint parent is another
-/// nested link, not the carapace.
-pub const NESTED_COLLISION: CollisionGroups = CollisionGroups::new(Group::GROUP_3, Group::GROUP_1);
+    CollisionGroups::new(Group::GROUP_1, Group::ALL.difference(Group::GROUP_1));
+
+/// Bit reserved for carapace-NESTED links: links whose collider center falls inside
+/// the carapace box — on this model the actuated coxa/claw-shoulder (and the
+/// eye-stalks) that ride just under the shell. Membership is purely geometric (see
+/// `spawn_crab`), so it catches actuated joints, not only locked links. They keep
+/// their mass but collide only with the arena — never with the carapace or each
+/// other. A link jammed inside the carapace collider just fights the solver every
+/// tick (the near-massless pincers ring it as rest jitter, bddap/rl#20), and
+/// `no_adjacent_contacts` can't filter it because its joint parent is another nested
+/// link, not the carapace. One shared bit across all envs is fine: nested links only
+/// ever touch the arena, never another crab's parts.
+pub const NESTED_COLLISION: CollisionGroups = CollisionGroups::new(Group::GROUP_2, Group::GROUP_1);
+
+/// Highest env bit a crab may occupy (`GROUP_3`..`GROUP_18` ⇒ envs 0..15), which is
+/// why `--envs` is capped at 16: env `e` takes bit `1 << (e + 2)` and we must stay
+/// inside `Group`'s 32 bits with room for the arena (bit 0) and nested (bit 1) bits.
+pub const MAX_ENVS: usize = 16;
+
+// Envs occupy bits 2..=MAX_ENVS+1 of `Group`'s 32, so the highest env bit must fit.
+// A compile-time guarantee, so raising MAX_ENVS past the budget fails the build
+// instead of silently truncating env `e`'s membership bit at runtime.
+const _: () = assert!(MAX_ENVS + 2 <= 32);
+
+/// Collision membership for env `e`'s ordinary (non-nested, distal) crab parts.
+///
+/// **Each env gets its OWN bit**, so a crab's distal limbs collide with the arena
+/// and with that SAME crab's other distal limbs — preserving self-collision (without
+/// it the policy "tucks" legs through one another: free interpenetration is an
+/// exploit, not a stance) — but NOT with any other env's crab, which keeps each env a
+/// physically independent RL problem even as the M crabs walk across one shared arena
+/// toward far targets and would otherwise plow into each other. Joint-adjacent
+/// segments are separately contact-filtered (`no_adjacent_contacts`).
+///
+/// `e` must be `< MAX_ENVS`; the `--envs` clap range (1..=16) guarantees it.
+pub fn crab_collision(env: usize) -> CollisionGroups {
+    debug_assert!(env < MAX_ENVS, "env {env} exceeds the {MAX_ENVS}-env bit budget");
+    // Env 0 → GROUP_3 (bit 2); arena=bit 0, nested=bit 1 are reserved below it.
+    let bit = Group::from_bits_truncate(1 << (env + 2));
+    CollisionGroups::new(bit, Group::GROUP_1.union(bit))
+}
 
 /// Disable contacts between the two segments a joint connects. The joint
 /// already constrains that pair, and their colliders overlap at the anchor by
 /// construction — contacts there would only fight the articulation. All other
-/// (non-adjacent) crab-part pairs DO collide; see [`CRAB_COLLISION`].
+/// (non-adjacent) parts of the SAME crab DO collide; see [`crab_collision`].
 fn no_adjacent_contacts(joint: impl Into<TypedJoint>) -> TypedJoint {
     let mut joint = joint.into();
     let generic: &mut GenericJoint = joint.as_mut();
@@ -468,7 +490,7 @@ pub fn spawn_crab(
                     recipe.carapace_half.z,
                 ),
             )]),
-            CRAB_COLLISION,
+            crab_collision(env),
             ColliderMassProperties::Density(recipe.carapace_density),
             // No stand-in Mesh3d: the visible body is the skin, and the true colliders
             // are shown by Rapier's debug-render (RL_DEBUG_COLLIDERS). A primitive mesh
@@ -506,7 +528,7 @@ pub fn spawn_crab(
         let groups = if inside_carapace(here + link.center) {
             NESTED_COLLISION
         } else {
-            CRAB_COLLISION
+            crab_collision(env)
         };
         let joint = match link.actuated {
             Some(id) => rig_revolute(id, link.axis_local, link.anchor1),
