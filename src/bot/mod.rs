@@ -41,9 +41,11 @@ pub struct NumEnvs(pub usize);
 #[derive(Resource, Default)]
 pub struct CrabSpawns(pub Vec<Vec3>);
 
-/// Crabs spaced on a grid: 4 m apart, centered on the origin. Legs reach
-/// ~1.3 m and episodes end on a fall, so neighbours can't touch; the whole
-/// grid fits the ±10 m arena up to N=16.
+/// Crabs spaced on a grid: 4 m apart, centered on the origin, so the whole grid
+/// fits the ±10 m arena up to N=16. With far targets the crabs WALK and their paths
+/// cross, but each env owns a private collision bit (see [`body::crab_collision`]),
+/// so neighbours pass through one another — the grid is just the start layout, not a
+/// no-touch guarantee.
 fn grid_offset(env: usize, n: usize) -> Vec3 {
     let cols = (n as f32).sqrt().ceil() as usize;
     let spacing = 4.0;

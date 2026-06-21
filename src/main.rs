@@ -71,8 +71,10 @@ pub struct TrainConfig {
 
     /// Environments M each rollout thread steps in its one world per tick (one
     /// batched NN pass over the M crabs, which sit on a 4 m grid). Total parallel
-    /// envs = `--workers` × M. Capped at 16 (the ±10 m arena's grid limit per world).
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=16))]
+    /// envs = `--workers` × M. Capped at [`bot::body::MAX_ENVS`] — each env needs its
+    /// own collision bit so independent crabs pass through each other, and `Group` has
+    /// only 32 bits (see [`bot::body::crab_collision`]).
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=bot::body::MAX_ENVS as u64))]
     pub envs: u64,
 }
 

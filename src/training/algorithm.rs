@@ -156,9 +156,9 @@ impl RolloutBuffer {
 /// # Why this exists
 /// The advantages PPO's policy gradient uses are already batch-normalized
 /// ([`ppo_update_core`]), so the policy is scale-invariant. The value head is not:
-/// it regresses raw returns, and when the reward magnitude is large (the standing
-/// reward's effort tax drives episode returns to ~-2700) the squared value loss and
-/// its gradient blow up, the bounded value head can't track the target, advantages
+/// it regresses raw returns, and when the reward magnitude is large (the pose+reach
+/// reward accumulates to ~+1500 over a full 1500-step episode) the squared value loss
+/// and its gradient blow up, the bounded value head can't track the target, advantages
 /// derived from `R - V` become noise, and training diverges. Normalizing the value
 /// TARGET to unit scale fixes the value head's conditioning without touching the
 /// reward or the policy.

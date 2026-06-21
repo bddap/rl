@@ -33,7 +33,7 @@ use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{BotSet, CrabSpawns, respawn_crab_rotated};
 use crate::training::session::{
-    BRAIN_STEM, DEMO_TOUCH_RADIUS, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend,
+    BRAIN_STEM, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend, planar_dist,
     sample_target,
 };
 
@@ -630,14 +630,22 @@ fn random_demo_tilt() -> Quat {
     body::random_spawn_rotation(&mut rand::thread_rng())
 }
 
-/// Marker on the demo's red target ball — the visible stand-in for the touch
-/// target the policy is reaching for. Demo-only: training renders nothing and
-/// reads the target straight from [`CrabTargets`].
+/// Marker on the demo's red target ball — the visible stand-in for the target the
+/// policy is reaching for. Demo-only: training renders nothing and reads the target
+/// straight from [`CrabTargets`].
 #[derive(Component)]
 struct TargetBall;
 
-/// Radius (m) of the demo target ball. Bigger than [`DEMO_TOUCH_RADIUS`] so the
-/// claw visibly reaches *into* the ball before it registers a touch and jumps —
+/// Planar (XZ) distance at which the DEMO counts a claw tip as having reached the
+/// target and teleports it to a fresh far point (see [`target_ball`]). Set at the edge
+/// of the claw's reach. DEMO-ONLY: training holds one fixed target per episode and pays
+/// the smooth `1 − tanh(d/S)` reward everywhere with no reach threshold, so this radius
+/// drives nothing in training — it is purely how often the demo's ball hops for a lively
+/// stream.
+const DEMO_REACH_RADIUS: f32 = 0.8;
+
+/// Radius (m) of the demo target ball. Bigger than [`DEMO_REACH_RADIUS`] so the
+/// claw visibly reaches *into* the ball before it registers a reach and jumps —
 /// a marker you can see from the orbit camera, not a pinprick.
 const TARGET_BALL_RADIUS: f32 = 0.08;
 
@@ -667,17 +675,26 @@ fn spawn_target_ball(
 }
 
 /// FixedUpdate (demo only): drive the red ball off env 0's target, and TELEPORT the
-/// target when a claw tip touches it. [`CrabTargets`] is the single source of truth —
-/// the same resource the observation reads and (in training) the reward scores; here
-/// we seed/relocate that resource and then snap the ball to it, so the ball can never
-/// disagree with the target the policy perceives. Seeding and relocation both reuse
-/// [`sample_target`], the exact box the training reward samples, so a demo target is
-/// always the same kind of reach the policy was trained on. Touch is the closest
-/// claw-tip-to-target distance falling within [`DEMO_TOUCH_RADIUS`] — the demo's
-/// discrete stand-in for the reward's smooth `exp(−d/S)` bump (which has no threshold).
-/// (The demo runs no training target system, so this is the only writer of env 0's
-/// target; the initial seed happens here rather than at Startup because `BotPlugin`'s
-/// Startup resize of [`CrabTargets`] would otherwise race and clear it.)
+/// target to a fresh far point when a claw tip reaches it. [`CrabTargets`] is the single
+/// source of truth — the same resource the observation reads; here we seed/relocate it
+/// and snap the ball to it, so the ball can never disagree with the target the policy
+/// perceives. Seeding and relocation both reuse [`sample_target`], the exact FAR-target
+/// rule training samples, so a demo target is always the same kind of walk-to goal the
+/// policy was trained on.
+///
+/// **Intentional train/demo divergence.** Training uses ONE fixed target per episode
+/// (no resample on reach): the reward is a pure distance field with no reach-event
+/// bonus, so resampling-on-reach would let the optimal policy hover just outside the
+/// reach radius forever instead of touching — a degenerate optimum (see
+/// `session::brain_step`). The DEMO deliberately teleports on reach anyway, purely for
+/// watchability: it keeps the crab walking continuously to new goals instead of parking
+/// on one. This is safe because the policy learned "walk toward the current target
+/// vector" and so generalizes to a target that moves — the demo just exercises that on
+/// a livelier schedule than training. Reached is the closest PLANAR claw-tip-to-target
+/// distance within [`DEMO_REACH_RADIUS`]. (The demo runs no training target system, so
+/// this is the only writer of env 0's target; the initial seed happens here rather than
+/// at Startup because `BotPlugin`'s Startup resize of [`CrabTargets`] would otherwise
+/// race and clear it.)
 fn target_ball(
     spawns: Res<CrabSpawns>,
     mut targets: ResMut<CrabTargets>,
@@ -696,16 +713,18 @@ fn target_ball(
             .unwrap_or_else(|| sample_target(origin, &mut rand::thread_rng())),
     };
 
-    // Closest distance from either claw tip to the target (the reward's `d`, env 0).
+    // Closest PLANAR distance from either claw tip to the target (the reward's `d`,
+    // env 0) — planar so the ball relocates at the same reached-moment training does.
     let mut min_dist = f32::INFINITY;
     for (env, tip) in claw_tips_q.iter() {
         if env.0 == 0 && tip.translation.is_finite() {
-            min_dist = min_dist.min(tip.translation.distance(target));
+            min_dist = min_dist.min(planar_dist(tip.translation, target));
         }
     }
 
-    // Touched → relocate to a fresh reach. The ball follows the new target below.
-    if min_dist <= DEMO_TOUCH_RADIUS {
+    // Reached → relocate to a fresh far target (demo watchability only; see the fn
+    // doc on why training does NOT do this). The ball follows the new target below.
+    if min_dist <= DEMO_REACH_RADIUS {
         target = sample_target(origin, &mut rand::thread_rng());
     }
 
@@ -1212,9 +1231,9 @@ fn pose_drive_step(
 }
 
 /// Read `RL_TARGET_BALL_AT="x,y,z"` into an explicit world target for the screenshot
-/// ball, so an evidence frame can place the red ball at a chosen reachable point next
-/// to the crab (and a second frame at a moved point) deterministically, instead of a
-/// random sample. `None` (the default) lets [`target_ball`] sample the reach box.
+/// ball, so an evidence frame can place the red ball at a chosen point in the arena
+/// (and a second frame at a moved point) deterministically, instead of a random
+/// sample. `None` (the default) lets [`target_ball`] sample a fresh far target.
 fn target_ball_at_from_env() -> Option<Vec3> {
     let raw = std::env::var("RL_TARGET_BALL_AT").ok()?;
     let parts: Vec<f32> = raw
@@ -1232,7 +1251,7 @@ impl Plugin for ScreenshotPlugin {
         add_inference(app, &self.checkpoint_dir, None);
         app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
         // RL_TARGET_BALL=1: render the demo's red target ball in the screenshot too,
-        // off the same `CrabTargets` state, so the target-touch viz can be inspected
+        // off the same `CrabTargets` state, so the reach-target viz can be inspected
         // headless. `target_ball` seeds (honoring RL_TARGET_BALL_AT), drives, and
         // teleports the target exactly as in the demo. Inert by default — a plain
         // screenshot is unchanged.
