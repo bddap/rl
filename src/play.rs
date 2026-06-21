@@ -33,8 +33,8 @@ use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{BotSet, CrabSpawns, respawn_crab_rotated};
 use crate::training::session::{
-    BRAIN_STEM, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend, planar_dist,
-    sample_target,
+    BRAIN_STEM, Curriculum, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend,
+    planar_dist, sample_target,
 };
 
 /// A loaded policy that maps observations to actions for inference (no learning).
@@ -638,11 +638,12 @@ struct TargetBall;
 
 /// Planar (XZ) distance at which the DEMO counts a claw tip as having reached the
 /// target and teleports it to a fresh far point (see [`target_ball`]). Set at the edge
-/// of the claw's reach. DEMO-ONLY: training holds one fixed target per episode and pays
-/// the smooth `1 − tanh(d/S)` reward everywhere with no reach threshold, so this radius
-/// drives nothing in training — it is purely how often the demo's ball hops for a lively
-/// stream.
-const DEMO_REACH_RADIUS: f32 = 0.8;
+/// of the claw's reach. The training REWARD pays the smooth `1 − tanh(d/S)` everywhere
+/// with no threshold, so this radius never enters a reward; it defines a binary "reached
+/// it" event in two non-reward places that benefit from one shared definition: the
+/// demo's ball-hop, and the training curriculum's per-episode competence signal (see
+/// [`crate::training::session::CURRICULUM_REACH_RADIUS`]).
+pub(crate) const DEMO_REACH_RADIUS: f32 = 0.8;
 
 /// Radius (m) of the demo target ball. Bigger than [`DEMO_REACH_RADIUS`] so the
 /// claw visibly reaches *into* the ball before it registers a reach and jumps —
@@ -707,10 +708,15 @@ fn target_ball(
     // explicit `RL_TARGET_BALL_AT` (screenshot evidence frames) pins the seed to a
     // chosen point; otherwise sample the reach box. Seeding here, not at Startup,
     // dodges a race with `BotPlugin`'s Startup resize of `CrabTargets`.
+    // The demo runs no curriculum (it isn't training), so it samples targets from the
+    // fixed rung-1 band — a sensible near-to-mid range that reads well on the orbit
+    // camera. A trained policy generalizes to any in-arena target, so the demo band need
+    // not track the rung the weights were trained at.
+    let demo_band = Curriculum::start();
     let mut target = match targets.get(0) {
         Some(t) => t,
         None => target_ball_at_from_env()
-            .unwrap_or_else(|| sample_target(origin, &mut rand::thread_rng())),
+            .unwrap_or_else(|| sample_target(origin, demo_band, &mut rand::thread_rng())),
     };
 
     // Closest PLANAR distance from either claw tip to the target (the reward's `d`,
@@ -725,7 +731,7 @@ fn target_ball(
     // Reached → relocate to a fresh far target (demo watchability only; see the fn
     // doc on why training does NOT do this). The ball follows the new target below.
     if min_dist <= DEMO_REACH_RADIUS {
-        target = sample_target(origin, &mut rand::thread_rng());
+        target = sample_target(origin, demo_band, &mut rand::thread_rng());
     }
 
     // Write the one source of truth (seed or relocation), then snap the ball to it.

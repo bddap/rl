@@ -73,7 +73,10 @@ use crate::TrainConfig;
 use crate::bot::brain::CrabBrain;
 
 use super::algorithm::{RolloutBuffer, Transition};
-use super::session::{ObsNormalizerData, TrainBackend, TrainingState, ppo_update_core};
+use super::session::{
+    CURRICULUM_FILENAME, Curriculum, CurriculumProgress, ObsNormalizerData, TrainBackend,
+    TrainingState, load_curriculum, ppo_update_core, save_curriculum,
+};
 
 /// Recorder for the in-memory weight snapshot. The same precision settings the
 /// on-disk checkpoint (`BinFileRecorder<FullPrecisionSettings>`) uses, so a brain
@@ -251,6 +254,10 @@ fn write_tick_watermark(dir: &Path, ticks: u64) {
 struct RollRequest {
     brain_bytes: Arc<Vec<u8>>,
     normalizer: Arc<ObsNormalizerData>,
+    /// The current curriculum band the thread samples this horizon's targets from. The
+    /// learner owns advancement and ships the band down each horizon; the thread never
+    /// advances it. `Copy` (a tiny band), so no `Arc` is warranted.
+    curriculum: Curriculum,
 }
 
 /// What a rollout thread returns after one horizon.
@@ -274,6 +281,10 @@ enum RollOutcome {
         /// recording-env ticks; the learner aggregates across threads into a mean (the
         /// walking diagnostic).
         drift: (f64, u64),
+        /// This horizon's per-episode reach tally as `(reached, finished)`; the learner
+        /// pools it across threads into the competence window that gates curriculum
+        /// advancement.
+        reach: (u64, u64),
         /// Physics ticks actually rolled this horizon.
         ticks: u64,
     },
@@ -402,6 +413,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
             .expect("rollout TrainingState");
         st.load_brain_bytes(&req.brain_bytes);
         st.set_normalizer((*req.normalizer).clone());
+        st.set_curriculum(req.curriculum);
         st.reset_horizon_counter();
     }
 
@@ -420,6 +432,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
         increment: st.normalizer_increment_snapshot(),
         rewards: st.drain_finished_episode_rewards(),
         drift: st.drain_drift(),
+        reach: st.drain_reach(),
         ticks: rolled,
     }
 }
@@ -584,6 +597,14 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // restart would re-grant the full `--ticks` budget and over-simulate.
     let mut total_ticks = read_tick_watermark(&checkpoint_dir);
 
+    // The distance curriculum: the learner owns the one advancing instance. Resume the
+    // rung from the checkpoint so a warm restart CONTINUES the curriculum; a fresh run
+    // or a pre-curriculum checkpoint loads rung 1 (see `load_curriculum`). The window is
+    // transient and starts empty — competence is re-measured from live episodes, so the
+    // next advance simply waits a full window after the restart.
+    let mut progress =
+        CurriculumProgress::new(load_curriculum(&checkpoint_dir.join(CURRICULUM_FILENAME)));
+
     let compute_threads = bevy::tasks::ComputeTaskPool::get().thread_num();
     eprintln!(
         "[learner] in-process: K={k} threads × M={m} envs × H={horizon} ticks/iter → {} transitions/update | budget {} ticks (0=∞), {iters} iters (0=∞) | nice {nice} | compute pool {compute_threads} thread(s), RAYON_NUM_THREADS={}",
@@ -623,7 +644,13 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         //    handoff to the threads (they get the in-memory snapshot above).
         let brain_bytes = Arc::new(snapshot_brain_bytes(&state.brain));
         let normalizer = Arc::new(state.normalizer_snapshot());
+        // The band every thread samples this horizon — captured here so an advance from
+        // last horizon's reach (applied after the roll, below) takes effect on THIS roll,
+        // and all threads roll the same band. Persist it beside the weights so a restart
+        // resumes the rung rather than the start band.
+        let curriculum = progress.curriculum();
         state.save_checkpoint();
+        save_curriculum(curriculum, &checkpoint_dir.join(CURRICULUM_FILENAME));
 
         // 2) Roll one synchronous horizon across all threads. Send every thread its
         //    request, then collect every result (the barrier: the update waits for
@@ -635,6 +662,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
                 .send(RollRequest {
                     brain_bytes: Arc::clone(&brain_bytes),
                     normalizer: Arc::clone(&normalizer),
+                    curriculum,
                 })
                 // A closed channel means the thread's OS thread itself died — not a
                 // caught roll panic (those return a `panicked` result), but a fault
@@ -664,6 +692,10 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         // Drift summed across threads this iter; divided for the mean logged below.
         let mut drift_sum = 0f64;
         let mut drift_count = 0u64;
+        // Per-episode reach tally pooled across threads this iter, fed to the curriculum
+        // after the merge so the competence window sees every thread's episodes.
+        let mut reach_reached = 0u64;
+        let mut reach_finished = 0u64;
         for r in results {
             match r {
                 RollOutcome::Rolled {
@@ -671,6 +703,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
                     increment,
                     rewards,
                     drift,
+                    reach,
                     ticks,
                 } => {
                     rolled_ticks += ticks;
@@ -680,6 +713,8 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
                     }
                     drift_sum += drift.0;
                     drift_count += drift.1;
+                    reach_reached += reach.0;
+                    reach_finished += reach.1;
                     for env in envs {
                         iter_samples += env.len() as u64;
                         rollouts.push(RolloutBuffer { transitions: env });
@@ -688,6 +723,9 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
                 RollOutcome::Panicked => panics += 1,
             }
         }
+        // Feed this iter's finished episodes to the curriculum, which may advance the
+        // band — taking effect on the NEXT horizon's `progress.curriculum()` snapshot.
+        progress.record_episodes(reach_reached, reach_finished);
 
         // 4) PPO update — `ppo_update_core` over all K·M buffers. The trailing
         //    bootstrap per buffer is recomputed inside from the current brain (which
@@ -729,8 +767,17 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         } else {
             String::new()
         };
+        // The curriculum band these rollouts used, plus this iter's reach-fraction over
+        // finished episodes — so an advance is visible (band steps out) and its approach
+        // is legible (reach climbing toward the threshold). `-` when no episode finished.
+        let (band_min, band_max) = curriculum.band();
+        let reach_note = if reach_finished > 0 {
+            format!("{:.2}", reach_reached as f64 / reach_finished as f64)
+        } else {
+            "-".to_string()
+        };
         eprintln!(
-            "[learner] iter {iter} | {iter_samples} samples | rollout {rollout_secs:.3}s ({rolled_ticks} ticks) update {update_secs:.3}s | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | ploss {:.3} vloss {:.3} ent {:.3}{panic_note}",
+            "[learner] iter {iter} | {iter_samples} samples | rollout {rollout_secs:.3}s ({rolled_ticks} ticks) update {update_secs:.3}s | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note}) | ploss {:.3} vloss {:.3} ent {:.3}{panic_note}",
             metrics.policy_loss, metrics.value_loss, metrics.entropy,
         );
 
@@ -745,8 +792,10 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     }
 
     // Final checkpoint so the last update's weights are on disk. The rollout threads
-    // are torn down by their Drop (channel close + join) when `threads` drops.
+    // are torn down by their Drop (channel close + join) when `threads` drops. Persist
+    // the curriculum alongside so a resume continues at the rung the run reached.
     state.save_checkpoint();
+    save_curriculum(progress.curriculum(), &checkpoint_dir.join(CURRICULUM_FILENAME));
     if timed_samples > 0 {
         let rollout_sps = timed_samples as f64 / timed_rollout_secs.max(1e-9);
         let e2e_sps = timed_samples as f64 / timed_wall_secs.max(1e-9);
@@ -932,6 +981,7 @@ mod tests {
                 increment: empty_normalizer_increment(),
                 rewards: vec![1.5],
                 drift: (0.0, 0),
+                reach: (0, 0),
                 ticks: 64,
             },
             || panic!("rebuild must NOT run on a successful roll"),
@@ -1007,6 +1057,7 @@ mod tests {
             .send(RollRequest {
                 brain_bytes: Arc::new(snapshot_brain_bytes(&state.brain)),
                 normalizer: Arc::new(state.normalizer_snapshot()),
+                curriculum: Curriculum::start(),
             })
             .expect("send request");
         let RollOutcome::Rolled { envs, .. } = thread.result_rx.recv().expect("recv result") else {
@@ -1078,6 +1129,7 @@ mod tests {
                 .send(RollRequest {
                     brain_bytes: Arc::clone(&brain_bytes),
                     normalizer: Arc::clone(&normalizer),
+                    curriculum: Curriculum::start(),
                 })
                 .expect("send");
         }
