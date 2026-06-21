@@ -4,29 +4,27 @@
 //! # Why one process scales
 //! A benchmark proved N independent crab+NN contexts run as N OS threads in one
 //! process scale near-linearly with cores — burn-ndarray does not serialize the
-//! tiny `[1,77]` inference, and rapier's per-world solve is independent. Two
-//! process-global thread pools would otherwise re-serialize the threads, so this
-//! module pins both before any `App` is built (see [`init_process_pools`]):
-//!   1. bevy's `ComputeTaskPool` (a global `OnceLock`) pinned to 1 thread, AND
-//!      every schedule forced onto the single-threaded executor — without this
-//!      bevy's multithreaded executor dispatches each `App`'s systems onto the one
-//!      shared pool and throughput is flat regardless of K.
-//!   2. burn-ndarray's rayon/matmul pool, pinned via `RAYON_NUM_THREADS=1` so the
-//!      per-step forward pass runs on the calling thread, not a contended global.
+//! tiny `[≤16,77]` inference, and rapier's per-world solve is independent. Several
+//! process-global thread pools would otherwise make the K threads contend — or, for
+//! matrixmultiply's gemm tree, deadlock — so this module pins them all to 1 before
+//! any `App` is built (rayon + that gemm tree behind burn-ndarray's matmul, and
+//! bevy's three task pools; see [`init_process_pools`] for which and why). Each
+//! `App`'s schedule is also forced onto the single-threaded executor, so bevy's
+//! multithreaded executor can't fan one `App`'s systems back onto a shared pool.
 //!
 //! # Design: synchronous actor-learner (on-policy PPO preserved)
 //! Each iteration the learner snapshots the current policy, every thread rolls a
 //! fixed horizon H in its own world acting with a LOCAL forward pass, ships its
 //! transitions back over a channel, and the learner concatenates all K·M env
-//! buffers, runs GAE per env, and does the PPO epochs — the SAME `ppo_update_core`
-//! single-process uses. Synchronous + one snapshot per update = every sample is
-//! drawn from a single consistent snapshot of the policy being updated, so it
-//! stays on-policy.
+//! buffers, runs GAE per env, and does the PPO epochs via `ppo_update_core`.
+//! Synchronous + one snapshot per update = every sample is drawn from a single
+//! consistent snapshot of the policy being updated, so it stays on-policy.
 //!
-//! With K=1 a thread's rollout is collected by the same `brain_step` code as
-//! single-process and the learner runs the same update, so a K=1 run is the
-//! single-process algorithm with the rollout moved to a worker thread — the
-//! parity anchor the tests pin.
+//! A thread's rollout is collected by the same `brain_step` code regardless of K,
+//! and the learner runs one update over the merged buffers regardless of K — so a
+//! K=1 run is just the K-thread algorithm with one rollout thread. That is the
+//! parity the tests pin (K=1 collection == one-thread reference; merge == one
+//! stream), which lets the K>1 path inherit the single-thread correctness.
 //!
 //! # Weight sharing — why a byte snapshot, not a shared `Arc<CrabBrain>`
 //! The NdArray tensors a `CrabBrain` holds are `!Send`, so a live brain cannot be
@@ -164,26 +162,56 @@ fn physical_cores() -> usize {
         .unwrap_or(1)
 }
 
-/// Pin both process-global thread pools to 1 thread BEFORE any `App` is built.
-/// MUST run before the first `App::new()` and before burn's rayon pool is first
-/// touched, or the threads re-serialize on a shared pool (the flat-throughput
-/// failure the spike diagnosed). Split out so the learner calls it exactly once at
-/// startup.
+/// Pin every process-global thread pool to 1 thread BEFORE any `App` is built, the
+/// first matmul runs, or burn's rayon pool is first touched. The learner calls it
+/// once at startup. K concurrent rollout-thread gemms otherwise fight over the pools
+/// the matmul stack shares process-wide:
 ///
-/// `RAYON_NUM_THREADS` is read once when rayon's global pool is lazily built; set
-/// it here (idempotent — honor any value an owner already exported) so the tiny
-/// `[1,77]` inference stays on the calling thread instead of fanning out.
+///   - `RAYON_NUM_THREADS=1` — the outer batch loop (`run_par!`/`iter_range_par!`).
+///     A safe perf knob (work-stealing pool, no capacity-1 hazard), so an owner's
+///     export is honored; we only default it.
+///   - `MATMUL_NUM_THREADS=1` — matrixmultiply's inner-gemm `thread-tree`. THIS is
+///     the pool that wedges: the tree is built to be driven by one matmul at a time,
+///     so K rollout threads racing it can deadlock — an intermittent race, so a run
+///     may go far before it bites. Pinned to 1 the tree has no workers and every gemm
+///     runs inline on its calling thread. >1 is a correctness hazard here, not a
+///     tuning choice, so it is forced (with a warning) rather than honored.
+///   - bevy's task pools — `with_num_threads(1)` pins all three (Io, AsyncCompute,
+///     Compute); each is process-global and shared by the K worker Apps, so one
+///     thread is the only size at which they can't contend across workers.
+///
+/// Cost is ~nil: the rollout forward pass is a tiny `[≤16,77]` matmul. Only the
+/// learner's PPO-update gemms (`[64,256]×[256,256]`) are big enough to have threaded,
+/// and that update runs while every rollout thread is idle — off the rollout critical
+/// path.
 fn init_process_pools() {
-    // SAFETY: single-threaded at process start (no rollout threads spawned yet),
-    // so this set_var races nothing. It must land before burn's pool initializes.
+    // SAFETY: single-threaded at process start (no rollout threads spawned yet), so
+    // these set_vars race nothing. They must land before the pools initialize — each
+    // reads its env exactly once, lazily, on first use.
     if std::env::var_os("RAYON_NUM_THREADS").is_none() {
         unsafe {
             std::env::set_var("RAYON_NUM_THREADS", "1");
         }
     }
-    // Pin bevy's global ComputeTaskPool to one thread. Building the App also forces
-    // every schedule onto the single-threaded executor (see `build_rollout_app`),
-    // but the pool itself must be pinned before any App can grab the default pools.
+    // Unlike RAYON, MATMUL_NUM_THREADS>1 doesn't just slow K>1 down — it re-arms the
+    // shared-tree deadlock — so force 1 rather than honor an export. Warn instead of
+    // silently overriding, so a stale >1 in the env can't resurface as a rare hang
+    // with no breadcrumb.
+    if let Ok(prev) = std::env::var("MATMUL_NUM_THREADS")
+        && prev != "1"
+    {
+        eprintln!(
+            "[learner] MATMUL_NUM_THREADS={prev} re-enables the shared matmul tree \
+             (deadlock risk with K>1 rollout threads); forcing 1"
+        );
+    }
+    unsafe {
+        std::env::set_var("MATMUL_NUM_THREADS", "1");
+    }
+    // with_num_threads(1) pins bevy's three global task pools to one worker each (see
+    // the doc above). Building the App also forces every schedule onto the
+    // single-threaded executor (see `build_rollout_app`), but the pools must be pinned
+    // before any App grabs the defaults.
     TaskPoolOptions::with_num_threads(1).create_default_pools();
 }
 
@@ -469,8 +497,8 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
     // One physics tick per app.update(): advance the virtual clock by exactly the
     // fixed dt each update, so FixedUpdate runs exactly one step and a horizon is
     // EXACTLY H ticks (clean, reproducible sample counts). Physics work per tick is
-    // identical to the single-process headless loop; only the per-update
-    // granularity differs.
+    // the production fixed_timestep step (one source, shared with the demo and
+    // tests); only the per-update granularity differs.
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_secs_f32(crate::physics::PHYSICS_DT),
     ));
@@ -483,11 +511,10 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
         .add_plugins(PhysicsWorldPlugin)
         .add_plugins(BotPlugin);
 
-    // Worker-mode training state + the same Sense→Think→Act systems the
-    // TrainingPlugin wires, minus the PPO-update boundary system: this app never
-    // adds `ppo_update_at_boundary` (the driver reads the buffers out each horizon
-    // and the learner owns the update). save_on_exit stays harmless (no AppExit
-    // fires here).
+    // Worker-mode training state + the Sense→Think→Act systems. No PPO-update step
+    // runs in this app: the driver thread reads the per-env buffers out each horizon
+    // and the learner owns the update. save_on_exit stays harmless (no AppExit fires
+    // here).
     let state = session::TrainingState::new_worker(config, &metrics_dir);
     app.insert_non_send_resource(state)
         .add_systems(
@@ -528,8 +555,7 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
 /// crab-train loop sets via `--ticks`, on hitting which the learner prints
 /// "Tick budget reached" (verbatim, the loop's termination grep) and exits. The
 /// policy is (re)loaded from `--checkpoint-dir` by `TrainingState::new`, so a
-/// learner restarted by the service resumes from the latest checkpoint exactly as
-/// the single-process trainer does.
+/// learner restarted by the service resumes from the latest checkpoint.
 pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nice: i32) {
     // Own nicing here (one place): lowers this whole process's priority before any
     // world is built, so a foreground game preempts training. The rollout threads
@@ -544,8 +570,8 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
 
     // The learner hosts the policy through a normal TrainingState (brain +
     // optimizer + normalizer + config) but steps no world: it builds rollouts from
-    // the threads' buffers and calls the SAME ppo_update_core single-process uses.
-    // `new` loads any existing checkpoint in checkpoint_dir — that is the resume.
+    // the threads' buffers and runs `ppo_update_core` over them. `new` loads any
+    // existing checkpoint in checkpoint_dir — that is the resume.
     let mut state = TrainingState::new(config);
 
     // Resume the tick odometer from the checkpoint, not from 0: the overnight loop
@@ -652,10 +678,10 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
             }
         }
 
-        // 4) PPO update — the SAME core as single-process, over all K·M buffers. The
-        //    trailing bootstrap per buffer is recomputed inside from the current
-        //    brain (which IS the snapshot the threads just rolled with), so no
-        //    per-env value crosses any boundary.
+        // 4) PPO update — `ppo_update_core` over all K·M buffers. The trailing
+        //    bootstrap per buffer is recomputed inside from the current brain (which
+        //    IS the snapshot the threads just rolled with), so no per-env value
+        //    crosses any boundary.
         let update_start = Instant::now();
         let (brain, optimizer, ppo_config, device, ret_norm) = state.learner_parts();
         let metrics = ppo_update_core(brain, optimizer, ppo_config, &rollouts, device, ret_norm);
@@ -692,8 +718,8 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
 
         iter += 1;
 
-        // Tick budget: counted in physics ticks (like the single-process --ticks),
-        // so a run simulates a fixed amount regardless of K or machine speed.
+        // Tick budget (`--ticks`): counted in physics ticks, so a run simulates a
+        // fixed amount regardless of K or machine speed.
         if tick_budget != 0 && total_ticks >= tick_budget {
             budget_hit = true;
             break;
@@ -712,7 +738,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     }
     if budget_hit {
         // The crab-train overnight loop greps for this exact phrase to stop
-        // resuming; keep it verbatim with the single-process trainer's message.
+        // resuming; keep the wording stable.
         eprintln!("[learner] Tick budget reached ({total_ticks} ticks) — stopping training.");
     }
     drop(threads);
@@ -927,13 +953,12 @@ mod tests {
         );
     }
 
-    /// Threaded-rollout parity: one rollout THREAD running M envs for a horizon must
-    /// collect exactly the same shape of data a single-process `--envs M` tick loop
-    /// does — M independent per-env buffers totaling ~M·H transitions — and the
+    /// Threaded-rollout shape: one rollout THREAD running M envs for a horizon must
+    /// collect M independent per-env buffers totaling ~M·H transitions, and the
     /// learner's update over them must change the policy (learning happens). This is
-    /// the structural half of "K threads == single-process": each thread runs the
-    /// SAME worker-mode `brain_step` collection, and the learner concatenates the
-    /// per-env buffers exactly as the single-world path would. (The reward-vs-samples
+    /// the structural invariant the K>1 path is built on: each thread runs the
+    /// worker-mode `brain_step` collection and the learner concatenates the per-env
+    /// buffers, GAE never sweeping across an env boundary. (The reward-vs-samples
     /// numeric parity within noise is shown live in the smoke test — stochastic
     /// action sampling makes two separate Apps' trajectories diverge tick-to-tick, so
     /// a unit test pins the deterministic structure instead.)
@@ -1008,8 +1033,8 @@ mod tests {
     /// Two rollout threads must each independently collect a full horizon's per-env
     /// buffers from one shared snapshot — the K>1 path. Proves the channel fan-out /
     /// fan-in and the shared `Arc` snapshot work: both threads return M buffers and
-    /// the learner sees 2·M buffers totaling up to 2·M·H transitions, the structural
-    /// claim that K threads == K× the single-process per-iteration sample count.
+    /// the learner sees 2·M buffers totaling up to 2·M·H transitions — i.e. K threads
+    /// yield K·M per-env buffers (K× one thread's per-iteration sample count).
     ///
     /// Heavy (builds two headless Apps), so `#[ignore]` by default.
     #[test]

@@ -145,10 +145,6 @@ impl RolloutBuffer {
         self.transitions.push(t);
     }
 
-    pub fn clear(&mut self) {
-        self.transitions.clear();
-    }
-
     pub fn len(&self) -> usize {
         self.transitions.len()
     }
@@ -424,8 +420,8 @@ fn next_standard_normal(rng: &mut StdRng) -> f32 {
 ///
 /// The noise comes from a THREAD-LOCAL RNG ([`ACTION_RNG`]) rather than the backend's
 /// global-mutex-locked `Tensor::random`, so K rollout threads don't serialize on a
-/// hot-path lock. The distribution is unchanged: standard-normal noise, then
-/// `mean + std·noise`, clamped — single-process (1 thread) samples the same family.
+/// hot-path lock. Swapping the RNG source leaves the distribution unchanged:
+/// standard-normal noise, then `mean + std·noise`, clamped.
 pub fn sample_action<B: Backend>(
     means: &Tensor<B, 1>,
     log_std: &Tensor<B, 1>,

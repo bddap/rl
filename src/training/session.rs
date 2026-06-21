@@ -269,15 +269,12 @@ type CrabOptimizer = OptimizerAdaptor<Adam, CrabBrain<TrainBackend>, TrainBacken
 
 struct MetricsLogger {
     episode_file: std::fs::File,
-    update_file: std::fs::File,
-    update_count: u32,
 }
 
 impl MetricsLogger {
-    /// `dir` is where the two CSVs land. The single-process trainer and the
-    /// in-process learner use "tmp" (the established location the plotting scripts
-    /// read); a rollout thread passes its own scratch dir so K threads don't clobber
-    /// one shared CSV (and the learner keeps owning "tmp").
+    /// `dir` is where `episodes.csv` lands. A rollout thread passes its own scratch
+    /// dir so K threads don't clobber one shared CSV; the learner's host uses "tmp"
+    /// (the established location the plotting scripts read).
     fn new(dir: &Path) -> Self {
         std::fs::create_dir_all(dir).expect("failed to create metrics dir");
 
@@ -290,20 +287,7 @@ impl MetricsLogger {
         )
         .expect("failed to write header");
 
-        let up_path = dir.join("ppo_updates.csv");
-        let mut update_file =
-            std::fs::File::create(&up_path).expect("failed to create ppo_updates.csv");
-        writeln!(
-            update_file,
-            "update,policy_loss,value_loss,entropy,avg_reward,buffer_size"
-        )
-        .expect("failed to write header");
-
-        Self {
-            episode_file,
-            update_file,
-            update_count: 0,
-        }
+        Self { episode_file }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -326,22 +310,6 @@ impl MetricsLogger {
         if episode.is_multiple_of(10) {
             self.episode_file.flush().ok();
         }
-    }
-
-    fn log_update(&mut self, metrics: &PpoMetrics, avg_reward: f32, buffer_size: usize) {
-        self.update_count += 1;
-        writeln!(
-            self.update_file,
-            "{},{:.6},{:.6},{:.6},{:.4},{}",
-            self.update_count,
-            metrics.policy_loss,
-            metrics.value_loss,
-            metrics.entropy,
-            avg_reward,
-            buffer_size,
-        )
-        .ok();
-        self.update_file.flush().ok();
     }
 }
 
@@ -403,11 +371,8 @@ fn load_return_normalizer(path: &Path) -> Option<ReturnNormalizer> {
     ReturnNormalizer::from_data(data)
 }
 
-/// Physics ticks per PPO update in single-process / windowed training: the
-/// rollout window `brain_step` fills before running an update. Also the default
-/// for the in-process learner's `--horizon` (one source, so the two can't silently
-/// diverge). Worker mode deliberately ignores `steps_per_rollout` — the learner's
-/// `--horizon` sets the window and reads the buffers out itself.
+/// Default rollout horizon: the number of physics ticks each rollout thread rolls
+/// per iteration before handing its buffers back, when `--horizon` is not given.
 pub(crate) const STEPS_PER_ROLLOUT: u32 = 1024;
 
 /// Where an env sits in the record → reset → settle lifecycle. One field in
@@ -489,14 +454,7 @@ pub struct TrainingState {
     pub envs: Vec<EnvEpisode>,
     pub episode_count: u32,
 
-    /// Ticks per PPO update ([`STEPS_PER_ROLLOUT`]). Worker mode bypasses this:
-    /// the learner's `--horizon` bounds the window and the driver reads the
-    /// buffers out, so `ppo_update_at_boundary` is never scheduled there.
-    pub steps_per_rollout: u32,
-    pub current_rollout_steps: u32,
-
     pub recent_rewards: Vec<f32>,
-    pub recent_metrics: Option<PpoMetrics>,
 
     logger: MetricsLogger,
 
@@ -514,56 +472,44 @@ pub struct TrainingState {
     return_normalizer: ReturnNormalizer,
 
     checkpoint_dir: PathBuf,
-    checkpoint_interval: u32,
     saved_on_exit: bool,
 
     /// Stop after this many physics ticks (0 = unlimited). See `Args::ticks`.
     tick_budget: u64,
     /// Benchmark: skip NN inference to measure the physics/overhead floor.
     skip_nn: bool,
-    /// Count of `recent_rewards` already handed to the learner (worker mode). The
-    /// drain returns the tail past this, so each finished episode's reward reaches
-    /// the learner's reward curve exactly once. Stays 0 in single-process.
+    /// Count of `recent_rewards` already handed to the learner. The drain returns
+    /// the tail past this, so each finished episode's reward reaches the learner's
+    /// reward curve exactly once. The learner's own host (which steps no world) never
+    /// records an episode, so its count stays 0.
     reported_episodes: usize,
-    /// Worker mode only: a fresh Welford accumulator over ONLY the observations
-    /// seen since the last `reset_horizon_counter` (i.e. this horizon's samples).
-    /// The thread ships THIS — not the cumulative `obs_normalizer` — so the learner
-    /// merges an increment the master hasn't already counted (the snapshot baseline
-    /// lives in `obs_normalizer`, never re-merged). `None` in
-    /// single-process, where the normalizer is never shipped or merged.
+    /// A fresh Welford accumulator over ONLY the observations seen since the last
+    /// `reset_horizon_counter` (i.e. this horizon's samples). The rollout thread
+    /// ships THIS — not the cumulative `obs_normalizer` — so the learner merges an
+    /// increment the master hasn't already counted (the snapshot baseline lives in
+    /// `obs_normalizer`, never re-merged). `None` on the learner's host, which never
+    /// rolls and so ships nothing.
     normalizer_increment: Option<ObsNormalizer>,
 }
 
 impl TrainingState {
-    /// The in-process learner's policy host (and the test fixtures): logs to "tmp".
-    /// The learner steps no world, so the rollout-boundary periodic checkpoint never
-    /// fires here — it checkpoints every iteration directly — hence interval 0.
+    /// The learner's policy host (and the test fixtures): logs to "tmp". The learner
+    /// steps no world itself — it owns the policy and runs the PPO update from the
+    /// threads' buffers, checkpointing every iteration directly.
     pub fn new(config: &TrainConfig) -> Self {
-        Self::build(config, Path::new("tmp"), false, 0)
+        Self::build(config, Path::new("tmp"), false)
     }
 
-    /// Single-process trainer: logs to "tmp", runs the PPO update at each rollout
-    /// boundary and checkpoints there every `save_interval` updates.
-    pub fn new_single_process(config: &TrainConfig, save_interval: u32) -> Self {
-        Self::build(config, Path::new("tmp"), false, save_interval)
-    }
-
-    /// In-process rollout thread: collects transitions but never runs the PPO
-    /// update locally, and logs to its own `metrics_dir` so K threads don't fight
-    /// over one CSV. Everything else — env count, reset/grace/rescue, reward,
-    /// normalizer — is identical to single-process, which is what makes a K=1
-    /// rollout match an `--envs M` rollout. Never reaches the rollout boundary, so
-    /// the periodic-checkpoint interval is irrelevant (0).
+    /// In-process rollout thread: collects transitions but never runs the PPO update
+    /// locally (the learner does), and logs to its own `metrics_dir` so K threads
+    /// don't fight over one CSV. `worker_mode` turns on the per-horizon normalizer
+    /// increment the thread ships back; everything else (env count, reset/grace/
+    /// rescue, reward) is the shared per-env machinery.
     pub fn new_worker(config: &TrainConfig, metrics_dir: &Path) -> Self {
-        Self::build(config, metrics_dir, true, 0)
+        Self::build(config, metrics_dir, true)
     }
 
-    fn build(
-        config: &TrainConfig,
-        metrics_dir: &Path,
-        worker_mode: bool,
-        checkpoint_interval: u32,
-    ) -> Self {
+    fn build(config: &TrainConfig, metrics_dir: &Path, worker_mode: bool) -> Self {
         let device = NdArrayDevice::Cpu;
         let mut brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
         let optimizer: CrabOptimizer = AdamConfig::new()
@@ -612,8 +558,8 @@ impl TrainingState {
         }
 
         let n = config.envs.max(1) as usize;
-        // A worker accumulates a per-horizon increment over the same clip; the
-        // learner/single-process host never ships a normalizer, so it stays None.
+        // A rollout thread accumulates a per-horizon increment over the same clip;
+        // the learner's host steps no world and ships no normalizer, so it stays None.
         let normalizer_increment = worker_mode.then(|| ObsNormalizer::new(obs_normalizer.clip));
         Self {
             brain,
@@ -623,17 +569,13 @@ impl TrainingState {
             optimizer,
             envs: vec![EnvEpisode::default(); n],
             episode_count: 0,
-            steps_per_rollout: STEPS_PER_ROLLOUT,
-            current_rollout_steps: 0,
             recent_rewards: Vec::new(),
-            recent_metrics: None,
             logger: MetricsLogger::new(metrics_dir),
             total_steps: 0,
             last_log_time: std::time::Instant::now(),
             obs_normalizer,
             return_normalizer,
             checkpoint_dir: config.checkpoint_dir.clone(),
-            checkpoint_interval,
             saved_on_exit: false,
             tick_budget: config.ticks,
             skip_nn: config.bench_skip_nn,
@@ -647,9 +589,8 @@ impl TrainingState {
     // estimates (a brief, self-correcting transient on the first updates after a
     // resume). Persisting optimizer state would remove it.
     //
-    // `pub(crate)` so the in-process learner can persist the latest weights each
-    // iteration (for a live demo hot-reload + restart resume); the single-process
-    // path calls it internally at the rollout boundary.
+    // `pub(crate)` so the learner can persist the latest weights each iteration (for
+    // a live demo hot-reload + restart resume).
     pub(crate) fn save_checkpoint(&self) {
         if let Err(e) = std::fs::create_dir_all(&self.checkpoint_dir) {
             warn!(
@@ -692,9 +633,9 @@ impl TrainingState {
     // rollout thread: load the learner's snapshot weights + master normalizer, roll
     // a horizon (via the normal systems), then hand the buffers + per-horizon
     // normalizer increment + finished rewards back. The learner side reuses
-    // `brain`/`optimizer`/`config` through accessors. Reusing this struct (rather
-    // than a parallel one) is what guarantees a rollout thread's collection is the
-    // *same* code as single-process — the K=1 == single-process parity anchor.
+    // `brain`/`optimizer`/`config` through accessors. One struct for both the
+    // learner host and the rollout threads (rather than a parallel one) is what
+    // keeps their collection + update on the same code.
 
     /// Load brain weights from the learner's in-memory snapshot bytes (the same
     /// `FullPrecisionSettings` bincode the on-disk checkpoint uses, produced by the
@@ -745,8 +686,8 @@ impl TrainingState {
 
     /// Move the collected transitions out, leaving the buffers empty for the next
     /// horizon. The per-env episode accumulators (`envs`) are deliberately left
-    /// untouched: an episode that spans a horizon boundary must continue, exactly
-    /// as the single-process 1024-step window cuts mid-episode and keeps going.
+    /// untouched: an episode that spans a horizon boundary must continue cleanly
+    /// across the cut rather than be force-terminated at the window edge.
     pub fn take_rollouts(&mut self) -> Vec<Vec<Transition>> {
         self.rollouts
             .iter_mut()
@@ -754,14 +695,13 @@ impl TrainingState {
             .collect()
     }
 
-    /// Reset the per-horizon rollout-step counter AND the normalizer increment
-    /// (rollout thread, called at the start of each horizon). `total_steps` stays
-    /// monotonic — it is the thread's tick odometer the learner diffs to measure the
-    /// horizon length. Resetting the increment here, separate from `set_normalizer`,
-    /// keeps the two concerns independent and guarantees the increment is always
-    /// exactly this horizon's samples.
+    /// Reset the per-horizon normalizer increment (rollout thread, at the start of
+    /// each horizon). `total_steps` stays monotonic — it is the thread's tick
+    /// odometer the learner diffs to measure the horizon length. Resetting the
+    /// increment here, separate from `set_normalizer`, keeps the two concerns
+    /// independent and guarantees the increment is always exactly this horizon's
+    /// samples.
     pub fn reset_horizon_counter(&mut self) {
-        self.current_rollout_steps = 0;
         if let Some(inc) = self.normalizer_increment.as_mut() {
             *inc = ObsNormalizer::new(self.obs_normalizer.clip);
         }
@@ -816,40 +756,26 @@ impl TrainingState {
         let slice = &self.recent_rewards[start..];
         slice.iter().sum::<f32>() / slice.len() as f32
     }
-
-    fn ppo_update(&mut self) -> PpoMetrics {
-        ppo_update_core(
-            &mut self.brain,
-            &mut self.optimizer,
-            &self.config,
-            &self.rollouts,
-            &self.device,
-            &mut self.return_normalizer,
-        )
-    }
 }
 
-/// PPO update shared by the single-process trainer and the in-process learner.
+/// The learner's PPO update over all K·M rollout buffers.
 ///
 /// `rollouts` is one buffer per env (GAE is computed strictly per env, never
 /// across a buffer boundary). The per-env trailing bootstrap — V of each buffer's
-/// non-`Terminal` tail observation — is computed HERE from `brain`, the single owner
-/// of that logic: the single-process path already holds the brain it rolled with,
-/// and the in-process learner holds the brain it snapshotted to the threads (which
-/// is what they rolled with), so neither needs a precomputed value. Mutating
-/// `brain`/`optimizer` in place keeps Adam's moment estimates persistent across
-/// updates.
+/// non-`Terminal` tail observation — is computed HERE from `brain`: the learner
+/// holds the brain it snapshotted to the threads (which is what they rolled with),
+/// so no precomputed value is needed. Mutating `brain`/`optimizer` in place keeps
+/// Adam's moment estimates persistent across updates.
 ///
 /// `ret_norm` is the learner's running return scale (see [`ReturnNormalizer`]): the
 /// value head's outputs (stored per-step values and the trailing bootstrap) are
 /// de-normalized by it so GAE/advantages stay in real reward units, then this
 /// update's real-unit returns are folded in and the value-loss targets normalized by
-/// the refreshed scale. It is `&mut` because the update advances it; the single
-/// learner owns the one copy, so passing it in keeps a single source of truth.
+/// the refreshed scale. It is `&mut` because the update advances it; the learner owns
+/// the one copy, so passing it in keeps a single source of truth.
 ///
-/// Factored out (rather than duplicated) so the two callers can never drift: the
-/// correctness claim "K=1 in-process == single-process" rests on this being the
-/// *same* code, byte for byte.
+/// Free function rather than a `TrainingState` method so the K=1 parity test
+/// ([`inproc`] tests) can call the exact production update over hand-built buffers.
 pub(crate) fn ppo_update_core(
     brain: &mut CrabBrain<TrainBackend>,
     optimizer: &mut CrabOptimizer,
@@ -1577,7 +1503,6 @@ pub fn brain_step(
         }
     }
 
-    training.current_rollout_steps += n as u32;
     training.total_steps += 1;
 
     // Fixed-tick stop: exactly `tick_budget` physics ticks, then save+exit. Tick
@@ -1590,46 +1515,6 @@ pub fn brain_step(
             training.tick_budget
         );
         exit.write(AppExit::Success);
-    }
-}
-
-/// System: at each rollout boundary, run one PPO update over the collected
-/// transitions, then clear the buffers and (periodically) checkpoint. Wired into
-/// the schedule ONLY by [`TrainingPlugin`] (single-process). The worker rollout
-/// app deliberately omits it — its driver thread reads the per-env buffers out
-/// each horizon and the learner owns the update — so "is this the learner?" is
-/// answered by the schedule, not a runtime flag in the per-step hot loop.
-pub fn ppo_update_at_boundary(mut training: NonSendMut<TrainingState>) {
-    if training.current_rollout_steps < training.steps_per_rollout {
-        return;
-    }
-
-    let buffer_size: usize = training.rollouts.iter().map(|b| b.len()).sum();
-    let avg = training.avg_reward(10);
-
-    info!("Running PPO update on {} transitions...", buffer_size);
-    let metrics = training.ppo_update();
-
-    info!(
-        "PPO | Policy loss: {:.4} | Value loss: {:.4} | Entropy: {:.4}",
-        metrics.policy_loss, metrics.value_loss, metrics.entropy,
-    );
-
-    training.logger.log_update(&metrics, avg, buffer_size);
-
-    training.recent_metrics = Some(metrics);
-    for buf in training.rollouts.iter_mut() {
-        buf.clear();
-    }
-    training.current_rollout_steps = 0;
-
-    if training.checkpoint_interval > 0
-        && training
-            .logger
-            .update_count
-            .is_multiple_of(training.checkpoint_interval)
-    {
-        training.save_checkpoint();
     }
 }
 
@@ -1978,9 +1863,8 @@ mod tests {
 
     /// The normalizer merge must be exact: K rollout threads each normalizing their
     /// own slice of samples, then merged on the learner, must give the same running
-    /// stats as one stream that saw every sample. This is what lets a K>1 run claim
-    /// the same observation normalization as single-process — so it is the
-    /// load-bearing correctness check for the multi-threaded path. Includes a
+    /// stats as one single-threaded stream that saw every sample. That equivalence is
+    /// the load-bearing correctness check for the multi-threaded rollout. Includes a
     /// NaN-skipped element to exercise the per-element count bookkeeping.
     #[test]
     fn parallel_normalizer_merge_matches_single_stream() {
@@ -2111,7 +1995,6 @@ mod tests {
         use crate::Visuals;
         use crate::bot::{BotPlugin, NumEnvs};
         use crate::physics::PhysicsWorldPlugin;
-        use crate::training::TrainingPlugin;
         use clap::Parser;
         use std::time::Duration;
 
@@ -2157,8 +2040,22 @@ mod tests {
             .insert_resource(crate::physics::rapier_context_init())
             .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
             .add_plugins(PhysicsWorldPlugin)
-            .add_plugins(BotPlugin)
-            .add_plugins(TrainingPlugin::new(config, 0));
+            .add_plugins(BotPlugin);
+
+        // Wire the training world the same way the `rl learn` rollout worlds do
+        // (see inproc::build_rollout_app): worker-mode TrainingState + the Sense→
+        // Think→Act systems, so these tests exercise the brain_step / reset_crab /
+        // rescue semantics the sole trainer runs. The metrics dir is the per-test
+        // scratch checkpoint dir (no shared CSV to clobber).
+        let state = TrainingState::new_worker(&config, checkpoint_dir);
+        app.insert_non_send_resource(state)
+            .add_systems(
+                FixedUpdate,
+                (brain_step, reset_crab)
+                    .chain()
+                    .in_set(crate::bot::BotSet::Think),
+            )
+            .add_systems(Last, save_on_exit);
         app
     }
 

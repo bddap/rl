@@ -51,9 +51,9 @@ Single crate to start. Split into modules, extract crates later if needed.
 
 ```
 src/
-  main.rs              — entry point, clap CLI, Bevy app setup; dispatches single-process modes vs the `learn` subcommand
+  main.rs              — entry point, clap CLI, Bevy app setup; renders the demo/screenshot modes, or dispatches the `learn` subcommand (the sole trainer)
   play.rs              — interactive demo (policy-driven crab, orbit camera, poke/reset) + windowless render-one-PNG screenshot mode
-  debug_sliders.rs     — TEMPORARY demo-only egui physics-tuning panel (`--debug-sliders`); never wired into training/headless
+  debug_sliders.rs     — TEMPORARY demo-only egui physics-tuning panel (`--debug-sliders`); never wired into the `learn` trainer
   wrist_tune.rs        — interactive wrist axis/amplitude tuner for the demo (`RL_WRIST_TUNE=1`)
   bot/
     mod.rs             — bot module root (`BotPlugin`)
@@ -76,8 +76,8 @@ src/
     mod.rs             — player module root
     graph.rs           — toggleable transparent joint angle/torque telemetry overlay for the demo (`G` / `RL_GRAPH`)
   training/
-    mod.rs             — training module root (`TrainingPlugin`)
-    session.rs         — the RL training loop as Bevy ECS systems (single-process path)
+    mod.rs             — training module root (re-exports `session`/`algorithm`/`inproc`)
+    session.rs         — the RL training systems as Bevy ECS (`brain_step`/`reset_crab`) + `TrainingState`, shared by the `learn` rollout worlds
     algorithm.rs       — PPO support functions (GAE, clipped loss)
     inproc.rs          — in-process, multi-threaded PPO: K rollout threads feed one learner, one process (`learn` subcommand)
 ```
