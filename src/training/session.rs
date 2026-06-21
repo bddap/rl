@@ -1000,8 +1000,11 @@ pub(crate) fn ppo_update_core(
 /// needs a goal you can only reach by walking, and `1 − tanh(d/S)` (see
 /// [`reach_bonus`]) still has real slope across this whole band, unlike the old
 /// `exp(−d/S)` which was ~0 past ~1.5 m.
-const TARGET_DIST_MIN: f32 = 3.0;
-const TARGET_DIST_MAX: f32 = 6.0;
+// Near targets so the reach gradient is strong at the spawn pose (~0.385/step at 1.5m
+// vs ~0.115 at 4.5m): a cold policy has to be able to FIND the locomotion gradient from
+// a stand, or it stalls in the stand basin and never walks. Widen once a gait exists.
+const TARGET_DIST_MIN: f32 = 1.5;
+const TARGET_DIST_MAX: f32 = 3.0;
 /// Vertical band of the target (world Y). A modest claw-height span so a crab that
 /// has walked up to the target still finishes with a real reach, not a foot-level
 /// touch. Kept low and narrow — height is the stand term's job; this term is about
