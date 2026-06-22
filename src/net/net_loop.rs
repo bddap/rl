@@ -18,7 +18,7 @@
 //! drive it raw in the headless async loop — not in the cold-start itself.
 //!
 //! Solo auto-fallback (rl#47): the common launch is ALONE — one process, no other peer
-//! on the LAN (Aiden opens the Steam shortcut). Forming a networked match then never
+//! on the LAN (a player opens the Steam shortcut). Forming a networked match then never
 //! reaches agreement (the barrier rightly refuses to freeze a guessed roster), leaving a
 //! frozen, unplayable round. So the cold-start has a SECOND outcome: if the discovery
 //! window elapses with no other peer ever heard ([`Formation::Alone`]), the caller starts

@@ -1,1 +1,0 @@
-fanout: 2 agents, jobs=2, model=claude-opus-4-8, depth=0 -> /tmp/tmp.CewqegVmKs
