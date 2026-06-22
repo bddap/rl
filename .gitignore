@@ -1,6 +1,7 @@
 /target
 /target-gc
 /target-fc
+/target-nn
 /tmp
 /checkpoints
 .cargo-home/

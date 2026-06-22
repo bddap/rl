@@ -162,8 +162,9 @@ impl Policy {
     }
 
     /// Deterministic action: the policy mean (no exploration noise), so the crab
-    /// holds a steady pose instead of jittering.
-    fn act(&self, raw_obs: &[f32; OBS_SIZE]) -> [f32; ACTION_SIZE] {
+    /// holds a steady pose instead of jittering. `pub` so the game's solo NN-crab drives
+    /// the same inference the demo does — one policy implementation, two callers.
+    pub fn act(&self, raw_obs: &[f32; OBS_SIZE]) -> [f32; ACTION_SIZE] {
         // No checkpoint → hold the neutral (zero-action) pose: a deterministic
         // view of the body geometry, not an untrained brain's noise.
         if !self.loaded {

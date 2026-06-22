@@ -1,19 +1,12 @@
-// rl#49: the `--features wgpu` build pulls bevy's wgpu 27 and burn-wgpu's wgpu 26 into
-// one graph (see Cargo.toml's `wgpu` feature). Resolving the `Module: Send` supertrait
-// bound on `load_record` for `CrabBrain<Autodiff<Wgpu>>` (the CPU→GPU weight load in
-// GpuLearner) chases wgpu_core's deeply-nested generic types past the default 128-deep
-// recursion limit and aborts with E0275 (overflow, not a genuine !Send). A higher limit
-// lets that finite-but-deep resolution complete. No effect on the default CPU build
-// (the wgpu types are never in the graph), and zero runtime cost — purely a
-// compile-time trait-solver budget.
-#![recursion_limit = "512"]
-
-mod bot;
-mod debug_sliders;
-mod physics;
-mod play;
-mod player;
-mod training;
+// The RL crab machinery (bot / physics / training / play / player / debug_sliders) and
+// the shared `Visuals` / `TrainConfig` / `UpdateDevice` types now live in the `rl`
+// LIBRARY (src/lib.rs), so the `game` binary can drive the same trained crab in its
+// solo playtest. This binary re-imports them rather than declaring its own copies — one
+// implementation, shared by both binaries. (`recursion_limit` is set on the library
+// root where the affected wgpu-load code lives; it does not need repeating here.)
+use rl::{
+    TrainConfig, UpdateDevice, Visuals, bot, debug_sliders, physics, play, player, training,
+};
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -70,23 +63,6 @@ pub enum BenchBackend {
     Gpu,
 }
 
-/// Which device the live `learn` trainer runs its batched PPO **update** on (rl#49).
-/// Rollout inference always stays on CPU regardless (many tiny per-step forwards across
-/// the worker threads, where GPU dispatch overhead would dominate); this selects only
-/// the per-iteration batched update's device.
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateDevice {
-    /// Run the update on the CPU (`Autodiff<NdArray>`) — byte-for-byte the production
-    /// CPU path; the GPU backend is never touched.
-    Cpu,
-    /// Run the update on the GPU (`Autodiff<Wgpu>` over Vulkan): mirror the policy
-    /// CPU→GPU, update on the discrete GPU, mirror back. Requires the binary be built
-    /// with `--features wgpu`; otherwise the run fails with a clear error (never a
-    /// silent CPU fallback). Forces + asserts a real discrete-GPU adapter (no software
-    /// lavapipe masquerading as the GPU).
-    Gpu,
-}
-
 /// Args for the `bench-update` PPO-update microbenchmark (rl#48/#49). Defaults
 /// reproduce the live trainer's per-iter update load (K=8 × M=4 × H=512 = 16384
 /// transitions).
@@ -113,42 +89,6 @@ pub struct BenchUpdateArgs {
     /// probe whether the GPU stays cheap as the per-step matmul grows (rl#49 tertiary).
     #[arg(long)]
     pub batch: Option<usize>,
-}
-
-/// Training config (consumed by the learner and its rollout threads, which build a
-/// `TrainingState`) plus the render modes' shared knobs. The `learn` subcommand
-/// flattens it so e.g. `--checkpoint-dir` / `--ticks` mean the same thing
-/// everywhere.
-#[derive(Parser, Debug, Clone)]
-pub struct TrainConfig {
-    /// Directory for checkpoint files. On startup, if the directory contains a
-    /// previous checkpoint it will be loaded automatically. During training,
-    /// checkpoints are saved here periodically and on exit.
-    #[arg(long, default_value = "checkpoints")]
-    pub checkpoint_dir: PathBuf,
-
-    /// Stop training after this many physics ticks (0 = run until killed). The budget
-    /// is counted in ticks, never wall-clock, so a run simulates an identical amount
-    /// regardless of machine speed or load — the "fixed ticks, not real time"
-    /// guarantee an assumed time↔tick relation can't give. The learner checks the
-    /// budget once per PPO iteration, so it stops at the first iteration boundary at
-    /// or after N (overshooting by up to one K·(--envs)·H iteration's worth of ticks).
-    #[arg(long, default_value_t = 0)]
-    pub ticks: u64,
-
-    /// Benchmark only: skip NN inference in the train loop (hold zero actions),
-    /// isolating physics + engine overhead from network cost. Training is
-    /// meaningless under this flag — it exists to measure the per-step bottleneck.
-    #[arg(long)]
-    pub bench_skip_nn: bool,
-
-    /// Environments M each rollout thread steps in its one world per tick (one
-    /// batched NN pass over the M crabs, which sit on a 4 m grid). Total parallel
-    /// envs = `--workers` × M. Capped at [`bot::body::MAX_ENVS`] — each env needs its
-    /// own collision bit so independent crabs pass through each other, and `Group` has
-    /// only 32 bits (see [`bot::body::crab_collision`]).
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=bot::body::MAX_ENVS as u64))]
-    pub envs: u64,
 }
 
 /// Render-mode config: the shared `TrainConfig` (for `--checkpoint-dir`, the policy
@@ -280,11 +220,6 @@ enum AppMode {
     Demo,
     Screenshot { path: PathBuf, settle: u32 },
 }
-
-/// Whether to spawn visual assets (meshes, lights). The `rl learn` rollout worlds
-/// set this false (rendering off entirely); the rendering modes here set it true.
-#[derive(Resource, Clone, Copy)]
-pub struct Visuals(pub bool);
 
 fn main() {
     let cli = Cli::parse();

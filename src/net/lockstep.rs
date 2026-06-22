@@ -274,6 +274,22 @@ impl Lockstep {
         &self.sim
     }
 
+    /// SOLO ONLY: hand the crab to external control (the rapier NN crab) — forwards to
+    /// [`Sim::enable_external_crab`]. Call once at solo setup; the integer pursuit then stops
+    /// and the caller drives the crab with [`Self::set_external_crab_pose`] each tick. Never
+    /// on the networked path (a float crab desyncs peers).
+    pub fn enable_external_crab(&mut self, external: bool) {
+        self.sim.enable_external_crab(external);
+    }
+
+    /// SOLO ONLY: set the crab's ground position + yaw from the real NN crab body, BEFORE
+    /// the next [`Self::try_advance`], so the grab/extraction checks resolve against it.
+    /// Forwards to [`Sim::set_external_crab_pose`]; a no-op on behaviour unless
+    /// [`Self::enable_external_crab`] was set.
+    pub fn set_external_crab_pose(&mut self, pos: crate::net::sim::Pos, yaw: i32) {
+        self.sim.set_external_crab_pose(pos, yaw);
+    }
+
     /// This peer's id.
     pub fn me(&self) -> PlayerId {
         self.me

@@ -722,9 +722,9 @@ fn carapace_box(model: &impl BindSource, center: Vec3) -> (Vec3, Vec3) {
 }
 
 /// A collider reconstructed in bind-pose world (the rest stance), paired with the
-/// part whose vertex cloud it should hug. The verifier ([`crate::verify_colliders`])
-/// scores cloud-vs-collider, and the model's clouds live in bind-pose world, so the
-/// collider must too. This mirrors the world accumulation in [`super::body`]'s
+/// part whose vertex cloud it should hug. The verifier (the `rl --verify-colliders`
+/// dev command) scores cloud-vs-collider, and the model's clouds live in bind-pose
+/// world, so the collider must too. This mirrors the world accumulation in [`super::body`]'s
 /// `spawn_crab` minus the constant spawn translation (it cancels — `anchor1` is a
 /// parent-relative delta, and the clouds are already in this frame).
 pub(crate) struct RestCollider {

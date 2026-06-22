@@ -470,6 +470,17 @@ pub struct Sim {
     /// a different roster is already a different game the cross-check would surface via
     /// the player/plane state it does hash.
     config: RoundConfig,
+    /// SOLO ONLY: the crab's ground position is driven from OUTSIDE the sim (by the
+    /// real rapier-simulated NN crab — see [`Sim::set_external_crab_pose`]) instead of by the
+    /// built-in integer point-pursuit. When set, [`Sim::step`] skips the pursuit move
+    /// (block 2) and trusts whatever `set_external_crab_pose` last wrote; grabs, extraction,
+    /// and outcome (blocks 3–5) then resolve against the REAL crab body's position.
+    ///
+    /// `false` for every multiplayer / networked round, which keeps the bit-deterministic
+    /// integer pursuit as the cross-peer-safe path: a float rapier crab is NOT identical
+    /// across peers, so it is the SOLO showcase only. Constant after construction and
+    /// (in solo) single-peer, so — like [`config`](Sim::config) — it is not hashed.
+    crab_external: bool,
 }
 
 /// The arguments that built a [`Sim`], retained so [`Sim::step`] can rebuild the
@@ -533,7 +544,31 @@ impl Sim {
             rng: ChaCha8Rng::seed_from_u64(seed),
             restart_held: false,
             config,
+            crab_external: false,
         }
+    }
+
+    /// Put the crab under EXTERNAL control for a solo round: [`Sim::step`] stops running
+    /// the built-in integer pursuit, and the caller must drive the crab's position each
+    /// tick with [`Sim::set_external_crab_pose`] (from the real rapier-simulated NN crab).
+    /// Grabs / extraction / outcome still run, against that externally-set position.
+    ///
+    /// Solo (single-peer) only — a float-driven crab is not cross-peer deterministic, so
+    /// a networked sim MUST be left on the integer pursuit. The lockstep solo path is the
+    /// sole caller; nothing over the wire flips this.
+    pub fn enable_external_crab(&mut self, external: bool) {
+        self.crab_external = external;
+    }
+
+    /// SOLO ONLY: set the crab's ground position + facing yaw directly, from the real
+    /// rapier-simulated NN crab body. Has effect only after [`Sim::enable_external_crab`]
+    /// (true); otherwise the integer pursuit in [`Sim::step`] overwrites it. Call it each
+    /// tick BEFORE advancing, so the grab/extraction checks resolve against the body's
+    /// current position. `pos`/`yaw` are genuine hashed state — a solo run is reproducible
+    /// given the same NN-crab trajectory.
+    pub fn set_external_crab_pose(&mut self, pos: Pos, yaw: i32) {
+        self.crab.pos = pos;
+        self.crab.yaw = yaw;
     }
 
     /// Rebuild the round to its tick-0 state from the stored [`config`](Sim::config) —
@@ -735,8 +770,11 @@ impl Sim {
 
         // 2) Crab: aim at and step toward the nearest living player. Pure arithmetic —
         //    no RNG, no float — so it is trivially deterministic. Frozen during the
-        //    startup grace.
-        if armed && let Some(target) = self.nearest_living_player() {
+        //    startup grace. SKIPPED entirely under external (solo NN) control: the real
+        //    rapier crab body owns the position then, written via `set_external_crab_pose`
+        //    before this step; the grab/extraction below still read `self.crab.pos`, so
+        //    they resolve against that body — only the *move* is delegated, not the hunt.
+        if !self.crab_external && armed && let Some(target) = self.nearest_living_player() {
             let t = target.pos;
             let dx = t.x - self.crab.pos.x;
             let dz = t.z - self.crab.pos.z;
@@ -789,6 +827,14 @@ impl Sim {
         // 5) Settle the round outcome (first decisive condition wins; extraction
         //    beats a wipe on the same tick — a rescue at the buzzer counts).
         self.outcome = self.settle_outcome();
+    }
+
+    /// Ground position of the living player nearest the crab, or `None` if every player
+    /// is downed/extracted. The solo NN-crab bridge reads this to aim the rapier crab at
+    /// its prey (the same target the integer pursuit picks), keeping the showcase crab
+    /// hunting the same player the round logic would.
+    pub fn nearest_living_player_pos(&self) -> Option<Pos> {
+        self.nearest_living_player().map(|p| p.pos)
     }
 
     /// The living player nearest the crab (ties broken by `PlayerId` order via the

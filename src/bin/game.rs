@@ -60,6 +60,12 @@ enum Command {
     /// and stream every connected game's events as a merged human feed (for remote
     /// debugging — `Monitor` its stdout). Pass each game `--telemetry <printed id>`.
     TelemetryCollector(TelemetryCollectorArgs),
+    /// Headless verification of the SOLO NN crab (no window / GPU / display): step the
+    /// real rapier-NN crab for N ticks against a still player and log the crab's game
+    /// position + its shrinking distance to the player — the evidence it WALKS toward the
+    /// player under the trained policy. Runs the seed TWICE and compares the final state
+    /// hash, the single-peer reproducibility check.
+    NnCrabProbe(NnCrabProbeArgs),
 }
 
 #[derive(Parser)]
@@ -107,6 +113,17 @@ struct PlayArgs {
     /// `NetArgs::telemetry`). Separate ALPN/connection — never perturbs the lockstep.
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
+
+    /// SOLO ONLY: directory holding the trained crab policy (`brain.bin` +
+    /// `normalizer.bin`). When set (and playing solo), the giant crab is the real
+    /// rapier-simulated, NN-driven body instead of the integer point-pursuer — it WALKS
+    /// toward the nearest player under the trained policy. Defaults to the
+    /// `RL_CRAB_CHECKPOINT_DIR` env var, else `assets/weights` under the asset root.
+    /// A missing/empty dir falls back to the integer crab (logged). Ignored when
+    /// networked — a float rapier crab is not cross-peer deterministic, so multiplayer
+    /// keeps the integer crab (a separate, bigger follow-up to make it MP-safe).
+    #[arg(long, value_name = "DIR")]
+    nn_crab_checkpoint: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -149,6 +166,28 @@ struct TelemetryCollectorArgs {
     key: PathBuf,
 }
 
+#[derive(Parser)]
+struct NnCrabProbeArgs {
+    /// Trained crab checkpoint dir (`brain.bin` + `normalizer.bin`). Same resolution as
+    /// `play --nn-crab-checkpoint`: this flag, else `RL_CRAB_CHECKPOINT_DIR`, else
+    /// `assets/weights` under the asset root.
+    #[arg(long, value_name = "DIR")]
+    checkpoint: Option<PathBuf>,
+    /// Sim ticks to step the crab for. Defaults high (1200 ≈ 40 s at 30 Hz) because the
+    /// current `ckpt-best.locomotion` checkpoint locomotes SLOWLY (it leans/reaches toward
+    /// the lead target rather than striding — its reward has no base-locomotion term), so a
+    /// short run shows little net travel even though the crab is clearly NN-driven.
+    #[arg(long, default_value_t = 1200)]
+    ticks: u64,
+    /// Log a sample every this-many ticks.
+    #[arg(long, default_value_t = 100)]
+    log_every: u64,
+    /// Match seed (also the determinism check: the run is repeated with this seed and the
+    /// final hashes compared).
+    #[arg(long, default_value_t = 0x6372_6162)]
+    seed: u64,
+}
+
 // Plain `main` (not `#[tokio::main]`): the windowed/screenshot client builds a Bevy
 // app that owns the main thread and, for networked play, spins up its OWN tokio
 // runtime inside `net_loop` — nesting that under an ambient `#[tokio::main]` runtime
@@ -172,6 +211,79 @@ fn main() -> Result<()> {
         Command::TelemetryCollector(args) => {
             tokio::runtime::Runtime::new()?.block_on(telemetry::run_collector(&args.key))
         }
+        Command::NnCrabProbe(args) => run_nn_crab_probe(args),
+    }
+}
+
+/// Headless NN-crab verification: step the real rapier crab for `--ticks` against a still
+/// player, log its game position + shrinking distance to the player, and repeat the seed
+/// to confirm the same trajectory hash twice (single-peer reproducibility). Prints a table
+/// and a PASS/look-here verdict; exits nonzero if the crab never closed the gap (so it
+/// doubles as a regression gate on "the policy actually drives the crab toward the player").
+fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
+    use rl::net::solo_crab::run_headless_probe;
+
+    let Some(dir) = nn_crab_checkpoint_dir(args.checkpoint) else {
+        anyhow::bail!("nn-crab-probe: no brain.bin at the resolved checkpoint dir");
+    };
+    println!("nn-crab-probe: checkpoint={}", dir.display());
+    println!("nn-crab-probe: seed={:#x} ticks={}", args.seed, args.ticks);
+
+    let samples = run_headless_probe(&dir, args.seed, args.ticks, args.log_every);
+    if samples.is_empty() {
+        anyhow::bail!("nn-crab-probe: no samples — the crab never stepped");
+    }
+
+    println!(
+        "\n  tick   crab_x   crab_z   dist  | carapace x/y/z (walks?)  | claw→tgt"
+    );
+    for s in &samples {
+        println!(
+            "  {:>5}  {:>7.2}  {:>7.2}  {:>6.2} | {:>7.2} {:>5.2} {:>7.2}  | {:>7.3}",
+            s.tick,
+            s.crab_x_m,
+            s.crab_z_m,
+            s.dist_to_prey_m,
+            s.carapace_arena_x,
+            s.carapace_y,
+            s.carapace_arena_z,
+            s.min_claw_to_target_m,
+        );
+    }
+
+    let first = samples.first().unwrap().dist_to_prey_m;
+    let last = samples.last().unwrap().dist_to_prey_m;
+    let closed = first - last;
+    println!(
+        "\nnn-crab-probe: distance to player {first:.3} m → {last:.3} m  (closed {closed:.3} m)"
+    );
+
+    // Determinism (single peer): same seed twice ⇒ identical final hash + trajectory.
+    let again = run_headless_probe(&dir, args.seed, args.ticks, args.log_every);
+    let hash_a = samples.last().unwrap().state_hash;
+    let hash_b = again.last().map(|s| s.state_hash).unwrap_or(0);
+    let traj_match = samples.len() == again.len()
+        && samples
+            .iter()
+            .zip(&again)
+            .all(|(a, b)| a.state_hash == b.state_hash);
+    println!(
+        "nn-crab-probe: determinism — final hash A={hash_a:#018x} B={hash_b:#018x} ({}), \
+         full trajectory {}",
+        if hash_a == hash_b { "MATCH" } else { "DIFFER" },
+        if traj_match { "MATCHES" } else { "DIFFERS" },
+    );
+
+    // Verdict: the crab must have closed the gap (the policy walked it toward the player)
+    // AND the run must be reproducible. A crab that drifted away or sat still fails.
+    if closed > 1.0 && traj_match {
+        println!("nn-crab-probe: PASS — NN crab walked toward the player, reproducibly");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "nn-crab-probe: FAIL — closed {closed:.3} m (want > 1.0) / trajectory \
+             reproducible = {traj_match}"
+        )
     }
 }
 
@@ -201,8 +313,44 @@ fn run_play(args: PlayArgs) -> Result<()> {
             net_loop::MatchResult::Alone => (solo_lockstep(), None),
         }
     };
-    render::build_windowed_app(ls, net).run();
+    // The solo NN-crab checkpoint dir (solo only — `build_windowed_app` ignores it when
+    // networked). Resolve only when we ended up solo so a networked round never probes
+    // the filesystem for it. Skip a dir that has no `brain.bin` so a bad path degrades to
+    // the integer crab rather than every-frame load failures.
+    let solo_crab = if net.is_none() {
+        nn_crab_checkpoint_dir(args.nn_crab_checkpoint)
+    } else {
+        None
+    };
+    render::build_windowed_app(ls, net, solo_crab).run();
     Ok(())
+}
+
+/// Resolve the solo NN-crab checkpoint dir: the `--nn-crab-checkpoint` flag (`flag`), else
+/// the `RL_CRAB_CHECKPOINT_DIR` env var (deploy sets this), else `assets/weights` under
+/// the asset root (`BEVY_ASSET_ROOT`, else the binary's cwd). `None` if the resolved dir
+/// has no `brain.bin` — the caller then keeps the integer crab. Configurable end to end so
+/// the reviewer/deploy points it at the chosen checkpoint without a recompile.
+fn nn_crab_checkpoint_dir(flag: Option<PathBuf>) -> Option<PathBuf> {
+    let dir = flag
+        .or_else(|| std::env::var_os("RL_CRAB_CHECKPOINT_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            let root = std::env::var_os("BEVY_ASSET_ROOT").map_or_else(
+                || std::env::current_dir().unwrap_or_default(),
+                PathBuf::from,
+            );
+            root.join("assets").join("weights")
+        });
+    if dir.join("brain.bin").exists() {
+        Some(dir)
+    } else {
+        eprintln!(
+            "solo crab: no brain.bin under {} — using the integer point-pursuer crab \
+             (set --nn-crab-checkpoint or RL_CRAB_CHECKPOINT_DIR to a trained checkpoint)",
+            dir.display()
+        );
+        None
+    }
 }
 
 /// The single-peer lockstep for an offline round: just us, honoring `RL_VEHICLE`. Shared
