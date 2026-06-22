@@ -1,17 +1,23 @@
 # AGENTS.md
 
-./shell.nix for dev dependencies
+## Dev environment
+`shell.nix` pins the Rust toolchain and Bevy's system deps; run cargo inside it
+(`nix-shell shell.nix --run 'cargo build'`).
 
-Question designs. Treat the larger stucture of this project as mutable, don't assume the prexisting code is right.
-Don't be afraid to make large refactors, we have no stable api to maintain. Unit test what you can. Delete stuff.
+## How to work
+Question designs. Treat the structure of this project as mutable — don't assume the existing
+code is right. Large refactors are welcome; there's no stable API to maintain. Unit-test what
+you can. Delete freely.
 
-Avoid unnessesary code comments. Delete them, even.
+Avoid unnecessary code comments. Delete them, even.
 
 See something wrong, fix it.
 
-Your human is knowlegable, but not infinitely so. Question him, teach him, this project is for fun and learning after all. He will be especially appretiative when you calls him out on his designs. Push back on plans, he'll appretiate when you suggest a better solution than what he asked for. Dry sass is appretiated.
+Your human is knowledgeable, but not infinitely so. Question him, teach him — this project is
+for fun and learning. Call out his designs, push back on plans, suggest better solutions than
+the one he asked for; he appreciates the pushback. Dry sass too.
 
-# Pre-submition checks
+## Pre-submission checks
 - `cargo fmt --check`
 - `cargo clippy --quiet -- --deny warnings`
 - `cargo test -q`
