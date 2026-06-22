@@ -102,13 +102,18 @@ fn link_map(links: &LinkQuery, env: usize) -> std::collections::HashMap<PartId, 
 }
 
 pub fn register(app: &mut App) {
-    let Ok(path) = std::env::var("CRAB_MODEL_PATH") else {
+    // Skin iff a model resolves — the SAME `model_path` the body uses, so skin and
+    // physics can't disagree about asset presence. The AssetServer wants an
+    // asset-root-RELATIVE path, so feed it the relative `CRAB_MODEL_PATH` (default
+    // `sally.glb`), not the absolute `model_path`.
+    if super::meshfit::model_path().is_none() {
         return;
-    };
+    }
+    let rel = std::env::var("CRAB_MODEL_PATH").unwrap_or_else(|_| "sally.glb".to_string());
     let scene = app
         .world()
         .resource::<AssetServer>()
-        .load(GltfAssetLabel::Scene(0).from_asset(path));
+        .load(GltfAssetLabel::Scene(0).from_asset(rel));
     app.insert_resource(CrabModel { scene });
     app.init_resource::<StrippedMeshes>();
     app.add_systems(
@@ -144,10 +149,9 @@ fn attach_skins(
     // The body's carapace root spawns at the leg hub's bind-world position; the skin
     // renders its bones at glTF bind-world from this root, so subtracting the hub puts
     // the skin's skeleton in the body's exact frame — bone-for-link aligned at rest.
-    // (Skip if the recipe is absent; the skin needs the model anyway.)
-    let Some(hub) = assets.hub_bind_world() else {
-        return;
-    };
+    // (`register` only runs the skin systems when a model resolves, so the hub here is
+    // always the real model's — the fallback body shows the debug wireframe, no skin.)
+    let hub = assets.hub_bind_world();
     for (env, t) in crabs.iter() {
         if skins.iter().any(|s| s.env == env.0) {
             continue;

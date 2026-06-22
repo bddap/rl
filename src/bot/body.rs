@@ -179,24 +179,33 @@ pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f3
 /// are Rapier's debug-render; there are no per-body meshes to cache here.
 #[derive(Resource)]
 pub struct CrabAssets {
-    /// `None` only when the glTF model is unavailable.
-    recipe: Option<RigRecipe>,
+    /// The body to spawn. `RigRecipe`, not `Option`: preflight rejects a model that
+    /// builds no recipe and an absent model falls back ([`rig::fallback_recipe`]), so
+    /// construction always yields one.
+    recipe: RigRecipe,
 }
 
 impl CrabAssets {
     /// Bind-pose world position of the leg hub the body spawns its root at. The skin
     /// reads it to place its own root in the same frame the body uses, so the two
     /// share one coordinate space (see [`super::skin::attach_skins`]).
-    pub fn hub_bind_world(&self) -> Option<Vec3> {
-        self.recipe.as_ref().map(|r| r.hub_bind_world)
+    pub fn hub_bind_world(&self) -> Vec3 {
+        self.recipe.hub_bind_world
     }
 }
 
 impl FromWorld for CrabAssets {
     fn from_world(_world: &mut World) -> Self {
-        let recipe = super::meshfit::model_path()
-            .and_then(|p| LoadedModel::load(&p).ok())
-            .and_then(|m| rig::build_recipe(&m));
+        // A present-but-broken model is rejected by main's preflight (not silently
+        // swapped for the stand-in), so this expect only fires for a future caller that
+        // skips that preflight; no model at all falls back to the procedural stand-in.
+        let recipe = match super::meshfit::model_path() {
+            Some(p) => LoadedModel::load(&p)
+                .ok()
+                .and_then(|m| rig::build_recipe(&m))
+                .expect("model preflight should have rejected a model that builds no recipe"),
+            None => rig::fallback_recipe(),
+        };
         Self { recipe }
     }
 }
@@ -423,12 +432,7 @@ pub fn spawn_crab(
     env: usize,
     init_rotation: Quat,
 ) -> Entity {
-    // Unreachable in normal runs: `main`'s preflight rejects a missing model or one
-    // that builds no recipe (exit 1) before any spawn. The expect guards the path
-    // that constructs `CrabAssets` without that preflight (e.g. a future caller).
-    let recipe = assets.recipe.as_ref().expect(
-        "CrabAssets built without a rig recipe — main's model preflight should have caught this",
-    );
+    let recipe = &assets.recipe;
     // Spawn in the glTF bind-world frame: the carapace root sits at the leg hub's
     // true bind-world position (offset by the spawn point + a clearance drop), so
     // every link's `anchor1` delta lands it at its real glTF bone origin — the exact

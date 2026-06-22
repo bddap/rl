@@ -399,6 +399,15 @@ fn crab_settles_quietly_at_rest() {
         (v.angular.length(), t.translation.y)
     }
 
+    // Sally-calibrated: these bars are the real model's measured rest numbers, which
+    // don't transfer to the differently-shaped stand-in (whose settle is checked
+    // body-agnostically by `fallback_body_settles_without_blowing_up`). Skip with no
+    // model so the no-asset `cargo test` stays green.
+    if super::meshfit::model_path().is_none() {
+        eprintln!("crab_settles_quietly_at_rest: no model — skipping (fallback body)");
+        return;
+    }
+
     let mut app = headless_app();
     tick(&mut app, 1);
 
@@ -480,6 +489,14 @@ fn crab_settles_quietly_at_rest() {
 fn claws_quiet_at_rest() {
     use bevy_rapier3d::prelude::Velocity;
 
+    // Sally-calibrated (see `crab_settles_quietly_at_rest`): the bar depends on the
+    // model's near-massless pincers, which the stand-in's claws don't match. Skip with
+    // no model.
+    if super::meshfit::model_path().is_none() {
+        eprintln!("claws_quiet_at_rest: no model — skipping (fallback body)");
+        return;
+    }
+
     let mut app = headless_app();
     tick(&mut app, 1);
     tick(&mut app, 320); // fall + settle onto the ground under zero torque
@@ -526,6 +543,63 @@ fn claws_quiet_at_rest() {
         ang_mean < 0.3,
         "claw links shaking at rest: mean worst-link angular speed {ang_mean:.3} rad/s \
          (want <0.3; the carapace-nesting fix brought this from ~0.77 to ~0.20)"
+    );
+}
+
+/// The procedural fallback body (rl#5) must SIMULATE soundly, not just build a recipe:
+/// the no-asset counterpart to `crab_settles_quietly_at_rest`, running ONLY with no
+/// model (so the crab IS the stand-in) and asserting body-AGNOSTIC invariants, not
+/// Sally's tuned rest numbers.
+#[test]
+fn fallback_body_settles_without_blowing_up() {
+    use super::body::{CrabBodyPart, CrabCarapace};
+    use bevy_rapier3d::prelude::Velocity;
+
+    if super::meshfit::model_path().is_some() {
+        eprintln!("fallback_body_settles_without_blowing_up: model present — skipping (not the fallback body)");
+        return;
+    }
+
+    let mut app = headless_app();
+    tick(&mut app, 1);
+    tick(&mut app, 320); // fall + settle onto the ground under zero torque
+
+    // Every part finite and not spinning/translating off to infinity. The bars are
+    // loose — this catches a NaN/explosion, not a settle-quality regression (the
+    // stand-in's exact rest numbers aren't pinned; its geometry is, in rig.rs).
+    let mut parts_q = app
+        .world_mut()
+        .query_filtered::<(&Transform, &Velocity), With<CrabBodyPart>>();
+    let mut n = 0;
+    for (t, v) in parts_q.iter(app.world()) {
+        assert!(
+            t.translation.is_finite() && t.rotation.is_finite(),
+            "fallback part pose went non-finite at rest: {t:?}"
+        );
+        assert!(
+            v.linear.is_finite() && v.angular.is_finite(),
+            "fallback part velocity went non-finite at rest: {v:?}"
+        );
+        assert!(
+            v.linear.length() < 5.0 && v.angular.length() < 50.0,
+            "fallback part still moving fast at rest: lin {:.2} m/s ang {:.2} rad/s",
+            v.linear.length(),
+            v.angular.length()
+        );
+        n += 1;
+    }
+    assert!(n >= 30, "fallback crab failed to spawn its parts (got {n})");
+
+    // The carapace settled on its legs: above the floor (didn't tunnel through) and
+    // not flung into the air. Spawned ~0.3 m up (the hub height); a stand sits in a
+    // generous band around there.
+    let mut car_q = app
+        .world_mut()
+        .query_filtered::<&Transform, With<CrabCarapace>>();
+    let car_y = car_q.iter(app.world()).next().expect("carapace").translation.y;
+    assert!(
+        (0.0..2.0).contains(&car_y),
+        "fallback carapace at y={car_y:.2} — sank through the floor or launched"
     );
 }
 
