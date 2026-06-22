@@ -274,6 +274,17 @@ type CrabOpt<B> = OptimizerAdaptor<Adam, CrabBrain<B>, B>;
 /// The production learner's optimizer: Adam over the CPU autodiff backend.
 type CrabOptimizer = CrabOpt<TrainBackend>;
 
+/// Build the learner's Adam optimizer (global grad-norm clip 0.5). The ONE source of
+/// the optimizer construction — the live learner, the `bench-update` harness, and the
+/// `--update-device gpu` learner all call this, so the clip constant can't silently
+/// drift between paths that are meant to be identical. Generic over the backend so the
+/// CPU and GPU learners get the same optimizer, differing only in `B`.
+fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
+    AdamConfig::new()
+        .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
+        .init()
+}
+
 struct MetricsLogger {
     episode_file: std::fs::File,
 }
@@ -612,9 +623,7 @@ impl TrainingState {
     fn build(config: &TrainConfig, metrics_dir: &Path, worker_mode: bool) -> Self {
         let device = NdArrayDevice::Cpu;
         let mut brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
-        let optimizer: CrabOptimizer = AdamConfig::new()
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
-            .init();
+        let optimizer: CrabOptimizer = crab_optimizer();
 
         let mut obs_normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
         let mut return_normalizer = ReturnNormalizer::new();
@@ -872,6 +881,22 @@ impl TrainingState {
             &self.device,
             &mut self.return_normalizer,
         )
+    }
+
+    /// Learner-side accessor for the `--update-device gpu` path (rl#49): the CPU brain
+    /// (mirrored to/from the GPU each update by [`GpuLearner`]), the PPO config, and the
+    /// host return normalizer. Unlike [`Self::learner_parts`] it omits the CPU
+    /// optimizer + device — the GPU update runs Adam on its own device-resident
+    /// optimizer, and the CPU optimizer must stay untouched so a `cpu`-device run is
+    /// byte-for-byte the production path. The brain is still the single source of truth
+    /// (rollout snapshots + checkpoints read it); the GPU learner only borrows it to
+    /// load weights in and write the result back. Gated on `wgpu`: with no GPU backend
+    /// compiled there is no caller, so it would be dead code.
+    #[cfg(feature = "wgpu")]
+    pub fn learner_parts_for_gpu(
+        &mut self,
+    ) -> (&mut CrabBrain<TrainBackend>, &PpoConfig, &mut ReturnNormalizer) {
+        (&mut self.brain, &self.config, &mut self.return_normalizer)
     }
 
     /// Record a finished episode's reward (the learner aggregates these from every
@@ -1142,11 +1167,9 @@ pub(crate) fn bench_ppo_update<B: AutodiffBackend>(
     use rand::{Rng, SeedableRng};
 
     let mut brain: CrabBrain<B> = CrabBrain::new(device);
-    // Same optimizer construction as `TrainingState::build` (grad-norm clip 0.5), so
-    // the optimizer step we time is the production one, not a bare Adam.
-    let mut optimizer: CrabOpt<B> = AdamConfig::new()
-        .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
-        .init();
+    // The production optimizer (shared `crab_optimizer`, grad-norm clip 0.5), so the
+    // step we time is the real one, not a bare Adam.
+    let mut optimizer: CrabOpt<B> = crab_optimizer();
     let mut config = PpoConfig::default();
     if let Some(bs) = batch_override {
         config.batch_size = bs;
@@ -1256,28 +1279,35 @@ pub(crate) fn bench_ppo_update<B: AutodiffBackend>(
     );
 }
 
-/// rl#49 GPU bench entry point: bring up the wgpu/Vulkan backend on the discrete GPU,
-/// PROVE the adapter is real hardware (not a software fallback), then run the same
-/// [`bench_ppo_update`] harness on `Autodiff<Wgpu>`.
-///
-/// The adapter check is the load-bearing part. The box's Vulkan ICD set includes
-/// lavapipe (`lvp` — a CPU software rasteriser, `DeviceType::Cpu`); if wgpu silently
-/// fell back to it, the update would run on the CPU and a slow result would falsely
-/// "prove" the GPU doesn't help. So we (a) request `DiscreteGpu(0)`, which cubecl
-/// filters by `device_type == DiscreteGpu` and thus skips lavapipe outright, and (b)
-/// read the chosen adapter's info, print it, and PANIC if it is `Cpu`/`Other` or its
-/// name looks like a software renderer. Pair this with `VK_ICD_FILENAMES` pointing at
-/// only `nvidia_icd.json` to make the NVIDIA card the only Vulkan device at all.
+/// The GPU training backend: `Autodiff<Wgpu>` over Vulkan (rl#49). The live learner's
+/// `--update-device gpu` path and the `bench-update --backend gpu` path both run the
+/// one generic [`ppo_update_core`] on this — same update, GPU device. WGSL→Vulkan (the
+/// SPIR-V `burn/vulkan` path is a separate, untried lever). Rollout inference stays on
+/// [`TrainBackend`] (CPU): rollouts are many tiny per-step obs forwards across the K
+/// worker threads, where GPU dispatch overhead would dominate; only the one batched
+/// update moves to the GPU.
 #[cfg(feature = "wgpu")]
-pub(crate) fn bench_ppo_update_gpu(
-    workers: usize,
-    envs: usize,
-    horizon: usize,
-    reps: usize,
-    batch_override: Option<usize>,
-) {
-    use burn::backend::Autodiff;
-    use burn::backend::wgpu::{RuntimeOptions, Wgpu, WgpuDevice, graphics::Vulkan, init_setup};
+pub(crate) type GpuBackend = Autodiff<burn::backend::wgpu::Wgpu>;
+
+/// Bring up the wgpu/Vulkan backend on the discrete GPU and PROVE the chosen adapter
+/// is real hardware, returning the device to run on. The single source of the
+/// adapter-selection + software-fallback guard, shared by `bench-update --backend gpu`
+/// and the live `learn --update-device gpu` learner (rl#49) so there is one place that
+/// decides "is this actually the GPU".
+///
+/// The guard is the load-bearing part. The box's Vulkan ICD set includes lavapipe
+/// (`lvp` — a CPU software rasteriser, `DeviceType::Cpu`); if wgpu silently fell back
+/// to it, the "GPU" update would run on the CPU. So we (a) request `DiscreteGpu(0)`,
+/// which cubecl filters by `device_type == DiscreteGpu` (lavapipe, a CPU device, is
+/// excluded before selection — and cubecl panics "No Discrete GPU device found" rather
+/// than fall back), and (b) read the chosen adapter, PRINT it, and PANIC if it is a
+/// `Cpu`/`Other` device or a known software-rasteriser name. Pair with
+/// `VK_ICD_FILENAMES` pointing at only `nvidia_icd.json` to make the NVIDIA card the
+/// only Vulkan device at all. `tag` prefixes the log lines (e.g. `bench-update` /
+/// `learner`).
+#[cfg(feature = "wgpu")]
+pub(crate) fn init_gpu_backend(tag: &str) -> burn::backend::wgpu::WgpuDevice {
+    use burn::backend::wgpu::{RuntimeOptions, WgpuDevice, graphics::Vulkan, init_setup};
 
     // DiscreteGpu(0) (not DefaultDevice): cubecl's adapter filter keeps only
     // `DeviceType::DiscreteGpu` adapters for this variant, so lavapipe (a CPU device)
@@ -1286,40 +1316,52 @@ pub(crate) fn bench_ppo_update_gpu(
 
     // init_setup::<Vulkan> forces the Vulkan graphics API, registers this exact device
     // with the runtime, and hands back the setup so we can inspect the real adapter.
-    eprintln!("[bench-update] initialising wgpu/Vulkan on {device:?} …");
+    eprintln!("[{tag}] initialising wgpu/Vulkan on {device:?} …");
     let setup = init_setup::<Vulkan>(&device, RuntimeOptions::default());
     let info = setup.adapter.get_info();
     eprintln!(
-        "[bench-update] wgpu adapter: name={:?} backend={:?} device_type={:?} driver={:?} {:?}",
+        "[{tag}] wgpu adapter: name={:?} backend={:?} device_type={:?} driver={:?} {:?}",
         info.name, info.backend, info.device_type, info.driver, info.driver_info,
     );
 
-    // Hard gate: refuse to benchmark on a software adapter. A lavapipe/llvmpipe result
-    // would be a CPU run mislabelled as GPU — worse than no result. Requesting
-    // `DiscreteGpu(0)` already makes cubecl reject a non-discrete adapter (it panics
-    // "No Discrete GPU device found" rather than fall back), and we additionally check
-    // both the device_type (via its Debug form, to avoid pinning the wgpu crate
-    // version) and the adapter name against the known software-rasteriser names.
+    // Hard gate: refuse to run on a software adapter. A lavapipe/llvmpipe result would
+    // be a CPU run mislabelled as GPU — worse than no result. We check both the
+    // device_type (via its Debug form, to avoid pinning the wgpu crate version) and the
+    // adapter name against the known software-rasteriser names.
     let name_lc = info.name.to_lowercase();
     let type_str = format!("{:?}", info.device_type).to_lowercase();
     let is_software = type_str.contains("cpu")
+        // Some software ICDs report `DeviceType::Other` rather than `Cpu`; reject those
+        // too. A real discrete GPU reports `DiscreteGpu`, so this never rejects hardware.
+        || type_str.contains("other")
         || name_lc.contains("llvmpipe")
         || name_lc.contains("lavapipe")
         || name_lc.contains("software")
         || name_lc.contains("swiftshader");
     assert!(
         !is_software,
-        "wgpu selected a SOFTWARE adapter (name={:?}, type={:?}) — refusing to report a GPU \
-         timing. Set VK_ICD_FILENAMES=/run/opengl-driver/share/vulkan/icd.d/nvidia_icd.json to \
-         expose only the NVIDIA card.",
+        "wgpu selected a SOFTWARE adapter (name={:?}, type={:?}) — refusing to run the update on \
+         it. Set VK_ICD_FILENAMES=/run/opengl-driver/share/vulkan/icd.d/nvidia_icd.json to expose \
+         only the NVIDIA card.",
         info.name, info.device_type,
     );
-    eprintln!(
-        "[bench-update] adapter confirmed as hardware GPU ({}) — proceeding.",
-        info.name,
-    );
+    eprintln!("[{tag}] adapter confirmed as hardware GPU ({}) — proceeding.", info.name);
+    device
+}
 
-    bench_ppo_update::<Autodiff<Wgpu>>(
+/// rl#49 GPU bench entry point: bring up the wgpu/Vulkan backend on the discrete GPU
+/// (proving the adapter is real hardware, [`init_gpu_backend`]), then run the same
+/// [`bench_ppo_update`] harness on [`GpuBackend`].
+#[cfg(feature = "wgpu")]
+pub(crate) fn bench_ppo_update_gpu(
+    workers: usize,
+    envs: usize,
+    horizon: usize,
+    reps: usize,
+    batch_override: Option<usize>,
+) {
+    let device = init_gpu_backend("bench-update");
+    bench_ppo_update::<GpuBackend>(
         &device,
         "GPU wgpu/Vulkan (Autodiff<Wgpu>)",
         workers,
@@ -1328,6 +1370,130 @@ pub(crate) fn bench_ppo_update_gpu(
         reps,
         batch_override,
     );
+}
+
+/// Wall-clock breakdown of one `--update-device gpu` learner iteration's update phase
+/// (rl#49): the CPU→GPU weight load, the GPU PPO update, and the GPU→CPU write-back, in
+/// milliseconds. The microbench measured only the update in isolation; the live port
+/// pays the two host↔device copies every iter, so the learner logs all three to show
+/// whether the copies eat the update's GPU win — the make-or-break end-to-end number.
+///
+/// Not feature-gated (just three plain `f64`s) so the learner's logging code stays
+/// cfg-free — only [`GpuLearner`], which produces it, needs the `wgpu` backend.
+#[derive(Clone, Copy)]
+pub(crate) struct GpuUpdateTiming {
+    /// CPU brain → bytes → GPU brain (load the policy onto the device for this update).
+    pub load_ms: f64,
+    /// The GPU [`ppo_update_core`] itself (autodiff backward + Adam steps).
+    pub update_ms: f64,
+    /// Updated GPU brain → bytes → CPU brain (the next rollout reads the CPU copy).
+    pub store_ms: f64,
+}
+
+/// The GPU-resident learner for `--update-device gpu` (rl#49). Owns a GPU brain + GPU
+/// Adam optimizer that PERSIST across iterations — the optimizer's moment estimates
+/// must carry over exactly as the CPU learner's do, so this is built once and reused,
+/// never per-iter.
+///
+/// The CPU `TrainingState.brain` stays the source of truth (rollout snapshots +
+/// checkpoints read it). Each iteration [`Self::update`] mirrors the current CPU policy
+/// onto the GPU, runs the one generic [`ppo_update_core`] there, and mirrors the result
+/// back — so this adds no second update implementation, only a device for the existing
+/// one. Weights cross the boundary as the same `FullPrecisionSettings` bincode the
+/// rollout snapshot/checkpoint already round-trips through (records are backend-
+/// agnostic), so no tensor is ever moved directly between backends.
+#[cfg(feature = "wgpu")]
+pub(crate) struct GpuLearner {
+    device: burn::backend::wgpu::WgpuDevice,
+    brain: CrabBrain<GpuBackend>,
+    optimizer: CrabOpt<GpuBackend>,
+}
+
+#[cfg(feature = "wgpu")]
+impl GpuLearner {
+    /// Bring up the GPU backend and build a GPU brain + the shared [`crab_optimizer`].
+    /// The brain's initial weights are irrelevant: [`Self::update`] loads the CPU policy
+    /// onto it before every update, so the first update trains the real policy, not this
+    /// fresh net.
+    ///
+    /// # Panics
+    /// Via [`init_gpu_backend`], if no real discrete-GPU Vulkan adapter is available (a
+    /// software lavapipe/llvmpipe adapter, or none at all). Deliberate: `--update-device
+    /// gpu` must fail loudly at boot, never silently fall back to the CPU.
+    pub fn new() -> Self {
+        let device = init_gpu_backend("learner");
+        let brain: CrabBrain<GpuBackend> = CrabBrain::new(&device);
+        let optimizer: CrabOpt<GpuBackend> = crab_optimizer();
+        Self { device, brain, optimizer }
+    }
+
+    /// Run one PPO update on the GPU and mirror the result back to the CPU brain.
+    ///
+    /// Loads `cpu_brain`'s current weights onto the GPU brain (so the GPU updates
+    /// exactly the policy the threads just rolled with), runs the production
+    /// [`ppo_update_core`] on [`GpuBackend`], then writes the updated GPU weights back
+    /// into `cpu_brain` for the next rollout snapshot/checkpoint. `ret_norm` is the
+    /// host's return scale (plain f32 stats, backend-independent), advanced in place
+    /// exactly as the CPU path does. Returns the PPO metrics and the load/update/store
+    /// wall-clock split.
+    pub fn update(
+        &mut self,
+        cpu_brain: &mut CrabBrain<TrainBackend>,
+        config: &PpoConfig,
+        rollouts: &[RolloutBuffer],
+        ret_norm: &mut ReturnNormalizer,
+    ) -> (PpoMetrics, GpuUpdateTiming) {
+        use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
+        type Bridge = BinBytesRecorder<FullPrecisionSettings>;
+
+        // CPU → GPU: serialize the CPU policy to the same bincode the rollout snapshot
+        // uses, then load it into the GPU brain on the GPU device. A backend-agnostic
+        // record is the one safe bridge — burn has no direct cross-backend tensor move.
+        let t_load = std::time::Instant::now();
+        let bytes = Bridge::default()
+            .record(cpu_brain.clone().into_record(), ())
+            .expect("serialize CPU brain for GPU update");
+        let record = Bridge::default()
+            .load(bytes, &self.device)
+            .expect("load brain record onto GPU");
+        self.brain = self.brain.clone().load_record(record);
+        let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
+
+        // GPU: the one production update, on the device. `ppo_update_core` reads each
+        // minibatch's losses back via `into_scalar`, which forces that minibatch's
+        // forward (and the prior step's backward+optimizer.step it depends on) to
+        // complete — so almost all the work is genuinely synced inside this region. The
+        // explicit `sync` after forces the FINAL minibatch's backward+step too, so
+        // `update_ms` is the true compute time and `store_ms` below is purely the copy
+        // (without it, the last step would leak into the store timing).
+        let t_update = std::time::Instant::now();
+        let metrics = ppo_update_core(
+            &mut self.brain,
+            &mut self.optimizer,
+            config,
+            rollouts,
+            &self.device,
+            ret_norm,
+        );
+        <GpuBackend as burn::tensor::backend::Backend>::sync(&self.device)
+            .expect("GPU sync after PPO update");
+        let update_ms = t_update.elapsed().as_secs_f64() * 1000.0;
+
+        // GPU → CPU: mirror the updated weights back so the next rollout snapshot +
+        // the checkpoint (both off the CPU brain) carry this iteration's update.
+        let t_store = std::time::Instant::now();
+        let bytes = Bridge::default()
+            .record(self.brain.clone().into_record(), ())
+            .expect("serialize GPU brain back to CPU");
+        let cpu_device = NdArrayDevice::Cpu;
+        let record = Bridge::default()
+            .load(bytes, &cpu_device)
+            .expect("load updated brain record onto CPU");
+        *cpu_brain = cpu_brain.clone().load_record(record);
+        let store_ms = t_store.elapsed().as_secs_f64() * 1000.0;
+
+        (metrics, GpuUpdateTiming { load_ms, update_ms, store_ms })
+    }
 }
 
 /// The start band (rung 1): the planar (XZ) distance, in metres, at which a fresh
@@ -2701,7 +2867,7 @@ mod tests {
         let loaded_record = recorder.load(stem, &device).expect("load brain");
         let loaded = CrabBrain::<TrainBackend>::new(&device).load_record(loaded_record);
 
-        let test_obs = Tensor::<B, 2>::zeros([1, OBS_SIZE], &device);
+        let test_obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
         let (orig_means, orig_log_std) = brain.policy(test_obs.clone());
         let (loaded_means, loaded_log_std) = loaded.policy(test_obs);
 

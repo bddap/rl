@@ -13,7 +13,7 @@ license = "MIT OR Apache-2.0"
 # default; the SPIR-V (`burn/vulkan`) high-perf path is a separate lever, not enabled
 # here. Off by default — the production `learn` path stays pure CPU ndarray.
 #
-# `naga/termcolor`: burn-wgpu drags in wgpu 27 → naga 27 alongside bevy's wgpu 26 →
+# `naga/termcolor`: bevy drags in wgpu 27 → naga 27 alongside burn-wgpu's wgpu 26 →
 # naga 26, and both share one `codespan-reporting` 0.12 (its features UNIFY across the
 # graph). naga 26's `term::emit` call only typechecks when codespan-reporting's
 # `termcolor` is on (its diagnostic buffer is then a `WriteColor`); without it, naga 26
