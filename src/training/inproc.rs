@@ -63,8 +63,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use bevy::app::ScheduleRunnerPlugin;
-use bevy::app::{TaskPoolOptions, TaskPoolPlugin};
+use bevy::app::TaskPoolOptions;
 use bevy::prelude::*;
 use burn::module::Module;
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
@@ -477,57 +476,24 @@ fn warm_up_app(app: &mut App) {
 /// serialize on it (flat throughput). This is the load-bearing knob the spike
 /// proved; it is unconditional here.
 fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
-    use crate::Visuals;
-    use crate::bot::{BotPlugin, NumEnvs};
-    use crate::physics::PhysicsWorldPlugin;
+    use crate::bot::test_util::{HeadlessStack, headless_stack};
     use crate::training::session;
     use crate::training::session::{brain_step, reset_crab, save_on_exit};
-    use bevy_rapier3d::prelude::*;
     use std::time::Duration;
 
     // Per-thread scratch CSV dir so K threads never write the same file.
     let metrics_dir = worker_metrics_dir(id);
 
-    let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(TaskPoolPlugin {
-                task_pool_options: TaskPoolOptions::with_num_threads(1),
-            })
-            .set(bevy::window::WindowPlugin {
-                primary_window: None,
-                exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
-            })
-            .set(bevy::render::RenderPlugin {
-                render_creation: bevy::render::settings::RenderCreation::Automatic(
-                    bevy::render::settings::WgpuSettings {
-                        backends: None,
-                        ..default()
-                    },
-                ),
-                ..default()
-            })
-            .disable::<bevy::winit::WinitPlugin>()
-            .disable::<bevy::log::LogPlugin>(),
-    );
-    app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::ZERO));
-    // One physics tick per app.update(): advance the virtual clock by exactly the
-    // fixed dt each update, so FixedUpdate runs exactly one step and a horizon is
-    // EXACTLY H ticks (clean, reproducible sample counts). Physics work per tick is
-    // the production fixed_timestep step (one source, shared with the demo and
-    // tests); only the per-update granularity differs.
-    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-        Duration::from_secs_f32(crate::physics::PHYSICS_DT),
-    ));
-
-    app.insert_resource(Visuals(false))
-        .insert_resource(NumEnvs(num_envs))
-        .insert_resource(crate::physics::fixed_timestep())
-        .insert_resource(crate::physics::rapier_context_init())
-        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
-        .add_plugins(PhysicsWorldPlugin)
-        .add_plugins(BotPlugin);
+    // The shared windowless physics+bot stack, with the rollout-worker knobs explicit:
+    // the 1-thread task pool + ScheduleRunner loop (the K-world scaling fix — see
+    // `single_thread_pool`), and one physics tick per update so a horizon is EXACTLY H
+    // ticks (reproducible sample counts).
+    let mut app = headless_stack(HeadlessStack {
+        num_envs,
+        tick_dt: Duration::from_secs_f32(crate::physics::PHYSICS_DT),
+        log: false,
+        single_thread_pool: true,
+    });
 
     // Worker-mode training state + the Sense→Think→Act systems. No PPO-update step
     // runs in this app: the driver thread reads the per-env buffers out each horizon
