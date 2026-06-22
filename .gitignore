@@ -2,6 +2,8 @@
 /target-gc
 /target-fc
 /target-nn
+/target-bm
+/target-bmi
 /tmp
 /checkpoints
 .cargo-home/

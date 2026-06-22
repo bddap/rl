@@ -127,11 +127,44 @@ pub enum MatchResult {
 /// on every peer (the caller passes the shared constant). `expect` is the minimum
 /// participant count to close on (see [`form_match`]); `discover_secs` bounds how long we
 /// wait for a peer before concluding we are alone.
+///
+/// Pure mDNS discovery (no explicit dial). The boot-menu Join-by-code path uses
+/// [`connect_and_form_dialing`] to additionally direct-dial a host's endpoint id; this is
+/// that with `dial == None`, kept as the name every existing caller already uses.
 pub fn connect_and_form(
     seed: u64,
     discover_secs: u64,
     expect: usize,
     collector: Option<iroh::EndpointId>,
+) -> Result<MatchResult> {
+    connect_and_form_dialing(seed, discover_secs, expect, None, collector, None)
+}
+
+/// [`connect_and_form`] plus an optional direct dial of a host's endpoint id before the
+/// barrier runs — the boot-menu (rl#56) Join-by-code path. `dial == Some(host)` opens a
+/// QUIC link to `host` (its LAN address resolved via the endpoint's registered mDNS
+/// lookup, so a bare id is enough on the local network) so formation has a peer even when
+/// mDNS discovery is slow/missed; `dial == None` is the plain mDNS path
+/// ([`connect_and_form`]).
+///
+/// Determinism is untouched by the dial: it only establishes a connection. The roster
+/// still comes wholly from the [`form_match`] barrier — every peer freezes the identical
+/// sorted set — so dialing the wrong/typo'd code simply fails to form a match (the
+/// barrier never hears an agreeing peer and falls back to [`MatchResult::Alone`] or
+/// errors), it can NEVER form a divergent roster. If the dial itself fails (bad code, host
+/// gone) we log and proceed to the barrier anyway, which then resolves alone/failed — a
+/// dial error must not be more fatal than an absent peer.
+///
+/// `on_bound` (if any) is sent our own endpoint id the instant the session binds — before
+/// the slow barrier — so a Host UI can display the join code to share while waiting. A
+/// closed receiver is ignored (the caller stopped caring); it never gates formation.
+pub fn connect_and_form_dialing(
+    seed: u64,
+    discover_secs: u64,
+    expect: usize,
+    dial: Option<iroh::EndpointId>,
+    collector: Option<iroh::EndpointId>,
+    on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
 ) -> Result<MatchResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -141,6 +174,22 @@ pub fn connect_and_form(
         let mut session = transport::start_session().await?;
         let my_eid = session.endpoint_id();
         println!("fp client endpoint id: {my_eid}");
+        // Report our bound id up front (best-effort) so a Host lobby can show the join code
+        // immediately, without waiting out the barrier.
+        if let Some(tx) = &on_bound {
+            let _ = tx.send(my_eid);
+        }
+        // Join-by-code: direct-dial the host so the barrier has a peer without waiting on
+        // mDNS. Best-effort — a failed dial (bad code / host absent) is logged and we fall
+        // through to the barrier, which resolves the absence as Alone/Failed just like an
+        // unreachable peer. Never read a roster from the dial; it only opens the link.
+        if let Some(host) = dial {
+            if host == my_eid {
+                tracing::warn!("join code is our own endpoint id — ignoring the self-dial");
+            } else if let Err(e) = session.connect_direct(host).await {
+                tracing::warn!("dialing host {} failed: {e:#}", host.fmt_short());
+            }
+        }
         // Open the telemetry side-channel BEFORE forming the match, so the collector
         // sees the roster fill (RosterForming/Agreed). Best-effort: a failure to bind
         // the telemetry endpoint just runs the game without it.
@@ -440,6 +489,31 @@ async fn run_barrier(
 ///   silently-invertible transposition of `now`/`deadline`).
 fn is_alone_now(expect: usize, live: usize, ever_heard_peer: bool, past_deadline: bool) -> bool {
     expect > 1 && !ever_heard_peer && live == 1 && past_deadline
+}
+
+/// Build the single-peer lockstep for an OFFLINE round (just us), honoring the
+/// `RL_VEHICLE` pilot flag. The one definition shared by every offline entry into the
+/// windowed client — the explicit `play --solo`, the boot-menu Solo / Host-Start-alone
+/// buttons (rl#56), and the rl#47 discovery-found-no-peer fallback — so they all play the
+/// byte-identical deterministic solo round with no second construction to drift. `seed`
+/// is the shared match seed (the caller passes the one constant every peer uses).
+pub fn solo_lockstep_for(seed: u64) -> Lockstep {
+    let me = PlayerId(0);
+    let pilots = pilots_from_env(me);
+    Lockstep::new_with_pilots(seed, &[me], me, &pilots)
+}
+
+/// Which players spawn PILOTING a plane rather than on foot, from the `RL_VEHICLE` env
+/// flag (rl#38 vehicle first cut). `RL_VEHICLE=plane` makes the LOCAL player (`me`) a
+/// pilot; anything else (incl. unset) is the unchanged foot game (empty ⇒ byte-identical
+/// sim). Offline paths only: the networked path ([`form_match`]) builds the session with
+/// no pilots, so it ignores `RL_VEHICLE` entirely — wiring pilots over the wire needs the
+/// peers to agree on the pilot set (a wire negotiation), which is future work.
+fn pilots_from_env(me: PlayerId) -> Vec<PlayerId> {
+    match std::env::var("RL_VEHICLE").as_deref() {
+        Ok("plane") => vec![me],
+        _ => Vec::new(),
+    }
 }
 
 /// Replay the inputs that arrived during formation into a freshly-built [`Lockstep`],

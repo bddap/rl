@@ -31,6 +31,7 @@
 
 pub mod lockstep;
 pub mod membership;
+pub mod menu;
 pub mod net_loop;
 pub mod render;
 pub mod sim;
