@@ -463,22 +463,26 @@ pub enum EnvPhase {
     Settling { grace: u32 },
 }
 
-/// A transition whose action has been chosen and obs/value captured, but whose
-/// reward and end need NEXT tick's post-physics pose to finalize.
+/// A transition whose action has been chosen and obs/value/effort captured, but
+/// whose reward and end need NEXT tick's post-physics pose to finalize.
 ///
-/// The reward for taking `aₜ` in `sₜ` must reflect the pose `aₜ` *produced*,
-/// `h(s_{t+1})` — but the schedule is Sense → Think (`brain_step`) → Act →
-/// physics, so when `brain_step` runs at tick `t` the carapace it can read is
-/// still `sₜ` (physics hasn't integrated `aₜ` yet). So everything known at tick
-/// `t` is stashed here and the transition is completed at tick `t+1`, when
-/// `h(s_{t+1})` is the carapace reading, pairing each action with the height change
-/// that same action caused (issue #15).
+/// The reach term must score the pose `aₜ` *produced* (the claw-tip distance at
+/// `s_{t+1}`) — but the schedule is Sense → Think (`brain_step`) → Act → physics,
+/// so when `brain_step` runs at tick `t` the carapace it can read is still `sₜ`
+/// (physics hasn't integrated `aₜ` yet). So everything known at tick `t` is
+/// stashed here and the transition is completed at tick `t+1`, in phase with the
+/// pose that action caused (issue #15).
 #[derive(Clone)]
 struct Pending {
     obs: [f32; OBS_SIZE],
     action: [f32; ACTION_SIZE],
     value: NormalizedValue,
     log_prob: f32,
+    /// `Σ|aᵢ|^L` for this action — the effort summand, computed from the RAW
+    /// pre-clamp outputs (see [`action_effort`]) and so already final at tick `t`.
+    /// At finalization [`compute_reward`] scales it by [`EFFORT_WEIGHT`] and
+    /// subtracts it; it travels with the action it priced.
+    effort: f32,
 }
 
 /// Per-env episode accumulators. Each env's episode runs and resets
@@ -1117,8 +1121,8 @@ const BAND_START_MAX: f32 = 3.0;
 const BAND_ADVANCE_STEP: f32 = 1.0;
 /// Vertical band of the target (world Y). A modest claw-height span so a crab that
 /// has walked up to the target still finishes with a real reach, not a foot-level
-/// touch. Kept low and narrow — height is the stand term's job; this term is about
-/// getting THERE.
+/// touch. Kept low and narrow — the reward is about getting THERE, so the target sits
+/// just high enough to demand a genuine reach, no higher.
 const TARGET_Y_MIN: f32 = 0.15;
 const TARGET_Y_MAX: f32 = 0.7;
 /// Half-extent the target's planar position is clamped within: a 1 m margin inside the
@@ -1344,78 +1348,69 @@ pub(crate) fn planar_dist(a: Vec3, b: Vec3) -> f32 {
     (d.x * d.x + d.z * d.z).sqrt()
 }
 
-/// Reach-reward weight `W` and length scale `S` in the term `W·u·(1 − tanh(d/S))`,
-/// where `d` is the closest PLANAR distance from any claw tip to the episode's far
-/// target and `u` is uprightness (see [`reach_bonus`]). `W` is the bonus a claw tip
-/// earns by reaching the target dead-on WHILE LEVEL; `S` sets how the pull decays
-/// with distance.
+/// Weight of the effort term `− EFFORT_WEIGHT·Σ|aᵢ|^L` (see [`compute_reward`]):
+/// the cost subtracted per unit of commanded actuation. Kept small so a calm hold
+/// pays almost nothing, so the crab moves only as hard as the goal demands —
+/// economical motion, never spending actuation the reach doesn't pay back. Paired
+/// with `EFFORT_EXP` = `L`, the CONVEX exponent that makes the cost climb steeply
+/// with command size (so the gentlest command that does the job is the cheapest).
+const EFFORT_WEIGHT: f32 = 0.05;
+const EFFORT_EXP: f32 = 3.0;
+
+/// The effort summand `Σ|aᵢ|^L` that [`compute_reward`] weights by [`EFFORT_WEIGHT`],
+/// taken over the RAW network outputs (the sampled PRE-clamp actions — see
+/// [`brain_step`]), NOT the ±1-clamped actions the sim runs. The point is a gradient
+/// PAST the clamp: `|a|^L` keeps rising beyond ±1, so an output that overshoots the
+/// usable range is taxed in proportion to the overshoot and the policy is pulled back
+/// into range. Taxing the clamped value instead would flatten the gradient at ±1 — a
+/// saturating logit would pay a fixed toll but feel no pull off the rail.
+pub(crate) fn action_effort(raw_actions: &[f32; ACTION_SIZE]) -> f32 {
+    raw_actions.iter().map(|a| a.abs().powf(EFFORT_EXP)).sum()
+}
+
+/// Weight `W` and length scale `S` of the reach term `W·(1 − tanh(d/S))` (see
+/// [`reach_bonus`]): `W` is the bonus a claw tip earns by reaching the target
+/// dead-on; `S` sets how the pull decays with distance.
 ///
-/// **Why `1 − tanh(d/S)` and not the old `exp(−d/S)`:** targets spawn metres away
-/// (the curriculum band runs 1.5–9 m), and `exp(−d/0.4)` is ~0 (≈1e-3 at 3 m) out there — no gradient,
-/// nothing pulling the crab across the arena. `tanh` has a long polynomial-ish tail:
-/// with `S = 4 m`, `1 − tanh(d/S)` is ~0.36 at 3 m and ~0.10 at 6 m, with a clearly
-/// non-zero slope the whole way (proved numerically in
+/// **Why `1 − tanh(d/S)` and not `exp(−d/S)`:** targets spawn metres away (the
+/// curriculum band runs 1.5–9 m), and `exp(−d/0.4)` is ~0 (≈1e-3 at 3 m) out there —
+/// no gradient, nothing pulling the crab across the arena. `tanh` has a long
+/// polynomial-ish tail: with `S = 4 m`, `1 − tanh(d/S)` is ~0.36 at 3 m and ~0.10 at
+/// 6 m, with a clearly non-zero slope the whole way (proved numerically in
 /// [`tests::new_reach_term_has_gradient_at_spawn_distance`]). That non-vanishing slope
 /// at spawn distance IS the walking signal — descend it by getting closer, i.e. walk.
 ///
-/// `W = 0.6` is larger than a clean stand's pose value (`h·u` ≈ 0.4): arriving at and
-/// reaching a FAR target — a whole walk — is a harder, more valuable feat than a bare
-/// stand, so its full reward exceeds standing still. Crucially this does NOT reopen
-/// the lie-down exploit: the uprightness gate (`·u`) still zeroes the term for a
-/// flat/inverted body, so a crab that face-plants onto the target scores ~0 on this
-/// term, while only a crab that walks there AND stays upright collects the full `W`
-/// (see the gate rationale on [`reach_bonus`]). At spawn distance the pull is small
-/// relative to the stand term, so it nudges the crab to set off without ever rewarding
-/// it for toppling toward the goal.
+/// `W` is set well above the effort cost of the gentle motion that closes the
+/// distance, so a whole walk to a far target nets positive and the policy is paid to
+/// set off (the tradeoff is pinned in [`tests::effort_cost_calibration`]).
 const REACH_WEIGHT: f32 = 0.6;
 const REACH_SCALE: f32 = 4.0;
 
-/// Shaped proximity bonus for reaching a claw tip to the far target:
-/// `W·u·(1 − tanh(d/S))`, where `d` is the minimum PLANAR distance over (claw tip,
-/// target) pairs and `u` is carapace uprightness (clamped ≥ 0). Smooth, strictly
-/// POSITIVE, and GATED ON STANDING: it maxes at `W` only when a tip reaches the target
-/// (`d`→0) AND the crab is level (`u`→1), decays gently with distance (so a far target
-/// still pulls — the walking signal), and falls to 0 when the crab is tilted/inverted.
-///
-/// The uprightness gate is what keeps target-seeking from collapsing the stand (the
-/// owner's hard constraint — walking must not come at the cost of toppling). A flat
-/// crab that drags a claw onto the target earns ZERO here no matter how close the tip,
-/// so the only way to collect the reach reward is to walk there while staying upright.
-/// `None` (no target, no claw tip) yields 0 — the reward degrades to the pure stand
-/// reward (the demo path and any tip-less tick).
-fn reach_bonus(min_tip_dist: Option<f32>, upright: f32) -> f32 {
+/// Shaped proximity bonus `W·(1 − tanh(d/S))` (weight and scale on [`REACH_WEIGHT`]),
+/// where `d` is the minimum PLANAR distance over (claw tip, target) pairs. The reward's
+/// only positive term: smooth and strictly POSITIVE, it maxes at `W` when a tip reaches
+/// the target (`d`→0) and decays gently with distance, so a far target still pulls —
+/// that decaying-but-alive gradient across the spawn band is the walking signal. `None`
+/// (no target, no claw tip) yields 0 — with no positive term left the reward degrades
+/// to just the effort tax (the demo path and any tip-less tick).
+fn reach_bonus(min_tip_dist: Option<f32>) -> f32 {
     match min_tip_dist {
-        Some(d) if d.is_finite() => {
-            REACH_WEIGHT * upright.max(0.0) * (1.0 - (d / REACH_SCALE).tanh())
-        }
+        Some(d) if d.is_finite() => REACH_WEIGHT * (1.0 - (d / REACH_SCALE).tanh()),
         _ => 0.0,
     }
 }
 
-/// Reward: carapace pose rewarded, WALKING to a far target while staying upright
-/// rewarded — `reward = (h·u) + W·u·(1 − tanh(d/S))`, where `h` is the carapace's
-/// world height, `u` its uprightness (carapace up · world Y, clamped ≥ 0), and `d`
-/// the closest PLANAR (XZ) claw-tip-to-target distance. The pose and target signals
-/// are global (a height, a distance), so the behaviour still EMERGES rather than being
-/// hand-specified — there is no gait term, no "feet on the ground"; locomotion is
-/// whatever maximises this return (owner's call: mechanical terms don't scale to
-/// emergent behaviour).
+/// The reward: `W·(1 − tanh(d/S)) − EFFORT_WEIGHT·Σ|aᵢ|^L`, the reach pull
+/// ([`reach_bonus`]) minus the cost of the commands that earn it ([`action_effort`]),
+/// where `d` is the closest PLANAR (XZ) claw-tip-to-target distance.
 ///
-/// `h·u` is high only when the carapace is BOTH elevated (legs extended underneath)
-/// and LEVEL (up·Y → 1) — i.e. standing — so the crab must stay upright as it walks;
-/// walking by toppling forward scores nothing once it goes flat. An earlier
-/// eye-tip-height proxy was gamed (rearing to lift the long eye-stalks for cheap
-/// height without standing level); reading the carapace, gated by uprightness, removes
-/// that lever. The reach term ([`reach_bonus`]) COMPOSES additively on top, itself
-/// gated on the same uprightness `u`, and — being non-vanishing across the curriculum's
-/// distance band — supplies the gradient that pulls the crab ACROSS the arena: a pull toward the
-/// target layered on the stand, never a path around it. ONE far target per episode (no
-/// mid-episode resample): with a fixed goal the crab walks there and settles at `d`≈0,
-/// where reach peaks at `W` > a hover's value — so full reaching dominates and there is
-/// no degenerate optimum in hovering just shy of it.
-fn compute_reward(height: f32, upright: f32, min_tip_dist: Option<f32>) -> f32 {
-    let upright = upright.max(0.0);
-    height * upright + reach_bonus(min_tip_dist, upright)
+/// The reach signal is GLOBAL — a single distance, no gait term, no "feet on the
+/// ground" — so locomotion EMERGES instead of being hand-specified (owner's call:
+/// mechanical terms don't scale to emergent behaviour). Height and uprightness are
+/// observations, not reward: this function literally can't see them, so no pose can be
+/// gamed for free reward — only closing `d` pays.
+fn compute_reward(min_tip_dist: Option<f32>, effort: f32) -> f32 {
+    reach_bonus(min_tip_dist) - EFFORT_WEIGHT * effort
 }
 
 /// System: runs the brain to produce actions each physics step.
@@ -1506,6 +1501,10 @@ pub fn brain_step(
 
     // Per-env action sampling + NaN guards.
     let mut action_arrays: Vec<[f32; ACTION_SIZE]> = Vec::with_capacity(n);
+    // Raw (pre-clamp) actions, kept only to compute the effort tax: the tax must see
+    // the unbounded network output so it can push a saturating logit back toward the
+    // usable range, not the ±1-clamped value the sim is fed (see `action_effort`).
+    let mut raw_action_arrays: Vec<[f32; ACTION_SIZE]> = Vec::with_capacity(n);
     let mut log_probs: Vec<f32> = Vec::with_capacity(n);
     for means in &means_rows {
         let action_tensor = sample_action(means, &log_std, &device);
@@ -1518,12 +1517,15 @@ pub fn brain_step(
 
         let action_data: Vec<f32> = action_tensor.to_data().to_vec().unwrap();
         let mut action_array = [0.0f32; ACTION_SIZE];
+        let mut raw_action_array = [0.0f32; ACTION_SIZE];
         let mut has_nan = false;
         for (i, &v) in action_data.iter().enumerate().take(ACTION_SIZE) {
             if v.is_nan() || v.is_infinite() {
                 has_nan = true;
                 action_array[i] = 0.0;
+                raw_action_array[i] = 0.0;
             } else {
+                raw_action_array[i] = v;
                 action_array[i] = v.clamp(-1.0, 1.0);
             }
         }
@@ -1531,6 +1533,7 @@ pub fn brain_step(
             warn!("NaN/Inf detected in NN output, clamping to zero");
         }
         action_arrays.push(action_array);
+        raw_action_arrays.push(raw_action_array);
     }
     actions.envs.copy_from_slice(&action_arrays);
     // Settling envs hold the rest pose (action 0); the policy takes over at
@@ -1609,8 +1612,9 @@ pub fn brain_step(
     // exactly like the carapace pose above. (GlobalTransform would be stale here: it
     // only resyncs in PostUpdate, frozen across the many FixedUpdate ticks per frame
     // the headless clock runs.) None when the env has no target or no claw tip this
-    // tick (mid-respawn) → `reach_bonus(None)` is 0, so the reward degrades to the pure
-    // stand reward. A non-finite tip is skipped, not folded as a spurious near/far hit.
+    // tick (mid-respawn) → `reach_bonus(None)` is 0, so with no positive term left the
+    // reward degrades to just the effort tax. A non-finite tip is skipped, not folded
+    // as a spurious near/far hit.
     let mut min_tip_dists: Vec<Option<f32>> = vec![None; n];
     for (env, tip) in claw_tips_q.iter() {
         let Some(slot) = min_tip_dists.get_mut(env.0) else {
@@ -1637,6 +1641,10 @@ pub fn brain_step(
             ep.min_tip_dist = Some(ep.min_tip_dist.map_or(d, |cur| cur.min(d)));
         }
     }
+    // Commanded effort this step (the reward's tax summand), per env — over the RAW
+    // outputs, not the clamped actions the sim ran (see `action_effort`).
+    let efforts: Vec<f32> = raw_action_arrays.iter().map(action_effort).collect();
+
     // ONE far target per episode: the target is seeded at reset (and lazily above for
     // the first episode) and then held FIXED — no mid-episode resample on reach. The
     // reward is a pure distance field with no event bonus for the reach itself, so
@@ -1648,11 +1656,10 @@ pub fn brain_step(
     // generalizes to that moving goal. See `play::target_ball`.)
 
     // Per-env: finalize the PREVIOUS tick's pending transition with this tick's
-    // post-physics pose, then stash this tick's action as the next pending. The
-    // reward for taking `aₜ` lands on the pose `aₜ` produced — `h(s_{t+1})`, the
-    // carapace reading one tick later — so each action and its resulting height
-    // change occupy the SAME transition (issue #15). Termination is judged on the
-    // same post-physics pose, for the same reason.
+    // post-physics pose, then stash this tick's action as the next pending. The reach
+    // term for taking `aₜ` reads the claw-tip distance at `s_{t+1}` — the pose one tick
+    // later — so each action and its resulting pose occupy the SAME transition (issue
+    // #15). Termination is judged on the same post-physics pose, for the same reason.
     for e in 0..n {
         // A pending exists only across a live recording stride, so an env that is
         // settling (or whose crab is momentarily absent) has none to finalize and
@@ -1670,13 +1677,11 @@ pub fn brain_step(
                 // The pending action's result went non-finite and was force-
                 // respawned this tick (rescue runs .before(Sense)), so the pose
                 // read above is the FRESH spawn, not what the action produced.
-                // Finalize the action as the episode's terminal step but with a
-                // ZERO pose term: a blow-up is a failure, and crediting it the
-                // spawn pose's height would pay a positive reward for it (the same
-                // hazard the pre-deferral rescue path guarded against). No reach credit
-                // either: the body teleported to spawn, so neither its height nor any
-                // claw-tip distance this tick is the action's doing.
-                let reward = compute_reward(0.0, 0.0, None);
+                // Finalize the action as the episode's terminal step with NO reach
+                // credit (`None`): the body teleported to spawn, so this tick's
+                // claw-tip distance isn't the action's doing. The effort tax still
+                // applies — it priced the COMMAND, not its result.
+                let reward = compute_reward(None, pending.effort);
                 training.rollouts[e].push(Transition {
                     obs: pending.obs,
                     action: pending.action,
@@ -1692,17 +1697,14 @@ pub fn brain_step(
                 true
             } else {
                 let (height, upright) = poses[e].expect("poses[e].is_none() handled above");
-                // Carapace pose reward: world height scaled by uprightness. The earlier
-                // eye-tip-height proxy was gamed — the policy reared the body up to lift
-                // the long eye-stalks (cheap height) instead of standing level — so reward
-                // the carapace pose directly: only a LEVEL (up·Y → 1) and HIGH carapace
-                // scores, and a tilted rear-brace is discounted by its low up·Y. (eye_sums
-                // is gathered above but currently unused.) This is `h(s_{t+1})` — the pose
-                // the pending action produced — so it is now in phase with that action.
+                // The reward is reach minus the effort tax — neither `height` nor
+                // `upright` feeds it. Both are read only for the off-reward machinery:
+                // `height` for the blow-up/fell-through termination guard below and the
+                // `mean_height` episode diagnostic, `upright` for the stance diagnostics.
                 // The reach term reads the post-physics claw-tip distance, crediting the
-                // SAME action that moved the tip (in phase, like the height term), and is
-                // gated on this same uprightness so reaching only pays while standing.
-                let reward = compute_reward(height, upright, min_tip_dists[e]);
+                // SAME action that moved the tip, and the effort tax prices that action's
+                // raw command (both phased to `aₜ`).
+                let reward = compute_reward(min_tip_dists[e], pending.effort);
                 // Termination is survival guards only — jumping, flipping, and
                 // any other strategy the policy invents are legitimate solutions
                 // (owner call: emergent behavior is the point). The height band
@@ -1761,6 +1763,7 @@ pub fn brain_step(
                 action: action_arrays[e],
                 value: values[e],
                 log_prob: log_probs[e],
+                effort: efforts[e],
             });
         }
 
@@ -1848,6 +1851,36 @@ pub fn brain_step(
                     sps,
                 );
             }
+        }
+    }
+
+    // Effort/tax/reach probe (RL_LOG_EFFORT only — inert otherwise): per tick, the mean
+    // raw-action effort `Σ|a|³`, the resulting tax `EFFORT_WEIGHT·effort`, and the reach
+    // term, over the live RECORDING envs. Lets a calibration run read how big a bite the
+    // tax takes out of the (reach-only) positive reward at the current weight, without
+    // parsing rollouts.
+    // Calibration diagnostic, ONE tick skewed: mean_tax is tick-`t`'s command while
+    // mean_reach is tick-`t`'s pose (the result of the LAST action), so read the ratio
+    // as a magnitude check, not as exactly-aligned same-action terms.
+    if std::env::var_os("RL_LOG_EFFORT").is_some() {
+        let mut count = 0usize;
+        let mut effort_sum = 0.0f32;
+        let mut reach_sum = 0.0f32;
+        for e in 0..n {
+            if matches!(training.envs[e].phase, EnvPhase::Recording) {
+                count += 1;
+                effort_sum += efforts[e];
+                reach_sum += reach_bonus(min_tip_dists[e]);
+            }
+        }
+        if count > 0 {
+            let mean_effort = effort_sum / count as f32;
+            info!(
+                "EFFORTLOG n={count} mean_effort={mean_effort:.3} \
+                 mean_tax={:.4} mean_reach={:.4}",
+                EFFORT_WEIGHT * mean_effort,
+                reach_sum / count as f32,
+            );
         }
     }
 
@@ -1968,62 +2001,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reward_increases_with_pose_height() {
-        // A higher carapace pose score `h·u` (standing) must score strictly above a
-        // low one (collapsed/flat/tilted). Level (u=1), no target (pure stand reward),
-        // so this isolates the height term.
+    fn height_does_not_change_the_reward() {
+        // Guards against reintroducing a height arg while leaving the reach term inert:
+        // `compute_reward` has no height argument, so tip distance must still move the
+        // reward on its own.
+        let effort = action_effort(&[0.3; ACTION_SIZE]);
+        let near = compute_reward(Some(0.1), effort);
+        let far = compute_reward(Some(2.0), effort);
         assert!(
-            compute_reward(1.2, 1.0, None) > compute_reward(0.2, 1.0, None),
-            "reward must increase with carapace pose height"
+            near > far,
+            "reach still moves the reward (closer out-scores farther): {near} vs {far}"
         );
     }
 
     #[test]
-    fn reach_bonus_rewards_reaching_while_standing() {
-        // Level crab (u=1): the reach term is strictly positive, maxes at the target
-        // (d→0 ⇒ W), and decreases monotonically with distance — a dense pull toward
-        // the target that, unlike the old exp, stays alive across the far band.
+    fn reach_bonus_rewards_reaching() {
+        // The reach term is strictly positive, maxes at the target (d→0 ⇒ W), and
+        // decreases monotonically with distance — a dense pull toward the target that,
+        // unlike the old exp, stays alive across the far band. It depends ONLY on the
+        // tip distance (ungated: uprightness is not in the reward).
         assert!(
-            (reach_bonus(Some(0.0), 1.0) - REACH_WEIGHT).abs() < 1e-6,
-            "a level claw tip on the target earns the full reach weight"
+            (reach_bonus(Some(0.0)) - REACH_WEIGHT).abs() < 1e-6,
+            "a claw tip on the target earns the full reach weight"
         );
         assert!(
-            reach_bonus(Some(0.1), 1.0) > reach_bonus(Some(0.5), 1.0),
+            reach_bonus(Some(0.1)) > reach_bonus(Some(0.5)),
             "closer to the target must out-reward farther"
         );
-        // The whole point of the redesign: the term is still clearly positive at the
+        // The whole point of the tanh: the term is still clearly positive at the
         // FARTHEST the curriculum can push the target (the arena cap), where the old
         // exp(−d/0.4) was effectively zero — so the walking signal survives every rung.
         assert!(
-            reach_bonus(Some(TARGET_ARENA_HALF), 1.0) > 0.0,
+            reach_bonus(Some(TARGET_ARENA_HALF)) > 0.0,
             "the reach bonus is strictly positive even at the arena-cap target distance"
         );
         assert!(
-            reach_bonus(Some(BAND_START_MIN), 1.0) > reach_bonus(Some(TARGET_ARENA_HALF), 1.0),
+            reach_bonus(Some(BAND_START_MIN)) > reach_bonus(Some(TARGET_ARENA_HALF)),
             "the pull must slope downward across the whole curriculum span — the walking signal"
         );
         assert_eq!(
-            reach_bonus(None, 1.0),
+            reach_bonus(None),
             0.0,
-            "no target (or no tip) contributes nothing — reward degrades to the stand reward"
-        );
-
-        // The uprightness GATE: reaching pays only while standing. A flat/inverted
-        // crab (u ≤ 0) earns zero reach no matter how close the tip — this is what
-        // keeps walking from collapsing into a topple toward the target.
-        assert_eq!(
-            reach_bonus(Some(0.0), 0.0),
-            0.0,
-            "a flat crab earns no reach bonus even with a tip on the target"
-        );
-        assert_eq!(
-            reach_bonus(Some(0.0), -1.0),
-            0.0,
-            "an inverted crab (u<0) earns no reach bonus"
-        );
-        assert!(
-            reach_bonus(Some(0.2), 1.0) > reach_bonus(Some(0.2), 0.3),
-            "at equal distance, a more upright crab earns more reach reward"
+            "no target (or no tip) contributes nothing — with no positive term left the \
+             reward is just the effort tax"
         );
     }
 
@@ -2032,7 +2052,7 @@ mod tests {
         // THE CRUX of the redesign, proved numerically: the new `1 − tanh(d/S)` term and
         // its slope are clearly non-zero across the spawn band where the old `exp` was ~0
         // — so the far target now gives a real gradient to WALK down (see the why-tanh
-        // rationale on [`REACH_WEIGHT`]). Finite-difference slope at u=1 (the reward's
+        // rationale on [`REACH_WEIGHT`]). Finite-difference slope (the reach term's
         // `d`-derivative), comparing old vs new at each distance.
         const OLD_SCALE: f32 = 0.4; // the pre-redesign exp length scale
         let old_term = |d: f32| (-d / OLD_SCALE).exp();
@@ -2155,47 +2175,87 @@ mod tests {
     }
 
     #[test]
-    fn reaching_never_out_rewards_a_clean_stand_by_lying_down() {
-        // The hard constraint: target-seeking must not collapse the stand. The worst
-        // case is a crab that lies flat (pose term 0) and dangles a claw on the
-        // target (max reach) — it must NOT out-score a clean stand that isn't
-        // reaching. The uprightness gate guarantees this: a flat body (u≈0) zeroes
-        // BOTH the pose term and the reach term, so lying down scores ~0 regardless
-        // of the claw, while a clean stand (h≈0.4, u≈1) scores its full pose value.
-        // (Heights here are the real measured magnitudes: stand ≈ 0.4 m.)
-        let stand_no_reach = compute_reward(0.4, 1.0, None);
-        let lie_flat_on_target = compute_reward(0.4, 0.0, Some(0.0));
+    fn reward_is_reach_minus_effort() {
+        // Reward is EXACTLY `reach_bonus(d) − K·Σ|a|^L` — two terms, no height, no
+        // uprightness, no hidden term. With no target and no command it is exactly zero
+        // (nothing to reach, nothing to tax); a target adds the (ungated) reach term; a
+        // command subtracts the tax.
         assert!(
-            stand_no_reach > lie_flat_on_target,
-            "a clean stand ({stand_no_reach}) must beat lying flat with a claw on the \
-             target ({lie_flat_on_target}) — else the policy learns to sprawl, not stand"
+            compute_reward(None, 0.0).abs() < 1e-6,
+            "with no target and no effort, reward is exactly zero"
         );
-        // And standing AND reaching is the global best, as intended.
-        let stand_and_reach = compute_reward(0.4, 1.0, Some(0.0));
+        let expected = reach_bonus(Some(0.3)) - EFFORT_WEIGHT * action_effort(&[0.2; ACTION_SIZE]);
         assert!(
-            stand_and_reach > stand_no_reach,
-            "standing while reaching ({stand_and_reach}) must beat standing alone ({stand_no_reach})"
+            (compute_reward(Some(0.3), action_effort(&[0.2; ACTION_SIZE])) - expected).abs() < 1e-6,
+            "reward is exactly reach_bonus − K·effort"
         );
     }
 
     #[test]
-    fn reward_is_pure_pose_and_reach() {
-        // Reward is exactly `h·u + reach_bonus` — no effort tax, no hidden term. With no
-        // target it collapses to the pose term `h·u`, so it depends on nothing but the
-        // pose and (when present) the claw-tip distance.
+    fn uprightness_does_not_change_the_reward() {
+        // Uprightness lives in the observation, not the reward — `compute_reward` has no
+        // uprightness argument, so a flat crab and a level one at the same tip distance and
+        // command earn IDENTICAL reward. The consequence pinned here: a claw dangled onto
+        // the target collects the FULL reach bonus ungated by pose, adding exactly
+        // `reach_bonus(0) = W` over not reaching, at any pose.
+        let effort = action_effort(&[0.3; ACTION_SIZE]);
+        let no_reach = compute_reward(None, effort);
+        let on_target = compute_reward(Some(0.0), effort);
         assert!(
-            (compute_reward(0.5, 1.0, None) - 0.5).abs() < 1e-6,
-            "with no target, reward is exactly the pose term h·u"
+            (on_target - no_reach - REACH_WEIGHT).abs() < 1e-6,
+            "a claw on the target adds the full reach weight {REACH_WEIGHT} with no pose gate: \
+             {on_target} − {no_reach}"
         );
+    }
+
+    #[test]
+    fn higher_effort_lowers_the_reward() {
+        // The tax is strictly increasing in command size, so a harder command always
+        // scores below a gentler one — the lever that should make the crab economical
+        // ("tired af"): it spends actuation only where reach pays for it.
+        let still = compute_reward(None, action_effort(&[0.0; ACTION_SIZE]));
+        let gentle = compute_reward(None, action_effort(&[0.3; ACTION_SIZE]));
+        let hard = compute_reward(None, action_effort(&[0.9; ACTION_SIZE]));
         assert!(
-            (compute_reward(0.5, 0.6, None) - 0.5 * 0.6).abs() < 1e-6,
-            "the pose term scales height by uprightness"
+            still > gentle && gentle > hard,
+            "reward must fall as commanded effort rises: still {still} > gentle {gentle} > hard {hard}"
         );
-        // With a target, reward is precisely pose + reach_bonus (additive, no other term).
-        let expected = 0.4 * 1.0 + reach_bonus(Some(0.3), 1.0);
+        // With no target, a still policy pays NO tax and earns nothing — reward is zero.
         assert!(
-            (compute_reward(0.4, 1.0, Some(0.3)) - expected).abs() < 1e-6,
-            "reward is exactly h·u + reach_bonus"
+            still.abs() < 1e-6,
+            "a still policy with no target is untaxed and unrewarded: {still} should be zero"
+        );
+    }
+
+    #[test]
+    fn effort_cost_calibration() {
+        // The tax `EFFORT_WEIGHT·Σ|a|^L` (weight 0.05, L=3) is taken on the RAW pre-clamp
+        // outputs, so its gradient keeps pulling a saturating logit back into range instead
+        // of going flat at the ±1 clamp. Pin the ordering that matters — reach is the ONLY
+        // positive term, so the tradeoff is reach vs the cost of the motion that earns it:
+        // 1. A still policy with no target pays no tax and earns nothing — reward is zero.
+        let still = compute_reward(None, action_effort(&[0.0; ACTION_SIZE]));
+        assert!(still.abs() < 1e-6, "a still policy with no target is zero: {still}");
+        // 2. Reaching the target with a MODERATE in-range command (|a| < 1) must still net
+        //    POSITIVE — the reach payoff has to exceed the cost of the gentle motion that
+        //    closes the distance, or the policy would rather lie still than walk. At weight
+        //    0.05 a |a|=0.4 command across all 30 joints costs 0.05·30·0.4³ ≈ 0.096, well under
+        //    the W=0.6 reach payoff, so honest moderate motion that reaches stays worthwhile.
+        let moderate_reach = compute_reward(Some(0.0), action_effort(&[0.4; ACTION_SIZE]));
+        assert!(
+            moderate_reach > 0.0,
+            "reaching the target with a moderate command must net positive: {moderate_reach}"
+        );
+        // 3. A saturation-seeking command (raw outputs driven far past the ±1 the sim
+        //    clamps to) is taxed BELOW that moderate reach even when it lands on the target —
+        //    because the tax reads the raw outputs, |a|^L keeps climbing past the clamp, so
+        //    the gradient pushes the policy OUT of saturation rather than letting it sit
+        //    pinned at the rail for a flat toll. At |a|=3 the cost (0.05·30·27 ≈ 40.5)
+        //    swamps any reach payoff, driving the reward deeply negative.
+        let oversaturated = compute_reward(Some(0.0), action_effort(&[3.0; ACTION_SIZE]));
+        assert!(
+            oversaturated < moderate_reach,
+            "saturation-seeking must be taxed below a moderate reach: {oversaturated} vs {moderate_reach}"
         );
     }
 
