@@ -63,7 +63,10 @@ const _: () = assert!(MAX_ENVS + 2 <= 32);
 ///
 /// `e` must be `< MAX_ENVS`; the `--envs` clap range (1..=16) guarantees it.
 pub fn crab_collision(env: usize) -> CollisionGroups {
-    debug_assert!(env < MAX_ENVS, "env {env} exceeds the {MAX_ENVS}-env bit budget");
+    debug_assert!(
+        env < MAX_ENVS,
+        "env {env} exceeds the {MAX_ENVS}-env bit budget"
+    );
     // Env 0 → GROUP_3 (bit 2); arena=bit 0, nested=bit 1 are reserved below it.
     let bit = Group::from_bits_truncate(1 << (env + 2));
     CollisionGroups::new(bit, Group::GROUP_1.union(bit))

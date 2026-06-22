@@ -92,7 +92,10 @@ fn parse_env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TimeoutAction {
     /// Re-exec as attempt `next_attempt` of `max_attempts`, re-rolling the race.
-    ReExec { next_attempt: u32, max_attempts: u32 },
+    ReExec {
+        next_attempt: u32,
+        max_attempts: u32,
+    },
     /// The retry budget is spent — log and exit non-zero for external intervention.
     GiveUp { attempts: u32, max_attempts: u32 },
 }

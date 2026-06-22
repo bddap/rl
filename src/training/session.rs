@@ -9,11 +9,11 @@ use burn::backend::Autodiff;
 use burn::backend::ndarray::{NdArray, NdArrayDevice};
 use burn::grad_clipping::GradientClippingConfig;
 use burn::module::AutodiffModule;
-use burn::tensor::backend::AutodiffBackend;
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::prelude::*;
 use burn::record::{BinBytesRecorder, BinFileRecorder, FullPrecisionSettings, Recorder};
+use burn::tensor::backend::AutodiffBackend;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -895,7 +895,11 @@ impl TrainingState {
     #[cfg(feature = "wgpu")]
     pub fn learner_parts_for_gpu(
         &mut self,
-    ) -> (&mut CrabBrain<TrainBackend>, &PpoConfig, &mut ReturnNormalizer) {
+    ) -> (
+        &mut CrabBrain<TrainBackend>,
+        &PpoConfig,
+        &mut ReturnNormalizer,
+    ) {
         (&mut self.brain, &self.config, &mut self.return_normalizer)
     }
 
@@ -981,8 +985,8 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
             let last_value = if matches!(last_t.end, StepEnd::Terminal) {
                 NormalizedValue(0.0)
             } else {
-                let obs = Tensor::<B, 1>::from_floats(last_t.obs.as_slice(), device)
-                    .unsqueeze::<2>();
+                let obs =
+                    Tensor::<B, 1>::from_floats(last_t.obs.as_slice(), device).unsqueeze::<2>();
                 NormalizedValue(
                     brain
                         .value(obs)
@@ -1033,18 +1037,14 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
             .collect();
         let old_log_probs_data: Vec<f32> = transitions.iter().map(|t| t.log_prob).collect();
 
-        let obs_all =
-            Tensor::<B, 2>::from_data(TensorData::new(obs_data, [n, OBS_SIZE]), device);
-        let actions_all = Tensor::<B, 2>::from_data(
-            TensorData::new(actions_data, [n, ACTION_SIZE]),
-            device,
-        );
+        let obs_all = Tensor::<B, 2>::from_data(TensorData::new(obs_data, [n, OBS_SIZE]), device);
+        let actions_all =
+            Tensor::<B, 2>::from_data(TensorData::new(actions_data, [n, ACTION_SIZE]), device);
         let old_log_probs_all =
             Tensor::<B, 1>::from_data(TensorData::new(old_log_probs_data, [n]), device);
         let advantages_all =
             Tensor::<B, 1>::from_data(TensorData::new(advantages_norm, [n]), device);
-        let returns_all =
-            Tensor::<B, 1>::from_data(TensorData::new(returns, [n]), device);
+        let returns_all = Tensor::<B, 1>::from_data(TensorData::new(returns, [n]), device);
 
         let mut total_policy_loss = 0.0f32;
         let mut total_value_loss = 0.0f32;
@@ -1345,7 +1345,10 @@ pub(crate) fn init_gpu_backend(tag: &str) -> burn::backend::wgpu::WgpuDevice {
          only the NVIDIA card.",
         info.name, info.device_type,
     );
-    eprintln!("[{tag}] adapter confirmed as hardware GPU ({}) — proceeding.", info.name);
+    eprintln!(
+        "[{tag}] adapter confirmed as hardware GPU ({}) — proceeding.",
+        info.name
+    );
     device
 }
 
@@ -1424,7 +1427,11 @@ impl GpuLearner {
         let device = init_gpu_backend("learner");
         let brain: CrabBrain<GpuBackend> = CrabBrain::new(&device);
         let optimizer: CrabOpt<GpuBackend> = crab_optimizer();
-        Self { device, brain, optimizer }
+        Self {
+            device,
+            brain,
+            optimizer,
+        }
     }
 
     /// Run one PPO update on the GPU and mirror the result back to the CPU brain.
@@ -1492,7 +1499,14 @@ impl GpuLearner {
         *cpu_brain = cpu_brain.clone().load_record(record);
         let store_ms = t_store.elapsed().as_secs_f64() * 1000.0;
 
-        (metrics, GpuUpdateTiming { load_ms, update_ms, store_ms })
+        (
+            metrics,
+            GpuUpdateTiming {
+                load_ms,
+                update_ms,
+                store_ms,
+            },
+        )
     }
 }
 
@@ -1712,7 +1726,11 @@ impl CurriculumProgress {
 /// samples — one sampling rule, so the demo can never pose a target training never saw.
 /// (The demo passes [`Curriculum::start`], a fixed sensible band — it runs no curriculum
 /// of its own.)
-pub(crate) fn sample_target(origin: Vec3, curriculum: Curriculum, rng: &mut impl rand::Rng) -> Vec3 {
+pub(crate) fn sample_target(
+    origin: Vec3,
+    curriculum: Curriculum,
+    rng: &mut impl rand::Rng,
+) -> Vec3 {
     let (min, max) = curriculum.band();
     let theta = rng.gen_range(0.0..std::f32::consts::TAU);
     let dist = rng.gen_range(min..max);
@@ -2190,9 +2208,7 @@ pub fn brain_step(
             // ball in 3D to count as reached — standing on the floor under a raised ball is
             // not enough. Stricter than a ground-plane radius, and deliberately so: advance
             // gates on actually getting near the ball, not merely walking under it.
-            let reached = ep
-                .min_tip_dist
-                .is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
+            let reached = ep.min_tip_dist.is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
             // A rescued env was already despawned+respawned this tick by
             // rescue_nonfinite_crabs (runs .before(Sense)); asking reset_crab for
             // a second respawn would tear down that fresh crab — which has lived
@@ -2655,10 +2671,7 @@ mod tests {
         // the body-local X and Z must FLIP sign (Y, the spin axis, is unchanged). This is
         // the orientation-invariance the obs frame buys: same goal, body-relative reading.
         let yaw = Quat::from_rotation_y(std::f32::consts::PI);
-        let obs_rot = observe_one_carapace(
-            Transform::from_rotation(yaw),
-            Some(offset),
-        );
+        let obs_rot = observe_one_carapace(Transform::from_rotation(yaw), Some(offset));
         let local_rot = Vec3::new(obs_rot[base], obs_rot[base + 1], obs_rot[base + 2]);
         let expected_rot = yaw.inverse() * offset;
         assert!(
@@ -2784,7 +2797,10 @@ mod tests {
         // positive term, so the tradeoff is reach vs the cost of the motion that earns it:
         // 1. A still policy with no target pays no tax and earns nothing — reward is zero.
         let still = compute_reward(None, action_effort(&[0.0; ACTION_SIZE]));
-        assert!(still.abs() < 1e-6, "a still policy with no target is zero: {still}");
+        assert!(
+            still.abs() < 1e-6,
+            "a still policy with no target is zero: {still}"
+        );
         // 2. Reaching the target with a MODERATE in-range command (|a| < 1) must still net
         //    POSITIVE — the reach payoff has to exceed the cost of the gentle motion that
         //    closes the distance, or the policy would rather lie still than walk. At weight
@@ -3343,7 +3359,10 @@ mod tests {
         feed(&mut p, COMPETENCE_WINDOW, ADVANCE_REACH_FRACTION);
         assert_eq!(
             p.curriculum().band(),
-            (BAND_START_MIN + BAND_ADVANCE_STEP, BAND_START_MAX + BAND_ADVANCE_STEP),
+            (
+                BAND_START_MIN + BAND_ADVANCE_STEP,
+                BAND_START_MAX + BAND_ADVANCE_STEP
+            ),
             "a mastered rung slides the whole band out by one STEP"
         );
     }
@@ -3352,7 +3371,11 @@ mod tests {
     fn does_not_advance_below_threshold_or_before_a_full_window() {
         // Below the reach threshold: no advance no matter how many episodes.
         let mut low = CurriculumProgress::new(Curriculum::start());
-        feed(&mut low, COMPETENCE_WINDOW * 3, ADVANCE_REACH_FRACTION - 0.2);
+        feed(
+            &mut low,
+            COMPETENCE_WINDOW * 3,
+            ADVANCE_REACH_FRACTION - 0.2,
+        );
         assert_eq!(
             low.curriculum().band(),
             Curriculum::start().band(),
@@ -3380,7 +3403,10 @@ mod tests {
         for _ in 0..(2 * (TARGET_ARENA_HALF as usize) + 10) {
             feed(&mut p, COMPETENCE_WINDOW, 1.0);
             let (min, max) = p.curriculum().band();
-            assert!(min >= prev_min, "the band must never slide inward (no regress)");
+            assert!(
+                min >= prev_min,
+                "the band must never slide inward (no regress)"
+            );
             assert!(
                 max <= TARGET_ARENA_HALF + 1e-6,
                 "the far edge must never exceed the arena cap, got {max}"
@@ -3399,7 +3425,11 @@ mod tests {
             "the band width is invariant across rungs"
         );
         // Capped: `advanced()` yields nothing, so further mastery is a no-op.
-        assert_eq!(p.curriculum().advanced(), None, "the capped band cannot advance");
+        assert_eq!(
+            p.curriculum().advanced(),
+            None,
+            "the capped band cannot advance"
+        );
         feed(&mut p, COMPETENCE_WINDOW, 1.0);
         assert_eq!(
             p.curriculum().band(),

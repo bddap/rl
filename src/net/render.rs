@@ -512,7 +512,11 @@ fn drive_lockstep(
         {
             *next_tel_tick =
                 (state.ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
-            t.send(TelemetryEvent::tick(state.ls.sim(), *total_desyncs, roster_len));
+            t.send(TelemetryEvent::tick(
+                state.ls.sim(),
+                *total_desyncs,
+                roster_len,
+            ));
             t.send(TelemetryEvent::input(issue_tick, input));
         }
     }
@@ -634,9 +638,8 @@ fn gather_input(
         // the obvious second way to walk): full ±1.0 on each axis, summed with the stick
         // and clamped at the funnel below — the SAME path WASD takes, so it quantizes
         // identically. Up=forward, Down=back, Right/Left=strafe (pre-negation downstream).
-        forward +=
-            (gp.pressed(GamepadButton::DPadUp) as i32 - gp.pressed(GamepadButton::DPadDown) as i32)
-                as f32;
+        forward += (gp.pressed(GamepadButton::DPadUp) as i32
+            - gp.pressed(GamepadButton::DPadDown) as i32) as f32;
         strafe += (gp.pressed(GamepadButton::DPadRight) as i32
             - gp.pressed(GamepadButton::DPadLeft) as i32) as f32;
         action |= gp.pressed(GamepadButton::South) || gp.pressed(GamepadButton::RightTrigger2);
@@ -688,9 +691,7 @@ fn exit_on_esc(
     }
     // Accumulate held time while Select is down on ANY pad; reset the instant it's
     // released, so only a sustained hold (not repeated taps) reaches the threshold.
-    let select_down = gamepads
-        .iter()
-        .any(|gp| gp.pressed(GamepadButton::Select));
+    let select_down = gamepads.iter().any(|gp| gp.pressed(GamepadButton::Select));
     if select_down {
         *quit_held += time.delta_secs();
         if *quit_held >= PAD_QUIT_HOLD_SECS {
@@ -1443,8 +1444,16 @@ mod tests {
     fn pad_sub_deadzone_sticks_contribute_nothing() {
         let inside = PAD_STICK_DEADZONE * 0.9;
         let a = pad_stick_axes(Vec2::new(inside, 0.0), Vec2::new(0.0, inside), 1.0 / 60.0);
-        assert_eq!((a.strafe, a.forward), (0.0, 0.0), "sub-deadzone move is zero");
-        assert_eq!((a.d_yaw, a.d_pitch), (0.0, 0.0), "sub-deadzone look is zero");
+        assert_eq!(
+            (a.strafe, a.forward),
+            (0.0, 0.0),
+            "sub-deadzone move is zero"
+        );
+        assert_eq!(
+            (a.d_yaw, a.d_pitch),
+            (0.0, 0.0),
+            "sub-deadzone look is zero"
+        );
     }
 
     /// Past the deadzone, the left stick passes its raw magnitude straight to the move
@@ -1465,7 +1474,10 @@ mod tests {
         // keeps turn speed consistent across machines (the i16 it quantizes to is each
         // peer's own broadcast input, so this stays lockstep-safe — see net::desync_test).
         let b = pad_stick_axes(Vec2::ZERO, Vec2::new(1.0, 0.0), dt * 2.0);
-        assert!((b.d_yaw - 2.0 * a.d_yaw).abs() < 1e-6, "look is linear in dt");
+        assert!(
+            (b.d_yaw - 2.0 * a.d_yaw).abs() < 1e-6,
+            "look is linear in dt"
+        );
     }
 
     /// `pad_stick_axes` does NOT pre-negate any axis: the screen-relative X-negation is
@@ -1476,7 +1488,13 @@ mod tests {
     #[test]
     fn pad_axes_are_not_pre_negated() {
         let a = pad_stick_axes(Vec2::new(1.0, 0.0), Vec2::new(1.0, 0.0), 1.0 / 60.0);
-        assert!(a.strafe > 0.0, "+stick X → +raw strafe (negation is downstream)");
-        assert!(a.d_yaw > 0.0, "+stick X → +raw yaw (negation is downstream)");
+        assert!(
+            a.strafe > 0.0,
+            "+stick X → +raw strafe (negation is downstream)"
+        );
+        assert!(
+            a.d_yaw > 0.0,
+            "+stick X → +raw yaw (negation is downstream)"
+        );
     }
 }

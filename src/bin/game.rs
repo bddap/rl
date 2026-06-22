@@ -316,14 +316,17 @@ async fn run_net(args: NetArgs) -> Result<()> {
     // client runs, so the two can't drift apart and desync). Replay any inputs that
     // arrived during formation into the fresh sim. If discovery finds no peer (rl#47),
     // tear down the network side and run a solo round instead of awaiting an empty match.
-    let frozen = match net_loop::form_match(&mut session, args.discover_secs, args.expect, tel.as_ref()).await? {
-        net_loop::Formation::Agreed(frozen) => frozen,
-        net_loop::Formation::Alone => {
-            drop(tel);
-            session.shutdown().await;
-            return run_solo_round(args.run_secs);
-        }
-    };
+    let frozen =
+        match net_loop::form_match(&mut session, args.discover_secs, args.expect, tel.as_ref())
+            .await?
+        {
+            net_loop::Formation::Agreed(frozen) => frozen,
+            net_loop::Formation::Alone => {
+                drop(tel);
+                session.shutdown().await;
+                return run_solo_round(args.run_secs);
+            }
+        };
     let me = frozen.me;
     let id_map = &frozen.id_map;
     let all_ids: Vec<PlayerId> = id_map.values().copied().collect();
@@ -448,7 +451,11 @@ async fn run_net(args: NetArgs) -> Result<()> {
 /// Phase 0 keeps running so the test harness can observe how many ticks faulted
 /// rather than aborting on the first. Also mirrored to telemetry (best-effort) so a
 /// remote operator sees the divergence the instant a deck does.
-fn report_fault(total: &mut usize, f: rl::net::lockstep::Fault, telemetry: Option<&TelemetrySender>) {
+fn report_fault(
+    total: &mut usize,
+    f: rl::net::lockstep::Fault,
+    telemetry: Option<&TelemetrySender>,
+) {
     use rl::net::lockstep::Fault;
     *total += 1;
     if let Some(t) = telemetry {

@@ -512,7 +512,11 @@ impl Sim {
         sorted.dedup();
         // Pilots not in the player set are meaningless — keep only the ones that map to
         // a participant, in sorted order, so the retained config is canonical.
-        let pilots: Vec<PlayerId> = sorted.iter().copied().filter(|id| pilots.contains(id)).collect();
+        let pilots: Vec<PlayerId> = sorted
+            .iter()
+            .copied()
+            .filter(|id| pilots.contains(id))
+            .collect();
         let config = RoundConfig {
             seed,
             players: sorted,
@@ -562,7 +566,12 @@ impl Sim {
     /// and the extraction point.
     fn spawn_state(
         cfg: &RoundConfig,
-    ) -> (BTreeMap<PlayerId, Player>, BTreeMap<PlayerId, Plane>, Crab, ExtractionPoint) {
+    ) -> (
+        BTreeMap<PlayerId, Player>,
+        BTreeMap<PlayerId, Plane>,
+        Crab,
+        ExtractionPoint,
+    ) {
         let mut map = BTreeMap::new();
         let mut plane_map = BTreeMap::new();
         let n = cfg.players.len() as i64;
@@ -976,8 +985,7 @@ fn within(ax: i64, az: i64, bx: i64, bz: i64, r: i64) -> bool {
 fn step_plane(plane: &mut Plane, inp: Input) {
     // 1) Orientation: integrate bounded yaw + pitch rates from the stick axes. Same
     //    descale pattern as the player's look (axis units of AXIS_SCALE → turn units).
-    let dyaw =
-        (inp.look_yaw as i64 * PLANE_YAW_RATE as i64 / Input::AXIS_SCALE as i64) as i32;
+    let dyaw = (inp.look_yaw as i64 * PLANE_YAW_RATE as i64 / Input::AXIS_SCALE as i64) as i32;
     plane.heading = trig::wrap_turns(plane.heading + dyaw);
     let dpitch =
         (inp.move_strafe as i64 * PLANE_PITCH_RATE as i64 / Input::AXIS_SCALE as i64) as i32;
@@ -1624,7 +1632,11 @@ mod tests {
             sim.step(&neutral);
         }
         let p = sim.plane(PlayerId(0)).unwrap();
-        assert_eq!(p.pos().y, 0, "an idle plane sinks to the ground and stops there");
+        assert_eq!(
+            p.pos().y,
+            0,
+            "an idle plane sinks to the ground and stops there"
+        );
     }
 
     #[test]
@@ -1642,7 +1654,11 @@ mod tests {
         a.step(&throttle);
         let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
         b.step(&neutral);
-        assert_ne!(a.state_hash(), b.state_hash(), "plane motion must change the hash");
+        assert_ne!(
+            a.state_hash(),
+            b.state_hash(),
+            "plane motion must change the hash"
+        );
     }
 
     #[test]
@@ -1996,7 +2012,10 @@ mod tests {
         }
         // And the restart actually happened: by tick 41 the sim is freshly at a low tick,
         // not 41 ticks deep.
-        assert!(a.tick() < 120, "the mid-run restart rewound the tick counter");
+        assert!(
+            a.tick() < 120,
+            "the mid-run restart rewound the tick counter"
+        );
     }
 
     fn dist2(a: Pos, b: Pos) -> i128 {

@@ -606,7 +606,10 @@ fn renormalize_kept(
             kept_sum += weights[lane];
         }
     }
-    debug_assert!(kept_sum > 0.0, "at least one lane must be kept to renormalize");
+    debug_assert!(
+        kept_sum > 0.0,
+        "at least one lane must be kept to renormalize"
+    );
     for w in &mut kept {
         *w /= kept_sum;
     }
@@ -1241,7 +1244,11 @@ mod tests {
             let reader = prim.reader(|b| (b.index() == 0).then_some(blob));
             let ps: Vec<[f32; 3]> = reader.read_positions().expect("positions").collect();
             let js: Vec<[u16; 4]> = reader.read_joints(0).expect("joints").into_u16().collect();
-            let ws: Vec<[f32; 4]> = reader.read_weights(0).expect("weights").into_f32().collect();
+            let ws: Vec<[f32; 4]> = reader
+                .read_weights(0)
+                .expect("weights")
+                .into_f32()
+                .collect();
             for ((p, j), w) in ps.iter().zip(&js).zip(&ws) {
                 positions.push(Vec3::from_array(*p));
                 joints.push(*j);
@@ -1330,7 +1337,10 @@ mod tests {
         let new = confine_vertex(Some(in_box), region, js, ws, &lane_parts);
         assert_eq!(new[1], 0.0, "arm lane zeroed on the confined shell vert");
         assert_eq!(new[2], 0.0, "arm lane zeroed on the confined shell vert");
-        assert!((new.iter().sum::<f32>() - 1.0).abs() < 1e-6, "renormalized: {new:?}");
+        assert!(
+            (new.iter().sum::<f32>() - 1.0).abs() < 1e-6,
+            "renormalized: {new:?}"
+        );
         assert!((new[0] - 0.2 / 0.3).abs() < 1e-6 && (new[3] - 0.1 / 0.3).abs() < 1e-6);
 
         // A limb-ONLY vertex inside the region (no carapace lane) is a socket stub
@@ -1344,7 +1354,10 @@ mod tests {
             strip_to_dominant_cluster(limb, limb_w, &lane_parts),
             "limb-only vert in region keeps the cluster strip, not the override"
         );
-        assert!(limb_new[0] + limb_new[1] > 0.99, "limb stub still articulates");
+        assert!(
+            limb_new[0] + limb_new[1] > 0.99,
+            "limb stub still articulates"
+        );
 
         // The SAME shell vertex OUTSIDE the region takes the cluster strip (the override
         // is geometric — it governs only the shell box).

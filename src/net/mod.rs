@@ -139,10 +139,10 @@ mod desync_test {
             .map(|t| {
                 // throttle (forward), pitch (strafe: + climbs), yaw-look (turn).
                 let (forward, strafe, look) = match t % 240 {
-                    0..60 => (1.0, 0.6, 0.0),    // climb under full throttle
-                    60..120 => (1.0, 0.0, 1.0),  // level off, hard turn
+                    0..60 => (1.0, 0.6, 0.0),     // climb under full throttle
+                    60..120 => (1.0, 0.0, 1.0),   // level off, hard turn
                     120..180 => (0.7, -0.7, 0.0), // nose down, dive
-                    _ => (1.0, 0.2, -0.5),       // pull up, opposite turn
+                    _ => (1.0, 0.2, -0.5),        // pull up, opposite turn
                 };
                 pilots
                     .iter()
@@ -153,9 +153,16 @@ mod desync_test {
 
         let mut a = Sim::new_with_pilots(seed, &pilots, &pilots);
         let mut b = Sim::new_with_pilots(seed, &pilots, &pilots);
-        assert_eq!(a.state_hash(), b.state_hash(), "initial pilot state must match");
+        assert_eq!(
+            a.state_hash(),
+            b.state_hash(),
+            "initial pilot state must match"
+        );
 
-        let start = a.plane(PlayerId(0)).expect("player 0 should be a pilot").pos();
+        let start = a
+            .plane(PlayerId(0))
+            .expect("player 0 should be a pilot")
+            .pos();
         for (t, inputs) in program.iter().enumerate() {
             a.step(inputs);
             b.step(inputs);

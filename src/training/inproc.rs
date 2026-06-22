@@ -833,7 +833,10 @@ pub fn run_learner(
     // are torn down by their Drop (channel close + join) when `threads` drops. Persist
     // the curriculum alongside so a resume continues at the rung the run reached.
     state.save_checkpoint();
-    save_curriculum(progress.curriculum(), &checkpoint_dir.join(CURRICULUM_FILENAME));
+    save_curriculum(
+        progress.curriculum(),
+        &checkpoint_dir.join(CURRICULUM_FILENAME),
+    );
     if timed_samples > 0 {
         let rollout_sps = timed_samples as f64 / timed_rollout_secs.max(1e-9);
         let e2e_sps = timed_samples as f64 / timed_wall_secs.max(1e-9);

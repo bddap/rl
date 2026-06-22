@@ -926,4 +926,3 @@ fn contact_audit(
         println!("  {:>4.0}mm {a} vs {b}", d * 1000.0);
     }
 }
-
