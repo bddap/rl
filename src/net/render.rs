@@ -161,7 +161,16 @@ fn world3(pos: Pos3) -> Vec3 {
 /// `run()`s it. Built here, not via a `Plugin` that holds the sim, because
 /// `Plugin::build(&self)` can't move a non-`Clone` `Lockstep`/`NetDriver` out of
 /// itself — inserting them as resources at construction is the clean path.
-pub fn build_windowed_app(ls: Lockstep, net: Option<NetDriver>) -> App {
+///
+/// `solo_crab` (solo only) points at a trained checkpoint dir; when set on a solo round
+/// the giant crab is the REAL rapier-simulated NN body ([`crate::net::solo_crab`])
+/// instead of the integer point-pursuer. Ignored on the networked path — a float crab is
+/// not cross-peer deterministic, so multiplayer keeps the integer crab.
+pub fn build_windowed_app(
+    mut ls: Lockstep,
+    net: Option<NetDriver>,
+    solo_crab: Option<std::path::PathBuf>,
+) -> App {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
@@ -171,6 +180,17 @@ pub fn build_windowed_app(ls: Lockstep, net: Option<NetDriver>) -> App {
         }),
         ..default()
     }));
+    // Solo NN crab: only when solo (no peers) AND a checkpoint was given. Capture the
+    // sim's integer crab spawn and hand the crab to external control BEFORE `ls` moves
+    // into the core resource.
+    let solo_crab = match (&net, solo_crab) {
+        (None, Some(dir)) => {
+            let spawn = ls.sim().crab().pos();
+            ls.enable_external_crab(true);
+            Some((dir, spawn))
+        }
+        _ => None,
+    };
     let source = match net {
         Some(n) => InputSource::Networked(n),
         None => InputSource::Solo,
@@ -182,7 +202,45 @@ pub fn build_windowed_app(ls: Lockstep, net: Option<NetDriver>) -> App {
             (gather_input, drive_lockstep, apply_transforms, update_hud).chain(),
         )
         .add_systems(Update, (grab_cursor_once, exit_on_esc));
+    if let Some((dir, spawn)) = solo_crab {
+        add_solo_nn_crab(&mut app, dir, spawn);
+    }
     app
+}
+
+/// Wire the real rapier-NN crab into the windowed solo app: the bot/physics/brain stack
+/// (the SAME plugins `rl --demo` runs, so the crab steps the exact dynamics the policy
+/// trained under) plus the [`solo_crab::SoloCrabPlugin`] bridge that walks it toward the
+/// player and feeds its body position back into the sim. With no `sally.glb` the crab is
+/// the rl#5 procedural fallback rig under a Rapier debug wireframe; with the model
+/// present the cosmetic skin rides the same body.
+fn add_solo_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_spawn: Pos) {
+    use bevy_rapier3d::prelude::*;
+
+    app.insert_resource(crate::Visuals(true))
+        .insert_resource(crate::bot::NumEnvs(1))
+        // Same fixed timestep + softened contact spring as training/demo (one source),
+        // so the solo crab's physics can't drift from what the policy optimised under.
+        .insert_resource(crate::physics::fixed_timestep())
+        .insert_resource(crate::physics::rapier_context_init())
+        // Physics in FixedUpdate, lockstep with the Sense→Think→Act brain loop — the same
+        // coupling the rollout worlds + the demo use.
+        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
+        .add_plugins(crate::physics::PhysicsWorldPlugin)
+        .add_plugins(crate::bot::BotPlugin)
+        .add_plugins(crate::net::solo_crab::SoloCrabPlugin {
+            checkpoint_dir,
+            crab_spawn,
+        });
+    // The crab's true colliders as a wireframe — the in-engine view of the NN body when
+    // no skin is loaded (and a useful overlay when one is). On by default for the solo
+    // showcase so the body is always visible; the integer-crab placeholder box is hidden
+    // in `apply_transforms` when the bridge is present.
+    app.add_plugins(RapierDebugRenderPlugin {
+        enabled: true,
+        mode: DebugRenderMode::COLLIDER_SHAPES,
+        ..default()
+    });
 }
 
 /// Build the HEADLESS screenshot app: GPU on, no window, render one settled frame of
@@ -399,6 +457,11 @@ fn drive_lockstep(
     mut state: NonSendMut<GameState>,
     mut pending: ResMut<PendingInput>,
     time: Res<Time>,
+    // The solo NN-crab bridge, present only on the solo NN path. We READ its
+    // game-world position to drive the sim crab and WRITE its hunt target (the nearest
+    // living player) for the policy to chase. `None` on networked/scripted runs, which
+    // keep the integer pursuit untouched.
+    mut bridge: Option<ResMut<crate::net::solo_crab::SoloCrabBridge>>,
     mut reported_outcome: Local<bool>,
     mut next_tel_tick: Local<u64>,
     // Last sim tick this system saw, to detect a deterministic restart (RESTART rewinds
@@ -492,6 +555,16 @@ fn drive_lockstep(
                     t.send(TelemetryEvent::fault(&fault));
                 }
             }
+        }
+
+        // SOLO NN crab: before advancing, push the real rapier crab body's game-world
+        // position + facing into the sim (so this tick's grab/extraction/outcome resolve
+        // against the NN crab, not the disabled integer pursuit) and refresh the player it
+        // hunts. One shared handshake with the headless probe. Present only on the solo NN
+        // path (`SoloCrabBridge` inserted by `SoloCrabPlugin`); networked/scripted runs have
+        // no bridge and keep the integer crab.
+        if let Some(bridge) = bridge.as_deref_mut() {
+            crate::net::solo_crab::sync_external_crab(&mut state.ls, bridge);
         }
 
         for fault in state.ls.try_advance() {
@@ -732,6 +805,9 @@ fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     state: NonSend<GameState>,
+    // Present only on the solo NN-crab path: when set, the placeholder crab box is
+    // spawned hidden (the real rig is the crab). See the crab spawn below.
+    solo_bridge: Option<Res<crate::net::solo_crab::SoloCrabBridge>>,
 ) {
     // Ground: a large gray plane at Y=0.
     commands.spawn((
@@ -858,14 +934,22 @@ fn spawn_world(
     }
 
     // The giant crab: a big menacing box, CRAB_SCALE× a player, with a "head" wedge
-    // so its facing is legible. Gray-box placeholder — the trained RL crab body is a
-    // later concern (per the sim interface note).
+    // so its facing is legible. Gray-box placeholder for the MULTIPLAYER (integer)
+    // crab. On the SOLO NN path the real rapier rig (wireframe / skin) is the crab, so
+    // the box is spawned HIDDEN there — the bridge resource is the tell — and the rig
+    // shows instead. (We still spawn it so `apply_transforms`'s crab query is satisfied
+    // either way; it just stays invisible.)
+    let crab_hidden = solo_bridge.is_some();
     let crab_h = PLAYER_HEIGHT * CRAB_SCALE as f32;
     let crab_w = PLAYER_RADIUS * 2.0 * CRAB_SCALE as f32;
     let crab_root = commands
         .spawn((
             Transform::from_translation(world(state.ls.sim().crab().pos(), 0.0)),
-            Visibility::default(),
+            if crab_hidden {
+                Visibility::Hidden
+            } else {
+                Visibility::default()
+            },
             CrabAvatar,
         ))
         .id();

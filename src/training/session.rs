@@ -768,14 +768,14 @@ impl TrainingState {
     /// Overwrite this state's normalizer from the learner's master snapshot. The
     /// per-horizon increment is reset separately in `reset_horizon_counter`, so the
     /// increment always starts fresh each horizon regardless of this call.
-    pub fn set_normalizer(&mut self, data: ObsNormalizerData) {
+    pub(crate) fn set_normalizer(&mut self, data: ObsNormalizerData) {
         self.obs_normalizer.load_snapshot(data);
     }
 
     /// Snapshot the master normalizer's full stats (learner → rollout threads), so
     /// each thread's policy normalizes observations against the same baseline the
     /// learner holds.
-    pub fn normalizer_snapshot(&self) -> ObsNormalizerData {
+    pub(crate) fn normalizer_snapshot(&self) -> ObsNormalizerData {
         self.obs_normalizer.snapshot()
     }
 
@@ -783,7 +783,7 @@ impl TrainingState {
     /// only the samples this horizon added, so merging it into the learner's master
     /// — which already holds the snapshot baseline handed back to the thread —
     /// counts every sample exactly once. Empty (count 0) outside worker mode.
-    pub fn normalizer_increment_snapshot(&self) -> ObsNormalizerData {
+    pub(crate) fn normalizer_increment_snapshot(&self) -> ObsNormalizerData {
         match self.normalizer_increment.as_ref() {
             Some(inc) => inc.snapshot(),
             None => self.obs_normalizer.snapshot(),
@@ -794,7 +794,7 @@ impl TrainingState {
     /// normalizer. The data merged here is ONLY samples the master has not already
     /// counted (the thread ships a per-horizon increment, never the snapshot
     /// baseline).
-    pub fn merge_normalizer(&mut self, data: &ObsNormalizerData) {
+    pub(crate) fn merge_normalizer(&mut self, data: &ObsNormalizerData) {
         self.obs_normalizer.merge(data);
     }
 
@@ -844,7 +844,7 @@ impl TrainingState {
     /// Set the curriculum band a rollout thread samples targets from this horizon
     /// (learner → thread, once per horizon before the roll, like `set_normalizer`). The
     /// learner owns the single advancing curriculum; the thread only consumes the band.
-    pub fn set_curriculum(&mut self, curriculum: Curriculum) {
+    pub(crate) fn set_curriculum(&mut self, curriculum: Curriculum) {
         self.curriculum = curriculum;
     }
 
