@@ -194,7 +194,10 @@ fn run_play(args: PlayArgs) -> Result<()> {
             args.expect,
             args.telemetry,
         )? {
-            net_loop::MatchResult::Joined(ls, driver) => (ls, Some(driver)),
+            net_loop::MatchResult::Joined(joined) => {
+                let (ls, driver) = *joined;
+                (ls, Some(driver))
+            }
             net_loop::MatchResult::Alone => (solo_lockstep(), None),
         }
     };

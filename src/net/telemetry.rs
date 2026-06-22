@@ -108,9 +108,9 @@ pub enum TelemetryEvent {
     RosterFailed { reason: String },
     /// A periodic sim snapshot (sampled): the applied `tick`, its full `state_hash`,
     /// the cumulative desync count, and the agreed `roster` size (player count). Comparing
-    /// the `(tick, state_hash)` across decks is the live cross-peer desync check; `desyncs`
-    /// > 0 on any deck is the alarm. `roster` is the frozen match player count (us +
-    /// peers), reported identically by every driver so the field means one thing.
+    /// the `(tick, state_hash)` across decks is the live cross-peer desync check;
+    /// `desyncs > 0` on any deck is the alarm. `roster` is the frozen match player count
+    /// (us + peers), reported identically by every driver so the field means one thing.
     Tick {
         tick: u64,
         state_hash: u64,

@@ -110,7 +110,9 @@ impl NetDriver {
 /// any other absence — `Alone` means exactly "play offline" and nothing else.
 pub enum MatchResult {
     /// A networked match formed: the agreed [`Lockstep`] and the driver for its peers.
-    Joined(Lockstep, NetDriver),
+    /// Boxed because both payloads are large and `Alone` is empty: without the box the
+    /// enum is sized to `Joined`, so every `Alone` carries that dead weight too.
+    Joined(Box<(Lockstep, NetDriver)>),
     /// Discovery completed with only us on the LAN (no peer ever beat us within the
     /// window). The caller starts a deterministic solo round instead of awaiting an
     /// empty networked match — see the module-level rl#47 note.
@@ -168,7 +170,7 @@ pub fn connect_and_form(
         id_map: frozen.id_map,
         telemetry,
     };
-    Ok(MatchResult::Joined(ls, driver))
+    Ok(MatchResult::Joined(Box::new((ls, driver))))
 }
 
 /// Open a [`TelemetrySender`] to `collector` if one was configured, tagging events with
