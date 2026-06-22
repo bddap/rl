@@ -34,7 +34,7 @@ use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{BotSet, CrabSpawns, respawn_crab_rotated};
 use crate::training::session::{
     BRAIN_STEM, Curriculum, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, RESET_GRACE_TICKS,
-    TrainBackend, planar_dist, sample_target, settle_countdown,
+    TrainBackend, dist_3d, sample_target, settle_countdown,
 };
 
 /// A loaded policy that maps observations to actions for inference (no learning).
@@ -637,13 +637,15 @@ fn random_demo_tilt() -> Quat {
 #[derive(Component)]
 struct TargetBall;
 
-/// Planar (XZ) distance at which the DEMO counts a claw tip as having reached the
+/// 3D euclidean distance at which the DEMO counts a claw tip as having reached the
 /// target and teleports it to a fresh far point (see [`target_ball`]). Set at the edge
-/// of the claw's reach. The training REWARD pays the smooth `1 − tanh(d/S)` everywhere
-/// with no threshold, so this radius never enters a reward; it defines a binary "reached
-/// it" event in two non-reward places that benefit from one shared definition: the
-/// demo's ball-hop, and the training curriculum's per-episode competence signal (see
-/// [`crate::training::session::CURRICULUM_REACH_RADIUS`]).
+/// of the claw's reach. Because the reach `d` is 3D, this 0.8 m is a SPHERE about the
+/// target, not a ground-plane cylinder: a tip standing under a raised ball is no longer
+/// "reached" until it is within 0.8 m in 3D. The training REWARD pays the smooth
+/// `1 − tanh(d/S)` everywhere with no threshold, so this radius never enters a reward; it
+/// defines a binary "reached it" event in two non-reward places that benefit from one
+/// shared definition: the demo's ball-hop, and the training curriculum's per-episode
+/// competence signal (see [`crate::training::session::CURRICULUM_REACH_RADIUS`]).
 pub(crate) const DEMO_REACH_RADIUS: f32 = 0.8;
 
 /// Radius (m) of the demo target ball. Bigger than [`DEMO_REACH_RADIUS`] so the
@@ -692,7 +694,7 @@ fn spawn_target_ball(
 /// watchability: it keeps the crab walking continuously to new goals instead of parking
 /// on one. This is safe because the policy learned "walk toward the current target
 /// vector" and so generalizes to a target that moves — the demo just exercises that on
-/// a livelier schedule than training. Reached is the closest PLANAR claw-tip-to-target
+/// a livelier schedule than training. Reached is the closest 3D euclidean claw-tip-to-target
 /// distance within [`DEMO_REACH_RADIUS`]. (The demo runs no training target system, so
 /// this is the only writer of env 0's target; the initial seed happens here rather than
 /// at Startup because `BotPlugin`'s Startup resize of [`CrabTargets`] would otherwise
@@ -720,12 +722,13 @@ fn target_ball(
             .unwrap_or_else(|| sample_target(origin, demo_band, &mut rand::thread_rng())),
     };
 
-    // Closest PLANAR distance from either claw tip to the target (the reward's `d`,
-    // env 0) — planar so the ball relocates at the same reached-moment training does.
+    // Closest 3D euclidean distance from either claw tip to the target (the reward's
+    // `d`, env 0) — 3D so the ball relocates at the same reached-moment training does
+    // (the reward and this test MUST share one `d`; see `session::dist_3d`).
     let mut min_dist = f32::INFINITY;
     for (env, tip) in claw_tips_q.iter() {
         if env.0 == 0 && tip.translation.is_finite() {
-            min_dist = min_dist.min(planar_dist(tip.translation, target));
+            min_dist = min_dist.min(dist_3d(tip.translation, target));
         }
     }
 

@@ -496,7 +496,7 @@ pub struct EnvEpisode {
     pub upright_sum: f32,
     pub sq_angvel_sum: f32,
     pub phase: EnvPhase,
-    /// Closest claw-tip→target planar distance seen at any tick this episode — the
+    /// Closest claw-tip→target 3D euclidean distance seen at any tick this episode — the
     /// curriculum's competence signal (an episode "reached" if this drops below
     /// [`CURRICULUM_REACH_RADIUS`]). `None` until the first finite tip reading. The MIN
     /// over the whole episode (not the final-tick distance) is the honest "did it get
@@ -1337,15 +1337,23 @@ fn seed_target(targets: &mut CrabTargets, spawns: &CrabSpawns, e: usize, curricu
     }
 }
 
-/// Planar (XZ) distance between two world points — the reward's `d` ignores Y, so a
-/// far target pulls the crab ACROSS the arena (walking) rather than tempting it to rear
-/// up and close the gap vertically. `pub(crate)` so the demo's reached-test
-/// (`play::target_ball`) measures the same planar `d` the reward does — the demo ball
-/// relocates on exactly the reach the reward scores (training holds one target per
-/// episode; the demo teleports on this reach for watchability).
-pub(crate) fn planar_dist(a: Vec3, b: Vec3) -> f32 {
+/// Planar (XZ) distance between two world points. NOT the reach reward's `d` (that is
+/// [`dist_3d`]); kept for the genuinely 2D diagnostics — the carapace's ground drift
+/// from spawn and the curriculum band, both DEFINED on the floor plane.
+fn planar_dist(a: Vec3, b: Vec3) -> f32 {
     let d = a - b;
     (d.x * d.x + d.z * d.z).sqrt()
+}
+
+/// Full 3D euclidean distance between two world points — the reach reward's `d`. 3D (not
+/// planar) so lowering a claw onto a low ball pays: a ground-only `d` would score a tip
+/// hovering a metre above the target identically to one resting on it, leaving nothing to
+/// pull the claw down the last stretch. `pub(crate)` so the demo's reached-test
+/// (`play::target_ball`) measures the SAME `d` the reward does — the demo ball relocates
+/// on exactly the reach the reward scores (training holds one target per episode; the
+/// demo teleports on this reach for watchability).
+pub(crate) fn dist_3d(a: Vec3, b: Vec3) -> f32 {
+    (a - b).length()
 }
 
 /// Weight of the effort term `− EFFORT_WEIGHT·Σ|aᵢ|^L` (see [`compute_reward`]):
@@ -1387,7 +1395,7 @@ const REACH_WEIGHT: f32 = 0.6;
 const REACH_SCALE: f32 = 4.0;
 
 /// Shaped proximity bonus `W·(1 − tanh(d/S))` (weight and scale on [`REACH_WEIGHT`]),
-/// where `d` is the minimum PLANAR distance over (claw tip, target) pairs. The reward's
+/// where `d` is the minimum 3D euclidean distance over (claw tip, target) pairs. The reward's
 /// only positive term: smooth and strictly POSITIVE, it maxes at `W` when a tip reaches
 /// the target (`d`→0) and decays gently with distance, so a far target still pulls —
 /// that decaying-but-alive gradient across the spawn band is the walking signal. `None`
@@ -1402,7 +1410,7 @@ fn reach_bonus(min_tip_dist: Option<f32>) -> f32 {
 
 /// The reward: `W·(1 − tanh(d/S)) − EFFORT_WEIGHT·Σ|aᵢ|^L`, the reach pull
 /// ([`reach_bonus`]) minus the cost of the commands that earn it ([`action_effort`]),
-/// where `d` is the closest PLANAR (XZ) claw-tip-to-target distance.
+/// where `d` is the closest 3D euclidean claw-tip-to-target distance.
 ///
 /// The reach signal is GLOBAL — a single distance, no gait term, no "feet on the
 /// ground" — so locomotion EMERGES instead of being hand-specified (owner's call:
@@ -1603,10 +1611,12 @@ pub fn brain_step(
         }
     }
 
-    // Closest claw-tip-to-target PLANAR (XZ) distance per env (the reach reward's
-    // `d`), folded over both claw tips. Planar so the goal pulls the crab ACROSS the
-    // arena — a tip directly above/below the target still has the full ground distance
-    // to walk. A crab link is parentless (only a MultibodyJoint, no Bevy child-of), so
+    // Closest claw-tip-to-target 3D euclidean distance per env (the reach reward's
+    // `d`), folded over both claw tips. 3D (not planar) so the goal pulls a tip all the
+    // way ONTO the target, height included — a tip directly above the ball still has the
+    // vertical gap left to close, so the policy is paid to lower the claw the last
+    // stretch instead of stalling once it is overhead.
+    // A crab link is parentless (only a MultibodyJoint, no Bevy child-of), so
     // Rapier writes its world pose straight into `Transform` each FixedUpdate tick —
     // that is the live `s_{t+1}` reading, in phase with the deferred transition,
     // exactly like the carapace pose above. (GlobalTransform would be stale here: it
@@ -1626,7 +1636,7 @@ pub fn brain_step(
         if !tip.translation.is_finite() {
             continue;
         }
-        let d = planar_dist(tip.translation, target);
+        let d = dist_3d(tip.translation, target);
         *slot = Some(slot.map_or(d, |cur| cur.min(d)));
     }
     // Fold this tick's closest tip distance into each RECORDING env's episode minimum —
@@ -1779,6 +1789,11 @@ pub fn brain_step(
             // clears it. `None` (no finite tip reading all episode) counts as a miss; so
             // does a blown-up episode that never got close — both are honest failures to
             // reach. The learner pools these to decide when to widen the band.
+            // `min_tip_dist` is a 3D distance, so this 0.8 m radius is a SPHERE about the
+            // target: since targets sit at Y 0.15–0.7, a tip must get within 0.8 m of the
+            // ball in 3D to count as reached — standing on the floor under a raised ball is
+            // not enough. Stricter than a ground-plane radius, and deliberately so: advance
+            // gates on actually getting near the ball, not merely walking under it.
             let reached = ep
                 .min_tip_dist
                 .is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
@@ -2186,6 +2201,130 @@ mod tests {
             c = next;
         }
         c
+    }
+
+    /// Drive `build_observation` over a single hand-placed carapace and return env 0's
+    /// observation. No physics/rig — just the resources the system reads plus one
+    /// carapace entity at the given world pose, so the body-state and target-local slots
+    /// can be checked against an exact expected value (joint slots stay 0, no joints).
+    fn observe_one_carapace(carapace: Transform, target: Option<Vec3>) -> [f32; OBS_SIZE] {
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy_rapier3d::prelude::Velocity;
+
+        let mut world = bevy::ecs::world::World::new();
+        let mut obs = CrabObservation::default();
+        obs.resize(1);
+        let mut targets = CrabTargets::default();
+        targets.resize(1);
+        targets.envs[0] = target;
+        world.insert_resource(obs);
+        world.insert_resource(targets);
+        world.insert_resource(CrabSpawns(vec![Vec3::ZERO]));
+        world.spawn((CrabCarapace, CrabEnvId(0), carapace, Velocity::default()));
+        world
+            .run_system_once(crate::bot::sensor::build_observation)
+            .expect("build observation");
+        world.resource::<CrabObservation>().envs[0]
+    }
+
+    /// Index of the first target-local obs slot (the carapace-frame target vector lives in
+    /// `[BASE, BASE+3)`), mirroring `build_observation`'s `body_base + 13`. Pinned here so
+    /// the directional test reads the same slots the sensor writes.
+    const TARGET_LOCAL_BASE: usize = crate::bot::body::CrabJointId::COUNT * 2 + 13;
+
+    /// The reach goal must enter the observation as a vector that points TOWARD the
+    /// target in the carapace's OWN frame (correct sign), and that body-local vector must
+    /// be orientation-invariant: yaw the body and the world offset is unchanged, but its
+    /// body-frame coordinates counter-rotate. This is the property the policy relies on to
+    /// "walk toward the target vector" from any heading — a sign flip here would train it
+    /// to walk directly away.
+    #[test]
+    fn target_obs_points_toward_target() {
+        let base = TARGET_LOCAL_BASE;
+
+        // Identity pose at origin: the body frame equals the world frame, so the
+        // target-local vector must equal the raw world offset to the target — same
+        // direction, same sign (it points AT the target, not away).
+        let offset = Vec3::new(2.0, 0.5, -1.0);
+        let obs = observe_one_carapace(Transform::IDENTITY, Some(offset));
+        let local = Vec3::new(obs[base], obs[base + 1], obs[base + 2]);
+        assert!(
+            (local - offset).length() < 1e-5,
+            "identity pose: target-local {local:?} must equal the world offset {offset:?} \
+             (points toward the target with the right sign)"
+        );
+
+        // Yaw the carapace 180° about Y, target fixed in WORLD. The world offset is
+        // unchanged, but in the rotated body frame "forward" now points the other way, so
+        // the body-local X and Z must FLIP sign (Y, the spin axis, is unchanged). This is
+        // the orientation-invariance the obs frame buys: same goal, body-relative reading.
+        let yaw = Quat::from_rotation_y(std::f32::consts::PI);
+        let obs_rot = observe_one_carapace(
+            Transform::from_rotation(yaw),
+            Some(offset),
+        );
+        let local_rot = Vec3::new(obs_rot[base], obs_rot[base + 1], obs_rot[base + 2]);
+        let expected_rot = yaw.inverse() * offset;
+        assert!(
+            (local_rot - expected_rot).length() < 1e-5,
+            "180° yaw: target-local {local_rot:?} must be the offset rotated into the body \
+             frame {expected_rot:?}"
+        );
+        assert!(
+            (local_rot.x + offset.x).abs() < 1e-5 && (local_rot.z + offset.z).abs() < 1e-5,
+            "a 180° yaw must flip the body-local forward/right components: got {local_rot:?} \
+             vs world offset {offset:?}"
+        );
+        assert!(
+            (local_rot.y - offset.y).abs() < 1e-5,
+            "yaw about Y must leave the body-local Y (height) component unchanged"
+        );
+
+        // Off-origin too: target-local is the offset FROM the carapace, not the absolute
+        // target — translating the body by the same vector as the target leaves it zero.
+        let pos = Vec3::new(3.0, 0.0, 4.0);
+        let obs_at = observe_one_carapace(Transform::from_translation(pos), Some(pos));
+        let local_at = Vec3::new(obs_at[base], obs_at[base + 1], obs_at[base + 2]);
+        assert!(
+            local_at.length() < 1e-5,
+            "carapace sitting on the target reads a zero target-local vector, got {local_at:?}"
+        );
+    }
+
+    /// The reach reward must genuinely pull the tip toward the target IN 3D: a smaller 3D
+    /// tip→target distance must score strictly higher, including when the only difference
+    /// is HEIGHT (the whole point of the planar→3D change — a claw lowered onto a low ball
+    /// must beat one hovering above it at the same ground position). Drives the reward
+    /// helpers directly with synthesized 3D distances.
+    #[test]
+    fn closer_tip_in_3d_raises_reward() {
+        let target = Vec3::new(1.0, 0.3, 0.0);
+        // Two tips at the SAME ground position, differing only in height: one resting on
+        // the ball, one a metre above it. A planar `d` ties these; the 3D `d` must rank
+        // the on-target tip strictly closer.
+        let on_ball = Vec3::new(1.0, 0.3, 0.0);
+        let hovering = Vec3::new(1.0, 1.3, 0.0);
+        let d_on = dist_3d(on_ball, target);
+        let d_hover = dist_3d(hovering, target);
+        assert!(
+            d_on < d_hover,
+            "3D distance must distinguish height: on-ball {d_on} should be < hovering {d_hover}"
+        );
+        // Same command effort both poses, so the reach term alone decides — closer ⇒ higher.
+        let effort = action_effort(&[0.2; ACTION_SIZE]);
+        assert!(
+            compute_reward(Some(d_on), effort) > compute_reward(Some(d_hover), effort),
+            "a tip resting on the ball must out-score one hovering a metre above it at the \
+             same ground spot — the 3D reach pulls the claw DOWN, not just across"
+        );
+        // And monotone in general: any strictly smaller 3D distance scores strictly higher.
+        for (near, far) in [(0.0_f32, 0.5_f32), (0.5, 2.0), (2.0, 6.0)] {
+            assert!(
+                reach_bonus(Some(near)) > reach_bonus(Some(far)),
+                "reach reward must strictly increase as 3D distance shrinks: \
+                 d={near} should beat d={far}"
+            );
+        }
     }
 
     #[test]
