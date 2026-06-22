@@ -551,6 +551,15 @@ pub fn run_learner(
     apply_nice(nice);
     init_process_pools();
 
+    // Arm the startup watchdog BEFORE any rollout world is built (so its thread is
+    // never a party to the gemm-tree deadlock it guards against). If the rollout
+    // workers wedge during their world build — the rare pre-iter-0 matmul
+    // shared-gemm-tree race that `init_process_pools` mitigates but can't fully rule
+    // out — the watchdog re-execs a fresh process, which re-rolls that probabilistic
+    // race and almost always clears it. The signal is set below the moment the first
+    // rollout returns, which disarms the watchdog for the rest of the run.
+    let progress_signal = super::watchdog::arm(super::watchdog::WatchdogConfig::from_env());
+
     let m = config.envs as usize;
     let tick_budget = config.ticks;
     let checkpoint_dir = config.checkpoint_dir.clone();
@@ -670,6 +679,10 @@ pub fn run_learner(
                 "rollout thread died (could not rebuild its world); resume from checkpoint",
             ));
         }
+        // Every world built and rolled a full horizon, so the pre-iter-0 gemm-tree
+        // deadlock did not happen — disarm the startup watchdog. (First iteration
+        // only; the call is idempotent, so doing it every iteration is harmless.)
+        progress_signal.mark_reached();
         let rollout_secs = rollout_start.elapsed().as_secs_f64();
 
         // 3) Merge each Rolled thread's normalizer increment + episode rewards and
