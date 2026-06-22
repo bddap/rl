@@ -16,30 +16,33 @@ use super::{BotPlugin, NumEnvs};
 use crate::Visuals;
 use crate::physics::PhysicsWorldPlugin;
 
-/// Knobs that legitimately differ between the headless entry points. Every field is
-/// an EXPLICIT choice the caller makes so a divergence (a slower clock, logging on,
-/// the K-thread pool) is visible at the call site, not an accident of a forked copy.
-/// Everything NOT here — the windowless render/winit setup, the production fixed
-/// timestep + contact spring, the physics/bot plugin stack — is identical for all
+/// The dimensions that legitimately differ between headless entry points: how many
+/// envs the world drives, and whether it runs as one of K parallel rollout workers or
+/// on its own. Everything else — the windowless render/winit setup, the production
+/// fixed timestep + contact spring, the disabled log/gamepad plugins, the physics/bot
+/// plugin stack, the one-physics-tick-per-`update()` clock — is identical for all
 /// callers and lives once in [`headless_stack`].
 pub struct HeadlessStack {
     /// `NumEnvs` for this world (1 for the demo/tests; `--envs` for a rollout worker).
     pub num_envs: usize,
-    /// Virtual-clock advance per `app.update()` — drives exactly one FixedUpdate step
-    /// when set to the physics dt, so a horizon is an exact tick count. Production uses
-    /// [`crate::physics::PHYSICS_DT`]; pass that unless a test deliberately wants a
-    /// different granularity.
-    pub tick_dt: Duration,
-    /// Keep bevy's `LogPlugin`? Headless callers disable it (no log spam in the
-    /// rollout threads / test output); kept as a flag so turning it back on for one
-    /// caller is a one-word, visible change.
-    pub log: bool,
-    /// Pin the bevy task pool to 1 thread and run on the `ScheduleRunnerPlugin` loop —
-    /// the rollout-worker scaling fix (K worlds must not share the global compute pool;
-    /// see `build_rollout_app`). The caller must ALSO force every schedule onto the
-    /// single-threaded executor AFTER adding its systems — that can't be done here
-    /// because the schedules don't exist until the caller wires them.
-    pub single_thread_pool: bool,
+    /// Whether this world is one of K parallel rollout workers or a standalone world —
+    /// the only thing that changes the bevy task-pool / executor setup.
+    pub role: WorldRole,
+}
+
+/// How a headless world relates to the rest of the process, which decides its bevy
+/// task-pool and executor setup.
+pub enum WorldRole {
+    /// A standalone world: the demo, the sim tests, the single training-test app.
+    /// Default bevy task pools.
+    Standalone,
+    /// One of K rollout-worker worlds run in parallel (see `build_rollout_app`). Pins
+    /// the task pool to 1 thread and drives the world on `ScheduleRunnerPlugin`, so the
+    /// K worlds don't all dispatch onto — and serialize on — the one global
+    /// `ComputeTaskPool`. The caller MUST ALSO force every schedule onto the
+    /// single-threaded executor AFTER adding its systems; that can't be done in
+    /// [`headless_stack`] because the schedules don't exist until the caller wires them.
+    RolloutWorker,
 }
 
 /// Build the shared windowless physics+bot `App` from [`HeadlessStack`]. The crab is
@@ -51,7 +54,7 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
     // The windowless, GPU-less DefaultPlugins all three headless entries share. The
     // gamepad poller (GilrsPlugin) is dropped: a headless world has no input device,
     // so it would only spawn an idle gilrs thread. Built as a binding so the optional
-    // `.set`/`.disable` below stay visible rather than buried in a chain.
+    // 1-thread-pool `.set` below stays visible rather than buried in a chain.
     let mut plugins = DefaultPlugins
         .set(bevy::window::WindowPlugin {
             primary_window: None,
@@ -68,25 +71,27 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
             ..default()
         })
         .disable::<bevy::winit::WinitPlugin>()
-        .disable::<bevy::gilrs::GilrsPlugin>();
-    if !cfg.log {
-        plugins = plugins.disable::<bevy::log::LogPlugin>();
-    }
-    if cfg.single_thread_pool {
+        .disable::<bevy::gilrs::GilrsPlugin>()
+        // No log spam in the rollout threads / test output.
+        .disable::<bevy::log::LogPlugin>();
+    let worker = matches!(cfg.role, WorldRole::RolloutWorker);
+    if worker {
         plugins = plugins.set(TaskPoolPlugin {
             task_pool_options: TaskPoolOptions::with_num_threads(1),
         });
     }
     app.add_plugins(plugins);
 
-    if cfg.single_thread_pool {
+    if worker {
         // No window/winit means no event loop to drive `update()`; the runner loop does.
         app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::ZERO));
     }
 
-    // One fixed tick per app.update(): advance the virtual clock by exactly `tick_dt`,
-    // so FixedUpdate runs one step per update.
-    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(cfg.tick_dt));
+    // One fixed tick per app.update(): advance the virtual clock by exactly the physics
+    // dt, so FixedUpdate runs exactly one step per update.
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        Duration::from_secs_f32(crate::physics::PHYSICS_DT),
+    ));
 
     app.insert_resource(Visuals(false))
         .insert_resource(NumEnvs(cfg.num_envs))
@@ -102,14 +107,13 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
 }
 
 /// A windowless, GPU-less app running the real physics + bot plugins, one fixed
-/// tick (1/64 s) per `app.update()`. The crab is the rig-derived one model. Thin
-/// wrapper over [`headless_stack`] for the sim tests and `--check-rest-colliders`.
+/// physics tick ([`crate::physics::PHYSICS_DT`]) per `app.update()`. The crab is the
+/// rig-derived one model. Thin wrapper over [`headless_stack`] for the sim tests and
+/// `--check-rest-colliders`.
 pub fn headless_app() -> App {
     headless_stack(HeadlessStack {
         num_envs: 1,
-        tick_dt: Duration::from_secs_f32(crate::physics::PHYSICS_DT),
-        log: false,
-        single_thread_pool: false,
+        role: WorldRole::Standalone,
     })
 }
 

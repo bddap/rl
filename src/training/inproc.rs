@@ -473,26 +473,22 @@ fn warm_up_app(app: &mut App) {
 /// The bevy `TaskPoolPlugin` is pinned to 1 thread and EVERY schedule is forced
 /// onto the single-threaded executor — without the latter bevy's multithreaded
 /// executor dispatches systems onto the global `ComputeTaskPool` and N apps
-/// serialize on it (flat throughput). This is the load-bearing knob the spike
-/// proved; it is unconditional here.
+/// serialize on it (flat throughput). Both are unconditional here.
 fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
-    use crate::bot::test_util::{HeadlessStack, headless_stack};
+    use crate::bot::test_util::{HeadlessStack, WorldRole, headless_stack};
     use crate::training::session;
     use crate::training::session::{brain_step, reset_crab, save_on_exit};
-    use std::time::Duration;
 
     // Per-thread scratch CSV dir so K threads never write the same file.
     let metrics_dir = worker_metrics_dir(id);
 
-    // The shared windowless physics+bot stack, with the rollout-worker knobs explicit:
-    // the 1-thread task pool + ScheduleRunner loop (the K-world scaling fix — see
-    // `single_thread_pool`), and one physics tick per update so a horizon is EXACTLY H
-    // ticks (reproducible sample counts).
+    // The shared windowless physics+bot stack in rollout-worker mode: the 1-thread
+    // task pool + ScheduleRunner loop (the K-world scaling fix — see
+    // `WorldRole::RolloutWorker`), one physics tick per update so a horizon is EXACTLY
+    // H ticks (reproducible sample counts).
     let mut app = headless_stack(HeadlessStack {
         num_envs,
-        tick_dt: Duration::from_secs_f32(crate::physics::PHYSICS_DT),
-        log: false,
-        single_thread_pool: true,
+        role: WorldRole::RolloutWorker,
     });
 
     // Worker-mode training state + the Sense→Think→Act systems. No PPO-update step
@@ -509,9 +505,10 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
         )
         .add_systems(Last, save_on_exit);
 
-    // THE bevy fix: force every schedule onto the single-threaded executor so ECS
-    // never dispatches onto the global ComputeTaskPool (which would serialize the K
-    // threads). Unconditional — proven load-bearing by the scaling spike.
+    // Force every schedule onto the single-threaded executor so ECS never dispatches
+    // onto the global ComputeTaskPool (which would serialize the K threads).
+    // Unconditional, and must run AFTER add_systems above — the schedules don't exist
+    // until the systems are wired.
     {
         use bevy::ecs::schedule::{ExecutorKind, Schedules};
         let mut schedules = app.world_mut().resource_mut::<Schedules>();

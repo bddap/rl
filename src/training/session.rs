@@ -1925,14 +1925,13 @@ pub fn brain_step(
 /// crab the policy was actually trained to settle.
 pub const RESET_GRACE_TICKS: u32 = 32;
 
-/// Advance a settle countdown by one tick. `grace` ≥ 1 means "still settling"
-/// (hold zero actions); the return is the grace for next tick, or `None` once the
-/// window is spent (the caller resumes normal control — `Recording` for training,
-/// policy drive for the demo). Sole source of the post-respawn settle arithmetic
-/// so the training reset path ([`reset_crab`]) and the demo settle
+/// Advance a settle countdown by one tick: returns the grace for the next tick, or 0
+/// once the window is spent (the caller then resumes normal control — `Recording` for
+/// training, policy drive for the demo). Sole source of the post-respawn settle
+/// arithmetic so the training reset path ([`reset_crab`]) and the demo settle
 /// (`play::demo_settle`) decrement the exact same way.
-pub fn settle_countdown(grace: u32) -> Option<u32> {
-    (grace > 1).then(|| grace - 1)
+pub fn settle_countdown(grace: u32) -> u32 {
+    grace.saturating_sub(1)
 }
 
 /// System: rebuilds each env's crab when that env's episode ends by a normal
@@ -1989,8 +1988,8 @@ pub fn reset_crab(
     for ep in training.envs.iter_mut() {
         if let EnvPhase::Settling { grace } = ep.phase {
             ep.phase = match settle_countdown(grace) {
-                Some(g) => EnvPhase::Settling { grace: g },
-                None => EnvPhase::Recording,
+                0 => EnvPhase::Recording,
+                g => EnvPhase::Settling { grace: g },
             };
         }
     }
@@ -2521,9 +2520,8 @@ mod tests {
     /// exercise the exact stack the sole trainer runs. Unlike the rollout worker it
     /// keeps the single-world default pool (no K-thread scaling fix needed for one app).
     fn headless_training_app(checkpoint_dir: &std::path::Path) -> App {
-        use crate::bot::test_util::{HeadlessStack, headless_stack};
+        use crate::bot::test_util::{HeadlessStack, WorldRole, headless_stack};
         use clap::Parser;
-        use std::time::Duration;
 
         // Point the checkpoint dir at an empty scratch path so no real checkpoint
         // loads; every other field keeps its default (tick budget 0 = unlimited,
@@ -2537,9 +2535,7 @@ mod tests {
 
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
-            tick_dt: Duration::from_secs_f32(crate::physics::PHYSICS_DT),
-            log: false,
-            single_thread_pool: false,
+            role: WorldRole::Standalone,
         });
 
         // Wire the training world the same way the `rl learn` rollout worlds do
