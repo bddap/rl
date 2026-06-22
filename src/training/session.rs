@@ -2057,9 +2057,9 @@ pub fn brain_step(
     // the curriculum's competence signal. Recording-only: a Settling env already holds
     // the NEXT episode's target (seeded at reset), so crediting its settle-pose distances
     // would contaminate that episode's reach with poses the policy never chose.
-    for e in 0..n {
+    for (e, tip) in min_tip_dists.iter().enumerate() {
         if matches!(training.envs[e].phase, EnvPhase::Recording)
-            && let Some(d) = min_tip_dists[e]
+            && let Some(d) = *tip
         {
             let ep = &mut training.envs[e];
             ep.min_tip_dist = Some(ep.min_tip_dist.map_or(d, |cur| cur.min(d)));
@@ -2316,9 +2316,9 @@ pub fn brain_step(
     // Summed here and drained per horizon to the learner, which logs the mean (it
     // climbs from ~0 as walking emerges). Recording-only, so a cold policy reads ~0 and
     // an exploring one reads its true reach, not a settle-pose artifact.
-    for e in 0..n {
+    for (e, drift) in drifts.iter().enumerate() {
         if matches!(training.envs[e].phase, EnvPhase::Recording)
-            && let Some(d) = drifts[e]
+            && let Some(d) = *drift
             && d.is_finite()
         {
             training.drift_sum += d as f64;

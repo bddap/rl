@@ -849,6 +849,10 @@ fn demo_fall_rescue(
 /// lands on its feet or never falls (the fall-rescue alone wouldn't fire then). Held
 /// off while a settle is in progress so a re-tilt can't interrupt the previous spawn
 /// before it has landed and had its moment. See [`DemoRetilt`].
+// A Bevy system: every parameter is a scheduler-injected `Res`/`ResMut`/`Query`, so the
+// arity is the dependency list, not a refactor smell — bundling them into a SystemParam
+// would only hide the wiring.
+#[allow(clippy::too_many_arguments)]
 fn demo_retilt(
     time: Res<Time>,
     mut retilt: ResMut<DemoRetilt>,
