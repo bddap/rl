@@ -367,8 +367,19 @@ struct StrippedMeshes(HashSet<AssetId<Mesh>>);
 /// rear-leg/shell drag. [`strip_to_dominant_cluster`] (the per-vertex rule) keeps a
 /// lane on any part *hinged* to the dominant one, so a seam flexes, but still strips
 /// a disjoint cross-weight (and any limb lane on a carapace-dominant shell vertex, so
-/// the rigid trunk never bulges). Weights-only, so the bind pose stays pixel-identical
-/// (a vertex at rest sits at the same place regardless of which bones could move it).
+/// the rigid trunk never bulges).
+///
+/// WHY the geometric carapace-region override (bddap/rl#37): the cluster strip keys
+/// off *dominance*, so a shell vertex the artist weighted limb-heavy is "limb-dominant"
+/// and keeps its limb lanes — and bulges. Weight cannot separate "shell vertex authored
+/// limb-heavy" from "limb vertex near the shell"; only position can. So every shell-flesh
+/// vertex (one carrying any carapace weight) sitting inside the [`carapace_region`] AABB
+/// is forced rigidly onto the carapace via [`confine_to_rigid`], regardless of its
+/// authored weights. A vertex with no carapace weight is a limb passing through the box
+/// (a leg/claw socket stub), so it is left to the cluster strip — confining it would zero
+/// its only lanes and collapse it to the origin. Still weight-only output: a vertex's
+/// REST position is its bind pose (all bones at bind), unchanged by which bones could move
+/// it, so the strip is pixel-identical at rest and only changes how the surface deforms.
 ///
 /// Runs in `Update` and waits until the mesh asset is loaded AND every joint
 /// entity has a `Name` (the scene finished spawning), since the strip maps each
@@ -404,6 +415,15 @@ fn strip_cross_part_weights(
         let Some(mesh) = meshes.get_mut(&mesh3d.0) else {
             continue; // asset not loaded yet
         };
+        // Positions (raw mesh-local, the frame skinning starts from — GPU LBS moves
+        // them, so the CPU attribute is the bind-pose-local position) define the
+        // geometric carapace region below. Cloned out so the borrow ends before the
+        // `&mut mesh` write; `None` (no/oddly-typed POSITION) just skips the region
+        // override and falls back to the per-vertex cluster strip.
+        let positions: Option<Vec<Vec3>> = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|a| a.as_float3())
+            .map(|p| p.iter().map(|v| Vec3::from_array(*v)).collect());
         let (Some(joints), Some(weights)) = (
             read_u16x4(mesh, Mesh::ATTRIBUTE_JOINT_INDEX),
             read_f32x4(mesh, Mesh::ATTRIBUTE_JOINT_WEIGHT),
@@ -415,10 +435,18 @@ fn strip_cross_part_weights(
             continue;
         };
 
-        let new_weights: Vec<[f32; 4]> = joints
-            .iter()
-            .zip(&weights)
-            .map(|(j, w)| strip_to_dominant_cluster(*j, *w, &lane_parts))
+        // The carapace region: the AABB of every shell-dominant vertex. `None` if
+        // positions are unavailable (then the region override is disabled and every
+        // vertex takes the cluster strip). See `confine_vertex` for the per-vertex rule.
+        let region = positions
+            .as_deref()
+            .and_then(|pos| carapace_region(pos, &joints, &weights, &lane_parts));
+
+        let new_weights: Vec<[f32; 4]> = (0..joints.len())
+            .map(|i| {
+                let pos = positions.as_ref().map(|p| p[i]);
+                confine_vertex(pos, region, joints[i], weights[i], &lane_parts)
+            })
             .collect();
         mesh.insert_attribute(Mesh::ATTRIBUTE_JOINT_WEIGHT, new_weights);
         stripped.0.insert(id);
@@ -451,6 +479,32 @@ pub(crate) fn read_f32x4(
     match mesh.attribute(attr)? {
         VertexAttributeValues::Float32x4(v) => Some(v.clone()),
         _ => None,
+    }
+}
+
+/// The per-vertex rule the strip applies (bddap/rl#37). A shell-flesh vertex (one with
+/// any carapace weight) whose `pos` lies inside the carapace `region` is forced rigidly
+/// onto the shell via [`confine_to_rigid`] — geometry overrides authored weight, since
+/// weight alone can't tell a shell vertex painted limb-heavy from a limb vertex near the
+/// shell. Every other vertex — outside the region, or limb-only (a leg/claw socket stub
+/// passing through the box, which confining would zero out) — takes the seam-aware
+/// [`strip_to_dominant_cluster`]. `region`/`pos` `None` (positions unavailable) disables
+/// the override, leaving the pure weight-based strip.
+fn confine_vertex(
+    pos: Option<Vec3>,
+    region: Option<(Vec3, Vec3)>,
+    joints: [u16; 4],
+    weights: [f32; 4],
+    lane_parts: &[PartId],
+) -> [f32; 4] {
+    let in_region = match (region, pos) {
+        (Some((lo, hi)), Some(p)) => p.cmpge(lo).all() && p.cmple(hi).all(),
+        _ => false,
+    };
+    if in_region && has_rigid_lane(joints, weights, lane_parts) {
+        confine_to_rigid(joints, weights, lane_parts)
+    } else {
+        strip_to_dominant_cluster(joints, weights, lane_parts)
     }
 }
 
@@ -488,29 +542,7 @@ fn strip_to_dominant_cluster(
     weights: [f32; 4],
     lane_parts: &[PartId],
 ) -> [f32; 4] {
-    let part_of = |lane: usize| -> PartId {
-        lane_parts
-            .get(joints[lane] as usize)
-            .copied()
-            .unwrap_or(PartId::Carapace)
-    };
-
-    // Sum weight per part, tracking the dominant (largest-sum) part.
-    let mut sums: Vec<(PartId, f32)> = Vec::new();
-    for (lane, &w) in weights.iter().enumerate() {
-        if w <= 0.0 {
-            continue;
-        }
-        let part = part_of(lane);
-        match sums.iter_mut().find(|(p, _)| *p == part) {
-            Some((_, s)) => *s += w,
-            None => sums.push((part, w)),
-        }
-    }
-    let Some(&(dominant, _)) = sums
-        .iter()
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-    else {
+    let Some(dominant) = dominant_part(joints, weights, lane_parts) else {
         return weights; // all-zero vertex: leave it be
     };
 
@@ -521,22 +553,103 @@ fn strip_to_dominant_cluster(
     let keep = |p: PartId| -> bool {
         p == dominant || (!dominant.is_rigid() && super::rig::parts_adjacent(dominant, p))
     };
+    renormalize_kept(joints, weights, lane_parts, keep)
+}
+
+/// The part of skin-joint lane `lane` on this vertex; an out-of-range index defaults
+/// to the carapace (matching `part_for_bone`'s unknown-bone fallback).
+fn lane_part(joints: [u16; 4], lane: usize, lane_parts: &[PartId]) -> PartId {
+    lane_parts
+        .get(joints[lane] as usize)
+        .copied()
+        .unwrap_or(PartId::Carapace)
+}
+
+/// The vertex's dominant part — the one with the largest summed weight across its
+/// lanes — or `None` for an all-zero vertex. The single source for "which part owns
+/// this vertex", shared by the cluster strip and the carapace-region builder so the
+/// two can't disagree about dominance.
+fn dominant_part(joints: [u16; 4], weights: [f32; 4], lane_parts: &[PartId]) -> Option<PartId> {
+    let mut sums: Vec<(PartId, f32)> = Vec::new();
+    for (lane, &w) in weights.iter().enumerate() {
+        if w <= 0.0 {
+            continue;
+        }
+        let part = lane_part(joints, lane, lane_parts);
+        match sums.iter_mut().find(|(p, _)| *p == part) {
+            Some((_, s)) => *s += w,
+            None => sums.push((part, w)),
+        }
+    }
+    sums.iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|&(p, _)| p)
+}
+
+/// Zero every lane whose part `keep` rejects, then renormalize the survivors to sum
+/// to 1.0. The caller guarantees at least one lane is kept (so the sum is positive).
+fn renormalize_kept(
+    joints: [u16; 4],
+    weights: [f32; 4],
+    lane_parts: &[PartId],
+    keep: impl Fn(PartId) -> bool,
+) -> [f32; 4] {
     let mut kept = [0.0f32; 4];
     let mut kept_sum = 0.0f32;
     for lane in 0..4 {
-        if weights[lane] > 0.0 && keep(part_of(lane)) {
+        if weights[lane] > 0.0 && keep(lane_part(joints, lane, lane_parts)) {
             kept[lane] = weights[lane];
             kept_sum += weights[lane];
         }
     }
-
-    // The dominant part has the max per-part sum, so at least one kept lane is
-    // > 0: survivors always exist to renormalize against.
-    debug_assert!(kept_sum > 0.0, "dominant part must carry positive weight");
+    debug_assert!(kept_sum > 0.0, "at least one lane must be kept to renormalize");
     for w in &mut kept {
         *w /= kept_sum;
     }
     kept
+}
+
+/// Whether this vertex carries any weight on a rigid (carapace) bone — i.e. whether
+/// it is bound to the shell at all. The carapace-region override only confines such
+/// vertices; one with no rigid lane is a limb passing through the region (a leg/claw
+/// socket stub), and zeroing its only (limb) lanes would collapse it to the origin.
+fn has_rigid_lane(joints: [u16; 4], weights: [f32; 4], lane_parts: &[PartId]) -> bool {
+    (0..4).any(|l| weights[l] > 0.0 && lane_part(joints, l, lane_parts).is_rigid())
+}
+
+/// Confine a shell-flesh vertex to the rigid shell: drop every articulated-joint lane
+/// and renormalize onto the carapace lane(s). The geometric override for vertices
+/// inside the carapace region (bddap/rl#37) — unlike the weight-based cluster strip,
+/// it strips even an adjacent chain-root lane, because position (not weight) has
+/// already established the vertex is shell, so no limb may tug it. `has_rigid_lane`
+/// must hold (a carapace lane exists to renormalize onto).
+fn confine_to_rigid(joints: [u16; 4], weights: [f32; 4], lane_parts: &[PartId]) -> [f32; 4] {
+    renormalize_kept(joints, weights, lane_parts, PartId::is_rigid)
+}
+
+/// The carapace region: the AABB of every shell-dominant vertex, in the mesh's raw
+/// position frame. Geometry, not weight, is what separates a shell vertex authored
+/// limb-heavy from a limb vertex near the shell (bddap/rl#37); a shell-flesh vertex
+/// inside this box is forced rigidly onto the carapace. Returns `None` if no vertex is
+/// shell-dominant (a non-crab mesh), which disables the override (the cluster strip
+/// still runs).
+fn carapace_region(
+    positions: &[Vec3],
+    joints: &[[u16; 4]],
+    weights: &[[f32; 4]],
+    lane_parts: &[PartId],
+) -> Option<(Vec3, Vec3)> {
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    let mut any = false;
+    for i in 0..positions.len() {
+        if dominant_part(joints[i], weights[i], lane_parts) == Some(PartId::Carapace) {
+            lo = lo.min(positions[i]);
+            hi = hi.max(positions[i]);
+            any = true;
+        }
+    }
+    any.then_some((lo, hi))
 }
 
 #[cfg(test)]
@@ -550,8 +663,8 @@ mod tests {
     use super::super::test_util::{headless_app, tick};
     use super::super::{CrabSpawns, respawn_crab};
     use super::{
-        BoneDrive, CrabSkin, PartId, SETTLE_FRAMES, repair_skins, reveal_skin,
-        strip_to_dominant_cluster,
+        BoneDrive, CrabSkin, PartId, SETTLE_FRAMES, carapace_region, confine_vertex,
+        has_rigid_lane, repair_skins, reveal_skin, strip_to_dominant_cluster,
     };
 
     /// The strip (bddap/rl#32, refined for seams): a shell vertex carrying stray arm
@@ -1073,5 +1186,165 @@ mod tests {
             disjoint_regressed, 0,
             "a disjoint (e.g. carapace-vs-distal-limb) bleed leaked through — #262 regressed"
         );
+    }
+
+    /// The decisive #37 guard on the real model (run with `--nocapture`): no rigid
+    /// shell vertex may deform with an articulated joint. Re-parses `sally.glb`, builds
+    /// the [`carapace_region`] from its shell-dominant verts, runs the SAME per-vertex
+    /// dispatch the live strip ([`strip_cross_part_weights`]) does, and asserts that
+    /// EVERY shell-flesh vertex (one carrying any carapace weight) inside that region
+    /// resolves to carapace-only — zero weight on any articulated joint bone.
+    ///
+    /// This FAILS on the pre-#37 cluster-strip-only code: a shell vertex the artist
+    /// weighted limb-heavy is limb-dominant, so the cluster strip keeps its limb lanes
+    /// and the rigid shell bulges with the joint (~1.2k such verts in sally.glb). The
+    /// geometric override drives that count to zero. Limb-only verts inside the box (a
+    /// leg/claw socket stub passing through) are NOT shell flesh and are excluded — they
+    /// must keep articulating, and confining them would zero their only lanes. Read off
+    /// the file, independent of the Bevy spawn path; skips cleanly with no model.
+    #[test]
+    fn carapace_region_verts_never_deform() {
+        use super::super::meshfit::model_path;
+        use super::super::rig::part_for_bone;
+
+        let Some(path) = model_path() else {
+            eprintln!("carapace_region_verts_never_deform: no model — skipping");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read glb");
+        let gltf = gltf::Gltf::from_slice(&bytes).expect("parse glb");
+        let blob = gltf.blob.as_deref().expect("glb blob");
+        let skin = gltf.skins().next().expect("skin");
+        let names: std::collections::HashMap<usize, String> = gltf
+            .nodes()
+            .filter_map(|n| n.name().map(|nm| (n.index(), nm.to_string())))
+            .collect();
+        // skin-joint lane -> physics part, resolved exactly as the live strip does.
+        let lane_parts: Vec<PartId> = skin
+            .joints()
+            .map(|j| {
+                names
+                    .get(&j.index())
+                    .and_then(|nm| part_for_bone(nm))
+                    .unwrap_or(PartId::Carapace)
+            })
+            .collect();
+
+        let mut positions: Vec<Vec3> = Vec::new();
+        let mut joints: Vec<[u16; 4]> = Vec::new();
+        let mut weights: Vec<[f32; 4]> = Vec::new();
+        for prim in gltf.meshes().next().expect("mesh").primitives() {
+            let reader = prim.reader(|b| (b.index() == 0).then_some(blob));
+            let ps: Vec<[f32; 3]> = reader.read_positions().expect("positions").collect();
+            let js: Vec<[u16; 4]> = reader.read_joints(0).expect("joints").into_u16().collect();
+            let ws: Vec<[f32; 4]> = reader.read_weights(0).expect("weights").into_f32().collect();
+            for ((p, j), w) in ps.iter().zip(&js).zip(&ws) {
+                positions.push(Vec3::from_array(*p));
+                joints.push(*j);
+                weights.push(*w);
+            }
+        }
+
+        let (lo, hi) =
+            carapace_region(&positions, &joints, &weights, &lane_parts).expect("shell verts");
+        let inside = |p: Vec3| p.cmpge(lo).all() && p.cmple(hi).all();
+
+        // Weight a vertex's lanes onto the articulated (non-rigid) joints — how much it
+        // still deforms with a moving limb. Must be zero for shell flesh in the region.
+        let articulated_weight = |js: [u16; 4], ws: [f32; 4]| -> f32 {
+            (0..4)
+                .filter(|&l| !lane_parts[js[l] as usize].is_rigid())
+                .map(|l| ws[l])
+                .sum()
+        };
+
+        let mut shell_in_region = 0usize; // shell-flesh verts the override governs
+        let mut deforming = 0usize; // …that STILL deform (the bug; must be 0)
+        for i in 0..positions.len() {
+            let (j, w) = (joints[i], weights[i]);
+            if w.iter().all(|&x| x <= 0.0) || !inside(positions[i]) {
+                continue;
+            }
+            // Limb-only verts inside the box are limb flesh passing through, not shell —
+            // the override skips them (so does this assertion), and they keep flexing.
+            if !has_rigid_lane(j, w, &lane_parts) {
+                continue;
+            }
+            shell_in_region += 1;
+            // The exact per-vertex rule `strip_cross_part_weights` runs in production.
+            let new = confine_vertex(Some(positions[i]), Some((lo, hi)), j, w, &lane_parts);
+            if articulated_weight(j, new) > 1e-6 {
+                deforming += 1;
+            }
+        }
+
+        eprintln!(
+            "\n=== #37 carapace-region guard ({}) ===\nregion lo={lo:?} hi={hi:?}\nshell-flesh verts in region: {shell_in_region}; still deforming: {deforming}\n=== end #37 ===\n",
+            path.display()
+        );
+
+        // Not vacuous: sally.glb has thousands of shell verts inside the region, so a
+        // future asset (or a bug) that strands zero would otherwise pass testing nothing.
+        assert!(
+            shell_in_region > 0,
+            "no shell-flesh verts in the carapace region — the #37 guard is vacuous"
+        );
+        // The #37 done-state: not one rigid shell vertex deforms with a joint.
+        assert_eq!(
+            deforming, 0,
+            "{deforming} carapace-region shell verts still carry articulated-joint weight \
+             — the rigid shell would morph with the limbs (#37)"
+        );
+    }
+
+    /// The geometric carapace-region rule ([`confine_vertex`], bddap/rl#37), pure (no
+    /// GPU): a hand-built lane→part map and explicit positions stand in for the model.
+    /// Pins the three branches the model test can only assert in aggregate — and unlike
+    /// the weight-based strip, the override fires on a vertex the cluster strip would
+    /// have LEFT articulating (limb-dominant), which is exactly the #37 bug.
+    #[test]
+    fn carapace_region_override_confines_shell_verts() {
+        let arm = PartId::Joint(CrabJointId::ClawShoulder(Side::Left));
+        // Lane layout: 0,1 → Carapace; 2,3 → an arm bone.
+        let lane_parts = [PartId::Carapace, PartId::Carapace, arm, arm];
+        let region = Some((Vec3::splat(-1.0), Vec3::splat(1.0)));
+        let in_box = Vec3::ZERO; // inside the region
+        let out_box = Vec3::splat(5.0); // outside it
+
+        // The #37 case: a shell vertex the artist weighted ARM-heavy (arm dominant,
+        // 0.7 > 0.3). The weight-based strip keeps the arm lanes (limb-dominant), so the
+        // shell would bulge — but inside the region the geometric override forces it onto
+        // the carapace, renormalizing its shell lane(s) to 1 and zeroing the arm.
+        let js = [0u16, 2, 3, 1];
+        let ws = [0.2, 0.5, 0.2, 0.1];
+        // Confirm the OLD rule leaks (so the override is doing real work here).
+        let old = strip_to_dominant_cluster(js, ws, &lane_parts);
+        assert!(
+            old[1] + old[2] > 1e-6,
+            "precondition: cluster strip leaves this shell vert limb-weighted: {old:?}"
+        );
+        let new = confine_vertex(Some(in_box), region, js, ws, &lane_parts);
+        assert_eq!(new[1], 0.0, "arm lane zeroed on the confined shell vert");
+        assert_eq!(new[2], 0.0, "arm lane zeroed on the confined shell vert");
+        assert!((new.iter().sum::<f32>() - 1.0).abs() < 1e-6, "renormalized: {new:?}");
+        assert!((new[0] - 0.2 / 0.3).abs() < 1e-6 && (new[3] - 0.1 / 0.3).abs() < 1e-6);
+
+        // A limb-ONLY vertex inside the region (no carapace lane) is a socket stub
+        // passing through — the override skips it (confining would zero it), so it takes
+        // the cluster strip and keeps articulating.
+        let limb = [2u16, 3, 0, 0];
+        let limb_w = [0.6, 0.4, 0.0, 0.0];
+        let limb_new = confine_vertex(Some(in_box), region, limb, limb_w, &lane_parts);
+        assert_eq!(
+            limb_new,
+            strip_to_dominant_cluster(limb, limb_w, &lane_parts),
+            "limb-only vert in region keeps the cluster strip, not the override"
+        );
+        assert!(limb_new[0] + limb_new[1] > 0.99, "limb stub still articulates");
+
+        // The SAME shell vertex OUTSIDE the region takes the cluster strip (the override
+        // is geometric — it governs only the shell box).
+        let outside = confine_vertex(Some(out_box), region, js, ws, &lane_parts);
+        assert_eq!(outside, strip_to_dominant_cluster(js, ws, &lane_parts));
     }
 }
