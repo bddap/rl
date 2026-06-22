@@ -1,4 +1,5 @@
 /target
+/target-gc
 /tmp
 /checkpoints
 .cargo-home/

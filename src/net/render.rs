@@ -85,6 +85,55 @@ const MOUSE_SENS: f32 = 0.0022;
 /// frame dt so it's frame-rate independent.
 const PAD_LOOK_SPEED: f32 = 2.5;
 
+/// Stick deadzone (fraction of full deflection): a resting/centered stick reads small
+/// nonzero noise on real hardware, so ignore sub-threshold magnitude on BOTH sticks to
+/// stop the avatar creeping or the view drifting when the player isn't touching them.
+const PAD_STICK_DEADZONE: f32 = 0.15;
+
+/// How long Select/Back must be HELD to quit (seconds). A hold, not a tap, so a stray
+/// press can't end the round for everyone on the couch — the kid-safe equivalent of
+/// Esc. Client-local (sends AppExit, never touches the sim), so it can't desync a peer.
+const PAD_QUIT_HOLD_SECS: f32 = 1.0;
+
+/// One gamepad's contribution to this frame's control deltas: move axes from the left
+/// stick, look deltas from the right. Raw f32 — like the keyboard/mouse contributions,
+/// it crosses into the sim only after [`Input::new`] quantizes it (see [`gather_input`]).
+struct PadAxes {
+    strafe: f32,
+    forward: f32,
+    /// Yaw-look this frame (radians), already scaled by [`PAD_LOOK_SPEED`] and dt.
+    d_yaw: f32,
+    /// Pitch-look this frame (radians); client-only camera, never reaches the sim.
+    d_pitch: f32,
+}
+
+/// Map a gamepad's two sticks to this frame's move + look deltas. The pure analog core
+/// of the pad branch, factored out of [`gather_input`] so the determinism test can drive
+/// the SAME arithmetic the client runs (no copy to drift) — the sub-deadzone-clears-to-0,
+/// the look = stick·speed·dt scaling. Buttons aren't here: they're plain bool reads with
+/// no quantization concern, so they stay inline at the call site. Frame-local and f32;
+/// the result is quantized downstream by [`Input::new`], so it never enters the sim raw.
+fn pad_stick_axes(left_stick: Vec2, right_stick: Vec2, dt: f32) -> PadAxes {
+    // Deadzone on each stick's MAGNITUDE (not per-axis), so a resting stick's hardware
+    // noise reads as exactly zero rather than creeping the avatar/view.
+    let (mut strafe, mut forward) = (0.0, 0.0);
+    if left_stick.length() > PAD_STICK_DEADZONE {
+        strafe = left_stick.x;
+        forward = left_stick.y;
+    }
+    let (mut d_yaw, mut d_pitch) = (0.0, 0.0);
+    if right_stick.length() > PAD_STICK_DEADZONE {
+        d_yaw = right_stick.x * PAD_LOOK_SPEED * dt;
+        d_pitch = right_stick.y * PAD_LOOK_SPEED * dt;
+    }
+    PadAxes {
+        strafe,
+        forward,
+        d_yaw,
+        d_pitch,
+    }
+}
+
 /// Pitch clamp (radians) so the FP camera can't flip over the poles.
 const PITCH_LIMIT: f32 = 1.5;
 
@@ -499,9 +548,20 @@ fn drive_lockstep(
 // ---------------------------------------------------------------------------
 
 /// Sample local controls each render frame into [`PendingInput`] and integrate the
-/// client-side camera pitch. Produces ONLY data destined for the next [`Input`] —
-/// it never touches the sim. WASD/left-stick = move; mouse/right-stick = look
-/// (yaw → sim, pitch → client); Space/RT or gamepad South = action.
+/// client-side camera pitch. Produces ONLY data destined for the next [`Input`] — it
+/// never touches the sim. The game is fully playable on keyboard+mouse OR a gamepad
+/// alone, the two additive:
+/// - move: WASD / left stick / d-pad
+/// - look: mouse / right stick (yaw → sim, pitch → client-only)
+/// - action (extract): Space / mouse-left / pad South / pad RT
+/// - restart: R / pad Start (edge-triggered → [`buttons::RESTART`], lockstep)
+/// - quit: Esc / hold pad Select (handled in [`exit_on_esc`])
+///
+/// Analog stick magnitudes are raw f32 here, but the ONLY path from this function to
+/// the sim is via [`Input::new`] in [`drive_lockstep`], which quantizes every axis to
+/// the fixed-point grid — the identical boundary keyboard/mouse cross. So no f32 ever
+/// reaches the deterministic sim; the i16 [`Input`] that each peer broadcasts is the
+/// shared truth, and a pad input is bit-for-bit a keyboard input of the same magnitude.
 #[allow(clippy::too_many_arguments)]
 fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
@@ -555,20 +615,37 @@ fn gather_input(
         d_pitch -= d.y * MOUSE_SENS;
     }
 
-    // Gamepad: left stick moves, right stick looks, RT/South = action. Sticks have a
-    // deadzone so a resting stick doesn't creep.
+    // Gamepad (full pad-only play): left stick moves, right stick looks, South/RT =
+    // action, Start = restart, Select held = quit (the quit hold is handled in
+    // `exit_on_esc`). Sticks have a deadzone so a resting stick doesn't creep. Stick
+    // magnitudes are raw f32 here but cross into the sim ONLY through `Input::new`'s
+    // fixed-point quantization (below) — the SAME boundary keyboard/mouse pass — so the
+    // analog values never reach the deterministic sim as floats.
     for gp in gamepads.iter() {
-        let ls = gp.left_stick();
-        if ls.length() > 0.15 {
-            strafe += ls.x;
-            forward += ls.y;
-        }
-        let rs = gp.right_stick();
-        if rs.length() > 0.15 {
-            d_yaw += rs.x * PAD_LOOK_SPEED * dt;
-            d_pitch += rs.y * PAD_LOOK_SPEED * dt;
-        }
+        // The analog stick → axis arithmetic (deadzone + look scaling) lives in the pure
+        // `pad_stick_axes` so the determinism test can exercise the SAME transform the
+        // client runs, with no copy to drift out of sync.
+        let pad = pad_stick_axes(gp.left_stick(), gp.right_stick(), dt);
+        strafe += pad.strafe;
+        forward += pad.forward;
+        d_yaw += pad.d_yaw;
+        d_pitch += pad.d_pitch;
+        // D-pad mirrors WASD as a digital move (kids reach for it instinctively, and it's
+        // the obvious second way to walk): full ±1.0 on each axis, summed with the stick
+        // and clamped at the funnel below — the SAME path WASD takes, so it quantizes
+        // identically. Up=forward, Down=back, Right/Left=strafe (pre-negation downstream).
+        forward +=
+            (gp.pressed(GamepadButton::DPadUp) as i32 - gp.pressed(GamepadButton::DPadDown) as i32)
+                as f32;
+        strafe += (gp.pressed(GamepadButton::DPadRight) as i32
+            - gp.pressed(GamepadButton::DPadLeft) as i32) as f32;
         action |= gp.pressed(GamepadButton::South) || gp.pressed(GamepadButton::RightTrigger2);
+        // Restart on Start, edge-triggered exactly like keyboard R: latched here, sent
+        // as buttons::RESTART, so every peer restarts on the same tick in lockstep (a
+        // local-only reset would desync). Edge (just_pressed), not held.
+        if gp.just_pressed(GamepadButton::Start) {
+            pending.restart = true;
+        }
     }
     // Mouse-left also fires action, for mouse-only play.
     action |= mouse_buttons.pressed(MouseButton::Left);
@@ -593,12 +670,34 @@ fn gather_input(
     yaw.0 = (yaw.0 - d_yaw).rem_euclid(std::f32::consts::TAU);
 }
 
-/// Quit the game on Esc (windowed play only). Purely client-local — sends Bevy's
-/// [`AppExit`] to end the run; no sim/lockstep involvement, so it can't desync a peer
-/// (each client just closes its own window). The other peers play on.
-fn exit_on_esc(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
+/// Quit the game (windowed play only): Esc, or HOLD the gamepad Select/Back button for
+/// [`PAD_QUIT_HOLD_SECS`]. Purely client-local — sends Bevy's [`AppExit`] to end the
+/// run; no sim/lockstep involvement, so it can't desync a peer (each client just closes
+/// its own window). The other peers play on. Select is a HOLD, not a tap, so a stray
+/// press on the couch can't kick everyone out mid-round.
+fn exit_on_esc(
+    keys: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
+    time: Res<Time>,
+    mut quit_held: Local<f32>,
+    mut exit: MessageWriter<AppExit>,
+) {
     if keys.just_pressed(KeyCode::Escape) {
         exit.write(AppExit::Success);
+        return;
+    }
+    // Accumulate held time while Select is down on ANY pad; reset the instant it's
+    // released, so only a sustained hold (not repeated taps) reaches the threshold.
+    let select_down = gamepads
+        .iter()
+        .any(|gp| gp.pressed(GamepadButton::Select));
+    if select_down {
+        *quit_held += time.delta_secs();
+        if *quit_held >= PAD_QUIT_HOLD_SECS {
+            exit.write(AppExit::Success);
+        }
+    } else {
+        *quit_held = 0.0;
     }
 }
 
@@ -1055,8 +1154,10 @@ fn update_hud(state: NonSend<GameState>, mut hud: Query<&mut Text, With<StatusHu
         Outcome::Extracted => "\nROUND WON — extracted!".to_string(),
         Outcome::Wiped => "\nROUND LOST — wiped".to_string(),
     };
+    // Both control schemes on the HUD so a couch/pad player sees the bindings without a
+    // keyboard: keyboard/mouse on the first line, gamepad (in parens) on the second.
     **text = format!(
-        "You: {status}   |   reach the green pillar, hold [Space]/(A) to extract — dodge the crab\n[R] restart   [Esc] quit{outcome}",
+        "You: {status}   |   reach the green pillar, hold [Space]/(A or RT) to extract — dodge the crab\n[R] restart   [Esc] quit      Pad: L-stick/d-pad move · R-stick look · (Start) restart · hold (Select) quit{outcome}",
     );
 }
 
@@ -1332,5 +1433,50 @@ mod tests {
             (right - Vec3::NEG_X).length() < 1e-5,
             "facing +Z, camera-right must be world −X (so sim +X is screen-left); got {right:?}"
         );
+    }
+
+    /// A stick resting inside the deadzone contributes exactly zero on every axis — the
+    /// guard that hardware idle-noise can't creep the avatar or drift the view. Tests the
+    /// REAL client transform (`pad_stick_axes`, which `gather_input` calls), so a future
+    /// edit that drops/weakens the deadzone fails here.
+    #[test]
+    fn pad_sub_deadzone_sticks_contribute_nothing() {
+        let inside = PAD_STICK_DEADZONE * 0.9;
+        let a = pad_stick_axes(Vec2::new(inside, 0.0), Vec2::new(0.0, inside), 1.0 / 60.0);
+        assert_eq!((a.strafe, a.forward), (0.0, 0.0), "sub-deadzone move is zero");
+        assert_eq!((a.d_yaw, a.d_pitch), (0.0, 0.0), "sub-deadzone look is zero");
+    }
+
+    /// Past the deadzone, the left stick passes its raw magnitude straight to the move
+    /// axes (analog, not bang-bang) and the right stick's look scales with both deflection
+    /// and dt — pinning the frame-rate-independent look and the analog move feel.
+    #[test]
+    fn pad_above_deadzone_passes_move_and_scales_look_by_dt() {
+        let dt = 1.0 / 60.0;
+        let a = pad_stick_axes(Vec2::new(0.8, -0.6), Vec2::new(1.0, 0.0), dt);
+        assert_eq!(a.strafe, 0.8, "left stick X → strafe, analog");
+        assert_eq!(a.forward, -0.6, "left stick Y → forward, analog");
+        assert!(
+            (a.d_yaw - PAD_LOOK_SPEED * dt).abs() < 1e-6,
+            "full right-stick-X look = PAD_LOOK_SPEED·dt, got {}",
+            a.d_yaw
+        );
+        // Double the dt → double the per-frame look, the frame-rate independence that
+        // keeps turn speed consistent across machines (the i16 it quantizes to is each
+        // peer's own broadcast input, so this stays lockstep-safe — see net::desync_test).
+        let b = pad_stick_axes(Vec2::ZERO, Vec2::new(1.0, 0.0), dt * 2.0);
+        assert!((b.d_yaw - 2.0 * a.d_yaw).abs() < 1e-6, "look is linear in dt");
+    }
+
+    /// `pad_stick_axes` does NOT pre-negate any axis: the screen-relative X-negation is
+    /// applied once, downstream in `gather_input` (the `-strafe` / `yaw_delta -= d_yaw`
+    /// at the funnel), to BOTH keyboard and pad together. A positive stick X yields a
+    /// positive raw strafe/yaw here; if this fn negated too, the pad would invert. Pins
+    /// that the single negation site stays single (no double-negate, no pad-only flip).
+    #[test]
+    fn pad_axes_are_not_pre_negated() {
+        let a = pad_stick_axes(Vec2::new(1.0, 0.0), Vec2::new(1.0, 0.0), 1.0 / 60.0);
+        assert!(a.strafe > 0.0, "+stick X → +raw strafe (negation is downstream)");
+        assert!(a.d_yaw > 0.0, "+stick X → +raw yaw (negation is downstream)");
     }
 }
