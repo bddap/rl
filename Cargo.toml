@@ -2,6 +2,10 @@
 name = "rl"
 version = "0.1.0"
 edition = "2024"
+# Dual MIT / Apache-2.0 (the Rust-ecosystem default); see LICENSE-MIT, LICENSE-APACHE.
+# Covers this repo's source ONLY — bundled-but-gitignored art assets carry their own
+# separate terms (see NOTICE).
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 bevy = "0.18"
