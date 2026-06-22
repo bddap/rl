@@ -8,3 +8,6 @@ vendor/
 /assets/
 /ckpt*/
 .nixshell.err
+
+# stray test/build output logs (do not commit)
+/*.log
