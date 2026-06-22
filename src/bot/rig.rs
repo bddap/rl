@@ -689,7 +689,7 @@ fn arc_to(from: Vec3, to: Vec3) -> Quat {
 /// bones are excluded (their verts belong to the limb links), and so are the
 /// lateral shoulder bones `Def_shell.003`/`.006`, which sit out over the leg sockets
 /// and would stretch the box wide enough to swallow the legs.
-pub(crate) const TRUNK_BONES: [&str; 10] = [
+pub const TRUNK_BONES: [&str; 10] = [
     "Def_shell.000.L",
     "Def_shell.002.L",
     "Def_shell.000.R",
@@ -727,7 +727,7 @@ fn carapace_box(model: &impl BindSource, center: Vec3) -> (Vec3, Vec3) {
 /// world, so the collider must too. This mirrors the world accumulation in [`super::body`]'s
 /// `spawn_crab` minus the constant spawn translation (it cancels — `anchor1` is a
 /// parent-relative delta, and the clouds are already in this frame).
-pub(crate) struct RestCollider {
+pub struct RestCollider {
     pub part: PartId,
     pub shape: RestShape,
     /// The link's bind-pose-world origin — where its revolute joint actually
@@ -738,7 +738,7 @@ pub(crate) struct RestCollider {
     pub pivot: Vec3,
 }
 
-pub(crate) enum RestShape {
+pub enum RestShape {
     Capsule { a: Vec3, b: Vec3, radius: f32 },
     Cuboid { center: Vec3, half: Vec3 },
 }
@@ -746,7 +746,7 @@ pub(crate) enum RestShape {
 /// Reconstruct every scoreable collider of `recipe` in bind-pose world. Locked
 /// eye-stalk links are skipped (no fitted cloud to score). The carapace box is
 /// world-axis-aligned at the hub + offset.
-pub(crate) fn rest_colliders(model: &impl BindSource, recipe: &RigRecipe) -> Vec<RestCollider> {
+pub fn rest_colliders(model: &impl BindSource, recipe: &RigRecipe) -> Vec<RestCollider> {
     let Some(o_root) = leg_hub_centroid(model) else {
         return Vec::new();
     };

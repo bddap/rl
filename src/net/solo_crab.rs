@@ -457,7 +457,7 @@ fn probe_step(
 
     // Log periodically (and always at tick 1 so the start point is recorded).
     let tick = driver.ls.sim().tick();
-    if tick == 1 || tick % driver.log_every == 0 {
+    if tick == 1 || tick.is_multiple_of(driver.log_every) {
         let crab = driver.ls.sim().crab().pos();
         let crab_x_m = crab.x as f32 / UNIT as f32;
         let crab_z_m = crab.z as f32 / UNIT as f32;

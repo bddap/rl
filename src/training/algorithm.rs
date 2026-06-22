@@ -148,6 +148,16 @@ impl RolloutBuffer {
     pub fn len(&self) -> usize {
         self.transitions.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.transitions.is_empty()
+    }
+}
+
+impl Default for RolloutBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Running mean/std of the value targets (GAE returns), used to fit the value head

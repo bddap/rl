@@ -582,6 +582,7 @@ struct StatusHud;
 /// else is the existing deterministic machinery — pump the transport, then
 /// `try_advance`. A desync fault is logged (lockstep can't recover); the client
 /// keeps running so the operator sees it rather than a silent freeze.
+#[allow(clippy::too_many_arguments)] // Bevy system: every parameter is a framework-injected resource/local.
 fn drive_lockstep(
     mut state: NonSendMut<GameState>,
     mut pending: ResMut<PendingInput>,

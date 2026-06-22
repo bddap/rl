@@ -1,11 +1,11 @@
-// The RL crab machinery (bot / physics / training / play / player / debug_sliders) and
+// The RL crab machinery (bot / physics / training / play / debug_sliders) and
 // the shared `Visuals` / `TrainConfig` / `UpdateDevice` types now live in the `rl`
 // LIBRARY (src/lib.rs), so the `game` binary can drive the same trained crab in its
 // solo playtest. This binary re-imports them rather than declaring its own copies — one
 // implementation, shared by both binaries. (`recursion_limit` is set on the library
 // root where the affected wgpu-load code lives; it does not need repeating here.)
 use rl::{
-    TrainConfig, UpdateDevice, Visuals, bot, debug_sliders, physics, play, player, training,
+    TrainConfig, UpdateDevice, Visuals, bot, debug_sliders, physics, play, training,
 };
 
 use std::path::PathBuf;
