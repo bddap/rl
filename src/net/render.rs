@@ -132,7 +132,7 @@ pub fn build_windowed_app(ls: Lockstep, net: Option<NetDriver>) -> App {
             Update,
             (gather_input, drive_lockstep, apply_transforms, update_hud).chain(),
         )
-        .add_systems(Update, grab_cursor_once);
+        .add_systems(Update, (grab_cursor_once, exit_on_esc));
     app
 }
 
@@ -205,7 +205,8 @@ fn insert_core(app: &mut App, ls: Lockstep, input_source: InputSource) {
         prev,
     })
     .init_resource::<PendingInput>()
-    .init_resource::<CameraPitch>();
+    .init_resource::<CameraPitch>()
+    .init_resource::<CameraYaw>();
 }
 
 // ---------------------------------------------------------------------------
@@ -280,12 +281,25 @@ struct PendingInput {
     /// Accrued yaw-look this inter-tick interval, in radians (drained per tick).
     yaw_delta: f32,
     action: bool,
+    /// Latches if RESTART (R) was pressed in this interval. Sent as
+    /// [`buttons::RESTART`] so the restart rides the deterministic input stream and all
+    /// peers restart on the same tick; the sim edge-triggers it. Drained per tick.
+    restart: bool,
 }
 
 /// Client-side camera pitch (radians), integrated from look input. The sim models
 /// only yaw (feet); pitch lives here and never reaches the sim, per the interface.
 #[derive(Resource, Default)]
 struct CameraPitch(f32);
+
+/// Client-side camera YAW (radians), integrated from the same look input every frame.
+/// While the local player is Alive the camera uses the AUTHORITATIVE sim yaw (so it
+/// agrees with the avatar and peers) and this tracks it; once the player is downed or
+/// extracted the sim freezes their yaw, so the camera falls back to this free value —
+/// giving a spectator full free-look (yaw AND pitch), not pitch-only. Never reaches the
+/// sim, so it adds no nondeterminism (a dead player's facing affects nothing).
+#[derive(Resource, Default)]
+struct CameraYaw(f32);
 
 /// The sim's per-tick yaw turn cap, in radians. The sim clamps a tick's yaw delta to
 /// `trig::TURN/24` turn-units (see [`crate::net::sim`]); we normalize our accrued
@@ -338,6 +352,11 @@ fn drive_lockstep(
     time: Res<Time>,
     mut reported_outcome: Local<bool>,
     mut next_tel_tick: Local<u64>,
+    // Last sim tick this system saw, to detect a deterministic restart (RESTART rewinds
+    // the sim to tick 0). When it does, the round-decided latch and telemetry cursor
+    // below must reset, or the NEXT round never reports "decided" and tick-telemetry
+    // stays suppressed until the counter climbs back past the stale watermark.
+    mut last_tick: Local<u64>,
     // Cumulative lockstep fault count across the whole round (persists between system
     // runs), so telemetry reports the REAL running desync total — not a per-frame 0. This
     // is the live-debug alarm: a non-zero value on any deck means it has diverged.
@@ -367,11 +386,13 @@ fn drive_lockstep(
         state.prev = SimSnapshot::capture(state.ls.sim());
 
         let look_axis = (pending.yaw_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
-        let btns = if pending.action { buttons::ACTION } else { 0 };
+        let btns = (if pending.action { buttons::ACTION } else { 0 })
+            | (if pending.restart { buttons::RESTART } else { 0 });
         let input = Input::new(pending.strafe, pending.forward, look_axis, btns);
-        // Drain the accrued look + action; movement axes are re-sampled next frame.
+        // Drain the accrued look + latched buttons; movement axes are re-sampled next frame.
         pending.yaw_delta = 0.0;
         pending.action = false;
+        pending.restart = false;
 
         let me = state.ls.me();
         let issue_tick = state.ls.next_tick();
@@ -452,6 +473,18 @@ fn drive_lockstep(
         state.accumulator = state.accumulator.min(TICK_DT);
     }
 
+    // Restart detector: a RESTART press rewinds the sim to tick 0, so a tick lower than
+    // last frame's means the round restarted. Clear the round-decided latch so the new
+    // round can report its own outcome, and snap the telemetry cursor back to the new
+    // (low) tick so sampled telemetry resumes immediately instead of waiting out a stale
+    // watermark.
+    let now_tick = state.ls.sim().tick();
+    if now_tick < *last_tick {
+        *reported_outcome = false;
+        *next_tel_tick = (now_tick / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
+    }
+    *last_tick = now_tick;
+
     if !*reported_outcome && state.ls.sim().outcome() != Outcome::Ongoing {
         *reported_outcome = true;
         info!("round decided: {:?}", state.ls.sim().outcome());
@@ -479,6 +512,7 @@ fn gather_input(
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     mut pending: ResMut<PendingInput>,
     mut pitch: ResMut<CameraPitch>,
+    mut yaw: ResMut<CameraYaw>,
 ) {
     let dt = time.delta_secs();
 
@@ -499,6 +533,11 @@ fn gather_input(
     }
 
     let mut action = keys.pressed(KeyCode::Space);
+    // Restart the round (R). Latched here, sent as buttons::RESTART, edge-triggered in
+    // the sim — so it restarts every peer in lockstep, not a local-only reset.
+    if keys.just_pressed(KeyCode::KeyR) {
+        pending.restart = true;
+    }
 
     // --- Look (accumulated across frames) ---
     let mut d_yaw = 0.0f32;
@@ -548,6 +587,19 @@ fn gather_input(
     pending.action |= action;
 
     pitch.0 = (pitch.0 + d_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    // Integrate the client-side free-look yaw from the SAME (screen-corrected) delta the
+    // sim yaw gets, so while alive it tracks the avatar and when dead it free-looks
+    // seamlessly from the last facing. Wrap to keep it bounded over a long spectate.
+    yaw.0 = (yaw.0 - d_yaw).rem_euclid(std::f32::consts::TAU);
+}
+
+/// Quit the game on Esc (windowed play only). Purely client-local — sends Bevy's
+/// [`AppExit`] to end the run; no sim/lockstep involvement, so it can't desync a peer
+/// (each client just closes its own window). The other peers play on.
+fn exit_on_esc(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
+    if keys.just_pressed(KeyCode::Escape) {
+        exit.write(AppExit::Success);
+    }
 }
 
 /// Grab + hide the cursor once the window's [`CursorOptions`] exist, so mouse-look
@@ -784,11 +836,13 @@ type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
 /// previous tick's snapshot and the live sim by the fractional accumulator. This is
 /// the smoothness layer: the sim jumps in 30 Hz steps, but every rendered frame
 /// shows a pose `alpha` of the way from last tick to this one. Reads sim state
-/// read-only; writes only Bevy `Transform`s.
+/// read-only; writes Bevy `Transform`s and (while the local player is alive) keeps the
+/// client-side [`CameraYaw`] tracking the authoritative sim yaw — never the sim.
 #[allow(clippy::too_many_arguments)]
 fn apply_transforms(
     state: NonSend<GameState>,
     pitch: Res<CameraPitch>,
+    mut yaw: ResMut<CameraYaw>,
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
     mut planes_q: PlaneXf,
@@ -867,9 +921,19 @@ fn apply_transforms(
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
-            let yaw = lerp_yaw(prev.yaw(), now.yaw(), alpha);
+            // Alive: aim by the AUTHORITATIVE sim yaw (so the view matches the avatar and
+            // peers) and keep the free-look yaw tracking it. Downed/Extracted: the sim
+            // freezes our yaw, so aim by the client-side CameraYaw instead — full
+            // free-look (yaw+pitch) for a spectator, decoupled from the gated movement.
+            let cam_yaw = if now.status() == PlayerStatus::Alive {
+                let sim_yaw = lerp_yaw(prev.yaw(), now.yaw(), alpha);
+                yaw.0 = sim_yaw;
+                sim_yaw
+            } else {
+                yaw.0
+            };
             let eye = world(pos, EYE_HEIGHT);
-            let look_dir = look_direction(yaw, pitch.0);
+            let look_dir = look_direction(cam_yaw, pitch.0);
             *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
         }
     }
@@ -992,7 +1056,7 @@ fn update_hud(state: NonSend<GameState>, mut hud: Query<&mut Text, With<StatusHu
         Outcome::Wiped => "\nROUND LOST — wiped".to_string(),
     };
     **text = format!(
-        "You: {status}   |   reach the green pillar, hold [Space]/(A) to extract — dodge the crab{outcome}",
+        "You: {status}   |   reach the green pillar, hold [Space]/(A) to extract — dodge the crab\n[R] restart   [Esc] quit{outcome}",
     );
 }
 

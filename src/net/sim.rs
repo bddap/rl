@@ -93,6 +93,11 @@ pub struct PlayerId(pub u8);
 pub mod buttons {
     /// Context action: at the extraction point, confirm the pickup. Bit 0.
     pub const ACTION: u8 = 1 << 0;
+    /// Restart the round. Bit 1. Routed through the input stream (not a client-local
+    /// reset) so every peer restarts on the SAME tick and stays in lockstep — a
+    /// local-only reset would desync. Edge-triggered in the sim (see [`Sim::step`]):
+    /// held across ticks restarts once, not every tick.
+    pub const RESTART: u8 = 1 << 1;
 }
 
 /// One player's input for a single tick.
@@ -186,18 +191,40 @@ pub const UNIT: i64 = 1000;
 /// realism: ~5 m/s at 30 Hz (`SPEED * 30 / UNIT`).
 const PLAYER_SPEED: i64 = 166;
 
-/// Crab pursuit speed, in [`UNIT`]/tick. A touch slower than the player so a dodging
-/// player can open distance — the asymmetry the loop is built on (rl#38) — but fast
-/// enough to punish standing still.
-const CRAB_SPEED: i64 = 150;
+/// Crab pursuit speed, in [`UNIT`]/tick. Held meaningfully below [`PLAYER_SPEED`]
+/// (166) so a dodging player can OUTRUN it and open distance — the tiny-vs-giant
+/// asymmetry the loop is built on (rl#38). Beatability comes mostly from this gap plus
+/// [`CRAB_GRAB_RADIUS`] and the [`STARTUP_GRACE_TICKS`] head-start, not from one number.
+/// FEEL KNOB: the exact value is for the owner to fine-tune by playing; keep the gap to
+/// PLAYER_SPEED wide enough that running away actually works.
+const CRAB_SPEED: i64 = 130;
 
 /// Render hint only: how many times bigger than a player to draw the crab. It is a
 /// scaled placeholder; the sim treats it as a point with a [`CRAB_GRAB_RADIUS`] reach.
 pub const CRAB_SCALE: i64 = 12;
 
 /// How close (in [`UNIT`]) the crab must get to a living player to "grab" (down) it.
-/// Generous — it stands in for the giant crab's reach without modelling its limbs.
-pub const CRAB_GRAB_RADIUS: i64 = 3 * UNIT;
+/// Stands in for the giant crab's reach without modelling its limbs. Was 3 m, which —
+/// combined with the crab snapping onto its target each step — made it catch from too
+/// far and feel relentless (rl#38 playtest). Pulled in so a player who keeps a small
+/// gap survives. FEEL KNOB: exact reach is the owner's to fine-tune; smaller = more
+/// beatable, larger = scarier.
+pub const CRAB_GRAB_RADIUS: i64 = 3 * UNIT / 2;
+
+/// Deterministic startup head-start, in ticks (~1 s at 30 Hz). For the first this-many
+/// ticks the crab neither pursues NOR grabs (see [`Sim::step`]) — it holds its spawn
+/// while players orient and break away. Fixes the "caught the instant the game
+/// launched" report (rl#38): with a guest spawning near the crab or the crab beelining
+/// from frame 1, there was no moment to react. Counted in ticks (sim state, identical
+/// on every peer), never wall-clock, so it stays deterministic. FEEL KNOB.
+const STARTUP_GRACE_TICKS: u64 = 30;
+
+/// Minimum spawn separation (in [`UNIT`]) enforced between the crab and the NEAREST
+/// player at round start (see [`Sim::spawn_crab`]). Belt-and-braces with
+/// [`STARTUP_GRACE_TICKS`]: even if a future roster/layout would drop a player close to
+/// the crab's nominal spawn, the crab is pushed out along the spawn line so no one
+/// starts inside its reach. Comfortably larger than [`CRAB_GRAB_RADIUS`].
+const MIN_CRAB_SPAWN_DISTANCE: i64 = 12 * UNIT;
 
 /// How close (in [`UNIT`]) a living player must be to the extraction point, AND
 /// holding [`buttons::ACTION`], to extract and win the round.
@@ -423,11 +450,38 @@ pub struct Sim {
     outcome: Outcome,
     /// The one sanctioned randomness source (see [`Sim::rng`]). Its stream position is
     /// hashed and reproduced across peers, so it is genuine sim state, not a scratch
-    /// generator — never reseed it mid-sim. The gray-box crab pursuit is pure
-    /// arithmetic and draws nothing; the field stays so later loop variation (spawn
-    /// jitter, crab feints) has a deterministic source ready, and the contract that
-    /// "the one RNG is hashed" is established.
+    /// generator — never reseed it mid-sim EXCEPT on a deterministic restart (see
+    /// [`Sim::step`]'s RESTART handling, which every peer applies on the same tick). The
+    /// gray-box crab pursuit is pure arithmetic and draws nothing; the field stays so
+    /// later loop variation (spawn jitter, crab feints) has a deterministic source
+    /// ready, and the contract that "the one RNG is hashed" is established.
     rng: ChaCha8Rng,
+    /// Whether [`buttons::RESTART`] was held by some player on the PREVIOUS tick, so the
+    /// restart is EDGE-triggered: a held key restarts once, not every tick it's down.
+    /// Genuine sim state (it gates a future tick's behaviour) and identical on every
+    /// peer (derived from the same lockstep inputs), so it is folded into
+    /// [`Sim::state_hash`].
+    restart_held: bool,
+    /// The immutable round CONFIG — the match seed and the foot/pilot roster — kept so a
+    /// deterministic restart ([`buttons::RESTART`]) can rebuild the initial state in
+    /// place. Constant for the session and identical on every peer (the same arguments
+    /// reach every peer's [`Sim::new_with_pilots`]), so it is NOT folded into
+    /// [`Sim::state_hash`]: it can't differ between in-sync peers, and a peer built with
+    /// a different roster is already a different game the cross-check would surface via
+    /// the player/plane state it does hash.
+    config: RoundConfig,
+}
+
+/// The arguments that built a [`Sim`], retained so [`Sim::step`] can rebuild the
+/// initial round on a deterministic restart. Not hashed — it never changes and is the
+/// same on every peer (see [`Sim::config`]).
+#[derive(Debug, Clone)]
+struct RoundConfig {
+    seed: u64,
+    /// Foot players, in `PlayerId` order. Disjoint from `pilots`.
+    players: Vec<PlayerId>,
+    /// Pilots (spawn flying a plane). Disjoint from `players`.
+    pilots: Vec<PlayerId>,
 }
 
 impl Sim {
@@ -456,15 +510,68 @@ impl Sim {
         let mut sorted: Vec<PlayerId> = players.to_vec();
         sorted.sort();
         sorted.dedup();
+        // Pilots not in the player set are meaningless — keep only the ones that map to
+        // a participant, in sorted order, so the retained config is canonical.
+        let pilots: Vec<PlayerId> = sorted.iter().copied().filter(|id| pilots.contains(id)).collect();
+        let config = RoundConfig {
+            seed,
+            players: sorted,
+            pilots,
+        };
+        let (players, planes, crab, extraction) = Self::spawn_state(&config);
+        Self {
+            tick: 0,
+            players,
+            planes,
+            crab,
+            extraction,
+            outcome: Outcome::Ongoing,
+            rng: ChaCha8Rng::seed_from_u64(seed),
+            restart_held: false,
+            config,
+        }
+    }
+
+    /// Rebuild the round to its tick-0 state from the stored [`config`](Sim::config) —
+    /// the deterministic restart ([`buttons::RESTART`] in [`Sim::step`]). Rebuilds the
+    /// SAME way construction does (both call [`Sim::spawn_state`]), so a restarted round
+    /// is byte-identical to a freshly-constructed one. The RNG is re-seeded from the
+    /// (constant) match seed; since every peer restarts on the same tick from the same
+    /// config, all peers land on the identical fresh state.
+    ///
+    /// Deliberately leaves [`config`](Sim::config) and [`restart_held`](Sim::restart_held)
+    /// alone: `config` is the rebuild source, and the restart-edge latch MUST survive the
+    /// rebuild — clearing it would let a still-held R re-trigger every tick (the
+    /// level-trigger bug `restart_is_edge_triggered_not_level` guards). [`Sim::step`] owns
+    /// that latch; reset only touches the round/world fields.
+    fn reset(&mut self) {
+        let (players, planes, crab, extraction) = Self::spawn_state(&self.config);
+        self.tick = 0;
+        self.players = players;
+        self.planes = planes;
+        self.crab = crab;
+        self.extraction = extraction;
+        self.outcome = Outcome::Ongoing;
+        self.rng = ChaCha8Rng::seed_from_u64(self.config.seed);
+    }
+
+    /// The tick-0 entity layout for a [`RoundConfig`] — the SINGLE source of the spawn
+    /// arrangement, shared by [`Sim::new_with_pilots`] and [`Sim::reset`] so the two can't
+    /// drift. Pure function of the (integer, sorted) config, so every peer composes the
+    /// identical starting world. Returns the foot players, the pilots' planes, the crab,
+    /// and the extraction point.
+    fn spawn_state(
+        cfg: &RoundConfig,
+    ) -> (BTreeMap<PlayerId, Player>, BTreeMap<PlayerId, Plane>, Crab, ExtractionPoint) {
         let mut map = BTreeMap::new();
         let mut plane_map = BTreeMap::new();
-        for (i, &id) in sorted.iter().enumerate() {
+        let n = cfg.players.len() as i64;
+        for (i, &id) in cfg.players.iter().enumerate() {
             // Spawn ring near the origin; spacing in world units, all facing +Z
             // (yaw 0). Integer layout → identical everywhere. A pilot takes the same
             // ground XZ slot but starts airborne over it (a plane, not feet).
-            let i = i as i64;
-            let x = (i - sorted.len() as i64 / 2) * 2 * UNIT;
-            if pilots.contains(&id) {
+            let x = (i as i64 - n / 2) * 2 * UNIT;
+            if cfg.pilots.contains(&id) {
                 plane_map.insert(
                     id,
                     Plane {
@@ -493,29 +600,53 @@ impl Sim {
             map.keys().all(|id| !plane_map.contains_key(id)),
             "a participant is on foot XOR piloting — the two maps must stay disjoint"
         );
-        Self {
-            tick: 0,
-            players: map,
-            planes: plane_map,
-            // Extraction is across the map at +Z; players spawn at the origin. The crab
-            // sits BETWEEN them (around the midpoint, offset in X so it's an obstacle to
-            // dodge, not a head-on instant grab) — so reaching safety means getting past
-            // it. The player is slightly faster than the crab (PLAYER_SPEED > CRAB_SPEED),
-            // so a good dodge slips by while standing still or a clumsy line gets grabbed:
-            // the tiny-vs-giant asymmetry the loop is built on (rl#38).
-            crab: Crab {
-                pos: Pos {
-                    x: 6 * UNIT,
-                    z: 20 * UNIT,
-                },
-                yaw: 0,
-            },
-            extraction: ExtractionPoint {
-                pos: Pos { x: 0, z: 40 * UNIT },
-            },
-            outcome: Outcome::Ongoing,
-            rng: ChaCha8Rng::seed_from_u64(seed),
+        // Extraction is across the map at +Z; players spawn at the origin.
+        let extraction = ExtractionPoint {
+            pos: Pos { x: 0, z: 40 * UNIT },
+        };
+        let crab = Self::spawn_crab(&map);
+        (map, plane_map, crab, extraction)
+    }
+
+    /// The crab's spawn pose for a given set of foot players. It sits BETWEEN spawn and
+    /// the +Z extraction (around the midpoint, offset in X so it's an obstacle to dodge,
+    /// not a head-on instant grab). Then, as a guard against any roster/layout that
+    /// would drop a player right next to it, push it OUT along the spawn→nearest-player
+    /// line until at least [`MIN_CRAB_SPAWN_DISTANCE`] away — so no one ever starts
+    /// inside its reach (the "caught the instant it launched" report, rl#38). Pure
+    /// integer math (the same deterministic isqrt the pursuit uses), so every peer
+    /// computes the identical spawn.
+    fn spawn_crab(players: &BTreeMap<PlayerId, Player>) -> Crab {
+        let mut pos = Pos {
+            x: 6 * UNIT,
+            z: 20 * UNIT,
+        };
+        // Nearest foot player to the nominal spawn (PlayerId order via BTreeMap breaks
+        // ties; planes aren't crab targets, so they don't gate the spawn).
+        if let Some(nearest) = players
+            .values()
+            .min_by_key(|p| dist2_i128(pos.x - p.pos.x, pos.z - p.pos.z))
+        {
+            let dx = pos.x - nearest.pos.x;
+            let dz = pos.z - nearest.pos.z;
+            let d2 = dist2_i128(dx, dz);
+            let min = MIN_CRAB_SPAWN_DISTANCE as i128;
+            if d2 < min * min {
+                // Too close: shove the crab to exactly MIN_CRAB_SPAWN_DISTANCE along the
+                // vector from that player toward the crab (away from the player). If the
+                // crab sits exactly on the player (d2==0) there's no direction to push
+                // along — fall back to +X, an arbitrary but deterministic escape.
+                let dist = isqrt_i128(d2);
+                let (ux, uz, len) = if dist > 0 {
+                    (dx as i128, dz as i128, dist)
+                } else {
+                    (1, 0, 1)
+                };
+                pos.x = nearest.pos.x + (ux * min / len) as i64;
+                pos.z = nearest.pos.z + (uz * min / len) as i64;
+            }
         }
+        Crab { pos, yaw: 0 }
     }
 
     /// Advance one tick: move each living player by its input (relative to facing),
@@ -528,6 +659,20 @@ impl Sim {
     /// defaulting keeps the step total rather than panicking on a dropped frame.
     pub fn step(&mut self, inputs: &BTreeMap<PlayerId, Input>) {
         self.tick += 1;
+
+        // Restart (edge-triggered): if any player newly presses RESTART this tick,
+        // rebuild the round to tick 0 and stop — every peer holds the identical input
+        // for this tick, so they all restart in lockstep (this is why restart rides the
+        // input stream, never a client-local reset). Checked BEFORE the freeze below so
+        // a decided (won/lost) round can be restarted, which is the whole point. Edge,
+        // not level: holding R restarts once, not every tick it's down.
+        let restart_now = inputs.values().any(|i| i.pressed(buttons::RESTART));
+        let restart_edge = restart_now && !self.restart_held;
+        self.restart_held = restart_now;
+        if restart_edge {
+            self.reset();
+            return;
+        }
 
         // Once the round is decided, freeze the world: no more movement or grabs, so
         // every peer that reached the same outcome holds an identical final state.
@@ -573,9 +718,16 @@ impl Sim {
             step_plane(plane, inp);
         }
 
+        // Startup grace (deterministic, counted in ticks): for the first
+        // STARTUP_GRACE_TICKS the crab neither pursues nor grabs — it holds its spawn so
+        // players get a real moment to orient and break away (fixes "caught the instant
+        // the game launched", rl#38). After the grace it hunts as normal.
+        let armed = self.tick > STARTUP_GRACE_TICKS;
+
         // 2) Crab: aim at and step toward the nearest living player. Pure arithmetic —
-        //    no RNG, no float — so it is trivially deterministic.
-        if let Some(target) = self.nearest_living_player() {
+        //    no RNG, no float — so it is trivially deterministic. Frozen during the
+        //    startup grace.
+        if armed && let Some(target) = self.nearest_living_player() {
             let t = target.pos;
             let dx = t.x - self.crab.pos.x;
             let dz = t.z - self.crab.pos.z;
@@ -596,13 +748,17 @@ impl Sim {
             }
         }
 
-        // 3) Grabs: any living player within the crab's reach is downed.
+        // 3) Grabs: any living player within the crab's reach is downed (disarmed during
+        //    the startup grace, so a player spawned near the crab isn't grabbed before
+        //    they can move).
         let crab = self.crab.pos;
-        for p in self.players.values_mut() {
-            if p.status == PlayerStatus::Alive
-                && within(p.pos.x, p.pos.z, crab.x, crab.z, CRAB_GRAB_RADIUS)
-            {
-                p.status = PlayerStatus::Downed;
+        if armed {
+            for p in self.players.values_mut() {
+                if p.status == PlayerStatus::Alive
+                    && within(p.pos.x, p.pos.z, crab.x, crab.z, CRAB_GRAB_RADIUS)
+                {
+                    p.status = PlayerStatus::Downed;
+                }
             }
         }
 
@@ -699,6 +855,10 @@ impl Sim {
         h.write(&self.crab.yaw.to_le_bytes());
         h.write_pos(self.extraction.pos);
         h.write(&[outcome_tag(self.outcome)]);
+        // The restart edge-latch: gates whether next tick's RESTART press fires, so a
+        // divergence in it would desync the restart. One byte, folded like every other
+        // evolving field.
+        h.write(&[u8::from(self.restart_held)]);
         // Hash the RNG stream position so a desync in random draws is caught even
         // before it manifests in an entity. Cloning and drawing one block reflects the
         // generator's position without disturbing the real stream.
@@ -1281,15 +1441,19 @@ mod tests {
     #[test]
     fn crab_pursues_and_grabs_a_lone_player() {
         // One player standing still; the crab should close in and eventually down it,
-        // ending the round as a wipe.
+        // ending the round as a wipe. The crab holds still through the startup grace
+        // (covered by its own test), so step PAST the grace before checking pursuit.
         let mut sim = Sim::new(0, &players(1));
         let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
-        let crab_start = sim.crab().pos();
-        let prey_start = sim.player(PlayerId(0)).unwrap().pos();
+        for _ in 0..STARTUP_GRACE_TICKS {
+            sim.step(&neutral);
+        }
+        let crab_armed = sim.crab().pos();
+        let prey = sim.player(PlayerId(0)).unwrap().pos();
+        let d_start = dist2(crab_armed, prey);
         sim.step(&neutral);
-        let d_start = dist2(crab_start, prey_start);
         let d_next = dist2(sim.crab().pos(), sim.player(PlayerId(0)).unwrap().pos());
-        assert!(d_next < d_start, "crab must close distance to its prey");
+        assert!(d_next < d_start, "crab must close distance once armed");
         // Run until the round resolves (bounded).
         for _ in 0..2000 {
             if sim.outcome() != Outcome::Ongoing {
@@ -1660,6 +1824,179 @@ mod tests {
             );
             prev = now;
         }
+    }
+
+    // --- rl#38 playtest fixes: startup grace + deterministic restart ---
+
+    #[test]
+    fn crab_holds_and_cannot_grab_during_startup_grace() {
+        // During the grace window the crab neither moves nor grabs, even with a player
+        // standing on top of it — so no one is caught "the instant the game launched".
+        // Spawn a lone player AT the crab's position to make the grab the only thing the
+        // grace could be suppressing, then step through the grace and assert: crab
+        // stationary, player still Alive, round still Ongoing.
+        let mut sim = Sim::new(0, &players(1));
+        let crab0 = sim.crab().pos();
+        // Place the player exactly on the crab (the harshest case the grace must cover).
+        sim.players.get_mut(&PlayerId(0)).unwrap().pos = crab0;
+        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        for _ in 0..STARTUP_GRACE_TICKS {
+            sim.step(&neutral);
+            assert_eq!(sim.crab().pos(), crab0, "crab holds its spawn during grace");
+            assert_eq!(
+                sim.player(PlayerId(0)).unwrap().status(),
+                PlayerStatus::Alive,
+                "no grab during the startup grace"
+            );
+            assert_eq!(sim.outcome(), Outcome::Ongoing);
+        }
+        // The very next tick the crab is armed and grabs the co-located player.
+        sim.step(&neutral);
+        assert_eq!(
+            sim.player(PlayerId(0)).unwrap().status(),
+            PlayerStatus::Downed,
+            "crab arms and grabs once the grace ends"
+        );
+    }
+
+    #[test]
+    fn crab_spawns_clear_of_every_player() {
+        // No player starts within the crab's reach — the spawn guard keeps at least
+        // MIN_CRAB_SPAWN_DISTANCE between the crab and the nearest player, for rosters
+        // from 1 to 8. (Min distance is well outside CRAB_GRAB_RADIUS, so even with the
+        // grace gone no one is in grab range at tick 0.)
+        for n in 1..=8u8 {
+            let sim = Sim::new(0, &players(n));
+            let crab = sim.crab().pos();
+            let nearest = sim
+                .players()
+                .map(|(_, p)| dist2_i128(crab.x - p.pos().x, crab.z - p.pos().z))
+                .min()
+                .unwrap();
+            let min = MIN_CRAB_SPAWN_DISTANCE as i128;
+            assert!(
+                nearest >= min * min,
+                "n={n}: nearest player {} closer than MIN_CRAB_SPAWN_DISTANCE",
+                isqrt_i128(nearest)
+            );
+        }
+    }
+
+    #[test]
+    fn restart_resets_the_round_to_spawn() {
+        // Press RESTART and the WORLD rebuilds to its tick-0 state: tick back to 0,
+        // players Alive at spawn, crab at its spawn, outcome Ongoing — matching a fresh
+        // round. (The hash also folds the restart edge-latch, which is legitimately set
+        // here because R is held and clear in a never-restarted sim — so we compare the
+        // observable round state, not the raw hash. The full-hash agreement BETWEEN
+        // peers who both apply the restart is the lockstep test's job.) Run a few ticks
+        // and move first so there's real state to discard.
+        let mut sim = Sim::new(0xBEEF, &players(2));
+        let fresh = Sim::new(0xBEEF, &players(2));
+        let mut fwd = BTreeMap::new();
+        fwd.insert(PlayerId(0), Input::new(0.3, 1.0, 0.5, 0));
+        fwd.insert(PlayerId(1), Input::new(-0.2, 1.0, 0.0, 0));
+        for _ in 0..50 {
+            sim.step(&fwd);
+        }
+        let round = |s: &Sim| {
+            (
+                s.tick(),
+                s.players().collect::<Vec<_>>(),
+                s.crab(),
+                s.extraction(),
+                s.outcome(),
+            )
+        };
+        assert_ne!(
+            round(&sim),
+            round(&fresh),
+            "the round should have diverged from spawn before restart"
+        );
+        // Press R (only player 0 holds it — one peer's press restarts everyone).
+        let mut restart = BTreeMap::new();
+        restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
+        restart.insert(PlayerId(1), Input::default());
+        sim.step(&restart);
+        assert_eq!(sim.tick(), 0, "restart resets the tick counter");
+        assert_eq!(sim.outcome(), Outcome::Ongoing);
+        assert_eq!(
+            round(&sim),
+            round(&fresh),
+            "a restarted round's world matches a fresh one"
+        );
+    }
+
+    #[test]
+    fn restart_works_after_the_round_is_decided() {
+        // The point of restart is to play again after a win/loss — so it must fire even
+        // once the world is frozen (outcome != Ongoing). Wipe the player, confirm the
+        // freeze, then RESTART and confirm a live round is back.
+        let mut sim = Sim::new(0, &players(1));
+        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        for _ in 0..2000 {
+            if sim.outcome() != Outcome::Ongoing {
+                break;
+            }
+            sim.step(&neutral);
+        }
+        assert_eq!(sim.outcome(), Outcome::Wiped, "round should have ended");
+        let mut restart = BTreeMap::new();
+        restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
+        sim.step(&restart);
+        assert_eq!(sim.outcome(), Outcome::Ongoing, "restart revives the round");
+        assert_eq!(sim.tick(), 0);
+        assert_eq!(
+            sim.player(PlayerId(0)).unwrap().status(),
+            PlayerStatus::Alive,
+            "the player is alive again after a post-loss restart"
+        );
+    }
+
+    #[test]
+    fn restart_is_edge_triggered_not_level() {
+        // Holding RESTART across ticks must restart ONCE (on the press), then let the
+        // round advance — otherwise a held key would pin the sim at tick 0 forever.
+        let mut sim = Sim::new(0, &players(1));
+        let mut held = BTreeMap::new();
+        held.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
+        sim.step(&held); // tick 1 → restart fires, back to tick 0
+        assert_eq!(sim.tick(), 0, "first press restarts");
+        // Keep holding: the latch is set, so subsequent ticks advance normally.
+        sim.step(&held);
+        sim.step(&held);
+        assert_eq!(sim.tick(), 2, "a held key doesn't re-restart every tick");
+        // Release, then press again: that fresh edge restarts once more.
+        sim.step(&BTreeMap::new()); // release (tick 3)
+        sim.step(&held); // fresh press → restart
+        assert_eq!(sim.tick(), 0, "a new press after release restarts again");
+    }
+
+    #[test]
+    fn restart_keeps_two_peers_in_lockstep() {
+        // The determinism contract under restart: two independent sims fed the identical
+        // input stream — including a mid-round RESTART press — stay bit-identical
+        // tick-for-tick. This is what makes restart safe over the wire (every peer
+        // applies the same RESTART on the same tick).
+        let mut a = Sim::new(0x5151, &players(2));
+        let mut b = Sim::new(0x5151, &players(2));
+        for t in 0..120u64 {
+            let mut inputs = BTreeMap::new();
+            // Both players move; player 1 presses R once at tick 40.
+            let restart_bit = if t == 40 { buttons::RESTART } else { 0 };
+            inputs.insert(PlayerId(0), Input::new(0.4, 1.0, 0.2, 0));
+            inputs.insert(PlayerId(1), Input::new(-0.3, 1.0, -0.1, restart_bit));
+            a.step(&inputs);
+            b.step(&inputs);
+            assert_eq!(
+                a.state_hash(),
+                b.state_hash(),
+                "peers must stay bit-identical across a restart (tick {t})"
+            );
+        }
+        // And the restart actually happened: by tick 41 the sim is freshly at a low tick,
+        // not 41 ticks deep.
+        assert!(a.tick() < 120, "the mid-run restart rewound the tick counter");
     }
 
     fn dist2(a: Pos, b: Pos) -> i128 {
