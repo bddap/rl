@@ -352,18 +352,13 @@ fn main() {
         std::process::exit(verify_pivots());
     }
 
-    // Every remaining mode spawns the rig-derived body, which needs the glTF
-    // skeleton. Resolve + load it now so a missing or corrupt model fails fast with
-    // the real reason, instead of panicking deep in Startup (or blaming
-    // CRAB_MODEL_PATH for a parse error in a model that was actually present).
-    match bot::meshfit::model_path() {
-        None => {
-            eprintln!(
-                "crab model not found: set CRAB_MODEL_PATH (an asset path under BEVY_ASSET_ROOT/assets), or place sally.glb there"
-            );
-            std::process::exit(1);
-        }
-        Some(p) => match bot::meshfit::LoadedModel::load(&p) {
+    // Every remaining mode spawns the rig-derived body. Preflight a PRESENT model now
+    // so a broken asset fails fast with the real reason, instead of panicking deep in
+    // Startup (or blaming CRAB_MODEL_PATH for a parse error in a model that was present).
+    // NO model is NOT an error: the body falls back to the procedural stand-in (built in
+    // `CrabAssets::from_world`).
+    if let Some(p) = bot::meshfit::model_path() {
+        match bot::meshfit::LoadedModel::load(&p) {
             Err(e) => {
                 eprintln!("crab model {p:?}: {e}");
                 std::process::exit(1);
@@ -379,7 +374,7 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-        },
+        }
     }
 
     // DEV check: settle the crab and audit its rest-pose colliders for illegal

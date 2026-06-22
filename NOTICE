@@ -9,9 +9,10 @@ repository.
 Sally Lightfoot crab model (sally.glb / grapsus_grapsus_crab_280.blend)
 -----------------------------------------------------------------------
 Purchased from Superhive (Blender Market). Royalty-free for use in a shipped
-product, but redistribution of the source asset is not permitted — so it is
-not committed here. The build falls back to the primitive-mesh crab when the
-asset is absent, so `cargo run` works with no purchase.
+product, but redistribution of the source asset is not permitted — so it is not
+committed here. When the asset is absent the body falls back to a procedural
+capsule stand-in crab — same joints, sim, and training, shown as the Rapier debug
+wireframe — so `cargo build`, `cargo run`, and `cargo test` all work with no purchase.
 
 To use the model if you own it, fetch it into `assets/` (gitignored):
 

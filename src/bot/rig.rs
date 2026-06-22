@@ -24,6 +24,39 @@ use bevy::prelude::*;
 use super::body::{CrabJointId, Side};
 use super::meshfit::{LoadedModel, PartId};
 
+/// Bind-pose geometry source, so the real [`LoadedModel`] and the procedural
+/// [`FallbackModel`] share ONE recipe-builder ([`build_recipe`]) — no second spawn
+/// path to drift.
+pub trait BindSource {
+    /// Bind-pose world origin of a bone by name (the joint pivot), if present.
+    fn bone_origin(&self, name: &str) -> Option<Vec3>;
+    /// Per-part flesh: world-space vertex cloud (and a skinning-cleanliness weight,
+    /// unused here) for each physics part. Drives the fitted capsule radius.
+    fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)>;
+    /// World-space vertices whose dominant bone is one of `names` — the trunk flesh
+    /// the carapace box is sized from.
+    fn vertices_for_bones(&self, names: &[&str]) -> Vec<Vec3>;
+    /// Radius to use for a part whose cloud is too sparse to fit a capsule to. The
+    /// real model has dense flesh so it returns `None`; the procedural body has no
+    /// flesh and supplies its intended per-part thickness here so its limbs aren't
+    /// pencil-thin.
+    fn radius_hint(&self, _part: PartId) -> Option<f32> {
+        None
+    }
+}
+
+impl BindSource for LoadedModel {
+    fn bone_origin(&self, name: &str) -> Option<Vec3> {
+        LoadedModel::bone_origin(self, name)
+    }
+    fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)> {
+        LoadedModel::vertices_by_part(self)
+    }
+    fn vertices_for_bones(&self, names: &[&str]) -> Vec<Vec3> {
+        LoadedModel::vertices_for_bones(self, names)
+    }
+}
+
 const LEG_DENSITY: f32 = 8.0;
 const CLAW_DENSITY: f32 = 1.0;
 const EYE_DENSITY: f32 = 0.5;
@@ -129,6 +162,23 @@ fn side_tag(side: Side) -> &'static str {
     }
 }
 
+// Deform-bone names in ONE place, so `joint_specs` and `FallbackModel` can't drift
+// into an incomplete recipe.
+/// `leg` is 0-based (the rig labels legs `01`..`04`), `seg` is the segment tag
+/// (`000`,`003`,`004`,`005`, …).
+fn leg_bone(leg: u8, seg: &str, side: Side) -> String {
+    format!("Def_leg_0{}.{}.{}", leg + 1, seg, side_tag(side))
+}
+fn pincer_bone(seg: &str, side: Side) -> String {
+    format!("Def_pincer.{}.{}", seg, side_tag(side))
+}
+fn antennae_bone(side: Side) -> String {
+    format!("Def_antennae.{}", side_tag(side))
+}
+fn antennae_top_bone(side: Side) -> String {
+    format!("Def_antennae_top.{}", side_tag(side))
+}
+
 /// The canonical rig decomposition: one chain of actuated joints per limb. Bones
 /// are bracketed by chain position — a joint owns every deform bone from its pivot
 /// up to the next joint's pivot — so flesh, skin, and collider all agree on which
@@ -137,11 +187,10 @@ fn side_tag(side: Side) -> &'static str {
 fn joint_specs() -> Vec<Vec<JointSpec>> {
     let mut chains = Vec::new();
     for side in [Side::Left, Side::Right] {
-        let s = side_tag(side);
         // Legs: front→back, same 0..3 order as the policy. The long coxa swings at
         // the body; the merus and carpus are the two load-bearing distal bends.
         for leg in 0u8..4 {
-            let b = |seg: &str| format!("Def_leg_0{}.{}.{}", leg + 1, seg, s);
+            let b = |seg: &str| leg_bone(leg, seg, side);
             chains.push(vec![
                 JointSpec {
                     id: CrabJointId::LegCoxa(side, leg),
@@ -183,7 +232,7 @@ fn joint_specs() -> Vec<Vec<JointSpec>> {
         // rig folded the palm into the rigid shoulder link and pivoted the wrist out
         // at `006b`, so the wrist bent only the finger against a hand welded to the
         // arm — the owner-reported "wrist moves just the thumb" with stretched chitin.
-        let p = |seg: &str| format!("Def_pincer.{}.{}", seg, s);
+        let p = |seg: &str| pincer_bone(seg, side);
         chains.push(vec![
             JointSpec {
                 id: CrabJointId::ClawShoulder(side),
@@ -283,7 +332,7 @@ pub fn parts_adjacent(a: PartId, b: PartId) -> bool {
 
 /// Build the whole-body recipe from the model's bind pose, or `None` if the model
 /// lacks the expected bones or carries a non-finite bind transform.
-pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
+pub fn build_recipe(model: &impl BindSource) -> Option<RigRecipe> {
     let carapace_center = leg_hub_centroid(model)?;
     // The hub seeds every anchor (the link chain telescopes off it), so a NaN/inf
     // leg-root translation here would poison the whole body and crash the solver on
@@ -313,7 +362,9 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
                 parent_pivot,
                 parent_idx,
                 cloud,
-                FALLBACK_RADIUS,
+                model
+                    .radius_hint(PartId::Joint(spec.id))
+                    .unwrap_or(FALLBACK_RADIUS),
                 spec.density,
                 Some(spec.id),
             ) else {
@@ -329,9 +380,8 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
     // so the tip is re-parented onto the base here. The tip carries the reward's
     // eye-height marker (`CrabEyeTip`, set by bone name in the spawn).
     for side in [Side::Left, Side::Right] {
-        let s = side_tag(side);
-        let base = format!("Def_antennae.{s}");
-        let tip = format!("Def_antennae_top.{s}");
+        let base = antennae_bone(side);
+        let tip = antennae_top_bone(side);
         let Some(base_link) = derive_link(
             model,
             &base,
@@ -379,17 +429,139 @@ pub fn build_recipe(model: &LoadedModel) -> Option<RigRecipe> {
     recipe.is_finite().then_some(recipe)
 }
 
+// ===========================================================================
+// Procedural fallback body (no purchased model)
+// ===========================================================================
+
+// Meters in the glTF bind-pose-world frame (Y up, feet ≈ y=0), so the recipe lands
+// in the same space the real model's does.
+const FB_CARAPACE_HALF_W: f32 = 0.40; // half-width  (±X), shell
+const FB_CARAPACE_HALF_D: f32 = 0.30; // half-depth  (±Z), shell
+const FB_CARAPACE_HALF_H: f32 = 0.12; // half-height (±Y), shell
+/// Hub height above the ground: the legs reach down to y≈0, so the body rests roughly
+/// a coxa+merus drop up.
+const FB_HUB_HEIGHT: f32 = 0.30;
+/// Per-segment limb radii, fed to `derive_link` via [`FallbackModel::radius_hint`].
+const FB_LEG_RADIUS: f32 = 0.045;
+const FB_CLAW_RADIUS: f32 = 0.06;
+
+/// Procedural stand-in skeleton that names its bones exactly as the glTF's, so
+/// [`build_recipe`] yields a full [`RigRecipe`] — simulatable and trainable; only the
+/// cosmetic skin is missing, so the body shows as the Rapier debug wireframe.
+pub struct FallbackModel {
+    origins: HashMap<String, Vec3>,
+}
+
+impl FallbackModel {
+    /// Lay out the skeleton. Placement isn't tuned for fidelity; it only has to give
+    /// every link a finite pivot and a bend pointing down the limb.
+    pub fn new() -> Self {
+        let mut o = HashMap::new();
+        let hub = Vec3::new(0.0, FB_HUB_HEIGHT, 0.0);
+
+        for side in [Side::Left, Side::Right] {
+            let sx = match side {
+                Side::Left => -1.0,
+                Side::Right => 1.0,
+            };
+            // Legs
+            for leg in 0u8..4 {
+                let z = 0.18 - leg as f32 * 0.16;
+                let root = hub + Vec3::new(sx * FB_CARAPACE_HALF_W, 0.0, z);
+                let coxa = root; // 000: leg root at the shell
+                let knee = root + Vec3::new(sx * 0.22, -0.02, 0.0); // 003: merus pivot
+                let ankle = knee + Vec3::new(sx * 0.16, -0.14, 0.0); // 004: carpus pivot
+                let foot = ankle + Vec3::new(sx * 0.05, -0.14, 0.0); // 005: foot tip on the ground
+                o.insert(leg_bone(leg, "000", side), coxa);
+                o.insert(leg_bone(leg, "003", side), knee);
+                o.insert(leg_bone(leg, "004", side), ankle);
+                o.insert(leg_bone(leg, "005", side), foot);
+            }
+            // Claw (cheliped)
+            let shoulder = hub + Vec3::new(sx * 0.18, 0.04, FB_CARAPACE_HALF_D); // 000a
+            let palm = shoulder + Vec3::new(sx * 0.06, 0.0, 0.22); // 005: palm base (wrist pivot)
+            let finger = palm + Vec3::new(0.0, 0.02, 0.12); // 006b: movable-finger pivot
+            let finger_tip = finger + Vec3::new(0.0, 0.0, 0.10); // 006: finger tip
+            o.insert(pincer_bone("000a", side), shoulder);
+            o.insert(pincer_bone("005", side), palm);
+            o.insert(pincer_bone("006b", side), finger);
+            o.insert(pincer_bone("006", side), finger_tip);
+            // Eye-stalks
+            let eye_base = hub + Vec3::new(sx * 0.12, FB_CARAPACE_HALF_H, FB_CARAPACE_HALF_D * 0.6);
+            let eye_top = eye_base + Vec3::new(0.0, 0.10, 0.02);
+            o.insert(antennae_bone(side), eye_base);
+            o.insert(antennae_top_bone(side), eye_top);
+        }
+        FallbackModel { origins: o }
+    }
+}
+
+impl Default for FallbackModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BindSource for FallbackModel {
+    fn bone_origin(&self, name: &str) -> Option<Vec3> {
+        self.origins.get(name).copied()
+    }
+
+    /// Empty per part, routing every link through `derive_link`'s sparse-cloud branch
+    /// sized at [`radius_hint`](Self::radius_hint).
+    fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)> {
+        HashMap::new()
+    }
+
+    /// The eight shell-box corners (bind-pose world at the hub), so [`carapace_box`]
+    /// derives the same box it would from a cloud. `names` is ignored: the only
+    /// `FallbackModel` caller is [`carapace_box`] asking for the trunk.
+    fn vertices_for_bones(&self, _names: &[&str]) -> Vec<Vec3> {
+        let c = Vec3::new(0.0, FB_HUB_HEIGHT, 0.0);
+        let h = Vec3::new(FB_CARAPACE_HALF_W, FB_CARAPACE_HALF_H, FB_CARAPACE_HALF_D);
+        let mut pts = Vec::with_capacity(8);
+        for sx in [-1.0, 1.0] {
+            for sy in [-1.0, 1.0] {
+                for sz in [-1.0, 1.0] {
+                    pts.push(c + Vec3::new(sx * h.x, sy * h.y, sz * h.z));
+                }
+            }
+        }
+        pts
+    }
+
+    fn radius_hint(&self, part: PartId) -> Option<f32> {
+        match part {
+            PartId::Joint(
+                CrabJointId::LegCoxa(..) | CrabJointId::LegMerus(..) | CrabJointId::LegCarpus(..),
+            ) => Some(FB_LEG_RADIUS),
+            PartId::Joint(
+                CrabJointId::ClawShoulder(_)
+                | CrabJointId::ClawWrist(_)
+                | CrabJointId::ClawPincer(_),
+            ) => Some(FB_CLAW_RADIUS),
+            PartId::Carapace => None, // the box is sized from the corner cloud above
+        }
+    }
+}
+
+/// The no-asset fallback recipe. `expect` is sound: the layout names every bone the
+/// builder requires with finite coords, so a `None` here is a bug in this file —
+/// caught by `fallback_recipe_builds`, not something a contributor can trip.
+pub fn fallback_recipe() -> RigRecipe {
+    build_recipe(&FallbackModel::new())
+        .expect("the procedural fallback skeleton must build a complete rig recipe")
+}
+
 /// Body centre = the centroid of the eight leg roots (bone `000`), the hub the
 /// limbs hang off: symmetric in x, mid-height in y. Carapace-relative anchors are
 /// measured from here, and the carapace box is offset relative to it.
-fn leg_hub_centroid(model: &LoadedModel) -> Option<Vec3> {
+fn leg_hub_centroid(model: &impl BindSource) -> Option<Vec3> {
     let mut sum = Vec3::ZERO;
     let mut n = 0u32;
     for side in [Side::Left, Side::Right] {
         for leg in 0u8..4 {
-            if let Some(o) =
-                model.bone_origin(&format!("Def_leg_0{}.000.{}", leg + 1, side_tag(side)))
-            {
+            if let Some(o) = model.bone_origin(&leg_bone(leg, "000", side)) {
                 sum += o;
                 n += 1;
             }
@@ -403,7 +575,7 @@ fn leg_hub_centroid(model: &LoadedModel) -> Option<Vec3> {
 /// fits the capsule radius to that vertex cloud; `None` uses `fixed_radius`.
 #[allow(clippy::too_many_arguments)]
 fn derive_link(
-    model: &LoadedModel,
+    model: &impl BindSource,
     pivot_name: &str,
     tip_name: Option<&str>,
     parent_pivot: Vec3,
@@ -533,7 +705,7 @@ pub(crate) const TRUNK_BONES: [&str; 10] = [
 /// Carapace box from the trunk's vertex cloud: half-extents and the box centre as
 /// an offset from `center` (the leg hub the links anchor to). Using the actual
 /// shell vertices — not bone origins — covers the trunk's flesh directly.
-fn carapace_box(model: &LoadedModel, center: Vec3) -> (Vec3, Vec3) {
+fn carapace_box(model: &impl BindSource, center: Vec3) -> (Vec3, Vec3) {
     let pts = model.vertices_for_bones(&TRUNK_BONES);
     if pts.len() < 4 {
         return (Vec3::splat(0.1), Vec3::ZERO); // sparse model: a small box at the hub
@@ -574,7 +746,7 @@ pub(crate) enum RestShape {
 /// Reconstruct every scoreable collider of `recipe` in bind-pose world. Locked
 /// eye-stalk links are skipped (no fitted cloud to score). The carapace box is
 /// world-axis-aligned at the hub + offset.
-pub(crate) fn rest_colliders(model: &LoadedModel, recipe: &RigRecipe) -> Vec<RestCollider> {
+pub(crate) fn rest_colliders(model: &impl BindSource, recipe: &RigRecipe) -> Vec<RestCollider> {
     let Some(o_root) = leg_hub_centroid(model) else {
         return Vec::new();
     };
@@ -781,6 +953,105 @@ mod tests {
                         spec.id
                     );
                 }
+            }
+        }
+    }
+
+    /// The stand-in must build a complete, finite recipe with NO asset present — the
+    /// whole point of the fallback, so it runs in the default `cargo test` (no model,
+    /// no App).
+    #[test]
+    fn fallback_recipe_builds() {
+        let recipe = fallback_recipe();
+
+        // Same actuated joint set as the real body — the RL obs/action layout is keyed
+        // by these, so a missing/extra one would silently mistrain.
+        let actuated: std::collections::HashSet<CrabJointId> =
+            recipe.links.iter().filter_map(|l| l.actuated).collect();
+        assert_eq!(
+            actuated.len(),
+            CrabJointId::COUNT,
+            "fallback must spawn every actuated joint exactly once"
+        );
+
+        // The reward locates eye-tips and claw-tips by these bone-name patterns.
+        assert_eq!(
+            recipe
+                .links
+                .iter()
+                .filter(|l| l.bone.starts_with("Def_antennae_top"))
+                .count(),
+            2,
+            "two eye-tip links (the reward's eye-height markers)"
+        );
+        assert_eq!(
+            recipe
+                .links
+                .iter()
+                .filter(|l| matches!(l.actuated, Some(CrabJointId::ClawPincer(_))))
+                .count(),
+            2,
+            "two claw-tip links (the reach effectors)"
+        );
+        // Grippy feet attach on the distal leg bone `.004.`; one per leg (8).
+        assert_eq!(
+            recipe
+                .links
+                .iter()
+                .filter(|l| l.bone.starts_with("Def_leg") && l.bone.contains(".004."))
+                .count(),
+            8,
+            "eight feet (the .004 distal leg links that plant on the ground)"
+        );
+
+        // A real, non-degenerate carapace box.
+        assert!(
+            recipe.carapace_half.min_element() > 0.01,
+            "carapace box must be non-degenerate, got {:?}",
+            recipe.carapace_half
+        );
+    }
+
+    /// `derive_link`'s sparse-cloud branch must honor [`BindSource::radius_hint`], or
+    /// the stand-in's limbs would all be the pencil-thin generic [`FALLBACK_RADIUS`].
+    #[test]
+    fn fallback_uses_per_part_radius() {
+        let recipe = fallback_recipe();
+        let radius_of = |pred: fn(CrabJointId) -> bool| {
+            recipe
+                .links
+                .iter()
+                .find(|l| l.actuated.is_some_and(pred))
+                .map(|l| l.radius)
+                .expect("link present")
+        };
+        let leg_r = radius_of(|id| matches!(id, CrabJointId::LegMerus(..)));
+        let claw_r = radius_of(|id| matches!(id, CrabJointId::ClawShoulder(_)));
+        assert!(
+            (leg_r - FB_LEG_RADIUS).abs() < 1e-6,
+            "leg radius {leg_r} should be the leg hint {FB_LEG_RADIUS}"
+        );
+        assert!(
+            (claw_r - FB_CLAW_RADIUS).abs() < 1e-6,
+            "claw radius {claw_r} should be the claw hint {FB_CLAW_RADIUS}"
+        );
+    }
+
+    /// Feet at y≈0 so the stand-in stands: the foot bones (`005`) sit at the ground in
+    /// the bind-pose-world frame the body spawns in, else it topples at spawn.
+    #[test]
+    fn fallback_feet_reach_the_ground() {
+        let m = FallbackModel::new();
+        for side in [Side::Left, Side::Right] {
+            for leg in 0u8..4 {
+                let foot = m
+                    .bone_origin(&leg_bone(leg, "005", side))
+                    .expect("foot bone");
+                assert!(
+                    foot.y.abs() < 0.02,
+                    "leg {leg} {side:?} foot at y={:.3}, should rest at the ground (y≈0)",
+                    foot.y
+                );
             }
         }
     }
