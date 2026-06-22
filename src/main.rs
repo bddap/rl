@@ -1,3 +1,13 @@
+// rl#49: the `--features wgpu` build pulls bevy's wgpu 27 and burn-wgpu's wgpu 26 into
+// one graph (see Cargo.toml's `wgpu` feature). Resolving the `Module: Send` supertrait
+// bound on `load_record` for `CrabBrain<Autodiff<Wgpu>>` (the CPU→GPU weight load in
+// GpuLearner) chases wgpu_core's deeply-nested generic types past the default 128-deep
+// recursion limit and aborts with E0275 (overflow, not a genuine !Send). A higher limit
+// lets that finite-but-deep resolution complete. No effect on the default CPU build
+// (the wgpu types are never in the graph), and zero runtime cost — purely a
+// compile-time trait-solver budget.
+#![recursion_limit = "512"]
+
 mod bot;
 mod debug_sliders;
 mod physics;
@@ -57,6 +67,23 @@ pub enum BenchBackend {
     /// GPU `Autodiff<Wgpu>` over Vulkan. Forces a discrete-GPU adapter and prints +
     /// asserts the adapter name so a silent lavapipe (software) fallback can't pass as
     /// a GPU result. Only built when the `wgpu` cargo feature is on.
+    Gpu,
+}
+
+/// Which device the live `learn` trainer runs its batched PPO **update** on (rl#49).
+/// Rollout inference always stays on CPU regardless (many tiny per-step forwards across
+/// the worker threads, where GPU dispatch overhead would dominate); this selects only
+/// the per-iteration batched update's device.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateDevice {
+    /// Run the update on the CPU (`Autodiff<NdArray>`) — byte-for-byte the production
+    /// CPU path; the GPU backend is never touched.
+    Cpu,
+    /// Run the update on the GPU (`Autodiff<Wgpu>` over Vulkan): mirror the policy
+    /// CPU→GPU, update on the discrete GPU, mirror back. Requires the binary be built
+    /// with `--features wgpu`; otherwise the run fails with a clear error (never a
+    /// silent CPU fallback). Forces + asserts a real discrete-GPU adapter (no software
+    /// lavapipe masquerading as the GPU).
     Gpu,
 }
 
@@ -236,6 +263,14 @@ struct LearnArgs {
     /// priority and needs privilege, so it is floored to 0 rather than attempted).
     #[arg(long, default_value_t = 10)]
     nice: i32,
+
+    /// Device for the batched PPO update: `cpu` (default; the production CPU ndarray
+    /// path, unchanged) or `gpu` (the RTX via wgpu/Vulkan — rl#49). Rollout inference
+    /// stays on CPU either way; only the update moves. `gpu` requires a `--features
+    /// wgpu` build and a real discrete-GPU adapter, and fails loudly otherwise (no
+    /// silent CPU fallback).
+    #[arg(long, value_enum, default_value_t = UpdateDevice::Cpu)]
+    update_device: UpdateDevice,
 }
 
 /// What the no-subcommand binary is rendering this run (training is `rl learn`,
@@ -266,6 +301,7 @@ fn main() {
             l.horizon,
             l.iters,
             l.nice,
+            l.update_device,
         );
         return;
     }

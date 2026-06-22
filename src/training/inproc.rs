@@ -68,8 +68,8 @@ use bevy::prelude::*;
 use burn::module::Module;
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
 
-use crate::TrainConfig;
 use crate::bot::brain::CrabBrain;
+use crate::{TrainConfig, UpdateDevice};
 
 use super::algorithm::{RolloutBuffer, Transition};
 use super::session::{
@@ -537,7 +537,14 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
 /// "Tick budget reached" (verbatim, the loop's termination grep) and exits. The
 /// policy is (re)loaded from `--checkpoint-dir` by `TrainingState::new`, so a
 /// learner restarted by the service resumes from the latest checkpoint.
-pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nice: i32) {
+pub fn run_learner(
+    config: &TrainConfig,
+    k: usize,
+    horizon: u64,
+    iters: u64,
+    nice: i32,
+    update_device: UpdateDevice,
+) {
     // Own nicing here (one place): lowers this whole process's priority before any
     // world is built, so a foreground game preempts training. The rollout threads
     // spawned below inherit it (POSIX priority is per-process).
@@ -554,6 +561,28 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // the threads' buffers and runs `ppo_update_core` over them. `new` loads any
     // existing checkpoint in checkpoint_dir — that is the resume.
     let mut state = TrainingState::new(config);
+
+    // `--update-device gpu` (rl#49): bring up the GPU learner once (its GPU brain +
+    // Adam optimizer persist across iters, like the CPU optimizer's moments). The
+    // adapter probe + assertion happen here at construction, so a missing/software GPU
+    // fails at boot before any rollout. (The first GPU update still pays a one-time
+    // shader-compile warmup; that lands in iter 0's update time, excluded by
+    // `warmup_iters` from the steady-state rate.) The GPU backend is only compiled
+    // under `--features wgpu`; requesting `gpu` without it is a hard, clear failure —
+    // never a silent CPU fallback (a mislabelled run is worse than no run).
+    #[cfg(feature = "wgpu")]
+    let mut gpu_learner = match update_device {
+        UpdateDevice::Cpu => None,
+        UpdateDevice::Gpu => Some(super::session::GpuLearner::new()),
+    };
+    #[cfg(not(feature = "wgpu"))]
+    if matches!(update_device, UpdateDevice::Gpu) {
+        eprintln!(
+            "[learner] --update-device gpu requires the `wgpu` cargo feature \
+             (build with `--features wgpu`)"
+        );
+        std::process::exit(2);
+    }
 
     // Resume the tick odometer from the checkpoint, not from 0: the overnight loop
     // makes a learner restart the expected case, and without persistence each
@@ -693,10 +722,33 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         // 4) PPO update — `ppo_update_core` over all K·M buffers. The trailing
         //    bootstrap per buffer is recomputed inside from the current brain (which
         //    IS the snapshot the threads just rolled with), so no per-env value
-        //    crosses any boundary.
+        //    crosses any boundary. On `--update-device gpu` the SAME update runs on the
+        //    GPU (policy mirrored CPU→GPU, updated, mirrored back); the CPU path is the
+        //    unchanged production update. `update_secs` spans the whole phase either
+        //    way — including the GPU's host↔device copies — so the per-iter wall time
+        //    is a fair CPU-vs-GPU comparison.
         let update_start = Instant::now();
-        let (brain, optimizer, ppo_config, device, ret_norm) = state.learner_parts();
-        let metrics = ppo_update_core(brain, optimizer, ppo_config, &rollouts, device, ret_norm);
+        // `gpu_timing` carries the GPU path's load/update/store split for the log; it is
+        // `None` on the CPU path (and always `None` when built without `wgpu`).
+        #[cfg(feature = "wgpu")]
+        let (metrics, gpu_timing) = match gpu_learner.as_mut() {
+            Some(gpu) => {
+                let (brain, ppo_config, ret_norm) = state.learner_parts_for_gpu();
+                let (m, t) = gpu.update(brain, ppo_config, &rollouts, ret_norm);
+                (m, Some(t))
+            }
+            None => {
+                let (brain, optimizer, ppo_config, device, ret_norm) = state.learner_parts();
+                let m = ppo_update_core(brain, optimizer, ppo_config, &rollouts, device, ret_norm);
+                (m, None)
+            }
+        };
+        #[cfg(not(feature = "wgpu"))]
+        let (metrics, gpu_timing): (_, Option<super::session::GpuUpdateTiming>) = {
+            let (brain, optimizer, ppo_config, device, ret_norm) = state.learner_parts();
+            let m = ppo_update_core(brain, optimizer, ppo_config, &rollouts, device, ret_norm);
+            (m, None)
+        };
         let update_secs = update_start.elapsed().as_secs_f64();
         let wall_secs = wall_start.elapsed().as_secs_f64();
 
@@ -739,8 +791,18 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         } else {
             "-".to_string()
         };
+        // On the GPU update path, break the update phase into load(CPU→GPU)/compute/
+        // store(GPU→CPU) ms so the host↔device copy cost is visible (the microbench
+        // excluded it). Empty on the CPU path.
+        let update_note = match gpu_timing {
+            Some(t) => format!(
+                " [gpu load {:.0}ms + compute {:.0}ms + store {:.0}ms]",
+                t.load_ms, t.update_ms, t.store_ms
+            ),
+            None => String::new(),
+        };
         eprintln!(
-            "[learner] iter {iter} | {iter_samples} samples | rollout {rollout_secs:.3}s ({rolled_ticks} ticks) update {update_secs:.3}s | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note}) | ploss {:.3} vloss {:.3} ent {:.3}{panic_note}",
+            "[learner] iter {iter} | {iter_samples} samples | rollout {rollout_secs:.3}s ({rolled_ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note}) | ploss {:.3} vloss {:.3} ent {:.3}{panic_note}",
             metrics.policy_loss, metrics.value_loss, metrics.entropy,
         );
 
