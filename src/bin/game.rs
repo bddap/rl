@@ -18,8 +18,9 @@
 //!   smoke of the tick machinery (it stirs a placeholder input — real movement is
 //!   the client's job, not this headless smoke's).
 //! - `play`: the windowed first-person CLIENT ([`rl::net::render`]) — see the
-//!   gray-box from the local player's eyes and play it, driving the SAME lockstep +
-//!   transport as `net` (genuinely networked; `--solo` for a single offline peer).
+//!   gray-box from the local player's eyes and play it, on the SAME lockstep +
+//!   transport as `net`. Boots to a Host/Join/Solo menu (rl#56); `--solo`/`--host`/
+//!   `--join <code>` skip it for scripting (the Deck shortcut uses `--solo`).
 //! - `fp-screenshot`: render one settled frame of the first-person view to a PNG and
 //!   exit (GPU on, no window) — the headless evidence path for the sim→render
 //!   pipeline on a box with no display.
@@ -98,10 +99,28 @@ struct SoloArgs {
 
 #[derive(Parser)]
 struct PlayArgs {
-    /// Run a single offline peer (no network): see + play the sim solo. Without this
-    /// the client discovers LAN peers over iroh and plays networked, exactly as `net`.
-    #[arg(long)]
+    /// Skip the boot menu and run a single offline peer (no network): see + play the sim
+    /// solo, instantly. This is the scripted solo path the Deck shortcut + tests use — no
+    /// menu, no networking. Without any of `--solo`/`--host`/`--join`, `play` shows the
+    /// interactive boot menu (rl#56) where the player picks Host / Join / Solo.
+    #[arg(long, conflicts_with_all = ["host", "join"])]
     solo: bool,
+    /// Skip the menu and HOST a networked match directly (scripted): form over the LAN
+    /// and start with whoever joins, or solo if nobody does. Equivalent to the menu's
+    /// Host button without the click.
+    #[arg(long, conflicts_with_all = ["solo", "join"])]
+    host: bool,
+    /// Skip the menu and JOIN a host by its endpoint-id code (scripted): dial the code,
+    /// then form. Equivalent to the menu's Join-by-code without the click. The bare flag
+    /// `--join` with no value joins by LAN discovery (no explicit dial).
+    #[arg(
+        long,
+        value_name = "JOIN_CODE",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["solo", "host"]
+    )]
+    join: Option<String>,
     /// Wait this long for peers before starting (networked play only).
     #[arg(long, default_value_t = 4)]
     discover_secs: u64,
@@ -287,42 +306,62 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
     }
 }
 
-/// Windowed first-person client. Solo (one offline peer) or networked (discover LAN
-/// peers and play in lockstep) per `--solo`. Builds the Bevy app from
-/// [`render::build_windowed_app`] and runs it — the app owns the lockstep loop and
-/// drives it on a fixed-timestep accumulator (see [`rl::net::render`]).
+/// Windowed first-person client. The DEFAULT (`game play` with no role flag) shows the
+/// boot menu (rl#56) — the player picks Host / Join / Solo — and the round is built only
+/// after the choice, never touching the deterministic sim before then (see
+/// [`rl::net::render::Boot`]). The scripted flags bypass the menu for the Deck shortcut +
+/// tests:
+/// - `--solo` → an instant offline round, no menu, no networking.
+/// - `--host` → host directly: form over the LAN, start with whoever joins (solo if none).
+/// - `--join [CODE]` → join directly: dial CODE (or LAN-discover if bare), then form.
 ///
-/// Networked play auto-falls-back to solo when discovery finds no peer (rl#47): a
-/// launch alone (the common case — a player opens the shortcut, nobody else running) yields
-/// [`net_loop::MatchResult::Alone`], which we play exactly as an explicit `--solo`. So the
-/// one launcher is always playable; `--solo` just skips discovery up front.
+/// All three scripted paths form the match UP FRONT and hand a ready round to
+/// [`render::Boot::Round`], so they boot straight into play with no menu. The networked
+/// ones reuse the SAME barrier as the menu and as `game net`, so the agreed roster + seed
+/// are identical however play was reached; the alone-fallback (rl#47) still yields a solo
+/// round when nobody shows.
 fn run_play(args: PlayArgs) -> Result<()> {
-    let (ls, net) = if args.solo {
-        (solo_lockstep(), None)
-    } else {
-        match net_loop::connect_and_form(
+    let boot = if args.solo {
+        render::Boot::Round(Box::new((net_loop::solo_lockstep_for(MATCH_SEED), None)))
+    } else if args.host || args.join.is_some() {
+        // Scripted host/join: dial the join code if joining (blank/absent = LAN discover),
+        // form over the barrier, and hand the result to Boot::Round. Host never dials.
+        let dial = match &args.join {
+            Some(code) if !code.trim().is_empty() => Some(code.trim().parse::<EndpointId>()?),
+            _ => None,
+        };
+        let result = net_loop::connect_and_form_dialing(
             MATCH_SEED,
             args.discover_secs,
             args.expect,
+            dial,
             args.telemetry,
-        )? {
+            None,
+        )?;
+        match result {
             net_loop::MatchResult::Joined(joined) => {
                 let (ls, driver) = *joined;
-                (ls, Some(driver))
+                render::Boot::Round(Box::new((ls, Some(driver))))
             }
-            net_loop::MatchResult::Alone => (solo_lockstep(), None),
+            // Nobody showed: play the shared solo round (same as `--solo`).
+            net_loop::MatchResult::Alone => {
+                render::Boot::Round(Box::new((net_loop::solo_lockstep_for(MATCH_SEED), None)))
+            }
+        }
+    } else {
+        // Interactive default: the boot menu builds the round after the player chooses.
+        render::Boot::Menu {
+            seed: MATCH_SEED,
+            telemetry: args.telemetry,
         }
     };
-    // The solo NN-crab checkpoint dir (solo only — `build_windowed_app` ignores it when
-    // networked). Resolve only when we ended up solo so a networked round never probes
-    // the filesystem for it. Skip a dir that has no `brain.bin` so a bad path degrades to
-    // the integer crab rather than every-frame load failures.
-    let solo_crab = if net.is_none() {
-        nn_crab_checkpoint_dir(args.nn_crab_checkpoint)
-    } else {
-        None
-    };
-    render::build_windowed_app(ls, net, solo_crab).run();
+    // The solo NN-crab checkpoint dir. Resolved unconditionally — it's just a path;
+    // `build_windowed_app` applies it only on a solo round (the integer crab stands in on
+    // every networked path, where a float rapier crab isn't cross-peer deterministic).
+    // Skip a dir with no `brain.bin` so a bad path degrades to the integer crab rather
+    // than every-frame load failures.
+    let solo_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint);
+    render::build_windowed_app(boot, solo_crab).run();
     Ok(())
 }
 
@@ -353,14 +392,6 @@ fn nn_crab_checkpoint_dir(flag: Option<PathBuf>) -> Option<PathBuf> {
     }
 }
 
-/// The single-peer lockstep for an offline round: just us, honoring `RL_VEHICLE`. Shared
-/// by explicit `--solo` and the rl#47 discovery-found-no-peer fallback so the two play the
-/// identical deterministic solo round (one definition, no drift between the launch paths).
-fn solo_lockstep() -> Lockstep {
-    let me = PlayerId(0);
-    let pilots = pilots_from_env(me);
-    Lockstep::new_with_pilots(MATCH_SEED, &[me], me, &pilots)
-}
 
 /// Headless first-person screenshot: build a solo lockstep with `--players`
 /// participants (so a remote avatar is in frame beside the local one), render one
@@ -391,20 +422,6 @@ fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
 /// peers agree without a handshake; Phase 1's session setup will negotiate it (the
 /// lower-id peer proposes, say) — the sim already takes it as a parameter.
 const MATCH_SEED: u64 = 0x6372_6162; // "crab"
-
-/// Which players spawn PILOTING a plane rather than on foot, from the `RL_VEHICLE` env
-/// flag (rl#38 vehicle first cut). `RL_VEHICLE=plane` makes the LOCAL player (`me`) a
-/// pilot; anything else (incl. unset) is the unchanged foot game (empty ⇒ byte-identical
-/// sim). Solo/screenshot only in this cut: the networked play path (`connect_and_form`)
-/// builds the session with no pilots, so it ignores `RL_VEHICLE` entirely — no plane
-/// spawns over the wire yet. Wiring pilots into networked play needs the peers to agree
-/// on the pilot set (a wire negotiation), which is future work.
-fn pilots_from_env(me: PlayerId) -> Vec<PlayerId> {
-    match std::env::var("RL_VEHICLE").as_deref() {
-        Ok("plane") => vec![me],
-        _ => Vec::new(),
-    }
-}
 
 /// Drive the lockstep sim from a constant local input, ticking at [`TICK_HZ`]. Pure
 /// machinery check: no peers, so our own input completes every tick.

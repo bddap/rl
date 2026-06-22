@@ -2,7 +2,10 @@
 //!
 //! This is the windowed `play` mode of the `game` binary: it makes the
 //! giant-crab-rescue sim VISIBLE and PLAYABLE on top of the existing lockstep +
-//! transport netcode. The split it honors is the one documented at the top of
+//! transport netcode. It boots to a client-side Host/Join/Solo menu (rl#56,
+//! [`AppPhase`]/[`menu_ui`]) and builds the round only once the player chooses — the
+//! menu is gated to its own pre-round phases and never touches the sim. The split it
+//! honors is the one documented at the top of
 //! [`crate::net::sim`]: **the sim is the authority, this client is a read-only
 //! consumer that produces [`Input`]**. Rendering, the camera, mouse/gamepad input,
 //! and tween interpolation are ALL client-side and add ZERO nondeterminism — the
@@ -156,54 +159,137 @@ fn world3(pos: Pos3) -> Vec3 {
     Vec3::new(meters(pos.x), meters(pos.y), meters(pos.z))
 }
 
-/// Build the windowed first-person client app (no network = solo, `net = Some` =
-/// real peers). Owns the `Lockstep` + optional `NetDriver` as resources; the caller
-/// `run()`s it. Built here, not via a `Plugin` that holds the sim, because
+/// How the windowed client starts up (rl#56): at the boot MENU (the interactive
+/// default — the player picks Host/Join/Solo), or straight into a prebuilt ROUND
+/// (the scripted `--solo`/`--host`/`--join` flags, which form the match up front so the
+/// Deck shortcut and tests never depend on clicking the menu). One enum, two boots, so
+/// "has a menu AND a prebuilt round" is unrepresentable rather than two bool flags.
+pub enum Boot {
+    /// Show the boot menu first; the sim is built only once the player chooses and any
+    /// networked formation completes. `seed` is the shared match seed and `telemetry` the
+    /// optional collector id — both threaded to whichever formation the menu kicks off.
+    Menu {
+        seed: u64,
+        telemetry: Option<crate::net::menu::EndpointId>,
+    },
+    /// Skip the menu and play this already-formed round immediately. The scripted entry
+    /// (`--solo` = a solo lockstep + `None`; `--host`/`--join` = the formed
+    /// lockstep + its driver). Identical to the pre-rl#56 boot once a round exists. Boxed
+    /// because the lockstep + driver are large and `Menu` is tiny — without the box every
+    /// `Menu` would carry that dead weight (the same reason [`crate::net::net_loop::MatchResult::Joined`] boxes).
+    Round(Box<(Lockstep, Option<NetDriver>)>),
+}
+
+/// The windowed client's top-level phase (rl#56). The menu and connecting screens are
+/// PURE client UI — no [`Lockstep`]/[`Sim`] exists until [`AppPhase::Playing`], which is
+/// entered only after a choice (and, for networked roles, a completed barrier). This is
+/// the firewall that keeps the menu off the deterministic sim: the FP systems and the
+/// sim resource are all gated to `Playing`, so menu state literally cannot reach the
+/// round (it's built fresh on the transition from the unchanged formation machinery).
+#[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AppPhase {
+    /// The boot menu: choose Host / Join / Solo. egui only.
+    #[default]
+    Menu,
+    /// A networked Host/Join is forming on a background thread; show a lobby/“connecting”
+    /// screen and poll for the result. Solo skips this phase (its round is instant).
+    Connecting,
+    /// The round is live: the FP client runs exactly as before rl#56.
+    Playing,
+}
+
+/// Build the windowed first-person client app. Starts at the boot menu or straight in a
+/// round per [`Boot`]; owns the `Lockstep` + optional `NetDriver` as resources once
+/// playing. Built here, not via a `Plugin` that holds the sim, because
 /// `Plugin::build(&self)` can't move a non-`Clone` `Lockstep`/`NetDriver` out of
-/// itself — inserting them as resources at construction is the clean path.
+/// itself — inserting them as resources at the `Playing` transition is the clean path.
 ///
 /// `solo_crab` (solo only) points at a trained checkpoint dir; when set on a solo round
 /// the giant crab is the REAL rapier-simulated NN body ([`crate::net::solo_crab`])
 /// instead of the integer point-pursuer. Ignored on the networked path — a float crab is
 /// not cross-peer deterministic, so multiplayer keeps the integer crab.
-pub fn build_windowed_app(
-    mut ls: Lockstep,
-    net: Option<NetDriver>,
-    solo_crab: Option<std::path::PathBuf>,
-) -> App {
+pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> App {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: "Giant Crab Rescue — first person".into(),
+            title: "Giant Crab Rescue".into(),
             mode: WindowMode::Windowed,
             ..default()
         }),
         ..default()
     }));
-    // Solo NN crab: only when solo (no peers) AND a checkpoint was given. Capture the
-    // sim's integer crab spawn and hand the crab to external control BEFORE `ls` moves
-    // into the core resource.
-    let solo_crab = match (&net, solo_crab) {
-        (None, Some(dir)) => {
-            let spawn = ls.sim().crab().pos();
-            ls.enable_external_crab(true);
-            Some((dir, spawn))
-        }
-        _ => None,
-    };
-    let source = match net {
-        Some(n) => InputSource::Networked(n),
-        None => InputSource::Solo,
-    };
-    insert_core(&mut app, ls, source);
-    app.add_systems(Startup, (spawn_world, spawn_fp_camera, spawn_hud))
+    app.init_state::<AppPhase>();
+
+    // The FP round systems, gated to Playing. spawn_* moved off Startup to the Playing
+    // transition (the sim doesn't exist until then); the per-frame systems run only while
+    // playing so they never touch a not-yet-built GameState. The set is IDENTICAL to the
+    // pre-rl#56 wiring — only the schedule gating is new, so the round itself is unchanged.
+    //
+    // `ensure_round_installed` is CHAINED ahead of the spawns: on the menu path it moves
+    // the chosen round into GameState here (the sim must exist before spawn_world reads
+    // it); on the scripted Boot::Round path GameState already exists, so it no-ops. The
+    // chain is what guarantees the sim is live before the scene spawns — separate
+    // OnEnter system sets have no ordering, which would race spawn_world ahead of the install.
+    app.init_non_send_resource::<PendingRound>()
+        .add_systems(
+            OnEnter(AppPhase::Playing),
+            (
+                ensure_round_installed,
+                spawn_world,
+                spawn_fp_camera,
+                spawn_hud,
+            )
+                .chain(),
+        )
         .add_systems(
             Update,
-            (gather_input, drive_lockstep, apply_transforms, update_hud).chain(),
+            (gather_input, drive_lockstep, apply_transforms, update_hud)
+                .chain()
+                .run_if(in_state(AppPhase::Playing)),
         )
-        .add_systems(Update, (grab_cursor_once, exit_on_esc));
-    if let Some((dir, spawn)) = solo_crab {
-        add_solo_nn_crab(&mut app, dir, spawn);
+        .add_systems(
+            Update,
+            (grab_cursor_once, exit_on_esc).run_if(in_state(AppPhase::Playing)),
+        );
+
+    match boot {
+        // Scripted boot: insert the round now and jump straight to Playing (the menu
+        // states are never entered). NextState applied before the first frame, so
+        // OnEnter(Playing) fires and the world spawns on frame one — no menu flash. This
+        // is the `--solo`/scripted path the Deck + TV shortcuts use, so it gets the real
+        // NN crab on a solo round.
+        Boot::Round(round) => {
+            let (mut ls, net) = *round;
+            // Solo NN crab: only on a solo round (no peers) with a checkpoint. Capture the
+            // integer crab's spawn + hand the crab to external control BEFORE ls moves into core.
+            let nn = match (&net, &solo_crab) {
+                (None, Some(dir)) => {
+                    let spawn = ls.sim().crab().pos();
+                    ls.enable_external_crab(true);
+                    Some((dir.clone(), spawn))
+                }
+                _ => None,
+            };
+            let source = match net {
+                Some(n) => InputSource::Networked(n),
+                None => InputSource::Solo,
+            };
+            insert_core(&mut app, ls, source);
+            if let Some((dir, spawn)) = nn {
+                add_solo_nn_crab(&mut app, dir, spawn);
+            }
+            app.world_mut()
+                .resource_mut::<NextState<AppPhase>>()
+                .set(AppPhase::Playing);
+        }
+        // Interactive boot: add the menu plugin (egui menu + connecting poll). The sim is
+        // built later, at the Playing transition, from the choice the menu records.
+        // TODO(rl#56 follow-up): wire the NN crab into the menu Solo path too. The menu's
+        // Solo button forms its round at the runtime Playing transition, which needs the NN
+        // stack added at build time + runtime-gated; for now that path keeps the integer crab.
+        Boot::Menu { seed, telemetry } => {
+            app.add_plugins(menu_ui::MenuPlugin { seed, telemetry });
+        }
     }
     app
 }
@@ -304,16 +390,59 @@ pub fn build_screenshot_app(ls: Lockstep, cfg: ScreenshotConfig) -> App {
 
 /// Shared setup for both apps: the sim + its input source, plus the input resources.
 fn insert_core(app: &mut App, ls: Lockstep, input_source: InputSource) {
+    install_round(app.world_mut(), ls, input_source);
+}
+
+/// Install the round resources into the world: the non-send [`GameState`] (sim + input
+/// source) and the input resources. Factored out of [`insert_core`] so it can be called
+/// BOTH at app build (the scripted/screenshot path) and from the menu's
+/// `OnEnter(Playing)` transition system (rl#56), which only has a [`World`], not an
+/// [`App`] — one definition so the round is set up identically however it was reached.
+fn install_round(world: &mut World, ls: Lockstep, input_source: InputSource) {
     let prev = SimSnapshot::capture(ls.sim());
-    app.insert_non_send_resource(GameState {
+    world.insert_non_send_resource(GameState {
         ls,
         input_source,
         accumulator: 0.0,
         prev,
-    })
-    .init_resource::<PendingInput>()
-    .init_resource::<CameraPitch>()
-    .init_resource::<CameraYaw>();
+    });
+    world.init_resource::<PendingInput>();
+    world.init_resource::<CameraPitch>();
+    world.init_resource::<CameraYaw>();
+}
+
+/// The round the boot menu chose, parked here between the menu's Playing transition and
+/// the `OnEnter(Playing)` install. Non-send because a [`menu::ReadyMatch`] holds a
+/// `NetDriver` (tokio runtime). `None` on the scripted `Boot::Round` path, which installs
+/// `GameState` at app build instead — so [`ensure_round_installed`] no-ops there.
+#[derive(Default)]
+struct PendingRound(Option<crate::net::menu::ReadyMatch>);
+
+/// At the Playing transition, make sure a [`GameState`] exists before the scene spawns.
+/// Chained ahead of `spawn_world` (which reads the sim). Two cases, one place:
+/// - **Scripted (`Boot::Round`)**: `GameState` was inserted at app build — nothing to do.
+/// - **Menu**: take the parked [`PendingRound`] (set by the menu on its choice) and
+///   [`install_round`] it now, so the sim is live for the spawns.
+///
+/// Idempotent (guards on `GameState` already present), so it can't double-install if both
+/// a scripted round and a stray pending one ever coexisted. Reaching Playing with neither a
+/// pre-installed `GameState` (scripted) nor a parked round (menu) is an unreachable
+/// logic-bug state — every menu path parks a round BEFORE requesting the transition — so we
+/// panic HERE with a precise message rather than no-op and let the chained `spawn_world`
+/// (which needs `GameState`) panic one system later with a cryptic missing-resource error.
+fn ensure_round_installed(world: &mut World) {
+    if world.get_non_send_resource::<GameState>().is_some() {
+        return; // scripted path already installed the round at build time
+    }
+    let ready = world
+        .get_non_send_resource_mut::<PendingRound>()
+        .and_then(|mut p| p.0.take())
+        .expect("entered Playing with no round to install — the menu must park a round before transitioning");
+    let source = match ready.net {
+        Some(n) => InputSource::Networked(n),
+        None => InputSource::Solo,
+    };
+    install_round(world, ready.lockstep, source);
 }
 
 // ---------------------------------------------------------------------------
@@ -1383,9 +1512,379 @@ fn capture_when_settled(
     progress.exit_countdown = 30;
 }
 
+// ---------------------------------------------------------------------------
+// Boot menu (rl#56): client-side egui Host/Join/Solo, gated to the Menu/Connecting
+// phases. Builds the round ONLY at the Playing transition, so it can't touch the sim.
+// ---------------------------------------------------------------------------
+
+/// The boot-menu front-end: the egui Host/Join/Solo UI, the background-formation poll,
+/// and the `OnEnter(Playing)` round installer. This is the ONLY Bevy/egui code for the
+/// menu; the pure (testable, Bevy-free) connection orchestration lives in
+/// [`crate::net::menu`]. The split keeps the determinism-relevant claim simple: nothing
+/// here builds or reads a [`Lockstep`]/[`Sim`] except at the Playing transition, from the
+/// unchanged formation machinery.
+mod menu_ui {
+    use bevy::prelude::*;
+    use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+
+    use super::{AppPhase, PendingRound};
+    use crate::net::menu::{self, EndpointId, Formation, StartChoice};
+
+    /// Wires the boot menu into the windowed app: the egui menu + connecting-poll pass.
+    /// The round install at `OnEnter(Playing)` is `ensure_round_installed` in the parent
+    /// module (always scheduled, chained ahead of the spawns) — the menu only *parks* its
+    /// chosen round in [`PendingRound`]. Carries the shared match seed + optional telemetry
+    /// collector so a networked Host/Join formation gets them.
+    pub struct MenuPlugin {
+        pub seed: u64,
+        pub telemetry: Option<EndpointId>,
+    }
+
+    /// The camera the menu/connecting screens render into. bevy_egui 0.39 is
+    /// camera-driven — it attaches its primary context to a [`Camera`] entity, so WITHOUT
+    /// a camera the egui pass is skipped and the menu never draws. The round spawns its own
+    /// `Camera3d` only at `OnEnter(Playing)`, so the menu needs this one of its own for the
+    /// pre-round phases; it's despawned the instant we enter Playing so it never coexists
+    /// with (or double-renders over) the FP camera.
+    #[derive(Component)]
+    struct MenuCamera;
+
+    impl Plugin for MenuPlugin {
+        fn build(&self, app: &mut App) {
+            if !app.is_plugin_added::<EguiPlugin>() {
+                app.add_plugins(EguiPlugin::default());
+            }
+            app.insert_non_send_resource(MenuState::new(self.seed, self.telemetry))
+                // A 2D camera for the menu so bevy_egui has a context to render into.
+                // Spawned on entering Menu (the default phase, so it fires at startup on the
+                // menu boot; never on the scripted Boot::Round path, which supersedes Menu
+                // with Playing before any transition). Re-entering Menu (Cancel/error from
+                // Connecting) despawns any prior one first, so there's never a duplicate.
+                .add_systems(OnEnter(AppPhase::Menu), spawn_menu_camera)
+                // Tear it down as the round begins, before the FP Camera3d spawns, so the
+                // two never coexist.
+                .add_systems(OnEnter(AppPhase::Playing), despawn_menu_camera)
+                // The menu + connecting poll draw in the egui pass (per render frame),
+                // gated to the two pre-round phases so they vanish once Playing.
+                .add_systems(
+                    EguiPrimaryContextPass,
+                    menu_screen.run_if(not(in_state(AppPhase::Playing))),
+                );
+        }
+    }
+
+    /// Spawn the menu's 2D camera (despawning any leftover first, so re-entering Menu from
+    /// Connecting can't stack two). Without a camera bevy_egui renders nothing.
+    fn spawn_menu_camera(mut commands: Commands, existing: Query<Entity, With<MenuCamera>>) {
+        for e in existing.iter() {
+            commands.entity(e).despawn();
+        }
+        commands.spawn((Camera2d, MenuCamera));
+    }
+
+    /// Despawn the menu camera as the round starts, so it doesn't linger into Playing and
+    /// double-render over the FP `Camera3d`.
+    fn despawn_menu_camera(mut commands: Commands, cams: Query<Entity, With<MenuCamera>>) {
+        for e in cams.iter() {
+            commands.entity(e).despawn();
+        }
+    }
+
+    /// The menu's working state (non-send: a started [`Formation`] holds a tokio runtime
+    /// via the `NetDriver`, which isn't `Send`). Holds the join-code text field, the
+    /// in-flight formation, and any error to show. The finished round is parked in the
+    /// parent's [`PendingRound`], not here. All pre-round UI bookkeeping — none of it is
+    /// sim state.
+    struct MenuState {
+        seed: u64,
+        telemetry: Option<EndpointId>,
+        /// The join-code text the player is typing (an endpoint id), for Join-by-code.
+        code_input: String,
+        /// A networked Host/Join formation running on a background thread, while Connecting.
+        forming: Option<Formation>,
+        /// Last error to surface on the menu (bad code, formation failed), cleared when the
+        /// player retries.
+        error: Option<String>,
+    }
+
+    impl MenuState {
+        fn new(seed: u64, telemetry: Option<EndpointId>) -> Self {
+            Self {
+                seed,
+                telemetry,
+                code_input: String::new(),
+                forming: None,
+                error: None,
+            }
+        }
+    }
+
+    /// Draw the menu (Menu phase) or the lobby/connecting screen (Connecting phase), and
+    /// drive the transitions. The single egui system for the boot flow:
+    /// - **Menu**: Solo builds the offline round instantly and jumps to Playing; Host and
+    ///   Join start a background barrier ([`menu::begin`]) and move to Connecting.
+    /// - **Connecting**: poll the formation; on a result, park the [`ReadyMatch`] and go
+    ///   to Playing (or show the error and return to Menu).
+    ///
+    /// Determinism: this only ever *selects* a formation and reads its finished result.
+    /// The round it parks (in [`PendingRound`]) is built by [`menu::ready_from`] /
+    /// [`menu::solo_round`] from the unchanged barrier output — no sim state originates here.
+    fn menu_screen(
+        mut contexts: EguiContexts,
+        mut state: NonSendMut<MenuState>,
+        mut pending: NonSendMut<PendingRound>,
+        phase: Res<State<AppPhase>>,
+        mut next: ResMut<NextState<AppPhase>>,
+    ) -> Result {
+        let ctx = contexts.ctx_mut()?;
+        match phase.get() {
+            AppPhase::Menu => menu_phase(ctx, &mut state, &mut pending, &mut next),
+            AppPhase::Connecting => connecting_phase(ctx, &mut state, &mut pending, &mut next),
+            // Playing is gated out by the run condition; nothing to draw.
+            AppPhase::Playing => {}
+        }
+        Ok(())
+    }
+
+    /// The Host/Join/Solo chooser. Writes the player's pick into [`MenuState`] (and a Solo
+    /// round straight into [`PendingRound`]) and sets the next phase. No networking happens
+    /// inline except KICKING OFF the background barrier; the UI never blocks.
+    fn menu_phase(
+        ctx: &egui::Context,
+        state: &mut MenuState,
+        pending: &mut PendingRound,
+        next: &mut NextState<AppPhase>,
+    ) {
+        egui::Window::new("Giant Crab Rescue")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.heading("Giant Crab Rescue");
+                ui.label("Rescue the giant crab. Reach the green pillar to extract.");
+                ui.separator();
+
+                // Solo: the always-playable offline round, built instantly (no network).
+                // This is the clean #55 fix — a lone player never depends on discovery.
+                if ui.button("Play solo").clicked() {
+                    pending.0 = Some(menu::solo_round(state.seed));
+                    next.set(AppPhase::Playing);
+                    return;
+                }
+
+                ui.separator();
+                ui.label("Multiplayer (same LAN):");
+                // Host: open a match. Others Join by our code or by discovering us on the
+                // LAN; Start (in the lobby) begins the round, solo if nobody joined.
+                if ui.button("Host a match").clicked() {
+                    start_forming(state, &StartChoice::Host, next);
+                    return;
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Join code:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.code_input)
+                            .desired_width(260.0)
+                            .hint_text("paste host code (optional)"),
+                    );
+                });
+                if ui.button("Join a match").clicked() {
+                    // Parse the optional code: blank = discover on the LAN (no dial); a
+                    // non-empty field must parse to an endpoint id or it's a user error we
+                    // surface rather than silently discovering.
+                    let trimmed = state.code_input.trim();
+                    let host = if trimmed.is_empty() {
+                        None
+                    } else {
+                        match trimmed.parse::<EndpointId>() {
+                            Ok(id) => Some(id),
+                            Err(_) => {
+                                state.error = Some("That join code isn't a valid endpoint id.".into());
+                                return;
+                            }
+                        }
+                    };
+                    start_forming(state, &StartChoice::Join(host), next);
+                }
+
+                if let Some(err) = &state.error {
+                    ui.separator();
+                    ui.colored_label(egui::Color32::from_rgb(230, 120, 120), err);
+                }
+            });
+    }
+
+    /// Kick off a networked formation for a Host/Join choice and move to Connecting. Shared
+    /// by both buttons so the "begin barrier + clear error + switch phase" sequence has one
+    /// definition. Solo never reaches here (it has no formation).
+    fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextState<AppPhase>) {
+        state.error = None;
+        state.forming = menu::begin(choice, state.seed, state.telemetry);
+        next.set(AppPhase::Connecting);
+    }
+
+    /// The lobby / connecting screen: poll the background barrier. While it forms, show the
+    /// role + (for Host) the join code to share. On completion, park the round in
+    /// [`PendingRound`] and enter Playing; on failure, show the error and return to Menu so
+    /// the player can retry.
+    fn connecting_phase(
+        ctx: &egui::Context,
+        state: &mut MenuState,
+        pending: &mut PendingRound,
+        next: &mut NextState<AppPhase>,
+    ) {
+        // Poll first so a finished formation transitions THIS frame.
+        if let Some(forming) = &state.forming
+            && let Some(result) = forming.poll()
+        {
+            // Done forming: drop the handle and act on the result.
+            state.forming = None;
+            match result {
+                Ok(match_result) => {
+                    pending.0 = Some(menu::ready_from(match_result, state.seed));
+                    next.set(AppPhase::Playing);
+                    return;
+                }
+                Err(e) => {
+                    state.error = Some(format!("Couldn't form a match: {e:#}"));
+                    next.set(AppPhase::Menu);
+                    return;
+                }
+            }
+        }
+
+        // A host's explicit "start now, solo" click, captured inside the egui closure and
+        // acted on after it (the closure borrows `state`; the abandon-and-solo mutation
+        // happens once it returns). Only the Host screen shows it.
+        let mut start_solo_now = false;
+        egui::Window::new("Connecting")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                let hosting = state.forming.as_ref().is_some_and(|f| f.hosting);
+                let display_code = state.forming.as_ref().and_then(|f| f.display_code());
+                if hosting {
+                    ui.heading("Hosting — waiting for players");
+                    ui.label("Share this join code (or others can find you on the LAN):");
+                    // The host's own code is its endpoint id, surfaced by the formation once
+                    // the session binds. Until then show a forming note.
+                    match display_code {
+                        Some(code) => {
+                            // A selectable, read-only field so the player can copy the code.
+                            let mut code_str = code.to_string();
+                            ui.add(
+                                egui::TextEdit::singleline(&mut code_str).desired_width(360.0),
+                            );
+                        }
+                        None => {
+                            ui.label("(starting host — code will appear shortly)");
+                        }
+                    }
+                    ui.separator();
+                    ui.label("Players who join are pulled into the round automatically.");
+                    // Explicit Start for the zero/early case (the issue's "Start works with
+                    // zero joiners"): begin a solo round immediately rather than waiting out
+                    // the discovery window. Networked starts (peers present) still close via
+                    // the barrier; a host-triggered SYNCHRONIZED start over the wire is the
+                    // remaining lobby-protocol work — this button covers the solo path.
+                    if ui.button("Start solo now").clicked() {
+                        start_solo_now = true;
+                    }
+                } else {
+                    ui.heading("Joining a match…");
+                    match display_code {
+                        Some(code) => {
+                            ui.label(format!("Dialing host {}…", code.fmt_short()));
+                        }
+                        None => {
+                            ui.label("Discovering a host on the LAN…");
+                        }
+                    }
+                }
+                ui.separator();
+                ui.spinner();
+                if ui.button("Cancel").clicked() {
+                    // Bail back to the menu: drop the in-flight formation (its session tears
+                    // down on the worker's return) and return to the chooser.
+                    start_solo_now = false;
+                    state.forming = None;
+                    next.set(AppPhase::Menu);
+                }
+            });
+
+        // Act on the host's "start solo now": abandon the wait (drop the formation handle —
+        // the worker's session closes on its own return) and install the shared solo round,
+        // the SAME one Solo/Alone produce. Guaranteed-instant, no discovery dependency.
+        if start_solo_now {
+            state.forming = None;
+            pending.0 = Some(menu::solo_round(state.seed));
+            next.set(AppPhase::Playing);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::menu::ReadyMatch;
+    use crate::net::net_loop;
+
+    /// The boot menu's handoff into the round (rl#56), exercised headlessly (no window):
+    /// park a chosen [`ReadyMatch`] in [`PendingRound`], request the Playing transition,
+    /// and prove `OnEnter(Playing)`'s [`ensure_round_installed`] builds a live
+    /// [`GameState`] from it — the determinism-critical link the menu depends on (the menu
+    /// only selects a round; this is where it actually becomes the sim). Uses
+    /// `MinimalPlugins` + the state plumbing only, so it needs no display/GPU and can run
+    /// on the headless box. (The egui UI + 2-peer formation still need on-device testing;
+    /// this pins the part that decides which sim the round runs.)
+    #[test]
+    fn menu_handoff_installs_the_chosen_round() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<AppPhase>()
+            .init_non_send_resource::<PendingRound>()
+            .add_systems(OnEnter(AppPhase::Playing), ensure_round_installed);
+
+        // Park a solo round (the same one the Solo button / Alone fallback produce) and ask
+        // to enter Playing, exactly as the menu does on a choice.
+        let seed = 0x1234_5678;
+        app.world_mut().insert_non_send_resource(PendingRound(Some(ReadyMatch {
+            lockstep: net_loop::solo_lockstep_for(seed),
+            net: None,
+        })));
+        app.world_mut()
+            .resource_mut::<NextState<AppPhase>>()
+            .set(AppPhase::Playing);
+
+        // One update applies the transition and runs OnEnter(Playing).
+        app.update();
+
+        assert_eq!(
+            *app.world().resource::<State<AppPhase>>().get(),
+            AppPhase::Playing,
+            "the transition must have entered Playing"
+        );
+        let gs = app
+            .world()
+            .get_non_send_resource::<GameState>()
+            .expect("ensure_round_installed must build GameState from the parked round");
+        // The installed sim is the chosen one: a single local player (solo), seeded as asked.
+        assert_eq!(gs.ls.me(), crate::net::sim::PlayerId(0), "solo player id 0");
+        assert!(
+            matches!(gs.input_source, InputSource::Solo),
+            "a solo handoff installs the Solo input source"
+        );
+        // And the parked round was consumed (taken), not left to double-install.
+        assert!(
+            app.world()
+                .get_non_send_resource::<PendingRound>()
+                .is_some_and(|p| p.0.is_none()),
+            "the chosen round must be taken out of PendingRound"
+        );
+    }
 
     /// The frame conversion must match the sim's documented right-handed XZ layout:
     /// +X right, +Z forward, Y up. A sim Pos maps straight through to Bevy XYZ with
