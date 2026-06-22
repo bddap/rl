@@ -181,7 +181,7 @@ fn main() -> Result<()> {
 /// drives it on a fixed-timestep accumulator (see [`rl::net::render`]).
 ///
 /// Networked play auto-falls-back to solo when discovery finds no peer (rl#47): a
-/// launch alone (the common case — Aiden opens the shortcut, nobody else running) yields
+/// launch alone (the common case — a player opens the shortcut, nobody else running) yields
 /// [`net_loop::MatchResult::Alone`], which we play exactly as an explicit `--solo`. So the
 /// one launcher is always playable; `--solo` just skips discovery up front.
 fn run_play(args: PlayArgs) -> Result<()> {
