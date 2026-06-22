@@ -455,7 +455,7 @@ pub(crate) fn load_curriculum(path: &Path) -> Curriculum {
 
 /// Default rollout horizon: the number of physics ticks each rollout thread rolls
 /// per iteration before handing its buffers back, when `--horizon` is not given.
-pub(crate) const STEPS_PER_ROLLOUT: u32 = 1024;
+pub const STEPS_PER_ROLLOUT: u32 = 1024;
 
 /// Where an env sits in the record → reset → settle lifecycle. One field in
 /// place of the old `needs_reset: bool` + `grace: u32` pair: those two booleans
@@ -1155,7 +1155,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
 /// `"GPU wgpu/Vulkan"`). `batch_override` replaces [`PpoConfig`]'s default minibatch
 /// size for the larger-batch sweep (the tertiary question: does the GPU stay cheap as
 /// the per-step matmul grows?); `None` keeps the live batch of 64.
-pub(crate) fn bench_ppo_update<B: AutodiffBackend>(
+pub fn bench_ppo_update<B: AutodiffBackend>(
     device: &B::Device,
     backend_label: &str,
     workers: usize,

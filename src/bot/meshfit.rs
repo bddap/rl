@@ -239,7 +239,7 @@ impl LoadedModel {
     /// canonical bone→part mapping. Returns, per part, the world-space vertex
     /// positions and the mean dominant-weight (a skinning-cleanliness proxy).
     /// Vertices on a non-rig node (no part) are dropped.
-    pub(crate) fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)> {
+    pub fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)> {
         let mut out: HashMap<PartId, (Vec<Vec3>, f32)> = HashMap::new();
         for v in &self.verts {
             let Some(name) = self.node_name.get(&v.dominant_node) else {
@@ -260,7 +260,7 @@ impl LoadedModel {
 
     /// World-space positions of every vertex whose dominant bone is one of `names`.
     /// Used to size the carapace box from the trunk's actual shell flesh.
-    pub(crate) fn vertices_for_bones(&self, names: &[&str]) -> Vec<Vec3> {
+    pub fn vertices_for_bones(&self, names: &[&str]) -> Vec<Vec3> {
         self.verts
             .iter()
             .filter(|v| {
@@ -556,7 +556,7 @@ fn percentile(sorted: &[f32], q: f32) -> f32 {
 /// under-coverage), negative = inside (collider margin / bulge). The split lets
 /// `--verify-colliders` tell "mesh escapes the collider" from "collider oversized",
 /// and the axis/radius diagnostics say *why* a capsule misses its limb.
-pub(crate) struct ColliderScore {
+pub struct ColliderScore {
     pub n: usize,
     /// Fraction of vertices more than 1 mm outside the collider.
     pub frac_outside: f32,
@@ -602,7 +602,7 @@ impl ColliderScore {
 }
 
 /// Score a cloud against a capsule given by its segment endpoints + radius (world).
-pub(crate) fn score_capsule(points: &[Vec3], a: Vec3, b: Vec3, radius: f32) -> ColliderScore {
+pub fn score_capsule(points: &[Vec3], a: Vec3, b: Vec3, radius: f32) -> ColliderScore {
     let seg = b - a;
     let seg_len2 = seg.length_squared().max(1e-12);
     let sd: Vec<f32> = points
@@ -634,7 +634,7 @@ pub(crate) fn score_capsule(points: &[Vec3], a: Vec3, b: Vec3, radius: f32) -> C
 }
 
 /// Score a cloud against a world-axis-aligned box (centre + half-extents).
-pub(crate) fn score_box(points: &[Vec3], center: Vec3, half: Vec3) -> ColliderScore {
+pub fn score_box(points: &[Vec3], center: Vec3, half: Vec3) -> ColliderScore {
     let sd: Vec<f32> = points
         .iter()
         .map(|&p| {
@@ -799,7 +799,7 @@ pub fn capsule_mass(radius: f32, half_height: f32, density: f32) -> CapsuleMass 
 /// derived from `inside` (not an independent threshold), so the two can't
 /// disagree at the boundary.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Containment {
+pub struct Containment {
     /// Winding number normalised by the soup's orientation so an interior point
     /// reads ≈ +1 regardless of CW/CCW triangle winding.
     pub wn: f32,
@@ -814,7 +814,7 @@ pub(crate) struct Containment {
 /// the skin-diag settled audit, and its bind-pose reference — each is a borrow
 /// of a different surface (bind mesh, live skinned soup) asking the same
 /// inside/outside question, so the probe convention must not drift between them.
-pub(crate) struct MeshContainment<'a> {
+pub struct MeshContainment<'a> {
     positions: &'a [Vec3],
     triangles: &'a [[u32; 3]],
     signed_vol: f64,
@@ -868,7 +868,7 @@ impl<'a> MeshContainment<'a> {
 
 /// Axis-aligned bounds (min, max) of a point set; `(+∞, -∞)` for an empty set so
 /// a later `size = hi - lo` reads as degenerate rather than silently zero.
-pub(crate) fn aabb(pts: &[Vec3]) -> (Vec3, Vec3) {
+pub fn aabb(pts: &[Vec3]) -> (Vec3, Vec3) {
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
     for &p in pts {
