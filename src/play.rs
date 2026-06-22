@@ -33,8 +33,8 @@ use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{BotSet, CrabSpawns, respawn_crab_rotated};
 use crate::training::session::{
-    BRAIN_STEM, Curriculum, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, TrainBackend,
-    planar_dist, sample_target,
+    BRAIN_STEM, Curriculum, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, RESET_GRACE_TICKS,
+    TrainBackend, planar_dist, sample_target, settle_countdown,
 };
 
 /// A loaded policy that maps observations to actions for inference (no learning).
@@ -530,11 +530,12 @@ fn orbit_camera(
 
 /// Settle ticks remaining after a reset. The respawned crab starts in the
 /// rest pose with the builder motors already holding it; the settle just
-/// holds zero actions while it drops onto the ground and takes load.
+/// holds zero actions while it drops onto the ground and takes load. Seeded from
+/// training's [`RESET_GRACE_TICKS`] and decremented via the shared
+/// [`settle_countdown`] so the demo's drop window stays identical to the one the
+/// policy was trained under (0 = settled, policy back in control).
 #[derive(Resource, Default)]
 struct DemoSettle(u32);
-
-const DEMO_SETTLE_TICKS: u32 = 32;
 
 /// Wall-clock since the last demo re-tilt. A passive stream needs the goofy
 /// righting "journey" on a loop: a crab that lands on its feet (or never falls)
@@ -617,7 +618,7 @@ fn demo_respawn(
 ) {
     let origin = spawns.0.first().copied().unwrap_or(Vec3::ZERO);
     respawn_crab_rotated(commands, assets, parts, origin, 0, init_rotation);
-    settle.0 = DEMO_SETTLE_TICKS;
+    settle.0 = RESET_GRACE_TICKS;
     if let Some(a) = actions.envs.first_mut() {
         *a = [0.0; ACTION_SIZE];
     }
@@ -886,7 +887,9 @@ fn demo_settle(mut settle: ResMut<DemoSettle>, mut actions: ResMut<CrabActions>)
     if let Some(a) = actions.envs.first_mut() {
         *a = [0.0; ACTION_SIZE];
     }
-    settle.0 -= 1;
+    // Same countdown training's reset path runs (see `settle_countdown`); spent →
+    // 0 (settled), which the demo treats as "policy back in control".
+    settle.0 = settle_countdown(settle.0).unwrap_or(0);
 }
 
 /// Interactive right-claw inspection sweep (present only with `RL_CLAW_DEMO=1`): the

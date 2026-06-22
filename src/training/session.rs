@@ -1917,7 +1917,23 @@ pub fn brain_step(
 /// Settle ticks after a respawn: the fresh crab spawns in the rest pose with
 /// the builder motors already holding it, so this only covers the drop from
 /// spawn height onto the ground and the motors taking the load (0.5 s).
-const RESET_GRACE_TICKS: u32 = 32;
+///
+/// This is the ONE settle window for the whole project: the demo's post-respawn
+/// settle (`play::demo_settle`) reuses it via [`settle_countdown`] so a change to
+/// the drop window keeps training and the streamed demo in lock-step — they must
+/// hold zero actions for the same number of ticks or the demo stops mirroring the
+/// crab the policy was actually trained to settle.
+pub const RESET_GRACE_TICKS: u32 = 32;
+
+/// Advance a settle countdown by one tick. `grace` ≥ 1 means "still settling"
+/// (hold zero actions); the return is the grace for next tick, or `None` once the
+/// window is spent (the caller resumes normal control — `Recording` for training,
+/// policy drive for the demo). Sole source of the post-respawn settle arithmetic
+/// so the training reset path ([`reset_crab`]) and the demo settle
+/// (`play::demo_settle`) decrement the exact same way.
+pub fn settle_countdown(grace: u32) -> Option<u32> {
+    (grace > 1).then(|| grace - 1)
+}
 
 /// System: rebuilds each env's crab when that env's episode ends by a normal
 /// terminal/truncation — `brain_step` leaves such an env in
@@ -1968,14 +1984,13 @@ pub fn reset_crab(
     }
 
     // Count the settle grace down on every settling env (including one just set
-    // above, which lands at RESET_GRACE_TICKS-1 this tick); at zero it returns to
-    // Recording and the policy takes back over.
+    // above, which lands at RESET_GRACE_TICKS-1 this tick); when the shared
+    // countdown is spent it returns to Recording and the policy takes back over.
     for ep in training.envs.iter_mut() {
         if let EnvPhase::Settling { grace } = ep.phase {
-            ep.phase = if grace > 1 {
-                EnvPhase::Settling { grace: grace - 1 }
-            } else {
-                EnvPhase::Recording
+            ep.phase = match settle_countdown(grace) {
+                Some(g) => EnvPhase::Settling { grace: g },
+                None => EnvPhase::Recording,
             };
         }
     }
