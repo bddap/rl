@@ -9,6 +9,7 @@ use burn::backend::Autodiff;
 use burn::backend::ndarray::{NdArray, NdArrayDevice};
 use burn::grad_clipping::GradientClippingConfig;
 use burn::module::AutodiffModule;
+use burn::tensor::backend::AutodiffBackend;
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::prelude::*;
@@ -265,7 +266,13 @@ impl ObsNormalizer {
 pub type TrainBackend = Autodiff<NdArray>;
 pub type InferBackend = NdArray;
 
-type CrabOptimizer = OptimizerAdaptor<Adam, CrabBrain<TrainBackend>, TrainBackend>;
+/// The Adam optimizer over a `CrabBrain` on backend `B`. Generic over the backend
+/// so the one PPO update ([`ppo_update_core`]) serves both the production CPU
+/// learner (`B = TrainBackend`) and the `bench-update` GPU comparison
+/// (`B = Autodiff<Wgpu>`) — same code, one backend parameter (rl#49).
+type CrabOpt<B> = OptimizerAdaptor<Adam, CrabBrain<B>, B>;
+/// The production learner's optimizer: Adam over the CPU autodiff backend.
+type CrabOptimizer = CrabOpt<TrainBackend>;
 
 struct MetricsLogger {
     episode_file: std::fs::File,
@@ -903,12 +910,18 @@ impl TrainingState {
 ///
 /// Free function rather than a `TrainingState` method so the K=1 parity test
 /// ([`inproc`] tests) can call the exact production update over hand-built buffers.
-pub(crate) fn ppo_update_core(
-    brain: &mut CrabBrain<TrainBackend>,
-    optimizer: &mut CrabOptimizer,
+///
+/// Generic over the autodiff backend `B` (rl#49): the production learner calls it
+/// with `B = TrainBackend` (CPU `Autodiff<NdArray>`), inferred from the concrete
+/// types `learner_parts` hands back, so the live path is unchanged; the
+/// `bench-update` GPU comparison calls the SAME function with `B = Autodiff<Wgpu>`.
+/// One update implementation, one backend parameter.
+pub(crate) fn ppo_update_core<B: AutodiffBackend>(
+    brain: &mut CrabBrain<B>,
+    optimizer: &mut CrabOpt<B>,
     config: &PpoConfig,
     rollouts: &[RolloutBuffer],
-    device: &NdArrayDevice,
+    device: &B::Device,
     ret_norm: &mut ReturnNormalizer,
 ) -> PpoMetrics {
     {
@@ -943,7 +956,7 @@ pub(crate) fn ppo_update_core(
             let last_value = if matches!(last_t.end, StepEnd::Terminal) {
                 NormalizedValue(0.0)
             } else {
-                let obs = Tensor::<TrainBackend, 1>::from_floats(last_t.obs.as_slice(), device)
+                let obs = Tensor::<B, 1>::from_floats(last_t.obs.as_slice(), device)
                     .unsqueeze::<2>();
                 NormalizedValue(
                     brain
@@ -996,17 +1009,17 @@ pub(crate) fn ppo_update_core(
         let old_log_probs_data: Vec<f32> = transitions.iter().map(|t| t.log_prob).collect();
 
         let obs_all =
-            Tensor::<TrainBackend, 2>::from_data(TensorData::new(obs_data, [n, OBS_SIZE]), device);
-        let actions_all = Tensor::<TrainBackend, 2>::from_data(
+            Tensor::<B, 2>::from_data(TensorData::new(obs_data, [n, OBS_SIZE]), device);
+        let actions_all = Tensor::<B, 2>::from_data(
             TensorData::new(actions_data, [n, ACTION_SIZE]),
             device,
         );
         let old_log_probs_all =
-            Tensor::<TrainBackend, 1>::from_data(TensorData::new(old_log_probs_data, [n]), device);
+            Tensor::<B, 1>::from_data(TensorData::new(old_log_probs_data, [n]), device);
         let advantages_all =
-            Tensor::<TrainBackend, 1>::from_data(TensorData::new(advantages_norm, [n]), device);
+            Tensor::<B, 1>::from_data(TensorData::new(advantages_norm, [n]), device);
         let returns_all =
-            Tensor::<TrainBackend, 1>::from_data(TensorData::new(returns, [n]), device);
+            Tensor::<B, 1>::from_data(TensorData::new(returns, [n]), device);
 
         let mut total_policy_loss = 0.0f32;
         let mut total_value_loss = 0.0f32;
@@ -1030,7 +1043,7 @@ pub(crate) fn ppo_update_core(
                 let batch_n = end - start;
                 let batch_indices = &indices[start..end];
 
-                let idx_tensor = Tensor::<TrainBackend, 1, Int>::from_data(
+                let idx_tensor = Tensor::<B, 1, Int>::from_data(
                     TensorData::new(
                         batch_indices.iter().map(|&i| i as i64).collect::<Vec<_>>(),
                         [batch_n],
@@ -1055,7 +1068,7 @@ pub(crate) fn ppo_update_core(
                 let scaled_diff = diff / log_std_2d.clone().exp();
                 let log_probs_per_dim =
                     scaled_diff.powf_scalar(2.0).neg() * 0.5 - log_std_2d - half_log_2pi;
-                let new_lp: Tensor<TrainBackend, 1> = log_probs_per_dim.sum_dim(1).flatten(0, 1);
+                let new_lp: Tensor<B, 1> = log_probs_per_dim.sum_dim(1).flatten(0, 1);
 
                 let entropy_per_dim = log_std.clone()
                     + (0.5 * (2.0 * std::f32::consts::PI * std::f32::consts::E).ln());
@@ -1073,7 +1086,7 @@ pub(crate) fn ppo_update_core(
                 // σ-units and `value_loss_clip` is a σ-count. The head therefore fits
                 // unit-scale targets regardless of the reward magnitude — the whole
                 // point of return normalization.
-                let values: Tensor<TrainBackend, 1> = brain.value(obs).flatten(0, 1);
+                let values: Tensor<B, 1> = brain.value(obs).flatten(0, 1);
                 let value_diff =
                     (values - rets).clamp(-config.value_loss_clip, config.value_loss_clip);
                 let value_loss = value_diff.powf_scalar(2.0).mean();
@@ -1098,6 +1111,223 @@ pub(crate) fn ppo_update_core(
             entropy: total_entropy / update_count as f32,
         }
     }
+}
+
+/// Microbenchmark of the PPO **update** phase in isolation (rl#48). Builds a fresh
+/// `CrabBrain` + Adam optimizer exactly as the real learner does, synthesizes
+/// `workers*envs` rollout buffers of `horizon` transitions each (so the per-update
+/// transition count and per-env GAE segment structure match a live `learn` iter at
+/// the same K/M/H), then calls the production [`ppo_update_core`] `reps` times. The
+/// first call is a warmup (page-in / first-alloc) and is excluded; the rest are
+/// timed individually and reported as min / median / max plus the per-rep PPO
+/// metrics (so NaN/garbage shows up as non-finite loss).
+///
+/// Generic over the autodiff backend `B` and parameterised by `device` (rl#49): the
+/// caller picks `B = TrainBackend` + `NdArrayDevice::Cpu` for the CPU baseline or
+/// `B = Autodiff<Wgpu>` + a `WgpuDevice` for the GPU run, so BOTH paths exercise this
+/// one harness over the one production [`ppo_update_core`] — no parallel
+/// implementation. `backend_label` is just printed (e.g. `"CPU ndarray"` /
+/// `"GPU wgpu/Vulkan"`). `batch_override` replaces [`PpoConfig`]'s default minibatch
+/// size for the larger-batch sweep (the tertiary question: does the GPU stay cheap as
+/// the per-step matmul grows?); `None` keeps the live batch of 64.
+pub(crate) fn bench_ppo_update<B: AutodiffBackend>(
+    device: &B::Device,
+    backend_label: &str,
+    workers: usize,
+    envs: usize,
+    horizon: usize,
+    reps: usize,
+    batch_override: Option<usize>,
+) {
+    use rand::{Rng, SeedableRng};
+
+    let mut brain: CrabBrain<B> = CrabBrain::new(device);
+    // Same optimizer construction as `TrainingState::build` (grad-norm clip 0.5), so
+    // the optimizer step we time is the production one, not a bare Adam.
+    let mut optimizer: CrabOpt<B> = AdamConfig::new()
+        .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
+        .init();
+    let mut config = PpoConfig::default();
+    if let Some(bs) = batch_override {
+        config.batch_size = bs;
+    }
+
+    // Synthetic rollouts: one buffer per env, `horizon` transitions each, filled with
+    // small random obs/actions/rewards. The values matter only for numerical realism
+    // (the matmul shapes — driven by OBS_SIZE/HIDDEN/ACTION_SIZE/batch_size — are what
+    // we measure); a fixed-seed RNG keeps the two backend builds comparing the same
+    // data. A non-terminal tail per buffer forces the trailing value bootstrap (one
+    // extra forward), matching a truncated live horizon.
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xC0FFEE);
+    let n_envs = (workers * envs).max(1);
+    let mut rollouts: Vec<RolloutBuffer> = Vec::with_capacity(n_envs);
+    for _ in 0..n_envs {
+        let mut buf = RolloutBuffer::new();
+        for _step in 0..horizon {
+            let mut obs = [0.0f32; OBS_SIZE];
+            for o in obs.iter_mut() {
+                *o = rng.gen_range(-1.0..1.0);
+            }
+            let mut action = [0.0f32; ACTION_SIZE];
+            for a in action.iter_mut() {
+                *a = rng.gen_range(-1.0..1.0);
+            }
+            buf.push(Transition {
+                obs,
+                action,
+                reward: rng.gen_range(-1.0..1.0),
+                value: NormalizedValue(rng.gen_range(-1.0..1.0)),
+                log_prob: rng.gen_range(-5.0..0.0),
+                // Every step Continues, so each buffer's tail is non-terminal and
+                // `ppo_update_core` bootstraps its trailing value off the brain (one
+                // extra forward per buffer) — matching a live horizon cut by the step
+                // cap rather than a real episode end.
+                end: StepEnd::Continues,
+            });
+        }
+        rollouts.push(buf);
+    }
+
+    let n: usize = rollouts.iter().map(|b| b.len()).sum();
+    let minibatches_per_epoch = n.div_ceil(config.batch_size);
+    let opt_steps = minibatches_per_epoch * config.epochs_per_update as usize;
+    eprintln!(
+        "[bench-update] backend: {backend_label} | K={workers} × M={envs} × H={horizon} → \
+         {n} transitions/update | batch_size {} epochs {} → {minibatches_per_epoch} \
+         minibatches/epoch × {} epochs = {opt_steps} optimizer steps/update | OBS {OBS_SIZE} \
+         HIDDEN 256 ACTION {ACTION_SIZE} | reps {reps} (1 warmup, {} timed)",
+        config.batch_size,
+        config.epochs_per_update,
+        config.epochs_per_update,
+        reps.saturating_sub(1),
+    );
+    eprintln!(
+        "[bench-update] cpu gemm threads: MATMUL_NUM_THREADS={} RAYON_NUM_THREADS={} (no effect on the GPU backend)",
+        std::env::var("MATMUL_NUM_THREADS").unwrap_or_else(|_| "<unset>".into()),
+        std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "<unset>".into()),
+    );
+
+    let mut times_ms: Vec<f64> = Vec::with_capacity(reps);
+    for rep in 0..reps {
+        // Fresh return normalizer per rep so each rep is the same starting condition
+        // (the normalizer's running stats would otherwise drift the value-loss targets
+        // rep to rep). The brain/optimizer DO carry over — that mirrors the live loop,
+        // where Adam moments persist across updates, and keeps the timing realistic.
+        let mut ret_norm = ReturnNormalizer::new();
+        let t0 = std::time::Instant::now();
+        let metrics = ppo_update_core(
+            &mut brain,
+            &mut optimizer,
+            &config,
+            &rollouts,
+            device,
+            &mut ret_norm,
+        );
+        let dt = t0.elapsed().as_secs_f64() * 1000.0;
+        let finite = metrics.policy_loss.is_finite()
+            && metrics.value_loss.is_finite()
+            && metrics.entropy.is_finite();
+        eprintln!(
+            "[bench-update] rep {rep:>2}{}: {dt:8.1} ms | ploss {:+.5} vloss {:+.5} ent {:+.5}{}",
+            if rep == 0 { " (warmup)" } else { "        " },
+            metrics.policy_loss,
+            metrics.value_loss,
+            metrics.entropy,
+            if finite { "" } else { "  <<< NON-FINITE!" },
+        );
+        if rep > 0 {
+            times_ms.push(dt);
+        }
+    }
+
+    if times_ms.is_empty() {
+        eprintln!("[bench-update] no timed reps (need reps > 1)");
+        return;
+    }
+    times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = times_ms[times_ms.len() / 2];
+    let min = times_ms[0];
+    let max = *times_ms.last().unwrap();
+    let mean = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
+    let per_step_ms = median / opt_steps as f64;
+    eprintln!(
+        "[bench-update] RESULT update: median {median:.1} ms (min {min:.1}, max {max:.1}, mean {mean:.1}) over {} timed reps | {per_step_ms:.3} ms/optimizer-step",
+        times_ms.len(),
+    );
+}
+
+/// rl#49 GPU bench entry point: bring up the wgpu/Vulkan backend on the discrete GPU,
+/// PROVE the adapter is real hardware (not a software fallback), then run the same
+/// [`bench_ppo_update`] harness on `Autodiff<Wgpu>`.
+///
+/// The adapter check is the load-bearing part. The box's Vulkan ICD set includes
+/// lavapipe (`lvp` — a CPU software rasteriser, `DeviceType::Cpu`); if wgpu silently
+/// fell back to it, the update would run on the CPU and a slow result would falsely
+/// "prove" the GPU doesn't help. So we (a) request `DiscreteGpu(0)`, which cubecl
+/// filters by `device_type == DiscreteGpu` and thus skips lavapipe outright, and (b)
+/// read the chosen adapter's info, print it, and PANIC if it is `Cpu`/`Other` or its
+/// name looks like a software renderer. Pair this with `VK_ICD_FILENAMES` pointing at
+/// only `nvidia_icd.json` to make the NVIDIA card the only Vulkan device at all.
+#[cfg(feature = "wgpu")]
+pub(crate) fn bench_ppo_update_gpu(
+    workers: usize,
+    envs: usize,
+    horizon: usize,
+    reps: usize,
+    batch_override: Option<usize>,
+) {
+    use burn::backend::Autodiff;
+    use burn::backend::wgpu::{RuntimeOptions, Wgpu, WgpuDevice, graphics::Vulkan, init_setup};
+
+    // DiscreteGpu(0) (not DefaultDevice): cubecl's adapter filter keeps only
+    // `DeviceType::DiscreteGpu` adapters for this variant, so lavapipe (a CPU device)
+    // is excluded before selection — belt to the ICD-filter braces.
+    let device = WgpuDevice::DiscreteGpu(0);
+
+    // init_setup::<Vulkan> forces the Vulkan graphics API, registers this exact device
+    // with the runtime, and hands back the setup so we can inspect the real adapter.
+    eprintln!("[bench-update] initialising wgpu/Vulkan on {device:?} …");
+    let setup = init_setup::<Vulkan>(&device, RuntimeOptions::default());
+    let info = setup.adapter.get_info();
+    eprintln!(
+        "[bench-update] wgpu adapter: name={:?} backend={:?} device_type={:?} driver={:?} {:?}",
+        info.name, info.backend, info.device_type, info.driver, info.driver_info,
+    );
+
+    // Hard gate: refuse to benchmark on a software adapter. A lavapipe/llvmpipe result
+    // would be a CPU run mislabelled as GPU — worse than no result. Requesting
+    // `DiscreteGpu(0)` already makes cubecl reject a non-discrete adapter (it panics
+    // "No Discrete GPU device found" rather than fall back), and we additionally check
+    // both the device_type (via its Debug form, to avoid pinning the wgpu crate
+    // version) and the adapter name against the known software-rasteriser names.
+    let name_lc = info.name.to_lowercase();
+    let type_str = format!("{:?}", info.device_type).to_lowercase();
+    let is_software = type_str.contains("cpu")
+        || name_lc.contains("llvmpipe")
+        || name_lc.contains("lavapipe")
+        || name_lc.contains("software")
+        || name_lc.contains("swiftshader");
+    assert!(
+        !is_software,
+        "wgpu selected a SOFTWARE adapter (name={:?}, type={:?}) — refusing to report a GPU \
+         timing. Set VK_ICD_FILENAMES=/run/opengl-driver/share/vulkan/icd.d/nvidia_icd.json to \
+         expose only the NVIDIA card.",
+        info.name, info.device_type,
+    );
+    eprintln!(
+        "[bench-update] adapter confirmed as hardware GPU ({}) — proceeding.",
+        info.name,
+    );
+
+    bench_ppo_update::<Autodiff<Wgpu>>(
+        &device,
+        "GPU wgpu/Vulkan (Autodiff<Wgpu>)",
+        workers,
+        envs,
+        horizon,
+        reps,
+        batch_override,
+    );
 }
 
 /// The start band (rung 1): the planar (XZ) distance, in metres, at which a fresh
@@ -2471,7 +2701,7 @@ mod tests {
         let loaded_record = recorder.load(stem, &device).expect("load brain");
         let loaded = CrabBrain::<TrainBackend>::new(&device).load_record(loaded_record);
 
-        let test_obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
+        let test_obs = Tensor::<B, 2>::zeros([1, OBS_SIZE], &device);
         let (orig_means, orig_log_std) = brain.policy(test_obs.clone());
         let (loaded_means, loaded_log_std) = loaded.policy(test_obs);
 

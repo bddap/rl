@@ -7,6 +7,21 @@ edition = "2024"
 # separate terms (see NOTICE).
 license = "MIT OR Apache-2.0"
 
+# rl#49 feasibility spike: a GPU backend for the PPO update via burn's wgpu/Vulkan.
+# `wgpu` enables burn-wgpu (already in the lock tree via bevy's wgpu) and adds the
+# `Autodiff<Wgpu>` backend + the `bench-update --backend gpu` path. WGSL→Vulkan by
+# default; the SPIR-V (`burn/vulkan`) high-perf path is a separate lever, not enabled
+# here. Off by default — the production `learn` path stays pure CPU ndarray.
+#
+# `naga/termcolor`: burn-wgpu drags in wgpu 27 → naga 27 alongside bevy's wgpu 26 →
+# naga 26, and both share one `codespan-reporting` 0.12 (its features UNIFY across the
+# graph). naga 26's `term::emit` call only typechecks when codespan-reporting's
+# `termcolor` is on (its diagnostic buffer is then a `WriteColor`); without it, naga 26
+# hands a `String` to a `WriteColor`-typed emit and fails to compile. The 27 stack pulls
+# `termcolor` in, so we must flip naga 26's matching feature on too. Only under `wgpu`.
+[features]
+wgpu = ["burn/wgpu", "dep:naga", "naga/termcolor"]
+
 [dependencies]
 bevy = "0.18"
 bevy_rapier3d = "0.34"
@@ -29,6 +44,11 @@ serde = { version = "1", features = ["derive"] }
 gltf = { version = "1.4.1", default-features = false, features = ["utils", "names"] }
 
 burn = { version = "0.20", features = ["autodiff", "ndarray"] }
+# Only pulled in by the `wgpu` feature, and ONLY to flip naga 26's `termcolor` feature
+# on (see [features].wgpu). naga 26 is already in the lock via bevy's wgpu — this adds
+# no crate, it just activates the feature that makes naga 26 compile alongside naga 27.
+# Not used in any code path.
+naga = { version = "26", optional = true }
 rand_distr = "0.5"
 clap = { version = "4", features = ["derive"] }
 bincode = "1"
