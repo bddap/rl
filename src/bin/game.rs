@@ -179,25 +179,36 @@ fn main() -> Result<()> {
 /// peers and play in lockstep) per `--solo`. Builds the Bevy app from
 /// [`render::build_windowed_app`] and runs it — the app owns the lockstep loop and
 /// drives it on a fixed-timestep accumulator (see [`rl::net::render`]).
+///
+/// Networked play auto-falls-back to solo when discovery finds no peer (rl#47): a
+/// launch alone (the common case — Aiden opens the shortcut, nobody else running) yields
+/// [`net_loop::MatchResult::Alone`], which we play exactly as an explicit `--solo`. So the
+/// one launcher is always playable; `--solo` just skips discovery up front.
 fn run_play(args: PlayArgs) -> Result<()> {
     let (ls, net) = if args.solo {
-        let me = PlayerId(0);
-        let pilots = pilots_from_env(me);
-        (
-            Lockstep::new_with_pilots(MATCH_SEED, &[me], me, &pilots),
-            None,
-        )
+        (solo_lockstep(), None)
     } else {
-        let (ls, driver) = net_loop::connect_and_assign(
+        match net_loop::connect_and_form(
             MATCH_SEED,
             args.discover_secs,
             args.expect,
             args.telemetry,
-        )?;
-        (ls, Some(driver))
+        )? {
+            net_loop::MatchResult::Joined(ls, driver) => (ls, Some(driver)),
+            net_loop::MatchResult::Alone => (solo_lockstep(), None),
+        }
     };
     render::build_windowed_app(ls, net).run();
     Ok(())
+}
+
+/// The single-peer lockstep for an offline round: just us, honoring `RL_VEHICLE`. Shared
+/// by explicit `--solo` and the rl#47 discovery-found-no-peer fallback so the two play the
+/// identical deterministic solo round (one definition, no drift between the launch paths).
+fn solo_lockstep() -> Lockstep {
+    let me = PlayerId(0);
+    let pilots = pilots_from_env(me);
+    Lockstep::new_with_pilots(MATCH_SEED, &[me], me, &pilots)
 }
 
 /// Headless first-person screenshot: build a solo lockstep with `--players`
@@ -233,7 +244,7 @@ const MATCH_SEED: u64 = 0x6372_6162; // "crab"
 /// Which players spawn PILOTING a plane rather than on foot, from the `RL_VEHICLE` env
 /// flag (rl#38 vehicle first cut). `RL_VEHICLE=plane` makes the LOCAL player (`me`) a
 /// pilot; anything else (incl. unset) is the unchanged foot game (empty ⇒ byte-identical
-/// sim). Solo/screenshot only in this cut: the networked play path (`connect_and_assign`)
+/// sim). Solo/screenshot only in this cut: the networked play path (`connect_and_form`)
 /// builds the session with no pilots, so it ignores `RL_VEHICLE` entirely — no plane
 /// spawns over the wire yet. Wiring pilots into networked play needs the peers to agree
 /// on the pilot set (a wire negotiation), which is future work.
@@ -247,10 +258,18 @@ fn pilots_from_env(me: PlayerId) -> Vec<PlayerId> {
 /// Drive the lockstep sim from a constant local input, ticking at [`TICK_HZ`]. Pure
 /// machinery check: no peers, so our own input completes every tick.
 fn run_solo(args: SoloArgs) -> Result<()> {
+    run_solo_round(args.run_secs)
+}
+
+/// One offline lockstep round for `run_secs`: a single peer whose own input completes
+/// every tick (no network), ticking at [`TICK_HZ`] and printing a final summary. Shared
+/// by the `solo` command and the headless `net` rl#47 fallback (discovery found no peer),
+/// so the alone case runs the SAME deterministic solo path — no second sim loop to drift.
+fn run_solo_round(run_secs: u64) -> Result<()> {
     let me = PlayerId(0);
     let mut ls = Lockstep::new(MATCH_SEED, &[me], me);
     let tick_dt = Duration::from_secs_f64(1.0 / TICK_HZ as f64);
-    let end = Instant::now() + Duration::from_secs(args.run_secs);
+    let end = Instant::now() + Duration::from_secs(run_secs);
     let mut next = Instant::now();
     while Instant::now() < end {
         // A lazy circular stir so the dot visibly moves.
@@ -295,9 +314,16 @@ async fn run_net(args: NetArgs) -> Result<()> {
 
     // Form one agreed match via the shared cold-start barrier (same code the windowed
     // client runs, so the two can't drift apart and desync). Replay any inputs that
-    // arrived during formation into the fresh sim.
-    let frozen =
-        net_loop::form_match(&mut session, args.discover_secs, args.expect, tel.as_ref()).await?;
+    // arrived during formation into the fresh sim. If discovery finds no peer (rl#47),
+    // tear down the network side and run a solo round instead of awaiting an empty match.
+    let frozen = match net_loop::form_match(&mut session, args.discover_secs, args.expect, tel.as_ref()).await? {
+        net_loop::Formation::Agreed(frozen) => frozen,
+        net_loop::Formation::Alone => {
+            drop(tel);
+            session.shutdown().await;
+            return run_solo_round(args.run_secs);
+        }
+    };
     let me = frozen.me;
     let id_map = &frozen.id_map;
     let all_ids: Vec<PlayerId> = id_map.values().copied().collect();

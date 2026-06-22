@@ -449,7 +449,7 @@ impl Sim {
     ///
     /// Callers must pass the SAME `pilots` on every peer or their sims diverge; in
     /// THIS cut only the solo/screenshot paths pass a non-empty set — the networked
-    /// path (`connect_and_assign`) passes none, so planes don't yet fly in networked
+    /// path (`connect_and_form`) passes none, so planes don't yet fly in networked
     /// play. Wire-negotiating the pilot set (and the tagged-`Input` redesign the
     /// module note describes) is future work.
     pub fn new_with_pilots(seed: u64, players: &[PlayerId], pilots: &[PlayerId]) -> Self {
