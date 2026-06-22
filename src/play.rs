@@ -889,7 +889,7 @@ fn demo_settle(mut settle: ResMut<DemoSettle>, mut actions: ResMut<CrabActions>)
     }
     // Same countdown training's reset path runs (see `settle_countdown`); spent →
     // 0 (settled), which the demo treats as "policy back in control".
-    settle.0 = settle_countdown(settle.0).unwrap_or(0);
+    settle.0 = settle_countdown(settle.0);
 }
 
 /// Interactive right-claw inspection sweep (present only with `RL_CLAW_DEMO=1`): the
