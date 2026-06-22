@@ -2513,15 +2513,15 @@ mod tests {
     }
 
     use bevy::ecs::system::RunSystemOnce;
-    use bevy_rapier3d::prelude::*;
 
     /// Headless training app (physics + bot + training), one fixed tick per
-    /// `update()`, one env. Mirrors `bot::test_util::headless_app` plus the
-    /// training systems; that helper is private to `bot`, so we rebuild it here.
+    /// `update()`, one env. The windowless physics+bot stack is the shared
+    /// [`crate::bot::test_util::headless_stack`] (same builder `headless_app` and the
+    /// rollout workers use); this adds the training systems on top, so these tests
+    /// exercise the exact stack the sole trainer runs. Unlike the rollout worker it
+    /// keeps the single-world default pool (no K-thread scaling fix needed for one app).
     fn headless_training_app(checkpoint_dir: &std::path::Path) -> App {
-        use crate::Visuals;
-        use crate::bot::{BotPlugin, NumEnvs};
-        use crate::physics::PhysicsWorldPlugin;
+        use crate::bot::test_util::{HeadlessStack, headless_stack};
         use clap::Parser;
         use std::time::Duration;
 
@@ -2535,39 +2535,12 @@ mod tests {
         ])
         .expect("parse default TrainConfig");
 
-        let mut app = App::new();
-        app.add_plugins(
-            DefaultPlugins
-                .set(bevy::window::WindowPlugin {
-                    primary_window: None,
-                    exit_condition: bevy::window::ExitCondition::DontExit,
-                    ..default()
-                })
-                .set(bevy::render::RenderPlugin {
-                    render_creation: bevy::render::settings::RenderCreation::Automatic(
-                        bevy::render::settings::WgpuSettings {
-                            backends: None,
-                            ..default()
-                        },
-                    ),
-                    ..default()
-                })
-                .disable::<bevy::winit::WinitPlugin>()
-                .disable::<bevy::log::LogPlugin>(),
-        );
-        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-            Duration::from_secs_f64(1.0 / 64.0),
-        ));
-        app.insert_resource(Visuals(false))
-            .insert_resource(NumEnvs(1))
-            // CrabAssets builds the rig-derived one model (no body-source switch).
-            // Same fixed timestep as production (one source — see physics::fixed_timestep)
-            // so this test runs the physics the demo/training loop actually uses.
-            .insert_resource(crate::physics::fixed_timestep())
-            .insert_resource(crate::physics::rapier_context_init())
-            .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
-            .add_plugins(PhysicsWorldPlugin)
-            .add_plugins(BotPlugin);
+        let mut app = headless_stack(HeadlessStack {
+            num_envs: 1,
+            tick_dt: Duration::from_secs_f32(crate::physics::PHYSICS_DT),
+            log: false,
+            single_thread_pool: false,
+        });
 
         // Wire the training world the same way the `rl learn` rollout worlds do
         // (see inproc::build_rollout_app): worker-mode TrainingState + the Sense→
