@@ -171,7 +171,11 @@ impl TelemetryEvent {
     /// be a contradiction on the feed).
     pub fn round_decided(sim: &Sim) -> Self {
         let outcome = sim.outcome();
-        debug_assert_ne!(outcome, Outcome::Ongoing, "RoundDecided requires a decided round");
+        debug_assert_ne!(
+            outcome,
+            Outcome::Ongoing,
+            "RoundDecided requires a decided round"
+        );
         TelemetryEvent::RoundDecided {
             outcome,
             tick: sim.tick(),
@@ -209,9 +213,9 @@ impl TelemetryEvent {
                 state_hash,
                 desyncs,
                 roster,
-            } => format!(
-                "tick={tick:>6} hash={state_hash:#018x} desyncs={desyncs} roster={roster}"
-            ),
+            } => {
+                format!("tick={tick:>6} hash={state_hash:#018x} desyncs={desyncs} roster={roster}")
+            }
             TelemetryEvent::Input {
                 tick,
                 strafe,
@@ -340,7 +344,9 @@ async fn sender_task(endpoint: Endpoint, collector: EndpointId, mut rx: mpsc::Re
         Err(e) => {
             // One line, then drain-and-drop so the game's try_send never blocks on a
             // full queue waiting for a connection that isn't coming.
-            tracing::warn!("telemetry: could not reach collector {collector}: {e:#} — running without telemetry");
+            tracing::warn!(
+                "telemetry: could not reach collector {collector}: {e:#} — running without telemetry"
+            );
             while rx.recv().await.is_some() {}
             return;
         }
@@ -353,7 +359,10 @@ async fn sender_task(endpoint: Endpoint, collector: EndpointId, mut rx: mpsc::Re
             return;
         }
     };
-    tracing::info!("telemetry: streaming to collector {}", collector.fmt_short());
+    tracing::info!(
+        "telemetry: streaming to collector {}",
+        collector.fmt_short()
+    );
     while let Some(env) = rx.recv().await {
         if let Err(e) = write_frame(&mut send, &env).await {
             tracing::warn!("telemetry: send failed, stopping stream: {e:#}");
@@ -470,8 +479,7 @@ async fn collector_read_loop(mut recv: RecvStream) -> Result<()> {
         recv.read_exact(&mut buf)
             .await
             .context("reading telemetry frame")?;
-        let env: Envelope =
-            bincode::deserialize(&buf).context("decoding telemetry envelope")?;
+        let env: Envelope = bincode::deserialize(&buf).context("decoding telemetry envelope")?;
         print_event(&env);
     }
 }
@@ -587,7 +595,11 @@ pub fn load_or_create_key(path: &Path) -> Result<SecretKey> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let hex: String = secret.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = secret
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     std::fs::write(&path, format!("{hex}\n"))
         .with_context(|| format!("writing telemetry key to {}", path.display()))?;
     set_key_permissions(&path);

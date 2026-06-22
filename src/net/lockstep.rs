@@ -122,7 +122,12 @@ impl Lockstep {
     /// flag here, not yet wire-negotiated — and the networked driver currently passes
     /// none, so this is solo/screenshot-only for now). With `pilots` empty this is
     /// [`Lockstep::new`].
-    pub fn new_with_pilots(seed: u64, peers: &[PlayerId], me: PlayerId, pilots: &[PlayerId]) -> Self {
+    pub fn new_with_pilots(
+        seed: u64,
+        peers: &[PlayerId],
+        me: PlayerId,
+        pilots: &[PlayerId],
+    ) -> Self {
         let mut peers = peers.to_vec();
         peers.sort();
         peers.dedup();

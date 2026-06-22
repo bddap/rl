@@ -556,7 +556,9 @@ fn fallback_body_settles_without_blowing_up() {
     use bevy_rapier3d::prelude::Velocity;
 
     if super::meshfit::model_path().is_some() {
-        eprintln!("fallback_body_settles_without_blowing_up: model present — skipping (not the fallback body)");
+        eprintln!(
+            "fallback_body_settles_without_blowing_up: model present — skipping (not the fallback body)"
+        );
         return;
     }
 
@@ -596,7 +598,12 @@ fn fallback_body_settles_without_blowing_up() {
     let mut car_q = app
         .world_mut()
         .query_filtered::<&Transform, With<CrabCarapace>>();
-    let car_y = car_q.iter(app.world()).next().expect("carapace").translation.y;
+    let car_y = car_q
+        .iter(app.world())
+        .next()
+        .expect("carapace")
+        .translation
+        .y;
     assert!(
         (0.0..2.0).contains(&car_y),
         "fallback carapace at y={car_y:.2} — sank through the floor or launched"
