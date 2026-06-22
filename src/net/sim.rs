@@ -1224,6 +1224,36 @@ mod tests {
     }
 
     #[test]
+    fn strafe_input_moves_sideways_along_x() {
+        // At yaw 0 a player faces +Z, so its RIGHT is +X. A full positive strafe stick
+        // must slide it +X by ≈PLAYER_SPEED with no forward (+Z) drift — the sim-frame
+        // direction the render layer's screen-right negation is built on top of (see
+        // render::gather_input / camera_right_is_negative_x_facing_plus_z). A negative
+        // strafe mirrors to −X. Pinned because nothing else asserts strafe's world
+        // direction, only forward's — a flipped sign here is exactly "strafing goes the
+        // wrong way", invisible to the forward/look tests.
+        let mut sim = Sim::new(0, &players(1));
+        let p0 = sim.player(PlayerId(0)).unwrap().pos();
+        let mut right = BTreeMap::new();
+        right.insert(PlayerId(0), Input::new(1.0, 0.0, 0.0, 0));
+        sim.step(&right);
+        let p1 = sim.player(PlayerId(0)).unwrap().pos();
+        assert_eq!(p1.z, p0.z, "no Z drift strafing at yaw 0");
+        let dx = p1.x - p0.x;
+        assert!(
+            (dx - PLAYER_SPEED).abs() <= 1,
+            "strafe-right step ≈ +PLAYER_SPEED in X, got {dx}"
+        );
+        // And the opposite stick mirrors to −X (a fresh sim so the start is the same).
+        let mut sim = Sim::new(0, &players(1));
+        let mut left = BTreeMap::new();
+        left.insert(PlayerId(0), Input::new(-1.0, 0.0, 0.0, 0));
+        sim.step(&left);
+        let dx_left = sim.player(PlayerId(0)).unwrap().pos().x - p0.x;
+        assert_eq!(dx_left, -dx, "strafe-left mirrors strafe-right exactly");
+    }
+
+    #[test]
     fn look_then_move_turns_the_heading() {
         // Apply a quarter-turn of look over enough ticks, then move forward: the
         // player should now travel along +X (yaw 90°), not +Z.
