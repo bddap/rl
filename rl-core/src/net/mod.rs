@@ -47,6 +47,18 @@ pub mod render;
 #[cfg(feature = "render")]
 pub mod solo_crab;
 
+/// Whether to hand the crab to the float NN body for THIS round: only when the round is
+/// solo (no networked peers) AND a checkpoint/NN stack is present. The single source of
+/// this gate — the [`render`] arming sites and the rl#63 byte-identical test all call it,
+/// so the rule can't drift between them (rl#64). Deliberately NOT behind `cfg(render)`:
+/// the no-feature test build (like the headless trainer) must be able to exercise the
+/// REAL predicate, not a re-encoded copy. A networked round (`!net_is_none`) NEVER arms,
+/// so the float crab can't desync peers — the determinism invariant this gate exists to
+/// hold.
+pub fn should_arm_solo_crab(net_is_none: bool, has_ckpt: bool) -> bool {
+    net_is_none && has_ckpt
+}
+
 #[cfg(test)]
 mod desync_test {
     //! The headless determinism proof (rl#39): replay ONE input log through two
@@ -326,18 +338,19 @@ mod desync_test {
     // bit-for-bit no-op across a real multi-peer round. A higher-fidelity test that exercises the
     // actual `build_windowed_app` gating would have to live behind the `render` feature.
 
-    /// The production gate, re-encoded: `net::render` hands the crab to external control
-    /// (`enable_external_crab(true)`) IFF the round is solo — `net.is_none()` AND a checkpoint
-    /// is present (`(None, Some(dir))` in `Boot::Round`; `is_solo && has_nn_stack` in
-    /// `ensure_round_installed`). `net`/`checkpoint` are `Option<()>` stand-ins — only their
-    /// `is_none()`/`is_some()` is load-bearing here, which is exactly what the production match
-    /// arms branch on. Returns whether the crab WOULD be externally driven.
+    /// Drives the lockstep exactly as `net::render` does: arms the external crab via the
+    /// production gate [`super::should_arm_solo_crab`] (the SAME predicate the `Boot::Round`
+    /// and `ensure_round_installed` arming sites call — rl#64, so this can't drift from them),
+    /// then mirrors render's side effect (`enable_external_crab(true)`). `net`/`checkpoint`
+    /// are `Option<()>` stand-ins — only their `is_none()`/`is_some()` feeds the gate, exactly
+    /// what the production match arms branch on. Returns whether the crab WOULD be externally
+    /// driven.
     fn arm_solo_crab_like_render(
         ls: &mut Lockstep,
         net: Option<()>,
         checkpoint: Option<()>,
     ) -> bool {
-        let solo_with_ckpt = net.is_none() && checkpoint.is_some();
+        let solo_with_ckpt = super::should_arm_solo_crab(net.is_none(), checkpoint.is_some());
         if solo_with_ckpt {
             ls.enable_external_crab(true);
         }

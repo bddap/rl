@@ -27,7 +27,7 @@ use tracing::{info, warn};
 use crate::TrainConfig;
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::bot::body::{
-    CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabEyeTip,
+    CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId,
     random_spawn_rotation,
 };
 use crate::bot::brain::CrabBrain;
@@ -2261,7 +2261,6 @@ pub fn brain_step(
     spawns: Res<CrabSpawns>,
     carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
     parts_q: Query<(&CrabEnvId, &bevy_rapier3d::prelude::Velocity), With<CrabBodyPart>>,
-    eyes_q: Query<(&CrabEnvId, &Transform), With<CrabEyeTip>>,
     claw_tips_q: Query<(&CrabEnvId, &Transform), With<CrabClawTip>>,
     mut exit: MessageWriter<AppExit>,
     mut rescued: MessageReader<CrabRescued>,
@@ -2304,15 +2303,6 @@ pub fn brain_step(
     }
 
     let body = gather_body_state(n, &spawns, &carapace_q, &parts_q);
-    // Dead: `eyes_q`/`eye_sums` are computed but never read (see rl#62 follow-up); kept
-    // verbatim so `brain_step`'s system params stay byte-identical to the live path.
-    let mut eye_sums: Vec<(f32, u32)> = vec![(0.0, 0); n];
-    for (env, eye) in eyes_q.iter() {
-        if let Some(s) = eye_sums.get_mut(env.0) {
-            s.0 += eye.translation.y;
-            s.1 += 1;
-        }
-    }
 
     // Lazily seed the FIRST episode's target for any env still without one (envs
     // start Recording with no target; episode-end reset seeds every subsequent one).

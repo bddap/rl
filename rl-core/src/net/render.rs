@@ -261,13 +261,15 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
         // found no peer is a solo round here, so it gets the real NN crab.
         Boot::Round(round) => {
             let (mut ls, net) = *round;
-            // Solo NN crab: only on a solo round (no peers) with a checkpoint. Capture the
-            // integer crab's spawn + hand the crab to external control BEFORE ls moves into core.
-            let nn = match (&net, &solo_crab) {
-                (None, Some(dir)) => {
+            // Solo NN crab: arm iff the shared gate says so (solo round + checkpoint —
+            // rl#64). Capture the integer crab's spawn + hand the crab to external control
+            // BEFORE ls moves into core. `has_ckpt = true`: the `Some(dir)` arm already
+            // proves the checkpoint is present, so the gate here turns purely on net.is_none().
+            let nn = match solo_crab {
+                Some(dir) if crate::net::should_arm_solo_crab(net.is_none(), true) => {
                     let spawn = ls.sim().crab().pos();
                     ls.enable_external_crab(true);
-                    Some((dir.clone(), spawn))
+                    Some((dir, spawn))
                 }
                 _ => None,
             };
@@ -473,12 +475,12 @@ fn ensure_round_installed(world: &mut World) {
         .get_non_send_resource_mut::<PendingRound>()
         .and_then(|mut p| p.0.take())
         .expect("entered Playing with no round to install — the menu must park a round before transitioning");
-    let is_solo = ready.net.is_none();
-    // Arm the solo NN crab iff this round is solo AND the stack was installed at build.
+    // Arm the solo NN crab iff this round is solo AND the stack was installed at build
+    // (the shared gate — rl#64).
     let has_nn_stack = world
         .get_resource::<SoloCrabStackInstalled>()
         .is_some_and(|m| m.0);
-    if is_solo && has_nn_stack {
+    if crate::net::should_arm_solo_crab(ready.net.is_none(), has_nn_stack) {
         ready.lockstep.enable_external_crab(true);
         world.insert_resource(crate::net::solo_crab::SoloCrabActive(true));
     }
