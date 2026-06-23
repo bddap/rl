@@ -1783,13 +1783,15 @@ pub(crate) fn dist_3d(a: Vec3, b: Vec3) -> f32 {
     (a - b).length()
 }
 
-/// Weight of the effort term `− EFFORT_WEIGHT·Σ|aᵢ|^L` (see [`compute_reward`]):
-/// the cost subtracted per unit of commanded actuation. Kept small so a calm hold
-/// pays almost nothing, so the crab moves only as hard as the goal demands —
-/// economical motion, never spending actuation the reach doesn't pay back. Paired
-/// with `EFFORT_EXP` = `L`, the CONVEX exponent that makes the cost climb steeply
-/// with command size (so the gentlest command that does the job is the cheapest).
-const EFFORT_WEIGHT: f32 = 0.05;
+/// Weight of the effort term `− EFFORT_WEIGHT·Σ|aᵢ|^L` (see [`compute_reward`]): the
+/// per-command actuation cost. Binding constraint — effort is the convex cube of the
+/// RAW (unbounded) outputs, so the weight fixes a break-even command size (tax = reach)
+/// under which exploring-and-reaching nets positive. That break-even must exceed a real
+/// stride or a COLD stand can't explore a gait and stays stuck in the stand basin just
+/// paying the tax. At 0.005 break-even is ~|a|≈1.6/joint (a gait is explorable) while
+/// deep saturation (|a|=3) still costs ~4 ≫ the W=0.6 reach, so flailing is still reined
+/// in. Convex `EFFORT_EXP`=`L` keeps the gentlest sufficient command the cheapest.
+const EFFORT_WEIGHT: f32 = 0.005;
 const EFFORT_EXP: f32 = 3.0;
 
 /// The effort summand `Σ|aᵢ|^L` that [`compute_reward`] weights by [`EFFORT_WEIGHT`],
@@ -2817,7 +2819,7 @@ mod tests {
         // 2. Reaching the target with a MODERATE in-range command (|a| < 1) must still net
         //    POSITIVE — the reach payoff has to exceed the cost of the gentle motion that
         //    closes the distance, or the policy would rather lie still than walk. At weight
-        //    0.05 a |a|=0.4 command across all 30 joints costs 0.05·30·0.4³ ≈ 0.096, well under
+        //    0.005 a |a|=0.4 command across all 30 joints costs 0.005·30·0.4³ ≈ 0.0096, well under
         //    the W=0.6 reach payoff, so honest moderate motion that reaches stays worthwhile.
         let moderate_reach = compute_reward(Some(0.0), action_effort(&[0.4; ACTION_SIZE]));
         assert!(
@@ -2828,7 +2830,7 @@ mod tests {
         //    clamps to) is taxed BELOW that moderate reach even when it lands on the target —
         //    because the tax reads the raw outputs, |a|^L keeps climbing past the clamp, so
         //    the gradient pushes the policy OUT of saturation rather than letting it sit
-        //    pinned at the rail for a flat toll. At |a|=3 the cost (0.05·30·27 ≈ 40.5)
+        //    pinned at the rail for a flat toll. At |a|=3 the cost (0.005·30·27 ≈ 4.05)
         //    swamps any reach payoff, driving the reward deeply negative.
         let oversaturated = compute_reward(Some(0.0), action_effort(&[3.0; ACTION_SIZE]));
         assert!(
