@@ -713,15 +713,15 @@ mod tests {
             let beat_b = b.beat();
             a.on_beat(idb, &beat_b, now);
             b.on_beat(ida, &beat_a, now);
-            if agreed_a.is_none() {
-                if let Status::Agreed { roster } = a.poll(now) {
-                    agreed_a = Some(roster);
-                }
+            if agreed_a.is_none()
+                && let Status::Agreed { roster } = a.poll(now)
+            {
+                agreed_a = Some(roster);
             }
-            if agreed_b.is_none() {
-                if let Status::Agreed { roster } = b.poll(now) {
-                    agreed_b = Some(roster);
-                }
+            if agreed_b.is_none()
+                && let Status::Agreed { roster } = b.poll(now)
+            {
+                agreed_b = Some(roster);
             }
             t += 250;
         }
@@ -760,12 +760,11 @@ mod tests {
                 c.on_beat(idb, &bb, now);
             }
             for (id, m) in [(1u8, &mut a), (2, &mut b), (3, &mut c)] {
-                if !froze.contains_key(&id) {
-                    if let Status::Agreed { roster } = m.poll(now) {
-                        froze.insert(id, roster);
-                    }
-                } else {
-                    m.poll(now);
+                // Always poll (drives the machine); record only the first Agreed per peer.
+                if let Status::Agreed { roster } = m.poll(now)
+                    && !froze.contains_key(&id)
+                {
+                    froze.insert(id, roster);
                 }
             }
             t += 250;
@@ -802,15 +801,15 @@ mod tests {
             let (ba, bb) = (a.beat(), b.beat());
             a.on_beat(idb, &bb, now);
             b.on_beat(ida, &ba, now);
-            if froze_a.is_none() {
-                if let Status::Agreed { roster } = a.poll(now) {
-                    froze_a = Some(roster);
-                }
+            if froze_a.is_none()
+                && let Status::Agreed { roster } = a.poll(now)
+            {
+                froze_a = Some(roster);
             }
-            if froze_b.is_none() {
-                if let Status::Agreed { roster } = b.poll(now) {
-                    froze_b = Some(roster);
-                }
+            if froze_b.is_none()
+                && let Status::Agreed { roster } = b.poll(now)
+            {
+                froze_b = Some(roster);
             }
             t += 250;
         }
@@ -897,7 +896,7 @@ mod tests {
         let mut t = 0u64;
         while t <= JOIN_WINDOW.as_millis() as u64 - 1000 {
             let now = at(t0, t);
-            let bb = if (t / 250) % 2 == 0 {
+            let bb = if (t / 250).is_multiple_of(2) {
                 &agree
             } else {
                 &disagree
@@ -941,14 +940,13 @@ mod tests {
                 c.on_beat(idb, &bb, now);
             }
             for (id, m) in [(1u8, &mut a), (2, &mut b), (3, &mut c)] {
-                if !froze.contains_key(&id) {
-                    if let Status::Agreed { roster } = m.poll(now) {
-                        // The crux: NO peer may ever freeze the partial {A,B}.
-                        assert_eq!(roster, abc, "peer {id} froze a partial/wrong set");
-                        froze.insert(id, roster);
-                    }
-                } else {
-                    m.poll(now);
+                // Always poll (drives the machine); check+record only the first Agreed per peer.
+                if let Status::Agreed { roster } = m.poll(now)
+                    && !froze.contains_key(&id)
+                {
+                    // The crux: NO peer may ever freeze the partial {A,B}.
+                    assert_eq!(roster, abc, "peer {id} froze a partial/wrong set");
+                    froze.insert(id, roster);
                 }
             }
             t += 250;
@@ -994,15 +992,15 @@ mod tests {
             // Each relays whatever it currently lists (P included until locally expired).
             a.on_beat(idb, &bb, now);
             b.on_beat(ida, &ba, now);
-            if froze_a.is_none() {
-                if let Status::Agreed { roster } = a.poll(now) {
-                    froze_a = Some(roster);
-                }
+            if froze_a.is_none()
+                && let Status::Agreed { roster } = a.poll(now)
+            {
+                froze_a = Some(roster);
             }
-            if froze_b.is_none() {
-                if let Status::Agreed { roster } = b.poll(now) {
-                    froze_b = Some(roster);
-                }
+            if froze_b.is_none()
+                && let Status::Agreed { roster } = b.poll(now)
+            {
+                froze_b = Some(roster);
             }
             t += 250;
         }
