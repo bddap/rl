@@ -55,10 +55,7 @@ pub(crate) struct ObsNormalizer {
 /// Serde-friendly mirror of `ObsNormalizer` (arrays > 32 don't auto-derive). Also
 /// the form the learner snapshots to / merges from across rollout threads (passed
 /// in-process, not over a wire) and the on-disk checkpoint format, so it is
-/// `pub(crate)`.
-///
-/// No `var` field: variance is recomputed from `m2`/`count` on load, so carrying it
-/// would be OBS_SIZE redundant f64s per snapshot/checkpoint and a drift hazard.
+/// `pub(crate)`. No `var` field, for the same reason `ObsNormalizer` stores none.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ObsNormalizerData {
     mean: Vec<f64>,
@@ -219,10 +216,9 @@ impl ObsNormalizer {
     /// INDEPENDENT streams — so it is only valid when `other` shares no samples
     /// with `self`. The in-process path upholds that by merging a per-horizon
     /// INCREMENT (only the samples this iteration added, never the snapshot baseline
-    /// the master already counted); merging a cumulative snapshot that re-included
-    /// the baseline would double-count it. (The per-element NaN-skip
-    /// means counts can differ across elements, which is why the merge is per
-    /// element; variance is derived from the merged M2 on demand.)
+    /// the master already counted); merging a cumulative snapshot would double-count
+    /// the baseline. Per element because the NaN-skip lets counts differ across
+    /// elements; variance is derived from the merged M2 on demand.
     pub(crate) fn merge(&mut self, other: &ObsNormalizerData) {
         if other.mean.len() != OBS_SIZE {
             warn!("normalizer merge: size mismatch, skipping");
@@ -272,10 +268,9 @@ impl ObsNormalizer {
 pub type TrainBackend = Autodiff<NdArray>;
 pub type InferBackend = NdArray;
 
-/// The Adam optimizer over a `CrabBrain` on backend `B`. Generic over the backend
-/// so the one PPO update ([`ppo_update_core`]) serves both the production CPU
-/// learner (`B = TrainBackend`) and the `bench-update` GPU comparison
-/// (`B = Autodiff<Wgpu>`) — same code, one backend parameter (rl#49).
+/// The Adam optimizer over a `CrabBrain` on backend `B`. Generic over the backend so
+/// the one PPO update ([`ppo_update_core`]) serves both the CPU learner and the GPU
+/// `bench-update` comparison from one code path.
 type CrabOpt<B> = OptimizerAdaptor<Adam, CrabBrain<B>, B>;
 /// The production learner's optimizer: Adam over the CPU autodiff backend.
 type CrabOptimizer = CrabOpt<TrainBackend>;
@@ -283,8 +278,7 @@ type CrabOptimizer = CrabOpt<TrainBackend>;
 /// Build the learner's Adam optimizer (global grad-norm clip 0.5). The ONE source of
 /// the optimizer construction — the live learner, the `bench-update` harness, and the
 /// `--update-device gpu` learner all call this, so the clip constant can't silently
-/// drift between paths that are meant to be identical. Generic over the backend so the
-/// CPU and GPU learners get the same optimizer, differing only in `B`.
+/// drift between paths meant to be identical.
 fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
     AdamConfig::new()
         .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
@@ -347,10 +341,8 @@ pub(crate) const NORMALIZER_FILENAME: &str = "normalizer.bin";
 pub(crate) const RETURN_NORMALIZER_FILENAME: &str = "return_normalizer.bin";
 /// Curriculum band checkpoint, beside the brain, so a warm restart CONTINUES the
 /// distance curriculum at the rung it reached rather than resetting to near targets
-/// (which would re-teach what the policy already knows). A missing or unparseable file
-/// — a fresh run, OR a checkpoint that predates the curriculum — loads as rung 1 (see
-/// [`load_curriculum`]), so an older policy warm-continued with this binary starts the
-/// curriculum from the start band.
+/// (which would re-teach what the policy already knows). Fallback on a missing/bad file
+/// is rung 1 (see [`load_curriculum`]).
 pub(crate) const CURRICULUM_FILENAME: &str = "curriculum.bin";
 
 /// Write `bytes` to `path` atomically: a sibling temp file then a rename, so a crash
@@ -463,11 +455,9 @@ pub(crate) fn load_curriculum(path: &Path) -> Curriculum {
 /// per iteration before handing its buffers back, when `--horizon` is not given.
 pub const STEPS_PER_ROLLOUT: u32 = 1024;
 
-/// Where an env sits in the record → reset → settle lifecycle. One field in
-/// place of the old `needs_reset: bool` + `grace: u32` pair: those two booleans
-/// could spell a state that never legally coexists (a respawn pending *while*
-/// already settling), and the rescue-vs-normal fork that issue #16 fixed is now
-/// a single explicit phase assignment rather than a flag combination.
+/// Where an env sits in the record → reset → settle lifecycle. One field, not a
+/// `needs_reset: bool` + `grace: u32` pair, so an illegal combination (a respawn pending
+/// *while* already settling) is unrepresentable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum EnvPhase {
     /// Live episode: transitions are recorded and termination is evaluated.
@@ -481,9 +471,9 @@ pub enum EnvPhase {
     /// Fresh crab dropping into the rest pose: `grace` ticks remain in which no
     /// transition is recorded and no termination is evaluated, while it lands
     /// and the motors take the load. Reached from `AwaitingRespawn` (a normal
-    /// reset) or directly from a non-finite rescue, which respawns the crab
-    /// itself and so skips `AwaitingRespawn` (issue #16). `grace` is always ≥ 1
-    /// here — it returns to `Recording` the tick it would hit 0.
+    /// reset) or directly from a non-finite rescue, which respawns the crab itself
+    /// and so skips `AwaitingRespawn`. `grace` is always ≥ 1 here — it returns to
+    /// `Recording` the tick it would hit 0.
     Settling { grace: u32 },
 }
 
@@ -491,21 +481,19 @@ pub enum EnvPhase {
 /// whose reward and end need NEXT tick's post-physics pose to finalize.
 ///
 /// The reach term must score the pose `aₜ` *produced* (the claw-tip distance at
-/// `s_{t+1}`) — but the schedule is Sense → Think (`brain_step`) → Act → physics,
-/// so when `brain_step` runs at tick `t` the carapace it can read is still `sₜ`
-/// (physics hasn't integrated `aₜ` yet). So everything known at tick `t` is
-/// stashed here and the transition is completed at tick `t+1`, in phase with the
-/// pose that action caused (issue #15).
+/// `s_{t+1}`) — but the schedule is Sense → Think (`brain_step`) → Act → physics, so
+/// when `brain_step` runs at tick `t` the carapace it can read is still `sₜ` (physics
+/// hasn't integrated `aₜ` yet). So everything known at tick `t` is stashed here and the
+/// transition completed at tick `t+1`, in phase with the pose that action caused.
 #[derive(Clone)]
 struct Pending {
     obs: [f32; OBS_SIZE],
     action: [f32; ACTION_SIZE],
     value: NormalizedValue,
     log_prob: f32,
-    /// `Σ|aᵢ|^L` for this action — the effort summand, computed from the RAW
-    /// pre-clamp outputs (see [`action_effort`]) and so already final at tick `t`.
-    /// At finalization [`compute_reward`] scales it by [`EFFORT_WEIGHT`] and
-    /// subtracts it; it travels with the action it priced.
+    /// `Σ|aᵢ|^L` for this action — the effort summand over the RAW pre-clamp outputs
+    /// (see [`action_effort`]), final at tick `t` and traveling with the action it
+    /// priced. [`compute_reward`] scales it by [`EFFORT_WEIGHT`] at finalization.
     effort: f32,
 }
 
@@ -527,10 +515,9 @@ pub struct EnvEpisode {
     /// there", since the crab need only touch the target once, and the target then
     /// stays fixed for the rest of the episode.
     min_tip_dist: Option<f32>,
-    /// Tick `t`'s chosen action awaiting tick `t+1`'s post-physics pose to become
-    /// a finalized [`Transition`] (issue #15). `None` outside a live recording
-    /// stride — before the first action of an episode, and after its last action
-    /// is finalized or dropped at a reset/rescue boundary.
+    /// Tick `t`'s chosen action awaiting tick `t+1`'s post-physics pose (see
+    /// [`Pending`]). `None` outside a live recording stride — before the first action of
+    /// an episode, and after its last is finalized or dropped at a reset/rescue boundary.
     pending: Option<Pending>,
 }
 
@@ -558,12 +545,11 @@ pub struct TrainingState {
 
     obs_normalizer: ObsNormalizer,
 
-    /// Running mean/std of the value targets (GAE returns), normalizing what the
-    /// value head regresses to unit scale so it can track large-magnitude returns
-    /// (see [`ReturnNormalizer`]). The LEARNER owns the single copy: rollout threads
-    /// never update it — they emit raw value predictions, which the learner
-    /// de-normalizes with this scale in `ppo_update_core` — so there is no second
-    /// instance to drift. Persisted in the checkpoint beside `obs_normalizer`.
+    /// Running mean/std of the value targets (GAE returns), normalizing what the value
+    /// head regresses to unit scale so it can track large-magnitude returns (see
+    /// [`ReturnNormalizer`]). The LEARNER owns the single copy — rollout threads emit raw
+    /// value predictions and never touch it, so there is no second instance to drift.
+    /// Persisted in the checkpoint beside `obs_normalizer`.
     return_normalizer: ReturnNormalizer,
 
     checkpoint_dir: PathBuf,
@@ -595,10 +581,9 @@ pub struct TrainingState {
 
     /// The curriculum band a rollout thread samples targets from THIS horizon. The
     /// learner owns advancement and ships the current band down each horizon (set via
-    /// [`Self::set_curriculum`]); the thread only reads it in [`seed_target`]. The
-    /// learner's own host never rolls, so its value is unused. Defaults to the start
-    /// band so a thread that somehow rolls before its first `set_curriculum` still
-    /// samples a sane (rung-1) target rather than a garbage band.
+    /// [`Self::set_curriculum`]); the thread only reads it in [`seed_target`]. Defaults to
+    /// the start band so a thread that somehow rolls before its first `set_curriculum`
+    /// still samples a sane (rung-1) target rather than a garbage band.
     curriculum: Curriculum,
     /// This horizon's per-episode reach tally over FINISHED episodes (rollout thread →
     /// learner, drained per horizon like the rewards): `reached` of `finished` episodes
@@ -704,13 +689,6 @@ impl TrainingState {
         }
     }
 
-    // FOLLOW-UP (out of scope): the checkpoint persists brain + normalizer but NOT
-    // the Adam optimizer moments, so a restart resumes the policy with cold moment
-    // estimates (a brief, self-correcting transient on the first updates after a
-    // resume). Persisting optimizer state would remove it.
-    //
-    // `pub(crate)` so the learner can persist the latest weights each iteration (for
-    // a live demo hot-reload + restart resume).
     pub(crate) fn save_checkpoint(&self) {
         if let Err(e) = std::fs::create_dir_all(&self.checkpoint_dir) {
             warn!(
@@ -750,12 +728,10 @@ impl TrainingState {
     // ---- In-process rollout-thread / learner hooks ------------------------
     //
     // These let `training::inproc` drive a worker-mode TrainingState by hand on a
-    // rollout thread: load the learner's snapshot weights + master normalizer, roll
-    // a horizon (via the normal systems), then hand the buffers + per-horizon
-    // normalizer increment + finished rewards back. The learner side reuses
-    // `brain`/`optimizer`/`config` through accessors. One struct for both the
-    // learner host and the rollout threads (rather than a parallel one) is what
-    // keeps their collection + update on the same code.
+    // rollout thread: load the learner's snapshot weights + master normalizer, roll a
+    // horizon (via the normal systems), then hand the buffers + per-horizon normalizer
+    // increment + finished rewards back. One struct for both the learner host and the
+    // rollout threads (not a parallel one) keeps their collection + update on the same code.
 
     /// Load brain weights from the learner's in-memory snapshot bytes (the same
     /// `FullPrecisionSettings` bincode the on-disk checkpoint uses, produced by the
@@ -785,10 +761,8 @@ impl TrainingState {
         self.obs_normalizer.snapshot()
     }
 
-    /// Snapshot the per-horizon normalizer INCREMENT (rollout thread → learner):
-    /// only the samples this horizon added, so merging it into the learner's master
-    /// — which already holds the snapshot baseline handed back to the thread —
-    /// counts every sample exactly once. Empty (count 0) outside worker mode.
+    /// Snapshot the per-horizon normalizer INCREMENT to ship back (rollout thread →
+    /// learner; see [`ObsNormalizer::merge`]). Empty (count 0) outside worker mode.
     pub(crate) fn normalizer_increment_snapshot(&self) -> ObsNormalizerData {
         match self.normalizer_increment.as_ref() {
             Some(inc) => inc.snapshot(),
@@ -796,10 +770,8 @@ impl TrainingState {
         }
     }
 
-    /// Merge a rollout thread's normalizer increment into this (learner's)
-    /// normalizer. The data merged here is ONLY samples the master has not already
-    /// counted (the thread ships a per-horizon increment, never the snapshot
-    /// baseline).
+    /// Merge a rollout thread's per-horizon normalizer increment into this (learner's)
+    /// normalizer (see [`ObsNormalizer::merge`] for why an increment, not a snapshot).
     pub(crate) fn merge_normalizer(&mut self, data: &ObsNormalizerData) {
         self.obs_normalizer.merge(data);
     }
@@ -815,12 +787,9 @@ impl TrainingState {
             .collect()
     }
 
-    /// Reset the per-horizon normalizer increment (rollout thread, at the start of
-    /// each horizon). `total_steps` stays monotonic — it is the thread's tick
-    /// odometer the learner diffs to measure the horizon length. Resetting the
-    /// increment here, separate from `set_normalizer`, keeps the two concerns
-    /// independent and guarantees the increment is always exactly this horizon's
-    /// samples.
+    /// Reset the per-horizon normalizer increment (rollout thread, at the start of each
+    /// horizon), so it always holds exactly this horizon's samples. `total_steps` stays
+    /// monotonic — it is the thread's tick odometer the learner diffs for horizon length.
     pub fn reset_horizon_counter(&mut self) {
         if let Some(inc) = self.normalizer_increment.as_mut() {
             *inc = ObsNormalizer::new(self.obs_normalizer.clip);
@@ -889,15 +858,13 @@ impl TrainingState {
         )
     }
 
-    /// Learner-side accessor for the `--update-device gpu` path (rl#49): the CPU brain
-    /// (mirrored to/from the GPU each update by [`GpuLearner`]), the PPO config, and the
-    /// host return normalizer. Unlike [`Self::learner_parts`] it omits the CPU
-    /// optimizer + device — the GPU update runs Adam on its own device-resident
-    /// optimizer, and the CPU optimizer must stay untouched so a `cpu`-device run is
-    /// byte-for-byte the production path. The brain is still the single source of truth
-    /// (rollout snapshots + checkpoints read it); the GPU learner only borrows it to
-    /// load weights in and write the result back. Gated on `wgpu`: with no GPU backend
-    /// compiled there is no caller, so it would be dead code.
+    /// Learner-side accessor for the `--update-device gpu` path: the CPU brain (mirrored
+    /// to/from the GPU each update by [`GpuLearner`]), the PPO config, and the host return
+    /// normalizer. Unlike [`Self::learner_parts`] it omits the CPU optimizer + device —
+    /// the GPU update runs Adam on its own device-resident optimizer, and the CPU
+    /// optimizer must stay untouched so a `cpu`-device run is byte-for-byte the production
+    /// path. The brain stays the single source of truth (rollout snapshots + checkpoints
+    /// read it); the GPU learner only borrows it to load weights in and write back.
     #[cfg(feature = "wgpu")]
     pub fn learner_parts_for_gpu(
         &mut self,
@@ -945,12 +912,8 @@ impl TrainingState {
 ///
 /// Free function rather than a `TrainingState` method so the K=1 parity test
 /// ([`inproc`] tests) can call the exact production update over hand-built buffers.
-///
-/// Generic over the autodiff backend `B` (rl#49): the production learner calls it
-/// with `B = TrainBackend` (CPU `Autodiff<NdArray>`), inferred from the concrete
-/// types `learner_parts` hands back, so the live path is unchanged; the
-/// `bench-update` GPU comparison calls the SAME function with `B = Autodiff<Wgpu>`.
-/// One update implementation, one backend parameter.
+/// Generic over the autodiff backend `B` so the CPU learner and the GPU `bench-update`
+/// run the one implementation — same update, one backend parameter.
 pub(crate) fn ppo_update_core<B: AutodiffBackend>(
     brain: &mut CrabBrain<B>,
     optimizer: &mut CrabOpt<B>,
@@ -1006,10 +969,9 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
             returns.extend(r);
         }
 
-        // Fold this update's REAL-unit returns into the running scale, then normalize
-        // the value-loss targets by the refreshed scale. The value head's raw output
-        // is in the same normalized space, so the loss `(V' - R')²` below is unit-
-        // scale and `value_loss_clip` is a σ-count (see PpoConfig::value_loss_clip).
+        // Fold this update's REAL-unit returns into the running scale, then normalize the
+        // value-loss targets by the refreshed scale (the residual is then in σ-units — see
+        // the value-loss site below).
         let real_returns: Vec<f32> = returns.iter().map(|r| r.0).collect();
         ret_norm.update(&real_returns);
         let returns: Vec<f32> = returns.iter().map(|&r| ret_norm.normalize(r).0).collect();
@@ -1144,7 +1106,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
     }
 }
 
-/// Microbenchmark of the PPO **update** phase in isolation (rl#48). Builds a fresh
+/// Microbenchmark of the PPO **update** phase in isolation. Builds a fresh
 /// `CrabBrain` + Adam optimizer exactly as the real learner does, synthesizes
 /// `workers*envs` rollout buffers of `horizon` transitions each (so the per-update
 /// transition count and per-env GAE segment structure match a live `learn` iter at
@@ -1153,14 +1115,12 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
 /// timed individually and reported as min / median / max plus the per-rep PPO
 /// metrics (so NaN/garbage shows up as non-finite loss).
 ///
-/// Generic over the autodiff backend `B` and parameterised by `device` (rl#49): the
-/// caller picks `B = TrainBackend` + `NdArrayDevice::Cpu` for the CPU baseline or
-/// `B = Autodiff<Wgpu>` + a `WgpuDevice` for the GPU run, so BOTH paths exercise this
-/// one harness over the one production [`ppo_update_core`] — no parallel
-/// implementation. `backend_label` is just printed (e.g. `"CPU ndarray"` /
-/// `"GPU wgpu/Vulkan"`). `batch_override` replaces [`PpoConfig`]'s default minibatch
-/// size for the larger-batch sweep (the tertiary question: does the GPU stay cheap as
-/// the per-step matmul grows?); `None` keeps the live batch of 64.
+/// Generic over the autodiff backend `B` and parameterised by `device`: the caller picks
+/// CPU (`TrainBackend` + `NdArrayDevice::Cpu`) or GPU (`Autodiff<Wgpu>` + a `WgpuDevice`),
+/// so both exercise this one harness over the production [`ppo_update_core`].
+/// `backend_label` is just printed. `batch_override` replaces [`PpoConfig`]'s default
+/// minibatch size for the larger-batch sweep (does the GPU stay cheap as the per-step
+/// matmul grows?); `None` keeps the live batch of 64.
 pub fn bench_ppo_update<B: AutodiffBackend>(
     device: &B::Device,
     backend_label: &str,
@@ -1285,7 +1245,7 @@ pub fn bench_ppo_update<B: AutodiffBackend>(
     );
 }
 
-/// The GPU training backend: `Autodiff<Wgpu>` over Vulkan (rl#49). The live learner's
+/// The GPU training backend: `Autodiff<Wgpu>` over Vulkan. The live learner's
 /// `--update-device gpu` path and the `bench-update --backend gpu` path both run the
 /// one generic [`ppo_update_core`] on this — same update, GPU device. WGSL→Vulkan (the
 /// SPIR-V `burn/vulkan` path is a separate, untried lever). Rollout inference stays on
@@ -1298,8 +1258,8 @@ pub(crate) type GpuBackend = Autodiff<burn::backend::wgpu::Wgpu>;
 /// Bring up the wgpu/Vulkan backend on the discrete GPU and PROVE the chosen adapter
 /// is real hardware, returning the device to run on. The single source of the
 /// adapter-selection + software-fallback guard, shared by `bench-update --backend gpu`
-/// and the live `learn --update-device gpu` learner (rl#49) so there is one place that
-/// decides "is this actually the GPU".
+/// and the live `learn --update-device gpu` learner, so there is one place that decides
+/// "is this actually the GPU".
 ///
 /// The guard is the load-bearing part. The box's Vulkan ICD set includes lavapipe
 /// (`lvp` — a CPU software rasteriser, `DeviceType::Cpu`); if wgpu silently fell back
@@ -1315,13 +1275,12 @@ pub(crate) type GpuBackend = Autodiff<burn::backend::wgpu::Wgpu>;
 pub(crate) fn init_gpu_backend(tag: &str) -> burn::backend::wgpu::WgpuDevice {
     use burn::backend::wgpu::{RuntimeOptions, WgpuDevice, graphics::Vulkan, init_setup};
 
-    // DiscreteGpu(0) (not DefaultDevice): cubecl's adapter filter keeps only
-    // `DeviceType::DiscreteGpu` adapters for this variant, so lavapipe (a CPU device)
-    // is excluded before selection — belt to the ICD-filter braces.
+    // DiscreteGpu(0), not DefaultDevice, so cubecl's filter excludes lavapipe before
+    // selection (see the guard rationale above).
     let device = WgpuDevice::DiscreteGpu(0);
 
-    // init_setup::<Vulkan> forces the Vulkan graphics API, registers this exact device
-    // with the runtime, and hands back the setup so we can inspect the real adapter.
+    // init_setup::<Vulkan> forces the Vulkan API, registers this device, and hands back
+    // the setup so we can inspect the real adapter.
     eprintln!("[{tag}] initialising wgpu/Vulkan on {device:?} …");
     let setup = init_setup::<Vulkan>(&device, RuntimeOptions::default());
     let info = setup.adapter.get_info();
@@ -1330,10 +1289,9 @@ pub(crate) fn init_gpu_backend(tag: &str) -> burn::backend::wgpu::WgpuDevice {
         info.name, info.backend, info.device_type, info.driver, info.driver_info,
     );
 
-    // Hard gate: refuse to run on a software adapter. A lavapipe/llvmpipe result would
-    // be a CPU run mislabelled as GPU — worse than no result. We check both the
-    // device_type (via its Debug form, to avoid pinning the wgpu crate version) and the
-    // adapter name against the known software-rasteriser names.
+    // Hard gate: refuse a software adapter (a CPU run mislabelled as GPU is worse than no
+    // result). Check the device_type via its Debug form (to avoid pinning the wgpu crate
+    // version) AND the adapter name against the known software-rasteriser names.
     let name_lc = info.name.to_lowercase();
     let type_str = format!("{:?}", info.device_type).to_lowercase();
     let is_software = type_str.contains("cpu")
@@ -1358,11 +1316,10 @@ pub(crate) fn init_gpu_backend(tag: &str) -> burn::backend::wgpu::WgpuDevice {
     device
 }
 
-/// rl#49 GPU bench entry point: bring up the wgpu/Vulkan backend on the discrete GPU
-/// (proving the adapter is real hardware, [`init_gpu_backend`]), then run the same
-/// [`bench_ppo_update`] harness on [`GpuBackend`]. `pub` (not `pub(crate)`) because the
-/// `bench-update --backend gpu` caller now lives in the separate `rl-train` binary
-/// crate, which reaches it across the crate boundary like the CPU `bench_ppo_update`.
+/// GPU bench entry point: bring up the wgpu/Vulkan backend on the discrete GPU (proving
+/// the adapter is real hardware, [`init_gpu_backend`]), then run the [`bench_ppo_update`]
+/// harness on [`GpuBackend`]. `pub` because the `bench-update --backend gpu` caller lives
+/// in the separate `rl-train` crate.
 #[cfg(feature = "wgpu")]
 pub fn bench_ppo_update_gpu(
     workers: usize,
@@ -1383,11 +1340,11 @@ pub fn bench_ppo_update_gpu(
     );
 }
 
-/// Wall-clock breakdown of one `--update-device gpu` learner iteration's update phase
-/// (rl#49): the CPU→GPU weight load, the GPU PPO update, and the GPU→CPU write-back, in
-/// milliseconds. The microbench measured only the update in isolation; the live port
-/// pays the two host↔device copies every iter, so the learner logs all three to show
-/// whether the copies eat the update's GPU win — the make-or-break end-to-end number.
+/// Wall-clock breakdown of one `--update-device gpu` learner iteration's update phase:
+/// the CPU→GPU weight load, the GPU PPO update, and the GPU→CPU write-back, in
+/// milliseconds. The live port pays the two host↔device copies every iter, so the learner
+/// logs all three to show whether the copies eat the update's GPU win — the make-or-break
+/// end-to-end number.
 ///
 /// Not feature-gated (just three plain `f64`s) so the learner's logging code stays
 /// cfg-free — only [`GpuLearner`], which produces it, needs the `wgpu` backend.
@@ -1401,18 +1358,16 @@ pub(crate) struct GpuUpdateTiming {
     pub store_ms: f64,
 }
 
-/// The GPU-resident learner for `--update-device gpu` (rl#49). Owns a GPU brain + GPU
-/// Adam optimizer that PERSIST across iterations — the optimizer's moment estimates
-/// must carry over exactly as the CPU learner's do, so this is built once and reused,
-/// never per-iter.
+/// The GPU-resident learner for `--update-device gpu`. Owns a GPU brain + GPU Adam
+/// optimizer that PERSIST across iterations — the optimizer's moment estimates must carry
+/// over exactly as the CPU learner's do, so this is built once and reused, never per-iter.
 ///
-/// The CPU `TrainingState.brain` stays the source of truth (rollout snapshots +
-/// checkpoints read it). Each iteration [`Self::update`] mirrors the current CPU policy
-/// onto the GPU, runs the one generic [`ppo_update_core`] there, and mirrors the result
-/// back — so this adds no second update implementation, only a device for the existing
-/// one. Weights cross the boundary as the same `FullPrecisionSettings` bincode the
-/// rollout snapshot/checkpoint already round-trips through (records are backend-
-/// agnostic), so no tensor is ever moved directly between backends.
+/// The CPU `TrainingState.brain` stays the source of truth. Each iteration
+/// [`Self::update`] mirrors the CPU policy onto the GPU, runs the one generic
+/// [`ppo_update_core`] there, and mirrors the result back — no second update
+/// implementation, only a device for the existing one. Weights cross the boundary as the
+/// same `FullPrecisionSettings` bincode the snapshot/checkpoint uses (records are
+/// backend-agnostic); no tensor is ever moved directly between backends.
 #[cfg(feature = "wgpu")]
 pub(crate) struct GpuLearner {
     device: burn::backend::wgpu::WgpuDevice,
@@ -1442,14 +1397,11 @@ impl GpuLearner {
         }
     }
 
-    /// Run one PPO update on the GPU and mirror the result back to the CPU brain.
-    ///
-    /// Loads `cpu_brain`'s current weights onto the GPU brain (so the GPU updates
-    /// exactly the policy the threads just rolled with), runs the production
-    /// [`ppo_update_core`] on [`GpuBackend`], then writes the updated GPU weights back
-    /// into `cpu_brain` for the next rollout snapshot/checkpoint. `ret_norm` is the
-    /// host's return scale (plain f32 stats, backend-independent), advanced in place
-    /// exactly as the CPU path does. Returns the PPO metrics and the load/update/store
+    /// Run one PPO update on the GPU and mirror the result back to the CPU brain. Loads
+    /// `cpu_brain`'s current weights onto the GPU (so the GPU updates exactly the policy
+    /// the threads rolled with), runs [`ppo_update_core`] on [`GpuBackend`], then writes
+    /// the result back into `cpu_brain`. `ret_norm` (backend-independent f32 stats) is
+    /// advanced in place as the CPU path does. Returns the metrics + the load/update/store
     /// wall-clock split.
     pub fn update(
         &mut self,
@@ -1461,9 +1413,7 @@ impl GpuLearner {
         use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
         type Bridge = BinBytesRecorder<FullPrecisionSettings>;
 
-        // CPU → GPU: serialize the CPU policy to the same bincode the rollout snapshot
-        // uses, then load it into the GPU brain on the GPU device. A backend-agnostic
-        // record is the one safe bridge — burn has no direct cross-backend tensor move.
+        // CPU → GPU: serialize the CPU policy to bincode, then load it into the GPU brain.
         let t_load = std::time::Instant::now();
         let bytes = Bridge::default()
             .record(cpu_brain.clone().into_record(), ())
@@ -1519,17 +1469,14 @@ impl GpuLearner {
 }
 
 /// The start band (rung 1): the planar (XZ) distance, in metres, at which a fresh
-/// target spawns from the env's origin. NEAR on purpose. WHY a curriculum at all:
-/// a cold policy cannot learn a FAR (3–6 m) target — that far out the reach term
-/// `W·(1 − tanh(d/S))` is both small and flat (~0.115, slope ~0.05/m at 4.5 m), too
-/// weak a signal for a stand to discover locomotion from, so it stalls in the stand
-/// basin and never walks (verified: 150 iters pinned at the stand floor, drift ~0.3 m).
-/// The near band's term is large and steep at the spawn pose (~0.385, slope ~0.13/m at
-/// 1.5 m), so the crab sets off
-/// immediately and a gait forms. The band then WIDENS outward only as the policy
-/// masters the current rung (see [`Curriculum`]) — far walking is learnable once a
-/// gait exists, just not from cold. Lower bound clears the ~1.3 m reach shell so even
-/// the nearest target demands a step, not a lean.
+/// target spawns from the env's origin. NEAR on purpose. WHY a curriculum at all: a cold
+/// policy cannot learn a FAR (3–6 m) target — that far out the reach term is both small
+/// and flat (~0.115, slope ~0.05/m at 4.5 m), too weak for a stand to discover locomotion
+/// from, so it stalls in the stand basin and never walks (verified: 150 iters pinned at
+/// the stand floor, drift ~0.3 m). At the near band it is large and steep (~0.385, slope
+/// ~0.13/m at 1.5 m), so the crab sets off immediately and a gait forms. The band then
+/// WIDENS outward only as the policy masters the current rung (see [`Curriculum`]). Lower
+/// bound clears the ~1.3 m reach shell so even the nearest target demands a step, not a lean.
 const BAND_START_MIN: f32 = 1.5;
 const BAND_START_MAX: f32 = 3.0;
 /// How far the band slides outward per advancement (both bounds move, so the width is
@@ -1553,14 +1500,11 @@ const TARGET_ARENA_HALF: f32 = crate::physics::world::ARENA_HALF_SIZE - 1.0;
 
 /// Per-episode reach radius (m): the curriculum scores an episode "reached" if the
 /// crab's claw tip came within this of the target at any tick. The CANONICAL reach
-/// distance — the demo's ball-hop (`crate::play::DEMO_REACH_RADIUS`) derives from
-/// this one constant, so "reached" means the same event a viewer sees the ball
-/// teleport on. Lives in the (always-compiled) trainer rather than the render-only
-/// demo so the headless build owns the source; the demo, gated out of the trainer,
-/// follows. A touch looser than zero so a near-miss the policy clearly solved still
-/// counts.
-///
-/// `pub(crate)`, not private, so `play` (the demo) can re-export it as the one source.
+/// distance — the demo's ball-hop (`crate::play::DEMO_REACH_RADIUS`) derives from this one
+/// constant, so "reached" means the same event a viewer sees the ball teleport on. Lives
+/// in the always-compiled trainer (`pub(crate)` so the demo re-exports it) rather than the
+/// render-only demo, so the headless build owns the source. A touch looser than zero so a
+/// near-miss the policy clearly solved still counts.
 pub(crate) const CURRICULUM_REACH_RADIUS: f32 = 0.8;
 /// Reach-fraction over the competence window at or above which the band advances. 0.6,
 /// not ~1.0: the goal is "the policy reliably gets there", not "every episode is
@@ -1590,9 +1534,9 @@ const COMPETENCE_WINDOW: usize = 200;
 /// back — they never advance, so there is no second curriculum to drift.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Curriculum {
-    /// Near edge of the current band (m). `min < max` always.
+    /// Near edge of the current band (m).
     min: f32,
-    /// Far edge of the current band (m). `max ≤ TARGET_ARENA_HALF` always.
+    /// Far edge of the current band (m).
     max: f32,
 }
 
@@ -1639,9 +1583,7 @@ impl Curriculum {
 
     /// The next rung out: both edges slid by [`BAND_ADVANCE_STEP`] (width preserved),
     /// the far edge capped at [`TARGET_ARENA_HALF`]. `None` once the far edge is already
-    /// at the cap — there is no further to go, so the curriculum is done. Returning the
-    /// new value (rather than mutating) keeps the type's invariant the only way to build
-    /// one.
+    /// at the cap — the curriculum is done.
     fn advanced(self) -> Option<Self> {
         if self.max >= TARGET_ARENA_HALF {
             return None;
@@ -1737,8 +1679,6 @@ impl CurriculumProgress {
 /// re-expresses in body axes each tick. `pub(crate)` so the demo's red-ball marker
 /// (`play::target_ball`) relocates its target through the very same rule training
 /// samples — one sampling rule, so the demo can never pose a target training never saw.
-/// (The demo passes [`Curriculum::start`], a fixed sensible band — it runs no curriculum
-/// of its own.)
 pub(crate) fn sample_target(
     origin: Vec3,
     curriculum: Curriculum,
@@ -1776,9 +1716,7 @@ fn planar_dist(a: Vec3, b: Vec3) -> f32 {
 /// planar) so lowering a claw onto a low ball pays: a ground-only `d` would score a tip
 /// hovering a metre above the target identically to one resting on it, leaving nothing to
 /// pull the claw down the last stretch. `pub(crate)` so the demo's reached-test
-/// (`play::target_ball`) measures the SAME `d` the reward does — the demo ball relocates
-/// on exactly the reach the reward scores (training holds one target per episode; the
-/// demo teleports on this reach for watchability).
+/// (`play::target_ball`) measures the SAME `d` the reward does.
 pub(crate) fn dist_3d(a: Vec3, b: Vec3) -> f32 {
     (a - b).length()
 }
@@ -1824,12 +1762,10 @@ const REACH_WEIGHT: f32 = 0.6;
 const REACH_SCALE: f32 = 4.0;
 
 /// Shaped proximity bonus `W·(1 − tanh(d/S))` (weight and scale on [`REACH_WEIGHT`]),
-/// where `d` is the minimum 3D euclidean distance over (claw tip, target) pairs. The reward's
-/// only positive term: smooth and strictly POSITIVE, it maxes at `W` when a tip reaches
-/// the target (`d`→0) and decays gently with distance, so a far target still pulls —
-/// that decaying-but-alive gradient across the spawn band is the walking signal. `None`
-/// (no target, no claw tip) yields 0 — with no positive term left the reward degrades
-/// to just the effort tax (the demo path and any tip-less tick).
+/// where `d` is the minimum 3D euclidean distance over (claw tip, target) pairs. The
+/// reward's only positive term: strictly POSITIVE, maxing at `W` when a tip reaches the
+/// target (`d`→0). `None` (no target, no claw tip) yields 0 — the reward then degrades to
+/// just the effort tax (the demo path and any tip-less tick).
 fn reach_bonus(min_tip_dist: Option<f32>) -> f32 {
     match min_tip_dist {
         Some(d) if d.is_finite() => REACH_WEIGHT * (1.0 - (d / REACH_SCALE).tanh()),
@@ -1938,9 +1874,8 @@ pub fn brain_step(
 
     // Per-env action sampling + NaN guards.
     let mut action_arrays: Vec<[f32; ACTION_SIZE]> = Vec::with_capacity(n);
-    // Raw (pre-clamp) actions, kept only to compute the effort tax: the tax must see
-    // the unbounded network output so it can push a saturating logit back toward the
-    // usable range, not the ±1-clamped value the sim is fed (see `action_effort`).
+    // Raw (pre-clamp) actions, kept only to compute the effort tax over the unbounded
+    // output rather than the ±1-clamped value the sim runs (see `action_effort`).
     let mut raw_action_arrays: Vec<[f32; ACTION_SIZE]> = Vec::with_capacity(n);
     let mut log_probs: Vec<f32> = Vec::with_capacity(n);
     for means in &means_rows {
@@ -2040,20 +1975,14 @@ pub fn brain_step(
         }
     }
 
-    // Closest claw-tip-to-target 3D euclidean distance per env (the reach reward's
-    // `d`), folded over both claw tips. 3D (not planar) so the goal pulls a tip all the
-    // way ONTO the target, height included — a tip directly above the ball still has the
-    // vertical gap left to close, so the policy is paid to lower the claw the last
-    // stretch instead of stalling once it is overhead.
-    // A crab link is parentless (only a MultibodyJoint, no Bevy child-of), so
-    // Rapier writes its world pose straight into `Transform` each FixedUpdate tick —
-    // that is the live `s_{t+1}` reading, in phase with the deferred transition,
-    // exactly like the carapace pose above. (GlobalTransform would be stale here: it
-    // only resyncs in PostUpdate, frozen across the many FixedUpdate ticks per frame
-    // the headless clock runs.) None when the env has no target or no claw tip this
-    // tick (mid-respawn) → `reach_bonus(None)` is 0, so with no positive term left the
-    // reward degrades to just the effort tax. A non-finite tip is skipped, not folded
-    // as a spurious near/far hit.
+    // Closest claw-tip-to-target distance per env (the reach reward's `d`, see
+    // [`dist_3d`]), folded over both claw tips. A crab link is parentless (only a
+    // MultibodyJoint, no Bevy child-of), so Rapier writes its world pose straight into
+    // `Transform` each FixedUpdate tick — that is the live `s_{t+1}` reading, in phase with
+    // the deferred transition, like the carapace pose above. (GlobalTransform would be
+    // stale: it only resyncs in PostUpdate, frozen across the many FixedUpdate ticks per
+    // frame the headless clock runs.) None when the env has no target or no claw tip this
+    // tick (mid-respawn). A non-finite tip is skipped, not folded as a spurious hit.
     let mut min_tip_dists: Vec<Option<f32>> = vec![None; n];
     for (env, tip) in claw_tips_q.iter() {
         let Some(slot) = min_tip_dists.get_mut(env.0) else {
@@ -2080,25 +2009,19 @@ pub fn brain_step(
             ep.min_tip_dist = Some(ep.min_tip_dist.map_or(d, |cur| cur.min(d)));
         }
     }
-    // Commanded effort this step (the reward's tax summand), per env — over the RAW
-    // outputs, not the clamped actions the sim ran (see `action_effort`).
+    // Commanded effort this step (the reward's tax summand), per env (see `action_effort`).
     let efforts: Vec<f32> = raw_action_arrays.iter().map(action_effort).collect();
 
-    // ONE far target per episode: the target is seeded at reset (and lazily above for
-    // the first episode) and then held FIXED — no mid-episode resample on reach. The
-    // reward is a pure distance field with no event bonus for the reach itself, so
-    // resampling-on-reach would make reaching MOVE the reward away, and the optimal
-    // policy would hover just outside the reach radius forever rather than touch. With
-    // a fixed goal the crab instead walks up and settles at d≈0, where the reach term
-    // peaks — so full reaching is the optimum. (The demo still teleports its target on
-    // reach for watchability; the trained policy tracks the current target vector and
-    // generalizes to that moving goal. See `play::target_ball`.)
+    // ONE far target per episode: seeded at reset (and lazily above for the first episode)
+    // and then held FIXED — no mid-episode resample on reach. The reward is a pure distance
+    // field with no event bonus for the reach itself, so resampling-on-reach would make
+    // reaching MOVE the reward away, and the optimal policy would hover just outside the
+    // reach radius forever rather than touch. With a fixed goal the crab instead walks up
+    // and settles at d≈0, where the reach term peaks — so full reaching is the optimum.
 
     // Per-env: finalize the PREVIOUS tick's pending transition with this tick's
-    // post-physics pose, then stash this tick's action as the next pending. The reach
-    // term for taking `aₜ` reads the claw-tip distance at `s_{t+1}` — the pose one tick
-    // later — so each action and its resulting pose occupy the SAME transition (issue
-    // #15). Termination is judged on the same post-physics pose, for the same reason.
+    // post-physics pose (see [`Pending`] for the one-tick phasing), then stash this tick's
+    // action as the next pending. Termination is judged on the same post-physics pose.
     for e in 0..n {
         // A pending exists only across a live recording stride, so an env that is
         // settling (or whose crab is momentarily absent) has none to finalize and
@@ -2136,13 +2059,9 @@ pub fn brain_step(
                 true
             } else {
                 let (height, upright) = poses[e].expect("poses[e].is_none() handled above");
-                // The reward is reach minus the effort tax — neither `height` nor
-                // `upright` feeds it. Both are read only for the off-reward machinery:
-                // `height` for the blow-up/fell-through termination guard below and the
-                // `mean_height` episode diagnostic, `upright` for the stance diagnostics.
-                // The reach term reads the post-physics claw-tip distance, crediting the
-                // SAME action that moved the tip, and the effort tax prices that action's
-                // raw command (both phased to `aₜ`).
+                // `height`/`upright` feed no reward (see `compute_reward`) — only the
+                // off-reward machinery: `height` the blow-up/fell-through guard below and
+                // the `mean_height` diagnostic, `upright` the stance diagnostics.
                 let reward = compute_reward(min_tip_dists[e], pending.effort);
                 // Termination is survival guards only — jumping, flipping, and
                 // any other strategy the policy invents are legitimate solutions
@@ -2213,24 +2132,17 @@ pub fn brain_step(
             let ep_height = ep.height_sum / ep_steps.max(1) as f32;
             let ep_upright = ep.upright_sum / ep_steps.max(1) as f32;
             let ep_sq_angvel = ep.sq_angvel_sum / ep_steps.max(1) as f32;
-            // Did this episode reach the target — the curriculum's competence signal.
-            // Read off the episode's closest-ever tip distance before the reset below
-            // clears it. `None` (no finite tip reading all episode) counts as a miss; so
-            // does a blown-up episode that never got close — both are honest failures to
-            // reach. The learner pools these to decide when to widen the band.
-            // `min_tip_dist` is a 3D distance, so this 0.8 m radius is a SPHERE about the
-            // target: since targets sit at Y 0.15–0.7, a tip must get within 0.8 m of the
-            // ball in 3D to count as reached — standing on the floor under a raised ball is
-            // not enough. Stricter than a ground-plane radius, and deliberately so: advance
-            // gates on actually getting near the ball, not merely walking under it.
+            // Did this episode reach the target — the curriculum's competence signal, read
+            // off the episode's closest-ever tip distance before the reset clears it.
+            // `None` (no finite tip all episode) and a blown-up episode that never got close
+            // both count as honest misses. A 3D radius (see [`dist_3d`]): a tip on the floor
+            // under a raised ball does not count.
             let reached = ep.min_tip_dist.is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
             // A rescued env was already despawned+respawned this tick by
-            // rescue_nonfinite_crabs (runs .before(Sense)); asking reset_crab for
-            // a second respawn would tear down that fresh crab — which has lived
-            // zero ticks — and rebuild an identical one (issue #16). So the rescue
-            // path owns the reset: it goes straight to `Settling` here, taking the
-            // grace itself, while a normal end goes to `AwaitingRespawn` for
-            // reset_crab to respawn.
+            // rescue_nonfinite_crabs (runs .before(Sense)); a second respawn from reset_crab
+            // would tear down that zero-tick-old fresh crab and rebuild an identical one. So
+            // the rescue path owns the reset: straight to `Settling` here, taking the grace
+            // itself, while a normal end goes to `AwaitingRespawn` for reset_crab to respawn.
             training.envs[e] = EnvEpisode {
                 phase: if rescued_envs.contains(&e) {
                     EnvPhase::Settling {
@@ -2326,11 +2238,8 @@ pub fn brain_step(
         }
     }
 
-    // Drift diagnostic: one sample per RECORDING env this tick — the carapace's planar
-    // distance from its spawn origin. Settling/absent envs (no live walk) don't count.
-    // Summed here and drained per horizon to the learner, which logs the mean (it
-    // climbs from ~0 as walking emerges). Recording-only, so a cold policy reads ~0 and
-    // an exploring one reads its true reach, not a settle-pose artifact.
+    // Drift diagnostic: one sample per RECORDING env this tick (see `drift_sum`).
+    // Recording-only, so a settle pose can't masquerade as a cold policy's ~0 reach.
     for (e, drift) in drifts.iter().enumerate() {
         if matches!(training.envs[e].phase, EnvPhase::Recording)
             && let Some(d) = *drift
@@ -2381,8 +2290,8 @@ pub fn settle_countdown(grace: u32) -> u32 {
 /// [`EnvPhase::AwaitingRespawn`], which this system consumes. An episode ended
 /// by a non-finite *rescue* is deliberately NOT handled here — that crab was
 /// already respawned this tick by [`rescue_nonfinite_crabs`], so the rescue path
-/// goes straight to [`EnvPhase::Settling`] and never enters `AwaitingRespawn`
-/// (issue #16); a respawn here would just rebuild the fresh crab a second time.
+/// goes straight to [`EnvPhase::Settling`] and never enters `AwaitingRespawn`;
+/// a respawn here would just rebuild the fresh crab a second time.
 ///
 /// A reset is a full despawn + respawn ([`respawn_crab_rotated`]): teleporting bodies
 /// cannot repair a multibody whose joint state went non-finite — rapier 0.32
@@ -2473,9 +2382,8 @@ mod tests {
     #[test]
     fn reach_bonus_rewards_reaching() {
         // The reach term is strictly positive, maxes at the target (d→0 ⇒ W), and
-        // decreases monotonically with distance — a dense pull toward the target that,
-        // unlike the old exp, stays alive across the far band. It depends ONLY on the
-        // tip distance (ungated: uprightness is not in the reward).
+        // decreases monotonically with distance — a dense pull that stays alive across the
+        // far band. Depends ONLY on the tip distance (uprightness is not in the reward).
         assert!(
             (reach_bonus(Some(0.0)) - REACH_WEIGHT).abs() < 1e-6,
             "a claw tip on the target earns the full reach weight"
@@ -2484,9 +2392,8 @@ mod tests {
             reach_bonus(Some(0.1)) > reach_bonus(Some(0.5)),
             "closer to the target must out-reward farther"
         );
-        // The whole point of the tanh: the term is still clearly positive at the
-        // FARTHEST the curriculum can push the target (the arena cap), where the old
-        // exp(−d/0.4) was effectively zero — so the walking signal survives every rung.
+        // Still clearly positive at the FARTHEST the curriculum can push the target (the
+        // arena cap) — the walking signal survives every rung.
         assert!(
             reach_bonus(Some(TARGET_ARENA_HALF)) > 0.0,
             "the reach bonus is strictly positive even at the arena-cap target distance"
@@ -2505,12 +2412,11 @@ mod tests {
 
     #[test]
     fn new_reach_term_has_gradient_at_spawn_distance() {
-        // THE CRUX of the redesign, proved numerically: the new `1 − tanh(d/S)` term and
-        // its slope are clearly non-zero across the spawn band where the old `exp` was ~0
-        // — so the far target now gives a real gradient to WALK down (see the why-tanh
-        // rationale on [`REACH_WEIGHT`]). Finite-difference slope (the reach term's
-        // `d`-derivative), comparing old vs new at each distance.
-        const OLD_SCALE: f32 = 0.4; // the pre-redesign exp length scale
+        // Numerically pins the why-tanh rationale (on [`REACH_WEIGHT`]): the `1 − tanh(d/S)`
+        // term and its slope are clearly non-zero across the spawn band where an `exp` term
+        // would be ~0, so a far target gives a real gradient to WALK down. Compares the two
+        // at each distance via a finite-difference slope.
+        const OLD_SCALE: f32 = 0.4; // an exp length scale, for the comparison
         let old_term = |d: f32| (-d / OLD_SCALE).exp();
         let new_term = |d: f32| 1.0 - (d / REACH_SCALE).tanh();
         let slope = |f: &dyn Fn(f32) -> f32, d: f32| {
@@ -2537,14 +2443,12 @@ mod tests {
                 && slope(&new_term, BAND_START_MIN).abs() > slope(&old_term, BAND_START_MIN).abs(),
             "even at the near edge the new term/slope must exceed the old",
         );
-        // (b) FAR rungs (3 m out to the arena cap) — here the old exp has all but vanished
-        // (exp(−7.5)…exp(−22.5)), so the new term/slope DOMINATE it by a large factor.
-        // This is the redesign's crux: a far target that used to give ~0 signal now gives
-        // a real gradient to WALK down. The term shrinks toward the cap (1−tanh(9/4)≈0.022
-        // at d=9), so the meaningful guarantees are: strictly positive, a clearly non-zero
-        // SLOPE (the actual learning signal — descend it by walking), and overwhelming
-        // dominance of the old exp — not an absolute term floor (which the old 3–6 m band
-        // could assume but the curriculum's longer reach cannot).
+        // (b) FAR rungs (3 m out to the arena cap) — here an exp would have all but vanished
+        // (exp(−7.5)…exp(−22.5)), so the tanh term/slope DOMINATE it. The term itself
+        // shrinks toward the cap (1−tanh(9/4)≈0.022 at d=9), so the guarantees are: strictly
+        // positive, a clearly non-zero SLOPE (the learning signal), and overwhelming
+        // dominance of the exp — not an absolute term floor (which the curriculum's longer
+        // reach can't assume).
         for &d in &[3.0, 4.5, TARGET_ARENA_HALF] {
             assert!(
                 new_term(d) > 0.0,
@@ -2715,11 +2619,9 @@ mod tests {
         );
     }
 
-    /// The reach reward must genuinely pull the tip toward the target IN 3D: a smaller 3D
-    /// tip→target distance must score strictly higher, including when the only difference
-    /// is HEIGHT (the whole point of the planar→3D change — a claw lowered onto a low ball
-    /// must beat one hovering above it at the same ground position). Drives the reward
-    /// helpers directly with synthesized 3D distances.
+    /// The reach reward must pull the tip toward the target IN 3D: a smaller 3D tip→target
+    /// distance scores strictly higher, including when the only difference is HEIGHT — a
+    /// claw lowered onto a low ball must beat one hovering above it at the same ground spot.
     #[test]
     fn closer_tip_in_3d_raises_reward() {
         let target = Vec3::new(1.0, 0.3, 0.0);
@@ -2806,10 +2708,9 @@ mod tests {
 
     #[test]
     fn effort_cost_calibration() {
-        // The tax `EFFORT_WEIGHT·Σ|a|^L` (weight 0.05, L=3) is taken on the RAW pre-clamp
-        // outputs, so its gradient keeps pulling a saturating logit back into range instead
-        // of going flat at the ±1 clamp. Pin the ordering that matters — reach is the ONLY
-        // positive term, so the tradeoff is reach vs the cost of the motion that earns it:
+        // Pin the ordering that matters — reach is the ONLY positive term, so the tradeoff
+        // is reach vs the cost of the motion that earns it (the tax is over the RAW
+        // pre-clamp outputs, see `action_effort`):
         // 1. A still policy with no target pays no tax and earns nothing — reward is zero.
         let still = compute_reward(None, action_effort(&[0.0; ACTION_SIZE]));
         assert!(
@@ -3128,19 +3029,16 @@ mod tests {
         q.iter(app.world()).collect()
     }
 
-    /// Issue #16: a crab that goes non-finite is rescued (despawn+respawn) by
-    /// `rescue_nonfinite_crabs` BEFORE Sense; the same tick, `brain_step` ends the
-    /// episode and `reset_crab` used to respawn it a SECOND time — so the rescue's
-    /// fresh crab lived zero ticks. This pins the fix: a
-    /// rescued env respawns EXACTLY ONCE (the rescue's), reset_crab leaves it
-    /// alone, and the episode still terminates for training.
+    /// A crab that goes non-finite is rescued (despawn+respawn) by `rescue_nonfinite_crabs`
+    /// BEFORE Sense; the same tick, `brain_step` ends the episode. A rescued env must
+    /// respawn EXACTLY ONCE (the rescue's) — `reset_crab` must leave it alone — yet the
+    /// episode must still terminate for training.
     ///
-    /// The post-tick *episode state* is identical with or without the bug (both
-    /// end at `Settling { grace: RESET_GRACE_TICKS - 1 }`), so the only thing
-    /// that distinguishes "respawned once" from "twice" is ENTITY IDENTITY: the
-    /// crab present after the tick must be the exact set the rescue spawned. We
-    /// therefore drive the rescue tick by hand, capture the rescued entity set,
-    /// then run brain_step + reset_crab and assert the set is untouched.
+    /// The post-tick episode state is identical whether or not reset_crab also respawns
+    /// (both end at `Settling { grace: RESET_GRACE_TICKS - 1 }`), so the only discriminator
+    /// is ENTITY IDENTITY: the crab after the tick must be the exact set the rescue spawned.
+    /// So we drive the rescue tick by hand, capture the rescued entity set, then run
+    /// brain_step + reset_crab and assert the set is untouched.
     #[test]
     fn rescued_env_respawns_exactly_once() {
         let checkpoint_dir =
@@ -3236,21 +3134,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&checkpoint_dir);
     }
 
-    /// Issue #15: each action's reward and the height change it produced must
-    /// occupy the SAME transition. The schedule is Sense → Think (`brain_step`) →
-    /// Act → physics, so the carapace `brain_step` reads at tick `t` is `sₜ` — the
-    /// state BEFORE this tick's action integrates. The reward for taking `aₜ` must
-    /// reflect the pose `aₜ` produced, `h(s_{t+1})`, read one tick later. The fix
-    /// defers each transition a tick, so the height read at tick `t+1` is glued to
-    /// the action chosen at tick `t`.
-    ///
-    /// This pins the phase at the unambiguous seam — a terminal. We hand-drive two
-    /// ticks: tick A chooses action `act_a` at a live height; then we drop the
-    /// carapace below the kill floor so tick B reads `h < 0.02` and terminates. The
-    /// terminal that the kill-floor height produces must carry `act_a` (the prior
-    /// tick's action — the one whose result that height IS), not tick B's action.
-    /// Under the pre-fix same-tick coupling the terminal carried tick B's action,
-    /// so `terminal.action == act_a` is exactly what the phase fix buys.
+    /// Each action's reward and the pose change it produced must occupy the SAME
+    /// transition — the one-tick deferral [`Pending`] documents. This pins the phase at the
+    /// unambiguous seam, a terminal: tick A chooses action `act_a` at a live height; then we
+    /// drop the carapace below the kill floor so tick B reads `h < 0.02` and terminates. The
+    /// terminal the kill-floor height produces must carry `act_a` (the action whose result
+    /// that height IS), not tick B's action.
     #[test]
     fn height_reward_pairs_with_the_action_that_produced_it() {
         let checkpoint_dir =
