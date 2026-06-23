@@ -1,78 +1,24 @@
-//! Deterministic simulation core for lockstep multiplayer.
+//! Deterministic simulation core for lockstep multiplayer: peers run independent
+//! copies and only inputs cross the wire (see [`crate::net::lockstep`]), so the sim
+//! must be bit-identical across machines. The contract that buys that:
 //!
-//! Phase 1 (rl#38) lives here: the gray-box "Extraction" loop — tiny first-person
-//! players hunted by one giant crab, each racing to a fixed pickup point. It
-//! replaces Phase 0's dot world but keeps the contract that makes lockstep work,
-//! because peers run independent copies and only inputs cross the wire (see
-//! [`crate::net::lockstep`]):
-//!
-//! - [`Sim::step`] is a pure function of `(prior state, inputs)` — identical inputs
-//!   from an identical state always produce an identical next state, on any machine.
-//!   No wall-clock, no thread-local/global RNG, no iteration over `HashMap`/`HashSet`
-//!   (their order is randomized per process). Seed every random draw from
-//!   [`Sim::rng`]; iterate players in `PlayerId` order.
+//! - [`Sim::step`] is a pure function of `(prior state, inputs)`. No wall-clock, no
+//!   thread-local/global RNG, no iteration over `HashMap`/`HashSet` (their order is
+//!   randomized per process). Seed every random draw from [`Sim::rng`]; iterate
+//!   players in `PlayerId` order.
 //! - **No `f32`/`f64` arithmetic in the sim.** Floats round-trip differently across
 //!   targets/compilers, so the whole world is integer fixed-point (positions, yaw,
-//!   velocities) and angles go through an integer sin/cos table ([`trig`]). This
-//!   sidesteps the cross-machine float-determinism risk entirely for the gray-box;
-//!   if real rapier bodies arrive later, determinism shifts onto rapier's
-//!   enhanced-determinism instead (see rl#39). `f32` appears ONLY at the input
-//!   boundary ([`Input::from_axes`]), which quantizes to the integer grid before
-//!   anything reaches the sim.
-//! - [`Sim::state_hash`] folds the FULL observable state into one `u64`. It is the
-//!   desync detector: two peers that diverge by even one bit hash differently next
-//!   tick. Every field added here MUST be hashed there, or a desync in it goes
-//!   undetected.
-//!
-//! # Interface for render / vehicle subs (rl#38)
-//!
-//! Two later subs build ON this module, and they relate to it differently — say so
-//! plainly so neither author is surprised:
-//! - The **render / FP-client** sub consumes a stable **read-only** view (the
-//!   accessors below) and produces [`Input`]. It never edits the sim.
-//! - The **vehicle** sub (plane, heli) is NOT a pure consumer: a flying body has 3D
-//!   orientation (pitch + roll, which DO move it) and altitude, none of which fit
-//!   [`Player`]'s 2D [`Pos`] + scalar yaw. So it will add a new entity type and edit
-//!   [`Sim::new`]/[`Sim::step`]/[`Sim::state_hash`] directly (there is no plugin
-//!   point — it's one crate). The yaw-only / Y=0 model here is a truth about *feet*,
-//!   not a rule flying entities must obey.
+//!   velocities) and angles go through an integer sin/cos table ([`trig`]). `f32`
+//!   appears ONLY at the input boundary ([`Input::from_axes`]), which quantizes to
+//!   the integer grid before anything reaches the sim.
+//! - [`Sim::state_hash`] folds the FULL observable state into one `u64` — the desync
+//!   detector. Every field added to the state MUST be hashed there, or a desync in it
+//!   goes undetected.
 //!
 //! **Coordinate frame.** Right-handed: world is the XZ ground plane at Y=0, +X right,
-//! +Z forward, +Y up (unused by feet). A yaw of 0 faces +Z and increases turning
-//! toward +X (see [`trig::atan2_turns`]).
-//!
-//! **Reading state to render (read-only — never drives sim logic):**
-//! - [`Sim::players`] → each [`Player`]'s [`pos`](Player::pos) ([`Pos`], world XZ in
-//!   [`UNIT`] fixed-point), [`yaw`](Player::yaw) (a [`trig`] turn-unit facing), and
-//!   [`status`](Player::status) (Alive / Downed / Extracted). A player is a capsule
-//!   standing on the ground. Convert a coordinate to meters with
-//!   `coord as f32 / UNIT as f32`, and a yaw to radians with
-//!   [`trig_client::turns_to_radians`].
-//! - [`Sim::crab`] → the one [`Crab`]: world position, facing yaw, and [`CRAB_SCALE`]
-//!   (render it that many times bigger than a player — it is a scaled placeholder;
-//!   reusing the trained RL crab body is a later concern).
-//! - [`Sim::extraction`] → the fixed pickup point ([`ExtractionPoint`]); reaching it
-//!   clears the round. Draw it as a debug marker of radius [`EXTRACT_RADIUS`].
-//! - [`Sim::outcome`] → [`Outcome`]: `Ongoing`, `Extracted` (someone reached the
-//!   point — round won), or `Wiped` (every player downed — round lost).
-//!
-//! **Producing input each tick:** build one [`Input`] per local player from the
-//! controls — [`Input::new`] (move axes + yaw-look delta + an action bit) or the
-//! move-only [`Input::from_axes`]. The client owns the camera (including pitch, which
-//! the sim does not model — feet only need yaw to move relative to facing); it feeds
-//! the sim a per-tick yaw *delta* and reads back the authoritative yaw to aim the
-//! camera. When the vehicle sub lands, [`Input`] is a single flat fixed-width struct
-//! shared by all entities — a deliberate gray-box simplification, NOT a finished
-//! design. Adding throttle/pitch/roll either makes every walking player pay wire
-//! bytes it ignores or lets a walker carry a nonzero throttle (an illegal state the
-//! flat struct permits). Routing input to the right controller is also unsolved:
-//! [`PlayerId`] is hardwired 1:1 to its [`Player`], with no "client X is piloting the
-//! heli" indirection. **The vehicle author's first task is to redesign this seam**
-//! (likely a tagged `enum Input { OnFoot{..}, Piloting{..} }` + a control-assignment
-//! map) — keeping it small, fixed-width, and losslessly (de)serializable, since the
-//! wire bytes ARE the shared truth (see [`Input::to_bytes`]). Also note [`trig`] is
-//! 2D (yaw only): a flying body's pitch/roll need a 3D rotation the vehicle sub must
-//! add (e.g. integer quaternions), still float-free for determinism.
+//! +Z forward, +Y up. A yaw of 0 faces +Z and increases turning toward +X (see
+//! [`trig::atan2_turns`]). The accessors below are read-only — rendering reads them but
+//! never drives sim logic, which goes through [`Sim::step`] so it stays deterministic.
 
 use std::collections::BTreeMap;
 
@@ -95,32 +41,25 @@ pub mod buttons {
     pub const ACTION: u8 = 1 << 0;
     /// Restart the round. Bit 1. Routed through the input stream (not a client-local
     /// reset) so every peer restarts on the SAME tick and stays in lockstep — a
-    /// local-only reset would desync. Edge-triggered in the sim (see [`Sim::step`]):
-    /// held across ticks restarts once, not every tick.
+    /// local-only reset would desync. Edge-triggered (see [`Sim::step`]).
     pub const RESTART: u8 = 1 << 1;
 }
 
-/// One player's input for a single tick.
-///
-/// This is the unit that crosses the wire each tick, so it stays small and
-/// (de)serializes losslessly and identically on every peer — the wire bytes ARE the
-/// shared truth (see [`Input::to_bytes`]). Fixed-point, not `f32`: an integer is
-/// bit-identical across machines where a float round-trip need not be.
+/// One player's input for a single tick — the unit that crosses the wire (see
+/// [`Input::to_bytes`]). The move/look axes are facing-relative (named for the control
+/// intent), not world axes: at a nonzero yaw they do not map to world X/Z.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Input {
     /// Strafe axis (right +, i.e. toward +X at yaw 0) in fixed-point units of
-    /// 1/[`Input::AXIS_SCALE`], clamped to ±[`Input::AXIS_SCALE`]. Applied relative to
-    /// the player's facing yaw. Named for the control intent, not a world axis — at a
-    /// nonzero yaw it does not map to world X.
+    /// 1/[`Input::AXIS_SCALE`], clamped to ±[`Input::AXIS_SCALE`].
     pub move_strafe: i16,
     /// Forward axis (forward +, i.e. toward +Z at yaw 0), same units/clamp as
-    /// [`move_strafe`](Input::move_strafe). Likewise facing-relative, not world Z.
+    /// [`move_strafe`](Input::move_strafe).
     pub move_forward: i16,
     /// Yaw-look delta for THIS tick, in fixed-point units of 1/[`Input::AXIS_SCALE`]:
-    /// ±[`Input::AXIS_SCALE`] is the per-tick yaw cap (a fraction of a turn; see the
-    /// sim's yaw clamp). The client integrates raw mouse/stick into this bounded delta
-    /// and the sim adds it to the player's yaw — bounded so one tick can't spin a peer
-    /// arbitrarily. A yaw delta, not a world-X delta.
+    /// ±[`Input::AXIS_SCALE`] is the per-tick yaw cap. The client integrates raw
+    /// mouse/stick into this bounded delta and the sim adds it to the player's yaw —
+    /// bounded so one tick can't spin a peer arbitrarily.
     pub look_yaw: i16,
     /// Action/button bitfield (see [`buttons`]). Held state, sampled each tick.
     pub buttons: u8,
@@ -192,8 +131,7 @@ impl Input {
 pub const TICK_HZ: u64 = 30;
 
 /// Fixed-point world scale: a position/length value of [`UNIT`] equals one world
-/// meter. All world coordinates, radii, and speeds are integers in these units, so
-/// the whole sim is bit-identical across machines (see the module determinism note).
+/// meter. All world coordinates, radii, and speeds are integers in these units.
 pub const UNIT: i64 = 1000;
 
 /// Player walk speed, in [`UNIT`]/tick at full stick. Tuned for the gray-box, not
@@ -202,7 +140,7 @@ const PLAYER_SPEED: i64 = 166;
 
 /// Crab pursuit speed, in [`UNIT`]/tick. Held meaningfully below [`PLAYER_SPEED`]
 /// (166) so a dodging player can OUTRUN it and open distance — the tiny-vs-giant
-/// asymmetry the loop is built on (rl#38). Beatability comes mostly from this gap plus
+/// asymmetry the loop is built on. Beatability comes mostly from this gap plus
 /// [`CRAB_GRAB_RADIUS`] and the [`STARTUP_GRACE_TICKS`] head-start, not from one number.
 /// FEEL KNOB: the exact value is for the owner to fine-tune by playing; keep the gap to
 /// PLAYER_SPEED wide enough that running away actually works.
@@ -213,19 +151,16 @@ const CRAB_SPEED: i64 = 130;
 pub const CRAB_SCALE: i64 = 12;
 
 /// How close (in [`UNIT`]) the crab must get to a living player to "grab" (down) it.
-/// Stands in for the giant crab's reach without modelling its limbs. Was 3 m, which —
-/// combined with the crab snapping onto its target each step — made it catch from too
-/// far and feel relentless (rl#38 playtest). Pulled in so a player who keeps a small
-/// gap survives. FEEL KNOB: exact reach is the owner's to fine-tune; smaller = more
-/// beatable, larger = scarier.
+/// Stands in for the giant crab's reach without modelling its limbs. Kept small so a
+/// player who keeps a little gap survives. FEEL KNOB: exact reach is the owner's to
+/// fine-tune; smaller = more beatable, larger = scarier.
 pub const CRAB_GRAB_RADIUS: i64 = 3 * UNIT / 2;
 
-/// Deterministic startup head-start, in ticks (~1 s at 30 Hz). For the first this-many
-/// ticks the crab neither pursues NOR grabs (see [`Sim::step`]) — it holds its spawn
-/// while players orient and break away. Fixes the "caught the instant the game
-/// launched" report (rl#38): with a guest spawning near the crab or the crab beelining
-/// from frame 1, there was no moment to react. Counted in ticks (sim state, identical
-/// on every peer), never wall-clock, so it stays deterministic. FEEL KNOB.
+/// Startup head-start, in ticks (~1 s at 30 Hz). For the first this-many ticks the
+/// crab neither pursues NOR grabs (see [`Sim::step`]) — it holds its spawn while
+/// players orient and break away, so no one is caught the instant the round starts.
+/// Counted in ticks (sim state, identical on every peer), never wall-clock, so it stays
+/// deterministic. FEEL KNOB.
 const STARTUP_GRACE_TICKS: u64 = 30;
 
 /// Minimum spawn separation (in [`UNIT`]) enforced between the crab and the NEAREST
@@ -245,7 +180,7 @@ pub const EXTRACT_RADIUS: i64 = 2 * UNIT;
 /// spin a peer wildly.
 const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
 
-// --- Plane flight tuning (rl#38 first cut) ---
+// --- Plane flight tuning ---
 // All integer, all named, few: crude arcade flight, not a sim. Values are in
 // [`UNIT`]/tick for forces/speeds and [`trig`] turn units for the orientation rates.
 
@@ -367,11 +302,10 @@ pub struct Pos3 {
 /// A pilotable plane: a flying body with 3D position + velocity and a 2D orientation
 /// (heading yaw + pitch), all integer fixed-point so two peers evolve it identically.
 ///
-/// Crude arcade flight, NOT a sim (rl#38 first cut): throttle thrusts along the
-/// heading-and-pitch facing, gravity pulls −Y every tick, and velocity damps so it
-/// can't integrate to infinity. Roll is omitted on purpose — yaw + pitch is enough to
-/// fly a gray box and keeps the orientation 2-angle (no integer quaternion yet, the
-/// thing the [`crate::net::sim`] interface note flags as a later concern).
+/// Crude arcade flight, NOT a sim: throttle thrusts along the heading-and-pitch facing,
+/// gravity pulls −Y every tick, and velocity damps so it can't integrate to infinity.
+/// Roll is omitted on purpose — yaw + pitch is enough to fly a gray box and keeps the
+/// orientation 2-angle (no integer quaternion needed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plane {
     pos: Pos3,
@@ -438,16 +372,15 @@ pub struct Sim {
     /// First-person players. `BTreeMap` (per the determinism contract) so iteration
     /// is in `PlayerId` order on every peer.
     players: BTreeMap<PlayerId, Player>,
-    /// Pilotable planes, keyed by the [`PlayerId`] flying each one (rl#38 first cut).
-    /// A player is EITHER on foot (in `players`) OR piloting (here) — the two maps are
-    /// disjoint, decided once at [`Sim::new_with_pilots`] (an empty map ⇒ the foot-only
-    /// game, hashed to zero extra bytes, so the no-plane sim is byte-identical to before
-    /// planes existed). `BTreeMap` for `PlayerId`-ordered iteration, per the contract.
+    /// Pilotable planes, keyed by the [`PlayerId`] flying each one. A player is EITHER on
+    /// foot (in `players`) OR piloting (here) — the two maps are disjoint, decided once at
+    /// [`Sim::new_with_pilots`]. An empty map ⇒ the foot-only game, hashed to zero extra
+    /// bytes, so the no-plane sim is byte-identical. `BTreeMap` for `PlayerId`-ordered
+    /// iteration, per the contract.
     ///
-    /// Planes don't yet participate in the objective: the crab (`nearest_living_player`),
+    /// Planes don't participate in the objective: the crab (`nearest_living_player`),
     /// grabs, extraction, and `settle_outcome` all read only `players`, so a pilot can't
-    /// be hunted or extract, and an all-pilot round never resolves (stays `Ongoing`). A
-    /// flyable gray box this cut; making planes rescue (grab/carry/extract) is future work.
+    /// be hunted or extract, and an all-pilot round never resolves (stays `Ongoing`).
     planes: BTreeMap<PlayerId, Plane>,
     crab: Crab,
     extraction: ExtractionPoint,
@@ -458,37 +391,31 @@ pub struct Sim {
     /// with them.
     outcome: Outcome,
     /// The one sanctioned randomness source (see [`Sim::rng`]). Its stream position is
-    /// hashed and reproduced across peers, so it is genuine sim state, not a scratch
-    /// generator — never reseed it mid-sim EXCEPT on a deterministic restart (see
-    /// [`Sim::step`]'s RESTART handling, which every peer applies on the same tick). The
-    /// gray-box crab pursuit is pure arithmetic and draws nothing; the field stays so
-    /// later loop variation (spawn jitter, crab feints) has a deterministic source
-    /// ready, and the contract that "the one RNG is hashed" is established.
+    /// hashed and reproduced across peers, so it is genuine sim state — never reseed it
+    /// mid-sim EXCEPT on a deterministic restart (see [`Sim::step`]'s RESTART handling,
+    /// which every peer applies on the same tick). The crab pursuit draws nothing; the
+    /// field stays so later loop variation (spawn jitter, crab feints) has a
+    /// deterministic source ready.
     rng: ChaCha8Rng,
-    /// Whether [`buttons::RESTART`] was held by some player on the PREVIOUS tick, so the
-    /// restart is EDGE-triggered: a held key restarts once, not every tick it's down.
-    /// Genuine sim state (it gates a future tick's behaviour) and identical on every
-    /// peer (derived from the same lockstep inputs), so it is folded into
-    /// [`Sim::state_hash`].
+    /// Whether [`buttons::RESTART`] was held by some player on the PREVIOUS tick — the
+    /// edge-trigger latch (see [`buttons::RESTART`]). It gates a future tick's behaviour
+    /// and is identical on every peer, so it is folded into [`Sim::state_hash`].
     restart_held: bool,
     /// The immutable round CONFIG — the match seed and the foot/pilot roster — kept so a
     /// deterministic restart ([`buttons::RESTART`]) can rebuild the initial state in
-    /// place. Constant for the session and identical on every peer (the same arguments
-    /// reach every peer's [`Sim::new_with_pilots`]), so it is NOT folded into
-    /// [`Sim::state_hash`]: it can't differ between in-sync peers, and a peer built with
-    /// a different roster is already a different game the cross-check would surface via
-    /// the player/plane state it does hash.
+    /// place. NOT folded into [`Sim::state_hash`]: it can't differ between in-sync peers,
+    /// and a peer built with a different roster is already a different game the cross-check
+    /// surfaces via the player/plane state it does hash.
     config: RoundConfig,
-    /// SOLO ONLY: the crab's ground position is driven from OUTSIDE the sim (by the
-    /// real rapier-simulated NN crab — see [`Sim::set_external_crab_pose`]) instead of by the
+    /// SOLO ONLY: the crab's ground position is driven from OUTSIDE the sim (by the real
+    /// rapier-simulated NN crab — see [`Sim::set_external_crab_pose`]) instead of by the
     /// built-in integer point-pursuit. When set, [`Sim::step`] skips the pursuit move
     /// (block 2) and trusts whatever `set_external_crab_pose` last wrote; grabs, extraction,
-    /// and outcome (blocks 3–5) then resolve against the REAL crab body's position.
+    /// and outcome (blocks 3–5) then resolve against the real crab body's position.
     ///
-    /// `false` for every multiplayer / networked round, which keeps the bit-deterministic
-    /// integer pursuit as the cross-peer-safe path: a float rapier crab is NOT identical
-    /// across peers, so it is the SOLO showcase only. Constant after construction and
-    /// (in solo) single-peer, so — like [`config`](Sim::config) — it is not hashed.
+    /// `false` for every networked round: a float rapier crab is NOT identical across
+    /// peers, so the integer pursuit is the cross-peer-safe path and this is the solo
+    /// showcase only. Not hashed (like [`config`](Sim::config)).
     crab_external: bool,
 }
 
@@ -515,17 +442,10 @@ impl Sim {
     }
 
     /// Like [`Sim::new`], but each id in `pilots` spawns PILOTING a plane instead of
-    /// standing on foot (rl#38 vehicle first cut). A pilot is removed from the foot
-    /// `players` map and added to `planes`; the two stay disjoint. `pilots` not in the
-    /// `players` set are ignored. With `pilots` empty this is byte-for-byte [`Sim::new`]
-    /// (the plane map is empty, contributing nothing to [`Sim::state_hash`]), so the
-    /// foot-only game is unchanged.
-    ///
-    /// Callers must pass the SAME `pilots` on every peer or their sims diverge; in
-    /// THIS cut only the solo/screenshot paths pass a non-empty set — the networked
-    /// path (`connect_and_form`) passes none, so planes don't yet fly in networked
-    /// play. Wire-negotiating the pilot set (and the tagged-`Input` redesign the
-    /// module note describes) is future work.
+    /// standing on foot. A pilot is removed from the foot `players` map and added to
+    /// `planes`; the two stay disjoint. `pilots` not in the `players` set are ignored.
+    /// With `pilots` empty this is byte-for-byte [`Sim::new`]. Callers MUST pass the same
+    /// `pilots` on every peer or their sims diverge; the networked path passes none.
     pub fn new_with_pilots(seed: u64, players: &[PlayerId], pilots: &[PlayerId]) -> Self {
         let mut sorted: Vec<PlayerId> = players.to_vec();
         sorted.sort();
@@ -557,24 +477,19 @@ impl Sim {
         }
     }
 
-    /// Put the crab under EXTERNAL control for a solo round: [`Sim::step`] stops running
-    /// the built-in integer pursuit, and the caller must drive the crab's position each
-    /// tick with [`Sim::set_external_crab_pose`] (from the real rapier-simulated NN crab).
-    /// Grabs / extraction / outcome still run, against that externally-set position.
-    ///
-    /// Solo (single-peer) only — a float-driven crab is not cross-peer deterministic, so
-    /// a networked sim MUST be left on the integer pursuit. The lockstep solo path is the
-    /// sole caller; nothing over the wire flips this.
+    /// Put the crab under EXTERNAL control (see [`crab_external`](Sim::crab_external)):
+    /// [`Sim::step`] stops running the built-in integer pursuit, and the caller drives the
+    /// crab's position each tick with [`Sim::set_external_crab_pose`]. Solo only — a
+    /// float-driven crab is not cross-peer deterministic.
     pub fn enable_external_crab(&mut self, external: bool) {
         self.crab_external = external;
     }
 
-    /// SOLO ONLY: set the crab's ground position + facing yaw directly, from the real
-    /// rapier-simulated NN crab body. Has effect only after [`Sim::enable_external_crab`]
-    /// (true); otherwise the integer pursuit in [`Sim::step`] overwrites it. Call it each
-    /// tick BEFORE advancing, so the grab/extraction checks resolve against the body's
-    /// current position. `pos`/`yaw` are genuine hashed state — a solo run is reproducible
-    /// given the same NN-crab trajectory.
+    /// Set the crab's ground position + facing yaw directly (see
+    /// [`enable_external_crab`](Sim::enable_external_crab)). Has effect only after
+    /// `enable_external_crab(true)`; otherwise [`Sim::step`]'s pursuit overwrites it. Call
+    /// it each tick BEFORE advancing, so the grab/extraction checks resolve against the
+    /// body's current position. `pos`/`yaw` are genuine hashed state.
     pub fn set_external_crab_pose(&mut self, pos: Pos, yaw: i32) {
         self.crab.pos = pos;
         self.crab.yaw = yaw;
@@ -665,10 +580,9 @@ impl Sim {
     /// the +Z extraction (around the midpoint, offset in X so it's an obstacle to dodge,
     /// not a head-on instant grab). Then, as a guard against any roster/layout that
     /// would drop a player right next to it, push it OUT along the spawn→nearest-player
-    /// line until at least [`MIN_CRAB_SPAWN_DISTANCE`] away — so no one ever starts
-    /// inside its reach (the "caught the instant it launched" report, rl#38). Pure
-    /// integer math (the same deterministic isqrt the pursuit uses), so every peer
-    /// computes the identical spawn.
+    /// line until at least [`MIN_CRAB_SPAWN_DISTANCE`] away — so no one ever starts inside
+    /// its reach. Pure integer math (the same deterministic isqrt the pursuit uses), so
+    /// every peer computes the identical spawn.
     fn spawn_crab(players: &BTreeMap<PlayerId, Player>) -> Crab {
         let mut pos = Pos {
             x: 6 * UNIT,
@@ -713,12 +627,9 @@ impl Sim {
     pub fn step(&mut self, inputs: &BTreeMap<PlayerId, Input>) {
         self.tick += 1;
 
-        // Restart (edge-triggered): if any player newly presses RESTART this tick,
-        // rebuild the round to tick 0 and stop — every peer holds the identical input
-        // for this tick, so they all restart in lockstep (this is why restart rides the
-        // input stream, never a client-local reset). Checked BEFORE the freeze below so
-        // a decided (won/lost) round can be restarted, which is the whole point. Edge,
-        // not level: holding R restarts once, not every tick it's down.
+        // Restart, edge-triggered: any player newly pressing RESTART rebuilds the round
+        // to tick 0 and stops. Checked BEFORE the freeze below so a decided (won/lost)
+        // round can be restarted. Edge, not level: holding R restarts once.
         let restart_now = inputs.values().any(|i| i.pressed(buttons::RESTART));
         let restart_edge = restart_now && !self.restart_held;
         self.restart_held = restart_now;
@@ -771,18 +682,13 @@ impl Sim {
             step_plane(plane, inp);
         }
 
-        // Startup grace (deterministic, counted in ticks): for the first
-        // STARTUP_GRACE_TICKS the crab neither pursues nor grabs — it holds its spawn so
-        // players get a real moment to orient and break away (fixes "caught the instant
-        // the game launched", rl#38). After the grace it hunts as normal.
+        // The crab is disarmed during the startup grace (see [`STARTUP_GRACE_TICKS`]).
         let armed = self.tick > STARTUP_GRACE_TICKS;
 
-        // 2) Crab: aim at and step toward the nearest living player. Pure arithmetic —
-        //    no RNG, no float — so it is trivially deterministic. Frozen during the
-        //    startup grace. SKIPPED entirely under external (solo NN) control: the real
-        //    rapier crab body owns the position then, written via `set_external_crab_pose`
-        //    before this step; the grab/extraction below still read `self.crab.pos`, so
-        //    they resolve against that body — only the *move* is delegated, not the hunt.
+        // 2) Crab: aim at and step toward the nearest living player. SKIPPED under
+        //    external (solo NN) control — the real crab body owns the position then (see
+        //    `crab_external`); the grab/extraction below still read `self.crab.pos`, so
+        //    only the *move* is delegated, not the hunt.
         if !self.crab_external && armed && let Some(target) = self.nearest_living_player() {
             let t = target.pos;
             let dx = t.x - self.crab.pos.x;
@@ -907,7 +813,7 @@ impl Sim {
         }
         // Planes (PlayerId order): every evolving field — 3D pos, 3D velocity, heading,
         // pitch. An empty plane map writes nothing, so the foot-only sim's hash is
-        // unchanged. A field omitted here is a field whose desync is invisible.
+        // unchanged.
         for (id, plane) in self.planes.iter() {
             h.write(&[id.0]);
             h.write_pos3(plane.pos);
@@ -1023,16 +929,12 @@ fn within(ax: i64, az: i64, bx: i64, bz: i64, r: i64) -> bool {
 }
 
 /// Advance one plane one tick from its pilot input — crude arcade flight, pure integer
-/// fixed-point so two peers evolve it bit-identically (rl#38 first cut).
+/// fixed-point so two peers evolve it bit-identically.
 ///
 /// Control map (reuses the existing [`Input`] axes, no wire change):
 /// - [`Input::move_forward`] → throttle: thrust along the heading-and-pitch facing.
 /// - [`Input::look_yaw`] → yaw rate: turn the heading.
 /// - [`Input::move_strafe`] → pitch rate: nose up (climb) / down (dive).
-///
-/// Reusing the flat [`Input`] axes (throttle/yaw/pitch) is the INTERIM the module's
-/// seam note flags for a tagged-[`Input`] redesign — the proper next step, deferred
-/// to keep this cut small and the wire format unchanged.
 ///
 /// Order per tick: turn (yaw + pitch, clamped) → accelerate (thrust along the new
 /// facing, minus gravity) → damp → integrate position. Forces are integers; the only
@@ -1115,12 +1017,11 @@ fn isqrt_i128(n: i128) -> i128 {
 ///
 /// **The table is built with INTEGER-ONLY math (CORDIC), never `f64::sin`.** A
 /// hardware/compiler float `sin` is not guaranteed bit-identical across platforms
-/// (libm/FMA/rounding differ), so building the table from one would reintroduce the
-/// exact cross-machine desync this whole module exists to prevent — and a unit test,
-/// being same-binary, could never catch it. Integer CORDIC is a fixed sequence of
-/// adds and shifts: its output is identical on every target, so two peers on
-/// *different builds/OSes* still get the same table. No `f32`/`f64` appears anywhere
-/// in this module (client float helpers live in [`super::trig_client`]).
+/// (libm/FMA/rounding differ), so building the table from one would reintroduce a
+/// cross-machine desync — and a unit test, being same-binary, could never catch it.
+/// Integer CORDIC is a fixed sequence of adds and shifts: identical on every target, so
+/// two peers on different builds/OSes get the same table. No `f32`/`f64` appears
+/// anywhere in this module (client float helpers live in [`super::trig_client`]).
 pub mod trig {
     use std::sync::OnceLock;
 
@@ -1448,13 +1349,10 @@ mod tests {
 
     #[test]
     fn strafe_input_moves_sideways_along_x() {
-        // At yaw 0 a player faces +Z, so its RIGHT is +X. A full positive strafe stick
-        // must slide it +X by ≈PLAYER_SPEED with no forward (+Z) drift — the sim-frame
-        // direction the render layer's screen-right negation is built on top of (see
-        // render::gather_input / camera_right_is_negative_x_facing_plus_z). A negative
-        // strafe mirrors to −X. Pinned because nothing else asserts strafe's world
-        // direction, only forward's — a flipped sign here is exactly "strafing goes the
-        // wrong way", invisible to the forward/look tests.
+        // At yaw 0 a player faces +Z, so its RIGHT is +X: a full positive strafe slides
+        // +X by ≈PLAYER_SPEED with no +Z drift, a negative strafe mirrors to −X. The only
+        // test pinning strafe's world direction (the others cover forward/look), so a
+        // flipped sign — "strafing goes the wrong way" — is invisible without it.
         let mut sim = Sim::new(0, &players(1));
         let p0 = sim.player(PlayerId(0)).unwrap().pos();
         let mut right = BTreeMap::new();
@@ -1541,9 +1439,7 @@ mod tests {
         // ACTION wins. The crab sits between spawn and extraction (at +X), so a straight
         // line gets grabbed; the player instead swings WIDE to -X (away from the crab),
         // dragging it off-axis, then runs up the far side to the point. The speed edge
-        // (PLAYER_SPEED > CRAB_SPEED) makes the detour pay off. Deterministic — fixed
-        // waypoints, no randomness — so it can't flake. (A traced win lands ~t=590, far
-        // inside the 4000 budget.)
+        // (PLAYER_SPEED > CRAB_SPEED) makes the detour pay off.
         let mut sim = Sim::new(0, &players(1));
         let ex = sim.extraction().pos();
         // Waypoints: out to -X, up the far side, then the point itself.
@@ -1897,7 +1793,7 @@ mod tests {
         }
     }
 
-    // --- rl#38 playtest fixes: startup grace + deterministic restart ---
+    // --- startup grace + deterministic restart ---
 
     #[test]
     fn crab_holds_and_cannot_grab_during_startup_grace() {
