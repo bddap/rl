@@ -617,4 +617,3 @@ fn verify_pivots() -> i32 {
     );
     i32::from(!pass)
 }
-

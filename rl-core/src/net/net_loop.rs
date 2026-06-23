@@ -259,9 +259,14 @@ fn connect_and_form_inner(
         // sees the roster fill (RosterForming/Agreed). Best-effort: a failure to bind
         // the telemetry endpoint just runs the game without it.
         let telemetry = connect_telemetry(collector, my_eid).await;
-        let formation =
-            form_match(&mut session, discover_secs, expect, telemetry.as_ref(), lobby.as_ref())
-                .await?;
+        let formation = form_match(
+            &mut session,
+            discover_secs,
+            expect,
+            telemetry.as_ref(),
+            lobby.as_ref(),
+        )
+        .await?;
         anyhow::Ok((session, formation, telemetry))
     })?;
 

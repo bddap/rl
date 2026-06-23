@@ -650,8 +650,7 @@ struct TargetBall;
 /// ([`crate::training::session::CURRICULUM_REACH_RADIUS`]) — one source, in the
 /// always-compiled trainer — so the demo and curriculum can't drift apart on the
 /// radius. (0.8 m, as the doc above describes.)
-pub(crate) const DEMO_REACH_RADIUS: f32 =
-    crate::training::session::CURRICULUM_REACH_RADIUS;
+pub(crate) const DEMO_REACH_RADIUS: f32 = crate::training::session::CURRICULUM_REACH_RADIUS;
 
 /// Radius (m) of the demo target ball. Bigger than [`DEMO_REACH_RADIUS`] so the
 /// claw visibly reaches *into* the ball before it registers a reach and jumps —

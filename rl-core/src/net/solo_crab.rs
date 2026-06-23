@@ -271,11 +271,7 @@ impl Plugin for SoloCrabPlugin {
         // between fixed steps, and `+=`-ing the offset each of those frames would
         // accumulate and fling the rig away. Gated on Visuals — headless has no rendered
         // transforms to place.
-        if app
-            .world()
-            .get_resource::<Visuals>()
-            .is_some_and(|v| v.0)
-        {
+        if app.world().get_resource::<Visuals>().is_some_and(|v| v.0) {
             app.add_systems(
                 FixedUpdate,
                 offset_rendered_crab
@@ -616,10 +612,7 @@ pub fn run_headless_probe(
     });
     // Drive the sim AFTER the bridge integrates this step's walk, so each sim tick reads
     // the up-to-date crab position.
-    app.add_systems(
-        FixedUpdate,
-        probe_step.after(integrate_solo_crab),
-    );
+    app.add_systems(FixedUpdate, probe_step.after(integrate_solo_crab));
 
     // One physics tick + one sim tick per update.
     for _ in 0..ticks {

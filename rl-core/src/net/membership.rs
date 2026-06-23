@@ -1151,7 +1151,7 @@ mod tests {
         // "joiner can't GO" rule, in the type rather than in external channel wiring).
         let t0 = Instant::now();
         for mut m in [
-            Membership::new(eid(1), 1, t0),                          // timer barrier
+            Membership::new(eid(1), 1, t0), // timer barrier
             Membership::host_triggered(Role::Joiner, eid(1), 2, t0), // a joiner
         ] {
             m.set_starting();
@@ -1211,7 +1211,11 @@ mod tests {
             }
             t += 250;
         }
-        assert_eq!(froze.len(), 3, "all three must converge and freeze {{H,J,C}}");
+        assert_eq!(
+            froze.len(),
+            3,
+            "all three must converge and freeze {{H,J,C}}"
+        );
         assert!(
             join_at < STABLE_FOR.as_millis() as u64,
             "C must join within the settle window for this to test the rewind"
