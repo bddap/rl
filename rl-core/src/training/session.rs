@@ -892,6 +892,263 @@ impl TrainingState {
         let slice = &self.recent_rewards[start..];
         slice.iter().sum::<f32>() / slice.len() as f32
     }
+
+    /// Per env, finalize the PREVIOUS tick's pending transition with this tick's post-physics
+    /// pose (see [`Pending`] for the one-tick phasing), then stash this tick's action as the
+    /// next pending. On an episode end (terminal/truncation/rescue) push the transition, tally
+    /// stance + reach, log the episode, and reset the env (seeding its next target).
+    ///
+    /// The heart of `brain_step`: the only writer of [`Transition`]s and the per-env episode
+    /// lifecycle. Termination is survival guards only — jumping, flipping, and any other
+    /// strategy the policy invents are legitimate (owner call: emergent behaviour is the
+    /// point); the height band is sim sanity, not a behaviour bound.
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_transitions(
+        &mut self,
+        n: usize,
+        body: &BodyState,
+        min_tip_dists: &[Option<f32>],
+        obs_arrays: &[[f32; OBS_SIZE]],
+        action_arrays: &[[f32; ACTION_SIZE]],
+        values: &[NormalizedValue],
+        log_probs: &[f32],
+        efforts: &[f32],
+        rescued_envs: &[usize],
+        targets: &mut CrabTargets,
+        spawns: &CrabSpawns,
+        curriculum: Curriculum,
+    ) {
+        for e in 0..n {
+            // A pending exists only across a live recording stride, so an env that is
+            // settling (or whose crab is momentarily absent) has none to finalize and
+            // nothing to stash — the policy is holding the rest pose, not acting.
+            if matches!(self.envs[e].phase, EnvPhase::Settling { .. }) || body.poses[e].is_none() {
+                continue;
+            }
+
+            // Finalize the action chosen last tick using this tick's pose. Three
+            // outcomes: rescued (the action drove the body non-finite — a failure),
+            // true terminal (a survival guard tripped on the post-physics pose), or a
+            // normal step (continues / truncated-at-cap).
+            let episode_ended = if let Some(pending) = self.envs[e].pending.take() {
+                if rescued_envs.contains(&e) {
+                    // The pending action's result went non-finite and was force-
+                    // respawned this tick (rescue runs .before(Sense)), so the pose
+                    // read above is the FRESH spawn, not what the action produced.
+                    // Finalize the action as the episode's terminal step with NO reach
+                    // credit (`None`): the body teleported to spawn, so this tick's
+                    // claw-tip distance isn't the action's doing. The effort tax still
+                    // applies — it priced the COMMAND, not its result.
+                    let reward = compute_reward(None, pending.effort);
+                    self.rollouts[e].push(Transition {
+                        obs: pending.obs,
+                        action: pending.action,
+                        reward,
+                        value: pending.value,
+                        log_prob: pending.log_prob,
+                        end: StepEnd::Terminal,
+                    });
+                    let ep = &mut self.envs[e];
+                    ep.reward += reward;
+                    ep.steps += 1;
+                    // No finite pose to fold into the stance averages.
+                    true
+                } else {
+                    let (height, upright) =
+                        body.poses[e].expect("poses[e].is_none() handled above");
+                    // `height`/`upright` feed no reward (see `compute_reward`) — only the
+                    // off-reward machinery: `height` the blow-up/fell-through guard below and
+                    // the `mean_height` diagnostic, `upright` the stance diagnostics.
+                    let reward = compute_reward(min_tip_dists[e], pending.effort);
+                    // The blowup check only catches a genuine numerical explosion before the
+                    // solver NaNs and Rapier panics the whole app; the threshold is high
+                    // because direct torque is bounded (no acceleration-motor energy pump), so
+                    // ordinary vigorous, limb-flinging motion is legal — only a part moving at
+                    // clearly unphysical speed ends the episode. The height band is sim sanity
+                    // (clipped through the floor / left the playfield).
+                    let blowing_up = body.max_speeds[e] > 100.0 || !height.is_finite();
+                    let done = !(0.02..=50.0).contains(&height) || blowing_up;
+                    // The step cap is a TRUNCATION, not a failure: a crab still standing
+                    // at the cap was cut short, so GAE must bootstrap its value rather
+                    // than learn the cap is a dead end (see StepEnd::Truncated).
+                    let truncated = !done && self.envs[e].steps > 1500;
+
+                    let end = if done {
+                        StepEnd::Terminal
+                    } else if truncated {
+                        StepEnd::Truncated
+                    } else {
+                        StepEnd::Continues
+                    };
+                    self.rollouts[e].push(Transition {
+                        obs: pending.obs,
+                        action: pending.action,
+                        reward,
+                        value: pending.value,
+                        log_prob: pending.log_prob,
+                        end,
+                    });
+
+                    let ep = &mut self.envs[e];
+                    ep.reward += reward;
+                    ep.steps += 1;
+                    ep.height_sum += height;
+                    ep.upright_sum += upright;
+                    ep.sq_angvel_sum += body.sq_angvels[e];
+
+                    done || truncated
+                }
+            } else {
+                // No pending yet: the first recording tick of an episode only chooses
+                // an action (stashed below); its result, and thus its transition,
+                // arrives next tick.
+                false
+            };
+
+            // Stash this tick's action to finalize next tick — but only if the env is
+            // still recording (a just-ended env is resetting below, and a rescued env
+            // is being respawned). Settling/absent envs already `continue`d above.
+            if !episode_ended && matches!(self.envs[e].phase, EnvPhase::Recording) {
+                self.envs[e].pending = Some(Pending {
+                    obs: obs_arrays[e],
+                    action: action_arrays[e],
+                    value: values[e],
+                    log_prob: log_probs[e],
+                    effort: efforts[e],
+                });
+            }
+
+            if episode_ended {
+                let ep = &self.envs[e];
+                let ep_reward = ep.reward;
+                let ep_steps = ep.steps;
+                let ep_height = ep.height_sum / ep_steps.max(1) as f32;
+                let ep_upright = ep.upright_sum / ep_steps.max(1) as f32;
+                let ep_sq_angvel = ep.sq_angvel_sum / ep_steps.max(1) as f32;
+                // Did this episode reach the target — the curriculum's competence signal, read
+                // off the episode's closest-ever tip distance before the reset clears it.
+                // `None` (no finite tip all episode) and a blown-up episode that never got close
+                // both count as honest misses. A 3D radius (see [`dist_3d`]): a tip on the floor
+                // under a raised ball does not count.
+                let reached = ep.min_tip_dist.is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
+                // A rescued env was already despawned+respawned this tick by
+                // rescue_nonfinite_crabs (runs .before(Sense)); a second respawn from reset_crab
+                // would tear down that zero-tick-old fresh crab and rebuild an identical one. So
+                // the rescue path owns the reset: straight to `Settling` here, taking the grace
+                // itself, while a normal end goes to `AwaitingRespawn` for reset_crab to respawn.
+                self.envs[e] = EnvEpisode {
+                    phase: if rescued_envs.contains(&e) {
+                        EnvPhase::Settling {
+                            grace: RESET_GRACE_TICKS,
+                        }
+                    } else {
+                        EnvPhase::AwaitingRespawn
+                    },
+                    ..EnvEpisode::default()
+                };
+
+                // New episode → fresh target around this env's spawn slot from the current
+                // band, so the next episode poses a new target. Done here (the one place both
+                // the normal and rescue ends converge) so target life tracks episode life.
+                seed_target(targets, spawns, e, curriculum);
+
+                // Tally this finished episode's reach for the curriculum (drained per horizon
+                // to the learner, like the rewards just below).
+                self.reach_finished += 1;
+                if reached {
+                    self.reach_reached += 1;
+                }
+
+                self.recent_rewards.push(ep_reward);
+                self.episode_count += 1;
+                let avg = self.avg_reward(10);
+                let ep_count = self.episode_count;
+
+                self.logger.log_episode(
+                    ep_count,
+                    ep_reward,
+                    ep_steps,
+                    avg,
+                    ep_height,
+                    ep_upright,
+                    ep_sq_angvel,
+                );
+
+                if self.episode_count.is_multiple_of(10) {
+                    let elapsed = self.last_log_time.elapsed().as_secs_f32();
+                    let total_transitions =
+                        self.total_steps * n as u64 + (e as u64 + 1).min(n as u64);
+                    let sps = if elapsed > 0.0 {
+                        total_transitions as f32 / elapsed
+                    } else {
+                        0.0
+                    };
+                    let buffered: usize = self.rollouts.iter().map(|b| b.len()).sum();
+                    // Σω² is telemetry only — never enters the reward. (The other
+                    // labels spell out their scope inline.)
+                    info!(
+                        "Ep {} | avg reward(10): {:.2} | last ep (1 env): {} steps, height {:.2}, upright {:.2}, Σω² {:.0} | buffer {} | {:.0} steps/s (lifetime avg)",
+                        self.episode_count,
+                        avg,
+                        ep_steps,
+                        ep_height,
+                        ep_upright,
+                        ep_sq_angvel,
+                        buffered,
+                        sps,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Accumulate this tick's carapace drift-from-spawn over RECORDING envs (one sample each)
+    /// into the horizon's walking diagnostic (see `drift_sum`). Recording-only, so a settle
+    /// pose can't masquerade as a cold policy's ~0 reach.
+    fn accumulate_drift(&mut self, drifts: &[Option<f32>]) {
+        for (e, drift) in drifts.iter().enumerate() {
+            if matches!(self.envs[e].phase, EnvPhase::Recording)
+                && let Some(d) = *drift
+                && d.is_finite()
+            {
+                self.drift_sum += d as f64;
+                self.drift_count += 1;
+            }
+        }
+    }
+}
+
+/// Effort/tax/reach probe (RL_LOG_EFFORT only — inert otherwise): per tick, the mean raw-action
+/// effort `Σ|a|³`, the resulting tax `EFFORT_WEIGHT·effort`, and the reach term, over the live
+/// RECORDING envs. Lets a calibration run read how big a bite the tax takes out of the
+/// (reach-only) positive reward at the current weight, without parsing rollouts.
+///
+/// Calibration diagnostic, ONE tick skewed: mean_tax is tick-`t`'s command while mean_reach is
+/// tick-`t`'s pose (the result of the LAST action), so read the ratio as a magnitude check, not
+/// as exactly-aligned same-action terms.
+fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32], min_tip_dists: &[Option<f32>]) {
+    if std::env::var_os("RL_LOG_EFFORT").is_none() {
+        return;
+    }
+    let mut count = 0usize;
+    let mut effort_sum = 0.0f32;
+    let mut reach_sum = 0.0f32;
+    for (e, ep) in envs.iter().enumerate() {
+        if matches!(ep.phase, EnvPhase::Recording) {
+            count += 1;
+            effort_sum += efforts[e];
+            reach_sum += reach_bonus(min_tip_dists[e]);
+        }
+    }
+    if count > 0 {
+        let mean_effort = effort_sum / count as f32;
+        info!(
+            "EFFORTLOG n={count} mean_effort={mean_effort:.3} \
+             mean_tax={:.4} mean_reach={:.4}",
+            EFFORT_WEIGHT * mean_effort,
+            reach_sum / count as f32,
+        );
+    }
 }
 
 /// The learner's PPO update over all K·M rollout buffers.
@@ -1786,6 +2043,214 @@ fn compute_reward(min_tip_dist: Option<f32>, effort: f32) -> f32 {
     reach_bonus(min_tip_dist) - EFFORT_WEIGHT * effort
 }
 
+/// One env's sampled action for this tick: the ±1-clamped command the sim runs, the RAW
+/// pre-clamp output the effort tax is taken over (see [`action_effort`]), and the sampling
+/// log-prob (NaN/Inf-guarded and clamped). One row of [`sample_actions`].
+struct SampledAction {
+    /// Command sent to the sim — each output clamped to ±1.
+    action: [f32; ACTION_SIZE],
+    /// Pre-clamp output, kept only for the effort tax over the unbounded value.
+    raw_action: [f32; ACTION_SIZE],
+    log_prob: f32,
+}
+
+/// Per-env body state read off this tick's post-physics poses (the live `s_{t+1}`). Every
+/// field is off-reward: poses/speeds feed the survival guards and stance diagnostics, drift
+/// the walking diagnostic — none enters [`compute_reward`]. `None` for an env whose crab is
+/// momentarily absent (mid-respawn).
+struct BodyState {
+    /// `(carapace height, up·Y uprightness)`, the survival-guard + stance inputs.
+    poses: Vec<Option<(f32, f32)>>,
+    /// Carapace planar (XZ) distance from spawn — the walking diagnostic.
+    drifts: Vec<Option<f32>>,
+    /// Fastest body part (limbs blow up first), linear-scaled — the blow-up guard input.
+    max_speeds: Vec<f32>,
+    /// Σω² over body parts — the angular-energy stance diagnostic.
+    sq_angvels: Vec<f32>,
+}
+
+/// Normalize every env's observation, feeding the shared running stats (and, in worker mode,
+/// the per-horizon increment the thread ships back — see [`TrainingState::normalizer_increment`]).
+/// Returns one normalized row per env, the forward pass's input.
+fn normalize_observations(training: &mut TrainingState, obs: &CrabObservation) -> Vec<[f32; OBS_SIZE]> {
+    let n = training.envs.len();
+    let mut obs_arrays: Vec<[f32; OBS_SIZE]> = Vec::with_capacity(n);
+    for e in 0..n {
+        let normalized = training.obs_normalizer.normalize(&obs.envs[e]);
+        if let Some(inc) = training.normalizer_increment.as_mut() {
+            inc.observe(&obs.envs[e]);
+        }
+        obs_arrays.push(normalized);
+    }
+    obs_arrays
+}
+
+/// ONE batched forward pass for all `n` envs: `[n, OBS_SIZE]` through the trunk once — this is
+/// what makes N crabs cheaper than N apps. Returns each env's policy-mean row, the shared
+/// `log_std`, and each value. Value-head outputs enter the type system as [`NormalizedValue`]
+/// HERE (the single wrap point), so every stored value is in the head's normalized space.
+///
+/// `skip_nn` (bench mode) runs no network: the zeros it returns are irrelevant — the bench
+/// isolates physics + overhead, and the cheap sampling below still runs on them.
+fn forward_pass(
+    training: &TrainingState,
+    obs_arrays: &[[f32; OBS_SIZE]],
+) -> (Vec<Tensor<NdArray, 1>>, Tensor<NdArray, 1>, Vec<NormalizedValue>) {
+    let n = obs_arrays.len();
+    let device = training.device;
+    if training.skip_nn {
+        let z = Tensor::<NdArray, 1>::zeros([ACTION_SIZE], &device);
+        return (vec![z.clone(); n], z, vec![NormalizedValue(0.0); n]);
+    }
+    let inference_brain = training.brain.valid();
+    let flat: Vec<f32> = obs_arrays.iter().flat_map(|a| a.iter().copied()).collect();
+    let obs_batch =
+        Tensor::<NdArray, 2>::from_data(burn::tensor::TensorData::new(flat, [n, OBS_SIZE]), &device);
+    let (means_batch, log_std) = inference_brain.policy(obs_batch.clone());
+    let values: Vec<NormalizedValue> = inference_brain
+        .value(obs_batch)
+        .flatten::<1>(0, 1)
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap()
+        .into_iter()
+        .map(NormalizedValue)
+        .collect();
+    let means_rows = (0..n)
+        .map(|e| {
+            means_batch
+                .clone()
+                .slice([e..e + 1, 0..ACTION_SIZE])
+                .flatten(0, 1)
+        })
+        .collect();
+    (means_rows, log_std, values)
+}
+
+/// Sample one action per env from its policy mean and the shared `log_std`, with the NaN/Inf
+/// guards the live solver needs: a non-finite log-prob becomes 0 (else clamped to ±20), and
+/// any non-finite output element zeroes that element (warning once for the row). The kept RAW
+/// output feeds the effort tax; the ±1 clamp is what the sim runs.
+fn sample_actions(
+    means_rows: &[Tensor<NdArray, 1>],
+    log_std: &Tensor<NdArray, 1>,
+    device: &NdArrayDevice,
+) -> Vec<SampledAction> {
+    means_rows
+        .iter()
+        .map(|means| {
+            let action_tensor = sample_action(means, log_std, device);
+            let log_prob = compute_log_prob(means, log_std, &action_tensor);
+            let log_prob = if log_prob.is_nan() || log_prob.is_infinite() {
+                0.0
+            } else {
+                log_prob.clamp(-20.0, 20.0)
+            };
+
+            let action_data: Vec<f32> = action_tensor.to_data().to_vec().unwrap();
+            let mut action = [0.0f32; ACTION_SIZE];
+            let mut raw_action = [0.0f32; ACTION_SIZE];
+            let mut has_nan = false;
+            for (i, &v) in action_data.iter().enumerate().take(ACTION_SIZE) {
+                if v.is_nan() || v.is_infinite() {
+                    has_nan = true;
+                    action[i] = 0.0;
+                    raw_action[i] = 0.0;
+                } else {
+                    raw_action[i] = v;
+                    action[i] = v.clamp(-1.0, 1.0);
+                }
+            }
+            if has_nan {
+                warn!("NaN/Inf detected in NN output, clamping to zero");
+            }
+            SampledAction {
+                action,
+                raw_action,
+                log_prob,
+            }
+        })
+        .collect()
+}
+
+/// Gather each env's [`BodyState`] from this tick's post-physics poses/velocities. Computed
+/// from queries already in hand (no extra reads). Rapier writes each parentless link's world
+/// pose straight into `Transform` every FixedUpdate tick, so these are the live `s_{t+1}`
+/// readings, in phase with the deferred transition (`GlobalTransform` would be PostUpdate-stale).
+fn gather_body_state(
+    n: usize,
+    spawns: &CrabSpawns,
+    carapace_q: &Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
+    parts_q: &Query<(&CrabEnvId, &bevy_rapier3d::prelude::Velocity), With<CrabBodyPart>>,
+) -> BodyState {
+    let mut poses: Vec<Option<(f32, f32)>> = vec![None; n];
+    let mut drifts: Vec<Option<f32>> = vec![None; n];
+    for (env, transform) in carapace_q.iter() {
+        if let Some(p) = poses.get_mut(env.0) {
+            let up = transform.rotation * Vec3::Y;
+            *p = Some((transform.translation.y, up.dot(Vec3::Y)));
+        }
+        if let Some(d) = drifts.get_mut(env.0) {
+            let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
+            *d = Some(planar_dist(transform.translation, origin));
+        }
+    }
+    // Fastest body part per env — limbs, not the carapace, blow up first (tiny eye-stalk
+    // balls + acceleration motors), so the blowup guard must watch every body. NaN poisons
+    // the max, so fold it in as +inf.
+    let mut max_speeds: Vec<f32> = vec![0.0; n];
+    let mut sq_angvels: Vec<f32> = vec![0.0; n];
+    for (env, vel) in parts_q.iter() {
+        if let Some(m) = max_speeds.get_mut(env.0) {
+            let lin = vel.linear.length();
+            let ang = vel.angular.length();
+            let s = if lin.is_finite() && ang.is_finite() {
+                // Angular blowups (rad/s) run ~3x the linear scale before the solver NaNs;
+                // fold both into one number on the linear scale.
+                lin.max(ang / 3.0)
+            } else {
+                f32::INFINITY
+            };
+            *m = m.max(s);
+            // Non-finite ω is the blowup guard's problem, not the tax's.
+            if ang.is_finite() {
+                sq_angvels[env.0] += ang * ang;
+            }
+        }
+    }
+    BodyState {
+        poses,
+        drifts,
+        max_speeds,
+        sq_angvels,
+    }
+}
+
+/// Closest claw-tip→target 3D distance per env this tick (the reach reward's `d`, see
+/// [`dist_3d`]), folded over both claw tips. `None` when the env has no target or no claw tip
+/// this tick (mid-respawn); a non-finite tip is skipped, not folded as a spurious hit.
+fn closest_tip_dists(
+    n: usize,
+    targets: &CrabTargets,
+    claw_tips_q: &Query<(&CrabEnvId, &Transform), With<CrabClawTip>>,
+) -> Vec<Option<f32>> {
+    let mut min_tip_dists: Vec<Option<f32>> = vec![None; n];
+    for (env, tip) in claw_tips_q.iter() {
+        let Some(slot) = min_tip_dists.get_mut(env.0) else {
+            continue;
+        };
+        let Some(target) = targets.get(env.0) else {
+            continue;
+        };
+        if !tip.translation.is_finite() {
+            continue;
+        }
+        let d = dist_3d(tip.translation, target);
+        *slot = Some(slot.map_or(d, |cur| cur.min(d)));
+    }
+    min_tip_dists
+}
+
 /// System: runs the brain to produce actions each physics step.
 #[allow(clippy::too_many_arguments)]
 pub fn brain_step(
@@ -1811,102 +2276,22 @@ pub fn brain_step(
         return;
     }
     let device = training.device;
-    // The horizon's curriculum band (Copy), captured before the heavy per-env borrows
-    // below so both `seed_target` calls sample from the same band the learner set this
-    // horizon — one band per horizon, identical for the lazy first-episode seed and
-    // every reset.
+    // The horizon's curriculum band (Copy), captured before the per-env borrows below so
+    // both `seed_target` paths sample from the same band the learner set this horizon —
+    // one band per horizon, identical for the lazy first-episode seed and every reset.
     let curriculum = training.curriculum;
 
-    // Normalize every env's observation (each row also updates the shared
-    // running stats — N envs feed the same normalizer, just more samples). In
-    // worker mode the SAME raw rows feed a per-horizon increment accumulator, so
-    // the thread ships only this horizon's samples (the master's baseline, already
-    // on the learner, is never re-merged — see `normalizer_increment`).
-    let mut obs_arrays: Vec<[f32; OBS_SIZE]> = Vec::with_capacity(n);
-    for e in 0..n {
-        let normalized = training.obs_normalizer.normalize(&obs.envs[e]);
-        if let Some(inc) = training.normalizer_increment.as_mut() {
-            inc.observe(&obs.envs[e]);
-        }
-        obs_arrays.push(normalized);
-    }
+    // Sense → Think: normalize, one batched forward pass, sample an action per env.
+    let obs_arrays = normalize_observations(&mut training, &obs);
+    let (means_rows, log_std, values) = forward_pass(&training, &obs_arrays);
+    let sampled = sample_actions(&means_rows, &log_std, &device);
 
-    // ONE batched forward pass for all envs: [n, OBS_SIZE] through the trunk
-    // once — this is what makes N crabs cheaper than N apps. The value head's raw
-    // outputs enter the type system as `NormalizedValue` HERE, the single wrap point,
-    // so every value stored on a `Transition` is in the head's normalized space.
-    let (means_rows, log_std, values): (
-        Vec<Tensor<NdArray, 1>>,
-        Tensor<NdArray, 1>,
-        Vec<NormalizedValue>,
-    ) = if training.skip_nn {
-        // Bench mode: no forward pass. The sampling below is cheap and what
-        // it produces is irrelevant — we are isolating physics + overhead.
-        let z = Tensor::<NdArray, 1>::zeros([ACTION_SIZE], &device);
-        (vec![z.clone(); n], z, vec![NormalizedValue(0.0); n])
-    } else {
-        let inference_brain = training.brain.valid();
-        let flat: Vec<f32> = obs_arrays.iter().flat_map(|a| a.iter().copied()).collect();
-        let obs_batch = Tensor::<NdArray, 2>::from_data(
-            burn::tensor::TensorData::new(flat, [n, OBS_SIZE]),
-            &device,
-        );
-        let (means_batch, log_std) = inference_brain.policy(obs_batch.clone());
-        let values: Vec<NormalizedValue> = inference_brain
-            .value(obs_batch)
-            .flatten::<1>(0, 1)
-            .to_data()
-            .to_vec::<f32>()
-            .unwrap()
-            .into_iter()
-            .map(NormalizedValue)
-            .collect();
-        let means_rows = (0..n)
-            .map(|e| {
-                means_batch
-                    .clone()
-                    .slice([e..e + 1, 0..ACTION_SIZE])
-                    .flatten(0, 1)
-            })
-            .collect();
-        (means_rows, log_std, values)
-    };
+    let action_arrays: Vec<[f32; ACTION_SIZE]> = sampled.iter().map(|s| s.action).collect();
+    let log_probs: Vec<f32> = sampled.iter().map(|s| s.log_prob).collect();
+    // Effort tax (the reward's tax summand) is taken over the RAW pre-clamp outputs, per
+    // env (see `action_effort`).
+    let efforts: Vec<f32> = sampled.iter().map(|s| action_effort(&s.raw_action)).collect();
 
-    // Per-env action sampling + NaN guards.
-    let mut action_arrays: Vec<[f32; ACTION_SIZE]> = Vec::with_capacity(n);
-    // Raw (pre-clamp) actions, kept only to compute the effort tax over the unbounded
-    // output rather than the ±1-clamped value the sim runs (see `action_effort`).
-    let mut raw_action_arrays: Vec<[f32; ACTION_SIZE]> = Vec::with_capacity(n);
-    let mut log_probs: Vec<f32> = Vec::with_capacity(n);
-    for means in &means_rows {
-        let action_tensor = sample_action(means, &log_std, &device);
-        let log_prob = compute_log_prob(means, &log_std, &action_tensor);
-        log_probs.push(if log_prob.is_nan() || log_prob.is_infinite() {
-            0.0
-        } else {
-            log_prob.clamp(-20.0, 20.0)
-        });
-
-        let action_data: Vec<f32> = action_tensor.to_data().to_vec().unwrap();
-        let mut action_array = [0.0f32; ACTION_SIZE];
-        let mut raw_action_array = [0.0f32; ACTION_SIZE];
-        let mut has_nan = false;
-        for (i, &v) in action_data.iter().enumerate().take(ACTION_SIZE) {
-            if v.is_nan() || v.is_infinite() {
-                has_nan = true;
-                action_array[i] = 0.0;
-                raw_action_array[i] = 0.0;
-            } else {
-                raw_action_array[i] = v;
-                action_array[i] = v.clamp(-1.0, 1.0);
-            }
-        }
-        if has_nan {
-            warn!("NaN/Inf detected in NN output, clamping to zero");
-        }
-        action_arrays.push(action_array);
-        raw_action_arrays.push(raw_action_array);
-    }
     actions.envs.copy_from_slice(&action_arrays);
     // Settling envs hold the rest pose (action 0); the policy takes over at
     // step 0 of the new episode.
@@ -1918,46 +2303,9 @@ pub fn brain_step(
         }
     }
 
-    // Gather per-env body state: carapace pose + mean eye-tip height. `drifts[e]` is
-    // the carapace's planar (XZ) distance from its spawn origin — the diagnostic that
-    // shows walking emerge (it climbs from ~0 as the policy learns to set off), folded
-    // into the per-iter learner log. Computed from state already in hand (no extra
-    // query), and only consumed for recording envs below.
-    let mut poses: Vec<Option<(f32, f32)>> = vec![None; n]; // (height, upright)
-    let mut drifts: Vec<Option<f32>> = vec![None; n];
-    for (env, transform) in carapace_q.iter() {
-        if let Some(p) = poses.get_mut(env.0) {
-            let up = transform.rotation * Vec3::Y;
-            *p = Some((transform.translation.y, up.dot(Vec3::Y)));
-        }
-        if let Some(d) = drifts.get_mut(env.0) {
-            let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
-            *d = Some(planar_dist(transform.translation, origin));
-        }
-    }
-    // Fastest body part per env — limbs, not the carapace, blow up first (tiny
-    // eye-stalk balls + acceleration motors), so the blowup guard must watch
-    // every body. NaN poisons the max, so fold it in as +inf.
-    let mut max_speeds: Vec<f32> = vec![0.0; n];
-    let mut sq_angvels: Vec<f32> = vec![0.0; n];
-    for (env, vel) in parts_q.iter() {
-        if let Some(m) = max_speeds.get_mut(env.0) {
-            let lin = vel.linear.length();
-            let ang = vel.angular.length();
-            let s = if lin.is_finite() && ang.is_finite() {
-                // Angular blowups (rad/s) run ~3x the linear scale before the
-                // solver NaNs; fold both into one number on the linear scale.
-                lin.max(ang / 3.0)
-            } else {
-                f32::INFINITY
-            };
-            *m = m.max(s);
-            // Non-finite ω is the blowup guard's problem, not the tax's.
-            if ang.is_finite() {
-                sq_angvels[env.0] += ang * ang;
-            }
-        }
-    }
+    let body = gather_body_state(n, &spawns, &carapace_q, &parts_q);
+    // Dead: `eyes_q`/`eye_sums` are computed but never read (see rl#62 follow-up); kept
+    // verbatim so `brain_step`'s system params stay byte-identical to the live path.
     let mut eye_sums: Vec<(f32, u32)> = vec![(0.0, 0); n];
     for (env, eye) in eyes_q.iter() {
         if let Some(s) = eye_sums.get_mut(env.0) {
@@ -1965,6 +2313,7 @@ pub fn brain_step(
             s.1 += 1;
         }
     }
+
     // Lazily seed the FIRST episode's target for any env still without one (envs
     // start Recording with no target; episode-end reset seeds every subsequent one).
     // Training-only by construction: only `brain_step` runs here, so the demo's
@@ -1975,28 +2324,7 @@ pub fn brain_step(
         }
     }
 
-    // Closest claw-tip-to-target distance per env (the reach reward's `d`, see
-    // [`dist_3d`]), folded over both claw tips. A crab link is parentless (only a
-    // MultibodyJoint, no Bevy child-of), so Rapier writes its world pose straight into
-    // `Transform` each FixedUpdate tick — that is the live `s_{t+1}` reading, in phase with
-    // the deferred transition, like the carapace pose above. (GlobalTransform would be
-    // stale: it only resyncs in PostUpdate, frozen across the many FixedUpdate ticks per
-    // frame the headless clock runs.) None when the env has no target or no claw tip this
-    // tick (mid-respawn). A non-finite tip is skipped, not folded as a spurious hit.
-    let mut min_tip_dists: Vec<Option<f32>> = vec![None; n];
-    for (env, tip) in claw_tips_q.iter() {
-        let Some(slot) = min_tip_dists.get_mut(env.0) else {
-            continue;
-        };
-        let Some(target) = targets.get(env.0) else {
-            continue;
-        };
-        if !tip.translation.is_finite() {
-            continue;
-        }
-        let d = dist_3d(tip.translation, target);
-        *slot = Some(slot.map_or(d, |cur| cur.min(d)));
-    }
+    let min_tip_dists = closest_tip_dists(n, &targets, &claw_tips_q);
     // Fold this tick's closest tip distance into each RECORDING env's episode minimum —
     // the curriculum's competence signal. Recording-only: a Settling env already holds
     // the NEXT episode's target (seeded at reset), so crediting its settle-pose distances
@@ -2009,8 +2337,6 @@ pub fn brain_step(
             ep.min_tip_dist = Some(ep.min_tip_dist.map_or(d, |cur| cur.min(d)));
         }
     }
-    // Commanded effort this step (the reward's tax summand), per env (see `action_effort`).
-    let efforts: Vec<f32> = raw_action_arrays.iter().map(action_effort).collect();
 
     // ONE far target per episode: seeded at reset (and lazily above for the first episode)
     // and then held FIXED — no mid-episode resample on reach. The reward is a pure distance
@@ -2019,236 +2345,25 @@ pub fn brain_step(
     // reach radius forever rather than touch. With a fixed goal the crab instead walks up
     // and settles at d≈0, where the reach term peaks — so full reaching is the optimum.
 
-    // Per-env: finalize the PREVIOUS tick's pending transition with this tick's
-    // post-physics pose (see [`Pending`] for the one-tick phasing), then stash this tick's
-    // action as the next pending. Termination is judged on the same post-physics pose.
-    for e in 0..n {
-        // A pending exists only across a live recording stride, so an env that is
-        // settling (or whose crab is momentarily absent) has none to finalize and
-        // nothing to stash — the policy is holding the rest pose, not acting.
-        if matches!(training.envs[e].phase, EnvPhase::Settling { .. }) || poses[e].is_none() {
-            continue;
-        }
+    // Act → record: finalize last tick's pending transition against this tick's pose, stash
+    // this tick's, and roll over any episode that ended. The sole writer of `Transition`s.
+    training.finalize_transitions(
+        n,
+        &body,
+        &min_tip_dists,
+        &obs_arrays,
+        &action_arrays,
+        &values,
+        &log_probs,
+        &efforts,
+        &rescued_envs,
+        &mut targets,
+        &spawns,
+        curriculum,
+    );
 
-        // Finalize the action chosen last tick using this tick's pose. Three
-        // outcomes: rescued (the action drove the body non-finite — a failure),
-        // true terminal (a survival guard tripped on the post-physics pose), or a
-        // normal step (continues / truncated-at-cap).
-        let episode_ended = if let Some(pending) = training.envs[e].pending.take() {
-            if rescued_envs.contains(&e) {
-                // The pending action's result went non-finite and was force-
-                // respawned this tick (rescue runs .before(Sense)), so the pose
-                // read above is the FRESH spawn, not what the action produced.
-                // Finalize the action as the episode's terminal step with NO reach
-                // credit (`None`): the body teleported to spawn, so this tick's
-                // claw-tip distance isn't the action's doing. The effort tax still
-                // applies — it priced the COMMAND, not its result.
-                let reward = compute_reward(None, pending.effort);
-                training.rollouts[e].push(Transition {
-                    obs: pending.obs,
-                    action: pending.action,
-                    reward,
-                    value: pending.value,
-                    log_prob: pending.log_prob,
-                    end: StepEnd::Terminal,
-                });
-                let ep = &mut training.envs[e];
-                ep.reward += reward;
-                ep.steps += 1;
-                // No finite pose to fold into the stance averages.
-                true
-            } else {
-                let (height, upright) = poses[e].expect("poses[e].is_none() handled above");
-                // `height`/`upright` feed no reward (see `compute_reward`) — only the
-                // off-reward machinery: `height` the blow-up/fell-through guard below and
-                // the `mean_height` diagnostic, `upright` the stance diagnostics.
-                let reward = compute_reward(min_tip_dists[e], pending.effort);
-                // Termination is survival guards only — jumping, flipping, and
-                // any other strategy the policy invents are legitimate solutions
-                // (owner call: emergent behavior is the point). The height band
-                // is sim sanity (clipped through the floor / left the playfield),
-                // not a behavior bound. The blowup check only catches a genuine
-                // numerical explosion before the solver NaNs and Rapier panics the
-                // whole app; the threshold is high because direct torque is bounded
-                // (no acceleration-motor energy pump), so ordinary vigorous,
-                // limb-flinging motion is legal — only a part moving at clearly
-                // unphysical speed ends the episode.
-                let blowing_up = max_speeds[e] > 100.0 || !height.is_finite();
-                let done = !(0.02..=50.0).contains(&height) || blowing_up;
-                // The step cap is a TRUNCATION, not a failure: a crab still standing
-                // at the cap was cut short, so GAE must bootstrap its value rather
-                // than learn the cap is a dead end (see StepEnd::Truncated).
-                let truncated = !done && training.envs[e].steps > 1500;
-
-                let end = if done {
-                    StepEnd::Terminal
-                } else if truncated {
-                    StepEnd::Truncated
-                } else {
-                    StepEnd::Continues
-                };
-                training.rollouts[e].push(Transition {
-                    obs: pending.obs,
-                    action: pending.action,
-                    reward,
-                    value: pending.value,
-                    log_prob: pending.log_prob,
-                    end,
-                });
-
-                let ep = &mut training.envs[e];
-                ep.reward += reward;
-                ep.steps += 1;
-                ep.height_sum += height;
-                ep.upright_sum += upright;
-                ep.sq_angvel_sum += sq_angvels[e];
-
-                done || truncated
-            }
-        } else {
-            // No pending yet: the first recording tick of an episode only chooses
-            // an action (stashed below); its result, and thus its transition,
-            // arrives next tick.
-            false
-        };
-
-        // Stash this tick's action to finalize next tick — but only if the env is
-        // still recording (a just-ended env is resetting below, and a rescued env
-        // is being respawned). Settling/absent envs already `continue`d above.
-        if !episode_ended && matches!(training.envs[e].phase, EnvPhase::Recording) {
-            training.envs[e].pending = Some(Pending {
-                obs: obs_arrays[e],
-                action: action_arrays[e],
-                value: values[e],
-                log_prob: log_probs[e],
-                effort: efforts[e],
-            });
-        }
-
-        if episode_ended {
-            let ep = &training.envs[e];
-            let ep_reward = ep.reward;
-            let ep_steps = ep.steps;
-            let ep_height = ep.height_sum / ep_steps.max(1) as f32;
-            let ep_upright = ep.upright_sum / ep_steps.max(1) as f32;
-            let ep_sq_angvel = ep.sq_angvel_sum / ep_steps.max(1) as f32;
-            // Did this episode reach the target — the curriculum's competence signal, read
-            // off the episode's closest-ever tip distance before the reset clears it.
-            // `None` (no finite tip all episode) and a blown-up episode that never got close
-            // both count as honest misses. A 3D radius (see [`dist_3d`]): a tip on the floor
-            // under a raised ball does not count.
-            let reached = ep.min_tip_dist.is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
-            // A rescued env was already despawned+respawned this tick by
-            // rescue_nonfinite_crabs (runs .before(Sense)); a second respawn from reset_crab
-            // would tear down that zero-tick-old fresh crab and rebuild an identical one. So
-            // the rescue path owns the reset: straight to `Settling` here, taking the grace
-            // itself, while a normal end goes to `AwaitingRespawn` for reset_crab to respawn.
-            training.envs[e] = EnvEpisode {
-                phase: if rescued_envs.contains(&e) {
-                    EnvPhase::Settling {
-                        grace: RESET_GRACE_TICKS,
-                    }
-                } else {
-                    EnvPhase::AwaitingRespawn
-                },
-                ..EnvEpisode::default()
-            };
-
-            // New episode → fresh target around this env's spawn slot from the current
-            // band, so the next episode poses a new target. Done here (the one place both
-            // the normal and rescue ends converge) so target life tracks episode life.
-            seed_target(&mut targets, &spawns, e, curriculum);
-
-            // Tally this finished episode's reach for the curriculum (drained per horizon
-            // to the learner, like the rewards just below).
-            training.reach_finished += 1;
-            if reached {
-                training.reach_reached += 1;
-            }
-
-            training.recent_rewards.push(ep_reward);
-            training.episode_count += 1;
-            let avg = training.avg_reward(10);
-            let ep_count = training.episode_count;
-
-            training.logger.log_episode(
-                ep_count,
-                ep_reward,
-                ep_steps,
-                avg,
-                ep_height,
-                ep_upright,
-                ep_sq_angvel,
-            );
-
-            if training.episode_count.is_multiple_of(10) {
-                let elapsed = training.last_log_time.elapsed().as_secs_f32();
-                let total_transitions =
-                    training.total_steps * n as u64 + (e as u64 + 1).min(n as u64);
-                let sps = if elapsed > 0.0 {
-                    total_transitions as f32 / elapsed
-                } else {
-                    0.0
-                };
-                let buffered: usize = training.rollouts.iter().map(|b| b.len()).sum();
-                // Σω² is telemetry only — never enters the reward. (The other
-                // labels spell out their scope inline.)
-                info!(
-                    "Ep {} | avg reward(10): {:.2} | last ep (1 env): {} steps, height {:.2}, upright {:.2}, Σω² {:.0} | buffer {} | {:.0} steps/s (lifetime avg)",
-                    training.episode_count,
-                    avg,
-                    ep_steps,
-                    ep_height,
-                    ep_upright,
-                    ep_sq_angvel,
-                    buffered,
-                    sps,
-                );
-            }
-        }
-    }
-
-    // Effort/tax/reach probe (RL_LOG_EFFORT only — inert otherwise): per tick, the mean
-    // raw-action effort `Σ|a|³`, the resulting tax `EFFORT_WEIGHT·effort`, and the reach
-    // term, over the live RECORDING envs. Lets a calibration run read how big a bite the
-    // tax takes out of the (reach-only) positive reward at the current weight, without
-    // parsing rollouts.
-    // Calibration diagnostic, ONE tick skewed: mean_tax is tick-`t`'s command while
-    // mean_reach is tick-`t`'s pose (the result of the LAST action), so read the ratio
-    // as a magnitude check, not as exactly-aligned same-action terms.
-    if std::env::var_os("RL_LOG_EFFORT").is_some() {
-        let mut count = 0usize;
-        let mut effort_sum = 0.0f32;
-        let mut reach_sum = 0.0f32;
-        for e in 0..n {
-            if matches!(training.envs[e].phase, EnvPhase::Recording) {
-                count += 1;
-                effort_sum += efforts[e];
-                reach_sum += reach_bonus(min_tip_dists[e]);
-            }
-        }
-        if count > 0 {
-            let mean_effort = effort_sum / count as f32;
-            info!(
-                "EFFORTLOG n={count} mean_effort={mean_effort:.3} \
-                 mean_tax={:.4} mean_reach={:.4}",
-                EFFORT_WEIGHT * mean_effort,
-                reach_sum / count as f32,
-            );
-        }
-    }
-
-    // Drift diagnostic: one sample per RECORDING env this tick (see `drift_sum`).
-    // Recording-only, so a settle pose can't masquerade as a cold policy's ~0 reach.
-    for (e, drift) in drifts.iter().enumerate() {
-        if matches!(training.envs[e].phase, EnvPhase::Recording)
-            && let Some(d) = *drift
-            && d.is_finite()
-        {
-            training.drift_sum += d as f64;
-            training.drift_count += 1;
-        }
-    }
+    log_effort_probe(&training.envs, &efforts, &min_tip_dists);
+    training.accumulate_drift(&body.drifts);
 
     training.total_steps += 1;
 
