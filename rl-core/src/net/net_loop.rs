@@ -331,7 +331,11 @@ pub struct Frozen {
 pub enum Formation {
     /// The membership barrier agreed on a roster; play networked over it.
     Agreed(Frozen),
-    /// Discovery completed with only us live; play solo (see the module rl#47 note).
+    /// Formation ended with only us live — play solo. Two routes, both genuinely-alone (a
+    /// peer present-and-live at the moment of decision keeps us on the barrier, never here):
+    /// the `discover_secs` deadline elapsed never having heard a peer (rl#47), or the
+    /// JOIN_WINDOW expired with `live == 1` (rl#55 — the `discover_secs >= JOIN_WINDOW` case,
+    /// or a phantom that beat once then expired). See the [`run_barrier`] fallback notes.
     Alone,
     /// The player cancelled the host-triggered lobby before a match formed (rl#58). The
     /// caller tears the session down and reports [`MatchResult::Cancelled`].
@@ -462,22 +466,25 @@ enum BarrierResult {
 ///   solo round. This closes the skewed-two-peer regression a reviewer flagged — a peer we
 ///   ever reached must not be silently dropped into single-player.
 ///
-/// What this does NOT solve (product calls, not barrier bugs):
-/// - If two co-launched peers NEVER hear each other within their windows (both genuinely
-///   see an empty LAN — slow/no mDNS), both solo independently. That residual is inherent
-///   to a unilateral solo decision with no "we agree nobody's here" exchange; `discover_secs`
-///   is the knob that shrinks it, and rl#47's intent ("one launcher, always playable")
-///   favors playing solo over a hard fail when discovery genuinely finds nobody.
-/// - A stale endpoint that beats ONCE then dies latches `ever_heard_peer`, so a genuinely-
-///   alone launch next to a lingering phantom gets the loud `Failed` (relaunch) instead of
-///   a solo round. Conservative by design — the same "heard ⇒ not alone" stance that closes
-///   the heard-then-lost split — and rare (it needs another endpoint to have been on the LAN
-///   recently); distinguishing a phantom from a real lost peer would reopen that split.
+/// What this does NOT solve (a product call, not a barrier bug): if two co-launched peers
+/// NEVER hear each other within their windows (both genuinely see an empty LAN — slow/no
+/// mDNS), both solo independently. That residual is inherent to a unilateral solo decision
+/// with no "we agree nobody's here" exchange; `discover_secs` is the knob that shrinks it,
+/// and rl#47's intent ("one launcher, always playable") favors playing solo over a hard fail
+/// when discovery genuinely finds nobody.
 ///
-/// `discover_secs` MUST stay below [`crate::net::membership::JOIN_WINDOW`]: the fallback can
-/// only fire while `poll` still returns `Forming`, so a `discover_secs >= JOIN_WINDOW` would
-/// let a genuinely-alone peer hit `Failed` first and never solo. The defaults (4s vs 20s)
-/// hold this with wide margin.
+/// rl#55 timeout fallback: the `Forming`-arm check above only fires while `discover_secs <
+/// [`crate::net::membership::JOIN_WINDOW`]` (it needs `poll` to still return `Forming`). The
+/// genuinely-alone case where `discover_secs >= JOIN_WINDOW` — or where a phantom that beat
+/// ONCE then expired latched `ever_heard_peer`, blocking the `Forming`-arm fallback — instead
+/// reaches [`Status::Failed`] at the window's end. The `Failed` arm there ALSO solos when
+/// `expect > 1` and we are alone at expiry (`live == 1`), so the window expiry is itself a
+/// solo fallback, not an error: a phantom merely delays the solo round to the window's end.
+/// This removes the former hard requirement that `discover_secs` stay below `JOIN_WINDOW`
+/// (the deck's `--discover-secs 25` vs the 20 s window used to error when alone). A `live >=
+/// 2` failure stays loud — real peers present that never agreed is a genuine multi-peer fault
+/// ("relaunch together").
+///
 /// rl#58 host-triggered lobby: when `lobby` is `Some`, the barrier is built with
 /// [`Membership::host_triggered`] for that control's [`Role`] and the close gate is the
 /// host's GO on top of the settle, not the timer alone. Each beat we also (a) call
@@ -580,6 +587,27 @@ async fn run_barrier(
                 }));
             }
             Status::Failed => {
+                // The JOIN_WINDOW elapsed without a closed roster. rl#55: on the DEFAULT
+                // (non-lobby) path this is the last-resort alone-fallback, not always an
+                // error. If we are alone RIGHT NOW (`live == 1`, fresh from the `poll`
+                // above) the window expired with literally nobody else present — a solo
+                // launch (incl. one whose only company was a phantom that beat once then
+                // expired, leaving us alone at the deadline). Play the deterministic solo
+                // round rather than stranding the player, exactly as `Formation::Alone`
+                // does on the earlier `discover_secs` deadline. This also removes the old
+                // fragile `discover_secs < JOIN_WINDOW` coupling: a `discover_secs` past
+                // the window (e.g. the deck's `--discover-secs 25` vs the 20 s window) used
+                // to hit this `Failed` before the `Forming` fallback could fire and so
+                // errored when alone — now the window expiry itself solos when alone.
+                //
+                // We still fail LOUD when `live >= 2`: real peers are present but never
+                // agreed (a one-way link or churn AMONG present peers) — a genuine
+                // multi-peer fault worth surfacing ("relaunch together"), not a quiet
+                // split into single-player. The lobby path never reaches `Failed` (it has
+                // no JOIN_WINDOW), so this is the scripted/headless timer barrier only.
+                if lobby.is_none() && is_alone_at_timeout(expect, m.live_set().len()) {
+                    return Ok(BarrierResult::Alone);
+                }
                 anyhow::bail!(
                     "match formation failed: peers never agreed on one roster within the join window \
                      (too few players showed up, or a peer kept appearing/disappearing, or a link is \
@@ -626,6 +654,21 @@ async fn run_barrier(
 ///   silently-invertible transposition of `now`/`deadline`).
 fn is_alone_now(expect: usize, live: usize, ever_heard_peer: bool, past_deadline: bool) -> bool {
     expect > 1 && !ever_heard_peer && live == 1 && past_deadline
+}
+
+/// The rl#55 LAST-RESORT alone-fallback, applied when the barrier has already reached
+/// [`crate::net::membership::Status::Failed`] (the [`crate::net::membership::JOIN_WINDOW`]
+/// elapsed without a closed roster) on the default (non-lobby) path. Returns true iff we
+/// should solo rather than error. Unlike [`is_alone_now`] it does NOT consult
+/// `ever_heard_peer`: at the window's END a once-heard peer that has since expired leaves us
+/// at `live == 1`, and stranding a lone player with an error helps no one — so a phantom
+/// flicker solos here (just later than a never-heard launch, which solos at the earlier
+/// `discover_secs` deadline). It does NOT consult a deadline either: reaching `Failed`
+/// already means the window expired. `live` is the post-`poll` live count (stale peers
+/// expired). The `live >= 2` case is deliberately excluded so it stays the loud `Failed` —
+/// real peers present that never agreed is a genuine multi-peer fault, not the alone case.
+fn is_alone_at_timeout(expect: usize, live: usize) -> bool {
+    expect > 1 && live == 1
 }
 
 /// Build the single-peer lockstep for an OFFLINE round (just us), honoring the
@@ -852,5 +895,33 @@ mod tests {
         );
         // And it stays suppressed for any larger live count.
         assert!(!is_alone_now(4, 3, false, true));
+    }
+
+    /// rl#55: the LAST-RESORT timeout fallback (`is_alone_at_timeout`), applied when the
+    /// barrier already hit `Status::Failed` (the JOIN_WINDOW expired). It solos iff we
+    /// defaulted to networked (`expect > 1`) and are ALONE at expiry (`live == 1`) —
+    /// regardless of `ever_heard_peer`, so a phantom that flickered then expired solos
+    /// rather than erroring (the rl#55 symptom). A genuine multi-peer failure (`live >= 2`)
+    /// stays the loud error, and a deliberate `expect == 1` solo-over-network is unaffected.
+    #[test]
+    fn timeout_fallback_solos_when_alone_at_window_expiry_else_stays_loud() {
+        assert!(
+            is_alone_at_timeout(2, 1),
+            "defaulted-networked + alone at JOIN_WINDOW expiry ⇒ solo, not error (incl. the \
+             phantom-flicker and discover_secs>=JOIN_WINDOW cases — the rl#55 fix)"
+        );
+        assert!(
+            !is_alone_at_timeout(2, 2),
+            "peers present at expiry that never agreed ⇒ a real multi-peer fault, stay loud"
+        );
+        assert!(
+            !is_alone_at_timeout(2, 5),
+            "any live>=2 at expiry stays the loud Failed, never a silent solo"
+        );
+        assert!(
+            !is_alone_at_timeout(1, 1),
+            "expect==1 is a deliberate solo-over-network — the barrier forms {{self}} and \
+             never reaches a JOIN_WINDOW Failed for this to catch"
+        );
     }
 }
