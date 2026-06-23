@@ -247,9 +247,7 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
         anyhow::bail!("nn-crab-probe: no samples — the crab never stepped");
     }
 
-    println!(
-        "\n  tick   crab_x   crab_z   dist  | carapace x/y/z (walks?)  | claw→tgt"
-    );
+    println!("\n  tick   crab_x   crab_z   dist  | carapace x/y/z (walks?)  | claw→tgt");
     for s in &samples {
         println!(
             "  {:>5}  {:>7.2}  {:>7.2}  {:>6.2} | {:>7.2} {:>5.2} {:>7.2}  | {:>7.3}",
@@ -387,7 +385,6 @@ fn nn_crab_checkpoint_dir(flag: Option<PathBuf>) -> Option<PathBuf> {
         None
     }
 }
-
 
 /// Headless first-person screenshot: build a solo lockstep with `--players`
 /// participants (so a remote avatar is in frame beside the local one), render one

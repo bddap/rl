@@ -689,7 +689,10 @@ impl Sim {
         //    external (solo NN) control — the real crab body owns the position then (see
         //    `crab_external`); the grab/extraction below still read `self.crab.pos`, so
         //    only the *move* is delegated, not the hunt.
-        if !self.crab_external && armed && let Some(target) = self.nearest_living_player() {
+        if !self.crab_external
+            && armed
+            && let Some(target) = self.nearest_living_player()
+        {
             let t = target.pos;
             let dx = t.x - self.crab.pos.x;
             let dz = t.z - self.crab.pos.z;

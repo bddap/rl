@@ -388,7 +388,10 @@ mod desync_test {
         // passing vacuously (e.g. because `enable_external_crab` silently no-ops).
         let mut solo = Lockstep::new(0x3963, &[PlayerId(0)], PlayerId(0));
         let armed_solo = arm_solo_crab_like_render(&mut solo, None, Some(()));
-        assert!(armed_solo && solo.crab_is_external(), "the solo path must arm the external crab");
+        assert!(
+            armed_solo && solo.crab_is_external(),
+            "the solo path must arm the external crab"
+        );
         // And a solo round with NO checkpoint stays integer (the empty-checkpoint fallback).
         let mut solo_no_ckpt = Lockstep::new(0x3963, &[PlayerId(0)], PlayerId(0));
         assert!(!arm_solo_crab_like_render(&mut solo_no_ckpt, None, None));
@@ -431,7 +434,11 @@ mod desync_test {
                 assert!(b.record_remote(PlayerId(0), ma).is_none());
                 assert!(a.try_advance().is_empty());
                 assert!(b.try_advance().is_empty());
-                assert_eq!(a.sim().state_hash(), b.sim().state_hash(), "peers diverged at tick {t}");
+                assert_eq!(
+                    a.sim().state_hash(),
+                    b.sim().state_hash(),
+                    "peers diverged at tick {t}"
+                );
                 hashes.push(a.sim().state_hash());
             }
             hashes

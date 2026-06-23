@@ -511,9 +511,17 @@ mod tests {
             }
         }
         for e in &CONTROL_MAP {
-            assert!(expect_mapped(e.action), "{:?} mapped but unclassified", e.action);
+            assert!(
+                expect_mapped(e.action),
+                "{:?} mapped but unclassified",
+                e.action
+            );
             let n = CONTROL_MAP.iter().filter(|x| x.action == e.action).count();
-            assert_eq!(n, 1, "{:?} appears {n} times in the map; want exactly 1", e.action);
+            assert_eq!(
+                n, 1,
+                "{:?} appears {n} times in the map; want exactly 1",
+                e.action
+            );
         }
     }
 
@@ -525,7 +533,11 @@ mod tests {
     fn legend_matches_the_map_for_both_devices() {
         for device in [Device::KeyboardMouse, Device::Gamepad] {
             let lines = legend(device);
-            assert_eq!(lines.len(), CONTROL_MAP.len(), "legend must cover every map row");
+            assert_eq!(
+                lines.len(),
+                CONTROL_MAP.len(),
+                "legend must cover every map row"
+            );
             for (line, entry) in lines.iter().zip(CONTROL_MAP.iter()) {
                 assert_eq!(line.label, entry.label);
                 assert_eq!(
@@ -534,7 +546,11 @@ mod tests {
                     "legend glyphs for {:?} on {device:?} drifted from glyphs_for",
                     entry.action
                 );
-                assert!(!line.glyphs.is_empty(), "{:?} on {device:?} shows no glyph", entry.action);
+                assert!(
+                    !line.glyphs.is_empty(),
+                    "{:?} on {device:?} shows no glyph",
+                    entry.action
+                );
             }
         }
     }
@@ -563,11 +579,23 @@ mod tests {
     /// devices (data-driven on each binding's `hold` flag).
     #[test]
     fn reveal_glyph_follows_the_map() {
-        assert_eq!(reveal_glyph(Device::KeyboardMouse), "controls/keyboard_tab.png");
-        assert_eq!(reveal_glyph(Device::Gamepad), "controls/xbox_button_view.png");
+        assert_eq!(
+            reveal_glyph(Device::KeyboardMouse),
+            "controls/keyboard_tab.png"
+        );
+        assert_eq!(
+            reveal_glyph(Device::Gamepad),
+            "controls/xbox_button_view.png"
+        );
         for device in [Device::KeyboardMouse, Device::Gamepad] {
-            let reveal = legend(device).into_iter().find(|l| l.label == "Controls").unwrap();
-            assert!(reveal.hold, "RevealControls must read as a hold on {device:?}");
+            let reveal = legend(device)
+                .into_iter()
+                .find(|l| l.label == "Controls")
+                .unwrap();
+            assert!(
+                reveal.hold,
+                "RevealControls must read as a hold on {device:?}"
+            );
         }
     }
 
@@ -603,6 +631,9 @@ mod tests {
             "Quit must not share Start with Restart (a quit-hold would broadcast RESTART)"
         );
         // And it doesn't collide with the reveal button either.
-        assert_ne!(quit.pad.primary, entry(Action::RevealControls).unwrap().pad.primary);
+        assert_ne!(
+            quit.pad.primary,
+            entry(Action::RevealControls).unwrap().pad.primary
+        );
     }
 }

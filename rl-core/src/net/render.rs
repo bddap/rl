@@ -427,7 +427,12 @@ pub fn build_screenshot_app(ls: Lockstep, cfg: ScreenshotConfig) -> App {
         }))
         .add_systems(
             Startup,
-            (spawn_world, spawn_offscreen_camera, spawn_hud, spawn_controls_ui),
+            (
+                spawn_world,
+                spawn_offscreen_camera,
+                spawn_hud,
+                spawn_controls_ui,
+            ),
         )
         .add_systems(
             Update,
@@ -782,9 +787,7 @@ fn drive_lockstep(
         // networked round, and syncing the NN pose there would push a float crab across the
         // wire boundary and desync peers. `nn_active` is false on every networked round, so
         // the multiplayer sim stays byte-identical to the integer-crab path.
-        if nn_active
-            && let Some(bridge) = bridge.as_deref_mut()
-        {
+        if nn_active && let Some(bridge) = bridge.as_deref_mut() {
             crate::net::solo_crab::sync_external_crab(&mut state.ls, bridge);
         }
 
@@ -1469,9 +1472,8 @@ fn update_hud(state: NonSend<GameState>, mut hud: Query<&mut Text, With<StatusHu
     // Status + the one-line objective only. The control bindings are NOT duplicated here:
     // they live in the hold-to-reveal overlay + corner hint (the controls UI), which derive
     // from the one control map — so there's a single on-screen source for them.
-    **text = format!(
-        "You: {status}   |   reach the green pillar, extract - dodge the crab{outcome}",
-    );
+    **text =
+        format!("You: {status}   |   reach the green pillar, extract - dodge the crab{outcome}",);
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,7 +1568,11 @@ fn spawn_legend_column(
     parent
         .spawn((
             Node {
-                display: if visible { Display::Flex } else { Display::None },
+                display: if visible {
+                    Display::Flex
+                } else {
+                    Display::None
+                },
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(8.0),
                 ..default()
@@ -2069,7 +2075,8 @@ mod menu_ui {
                         match trimmed.parse::<EndpointId>() {
                             Ok(id) => Some(id),
                             Err(_) => {
-                                state.error = Some("That join code isn't a valid endpoint id.".into());
+                                state.error =
+                                    Some("That join code isn't a valid endpoint id.".into());
                                 return;
                             }
                         }
@@ -2153,9 +2160,7 @@ mod menu_ui {
                         Some(code) => {
                             // A selectable, read-only field so the player can copy the code.
                             let mut code_str = code.to_string();
-                            ui.add(
-                                egui::TextEdit::singleline(&mut code_str).desired_width(360.0),
-                            );
+                            ui.add(egui::TextEdit::singleline(&mut code_str).desired_width(360.0));
                         }
                         None => {
                             ui.label("(starting host — code will appear shortly)");
@@ -2277,10 +2282,11 @@ mod tests {
         // Park a solo round (the same one the Solo button / Alone fallback produce) and ask
         // to enter Playing, exactly as the menu does on a choice.
         let seed = 0x1234_5678;
-        app.world_mut().insert_non_send_resource(PendingRound(Some(ReadyMatch {
-            lockstep: net_loop::solo_lockstep_for(seed),
-            net: None,
-        })));
+        app.world_mut()
+            .insert_non_send_resource(PendingRound(Some(ReadyMatch {
+                lockstep: net_loop::solo_lockstep_for(seed),
+                net: None,
+            })));
         app.world_mut()
             .resource_mut::<NextState<AppPhase>>()
             .set(AppPhase::Playing);

@@ -27,8 +27,7 @@ use tracing::{info, warn};
 use crate::TrainConfig;
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::bot::body::{
-    CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId,
-    random_spawn_rotation,
+    CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, random_spawn_rotation,
 };
 use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
@@ -2072,7 +2071,10 @@ struct BodyState {
 /// Normalize every env's observation, feeding the shared running stats (and, in worker mode,
 /// the per-horizon increment the thread ships back — see [`TrainingState::normalizer_increment`]).
 /// Returns one normalized row per env, the forward pass's input.
-fn normalize_observations(training: &mut TrainingState, obs: &CrabObservation) -> Vec<[f32; OBS_SIZE]> {
+fn normalize_observations(
+    training: &mut TrainingState,
+    obs: &CrabObservation,
+) -> Vec<[f32; OBS_SIZE]> {
     let n = training.envs.len();
     let mut obs_arrays: Vec<[f32; OBS_SIZE]> = Vec::with_capacity(n);
     for e in 0..n {
@@ -2095,7 +2097,11 @@ fn normalize_observations(training: &mut TrainingState, obs: &CrabObservation) -
 fn forward_pass(
     training: &TrainingState,
     obs_arrays: &[[f32; OBS_SIZE]],
-) -> (Vec<Tensor<NdArray, 1>>, Tensor<NdArray, 1>, Vec<NormalizedValue>) {
+) -> (
+    Vec<Tensor<NdArray, 1>>,
+    Tensor<NdArray, 1>,
+    Vec<NormalizedValue>,
+) {
     let n = obs_arrays.len();
     let device = training.device;
     if training.skip_nn {
@@ -2104,8 +2110,10 @@ fn forward_pass(
     }
     let inference_brain = training.brain.valid();
     let flat: Vec<f32> = obs_arrays.iter().flat_map(|a| a.iter().copied()).collect();
-    let obs_batch =
-        Tensor::<NdArray, 2>::from_data(burn::tensor::TensorData::new(flat, [n, OBS_SIZE]), &device);
+    let obs_batch = Tensor::<NdArray, 2>::from_data(
+        burn::tensor::TensorData::new(flat, [n, OBS_SIZE]),
+        &device,
+    );
     let (means_batch, log_std) = inference_brain.policy(obs_batch.clone());
     let values: Vec<NormalizedValue> = inference_brain
         .value(obs_batch)
@@ -2289,7 +2297,10 @@ pub fn brain_step(
     let log_probs: Vec<f32> = sampled.iter().map(|s| s.log_prob).collect();
     // Effort tax (the reward's tax summand) is taken over the RAW pre-clamp outputs, per
     // env (see `action_effort`).
-    let efforts: Vec<f32> = sampled.iter().map(|s| action_effort(&s.raw_action)).collect();
+    let efforts: Vec<f32> = sampled
+        .iter()
+        .map(|s| action_effort(&s.raw_action))
+        .collect();
 
     actions.envs.copy_from_slice(&action_arrays);
     // Settling envs hold the rest pose (action 0); the policy takes over at
