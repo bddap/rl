@@ -645,9 +645,13 @@ struct TargetBall;
 /// "reached" until it is within 0.8 m in 3D. The training REWARD pays the smooth
 /// `1 − tanh(d/S)` everywhere with no threshold, so this radius never enters a reward; it
 /// defines a binary "reached it" event in two non-reward places that benefit from one
-/// shared definition: the demo's ball-hop, and the training curriculum's per-episode
-/// competence signal (see [`crate::training::session::CURRICULUM_REACH_RADIUS`]).
-pub(crate) const DEMO_REACH_RADIUS: f32 = 0.8;
+/// shared definition: the demo's ball-hop here, and the training curriculum's
+/// per-episode competence signal. DERIVED from that curriculum constant
+/// ([`crate::training::session::CURRICULUM_REACH_RADIUS`]) — one source, in the
+/// always-compiled trainer — so the demo and curriculum can't drift apart on the
+/// radius. (0.8 m, as the doc above describes.)
+pub(crate) const DEMO_REACH_RADIUS: f32 =
+    crate::training::session::CURRICULUM_REACH_RADIUS;
 
 /// Radius (m) of the demo target ball. Bigger than [`DEMO_REACH_RADIUS`] so the
 /// claw visibly reaches *into* the ball before it registers a reach and jumps —

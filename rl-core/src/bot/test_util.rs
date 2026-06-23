@@ -51,39 +51,67 @@ pub enum WorldRole {
 pub fn headless_stack(cfg: HeadlessStack) -> App {
     let mut app = App::new();
 
-    // The windowless, GPU-less DefaultPlugins all three headless entries share. The
-    // gamepad poller (GilrsPlugin) is dropped: a headless world has no input device,
-    // so it would only spawn an idle gilrs thread. Built as a binding so the optional
-    // 1-thread-pool `.set` below stays visible rather than buried in a chain.
-    let mut plugins = DefaultPlugins
-        .set(bevy::window::WindowPlugin {
-            primary_window: None,
-            exit_condition: bevy::window::ExitCondition::DontExit,
-            ..default()
-        })
-        .set(bevy::render::RenderPlugin {
-            render_creation: bevy::render::settings::RenderCreation::Automatic(
-                bevy::render::settings::WgpuSettings {
-                    backends: None,
-                    ..default()
-                },
-            ),
-            ..default()
-        })
-        .disable::<bevy::winit::WinitPlugin>()
-        .disable::<bevy::gilrs::GilrsPlugin>()
-        // No log spam in the rollout threads / test output.
-        .disable::<bevy::log::LogPlugin>();
     let worker = matches!(cfg.role, WorldRole::RolloutWorker);
+
+    // The windowless plugin set every headless entry shares — `DefaultPlugins` either
+    // way, because the sim needs the non-render core plugins it brings (TransformPlugin
+    // for GlobalTransform propagation, AssetPlugin, ScenePlugin, InputPlugin); a bare
+    // MinimalPlugins omits those and rapier/bot systems then panic "Resource does not
+    // exist". The difference between the two builds is ONLY which extra plugins
+    // `DefaultPlugins` *contains*, and that's decided by bevy's feature set, not here:
+    //
+    // - render OFF (the trainer): bevy is built without its render feature, so
+    //   `DefaultPlugins` automatically OMITS WindowPlugin/RenderPlugin/winit/gilrs/PBR
+    //   (all `#[cfg(feature = "bevy_render"/"bevy_window"/…)]`) and instead includes
+    //   `ScheduleRunnerPlugin`. No graphics crate is linked — the whole point of #51.
+    // - render ON (the demo/game test builds, which also stand up this headless world):
+    //   `DefaultPlugins` includes the window + render plugins, so we turn the window off
+    //   and disable the GPU backend (`WgpuSettings::backends = None`) to stay windowless
+    //   and GPU-less, matching the single-binary headless build before the split.
+    //
+    // Either way: drop LogPlugin (no rollout/test spam) and, for a rollout worker, pin
+    // the task pool to one thread so K worlds don't serialize on the global pool.
+    let mut plugins = DefaultPlugins.build().disable::<bevy::log::LogPlugin>();
+    // render ON only: the window + GPU-backend plugins exist only when bevy's render
+    // feature is on, so configure them under cfg (render-off they aren't in the group).
+    #[cfg(feature = "render")]
+    {
+        plugins = plugins
+            .set(bevy::window::WindowPlugin {
+                primary_window: None,
+                exit_condition: bevy::window::ExitCondition::DontExit,
+                ..default()
+            })
+            .set(bevy::render::RenderPlugin {
+                render_creation: bevy::render::settings::RenderCreation::Automatic(
+                    bevy::render::settings::WgpuSettings {
+                        backends: None,
+                        ..default()
+                    },
+                ),
+                ..default()
+            })
+            .disable::<bevy::winit::WinitPlugin>()
+            .disable::<bevy::gilrs::GilrsPlugin>();
+    }
     if worker {
         plugins = plugins.set(TaskPoolPlugin {
             task_pool_options: TaskPoolOptions::with_num_threads(1),
         });
+        // render OFF, `DefaultPlugins` already carries a ScheduleRunnerPlugin (no window
+        // ⇒ the group includes it); a rollout worker drives its world on the runner loop
+        // rather than once, so SET it to `run_loop(ZERO)` instead of adding a duplicate.
+        #[cfg(not(feature = "render"))]
+        {
+            plugins = plugins.set(ScheduleRunnerPlugin::run_loop(Duration::ZERO));
+        }
     }
     app.add_plugins(plugins);
 
+    // render ON, `DefaultPlugins` has a WindowPlugin (not a ScheduleRunnerPlugin), so a
+    // worker needs the runner loop ADDED to drive `update()` with no winit event loop.
+    #[cfg(feature = "render")]
     if worker {
-        // No window/winit means no event loop to drive `update()`; the runner loop does.
         app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::ZERO));
     }
 

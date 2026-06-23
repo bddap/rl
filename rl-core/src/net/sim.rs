@@ -182,6 +182,15 @@ impl Input {
     }
 }
 
+/// Tick rate of the deterministic sim (Hz). The CANONICAL value: the headless driver
+/// (`game`), the windowed client's render loop (`net::render`), and the per-tick speed
+/// tuning here all read this one constant, so a render peer and a headless peer step
+/// at the same rate and stay in lockstep. Lives in `sim` (the render-free determinism
+/// core) so it is available even in the headless trainer build where `net::render` is
+/// gated out. 30 Hz is plenty for the gray-box and keeps the lockstep stall window
+/// forgiving on a LAN.
+pub const TICK_HZ: u64 = 30;
+
 /// Fixed-point world scale: a position/length value of [`UNIT`] equals one world
 /// meter. All world coordinates, radii, and speeds are integers in these units, so
 /// the whole sim is bit-identical across machines (see the module determinism note).

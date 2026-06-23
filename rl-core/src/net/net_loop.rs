@@ -22,7 +22,7 @@
 //! reaches agreement (the barrier rightly refuses to freeze a guessed roster), leaving a
 //! frozen, unplayable round. So the cold-start has a SECOND outcome: if the discovery
 //! window elapses with no other peer ever heard ([`Formation::Alone`]), the caller starts
-//! a deterministic [`crate::net::render::InputSource::Solo`] round instead of awaiting an
+//! a deterministic `net::render::InputSource::Solo` round instead of awaiting an
 //! empty match. The fallback fires ONLY in the genuinely-alone case (see [`run_barrier`]);
 //! the moment ANY peer is present the full membership-agreement barrier is back in force,
 //! so real multiplayer is never weakened into a premature solo.

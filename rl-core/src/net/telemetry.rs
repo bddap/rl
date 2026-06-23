@@ -44,7 +44,7 @@ use crate::net::sim::{Input, Outcome, Sim};
 /// [`Tick`](TelemetryEvent::Tick)/[`Input`](TelemetryEvent::Input) events are thinned to
 /// one per this many ticks so a 30 Hz round streams a couple events/sec per deck instead
 /// of flooding the collector; the per-tick desync cross-check still runs every tick
-/// locally — this only thins what's REPORTED. At [`TICK_HZ`](crate::net::render::TICK_HZ)
+/// locally — this only thins what's REPORTED. At [`TICK_HZ`](crate::net::sim::TICK_HZ)
 /// = 30 that's ~one snapshot per simulated second, and both drivers (`game net` and the
 /// windowed client) share this one constant so their feeds read the same.
 pub const TELEMETRY_TICK_EVERY: u64 = 30;

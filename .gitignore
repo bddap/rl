@@ -1,4 +1,5 @@
 /target
+/target-ws
 /target-gc
 /target-fc
 /target-nn

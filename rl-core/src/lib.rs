@@ -11,13 +11,13 @@
 //! body in the game" was deferred. They now live behind this one crate root, which
 //! the training binary re-imports (`use rl::{bot, physics, …}`) instead of declaring.
 
-// rl#49: the `--features wgpu` build pulls bevy's wgpu 27 and burn-wgpu's wgpu 26 into
-// one graph. Resolving `Module: Send` on `load_record` for `CrabBrain<Autodiff<Wgpu>>`
-// chases wgpu_core's nested generics past the default 128-deep recursion limit and
-// aborts with E0275 (overflow, not a genuine !Send). A higher limit lets that
-// finite-but-deep resolution complete; no effect on the default CPU build, zero runtime
-// cost. Set on the library root because the affected modules now live here.
-#![recursion_limit = "512"]
+// rl#49: the `--features wgpu` build resolves `Module: Send` on `load_record` for
+// `CrabBrain<Autodiff<Wgpu>>`, chasing wgpu_core's nested generics past the default
+// 128-deep recursion limit and aborting with E0275 (overflow, not a genuine !Send). A
+// higher limit lets that finite-but-deep resolution complete. ONLY needed under `wgpu`
+// — every other build (the headless CPU trainer, the renderers) compiles at the default
+// 128, so the bump is gated on the feature instead of paid unconditionally.
+#![cfg_attr(feature = "wgpu", recursion_limit = "512")]
 
 use std::path::PathBuf;
 
@@ -25,12 +25,20 @@ use bevy::prelude::*;
 use clap::Parser;
 
 pub mod bot;
-pub mod debug_sliders;
 pub mod net;
 pub mod physics;
-pub mod play;
-pub mod player;
 pub mod training;
+
+// Rendering-only modules — gated out of the headless trainer build. They pull bevy's
+// render/PBR/egui types (cameras, materials, screenshots, the egui slider panel), which
+// don't even exist when bevy is built without `render`, so without this gate the
+// trainer wouldn't compile. The trainer never renders, so it loses nothing.
+#[cfg(feature = "render")]
+pub mod debug_sliders;
+#[cfg(feature = "render")]
+pub mod play;
+#[cfg(feature = "render")]
+pub mod player;
 
 /// Whether to spawn visual assets (meshes, lights). The `rl learn` rollout worlds
 /// set this false (rendering off entirely); the rendering modes (demo/screenshot, and

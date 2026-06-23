@@ -1,0 +1,19 @@
+[package]
+name = "game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "game"
+path = "src/main.rs"
+
+[dependencies]
+# render ON: the `play` / `fp-screenshot` modes are the windowed first-person client
+# (net::render). The headless modes (net/solo/nn-crab-probe) live in the same binary.
+rl-core = { path = "../rl-core", features = ["render"] }
+anyhow.workspace = true
+clap.workspace = true
+iroh.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
