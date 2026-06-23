@@ -1,0 +1,5 @@
+# The repo-root .gitignore ignores *.png (to keep stray screenshots + the proprietary
+# sally.glb out of the tree). The control glyphs here are the EXCEPTION: they are Kenney
+# Input Prompts (CC0 / public domain — see /NOTICE), deliberately bundled and committed so
+# the control overlay works with no external fetch. Un-ignore them.
+!*.png

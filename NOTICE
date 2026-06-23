@@ -2,9 +2,20 @@ Third-party assets
 ==================
 
 This project's own source code is licensed MIT OR Apache-2.0 (see LICENSE-MIT and
-LICENSE-APACHE), which covers the code only. Optional art assets the code can load
-are licensed separately by their authors and are NOT redistributed in this
-repository.
+LICENSE-APACHE), which covers the code only. Art assets the code loads are licensed
+separately by their authors: public-domain (CC0) assets are bundled and redistributed
+here (see Kenney Input Prompts below); license-restricted assets are NOT redistributed
+(see the Sally crab model below).
+
+Kenney Input Prompts — control glyphs (rl-core/assets/controls/*.png)
+---------------------------------------------------------------------
+The keyboard/mouse/gamepad button icons shown by the in-game control overlay are a
+subset of Kenney's "Input Prompts" pack (https://kenney.nl/assets/input-prompts),
+released under Creative Commons Zero (CC0 1.0, public domain:
+https://creativecommons.org/publicdomain/zero/1.0/). CC0 permits redistribution for
+any purpose, so — unlike the crab model — these PNGs ARE committed to this repo and
+ship with the build. Crediting Kenney is appreciated but not required. Only the
+glyphs the control map actually uses are bundled.
 
 Sally Lightfoot crab model (sally.glb / grapsus_grapsus_crab_280.blend)
 -----------------------------------------------------------------------
