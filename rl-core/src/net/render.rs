@@ -38,9 +38,9 @@ use bevy::camera::RenderTarget;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use bevy::render::render_resource::{TextureFormat, TextureUsages};
-use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowMode};
+
+use crate::screenshot::{self, ShotProgress, ShotTarget};
 
 use crate::net::controls::{self, Action, Device};
 use crate::net::lockstep::{Lockstep, TickMsg};
@@ -1797,16 +1797,6 @@ impl ScreenshotConfig {
     }
 }
 
-#[derive(Resource)]
-struct ShotTarget(Handle<Image>);
-
-#[derive(Resource, Default)]
-struct ShotProgress {
-    frames: u32,
-    captured: bool,
-    exit_countdown: i32,
-}
-
 /// The offscreen camera for the screenshot path. Its transform is driven by
 /// [`apply_transforms`] (it carries the [`FpCamera`] marker), so the captured frame
 /// is the genuine first-person view, not a separate angle.
@@ -1815,10 +1805,7 @@ fn spawn_offscreen_camera(
     mut images: ResMut<Assets<Image>>,
     cfg: Res<ScreenshotConfig>,
 ) {
-    let mut image =
-        Image::new_target_texture(cfg.width, cfg.height, TextureFormat::bevy_default(), None);
-    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
-    let handle = images.add(image);
+    let handle = images.add(screenshot::new_render_target(cfg.width, cfg.height));
     commands.spawn((
         Camera3d::default(),
         Camera {
@@ -1865,10 +1852,10 @@ fn apply_shot_cam_offset(
     *cam = Transform::from_translation(eye).looking_at(eye + new_fwd, Vec3::Y);
 }
 
-/// After the sim has run a few ticks and the GPU pipeline has warmed (settle counted
-/// in RENDER frames — early frames render black), capture one PNG of the FP view and
-/// exit. Same shape as play.rs's capture: spawn a `Screenshot` observed by
-/// `save_to_disk`, then a short countdown for the readback/encode to finish.
+/// After the sim has run a few ticks and the GPU pipeline has warmed, capture one PNG
+/// of the FP view and exit. The settle/capture/exit bookkeeping is the shared
+/// [`crate::screenshot`] primitive; this system just composes the FP scene's single
+/// shot on top of it.
 fn capture_when_settled(
     mut commands: Commands,
     cfg: Res<ScreenshotConfig>,
@@ -1876,27 +1863,15 @@ fn capture_when_settled(
     mut progress: ResMut<ShotProgress>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if progress.captured {
-        progress.exit_countdown -= 1;
-        if progress.exit_countdown <= 0 {
-            exit.write(AppExit::Success);
-        }
+    let Some(frame) = screenshot::advance_capture(&mut progress, cfg.settle, &mut exit) else {
         return;
-    }
-    progress.frames += 1;
-    if progress.frames < cfg.settle {
-        return;
-    }
-    commands
-        .spawn(Screenshot::image(target.0.clone()))
-        .observe(save_to_disk(cfg.path.clone()));
+    };
+    screenshot::save_target_to(&mut commands, &target, cfg.path.clone());
     info!(
-        "fp screenshot: captured at render frame {}, writing {}",
-        progress.frames,
+        "fp screenshot: captured at render frame {frame}, writing {}",
         cfg.path.display()
     );
-    progress.captured = true;
-    progress.exit_countdown = 30;
+    screenshot::finish_capture(&mut progress);
 }
 
 // ---------------------------------------------------------------------------

@@ -39,6 +39,10 @@ pub mod debug_sliders;
 pub mod play;
 #[cfg(feature = "render")]
 pub mod player;
+/// Shared offscreen render-to-PNG-on-settle primitive behind both headless shots
+/// (the crab inspection shot in `play`, the FP game-view shot in `net::render`).
+#[cfg(feature = "render")]
+pub(crate) mod screenshot;
 
 /// Whether to spawn visual assets (meshes, lights). The `rl learn` rollout worlds
 /// set this false (rendering off entirely); the rendering modes (demo/screenshot, and

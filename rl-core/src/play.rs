@@ -15,8 +15,6 @@ use bevy::camera::RenderTarget;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
-use bevy::render::render_resource::{TextureFormat, TextureUsages};
-use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy_rapier3d::plugin::PhysicsSet;
 use bevy_rapier3d::prelude::*;
 use burn::backend::ndarray::NdArrayDevice;
@@ -32,6 +30,7 @@ use crate::bot::body::{
 use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{BotSet, CrabSpawns, respawn_crab_rotated};
+use crate::screenshot::{self, ShotProgress, ShotTarget};
 use crate::training::session::{
     BRAIN_STEM, Curriculum, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, RESET_GRACE_TICKS,
     TrainBackend, dist_3d, sample_target, settle_countdown,
@@ -1036,17 +1035,6 @@ struct ShotConfig {
     height: u32,
 }
 
-/// The render-target image the offscreen camera draws into.
-#[derive(Resource)]
-struct ShotTarget(Handle<Image>);
-
-#[derive(Resource, Default)]
-struct ShotProgress {
-    steps: u32,
-    captured: bool,
-    exit_countdown: i32,
-}
-
 /// Diagnostic pose drive, configured from the environment. `Some` only when
 /// `RL_POSE_JOINT` names a joint slot (0..`COUNT`); then the screenshot zeroes every
 /// action and holds a constant torque on that joint, so a render shows what one
@@ -1203,7 +1191,7 @@ fn pin_body_hold(
     mut pin: ResMut<PinBody>,
     mut carapace_q: Query<(&Transform, &Velocity, &mut ExternalForce), With<CrabCarapace>>,
 ) {
-    if progress.steps < cfg.settle {
+    if progress.frames < cfg.settle {
         return;
     }
     let Ok((xform, vel, mut force)) = carapace_q.single_mut() else {
@@ -1212,7 +1200,7 @@ fn pin_body_hold(
     let target = *pin.target.get_or_insert_with(|| {
         info!(
             "video: pinning carapace at settled pose, render frame {}",
-            progress.steps
+            progress.frames
         );
         *xform
     });
@@ -1237,7 +1225,7 @@ fn pose_drive_step(
     if let Some(v) = sweep {
         // Phase from the post-settle render-frame index; at low cycle counts the claw
         // tracks the torque quasi-statically, so the angle reads as a clean sin/cos.
-        let frac = progress.steps.saturating_sub(cfg.settle) as f32 / v.frames.max(1) as f32;
+        let frac = progress.frames.saturating_sub(cfg.settle) as f32 / v.frames.max(1) as f32;
         t1 = drive.torque * (std::f32::consts::TAU * v.cycles1 * frac).sin();
         t2 = drive.torque2 * (std::f32::consts::TAU * v.cycles2 * frac).cos();
     }
@@ -1365,7 +1353,7 @@ struct TossBurst {
 /// an arbitrary orientation, away from the origin — a movement stress-test that the
 /// two track together (both ride the same physics). Inert without the env var.
 fn toss_once(progress: Res<ShotProgress>, mut burst: ResMut<TossBurst>, mut done: Local<bool>) {
-    if *done || std::env::var_os("RL_TOSS").is_none() || progress.steps < TOSS_AT_FRAME {
+    if *done || std::env::var_os("RL_TOSS").is_none() || progress.frames < TOSS_AT_FRAME {
         return;
     }
     let mut rng = rand::thread_rng();
@@ -1489,11 +1477,7 @@ fn spawn_offscreen_camera(
     mut images: ResMut<Assets<Image>>,
     cfg: Res<ShotConfig>,
 ) {
-    let mut image =
-        Image::new_target_texture(cfg.width, cfg.height, TextureFormat::bevy_default(), None);
-    // COPY_SRC so the screenshot machinery can read the rendered texture back.
-    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
-    let handle = images.add(image);
+    let handle = images.add(screenshot::new_render_target(cfg.width, cfg.height));
 
     commands.spawn((
         Camera3d::default(),
@@ -1523,37 +1507,25 @@ fn capture_when_settled(
     lights_q: Query<(), With<DirectionalLight>>,
     cams_q: Query<&Camera>,
 ) {
-    if progress.captured {
-        progress.exit_countdown -= 1;
-        if progress.exit_countdown <= 0 {
-            exit.write(AppExit::Success);
-        }
+    // settle counted in RENDER frames (the GPU pipeline renders black for the first
+    // few dozen frames while shaders/pipelines compile and assets upload); the shared
+    // helper owns that gate + the post-capture exit countdown.
+    let Some(frame) = screenshot::advance_capture(&mut progress, cfg.settle, &mut exit) else {
         return;
-    }
-
-    // settle is counted in RENDER frames, not physics steps: the GPU render
-    // pipeline needs a few dozen frames to warm up (shader/pipeline compile,
-    // asset upload) before the scene appears — earlier frames come out black.
-    progress.steps += 1;
-    if progress.steps < cfg.settle {
-        return;
-    }
+    };
 
     // Video mode: save one numbered frame per render frame while the pose sweeps,
     // until `frames` are captured; then fall into the same exit countdown as a shot.
     if let Some(v) = sweep {
-        let n = progress.steps - cfg.settle;
-        commands
-            .spawn(Screenshot::image(target.0.clone()))
-            .observe(save_to_disk(video_frame_path(&cfg.path, n)));
+        let n = frame - cfg.settle;
+        screenshot::save_target_to(&mut commands, &target, video_frame_path(&cfg.path, n));
         if n + 1 >= v.frames {
             info!(
                 "video: captured {} frames alongside {}",
                 v.frames,
                 cfg.path.display()
             );
-            progress.captured = true;
-            progress.exit_countdown = 30;
+            screenshot::finish_capture(&mut progress);
         }
         return;
     }
@@ -1568,17 +1540,12 @@ fn capture_when_settled(
         lights_q.iter().count(),
         cams_q.iter().count(),
     );
-    commands
-        .spawn(Screenshot::image(target.0.clone()))
-        .observe(save_to_disk(cfg.path.clone()));
+    screenshot::save_target_to(&mut commands, &target, cfg.path.clone());
     info!(
-        "screenshot: captured at render frame {}, writing {}",
-        progress.steps,
+        "screenshot: captured at render frame {frame}, writing {}",
         cfg.path.display()
     );
-    progress.captured = true;
-    // Give the GPU readback + PNG encode a few frames to finish.
-    progress.exit_countdown = 30;
+    screenshot::finish_capture(&mut progress);
 }
 
 #[cfg(test)]
