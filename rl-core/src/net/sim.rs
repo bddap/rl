@@ -880,6 +880,15 @@ impl Sim {
         self.crab
     }
 
+    /// Test-only read of the external-control flag (see [`crab_external`](Sim::crab_external)),
+    /// so the MP byte-identical-invariant tests (rl#63) can assert the networked path leaves
+    /// the crab under the deterministic integer pursuit. Not part of the production API: the
+    /// flag is set-once internal state, never read back outside the determinism guard tests.
+    #[cfg(test)]
+    pub(crate) fn crab_is_external(&self) -> bool {
+        self.crab_external
+    }
+
     /// The extraction point (for rendering the objective marker).
     pub fn extraction(&self) -> ExtractionPoint {
         self.extraction

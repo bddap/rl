@@ -74,7 +74,8 @@ mod desync_test {
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
-    use crate::net::sim::{Input, Outcome, PlayerId, Sim, buttons};
+    use crate::net::lockstep::Lockstep;
+    use crate::net::sim::{Input, Outcome, PlayerId, Pos, Sim, buttons};
 
     /// Generate a deterministic pseudo-random input log: `ticks` ticks, each with one
     /// input per player, spanning every input field — move axes, yaw-look delta, and
@@ -298,6 +299,161 @@ mod desync_test {
             "restart edges must have rewound the sim (tick {} vs {} ticks)",
             a.tick(),
             log.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Solo NN-crab MP byte-identical invariant (rl#63)
+    // -----------------------------------------------------------------------------
+    //
+    // The solo NN-crab (`net::solo_crab`, render-only) drives a FLOAT rapier crab and writes
+    // its pose into the integer `Sim` via `enable_external_crab(true)`/`set_external_crab_pose`.
+    // A float crab is NOT bit-identical across machines, so on any NETWORKED round it MUST stay
+    // inactive (`crab_external == false`) or peers desync. Production enforces this by STRUCTURE
+    // alone: `net::render` flips `enable_external_crab(true)` only inside a `net.is_none()`
+    // branch (the scripted `Boot::Round` arm and the menu's `ensure_round_installed`), and
+    // `drive_lockstep` calls `sync_external_crab` only when the `SoloCrabActive` gate is on,
+    // which the networked path never sets. Nothing tested it. These two tests would go red if a
+    // refactor let `crab_external` flip true on a networked round.
+    //
+    // FAITHFULNESS / LIMITATION: `solo_crab`/`render` are `#[cfg(feature = "render")]` (they pull
+    // bevy's full GPU stack), so this suite — which builds with NO features, like the headless
+    // trainer — cannot reference `SoloCrabPlugin`/`SoloCrabActive`/`build_windowed_app` directly,
+    // nor stand up a real iroh transport. Per the issue, these are the closest faithful tests:
+    // they re-encode the SAME `net.is_none()` gating predicate the production sites use and
+    // assert the networked branch leaves the crab integer-driven, and they prove the only sim-
+    // level footprint of an inactive stack on a networked round (no external pose pushed) is a
+    // bit-for-bit no-op across a real multi-peer round. A higher-fidelity test that exercises the
+    // actual `build_windowed_app` gating would have to live behind the `render` feature.
+
+    /// The production gate, re-encoded: `net::render` hands the crab to external control
+    /// (`enable_external_crab(true)`) IFF the round is solo — `net.is_none()` AND a checkpoint
+    /// is present (`(None, Some(dir))` in `Boot::Round`; `is_solo && has_nn_stack` in
+    /// `ensure_round_installed`). `net`/`checkpoint` are `Option<()>` stand-ins — only their
+    /// `is_none()`/`is_some()` is load-bearing here, which is exactly what the production match
+    /// arms branch on. Returns whether the crab WOULD be externally driven.
+    fn arm_solo_crab_like_render(
+        ls: &mut Lockstep,
+        net: Option<()>,
+        checkpoint: Option<()>,
+    ) -> bool {
+        let solo_with_ckpt = net.is_none() && checkpoint.is_some();
+        if solo_with_ckpt {
+            ls.enable_external_crab(true);
+        }
+        solo_with_ckpt
+    }
+
+    #[test]
+    fn networked_round_leaves_crab_under_integer_pursuit() {
+        // Test A — the invariant. Run the solo-crab arming logic under a NETWORKED config and
+        // assert the crab is NEVER handed to external control, so the deterministic integer
+        // pursuit (the only cross-peer-safe crab) drives every networked round.
+        let players: Vec<PlayerId> = (0..2).map(PlayerId).collect();
+        let mut ls = Lockstep::new(0x3963, &players, PlayerId(0));
+
+        // Networked round WITH a checkpoint available — the case that must still stay integer:
+        // `net.is_some()`, so the gate must not arm even though a checkpoint exists.
+        let armed = arm_solo_crab_like_render(&mut ls, Some(()), Some(()));
+        assert!(
+            !armed,
+            "a networked round must NOT arm the external crab even with a checkpoint present"
+        );
+        assert!(
+            !ls.crab_is_external(),
+            "crab_external must be false on a networked round (float crab would desync peers)"
+        );
+
+        // Positive control: the SAME gating logic on a SOLO round (net.is_none()) with a
+        // checkpoint DOES arm — proving the predicate genuinely keys on `net`, so Test A isn't
+        // passing vacuously (e.g. because `enable_external_crab` silently no-ops).
+        let mut solo = Lockstep::new(0x3963, &[PlayerId(0)], PlayerId(0));
+        let armed_solo = arm_solo_crab_like_render(&mut solo, None, Some(()));
+        assert!(armed_solo && solo.crab_is_external(), "the solo path must arm the external crab");
+        // And a solo round with NO checkpoint stays integer (the empty-checkpoint fallback).
+        let mut solo_no_ckpt = Lockstep::new(0x3963, &[PlayerId(0)], PlayerId(0));
+        assert!(!arm_solo_crab_like_render(&mut solo_no_ckpt, None, None));
+        assert!(!solo_no_ckpt.crab_is_external());
+    }
+
+    #[test]
+    fn inactive_solo_crab_stack_is_a_noop_on_a_multipeer_round() {
+        // Test B — no-op-on-MP. On a networked round the solo-crab stack may be PRESENT (the
+        // menu builds it in before the round resolves) but stays INACTIVE: the gate is off, so
+        // `sync_external_crab` is never called and `enable_external_crab(true)` never fires. The
+        // only sim-facing footprint left is the menu's networked branch leaving the crab
+        // integer-driven. Prove that footprint is a bit-for-bit no-op: a real 2-peer lockstep
+        // round driven identically — once plain, once with the inactive stack's sim-facing API
+        // exercised (`enable_external_crab(false)`, the no-op the gate leaves) — must produce the
+        // SAME state-hash sequence tick-for-tick. If a refactor made the "inactive" stack perturb
+        // the sim, this diverges.
+        let players: Vec<PlayerId> = (0..2).map(PlayerId).collect();
+        let seed = 0x0A0B;
+
+        // Run a full 2-peer round (modeled on `two_peers_stay_in_lockstep`), optionally calling
+        // the inactive stack's sim-facing API, and collect the per-tick hash sequence.
+        let run = |touch_inactive_stack: bool| -> Vec<u64> {
+            let mut a = Lockstep::new(seed, &players, PlayerId(0));
+            let mut b = Lockstep::new(seed, &players, PlayerId(1));
+            if touch_inactive_stack {
+                // What the menu's NETWORKED branch does with the stack present: it does NOT arm
+                // the gate. `enable_external_crab(false)` is the closest standalone call that
+                // represents "the inactive stack touched the sim" — it must change nothing.
+                a.enable_external_crab(false);
+                b.enable_external_crab(false);
+            }
+            let mut hashes = Vec::new();
+            for t in 0..200u64 {
+                let ia = Input::from_axes((t % 3) as f32 - 1.0, 0.5);
+                let ib = Input::from_axes(0.0, (t % 2) as f32);
+                let ma = a.submit_local_input(ia);
+                let mb = b.submit_local_input(ib);
+                assert!(a.record_remote(PlayerId(1), mb).is_none());
+                assert!(b.record_remote(PlayerId(0), ma).is_none());
+                assert!(a.try_advance().is_empty());
+                assert!(b.try_advance().is_empty());
+                assert_eq!(a.sim().state_hash(), b.sim().state_hash(), "peers diverged at tick {t}");
+                hashes.push(a.sim().state_hash());
+            }
+            hashes
+        };
+
+        let without_stack = run(false);
+        let with_inactive_stack = run(true);
+        assert_eq!(
+            without_stack, with_inactive_stack,
+            "the inactive solo-crab stack must be a bit-for-bit no-op on a networked round"
+        );
+
+        // Non-vacuity: the round must actually evolve, so the equality above isn't a trivial
+        // match of two frozen sims. The integer crab moves under its pursuit, so the hash
+        // changes over the run.
+        assert!(
+            without_stack.first() != without_stack.last(),
+            "the round must change state (else the no-op equality is vacuous)"
+        );
+
+        // Teeth: prove the hash is SENSITIVE to the crab pose, so the no-op equality above is
+        // meaningful — i.e. IF a refactor wrongly armed the external crab and pushed a pose on a
+        // networked round, the hashes WOULD diverge (this is the desync the invariant prevents).
+        let mut armed = Lockstep::new(seed, &players, PlayerId(0));
+        let mut plain = Lockstep::new(seed, &players, PlayerId(1));
+        armed.enable_external_crab(true);
+        // Warm past the startup grace so the integer pursuit on `plain` has begun moving the
+        // crab, then push a DIFFERENT pose into the externally-driven sim.
+        for _ in 0..40u64 {
+            let ma = armed.submit_local_input(Input::default());
+            let mb = plain.submit_local_input(Input::default());
+            let _ = armed.record_remote(PlayerId(1), mb);
+            let _ = plain.record_remote(PlayerId(0), ma);
+            armed.set_external_crab_pose(Pos { x: 0, z: 0 }, 0);
+            let _ = armed.try_advance();
+            let _ = plain.try_advance();
+        }
+        assert_ne!(
+            armed.sim().state_hash(),
+            plain.sim().state_hash(),
+            "an externally-driven crab pose MUST change the hash — else the no-op test has no teeth"
         );
     }
 }
