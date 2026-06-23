@@ -19,5 +19,5 @@ the one he asked for; he appreciates the pushback. Dry sass too.
 
 ## Pre-submission checks
 - `cargo fmt --check`
-- `cargo clippy --quiet -- --deny warnings`
+- `cargo clippy --quiet --all-targets -- --deny warnings` (`--all-targets` lints test/bench/example code too, so test-only lints can't slip in)
 - `cargo test -q`

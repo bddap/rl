@@ -756,7 +756,7 @@ mod tests {
         assert_eq!(a, b, "id assignment must not depend on input order");
         // PlayerIds are 0..n in endpoint-id BYTE order (not seed order — real public
         // keys sort arbitrarily). Verify the assignment IS that sorted order.
-        let mut ids = vec![eid(1), eid(2), eid(3)];
+        let mut ids = [eid(1), eid(2), eid(3)];
         ids.sort_by(|x, y| x.as_bytes().cmp(y.as_bytes()));
         for (i, id) in ids.iter().enumerate() {
             assert_eq!(a[id], PlayerId(i as u8), "id at sort position {i}");

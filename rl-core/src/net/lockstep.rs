@@ -307,6 +307,17 @@ fn check(tick: u64, peer: PlayerId, local: u64, remote: u64) -> Option<Fault> {
     })
 }
 
+/// Test-only accessor reachable from the sibling [`crate::net`] desync/invariant suite
+/// (rl#63's MP byte-identical guard), which constructs networked `Lockstep`s and must read
+/// back whether the crab was handed to external control. `pub(crate)` + `#[cfg(test)]` so it
+/// exists only in test builds and never widens the production surface.
+#[cfg(test)]
+impl Lockstep {
+    pub(crate) fn crab_is_external(&self) -> bool {
+        self.sim.crab_is_external()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,16 +486,5 @@ mod tests {
         fn buffered_input_ticks(&self) -> usize {
             self.inputs.len()
         }
-    }
-}
-
-/// Test-only accessor reachable from the sibling [`crate::net`] desync/invariant suite
-/// (rl#63's MP byte-identical guard), which constructs networked `Lockstep`s and must read
-/// back whether the crab was handed to external control. `pub(crate)` + `#[cfg(test)]` so it
-/// exists only in test builds and never widens the production surface.
-#[cfg(test)]
-impl Lockstep {
-    pub(crate) fn crab_is_external(&self) -> bool {
-        self.sim.crab_is_external()
     }
 }
