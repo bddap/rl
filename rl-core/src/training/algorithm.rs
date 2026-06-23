@@ -38,12 +38,14 @@ impl Default for PpoConfig {
             gamma: 0.99,
             lambda: 0.95,
             clip_epsilon: 0.2,
-            // Per-dim mean entropy (not sum), so scale-invariant. Kept small: near a
-            // converged pose the reward gradient goes flat, and a larger bonus then
-            // overpowers it and inflates the action distribution until the stand
-            // dissolves into noise (observed at 0.01 — entropy ran away late-training,
-            // reward eroded). 0.003 still explores early but won't run away.
-            entropy_coeff: 0.003,
+            // Per-dim mean entropy (not sum), so scale-invariant. It's a constant upward
+            // force on the policy's log_std, opposed only by the reach-reward gradient —
+            // which weakens as the curriculum moves the target farther (~⅓ less pull from
+            // band 1.5-3.0m to 2.5-4.0m), so the coeff must sit below what the FARTHEST
+            // band's reach can contain, else log_std inflates unbounded and the policy
+            // dissolves into noise (ran away at 0.01; 0.003 still crept up in band 1, then
+            // diffused once band 2 weakened the reach signal). 0.001 leaves margin.
+            entropy_coeff: 0.001,
             value_coeff: 0.5,
             learning_rate: 3e-4,
             epochs_per_update: 4,
