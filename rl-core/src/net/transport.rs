@@ -27,9 +27,10 @@ use crate::net::membership::{self, Beat};
 /// ALPN for the game's wire. The framing is `[len:u32 LE][kind:u8][body]`, where
 /// `kind` ([`Frame`]) selects a per-tick [`TickMsg`] (the lockstep channel) or a
 /// [`Beat`] (the match-formation barrier channel — rl#44). Bumped on any incompatible
-/// wire change so mismatched builds refuse to connect rather than desync. `/1` adds the
-/// kind byte + the barrier channel over `/0`'s bare-TickMsg stream.
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/1";
+/// wire change so mismatched builds refuse to connect rather than desync. `/1` added the
+/// kind byte + the barrier channel over `/0`'s bare-TickMsg stream; `/2` added the host's
+/// start-GO byte to every [`Beat`] (rl#58), shifting the barrier-frame layout.
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/2";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
@@ -499,8 +500,8 @@ async fn wire_connection(
 
 /// Upper bound on a single frame body, to reject a hostile/garbled length before
 /// allocating. The largest legitimate frame is a full-roster [`Beat`]
-/// (kind + count + 256×32-byte ids ≈ 8 KiB); 16 KiB is generous slack and still bounds
-/// a bad length to a small allocation.
+/// (kind + start + count + 256×32-byte ids ≈ 8 KiB); 16 KiB is generous slack and still
+/// bounds a bad length to a small allocation.
 const MAX_FRAME_LEN: usize = 16 * 1024;
 
 /// Read `[len:u32 LE][kind:u8][body]` frames from a peer's recv stream until it closes,

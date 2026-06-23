@@ -34,7 +34,7 @@ use anyhow::Result;
 use iroh::EndpointId;
 
 use crate::net::lockstep::{Lockstep, TickMsg};
-use crate::net::membership::{BEAT_EVERY, Membership, Status};
+use crate::net::membership::{BEAT_EVERY, Membership, Role, Status};
 use crate::net::sim::PlayerId;
 use crate::net::telemetry::{self, TelemetryEvent, TelemetrySender};
 use crate::net::transport::{self, PeerWire, Session};
@@ -117,6 +117,34 @@ pub enum MatchResult {
     /// window). The caller starts a deterministic solo round instead of awaiting an
     /// empty networked match — see the module-level rl#47 note.
     Alone,
+    /// The user cancelled out of the lobby before a match formed (rl#58 host-triggered
+    /// path only). The session is torn down before returning, so no LAN phantom lingers.
+    /// The caller drops back to the menu — distinct from [`MatchResult::Alone`], which is
+    /// a round to play; `Cancelled` is "play nothing, go back".
+    Cancelled,
+}
+
+/// The rl#58 host-triggered lobby: the [`Role`] (which decides the close trigger) plus the
+/// live control + observation channels. Passing `Some(LobbyControl)` to the formation core
+/// IS what selects the lobby barrier; `None` is the default timer-closed barrier. So the
+/// determinism-critical mode is an explicit sum (`Option<LobbyControl>`), never inferred from
+/// "did some channel happen to be wired" — `connect_and_form_lobby` can't be handed a control
+/// that silently runs the timer barrier.
+pub struct LobbyControl {
+    /// Host vs joiner. The host commands the synchronized start; a joiner waits for the GO.
+    /// Threaded into [`Membership::host_triggered`] so the role is enforced by the type.
+    pub role: Role,
+    /// A signal that the player clicked **Start**. On the first signal the barrier calls
+    /// [`Membership::set_starting`] — which is a structural no-op for a [`Role::Joiner`], so a
+    /// joiner can't command a start even if this fires.
+    pub start_rx: std::sync::mpsc::Receiver<()>,
+    /// A signal that the player clicked **Cancel** (Host or Join). The barrier returns
+    /// [`MatchResult::Cancelled`] promptly and tears the session down, so leaving the lobby
+    /// doesn't strand a ~12 s LAN phantom (the bug rl#58 calls out).
+    pub cancel_rx: std::sync::mpsc::Receiver<()>,
+    /// A feed of the current live roster (us + peers, sorted) emitted each beat, for the
+    /// lobby's live player list. Best-effort: a full/closed channel just drops the update.
+    pub roster_tx: std::sync::mpsc::Sender<Vec<EndpointId>>,
 }
 
 /// Bind the LAN endpoint, run the shared [`form_match`] cold-start (the membership
@@ -166,6 +194,43 @@ pub fn connect_and_form_dialing(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
 ) -> Result<MatchResult> {
+    // The scripted/headless path: no interactive lobby (`None`), so the default
+    // (timer-closed) barrier. Identical behaviour to before rl#58.
+    connect_and_form_inner(seed, discover_secs, expect, dial, collector, on_bound, None)
+}
+
+/// The rl#58 boot-menu networked entry: [`connect_and_form_dialing`] plus a [`LobbyControl`]
+/// for the host-triggered lobby — the [`Role`], a host's Start signal, a Cancel that detaches
+/// without a LAN phantom, and a live roster feed. Passing the control IS what selects the
+/// lobby barrier (a joiner lobbies until the host clicks Start) over the timer-closed one; the
+/// roster it freezes is identical either way (the membership core's guarantee), so determinism
+/// is untouched. No `discover_secs` — the lobby is open-ended until the host starts or someone
+/// cancels.
+pub fn connect_and_form_lobby(
+    seed: u64,
+    expect: usize,
+    dial: Option<iroh::EndpointId>,
+    collector: Option<iroh::EndpointId>,
+    on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
+    control: LobbyControl,
+) -> Result<MatchResult> {
+    connect_and_form_inner(seed, 0, expect, dial, collector, on_bound, Some(control))
+}
+
+/// The shared body of both networked entrypoints: bind, optionally dial, run the barrier
+/// (timer-closed when `lobby` is `None`, host-triggered when `Some`), and build the
+/// [`Lockstep`] + driver. One definition so the scripted and lobby paths can't drift on the
+/// cold-start.
+#[allow(clippy::too_many_arguments)] // every arg is a distinct formation knob; bundling further would obscure them.
+fn connect_and_form_inner(
+    seed: u64,
+    discover_secs: u64,
+    expect: usize,
+    dial: Option<iroh::EndpointId>,
+    collector: Option<iroh::EndpointId>,
+    on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
+    lobby: Option<LobbyControl>,
+) -> Result<MatchResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -194,7 +259,9 @@ pub fn connect_and_form_dialing(
         // sees the roster fill (RosterForming/Agreed). Best-effort: a failure to bind
         // the telemetry endpoint just runs the game without it.
         let telemetry = connect_telemetry(collector, my_eid).await;
-        let formation = form_match(&mut session, discover_secs, expect, telemetry.as_ref()).await?;
+        let formation =
+            form_match(&mut session, discover_secs, expect, telemetry.as_ref(), lobby.as_ref())
+                .await?;
         anyhow::Ok((session, formation, telemetry))
     })?;
 
@@ -203,6 +270,13 @@ pub fn connect_and_form_dialing(
         // No peer showed up: drop the session/telemetry (the runtime + endpoint tear down
         // on drop) and tell the caller to play offline.
         Formation::Alone => return Ok(MatchResult::Alone),
+        // The player cancelled the lobby: tear the session down NOW (not on a lazy drop) so
+        // no LAN phantom lingers, then report Cancelled so the caller returns to the menu.
+        Formation::Cancelled => {
+            drop(telemetry);
+            rt.block_on(session.shutdown());
+            return Ok(MatchResult::Cancelled);
+        }
     };
 
     let all_ids: Vec<PlayerId> = frozen.id_map.values().copied().collect();
@@ -259,6 +333,9 @@ pub enum Formation {
     Agreed(Frozen),
     /// Discovery completed with only us live; play solo (see the module rl#47 note).
     Alone,
+    /// The player cancelled the host-triggered lobby before a match formed (rl#58). The
+    /// caller tears the session down and reports [`MatchResult::Cancelled`].
+    Cancelled,
 }
 
 /// Run the LAN match-formation barrier ([`run_barrier`]), then freeze the AGREED
@@ -280,13 +357,15 @@ pub async fn form_match(
     discover_secs: u64,
     expect: usize,
     telemetry: Option<&TelemetrySender>,
+    lobby: Option<&LobbyControl>,
 ) -> Result<Formation> {
     let my_eid = session.endpoint_id();
     println!(
         "forming match on the LAN (need {expect} player(s), solo if alone after {discover_secs}s)…"
     );
 
-    let outcome = match run_barrier(session, my_eid, discover_secs, expect, telemetry).await {
+    let outcome = match run_barrier(session, my_eid, discover_secs, expect, telemetry, lobby).await
+    {
         Ok(BarrierResult::Agreed(o)) => o,
         Ok(BarrierResult::Alone) => {
             // Discovery elapsed with only us live — fall back to solo (rl#47). No
@@ -294,6 +373,12 @@ pub async fn form_match(
             // shows neither; the caller runs an offline round.
             println!("no other peer found within {discover_secs}s — starting a solo round");
             return Ok(Formation::Alone);
+        }
+        Ok(BarrierResult::Cancelled) => {
+            // The player left the lobby (rl#58). No telemetry event — no match formed and
+            // no failure; the caller tears down the session and returns to the menu.
+            println!("lobby cancelled by the player");
+            return Ok(Formation::Cancelled);
         }
         Err(e) => {
             // Mirror the formation failure to the collector (best-effort) before
@@ -337,12 +422,16 @@ struct BarrierOutcome {
     elapsed: Duration,
 }
 
-/// The non-error outcomes of [`run_barrier`]: a real agreement, or the alone fallback
-/// (rl#47). `Alone` is distinct from the `Err` path on purpose — being alone is a normal,
-/// expected launch (play solo), not a formation failure (relaunch).
+/// The non-error outcomes of [`run_barrier`]: a real agreement, the alone fallback (rl#47),
+/// or a user cancel (rl#58 lobby). All three are distinct from the `Err` path on purpose —
+/// being alone is a normal launch (play solo), cancelling is a deliberate exit, and only a
+/// genuine formation failure is an error (relaunch).
 enum BarrierResult {
     Agreed(BarrierOutcome),
     Alone,
+    /// The player clicked Cancel in the host-triggered lobby; leave the barrier promptly so
+    /// the session can be torn down before a LAN phantom forms.
+    Cancelled,
 }
 
 /// Drive the membership barrier to agreement: beat our view every [`BEAT_EVERY`],
@@ -389,18 +478,34 @@ enum BarrierResult {
 /// only fire while `poll` still returns `Forming`, so a `discover_secs >= JOIN_WINDOW` would
 /// let a genuinely-alone peer hit `Failed` first and never solo. The defaults (4s vs 20s)
 /// hold this with wide margin.
+/// rl#58 host-triggered lobby: when `lobby` is `Some`, the barrier is built with
+/// [`Membership::host_triggered`] for that control's [`Role`] and the close gate is the
+/// host's GO on top of the settle, not the timer alone. Each beat we also (a) call
+/// [`Membership::set_starting`] once the host's `start_rx` fires, (b) return
+/// [`BarrierResult::Cancelled`] the instant `cancel_rx` fires (so the caller can tear the
+/// session down with no LAN phantom), and (c) push the live roster to `roster_tx` for the
+/// lobby's player list. The rl#47 alone-fallback is SKIPPED in lobby mode — a lone host
+/// starts via the UI's local instant-solo path and never enters this barrier, so reaching
+/// here means the host means to wait for peers (open-ended until Start/Cancel).
 async fn run_barrier(
     session: &mut Session,
     me: EndpointId,
     discover_secs: u64,
     expect: usize,
     telemetry: Option<&TelemetrySender>,
+    lobby: Option<&LobbyControl>,
 ) -> Result<BarrierResult> {
     let start = Instant::now();
-    let mut m = Membership::new(me, expect, start);
+    // `Some(control)` is the interactive lobby (host-triggered close per its `role`); `None`
+    // is the default timer barrier. The mode is this explicit choice, never inferred.
+    let mut m = match lobby {
+        Some(c) => Membership::host_triggered(c.role, me, expect, start),
+        None => Membership::new(me, expect, start),
+    };
     let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
     let mut ticker = tokio::time::interval(BEAT_EVERY);
     let mut last_live = 0usize;
+    let mut last_roster: Vec<EndpointId> = Vec::new();
     // Whether we've EVER received a direct beat from any peer this formation. Gates the solo
     // fallback: heard-then-lost is a link failure (loud `Failed`), only never-heard is solo.
     let mut ever_heard_peer = false;
@@ -413,6 +518,22 @@ async fn run_barrier(
     loop {
         ticker.tick().await;
         let now = Instant::now();
+
+        // Lobby controls (rl#58), checked before forming: a Cancel ends the barrier NOW; a
+        // Start latches the host into commanding the GO (a no-op for a joiner — `set_starting`
+        // is structurally inert off [`Role::Host`]). `try_recv` is non-blocking; a closed
+        // cancel channel (the UI dropped its sender) is treated as a cancel — the lobby is gone.
+        if let Some(c) = lobby {
+            match c.cancel_rx.try_recv() {
+                Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Ok(BarrierResult::Cancelled);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            if c.start_rx.try_recv().is_ok() {
+                m.set_starting();
+            }
+        }
 
         // Ingest everything the transport has: beats feed the membership machine;
         // ticks are from a peer that already finished forming — hold them to replay
@@ -439,6 +560,17 @@ async fn run_barrier(
         let status = m.poll(now);
         session.broadcast_beat(&m.beat()).await;
 
+        // Push the live roster to the lobby UI when it changes (rl#58). Best-effort — a
+        // closed/full channel just drops it. The set is the membership's own `live_set`,
+        // so the lobby shows exactly what would freeze.
+        if let Some(c) = lobby {
+            let roster = m.live_set();
+            if roster != last_roster {
+                let _ = c.roster_tx.send(roster.clone());
+                last_roster = roster;
+            }
+        }
+
         match status {
             Status::Agreed { roster } => {
                 return Ok(BarrierResult::Agreed(BarrierOutcome {
@@ -455,12 +587,17 @@ async fn run_barrier(
                 );
             }
             Status::Forming { live } => {
-                // Solo fallback (rl#47): the window elapsed and we are STILL alone and have
-                // never heard a peer. `live` is fresh from the `poll` above (post-expiry),
-                // and any peer that ever beat us directly makes `live >= 2` AND latches
-                // `ever_heard_peer`, so this is the genuinely-empty-LAN case — never a peer
-                // mid-handshake or a peer we lost. Real multiplayer keeps the full barrier.
-                if is_alone_now(expect, live, ever_heard_peer, now >= alone_deadline) {
+                // Solo fallback (rl#47) — DEFAULT (non-lobby) path only. The lobby is
+                // open-ended (a host waits for peers until Start/Cancel), and a lone host
+                // never reaches this barrier (the UI's local instant-solo path handles it),
+                // so the alone-fallback would only mis-fire here. When it does apply: the
+                // window elapsed and we are STILL alone and have never heard a peer. `live`
+                // is fresh from the `poll` above (post-expiry), and any peer that ever beat
+                // us directly makes `live >= 2` AND latches `ever_heard_peer`, so this is the
+                // genuinely-empty-LAN case — never a peer mid-handshake or a peer we lost.
+                if lobby.is_none()
+                    && is_alone_now(expect, live, ever_heard_peer, now >= alone_deadline)
+                {
                     return Ok(BarrierResult::Alone);
                 }
                 if live != last_live {
@@ -493,8 +630,8 @@ fn is_alone_now(expect: usize, live: usize, ever_heard_peer: bool, past_deadline
 
 /// Build the single-peer lockstep for an OFFLINE round (just us), honoring the
 /// `RL_VEHICLE` pilot flag. The one definition shared by every offline entry into the
-/// windowed client — the explicit `play --solo`, the boot-menu Solo / Host-Start-alone
-/// buttons (rl#56), and the rl#47 discovery-found-no-peer fallback — so they all play the
+/// windowed client — the boot-menu Host-alone Start (rl#58), the scripted `--host`/`--join`
+/// alone outcome, and the rl#47 discovery-found-no-peer fallback — so they all play the
 /// byte-identical deterministic solo round with no second construction to drift. `seed`
 /// is the shared match seed (the caller passes the one constant every peer uses).
 pub fn solo_lockstep_for(seed: u64) -> Lockstep {
@@ -628,15 +765,16 @@ mod tests {
         s0.connect_direct(a1.clone()).await.expect("s0->s1");
 
         // Run all three barriers concurrently. s2's dials are issued from inside its
-        // future after a short delay, so it shows up mid-formation.
-        let f0 = form_match(&mut s0, 1, 3, None);
-        let f1 = form_match(&mut s1, 1, 3, None);
+        // future after a short delay, so it shows up mid-formation. `None` lobby — this
+        // exercises the unchanged timer-closed barrier.
+        let f0 = form_match(&mut s0, 1, 3, None, None);
+        let f1 = form_match(&mut s1, 1, 3, None, None);
         let f2 = async {
             // Stagger: let s0/s1 form their partial view first, then s2 meshes in.
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             s2.connect_direct(a0.clone()).await.expect("s2->s0");
             s2.connect_direct(a1.clone()).await.expect("s2->s1");
-            form_match(&mut s2, 1, 3, None).await
+            form_match(&mut s2, 1, 3, None, None).await
         };
         let (r0, r1, r2) = tokio::join!(f0, f1, f2);
         // Each peer must AGREE (not fall back to solo — they all see each other), so unwrap
@@ -644,6 +782,7 @@ mod tests {
         let unwrap_agreed = |r: Result<Formation>, who: &str| match r.expect(who) {
             Formation::Agreed(f) => f,
             Formation::Alone => panic!("{who}: fell back to solo despite peers being present"),
+            Formation::Cancelled => panic!("{who}: cancelled despite no lobby control"),
         };
         let (r0, r1, r2) = (
             unwrap_agreed(r0, "s0 forms"),

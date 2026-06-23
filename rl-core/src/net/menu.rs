@@ -1,8 +1,10 @@
-//! Boot menu for the windowed client (rl#56): Host / Join / Solo, shown before any
-//! round so the player picks a ROLE instead of the old blind discover-or-fail window
-//! (which errored with no/flickering peers — #55). It supersedes that auto-fallback:
-//! Host → Start always yields a round (solo when nobody joined), so a lone player is
-//! always playable without the fragile discovery timeout.
+//! Boot menu for the windowed client: **Host / Join** (rl#58 — the old separate Solo
+//! button is gone, because Host-with-no-joiners IS solo, one codepath). Shown before any
+//! round so the player picks a ROLE. Host opens a lobby and a **Start** button forms the
+//! round NOW: alone → an instant solo round, peers present → a host-commanded networked
+//! lockstep. Join sits in the lobby until the host Starts. This supersedes the old
+//! discover-or-fail boot (#55): there is no fragile discovery timeout — the host decides
+//! when to begin.
 //!
 //! ## Determinism isolation — why the menu can't desync the sim
 //!
@@ -11,16 +13,18 @@
 //! channel:
 //! - The pre-round phases (`Menu`/`Connecting` — see [`crate::net::render::AppPhase`])
 //!   hold no [`Lockstep`] and no sim. The sim is built only at the `Playing` transition,
-//!   from the same [`net_loop::connect_and_form`]/[`net_loop::solo_lockstep_for`] the
+//!   from the same [`net_loop::connect_and_form_lobby`]/[`net_loop::solo_lockstep_for`] the
 //!   pre-menu boot used — so the agreed roster + seed form EXACTLY as before. The menu
 //!   chooses *when* and *whether to network*; it contributes zero bytes to sim state.
 //! - Networked formation runs on a background thread ([`spawn_formation`]); the menu
 //!   only polls a channel for the finished [`net_loop::MatchResult`]. The barrier
-//!   ([`crate::net::membership`]) is the unchanged determinism-critical code — every
-//!   peer still freezes the byte-identical sorted roster. The menu adds no roster input.
-//! - The only menu output that reaches the round is the choice of [`StartChoice`]
-//!   (solo vs networked) and, for Join, the host's endpoint id to DIAL — addressing
-//!   data, never sim data. Dialing only opens a QUIC link; the roster still comes from
+//!   ([`crate::net::membership`]) is the determinism-critical code — every peer still
+//!   freezes the byte-identical sorted roster. The host-triggered start (rl#58) moves only
+//!   the *moment* the barrier closes (the host's GO instead of a timer); the roster a peer
+//!   freezes is the membership core's same `live_set`, so it can't fork the agreed set.
+//! - The only menu output that reaches the round is the [`StartChoice`] role, for Join the
+//!   host's endpoint id to DIAL, and the host's Start/Cancel signals — addressing +
+//!   commands, never sim data. Dialing only opens a QUIC link; the roster still comes from
 //!   the barrier, so a typo'd code fails to form a match, it can't form a WRONG one.
 //!
 //! So two peers that reach a round via the menu are bit-identical to two that reached
@@ -34,47 +38,37 @@ use anyhow::Result;
 pub use iroh::EndpointId;
 
 use crate::net::lockstep::Lockstep;
-use crate::net::net_loop::{self, MatchResult, NetDriver};
+use crate::net::membership::Role;
+use crate::net::net_loop::{self, LobbyControl, MatchResult, NetDriver};
 
-/// What the player picked on the menu (or a scripted flag forced). Drives whether the
-/// round is built instantly offline or after a networked formation. NOT sim state — it
-/// only selects which formation path runs; the resulting roster/seed is the barrier's.
+/// The role the player picked on the menu (rl#58: the menu is just Host / Join — the old
+/// separate Solo button is gone, since Host-with-no-joiners IS solo). Selects which side of
+/// the host-triggered lobby we run; NOT sim state — the resulting roster/seed is the
+/// barrier's.
 #[derive(Debug, Clone)]
 pub enum StartChoice {
-    /// Play offline immediately: build the solo [`Lockstep`] with no network. Both the
-    /// explicit Solo button and Host → Start with zero joiners land here — the clean
-    /// always-playable path that removes the #55 discovery failure.
-    Solo,
-    /// Host a networked match: run the shared formation barrier so any LAN peers that
-    /// dialed our code (or found us via mDNS) join the agreed roster. With nobody else
-    /// present the barrier-over-network forms `{self}` (see `expect == 1` in
-    /// [`net_loop`]); but the menu's Start-solo button uses [`StartChoice::Solo`] for a
-    /// guaranteed instant round rather than depending on that timing.
+    /// Host a match: open a host-triggered lobby (rl#58). Peers join by our code or mDNS;
+    /// the host clicks **Start** to begin. Start with zero joiners is the SOLO round (the
+    /// UI forms it locally and instantly — see [`solo_round`] — never depending on the
+    /// barrier), and Start with peers present commands a synchronized networked start.
     Host,
-    /// Join a host: dial this endpoint id first (mDNS resolves its LAN address), then run
-    /// the same barrier so we land in the host's agreed roster. `None` = discover on the
-    /// LAN with no explicit dial (rely on mDNS alone).
+    /// Join a host: dial this endpoint id first (mDNS resolves its LAN address), then sit
+    /// in the lobby until the host Starts. `None` = discover on the LAN with no explicit
+    /// dial (rely on mDNS alone).
     Join(Option<EndpointId>),
 }
 
-/// How long the networked Host/Join paths wait in the barrier before concluding (passed
-/// to [`net_loop::connect_and_form`] as `discover_secs`). Longer than the old 4 s boot
-/// default because the player has now EXPLICITLY chosen to network and may be waiting on
-/// a peer to also hit Join — give the LAN time rather than dropping to solo early. Stays
-/// well under the barrier's `JOIN_WINDOW` (20 s) so the alone-fallback can still fire.
-const NET_DISCOVER_SECS: u64 = 12;
-
-/// The participant floor for a menu-initiated networked match (the barrier's `expect`).
-/// 2 — a Host/Join player wants at least one peer; with none present after
-/// [`NET_DISCOVER_SECS`] the barrier's rl#47 alone-fallback returns
-/// [`MatchResult::Alone`] and we play solo, so "nobody joined" still yields a round.
+/// The participant floor for a menu-initiated NETWORKED match (the barrier's `expect`).
+/// 2 — the host-commanded networked start only fires with at least one peer present; a
+/// host that clicks Start ALONE takes the UI's local instant-solo path ([`solo_round`])
+/// and never reaches the barrier, so this floor never blocks the solo case.
 const NET_EXPECT: usize = 2;
 
-/// A networked formation running on a background thread, with the channels its result
-/// and bound-id arrive on. Held by the menu while [`AppPhase::Connecting`] so the render
-/// loop never blocks on the barrier (which can wait many seconds). Dropping the receiver
-/// before the thread finishes just detaches it — the thread tears its own session down on
-/// return.
+/// A networked host-triggered formation running on a background thread, with the channels
+/// its result, bound-id, live roster, and start/cancel commands flow over. Held by the menu
+/// while [`AppPhase::Connecting`] so the render loop never blocks on the barrier. Dropping it
+/// (e.g. on Cancel) drops the command/roster channels too — the barrier sees its `cancel_rx`
+/// disconnect and tears its own session down promptly (no LAN phantom).
 pub struct Formation {
     rx: mpsc::Receiver<Result<MatchResult>>,
     /// For a Join, the dialed host's id (shown as "dialing …"); `None` for a LAN-discover
@@ -85,6 +79,17 @@ pub struct Formation {
     /// channel value isn't lost across frames.
     bound_rx: mpsc::Receiver<EndpointId>,
     bound: std::cell::Cell<Option<EndpointId>>,
+    /// The host's Start command (rl#58): one send commands the barrier's synchronized GO.
+    /// `Some` only for a Host; a Join has no Start to give. `take`-n on first use so Start
+    /// fires exactly once.
+    start_tx: std::cell::Cell<Option<mpsc::Sender<()>>>,
+    /// The Cancel command (rl#58): a send (or simply dropping this [`Formation`]) tells the
+    /// barrier to bail and shut the session down with no phantom.
+    cancel_tx: mpsc::Sender<()>,
+    /// Live roster feed from the barrier (us + peers, sorted), updated each beat. Drained
+    /// into `roster` so the latest survives frame to frame for the lobby player list.
+    roster_rx: mpsc::Receiver<Vec<EndpointId>>,
+    roster: std::cell::RefCell<Vec<EndpointId>>,
     /// Whether this is a Host (vs Join) formation — for the lobby screen's copy + which
     /// code to display.
     pub hosting: bool,
@@ -92,8 +97,8 @@ pub struct Formation {
 
 impl Formation {
     /// Non-blocking poll: `Some` once the background barrier has finished (Ok with a
-    /// match/alone result, or Err on a formation failure), `None` while it's still
-    /// forming. The render loop calls this each frame from the Connecting screen.
+    /// match/alone/cancelled result, or Err on a formation failure), `None` while it's
+    /// still forming. The render loop calls this each frame from the Connecting screen.
     pub fn poll(&self) -> Option<Result<MatchResult>> {
         match self.rx.try_recv() {
             Ok(result) => Some(result),
@@ -123,14 +128,48 @@ impl Formation {
             self.dial_code
         }
     }
+
+    /// The current live lobby roster (us + every joined peer, sorted), drained from the
+    /// barrier's feed. Drives the lobby player list. Empty until the session binds and the
+    /// first beat lands; for a host alone it stays `[self]`.
+    pub fn roster(&self) -> Vec<EndpointId> {
+        // Drain to the newest snapshot (cheap; a couple per second), keeping the last.
+        while let Ok(r) = self.roster_rx.try_recv() {
+            *self.roster.borrow_mut() = r;
+        }
+        self.roster.borrow().clone()
+    }
+
+    /// How many players are currently in the lobby (us + peers). 1 = the host is still
+    /// alone, so a Host Start now is the instant SOLO round; ≥2 = a networked start.
+    pub fn lobby_len(&self) -> usize {
+        self.roster().len()
+    }
+
+    /// Host: command the barrier's synchronized start (rl#58). Fires the GO exactly once
+    /// (the sender is taken on first call); a Join or a second call is a no-op. The caller
+    /// uses this only when peers are present — a host alone takes the local instant-solo
+    /// path instead.
+    pub fn request_start(&self) {
+        if let Some(tx) = self.start_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Cancel the formation (rl#58): tell the barrier to bail and shut its session down now,
+    /// so leaving the lobby strands no ~12 s LAN phantom. Idempotent and also implied by
+    /// simply dropping this [`Formation`] (the barrier's `cancel_rx` then disconnects).
+    pub fn cancel(&self) {
+        let _ = self.cancel_tx.send(());
+    }
 }
 
-/// Start a networked formation on a background thread and hand back the [`Formation`] to
-/// poll. The barrier ([`net_loop::connect_and_form`]) builds its own tokio runtime and
-/// blocks until it agrees / falls back to solo / fails — so it MUST run off the render
-/// thread, or the menu would freeze for the whole discovery window. The thread owns the
-/// runtime + session for its lifetime and tears them down on return (Drop), exactly as a
-/// direct `connect_and_form` call would.
+/// Start a host-triggered formation on a background thread and hand back the [`Formation`]
+/// to poll + command. The barrier ([`net_loop::connect_and_form_lobby`]) builds its own
+/// tokio runtime and blocks until the host starts / a peer cancels / it fails — so it MUST
+/// run off the render thread, or the menu would freeze. The thread owns the runtime +
+/// session for its lifetime and tears them down on return (Drop or an explicit shutdown on
+/// Cancel).
 ///
 /// `seed` is the shared match seed (the caller passes the one constant every peer uses,
 /// so the menu can't introduce a per-peer seed and desync). `join` is the host id to dial
@@ -143,17 +182,33 @@ fn spawn_formation(
     telemetry: Option<EndpointId>,
 ) -> Formation {
     let (tx, rx) = mpsc::channel();
-    // A second channel for the worker to report our own bound endpoint id the instant the
-    // session is up, so a Host lobby can show its join code without waiting out the barrier.
+    // The worker reports our bound endpoint id (Host's join code) the instant the session
+    // is up, the live roster each beat, and listens for Start (host GO) + Cancel commands.
     let (bound_tx, bound_rx) = mpsc::channel();
+    let (roster_tx, roster_rx) = mpsc::channel();
+    let (start_tx, start_rx) = mpsc::channel();
+    let (cancel_tx, cancel_rx) = mpsc::channel();
+    // The Role decides the barrier's close trigger (host commands the GO; joiner waits) and
+    // is enforced in the membership type. A joiner also has no Start sender to give — it's
+    // dropped here so the UI's `request_start` is a no-op — defense in depth atop the Role.
+    let (role, host_start_tx) = if hosting {
+        (Role::Host, Some(start_tx))
+    } else {
+        (Role::Joiner, None)
+    };
     thread::spawn(move || {
-        let result = net_loop::connect_and_form_dialing(
+        let result = net_loop::connect_and_form_lobby(
             seed,
-            NET_DISCOVER_SECS,
             NET_EXPECT,
             join,
             telemetry,
             Some(bound_tx),
+            LobbyControl {
+                role,
+                start_rx,
+                cancel_rx,
+                roster_tx,
+            },
         );
         // Ignore a send error: it only means the menu moved on (receiver dropped), in
         // which case nobody is waiting and the session tears down on this fn's return.
@@ -164,19 +219,21 @@ fn spawn_formation(
         dial_code: join,
         bound_rx,
         bound: std::cell::Cell::new(None),
+        start_tx: std::cell::Cell::new(host_start_tx),
+        cancel_tx,
+        roster_rx,
+        roster: std::cell::RefCell::new(Vec::new()),
         hosting,
     }
 }
 
-/// Kick off the formation for a networked [`StartChoice`] (Host or Join), or `None` for
-/// Solo (which needs no formation — the caller builds the solo lockstep directly). The
-/// single place the menu turns a choice into a running barrier, so the Host vs Join
-/// parameterization (who dials whom) lives in one spot.
-pub fn begin(choice: &StartChoice, seed: u64, telemetry: Option<EndpointId>) -> Option<Formation> {
+/// Kick off the host-triggered formation for a [`StartChoice`] (Host or Join). The single
+/// place the menu turns a choice into a running lobby, so the Host vs Join parameterization
+/// (who dials whom, who holds the Start command) lives in one spot.
+pub fn begin(choice: &StartChoice, seed: u64, telemetry: Option<EndpointId>) -> Formation {
     match choice {
-        StartChoice::Solo => None,
-        StartChoice::Host => Some(spawn_formation(seed, None, true, telemetry)),
-        StartChoice::Join(host) => Some(spawn_formation(seed, *host, false, telemetry)),
+        StartChoice::Host => spawn_formation(seed, None, true, telemetry),
+        StartChoice::Join(host) => spawn_formation(seed, *host, false, telemetry),
     }
 }
 
@@ -190,26 +247,28 @@ pub struct ReadyMatch {
     pub net: Option<NetDriver>,
 }
 
-/// Turn a finished [`MatchResult`] into a [`ReadyMatch`]. `Alone` becomes a [`solo_round`]
-/// (the SAME deterministic solo the `--solo` path uses — one definition, no drift), so
-/// "Host → Start, nobody joined" and "Join, host never appeared" both play the identical
-/// offline round.
-pub fn ready_from(result: MatchResult, seed: u64) -> ReadyMatch {
+/// Turn a finished [`MatchResult`] into a [`ReadyMatch`], or `None` if the player cancelled
+/// the lobby (no round to play — the UI returns to the menu). `Alone` becomes a
+/// [`solo_round`] (the SAME deterministic solo the Host-alone Start uses — one definition,
+/// no drift), so "Join, host never appeared" plays the identical offline round.
+pub fn ready_from(result: MatchResult, seed: u64) -> Option<ReadyMatch> {
     match result {
         MatchResult::Joined(joined) => {
             let (lockstep, net) = *joined;
-            ReadyMatch {
+            Some(ReadyMatch {
                 lockstep,
                 net: Some(net),
-            }
+            })
         }
-        MatchResult::Alone => solo_round(seed),
+        MatchResult::Alone => Some(solo_round(seed)),
+        MatchResult::Cancelled => None,
     }
 }
 
-/// Build an OFFLINE round directly (no networking): the Solo menu button and the
-/// barrier's Alone fallback both use it, so the instant-solo path and the "nobody joined"
-/// path are the byte-identical deterministic round from [`net_loop::solo_lockstep_for`].
+/// Build an OFFLINE round directly (no networking): the Host-alone Start (the UI forms it
+/// the instant a host clicks Start with zero peers) and the barrier's Alone fallback both
+/// use it, so the instant-solo path and the "nobody joined" path are the byte-identical
+/// deterministic round from [`net_loop::solo_lockstep_for`].
 pub fn solo_round(seed: u64) -> ReadyMatch {
     ReadyMatch {
         lockstep: net_loop::solo_lockstep_for(seed),
@@ -221,17 +280,29 @@ pub fn solo_round(seed: u64) -> ReadyMatch {
 mod tests {
     use super::*;
 
-    /// `begin` returns no formation for Solo (the caller builds the solo lockstep with no
-    /// network) and a formation for the networked roles — the routing the render loop
-    /// relies on to know whether to enter the Connecting screen at all. Pins that Solo
-    /// never spins up a barrier/thread.
+    /// Only a Host formation hands back a usable Start command (rl#58); a Join has no Start
+    /// to give (it waits for the host's), so its `start_tx` is dropped at spawn. Pins that
+    /// `request_start` is a no-op for a joiner — it can never command a start it isn't
+    /// allowed to — and that `cancel`/`hosting` route per role. `#[ignore]` because `begin`
+    /// spawns a real barrier thread that binds an iroh UDP endpoint (same reason as
+    /// `net_loop`'s live formation test); run with `--ignored`. The pure host-vs-joiner
+    /// protocol guarantee is covered socket-free by
+    /// `membership::only_a_host_ever_advertises_the_start_go`.
     #[test]
-    fn begin_only_networks_for_host_and_join() {
-        // No seed/telemetry side effects: Solo must short-circuit before any thread.
-        assert!(
-            begin(&StartChoice::Solo, 0, None).is_none(),
-            "Solo must not start a formation"
-        );
+    #[ignore = "binds a real iroh UDP endpoint via begin(); run explicitly with --ignored"]
+    fn only_host_holds_the_start_command() {
+        // A Host keeps its Start sender; calling request_start takes it (so a second call is
+        // inert) — the once-only GO.
+        let host = begin(&StartChoice::Host, 0, None);
+        assert!(host.hosting, "Host formation is flagged hosting");
+        host.request_start(); // consumes the sender
+        // Cancel both so their barrier threads tear down promptly rather than lingering.
+        host.cancel();
+
+        let join = begin(&StartChoice::Join(None), 0, None);
+        assert!(!join.hosting, "Join formation is not hosting");
+        join.request_start(); // no-op: a joiner never had a Start sender
+        join.cancel();
     }
 
     /// `ready_from(Alone)` yields a solo round (no NetDriver) seeded with the shared seed
@@ -240,9 +311,19 @@ mod tests {
     #[test]
     fn alone_becomes_a_solo_round() {
         let seed = 0xABCD;
-        let m = ready_from(MatchResult::Alone, seed);
+        let m = ready_from(MatchResult::Alone, seed).expect("Alone is a playable solo round");
         assert!(m.net.is_none(), "Alone is offline — no NetDriver");
         // The solo lockstep is built and ready (one player: us).
         assert_eq!(m.lockstep.me().0, 0, "solo player is id 0");
+    }
+
+    /// `ready_from(Cancelled)` is no round at all — the player backed out of the lobby, so
+    /// the UI returns to the menu rather than installing a sim. Pins the type-honest `None`.
+    #[test]
+    fn cancelled_is_not_a_round() {
+        assert!(
+            ready_from(MatchResult::Cancelled, 0).is_none(),
+            "a cancelled lobby yields no round"
+        );
     }
 }
