@@ -17,6 +17,12 @@ use burn::tensor::backend::AutodiffBackend;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
+// The log macros come from `tracing` directly, not `bevy::prelude`: the headless
+// trainer builds bevy without its `bevy_log` default feature (no renderer), so the
+// prelude no longer re-exports `warn!`/`info!`. tracing (a direct dep) carries the same
+// macros and is present in every build. An explicit import shadows the prelude glob, so
+// this is unambiguous in render builds too.
+use tracing::{info, warn};
 
 use crate::TrainConfig;
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
@@ -1354,9 +1360,11 @@ pub(crate) fn init_gpu_backend(tag: &str) -> burn::backend::wgpu::WgpuDevice {
 
 /// rl#49 GPU bench entry point: bring up the wgpu/Vulkan backend on the discrete GPU
 /// (proving the adapter is real hardware, [`init_gpu_backend`]), then run the same
-/// [`bench_ppo_update`] harness on [`GpuBackend`].
+/// [`bench_ppo_update`] harness on [`GpuBackend`]. `pub` (not `pub(crate)`) because the
+/// `bench-update --backend gpu` caller now lives in the separate `rl-train` binary
+/// crate, which reaches it across the crate boundary like the CPU `bench_ppo_update`.
 #[cfg(feature = "wgpu")]
-pub(crate) fn bench_ppo_update_gpu(
+pub fn bench_ppo_update_gpu(
     workers: usize,
     envs: usize,
     horizon: usize,
@@ -1543,12 +1551,17 @@ const TARGET_Y_MAX: f32 = 0.7;
 /// not a rung worth training.
 const TARGET_ARENA_HALF: f32 = crate::physics::world::ARENA_HALF_SIZE - 1.0;
 
-/// Per-episode reach radius (m) the curriculum scores competence by: an episode
-/// "reached" if the crab's claw tip came within this of the target at any tick. Set to
-/// the demo's reach radius so "reached" means the same event a viewer sees the demo
-/// ball teleport on — one definition of a reach across training and demo. A touch
-/// looser than zero so a near-miss that the policy clearly solved still counts.
-const CURRICULUM_REACH_RADIUS: f32 = crate::play::DEMO_REACH_RADIUS;
+/// Per-episode reach radius (m): the curriculum scores an episode "reached" if the
+/// crab's claw tip came within this of the target at any tick. The CANONICAL reach
+/// distance — the demo's ball-hop (`crate::play::DEMO_REACH_RADIUS`) derives from
+/// this one constant, so "reached" means the same event a viewer sees the ball
+/// teleport on. Lives in the (always-compiled) trainer rather than the render-only
+/// demo so the headless build owns the source; the demo, gated out of the trainer,
+/// follows. A touch looser than zero so a near-miss the policy clearly solved still
+/// counts.
+///
+/// `pub(crate)`, not private, so `play` (the demo) can re-export it as the one source.
+pub(crate) const CURRICULUM_REACH_RADIUS: f32 = 0.8;
 /// Reach-fraction over the competence window at or above which the band advances. 0.6,
 /// not ~1.0: the goal is "the policy reliably gets there", not "every episode is
 /// perfect" — targets near the arena edge clamp short and some spawns are awkward, so

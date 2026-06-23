@@ -1,13 +1,13 @@
 //! `game` — the giant-crab rescue game (rl#38), built multiplayer-first on the
 //! deterministic-lockstep + iroh netcode foundation (rl#39).
 //!
-//! This binary is the HEADLESS driver of the deterministic sim ([`rl::net::sim`] —
+//! This binary is the HEADLESS driver of the deterministic sim ([`rl_core::net::sim`] —
 //! now the Phase 1 gray-box Extraction loop: first-person players, one giant crab,
-//! an extraction point) over [`rl::net::lockstep`] and [`rl::net::transport`] (iroh
+//! an extraction point) over [`rl_core::net::lockstep`] and [`rl_core::net::transport`] (iroh
 //! LAN discovery). It proves the netcode end to end — discovery, input exchange,
 //! deterministic tick, desync detection — without a GPU (this box renders headlessly
 //! at best). The windowed first-person client + the plane/heli vehicles are separate
-//! later subs that plug into the same sim interface (documented on [`rl::net::sim`]);
+//! later subs that plug into the same sim interface (documented on [`rl_core::net::sim`]);
 //! they consume the state this driver advances, they don't replace it.
 //!
 //! Modes:
@@ -17,7 +17,7 @@
 //! - `solo`: run the lockstep+sim loop with no network (one peer), for a quick
 //!   smoke of the tick machinery (it stirs a placeholder input — real movement is
 //!   the client's job, not this headless smoke's).
-//! - `play`: the windowed first-person CLIENT ([`rl::net::render`]) — see the
+//! - `play`: the windowed first-person CLIENT ([`rl_core::net::render`]) — see the
 //!   gray-box from the local player's eyes and play it, on the SAME lockstep +
 //!   transport as `net`. Boots to a Host/Join/Solo menu (rl#56); `--solo`/`--host`/
 //!   `--join <code>` skip it for scripting (the Deck shortcut uses `--solo`).
@@ -31,14 +31,13 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use iroh::EndpointId;
-use rl::net::lockstep::{INPUT_DELAY, Lockstep};
-use rl::net::sim::{Input, PlayerId};
-use rl::net::telemetry::{self, TELEMETRY_TICK_EVERY, TelemetryEvent, TelemetrySender};
-use rl::net::{net_loop, render, transport};
-
-/// Tick rate of the deterministic sim. 30 Hz is plenty for Phase 0's dots and keeps
-/// the lockstep stall window forgiving on a LAN; Phase 1 can raise it.
-const TICK_HZ: u64 = 30;
+use rl_core::net::lockstep::{INPUT_DELAY, Lockstep};
+// `TICK_HZ` is the deterministic sim's tick rate. The ONE source lives in `net::sim`
+// (so a render peer and this headless driver agree); import it rather than redeclare a
+// second `30` that could silently drift from the sim's.
+use rl_core::net::sim::{Input, PlayerId, TICK_HZ};
+use rl_core::net::telemetry::{self, TELEMETRY_TICK_EVERY, TelemetryEvent, TelemetrySender};
+use rl_core::net::{net_loop, render, transport};
 
 #[derive(Parser)]
 #[command(about = "Giant-crab rescue — Phase 0 netcode skeleton (rl#39)")]
@@ -181,7 +180,7 @@ struct TelemetryCollectorArgs {
     /// Path to the collector's persistent secret key (generated on first run). Pinning
     /// it keeps the collector's endpoint id STABLE across restarts, so the id baked into
     /// each game's `--telemetry` never goes stale.
-    #[arg(long, default_value = rl::net::telemetry::DEFAULT_KEY_PATH)]
+    #[arg(long, default_value = rl_core::net::telemetry::DEFAULT_KEY_PATH)]
     key: PathBuf,
 }
 
@@ -240,7 +239,7 @@ fn main() -> Result<()> {
 /// and a PASS/look-here verdict; exits nonzero if the crab never closed the gap (so it
 /// doubles as a regression gate on "the policy actually drives the crab toward the player").
 fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
-    use rl::net::solo_crab::run_headless_probe;
+    use rl_core::net::solo_crab::run_headless_probe;
 
     let Some(dir) = nn_crab_checkpoint_dir(args.checkpoint) else {
         anyhow::bail!("nn-crab-probe: no brain.bin at the resolved checkpoint dir");
@@ -309,7 +308,7 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
 /// Windowed first-person client. The DEFAULT (`game play` with no role flag) shows the
 /// boot menu (rl#56) — the player picks Host / Join / Solo — and the round is built only
 /// after the choice, never touching the deterministic sim before then (see
-/// [`rl::net::render::Boot`]). The scripted flags bypass the menu for the Deck shortcut +
+/// [`rl_core::net::render::Boot`]). The scripted flags bypass the menu for the Deck shortcut +
 /// tests:
 /// - `--solo` → an instant offline round, no menu, no networking.
 /// - `--host` → host directly: form over the LAN, start with whoever joins (solo if none).
@@ -476,7 +475,7 @@ async fn run_net(args: NetArgs) -> Result<()> {
 
     // Open the telemetry side-channel (if configured) BEFORE forming the match, so the
     // collector sees the roster fill. Best-effort + isolated: separate iroh endpoint,
-    // separate ALPN — see `rl::net::telemetry`. A failure yields `None` and the run is
+    // separate ALPN — see `rl_core::net::telemetry`. A failure yields `None` and the run is
     // byte-for-byte the no-telemetry run.
     let tel = net_loop::connect_telemetry(args.telemetry, my_eid).await;
 
@@ -575,7 +574,7 @@ async fn run_net(args: NetArgs) -> Result<()> {
                 t.send(TelemetryEvent::tick(ls.sim(), total_desyncs, all_ids.len()));
                 t.send(TelemetryEvent::input(issue_tick, input));
             }
-            if !reported_outcome && ls.sim().outcome() != rl::net::sim::Outcome::Ongoing {
+            if !reported_outcome && ls.sim().outcome() != rl_core::net::sim::Outcome::Ongoing {
                 reported_outcome = true;
                 t.send(TelemetryEvent::round_decided(ls.sim()));
             }
@@ -621,10 +620,10 @@ async fn run_net(args: NetArgs) -> Result<()> {
 /// remote operator sees the divergence the instant a deck does.
 fn report_fault(
     total: &mut usize,
-    f: rl::net::lockstep::Fault,
+    f: rl_core::net::lockstep::Fault,
     telemetry: Option<&TelemetrySender>,
 ) {
-    use rl::net::lockstep::Fault;
+    use rl_core::net::lockstep::Fault;
     *total += 1;
     if let Some(t) = telemetry {
         t.send(TelemetryEvent::fault(&f));

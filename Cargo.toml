@@ -1,5 +1,11 @@
-[package]
-name = "rl"
+[workspace]
+resolver = "3"
+members = ["rl-core", "rl-train", "rl-demo", "game"]
+
+# Shared metadata + dependency versions, inherited by every member via
+# `foo.workspace = true`. ONE source for each version/feature set, so the four
+# crates can't drift apart on a bump (the win the workspace is meant to lock in).
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 # Dual MIT / Apache-2.0 (the Rust-ecosystem default); see LICENSE-MIT, LICENSE-APACHE.
@@ -7,48 +13,37 @@ edition = "2024"
 # separate terms (see NOTICE).
 license = "MIT OR Apache-2.0"
 
-# rl#49 feasibility spike: a GPU backend for the PPO update via burn's wgpu/Vulkan.
-# `wgpu` enables burn-wgpu (already in the lock tree via bevy's wgpu) and adds the
-# `Autodiff<Wgpu>` backend + the `bench-update --backend gpu` path. WGSL→Vulkan by
-# default; the SPIR-V (`burn/vulkan`) high-perf path is a separate lever, not enabled
-# here. Off by default — the production `learn` path stays pure CPU ndarray.
-#
-# `naga/termcolor`: bevy drags in wgpu 27 → naga 27 alongside burn-wgpu's wgpu 26 →
-# naga 26, and both share one `codespan-reporting` 0.12 (its features UNIFY across the
-# graph). naga 26's `term::emit` call only typechecks when codespan-reporting's
-# `termcolor` is on (its diagnostic buffer is then a `WriteColor`); without it, naga 26
-# hands a `String` to a `WriteColor`-typed emit and fails to compile. The 27 stack pulls
-# `termcolor` in, so we must flip naga 26's matching feature on too. Only under `wgpu`.
-[features]
-wgpu = ["burn/wgpu", "dep:naga", "naga/termcolor"]
-
-[dependencies]
-bevy = "0.18"
-bevy_rapier3d = "0.34"
+[workspace.dependencies]
+# --- render stack: pulled ONLY by rl-core's `render` feature + the rendering bins.
+# rl-train never enables `render`, so it links none of these. bevy/bevy_rapier3d at
+# default-features=false so the render-free build drops bevy_render/bevy_pbr/wgpu and
+# rapier's render integration; the `render` feature flips their defaults back on (see
+# rl-core/Cargo.toml [features]).
+bevy = { version = "0.18", default-features = false }
+bevy_rapier3d = { version = "0.34", default-features = false }
 # Immediate-mode GUI for the TEMPORARY in-demo `--debug-sliders` physics panel
-# (src/debug_sliders.rs). 0.39 is the bevy_egui release series that tracks bevy
-# 0.18. The panel plugin is only added behind the flag, so training/headless never
-# instantiate it — zero runtime cost; the crate is compiled into the one binary
-# regardless of mode.
+# (rl-core/src/debug_sliders.rs) and the game's boot menu (net::menu). 0.39 tracks
+# bevy 0.18. Optional in rl-core, enabled by `render`.
 bevy_egui = "0.39"
+
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 
 # Read the skinned glTF's skeleton (bind-pose bone transforms) + skin weights to
-# derive colliders (`src/bot/meshfit.rs`). `utils` enables
-# the accessor readers; `names` keeps node names (the bone↔part mapping keys on
-# them). No `import` (it would drag in `image`); we feed the GLB bytes to
-# `Gltf::from_slice`. Already in the tree via bevy at this version, so it adds no
-# new crate. A normal dependency, not dev-only: the collider-fitting runs in the
-# shipped binary under dev subcommands (e.g. `--verify-colliders`), not `cargo test`.
+# derive colliders (rl-core/src/bot/meshfit.rs). `utils` enables the accessor
+# readers; `names` keeps node names (the bone<->part mapping keys on them). No
+# `import` (it would drag in `image`); the GLB bytes feed `Gltf::from_slice`. Already
+# in the tree via bevy at this version, so it adds no new crate. A normal dependency,
+# not dev-only: collider-fitting runs in the shipped binary under dev subcommands
+# (e.g. `--verify-colliders`), not `cargo test`.
 gltf = { version = "1.4.1", default-features = false, features = ["utils", "names"] }
 
 burn = { version = "0.20", features = ["autodiff", "ndarray"] }
 # Only pulled in by the `wgpu` feature, and ONLY to flip naga 26's `termcolor` feature
-# on (see [features].wgpu). naga 26 is already in the lock via bevy's wgpu — this adds
-# no crate, it just activates the feature that makes naga 26 compile alongside naga 27.
-# Not used in any code path.
-naga = { version = "26", optional = true }
+# on. naga 26 is already in the lock via bevy's wgpu — this adds no crate, it just
+# activates the feature that makes naga 26 compile alongside naga 27. Not used in any
+# code path. (See rl-core's [features].wgpu for the full rationale.)
+naga = { version = "26" }
 rand_distr = "0.5"
 clap = { version = "4", features = ["derive"] }
 bincode = "1"
@@ -58,12 +53,10 @@ bincode = "1"
 # none are orphaned). Already in the tree transitively, so it adds no new crate.
 libc = "0.2"
 
-# --- multiplayer netcode foundation (src/net/, src/bin/game.rs — rl#39) ----------
+# --- multiplayer netcode foundation (net/, game) ---------------------------------
 # P2P transport + LAN discovery for couch co-op (the boys + dad, no server). `iroh`
 # is QUIC + endpoint identity; `iroh-mdns-address-lookup` is its mDNS local-network
-# discovery (peers find each other by endpoint id on the LAN). Version-matched to
-# the same iroh 1.0 the deck-control tool runs. Internet relay (Steam) is a later
-# layer; the game binary disables the relay and uses only mDNS.
+# discovery. Version-matched to the same iroh 1.0 the deck-control tool runs.
 iroh = "1"
 iroh-mdns-address-lookup = "0.4"
 # Async stream combinators (`StreamExt`) for the mDNS discovery event stream; iroh
@@ -73,23 +66,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-# Seedable, reproducible PRNG for the deterministic sim. ChaCha8 is the one
-# sanctioned randomness source in `net::sim` — its stream is identical across
-# machines from a seed, unlike `thread_rng`, which is the whole point for lockstep.
+# Seedable, reproducible PRNG for the deterministic sim. ChaCha8 is the one sanctioned
+# randomness source in net::sim — its stream is identical across machines from a seed,
+# unlike `thread_rng`, which is the whole point for lockstep.
 rand_chacha = "0.3"
 
-# The netcode lives in a library target so both `game` and the test harness can use
-# it; the existing single-binary training app (src/main.rs) does not depend on it.
-[lib]
-name = "rl"
-path = "src/lib.rs"
-
-# Phase 0 netcode skeleton: headless LAN discovery + deterministic lockstep demo.
-[[bin]]
-name = "game"
-path = "src/bin/game.rs"
-
-# Enable optimizations in dev for physics sim performance
+# Enable optimizations in dev for physics sim performance.
 [profile.dev]
 opt-level = 1
 

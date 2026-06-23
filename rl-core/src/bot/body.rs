@@ -628,6 +628,9 @@ fn capsule_collider(center: Vec3, rot: Quat, half_height: f32, radius: f32) -> C
 // ---------------------------------------------------------------------------
 // Debug: joint-pivot markers (RL_DEBUG_COLLIDERS)
 // ---------------------------------------------------------------------------
+// Render-only: gizmos draw through a camera, so this whole block is dead in the
+// headless trainer and its types (Gizmos/GizmoConfig) don't exist without bevy's
+// render feature. Gated out there; the demo/screenshot bins (render on) keep it.
 
 /// A separate gizmo config group so the pivot markers can force `depth_bias = -1.0`
 /// (always-in-front) WITHOUT changing how Rapier's collider wireframes render —
@@ -635,12 +638,14 @@ fn capsule_collider(center: Vec3, rot: Quat, half_height: f32, radius: f32) -> C
 /// still reads as 3D. The pivots sit buried inside the opaque skin, so without the
 /// override every marker would be hidden by the body and the screenshot would prove
 /// nothing.
+#[cfg(feature = "render")]
 #[derive(Default, Reflect, GizmoConfigGroup)]
 #[reflect(Default)]
 pub struct PivotGizmos;
 
 /// Marker sphere radius (model units): big enough to spot against the skin yet
 /// small enough not to swallow the joint it marks.
+#[cfg(feature = "render")]
 const PIVOT_MARKER_RADIUS: f32 = 0.02;
 
 /// Draw a bright sphere at every physics link's world origin — which, by
@@ -650,6 +655,7 @@ const PIVOT_MARKER_RADIUS: f32 = 0.02;
 /// wireframes. `GlobalTransform`, not `Transform`: a marker must sit at the pivot's
 /// true world point even mid-tumble, and only the global has the full parent chain
 /// resolved. Always-in-front comes from [`PivotGizmos`]'s `depth_bias`.
+#[cfg(feature = "render")]
 fn draw_pivot_markers(
     parts: Query<&GlobalTransform, With<CrabBodyPart>>,
     mut gizmos: Gizmos<PivotGizmos>,
@@ -669,6 +675,7 @@ fn draw_pivot_markers(
 /// physics-truth overlays — collider cages and the pivots they hinge about — appear
 /// together. Drawn through whatever camera renders the gizmos (the windowed demo's
 /// or the offscreen screenshot's), so it shows up in `--screenshot` too.
+#[cfg(feature = "render")]
 pub fn register_pivot_markers(app: &mut App) {
     app.insert_gizmo_config(
         PivotGizmos,

@@ -1,0 +1,25 @@
+[package]
+name = "rl-train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rl-train"
+path = "src/main.rs"
+
+[features]
+# Forward to rl-core's GPU update backend (rl#49). rl-train builds the GPU PPO update
+# WITHOUT the bevy renderer — `wgpu` does not pull `render`. So `cargo build -p
+# rl-train --features wgpu` links burn-wgpu but still no bevy_render.
+wgpu = ["rl-core/wgpu"]
+
+[dependencies]
+# render OFF (rl-core's default) — the headless trainer links NO bevy_render/wgpu27.
+rl-core = { path = "../rl-core" }
+# bevy for the `Vec3`/math types the DEV verify modes use; burn for the bench-update
+# backend; clap for arg parsing. No bevy_rapier3d here — the verify/bench entries don't
+# touch it directly (rl-core does, transitively).
+bevy.workspace = true
+clap.workspace = true
+burn.workspace = true

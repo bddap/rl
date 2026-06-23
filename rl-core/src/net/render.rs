@@ -50,10 +50,10 @@ use crate::net::sim::{
 };
 use crate::net::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
 
-/// Sim tick rate (Hz). The deterministic sim advances at this fixed rate on every
-/// peer; the client renders faster and interpolates between ticks. Matches the
-/// headless driver's rate so a render peer and a headless peer stay in lockstep.
-pub const TICK_HZ: u64 = 30;
+/// Sim tick rate (Hz). Re-exported from [`crate::net::sim::TICK_HZ`] (the one source)
+/// so this windowed client and the headless driver advance at the same rate and stay
+/// in lockstep; the client renders faster and interpolates between ticks.
+pub use crate::net::sim::TICK_HZ;
 
 /// Seconds per sim tick — the fixed dt the lockstep accumulator drains in.
 const TICK_DT: f64 = 1.0 / TICK_HZ as f64;

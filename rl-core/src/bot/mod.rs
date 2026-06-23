@@ -9,7 +9,13 @@ pub mod rig;
 pub mod sensor;
 #[cfg(test)]
 mod sim_truth_test;
+// Render-only: the skinned-mesh setup + the skin diagnostics drive bevy's renderer
+// (SkinnedMesh, materials, mesh assets), absent in the headless trainer's bevy build.
+// Headless training spawns the colliders only — no skin — so the trainer loses
+// nothing by gating these out.
+#[cfg(feature = "render")]
 pub mod skin;
+#[cfg(feature = "render")]
 pub mod skin_diag;
 // Not test-only: the `--check-rest-colliders` diagnostic ships in the binary and
 // reuses `headless_app`/`tick` to build and settle the same windowless physics
@@ -89,8 +95,10 @@ impl Plugin for BotPlugin {
             .add_systems(FixedUpdate, sensor::build_observation.in_set(BotSet::Sense))
             .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act));
 
-        // The optional skinned model only makes sense with rendering on; in
-        // headless training there is no AssetServer to load it with.
+        // The optional skinned model only renders with visuals on, and `skin` is
+        // render-gated out of the headless trainer entirely — so the whole block is
+        // render-only. (Headless training has no AssetServer to load the model with.)
+        #[cfg(feature = "render")]
         if app
             .world()
             .get_resource::<crate::Visuals>()

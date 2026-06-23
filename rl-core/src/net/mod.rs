@@ -31,13 +31,21 @@
 
 pub mod lockstep;
 pub mod membership;
-pub mod menu;
 pub mod net_loop;
-pub mod render;
 pub mod sim;
-pub mod solo_crab;
 pub mod telemetry;
 pub mod transport;
+
+// Rendering-only client layers — gated out of the headless trainer build (they pull
+// bevy's renderer + egui: the FP window, the boot menu, the solo NN-crab's render
+// transforms). The headless netcode (sim/lockstep/transport) and the trainer don't
+// need them.
+#[cfg(feature = "render")]
+pub mod menu;
+#[cfg(feature = "render")]
+pub mod render;
+#[cfg(feature = "render")]
+pub mod solo_crab;
 
 #[cfg(test)]
 mod desync_test {

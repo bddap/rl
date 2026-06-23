@@ -1,36 +1,68 @@
-// The RL crab machinery (bot / physics / training / play / debug_sliders) and
-// the shared `Visuals` / `TrainConfig` / `UpdateDevice` types now live in the `rl`
-// LIBRARY (src/lib.rs), so the `game` binary can drive the same trained crab in its
-// solo playtest. This binary re-imports them rather than declaring its own copies — one
-// implementation, shared by both binaries. (`recursion_limit` is set on the library
-// root where the affected wgpu-load code lives; it does not need repeating here.)
-use rl::{
-    TrainConfig, UpdateDevice, Visuals, bot, debug_sliders, physics, play, training,
-};
-
-use std::path::PathBuf;
-use std::time::Duration;
+//! `rl-train` — the HEADLESS trainer. Links `rl-core` with render OFF, so it pulls NO
+//! bevy_render/bevy_pbr/wgpu27: the crab machinery (bot / physics / training) and the
+//! shared `TrainConfig` / `UpdateDevice` types come from the library, this binary is a
+//! thin entry that parses its modes and dispatches.
+//!
+//! Modes (all headless, no window, no GPU renderer):
+//! - `learn` — the trainer: K rollout threads + the PPO update. The production path.
+//! - `bench-update` — the PPO-update microbenchmark (rl#48/#49), CPU or `--backend gpu`.
+//! - `--verify-colliders` / `--verify-pivots` / `--check-rest-colliders` — DEV rig
+//!   audits that build a windowless physics world, print a report, and exit.
+//!
+//! The windowed demo + screenshot live in the separate `rl-demo` binary (render on);
+//! the multiplayer game in `game`. Splitting them off is what lets THIS binary link no
+//! graphics crate (rl#51).
 
 use bevy::prelude::*;
-use bevy_rapier3d::prelude::*;
 use clap::{Parser, Subcommand};
+use rl_core::{TrainConfig, UpdateDevice, bot, training};
 
 use training::session::STEPS_PER_ROLLOUT;
 
 /// Crab Combat — RL-trained crab bots learn to stand, walk, and fight.
 ///
 /// Training is the `learn` subcommand (the sole trainer). With no subcommand the
-/// binary only renders a trained policy — `--demo` or `--screenshot` — from the
-/// flags below. The training knobs live on the `learn` subcommand, so a stray
-/// `--workers` on a render invocation is a parse error rather than a silent no-op.
+/// binary runs one of the DEV rig audits (`--verify-colliders` / `--verify-pivots` /
+/// `--check-rest-colliders`) from the flags below, else errors. The training knobs
+/// live on the `learn` subcommand, so a stray `--workers` without it is a parse error
+/// rather than a silent no-op. (The windowed demo/screenshot moved to `rl-demo`.)
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct Cli {
     #[command(flatten)]
-    args: Args,
+    dev: DevArgs,
 
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+/// The headless DEV rig audits — no subcommand, no window. Each loads the crab model,
+/// runs a containment/agreement check, prints a table, and exits with a pass/fail
+/// code, so each doubles as a regression gate on rig changes.
+#[derive(Parser, Debug, Clone)]
+struct DevArgs {
+    /// DEV: score every live collider against the mesh it stands in for and print a
+    /// per-part agreement table (signed surface distance, in model units), then exit.
+    /// Exits nonzero if any part fails. Model is `CRAB_MODEL_PATH`, else the dev
+    /// `sally.glb`.
+    #[arg(long)]
+    verify_colliders: bool,
+
+    /// DEV: test whether every joint pivot and collider endpoint lies INSIDE the
+    /// bind-pose mesh, via the generalized winding number against the model's triangle
+    /// soup, then exit. Reports per-point winding number + signed nearest-surface
+    /// distance and ranks the worst out-of-mesh offenders. Model is `CRAB_MODEL_PATH`,
+    /// else the dev `sally.glb`.
+    #[arg(long)]
+    verify_pivots: bool,
+
+    /// DEV: spawn the crab, settle it to rest, then test every pair of body colliders
+    /// for interpenetration at the settled pose and flag any overlap the solver is
+    /// actively fighting. Expected overlaps (jointed anchors, group-filtered nested
+    /// links) are reported but never failed. Exits nonzero on any illegal one, so it
+    /// gates rig changes.
+    #[arg(long)]
+    check_rest_colliders: bool,
 }
 
 /// The trainer. One learner (the main thread) owns the policy + optimizer +
@@ -91,85 +123,6 @@ pub struct BenchUpdateArgs {
     pub batch: Option<usize>,
 }
 
-/// Render-mode config: the shared `TrainConfig` (for `--checkpoint-dir`, the policy
-/// the demo/screenshot loads) plus the demo/screenshot/window knobs. Training knobs
-/// live on the `learn` subcommand, not here.
-#[derive(Parser, Debug, Clone)]
-pub struct Args {
-    #[command(flatten)]
-    pub train: TrainConfig,
-
-    /// Play with a trained crab: load the checkpoint, drive it with the policy
-    /// (no learning), orbit camera + poke/reset controls.
-    #[arg(long)]
-    demo: bool,
-
-    /// Run the demo in a window instead of the default borderless fullscreen.
-    #[arg(long)]
-    windowed: bool,
-
-    /// Render one frame to this PNG and exit (windowless, GPU on). For inspecting
-    /// the trained crab without a display.
-    #[arg(long, value_name = "PATH")]
-    screenshot: Option<PathBuf>,
-
-    /// Physics steps to simulate before taking the screenshot.
-    #[arg(long, default_value_t = 200)]
-    screenshot_settle: u32,
-
-    /// Screenshot width in pixels.
-    #[arg(long, default_value_t = 1280)]
-    width: u32,
-
-    /// Screenshot height in pixels.
-    #[arg(long, default_value_t = 720)]
-    height: u32,
-
-    /// Directory the DEMO hot-reloads the policy from while running — the LIVE
-    /// training output. The demo loads its initial policy from `--checkpoint-dir`
-    /// (a stable copy) and then, every couple of seconds, swaps in a newer
-    /// checkpoint that appears here, so a left-open demo tracks training without a
-    /// relaunch. Unset, or a missing/half-written dir, = no swap. Demo mode only.
-    #[arg(long, value_name = "PATH")]
-    live_checkpoint_dir: Option<PathBuf>,
-
-    /// Demo only: replace the trained policy with hands-on gamepad control — D-pad
-    /// up/down picks a joint, the right stick drives its torque, all else held at
-    /// zero. A physics feel-test, not a learned driver.
-    #[arg(long)]
-    manual_control: bool,
-
-    /// Demo only: show a TEMPORARY egui panel of physics sliders (contact spring,
-    /// length_unit, joint limit spring + leg friction, restitution, substeps) that
-    /// live-tune the running crab. A throwaway feel-tuning aid; off by default and
-    /// never wired into training/headless. See `src/debug_sliders.rs`.
-    #[arg(long)]
-    debug_sliders: bool,
-
-    /// DEV: score every live collider against the mesh it stands in for and print a
-    /// per-part agreement table (signed surface distance, in model units), then exit
-    /// (no window). Exits nonzero if any part fails, so it doubles as a regression
-    /// gate on rig changes. Model is `CRAB_MODEL_PATH`, else the dev `sally.glb`.
-    #[arg(long)]
-    verify_colliders: bool,
-
-    /// DEV: test whether every joint pivot and collider endpoint lies INSIDE the
-    /// bind-pose mesh, via the generalized winding number against the model's
-    /// triangle soup, then exit (no window). Reports per-point winding number +
-    /// signed nearest-surface distance and ranks the worst out-of-mesh offenders.
-    /// Model is `CRAB_MODEL_PATH`, else the dev `sally.glb`.
-    #[arg(long)]
-    verify_pivots: bool,
-
-    /// DEV: spawn the crab, settle it to rest, then test every pair of body
-    /// colliders for interpenetration at the settled pose and flag any overlap the
-    /// solver is actively fighting — a collision the rig didn't suppress as a jointed
-    /// anchor or a group-filtered nested link. Those expected overlaps are reported
-    /// but never failed. Exits nonzero on any illegal one, so it gates rig changes.
-    #[arg(long)]
-    check_rest_colliders: bool,
-}
-
 /// Learner orchestration: the shared training config plus how many rollout threads
 /// to fan out.
 #[derive(Parser, Debug, Clone)]
@@ -213,20 +166,12 @@ struct LearnArgs {
     update_device: UpdateDevice,
 }
 
-/// What the no-subcommand binary is rendering this run (training is `rl learn`,
-/// which never builds an `AppMode`). Both modes always render.
-#[derive(Clone)]
-enum AppMode {
-    Demo,
-    Screenshot { path: PathBuf, settle: u32 },
-}
-
 fn main() {
     let cli = Cli::parse();
 
-    // The `learn` entry point short-circuits the normal Bevy app: the learner steps
-    // no world itself (it owns the policy and runs PPO), and spawns K rollout
-    // threads that each drive their own headless app by hand. See `training::inproc`.
+    // The `learn` entry point: the learner steps no world itself (it owns the policy
+    // and runs PPO), and spawns K rollout threads that each drive their own headless
+    // app by hand. See `training::inproc`.
     if let Some(Command::Learn(l)) = cli.command {
         // run_learner owns nicing (it lowers process priority before building any
         // world) so a foreground game preempts training.
@@ -241,8 +186,7 @@ fn main() {
         return;
     }
 
-    // The update microbenchmark (rl#48/#49) short-circuits like `learn`: it steps no
-    // world and loads no model, so it skips the glTF resolution below.
+    // The update microbenchmark (rl#48/#49): no worlds, no rollout, no model load.
     if let Some(Command::BenchUpdate(b)) = cli.command {
         match b.backend {
             BenchBackend::Cpu => {
@@ -275,23 +219,23 @@ fn main() {
         return;
     }
 
-    let args = cli.args;
+    let dev = cli.dev;
 
     // DEV verify: score the live colliders against the mesh, print, exit.
-    if args.verify_colliders {
+    if dev.verify_colliders {
         std::process::exit(verify_colliders());
     }
 
     // DEV verify: test joint pivots + collider endpoints for mesh containment, exit.
-    if args.verify_pivots {
+    if dev.verify_pivots {
         std::process::exit(verify_pivots());
     }
 
-    // Every remaining mode spawns the rig-derived body. Preflight a PRESENT model now
-    // so a broken asset fails fast with the real reason, instead of panicking deep in
-    // Startup (or blaming CRAB_MODEL_PATH for a parse error in a model that was present).
-    // NO model is NOT an error: the body falls back to the procedural stand-in (built in
-    // `CrabAssets::from_world`).
+    // The rest-collider check spawns the rig-derived body, so preflight a PRESENT model
+    // first: a broken asset then fails fast with the real reason instead of panicking
+    // deep in Startup (or blaming CRAB_MODEL_PATH for a parse error in a model that was
+    // present). NO model is NOT an error: the body falls back to the procedural
+    // stand-in (built in `CrabAssets::from_world`).
     if let Some(p) = bot::meshfit::model_path() {
         match bot::meshfit::LoadedModel::load(&p) {
             Err(e) => {
@@ -313,150 +257,21 @@ fn main() {
     }
 
     // DEV check: settle the crab and audit its rest-pose colliders for illegal
-    // interpenetration, then exit. Placed after the model preflight so a missing
-    // model fails with the message above, not a spawn panic deep in the check.
-    if args.check_rest_colliders {
+    // interpenetration, then exit. After the model preflight so a missing model fails
+    // with the message above, not a spawn panic deep in the check.
+    if dev.check_rest_colliders {
         std::process::exit(bot::collider_check::run());
     }
 
-    let mode = if let Some(path) = args.screenshot.clone() {
-        AppMode::Screenshot {
-            path,
-            settle: args.screenshot_settle,
-        }
-    } else if args.demo {
-        AppMode::Demo
-    } else {
-        // Training is `rl learn` (the sole trainer) — the no-subcommand binary only
-        // renders (demo/screenshot). A bare `rl` with no mode flag has nothing to do.
-        eprintln!(
-            "no mode selected. Train with `rl learn` (the sole trainer); the bare \
-             binary needs --demo or --screenshot."
-        );
-        std::process::exit(2);
-    };
-
-    let mut app = App::new();
-
-    match &mode {
-        AppMode::Screenshot { .. } => {
-            // No window, but GPU ON so we can render to an image. Real-time 60 Hz
-            // loop at default 1x: one physics step + one render per frame, so the
-            // capture counter (render frames) also tracks simulated time and the
-            // GPU pipeline warms over the same frames. (A fast/100x clock decouples
-            // them — physics races while render frames crawl, and early frames
-            // render black before the pipeline warms up.)
-            app.add_plugins(
-                DefaultPlugins
-                    .set(bevy::window::WindowPlugin {
-                        primary_window: None,
-                        exit_condition: bevy::window::ExitCondition::DontExit,
-                        ..default()
-                    })
-                    .disable::<bevy::winit::WinitPlugin>(),
-            );
-            app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
-                Duration::from_secs_f64(1.0 / 60.0),
-            ));
-            // Rapier collider wireframes draw via gizmos, which DO render into the
-            // offscreen screenshot camera (Bevy 0.18) — but only if the plugin is
-            // present. The other arms add it; Screenshot has its own arm, so gate it
-            // here on the same flag or the captured PNG never shows the colliders.
-            if std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
-                app.add_plugins(RapierDebugRenderPlugin {
-                    // Collider shapes only — the default also draws per-body axes +
-                    // joint markers, which on a 31-part body is an unreadable tangle.
-                    mode: DebugRenderMode::COLLIDER_SHAPES,
-                    ..default()
-                });
-                // Bright always-in-front markers at each joint pivot — the companion
-                // to the collider cage, gated on the same flag (see body.rs).
-                bot::body::register_pivot_markers(&mut app);
-            }
-        }
-        AppMode::Demo => {
-            // The demo defaults to borderless fullscreen (the Steam launch target is
-            // a couch screen) unless --windowed.
-            let fullscreen = !args.windowed;
-            app.add_plugins(DefaultPlugins.set(bevy::window::WindowPlugin {
-                primary_window: Some(bevy::window::Window {
-                    title: "Crab RL".into(),
-                    mode: if fullscreen {
-                        bevy::window::WindowMode::BorderlessFullscreen(
-                            bevy::window::MonitorSelection::Primary,
-                        )
-                    } else {
-                        bevy::window::WindowMode::Windowed
-                    },
-                    ..default()
-                }),
-                ..default()
-            }));
-            // With the stand-in primitive meshes removed, Rapier's debug-render is
-            // the only in-engine view of the true colliders, so the skin can be
-            // checked against the actual physics shapes. `enabled` only sets the
-            // INITIAL state — the demo's right-arrow toggles `DebugRenderContext`
-            // live — and the demo starts the cage on iff RL_DEBUG_COLLIDERS is set.
-            app.add_plugins(RapierDebugRenderPlugin {
-                enabled: std::env::var_os("RL_DEBUG_COLLIDERS").is_some(),
-                // Collider shapes only — the default also draws per-body axes +
-                // joint markers, which on a 31-part body is an unreadable tangle.
-                mode: DebugRenderMode::COLLIDER_SHAPES,
-                ..default()
-            });
-            // Pivot markers gate on RL_DEBUG_COLLIDERS: a deliberate diagnostic, not
-            // default chrome.
-            if std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
-                bot::body::register_pivot_markers(&mut app);
-            }
-        }
-    }
-
-    // Demo and screenshot always render and drive exactly one crab (visuals on,
-    // 1 env — parallel envs are a training concept, and training is `rl learn` only).
-    app.insert_resource(Visuals(true))
-        .insert_resource(bot::NumEnvs(1))
-        // The dt + sub-steps live in one place, physics::fixed_timestep, shared with
-        // every headless test and the `rl learn` rollout worlds, so the physics the
-        // demo/screenshot renders can't drift from the physics training optimizes.
-        .insert_resource(physics::fixed_timestep())
-        // Seed Rapier's context with the softened contact spring (physics::
-        // CONTACT_SOFTNESS) — one source, shared with training + tests — before the
-        // plugin spawns the context from it.
-        .insert_resource(physics::rapier_context_init())
-        // Run physics IN FixedUpdate, lockstep with the Sense→Think→Act brain loop
-        // (which also lives in FixedUpdate): one physics step per brain step, the
-        // same coupling the `rl learn` rollout worlds use, so the demo replays the
-        // exact dynamics the policy trained under.
-        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
-        .add_plugins(physics::PhysicsWorldPlugin)
-        .add_plugins(bot::BotPlugin)
-        .add_systems(FixedUpdate, contact_audit);
-
-    match mode {
-        AppMode::Demo => {
-            app.add_plugins(play::DemoPlugin {
-                checkpoint_dir: args.train.checkpoint_dir.clone(),
-                live_checkpoint_dir: args.live_checkpoint_dir.clone(),
-                manual_control: args.manual_control,
-            });
-            // TEMPORARY physics-tuning overlay, demo-only and off by default.
-            if args.debug_sliders {
-                app.add_plugins(debug_sliders::DebugSlidersPlugin);
-            }
-        }
-        AppMode::Screenshot { path, settle } => {
-            app.add_plugins(play::ScreenshotPlugin {
-                checkpoint_dir: args.train.checkpoint_dir.clone(),
-                path,
-                settle,
-                width: args.width,
-                height: args.height,
-            });
-        }
-    }
-
-    app.run();
+    // No mode: this binary trains (`rl-train learn`) or runs a DEV audit; the windowed
+    // demo/screenshot live in `rl-demo`.
+    eprintln!(
+        "no mode selected. Train with `rl-train learn` (the sole trainer), benchmark \
+         with `rl-train bench-update`, or run a DEV rig audit \
+         (--verify-colliders / --verify-pivots / --check-rest-colliders). The windowed \
+         demo + screenshot are the `rl-demo` binary."
+    );
+    std::process::exit(2);
 }
 
 /// DEV `--verify-colliders`: load the model, reconstruct every live collider in
@@ -803,61 +618,3 @@ fn verify_pivots() -> i32 {
     i32::from(!pass)
 }
 
-/// Diagnostic (enable with RL_CONTACT_AUDIT=1): every 64 ticks, prints every
-/// crab-part-vs-crab-part contact pair currently penetrating more than 5 mm,
-/// deepest first. Ground contacts are excluded. Answers "are the legs
-/// actually intersecting" with numbers instead of squinting at renders.
-fn contact_audit(
-    sim: Query<&bevy_rapier3d::plugin::context::RapierContextSimulation>,
-    cols: Query<&bevy_rapier3d::plugin::context::RapierContextColliders>,
-    parts: Query<
-        (Option<&bot::body::CrabJoint>, Has<bot::body::CrabCarapace>),
-        With<bot::body::CrabBodyPart>,
-    >,
-    mut tick: Local<u32>,
-) {
-    if std::env::var_os("RL_CONTACT_AUDIT").is_none() {
-        return;
-    }
-    *tick += 1;
-    if *tick % 64 != 2 {
-        return;
-    }
-    let (Ok(sim), Ok(cols)) = (sim.single(), cols.single()) else {
-        return;
-    };
-    let name = |p: (Option<&bot::body::CrabJoint>, bool)| {
-        p.0.map(|j| format!("{:?}", j.id))
-            .unwrap_or_else(|| "Carapace".to_string())
-    };
-    let mut worst: Vec<(f32, String, String)> = Vec::new();
-    for pair in sim.narrow_phase.contact_pairs() {
-        let (Some(e1), Some(e2)) = (
-            cols.collider_entity(pair.collider1),
-            cols.collider_entity(pair.collider2),
-        ) else {
-            continue;
-        };
-        let (Ok(p1), Ok(p2)) = (parts.get(e1), parts.get(e2)) else {
-            continue;
-        };
-        let mut depth = 0.0f32;
-        for m in &pair.manifolds {
-            for pt in &m.points {
-                depth = depth.max(-pt.dist);
-            }
-        }
-        if depth > 0.005 {
-            worst.push((depth, name(p1), name(p2)));
-        }
-    }
-    worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    println!(
-        "AUDIT tick {}: {} crab-crab pairs >5mm penetration",
-        *tick,
-        worst.len()
-    );
-    for (d, a, b) in worst.iter().take(6) {
-        println!("  {:>4.0}mm {a} vs {b}", d * 1000.0);
-    }
-}
