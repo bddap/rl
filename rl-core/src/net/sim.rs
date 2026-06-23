@@ -805,37 +805,66 @@ impl Sim {
     /// builds, and machines — `DefaultHasher` is explicitly not (its seed/algorithm
     /// may change), which would make cross-peer comparison meaningless. EVERY field of
     /// every entity is folded; a field omitted here is a field whose desync is invisible.
+    ///
+    /// The exhaustive `let`-destructures below enforce that "EVERY field" promise (rl#70):
+    /// no `..`, so a field added to `Sim` or any entity it hashes stops THIS function
+    /// compiling until the field is folded in or bound to `_` as a deliberate exclusion —
+    /// the forgot-to-hash-it desync becomes a compile error at the site that would be wrong.
+    /// A runtime test perturbs each field and checks the hash moves, catching the dual slip
+    /// (a field bound here but never written).
     pub fn state_hash(&self) -> u64 {
+        // config/crab_external are deliberately not hashed (see field docs); bound to `_`
+        // so the destructure stays exhaustive without folding them.
+        let Sim {
+            tick,
+            players,
+            planes,
+            crab,
+            extraction,
+            outcome,
+            rng,
+            restart_held,
+            config: _,
+            crab_external: _,
+        } = self;
+
         let mut h = Fnv::new();
-        h.write(&self.tick.to_le_bytes());
-        for (id, p) in self.players.iter() {
+        h.write(&tick.to_le_bytes());
+        for (id, player) in players.iter() {
+            let Player { pos, yaw, status } = player;
             h.write(&[id.0]);
-            h.write_pos(p.pos);
-            h.write(&p.yaw.to_le_bytes());
-            h.write(&[status_tag(p.status)]);
+            h.write_pos(*pos);
+            h.write(&yaw.to_le_bytes());
+            h.write(&[status_tag(*status)]);
         }
-        // Planes (PlayerId order): every evolving field — 3D pos, 3D velocity, heading,
-        // pitch. An empty plane map writes nothing, so the foot-only sim's hash is
-        // unchanged.
-        for (id, plane) in self.planes.iter() {
+        // Planes (PlayerId order): every evolving field. An empty plane map writes
+        // nothing, so the foot-only sim's hash is unchanged.
+        for (id, plane) in planes.iter() {
+            let Plane {
+                pos,
+                vel,
+                heading,
+                pitch,
+            } = plane;
             h.write(&[id.0]);
-            h.write_pos3(plane.pos);
-            h.write_pos3(plane.vel);
-            h.write(&plane.heading.to_le_bytes());
-            h.write(&plane.pitch.to_le_bytes());
+            h.write_pos3(*pos);
+            h.write_pos3(*vel);
+            h.write(&heading.to_le_bytes());
+            h.write(&pitch.to_le_bytes());
         }
-        h.write_pos(self.crab.pos);
-        h.write(&self.crab.yaw.to_le_bytes());
-        h.write_pos(self.extraction.pos);
-        h.write(&[outcome_tag(self.outcome)]);
-        // The restart edge-latch: gates whether next tick's RESTART press fires, so a
-        // divergence in it would desync the restart. One byte, folded like every other
-        // evolving field.
-        h.write(&[u8::from(self.restart_held)]);
-        // Hash the RNG stream position so a desync in random draws is caught even
-        // before it manifests in an entity. Cloning and drawing one block reflects the
+        let Crab { pos, yaw } = crab;
+        h.write_pos(*pos);
+        h.write(&yaw.to_le_bytes());
+        let ExtractionPoint { pos } = extraction;
+        h.write_pos(*pos);
+        h.write(&[outcome_tag(*outcome)]);
+        // The restart edge-latch gates whether next tick's RESTART press fires, so a
+        // divergence in it would desync the restart.
+        h.write(&[u8::from(*restart_held)]);
+        // Hash the RNG stream position so a desync in random draws is caught even before
+        // it manifests in an entity. Cloning and drawing one block reflects the
         // generator's position without disturbing the real stream.
-        h.write(&rand::Rng::r#gen::<u64>(&mut self.rng.clone()).to_le_bytes());
+        h.write(&rand::Rng::r#gen::<u64>(&mut rng.clone()).to_le_bytes());
         h.finish()
     }
 
@@ -1277,17 +1306,21 @@ impl Fnv {
         }
     }
     /// Fold a [`Pos`] (both coordinates) — one call per position so a hashed entity
-    /// can't accidentally fold X but forget Z.
+    /// can't accidentally fold X but forget Z. Destructured exhaustively so a new
+    /// coordinate forces a compile error here (the rl#70 guard, extended to `Pos`).
     fn write_pos(&mut self, p: Pos) {
-        self.write(&p.x.to_le_bytes());
-        self.write(&p.z.to_le_bytes());
+        let Pos { x, z } = p;
+        self.write(&x.to_le_bytes());
+        self.write(&z.to_le_bytes());
     }
     /// Fold a [`Pos3`] (all three coordinates) — one call per 3D position so a hashed
-    /// flying entity can't fold X/Z but forget the altitude Y.
+    /// flying entity can't fold X/Z but forget the altitude Y. Exhaustively destructured
+    /// for the same reason as [`Fnv::write_pos`].
     fn write_pos3(&mut self, p: Pos3) {
-        self.write(&p.x.to_le_bytes());
-        self.write(&p.y.to_le_bytes());
-        self.write(&p.z.to_le_bytes());
+        let Pos3 { x, y, z } = p;
+        self.write(&x.to_le_bytes());
+        self.write(&y.to_le_bytes());
+        self.write(&z.to_le_bytes());
     }
     fn finish(&self) -> u64 {
         self.0
@@ -1673,24 +1706,6 @@ mod tests {
         assert_ne!(sim.state_hash(), h0);
     }
 
-    #[test]
-    fn hash_covers_yaw_and_status() {
-        // Two sims identical but for one player's yaw must hash differently — proves
-        // yaw is in the hash. (Status coverage is exercised by the wipe/extract tests
-        // changing the outcome, which flips the hash.)
-        let mut a = Sim::new(0, &players(1));
-        let mut b = Sim::new(0, &players(1));
-        assert_eq!(a.state_hash(), b.state_hash());
-        let mut look = BTreeMap::new();
-        look.insert(PlayerId(0), Input::new(0.0, 0.0, 1.0, 0));
-        a.step(&look);
-        let mut none = BTreeMap::new();
-        none.insert(PlayerId(0), Input::default());
-        b.step(&none);
-        // a turned, b didn't: positions equal (no move) but yaw differs → hashes differ.
-        assert_ne!(a.state_hash(), b.state_hash(), "yaw must be hashed");
-    }
-
     // --- trig table sanity: pins the integer table to known trig values ---
 
     #[test]
@@ -1787,22 +1802,157 @@ mod tests {
     }
 
     #[test]
-    fn pos_is_hashed_for_every_entity() {
-        // Moving a player changes the hash (player pos hashed); the crab moving toward
-        // it also changes it (crab pos hashed). Covered jointly by stepping a sim with a
-        // crab in pursuit and checking the hash advances each of the first few ticks.
-        let mut sim = Sim::new(0, &players(1));
-        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
-        let mut prev = sim.state_hash();
-        for _ in 0..5 {
-            sim.step(&neutral);
-            let now = sim.state_hash();
-            assert_ne!(
-                now, prev,
-                "crab moving (and tick advancing) must change the hash"
-            );
-            prev = now;
-        }
+    fn state_hash_is_sensitive_to_every_hashed_field() {
+        // Runtime half of the rl#70 guard. The COMPILE-TIME half lives in `state_hash`
+        // itself: its exhaustive `let Sim { .. }` (and per-entity) destructures stop that
+        // function compiling until a newly-added field is folded in or bound to `_`. This
+        // test proves the other direction — that each field the destructure *names* is
+        // actually written into the hash, not bound and silently dropped. Together: a new
+        // field can be neither forgotten (compile error) nor faked (a binding that hashes
+        // nothing fails here).
+        //
+        // A sim with BOTH a foot player and a pilot, so the plane fields are real (an empty
+        // plane map hashes to nothing — see `state_hash`) and every field has a value to
+        // perturb. `hash_after` clones the base, mutates one field, and returns the hash; a
+        // hashed field must change it, the two excluded fields must not.
+        let base = Sim::new_with_pilots(7, &players(2), &[PlayerId(1)]);
+        let h0 = base.state_hash();
+        let hash_after = |mutate: &dyn Fn(&mut Sim)| {
+            let mut s = base.clone();
+            mutate(&mut s);
+            s.state_hash()
+        };
+        let foot = PlayerId(0);
+        let pilot = PlayerId(1);
+
+        // Hashed fields: perturbing each must flip the hash.
+        assert_ne!(hash_after(&|s| s.tick += 1), h0, "tick must be hashed");
+
+        assert_ne!(
+            hash_after(&|s| s.players.get_mut(&foot).unwrap().pos.x += 1),
+            h0,
+            "player pos.x must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.players.get_mut(&foot).unwrap().pos.z += 1),
+            h0,
+            "player pos.z must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.players.get_mut(&foot).unwrap().yaw += 1),
+            h0,
+            "player yaw must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.players.get_mut(&foot).unwrap().status = PlayerStatus::Downed),
+            h0,
+            "player status must be hashed"
+        );
+
+        assert_ne!(
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().pos.x += 1),
+            h0,
+            "plane pos.x must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().pos.y += 1),
+            h0,
+            "plane pos.y must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().pos.z += 1),
+            h0,
+            "plane pos.z must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().vel.x += 1),
+            h0,
+            "plane vel.x must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().vel.y += 1),
+            h0,
+            "plane vel.y must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().vel.z += 1),
+            h0,
+            "plane vel.z must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().heading += 1),
+            h0,
+            "plane heading must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().pitch += 1),
+            h0,
+            "plane pitch must be hashed"
+        );
+
+        // The crab_external FLAG is excluded (below), but the crab POSE it drives is hashed
+        // exactly like the internal-pursuit pose — that's what lets the solo NN crab's
+        // quantized pose stay desync-safe.
+        assert_ne!(
+            hash_after(&|s| s.crab.pos.x += 1),
+            h0,
+            "crab pos.x must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.crab.pos.z += 1),
+            h0,
+            "crab pos.z must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.crab.yaw += 1),
+            h0,
+            "crab yaw must be hashed"
+        );
+
+        assert_ne!(
+            hash_after(&|s| s.extraction.pos.x += 1),
+            h0,
+            "extraction pos.x must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.extraction.pos.z += 1),
+            h0,
+            "extraction pos.z must be hashed"
+        );
+
+        assert_ne!(
+            hash_after(&|s| s.outcome = Outcome::Wiped),
+            h0,
+            "outcome must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.restart_held = !s.restart_held),
+            h0,
+            "restart_held must be hashed"
+        );
+        // Advancing the generator (without touching anything else) must flip the hash, so a
+        // desync in random draws is caught before it surfaces in an entity.
+        assert_ne!(
+            hash_after(&|s| {
+                let _: u64 = rand::Rng::r#gen(s.rng());
+            }),
+            h0,
+            "rng stream position must be hashed"
+        );
+
+        // Excluded fields: perturbing must NOT flip the hash. Both have field docs
+        // explaining why they are outside the cross-peer hash; mutating them here is purely
+        // to witness the exclusion (nothing in production mutates `config`).
+        assert_eq!(
+            hash_after(&|s| s.config.seed ^= 0xdead_beef),
+            h0,
+            "config is deliberately not hashed (see Sim::config)"
+        );
+        assert_eq!(
+            hash_after(&|s| s.crab_external = !s.crab_external),
+            h0,
+            "crab_external is deliberately not hashed (see Sim::crab_external)"
+        );
     }
 
     // --- startup grace + deterministic restart ---
