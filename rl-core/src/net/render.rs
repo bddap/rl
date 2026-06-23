@@ -42,6 +42,7 @@ use bevy::render::render_resource::{TextureFormat, TextureUsages};
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowMode};
 
+use crate::net::controls::{self, Action, Device};
 use crate::net::lockstep::{Lockstep, TickMsg};
 use crate::net::net_loop::{NetDriver, PeerMsg};
 use crate::net::sim::{
@@ -232,6 +233,11 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
     // chain is what guarantees the sim is live before the scene spawns — separate
     // OnEnter system sets have no ordering, which would race spawn_world ahead of the install.
     app.init_non_send_resource::<PendingRound>()
+        .init_resource::<ActiveDevice>()
+        // The windowed client never forces the overlay open — it's hold-to-reveal. Inserting
+        // the resource here (false) keeps `update_controls_ui` reading a plain `Res`, not an
+        // `Option<Res>`; only the screenshot path sets it true.
+        .insert_resource(ForceRevealControls(false))
         .add_systems(
             OnEnter(AppPhase::Playing),
             (
@@ -239,6 +245,7 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
                 spawn_world,
                 spawn_fp_camera,
                 spawn_hud,
+                spawn_controls_ui,
             )
                 .chain(),
         )
@@ -250,7 +257,13 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
         )
         .add_systems(
             Update,
-            (grab_cursor_once, exit_on_esc).run_if(in_state(AppPhase::Playing)),
+            (
+                grab_cursor_once,
+                quit_game,
+                // chained so the glyph swap reflects THIS frame's device, not last frame's.
+                (track_active_device, update_controls_ui).chain(),
+            )
+                .run_if(in_state(AppPhase::Playing)),
         );
 
     match boot {
@@ -398,9 +411,24 @@ pub fn build_screenshot_app(ls: Lockstep, cfg: ScreenshotConfig) -> App {
         ls,
         InputSource::Scripted(Input::new(0.0, 1.0, 0.0, 0)),
     );
+    // Controls UI on the screenshot path too, so an evidence frame can prove the overlay +
+    // hint draw. `RL_SHOW_CONTROLS=1` forces the (normally hold-to-reveal) overlay open;
+    // `RL_SHOW_CONTROLS_PAD=1` shows the gamepad column instead of keyboard/mouse — so one
+    // headless shot can capture either device's legend with no live input.
+    let force_reveal = std::env::var_os("RL_SHOW_CONTROLS").is_some();
+    let show_pad = std::env::var_os("RL_SHOW_CONTROLS_PAD").is_some();
     app.insert_resource(cfg)
         .init_resource::<ShotProgress>()
-        .add_systems(Startup, (spawn_world, spawn_offscreen_camera, spawn_hud))
+        .insert_resource(ForceRevealControls(force_reveal))
+        .insert_resource(ActiveDevice(if show_pad {
+            Device::Gamepad
+        } else {
+            Device::KeyboardMouse
+        }))
+        .add_systems(
+            Startup,
+            (spawn_world, spawn_offscreen_camera, spawn_hud, spawn_controls_ui),
+        )
         .add_systems(
             Update,
             (
@@ -409,6 +437,7 @@ pub fn build_screenshot_app(ls: Lockstep, cfg: ScreenshotConfig) -> App {
                 apply_transforms,
                 apply_shot_cam_offset,
                 update_hud,
+                update_controls_ui,
                 capture_when_settled,
             )
                 .chain(),
@@ -845,26 +874,27 @@ fn gather_input(
 ) {
     let dt = time.delta_secs();
 
+    // Every DISCRETE key/button below is looked up in the one control map
+    // (`controls::CONTROL_MAP`) via these helpers, never hardcoded — so the keys the
+    // client polls are exactly the keys the on-screen legend shows (no drift).
+    // `kc(action)` is the keyboard key; `pad_pressed`/`pad_just_pressed` fold the pad's
+    // primary+alternate buttons. The ANALOG channels (stick→axis math, mouse motion,
+    // D-pad digital move) aren't rebindable bindings, so they stay inline here.
+    let kc = controls::key_code_for;
+    let held = |a| kc(a).is_some_and(|k| keys.pressed(k));
+
     // --- Move axes (last sample wins; re-sampled every frame) ---
     let mut strafe = 0.0f32;
     let mut forward = 0.0f32;
-    if keys.pressed(KeyCode::KeyW) {
-        forward += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyS) {
-        forward -= 1.0;
-    }
-    if keys.pressed(KeyCode::KeyD) {
-        strafe += 1.0;
-    }
-    if keys.pressed(KeyCode::KeyA) {
-        strafe -= 1.0;
-    }
+    forward += held(Action::MoveForward) as i32 as f32;
+    forward -= held(Action::MoveBack) as i32 as f32;
+    strafe += held(Action::StrafeRight) as i32 as f32;
+    strafe -= held(Action::StrafeLeft) as i32 as f32;
 
-    let mut action = keys.pressed(KeyCode::Space);
+    let mut action = held(Action::Extract);
     // Restart the round (R). Latched here, sent as buttons::RESTART, edge-triggered in
     // the sim — so it restarts every peer in lockstep, not a local-only reset.
-    if keys.just_pressed(KeyCode::KeyR) {
+    if kc(Action::Restart).is_some_and(|k| keys.just_pressed(k)) {
         pending.restart = true;
     }
 
@@ -885,11 +915,11 @@ fn gather_input(
     }
 
     // Gamepad (full pad-only play): left stick moves, right stick looks, South/RT =
-    // action, Start = restart, Select held = quit (the quit hold is handled in
-    // `exit_on_esc`). Sticks have a deadzone so a resting stick doesn't creep. Stick
-    // magnitudes are raw f32 here but cross into the sim ONLY through `Input::new`'s
-    // fixed-point quantization (below) — the SAME boundary keyboard/mouse pass — so the
-    // analog values never reach the deterministic sim as floats.
+    // extract, Start (tap) = restart. Quit (hold North) and reveal-controls (hold Back)
+    // live in `quit_game` / the overlay system. Sticks have a deadzone so a resting stick
+    // doesn't creep. Stick magnitudes are raw f32 here but cross into the sim ONLY through
+    // `Input::new`'s fixed-point quantization (below) — the SAME boundary keyboard/mouse
+    // pass — so the analog values never reach the deterministic sim.
     for gp in gamepads.iter() {
         // The analog stick → axis arithmetic (deadzone + look scaling) lives in the pure
         // `pad_stick_axes` so the determinism test can exercise the SAME transform the
@@ -907,16 +937,19 @@ fn gather_input(
             - gp.pressed(GamepadButton::DPadDown) as i32) as f32;
         strafe += (gp.pressed(GamepadButton::DPadRight) as i32
             - gp.pressed(GamepadButton::DPadLeft) as i32) as f32;
-        action |= gp.pressed(GamepadButton::South) || gp.pressed(GamepadButton::RightTrigger2);
-        // Restart on Start, edge-triggered exactly like keyboard R: latched here, sent
-        // as buttons::RESTART, so every peer restarts on the same tick in lockstep (a
-        // local-only reset would desync). Edge (just_pressed), not held.
-        if gp.just_pressed(GamepadButton::Start) {
+        action |= controls::gamepad_buttons_for(Action::Extract).any(|b| gp.pressed(b));
+        // Restart on Start (tap), edge-triggered exactly like keyboard R: latched here,
+        // sent as buttons::RESTART, so every peer restarts on the same tick in lockstep (a
+        // local-only reset would desync). Edge (just_pressed), not held. Quit is on its OWN
+        // pad button (North, held), NOT Start — so beginning a quit can't fire this restart.
+        if controls::gamepad_buttons_for(Action::Restart).any(|b| gp.just_pressed(b)) {
             pending.restart = true;
         }
     }
     // Mouse-left also fires action, for mouse-only play.
-    action |= mouse_buttons.pressed(MouseButton::Left);
+    if let Some(mb) = controls::MouseInput::Left.mouse_button() {
+        action |= mouse_buttons.pressed(mb);
+    }
 
     // Reconcile screen-right with the sim's X axis. The sim labels +X "strafe right"
     // and increasing yaw turns +Z toward +X — but a camera looking along +Z (yaw 0)
@@ -938,26 +971,26 @@ fn gather_input(
     yaw.0 = (yaw.0 - d_yaw).rem_euclid(std::f32::consts::TAU);
 }
 
-/// Quit the game (windowed play only): Esc, or HOLD the gamepad Select/Back button for
-/// [`PAD_QUIT_HOLD_SECS`]. Purely client-local — sends Bevy's [`AppExit`] to end the
-/// run; no sim/lockstep involvement, so it can't desync a peer (each client just closes
-/// its own window). The other peers play on. Select is a HOLD, not a tap, so a stray
-/// press on the couch can't kick everyone out mid-round.
-fn exit_on_esc(
+/// Quit the game (windowed play only): the keyboard Quit key (Esc), or HOLD the gamepad
+/// Quit button (North/Y) for [`PAD_QUIT_HOLD_SECS`]. Both bindings come from the one control
+/// map ([`controls::CONTROL_MAP`]), so this matches the legend. Purely client-local — sends
+/// Bevy's [`AppExit`]; no sim/lockstep involvement, so it can't desync a peer (each client
+/// just closes its own window) and the others play on. The pad Quit is a HOLD on its OWN
+/// button (not Start, which restarts), so a stray press can't end the round for the couch.
+fn quit_game(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     time: Res<Time>,
     mut quit_held: Local<f32>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    if keys.just_pressed(KeyCode::Escape) {
+    if controls::key_code_for(Action::Quit).is_some_and(|k| keys.just_pressed(k)) {
         exit.write(AppExit::Success);
         return;
     }
-    // Accumulate held time while Select is down on ANY pad; reset the instant it's
-    // released, so only a sustained hold (not repeated taps) reaches the threshold.
-    let select_down = gamepads.iter().any(|gp| gp.pressed(GamepadButton::Select));
-    if select_down {
+    // Accumulate held time while the pad Quit button is down on ANY pad; reset the instant
+    // it's released, so only a sustained hold (not repeated taps) reaches the threshold.
+    if pad_action_held(&gamepads, Action::Quit) {
         *quit_held += time.delta_secs();
         if *quit_held >= PAD_QUIT_HOLD_SECS {
             exit.write(AppExit::Success);
@@ -1433,11 +1466,288 @@ fn update_hud(state: NonSend<GameState>, mut hud: Query<&mut Text, With<StatusHu
         Outcome::Extracted => "\nROUND WON — extracted!".to_string(),
         Outcome::Wiped => "\nROUND LOST — wiped".to_string(),
     };
-    // Both control schemes on the HUD so a couch/pad player sees the bindings without a
-    // keyboard: keyboard/mouse on the first line, gamepad (in parens) on the second.
+    // Status + the one-line objective only. The control bindings are NOT duplicated here:
+    // they live in the hold-to-reveal overlay + corner hint (the controls UI), which derive
+    // from the one control map — so there's a single on-screen source for them.
     **text = format!(
-        "You: {status}   |   reach the green pillar, hold [Space]/(A or RT) to extract — dodge the crab\n[R] restart   [Esc] quit      Pad: L-stick/d-pad move · R-stick look · (Start) restart · hold (Select) quit{outcome}",
+        "You: {status}   |   reach the green pillar, extract - dodge the crab{outcome}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Controls UI — the corner hint + hold-to-reveal overlay
+//
+// Both are rendered ENTIRELY from `controls::legend`/`reveal_glyph` (which derive from the
+// one `controls::CONTROL_MAP` the input code also reads), so the displayed bindings can
+// never drift from the live ones. The overlay is hidden by default and shown only while the
+// RevealControls control is held (Tab / pad Back). Glyphs are the bundled Kenney Input
+// Prompts (CC0) PNGs under `assets/controls/`; the active-device tracker picks the
+// keyboard vs gamepad column + glyph set.
+// ---------------------------------------------------------------------------
+
+/// The input device the player is currently using, refreshed each frame from the most
+/// recent input. Drives which control column the legend/hint show. Defaults to
+/// keyboard/mouse (the desktop default); flips to [`Device::Gamepad`] the moment a pad
+/// button/stick moves, and back when a key/mouse moves — so a couch player who switches
+/// devices sees matching glyphs. Pure client UI; never reaches the sim.
+#[derive(Resource, Clone, Copy, Default)]
+struct ActiveDevice(Device);
+
+/// Force the reveal overlay open regardless of input — for the HEADLESS screenshot path,
+/// which has no live keyboard/pad to hold the reveal control. Defaults false (the windowed
+/// client never sets it, so its overlay stays hold-to-reveal); the screenshot app sets it
+/// true when `RL_SHOW_CONTROLS=1`, so an evidence frame can prove the overlay draws.
+#[derive(Resource, Clone, Copy, Default)]
+struct ForceRevealControls(bool);
+
+/// Marks the always-visible corner hint ("Hold [glyph] — Controls"). Its glyph + text are
+/// refreshed by [`update_controls_ui`] to match the active device.
+#[derive(Component)]
+struct ControlsHintRoot;
+
+/// Marks the hold-to-reveal overlay root (the dark panel listing every binding). Toggled
+/// between [`Display::None`] (hidden) and [`Display::Flex`] by [`update_controls_ui`].
+#[derive(Component)]
+struct ControlsOverlayRoot;
+
+/// One device's legend container inside the overlay (built once for keyboard, once for
+/// pad). Only the active device's container is shown — pre-building both avoids rebuilding
+/// child entities every time the player switches device or opens the overlay.
+#[derive(Component)]
+struct LegendColumn(Device);
+
+/// The corner hint's icon node, so its image can be swapped when the device changes.
+#[derive(Component)]
+struct HintGlyph;
+
+/// Pixel size of a rendered glyph icon in the UI (square). Kenney's Default PNGs are small
+/// square tiles; 30px reads cleanly at TV distance without crowding the legend rows.
+const GLYPH_PX: f32 = 30.0;
+
+/// Detect the active input device from this frame's input. A pressed key or moved mouse →
+/// keyboard/mouse; any pad button or past-deadzone stick → gamepad. Last input wins, so the
+/// hint/legend track whatever the player just touched. Reads `just_pressed`/motion (edges),
+/// not held state, so holding a key doesn't pin the device against a pad the player picks up.
+fn track_active_device(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    mouse_motion: Res<AccumulatedMouseMotion>,
+    gamepads: Query<&Gamepad>,
+    mut device: ResMut<ActiveDevice>,
+) {
+    let kb_active = keys.get_just_pressed().next().is_some()
+        || mouse_buttons.get_just_pressed().next().is_some()
+        || mouse_motion.delta != Vec2::ZERO;
+    let pad_active = gamepads.iter().any(|gp| {
+        gp.get_just_pressed().next().is_some()
+            || gp.left_stick().length() > PAD_STICK_DEADZONE
+            || gp.right_stick().length() > PAD_STICK_DEADZONE
+    });
+    // Pad checked last so simultaneous input (a pad player whose hand brushes a key) favors
+    // the pad they're actively holding; either edge alone flips cleanly.
+    if kb_active {
+        device.0 = Device::KeyboardMouse;
+    }
+    if pad_active {
+        device.0 = Device::Gamepad;
+    }
+}
+
+/// Spawn one legend column (a vertical list of icon+label rows) for `device`, as a child of
+/// the overlay. Each row's glyphs + label come straight from [`controls::legend`], so the
+/// panel IS the live bindings. `visible` sets the initial display (only the active device's
+/// column starts shown).
+fn spawn_legend_column(
+    parent: &mut ChildSpawnerCommands,
+    asset_server: &AssetServer,
+    device: Device,
+    visible: bool,
+) {
+    parent
+        .spawn((
+            Node {
+                display: if visible { Display::Flex } else { Display::None },
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(8.0),
+                ..default()
+            },
+            LegendColumn(device),
+        ))
+        .with_children(|col| {
+            for line in controls::legend(device) {
+                col.spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    for glyph in &line.glyphs {
+                        row.spawn((
+                            ImageNode::new(asset_server.load(*glyph)),
+                            Node {
+                                width: Val::Px(GLYPH_PX),
+                                height: Val::Px(GLYPH_PX),
+                                ..default()
+                            },
+                        ));
+                    }
+                    let label = if line.hold {
+                        format!("Hold {}", line.label)
+                    } else {
+                        line.label.to_string()
+                    };
+                    row.spawn((
+                        Text::new(label),
+                        TextFont {
+                            font_size: 20.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.95, 0.95)),
+                    ));
+                });
+            }
+        });
+}
+
+/// Spawn the controls UI: the always-visible corner hint and the hidden hold-to-reveal
+/// overlay (both device columns pre-built). Runs at the Playing transition alongside the
+/// HUD. `AssetServer::load` is lazy — the glyph PNGs stream in from `assets/controls/`; the
+/// hint glyph is set for the default device and re-pointed by [`update_controls_ui`].
+fn spawn_controls_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let default_device = Device::default();
+
+    // Corner hint (bottom-left), always visible: "[reveal glyph] Hold - Controls".
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(14.0),
+                left: Val::Px(14.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(8.0),
+                ..default()
+            },
+            ControlsHintRoot,
+        ))
+        .with_children(|hint| {
+            hint.spawn((
+                ImageNode::new(asset_server.load(controls::reveal_glyph(default_device))),
+                Node {
+                    width: Val::Px(GLYPH_PX),
+                    height: Val::Px(GLYPH_PX),
+                    ..default()
+                },
+                HintGlyph,
+            ));
+            // The hint TEXT is device-independent (only the glyph changes), so it's set once
+            // here and never updated — no marker needed.
+            hint.spawn((
+                Text::new("Hold - Controls"),
+                TextFont {
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.85, 0.85, 0.85)),
+            ));
+        });
+
+    // Overlay panel (centered, dark backdrop), hidden until RevealControls is held. Holds a
+    // legend column per device; only the active one is shown.
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Percent(20.0),
+                left: Val::Percent(35.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(Val::Px(24.0)),
+                row_gap: Val::Px(8.0),
+                display: Display::None,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.82)),
+            ControlsOverlayRoot,
+        ))
+        .with_children(|overlay| {
+            overlay.spawn((
+                Text::new("Controls"),
+                TextFont {
+                    font_size: 26.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 1.0, 1.0)),
+            ));
+            spawn_legend_column(
+                overlay,
+                &asset_server,
+                Device::KeyboardMouse,
+                default_device == Device::KeyboardMouse,
+            );
+            spawn_legend_column(
+                overlay,
+                &asset_server,
+                Device::Gamepad,
+                default_device == Device::Gamepad,
+            );
+        });
+}
+
+/// Whether any connected gamepad currently HOLDS a button bound to `action`. The shared
+/// read for the discrete pad buttons — folds the map's primary+alternate (via
+/// [`controls::gamepad_buttons_for`]) across every pad. Factored out so `gather_input`,
+/// `quit_game`, and `update_controls_ui` don't each re-spell the nested any-any loop.
+fn pad_action_held(gamepads: &Query<&Gamepad>, action: Action) -> bool {
+    gamepads
+        .iter()
+        .any(|gp| controls::gamepad_buttons_for(action).any(|b| gp.pressed(b)))
+}
+
+/// Each frame: show the overlay iff the RevealControls control is held, and keep the hint
+/// glyph + the visible legend column matching the active device. The reveal-held read goes
+/// through the SAME control map as everything else (Tab / pad Back), so the hint advertises
+/// exactly the key that opens the panel. Pure client UI — no sim contact.
+#[allow(clippy::too_many_arguments)] // Bevy system: every parameter is a framework-injected resource/query.
+fn update_controls_ui(
+    keys: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
+    device: Res<ActiveDevice>,
+    force_reveal: Res<ForceRevealControls>,
+    asset_server: Res<AssetServer>,
+    mut overlay: Query<&mut Node, (With<ControlsOverlayRoot>, Without<LegendColumn>)>,
+    mut columns: Query<(&LegendColumn, &mut Node), Without<ControlsOverlayRoot>>,
+    mut hint_glyph: Query<&mut ImageNode, With<HintGlyph>>,
+) {
+    // Reveal held? Keyboard Tab OR any pad's Back — read from the map. The screenshot path's
+    // ForceRevealControls overrides for a headless evidence frame (false in the windowed
+    // client, so it stays hold-to-reveal there).
+    let revealed = force_reveal.0
+        || controls::key_code_for(Action::RevealControls).is_some_and(|k| keys.pressed(k))
+        || pad_action_held(&gamepads, Action::RevealControls);
+
+    if let Ok(mut node) = overlay.single_mut() {
+        node.display = if revealed {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+
+    // Show only the active device's legend column.
+    for (col, mut node) in &mut columns {
+        node.display = if col.0 == device.0 {
+            Display::Flex
+        } else {
+            Display::None
+        };
+    }
+
+    // Point the hint glyph at the active device's reveal control (the hint TEXT is constant,
+    // set once at spawn).
+    if let Ok(mut img) = hint_glyph.single_mut() {
+        img.image = asset_server.load(controls::reveal_glyph(device.0));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1515,6 +1825,12 @@ fn spawn_offscreen_camera(
         Tonemapping::None,
         Transform::default(),
         FpCamera,
+        // Make UI render into THIS offscreen target. Bevy renders UI to the default-window
+        // camera automatically, but the screenshot path has no window — without this marker
+        // the HUD + controls overlay never composite into the captured texture, so an
+        // evidence frame would miss them. The windowed client doesn't need it (its window
+        // camera is the implicit UI target).
+        bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(ShotTarget(handle));
 }

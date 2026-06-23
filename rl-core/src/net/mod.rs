@@ -23,12 +23,18 @@
 //!   point), WASD+mouse+gamepad → [`sim::Input`], tick interpolation, and a headless
 //!   screenshot mode for evidence.
 //!
+//! [`controls`] is the data-driven control map both [`render`]'s input handling AND its
+//! on-screen legend derive from (one source, can't drift — rl#57). Its pure core is NOT
+//! gated on `render` so it unit-tests in the headless build like [`sim`]; only the
+//! Bevy-input glue is render-only.
+//!
 //! The determinism-critical code ([`sim`] + [`lockstep`]) is pure and sync; all the
 //! async/IO lives in [`transport`]/[`net_loop`] and all the rendering in [`render`].
 //! That separation is deliberate: it keeps the part that MUST be reproducible free of
 //! any source of nondeterminism, and it's why the desync test below can prove
 //! determinism without touching the network or a GPU.
 
+pub mod controls;
 pub mod lockstep;
 pub mod membership;
 pub mod net_loop;
