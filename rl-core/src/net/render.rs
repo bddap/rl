@@ -2,7 +2,7 @@
 //!
 //! This is the windowed `play` mode of the `game` binary: it makes the
 //! giant-crab-rescue sim VISIBLE and PLAYABLE on top of the existing lockstep +
-//! transport netcode. It boots to a client-side Host/Join/Solo menu (rl#56,
+//! transport netcode. It boots to a client-side Host / Join menu (rl#58,
 //! [`AppPhase`]/[`menu_ui`]) and builds the round only once the player chooses — the
 //! menu is gated to its own pre-round phases and never touches the sim. The split it
 //! honors is the one documented at the top of
@@ -159,40 +159,41 @@ fn world3(pos: Pos3) -> Vec3 {
     Vec3::new(meters(pos.x), meters(pos.y), meters(pos.z))
 }
 
-/// How the windowed client starts up (rl#56): at the boot MENU (the interactive
-/// default — the player picks Host/Join/Solo), or straight into a prebuilt ROUND
-/// (the scripted `--solo`/`--host`/`--join` flags, which form the match up front so the
-/// Deck shortcut and tests never depend on clicking the menu). One enum, two boots, so
-/// "has a menu AND a prebuilt round" is unrepresentable rather than two bool flags.
+/// How the windowed client starts up: at the boot MENU (the interactive default — the
+/// player picks Host/Join, rl#58), or straight into a prebuilt ROUND (the scripted
+/// `--host`/`--join` flags, which form the match up front so tests/scripts never depend on
+/// clicking the menu). One enum, two boots, so "has a menu AND a prebuilt round" is
+/// unrepresentable rather than two bool flags.
 pub enum Boot {
-    /// Show the boot menu first; the sim is built only once the player chooses and any
-    /// networked formation completes. `seed` is the shared match seed and `telemetry` the
+    /// Show the boot menu first; the sim is built only once the player chooses and the
+    /// host-triggered lobby resolves. `seed` is the shared match seed and `telemetry` the
     /// optional collector id — both threaded to whichever formation the menu kicks off.
     Menu {
         seed: u64,
         telemetry: Option<crate::net::menu::EndpointId>,
     },
     /// Skip the menu and play this already-formed round immediately. The scripted entry
-    /// (`--solo` = a solo lockstep + `None`; `--host`/`--join` = the formed
-    /// lockstep + its driver). Identical to the pre-rl#56 boot once a round exists. Boxed
-    /// because the lockstep + driver are large and `Menu` is tiny — without the box every
-    /// `Menu` would carry that dead weight (the same reason [`crate::net::net_loop::MatchResult::Joined`] boxes).
+    /// (`--host`/`--join` = the formed lockstep + its driver; a host-alone `--host` that
+    /// found no peer = a solo lockstep + `None`). Boxed because the lockstep + driver are
+    /// large and `Menu` is tiny — without the box every `Menu` would carry that dead weight
+    /// (the same reason [`crate::net::net_loop::MatchResult::Joined`] boxes).
     Round(Box<(Lockstep, Option<NetDriver>)>),
 }
 
-/// The windowed client's top-level phase (rl#56). The menu and connecting screens are
-/// PURE client UI — no [`Lockstep`]/[`Sim`] exists until [`AppPhase::Playing`], which is
-/// entered only after a choice (and, for networked roles, a completed barrier). This is
-/// the firewall that keeps the menu off the deterministic sim: the FP systems and the
-/// sim resource are all gated to `Playing`, so menu state literally cannot reach the
-/// round (it's built fresh on the transition from the unchanged formation machinery).
+/// The windowed client's top-level phase (rl#56). The menu and lobby screens are PURE
+/// client UI — no [`Lockstep`]/[`Sim`] exists until [`AppPhase::Playing`], which is entered
+/// only after a choice (and, for networked roles, a host-commanded start). This is the
+/// firewall that keeps the menu off the deterministic sim: the FP systems and the sim
+/// resource are all gated to `Playing`, so menu state literally cannot reach the round
+/// (it's built fresh on the transition from the unchanged formation machinery).
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AppPhase {
-    /// The boot menu: choose Host / Join / Solo. egui only.
+    /// The boot menu: choose Host / Join (rl#58). egui only.
     #[default]
     Menu,
-    /// A networked Host/Join is forming on a background thread; show a lobby/“connecting”
-    /// screen and poll for the result. Solo skips this phase (its round is instant).
+    /// A host-triggered lobby is forming on a background thread; show the live roster +
+    /// (Host) join code + Start, and poll for the result. A Host-alone Start skips straight
+    /// to its instant solo round without lingering here.
     Connecting,
     /// The round is live: the FP client runs exactly as before rl#56.
     Playing,
@@ -255,9 +256,9 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
     match boot {
         // Scripted boot: insert the round now and jump straight to Playing (the menu
         // states are never entered). NextState applied before the first frame, so
-        // OnEnter(Playing) fires and the world spawns on frame one — no menu flash. This
-        // is the `--solo`/scripted path the Deck + TV shortcuts use, so it gets the real
-        // NN crab on a solo round.
+        // OnEnter(Playing) fires and the world spawns on frame one — no menu flash. The
+        // scripted `--host`/`--join` path tests/scripts use; a host-alone `--host` that
+        // found no peer is a solo round here, so it gets the real NN crab.
         Boot::Round(round) => {
             let (mut ls, net) = *round;
             // Solo NN crab: only on a solo round (no peers) with a checkpoint. Capture the
@@ -276,23 +277,48 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
             };
             insert_core(&mut app, ls, source);
             if let Some((dir, spawn)) = nn {
+                // Known-solo at build: add the stack AND activate the gate now, so the crab
+                // spawns frame one exactly as before rl#58.
                 add_solo_nn_crab(&mut app, dir, spawn);
+                app.insert_resource(crate::net::solo_crab::SoloCrabActive(true));
             }
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
                 .set(AppPhase::Playing);
         }
-        // Interactive boot: add the menu plugin (egui menu + connecting poll). The sim is
-        // built later, at the Playing transition, from the choice the menu records.
-        // TODO(rl#56 follow-up): wire the NN crab into the menu Solo path too. The menu's
-        // Solo button forms its round at the runtime Playing transition, which needs the NN
-        // stack added at build time + runtime-gated; for now that path keeps the integer crab.
+        // Interactive boot: add the menu plugin (egui menu + lobby poll). The sim is built
+        // later, at the Playing transition, from the choice the menu records.
         Boot::Menu { seed, telemetry } => {
             app.add_plugins(menu_ui::MenuPlugin { seed, telemetry });
+            // NN crab on the Host-alone (solo) round (rl#58): the menu can't know at BUILD
+            // time whether the round will be solo, so add the whole NN stack now but with the
+            // gate OFF and no crab spawned (NumEnvs 0), and flip it on only if the round
+            // resolves solo (`ensure_round_installed`). The crab's arena spawn is a pure
+            // function of the seed (a throwaway solo lockstep reads it), so it's known here
+            // without the round existing yet. A missing/empty checkpoint keeps the integer
+            // crab (the stack isn't added at all). The networked path leaves the gate off, so
+            // it stays byte-identical to the integer-crab multiplayer round.
+            if let Some(dir) = solo_crab {
+                let crab_spawn = crate::net::net_loop::solo_lockstep_for(seed)
+                    .sim()
+                    .crab()
+                    .pos();
+                add_solo_nn_crab(&mut app, dir, crab_spawn);
+                app.insert_resource(crate::net::solo_crab::SoloCrabActive(false));
+                app.insert_resource(crate::bot::NumEnvs(0)); // no crab spawns behind the menu
+                app.insert_resource(SoloCrabStackInstalled(true)); // the transition may activate it
+            }
         }
     }
     app
 }
+
+/// Whether the boot-menu app has the solo NN-crab stack installed at build (rl#58) — set when
+/// a checkpoint was supplied on the menu path. The Playing transition reads it to decide
+/// whether to ACTIVATE the NN crab (only when the round resolved solo). Absent/false ⇒ the
+/// integer crab (no checkpoint, or the networked path).
+#[derive(Resource, Default, Clone, Copy)]
+struct SoloCrabStackInstalled(bool);
 
 /// Wire the real rapier-NN crab into the windowed solo app: the bot/physics/brain stack
 /// (the SAME plugins `rl --demo` runs, so the crab steps the exact dynamics the policy
@@ -424,6 +450,15 @@ struct PendingRound(Option<crate::net::menu::ReadyMatch>);
 /// - **Menu**: take the parked [`PendingRound`] (set by the menu on its choice) and
 ///   [`install_round`] it now, so the sim is live for the spawns.
 ///
+/// On the menu path this is ALSO where the solo NN crab is ARMED (rl#58): if the round
+/// resolved solo (`net.is_none()`) and the NN stack was installed at build
+/// ([`SoloCrabStackInstalled`]), flip [`crate::net::solo_crab::SoloCrabActive`] on and hand
+/// the sim crab to external control
+/// so the rapier-NN body drives it. A networked round leaves the gate off → the integer crab,
+/// byte-identical to today's multiplayer. The crab's arena spawn was already seeded into the
+/// bridge at build (a pure function of the seed), so nothing about the spawn depends on the
+/// round here.
+///
 /// Idempotent (guards on `GameState` already present), so it can't double-install if both
 /// a scripted round and a stray pending one ever coexisted. Reaching Playing with neither a
 /// pre-installed `GameState` (scripted) nor a parked round (menu) is an unreachable
@@ -434,10 +469,19 @@ fn ensure_round_installed(world: &mut World) {
     if world.get_non_send_resource::<GameState>().is_some() {
         return; // scripted path already installed the round at build time
     }
-    let ready = world
+    let mut ready = world
         .get_non_send_resource_mut::<PendingRound>()
         .and_then(|mut p| p.0.take())
         .expect("entered Playing with no round to install — the menu must park a round before transitioning");
+    let is_solo = ready.net.is_none();
+    // Arm the solo NN crab iff this round is solo AND the stack was installed at build.
+    let has_nn_stack = world
+        .get_resource::<SoloCrabStackInstalled>()
+        .is_some_and(|m| m.0);
+    if is_solo && has_nn_stack {
+        ready.lockstep.enable_external_crab(true);
+        world.insert_resource(crate::net::solo_crab::SoloCrabActive(true));
+    }
     let source = match ready.net {
         Some(n) => InputSource::Networked(n),
         None => InputSource::Solo,
@@ -587,11 +631,17 @@ fn drive_lockstep(
     mut state: NonSendMut<GameState>,
     mut pending: ResMut<PendingInput>,
     time: Res<Time>,
-    // The solo NN-crab bridge, present only on the solo NN path. We READ its
+    // The solo NN-crab bridge, present whenever the NN stack was built in (the scripted
+    // solo path AND the menu path, where the round may turn out networked). We READ its
     // game-world position to drive the sim crab and WRITE its hunt target (the nearest
-    // living player) for the policy to chase. `None` on networked/scripted runs, which
-    // keep the integer pursuit untouched.
+    // living player) for the policy to chase.
     mut bridge: Option<ResMut<crate::net::solo_crab::SoloCrabBridge>>,
+    // The runtime gate: whether the NN crab is ACTIVE (the round resolved solo). On the menu
+    // path the bridge exists even for a networked round, so this — not the bridge's mere
+    // presence — is what decides whether to drive the external crab. False on every networked
+    // round, so the sim there is byte-identical to the integer-crab path (no NN pose pushed
+    // across the wire boundary). `None` ⇒ inactive.
+    solo_crab_active: Option<Res<crate::net::solo_crab::SoloCrabActive>>,
     mut reported_outcome: Local<bool>,
     mut next_tel_tick: Local<u64>,
     // Last sim tick this system saw, to detect a deterministic restart (RESTART rewinds
@@ -617,6 +667,12 @@ fn drive_lockstep(
     if *next_tel_tick == 0 {
         *next_tel_tick = TELEMETRY_TICK_EVERY;
     }
+
+    // Whether the NN crab drives the sim this run (the round resolved solo). Read once — the
+    // gate can't change mid-round — and used below to decide whether to sync the external
+    // crab pose. The bridge may exist on a networked round (menu path), so this, not the
+    // bridge's presence, is the determinism-safe gate.
+    let nn_active = crate::net::solo_crab::SoloCrabActive::is_on(solo_crab_active.as_deref());
 
     let mut applied = 0u32;
     while state.accumulator >= TICK_DT && applied < MAX_TICKS_PER_FRAME {
@@ -690,10 +746,14 @@ fn drive_lockstep(
         // SOLO NN crab: before advancing, push the real rapier crab body's game-world
         // position + facing into the sim (so this tick's grab/extraction/outcome resolve
         // against the NN crab, not the disabled integer pursuit) and refresh the player it
-        // hunts. One shared handshake with the headless probe. Present only on the solo NN
-        // path (`SoloCrabBridge` inserted by `SoloCrabPlugin`); networked/scripted runs have
-        // no bridge and keep the integer crab.
-        if let Some(bridge) = bridge.as_deref_mut() {
+        // hunts. One shared handshake with the headless probe. Gated on the runtime ACTIVE
+        // flag, NOT the bridge's mere presence: on the menu path the bridge exists even for a
+        // networked round, and syncing the NN pose there would push a float crab across the
+        // wire boundary and desync peers. `nn_active` is false on every networked round, so
+        // the multiplayer sim stays byte-identical to the integer-crab path.
+        if nn_active
+            && let Some(bridge) = bridge.as_deref_mut()
+        {
             crate::net::solo_crab::sync_external_crab(&mut state.ls, bridge);
         }
 
@@ -935,9 +995,11 @@ fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     state: NonSend<GameState>,
-    // Present only on the solo NN-crab path: when set, the placeholder crab box is
-    // spawned hidden (the real rig is the crab). See the crab spawn below.
-    solo_bridge: Option<Res<crate::net::solo_crab::SoloCrabBridge>>,
+    // Whether the solo NN crab is ACTIVE this round: when so, the placeholder crab box is
+    // spawned hidden (the real rig is the crab). Keyed on the active gate, NOT the bridge's
+    // presence — on the menu path the bridge exists even for a networked round, which must
+    // keep the visible integer crab box. See the crab spawn below.
+    solo_crab_active: Option<Res<crate::net::solo_crab::SoloCrabActive>>,
 ) {
     // Ground: a large gray plane at Y=0.
     commands.spawn((
@@ -1066,10 +1128,10 @@ fn spawn_world(
     // The giant crab: a big menacing box, CRAB_SCALE× a player, with a "head" wedge
     // so its facing is legible. Gray-box placeholder for the MULTIPLAYER (integer)
     // crab. On the SOLO NN path the real rapier rig (wireframe / skin) is the crab, so
-    // the box is spawned HIDDEN there — the bridge resource is the tell — and the rig
-    // shows instead. (We still spawn it so `apply_transforms`'s crab query is satisfied
-    // either way; it just stays invisible.)
-    let crab_hidden = solo_bridge.is_some();
+    // the box is spawned HIDDEN there — the active gate is the tell — and the rig shows
+    // instead. (We still spawn it so `apply_transforms`'s crab query is satisfied either
+    // way; it just stays invisible.)
+    let crab_hidden = crate::net::solo_crab::SoloCrabActive::is_on(solo_crab_active.as_deref());
     let crab_h = PLAYER_HEIGHT * CRAB_SCALE as f32;
     let crab_w = PLAYER_RADIUS * 2.0 * CRAB_SCALE as f32;
     let crab_root = commands
@@ -1514,16 +1576,17 @@ fn capture_when_settled(
 }
 
 // ---------------------------------------------------------------------------
-// Boot menu (rl#56): client-side egui Host/Join/Solo, gated to the Menu/Connecting
-// phases. Builds the round ONLY at the Playing transition, so it can't touch the sim.
+// Boot menu (rl#58): client-side egui Host / Join + host-triggered lobby, gated to the
+// Menu/Connecting phases. Builds the round ONLY at the Playing transition, so it can't
+// touch the sim.
 // ---------------------------------------------------------------------------
 
-/// The boot-menu front-end: the egui Host/Join/Solo UI, the background-formation poll,
-/// and the `OnEnter(Playing)` round installer. This is the ONLY Bevy/egui code for the
-/// menu; the pure (testable, Bevy-free) connection orchestration lives in
-/// [`crate::net::menu`]. The split keeps the determinism-relevant claim simple: nothing
-/// here builds or reads a [`Lockstep`]/[`Sim`] except at the Playing transition, from the
-/// unchanged formation machinery.
+/// The boot-menu front-end: the egui Host / Join UI, the lobby (live roster + the host's
+/// Start/Cancel), the background-formation poll, and the `OnEnter(Playing)` round installer.
+/// This is the ONLY Bevy/egui code for the menu; the pure (testable, Bevy-free) connection
+/// orchestration lives in [`crate::net::menu`]. The split keeps the determinism-relevant
+/// claim simple: nothing here builds or reads a [`Lockstep`]/[`Sim`] except at the Playing
+/// transition, from the unchanged formation machinery.
 mod menu_ui {
     use bevy::prelude::*;
     use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
@@ -1620,15 +1683,15 @@ mod menu_ui {
         }
     }
 
-    /// Draw the menu (Menu phase) or the lobby/connecting screen (Connecting phase), and
-    /// drive the transitions. The single egui system for the boot flow:
-    /// - **Menu**: Solo builds the offline round instantly and jumps to Playing; Host and
-    ///   Join start a background barrier ([`menu::begin`]) and move to Connecting.
-    /// - **Connecting**: poll the formation; on a result, park the [`ReadyMatch`] and go
-    ///   to Playing (or show the error and return to Menu).
+    /// Draw the menu (Menu phase) or the lobby (Connecting phase), and drive the transitions.
+    /// The single egui system for the boot flow (rl#58):
+    /// - **Menu**: Host or Join opens a host-triggered lobby ([`menu::begin`]) → Connecting.
+    /// - **Connecting**: show the live roster; the host's Start forms the round (instant solo
+    ///   if alone, host-commanded networked if peers present); on a result park the
+    ///   [`ReadyMatch`] and go to Playing; on Cancel/error return to Menu.
     ///
-    /// Determinism: this only ever *selects* a formation and reads its finished result.
-    /// The round it parks (in [`PendingRound`]) is built by [`menu::ready_from`] /
+    /// Determinism: this only ever *selects/commands* a formation and reads its finished
+    /// result. The round it parks (in [`PendingRound`]) is built by [`menu::ready_from`] /
     /// [`menu::solo_round`] from the unchanged barrier output — no sim state originates here.
     fn menu_screen(
         mut contexts: EguiContexts,
@@ -1639,7 +1702,7 @@ mod menu_ui {
     ) -> Result {
         let ctx = contexts.ctx_mut()?;
         match phase.get() {
-            AppPhase::Menu => menu_phase(ctx, &mut state, &mut pending, &mut next),
+            AppPhase::Menu => menu_phase(ctx, &mut state, &mut next),
             AppPhase::Connecting => connecting_phase(ctx, &mut state, &mut pending, &mut next),
             // Playing is gated out by the run condition; nothing to draw.
             AppPhase::Playing => {}
@@ -1647,15 +1710,10 @@ mod menu_ui {
         Ok(())
     }
 
-    /// The Host/Join/Solo chooser. Writes the player's pick into [`MenuState`] (and a Solo
-    /// round straight into [`PendingRound`]) and sets the next phase. No networking happens
-    /// inline except KICKING OFF the background barrier; the UI never blocks.
-    fn menu_phase(
-        ctx: &egui::Context,
-        state: &mut MenuState,
-        pending: &mut PendingRound,
-        next: &mut NextState<AppPhase>,
-    ) {
+    /// The Host / Join chooser (rl#58 — no separate Solo button; Host-alone IS solo). Both
+    /// buttons open a host-triggered lobby and move to Connecting; nothing blocks (the
+    /// barrier runs on a background thread).
+    fn menu_phase(ctx: &egui::Context, state: &mut MenuState, next: &mut NextState<AppPhase>) {
         egui::Window::new("Giant Crab Rescue")
             .collapsible(false)
             .resizable(false)
@@ -1665,23 +1723,15 @@ mod menu_ui {
                 ui.label("Rescue the giant crab. Reach the green pillar to extract.");
                 ui.separator();
 
-                // Solo: the always-playable offline round, built instantly (no network).
-                // This is the clean #55 fix — a lone player never depends on discovery.
-                if ui.button("Play solo").clicked() {
-                    pending.0 = Some(menu::solo_round(state.seed));
-                    next.set(AppPhase::Playing);
-                    return;
-                }
-
-                ui.separator();
-                ui.label("Multiplayer (same LAN):");
-                // Host: open a match. Others Join by our code or by discovering us on the
-                // LAN; Start (in the lobby) begins the round, solo if nobody joined.
-                if ui.button("Host a match").clicked() {
+                // Host: open a lobby. Play alone (Start with nobody joined = an instant solo
+                // round) or wait for others to Join by our code / the LAN, then Start.
+                if ui.button("Host (play alone or with others)").clicked() {
                     start_forming(state, &StartChoice::Host, next);
                     return;
                 }
 
+                ui.separator();
+                ui.label("…or join someone on your LAN:");
                 ui.horizontal(|ui| {
                     ui.label("Join code:");
                     ui.add(
@@ -1716,12 +1766,12 @@ mod menu_ui {
             });
     }
 
-    /// Kick off a networked formation for a Host/Join choice and move to Connecting. Shared
-    /// by both buttons so the "begin barrier + clear error + switch phase" sequence has one
-    /// definition. Solo never reaches here (it has no formation).
+    /// Open the host-triggered lobby for a Host/Join choice and move to Connecting. Shared by
+    /// both buttons so the "begin lobby + clear error + switch phase" sequence has one
+    /// definition.
     fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextState<AppPhase>) {
         state.error = None;
-        state.forming = menu::begin(choice, state.seed, state.telemetry);
+        state.forming = Some(menu::begin(choice, state.seed, state.telemetry));
         next.set(AppPhase::Connecting);
     }
 
@@ -1742,24 +1792,35 @@ mod menu_ui {
             // Done forming: drop the handle and act on the result.
             state.forming = None;
             match result {
-                Ok(match_result) => {
-                    pending.0 = Some(menu::ready_from(match_result, state.seed));
-                    next.set(AppPhase::Playing);
-                    return;
-                }
+                // A round formed (networked, or the Alone fallback): install it and play.
+                // `ready_from` is `None` only for Cancelled, which the barrier reports after
+                // tearing its session down — return to the menu, no phantom left behind.
+                Ok(match_result) => match menu::ready_from(match_result, state.seed) {
+                    Some(ready) => {
+                        pending.0 = Some(ready);
+                        next.set(AppPhase::Playing);
+                    }
+                    None => next.set(AppPhase::Menu),
+                },
                 Err(e) => {
                     state.error = Some(format!("Couldn't form a match: {e:#}"));
                     next.set(AppPhase::Menu);
-                    return;
                 }
             }
+            return;
         }
 
-        // A host's explicit "start now, solo" click, captured inside the egui closure and
-        // acted on after it (the closure borrows `state`; the abandon-and-solo mutation
-        // happens once it returns). Only the Host screen shows it.
-        let mut start_solo_now = false;
-        egui::Window::new("Connecting")
+        // Clicks captured inside the egui closure (which borrows `state`) and acted on after
+        // it returns, when `state.forming` is free to mutate.
+        let mut clicked_start = false;
+        let mut clicked_cancel = false;
+        // The live lobby roster (us + joined peers), pulled from the barrier's feed.
+        let lobby = state
+            .forming
+            .as_ref()
+            .map(|f| f.roster())
+            .unwrap_or_default();
+        egui::Window::new("Lobby")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1767,10 +1828,9 @@ mod menu_ui {
                 let hosting = state.forming.as_ref().is_some_and(|f| f.hosting);
                 let display_code = state.forming.as_ref().and_then(|f| f.display_code());
                 if hosting {
-                    ui.heading("Hosting — waiting for players");
+                    ui.heading("Hosting a match");
                     ui.label("Share this join code (or others can find you on the LAN):");
-                    // The host's own code is its endpoint id, surfaced by the formation once
-                    // the session binds. Until then show a forming note.
+                    // The host's own code is its endpoint id, surfaced once the session binds.
                     match display_code {
                         Some(code) => {
                             // A selectable, read-only field so the player can copy the code.
@@ -1783,16 +1843,6 @@ mod menu_ui {
                             ui.label("(starting host — code will appear shortly)");
                         }
                     }
-                    ui.separator();
-                    ui.label("Players who join are pulled into the round automatically.");
-                    // Explicit Start for the zero/early case (the issue's "Start works with
-                    // zero joiners"): begin a solo round immediately rather than waiting out
-                    // the discovery window. Networked starts (peers present) still close via
-                    // the barrier; a host-triggered SYNCHRONIZED start over the wire is the
-                    // remaining lobby-protocol work — this button covers the solo path.
-                    if ui.button("Start solo now").clicked() {
-                        start_solo_now = true;
-                    }
                 } else {
                     ui.heading("Joining a match…");
                     match display_code {
@@ -1804,24 +1854,81 @@ mod menu_ui {
                         }
                     }
                 }
+
+                // Live roster: the players currently in the lobby (rl#58). Host alone shows
+                // just itself, which is the cue that Start = a solo round. When hosting, the
+                // host's own id is its join code (`display_code`), so mark it "you"; a joiner
+                // doesn't know which id is its own here, so nothing is marked for it.
                 ui.separator();
-                ui.spinner();
+                let me = if hosting { display_code } else { None };
+                lobby_roster(ui, &lobby, me);
+
+                ui.separator();
+                if hosting {
+                    // The host commands the start (rl#58). Alone → an instant solo round;
+                    // with peers → the synchronized networked start. The button label reflects
+                    // which, read from the live roster so it's honest about what Start does.
+                    let solo = lobby.len() <= 1;
+                    let label = if solo {
+                        "Start (solo — nobody has joined)"
+                    } else {
+                        "Start the match"
+                    };
+                    if ui.button(label).clicked() {
+                        clicked_start = true;
+                    }
+                } else {
+                    // A joiner can't start; it waits for the host's GO.
+                    ui.spinner();
+                    ui.label("Waiting for the host to start…");
+                }
                 if ui.button("Cancel").clicked() {
-                    // Bail back to the menu: drop the in-flight formation (its session tears
-                    // down on the worker's return) and return to the chooser.
-                    start_solo_now = false;
-                    state.forming = None;
-                    next.set(AppPhase::Menu);
+                    clicked_cancel = true;
                 }
             });
 
-        // Act on the host's "start solo now": abandon the wait (drop the formation handle —
-        // the worker's session closes on its own return) and install the shared solo round,
-        // the SAME one Solo/Alone produce. Guaranteed-instant, no discovery dependency.
-        if start_solo_now {
+        // Cancel takes priority over a same-frame Start: tell the barrier to bail and tear
+        // its session down (no ~12s LAN phantom), drop the handle, and return to the menu.
+        if clicked_cancel {
+            if let Some(f) = &state.forming {
+                f.cancel();
+            }
             state.forming = None;
-            pending.0 = Some(menu::solo_round(state.seed));
-            next.set(AppPhase::Playing);
+            next.set(AppPhase::Menu);
+            return;
+        }
+        if clicked_start {
+            let solo = state.forming.as_ref().map(|f| f.lobby_len()).unwrap_or(1) <= 1;
+            if solo {
+                // Host-alone Start: abandon the wait (cancel the barrier so its session tears
+                // down) and install the shared solo round INSTANTLY — the SAME deterministic
+                // round Alone produces. No discovery dependency.
+                if let Some(f) = &state.forming {
+                    f.cancel();
+                }
+                state.forming = None;
+                pending.0 = Some(menu::solo_round(state.seed));
+                next.set(AppPhase::Playing);
+            } else if let Some(f) = &state.forming {
+                // Peers present: command the barrier's synchronized GO. The formed networked
+                // round arrives on a later poll (above), which then enters Playing.
+                f.request_start();
+            }
+        }
+    }
+
+    /// Draw the lobby's live player list (rl#58): one line per player, `me` (if given)
+    /// marked. `roster` is the barrier's current `live_set` (sorted by id bytes), empty until
+    /// the session binds.
+    fn lobby_roster(ui: &mut egui::Ui, roster: &[EndpointId], me: Option<EndpointId>) {
+        if roster.is_empty() {
+            ui.label("Players: (connecting…)");
+            return;
+        }
+        ui.label(format!("Players in the lobby: {}", roster.len()));
+        for id in roster {
+            let tag = if Some(*id) == me { "  (you)" } else { "" };
+            ui.label(format!("  • {}{}", id.fmt_short(), tag));
         }
     }
 }

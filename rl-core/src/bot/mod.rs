@@ -189,7 +189,13 @@ pub fn respawn_crab_rotated(
     body::spawn_crab(commands, assets, origin, env, init_rotation);
 }
 
-fn spawn_initial_crabs(
+/// Spawn `NumEnvs` crabs and size the per-env buffers to match — the [`BotPlugin`] Startup
+/// system, also reusable as a deferred spawn. The boot-menu solo NN crab (rl#58) leaves
+/// `NumEnvs` at 0 through the menu (so no crab spawns behind it), then bumps it to 1 and
+/// runs THIS at the solo round transition, so the one crab-spawn path is shared (no second
+/// spawn routine to drift from training/demo). Idempotent only via the caller's gating —
+/// it appends, so run it exactly once per intended spawn.
+pub fn spawn_initial_crabs(
     mut commands: Commands,
     assets: Res<body::CrabAssets>,
     num_envs: Res<NumEnvs>,

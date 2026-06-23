@@ -19,8 +19,8 @@
 //!   the client's job, not this headless smoke's).
 //! - `play`: the windowed first-person CLIENT ([`rl_core::net::render`]) — see the
 //!   gray-box from the local player's eyes and play it, on the SAME lockstep +
-//!   transport as `net`. Boots to a Host/Join/Solo menu (rl#56); `--solo`/`--host`/
-//!   `--join <code>` skip it for scripting (the Deck shortcut uses `--solo`).
+//!   transport as `net`. Boots to a Host / Join menu (rl#58); `--host`/`--join <code>`
+//!   skip it for scripting/tests.
 //! - `fp-screenshot`: render one settled frame of the first-person view to a PNG and
 //!   exit (GPU on, no window) — the headless evidence path for the sim→render
 //!   pipeline on a box with no display.
@@ -98,33 +98,28 @@ struct SoloArgs {
 
 #[derive(Parser)]
 struct PlayArgs {
-    /// Skip the boot menu and run a single offline peer (no network): see + play the sim
-    /// solo, instantly. This is the scripted solo path the Deck shortcut + tests use — no
-    /// menu, no networking. Without any of `--solo`/`--host`/`--join`, `play` shows the
-    /// interactive boot menu (rl#56) where the player picks Host / Join / Solo.
-    #[arg(long, conflicts_with_all = ["host", "join"])]
-    solo: bool,
-    /// Skip the menu and HOST a networked match directly (scripted): form over the LAN
-    /// and start with whoever joins, or solo if nobody does. Equivalent to the menu's
-    /// Host button without the click.
-    #[arg(long, conflicts_with_all = ["solo", "join"])]
+    /// Skip the menu and HOST a networked match directly (scripted/test entry): form over
+    /// the LAN and start with whoever joins, or solo if nobody does. Equivalent to the
+    /// menu's Host without the click. (rl#58 removed the old `--solo` flag — a Host that
+    /// finds no peer IS the solo round, the one codepath; bare `play` shows the menu.)
+    #[arg(long, conflicts_with = "join")]
     host: bool,
-    /// Skip the menu and JOIN a host by its endpoint-id code (scripted): dial the code,
-    /// then form. Equivalent to the menu's Join-by-code without the click. The bare flag
-    /// `--join` with no value joins by LAN discovery (no explicit dial).
+    /// Skip the menu and JOIN a host by its endpoint-id code (scripted/test entry): dial the
+    /// code, then form. Equivalent to the menu's Join-by-code without the click. The bare
+    /// flag `--join` with no value joins by LAN discovery (no explicit dial).
     #[arg(
         long,
         value_name = "JOIN_CODE",
         num_args = 0..=1,
         default_missing_value = "",
-        conflicts_with_all = ["solo", "host"]
+        conflicts_with = "host"
     )]
     join: Option<String>,
-    /// Wait this long for peers before starting (networked play only).
+    /// Wait this long for peers before starting (the scripted `--host`/`--join` paths only).
     #[arg(long, default_value_t = 4)]
     discover_secs: u64,
-    /// Expected peer count including us (networked play only); proceeds with whoever
-    /// showed up after `discover_secs`.
+    /// Expected peer count including us (the scripted `--host`/`--join` paths only); proceeds
+    /// with whoever showed up after `discover_secs`.
     #[arg(long, default_value_t = 2)]
     expect: usize,
     /// Stream live telemetry to this collector endpoint id (networked play only; see
@@ -132,14 +127,14 @@ struct PlayArgs {
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
 
-    /// SOLO ONLY: directory holding the trained crab policy (`brain.bin` +
-    /// `normalizer.bin`). When set (and playing solo), the giant crab is the real
-    /// rapier-simulated, NN-driven body instead of the integer point-pursuer — it WALKS
-    /// toward the nearest player under the trained policy. Defaults to the
-    /// `RL_CRAB_CHECKPOINT_DIR` env var, else `assets/weights` under the asset root.
-    /// A missing/empty dir falls back to the integer crab (logged). Ignored when
-    /// networked — a float rapier crab is not cross-peer deterministic, so multiplayer
-    /// keeps the integer crab (a separate, bigger follow-up to make it MP-safe).
+    /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`). When set,
+    /// a SOLO round (a Host-alone Start, or a scripted `--host` that found no peer) drives
+    /// the giant crab with the real rapier-simulated NN body instead of the integer
+    /// point-pursuer — it WALKS toward the nearest player under the trained policy. Defaults
+    /// to the `RL_CRAB_CHECKPOINT_DIR` env var, else `assets/weights` under the asset root.
+    /// A missing/empty dir falls back to the integer crab (logged). Ignored on a NETWORKED
+    /// round — a float rapier crab is not cross-peer deterministic, so multiplayer keeps the
+    /// integer crab (the runtime gate ensures the NN crab activates only when solo).
     #[arg(long, value_name = "DIR")]
     nn_crab_checkpoint: Option<PathBuf>,
 }
@@ -305,26 +300,24 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
     }
 }
 
-/// Windowed first-person client. The DEFAULT (`game play` with no role flag) shows the
-/// boot menu (rl#56) — the player picks Host / Join / Solo — and the round is built only
-/// after the choice, never touching the deterministic sim before then (see
-/// [`rl_core::net::render::Boot`]). The scripted flags bypass the menu for the Deck shortcut +
-/// tests:
-/// - `--solo` → an instant offline round, no menu, no networking.
+/// Windowed first-person client. The DEFAULT (`game play` with no flag) shows the boot menu
+/// (rl#58) — the player picks Host / Join — and the round is built only after the choice,
+/// never touching the deterministic sim before then (see [`rl_core::net::render::Boot`]). The
+/// scripted flags bypass the menu for tests/scripts:
 /// - `--host` → host directly: form over the LAN, start with whoever joins (solo if none).
 /// - `--join [CODE]` → join directly: dial CODE (or LAN-discover if bare), then form.
 ///
-/// All three scripted paths form the match UP FRONT and hand a ready round to
-/// [`render::Boot::Round`], so they boot straight into play with no menu. The networked
-/// ones reuse the SAME barrier as the menu and as `game net`, so the agreed roster + seed
-/// are identical however play was reached; the alone-fallback (rl#47) still yields a solo
-/// round when nobody shows.
+/// Both scripted paths form the match UP FRONT and hand a ready round to
+/// [`render::Boot::Round`], so they boot straight into play with no menu. They reuse the
+/// SAME barrier as the menu and as `game net`, so the agreed roster + seed are identical
+/// however play was reached; the alone-fallback (rl#47) still yields a solo round when
+/// nobody shows. (rl#58 removed the old `--solo`: a Host-alone IS the solo round.)
 fn run_play(args: PlayArgs) -> Result<()> {
-    let boot = if args.solo {
-        render::Boot::Round(Box::new((net_loop::solo_lockstep_for(MATCH_SEED), None)))
-    } else if args.host || args.join.is_some() {
+    let boot = if args.host || args.join.is_some() {
         // Scripted host/join: dial the join code if joining (blank/absent = LAN discover),
-        // form over the barrier, and hand the result to Boot::Round. Host never dials.
+        // form over the barrier, and hand the result to Boot::Round. Host never dials. This
+        // is the default timer-closed barrier (no interactive lobby), so it can't be
+        // cancelled — only Joined or the Alone solo fallback.
         let dial = match &args.join {
             Some(code) if !code.trim().is_empty() => Some(code.trim().parse::<EndpointId>()?),
             _ => None,
@@ -342,9 +335,13 @@ fn run_play(args: PlayArgs) -> Result<()> {
                 let (ls, driver) = *joined;
                 render::Boot::Round(Box::new((ls, Some(driver))))
             }
-            // Nobody showed: play the shared solo round (same as `--solo`).
+            // Nobody showed: play the shared solo round (the Host-alone outcome).
             net_loop::MatchResult::Alone => {
                 render::Boot::Round(Box::new((net_loop::solo_lockstep_for(MATCH_SEED), None)))
+            }
+            // The scripted path runs no interactive lobby, so a Cancel is impossible.
+            net_loop::MatchResult::Cancelled => {
+                unreachable!("scripted --host/--join has no lobby to cancel")
             }
         }
     } else {
@@ -483,17 +480,24 @@ async fn run_net(args: NetArgs) -> Result<()> {
     // client runs, so the two can't drift apart and desync). Replay any inputs that
     // arrived during formation into the fresh sim. If discovery finds no peer (rl#47),
     // tear down the network side and run a solo round instead of awaiting an empty match.
-    let frozen =
-        match net_loop::form_match(&mut session, args.discover_secs, args.expect, tel.as_ref())
-            .await?
-        {
-            net_loop::Formation::Agreed(frozen) => frozen,
-            net_loop::Formation::Alone => {
-                drop(tel);
-                session.shutdown().await;
-                return run_solo_round(args.run_secs);
-            }
-        };
+    let frozen = match net_loop::form_match(
+        &mut session,
+        args.discover_secs,
+        args.expect,
+        tel.as_ref(),
+        None, // headless: timer-closed barrier, no interactive lobby
+    )
+    .await?
+    {
+        net_loop::Formation::Agreed(frozen) => frozen,
+        net_loop::Formation::Alone => {
+            drop(tel);
+            session.shutdown().await;
+            return run_solo_round(args.run_secs);
+        }
+        // No cancel channel on the headless path, so a Cancel can never be signalled.
+        net_loop::Formation::Cancelled => unreachable!("headless net has no lobby to cancel"),
+    };
     let me = frozen.me;
     let id_map = &frozen.id_map;
     let all_ids: Vec<PlayerId> = id_map.values().copied().collect();

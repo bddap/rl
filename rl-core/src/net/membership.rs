@@ -109,6 +109,14 @@ pub struct Beat {
     /// the sender. The receiver unions these ids into its own view (transitive gossip)
     /// and reads [`Beat::roster_hash`] to check agreement.
     pub members: Vec<EndpointId>,
+    /// The host's synchronized-start command (rl#58): `true` once the host has clicked
+    /// Start, commanding the round to begin on the roster carried in THIS same beat. A
+    /// joiner closes the barrier on a direct `start` beat whose roster hash equals its
+    /// own — so host and joiners freeze the byte-identical set the GO names, never a
+    /// divergent one (the same unanimity safety as the timer close, just host-triggered).
+    /// Always `false` outside the host-triggered menu path, so every other caller's wire
+    /// and close behaviour is unchanged.
+    pub start: bool,
 }
 
 impl Beat {
@@ -185,6 +193,39 @@ pub struct Membership {
     agreed_since: Option<(Instant, u64)>,
     /// When formation began, for the [`JOIN_WINDOW`] hard deadline.
     started: Instant,
+    /// rl#58 close mode. The sum type that decides HOW the barrier closes, so the two-mode
+    /// behaviour can't be a soup of bools and "only the host may GO" is enforced by the type,
+    /// not by external wiring. [`LobbyMode::Off`] (the default [`Membership::new`]) is the
+    /// unchanged barrier — close on the [`STABLE_FOR`] timer. The lobby variants
+    /// ([`Membership::host_triggered`]) replace that with a host's explicit GO; the roster a
+    /// peer freezes is the same `live_set` either way (only the close *moment* differs), so
+    /// determinism is untouched.
+    lobby: LobbyMode,
+    /// Whether we've received a direct [`Beat`] with `start` set from a peer whose roster
+    /// hash equals our CURRENT one — the host's GO landing on a roster we agree with.
+    /// Recomputed each [`Membership::poll`] from peer views, so it can never latch on a
+    /// stale roster: a GO seen while our sets disagreed does not close us, and a set change
+    /// after a GO re-gates on the new hash. The joiner's sole close trigger in the lobby.
+    host_go_on_my_roster: bool,
+}
+
+/// How a [`Membership`] barrier decides to close (rl#58). A sum type so the
+/// determinism-critical mode is explicit, not inferred, and so the "only a host commands the
+/// start" rule is unrepresentable to violate (a [`LobbyMode::Joiner`] has no `starting` to
+/// set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LobbyMode {
+    /// The default barrier: close on [`STABLE_FOR`] continuous agreement, fail at
+    /// [`JOIN_WINDOW`]. Used by the headless `net` driver and the scripted entrypoints —
+    /// byte-identical to pre-rl#58.
+    Off,
+    /// Host of an interactive lobby: `started` flips true on the Start click
+    /// ([`Membership::set_starting`]); while true the host advertises the `start` GO and
+    /// closes once its own agreement predicate holds. Open-ended (no [`JOIN_WINDOW`] fail).
+    Host { started: bool },
+    /// Joiner in an interactive lobby: closes only on the host's GO landing on a matching
+    /// roster (`host_go_on_my_roster`). Has no way to command a start — that's the point.
+    Joiner,
 }
 
 /// Our latest knowledge of one peer. Liveness comes from `last_direct` (its OWN beats —
@@ -201,6 +242,11 @@ struct PeerView {
     /// The roster hash this peer last advertised in its own beat, or `None` if not yet
     /// heard directly (gossip-admitted only).
     advertised: Option<u64>,
+    /// Whether this peer's most recent DIRECT beat carried the host's `start` GO (rl#58).
+    /// Paired with `advertised` so the close check requires the GO and a matching roster
+    /// hash *from the same beat* — a host that commanded start on roster R can't close a
+    /// joiner that's on a different roster. A relay never sets this (only a direct beat).
+    started: bool,
 }
 
 /// The barrier's verdict on each [`Membership::poll`]: keep waiting, freeze this exact
@@ -217,6 +263,17 @@ pub enum Status {
     /// [`JOIN_WINDOW`] elapsed without sustained agreement. The caller must surface this
     /// and retry rather than freeze a guessed set.
     Failed,
+}
+
+/// Which side of an interactive lobby a peer is (rl#58) — passed to
+/// [`Membership::host_triggered`] so the barrier knows whether it may command the start. The
+/// boot menu's Host button is [`Role::Host`], Join is [`Role::Joiner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The host: commands the synchronized start ([`Membership::set_starting`]).
+    Host,
+    /// A joiner: waits for the host's GO; cannot command a start.
+    Joiner,
 }
 
 impl Membership {
@@ -237,6 +294,38 @@ impl Membership {
             tombstones: BTreeMap::new(),
             agreed_since: None,
             started: now,
+            lobby: LobbyMode::Off,
+            host_go_on_my_roster: false,
+        }
+    }
+
+    /// Begin a host-triggered (interactive lobby) formation (rl#58, boot-menu networked
+    /// Host/Join only). Same agreement core as [`Membership::new`], but the close trigger is
+    /// a host's explicit GO instead of the [`STABLE_FOR`] timer: a joiner lobbies until the
+    /// host clicks Start, and the host (via [`Membership::set_starting`]) commands the start
+    /// on click. `role` decides which: only a [`Role::Host`] can `set_starting` and advertise
+    /// the GO. `expect` is still the participant floor. The frozen roster is identical to the
+    /// timer path — only the close *moment* changes — so this introduces no new divergence.
+    pub fn host_triggered(role: Role, me: EndpointId, expect: usize, now: Instant) -> Self {
+        let lobby = match role {
+            Role::Host => LobbyMode::Host { started: false },
+            Role::Joiner => LobbyMode::Joiner,
+        };
+        Self {
+            lobby,
+            ..Self::new(me, expect, now)
+        }
+    }
+
+    /// Host: command the round to start NOW (the boot menu's Start click). The host then
+    /// advertises the GO in its [`Beat`] and closes the barrier as soon as its agreement
+    /// predicate holds; joiners close when they receive that GO on a matching roster.
+    /// Idempotent, and structurally a no-op for anything but a [`LobbyMode::Host`] — a joiner
+    /// or a timer barrier has no `started` to set, so "only the host commands the start" is
+    /// the type's guarantee, not an external one.
+    pub fn set_starting(&mut self) {
+        if let LobbyMode::Host { started } = &mut self.lobby {
+            *started = true;
         }
     }
 
@@ -271,9 +360,13 @@ impl Membership {
                 let view = self.peers.entry(from).or_insert(PeerView {
                     last_direct: now,
                     advertised: None,
+                    started: false,
                 });
                 view.last_direct = now;
                 view.advertised = Some(beat.roster_hash());
+                // Latch the host's GO from THIS direct beat; paired with `advertised` so the
+                // joiner close requires both the GO and a matching roster from one beat.
+                view.started = beat.start;
             }
         }
         // Transitive admission: a relayed id we don't track yet and that isn't
@@ -294,6 +387,7 @@ impl Membership {
                     PeerView {
                         last_direct: now,
                         advertised: None,
+                        started: false,
                     },
                 );
             }
@@ -312,11 +406,17 @@ impl Membership {
         ids
     }
 
-    /// The [`Beat`] to broadcast this round: our full live set. Built from
-    /// [`Membership::live_set`] so what we advertise is exactly what we'd freeze.
+    /// The [`Beat`] to broadcast this round: our full live set, and (host only, once
+    /// [`Membership::set_starting`] has fired) the `start` GO commanding the round to begin
+    /// on that set. Built from [`Membership::live_set`] so what we advertise is exactly what
+    /// we'd freeze; `start` rides the same beat so the GO and the roster it commands are
+    /// inseparable.
     pub fn beat(&self) -> Beat {
         Beat {
             members: self.live_set(),
+            // Only a host that has clicked Start advertises the GO; everything else sends a
+            // plain beat. So a joiner/timer barrier can never put `start` on the wire.
+            start: matches!(self.lobby, LobbyMode::Host { started: true }),
         }
     }
 
@@ -354,6 +454,16 @@ impl Membership {
         let unanimous = self.peers.values().all(|v| v.advertised == Some(my_hash));
         let agreed_now = enough && unanimous;
 
+        // The host's GO landing on a roster we agree with: a peer whose latest direct beat
+        // both commanded start AND advertised our exact current hash. Recomputed here (never
+        // latched) so a GO seen while sets disagreed can't close us, and a later set change
+        // re-gates the GO on the new hash. Only the host ever sets `start`, so in practice
+        // this is "the host commanded the start on the roster we're holding".
+        self.host_go_on_my_roster = self
+            .peers
+            .values()
+            .any(|v| v.started && v.advertised == Some(my_hash));
+
         // Maintain the continuous-agreement timer, KEYED ON the agreed hash: (re)start it
         // when the predicate holds on a hash different from what the timer tracks; clear
         // it the instant the predicate fails. So the elapsed time always measures how long
@@ -365,25 +475,53 @@ impl Membership {
             (false, _) => None,                                   // predicate broke → reset
         };
 
-        match self.agreed_since {
-            Some((since, _)) if now.duration_since(since) >= STABLE_FOR => {
-                Status::Agreed { roster: live }
-            }
-            _ if now.duration_since(self.started) >= JOIN_WINDOW => Status::Failed,
-            _ => Status::Forming { live: live.len() },
+        // EVERY mode requires the agreement predicate to have held CONTINUOUSLY for
+        // [`STABLE_FOR`] before closing — that settle is what absorbs a staggered/late join
+        // (a peer growing its set shifts `my_hash`, breaks unanimity, and rewinds the timer),
+        // so it's load-bearing for the lobby modes too, NOT just the timer one. The mode only
+        // adds an EXTRA gate on top of that settle (rl#58):
+        // - Host: also requires the Start click (`started`). The settle still runs, so a peer
+        //   that joins right as the host clicks can't be frozen out mid-join — the host waits
+        //   the dust out exactly like the timer path, then closes on the click.
+        // - Joiner: also requires the host's GO on its matching roster.
+        // - Off (default): no extra gate — the settle alone closes, as before rl#58.
+        // Every mode freezes the IDENTICAL `live` set; only the extra gate (and, for the lobby
+        // modes, the lack of a [`JOIN_WINDOW`] fail — a lobby is open-ended, the user cancels)
+        // differs, so determinism is untouched.
+        let held = self
+            .agreed_since
+            .is_some_and(|(since, _)| now.duration_since(since) >= STABLE_FOR);
+        let close = held
+            && match self.lobby {
+                LobbyMode::Host { started } => started,
+                LobbyMode::Joiner => self.host_go_on_my_roster,
+                LobbyMode::Off => true,
+            };
+        let timed_out =
+            self.lobby == LobbyMode::Off && now.duration_since(self.started) >= JOIN_WINDOW;
+        if close {
+            Status::Agreed { roster: live }
+        } else if timed_out {
+            Status::Failed
+        } else {
+            Status::Forming { live: live.len() }
         }
     }
 }
 
-/// Encode a [`Beat`] for the wire: `[count:u16 LE][id:32]*count`, ids sorted. Fixed
-/// 32-byte ids (an [`EndpointId`] is a 32-byte public key) so the body is
-/// `2 + 32*count` with no per-id length. The count is bounded by [`MAX_BEAT_MEMBERS`]
-/// on decode so a hostile/garbled frame can't trigger a huge allocation.
+/// Encode a [`Beat`] for the wire: `[start:u8][count:u16 LE][id:32]*count`, ids sorted.
+/// Fixed 32-byte ids (an [`EndpointId`] is a 32-byte public key) so the body is
+/// `3 + 32*count` with no per-id length. The leading `start` byte is the host's GO
+/// flag (rl#58); it is NOT folded into [`roster_hash`] (a command, not membership), so
+/// the same set hashes identically whether or not the round has been commanded to start.
+/// The count is bounded by [`MAX_BEAT_MEMBERS`] on decode so a hostile/garbled frame
+/// can't trigger a huge allocation.
 pub fn encode_beat(beat: &Beat) -> Vec<u8> {
     let mut sorted = beat.members.clone();
     sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     sorted.dedup();
-    let mut out = Vec::with_capacity(2 + 32 * sorted.len());
+    let mut out = Vec::with_capacity(3 + 32 * sorted.len());
+    out.push(beat.start as u8);
     out.extend_from_slice(&(sorted.len() as u16).to_le_bytes());
     for id in &sorted {
         out.extend_from_slice(id.as_bytes());
@@ -400,13 +538,14 @@ const MAX_BEAT_MEMBERS: usize = 256;
 /// past [`MAX_BEAT_MEMBERS`] (a malformed/hostile frame) rather than panicking or
 /// over-allocating.
 pub fn decode_beat(body: &[u8]) -> Result<Beat> {
-    anyhow::ensure!(body.len() >= 2, "barrier frame too short for count");
-    let count = u16::from_le_bytes([body[0], body[1]]) as usize;
+    anyhow::ensure!(body.len() >= 3, "barrier frame too short for start+count");
+    let start = body[0] != 0;
+    let count = u16::from_le_bytes([body[1], body[2]]) as usize;
     anyhow::ensure!(
         count <= MAX_BEAT_MEMBERS,
         "barrier frame claims {count} members (> {MAX_BEAT_MEMBERS})"
     );
-    let need = 2 + 32 * count;
+    let need = 3 + 32 * count;
     anyhow::ensure!(
         body.len() == need,
         "barrier frame length {} != expected {need} for {count} members",
@@ -414,13 +553,13 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     );
     let mut members = Vec::with_capacity(count);
     for i in 0..count {
-        let off = 2 + 32 * i;
+        let off = 3 + 32 * i;
         let bytes: [u8; 32] = body[off..off + 32].try_into().expect("32-byte slice");
         let id = EndpointId::from_bytes(&bytes)
             .map_err(|e| anyhow::anyhow!("bad endpoint id in barrier frame: {e}"))?;
         members.push(id);
     }
-    Ok(Beat { members })
+    Ok(Beat { members, start })
 }
 
 #[cfg(test)]
@@ -440,6 +579,16 @@ mod tests {
         base + Duration::from_millis(ms)
     }
 
+    /// A plain (non-start) [`Beat`] for the given members — the default heartbeat every
+    /// peer sends until a host commands the start. Keeps the membership tests reading about
+    /// rosters, not the rl#58 GO flag they don't exercise.
+    fn bt(members: Vec<EndpointId>) -> Beat {
+        Beat {
+            members,
+            start: false,
+        }
+    }
+
     /// The expected canonical (sorted) form of a set, for comparing against a roster
     /// the code returns. Real public keys sort by their key bytes in an order unrelated
     /// to the seed `i`, so tests must compare against this, not a hand-ordered literal.
@@ -451,29 +600,50 @@ mod tests {
 
     #[test]
     fn beat_wire_roundtrips_and_is_order_independent() {
-        let a = Beat {
-            members: vec![eid(3), eid(1), eid(2)],
-        };
-        let b = Beat {
-            members: vec![eid(1), eid(2), eid(3)],
-        };
+        let a = bt(vec![eid(3), eid(1), eid(2)]);
+        let b = bt(vec![eid(1), eid(2), eid(3)]);
         // Same set in any order → identical bytes and identical hash (the agreement
         // token must not depend on insertion order).
         assert_eq!(encode_beat(&a), encode_beat(&b));
         assert_eq!(a.roster_hash(), b.roster_hash());
         let decoded = decode_beat(&encode_beat(&a)).unwrap();
         assert_eq!(decoded.members, sorted(&[eid(1), eid(2), eid(3)]));
+        assert!(!decoded.start, "a plain beat decodes with no start GO");
     }
 
     #[test]
     fn decode_rejects_garbage() {
-        assert!(decode_beat(&[0]).is_err(), "too short for count");
-        // count=5 but no bodies.
-        assert!(decode_beat(&5u16.to_le_bytes()).is_err(), "truncated body");
-        // count past the cap.
-        let mut huge = (300u16).to_le_bytes().to_vec();
-        huge.resize(2 + 32 * 300, 0);
+        assert!(decode_beat(&[0]).is_err(), "too short for start+count");
+        // start byte + count=5 but no member bodies.
+        let mut truncated = vec![0u8];
+        truncated.extend_from_slice(&5u16.to_le_bytes());
+        assert!(decode_beat(&truncated).is_err(), "truncated body");
+        // count past the cap (start byte + bogus count + filler).
+        let mut huge = vec![0u8];
+        huge.extend_from_slice(&(300u16).to_le_bytes());
+        huge.resize(3 + 32 * 300, 0);
         assert!(decode_beat(&huge).is_err(), "over-large count rejected");
+    }
+
+    /// The host's start GO survives the wire as a distinct field and does NOT change the
+    /// roster hash (rl#58): a `start` beat and a plain beat over the SAME members hash
+    /// identically (so a host commanding the start can't accidentally fork the agreed set),
+    /// but the decoded `start` flag faithfully reflects which was sent.
+    #[test]
+    fn start_flag_roundtrips_without_perturbing_the_roster_hash() {
+        let members = vec![eid(1), eid(2)];
+        let plain = bt(members.clone());
+        let go = Beat {
+            members,
+            start: true,
+        };
+        assert_eq!(
+            plain.roster_hash(),
+            go.roster_hash(),
+            "the GO flag must not be part of the roster hash"
+        );
+        assert!(!decode_beat(&encode_beat(&plain)).unwrap().start);
+        assert!(decode_beat(&encode_beat(&go)).unwrap().start);
     }
 
     #[test]
@@ -618,7 +788,7 @@ mod tests {
         let mut b = Membership::new(idb, 2, t0);
 
         // One stale DIRECT beat from P at t=0, then never again (its process crashed).
-        let phantom_beat = Beat { members: vec![idp] };
+        let phantom_beat = bt(vec![idp]);
         a.on_beat(idp, &phantom_beat, t0);
         b.on_beat(idp, &phantom_beat, t0);
 
@@ -670,7 +840,7 @@ mod tests {
         // B hears C directly (so C is live in B with a real advertised hash) but A has
         // NOT — A's beats won't list C, and we deliberately feed A a doctored {A,B}-only
         // view of B to HOLD the views divergent and check neither closes wrongly.
-        let cbeat = Beat { members: vec![idc] };
+        let cbeat = bt(vec![idc]);
         b.on_beat(idc, &cbeat, t0);
 
         let mut t = 0u64;
@@ -681,13 +851,7 @@ mod tests {
             b.on_beat(idc, &cbeat, now);
             // Feed A a stale {A,B}-only view of B (simulating C-bearing frames not yet
             // arriving). B hears A's real beat.
-            a.on_beat(
-                idb,
-                &Beat {
-                    members: vec![ida, idb],
-                },
-                now,
-            );
+            a.on_beat(idb, &bt(vec![ida, idb]), now);
             b.on_beat(ida, &ba, now);
             let sa = a.poll(now);
             let sb = b.poll(now);
@@ -728,12 +892,8 @@ mod tests {
         let (ida, idb) = (eid(1), eid(2));
         let mut a = Membership::new(ida, 2, t0);
         let other = eid(7);
-        let agree = Beat {
-            members: vec![ida, idb],
-        };
-        let disagree = Beat {
-            members: vec![ida, idb, other],
-        };
+        let agree = bt(vec![ida, idb]);
+        let disagree = bt(vec![ida, idb, other]);
         let mut t = 0u64;
         while t <= JOIN_WINDOW.as_millis() as u64 - 1000 {
             let now = at(t0, t);
@@ -820,7 +980,7 @@ mod tests {
         // still relaying P to A — the resurrection window. The tombstone A set on expiry
         // must make A REFUSE to re-admit the relayed P (only P's own direct beat could),
         // so the dead P can't ping-pong back and the set settles to {A,B}.
-        let pbeat = Beat { members: vec![idp] };
+        let pbeat = bt(vec![idp]);
         a.on_beat(idp, &pbeat, t0);
         b.on_beat(idp, &pbeat, at(t0, 400));
 
@@ -874,13 +1034,7 @@ mod tests {
             // directly. It expires after MEMBER_TIMEOUT, but a fresh one replaces it, so
             // the set never holds still. (Tombstones don't block these — each id is new.)
             let transient = eid((t / 250 % 200 + 10) as u8);
-            m.on_beat(
-                transient,
-                &Beat {
-                    members: vec![transient],
-                },
-                now,
-            );
+            m.on_beat(transient, &bt(vec![transient]), now);
             if m.poll(now) == Status::Failed {
                 saw_failed = true;
                 break;
@@ -890,6 +1044,179 @@ mod tests {
         assert!(
             saw_failed,
             "perpetual churn must FAIL at the join window, never silently freeze"
+        );
+    }
+
+    #[test]
+    fn host_triggered_joiner_waits_for_the_go_then_both_freeze_the_identical_set() {
+        // rl#58 determinism gate. A host (H) and a joiner (J) form a host-triggered barrier.
+        // Neither may close on agreement ALONE — the lobby waits for H's Start click (the
+        // STABLE_FOR settle still runs underneath, absorbing late joins, but it's not enough
+        // to close in lobby mode) — and when H clicks, BOTH must freeze the byte-identical
+        // {H,J}. The host-driven analogue of `two_peers_converge_and_freeze_the_identical_set`:
+        // the roster guarantee is unchanged, only an EXTRA close gate (the GO) is layered on.
+        let t0 = Instant::now();
+        let (idh, idj) = (eid(1), eid(2));
+        let mut h = Membership::host_triggered(Role::Host, idh, 2, t0);
+        let mut j = Membership::host_triggered(Role::Joiner, idj, 2, t0);
+
+        // Exchange beats well past STABLE_FOR with NO host click: BOTH must keep lobbying —
+        // the settle elapses but neither lobby gate (Start / GO) is satisfied, so agreement
+        // alone never closes a lobby.
+        let mut t = 0u64;
+        while t <= STABLE_FOR.as_millis() as u64 + 1000 {
+            let now = at(t0, t);
+            let (bh, bj) = (h.beat(), j.beat());
+            h.on_beat(idj, &bj, now);
+            j.on_beat(idh, &bh, now);
+            assert!(
+                !matches!(h.poll(now), Status::Agreed { .. }),
+                "host must not auto-close before its own Start click"
+            );
+            assert!(
+                !matches!(j.poll(now), Status::Agreed { .. }),
+                "joiner must lobby until the host's GO, never auto-close on the timer"
+            );
+            t += 250;
+        }
+
+        // Host clicks Start. Now both close — on the SAME set — within a couple beats.
+        h.set_starting();
+        let mut froze_h = None;
+        let mut froze_j = None;
+        while t <= STABLE_FOR.as_millis() as u64 + 4000 && (froze_h.is_none() || froze_j.is_none())
+        {
+            let now = at(t0, t);
+            let (bh, bj) = (h.beat(), j.beat());
+            h.on_beat(idj, &bj, now);
+            j.on_beat(idh, &bh, now);
+            if froze_h.is_none()
+                && let Status::Agreed { roster } = h.poll(now)
+            {
+                froze_h = Some(roster);
+            }
+            if froze_j.is_none()
+                && let Status::Agreed { roster } = j.poll(now)
+            {
+                froze_j = Some(roster);
+            }
+            t += 250;
+        }
+        let rh = froze_h.expect("host must close on its own Start once agreed");
+        let rj = froze_j.expect("joiner must close on the host's GO");
+        assert_eq!(rh, rj, "host and joiner MUST freeze the identical set");
+        assert_eq!(rh, sorted(&[idh, idj]));
+    }
+
+    #[test]
+    fn host_go_on_a_mismatched_roster_does_not_close_a_joiner() {
+        // The determinism SAFETY gate (rl#58): a host GO closes a joiner ONLY when the GO's
+        // roster hash equals the joiner's own. Here the host commands start on {H} (it hasn't
+        // yet heard J), while J already sees {H,J}. J must NOT close — its set {H,J} ≠ the
+        // GO's {H} — so the two can never freeze divergent rosters off a premature GO. (In
+        // the live protocol the host would hear J and re-GO on {H,J}; this isolates the
+        // negative: a GO on the wrong set is inert.)
+        let t0 = Instant::now();
+        let (idh, idj) = (eid(1), eid(2));
+        let mut j = Membership::host_triggered(Role::Joiner, idj, 2, t0);
+
+        // J has heard H directly (so {H,J} is live for J) and H is "started", but H's beat
+        // carries only {H} (it hasn't admitted J yet) with the GO set.
+        let host_go_on_partial = Beat {
+            members: vec![idh],
+            start: true,
+        };
+        let mut t = 0u64;
+        let mut closed = false;
+        while t <= STABLE_FOR.as_millis() as u64 + 2000 {
+            let now = at(t0, t);
+            // Keep H alive in J's view with the partial GO beat each round.
+            j.on_beat(idh, &host_go_on_partial, now);
+            if matches!(j.poll(now), Status::Agreed { .. }) {
+                closed = true;
+                break;
+            }
+            t += 250;
+        }
+        assert!(
+            !closed,
+            "a GO whose roster hash differs from ours must never close us (no divergent freeze)"
+        );
+    }
+
+    #[test]
+    fn only_a_host_ever_advertises_the_start_go() {
+        // The protocol guarantee that the [`LobbyMode`] type now ENFORCES (rl#58): only a
+        // host can put `start` on the wire. A timer barrier and a JOINER both stay silent on
+        // the GO even after `set_starting` — so a non-menu caller's wire is unchanged, and a
+        // joiner can never command a start it isn't entitled to (the determinism-adjacent
+        // "joiner can't GO" rule, in the type rather than in external channel wiring).
+        let t0 = Instant::now();
+        for mut m in [
+            Membership::new(eid(1), 1, t0),                          // timer barrier
+            Membership::host_triggered(Role::Joiner, eid(1), 2, t0), // a joiner
+        ] {
+            m.set_starting();
+            assert!(
+                !m.beat().start,
+                "only a Role::Host may advertise the start GO"
+            );
+        }
+        // A host, by contrast, advertises the GO once it has clicked Start.
+        let mut host = Membership::host_triggered(Role::Host, eid(1), 2, t0);
+        assert!(!host.beat().start, "a host is silent before clicking Start");
+        host.set_starting();
+        assert!(host.beat().start, "a host advertises the GO after Start");
+    }
+
+    #[test]
+    fn host_clicking_start_during_a_late_join_does_not_freeze_a_partial_set() {
+        // The rl#58 race a reviewer flagged: the host has clicked Start and agrees with J on
+        // {H,J}, but C joins in that same window so J's set grows to {H,J,C}. The host must
+        // NOT freeze {H,J} (which would leave it waiting forever on J's inputs while J is on a
+        // different roster). The per-mode [`STABLE_FOR`] settle is what saves it: C's arrival
+        // breaks the host's unanimity (J now advertises hash({H,J,C})) and rewinds the timer,
+        // so `held` goes false and the host keeps forming until all three converge. This is the
+        // same staggered-join guarantee `late_joiner_within_settle…` proves for the timer path,
+        // now confirmed for a host that has ALREADY clicked Start.
+        let t0 = Instant::now();
+        let (idh, idj, idc) = (eid(1), eid(2), eid(3));
+        let mut h = Membership::host_triggered(Role::Host, idh, 3, t0);
+        let mut j = Membership::host_triggered(Role::Joiner, idj, 3, t0);
+        let mut c = Membership::host_triggered(Role::Joiner, idc, 3, t0);
+        h.set_starting(); // the host has committed to start from the outset
+
+        let join_at = 1000u64; // C joins WITHIN STABLE_FOR of H+J agreeing on {H,J}
+        let abc = sorted(&[idh, idj, idc]);
+        let mut froze: BTreeMap<u8, Vec<EndpointId>> = BTreeMap::new();
+        let mut t = 0u64;
+        while t <= 8000 && froze.len() < 3 {
+            let now = at(t0, t);
+            let (bh, bj, bc) = (h.beat(), j.beat(), c.beat());
+            h.on_beat(idj, &bj, now);
+            j.on_beat(idh, &bh, now);
+            if t >= join_at {
+                h.on_beat(idc, &bc, now);
+                j.on_beat(idc, &bc, now);
+                c.on_beat(idh, &bh, now);
+                c.on_beat(idj, &bj, now);
+            }
+            for (id, m) in [(1u8, &mut h), (2, &mut j), (3, &mut c)] {
+                // Always poll (drives the machine); record the first Agreed per peer.
+                if let Status::Agreed { roster } = m.poll(now)
+                    && !froze.contains_key(&id)
+                {
+                    // The crux: the host (or anyone) must only ever freeze the FULL {H,J,C}.
+                    assert_eq!(roster, abc, "peer {id} froze a partial/wrong set");
+                    froze.insert(id, roster);
+                }
+            }
+            t += 250;
+        }
+        assert_eq!(froze.len(), 3, "all three must converge and freeze {{H,J,C}}");
+        assert!(
+            join_at < STABLE_FOR.as_millis() as u64,
+            "C must join within the settle window for this to test the rewind"
         );
     }
 }

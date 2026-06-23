@@ -1,5 +1,7 @@
-//! SOLO-ONLY: a real rapier-simulated, NN-driven giant crab for the `game play --solo`
-//! playtest, replacing the integer point-pursuer with the actual trained RL body.
+//! SOLO-ONLY: a real rapier-simulated, NN-driven giant crab for the SOLO round (a Host-alone
+//! Start, or scripted `--host` that found no peer), replacing the integer point-pursuer with
+//! the actual trained RL body. Activated by the [`SoloCrabActive`] runtime gate (rl#58), so
+//! it drives the crab only when the round genuinely resolves solo.
 //!
 //! # Why solo only
 //! The game's [`crate::net::sim`] is a bit-deterministic INTEGER lockstep sim so two
@@ -162,11 +164,39 @@ pub fn sync_external_crab(ls: &mut crate::net::lockstep::Lockstep, bridge: &mut 
     bridge.set_hunt_target(ls.sim().nearest_living_player_pos());
 }
 
+/// Runtime gate for the solo NN crab (rl#58). The boot-menu path adds the whole NN stack at
+/// app build (plugins can't be added later) but does NOT know yet whether the round will be
+/// solo — so every NN system is gated on this, and it's flipped on ONLY when the round
+/// resolves solo (Host-alone). While `false` the crab never spawns and no policy/physics
+/// drives it, and crucially [`crate::net::render`]'s `drive_lockstep` never calls
+/// [`sync_external_crab`] — so a networked round with the stack present stays byte-identical
+/// to the integer-crab path. The scripted solo paths (`Boot::Round`) insert it `true` at
+/// build, so there is ONE gate for both, not a second always-on code path.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SoloCrabActive(pub bool);
+
+impl SoloCrabActive {
+    /// Whether the NN crab is active, tolerating an absent resource (`None` ⇒ off). The one
+    /// predicate both the run-condition and [`crate::net::render`]'s `Option<Res<…>>` reads go
+    /// through, so "is the NN crab driving?" is asked one way everywhere.
+    pub fn is_on(this: Option<&Self>) -> bool {
+        this.is_some_and(|a| a.0)
+    }
+}
+
+/// Run condition: the solo NN crab is active. Gates every [`SoloCrabPlugin`] system so they
+/// idle (zero cost beyond the check) until the round resolves solo.
+fn solo_crab_active(active: Option<Res<SoloCrabActive>>) -> bool {
+    SoloCrabActive::is_on(active.as_deref())
+}
+
 /// Plugin: the solo NN crab. Adds the loaded policy + the bridge, and the systems that
-/// (a) aim + drive the policy, (b) integrate the body's walk into the game crab. The
-/// caller must ALSO have added the bot/physics stack (`RapierPhysicsPlugin` +
-/// `PhysicsWorldPlugin` + `BotPlugin`) to the same app — see [`crate::net::render`]'s
-/// solo branch — so the rig actually exists and steps.
+/// (a) spawn the crab once active, (b) aim + drive the policy, (c) integrate the body's walk
+/// into the game crab. The caller must ALSO have added the bot/physics stack
+/// (`RapierPhysicsPlugin` + `PhysicsWorldPlugin` + `BotPlugin`) to the same app — see
+/// [`crate::net::render`]'s solo branch — so the rig actually exists and steps. Every system
+/// is gated on [`SoloCrabActive`]: the scripted solo path flips it on at build; the boot
+/// menu flips it on only when the round resolves solo (rl#58).
 pub struct SoloCrabPlugin {
     /// Directory the brain (`brain.bin`) + normalizer (`normalizer.bin`) load from.
     /// Configurable so deploy can point it at the chosen checkpoint.
@@ -179,6 +209,7 @@ impl Plugin for SoloCrabPlugin {
     fn build(&self, app: &mut App) {
         let policy = Policy::load(&self.checkpoint_dir);
         app.insert_non_send_resource(policy);
+        app.init_resource::<SoloCrabActive>();
         // Resolve the env-tunable knobs ONCE here (override → default), not per tick.
         let env_f32 = |key: &str, default: f32| {
             std::env::var(key)
@@ -191,25 +222,45 @@ impl Plugin for SoloCrabPlugin {
         let world_gain = env_f32("RL_CRAB_WORLD_GAIN", WORLD_GAIN_DEFAULT);
         app.insert_resource(SoloCrabBridge::new(self.crab_spawn, lead_m, world_gain));
 
+        // Spawn the crab the first frame the gate is active (rl#58). On the scripted solo
+        // path the gate is true from build, so this spawns on frame 1 exactly as before; on
+        // the menu path it spawns only once the solo round is chosen. Reuses the bot stack's
+        // own [`spawn_initial_crabs`] (one spawn path, no drift) after bumping NumEnvs to 1.
+        app.add_systems(
+            Update,
+            spawn_solo_crab_when_active
+                .run_if(solo_crab_active)
+                .before(crate::bot::spawn_initial_crabs),
+        );
+        app.add_systems(
+            Update,
+            crate::bot::spawn_initial_crabs
+                .run_if(solo_crab_active)
+                .run_if(crab_not_yet_spawned),
+        );
+
         // Aim + drive the policy in the Sense→Think→Act chain. The walk target MUST be
         // placed BEFORE Sense: `build_observation` (in BotSet::Sense) reads `CrabTargets`
         // to build the target-relative observation the policy steers by, so a target set
         // after Sense would only reach the policy a tick late (and tick 0 not at all). Then
         // run the policy in Think; the actuator (Act) + rapier step follow from the bot
-        // stack the caller added.
+        // stack the caller added. Gated on the active flag so the policy is inert until solo.
         app.add_systems(
             FixedUpdate,
             (
                 set_crab_walk_target.before(BotSet::Sense),
                 run_solo_policy.in_set(BotSet::Think),
-            ),
+            )
+                .run_if(solo_crab_active),
         );
         // After physics has moved the body this fixed step, fold its displacement into
         // the game-world crab position. Runs in FixedUpdate (one physics step per run) so
         // every bit of walk is captured, not just the frames the render samples.
         app.add_systems(
             FixedUpdate,
-            integrate_solo_crab.after(PhysicsSet::Writeback),
+            integrate_solo_crab
+                .after(PhysicsSet::Writeback)
+                .run_if(solo_crab_active),
         );
 
         // Render-only: shift the rendered rig to the game-world crab position. MUST run in
@@ -229,10 +280,30 @@ impl Plugin for SoloCrabPlugin {
                 FixedUpdate,
                 offset_rendered_crab
                     .after(integrate_solo_crab)
-                    .after(PhysicsSet::Writeback),
+                    .after(PhysicsSet::Writeback)
+                    .run_if(solo_crab_active),
             );
         }
     }
+}
+
+/// Bump `NumEnvs` to 1 the first time the solo crab activates, so the shared
+/// [`crate::bot::spawn_initial_crabs`] (run right after, gated on the same active flag)
+/// spawns exactly one crab. Kept to env 0 / a single crab — the solo round has one giant
+/// crab. A no-op once the crab exists (`NumEnvs` already 1); the spawn-once guard is
+/// [`crab_not_yet_spawned`].
+fn spawn_solo_crab_when_active(mut num_envs: ResMut<crate::bot::NumEnvs>) {
+    if num_envs.0 == 0 {
+        num_envs.0 = 1;
+    }
+}
+
+/// Run condition: no crab body has spawned yet — so [`crate::bot::spawn_initial_crabs`]
+/// (which appends) fires exactly once on the menu solo path rather than every frame the
+/// gate is active. The scripted solo path's crab also spawns through here, so there is one
+/// spawn trigger, not two.
+fn crab_not_yet_spawned(crabs: Query<(), With<CrabCarapace>>) -> bool {
+    crabs.is_empty()
 }
 
 /// Aim the policy: plant env 0's touch target a fixed lead ahead of the carapace toward
@@ -534,6 +605,10 @@ pub fn run_headless_probe(
         checkpoint_dir: checkpoint_dir.to_path_buf(),
         crab_spawn,
     });
+    // The probe IS the solo case — activate the NN gate so the policy/integration systems
+    // run. The crab already spawned via `headless_stack`'s `num_envs: 1`, so the plugin's
+    // own gated spawn is a no-op (the not-yet-spawned guard sees it present).
+    app.insert_resource(SoloCrabActive(true));
     app.insert_non_send_resource(ProbeDriver {
         ls,
         samples: Vec::new(),
