@@ -268,16 +268,18 @@ pub type TrainBackend = Autodiff<NdArray>;
 pub type InferBackend = NdArray;
 
 /// The Adam optimizer over a `CrabBrain` on backend `B`. Generic over the backend so
-/// the one PPO update ([`ppo_update_core`]) serves both the CPU learner and the GPU
-/// `bench-update` comparison from one code path.
+/// the one PPO update ([`ppo_update_core`]) serves the live GPU learner, the GPU/CPU
+/// `bench-update` comparison, and the CPU-backed update test from one code path.
 type CrabOpt<B> = OptimizerAdaptor<Adam, CrabBrain<B>, B>;
-/// The production learner's optimizer: Adam over the CPU autodiff backend.
+/// Adam over the CPU autodiff backend. The live learner updates on the GPU (the
+/// `GpuLearner` owns its own optimizer); this CPU optimizer backs only the
+/// `bench-update --backend cpu` harness and the update test.
 type CrabOptimizer = CrabOpt<TrainBackend>;
 
 /// Build the learner's Adam optimizer (global grad-norm clip 0.5). The ONE source of
-/// the optimizer construction — the live learner, the `bench-update` harness, and the
-/// `--update-device gpu` learner all call this, so the clip constant can't silently
-/// drift between paths meant to be identical.
+/// the optimizer construction — the live `GpuLearner`, the `bench-update` harness, and
+/// the CPU-backed update test all call this, so the clip constant can't silently drift
+/// between paths meant to be identical.
 fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
     AdamConfig::new()
         .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
@@ -833,12 +835,13 @@ impl TrainingState {
         out
     }
 
-    /// Learner-side accessors: hand the PPO update its pieces (see
-    /// `ppo_update_core`). The learner builds rollouts from the threads' returned
-    /// buffers rather than stepping any world, so it reaches into the same
-    /// brain/optimizer/config/return-normalizer. The return normalizer is the
-    /// learner's single copy (rollout threads never touch it), so it is handed out
-    /// `&mut` here for the update to fold the iteration's returns into.
+    /// Hand a CPU-backend PPO update its pieces (brain/optimizer/config/return-
+    /// normalizer; see `ppo_update_core`). The live learner updates on the GPU (see
+    /// `learner_parts_for_gpu` + the `GpuLearner`); this CPU accessor backs the
+    /// `bench-update --backend cpu` baseline and the update test, which exercise the
+    /// shared update math without needing a GPU. The return normalizer is the single
+    /// copy (rollout threads never touch it), handed out `&mut` to fold in the
+    /// iteration's returns.
     pub fn learner_parts(
         &mut self,
     ) -> (
@@ -857,13 +860,12 @@ impl TrainingState {
         )
     }
 
-    /// Learner-side accessor for the `--update-device gpu` path: the CPU brain (mirrored
-    /// to/from the GPU each update by [`GpuLearner`]), the PPO config, and the host return
-    /// normalizer. Unlike [`Self::learner_parts`] it omits the CPU optimizer + device —
-    /// the GPU update runs Adam on its own device-resident optimizer, and the CPU
-    /// optimizer must stay untouched so a `cpu`-device run is byte-for-byte the production
-    /// path. The brain stays the single source of truth (rollout snapshots + checkpoints
-    /// read it); the GPU learner only borrows it to load weights in and write back.
+    /// Learner-side accessor for the live GPU update: the CPU brain (mirrored to/from the
+    /// GPU each update by [`GpuLearner`]), the PPO config, and the host return normalizer.
+    /// Unlike [`Self::learner_parts`] it omits the CPU optimizer + device — the GPU update
+    /// runs Adam on its own device-resident optimizer. The brain stays the single source
+    /// of truth (rollout snapshots + checkpoints read it); the GPU learner only borrows it
+    /// to load weights in and write back.
     #[cfg(feature = "wgpu")]
     pub fn learner_parts_for_gpu(
         &mut self,
@@ -1168,8 +1170,8 @@ fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32], min_tip_dists: &[Optio
 ///
 /// Free function rather than a `TrainingState` method so the K=1 parity test
 /// ([`inproc`] tests) can call the exact production update over hand-built buffers.
-/// Generic over the autodiff backend `B` so the CPU learner and the GPU `bench-update`
-/// run the one implementation — same update, one backend parameter.
+/// Generic over the autodiff backend `B` so the live GPU learner and the CPU/GPU
+/// `bench-update` run the one implementation — same update, one backend parameter.
 pub(crate) fn ppo_update_core<B: AutodiffBackend>(
     brain: &mut CrabBrain<B>,
     optimizer: &mut CrabOpt<B>,
@@ -1501,10 +1503,10 @@ pub fn bench_ppo_update<B: AutodiffBackend>(
     );
 }
 
-/// The GPU training backend: `Autodiff<Wgpu>` over Vulkan. The live learner's
-/// `--update-device gpu` path and the `bench-update --backend gpu` path both run the
-/// one generic [`ppo_update_core`] on this — same update, GPU device. WGSL→Vulkan (the
-/// SPIR-V `burn/vulkan` path is a separate, untried lever). Rollout inference stays on
+/// The GPU training backend: `Autodiff<Wgpu>` over Vulkan. The live learner (the SOLE
+/// update path) and the `bench-update --backend gpu` comparison both run the one generic
+/// [`ppo_update_core`] on this — same update, GPU device. WGSL→Vulkan (the SPIR-V
+/// `burn/vulkan` path is a separate, untried lever). Rollout inference stays on
 /// [`TrainBackend`] (CPU): rollouts are many tiny per-step obs forwards across the K
 /// worker threads, where GPU dispatch overhead would dominate; only the one batched
 /// update moves to the GPU.
@@ -1514,8 +1516,8 @@ pub(crate) type GpuBackend = Autodiff<burn::backend::wgpu::Wgpu>;
 /// Bring up the wgpu/Vulkan backend on the discrete GPU and PROVE the chosen adapter
 /// is real hardware, returning the device to run on. The single source of the
 /// adapter-selection + software-fallback guard, shared by `bench-update --backend gpu`
-/// and the live `learn --update-device gpu` learner, so there is one place that decides
-/// "is this actually the GPU".
+/// and the live `learn` learner (the SOLE update path), so there is one place that
+/// decides "is this actually the GPU".
 ///
 /// The guard is the load-bearing part. The box's Vulkan ICD set includes lavapipe
 /// (`lvp` — a CPU software rasteriser, `DeviceType::Cpu`); if wgpu silently fell back
@@ -1596,14 +1598,11 @@ pub fn bench_ppo_update_gpu(
     );
 }
 
-/// Wall-clock breakdown of one `--update-device gpu` learner iteration's update phase:
-/// the CPU→GPU weight load, the GPU PPO update, and the GPU→CPU write-back, in
-/// milliseconds. The live port pays the two host↔device copies every iter, so the learner
-/// logs all three to show whether the copies eat the update's GPU win — the make-or-break
-/// end-to-end number.
-///
-/// Not feature-gated (just three plain `f64`s) so the learner's logging code stays
-/// cfg-free — only [`GpuLearner`], which produces it, needs the `wgpu` backend.
+/// Wall-clock breakdown of one learner iteration's GPU update phase: the CPU→GPU weight
+/// load, the GPU PPO update, and the GPU→CPU write-back, in milliseconds. The update pays
+/// the two host↔device copies every iter, so the learner logs all three to show whether
+/// the copies eat the GPU win — the make-or-break end-to-end number.
+#[cfg(feature = "wgpu")]
 #[derive(Clone, Copy)]
 pub(crate) struct GpuUpdateTiming {
     /// CPU brain → bytes → GPU brain (load the policy onto the device for this update).
@@ -1614,9 +1613,9 @@ pub(crate) struct GpuUpdateTiming {
     pub store_ms: f64,
 }
 
-/// The GPU-resident learner for `--update-device gpu`. Owns a GPU brain + GPU Adam
-/// optimizer that PERSIST across iterations — the optimizer's moment estimates must carry
-/// over exactly as the CPU learner's do, so this is built once and reused, never per-iter.
+/// The GPU-resident learner — the SOLE PPO-update path (rl#49). Owns a GPU brain + GPU
+/// Adam optimizer that PERSIST across iterations — the optimizer's moment estimates must
+/// carry over across updates, so this is built once and reused, never per-iter.
 ///
 /// The CPU `TrainingState.brain` stays the source of truth. Each iteration
 /// [`Self::update`] mirrors the CPU policy onto the GPU, runs the one generic
@@ -1640,8 +1639,8 @@ impl GpuLearner {
     ///
     /// # Panics
     /// Via [`init_gpu_backend`], if no real discrete-GPU Vulkan adapter is available (a
-    /// software lavapipe/llvmpipe adapter, or none at all). Deliberate: `--update-device
-    /// gpu` must fail loudly at boot, never silently fall back to the CPU.
+    /// software lavapipe/llvmpipe adapter, or none at all). Deliberate: the GPU is the
+    /// only update path, so it must fail loudly at boot, never silently run on the CPU.
     pub fn new() -> Self {
         let device = init_gpu_backend("learner");
         let brain: CrabBrain<GpuBackend> = CrabBrain::new(&device);

@@ -1,10 +1,11 @@
 //! `rl-train` — the HEADLESS trainer. Links `rl-core` with render OFF, so it pulls NO
 //! bevy_render/bevy_pbr/wgpu27: the crab machinery (bot / physics / training) and the
-//! shared `TrainConfig` / `UpdateDevice` types come from the library, this binary is a
-//! thin entry that parses its modes and dispatches.
+//! shared `TrainConfig` come from the library, this binary is a thin entry that parses
+//! its modes and dispatches. It DOES link burn-wgpu (the GPU PPO update is the sole
+//! update path, rl#49) — that is wgpu 26 for compute, still no bevy_render/wgpu 27.
 //!
 //! Modes (all headless, no window, no GPU renderer):
-//! - `learn` — the trainer: K rollout threads + the PPO update. The production path.
+//! - `learn` — the trainer: K rollout threads (CPU inference) + the GPU PPO update.
 //! - `bench-update` — the PPO-update microbenchmark (rl#48/#49), CPU or `--backend gpu`.
 //! - `--verify-colliders` / `--verify-pivots` / `--check-rest-colliders` — DEV rig
 //!   audits that build a windowless physics world, print a report, and exit.
@@ -15,7 +16,7 @@
 
 use bevy::prelude::*;
 use clap::{Parser, Subcommand};
-use rl_core::{TrainConfig, UpdateDevice, bot, training};
+use rl_core::{TrainConfig, bot, training};
 
 use training::session::STEPS_PER_ROLLOUT;
 
@@ -156,14 +157,6 @@ struct LearnArgs {
     /// priority and needs privilege, so it is floored to 0 rather than attempted).
     #[arg(long, default_value_t = 10)]
     nice: i32,
-
-    /// Device for the batched PPO update: `cpu` (default; the production CPU ndarray
-    /// path, unchanged) or `gpu` (the RTX via wgpu/Vulkan — rl#49). Rollout inference
-    /// stays on CPU either way; only the update moves. `gpu` requires a `--features
-    /// wgpu` build and a real discrete-GPU adapter, and fails loudly otherwise (no
-    /// silent CPU fallback).
-    #[arg(long, value_enum, default_value_t = UpdateDevice::Cpu)]
-    update_device: UpdateDevice,
 }
 
 fn main() {
@@ -181,7 +174,6 @@ fn main() {
             l.horizon,
             l.iters,
             l.nice,
-            l.update_device,
         );
         return;
     }

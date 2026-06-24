@@ -9,9 +9,13 @@ name = "rl-train"
 path = "src/main.rs"
 
 [features]
-# Forward to rl-core's GPU update backend (rl#49). rl-train builds the GPU PPO update
-# WITHOUT the bevy renderer — `wgpu` does not pull `render`. So `cargo build -p
-# rl-train --features wgpu` links burn-wgpu but still no bevy_render.
+# DEFAULT-ON: the PPO update runs ONLY on the GPU (rl#49; ~1.5–4.3× the CPU update on
+# the RTX 2080), so the trainer links burn-wgpu on a bare `cargo build` — no opt-in flag.
+# `wgpu` forwards to rl-core's GPU backend WITHOUT pulling `render`, so the headless
+# trainer gets burn-wgpu (wgpu 26) but still NO bevy_render/wgpu 27. Building it OFF
+# (`--no-default-features`) leaves the learn path with no update backend, which is a hard
+# compile error (see rl-core/src/training/inproc.rs), never a silent CPU fallback.
+default = ["wgpu"]
 wgpu = ["rl-core/wgpu"]
 
 [dependencies]

@@ -68,13 +68,13 @@ use bevy::prelude::*;
 use burn::module::Module;
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
 
+use crate::TrainConfig;
 use crate::bot::brain::CrabBrain;
-use crate::{TrainConfig, UpdateDevice};
 
 use super::algorithm::{RolloutBuffer, Transition};
 use super::session::{
     CURRICULUM_FILENAME, Curriculum, CurriculumProgress, ObsNormalizerData, TrainBackend,
-    TrainingState, load_curriculum, ppo_update_core, save_curriculum,
+    TrainingState, load_curriculum, save_curriculum,
 };
 
 /// Recorder for the in-memory weight snapshot. The same precision settings the
@@ -537,14 +537,14 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
 /// "Tick budget reached" (verbatim, the loop's termination grep) and exits. The
 /// policy is (re)loaded from `--checkpoint-dir` by `TrainingState::new`, so a
 /// learner restarted by the service resumes from the latest checkpoint.
-pub fn run_learner(
-    config: &TrainConfig,
-    k: usize,
-    horizon: u64,
-    iters: u64,
-    nice: i32,
-    update_device: UpdateDevice,
-) {
+///
+/// Gated on `wgpu` (default-on for `rl-train`): the PPO update runs ONLY on the GPU
+/// (rl#49), so the learner needs the GPU backend to exist. A `--no-default-features`
+/// trainer drops this function, turning `main`'s call site into a compile error rather
+/// than a learner with no update path. (rl-core builds without `wgpu` for the render
+/// bins, which only do CPU inference and never call this.)
+#[cfg(feature = "wgpu")]
+pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nice: i32) {
     // Own nicing here (one place): lowers this whole process's priority before any
     // world is built, so a foreground game preempts training. The rollout threads
     // spawned below inherit it (POSIX priority is per-process).
@@ -565,33 +565,21 @@ pub fn run_learner(
     let checkpoint_dir = config.checkpoint_dir.clone();
     std::fs::create_dir_all(&checkpoint_dir).expect("create checkpoint dir");
 
-    // The learner hosts the policy through a normal TrainingState (brain +
-    // optimizer + normalizer + config) but steps no world: it builds rollouts from
-    // the threads' buffers and runs `ppo_update_core` over them. `new` loads any
-    // existing checkpoint in checkpoint_dir — that is the resume.
+    // The learner hosts the policy through a normal TrainingState (brain on the CPU
+    // backend + normalizer + config) but steps no world: it builds rollouts from the
+    // threads' buffers and runs the PPO update over them. `new` loads any existing
+    // checkpoint in checkpoint_dir — that is the resume. The CPU brain stays the source
+    // of truth (rollout snapshots + checkpoints read it); the GPU learner only borrows
+    // it each iter to update on the device.
     let mut state = TrainingState::new(config);
 
-    // `--update-device gpu` (rl#49): bring up the GPU learner once (its GPU brain +
-    // Adam optimizer persist across iters, like the CPU optimizer's moments). The
-    // adapter probe + assertion happen here at construction, so a missing/software GPU
+    // The GPU learner (rl#49): the SOLE PPO-update path. Its GPU brain + Adam optimizer
+    // persist across iters, like the CPU optimizer's moments. The adapter probe +
+    // software-fallback assertion happen here at construction, so a missing/software GPU
     // fails at boot before any rollout. (The first GPU update still pays a one-time
     // shader-compile warmup; that lands in iter 0's update time, excluded by
-    // `warmup_iters` from the steady-state rate.) The GPU backend is only compiled
-    // under `--features wgpu`; requesting `gpu` without it is a hard, clear failure —
-    // never a silent CPU fallback (a mislabelled run is worse than no run).
-    #[cfg(feature = "wgpu")]
-    let mut gpu_learner = match update_device {
-        UpdateDevice::Cpu => None,
-        UpdateDevice::Gpu => Some(super::session::GpuLearner::new()),
-    };
-    #[cfg(not(feature = "wgpu"))]
-    if matches!(update_device, UpdateDevice::Gpu) {
-        eprintln!(
-            "[learner] --update-device gpu requires the `wgpu` cargo feature \
-             (build with `--features wgpu`)"
-        );
-        std::process::exit(2);
-    }
+    // `warmup_iters` from the steady-state rate.)
+    let mut gpu_learner = super::session::GpuLearner::new();
 
     // Resume the tick odometer from the checkpoint, not from 0: the overnight loop
     // makes a learner restart the expected case, and without persistence each
@@ -732,36 +720,18 @@ pub fn run_learner(
         // band — taking effect on the NEXT horizon's `progress.curriculum()` snapshot.
         progress.record_episodes(reach_reached, reach_finished);
 
-        // 4) PPO update — `ppo_update_core` over all K·M buffers. The trailing
-        //    bootstrap per buffer is recomputed inside from the current brain (which
-        //    IS the snapshot the threads just rolled with), so no per-env value
-        //    crosses any boundary. On `--update-device gpu` the SAME update runs on the
-        //    GPU (policy mirrored CPU→GPU, updated, mirrored back); the CPU path is the
-        //    unchanged production update. `update_secs` spans the whole phase either
-        //    way — including the GPU's host↔device copies — so the per-iter wall time
-        //    is a fair CPU-vs-GPU comparison.
+        // 4) PPO update on the GPU — the SOLE update path (rl#49). The CPU policy is
+        //    mirrored CPU→GPU, the one `ppo_update_core` runs on the device, and the
+        //    result is mirrored back into the CPU brain (the source of truth the next
+        //    rollout snapshot + the checkpoint read). The trailing bootstrap per buffer
+        //    is recomputed inside from the current brain (which IS the snapshot the
+        //    threads just rolled with), so no per-env value crosses any boundary.
+        //    `update_secs` spans the whole phase — including the host↔device copies —
+        //    so it is the honest per-iter update cost.
         let update_start = Instant::now();
-        // `gpu_timing` carries the GPU path's load/update/store split for the log; it is
-        // `None` on the CPU path (and always `None` when built without `wgpu`).
-        #[cfg(feature = "wgpu")]
-        let (metrics, gpu_timing) = match gpu_learner.as_mut() {
-            Some(gpu) => {
-                let (brain, ppo_config, ret_norm) = state.learner_parts_for_gpu();
-                let (m, t) = gpu.update(brain, ppo_config, &rollouts, ret_norm);
-                (m, Some(t))
-            }
-            None => {
-                let (brain, optimizer, ppo_config, device, ret_norm) = state.learner_parts();
-                let m = ppo_update_core(brain, optimizer, ppo_config, &rollouts, device, ret_norm);
-                (m, None)
-            }
-        };
-        #[cfg(not(feature = "wgpu"))]
-        let (metrics, gpu_timing): (_, Option<super::session::GpuUpdateTiming>) = {
-            let (brain, optimizer, ppo_config, device, ret_norm) = state.learner_parts();
-            let m = ppo_update_core(brain, optimizer, ppo_config, &rollouts, device, ret_norm);
-            (m, None)
-        };
+        // `gpu_timing` carries the GPU update's load/compute/store split for the log.
+        let (brain, ppo_config, ret_norm) = state.learner_parts_for_gpu();
+        let (metrics, gpu_timing) = gpu_learner.update(brain, ppo_config, &rollouts, ret_norm);
         let update_secs = update_start.elapsed().as_secs_f64();
         let wall_secs = wall_start.elapsed().as_secs_f64();
 
@@ -804,16 +774,12 @@ pub fn run_learner(
         } else {
             "-".to_string()
         };
-        // On the GPU update path, break the update phase into load(CPU→GPU)/compute/
-        // store(GPU→CPU) ms so the host↔device copy cost is visible (the microbench
-        // excluded it). Empty on the CPU path.
-        let update_note = match gpu_timing {
-            Some(t) => format!(
-                " [gpu load {:.0}ms + compute {:.0}ms + store {:.0}ms]",
-                t.load_ms, t.update_ms, t.store_ms
-            ),
-            None => String::new(),
-        };
+        // Break the update phase into load(CPU→GPU)/compute/store(GPU→CPU) ms so the
+        // host↔device copy cost is visible (the microbench excluded it).
+        let update_note = format!(
+            " [gpu load {:.0}ms + compute {:.0}ms + store {:.0}ms]",
+            gpu_timing.load_ms, gpu_timing.update_ms, gpu_timing.store_ms
+        );
         eprintln!(
             "[learner] iter {iter} | {iter_samples} samples | rollout {rollout_secs:.3}s ({rolled_ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note}) | ploss {:.3} vloss {:.3} ent {:.3}{panic_note}",
             metrics.policy_loss, metrics.value_loss, metrics.entropy,
@@ -864,7 +830,12 @@ fn snapshot_brain_bytes(brain: &CrabBrain<TrainBackend>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The CPU PPO update — used here as a backend-agnostic check that the update moves
+    // the policy weights, run on CPU so `cargo test` needs no GPU/Vulkan. The live
+    // trainer's update is GPU-only (see `run_learner`); this exercises the shared
+    // `ppo_update_core` math, not a second production path.
     use crate::bot::sensor::OBS_SIZE;
+    use crate::training::session::ppo_update_core;
 
     /// A zero-count normalizer increment: a fresh normalizer's snapshot. Used to fill
     /// a `Rolled` outcome's `increment` in tests that don't exercise real stats, and
