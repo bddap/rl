@@ -431,16 +431,9 @@ pub fn spawn_crab(
     // offset, sliding the whole body ~0.1 (mostly −Z) off the skin.
     let origin = position + recipe.hub_bind_world + Vec3::new(0.0, SPAWN_HEIGHT, 0.0);
 
-    // Every link's bind-pose world origin (unrotated), by chaining `anchor1` deltas
-    // down the tree — used both to chain children below and to size the clearance lift.
-    let mut world_pos: Vec<Vec3> = Vec::with_capacity(recipe.links.len());
-    for link in &recipe.links {
-        let parent_pos = match link.parent {
-            None => origin,
-            Some(idx) => world_pos[idx],
-        };
-        world_pos.push(parent_pos + link.anchor1);
-    }
+    // Every link's bind-pose world origin (unrotated), telescoped from the spawn hub
+    // — used both to chain children below and to size the clearance lift.
+    let world_pos = rig::link_world_origins(&recipe.links, origin);
 
     // `init_rotation` rigidly rotates the whole bind pose about `origin`. Every body
     // gets the SAME rotation, so parent-frame == child-frame still holds and the local

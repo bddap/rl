@@ -48,8 +48,6 @@ struct SkinnedVertex {
     pos: Vec3,
     /// glTF node index of the bone with the largest weight on this vertex.
     dominant_node: usize,
-    /// That bone's weight (0..1) — used to gauge how "clean" the assignment is.
-    dominant_weight: f32,
 }
 
 /// The parsed-and-flattened model: bone bind transforms keyed by node index,
@@ -279,7 +277,7 @@ impl LoadedModel {
         for prim in parsed.primitives()? {
             for (pos, j, w) in parsed.skin_primitive(&prim)? {
                 // Dominant influence tags the vertex for per-part bucketing.
-                let (lane, &wmax) = w
+                let (lane, _) = w
                     .iter()
                     .enumerate()
                     .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -293,7 +291,6 @@ impl LoadedModel {
                             parsed.joint_nodes.len()
                         )
                     })?,
-                    dominant_weight: wmax,
                 });
             }
         }
@@ -306,11 +303,10 @@ impl LoadedModel {
     }
 
     /// Group vertices by physics part via [`super::rig::part_for_bone`] — the one
-    /// canonical bone→part mapping. Returns, per part, the world-space vertex
-    /// positions and the mean dominant-weight (a skinning-cleanliness proxy).
-    /// Vertices on a non-rig node (no part) are dropped.
-    pub fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)> {
-        let mut out: HashMap<PartId, (Vec<Vec3>, f32)> = HashMap::new();
+    /// canonical bone→part mapping. Returns the world-space vertex positions per
+    /// part. Vertices on a non-rig node (no part) are dropped.
+    pub fn vertices_by_part(&self) -> HashMap<PartId, Vec<Vec3>> {
+        let mut out: HashMap<PartId, Vec<Vec3>> = HashMap::new();
         for v in &self.verts {
             let Some(name) = self.node_name.get(&v.dominant_node) else {
                 continue;
@@ -318,12 +314,7 @@ impl LoadedModel {
             let Some(part) = super::rig::part_for_bone(name) else {
                 continue;
             };
-            let e = out.entry(part).or_insert_with(|| (Vec::new(), 0.0));
-            e.0.push(v.pos);
-            e.1 += v.dominant_weight;
-        }
-        for (_, (positions, wsum)) in out.iter_mut() {
-            *wsum /= positions.len().max(1) as f32;
+            out.entry(part).or_default().push(v.pos);
         }
         out
     }

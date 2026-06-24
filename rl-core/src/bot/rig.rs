@@ -30,9 +30,9 @@ use super::meshfit::{LoadedModel, PartId};
 pub trait BindSource {
     /// Bind-pose world origin of a bone by name (the joint pivot), if present.
     fn bone_origin(&self, name: &str) -> Option<Vec3>;
-    /// Per-part flesh: world-space vertex cloud (and a skinning-cleanliness weight,
-    /// unused here) for each physics part. Drives the fitted capsule radius.
-    fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)>;
+    /// Per-part flesh: world-space vertex cloud for each physics part. Drives the
+    /// fitted capsule radius.
+    fn vertices_by_part(&self) -> HashMap<PartId, Vec<Vec3>>;
     /// World-space vertices whose dominant bone is one of `names` — the trunk flesh
     /// the carapace box is sized from.
     fn vertices_for_bones(&self, names: &[&str]) -> Vec<Vec3>;
@@ -49,7 +49,7 @@ impl BindSource for LoadedModel {
     fn bone_origin(&self, name: &str) -> Option<Vec3> {
         LoadedModel::bone_origin(self, name)
     }
-    fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)> {
+    fn vertices_by_part(&self) -> HashMap<PartId, Vec<Vec3>> {
         LoadedModel::vertices_by_part(self)
     }
     fn vertices_for_bones(&self, names: &[&str]) -> Vec<Vec3> {
@@ -141,6 +141,24 @@ impl RigLink {
             && self.col_rot.is_finite()
             && self.density.is_finite()
     }
+}
+
+/// Every link's unrotated origin in `root`'s frame, by telescoping each `anchor1`
+/// (a parent-relative delta) down the parent-before-child chain. Links are emitted
+/// parent-first, so `world[parent]` is always filled before a child reads it. The
+/// single source for this walk: the body spawn ([`super::body`]'s `spawn_crab`)
+/// runs it from the spawn-translated hub, and `rest_colliders` from the bare
+/// bind-world hub — same telescoping, the constant translation simply cancels.
+pub(crate) fn link_world_origins(links: &[RigLink], root: Vec3) -> Vec<Vec3> {
+    let mut world = Vec::with_capacity(links.len());
+    for link in links {
+        let base = match link.parent {
+            None => root,
+            Some(idx) => world[idx],
+        };
+        world.push(base + link.anchor1);
+    }
+    world
 }
 
 /// One actuated joint, located against the bind-pose skeleton. The capsule runs
@@ -354,18 +372,20 @@ pub fn build_recipe(model: &impl BindSource) -> Option<RigRecipe> {
             };
             let cloud = clouds
                 .get(&PartId::Joint(spec.id))
-                .map(|(pts, _)| pts.as_slice());
+                .map(|pts| pts.as_slice());
             let Some(link) = derive_link(
                 model,
                 &spec.pivot,
                 spec.tip.as_deref(),
-                parent_pivot,
-                parent_idx,
-                cloud,
-                model
-                    .radius_hint(PartId::Joint(spec.id))
-                    .unwrap_or(FALLBACK_RADIUS),
-                spec.density,
+                LinkGeom {
+                    parent_pivot,
+                    parent_idx,
+                    cloud,
+                    fixed_radius: model
+                        .radius_hint(PartId::Joint(spec.id))
+                        .unwrap_or(FALLBACK_RADIUS),
+                    density: spec.density,
+                },
                 Some(spec.id),
             ) else {
                 break;
@@ -386,11 +406,13 @@ pub fn build_recipe(model: &impl BindSource) -> Option<RigRecipe> {
             model,
             &base,
             Some(&tip),
-            carapace_center,
-            None,
-            None,
-            EYE_RADIUS,
-            EYE_DENSITY,
+            LinkGeom {
+                parent_pivot: carapace_center,
+                parent_idx: None,
+                cloud: None,
+                fixed_radius: EYE_RADIUS,
+                density: EYE_DENSITY,
+            },
             None,
         ) else {
             continue;
@@ -402,11 +424,13 @@ pub fn build_recipe(model: &impl BindSource) -> Option<RigRecipe> {
             model,
             &tip,
             None,
-            base_origin,
-            Some(base_idx),
-            None,
-            EYE_RADIUS,
-            EYE_DENSITY,
+            LinkGeom {
+                parent_pivot: base_origin,
+                parent_idx: Some(base_idx),
+                cloud: None,
+                fixed_radius: EYE_RADIUS,
+                density: EYE_DENSITY,
+            },
             None,
         ) {
             links.push(tip_link);
@@ -509,7 +533,7 @@ impl BindSource for FallbackModel {
 
     /// Empty per part, routing every link through `derive_link`'s sparse-cloud branch
     /// sized at [`radius_hint`](Self::radius_hint).
-    fn vertices_by_part(&self) -> HashMap<PartId, (Vec<Vec3>, f32)> {
+    fn vertices_by_part(&self) -> HashMap<PartId, Vec<Vec3>> {
         HashMap::new()
     }
 
@@ -570,21 +594,38 @@ fn leg_hub_centroid(model: &impl BindSource) -> Option<Vec3> {
     (n > 0).then(|| sum / n as f32)
 }
 
+/// The bind-pose geometry inputs for one link, grouped so the run of similarly
+/// typed args (the two `f32`s, the cloud, the parent index) can't be silently
+/// transposed at a call site.
+struct LinkGeom<'a> {
+    /// The parent link's bind-pose-world origin; this link's `anchor1` is the delta
+    /// from it.
+    parent_pivot: Vec3,
+    /// Index of the parent link, or `None` when the link hangs off the carapace root.
+    parent_idx: Option<usize>,
+    /// Flesh to fit the capsule radius to; `None`/sparse falls back to `fixed_radius`.
+    cloud: Option<&'a [Vec3]>,
+    fixed_radius: f32,
+    density: f32,
+}
+
 /// Derive one link's joint + collider geometry from the bind pose. `tip = None`
 /// makes a short stub along the incoming direction (a leaf bone). `cloud = Some`
 /// fits the capsule radius to that vertex cloud; `None` uses `fixed_radius`.
-#[allow(clippy::too_many_arguments)]
 fn derive_link(
     model: &impl BindSource,
     pivot_name: &str,
     tip_name: Option<&str>,
-    parent_pivot: Vec3,
-    parent_idx: Option<usize>,
-    cloud: Option<&[Vec3]>,
-    fixed_radius: f32,
-    density: f32,
+    geom: LinkGeom,
     actuated: Option<CrabJointId>,
 ) -> Option<RigLink> {
+    let LinkGeom {
+        parent_pivot,
+        parent_idx,
+        cloud,
+        fixed_radius,
+        density,
+    } = geom;
     let c_origin = model.bone_origin(pivot_name)?;
     // Links spawn axis-aligned, so the parent frame is world: the anchor is a plain
     // world delta between bind-pose bone origins.
@@ -750,15 +791,9 @@ pub fn rest_colliders(model: &impl BindSource, recipe: &RigRecipe) -> Vec<RestCo
     let Some(o_root) = leg_hub_centroid(model) else {
         return Vec::new();
     };
-    let mut world_origin: Vec<Vec3> = Vec::with_capacity(recipe.links.len());
+    let world_origin = link_world_origins(&recipe.links, o_root);
     let mut out: Vec<RestCollider> = Vec::new();
-    for link in &recipe.links {
-        let base = match link.parent {
-            None => o_root,
-            Some(idx) => world_origin[idx],
-        };
-        let origin = base + link.anchor1;
-        world_origin.push(origin);
+    for (link, &origin) in recipe.links.iter().zip(&world_origin) {
         // Only actuated links carry a PartId and a fitted cloud; eye-stalks (locked,
         // fixed radius, cosmetic) have nothing to score against.
         if let Some(id) = link.actuated {
