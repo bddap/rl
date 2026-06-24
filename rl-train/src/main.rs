@@ -315,7 +315,7 @@ fn verify_colliders() -> i32 {
             RestShape::Capsule { a, b, radius } => {
                 let pts = clouds
                     .get(&rc.part)
-                    .map(|(p, _)| p.as_slice())
+                    .map(|p| p.as_slice())
                     .unwrap_or(&[]);
                 let s = score_capsule(pts, a, b, radius);
                 // Pass: little flesh escapes, the worst poke is shallow vs the part's
