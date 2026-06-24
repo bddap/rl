@@ -19,8 +19,8 @@
 //!   the client's job, not this headless smoke's).
 //! - `play`: the windowed first-person CLIENT ([`rl_core::net::render`]) — see the
 //!   gray-box from the local player's eyes and play it, on the SAME lockstep +
-//!   transport as `net`. Boots to a Host / Join menu (rl#58); `--host`/`--join <code>`
-//!   skip it for scripting/tests.
+//!   transport as `net`. Boots to a Host / Join menu; `--host`/`--join <code>` skip it
+//!   for scripting/tests.
 //! - `fp-screenshot`: render one settled frame of the first-person view to a PNG and
 //!   exit (GPU on, no window) — the headless evidence path for the sim→render
 //!   pipeline on a box with no display.
@@ -40,7 +40,7 @@ use rl_core::net::telemetry::{self, TELEMETRY_TICK_EVERY, TelemetryEvent, Teleme
 use rl_core::net::{net_loop, render, transport};
 
 #[derive(Parser)]
-#[command(about = "Giant-crab rescue — Phase 0 netcode skeleton (rl#39)")]
+#[command(about = "Giant-crab rescue — Phase 1 gray-box extraction loop on deterministic lockstep + iroh")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -100,8 +100,8 @@ struct SoloArgs {
 struct PlayArgs {
     /// Skip the menu and HOST a networked match directly (scripted/test entry): form over
     /// the LAN and start with whoever joins, or solo if nobody does. Equivalent to the
-    /// menu's Host without the click. (rl#58 removed the old `--solo` flag — a Host that
-    /// finds no peer IS the solo round, the one codepath; bare `play` shows the menu.)
+    /// menu's Host without the click. A Host that finds no peer IS the solo round — one
+    /// codepath, no separate solo flag; bare `play` shows the menu instead.
     #[arg(long, conflicts_with = "join")]
     host: bool,
     /// Skip the menu and JOIN a host by its endpoint-id code (scripted/test entry): dial the
@@ -127,14 +127,13 @@ struct PlayArgs {
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
 
-    /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`). When set,
-    /// a SOLO round (a Host-alone Start, or a scripted `--host` that found no peer) drives
-    /// the giant crab with the real rapier-simulated NN body instead of the integer
-    /// point-pursuer — it WALKS toward the nearest player under the trained policy. Defaults
-    /// to the `RL_CRAB_CHECKPOINT_DIR` env var, else `assets/weights` under the asset root.
-    /// A missing/empty dir falls back to the integer crab (logged). Ignored on a NETWORKED
-    /// round — a float rapier crab is not cross-peer deterministic, so multiplayer keeps the
-    /// integer crab (the runtime gate ensures the NN crab activates only when solo).
+    /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`). On a SOLO
+    /// round (a Host-alone Start, or a scripted `--host` that found no peer) it drives the
+    /// giant crab with the rapier-simulated NN body instead of the integer point-pursuer.
+    /// Defaults to the `RL_CRAB_CHECKPOINT_DIR` env var, else `assets/weights` under the asset
+    /// root; a missing/empty dir falls back to the integer crab (logged). Ignored on a
+    /// NETWORKED round — a float rapier crab is not cross-peer deterministic, so multiplayer
+    /// always keeps the integer crab.
     #[arg(long, value_name = "DIR")]
     nn_crab_checkpoint: Option<PathBuf>,
 }
@@ -144,11 +143,10 @@ struct FpScreenshotArgs {
     /// Output PNG path for the captured first-person frame.
     #[arg(long, default_value = "fp.png")]
     out: PathBuf,
-    /// Frames to render before capturing. The sim advances one tick per frame (a
-    /// fixed dt, so the composed scene is deterministic, not machine-speed-dependent),
-    /// and the count also warms the GPU pipeline (early frames render black). So it's
-    /// both "how far into the round" and "warmup"; ~40 keeps the players alive in
-    /// frame, higher lets the round play out.
+    /// Frames to render before capturing — both how far into the round and GPU warmup
+    /// (early frames render black). The sim advances one tick per frame at a fixed dt, so
+    /// the scene is deterministic, not machine-speed-dependent. ~40 keeps the players in
+    /// frame; higher lets the round play out.
     #[arg(long, default_value_t = 90)]
     settle: u32,
     #[arg(long, default_value_t = 1280)]
@@ -159,10 +157,9 @@ struct FpScreenshotArgs {
     /// player's avatar alongside the local one (player 0 is the local camera).
     #[arg(long, default_value_t = 2)]
     players: u8,
-    /// Pan the screenshot camera this many degrees (about up) from the dead-ahead
-    /// first-person aim, to frame the towering crab + the extraction pillar + the
-    /// other players together (the giant crab fills the straight-ahead view). Still a
-    /// first-person shot from the local eye; 0 = straight ahead.
+    /// Pan the screenshot camera this many degrees from the dead-ahead first-person aim
+    /// (0 = straight ahead), to frame the towering crab + extraction pillar + other players
+    /// together when the crab would otherwise fill the straight-ahead view.
     #[arg(long, default_value_t = 0.0)]
     cam_yaw: f32,
     /// Tilt the screenshot camera this many degrees (+ up) from the first-person aim.
@@ -299,8 +296,8 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
 }
 
 /// Windowed first-person client. The DEFAULT (`game play` with no flag) shows the boot menu
-/// (rl#58) — the player picks Host / Join — and the round is built only after the choice,
-/// never touching the deterministic sim before then (see [`rl_core::net::render::Boot`]). The
+/// — the player picks Host / Join — and the round is built only after the choice, never
+/// touching the deterministic sim before then (see [`rl_core::net::render::Boot`]). The
 /// scripted flags bypass the menu for tests/scripts:
 /// - `--host` → host directly: form over the LAN, start with whoever joins (solo if none).
 /// - `--join [CODE]` → join directly: dial CODE (or LAN-discover if bare), then form.
@@ -308,8 +305,7 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
 /// Both scripted paths form the match UP FRONT and hand a ready round to
 /// [`render::Boot::Round`], so they boot straight into play with no menu. They reuse the
 /// SAME barrier as the menu and as `game net`, so the agreed roster + seed are identical
-/// however play was reached; the alone-fallback (rl#47) still yields a solo round when
-/// nobody shows. (rl#58 removed the old `--solo`: a Host-alone IS the solo round.)
+/// however play was reached; a Host-alone fallback yields a solo round when nobody shows.
 fn run_play(args: PlayArgs) -> Result<()> {
     let boot = if args.host || args.join.is_some() {
         // Scripted host/join: dial the join code if joining (blank/absent = LAN discover),
@@ -360,10 +356,10 @@ fn run_play(args: PlayArgs) -> Result<()> {
 }
 
 /// Resolve the solo NN-crab checkpoint dir: the `--nn-crab-checkpoint` flag (`flag`), else
-/// the `RL_CRAB_CHECKPOINT_DIR` env var (deploy sets this), else `assets/weights` under
-/// the asset root (`BEVY_ASSET_ROOT`, else the binary's cwd). `None` if the resolved dir
-/// has no `brain.bin` — the caller then keeps the integer crab. Configurable end to end so
-/// the reviewer/deploy points it at the chosen checkpoint without a recompile.
+/// the `RL_CRAB_CHECKPOINT_DIR` env var (deploy sets this), else `assets/weights` under the
+/// asset root (`BEVY_ASSET_ROOT`, else the binary's cwd) — so a checkpoint can be chosen at
+/// runtime, no recompile. `None` if the resolved dir has no `brain.bin`, and the caller then
+/// keeps the integer crab.
 fn nn_crab_checkpoint_dir(flag: Option<PathBuf>) -> Option<PathBuf> {
     let dir = flag
         .or_else(|| std::env::var_os("RL_CRAB_CHECKPOINT_DIR").map(PathBuf::from))
@@ -394,12 +390,10 @@ fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
     let me = PlayerId(0);
     let players: Vec<PlayerId> = (0..args.players.max(1)).map(PlayerId).collect();
     // RL_VEHICLE=plane: make the NON-local players pilots and keep the local (player 0)
-    // a ground observer, so the captured FP frame clearly shows a remote plane's gray
-    // box flying — the evidence the plane renders. (The local-pilot cockpit view is the
-    // play path; here a ground vantage makes the box unmistakable.) Needs `--players >= 2`:
-    // player 0 stays on foot and sees player 1's plane box. With only 1 player there's no
-    // remote plane to frame, so the shot stays on foot (a lone pilot would hide its own
-    // cockpit and show empty sky — worthless as evidence). Unset ⇒ the unchanged foot shot.
+    // a ground observer, so the captured FP frame clearly shows a remote plane's gray box
+    // flying — the evidence the plane renders. Needs `--players >= 2`: with one player
+    // there's no remote plane to frame, so the shot stays on foot (a lone pilot would show
+    // empty sky — worthless as evidence). Unset ⇒ the unchanged foot shot.
     let pilots: Vec<PlayerId> = match std::env::var("RL_VEHICLE").as_deref() {
         Ok("plane") if players.len() > 1 => players[1..].to_vec(),
         _ => Vec::new(),
@@ -411,9 +405,9 @@ fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
     Ok(())
 }
 
-/// Deterministic match seed. In Phase 0 it's a constant so independently-launched
-/// peers agree without a handshake; Phase 1's session setup will negotiate it (the
-/// lower-id peer proposes, say) — the sim already takes it as a parameter.
+/// Deterministic match seed: a constant so independently-launched peers agree without a
+/// handshake. The sim takes it as a parameter, so a future session setup can negotiate it
+/// (the lower-id peer proposes, say) without touching the sim.
 const MATCH_SEED: u64 = 0x6372_6162; // "crab"
 
 /// Drive the lockstep sim from a constant local input, ticking at [`TICK_HZ`]. Pure
@@ -423,9 +417,9 @@ fn run_solo(args: SoloArgs) -> Result<()> {
 }
 
 /// One offline lockstep round for `run_secs`: a single peer whose own input completes
-/// every tick (no network), ticking at [`TICK_HZ`] and printing a final summary. Shared
-/// by the `solo` command and the headless `net` rl#47 fallback (discovery found no peer),
-/// so the alone case runs the SAME deterministic solo path — no second sim loop to drift.
+/// every tick (no network), ticking at [`TICK_HZ`] and printing a final summary. Shared by
+/// the `solo` command and the headless `net` no-peer fallback, so the alone case runs the
+/// SAME deterministic solo path — no second sim loop to drift.
 fn run_solo_round(run_secs: u64) -> Result<()> {
     let me = PlayerId(0);
     let mut ls = Lockstep::new(MATCH_SEED, &[me], me);
@@ -475,8 +469,8 @@ async fn run_net(args: NetArgs) -> Result<()> {
 
     // Form one agreed match via the shared cold-start barrier (same code the windowed
     // client runs, so the two can't drift apart and desync). Replay any inputs that
-    // arrived during formation into the fresh sim. If discovery finds no peer (rl#47),
-    // tear down the network side and run a solo round instead of awaiting an empty match.
+    // arrived during formation into the fresh sim. If discovery finds no peer, tear down
+    // the network side and run a solo round instead of awaiting an empty match.
     let frozen = match net_loop::form_match(
         &mut session,
         args.discover_secs,
@@ -615,10 +609,10 @@ async fn run_net(args: NetArgs) -> Result<()> {
     Ok(())
 }
 
-/// Count and log a cross-check fault. A desync is unrecoverable in lockstep, but
-/// Phase 0 keeps running so the test harness can observe how many ticks faulted
-/// rather than aborting on the first. Also mirrored to telemetry (best-effort) so a
-/// remote operator sees the divergence the instant a deck does.
+/// Count and log a cross-check fault. A desync is unrecoverable in lockstep, but we keep
+/// running so the test harness can observe how many ticks faulted rather than aborting on
+/// the first. Also mirrored to telemetry (best-effort) so a remote operator sees the
+/// divergence the instant a deck does.
 fn report_fault(
     total: &mut usize,
     f: rl_core::net::lockstep::Fault,
