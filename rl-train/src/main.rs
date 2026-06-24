@@ -302,13 +302,9 @@ fn verify_colliders() -> i32 {
         "part", "n", "r", "fOut%", "pk95", "pkMax", "bulge", "skew", "rRat", "verdict"
     );
 
-    let fmt = |x: f32| {
-        if x.is_finite() {
-            format!("{x:.2}")
-        } else {
-            "-".to_string()
-        }
-    };
+    // A capsule-only diagnostic prints as a number, or "-" when it doesn't apply
+    // (a box, or a cloud too small to have a principal axis).
+    let fmt = |x: Option<f32>| x.map_or_else(|| "-".to_string(), |v| format!("{v:.2}"));
     // (label, severity = pk95/r, failed) for the worst-offender ranking.
     let mut ranking: Vec<(String, f32, bool)> = Vec::new();
     let mut any_fail = false;
@@ -324,12 +320,15 @@ fn verify_colliders() -> i32 {
                 let s = score_capsule(pts, a, b, radius);
                 // Pass: little flesh escapes, the worst poke is shallow vs the part's
                 // own radius, the collider isn't grossly oversized, the axis tracks
-                // the limb, and the radius isn't starved/ballooned.
+                // the limb, and the radius isn't starved/ballooned. The axis/radius
+                // diagnostics only exist for a fittable cloud (`Some`); absent, those
+                // two checks simply don't apply.
                 let fail = s.frac_outside > 0.05
                     || s.poke_out_p95 > (0.15 * radius).max(0.005)
                     || s.bulge_p95 > 0.5 * radius
-                    || (s.axis_skew_deg.is_finite() && s.axis_skew_deg > 15.0)
-                    || (s.radius_ratio.is_finite() && !(0.85..=1.4).contains(&s.radius_ratio));
+                    || s.capsule.is_some_and(|c| {
+                        c.axis_skew_deg > 15.0 || !(0.85..=1.4).contains(&c.radius_ratio)
+                    });
                 (s, radius.max(1e-3), fail)
             }
             RestShape::Cuboid { center, half } => {
@@ -351,8 +350,8 @@ fn verify_colliders() -> i32 {
             score.poke_out_p95,
             score.poke_out_max,
             score.bulge_p95,
-            fmt(score.axis_skew_deg),
-            fmt(score.radius_ratio),
+            fmt(score.capsule.map(|c| c.axis_skew_deg)),
+            fmt(score.capsule.map(|c| c.radius_ratio)),
             if fail { "FAIL" } else { "pass" },
         );
     }
