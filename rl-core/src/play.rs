@@ -385,11 +385,10 @@ impl Plugin for DemoPlugin {
         )
         .add_systems(Update, hot_reload_policy);
 
-        // RL_CLAW_DEMO: the validated right-claw inspection sweep, on the demo's
-        // wall-clock. The drive overwrites the wrist/pincer slots after the policy
-        // wrote them (so it wins those two DOFs while the policy keeps the rest); the
-        // pin holds the carapace still — both the same logic the screenshot sweep used,
-        // adapted to `Time`. Reuses `PinBody`; gated entirely on the env var.
+        // RL_CLAW_DEMO: the right-claw inspection sweep, on the demo's wall-clock. The
+        // drive overwrites the wrist/pincer slots after the policy wrote them (so it
+        // wins those two DOFs while the policy keeps the rest); the pin holds the
+        // carapace still so only the claw articulates. Gated entirely on the env var.
         if let Some(claw) = claw_demo_from_env() {
             app.insert_resource(claw)
                 .init_resource::<PinBody>()
@@ -902,10 +901,10 @@ fn demo_settle(mut settle: ResMut<DemoSettle>, mut actions: ResMut<CrabActions>)
     settle.0 = settle_countdown(settle.0);
 }
 
-/// Interactive right-claw inspection sweep (present only with `RL_CLAW_DEMO=1`): the
-/// same wrist+pincer drive and body-pin the screenshot sweep validated, retargeted
-/// onto the demo's wall-clock so the owner and a human expert can orbit/zoom a live,
-/// continuously articulating claw. `wrist`/`pincer` are resolved through
+/// Interactive right-claw inspection sweep (present only with `RL_CLAW_DEMO=1`): a
+/// wrist+pincer sin/cos drive plus a body-pin, on the demo's wall-clock, so a viewer
+/// can orbit/zoom a live, continuously articulating claw. `wrist`/`pincer` are resolved
+/// through
 /// [`CrabJointId::index`] (not hardcoded) so a rig reorder can't silently drive the
 /// wrong slots. `f1`/`f2` (Hz, `RL_CLAW_DEMO_F1`/`F2`) are deliberately low and
 /// unequal so the two DOFs trace a slow, non-repeating figure that reads clearly.
@@ -967,11 +966,11 @@ fn claw_demo_drive(
 }
 
 /// System (FixedUpdate, after `BotSet::Act`, before the physics step): the claw demo's
-/// body pin. Identical hold to the screenshot sweep's [`pin_body_hold`], but anchored
-/// on the demo's settle (not the shot's settle counter) and re-anchored on every reset
-/// — a respawn restarts the settle, so the stale target is dropped and recaptured at
-/// the new rest pose. Without this the one-claw torque slowly yaws the light crab and
-/// the articulation is lost; see [`PinBody`].
+/// body pin. Captures the carapace pose once the demo settles and PD-corrects it back
+/// every step ([`pin_correction`]), re-anchored on every reset — a respawn restarts the
+/// settle, so the stale target is dropped and recaptured at the new rest pose. Without
+/// this the one-claw torque slowly yaws the light crab and the articulation is lost;
+/// see [`PinBody`].
 fn claw_demo_pin(
     settle: Res<DemoSettle>,
     mut pin: ResMut<PinBody>,
@@ -1035,94 +1034,7 @@ struct ShotConfig {
     height: u32,
 }
 
-/// Diagnostic pose drive, configured from the environment. `Some` only when
-/// `RL_POSE_JOINT` names a joint slot (0..`COUNT`); then the screenshot zeroes every
-/// action and holds a constant torque on that joint, so a render shows what one
-/// joint's motor does in isolation (e.g. "does the wrist swing the whole hand?").
-/// An optional second joint (`RL_POSE_JOINT2`/`RL_POSE_TORQUE2`) is held at the same
-/// time, so a sequence of renders can sweep two joints together — e.g. a claw's
-/// wrist + pincer driven as sin/cos for a video. Inert (`policy_step` drives) unset.
-#[derive(Resource, Clone, Copy)]
-struct PoseDrive {
-    joint: usize,
-    torque: f32,
-    joint2: Option<usize>,
-    torque2: f32,
-}
-
-/// Read `RL_POSE_JOINT` (a [`CrabJointId::index`], 0..`COUNT`) and `RL_POSE_TORQUE`
-/// (default 1.0), plus an optional second joint `RL_POSE_JOINT2`/`RL_POSE_TORQUE2`
-/// (default torque 0.0; the second joint is ignored if out of range). Out-of-range or
-/// unparseable primary joint → no drive.
-fn pose_drive_from_env() -> Option<PoseDrive> {
-    let joint: usize = std::env::var("RL_POSE_JOINT").ok()?.trim().parse().ok()?;
-    if joint >= CrabJointId::COUNT {
-        return None;
-    }
-    let torque = std::env::var("RL_POSE_TORQUE")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(1.0);
-    let joint2 = std::env::var("RL_POSE_JOINT2")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|j| *j < CrabJointId::COUNT);
-    let torque2 = std::env::var("RL_POSE_TORQUE2")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0.0);
-    Some(PoseDrive {
-        joint,
-        torque,
-        joint2,
-        torque2,
-    })
-}
-
-/// Video-sweep config (present only when `RL_VIDEO_FRAMES` is set). After the settle
-/// [`capture_when_settled`] saves this many numbered frames from a single launch while
-/// [`pose_drive_step`] sweeps the pose joints: the primary joint's torque follows
-/// `RL_POSE_TORQUE * sin`, the second `RL_POSE_TORQUE2 * cos`, over `cycles1`/`cycles2`
-/// full cycles across the clip — a slow Lissajous so a claw's wrist + pincer trace out
-/// their range. One launch captures the whole sequence; re-launching per frame is ~30x
-/// slower (the glTF load dominates each run).
-#[derive(Resource, Clone, Copy)]
-struct VideoSweep {
-    frames: u32,
-    cycles1: f32,
-    cycles2: f32,
-}
-
-/// `RL_VIDEO_FRAMES` (frames after settle; 0/unset → no video), `RL_VIDEO_CYCLES1`
-/// (sin cycles for the primary joint, default 2), `RL_VIDEO_CYCLES2` (cos cycles for
-/// the second joint, default 3).
-fn video_sweep_from_env() -> Option<VideoSweep> {
-    let frames: u32 = std::env::var("RL_VIDEO_FRAMES").ok()?.trim().parse().ok()?;
-    if frames == 0 {
-        return None;
-    }
-    let cyc = |k: &str, d: f32| {
-        std::env::var(k)
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(d)
-    };
-    Some(VideoSweep {
-        frames,
-        cycles1: cyc("RL_VIDEO_CYCLES1", 2.0),
-        cycles2: cyc("RL_VIDEO_CYCLES2", 3.0),
-    })
-}
-
-/// `base` (`foo.png`) → `foo_00007.png` in the same dir: per-frame names for the video
-/// sequence ffmpeg then globs into a clip.
-fn video_frame_path(base: &Path, n: u32) -> PathBuf {
-    let dir = base.parent().unwrap_or_else(|| Path::new("."));
-    let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
-    dir.join(format!("{stem}_{n:05}.png"))
-}
-
-/// Anchor target for the video sweep (present only with `RL_VIDEO_PIN_BODY`).
+/// Anchor target for the interactive claw demo's body pin ([`claw_demo_pin`]).
 /// Driving one claw's torque reaction-torques the lightweight carapace, and on the
 /// low-friction ground the whole crab slowly yaws/drifts — that body motion masks
 /// the claw articulation. So we hold the carapace at the pose it settled into and
@@ -1152,10 +1064,9 @@ const PIN_MAX_TORQUE: f32 = 12.0;
 const PIN_MAX_FORCE: f32 = 120.0;
 
 /// The clamped corrective `(force, torque)` that drives the carapace from its
-/// current pose/velocity back toward `target` — the PD hold shared by the
-/// screenshot sweep and the interactive claw demo (both pin the body the same way;
-/// only their trigger and clock differ). Caller *adds* this onto `ExternalForce`
-/// after the actuator has written the baseline; see [`pin_body_hold`].
+/// current pose/velocity back toward `target` — the PD hold the interactive claw demo
+/// uses to keep the body still while one claw articulates. Caller *adds* this onto
+/// `ExternalForce` after the actuator has written the baseline; see [`claw_demo_pin`].
 pub(crate) fn pin_correction(
     target: &Transform,
     xform: &Transform,
@@ -1177,65 +1088,6 @@ pub(crate) fn pin_correction(
     let err_pos = target.translation - xform.translation;
     let force = (err_pos * PIN_POS_KP - vel.linear * PIN_POS_KD).clamp_length_max(PIN_MAX_FORCE);
     (force, torque)
-}
-
-/// System (FixedUpdate, after `BotSet::Act`, before the physics step): once the
-/// carapace has settled, capture its pose as the anchor, then every step add a
-/// (clamped) corrective force+torque to drive it back toward that pose — so the
-/// body stays put and only the claw swings. Must run *after* the actuator (which
-/// overwrites every part's `ExternalForce` each step) and add, not set. Inert
-/// before settle and unless [`PinBody`] is present.
-fn pin_body_hold(
-    cfg: Res<ShotConfig>,
-    progress: Res<ShotProgress>,
-    mut pin: ResMut<PinBody>,
-    mut carapace_q: Query<(&Transform, &Velocity, &mut ExternalForce), With<CrabCarapace>>,
-) {
-    if progress.frames < cfg.settle {
-        return;
-    }
-    let Ok((xform, vel, mut force)) = carapace_q.single_mut() else {
-        return;
-    };
-    let target = *pin.target.get_or_insert_with(|| {
-        info!(
-            "video: pinning carapace at settled pose, render frame {}",
-            progress.frames
-        );
-        *xform
-    });
-    let (f, t) = pin_correction(&target, xform, vel);
-    force.force += f;
-    force.torque += t;
-}
-
-/// System (BotSet::Think, after `policy_step`): override the action vector to hold a
-/// constant torque on the [`PoseDrive`] joint(s) and zero on all others, so the
-/// settled screenshot isolates that motion. With [`VideoSweep`] present the torques
-/// instead follow `sin`/`cos` of the post-settle frame, so the joints sweep across a
-/// captured clip. Present only when `RL_POSE_JOINT` is set; otherwise the policy drives.
-fn pose_drive_step(
-    drive: Res<PoseDrive>,
-    sweep: Option<Res<VideoSweep>>,
-    progress: Res<ShotProgress>,
-    cfg: Res<ShotConfig>,
-    mut actions: ResMut<CrabActions>,
-) {
-    let (mut t1, mut t2) = (drive.torque, drive.torque2);
-    if let Some(v) = sweep {
-        // Phase from the post-settle render-frame index; at low cycle counts the claw
-        // tracks the torque quasi-statically, so the angle reads as a clean sin/cos.
-        let frac = progress.frames.saturating_sub(cfg.settle) as f32 / v.frames.max(1) as f32;
-        t1 = drive.torque * (std::f32::consts::TAU * v.cycles1 * frac).sin();
-        t2 = drive.torque2 * (std::f32::consts::TAU * v.cycles2 * frac).cos();
-    }
-    if let Some(a) = actions.envs.first_mut() {
-        *a = [0.0; ACTION_SIZE];
-        a[drive.joint] = t1.clamp(-1.0, 1.0);
-        if let Some(j2) = drive.joint2 {
-            a[j2] = t2.clamp(-1.0, 1.0);
-        }
-    }
 }
 
 /// Read `RL_TARGET_BALL_AT="x,y,z"` into an explicit world target for the screenshot
@@ -1267,34 +1119,6 @@ impl Plugin for ScreenshotPlugin {
             app.add_systems(Startup, spawn_target_ball)
                 .add_systems(FixedUpdate, target_ball.after(BotSet::Sense));
         }
-        // RL_POSE_JOINT: drive one joint's motor in isolation for an anatomy check.
-        // Runs after `policy_step` in the same set so its override wins over the
-        // (zero-action, no-checkpoint) policy. Inert unless the env var is set.
-        if let Some(drive) = pose_drive_from_env() {
-            app.insert_resource(drive).add_systems(
-                FixedUpdate,
-                pose_drive_step.in_set(BotSet::Think).after(policy_step),
-            );
-        }
-        // RL_VIDEO_FRAMES: turn the single screenshot into a swept frame sequence
-        // (read by pose_drive_step + capture_when_settled as an optional resource).
-        if let Some(sweep) = video_sweep_from_env() {
-            app.insert_resource(sweep);
-        }
-        // RL_VIDEO_PIN_BODY: hold the carapace at its settled pose during the sweep
-        // (a PD force/torque, after the actuator overwrites forces and before the
-        // physics step) so the claw articulates against a still body instead of
-        // slowly yawing the whole crab.
-        if std::env::var_os("RL_VIDEO_PIN_BODY").is_some() {
-            app.init_resource::<PinBody>().add_systems(
-                FixedUpdate,
-                pin_body_hold
-                    .after(BotSet::Act)
-                    .before(PhysicsSet::SyncBackend),
-            );
-        }
-        app.add_systems(FixedUpdate, apply_toss.after(BotSet::Think));
-        app.init_resource::<TossBurst>();
         app.insert_resource(ShotConfig {
             path: self.path.clone(),
             settle: self.settle,
@@ -1305,19 +1129,8 @@ impl Plugin for ScreenshotPlugin {
         .add_systems(Startup, spawn_offscreen_camera)
         .add_systems(
             Update,
-            (track_offscreen_camera, toss_once, capture_when_settled).chain(),
+            (track_offscreen_camera, capture_when_settled).chain(),
         );
-        // RL_CAM_YAW_DEG/PITCH_DEG/DIST: orbit the screenshot camera to view the same
-        // pose from another angle. Runs after the tracker so it re-aims at the focus
-        // the tracker chose. Inert (system absent) unless a knob is set.
-        if let Some(over) = cam_override_from_env() {
-            app.insert_resource(over).add_systems(
-                Update,
-                apply_cam_override
-                    .after(track_offscreen_camera)
-                    .before(capture_when_settled),
-            );
-        }
         // RL_SKIN_DIAG: print the settled-pose point-in-mesh audit one frame before
         // the capture, so the table describes the exact frame the screenshot records.
         if std::env::var_os("RL_SKIN_DIAG").is_some() {
@@ -1331,69 +1144,8 @@ impl Plugin for ScreenshotPlugin {
     }
 }
 
-/// Render frame at which the diagnostic toss fires — comfortably after the skin
-/// pairs (`SETTLE_FRAMES` = 90 scene frames) so the skin's per-bone offsets are
-/// captured against the clean rest pose and then track the tumble faithfully.
-const TOSS_AT_FRAME: u32 = 130;
-/// Physics ticks the toss force is spread over (a multibody root ignores a direct
-/// velocity write — only forces reach it through the body Jacobians, see #14).
-const TOSS_TICKS: u32 = 10;
-
-/// A pending diagnostic toss: a force + torque to add to the carapace each tick
-/// until `ticks` runs out.
-#[derive(Resource, Default)]
-struct TossBurst {
-    ticks: u32,
-    force: Vec3,
-    torque: Vec3,
-}
-
-/// Trigger (Update): once, after the skin has paired, queue a random toss
-/// (`RL_TOSS=1`). The settled screenshot then shows the collider/skin overlay from
-/// an arbitrary orientation, away from the origin — a movement stress-test that the
-/// two track together (both ride the same physics). Inert without the env var.
-fn toss_once(progress: Res<ShotProgress>, mut burst: ResMut<TossBurst>, mut done: Local<bool>) {
-    if *done || std::env::var_os("RL_TOSS").is_none() || progress.frames < TOSS_AT_FRAME {
-        return;
-    }
-    let mut rng = rand::thread_rng();
-    *burst = TossBurst {
-        ticks: TOSS_TICKS,
-        force: Vec3::new(
-            rng.gen_range(-70.0..70.0),
-            rng.gen_range(120.0..180.0),
-            rng.gen_range(-70.0..70.0),
-        ),
-        torque: Vec3::new(
-            rng.gen_range(-70.0..70.0),
-            rng.gen_range(-70.0..70.0),
-            rng.gen_range(-70.0..70.0),
-        ),
-    };
-    *done = true;
-}
-
-/// Apply (FixedUpdate, after the actuator zeroes the baseline): add the toss to the
-/// carapace's `ExternalForce` while the burst lasts — the same add-after-`Think`
-/// trick as the demo poke.
-fn apply_toss(
-    mut burst: ResMut<TossBurst>,
-    mut crabs: Query<&mut ExternalForce, With<CrabCarapace>>,
-) {
-    if burst.ticks == 0 {
-        return;
-    }
-    burst.ticks -= 1;
-    if let Ok(mut f) = crabs.single_mut() {
-        f.force += burst.force;
-        f.torque += burst.torque;
-    }
-}
-
 /// Default screenshot eye position relative to the tracked focus, and the fixed
-/// height of that focus. The single source for the camera's framing — shared by
-/// the tracker and the orbit override so a yaw/pitch/dist of zero reproduces this
-/// exact view.
+/// height of that focus. The single source for the camera's framing.
 const SHOT_CAM_OFFSET: Vec3 = Vec3::new(1.9, 0.95, 2.5);
 const SHOT_CAM_FOCUS_Y: f32 = 0.5;
 
@@ -1409,67 +1161,6 @@ fn track_offscreen_camera(
     };
     let focus = Vec3::new(crab.translation.x, SHOT_CAM_FOCUS_Y, crab.translation.z);
     *cam = Transform::from_translation(focus + SHOT_CAM_OFFSET).looking_at(focus, Vec3::Y);
-}
-
-/// Diagnostic camera-angle override, configured from the environment. `Some` only
-/// when at least one of `RL_CAM_YAW_DEG` / `RL_CAM_PITCH_DEG` / `RL_CAM_DIST` is
-/// set; then [`apply_cam_override`] re-aims the screenshot camera so the same crab
-/// and pose can be validated from several viewpoints. Inert when all are unset —
-/// the system isn't added and `track_offscreen_camera`'s default framing stands.
-#[derive(Resource, Clone, Copy)]
-struct CamOverride {
-    /// Azimuth orbit around the focus, added to the default view's heading (degrees).
-    yaw_deg: f32,
-    /// Elevation, added to the default view's pitch (degrees, +up).
-    pitch_deg: f32,
-    /// Eye distance from the focus; `None` keeps the default `SHOT_CAM_OFFSET` length.
-    dist: Option<f32>,
-}
-
-/// Read the three `RL_CAM_*` knobs; `None` (fully inert) unless at least one is set.
-/// Yaw and pitch default to 0 (no rotation), distance to the default offset length.
-fn cam_override_from_env() -> Option<CamOverride> {
-    let deg = |k: &str| {
-        std::env::var(k)
-            .ok()
-            .and_then(|v| v.trim().parse::<f32>().ok())
-    };
-    let yaw = deg("RL_CAM_YAW_DEG");
-    let pitch = deg("RL_CAM_PITCH_DEG");
-    let dist = deg("RL_CAM_DIST");
-    if yaw.is_none() && pitch.is_none() && dist.is_none() {
-        return None;
-    }
-    Some(CamOverride {
-        yaw_deg: yaw.unwrap_or(0.0),
-        pitch_deg: pitch.unwrap_or(0.0),
-        dist,
-    })
-}
-
-/// System (chained after `track_offscreen_camera`): orbit the eye around the focus
-/// the tracker just chose. Decomposes the default [`SHOT_CAM_OFFSET`] into its
-/// azimuth/elevation/radius, adds the env-configured deltas, and rebuilds the eye —
-/// so a zero yaw/pitch and default distance land exactly on the tracker's view.
-/// Same spherical convention as the interactive [`OrbitCamera`].
-fn apply_cam_override(over: Res<CamOverride>, mut cam_q: Query<&mut Transform, With<Camera3d>>) {
-    let Ok(mut cam) = cam_q.single_mut() else {
-        return;
-    };
-    // `track_offscreen_camera` ran first, so the translation is `focus + SHOT_CAM_OFFSET`.
-    let focus = cam.translation - SHOT_CAM_OFFSET;
-
-    let off = SHOT_CAM_OFFSET;
-    let horiz = (off.x * off.x + off.z * off.z).sqrt();
-    let yaw0 = off.x.atan2(off.z); // azimuth: 0 looks down +Z (the crab's front)
-    let pitch0 = off.y.atan2(horiz); // elevation above the ground plane
-    let radius = over.dist.unwrap_or(off.length());
-
-    let yaw = yaw0 + over.yaw_deg.to_radians();
-    let pitch = pitch0 + over.pitch_deg.to_radians();
-    let rot = Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(Vec3::X, -pitch);
-    let eye = focus + rot * Vec3::new(0.0, 0.0, radius);
-    *cam = Transform::from_translation(eye).looking_at(focus, Vec3::Y);
 }
 
 fn spawn_offscreen_camera(
@@ -1498,7 +1189,6 @@ fn spawn_offscreen_camera(
 fn capture_when_settled(
     mut commands: Commands,
     cfg: Res<ShotConfig>,
-    sweep: Option<Res<VideoSweep>>,
     target: Res<ShotTarget>,
     mut progress: ResMut<ShotProgress>,
     mut exit: MessageWriter<AppExit>,
@@ -1513,22 +1203,6 @@ fn capture_when_settled(
     let Some(frame) = screenshot::advance_capture(&mut progress, cfg.settle, &mut exit) else {
         return;
     };
-
-    // Video mode: save one numbered frame per render frame while the pose sweeps,
-    // until `frames` are captured; then fall into the same exit countdown as a shot.
-    if let Some(v) = sweep {
-        let n = frame - cfg.settle;
-        screenshot::save_target_to(&mut commands, &target, video_frame_path(&cfg.path, n));
-        if n + 1 >= v.frames {
-            info!(
-                "video: captured {} frames alongside {}",
-                v.frames,
-                cfg.path.display()
-            );
-            screenshot::finish_capture(&mut progress);
-        }
-        return;
-    }
 
     let carapace = carapace_q
         .single()

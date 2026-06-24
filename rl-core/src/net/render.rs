@@ -1788,8 +1788,8 @@ impl ScreenshotConfig {
     /// eye AFTER the first-person aim — so a single evidence frame can frame the giant
     /// crab, the extraction pillar, and the other players together when the towering
     /// crab would otherwise fill the dead-ahead view. Still a first-person shot (same
-    /// eye, same sim yaw as the base); only the composition pans, the play.rs
-    /// `RL_CAM_*` convention. Zero = straight first-person.
+    /// eye, same sim yaw as the base); only the composition pans. Zero = straight
+    /// first-person.
     pub fn with_cam_offset(mut self, yaw_deg: f32, pitch_deg: f32) -> Self {
         self.cam_yaw_deg = yaw_deg;
         self.cam_pitch_deg = pitch_deg;
