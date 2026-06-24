@@ -106,13 +106,11 @@ pub const SPAWN_HEIGHT: f32 = 0.05;
 
 // ---------------------------------------------------------------------------
 // Torque ceilings — the magnitude an action of ±1 commands on each joint type.
-// DIRECT-DRIVE torques (the policy's output IS the torque), and GRADED BY INERTIA:
-// the lighter and more distal a link, the smaller its ceiling. A joint's
-// snappiness is torque/inertia, so a flat ceiling makes a feather-light shin a
-// hair-trigger while it's modest on the hip — the old flat 20 N·m on a sub-gram
-// tibia was ~400,000 rad/s² of headroom and fed the mid-air helicopter. Each
-// ceiling here is still 5-12x the ~0.5 N·m a joint needs to bear its share of the
-// body, so standing keeps ample authority; only the absurd surplus is cut.
+// DIRECT-DRIVE (the policy's output IS the torque) and GRADED BY INERTIA: a joint's
+// snappiness is torque/inertia, so a flat ceiling would make a feather-light distal
+// link a hair-trigger while staying modest on the hip. Each ceiling is still several×
+// the ~0.5 N·m a joint needs to bear its share of the body, so standing keeps ample
+// authority; only the surplus that fed mid-air spin-up is cut.
 // ---------------------------------------------------------------------------
 
 const COXA_TORQUE_CEILING: f32 = 6.0;
@@ -125,46 +123,35 @@ const CLAW_PINCER_TORQUE_CEILING: f32 = 7.0;
 const CLAW_SHOULDER_TORQUE_CEILING: f32 = 4.0;
 const CLAW_WRIST_TORQUE_CEILING: f32 = 3.0;
 
-/// Joint friction: a velocity-0 motor (stiffness 0 — no position servo; the policy
-/// still commands all torque via `ExternalForce`), but FORCE-CAPPED by
-/// [`CrabJointId::friction_cap`] so it saturates almost at once into a small
-/// CONSTANT opposing torque — dry/Coulomb friction, not a viscous brake. This
-/// coefficient is just the slope of the RAMP into that cap (hence the name): steep
-/// enough to regularize the zero-velocity crossing, after which the cap binds and
-/// the friction is the same small torque whether a joint creeps or flails — it is
-/// NOT a damping gain. ForceBased so the cap is an honest N·m, not rescaled by the
-/// link's effective mass. The friction must live on the joint: Rapier's per-body
-/// `Damping` is a no-op on multibody links (only joint constraints and external
-/// forces reach them, see #14). The free-flail speed it does NOT bound is caught by
-/// the hard joint limits, which a limb reaches within a couple of ticks.
+/// Slope of the velocity-0 friction motor's ramp into its force cap
+/// ([`CrabJointId::friction_cap`]): steep enough to saturate near-instantly into a
+/// small CONSTANT opposing torque (dry/Coulomb friction, not a viscous damping gain).
+/// The motor has stiffness 0 (no position servo — the policy commands all torque via
+/// `ExternalForce`), and is ForceBased so the cap is an honest N·m, not rescaled by
+/// the link's effective mass. Friction MUST live on the joint: Rapier's per-body
+/// `Damping` is a no-op on multibody links — only joint constraints and external
+/// forces reach them (#14).
 const FRICTION_RAMP: f32 = 4.0;
 
-/// Breakaway level of the joint-friction motor (see [`FRICTION_RAMP`]) — the
-/// constant torque an external load must exceed to back-drive the joint. Kept WELL
-/// below the ~0.5 N·m needed to hold a leg (only ~1/5) so the legs flop loosely and
-/// crumple under the lightest ground load instead of propping the body up, yet
-/// nonzero because real joints have a little stiction and a touch of it regularizes
-/// the zero-velocity crossing.
+/// Breakaway torque of the joint-friction motor (see [`FRICTION_RAMP`]): the constant
+/// an external load must exceed to back-drive the joint. Kept WELL below the ~0.5 N·m
+/// needed to hold a leg (~1/5) so legs crumple under the lightest ground load instead
+/// of propping the body up, yet nonzero because real joints have a little stiction.
 pub const LEG_FRICTION_CAP: f32 = 0.04;
 const CLAW_FRICTION_CAP: f32 = 0.04;
 
-/// Spring stiffness (natural frequency Hz, damping ratio) of every revolute
-/// joint's constraint — the lock that holds the limb attached AND the hard end
-/// stops. Rapier's joint default is `1e6` Hz: a near-rigid Baumgarte stop. At
-/// that stiffness a limb driven hard into its limit overshoots it by up to
-/// ~2.3 rad (130°!) in one tick, and the violent position-correction that snaps
-/// it back is not momentum-conserving in the reduced-coordinate multibody
-/// solver — with 30 joints slammed at once that residual *accumulates* into net
-/// angular momentum, letting an airborne crab spin itself up from nothing
-/// (issue #17: the ExternalForce couples are balanced to ~1e-5 N·m and contact
-/// is ruled out, so the joint-LIMIT impulse was the leak, NOT the actuator).
-/// 400 Hz keeps the stop firm — under standing/ground load the limb still holds
-/// within ~0.1 rad of its limit, same as the rigid default — while capping the
-/// airborne overshoot at ~0.2 rad, which cuts the spurious spin-up ~10× (a 68×
-/// runaway under realistic drive becomes a bounded ~5× wobble). Damping 2.0
-/// (> the default 1.0) softens the snap further without letting the limb sag
-/// through its stop. It does NOT fully conserve L — the iterative solver has a
-/// small irreducible drift floor — but it removes the runaway pumping.
+/// Spring (natural frequency Hz, damping ratio) of every revolute joint's
+/// constraint — the lock holding the limb attached AND the hard end stops. Softened
+/// well below Rapier's near-rigid `1e6` Hz default because at that stiffness a limb
+/// driven into its limit overshoots and the violent position-correction snapping it
+/// back is NOT momentum-conserving in the reduced-coordinate multibody solver: with
+/// 30 joints slammed at once the residual accumulates into net angular momentum,
+/// letting an airborne crab spin up from nothing (issue #17 — actuator couples and
+/// contact were ruled out, so the joint-LIMIT impulse was the leak). 400 Hz keeps the
+/// stop firm under standing load yet caps the airborne overshoot enough to remove the
+/// runaway pumping; damping 2.0 (> the default 1.0) softens the snap without letting
+/// the limb sag through its stop. The iterative solver still leaves a small drift
+/// floor, but no runaway. (Tuning figures: issue #17.)
 pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f32> =
     bevy_rapier3d::rapier::dynamics::SpringCoefficients {
         natural_frequency: 400.0,
@@ -389,9 +376,8 @@ impl CrabJointId {
             CrabJointId::LegMerus(..) => [-1.0, 1.0],
             CrabJointId::LegCarpus(..) => [-1.1, 1.1],
             CrabJointId::ClawShoulder(_) => [-1.0, 1.0],
-            // Owner-tuned wrist sweep amplitude (13.7°): the
-            // reported feedback was that the wrist rotated too far, so the travel is
-            // clamped symmetrically to ±13.7° (= ±0.239110 rad) about the bind rest.
+            // Tuned wrist sweep, clamped tight: ±13.7° (±0.239110 rad) about the bind
+            // rest — much narrower than the other joints because the wrist rotated too far.
             CrabJointId::ClawWrist(_) => [-0.239110, 0.239110],
             CrabJointId::ClawPincer(_) => [-0.5, 0.2],
         }

@@ -1,15 +1,11 @@
-//! `rl` library surface.
+//! `rl_core` library surface.
 //!
 //! Hosts BOTH the multiplayer netcode foundation ([`net`]) and the RL crab
 //! machinery ([`bot`], [`physics`], [`training`], [`play`]) so the `game` binary can
-//! drive the trained crab in its SOLO playtest. The `rl` training binary and the
-//! `game` binary both link this one library, so there is ONE copy of every module —
-//! no duplicated crab / physics / brain implementation across the two binaries.
-//!
-//! Until this consolidation the RL modules lived only in the `rl` training binary
-//! (`src/main.rs`) and were invisible to `game`; that is why "reuse the trained crab
-//! body in the game" was deferred. They now live behind this one crate root, which
-//! the training binary re-imports (`use rl::{bot, physics, …}`) instead of declaring.
+//! drive the trained crab in its SOLO playtest. The training binary and the `game`
+//! binary both link this one library (`use rl_core::{bot, physics, …}`), so there is
+//! ONE copy of every module — no duplicated crab / physics / brain implementation
+//! across the two binaries.
 
 // rl#49: the `--features wgpu` build resolves `Module: Send` on `load_record` for
 // `CrabBrain<Autodiff<Wgpu>>`, chasing wgpu_core's nested generics past the default
