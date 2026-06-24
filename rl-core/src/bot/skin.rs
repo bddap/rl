@@ -50,14 +50,26 @@ pub struct CrabModel {
 #[derive(Component)]
 pub struct CrabSkin {
     env: usize,
-    /// Frames since the scene instance got children. Pairing waits for
-    /// [`SETTLE_FRAMES`]: offsets captured against the crab still up at spawn
-    /// height bake the subsequent ~0.2 m settle into every carapace-bound bone
-    /// and sink the shell into the ground. The skin stays hidden (primitives
-    /// showing) until it pairs.
-    scene_frames: Option<u32>,
-    /// Pairing done; `BoneDrive`s exist below this root.
-    paired: bool,
+    phase: Pairing,
+}
+
+/// The skin's pairing lifecycle. A skin spawns before its glTF scene has
+/// instantiated, settles with the body, then pairs its bones to the physics
+/// links — strictly in that order. One enum makes the settle counter live only
+/// inside [`Settling`](Pairing::Settling), so being [`Paired`](Pairing::Paired)
+/// with a settle still outstanding is unrepresentable rather than merely avoided.
+enum Pairing {
+    /// Scene instance has no children yet, so its bind-pose GlobalTransforms
+    /// aren't readable. The skin is a bind-pose statue off the body, kept hidden.
+    Spawning,
+    /// Scene is up; counting render frames so the body can settle before offsets
+    /// are captured. Offsets taken against the crab still up at spawn height bake
+    /// the subsequent ~0.2 m settle into every carapace-bound bone and sink the
+    /// shell into the ground, so capture waits for [`SETTLE_FRAMES`]. Still hidden.
+    Settling { frames: u32 },
+    /// Bones captured and driven; `BoneDrive`s exist below this root and the skin
+    /// is shown.
+    Paired,
 }
 
 /// Render frames between scene readiness and offset capture — enough for the
@@ -163,8 +175,7 @@ fn attach_skins(
             Visibility::Hidden,
             CrabSkin {
                 env: env.0,
-                scene_frames: None,
-                paired: false,
+                phase: Pairing::Spawning,
             },
         ));
     }
@@ -186,7 +197,7 @@ fn reap_orphan_skins(
 
 /// Once the glTF instance exists (one frame after its children appear, so
 /// GlobalTransforms hold the bind pose), capture per-bone offsets and flatten
-/// driven bones under the root. Setting `paired` hands visibility to
+/// driven bones under the root. Reaching [`Pairing::Paired`] hands visibility to
 /// [`reveal_skin`], which shows the now-driven skin.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn pair_bones(
@@ -200,21 +211,21 @@ fn pair_bones(
     meshes: Query<(), With<Mesh3d>>,
 ) {
     for (root, mut skin) in skins.iter_mut() {
-        if skin.paired {
-            continue;
-        }
-        match skin.scene_frames {
-            None => {
+        match skin.phase {
+            Pairing::Paired => continue,
+            Pairing::Spawning => {
                 if children.get(root).is_ok_and(|c| !c.is_empty()) {
-                    skin.scene_frames = Some(0);
+                    skin.phase = Pairing::Settling { frames: 0 };
                 }
                 continue;
             }
-            Some(n) if n < SETTLE_FRAMES => {
-                skin.scene_frames = Some(n + 1);
+            Pairing::Settling { frames } if frames < SETTLE_FRAMES => {
+                skin.phase = Pairing::Settling {
+                    frames: frames + 1,
+                };
                 continue;
             }
-            Some(_) => {}
+            Pairing::Settling { .. } => {}
         }
 
         let link_of = link_map(&links, skin.env);
@@ -269,7 +280,7 @@ fn pair_bones(
         // place that transform would be applied a SECOND time on top of the
         // already-world bone poses, rendering the skin offset from the physics body.
         commands.entity(root).insert(Transform::default());
-        skin.paired = true;
+        skin.phase = Pairing::Paired;
     }
 }
 
@@ -286,7 +297,7 @@ fn repair_skins(
     links: LinkQuery,
 ) {
     for (skin, kids) in skins.iter() {
-        if !skin.paired {
+        if !matches!(skin.phase, Pairing::Paired) {
             continue; // pair_bones owns first-time pairing.
         }
         // Stale iff a bone targets a despawned link. `get` on a dead entity
@@ -321,7 +332,7 @@ fn repair_skins(
 /// visible crab and just stays on after pairing. Writes only on change.
 fn reveal_skin(mut roots: Query<(&CrabSkin, &mut Visibility)>) {
     for (skin, mut vis) in roots.iter_mut() {
-        if skin.paired && *vis != Visibility::Visible {
+        if matches!(skin.phase, Pairing::Paired) && *vis != Visibility::Visible {
             *vis = Visibility::Visible;
         }
     }
@@ -670,8 +681,8 @@ mod tests {
     use super::super::test_util::{headless_app, tick};
     use super::super::{CrabSpawns, respawn_crab};
     use super::{
-        BoneDrive, CrabSkin, PartId, SETTLE_FRAMES, carapace_region, confine_vertex,
-        has_rigid_lane, repair_skins, reveal_skin, strip_to_dominant_cluster,
+        BoneDrive, CrabSkin, Pairing, PartId, carapace_region, confine_vertex, has_rigid_lane,
+        repair_skins, reveal_skin, strip_to_dominant_cluster,
     };
 
     /// The strip (bddap/rl#32, refined for seams): a shell vertex carrying stray arm
@@ -798,8 +809,7 @@ mod tests {
                     .spawn((
                         CrabSkin {
                             env: 0,
-                            scene_frames: Some(SETTLE_FRAMES),
-                            paired: true,
+                            phase: Pairing::Paired,
                         },
                         Transform::default(),
                         Visibility::Visible,
@@ -866,8 +876,7 @@ mod tests {
                     .spawn((
                         CrabSkin {
                             env: 0,
-                            scene_frames: None,
-                            paired: false,
+                            phase: Pairing::Spawning,
                         },
                         Transform::default(),
                         Visibility::Hidden,
@@ -887,7 +896,7 @@ mod tests {
         assert!(!visible(&app), "unpaired skin must stay hidden");
 
         // Pair it; reveal_skin flips it visible and leaves it there.
-        app.world_mut().get_mut::<CrabSkin>(root).unwrap().paired = true;
+        app.world_mut().get_mut::<CrabSkin>(root).unwrap().phase = Pairing::Paired;
         tick(&mut app, 1);
         assert!(visible(&app), "paired skin must become visible");
         tick(&mut app, 1);
