@@ -149,28 +149,40 @@ mod model_path_tests {
     }
 }
 
-impl LoadedModel {
-    /// Parse a GLB from disk: decode the skin's bind matrices into world bone
-    /// transforms and every vertex's dominant bone. Errors surface as a string
-    /// so the test can fail loudly rather than panic deep in the gltf crate.
-    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+/// A GLB opened and decoded down to the skinning inputs both loaders share: the
+/// binary blob, the bind-pose world transforms, and the skin's joint-node list +
+/// inverse-bind matrices. [`LoadedModel::load`] and [`load_bind_mesh`] read the same
+/// model for different end-products (per-part vertex clouds vs a triangle soup) but
+/// must skin identically — folding the open/compose/skin-decode here is what stops
+/// the two from drifting (they previously duplicated it and had to change in lockstep).
+struct ParsedGltf {
+    gltf: gltf::Gltf,
+    blob: Vec<u8>,
+    /// Bind-pose world transform of each node, by node index.
+    bind_world: HashMap<usize, Mat4>,
+    /// Skin joint node indices, in skin-joint order; a per-vertex JOINTS_0 value
+    /// indexes this list.
+    joint_nodes: Vec<usize>,
+    /// Inverse-bind matrices in the same skin-joint order as `joint_nodes`.
+    inv_binds: Vec<Mat4>,
+}
+
+impl ParsedGltf {
+    /// Open the GLB and decode the inputs common to both loaders. The bind pose IS
+    /// the node rest pose (no animation sampling) — the same pose the skin captures
+    /// offsets in.
+    fn open(path: &std::path::Path) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("read {path:?}: {e}"))?;
         let gltf = gltf::Gltf::from_slice(&bytes).map_err(|e| format!("parse glb: {e}"))?;
-        let blob = gltf.blob.as_deref().ok_or("GLB has no binary chunk")?;
-
-        let node_name: HashMap<usize, String> = gltf
-            .nodes()
-            .filter_map(|n| n.name().map(|nm| (n.index(), nm.to_string())))
-            .collect();
+        let blob = gltf.blob.clone().ok_or("GLB has no binary chunk")?;
 
         // Bind-pose world transforms: walk every scene root down, composing
-        // `parent_world * node_local`. The bind pose IS the node rest pose here
-        // (no animation sampling) — the same pose the skin captures offsets in.
+        // `parent_world * node_local`.
         let mut bind_world: HashMap<usize, Mat4> = HashMap::new();
         compose_world(gltf.scenes().flat_map(|s| s.nodes()), &mut bind_world);
 
-        // Skin weights: dominant bone per vertex. A skin's `joints()` list maps
-        // the per-vertex JOINTS_0 *indices* (0..N) to actual node indices.
+        // A skin's `joints()` list maps the per-vertex JOINTS_0 *indices* (0..N) to
+        // actual node indices.
         let skin = gltf.skins().next().ok_or("model has no skin")?;
         let joint_nodes: Vec<usize> = skin.joints().map(|j| j.index()).collect();
         // Inverse-bind matrices (skin-joint order). Combined with the joints'
@@ -178,36 +190,94 @@ impl LoadedModel {
         // position — the position Bevy actually skins the visible mesh to. Fitting
         // colliders to that (not the raw, pre-skin POSITION attribute) is what keeps
         // them on the rendered mesh rather than offset by the mesh/armature frame.
+        // glTF lets a skin omit the IBMs to mean "all identity" — that is the only
+        // legitimate empty case, so synthesise a full identity set of the right
+        // length; `skin_to_bind_world` then treats a SHORTER array as the error it is.
         let inv_binds: Vec<Mat4> = skin
-            .reader(|buf| (buf.index() == 0).then_some(blob))
+            .reader(|buf| (buf.index() == 0).then_some(blob.as_slice()))
             .read_inverse_bind_matrices()
             .map(|it| it.map(|m| Mat4::from_cols_array_2d(&m)).collect())
             .unwrap_or_else(|| vec![Mat4::IDENTITY; joint_nodes.len()]);
 
-        let mesh = gltf.meshes().next().ok_or("model has no mesh")?;
+        Ok(ParsedGltf {
+            gltf,
+            blob,
+            bind_world,
+            joint_nodes,
+            inv_binds,
+        })
+    }
+
+    /// The single mesh's primitives. Both loaders read POSITION/JOINTS_0/WEIGHTS_0
+    /// off these and skin via [`skin_to_bind_world`]; only their per-vertex output
+    /// differs.
+    fn primitives(&self) -> Result<gltf::mesh::iter::Primitives<'_>, String> {
+        Ok(self
+            .gltf
+            .meshes()
+            .next()
+            .ok_or("model has no mesh")?
+            .primitives())
+    }
+
+    /// Read a primitive's POSITION/JOINTS_0/WEIGHTS_0 and skin each vertex to its
+    /// bind-pose WORLD position. Returns the skinned positions paired with their raw
+    /// joints+weights so a caller can derive its own per-vertex product (dominant
+    /// bone, triangle indices, …) without re-skinning.
+    #[allow(clippy::type_complexity)]
+    fn skin_primitive(
+        &self,
+        prim: &gltf::Primitive<'_>,
+    ) -> Result<Vec<(Vec3, [u16; 4], [f32; 4])>, String> {
+        let reader = prim.reader(|buf| (buf.index() == 0).then_some(self.blob.as_slice()));
+        let positions: Vec<[f32; 3]> = reader
+            .read_positions()
+            .ok_or("primitive has no POSITION")?
+            .collect();
+        let joints: Vec<[u16; 4]> = reader
+            .read_joints(0)
+            .ok_or("primitive has no JOINTS_0")?
+            .into_u16()
+            .collect();
+        let weights: Vec<[f32; 4]> = reader
+            .read_weights(0)
+            .ok_or("primitive has no WEIGHTS_0")?
+            .into_f32()
+            .collect();
+        positions
+            .iter()
+            .zip(&joints)
+            .zip(&weights)
+            .map(|((p, &j), &w)| {
+                let pos = skin_to_bind_world(
+                    Vec3::from_array(*p),
+                    j,
+                    w,
+                    &self.bind_world,
+                    &self.joint_nodes,
+                    &self.inv_binds,
+                )?;
+                Ok((pos, j, w))
+            })
+            .collect()
+    }
+}
+
+impl LoadedModel {
+    /// Parse a GLB from disk: decode the skin's bind matrices into world bone
+    /// transforms and every vertex's dominant bone. Errors surface as a string
+    /// so the test can fail loudly rather than panic deep in the gltf crate.
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        let parsed = ParsedGltf::open(path)?;
+        let node_name: HashMap<usize, String> = parsed
+            .gltf
+            .nodes()
+            .filter_map(|n| n.name().map(|nm| (n.index(), nm.to_string())))
+            .collect();
+
         let mut verts = Vec::new();
-        for prim in mesh.primitives() {
-            let reader = prim.reader(|buf| {
-                // Single embedded buffer (GLB blob); index 0 is the bin chunk.
-                (buf.index() == 0).then_some(blob)
-            });
-            let positions: Vec<[f32; 3]> = reader
-                .read_positions()
-                .ok_or("primitive has no POSITION")?
-                .collect();
-            let joints: Vec<[u16; 4]> = reader
-                .read_joints(0)
-                .ok_or("primitive has no JOINTS_0")?
-                .into_u16()
-                .collect();
-            let weights: Vec<[f32; 4]> = reader
-                .read_weights(0)
-                .ok_or("primitive has no WEIGHTS_0")?
-                .into_f32()
-                .collect();
-            for ((p, j), w) in positions.iter().zip(&joints).zip(&weights) {
-                let raw = Vec3::from_array(*p);
-                let pos = skin_to_bind_world(raw, *j, *w, &bind_world, &joint_nodes, &inv_binds)?;
+        for prim in parsed.primitives()? {
+            for (pos, j, w) in parsed.skin_primitive(&prim)? {
                 // Dominant influence tags the vertex for per-part bucketing.
                 let (lane, &wmax) = w
                     .iter()
@@ -217,10 +287,10 @@ impl LoadedModel {
                 let dom = j[lane] as usize;
                 verts.push(SkinnedVertex {
                     pos,
-                    dominant_node: *joint_nodes.get(dom).ok_or_else(|| {
+                    dominant_node: *parsed.joint_nodes.get(dom).ok_or_else(|| {
                         format!(
                             "JOINTS_0 index {dom} out of range (skin has {} joints)",
-                            joint_nodes.len()
+                            parsed.joint_nodes.len()
                         )
                     })?,
                     dominant_weight: wmax,
@@ -229,7 +299,7 @@ impl LoadedModel {
         }
 
         Ok(LoadedModel {
-            bind_world,
+            bind_world: parsed.bind_world,
             node_name,
             verts,
         })
@@ -319,58 +389,21 @@ pub struct BindMesh {
 /// (indices 0,1,2,…); per-primitive indices are offset by the running vertex base so
 /// the concatenated soup stays consistent.
 pub fn load_bind_mesh(path: &std::path::Path) -> Result<BindMesh, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read {path:?}: {e}"))?;
-    let gltf = gltf::Gltf::from_slice(&bytes).map_err(|e| format!("parse glb: {e}"))?;
-    let blob = gltf.blob.as_deref().ok_or("GLB has no binary chunk")?;
-
-    let mut bind_world: HashMap<usize, Mat4> = HashMap::new();
-    compose_world(gltf.scenes().flat_map(|s| s.nodes()), &mut bind_world);
-
-    let skin = gltf.skins().next().ok_or("model has no skin")?;
-    let joint_nodes: Vec<usize> = skin.joints().map(|j| j.index()).collect();
-    let inv_binds: Vec<Mat4> = skin
-        .reader(|buf| (buf.index() == 0).then_some(blob))
-        .read_inverse_bind_matrices()
-        .map(|it| it.map(|m| Mat4::from_cols_array_2d(&m)).collect())
-        .unwrap_or_else(|| vec![Mat4::IDENTITY; joint_nodes.len()]);
-
-    let mesh = gltf.meshes().next().ok_or("model has no mesh")?;
+    let parsed = ParsedGltf::open(path)?;
     let mut positions: Vec<Vec3> = Vec::new();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
-    for prim in mesh.primitives() {
-        let reader = prim.reader(|buf| (buf.index() == 0).then_some(blob));
-        let raw_positions: Vec<[f32; 3]> = reader
-            .read_positions()
-            .ok_or("primitive has no POSITION")?
-            .collect();
-        let joints: Vec<[u16; 4]> = reader
-            .read_joints(0)
-            .ok_or("primitive has no JOINTS_0")?
-            .into_u16()
-            .collect();
-        let weights: Vec<[f32; 4]> = reader
-            .read_weights(0)
-            .ok_or("primitive has no WEIGHTS_0")?
-            .into_f32()
-            .collect();
-
+    for prim in parsed.primitives()? {
         let base = positions.len() as u32;
-        for ((p, j), w) in raw_positions.iter().zip(&joints).zip(&weights) {
-            positions.push(skin_to_bind_world(
-                Vec3::from_array(*p),
-                *j,
-                *w,
-                &bind_world,
-                &joint_nodes,
-                &inv_binds,
-            )?);
-        }
+        let skinned = parsed.skin_primitive(&prim)?;
+        let prim_verts = skinned.len() as u32;
+        positions.extend(skinned.into_iter().map(|(pos, _, _)| pos));
 
         // Offset this primitive's indices into the global vertex range. An indexless
         // primitive is an implicit 0,1,2,… triangle list over its own vertices.
+        let reader = prim.reader(|buf| (buf.index() == 0).then_some(parsed.blob.as_slice()));
         let local: Vec<u32> = match reader.read_indices() {
             Some(idx) => idx.into_u32().collect(),
-            None => (0..raw_positions.len() as u32).collect(),
+            None => (0..prim_verts).collect(),
         };
         for tri in local.chunks_exact(3) {
             triangles.push([base + tri[0], base + tri[1], base + tri[2]]);
@@ -404,9 +437,13 @@ fn skin_to_bind_world(
         if wt <= 0.0 {
             continue;
         }
-        // `ji` is a raw JOINTS_0 value straight off the mesh stream; a malformed
-        // asset can put it past the skin's joint list, so bound it rather than let
-        // the slice index panic deep in the loader (both arrays are joint-indexed).
+        // `ji` is a raw JOINTS_0 value straight off the mesh stream. Three things
+        // must hold for it to skin correctly, and a parseable-but-malformed asset can
+        // break any of them; all three fail loud (return `Err`) rather than indexing
+        // out of bounds or substituting identity, which would skin this vertex to the
+        // wrong place SILENTLY. The glTF spec guarantees all three for a valid skin —
+        // the joint index is in range, there is one IBM per joint, and every joint is
+        // reachable from a scene root — so each gap is the asset's error to surface.
         let ji = joints[lane] as usize;
         let &node = joint_nodes.get(ji).ok_or_else(|| {
             format!(
@@ -414,8 +451,17 @@ fn skin_to_bind_world(
                 joint_nodes.len()
             )
         })?;
-        let inv_bind = inv_binds.get(ji).copied().unwrap_or(Mat4::IDENTITY);
-        let jm = bind_world.get(&node).copied().unwrap_or(Mat4::IDENTITY) * inv_bind;
+        let inv_bind = inv_binds.get(ji).copied().ok_or_else(|| {
+            format!(
+                "skin has no inverse-bind matrix for joint index {ji} ({} IBMs, {} joints)",
+                inv_binds.len(),
+                joint_nodes.len()
+            )
+        })?;
+        let bind = bind_world.get(&node).copied().ok_or_else(|| {
+            format!("joint index {ji} (node {node}) is not reachable from any scene root")
+        })?;
+        let jm = bind * inv_bind;
         world += wt * jm.transform_point3(raw);
         wsum += wt;
     }
@@ -565,17 +611,29 @@ pub struct ColliderScore {
     pub poke_out_max: f32,
     /// 95th-percentile depth the surface sits past the mesh on the covered side.
     pub bulge_p95: f32,
+    /// Axis/radius diagnostics — `Some` only when the collider is a capsule fitted to
+    /// a cloud big enough to have a well-defined principal axis. Grouping them in one
+    /// `Option` makes a box-with-axis-skew unrepresentable: a box ([`score_box`]) and a
+    /// too-small capsule cloud both yield `None`, so a reader can't read a meaningless
+    /// skew/ratio off them (the previous `NaN`-in-band could, and only a runtime
+    /// `is_nan` check stood between that and silent garbage).
+    pub capsule: Option<CapsuleDiagnostics>,
+}
+
+/// Why a capsule misses (or hugs) its limb — only meaningful for a capsule collider.
+#[derive(Clone, Copy, Debug)]
+pub struct CapsuleDiagnostics {
     /// Angle (deg) between the capsule axis and the cloud's principal axis — large
-    /// = capsule pointed off the limb. `NaN` for a box or a too-small cloud.
+    /// = capsule pointed off the limb.
     pub axis_skew_deg: f32,
     /// Live radius ÷ the cloud's p95 perpendicular spread about the live axis;
-    /// `>1` fat, `<1` starved. `NaN` for a box or a too-small cloud.
+    /// `>1` fat, `<1` starved.
     pub radius_ratio: f32,
 }
 
 impl ColliderScore {
-    /// Aggregate a set of signed surface distances (capsule diagnostics filled in
-    /// by [`score_capsule`]; left `NaN` for a box).
+    /// Aggregate a set of signed surface distances. Leaves [`Self::capsule`] `None`;
+    /// [`score_capsule`] fills it in when the cloud supports the diagnostics.
     fn from_signed(sd: &[f32]) -> Self {
         let inv = 1.0 / sd.len().max(1) as f32;
         let mut outs: Vec<f32> = sd.iter().copied().filter(|&d| d > 0.0).collect();
@@ -595,8 +653,7 @@ impl ColliderScore {
             poke_out_p95: pctl(&outs, 0.95),
             poke_out_max: outs.last().copied().unwrap_or(0.0),
             bulge_p95: pctl(&ins, 0.95),
-            axis_skew_deg: f32::NAN,
-            radius_ratio: f32::NAN,
+            capsule: None,
         }
     }
 }
@@ -614,12 +671,14 @@ pub fn score_capsule(points: &[Vec3], a: Vec3, b: Vec3, radius: f32) -> Collider
         .collect();
     let mut s = ColliderScore::from_signed(&sd);
     // Diagnostics: how skewed is the live axis vs the cloud's true long axis, and
-    // is the radius fat/starved relative to the cloud's spread about that axis.
+    // is the radius fat/starved relative to the cloud's spread about that axis. Only
+    // defined when the cloud is big enough to have a principal axis and the segment is
+    // non-degenerate; otherwise the diagnostics stay `None`.
     let axis = seg.normalize_or_zero();
     if points.len() >= 4 && axis.length_squared() > 0.5 {
         let centroid = points.iter().copied().sum::<Vec3>() / points.len() as f32;
         let (axes, _) = covariance_eigenframe(points, centroid);
-        s.axis_skew_deg = axis.dot(axes[0]).abs().clamp(0.0, 1.0).acos().to_degrees();
+        let axis_skew_deg = axis.dot(axes[0]).abs().clamp(0.0, 1.0).acos().to_degrees();
         let mut perp: Vec<f32> = points
             .iter()
             .map(|&p| {
@@ -628,7 +687,11 @@ pub fn score_capsule(points: &[Vec3], a: Vec3, b: Vec3, radius: f32) -> Collider
             })
             .collect();
         perp.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-        s.radius_ratio = radius / percentile(&perp, 0.95).max(1e-4);
+        let radius_ratio = radius / percentile(&perp, 0.95).max(1e-4);
+        s.capsule = Some(CapsuleDiagnostics {
+            axis_skew_deg,
+            radius_ratio,
+        });
     }
     s
 }
@@ -1095,6 +1158,82 @@ mod tests {
         assert!(
             got.is_err(),
             "out-of-range joint index should Err, got {got:?}"
+        );
+    }
+
+    /// An inverse-bind-matrix array shorter than the joint list (a malformed skin —
+    /// the glTF spec requires one IBM per joint) must `Err`, not silently substitute
+    /// identity and skin the vertex to the wrong place. The joint index is IN range
+    /// here, so this isolates the IBM-length guard from the out-of-range one above.
+    #[test]
+    fn missing_inverse_bind_matrix_errors() {
+        let joint_nodes = [7usize]; // one joint, in range
+        let inv_binds: [Mat4; 0] = []; // but no IBM for it
+        let mut bind_world = HashMap::new();
+        bind_world.insert(7usize, Mat4::IDENTITY);
+        let got = skin_to_bind_world(
+            Vec3::ZERO,
+            [0, 0, 0, 0],
+            [1.0, 0.0, 0.0, 0.0],
+            &bind_world,
+            &joint_nodes,
+            &inv_binds,
+        );
+        assert!(
+            got.is_err(),
+            "missing inverse-bind matrix should Err, got {got:?}"
+        );
+    }
+
+    /// A joint not reachable from any scene root (absent from `bind_world` — a
+    /// malformed skin) must `Err` rather than silently skin against identity. The
+    /// joint index is in range and has an IBM, isolating the reachability guard.
+    #[test]
+    fn unreachable_joint_node_errors() {
+        let joint_nodes = [7usize]; // joint node 7, in range, with an IBM…
+        let inv_binds = [Mat4::IDENTITY];
+        let bind_world = HashMap::new(); // …but node 7 never got a bind-world transform
+        let got = skin_to_bind_world(
+            Vec3::ZERO,
+            [0, 0, 0, 0],
+            [1.0, 0.0, 0.0, 0.0],
+            &bind_world,
+            &joint_nodes,
+            &inv_binds,
+        );
+        assert!(
+            got.is_err(),
+            "unreachable joint node should Err, got {got:?}"
+        );
+    }
+
+    /// `score_box` and a too-small capsule cloud carry no axis/radius diagnostics
+    /// (the illegal "box with skew" state is now unrepresentable); a fittable capsule
+    /// cloud does. Guards the `Option` modelling from regressing to an in-band sentinel.
+    #[test]
+    fn box_and_tiny_cloud_have_no_capsule_diagnostics() {
+        let pts = [Vec3::ZERO, Vec3::X, Vec3::Y];
+        assert!(
+            score_box(&pts, Vec3::ZERO, Vec3::splat(1.0))
+                .capsule
+                .is_none(),
+            "a box has no capsule diagnostics"
+        );
+        assert!(
+            score_capsule(&pts, Vec3::ZERO, Vec3::X, 0.1)
+                .capsule
+                .is_none(),
+            "a <4-point cloud has no capsule diagnostics"
+        );
+        // A cloud along +X with four points and a non-degenerate segment IS fittable.
+        let line: Vec<Vec3> = (0..8)
+            .map(|i| Vec3::new(i as f32 * 0.1, 0.0, 0.0))
+            .collect();
+        assert!(
+            score_capsule(&line, Vec3::ZERO, Vec3::X, 0.05)
+                .capsule
+                .is_some(),
+            "a fittable capsule cloud has diagnostics"
         );
     }
 }
