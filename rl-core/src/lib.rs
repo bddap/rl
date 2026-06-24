@@ -46,22 +46,6 @@ pub(crate) mod screenshot;
 #[derive(Resource, Clone, Copy)]
 pub struct Visuals(pub bool);
 
-/// Device for the batched PPO update: CPU (the production ndarray path) or GPU (the
-/// RTX via wgpu/Vulkan — rl#49). Rollout inference stays on CPU either way; only the
-/// update moves.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UpdateDevice {
-    /// Run the update on the CPU (`Autodiff<NdArray>`) — byte-for-byte the production
-    /// CPU path; the GPU backend is never touched.
-    Cpu,
-    /// Run the update on the GPU (`Autodiff<Wgpu>` over Vulkan): mirror the policy
-    /// CPU→GPU, update on the discrete GPU, mirror back. Requires the binary be built
-    /// with `--features wgpu`; otherwise the run fails with a clear error (never a
-    /// silent CPU fallback). Forces + asserts a real discrete-GPU adapter (no software
-    /// lavapipe masquerading as the GPU).
-    Gpu,
-}
-
 /// Training config (consumed by the learner and its rollout threads, which build a
 /// `TrainingState`) plus the render modes' shared knobs. The `learn` subcommand
 /// flattens it so e.g. `--checkpoint-dir` / `--ticks` mean the same thing
