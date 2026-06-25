@@ -159,7 +159,21 @@ struct LearnArgs {
     nice: i32,
 }
 
+/// Install the process-wide tracing subscriber so the trainer's `info!`/`warn!`/`error!`
+/// reach stderr. The headless build links no bevy `LogPlugin`, so WITHOUT this every log is
+/// dropped on the floor — a fail-loud guard (e.g. the non-finite-observation `error!`) that
+/// never speaks is no guard at all. `RUST_LOG` overrides the default `info` level.
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+}
+
 fn main() {
+    init_tracing();
     let cli = Cli::parse();
 
     // The `learn` entry point: the learner steps no world itself (it owns the policy

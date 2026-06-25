@@ -31,28 +31,52 @@ use bevy::prelude::Vec3;
 
 use crate::bot::actuator::ACTION_SIZE;
 
-/// Weight of the effort term `− EFFORT_WEIGHT·Σ|aᵢ|^L` (see [`compute_reward`]): the
-/// per-command actuation cost. Binding constraint — effort is the convex cube of the
-/// RAW (unbounded) outputs, so the weight fixes a break-even command size under which a
-/// real stride still nets positive. Now that PROGRESS (not reach) is what a stride earns, the
-/// break-even is re-derived against the progress a stride collects per tick: a nominal ~0.5
-/// m/s walk closes ~0.008 m/tick (at 60 Hz), worth `PROGRESS_WEIGHT·0.008 ≈ 0.2`, so
-/// `tax(|a|) = EFFORT_WEIGHT·30·|a|³ = 0.2` at `|a| ≈ 1.1/joint`: a gait command (`|a| ≈
-/// 0.4–0.8`) nets clearly positive on progress alone, while deep saturation (`|a| = 3`, cost
-/// ≈ 4 ≫ 0.2) is still reined in. The recalibration CONFIRMS 0.005 rather than moving it.
-/// Convex `EFFORT_EXP`=`L` keeps the gentlest sufficient command the cheapest.
-pub(crate) const EFFORT_WEIGHT: f32 = 0.005;
-const EFFORT_EXP: f32 = 3.0;
+/// Weight of the metabolic-effort term `− EFFORT_WEIGHT·Σ|dᵢ|^L` (see [`compute_reward`]):
+/// a GENTLE regularizer on the policy's neural DRIVE — the pre-clamp Gaussian sample `dᵢ =
+/// μᵢ + σ·εᵢ` (UNBOUNDED), NOT the ±1-clamped command the sim runs (see [`action_effort`]).
+/// The metabolic-cost analog: cost scales with the neural ACTIVATION the policy emits, not
+/// with the bounded muscle output the joint produces. Two binding properties:
+///   * **Live anti-saturation gradient.** Because the input is the UNBOUNDED drive, `|d|^L`
+///     keeps rising past the ±1 torque clamp, so a policy that samples `|d| ≫ 1` to slam a
+///     joint onto its rail PAYS for the overshoot — a gradient pulling `σ` (log_std) and `|μ|`
+///     back off saturation. A tax on the clamped command could not: `|command| ≤ 1` is flat at
+///     the rail, so a saturating joint would feel no pull off it.
+///   * **`σ`-regularizer (via the advantage, not the loss).** The tax is a REWARD term, so
+///     it reaches log_std through the policy gradient's normalized advantage — NOT as a direct
+///     `∂/∂σ²` loss term. Because `E|d|² = μ² + σ²`, a wider policy samples larger drives on
+///     average, so the quadratic tax lands as negative advantage that the gradient reduces by
+///     lowering log_std. Crucially it DOMINATES the advantage in the early pure-noise regime
+///     (progress ≈ 0, so the tax is nearly the whole signal) — counter-pressure on the entropy
+///     bonus exactly when the policy would otherwise inflate into noise — then its share fades
+///     once a gait forms and progress dominates the return.
+///
+/// **Calibration (physics 64 Hz = `physics::PHYSICS_DT`, integrated over a full
+/// `systems::MAX_EPISODE_TICKS` episode).** `EFFORT_EXP = 2` (quadratic): the input is
+/// unbounded, so a cube would explode over a noisy policy; the square is the standard
+/// metabolic activation² and stays a regularizer, not the dominant term. A per-tick CAP is
+/// deliberately avoided — it would re-flatten `|d|^L` past the cap and kill the anti-saturation
+/// gradient — so the gentle quadratic is what bounds the cost instead. With
+/// `EFFORT_WEIGHT = 0.0006`:
+///   * a ~0.5 m/s stride closes `0.5·PHYSICS_DT ≈ 0.0078 m/tick`, worth `24·0.0078 ≈ 0.19`;
+///   * a gait drive (`|d| ≈ 0.7`) taxes `0.0006·30·0.49 ≈ 0.009/tick` — ~5% of the stride's
+///     progress, and ~13 integrated over a 3 m traverse vs its `24·3 = 72` progress: progress
+///     dominates >5:1;
+///   * the per-joint break-even sits at `|d| ≈ 3.2` (`0.0006·30·d² = 0.19`), far above any
+///     gait. A NON-progressing saturating thrash (`|d| = 3`, ~0 progress) pays `0.16/tick`,
+///     ≈ −240 over an episode — firmly net-negative. Convex, so the gentlest sufficient drive
+///     is the cheapest.
+pub(crate) const EFFORT_WEIGHT: f32 = 0.0006;
+const EFFORT_EXP: f32 = 2.0;
 
-/// The effort summand `Σ|aᵢ|^L` that [`compute_reward`] weights by [`EFFORT_WEIGHT`],
-/// taken over the RAW network outputs (the sampled PRE-clamp actions — see
-/// `brain_step`), NOT the ±1-clamped actions the sim runs. The point is a gradient
-/// PAST the clamp: `|a|^L` keeps rising beyond ±1, so an output that overshoots the
-/// usable range is taxed in proportion to the overshoot and the policy is pulled back
-/// into range. Taxing the clamped value instead would flatten the gradient at ±1 — a
-/// saturating logit would pay a fixed toll but feel no pull off the rail.
-pub(crate) fn action_effort(raw_actions: &[f32; ACTION_SIZE]) -> f32 {
-    raw_actions.iter().map(|a| a.abs().powf(EFFORT_EXP)).sum()
+/// The effort summand `Σ|dᵢ|^L` that [`compute_reward`] weights by [`EFFORT_WEIGHT`], taken
+/// over the policy's neural DRIVES `dᵢ` — the PRE-clamp Gaussian samples `μᵢ + σ·εᵢ` the
+/// policy actually drew (see `sample_actions`), NOT the ±1-clamped commands the sim runs. The
+/// point is a gradient PAST the clamp: `|d|^L` keeps rising beyond ±1, so a drive that
+/// overshoots the usable range is taxed in proportion to the overshoot and the policy is
+/// pulled back into range. Taxing the clamped command instead flattens the gradient at ±1 — a
+/// saturating drive would pay a fixed toll but feel no pull off the rail.
+pub(crate) fn action_effort(drives: &[f32; ACTION_SIZE]) -> f32 {
+    drives.iter().map(|d| d.abs().powf(EFFORT_EXP)).sum()
 }
 
 /// Weight `P` of the progress term `P·(d_prev − d_now)` (see [`compute_reward`] and
@@ -61,11 +85,14 @@ pub(crate) fn action_effort(raw_actions: &[f32; ACTION_SIZE]) -> f32 {
 /// (un-clamped) telescopes exactly to `P·(d_start − d_end)` over an episode.
 ///
 /// 24 is chosen so:
-/// * a full traversal of the curriculum band (targets 1.5→9 m out) pays ≈ 36→216 — comparable
-///   to the old reach-only episode totals (~250), so the warm-started value head + return
-///   normalizer barely rescale;
-/// * one tick of honest walking (~0.5 m/s ⇒ ~0.008 m at 60 Hz) pays ≈ 0.2 — about 10× its
-///   ~0.019 effort tax — a dense local gradient to set off and keep moving;
+/// * a full traversal of the curriculum band (targets 1.5→9 m out) pays ≈ 36→216 in progress
+///   alone; added to the per-tick reach-hold integral, realistic episode totals land at
+///   ≈280–310 — near the old reach-only ~250, so the warm-started value head + return
+///   normalizer barely rescale (it is reach-hold + progress that lands there, not progress's
+///   36 near-band by itself);
+/// * one tick of honest walking (~0.5 m/s ⇒ ~0.0078 m at 64 Hz, `physics::PHYSICS_DT`) pays
+///   ≈ 0.19 — ~20× its ~0.009 gait-drive effort tax — a dense local gradient to set off and
+///   keep moving;
 /// * it is the SAME per-tick signal strength the velocity-form first cut intended
 ///   (`P_vel·v = 0.4·0.5 = 0.2`), re-expressed as the exactly-telescoping potential rather
 ///   than a clipped per-tick velocity (which reopened an oscillation exploit — see the module
@@ -74,7 +101,7 @@ pub(crate) fn action_effort(raw_actions: &[f32; ACTION_SIZE]) -> f32 {
 const PROGRESS_WEIGHT: f32 = 24.0;
 
 /// Glitch guard on the per-tick progress: a transition whose carapace planar distance changed
-/// by MORE than this (metres in one ~1/60 s tick ⇒ > ~30 m/s of origin translation) is treated
+/// by MORE than this (metres in one 1/64 s tick ⇒ > ~32 m/s of origin translation) is treated
 /// as NON-PHYSICAL and earns ZERO progress, not `P·Δd`. No crab covers half a metre of ground
 /// in a tick — the observed carapace speed peaks at ~3 m/s (≈0.05 m/tick), so this sits ~10×
 /// above any real motion and NEVER fires on a physical trajectory. It exists only to stop a
@@ -130,7 +157,7 @@ fn progress_reward(distance_closed: Option<f32>) -> f32 {
     }
 }
 
-/// The reward: `P·(d_prev − d_now) + W·(1 − tanh(d/S)) − EFFORT_WEIGHT·Σ|aᵢ|^L` — the
+/// The reward: `P·(d_prev − d_now) + W·(1 − tanh(d/S)) − EFFORT_WEIGHT·Σ|dᵢ|^L` — the
 /// world-frame progress pull ([`progress_reward`]) plus the near-field reach grab bonus
 /// ([`reach_bonus`]) minus the cost of the commands that earn them ([`action_effort`]).
 ///
@@ -169,6 +196,15 @@ pub(crate) fn dist_3d(a: Vec3, b: Vec3) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::PHYSICS_DT;
+    use crate::training::systems::MAX_EPISODE_TICKS;
+
+    /// Ground a crab closes in one physics tick at speed `v` (m/s). The reward calibration is
+    /// DERIVED from `physics::PHYSICS_DT` (64 Hz), so a tick-rate change can never silently
+    /// desync the numbers from the sim the way the old hard-coded `/60.0` did.
+    fn per_tick_closed(v: f32) -> f32 {
+        v * PHYSICS_DT
+    }
 
     #[test]
     fn progress_closing_raises_receding_lowers() {
@@ -248,8 +284,8 @@ mod tests {
         // The division of labour: while crossing the arena the progress a stride earns
         // dominates the (near-field) reach bonus at that distance, so leaning-from-afar stops
         // paying; in the final approach the reach grab bonus carries as progress tapers off.
-        // FAR: a single honest stride (~0.5 m/s ⇒ ~0.008 m closed/tick) vs reach at 6 m.
-        let stride = progress_reward(Some(0.5 / 60.0));
+        // FAR: a single honest stride (~0.5 m/s ⇒ ~0.0078 m closed/tick at 64 Hz) vs reach at 6 m.
+        let stride = progress_reward(Some(per_tick_closed(0.5)));
         assert!(
             stride > reach_bonus(Some(6.0)),
             "far from the goal, a stride's per-tick progress must exceed the reach bonus there: \
@@ -327,7 +363,7 @@ mod tests {
 
     #[test]
     fn reward_is_progress_plus_reach_minus_effort() {
-        // Reward is EXACTLY `progress + reach − K·Σ|a|^L` — three terms, no height, no
+        // Reward is EXACTLY `progress + reach − K·Σ|d|^L` — three terms, no height, no
         // uprightness, no hidden term. With no progress, no target and no command it is
         // exactly zero.
         assert!(
@@ -345,16 +381,16 @@ mod tests {
     }
 
     #[test]
-    fn higher_effort_lowers_the_reward() {
-        // The tax is strictly increasing in command size, so a harder command always
+    fn higher_drive_lowers_the_reward() {
+        // The tax is strictly increasing in DRIVE magnitude, so a harder drive always
         // scores below a gentler one — the lever that makes the crab economical: it spends
-        // actuation only where progress (or reach) pays for it.
+        // neural activation only where progress (or reach) pays for it.
         let still = compute_reward(None, None, action_effort(&[0.0; ACTION_SIZE]));
         let gentle = compute_reward(None, None, action_effort(&[0.3; ACTION_SIZE]));
         let hard = compute_reward(None, None, action_effort(&[0.9; ACTION_SIZE]));
         assert!(
             still > gentle && gentle > hard,
-            "reward must fall as commanded effort rises: still {still} > gentle {gentle} > hard {hard}"
+            "reward must fall as drive magnitude rises: still {still} > gentle {gentle} > hard {hard}"
         );
         assert!(
             still.abs() < 1e-6,
@@ -363,41 +399,93 @@ mod tests {
     }
 
     #[test]
+    fn saturating_drive_costs_more_than_a_gentle_drive_at_the_same_command() {
+        // THE property the OLD code failed and the whole fix turns on: two drives that produce
+        // the IDENTICAL ±1-clamped command the sim runs, but at different pre-clamp magnitudes,
+        // must NOT cost the same. The tax is over the unbounded DRIVE, so a policy that samples
+        // |d|≫1 to pin a joint on its rail pays strictly more than one that reaches the same
+        // rail gently — a live gradient OFF saturation. (Old: tax over the clamped action ⇒
+        // both |a|=1 ⇒ identical cost ⇒ zero anti-saturation gradient.)
+        let gentle_drive = [1.0_f32; ACTION_SIZE]; // sits exactly on the rail
+        let saturating_drive = [5.0_f32; ACTION_SIZE]; // slams far past it
+        // Both clamp to the SAME command — the sim cannot tell them apart.
+        let gentle_cmd: Vec<f32> = gentle_drive.iter().map(|d| d.clamp(-1.0, 1.0)).collect();
+        let sat_cmd: Vec<f32> = saturating_drive.iter().map(|d| d.clamp(-1.0, 1.0)).collect();
+        assert_eq!(gentle_cmd, sat_cmd, "both drives produce the identical clamped command");
+        // …yet the reward must charge the saturating drive strictly more.
+        let r_gentle = compute_reward(Some(0.01), None, action_effort(&gentle_drive));
+        let r_sat = compute_reward(Some(0.01), None, action_effort(&saturating_drive));
+        assert!(
+            r_sat < r_gentle,
+            "a saturating drive must cost STRICTLY MORE than a gentle one at the same command: \
+             sat {r_sat} vs gentle {r_gentle}"
+        );
+    }
+
+    #[test]
     fn effort_cost_calibration() {
-        // The tradeoff that matters now is PROGRESS vs the cost of the stride that earns it
-        // (the tax is over the RAW pre-clamp outputs — see `action_effort`):
+        // The tradeoff that matters is PROGRESS vs the cost of the DRIVE that earns it (the tax
+        // is over the pre-clamp drives — see `action_effort`), all per-tick figures DERIVED
+        // from `physics::PHYSICS_DT` (64 Hz):
         // 1. A still policy with no progress/target pays no tax and earns nothing — zero.
         let still = compute_reward(None, None, action_effort(&[0.0; ACTION_SIZE]));
         assert!(
             still.abs() < 1e-6,
             "a still policy with no progress/target is zero: {still}"
         );
-        // 2. A real STRIDE — closing ~0.5 m/s of ground (≈0.008 m/tick at 60 Hz) with an
-        //    in-range gait command (|a| < 1) — must net POSITIVE, valuing ONLY the progress
-        //    (no reach credit). At weight 0.005 a |a|=0.6 command across 30 joints costs
-        //    0.005·30·0.6³ ≈ 0.032, well under the stride's PROGRESS_WEIGHT·0.5/60 ≈ 0.2.
-        let stride = compute_reward(Some(0.5 / 60.0), None, action_effort(&[0.6; ACTION_SIZE]));
+        // 2. A real STRIDE — closing ~0.5 m/s of ground (≈0.0078 m/tick at 64 Hz) with an
+        //    in-range gait drive (|d| < 1) — must net POSITIVE, valuing ONLY the progress (no
+        //    reach credit). At weight 0.0006 a |d|=0.7 drive across 30 joints costs
+        //    0.0006·30·0.49 ≈ 0.009, well under the stride's 24·0.0078 ≈ 0.19.
+        let stride = compute_reward(Some(per_tick_closed(0.5)), None, action_effort(&[0.7; ACTION_SIZE]));
         assert!(
             stride > 0.0,
             "a real stride must net positive after the tax, on progress alone: {stride}"
         );
-        // 3. The break-even command size: the per-tick stride progress (≈0.2) equals the tax
-        //    at |a| ≈ 1.1/joint, so a gait command is well inside the net-positive region.
-        let stride_progress = progress_reward(Some(0.5 / 60.0));
-        let breakeven = EFFORT_WEIGHT * action_effort(&[1.1; ACTION_SIZE]);
+        // 3. The break-even DRIVE size: the per-tick stride progress (≈0.19) equals the tax at
+        //    |d| ≈ 3.2/joint — far above any gait, so a gait drive is deep in the net-positive
+        //    region while saturation is firmly net-negative.
+        let stride_progress = progress_reward(Some(per_tick_closed(0.5)));
+        let breakeven = EFFORT_WEIGHT * action_effort(&[3.2; ACTION_SIZE]);
         assert!(
-            (breakeven - stride_progress).abs() < 0.02,
+            (breakeven - stride_progress).abs() < 0.03,
             "effort break-even must sit at the per-tick stride progress: tax {breakeven} vs progress {stride_progress}"
         );
-        // 4. A saturation-seeking command (raw outputs far past the ±1 clamp) is taxed BELOW
-        //    a real stride even while closing ground — `|a|^L` keeps climbing past the clamp,
-        //    so the gradient pushes the policy out of saturation. At |a|=3 the cost
-        //    (0.005·30·27 ≈ 4.05) swamps the ≈0.2 stride progress, driving reward negative.
+        // 4. A saturation-seeking drive (far past the ±1 clamp) is taxed BELOW a real stride
+        //    even while closing ground — `|d|²` keeps climbing past the clamp, so the gradient
+        //    pushes the policy out of saturation. At |d|=3 the cost (0.0006·30·9 ≈ 0.16)
+        //    swamps the ≈0.19 stride progress's margin, driving reward toward/below zero.
         let oversaturated =
-            compute_reward(Some(0.5 / 60.0), None, action_effort(&[3.0; ACTION_SIZE]));
+            compute_reward(Some(per_tick_closed(0.5)), None, action_effort(&[3.0; ACTION_SIZE]));
         assert!(
             oversaturated < stride,
             "saturation-seeking must be taxed below a real stride: {oversaturated} vs {stride}"
+        );
+    }
+
+    #[test]
+    fn progress_episode_dominates_freezing() {
+        // Defect (B) — the episode-scale mismatch — must be closed: a full band traverse must
+        // CLEARLY out-earn standing still over a whole MAX_EPISODE_TICKS episode, and the
+        // integrated effort tax must stay a LIGHT regularizer, never the dominant term.
+        let ticks = MAX_EPISODE_TICKS as f32;
+        // WALK: closes ~3 m over the episode (telescoped progress = P·Δd, path-independent),
+        // paying a gait-drive tax (|d|≈0.7) every tick.
+        let traverse_m = 3.0_f32;
+        let walk_progress = PROGRESS_WEIGHT * traverse_m;
+        let walk_tax = ticks * EFFORT_WEIGHT * action_effort(&[0.7; ACTION_SIZE]);
+        let walk_total = walk_progress - walk_tax;
+        // FREEZE: closes ~0 m, paying only the near-still drive tax (μ→0, σ≈0.2 ⇒ |d|≈0.1).
+        let freeze_total = -(ticks * EFFORT_WEIGHT * action_effort(&[0.1; ACTION_SIZE]));
+        assert!(walk_total > 0.0, "a full traverse must net positive over an episode: {walk_total}");
+        assert!(
+            walk_total > freeze_total + 30.0,
+            "progress must EPISODE-DOMINATE: a traverse {walk_total} ≫ freezing {freeze_total}"
+        );
+        assert!(
+            walk_progress > 4.0 * walk_tax,
+            "progress {walk_progress} must dominate the integrated effort {walk_tax} (a light \
+             regularizer, not the main term)"
         );
     }
 }

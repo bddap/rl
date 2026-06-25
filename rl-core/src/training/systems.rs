@@ -47,6 +47,14 @@ use super::reward::{
 /// per iteration before handing its buffers back, when `--horizon` is not given.
 pub const STEPS_PER_ROLLOUT: u32 = 1024;
 
+/// Episode length cap: a crab still alive after this many physics ticks is TRUNCATED (not
+/// failed — GAE bootstraps its value; see `StepEnd::Truncated`). At 64 Hz this is ~23 s of
+/// crab-time. The reward calibration is balanced over exactly this horizon (a full traverse's
+/// progress must out-earn the integrated effort tax across these ticks — see
+/// `reward::EFFORT_WEIGHT`), so it is named once here and shared, never duplicated as a magic
+/// `1500`.
+pub(crate) const MAX_EPISODE_TICKS: u32 = 1500;
+
 /// Where an env sits in the record → reset → settle lifecycle. One field, not a
 /// `needs_reset: bool` + `grace: u32` pair, so an illegal combination (a respawn pending
 /// *while* already settling) is unrepresentable.
@@ -80,12 +88,14 @@ pub(crate) enum EnvPhase {
 #[derive(Clone)]
 struct Pending {
     obs: [f32; OBS_SIZE],
+    /// The policy's unbounded DRIVE `μ + σ·ε` this tick — the RL action proper the PPO update
+    /// recomputes its log-prob over (the sim ran `drive.clamp(±1)`). See [`SampledAction`].
     action: [f32; ACTION_SIZE],
     value: NormalizedValue,
     log_prob: f32,
-    /// `Σ|aᵢ|^L` for this action — the effort summand over the RAW pre-clamp outputs
-    /// (see [`action_effort`]), final at tick `t` and traveling with the action it
-    /// priced. [`compute_reward`] scales it by [`EFFORT_WEIGHT`] at finalization.
+    /// `Σ|dᵢ|^L` for this drive — the effort summand over the unbounded DRIVES (see
+    /// [`action_effort`]), final at tick `t` and traveling with the drive it priced.
+    /// [`compute_reward`] scales it by [`EFFORT_WEIGHT`] at finalization.
     effort: f32,
     /// Carapace planar distance to the target at `s_t` (the pose this action was chosen from).
     /// The progress reward is the REDUCTION in this distance to `s_{t+1}`, computed at
@@ -202,13 +212,15 @@ struct StepInputs<'a> {
     min_tip_dists: &'a [Option<f32>],
     /// Normalized observation fed to the policy this tick (stashed in the pending).
     obs: &'a [[f32; OBS_SIZE]],
-    /// The ±1-clamped command the sim ran this tick.
-    actions: &'a [[f32; ACTION_SIZE]],
+    /// The policy's unbounded DRIVE this tick — the RL action proper, carried into the
+    /// transition so the PPO log-prob recomputes over the same quantity it was sampled on
+    /// (the sim ran `drive.clamp(±1)`; that command is not stored — nothing reads it back).
+    drives: &'a [[f32; ACTION_SIZE]],
     /// Value-head output for this tick's observation.
     values: &'a [NormalizedValue],
-    /// Sampling log-prob of this tick's action.
+    /// Sampling log-prob of this tick's drive.
     log_probs: &'a [f32],
-    /// `Σ|aᵢ|^L` effort summand over the RAW pre-clamp outputs (the tax input).
+    /// `Σ|dᵢ|^L` effort summand over the unbounded DRIVES (the metabolic tax input).
     efforts: &'a [f32],
     /// Envs force-respawned this tick by the non-finite rescue (their pose is the fresh
     /// spawn, not the action's result — so the action ends the episode with no reach credit).
@@ -587,7 +599,7 @@ impl TrainingState {
                     // spawn, so neither this tick's claw-tip distance nor the carapace's
                     // change in distance-to-target is the action's doing (crediting the
                     // spawn jump would be a huge spurious progress delta). The effort tax
-                    // still applies — it priced the COMMAND, not its result.
+                    // still applies — it priced the DRIVE, not its result.
                     let reward = compute_reward(None, None, pending.effort);
                     self.rollouts[e].push(Transition {
                         obs: pending.obs,
@@ -630,7 +642,7 @@ impl TrainingState {
                     // The step cap is a TRUNCATION, not a failure: a crab still standing
                     // at the cap was cut short, so GAE must bootstrap its value rather
                     // than learn the cap is a dead end (see StepEnd::Truncated).
-                    let truncated = !done && self.envs[e].steps > 1500;
+                    let truncated = !done && self.envs[e].steps > MAX_EPISODE_TICKS;
 
                     let end = if done {
                         StepEnd::Terminal
@@ -670,7 +682,7 @@ impl TrainingState {
                 let target_dist = carapace_target_dist(body, targets, e);
                 self.envs[e].pending = Some(Pending {
                     obs: inputs.obs[e],
-                    action: inputs.actions[e],
+                    action: inputs.drives[e],
                     value: inputs.values[e],
                     log_prob: inputs.log_probs[e],
                     effort: inputs.efforts[e],
@@ -737,12 +749,12 @@ impl TrainingState {
     }
 }
 
-/// Effort/tax/reach probe (RL_LOG_EFFORT only — inert otherwise): per tick, the mean raw-action
-/// effort `Σ|a|³`, the resulting tax `EFFORT_WEIGHT·effort`, and the reach term, over the live
+/// Effort/tax/reach probe (RL_LOG_EFFORT only — inert otherwise): per tick, the mean drive
+/// effort `Σ|d|²`, the resulting tax `EFFORT_WEIGHT·effort`, and the reach term, over the live
 /// RECORDING envs. Lets a calibration run read how big a bite the tax takes out of the
-/// (reach-only) positive reward at the current weight, without parsing rollouts.
+/// positive reward at the current weight, without parsing rollouts.
 ///
-/// Calibration diagnostic, ONE tick skewed: mean_tax is tick-`t`'s command while mean_reach is
+/// Calibration diagnostic, ONE tick skewed: mean_tax is tick-`t`'s drive while mean_reach is
 /// tick-`t`'s pose (the result of the LAST action), so read the ratio as a magnitude check, not
 /// as exactly-aligned same-action terms.
 fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32], min_tip_dists: &[Option<f32>]) {
@@ -770,14 +782,15 @@ fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32], min_tip_dists: &[Optio
     }
 }
 
-/// One env's sampled action for this tick: the ±1-clamped command the sim runs, the RAW
-/// pre-clamp output the effort tax is taken over (see [`action_effort`]), and the sampling
-/// log-prob (NaN/Inf-guarded and clamped). One row of [`sample_actions`].
+/// One env's sample for this tick: the policy's unbounded neural DRIVE `μ + σ·ε` (see
+/// [`sample_action`]) and its sampling log-prob. The drive is the RL action proper — the PPO
+/// log-prob and the metabolic tax are both over it. The ±1 torque bound the sim runs is the
+/// actuator's job, not stored here (`apply_actions` clamps every command), so the unbounded
+/// drive is the single quantity and a saturating `|d|≫1` overshoot stays visible to the tax.
+/// One row of [`sample_actions`].
 struct SampledAction {
-    /// Command sent to the sim — each output clamped to ±1.
-    action: [f32; ACTION_SIZE],
-    /// Pre-clamp output, kept only for the effort tax over the unbounded value.
-    raw_action: [f32; ACTION_SIZE],
+    drive: [f32; ACTION_SIZE],
+    /// Sampling log-prob of `drive` under the policy (NaN/Inf-guarded and clamped).
     log_prob: f32,
 }
 
@@ -867,11 +880,12 @@ fn forward_pass(
     (means_rows, log_std, values)
 }
 
-/// Sample one action per env from its policy mean and the shared `log_std`, drawing the
+/// Sample one DRIVE per env from its policy mean and the shared `log_std`, drawing the
 /// Gaussian noise from the run's seeded `rng` (so the trajectory is reproducible), with the
 /// NaN/Inf guards the live solver needs: a non-finite log-prob becomes 0 (else clamped to ±20),
-/// and any non-finite output element zeroes that element (warning once for the row). The kept
-/// RAW output feeds the effort tax; the ±1 clamp is what the sim runs.
+/// and any non-finite drive element zeroes that element (warning once for the row). The
+/// log-prob and the effort tax are both over the unbounded `drive`; the ±1 torque bound is the
+/// actuator's clamp, not applied here, so the drive stays a single un-truncated quantity.
 fn sample_actions(
     means_rows: &[Tensor<NdArray, 1>],
     log_std: &Tensor<NdArray, 1>,
@@ -881,36 +895,32 @@ fn sample_actions(
     means_rows
         .iter()
         .map(|means| {
-            let action_tensor = sample_action(means, log_std, device, rng);
-            let log_prob = compute_log_prob(means, log_std, &action_tensor);
+            let drive_tensor = sample_action(means, log_std, device, rng);
+            // Log-prob of the ACTUAL sample (the unbounded drive): it must be the quantity the
+            // PPO update later recomputes its ratio over, and the drive — not a clamp of it —
+            // is what the Gaussian drew.
+            let log_prob = compute_log_prob(means, log_std, &drive_tensor);
             let log_prob = if log_prob.is_nan() || log_prob.is_infinite() {
                 0.0
             } else {
                 log_prob.clamp(-20.0, 20.0)
             };
 
-            let action_data: Vec<f32> = action_tensor.to_data().to_vec().unwrap();
-            let mut action = [0.0f32; ACTION_SIZE];
-            let mut raw_action = [0.0f32; ACTION_SIZE];
+            let drive_data: Vec<f32> = drive_tensor.to_data().to_vec().unwrap();
+            let mut drive = [0.0f32; ACTION_SIZE];
             let mut has_nan = false;
-            for (i, &v) in action_data.iter().enumerate().take(ACTION_SIZE) {
+            for (i, &v) in drive_data.iter().enumerate().take(ACTION_SIZE) {
                 if v.is_nan() || v.is_infinite() {
                     has_nan = true;
-                    action[i] = 0.0;
-                    raw_action[i] = 0.0;
+                    drive[i] = 0.0;
                 } else {
-                    raw_action[i] = v;
-                    action[i] = v.clamp(-1.0, 1.0);
+                    drive[i] = v;
                 }
             }
             if has_nan {
-                warn!("NaN/Inf detected in NN output, clamping to zero");
+                warn!("NaN/Inf detected in NN drive, zeroing the offending joints");
             }
-            SampledAction {
-                action,
-                raw_action,
-                log_prob,
-            }
+            SampledAction { drive, log_prob }
         })
         .collect()
 }
@@ -1038,16 +1048,15 @@ pub(crate) fn brain_step(
     let (means_rows, log_std, values) = forward_pass(&training, &obs_arrays);
     let sampled = sample_actions(&means_rows, &log_std, &device, &mut training.rng);
 
-    let action_arrays: Vec<[f32; ACTION_SIZE]> = sampled.iter().map(|s| s.action).collect();
+    let drive_arrays: Vec<[f32; ACTION_SIZE]> = sampled.iter().map(|s| s.drive).collect();
     let log_probs: Vec<f32> = sampled.iter().map(|s| s.log_prob).collect();
-    // Effort tax (the reward's tax summand) is taken over the RAW pre-clamp outputs, per
-    // env (see `action_effort`).
-    let efforts: Vec<f32> = sampled
-        .iter()
-        .map(|s| action_effort(&s.raw_action))
-        .collect();
+    // Metabolic effort tax is taken over the unbounded DRIVE, per env (see `action_effort`) —
+    // so a saturating `|d|≫1` drive pays for the overshoot the ±1 torque bound would hide.
+    let efforts: Vec<f32> = sampled.iter().map(|s| action_effort(&s.drive)).collect();
 
-    actions.envs.copy_from_slice(&action_arrays);
+    // The sim runs the drive through the actuator's ±1 clamp (`apply_actions`, the single
+    // torque-bound source), so the unbounded drive is written here as-is — no second clamp.
+    actions.envs.copy_from_slice(&drive_arrays);
     // Settling envs hold the rest pose (action 0); the policy takes over at
     // step 0 of the new episode.
     for (e, ep) in training.envs.iter().enumerate() {
@@ -1097,7 +1106,7 @@ pub(crate) fn brain_step(
         body: &body,
         min_tip_dists: &min_tip_dists,
         obs: &obs_arrays,
-        actions: &action_arrays,
+        drives: &drive_arrays,
         values: &values,
         log_probs: &log_probs,
         efforts: &efforts,
