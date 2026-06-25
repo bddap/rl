@@ -40,7 +40,9 @@ use super::metrics::MetricsLogger;
 use super::normalizer::{
     IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
 };
-use super::reward::{EFFORT_WEIGHT, action_effort, compute_reward, dist_3d, planar_dist, reach_bonus};
+use super::reward::{
+    EFFORT_WEIGHT, action_effort, compute_reward, dist_3d, planar_dist, reach_bonus,
+};
 
 /// Default rollout horizon: the number of physics ticks each rollout thread rolls
 /// per iteration before handing its buffers back, when `--horizon` is not given.
@@ -86,6 +88,11 @@ struct Pending {
     /// (see [`action_effort`]), final at tick `t` and traveling with the action it
     /// priced. [`compute_reward`] scales it by [`EFFORT_WEIGHT`] at finalization.
     effort: f32,
+    /// Carapace planar distance to the target at `s_t` (the pose this action was chosen from).
+    /// The progress reward is the REDUCTION in this distance to `s_{t+1}`, computed at
+    /// finalization (`P·(target_dist − d_now)`). `None` if the carapace pose or target was
+    /// absent at stash time, in which case the transition earns no progress credit.
+    target_dist: Option<f32>,
 }
 
 /// Per-env episode accumulators. Each env's episode runs and resets
@@ -591,10 +598,12 @@ impl TrainingState {
                     // respawned this tick (rescue runs .before(Sense)), so the pose
                     // read above is the FRESH spawn, not what the action produced.
                     // Finalize the action as the episode's terminal step with NO reach
-                    // credit (`None`): the body teleported to spawn, so this tick's
-                    // claw-tip distance isn't the action's doing. The effort tax still
-                    // applies — it priced the COMMAND, not its result.
-                    let reward = compute_reward(None, pending.effort);
+                    // credit AND no progress credit (both `None`): the body teleported to
+                    // spawn, so neither this tick's claw-tip distance nor the carapace's
+                    // change in distance-to-target is the action's doing (crediting the
+                    // spawn jump would be a huge spurious progress delta). The effort tax
+                    // still applies — it priced the COMMAND, not its result.
+                    let reward = compute_reward(None, None, pending.effort);
                     self.rollouts[e].push(Transition {
                         obs: pending.obs,
                         action: pending.action,
@@ -614,7 +623,18 @@ impl TrainingState {
                     // `height`/`upright` feed no reward (see `compute_reward`) — only the
                     // off-reward machinery: `height` the blow-up/fell-through guard below and
                     // the `mean_height` diagnostic, `upright` the stance diagnostics.
-                    let reward = compute_reward(min_tip_dists[e], pending.effort);
+                    //
+                    // World-frame progress toward the (fixed, per-episode) target: the metres
+                    // the carapace's planar distance to the goal SHRANK from `s_t` (the pose
+                    // the action was chosen at, `pending.target_dist`) to this tick's `s_{t+1}`.
+                    // `None` if either distance is missing (carapace or target absent) — the
+                    // reward then degrades to reach + tax, never a spurious progress credit.
+                    let d_now = carapace_target_dist(body, targets, e);
+                    let distance_closed = pending
+                        .target_dist
+                        .zip(d_now)
+                        .map(|(prev, now)| prev - now);
+                    let reward = compute_reward(distance_closed, min_tip_dists[e], pending.effort);
                     // The blowup check only catches a genuine numerical explosion before the
                     // solver NaNs and Rapier panics the whole app; the threshold is high
                     // because direct torque is bounded (no acceleration-motor energy pump), so
@@ -664,12 +684,16 @@ impl TrainingState {
             // still recording (a just-ended env is resetting below, and a rescued env
             // is being respawned). Settling/absent envs already `continue`d above.
             if !episode_ended && matches!(self.envs[e].phase, EnvPhase::Recording) {
+                // Carapace→target distance at THIS pose (`s_t` for the action chosen now); next
+                // tick's finalize credits the reduction to `s_{t+1}` as the progress reward.
+                let target_dist = carapace_target_dist(body, targets, e);
                 self.envs[e].pending = Some(Pending {
                     obs: inputs.obs[e],
                     action: inputs.actions[e],
                     value: inputs.values[e],
                     log_prob: inputs.log_probs[e],
                     effort: inputs.efforts[e],
+                    target_dist,
                 });
             }
 
@@ -817,13 +841,19 @@ struct SampledAction {
     log_prob: f32,
 }
 
-/// Per-env body state read off this tick's post-physics poses (the live `s_{t+1}`). Every
-/// field is off-reward: poses/speeds feed the survival guards and stance diagnostics, drift
-/// the walking diagnostic — none enters [`compute_reward`]. `None` for an env whose crab is
-/// momentarily absent (mid-respawn).
+/// Per-env body state read off this tick's post-physics poses (the live `s_{t+1}`). Most
+/// fields are off-reward (poses/speeds feed the survival guards and stance diagnostics, drift
+/// the walking diagnostic) — the ONE that enters [`compute_reward`] is `carapace_pos`, from
+/// which the call site derives the carapace→target distance whose per-tick REDUCTION is the
+/// progress reward. `None` for an env whose crab is momentarily absent (mid-respawn).
 struct BodyState {
     /// `(carapace height, up·Y uprightness)`, the survival-guard + stance inputs.
     poses: Vec<Option<(f32, f32)>>,
+    /// Carapace world position — the progress-reward input: the call site computes its planar
+    /// distance to the target and credits the per-tick reduction (the body's net ground
+    /// covered). Measuring the ORIGIN's distance (not COM velocity) is what makes the progress
+    /// term spin/limb-fling-proof (see [`super::reward`] module header).
+    carapace_pos: Vec<Option<Vec3>>,
     /// Carapace planar (XZ) distance from spawn — the walking diagnostic.
     drifts: Vec<Option<f32>>,
     /// Fastest body part (limbs blow up first), linear-scaled — the blow-up guard input.
@@ -958,11 +988,18 @@ fn gather_body_state(
     parts_q: &Query<(&CrabEnvId, &bevy_rapier3d::prelude::Velocity), With<CrabBodyPart>>,
 ) -> BodyState {
     let mut poses: Vec<Option<(f32, f32)>> = vec![None; n];
+    let mut carapace_pos: Vec<Option<Vec3>> = vec![None; n];
     let mut drifts: Vec<Option<f32>> = vec![None; n];
     for (env, transform) in carapace_q.iter() {
         if let Some(p) = poses.get_mut(env.0) {
             let up = transform.rotation * Vec3::Y;
             *p = Some((transform.translation.y, up.dot(Vec3::Y)));
+        }
+        // World position for the progress reward — the call site computes its planar distance
+        // to the target and credits the per-tick reduction. Rapier writes the multibody root's
+        // world pose into this `Transform` each tick (the live `s_{t+1}`).
+        if let Some(c) = carapace_pos.get_mut(env.0) {
+            *c = Some(transform.translation);
         }
         if let Some(d) = drifts.get_mut(env.0) {
             let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
@@ -994,10 +1031,20 @@ fn gather_body_state(
     }
     BodyState {
         poses,
+        carapace_pos,
         drifts,
         max_speeds,
         sq_angvels,
     }
+}
+
+/// Env `e`'s carapace planar distance to its target this tick — the quantity whose per-tick
+/// REDUCTION is the progress reward (see [`super::reward`]). `None` if the carapace pose or the
+/// target is absent (mid-respawn / unseeded), so the transition earns no spurious progress.
+fn carapace_target_dist(body: &BodyState, targets: &CrabTargets, e: usize) -> Option<f32> {
+    body.carapace_pos[e]
+        .zip(targets.get(e))
+        .map(|(pos, target)| planar_dist(pos, target))
 }
 
 /// Closest claw-tip→target 3D distance per env this tick (the reach reward's `d`, see
