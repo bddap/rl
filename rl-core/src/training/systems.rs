@@ -40,7 +40,9 @@ use super::checkpoint::{
 };
 use super::curriculum::{CURRICULUM_REACH_RADIUS, Curriculum, seed_target};
 use super::metrics::MetricsLogger;
-use super::normalizer::{NORMALIZER_CLIP, ObsNormalizer, ObsNormalizerData};
+use super::normalizer::{
+    IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
+};
 use super::reward::{EFFORT_WEIGHT, action_effort, compute_reward, dist_3d, planar_dist, reach_bonus};
 
 /// Default rollout horizon: the number of physics ticks each rollout thread rolls
@@ -168,7 +170,7 @@ pub(crate) struct TrainingState {
     /// increment the master hasn't already counted (the snapshot baseline lives in
     /// `obs_normalizer`, never re-merged). `None` on the learner's host, which never
     /// rolls and so ships nothing.
-    normalizer_increment: Option<ObsNormalizer>,
+    normalizer_increment: Option<IncrementAccumulator>,
 
     /// Running sum and count of the carapace planar (XZ) drift-from-spawn over
     /// recording envs, this horizon — the walking diagnostic shipped to the learner
@@ -308,9 +310,9 @@ impl TrainingState {
         }
 
         let n = config.envs.max(1) as usize;
-        // A rollout thread accumulates a per-horizon increment over the same clip;
-        // the learner's host steps no world and ships no normalizer, so it stays None.
-        let normalizer_increment = worker_mode.then(|| ObsNormalizer::new(obs_normalizer.clip()));
+        // A rollout thread accumulates a per-horizon increment; the learner's host
+        // steps no world and ships no normalizer, so it stays None.
+        let normalizer_increment = worker_mode.then(IncrementAccumulator::new);
         Self {
             brain,
             config: PpoConfig::default(),
@@ -400,30 +402,33 @@ impl TrainingState {
     /// Overwrite this state's normalizer from the learner's master snapshot. The
     /// per-horizon increment is reset separately in `reset_horizon_counter`, so the
     /// increment always starts fresh each horizon regardless of this call.
-    pub(crate) fn set_normalizer(&mut self, data: ObsNormalizerData) {
-        self.obs_normalizer.load_snapshot(data);
+    pub(crate) fn set_normalizer(&mut self, snapshot: NormalizerSnapshot) {
+        self.obs_normalizer.load_snapshot(snapshot);
     }
 
     /// Snapshot the master normalizer's full stats (learner → rollout threads), so
     /// each thread's policy normalizes observations against the same baseline the
-    /// learner holds.
-    pub(crate) fn normalizer_snapshot(&self) -> ObsNormalizerData {
+    /// learner holds. A cumulative snapshot — by type, not mergeable.
+    pub(crate) fn normalizer_snapshot(&self) -> NormalizerSnapshot {
         self.obs_normalizer.snapshot()
     }
 
-    /// Snapshot the per-horizon normalizer INCREMENT to ship back (rollout thread →
-    /// learner; see [`ObsNormalizer::merge`]). Empty (count 0) outside worker mode.
-    pub(crate) fn normalizer_increment_snapshot(&self) -> ObsNormalizerData {
-        match self.normalizer_increment.as_ref() {
-            Some(inc) => inc.snapshot(),
-            None => self.obs_normalizer.snapshot(),
-        }
+    /// The per-horizon normalizer INCREMENT to ship back (rollout thread → learner; see
+    /// [`ObsNormalizer::merge`]). Panics if called off a worker: only a worker rolls and
+    /// accumulates an increment, and there is deliberately no full-snapshot fallback —
+    /// shipping the cumulative snapshot here would double-count the baseline on merge.
+    pub(crate) fn normalizer_increment(&self) -> NormalizerIncrement {
+        self.normalizer_increment
+            .as_ref()
+            .expect("normalizer increment requested on a non-worker TrainingState")
+            .increment()
     }
 
-    /// Merge a rollout thread's per-horizon normalizer increment into this (learner's)
-    /// normalizer (see [`ObsNormalizer::merge`] for why an increment, not a snapshot).
-    pub(crate) fn merge_normalizer(&mut self, data: &ObsNormalizerData) {
-        self.obs_normalizer.merge(data);
+    /// Merge a rollout thread's per-horizon increment into this (learner's) normalizer.
+    /// Only a [`NormalizerIncrement`] is accepted — a cumulative snapshot can't reach
+    /// here (see [`ObsNormalizer::merge`]).
+    pub(crate) fn merge_normalizer(&mut self, increment: &NormalizerIncrement) {
+        self.obs_normalizer.merge(increment);
     }
 
     /// Move the collected transitions out, leaving the buffers empty for the next
@@ -442,7 +447,7 @@ impl TrainingState {
     /// monotonic — it is the thread's tick odometer the learner diffs for horizon length.
     pub fn reset_horizon_counter(&mut self) {
         if let Some(inc) = self.normalizer_increment.as_mut() {
-            *inc = ObsNormalizer::new(self.obs_normalizer.clip());
+            *inc = IncrementAccumulator::new();
         }
     }
 
