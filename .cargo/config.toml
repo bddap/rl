@@ -1,0 +1,6 @@
+# Use mold as the linker for the host x86_64-gnu target. mold links the big Bevy
+# binaries (rl-demo/game) far faster than the default bfd, cutting the relink tail
+# that dominates incremental rebuilds. gcc (the default `cc`) drives mold via
+# -fuse-ld=mold; mold is already provided by shell.nix's buildInputs.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
