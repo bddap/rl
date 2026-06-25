@@ -75,7 +75,7 @@ use super::algorithm::{RolloutBuffer, Transition};
 use super::TrainBackend;
 use super::checkpoint::CURRICULUM_FILENAME;
 use super::curriculum::{Curriculum, CurriculumProgress, load_curriculum, save_curriculum};
-use super::normalizer::ObsNormalizerData;
+use super::normalizer::{NormalizerIncrement, NormalizerSnapshot};
 use super::systems::TrainingState;
 // Gated to the call sites, both in the wgpu-only `run_learner`: an unconditional import
 // would be an unresolved-symbol error in the render bins (rl-demo, game), which link
@@ -255,10 +255,13 @@ fn write_tick_watermark(dir: &Path, ticks: u64) {
 
 /// What the learner hands a rollout thread for one horizon: the policy weight
 /// snapshot (bincode bytes, shared read-only) and the master normalizer stats. An
-/// `Arc` so K threads share one allocation per iteration rather than K copies.
+/// `Arc` so K threads share one allocation per iteration rather than K copies — and
+/// `Clone` is therefore cheap (bumps the Arcs, copies the tiny band), letting one
+/// captured snapshot be sent to every thread.
+#[derive(Clone)]
 struct RollRequest {
     brain_bytes: Arc<Vec<u8>>,
-    normalizer: Arc<ObsNormalizerData>,
+    normalizer: Arc<NormalizerSnapshot>,
     /// The current curriculum band the thread samples this horizon's targets from. The
     /// learner owns advancement and ships the band down each horizon; the thread never
     /// advances it. `Copy` (a tiny band), so no `Arc` is warranted.
@@ -279,7 +282,7 @@ enum RollOutcome {
         envs: Vec<Vec<Transition>>,
         /// Per-horizon normalizer INCREMENT — only the observations this horizon saw,
         /// so merging it into the master (which holds the baseline) never double-counts.
-        increment: ObsNormalizerData,
+        increment: NormalizerIncrement,
         /// Rewards of episodes that finished during this horizon.
         rewards: Vec<f32>,
         /// Carapace planar drift-from-spawn this horizon as `(sum, count)` over
@@ -434,7 +437,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
         .expect("rollout TrainingState");
     RollOutcome::Rolled {
         envs: st.take_rollouts(),
-        increment: st.normalizer_increment_snapshot(),
+        increment: st.normalizer_increment(),
         rewards: st.drain_finished_episode_rewards(),
         drift: st.drain_drift(),
         reach: st.drain_reach(),
@@ -533,6 +536,186 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
 // ---------------------------------------------------------------------------
 // Learner (main thread)
 // ---------------------------------------------------------------------------
+
+/// Everything one horizon's K rollouts contribute to the learner, reduced from the
+/// threads' [`RollOutcome`]s in one place: the per-env buffers the PPO update consumes,
+/// plus the aggregates the log and curriculum read. One struct so the reduction's
+/// accumulators don't smear across the iteration body as a dozen loose locals.
+#[cfg(feature = "wgpu")]
+struct MergedRollout {
+    rollouts: Vec<RolloutBuffer>,
+    samples: u64,
+    ticks: u64,
+    panics: u32,
+    /// Carapace planar drift-from-spawn this iter as `(sum, count)` over recording-env
+    /// ticks, pooled across threads; the log divides it for the mean.
+    drift: (f64, u64),
+    /// Per-episode reach tally `(reached, finished)` pooled across threads; feeds the
+    /// curriculum's competence window and the log's reach fraction.
+    reach: (u64, u64),
+}
+
+/// Phase 1 — capture the consistent per-iteration view every thread rolls: the policy
+/// weights, the master normalizer baseline (a snapshot, never an increment), and the
+/// curriculum band. Captured before any thread runs, so none sees a half-updated net.
+#[cfg(feature = "wgpu")]
+fn snapshot_policy(state: &TrainingState, curriculum: Curriculum) -> RollRequest {
+    RollRequest {
+        brain_bytes: Arc::new(snapshot_brain_bytes(&state.brain)),
+        normalizer: Arc::new(state.normalizer_snapshot()),
+        curriculum,
+    }
+}
+
+/// Phase 1 (durability) — persist the checkpoint so a live demo / a restart picks up
+/// the latest weights, normalizer, curriculum, and Adam moments. Not a handoff to the
+/// threads (they get the in-memory snapshot); the Adam state lives on the GPU learner,
+/// so it is saved here beside the brain to let a resume continue the optimizer warm.
+#[cfg(feature = "wgpu")]
+fn persist_checkpoint(
+    state: &TrainingState,
+    gpu_learner: &super::gpu::GpuLearner,
+    curriculum: Curriculum,
+    checkpoint_dir: &Path,
+) {
+    state.save_checkpoint();
+    save_curriculum(curriculum, &checkpoint_dir.join(CURRICULUM_FILENAME));
+    gpu_learner.save_adam_state(&checkpoint_dir.join(OPTIMIZER_FILENAME));
+}
+
+/// Phase 2 — roll one synchronous horizon across all threads: send each its request,
+/// then collect every result. This is the barrier — the update waits for the slowest.
+/// A closed channel means a thread's OS thread died building/warming a world (not a
+/// caught roll panic, which returns `Panicked`); that is unrecoverable, so abort loud
+/// and let crab-train's restart loop resume from the checkpoint.
+#[cfg(feature = "wgpu")]
+fn dispatch_horizon(threads: &[RolloutThread], request: &RollRequest) -> Vec<RollOutcome> {
+    const DIED: &str = "rollout thread died (could not rebuild its world); resume from checkpoint";
+    for t in threads {
+        t.request_tx.send(request.clone()).expect(DIED);
+    }
+    threads
+        .iter()
+        .map(|t| t.result_rx.recv().expect(DIED))
+        .collect()
+}
+
+/// Phase 3 — reduce the threads' outcomes into the learner's master state and one
+/// [`MergedRollout`]: fold each `Rolled` thread's DISJOINT increment into the master
+/// (counting each sample once, since the master holds the baseline), record its
+/// rewards, and pool its buffers + aggregates. A `Panicked` thread contributes nothing
+/// — no merge, no buffers — so a wedged thread can't corrupt the master.
+#[cfg(feature = "wgpu")]
+fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> MergedRollout {
+    let mut merged = MergedRollout {
+        rollouts: Vec::new(),
+        samples: 0,
+        ticks: 0,
+        panics: 0,
+        drift: (0.0, 0),
+        reach: (0, 0),
+    };
+    for r in results {
+        match r {
+            RollOutcome::Rolled {
+                envs,
+                increment,
+                rewards,
+                drift,
+                reach,
+                ticks,
+            } => {
+                merged.ticks += ticks;
+                state.merge_normalizer(&increment);
+                for reward in rewards {
+                    state.record_episode_reward(reward);
+                }
+                merged.drift.0 += drift.0;
+                merged.drift.1 += drift.1;
+                merged.reach.0 += reach.0;
+                merged.reach.1 += reach.1;
+                for env in envs {
+                    merged.samples += env.len() as u64;
+                    merged.rollouts.push(RolloutBuffer { transitions: env });
+                }
+            }
+            RollOutcome::Panicked => merged.panics += 1,
+        }
+    }
+    merged
+}
+
+/// The per-iteration values the learner log line reports, gathered so the formatting
+/// lives in [`log_iteration`] rather than interleaved with the update phase.
+#[cfg(feature = "wgpu")]
+struct IterReport<'a> {
+    iter: u64,
+    samples: u64,
+    rollout_secs: f64,
+    ticks: u64,
+    update_secs: f64,
+    gpu_timing: &'a super::gpu::GpuUpdateTiming,
+    /// This iter's rollout samples/sec (instantaneous) and the steady-state rate
+    /// (excludes the warmup iters), respectively.
+    sps_iter: f64,
+    sps_rollout: f64,
+    total_samples: u64,
+    total_ticks: u64,
+    avg_reward: f32,
+    drift: (f64, u64),
+    curriculum: Curriculum,
+    reach: (u64, u64),
+    metrics: &'a super::algorithm::PpoMetrics,
+    panics: u32,
+}
+
+/// Phase 4 (reporting) — emit the one steady-state learner log line. Derives the means
+/// and notes (drift, reach fraction, GPU split, panic recoveries) from the raw counts
+/// so the iteration body carries no formatting.
+#[cfg(feature = "wgpu")]
+fn log_iteration(r: &IterReport) {
+    let drift = if r.drift.1 > 0 {
+        r.drift.0 / r.drift.1 as f64
+    } else {
+        0.0
+    };
+    let (band_min, band_max) = r.curriculum.band();
+    let (reached, finished) = r.reach;
+    // Reach fraction over finished episodes, so an advance's approach is legible (it
+    // climbs toward the threshold); `-` when no episode finished this iter.
+    let reach_note = if finished > 0 {
+        format!("{:.2}", reached as f64 / finished as f64)
+    } else {
+        "-".to_string()
+    };
+    let panic_note = if r.panics > 0 {
+        format!(" | {} thread(s) recovered from a panic this iter", r.panics)
+    } else {
+        String::new()
+    };
+    let update_note = format!(
+        " [gpu load {:.0}ms + compute {:.0}ms + store {:.0}ms]",
+        r.gpu_timing.load_ms, r.gpu_timing.update_ms, r.gpu_timing.store_ms
+    );
+    let IterReport {
+        iter,
+        samples,
+        rollout_secs,
+        ticks,
+        update_secs,
+        sps_iter,
+        sps_rollout,
+        total_samples,
+        total_ticks,
+        avg_reward,
+        metrics,
+        ..
+    } = *r;
+    eprintln!(
+        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note}) | ploss {:.3} vloss {:.3} ent {:.3}{panic_note}",
+        metrics.policy_loss, metrics.value_loss, metrics.entropy,
+    );
+}
 
 /// Run as the learner: own the policy + optimizer + master normalizer, spawn K
 /// rollout threads, and loop {snapshot weights → roll all → merge → PPO update}.
@@ -650,104 +833,27 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         }
         let wall_start = Instant::now();
 
-        // 1) Snapshot the current policy to bytes + the master normalizer, shared
-        //    read-only across all threads via Arc. This is the consistent snapshot
-        //    every thread rolls with — captured before any thread runs, so no
-        //    thread can see a half-updated net. Also persist a checkpoint so a live
-        //    demo / a restart picks up the latest weights — durability only, not a
-        //    handoff to the threads (they get the in-memory snapshot above).
-        let brain_bytes = Arc::new(snapshot_brain_bytes(&state.brain));
-        let normalizer = Arc::new(state.normalizer_snapshot());
-        // The band every thread samples this horizon — captured here so an advance from
-        // last horizon's reach (applied after the roll, below) takes effect on THIS roll,
-        // and all threads roll the same band. Persist it beside the weights so a restart
-        // resumes the rung rather than the start band.
+        // 1) Capture the consistent per-iteration snapshot (weights + master normalizer
+        //    + curriculum band, none half-updated) and persist a checkpoint. The band is
+        //    captured here so last iter's reach-driven advance takes effect on THIS roll.
         let curriculum = progress.curriculum();
-        state.save_checkpoint();
-        save_curriculum(curriculum, &checkpoint_dir.join(CURRICULUM_FILENAME));
-        // The Adam moments + step live on the GPU learner, not the CPU TrainingState, so
-        // they persist here alongside the brain — together they let a resume continue the
-        // optimizer warm (rl#60).
-        gpu_learner.save_adam_state(&checkpoint_dir.join(OPTIMIZER_FILENAME));
+        let request = snapshot_policy(&state, curriculum);
+        persist_checkpoint(&state, &gpu_learner, curriculum, &checkpoint_dir);
 
-        // 2) Roll one synchronous horizon across all threads. Send every thread its
-        //    request, then collect every result (the barrier: the update waits for
-        //    the slowest). A thread that panicked mid-roll returns an empty result
-        //    and has already rebuilt its world — the run continues on the rest.
+        // 2) Roll one synchronous horizon across all threads.
         let rollout_start = Instant::now();
-        for t in &threads {
-            t.request_tx
-                .send(RollRequest {
-                    brain_bytes: Arc::clone(&brain_bytes),
-                    normalizer: Arc::clone(&normalizer),
-                    curriculum,
-                })
-                // A closed channel means the thread's OS thread itself died — not a
-                // caught roll panic (those return a `panicked` result), but a fault
-                // building/warming a world. Unrecoverable for training, so abort
-                // loud; crab-train's restart loop resumes from the checkpoint.
-                .expect(
-                    "rollout thread died (could not rebuild its world); resume from checkpoint",
-                );
-        }
-        let mut results: Vec<RollOutcome> = Vec::with_capacity(k);
-        for t in &threads {
-            results.push(t.result_rx.recv().expect(
-                "rollout thread died (could not rebuild its world); resume from checkpoint",
-            ));
-        }
+        let results = dispatch_horizon(&threads, &request);
         // Every world built and rolled a full horizon, so the pre-iter-0 gemm-tree
         // deadlock did not happen — disarm the startup watchdog. (First iteration
         // only; the call is idempotent, so doing it every iteration is harmless.)
         progress_signal.mark_reached();
         let rollout_secs = rollout_start.elapsed().as_secs_f64();
 
-        // 3) Merge each Rolled thread's normalizer increment + episode rewards and
-        //    collect its env buffers. The increment is only this horizon's samples,
-        //    so merging it into the master (which already holds the baseline) counts
-        //    each sample exactly once. A Panicked thread contributes nothing — no
-        //    merge, no buffers — so the master can't be corrupted by a wedged thread.
-        let mut rollouts: Vec<RolloutBuffer> = Vec::new();
-        let mut iter_samples = 0u64;
-        let mut rolled_ticks = 0u64;
-        let mut panics = 0u32;
-        // Drift summed across threads this iter; divided for the mean logged below.
-        let mut drift_sum = 0f64;
-        let mut drift_count = 0u64;
-        // Per-episode reach tally pooled across threads this iter, fed to the curriculum
-        // after the merge so the competence window sees every thread's episodes.
-        let mut reach_reached = 0u64;
-        let mut reach_finished = 0u64;
-        for r in results {
-            match r {
-                RollOutcome::Rolled {
-                    envs,
-                    increment,
-                    rewards,
-                    drift,
-                    reach,
-                    ticks,
-                } => {
-                    rolled_ticks += ticks;
-                    state.merge_normalizer(&increment);
-                    for reward in rewards {
-                        state.record_episode_reward(reward);
-                    }
-                    drift_sum += drift.0;
-                    drift_count += drift.1;
-                    reach_reached += reach.0;
-                    reach_finished += reach.1;
-                    for env in envs {
-                        iter_samples += env.len() as u64;
-                        rollouts.push(RolloutBuffer { transitions: env });
-                    }
-                }
-                RollOutcome::Panicked => panics += 1,
-            }
-        }
+        // 3) Reduce the threads' outcomes into the master + this iter's aggregates.
+        let merged = merge_rollouts(&mut state, results);
         // Feed this iter's finished episodes to the curriculum, which may advance the
-        // band — taking effect on the NEXT horizon's `progress.curriculum()` snapshot.
-        progress.record_episodes(reach_reached, reach_finished);
+        // band — taking effect on the NEXT iter's `progress.curriculum()` snapshot.
+        progress.record_episodes(merged.reach.0, merged.reach.1);
 
         // 4) PPO update on the GPU — the SOLE update path (rl#49). The CPU policy is
         //    mirrored CPU→GPU, the one `ppo_update_core` runs on the device, and the
@@ -758,61 +864,46 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         //    `update_secs` spans the whole phase — including the host↔device copies —
         //    so it is the honest per-iter update cost.
         let update_start = Instant::now();
-        // `gpu_timing` carries the GPU update's load/compute/store split for the log.
         let (brain, ppo_config, ret_norm, rng) = state.learner_parts_for_gpu();
-        let (metrics, gpu_timing) = gpu_learner.update(brain, ppo_config, &rollouts, ret_norm, rng);
+        let (metrics, gpu_timing) =
+            gpu_learner.update(brain, ppo_config, &merged.rollouts, ret_norm, rng);
         let update_secs = update_start.elapsed().as_secs_f64();
         let wall_secs = wall_start.elapsed().as_secs_f64();
 
-        total_samples += iter_samples;
-        total_ticks += rolled_ticks;
+        total_samples += merged.samples;
+        total_ticks += merged.ticks;
         // Persist the odometer alongside the weights this update produced, so a
         // restart resumes the budget instead of resetting it.
         write_tick_watermark(&checkpoint_dir, total_ticks);
         if iter >= warmup_iters {
-            timed_samples += iter_samples;
+            timed_samples += merged.samples;
             timed_rollout_secs += rollout_secs;
             timed_wall_secs += wall_secs;
         }
 
-        let avg_reward = state.avg_reward(20);
-        // Mean carapace planar drift-from-spawn over recording-env ticks this iter — the
-        // walking diagnostic (climbs from ~0). 0 when no recording tick was sampled.
-        let drift = if drift_count > 0 {
-            drift_sum / drift_count as f64
-        } else {
-            0.0
-        };
-        let sps_iter = iter_samples as f64 / rollout_secs.max(1e-9);
         let sps_rollout = if timed_rollout_secs > 0.0 {
             timed_samples as f64 / timed_rollout_secs
         } else {
             0.0
         };
-        let panic_note = if panics > 0 {
-            format!(" | {panics} thread(s) recovered from a panic this iter")
-        } else {
-            String::new()
-        };
-        // The curriculum band these rollouts used, plus this iter's reach-fraction over
-        // finished episodes — so an advance is visible (band steps out) and its approach
-        // is legible (reach climbing toward the threshold). `-` when no episode finished.
-        let (band_min, band_max) = curriculum.band();
-        let reach_note = if reach_finished > 0 {
-            format!("{:.2}", reach_reached as f64 / reach_finished as f64)
-        } else {
-            "-".to_string()
-        };
-        // Break the update phase into load(CPU→GPU)/compute/store(GPU→CPU) ms so the
-        // host↔device copy cost is visible (the microbench excluded it).
-        let update_note = format!(
-            " [gpu load {:.0}ms + compute {:.0}ms + store {:.0}ms]",
-            gpu_timing.load_ms, gpu_timing.update_ms, gpu_timing.store_ms
-        );
-        eprintln!(
-            "[learner] iter {iter} | {iter_samples} samples | rollout {rollout_secs:.3}s ({rolled_ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note}) | ploss {:.3} vloss {:.3} ent {:.3}{panic_note}",
-            metrics.policy_loss, metrics.value_loss, metrics.entropy,
-        );
+        log_iteration(&IterReport {
+            iter,
+            samples: merged.samples,
+            rollout_secs,
+            ticks: merged.ticks,
+            update_secs,
+            gpu_timing: &gpu_timing,
+            sps_iter: merged.samples as f64 / rollout_secs.max(1e-9),
+            sps_rollout,
+            total_samples,
+            total_ticks,
+            avg_reward: state.avg_reward(20),
+            drift: merged.drift,
+            curriculum,
+            reach: merged.reach,
+            metrics: &metrics,
+            panics: merged.panics,
+        });
 
         iter += 1;
 
@@ -867,12 +958,11 @@ mod tests {
     use crate::training::checkpoint::crab_optimizer;
     use crate::training::update::ppo_update_core;
 
-    /// A zero-count normalizer increment: a fresh normalizer's snapshot. Used to fill
-    /// a `Rolled` outcome's `increment` in tests that don't exercise real stats, and
-    /// to pin the no-op-merge property the normalizer relies on.
-    fn empty_normalizer_increment() -> ObsNormalizerData {
-        use crate::training::normalizer::{NORMALIZER_CLIP, ObsNormalizer};
-        ObsNormalizer::new(NORMALIZER_CLIP).snapshot()
+    /// A zero-count normalizer increment: a fresh accumulator's delta. Used to fill a
+    /// `Rolled` outcome's `increment` in tests that don't exercise real stats, and to
+    /// pin the no-op-merge property the normalizer relies on.
+    fn empty_normalizer_increment() -> NormalizerIncrement {
+        crate::training::normalizer::IncrementAccumulator::new().increment()
     }
 
     /// The thread count cap the owner asked for: the default is PHYSICAL cores minus
