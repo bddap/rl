@@ -951,6 +951,49 @@ mod tests {
         );
     }
 
+    /// The clamped shoulder up-swing keeps BOTH reach effectors (palm `005`, pincer tip
+    /// `006`) at or below the carapace top — the regression guard for the "arm lifts up
+    /// through the shell / past the eye-stalks" bug. It reads the SPAWNED shoulder link's
+    /// own `axis_local` and bind-world pivot straight from the recipe — the exact axis the
+    /// actuator drives and the joint limit clamps — rather than re-deriving them, so the
+    /// guard can't silently test a phantom axis if the cheliped is ever re-bracketed. The
+    /// palm is the higher of the two effectors, so it's the binding one. `lo` is the
+    /// up-stop (−θ raises the arm; see the actuator). Pure geometry; skips with no model.
+    #[test]
+    fn shoulder_upswing_stays_below_carapace() {
+        let Some(path) = model_path() else {
+            eprintln!("shoulder_upswing_stays_below_carapace: no model — skipping");
+            return;
+        };
+        let model = LoadedModel::load(&path).expect("load model");
+        let recipe = build_recipe(&model).expect("recipe");
+        let hub = leg_hub_centroid(&model).expect("hub");
+        let box_top = (hub + recipe.carapace_offset).y + recipe.carapace_half.y;
+        // Bind-world origin of every link — a link's origin IS its joint pivot.
+        let world = link_world_origins(&recipe.links, hub);
+        for side in [Side::Left, Side::Right] {
+            let (link, &pivot) = recipe
+                .links
+                .iter()
+                .zip(&world)
+                .find(|(l, _)| l.actuated == Some(CrabJointId::ClawShoulder(side)))
+                .expect("shoulder link present");
+            // `axis_local` is in the parent frame, which is world at the bind rest (the
+            // parent carapace spawns unrotated), so it rotates the effectors directly.
+            let [lo, _hi] = CrabJointId::ClawShoulder(side).limits();
+            let rot = Quat::from_axis_angle(link.axis_local, lo);
+            for bone in ["005", "006"] {
+                let p = model.bone_origin(&pincer_bone(bone, side)).unwrap();
+                let y = (pivot + rot * (p - pivot)).y;
+                assert!(
+                    y <= box_top + 1e-3,
+                    "{side:?} cheliped {bone} reaches y={y:.3} at the up-stop θ={lo:.3}, \
+                     above the carapace top {box_top:.3} — arm clips the shell"
+                );
+            }
+        }
+    }
+
     /// The chains must enumerate exactly the actuated joint set — same count, all
     /// distinct. Guards the "add a joint" footgun: a new `CrabJointId` with no
     /// matching `JointSpec` (or a duplicate) is caught here, not silently at runtime.

@@ -123,6 +123,17 @@ const CLAW_PINCER_TORQUE_CEILING: f32 = 7.0;
 const CLAW_SHOULDER_TORQUE_CEILING: f32 = 4.0;
 const CLAW_WRIST_TORQUE_CEILING: f32 = 3.0;
 
+// Cheliped shoulder travel is ASYMMETRIC about the bind rest, and a single source for
+// both sides (`CrabJointId::limits` matches `ClawShoulder(_)`). +θ swings the arm DOWN
+// toward the ground, keeping the full reach the last-metre grab needs; −θ LIFTS it. The
+// old symmetric −1.0 up-stop let the palm swing to y≈0.75 — up through the shell top
+// (≈0.61) and past the eye-stalks (≈0.52), the owner-reported "arms lift up through the
+// carapace". −0.6 rad raises the claw to about eye/shell-top level (defensive reach
+// kept) while the palm — the higher of the two reach effectors — stays below the shell.
+// Read off the bind-pose geometry; pinned by `rig::tests::shoulder_upswing_stays_below_carapace`.
+const CLAW_SHOULDER_UP_STOP: f32 = -0.6;
+const CLAW_SHOULDER_DOWN_STOP: f32 = 1.0;
+
 /// Slope of the velocity-0 friction motor's ramp into its force cap
 /// ([`CrabJointId::friction_cap`]): steep enough to saturate near-instantly into a
 /// small CONSTANT opposing torque (dry/Coulomb friction, not a viscous damping gain).
@@ -375,7 +386,7 @@ impl CrabJointId {
             CrabJointId::LegCoxa(..) => [-0.8, 0.8],
             CrabJointId::LegMerus(..) => [-1.0, 1.0],
             CrabJointId::LegCarpus(..) => [-1.1, 1.1],
-            CrabJointId::ClawShoulder(_) => [-1.0, 1.0],
+            CrabJointId::ClawShoulder(_) => [CLAW_SHOULDER_UP_STOP, CLAW_SHOULDER_DOWN_STOP],
             // Tuned wrist sweep, clamped tight: ±13.7° (±0.239110 rad) about the bind
             // rest — much narrower than the other joints because the wrist rotated too far.
             CrabJointId::ClawWrist(_) => [-0.239110, 0.239110],

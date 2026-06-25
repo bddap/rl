@@ -19,6 +19,7 @@ mod demo;
 mod hot_reload;
 mod manual_control;
 mod policy;
+mod rig_pose;
 mod target_ball;
 
 use std::path::PathBuf;
@@ -151,6 +152,23 @@ impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
         add_inference(app, &self.checkpoint_dir, None);
         app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
+        // RL_RIG_POSE: drive the chelipeds to their shoulder stop with the body pinned, so
+        // a rig limit/axis change can be inspected headless in the offending pose. Inert by
+        // default — a plain screenshot is unchanged. See [`rig_pose`].
+        if let Some(pose) = rig_pose::rig_pose_from_env() {
+            app.insert_resource(pose)
+                .init_resource::<rig_pose::RigPosePin>()
+                .add_systems(
+                    FixedUpdate,
+                    rig_pose::rig_pose_drive.in_set(BotSet::Think).after(policy_step),
+                )
+                .add_systems(
+                    FixedUpdate,
+                    rig_pose::rig_pose_pin
+                        .after(BotSet::Act)
+                        .before(PhysicsSet::SyncBackend),
+                );
+        }
         // RL_TARGET_BALL=1: render the demo's red target ball in the screenshot too,
         // off the same `CrabTargets` state, so the reach-target viz can be inspected
         // headless. `target_ball` seeds (honoring RL_TARGET_BALL_AT), drives, and
