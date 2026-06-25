@@ -34,10 +34,7 @@ use super::algorithm::{
     compute_log_prob, sample_action,
 };
 use super::TrainBackend;
-use super::checkpoint::{
-    BRAIN_STEM, NORMALIZER_FILENAME, RETURN_NORMALIZER_FILENAME, load_return_normalizer,
-    save_return_normalizer,
-};
+use super::checkpoint::{CheckpointDir, load_return_normalizer, save_return_normalizer};
 use super::curriculum::{CURRICULUM_REACH_RADIUS, Curriculum, seed_target};
 use super::metrics::MetricsLogger;
 use super::normalizer::{
@@ -271,22 +268,21 @@ impl TrainingState {
         let mut obs_normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
         let mut return_normalizer = ReturnNormalizer::new();
 
-        let brain_path = config.checkpoint_dir.join(BRAIN_STEM);
-        let norm_path = config.checkpoint_dir.join(NORMALIZER_FILENAME);
-        let ret_norm_path = config.checkpoint_dir.join(RETURN_NORMALIZER_FILENAME);
+        let paths = CheckpointDir::new(&config.checkpoint_dir);
+        let norm_path = paths.normalizer_path();
+        let ret_norm_path = paths.return_normalizer_path();
 
-        // BinFileRecorder appends .bin to the stem, so check for that.
-        if brain_path.with_extension("bin").exists() {
+        if paths.brain_file().exists() {
             let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-            match recorder.load(brain_path.clone(), &device) {
+            match recorder.load(paths.brain_stem(), &device) {
                 Ok(record) => {
                     brain = brain.load_record(record);
-                    info!("Loaded brain weights from {}", brain_path.display());
+                    info!("Loaded brain weights from {}", paths.brain_file().display());
                 }
                 Err(e) => {
                     warn!(
                         "Failed to load brain from {}: {e} — starting fresh",
-                        brain_path.display()
+                        paths.brain_file().display()
                     );
                 }
             }
@@ -350,18 +346,16 @@ impl TrainingState {
             return;
         }
 
-        let brain_path = self.checkpoint_dir.join(BRAIN_STEM);
+        let paths = CheckpointDir::new(&self.checkpoint_dir);
         let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
         // Record to a temp stem then rename into place, so a crash mid-write can't
         // leave a torn brain.bin (silently discarded on load → resume from random
-        // weights). The stem must be dot-free: BinFileRecorder sets the extension to
-        // `.bin`, so a "brain.tmp" stem would become brain.bin and clobber the live
-        // file before the rename.
-        let brain_tmp_stem = self.checkpoint_dir.join("brain-tmp");
+        // weights).
+        let brain_tmp_stem = paths.brain_tmp_stem();
         match recorder.record(self.brain.clone().into_record(), brain_tmp_stem.clone()) {
             Ok(()) => {
                 let tmp_file = brain_tmp_stem.with_extension("bin");
-                let final_file = brain_path.with_extension("bin");
+                let final_file = paths.brain_file();
                 match std::fs::rename(&tmp_file, &final_file) {
                     Ok(()) => info!("Saved brain to {}", final_file.display()),
                     Err(e) => warn!("Failed to finalize brain checkpoint: {e}"),
@@ -370,11 +364,8 @@ impl TrainingState {
             Err(e) => warn!("Failed to save brain: {e}"),
         }
 
-        let norm_path = self.checkpoint_dir.join(NORMALIZER_FILENAME);
-        self.obs_normalizer.save(&norm_path);
-
-        let ret_norm_path = self.checkpoint_dir.join(RETURN_NORMALIZER_FILENAME);
-        save_return_normalizer(&self.return_normalizer, &ret_norm_path);
+        self.obs_normalizer.save(&paths.normalizer_path());
+        save_return_normalizer(&self.return_normalizer, &paths.return_normalizer_path());
     }
 
     // ---- In-process rollout-thread / learner hooks ------------------------

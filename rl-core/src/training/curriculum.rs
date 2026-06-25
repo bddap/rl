@@ -45,9 +45,9 @@ pub(crate) const TARGET_ARENA_HALF: f32 = crate::physics::world::ARENA_HALF_SIZE
 
 /// Per-episode reach radius (m): the curriculum scores an episode "reached" if the
 /// crab's claw tip came within this of the target at any tick. The CANONICAL reach
-/// distance — the demo's ball-hop (`crate::play::DEMO_REACH_RADIUS`) derives from this one
+/// distance — the demo's ball-hop (`play::target_ball::DEMO_REACH_RADIUS`) derives from this one
 /// constant, so "reached" means the same event a viewer sees the ball teleport on. Lives
-/// in the always-compiled trainer (`pub(crate)` so the demo re-exports it) rather than the
+/// in the always-compiled trainer rather than the
 /// render-only demo, so the headless build owns the source. A touch looser than zero so a
 /// near-miss the policy clearly solved still counts.
 pub(crate) const CURRICULUM_REACH_RADIUS: f32 = 0.8;
@@ -312,7 +312,7 @@ pub(crate) fn load_curriculum(path: &Path) -> Curriculum {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::training::checkpoint::CURRICULUM_FILENAME;
+    use crate::training::checkpoint::CheckpointDir;
     use crate::training::reward::planar_dist;
 
     #[test]
@@ -538,7 +538,7 @@ mod tests {
     fn missing_or_corrupt_checkpoint_loads_rung_one() {
         let dir = std::env::temp_dir().join(format!("rl-curric-load-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(CURRICULUM_FILENAME);
+        let path = CheckpointDir::new(&dir).curriculum_path();
 
         // No file at all (fresh run OR a checkpoint predating the curriculum) → rung 1.
         let _ = std::fs::remove_file(&path);
