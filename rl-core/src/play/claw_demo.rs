@@ -134,7 +134,7 @@ const PIN_MAX_FORCE: f32 = 120.0;
 /// current pose/velocity back toward `target` — the PD hold the interactive claw demo
 /// uses to keep the body still while one claw articulates. Caller *adds* this onto
 /// `ExternalForce` after the actuator has written the baseline; see [`claw_demo_pin`].
-fn pin_correction(target: &Transform, xform: &Transform, vel: &Velocity) -> (Vec3, Vec3) {
+pub(super) fn pin_correction(target: &Transform, xform: &Transform, vel: &Velocity) -> (Vec3, Vec3) {
     // Rotational PD: error as the axis-angle of the rotation that takes the current
     // orientation to the target, fed back against the current angular velocity.
     let err_rot = target.rotation * xform.rotation.inverse();
