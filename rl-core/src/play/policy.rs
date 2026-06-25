@@ -36,6 +36,39 @@ pub(crate) struct Policy {
     /// we reload only when training has written a newer one. See [`Self::try_hot_reload`].
     live_dir: Option<PathBuf>,
     last_loaded: Option<std::time::SystemTime>,
+    /// A stable digest of the loaded checkpoint's bytes (brain + normalizer), `0` when no
+    /// checkpoint loaded. Two peers running the SAME weights get the same digest; different
+    /// weights get different ones. The GCR bridge folds this into the crab's per-tick lockstep
+    /// hash ([`Self::weights_digest`]), so two peers with mismatched brains desync by
+    /// construction on tick 1 rather than diverging silently as the float bodies drift apart.
+    weights_digest: u64,
+}
+
+/// FNV-1a over `bytes` — a build-stable digest (unlike `std`'s randomized hashers) so two
+/// same-binary peers hash an identical checkpoint to an identical value. Used for the policy
+/// weights digest that gates lockstep (peers MUST run identical weights or they desync).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Digest of a checkpoint's on-disk weights (brain + normalizer bytes), or `0` if the brain
+/// file is unreadable. The cross-peer "same weights?" check: identical files → identical
+/// digest. Reads the raw bytes rather than the deserialized tensors so it needs no backend
+/// and can't drift from how the weights are stored.
+fn checkpoint_digest(dir: &Path) -> u64 {
+    let paths = CheckpointDir::new(dir);
+    let Ok(mut bytes) = std::fs::read(paths.brain_file()) else {
+        return 0;
+    };
+    if let Ok(norm) = std::fs::read(paths.normalizer_path()) {
+        bytes.extend_from_slice(&norm);
+    }
+    fnv1a(&bytes)
 }
 
 /// Load a brain + normalizer from `dir`, or `None` if the brain file is absent or
@@ -110,6 +143,15 @@ impl Policy {
         // behaviour from one the dynamics produce on their own.
         let loaded = loaded || std::env::var("RL_RANDOM_POLICY").is_ok_and(|v| v == "1");
 
+        // Digest the on-disk weights iff a real checkpoint loaded. A RANDOM_POLICY brain (no
+        // file) gets `0` — it must never enter networked lockstep, and the bridge's
+        // loaded-checkpoint guard refuses to arm it there.
+        let weights_digest = if loaded {
+            checkpoint_digest(checkpoint_dir)
+        } else {
+            0
+        };
+
         Self {
             brain,
             normalizer,
@@ -117,6 +159,7 @@ impl Policy {
             loaded,
             live_dir: None,
             last_loaded: None,
+            weights_digest,
         }
     }
 
@@ -142,6 +185,7 @@ impl Policy {
         self.normalizer = normalizer;
         self.loaded = true;
         self.last_loaded = Some(mtime);
+        self.weights_digest = checkpoint_digest(&dir);
         true
     }
 
@@ -150,6 +194,13 @@ impl Policy {
     /// neutral pose while this is false).
     pub(crate) fn is_loaded(&self) -> bool {
         self.loaded
+    }
+
+    /// Stable digest of the loaded weights (`0` if none) — see
+    /// [`weights_digest`](Self::weights_digest). The GCR bridge folds it into the crab's
+    /// per-tick lockstep hash so peers running different brains desync immediately.
+    pub(crate) fn weights_digest(&self) -> u64 {
+        self.weights_digest
     }
 
     /// Deterministic action: the policy mean (no exploration noise), so the crab

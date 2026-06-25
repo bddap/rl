@@ -65,6 +65,32 @@ pub fn should_arm_solo_crab(net_is_none: bool, has_ckpt: bool) -> bool {
     net_is_none && has_ckpt
 }
 
+/// The shared-checkpoint guard for handing the crab to the float NN body in LOCKSTEP (rl#82,
+/// GCR): a round may arm the external crab only when it can't desync peers on the weights.
+/// SOLO rounds always may — one peer, nothing to desync. A NETWORKED round may arm ONLY with
+/// genuinely-SYNCED weights (`weights_synced`): a random-init or unloadable brain differs per
+/// peer (burn seeds fresh weights from process entropy), so it would desync by construction —
+/// it must stay on the deterministic integer crab. This is the UPSTREAM half of the guard: it
+/// keeps an *unsynced* brain out of lockstep entirely; the policy-weights digest folded into
+/// [`crate::net::sim::Sim::state_hash`] is the downstream half, catching a mismatch between
+/// two *synced* brains.
+///
+/// CALLER CONTRACT: `weights_synced` must be `Policy::weights_digest() != 0`, **NOT**
+/// `is_loaded()` — `RL_RANDOM_POLICY=1` forces `is_loaded()` true on a fresh random brain whose
+/// digest is `0` (no checkpoint bytes), which would desync peers silently; a zero digest is
+/// exactly "no shared checkpoint", so gating on a non-zero digest closes that trap.
+///
+/// The networked arm itself is the in-progress GCR follow-up (the windowed driver must first
+/// step the rapier crab once per lockstep tick — see the cadence note on
+/// [`crate::net::sim::Sim::state_hash`]); this predicate is the single rule that follow-up
+/// gates on, so the invariant lives in one place rather than being re-encoded at the arm site.
+/// `pub` (not `pub(crate)`) to match its sibling [`should_arm_solo_crab`] and because the only
+/// caller until the fork lands is a `#[cfg(test)]` test — `pub(crate)` would read as dead code
+/// in the non-test build and trip `-D warnings`.
+pub fn may_arm_external_crab(net_is_none: bool, weights_synced: bool) -> bool {
+    net_is_none || weights_synced
+}
+
 #[cfg(test)]
 mod desync_test {
     //! The headless determinism proof (rl#39): replay ONE input log through two
@@ -472,7 +498,7 @@ mod desync_test {
             let mb = plain.submit_local_input(Input::default());
             let _ = armed.record_remote(PlayerId(1), mb);
             let _ = plain.record_remote(PlayerId(0), ma);
-            armed.set_external_crab_pose(Pos { x: 0, z: 0 }, 0);
+            armed.set_external_crab_pose(Pos { x: 0, z: 0 }, 0, 0);
             let _ = armed.try_advance();
             let _ = plain.try_advance();
         }
@@ -480,6 +506,86 @@ mod desync_test {
             armed.sim().state_hash(),
             plain.sim().state_hash(),
             "an externally-driven crab pose MUST change the hash — else the no-op test has no teeth"
+        );
+    }
+
+    /// The shared-checkpoint guard (rl#82): two peers running the SAME float crab pose but
+    /// DIFFERENT policy weights must desync, because the bridge folds the weights digest into
+    /// the per-tick physics hash. Here we push an identical pose to both externally-driven
+    /// sims but a different `phys_digest` (standing in for "different weights"), and require the
+    /// state hashes to diverge — so a peer that loaded the wrong brain can't masquerade as
+    /// in-sync.
+    ///
+    /// SCOPE: this drives two `Lockstep`s by HAND with a synthetic digest — it proves the
+    /// FOLD has teeth (a digest mismatch surfaces as a hash divergence), NOT that a networked
+    /// NN crab is shippable. The networked arm is still gated off pending the cadence fold (see
+    /// [`super::may_arm_external_crab`] and the cadence caveat on `Sim::state_hash`).
+    #[test]
+    fn external_crab_with_mismatched_weights_desyncs() {
+        let seed = 0x5151_8202;
+        let players = [PlayerId(0), PlayerId(1)];
+        let mut a = Lockstep::new(seed, &players, PlayerId(0));
+        let mut b = Lockstep::new(seed, &players, PlayerId(1));
+        a.enable_external_crab(true);
+        b.enable_external_crab(true);
+        let pose = Pos { x: 1234, z: -567 };
+        // Two distinct weights digests fold into otherwise-identical external crab state.
+        let (weights_a, weights_b) = (0xAAAA_AAAA_AAAA_AAAA, 0xBBBB_BBBB_BBBB_BBBB);
+        for _ in 0..10u64 {
+            let ma = a.submit_local_input(Input::default());
+            let mb = b.submit_local_input(Input::default());
+            let _ = a.record_remote(PlayerId(1), mb);
+            let _ = b.record_remote(PlayerId(0), ma);
+            a.set_external_crab_pose(pose, 7, weights_a);
+            b.set_external_crab_pose(pose, 7, weights_b);
+            let _ = a.try_advance();
+            let _ = b.try_advance();
+        }
+        assert_ne!(
+            a.sim().state_hash(),
+            b.sim().state_hash(),
+            "identical pose + DIFFERENT weights digest must desync (shared-checkpoint guard)"
+        );
+
+        // Control: the SAME weights digest with the same pose stays in sync — the desync above
+        // is the weights mismatch, not a spurious always-diverge.
+        let mut c = Lockstep::new(seed, &players, PlayerId(0));
+        let mut d = Lockstep::new(seed, &players, PlayerId(1));
+        c.enable_external_crab(true);
+        d.enable_external_crab(true);
+        for _ in 0..10u64 {
+            let mc = c.submit_local_input(Input::default());
+            let md = d.submit_local_input(Input::default());
+            let _ = c.record_remote(PlayerId(1), md);
+            let _ = d.record_remote(PlayerId(0), mc);
+            c.set_external_crab_pose(pose, 7, weights_a);
+            d.set_external_crab_pose(pose, 7, weights_a);
+            let _ = c.try_advance();
+            let _ = d.try_advance();
+        }
+        assert_eq!(
+            c.sim().state_hash(),
+            d.sim().state_hash(),
+            "identical pose + SAME weights digest must stay in sync"
+        );
+    }
+
+    /// [`super::may_arm_external_crab`]: solo may always arm; networked may arm only with
+    /// SYNCED weights (the upstream half of the shared-checkpoint guard).
+    #[test]
+    fn may_arm_external_crab_rules() {
+        assert!(super::may_arm_external_crab(true, true), "solo + synced → arm");
+        assert!(
+            super::may_arm_external_crab(true, false),
+            "solo may arm even unsynced (rest pose, single peer, nothing to desync)"
+        );
+        assert!(
+            super::may_arm_external_crab(false, true),
+            "networked + synced weights → may arm (the GCR path)"
+        );
+        assert!(
+            !super::may_arm_external_crab(false, false),
+            "networked + UNSYNCED weights → must NOT arm (a random-init brain desyncs peers)"
         );
     }
 }

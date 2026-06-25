@@ -413,10 +413,31 @@ pub struct Sim {
     /// (block 2) and trusts whatever `set_external_crab_pose` last wrote; grabs, extraction,
     /// and outcome (blocks 3–5) then resolve against the real crab body's position.
     ///
-    /// `false` for every networked round: a float rapier crab is NOT identical across
-    /// peers, so the integer pursuit is the cross-peer-safe path and this is the solo
-    /// showcase only. Not hashed (like [`config`](Sim::config)).
+    /// `false` for every networked round TODAY: folding the float NN crab into the
+    /// deterministic lockstep tick (rl#82, GCR) is the in-progress follow-up that flips this
+    /// on for multiplayer. The FLAG itself is not hashed (like [`config`](Sim::config)) — but
+    /// [`external_crab_digest`](Sim::external_crab_digest), the float body's per-tick digest, IS
+    /// hashed while this is set, so the desync check covers the articulated body and not just
+    /// the quantized 2D pose below.
     crab_external: bool,
+    /// While [`crab_external`](Sim::crab_external) is set, the peer-comparable digest of the
+    /// REAL rapier crab's full physics state for this tick (every actuated body's pose +
+    /// velocity bits — see [`crate::bot::physics_digest`]), supplied each tick by the
+    /// deterministic driver alongside the pose. Folded into [`Sim::state_hash`] ONLY while
+    /// external, so two peers whose float bodies — or whose policy weights, folded into this
+    /// digest by the bridge — diverge desync on the tick it happens. Unused (and unhashed) on
+    /// the integer path, so integer-only multiplayer hashes are byte-identical to before
+    /// (the rl#63 no-op-on-MP guarantee).
+    ///
+    /// CADENCE CAVEAT (rl#82, why external control is still solo-only): this digest is sound
+    /// cross-peer ONLY once the rapier crab steps exactly once per lockstep tick. The windowed
+    /// driver currently steps physics on Bevy's wall-clock `FixedUpdate`, decoupled from the
+    /// lockstep accumulator, so the SAME digest can be folded into a different number of ticks
+    /// on a different-framerate peer — a real divergence the equal-per-tick digest would NOT
+    /// catch. So the networked arm stays gated off ([`crate::net::may_arm_external_crab`]) until
+    /// the step is folded into the tick; until then this is exercised only on solo (one peer,
+    /// nothing to desync) and by the cross-check tests.
+    external_crab_digest: u64,
 }
 
 /// The arguments that built a [`Sim`], retained so [`Sim::step`] can rebuild the
@@ -474,6 +495,7 @@ impl Sim {
             restart_held: false,
             config,
             crab_external: false,
+            external_crab_digest: 0,
         }
     }
 
@@ -489,19 +511,24 @@ impl Sim {
     /// [`enable_external_crab`](Sim::enable_external_crab)). Has effect only after
     /// `enable_external_crab(true)`; otherwise [`Sim::step`]'s pursuit overwrites it. Call
     /// it each tick BEFORE advancing, so the grab/extraction checks resolve against the
-    /// body's current position. `pos`/`yaw` are genuine hashed state.
-    pub fn set_external_crab_pose(&mut self, pos: Pos, yaw: i32) {
+    /// body's current position. `pos`/`yaw` are genuine hashed state; `phys_digest` is the
+    /// float body's per-tick digest (see [`external_crab_digest`](Sim::external_crab_digest)) the
+    /// desync check folds in while external — the bridge computes it from the rapier bodies
+    /// and the loaded policy weights, so any cross-peer divergence is caught.
+    pub fn set_external_crab_pose(&mut self, pos: Pos, yaw: i32, phys_digest: u64) {
         self.crab.pos = pos;
         self.crab.yaw = yaw;
+        self.external_crab_digest = phys_digest;
     }
 
-    /// Solo setup: arm external control AND seed the crab's initial pose in ONE call, so a pose
-    /// can't be set before the flag is armed (where [`set_external_crab_pose`](Sim::set_external_crab_pose)
-    /// would silently no-op — the integer pursuit overwrites it). Per-tick updates after this
-    /// go through `set_external_crab_pose`.
-    pub fn initialize_external_crab(&mut self, pos: Pos, yaw: i32) {
+    /// Solo setup: arm external control AND seed the crab's initial pose + digest in ONE call,
+    /// so a pose can't be set before the flag is armed (where
+    /// [`set_external_crab_pose`](Sim::set_external_crab_pose) would silently no-op — the
+    /// integer pursuit overwrites it). Per-tick updates after this go through
+    /// `set_external_crab_pose`.
+    pub fn initialize_external_crab(&mut self, pos: Pos, yaw: i32, phys_digest: u64) {
         self.enable_external_crab(true);
-        self.set_external_crab_pose(pos, yaw);
+        self.set_external_crab_pose(pos, yaw, phys_digest);
     }
 
     /// Rebuild the round to its tick-0 state from the stored [`config`](Sim::config) —
@@ -822,8 +849,9 @@ impl Sim {
     /// A runtime test perturbs each field and checks the hash moves, catching the dual slip
     /// (a field bound here but never written).
     pub fn state_hash(&self) -> u64 {
-        // config/crab_external are deliberately not hashed (see field docs); bound to `_`
-        // so the destructure stays exhaustive without folding them.
+        // config + the crab_external FLAG are deliberately not hashed (see field docs); bound
+        // to `_` so the destructure stays exhaustive without folding them. external_crab_digest
+        // IS folded, but only while external (below), so the integer path is byte-identical.
         let Sim {
             tick,
             players,
@@ -834,7 +862,8 @@ impl Sim {
             rng,
             restart_held,
             config: _,
-            crab_external: _,
+            crab_external,
+            external_crab_digest,
         } = self;
 
         let mut h = Fnv::new();
@@ -874,6 +903,14 @@ impl Sim {
         // it manifests in an entity. Cloning and drawing one block reflects the
         // generator's position without disturbing the real stream.
         h.write(&rand::Rng::r#gen::<u64>(&mut rng.clone()).to_le_bytes());
+        // The float NN crab's per-tick physics+weights digest — folded ONLY while the crab is
+        // externally driven (rl#82, GCR). On the integer path nothing is written here, so the
+        // hash is byte-identical to before this field existed. While external it makes the
+        // articulated body (and the policy weights, via the bridge) part of the desync check,
+        // not just the quantized 2D `crab.pos`/`yaw` hashed above.
+        if *crab_external {
+            h.write(&external_crab_digest.to_le_bytes());
+        }
         h.finish()
     }
 
@@ -1498,10 +1535,20 @@ mod tests {
         let yaw = 123;
 
         let mut sim = Sim::new(0, &players(1));
-        sim.initialize_external_crab(pos, yaw);
+        let digest = 0xFEED_FACE_DEAD_BEEF;
+        sim.initialize_external_crab(pos, yaw, digest);
         assert!(sim.crab_is_external(), "initialize must arm external control");
         assert_eq!(sim.crab().pos(), pos, "initialize must seed the pose");
         assert_eq!(sim.crab().yaw(), yaw, "initialize must seed the yaw");
+        // The seeded digest is folded into the hash (external is armed); a different digest
+        // must move the hash — the desync teeth for the float body / weights mismatch.
+        let h_seed = sim.state_hash();
+        sim.set_external_crab_pose(pos, yaw, digest ^ 1);
+        assert_ne!(
+            h_seed,
+            sim.state_hash(),
+            "the external crab digest must be hashed while external control is armed"
+        );
     }
 
     #[test]
@@ -1966,18 +2013,33 @@ mod tests {
             "rng stream position must be hashed"
         );
 
-        // Excluded fields: perturbing must NOT flip the hash. Both have field docs
-        // explaining why they are outside the cross-peer hash; mutating them here is purely
-        // to witness the exclusion (nothing in production mutates `config`).
+        // `config` is excluded: perturbing must NOT flip the hash (field doc explains why;
+        // nothing in production mutates it).
         assert_eq!(
             hash_after(&|s| s.config.seed ^= 0xdead_beef),
             h0,
             "config is deliberately not hashed (see Sim::config)"
         );
+        // `crab_external` is a GATE, not a hashed scalar: while it is FALSE (the integer-crab
+        // default of `base`) the external digest is outside the hash, so perturbing
+        // `external_crab_digest` must NOT move it — preserving integer-only-MP byte-identity
+        // (rl#63). While TRUE the SAME digest IS folded in, and its VALUE must move the hash —
+        // the desync teeth for the float body / weights mismatch (rl#82).
         assert_eq!(
-            hash_after(&|s| s.crab_external = !s.crab_external),
+            hash_after(&|s| s.external_crab_digest ^= 0xdead_beef),
             h0,
-            "crab_external is deliberately not hashed (see Sim::crab_external)"
+            "external_crab_digest must NOT be hashed while the integer crab drives (gated out)"
+        );
+        let armed = |digest: u64| {
+            hash_after(&move |s: &mut Sim| {
+                s.crab_external = true;
+                s.external_crab_digest = digest;
+            })
+        };
+        assert_ne!(
+            armed(0),
+            armed(0xdead_beef),
+            "external_crab_digest value must be hashed while external control is armed"
         );
     }
 
