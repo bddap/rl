@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use clap::{Parser, Subcommand};
 use rl_core::{TrainConfig, bot, training};
 
-use training::session::STEPS_PER_ROLLOUT;
+use training::systems::STEPS_PER_ROLLOUT;
 
 /// Crab Combat — RL-trained crab bots learn to stand, walk, and fight.
 ///
@@ -183,7 +183,7 @@ fn main() {
         match b.backend {
             BenchBackend::Cpu => {
                 use burn::backend::ndarray::NdArrayDevice;
-                training::session::bench_ppo_update::<training::session::TrainBackend>(
+                training::bench::bench_ppo_update::<training::TrainBackend>(
                     &NdArrayDevice::Cpu,
                     "CPU ndarray (Autodiff<NdArray>)",
                     b.workers,
@@ -195,7 +195,7 @@ fn main() {
             }
             BenchBackend::Gpu => {
                 #[cfg(feature = "wgpu")]
-                training::session::bench_ppo_update_gpu(
+                training::bench::bench_ppo_update_gpu(
                     b.workers, b.envs, b.horizon, b.reps, b.batch,
                 );
                 #[cfg(not(feature = "wgpu"))]

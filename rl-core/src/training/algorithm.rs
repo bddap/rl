@@ -1,7 +1,5 @@
 //! PPO (Proximal Policy Optimization) support functions.
 
-use std::cell::RefCell;
-
 use burn::prelude::*;
 use rand::Rng;
 use rand::rngs::StdRng;
@@ -10,15 +8,15 @@ use serde::{Deserialize, Serialize};
 use crate::bot::actuator::ACTION_SIZE;
 use crate::bot::sensor::OBS_SIZE;
 
-pub struct PpoConfig {
-    pub gamma: f32,
-    pub lambda: f32,
-    pub clip_epsilon: f32,
-    pub entropy_coeff: f32,
-    pub value_coeff: f32,
-    pub learning_rate: f64,
-    pub epochs_per_update: u32,
-    pub batch_size: usize,
+pub(crate) struct PpoConfig {
+    pub(crate) gamma: f32,
+    pub(crate) lambda: f32,
+    pub(crate) clip_epsilon: f32,
+    pub(crate) entropy_coeff: f32,
+    pub(crate) value_coeff: f32,
+    pub(crate) learning_rate: f64,
+    pub(crate) epochs_per_update: u32,
+    pub(crate) batch_size: usize,
     /// Max absolute per-sample value-prediction ERROR `|V' - R'|` admitted into the
     /// value loss, in NORMALIZED units (the value head fits `R' = (R-μ)/σ`, so the
     /// unit is one standard deviation of the return). This is a plain RESIDUAL clamp
@@ -29,7 +27,7 @@ pub struct PpoConfig {
     /// the head, which is exactly the failure the old 10.0 produced against ~-2700
     /// returns (10 ≪ 2700, so every residual was clamped). A few σ is the right order:
     /// it passes honest predictions through and only tames genuine outliers.
-    pub value_loss_clip: f32,
+    pub(crate) value_loss_clip: f32,
 }
 
 impl Default for PpoConfig {
@@ -63,7 +61,7 @@ impl Default for PpoConfig {
 /// the "never both set" invariant is structural rather than a comment the producer
 /// has to uphold by hand.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum StepEnd {
+pub(crate) enum StepEnd {
     /// The trajectory continues past this step — an in-episode step, or a
     /// rollout-window boundary mid-episode (bootstrapped via `last_value`).
     Continues,
@@ -121,19 +119,19 @@ impl std::ops::Mul<f32> for RealReturn {
 }
 
 #[derive(Clone)]
-pub struct Transition {
-    pub obs: [f32; OBS_SIZE],
-    pub action: [f32; ACTION_SIZE],
-    pub reward: f32,
+pub(crate) struct Transition {
+    pub(crate) obs: [f32; OBS_SIZE],
+    pub(crate) action: [f32; ACTION_SIZE],
+    pub(crate) reward: f32,
     /// The value head's raw output for this step — always NORMALIZED units, never
     /// pre-de-normalized (GAE de-normalizes it).
     pub(crate) value: NormalizedValue,
-    pub log_prob: f32,
-    pub end: StepEnd,
+    pub(crate) log_prob: f32,
+    pub(crate) end: StepEnd,
 }
 
-pub struct RolloutBuffer {
-    pub transitions: Vec<Transition>,
+pub(crate) struct RolloutBuffer {
+    pub(crate) transitions: Vec<Transition>,
 }
 
 impl RolloutBuffer {
@@ -149,10 +147,6 @@ impl RolloutBuffer {
 
     pub fn len(&self) -> usize {
         self.transitions.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.transitions.is_empty()
     }
 }
 
@@ -193,7 +187,7 @@ impl Default for RolloutBuffer {
 ///
 /// # Single source of truth
 /// Mean/M2/count are the only stored fields; variance/std are derived on demand
-/// (mirrors [`ObsNormalizer`](crate::training::session)). The learner owns ONE of
+/// (mirrors [`ObsNormalizer`](crate::training::normalizer)). The learner owns ONE of
 /// these; rollout threads never update it (they only emit value PREDICTIONS, which
 /// the learner de-normalizes with its own stats), so there is no second copy to
 /// drift. The stats lag the policy by exactly one update — they are refreshed from
@@ -201,7 +195,7 @@ impl Default for RolloutBuffer {
 /// the standard PopArt ordering and unbiased in expectation; advantage
 /// normalization makes the one-update lag irrelevant to the policy gradient.
 #[derive(Clone)]
-pub struct ReturnNormalizer {
+pub(crate) struct ReturnNormalizer {
     mean: f64,
     m2: f64,
     count: u64,
@@ -212,7 +206,7 @@ pub struct ReturnNormalizer {
 /// No `var`/`std` field: both derive from `m2`/`count`, so storing them would be a
 /// second source of truth that can drift.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct ReturnNormalizerData {
+pub(crate) struct ReturnNormalizerData {
     mean: f64,
     m2: f64,
     count: u64,
@@ -363,7 +357,7 @@ pub(crate) fn compute_gae(
 }
 
 /// Log-space throughout to avoid dividing by a tiny variance.
-pub fn compute_log_prob<B: Backend>(
+pub(crate) fn compute_log_prob<B: Backend>(
     means: &Tensor<B, 1>,
     log_std: &Tensor<B, 1>,
     actions: &Tensor<B, 1>,
@@ -378,49 +372,12 @@ pub fn compute_log_prob<B: Backend>(
     log_probs.sum().into_scalar().elem::<f32>()
 }
 
-thread_local! {
-    /// Per-thread RNG for action-noise sampling. The NdArray backend's
-    /// `Tensor::random` locks a process-global `static SEED: Mutex<NdArrayRng>` on
-    /// every draw, so with K rollout threads sampling every env every tick they all
-    /// serialize on that one mutex — a hot-path global lock that throttles the
-    /// near-linear scaling this module exists for. Drawing the Gaussian noise from a
-    /// thread-local stream instead removes the lock entirely while preserving the
-    /// sampling distribution (standard-normal noise, then `mean + std·noise`).
-    ///
-    /// Seeded from OS entropy mixed with the thread's id: entropy alone already gives
-    /// each thread an independent stream (it is drawn fresh per thread-local init),
-    /// and folding in the id guarantees distinctness even in the astronomically
-    /// unlikely event two threads' entropy draws coincide.
-    static ACTION_RNG: RefCell<StdRng> = RefCell::new(seed_action_rng());
-}
-
-/// Seed a thread-local action RNG from OS entropy XORed with the current thread's
-/// id, so each rollout thread draws an independent noise stream off the global lock.
-fn seed_action_rng() -> StdRng {
-    use rand::{RngCore, SeedableRng};
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::thread::current().id().hash(&mut hasher);
-    let tid_mix = hasher.finish().to_le_bytes();
-
-    // Fill the full ChaCha seed from the OS CSPRNG (already independent per init),
-    // then XOR the thread-id hash into the first 8 bytes as a belt-and-suspenders
-    // guarantee that no two threads can share a stream.
-    let mut seed = <StdRng as SeedableRng>::Seed::default();
-    rand::rngs::OsRng.fill_bytes(&mut seed);
-    for (b, m) in seed.iter_mut().zip(tid_mix.iter()) {
-        *b ^= *m;
-    }
-    StdRng::from_seed(seed)
-}
-
 /// Draw one standard-normal sample (N(0,1)) from `rng` via the Box–Muller transform.
 /// `rand 0.8` has no normal distribution in core and the project's `rand_distr` is a
-/// later-`rand` release (incompatible RNG traits), so this keeps the thread-local
-/// noise source on the same `rand 0.8` `StdRng` the rest of the crate uses. The
-/// distribution is exactly standard-normal — identical to the backend RNG's
-/// `Distribution::Normal(0.0, 1.0)` this replaced, only off the global lock.
+/// later-`rand` release (incompatible RNG traits), so this keeps the noise source on the
+/// same `rand 0.8` `StdRng` the rest of the crate uses. The distribution is exactly
+/// standard-normal — identical to the backend RNG's `Distribution::Normal(0.0, 1.0)` an
+/// earlier version drew from, only off the global lock.
 fn next_standard_normal(rng: &mut StdRng) -> f32 {
     // u1 in (0, 1] so ln(u1) is finite (open at 0); u2 in [0, 1) for the angle.
     let u1: f32 = 1.0 - rng.r#gen::<f32>();
@@ -430,28 +387,29 @@ fn next_standard_normal(rng: &mut StdRng) -> f32 {
 
 /// Sample actions from Gaussian policy.
 ///
-/// The noise comes from a THREAD-LOCAL RNG ([`ACTION_RNG`]) rather than the backend's
-/// global-mutex-locked `Tensor::random`, so K rollout threads don't serialize on a
-/// hot-path lock. Swapping the RNG source leaves the distribution unchanged:
+/// The noise comes from the caller's `rng` (the run's seeded [`StdRng`], owned per
+/// `TrainingState`) rather than the backend's global-mutex-locked `Tensor::random`, so K
+/// rollout threads don't serialize on a hot-path lock AND the sampled trajectory is
+/// reproducible from the seed. Swapping the RNG source leaves the distribution unchanged:
 /// standard-normal noise, then `mean + std·noise`, clamped.
-pub fn sample_action<B: Backend>(
+pub(crate) fn sample_action<B: Backend>(
     means: &Tensor<B, 1>,
     log_std: &Tensor<B, 1>,
     device: &B::Device,
+    rng: &mut StdRng,
 ) -> Tensor<B, 1> {
     let std = log_std.clone().exp();
-    let noise_vals: [f32; ACTION_SIZE] =
-        ACTION_RNG.with(|rng| std::array::from_fn(|_| next_standard_normal(&mut rng.borrow_mut())));
+    let noise_vals: [f32; ACTION_SIZE] = std::array::from_fn(|_| next_standard_normal(rng));
     let noise = Tensor::<B, 1>::from_floats(noise_vals, device);
     let action = means.clone() + noise * std;
     action.clamp(-1.0, 1.0)
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct PpoMetrics {
-    pub policy_loss: f32,
-    pub value_loss: f32,
-    pub entropy: f32,
+pub(crate) struct PpoMetrics {
+    pub(crate) policy_loss: f32,
+    pub(crate) value_loss: f32,
+    pub(crate) entropy: f32,
 }
 
 #[cfg(test)]

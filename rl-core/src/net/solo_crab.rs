@@ -119,7 +119,7 @@ impl SoloCrabBridge {
             last_carapace_m: None,
             yaw_turns: 0,
             hunt_target_m: None,
-            settle: crate::training::session::RESET_GRACE_TICKS,
+            settle: crate::training::systems::RESET_GRACE_TICKS,
         }
     }
 
@@ -365,7 +365,7 @@ fn run_solo_policy(
     // the demo/training do, so the policy doesn't drive a still-falling body into a locked
     // pose that never walks. Counts down to 0, then the policy takes over.
     if bridge.settle > 0 {
-        bridge.settle = crate::training::session::settle_countdown(bridge.settle);
+        bridge.settle = crate::training::systems::settle_countdown(bridge.settle);
         if let Some(a) = actions.envs.first_mut() {
             *a = [0.0; crate::bot::actuator::ACTION_SIZE];
         }
@@ -393,7 +393,7 @@ fn integrate_solo_crab(
     let was_rescued = rescued.read().any(|m| m.env == 0);
     if was_rescued {
         bridge.last_carapace_m = None;
-        bridge.settle = crate::training::session::RESET_GRACE_TICKS;
+        bridge.settle = crate::training::systems::RESET_GRACE_TICKS;
     }
 
     let Some((_, t, vel)) = carapace_q.iter().find(|(env, _, _)| env.0 == 0) else {

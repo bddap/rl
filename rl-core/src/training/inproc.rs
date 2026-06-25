@@ -72,15 +72,16 @@ use crate::TrainConfig;
 use crate::bot::brain::CrabBrain;
 
 use super::algorithm::{RolloutBuffer, Transition};
-use super::session::{
-    CURRICULUM_FILENAME, Curriculum, CurriculumProgress, ObsNormalizerData, TrainBackend,
-    TrainingState, load_curriculum, save_curriculum,
-};
+use super::TrainBackend;
+use super::checkpoint::CURRICULUM_FILENAME;
+use super::curriculum::{Curriculum, CurriculumProgress, load_curriculum, save_curriculum};
+use super::normalizer::ObsNormalizerData;
+use super::systems::TrainingState;
 // Gated to the call sites, both in the wgpu-only `run_learner`: an unconditional import
 // would be an unresolved-symbol error in the render bins (rl-demo, game), which link
 // rl-core with `render` but neither `wgpu` nor `test` (the gate on the symbol itself).
 #[cfg(feature = "wgpu")]
-use super::session::OPTIMIZER_FILENAME;
+use super::checkpoint::OPTIMIZER_FILENAME;
 
 /// Recorder for the in-memory weight snapshot. The same precision settings the
 /// on-disk checkpoint (`BinFileRecorder<FullPrecisionSettings>`) uses, so a brain
@@ -481,8 +482,8 @@ fn warm_up_app(app: &mut App) {
 /// serialize on it (flat throughput). Both are unconditional here.
 fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
     use crate::bot::test_util::{HeadlessStack, WorldRole, headless_stack};
-    use crate::training::session;
-    use crate::training::session::{brain_step, reset_crab, save_on_exit};
+    use crate::training::systems;
+    use crate::training::systems::{brain_step, reset_crab, save_on_exit};
 
     // Per-thread scratch CSV dir so K threads never write the same file.
     let metrics_dir = worker_metrics_dir(id);
@@ -500,7 +501,9 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
     // runs in this app: the driver thread reads the per-env buffers out each horizon
     // and the learner owns the update. save_on_exit stays harmless (no AppExit fires
     // here).
-    let state = session::TrainingState::new_worker(config, &metrics_dir);
+    // `id` is the worker index — mixed into the RNG seed so each thread explores an
+    // independent stream even under a fixed `--seed` (see `TrainingState::build`).
+    let state = systems::TrainingState::new_worker(config, &metrics_dir, id);
     app.insert_non_send_resource(state)
         .add_systems(
             FixedUpdate,
@@ -556,6 +559,17 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     apply_nice(nice);
     init_process_pools();
 
+    // Resolve the run's master RNG seed ONCE here, so the same base seed reaches the host
+    // and every rollout worker (each mixes in its index for an independent stream — see
+    // `TrainingState::build`). A single logged seed then reproduces the whole run; left to
+    // each `TrainingState` to resolve, an entropy-default run would draw K+1 unrelated
+    // seeds and no one value could reproduce it.
+    let mut config_owned = config.clone();
+    if config_owned.seed.is_none() {
+        config_owned.seed = Some(rand::random::<u64>());
+    }
+    let config = &config_owned;
+
     // Arm the startup watchdog BEFORE any rollout world is built (so its thread is
     // never a party to the gemm-tree deadlock it guards against). If the rollout
     // workers wedge during their world build — the rare pre-iter-0 matmul
@@ -584,7 +598,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // fails at boot before any rollout. (The first GPU update still pays a one-time
     // shader-compile warmup; that lands in iter 0's update time, excluded by
     // `warmup_iters` from the steady-state rate.)
-    let mut gpu_learner = super::session::GpuLearner::new();
+    let mut gpu_learner = super::gpu::GpuLearner::new();
 
     // Resume the optimizer's Adam moments + step from the checkpoint so the update
     // continues with warm momentum instead of the brief self-correcting transient a cold
@@ -745,8 +759,8 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         //    so it is the honest per-iter update cost.
         let update_start = Instant::now();
         // `gpu_timing` carries the GPU update's load/compute/store split for the log.
-        let (brain, ppo_config, ret_norm) = state.learner_parts_for_gpu();
-        let (metrics, gpu_timing) = gpu_learner.update(brain, ppo_config, &rollouts, ret_norm);
+        let (brain, ppo_config, ret_norm, rng) = state.learner_parts_for_gpu();
+        let (metrics, gpu_timing) = gpu_learner.update(brain, ppo_config, &rollouts, ret_norm, rng);
         let update_secs = update_start.elapsed().as_secs_f64();
         let wall_secs = wall_start.elapsed().as_secs_f64();
 
@@ -850,13 +864,14 @@ mod tests {
     // trainer's update is GPU-only (see `run_learner`); this exercises the shared
     // `ppo_update_core` math, not a second production path.
     use crate::bot::sensor::OBS_SIZE;
-    use crate::training::session::{crab_optimizer, ppo_update_core};
+    use crate::training::checkpoint::crab_optimizer;
+    use crate::training::update::ppo_update_core;
 
     /// A zero-count normalizer increment: a fresh normalizer's snapshot. Used to fill
     /// a `Rolled` outcome's `increment` in tests that don't exercise real stats, and
     /// to pin the no-op-merge property the normalizer relies on.
     fn empty_normalizer_increment() -> ObsNormalizerData {
-        use crate::training::session::{NORMALIZER_CLIP, ObsNormalizer};
+        use crate::training::normalizer::{NORMALIZER_CLIP, ObsNormalizer};
         ObsNormalizer::new(NORMALIZER_CLIP).snapshot()
     }
 
@@ -1027,7 +1042,7 @@ mod tests {
     /// bincode bytes, the same form that crosses the iteration.
     #[test]
     fn empty_increment_merge_is_a_noop() {
-        use crate::training::session::{NORMALIZER_CLIP, ObsNormalizer};
+        use crate::training::normalizer::{NORMALIZER_CLIP, ObsNormalizer};
 
         // A master with some real stats.
         let mut master = ObsNormalizer::new(NORMALIZER_CLIP);
@@ -1112,9 +1127,9 @@ mod tests {
         // The CPU update path owns its optimizer (it isn't learner state — the live
         // GPU learner never steps a CPU Adam), so build the production one here.
         let mut optimizer = crab_optimizer();
-        let (brain, ppo_config, device, ret_norm) = state.learner_parts();
+        let (brain, ppo_config, device, ret_norm, rng) = state.learner_parts();
         let metrics =
-            ppo_update_core(brain, &mut optimizer, ppo_config, &rollouts, device, ret_norm);
+            ppo_update_core(brain, &mut optimizer, ppo_config, &rollouts, device, ret_norm, rng);
         assert!(
             metrics.policy_loss.is_finite()
                 && metrics.value_loss.is_finite()

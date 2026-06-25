@@ -31,10 +31,12 @@ use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{BotSet, CrabSpawns, respawn_crab_rotated};
 use crate::screenshot::{self, ShotProgress, ShotTarget};
-use crate::training::session::{
-    BRAIN_STEM, Curriculum, InferBackend, NORMALIZER_FILENAME, ObsNormalizer, RESET_GRACE_TICKS,
-    TrainBackend, dist_3d, sample_target, settle_countdown,
-};
+use crate::training::checkpoint::{BRAIN_STEM, NORMALIZER_FILENAME};
+use crate::training::curriculum::{Curriculum, sample_target};
+use crate::training::{InferBackend, TrainBackend};
+use crate::training::normalizer::ObsNormalizer;
+use crate::training::reward::dist_3d;
+use crate::training::systems::{RESET_GRACE_TICKS, settle_countdown};
 
 // ---------------------------------------------------------------------------
 // Demo control scheme — the demo's verbs for the reusable controls overlay
@@ -874,10 +876,10 @@ struct TargetBall;
 /// defines a binary "reached it" event in two non-reward places that benefit from one
 /// shared definition: the demo's ball-hop here, and the training curriculum's
 /// per-episode competence signal. DERIVED from that curriculum constant
-/// ([`crate::training::session::CURRICULUM_REACH_RADIUS`]) — one source, in the
+/// ([`crate::training::curriculum::CURRICULUM_REACH_RADIUS`]) — one source, in the
 /// always-compiled trainer — so the demo and curriculum can't drift apart on the
 /// radius. (0.8 m, as the doc above describes.)
-pub(crate) const DEMO_REACH_RADIUS: f32 = crate::training::session::CURRICULUM_REACH_RADIUS;
+pub(crate) const DEMO_REACH_RADIUS: f32 = crate::training::curriculum::CURRICULUM_REACH_RADIUS;
 
 /// Radius (m) of the demo target ball. Bigger than [`DEMO_REACH_RADIUS`] so the
 /// claw visibly reaches *into* the ball before it registers a reach and jumps —
@@ -921,7 +923,7 @@ fn spawn_target_ball(
 /// (no resample on reach): the reward is a pure distance field with no reach-event
 /// bonus, so resampling-on-reach would let the optimal policy hover just outside the
 /// reach radius forever instead of touching — a degenerate optimum (see
-/// `session::brain_step`). The DEMO deliberately teleports on reach anyway, purely for
+/// `systems::brain_step`). The DEMO deliberately teleports on reach anyway, purely for
 /// watchability: it keeps the crab walking continuously to new goals instead of parking
 /// on one. This is safe because the policy learned "walk toward the current target
 /// vector" and so generalizes to a target that moves — the demo just exercises that on
@@ -955,7 +957,7 @@ fn target_ball(
 
     // Closest 3D euclidean distance from either claw tip to the target (the reward's
     // `d`, env 0) — 3D so the ball relocates at the same reached-moment training does
-    // (the reward and this test MUST share one `d`; see `session::dist_3d`).
+    // (the reward and this test MUST share one `d`; see `reward::dist_3d`).
     let mut min_dist = f32::INFINITY;
     for (env, tip) in claw_tips_q.iter() {
         if env.0 == 0 && tip.translation.is_finite() {
