@@ -2,9 +2,9 @@
 //!
 //! Two scrolling line graphs drawn over the scene: every joint's **angle**
 //! (the revolute coordinate, radians) on top and its **commanded torque** on
-//! the bottom. The crab is torque-controlled, so the torque trace is the
-//! policy's actual normalized output [-1, 1] — the real command, not a
-//! reconstructed proxy. The angle is read off the links' orientations with the
+//! the bottom. The crab is torque-controlled; the policy emits an unbounded
+//! drive, so the trace clamps it to [-1, 1] — the signed torque command the sim
+//! runs. The angle is read off the links' orientations with the
 //! same helper the observation uses, so the plot shows exactly what the policy
 //! senses.
 //!
@@ -176,8 +176,9 @@ fn sample_graph(
         let idx = id.index();
 
         let angle = joint_angle(joint.axis_local, parent_tf.rotation, child_tf.rotation);
-        // Under torque control the NN output IS the signed torque (normalized),
-        // so the "torque" plot is the real command, not a reconstructed proxy.
+        // `actions.envs` holds the policy's UNBOUNDED drive `μ+σ·ε`, so clamp to ±1 here to
+        // recover the signed torque command the sim actually runs (the actuator's bound) for
+        // the plot.
         let torque = action[idx].clamp(-1.0, 1.0);
 
         push(&mut graph.angle[idx], angle);

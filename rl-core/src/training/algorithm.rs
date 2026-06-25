@@ -121,6 +121,9 @@ impl std::ops::Mul<f32> for RealReturn {
 #[derive(Clone)]
 pub(crate) struct Transition {
     pub(crate) obs: [f32; OBS_SIZE],
+    /// The policy's unbounded pre-clamp DRIVE `μ + σ·ε` (the sim ran `drive.clamp(±1)`). The
+    /// PPO update recomputes its log-prob over THIS, so it must be the sample the stored
+    /// `log_prob` was taken on — the drive, not the clamped command (see `sample_actions`).
     pub(crate) action: [f32; ACTION_SIZE],
     pub(crate) reward: f32,
     /// The value head's raw output for this step — always NORMALIZED units, never
@@ -162,8 +165,8 @@ impl Default for RolloutBuffer {
 /// # Why this exists
 /// The advantages PPO's policy gradient uses are already batch-normalized
 /// ([`ppo_update_core`]), so the policy is scale-invariant. The value head is not:
-/// it regresses raw returns, and when the reward magnitude is large (the pose+reach
-/// reward accumulates to ~+1500 over a full 1500-step episode) the squared value loss
+/// it regresses raw returns, and when the reward magnitude is large (a reward that
+/// accumulates to hundreds or thousands over a full episode) the squared value loss
 /// and its gradient blow up, the bounded value head can't track the target, advantages
 /// derived from `R - V` become noise, and training diverges. Normalizing the value
 /// TARGET to unit scale fixes the value head's conditioning without touching the
@@ -385,13 +388,20 @@ fn next_standard_normal(rng: &mut StdRng) -> f32 {
     (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
 }
 
-/// Sample actions from Gaussian policy.
+/// Sample one DRIVE per joint from the Gaussian policy: `dᵢ = μᵢ + σ·εᵢ`, UN-clamped.
+///
+/// Returns the raw pre-clamp drive — the random variable the policy actually drew, and the
+/// quantity the reward's metabolic tax and the PPO log-prob are both taken over (see
+/// `sample_actions`). The ±1 clamp that bounds the sim's torque command is applied by the
+/// caller, so the unbounded drive survives for the tax to bite on saturation (a `|d|≫1` drive
+/// that slams a joint onto its rail). Clamping here would erase that overshoot — the tax would
+/// see only the bounded command and lose its pull off the rail.
 ///
 /// The noise comes from the caller's `rng` (the run's seeded [`StdRng`], owned per
 /// `TrainingState`) rather than the backend's global-mutex-locked `Tensor::random`, so K
 /// rollout threads don't serialize on a hot-path lock AND the sampled trajectory is
 /// reproducible from the seed. Swapping the RNG source leaves the distribution unchanged:
-/// standard-normal noise, then `mean + std·noise`, clamped.
+/// standard-normal noise, then `mean + std·noise`.
 pub(crate) fn sample_action<B: Backend>(
     means: &Tensor<B, 1>,
     log_std: &Tensor<B, 1>,
@@ -401,8 +411,7 @@ pub(crate) fn sample_action<B: Backend>(
     let std = log_std.clone().exp();
     let noise_vals: [f32; ACTION_SIZE] = std::array::from_fn(|_| next_standard_normal(rng));
     let noise = Tensor::<B, 1>::from_floats(noise_vals, device);
-    let action = means.clone() + noise * std;
-    action.clamp(-1.0, 1.0)
+    means.clone() + noise * std
 }
 
 #[derive(Debug, Default, Clone)]

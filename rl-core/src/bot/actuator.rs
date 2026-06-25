@@ -54,6 +54,11 @@ pub fn apply_actions(
         };
         let id = joint.id;
         let a = values[id.index()];
+        // The SOLE ±1 torque-bound for every `CrabActions` writer (the training policy's raw
+        // drive, the demo, manual control): each writes an un-clamped value and this clamp is
+        // where it becomes a bounded muscle command. Keeping the bound here (not at each
+        // writer) lets the training tax see the policy's unbounded drive — a saturating
+        // `|a|≫1` is penalized for the overshoot, then clamped to a physical torque here.
         let a = if a.is_finite() {
             a.clamp(-1.0, 1.0)
         } else {

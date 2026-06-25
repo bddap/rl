@@ -9374,6 +9374,8 @@ dependencies = [
  "burn",
  "clap",
  "rl-core",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

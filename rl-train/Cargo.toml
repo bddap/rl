@@ -27,3 +27,10 @@ rl-core = { path = "../rl-core" }
 bevy.workspace = true
 clap.workspace = true
 burn.workspace = true
+# A tracing subscriber so the trainer's `info!`/`warn!`/`error!` actually surface: the
+# headless build links no bevy LogPlugin, so without an installed subscriber every log —
+# including the non-finite-observation guard — is silently discarded.
+tracing.workspace = true
+# `env-filter` owned explicitly (RUST_LOG support) rather than borrowed from bevy_log's
+# feature unification, so dropping bevy from this crate can't silently break `init_tracing`.
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
