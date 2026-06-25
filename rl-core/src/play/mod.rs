@@ -177,16 +177,6 @@ impl Plugin for ScreenshotPlugin {
         app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default())
             .insert_resource(force_reveal)
             .insert_resource(active_device);
-        // RL_SKIN_DIAG: print the settled-pose point-in-mesh audit one frame before
-        // the capture, so the table describes the exact frame the screenshot records.
-        if std::env::var_os("RL_SKIN_DIAG").is_some() {
-            crate::bot::skin_diag::register(app, self.settle);
-        }
-        // RL_SKIN_ALPHA: render the skin translucent so markers/colliders read through
-        // it — the visually-unambiguous inside/outside check.
-        if std::env::var_os("RL_SKIN_ALPHA").is_some() {
-            crate::bot::skin_diag::register_translucent(app);
-        }
     }
 }
 

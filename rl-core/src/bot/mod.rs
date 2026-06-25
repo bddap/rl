@@ -12,14 +12,11 @@ pub mod rig;
 pub mod sensor;
 #[cfg(test)]
 mod sim_truth_test;
-// Render-only: the skinned-mesh setup + the skin diagnostics drive bevy's renderer
-// (SkinnedMesh, materials, mesh assets), absent in the headless trainer's bevy build.
-// Headless training spawns the colliders only — no skin — so the trainer loses
-// nothing by gating these out.
+// Render-only: the skinned-mesh setup drives bevy's renderer (SkinnedMesh, materials,
+// mesh assets), absent in the headless trainer's bevy build. Headless training spawns
+// the colliders only — no skin — so the trainer loses nothing by gating this out.
 #[cfg(feature = "render")]
 pub mod skin;
-#[cfg(feature = "render")]
-pub mod skin_diag;
 // Not test-only: the `--check-rest-colliders` diagnostic ships in the binary and
 // reuses `headless_app`/`tick` to build and settle the same windowless physics
 // world the sim tests run, so one app builder serves both.

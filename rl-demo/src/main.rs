@@ -18,7 +18,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 use clap::Parser;
-use rl_core::{TrainConfig, Visuals, bot, debug_sliders, physics, play};
+use rl_core::{TrainConfig, Visuals, bot, physics, play};
 
 /// Crab Combat demo — render a trained crab policy.
 ///
@@ -70,13 +70,6 @@ pub struct Args {
     /// zero. A physics feel-test, not a learned driver.
     #[arg(long)]
     manual_control: bool,
-
-    /// Demo only: show a TEMPORARY egui panel of physics sliders (contact spring,
-    /// length_unit, joint limit spring + leg friction, restitution, substeps) that
-    /// live-tune the running crab. A throwaway feel-tuning aid; off by default and
-    /// never wired into training/headless. See `rl-core/src/debug_sliders.rs`.
-    #[arg(long)]
-    debug_sliders: bool,
 }
 
 /// What this run is rendering. Both modes always render (the binary has no headless
@@ -233,10 +226,6 @@ fn main() {
                 live_checkpoint_dir: args.live_checkpoint_dir.clone(),
                 manual_control: args.manual_control,
             });
-            // TEMPORARY physics-tuning overlay, demo-only and off by default.
-            if args.debug_sliders {
-                app.add_plugins(debug_sliders::DebugSlidersPlugin);
-            }
         }
         AppMode::Screenshot { path, settle } => {
             app.add_plugins(play::ScreenshotPlugin {

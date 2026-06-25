@@ -474,7 +474,7 @@ fn strip_cross_part_weights(
 }
 
 /// Read a `Uint16x4` mesh attribute as `[u16; 4]` lanes, or `None` for any other
-/// stored format. Shared with `skin_diag` (which also walks skin joints/weights).
+/// stored format.
 pub(crate) fn read_u16x4(
     mesh: &Mesh,
     attr: bevy::mesh::MeshVertexAttribute,
