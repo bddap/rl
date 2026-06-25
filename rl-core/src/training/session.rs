@@ -282,6 +282,116 @@ pub(crate) fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
         .init()
 }
 
+/// Format version of the [`OPTIMIZER_FILENAME`] envelope. Bumped whenever the serialized
+/// layout changes; a file tagged with any other version is ignored on load (→ cold
+/// moments), never deserialized blind — so both an older checkpoint (which has no such
+/// file at all) and one from a future format resume safely instead of erroring. v1 is
+/// burn's Adam record (per-param m/v + step `time`) under `FullPrecisionSettings`, wrapped
+/// in this versioned bincode envelope.
+#[cfg(any(feature = "wgpu", test))]
+const OPTIMIZER_FORMAT_VERSION: u32 = 1;
+
+/// On-disk envelope for the optimizer state: a version tag wrapping the burn optimizer
+/// record's bytes. The bytes are device-independent — the `FullPrecisionSettings` recorder
+/// reads the moment tensors off whatever device the optimizer lives on (the GPU, in
+/// production) into host floats on save, and uploads them back on load — so one file
+/// restores onto whichever device the next learner brings up.
+#[cfg(any(feature = "wgpu", test))]
+#[derive(Serialize, Deserialize)]
+struct OptimizerCheckpoint {
+    version: u32,
+    record: Vec<u8>,
+}
+
+/// Persist an Adam optimizer's state (per-param first/second moments + step) to `path`,
+/// atomically and version-tagged. Generic over the backend so the live GPU learner and the
+/// CPU round-trip test serialize through ONE path — no save/load drift. The
+/// `FullPrecisionSettings` recorder reads the moment tensors back off the optimizer's device
+/// into host floats, exactly as the brain bridge does for weights. Best-effort: any failure
+/// is logged, not fatal — the run continues, a resume just falls back to cold moments.
+#[cfg(any(feature = "wgpu", test))]
+fn save_optimizer<B: AutodiffBackend>(optimizer: &CrabOpt<B>, path: &Path) {
+    let record = optimizer.to_record();
+    let bytes = match BinBytesRecorder::<FullPrecisionSettings>::default().record(record, ()) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Failed to serialize Adam optimizer state: {e}");
+            return;
+        }
+    };
+    let envelope = OptimizerCheckpoint {
+        version: OPTIMIZER_FORMAT_VERSION,
+        record: bytes,
+    };
+    match bincode::serialize(&envelope) {
+        Ok(encoded) => {
+            if let Err(e) = atomic_write(path, &encoded) {
+                warn!(
+                    "Failed to write Adam optimizer state to {}: {e}",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => warn!("Failed to encode Adam optimizer state: {e}"),
+    }
+}
+
+/// Load an Adam optimizer state saved by [`save_optimizer`] onto `device`, returning the
+/// optimizer with its moments + step restored. Returns the `cold` optimizer UNCHANGED — no
+/// error — when the file is absent (a pre-rl#60 checkpoint, or a fresh run), unreadable,
+/// corrupt, or tagged with a version this build doesn't recognize; all of these resume cold,
+/// which is correct, just without the warm-momentum head start. The per-parameter keys line
+/// up across the round trip because the resumed brain restores the SAME `ParamId`s from its
+/// own record, so each moment lands back on its parameter.
+#[cfg(any(feature = "wgpu", test))]
+fn load_optimizer<B: AutodiffBackend>(
+    cold: CrabOpt<B>,
+    path: &Path,
+    device: &B::Device,
+) -> CrabOpt<B> {
+    let Ok(bytes) = std::fs::read(path) else {
+        // Absent file is the EXPECTED case for a pre-rl#60 checkpoint, so info, not warn —
+        // a warm-continue of an older policy with cold moments is normal, not a fault.
+        info!(
+            "No Adam optimizer state at {} — starting the optimizer cold",
+            path.display()
+        );
+        return cold;
+    };
+    let envelope: OptimizerCheckpoint = match bincode::deserialize(&bytes) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(
+                "Corrupt Adam optimizer state at {}: {e} — starting the optimizer cold",
+                path.display()
+            );
+            return cold;
+        }
+    };
+    if envelope.version != OPTIMIZER_FORMAT_VERSION {
+        warn!(
+            "Adam optimizer state at {} is format v{}, this build writes v{} — starting cold",
+            path.display(),
+            envelope.version,
+            OPTIMIZER_FORMAT_VERSION
+        );
+        return cold;
+    }
+    match BinBytesRecorder::<FullPrecisionSettings>::default().load(envelope.record, device) {
+        Ok(record) => {
+            info!("Restored Adam optimizer state from {}", path.display());
+            cold.load_record(record)
+        }
+        Err(e) => {
+            warn!(
+                "Failed to decode Adam optimizer record at {}: {e} — starting cold",
+                path.display()
+            );
+            cold
+        }
+    }
+}
+
 struct MetricsLogger {
     episode_file: std::fs::File,
 }
@@ -341,6 +451,14 @@ pub(crate) const RETURN_NORMALIZER_FILENAME: &str = "return_normalizer.bin";
 /// (which would re-teach what the policy already knows). Fallback on a missing/bad file
 /// is rung 1 (see [`load_curriculum`]).
 pub(crate) const CURRICULUM_FILENAME: &str = "curriculum.bin";
+/// Persisted Adam optimizer state (rl#60): the per-parameter first/second moments and step
+/// (`time`) the GPU learner carries across iterations. A resume restores these so the
+/// optimizer continues with warm momentum instead of paying the brief self-correcting
+/// transient a cold restart costs. Absent in pre-rl#60 checkpoints, which then resume cold
+/// (see [`load_optimizer`]) rather than erroring — the format version inside the file
+/// (see [`OPTIMIZER_FORMAT_VERSION`]) guards a layout change the same way.
+#[cfg(any(feature = "wgpu", test))]
+pub(crate) const OPTIMIZER_FILENAME: &str = "optimizer.bin";
 
 /// Write `bytes` to `path` atomically: a sibling temp file then a rename, so a crash
 /// mid-write leaves the previous file intact rather than a torn one. The overnight
@@ -1714,6 +1832,21 @@ impl GpuLearner {
             },
         )
     }
+
+    /// Persist the optimizer's Adam state (per-param m/v + step) to `path`, reading the
+    /// moment tensors back off the GPU. Called each iteration beside the brain checkpoint so
+    /// a resume warm-starts the optimizer. Best-effort (see [`save_optimizer`]).
+    pub fn save_adam_state(&self, path: &Path) {
+        save_optimizer(&self.optimizer, path);
+    }
+
+    /// Restore the optimizer's Adam state from `path`, uploading the moments back onto this
+    /// learner's GPU device. A missing file (pre-rl#60 checkpoint) or an unrecognized version
+    /// leaves the optimizer cold without error (see [`load_optimizer`]).
+    pub fn load_adam_state(&mut self, path: &Path) {
+        let cold = std::mem::replace(&mut self.optimizer, crab_optimizer());
+        self.optimizer = load_optimizer(cold, path, &self.device);
+    }
 }
 
 /// The start band (rung 1): the planar (XZ) distance, in metres, at which a fresh
@@ -2925,6 +3058,126 @@ mod tests {
         for (i, (a, b)) in orig_s.iter().zip(loaded_s.iter()).enumerate() {
             assert!((a - b).abs() < 1e-6, "log_std[{i}] diverged: {a} vs {b}");
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One deterministic Adam step on a tiny constant-gradient loss, returning the updated
+    /// brain + optimizer. Warms the Adam moments for the round-trip test without the full
+    /// PPO machinery: a fixed input + sum loss puts non-zero grads on every parameter, so
+    /// the moments + step advance as a real update would.
+    fn adam_test_step(
+        brain: CrabBrain<TrainBackend>,
+        mut optimizer: CrabOpt<TrainBackend>,
+        device: &NdArrayDevice,
+    ) -> (CrabBrain<TrainBackend>, CrabOpt<TrainBackend>) {
+        let obs = Tensor::<TrainBackend, 2>::ones([4, OBS_SIZE], device);
+        let (means, log_std) = brain.policy(obs);
+        let loss = means.sum() + log_std.sum();
+        let grads = loss.backward();
+        let grads = GradientsParams::from_grads(grads, &brain);
+        let brain = optimizer.step(1e-2, brain, grads);
+        (brain, optimizer)
+    }
+
+    fn policy_means(brain: &CrabBrain<TrainBackend>, device: &NdArrayDevice) -> Vec<f32> {
+        let obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], device);
+        brain.policy(obs).0.to_data().to_vec().unwrap()
+    }
+
+    #[test]
+    fn adam_optimizer_state_round_trips_through_checkpoint() {
+        let dir = std::env::temp_dir().join("rl_test_adam_roundtrip");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let device = NdArrayDevice::Cpu;
+
+        // Warm an optimizer over several steps so its Adam moments + step are non-trivial,
+        // then snapshot brain + optimizer mid-run.
+        let mut brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let mut warm = crab_optimizer::<TrainBackend>();
+        for _ in 0..5 {
+            let (b, o) = adam_test_step(brain, warm, &device);
+            brain = b;
+            warm = o;
+        }
+        assert!(
+            !warm.to_record().is_empty(),
+            "the warmed optimizer should hold per-parameter moments"
+        );
+
+        let path = dir.join(OPTIMIZER_FILENAME);
+        save_optimizer(&warm, &path);
+        assert!(path.exists(), "optimizer.bin should be written");
+
+        // A fresh cold optimizer loaded from the snapshot must take the NEXT step
+        // identically to the warm one (same momentum + step/bias-correction), and
+        // DIFFERENTLY from a truly cold optimizer — that difference is exactly the
+        // self-correcting transient a warm resume avoids.
+        let restored = load_optimizer(crab_optimizer::<TrainBackend>(), &path, &device);
+        assert_eq!(
+            restored.to_record().len(),
+            warm.to_record().len(),
+            "restored optimizer should hold the same per-parameter moment count"
+        );
+
+        let (warm_next, _) = adam_test_step(brain.clone(), warm, &device);
+        let (restored_next, _) = adam_test_step(brain.clone(), restored, &device);
+        let (cold_next, _) =
+            adam_test_step(brain.clone(), crab_optimizer::<TrainBackend>(), &device);
+
+        let warm_m = policy_means(&warm_next, &device);
+        let restored_m = policy_means(&restored_next, &device);
+        let cold_m = policy_means(&cold_next, &device);
+
+        for (i, (a, b)) in warm_m.iter().zip(restored_m.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "restored step diverged from warm at mean[{i}]: {a} vs {b}"
+            );
+        }
+        // The moments must actually matter: a cold optimizer's step differs from the warm
+        // one. If not, the round-trip wouldn't be exercising the persisted state.
+        let differs = warm_m
+            .iter()
+            .zip(cold_m.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-6);
+        assert!(
+            differs,
+            "cold and warm steps were identical — the test isn't exercising the moments"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_or_unknown_optimizer_state_loads_cold_without_error() {
+        let dir = std::env::temp_dir().join("rl_test_adam_compat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let device = NdArrayDevice::Cpu;
+        let path = dir.join(OPTIMIZER_FILENAME);
+
+        // (a) Absent file — a pre-rl#60 checkpoint. Loads cold, no panic/error.
+        assert!(!path.exists());
+        let cold = load_optimizer(crab_optimizer::<TrainBackend>(), &path, &device);
+        assert!(
+            cold.to_record().is_empty(),
+            "an absent optimizer file must leave the optimizer cold"
+        );
+
+        // (b) A file tagged with a version this build doesn't recognize (a future format)
+        //     is ignored rather than deserialized blind → cold, no panic.
+        let bogus = OptimizerCheckpoint {
+            version: OPTIMIZER_FORMAT_VERSION + 1,
+            record: vec![0xde, 0xad, 0xbe, 0xef],
+        };
+        std::fs::write(&path, bincode::serialize(&bogus).unwrap()).unwrap();
+        let cold2 = load_optimizer(crab_optimizer::<TrainBackend>(), &path, &device);
+        assert!(
+            cold2.to_record().is_empty(),
+            "an unknown-version optimizer file must leave the optimizer cold"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

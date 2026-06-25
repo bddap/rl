@@ -76,6 +76,11 @@ use super::session::{
     CURRICULUM_FILENAME, Curriculum, CurriculumProgress, ObsNormalizerData, TrainBackend,
     TrainingState, load_curriculum, save_curriculum,
 };
+// Gated to the call sites, both in the wgpu-only `run_learner`: an unconditional import
+// would be an unresolved-symbol error in the render bins (rl-demo, game), which link
+// rl-core with `render` but neither `wgpu` nor `test` (the gate on the symbol itself).
+#[cfg(feature = "wgpu")]
+use super::session::OPTIMIZER_FILENAME;
 
 /// Recorder for the in-memory weight snapshot. The same precision settings the
 /// on-disk checkpoint (`BinFileRecorder<FullPrecisionSettings>`) uses, so a brain
@@ -581,6 +586,12 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // `warmup_iters` from the steady-state rate.)
     let mut gpu_learner = super::session::GpuLearner::new();
 
+    // Resume the optimizer's Adam moments + step from the checkpoint so the update
+    // continues with warm momentum instead of the brief self-correcting transient a cold
+    // optimizer costs (rl#60). A pre-rl#60 checkpoint has no optimizer.bin and resumes cold
+    // — backward compatible, no error (see `load_optimizer`).
+    gpu_learner.load_adam_state(&checkpoint_dir.join(OPTIMIZER_FILENAME));
+
     // Resume the tick odometer from the checkpoint, not from 0: the overnight loop
     // makes a learner restart the expected case, and without persistence each
     // restart would re-grant the full `--ticks` budget and over-simulate.
@@ -640,6 +651,10 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         let curriculum = progress.curriculum();
         state.save_checkpoint();
         save_curriculum(curriculum, &checkpoint_dir.join(CURRICULUM_FILENAME));
+        // The Adam moments + step live on the GPU learner, not the CPU TrainingState, so
+        // they persist here alongside the brain — together they let a resume continue the
+        // optimizer warm (rl#60).
+        gpu_learner.save_adam_state(&checkpoint_dir.join(OPTIMIZER_FILENAME));
 
         // 2) Roll one synchronous horizon across all threads. Send every thread its
         //    request, then collect every result (the barrier: the update waits for
