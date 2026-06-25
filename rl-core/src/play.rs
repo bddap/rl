@@ -1338,6 +1338,14 @@ impl Plugin for ScreenshotPlugin {
             Update,
             (track_offscreen_camera, capture_when_settled).chain(),
         );
+        // Controls overlay on the screenshot path too, so an evidence frame can prove the
+        // demo's hold-to-reveal legend renders. The convenience plugin spawns the UI + seeds
+        // `ForceRevealControls(false)`; the shared env override (see
+        // [`crate::controls::reveal_overrides_from_env`]) opens it for the headless shot.
+        let (force_reveal, active_device) = crate::controls::reveal_overrides_from_env();
+        app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default())
+            .insert_resource(force_reveal)
+            .insert_resource(active_device);
         // RL_SKIN_DIAG: print the settled-pose point-in-mesh audit one frame before
         // the capture, so the table describes the exact frame the screenshot records.
         if std::env::var_os("RL_SKIN_DIAG").is_some() {
@@ -1388,6 +1396,12 @@ fn spawn_offscreen_camera(
         // windowless render; None keeps the offscreen pass simple.
         Tonemapping::None,
         Transform::from_xyz(1.9, 1.15, 2.5).looking_at(Vec3::new(0.0, 0.35, 0.0), Vec3::Y),
+        // Make UI composite into THIS offscreen target. Bevy auto-targets UI at the
+        // default-WINDOW camera, but the screenshot path has no window — without this
+        // marker the controls overlay never draws into the captured texture (same fix
+        // net/render.rs's screenshot camera carries). The windowed demo doesn't need it:
+        // its window camera is the implicit UI target.
+        bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(ShotTarget(handle));
 }

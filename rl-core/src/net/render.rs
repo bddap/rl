@@ -43,8 +43,8 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowMode};
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
 use crate::controls::{
-    ActiveDevice, Device, ForceRevealControls, PAD_STICK_DEADZONE, spawn_controls_ui,
-    track_active_device, update_controls_ui,
+    ActiveDevice, ForceRevealControls, PAD_STICK_DEADZONE, spawn_controls_ui, track_active_device,
+    update_controls_ui,
 };
 use crate::net::controls::{self, Action, GcrControls};
 use crate::net::lockstep::{Lockstep, TickMsg};
@@ -411,19 +411,13 @@ pub fn build_screenshot_app(ls: Lockstep, cfg: ScreenshotConfig) -> App {
         InputSource::Scripted(Input::new(0.0, 1.0, 0.0, 0)),
     );
     // Controls UI on the screenshot path too, so an evidence frame can prove the overlay +
-    // hint draw. `RL_SHOW_CONTROLS=1` forces the (normally hold-to-reveal) overlay open;
-    // `RL_SHOW_CONTROLS_PAD=1` shows the gamepad column instead of keyboard/mouse — so one
-    // headless shot can capture either device's legend with no live input.
-    let force_reveal = std::env::var_os("RL_SHOW_CONTROLS").is_some();
-    let show_pad = std::env::var_os("RL_SHOW_CONTROLS_PAD").is_some();
+    // hint draw — the shared env override forces it open headless (see
+    // [`crate::controls::reveal_overrides_from_env`]).
+    let (force_reveal, active_device) = crate::controls::reveal_overrides_from_env();
     app.insert_resource(cfg)
         .init_resource::<ShotProgress>()
-        .insert_resource(ForceRevealControls(force_reveal))
-        .insert_resource(ActiveDevice(if show_pad {
-            Device::Gamepad
-        } else {
-            Device::KeyboardMouse
-        }))
+        .insert_resource(force_reveal)
+        .insert_resource(active_device)
         .add_systems(
             Startup,
             (
