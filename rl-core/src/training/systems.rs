@@ -1279,9 +1279,9 @@ mod tests {
     }
 
     /// Index of the first target-local obs slot (the carapace-frame target vector lives in
-    /// `[BASE, BASE+3)`), mirroring `build_observation`'s `body_base + 13`. Pinned here so
-    /// the directional test reads the same slots the sensor writes.
-    const TARGET_LOCAL_BASE: usize = crate::bot::body::CrabJointId::COUNT * 2 + 13;
+    /// `[BASE, BASE+3)`). Taken from the observation layout's one home so this test can't
+    /// drift from the slots the sensor actually writes.
+    const TARGET_LOCAL_BASE: usize = crate::bot::sensor::TARGET_SLOT;
 
     /// The reach goal must enter the observation as a vector that points TOWARD the
     /// target in the carapace's OWN frame (correct sign), and that body-local vector must
