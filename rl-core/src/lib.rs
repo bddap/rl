@@ -21,6 +21,9 @@ use bevy::prelude::*;
 use clap::Parser;
 
 pub mod bot;
+/// Reusable controls + hold-to-reveal-overlay framework, generic over an app's action set
+/// (GCR and the demo each bring their own [`controls::ControlScheme`]).
+pub mod controls;
 pub mod net;
 pub mod physics;
 pub mod training;
