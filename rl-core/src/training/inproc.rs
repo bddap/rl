@@ -749,15 +749,6 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     }
     let config = &config_owned;
 
-    // Arm the startup watchdog BEFORE any rollout world is built (so its thread is
-    // never a party to the gemm-tree deadlock it guards against). If the rollout
-    // workers wedge during their world build — the rare pre-iter-0 matmul
-    // shared-gemm-tree race that `init_process_pools` mitigates but can't fully rule
-    // out — the watchdog re-execs a fresh process, which re-rolls that probabilistic
-    // race and almost always clears it. The signal is set below the moment the first
-    // rollout returns, which disarms the watchdog for the rest of the run.
-    let progress_signal = super::watchdog::arm(super::watchdog::WatchdogConfig::from_env());
-
     let m = config.envs as usize;
     let tick_budget = config.ticks;
     let checkpoint_dir = config.checkpoint_dir.clone();
@@ -841,10 +832,6 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         // 2) Roll one synchronous horizon across all threads.
         let rollout_start = Instant::now();
         let results = dispatch_horizon(&threads, &request);
-        // Every world built and rolled a full horizon, so the pre-iter-0 gemm-tree
-        // deadlock did not happen — disarm the startup watchdog. (First iteration
-        // only; the call is idempotent, so doing it every iteration is harmless.)
-        progress_signal.mark_reached();
         let rollout_secs = rollout_start.elapsed().as_secs_f64();
 
         // 3) Reduce the threads' outcomes into the master + this iter's aggregates.
