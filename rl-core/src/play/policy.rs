@@ -145,6 +145,13 @@ impl Policy {
         true
     }
 
+    /// Whether a usable checkpoint loaded (vs the zero-action rest-pose fallback). Lets a
+    /// caller fail loud when the body will only hold its rest pose ([`Self::act`] returns the
+    /// neutral pose while this is false).
+    pub(crate) fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
     /// Deterministic action: the policy mean (no exploration noise), so the crab
     /// holds a steady pose instead of jittering. One policy implementation, two
     /// callers — the demo and the game's solo NN-crab.

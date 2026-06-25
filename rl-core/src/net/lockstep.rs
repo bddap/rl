@@ -290,6 +290,13 @@ impl Lockstep {
         self.sim.set_external_crab_pose(pos, yaw);
     }
 
+    /// SOLO ONLY: arm external control AND seed the crab's initial pose atomically — the one
+    /// entry point for handing the crab to the rapier NN body. Forwards to
+    /// [`Sim::initialize_external_crab`].
+    pub fn initialize_external_crab(&mut self, pos: crate::net::sim::Pos, yaw: i32) {
+        self.sim.initialize_external_crab(pos, yaw);
+    }
+
     /// This peer's id.
     pub fn me(&self) -> PlayerId {
         self.me

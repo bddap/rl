@@ -125,6 +125,19 @@ impl SoloCrabBridge {
 
     /// The crab's game-world position as the sim's fixed-point [`Pos`].
     pub fn world_pos(&self) -> Pos {
+        // `world_pos_m` accumulates bounded per-tick steps, so any real session stays well
+        // inside these conservative game-world bounds. A non-finite or wildly out-of-range
+        // value means the integrator smeared a NaN / blow-up in upstream, and the
+        // `as f32 → as i64` cast below would saturate silently into a bogus pose. Catch that
+        // invariant break in debug; release keeps the bare cast unchanged (no clamp), so
+        // behaviour is byte-identical.
+        debug_assert!(
+            self.world_pos_m.is_finite()
+                && self.world_pos_m.x.abs() <= 100_000.0
+                && self.world_pos_m.y.abs() <= 100_000.0,
+            "solo crab world_pos_m out of live bounds: {:?}",
+            self.world_pos_m
+        );
         Pos {
             x: (self.world_pos_m.x * UNIT as f32) as i64,
             z: (self.world_pos_m.y * UNIT as f32) as i64,
@@ -164,30 +177,23 @@ pub fn sync_external_crab(ls: &mut crate::net::lockstep::Lockstep, bridge: &mut 
     bridge.set_hunt_target(ls.sim().nearest_living_player_pos());
 }
 
-/// Runtime gate for the solo NN crab (rl#58). The boot-menu path adds the whole NN stack at
-/// app build (plugins can't be added later) but does NOT know yet whether the round will be
-/// solo — so every NN system is gated on this, and it's flipped on ONLY when the round
-/// resolves solo (Host-alone). While `false` the crab never spawns and no policy/physics
-/// drives it, and crucially [`crate::net::render`]'s `drive_lockstep` never calls
-/// [`sync_external_crab`] — so a networked round with the stack present stays byte-identical
-/// to the integer-crab path. The scripted solo paths (`Boot::Round`) insert it `true` at
-/// build, so there is ONE gate for both, not a second always-on code path.
-#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
-pub struct SoloCrabActive(pub bool);
-
-impl SoloCrabActive {
-    /// Whether the NN crab is active, tolerating an absent resource (`None` ⇒ off). The one
-    /// predicate both the run-condition and [`crate::net::render`]'s `Option<Res<…>>` reads go
-    /// through, so "is the NN crab driving?" is asked one way everywhere.
-    pub fn is_on(this: Option<&Self>) -> bool {
-        this.is_some_and(|a| a.0)
-    }
-}
+/// Runtime gate for the solo NN crab (rl#58), as a presence marker: the resource exists iff
+/// the NN crab is active. The boot-menu path adds the whole NN stack at app build (plugins
+/// can't be added later) but does NOT know yet whether the round will be solo — so every NN
+/// system is gated on this, present ONLY once the round resolves solo (Host-alone). While
+/// absent the crab never spawns and no policy/physics drives it, and crucially
+/// [`crate::net::render`]'s `drive_lockstep` never calls [`sync_external_crab`] — so a
+/// networked round with the stack present stays byte-identical to the integer-crab path. The
+/// scripted solo path (`Boot::Round`) inserts it at build; there is ONE gate for both, not a
+/// second always-on code path. The run-condition and render's reads gate on
+/// `Option<Res<SoloCrabActive>>::is_some()`.
+#[derive(Resource)]
+pub struct SoloCrabActive;
 
 /// Run condition: the solo NN crab is active. Gates every [`SoloCrabPlugin`] system so they
 /// idle (zero cost beyond the check) until the round resolves solo.
 fn solo_crab_active(active: Option<Res<SoloCrabActive>>) -> bool {
-    SoloCrabActive::is_on(active.as_deref())
+    active.is_some()
 }
 
 /// Plugin: the solo NN crab. Adds the loaded policy + the bridge, and the systems that
@@ -208,8 +214,16 @@ pub struct SoloCrabPlugin {
 impl Plugin for SoloCrabPlugin {
     fn build(&self, app: &mut App) {
         let policy = Policy::load(&self.checkpoint_dir);
+        // Fail loud when there's no usable checkpoint: the policy returns the zero-action rest
+        // pose, so the showcase crab stands inert. Name the surface + dir so the operator knows
+        // WHY the demo crab isn't moving.
+        if !policy.is_loaded() {
+            warn!(
+                "solo_crab: no usable checkpoint at {} — NN crab holds rest pose",
+                self.checkpoint_dir.display()
+            );
+        }
         app.insert_non_send_resource(policy);
-        app.init_resource::<SoloCrabActive>();
         // Resolve the env-tunable knobs ONCE here (override → default), not per tick.
         let env_f32 = |key: &str, default: f32| {
             std::env::var(key)
@@ -589,9 +603,12 @@ pub fn run_headless_probe(
     let me = PlayerId(0);
     let ls = Lockstep::new(seed, &[me], me);
     let crab_spawn = ls.sim().crab().pos();
-    // The crab is externally driven for the whole probe (we own its position).
+    // The crab is externally driven for the whole probe (we own its position). Arm + seed the
+    // pose atomically with the crab's CURRENT spawn pose/yaw — writing back what's already
+    // there, so this is a no-op on sim state, just with the ordering footgun removed.
     let mut ls = ls;
-    ls.enable_external_crab(true);
+    let crab = ls.sim().crab();
+    ls.initialize_external_crab(crab.pos(), crab.yaw());
 
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
@@ -604,7 +621,7 @@ pub fn run_headless_probe(
     // The probe IS the solo case — activate the NN gate so the policy/integration systems
     // run. The crab already spawned via `headless_stack`'s `num_envs: 1`, so the plugin's
     // own gated spawn is a no-op (the not-yet-spawned guard sees it present).
-    app.insert_resource(SoloCrabActive(true));
+    app.insert_resource(SoloCrabActive);
     app.insert_non_send_resource(ProbeDriver {
         ls,
         samples: Vec::new(),
