@@ -4,7 +4,7 @@
 //! obs-normalizer checkpoints are written by their owners ([`super::systems::TrainingState`]
 //! and [`super::normalizer::ObsNormalizer`]); this module owns the shared plumbing.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::adaptor::OptimizerAdaptor;
@@ -33,17 +33,17 @@ pub(crate) fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
 
 /// Stem for brain checkpoint files. `BinFileRecorder` appends `.bin` automatically,
 /// so the actual file on disk is `brain.bin`.
-pub(crate) const BRAIN_STEM: &str = "brain";
-pub(crate) const NORMALIZER_FILENAME: &str = "normalizer.bin";
+const BRAIN_STEM: &str = "brain";
+const NORMALIZER_FILENAME: &str = "normalizer.bin";
 /// Return (value-target) normalizer checkpoint, beside the obs normalizer, so a
 /// resumed run de-normalizes value predictions against the same scale it trained
 /// with (a cold scale on resume would briefly mis-scale the value head).
-pub(crate) const RETURN_NORMALIZER_FILENAME: &str = "return_normalizer.bin";
+const RETURN_NORMALIZER_FILENAME: &str = "return_normalizer.bin";
 /// Curriculum band checkpoint, beside the brain, so a warm restart CONTINUES the
 /// distance curriculum at the rung it reached rather than resetting to near targets
 /// (which would re-teach what the policy already knows). Fallback on a missing/bad file
 /// is rung 1 (see [`super::curriculum::load_curriculum`]).
-pub(crate) const CURRICULUM_FILENAME: &str = "curriculum.bin";
+const CURRICULUM_FILENAME: &str = "curriculum.bin";
 /// Persisted Adam optimizer state (rl#60): the per-parameter first/second moments and step
 /// (`time`) the GPU learner carries across iterations. A resume restores these so the
 /// optimizer continues with warm momentum instead of paying the brief self-correcting
@@ -51,7 +51,60 @@ pub(crate) const CURRICULUM_FILENAME: &str = "curriculum.bin";
 /// (see [`load_optimizer`]) rather than erroring — the format version inside the file
 /// (see [`OPTIMIZER_FORMAT_VERSION`]) guards a layout change the same way.
 #[cfg(any(feature = "wgpu", test))]
-pub(crate) const OPTIMIZER_FILENAME: &str = "optimizer.bin";
+const OPTIMIZER_FILENAME: &str = "optimizer.bin";
+
+/// The on-disk layout of a checkpoint directory: the single place that knows which
+/// filename each artifact uses and how its path is assembled. Callers ask for
+/// [`Self::brain_stem`] / [`Self::normalizer_path`] / … instead of re-deriving
+/// `dir.join(CONST)` by hand, so a layout change lands in one place and every reader and
+/// writer (training, resume, the demo's load + hot-reload) stays in lockstep. Borrows the
+/// dir, so it's free to construct at each use.
+pub(crate) struct CheckpointDir<'a> {
+    dir: &'a Path,
+}
+
+impl<'a> CheckpointDir<'a> {
+    pub(crate) fn new(dir: &'a Path) -> Self {
+        Self { dir }
+    }
+
+    /// Stem (no extension) for the brain record — pass this to the recorder's
+    /// `record`/`load`, which append `.bin` themselves. Use [`Self::brain_file`] for the
+    /// file as it lands on disk.
+    pub(crate) fn brain_stem(&self) -> PathBuf {
+        self.dir.join(BRAIN_STEM)
+    }
+
+    /// The brain file on disk (`brain.bin`) — for existence and mtime checks.
+    pub(crate) fn brain_file(&self) -> PathBuf {
+        self.brain_stem().with_extension("bin")
+    }
+
+    /// Temp stem the brain is recorded to before an atomic rename onto [`Self::brain_file`],
+    /// so a crash mid-write can't leave a torn `brain.bin` (silently discarded on load →
+    /// resume from random weights). Dot-free for the same reason the stem is: the recorder
+    /// forces the `.bin` extension, so a "brain.tmp" stem would clobber the live file.
+    pub(crate) fn brain_tmp_stem(&self) -> PathBuf {
+        self.dir.join("brain-tmp")
+    }
+
+    pub(crate) fn normalizer_path(&self) -> PathBuf {
+        self.dir.join(NORMALIZER_FILENAME)
+    }
+
+    pub(crate) fn return_normalizer_path(&self) -> PathBuf {
+        self.dir.join(RETURN_NORMALIZER_FILENAME)
+    }
+
+    pub(crate) fn curriculum_path(&self) -> PathBuf {
+        self.dir.join(CURRICULUM_FILENAME)
+    }
+
+    #[cfg(any(feature = "wgpu", test))]
+    pub(crate) fn optimizer_path(&self) -> PathBuf {
+        self.dir.join(OPTIMIZER_FILENAME)
+    }
+}
 
 /// Format version of the [`OPTIMIZER_FILENAME`] envelope. Bumped whenever the serialized
 /// layout changes; a file tagged with any other version is ignored on load (→ cold
@@ -228,16 +281,14 @@ mod tests {
         let device = NdArrayDevice::Cpu;
         let brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
 
-        let stem = dir.join(BRAIN_STEM);
+        let paths = CheckpointDir::new(&dir);
+        let stem = paths.brain_stem();
         let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
         recorder
             .record(brain.clone().into_record(), stem.clone())
             .expect("save brain");
 
-        assert!(
-            stem.with_extension("bin").exists(),
-            "brain.bin should exist"
-        );
+        assert!(paths.brain_file().exists(), "brain.bin should exist");
 
         let loaded_record = recorder.load(stem, &device).expect("load brain");
         let loaded = CrabBrain::<TrainBackend>::new(&device).load_record(loaded_record);
@@ -308,7 +359,7 @@ mod tests {
             "the warmed optimizer should hold per-parameter moments"
         );
 
-        let path = dir.join(OPTIMIZER_FILENAME);
+        let path = CheckpointDir::new(&dir).optimizer_path();
         save_optimizer(&warm, &path);
         assert!(path.exists(), "optimizer.bin should be written");
 
@@ -358,7 +409,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let device = NdArrayDevice::Cpu;
-        let path = dir.join(OPTIMIZER_FILENAME);
+        let path = CheckpointDir::new(&dir).optimizer_path();
 
         // (a) Absent file — a pre-rl#60 checkpoint. Loads cold, no panic/error.
         assert!(!path.exists());

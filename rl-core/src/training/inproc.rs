@@ -73,15 +73,10 @@ use crate::bot::brain::CrabBrain;
 
 use super::algorithm::{RolloutBuffer, Transition};
 use super::TrainBackend;
-use super::checkpoint::CURRICULUM_FILENAME;
+use super::checkpoint::CheckpointDir;
 use super::curriculum::{Curriculum, CurriculumProgress, load_curriculum, save_curriculum};
 use super::normalizer::{NormalizerIncrement, NormalizerSnapshot};
 use super::systems::TrainingState;
-// Gated to the call sites, both in the wgpu-only `run_learner`: an unconditional import
-// would be an unresolved-symbol error in the render bins (rl-demo, game), which link
-// rl-core with `render` but neither `wgpu` nor `test` (the gate on the symbol itself).
-#[cfg(feature = "wgpu")]
-use super::checkpoint::OPTIMIZER_FILENAME;
 
 /// Recorder for the in-memory weight snapshot. The same precision settings the
 /// on-disk checkpoint (`BinFileRecorder<FullPrecisionSettings>`) uses, so a brain
@@ -578,9 +573,10 @@ fn persist_checkpoint(
     curriculum: Curriculum,
     checkpoint_dir: &Path,
 ) {
+    let paths = CheckpointDir::new(checkpoint_dir);
     state.save_checkpoint();
-    save_curriculum(curriculum, &checkpoint_dir.join(CURRICULUM_FILENAME));
-    gpu_learner.save_adam_state(&checkpoint_dir.join(OPTIMIZER_FILENAME));
+    save_curriculum(curriculum, &paths.curriculum_path());
+    gpu_learner.save_adam_state(&paths.optimizer_path());
 }
 
 /// Phase 2 — roll one synchronous horizon across all threads: send each its request,
@@ -787,7 +783,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // continues with warm momentum instead of the brief self-correcting transient a cold
     // optimizer costs (rl#60). A pre-rl#60 checkpoint has no optimizer.bin and resumes cold
     // — backward compatible, no error (see `load_optimizer`).
-    gpu_learner.load_adam_state(&checkpoint_dir.join(OPTIMIZER_FILENAME));
+    gpu_learner.load_adam_state(&CheckpointDir::new(&checkpoint_dir).optimizer_path());
 
     // Resume the tick odometer from the checkpoint, not from 0: the overnight loop
     // makes a learner restart the expected case, and without persistence each
@@ -800,7 +796,9 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // transient and starts empty — competence is re-measured from live episodes, so the
     // next advance simply waits a full window after the restart.
     let mut progress =
-        CurriculumProgress::new(load_curriculum(&checkpoint_dir.join(CURRICULUM_FILENAME)));
+        CurriculumProgress::new(load_curriculum(
+            &CheckpointDir::new(&checkpoint_dir).curriculum_path(),
+        ));
 
     let compute_threads = bevy::tasks::ComputeTaskPool::get().thread_num();
     eprintln!(
@@ -921,7 +919,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     state.save_checkpoint();
     save_curriculum(
         progress.curriculum(),
-        &checkpoint_dir.join(CURRICULUM_FILENAME),
+        &CheckpointDir::new(&checkpoint_dir).curriculum_path(),
     );
     if timed_samples > 0 {
         let rollout_sps = timed_samples as f64 / timed_rollout_secs.max(1e-9);
