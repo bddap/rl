@@ -835,7 +835,7 @@ mod tests {
     // trainer's update is GPU-only (see `run_learner`); this exercises the shared
     // `ppo_update_core` math, not a second production path.
     use crate::bot::sensor::OBS_SIZE;
-    use crate::training::session::ppo_update_core;
+    use crate::training::session::{crab_optimizer, ppo_update_core};
 
     /// A zero-count normalizer increment: a fresh normalizer's snapshot. Used to fill
     /// a `Rolled` outcome's `increment` in tests that don't exercise real stats, and
@@ -1094,8 +1094,12 @@ mod tests {
             .into_iter()
             .map(|transitions| RolloutBuffer { transitions })
             .collect();
-        let (brain, optimizer, ppo_config, device, ret_norm) = state.learner_parts();
-        let metrics = ppo_update_core(brain, optimizer, ppo_config, &rollouts, device, ret_norm);
+        // The CPU update path owns its optimizer (it isn't learner state — the live
+        // GPU learner never steps a CPU Adam), so build the production one here.
+        let mut optimizer = crab_optimizer();
+        let (brain, ppo_config, device, ret_norm) = state.learner_parts();
+        let metrics =
+            ppo_update_core(brain, &mut optimizer, ppo_config, &rollouts, device, ret_norm);
         assert!(
             metrics.policy_loss.is_finite()
                 && metrics.value_loss.is_finite()
