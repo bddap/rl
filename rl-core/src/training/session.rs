@@ -271,16 +271,12 @@ pub type InferBackend = NdArray;
 /// the one PPO update ([`ppo_update_core`]) serves the live GPU learner, the GPU/CPU
 /// `bench-update` comparison, and the CPU-backed update test from one code path.
 type CrabOpt<B> = OptimizerAdaptor<Adam, CrabBrain<B>, B>;
-/// Adam over the CPU autodiff backend. The live learner updates on the GPU (the
-/// `GpuLearner` owns its own optimizer); this CPU optimizer backs only the
-/// `bench-update --backend cpu` harness and the update test.
-type CrabOptimizer = CrabOpt<TrainBackend>;
 
 /// Build the learner's Adam optimizer (global grad-norm clip 0.5). The ONE source of
 /// the optimizer construction — the live `GpuLearner`, the `bench-update` harness, and
 /// the CPU-backed update test all call this, so the clip constant can't silently drift
 /// between paths meant to be identical.
-fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
+pub(crate) fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
     AdamConfig::new()
         .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
         .init()
@@ -532,7 +528,6 @@ pub struct TrainingState {
     /// buffer would bootstrap each env's advantages from another env's values.
     pub rollouts: Vec<RolloutBuffer>,
     pub device: NdArrayDevice,
-    optimizer: CrabOptimizer,
 
     pub envs: Vec<EnvEpisode>,
     pub episode_count: u32,
@@ -615,7 +610,6 @@ impl TrainingState {
     fn build(config: &TrainConfig, metrics_dir: &Path, worker_mode: bool) -> Self {
         let device = NdArrayDevice::Cpu;
         let mut brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
-        let optimizer: CrabOptimizer = crab_optimizer();
 
         let mut obs_normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
         let mut return_normalizer = ReturnNormalizer::new();
@@ -667,7 +661,6 @@ impl TrainingState {
             config: PpoConfig::default(),
             rollouts: (0..n).map(|_| RolloutBuffer::new()).collect(),
             device,
-            optimizer,
             envs: vec![EnvEpisode::default(); n],
             episode_count: 0,
             recent_rewards: Vec::new(),
@@ -835,25 +828,25 @@ impl TrainingState {
         out
     }
 
-    /// Hand a CPU-backend PPO update its pieces (brain/optimizer/config/return-
-    /// normalizer; see `ppo_update_core`). The live learner updates on the GPU (see
-    /// `learner_parts_for_gpu` + the `GpuLearner`); this CPU accessor backs the
-    /// `bench-update --backend cpu` baseline and the update test, which exercise the
-    /// shared update math without needing a GPU. The return normalizer is the single
-    /// copy (rollout threads never touch it), handed out `&mut` to fold in the
-    /// iteration's returns.
+    /// Hand a CPU-backend PPO update its non-optimizer pieces (brain/config/device/
+    /// return-normalizer; see `ppo_update_core`). The live learner updates on the GPU
+    /// (see `learner_parts_for_gpu` + the `GpuLearner`); this CPU accessor backs only the
+    /// `#[cfg(test)]` CPU update test, which exercises the shared update math without a
+    /// GPU. The optimizer is not learner state: each CPU update site (this test and the
+    /// `bench-update --backend cpu` harness) builds its own via [`crab_optimizer`], so the
+    /// production learner carries no optimizer the GPU path never steps. The return
+    /// normalizer is the single copy (rollout threads never touch it), handed out `&mut`
+    /// to fold in the iteration's returns.
     pub fn learner_parts(
         &mut self,
     ) -> (
         &mut CrabBrain<TrainBackend>,
-        &mut CrabOptimizer,
         &PpoConfig,
         &NdArrayDevice,
         &mut ReturnNormalizer,
     ) {
         (
             &mut self.brain,
-            &mut self.optimizer,
             &self.config,
             &self.device,
             &mut self.return_normalizer,
@@ -862,9 +855,9 @@ impl TrainingState {
 
     /// Learner-side accessor for the live GPU update: the CPU brain (mirrored to/from the
     /// GPU each update by [`GpuLearner`]), the PPO config, and the host return normalizer.
-    /// Unlike [`Self::learner_parts`] it omits the CPU optimizer + device — the GPU update
-    /// runs Adam on its own device-resident optimizer. The brain stays the single source
-    /// of truth (rollout snapshots + checkpoints read it); the GPU learner only borrows it
+    /// Unlike [`Self::learner_parts`] it also omits the CPU device — the GPU update runs
+    /// Adam on its own device-resident optimizer. The brain stays the single source of
+    /// truth (rollout snapshots + checkpoints read it); the GPU learner only borrows it
     /// to load weights in and write back.
     #[cfg(feature = "wgpu")]
     pub fn learner_parts_for_gpu(
