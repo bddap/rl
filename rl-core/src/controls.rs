@@ -642,3 +642,20 @@ pub use overlay::{
 
 #[cfg(feature = "render")]
 pub(crate) use overlay::PAD_STICK_DEADZONE;
+
+/// The headless/debug overlay override, from the rl env convention shared by every render
+/// bin: `RL_SHOW_CONTROLS=1` forces the (normally hold-to-reveal) overlay open and
+/// `RL_SHOW_CONTROLS_PAD=1` selects the gamepad column — so one windowless screenshot can
+/// record either device's legend with no live input. One source so the contract can't drift
+/// between bins (the demo's and GCR's screenshot paths both call it). Inert when unset.
+#[cfg(feature = "render")]
+pub(crate) fn reveal_overrides_from_env() -> (ForceRevealControls, ActiveDevice) {
+    (
+        ForceRevealControls(std::env::var_os("RL_SHOW_CONTROLS").is_some()),
+        ActiveDevice(if std::env::var_os("RL_SHOW_CONTROLS_PAD").is_some() {
+            Device::Gamepad
+        } else {
+            Device::KeyboardMouse
+        }),
+    )
+}
