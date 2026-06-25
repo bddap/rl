@@ -8322,6 +8322,7 @@ dependencies = [
  "foldhash 0.2.0",
  "glamx",
  "hashbrown 0.16.1",
+ "indexmap",
  "log",
  "num-derive",
  "num-traits",
@@ -9348,6 +9349,7 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_distr",
+ "rapier3d",
  "serde",
  "tokio",
  "tracing",
@@ -9993,6 +9995,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c99284beb21666094ba2b75bbceda012e610f5479dfcc2d6e2426f53197ffd95"
 dependencies = [
  "approx",
+ "libm",
  "num-complex",
  "num-traits",
  "paste",

@@ -21,7 +21,18 @@ path = "src/lib.rs"
 # crate. This is the single-crate feature-gate the earlier #51 spike proved, now
 # applied to the shared library; the bins just choose render on/off, no
 # `--no-default-features` juggling.
-render = ["bevy/default", "bevy_rapier3d/default", "dep:bevy_egui"]
+render = ["bevy/default", "bevy_rapier3d/default", "dep:bevy_egui", "enhanced-determinism"]
+
+# GCR avenue 1 (rl#82): rapier's bit-level cross-platform physics determinism, so the
+# networked NN crab evolves identically on every peer. OFF by default and pulled in by
+# `render` (the game/rl-demo binaries) — the headless trainer (rl-train, no `render`) stays
+# fast-float, since enhanced-determinism forces software transcendentals (`simba/libm_force`)
+# and blocks SIMD, a rollout-throughput cost training has no reason to pay: it is
+# single-process with no cross-peer hash, and the policy is robust to the tiny play-vs-train
+# numeric drift (OQ5). Standalone so the determinism regression can exercise the shipped
+# config headlessly without the GPU render stack. enhanced-determinism's one hard conflict
+# (`parallel`) is already off (rl#9), as is simd, so enabling it costs no feature we use.
+enhanced-determinism = ["rapier3d/enhanced-determinism"]
 
 # rl#49: a GPU backend for the PPO update via burn's wgpu/Vulkan. Enables burn-wgpu +
 # the `Autodiff<Wgpu>` backend. Off by default — the production `learn` path stays
@@ -64,6 +75,12 @@ bevy = { workspace = true, features = [
 # `render` feature's `bevy_rapier3d/default`, NOT here — so the headless trainer links
 # rapier's physics but none of its render integration.
 bevy_rapier3d = { workspace = true, features = ["dim3"] }
+# Named directly ONLY to carry the `enhanced-determinism` feature (rl#82) — rapier3d is
+# already pulled transitively by bevy_rapier3d, and cargo unifies features per package, so
+# this request merges the feature onto that same rapier3d. default-features=false adds
+# nothing on its own (bevy_rapier3d still brings dim3/f32); with the `enhanced-determinism`
+# rl-core feature OFF this dep is a no-op, so the trainer's rapier is unchanged.
+rapier3d = { version = "0.32", default-features = false }
 bevy_egui = { workspace = true, optional = true }
 rand.workspace = true
 serde.workspace = true

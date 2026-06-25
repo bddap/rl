@@ -283,7 +283,10 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
                     let spawn = crab.pos();
                     // Arm + seed the pose atomically with the crab's CURRENT spawn pose/yaw —
                     // writing back what's already there, so sim state is unchanged.
-                    ls.initialize_external_crab(spawn, crab.yaw());
+                    // Digest 0 to seed; the bridge's first post-step `hash_crab_physics`
+                    // fills it before the first `sync_external_crab` push (solo, so the
+                    // seeded value is never cross-checked anyway).
+                    ls.initialize_external_crab(spawn, crab.yaw(), 0);
                     Some((dir, spawn))
                 }
                 _ => None,
@@ -517,7 +520,7 @@ fn ensure_round_installed(world: &mut World) {
         // no state change), removing the set-pose-before-arm footgun.
         ready
             .lockstep
-            .initialize_external_crab(crab.pos(), crab.yaw());
+            .initialize_external_crab(crab.pos(), crab.yaw(), 0);
         world.insert_resource(crate::net::solo_crab::SoloCrabActive);
     }
     let source = match ready.net {

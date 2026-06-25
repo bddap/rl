@@ -2,7 +2,10 @@ pub mod actuator;
 pub mod body;
 pub mod brain;
 pub mod collider_check;
+#[cfg(test)]
+mod determinism_probe;
 pub mod meshfit;
+pub mod physics_digest;
 #[cfg(test)]
 mod reset_test;
 pub mod rig;

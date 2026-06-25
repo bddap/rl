@@ -39,7 +39,7 @@ use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 use crate::Visuals;
-use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId};
+use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint};
 use crate::bot::sensor::CrabTargets;
 use crate::bot::{BotSet, CrabSpawns};
 use crate::net::sim::{Pos, UNIT};
@@ -104,6 +104,13 @@ pub struct SoloCrabBridge {
     /// Game-world metres advanced per metre walked (see [`WORLD_GAIN_DEFAULT`]) — resolved
     /// once at plugin build (`RL_CRAB_WORLD_GAIN` override).
     world_gain: f32,
+    /// This tick's peer-comparable digest of the crab's full rapier physics state XORed with
+    /// the policy-weights digest — recomputed each step by [`hash_crab_physics`] and pushed
+    /// into the sim by [`sync_external_crab`], so the lockstep desync check covers the
+    /// articulated float body and rejects a peer running different weights (rl#82, GCR). `0`
+    /// until the first post-step hash; the integer sim ignores it unless external control is
+    /// armed.
+    phys_digest: u64,
 }
 
 impl SoloCrabBridge {
@@ -120,6 +127,7 @@ impl SoloCrabBridge {
             yaw_turns: 0,
             hunt_target_m: None,
             settle: crate::training::systems::RESET_GRACE_TICKS,
+            phys_digest: 0,
         }
     }
 
@@ -173,8 +181,39 @@ impl SoloCrabBridge {
 /// ([`crate::net::render`]'s `drive_lockstep`) and the headless probe can't drift on the
 /// contract (the manual's "one implementation per thing").
 pub fn sync_external_crab(ls: &mut crate::net::lockstep::Lockstep, bridge: &mut SoloCrabBridge) {
-    ls.set_external_crab_pose(bridge.world_pos(), bridge.yaw_turns());
+    ls.set_external_crab_pose(bridge.world_pos(), bridge.yaw_turns(), bridge.phys_digest);
     bridge.set_hunt_target(ls.sim().nearest_living_player_pos());
+}
+
+/// Recompute env 0's full rapier physics digest (every actuated body's pose+velocity bits,
+/// via the shared [`crate::bot::physics_digest`]) XORed with the loaded policy's weights
+/// digest, and store it on the bridge for [`sync_external_crab`] to push into the lockstep
+/// hash. Runs each step AFTER the physics writeback + [`integrate_solo_crab`], so it captures
+/// this tick's settled state. Folding in the weights digest makes two peers running different
+/// brains desync on the first tick (the GCR shared-checkpoint guard), and folding in the full
+/// articulated state makes a float divergence a detected desync, not just a 2D-pose one.
+#[allow(clippy::type_complexity)]
+fn hash_crab_physics(
+    policy: NonSend<Policy>,
+    mut bridge: ResMut<SoloCrabBridge>,
+    bodies: Query<
+        (
+            &CrabEnvId,
+            &Transform,
+            &Velocity,
+            Option<&CrabJoint>,
+            Option<&CrabCarapace>,
+        ),
+        With<CrabBodyPart>,
+    >,
+) {
+    let phys = crate::bot::physics_digest::crab_state_digest(
+        bodies
+            .iter()
+            .filter(|(env, ..)| env.0 == 0)
+            .map(|(_, t, v, j, c)| (t, v, j, c)),
+    );
+    bridge.phys_digest = phys ^ policy.weights_digest();
 }
 
 /// Runtime gate for the solo NN crab (rl#58), as a presence marker: the resource exists iff
@@ -276,6 +315,18 @@ impl Plugin for SoloCrabPlugin {
                 .after(PhysicsSet::Writeback)
                 .run_if(solo_crab_active),
         );
+        // Digest this step's settled rapier state (+ the policy weights) for the lockstep
+        // desync check. After the writeback AND `integrate_solo_crab` so it reads the final
+        // post-step pose, and before the driver pushes the bridge into the sim
+        // (`sync_external_crab`) each tick. Gated on the active flag so it never runs on a
+        // round without the NN crab.
+        app.add_systems(
+            FixedUpdate,
+            hash_crab_physics
+                .after(integrate_solo_crab)
+                .after(PhysicsSet::Writeback)
+                .run_if(solo_crab_active),
+        );
 
         // Render-only: shift the rendered rig to the game-world crab position. MUST run in
         // FixedUpdate right after the physics writeback (where rapier sets each part's raw
@@ -290,6 +341,12 @@ impl Plugin for SoloCrabPlugin {
                 FixedUpdate,
                 offset_rendered_crab
                     .after(integrate_solo_crab)
+                    // MUST run after the determinism hash: this render-only shift mutates the
+                    // crab parts' `Transform` and is gated on `Visuals`, so hashing the
+                    // POST-shift pose would make a windowed peer and a headless peer disagree
+                    // (the headless one never applies the shift). Hash the raw arena pose
+                    // first, then cosmetically shift it.
+                    .after(hash_crab_physics)
                     .after(PhysicsSet::Writeback)
                     .run_if(solo_crab_active),
             );
@@ -608,7 +665,9 @@ pub fn run_headless_probe(
     // there, so this is a no-op on sim state, just with the ordering footgun removed.
     let mut ls = ls;
     let crab = ls.sim().crab();
-    ls.initialize_external_crab(crab.pos(), crab.yaw());
+    // Seed with a zero digest; the first post-step `hash_crab_physics` fills it before the
+    // first `sync_external_crab` push, so the seeded value is never the one cross-checked.
+    ls.initialize_external_crab(crab.pos(), crab.yaw(), 0);
 
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
@@ -627,9 +686,12 @@ pub fn run_headless_probe(
         samples: Vec::new(),
         log_every: log_every.max(1),
     });
-    // Drive the sim AFTER the bridge integrates this step's walk, so each sim tick reads
-    // the up-to-date crab position.
-    app.add_systems(FixedUpdate, probe_step.after(integrate_solo_crab));
+    // Drive the sim AFTER the bridge integrates this step's walk AND hashes the physics
+    // state, so each sim tick reads the up-to-date crab position + digest.
+    app.add_systems(
+        FixedUpdate,
+        probe_step.after(integrate_solo_crab).after(hash_crab_physics),
+    );
 
     // One physics tick + one sim tick per update.
     for _ in 0..ticks {

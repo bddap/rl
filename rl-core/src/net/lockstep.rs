@@ -282,19 +282,20 @@ impl Lockstep {
         self.sim.enable_external_crab(external);
     }
 
-    /// SOLO ONLY: set the crab's ground position + yaw from the real NN crab body, BEFORE
-    /// the next [`Self::try_advance`], so the grab/extraction checks resolve against it.
-    /// Forwards to [`Sim::set_external_crab_pose`]; a no-op on behaviour unless
+    /// SOLO ONLY: set the crab's ground position + yaw + physics digest from the real NN crab
+    /// body, BEFORE the next [`Self::try_advance`], so the grab/extraction checks resolve
+    /// against it and the desync check folds in `phys_digest`. Forwards to
+    /// [`Sim::set_external_crab_pose`]; a no-op on behaviour unless
     /// [`Self::enable_external_crab`] was set.
-    pub fn set_external_crab_pose(&mut self, pos: crate::net::sim::Pos, yaw: i32) {
-        self.sim.set_external_crab_pose(pos, yaw);
+    pub fn set_external_crab_pose(&mut self, pos: crate::net::sim::Pos, yaw: i32, phys_digest: u64) {
+        self.sim.set_external_crab_pose(pos, yaw, phys_digest);
     }
 
-    /// SOLO ONLY: arm external control AND seed the crab's initial pose atomically — the one
-    /// entry point for handing the crab to the rapier NN body. Forwards to
+    /// SOLO ONLY: arm external control AND seed the crab's initial pose + digest atomically —
+    /// the one entry point for handing the crab to the rapier NN body. Forwards to
     /// [`Sim::initialize_external_crab`].
-    pub fn initialize_external_crab(&mut self, pos: crate::net::sim::Pos, yaw: i32) {
-        self.sim.initialize_external_crab(pos, yaw);
+    pub fn initialize_external_crab(&mut self, pos: crate::net::sim::Pos, yaw: i32, phys_digest: u64) {
+        self.sim.initialize_external_crab(pos, yaw, phys_digest);
     }
 
     /// This peer's id.
