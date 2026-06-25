@@ -1,0 +1,326 @@
+//! The learner's PPO update over all rollout buffers — the ONE update implementation,
+//! generic over the autodiff backend so the live GPU learner ([`super::gpu::GpuLearner`])
+//! and the CPU/GPU `bench-update` harness ([`super::bench`]) share it.
+
+use burn::optim::{GradientsParams, Optimizer};
+use burn::tensor::backend::AutodiffBackend;
+use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+
+use super::algorithm::{
+    NormalizedValue, PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer, StepEnd, Transition,
+    compute_gae,
+};
+use super::checkpoint::CrabOpt;
+use crate::bot::actuator::ACTION_SIZE;
+use crate::bot::brain::CrabBrain;
+use crate::bot::sensor::OBS_SIZE;
+
+/// The learner's PPO update over all K·M rollout buffers.
+///
+/// `rollouts` is one buffer per env (GAE is computed strictly per env, never
+/// across a buffer boundary). The per-env trailing bootstrap — V of each buffer's
+/// non-`Terminal` tail observation — is computed HERE from `brain`: the learner
+/// holds the brain it snapshotted to the threads (which is what they rolled with),
+/// so no precomputed value is needed. Mutating `brain`/`optimizer` in place keeps
+/// Adam's moment estimates persistent across updates.
+///
+/// `ret_norm` is the learner's running return scale (see [`ReturnNormalizer`]): the
+/// value head's outputs (stored per-step values and the trailing bootstrap) are
+/// de-normalized by it so GAE/advantages stay in real reward units, then this
+/// update's real-unit returns are folded in and the value-loss targets normalized by
+/// the refreshed scale. It is `&mut` because the update advances it; the learner owns
+/// the one copy, so passing it in keeps a single source of truth.
+///
+/// `rng` drives the per-epoch minibatch shuffle. The caller owns it (seeded from the
+/// run's master seed) so the shuffle order is reproducible across a run and varies
+/// across iterations as the stream advances.
+///
+/// Free function rather than a `TrainingState` method so the K=1 parity test
+/// ([`super::inproc`] tests) can call the exact production update over hand-built buffers.
+/// Generic over the autodiff backend `B` so the live GPU learner and the CPU/GPU
+/// `bench-update` run the one implementation — same update, one backend parameter.
+pub(crate) fn ppo_update_core<B: AutodiffBackend>(
+    brain: &mut CrabBrain<B>,
+    optimizer: &mut CrabOpt<B>,
+    config: &PpoConfig,
+    rollouts: &[RolloutBuffer],
+    device: &B::Device,
+    ret_norm: &mut ReturnNormalizer,
+    rng: &mut StdRng,
+) -> PpoMetrics {
+    {
+        let n: usize = rollouts.iter().map(|b| b.len()).sum();
+        if n == 0 {
+            return PpoMetrics::default();
+        }
+
+        // Return-normalization stats from BEFORE this update (PopArt ordering): GAE
+        // de-normalizes the value head's outputs with the scale the head was trained
+        // against, computes advantages/returns in REAL reward units, and only after
+        // does `ret_norm.update` fold THIS update's returns in. The first update sees
+        // the identity (no returns yet), so it is byte-identical to un-normalized PPO.
+        let ret_norm_pre = ret_norm.clone();
+
+        // GAE strictly per env: each buffer is one env's contiguous trajectory
+        // segment, bootstrapped from ITS last observation. Advantages/returns are
+        // then concatenated in the same env-major order as the transitions below.
+        let mut advantages = Vec::with_capacity(n);
+        let mut returns = Vec::with_capacity(n);
+        for buf in rollouts.iter() {
+            let Some(last_t) = buf.transitions.last() else {
+                continue;
+            };
+            // A `Terminal` tail genuinely ended → 0 future return; `compute_gae`
+            // hardcodes that step's bootstrap to `RealReturn(0.0)` and never reads
+            // `last_value`, so the value passed here is inert (any `NormalizedValue`
+            // would do). A non-terminal tail bootstraps V(s_tail) from the brain (the
+            // trailing obs continues into the next horizon's buffer, so its value
+            // carries the cut-off return); that output is in normalized units, which
+            // `compute_gae` de-normalizes like every stored value.
+            let last_value = if matches!(last_t.end, StepEnd::Terminal) {
+                NormalizedValue(0.0)
+            } else {
+                let obs =
+                    Tensor::<B, 1>::from_floats(last_t.obs.as_slice(), device).unsqueeze::<2>();
+                NormalizedValue(
+                    brain
+                        .value(obs)
+                        .flatten::<1>(0, 1)
+                        .into_scalar()
+                        .elem::<f32>(),
+                )
+            };
+            let (a, r) = compute_gae(buf, last_value, config.gamma, config.lambda, &ret_norm_pre);
+            advantages.extend(a);
+            returns.extend(r);
+        }
+
+        // Fold this update's REAL-unit returns into the running scale, then normalize the
+        // value-loss targets by the refreshed scale (the residual is then in σ-units — see
+        // the value-loss site below).
+        let real_returns: Vec<f32> = returns.iter().map(|r| r.0).collect();
+        ret_norm.update(&real_returns);
+        let returns: Vec<f32> = returns.iter().map(|&r| ret_norm.normalize(r).0).collect();
+
+        // Env-major transition view matching the advantages/returns order.
+        let transitions: Vec<&Transition> =
+            rollouts.iter().flat_map(|b| b.transitions.iter()).collect();
+
+        // Batch-normalizing the advantages strips their reward unit (centered and
+        // scaled to a unitless gradient signal), so they leave `RealReturn` here.
+        let advantages: Vec<f32> = advantages.iter().map(|a| a.0).collect();
+        let adv_mean: f32 = advantages.iter().sum::<f32>() / n as f32;
+        let adv_var: f32 = advantages
+            .iter()
+            .map(|a| (a - adv_mean).powi(2))
+            .sum::<f32>()
+            / n as f32;
+        let adv_std = adv_var.sqrt().max(1e-8);
+        let advantages_norm: Vec<f32> = advantages
+            .iter()
+            .map(|a| (a - adv_mean) / adv_std)
+            .collect();
+
+        let obs_data: Vec<f32> = transitions
+            .iter()
+            .flat_map(|t| t.obs.iter().copied())
+            .collect();
+        let actions_data: Vec<f32> = transitions
+            .iter()
+            .flat_map(|t| t.action.iter().copied())
+            .collect();
+        let old_log_probs_data: Vec<f32> = transitions.iter().map(|t| t.log_prob).collect();
+
+        let obs_all = Tensor::<B, 2>::from_data(TensorData::new(obs_data, [n, OBS_SIZE]), device);
+        let actions_all =
+            Tensor::<B, 2>::from_data(TensorData::new(actions_data, [n, ACTION_SIZE]), device);
+        let old_log_probs_all =
+            Tensor::<B, 1>::from_data(TensorData::new(old_log_probs_data, [n]), device);
+        let advantages_all =
+            Tensor::<B, 1>::from_data(TensorData::new(advantages_norm, [n]), device);
+        let returns_all = Tensor::<B, 1>::from_data(TensorData::new(returns, [n]), device);
+
+        let mut total_policy_loss = 0.0f32;
+        let mut total_value_loss = 0.0f32;
+        let mut total_entropy = 0.0f32;
+        let mut update_count = 0u32;
+
+        let bs = config.batch_size;
+        let half_log_2pi = 0.5 * (2.0 * std::f32::consts::PI).ln();
+
+        for _epoch in 0..config.epochs_per_update {
+            let mut indices: Vec<usize> = (0..n).collect();
+            indices.shuffle(rng);
+
+            let num_batches = n.div_ceil(bs);
+
+            for batch_idx in 0..num_batches {
+                let start = batch_idx * bs;
+                let end = (start + bs).min(n);
+                let batch_n = end - start;
+                let batch_indices = &indices[start..end];
+
+                let idx_tensor = Tensor::<B, 1, Int>::from_data(
+                    TensorData::new(
+                        batch_indices.iter().map(|&i| i as i64).collect::<Vec<_>>(),
+                        [batch_n],
+                    ),
+                    device,
+                );
+
+                let obs = obs_all.clone().select(0, idx_tensor.clone());
+                let actions = actions_all.clone().select(0, idx_tensor.clone());
+                let old_lp = old_log_probs_all.clone().select(0, idx_tensor.clone());
+                let advs = advantages_all.clone().select(0, idx_tensor.clone());
+                let rets = returns_all.clone().select(0, idx_tensor);
+
+                let (means, log_std) = brain.policy(obs.clone());
+
+                // log_std is pre-clamped by policy (single source of truth).
+                let diff = actions - means;
+                let log_std_2d = log_std
+                    .clone()
+                    .unsqueeze_dim::<2>(0)
+                    .expand([batch_n, ACTION_SIZE]);
+                let scaled_diff = diff / log_std_2d.clone().exp();
+                let log_probs_per_dim =
+                    scaled_diff.powf_scalar(2.0).neg() * 0.5 - log_std_2d - half_log_2pi;
+                let new_lp: Tensor<B, 1> = log_probs_per_dim.sum_dim(1).flatten(0, 1);
+
+                let entropy_per_dim = log_std.clone()
+                    + (0.5 * (2.0 * std::f32::consts::PI * std::f32::consts::E).ln());
+                let entropy = entropy_per_dim.mean();
+
+                let log_ratio = (new_lp - old_lp).clamp(-20.0, 20.0);
+                let ratio = log_ratio.exp();
+                let surr1 = ratio.clone() * advs.clone();
+                let surr2 =
+                    ratio.clamp(1.0 - config.clip_epsilon, 1.0 + config.clip_epsilon) * advs;
+                let policy_loss = surr1.min_pair(surr2).mean().neg();
+
+                // The value head's raw output is in NORMALIZED units, and `rets` was
+                // normalized by the same running scale above, so this residual is in
+                // σ-units and `value_loss_clip` is a σ-count. The head therefore fits
+                // unit-scale targets regardless of the reward magnitude — the whole
+                // point of return normalization.
+                let values: Tensor<B, 1> = brain.value(obs).flatten(0, 1);
+                let value_diff =
+                    (values - rets).clamp(-config.value_loss_clip, config.value_loss_clip);
+                let value_loss = value_diff.powf_scalar(2.0).mean();
+
+                let loss = policy_loss.clone() + value_loss.clone() * config.value_coeff
+                    - entropy.clone() * config.entropy_coeff;
+
+                total_policy_loss += policy_loss.clone().into_scalar().elem::<f32>();
+                total_value_loss += value_loss.clone().into_scalar().elem::<f32>();
+                total_entropy += entropy.clone().into_scalar().elem::<f32>();
+                update_count += 1;
+
+                let grads = loss.backward();
+                let grads = GradientsParams::from_grads(grads, brain);
+                *brain = optimizer.step(config.learning_rate, brain.clone(), grads);
+            }
+        }
+
+        PpoMetrics {
+            policy_loss: total_policy_loss / update_count as f32,
+            value_loss: total_value_loss / update_count as f32,
+            entropy: total_entropy / update_count as f32,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::training::TrainBackend;
+    use crate::training::checkpoint::crab_optimizer;
+    use burn::backend::ndarray::NdArrayDevice;
+    use rand::{Rng, SeedableRng};
+
+    /// Synthetic rollouts (one buffer per env, `horizon` non-terminal transitions) from a
+    /// fixed-seed RNG, so the update's INPUT is identical run-to-run and only the shuffle
+    /// seed varies. More than one minibatch per epoch (256 transitions, batch 64) so the
+    /// shuffle order actually changes the sequence of Adam steps.
+    fn make_rollouts() -> Vec<RolloutBuffer> {
+        let mut rng = StdRng::seed_from_u64(0xDA7A);
+        (0..4)
+            .map(|_| {
+                let mut buf = RolloutBuffer::new();
+                for _ in 0..64 {
+                    let mut obs = [0.0f32; OBS_SIZE];
+                    for o in obs.iter_mut() {
+                        *o = rng.gen_range(-1.0..1.0);
+                    }
+                    let mut action = [0.0f32; ACTION_SIZE];
+                    for a in action.iter_mut() {
+                        *a = rng.gen_range(-1.0..1.0);
+                    }
+                    buf.push(Transition {
+                        obs,
+                        action,
+                        reward: rng.gen_range(-1.0..1.0),
+                        value: NormalizedValue(rng.gen_range(-1.0..1.0)),
+                        log_prob: rng.gen_range(-5.0..0.0),
+                        end: StepEnd::Continues,
+                    });
+                }
+                buf
+            })
+            .collect()
+    }
+
+    /// The minibatch shuffle is seeded: two updates with the same shuffle seed (over the
+    /// SAME initial brain and the SAME data) produce a bit-identical result, and a
+    /// different seed reorders the minibatches enough to change it. Self-contained — a CPU
+    /// update over hand-built buffers, no learner thread or GPU. The brain is built once and
+    /// CLONED into each run so the comparison can't be perturbed by the process-global
+    /// weight-init RNG a parallel test may touch.
+    #[test]
+    fn ppo_update_is_deterministic_under_equal_shuffle_seed() {
+        let device = NdArrayDevice::Cpu;
+        let brain = CrabBrain::<TrainBackend>::new(&device);
+        let rollouts = make_rollouts();
+
+        let run = |shuffle_seed: u64| -> PpoMetrics {
+            let mut brain = brain.clone();
+            let mut optimizer = crab_optimizer::<TrainBackend>();
+            let config = PpoConfig::default();
+            let mut ret_norm = ReturnNormalizer::new();
+            let mut rng = StdRng::seed_from_u64(shuffle_seed);
+            ppo_update_core(
+                &mut brain,
+                &mut optimizer,
+                &config,
+                &rollouts,
+                &device,
+                &mut ret_norm,
+                &mut rng,
+            )
+        };
+
+        let a = run(0x5417);
+        let b = run(0x5417);
+        assert_eq!(
+            a.policy_loss.to_bits(),
+            b.policy_loss.to_bits(),
+            "equal shuffle seed must give an identical policy loss"
+        );
+        assert_eq!(a.value_loss.to_bits(), b.value_loss.to_bits(), "value loss");
+        assert_eq!(a.entropy.to_bits(), b.entropy.to_bits(), "entropy");
+
+        // A different shuffle seed reorders the minibatches, so the sequential Adam steps
+        // and the averaged losses differ — proving the shuffle is actually seeded, not
+        // accidentally constant.
+        let c = run(0x9999);
+        let differs = a.policy_loss.to_bits() != c.policy_loss.to_bits()
+            || a.value_loss.to_bits() != c.value_loss.to_bits()
+            || a.entropy.to_bits() != c.entropy.to_bits();
+        assert!(
+            differs,
+            "a different shuffle seed must change the update result"
+        );
+    }
+}

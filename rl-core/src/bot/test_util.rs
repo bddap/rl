@@ -3,7 +3,7 @@
 //! no-window physics+bot world, called by every headless entry — the sim tests, the
 //! shipped `--check-rest-colliders` diagnostic ([`super::collider_check`]), and the
 //! training rollout/test worlds (`training::inproc::build_rollout_app`,
-//! `training::session`'s test app) — so a physics knob added here reaches all of them
+//! `training::systems`'s test app) — so a physics knob added here reaches all of them
 //! instead of one hand-synced copy silently missing it.
 
 use std::time::Duration;

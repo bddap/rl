@@ -83,4 +83,13 @@ pub struct TrainConfig {
     /// only 32 bits (see [`bot::body::crab_collision`]).
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=bot::body::MAX_ENVS as u64))]
     pub envs: u64,
+
+    /// Master RNG seed for the run's stochastic choices — action-noise sampling, target
+    /// placement, spawn rotation, the minibatch shuffle, and weight init. Omitted (the
+    /// default) draws a fresh seed from OS entropy and LOGS it, so any run can be
+    /// reproduced after the fact by passing the logged value back via `--seed`. The
+    /// learner threads ONE base seed to every rollout worker, which mixes in its index so
+    /// the K streams stay independent; a fixed seed therefore reproduces the whole run.
+    #[arg(long)]
+    pub seed: Option<u64>,
 }

@@ -30,7 +30,7 @@ impl CrabObservation {
 }
 
 /// The per-env touch target: a point in WORLD space the crab is rewarded for
-/// reaching with a claw tip (see the target-touch reward in `training::session`).
+/// reaching with a claw tip (see the target-touch reward in `training::reward`).
 /// Owned by the training plugin, which respawns a fresh target each episode; the
 /// observation reads it to tell the policy where to reach. Empty / `None` outside
 /// training (the demo), where `build_observation` then writes a zero target vector
