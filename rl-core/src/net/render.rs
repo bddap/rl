@@ -279,8 +279,11 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
             // proves the checkpoint is present, so the gate here turns purely on net.is_none().
             let nn = match solo_crab {
                 Some(dir) if crate::net::should_arm_solo_crab(net.is_none(), true) => {
-                    let spawn = ls.sim().crab().pos();
-                    ls.enable_external_crab(true);
+                    let crab = ls.sim().crab();
+                    let spawn = crab.pos();
+                    // Arm + seed the pose atomically with the crab's CURRENT spawn pose/yaw —
+                    // writing back what's already there, so sim state is unchanged.
+                    ls.initialize_external_crab(spawn, crab.yaw());
                     Some((dir, spawn))
                 }
                 _ => None,
@@ -294,7 +297,7 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
                 // Known-solo at build: add the stack AND activate the gate now, so the crab
                 // spawns frame one exactly as before rl#58.
                 add_solo_nn_crab(&mut app, dir, spawn);
-                app.insert_resource(crate::net::solo_crab::SoloCrabActive(true));
+                app.insert_resource(crate::net::solo_crab::SoloCrabActive);
             }
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
@@ -318,7 +321,8 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
                     .crab()
                     .pos();
                 add_solo_nn_crab(&mut app, dir, crab_spawn);
-                app.insert_resource(crate::net::solo_crab::SoloCrabActive(false));
+                // Gate OFF: leave `SoloCrabActive` ABSENT (presence is the state). The
+                // transition (`ensure_round_installed`) inserts it iff the round resolves solo.
                 app.insert_resource(crate::bot::NumEnvs(0)); // no crab spawns behind the menu
                 app.insert_resource(SoloCrabStackInstalled(true)); // the transition may activate it
             }
@@ -508,8 +512,13 @@ fn ensure_round_installed(world: &mut World) {
         .get_resource::<SoloCrabStackInstalled>()
         .is_some_and(|m| m.0);
     if crate::net::should_arm_solo_crab(ready.net.is_none(), has_nn_stack) {
-        ready.lockstep.enable_external_crab(true);
-        world.insert_resource(crate::net::solo_crab::SoloCrabActive(true));
+        let crab = ready.lockstep.sim().crab();
+        // Arm + seed atomically with the crab's current pose/yaw (writing back what's there →
+        // no state change), removing the set-pose-before-arm footgun.
+        ready
+            .lockstep
+            .initialize_external_crab(crab.pos(), crab.yaw());
+        world.insert_resource(crate::net::solo_crab::SoloCrabActive);
     }
     let source = match ready.net {
         Some(n) => InputSource::Networked(n),
@@ -701,7 +710,7 @@ fn drive_lockstep(
     // gate can't change mid-round — and used below to decide whether to sync the external
     // crab pose. The bridge may exist on a networked round (menu path), so this, not the
     // bridge's presence, is the determinism-safe gate.
-    let nn_active = crate::net::solo_crab::SoloCrabActive::is_on(solo_crab_active.as_deref());
+    let nn_active = solo_crab_active.is_some();
 
     let mut applied = 0u32;
     while state.accumulator >= TICK_DT && applied < MAX_TICKS_PER_FRAME {
@@ -1162,7 +1171,7 @@ fn spawn_world(
     // the box is spawned HIDDEN there — the active gate is the tell — and the rig shows
     // instead. (We still spawn it so `apply_transforms`'s crab query is satisfied either
     // way; it just stays invisible.)
-    let crab_hidden = crate::net::solo_crab::SoloCrabActive::is_on(solo_crab_active.as_deref());
+    let crab_hidden = solo_crab_active.is_some();
     let crab_h = PLAYER_HEIGHT * CRAB_SCALE as f32;
     let crab_w = PLAYER_RADIUS * 2.0 * CRAB_SCALE as f32;
     let crab_root = commands

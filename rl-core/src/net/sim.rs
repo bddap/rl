@@ -495,6 +495,15 @@ impl Sim {
         self.crab.yaw = yaw;
     }
 
+    /// Solo setup: arm external control AND seed the crab's initial pose in ONE call, so a pose
+    /// can't be set before the flag is armed (where [`set_external_crab_pose`](Sim::set_external_crab_pose)
+    /// would silently no-op — the integer pursuit overwrites it). Per-tick updates after this
+    /// go through `set_external_crab_pose`.
+    pub fn initialize_external_crab(&mut self, pos: Pos, yaw: i32) {
+        self.enable_external_crab(true);
+        self.set_external_crab_pose(pos, yaw);
+    }
+
     /// Rebuild the round to its tick-0 state from the stored [`config`](Sim::config) —
     /// the deterministic restart ([`buttons::RESTART`] in [`Sim::step`]). Rebuilds the
     /// SAME way construction does (both call [`Sim::spawn_state`]), so a restarted round
@@ -1476,6 +1485,23 @@ mod tests {
             sim.player(PlayerId(0)).unwrap().status(),
             PlayerStatus::Downed
         );
+    }
+
+    #[test]
+    fn initialize_external_crab_arms_and_seeds_pose() {
+        // `initialize_external_crab` must arm external control AND seed the pose in one call,
+        // so a pose can't be written before the flag is armed.
+        let pos = Pos {
+            x: 7 * UNIT,
+            z: -3 * UNIT,
+        };
+        let yaw = 123;
+
+        let mut sim = Sim::new(0, &players(1));
+        sim.initialize_external_crab(pos, yaw);
+        assert!(sim.crab_is_external(), "initialize must arm external control");
+        assert_eq!(sim.crab().pos(), pos, "initialize must seed the pose");
+        assert_eq!(sim.crab().yaw(), yaw, "initialize must seed the yaw");
     }
 
     #[test]
