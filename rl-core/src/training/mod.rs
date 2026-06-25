@@ -10,7 +10,6 @@ pub mod curriculum;
 #[cfg(feature = "wgpu")]
 pub mod gpu;
 pub mod inproc;
-pub mod metrics;
 pub mod normalizer;
 pub mod reward;
 pub mod systems;

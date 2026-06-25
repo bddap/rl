@@ -3,7 +3,7 @@
 //! Sense→Think→Act systems ([`brain_step`], [`reset_crab`], [`save_on_exit`]) the sole
 //! trainer and each rollout thread run.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
@@ -36,7 +36,6 @@ use super::algorithm::{
 use super::TrainBackend;
 use super::checkpoint::{CheckpointDir, load_return_normalizer, save_return_normalizer};
 use super::curriculum::{CURRICULUM_REACH_RADIUS, Curriculum, seed_target};
-use super::metrics::MetricsLogger;
 use super::normalizer::{
     IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
 };
@@ -96,15 +95,11 @@ struct Pending {
 }
 
 /// Per-env episode accumulators. Each env's episode runs and resets
-/// independently; pose sums (carapace height, up·Y) are averaged at episode
-/// end to quantify stance quality.
+/// independently.
 #[derive(Clone, Default)]
 pub(crate) struct EnvEpisode {
     pub(crate) reward: f32,
     pub(crate) steps: u32,
-    pub(crate) height_sum: f32,
-    pub(crate) upright_sum: f32,
-    pub(crate) sq_angvel_sum: f32,
     pub(crate) phase: EnvPhase,
     /// Closest claw-tip→target 3D euclidean distance seen at any tick this episode — the
     /// curriculum's competence signal (an episode "reached" if this drops below
@@ -135,10 +130,7 @@ pub(crate) struct TrainingState {
 
     pub recent_rewards: Vec<f32>,
 
-    logger: MetricsLogger,
-
     pub total_steps: u64,
-    last_log_time: std::time::Instant,
 
     obs_normalizer: ObsNormalizer,
 
@@ -203,7 +195,8 @@ pub(crate) struct TrainingState {
 /// same-typed slices (three `&[f32]`, the obs/action arrays). Every field is indexed by
 /// env and has length `envs.len()`.
 struct StepInputs<'a> {
-    /// Post-physics body readings (poses/speeds/drift) — the survival + stance inputs.
+    /// Post-physics body readings (poses/speeds/drift) — the survival-guard +
+    /// walking-diagnostic inputs.
     body: &'a BodyState,
     /// Closest claw-tip→target 3D distance per env this tick (the reach reward's `d`).
     min_tip_dists: &'a [Option<f32>],
@@ -223,30 +216,24 @@ struct StepInputs<'a> {
 }
 
 impl TrainingState {
-    /// The learner's policy host (and the test fixtures): logs to "tmp". The learner
-    /// steps no world itself — it owns the policy and runs the PPO update from the
-    /// threads' buffers, checkpointing every iteration directly.
+    /// The learner's policy host (and the test fixtures). The learner steps no world
+    /// itself — it owns the policy and runs the PPO update from the threads' buffers,
+    /// checkpointing every iteration directly.
     pub fn new(config: &TrainConfig) -> Self {
-        Self::build(config, Path::new("tmp"), false, 0)
+        Self::build(config, false, 0)
     }
 
     /// In-process rollout thread: collects transitions but never runs the PPO update
-    /// locally (the learner does), and logs to its own `metrics_dir` so K threads
-    /// don't fight over one CSV. `worker_mode` turns on the per-horizon normalizer
+    /// locally (the learner does). `worker_mode` turns on the per-horizon normalizer
     /// increment the thread ships back; `worker_index` mixes into the RNG seed so each
     /// thread explores an independent stream even under a fixed `--seed` (see
     /// [`Self::build`]). Everything else (env count, reset/grace/rescue, reward) is the
     /// shared per-env machinery.
-    pub fn new_worker(config: &TrainConfig, metrics_dir: &Path, worker_index: usize) -> Self {
-        Self::build(config, metrics_dir, true, worker_index)
+    pub fn new_worker(config: &TrainConfig, worker_index: usize) -> Self {
+        Self::build(config, true, worker_index)
     }
 
-    fn build(
-        config: &TrainConfig,
-        metrics_dir: &Path,
-        worker_mode: bool,
-        worker_index: usize,
-    ) -> Self {
+    fn build(config: &TrainConfig, worker_mode: bool, worker_index: usize) -> Self {
         let device = NdArrayDevice::Cpu;
 
         // Resolve the run's RNG seed: an explicit `--seed`, else a fresh draw from
@@ -324,9 +311,7 @@ impl TrainingState {
             envs: vec![EnvEpisode::default(); n],
             episode_count: 0,
             recent_rewards: Vec::new(),
-            logger: MetricsLogger::new(metrics_dir),
             total_steps: 0,
-            last_log_time: std::time::Instant::now(),
             obs_normalizer,
             return_normalizer,
             rng,
@@ -560,7 +545,7 @@ impl TrainingState {
     /// Per env, finalize the PREVIOUS tick's pending transition with this tick's post-physics
     /// pose (see [`Pending`] for the one-tick phasing), then stash this tick's action as the
     /// next pending. On an episode end (terminal/truncation/rescue) push the transition, tally
-    /// stance + reach, log the episode, and reset the env (seeding its next target).
+    /// the reach signal, record the reward, and reset the env (seeding its next target).
     ///
     /// The heart of `brain_step`: the only writer of [`Transition`]s and the per-env episode
     /// lifecycle. Termination is survival guards only — jumping, flipping, and any other
@@ -615,14 +600,13 @@ impl TrainingState {
                     let ep = &mut self.envs[e];
                     ep.reward += reward;
                     ep.steps += 1;
-                    // No finite pose to fold into the stance averages.
                     true
                 } else {
-                    let (height, upright) =
+                    let (height, _upright) =
                         body.poses[e].expect("poses[e].is_none() handled above");
-                    // `height`/`upright` feed no reward (see `compute_reward`) — only the
-                    // off-reward machinery: `height` the blow-up/fell-through guard below and
-                    // the `mean_height` diagnostic, `upright` the stance diagnostics.
+                    // `height` feeds no reward (see `compute_reward`) — only the off-reward
+                    // blow-up/fell-through guard below. The pose's second element (uprightness)
+                    // is unused.
                     //
                     // World-frame progress toward the (fixed, per-episode) target: the metres
                     // the carapace's planar distance to the goal SHRANK from `s_t` (the pose
@@ -667,9 +651,6 @@ impl TrainingState {
                     let ep = &mut self.envs[e];
                     ep.reward += reward;
                     ep.steps += 1;
-                    ep.height_sum += height;
-                    ep.upright_sum += upright;
-                    ep.sq_angvel_sum += body.sq_angvels[e];
 
                     done || truncated
                 }
@@ -700,10 +681,6 @@ impl TrainingState {
             if episode_ended {
                 let ep = &self.envs[e];
                 let ep_reward = ep.reward;
-                let ep_steps = ep.steps;
-                let ep_height = ep.height_sum / ep_steps.max(1) as f32;
-                let ep_upright = ep.upright_sum / ep_steps.max(1) as f32;
-                let ep_sq_angvel = ep.sq_angvel_sum / ep_steps.max(1) as f32;
                 // Did this episode reach the target — the curriculum's competence signal, read
                 // off the episode's closest-ever tip distance before the reset clears it.
                 // `None` (no finite tip all episode) and a blown-up episode that never got close
@@ -740,43 +717,6 @@ impl TrainingState {
 
                 self.recent_rewards.push(ep_reward);
                 self.episode_count += 1;
-                let avg = self.avg_reward(10);
-                let ep_count = self.episode_count;
-
-                self.logger.log_episode(
-                    ep_count,
-                    ep_reward,
-                    ep_steps,
-                    avg,
-                    ep_height,
-                    ep_upright,
-                    ep_sq_angvel,
-                );
-
-                if self.episode_count.is_multiple_of(10) {
-                    let elapsed = self.last_log_time.elapsed().as_secs_f32();
-                    let total_transitions = self.total_steps * self.envs.len() as u64
-                        + (e as u64 + 1).min(self.envs.len() as u64);
-                    let sps = if elapsed > 0.0 {
-                        total_transitions as f32 / elapsed
-                    } else {
-                        0.0
-                    };
-                    let buffered: usize = self.rollouts.iter().map(|b| b.len()).sum();
-                    // Σω² is telemetry only — never enters the reward. (The other
-                    // labels spell out their scope inline.)
-                    info!(
-                        "Ep {} | avg reward(10): {:.2} | last ep (1 env): {} steps, height {:.2}, upright {:.2}, Σω² {:.0} | buffer {} | {:.0} steps/s (lifetime avg)",
-                        self.episode_count,
-                        avg,
-                        ep_steps,
-                        ep_height,
-                        ep_upright,
-                        ep_sq_angvel,
-                        buffered,
-                        sps,
-                    );
-                }
             }
         }
     }
@@ -842,12 +782,12 @@ struct SampledAction {
 }
 
 /// Per-env body state read off this tick's post-physics poses (the live `s_{t+1}`). Most
-/// fields are off-reward (poses/speeds feed the survival guards and stance diagnostics, drift
-/// the walking diagnostic) — the ONE that enters [`compute_reward`] is `carapace_pos`, from
-/// which the call site derives the carapace→target distance whose per-tick REDUCTION is the
-/// progress reward. `None` for an env whose crab is momentarily absent (mid-respawn).
+/// fields are off-reward (poses/speeds feed the survival guards, drift the walking diagnostic)
+/// — the ONE that enters [`compute_reward`] is `carapace_pos`, from which the call site derives
+/// the carapace→target distance whose per-tick REDUCTION is the progress reward. `None` for an
+/// env whose crab is momentarily absent (mid-respawn).
 struct BodyState {
-    /// `(carapace height, up·Y uprightness)`, the survival-guard + stance inputs.
+    /// `(carapace height, up·Y uprightness)`, the survival-guard input (only height is read).
     poses: Vec<Option<(f32, f32)>>,
     /// Carapace world position — the progress-reward input: the call site computes its planar
     /// distance to the target and credits the per-tick reduction (the body's net ground
@@ -858,8 +798,6 @@ struct BodyState {
     drifts: Vec<Option<f32>>,
     /// Fastest body part (limbs blow up first), linear-scaled — the blow-up guard input.
     max_speeds: Vec<f32>,
-    /// Σω² over body parts — the angular-energy stance diagnostic.
-    sq_angvels: Vec<f32>,
 }
 
 /// Normalize every env's observation, feeding the shared running stats (and, in worker mode,
@@ -1010,7 +948,6 @@ fn gather_body_state(
     // balls + acceleration motors), so the blowup guard must watch every body. NaN poisons
     // the max, so fold it in as +inf.
     let mut max_speeds: Vec<f32> = vec![0.0; n];
-    let mut sq_angvels: Vec<f32> = vec![0.0; n];
     for (env, vel) in parts_q.iter() {
         if let Some(m) = max_speeds.get_mut(env.0) {
             let lin = vel.linear.length();
@@ -1023,10 +960,6 @@ fn gather_body_state(
                 f32::INFINITY
             };
             *m = m.max(s);
-            // Non-finite ω is the blowup guard's problem, not the tax's.
-            if ang.is_finite() {
-                sq_angvels[env.0] += ang * ang;
-            }
         }
     }
     BodyState {
@@ -1034,7 +967,6 @@ fn gather_body_state(
         carapace_pos,
         drifts,
         max_speeds,
-        sq_angvels,
     }
 }
 
@@ -1408,10 +1340,9 @@ mod tests {
         // Wire the training world the same way the `rl learn` rollout worlds do
         // (see inproc::build_rollout_app): worker-mode TrainingState + the Sense→
         // Think→Act systems, so these tests exercise the brain_step / reset_crab /
-        // rescue semantics the sole trainer runs. The metrics dir is the per-test
-        // scratch checkpoint dir (no shared CSV to clobber). Worker index 0 → the
-        // seed is used unmixed, so a fixed `seed` reproduces the trajectory exactly.
-        let state = TrainingState::new_worker(&config, checkpoint_dir, 0);
+        // rescue semantics the sole trainer runs. Worker index 0 → the seed is used
+        // unmixed, so a fixed `seed` reproduces the trajectory exactly.
+        let state = TrainingState::new_worker(&config, 0);
         app.insert_non_send_resource(state)
             .add_systems(
                 FixedUpdate,
