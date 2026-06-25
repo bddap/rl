@@ -57,7 +57,7 @@
 //! rejoins at the live policy next iteration; the learner sees that thread
 //! contribute no samples for the iteration and the other threads are untouched.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
@@ -448,12 +448,6 @@ fn horizon_tick(app: &mut App) -> u64 {
         .unwrap_or(0)
 }
 
-/// Scratch metrics dir for rollout thread `id` so K threads don't clobber one CSV
-/// (the learner owns "tmp", the established curve location). Throwaway.
-fn worker_metrics_dir(id: usize) -> PathBuf {
-    std::env::temp_dir().join(format!("rl-rollout-{id}-metrics"))
-}
-
 /// Warm up a freshly built App: spawn the crabs and step a couple of updates so
 /// the spawn systems run and grace begins to elapse, then discard anything those
 /// updates recorded — otherwise the first horizon would carry pre-horizon
@@ -483,9 +477,6 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
     use crate::training::systems;
     use crate::training::systems::{brain_step, reset_crab, save_on_exit};
 
-    // Per-thread scratch CSV dir so K threads never write the same file.
-    let metrics_dir = worker_metrics_dir(id);
-
     // The shared windowless physics+bot stack in rollout-worker mode: the 1-thread
     // task pool + ScheduleRunner loop (the K-world scaling fix — see
     // `WorldRole::RolloutWorker`), one physics tick per update so a horizon is EXACTLY
@@ -501,7 +492,7 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
     // here).
     // `id` is the worker index — mixed into the RNG seed so each thread explores an
     // independent stream even under a fixed `--seed` (see `TrainingState::build`).
-    let state = systems::TrainingState::new_worker(config, &metrics_dir, id);
+    let state = systems::TrainingState::new_worker(config, id);
     app.insert_non_send_resource(state)
         .add_systems(
             FixedUpdate,
