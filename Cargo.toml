@@ -21,8 +21,7 @@ license = "MIT OR Apache-2.0"
 # rl-core/Cargo.toml [features]).
 bevy = { version = "0.18", default-features = false }
 bevy_rapier3d = { version = "0.34", default-features = false }
-# Immediate-mode GUI for the TEMPORARY in-demo `--debug-sliders` physics panel
-# (rl-core/src/debug_sliders.rs) and the game's boot menu (net::menu). 0.39 tracks
+# Immediate-mode GUI for the game's boot menu (net::menu). 0.39 tracks
 # bevy 0.18. Optional in rl-core, enabled by `render`.
 bevy_egui = "0.39"
 

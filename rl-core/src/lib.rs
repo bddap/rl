@@ -29,11 +29,9 @@ pub mod physics;
 pub mod training;
 
 // Rendering-only modules — gated out of the headless trainer build. They pull bevy's
-// render/PBR/egui types (cameras, materials, screenshots, the egui slider panel), which
-// don't even exist when bevy is built without `render`, so without this gate the
-// trainer wouldn't compile. The trainer never renders, so it loses nothing.
-#[cfg(feature = "render")]
-pub mod debug_sliders;
+// render/PBR/egui types (cameras, materials, screenshots), which don't even exist when
+// bevy is built without `render`, so without this gate the trainer wouldn't compile.
+// The trainer never renders, so it loses nothing.
 #[cfg(feature = "render")]
 pub mod play;
 #[cfg(feature = "render")]
