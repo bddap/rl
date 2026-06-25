@@ -11,8 +11,6 @@ use bevy_rapier3d::prelude::{ExternalForce, Velocity};
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabCarapace, CrabJointId, Side};
 
-use super::claw_demo::pin_correction;
-
 /// The constant shoulder action both chelipeds are driven with (clamped to [-1, 1] by
 /// the actuator, which then holds the joint at its corresponding limit). `slots` are
 /// resolved through [`CrabJointId::index`] so a rig reorder can't drive the wrong DOF.
@@ -56,8 +54,8 @@ pub(super) fn rig_pose_drive(pose: Res<RigPose>, mut actions: ResMut<CrabActions
 }
 
 /// System (FixedUpdate, after Act, before the physics step): capture the carapace pose
-/// once, then PD-hold it there (reusing the claw demo's correction) so the body stays
-/// framed while the arms drive to their stop.
+/// once, then PD-hold it there ([`pin_correction`]) so the body stays framed while the
+/// arms drive to their stop.
 pub(super) fn rig_pose_pin(
     mut pin: ResMut<RigPosePin>,
     mut carapace_q: Query<(&Transform, &Velocity, &mut ExternalForce), With<CrabCarapace>>,
@@ -69,4 +67,43 @@ pub(super) fn rig_pose_pin(
     let (f, t) = pin_correction(&target, xform, vel);
     force.force += f;
     force.torque += t;
+}
+
+/// PD gains for the carapace hold. The damping (KD) terms do the real work — arresting
+/// the slow yaw/drift the lone arm torque induces — so they dominate; the restoring (KP)
+/// terms only nudge the trunk back to where it settled. Both corrections are then clamped
+/// (`PIN_MAX_*`) so no transient at the moment of capture can fling the light multibody
+/// root out of frame.
+const PIN_ROT_KP: f32 = 20.0;
+const PIN_ROT_KD: f32 = 12.0;
+const PIN_POS_KP: f32 = 60.0;
+const PIN_POS_KD: f32 = 30.0;
+const PIN_MAX_TORQUE: f32 = 12.0;
+const PIN_MAX_FORCE: f32 = 120.0;
+
+/// The clamped corrective `(force, torque)` that drives the carapace from its current
+/// pose/velocity back toward `target`. The correction is an *external force/torque*, not
+/// a velocity write or a body-type swap: on a Rapier multibody root only forces reach the
+/// body (velocity writeback is a no-op, issue #14) and flipping the root to
+/// `RigidBody::Fixed` mid-sim NaNs the solver. Per-body `Damping` is likewise ignored on a
+/// multibody root, so a PD hold via `ExternalForce` is the one channel that actually pins
+/// the trunk. Caller *adds* this onto `ExternalForce` after the actuator's baseline; see
+/// [`rig_pose_pin`].
+fn pin_correction(target: &Transform, xform: &Transform, vel: &Velocity) -> (Vec3, Vec3) {
+    // Rotational PD: error as the axis-angle of the rotation that takes the current
+    // orientation to the target, fed back against the current angular velocity.
+    let err_rot = target.rotation * xform.rotation.inverse();
+    let (axis, angle) = err_rot.to_axis_angle();
+    let angle = if angle > std::f32::consts::PI {
+        angle - std::f32::consts::TAU
+    } else {
+        angle
+    };
+    let torque =
+        (axis * angle * PIN_ROT_KP - vel.angular * PIN_ROT_KD).clamp_length_max(PIN_MAX_TORQUE);
+
+    // Positional PD: hold the trunk where it settled (catches any lateral skating).
+    let err_pos = target.translation - xform.translation;
+    let force = (err_pos * PIN_POS_KP - vel.linear * PIN_POS_KD).clamp_length_max(PIN_MAX_FORCE);
+    (force, torque)
 }

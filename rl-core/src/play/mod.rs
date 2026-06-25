@@ -10,10 +10,9 @@
 //!
 //! Both plugins live here as the wiring core; the systems they schedule are carved into
 //! focused submodules ([`policy`], [`hot_reload`], [`manual_control`], [`cameras`],
-//! [`target_ball`], [`claw_demo`], [`demo`], [`controls`]).
+//! [`target_ball`], [`demo`], [`controls`]).
 
 mod cameras;
-mod claw_demo;
 mod controls;
 mod demo;
 mod hot_reload;
@@ -34,7 +33,6 @@ use crate::screenshot::{self, ShotProgress, ShotTarget};
 pub(crate) use policy::Policy;
 
 use cameras::{orbit_camera, spawn_offscreen_camera, spawn_orbit_camera, track_offscreen_camera};
-use claw_demo::{PinBody, claw_demo_drive, claw_demo_from_env, claw_demo_pin};
 use controls::DemoControls;
 use demo::{
     DemoRetilt, DemoSettle, PokeBurst, demo_controls, demo_fall_rescue, demo_poke, demo_retilt,
@@ -105,25 +103,6 @@ impl Plugin for DemoPlugin {
             (policy_step, manual_control_step).in_set(BotSet::Think),
         )
         .add_systems(Update, hot_reload_policy);
-
-        // RL_CLAW_DEMO: the right-claw inspection sweep, on the demo's wall-clock. The
-        // drive overwrites the wrist/pincer slots after the policy wrote them (so it
-        // wins those two DOFs while the policy keeps the rest); the pin holds the
-        // carapace still so only the claw articulates. Gated entirely on the env var.
-        if let Some(claw) = claw_demo_from_env() {
-            app.insert_resource(claw)
-                .init_resource::<PinBody>()
-                .add_systems(
-                    FixedUpdate,
-                    claw_demo_drive.in_set(BotSet::Think).after(policy_step),
-                )
-                .add_systems(
-                    FixedUpdate,
-                    claw_demo_pin
-                        .after(BotSet::Act)
-                        .before(PhysicsSet::SyncBackend),
-                );
-        }
     }
 }
 
