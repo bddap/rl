@@ -15,7 +15,6 @@ pub mod normalizer;
 pub mod reward;
 pub mod systems;
 pub mod update;
-mod watchdog;
 
 /// Backend type aliases — the foundational training types every other module builds on.
 /// Training carries autodiff; inference (play/demo) uses the bare inner backend, and
