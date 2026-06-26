@@ -65,8 +65,8 @@ pub(crate) enum StepEnd {
     /// The trajectory continues past this step — an in-episode step, or a
     /// rollout-window boundary mid-episode (bootstrapped via `last_value`).
     Continues,
-    /// True terminal: the episode genuinely ended here (a survival guard failed /
-    /// the sim died), so the future return is 0.
+    /// True terminal: the episode genuinely ended here (the crab GRABBED the target, a
+    /// survival guard failed, or the sim died), so the future return is 0.
     Terminal,
     /// Truncation: the episode was cut by the step cap while the crab was still
     /// standing. Its value must be bootstrapped (see [`compute_gae`]), or the policy
@@ -76,8 +76,9 @@ pub(crate) enum StepEnd {
 
 impl StepEnd {
     /// A terminal or a truncation ends the trajectory segment, so the GAE trace must
-    /// not fold future (next-episode) advantage back across it.
-    fn ends_segment(self) -> bool {
+    /// not fold future (next-episode) advantage back across it (and the rollout resets
+    /// the env on it).
+    pub(crate) fn ends_segment(self) -> bool {
         matches!(self, StepEnd::Terminal | StepEnd::Truncated)
     }
 }

@@ -40,7 +40,7 @@ use super::normalizer::{
     IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
 };
 use super::reward::{
-    EFFORT_WEIGHT, action_effort, compute_reward, dist_3d, planar_dist, reach_bonus,
+    EFFORT_WEIGHT, GRAB_REWARD, action_effort, compute_reward, dist_3d, planar_dist,
 };
 
 /// Default rollout horizon: the number of physics ticks each rollout thread rolls
@@ -54,6 +54,27 @@ pub const STEPS_PER_ROLLOUT: u32 = 1024;
 /// `reward::EFFORT_WEIGHT`), so it is named once here and shared, never duplicated as a magic
 /// `1500`.
 pub(crate) const MAX_EPISODE_TICKS: u32 = 1500;
+
+/// Classify a recorded step's episode end from its three independent end conditions, in
+/// PRIORITY order — the single place the terminal-vs-truncation contract is decided, kept pure
+/// so it is unit-tested directly (not only through a full rollout):
+///   * `grabbed` (a claw tip reached the target) or `fell` (a survival guard tripped) is a TRUE
+///     [`StepEnd::Terminal`] — the episode genuinely ended, so GAE bootstraps ZERO past it. A
+///     grab outranks the cap: a step that both grabs and crosses the cap is a success, not a
+///     truncation.
+///   * else `over_cap` (the step cap reached while still alive) is a [`StepEnd::Truncated`] — the
+///     episode was cut short, so GAE must BOOTSTRAP the cut-short value (teaching the cap is a
+///     dead end would be wrong).
+///   * else the trajectory [`StepEnd::Continues`].
+fn classify_step_end(grabbed: bool, fell: bool, over_cap: bool) -> StepEnd {
+    if grabbed || fell {
+        StepEnd::Terminal
+    } else if over_cap {
+        StepEnd::Truncated
+    } else {
+        StepEnd::Continues
+    }
+}
 
 /// Where an env sits in the record → reset → settle lifecycle. One field, not a
 /// `needs_reset: bool` + `grace: u32` pair, so an illegal combination (a respawn pending
@@ -80,11 +101,12 @@ pub(crate) enum EnvPhase {
 /// A transition whose action has been chosen and obs/value/effort captured, but
 /// whose reward and end need NEXT tick's post-physics pose to finalize.
 ///
-/// The reach term must score the pose `aₜ` *produced* (the claw-tip distance at
-/// `s_{t+1}`) — but the schedule is Sense → Think (`brain_step`) → Act → physics, so
-/// when `brain_step` runs at tick `t` the carapace it can read is still `sₜ` (physics
-/// hasn't integrated `aₜ` yet). So everything known at tick `t` is stashed here and the
-/// transition completed at tick `t+1`, in phase with the pose that action caused.
+/// The reward and end must score the pose `aₜ` *produced* — the carapace's distance closed
+/// (progress) and the claw-tip distance (the grab terminal) at `s_{t+1}` — but the schedule is
+/// Sense → Think (`brain_step`) → Act → physics, so when `brain_step` runs at tick `t` the pose
+/// it can read is still `sₜ` (physics hasn't integrated `aₜ` yet). So everything known at tick
+/// `t` is stashed here and the transition completed at tick `t+1`, in phase with the pose that
+/// action caused.
 #[derive(Clone)]
 struct Pending {
     obs: [f32; OBS_SIZE],
@@ -208,7 +230,8 @@ struct StepInputs<'a> {
     /// Post-physics body readings (poses/speeds/drift) — the survival-guard +
     /// walking-diagnostic inputs.
     body: &'a BodyState,
-    /// Closest claw-tip→target 3D distance per env this tick (the reach reward's `d`).
+    /// Closest claw-tip→target 3D distance per env this tick — the grab terminal's `d` (and
+    /// the curriculum "reached" signal's, via the per-episode minimum).
     min_tip_dists: &'a [Option<f32>],
     /// Normalized observation fed to the policy this tick (stashed in the pending).
     obs: &'a [[f32; OBS_SIZE]],
@@ -600,7 +623,7 @@ impl TrainingState {
                     // change in distance-to-target is the action's doing (crediting the
                     // spawn jump would be a huge spurious progress delta). The effort tax
                     // still applies — it priced the DRIVE, not its result.
-                    let reward = compute_reward(None, None, pending.effort);
+                    let reward = compute_reward(None, pending.effort);
                     self.rollouts[e].push(Transition {
                         obs: pending.obs,
                         action: pending.action,
@@ -630,7 +653,7 @@ impl TrainingState {
                         .target_dist
                         .zip(d_now)
                         .map(|(prev, now)| prev - now);
-                    let reward = compute_reward(distance_closed, min_tip_dists[e], pending.effort);
+                    let mut reward = compute_reward(distance_closed, pending.effort);
                     // The blowup check only catches a genuine numerical explosion before the
                     // solver NaNs and Rapier panics the whole app; the threshold is high
                     // because direct torque is bounded (no acceleration-motor energy pump), so
@@ -638,19 +661,25 @@ impl TrainingState {
                     // clearly unphysical speed ends the episode. The height band is sim sanity
                     // (clipped through the floor / left the playfield).
                     let blowing_up = body.max_speeds[e] > 100.0 || !height.is_finite();
-                    let done = !(0.02..=50.0).contains(&height) || blowing_up;
-                    // The step cap is a TRUNCATION, not a failure: a crab still standing
-                    // at the cap was cut short, so GAE must bootstrap its value rather
-                    // than learn the cap is a dead end (see StepEnd::Truncated).
-                    let truncated = !done && self.envs[e].steps > MAX_EPISODE_TICKS;
-
-                    let end = if done {
-                        StepEnd::Terminal
-                    } else if truncated {
-                        StepEnd::Truncated
-                    } else {
-                        StepEnd::Continues
-                    };
+                    let fell = !(0.02..=50.0).contains(&height) || blowing_up;
+                    // SPARSE TERMINAL GRAB (rl#95 — see `reward` module header): a claw tip within
+                    // the grab radius of the target THIS tick adds a one-shot `GRAB_REWARD` and
+                    // ends the episode as a SUCCESS terminal (`done` ⇒ GAE bootstraps ZERO past
+                    // it). Detected on this tick's post-physics tip distance (`min_tip_dists[e]` —
+                    // the result of `pending`'s action), so the credit lands on the grabbing
+                    // action, in phase with the pose it caused. `is_some_and` makes a missing/NaN
+                    // distance a non-grab (fail-safe, no spurious terminal). The radius is the
+                    // single shared `CURRICULUM_REACH_RADIUS` (also the curriculum "reached" signal
+                    // and the demo ball-hop), so a grab implies a reached episode.
+                    let grabbed = min_tip_dists[e].is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
+                    if grabbed {
+                        reward += GRAB_REWARD;
+                    }
+                    // The step cap is a TRUNCATION, not a failure: a crab still standing at the
+                    // cap was cut short, so GAE bootstraps its value rather than learning the cap
+                    // is a dead end (see [`classify_step_end`] / StepEnd::Truncated).
+                    let over_cap = self.envs[e].steps > MAX_EPISODE_TICKS;
+                    let end = classify_step_end(grabbed, fell, over_cap);
                     self.rollouts[e].push(Transition {
                         obs: pending.obs,
                         action: pending.action,
@@ -664,7 +693,7 @@ impl TrainingState {
                     ep.reward += reward;
                     ep.steps += 1;
 
-                    done || truncated
+                    end.ends_segment()
                 }
             } else {
                 // No pending yet: the first recording tick of an episode only chooses
@@ -694,7 +723,10 @@ impl TrainingState {
                 let ep = &self.envs[e];
                 let ep_reward = ep.reward;
                 // Did this episode reach the target — the curriculum's competence signal, read
-                // off the episode's closest-ever tip distance before the reset clears it.
+                // off the episode's closest-ever tip distance before the reset clears it. Same
+                // `CURRICULUM_REACH_RADIUS` as the grab terminal, but over the episode MINIMUM
+                // (not just this tick), so a grab ⟹ reached: the grab fires the first finalized
+                // tick the tip is inside the radius, which also drives the episode-min inside it.
                 // `None` (no finite tip all episode) and a blown-up episode that never got close
                 // both count as honest misses. A 3D radius (see [`dist_3d`]): a tip on the floor
                 // under a raised ball does not count.
@@ -749,35 +781,27 @@ impl TrainingState {
     }
 }
 
-/// Effort/tax/reach probe (RL_LOG_EFFORT only — inert otherwise): per tick, the mean drive
-/// effort `Σ|d|²`, the resulting tax `EFFORT_WEIGHT·effort`, and the reach term, over the live
-/// RECORDING envs. Lets a calibration run read how big a bite the tax takes out of the
-/// positive reward at the current weight, without parsing rollouts.
-///
-/// Calibration diagnostic, ONE tick skewed: mean_tax is tick-`t`'s drive while mean_reach is
-/// tick-`t`'s pose (the result of the LAST action), so read the ratio as a magnitude check, not
-/// as exactly-aligned same-action terms.
-fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32], min_tip_dists: &[Option<f32>]) {
+/// Effort/tax probe (RL_LOG_EFFORT only — inert otherwise): per tick, the mean drive effort
+/// `Σ|d|²` and the resulting tax `EFFORT_WEIGHT·effort`, over the live RECORDING envs. Lets a
+/// calibration run read how big a bite the tax takes out of the positive reward at the current
+/// weight, without parsing rollouts.
+fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32]) {
     if std::env::var_os("RL_LOG_EFFORT").is_none() {
         return;
     }
     let mut count = 0usize;
     let mut effort_sum = 0.0f32;
-    let mut reach_sum = 0.0f32;
     for (e, ep) in envs.iter().enumerate() {
         if matches!(ep.phase, EnvPhase::Recording) {
             count += 1;
             effort_sum += efforts[e];
-            reach_sum += reach_bonus(min_tip_dists[e]);
         }
     }
     if count > 0 {
         let mean_effort = effort_sum / count as f32;
         info!(
-            "EFFORTLOG n={count} mean_effort={mean_effort:.3} \
-             mean_tax={:.4} mean_reach={:.4}",
+            "EFFORTLOG n={count} mean_effort={mean_effort:.3} mean_tax={:.4}",
             EFFORT_WEIGHT * mean_effort,
-            reach_sum / count as f32,
         );
     }
 }
@@ -989,7 +1013,7 @@ fn carapace_target_dist(body: &BodyState, targets: &CrabTargets, e: usize) -> Op
         .map(|(pos, target)| planar_dist(pos, target))
 }
 
-/// Closest claw-tip→target 3D distance per env this tick (the reach reward's `d`, see
+/// Closest claw-tip→target 3D distance per env this tick (the grab terminal's `d`, see
 /// [`dist_3d`]), folded over both claw tips. `None` when the env has no target or no claw tip
 /// this tick (mid-respawn); a non-finite tip is skipped, not folded as a spurious hit.
 fn closest_tip_dists(
@@ -1094,11 +1118,12 @@ pub(crate) fn brain_step(
     }
 
     // ONE far target per episode: seeded at reset (and lazily above for the first episode)
-    // and then held FIXED — no mid-episode resample on reach. The reward is a pure distance
-    // field with no event bonus for the reach itself, so resampling-on-reach would make
-    // reaching MOVE the reward away, and the optimal policy would hover just outside the
-    // reach radius forever rather than touch. With a fixed goal the crab instead walks up
-    // and settles at d≈0, where the reach term peaks — so full reaching is the optimum.
+    // and then held FIXED — no mid-episode resample. A grab now ENDS the episode (the sparse
+    // terminal in `finalize_transitions`), so a fixed goal makes touching it strictly optimal:
+    // the dense progress field pulls the body in, and the one-shot grab bonus + done caps the
+    // approach — there is no positive per-tick stream to farm by hovering (progress telescopes
+    // to zero once arrived, and effort is a net cost), so the crab closes the last stretch and
+    // grabs rather than loitering at the radius edge.
 
     // Act → record: finalize last tick's pending transition against this tick's pose, stash
     // this tick's, and roll over any episode that ended. The sole writer of `Transition`s.
@@ -1114,7 +1139,7 @@ pub(crate) fn brain_step(
     };
     training.finalize_transitions(&inputs, &mut targets, &spawns, curriculum);
 
-    log_effort_probe(&training.envs, &efforts, &min_tip_dists);
+    log_effort_probe(&training.envs, &efforts);
     training.accumulate_drift(&body.drifts);
 
     training.total_steps += 1;
@@ -1233,6 +1258,30 @@ pub(crate) fn save_on_exit(
 mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// The terminal-vs-truncation contract the value targets depend on (rl#95): a GRAB or a
+    /// fall is a TRUE terminal (GAE bootstrap 0); the step cap is a TRUNCATION (bootstrap the
+    /// cut-short value); otherwise the trajectory continues. A grab OUTRANKS the cap — a step
+    /// that both grabs and crosses the cap is a success, not a truncation — so the success
+    /// return is never silently bootstrapped past.
+    #[test]
+    fn classify_step_end_terminal_vs_truncation() {
+        // Grab ⇒ true terminal (does not bootstrap). This is the new sparse-grab path.
+        assert_eq!(classify_step_end(true, false, false), StepEnd::Terminal);
+        // A grab on the very tick the cap is hit is still a SUCCESS terminal, not a truncation.
+        assert_eq!(classify_step_end(true, false, true), StepEnd::Terminal);
+        // A fall (survival guard) is a true terminal too.
+        assert_eq!(classify_step_end(false, true, false), StepEnd::Terminal);
+        // Alive at the cap ⇒ truncation (bootstraps the value — must differ from a terminal).
+        assert_eq!(classify_step_end(false, false, true), StepEnd::Truncated);
+        // Otherwise the episode continues.
+        assert_eq!(classify_step_end(false, false, false), StepEnd::Continues);
+        // The bootstrap contract those map to: terminal/truncation end the segment, continue
+        // does not — so GAE bootstraps 0 on the grab terminal, the value on truncation.
+        assert!(classify_step_end(true, false, false).ends_segment());
+        assert!(classify_step_end(false, false, true).ends_segment());
+        assert!(!classify_step_end(false, false, false).ends_segment());
+    }
 
     /// Drive `build_observation` over a single hand-placed carapace and return env 0's
     /// observation. No physics/rig — just the resources the system reads plus one
@@ -1560,6 +1609,79 @@ mod tests {
             after_set, rescued_set,
             "rescued env was respawned twice in one tick (issue #16): reset_crab \
              replaced the rescue's crab instead of leaving it alone"
+        );
+
+        let _ = std::fs::remove_dir_all(&checkpoint_dir);
+    }
+
+    /// The sparse-grab path end-to-end (rl#95): a claw tip within the reach radius of the target
+    /// ENDS the episode as a TRUE terminal carrying the one-shot grab bonus, and the env resets.
+    /// We force the grab by moving the target ONTO a live claw tip of env 0, so this tick's
+    /// minimum tip distance is ~0 (well under `CURRICULUM_REACH_RADIUS`).
+    #[test]
+    fn grab_within_radius_ends_episode_with_terminal_bonus() {
+        let checkpoint_dir =
+            std::env::temp_dir().join(format!("rl_test_grab_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&checkpoint_dir);
+        let mut app = headless_training_app(&checkpoint_dir, 0x6AB);
+
+        // Settle past grace and record a few real steps so env 0 has a pending action to
+        // finalize against the grab pose this tick (steps > 0, Recording).
+        for _ in 0..(RESET_GRACE_TICKS + 8) {
+            app.update();
+        }
+        assert!(
+            matches!(
+                app.world().non_send_resource::<TrainingState>().envs[0].phase,
+                EnvPhase::Recording
+            ),
+            "env 0 must be live-recording before the grab"
+        );
+        let episodes_before = app
+            .world()
+            .non_send_resource::<TrainingState>()
+            .episode_count;
+
+        // Place the target ON one of env 0's claw tips so the next finalize sees a tip distance
+        // of ~0 → grab. The target then stays fixed until the grab-triggered reset reseeds it.
+        let tip_pos = {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<(&CrabEnvId, &Transform), With<CrabClawTip>>();
+            q.iter(app.world())
+                .find(|(env, _)| env.0 == 0)
+                .map(|(_, t)| t.translation)
+                .expect("env 0 must have a claw tip")
+        };
+        app.world_mut().resource_mut::<CrabTargets>().envs[0] = Some(tip_pos);
+
+        // One tick: brain_step finalizes the pending action against a pose whose claw tip is on
+        // the target → grab → Terminal + bonus, then reset_crab respawns the env.
+        app.update();
+
+        let st = app.world().non_send_resource::<TrainingState>();
+        let last = st.rollouts[0]
+            .transitions
+            .last()
+            .expect("env 0 recorded a transition");
+        assert_eq!(
+            last.end,
+            StepEnd::Terminal,
+            "a grab must end the episode as a TRUE terminal (GAE bootstrap 0), not a truncation"
+        );
+        assert!(
+            last.reward >= GRAB_REWARD - 1.0,
+            "the grabbing transition must carry the one-shot grab bonus (~{GRAB_REWARD}): got {}",
+            last.reward
+        );
+        assert_eq!(
+            st.episode_count,
+            episodes_before + 1,
+            "the grab must end the episode and count it"
+        );
+        assert!(
+            !matches!(st.envs[0].phase, EnvPhase::Recording),
+            "env 0 must have left Recording (reset for the next episode) after the grab"
         );
 
         let _ = std::fs::remove_dir_all(&checkpoint_dir);

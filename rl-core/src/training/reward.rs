@@ -1,15 +1,21 @@
-//! The reward function and the distance metrics it is defined over. THREE terms: a
-//! world-frame PROGRESS pull (the carapace's net distance CLOSED toward the goal this tick),
-//! a near-field REACH grab bonus (closest claw-tip→target distance), minus an actuation-cost
-//! tax. The reward stays GLOBAL — it pays high-level progress-through-the-world plus a
-//! terminal grab, never a per-leg / foot-contact / gait-phase term — so the GAIT itself
-//! EMERGES rather than being hand-specified (owner call: mechanical terms don't scale to
-//! emergent behaviour).
+//! The reward function and the distance metrics it is defined over. TWO continuous terms — a
+//! world-frame PROGRESS pull (the carapace's net distance CLOSED toward the goal this tick)
+//! minus an actuation-cost tax — plus a SPARSE TERMINAL grab event (a one-shot bonus + episode
+//! `done`, applied at the episode boundary in `systems::finalize_transitions`, not here). The
+//! reward stays GLOBAL — it pays high-level progress-through-the-world plus a terminal grab,
+//! never a per-leg / foot-contact / gait-phase term — so the GAIT itself EMERGES rather than
+//! being hand-specified (owner call: mechanical terms don't scale to emergent behaviour).
 //!
-//! Why progress AND reach: the end task is "get to the player and grab." Progress is the
-//! cross-arena pull (a lean cannot fake the BODY moving toward the goal — the gap the old
-//! reach-only signal let a reacher game by leaning); reach is the last-metre grab bonus the
-//! game's hit actually resolves on. Progress dominates while far, reach dominates while near.
+//! Why progress AND a terminal grab: the end task is "get to the player and grab." Progress is
+//! the cross-arena pull, dense the whole way (a lean cannot fake the BODY covering ground — the
+//! gap the old reach-only signal let a reacher game by leaning). The grab is the SPARSE terminal
+//! event the task actually resolves on: a claw tip inside the grab radius ends the episode with
+//! a one-shot bonus. The approach EMERGES from progress alone — there is deliberately no per-tick
+//! near-field proximity term. The old continuous reach integral did two harmful things at once:
+//! it hand-specified the last-metre mechanic, and (un-telescoping, un-gated on contact) it paid a
+//! crab to ARRIVE AND HOLD a claw in the near-field for the rest of the episode — farming far
+//! more than an honest traverse earned (rl#95). A sparse terminal removes both: there is nothing
+//! to hold-farm (the episode ends on contact), and the mechanic is no longer hand-shaped.
 //!
 //! The progress term is a POTENTIAL-BASED shaping of `Φ = −distance`: each transition pays
 //! `P·(d_prev − d_now)`, the reduction in the carapace's planar distance to the (fixed,
@@ -85,11 +91,11 @@ pub(crate) fn action_effort(drives: &[f32; ACTION_SIZE]) -> f32 {
 /// (un-clamped) telescopes exactly to `P·(d_start − d_end)` over an episode.
 ///
 /// 24 is chosen so:
-/// * a full traversal of the curriculum band (targets 1.5→9 m out) pays ≈ 36→216 in progress
-///   alone; added to the per-tick reach-hold integral, realistic episode totals land at
-///   ≈280–310 — near the old reach-only ~250, so the warm-started value head + return
-///   normalizer barely rescale (it is reach-hold + progress that lands there, not progress's
-///   36 near-band by itself);
+/// * a full traversal of the curriculum band (targets 1.5→9 m out) pays ≈ 36→216 in progress —
+///   the ONLY cross-arena signal now that the per-tick reach integral is gone, and the dense
+///   shaping that carries the body to within grab range at every band, near and far. The sparse
+///   [`GRAB_REWARD`] is then a one-shot terminal bonus ON TOP, scaled (see there) to make a grab
+///   the clearly-dominant outcome of a near-band episode without swamping the approach signal;
 /// * one tick of honest walking (~0.5 m/s ⇒ ~0.0078 m at 64 Hz, `physics::PHYSICS_DT`) pays
 ///   ≈ 0.19 — ~20× its ~0.009 gait-drive effort tax — a dense local gradient to set off and
 ///   keep moving;
@@ -112,38 +118,31 @@ const PROGRESS_WEIGHT: f32 = 24.0;
 /// cannot deliberately produce a > 0.5 m/tick displacement to farm or to dodge the penalty.
 const MAX_PROGRESS_STEP_M: f32 = 0.5;
 
-/// Weight `W` and length scale `S` of the reach term `W·(1 − tanh(d/S))` (see
-/// [`reach_bonus`]): `W` is the bonus a claw tip earns by reaching the target dead-on; `S`
-/// sets how the pull decays with distance.
+/// The one-shot TERMINAL bonus a grab earns (the sparse-terminal design — see the module
+/// header). Applied at the episode boundary in `systems::finalize_transitions`, NOT inside
+/// [`compute_reward`] (the per-tick continuous reward): a claw tip within the grab radius adds
+/// this to the grabbing transition's reward and ends the episode as a TRUE terminal. The radius
+/// is the SINGLE `curriculum::CURRICULUM_REACH_RADIUS`, shared with the curriculum "reached"
+/// signal and the demo ball-hop, so no second radius can drift and a grab implies a reached
+/// episode.
 ///
-/// **Near-field only, by design.** The reach term is now the terminal GRAB bonus, not the
-/// cross-arena pull (that is the progress term). So `S` is tightened to ~1 m: `1 − tanh(d/1)`
-/// is ~0.27 of `W` at 1 m, ~0.10 at 1.5 m, and ~0.005 at 3 m — a smooth bonus confined to the
-/// last metre or so, decaying to ≈0 well before the curriculum's far targets. `W` is halved
-/// to 0.3 (from the old 0.6) so even dead-on reach cannot out-earn a steady stride from
-/// across the arena. The long `tanh` tail at `S=4` was exactly what let a reacher score from
-/// far away by leaning; tightening `S` and shrinking `W` removes that far-lean payoff without
-/// a hard distance gate (smooth, no cliff at the boundary).
-const REACH_WEIGHT: f32 = 0.3;
-const REACH_SCALE: f32 = 1.0;
-
-/// Shaped proximity bonus `W·(1 − tanh(d/S))` (weight and scale on [`REACH_WEIGHT`]),
-/// where `d` is the minimum 3D euclidean distance over (claw tip, target) pairs. Strictly
-/// POSITIVE, maxing at `W` when a tip reaches the target (`d`→0) and decaying to ≈0 by a few
-/// metres (the near-field grab bonus). `None` (no target, no claw tip) yields 0.
-pub(crate) fn reach_bonus(min_tip_dist: Option<f32>) -> f32 {
-    match min_tip_dist {
-        Some(d) if d.is_finite() => REACH_WEIGHT * (1.0 - (d / REACH_SCALE).tanh()),
-        _ => 0.0,
-    }
-}
+/// **Scale (relative to a band traverse's progress return, `PROGRESS_WEIGHT·distance`).** A
+/// near-band traverse (1.5 m) earns ≈ 36 progress to arrive, a far-band one (9 m) ≈ 216. 50
+/// makes a grab the clearly-DOMINANT outcome of a near-band episode (success ≈ 86, the grab
+/// ~58 %) without reducing the approach progress to noise, while at the far band the journey
+/// still dominates (≈ 266, the grab ~19 %). The approach itself is NOT sparse — dense progress
+/// shaping carries the body to grab range at every band, so only the terminal event is sparse
+/// and early learning is never signal-starved. A FLAT (not distance-shaped) bonus keeps the
+/// last-metre mechanic un-hand-specified: the policy is told only that touching the target is
+/// worth ~1.5 near-band traverses, and HOW the tip gets there emerges.
+pub(crate) const GRAB_REWARD: f32 = 50.0;
 
 /// The weighted progress term `P·(d_prev − d_now)` — see [`PROGRESS_WEIGHT`]. `distance_closed`
 /// is the metres the carapace's planar distance to the target SHRANK over the transition
 /// (positive ⇒ closer, negative ⇒ farther). UN-clamped on purpose: that is what makes a closed
 /// wobble telescope to exactly zero (the oscillation-proofness the design rests on). `None` —
 /// a rescued / teleported body, or a missing pose/target — contributes 0: a teleport is not
-/// EARNED travel (the same logic as the `None` reach credit on a rescue), and crediting the
+/// EARNED travel (the same logic as the `None` credit on a rescue), and crediting the
 /// spawn jump would be a huge spurious delta.
 fn progress_reward(distance_closed: Option<f32>) -> f32 {
     match distance_closed {
@@ -157,38 +156,33 @@ fn progress_reward(distance_closed: Option<f32>) -> f32 {
     }
 }
 
-/// The reward: `P·(d_prev − d_now) + W·(1 − tanh(d/S)) − EFFORT_WEIGHT·Σ|dᵢ|^L` — the
-/// world-frame progress pull ([`progress_reward`]) plus the near-field reach grab bonus
-/// ([`reach_bonus`]) minus the cost of the commands that earn them ([`action_effort`]).
+/// The per-tick continuous reward: `P·(d_prev − d_now) − EFFORT_WEIGHT·Σ|dᵢ|^L` — the
+/// world-frame progress pull ([`progress_reward`]) minus the cost of the commands that earn it
+/// ([`action_effort`]). The sparse terminal grab bonus ([`GRAB_REWARD`]) is NOT part of this
+/// function — it is a one-shot event added at the episode boundary (`finalize_transitions`),
+/// not a per-tick term.
 ///
-/// Division of labour: PROGRESS dominates while far (the only cross-arena pull, and a lean
-/// can't fake the body covering ground), REACH dominates in the last ~metre (it decays to ≈0
-/// by a few metres). The signal stays GLOBAL — progress-through-the-world + a terminal grab,
-/// no gait/foot/per-leg term — so locomotion EMERGES. Height and uprightness remain
-/// OBSERVATIONS, not reward inputs: this function can't see them, so no pose can be gamed for
-/// free reward — only closing ground toward the goal, or the last metre, pays.
-pub(crate) fn compute_reward(
-    distance_closed: Option<f32>,
-    min_tip_dist: Option<f32>,
-    effort: f32,
-) -> f32 {
-    progress_reward(distance_closed) + reach_bonus(min_tip_dist) - EFFORT_WEIGHT * effort
+/// The signal stays GLOBAL — progress-through-the-world (plus the terminal grab) with no
+/// gait/foot/per-leg term — so locomotion EMERGES. Height and uprightness remain OBSERVATIONS,
+/// not reward inputs: this function can't see them, so no pose can be gamed for free reward —
+/// only closing ground toward the goal pays per tick, and touching the target pays once.
+pub(crate) fn compute_reward(distance_closed: Option<f32>, effort: f32) -> f32 {
+    progress_reward(distance_closed) - EFFORT_WEIGHT * effort
 }
 
 /// Planar (XZ) distance between two world points. The carapace→target distance the progress
 /// term is the per-tick reduction OF (and the carapace→spawn drift diagnostic, and the
-/// curriculum band) — all DEFINED on the floor plane. NOT the reach reward's `d` (that is the
-/// 3D [`dist_3d`], so lowering a claw onto a low target pays).
+/// curriculum band) — all DEFINED on the floor plane. NOT the grab test's `d` (that is the
+/// 3D [`dist_3d`], so lowering a claw onto a low target counts).
 pub(crate) fn planar_dist(a: Vec3, b: Vec3) -> f32 {
     let d = a - b;
     (d.x * d.x + d.z * d.z).sqrt()
 }
 
-/// Full 3D euclidean distance between two world points — the reach reward's `d`. 3D (not
-/// planar) so lowering a claw onto a low ball pays: a ground-only `d` would score a tip
-/// hovering a metre above the target identically to one resting on it, leaving nothing to
-/// pull the claw down the last stretch. `pub(crate)` so the demo's reached-test
-/// (`play::target_ball`) measures the SAME `d` the reward does.
+/// Full 3D euclidean distance between two world points — the grab test's `d` (claw tip →
+/// target). 3D (not planar) so lowering a claw onto a low ball counts: a ground-only `d` would
+/// treat a tip hovering a metre above the target as a grab. `pub(crate)` so the demo's
+/// reached-test (`play::target_ball`) measures the SAME `d` the grab/curriculum does.
 pub(crate) fn dist_3d(a: Vec3, b: Vec3) -> f32 {
     (a - b).length()
 }
@@ -211,10 +205,10 @@ mod tests {
         // The core invariant: closing ground toward the target raises the reward, losing
         // ground lowers it, and the two are symmetric (the basis of the telescoping below).
         let effort = action_effort(&[0.3; ACTION_SIZE]);
-        let still = compute_reward(Some(0.0), None, effort);
-        let closing = compute_reward(Some(0.01), None, effort);
-        let closing_more = compute_reward(Some(0.02), None, effort);
-        let receding = compute_reward(Some(-0.01), None, effort);
+        let still = compute_reward(Some(0.0), effort);
+        let closing = compute_reward(Some(0.01), effort);
+        let closing_more = compute_reward(Some(0.02), effort);
+        let receding = compute_reward(Some(-0.01), effort);
         assert!(closing > still, "closing ground out-earns standing still");
         assert!(closing_more > closing, "closing more earns more (linear, un-capped)");
         assert!(receding < still, "losing ground lowers the reward below standing still");
@@ -224,7 +218,7 @@ mod tests {
         );
         // None (rescue/teleport, or missing pose/target) is neutral — no earned travel.
         assert!(
-            (compute_reward(None, None, effort) - still).abs() < 1e-6,
+            (compute_reward(None, effort) - still).abs() < 1e-6,
             "a teleported/rescued body earns no progress (neutral, like standing still)"
         );
     }
@@ -280,103 +274,61 @@ mod tests {
     }
 
     #[test]
-    fn progress_dominates_far_reach_dominates_near() {
-        // The division of labour: while crossing the arena the progress a stride earns
-        // dominates the (near-field) reach bonus at that distance, so leaning-from-afar stops
-        // paying; in the final approach the reach grab bonus carries as progress tapers off.
-        // FAR: a single honest stride (~0.5 m/s ⇒ ~0.0078 m closed/tick at 64 Hz) vs reach at 6 m.
-        let stride = progress_reward(Some(per_tick_closed(0.5)));
+    fn grab_bonus_dominates_a_near_band_traverse() {
+        // The sparse terminal grab must be the clearly-dominant outcome of a NEAR-band episode
+        // (so closing the last stretch and touching the target beats anything the dense progress
+        // shaping alone pays on the way), yet the far-band JOURNEY must still out-earn the bonus
+        // (out there the traverse is the hard part). PROGRESS_WEIGHT·distance is the progress
+        // return of a full traverse (telescoped, path-independent).
+        let near_traverse = PROGRESS_WEIGHT * 1.5;
+        let far_traverse = PROGRESS_WEIGHT * 9.0;
         assert!(
-            stride > reach_bonus(Some(6.0)),
-            "far from the goal, a stride's per-tick progress must exceed the reach bonus there: \
-             {stride} vs {}",
-            reach_bonus(Some(6.0)),
+            GRAB_REWARD > near_traverse,
+            "the grab bonus must dominate a near-band traverse's progress: {GRAB_REWARD} vs {near_traverse}"
         );
-        // NEAR/arrived: progress per tick → 0 as the body stops on the target; reach carries.
-        let near_reach = reach_bonus(Some(0.1));
-        let arrived_progress = progress_reward(Some(0.0005)); // creeping the last mm
         assert!(
-            near_reach > arrived_progress,
-            "near the goal the reach grab bonus must dominate the vanishing progress: \
-             {near_reach} vs {arrived_progress}"
+            far_traverse > GRAB_REWARD,
+            "a far-band traverse's progress must still out-earn the grab bonus: {far_traverse} vs {GRAB_REWARD}"
+        );
+        // …but the bonus must not swamp the near-band APPROACH to noise — the approach progress
+        // stays a meaningful fraction of the successful-episode return (here ~42 %).
+        assert!(
+            near_traverse > 0.3 * (near_traverse + GRAB_REWARD),
+            "approach progress must remain a meaningful share of a successful near-band return, \
+             not reduced to noise by the grab bonus"
         );
     }
 
     #[test]
-    fn reach_is_a_near_field_grab_bonus() {
-        // Reach is the terminal grab bonus: strictly positive, maxes at W on the target,
-        // monotone decreasing, and CONFINED to the near field (≈0 by a few metres) so it
-        // cannot pull the body across the arena — that is now the progress term's job.
+    fn reward_is_progress_minus_effort_no_reach_term() {
+        // Reward is EXACTLY `progress − K·Σ|d|^L` — two terms, no near-field reach integral, no
+        // height, no uprightness, no hidden term (the grab is a sparse terminal event applied in
+        // `finalize_transitions`, not a per-tick term here). With no progress and no command it
+        // is exactly zero — in particular STANDING AT THE TARGET earns nothing per tick, so the
+        // old hold-farming soft spot is gone: only closing ground pays, and touching pays once.
         assert!(
-            (reach_bonus(Some(0.0)) - REACH_WEIGHT).abs() < 1e-6,
-            "a claw tip on the target earns the full reach weight"
-        );
-        assert!(
-            reach_bonus(Some(0.1)) > reach_bonus(Some(0.5)),
-            "closer to the target must out-reward farther"
-        );
-        assert!(
-            reach_bonus(Some(0.5)) > reach_bonus(Some(1.5)),
-            "the reach bonus decreases monotonically with distance"
-        );
-        assert!(
-            reach_bonus(Some(3.0)) < 0.01 * REACH_WEIGHT,
-            "reach has all but vanished by a few metres — it is not a cross-arena pull: {}",
-            reach_bonus(Some(3.0)),
-        );
-        assert_eq!(
-            reach_bonus(None),
-            0.0,
-            "no target (or no tip) contributes nothing to the reach term"
-        );
-    }
-
-    /// The reach reward must pull the tip toward the target IN 3D: a smaller 3D tip→target
-    /// distance scores strictly higher, including when the only difference is HEIGHT — a
-    /// claw lowered onto a low ball must beat one hovering above it at the same ground spot.
-    #[test]
-    fn closer_tip_in_3d_raises_reward() {
-        let target = Vec3::new(1.0, 0.3, 0.0);
-        let on_ball = Vec3::new(1.0, 0.3, 0.0);
-        let hovering = Vec3::new(1.0, 1.3, 0.0);
-        let d_on = dist_3d(on_ball, target);
-        let d_hover = dist_3d(hovering, target);
-        assert!(
-            d_on < d_hover,
-            "3D distance must distinguish height: on-ball {d_on} should be < hovering {d_hover}"
-        );
-        // Same command effort and no progress, so the reach term alone decides — closer ⇒ higher.
-        let effort = action_effort(&[0.2; ACTION_SIZE]);
-        assert!(
-            compute_reward(None, Some(d_on), effort) > compute_reward(None, Some(d_hover), effort),
-            "a tip resting on the ball must out-score one hovering a metre above it at the \
-             same ground spot — the 3D reach pulls the claw DOWN, not just across"
-        );
-        for (near, far) in [(0.0_f32, 0.5_f32), (0.5, 1.5), (1.5, 3.0)] {
-            assert!(
-                reach_bonus(Some(near)) > reach_bonus(Some(far)),
-                "reach reward must strictly increase as 3D distance shrinks: \
-                 d={near} should beat d={far}"
-            );
-        }
-    }
-
-    #[test]
-    fn reward_is_progress_plus_reach_minus_effort() {
-        // Reward is EXACTLY `progress + reach − K·Σ|d|^L` — three terms, no height, no
-        // uprightness, no hidden term. With no progress, no target and no command it is
-        // exactly zero.
-        assert!(
-            compute_reward(None, None, 0.0).abs() < 1e-6,
-            "with no progress, no target and no effort, reward is exactly zero"
+            compute_reward(None, 0.0).abs() < 1e-6,
+            "with no progress and no effort, reward is exactly zero"
         );
         let p = Some(0.01);
-        let d = Some(0.3);
         let e = action_effort(&[0.2; ACTION_SIZE]);
-        let expected = progress_reward(p) + reach_bonus(d) - EFFORT_WEIGHT * e;
+        let expected = progress_reward(p) - EFFORT_WEIGHT * e;
         assert!(
-            (compute_reward(p, d, e) - expected).abs() < 1e-6,
-            "reward is exactly progress + reach − K·effort"
+            (compute_reward(p, e) - expected).abs() < 1e-6,
+            "reward is exactly progress − K·effort"
+        );
+    }
+
+    #[test]
+    fn holding_at_target_accrues_no_reward() {
+        // The rl#95 fix, pinned: a crab parked on the target (no progress — it has arrived and is
+        // not closing ground) accrues only the effort tax, i.e. ≤ 0 per tick — NEVER the old
+        // ~0.21/tick near-field integral. Holding is now strictly worse than the one-shot grab
+        // terminal, so there is nothing to farm by camping in the near field.
+        let held = compute_reward(Some(0.0), action_effort(&[0.1; ACTION_SIZE]));
+        assert!(
+            held <= 0.0,
+            "a crab holding on the target with no progress must accrue no positive reward: {held}"
         );
     }
 
@@ -384,28 +336,28 @@ mod tests {
     fn higher_drive_lowers_the_reward() {
         // The tax is strictly increasing in DRIVE magnitude, so a harder drive always
         // scores below a gentler one — the lever that makes the crab economical: it spends
-        // neural activation only where progress (or reach) pays for it.
-        let still = compute_reward(None, None, action_effort(&[0.0; ACTION_SIZE]));
-        let gentle = compute_reward(None, None, action_effort(&[0.3; ACTION_SIZE]));
-        let hard = compute_reward(None, None, action_effort(&[0.9; ACTION_SIZE]));
+        // neural activation only where progress pays for it.
+        let still = compute_reward(None, action_effort(&[0.0; ACTION_SIZE]));
+        let gentle = compute_reward(None, action_effort(&[0.3; ACTION_SIZE]));
+        let hard = compute_reward(None, action_effort(&[0.9; ACTION_SIZE]));
         assert!(
             still > gentle && gentle > hard,
             "reward must fall as drive magnitude rises: still {still} > gentle {gentle} > hard {hard}"
         );
         assert!(
             still.abs() < 1e-6,
-            "a still policy with no progress and no target is untaxed and unrewarded: {still} should be zero"
+            "a still policy with no progress is untaxed and unrewarded: {still} should be zero"
         );
     }
 
     #[test]
     fn saturating_drive_costs_more_than_a_gentle_drive_at_the_same_command() {
-        // THE property the OLD code failed and the whole fix turns on: two drives that produce
-        // the IDENTICAL ±1-clamped command the sim runs, but at different pre-clamp magnitudes,
-        // must NOT cost the same. The tax is over the unbounded DRIVE, so a policy that samples
-        // |d|≫1 to pin a joint on its rail pays strictly more than one that reaches the same
-        // rail gently — a live gradient OFF saturation. (Old: tax over the clamped action ⇒
-        // both |a|=1 ⇒ identical cost ⇒ zero anti-saturation gradient.)
+        // THE property the OLD code failed and the whole effort design turns on: two drives that
+        // produce the IDENTICAL ±1-clamped command the sim runs, but at different pre-clamp
+        // magnitudes, must NOT cost the same. The tax is over the unbounded DRIVE, so a policy
+        // that samples |d|≫1 to pin a joint on its rail pays strictly more than one that reaches
+        // the same rail gently — a live gradient OFF saturation. (Old: tax over the clamped
+        // action ⇒ both |a|=1 ⇒ identical cost ⇒ zero anti-saturation gradient.)
         let gentle_drive = [1.0_f32; ACTION_SIZE]; // sits exactly on the rail
         let saturating_drive = [5.0_f32; ACTION_SIZE]; // slams far past it
         // Both clamp to the SAME command — the sim cannot tell them apart.
@@ -413,8 +365,8 @@ mod tests {
         let sat_cmd: Vec<f32> = saturating_drive.iter().map(|d| d.clamp(-1.0, 1.0)).collect();
         assert_eq!(gentle_cmd, sat_cmd, "both drives produce the identical clamped command");
         // …yet the reward must charge the saturating drive strictly more.
-        let r_gentle = compute_reward(Some(0.01), None, action_effort(&gentle_drive));
-        let r_sat = compute_reward(Some(0.01), None, action_effort(&saturating_drive));
+        let r_gentle = compute_reward(Some(0.01), action_effort(&gentle_drive));
+        let r_sat = compute_reward(Some(0.01), action_effort(&saturating_drive));
         assert!(
             r_sat < r_gentle,
             "a saturating drive must cost STRICTLY MORE than a gentle one at the same command: \
@@ -427,21 +379,15 @@ mod tests {
         // The tradeoff that matters is PROGRESS vs the cost of the DRIVE that earns it (the tax
         // is over the pre-clamp drives — see `action_effort`), all per-tick figures DERIVED
         // from `physics::PHYSICS_DT` (64 Hz):
-        // 1. A still policy with no progress/target pays no tax and earns nothing — zero.
-        let still = compute_reward(None, None, action_effort(&[0.0; ACTION_SIZE]));
-        assert!(
-            still.abs() < 1e-6,
-            "a still policy with no progress/target is zero: {still}"
-        );
+        // 1. A still policy with no progress pays no tax and earns nothing — zero.
+        let still = compute_reward(None, action_effort(&[0.0; ACTION_SIZE]));
+        assert!(still.abs() < 1e-6, "a still policy with no progress is zero: {still}");
         // 2. A real STRIDE — closing ~0.5 m/s of ground (≈0.0078 m/tick at 64 Hz) with an
-        //    in-range gait drive (|d| < 1) — must net POSITIVE, valuing ONLY the progress (no
-        //    reach credit). At weight 0.0006 a |d|=0.7 drive across 30 joints costs
-        //    0.0006·30·0.49 ≈ 0.009, well under the stride's 24·0.0078 ≈ 0.19.
-        let stride = compute_reward(Some(per_tick_closed(0.5)), None, action_effort(&[0.7; ACTION_SIZE]));
-        assert!(
-            stride > 0.0,
-            "a real stride must net positive after the tax, on progress alone: {stride}"
-        );
+        //    in-range gait drive (|d| < 1) — must net POSITIVE on progress alone. At weight
+        //    0.0006 a |d|=0.7 drive across 30 joints costs 0.0006·30·0.49 ≈ 0.009, well under
+        //    the stride's 24·0.0078 ≈ 0.19.
+        let stride = compute_reward(Some(per_tick_closed(0.5)), action_effort(&[0.7; ACTION_SIZE]));
+        assert!(stride > 0.0, "a real stride must net positive after the tax, on progress alone: {stride}");
         // 3. The break-even DRIVE size: the per-tick stride progress (≈0.19) equals the tax at
         //    |d| ≈ 3.2/joint — far above any gait, so a gait drive is deep in the net-positive
         //    region while saturation is firmly net-negative.
@@ -456,7 +402,7 @@ mod tests {
         //    pushes the policy out of saturation. At |d|=3 the cost (0.0006·30·9 ≈ 0.16)
         //    swamps the ≈0.19 stride progress's margin, driving reward toward/below zero.
         let oversaturated =
-            compute_reward(Some(per_tick_closed(0.5)), None, action_effort(&[3.0; ACTION_SIZE]));
+            compute_reward(Some(per_tick_closed(0.5)), action_effort(&[3.0; ACTION_SIZE]));
         assert!(
             oversaturated < stride,
             "saturation-seeking must be taxed below a real stride: {oversaturated} vs {stride}"
