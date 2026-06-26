@@ -66,7 +66,14 @@ impl Plugin for DemoPlugin {
         app.init_resource::<DemoSettle>()
             .init_resource::<DemoRetilt>()
             .init_resource::<PokeBurst>()
-            .add_systems(Startup, (spawn_orbit_camera, spawn_target_ball))
+            .add_systems(
+                Startup,
+                (
+                    spawn_orbit_camera,
+                    spawn_target_ball,
+                    crate::build_info::spawn_build_info_overlay,
+                ),
+            )
             .add_systems(Update, (orbit_camera, demo_controls))
             .add_systems(
                 FixedUpdate,
