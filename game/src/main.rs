@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use iroh::EndpointId;
 use rl_core::net::lockstep::{INPUT_DELAY, Lockstep};
@@ -196,6 +196,11 @@ struct NnCrabProbeArgs {
     /// final hashes compared).
     #[arg(long, default_value_t = 0x6372_6162)]
     seed: u64,
+    /// Write a full per-tick `<tick> <state_hash>` log to this file (forces a sample every
+    /// tick). Two machines running the SAME `(checkpoint, seed, ticks)` must produce
+    /// byte-identical files — `diff` them for the on-hardware cross-machine determinism gate.
+    #[arg(long, value_name = "FILE")]
+    hash_log: Option<PathBuf>,
 }
 
 // Plain `main` (not `#[tokio::main]`): the windowed/screenshot client builds a Bevy
@@ -239,9 +244,28 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
     println!("nn-crab-probe: checkpoint={}", dir.display());
     println!("nn-crab-probe: seed={:#x} ticks={}", args.seed, args.ticks);
 
-    let samples = run_headless_probe(&dir, args.seed, args.ticks, args.log_every);
+    // For the cross-machine hash log we need EVERY tick, not the skimmable sample stride.
+    let log_every = if args.hash_log.is_some() { 1 } else { args.log_every };
+    let samples = run_headless_probe(&dir, args.seed, args.ticks, log_every);
     if samples.is_empty() {
         anyhow::bail!("nn-crab-probe: no samples — the crab never stepped");
+    }
+
+    // Cross-machine determinism gate: a plain `<tick> <hash>` line per tick. Two Decks running
+    // the same (checkpoint, seed, ticks) must yield byte-identical files (see [`hash_log`]).
+    if let Some(path) = &args.hash_log {
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(samples.len() * 24);
+        for s in &samples {
+            writeln!(out, "{} {:#018x}", s.tick, s.state_hash).unwrap();
+        }
+        std::fs::write(path, out)
+            .with_context(|| format!("nn-crab-probe: writing hash log to {}", path.display()))?;
+        println!(
+            "nn-crab-probe: wrote {} per-tick hashes to {}",
+            samples.len(),
+            path.display()
+        );
     }
 
     println!("\n  tick   crab_x   crab_z   dist  | carapace x/y/z (walks?)  | claw→tgt");
@@ -267,7 +291,7 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
     );
 
     // Determinism (single peer): same seed twice ⇒ identical final hash + trajectory.
-    let again = run_headless_probe(&dir, args.seed, args.ticks, args.log_every);
+    let again = run_headless_probe(&dir, args.seed, args.ticks, log_every);
     let hash_a = samples.last().unwrap().state_hash;
     let hash_b = again.last().map(|s| s.state_hash).unwrap_or(0);
     let traj_match = samples.len() == again.len()
