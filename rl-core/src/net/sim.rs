@@ -466,7 +466,8 @@ impl Sim {
     /// standing on foot. A pilot is removed from the foot `players` map and added to
     /// `planes`; the two stay disjoint. `pilots` not in the `players` set are ignored.
     /// With `pilots` empty this is byte-for-byte [`Sim::new`]. Callers MUST pass the same
-    /// `pilots` on every peer or their sims diverge; the networked path passes none.
+    /// `pilots` on every peer or their sims diverge — the networked path negotiates that set
+    /// over the wire so every peer agrees (see [`crate::net::net_loop::form_match`]).
     pub fn new_with_pilots(seed: u64, players: &[PlayerId], pilots: &[PlayerId]) -> Self {
         let mut sorted: Vec<PlayerId> = players.to_vec();
         sorted.sort();
