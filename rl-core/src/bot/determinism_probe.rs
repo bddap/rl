@@ -192,12 +192,16 @@ fn two_sims_bit_identical_under_scripted_torque() {
 // `solo_crab::sync_external_crab` does in production) — fed through a REAL 2-peer
 // [`Lockstep`] pair that cross-checks state hashes. So a synced pair stays bit-identical
 // every tick, and a weights mismatch trips [`Fault::Desync`] at the tick it happens. The
-// crab body is stepped EXACTLY ONCE per lockstep tick here (one `app.update()` : one
-// `try_advance`), which is the cadence the windowed driver fold must preserve — this is the
-// headless proof of that coupling, independent of the (GPU) windowed client.
+// crab body is stepped at the REAL production cadence — [`PhysicsCadence`] doles out
+// [`crate::physics::PHYSICS_HZ`] (64 Hz) physics steps across [`crate::net::sim::TICK_HZ`]
+// (30 Hz) lockstep ticks (mostly 2, periodically 3), one pose pushed per APPLIED tick via
+// [`Lockstep::advance_one`] — the exact coupling the windowed driver fold must preserve. This
+// is the headless proof of that coupling, independent of the (GPU) windowed client.
 
-use crate::net::lockstep::{Fault, Lockstep};
-use crate::net::sim::{Input, PlayerId, Pos, UNIT};
+use crate::net::cadence::PhysicsCadence;
+use crate::net::lockstep::{Fault, INPUT_DELAY, Lockstep};
+use crate::net::sim::{Input, PlayerId, Pos, TICK_HZ, UNIT};
+use crate::physics::PHYSICS_HZ;
 
 /// The match seed for the 2-peer GCR determinism tests. Arbitrary but fixed (reproducible).
 const GCR_SEED: u64 = 0x6C20_5EED;
@@ -238,10 +242,13 @@ fn bridge_pose_and_digest(app: &mut App, weights_digest: u64) -> (Pos, u64) {
 }
 
 /// Drive two independently-built crab worlds + two networked [`Lockstep`]s in tandem, with
-/// the external crab ARMED on both, stepping the crab exactly once per lockstep tick and
-/// cross-checking hashes each tick. Returns `(any_desync, hashes_match_at_end)`. `(da, db)`
-/// are the two peers' weights digests folded into their per-tick physics digest.
-fn run_two_peer_armed(da: u64, db: u64, ticks: usize) -> (bool, bool) {
+/// the external crab ARMED on both, at the REAL production cadence: each peer issues one
+/// input per outer iteration, then drains every now-ready apply tick, stepping the crab body
+/// [`PhysicsCadence::steps_for_next_tick`] physics steps and pushing ONE pose+digest per
+/// APPLIED tick via [`Lockstep::advance_one`] (the windowed driver's contract). Returns
+/// `(any_desync, hashes_match_at_end)`. `(da, db)` are the two peers' weights digests folded
+/// into their per-tick physics digest; `iterations` is the number of input-issue rounds.
+fn run_two_peer_armed(da: u64, db: u64, iterations: usize) -> (bool, bool) {
     let players = [PlayerId(0), PlayerId(1)];
     let mut a = Lockstep::new(GCR_SEED, &players, PlayerId(0));
     let mut b = Lockstep::new(GCR_SEED, &players, PlayerId(1));
@@ -254,25 +261,24 @@ fn run_two_peer_armed(da: u64, db: u64, ticks: usize) -> (bool, bool) {
     tick(&mut app_a, 1);
     tick(&mut app_b, 1);
 
-    let seq = scripted_actions(ticks);
+    // Real production cadence: the body advances PHYSICS_HZ steps per TICK_HZ lockstep ticks
+    // via the integer accumulator, NOT one step per tick. Both peers start from Default, so
+    // they step the body the same number of times every applied tick — the determinism the
+    // cadence guarantees, exercised here at the real 64:30 ratio.
+    let mut cad_a = PhysicsCadence::default();
+    let mut cad_b = PhysicsCadence::default();
+    // Scripted torque per physics step. Worst case is the ceil ratio every applied tick, plus
+    // the INPUT_DELAY warmup ticks the first drain also applies.
+    let per_tick_ceil = (PHYSICS_HZ as usize).div_ceil(TICK_HZ as usize);
+    let seq = scripted_actions((iterations + INPUT_DELAY as usize + 1) * per_tick_ceil);
+    let mut step_idx = 0usize;
+
     let is_desync = |f: &Fault| matches!(f, Fault::Desync { .. });
     let mut saw_desync = false;
-    for act in &seq {
-        // Same scripted torque on both peers → bit-identical physics (the probe's invariant).
-        set_actions(&mut app_a, act);
-        set_actions(&mut app_b, act);
-        app_a.update();
-        app_b.update();
-
-        let (pose_a, dig_a) = bridge_pose_and_digest(&mut app_a, da);
-        let (pose_b, dig_b) = bridge_pose_and_digest(&mut app_b, db);
-
-        // Each peer submits its own input, exchanges the tick message, pushes its crab pose +
-        // digest BEFORE advancing (the bridge contract), then advances one tick.
+    for _ in 0..iterations {
+        // Each peer issues its own input for the next scheduled tick and exchanges it.
         let ma = a.submit_local_input(Input::default());
         let mb = b.submit_local_input(Input::default());
-        a.set_external_crab_pose(pose_a, 0, dig_a);
-        b.set_external_crab_pose(pose_b, 0, dig_b);
         saw_desync |= a
             .record_remote(PlayerId(1), mb)
             .as_ref()
@@ -281,8 +287,32 @@ fn run_two_peer_armed(da: u64, db: u64, ticks: usize) -> (bool, bool) {
             .record_remote(PlayerId(0), ma)
             .as_ref()
             .is_some_and(is_desync);
-        saw_desync |= a.try_advance().iter().any(is_desync);
-        saw_desync |= b.try_advance().iter().any(is_desync);
+
+        // Drain every now-ready apply tick, one at a time, stepping the crab's physics by the
+        // deterministic cadence and pushing ONE pose+digest per APPLIED tick. Both peers are
+        // symmetric, so they advance in lockstep — drive both off `a`'s readiness.
+        while a.next_tick_ready() {
+            debug_assert!(b.next_tick_ready(), "symmetric peers must advance in lockstep");
+            let na = cad_a.steps_for_next_tick();
+            let nb = cad_b.steps_for_next_tick();
+            assert_eq!(na, nb, "the cadence must be identical across peers");
+            for _ in 0..na {
+                // Identical scripted torque per physics step on both peers → bit-identical
+                // physics (the probe's standing invariant), so any divergence is the weights.
+                let act = &seq[step_idx];
+                step_idx += 1;
+                set_actions(&mut app_a, act);
+                set_actions(&mut app_b, act);
+                app_a.update();
+                app_b.update();
+            }
+            let (pose_a, dig_a) = bridge_pose_and_digest(&mut app_a, da);
+            let (pose_b, dig_b) = bridge_pose_and_digest(&mut app_b, db);
+            a.set_external_crab_pose(pose_a, 0, dig_a);
+            b.set_external_crab_pose(pose_b, 0, dig_b);
+            saw_desync |= a.advance_one().expect("ready").iter().any(is_desync);
+            saw_desync |= b.advance_one().expect("ready").iter().any(is_desync);
+        }
     }
     (saw_desync, a.sim().state_hash() == b.sim().state_hash())
 }
@@ -290,10 +320,10 @@ fn run_two_peer_armed(da: u64, db: u64, ticks: usize) -> (bool, bool) {
 #[test]
 fn networked_nn_crab_synced_stays_bit_identical_every_tick() {
     // Two peers running the SAME brain (equal non-zero weights digest): the real articulated
-    // crab is stepped once per lockstep tick, its pose + digest folded into the desync hash —
-    // and the pair stays bit-identical every tick, no desync. This is the headless proof that
-    // an ARMED networked NN crab is deterministic when weights are synced (the cadence fold's
-    // core invariant), independent of the GPU windowed client.
+    // crab is stepped at the production 64:30 cadence, its pose + digest folded into the desync
+    // hash per applied tick — and the pair stays bit-identical every tick, no desync. This is
+    // the headless proof that an ARMED networked NN crab is deterministic when weights are
+    // synced (the cadence fold's core invariant), independent of the GPU windowed client.
     const BRAIN: u64 = 0xC0FFEE_1234_5678;
     let (saw_desync, matched) = run_two_peer_armed(BRAIN, BRAIN, 200);
     assert!(
