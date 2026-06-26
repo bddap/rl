@@ -312,7 +312,7 @@ impl Plugin for ExternalCrabPlugin {
         // to build the target-relative observation the policy steers by, so a target set
         // after Sense would only reach the policy a tick late (and tick 0 not at all). Then
         // run the policy in Think; the actuator (Act) + rapier step follow from the bot
-        // stack the caller added. Gated on the active flag so the policy is inert until solo.
+        // stack the caller added. Gated on the armed flag so the policy is inert until armed.
         app.add_systems(
             FixedUpdate,
             (
@@ -439,7 +439,7 @@ fn set_crab_walk_target(
 
 /// Run the loaded policy on env 0's observation and write env 0's action — the same
 /// deterministic mean action the demo's `policy_step` uses ([`Policy::act`]), so the
-/// solo crab and the demo share one inference path. The actuator (bot stack) turns the
+/// external crab and the demo share one inference path. The actuator (bot stack) turns the
 /// action into joint torques next in the chain.
 fn run_crab_policy(
     policy: NonSend<Policy>,
