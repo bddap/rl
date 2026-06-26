@@ -1,17 +1,19 @@
-//! SOLO-ONLY: a real rapier-simulated, NN-driven giant crab for the SOLO round (a Host-alone
-//! Start, or scripted `--host` that found no peer), replacing the integer point-pursuer with
-//! the actual trained RL body. Activated by the [`SoloCrabActive`] runtime gate (rl#58), so
-//! it drives the crab only when the round genuinely resolves solo.
+//! A real rapier-simulated, NN-driven giant crab, replacing the integer point-pursuer with the
+//! actual trained RL body. Armed by the [`ExternalCrabArmed`] runtime gate on a SOLO round (a
+//! Host-alone Start, or scripted `--host` that found no peer), and — since the GCR fold (rl#82)
+//! — on a NETWORKED round with synced weights.
 //!
-//! # Why solo only
-//! The game's [`crate::net::sim`] is a bit-deterministic INTEGER lockstep sim so two
-//! peers evolve identically. A rapier crab is FLOAT physics — not bit-identical across
-//! machines — so it can't drive a *networked* crab without desyncing. A solo round is a
-//! single peer: nothing to desync against, so float rapier is fine. This module is that
-//! solo path; the integer pursuit ([`crate::net::sim::Sim::step`]) stays the multiplayer
-//! crab. The owner accepts the two crab implementations here: the integer one is the
-//! determinism-safe MP fallback, the NN one is the solo showcase. Making the NN crab
-//! cross-peer deterministic is a separate, bigger follow-up (not attempted here).
+//! # When it drives the crab (and why it's safe)
+//! The game's [`crate::net::sim`] is a bit-deterministic INTEGER lockstep sim so two peers
+//! evolve identically. A rapier crab is FLOAT physics, so it can drive a *networked* crab
+//! without desyncing ONLY when every peer (a) loaded the same brain (the weights-digest
+//! handshake) and (b) steps the body the identical number of physics steps per lockstep tick
+//! (the deterministic [`crate::net::cadence::PhysicsCadence`], pumped by
+//! `net::render::drive_lockstep`). [`crate::net::may_arm_external_crab`] is the gate that
+//! enforces both; a networked-UNSYNCED round stays on the integer pursuit
+//! ([`crate::net::sim::Sim::step`]), the cross-peer-safe fallback. On a solo round there's no
+//! peer to desync against, so it always arms. The integer pursuit remains the FALLBACK, not a
+//! parallel implementation — exactly one of the two drives any given round.
 //!
 //! # How it works
 //! The trained policy ([`crate::play::Policy`], loaded from a checkpoint) is a
@@ -216,22 +218,23 @@ fn hash_crab_physics(
     bridge.phys_digest = phys ^ policy.weights_digest();
 }
 
-/// Runtime gate for the solo NN crab (rl#58), as a presence marker: the resource exists iff
-/// the NN crab is active. The boot-menu path adds the whole NN stack at app build (plugins
-/// can't be added later) but does NOT know yet whether the round will be solo — so every NN
-/// system is gated on this, present ONLY once the round resolves solo (Host-alone). While
-/// absent the crab never spawns and no policy/physics drives it, and crucially
-/// [`crate::net::render`]'s `drive_lockstep` never calls [`sync_external_crab`] — so a
-/// networked round with the stack present stays byte-identical to the integer-crab path. The
-/// scripted solo path (`Boot::Round`) inserts it at build; there is ONE gate for both, not a
-/// second always-on code path. The run-condition and render's reads gate on
-/// `Option<Res<SoloCrabActive>>::is_some()`.
+/// Runtime gate for the external NN crab (rl#58 + GCR rl#82), as a presence marker: the
+/// resource exists iff the NN crab is armed. The boot-menu path adds the whole NN stack at app
+/// build (plugins can't be added later) but does NOT know yet how the round resolves — so every
+/// NN system is gated on this, present ONLY once the round arms the crab
+/// ([`crate::net::may_arm_external_crab`]: solo always, networked only with synced weights).
+/// While absent the crab never spawns and no policy/physics drives it, and crucially
+/// [`crate::net::render`]'s `drive_lockstep` never pumps physics or calls [`sync_external_crab`]
+/// — so a networked-UNSYNCED round with the stack present stays byte-identical to the
+/// integer-crab path. The scripted `Boot::Round` path inserts it at build; there is ONE gate for
+/// all paths, not a second always-on code path. The run-condition and render's reads gate on
+/// `Option<Res<ExternalCrabArmed>>::is_some()`.
 #[derive(Resource)]
-pub struct SoloCrabActive;
+pub struct ExternalCrabArmed;
 
-/// Run condition: the solo NN crab is active. Gates every [`SoloCrabPlugin`] system so they
-/// idle (zero cost beyond the check) until the round resolves solo.
-fn solo_crab_active(active: Option<Res<SoloCrabActive>>) -> bool {
+/// Run condition: the external NN crab is armed. Gates every [`SoloCrabPlugin`] system so they
+/// idle (zero cost beyond the check) until the round arms the crab.
+fn external_crab_armed(active: Option<Res<ExternalCrabArmed>>) -> bool {
     active.is_some()
 }
 
@@ -240,7 +243,7 @@ fn solo_crab_active(active: Option<Res<SoloCrabActive>>) -> bool {
 /// into the game crab. The caller must ALSO have added the bot/physics stack
 /// (`RapierPhysicsPlugin` + `PhysicsWorldPlugin` + `BotPlugin`) to the same app — see
 /// [`crate::net::render`]'s solo branch — so the rig actually exists and steps. Every system
-/// is gated on [`SoloCrabActive`]: the scripted solo path flips it on at build; the boot
+/// is gated on [`ExternalCrabArmed`]: the scripted solo path flips it on at build; the boot
 /// menu flips it on only when the round resolves solo (rl#58).
 pub struct SoloCrabPlugin {
     /// Directory the brain (`brain.bin`) + normalizer (`normalizer.bin`) load from.
@@ -282,13 +285,13 @@ impl Plugin for SoloCrabPlugin {
         app.add_systems(
             Update,
             spawn_solo_crab_when_active
-                .run_if(solo_crab_active)
+                .run_if(external_crab_armed)
                 .before(crate::bot::spawn_initial_crabs),
         );
         app.add_systems(
             Update,
             crate::bot::spawn_initial_crabs
-                .run_if(solo_crab_active)
+                .run_if(external_crab_armed)
                 .run_if(crab_not_yet_spawned),
         );
 
@@ -304,7 +307,7 @@ impl Plugin for SoloCrabPlugin {
                 set_crab_walk_target.before(BotSet::Sense),
                 run_solo_policy.in_set(BotSet::Think),
             )
-                .run_if(solo_crab_active),
+                .run_if(external_crab_armed),
         );
         // After physics has moved the body this fixed step, fold its displacement into
         // the game-world crab position. Runs in FixedUpdate (one physics step per run) so
@@ -313,7 +316,7 @@ impl Plugin for SoloCrabPlugin {
             FixedUpdate,
             integrate_solo_crab
                 .after(PhysicsSet::Writeback)
-                .run_if(solo_crab_active),
+                .run_if(external_crab_armed),
         );
         // Digest this step's settled rapier state (+ the policy weights) for the lockstep
         // desync check. After the writeback AND `integrate_solo_crab` so it reads the final
@@ -325,7 +328,7 @@ impl Plugin for SoloCrabPlugin {
             hash_crab_physics
                 .after(integrate_solo_crab)
                 .after(PhysicsSet::Writeback)
-                .run_if(solo_crab_active),
+                .run_if(external_crab_armed),
         );
 
         // Render-only: shift the rendered rig to the game-world crab position. MUST run in
@@ -348,7 +351,7 @@ impl Plugin for SoloCrabPlugin {
                     // first, then cosmetically shift it.
                     .after(hash_crab_physics)
                     .after(PhysicsSet::Writeback)
-                    .run_if(solo_crab_active),
+                    .run_if(external_crab_armed),
             );
         }
     }
@@ -680,7 +683,7 @@ pub fn run_headless_probe(
     // The probe IS the solo case — activate the NN gate so the policy/integration systems
     // run. The crab already spawned via `headless_stack`'s `num_envs: 1`, so the plugin's
     // own gated spawn is a no-op (the not-yet-spawned guard sees it present).
-    app.insert_resource(SoloCrabActive);
+    app.insert_resource(ExternalCrabArmed);
     app.insert_non_send_resource(ProbeDriver {
         ls,
         samples: Vec::new(),

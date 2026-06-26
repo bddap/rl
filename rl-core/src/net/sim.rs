@@ -407,18 +407,18 @@ pub struct Sim {
     /// and a peer built with a different roster is already a different game the cross-check
     /// surfaces via the player/plane state it does hash.
     config: RoundConfig,
-    /// SOLO ONLY: the crab's ground position is driven from OUTSIDE the sim (by the real
-    /// rapier-simulated NN crab — see [`Sim::set_external_crab_pose`]) instead of by the
-    /// built-in integer point-pursuit. When set, [`Sim::step`] skips the pursuit move
-    /// (block 2) and trusts whatever `set_external_crab_pose` last wrote; grabs, extraction,
-    /// and outcome (blocks 3–5) then resolve against the real crab body's position.
+    /// The crab's ground position is driven from OUTSIDE the sim (by the real rapier-simulated
+    /// NN crab — see [`Sim::set_external_crab_pose`]) instead of by the built-in integer
+    /// point-pursuit. When set, [`Sim::step`] skips the pursuit move (block 2) and trusts
+    /// whatever `set_external_crab_pose` last wrote; grabs, extraction, and outcome (blocks 3–5)
+    /// then resolve against the real crab body's position.
     ///
-    /// `false` for every networked round TODAY: folding the float NN crab into the
-    /// deterministic lockstep tick (rl#82, GCR) is the in-progress follow-up that flips this
-    /// on for multiplayer. The FLAG itself is not hashed (like [`config`](Sim::config)) — but
-    /// [`external_crab_digest`](Sim::external_crab_digest), the float body's per-tick digest, IS
-    /// hashed while this is set, so the desync check covers the articulated body and not just
-    /// the quantized 2D pose below.
+    /// Armed on a SOLO round, and (since the GCR fold, rl#82) on a NETWORKED round with synced
+    /// weights — gated by [`crate::net::may_arm_external_crab`]; `false` on a networked-UNSYNCED
+    /// round, which keeps the integer pursuit. The FLAG itself is not hashed (like
+    /// [`config`](Sim::config)) — but [`external_crab_digest`](Sim::external_crab_digest), the
+    /// float body's per-tick digest, IS hashed while this is set, so the desync check covers the
+    /// articulated body and not just the quantized 2D pose below.
     crab_external: bool,
     /// While [`crab_external`](Sim::crab_external) is set, the peer-comparable digest of the
     /// REAL rapier crab's full physics state for this tick (every actuated body's pose +
@@ -429,14 +429,14 @@ pub struct Sim {
     /// the integer path, so integer-only multiplayer hashes are byte-identical to before
     /// (the rl#63 no-op-on-MP guarantee).
     ///
-    /// CADENCE CAVEAT (rl#82, why external control is still solo-only): this digest is sound
-    /// cross-peer ONLY once the rapier crab steps exactly once per lockstep tick. The windowed
-    /// driver currently steps physics on Bevy's wall-clock `FixedUpdate`, decoupled from the
-    /// lockstep accumulator, so the SAME digest can be folded into a different number of ticks
-    /// on a different-framerate peer — a real divergence the equal-per-tick digest would NOT
-    /// catch. So the networked arm stays gated off ([`crate::net::may_arm_external_crab`]) until
-    /// the step is folded into the tick; until then this is exercised only on solo (one peer,
-    /// nothing to desync) and by the cross-check tests.
+    /// CADENCE (rl#82, the GCR fold): this digest is sound cross-peer ONLY because the rapier
+    /// crab now steps a deterministic, wall-clock-free number of physics steps per lockstep tick
+    /// — `net::render::drive_lockstep` pumps the fixed schedule itself via
+    /// [`crate::net::cadence::PhysicsCadence`] (64:30), pushing ONE pose+digest per APPLIED tick,
+    /// so every peer folds the identical digest into the identical tick regardless of frame rate.
+    /// (Before the fold, physics ran on Bevy's wall-clock `FixedUpdate`, so the networked arm had
+    /// to stay gated off — different-framerate peers would fold the same digest into a different
+    /// number of ticks.)
     external_crab_digest: u64,
 }
 
@@ -501,8 +501,10 @@ impl Sim {
 
     /// Put the crab under EXTERNAL control (see [`crab_external`](Sim::crab_external)):
     /// [`Sim::step`] stops running the built-in integer pursuit, and the caller drives the
-    /// crab's position each tick with [`Sim::set_external_crab_pose`]. Solo only — a
-    /// float-driven crab is not cross-peer deterministic.
+    /// crab's position each tick with [`Sim::set_external_crab_pose`]. Armed on a solo round
+    /// always, and on a networked round only with synced weights stepped at the deterministic
+    /// cadence ([`crate::net::may_arm_external_crab`]) — an unsynced or wall-clock-stepped
+    /// float crab is not cross-peer deterministic.
     pub fn enable_external_crab(&mut self, external: bool) {
         self.crab_external = external;
     }
@@ -521,7 +523,7 @@ impl Sim {
         self.external_crab_digest = phys_digest;
     }
 
-    /// Solo setup: arm external control AND seed the crab's initial pose + digest in ONE call,
+    /// Round setup: arm external control AND seed the crab's initial pose + digest in ONE call,
     /// so a pose can't be set before the flag is armed (where
     /// [`set_external_crab_pose`](Sim::set_external_crab_pose) would silently no-op — the
     /// integer pursuit overwrites it). Per-tick updates after this go through
