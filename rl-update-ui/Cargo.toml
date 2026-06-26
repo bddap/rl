@@ -1,0 +1,36 @@
+[package]
+name = "rl-update-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rl-update-ui"
+path = "src/main.rs"
+
+[dependencies]
+# A 2D UI app: render + core_pipeline + ui + text + the default font, winit for the
+# window/input, gilrs for the physical controller, png so the headless screenshot can
+# encode. NOT bevy_pbr/gltf/audio/animation — this draws no 3D and plays no sound, so
+# the trimmed set keeps the build off the renderer's heaviest crates.
+bevy = { workspace = true, features = [
+    "std",
+    "multi_threaded",
+    "bevy_asset",
+    "bevy_winit",
+    "bevy_window",
+    "bevy_render",
+    "bevy_core_pipeline",
+    # bevy 0.18 split UI rendering out of `bevy_ui` (layout) into `bevy_ui_render`; the
+    # renderer is what actually draws nodes/text, and it pulls bevy_ui + bevy_sprite_render.
+    "bevy_ui_render",
+    "bevy_text",
+    "default_font",
+    "bevy_gilrs",
+    "png",
+    "x11",
+    "wayland",
+    "bevy_log",
+] }
+clap = { workspace = true, features = ["env"] }
+serde_json = "1"
