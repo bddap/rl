@@ -76,7 +76,7 @@ mod tests {
     fn per_tick_count_is_floor_or_ceil() {
         let mut c = PhysicsCadence::default();
         let floor = (PHYSICS_HZ / TICK_HZ) as u32;
-        let ceil = floor + u32::from(PHYSICS_HZ % TICK_HZ != 0);
+        let ceil = floor + u32::from(!PHYSICS_HZ.is_multiple_of(TICK_HZ));
         for _ in 0..(10 * TICK_HZ) {
             let n = c.steps_for_next_tick();
             assert!(n == floor || n == ceil, "step count {n} not in {{{floor},{ceil}}}");

@@ -231,7 +231,7 @@ fn main() -> Result<()> {
 /// and a PASS/look-here verdict; exits nonzero if the crab never closed the gap (so it
 /// doubles as a regression gate on "the policy actually drives the crab toward the player").
 fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
-    use rl_core::net::solo_crab::run_headless_probe;
+    use rl_core::net::external_crab::run_headless_probe;
 
     let Some(dir) = nn_crab_checkpoint_dir(args.checkpoint) else {
         anyhow::bail!("nn-crab-probe: no brain.bin at the resolved checkpoint dir");

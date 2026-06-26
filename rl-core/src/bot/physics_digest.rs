@@ -6,7 +6,7 @@
 //! DOFs, so hashing every actuated body's `(pos, quat, linvel, angvel)` as raw IEEE-754 bits
 //! captures the complete dynamic state. Equality is an exact integer compare (no epsilon):
 //! the determinism contract is bit-identity, not nearness. ONE definition, used by both the
-//! production bridge ([`crate::net::solo_crab`]) and the two-sim determinism regression
+//! production bridge ([`crate::net::external_crab`]) and the two-sim determinism regression
 //! ([`super::determinism_probe`]) so the hashed layout can't drift between them.
 
 use bevy::prelude::Transform;

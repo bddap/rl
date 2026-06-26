@@ -1,6 +1,6 @@
 //! The trained policy: load a checkpoint's brain + obs-normalizer and run deterministic
 //! inference (no learning). One implementation, two callers — the demo's `policy_step`
-//! here and the game's solo NN-crab ([`crate::net::solo_crab`]) — both drive [`Policy::act`].
+//! here and the game's solo NN-crab ([`crate::net::external_crab`]) — both drive [`Policy::act`].
 
 use std::path::{Path, PathBuf};
 

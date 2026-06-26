@@ -189,7 +189,7 @@ fn two_sims_bit_identical_under_scripted_torque() {
 // across two same-binary sims. These tests close the loop the GCR fold actually needs: the
 // per-tick bridge handshake — `crab_state_digest(bodies) ^ weights_digest` pushed into the
 // lockstep via `set_external_crab_pose` BEFORE each `try_advance` (exactly what
-// `solo_crab::sync_external_crab` does in production) — fed through a REAL 2-peer
+// `external_crab::sync_external_crab` does in production) — fed through a REAL 2-peer
 // [`Lockstep`] pair that cross-checks state hashes. So a synced pair stays bit-identical
 // every tick, and a weights mismatch trips [`Fault::Desync`] at the tick it happens. The
 // crab body is stepped at the REAL production cadence — [`PhysicsCadence`] doles out
@@ -217,10 +217,8 @@ fn bridge_pose_and_digest(app: &mut App, weights_digest: u64) -> (Pos, u64) {
         Option<&CrabJoint>,
         Option<&CrabCarapace>,
     ), With<CrabBodyPart>>();
-    // The digest over every actuated body — identical to `solo_crab::hash_crab_physics`.
-    let digest = crate::bot::physics_digest::crab_state_digest(
-        q.iter(app.world()).map(|(t, v, j, c)| (t, v, j, c)),
-    ) ^ weights_digest;
+    // The digest over every actuated body — identical to `external_crab::hash_crab_physics`.
+    let digest = crate::bot::physics_digest::crab_state_digest(q.iter(app.world())) ^ weights_digest;
     // The carapace ground position → the sim's fixed-point pose. A SIMPLIFIED model of the
     // bridge's `world_pos` (no world-gain accumulation) — fine here because both peers apply
     // the identical float→i64 cast to identical inputs (same binary), so the pose path is
@@ -324,7 +322,7 @@ fn networked_nn_crab_synced_stays_bit_identical_every_tick() {
     // hash per applied tick — and the pair stays bit-identical every tick, no desync. This is
     // the headless proof that an ARMED networked NN crab is deterministic when weights are
     // synced (the cadence fold's core invariant), independent of the GPU windowed client.
-    const BRAIN: u64 = 0xC0FFEE_1234_5678;
+    const BRAIN: u64 = 0x00C0_FFEE_1234_5678;
     let (saw_desync, matched) = run_two_peer_armed(BRAIN, BRAIN, 200);
     assert!(
         !saw_desync,
