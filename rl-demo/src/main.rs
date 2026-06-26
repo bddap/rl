@@ -202,19 +202,13 @@ fn main() {
     // 1 env — parallel envs are a training concept, and training is `rl-train` only).
     app.insert_resource(Visuals(true))
         .insert_resource(bot::NumEnvs(1))
-        // The dt + sub-steps live in one place, physics::fixed_timestep, shared with
-        // every headless test and the `rl-train learn` rollout worlds, so the physics
-        // the demo/screenshot renders can't drift from the physics training optimizes.
-        .insert_resource(physics::fixed_timestep())
-        // Seed Rapier's context with the softened contact spring (physics::
-        // CONTACT_SOFTNESS) — one source, shared with training + tests — before the
-        // plugin spawns the context from it.
-        .insert_resource(physics::rapier_context_init())
-        // Run physics IN FixedUpdate, lockstep with the Sense→Think→Act brain loop
-        // (which also lives in FixedUpdate): one physics step per brain step, the
-        // same coupling the `rl-train learn` rollout worlds use, so the demo replays
-        // the exact dynamics the policy trained under.
-        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
+        // The crab's physics setup as one plugin: the shared dt + sub-steps + softened
+        // contact spring, and Rapier running IN FixedUpdate (lockstep with the
+        // Sense→Think→Act brain loop, one physics step per brain step). One source with
+        // every headless test and the `rl-train learn` rollout worlds, and the init
+        // ordering is enforced internally, so the demo can't drift from the physics
+        // training optimizes (see physics::CrabPhysicsPlugin).
+        .add_plugins(physics::CrabPhysicsPlugin)
         .add_plugins(physics::PhysicsWorldPlugin)
         .add_plugins(bot::BotPlugin)
         .add_systems(FixedUpdate, contact_audit);

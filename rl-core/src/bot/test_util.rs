@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use bevy::app::{ScheduleRunnerPlugin, TaskPoolOptions, TaskPoolPlugin};
 use bevy::prelude::*;
+// Only the `#[cfg(test)]` transform-vs-rapier assertion below reaches into Rapier's
+// types now that the plugin stack is bundled in `physics::CrabPhysicsPlugin`.
+#[cfg(test)]
 use bevy_rapier3d::prelude::*;
 
 use super::{BotPlugin, NumEnvs};
@@ -123,12 +126,10 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
 
     app.insert_resource(Visuals(false))
         .insert_resource(NumEnvs(cfg.num_envs))
-        // Same fixed timestep as production (one source — see physics::fixed_timestep)
-        // so headless callers can't pass under physics the demo/training run never uses.
-        .insert_resource(crate::physics::fixed_timestep())
-        // Same softened contact spring as production (physics::CONTACT_SOFTNESS).
-        .insert_resource(crate::physics::rapier_context_init())
-        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
+        // The production fixed timestep + softened contact spring + Rapier plugin, in
+        // the one order that applies the spring — bundled so headless callers can't run
+        // physics the demo/training never uses (see physics::CrabPhysicsPlugin).
+        .add_plugins(crate::physics::CrabPhysicsPlugin)
         .add_plugins(PhysicsWorldPlugin)
         .add_plugins(BotPlugin);
     app
