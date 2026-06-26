@@ -91,6 +91,31 @@ pub fn model_path() -> Option<std::path::PathBuf> {
     )
 }
 
+/// FNV-1a/64 digest of the crab MODEL file's raw bytes (rl#100, GCR), or `0` when no
+/// model resolves — the per-peer "same collider asset?" check the membership handshake
+/// advertises alongside the policy-weights digest.
+///
+/// WHY hash the raw file bytes (not the post-load mesh or the fitted capsule spec): the
+/// giant crab's rapier colliders are a DETERMINISTIC pure function of this file's bytes
+/// GIVEN a fixed binary — `sally.glb` → [`ParsedGltf::open`] → [`skin_to_bind_world`] →
+/// [`fit_capsule`]/box → `Collider::capsule`/`cuboid`. The binary is already an unstated
+/// GCR baseline (two peers on different binaries desync on everything, not just colliders),
+/// so the ONLY collider-affecting input not yet guarded is the asset file itself. Hashing
+/// the bytes captures exactly that input — conservatively (any byte change ⇒ a mismatch ⇒
+/// the safe integer-crab fallback) and WITHOUT re-introducing the float-reproducibility
+/// question that hashing the skinned vertex cloud or the fitted f32 capsule would. Uses the
+/// shared [`super::physics_digest::fnv1a`] — the same build-stable FNV-1a/64 the other GCR
+/// digests use, so two same-binary peers with byte-identical assets agree.
+pub fn crab_asset_digest() -> u64 {
+    let Some(path) = model_path() else {
+        return 0; // no model resolves → "no collider asset", never counts as synced
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return 0; // unreadable → treat as no asset (the safe, fail-to-integer-crab side)
+    };
+    super::physics_digest::fnv1a(&bytes)
+}
+
 /// Pure resolver, factored out so the path logic is testable without touching
 /// process env: an absolute model path is used as-is; otherwise the path (default
 /// `sally.glb`) is looked up under `<asset_root or crate_dir>/assets/`.

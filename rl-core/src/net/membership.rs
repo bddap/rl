@@ -123,6 +123,14 @@ pub struct Beat {
     /// with the identical roster still freeze the same set regardless of their brains (a
     /// weights mismatch keeps the integer crab; it never breaks match formation).
     pub weights_digest: u64,
+    /// The sender's crab-MODEL-asset digest (rl#100, GCR), `0` for no resolvable model — the
+    /// giant crab's rapier colliders are derived from this asset
+    /// ([`crate::bot::meshfit::crab_asset_digest`]), so two peers with different crab models
+    /// build different colliders and silently desync. A SIBLING of `weights_digest`, handled
+    /// identically: NOT folded into [`Beat::roster_hash`] (a capability advertisement, not
+    /// membership — a mismatch keeps the integer crab, never breaks formation), self-declared,
+    /// never relayed. See [`Membership::assets_synced`] for what it gates.
+    pub asset_digest: u64,
     /// The sender's view of WHO PILOTS a plane (a subset of `members`, sorted by id bytes) —
     /// the networked half of plane mode (vehicles in multiplayer). Unlike `weights_digest`,
     /// this IS folded into [`Beat::roster_hash`]: the frozen pilot roster must be a pure
@@ -248,6 +256,11 @@ pub struct Membership {
     /// ([`Membership::with_weights_digest`] sets it), so a caller that never sets it behaves
     /// exactly as pre-rl#82 — `weights_synced` is then always false.
     local_digest: u64,
+    /// OUR crab-model-asset digest (rl#100, GCR), `0` for no resolvable model. Advertised in
+    /// every [`Membership::beat`] and the basis of [`Membership::assets_synced`]. `0` by default
+    /// ([`Membership::with_asset_digest`] sets it), so a caller that never sets it behaves
+    /// exactly as pre-rl#100 — `assets_synced` is then always false. Sibling of `local_digest`.
+    local_asset_digest: u64,
     /// Whether WE intend to pilot a plane (the local `RL_VEHICLE=plane` flag). Advertised as
     /// our own entry in every [`Membership::beat`]'s `pilots` list and folded into our
     /// agreement token, so peers converge on a shared pilot roster before freezing. `false` by
@@ -299,6 +312,11 @@ struct PeerView {
     /// non-zero digest, so a peer not yet heard directly blocks [`Membership::weights_synced`]
     /// until it speaks for itself.
     weights_digest: Option<u64>,
+    /// The crab-model-asset digest this peer last advertised in its OWN direct beat (rl#100),
+    /// or `None` if heard only via relay. Sibling of `weights_digest`: like it, a `None` can
+    /// never equal our non-zero digest, so a peer not yet heard directly blocks
+    /// [`Membership::assets_synced`] until it speaks for itself.
+    asset_digest: Option<u64>,
     /// Whether this peer declared ITSELF a pilot on its OWN direct beat — `Some(true/false)`
     /// once heard directly, `None` while only gossip-admitted. Read by [`Membership::pilot_set`]
     /// to assemble the frozen pilot roster. `None` (never heard directly) is treated as
@@ -363,6 +381,7 @@ impl Membership {
             lobby: LobbyMode::Off,
             host_go_on_my_roster: false,
             local_digest: 0,
+            local_asset_digest: 0,
             local_pilot: false,
         }
     }
@@ -384,6 +403,16 @@ impl Membership {
     /// `0` (the default) means "no usable checkpoint"; it never counts as synced.
     pub fn with_weights_digest(mut self, digest: u64) -> Self {
         self.local_digest = digest;
+        self
+    }
+
+    /// Set OUR crab-model-asset digest (rl#100, GCR), advertised in every [`Membership::beat`]
+    /// so peers can agree on a shared crab collider asset before arming the float NN crab in
+    /// lockstep. Sibling of [`Membership::with_weights_digest`]; same launch-time-constant
+    /// builder form (the resolved model can't change mid-formation). `0` (the default) means
+    /// "no usable asset"; it never counts as synced.
+    pub fn with_asset_digest(mut self, digest: u64) -> Self {
+        self.local_asset_digest = digest;
         self
     }
 
@@ -450,6 +479,7 @@ impl Membership {
                     advertised: None,
                     started: false,
                     weights_digest: None,
+                    asset_digest: None,
                     is_pilot: None,
                 });
                 view.last_direct = now;
@@ -460,6 +490,8 @@ impl Membership {
                 // Record the peer's advertised brain digest (rl#82) for the weights-synced
                 // check; only a direct beat sets it, like `advertised`/`started`.
                 view.weights_digest = Some(beat.weights_digest);
+                // Likewise the peer's crab-asset digest (rl#100) for the assets-synced check.
+                view.asset_digest = Some(beat.asset_digest);
                 // Record whether the peer declared ITSELF a pilot: it lists its own id in its
                 // beat's `pilots` iff it intends to fly. Only a direct beat sets this — intent
                 // is self-declared, never inferred from a relay's pilot list.
@@ -486,6 +518,7 @@ impl Membership {
                         advertised: None,
                         started: false,
                         weights_digest: None,
+                        asset_digest: None,
                         is_pilot: None,
                     },
                 );
@@ -539,6 +572,7 @@ impl Membership {
             // plain beat. So a joiner/timer barrier can never put `start` on the wire.
             start: matches!(self.lobby, LobbyMode::Host { started: true }),
             weights_digest: self.local_digest,
+            asset_digest: self.local_asset_digest,
             pilots: self.pilot_set(),
         }
     }
@@ -558,6 +592,26 @@ impl Membership {
                 .peers
                 .values()
                 .all(|v| v.weights_digest == Some(self.local_digest))
+    }
+
+    /// Whether every peer in the match (us + all live peers) advertised the SAME, NON-ZERO
+    /// crab-model-asset digest (rl#100, GCR) — the collider half of the shared-asset guard, a
+    /// SIBLING of [`Membership::weights_synced`] with the identical rules. True only when we
+    /// have a real asset (`local_asset_digest != 0`) AND every live peer's last DIRECT beat
+    /// carried that exact digest. A `None` (relay-only) or any differing/zero digest fails it,
+    /// so two peers whose crab models (and thus colliders) differ never arm the float NN crab
+    /// into lockstep — they stay on the deterministic integer crab. An OUTPUT, never a close
+    /// gate: an asset mismatch still forms and plays the match (integer crab), it just refuses
+    /// to hand the crab to the float NN body. The NN crab arms only when BOTH this and
+    /// `weights_synced` hold (peers agree on brain AND collider asset) — see
+    /// [`crate::net::may_arm_external_crab`]. Call after [`Membership::poll`] so the live set
+    /// is current.
+    pub fn assets_synced(&self) -> bool {
+        self.local_asset_digest != 0
+            && self
+                .peers
+                .values()
+                .all(|v| v.asset_digest == Some(self.local_asset_digest))
     }
 
     /// Advance the clock and return the verdict — the SINGLE per-round entry point.
@@ -657,14 +711,14 @@ impl Membership {
 }
 
 /// Encode a [`Beat`] for the wire:
-/// `[start:u8][count:u16 LE][weights_digest:u64 LE][id:32]*count[pilot_count:u16 LE][pilot_id:32]*pilot_count`,
+/// `[start:u8][count:u16 LE][weights_digest:u64 LE][asset_digest:u64 LE][id:32]*count[pilot_count:u16 LE][pilot_id:32]*pilot_count`,
 /// both id lists sorted+deduped. Fixed 32-byte ids (an [`EndpointId`] is a 32-byte public
 /// key) so there is no per-id length. The leading `start` byte is the host's GO flag (rl#58);
-/// `weights_digest` (rl#82) is the sender's checkpoint digest (NEITHER folded into
-/// [`roster_hash`] — a command / a capability, not membership); the trailing `pilots` list is
-/// who the sender believes flies, which IS folded in. Both counts are bounded on decode
-/// ([`MAX_BEAT_MEMBERS`], and pilots ≤ members) so a hostile/garbled frame can't trigger a
-/// huge allocation.
+/// `weights_digest` (rl#82) is the sender's checkpoint digest and `asset_digest` (rl#100) its
+/// crab-model digest (NEITHER folded into [`roster_hash`] — capabilities, not membership); the
+/// trailing `pilots` list is who the sender believes flies, which IS folded in. Both counts are
+/// bounded on decode ([`MAX_BEAT_MEMBERS`], and pilots ≤ members) so a hostile/garbled frame
+/// can't trigger a huge allocation.
 pub fn encode_beat(beat: &Beat) -> Vec<u8> {
     let canon = |ids: &[EndpointId]| -> Vec<EndpointId> {
         let mut v = ids.to_vec();
@@ -674,10 +728,11 @@ pub fn encode_beat(beat: &Beat) -> Vec<u8> {
     };
     let members = canon(&beat.members);
     let pilots = canon(&beat.pilots);
-    let mut out = Vec::with_capacity(13 + 32 * (members.len() + pilots.len()));
+    let mut out = Vec::with_capacity(21 + 32 * (members.len() + pilots.len()));
     out.push(beat.start as u8);
     out.extend_from_slice(&(members.len() as u16).to_le_bytes());
     out.extend_from_slice(&beat.weights_digest.to_le_bytes());
+    out.extend_from_slice(&beat.asset_digest.to_le_bytes());
     for id in &members {
         out.extend_from_slice(id.as_bytes());
     }
@@ -698,8 +753,8 @@ const MAX_BEAT_MEMBERS: usize = 256;
 /// frame) rather than panicking or over-allocating.
 pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     anyhow::ensure!(
-        body.len() >= 11,
-        "barrier frame too short for start+count+digest"
+        body.len() >= 19,
+        "barrier frame too short for start+count+weights+asset digests"
     );
     let start = body[0] != 0;
     let count = u16::from_le_bytes([body[1], body[2]]) as usize;
@@ -708,7 +763,8 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
         "barrier frame claims {count} members (> {MAX_BEAT_MEMBERS})"
     );
     let weights_digest = u64::from_le_bytes(body[3..11].try_into().expect("8-byte slice"));
-    let members_end = 11 + 32 * count;
+    let asset_digest = u64::from_le_bytes(body[11..19].try_into().expect("8-byte slice"));
+    let members_end = 19 + 32 * count;
     // Room for the member ids AND the trailing 2-byte pilot count.
     anyhow::ensure!(
         body.len() >= members_end + 2,
@@ -727,7 +783,7 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
         }
         Ok(ids)
     };
-    let members = read_ids(11, count)?;
+    let members = read_ids(19, count)?;
     let pilot_count = u16::from_le_bytes([body[members_end], body[members_end + 1]]) as usize;
     // Pilots are a subset of members, so a count above `count` is malformed (and bounds the
     // allocation without a separate cap).
@@ -755,6 +811,7 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
         members,
         start,
         weights_digest,
+        asset_digest,
         pilots,
     })
 }
@@ -784,6 +841,7 @@ mod tests {
             members,
             start: false,
             weights_digest: 0,
+            asset_digest: 0,
             pilots: Vec::new(),
         }
     }
@@ -794,6 +852,7 @@ mod tests {
             members,
             start: false,
             weights_digest: 0,
+            asset_digest: 0,
             pilots,
         }
     }
@@ -822,17 +881,22 @@ mod tests {
 
     #[test]
     fn decode_rejects_garbage() {
-        assert!(decode_beat(&[0]).is_err(), "too short for start+count+digest");
-        // Valid header (start + count=5 + digest) but no member bodies.
+        assert!(
+            decode_beat(&[0]).is_err(),
+            "too short for start+count+digests"
+        );
+        // Valid header (start + count=5 + weights + asset digests) but no member bodies.
         let mut truncated = vec![0u8];
         truncated.extend_from_slice(&5u16.to_le_bytes());
-        truncated.extend_from_slice(&0u64.to_le_bytes());
+        truncated.extend_from_slice(&0u64.to_le_bytes()); // weights digest
+        truncated.extend_from_slice(&0u64.to_le_bytes()); // asset digest
         assert!(decode_beat(&truncated).is_err(), "truncated body");
-        // count past the cap (start byte + bogus count + digest + filler).
+        // count past the cap (start byte + bogus count + both digests + filler).
         let mut huge = vec![0u8];
         huge.extend_from_slice(&(300u16).to_le_bytes());
-        huge.extend_from_slice(&0u64.to_le_bytes());
-        huge.resize(11 + 32 * 300, 0);
+        huge.extend_from_slice(&0u64.to_le_bytes()); // weights digest
+        huge.extend_from_slice(&0u64.to_le_bytes()); // asset digest
+        huge.resize(19 + 32 * 300, 0);
         assert!(decode_beat(&huge).is_err(), "over-large count rejected");
     }
 
@@ -848,6 +912,7 @@ mod tests {
             members,
             start: true,
             weights_digest: 0,
+            asset_digest: 0,
             pilots: Vec::new(),
         };
         assert_eq!(
@@ -876,6 +941,19 @@ mod tests {
             members,
             start: false,
             weights_digest,
+            asset_digest: 0,
+            pilots: Vec::new(),
+        }
+    }
+
+    /// A heartbeat carrying a crab-asset digest (rl#100), for the synced-asset tests. Sibling
+    /// of [`bt_d`]; weights digest left `0` so these isolate the asset-handshake path.
+    fn bt_ad(members: Vec<EndpointId>, asset_digest: u64) -> Beat {
+        Beat {
+            members,
+            start: false,
+            weights_digest: 0,
+            asset_digest,
             pilots: Vec::new(),
         }
     }
@@ -950,6 +1028,106 @@ mod tests {
         a.on_beat(idc, &bt_d(vec![ida, idb, idc], BRAIN), t0);
         a.poll(t0);
         assert!(a.weights_synced(), "once every peer is heard with the same brain, synced");
+    }
+
+    // ── Asset-digest handshake (rl#100, GCR — the shared-collider-asset guard) ────────
+    // A SIBLING of the weights handshake above: the crab-model digest rides its own Beat
+    // field, is never folded into the roster hash, and gates arming the float NN crab on every
+    // peer agreeing — so two peers whose crab colliders differ stay on the integer crab.
+
+    #[test]
+    fn asset_digest_roundtrips_on_the_wire() {
+        // The digest survives encode→decode and (like `weights_digest`) does NOT perturb the
+        // roster hash, NOR collide with the weights digest field — a beat carrying an asset
+        // digest but no weights digest roundtrips both fields independently.
+        let members = vec![eid(1), eid(2)];
+        let a = bt_ad(members.clone(), 0xC0FF_EE00_1234_5678);
+        let b = bt_ad(members, 0x9876_5432_10AB_CDEF);
+        assert_eq!(
+            a.roster_hash(),
+            b.roster_hash(),
+            "the asset digest must not be part of the roster hash"
+        );
+        let decoded = decode_beat(&encode_beat(&a)).unwrap();
+        assert_eq!(decoded.asset_digest, 0xC0FF_EE00_1234_5678);
+        assert_eq!(decoded.weights_digest, 0, "asset digest must not bleed into weights");
+    }
+
+    #[test]
+    fn weights_and_asset_digests_are_independent_on_the_wire() {
+        // Both digests present and DISTINCT must roundtrip to their own values — proves the two
+        // sibling u64 fields don't alias (a layout bug in the wire format would swap them).
+        let members = vec![eid(1), eid(2)];
+        let beat = Beat {
+            members,
+            start: false,
+            weights_digest: 0x1111_2222_3333_4444,
+            asset_digest: 0x5555_6666_7777_8888,
+            pilots: Vec::new(),
+        };
+        let decoded = decode_beat(&encode_beat(&beat)).unwrap();
+        assert_eq!(decoded.weights_digest, 0x1111_2222_3333_4444);
+        assert_eq!(decoded.asset_digest, 0x5555_6666_7777_8888);
+    }
+
+    #[test]
+    fn assets_synced_only_when_all_peers_share_one_nonzero_digest() {
+        let t0 = Instant::now();
+        let (ida, idb) = (eid(1), eid(2));
+        const ASSET: u64 = 0x5A11_0000_C0DE_4321;
+
+        // Matched, non-zero assets on both peers → synced.
+        let mut a = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
+        a.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
+        a.poll(t0);
+        assert!(a.assets_synced(), "equal non-zero asset digests must be synced");
+
+        // A peer on a DIFFERENT crab model → not synced (the desync the guard exists for).
+        let mut b = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
+        b.on_beat(idb, &bt_ad(vec![ida, idb], ASSET ^ 0xFF), t0);
+        b.poll(t0);
+        assert!(!b.assets_synced(), "a differing peer asset digest must not be synced");
+
+        // A peer advertising a ZERO digest (no resolvable model) → not synced.
+        let mut c = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
+        c.on_beat(idb, &bt_ad(vec![ida, idb], 0), t0);
+        c.poll(t0);
+        assert!(!c.assets_synced(), "a zero peer asset digest must not be synced");
+
+        // OUR OWN digest zero (no model locally) → never synced, even if a peer has one.
+        let mut d = Membership::new(ida, 2, t0); // local_asset_digest defaults to 0
+        d.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
+        d.poll(t0);
+        assert!(!d.assets_synced(), "a zero local asset digest is never synced");
+    }
+
+    #[test]
+    fn weights_and_assets_synced_are_independent_gates() {
+        // The two guards are orthogonal: matching brains but mismatched crab assets must leave
+        // `weights_synced` true yet `assets_synced` false (and the arm site ANDs them, so the
+        // NN crab stays integer). Proves a refactor can't collapse the two into one digest.
+        let t0 = Instant::now();
+        let (ida, idb) = (eid(1), eid(2));
+        const BRAIN: u64 = 0xB0B0_0000_1234_5678;
+        const ASSET: u64 = 0xA55E_0000_8765_4321;
+        let mut a = Membership::new(ida, 2, t0)
+            .with_weights_digest(BRAIN)
+            .with_asset_digest(ASSET);
+        // Peer matches the brain but runs a DIFFERENT crab model.
+        let mismatched_asset = Beat {
+            members: vec![ida, idb],
+            start: false,
+            weights_digest: BRAIN,
+            asset_digest: ASSET ^ 0x1,
+            pilots: Vec::new(),
+        };
+        a.on_beat(idb, &mismatched_asset, t0);
+        a.poll(t0);
+        assert!(a.weights_synced(), "matching brains → weights synced");
+        assert!(
+            !a.assets_synced(),
+            "a different crab asset must leave assets NOT synced (independent of weights)"
+        );
     }
 
     // ── Pilot-intent handshake (GCR planes — wire-negotiated who flies) ──────────────
@@ -1576,6 +1754,7 @@ mod tests {
             members: vec![idh],
             start: true,
             weights_digest: 0,
+            asset_digest: 0,
             pilots: Vec::new(),
         };
         let mut t = 0u64;

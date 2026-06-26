@@ -278,6 +278,12 @@ pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>)
         .as_deref()
         .map(crate::play::checkpoint_digest)
         .unwrap_or(0);
+    // OUR crab-MODEL-asset digest (rl#100, GCR): the giant crab's rapier colliders are derived
+    // from this asset ([`crate::bot::meshfit::crab_asset_digest`]), so peers must agree on it
+    // before arming the float crab in lockstep — a different model builds different colliders
+    // and desyncs even with identical brains. Computed unconditionally (it's a property of this
+    // peer's installed crab model, independent of whether a checkpoint loaded); `0` for no model.
+    let asset_digest = crate::bot::meshfit::crab_asset_digest();
 
     match boot {
         // Scripted boot: insert the round now and jump straight to Playing (the menu
@@ -298,6 +304,7 @@ pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>)
                     if crate::net::may_arm_external_crab(
                         net.is_none(),
                         net.as_ref().is_some_and(NetDriver::weights_synced),
+                        net.as_ref().is_some_and(NetDriver::assets_synced),
                     ) =>
                 {
                     let crab = ls.sim().crab();
@@ -340,6 +347,7 @@ pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>)
                 seed,
                 telemetry,
                 weights_digest,
+                asset_digest,
             });
             // NN crab on the round (rl#58 + GCR): the menu can't know at BUILD time whether the
             // round will be solo, networked-synced, or networked-unsynced, so add the whole NN
@@ -562,7 +570,10 @@ fn ensure_round_installed(world: &mut World) {
         .is_some_and(|m| m.0);
     let networked = ready.net.is_some();
     let weights_synced = ready.net.as_ref().is_some_and(NetDriver::weights_synced);
-    if has_nn_stack && crate::net::may_arm_external_crab(ready.net.is_none(), weights_synced) {
+    let assets_synced = ready.net.as_ref().is_some_and(NetDriver::assets_synced);
+    if has_nn_stack
+        && crate::net::may_arm_external_crab(ready.net.is_none(), weights_synced, assets_synced)
+    {
         let crab = ready.lockstep.sim().crab();
         // Arm + seed atomically with the crab's current pose/yaw (writing back what's there →
         // no state change), removing the set-pose-before-arm footgun.
@@ -1791,6 +1802,9 @@ mod menu_ui {
         /// Our NN-crab checkpoint digest (rl#82, GCR), `0` for none. Advertised in networked
         /// formation so peers can agree on a shared brain before arming the float crab.
         pub weights_digest: u64,
+        /// Our crab-model-asset digest (rl#100, GCR), `0` for none. Advertised alongside
+        /// `weights_digest` so peers can agree on a shared collider asset before arming.
+        pub asset_digest: u64,
     }
 
     /// The camera the menu/connecting screens render into. bevy_egui 0.39 is
@@ -1807,7 +1821,12 @@ mod menu_ui {
             if !app.is_plugin_added::<EguiPlugin>() {
                 app.add_plugins(EguiPlugin::default());
             }
-            app.insert_non_send_resource(MenuState::new(self.seed, self.telemetry, self.weights_digest))
+            app.insert_non_send_resource(MenuState::new(
+                self.seed,
+                self.telemetry,
+                self.weights_digest,
+                self.asset_digest,
+            ))
                 // A 2D camera for the menu so bevy_egui has a context to render into.
                 // Spawned on entering Menu (the default phase, so it fires at startup on the
                 // menu boot; never on the scripted Boot::Round path, which supersedes Menu
@@ -1854,6 +1873,9 @@ mod menu_ui {
         /// Our NN-crab checkpoint digest (rl#82, GCR), `0` for none — handed to
         /// [`crate::net::menu::begin`] so networked formation advertises it.
         weights_digest: u64,
+        /// Our crab-model-asset digest (rl#100, GCR), `0` for none — handed to
+        /// [`crate::net::menu::begin`] alongside `weights_digest`.
+        asset_digest: u64,
         /// The pure navigation FSM ([`MenuNav`]) — focus + the chooser/lobby transition.
         /// Folded by controller/keyboard input AND egui clicks through one path, so every
         /// confirm (Start included) routes through the same tested dispatch.
@@ -1871,11 +1893,17 @@ mod menu_ui {
     }
 
     impl MenuState {
-        fn new(seed: u64, telemetry: Option<EndpointId>, weights_digest: u64) -> Self {
+        fn new(
+            seed: u64,
+            telemetry: Option<EndpointId>,
+            weights_digest: u64,
+            asset_digest: u64,
+        ) -> Self {
             Self {
                 seed,
                 telemetry,
                 weights_digest,
+                asset_digest,
                 nav: MenuNav::new(),
                 stick_latched: false,
                 code_input: String::new(),
@@ -2168,6 +2196,7 @@ mod menu_ui {
             state.seed,
             state.telemetry,
             state.weights_digest,
+            state.asset_digest,
         ));
         next.set(AppPhase::Connecting);
     }
