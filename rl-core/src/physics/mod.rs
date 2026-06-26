@@ -2,6 +2,7 @@ pub mod world;
 
 pub use world::PhysicsWorldPlugin;
 
+use bevy_rapier3d::math::Vect;
 use bevy_rapier3d::plugin::RapierContextInitialization;
 use bevy_rapier3d::prelude::{RapierConfiguration, TimestepMode};
 use bevy_rapier3d::rapier::dynamics::{IntegrationParameters, SpringCoefficients};
@@ -73,9 +74,28 @@ pub const CONTACT_SOFTNESS: SpringCoefficients<f32> = SpringCoefficients {
     damping_ratio: 5.0,
 };
 
-/// How Rapier seeds its default physics context — same as the built-in default
-/// but with [`CONTACT_SOFTNESS`] baked into the integration parameters from
-/// creation. Not called directly by app builders: [`CrabPhysicsPlugin`] inserts
+/// World length unit (1 sim unit = 1 metre): the scale Rapier's solver tolerances and
+/// its default gravity are expressed in. The one source [`PHYSICS_GRAVITY`] is pinned
+/// against (`gravity_matches_rapier_default`); we override gravity itself explicitly.
+const LENGTH_UNIT: f32 = 1.0;
+
+/// Gravity, set EXPLICITLY on the Rapier config rather than inherited from
+/// `RapierConfiguration::new`'s default. The determinism contract is bit-identity, and
+/// the GCR lockstep (proven cross-machine on hardware, rl#82) integrates this exact
+/// vector every tick — so it must not be an unguarded dependency on an upstream
+/// constant a Rapier bump or a stray config edit could silently flip and desync the
+/// trained checkpoint.
+///
+/// Value-equal to Rapier's default at [`LENGTH_UNIT`] (`Vect::Y * -9.81`): y is the
+/// same `-9.81` f32 and the horizontal components are zero, so the trajectory is
+/// bit-identical and the determinism/lockstep tests hold. `gravity_matches_rapier_default`
+/// pins this equality — an upstream change to the default fails there, in review,
+/// instead of silently shifting physics on the next rebuild.
+pub const PHYSICS_GRAVITY: Vect = Vect::new(0.0, -9.81, 0.0);
+
+/// How Rapier seeds its default physics context — Rapier's default but with
+/// [`CONTACT_SOFTNESS`] baked into the integration parameters and [`PHYSICS_GRAVITY`]
+/// set explicitly. Not called directly by app builders: [`CrabPhysicsPlugin`] inserts
 /// it (in the one order that works) so all worlds share one contact spring and
 /// can't drift; `RapierPhysicsPlugin` spawns the context from it at `PreStartup`.
 fn rapier_context_init() -> RapierContextInitialization {
@@ -84,7 +104,10 @@ fn rapier_context_init() -> RapierContextInitialization {
             contact_softness: CONTACT_SOFTNESS,
             ..IntegrationParameters::default()
         },
-        rapier_configuration: RapierConfiguration::new(1.0),
+        rapier_configuration: RapierConfiguration {
+            gravity: PHYSICS_GRAVITY,
+            ..RapierConfiguration::new(LENGTH_UNIT)
+        },
     }
 }
 
@@ -102,10 +125,12 @@ fn rapier_context_init() -> RapierContextInitialization {
 /// One residual trap Bevy can't make unrepresentable: resources are last-write-wins,
 /// so a caller who ALSO inserts their own [`RapierContextInitialization`] (or adds a
 /// bare `RapierPhysicsPlugin`) after this plugin silently clobbers the spring. So this
-/// plugin also installs [`assert_contact_spring_applied`] at `PostStartup` — a
-/// fail-loud runtime guard, in EVERY world (demo/render/train), that the spawned
-/// context really carries [`CONTACT_SOFTNESS`]. The `contact_spring_is_applied` test
-/// proves the guard catches a dropped spring on the headless path.
+/// plugin also installs [`assert_contact_spring_applied`] and
+/// [`assert_gravity_applied`] at `PostStartup` — fail-loud runtime guards, in EVERY
+/// world (demo/render/train), that the spawned context really carries
+/// [`CONTACT_SOFTNESS`] and [`PHYSICS_GRAVITY`]. The `contact_spring_is_applied` and
+/// `gravity_is_applied` tests prove the guards catch a dropped value on the headless
+/// path.
 pub struct CrabPhysicsPlugin;
 
 impl bevy::app::Plugin for CrabPhysicsPlugin {
@@ -115,7 +140,10 @@ impl bevy::app::Plugin for CrabPhysicsPlugin {
         app.insert_resource(fixed_timestep())
             .insert_resource(rapier_context_init())
             .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
-            .add_systems(PostStartup, assert_contact_spring_applied);
+            .add_systems(
+                PostStartup,
+                (assert_contact_spring_applied, assert_gravity_applied),
+            );
     }
 }
 
@@ -146,6 +174,31 @@ fn assert_contact_spring_applied(
         "CrabPhysicsPlugin: the spawned Rapier context lost CONTACT_SOFTNESS — its \
          RapierContextInitialization was overridden after the plugin (last-write-wins). \
          The contact spring is silently wrong; fix the init ordering at the call site."
+    );
+}
+
+/// Fail loud, in every world, if the spawned Rapier context's gravity isn't our
+/// explicit [`PHYSICS_GRAVITY`] — the runtime backstop, alongside
+/// [`assert_contact_spring_applied`], for the same last-write-wins resource trap.
+/// Gravity lives on the `RapierConfiguration` component (not the integration
+/// parameters), so it needs its own read-only query. A panic here means the config
+/// was overridden after the plugin — wrong physics that would otherwise pass silently
+/// into the GCR lockstep.
+fn assert_gravity_applied(
+    config: bevy::ecs::system::Query<
+        &RapierConfiguration,
+        bevy::ecs::query::With<bevy_rapier3d::plugin::context::DefaultRapierContext>,
+    >,
+) {
+    let gravity = config
+        .single()
+        .expect("CrabPhysicsPlugin: exactly one default Rapier context")
+        .gravity;
+    assert_eq!(
+        gravity, PHYSICS_GRAVITY,
+        "CrabPhysicsPlugin: the spawned Rapier context's gravity is not PHYSICS_GRAVITY — \
+         its RapierConfiguration was overridden after the plugin (last-write-wins). \
+         Gravity is silently wrong; fix the init ordering at the call site."
     );
 }
 
@@ -181,6 +234,102 @@ mod tests {
         assert_eq!(
             spring.damping_ratio, CONTACT_SOFTNESS.damping_ratio,
             "contact spring damping_ratio lost — init ordering broke"
+        );
+    }
+
+    /// Pins [`PHYSICS_GRAVITY`] to the value Rapier's own `RapierConfiguration::new`
+    /// seeds at [`LENGTH_UNIT`] — see [`PHYSICS_GRAVITY`] for why the equality matters.
+    /// A Rapier bump that changed the default fails here, in review.
+    #[test]
+    fn gravity_matches_rapier_default() {
+        assert_eq!(
+            PHYSICS_GRAVITY,
+            RapierConfiguration::new(LENGTH_UNIT).gravity,
+            "PHYSICS_GRAVITY diverged from Rapier's default — verify the new value is \
+             intentional and resume training; a silent change desyncs the checkpoint."
+        );
+    }
+
+    /// The gravity twin of [`contact_spring_is_applied`]: after the production stack
+    /// builds, the spawned context's active gravity must be our explicit
+    /// [`PHYSICS_GRAVITY`], proving [`assert_gravity_applied`]'s invariant holds on the
+    /// real headless path rather than leaning on Rapier's undocumented default.
+    #[test]
+    fn gravity_is_applied() {
+        let mut app = headless_app();
+        app.update();
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&RapierConfiguration, With<DefaultRapierContext>>();
+        let config = q.single(app.world()).expect("one default rapier context");
+        assert_eq!(
+            config.gravity, PHYSICS_GRAVITY,
+            "active context gravity != PHYSICS_GRAVITY — init ordering broke"
+        );
+    }
+
+    /// Free-fall determinism regression: a bare dynamic body dropped into the real
+    /// physics stack must (a) trace a bit-identical per-tick state hash across two
+    /// independently-built worlds — the determinism contract gravity feeds into — and
+    /// (b) actually accelerate downward, so the test can't pass vacuously on a frozen
+    /// or zero-gravity body. Hashes the body's full `(pos, quat, linvel, angvel)` bits
+    /// via the same [`crate::bot::physics_digest`] machinery the GCR lockstep folds.
+    #[test]
+    fn falling_body_is_deterministic() {
+        use crate::bot::physics_digest::{DIGEST_SEED, body_bits, fold_bodies};
+        use bevy::prelude::{Transform, Vec3};
+        use bevy_rapier3d::prelude::{Collider, RigidBody, Velocity};
+
+        const TICKS: usize = 32;
+        // Far from the crab + ground so the fall is pure gravity, never a contact.
+        const START: Vec3 = Vec3::new(1000.0, 500.0, 1000.0);
+
+        // One world: spawn a free body, step `TICKS`, return (per-tick hashes, final).
+        fn run() -> (Vec<u64>, Transform, Velocity) {
+            let mut app = headless_app();
+            let body = app
+                .world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Collider::ball(0.1),
+                    Velocity::zero(),
+                    Transform::from_translation(START),
+                ))
+                .id();
+            let mut hashes = Vec::with_capacity(TICKS);
+            for _ in 0..TICKS {
+                app.update();
+                let t = *app.world().entity(body).get::<Transform>().unwrap();
+                let v = *app.world().entity(body).get::<Velocity>().unwrap();
+                hashes.push(fold_bodies(DIGEST_SEED, &[(0, body_bits(&t, &v))]));
+            }
+            let t = *app.world().entity(body).get::<Transform>().unwrap();
+            let v = *app.world().entity(body).get::<Velocity>().unwrap();
+            (hashes, t, v)
+        }
+
+        let (a_hashes, a_final, a_vel) = run();
+        let (b_hashes, _, _) = run();
+
+        // (a) Bit-identical across independent worlds — the determinism contract.
+        assert_eq!(a_hashes, b_hashes, "free-fall trajectory not reproducible");
+        // Non-vacuous: the body genuinely fell under PHYSICS_GRAVITY (negative Y), and
+        // the state changed every tick (not frozen, so the hash equality means something).
+        assert!(
+            a_final.translation.y < START.y - 1.0,
+            "body did not fall: y {} -> {}",
+            START.y,
+            a_final.translation.y
+        );
+        assert!(
+            a_vel.linear.y < -1.0,
+            "downward velocity never built: {a_vel:?}"
+        );
+        let distinct = a_hashes.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            distinct.len(),
+            TICKS,
+            "state hash repeated across ticks — body wasn't actually moving"
         );
     }
 }
