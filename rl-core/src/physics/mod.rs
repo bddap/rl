@@ -6,11 +6,19 @@ use bevy_rapier3d::plugin::RapierContextInitialization;
 use bevy_rapier3d::prelude::{RapierConfiguration, TimestepMode};
 use bevy_rapier3d::rapier::dynamics::{IntegrationParameters, SpringCoefficients};
 
+/// Physics step rate (Hz) — the CANONICAL source. The crab body + the brain's
+/// Sense→Think→Act loop advance at this rate; the sim/lockstep ([`crate::net::sim::TICK_HZ`])
+/// runs slower, so the networked arm reconciles the two with a deterministic integer cadence
+/// ([`crate::net::cadence::PhysicsCadence`]). Kept as the source (and [`PHYSICS_DT`] derived
+/// from it) so the cadence math and the timestep can never disagree about the rate.
+pub const PHYSICS_HZ: u64 = 64;
+
 /// One Bevy tick advances physics by exactly this, split into [`PHYSICS_SUBSTEPS`]
 /// solver sub-steps. Shared by production AND every headless test via
 /// [`fixed_timestep`], so the three can never drift — a test that ran different
-/// physics than the demo/training loop would prove nothing.
-pub const PHYSICS_DT: f32 = 1.0 / 64.0;
+/// physics than the demo/training loop would prove nothing. Derived from
+/// [`PHYSICS_HZ`] so the rate has one source.
+pub const PHYSICS_DT: f32 = 1.0 / PHYSICS_HZ as f32;
 
 /// Solver sub-steps per tick. At one sub-step the solver can't converge the floppy
 /// legs + soft joint limits resting under the zero policy, so the crab buzzes

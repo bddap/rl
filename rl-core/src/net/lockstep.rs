@@ -221,6 +221,67 @@ impl Lockstep {
         (next..=next + FUTURE_TICK_BOUND).contains(&tick)
     }
 
+    /// Whether the next tick is ready to apply — it's a warmup tick, or every peer's
+    /// input for it is already buffered. `false` means we're stalled waiting on a peer.
+    ///
+    /// The GCR windowed driver checks this so it steps the external crab's physics (the
+    /// per-tick cadence, [`crate::net::cadence`]) and pushes ONE crab pose for a tick ONLY
+    /// when that tick will actually advance — a batched [`Self::try_advance`] can apply
+    /// several ticks at once on catch-up, which would smear one crab pose across them.
+    pub fn next_tick_ready(&self) -> bool {
+        let tick = self.next_tick();
+        tick < INPUT_DELAY
+            || self
+                .inputs
+                .get(&tick)
+                .is_some_and(|ti| self.peers.iter().all(|p| ti.contains_key(p)))
+    }
+
+    /// Apply AT MOST one tick: if [`Self::next_tick_ready`], step the sim once and return
+    /// `Some(faults)` for that tick; otherwise return `None` (stalled, nothing applied).
+    /// `Some(vec![])` means "applied, in sync"; a non-empty vec is a desync to surface.
+    ///
+    /// This is the single place a tick is applied — [`Self::try_advance`] is just this in a
+    /// loop — so the batched and one-at-a-time callers can never drift on the apply logic.
+    /// The windowed GCR driver advances one tick at a time so it can run the crab's
+    /// physics-step cadence + push one pose per advanced tick.
+    pub fn advance_one(&mut self) -> Option<Vec<Fault>> {
+        let tick = self.next_tick();
+        // Warmup window: the first INPUT_DELAY ticks have no scheduled input (the earliest
+        // input any peer issues is for tick INPUT_DELAY). They apply with neutral input on
+        // every peer, filling the input pipeline — the standard lockstep cold-start. Without
+        // it the driver would stall at tick 0 forever waiting for inputs that, by design,
+        // were never scheduled.
+        let tick_inputs = if tick < INPUT_DELAY {
+            BTreeMap::new()
+        } else {
+            let tick_inputs = self.inputs.get(&tick)?;
+            if !self.peers.iter().all(|p| tick_inputs.contains_key(p)) {
+                return None; // not everyone's input is here yet — stall this tick.
+            }
+            self.inputs.remove(&tick).expect("just checked present")
+        };
+        let mut faults = Vec::new();
+        self.sim.step(&tick_inputs);
+        let hash = self.sim.state_hash();
+        self.confirmed = Some(Confirmed { tick, hash });
+        self.applied_hashes.insert(tick, hash);
+        while self.applied_hashes.len() as u64 > HASH_HISTORY {
+            self.applied_hashes.pop_first();
+        }
+        // Compare against any peer hashes that arrived for this tick before we
+        // reached it (the late-hash case is in record_remote).
+        for &peer in &self.peers {
+            if peer == self.me {
+                continue;
+            }
+            if let Some(peer_hash) = self.pending_peer_hashes.remove(&(tick, peer)) {
+                faults.extend(check(tick, peer, hash, peer_hash));
+            }
+        }
+        Some(faults)
+    }
+
     /// Advance as many ticks as are fully ready (every peer's input present),
     /// returning any faults detected against peer-advertised hashes.
     ///
@@ -230,41 +291,8 @@ impl Lockstep {
     /// leaving us stalled until the missing input arrives.
     pub fn try_advance(&mut self) -> Vec<Fault> {
         let mut faults = Vec::new();
-        loop {
-            let tick = self.next_tick();
-            // Warmup window: the first INPUT_DELAY ticks have no scheduled input (the
-            // earliest input any peer issues is for tick INPUT_DELAY). They apply with
-            // neutral input on every peer, filling the input pipeline — the standard
-            // lockstep cold-start. Without it the driver would stall at tick 0 forever
-            // waiting for inputs that, by design, were never scheduled.
-            let tick_inputs = if tick < INPUT_DELAY {
-                BTreeMap::new()
-            } else {
-                let Some(tick_inputs) = self.inputs.get(&tick) else {
-                    break;
-                };
-                if !self.peers.iter().all(|p| tick_inputs.contains_key(p)) {
-                    break; // not everyone's input is here yet — stall this tick.
-                }
-                self.inputs.remove(&tick).expect("just checked present")
-            };
-            self.sim.step(&tick_inputs);
-            let hash = self.sim.state_hash();
-            self.confirmed = Some(Confirmed { tick, hash });
-            self.applied_hashes.insert(tick, hash);
-            while self.applied_hashes.len() as u64 > HASH_HISTORY {
-                self.applied_hashes.pop_first();
-            }
-            // Compare against any peer hashes that arrived for this tick before we
-            // reached it (the late-hash case is in record_remote).
-            for &peer in &self.peers {
-                if peer == self.me {
-                    continue;
-                }
-                if let Some(peer_hash) = self.pending_peer_hashes.remove(&(tick, peer)) {
-                    faults.extend(check(tick, peer, hash, peer_hash));
-                }
-            }
+        while let Some(tick_faults) = self.advance_one() {
+            faults.extend(tick_faults);
         }
         faults
     }
