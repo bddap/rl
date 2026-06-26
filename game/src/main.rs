@@ -353,8 +353,8 @@ fn run_play(args: PlayArgs) -> Result<()> {
     // every networked path, where a float rapier crab isn't cross-peer deterministic).
     // Skip a dir with no `brain.bin` so a bad path degrades to the integer crab rather
     // than every-frame load failures.
-    let solo_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint);
-    render::build_windowed_app(boot, solo_crab).run();
+    let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint);
+    render::build_windowed_app(boot, external_crab).run();
     Ok(())
 }
 
