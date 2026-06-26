@@ -245,6 +245,7 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
                 spawn_fp_camera,
                 spawn_hud,
                 spawn_controls_ui::<GcrControls>,
+                crate::build_info::spawn_build_info_overlay,
             )
                 .chain(),
         )
