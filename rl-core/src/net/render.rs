@@ -944,7 +944,7 @@ fn drive_lockstep(
                     },
                 );
             }
-            let tick_faults = {
+            let (tick_faults, restarted) = {
                 let mut state = world.non_send_resource_mut::<GameState>();
                 let before = state.ls.sim().tick();
                 let faults = state.ls.advance_one().expect("next_tick_ready was true");
@@ -953,11 +953,24 @@ fn drive_lockstep(
                 // every peer regardless of how each peer's frames batched the drain (an
                 // end-of-frame reset would let one peer step a few post-restart ticks on the stale
                 // phase before resetting, desyncing them).
-                if state.ls.sim().tick() < before {
+                let restarted = state.ls.sim().tick() < before;
+                if restarted {
                     *cadence = PhysicsCadence::default();
                 }
-                faults
+                (faults, restarted)
             };
+            // Same restart edge as the cadence reset above: re-seed the crab bridge to the
+            // round's (rebuilt) spawn, so the next `sync_external_crab` pushes the spawn pose
+            // instead of snapping the restarted crab onto the still-walking body's accumulated
+            // position. The cross-peer-determinism argument lives on `restart_to_spawn`'s doc
+            // (it fires off this same shared-input edge). Only meaningful while armed (else there
+            // is no bridge driving the crab).
+            if restarted && armed {
+                let spawn = world.non_send_resource::<GameState>().ls.sim().crab().pos();
+                world
+                    .resource_mut::<crate::net::external_crab::ExternalCrabBridge>()
+                    .restart_to_spawn(spawn);
+            }
             report_faults(&tick_faults, &mut total_desyncs, &tel);
         }
 

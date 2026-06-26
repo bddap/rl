@@ -200,7 +200,7 @@ fn two_sims_bit_identical_under_scripted_torque() {
 
 use crate::net::cadence::PhysicsCadence;
 use crate::net::lockstep::{Fault, INPUT_DELAY, Lockstep};
-use crate::net::sim::{Input, PlayerId, Pos, TICK_HZ, UNIT};
+use crate::net::sim::{Input, PlayerId, Pos, TICK_HZ, UNIT, buttons};
 use crate::physics::PHYSICS_HZ;
 
 /// The match seed for the 2-peer GCR determinism tests. Arbitrary but fixed (reproducible).
@@ -239,14 +239,36 @@ fn bridge_pose_and_digest(app: &mut App, weights_digest: u64) -> (Pos, u64) {
     (pose, digest)
 }
 
+/// Outcome of a two-peer armed run (named fields over positional bools, so the asserts read).
+struct ArmedRun {
+    /// Any [`Fault::Desync`] surfaced on either peer across the whole run.
+    saw_desync: bool,
+    /// The two peers' `state_hash` agree at the END of the run.
+    matched_end: bool,
+    /// The two peers' `state_hash` agreed at EVERY applied tick (through any restart) — the
+    /// stronger "never diverged for a moment" check the end-only compare can't make.
+    matched_every_tick: bool,
+    /// A drain tick actually rewound the sim (`tick() < before`) — proves a requested RESTART
+    /// fired and wasn't a silent no-op.
+    saw_restart: bool,
+}
+
 /// Drive two independently-built crab worlds + two networked [`Lockstep`]s in tandem, with
 /// the external crab ARMED on both, at the REAL production cadence: each peer issues one
 /// input per outer iteration, then drains every now-ready apply tick, stepping the crab body
 /// [`PhysicsCadence::steps_for_next_tick`] physics steps and pushing ONE pose+digest per
-/// APPLIED tick via [`Lockstep::advance_one`] (the windowed driver's contract). Returns
-/// `(any_desync, hashes_match_at_end)`. `(da, db)` are the two peers' weights digests folded
-/// into their per-tick physics digest; `iterations` is the number of input-issue rounds.
-fn run_two_peer_armed(da: u64, db: u64, iterations: usize) -> (bool, bool) {
+/// APPLIED tick via [`Lockstep::advance_one`] (the windowed driver's contract). `(da, db)`
+/// are the two peers' weights digests folded into their per-tick physics digest; `iterations`
+/// is the number of input-issue rounds. `restart_tick`, if set, ORs [`buttons::RESTART`] into
+/// that ONE iteration's input on BOTH peers (an edge-clean press→release, since every other
+/// iteration is neutral) so the armed round restarts in lockstep — exercising the sim's
+/// restart edge with the crab digest folded in.
+fn run_two_peer_armed(
+    da: u64,
+    db: u64,
+    iterations: usize,
+    restart_tick: Option<usize>,
+) -> ArmedRun {
     let players = [PlayerId(0), PlayerId(1)];
     let mut a = Lockstep::new(GCR_SEED, &players, PlayerId(0));
     let mut b = Lockstep::new(GCR_SEED, &players, PlayerId(1));
@@ -273,10 +295,21 @@ fn run_two_peer_armed(da: u64, db: u64, iterations: usize) -> (bool, bool) {
 
     let is_desync = |f: &Fault| matches!(f, Fault::Desync { .. });
     let mut saw_desync = false;
-    for _ in 0..iterations {
-        // Each peer issues its own input for the next scheduled tick and exchanges it.
-        let ma = a.submit_local_input(Input::default());
-        let mb = b.submit_local_input(Input::default());
+    let mut saw_restart = false;
+    let mut matched_every_tick = true;
+    for i in 0..iterations {
+        // Each peer issues its own input for the next scheduled tick and exchanges it. On the
+        // designated iteration both peers press RESTART (identical bits, same scheduled tick),
+        // so the round restarts in lockstep; every other tick is neutral, making it a clean
+        // press→release edge.
+        let btns = if Some(i) == restart_tick {
+            buttons::RESTART
+        } else {
+            0
+        };
+        let input = Input::new(0.0, 0.0, 0.0, btns);
+        let ma = a.submit_local_input(input);
+        let mb = b.submit_local_input(input);
         saw_desync |= a
             .record_remote(PlayerId(1), mb)
             .as_ref()
@@ -308,11 +341,23 @@ fn run_two_peer_armed(da: u64, db: u64, iterations: usize) -> (bool, bool) {
             let (pose_b, dig_b) = bridge_pose_and_digest(&mut app_b, db);
             a.set_external_crab_pose(pose_a, 0, dig_a);
             b.set_external_crab_pose(pose_b, 0, dig_b);
+            let before = a.sim().tick();
             saw_desync |= a.advance_one().expect("ready").iter().any(is_desync);
             saw_desync |= b.advance_one().expect("ready").iter().any(is_desync);
+            // A RESTART rewinds the sim to tick 0 inside advance_one — record it so the test can
+            // prove the press wasn't a no-op.
+            saw_restart |= a.sim().tick() < before;
+            // Compare per tick, not just at the end: a transient divergence at the restart tick
+            // that re-converged would slip past an end-only check.
+            matched_every_tick &= a.sim().state_hash() == b.sim().state_hash();
         }
     }
-    (saw_desync, a.sim().state_hash() == b.sim().state_hash())
+    ArmedRun {
+        saw_desync,
+        matched_end: a.sim().state_hash() == b.sim().state_hash(),
+        matched_every_tick,
+        saw_restart,
+    }
 }
 
 #[test]
@@ -323,14 +368,40 @@ fn networked_nn_crab_synced_stays_bit_identical_every_tick() {
     // the headless proof that an ARMED networked NN crab is deterministic when weights are
     // synced (the cadence fold's core invariant), independent of the GPU windowed client.
     const BRAIN: u64 = 0x00C0_FFEE_1234_5678;
-    let (saw_desync, matched) = run_two_peer_armed(BRAIN, BRAIN, 200);
+    let run = run_two_peer_armed(BRAIN, BRAIN, 200, None);
     assert!(
-        !saw_desync,
+        !run.saw_desync,
         "synced weights + identical physics must never desync across the 2-peer round"
     );
     assert!(
-        matched,
+        run.matched_end,
         "synced peers must hold identical state hashes through the whole round"
+    );
+}
+
+#[test]
+fn networked_nn_crab_restart_stays_in_lockstep() {
+    // The armed-crab + RESTART regression (rl#101): mid-round, both peers press RESTART on the
+    // same scheduled tick with the crab digest folded into the lockstep hash. The sim must
+    // rewind to tick 0 on BOTH peers at the SAME applied tick and stay bit-identical through and
+    // after the restart. This guards the restart edge that `drive_lockstep` also hangs the crab
+    // bridge re-seed off (rl#101 part a): that re-seed is deterministic precisely because this
+    // edge is — it fires identically on both peers from the shared input stream, never a
+    // local-only signal. `saw_restart` makes the check non-vacuous: a press that silently no-op'd
+    // would pass the hash asserts while testing nothing.
+    const BRAIN: u64 = 0x00C0_FFEE_1234_5678;
+    let run = run_two_peer_armed(BRAIN, BRAIN, 120, Some(60));
+    assert!(
+        run.saw_restart,
+        "the RESTART press must actually rewind the sim (non-vacuous: a no-op would hide a bug)"
+    );
+    assert!(
+        !run.saw_desync,
+        "an armed-crab round that restarts in lockstep must never desync"
+    );
+    assert!(
+        run.matched_every_tick,
+        "peers must hold identical state hashes at EVERY tick through and after the restart"
     );
 }
 
@@ -343,13 +414,13 @@ fn networked_nn_crab_weights_mismatch_trips_desync() {
     // even if the upstream handshake were bypassed, the divergence is caught LOUDLY at the tick.
     const BRAIN_A: u64 = 0xAAAA_AAAA_AAAA_AAAA;
     const BRAIN_B: u64 = 0xBBBB_BBBB_BBBB_BBBB;
-    let (saw_desync, matched) = run_two_peer_armed(BRAIN_A, BRAIN_B, 60);
+    let run = run_two_peer_armed(BRAIN_A, BRAIN_B, 60, None);
     assert!(
-        saw_desync,
+        run.saw_desync,
         "mismatched weights digests must trip Fault::Desync at the divergent tick"
     );
     assert!(
-        !matched,
+        !run.matched_end,
         "mismatched-brain peers must NOT end on equal state hashes"
     );
 }
