@@ -59,6 +59,10 @@ pub struct NetDriver {
     /// [`Membership::weights_synced`]); read by the arm sites via
     /// [`crate::net::may_arm_external_crab`]. `false` without a supplied checkpoint.
     weights_synced: bool,
+    /// Whether the barrier agreed every peer resolved the same non-zero crab-model asset
+    /// (rl#100, GCR — [`Membership::assets_synced`]); ANDed with `weights_synced` at the arm
+    /// sites. `false` without a resolvable model.
+    assets_synced: bool,
 }
 
 impl NetDriver {
@@ -82,6 +86,14 @@ impl NetDriver {
     /// crab. Always `false` without a supplied checkpoint (the digest exchanged was `0`).
     pub fn weights_synced(&self) -> bool {
         self.weights_synced
+    }
+
+    /// Whether the formation barrier agreed every peer resolved the SAME non-zero crab-model
+    /// asset (rl#100, GCR — [`Membership::assets_synced`]). The arm sites AND this with
+    /// [`NetDriver::weights_synced`] via [`crate::net::may_arm_external_crab`]; a mismatch keeps
+    /// the integer crab. Always `false` without a resolvable model (asset digest exchanged `0`).
+    pub fn assets_synced(&self) -> bool {
+        self.assets_synced
     }
 
     /// Broadcast our tick message to every connected peer. Non-blocking from the
@@ -170,7 +182,19 @@ pub fn connect_and_form(
     expect: usize,
     collector: Option<iroh::EndpointId>,
 ) -> Result<MatchResult> {
-    connect_and_form_dialing(seed, discover_secs, expect, None, collector, None, 0)
+    // No Policy is loaded on the scripted/headless path (weights digest `0` ⇒ the NN crab never
+    // arms here), but advertise our REAL crab-asset digest (rl#100) so the value is honest if
+    // this peer ever forms with a rendered peer that does arm.
+    connect_and_form_dialing(
+        seed,
+        discover_secs,
+        expect,
+        None,
+        collector,
+        None,
+        0,
+        crate::bot::meshfit::crab_asset_digest(),
+    )
 }
 
 /// [`connect_and_form`] plus an optional direct dial of a host's endpoint id before the
@@ -191,9 +215,12 @@ pub fn connect_and_form(
 /// the slow barrier — so a Host UI can display the join code to share while waiting. A
 /// closed receiver is ignored (the caller stopped caring); it never gates formation.
 ///
-/// `local_weights_digest` is OUR policy-checkpoint digest (rl#82, GCR), `0` for none. It is
-/// advertised in the formation beats; the agreed [`NetDriver::weights_synced`] tells the
-/// caller whether every peer matched it (the shared-checkpoint guard).
+/// `local_weights_digest` is OUR policy-checkpoint digest (rl#82, GCR), `0` for none, and
+/// `local_asset_digest` OUR crab-model-asset digest (rl#100, GCR), `0` for none. Both are
+/// advertised in the formation beats; the agreed [`NetDriver::weights_synced`]/
+/// [`NetDriver::assets_synced`] tell the caller whether every peer matched them (the upstream
+/// shared-asset guard — the NN crab arms only when both hold).
+#[allow(clippy::too_many_arguments)] // each arg is a distinct formation knob.
 pub fn connect_and_form_dialing(
     seed: u64,
     discover_secs: u64,
@@ -202,6 +229,7 @@ pub fn connect_and_form_dialing(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     local_weights_digest: u64,
+    local_asset_digest: u64,
 ) -> Result<MatchResult> {
     // The scripted/headless path: no interactive lobby (`None`), so the default
     // (timer-closed) barrier.
@@ -214,6 +242,7 @@ pub fn connect_and_form_dialing(
         on_bound,
         None,
         local_weights_digest,
+        local_asset_digest,
     )
 }
 
@@ -224,6 +253,7 @@ pub fn connect_and_form_dialing(
 /// roster it freezes is identical either way (the membership core's guarantee), so determinism
 /// is untouched. No `discover_secs` — the lobby is open-ended until the host starts or someone
 /// cancels.
+#[allow(clippy::too_many_arguments)] // each arg is a distinct formation knob.
 pub fn connect_and_form_lobby(
     seed: u64,
     expect: usize,
@@ -232,6 +262,7 @@ pub fn connect_and_form_lobby(
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     control: LobbyControl,
     local_weights_digest: u64,
+    local_asset_digest: u64,
 ) -> Result<MatchResult> {
     connect_and_form_inner(
         seed,
@@ -242,6 +273,7 @@ pub fn connect_and_form_lobby(
         on_bound,
         Some(control),
         local_weights_digest,
+        local_asset_digest,
     )
 }
 
@@ -259,6 +291,7 @@ fn connect_and_form_inner(
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     lobby: Option<LobbyControl>,
     local_weights_digest: u64,
+    local_asset_digest: u64,
 ) -> Result<MatchResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -295,6 +328,7 @@ fn connect_and_form_inner(
             telemetry.as_ref(),
             lobby.as_ref(),
             local_weights_digest,
+            local_asset_digest,
         )
         .await?;
         anyhow::Ok((session, formation, telemetry))
@@ -331,6 +365,7 @@ fn connect_and_form_inner(
         id_map: frozen.id_map,
         telemetry,
         weights_synced: frozen.weights_synced,
+        assets_synced: frozen.assets_synced,
     };
     Ok(MatchResult::Joined(Box::new((ls, driver))))
 }
@@ -368,6 +403,9 @@ pub struct Frozen {
     /// Carried out of the barrier so [`NetDriver::weights_synced`] can expose it; see
     /// [`Membership::weights_synced`].
     pub weights_synced: bool,
+    /// Likewise the crab-asset verdict (rl#100), for [`NetDriver::assets_synced`]; see
+    /// [`Membership::assets_synced`].
+    pub assets_synced: bool,
 }
 
 /// What [`form_match`] resolves to: a real agreed match, the genuinely-alone case, or a
@@ -408,6 +446,7 @@ pub async fn form_match(
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
     local_weights_digest: u64,
+    local_asset_digest: u64,
 ) -> Result<Formation> {
     let my_eid = session.endpoint_id();
     println!(
@@ -422,6 +461,7 @@ pub async fn form_match(
         telemetry,
         lobby,
         local_weights_digest,
+        local_asset_digest,
     )
     .await
     {
@@ -470,20 +510,30 @@ pub async fn form_match(
             me: me.0,
         });
     }
-    // GCR shared-checkpoint guard (rl#82): make the verdict LOUD. With a checkpoint loaded
-    // (`local_weights_digest != 0`) the operator needs to know whether the NN crab will arm:
-    // a mismatch means it WON'T (stays integer), which would otherwise look like a silent
-    // regression. With no checkpoint we say nothing (the integer crab is the only option).
+    // GCR shared-asset guard (rl#82 weights + rl#100 crab asset): make the verdict LOUD. With a
+    // checkpoint loaded (`local_weights_digest != 0`) the operator needs to know whether the NN
+    // crab will arm — it needs BOTH synced weights AND a synced crab asset; a mismatch on either
+    // means it WON'T (stays integer), which would otherwise look like a silent regression. With
+    // no checkpoint we say nothing (the integer crab is the only option). The asset verdict is
+    // reported whenever weights are synced (so an asset-only mismatch — the rl#100 hole this
+    // closes — is diagnosable, never silent).
     if local_weights_digest != 0 {
-        if outcome.weights_synced {
-            println!(
-                "GCR: policy weights synced across all {} peer(s) — NN crab eligible for lockstep",
-                id_map.len()
-            );
-        } else {
+        if !outcome.weights_synced {
             tracing::warn!(
                 "GCR: weights NOT synced across peers (digest mismatch or a peer has no \
                  checkpoint) — refusing to arm the NN crab; using the deterministic integer crab"
+            );
+        } else if !outcome.assets_synced {
+            tracing::warn!(
+                "GCR: weights synced but crab MODEL ASSET NOT synced across peers (a peer has a \
+                 different sally.glb / no model — different colliders would desync) — refusing to \
+                 arm the NN crab; using the deterministic integer crab"
+            );
+        } else {
+            println!(
+                "GCR: policy weights AND crab asset synced across all {} peer(s) — NN crab \
+                 eligible for lockstep",
+                id_map.len()
             );
         }
     }
@@ -500,6 +550,7 @@ pub async fn form_match(
         early: outcome.early,
         pilots,
         weights_synced: outcome.weights_synced,
+        assets_synced: outcome.assets_synced,
     }))
 }
 
@@ -517,6 +568,8 @@ struct BarrierOutcome {
     elapsed: Duration,
     /// [`Membership::weights_synced`] sampled at the close instant (rl#82, GCR).
     weights_synced: bool,
+    /// [`Membership::assets_synced`] sampled at the close instant (rl#100, GCR).
+    assets_synced: bool,
 }
 
 /// The non-error outcomes of [`run_barrier`]: a real agreement, the alone fallback, or a
@@ -556,6 +609,7 @@ enum BarrierResult {
 /// Residual (a product call, not a bug): two co-launched peers that NEVER hear each other
 /// within their windows both solo independently — inherent to a unilateral solo decision
 /// with no "we agree nobody's here" exchange. `discover_secs` shrinks the window.
+#[allow(clippy::too_many_arguments)] // each arg is a distinct formation knob.
 async fn run_barrier(
     session: &mut Session,
     me: EndpointId,
@@ -564,16 +618,19 @@ async fn run_barrier(
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
     local_weights_digest: u64,
+    local_asset_digest: u64,
 ) -> Result<BarrierResult> {
     let start = Instant::now();
     // `Some(control)` is the interactive lobby (host-triggered close per its `role`); `None`
     // is the default timer barrier. The mode is this explicit choice, never inferred. Our
-    // weights digest (rl#82) rides every beat so peers can agree on a shared checkpoint.
+    // weights digest (rl#82) and crab-asset digest (rl#100) ride every beat so peers can agree
+    // on a shared checkpoint AND a shared collider asset before arming the float NN crab.
     let mut m = match lobby {
         Some(c) => Membership::host_triggered(c.role, me, expect, start),
         None => Membership::new(me, expect, start),
     }
     .with_weights_digest(local_weights_digest)
+    .with_asset_digest(local_asset_digest)
     // Our local `RL_VEHICLE=plane` intent rides every beat and is folded into the agreement
     // token, so peers freeze ONE shared pilot roster (a divergent view blocks the close).
     .piloting(local_wants_to_pilot());
@@ -657,6 +714,7 @@ async fn run_barrier(
                     early,
                     elapsed: now.duration_since(start),
                     weights_synced: m.weights_synced(),
+                    assets_synced: m.assets_synced(),
                 }));
             }
             Status::Failed => {
@@ -872,14 +930,14 @@ mod tests {
         // Run all three barriers concurrently. s2's dials are issued from inside its
         // future after a short delay, so it shows up mid-formation. `None` lobby — this
         // exercises the unchanged timer-closed barrier.
-        let f0 = form_match(&mut s0, 1, 3, None, None, 0);
-        let f1 = form_match(&mut s1, 1, 3, None, None, 0);
+        let f0 = form_match(&mut s0, 1, 3, None, None, 0, 0);
+        let f1 = form_match(&mut s1, 1, 3, None, None, 0, 0);
         let f2 = async {
             // Stagger: let s0/s1 form their partial view first, then s2 meshes in.
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             s2.connect_direct(a0.clone()).await.expect("s2->s0");
             s2.connect_direct(a1.clone()).await.expect("s2->s1");
-            form_match(&mut s2, 1, 3, None, None, 0).await
+            form_match(&mut s2, 1, 3, None, None, 0, 0).await
         };
         let (r0, r1, r2) = tokio::join!(f0, f1, f2);
         // Each peer must AGREE (not fall back to solo — they all see each other), so unwrap

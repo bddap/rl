@@ -347,9 +347,11 @@ fn run_play(args: PlayArgs) -> Result<()> {
             dial,
             args.telemetry,
             None,
-            // Headless `game net` driver: no NN-crab checkpoint, so a `0` digest — it never
-            // arms the float crab, always plays the deterministic integer crab.
+            // Scripted host/join: no NN-crab checkpoint here, so a `0` weights digest — it never
+            // arms the float crab, always plays the deterministic integer crab. Still advertise
+            // our REAL crab-asset digest (rl#100) so the value is honest to any peer that arms.
             0,
+            rl_core::bot::meshfit::crab_asset_digest(),
         )?;
         match result {
             net_loop::MatchResult::Joined(joined) => {
@@ -504,7 +506,8 @@ async fn run_net(args: NetArgs) -> Result<()> {
         args.expect,
         tel.as_ref(),
         None, // headless: timer-closed barrier, no interactive lobby
-        0,    // no NN-crab checkpoint headless → 0 digest, integer crab only (rl#82)
+        0,    // no NN-crab checkpoint headless → 0 weights digest, integer crab only (rl#82)
+        rl_core::bot::meshfit::crab_asset_digest(), // honest crab-asset digest (rl#100)
     )
     .await?
     {

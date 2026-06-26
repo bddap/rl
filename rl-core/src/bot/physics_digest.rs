@@ -20,6 +20,22 @@ pub const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
 
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+/// FNV-1a/64 over a raw byte slice, seeded from [`DIGEST_SEED`] — the build-stable hash the GCR
+/// guards use to compare BYTE blobs across peers (a checkpoint's weights, the crab-model asset).
+/// Unlike `std`'s randomized hashers, two same-binary peers hash identical bytes to an identical
+/// value, which is exactly what the shared-checkpoint/-asset guards require. (The same FNV-1a is
+/// still inlined at several older digest sites — `play::policy::fnv1a`, `membership::roster_hash`,
+/// sim's `Fnv`; folding those into this one is a tracked follow-up, deliberately not done in a
+/// determinism PR.)
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h = DIGEST_SEED;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
 /// Per-body field count: pos(3) + quat(4) + linvel(3) + angvel(3).
 pub const BODY_FIELDS: usize = 13;
 

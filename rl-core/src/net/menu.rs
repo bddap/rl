@@ -181,6 +181,7 @@ fn spawn_formation(
     hosting: bool,
     telemetry: Option<EndpointId>,
     weights_digest: u64,
+    asset_digest: u64,
 ) -> Formation {
     let (tx, rx) = mpsc::channel();
     // The worker reports our bound endpoint id (Host's join code) the instant the session
@@ -211,6 +212,7 @@ fn spawn_formation(
                 roster_tx,
             },
             weights_digest,
+            asset_digest,
         );
         // Ignore a send error: it only means the menu moved on (receiver dropped), in
         // which case nobody is waiting and the session tears down on this fn's return.
@@ -232,17 +234,23 @@ fn spawn_formation(
 /// Kick off the host-triggered formation for a [`StartChoice`] (Host or Join). The single
 /// place the menu turns a choice into a running lobby, so the Host vs Join parameterization
 /// (who dials whom, who holds the Start command) lives in one spot. `weights_digest` is our
-/// loaded NN-crab checkpoint's digest (rl#82, GCR), `0` for none — advertised in formation so
-/// peers can agree on a shared brain before arming the float crab.
+/// loaded NN-crab checkpoint's digest (rl#82, GCR) and `asset_digest` our crab-model digest
+/// (rl#100, GCR), `0` for none — both advertised in formation so peers can agree on a shared
+/// brain AND a shared collider asset before arming the float crab.
 pub fn begin(
     choice: &StartChoice,
     seed: u64,
     telemetry: Option<EndpointId>,
     weights_digest: u64,
+    asset_digest: u64,
 ) -> Formation {
     match choice {
-        StartChoice::Host => spawn_formation(seed, None, true, telemetry, weights_digest),
-        StartChoice::Join(host) => spawn_formation(seed, *host, false, telemetry, weights_digest),
+        StartChoice::Host => {
+            spawn_formation(seed, None, true, telemetry, weights_digest, asset_digest)
+        }
+        StartChoice::Join(host) => {
+            spawn_formation(seed, *host, false, telemetry, weights_digest, asset_digest)
+        }
     }
 }
 
@@ -496,13 +504,13 @@ mod tests {
     fn only_host_holds_the_start_command() {
         // A Host keeps its Start sender; calling request_start takes it (so a second call is
         // inert) — the once-only GO.
-        let host = begin(&StartChoice::Host, 0, None, 0);
+        let host = begin(&StartChoice::Host, 0, None, 0, 0);
         assert!(host.hosting, "Host formation is flagged hosting");
         host.request_start(); // consumes the sender
         // Cancel both so their barrier threads tear down promptly rather than lingering.
         host.cancel();
 
-        let join = begin(&StartChoice::Join(None), 0, None, 0);
+        let join = begin(&StartChoice::Join(None), 0, None, 0, 0);
         assert!(!join.hosting, "Join formation is not hosting");
         join.request_start(); // no-op: a joiner never had a Start sender
         join.cancel();
