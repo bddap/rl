@@ -52,7 +52,7 @@ pub mod menu;
 #[cfg(feature = "render")]
 pub mod render;
 #[cfg(feature = "render")]
-pub mod solo_crab;
+pub mod external_crab;
 
 /// The shared-checkpoint guard for handing the crab to the float NN body in LOCKSTEP (rl#82,
 /// GCR): a round may arm the external crab only when it can't desync peers on the weights.
@@ -337,7 +337,7 @@ mod desync_test {
     // External NN-crab arm gate (rl#63 + GCR rl#82)
     // -----------------------------------------------------------------------------
     //
-    // The external NN crab (`net::solo_crab`, render-only) drives a FLOAT rapier crab and writes
+    // The external NN crab (`net::external_crab`, render-only) drives a FLOAT rapier crab and writes
     // its pose into the integer `Sim` via `enable_external_crab(true)`/`set_external_crab_pose`.
     // A float crab desyncs peers UNLESS they share the same brain and step it identically, so it
     // may arm only when [`super::may_arm_external_crab`] allows: a SOLO round always, a NETWORKED
@@ -347,9 +347,9 @@ mod desync_test {
     // calls `sync_external_crab` only when the `ExternalCrabArmed` gate is set. These tests would
     // go red if a refactor let `crab_external` flip true on a networked-UNSYNCED round.
     //
-    // FAITHFULNESS / LIMITATION: `solo_crab`/`render` are `#[cfg(feature = "render")]` (they pull
+    // FAITHFULNESS / LIMITATION: `external_crab`/`render` are `#[cfg(feature = "render")]` (they pull
     // bevy's full GPU stack), so this suite — which builds with NO features, like the headless
-    // trainer — cannot reference `SoloCrabPlugin`/`ExternalCrabArmed`/`build_windowed_app`
+    // trainer — cannot reference `ExternalCrabPlugin`/`ExternalCrabArmed`/`build_windowed_app`
     // directly, nor stand up a real iroh transport. These re-encode the SAME `may_arm_external_crab`
     // predicate the production sites use and assert the networked-unsynced branch leaves the crab
     // integer-driven, and prove the only sim-level footprint of an inactive stack there is a

@@ -75,7 +75,7 @@ const WORLD_GAIN_DEFAULT: f32 = 1.0;
 /// Non-trivial state (a float world position + the last carapace sample) that must
 /// persist across ticks, so it can't live on the `Copy` integer `Sim`.
 #[derive(Resource)]
-pub struct SoloCrabBridge {
+pub struct ExternalCrabBridge {
     /// The crab's accumulated game-world ground position, in metres (float; converted to
     /// the sim's [`UNIT`] fixed-point when written back). Seeded from the sim's integer
     /// crab spawn so the NN crab starts where the round placed it.
@@ -95,7 +95,7 @@ pub struct SoloCrabBridge {
     /// control.
     settle: u32,
     /// Game-world point (metres) the crab is currently hunting — the nearest living
-    /// player, refreshed each tick by [`drive_solo_crab`]. `None` when every player is
+    /// player, refreshed each tick by [`drive_external_crab`]. `None` when every player is
     /// down (the crab then holds position). Read by [`set_crab_walk_target`] to aim the
     /// policy.
     hunt_target_m: Option<Vec2>,
@@ -115,7 +115,7 @@ pub struct SoloCrabBridge {
     phys_digest: u64,
 }
 
-impl SoloCrabBridge {
+impl ExternalCrabBridge {
     /// Seed the bridge at the sim's integer crab spawn (so the NN crab begins where the
     /// round placed the giant crab, MIN_CRAB_SPAWN_DISTANCE from the players). `lead_m` /
     /// `world_gain` are the per-tick walk-target lead and the world-speed gain, resolved
@@ -145,7 +145,7 @@ impl SoloCrabBridge {
             self.world_pos_m.is_finite()
                 && self.world_pos_m.x.abs() <= 100_000.0
                 && self.world_pos_m.y.abs() <= 100_000.0,
-            "solo crab world_pos_m out of live bounds: {:?}",
+            "external crab world_pos_m out of live bounds: {:?}",
             self.world_pos_m
         );
         Pos {
@@ -174,6 +174,18 @@ impl SoloCrabBridge {
         self.hunt_target_m =
             prey.map(|p| Vec2::new(p.x as f32 / UNIT as f32, p.z as f32 / UNIT as f32));
     }
+
+    /// Pin the feel knobs (walk-target lead, world-speed gain) to their canonical defaults,
+    /// dropping any `RL_CRAB_LEAD` / `RL_CRAB_WORLD_GAIN` env override. MUST be called when
+    /// arming on a NETWORKED round: those knobs are a per-PROCESS solo-tuning convenience, and
+    /// they both feed the HASHED crab pose (`world_gain` scales the per-tick displacement;
+    /// `lead_m` steers the policy's trajectory), so a peer that set them differently would walk
+    /// the crab to a different pose and desync. The weights handshake covers only the brain
+    /// bytes, not these — so networked play uses the canonical feel on every peer.
+    pub fn pin_default_knobs(&mut self) {
+        self.lead_m = TARGET_LEAD_M;
+        self.world_gain = WORLD_GAIN_DEFAULT;
+    }
 }
 
 /// The per-tick bridge↔sim handshake, run BEFORE each [`Lockstep::try_advance`]: push the
@@ -182,7 +194,7 @@ impl SoloCrabBridge {
 /// prey the integer pursuit picks). ONE definition so the windowed driver
 /// ([`crate::net::render`]'s `drive_lockstep`) and the headless probe can't drift on the
 /// contract (the manual's "one implementation per thing").
-pub fn sync_external_crab(ls: &mut crate::net::lockstep::Lockstep, bridge: &mut SoloCrabBridge) {
+pub fn sync_external_crab(ls: &mut crate::net::lockstep::Lockstep, bridge: &mut ExternalCrabBridge) {
     ls.set_external_crab_pose(bridge.world_pos(), bridge.yaw_turns(), bridge.phys_digest);
     bridge.set_hunt_target(ls.sim().nearest_living_player_pos());
 }
@@ -190,14 +202,14 @@ pub fn sync_external_crab(ls: &mut crate::net::lockstep::Lockstep, bridge: &mut 
 /// Recompute env 0's full rapier physics digest (every actuated body's pose+velocity bits,
 /// via the shared [`crate::bot::physics_digest`]) XORed with the loaded policy's weights
 /// digest, and store it on the bridge for [`sync_external_crab`] to push into the lockstep
-/// hash. Runs each step AFTER the physics writeback + [`integrate_solo_crab`], so it captures
+/// hash. Runs each step AFTER the physics writeback + [`integrate_crab`], so it captures
 /// this tick's settled state. Folding in the weights digest makes two peers running different
 /// brains desync on the first tick (the GCR shared-checkpoint guard), and folding in the full
 /// articulated state makes a float divergence a detected desync, not just a 2D-pose one.
 #[allow(clippy::type_complexity)]
 fn hash_crab_physics(
     policy: NonSend<Policy>,
-    mut bridge: ResMut<SoloCrabBridge>,
+    mut bridge: ResMut<ExternalCrabBridge>,
     bodies: Query<
         (
             &CrabEnvId,
@@ -232,20 +244,20 @@ fn hash_crab_physics(
 #[derive(Resource)]
 pub struct ExternalCrabArmed;
 
-/// Run condition: the external NN crab is armed. Gates every [`SoloCrabPlugin`] system so they
+/// Run condition: the external NN crab is armed. Gates every [`ExternalCrabPlugin`] system so they
 /// idle (zero cost beyond the check) until the round arms the crab.
 fn external_crab_armed(active: Option<Res<ExternalCrabArmed>>) -> bool {
     active.is_some()
 }
 
-/// Plugin: the solo NN crab. Adds the loaded policy + the bridge, and the systems that
-/// (a) spawn the crab once active, (b) aim + drive the policy, (c) integrate the body's walk
+/// Plugin: the external NN crab. Adds the loaded policy + the bridge, and the systems that
+/// (a) spawn the crab once armed, (b) aim + drive the policy, (c) integrate the body's walk
 /// into the game crab. The caller must ALSO have added the bot/physics stack
 /// (`RapierPhysicsPlugin` + `PhysicsWorldPlugin` + `BotPlugin`) to the same app — see
-/// [`crate::net::render`]'s solo branch — so the rig actually exists and steps. Every system
-/// is gated on [`ExternalCrabArmed`]: the scripted solo path flips it on at build; the boot
-/// menu flips it on only when the round resolves solo (rl#58).
-pub struct SoloCrabPlugin {
+/// [`crate::net::render`]'s `add_external_nn_crab` — so the rig actually exists and steps. Every
+/// system is gated on [`ExternalCrabArmed`]: the scripted `Boot::Round` path arms it at build;
+/// the boot menu arms it only once the round resolves armable (rl#58 + GCR).
+pub struct ExternalCrabPlugin {
     /// Directory the brain (`brain.bin`) + normalizer (`normalizer.bin`) load from.
     /// Configurable so deploy can point it at the chosen checkpoint.
     pub checkpoint_dir: std::path::PathBuf,
@@ -253,7 +265,7 @@ pub struct SoloCrabPlugin {
     pub crab_spawn: Pos,
 }
 
-impl Plugin for SoloCrabPlugin {
+impl Plugin for ExternalCrabPlugin {
     fn build(&self, app: &mut App) {
         let policy = Policy::load(&self.checkpoint_dir);
         // Fail loud when there's no usable checkpoint: the policy returns the zero-action rest
@@ -261,7 +273,7 @@ impl Plugin for SoloCrabPlugin {
         // WHY the demo crab isn't moving.
         if !policy.is_loaded() {
             warn!(
-                "solo_crab: no usable checkpoint at {} — NN crab holds rest pose",
+                "external_crab: no usable checkpoint at {} — NN crab holds rest pose",
                 self.checkpoint_dir.display()
             );
         }
@@ -276,7 +288,7 @@ impl Plugin for SoloCrabPlugin {
         };
         let lead_m = env_f32("RL_CRAB_LEAD", TARGET_LEAD_M);
         let world_gain = env_f32("RL_CRAB_WORLD_GAIN", WORLD_GAIN_DEFAULT);
-        app.insert_resource(SoloCrabBridge::new(self.crab_spawn, lead_m, world_gain));
+        app.insert_resource(ExternalCrabBridge::new(self.crab_spawn, lead_m, world_gain));
 
         // Spawn the crab the first frame the gate is active (rl#58). On the scripted solo
         // path the gate is true from build, so this spawns on frame 1 exactly as before; on
@@ -284,7 +296,7 @@ impl Plugin for SoloCrabPlugin {
         // own [`spawn_initial_crabs`] (one spawn path, no drift) after bumping NumEnvs to 1.
         app.add_systems(
             Update,
-            spawn_solo_crab_when_active
+            ensure_crab_env
                 .run_if(external_crab_armed)
                 .before(crate::bot::spawn_initial_crabs),
         );
@@ -305,7 +317,7 @@ impl Plugin for SoloCrabPlugin {
             FixedUpdate,
             (
                 set_crab_walk_target.before(BotSet::Sense),
-                run_solo_policy.in_set(BotSet::Think),
+                run_crab_policy.in_set(BotSet::Think),
             )
                 .run_if(external_crab_armed),
         );
@@ -314,26 +326,26 @@ impl Plugin for SoloCrabPlugin {
         // every bit of walk is captured, not just the frames the render samples.
         app.add_systems(
             FixedUpdate,
-            integrate_solo_crab
+            integrate_crab
                 .after(PhysicsSet::Writeback)
                 .run_if(external_crab_armed),
         );
         // Digest this step's settled rapier state (+ the policy weights) for the lockstep
-        // desync check. After the writeback AND `integrate_solo_crab` so it reads the final
+        // desync check. After the writeback AND `integrate_crab` so it reads the final
         // post-step pose, and before the driver pushes the bridge into the sim
         // (`sync_external_crab`) each tick. Gated on the active flag so it never runs on a
         // round without the NN crab.
         app.add_systems(
             FixedUpdate,
             hash_crab_physics
-                .after(integrate_solo_crab)
+                .after(integrate_crab)
                 .after(PhysicsSet::Writeback)
                 .run_if(external_crab_armed),
         );
 
         // Render-only: shift the rendered rig to the game-world crab position. MUST run in
         // FixedUpdate right after the physics writeback (where rapier sets each part's raw
-        // arena-frame Transform) and after `integrate_solo_crab` (which finalises the
+        // arena-frame Transform) and after `integrate_crab` (which finalises the
         // offset for this step) — exactly ONCE per writeback. It adds the offset to the
         // freshly-written raw pose, so it must NOT run in Update: Update can run many times
         // between fixed steps, and `+=`-ing the offset each of those frames would
@@ -343,7 +355,7 @@ impl Plugin for SoloCrabPlugin {
             app.add_systems(
                 FixedUpdate,
                 offset_rendered_crab
-                    .after(integrate_solo_crab)
+                    .after(integrate_crab)
                     // MUST run after the determinism hash: this render-only shift mutates the
                     // crab parts' `Transform` and is gated on `Visuals`, so hashing the
                     // POST-shift pose would make a windowed peer and a headless peer disagree
@@ -357,12 +369,12 @@ impl Plugin for SoloCrabPlugin {
     }
 }
 
-/// Bump `NumEnvs` to 1 the first time the solo crab activates, so the shared
-/// [`crate::bot::spawn_initial_crabs`] (run right after, gated on the same active flag)
-/// spawns exactly one crab. Kept to env 0 / a single crab — the solo round has one giant
-/// crab. A no-op once the crab exists (`NumEnvs` already 1); the spawn-once guard is
-/// [`crab_not_yet_spawned`].
-fn spawn_solo_crab_when_active(mut num_envs: ResMut<crate::bot::NumEnvs>) {
+/// Bump `NumEnvs` to 1 the first time the crab is armed, so the shared
+/// [`crate::bot::spawn_initial_crabs`] (run right after, gated on the same armed flag) spawns
+/// exactly one crab. This does NOT spawn — it sizes the env so the shared spawner does. Kept to
+/// env 0 / a single crab — a round has one giant crab. A no-op once the crab exists (`NumEnvs`
+/// already 1); the spawn-once guard is [`crab_not_yet_spawned`].
+fn ensure_crab_env(mut num_envs: ResMut<crate::bot::NumEnvs>) {
     if num_envs.0 == 0 {
         num_envs.0 = 1;
     }
@@ -383,7 +395,7 @@ fn crab_not_yet_spawned(crabs: Query<(), With<CrabCarapace>>) -> bool {
 /// and walks for it. With no living target (all players down) the target is dropped and
 /// the crab holds.
 fn set_crab_walk_target(
-    bridge: Res<SoloCrabBridge>,
+    bridge: Res<ExternalCrabBridge>,
     spawns: Res<CrabSpawns>,
     mut targets: ResMut<CrabTargets>,
     carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
@@ -429,9 +441,9 @@ fn set_crab_walk_target(
 /// deterministic mean action the demo's `policy_step` uses ([`Policy::act`]), so the
 /// solo crab and the demo share one inference path. The actuator (bot stack) turns the
 /// action into joint torques next in the chain.
-fn run_solo_policy(
+fn run_crab_policy(
     policy: NonSend<Policy>,
-    mut bridge: ResMut<SoloCrabBridge>,
+    mut bridge: ResMut<ExternalCrabBridge>,
     obs: Res<crate::bot::sensor::CrabObservation>,
     mut actions: ResMut<crate::bot::actuator::CrabActions>,
 ) {
@@ -454,8 +466,8 @@ fn run_solo_policy(
 /// position (the displacement since last step × the world gain) and the walk heading into
 /// the yaw, storing both on the bridge. The render-loop owner ([`crate::net::render`]) then
 /// pushes them into the sim each game tick via [`sync_external_crab`].
-fn integrate_solo_crab(
-    mut bridge: ResMut<SoloCrabBridge>,
+fn integrate_crab(
+    mut bridge: ResMut<ExternalCrabBridge>,
     mut rescued: MessageReader<crate::bot::CrabRescued>,
     carapace_q: Query<(&CrabEnvId, &Transform, &Velocity), With<CrabCarapace>>,
 ) {
@@ -510,7 +522,7 @@ fn integrate_solo_crab(
 /// its rapier bodies stay in the small arena. Pure cosmetics — it never touches rapier, so
 /// physics/determinism are untouched.
 ///
-/// Scheduled in FixedUpdate right after rapier's `Writeback` (and `integrate_solo_crab`),
+/// Scheduled in FixedUpdate right after rapier's `Writeback` (and `integrate_crab`),
 /// so it runs EXACTLY ONCE per writeback — each writeback first overwrites every part's
 /// `Transform` with the raw arena pose, then this adds the offset once. That is why the
 /// add is safe: it must NOT run in `Update`, which can run several times between fixed
@@ -518,7 +530,7 @@ fn integrate_solo_crab(
 /// fling the rig away by the full (≥12 m) offset. Crab parts are always under motor torque
 /// so they never sleep out of the writeback, keeping the one-add-per-step invariant.
 fn offset_rendered_crab(
-    bridge: Res<SoloCrabBridge>,
+    bridge: Res<ExternalCrabBridge>,
     mut parts_q: Query<(&CrabEnvId, &mut Transform), With<CrabBodyPart>>,
 ) {
     let Some(off) = bridge.render_offset_m() else {
@@ -571,14 +583,14 @@ struct ProbeDriver {
     log_every: u64,
 }
 
-/// Headless probe system (FixedUpdate, AFTER `integrate_solo_crab`): take the freshly
+/// Headless probe system (FixedUpdate, AFTER `integrate_crab`): take the freshly
 /// integrated NN-crab position from the bridge, feed it into the sim, advance one sim
 /// tick with the local player holding still, and log periodically. Mirrors what
 /// `render::drive_lockstep` does for the windowed app, minus input/telemetry/interp — a
 /// purpose-built verification driver, not a second production loop.
 fn probe_step(
     mut driver: NonSendMut<ProbeDriver>,
-    mut bridge: ResMut<SoloCrabBridge>,
+    mut bridge: ResMut<ExternalCrabBridge>,
     // Diagnostics live HERE (the probe), not on the production bridge: the shipping game
     // never needs the claw-reach signal or carapace height, so it shouldn't compute them.
     targets: Res<CrabTargets>,
@@ -647,7 +659,7 @@ fn probe_step(
 
 /// Run the NN crab headlessly for `ticks` sim steps and return the logged samples. Builds
 /// the SAME windowless bot+physics world the training/tests use ([`crate::bot::test_util::headless_stack`])
-/// plus [`SoloCrabPlugin`] and a hand-driven lockstep — so the crab steps the exact
+/// plus [`ExternalCrabPlugin`] and a hand-driven lockstep — so the crab steps the exact
 /// dynamics the policy trained under, with no GPU/display. `checkpoint_dir` is the trained
 /// policy; `seed` seeds the round (same seed twice ⇒ identical samples, the determinism
 /// check). The local player holds still so a shrinking `dist_to_prey_m` proves the crab
@@ -676,13 +688,13 @@ pub fn run_headless_probe(
         num_envs: 1,
         role: WorldRole::Standalone,
     });
-    app.add_plugins(SoloCrabPlugin {
+    app.add_plugins(ExternalCrabPlugin {
         checkpoint_dir: checkpoint_dir.to_path_buf(),
         crab_spawn,
     });
-    // The probe IS the solo case — activate the NN gate so the policy/integration systems
-    // run. The crab already spawned via `headless_stack`'s `num_envs: 1`, so the plugin's
-    // own gated spawn is a no-op (the not-yet-spawned guard sees it present).
+    // The probe always arms the crab — insert the gate so the policy/integration systems run.
+    // The crab already spawned via `headless_stack`'s `num_envs: 1`, so the plugin's own gated
+    // spawn is a no-op (the not-yet-spawned guard sees it present).
     app.insert_resource(ExternalCrabArmed);
     app.insert_non_send_resource(ProbeDriver {
         ls,
@@ -693,7 +705,7 @@ pub fn run_headless_probe(
     // state, so each sim tick reads the up-to-date crab position + digest.
     app.add_systems(
         FixedUpdate,
-        probe_step.after(integrate_solo_crab).after(hash_crab_physics),
+        probe_step.after(integrate_crab).after(hash_crab_physics),
     );
 
     // One physics tick + one sim tick per update.

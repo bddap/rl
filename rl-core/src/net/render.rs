@@ -206,13 +206,12 @@ pub enum AppPhase {
 /// `Plugin::build(&self)` can't move a non-`Clone` `Lockstep`/`NetDriver` out of
 /// itself — inserting them as resources at the `Playing` transition is the clean path.
 ///
-/// `solo_crab` points at a trained checkpoint dir; when set on a solo round the giant crab
-/// is the REAL rapier-simulated NN body ([`crate::net::solo_crab`]) instead of the integer
-/// point-pursuer. On the NETWORKED path the crab is still the integer pursuer (arming the
-/// float NN crab in lockstep is the cadence-fold follow-up — see the caveat on
-/// [`crate::net::sim::Sim::state_hash`]), but the checkpoint's weights digest IS now
-/// advertised in formation (rl#82, GCR) so peers can agree on a shared brain ahead of that.
-pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> App {
+/// `external_crab` points at a trained checkpoint dir; when the round arms the crab the giant
+/// crab is the REAL rapier-simulated NN body ([`crate::net::external_crab`]) instead of the
+/// integer point-pursuer — on a SOLO round always, and on a NETWORKED round once peers agree on
+/// a shared brain (the weights-digest handshake) and step it at the deterministic cadence (the
+/// GCR fold, rl#82). A networked-UNSYNCED round keeps the integer pursuer.
+pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>) -> App {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
@@ -275,7 +274,7 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
     // [`crate::play::checkpoint_digest`] (here from the path; on the bridge via
     // `Policy::weights_digest()`), so the cadence-fold follow-up that arms the crab must source
     // its folded digest from the SAME checkpoint, or a hot-reload could split the two.
-    let weights_digest = solo_crab
+    let weights_digest = external_crab
         .as_deref()
         .map(crate::play::checkpoint_digest)
         .unwrap_or(0);
@@ -288,12 +287,13 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
         // found no peer is a solo round here, so it gets the real NN crab.
         Boot::Round(round) => {
             let (mut ls, net) = *round;
+            let networked = net.is_some();
             // External NN crab: arm iff the shared GCR gate allows it — a SOLO round always,
             // a NETWORKED round only with synced weights ([`crate::net::may_arm_external_crab`],
             // the determinism guard; the `Some(dir)` arm already proves a checkpoint is present).
             // Capture the integer crab's spawn + hand the crab to external control BEFORE `ls`
             // moves into core.
-            let nn = match solo_crab {
+            let nn = match external_crab {
                 Some(dir)
                     if crate::net::may_arm_external_crab(
                         net.is_none(),
@@ -319,8 +319,15 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
             if let Some((dir, spawn)) = nn {
                 // Known-armed at build: add the stack AND arm the gate now, so the crab spawns
                 // frame one.
-                add_solo_nn_crab(&mut app, dir, spawn);
-                app.insert_resource(crate::net::solo_crab::ExternalCrabArmed);
+                add_external_nn_crab(&mut app, dir, spawn);
+                app.insert_resource(crate::net::external_crab::ExternalCrabArmed);
+                // Networked: pin the feel knobs to defaults so a per-peer env override can't
+                // walk the crab to a different (hashed) pose and desync — solo keeps its tuning.
+                if networked {
+                    app.world_mut()
+                        .resource_mut::<crate::net::external_crab::ExternalCrabBridge>()
+                        .pin_default_knobs();
+                }
             }
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
@@ -343,16 +350,16 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
             // without the round existing yet. A missing/empty checkpoint keeps the integer crab
             // (the stack isn't added at all); a networked-UNSYNCED round leaves the gate off, so
             // it stays byte-identical to the integer-crab multiplayer round.
-            if let Some(dir) = solo_crab {
+            if let Some(dir) = external_crab {
                 let crab_spawn = crate::net::net_loop::solo_lockstep_for(seed)
                     .sim()
                     .crab()
                     .pos();
-                add_solo_nn_crab(&mut app, dir, crab_spawn);
+                add_external_nn_crab(&mut app, dir, crab_spawn);
                 // Gate OFF: leave `ExternalCrabArmed` ABSENT (presence is the state). The
                 // transition (`ensure_round_installed`) inserts it iff the round resolves solo.
                 app.insert_resource(crate::bot::NumEnvs(0)); // no crab spawns behind the menu
-                app.insert_resource(SoloCrabStackInstalled(true)); // the transition may activate it
+                app.insert_resource(ExternalCrabStackInstalled(true)); // the transition may activate it
             }
         }
     }
@@ -364,15 +371,15 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
 /// whether to ACTIVATE the NN crab (only when the round resolved solo). Absent/false ⇒ the
 /// integer crab (no checkpoint, or the networked path).
 #[derive(Resource, Default, Clone, Copy)]
-struct SoloCrabStackInstalled(bool);
+struct ExternalCrabStackInstalled(bool);
 
 /// Wire the real rapier-NN crab into the windowed solo app: the bot/physics/brain stack
 /// (the SAME plugins `rl --demo` runs, so the crab steps the exact dynamics the policy
-/// trained under) plus the [`solo_crab::SoloCrabPlugin`] bridge that walks it toward the
+/// trained under) plus the [`external_crab::ExternalCrabPlugin`] bridge that walks it toward the
 /// player and feeds its body position back into the sim. With no `sally.glb` the crab is
 /// the rl#5 procedural fallback rig under a Rapier debug wireframe; with the model
 /// present the cosmetic skin rides the same body.
-fn add_solo_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_spawn: Pos) {
+fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_spawn: Pos) {
     use bevy_rapier3d::prelude::*;
 
     app.insert_resource(crate::Visuals(true))
@@ -386,7 +393,7 @@ fn add_solo_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_spaw
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
         .add_plugins(crate::physics::PhysicsWorldPlugin)
         .add_plugins(crate::bot::BotPlugin)
-        .add_plugins(crate::net::solo_crab::SoloCrabPlugin {
+        .add_plugins(crate::net::external_crab::ExternalCrabPlugin {
             checkpoint_dir,
             crab_spawn,
         });
@@ -525,9 +532,9 @@ struct PendingRound(Option<crate::net::menu::ReadyMatch>);
 ///   [`install_round`] it now, so the sim is live for the spawns.
 ///
 /// On the menu path this is ALSO where the external NN crab is ARMED (rl#58 + GCR): if the NN
-/// stack was installed at build ([`SoloCrabStackInstalled`]) AND the resolved round may arm it
+/// stack was installed at build ([`ExternalCrabStackInstalled`]) AND the resolved round may arm it
 /// ([`crate::net::may_arm_external_crab`]: solo always, networked only with synced weights),
-/// insert [`crate::net::solo_crab::ExternalCrabArmed`] and hand the sim crab to external control
+/// insert [`crate::net::external_crab::ExternalCrabArmed`] and hand the sim crab to external control
 /// so the rapier-NN body drives it. A networked-UNSYNCED round (or no checkpoint) leaves the
 /// gate off → the integer crab, byte-identical to today's multiplayer. The crab's arena spawn
 /// was already seeded into the bridge at build (a pure function of the seed), so nothing about
@@ -551,8 +558,9 @@ fn ensure_round_installed(world: &mut World) {
     // AND the resolved round may arm it (the shared GCR gate: solo always, networked only with
     // synced weights — a float crab on an unsynced networked round would desync peers).
     let has_nn_stack = world
-        .get_resource::<SoloCrabStackInstalled>()
+        .get_resource::<ExternalCrabStackInstalled>()
         .is_some_and(|m| m.0);
+    let networked = ready.net.is_some();
     let weights_synced = ready.net.as_ref().is_some_and(NetDriver::weights_synced);
     if has_nn_stack && crate::net::may_arm_external_crab(ready.net.is_none(), weights_synced) {
         let crab = ready.lockstep.sim().crab();
@@ -561,7 +569,14 @@ fn ensure_round_installed(world: &mut World) {
         ready
             .lockstep
             .initialize_external_crab(crab.pos(), crab.yaw(), 0);
-        world.insert_resource(crate::net::solo_crab::ExternalCrabArmed);
+        world.insert_resource(crate::net::external_crab::ExternalCrabArmed);
+        // Networked: pin the feel knobs to defaults so a per-peer env override can't walk the
+        // crab to a different (hashed) pose and desync — solo keeps its tuning.
+        if networked {
+            world
+                .resource_mut::<crate::net::external_crab::ExternalCrabBridge>()
+                .pin_default_knobs();
+        }
     }
     let source = match ready.net {
         Some(n) => InputSource::Networked(Box::new(n)),
@@ -722,7 +737,7 @@ fn report_faults(
 
 /// Advance the crab's rapier physics + brain by exactly `steps` fixed steps, NOW, from the
 /// lockstep driver — the deterministic replacement for Bevy's wall-clock `FixedUpdate`
-/// auto-pump (disabled in [`add_solo_nn_crab`] by parking `Time<Fixed>` at a huge timestep).
+/// auto-pump (disabled in [`add_external_nn_crab`] by parking `Time<Fixed>` at a huge timestep).
 /// Each `run_schedule(FixedMain)` is one [`crate::physics::PHYSICS_DT`] step (rapier's own
 /// fixed `dt`, independent of any clock), so N calls advance the body exactly `N · PHYSICS_DT`.
 /// We mirror Bevy's own `run_fixed_main_schedule`: swap the generic `Time` to `Time<Fixed>`
@@ -755,7 +770,7 @@ fn pump_fixed_steps(world: &mut World, steps: u32) {
 /// networked round with synced weights, [`crate::net::may_arm_external_crab`]), the rapier
 /// crab body is stepped INSIDE the lockstep tick: per APPLIED tick we run the deterministic
 /// [`PhysicsCadence`] number of physics steps ([`pump_fixed_steps`]) and push the body's
-/// resulting pose + weights-folded digest via [`solo_crab::sync_external_crab`] BEFORE
+/// resulting pose + weights-folded digest via [`external_crab::sync_external_crab`] BEFORE
 /// applying that tick. We advance one tick at a time ([`Lockstep::advance_one`]) so each
 /// applied tick gets its own physics batch + pose — a batched `try_advance` (which can apply
 /// several ticks at once on catch-up) would smear one pose across them and desync peers. This
@@ -785,7 +800,7 @@ fn drive_lockstep(
     // weights). Read once — the gate is fixed for the round. When off, the integer pursuit
     // drives the crab and no physics is pumped, byte-identical to the pre-GCR path.
     let armed = world
-        .get_resource::<crate::net::solo_crab::ExternalCrabArmed>()
+        .get_resource::<crate::net::external_crab::ExternalCrabArmed>()
         .is_some();
 
     let delta = world.resource::<Time>().delta().as_secs_f64();
@@ -889,6 +904,12 @@ fn drive_lockstep(
         // grab/extraction/outcome resolve against the real NN crab and every peer folds the
         // identical `phys_digest`. When not armed, the integer pursuit drives the crab and the
         // tick is byte-identical to the pre-GCR path.
+        //
+        // This inner drain is UNBOUNDED on purpose: it applies every tick whose inputs are
+        // ready (a catch-up after a stall must apply them all, in order, to stay in lockstep —
+        // and each applied tick advances the cadence, so peers stay phase-aligned regardless of
+        // how the catch-up batches). `MAX_TICKS_PER_FRAME` bounds only input ISSUANCE (the outer
+        // loop), which is what prevents a real-time spiral.
         loop {
             {
                 let state = world.non_send_resource::<GameState>();
@@ -908,15 +929,25 @@ fn drive_lockstep(
                 // `resource_scope` lifts the bridge out so we can hold it AND `GameState`'s
                 // `ls` mutably at once (both live in the same `World`).
                 world.resource_scope(
-                    |world, mut bridge: Mut<crate::net::solo_crab::SoloCrabBridge>| {
+                    |world, mut bridge: Mut<crate::net::external_crab::ExternalCrabBridge>| {
                         let mut state = world.non_send_resource_mut::<GameState>();
-                        crate::net::solo_crab::sync_external_crab(&mut state.ls, &mut bridge);
+                        crate::net::external_crab::sync_external_crab(&mut state.ls, &mut bridge);
                     },
                 );
             }
             let tick_faults = {
                 let mut state = world.non_send_resource_mut::<GameState>();
-                state.ls.advance_one().expect("next_tick_ready was true")
+                let before = state.ls.sim().tick();
+                let faults = state.ls.advance_one().expect("next_tick_ready was true");
+                // A RESTART rewinds the sim to tick 0 INSIDE this step. Reset the cadence AT that
+                // edge — not at end-of-frame — so the new round's first ticks step in phase on
+                // every peer regardless of how each peer's frames batched the drain (an
+                // end-of-frame reset would let one peer step a few post-restart ticks on the stale
+                // phase before resetting, desyncing them).
+                if state.ls.sim().tick() < before {
+                    *cadence = PhysicsCadence::default();
+                }
+                faults
             };
             report_faults(&tick_faults, &mut total_desyncs, &tel);
         }
@@ -941,9 +972,11 @@ fn drive_lockstep(
     }
 
     // Restart detector: a RESTART press rewinds the sim to tick 0, so a tick lower than last
-    // frame's means the round restarted. Clear the round-decided latch, snap the telemetry
-    // cursor back to the new (low) tick, and reset the cadence so the crab's per-tick step
-    // sequence restarts in phase across peers.
+    // frame's means the round restarted. Clear the round-decided latch and snap the telemetry
+    // cursor back to the new (low) tick. (The cadence reset is NOT here — it must happen at the
+    // exact rewind edge inside the drain above, or post-restart ticks applied in the same frame
+    // would step on the stale phase; these two resets are reporting-only, so frame-relative is
+    // fine.)
     let (now_tick, outcome) = {
         let state = world.non_send_resource::<GameState>();
         (state.ls.sim().tick(), state.ls.sim().outcome())
@@ -951,7 +984,6 @@ fn drive_lockstep(
     if now_tick < *last_tick {
         *reported_outcome = false;
         *next_tel_tick = (now_tick / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
-        *cadence = PhysicsCadence::default();
     }
     *last_tick = now_tick;
 
@@ -1158,7 +1190,7 @@ fn spawn_world(
     // spawned hidden (the real rig is the crab). Keyed on the active gate, NOT the bridge's
     // presence — on the menu path the bridge exists even for a networked round, which must
     // keep the visible integer crab box. See the crab spawn below.
-    external_crab_armed: Option<Res<crate::net::solo_crab::ExternalCrabArmed>>,
+    external_crab_armed: Option<Res<crate::net::external_crab::ExternalCrabArmed>>,
 ) {
     // Ground: a large gray plane at Y=0.
     commands.spawn((
@@ -1285,11 +1317,11 @@ fn spawn_world(
     }
 
     // The giant crab: a big menacing box, CRAB_SCALE× a player, with a "head" wedge
-    // so its facing is legible. Gray-box placeholder for the MULTIPLAYER (integer)
-    // crab. On the SOLO NN path the real rapier rig (wireframe / skin) is the crab, so
-    // the box is spawned HIDDEN there — the active gate is the tell — and the rig shows
-    // instead. (We still spawn it so `apply_transforms`'s crab query is satisfied either
-    // way; it just stays invisible.)
+    // so its facing is legible. Gray-box placeholder for the integer-pursuit crab. When the
+    // external NN crab is armed (solo, or networked-synced) the real rapier rig (wireframe /
+    // skin) is the crab, so the box is spawned HIDDEN there — the armed gate is the tell — and
+    // the rig shows instead. (We still spawn it so `apply_transforms`'s crab query is satisfied
+    // either way; it just stays invisible.)
     let crab_hidden = external_crab_armed.is_some();
     let crab_h = PLAYER_HEIGHT * CRAB_SCALE as f32;
     let crab_w = PLAYER_RADIUS * 2.0 * CRAB_SCALE as f32;
@@ -2401,7 +2433,7 @@ mod tests {
         // so both worlds start from the identical post-spawn state.
         auto.update();
         manual.update();
-        // Park the manual world's wall-clock auto-pump, exactly as `add_solo_nn_crab` does, so
+        // Park the manual world's wall-clock auto-pump, exactly as `add_external_nn_crab` does, so
         // from here ONLY `pump_fixed_steps` advances its physics.
         manual
             .world_mut()
@@ -2415,7 +2447,7 @@ mod tests {
                 Option<&CrabJoint>,
                 Option<&CrabCarapace>,
             ), With<CrabBodyPart>>();
-            crab_state_digest(q.iter(app.world()).map(|(t, v, j, c)| (t, v, j, c)))
+            crab_state_digest(q.iter(app.world()))
         };
         let set_torque = |app: &mut App, a: [f32; ACTION_SIZE]| {
             app.world_mut().resource_mut::<CrabActions>().envs[0] = a;
