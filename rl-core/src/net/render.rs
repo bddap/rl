@@ -388,17 +388,15 @@ struct ExternalCrabStackInstalled(bool);
 /// the rl#5 procedural fallback rig under a Rapier debug wireframe; with the model
 /// present the cosmetic skin rides the same body.
 fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_spawn: Pos) {
-    use bevy_rapier3d::prelude::*;
+    use bevy_rapier3d::prelude::{DebugRenderMode, RapierDebugRenderPlugin};
 
     app.insert_resource(crate::Visuals(true))
         .insert_resource(crate::bot::NumEnvs(1))
-        // Same fixed timestep + softened contact spring as training/demo (one source),
-        // so the solo crab's physics can't drift from what the policy optimised under.
-        .insert_resource(crate::physics::fixed_timestep())
-        .insert_resource(crate::physics::rapier_context_init())
-        // Physics in FixedUpdate, lockstep with the Sense→Think→Act brain loop — the same
-        // coupling the rollout worlds + the demo use.
-        .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
+        // Same fixed timestep + softened contact spring as training/demo, with Rapier in
+        // FixedUpdate (lockstep with the Sense→Think→Act brain loop) — bundled in the one
+        // order that applies the spring, so the solo crab's physics can't drift from what
+        // the policy optimised under (see physics::CrabPhysicsPlugin).
+        .add_plugins(crate::physics::CrabPhysicsPlugin)
         .add_plugins(crate::physics::PhysicsWorldPlugin)
         .add_plugins(crate::bot::BotPlugin)
         .add_plugins(crate::net::external_crab::ExternalCrabPlugin {

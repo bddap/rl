@@ -29,9 +29,10 @@ pub const PHYSICS_DT: f32 = 1.0 / PHYSICS_HZ as f32;
 /// 2 sub-steps was the *contact* spring, not sub-step count — see [`CONTACT_SOFTNESS`].
 pub const PHYSICS_SUBSTEPS: usize = 2;
 
-/// The fixed physics timestep. Use everywhere (main + headless tests) so the
-/// simulation is identical and reproducible across all three.
-pub fn fixed_timestep() -> TimestepMode {
+/// The fixed physics timestep. Private: [`CrabPhysicsPlugin`] is the one entry
+/// point that installs it, so no caller can pick a different timestep and run
+/// physics the policy never trained under.
+fn fixed_timestep() -> TimestepMode {
     TimestepMode::Fixed {
         dt: PHYSICS_DT,
         substeps: PHYSICS_SUBSTEPS,
@@ -74,15 +75,112 @@ pub const CONTACT_SOFTNESS: SpringCoefficients<f32> = SpringCoefficients {
 
 /// How Rapier seeds its default physics context — same as the built-in default
 /// but with [`CONTACT_SOFTNESS`] baked into the integration parameters from
-/// creation. Insert this BEFORE `RapierPhysicsPlugin` (main + training + tests)
-/// so all three share one contact spring and can't drift; the plugin spawns the
-/// context from it at `PreStartup`.
-pub fn rapier_context_init() -> RapierContextInitialization {
+/// creation. Not called directly by app builders: [`CrabPhysicsPlugin`] inserts
+/// it (in the one order that works) so all worlds share one contact spring and
+/// can't drift; `RapierPhysicsPlugin` spawns the context from it at `PreStartup`.
+fn rapier_context_init() -> RapierContextInitialization {
     RapierContextInitialization::InitializeDefaultRapierContext {
         integration_parameters: IntegrationParameters {
             contact_softness: CONTACT_SOFTNESS,
             ..IntegrationParameters::default()
         },
         rapier_configuration: RapierConfiguration::new(1.0),
+    }
+}
+
+/// The crab's complete Rapier setup, bundled so the init ordering is impossible to
+/// get wrong. The contact-spring-seeded context init ([`rapier_context_init`]) MUST
+/// already be present when `RapierPhysicsPlugin::build` runs — the plugin only keeps
+/// a pre-existing [`RapierContextInitialization`], otherwise it inserts its own
+/// default and the softened contact spring silently never applies (wrong physics, no
+/// compile error, no panic). Registering both here, in order, replaces that
+/// comment-enforced invariant with a structural one: every world (demo, headless
+/// training/tests, solo netcode render) does a single `add_plugins(CrabPhysicsPlugin)`
+/// and cannot insert the two out of order. The shared [`fixed_timestep`] rides along
+/// for the same one-source reason.
+///
+/// One residual trap Bevy can't make unrepresentable: resources are last-write-wins,
+/// so a caller who ALSO inserts their own [`RapierContextInitialization`] (or adds a
+/// bare `RapierPhysicsPlugin`) after this plugin silently clobbers the spring. So this
+/// plugin also installs [`assert_contact_spring_applied`] at `PostStartup` — a
+/// fail-loud runtime guard, in EVERY world (demo/render/train), that the spawned
+/// context really carries [`CONTACT_SOFTNESS`]. The `contact_spring_is_applied` test
+/// proves the guard catches a dropped spring on the headless path.
+pub struct CrabPhysicsPlugin;
+
+impl bevy::app::Plugin for CrabPhysicsPlugin {
+    fn build(&self, app: &mut bevy::app::App) {
+        use bevy::app::PostStartup;
+        use bevy_rapier3d::plugin::{NoUserData, RapierPhysicsPlugin};
+        app.insert_resource(fixed_timestep())
+            .insert_resource(rapier_context_init())
+            .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
+            .add_systems(PostStartup, assert_contact_spring_applied);
+    }
+}
+
+/// Fail loud, in every world, if the spawned Rapier context doesn't carry the
+/// crab's softened contact spring — the runtime backstop for the last-write-wins
+/// resource trap [`CrabPhysicsPlugin`] can't close at compile time. Runs once at
+/// `PostStartup` (after `RapierPhysicsPlugin` spawns the context at `PreStartup`):
+/// read-only, so it can't perturb the physics it guards. A panic here means the
+/// init was overridden after the plugin — wrong physics that would otherwise pass
+/// silently into the GCR lockstep.
+fn assert_contact_spring_applied(
+    ctx: bevy::ecs::system::Query<
+        &bevy_rapier3d::plugin::context::RapierContextSimulation,
+        bevy::ecs::query::With<bevy_rapier3d::plugin::context::DefaultRapierContext>,
+    >,
+) {
+    let spring = ctx
+        .single()
+        .expect("CrabPhysicsPlugin: exactly one default Rapier context")
+        .integration_parameters
+        .contact_softness;
+    assert_eq!(
+        (spring.natural_frequency, spring.damping_ratio),
+        (
+            CONTACT_SOFTNESS.natural_frequency,
+            CONTACT_SOFTNESS.damping_ratio
+        ),
+        "CrabPhysicsPlugin: the spawned Rapier context lost CONTACT_SOFTNESS — its \
+         RapierContextInitialization was overridden after the plugin (last-write-wins). \
+         The contact spring is silently wrong; fix the init ordering at the call site."
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bot::test_util::headless_app;
+    use bevy::prelude::With;
+    use bevy_rapier3d::prelude::{DefaultRapierContext, RapierContextSimulation};
+
+    /// The runtime guard the init-ordering comment used to be: after the real
+    /// production stack builds and runs `PreStartup`, the spawned Rapier context must
+    /// carry our softened [`CONTACT_SOFTNESS`], not Rapier's stiff default. If a
+    /// future plugin reorder broke the ordering [`CrabPhysicsPlugin`] enforces, the
+    /// plugin would seed its own default context and this assert fails loudly —
+    /// instead of the contact spring silently dropping and the physics drifting under
+    /// the GCR lockstep that proved bit-identical on hardware.
+    #[test]
+    fn contact_spring_is_applied() {
+        let mut app = headless_app();
+        // First update runs PreStartup, where RapierPhysicsPlugin spawns the context
+        // from the init resource CrabPhysicsPlugin inserted ahead of it.
+        app.update();
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&RapierContextSimulation, With<DefaultRapierContext>>();
+        let ctx = q.single(app.world()).expect("one default rapier context");
+        let spring = ctx.integration_parameters.contact_softness;
+        assert_eq!(
+            spring.natural_frequency, CONTACT_SOFTNESS.natural_frequency,
+            "contact spring natural_frequency lost — init ordering broke"
+        );
+        assert_eq!(
+            spring.damping_ratio, CONTACT_SOFTNESS.damping_ratio,
+            "contact spring damping_ratio lost — init ordering broke"
+        );
     }
 }
