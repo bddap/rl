@@ -320,7 +320,10 @@ fn connect_and_form_inner(
         all_ids.len(),
         frozen.me
     );
-    let mut ls = Lockstep::new(seed, &all_ids, frozen.me);
+    // Build with the agreed pilot set so every peer spawns the byte-identical foot/plane mix
+    // (empty ⇒ the unchanged foot-only round). The pilots were negotiated over the wire and
+    // are identical on every peer (the agreement-token guarantee).
+    let mut ls = Lockstep::new_with_pilots(seed, &all_ids, frozen.me, &frozen.pilots);
     replay_early(&mut ls, &frozen);
     let driver = NetDriver {
         rt,
@@ -357,6 +360,11 @@ pub struct Frozen {
     pub id_map: BTreeMap<EndpointId, PlayerId>,
     pub me: PlayerId,
     pub early: Vec<(EndpointId, TickMsg)>,
+    /// The agreed pilots as [`PlayerId`]s (⊆ the roster), mapped from the agreed pilot
+    /// endpoints through the SAME `id_map`. Every peer freezes the identical set, so handing
+    /// this to [`Lockstep::new_with_pilots`] spawns the byte-identical mix of foot + plane
+    /// bodies on all peers. Empty ⇒ the unchanged foot-only round.
+    pub pilots: Vec<PlayerId>,
     /// Carried out of the barrier so [`NetDriver::weights_synced`] can expose it; see
     /// [`Membership::weights_synced`].
     pub weights_synced: bool,
@@ -444,6 +452,12 @@ pub async fn form_match(
     };
     let id_map = assign_player_ids(my_eid, &outcome.roster)?;
     let me = id_map[&my_eid];
+    // Translate the agreed pilot ENDPOINTS to PlayerIds through the SAME map, so every peer
+    // derives the identical pilot PlayerId set (the agreed pilots are ⊆ the roster, so each is
+    // present in `id_map`). Sorted for a stable order (the sim keys pilots in a BTreeMap, so
+    // order doesn't affect determinism — this is just tidy).
+    let mut pilots: Vec<PlayerId> = outcome.pilots.iter().map(|e| id_map[e]).collect();
+    pilots.sort();
     println!(
         "match formed: {} participant(s), barrier agreed in {:.1}s",
         id_map.len(),
@@ -473,10 +487,18 @@ pub async fn form_match(
             );
         }
     }
+    if !pilots.is_empty() {
+        println!(
+            "GCR: {} of {} player(s) piloting a plane this match",
+            pilots.len(),
+            id_map.len()
+        );
+    }
     Ok(Formation::Agreed(Frozen {
         id_map,
         me,
         early: outcome.early,
+        pilots,
         weights_synced: outcome.weights_synced,
     }))
 }
@@ -487,6 +509,10 @@ pub async fn form_match(
 /// took.
 struct BarrierOutcome {
     roster: Vec<EndpointId>,
+    /// The agreed pilots (⊆ `roster`, sorted by id bytes): the endpoints that spawn flying.
+    /// Identical on every peer — folded into the agreement token, so a divergent pilot view
+    /// can't close. Mapped to [`PlayerId`]s in [`form_match`].
+    pilots: Vec<EndpointId>,
     early: Vec<(EndpointId, TickMsg)>,
     elapsed: Duration,
     /// [`Membership::weights_synced`] sampled at the close instant (rl#82, GCR).
@@ -547,7 +573,10 @@ async fn run_barrier(
         Some(c) => Membership::host_triggered(c.role, me, expect, start),
         None => Membership::new(me, expect, start),
     }
-    .with_weights_digest(local_weights_digest);
+    .with_weights_digest(local_weights_digest)
+    // Our local `RL_VEHICLE=plane` intent rides every beat and is folded into the agreement
+    // token, so peers freeze ONE shared pilot roster (a divergent view blocks the close).
+    .piloting(local_wants_to_pilot());
     let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
     let mut ticker = tokio::time::interval(BEAT_EVERY);
     let mut last_live = 0usize;
@@ -618,11 +647,13 @@ async fn run_barrier(
         }
 
         match status {
-            Status::Agreed { roster } => {
+            Status::Agreed { roster, pilots } => {
                 // Sample the weights verdict at the close instant — `poll` (above) just expired
-                // the dead, so the live set this reflects is exactly the frozen `roster`.
+                // the dead, so the live set this reflects is exactly the frozen `roster`. The
+                // pilots come straight from the agreed status (⊆ roster, identical per peer).
                 return Ok(BarrierResult::Agreed(BarrierOutcome {
                     roster,
+                    pilots,
                     early,
                     elapsed: now.duration_since(start),
                     weights_synced: m.weights_synced(),
@@ -707,16 +738,24 @@ pub fn solo_lockstep_for(seed: u64) -> Lockstep {
     Lockstep::new_with_pilots(seed, &[me], me, &pilots)
 }
 
-/// Which players spawn PILOTING a plane rather than on foot, from the `RL_VEHICLE` env
-/// flag. `RL_VEHICLE=plane` makes the LOCAL player (`me`) a pilot; anything else (incl.
-/// unset) is the unchanged foot game (empty ⇒ byte-identical sim). Offline paths only:
-/// the networked path ([`form_match`]) builds the session with
-/// no pilots, so it ignores `RL_VEHICLE` entirely — wiring pilots over the wire needs the
-/// peers to agree on the pilot set (a wire negotiation), which is future work.
+/// Whether THIS process intends to pilot a plane, from the `RL_VEHICLE=plane` env flag.
+/// The single source of the env-string read, shared by the offline [`pilots_from_env`] and
+/// the networked barrier (which advertises this as our pilot-intent and negotiates the agreed
+/// pilot set over the wire — see [`Membership::piloting`]/[`form_match`]).
+pub fn local_wants_to_pilot() -> bool {
+    matches!(std::env::var("RL_VEHICLE").as_deref(), Ok("plane"))
+}
+
+/// Which players spawn PILOTING a plane rather than on foot in an OFFLINE round, from the
+/// `RL_VEHICLE` flag: `RL_VEHICLE=plane` makes the LOCAL player (`me`) a pilot; anything else
+/// (incl. unset) is the unchanged foot game (empty ⇒ byte-identical sim). The NETWORKED path
+/// ([`form_match`]) negotiates the pilot set over the wire instead, so every peer freezes one
+/// agreed roster of who flies.
 fn pilots_from_env(me: PlayerId) -> Vec<PlayerId> {
-    match std::env::var("RL_VEHICLE").as_deref() {
-        Ok("plane") => vec![me],
-        _ => Vec::new(),
+    if local_wants_to_pilot() {
+        vec![me]
+    } else {
+        Vec::new()
     }
 }
 

@@ -118,9 +118,10 @@ impl Lockstep {
 
     /// Like [`Lockstep::new`], but `pilots` spawn flying planes instead of on foot (the
     /// rl#38 vehicle first cut). Forwarded to [`Sim::new_with_pilots`]; every peer must
-    /// pass the SAME `pilots` set or their sims diverge (pilot assignment is a launch
-    /// flag here, not yet wire-negotiated — and the networked driver currently passes
-    /// none, so this is solo/screenshot-only for now). With `pilots` empty this is
+    /// pass the SAME `pilots` set or their sims diverge. The networked driver negotiates that
+    /// set over the wire (the membership barrier folds pilot-intent into its agreement token,
+    /// so every peer freezes the identical pilots — see [`crate::net::net_loop::form_match`]);
+    /// the offline/screenshot paths pass it directly. With `pilots` empty this is
     /// [`Lockstep::new`].
     pub fn new_with_pilots(
         seed: u64,
@@ -411,6 +412,48 @@ mod tests {
         }
         assert_eq!(a.sim().tick(), b.sim().tick());
         assert_eq!(a.sim().state_hash(), b.sim().state_hash());
+    }
+
+    #[test]
+    fn two_peers_with_a_pilot_stay_in_lockstep() {
+        // The networked mixed foot+pilot round: two peers built from the SAME agreed pilot set
+        // (player 1 flies, player 0 on foot — what the wire negotiation freezes) must stay
+        // bit-identical tick-for-tick. Proves the pilot set threaded from formation into
+        // `new_with_pilots` keeps the lockstep deterministic over a real exchange (the sim-level
+        // flight determinism is proven separately; this is the lockstep+network round).
+        let pilots = [PlayerId(1)];
+        let mut a = Lockstep::new_with_pilots(99, &ids(2), PlayerId(0), &pilots);
+        let mut b = Lockstep::new_with_pilots(99, &ids(2), PlayerId(1), &pilots);
+        assert_eq!(
+            a.sim().state_hash(),
+            b.sim().state_hash(),
+            "the mixed foot+pilot initial state must match across peers"
+        );
+        for t in 0..120u64 {
+            // Drive both bodies through non-trivial control: the pilot gets throttle+turn, the
+            // foot player strafes — distinct inputs per player so the round actually evolves.
+            let ma = a.submit_local_input(Input::from_axes((t % 3) as f32 - 1.0, 0.5));
+            let mb = b.submit_local_input(Input::new(0.2, 1.0, (t % 5) as f32 * 0.2 - 0.4, 0));
+            assert!(a.record_remote(PlayerId(1), mb).is_none());
+            assert!(b.record_remote(PlayerId(0), ma).is_none());
+            assert!(a.try_advance().is_empty());
+            assert!(b.try_advance().is_empty());
+            assert_eq!(
+                a.sim().state_hash(),
+                b.sim().state_hash(),
+                "mixed foot+pilot peers diverged at tick {t}"
+            );
+        }
+        // Non-vacuous: the pilot is actually flying (player 1 is a plane), so the round isn't a
+        // frozen no-op that would stay in lockstep trivially.
+        assert!(
+            b.sim().plane(PlayerId(1)).is_some(),
+            "player 1 must be a pilot in the agreed networked round"
+        );
+        assert!(
+            a.sim().tick() > INPUT_DELAY,
+            "the round must have advanced past warmup"
+        );
     }
 
     #[test]

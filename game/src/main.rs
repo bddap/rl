@@ -527,7 +527,9 @@ async fn run_net(args: NetArgs) -> Result<()> {
         my_eid.fmt_short()
     );
 
-    let mut ls = Lockstep::new(MATCH_SEED, &all_ids, me);
+    // Use the wire-negotiated pilot set so every peer spawns the identical foot/plane mix
+    // (empty ⇒ the unchanged foot-only round).
+    let mut ls = Lockstep::new_with_pilots(MATCH_SEED, &all_ids, me, &frozen.pilots);
     net_loop::replay_early(&mut ls, &frozen);
 
     let tick_dt = Duration::from_secs_f64(1.0 / TICK_HZ as f64);

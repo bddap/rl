@@ -123,18 +123,30 @@ pub struct Beat {
     /// with the identical roster still freeze the same set regardless of their brains (a
     /// weights mismatch keeps the integer crab; it never breaks match formation).
     pub weights_digest: u64,
+    /// The sender's view of WHO PILOTS a plane (a subset of `members`, sorted by id bytes) —
+    /// the networked half of plane mode (vehicles in multiplayer). Unlike `weights_digest`,
+    /// this IS folded into [`Beat::roster_hash`]: the frozen pilot roster must be a pure
+    /// function of agreed data, so a peer holding a divergent view of who flies must NOT be
+    /// able to close (a split pilot set spawns different bodies per peer in
+    /// [`crate::net::sim::Sim::new_with_pilots`] and desyncs instantly). A sender lists
+    /// another member here only once it has heard that member's intent on the member's OWN
+    /// direct beat — intent is self-declared, never relayed, so each peer learns every
+    /// member's role by hearing it directly (which the barrier already requires before close).
+    pub pilots: Vec<EndpointId>,
 }
 
 impl Beat {
-    /// The agreement token: a hash of `members`. Two peers advertising the same hash
-    /// have the identical set (the freeze precondition). Computed from the sorted,
-    /// deduped id bytes so it is independent of insertion order — the same set always
-    /// hashes the same on every peer. FNV-1a over the raw 32-byte ids: this is an
-    /// agreement check among cooperating LAN peers, not an adversarial digest, so a
-    /// fast non-cryptographic hash is the right tool (a collision would at worst admit
-    /// a wrong freeze, which the post-freeze lockstep hash cross-check still catches).
+    /// The agreement token: a hash folding BOTH `members` AND `pilots`. Two peers
+    /// advertising the same token have the identical participant set AND the identical view
+    /// of who pilots (the freeze precondition). Computed from the sorted, deduped id bytes so
+    /// it is independent of insertion order — the same (members, pilots) always hashes the
+    /// same on every peer. FNV-1a over the raw 32-byte ids: this is an agreement check among
+    /// cooperating LAN peers, not an adversarial digest, so a fast non-cryptographic hash is
+    /// the right tool (a collision would at worst admit a wrong freeze, which the post-freeze
+    /// lockstep hash cross-check still catches). See [`agreement_token`] for why pilots are
+    /// folded in (and `weights_digest` is not).
     pub fn roster_hash(&self) -> u64 {
-        roster_hash(&self.members)
+        agreement_token(&self.members, &self.pilots)
     }
 }
 
@@ -152,6 +164,24 @@ pub fn roster_hash(ids: &[EndpointId]) -> u64 {
             h ^= byte as u64;
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
+    }
+    h
+}
+
+/// The full agreement token folds the member set AND the pilot set, so two peers agree only
+/// when they hold the identical roster AND the identical view of who pilots. Pilot-intent is
+/// folded in (unlike [`Beat::weights_digest`], which is a side-channel capability) precisely
+/// because the frozen pilot roster must be a pure function of agreed data: with it folded, a
+/// divergent pilot view breaks unanimity and rewinds the [`STABLE_FOR`] timer exactly like a
+/// membership change, so peers can never freeze split pilot sets (which would spawn different
+/// bodies per peer and desync instantly). Role-aware: the member set seeds the hash and the
+/// pilot set mixes in after, so the two dimensions can't cancel. Pilots ⊆ members always, so
+/// this is just `roster_hash(members)` with the pilot subset stirred in.
+pub fn agreement_token(members: &[EndpointId], pilots: &[EndpointId]) -> u64 {
+    let mut h = roster_hash(members);
+    for byte in roster_hash(pilots).to_le_bytes() {
+        h ^= byte as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
 }
@@ -218,6 +248,12 @@ pub struct Membership {
     /// ([`Membership::with_weights_digest`] sets it), so a caller that never sets it behaves
     /// exactly as pre-rl#82 — `weights_synced` is then always false.
     local_digest: u64,
+    /// Whether WE intend to pilot a plane (the local `RL_VEHICLE=plane` flag). Advertised as
+    /// our own entry in every [`Membership::beat`]'s `pilots` list and folded into our
+    /// agreement token, so peers converge on a shared pilot roster before freezing. `false` by
+    /// default ([`Membership::piloting`] sets it), so a caller that never sets it forms the
+    /// unchanged foot-only match (empty pilot set ⇒ byte-identical sim).
+    local_pilot: bool,
 }
 
 /// How a [`Membership`] barrier decides to close (rl#58). A sum type so the
@@ -263,6 +299,14 @@ struct PeerView {
     /// non-zero digest, so a peer not yet heard directly blocks [`Membership::weights_synced`]
     /// until it speaks for itself.
     weights_digest: Option<u64>,
+    /// Whether this peer declared ITSELF a pilot on its OWN direct beat — `Some(true/false)`
+    /// once heard directly, `None` while only gossip-admitted. Read by [`Membership::pilot_set`]
+    /// to assemble the frozen pilot roster. `None` (never heard directly) is treated as
+    /// not-a-pilot, but such a peer also has `advertised == None`, so it blocks the close until
+    /// it speaks for itself — by which point its true role is known. A relay never sets this:
+    /// intent is self-declared, learned only from the peer's own beat (the same trust rule as
+    /// liveness and `weights_digest`).
+    is_pilot: Option<bool>,
 }
 
 /// The barrier's verdict on each [`Membership::poll`]: keep waiting, freeze this exact
@@ -273,9 +317,15 @@ pub enum Status {
     /// logging/UX (a lobby can show "2 players, waiting…").
     Forming { live: usize },
     /// The agreement predicate held continuously for [`STABLE_FOR`]. Freeze EXACTLY
-    /// these ids (sorted, includes us). Every peer that reaches this state computed the
-    /// identical set — that is the guarantee.
-    Agreed { roster: Vec<EndpointId> },
+    /// these ids (sorted, includes us) with EXACTLY this pilot subset. Every peer that reaches
+    /// this state computed the identical roster AND the identical pilot set — that is the
+    /// guarantee (both are folded into the agreement token, so neither can diverge).
+    Agreed {
+        roster: Vec<EndpointId>,
+        /// The frozen pilots (⊆ `roster`, sorted by id bytes): the members that spawn flying.
+        /// Identical on every peer by the same agreement-token guarantee as `roster`.
+        pilots: Vec<EndpointId>,
+    },
     /// [`JOIN_WINDOW`] elapsed without sustained agreement. The caller must surface this
     /// and retry rather than freeze a guessed set.
     Failed,
@@ -313,7 +363,18 @@ impl Membership {
             lobby: LobbyMode::Off,
             host_go_on_my_roster: false,
             local_digest: 0,
+            local_pilot: false,
         }
+    }
+
+    /// Declare whether WE pilot a plane (the local `RL_VEHICLE=plane` intent), advertised in
+    /// every [`Membership::beat`] and folded into our agreement token so peers freeze ONE
+    /// shared pilot roster. Builder form (chains off [`Membership::new`] /
+    /// [`Membership::host_triggered`]) because the intent is a launch-time constant. `false`
+    /// (the default) forms the unchanged foot-only match.
+    pub fn piloting(mut self, pilot: bool) -> Self {
+        self.local_pilot = pilot;
+        self
     }
 
     /// Set OUR policy-weights digest (rl#82, GCR), advertised in every [`Membership::beat`]
@@ -389,6 +450,7 @@ impl Membership {
                     advertised: None,
                     started: false,
                     weights_digest: None,
+                    is_pilot: None,
                 });
                 view.last_direct = now;
                 view.advertised = Some(beat.roster_hash());
@@ -398,6 +460,10 @@ impl Membership {
                 // Record the peer's advertised brain digest (rl#82) for the weights-synced
                 // check; only a direct beat sets it, like `advertised`/`started`.
                 view.weights_digest = Some(beat.weights_digest);
+                // Record whether the peer declared ITSELF a pilot: it lists its own id in its
+                // beat's `pilots` iff it intends to fly. Only a direct beat sets this — intent
+                // is self-declared, never inferred from a relay's pilot list.
+                view.is_pilot = Some(beat.pilots.contains(&from));
             }
         }
         // Transitive admission: a relayed id we don't track yet and that isn't
@@ -420,6 +486,7 @@ impl Membership {
                         advertised: None,
                         started: false,
                         weights_digest: None,
+                        is_pilot: None,
                     },
                 );
             }
@@ -438,11 +505,33 @@ impl Membership {
         ids
     }
 
-    /// The [`Beat`] to broadcast this round: our full live set, and (host only, once
-    /// [`Membership::set_starting`] has fired) the `start` GO commanding the round to begin
-    /// on that set. Built from [`Membership::live_set`] so what we advertise is exactly what
-    /// we'd freeze; `start` rides the same beat so the GO and the roster it commands are
-    /// inseparable.
+    /// The pilots among our current live set (us iff [`Membership::piloting`], plus every live
+    /// peer whose OWN direct beat declared it a pilot), sorted by id bytes. A subset of
+    /// [`Membership::live_set`]. This is exactly what we advertise in our [`Beat`] and freeze
+    /// on agreement, so advertiser and freezer can't drift. A gossip-only peer (`is_pilot ==
+    /// None`) is excluded — but it also blocks the close (`advertised == None`), so by the time
+    /// we could freeze, every member has been heard directly and its role is known. (Read-only;
+    /// expiry happens in [`Membership::poll`], so call `poll` once per round first.)
+    pub fn pilot_set(&self) -> Vec<EndpointId> {
+        let mut pilots: Vec<EndpointId> = self
+            .peers
+            .iter()
+            .filter(|(_, v)| v.is_pilot == Some(true))
+            .map(|(id, _)| *id)
+            .collect();
+        if self.local_pilot {
+            pilots.push(self.me);
+        }
+        pilots.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        pilots.dedup();
+        pilots
+    }
+
+    /// The [`Beat`] to broadcast this round: our full live set, who we believe pilots, and
+    /// (host only, once [`Membership::set_starting`] has fired) the `start` GO commanding the
+    /// round to begin on that set. Built from [`Membership::live_set`]/[`Membership::pilot_set`]
+    /// so what we advertise is exactly what we'd freeze; `start` rides the same beat so the GO
+    /// and the roster it commands are inseparable.
     pub fn beat(&self) -> Beat {
         Beat {
             members: self.live_set(),
@@ -450,6 +539,7 @@ impl Membership {
             // plain beat. So a joiner/timer barrier can never put `start` on the wire.
             start: matches!(self.lobby, LobbyMode::Host { started: true }),
             weights_digest: self.local_digest,
+            pilots: self.pilot_set(),
         }
     }
 
@@ -497,9 +587,13 @@ impl Membership {
         self.tombstones
             .retain(|_, &mut t| now.duration_since(t) < MEMBER_TIMEOUT);
 
-        // Evaluate the agreement predicate over the current live set.
+        // Evaluate the agreement predicate over the current live set AND pilot set. Folding
+        // the pilot roster into the token is what makes a divergent view of who-flies block
+        // the close (and rewind the timer on a mid-formation flip), so peers can only freeze
+        // ONE shared pilot set — see [`agreement_token`].
         let live = self.live_set();
-        let my_hash = roster_hash(&live);
+        let pilots = self.pilot_set();
+        let my_hash = agreement_token(&live, &pilots);
         let enough = live.len() >= self.expect;
         let unanimous = self.peers.values().all(|v| v.advertised == Some(my_hash));
         let agreed_now = enough && unanimous;
@@ -550,7 +644,10 @@ impl Membership {
         let timed_out =
             self.lobby == LobbyMode::Off && now.duration_since(self.started) >= JOIN_WINDOW;
         if close {
-            Status::Agreed { roster: live }
+            Status::Agreed {
+                roster: live,
+                pilots,
+            }
         } else if timed_out {
             Status::Failed
         } else {
@@ -559,22 +656,33 @@ impl Membership {
     }
 }
 
-/// Encode a [`Beat`] for the wire: `[start:u8][count:u16 LE][weights_digest:u64 LE][id:32]*count`,
-/// ids sorted. Fixed 32-byte ids (an [`EndpointId`] is a 32-byte public key) so the body is
-/// `11 + 32*count` with no per-id length. The leading `start` byte is the host's GO
-/// flag (rl#58); the `weights_digest` (rl#82) is the sender's checkpoint digest. NEITHER is
-/// folded into [`roster_hash`] (a command / a capability, not membership), so the same set
-/// hashes identically regardless of start or brain. The count is bounded by
-/// [`MAX_BEAT_MEMBERS`] on decode so a hostile/garbled frame can't trigger a huge allocation.
+/// Encode a [`Beat`] for the wire:
+/// `[start:u8][count:u16 LE][weights_digest:u64 LE][id:32]*count[pilot_count:u16 LE][pilot_id:32]*pilot_count`,
+/// both id lists sorted+deduped. Fixed 32-byte ids (an [`EndpointId`] is a 32-byte public
+/// key) so there is no per-id length. The leading `start` byte is the host's GO flag (rl#58);
+/// `weights_digest` (rl#82) is the sender's checkpoint digest (NEITHER folded into
+/// [`roster_hash`] — a command / a capability, not membership); the trailing `pilots` list is
+/// who the sender believes flies, which IS folded in. Both counts are bounded on decode
+/// ([`MAX_BEAT_MEMBERS`], and pilots ≤ members) so a hostile/garbled frame can't trigger a
+/// huge allocation.
 pub fn encode_beat(beat: &Beat) -> Vec<u8> {
-    let mut sorted = beat.members.clone();
-    sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-    sorted.dedup();
-    let mut out = Vec::with_capacity(11 + 32 * sorted.len());
+    let canon = |ids: &[EndpointId]| -> Vec<EndpointId> {
+        let mut v = ids.to_vec();
+        v.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        v.dedup();
+        v
+    };
+    let members = canon(&beat.members);
+    let pilots = canon(&beat.pilots);
+    let mut out = Vec::with_capacity(13 + 32 * (members.len() + pilots.len()));
     out.push(beat.start as u8);
-    out.extend_from_slice(&(sorted.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(members.len() as u16).to_le_bytes());
     out.extend_from_slice(&beat.weights_digest.to_le_bytes());
-    for id in &sorted {
+    for id in &members {
+        out.extend_from_slice(id.as_bytes());
+    }
+    out.extend_from_slice(&(pilots.len() as u16).to_le_bytes());
+    for id in &pilots {
         out.extend_from_slice(id.as_bytes());
     }
     out
@@ -585,9 +693,9 @@ pub fn encode_beat(beat: &Beat) -> Vec<u8> {
 /// absolute ceiling the rest of the stack accepts anyway.
 const MAX_BEAT_MEMBERS: usize = 256;
 
-/// Decode a [`Beat`] produced by [`encode_beat`]. Rejects a truncated body or a count
-/// past [`MAX_BEAT_MEMBERS`] (a malformed/hostile frame) rather than panicking or
-/// over-allocating.
+/// Decode a [`Beat`] produced by [`encode_beat`]. Rejects a truncated body, a member count
+/// past [`MAX_BEAT_MEMBERS`], or a pilot count exceeding the member count (a malformed/hostile
+/// frame) rather than panicking or over-allocating.
 pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     anyhow::ensure!(
         body.len() >= 11,
@@ -600,24 +708,54 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
         "barrier frame claims {count} members (> {MAX_BEAT_MEMBERS})"
     );
     let weights_digest = u64::from_le_bytes(body[3..11].try_into().expect("8-byte slice"));
-    let need = 11 + 32 * count;
+    let members_end = 11 + 32 * count;
+    // Room for the member ids AND the trailing 2-byte pilot count.
+    anyhow::ensure!(
+        body.len() >= members_end + 2,
+        "barrier frame truncated before the pilot count (len {} < {})",
+        body.len(),
+        members_end + 2
+    );
+    let read_ids = |start_off: usize, n: usize| -> Result<Vec<EndpointId>> {
+        let mut ids = Vec::with_capacity(n);
+        for i in 0..n {
+            let off = start_off + 32 * i;
+            let bytes: [u8; 32] = body[off..off + 32].try_into().expect("32-byte slice");
+            let id = EndpointId::from_bytes(&bytes)
+                .map_err(|e| anyhow::anyhow!("bad endpoint id in barrier frame: {e}"))?;
+            ids.push(id);
+        }
+        Ok(ids)
+    };
+    let members = read_ids(11, count)?;
+    let pilot_count = u16::from_le_bytes([body[members_end], body[members_end + 1]]) as usize;
+    // Pilots are a subset of members, so a count above `count` is malformed (and bounds the
+    // allocation without a separate cap).
+    anyhow::ensure!(
+        pilot_count <= count,
+        "barrier frame claims {pilot_count} pilots (> {count} members)"
+    );
+    let need = members_end + 2 + 32 * pilot_count;
     anyhow::ensure!(
         body.len() == need,
-        "barrier frame length {} != expected {need} for {count} members",
+        "barrier frame length {} != expected {need} for {count} members + {pilot_count} pilots",
         body.len()
     );
-    let mut members = Vec::with_capacity(count);
-    for i in 0..count {
-        let off = 11 + 32 * i;
-        let bytes: [u8; 32] = body[off..off + 32].try_into().expect("32-byte slice");
-        let id = EndpointId::from_bytes(&bytes)
-            .map_err(|e| anyhow::anyhow!("bad endpoint id in barrier frame: {e}"))?;
-        members.push(id);
-    }
+    let pilots = read_ids(members_end + 2, pilot_count)?;
+    // Pilots are a subset of members by construction. Enforce it at the trust boundary so the
+    // "pilots ⊆ members" invariant the rest of the code (and three doc comments) rely on is
+    // real, not asserted-by-comment. An out-of-roster pilot can't itself desync — the agreement
+    // token just won't match honest peers — but rejecting it keeps a malformed frame from ever
+    // entering the state machine.
+    anyhow::ensure!(
+        pilots.iter().all(|p| members.contains(p)),
+        "barrier frame lists a pilot absent from its member set"
+    );
     Ok(Beat {
         members,
         start,
         weights_digest,
+        pilots,
     })
 }
 
@@ -646,6 +784,17 @@ mod tests {
             members,
             start: false,
             weights_digest: 0,
+            pilots: Vec::new(),
+        }
+    }
+
+    /// A heartbeat declaring a pilot roster, for the networked-planes tests.
+    fn bt_p(members: Vec<EndpointId>, pilots: Vec<EndpointId>) -> Beat {
+        Beat {
+            members,
+            start: false,
+            weights_digest: 0,
+            pilots,
         }
     }
 
@@ -699,6 +848,7 @@ mod tests {
             members,
             start: true,
             weights_digest: 0,
+            pilots: Vec::new(),
         };
         assert_eq!(
             plain.roster_hash(),
@@ -726,6 +876,7 @@ mod tests {
             members,
             start: false,
             weights_digest,
+            pilots: Vec::new(),
         }
     }
 
@@ -801,6 +952,161 @@ mod tests {
         assert!(a.weights_synced(), "once every peer is heard with the same brain, synced");
     }
 
+    // ── Pilot-intent handshake (GCR planes — wire-negotiated who flies) ──────────────
+
+    /// A pilot list rides the wire as a distinct field, and (unlike `start`/`weights_digest`)
+    /// IS folded into the agreement token: two beats with the same members but different pilots
+    /// must hash DIFFERENTLY (else peers could freeze split pilot sets), while a roundtrip
+    /// preserves the pilot list. The determinism crux of the whole feature in one assertion.
+    #[test]
+    fn pilot_list_roundtrips_and_is_folded_into_the_roster_hash() {
+        let members = vec![eid(1), eid(2)];
+        let no_pilots = bt_p(members.clone(), vec![]);
+        let a_flies = bt_p(members.clone(), vec![eid(1)]);
+        let b_flies = bt_p(members, vec![eid(2)]);
+        // Different pilot rosters over the same members MUST diverge the token.
+        assert_ne!(
+            no_pilots.roster_hash(),
+            a_flies.roster_hash(),
+            "adding a pilot must change the agreement token (else split pilot sets could freeze)"
+        );
+        assert_ne!(
+            a_flies.roster_hash(),
+            b_flies.roster_hash(),
+            "a DIFFERENT pilot must change the token — who flies is part of the agreement"
+        );
+        // The pilot list survives the wire, sorted+deduped like members.
+        let decoded = decode_beat(&encode_beat(&a_flies)).unwrap();
+        assert_eq!(decoded.pilots, sorted(&[eid(1)]));
+        assert_eq!(decoded.members, sorted(&[eid(1), eid(2)]));
+    }
+
+    #[test]
+    fn decode_rejects_a_pilot_not_in_the_member_set() {
+        // The wire enforces pilots ⊆ members: a frame declaring a pilot absent from its own
+        // roster is malformed and must be rejected, so the "pilots ⊆ members" invariant holds
+        // at the trust boundary (not just by honest-encoder construction).
+        let bogus = bt_p(vec![eid(1), eid(2)], vec![eid(9)]);
+        assert!(
+            decode_beat(&encode_beat(&bogus)).is_err(),
+            "a pilot outside the member set must be rejected on decode"
+        );
+    }
+
+    #[test]
+    fn two_peers_with_one_pilot_freeze_the_identical_pilot_set() {
+        // The core determinism guarantee for planes: A declares itself a pilot, B does not;
+        // both must converge AND freeze the byte-identical pilot set {A} (not just the same
+        // member roster). Mirrors `two_peers_converge_and_freeze_the_identical_set`, now
+        // asserting the pilot subset matches too.
+        let t0 = Instant::now();
+        let (ida, idb) = (eid(1), eid(2));
+        let mut a = Membership::new(ida, 2, t0).piloting(true);
+        let mut b = Membership::new(idb, 2, t0).piloting(false);
+
+        let mut t = 0u64;
+        let mut agreed_a: Option<(Vec<EndpointId>, Vec<EndpointId>)> = None;
+        let mut agreed_b: Option<(Vec<EndpointId>, Vec<EndpointId>)> = None;
+        while t <= 3000 && (agreed_a.is_none() || agreed_b.is_none()) {
+            let now = at(t0, t);
+            let (ba, bb) = (a.beat(), b.beat());
+            a.on_beat(idb, &bb, now);
+            b.on_beat(ida, &ba, now);
+            if agreed_a.is_none()
+                && let Status::Agreed { roster, pilots } = a.poll(now)
+            {
+                agreed_a = Some((roster, pilots));
+            }
+            if agreed_b.is_none()
+                && let Status::Agreed { roster, pilots } = b.poll(now)
+            {
+                agreed_b = Some((roster, pilots));
+            }
+            t += 250;
+        }
+        let (ra, pa) = agreed_a.expect("A must agree");
+        let (rb, pb) = agreed_b.expect("B must agree");
+        assert_eq!(ra, rb, "both peers must freeze the identical roster");
+        assert_eq!(pa, pb, "both peers MUST freeze the identical pilot set");
+        assert_eq!(pa, vec![ida], "only A (which declared RL_VEHICLE=plane) flies");
+    }
+
+    #[test]
+    fn relay_only_pilot_blocks_the_close_until_heard_directly() {
+        // A pilot's intent is learned ONLY from its own direct beat, never a relay. So a peer
+        // that knows a pilot P only via another's relay must NOT close: it has P at `is_pilot:
+        // None` (so P is absent from its pilot_set) AND `advertised: None` (so P blocks
+        // unanimity). If a relay COULD seed P's pilot role, this peer's pilot_set would differ
+        // from one that heard P directly — a split freeze. Prove the close is blocked.
+        let t0 = Instant::now();
+        let (ida, idb, idp) = (eid(1), eid(2), eid(9));
+        let mut a = Membership::new(ida, 3, t0);
+        // B beats directly (foot) and RELAYS both P's existence and P-as-pilot in its list.
+        // A must NOT trust the relayed pilot bit for P — P is still only gossip-admitted.
+        let mut t = 0u64;
+        let mut closed = false;
+        while t <= STABLE_FOR.as_millis() as u64 + 1000 {
+            let now = at(t0, t);
+            a.on_beat(idb, &bt_p(vec![ida, idb, idp], vec![idp]), now);
+            if matches!(a.poll(now), Status::Agreed { .. }) {
+                closed = true;
+                break;
+            }
+            // A never lists P as a pilot off a relay — only P's own beat could declare it.
+            assert!(
+                !a.pilot_set().contains(&idp),
+                "a relayed pilot bit must not make P a pilot in our view"
+            );
+            t += 250;
+        }
+        assert!(
+            !closed,
+            "a relay-only member (pilot or not) must block the close until heard directly"
+        );
+    }
+
+    #[test]
+    fn a_pilot_intent_flip_mid_formation_never_splits_the_frozen_set() {
+        // The determinism trap the feature exists to defeat: a peer that FLIPS its pilot
+        // intent mid-formation must not let peers freeze divergent pilot sets. B flies for a
+        // stretch, then stops (or vice-versa); the flip changes B's advertised token, breaks
+        // A's unanimity, and rewinds the STABLE_FOR timer — so A can only close AFTER B's
+        // intent has settled, and then on B's FINAL intent. Assert: no peer ever freezes a
+        // pilot set the other doesn't share, and the final freeze reflects B's settled intent.
+        let t0 = Instant::now();
+        let (ida, idb) = (eid(1), eid(2));
+        let mut a = Membership::new(ida, 2, t0).piloting(false);
+        // B is modeled by hand-fed beats so we can flip its declared intent mid-stream. A's
+        // own beats are real. We drive A and feed it B's (flipping) beats.
+        let flip_until = 1200u64; // B "flies" until here, then settles to foot
+        let mut froze_a: Option<Vec<EndpointId>> = None;
+        let mut last_close_t = 0u64;
+        let mut t = 0u64;
+        while t <= 6000 && froze_a.is_none() {
+            let now = at(t0, t);
+            // B's beat: lists {A,B}; declares itself a pilot only while flipping.
+            let b_pilots = if t < flip_until { vec![idb] } else { vec![] };
+            a.on_beat(idb, &bt_p(vec![ida, idb], b_pilots), now);
+            if let Status::Agreed { pilots, .. } = a.poll(now) {
+                froze_a = Some(pilots);
+                last_close_t = t;
+            }
+            t += 250;
+        }
+        let pa = froze_a.expect("A must eventually close once B's intent settles");
+        // A closed only AFTER the flip settled (the timer rewinds on every intent change), and
+        // froze on B's FINAL intent: foot, so the pilot set is empty.
+        assert!(
+            last_close_t >= flip_until + STABLE_FOR.as_millis() as u64,
+            "A must not close until B's flipped intent has been stable for STABLE_FOR (closed at \
+             {last_close_t}ms, flip settled at {flip_until}ms)"
+        );
+        assert!(
+            pa.is_empty(),
+            "A must freeze B's SETTLED (foot) intent, not a mid-flip pilot view — got {pa:?}"
+        );
+    }
+
     #[test]
     fn lone_peer_with_expect_one_waits_then_agrees_on_itself() {
         // A deliberate solo run (expect=1) must still settle for STABLE_FOR, then agree
@@ -813,7 +1119,7 @@ mod tests {
         assert_eq!(m.poll(at(t0, 500)), Status::Forming { live: 1 });
         // Once the predicate has held continuously for STABLE_FOR: agreed on {self}.
         match m.poll(at(t0, STABLE_FOR.as_millis() as u64 + 1)) {
-            Status::Agreed { roster } => assert_eq!(roster, vec![eid(1)]),
+            Status::Agreed { roster, .. } => assert_eq!(roster, vec![eid(1)]),
             other => panic!("lone peer should agree on itself, got {other:?}"),
         }
     }
@@ -860,12 +1166,12 @@ mod tests {
             a.on_beat(idb, &beat_b, now);
             b.on_beat(ida, &beat_a, now);
             if agreed_a.is_none()
-                && let Status::Agreed { roster } = a.poll(now)
+                && let Status::Agreed { roster, .. } = a.poll(now)
             {
                 agreed_a = Some(roster);
             }
             if agreed_b.is_none()
-                && let Status::Agreed { roster } = b.poll(now)
+                && let Status::Agreed { roster, .. } = b.poll(now)
             {
                 agreed_b = Some(roster);
             }
@@ -907,7 +1213,7 @@ mod tests {
             }
             for (id, m) in [(1u8, &mut a), (2, &mut b), (3, &mut c)] {
                 // Always poll (drives the machine); record only the first Agreed per peer.
-                if let Status::Agreed { roster } = m.poll(now)
+                if let Status::Agreed { roster, .. } = m.poll(now)
                     && !froze.contains_key(&id)
                 {
                     froze.insert(id, roster);
@@ -948,12 +1254,12 @@ mod tests {
             a.on_beat(idb, &bb, now);
             b.on_beat(ida, &ba, now);
             if froze_a.is_none()
-                && let Status::Agreed { roster } = a.poll(now)
+                && let Status::Agreed { roster, .. } = a.poll(now)
             {
                 froze_a = Some(roster);
             }
             if froze_b.is_none()
-                && let Status::Agreed { roster } = b.poll(now)
+                && let Status::Agreed { roster, .. } = b.poll(now)
             {
                 froze_b = Some(roster);
             }
@@ -1007,7 +1313,7 @@ mod tests {
             // This isolates the safety check: a peer never closes on a hash a live member
             // isn't echoing. B never closes here: C advertises hash({C}) ≠ B's
             // hash({A,B,C}), so B is never unanimous.)
-            if let Status::Agreed { roster } = sa {
+            if let Status::Agreed { roster, .. } = sa {
                 assert_eq!(roster, sorted(&[ida, idb]));
                 assert!(
                     !matches!(sb, Status::Agreed { .. }),
@@ -1087,7 +1393,7 @@ mod tests {
             }
             for (id, m) in [(1u8, &mut a), (2, &mut b), (3, &mut c)] {
                 // Always poll (drives the machine); check+record only the first Agreed per peer.
-                if let Status::Agreed { roster } = m.poll(now)
+                if let Status::Agreed { roster, .. } = m.poll(now)
                     && !froze.contains_key(&id)
                 {
                     // The crux: NO peer may ever freeze the partial {A,B}.
@@ -1139,12 +1445,12 @@ mod tests {
             a.on_beat(idb, &bb, now);
             b.on_beat(ida, &ba, now);
             if froze_a.is_none()
-                && let Status::Agreed { roster } = a.poll(now)
+                && let Status::Agreed { roster, .. } = a.poll(now)
             {
                 froze_a = Some(roster);
             }
             if froze_b.is_none()
-                && let Status::Agreed { roster } = b.poll(now)
+                && let Status::Agreed { roster, .. } = b.poll(now)
             {
                 froze_b = Some(roster);
             }
@@ -1235,12 +1541,12 @@ mod tests {
             h.on_beat(idj, &bj, now);
             j.on_beat(idh, &bh, now);
             if froze_h.is_none()
-                && let Status::Agreed { roster } = h.poll(now)
+                && let Status::Agreed { roster, .. } = h.poll(now)
             {
                 froze_h = Some(roster);
             }
             if froze_j.is_none()
-                && let Status::Agreed { roster } = j.poll(now)
+                && let Status::Agreed { roster, .. } = j.poll(now)
             {
                 froze_j = Some(roster);
             }
@@ -1270,6 +1576,7 @@ mod tests {
             members: vec![idh],
             start: true,
             weights_digest: 0,
+            pilots: Vec::new(),
         };
         let mut t = 0u64;
         let mut closed = false;
@@ -1348,7 +1655,7 @@ mod tests {
             }
             for (id, m) in [(1u8, &mut h), (2, &mut j), (3, &mut c)] {
                 // Always poll (drives the machine); record the first Agreed per peer.
-                if let Status::Agreed { roster } = m.poll(now)
+                if let Status::Agreed { roster, .. } = m.poll(now)
                     && !froze.contains_key(&id)
                 {
                     // The crux: the host (or anyone) must only ever freeze the FULL {H,J,C}.
