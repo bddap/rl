@@ -115,6 +115,14 @@ pub struct ExternalCrabBridge {
     phys_digest: u64,
 }
 
+/// The sim's fixed-point [`Pos`] (XZ) as game-world metres on the bridge's `Vec2` frame
+/// (sim `x`→`Vec2.x`, sim `z`→`Vec2.y`). One definition for every Pos→metres conversion in
+/// this module, so the `/ UNIT` cast can't drift between the spawn seed, the restart re-seed,
+/// and the hunt target (the manual's "one source, derive the rest").
+fn pos_to_m(p: Pos) -> Vec2 {
+    Vec2::new(p.x as f32 / UNIT as f32, p.z as f32 / UNIT as f32)
+}
+
 impl ExternalCrabBridge {
     /// Seed the bridge at the sim's integer crab spawn (so the NN crab begins where the
     /// round placed the giant crab, MIN_CRAB_SPAWN_DISTANCE from the players). `lead_m` /
@@ -122,7 +130,7 @@ impl ExternalCrabBridge {
     /// once by the plugin.
     fn new(spawn: Pos, lead_m: f32, world_gain: f32) -> Self {
         Self {
-            world_pos_m: Vec2::new(spawn.x as f32 / UNIT as f32, spawn.z as f32 / UNIT as f32),
+            world_pos_m: pos_to_m(spawn),
             lead_m,
             world_gain,
             last_carapace_m: None,
@@ -171,8 +179,7 @@ impl ExternalCrabBridge {
     /// owns the sim and so knows the prey; [`set_crab_walk_target`] reads it to aim the
     /// policy.
     pub fn set_hunt_target(&mut self, prey: Option<Pos>) {
-        self.hunt_target_m =
-            prey.map(|p| Vec2::new(p.x as f32 / UNIT as f32, p.z as f32 / UNIT as f32));
+        self.hunt_target_m = prey.map(pos_to_m);
     }
 
     /// Pin the feel knobs (walk-target lead, world-speed gain) to their canonical defaults,
@@ -185,6 +192,31 @@ impl ExternalCrabBridge {
     pub fn pin_default_knobs(&mut self) {
         self.lead_m = TARGET_LEAD_M;
         self.world_gain = WORLD_GAIN_DEFAULT;
+    }
+
+    /// Re-seed the bridge to the round's spawn after a deterministic sim RESTART
+    /// ([`buttons::RESTART`]). The sim's [`reset`](crate::net::sim::Sim::reset) rebuilds the
+    /// integer crab back AT spawn, but the float body keeps walking and the bridge keeps its
+    /// accumulated `world_pos_m`; without this the next [`sync_external_crab`] would snap the
+    /// freshly-restarted crab onto the still-walking body's old position — mid-gait at the
+    /// wrong place, not at the computed spawn. So move the game-world position back to the
+    /// integer spawn and forget the pre-restart carapace sample (re-seeded from the fresh pose
+    /// next frame, exactly as the [`CrabRescued`](crate::bot::CrabRescued) path does — without
+    /// it the first post-restart accumulation would difference the spawn against the old pose
+    /// and inject a multi-metre false step). Re-settle too, so the round opens with the spawn
+    /// drop/plant grace.
+    ///
+    /// DETERMINISM: this fires off the sim's restart EDGE — the same edge the cadence reset
+    /// hangs off in [`crate::net::render`]'s `drive_lockstep`, observed identically on every
+    /// peer (the RESTART rides the shared lockstep input stream, so `advance_one` rewinds the
+    /// sim on the SAME applied tick on both peers). `spawn` is read back from the post-restart
+    /// sim, which is itself deterministic — so the re-seed is bit-identical cross-peer. Unlike
+    /// `CrabRescued` (a float-body teleport that leaves the game position put) this DOES move
+    /// `world_pos_m`, because a restart moves the integer crab.
+    pub fn restart_to_spawn(&mut self, spawn: Pos) {
+        self.world_pos_m = pos_to_m(spawn);
+        self.last_carapace_m = None;
+        self.settle = crate::training::systems::RESET_GRACE_TICKS;
     }
 }
 
