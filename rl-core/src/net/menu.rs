@@ -276,6 +276,200 @@ pub fn solo_round(seed: u64) -> ReadyMatch {
     }
 }
 
+// ── Pure menu navigation state machine (rl#82) ──────────────────────────────
+//
+// The boot menu's focus + transitions as a Bevy-free, egui-free VALUE, so navigation and
+// the Start transition are unit-testable without a live window. The render layer gathers
+// raw input (keyboard, gamepad, egui clicks), reduces it to a [`MenuInput`], folds it
+// through [`MenuNav::step`], and EXECUTES the returned [`MenuAction`] in one exhaustive
+// `match`. So a focusable item with no wired action is a COMPILE error, not a silently dead
+// button — the failure mode that left the lobby Start unreachable for a gamepad-only player
+// (the boot menu had no controller input at all, so on the Deck nothing in it was operable,
+// Start included). Like [`StartChoice`], the FSM never touches the sim/[`Lockstep`]/
+// [`Formation`]; it only decides which abstract action a confirm means.
+
+/// A focusable item on the Host / Join chooser. The join-code text field sits between the
+/// two but is NOT in this ring — it's edited with mouse/keyboard, while a gamepad player
+/// joins by LAN discovery (a blank code), so the navigable ring is the two actions only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChooserItem {
+    Host,
+    Join,
+}
+
+/// A focusable item in the HOST lobby (the only lobby with a focus ring). A joiner's lobby
+/// has no choices — its only action is Cancel — so it carries no `LobbyItem` at all (see
+/// [`MenuNav::JoinLobby`]), which is what makes "a joiner focused on Start" unrepresentable
+/// rather than merely unreachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LobbyItem {
+    Start,
+    Cancel,
+}
+
+/// One device-agnostic menu navigation event. Keyboard arrows/WASD, gamepad D-pad/stick,
+/// and egui clicks all reduce to these (a click is `Confirm` after focusing the clicked
+/// item). Left/Right collapse into Up/Down because every menu screen is a vertical list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuInput {
+    Up,
+    Down,
+    Confirm,
+    Back,
+}
+
+/// The side effect a [`MenuInput`] resolves to, executed by the render layer's single
+/// dispatch. The whole point of the type: that `match` is exhaustive, so every menu action
+/// is wired or the build fails. A pure focus move yields [`MenuAction::None`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAction {
+    /// Focus moved (or a no-op confirm) — nothing for the render layer to do.
+    None,
+    /// Chooser: begin hosting a lobby.
+    Host,
+    /// Chooser: begin joining (the render layer reads the typed code field).
+    Join,
+    /// Lobby (host, peers present): command the synchronized networked start.
+    StartNetworked,
+    /// Lobby (host, alone): install the instant solo round and play now.
+    StartSolo,
+    /// Lobby: leave — cancel the formation and return to the chooser.
+    Cancel,
+}
+
+/// The pure menu state: which screen, and the focus within it. Built by [`MenuNav::new`]
+/// (the chooser, Host focused) and folded by [`MenuNav::step`]. The render layer mirrors its
+/// AppPhase from the actions `step` returns, so the FSM screen and the Bevy phase move
+/// together (no second source of truth to drift).
+///
+/// Host and joiner lobbies are SEPARATE variants, not one `Lobby { hosting: bool }`: only a
+/// host has a focus ring (Start / Cancel), and splitting them makes "a joiner focused on
+/// Start" unrepresentable instead of a runtime no-op — the make-illegal-states-
+/// unrepresentable the menu's design aims for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuNav {
+    /// The Host / Join chooser (AppPhase::Menu).
+    Chooser { focus: ChooserItem },
+    /// The host's lobby (AppPhase::Connecting): a Start / Cancel focus ring.
+    HostLobby { focus: LobbyItem },
+    /// A joiner's lobby (AppPhase::Connecting): no choices but Cancel, so no focus to hold.
+    JoinLobby,
+}
+
+impl Default for MenuNav {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MenuNav {
+    /// The starting state: the chooser with Host focused (the common Deck case).
+    pub fn new() -> Self {
+        MenuNav::Chooser {
+            focus: ChooserItem::Host,
+        }
+    }
+
+    /// Enter the lobby for a chosen role: the host's lobby (Start focused) or the joiner's
+    /// choice-free lobby.
+    fn lobby(hosting: bool) -> Self {
+        if hosting {
+            MenuNav::HostLobby {
+                focus: LobbyItem::Start,
+            }
+        } else {
+            MenuNav::JoinLobby
+        }
+    }
+
+    /// Fold one input into the menu, returning the action for the render layer to execute.
+    /// `lobby_len` is the live roster size (us + peers); it ONLY resolves a host's lobby
+    /// Start into solo (≤1) vs networked (≥2), and is ignored on every other transition.
+    pub fn step(&mut self, input: MenuInput, lobby_len: usize) -> MenuAction {
+        match self {
+            MenuNav::Chooser { focus } => match input {
+                // A two-item vertical list: either direction just toggles.
+                MenuInput::Up | MenuInput::Down => {
+                    *focus = match focus {
+                        ChooserItem::Host => ChooserItem::Join,
+                        ChooserItem::Join => ChooserItem::Host,
+                    };
+                    MenuAction::None
+                }
+                MenuInput::Confirm => {
+                    let hosting = matches!(focus, ChooserItem::Host);
+                    *self = MenuNav::lobby(hosting);
+                    if hosting {
+                        MenuAction::Host
+                    } else {
+                        MenuAction::Join
+                    }
+                }
+                // Already at the root — nowhere to back out to.
+                MenuInput::Back => MenuAction::None,
+            },
+            MenuNav::HostLobby { focus } => match input {
+                MenuInput::Up | MenuInput::Down => {
+                    *focus = match focus {
+                        LobbyItem::Start => LobbyItem::Cancel,
+                        LobbyItem::Cancel => LobbyItem::Start,
+                    };
+                    MenuAction::None
+                }
+                MenuInput::Confirm => match focus {
+                    LobbyItem::Start => {
+                        // Resolve the host's Start against the LIVE roster (the single source
+                        // for solo-vs-networked), then leave the lobby. Solo enters Playing
+                        // now, so reset to a clean chooser; networked stays in the lobby
+                        // waiting for the formed match to arrive.
+                        if lobby_len <= 1 {
+                            *self = MenuNav::new();
+                            MenuAction::StartSolo
+                        } else {
+                            MenuAction::StartNetworked
+                        }
+                    }
+                    LobbyItem::Cancel => {
+                        *self = MenuNav::new();
+                        MenuAction::Cancel
+                    }
+                },
+                // Back out of the lobby == Cancel (tear the formation down, return to root).
+                MenuInput::Back => {
+                    *self = MenuNav::new();
+                    MenuAction::Cancel
+                }
+            },
+            // A joiner can only wait or leave: nav is inert, and the only action it can issue
+            // (Confirm or Back) is Cancel. There is no Start to reach — by construction.
+            MenuNav::JoinLobby => match input {
+                MenuInput::Up | MenuInput::Down => MenuAction::None,
+                MenuInput::Confirm | MenuInput::Back => {
+                    *self = MenuNav::new();
+                    MenuAction::Cancel
+                }
+            },
+        }
+    }
+
+    /// Move focus to a specific chooser item (no-op off the chooser). Used when a mouse click
+    /// lands on an item: the render layer focuses it then feeds `Confirm`, so a click takes
+    /// the EXACT same path through `step` as a pad/keyboard confirm.
+    pub fn focus_chooser(&mut self, item: ChooserItem) {
+        if let MenuNav::Chooser { focus } = self {
+            *focus = item;
+        }
+    }
+
+    /// Move focus to a specific host-lobby item (no-op off the host lobby — a joiner has no
+    /// focus). The click counterpart of [`Self::focus_chooser`].
+    pub fn focus_lobby(&mut self, item: LobbyItem) {
+        if let MenuNav::HostLobby { focus } = self {
+            *focus = item;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +519,112 @@ mod tests {
             ready_from(MatchResult::Cancelled, 0).is_none(),
             "a cancelled lobby yields no round"
         );
+    }
+
+    // ── MenuNav: the pure navigation FSM (no window needed) ──────────────────
+    // These are the unit tests the controller refactor exists to enable: every
+    // navigation move and Start transition exercised as plain values, so the menu's
+    // logic is proven without a live Bevy/egui window or a gamepad.
+
+    /// The chooser starts on Host and Up/Down toggles between the two items (a two-item
+    /// vertical list wraps trivially), with no side effect.
+    #[test]
+    fn chooser_navigates_between_host_and_join() {
+        let mut nav = MenuNav::new();
+        assert_eq!(nav, MenuNav::Chooser { focus: ChooserItem::Host });
+        assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
+        assert_eq!(nav, MenuNav::Chooser { focus: ChooserItem::Join });
+        assert_eq!(nav.step(MenuInput::Up, 0), MenuAction::None);
+        assert_eq!(nav, MenuNav::Chooser { focus: ChooserItem::Host });
+        // Either direction toggles; Back at the root is inert.
+        assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
+        assert_eq!(nav, MenuNav::Chooser { focus: ChooserItem::Join });
+        assert_eq!(nav.step(MenuInput::Back, 0), MenuAction::None);
+        assert_eq!(nav, MenuNav::Chooser { focus: ChooserItem::Join });
+    }
+
+    /// Confirming Host enters the lobby as a host (Start focused) and emits `Host`;
+    /// confirming Join enters as a joiner (Cancel focused — a joiner can't Start) and emits
+    /// `Join`. The chooser→lobby transition the menu depends on.
+    #[test]
+    fn confirm_host_or_join_enters_the_lobby_with_the_right_role() {
+        let mut host = MenuNav::new();
+        assert_eq!(host.step(MenuInput::Confirm, 0), MenuAction::Host);
+        assert_eq!(host, MenuNav::HostLobby { focus: LobbyItem::Start });
+
+        let mut join = MenuNav::new();
+        join.step(MenuInput::Down, 0); // focus Join
+        assert_eq!(join.step(MenuInput::Confirm, 0), MenuAction::Join);
+        assert_eq!(join, MenuNav::JoinLobby);
+    }
+
+    /// THE Start transition, the bug this job fixes: a host confirming Start resolves against
+    /// the live roster — alone (≤1) → an instant solo round, peers present (≥2) → the
+    /// networked GO. Solo resets to a clean chooser (we're entering Playing); networked stays
+    /// in the lobby waiting for the formed match.
+    #[test]
+    fn host_start_resolves_solo_vs_networked_by_roster() {
+        let mut alone = MenuNav::lobby(true);
+        assert_eq!(alone.step(MenuInput::Confirm, 1), MenuAction::StartSolo);
+        assert_eq!(alone, MenuNav::new(), "solo Start resets to the chooser");
+
+        // An empty roster (session not yet bound) is still the solo case.
+        let mut empty = MenuNav::lobby(true);
+        assert_eq!(empty.step(MenuInput::Confirm, 0), MenuAction::StartSolo);
+
+        let mut networked = MenuNav::lobby(true);
+        assert_eq!(networked.step(MenuInput::Confirm, 2), MenuAction::StartNetworked);
+        assert_eq!(
+            networked,
+            MenuNav::HostLobby { focus: LobbyItem::Start },
+            "networked Start stays in the lobby until the match forms"
+        );
+    }
+
+    /// In the host lobby, Up/Down moves between Start and Cancel; confirming Cancel (or
+    /// pressing Back) leaves the lobby and returns to the chooser, emitting `Cancel`.
+    #[test]
+    fn host_lobby_navigates_and_cancels() {
+        let mut nav = MenuNav::lobby(true);
+        assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
+        assert_eq!(nav, MenuNav::HostLobby { focus: LobbyItem::Cancel });
+        assert_eq!(nav.step(MenuInput::Confirm, 0), MenuAction::Cancel);
+        assert_eq!(nav, MenuNav::new(), "Cancel returns to the chooser");
+
+        // Back from anywhere in the lobby is the same as Cancel.
+        let mut back = MenuNav::lobby(true);
+        assert_eq!(back.step(MenuInput::Back, 5), MenuAction::Cancel);
+        assert_eq!(back, MenuNav::new());
+    }
+
+    /// A joiner's lobby has no focus and no choices but Cancel: navigation is inert, and the
+    /// only action it can ever issue (Confirm or Back) is `Cancel`. It can NEVER produce a
+    /// Start — that state is unrepresentable (no `LobbyItem` on [`MenuNav::JoinLobby`]), a
+    /// stronger guarantee than the host-only Start command in [`Formation`].
+    #[test]
+    fn joiner_lobby_can_only_cancel() {
+        let mut nav = MenuNav::lobby(false);
+        assert_eq!(nav, MenuNav::JoinLobby);
+        // Navigation is inert — there's nothing to move to.
+        assert_eq!(nav.step(MenuInput::Down, 9), MenuAction::None);
+        assert_eq!(nav, MenuNav::JoinLobby);
+        // Confirm can only ever cancel; even a populated roster yields no Start.
+        assert_eq!(nav.step(MenuInput::Confirm, 9), MenuAction::Cancel);
+        assert_eq!(nav, MenuNav::new());
+    }
+
+    /// A click routes through the SAME `step` path as a pad/keyboard confirm: focus the
+    /// clicked item, then `Confirm`. Clicking Join from a Host-focused chooser yields `Join`,
+    /// proving click and controller can't diverge (the unified-dispatch guarantee).
+    #[test]
+    fn click_focuses_then_confirms_like_a_controller() {
+        let mut nav = MenuNav::new(); // Host focused
+        nav.focus_chooser(ChooserItem::Join);
+        assert_eq!(nav.step(MenuInput::Confirm, 0), MenuAction::Join);
+
+        // focus_lobby is a no-op off the lobby (and vice-versa) — it can't corrupt state.
+        let mut chooser = MenuNav::new();
+        chooser.focus_lobby(LobbyItem::Cancel);
+        assert_eq!(chooser, MenuNav::new(), "focus_lobby is inert on the chooser");
     }
 }
