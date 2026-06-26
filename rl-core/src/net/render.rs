@@ -46,6 +46,7 @@ use crate::controls::{
     ActiveDevice, ForceRevealControls, PAD_STICK_DEADZONE, spawn_controls_ui, track_active_device,
     update_controls_ui,
 };
+use crate::net::cadence::PhysicsCadence;
 use crate::net::controls::{self, Action, GcrControls};
 use crate::net::lockstep::{Lockstep, TickMsg};
 use crate::net::net_loop::{NetDriver, PeerMsg};
@@ -287,19 +288,24 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
         // found no peer is a solo round here, so it gets the real NN crab.
         Boot::Round(round) => {
             let (mut ls, net) = *round;
-            // Solo NN crab: arm iff the shared gate says so (solo round + checkpoint —
-            // rl#64). Capture the integer crab's spawn + hand the crab to external control
-            // BEFORE ls moves into core. `has_ckpt = true`: the `Some(dir)` arm already
-            // proves the checkpoint is present, so the gate here turns purely on net.is_none().
+            // External NN crab: arm iff the shared GCR gate allows it — a SOLO round always,
+            // a NETWORKED round only with synced weights ([`crate::net::may_arm_external_crab`],
+            // the determinism guard; the `Some(dir)` arm already proves a checkpoint is present).
+            // Capture the integer crab's spawn + hand the crab to external control BEFORE `ls`
+            // moves into core.
             let nn = match solo_crab {
-                Some(dir) if crate::net::should_arm_solo_crab(net.is_none(), true) => {
+                Some(dir)
+                    if crate::net::may_arm_external_crab(
+                        net.is_none(),
+                        net.as_ref().is_some_and(NetDriver::weights_synced),
+                    ) =>
+                {
                     let crab = ls.sim().crab();
                     let spawn = crab.pos();
                     // Arm + seed the pose atomically with the crab's CURRENT spawn pose/yaw —
-                    // writing back what's already there, so sim state is unchanged.
-                    // Digest 0 to seed; the bridge's first post-step `hash_crab_physics`
-                    // fills it before the first `sync_external_crab` push (solo, so the
-                    // seeded value is never cross-checked anyway).
+                    // writing back what's already there, so sim state is unchanged. Digest 0 to
+                    // seed; the bridge's first post-step `hash_crab_physics` fills it before the
+                    // first `sync_external_crab` push, so the seeded value is never cross-checked.
                     ls.initialize_external_crab(spawn, crab.yaw(), 0);
                     Some((dir, spawn))
                 }
@@ -311,10 +317,10 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
             };
             insert_core(&mut app, ls, source);
             if let Some((dir, spawn)) = nn {
-                // Known-solo at build: add the stack AND activate the gate now, so the crab
-                // spawns frame one exactly as before rl#58.
+                // Known-armed at build: add the stack AND arm the gate now, so the crab spawns
+                // frame one.
                 add_solo_nn_crab(&mut app, dir, spawn);
-                app.insert_resource(crate::net::solo_crab::SoloCrabActive);
+                app.insert_resource(crate::net::solo_crab::ExternalCrabArmed);
             }
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
@@ -328,13 +334,14 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
                 telemetry,
                 weights_digest,
             });
-            // NN crab on the Host-alone (solo) round (rl#58): the menu can't know at BUILD
-            // time whether the round will be solo, so add the whole NN stack now but with the
-            // gate OFF and no crab spawned (NumEnvs 0), and flip it on only if the round
-            // resolves solo (`ensure_round_installed`). The crab's arena spawn is a pure
+            // NN crab on the round (rl#58 + GCR): the menu can't know at BUILD time whether the
+            // round will be solo, networked-synced, or networked-unsynced, so add the whole NN
+            // stack now with the gate OFF and no crab spawned (NumEnvs 0), and arm it only if
+            // the resolved round may ([`ensure_round_installed`] → [`crate::net::may_arm_external_crab`]:
+            // solo always, networked only with synced weights). The crab's arena spawn is a pure
             // function of the seed (a throwaway solo lockstep reads it), so it's known here
-            // without the round existing yet. A missing/empty checkpoint keeps the integer
-            // crab (the stack isn't added at all). The networked path leaves the gate off, so
+            // without the round existing yet. A missing/empty checkpoint keeps the integer crab
+            // (the stack isn't added at all); a networked-UNSYNCED round leaves the gate off, so
             // it stays byte-identical to the integer-crab multiplayer round.
             if let Some(dir) = solo_crab {
                 let crab_spawn = crate::net::net_loop::solo_lockstep_for(seed)
@@ -342,7 +349,7 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
                     .crab()
                     .pos();
                 add_solo_nn_crab(&mut app, dir, crab_spawn);
-                // Gate OFF: leave `SoloCrabActive` ABSENT (presence is the state). The
+                // Gate OFF: leave `ExternalCrabArmed` ABSENT (presence is the state). The
                 // transition (`ensure_round_installed`) inserts it iff the round resolves solo.
                 app.insert_resource(crate::bot::NumEnvs(0)); // no crab spawns behind the menu
                 app.insert_resource(SoloCrabStackInstalled(true)); // the transition may activate it
@@ -383,6 +390,19 @@ fn add_solo_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_spaw
             checkpoint_dir,
             crab_spawn,
         });
+
+    // Park Bevy's wall-clock `FixedUpdate` auto-pump: the crab body must NOT step by real time
+    // (that differs per machine/frame-rate and would desync peers). `drive_lockstep` pumps the
+    // fixed schedule itself, exactly the deterministic [`PhysicsCadence`] number of steps per
+    // lockstep tick ([`pump_fixed_steps`]). Setting `Time<Fixed>` to a huge timestep makes
+    // Bevy's `run_fixed_main_schedule` never reach its `expend()` threshold, so it auto-runs
+    // FixedMain zero times; the render clock (`Time<Virtual>`/`Time<Real>`) is untouched, so
+    // interpolation still tracks real time. Rapier's `TimestepMode::Fixed { dt }` uses its own
+    // stored `dt`, so each manual FixedMain pump is still exactly one `PHYSICS_DT` step.
+    app.world_mut()
+        .resource_mut::<bevy::time::Time<bevy::time::Fixed>>()
+        .set_timestep(std::time::Duration::from_secs(86_400));
+
     // The crab's true colliders as a wireframe — the in-engine view of the NN body when
     // no skin is loaded (and a useful overlay when one is). On by default for the solo
     // showcase so the body is always visible; the integer-crab placeholder box is hidden
@@ -504,14 +524,14 @@ struct PendingRound(Option<crate::net::menu::ReadyMatch>);
 /// - **Menu**: take the parked [`PendingRound`] (set by the menu on its choice) and
 ///   [`install_round`] it now, so the sim is live for the spawns.
 ///
-/// On the menu path this is ALSO where the solo NN crab is ARMED (rl#58): if the round
-/// resolved solo (`net.is_none()`) and the NN stack was installed at build
-/// ([`SoloCrabStackInstalled`]), flip [`crate::net::solo_crab::SoloCrabActive`] on and hand
-/// the sim crab to external control
-/// so the rapier-NN body drives it. A networked round leaves the gate off → the integer crab,
-/// byte-identical to today's multiplayer. The crab's arena spawn was already seeded into the
-/// bridge at build (a pure function of the seed), so nothing about the spawn depends on the
-/// round here.
+/// On the menu path this is ALSO where the external NN crab is ARMED (rl#58 + GCR): if the NN
+/// stack was installed at build ([`SoloCrabStackInstalled`]) AND the resolved round may arm it
+/// ([`crate::net::may_arm_external_crab`]: solo always, networked only with synced weights),
+/// insert [`crate::net::solo_crab::ExternalCrabArmed`] and hand the sim crab to external control
+/// so the rapier-NN body drives it. A networked-UNSYNCED round (or no checkpoint) leaves the
+/// gate off → the integer crab, byte-identical to today's multiplayer. The crab's arena spawn
+/// was already seeded into the bridge at build (a pure function of the seed), so nothing about
+/// the spawn depends on the round here.
 ///
 /// Idempotent (guards on `GameState` already present), so it can't double-install if both
 /// a scripted round and a stray pending one ever coexisted. Reaching Playing with neither a
@@ -527,19 +547,21 @@ fn ensure_round_installed(world: &mut World) {
         .get_non_send_resource_mut::<PendingRound>()
         .and_then(|mut p| p.0.take())
         .expect("entered Playing with no round to install — the menu must park a round before transitioning");
-    // Arm the solo NN crab iff this round is solo AND the stack was installed at build
-    // (the shared gate — rl#64).
+    // Arm the external NN crab iff the stack was installed at build (a checkpoint was present)
+    // AND the resolved round may arm it (the shared GCR gate: solo always, networked only with
+    // synced weights — a float crab on an unsynced networked round would desync peers).
     let has_nn_stack = world
         .get_resource::<SoloCrabStackInstalled>()
         .is_some_and(|m| m.0);
-    if crate::net::should_arm_solo_crab(ready.net.is_none(), has_nn_stack) {
+    let weights_synced = ready.net.as_ref().is_some_and(NetDriver::weights_synced);
+    if has_nn_stack && crate::net::may_arm_external_crab(ready.net.is_none(), weights_synced) {
         let crab = ready.lockstep.sim().crab();
         // Arm + seed atomically with the crab's current pose/yaw (writing back what's there →
         // no state change), removing the set-pose-before-arm footgun.
         ready
             .lockstep
             .initialize_external_crab(crab.pos(), crab.yaw(), 0);
-        world.insert_resource(crate::net::solo_crab::SoloCrabActive);
+        world.insert_resource(crate::net::solo_crab::ExternalCrabArmed);
     }
     let source = match ready.net {
         Some(n) => InputSource::Networked(Box::new(n)),
@@ -681,189 +703,263 @@ struct StatusHud;
 // Lockstep driver system
 // ---------------------------------------------------------------------------
 
-/// Advance the lockstep sim by real time on a fixed-timestep accumulator. This is
-/// the ONLY writer of sim state, and it writes exactly one thing: the local
-/// [`Input`] (drained from [`PendingInput`]) via `submit_local_input`. Everything
-/// else is the existing deterministic machinery — pump the transport, then
-/// `try_advance`. A desync fault is logged (lockstep can't recover); the client
-/// keeps running so the operator sees it rather than a silent freeze.
-#[allow(clippy::too_many_arguments)] // Bevy system: every parameter is a framework-injected resource/local.
+/// Log + count each lockstep fault and forward it to telemetry — the shared reporting both
+/// fault sites in [`drive_lockstep`] (`record_remote` and `advance_one`) use, so they can't
+/// drift. A desync can't be recovered; we surface it (log + telemetry) and play on.
+fn report_faults(
+    faults: &[crate::net::lockstep::Fault],
+    total: &mut usize,
+    tel: &Option<crate::net::telemetry::TelemetrySender>,
+) {
+    for fault in faults {
+        *total += 1;
+        warn!("lockstep fault: {fault:?}");
+        if let Some(t) = tel {
+            t.send(TelemetryEvent::fault(fault));
+        }
+    }
+}
+
+/// Advance the crab's rapier physics + brain by exactly `steps` fixed steps, NOW, from the
+/// lockstep driver — the deterministic replacement for Bevy's wall-clock `FixedUpdate`
+/// auto-pump (disabled in [`add_solo_nn_crab`] by parking `Time<Fixed>` at a huge timestep).
+/// Each `run_schedule(FixedMain)` is one [`crate::physics::PHYSICS_DT`] step (rapier's own
+/// fixed `dt`, independent of any clock), so N calls advance the body exactly `N · PHYSICS_DT`.
+/// We mirror Bevy's own `run_fixed_main_schedule`: swap the generic `Time` to `Time<Fixed>`
+/// for the step (so any system reading `Res<Time>` inside the fixed schedule sees the fixed
+/// clock), then restore `Time<Virtual>` for the rest of `Update`/render. The step COUNT comes
+/// from the integer [`PhysicsCadence`] (not wall clock), so every peer runs the identical
+/// number of steps per lockstep tick and the per-tick `phys_digest` matches bit-for-bit.
+fn pump_fixed_steps(world: &mut World, steps: u32) {
+    use bevy::app::FixedMain;
+    use bevy::time::{Fixed, Time, Virtual};
+
+    if steps == 0 {
+        return;
+    }
+    for _ in 0..steps {
+        let fixed = world.resource::<Time<Fixed>>().as_generic();
+        *world.resource_mut::<Time>() = fixed;
+        world.run_schedule(FixedMain);
+    }
+    let virt = world.resource::<Time<Virtual>>().as_generic();
+    *world.resource_mut::<Time>() = virt;
+}
+
+/// Advance the lockstep sim by real time on a fixed-timestep accumulator. This is the ONLY
+/// writer of sim state, and (apart from the external crab pose) it writes exactly one thing:
+/// the local [`Input`] (drained from [`PendingInput`]) via `submit_local_input`. Everything
+/// else is the existing deterministic machinery — pump the transport, then advance.
+///
+/// GCR fold: when the external NN crab is armed ([`ExternalCrabArmed`] — solo OR a
+/// networked round with synced weights, [`crate::net::may_arm_external_crab`]), the rapier
+/// crab body is stepped INSIDE the lockstep tick: per APPLIED tick we run the deterministic
+/// [`PhysicsCadence`] number of physics steps ([`pump_fixed_steps`]) and push the body's
+/// resulting pose + weights-folded digest via [`solo_crab::sync_external_crab`] BEFORE
+/// applying that tick. We advance one tick at a time ([`Lockstep::advance_one`]) so each
+/// applied tick gets its own physics batch + pose — a batched `try_advance` (which can apply
+/// several ticks at once on catch-up) would smear one pose across them and desync peers. This
+/// is an EXCLUSIVE system because pumping the fixed schedule needs `&mut World`.
+///
+/// A desync fault is logged (lockstep can't recover); the client keeps running so the
+/// operator sees it rather than a silent freeze.
 fn drive_lockstep(
-    mut state: NonSendMut<GameState>,
-    mut pending: ResMut<PendingInput>,
-    time: Res<Time>,
-    // The solo NN-crab bridge, present whenever the NN stack was built in (the scripted
-    // solo path AND the menu path, where the round may turn out networked). We READ its
-    // game-world position to drive the sim crab and WRITE its hunt target (the nearest
-    // living player) for the policy to chase.
-    mut bridge: Option<ResMut<crate::net::solo_crab::SoloCrabBridge>>,
-    // The runtime gate: whether the NN crab is ACTIVE (the round resolved solo). On the menu
-    // path the bridge exists even for a networked round, so this — not the bridge's mere
-    // presence — is what decides whether to drive the external crab. False on every networked
-    // round, so the sim there is byte-identical to the integer-crab path (no NN pose pushed
-    // across the wire boundary). `None` ⇒ inactive.
-    solo_crab_active: Option<Res<crate::net::solo_crab::SoloCrabActive>>,
+    world: &mut World,
     mut reported_outcome: Local<bool>,
     mut next_tel_tick: Local<u64>,
     // Last sim tick this system saw, to detect a deterministic restart (RESTART rewinds
-    // the sim to tick 0). When it does, the round-decided latch and telemetry cursor
-    // below must reset, or the NEXT round never reports "decided" and tick-telemetry
-    // stays suppressed until the counter climbs back past the stale watermark.
+    // the sim to tick 0). When it does, the round-decided latch, telemetry cursor, AND the
+    // physics cadence below must reset, or the NEXT round never reports "decided", tick
+    // telemetry stays suppressed until the counter climbs past the stale watermark, and the
+    // crab's per-tick step count starts mid-sequence (a needless cross-peer phase risk).
     mut last_tick: Local<u64>,
     // Cumulative lockstep fault count across the whole round (persists between system
     // runs), so telemetry reports the REAL running desync total — not a per-frame 0. This
     // is the live-debug alarm: a non-zero value on any deck means it has diverged.
     mut total_desyncs: Local<usize>,
+    // The deterministic 64:30 physics/sim cadence, advanced once per APPLIED tick while armed.
+    // A `Local` (per-round state) reset on the restart edge so two peers stay phase-aligned.
+    mut cadence: Local<PhysicsCadence>,
 ) {
-    state.accumulator += time.delta().as_secs_f64();
+    // Whether the external NN crab drives the sim this round (solo, or networked + synced
+    // weights). Read once — the gate is fixed for the round. When off, the integer pursuit
+    // drives the crab and no physics is pumped, byte-identical to the pre-GCR path.
+    let armed = world
+        .get_resource::<crate::net::solo_crab::ExternalCrabArmed>()
+        .is_some();
 
-    // Clone out the telemetry handle (cheap: an mpsc sender + id) + the roster size so we
-    // can READ the sim and push events without holding a borrow of `state.input_source`
-    // (where the NetDriver that owns it lives). `None` unless this is networked play with
-    // a collector. Telemetry never writes the sim — it only reports it.
-    let (tel, roster_len) = match &state.input_source {
-        InputSource::Networked(net) => (net.telemetry().cloned(), net.roster_len()),
-        _ => (None, 0),
+    let delta = world.resource::<Time>().delta().as_secs_f64();
+
+    // Clone out the telemetry handle (cheap: an mpsc sender + id) + the roster size so we can
+    // READ the sim and push events without holding a borrow of the `NetDriver`. `None` unless
+    // this is networked play with a collector. Telemetry never writes the sim.
+    let (tel, roster_len) = {
+        let state = world.non_send_resource::<GameState>();
+        match &state.input_source {
+            InputSource::Networked(net) => (net.telemetry().cloned(), net.roster_len()),
+            _ => (None, 0),
+        }
     };
     if *next_tel_tick == 0 {
         *next_tel_tick = TELEMETRY_TICK_EVERY;
     }
 
-    // Whether the NN crab drives the sim this run (the round resolved solo). Read once — the
-    // gate can't change mid-round — and used below to decide whether to sync the external
-    // crab pose. The bridge may exist on a networked round (menu path), so this, not the
-    // bridge's presence, is the determinism-safe gate.
-    let nn_active = solo_crab_active.is_some();
+    world.non_send_resource_mut::<GameState>().accumulator += delta;
 
     let mut applied = 0u32;
-    while state.accumulator >= TICK_DT && applied < MAX_TICKS_PER_FRAME {
-        state.accumulator -= TICK_DT;
+    loop {
+        // Pace by wall clock: one local input issued per sim tick, bounded per frame so a
+        // stall can't trigger an unbounded catch-up spiral.
+        {
+            let state = world.non_send_resource::<GameState>();
+            if state.accumulator < TICK_DT || applied >= MAX_TICKS_PER_FRAME {
+                break;
+            }
+        }
+        world.non_send_resource_mut::<GameState>().accumulator -= TICK_DT;
         applied += 1;
 
-        // Snapshot the pre-step state for interpolation, then build THIS tick's local
-        // input from the accumulated controls and hand it to the deterministic driver.
-        state.prev = SimSnapshot::capture(state.ls.sim());
-
-        let look_axis = (pending.yaw_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
-        let btns = (if pending.action { buttons::ACTION } else { 0 })
-            | (if pending.restart { buttons::RESTART } else { 0 });
-        let input = Input::new(pending.strafe, pending.forward, look_axis, btns);
-        // Drain the accrued look + latched buttons; movement axes are re-sampled next frame.
-        pending.yaw_delta = 0.0;
-        pending.action = false;
-        pending.restart = false;
-
-        let me = state.ls.me();
-        let issue_tick = state.ls.next_tick();
-        let msg = state.ls.submit_local_input(input);
-
-        // Supply the OTHER players' inputs for this tick from whichever source this run
-        // uses, then record them into the deterministic driver. Collect them into a Vec
-        // first — releasing the borrow of `state.input_source`/`state.ls` — before
-        // recording into `state.ls`, since the source (`NetDriver`) and `ls` are fields
-        // of the same non-send resource and an overlapping borrow wouldn't type-check.
-        // Every path lands at `record_remote`, the same entry a wire peer takes, so the
-        // sim can't tell the sources apart. Split the field borrows via `&mut *state`.
-        let st = &mut *state;
-        let peer_msgs: Vec<PeerMsg> = match &mut st.input_source {
-            InputSource::Networked(net) => {
-                net.broadcast(&msg);
-                net.drain_inbox()
-            }
-            InputSource::Solo => Vec::new(),
-            InputSource::Scripted(bot) => {
-                // Stand in for the absent peers so the (otherwise-stalled) sim advances:
-                // feed every non-local player this input at the SAME apply_tick the local
-                // input got. Always a single-machine solo run, so no peer disagrees.
-                let bot = *bot;
-                st.ls
-                    .sim()
-                    .players()
-                    .map(|(id, _)| id)
-                    .filter(|&id| id != me)
-                    .map(|pid| PeerMsg {
-                        pid,
-                        msg: TickMsg {
-                            apply_tick: msg.apply_tick,
-                            input: bot,
-                            confirmed: None,
-                        },
-                    })
-                    .collect()
-            }
+        // Build THIS tick's local input from the accumulated controls, draining the accrued
+        // look + latched buttons (movement axes are re-sampled next frame).
+        let input = {
+            let mut pending = world.resource_mut::<PendingInput>();
+            let look_axis = (pending.yaw_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
+            let btns = (if pending.action { buttons::ACTION } else { 0 })
+                | (if pending.restart { buttons::RESTART } else { 0 });
+            let input = Input::new(pending.strafe, pending.forward, look_axis, btns);
+            pending.yaw_delta = 0.0;
+            pending.action = false;
+            pending.restart = false;
+            input
         };
-        for from in peer_msgs {
-            if from.pid != me
-                && let Some(fault) = state.ls.record_remote(from.pid, from.msg)
-            {
-                *total_desyncs += 1;
-                warn!("lockstep fault: {fault:?}");
-                if let Some(t) = &tel {
-                    t.send(TelemetryEvent::fault(&fault));
+
+        // Submit our input + gather the other players' inputs from whichever source this run
+        // uses, then record them — every path lands at `record_remote`, the same entry a wire
+        // peer takes, so the sim can't tell the sources apart.
+        let (issue_tick, faults) = {
+            let mut state = world.non_send_resource_mut::<GameState>();
+            let me = state.ls.me();
+            let issue_tick = state.ls.next_tick();
+            let msg = state.ls.submit_local_input(input);
+            // Collect peer messages first (releasing the `input_source`/`ls` co-borrow via
+            // `&mut *state`) before recording into `ls`.
+            let st = &mut *state;
+            let peer_msgs: Vec<PeerMsg> = match &mut st.input_source {
+                InputSource::Networked(net) => {
+                    net.broadcast(&msg);
+                    net.drain_inbox()
+                }
+                InputSource::Solo => Vec::new(),
+                InputSource::Scripted(bot) => {
+                    // Stand in for the absent peers so the (otherwise-stalled) sim advances:
+                    // feed every non-local player this input at the SAME apply_tick the local
+                    // input got. Always a single-machine solo run, so no peer disagrees.
+                    let bot = *bot;
+                    st.ls
+                        .sim()
+                        .players()
+                        .map(|(id, _)| id)
+                        .filter(|&id| id != me)
+                        .map(|pid| PeerMsg {
+                            pid,
+                            msg: TickMsg {
+                                apply_tick: msg.apply_tick,
+                                input: bot,
+                                confirmed: None,
+                            },
+                        })
+                        .collect()
+                }
+            };
+            let mut faults = Vec::new();
+            for from in peer_msgs {
+                if from.pid != me
+                    && let Some(fault) = state.ls.record_remote(from.pid, from.msg)
+                {
+                    faults.push(fault);
                 }
             }
-        }
+            (issue_tick, faults)
+        };
+        report_faults(&faults, &mut total_desyncs, &tel);
 
-        // SOLO NN crab: before advancing, push the real rapier crab body's game-world
-        // position + facing into the sim (so this tick's grab/extraction/outcome resolve
-        // against the NN crab, not the disabled integer pursuit) and refresh the player it
-        // hunts. One shared handshake with the headless probe. Gated on the runtime ACTIVE
-        // flag, NOT the bridge's mere presence: on the menu path the bridge exists even for a
-        // networked round, and syncing the NN pose there would push a float crab across the
-        // wire boundary and desync peers. `nn_active` is false on every networked round, so
-        // the multiplayer sim stays byte-identical to the integer-crab path.
-        if nn_active && let Some(bridge) = bridge.as_deref_mut() {
-            crate::net::solo_crab::sync_external_crab(&mut state.ls, bridge);
-        }
-
-        for fault in state.ls.try_advance() {
-            *total_desyncs += 1;
-            warn!("lockstep fault: {fault:?}");
-            if let Some(t) = &tel {
-                t.send(TelemetryEvent::fault(&fault));
+        // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step
+        // state for interpolation; if armed, step the crab body by the deterministic cadence
+        // and push its resulting pose + digest BEFORE advancing, so this tick's
+        // grab/extraction/outcome resolve against the real NN crab and every peer folds the
+        // identical `phys_digest`. When not armed, the integer pursuit drives the crab and the
+        // tick is byte-identical to the pre-GCR path.
+        loop {
+            {
+                let state = world.non_send_resource::<GameState>();
+                if !state.ls.next_tick_ready() {
+                    break;
+                }
             }
+            {
+                let mut state = world.non_send_resource_mut::<GameState>();
+                state.prev = SimSnapshot::capture(state.ls.sim());
+            }
+            if armed {
+                let steps = cadence.steps_for_next_tick();
+                pump_fixed_steps(world, steps);
+                // Push the freshly-stepped body's pose + weights-folded digest + refresh the
+                // hunted player — the shared handshake (one source with the headless probe).
+                // `resource_scope` lifts the bridge out so we can hold it AND `GameState`'s
+                // `ls` mutably at once (both live in the same `World`).
+                world.resource_scope(
+                    |world, mut bridge: Mut<crate::net::solo_crab::SoloCrabBridge>| {
+                        let mut state = world.non_send_resource_mut::<GameState>();
+                        crate::net::solo_crab::sync_external_crab(&mut state.ls, &mut bridge);
+                    },
+                );
+            }
+            let tick_faults = {
+                let mut state = world.non_send_resource_mut::<GameState>();
+                state.ls.advance_one().expect("next_tick_ready was true")
+            };
+            report_faults(&tick_faults, &mut total_desyncs, &tel);
         }
 
         // Sampled telemetry: a Tick snapshot + the local input every TELEMETRY_TICK_EVERY
-        // applied ticks. Read-only on the sim; best-effort (drops if the link can't keep
-        // up). `roster` is the agreed player count (sync + accurate), `desyncs` is the real
-        // running fault total, and the (tick, hash) is what the cross-peer desync check
-        // needs.
-        if let Some(t) = &tel
-            && state.ls.sim().tick() >= *next_tel_tick
-        {
-            *next_tel_tick =
-                (state.ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
-            t.send(TelemetryEvent::tick(
-                state.ls.sim(),
-                *total_desyncs,
-                roster_len,
-            ));
-            t.send(TelemetryEvent::input(issue_tick, input));
+        // applied ticks. Read-only on the sim; best-effort (drops if the link can't keep up).
+        if let Some(t) = &tel {
+            let state = world.non_send_resource::<GameState>();
+            if state.ls.sim().tick() >= *next_tel_tick {
+                *next_tel_tick =
+                    (state.ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
+                t.send(TelemetryEvent::tick(state.ls.sim(), *total_desyncs, roster_len));
+                t.send(TelemetryEvent::input(issue_tick, input));
+            }
         }
     }
 
     if applied == MAX_TICKS_PER_FRAME {
         // Shed the backlog rather than spiral: drop accumulated time past one tick.
+        let mut state = world.non_send_resource_mut::<GameState>();
         state.accumulator = state.accumulator.min(TICK_DT);
     }
 
-    // Restart detector: a RESTART press rewinds the sim to tick 0, so a tick lower than
-    // last frame's means the round restarted. Clear the round-decided latch so the new
-    // round can report its own outcome, and snap the telemetry cursor back to the new
-    // (low) tick so sampled telemetry resumes immediately instead of waiting out a stale
-    // watermark.
-    let now_tick = state.ls.sim().tick();
+    // Restart detector: a RESTART press rewinds the sim to tick 0, so a tick lower than last
+    // frame's means the round restarted. Clear the round-decided latch, snap the telemetry
+    // cursor back to the new (low) tick, and reset the cadence so the crab's per-tick step
+    // sequence restarts in phase across peers.
+    let (now_tick, outcome) = {
+        let state = world.non_send_resource::<GameState>();
+        (state.ls.sim().tick(), state.ls.sim().outcome())
+    };
     if now_tick < *last_tick {
         *reported_outcome = false;
         *next_tel_tick = (now_tick / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
+        *cadence = PhysicsCadence::default();
     }
     *last_tick = now_tick;
 
-    if !*reported_outcome && state.ls.sim().outcome() != Outcome::Ongoing {
+    if !*reported_outcome && outcome != Outcome::Ongoing {
         *reported_outcome = true;
-        info!("round decided: {:?}", state.ls.sim().outcome());
+        info!("round decided: {outcome:?}");
         if let Some(t) = &tel {
+            let state = world.non_send_resource::<GameState>();
             t.send(TelemetryEvent::round_decided(state.ls.sim()));
         }
     }
@@ -1062,7 +1158,7 @@ fn spawn_world(
     // spawned hidden (the real rig is the crab). Keyed on the active gate, NOT the bridge's
     // presence — on the menu path the bridge exists even for a networked round, which must
     // keep the visible integer crab box. See the crab spawn below.
-    solo_crab_active: Option<Res<crate::net::solo_crab::SoloCrabActive>>,
+    external_crab_armed: Option<Res<crate::net::solo_crab::ExternalCrabArmed>>,
 ) {
     // Ground: a large gray plane at Y=0.
     commands.spawn((
@@ -1194,7 +1290,7 @@ fn spawn_world(
     // the box is spawned HIDDEN there — the active gate is the tell — and the rig shows
     // instead. (We still spawn it so `apply_transforms`'s crab query is satisfied either
     // way; it just stays invisible.)
-    let crab_hidden = solo_crab_active.is_some();
+    let crab_hidden = external_crab_armed.is_some();
     let crab_h = PLAYER_HEIGHT * CRAB_SCALE as f32;
     let crab_w = PLAYER_RADIUS * 2.0 * CRAB_SCALE as f32;
     let crab_root = commands
@@ -2274,6 +2370,76 @@ mod tests {
                 .is_some_and(|p| p.0.is_none()),
             "the chosen round must be taken out of PendingRound"
         );
+    }
+
+    /// The GCR fold's manual fixed-step pump ([`pump_fixed_steps`]) must reproduce, bit-for-bit,
+    /// the physics Bevy's wall-clock auto-pump produces — the stepping `bot::determinism_probe`
+    /// proves deterministic. Build two identical headless crab worlds; step one with `app.update()`
+    /// (the auto-pump path) and the other with `pump_fixed_steps` after parking `Time<Fixed>` (the
+    /// windowed driver's path); drive both with the SAME scripted torque and assert their full
+    /// articulated crab digests agree every tick. If they do, the windowed crab inherits ALL of
+    /// the probe's determinism guarantees; if `pump_fixed_steps` ever double-stepped, skipped a
+    /// fixed sub-schedule, or fed the wrong clock, this diverges. (Render-only — it needs the real
+    /// rapier+bot stack — but headless: no window/GPU.)
+    #[test]
+    fn manual_pump_matches_auto_pump_step_for_step() {
+        use crate::bot::actuator::{ACTION_SIZE, CrabActions};
+        use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint};
+        use crate::bot::physics_digest::crab_state_digest;
+        use crate::bot::test_util::{HeadlessStack, WorldRole, headless_stack};
+        use bevy_rapier3d::prelude::Velocity;
+
+        let build = || {
+            headless_stack(HeadlessStack {
+                num_envs: 1,
+                role: WorldRole::Standalone,
+            })
+        };
+        let mut auto = build();
+        let mut manual = build();
+        // One update each: run Startup (spawns the crab + sizes CrabActions) + one physics step,
+        // so both worlds start from the identical post-spawn state.
+        auto.update();
+        manual.update();
+        // Park the manual world's wall-clock auto-pump, exactly as `add_solo_nn_crab` does, so
+        // from here ONLY `pump_fixed_steps` advances its physics.
+        manual
+            .world_mut()
+            .resource_mut::<bevy::time::Time<bevy::time::Fixed>>()
+            .set_timestep(std::time::Duration::from_secs(86_400));
+
+        let digest = |app: &mut App| -> u64 {
+            let mut q = app.world_mut().query_filtered::<(
+                &Transform,
+                &Velocity,
+                Option<&CrabJoint>,
+                Option<&CrabCarapace>,
+            ), With<CrabBodyPart>>();
+            crab_state_digest(q.iter(app.world()).map(|(t, v, j, c)| (t, v, j, c)))
+        };
+        let set_torque = |app: &mut App, a: [f32; ACTION_SIZE]| {
+            app.world_mut().resource_mut::<CrabActions>().envs[0] = a;
+        };
+
+        let mut lcg: u64 = 0x1234_5678_9abc_def0;
+        for t in 0..120u32 {
+            let mut act = [0.0f32; ACTION_SIZE];
+            for slot in act.iter_mut() {
+                lcg = lcg
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                *slot = ((lcg >> 40) as u32 as f32 / (1u32 << 24) as f32) * 1.6 - 0.8;
+            }
+            set_torque(&mut auto, act);
+            set_torque(&mut manual, act);
+            auto.update();
+            pump_fixed_steps(manual.world_mut(), 1);
+            assert_eq!(
+                digest(&mut auto),
+                digest(&mut manual),
+                "manual pump diverged from auto-pump at tick {t}"
+            );
+        }
     }
 
     /// The frame conversion must match the sim's documented right-handed XZ layout:
