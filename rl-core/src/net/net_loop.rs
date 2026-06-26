@@ -55,6 +55,10 @@ pub struct NetDriver {
     /// collector). Best-effort and read-only — see [`crate::net::telemetry`]; the
     /// windowed driver pushes Tick/Input/RoundDecided/Fault through it.
     telemetry: Option<TelemetrySender>,
+    /// Whether the barrier agreed every peer loaded the same non-zero weights (rl#82, GCR —
+    /// [`Membership::weights_synced`]); read by the arm sites via
+    /// [`crate::net::may_arm_external_crab`]. `false` without a supplied checkpoint.
+    weights_synced: bool,
 }
 
 impl NetDriver {
@@ -70,6 +74,14 @@ impl NetDriver {
     /// via the session; the agreed roster size is what the operator wants anyway).
     pub fn roster_len(&self) -> usize {
         self.id_map.len()
+    }
+
+    /// Whether the formation barrier agreed every peer loaded the SAME non-zero policy
+    /// weights (rl#82, GCR — [`Membership::weights_synced`]). The arm sites gate the float
+    /// NN crab on this via [`crate::net::may_arm_external_crab`]; `false` keeps the integer
+    /// crab. Always `false` without a supplied checkpoint (the digest exchanged was `0`).
+    pub fn weights_synced(&self) -> bool {
+        self.weights_synced
     }
 
     /// Broadcast our tick message to every connected peer. Non-blocking from the
@@ -158,7 +170,7 @@ pub fn connect_and_form(
     expect: usize,
     collector: Option<iroh::EndpointId>,
 ) -> Result<MatchResult> {
-    connect_and_form_dialing(seed, discover_secs, expect, None, collector, None)
+    connect_and_form_dialing(seed, discover_secs, expect, None, collector, None, 0)
 }
 
 /// [`connect_and_form`] plus an optional direct dial of a host's endpoint id before the
@@ -178,6 +190,10 @@ pub fn connect_and_form(
 /// `on_bound` (if any) is sent our own endpoint id the instant the session binds — before
 /// the slow barrier — so a Host UI can display the join code to share while waiting. A
 /// closed receiver is ignored (the caller stopped caring); it never gates formation.
+///
+/// `local_weights_digest` is OUR policy-checkpoint digest (rl#82, GCR), `0` for none. It is
+/// advertised in the formation beats; the agreed [`NetDriver::weights_synced`] tells the
+/// caller whether every peer matched it (the shared-checkpoint guard).
 pub fn connect_and_form_dialing(
     seed: u64,
     discover_secs: u64,
@@ -185,10 +201,20 @@ pub fn connect_and_form_dialing(
     dial: Option<iroh::EndpointId>,
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
+    local_weights_digest: u64,
 ) -> Result<MatchResult> {
     // The scripted/headless path: no interactive lobby (`None`), so the default
     // (timer-closed) barrier.
-    connect_and_form_inner(seed, discover_secs, expect, dial, collector, on_bound, None)
+    connect_and_form_inner(
+        seed,
+        discover_secs,
+        expect,
+        dial,
+        collector,
+        on_bound,
+        None,
+        local_weights_digest,
+    )
 }
 
 /// The boot-menu networked entry: [`connect_and_form_dialing`] plus a [`LobbyControl`] for
@@ -205,8 +231,18 @@ pub fn connect_and_form_lobby(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     control: LobbyControl,
+    local_weights_digest: u64,
 ) -> Result<MatchResult> {
-    connect_and_form_inner(seed, 0, expect, dial, collector, on_bound, Some(control))
+    connect_and_form_inner(
+        seed,
+        0,
+        expect,
+        dial,
+        collector,
+        on_bound,
+        Some(control),
+        local_weights_digest,
+    )
 }
 
 /// The shared body of both networked entrypoints: bind, optionally dial, run the barrier
@@ -222,6 +258,7 @@ fn connect_and_form_inner(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     lobby: Option<LobbyControl>,
+    local_weights_digest: u64,
 ) -> Result<MatchResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -257,6 +294,7 @@ fn connect_and_form_inner(
             expect,
             telemetry.as_ref(),
             lobby.as_ref(),
+            local_weights_digest,
         )
         .await?;
         anyhow::Ok((session, formation, telemetry))
@@ -289,6 +327,7 @@ fn connect_and_form_inner(
         session,
         id_map: frozen.id_map,
         telemetry,
+        weights_synced: frozen.weights_synced,
     };
     Ok(MatchResult::Joined(Box::new((ls, driver))))
 }
@@ -318,6 +357,9 @@ pub struct Frozen {
     pub id_map: BTreeMap<EndpointId, PlayerId>,
     pub me: PlayerId,
     pub early: Vec<(EndpointId, TickMsg)>,
+    /// Carried out of the barrier so [`NetDriver::weights_synced`] can expose it; see
+    /// [`Membership::weights_synced`].
+    pub weights_synced: bool,
 }
 
 /// What [`form_match`] resolves to: a real agreed match, the genuinely-alone case, or a
@@ -357,13 +399,23 @@ pub async fn form_match(
     expect: usize,
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
+    local_weights_digest: u64,
 ) -> Result<Formation> {
     let my_eid = session.endpoint_id();
     println!(
         "forming match on the LAN (need {expect} player(s), solo if alone after {discover_secs}s)…"
     );
 
-    let outcome = match run_barrier(session, my_eid, discover_secs, expect, telemetry, lobby).await
+    let outcome = match run_barrier(
+        session,
+        my_eid,
+        discover_secs,
+        expect,
+        telemetry,
+        lobby,
+        local_weights_digest,
+    )
+    .await
     {
         Ok(BarrierResult::Agreed(o)) => o,
         Ok(BarrierResult::Alone) => {
@@ -404,10 +456,28 @@ pub async fn form_match(
             me: me.0,
         });
     }
+    // GCR shared-checkpoint guard (rl#82): make the verdict LOUD. With a checkpoint loaded
+    // (`local_weights_digest != 0`) the operator needs to know whether the NN crab will arm:
+    // a mismatch means it WON'T (stays integer), which would otherwise look like a silent
+    // regression. With no checkpoint we say nothing (the integer crab is the only option).
+    if local_weights_digest != 0 {
+        if outcome.weights_synced {
+            println!(
+                "GCR: policy weights synced across all {} peer(s) — NN crab eligible for lockstep",
+                id_map.len()
+            );
+        } else {
+            tracing::warn!(
+                "GCR: weights NOT synced across peers (digest mismatch or a peer has no \
+                 checkpoint) — refusing to arm the NN crab; using the deterministic integer crab"
+            );
+        }
+    }
     Ok(Formation::Agreed(Frozen {
         id_map,
         me,
         early: outcome.early,
+        weights_synced: outcome.weights_synced,
     }))
 }
 
@@ -419,6 +489,8 @@ struct BarrierOutcome {
     roster: Vec<EndpointId>,
     early: Vec<(EndpointId, TickMsg)>,
     elapsed: Duration,
+    /// [`Membership::weights_synced`] sampled at the close instant (rl#82, GCR).
+    weights_synced: bool,
 }
 
 /// The non-error outcomes of [`run_barrier`]: a real agreement, the alone fallback, or a
@@ -465,14 +537,17 @@ async fn run_barrier(
     expect: usize,
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
+    local_weights_digest: u64,
 ) -> Result<BarrierResult> {
     let start = Instant::now();
     // `Some(control)` is the interactive lobby (host-triggered close per its `role`); `None`
-    // is the default timer barrier. The mode is this explicit choice, never inferred.
+    // is the default timer barrier. The mode is this explicit choice, never inferred. Our
+    // weights digest (rl#82) rides every beat so peers can agree on a shared checkpoint.
     let mut m = match lobby {
         Some(c) => Membership::host_triggered(c.role, me, expect, start),
         None => Membership::new(me, expect, start),
-    };
+    }
+    .with_weights_digest(local_weights_digest);
     let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
     let mut ticker = tokio::time::interval(BEAT_EVERY);
     let mut last_live = 0usize;
@@ -544,10 +619,13 @@ async fn run_barrier(
 
         match status {
             Status::Agreed { roster } => {
+                // Sample the weights verdict at the close instant — `poll` (above) just expired
+                // the dead, so the live set this reflects is exactly the frozen `roster`.
                 return Ok(BarrierResult::Agreed(BarrierOutcome {
                     roster,
                     early,
                     elapsed: now.duration_since(start),
+                    weights_synced: m.weights_synced(),
                 }));
             }
             Status::Failed => {
@@ -755,14 +833,14 @@ mod tests {
         // Run all three barriers concurrently. s2's dials are issued from inside its
         // future after a short delay, so it shows up mid-formation. `None` lobby — this
         // exercises the unchanged timer-closed barrier.
-        let f0 = form_match(&mut s0, 1, 3, None, None);
-        let f1 = form_match(&mut s1, 1, 3, None, None);
+        let f0 = form_match(&mut s0, 1, 3, None, None, 0);
+        let f1 = form_match(&mut s1, 1, 3, None, None, 0);
         let f2 = async {
             // Stagger: let s0/s1 form their partial view first, then s2 meshes in.
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             s2.connect_direct(a0.clone()).await.expect("s2->s0");
             s2.connect_direct(a1.clone()).await.expect("s2->s1");
-            form_match(&mut s2, 1, 3, None, None).await
+            form_match(&mut s2, 1, 3, None, None, 0).await
         };
         let (r0, r1, r2) = tokio::join!(f0, f1, f2);
         // Each peer must AGREE (not fall back to solo — they all see each other), so unwrap
