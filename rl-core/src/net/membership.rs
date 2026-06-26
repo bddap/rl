@@ -117,6 +117,12 @@ pub struct Beat {
     /// Always `false` outside the host-triggered menu path, so every other caller's wire
     /// and close behaviour is unchanged.
     pub start: bool,
+    /// The sender's policy-weights digest (rl#82, GCR), `0` for no checkpoint — see
+    /// [`Membership::weights_synced`] for what it gates. Deliberately NOT folded into
+    /// [`Beat::roster_hash`]: it is a capability advertisement, not membership, so two peers
+    /// with the identical roster still freeze the same set regardless of their brains (a
+    /// weights mismatch keeps the integer crab; it never breaks match formation).
+    pub weights_digest: u64,
 }
 
 impl Beat {
@@ -207,6 +213,11 @@ pub struct Membership {
     /// stale roster: a GO seen while our sets disagreed does not close us, and a set change
     /// after a GO re-gates on the new hash. The joiner's sole close trigger in the lobby.
     host_go_on_my_roster: bool,
+    /// OUR policy-weights digest (rl#82, GCR), `0` for no checkpoint. Advertised in every
+    /// [`Membership::beat`] and the basis of [`Membership::weights_synced`]. `0` by default
+    /// ([`Membership::with_weights_digest`] sets it), so a caller that never sets it behaves
+    /// exactly as pre-rl#82 — `weights_synced` is then always false.
+    local_digest: u64,
 }
 
 /// How a [`Membership`] barrier decides to close (rl#58). A sum type so the
@@ -247,6 +258,11 @@ struct PeerView {
     /// hash *from the same beat* — a host that commanded start on roster R can't close a
     /// joiner that's on a different roster. A relay never sets this (only a direct beat).
     started: bool,
+    /// The policy-weights digest this peer last advertised in its OWN direct beat (rl#82),
+    /// or `None` if heard only via relay. Like `advertised`, `None` can never equal our
+    /// non-zero digest, so a peer not yet heard directly blocks [`Membership::weights_synced`]
+    /// until it speaks for itself.
+    weights_digest: Option<u64>,
 }
 
 /// The barrier's verdict on each [`Membership::poll`]: keep waiting, freeze this exact
@@ -296,7 +312,18 @@ impl Membership {
             started: now,
             lobby: LobbyMode::Off,
             host_go_on_my_roster: false,
+            local_digest: 0,
         }
+    }
+
+    /// Set OUR policy-weights digest (rl#82, GCR), advertised in every [`Membership::beat`]
+    /// so peers can agree on a shared checkpoint before arming the float NN crab in lockstep.
+    /// Builder form (chains off [`Membership::new`] / [`Membership::host_triggered`]) because
+    /// the digest is a launch-time constant — the loaded checkpoint can't change mid-formation.
+    /// `0` (the default) means "no usable checkpoint"; it never counts as synced.
+    pub fn with_weights_digest(mut self, digest: u64) -> Self {
+        self.local_digest = digest;
+        self
     }
 
     /// Begin a host-triggered (interactive lobby) formation (rl#58, boot-menu networked
@@ -361,12 +388,16 @@ impl Membership {
                     last_direct: now,
                     advertised: None,
                     started: false,
+                    weights_digest: None,
                 });
                 view.last_direct = now;
                 view.advertised = Some(beat.roster_hash());
                 // Latch the host's GO from THIS direct beat; paired with `advertised` so the
                 // joiner close requires both the GO and a matching roster from one beat.
                 view.started = beat.start;
+                // Record the peer's advertised brain digest (rl#82) for the weights-synced
+                // check; only a direct beat sets it, like `advertised`/`started`.
+                view.weights_digest = Some(beat.weights_digest);
             }
         }
         // Transitive admission: a relayed id we don't track yet and that isn't
@@ -388,6 +419,7 @@ impl Membership {
                         last_direct: now,
                         advertised: None,
                         started: false,
+                        weights_digest: None,
                     },
                 );
             }
@@ -417,7 +449,25 @@ impl Membership {
             // Only a host that has clicked Start advertises the GO; everything else sends a
             // plain beat. So a joiner/timer barrier can never put `start` on the wire.
             start: matches!(self.lobby, LobbyMode::Host { started: true }),
+            weights_digest: self.local_digest,
         }
+    }
+
+    /// Whether every peer in the match (us + all live peers) advertised the SAME, NON-ZERO
+    /// policy-weights digest (rl#82, GCR) — the upstream half of the shared-checkpoint guard.
+    /// True only when we have a real checkpoint (`local_digest != 0`) AND every live peer's
+    /// last DIRECT beat carried that exact digest. A `None` (relay-only, never heard directly)
+    /// or any differing/zero digest fails it, so an unsynced brain can never be armed into
+    /// lockstep — it stays on the deterministic integer crab. This is an OUTPUT, never a close
+    /// gate: a weights mismatch still forms and plays the match (integer crab), it just refuses
+    /// to hand the crab to the float NN body. Call after [`Membership::poll`] (which expires
+    /// the dead) so the live set is current; pairs with [`crate::net::may_arm_external_crab`].
+    pub fn weights_synced(&self) -> bool {
+        self.local_digest != 0
+            && self
+                .peers
+                .values()
+                .all(|v| v.weights_digest == Some(self.local_digest))
     }
 
     /// Advance the clock and return the verdict — the SINGLE per-round entry point.
@@ -509,20 +559,21 @@ impl Membership {
     }
 }
 
-/// Encode a [`Beat`] for the wire: `[start:u8][count:u16 LE][id:32]*count`, ids sorted.
-/// Fixed 32-byte ids (an [`EndpointId`] is a 32-byte public key) so the body is
-/// `3 + 32*count` with no per-id length. The leading `start` byte is the host's GO
-/// flag (rl#58); it is NOT folded into [`roster_hash`] (a command, not membership), so
-/// the same set hashes identically whether or not the round has been commanded to start.
-/// The count is bounded by [`MAX_BEAT_MEMBERS`] on decode so a hostile/garbled frame
-/// can't trigger a huge allocation.
+/// Encode a [`Beat`] for the wire: `[start:u8][count:u16 LE][weights_digest:u64 LE][id:32]*count`,
+/// ids sorted. Fixed 32-byte ids (an [`EndpointId`] is a 32-byte public key) so the body is
+/// `11 + 32*count` with no per-id length. The leading `start` byte is the host's GO
+/// flag (rl#58); the `weights_digest` (rl#82) is the sender's checkpoint digest. NEITHER is
+/// folded into [`roster_hash`] (a command / a capability, not membership), so the same set
+/// hashes identically regardless of start or brain. The count is bounded by
+/// [`MAX_BEAT_MEMBERS`] on decode so a hostile/garbled frame can't trigger a huge allocation.
 pub fn encode_beat(beat: &Beat) -> Vec<u8> {
     let mut sorted = beat.members.clone();
     sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     sorted.dedup();
-    let mut out = Vec::with_capacity(3 + 32 * sorted.len());
+    let mut out = Vec::with_capacity(11 + 32 * sorted.len());
     out.push(beat.start as u8);
     out.extend_from_slice(&(sorted.len() as u16).to_le_bytes());
+    out.extend_from_slice(&beat.weights_digest.to_le_bytes());
     for id in &sorted {
         out.extend_from_slice(id.as_bytes());
     }
@@ -538,14 +589,18 @@ const MAX_BEAT_MEMBERS: usize = 256;
 /// past [`MAX_BEAT_MEMBERS`] (a malformed/hostile frame) rather than panicking or
 /// over-allocating.
 pub fn decode_beat(body: &[u8]) -> Result<Beat> {
-    anyhow::ensure!(body.len() >= 3, "barrier frame too short for start+count");
+    anyhow::ensure!(
+        body.len() >= 11,
+        "barrier frame too short for start+count+digest"
+    );
     let start = body[0] != 0;
     let count = u16::from_le_bytes([body[1], body[2]]) as usize;
     anyhow::ensure!(
         count <= MAX_BEAT_MEMBERS,
         "barrier frame claims {count} members (> {MAX_BEAT_MEMBERS})"
     );
-    let need = 3 + 32 * count;
+    let weights_digest = u64::from_le_bytes(body[3..11].try_into().expect("8-byte slice"));
+    let need = 11 + 32 * count;
     anyhow::ensure!(
         body.len() == need,
         "barrier frame length {} != expected {need} for {count} members",
@@ -553,13 +608,17 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     );
     let mut members = Vec::with_capacity(count);
     for i in 0..count {
-        let off = 3 + 32 * i;
+        let off = 11 + 32 * i;
         let bytes: [u8; 32] = body[off..off + 32].try_into().expect("32-byte slice");
         let id = EndpointId::from_bytes(&bytes)
             .map_err(|e| anyhow::anyhow!("bad endpoint id in barrier frame: {e}"))?;
         members.push(id);
     }
-    Ok(Beat { members, start })
+    Ok(Beat {
+        members,
+        start,
+        weights_digest,
+    })
 }
 
 #[cfg(test)]
@@ -586,6 +645,7 @@ mod tests {
         Beat {
             members,
             start: false,
+            weights_digest: 0,
         }
     }
 
@@ -613,15 +673,17 @@ mod tests {
 
     #[test]
     fn decode_rejects_garbage() {
-        assert!(decode_beat(&[0]).is_err(), "too short for start+count");
-        // start byte + count=5 but no member bodies.
+        assert!(decode_beat(&[0]).is_err(), "too short for start+count+digest");
+        // Valid header (start + count=5 + digest) but no member bodies.
         let mut truncated = vec![0u8];
         truncated.extend_from_slice(&5u16.to_le_bytes());
+        truncated.extend_from_slice(&0u64.to_le_bytes());
         assert!(decode_beat(&truncated).is_err(), "truncated body");
-        // count past the cap (start byte + bogus count + filler).
+        // count past the cap (start byte + bogus count + digest + filler).
         let mut huge = vec![0u8];
         huge.extend_from_slice(&(300u16).to_le_bytes());
-        huge.resize(3 + 32 * 300, 0);
+        huge.extend_from_slice(&0u64.to_le_bytes());
+        huge.resize(11 + 32 * 300, 0);
         assert!(decode_beat(&huge).is_err(), "over-large count rejected");
     }
 
@@ -636,6 +698,7 @@ mod tests {
         let go = Beat {
             members,
             start: true,
+            weights_digest: 0,
         };
         assert_eq!(
             plain.roster_hash(),
@@ -653,6 +716,89 @@ mod tests {
             roster_hash(&[eid(1), eid(2), eid(3)]),
             "{{A,B}} and {{A,B,C}} must not collide — the close condition relies on it"
         );
+    }
+
+    // ── Weights-digest handshake (rl#82, GCR — the shared-checkpoint guard) ──────────
+
+    /// A heartbeat carrying a weights digest, for the synced-brain tests.
+    fn bt_d(members: Vec<EndpointId>, weights_digest: u64) -> Beat {
+        Beat {
+            members,
+            start: false,
+            weights_digest,
+        }
+    }
+
+    #[test]
+    fn weights_digest_roundtrips_on_the_wire() {
+        // The digest survives encode→decode and (like `start`) does NOT perturb the roster
+        // hash: two beats with the same members but different brains still agree on the set.
+        let members = vec![eid(1), eid(2)];
+        let a = bt_d(members.clone(), 0xDEAD_BEEF_F00D_1234);
+        let b = bt_d(members, 0x1111_2222_3333_4444);
+        assert_eq!(
+            a.roster_hash(),
+            b.roster_hash(),
+            "the weights digest must not be part of the roster hash"
+        );
+        assert_eq!(
+            decode_beat(&encode_beat(&a)).unwrap().weights_digest,
+            0xDEAD_BEEF_F00D_1234
+        );
+    }
+
+    #[test]
+    fn weights_synced_only_when_all_peers_share_one_nonzero_digest() {
+        let t0 = Instant::now();
+        let (ida, idb) = (eid(1), eid(2));
+        const BRAIN: u64 = 0xABCD_0000_1234_5678;
+
+        // Matched, non-zero brains on both peers → synced.
+        let mut a = Membership::new(ida, 2, t0).with_weights_digest(BRAIN);
+        a.on_beat(idb, &bt_d(vec![ida, idb], BRAIN), t0);
+        a.poll(t0);
+        assert!(a.weights_synced(), "equal non-zero digests must be synced");
+
+        // A peer on a DIFFERENT brain → not synced (the mismatch case the guard exists for).
+        let mut b = Membership::new(ida, 2, t0).with_weights_digest(BRAIN);
+        b.on_beat(idb, &bt_d(vec![ida, idb], BRAIN ^ 0xFF), t0);
+        b.poll(t0);
+        assert!(!b.weights_synced(), "a differing peer digest must not be synced");
+
+        // A peer advertising a ZERO digest (no checkpoint) → not synced.
+        let mut c = Membership::new(ida, 2, t0).with_weights_digest(BRAIN);
+        c.on_beat(idb, &bt_d(vec![ida, idb], 0), t0);
+        c.poll(t0);
+        assert!(!c.weights_synced(), "a zero peer digest must not be synced");
+
+        // OUR OWN digest zero (no checkpoint locally) → never synced, even if a peer has one.
+        let mut d = Membership::new(ida, 2, t0); // local_digest defaults to 0
+        d.on_beat(idb, &bt_d(vec![ida, idb], BRAIN), t0);
+        d.poll(t0);
+        assert!(!d.weights_synced(), "a zero local digest is never synced");
+    }
+
+    #[test]
+    fn relay_only_peer_blocks_weights_synced() {
+        // A peer we know only via another's relay (never a DIRECT beat) has `weights_digest:
+        // None`, which can't equal our digest — so it blocks synced until it speaks for itself,
+        // exactly like the roster-agreement `advertised: None` rule. Prevents arming the NN
+        // crab against a peer whose brain we've never actually heard.
+        let t0 = Instant::now();
+        let (ida, idb, idc) = (eid(1), eid(2), eid(3));
+        const BRAIN: u64 = 0x9999_8888_7777_6666;
+        let mut a = Membership::new(ida, 3, t0).with_weights_digest(BRAIN);
+        // B beats directly with the matching brain AND relays C's existence (no C digest).
+        a.on_beat(idb, &bt_d(vec![ida, idb, idc], BRAIN), t0);
+        a.poll(t0);
+        assert!(
+            !a.weights_synced(),
+            "a relay-only peer (digest None) must block synced"
+        );
+        // Now C beats directly with the matching brain → all heard, all matched → synced.
+        a.on_beat(idc, &bt_d(vec![ida, idb, idc], BRAIN), t0);
+        a.poll(t0);
+        assert!(a.weights_synced(), "once every peer is heard with the same brain, synced");
     }
 
     #[test]
@@ -1123,6 +1269,7 @@ mod tests {
         let host_go_on_partial = Beat {
             members: vec![idh],
             start: true,
+            weights_digest: 0,
         };
         let mut t = 0u64;
         let mut closed = false;

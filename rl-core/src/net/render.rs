@@ -205,10 +205,12 @@ pub enum AppPhase {
 /// `Plugin::build(&self)` can't move a non-`Clone` `Lockstep`/`NetDriver` out of
 /// itself — inserting them as resources at the `Playing` transition is the clean path.
 ///
-/// `solo_crab` (solo only) points at a trained checkpoint dir; when set on a solo round
-/// the giant crab is the REAL rapier-simulated NN body ([`crate::net::solo_crab`])
-/// instead of the integer point-pursuer. Ignored on the networked path — a float crab is
-/// not cross-peer deterministic, so multiplayer keeps the integer crab.
+/// `solo_crab` points at a trained checkpoint dir; when set on a solo round the giant crab
+/// is the REAL rapier-simulated NN body ([`crate::net::solo_crab`]) instead of the integer
+/// point-pursuer. On the NETWORKED path the crab is still the integer pursuer (arming the
+/// float NN crab in lockstep is the cadence-fold follow-up — see the caveat on
+/// [`crate::net::sim::Sim::state_hash`]), but the checkpoint's weights digest IS now
+/// advertised in formation (rl#82, GCR) so peers can agree on a shared brain ahead of that.
 pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> App {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -266,6 +268,17 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
                 .run_if(in_state(AppPhase::Playing)),
         );
 
+    // OUR policy-weights digest (rl#82, GCR), advertised in networked formation so peers can
+    // agree on a shared brain (see [`crate::net::may_arm_external_crab`]). `0` for no checkpoint.
+    // MUST equal the digest the per-tick bridge folds into the lockstep hash — both come from
+    // [`crate::play::checkpoint_digest`] (here from the path; on the bridge via
+    // `Policy::weights_digest()`), so the cadence-fold follow-up that arms the crab must source
+    // its folded digest from the SAME checkpoint, or a hot-reload could split the two.
+    let weights_digest = solo_crab
+        .as_deref()
+        .map(crate::play::checkpoint_digest)
+        .unwrap_or(0);
+
     match boot {
         // Scripted boot: insert the round now and jump straight to Playing (the menu
         // states are never entered). NextState applied before the first frame, so
@@ -293,7 +306,7 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
                 _ => None,
             };
             let source = match net {
-                Some(n) => InputSource::Networked(n),
+                Some(n) => InputSource::Networked(Box::new(n)),
                 None => InputSource::Solo,
             };
             insert_core(&mut app, ls, source);
@@ -310,7 +323,11 @@ pub fn build_windowed_app(boot: Boot, solo_crab: Option<std::path::PathBuf>) -> 
         // Interactive boot: add the menu plugin (egui menu + lobby poll). The sim is built
         // later, at the Playing transition, from the choice the menu records.
         Boot::Menu { seed, telemetry } => {
-            app.add_plugins(menu_ui::MenuPlugin { seed, telemetry });
+            app.add_plugins(menu_ui::MenuPlugin {
+                seed,
+                telemetry,
+                weights_digest,
+            });
             // NN crab on the Host-alone (solo) round (rl#58): the menu can't know at BUILD
             // time whether the round will be solo, so add the whole NN stack now but with the
             // gate OFF and no crab spawned (NumEnvs 0), and flip it on only if the round
@@ -525,7 +542,7 @@ fn ensure_round_installed(world: &mut World) {
         world.insert_resource(crate::net::solo_crab::SoloCrabActive);
     }
     let source = match ready.net {
-        Some(n) => InputSource::Networked(n),
+        Some(n) => InputSource::Networked(Box::new(n)),
         None => InputSource::Solo,
     };
     install_round(world, ready.lockstep, source);
@@ -540,8 +557,10 @@ fn ensure_round_installed(world: &mut World) {
 /// (a meaningless combination) is unrepresentable rather than merely unreached.
 enum InputSource {
     /// Real peers over the transport (windowed networked play): broadcast our tick
-    /// message and ingest theirs.
-    Networked(NetDriver),
+    /// message and ingest theirs. Boxed because [`NetDriver`] owns a tokio runtime +
+    /// the iroh session (~200 bytes), dwarfing the other variants — without the box the
+    /// whole enum (one per round) carries that weight even when solo.
+    Networked(Box<NetDriver>),
     /// A single offline peer (windowed solo): our own input completes every tick, so
     /// there are no other inputs to supply.
     Solo,
@@ -1641,6 +1660,9 @@ mod menu_ui {
     pub struct MenuPlugin {
         pub seed: u64,
         pub telemetry: Option<EndpointId>,
+        /// Our NN-crab checkpoint digest (rl#82, GCR), `0` for none. Advertised in networked
+        /// formation so peers can agree on a shared brain before arming the float crab.
+        pub weights_digest: u64,
     }
 
     /// The camera the menu/connecting screens render into. bevy_egui 0.39 is
@@ -1657,7 +1679,7 @@ mod menu_ui {
             if !app.is_plugin_added::<EguiPlugin>() {
                 app.add_plugins(EguiPlugin::default());
             }
-            app.insert_non_send_resource(MenuState::new(self.seed, self.telemetry))
+            app.insert_non_send_resource(MenuState::new(self.seed, self.telemetry, self.weights_digest))
                 // A 2D camera for the menu so bevy_egui has a context to render into.
                 // Spawned on entering Menu (the default phase, so it fires at startup on the
                 // menu boot; never on the scripted Boot::Round path, which supersedes Menu
@@ -1701,6 +1723,9 @@ mod menu_ui {
     struct MenuState {
         seed: u64,
         telemetry: Option<EndpointId>,
+        /// Our NN-crab checkpoint digest (rl#82, GCR), `0` for none — handed to
+        /// [`crate::net::menu::begin`] so networked formation advertises it.
+        weights_digest: u64,
         /// The pure navigation FSM ([`MenuNav`]) — focus + the chooser/lobby transition.
         /// Folded by controller/keyboard input AND egui clicks through one path, so every
         /// confirm (Start included) routes through the same tested dispatch.
@@ -1718,10 +1743,11 @@ mod menu_ui {
     }
 
     impl MenuState {
-        fn new(seed: u64, telemetry: Option<EndpointId>) -> Self {
+        fn new(seed: u64, telemetry: Option<EndpointId>, weights_digest: u64) -> Self {
             Self {
                 seed,
                 telemetry,
+                weights_digest,
                 nav: MenuNav::new(),
                 stick_latched: false,
                 code_input: String::new(),
@@ -2009,7 +2035,12 @@ mod menu_ui {
     /// has one definition.
     fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextState<AppPhase>) {
         state.error = None;
-        state.forming = Some(menu::begin(choice, state.seed, state.telemetry));
+        state.forming = Some(menu::begin(
+            choice,
+            state.seed,
+            state.telemetry,
+            state.weights_digest,
+        ));
         next.set(AppPhase::Connecting);
     }
 

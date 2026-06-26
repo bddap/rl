@@ -323,6 +323,9 @@ fn run_play(args: PlayArgs) -> Result<()> {
             dial,
             args.telemetry,
             None,
+            // Headless `game net` driver: no NN-crab checkpoint, so a `0` digest — it never
+            // arms the float crab, always plays the deterministic integer crab.
+            0,
         )?;
         match result {
             net_loop::MatchResult::Joined(joined) => {
@@ -477,6 +480,7 @@ async fn run_net(args: NetArgs) -> Result<()> {
         args.expect,
         tel.as_ref(),
         None, // headless: timer-closed barrier, no interactive lobby
+        0,    // no NN-crab checkpoint headless → 0 digest, integer crab only (rl#82)
     )
     .await?
     {
