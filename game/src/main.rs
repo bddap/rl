@@ -286,17 +286,21 @@ fn run_nn_crab_xpeer(args: NnCrabXpeerArgs) -> Result<()> {
     }
 
     // Per-tick `<tick> <hash>` logs for each peer, so an operator can `diff` them directly.
-    let write_log = |path: &PathBuf, pick: &dyn Fn(&rl_core::net::external_crab::XPeerTick) -> u64| {
+    fn write_log(
+        path: &PathBuf,
+        ticks: &[rl_core::net::external_crab::XPeerTick],
+        pick: fn(&rl_core::net::external_crab::XPeerTick) -> u64,
+    ) -> Result<()> {
         use std::fmt::Write as _;
-        let mut out = String::with_capacity(result.ticks.len() * 24);
-        for t in &result.ticks {
+        let mut out = String::with_capacity(ticks.len() * 28);
+        for t in ticks {
             writeln!(out, "{} {:#018x}", t.tick, pick(t)).unwrap();
         }
         std::fs::write(path, out)
             .with_context(|| format!("nn-crab-xpeer: writing hash log {}", path.display()))
-    };
-    write_log(&args.hash_log_a, &|t| t.hash_a)?;
-    write_log(&args.hash_log_b, &|t| t.hash_b)?;
+    }
+    write_log(&args.hash_log_a, &result.ticks, |t| t.hash_a)?;
+    write_log(&args.hash_log_b, &result.ticks, |t| t.hash_b)?;
     println!(
         "nn-crab-xpeer: wrote {} per-tick hashes per peer to {} / {}",
         result.ticks.len(),
