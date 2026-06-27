@@ -514,6 +514,7 @@ fn install_round(world: &mut World, ls: Lockstep, input_source: InputSource) {
     world.init_resource::<PendingInput>();
     world.init_resource::<CameraPitch>();
     world.init_resource::<CameraYaw>();
+    world.init_resource::<LocalVehicle>();
 }
 
 /// The round the boot menu chose, parked here between the menu's Playing transition and
@@ -664,6 +665,10 @@ struct PendingInput {
     /// [`buttons::RESTART`] so the restart rides the deterministic input stream and all
     /// peers restart on the same tick; the sim edge-triggers it. Drained per tick.
     restart: bool,
+    /// Latches if the enter/exit-vehicle key (E) was tapped this interval — a client-local
+    /// toggle drained ONCE per frame in [`drive_lockstep`] (single-player only), never sent
+    /// to the sim. Board a plane on foot / step out when piloting.
+    toggle_vehicle: bool,
 }
 
 /// Client-side camera pitch (radians), integrated from look input. The sim models
@@ -679,6 +684,30 @@ struct CameraPitch(f32);
 /// sim, so it adds no nondeterminism (a dead player's facing affects nothing).
 #[derive(Resource, Default)]
 struct CameraYaw(f32);
+
+/// The local player's SINGLE-PLAYER vehicle, when piloting one. `None` = on foot.
+///
+/// Single-player vehicle flight lives ENTIRELY here in the play layer, NOT in the
+/// deterministic sim ([`crate::net::sim`] stays integer-only and untouched): a solo round
+/// needs no cross-peer lockstep, so the plane is a client-side body the client integrates
+/// itself with the shared [`Plane::step`] flight formula. While piloting, the local foot
+/// player feeds the sim a NEUTRAL input (it just stands at the boarding spot) and the camera
+/// flies from this plane; stepping out drops it and returns the view to the foot player.
+///
+/// `prev` is last applied tick's pose, so [`apply_transforms`] tweens the cockpit camera the
+/// same way it interpolates every sim body. Both are set/cleared together (board / step out).
+/// Only ever populated on the windowed [`InputSource::Solo`] path.
+#[derive(Resource, Default)]
+struct LocalVehicle {
+    plane: Option<Plane>,
+    prev: Option<Plane>,
+}
+
+impl LocalVehicle {
+    fn piloting(&self) -> bool {
+        self.plane.is_some()
+    }
+}
 
 /// The sim's per-tick yaw turn cap, in radians. The sim clamps a tick's yaw delta to
 /// `trig::TURN/24` turn-units (see [`crate::net::sim`]); we normalize our accrued
@@ -837,6 +866,43 @@ fn drive_lockstep(
 
     world.non_send_resource_mut::<GameState>().accumulator += delta;
 
+    // Single-player enter/exit a vehicle (client-local; the sim never sees it). Drain the
+    // E-tap latch ONCE per frame: board a plane at the foot player's spot, or step back out.
+    // Solo only — a networked round freezes its pilot set over the wire at formation (rl#43),
+    // so this toggle is inert there and the deterministic lockstep is untouched.
+    {
+        let toggle = std::mem::take(&mut world.resource_mut::<PendingInput>().toggle_vehicle);
+        let solo = toggle
+            && matches!(
+                world.non_send_resource::<GameState>().input_source,
+                InputSource::Solo
+            );
+        if solo {
+            if world.resource::<LocalVehicle>().piloting() {
+                // Step out: drop the plane, the camera falls back to the foot player.
+                let mut veh = world.resource_mut::<LocalVehicle>();
+                veh.plane = None;
+                veh.prev = None;
+            } else {
+                // Board: spawn a plane at the local player's current ground spot + facing, if
+                // it is still alive to board. Reuses the sim's one plane-spawn definition.
+                let state = world.non_send_resource::<GameState>();
+                let me = state.ls.me();
+                let boarding = state
+                    .ls
+                    .sim()
+                    .player(me)
+                    .filter(|p| p.status() == PlayerStatus::Alive)
+                    .map(|p| Plane::spawn(p.pos(), p.yaw()));
+                if let Some(plane) = boarding {
+                    let mut veh = world.resource_mut::<LocalVehicle>();
+                    veh.plane = Some(plane);
+                    veh.prev = Some(plane);
+                }
+            }
+        }
+    }
+
     let mut applied = 0u32;
     loop {
         // Pace by wall clock: one local input issued per sim tick, bounded per frame so a
@@ -864,6 +930,12 @@ fn drive_lockstep(
             input
         };
 
+        // While piloting (single-player), the foot player feeds the sim a NEUTRAL input — it
+        // just stands at the boarding spot — and the real input flies the client-side plane
+        // below instead. On foot, the real input drives the sim as usual.
+        let piloting = world.resource::<LocalVehicle>().piloting();
+        let sim_input = if piloting { Input::default() } else { input };
+
         // Submit our input + gather the other players' inputs from whichever source this run
         // uses, then record them — every path lands at `record_remote`, the same entry a wire
         // peer takes, so the sim can't tell the sources apart.
@@ -871,7 +943,7 @@ fn drive_lockstep(
             let mut state = world.non_send_resource_mut::<GameState>();
             let me = state.ls.me();
             let issue_tick = state.ls.next_tick();
-            let msg = state.ls.submit_local_input(input);
+            let msg = state.ls.submit_local_input(sim_input);
             // Collect peer messages first (releasing the `input_source`/`ls` co-borrow via
             // `&mut *state`) before recording into `ls`.
             let st = &mut *state;
@@ -913,6 +985,17 @@ fn drive_lockstep(
             (issue_tick, faults)
         };
         report_faults(&faults, &mut total_desyncs, &tel);
+
+        // Fly the client-side plane one tick with the real input (single-player vehicle),
+        // keeping last tick's pose for the camera interpolation. The sim never sees this — it
+        // is the play layer's own body, so the deterministic core stays integer-only.
+        if piloting {
+            let mut veh = world.resource_mut::<LocalVehicle>();
+            veh.prev = veh.plane;
+            if let Some(p) = veh.plane.as_mut() {
+                p.step(input);
+            }
+        }
 
         // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step
         // state for interpolation; if armed, step the crab body by the deterministic cadence
@@ -989,7 +1072,8 @@ fn drive_lockstep(
                 *next_tel_tick =
                     (state.ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
                 t.send(TelemetryEvent::tick(state.ls.sim(), *total_desyncs, roster_len));
-                t.send(TelemetryEvent::input(issue_tick, input));
+                // The input the SIM actually applied this tick (neutral while piloting).
+                t.send(TelemetryEvent::input(issue_tick, sim_input));
             }
         }
     }
@@ -1082,6 +1166,11 @@ fn gather_input(
     if kc(Action::Restart).is_some_and(|k| keys.just_pressed(k)) {
         pending.restart = true;
     }
+    // Enter/exit a vehicle (E). A tap-toggle, edge-triggered like restart, but client-local
+    // (single-player) — `drive_lockstep` boards/steps-out; it never reaches the sim.
+    if kc(Action::EnterExit).is_some_and(|k| keys.just_pressed(k)) {
+        pending.toggle_vehicle = true;
+    }
 
     // --- Look (accumulated across frames) ---
     let mut d_yaw = 0.0f32;
@@ -1129,6 +1218,10 @@ fn gather_input(
         // pad button (North, held), NOT Start — so beginning a quit can't fire this restart.
         if controls::gamepad_buttons_for(Action::Restart).any(|b| gp.just_pressed(b)) {
             pending.restart = true;
+        }
+        // Enter/exit vehicle on pad West (X), tap — same client-local toggle as keyboard E.
+        if controls::gamepad_buttons_for(Action::EnterExit).any(|b| gp.just_pressed(b)) {
+            pending.toggle_vehicle = true;
         }
     }
     // Mouse-left also fires action, for mouse-only play.
@@ -1587,6 +1680,7 @@ fn apply_transforms(
     state: NonSend<GameState>,
     pitch: Res<CameraPitch>,
     mut yaw: ResMut<CameraYaw>,
+    vehicle: Res<LocalVehicle>,
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
     mut planes_q: PlaneXf,
@@ -1648,20 +1742,18 @@ fn apply_transforms(
     }
 
     // FP camera. A PILOT flies from the cockpit: anchor the camera to the plane's
-    // interpolated pose, looking along its heading+pitch (the authoritative sim
-    // orientation), with the client pitch still added so the pilot can glance around.
-    // An on-foot player keeps the ground eye view. Either way the orientation comes
-    // from the sim, so what's seen matches where the sim says we point.
+    // interpolated pose, looking along its heading+pitch, with the client pitch still added
+    // so the pilot can glance around. An on-foot player keeps the ground eye view.
     if let Ok(mut cam) = cam_q.single_mut() {
-        if let Some(plane_now) = sim.plane(local) {
+        if let Some(plane_now) = vehicle.plane {
+            // Single-player: fly from the CLIENT-side plane (the play layer's own body — it
+            // is not in the sim, so the deterministic core stays integer-only).
+            let plane_prev = vehicle.prev.unwrap_or(plane_now);
+            *cam = plane_cockpit_camera(plane_prev, plane_now, alpha, pitch.0);
+        } else if let Some(plane_now) = sim.plane(local) {
+            // A SIM-side pilot (networked vehicle, rl#43): same cockpit view from sim state.
             let plane_prev = state.prev.planes.get(&local).copied().unwrap_or(plane_now);
-            let eye = lerp_pos3(plane_prev.pos(), plane_now.pos(), alpha);
-            let heading = lerp_yaw(plane_prev.heading(), plane_now.heading(), alpha);
-            // Pitch reuses lerp_yaw because it's a turn-unit angle too; since pitch is
-            // bounded (never wraps), the shortest-arc handling is a harmless no-op here.
-            let plane_pitch = lerp_yaw(plane_prev.pitch(), plane_now.pitch(), alpha);
-            let look_dir = look_direction(heading, plane_pitch + pitch.0);
-            *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
+            *cam = plane_cockpit_camera(plane_prev, plane_now, alpha, pitch.0);
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
@@ -1681,6 +1773,20 @@ fn apply_transforms(
             *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
         }
     }
+}
+
+/// The first-person cockpit camera for a plane: eye at the interpolated 3D position,
+/// looking along the interpolated heading + pitch with `extra_pitch` (the client free-look)
+/// added on. The ONE cockpit-view formula, shared by the single-player client vehicle and
+/// the sim-side networked pilot, so both fly from the identical view with no copy to drift.
+fn plane_cockpit_camera(prev: Plane, now: Plane, alpha: f32, extra_pitch: f32) -> Transform {
+    let eye = lerp_pos3(prev.pos(), now.pos(), alpha);
+    let heading = lerp_yaw(prev.heading(), now.heading(), alpha);
+    // Pitch reuses lerp_yaw because it's a turn-unit angle too; since pitch is bounded
+    // (never wraps), the shortest-arc handling is a harmless no-op here.
+    let plane_pitch = lerp_yaw(prev.pitch(), now.pitch(), alpha);
+    let look_dir = look_direction(heading, plane_pitch + extra_pitch);
+    Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y)
 }
 
 /// The interpolated world transform for a plane: position lerped in 3D, orientation

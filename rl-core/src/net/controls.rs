@@ -38,6 +38,11 @@ pub enum Action {
     Restart,
     /// Quit the client (local `AppExit`; never touches the sim).
     Quit,
+    /// Enter the vehicle/plane when on foot, or exit back to foot when piloting
+    /// (single-player). A tap-toggle handled entirely in the windowed client's play
+    /// layer ([`crate::net::render`]) — like [`Quit`](Action::Quit) it never crosses the
+    /// wire or the deterministic sim, so the lockstep crab game is unaffected.
+    EnterExit,
     /// Hold to reveal the full control overlay; release to hide. Pure client UI.
     RevealControls,
 }
@@ -50,6 +55,7 @@ pub enum Key {
     A,
     S,
     D,
+    E,
     R,
     Tab,
     Space,
@@ -72,6 +78,8 @@ pub enum PadButton {
     South,
     /// The "north" face button (Xbox Y / PS Triangle).
     North,
+    /// The "west" face button (Xbox X / PS Square).
+    West,
     /// Right trigger (alternate extract).
     RightTrigger,
     /// Start / Menu.
@@ -105,6 +113,7 @@ impl ControlScheme for GcrControls {
             Key::A => "controls/keyboard_a.png",
             Key::S => "controls/keyboard_s.png",
             Key::D => "controls/keyboard_d.png",
+            Key::E => "controls/keyboard_e.png",
             Key::R => "controls/keyboard_r.png",
             Key::Tab => "controls/keyboard_tab.png",
             Key::Space => "controls/keyboard_space.png",
@@ -116,6 +125,7 @@ impl ControlScheme for GcrControls {
         Glyph::Icon(match pad {
             PadButton::South => "controls/xbox_button_a.png",
             PadButton::North => "controls/xbox_button_y.png",
+            PadButton::West => "controls/xbox_button_x.png",
             PadButton::RightTrigger => "controls/xbox_rt.png",
             PadButton::Start => "controls/xbox_button_menu.png",
             PadButton::Back => "controls/xbox_button_view.png",
@@ -141,8 +151,10 @@ impl ControlScheme for GcrControls {
 /// - **Quit**: Esc / HOLD pad North (Y) ≥1s. A hold so a stray tap can't end the round; on
 ///   its OWN button (not Start) so quitting can't also fire the lockstep RESTART a shared
 ///   Start tap would — Start is restart-only.
+/// - **Enter/exit vehicle**: E / pad West (X) — tap to board a plane or step out
+///   (single-player; a client-local toggle, never on the wire).
 /// - **Reveal controls**: HOLD Tab / HOLD pad Back — show the overlay while held.
-pub const CONTROL_MAP: [ControlEntry<GcrControls>; 9] = [
+pub const CONTROL_MAP: [ControlEntry<GcrControls>; 10] = [
     ControlEntry {
         action: Action::MoveForward,
         label: "Forward",
@@ -194,6 +206,12 @@ pub const CONTROL_MAP: [ControlEntry<GcrControls>; 9] = [
         pad: PadBinding::hold(&[PadButton::North]),
     },
     ControlEntry {
+        action: Action::EnterExit,
+        label: "Enter/exit vehicle",
+        keyboard: KbBinding::new(&[Key::E], &[]),
+        pad: PadBinding::new(&[PadButton::West]),
+    },
+    ControlEntry {
         action: Action::RevealControls,
         label: "Controls",
         keyboard: KbBinding::hold(&[Key::Tab], &[]),
@@ -221,6 +239,7 @@ mod bevy_glue {
                 Key::A => KeyCode::KeyA,
                 Key::S => KeyCode::KeyS,
                 Key::D => KeyCode::KeyD,
+                Key::E => KeyCode::KeyE,
                 Key::R => KeyCode::KeyR,
                 Key::Tab => KeyCode::Tab,
                 Key::Space => KeyCode::Space,
@@ -245,6 +264,7 @@ mod bevy_glue {
             match self {
                 PadButton::South => Some(GamepadButton::South),
                 PadButton::North => Some(GamepadButton::North),
+                PadButton::West => Some(GamepadButton::West),
                 PadButton::RightTrigger => Some(GamepadButton::RightTrigger2),
                 PadButton::Start => Some(GamepadButton::Start),
                 PadButton::Back => Some(GamepadButton::Select),
@@ -299,7 +319,7 @@ mod tests {
     /// `match` to cover every variant; `assert_map_well_formed` does the runtime checks.
     #[test]
     fn every_action_has_exactly_one_map_row() {
-        const ALL: [Action; 9] = [
+        const ALL: [Action; 10] = [
             Action::MoveForward,
             Action::MoveBack,
             Action::StrafeLeft,
@@ -308,6 +328,7 @@ mod tests {
             Action::Extract,
             Action::Restart,
             Action::Quit,
+            Action::EnterExit,
             Action::RevealControls,
         ];
         // Exhaustiveness guard: a new variant fails to compile until added to ALL above.
@@ -321,6 +342,7 @@ mod tests {
                 | Action::Extract
                 | Action::Restart
                 | Action::Quit
+                | Action::EnterExit
                 | Action::RevealControls => true,
             }
         }

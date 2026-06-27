@@ -631,9 +631,10 @@ async fn run_barrier(
     }
     .with_weights_digest(local_weights_digest)
     .with_asset_digest(local_asset_digest)
-    // Our local `RL_VEHICLE=plane` intent rides every beat and is folded into the agreement
-    // token, so peers freeze ONE shared pilot roster (a divergent view blocks the close).
-    .piloting(local_wants_to_pilot());
+    // No peer declares a spawn-time pilot intent: a single player boards a plane in-game via
+    // the client's enter/exit toggle, not at formation. The pilot-roster negotiation stays
+    // wired (the seam for networked vehicles, rl#43); it just freezes empty for now.
+    .piloting(false);
     let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
     let mut ticker = tokio::time::interval(BEAT_EVERY);
     let mut last_live = 0usize;
@@ -784,37 +785,16 @@ fn is_alone_at_timeout(expect: usize, live: usize) -> bool {
     expect > 1 && live == 1
 }
 
-/// Build the single-peer lockstep for an OFFLINE round (just us), honoring the
-/// `RL_VEHICLE` pilot flag. The one definition shared by every offline entry into the
-/// windowed client — the boot-menu Host-alone Start, the scripted `--host`/`--join` alone
-/// outcome, and the discovery-found-no-peer fallback — so they all play the byte-identical
-/// deterministic solo round with no second construction to drift. `seed` is the shared
-/// match seed (the caller passes the one constant every peer uses).
+/// Build the single-peer lockstep for an OFFLINE round (just us). The one definition shared
+/// by every offline entry into the windowed client — the boot-menu Host-alone Start, the
+/// scripted `--host`/`--join` alone outcome, and the discovery-found-no-peer fallback — so
+/// they all play the byte-identical deterministic solo round with no second construction to
+/// drift. `seed` is the shared match seed (the caller passes the one constant every peer
+/// uses). The player always starts ON FOOT; piloting a plane is reached in-game via the
+/// client's enter/exit toggle ([`crate::net::render`]), not an env flag at spawn.
 pub fn solo_lockstep_for(seed: u64) -> Lockstep {
     let me = PlayerId(0);
-    let pilots = pilots_from_env(me);
-    Lockstep::new_with_pilots(seed, &[me], me, &pilots)
-}
-
-/// Whether THIS process intends to pilot a plane, from the `RL_VEHICLE=plane` env flag.
-/// The single source of the env-string read, shared by the offline [`pilots_from_env`] and
-/// the networked barrier (which advertises this as our pilot-intent and negotiates the agreed
-/// pilot set over the wire — see [`Membership::piloting`]/[`form_match`]).
-pub fn local_wants_to_pilot() -> bool {
-    matches!(std::env::var("RL_VEHICLE").as_deref(), Ok("plane"))
-}
-
-/// Which players spawn PILOTING a plane rather than on foot in an OFFLINE round, from the
-/// `RL_VEHICLE` flag: `RL_VEHICLE=plane` makes the LOCAL player (`me`) a pilot; anything else
-/// (incl. unset) is the unchanged foot game (empty ⇒ byte-identical sim). The NETWORKED path
-/// ([`form_match`]) negotiates the pilot set over the wire instead, so every peer freezes one
-/// agreed roster of who flies.
-fn pilots_from_env(me: PlayerId) -> Vec<PlayerId> {
-    if local_wants_to_pilot() {
-        vec![me]
-    } else {
-        Vec::new()
-    }
+    Lockstep::new(seed, &[me], me)
 }
 
 /// Replay the inputs that arrived during formation into a freshly-built [`Lockstep`],
