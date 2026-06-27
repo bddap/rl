@@ -672,15 +672,40 @@ impl Sim {
         Crab { pos, yaw: 0 }
     }
 
+    /// Every participant the sim simulates: each on-foot player and each pilot. The
+    /// lockstep boundary requires exactly one input per id in this set. `players` and
+    /// `planes` are kept disjoint at spawn, so no id appears twice.
+    fn participant_ids(&self) -> impl Iterator<Item = PlayerId> + '_ {
+        self.players.keys().chain(self.planes.keys()).copied()
+    }
+
+    /// Fail-loud guard for the lockstep boundary (rl#105): every participant must have
+    /// supplied this tick's input. Panics naming a missing id rather than letting
+    /// [`Sim::step`] default it to neutral and silently desync peers.
+    fn require_complete_inputs(&self, inputs: &BTreeMap<PlayerId, Input>) {
+        for id in self.participant_ids() {
+            assert!(
+                inputs.contains_key(&id),
+                "lockstep input incomplete: no input for {id:?} (have {:?}); defaulting \
+                 to neutral would desync peers — refusing",
+                inputs.keys().collect::<Vec<_>>(),
+            );
+        }
+    }
+
     /// Advance one tick: move each living player by its input (relative to facing),
     /// step the crab toward its nearest living prey, resolve grabs and extractions,
     /// then settle the round outcome. All in `PlayerId` order; pure integer math.
     ///
-    /// `inputs` must hold an entry for each player the sim knows about (the lockstep
-    /// driver guarantees this by buffering a tick until all peers' inputs arrive). A
-    /// missing input is treated as neutral — divergence here would be a logic bug, but
-    /// defaulting keeps the step total rather than panicking on a dropped frame.
+    /// `inputs` MUST hold an entry for every participant the sim tracks — each on-foot
+    /// player and each pilot. A missing input is a fail-loud determinism fault, NOT a
+    /// silent neutral: defaulting a dropped input to neutral would let one peer apply
+    /// real input where another applied none, diverging `state_hash` invisibly (the
+    /// NN-crab pose rides on player state, which feeds the hash). The lockstep driver
+    /// guarantees completeness by stalling a tick until every peer's input arrives, so
+    /// reaching `step` short is a bug — we panic rather than fabricate input (rl#105).
     pub fn step(&mut self, inputs: &BTreeMap<PlayerId, Input>) {
+        self.require_complete_inputs(inputs);
         self.tick += 1;
 
         // Restart, edge-triggered: any player newly pressing RESTART rebuilds the round
@@ -707,7 +732,8 @@ impl Sim {
             if p.status != PlayerStatus::Alive {
                 continue;
             }
-            let inp = inputs.get(id).copied().unwrap_or_default();
+            // require_complete_inputs (step entry) guarantees an entry per participant.
+            let inp = inputs[id];
 
             // Look: integrate the bounded yaw delta, wrapping into [0, TURN).
             let dyaw = (inp.look_yaw as i64 * MAX_YAW_TURNS_PER_TICK as i64
@@ -734,7 +760,7 @@ impl Sim {
         // 1b) Planes. Each pilot's plane integrates its own flight from its input,
         //     in PlayerId order (BTreeMap). Pure integer math — see `step_plane`.
         for (id, plane) in self.planes.iter_mut() {
-            let inp = inputs.get(id).copied().unwrap_or_default();
+            let inp = inputs[id];
             step_plane(plane, inp);
         }
 
@@ -767,11 +793,7 @@ impl Sim {
         for (id, p) in self.players.iter_mut() {
             if p.status == PlayerStatus::Alive
                 && within(p.pos.x, p.pos.z, ex.x, ex.z, EXTRACT_RADIUS)
-                && inputs
-                    .get(id)
-                    .copied()
-                    .unwrap_or_default()
-                    .pressed(buttons::ACTION)
+                && inputs[id].pressed(buttons::ACTION)
             {
                 p.status = PlayerStatus::Extracted;
             }
@@ -1366,6 +1388,14 @@ mod tests {
         (0..n).map(PlayerId).collect()
     }
 
+    /// A complete neutral input map for every participant in `sim`. The lockstep
+    /// boundary now REQUIRES an entry per participant (rl#105), so a test driving
+    /// idle players spells out their neutral input instead of relying on a
+    /// missing-key default.
+    fn neutral_for(sim: &Sim) -> BTreeMap<PlayerId, Input> {
+        sim.participant_ids().map(|id| (id, Input::default())).collect()
+    }
+
     #[test]
     fn input_bytes_roundtrip() {
         for inp in [
@@ -1482,7 +1512,7 @@ mod tests {
         // down it, ending the round as a wipe. The crab holds still through the startup grace, so
         // step PAST the grace before checking that distance closes.
         let mut sim = Sim::new(0, &players(1));
-        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        let neutral = neutral_for(&sim);
         for _ in 0..STARTUP_GRACE_TICKS {
             drive_crab_toward_prey(&mut sim);
             sim.step(&neutral);
@@ -1605,7 +1635,7 @@ mod tests {
         // still advances — it counts steps — so we compare the game state, not the
         // tick-inclusive hash; the desync test already proves the hash tracks in step.)
         let mut sim = Sim::new(0, &players(1));
-        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        let neutral = neutral_for(&sim);
         for _ in 0..2000 {
             if sim.outcome() != Outcome::Ongoing {
                 break;
@@ -1690,7 +1720,7 @@ mod tests {
         // No throttle: gravity wins, the plane descends, and the ground clamp catches it
         // at Y=0 (never negative) — a crude belly landing, not an infinite fall.
         let mut sim = Sim::new_with_pilots(0, &players(1), &players(1));
-        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        let neutral = neutral_for(&sim);
         for _ in 0..400 {
             sim.step(&neutral);
         }
@@ -1715,7 +1745,7 @@ mod tests {
         let mut throttle = BTreeMap::new();
         throttle.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0));
         a.step(&throttle);
-        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        let neutral = neutral_for(&b);
         b.step(&neutral);
         assert_ne!(
             a.state_hash(),
@@ -1767,10 +1797,23 @@ mod tests {
     fn hash_changes_when_state_changes() {
         let mut sim = Sim::new(0, &players(2));
         let h0 = sim.state_hash();
-        let mut inputs = BTreeMap::new();
+        let mut inputs = neutral_for(&sim);
         inputs.insert(PlayerId(0), Input::from_axes(1.0, 1.0));
         sim.step(&inputs);
         assert_ne!(sim.state_hash(), h0);
+    }
+
+    #[test]
+    #[should_panic(expected = "lockstep input incomplete")]
+    fn missing_lockstep_input_panics_not_defaults_to_neutral() {
+        // rl#105: a tick stepped without EVERY participant's input must fail loud, not
+        // silently default the absentee to neutral — which would desync a peer whose
+        // input map WAS complete (the NN-crab pose rides on player state, in the hash).
+        // Two players, only one input supplied → hard error at the boundary.
+        let mut sim = Sim::new(0, &players(2));
+        let mut partial = BTreeMap::new();
+        partial.insert(PlayerId(0), Input::from_axes(0.0, 1.0));
+        sim.step(&partial); // PlayerId(1)'s input is missing
     }
 
     // --- trig table sanity: pins the integer table to known trig values ---
@@ -2036,7 +2079,7 @@ mod tests {
         let crab0 = sim.crab().pos();
         // Place the player exactly on the crab (the harshest case the grace must cover).
         sim.players.get_mut(&PlayerId(0)).unwrap().pos = crab0;
-        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        let neutral = neutral_for(&sim);
         for _ in 0..STARTUP_GRACE_TICKS {
             sim.step(&neutral);
             assert_eq!(sim.crab().pos(), crab0, "crab holds its spawn during grace");
@@ -2130,7 +2173,7 @@ mod tests {
         // once the world is frozen (outcome != Ongoing). Wipe the player, confirm the
         // freeze, then RESTART and confirm a live round is back.
         let mut sim = Sim::new(0, &players(1));
-        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        let neutral = neutral_for(&sim);
         for _ in 0..2000 {
             if sim.outcome() != Outcome::Ongoing {
                 break;
@@ -2165,7 +2208,7 @@ mod tests {
         sim.step(&held);
         assert_eq!(sim.tick(), 2, "a held key doesn't re-restart every tick");
         // Release, then press again: that fresh edge restarts once more.
-        sim.step(&BTreeMap::new()); // release (tick 3)
+        sim.step(&neutral_for(&sim)); // release (tick 3)
         sim.step(&held); // fresh press → restart
         assert_eq!(sim.tick(), 0, "a new press after release restarts again");
     }

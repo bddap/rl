@@ -247,7 +247,10 @@ mod desync_test {
         // would also "stay in lockstep") WITHOUT leaning on random inputs happening to
         // resolve, so it can't flake.
         let players: Vec<PlayerId> = (0..2).map(PlayerId).collect();
-        let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
+        // Complete neutral map — `Sim::step` requires one input per participant (rl#105),
+        // never an empty map silently defaulted to all-neutral.
+        let neutral: BTreeMap<PlayerId, Input> =
+            players.iter().map(|&p| (p, Input::default())).collect();
         let mut a = Sim::new(0x5EED, &players);
         let mut b = Sim::new(0x5EED, &players);
         let mut resolved_at = None;
