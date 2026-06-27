@@ -396,9 +396,10 @@ pub fn build_recipe(model: &impl BindSource) -> Option<RigRecipe> {
         }
     }
 
-    // Eye-stalks (locked): base (carapace-parented) + tip. The eye rides the stalk,
-    // so the tip is re-parented onto the base here. The tip carries the reward's
-    // eye-height marker (`CrabEyeTip`, set by bone name in the spawn).
+    // Eye-stalks (locked, cosmetic): base (carapace-parented) + tip. The eye rides the
+    // stalk, so the tip is re-parented onto the base here. These links stay in the rig
+    // for the cosmetic/debug view + the fallback body, but `spawn_crab` does NOT give
+    // them physics bodies (no policy joint, not observed, not load-bearing).
     for side in [Side::Left, Side::Right] {
         let base = antennae_bone(side);
         let tip = antennae_top_bone(side);
@@ -445,12 +446,34 @@ pub fn build_recipe(model: &impl BindSource) -> Option<RigRecipe> {
         carapace_density: CARAPACE_DENSITY,
         links,
     };
+    assert_actuated_never_parents_locked(&recipe.links);
     // A non-finite origin on any non-hub bone slips past the hub check above but
     // still poisons that link's anchor. Make a non-finite recipe unrepresentable
     // downstream: reject the whole thing once here so spawn only ever sees clean
     // geometry (the degenerate-but-finite axis cases are already guarded in
     // `derive_link`/`bend_axis`).
     recipe.is_finite().then_some(recipe)
+}
+
+/// `spawn_crab` does not give the cosmetic locked links (eye-stalks, `actuated ==
+/// None`) physics bodies; it leaves a carapace placeholder in their `ents` slot to
+/// keep the index alignment with `recipe.links`. That placeholder is only sound while
+/// no ACTUATED link parents a locked one — otherwise a kept link would silently
+/// reparent onto the carapace. The rig builds locked links as leaves of the carapace
+/// or of other locked links, so this holds; assert it at construction so a future rig
+/// edit that violates it fails loudly here, not as a mysterious mis-jointed crab.
+fn assert_actuated_never_parents_locked(links: &[RigLink]) {
+    for (i, link) in links.iter().enumerate() {
+        if link.actuated.is_some() {
+            if let Some(p) = link.parent {
+                assert!(
+                    links[p].actuated.is_some(),
+                    "actuated rig link {i} has a locked parent {p} — spawn_crab would \
+                     misparent it onto the carapace placeholder"
+                );
+            }
+        }
+    }
 }
 
 // ===========================================================================
@@ -1135,7 +1158,8 @@ mod tests {
             "fallback must spawn every actuated joint exactly once"
         );
 
-        // The reward locates eye-tips and claw-tips by these bone-name patterns.
+        // The two cosmetic eye-tip links exist in the rig (for the cosmetic/debug view);
+        // they are not given physics bodies and the reward does not read them.
         assert_eq!(
             recipe
                 .links
@@ -1143,7 +1167,7 @@ mod tests {
                 .filter(|l| l.bone.starts_with("Def_antennae_top"))
                 .count(),
             2,
-            "two eye-tip links (the reward's eye-height markers)"
+            "two eye-tip links"
         );
         assert_eq!(
             recipe
