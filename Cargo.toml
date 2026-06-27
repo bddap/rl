@@ -77,5 +77,15 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
+# rapier3d 0.32 (what bevy_rapier3d 0.34 resolves to) forked for two fixes upstream
+# lacks, both load-bearing for the trainer:
+#  1. MultibodyJointSet::remove panics on a None unwrap, so a multibody crab cannot be
+#     despawned — but despawn+respawn is the only reliable reset (a tunneled crab's joint
+#     state goes non-finite and teleport-zero can't repair it). Carries the upstream #935
+#     cherry-picks: the remove fix plus the joint coords() accessor it needs.
+#  2. The generic contact jacobian workspace grows by exact-size nalgebra resizes —
+#     O(M^2) bytes copied per solver step on self-colliding multibody islands, a sys-bound
+#     stall from N>=4 worlds up. The fork grows it geometrically (N=8: 51s->2.5s sys/60s).
+# Drop the fork once both land in an upstream rapier3d release that bevy_rapier3d pulls.
 [patch.crates-io]
 rapier3d = { git = "https://github.com/bddap-bot/rapier", rev = "3ccc03d91ec0cff7ddd370c8e9a34240991f9875" }
