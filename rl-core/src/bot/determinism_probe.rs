@@ -220,10 +220,10 @@ fn bridge_pose_and_digest(app: &mut App, weights_digest: u64) -> (Pos, u64) {
     // The digest over every actuated body — identical to `external_crab::hash_crab_physics`.
     let digest = crate::bot::physics_digest::crab_state_digest(q.iter(app.world())) ^ weights_digest;
     // The carapace ground position → the sim's fixed-point pose. A SIMPLIFIED model of the
-    // bridge's `world_pos` (no world-gain accumulation) — fine here because both peers apply
-    // the identical float→i64 cast to identical inputs (same binary), so the pose path is
-    // approximate-but-symmetric; the DIGEST path below is the exact production fold, and it's
-    // what carries the determinism teeth.
+    // bridge's `world_pos` (no per-tick displacement accumulation) — fine here because both
+    // peers apply the identical float→i64 cast to identical inputs (same binary), so the pose
+    // path is approximate-but-symmetric; the DIGEST path below is the exact production fold,
+    // and it's what carries the determinism teeth.
     let mut cq = app
         .world_mut()
         .query_filtered::<&Transform, With<CrabCarapace>>();
