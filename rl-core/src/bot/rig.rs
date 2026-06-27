@@ -797,28 +797,57 @@ pub fn rest_colliders(model: &impl BindSource, recipe: &RigRecipe) -> Vec<RestCo
         // Only actuated links carry a PartId and a fitted cloud; eye-stalks (locked,
         // fixed radius, cosmetic) have nothing to score against.
         if let Some(id) = link.actuated {
-            let axis = link.col_rot * Vec3::Y * link.half_height;
-            let c = origin + link.center;
             out.push(RestCollider {
                 part: PartId::Joint(id),
-                shape: RestShape::Capsule {
-                    a: c - axis,
-                    b: c + axis,
-                    radius: link.radius,
-                },
+                shape: link_capsule(link, origin),
                 pivot: origin,
             });
         }
     }
     out.push(RestCollider {
         part: PartId::Carapace,
-        shape: RestShape::Cuboid {
-            center: o_root + recipe.carapace_offset,
-            half: recipe.carapace_half,
-        },
+        shape: carapace_cuboid(recipe, o_root),
         pivot: o_root,
     });
     out
+}
+
+/// Every collider shape of `recipe` in a hub-anchored frame (hub at the origin) — the
+/// carapace cuboid plus a capsule for EVERY link, eye-stalks included. Unlike
+/// [`rest_colliders`] (scoring: actuated links only, anchored in the model's bind-pose
+/// world) this is the COSMETIC silhouette, so it draws the locked eye-stalks too and
+/// needs no model: the shapes are hub-relative, which is all a render that re-poses and
+/// re-centers the crab needs. This is the ONE shape source the giant-crab render draws
+/// from — fed [`super::body::render_recipe`], it can't drift from the body it depicts.
+pub fn recipe_collider_shapes(recipe: &RigRecipe) -> Vec<RestShape> {
+    let world_origin = link_world_origins(&recipe.links, Vec3::ZERO);
+    let mut out: Vec<RestShape> = Vec::with_capacity(recipe.links.len() + 1);
+    for (link, &origin) in recipe.links.iter().zip(&world_origin) {
+        out.push(link_capsule(link, origin));
+    }
+    out.push(carapace_cuboid(recipe, Vec3::ZERO));
+    out
+}
+
+/// One link's capsule from its telescoped `origin`. Shared by [`rest_colliders`]
+/// (scoring) and [`recipe_collider_shapes`] (rendering) so the capsule geometry has a
+/// single definition that can't drift between the scored body and the drawn one.
+fn link_capsule(link: &RigLink, origin: Vec3) -> RestShape {
+    let axis = link.col_rot * Vec3::Y * link.half_height;
+    let c = origin + link.center;
+    RestShape::Capsule {
+        a: c - axis,
+        b: c + axis,
+        radius: link.radius,
+    }
+}
+
+/// The carapace box, world-axis-aligned at the leg `hub` + the recipe's offset.
+fn carapace_cuboid(recipe: &RigRecipe, hub: Vec3) -> RestShape {
+    RestShape::Cuboid {
+        center: hub + recipe.carapace_offset,
+        half: recipe.carapace_half,
+    }
 }
 
 #[cfg(test)]
@@ -1087,6 +1116,38 @@ mod tests {
             recipe.carapace_half.min_element() > 0.01,
             "carapace box must be non-degenerate, got {:?}",
             recipe.carapace_half
+        );
+    }
+
+    /// The render silhouette (#108) draws EVERY link, eye-stalks included, plus the
+    /// carapace — one capsule per link and a final carapace cuboid — and every shape
+    /// must be finite or the giant crab would spawn NaN meshes. (Contrast
+    /// [`rest_colliders`], which scores actuated links only.)
+    #[test]
+    fn recipe_collider_shapes_cover_all_links_plus_carapace() {
+        let recipe = fallback_recipe();
+        let shapes = recipe_collider_shapes(&recipe);
+        assert_eq!(
+            shapes.len(),
+            recipe.links.len() + 1,
+            "one capsule per link (eye-stalks included) plus the carapace cuboid"
+        );
+        let finite = |v: Vec3| v.is_finite();
+        for s in &shapes {
+            match *s {
+                RestShape::Capsule { a, b, radius } => {
+                    assert!(finite(a) && finite(b) && radius.is_finite() && radius > 0.0);
+                }
+                RestShape::Cuboid { center, half } => {
+                    assert!(finite(center) && finite(half) && half.min_element() > 0.0);
+                }
+            }
+        }
+        // The carapace cuboid is pushed last; the render derives the crab's facing from
+        // that ordering, so it must hold.
+        assert!(
+            matches!(shapes.last(), Some(RestShape::Cuboid { .. })),
+            "carapace cuboid must be the final shape"
         );
     }
 
