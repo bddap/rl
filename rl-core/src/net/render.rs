@@ -404,17 +404,9 @@ fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_
             crab_spawn,
         });
 
-    // Park Bevy's wall-clock `FixedUpdate` auto-pump: the crab body must NOT step by real time
-    // (that differs per machine/frame-rate and would desync peers). `drive_lockstep` pumps the
-    // fixed schedule itself, exactly the deterministic [`PhysicsCadence`] number of steps per
-    // lockstep tick ([`pump_fixed_steps`]). Setting `Time<Fixed>` to a huge timestep makes
-    // Bevy's `run_fixed_main_schedule` never reach its `expend()` threshold, so it auto-runs
-    // FixedMain zero times; the render clock (`Time<Virtual>`/`Time<Real>`) is untouched, so
-    // interpolation still tracks real time. Rapier's `TimestepMode::Fixed { dt }` uses its own
-    // stored `dt`, so each manual FixedMain pump is still exactly one `PHYSICS_DT` step.
-    app.world_mut()
-        .resource_mut::<bevy::time::Time<bevy::time::Fixed>>()
-        .set_timestep(std::time::Duration::from_secs(86_400));
+    // Park the wall-clock FixedUpdate auto-pump; `drive_lockstep` pumps the body at the
+    // deterministic [`PhysicsCadence`] instead (see [`park_fixed_auto_pump`]).
+    park_fixed_auto_pump(app.world_mut());
 
     // The crab's true colliders as a wireframe — the in-engine view of the NN body when
     // no skin is loaded (and a useful overlay when one is). On by default for the solo
@@ -754,7 +746,7 @@ fn report_faults(
 /// clock), then restore `Time<Virtual>` for the rest of `Update`/render. The step COUNT comes
 /// from the integer [`PhysicsCadence`] (not wall clock), so every peer runs the identical
 /// number of steps per lockstep tick and the per-tick `phys_digest` matches bit-for-bit.
-fn pump_fixed_steps(world: &mut World, steps: u32) {
+pub(crate) fn pump_fixed_steps(world: &mut World, steps: u32) {
     use bevy::app::FixedMain;
     use bevy::time::{Fixed, Time, Virtual};
 
@@ -768,6 +760,21 @@ fn pump_fixed_steps(world: &mut World, steps: u32) {
     }
     let virt = world.resource::<Time<Virtual>>().as_generic();
     *world.resource_mut::<Time>() = virt;
+}
+
+/// Park Bevy's wall-clock `FixedUpdate` auto-pump: stretch `Time<Fixed>`'s timestep to a day so
+/// `run_fixed_main_schedule` never reaches its `expend()` threshold and auto-runs `FixedMain`
+/// zero times. The deterministic crab body is then advanced ONLY by [`pump_fixed_steps`] at the
+/// [`PhysicsCadence`] count — wall clock differs per machine/frame-rate, so letting it pump the
+/// body would desync peers. The render clock (`Time<Virtual>`/`Time<Real>`) is untouched, and
+/// rapier's `TimestepMode::Fixed { dt }` keeps its own `dt`, so each manual pump is still exactly
+/// one `PHYSICS_DT` step. One source for the magic timestep so the windowed driver
+/// ([`add_external_nn_crab`]) and the headless cross-peer probe
+/// ([`crate::net::external_crab::run_cross_peer_probe`]) can't drift on it.
+pub(crate) fn park_fixed_auto_pump(world: &mut World) {
+    world
+        .resource_mut::<bevy::time::Time<bevy::time::Fixed>>()
+        .set_timestep(std::time::Duration::from_secs(86_400));
 }
 
 /// Advance the lockstep sim by real time on a fixed-timestep accumulator. This is the ONLY
@@ -2623,10 +2630,7 @@ mod tests {
         manual.update();
         // Park the manual world's wall-clock auto-pump, exactly as `add_external_nn_crab` does, so
         // from here ONLY `pump_fixed_steps` advances its physics.
-        manual
-            .world_mut()
-            .resource_mut::<bevy::time::Time<bevy::time::Fixed>>()
-            .set_timestep(std::time::Duration::from_secs(86_400));
+        park_fixed_auto_pump(manual.world_mut());
 
         let digest = |app: &mut App| -> u64 {
             let mut q = app.world_mut().query_filtered::<(
