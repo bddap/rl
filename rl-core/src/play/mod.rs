@@ -34,10 +34,7 @@ pub(crate) use policy::{Policy, checkpoint_digest};
 
 use cameras::{orbit_camera, spawn_offscreen_camera, spawn_orbit_camera, track_offscreen_camera};
 use controls::DemoControls;
-use demo::{
-    DemoRetilt, DemoSettle, PokeBurst, demo_controls, demo_fall_rescue, demo_poke, demo_retilt,
-    demo_settle,
-};
+use demo::{DemoSettle, PokeBurst, demo_controls, demo_poke, demo_settle};
 use hot_reload::hot_reload_policy;
 use manual_control::{ManualControl, manual_control_step, spawn_manual_hud};
 use policy::{add_inference, policy_step};
@@ -64,7 +61,6 @@ impl Plugin for DemoPlugin {
         // demo's own DEMO_CONTROL_MAP — replaces the old static bottom-left HUD text.
         app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default());
         app.init_resource::<DemoSettle>()
-            .init_resource::<DemoRetilt>()
             .init_resource::<PokeBurst>()
             .add_systems(
                 Startup,
@@ -84,13 +80,6 @@ impl Plugin for DemoPlugin {
                     // Sense→Think→Act chain alone leaves settle-vs-Act to Bevy's
                     // implicit conflict ordering; pin it.
                     demo_settle.after(BotSet::Think).before(BotSet::Act),
-                    // Both rebuild the crab; run before Sense (as the training rescue
-                    // does) so the fresh pose is observed and the zeroed actions reach
-                    // Act this tick, not next. The periodic re-tilt keeps the passive
-                    // stream showing the goofy righting loop; the fall-rescue is the
-                    // safety net when the policy walks off the arena.
-                    demo_fall_rescue.before(BotSet::Sense),
-                    demo_retilt.before(BotSet::Sense),
                     demo_poke.after(BotSet::Act).before(PhysicsSet::SyncBackend),
                     // After Sense so it reads the same post-physics claw-tip and target
                     // state the observation just consumed — touch detection and the ball
