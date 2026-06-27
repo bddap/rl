@@ -34,6 +34,7 @@
 //! any source of nondeterminism, and it's why the desync test below can prove
 //! determinism without touching the network or a GPU.
 
+pub mod cordic;
 pub mod cadence;
 pub mod controls;
 pub mod lockstep;
