@@ -457,12 +457,10 @@ fn seed_external_crab_solo(ls: &mut Lockstep) -> Pos {
 /// Wire the real rapier-NN crab into the windowed solo app: the bot/physics/brain stack
 /// (the SAME plugins `rl --demo` runs, so the crab steps the exact dynamics the policy
 /// trained under) plus the [`external_crab::ExternalCrabPlugin`] bridge that walks it toward the
-/// player and feeds its body position back into the sim. With no `sally.glb` the crab is
-/// the rl#5 procedural fallback rig under a Rapier debug wireframe; with the model
-/// present the cosmetic skin rides the same body.
+/// player and feeds its body position back into the sim. With the model present the cosmetic
+/// skin rides the body; with no `sally.glb` the visible crab is the static giant silhouette
+/// (`spawn_world` keeps it shown when no skin loads).
 fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_spawn: Pos) {
-    use bevy_rapier3d::prelude::{DebugRenderMode, RapierDebugRenderPlugin};
-
     app.insert_resource(crate::Visuals(true))
         .insert_resource(crate::bot::NumEnvs(1))
         // Same fixed timestep + softened contact spring as training/demo, with Rapier in
@@ -481,15 +479,10 @@ fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_
     // deterministic [`PhysicsCadence`] instead (see [`park_fixed_auto_pump`]).
     park_fixed_auto_pump(app.world_mut());
 
-    // The crab's true colliders as a wireframe — the in-engine view of the NN body when
-    // no skin is loaded (and a useful overlay when one is). On by default for the solo
-    // showcase so the body is always visible; the placeholder crab box is hidden
-    // in `apply_transforms` when the bridge is present.
-    app.add_plugins(RapierDebugRenderPlugin {
-        enabled: true,
-        mode: DebugRenderMode::COLLIDER_SHAPES,
-        ..default()
-    });
+    // No Rapier collider wireframe here: it reads raw physics space and can't pick up the cosmetic
+    // `crab_render_scale`, so it drew a tiny crab at the ~1 m arena origin beside the giant skin
+    // (the play-day "one little, one big" mismatch). The visible crab is the scaled skin, or the
+    // scaled silhouette `spawn_world` leaves shown when no model loads.
 }
 
 /// Build the HEADLESS screenshot app: GPU on, no window, render one settled frame of
@@ -1569,13 +1562,12 @@ fn spawn_world(
         commands.entity(root).add_children(&[fuselage, wing]);
     }
 
-    // The giant crab: Sally's real collider silhouette (see `spawn_crab_silhouette`),
-    // CRAB_SCALE× a player — the static placeholder shown only on the headless screenshot path.
-    // When the external NN crab is armed (every real round, rl#114) the real rapier rig
-    // (wireframe / skin) is the crab, so this silhouette is spawned HIDDEN there — the armed gate
-    // is the tell — and the rig shows instead. (We still spawn it so `apply_transforms`'s crab query is
-    // satisfied either way; it just stays invisible.)
-    let crab_hidden = external_crab_armed.is_some();
+    // The giant crab: Sally's collider silhouette (see `spawn_crab_silhouette`), CRAB_SCALE× a
+    // player. Hidden only when the armed NN rig (rl#114) has a skin model to be the visible crab;
+    // with no model the rig is mesh-less, so the silhouette must stay shown or the crab vanishes.
+    // Always spawned so `apply_transforms`'s crab query is satisfied. Both renders use the one
+    // `crab_render_scale`, so they can't mis-size.
+    let crab_hidden = external_crab_armed.is_some() && crate::bot::meshfit::model_path().is_some();
     let crab_root = commands
         .spawn((
             Transform::from_translation(world(state.ls.sim().crab().pos(), 0.0)),
