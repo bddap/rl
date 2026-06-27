@@ -694,18 +694,23 @@ struct CameraYaw(f32);
 /// player feeds the sim a NEUTRAL input (it just stands at the boarding spot) and the camera
 /// flies from this plane; stepping out drops it and returns the view to the foot player.
 ///
-/// `prev` is last applied tick's pose, so [`apply_transforms`] tweens the cockpit camera the
-/// same way it interpolates every sim body. Both are set/cleared together (board / step out).
-/// Only ever populated on the windowed [`InputSource::Solo`] path.
+/// An enum (not two `Option`s) so the plane and its previous pose are present together or not
+/// at all — the "flying but no prev pose" state is unrepresentable. `prev` is last applied
+/// tick's pose, so [`apply_transforms`] tweens the cockpit camera the same way it interpolates
+/// every sim body. Only ever `Piloting` on the windowed [`InputSource::Solo`] path.
 #[derive(Resource, Default)]
-struct LocalVehicle {
-    plane: Option<Plane>,
-    prev: Option<Plane>,
+enum LocalVehicle {
+    #[default]
+    OnFoot,
+    Piloting {
+        plane: Plane,
+        prev: Plane,
+    },
 }
 
 impl LocalVehicle {
     fn piloting(&self) -> bool {
-        self.plane.is_some()
+        matches!(self, Self::Piloting { .. })
     }
 }
 
@@ -880,9 +885,7 @@ fn drive_lockstep(
         if solo {
             if world.resource::<LocalVehicle>().piloting() {
                 // Step out: drop the plane, the camera falls back to the foot player.
-                let mut veh = world.resource_mut::<LocalVehicle>();
-                veh.plane = None;
-                veh.prev = None;
+                *world.resource_mut::<LocalVehicle>() = LocalVehicle::OnFoot;
             } else {
                 // Board: spawn a plane at the local player's current ground spot + facing, if
                 // it is still alive to board. Reuses the sim's one plane-spawn definition.
@@ -895,9 +898,8 @@ fn drive_lockstep(
                     .filter(|p| p.status() == PlayerStatus::Alive)
                     .map(|p| Plane::spawn(p.pos(), p.yaw()));
                 if let Some(plane) = boarding {
-                    let mut veh = world.resource_mut::<LocalVehicle>();
-                    veh.plane = Some(plane);
-                    veh.prev = Some(plane);
+                    *world.resource_mut::<LocalVehicle>() =
+                        LocalVehicle::Piloting { plane, prev: plane };
                 }
             }
         }
@@ -989,12 +991,9 @@ fn drive_lockstep(
         // Fly the client-side plane one tick with the real input (single-player vehicle),
         // keeping last tick's pose for the camera interpolation. The sim never sees this — it
         // is the play layer's own body, so the deterministic core stays integer-only.
-        if piloting {
-            let mut veh = world.resource_mut::<LocalVehicle>();
-            veh.prev = veh.plane;
-            if let Some(p) = veh.plane.as_mut() {
-                p.step(input);
-            }
+        if let LocalVehicle::Piloting { plane, prev } = &mut *world.resource_mut::<LocalVehicle>() {
+            *prev = *plane;
+            plane.step(input);
         }
 
         // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step
@@ -1745,11 +1744,10 @@ fn apply_transforms(
     // interpolated pose, looking along its heading+pitch, with the client pitch still added
     // so the pilot can glance around. An on-foot player keeps the ground eye view.
     if let Ok(mut cam) = cam_q.single_mut() {
-        if let Some(plane_now) = vehicle.plane {
+        if let LocalVehicle::Piloting { plane, prev } = &*vehicle {
             // Single-player: fly from the CLIENT-side plane (the play layer's own body — it
             // is not in the sim, so the deterministic core stays integer-only).
-            let plane_prev = vehicle.prev.unwrap_or(plane_now);
-            *cam = plane_cockpit_camera(plane_prev, plane_now, alpha, pitch.0);
+            *cam = plane_cockpit_camera(*prev, *plane, alpha, pitch.0);
         } else if let Some(plane_now) = sim.plane(local) {
             // A SIM-side pilot (networked vehicle, rl#43): same cockpit view from sim state.
             let plane_prev = state.prev.planes.get(&local).copied().unwrap_or(plane_now);
