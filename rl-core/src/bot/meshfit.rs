@@ -101,8 +101,8 @@ pub fn model_path() -> Option<std::path::PathBuf> {
 /// [`fit_capsule`]/box → `Collider::capsule`/`cuboid`. The binary is already an unstated
 /// GCR baseline (two peers on different binaries desync on everything, not just colliders),
 /// so the ONLY collider-affecting input not yet guarded is the asset file itself. Hashing
-/// the bytes captures exactly that input — conservatively (any byte change ⇒ a mismatch ⇒
-/// the safe integer-crab fallback) and WITHOUT re-introducing the float-reproducibility
+/// the bytes captures exactly that input — conservatively (any byte change ⇒ a mismatch ⇒ the
+/// round refuses to arm the NN crab, rl#114) and WITHOUT re-introducing the float-reproducibility
 /// question that hashing the skinned vertex cloud or the fitted f32 capsule would. Uses the
 /// shared [`super::physics_digest::fnv1a`] — the same build-stable FNV-1a/64 the other GCR
 /// digests use, so two same-binary peers with byte-identical assets agree.
@@ -111,7 +111,7 @@ pub fn crab_asset_digest() -> u64 {
         return 0; // no model resolves → "no collider asset", never counts as synced
     };
     let Ok(bytes) = std::fs::read(&path) else {
-        return 0; // unreadable → treat as no asset (the safe, fail-to-integer-crab side)
+        return 0; // unreadable → treat as no asset (a `0` digest never counts as synced → refuse)
     };
     super::physics_digest::fnv1a(&bytes)
 }

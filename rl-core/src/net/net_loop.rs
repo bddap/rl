@@ -82,16 +82,18 @@ impl NetDriver {
 
     /// Whether the formation barrier agreed every peer loaded the SAME non-zero policy
     /// weights (rl#82, GCR — [`Membership::weights_synced`]). The arm sites gate the float
-    /// NN crab on this via [`crate::net::may_arm_external_crab`]; `false` keeps the integer
-    /// crab. Always `false` without a supplied checkpoint (the digest exchanged was `0`).
+    /// NN crab on this via [`crate::net::may_arm_external_crab`]; `false` means the round can't
+    /// arm Sally and is refused (rl#114, no integer fallback). Always `false` without a supplied
+    /// checkpoint (the digest exchanged was `0`).
     pub fn weights_synced(&self) -> bool {
         self.weights_synced
     }
 
     /// Whether the formation barrier agreed every peer resolved the SAME non-zero crab-model
     /// asset (rl#100, GCR — [`Membership::assets_synced`]). The arm sites AND this with
-    /// [`NetDriver::weights_synced`] via [`crate::net::may_arm_external_crab`]; a mismatch keeps
-    /// the integer crab. Always `false` without a resolvable model (asset digest exchanged `0`).
+    /// [`NetDriver::weights_synced`] via [`crate::net::may_arm_external_crab`]; a mismatch means
+    /// the round can't arm Sally and is refused (rl#114, no integer fallback). Always `false`
+    /// without a resolvable model (asset digest exchanged `0`).
     pub fn assets_synced(&self) -> bool {
         self.assets_synced
     }
@@ -513,21 +515,24 @@ pub async fn form_match(
     // GCR shared-asset guard (rl#82 weights + rl#100 crab asset): make the verdict LOUD. With a
     // checkpoint loaded (`local_weights_digest != 0`) the operator needs to know whether the NN
     // crab will arm — it needs BOTH synced weights AND a synced crab asset; a mismatch on either
-    // means it WON'T (stays integer), which would otherwise look like a silent regression. With
-    // no checkpoint we say nothing (the integer crab is the only option). The asset verdict is
-    // reported whenever weights are synced (so an asset-only mismatch — the rl#100 hole this
-    // closes — is diagnosable, never silent).
+    // means it WON'T, and with no integer fallback (rl#114) the windowed client REFUSES the round
+    // rather than substituting a fake crab. The asset verdict is reported whenever weights are
+    // synced (so an asset-only mismatch — the rl#100 hole this closes — is diagnosable, never
+    // silent).
     if local_weights_digest != 0 {
         if !outcome.weights_synced {
             tracing::warn!(
                 "GCR: weights NOT synced across peers (digest mismatch or a peer has no \
-                 checkpoint) — refusing to arm the NN crab; using the deterministic integer crab"
+                 checkpoint) — cannot arm the NN crab; the windowed client will REFUSE this round \
+                 (rl#114, no integer fallback). Run rl-update on every device so all carry the \
+                 identical brain."
             );
         } else if !outcome.assets_synced {
             tracing::warn!(
                 "GCR: weights synced but crab MODEL ASSET NOT synced across peers (a peer has a \
-                 different sally.glb / no model — different colliders would desync) — refusing to \
-                 arm the NN crab; using the deterministic integer crab"
+                 different sally.glb / no model — different colliders would desync) — cannot arm \
+                 the NN crab; the windowed client will REFUSE this round (rl#114, no integer \
+                 fallback). Run rl-update on every device so all carry the identical crab model."
             );
         } else {
             println!(

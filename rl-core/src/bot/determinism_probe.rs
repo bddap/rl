@@ -272,8 +272,6 @@ fn run_two_peer_armed(
     let players = [PlayerId(0), PlayerId(1)];
     let mut a = Lockstep::new(GCR_SEED, &players, PlayerId(0));
     let mut b = Lockstep::new(GCR_SEED, &players, PlayerId(1));
-    a.enable_external_crab(true);
-    b.enable_external_crab(true);
 
     let mut app_a = headless_app();
     let mut app_b = headless_app();

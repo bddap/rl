@@ -197,7 +197,7 @@ impl CrabAssets {
 
 /// The body recipe the game renders and spawns: the fitted model when one is present,
 /// else the procedural stand-in. The ONE place this model-vs-fallback selection lives —
-/// [`CrabAssets`] (the spawned/skinned body) and the integer-crab collider silhouette
+/// [`CrabAssets`] (the spawned/skinned body) and the crab collider silhouette
 /// (`net::render::spawn_crab_silhouette`) both go through here so they can't drift on
 /// which body they show. A present-but-broken model is rejected by main's preflight (not
 /// silently swapped for the stand-in), so the `expect` only fires for a future caller

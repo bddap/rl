@@ -140,15 +140,15 @@ struct PlayArgs {
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
 
-    /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`). Drives the
-    /// giant crab with the rapier-simulated NN body instead of the integer point-pursuer, on a
-    /// SOLO round (a Host-alone Start, or a scripted `--host` that found no peer) AND — since the
-    /// GCR fold (rl#82) — on a NETWORKED round once peers agree on the brain + collider asset (the
-    /// weights/asset handshake, [`rl_core::net::may_arm_external_crab`]): the float NN crab is then
-    /// cross-peer deterministic (`enhanced-determinism`, proven by `game nn-crab-xpeer`). A
-    /// networked round whose peers DON'T agree, or any round with a missing/empty dir, falls back
-    /// to the integer crab (logged). Defaults to the `RL_CRAB_CHECKPOINT_DIR` env var, else
-    /// `assets/weights` under the asset root.
+    /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`) — REQUIRED: the
+    /// giant crab IS the rapier-simulated NN body (rl#114, no integer fallback). It drives the crab
+    /// on a SOLO round (a Host-alone Start, or a scripted `--host` that found no peer) AND — since
+    /// the GCR fold (rl#82) — on a NETWORKED round once peers agree on the brain + collider asset
+    /// (the weights/asset handshake, [`rl_core::net::may_arm_external_crab`]): the float NN crab is
+    /// then cross-peer deterministic (`enhanced-determinism`, proven by `game nn-crab-xpeer`). A
+    /// missing/empty dir, or a networked round whose peers DON'T agree, FAILS LOUD with an
+    /// actionable message rather than substituting a fake crab. Defaults to the
+    /// `RL_CRAB_CHECKPOINT_DIR` env var, else `assets/weights` under the asset root.
     #[arg(long, value_name = "DIR")]
     nn_crab_checkpoint: Option<PathBuf>,
 }
@@ -279,9 +279,7 @@ fn main() -> Result<()> {
 fn run_nn_crab_xpeer(args: NnCrabXpeerArgs) -> Result<()> {
     use rl_core::net::external_crab::run_cross_peer_probe;
 
-    let Some(dir) = nn_crab_checkpoint_dir(args.checkpoint) else {
-        anyhow::bail!("nn-crab-xpeer: no brain.bin at the resolved checkpoint dir");
-    };
+    let dir = nn_crab_checkpoint_dir(args.checkpoint)?;
     println!("nn-crab-xpeer: checkpoint={}", dir.display());
     println!("nn-crab-xpeer: seed={:#x} ticks={}", args.seed, args.ticks);
 
@@ -356,9 +354,7 @@ fn run_nn_crab_xpeer(args: NnCrabXpeerArgs) -> Result<()> {
 fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
     use rl_core::net::external_crab::run_headless_probe;
 
-    let Some(dir) = nn_crab_checkpoint_dir(args.checkpoint) else {
-        anyhow::bail!("nn-crab-probe: no brain.bin at the resolved checkpoint dir");
-    };
+    let dir = nn_crab_checkpoint_dir(args.checkpoint)?;
     println!("nn-crab-probe: checkpoint={}", dir.display());
     println!("nn-crab-probe: seed={:#x} ticks={}", args.seed, args.ticks);
 
@@ -453,6 +449,12 @@ fn run_play(args: PlayArgs) -> Result<()> {
     // pools — keeps the armed float NN crab cross-peer deterministic in multiplayer (GCR#113).
     // Why this must be first: see `render::pin_process_pools`.
     render::pin_process_pools();
+    // The REQUIRED NN-crab checkpoint dir — the one giant crab IS the trained NN body (rl#114): no
+    // integer fallback, so a missing brain is a hard, actionable failure here. Resolved BEFORE the
+    // handshake so the scripted host/join path can advertise our REAL weights digest (two peers arm
+    // the NN crab only when their brains agree — see `rl_core::net::may_arm_external_crab`).
+    let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint)?;
+    let weights_digest = rl_core::play::checkpoint_digest(&external_crab);
     let boot = if args.host || args.join.is_some() {
         // Scripted host/join: dial the join code if joining (blank/absent = LAN discover),
         // form over the barrier, and hand the result to Boot::Round. Host never dials. This
@@ -469,10 +471,9 @@ fn run_play(args: PlayArgs) -> Result<()> {
             dial,
             args.telemetry,
             None,
-            // Scripted host/join: no NN-crab checkpoint here, so a `0` weights digest — it never
-            // arms the float crab, always plays the deterministic integer crab. Still advertise
-            // our REAL crab-asset digest (rl#100) so the value is honest to any peer that arms.
-            0,
+            // Advertise our REAL weights + crab-asset digests so two scripted peers carrying the
+            // same checkpoint arm the NN crab; a mismatch refuses the round (rl#114, no fallback).
+            weights_digest,
             rl_core::bot::meshfit::crab_asset_digest(),
         )?;
         match result {
@@ -496,25 +497,23 @@ fn run_play(args: PlayArgs) -> Result<()> {
             telemetry: args.telemetry,
         }
     };
-    // The NN-crab checkpoint dir. Resolved unconditionally — it's just a path; arming is
-    // decided in `build_windowed_app`: a SOLO round always arms the real float rapier-NN crab,
-    // and a NETWORKED round arms it once peers agree on weights+assets (the digest handshake,
-    // `rl_core::net::may_arm_external_crab`) — otherwise the networked round keeps the integer
-    // pursuer. The single-thread pin above (`pin_process_pools`) plus the schedule pin inside
-    // `build_windowed_app` are what keep that armed float crab cross-peer deterministic.
-    // Skip a dir with no `brain.bin` so a bad path degrades to the integer crab rather
-    // than every-frame load failures.
-    let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint);
+    // Arming is decided in `build_windowed_app`: a SOLO round always arms the NN crab, a NETWORKED
+    // round arms it once peers agree on weights+assets (the digest handshake above), and a round
+    // that can't agree FAILS LOUD rather than substituting a fake crab. The single-thread pin above
+    // (`pin_process_pools`) plus the schedule pin inside `build_windowed_app` keep the armed float
+    // crab cross-peer deterministic.
     render::build_windowed_app(boot, external_crab).run();
     Ok(())
 }
 
-/// Resolve the solo NN-crab checkpoint dir: the `--nn-crab-checkpoint` flag (`flag`), else
+/// Resolve the REQUIRED NN-crab checkpoint dir: the `--nn-crab-checkpoint` flag (`flag`), else
 /// the `RL_CRAB_CHECKPOINT_DIR` env var (deploy sets this), else `assets/weights` under the
 /// asset root (`BEVY_ASSET_ROOT`, else the binary's cwd) — so a checkpoint can be chosen at
-/// runtime, no recompile. `None` if the resolved dir has no `brain.bin`, and the caller then
-/// keeps the integer crab.
-fn nn_crab_checkpoint_dir(flag: Option<PathBuf>) -> Option<PathBuf> {
+/// runtime, no recompile. A missing `brain.bin` is a HARD, ACTIONABLE failure (rl#114): the one
+/// giant crab IS the trained NN body ("Sally"), and there is no integer point-pursuer to fall back
+/// to, so rather than silently substituting a fake crab we refuse to launch with a message naming
+/// the dir we searched and how to fix it.
+fn nn_crab_checkpoint_dir(flag: Option<PathBuf>) -> Result<PathBuf> {
     let dir = flag
         .or_else(|| std::env::var_os("RL_CRAB_CHECKPOINT_DIR").map(PathBuf::from))
         .unwrap_or_else(|| {
@@ -525,14 +524,15 @@ fn nn_crab_checkpoint_dir(flag: Option<PathBuf>) -> Option<PathBuf> {
             root.join("assets").join("weights")
         });
     if dir.join("brain.bin").exists() {
-        Some(dir)
+        Ok(dir)
     } else {
-        eprintln!(
-            "solo crab: no brain.bin under {} — using the integer point-pursuer crab \
-             (set --nn-crab-checkpoint or RL_CRAB_CHECKPOINT_DIR to a trained checkpoint)",
+        anyhow::bail!(
+            "rl#114: no trained crab brain (brain.bin) under {} — the giant crab IS the trained NN \
+             body (\"Sally\"), and there is no integer stand-in. Point --nn-crab-checkpoint or the \
+             RL_CRAB_CHECKPOINT_DIR env var at a trained checkpoint dir (deploy/rl-update must set \
+             it, and EVERY device needs the IDENTICAL brain + crab model), then relaunch.",
             dir.display()
         );
-        None
     }
 }
 
@@ -565,8 +565,10 @@ fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
 /// (the lower-id peer proposes, say) without touching the sim.
 const MATCH_SEED: u64 = 0x6372_6162; // "crab"
 
-/// Drive the lockstep sim from a constant local input, ticking at [`TICK_HZ`]. Pure
-/// machinery check: no peers, so our own input completes every tick.
+/// Drive the lockstep sim from a constant local input, ticking at [`TICK_HZ`]. Pure machinery
+/// check of the sim/lockstep loop: no peers, so our own input completes every tick. Headless, so
+/// there is no rapier-NN crab stack — the giant crab simply holds its spawn (rl#114: no integer
+/// pursuit), which is fine here since this exercises player/lockstep determinism, not the crab.
 fn run_solo(args: SoloArgs) -> Result<()> {
     run_solo_round(args.run_secs)
 }
@@ -632,7 +634,7 @@ async fn run_net(args: NetArgs) -> Result<()> {
         args.expect,
         tel.as_ref(),
         None, // headless: timer-closed barrier, no interactive lobby
-        0,    // no NN-crab checkpoint headless → 0 weights digest, integer crab only (rl#82)
+        0,    // headless has no rapier-NN crab stack → 0 weights digest; the crab holds spawn (rl#114)
         rl_core::bot::meshfit::crab_asset_digest(), // honest crab-asset digest (rl#100)
     )
     .await?

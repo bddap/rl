@@ -60,7 +60,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// file is unreadable. The cross-peer "same weights?" check: identical files → identical
 /// digest. Reads the raw bytes rather than the deserialized tensors so it needs no backend
 /// and can't drift from how the weights are stored.
-pub(crate) fn checkpoint_digest(dir: &Path) -> u64 {
+pub fn checkpoint_digest(dir: &Path) -> u64 {
     let paths = CheckpointDir::new(dir);
     let Ok(mut bytes) = std::fs::read(paths.brain_file()) else {
         return 0;

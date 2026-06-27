@@ -121,14 +121,14 @@ pub struct Beat {
     /// [`Membership::weights_synced`] for what it gates. Deliberately NOT folded into
     /// [`Beat::roster_hash`]: it is a capability advertisement, not membership, so two peers
     /// with the identical roster still freeze the same set regardless of their brains (a
-    /// weights mismatch keeps the integer crab; it never breaks match formation).
+    /// weights mismatch refuses to arm the NN crab, rl#114; it never breaks match formation).
     pub weights_digest: u64,
     /// The sender's crab-MODEL-asset digest (rl#100, GCR), `0` for no resolvable model — the
     /// giant crab's rapier colliders are derived from this asset
     /// ([`crate::bot::meshfit::crab_asset_digest`]), so two peers with different crab models
     /// build different colliders and silently desync. A SIBLING of `weights_digest`, handled
     /// identically: NOT folded into [`Beat::roster_hash`] (a capability advertisement, not
-    /// membership — a mismatch keeps the integer crab, never breaks formation), self-declared,
+    /// membership — a mismatch refuses to arm the NN crab, never breaks formation), self-declared,
     /// never relayed. See [`Membership::assets_synced`] for what it gates.
     pub asset_digest: u64,
     /// The sender's view of WHO PILOTS a plane (a subset of `members`, sorted by id bytes) —
@@ -585,9 +585,10 @@ impl Membership {
     /// True only when we have a real checkpoint (`local_digest != 0`) AND every live peer's
     /// last DIRECT beat carried that exact digest. A `None` (relay-only, never heard directly)
     /// or any differing/zero digest fails it, so an unsynced brain can never be armed into
-    /// lockstep — it stays on the deterministic integer crab. This is an OUTPUT, never a close
-    /// gate: a weights mismatch still forms and plays the match (integer crab), it just refuses
-    /// to hand the crab to the float NN body. Call after [`Membership::poll`] (which expires
+    /// lockstep. This is an OUTPUT, never a close gate: a weights mismatch still FORMS the match
+    /// (it never breaks formation), but the round can't arm the NN crab and — with no integer
+    /// fallback (rl#114) — the windowed client REFUSES it loudly rather than playing a fake crab.
+    /// Call after [`Membership::poll`] (which expires
     /// the dead) so the live set is current; pairs with [`crate::net::may_arm_external_crab`].
     pub fn weights_synced(&self) -> bool {
         self.local_digest != 0
@@ -603,9 +604,10 @@ impl Membership {
     /// have a real asset (`local_asset_digest != 0`) AND every live peer's last DIRECT beat
     /// carried that exact digest. A `None` (relay-only) or any differing/zero digest fails it,
     /// so two peers whose crab models (and thus colliders) differ never arm the float NN crab
-    /// into lockstep — they stay on the deterministic integer crab. An OUTPUT, never a close
-    /// gate: an asset mismatch still forms and plays the match (integer crab), it just refuses
-    /// to hand the crab to the float NN body. The NN crab arms only when BOTH this and
+    /// into lockstep. An OUTPUT, never a close gate: an asset mismatch still FORMS the match, but
+    /// the round can't arm the NN crab and — with no integer fallback (rl#114) — the windowed
+    /// client REFUSES it loudly rather than playing a fake crab. The NN crab arms only when BOTH
+    /// this and
     /// `weights_synced` hold (peers agree on brain AND collider asset) — see
     /// [`crate::net::may_arm_external_crab`]. Call after [`Membership::poll`] so the live set
     /// is current.
@@ -1036,7 +1038,8 @@ mod tests {
     // ── Asset-digest handshake (rl#100, GCR — the shared-collider-asset guard) ────────
     // A SIBLING of the weights handshake above: the crab-model digest rides its own Beat
     // field, is never folded into the roster hash, and gates arming the float NN crab on every
-    // peer agreeing — so two peers whose crab colliders differ stay on the integer crab.
+    // peer agreeing — so two peers whose crab colliders differ can't arm Sally and the round is
+    // refused (rl#114, no integer fallback).
 
     #[test]
     fn asset_digest_roundtrips_on_the_wire() {
@@ -1108,7 +1111,8 @@ mod tests {
     fn weights_and_assets_synced_are_independent_gates() {
         // The two guards are orthogonal: matching brains but mismatched crab assets must leave
         // `weights_synced` true yet `assets_synced` false (and the arm site ANDs them, so the
-        // NN crab stays integer). Proves a refactor can't collapse the two into one digest.
+        // round can't arm Sally and is refused — rl#114). Proves a refactor can't collapse the two
+        // into one digest.
         let t0 = Instant::now();
         let (ida, idb) = (eid(1), eid(2));
         const BRAIN: u64 = 0xB0B0_0000_1234_5678;
