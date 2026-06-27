@@ -1,7 +1,8 @@
-//! A real rapier-simulated, NN-driven giant crab, replacing the integer point-pursuer with the
-//! actual trained RL body. Armed by the [`ExternalCrabArmed`] runtime gate on a SOLO round (a
-//! Host-alone Start, or scripted `--host` that found no peer), and — since the GCR fold (rl#82)
-//! — on a NETWORKED round with synced weights.
+//! A real rapier-simulated, NN-driven giant crab — the trained RL body ("real Sally"), the ONLY
+//! crab the game has (rl#114: there is no integer point-pursuer to fall back to). Armed by the
+//! [`ExternalCrabArmed`] runtime gate on a SOLO round (a Host-alone Start, or scripted `--host`
+//! that found no peer), and — since the GCR fold (rl#82) — on a NETWORKED round with synced
+//! weights.
 //!
 //! # When it drives the crab (and why it's safe)
 //! The game's [`crate::net::sim`] is a bit-deterministic INTEGER lockstep sim so two peers
@@ -10,10 +11,10 @@
 //! handshake) and (b) steps the body the identical number of physics steps per lockstep tick
 //! (the deterministic [`crate::net::cadence::PhysicsCadence`], pumped by
 //! `net::render::drive_lockstep`). [`crate::net::may_arm_external_crab`] is the gate that
-//! enforces both; a networked-UNSYNCED round stays on the integer pursuit
-//! ([`crate::net::sim::Sim::step`]), the cross-peer-safe fallback. On a solo round there's no
-//! peer to desync against, so it always arms. The integer pursuit remains the FALLBACK, not a
-//! parallel implementation — exactly one of the two drives any given round.
+//! enforces both. On a solo round there's no peer to desync against, so it always arms. A
+//! networked-UNSYNCED round CANNOT arm and — with no integer fallback — REFUSES LOUDLY (the
+//! windowed client fails with an actionable peer-mismatch message; see [`crate::net::render`])
+//! rather than silently substituting a fake crab for Sally.
 //!
 //! # How it works
 //! The trained policy ([`crate::play::Policy`], loaded from a checkpoint) is a
@@ -124,7 +125,7 @@ fn pos_to_m(p: Pos) -> Vec2 {
 }
 
 impl ExternalCrabBridge {
-    /// Seed the bridge at the sim's integer crab spawn (so the NN crab begins where the
+    /// Seed the bridge at the sim's crab spawn (so the NN crab begins where the
     /// round placed the giant crab, MIN_CRAB_SPAWN_DISTANCE from the players). `lead_m` /
     /// `world_gain` are the per-tick walk-target lead and the world-speed gain, resolved
     /// once by the plugin.
@@ -196,7 +197,7 @@ impl ExternalCrabBridge {
 
     /// Re-seed the bridge to the round's spawn after a deterministic sim RESTART
     /// ([`buttons::RESTART`]). The sim's [`reset`](crate::net::sim::Sim::reset) rebuilds the
-    /// integer crab back AT spawn, but the float body keeps walking and the bridge keeps its
+    /// crab back AT spawn, but the float body keeps walking and the bridge keeps its
     /// accumulated `world_pos_m`; without this the next [`sync_external_crab`] would snap the
     /// freshly-restarted crab onto the still-walking body's old position — mid-gait at the
     /// wrong place, not at the computed spawn. So move the game-world position back to the
@@ -212,7 +213,7 @@ impl ExternalCrabBridge {
     /// sim on the SAME applied tick on both peers). `spawn` is read back from the post-restart
     /// sim, which is itself deterministic — so the re-seed is bit-identical cross-peer. Unlike
     /// `CrabRescued` (a float-body teleport that leaves the game position put) this DOES move
-    /// `world_pos_m`, because a restart moves the integer crab.
+    /// `world_pos_m`, because a restart moves the crab back to spawn.
     pub fn restart_to_spawn(&mut self, spawn: Pos) {
         self.world_pos_m = pos_to_m(spawn);
         self.last_carapace_m = None;
@@ -222,8 +223,8 @@ impl ExternalCrabBridge {
 
 /// The per-tick bridge↔sim handshake, run BEFORE each [`Lockstep::try_advance`]: push the
 /// real crab body's game position + facing into the sim (so this tick's grab/extraction
-/// resolve against it), then refresh the player the crab hunts (nearest living — the same
-/// prey the integer pursuit picks). ONE definition so the windowed driver
+/// resolve against it), then refresh the player the crab hunts (nearest living). ONE definition
+/// so the windowed driver
 /// ([`crate::net::render`]'s `drive_lockstep`) and the headless probe can't drift on the
 /// contract (the manual's "one implementation per thing").
 pub fn sync_external_crab(ls: &mut crate::net::lockstep::Lockstep, bridge: &mut ExternalCrabBridge) {
@@ -267,12 +268,12 @@ fn hash_crab_physics(
 /// build (plugins can't be added later) but does NOT know yet how the round resolves — so every
 /// NN system is gated on this, present ONLY once the round arms the crab
 /// ([`crate::net::may_arm_external_crab`]: solo always, networked only with synced weights).
-/// While absent the crab never spawns and no policy/physics drives it, and crucially
-/// [`crate::net::render`]'s `drive_lockstep` never pumps physics or calls [`sync_external_crab`]
-/// — so a networked-UNSYNCED round with the stack present stays byte-identical to the
-/// integer-crab path. The scripted `Boot::Round` path inserts it at build; there is ONE gate for
-/// all paths, not a second always-on code path. The run-condition and render's reads gate on
-/// `Option<Res<ExternalCrabArmed>>::is_some()`.
+/// While absent (only behind the boot menu, before a round resolves — NumEnvs 0) the crab never
+/// spawns and `drive_lockstep` never pumps physics or calls [`sync_external_crab`]. Once a round
+/// resolves it is ARMED, or — if it can't be (networked-unsynced) — the round is REFUSED loudly
+/// (rl#114, no integer fallback; see [`crate::net::render`]'s `ensure_round_installed`). The
+/// scripted `Boot::Round` path inserts it armed at build; there is ONE gate for all paths. The
+/// run-condition and render's reads gate on `Option<Res<ExternalCrabArmed>>::is_some()`.
 #[derive(Resource)]
 pub struct ExternalCrabArmed;
 
@@ -293,7 +294,7 @@ pub struct ExternalCrabPlugin {
     /// Directory the brain (`brain.bin`) + normalizer (`normalizer.bin`) load from.
     /// Configurable so deploy can point it at the chosen checkpoint.
     pub checkpoint_dir: std::path::PathBuf,
-    /// The sim's integer crab spawn, so the bridge starts the NN crab there.
+    /// The sim's crab spawn, so the bridge starts the NN crab there.
     pub crab_spawn: Pos,
 }
 
@@ -751,14 +752,13 @@ pub fn run_headless_probe(
     let me = PlayerId(0);
     let ls = Lockstep::new(seed, &[me], me);
     let crab_spawn = ls.sim().crab().pos();
-    // The crab is externally driven for the whole probe (we own its position). Arm + seed the
-    // pose atomically with the crab's CURRENT spawn pose/yaw — writing back what's already
-    // there, so this is a no-op on sim state, just with the ordering footgun removed.
+    // The crab is externally driven for the whole probe (we own its position). Seed the pose with
+    // the crab's CURRENT spawn pose/yaw — writing back what's already there, so this is a no-op on
+    // sim state. Seed with a zero digest; the first post-step `hash_crab_physics` fills it before
+    // the first `sync_external_crab` push, so the seeded value is never the one cross-checked.
     let mut ls = ls;
     let crab = ls.sim().crab();
-    // Seed with a zero digest; the first post-step `hash_crab_physics` fills it before the
-    // first `sync_external_crab` push, so the seeded value is never the one cross-checked.
-    ls.initialize_external_crab(crab.pos(), crab.yaw(), 0);
+    ls.set_external_crab_pose(crab.pos(), crab.yaw(), 0);
 
     let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
     app.insert_non_send_resource(ProbeDriver {
@@ -848,8 +848,9 @@ fn sync_peer(app: &mut bevy::app::App, ls: &mut Lockstep) {
 ///
 /// If every `hash_a == hash_b` and the lockstep raises no desync fault, the float NN crab is the
 /// deterministic multiplayer crab on this hardware (same-arch, `enhanced-determinism` on; the
-/// cross-ARCH case stays untested here and is guarded by the integer fallback). A single diverging
-/// tick is the netcode-rethink trigger. Same `(checkpoint, seed, ticks)` ⇒ identical result (the
+/// cross-ARCH case stays untested here — peers must run the same-arch binary deploy carries, since
+/// there is no integer fallback any more, rl#114). A single diverging tick is the netcode-rethink
+/// trigger. Same `(checkpoint, seed, ticks)` ⇒ identical result (the
 /// inputs are a deterministic function of the tick index).
 pub fn run_cross_peer_probe(checkpoint_dir: &std::path::Path, seed: u64, ticks: u64) -> XPeerResult {
     use crate::net::cadence::PhysicsCadence;
@@ -883,11 +884,11 @@ pub fn run_cross_peer_probe(checkpoint_dir: &std::path::Path, seed: u64, ticks: 
     let mut ls_b = Lockstep::new(seed, &peers, p1);
     {
         let crab = ls_a.sim().crab();
-        ls_a.initialize_external_crab(crab.pos(), crab.yaw(), 0);
+        ls_a.set_external_crab_pose(crab.pos(), crab.yaw(), 0);
     }
     {
         let crab = ls_b.sim().crab();
-        ls_b.initialize_external_crab(crab.pos(), crab.yaw(), 0);
+        ls_b.set_external_crab_pose(crab.pos(), crab.yaw(), 0);
     }
     // The physics-step cadence per peer — `Default`-started and advanced once per applied tick on
     // each, so both peers run the identical step count for every tick (the GCR fold's core

@@ -138,13 +138,44 @@ pub const UNIT: i64 = 1000;
 /// realism: ~5 m/s at 30 Hz (`SPEED * 30 / UNIT`).
 const PLAYER_SPEED: i64 = 166;
 
-/// Crab pursuit speed, in [`UNIT`]/tick. Held meaningfully below [`PLAYER_SPEED`]
-/// (166) so a dodging player can OUTRUN it and open distance — the tiny-vs-giant
-/// asymmetry the loop is built on. Beatability comes mostly from this gap plus
-/// [`CRAB_GRAB_RADIUS`] and the [`STARTUP_GRACE_TICKS`] head-start, not from one number.
-/// FEEL KNOB: the exact value is for the owner to fine-tune by playing; keep the gap to
-/// PLAYER_SPEED wide enough that running away actually works.
+/// TEST-FIXTURE crab speed, in [`UNIT`]/tick (rl#114). The production crab is driven entirely by
+/// the rapier-NN body, so its real speed comes from physics, not a constant. This value only
+/// powers the deterministic test driver ([`drive_crab_toward_prey`]) that walks a stand-in crab so
+/// the grab/extraction/outcome MECHANICS stay exercised. Kept below [`PLAYER_SPEED`] (166) so the
+/// dodge test's faster player can still outrun and beat it.
+#[cfg(test)]
 const CRAB_SPEED: i64 = 130;
+
+/// Deterministic stand-in for the production crab driver (rl#114), shared by every test in this
+/// crate that needs a HUNTING crab (the sim mechanic tests + the `net` desync replay). Production
+/// drives the crab from the rapier-NN body via [`Sim::set_external_crab_pose`]; tests have no
+/// rapier stack, so this walks a crab toward the nearest living prey with the SAME integer math
+/// the real bridge's hunt target uses, then pushes the pose. `#[cfg(test)]` only — it can NEVER
+/// stand in for the NN crab in a release build, so it is not a production fallback. ONE definition
+/// (the manual's "one implementation per thing"). Call it each tick BEFORE [`Sim::step`]: it moves
+/// the crab once `tick() >= STARTUP_GRACE_TICKS`, so the pose is in place for the first armed step
+/// (the one that increments the tick PAST the grace and turns on grabs).
+#[cfg(test)]
+pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) {
+    if sim.tick() < STARTUP_GRACE_TICKS {
+        return; // hold spawn through the grace, matching the grab gate's head-start
+    }
+    let Some(target) = sim.nearest_living_player_pos() else {
+        return;
+    };
+    let mut pos = sim.crab().pos();
+    let dx = target.x - pos.x;
+    let dz = target.z - pos.z;
+    let yaw = trig::atan2_turns(dx, dz);
+    let dist = isqrt_i128(dist2_i128(dx, dz));
+    if dist <= CRAB_SPEED as i128 {
+        pos = target;
+    } else if dist > 0 {
+        pos.x += (dx as i128 * CRAB_SPEED as i128 / dist) as i64;
+        pos.z += (dz as i128 * CRAB_SPEED as i128 / dist) as i64;
+    }
+    sim.set_external_crab_pose(pos, yaw, 0);
+}
 
 /// Render hint only: how many times bigger than a player to draw the crab. It is a
 /// scaled placeholder; the sim treats it as a point with a [`CRAB_GRAB_RADIUS`] reach.
@@ -268,9 +299,10 @@ impl Player {
     }
 }
 
-/// The one giant crab: a point pursuer on the ground plane with a facing yaw (it
-/// turns to face its prey). Rendered [`CRAB_SCALE`]× a player; the sim models only
-/// its position and a [`CRAB_GRAB_RADIUS`] reach (no limbs yet — gray-box).
+/// The one giant crab: a ground-plane position with a facing yaw, driven from OUTSIDE the sim by
+/// the real rapier-NN body (rl#114, via [`Sim::set_external_crab_pose`]) — there is no built-in
+/// integer pursuit. Rendered [`CRAB_SCALE`]× a player; the sim models only its position and a
+/// [`CRAB_GRAB_RADIUS`] reach (the limbs live in the NN body, not here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Crab {
     pos: Pos,
@@ -434,27 +466,17 @@ pub struct Sim {
     /// and a peer built with a different roster is already a different game the cross-check
     /// surfaces via the player/plane state it does hash.
     config: RoundConfig,
-    /// The crab's ground position is driven from OUTSIDE the sim (by the real rapier-simulated
-    /// NN crab — see [`Sim::set_external_crab_pose`]) instead of by the built-in integer
-    /// point-pursuit. When set, [`Sim::step`] skips the pursuit move (block 2) and trusts
-    /// whatever `set_external_crab_pose` last wrote; grabs, extraction, and outcome (blocks 3–5)
-    /// then resolve against the real crab body's position.
-    ///
-    /// Armed on a SOLO round, and (since the GCR fold, rl#82) on a NETWORKED round with synced
-    /// weights — gated by [`crate::net::may_arm_external_crab`]; `false` on a networked-UNSYNCED
-    /// round, which keeps the integer pursuit. The FLAG itself is not hashed (like
-    /// [`config`](Sim::config)) — but [`external_crab_digest`](Sim::external_crab_digest), the
-    /// float body's per-tick digest, IS hashed while this is set, so the desync check covers the
-    /// articulated body and not just the quantized 2D pose below.
-    crab_external: bool,
-    /// While [`crab_external`](Sim::crab_external) is set, the peer-comparable digest of the
-    /// REAL rapier crab's full physics state for this tick (every actuated body's pose +
-    /// velocity bits — see [`crate::bot::physics_digest`]), supplied each tick by the
-    /// deterministic driver alongside the pose. Folded into [`Sim::state_hash`] ONLY while
-    /// external, so two peers whose float bodies — or whose policy weights, folded into this
-    /// digest by the bridge — diverge desync on the tick it happens. Unused (and unhashed) on
-    /// the integer path, so integer-only multiplayer hashes are byte-identical to before
-    /// (the rl#63 no-op-on-MP guarantee).
+    /// The peer-comparable digest of the REAL rapier crab's full physics state for this tick
+    /// (every actuated body's pose + velocity bits — see [`crate::bot::physics_digest`]),
+    /// supplied each tick by the deterministic driver alongside the pose via
+    /// [`Sim::set_external_crab_pose`]. ALWAYS folded into [`Sim::state_hash`], so two peers whose
+    /// float bodies — or whose policy weights, folded into this digest by the bridge — diverge
+    /// desync on the tick it happens. The giant crab's ground position is ALWAYS driven from
+    /// OUTSIDE the sim by the real NN crab body (rl#114): there is no built-in integer
+    /// point-pursuer to fall back to, so a round that can't arm the NN crab REFUSES LOUDLY rather
+    /// than silently substituting a fake crab. `0` until a pose is first pushed (a never-driven
+    /// crab — e.g. a headless determinism-machinery sim — folds a constant `0`, still
+    /// deterministic).
     ///
     /// CADENCE (rl#82, the GCR fold): this digest is sound cross-peer ONLY because the rapier
     /// crab now steps a deterministic, wall-clock-free number of physics steps per lockstep tick
@@ -522,43 +544,23 @@ impl Sim {
             rng: ChaCha8Rng::seed_from_u64(seed),
             restart_held: false,
             config,
-            crab_external: false,
             external_crab_digest: 0,
         }
     }
 
-    /// Put the crab under EXTERNAL control (see [`crab_external`](Sim::crab_external)):
-    /// [`Sim::step`] stops running the built-in integer pursuit, and the caller drives the
-    /// crab's position each tick with [`Sim::set_external_crab_pose`]. Armed on a solo round
-    /// always, and on a networked round only with synced weights stepped at the deterministic
-    /// cadence ([`crate::net::may_arm_external_crab`]) — an unsynced or wall-clock-stepped
-    /// float crab is not cross-peer deterministic.
-    pub fn enable_external_crab(&mut self, external: bool) {
-        self.crab_external = external;
-    }
-
-    /// Set the crab's ground position + facing yaw directly (see
-    /// [`enable_external_crab`](Sim::enable_external_crab)). Has effect only after
-    /// `enable_external_crab(true)`; otherwise [`Sim::step`]'s pursuit overwrites it. Call
-    /// it each tick BEFORE advancing, so the grab/extraction checks resolve against the
-    /// body's current position. `pos`/`yaw` are genuine hashed state; `phys_digest` is the
-    /// float body's per-tick digest (see [`external_crab_digest`](Sim::external_crab_digest)) the
-    /// desync check folds in while external — the bridge computes it from the rapier bodies
-    /// and the loaded policy weights, so any cross-peer divergence is caught.
+    /// Drive the crab's ground position + facing yaw from outside the sim — the ONLY way the
+    /// giant crab moves (rl#114: there is no built-in integer pursuit). The real rapier-NN crab
+    /// body ([`crate::net::external_crab`]) calls this each tick BEFORE advancing, so the
+    /// grab/extraction checks resolve against the body's current position. `pos`/`yaw` are genuine
+    /// hashed state; `phys_digest` is the float body's per-tick digest (see
+    /// [`external_crab_digest`](Sim::external_crab_digest)) the desync check folds in — the bridge
+    /// computes it from the rapier bodies and the loaded policy weights, so any cross-peer
+    /// divergence is caught. Seed it once at round setup with the crab's spawn pose, then push the
+    /// body's pose each tick.
     pub fn set_external_crab_pose(&mut self, pos: Pos, yaw: i32, phys_digest: u64) {
         self.crab.pos = pos;
         self.crab.yaw = yaw;
         self.external_crab_digest = phys_digest;
-    }
-
-    /// Round setup: arm external control AND seed the crab's initial pose + digest in ONE call,
-    /// so a pose can't be set before the flag is armed (where
-    /// [`set_external_crab_pose`](Sim::set_external_crab_pose) would silently no-op — the
-    /// integer pursuit overwrites it). Per-tick updates after this go through
-    /// `set_external_crab_pose`.
-    pub fn initialize_external_crab(&mut self, pos: Pos, yaw: i32, phys_digest: u64) {
-        self.enable_external_crab(true);
-        self.set_external_crab_pose(pos, yaw, phys_digest);
     }
 
     /// Rebuild the round to its tick-0 state from the stored [`config`](Sim::config) —
@@ -736,36 +738,15 @@ impl Sim {
             step_plane(plane, inp);
         }
 
-        // The crab is disarmed during the startup grace (see [`STARTUP_GRACE_TICKS`]).
+        // The crab's grabs are disarmed during the startup grace (see [`STARTUP_GRACE_TICKS`]).
         let armed = self.tick > STARTUP_GRACE_TICKS;
 
-        // 2) Crab: aim at and step toward the nearest living player. SKIPPED under
-        //    external (solo NN) control — the real crab body owns the position then (see
-        //    `crab_external`); the grab/extraction below still read `self.crab.pos`, so
-        //    only the *move* is delegated, not the hunt.
-        if !self.crab_external
-            && armed
-            && let Some(target) = self.nearest_living_player()
-        {
-            let t = target.pos;
-            let dx = t.x - self.crab.pos.x;
-            let dz = t.z - self.crab.pos.z;
-            self.crab.yaw = trig::atan2_turns(dx, dz);
-            // Step CRAB_SPEED along the (dx, dz) direction via an integer-normalized
-            // move (deterministic isqrt), not float trig. Within one step's distance,
-            // snap to the target so it doesn't overshoot/jitter around it. All of this
-            // is i128: players can flee the slower crab forever, so positions are
-            // unbounded, and an i64·i64 here (the squared distance OR the normalization
-            // multiply) could overflow on a marathon round — which PANICS in debug but
-            // WRAPS in release, i.e. desyncs two peers on different build profiles.
-            let dist = isqrt_i128(dist2_i128(dx, dz));
-            if dist <= CRAB_SPEED as i128 {
-                self.crab.pos = t;
-            } else if dist > 0 {
-                self.crab.pos.x += (dx as i128 * CRAB_SPEED as i128 / dist) as i64;
-                self.crab.pos.z += (dz as i128 * CRAB_SPEED as i128 / dist) as i64;
-            }
-        }
+        // 2) Crab MOVE: the giant crab's position is driven entirely from outside the sim by the
+        //    real rapier-NN crab body (rl#114, via [`Sim::set_external_crab_pose`]) — there is no
+        //    built-in integer point-pursuer here. A round that can't arm the NN crab REFUSES at
+        //    build time (see [`crate::net::render`]) rather than reaching `step` with a fake crab,
+        //    so by the time we step, the crab pose is whatever the body last pushed. The
+        //    grab/extraction below read `self.crab.pos`.
 
         // 3) Grabs: any living player within the crab's reach is downed (disarmed during
         //    the startup grace, so a player spawned near the crab isn't grabbed before
@@ -802,9 +783,8 @@ impl Sim {
     }
 
     /// Ground position of the living player nearest the crab, or `None` if every player
-    /// is downed/extracted. The solo NN-crab bridge reads this to aim the rapier crab at
-    /// its prey (the same target the integer pursuit picks), keeping the showcase crab
-    /// hunting the same player the round logic would.
+    /// is downed/extracted. The NN-crab bridge reads this to aim the rapier crab at its
+    /// prey, keeping the crab hunting the same player the round's grab logic resolves against.
     pub fn nearest_living_player_pos(&self) -> Option<Pos> {
         self.nearest_living_player().map(|p| p.pos)
     }
@@ -867,9 +847,8 @@ impl Sim {
     /// A runtime test perturbs each field and checks the hash moves, catching the dual slip
     /// (a field bound here but never written).
     pub fn state_hash(&self) -> u64 {
-        // config + the crab_external FLAG are deliberately not hashed (see field docs); bound
-        // to `_` so the destructure stays exhaustive without folding them. external_crab_digest
-        // IS folded, but only while external (below), so the integer path is byte-identical.
+        // config is deliberately not hashed (see its field doc); bound to `_` so the destructure
+        // stays exhaustive without folding it. external_crab_digest IS folded (below).
         let Sim {
             tick,
             players,
@@ -880,7 +859,6 @@ impl Sim {
             rng,
             restart_held,
             config: _,
-            crab_external,
             external_crab_digest,
         } = self;
 
@@ -921,14 +899,12 @@ impl Sim {
         // it manifests in an entity. Cloning and drawing one block reflects the
         // generator's position without disturbing the real stream.
         h.write(&rand::Rng::r#gen::<u64>(&mut rng.clone()).to_le_bytes());
-        // The float NN crab's per-tick physics+weights digest — folded ONLY while the crab is
-        // externally driven (rl#82, GCR). On the integer path nothing is written here, so the
-        // hash is byte-identical to before this field existed. While external it makes the
-        // articulated body (and the policy weights, via the bridge) part of the desync check,
-        // not just the quantized 2D `crab.pos`/`yaw` hashed above.
-        if *crab_external {
-            h.write(&external_crab_digest.to_le_bytes());
-        }
+        // The float NN crab's per-tick physics+weights digest — ALWAYS folded (rl#114: the crab
+        // is always externally driven). It makes the articulated body (and the policy weights,
+        // via the bridge) part of the desync check, not just the quantized 2D `crab.pos`/`yaw`
+        // hashed above. A never-driven crab folds the constant `0` it was seeded with — still
+        // deterministic across peers.
+        h.write(&external_crab_digest.to_le_bytes());
         h.finish()
     }
 
@@ -974,15 +950,6 @@ impl Sim {
     /// The giant crab (for rendering the threat).
     pub fn crab(&self) -> Crab {
         self.crab
-    }
-
-    /// Test-only read of the external-control flag (see [`crab_external`](Sim::crab_external)),
-    /// so the MP byte-identical-invariant tests (rl#63) can assert the networked path leaves
-    /// the crab under the deterministic integer pursuit. Not part of the production API: the
-    /// flag is set-once internal state, never read back outside the determinism guard tests.
-    #[cfg(test)]
-    pub(crate) fn crab_is_external(&self) -> bool {
-        self.crab_external
     }
 
     /// The extraction point (for rendering the objective marker).
@@ -1510,25 +1477,29 @@ mod tests {
 
     #[test]
     fn crab_pursues_and_grabs_a_lone_player() {
-        // One player standing still; the crab should close in and eventually down it,
-        // ending the round as a wipe. The crab holds still through the startup grace
-        // (covered by its own test), so step PAST the grace before checking pursuit.
+        // One player standing still; a crab driven toward it (the external driver — production's
+        // rapier-NN body, here the deterministic test stand-in) should close in and eventually
+        // down it, ending the round as a wipe. The crab holds still through the startup grace, so
+        // step PAST the grace before checking that distance closes.
         let mut sim = Sim::new(0, &players(1));
         let neutral: BTreeMap<PlayerId, Input> = BTreeMap::new();
         for _ in 0..STARTUP_GRACE_TICKS {
+            drive_crab_toward_prey(&mut sim);
             sim.step(&neutral);
         }
         let crab_armed = sim.crab().pos();
         let prey = sim.player(PlayerId(0)).unwrap().pos();
         let d_start = dist2(crab_armed, prey);
+        drive_crab_toward_prey(&mut sim);
         sim.step(&neutral);
         let d_next = dist2(sim.crab().pos(), sim.player(PlayerId(0)).unwrap().pos());
-        assert!(d_next < d_start, "crab must close distance once armed");
+        assert!(d_next < d_start, "crab must close distance once driven");
         // Run until the round resolves (bounded).
         for _ in 0..2000 {
             if sim.outcome() != Outcome::Ongoing {
                 break;
             }
+            drive_crab_toward_prey(&mut sim);
             sim.step(&neutral);
         }
         assert_eq!(
@@ -1543,9 +1514,9 @@ mod tests {
     }
 
     #[test]
-    fn initialize_external_crab_arms_and_seeds_pose() {
-        // `initialize_external_crab` must arm external control AND seed the pose in one call,
-        // so a pose can't be written before the flag is armed.
+    fn external_crab_pose_seeds_and_digest_is_hashed() {
+        // `set_external_crab_pose` is the ONLY way the crab moves (rl#114): it seeds/updates the
+        // pose AND the per-tick physics digest, which is always folded into the hash.
         let pos = Pos {
             x: 7 * UNIT,
             z: -3 * UNIT,
@@ -1554,18 +1525,17 @@ mod tests {
 
         let mut sim = Sim::new(0, &players(1));
         let digest = 0xFEED_FACE_DEAD_BEEF;
-        sim.initialize_external_crab(pos, yaw, digest);
-        assert!(sim.crab_is_external(), "initialize must arm external control");
-        assert_eq!(sim.crab().pos(), pos, "initialize must seed the pose");
-        assert_eq!(sim.crab().yaw(), yaw, "initialize must seed the yaw");
-        // The seeded digest is folded into the hash (external is armed); a different digest
-        // must move the hash — the desync teeth for the float body / weights mismatch.
+        sim.set_external_crab_pose(pos, yaw, digest);
+        assert_eq!(sim.crab().pos(), pos, "must seed the pose");
+        assert_eq!(sim.crab().yaw(), yaw, "must seed the yaw");
+        // A different digest must move the hash — the desync teeth for the float body / weights
+        // mismatch. (The digest is always folded now, no arm flag to gate it.)
         let h_seed = sim.state_hash();
         sim.set_external_crab_pose(pos, yaw, digest ^ 1);
         assert_ne!(
             h_seed,
             sim.state_hash(),
-            "the external crab digest must be hashed while external control is armed"
+            "the external crab digest must be folded into the state hash"
         );
     }
 
@@ -1615,6 +1585,7 @@ mod tests {
             };
             let mut inp = BTreeMap::new();
             inp.insert(PlayerId(0), Input::new(0.0, 1.0, look, buttons::ACTION));
+            drive_crab_toward_prey(&mut sim);
             sim.step(&inp);
             if sim.outcome() == Outcome::Extracted {
                 won = true;
@@ -1639,6 +1610,7 @@ mod tests {
             if sim.outcome() != Outcome::Ongoing {
                 break;
             }
+            drive_crab_toward_prey(&mut sim);
             sim.step(&neutral);
         }
         assert_ne!(
@@ -1655,7 +1627,11 @@ mod tests {
             )
         };
         let frozen = snapshot(&sim);
+        // Keep calling the driver — once the round is decided every player is downed, so the driver
+        // finds no living prey and pushes nothing, and `step` early-returns on the frozen outcome;
+        // between the two the world stays frozen.
         for _ in 0..10 {
+            drive_crab_toward_prey(&mut sim);
             sim.step(&neutral);
         }
         assert_eq!(
@@ -1981,9 +1957,8 @@ mod tests {
             "plane pitch must be hashed"
         );
 
-        // The crab_external FLAG is excluded (below), but the crab POSE it drives is hashed
-        // exactly like the internal-pursuit pose — that's what lets the solo NN crab's
-        // quantized pose stay desync-safe.
+        // The crab POSE (driven externally by the NN body, rl#114) is hashed so the quantized
+        // 2D pose stays desync-safe.
         assert_ne!(
             hash_after(&|s| s.crab.pos.x += 1),
             h0,
@@ -2038,26 +2013,13 @@ mod tests {
             h0,
             "config is deliberately not hashed (see Sim::config)"
         );
-        // `crab_external` is a GATE, not a hashed scalar: while it is FALSE (the integer-crab
-        // default of `base`) the external digest is outside the hash, so perturbing
-        // `external_crab_digest` must NOT move it — preserving integer-only-MP byte-identity
-        // (rl#63). While TRUE the SAME digest IS folded in, and its VALUE must move the hash —
-        // the desync teeth for the float body / weights mismatch (rl#82).
-        assert_eq!(
+        // `external_crab_digest` is ALWAYS folded into the hash now (rl#114: the crab is always
+        // externally driven — no integer-crab gate to fold it out), so perturbing it MUST move the
+        // hash. This is the desync teeth for the float body / weights mismatch (rl#82).
+        assert_ne!(
             hash_after(&|s| s.external_crab_digest ^= 0xdead_beef),
             h0,
-            "external_crab_digest must NOT be hashed while the integer crab drives (gated out)"
-        );
-        let armed = |digest: u64| {
-            hash_after(&move |s: &mut Sim| {
-                s.crab_external = true;
-                s.external_crab_digest = digest;
-            })
-        };
-        assert_ne!(
-            armed(0),
-            armed(0xdead_beef),
-            "external_crab_digest value must be hashed while external control is armed"
+            "external_crab_digest must be hashed (always folded since rl#114)"
         );
     }
 
@@ -2173,6 +2135,7 @@ mod tests {
             if sim.outcome() != Outcome::Ongoing {
                 break;
             }
+            drive_crab_toward_prey(&mut sim);
             sim.step(&neutral);
         }
         assert_eq!(sim.outcome(), Outcome::Wiped, "round should have ended");

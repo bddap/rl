@@ -30,7 +30,8 @@ use crate::bot::BotSet;
 use crate::bot::body::CrabCarapace;
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
-pub(crate) use policy::{Policy, checkpoint_digest};
+pub(crate) use policy::Policy;
+pub use policy::checkpoint_digest;
 
 use cameras::{orbit_camera, spawn_offscreen_camera, spawn_orbit_camera, track_offscreen_camera};
 use controls::DemoControls;

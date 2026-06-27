@@ -17,7 +17,9 @@
 #
 # SCOPE: same-arch (x86_64) cross-PROCESS determinism. It does NOT prove cross-ARCHITECTURE float
 # determinism — the cross-MACHINE case (two Steam Decks, possibly different CPUs) is the NEXT gate,
-# not this one; the integer-pursuit fallback remains the guard if a non-x86_64 peer ever appears.
+# not this one. rl#114 removed the integer-pursuit fallback (it was the trap that silently stood in
+# for Sally), so deploy MUST keep every peer on the same-arch binary it ships; a non-x86_64 peer
+# would have to be proven here (or REFUSE the round) rather than silently dropping to a fake crab.
 #
 # Usage: scripts/gcr82-xpeer-determinism.sh [CHECKPOINT_DIR]
 #   CHECKPOINT_DIR defaults to $RL_CRAB_CHECKPOINT_DIR, else assets/weights under the repo root.

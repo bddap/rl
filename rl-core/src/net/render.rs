@@ -206,11 +206,13 @@ pub enum AppPhase {
 /// `Plugin::build(&self)` can't move a non-`Clone` `Lockstep`/`NetDriver` out of
 /// itself — inserting them as resources at the `Playing` transition is the clean path.
 ///
-/// `external_crab` points at a trained checkpoint dir; when the round arms the crab the giant
-/// crab is the REAL rapier-simulated NN body ([`crate::net::external_crab`]) instead of the
-/// integer point-pursuer — on a SOLO round always, and on a NETWORKED round once peers agree on
-/// a shared brain (the weights-digest handshake) and step it at the deterministic cadence (the
-/// GCR fold, rl#82). A networked-UNSYNCED round keeps the integer pursuer.
+/// `external_crab` is the REQUIRED trained checkpoint dir for the one giant crab — the REAL
+/// rapier-simulated NN body ("real Sally", [`crate::net::external_crab`]). There is NO integer
+/// fallback (rl#114): a SOLO round always arms it; a NETWORKED round arms it once peers agree on a
+/// shared brain (the weights-digest handshake) and step it at the deterministic cadence (the GCR
+/// fold, rl#82). A networked-UNSYNCED round CANNOT arm Sally and FAILS LOUD (a clear peer-mismatch
+/// panic naming the fix — run rl-update on every device) rather than silently substituting a fake
+/// crab — the whole point of rl#114.
 /// Pin every process-global task pool to a single worker, so the armed float rapier-NN crab
 /// ("real Sally") evolves bit-identically across peers in the windowed client (GCR#113).
 ///
@@ -225,7 +227,7 @@ pub fn pin_process_pools() {
     crate::bot::test_util::pin_single_thread_pools();
 }
 
-pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>) -> App {
+pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App {
     // Loud canary for the one footgun the two-phase pin leaves: a caller that forgot
     // `pin_process_pools()` at process start would silently lose cross-peer determinism (fine
     // solo, desyncs only between peers). RAYON_NUM_THREADS is set to "1" only by the pin (and
@@ -297,10 +299,7 @@ pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>)
     // [`crate::play::checkpoint_digest`] (here from the path; on the bridge via
     // `Policy::weights_digest()`), so the cadence-fold follow-up that arms the crab must source
     // its folded digest from the SAME checkpoint, or a hot-reload could split the two.
-    let weights_digest = external_crab
-        .as_deref()
-        .map(crate::play::checkpoint_digest)
-        .unwrap_or(0);
+    let weights_digest = crate::play::checkpoint_digest(&external_crab);
     // OUR crab-MODEL-asset digest (rl#100, GCR): the giant crab's rapier colliders are derived
     // from this asset ([`crate::bot::meshfit::crab_asset_digest`]), so peers must agree on it
     // before arming the float crab in lockstep — a different model builds different colliders
@@ -317,47 +316,40 @@ pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>)
         Boot::Round(round) => {
             let (mut ls, net) = *round;
             let networked = net.is_some();
-            // External NN crab: arm iff the shared GCR gate allows it — a SOLO round always,
-            // a NETWORKED round only with synced weights ([`crate::net::may_arm_external_crab`],
-            // the determinism guard; the `Some(dir)` arm already proves a checkpoint is present).
-            // Capture the integer crab's spawn + hand the crab to external control BEFORE `ls`
-            // moves into core.
-            let nn = match external_crab {
-                Some(dir)
-                    if crate::net::may_arm_external_crab(
-                        net.is_none(),
-                        net.as_ref().is_some_and(NetDriver::weights_synced),
-                        net.as_ref().is_some_and(NetDriver::assets_synced),
-                    ) =>
-                {
-                    let crab = ls.sim().crab();
-                    let spawn = crab.pos();
-                    // Arm + seed the pose atomically with the crab's CURRENT spawn pose/yaw —
-                    // writing back what's already there, so sim state is unchanged. Digest 0 to
-                    // seed; the bridge's first post-step `hash_crab_physics` fills it before the
-                    // first `sync_external_crab` push, so the seeded value is never cross-checked.
-                    ls.initialize_external_crab(spawn, crab.yaw(), 0);
-                    Some((dir, spawn))
-                }
-                _ => None,
-            };
+            // The one giant crab is the real NN body (rl#114) — arm it now. A SOLO round always
+            // may; a NETWORKED round may only with synced weights+assets
+            // ([`crate::net::may_arm_external_crab`], the determinism guard). With no integer
+            // fallback, a networked round that CAN'T arm FAILS LOUD here rather than playing a fake
+            // crab. Capture the crab's spawn + seed the pose BEFORE `ls` moves into core.
+            if !crate::net::may_arm_external_crab(
+                net.is_none(),
+                net.as_ref().is_some_and(NetDriver::weights_synced),
+                net.as_ref().is_some_and(NetDriver::assets_synced),
+            ) {
+                panic!("{}", crab_arm_failure_message(&net));
+            }
+            let crab = ls.sim().crab();
+            let spawn = crab.pos();
+            // Seed the pose with the crab's CURRENT spawn pose/yaw — writing back what's already
+            // there, so sim state is unchanged. Digest 0 to seed; the bridge's first post-step
+            // `hash_crab_physics` fills it before the first `sync_external_crab` push, so the
+            // seeded value is never cross-checked.
+            ls.set_external_crab_pose(spawn, crab.yaw(), 0);
             let source = match net {
                 Some(n) => InputSource::Networked(Box::new(n)),
                 None => InputSource::Solo,
             };
             insert_core(&mut app, ls, source);
-            if let Some((dir, spawn)) = nn {
-                // Known-armed at build: add the stack AND arm the gate now, so the crab spawns
-                // frame one.
-                add_external_nn_crab(&mut app, dir, spawn);
-                app.insert_resource(crate::net::external_crab::ExternalCrabArmed);
-                // Networked: pin the feel knobs to defaults so a per-peer env override can't
-                // walk the crab to a different (hashed) pose and desync — solo keeps its tuning.
-                if networked {
-                    app.world_mut()
-                        .resource_mut::<crate::net::external_crab::ExternalCrabBridge>()
-                        .pin_default_knobs();
-                }
+            // Known-armed at build: add the stack AND arm the gate now, so the crab spawns frame
+            // one.
+            add_external_nn_crab(&mut app, external_crab, spawn);
+            app.insert_resource(crate::net::external_crab::ExternalCrabArmed);
+            // Networked: pin the feel knobs to defaults so a per-peer env override can't
+            // walk the crab to a different (hashed) pose and desync — solo keeps its tuning.
+            if networked {
+                app.world_mut()
+                    .resource_mut::<crate::net::external_crab::ExternalCrabBridge>()
+                    .pin_default_knobs();
             }
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
@@ -378,19 +370,20 @@ pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>)
             // the resolved round may ([`ensure_round_installed`] → [`crate::net::may_arm_external_crab`]:
             // solo always, networked only with synced weights). The crab's arena spawn is a pure
             // function of the seed (a throwaway solo lockstep reads it), so it's known here
-            // without the round existing yet. A missing/empty checkpoint keeps the integer crab
-            // (the stack isn't added at all); a networked-UNSYNCED round leaves the gate off, so
-            // it stays byte-identical to the integer-crab multiplayer round.
-            if let Some(dir) = external_crab {
+            // without the round existing yet. The checkpoint is REQUIRED (rl#114), so the stack is
+            // always installed; a networked-UNSYNCED round leaves the gate off and
+            // `ensure_round_installed` FAILS LOUD rather than substituting a fake crab.
+            {
+                let dir = external_crab;
                 let crab_spawn = crate::net::net_loop::solo_lockstep_for(seed)
                     .sim()
                     .crab()
                     .pos();
                 add_external_nn_crab(&mut app, dir, crab_spawn);
                 // Gate OFF: leave `ExternalCrabArmed` ABSENT (presence is the state). The
-                // transition (`ensure_round_installed`) inserts it iff the round resolves solo.
+                // transition (`ensure_round_installed`) inserts it iff the round resolves armable.
                 app.insert_resource(crate::bot::NumEnvs(0)); // no crab spawns behind the menu
-                app.insert_resource(ExternalCrabStackInstalled(true)); // the transition may activate it
+                app.insert_resource(ExternalCrabStackInstalled); // the transition may activate it
             }
         }
     }
@@ -409,12 +402,36 @@ pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>)
     app
 }
 
-/// Whether the boot-menu app has the solo NN-crab stack installed at build (rl#58) — set when
-/// a checkpoint was supplied on the menu path. The Playing transition reads it to decide
-/// whether to ACTIVATE the NN crab (only when the round resolved solo). Absent/false ⇒ the
-/// integer crab (no checkpoint, or the networked path).
-#[derive(Resource, Default, Clone, Copy)]
-struct ExternalCrabStackInstalled(bool);
+/// Presence marker: the boot-menu app installed the NN-crab stack at build (rl#58). The checkpoint
+/// is REQUIRED (rl#114), so on the menu path this is always inserted; the Playing transition reads
+/// its presence and arms the crab once the round resolves armable (solo always, networked only when
+/// synced), FAILING LOUD otherwise — there is no integer crab to fall back to. A presence marker,
+/// not a bool: "not installed" is simply the resource's absence (the scripted `Boot::Round` path),
+/// so there's no degenerate `false` state to mishandle.
+#[derive(Resource, Clone, Copy)]
+struct ExternalCrabStackInstalled;
+
+/// The actionable failure message when the one giant crab (the real NN body, "Sally") can't be
+/// armed for a NETWORKED round — peers disagree on the brain or the crab colliders, so a float
+/// crab would desync lockstep. With no integer fallback (rl#114) the round REFUSES rather than
+/// silently substituting a fake crab, so this message must tell the operator exactly what's wrong
+/// and how to fix it. Solo always arms, so this is only ever reached on a networked round.
+fn crab_arm_failure_message(net: &Option<NetDriver>) -> String {
+    // weights are checked first, so reaching the `else` means weights agree but assets don't.
+    let weights_synced = net.as_ref().is_some_and(NetDriver::weights_synced);
+    let cause = if !weights_synced {
+        "the trained brain (brain.bin) differs or is missing on a peer"
+    } else {
+        "the crab colliders (the sally.glb model) differ on a peer"
+    };
+    format!(
+        "rl#114: refusing to start the round — can't arm the trained NN crab (\"Sally\") for this \
+         multiplayer match because {cause}. Every device MUST carry the IDENTICAL brain + crab \
+         model, or lockstep would desync. Fix: run rl-update on every device so all peers share \
+         the same weights and colliders, then re-form the match. (There is deliberately no integer \
+         stand-in crab — a mismatched table refuses rather than silently dropping Sally.)"
+    )
+}
 
 /// Wire the real rapier-NN crab into the windowed solo app: the bot/physics/brain stack
 /// (the SAME plugins `rl --demo` runs, so the crab steps the exact dynamics the policy
@@ -445,7 +462,7 @@ fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_
 
     // The crab's true colliders as a wireframe — the in-engine view of the NN body when
     // no skin is loaded (and a useful overlay when one is). On by default for the solo
-    // showcase so the body is always visible; the integer-crab placeholder box is hidden
+    // showcase so the body is always visible; the placeholder crab box is hidden
     // in `apply_transforms` when the bridge is present.
     app.add_plugins(RapierDebugRenderPlugin {
         enabled: true,
@@ -565,14 +582,14 @@ struct PendingRound(Option<crate::net::menu::ReadyMatch>);
 /// - **Menu**: take the parked [`PendingRound`] (set by the menu on its choice) and
 ///   [`install_round`] it now, so the sim is live for the spawns.
 ///
-/// On the menu path this is ALSO where the external NN crab is ARMED (rl#58 + GCR): if the NN
-/// stack was installed at build ([`ExternalCrabStackInstalled`]) AND the resolved round may arm it
-/// ([`crate::net::may_arm_external_crab`]: solo always, networked only with synced weights),
-/// insert [`crate::net::external_crab::ExternalCrabArmed`] and hand the sim crab to external control
-/// so the rapier-NN body drives it. A networked-UNSYNCED round (or no checkpoint) leaves the
-/// gate off → the integer crab, byte-identical to today's multiplayer. The crab's arena spawn
-/// was already seeded into the bridge at build (a pure function of the seed), so nothing about
-/// the spawn depends on the round here.
+/// On the menu path this is ALSO where the one giant crab — the real NN body — is ARMED
+/// (rl#58 + GCR): if the resolved round may arm it ([`crate::net::may_arm_external_crab`]: solo
+/// always, networked only with synced weights+assets), insert
+/// [`crate::net::external_crab::ExternalCrabArmed`] and seed the sim crab so the rapier-NN body
+/// drives it. A networked-UNSYNCED round CANNOT arm and, with no integer fallback (rl#114), FAILS
+/// LOUD here with an actionable peer-mismatch message rather than silently substituting a fake
+/// crab. The crab's arena spawn was already seeded into the bridge at build (a pure function of
+/// the seed), so nothing about the spawn depends on the round here.
 ///
 /// Idempotent (guards on `GameState` already present), so it can't double-install if both
 /// a scripted round and a stray pending one ever coexisted. Reaching Playing with neither a
@@ -588,32 +605,34 @@ fn ensure_round_installed(world: &mut World) {
         .get_non_send_resource_mut::<PendingRound>()
         .and_then(|mut p| p.0.take())
         .expect("entered Playing with no round to install — the menu must park a round before transitioning");
-    // Arm the external NN crab iff the stack was installed at build (a checkpoint was present)
-    // AND the resolved round may arm it (the shared GCR gate: solo always, networked only with
-    // synced weights — a float crab on an unsynced networked round would desync peers).
-    let has_nn_stack = world
-        .get_resource::<ExternalCrabStackInstalled>()
-        .is_some_and(|m| m.0);
+    // Arm the one giant crab — the real NN body — iff the resolved round may (the shared GCR gate:
+    // solo always, networked only with synced weights+assets — a float crab on an unsynced
+    // networked round would desync peers). The checkpoint is required (rl#114), so the stack is
+    // always installed; a round that CAN'T arm FAILS LOUD here rather than substituting a fake
+    // crab. The stack marker must be present (it always is on the menu path) — a missing stack is a
+    // build-wiring bug, so assert it loudly too.
+    assert!(
+        world.get_resource::<ExternalCrabStackInstalled>().is_some(),
+        "the NN-crab stack must be installed before Playing (rl#114: the checkpoint is required)"
+    );
     let networked = ready.net.is_some();
     let weights_synced = ready.net.as_ref().is_some_and(NetDriver::weights_synced);
     let assets_synced = ready.net.as_ref().is_some_and(NetDriver::assets_synced);
-    if has_nn_stack
-        && crate::net::may_arm_external_crab(ready.net.is_none(), weights_synced, assets_synced)
-    {
-        let crab = ready.lockstep.sim().crab();
-        // Arm + seed atomically with the crab's current pose/yaw (writing back what's there →
-        // no state change), removing the set-pose-before-arm footgun.
-        ready
-            .lockstep
-            .initialize_external_crab(crab.pos(), crab.yaw(), 0);
-        world.insert_resource(crate::net::external_crab::ExternalCrabArmed);
-        // Networked: pin the feel knobs to defaults so a per-peer env override can't walk the
-        // crab to a different (hashed) pose and desync — solo keeps its tuning.
-        if networked {
-            world
-                .resource_mut::<crate::net::external_crab::ExternalCrabBridge>()
-                .pin_default_knobs();
-        }
+    if !crate::net::may_arm_external_crab(ready.net.is_none(), weights_synced, assets_synced) {
+        panic!("{}", crab_arm_failure_message(&ready.net));
+    }
+    let crab = ready.lockstep.sim().crab();
+    // Seed the pose with the crab's current pose/yaw (writing back what's there → no state change).
+    ready
+        .lockstep
+        .set_external_crab_pose(crab.pos(), crab.yaw(), 0);
+    world.insert_resource(crate::net::external_crab::ExternalCrabArmed);
+    // Networked: pin the feel knobs to defaults so a per-peer env override can't walk the
+    // crab to a different (hashed) pose and desync — solo keeps its tuning.
+    if networked {
+        world
+            .resource_mut::<crate::net::external_crab::ExternalCrabBridge>()
+            .pin_default_knobs();
     }
     let source = match ready.net {
         Some(n) => InputSource::Networked(Box::new(n)),
@@ -882,8 +901,9 @@ fn drive_lockstep(
     mut cadence: Local<PhysicsCadence>,
 ) {
     // Whether the external NN crab drives the sim this round (solo, or networked + synced
-    // weights). Read once — the gate is fixed for the round. When off, the integer pursuit
-    // drives the crab and no physics is pumped, byte-identical to the pre-GCR path.
+    // weights). Read once — the gate is fixed for the round. A real round is always armed (rl#114:
+    // a round that can't arm Sally is refused at build); when off (e.g. behind the boot menu) no
+    // physics is pumped and the crab holds its spawn.
     let armed = world
         .get_resource::<crate::net::external_crab::ExternalCrabArmed>()
         .is_some();
@@ -1035,8 +1055,8 @@ fn drive_lockstep(
         // state for interpolation; if armed, step the crab body by the deterministic cadence
         // and push its resulting pose + digest BEFORE advancing, so this tick's
         // grab/extraction/outcome resolve against the real NN crab and every peer folds the
-        // identical `phys_digest`. When not armed, the integer pursuit drives the crab and the
-        // tick is byte-identical to the pre-GCR path.
+        // identical `phys_digest`. A real round is always armed (rl#114: a round that can't arm
+        // Sally is refused at build, never reaches here unarmed).
         //
         // This inner drain is UNBOUNDED on purpose: it applies every tick whose inputs are
         // ready (a catch-up after a stall must apply them all, in order, to stay in lockstep —
@@ -1342,10 +1362,10 @@ fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     state: NonSend<GameState>,
-    // Whether the solo NN crab is ACTIVE this round: when so, the placeholder crab box is
-    // spawned hidden (the real rig is the crab). Keyed on the active gate, NOT the bridge's
-    // presence — on the menu path the bridge exists even for a networked round, which must
-    // keep the visible integer crab box. See the crab spawn below.
+    // Whether the NN crab is ACTIVE this round: when so, the placeholder crab box is spawned
+    // hidden (the real rig is the crab). A real round always arms it (rl#114); the box stays
+    // visible only on the headless screenshot path, which renders a plain sim with no NN stack.
+    // Keyed on the active gate, NOT the bridge's presence.
     external_crab_armed: Option<Res<crate::net::external_crab::ExternalCrabArmed>>,
 ) {
     // Ground: a large gray plane at Y=0.
@@ -1473,10 +1493,10 @@ fn spawn_world(
     }
 
     // The giant crab: Sally's real collider silhouette (see `spawn_crab_silhouette`),
-    // CRAB_SCALE× a player, for the integer-pursuit crab. When the external NN crab is
-    // armed (solo, or networked-synced) the real rapier rig (wireframe / skin) is the
-    // crab, so this silhouette is spawned HIDDEN there — the armed gate is the tell — and
-    // the rig shows instead. (We still spawn it so `apply_transforms`'s crab query is
+    // CRAB_SCALE× a player — the static placeholder shown only on the headless screenshot path.
+    // When the external NN crab is armed (every real round, rl#114) the real rapier rig
+    // (wireframe / skin) is the crab, so this silhouette is spawned HIDDEN there — the armed gate
+    // is the tell — and the rig shows instead. (We still spawn it so `apply_transforms`'s crab query is
     // satisfied either way; it just stays invisible.)
     let crab_hidden = external_crab_armed.is_some();
     let crab_h = PLAYER_HEIGHT * CRAB_SCALE as f32;
@@ -1497,15 +1517,15 @@ fn spawn_world(
     spawn_crab_silhouette(&mut commands, &mut meshes, &mut materials, crab_root, crab_h);
 }
 
-/// Draw the giant integer-pursuit crab as its REAL physics colliders — the carapace
-/// cuboid and every link capsule that [`crate::bot::body::render_recipe`] yields,
-/// scaled to the giant height and oriented claws-forward (+Z, the crab's facing) — and
-/// parent them to `crab_root`. Drawing the SAME shapes the sim body uses is the point
-/// of #108: the cosmetic crab can't drift from the body it depicts, and it reads as
-/// Sally instead of a box. `render_recipe` is the single model-vs-fallback selector
-/// (shared with the trainer), so this never invents a second source of geometry. The
-/// integer crab carries only a root pose (no per-limb articulation), so the silhouette
-/// is the rest stance posed rigidly — the legs don't walk, but the shape is honest.
+/// Draw the giant crab as its REAL physics colliders — the carapace cuboid and every link
+/// capsule that [`crate::bot::body::render_recipe`] yields, scaled to the giant height and
+/// oriented claws-forward (+Z, the crab's facing) — and parent them to `crab_root`. Drawing the
+/// SAME shapes the sim body uses is the point of #108: the cosmetic crab can't drift from the body
+/// it depicts, and it reads as Sally instead of a box. `render_recipe` is the single
+/// model-vs-fallback selector (shared with the trainer), so this never invents a second source of
+/// geometry. This static silhouette is the headless-screenshot placeholder (no articulation) — the
+/// real armed round shows the walking NN rig instead; the silhouette is the rest stance posed
+/// rigidly, so the legs don't walk, but the shape is honest.
 fn spawn_crab_silhouette(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,

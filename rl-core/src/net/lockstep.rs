@@ -314,31 +314,14 @@ impl Lockstep {
         self.confirmed
     }
 
-    /// Hand the crab to external control (the rapier NN crab) — forwards to
-    /// [`Sim::enable_external_crab`]. Call once at round setup; the integer pursuit then stops
-    /// and the caller drives the crab with [`Self::set_external_crab_pose`] each tick. Allowed
-    /// on a SOLO round always, and on a NETWORKED round ONLY with synced weights stepped at the
-    /// deterministic cadence (the GCR fold — [`crate::net::may_arm_external_crab`]); an unsynced
-    /// or wall-clock-stepped float crab desyncs peers.
-    pub fn enable_external_crab(&mut self, external: bool) {
-        self.sim.enable_external_crab(external);
-    }
-
-    /// Set the crab's ground position + yaw + physics digest from the real NN crab body, BEFORE
-    /// the next [`Self::advance_one`]/[`Self::try_advance`], so the grab/extraction checks
-    /// resolve against it and the desync check folds in `phys_digest`. Forwards to
-    /// [`Sim::set_external_crab_pose`]; a no-op on behaviour unless [`Self::enable_external_crab`]
-    /// was set. On a networked round call it once per APPLIED tick with that tick's freshly
+    /// Drive the crab's ground position + yaw + physics digest from the real NN crab body, BEFORE
+    /// the next [`Self::advance_one`]/[`Self::try_advance`], so the grab/extraction checks resolve
+    /// against it and the desync check folds in `phys_digest`. Forwards to
+    /// [`Sim::set_external_crab_pose`] — the ONLY way the crab moves (rl#114). Seed it once at
+    /// round setup with the spawn pose, then call once per APPLIED tick with that tick's freshly
     /// stepped pose (see `net::render::drive_lockstep`), so every peer folds the identical digest.
     pub fn set_external_crab_pose(&mut self, pos: crate::net::sim::Pos, yaw: i32, phys_digest: u64) {
         self.sim.set_external_crab_pose(pos, yaw, phys_digest);
-    }
-
-    /// Arm external control AND seed the crab's initial pose + digest atomically — the one entry
-    /// point for handing the crab to the rapier NN body. Forwards to
-    /// [`Sim::initialize_external_crab`].
-    pub fn initialize_external_crab(&mut self, pos: crate::net::sim::Pos, yaw: i32, phys_digest: u64) {
-        self.sim.initialize_external_crab(pos, yaw, phys_digest);
     }
 
     /// This peer's id.
@@ -356,17 +339,6 @@ fn check(tick: u64, peer: PlayerId, local: u64, remote: u64) -> Option<Fault> {
         local_hash: local,
         peer_hash: remote,
     })
-}
-
-/// Test-only accessor reachable from the sibling [`crate::net`] desync/invariant suite
-/// (rl#63's MP byte-identical guard), which constructs networked `Lockstep`s and must read
-/// back whether the crab was handed to external control. `pub(crate)` + `#[cfg(test)]` so it
-/// exists only in test builds and never widens the production surface.
-#[cfg(test)]
-impl Lockstep {
-    pub(crate) fn crab_is_external(&self) -> bool {
-        self.sim.crab_is_external()
-    }
 }
 
 #[cfg(test)]
