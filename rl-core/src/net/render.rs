@@ -211,23 +211,30 @@ pub enum AppPhase {
 /// integer point-pursuer — on a SOLO round always, and on a NETWORKED round once peers agree on
 /// a shared brain (the weights-digest handshake) and step it at the deterministic cadence (the
 /// GCR fold, rl#82). A networked-UNSYNCED round keeps the integer pursuer.
-/// Pin every process task pool to a single worker for the windowed client, so the armed
-/// float rapier-NN crab ("real Sally") evolves bit-identically across peers (GCR#113).
+/// Pin every process-global task pool to a single worker, so the armed float rapier-NN crab
+/// ("real Sally") evolves bit-identically across peers in the windowed client (GCR#113).
 ///
-/// MUST be called at process start — before any sim/rapier/bevy work creates the global
-/// pools (the `RAYON_NUM_THREADS=1` / `MATMUL_NUM_THREADS=1` env vars are read once on first
-/// pool use, and bevy's task pools are first-writer-wins `OnceLock`s). In `game play` that
-/// means the very top of `run_play`, ahead of matchmaking and `solo_lockstep_for`, which
-/// build sims that touch rapier's rayon pool. This is the IDENTICAL recipe the trainer
-/// (`training::inproc::init_process_pools`) and the #82 cross-peer probe run; exposed as one
-/// thin `pub` entry so `game` (a separate crate) can call it without widening the crate-
-/// internal helper. The matching schedule pin (ECS run order) is applied inside
-/// [`build_windowed_app`] via `force_serial_schedules`.
-pub fn pin_windowed_pools() {
+/// MUST be called at process start — ahead of matchmaking and `solo_lockstep_for` (which build
+/// sims) and `App::new` — because the pools latch their thread count on first use; see
+/// [`crate::bot::test_util::pin_single_thread_pools`] for the env-var/`OnceLock` mechanism. Same
+/// recipe the trainer and the #82 cross-peer probe run; exposed as one thin `pub` entry so `game`
+/// (a separate crate) can call it without widening the crate-internal helper. The matching ECS
+/// run-order pin is applied inside [`build_windowed_app`] via `force_serial_schedules`; that one
+/// is `build`-internal because nothing outside needs it.
+pub fn pin_process_pools() {
     crate::bot::test_util::pin_single_thread_pools();
 }
 
 pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>) -> App {
+    // Loud canary for the one footgun the two-phase pin leaves: a caller that forgot
+    // `pin_process_pools()` at process start would silently lose cross-peer determinism (fine
+    // solo, desyncs only between peers). RAYON_NUM_THREADS is set to "1" only by the pin (and
+    // an external override to anything else equally breaks determinism), so it's the canary.
+    debug_assert_eq!(
+        std::env::var("RAYON_NUM_THREADS").ok().as_deref(),
+        Some("1"),
+        "pin_process_pools() must run before build_windowed_app (and no external RAYON_NUM_THREADS override)"
+    );
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
