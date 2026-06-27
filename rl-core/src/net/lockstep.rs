@@ -254,7 +254,12 @@ impl Lockstep {
         // it the driver would stall at tick 0 forever waiting for inputs that, by design,
         // were never scheduled.
         let tick_inputs = if tick < INPUT_DELAY {
-            BTreeMap::new()
+            // A complete neutral map for every peer — NOT an empty map. `Sim::step`
+            // now demands an input per participant (rl#105); `self.peers` is exactly
+            // the sim's participant set, so this fills the warmup uniformly on every
+            // peer (bit-identical to the old empty-map default) while keeping the
+            // boundary fail-loud against a genuinely missing input.
+            self.peers.iter().map(|&p| (p, Input::default())).collect()
         } else {
             let tick_inputs = self.inputs.get(&tick)?;
             if !self.peers.iter().all(|p| tick_inputs.contains_key(p)) {
