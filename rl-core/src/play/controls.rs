@@ -2,20 +2,33 @@
 //! (`crate::controls`). This is the single source of the on-screen LEGEND (it replaces the
 //! old hand-written HUD string, so the legend can't drift from the bindings). The demo's
 //! live input is analog/multi-key and read directly in its own systems (`cameras::orbit_camera`,
-//! `demo::demo_controls`, `manual_control::manual_control_step`, `toggle_graph`) — the map
-//! drives only the overlay, at the granularity that reads well (orbit's four arrow keys show
-//! as one glyph).
+//! `demo::demo_controls`, `manual_control::manual_control_step`, `toggle_graph`) — the
+//! bindings drive only the overlay, at the granularity that reads well (orbit's four arrow
+//! keys show as one glyph).
+//!
+//! The demo never switches context (one inspection screen), so it has a single
+//! [`DemoContext`] whose row list ([`DEMO_ROWS`]) names every demo verb. The split between
+//! the binding table ([`DEMO_BINDINGS`], action → keys) and the row list (action → label) is
+//! the framework's uniform shape; for a single-context app the two simply parallel each
+//! other once.
 
 use bevy::prelude::*;
 
-use crate::controls::{ControlEntry, ControlInput, ControlScheme, Glyph, KbBinding, PadBinding};
+use crate::controls::{Binding, ContextRow, ControlInput, ControlScheme, Glyph, KbBinding, PadBinding};
 
 /// The demo's control scheme — a zero-size marker the overlay framework is instantiated
-/// with. Disjoint from GCR's [`crate::net::controls::GcrControls`]: different verbs, own map.
+/// with. Disjoint from GCR's [`crate::net::controls::GcrControls`]: different verbs, own data.
 pub(crate) struct DemoControls;
 
-/// The demo's controllable verbs. The row key of [`DEMO_CONTROL_MAP`]; the per-app test
-/// forces every variant to have exactly one row.
+/// The demo's single input context (it never switches screens). One variant, the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DemoContext {
+    #[default]
+    Inspect,
+}
+
+/// The demo's controllable verbs. The row key of [`DEMO_BINDINGS`]; the per-app test forces
+/// every variant to have exactly one binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DemoAction {
     Orbit,
@@ -84,9 +97,33 @@ impl ControlScheme for DemoControls {
     type Key = DemoKey;
     type Pad = DemoPad;
     type Mouse = DemoMouse;
+    type Context = DemoContext;
 
-    fn map() -> &'static [ControlEntry<Self>] {
-        &DEMO_CONTROL_MAP
+    fn bindings() -> &'static [Binding<Self>] {
+        &DEMO_BINDINGS
+    }
+
+    fn contexts() -> &'static [DemoContext] {
+        &[DemoContext::Inspect]
+    }
+
+    fn context_rows(ctx: DemoContext) -> &'static [ContextRow<Self>] {
+        match ctx {
+            DemoContext::Inspect => &DEMO_ROWS,
+        }
+    }
+
+    fn context_label(ctx: DemoContext) -> &'static str {
+        match ctx {
+            DemoContext::Inspect => "Crab demo",
+        }
+    }
+
+    fn context_from_id(id: &str) -> Option<DemoContext> {
+        match id {
+            "inspect" | "demo" => Some(DemoContext::Inspect),
+            _ => None,
+        }
     }
 
     fn reveal_action() -> DemoAction {
@@ -151,92 +188,97 @@ impl ControlInput for DemoControls {
     }
 }
 
-/// THE demo control map — models the demo's CURRENT bindings (verified against
+/// THE demo binding table — the demo's CURRENT bindings (verified against
 /// `cameras::orbit_camera`, `demo::demo_controls`, `manual_control::manual_control_step`,
 /// and `player::graph::toggle_graph`). Reveal binding: hold Tab / hold pad View — both
 /// free in the demo's input set. Manual, PickJoint, and Torque are gamepad-only (no
-/// keyboard binding), so the keyboard legend omits them.
-pub(crate) const DEMO_CONTROL_MAP: [ControlEntry<DemoControls>; 11] = [
-    ControlEntry {
+/// keyboard binding), so the keyboard legend omits them. Labels live in [`DEMO_ROWS`].
+pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [
+    Binding {
         action: DemoAction::Orbit,
-        label: "Orbit camera",
         keyboard: KbBinding::new(&[DemoKey::Arrows], &[DemoMouse::Drag]),
         pad: PadBinding::new(&[DemoPad::LeftStick]),
     },
-    ControlEntry {
+    Binding {
         action: DemoAction::Zoom,
-        label: "Zoom",
         keyboard: KbBinding::new(&[DemoKey::ZoomKeys], &[DemoMouse::Wheel]),
         pad: PadBinding::new(&[DemoPad::RightTrigger, DemoPad::LeftTrigger]),
     },
-    ControlEntry {
+    Binding {
         action: DemoAction::Rebuild,
-        label: "Rebuild crab",
         keyboard: KbBinding::new(&[DemoKey::R], &[]),
         pad: PadBinding::new(&[DemoPad::South]),
     },
-    ControlEntry {
+    Binding {
         action: DemoAction::Poke,
-        label: "Poke",
         keyboard: KbBinding::new(&[DemoKey::Space], &[]),
         pad: PadBinding::new(&[DemoPad::West]),
     },
-    ControlEntry {
+    Binding {
         action: DemoAction::Colliders,
-        label: "Collider wireframes",
         keyboard: KbBinding::new(&[DemoKey::ColliderKey], &[]),
         pad: PadBinding::new(&[DemoPad::Dpad]),
     },
-    ControlEntry {
+    Binding {
         action: DemoAction::JointGraph,
-        label: "Joint graph",
         keyboard: KbBinding::new(&[DemoKey::Graph], &[]),
         pad: PadBinding::new(&[DemoPad::North]),
     },
-    ControlEntry {
+    Binding {
         action: DemoAction::Manual,
-        label: "Manual control",
         keyboard: KbBinding::NONE,
         pad: PadBinding::new(&[DemoPad::East]),
     },
-    ControlEntry {
+    Binding {
         action: DemoAction::PickJoint,
-        label: "Pick joint (manual)",
         keyboard: KbBinding::NONE,
         pad: PadBinding::new(&[DemoPad::Dpad]),
     },
-    ControlEntry {
+    Binding {
         action: DemoAction::Torque,
-        label: "Joint torque (manual)",
         keyboard: KbBinding::NONE,
         pad: PadBinding::new(&[DemoPad::RightStick]),
     },
-    ControlEntry {
+    Binding {
         action: DemoAction::Quit,
-        label: "Quit",
         keyboard: KbBinding::new(&[DemoKey::Escape], &[]),
         pad: PadBinding::new(&[DemoPad::Start]),
     },
-    ControlEntry {
+    Binding {
         action: DemoAction::RevealControls,
-        label: "Controls",
         keyboard: KbBinding::hold(&[DemoKey::Tab], &[]),
         pad: PadBinding::hold(&[DemoPad::View]),
     },
+];
+
+/// The demo's one context's legend, in display order — each verb's human label. (The demo
+/// never switches context, so this is the whole legend.)
+pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 11] = [
+    ContextRow { action: DemoAction::Orbit, label: "Orbit camera" },
+    ContextRow { action: DemoAction::Zoom, label: "Zoom" },
+    ContextRow { action: DemoAction::Rebuild, label: "Rebuild crab" },
+    ContextRow { action: DemoAction::Poke, label: "Poke" },
+    ContextRow { action: DemoAction::Colliders, label: "Collider wireframes" },
+    ContextRow { action: DemoAction::JointGraph, label: "Joint graph" },
+    ContextRow { action: DemoAction::Manual, label: "Manual control" },
+    ContextRow { action: DemoAction::PickJoint, label: "Pick joint (manual)" },
+    ContextRow { action: DemoAction::Torque, label: "Joint torque (manual)" },
+    ContextRow { action: DemoAction::Quit, label: "Quit" },
+    ContextRow { action: DemoAction::RevealControls, label: "Controls" },
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Per-app control-map invariant: every [`DemoAction`] has exactly one
-    /// [`DEMO_CONTROL_MAP`] row, is bound on at least one device, and the reveal control
-    /// resolves to a hint glyph. The exhaustive `match` forces a new variant to be added to
-    /// `ALL` (so it can't slip in unmapped); the framework does the runtime checks. Manual /
-    /// PickJoint / Torque are gamepad-only — legitimately unbound on keyboard.
+    /// Per-app scheme invariant: every [`DemoAction`] has exactly one [`DEMO_BINDINGS`] row,
+    /// is bound on at least one device, and the single context shows it + the reveal control.
+    /// The exhaustive `match` forces a new variant to be added to `ALL` (so it can't slip in
+    /// unmapped); the framework does the runtime checks. Manual / PickJoint / Torque are
+    /// gamepad-only — legitimately unbound on keyboard.
     #[test]
-    fn demo_map_is_well_formed() {
-        use crate::controls::assert_map_well_formed;
+    fn demo_scheme_is_well_formed() {
+        use crate::controls::assert_scheme_well_formed;
         const ALL: [DemoAction; 11] = [
             DemoAction::Orbit,
             DemoAction::Zoom,
@@ -266,22 +308,22 @@ mod tests {
             }
         }
         assert!(ALL.iter().copied().all(classified));
-        assert_map_well_formed::<DemoControls>(&ALL);
+        assert_scheme_well_formed::<DemoControls>(&ALL, &[DemoContext::Inspect]);
     }
 
-    /// Every icon glyph the demo map surfaces points under `controls/`; the text-keycap
+    /// Every icon glyph the demo bindings surface points under `controls/`; the text-keycap
     /// glyphs (arrows/zoom/G/LT/X/B/Wheel) are intentional and need no asset.
     #[test]
     fn demo_icon_glyphs_are_under_controls_dir() {
         use crate::controls::{Device, Glyph};
         for device in [Device::KeyboardMouse, Device::Gamepad] {
-            for e in &DEMO_CONTROL_MAP {
-                for glyph in e.glyphs(device) {
+            for b in &DEMO_BINDINGS {
+                for glyph in b.glyphs(device) {
                     if let Glyph::Icon(path) = glyph {
                         assert!(
                             path.starts_with("controls/") && path.ends_with(".png"),
                             "glyph path {path:?} for {:?}/{device:?} is malformed",
-                            e.action
+                            b.action
                         );
                     }
                 }

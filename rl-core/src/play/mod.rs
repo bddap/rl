@@ -170,10 +170,12 @@ impl Plugin for ScreenshotPlugin {
         // demo's hold-to-reveal legend renders. The convenience plugin spawns the UI + seeds
         // `ForceRevealControls(false)`; the shared env override (see
         // [`crate::controls::reveal_overrides_from_env`]) opens it for the headless shot.
-        let (force_reveal, active_device) = crate::controls::reveal_overrides_from_env();
+        let (force_reveal, active_device, active_context) =
+            crate::controls::reveal_overrides_from_env::<DemoControls>();
         app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default())
             .insert_resource(force_reveal)
-            .insert_resource(active_device);
+            .insert_resource(active_device)
+            .insert_resource(active_context);
     }
 }
 

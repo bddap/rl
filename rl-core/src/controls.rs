@@ -1,25 +1,31 @@
-//! Reusable controls + hold-to-reveal-overlay framework, generic over an app's action
-//! set. One executable = one [`ControlScheme`] (its action enum, input vocabulary, glyph
-//! art, and control map); the framework turns that into the on-screen control legend and
-//! the polished hold-to-reveal overlay. GCR ([`crate::net::controls`]) and the demo
-//! ([`crate::play`]) are disjoint apps with disjoint verbs — each brings its own scheme;
-//! the overlay code below is shared.
+//! Reusable controls + hold-to-reveal-overlay framework, generic over an app's action set
+//! AND its input contexts. One executable = one [`ControlScheme`] (its action enum, input
+//! vocabulary, glyph art, binding table, and the per-context row lists); the framework turns
+//! that into the on-screen control legend and the polished hold-to-reveal overlay. GCR
+//! ([`crate::net::controls`]) and the demo ([`crate::play`]) are disjoint apps with disjoint
+//! verbs — each brings its own scheme; the overlay code below is shared.
 //!
-//! The single-source guarantee, PER APP: a scheme's [`ControlScheme::map`] is the one
-//! table the framework reads. The legend glyphs derive from it via [`ControlScheme`]'s
-//! `*_glyph` resolvers, so the displayed bindings can't drift from the table. An app whose
-//! live input ALSO reads the map (GCR, via the [`ControlInput`] glue + its own
-//! `key_code_for`) gets a full round-trip — rebind in the table, both the poll and the
-//! legend move together. An app whose input is analog/multi-key and read directly (the
-//! demo) uses the map as the single source of its LEGEND, at the granularity that reads
-//! well.
+//! The no-drift guarantee, in two halves:
+//! - **One binding table.** A scheme's [`ControlScheme::bindings`] is the ONE table that says
+//!   which key/button triggers each action. The legend glyphs derive from it (via the
+//!   `*_glyph` resolvers), and an app whose live input ALSO reads it (GCR, via the
+//!   [`ControlInput`] glue + its own `key_code_for`) gets a full round-trip — rebind in the
+//!   table, both the poll and the legend move together. So the displayed bindings can't drift
+//!   from the dispatched ones: the HUD resolves every key through the SAME `binding(action)`
+//!   the input layer dispatches from.
+//! - **Context as data.** The active control set is a CONTEXT (on-foot / piloting / …). Each
+//!   context is a [`ContextRow`] list — the actions shown in that context, in legend order,
+//!   each with the human label that's correct THERE ("Forward" on foot, "Throttle up" in the
+//!   plane). The binding (the key) is shared; only the label and membership vary. The HUD
+//!   renders [`legend`]`(ctx, device)` for the live [`ActiveContext`], so entering a vehicle
+//!   re-derives the panel from the one table — a stale/parallel HUD is unrepresentable.
 //!
 //! Two layers, split by the `render` feature — exactly like the rest of the crate:
-//! - The **pure core** ([`Device`], [`Glyph`], [`LegendLine`], [`ControlEntry`], the
-//!   [`ControlScheme`] trait, [`legend`]/[`reveal_glyph`], [`assert_map_well_formed`]) has
-//!   NO Bevy dependency, so it compiles and unit-tests in the no-feature build.
-//! - The **Bevy glue** (the `#[cfg(feature = "render")]` block) is the only place the
-//!   typed inputs meet Bevy's input API and the only place the overlay UI lives.
+//! - The **pure core** ([`Device`], [`Glyph`], [`LegendLine`], [`Binding`], [`ContextRow`],
+//!   the [`ControlScheme`] trait, [`legend`]/[`reveal_glyph`], [`assert_scheme_well_formed`])
+//!   has NO Bevy dependency, so it compiles and unit-tests in the no-feature build.
+//! - The **Bevy glue** (the `#[cfg(feature = "render")]` block) is the only place the typed
+//!   inputs meet Bevy's input API and the only place the overlay UI lives.
 
 use std::fmt::Debug;
 
@@ -47,27 +53,54 @@ pub enum Glyph {
     Label(&'static str),
 }
 
-/// An app's control scheme: its action enum, its input vocabulary, the glyph art for that
-/// vocabulary, and the control map. Implemented once per executable. The associated input
-/// types ([`Key`](ControlScheme::Key)/[`Pad`](ControlScheme::Pad)/[`Mouse`](ControlScheme::Mouse))
-/// make the scheme self-describing, so the legend's glyphs derive from the SAME typed map
-/// the input reads — no drift.
+/// An app's control scheme: its action enum, input vocabulary, glyph art, the binding table,
+/// and the input contexts (each a [`ContextRow`] list). Implemented once per executable. The
+/// associated input types ([`Key`](ControlScheme::Key)/[`Pad`](ControlScheme::Pad)/[`Mouse`](ControlScheme::Mouse))
+/// make the scheme self-describing, so the legend's glyphs derive from the SAME typed
+/// bindings the input reads — no drift.
 pub trait ControlScheme: 'static + Send + Sync {
-    /// The controllable verbs. The row key of [`ControlScheme::map`]; the per-app
-    /// invariant test ([`assert_map_well_formed`]) proves every variant has exactly one row.
+    /// The controllable verbs. The row key of [`ControlScheme::bindings`]; the per-app
+    /// invariant test ([`assert_scheme_well_formed`]) proves every variant has exactly one
+    /// binding.
     type Action: Copy + PartialEq + Debug;
-    /// The app's keyboard vocabulary (a closed enum: only the keys it binds), so the map
-    /// and glyph table are exhaustive and a typo can't name a nonexistent key.
+    /// The app's keyboard vocabulary (a closed enum: only the keys it binds), so the binding
+    /// and glyph tables are exhaustive and a typo can't name a nonexistent key.
     type Key: Copy + PartialEq;
     /// The app's gamepad vocabulary.
     type Pad: Copy + PartialEq;
     /// The app's mouse vocabulary (motion / buttons / wheel).
     type Mouse: Copy + PartialEq;
+    /// The app's input CONTEXTS — the distinct control sets the player moves between
+    /// (on-foot, piloting a plane, …). A single context for an app that never switches.
+    /// `Default` is the context the overlay starts in (the foot/primary context).
+    type Context: Copy + PartialEq + Eq + Debug + Default + Send + Sync + 'static;
 
-    /// THE control map: one row per action, in legend display order.
-    fn map() -> &'static [ControlEntry<Self>];
+    /// THE binding table: one row per action, the key/button that triggers it on each device.
+    /// Context-INDEPENDENT — an action's binding is the same wherever it appears, so the key
+    /// the legend shows is the key the input polls. Order is the canonical action order.
+    fn bindings() -> &'static [Binding<Self>];
+
+    /// Every context, in display order — drives pre-building the per-context legend columns
+    /// and the well-formedness test.
+    fn contexts() -> &'static [Self::Context];
+
+    /// The actions visible in a context, in legend order, each with the label that's correct
+    /// IN that context. The HUD for `ctx` is built by joining these rows with
+    /// [`bindings`](ControlScheme::bindings) for glyphs — so the panel IS the live bindings,
+    /// labeled for where you are.
+    fn context_rows(ctx: Self::Context) -> &'static [ContextRow<Self>];
+
+    /// Human name of a context — the overlay heading and the always-visible corner hint
+    /// ("On foot", "Piloting plane"), so the player always knows which control set is live.
+    fn context_label(ctx: Self::Context) -> &'static str;
+
+    /// Resolve a short context id (from the `RL_SHOW_CONTROLS_CONTEXT` screenshot override)
+    /// to a context, so one headless frame can record any context's legend. `None` for an
+    /// unknown id (the override then leaves the default context).
+    fn context_from_id(id: &str) -> Option<Self::Context>;
 
     /// The action whose HOLD reveals the overlay (and whose glyph the corner hint shows).
+    /// Bound once (context-independent) and present in every context's rows.
     fn reveal_action() -> Self::Action;
 
     /// Glyph art for the input vocabulary. Total over each enum, so a binding can't name an
@@ -141,18 +174,19 @@ impl<S: ControlScheme + ?Sized> PadBinding<S> {
     }
 }
 
-/// One row of a scheme's control map: an action, its legend label, and its binding on each
-/// device.
-pub struct ControlEntry<S: ControlScheme + ?Sized> {
+/// One row of a scheme's binding table: an action and the key/button that triggers it on
+/// each device. NO label — the label lives in [`ContextRow`], because the same binding reads
+/// differently in different contexts (the W key is "Forward" on foot, "Throttle up" in the
+/// plane). This split is what makes the binding single-source while letting labels be
+/// context-correct.
+pub struct Binding<S: ControlScheme + ?Sized> {
     pub action: S::Action,
-    /// Short human label for the legend (e.g. "Forward", "Rebuild crab").
-    pub label: &'static str,
     pub keyboard: KbBinding<S>,
     pub pad: PadBinding<S>,
 }
 
-impl<S: ControlScheme + ?Sized> ControlEntry<S> {
-    /// Whether this row is a hold on the given device.
+impl<S: ControlScheme + ?Sized> Binding<S> {
+    /// Whether this binding is a hold on the given device.
     pub fn is_hold(&self, device: Device) -> bool {
         match device {
             Device::KeyboardMouse => self.keyboard.hold,
@@ -160,7 +194,7 @@ impl<S: ControlScheme + ?Sized> ControlEntry<S> {
         }
     }
 
-    /// The ordered glyphs to display for this row on `device` (empty if it has no binding
+    /// The ordered glyphs to display for this binding on `device` (empty if it has no binding
     /// there). Keyboard: each key glyph then each mouse glyph; gamepad: each button glyph.
     pub fn glyphs(&self, device: Device) -> Vec<Glyph> {
         match device {
@@ -176,11 +210,21 @@ impl<S: ControlScheme + ?Sized> ControlEntry<S> {
     }
 }
 
-/// Look up a scheme's row for `action`. Total over the scheme's actions (every action has a
-/// row — proven by [`assert_map_well_formed`]), so the `Option` is just the lookup's honest
-/// shape.
-pub fn entry<S: ControlScheme + ?Sized>(action: S::Action) -> Option<&'static ControlEntry<S>> {
-    S::map().iter().find(|e| e.action == action)
+/// One row of a context's control list: an action shown in that context + the human label
+/// for it THERE. The binding (glyphs/hold) is looked up from [`ControlScheme::bindings`] by
+/// `action`, so a context can re-label a key without re-stating — or drifting from — what
+/// the input layer does with it.
+pub struct ContextRow<S: ControlScheme + ?Sized> {
+    pub action: S::Action,
+    /// Short human label for the legend in this context (e.g. "Forward" / "Throttle up").
+    pub label: &'static str,
+}
+
+/// Look up a scheme's binding for `action`. Total over the scheme's actions (every action has
+/// exactly one binding — proven by [`assert_scheme_well_formed`]), so the `Option` is just
+/// the lookup's honest shape.
+pub fn binding<S: ControlScheme + ?Sized>(action: S::Action) -> Option<&'static Binding<S>> {
+    S::bindings().iter().find(|b| b.action == action)
 }
 
 /// One ready-to-render legend line: the action's label, whether it's a hold, and the glyphs
@@ -193,55 +237,85 @@ pub struct LegendLine {
     pub glyphs: Vec<Glyph>,
 }
 
-/// Build the legend for `device` from a scheme's map: one [`LegendLine`] per row that is
-/// BOUND on that device, in map order. Rows with no binding on the device are omitted (so
-/// the keyboard column doesn't list a pad-only control). Iterating the map directly is what
-/// keeps it the only enumeration source — the legend can't drift from the live bindings.
-pub fn legend<S: ControlScheme + ?Sized>(device: Device) -> Vec<LegendLine> {
-    S::map()
+/// Build the legend for context `ctx` on `device`: one [`LegendLine`] per context row that
+/// is BOUND on that device, in context-row order, labeled for `ctx`. Rows whose action has
+/// no binding on the device are omitted (so the keyboard column doesn't list a pad-only
+/// control). Joining the context rows with the binding table is what keeps the bindings the
+/// only enumeration source — the legend can't drift from the live keys.
+pub fn legend<S: ControlScheme + ?Sized>(ctx: S::Context, device: Device) -> Vec<LegendLine> {
+    S::context_rows(ctx)
         .iter()
-        .filter_map(|e| {
-            let glyphs = e.glyphs(device);
+        .filter_map(|row| {
+            let b = binding::<S>(row.action)?;
+            let glyphs = b.glyphs(device);
             if glyphs.is_empty() {
                 return None;
             }
             Some(LegendLine {
-                label: e.label,
-                hold: e.is_hold(device),
+                label: row.label,
+                hold: b.is_hold(device),
                 glyphs,
             })
         })
         .collect()
 }
 
-/// The single glyph for the reveal control on `device`, for the corner hint. The reveal
+/// The single glyph for the reveal control on `device`, for the corner hint. Context-
+/// independent: the reveal control is bound once and shown in every context. The reveal
 /// action binds at least one control per device (its first glyph), so this never returns
 /// `None` for a well-formed scheme; the `Option` documents the invariant rather than
 /// inventing a fallback.
 pub fn reveal_glyph<S: ControlScheme + ?Sized>(device: Device) -> Option<Glyph> {
-    entry::<S>(S::reveal_action()).and_then(|e| e.glyphs(device).first().copied())
+    binding::<S>(S::reveal_action()).and_then(|b| b.glyphs(device).first().copied())
 }
 
 /// Per-app well-formedness check, called from each scheme's own `#[test]` with its
-/// exhaustive action list: every action appears EXACTLY once in the map, and every action
-/// is bound on at least one device (else it'd be invisible and unusable). The compiler-side
-/// half — that a new `Action` variant can't be added without a map row — is each app's
-/// exhaustive `match` over its actions producing `all_actions`.
-pub fn assert_map_well_formed<S: ControlScheme + ?Sized>(all_actions: &[S::Action]) {
+/// exhaustive action + context lists. Proves the no-drift invariants the types alone can't:
+/// every action has exactly one binding and is bound on some device; every context's rows
+/// reference real actions, are bound on some device, and INCLUDE the reveal action (so the
+/// overlay is openable everywhere); and the reveal control resolves to a hint glyph on both
+/// devices. The compiler-side half — that a new `Action`/`Context` variant can't be added
+/// without showing up here — is each app's exhaustive `match` producing these lists.
+pub fn assert_scheme_well_formed<S: ControlScheme + ?Sized>(
+    all_actions: &[S::Action],
+    all_contexts: &[S::Context],
+) {
     for &a in all_actions {
-        let n = S::map().iter().filter(|e| e.action == a).count();
-        assert_eq!(n, 1, "{a:?} appears {n} times in the map; want exactly 1");
-        let e = entry::<S>(a).expect("just checked exactly one row exists");
+        let n = S::bindings().iter().filter(|b| b.action == a).count();
+        assert_eq!(n, 1, "{a:?} has {n} bindings; want exactly 1");
+        let b = binding::<S>(a).expect("just checked exactly one binding exists");
         assert!(
-            !e.glyphs(Device::KeyboardMouse).is_empty() || !e.glyphs(Device::Gamepad).is_empty(),
+            !b.glyphs(Device::KeyboardMouse).is_empty() || !b.glyphs(Device::Gamepad).is_empty(),
             "{a:?} is bound on no device (would be invisible/unusable)"
         );
     }
     assert_eq!(
-        S::map().len(),
+        S::bindings().len(),
         all_actions.len(),
-        "the map has rows for actions not in the exhaustive list (a stale/duplicate row)"
+        "the binding table has rows for actions not in the exhaustive list (a stale/dup row)"
     );
+    assert!(!all_contexts.is_empty(), "a scheme needs at least one context");
+    for &ctx in all_contexts {
+        let rows = S::context_rows(ctx);
+        assert!(
+            !rows.is_empty(),
+            "context {ctx:?} shows no controls (an empty legend)"
+        );
+        for row in rows {
+            let b = binding::<S>(row.action)
+                .unwrap_or_else(|| panic!("context {ctx:?} row {:?} has no binding", row.action));
+            assert!(
+                !b.glyphs(Device::KeyboardMouse).is_empty()
+                    || !b.glyphs(Device::Gamepad).is_empty(),
+                "context {ctx:?} shows {:?}, which is bound on no device",
+                row.action
+            );
+        }
+        assert!(
+            rows.iter().any(|r| r.action == S::reveal_action()),
+            "context {ctx:?} omits the reveal control — the overlay couldn't be opened there"
+        );
+    }
     // The reveal action must resolve to a hint glyph on both devices (the corner hint).
     for device in [Device::KeyboardMouse, Device::Gamepad] {
         assert!(
@@ -278,26 +352,54 @@ mod overlay {
     #[derive(Resource, Clone, Copy, Default)]
     pub struct ActiveDevice(pub Device);
 
+    /// The live input CONTEXT for scheme `S` — the control set whose legend the overlay
+    /// shows and whose name the corner hint displays. The app drives it (GCR maps its
+    /// `LocalVehicle` to a context each frame); the overlay only reads it. Pure client UI —
+    /// it never touches the deterministic sim. Defaults to the scheme's default context.
+    #[derive(Resource, Clone, Copy)]
+    pub struct ActiveContext<S: ControlScheme>(pub S::Context);
+
+    impl<S: ControlScheme> Default for ActiveContext<S> {
+        fn default() -> Self {
+            Self(S::Context::default())
+        }
+    }
+
     /// Force the reveal overlay open regardless of input — for a HEADLESS screenshot, which
     /// has no live keyboard/pad to hold the reveal control. Defaults false (the windowed
     /// client stays hold-to-reveal); a screenshot app sets it true for an evidence frame.
     #[derive(Resource, Clone, Copy, Default)]
     pub struct ForceRevealControls(pub bool);
 
-    /// Marks the always-visible corner hint ("Hold [glyph] — Controls").
+    /// Marks the always-visible corner hint root ("[context] · Hold [glyph] Controls").
     #[derive(Component)]
     pub struct ControlsHintRoot;
+
+    /// Marks the context-name text in the corner hint (always visible) — updated each frame
+    /// to the active context's label so the player always knows which control set is live.
+    #[derive(Component)]
+    pub struct ContextHintLabel;
+
+    /// Marks the context-name heading at the top of the reveal panel — updated each frame to
+    /// the active context's label (e.g. "Piloting plane"), so the open overlay names the
+    /// context too.
+    #[derive(Component)]
+    pub struct ContextHeading;
 
     /// Marks the hold-to-reveal overlay root (the dark panel). Toggled between
     /// [`Display::None`] and [`Display::Flex`] by [`update_controls_ui`].
     #[derive(Component)]
     pub struct ControlsOverlayRoot;
 
-    /// One device's legend container inside the overlay (built once per device). Only the
-    /// active device's container is shown — pre-building both avoids rebuilding child
-    /// entities every time the player switches device or opens the overlay.
+    /// One (context, device) legend container inside the overlay (pre-built once each). Only
+    /// the active context's active-device container is shown — pre-building every combination
+    /// avoids rebuilding child entities on a context switch or device pickup. `ctx_idx`
+    /// indexes [`ControlScheme::contexts`] so the component stays non-generic.
     #[derive(Component)]
-    pub struct LegendColumn(Device);
+    pub struct LegendColumn {
+        ctx_idx: usize,
+        device: Device,
+    }
 
     /// One device's reveal-glyph node in the corner hint. Like [`LegendColumn`], both are
     /// pre-built (keyboard + pad) and only the active device's is shown — so the hint
@@ -357,11 +459,14 @@ mod overlay {
         }
     }
 
-    /// Spawn one legend column (icon/label + label rows) for `device`, as a child of the
-    /// overlay. Each row comes straight from [`legend`], so the panel IS the live bindings.
+    /// Spawn one (context, device) legend column (icon/label + label rows) as a child of the
+    /// overlay. Each row comes straight from [`legend`]`(ctx, device)`, so the panel IS the
+    /// live bindings, labeled for that context.
     fn spawn_legend_column<S: ControlScheme>(
         parent: &mut ChildSpawnerCommands,
         asset_server: &AssetServer,
+        ctx_idx: usize,
+        ctx: S::Context,
         device: Device,
         visible: bool,
     ) {
@@ -377,10 +482,10 @@ mod overlay {
                     row_gap: Val::Px(8.0),
                     ..default()
                 },
-                LegendColumn(device),
+                LegendColumn { ctx_idx, device },
             ))
             .with_children(|col| {
-                for line in legend::<S>(device) {
+                for line in legend::<S>(ctx, device) {
                     col.spawn(Node {
                         flex_direction: FlexDirection::Row,
                         align_items: AlignItems::Center,
@@ -409,16 +514,20 @@ mod overlay {
             });
     }
 
-    /// Spawn the controls UI for scheme `S`: the always-visible corner hint and the hidden
-    /// hold-to-reveal overlay. The reveal-glyph hint and the legend are both pre-built per
-    /// device; [`update_controls_ui`] shows only the active device's.
+    /// Spawn the controls UI for scheme `S`: the always-visible corner hint (the active
+    /// context name + "Hold [glyph] Controls") and the hidden hold-to-reveal overlay. The
+    /// reveal-glyph hint and one legend column per (context, device) are pre-built;
+    /// [`update_controls_ui`] shows only the active context's active-device column and keeps
+    /// the context name in sync.
     pub fn spawn_controls_ui<S: ControlScheme>(
         mut commands: Commands,
         asset_server: Res<AssetServer>,
     ) {
         let default_device = Device::default();
+        let default_ctx = S::Context::default();
+        let default_label = S::context_label(default_ctx);
 
-        // Corner hint (bottom-left), always visible: "[reveal glyph] Hold - Controls".
+        // Corner hint (bottom-left), always visible: "[context] · [reveal glyph] Hold - Controls".
         commands
             .spawn((
                 Node {
@@ -433,6 +542,25 @@ mod overlay {
                 ControlsHintRoot,
             ))
             .with_children(|hint| {
+                // The active context name, kept current by `update_controls_ui` — so which
+                // control set is live is visible WITHOUT opening the overlay.
+                hint.spawn((
+                    Text::new(default_label),
+                    TextFont {
+                        font_size: 18.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(1.0, 0.95, 0.6)),
+                    ContextHintLabel,
+                ));
+                hint.spawn((
+                    Text::new("·"),
+                    TextFont {
+                        font_size: 18.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.6, 0.6, 0.6)),
+                ));
                 // One reveal-glyph node per device, only the active one shown — same pattern
                 // as the legend columns, so an icon OR a text-keycap reveal glyph both work.
                 for device in [Device::KeyboardMouse, Device::Gamepad] {
@@ -480,26 +608,37 @@ mod overlay {
                 ControlsOverlayRoot,
             ))
             .with_children(|overlay| {
+                // Context name, big — the open panel names the live control set.
                 overlay.spawn((
-                    Text::new("Controls"),
+                    Text::new(default_label),
                     TextFont {
                         font_size: 26.0,
                         ..default()
                     },
-                    TextColor(Color::srgb(1.0, 1.0, 1.0)),
+                    TextColor(Color::srgb(1.0, 0.95, 0.6)),
+                    ContextHeading,
                 ));
-                spawn_legend_column::<S>(
-                    overlay,
-                    &asset_server,
-                    Device::KeyboardMouse,
-                    default_device == Device::KeyboardMouse,
-                );
-                spawn_legend_column::<S>(
-                    overlay,
-                    &asset_server,
-                    Device::Gamepad,
-                    default_device == Device::Gamepad,
-                );
+                overlay.spawn((
+                    Text::new("Controls"),
+                    TextFont {
+                        font_size: 16.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.7, 0.7, 0.7)),
+                ));
+                // One legend column per (context, device); only the default pair starts shown.
+                for (ctx_idx, &ctx) in S::contexts().iter().enumerate() {
+                    for device in [Device::KeyboardMouse, Device::Gamepad] {
+                        spawn_legend_column::<S>(
+                            overlay,
+                            &asset_server,
+                            ctx_idx,
+                            ctx,
+                            device,
+                            ctx == default_ctx && device == default_device,
+                        );
+                    }
+                }
             });
     }
 
@@ -532,40 +671,44 @@ mod overlay {
     }
 
     /// Whether the reveal control is currently held — any of its keyboard keys down OR any
-    /// of its pad buttons down on any connected pad. Reads the scheme's map via the
+    /// of its pad buttons down on any connected pad. Reads the scheme's binding table via the
     /// [`ControlInput`] glue, so the hint advertises exactly the control that opens the panel.
     fn reveal_held<S: ControlInput>(
         keys: &ButtonInput<KeyCode>,
         gamepads: &Query<&Gamepad>,
     ) -> bool {
-        let Some(e) = entry::<S>(S::reveal_action()) else {
+        let Some(b) = binding::<S>(S::reveal_action()) else {
             return false;
         };
-        let key_down = e
+        let key_down = b
             .keyboard
             .keys
             .iter()
             .filter_map(|&k| S::key_code(k))
             .any(|k| keys.pressed(k));
-        let pad_down = e
+        let pad_down = b
             .pad
             .buttons
             .iter()
             .filter_map(|&p| S::gamepad_button(p))
-            .any(|b| gamepads.iter().any(|gp| gp.pressed(b)));
+            .any(|btn| gamepads.iter().any(|gp| gp.pressed(btn)));
         key_down || pad_down
     }
 
-    /// Each frame: show the overlay iff the reveal control is held, and show only the active
-    /// device's legend column and hint glyph. Pure client UI — no sim contact. The three
-    /// `&mut Node` queries carry mutual `Without` filters so Bevy proves them disjoint.
+    /// Each frame: show the overlay iff the reveal control is held; show only the active
+    /// context's active-device legend column and the active device's hint glyph; and keep
+    /// the context name (corner hint + panel heading) in sync with [`ActiveContext`]. Pure
+    /// client UI — no sim contact. The `&mut Node`/`&mut Text` queries carry mutual `Without`
+    /// filters so Bevy proves them disjoint.
     // The query filter tuples are the disjointness proof, not gratuitous complexity — Bevy
-    // needs them spelled out, so the lint doesn't apply here.
-    #[allow(clippy::type_complexity)]
+    // needs them spelled out, so the lint doesn't apply here. Likewise the arg count: each is
+    // a distinct system param (inputs, the two name sinks, the column/hint/overlay queries).
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn update_controls_ui<S: ControlInput>(
         keys: Res<ButtonInput<KeyCode>>,
         gamepads: Query<&Gamepad>,
         device: Res<ActiveDevice>,
+        context: Res<ActiveContext<S>>,
         force_reveal: Res<ForceRevealControls>,
         mut overlay: Query<
             &mut Node,
@@ -583,6 +726,8 @@ mod overlay {
             (&HintGlyphFor, &mut Node),
             (Without<ControlsOverlayRoot>, Without<LegendColumn>),
         >,
+        mut headings: Query<&mut Text, (With<ContextHeading>, Without<ContextHintLabel>)>,
+        mut hint_labels: Query<&mut Text, (With<ContextHintLabel>, Without<ContextHeading>)>,
     ) {
         let revealed = force_reveal.0 || reveal_held::<S>(&keys, &gamepads);
 
@@ -594,25 +739,42 @@ mod overlay {
             };
         }
 
-        let show_for = |d: Device| {
-            if d == device.0 {
+        // The active context's index into `contexts()` — the column key. A context not in the
+        // list (can't happen for a well-formed scheme) shows no column rather than panicking.
+        let active_ctx_idx = S::contexts().iter().position(|&c| c == context.0);
+        for (col, mut node) in &mut columns {
+            node.display = if Some(col.ctx_idx) == active_ctx_idx && col.device == device.0 {
                 Display::Flex
             } else {
                 Display::None
-            }
-        };
-        for (col, mut node) in &mut columns {
-            node.display = show_for(col.0);
+            };
         }
         for (hint, mut node) in &mut hints {
-            node.display = show_for(hint.0);
+            node.display = if hint.0 == device.0 {
+                Display::Flex
+            } else {
+                Display::None
+            };
+        }
+
+        // Keep the context name current wherever it shows.
+        let label = S::context_label(context.0);
+        for mut text in &mut headings {
+            if text.0 != label {
+                text.0 = label.to_string();
+            }
+        }
+        for mut text in &mut hint_labels {
+            if text.0 != label {
+                text.0 = label.to_string();
+            }
         }
     }
 
-    /// Convenience plugin for the always-on case (the demo): spawns the controls UI at
-    /// Startup and runs the device tracker + overlay update every frame. An app with a
-    /// gated lifecycle (GCR spawns at its Playing transition) wires the systems directly
-    /// instead.
+    /// Convenience plugin for the always-on, single-context case (the demo): spawns the
+    /// controls UI at Startup and runs the device tracker + overlay update every frame. An
+    /// app that switches contexts (GCR) wires the systems directly and drives
+    /// [`ActiveContext`] itself.
     pub struct ControlsOverlayPlugin<S>(std::marker::PhantomData<fn() -> S>);
 
     impl<S> Default for ControlsOverlayPlugin<S> {
@@ -624,6 +786,7 @@ mod overlay {
     impl<S: ControlInput> Plugin for ControlsOverlayPlugin<S> {
         fn build(&self, app: &mut App) {
             app.init_resource::<ActiveDevice>()
+                .init_resource::<ActiveContext<S>>()
                 .insert_resource(ForceRevealControls(false))
                 .add_systems(Startup, spawn_controls_ui::<S>)
                 .add_systems(
@@ -636,20 +799,27 @@ mod overlay {
 
 #[cfg(feature = "render")]
 pub use overlay::{
-    ActiveDevice, ControlInput, ControlsOverlayPlugin, ForceRevealControls, spawn_controls_ui,
-    track_active_device, update_controls_ui,
+    ActiveContext, ActiveDevice, ControlInput, ControlsOverlayPlugin, ForceRevealControls,
+    spawn_controls_ui, track_active_device, update_controls_ui,
 };
 
 #[cfg(feature = "render")]
 pub(crate) use overlay::PAD_STICK_DEADZONE;
 
 /// The headless/debug overlay override, from the rl env convention shared by every render
-/// bin: `RL_SHOW_CONTROLS=1` forces the (normally hold-to-reveal) overlay open and
-/// `RL_SHOW_CONTROLS_PAD=1` selects the gamepad column — so one windowless screenshot can
-/// record either device's legend with no live input. One source so the contract can't drift
-/// between bins (the demo's and GCR's screenshot paths both call it). Inert when unset.
+/// bin: `RL_SHOW_CONTROLS=1` forces the (normally hold-to-reveal) overlay open,
+/// `RL_SHOW_CONTROLS_PAD=1` selects the gamepad column, and `RL_SHOW_CONTROLS_CONTEXT=<id>`
+/// selects which context's legend to show (via [`ControlScheme::context_from_id`]) — so one
+/// windowless screenshot can record any context/device's legend with no live input. One
+/// source so the contract can't drift between bins (the demo's and GCR's screenshot paths
+/// both call it). Inert when unset (default context/device, overlay closed).
 #[cfg(feature = "render")]
-pub(crate) fn reveal_overrides_from_env() -> (ForceRevealControls, ActiveDevice) {
+pub(crate) fn reveal_overrides_from_env<S: ControlScheme>()
+-> (ForceRevealControls, ActiveDevice, ActiveContext<S>) {
+    let ctx = std::env::var("RL_SHOW_CONTROLS_CONTEXT")
+        .ok()
+        .and_then(|id| S::context_from_id(&id))
+        .unwrap_or_default();
     (
         ForceRevealControls(std::env::var_os("RL_SHOW_CONTROLS").is_some()),
         ActiveDevice(if std::env::var_os("RL_SHOW_CONTROLS_PAD").is_some() {
@@ -657,5 +827,6 @@ pub(crate) fn reveal_overrides_from_env() -> (ForceRevealControls, ActiveDevice)
         } else {
             Device::KeyboardMouse
         }),
+        ActiveContext(ctx),
     )
 }
