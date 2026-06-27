@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+use crate::fnv::Fnv;
+
 /// Identifies a player within the sim. Assigned from the connection set in a
 /// deterministic order so every peer agrees which id is whom (see
 /// [`crate::net::lockstep`]); the sim itself only relies on the ordering being
@@ -889,7 +891,7 @@ impl Sim {
         for (id, player) in players.iter() {
             let Player { pos, yaw, status } = player;
             h.write(&[id.0]);
-            h.write_pos(*pos);
+            write_pos(&mut h, *pos);
             h.write(&yaw.to_le_bytes());
             h.write(&[status_tag(*status)]);
         }
@@ -903,16 +905,16 @@ impl Sim {
                 pitch,
             } = plane;
             h.write(&[id.0]);
-            h.write_pos3(*pos);
-            h.write_pos3(*vel);
+            write_pos3(&mut h, *pos);
+            write_pos3(&mut h, *vel);
             h.write(&heading.to_le_bytes());
             h.write(&pitch.to_le_bytes());
         }
         let Crab { pos, yaw } = crab;
-        h.write_pos(*pos);
+        write_pos(&mut h, *pos);
         h.write(&yaw.to_le_bytes());
         let ExtractionPoint { pos } = extraction;
-        h.write_pos(*pos);
+        write_pos(&mut h, *pos);
         h.write(&[outcome_tag(*outcome)]);
         // The restart edge-latch gates whether next tick's RESTART press fires, so a
         // divergence in it would desync the restart.
@@ -1340,44 +1342,25 @@ pub mod trig_client {
     }
 }
 
-/// FNV-1a 64-bit. A tiny, fixed, allocation-free hash whose result is identical on
-/// every machine — the property `state_hash` needs and `std::hash::DefaultHasher`
-/// does not guarantee.
-struct Fnv(u64);
+/// Fold a [`Pos`] (both coordinates) into the state hash — one call per position so a hashed
+/// entity can't accidentally fold X but forget Z. Destructured exhaustively so a new coordinate
+/// forces a compile error here (the rl#70 guard, extended to `Pos`). A free function rather than
+/// an `Fnv` method because the hasher is the shared [`crate::fnv::Fnv`], which can't name sim's
+/// `Pos`.
+fn write_pos(h: &mut Fnv, p: Pos) {
+    let Pos { x, z } = p;
+    h.write(&x.to_le_bytes());
+    h.write(&z.to_le_bytes());
+}
 
-impl Fnv {
-    const OFFSET: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
-
-    fn new() -> Self {
-        Self(Self::OFFSET)
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 ^= b as u64;
-            self.0 = self.0.wrapping_mul(Self::PRIME);
-        }
-    }
-    /// Fold a [`Pos`] (both coordinates) — one call per position so a hashed entity
-    /// can't accidentally fold X but forget Z. Destructured exhaustively so a new
-    /// coordinate forces a compile error here (the rl#70 guard, extended to `Pos`).
-    fn write_pos(&mut self, p: Pos) {
-        let Pos { x, z } = p;
-        self.write(&x.to_le_bytes());
-        self.write(&z.to_le_bytes());
-    }
-    /// Fold a [`Pos3`] (all three coordinates) — one call per 3D position so a hashed
-    /// flying entity can't fold X/Z but forget the altitude Y. Exhaustively destructured
-    /// for the same reason as [`Fnv::write_pos`].
-    fn write_pos3(&mut self, p: Pos3) {
-        let Pos3 { x, y, z } = p;
-        self.write(&x.to_le_bytes());
-        self.write(&y.to_le_bytes());
-        self.write(&z.to_le_bytes());
-    }
-    fn finish(&self) -> u64 {
-        self.0
-    }
+/// Fold a [`Pos3`] (all three coordinates) into the state hash — one call per 3D position so a
+/// hashed flying entity can't fold X/Z but forget the altitude Y. Exhaustively destructured for
+/// the same reason as [`write_pos`].
+fn write_pos3(h: &mut Fnv, p: Pos3) {
+    let Pos3 { x, y, z } = p;
+    h.write(&x.to_le_bytes());
+    h.write(&y.to_le_bytes());
+    h.write(&z.to_le_bytes());
 }
 
 #[cfg(test)]

@@ -14,27 +14,10 @@ use bevy_rapier3d::prelude::Velocity;
 
 use super::body::{CrabCarapace, CrabJoint};
 
-/// FNV-1a offset basis — the digest's start value. Public so a caller folding bodies from
-/// several sources seeds one rolling digest identically.
-pub const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
-
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-/// FNV-1a/64 over a raw byte slice, seeded from [`DIGEST_SEED`] — the build-stable hash the GCR
-/// guards use to compare BYTE blobs across peers (a checkpoint's weights, the crab-model asset).
-/// Unlike `std`'s randomized hashers, two same-binary peers hash identical bytes to an identical
-/// value, which is exactly what the shared-checkpoint/-asset guards require. (The same FNV-1a is
-/// still inlined at several older digest sites — `play::policy::fnv1a`, `membership::roster_hash`,
-/// sim's `Fnv`; folding those into this one is a tracked follow-up, deliberately not done in a
-/// determinism PR.)
-pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut h = DIGEST_SEED;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(FNV_PRIME);
-    }
-    h
-}
+/// The body digest's start value, so several body sources seed one rolling digest identically.
+/// Shares the FNV offset-basis *value* — but [`fold_bodies`] is word-wise, not byte-wise FNV
+/// (see there), so this is its own constant aliased onto the basis, not an [`crate::fnv::Fnv`].
+pub const DIGEST_SEED: u64 = crate::fnv::OFFSET_BASIS;
 
 /// Per-body field count: pos(3) + quat(4) + linvel(3) + angvel(3).
 pub const BODY_FIELDS: usize = 13;
@@ -89,15 +72,21 @@ pub fn body_bits(transform: &Transform, vel: &Velocity) -> [u32; BODY_FIELDS] {
     .map(canon_bits)
 }
 
-/// Fold a sorted-by-key slice of `(key, bits)` bodies into a rolling FNV-1a digest. The
-/// caller MUST sort by key first so two worlds whose ECS iteration order differs still
-/// produce the same digest (the key order is the cross-peer-stable order). Returns the
-/// updated digest so several body sets can be chained into one number.
+/// Fold a sorted-by-key slice of `(key, bits)` bodies into a rolling digest. The caller MUST
+/// sort by key first so two worlds whose ECS iteration order differs still produce the same
+/// digest (the key order is the cross-peer-stable order). Returns the updated digest so several
+/// body sets can be chained into one number.
+///
+/// This is an FNV-*style* word-wise fold (XOR each whole 32-bit word, then multiply), NOT
+/// byte-wise FNV-1a: it borrows [`crate::fnv::PRIME`] as the multiplier from one source, but
+/// folds at u32 granularity, so it is deliberately NOT routed through [`crate::fnv::Fnv`]
+/// (whose `write` is byte-wise and would yield a different digest). Don't "unify" it onto
+/// `Fnv` — that silently changes the value and desyncs peers.
 pub fn fold_bodies(mut h: u64, sorted_bodies: &[(usize, [u32; BODY_FIELDS])]) -> u64 {
     for (_, bits) in sorted_bodies {
         for &w in bits {
             h ^= w as u64;
-            h = h.wrapping_mul(FNV_PRIME);
+            h = h.wrapping_mul(crate::fnv::PRIME);
         }
     }
     h

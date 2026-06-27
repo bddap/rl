@@ -59,6 +59,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use iroh::EndpointId;
 
+use crate::fnv::Fnv;
+
 /// How long a member may go without a [`Beat`] before we drop it from our live set.
 /// Comfortably longer than [`BEAT_EVERY`] so a healthy peer is never flapped out by a
 /// single late heartbeat, short enough that a crashed/stale endpoint clears within the
@@ -165,15 +167,11 @@ pub fn roster_hash(ids: &[EndpointId]) -> u64 {
     let mut sorted: Vec<&EndpointId> = ids.iter().collect();
     sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
     sorted.dedup();
-    // FNV-1a/64.
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h = Fnv::new();
     for id in sorted {
-        for &byte in id.as_bytes() {
-            h ^= byte as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        h.write(id.as_bytes());
     }
-    h
+    h.finish()
 }
 
 /// The full agreement token folds the member set AND the pilot set, so two peers agree only
@@ -186,12 +184,9 @@ pub fn roster_hash(ids: &[EndpointId]) -> u64 {
 /// pilot set mixes in after, so the two dimensions can't cancel. Pilots ⊆ members always, so
 /// this is just `roster_hash(members)` with the pilot subset stirred in.
 pub fn agreement_token(members: &[EndpointId], pilots: &[EndpointId]) -> u64 {
-    let mut h = roster_hash(members);
-    for byte in roster_hash(pilots).to_le_bytes() {
-        h ^= byte as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
+    let mut h = Fnv::resume(roster_hash(members));
+    h.write(&roster_hash(pilots).to_le_bytes());
+    h.finish()
 }
 
 /// The agreement state machine: who is currently live, what each peer is advertising,

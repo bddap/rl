@@ -44,18 +44,6 @@ pub(crate) struct Policy {
     weights_digest: u64,
 }
 
-/// FNV-1a over `bytes` — a build-stable digest (unlike `std`'s randomized hashers) so two
-/// same-binary peers hash an identical checkpoint to an identical value. Used for the policy
-/// weights digest that gates lockstep (peers MUST run identical weights or they desync).
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
 /// Digest of a checkpoint's on-disk weights (brain + normalizer bytes), or `0` if the brain
 /// file is unreadable. The cross-peer "same weights?" check: identical files → identical
 /// digest. Reads the raw bytes rather than the deserialized tensors so it needs no backend
@@ -68,7 +56,7 @@ pub fn checkpoint_digest(dir: &Path) -> u64 {
     if let Ok(norm) = std::fs::read(paths.normalizer_path()) {
         bytes.extend_from_slice(&norm);
     }
-    fnv1a(&bytes)
+    crate::fnv::fnv1a(&bytes)
 }
 
 /// Load a brain + normalizer from `dir`, or `None` if the brain file is absent or
