@@ -449,12 +449,10 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
 /// SAME barrier as the menu and as `game net`, so the agreed roster + seed are identical
 /// however play was reached; a Host-alone fallback yields a solo round when nobody shows.
 fn run_play(args: PlayArgs) -> Result<()> {
-    // Pin all task pools to a single thread BEFORE any sim/net/bevy work (matchmaking and
-    // `solo_lockstep_for` below build sims that touch rapier's rayon pool, and the pools are
-    // first-read/first-writer-wins). This is what keeps the armed float NN crab cross-peer
-    // deterministic in multiplayer (GCR#113); the matching ECS-schedule pin lands inside
-    // `build_windowed_app`. See `render::pin_windowed_pools`.
-    render::pin_windowed_pools();
+    // Pin task pools BEFORE the matchmaking / `solo_lockstep_for` / `App::new` below latch the
+    // pools — keeps the armed float NN crab cross-peer deterministic in multiplayer (GCR#113).
+    // Why this must be first: see `render::pin_process_pools`.
+    render::pin_process_pools();
     let boot = if args.host || args.join.is_some() {
         // Scripted host/join: dial the join code if joining (blank/absent = LAN discover),
         // form over the barrier, and hand the result to Boot::Round. Host never dials. This
