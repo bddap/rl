@@ -152,6 +152,59 @@ pub fn tick(app: &mut App, n: u32) {
     }
 }
 
+/// Pin every process-global parallel-reduction pool to a SINGLE thread, so the hashed
+/// sim+inference path runs in one fixed float-operation order — the precondition for the
+/// crab to evolve bit-identically ACROSS processes (GCR#82). Three pools matter:
+///   - rayon's global pool (`RAYON_NUM_THREADS`) — any par-reduce reached from the deps;
+///   - the `matrixmultiply` thread tree (`MATMUL_NUM_THREADS`) — burn-ndarray's matmul,
+///     whose PARALLEL float accumulation order is otherwise nondeterministic across runs
+///     (the NN forward pass that drives the crab — the round-1 divergence source);
+///   - bevy's three task pools — `create_default_pools` claims the global `OnceLock`s with
+///     one worker each before any `App` build grabs the multi-threaded defaults.
+/// Each env var is read once, lazily, on first pool use, so this MUST run before the first
+/// matmul / `App::new`. Idempotent: safe to call per-app (a later `create_default_pools`
+/// no-ops on the already-initialised globals).
+///
+/// The same recipe the trainer runs at process start (`training::inproc::init_process_pools`,
+/// which now delegates here), shared so the rollout apps and the determinism probe can't
+/// drift on what "single-threaded" means.
+pub(crate) fn pin_single_thread_pools() {
+    // SAFETY: called before any pool reads its env (callers invoke this before building
+    // their first App / running inference), so these set_vars race no reader thread.
+    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        unsafe { std::env::set_var("RAYON_NUM_THREADS", "1") };
+    }
+    // Unlike RAYON, MATMUL_NUM_THREADS>1 doesn't just slow K=1 down — it re-arms the
+    // shared-tree deadlock under K>1 rollout threads — so force 1 rather than honor an
+    // export, warning instead of silently overriding so a stale >1 leaves a breadcrumb.
+    if let Ok(prev) = std::env::var("MATMUL_NUM_THREADS")
+        && prev != "1"
+    {
+        eprintln!(
+            "MATMUL_NUM_THREADS={prev} re-enables the shared matmul tree (deadlock risk \
+             under K>1 rollout threads, nondeterministic reduction order); forcing 1"
+        );
+    }
+    unsafe { std::env::set_var("MATMUL_NUM_THREADS", "1") };
+    // Pins bevy's three global task pools to one worker each. Must land before any App
+    // grabs the defaults (the OnceLock-backed pools are first-writer-wins).
+    TaskPoolOptions::with_num_threads(1).create_default_pools();
+}
+
+/// Force every schedule in `app` onto the single-threaded executor, so ECS never dispatches
+/// systems onto the global `ComputeTaskPool` — system run order becomes fixed rather than
+/// thread-scheduling-dependent. Must run AFTER all systems are added (the schedules don't
+/// exist until then). Used by the K-world rollout apps (so the workers don't serialise on
+/// the shared pool) and the GCR#82 determinism probe (so cross-peer float evolution can't
+/// reorder).
+pub(crate) fn force_serial_schedules(app: &mut App) {
+    use bevy::ecs::schedule::{ExecutorKind, Schedules};
+    let mut schedules = app.world_mut().resource_mut::<Schedules>();
+    for (_label, schedule) in schedules.iter_mut() {
+        schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+    }
+}
+
 /// Render truthfulness at the transform level: every crab body part's bevy
 /// `Transform` (what the mesh renders at) must equal rapier's rigid-body pose.
 #[cfg(test)]

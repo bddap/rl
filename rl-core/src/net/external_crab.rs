@@ -697,7 +697,20 @@ fn probe_step(
 /// drift between the two harnesses (the manual's "one implementation per thing"). The caller owns
 /// the [`Lockstep`] driving and seeding; this only stands up the rapier NN body.
 fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> bevy::app::App {
-    use crate::bot::test_util::{HeadlessStack, WorldRole, headless_stack};
+    use crate::bot::test_util::{
+        HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
+    };
+
+    // GCR#82: pin every parallel-reduction pool to one thread BEFORE building the app, so the
+    // rapier physics AND the burn matmul inference run in a single fixed float-op order — the
+    // precondition for the crab to evolve bit-identically across processes. Today the unpinned
+    // path happens to match cross-process too (rapier is serial — `parallel` off — and the
+    // `[≤16,77]` NN matmul stays under matrixmultiply's threading threshold), but that's
+    // INCIDENTAL: a larger NN (the stated next direction) would parallelize the matmul and a
+    // multi-threaded ECS executor could reorder accumulation, silently reintroducing divergence.
+    // Pinning makes determinism hold BY CONSTRUCTION. Same recipe the trainer uses (shared
+    // `pin_single_thread_pools`). Idempotent across the two in-process peers.
+    pin_single_thread_pools();
 
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
@@ -711,6 +724,11 @@ fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> be
     // The crab already spawned via `headless_stack`'s `num_envs: 1`, so the plugin's own gated
     // spawn is a no-op (the not-yet-spawned guard sees it present).
     app.insert_resource(ExternalCrabArmed);
+    // Force the ECS executor serial now that the plugin systems are wired — fixes the system run
+    // ORDER, the second half of the determinism guarantee alongside the pinned pools. A system the
+    // single-peer probe adds later (`probe_step`) lands in the already-serial schedule and inherits
+    // it, so this one call covers both probe drivers.
+    force_serial_schedules(&mut app);
     app
 }
 
