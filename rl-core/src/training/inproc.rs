@@ -63,7 +63,6 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use bevy::app::TaskPoolOptions;
 use bevy::prelude::*;
 use burn::module::Module;
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
@@ -188,34 +187,14 @@ fn physical_cores() -> usize {
 /// and that update runs while every rollout thread is idle — off the rollout critical
 /// path.
 fn init_process_pools() {
-    // SAFETY: single-threaded at process start (no rollout threads spawned yet), so
-    // these set_vars race nothing. They must land before the pools initialize — each
-    // reads its env exactly once, lazily, on first use.
-    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
-        unsafe {
-            std::env::set_var("RAYON_NUM_THREADS", "1");
-        }
-    }
-    // Unlike RAYON, MATMUL_NUM_THREADS>1 doesn't just slow K>1 down — it re-arms the
-    // shared-tree deadlock — so force 1 rather than honor an export. Warn instead of
-    // silently overriding, so a stale >1 in the env can't resurface as a rare hang
-    // with no breadcrumb.
-    if let Ok(prev) = std::env::var("MATMUL_NUM_THREADS")
-        && prev != "1"
-    {
-        eprintln!(
-            "[learner] MATMUL_NUM_THREADS={prev} re-enables the shared matmul tree \
-             (deadlock risk with K>1 rollout threads); forcing 1"
-        );
-    }
-    unsafe {
-        std::env::set_var("MATMUL_NUM_THREADS", "1");
-    }
-    // with_num_threads(1) pins bevy's three global task pools to one worker each (see
-    // the doc above). Building the App also forces every schedule onto the
-    // single-threaded executor (see `build_rollout_app`), but the pools must be pinned
-    // before any App grabs the defaults.
-    TaskPoolOptions::with_num_threads(1).create_default_pools();
+    // The single-threaded pool recipe is shared with the GCR#82 determinism probe so the
+    // two can't drift on what "single-threaded" means (the probe needs the IDENTICAL fixed
+    // float-op order to evolve the crab bit-identically cross-process). Called here at
+    // process start — single-threaded, no rollout threads yet, so the set_vars race nothing
+    // and land before any pool initializes. Building each App also forces every schedule
+    // onto the single-threaded executor (see `build_rollout_app`), but the pools must be
+    // pinned before any App grabs the defaults.
+    crate::bot::test_util::pin_single_thread_pools();
 }
 
 /// Filename of the tick-budget odometer, beside the checkpoint, so a restarted
@@ -502,17 +481,11 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
         )
         .add_systems(Last, save_on_exit);
 
-    // Force every schedule onto the single-threaded executor so ECS never dispatches
-    // onto the global ComputeTaskPool (which would serialize the K threads).
-    // Unconditional, and must run AFTER add_systems above — the schedules don't exist
-    // until the systems are wired.
-    {
-        use bevy::ecs::schedule::{ExecutorKind, Schedules};
-        let mut schedules = app.world_mut().resource_mut::<Schedules>();
-        for (_label, schedule) in schedules.iter_mut() {
-            schedule.set_executor_kind(ExecutorKind::SingleThreaded);
-        }
-    }
+    // Force every schedule onto the single-threaded executor so ECS never dispatches onto
+    // the global ComputeTaskPool (which would serialize the K threads). Unconditional, and
+    // must run AFTER add_systems above — the schedules don't exist until the systems are
+    // wired. Shared with the determinism probe (see `force_serial_schedules`).
+    crate::bot::test_util::force_serial_schedules(&mut app);
 
     app.finish();
     app.cleanup();
