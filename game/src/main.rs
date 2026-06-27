@@ -449,6 +449,12 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
 /// SAME barrier as the menu and as `game net`, so the agreed roster + seed are identical
 /// however play was reached; a Host-alone fallback yields a solo round when nobody shows.
 fn run_play(args: PlayArgs) -> Result<()> {
+    // Pin all task pools to a single thread BEFORE any sim/net/bevy work (matchmaking and
+    // `solo_lockstep_for` below build sims that touch rapier's rayon pool, and the pools are
+    // first-read/first-writer-wins). This is what keeps the armed float NN crab cross-peer
+    // deterministic in multiplayer (GCR#113); the matching ECS-schedule pin lands inside
+    // `build_windowed_app`. See `render::pin_windowed_pools`.
+    render::pin_windowed_pools();
     let boot = if args.host || args.join.is_some() {
         // Scripted host/join: dial the join code if joining (blank/absent = LAN discover),
         // form over the barrier, and hand the result to Boot::Round. Host never dials. This
@@ -492,9 +498,12 @@ fn run_play(args: PlayArgs) -> Result<()> {
             telemetry: args.telemetry,
         }
     };
-    // The solo NN-crab checkpoint dir. Resolved unconditionally — it's just a path;
-    // `build_windowed_app` applies it only on a solo round (the integer crab stands in on
-    // every networked path, where a float rapier crab isn't cross-peer deterministic).
+    // The NN-crab checkpoint dir. Resolved unconditionally — it's just a path; arming is
+    // decided in `build_windowed_app`: a SOLO round always arms the real float rapier-NN crab,
+    // and a NETWORKED round arms it once peers agree on weights+assets (the digest handshake,
+    // `rl_core::net::may_arm_external_crab`) — otherwise the networked round keeps the integer
+    // pursuer. The single-thread pin above (`pin_windowed_pools`) plus the schedule pin inside
+    // `build_windowed_app` are what keep that armed float crab cross-peer deterministic.
     // Skip a dir with no `brain.bin` so a bad path degrades to the integer crab rather
     // than every-frame load failures.
     let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint);

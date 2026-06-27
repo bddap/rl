@@ -211,6 +211,22 @@ pub enum AppPhase {
 /// integer point-pursuer — on a SOLO round always, and on a NETWORKED round once peers agree on
 /// a shared brain (the weights-digest handshake) and step it at the deterministic cadence (the
 /// GCR fold, rl#82). A networked-UNSYNCED round keeps the integer pursuer.
+/// Pin every process task pool to a single worker for the windowed client, so the armed
+/// float rapier-NN crab ("real Sally") evolves bit-identically across peers (GCR#113).
+///
+/// MUST be called at process start — before any sim/rapier/bevy work creates the global
+/// pools (the `RAYON_NUM_THREADS=1` / `MATMUL_NUM_THREADS=1` env vars are read once on first
+/// pool use, and bevy's task pools are first-writer-wins `OnceLock`s). In `game play` that
+/// means the very top of `run_play`, ahead of matchmaking and `solo_lockstep_for`, which
+/// build sims that touch rapier's rayon pool. This is the IDENTICAL recipe the trainer
+/// (`training::inproc::init_process_pools`) and the #82 cross-peer probe run; exposed as one
+/// thin `pub` entry so `game` (a separate crate) can call it without widening the crate-
+/// internal helper. The matching schedule pin (ECS run order) is applied inside
+/// [`build_windowed_app`] via `force_serial_schedules`.
+pub fn pin_windowed_pools() {
+    crate::bot::test_util::pin_single_thread_pools();
+}
+
 pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>) -> App {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -371,6 +387,18 @@ pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>)
             }
         }
     }
+
+    // Pin ECS run order: force every MAIN-world schedule onto the single-threaded executor so
+    // systems never dispatch onto the global ComputeTaskPool, where thread scheduling would
+    // reorder the float evolution that drives the armed NN crab and desync peers (GCR#113,
+    // the same pin the trainer and #82 probe apply). Must run AFTER all systems are wired —
+    // every plugin/`add_systems` above is in, the schedules now exist. This touches only the
+    // main world's schedules (the sim); bevy's render sub-app keeps its own executor, so
+    // rendering isn't forced serial here — only the global pool pin (`pin_windowed_pools`,
+    // called at process start) caps render parallelism, the unavoidable cost of bevy sharing
+    // three global pools across sim and render. Correctness > a few dropped frames.
+    crate::bot::test_util::force_serial_schedules(&mut app);
+
     app
 }
 
