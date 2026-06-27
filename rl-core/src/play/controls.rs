@@ -119,6 +119,12 @@ impl ControlScheme for DemoControls {
         }
     }
 
+    fn context_id(ctx: DemoContext) -> &'static str {
+        match ctx {
+            DemoContext::Inspect => "inspect",
+        }
+    }
+
     fn context_from_id(id: &str) -> Option<DemoContext> {
         match id {
             "inspect" | "demo" => Some(DemoContext::Inspect),

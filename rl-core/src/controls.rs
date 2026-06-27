@@ -94,8 +94,14 @@ pub trait ControlScheme: 'static + Send + Sync {
     /// ("On foot", "Piloting plane"), so the player always knows which control set is live.
     fn context_label(ctx: Self::Context) -> &'static str;
 
-    /// Resolve a short context id (from the `RL_SHOW_CONTROLS_CONTEXT` screenshot override)
-    /// to a context, so one headless frame can record any context's legend. `None` for an
+    /// The canonical short id of a context (a slug for the `RL_SHOW_CONTROLS_CONTEXT`
+    /// screenshot override, e.g. `"foot"`/`"plane"`). [`assert_scheme_well_formed`] proves
+    /// every context round-trips `context_from_id(context_id(c)) == Some(c)`, so each context
+    /// is reachable by a stable id — a new context can't be added screenshot-unreachable.
+    fn context_id(ctx: Self::Context) -> &'static str;
+
+    /// Resolve a context id (from `RL_SHOW_CONTROLS_CONTEXT`) to a context, accepting the
+    /// canonical [`context_id`](ControlScheme::context_id) plus any aliases. `None` for an
     /// unknown id (the override then leaves the default context).
     fn context_from_id(id: &str) -> Option<Self::Context>;
 
@@ -212,8 +218,10 @@ impl<S: ControlScheme + ?Sized> Binding<S> {
 
 /// One row of a context's control list: an action shown in that context + the human label
 /// for it THERE. The binding (glyphs/hold) is looked up from [`ControlScheme::bindings`] by
-/// `action`, so a context can re-label a key without re-stating — or drifting from — what
-/// the input layer does with it.
+/// `action`, so the displayed KEY can't drift from the polled key (both resolve through the
+/// one binding). The label's MEANING — that "Throttle up" really is what `move_forward` does
+/// in the plane — is the one hand-maintained link the types don't enforce; a scheme pins the
+/// non-obvious ones with a test (see GCR's plane-pitch-sign test).
 pub struct ContextRow<S: ControlScheme + ?Sized> {
     pub action: S::Action,
     /// Short human label for the legend in this context (e.g. "Forward" / "Throttle up").
@@ -246,7 +254,11 @@ pub fn legend<S: ControlScheme + ?Sized>(ctx: S::Context, device: Device) -> Vec
     S::context_rows(ctx)
         .iter()
         .filter_map(|row| {
-            let b = binding::<S>(row.action)?;
+            // Every context row's action has a binding (proven by `assert_scheme_well_formed`),
+            // so a miss is a malformed scheme — panic loudly rather than silently dropping the
+            // line from the HUD (which would read as "that control doesn't exist").
+            let b = binding::<S>(row.action)
+                .expect("context row's action has no binding — assert_scheme_well_formed missed it");
             let glyphs = b.glyphs(device);
             if glyphs.is_empty() {
                 return None;
@@ -295,7 +307,21 @@ pub fn assert_scheme_well_formed<S: ControlScheme + ?Sized>(
         "the binding table has rows for actions not in the exhaustive list (a stale/dup row)"
     );
     assert!(!all_contexts.is_empty(), "a scheme needs at least one context");
+    // The default context (the overlay's spawn/idle state) must be a real, listed context —
+    // else the HUD boots showing a context that isn't in `contexts()` and shows no column.
+    assert!(
+        all_contexts.contains(&S::Context::default()),
+        "Context::default() {:?} is not in contexts()",
+        S::Context::default()
+    );
     for &ctx in all_contexts {
+        // Every context is reachable by a stable id (the screenshot override), so a new
+        // context can't be added that the evidence harness silently can't target.
+        assert_eq!(
+            S::context_from_id(S::context_id(ctx)),
+            Some(ctx),
+            "context {ctx:?} does not round-trip through context_id/context_from_id"
+        );
         let rows = S::context_rows(ctx);
         assert!(
             !rows.is_empty(),
@@ -393,11 +419,12 @@ mod overlay {
 
     /// One (context, device) legend container inside the overlay (pre-built once each). Only
     /// the active context's active-device container is shown — pre-building every combination
-    /// avoids rebuilding child entities on a context switch or device pickup. `ctx_idx`
-    /// indexes [`ControlScheme::contexts`] so the component stays non-generic.
+    /// avoids rebuilding child entities on a context switch or device pickup. Holds the
+    /// context VALUE (not an index into `contexts()`), so the shown-column test is a direct
+    /// `col.ctx == active` compare with nothing to fall out of sync.
     #[derive(Component)]
-    pub struct LegendColumn {
-        ctx_idx: usize,
+    pub struct LegendColumn<S: ControlScheme> {
+        ctx: S::Context,
         device: Device,
     }
 
@@ -465,7 +492,6 @@ mod overlay {
     fn spawn_legend_column<S: ControlScheme>(
         parent: &mut ChildSpawnerCommands,
         asset_server: &AssetServer,
-        ctx_idx: usize,
         ctx: S::Context,
         device: Device,
         visible: bool,
@@ -482,7 +508,7 @@ mod overlay {
                     row_gap: Val::Px(8.0),
                     ..default()
                 },
-                LegendColumn { ctx_idx, device },
+                LegendColumn::<S> { ctx, device },
             ))
             .with_children(|col| {
                 for line in legend::<S>(ctx, device) {
@@ -627,12 +653,11 @@ mod overlay {
                     TextColor(Color::srgb(0.7, 0.7, 0.7)),
                 ));
                 // One legend column per (context, device); only the default pair starts shown.
-                for (ctx_idx, &ctx) in S::contexts().iter().enumerate() {
+                for &ctx in S::contexts() {
                     for device in [Device::KeyboardMouse, Device::Gamepad] {
                         spawn_legend_column::<S>(
                             overlay,
                             &asset_server,
-                            ctx_idx,
                             ctx,
                             device,
                             ctx == default_ctx && device == default_device,
@@ -714,17 +739,17 @@ mod overlay {
             &mut Node,
             (
                 With<ControlsOverlayRoot>,
-                Without<LegendColumn>,
+                Without<LegendColumn<S>>,
                 Without<HintGlyphFor>,
             ),
         >,
         mut columns: Query<
-            (&LegendColumn, &mut Node),
+            (&LegendColumn<S>, &mut Node),
             (Without<ControlsOverlayRoot>, Without<HintGlyphFor>),
         >,
         mut hints: Query<
             (&HintGlyphFor, &mut Node),
-            (Without<ControlsOverlayRoot>, Without<LegendColumn>),
+            (Without<ControlsOverlayRoot>, Without<LegendColumn<S>>),
         >,
         mut headings: Query<&mut Text, (With<ContextHeading>, Without<ContextHintLabel>)>,
         mut hint_labels: Query<&mut Text, (With<ContextHintLabel>, Without<ContextHeading>)>,
@@ -739,11 +764,9 @@ mod overlay {
             };
         }
 
-        // The active context's index into `contexts()` — the column key. A context not in the
-        // list (can't happen for a well-formed scheme) shows no column rather than panicking.
-        let active_ctx_idx = S::contexts().iter().position(|&c| c == context.0);
+        // Show the column for the live (context, device); compare the context VALUE directly.
         for (col, mut node) in &mut columns {
-            node.display = if Some(col.ctx_idx) == active_ctx_idx && col.device == device.0 {
+            node.display = if col.ctx == context.0 && col.device == device.0 {
                 Display::Flex
             } else {
                 Display::None

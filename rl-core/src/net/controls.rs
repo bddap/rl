@@ -12,7 +12,9 @@
 //! same W is "Throttle up" (the plane sim reads `move_forward` as throttle — see
 //! [`crate::net::sim`]'s `step_plane`). So each context is a row list naming the actions it
 //! shows with the label correct THERE. The legend joins the rows with the bindings, so the
-//! displayed key can't drift from the polled key while the label stays context-correct.
+//! displayed KEY can't drift from the polled key; the label's meaning (e.g. "Throttle up" =
+//! what `move_forward` does in flight) is a hand-maintained description, pinned where it's
+//! non-obvious by a test (the plane-pitch-sign test).
 //!
 //! Two caveats on the single-source guarantee:
 //! - It covers the REBINDABLE discrete controls. The analog movers (sticks, mouse motion,
@@ -138,6 +140,13 @@ impl ControlScheme for GcrControls {
         match ctx {
             GcrContext::OnFoot => "On foot",
             GcrContext::Plane => "Piloting plane",
+        }
+    }
+
+    fn context_id(ctx: GcrContext) -> &'static str {
+        match ctx {
+            GcrContext::OnFoot => "foot",
+            GcrContext::Plane => "plane",
         }
     }
 
@@ -274,15 +283,23 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 10] = [
 ];
 
 /// The PILOTING-PLANE context: the SAME move keys, re-labeled for flight to match what the
-/// plane sim does with them (`step_plane` in [`crate::net::sim`]): `move_forward` → throttle,
-/// `move_strafe` → pitch (D=climb / A=dive), `look_yaw` → yaw. `Extract` is omitted — the
-/// foot player feeds the sim neutral input while piloting, so the pickup button is inert in
-/// the air. `EnterExit` now reads "Exit plane".
+/// plane sim ACTUALLY does with them (`step_plane` in [`crate::net::sim`]): `move_forward` →
+/// throttle, `move_strafe` → pitch, `look_yaw` → yaw. `Extract` is omitted — the foot player
+/// feeds the sim neutral input while piloting, so the pickup button is inert in the air.
+/// `EnterExit` now reads "Exit plane".
+///
+/// Pitch sign — the subtle part the labels MUST get right: `gather_input` negates the strafe
+/// axis once (`render.rs`'s `pending.strafe = -strafe`, the screen-right↔sim-X reconcile), so
+/// A (`StrafeLeft`) reaches the sim as POSITIVE `move_strafe` and D (`StrafeRight`) as
+/// negative. `step_plane` makes positive `move_strafe` nose-UP. Net: **A climbs, D dives** —
+/// so the labels ride those actions, not the screen-intuitive ones. (Pinned by the sim-side
+/// `step_plane_positive_strafe_climbs` test + the render-side negation; reassigning the keys
+/// for FPS feel is a separate taste call.)
 pub const PLANE_ROWS: [ContextRow<GcrControls>; 9] = [
     ContextRow { action: Action::MoveForward, label: "Throttle up" },
     ContextRow { action: Action::MoveBack, label: "Throttle down" },
-    ContextRow { action: Action::StrafeRight, label: "Pitch up (climb)" },
-    ContextRow { action: Action::StrafeLeft, label: "Pitch down (dive)" },
+    ContextRow { action: Action::StrafeLeft, label: "Pitch up (climb)" },
+    ContextRow { action: Action::StrafeRight, label: "Pitch down (dive)" },
     ContextRow { action: Action::Look, label: "Yaw / turn" },
     ContextRow { action: Action::EnterExit, label: "Exit plane" },
     ContextRow { action: Action::Restart, label: "Restart round" },

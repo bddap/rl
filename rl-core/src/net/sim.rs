@@ -1435,6 +1435,29 @@ mod tests {
         assert_eq!(a.state_hash(), b.state_hash());
     }
 
+    /// Pins the PLANE PITCH SIGN the cockpit legend depends on: positive `move_strafe` noses
+    /// UP (climb), negative noses DOWN (dive). The GCR plane legend (`net::controls::PLANE_ROWS`)
+    /// labels A "Pitch up (climb)" / D "Pitch down (dive)" because `gather_input` negates the
+    /// strafe axis (screen-right↔sim-X), so A reaches the sim as POSITIVE `move_strafe`. If
+    /// either this sign or that negation ever flips, the labels would lie — so this test fails
+    /// loud rather than letting the HUD mislead the pilot.
+    #[test]
+    fn step_plane_pitch_sign_matches_the_cockpit_legend() {
+        let level = Plane::spawn(Pos { x: 0, z: 0 }, 0);
+        let mut climb = level;
+        climb.step(Input::from_axes(1.0, 0.0)); // positive move_strafe
+        assert!(
+            climb.pitch() > level.pitch(),
+            "positive move_strafe must nose UP (the 'Pitch up (climb)' key)"
+        );
+        let mut dive = level;
+        dive.step(Input::from_axes(-1.0, 0.0)); // negative move_strafe
+        assert!(
+            dive.pitch() < level.pitch(),
+            "negative move_strafe must nose DOWN (the 'Pitch down (dive)' key)"
+        );
+    }
+
     #[test]
     fn forward_input_moves_along_facing() {
         // At yaw 0 a player faces +Z; full forward stick should advance +Z by about
