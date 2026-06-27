@@ -812,25 +812,43 @@ pub fn rest_colliders(model: &impl BindSource, recipe: &RigRecipe) -> Vec<RestCo
     out
 }
 
-/// Every collider shape of `recipe` in a hub-anchored frame (hub at the origin) — the
-/// carapace cuboid plus a capsule for EVERY link, eye-stalks included. Unlike
-/// [`rest_colliders`] (scoring: actuated links only, anchored in the model's bind-pose
-/// world) this is the COSMETIC silhouette, so it draws the locked eye-stalks too and
-/// needs no model: the shapes are hub-relative, which is all a render that re-poses and
-/// re-centers the crab needs. This is the ONE shape source the giant-crab render draws
-/// from — fed [`super::body::render_recipe`], it can't drift from the body it depicts.
-pub fn recipe_collider_shapes(recipe: &RigRecipe) -> Vec<RestShape> {
-    let world_origin = link_world_origins(&recipe.links, Vec3::ZERO);
-    let mut out: Vec<RestShape> = Vec::with_capacity(recipe.links.len() + 1);
-    for (link, &origin) in recipe.links.iter().zip(&world_origin) {
-        out.push(link_capsule(link, origin));
+/// The crab's cosmetic collider silhouette — the carapace box and a capsule for EVERY
+/// link, the carapace kept as its OWN field (not the tail of a list) so a consumer
+/// can't mistake it for a limb when it derives the crab's facing. See
+/// [`recipe_silhouette`].
+pub struct CrabSilhouette {
+    /// One capsule per link, in `recipe.hub_bind_world`'s frame — legs, locked
+    /// eye-stalks, and claws alike (the cosmetic view draws them all).
+    pub limbs: Vec<RestShape>,
+    /// The carapace box, same frame.
+    pub carapace: RestShape,
+}
+
+/// Reconstruct `recipe`'s collider silhouette for rendering. Unlike [`rest_colliders`]
+/// (scoring: actuated links only, anchored at the model's leg hub) this is the COSMETIC
+/// view — it draws every link including the locked eye-stalks and needs no model, the
+/// recipe alone carries the geometry. Anchored at `recipe.hub_bind_world` so it shares
+/// [`rest_colliders`]'s frame; a render that re-poses and re-centers the crab is free of
+/// the absolute offset either way. This is the ONE shape source the giant-crab render
+/// draws from (fed [`super::body::render_recipe`]), so the cosmetic crab can't drift
+/// from the body it depicts.
+pub fn recipe_silhouette(recipe: &RigRecipe) -> CrabSilhouette {
+    let hub = recipe.hub_bind_world;
+    let world_origin = link_world_origins(&recipe.links, hub);
+    let limbs = recipe
+        .links
+        .iter()
+        .zip(&world_origin)
+        .map(|(link, &origin)| link_capsule(link, origin))
+        .collect();
+    CrabSilhouette {
+        limbs,
+        carapace: carapace_cuboid(recipe, hub),
     }
-    out.push(carapace_cuboid(recipe, Vec3::ZERO));
-    out
 }
 
 /// One link's capsule from its telescoped `origin`. Shared by [`rest_colliders`]
-/// (scoring) and [`recipe_collider_shapes`] (rendering) so the capsule geometry has a
+/// (scoring) and [`recipe_silhouette`] (rendering) so the capsule geometry has a
 /// single definition that can't drift between the scored body and the drawn one.
 fn link_capsule(link: &RigLink, origin: Vec3) -> RestShape {
     let axis = link.col_rot * Vec3::Y * link.half_height;
@@ -1119,35 +1137,32 @@ mod tests {
         );
     }
 
-    /// The render silhouette (#108) draws EVERY link, eye-stalks included, plus the
-    /// carapace — one capsule per link and a final carapace cuboid — and every shape
-    /// must be finite or the giant crab would spawn NaN meshes. (Contrast
-    /// [`rest_colliders`], which scores actuated links only.)
+    /// The render silhouette (#108) draws EVERY link, eye-stalks included, as a capsule
+    /// (one per link) plus the carapace as its own cuboid — and every shape must be
+    /// finite or the giant crab would spawn NaN meshes. (Contrast [`rest_colliders`],
+    /// which scores actuated links only.)
     #[test]
-    fn recipe_collider_shapes_cover_all_links_plus_carapace() {
+    fn recipe_silhouette_covers_all_links_plus_carapace() {
         let recipe = fallback_recipe();
-        let shapes = recipe_collider_shapes(&recipe);
+        let sil = recipe_silhouette(&recipe);
         assert_eq!(
-            shapes.len(),
-            recipe.links.len() + 1,
-            "one capsule per link (eye-stalks included) plus the carapace cuboid"
+            sil.limbs.len(),
+            recipe.links.len(),
+            "one capsule per link, eye-stalks included"
         );
-        let finite = |v: Vec3| v.is_finite();
-        for s in &shapes {
+        for s in sil.limbs.iter().chain(std::iter::once(&sil.carapace)) {
             match *s {
                 RestShape::Capsule { a, b, radius } => {
-                    assert!(finite(a) && finite(b) && radius.is_finite() && radius > 0.0);
+                    assert!(a.is_finite() && b.is_finite() && radius.is_finite() && radius > 0.0);
                 }
                 RestShape::Cuboid { center, half } => {
-                    assert!(finite(center) && finite(half) && half.min_element() > 0.0);
+                    assert!(center.is_finite() && half.is_finite() && half.min_element() > 0.0);
                 }
             }
         }
-        // The carapace cuboid is pushed last; the render derives the crab's facing from
-        // that ordering, so it must hold.
         assert!(
-            matches!(shapes.last(), Some(RestShape::Cuboid { .. })),
-            "carapace cuboid must be the final shape"
+            matches!(sil.carapace, RestShape::Cuboid { .. }),
+            "carapace must be a cuboid"
         );
     }
 

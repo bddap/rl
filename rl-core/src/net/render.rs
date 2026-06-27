@@ -1381,31 +1381,26 @@ fn spawn_crab_silhouette(
 ) {
     use crate::bot::rig::RestShape;
 
-    let shapes = crate::bot::rig::recipe_collider_shapes(&crate::bot::body::render_recipe());
+    let sil = crate::bot::rig::recipe_silhouette(&crate::bot::body::render_recipe());
+    let shapes = || sil.limbs.iter().chain(std::iter::once(&sil.carapace));
 
     // Orient the rig claws-forward (+Z). The recipe's forward axis isn't necessarily +Z,
-    // so DERIVE it from the geometry — carapace-center → claw/limb centroid, flattened to
-    // the ground plane — rather than hard-code a constant that could drift if the asset
+    // so DERIVE it from the geometry — carapace-center → limb centroid, flattened to the
+    // ground plane — rather than hard-code a constant that could drift if the asset
     // changes. Both vectors are horizontal, so `from_rotation_arc` yields a pure yaw; a
-    // degenerate recipe leaves the rig as-is (Vec3::Z → identity).
+    // degenerate recipe (no limbs) leaves the rig as-is (Vec3::Z → identity).
     let shape_mid = |s: &RestShape| match *s {
         RestShape::Capsule { a, b, .. } => (a + b) * 0.5,
         RestShape::Cuboid { center, .. } => center,
     };
-    // The carapace cuboid is pushed last by `recipe_collider_shapes`; the limbs precede it.
-    let (carapace, limbs) = match shapes.split_last() {
-        Some((c, rest)) if !rest.is_empty() => (Some(c), rest),
-        _ => (shapes.last(), shapes.as_slice()),
-    };
-    let fwd = match carapace {
-        Some(c) if !limbs.is_empty() => {
-            let cc = shape_mid(c);
-            let centroid = limbs.iter().map(shape_mid).sum::<Vec3>() / limbs.len() as f32;
-            let mut d = centroid - cc;
-            d.y = 0.0;
-            d.normalize_or_zero()
-        }
-        _ => Vec3::ZERO,
+    let fwd = if sil.limbs.is_empty() {
+        Vec3::ZERO
+    } else {
+        let cc = shape_mid(&sil.carapace);
+        let centroid = sil.limbs.iter().map(shape_mid).sum::<Vec3>() / sil.limbs.len() as f32;
+        let mut d = centroid - cc;
+        d.y = 0.0;
+        d.normalize_or_zero()
     };
     let r = Quat::from_rotation_arc(
         if fwd.length_squared() < 1e-6 { Vec3::Z } else { fwd },
@@ -1420,7 +1415,7 @@ fn spawn_crab_silhouette(
         lo = lo.min(p);
         hi = hi.max(p);
     };
-    for s in &shapes {
+    for s in shapes() {
         match *s {
             RestShape::Capsule { a, b, radius } => {
                 let rad = Vec3::splat(radius);
@@ -1463,8 +1458,8 @@ fn spawn_crab_silhouette(
         ..default()
     });
 
-    let mut children: Vec<Entity> = Vec::with_capacity(shapes.len());
-    for s in &shapes {
+    let mut children: Vec<Entity> = Vec::with_capacity(sil.limbs.len() + 1);
+    for s in shapes() {
         let child = match *s {
             RestShape::Capsule { a, b, radius } => {
                 let a = map(a);
