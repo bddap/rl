@@ -696,25 +696,15 @@ fn probe_step(
 /// policy; `seed` seeds the round (same seed twice ⇒ identical samples, the determinism
 /// check). The local player holds still so a shrinking `dist_to_prey_m` proves the crab
 /// walks toward it under the policy.
-pub fn run_headless_probe(
-    checkpoint_dir: &std::path::Path,
-    seed: u64,
-    ticks: u64,
-    log_every: u64,
-) -> Vec<ProbeSample> {
+/// Build the windowless bot+physics world the headless NN-crab probes step: the SAME stack
+/// the training/tests use ([`crate::bot::test_util::headless_stack`], one crab in env 0) plus
+/// [`ExternalCrabPlugin`] (the policy + arena↔game bridge) with the crab ARMED. Shared by the
+/// single-peer [`run_headless_probe`] and the two-peer [`run_cross_peer_probe`] so both step the
+/// identical dynamics the policy trained under, with no GPU/display — one app-construction, no
+/// drift between the two harnesses (the manual's "one implementation per thing"). The caller owns
+/// the [`Lockstep`] driving and seeding; this only stands up the rapier NN body.
+fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> bevy::app::App {
     use crate::bot::test_util::{HeadlessStack, WorldRole, headless_stack};
-
-    let me = PlayerId(0);
-    let ls = Lockstep::new(seed, &[me], me);
-    let crab_spawn = ls.sim().crab().pos();
-    // The crab is externally driven for the whole probe (we own its position). Arm + seed the
-    // pose atomically with the crab's CURRENT spawn pose/yaw — writing back what's already
-    // there, so this is a no-op on sim state, just with the ordering footgun removed.
-    let mut ls = ls;
-    let crab = ls.sim().crab();
-    // Seed with a zero digest; the first post-step `hash_crab_physics` fills it before the
-    // first `sync_external_crab` push, so the seeded value is never the one cross-checked.
-    ls.initialize_external_crab(crab.pos(), crab.yaw(), 0);
 
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
@@ -728,6 +718,28 @@ pub fn run_headless_probe(
     // The crab already spawned via `headless_stack`'s `num_envs: 1`, so the plugin's own gated
     // spawn is a no-op (the not-yet-spawned guard sees it present).
     app.insert_resource(ExternalCrabArmed);
+    app
+}
+
+pub fn run_headless_probe(
+    checkpoint_dir: &std::path::Path,
+    seed: u64,
+    ticks: u64,
+    log_every: u64,
+) -> Vec<ProbeSample> {
+    let me = PlayerId(0);
+    let ls = Lockstep::new(seed, &[me], me);
+    let crab_spawn = ls.sim().crab().pos();
+    // The crab is externally driven for the whole probe (we own its position). Arm + seed the
+    // pose atomically with the crab's CURRENT spawn pose/yaw — writing back what's already
+    // there, so this is a no-op on sim state, just with the ordering footgun removed.
+    let mut ls = ls;
+    let crab = ls.sim().crab();
+    // Seed with a zero digest; the first post-step `hash_crab_physics` fills it before the
+    // first `sync_external_crab` push, so the seeded value is never the one cross-checked.
+    ls.initialize_external_crab(crab.pos(), crab.yaw(), 0);
+
+    let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
     app.insert_non_send_resource(ProbeDriver {
         ls,
         samples: Vec::new(),
@@ -748,4 +760,144 @@ pub fn run_headless_probe(
         .get_non_send_resource::<ProbeDriver>()
         .map(|d| d.samples.clone())
         .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Cross-peer NN-crab determinism harness (the decisive GCR #82 gate)
+// ---------------------------------------------------------------------------
+
+/// One applied tick of the two-peer probe: the tick number and the closing `state_hash` each
+/// peer's lockstep computed for it. The two peers stayed deterministic iff `hash_a == hash_b`
+/// for every tick — the float rapier NN crab evolved bit-identically on both.
+#[derive(Clone, Copy, Debug)]
+pub struct XPeerTick {
+    pub tick: u64,
+    pub hash_a: u64,
+    pub hash_b: u64,
+}
+
+/// Result of [`run_cross_peer_probe`]: the per-tick hash pair plus the count of lockstep
+/// desync faults the peers' OWN cross-check (peer-advertised hashes in each [`TickMsg`])
+/// raised. A pass is `faults == 0` AND every `hash_a == hash_b` — two independent checks of
+/// the same property, from outside (the hash diff) and inside (the lockstep desync check).
+pub struct XPeerResult {
+    pub ticks: Vec<XPeerTick>,
+    pub faults: usize,
+}
+
+impl XPeerResult {
+    /// First tick whose two hashes disagree, if any — the point determinism broke.
+    pub fn first_divergence(&self) -> Option<XPeerTick> {
+        self.ticks.iter().copied().find(|t| t.hash_a != t.hash_b)
+    }
+
+    /// Both checks clean: no per-tick hash disagreed and the lockstep raised no desync fault.
+    pub fn is_deterministic(&self) -> bool {
+        self.faults == 0 && self.first_divergence().is_none()
+    }
+}
+
+/// Push a headless peer's freshly-integrated NN-crab pose + physics digest into its OWN
+/// lockstep and refresh the player it hunts — the SAME per-tick handshake
+/// [`crate::net::render`]'s `drive_lockstep` runs for the windowed peer ([`sync_external_crab`]),
+/// reaching into the app's [`ExternalCrabBridge`] resource. Called once per applied tick.
+fn sync_peer(app: &mut bevy::app::App, ls: &mut Lockstep) {
+    let mut bridge = app.world_mut().resource_mut::<ExternalCrabBridge>();
+    sync_external_crab(ls, &mut bridge);
+}
+
+/// Run the real rapier-NN crab as the giant crab on TWO independent in-process peers and
+/// return their per-tick hash pair — the decisive cross-peer determinism gate for GCR #82.
+///
+/// Each peer is a SEPARATE headless bot+physics world ([`headless_nn_crab_app`]) stepping its
+/// OWN float rapier crab under the trained policy, plus its OWN integer [`Lockstep`] with the
+/// crab handed to external control. Per applied tick the harness mirrors
+/// `net::render::drive_lockstep` for both peers: step one physics tick, push that peer's crab
+/// pose + weights-folded physics digest into its lockstep, then EXCHANGE the two peers' inputs
+/// (each records the other's exact [`TickMsg`]) and advance one tick on each. The two peers move
+/// their PLAYERS differently (divergent but faithfully-exchanged input), so the test exercises a
+/// real two-player round — yet their giant crabs must reach byte-identical poses.
+///
+/// If every `hash_a == hash_b` and the lockstep raises no desync fault, the float NN crab is the
+/// deterministic multiplayer crab on this hardware (same-arch, `enhanced-determinism` on). A
+/// single diverging tick is the netcode-rethink trigger. Same `(checkpoint, seed, ticks)` ⇒
+/// identical result (the inputs are a deterministic function of the tick index).
+pub fn run_cross_peer_probe(checkpoint_dir: &std::path::Path, seed: u64, ticks: u64) -> XPeerResult {
+    let p0 = PlayerId(0);
+    let p1 = PlayerId(1);
+    let peers = [p0, p1];
+
+    // Both peers start from the SAME seed → identical integer sim → identical crab spawn, so
+    // their float crabs begin at the same game-world pose.
+    let crab_spawn = {
+        let ls = Lockstep::new(seed, &peers, p0);
+        ls.sim().crab().pos()
+    };
+
+    let mut app_a = headless_nn_crab_app(checkpoint_dir, crab_spawn);
+    let mut app_b = headless_nn_crab_app(checkpoint_dir, crab_spawn);
+
+    // Each peer drives its OWN lockstep (its own `me`), with the crab armed + seeded at spawn.
+    // Seed a zero digest; the first post-step `hash_crab_physics` fills the real one before the
+    // first push, so the seeded value is never cross-checked.
+    let mut ls_a = Lockstep::new(seed, &peers, p0);
+    let mut ls_b = Lockstep::new(seed, &peers, p1);
+    {
+        let crab = ls_a.sim().crab();
+        ls_a.initialize_external_crab(crab.pos(), crab.yaw(), 0);
+    }
+    {
+        let crab = ls_b.sim().crab();
+        ls_b.initialize_external_crab(crab.pos(), crab.yaw(), 0);
+    }
+
+    let mut out = Vec::new();
+    let mut faults = 0usize;
+    let mut issue = 0u64;
+    // Step until BOTH peers have applied `ticks` ticks. Each iteration steps exactly one physics
+    // tick per peer and applies exactly one sim tick per peer, so the crab's physics cadence stays
+    // 1:1 with applied ticks (a batched multi-tick advance would smear one crab pose across several
+    // ticks — the bug `drive_lockstep`'s one-at-a-time advance exists to avoid).
+    while ls_a.sim().tick() < ticks || ls_b.sim().tick() < ticks {
+        // 1. One physics step per peer (uses the hunt target each bridge set last iteration).
+        app_a.update();
+        app_b.update();
+
+        // 2. Push each peer's freshly stepped crab pose + digest into its own lockstep.
+        sync_peer(&mut app_a, &mut ls_a);
+        sync_peer(&mut app_b, &mut ls_b);
+
+        // 3. Each peer issues a DETERMINISTIC but distinct input, then they EXCHANGE — peer A
+        //    records B's exact message and vice versa, exactly as the wire transport delivers it.
+        //    Divergent player motion makes the round real; the exchange keeps both sims fed the
+        //    identical {A,B} input set so any hash difference is the CRAB's float physics, not the
+        //    players'.
+        let t = issue as f32 * 0.1;
+        issue += 1;
+        let msg_a = ls_a.submit_local_input(Input::from_axes(t.cos(), t.sin()));
+        let msg_b = ls_b.submit_local_input(Input::from_axes(-t.sin(), t.cos()));
+        if ls_a.record_remote(p1, msg_b).is_some() {
+            faults += 1;
+        }
+        if ls_b.record_remote(p0, msg_a).is_some() {
+            faults += 1;
+        }
+
+        // 4. Advance one tick on each (warmup ticks and, after them, ticks whose inputs both
+        //    arrived this iteration are always ready — the input cursor leads the apply cursor by
+        //    INPUT_DELAY). Count any desync the lockstep's own cross-check raises.
+        let tick_a = ls_a.advance_one().map(|f| (ls_a.last_applied(), f));
+        let tick_b = ls_b.advance_one().map(|f| (ls_b.last_applied(), f));
+        if let (Some((Some(ca), fa)), Some((Some(cb), fb))) = (tick_a, tick_b) {
+            faults += fa.len() + fb.len();
+            // The two peers advance in lockstep, so `ca.tick == cb.tick`; pair their hashes.
+            out.push(XPeerTick {
+                tick: ca.tick,
+                hash_a: ca.hash,
+                hash_b: cb.hash,
+            });
+        }
+    }
+
+    XPeerResult { ticks: out, faults }
 }

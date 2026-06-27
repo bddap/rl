@@ -66,6 +66,12 @@ enum Command {
     /// player under the trained policy. Runs the seed TWICE and compares the final state
     /// hash, the single-peer reproducibility check.
     NnCrabProbe(NnCrabProbeArgs),
+    /// The decisive GCR #82 gate: run the real rapier-NN crab as the giant crab on TWO
+    /// independent in-process peers exchanging lockstep inputs, and confirm their per-tick
+    /// state hashes stay byte-identical — the float NN crab IS the deterministic multiplayer
+    /// crab. Writes each peer's `<tick> <hash>` log (`--hash-log-a` / `--hash-log-b`) so they
+    /// can be `diff`ed, and exits nonzero on any divergence (so it doubles as a CI gate).
+    NnCrabXpeer(NnCrabXpeerArgs),
 }
 
 #[derive(Parser)]
@@ -134,13 +140,15 @@ struct PlayArgs {
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
 
-    /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`). On a SOLO
-    /// round (a Host-alone Start, or a scripted `--host` that found no peer) it drives the
-    /// giant crab with the rapier-simulated NN body instead of the integer point-pursuer.
-    /// Defaults to the `RL_CRAB_CHECKPOINT_DIR` env var, else `assets/weights` under the asset
-    /// root; a missing/empty dir falls back to the integer crab (logged). Ignored on a
-    /// NETWORKED round — a float rapier crab is not cross-peer deterministic, so multiplayer
-    /// always keeps the integer crab.
+    /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`). Drives the
+    /// giant crab with the rapier-simulated NN body instead of the integer point-pursuer, on a
+    /// SOLO round (a Host-alone Start, or a scripted `--host` that found no peer) AND — since the
+    /// GCR fold (rl#82) — on a NETWORKED round once peers agree on the brain + collider asset (the
+    /// weights/asset handshake, [`rl_core::net::may_arm_external_crab`]): the float NN crab is then
+    /// cross-peer deterministic (`enhanced-determinism`, proven by `game nn-crab-xpeer`). A
+    /// networked round whose peers DON'T agree, or any round with a missing/empty dir, falls back
+    /// to the integer crab (logged). Defaults to the `RL_CRAB_CHECKPOINT_DIR` env var, else
+    /// `assets/weights` under the asset root.
     #[arg(long, value_name = "DIR")]
     nn_crab_checkpoint: Option<PathBuf>,
 }
@@ -210,6 +218,27 @@ struct NnCrabProbeArgs {
     hash_log: Option<PathBuf>,
 }
 
+#[derive(Parser)]
+struct NnCrabXpeerArgs {
+    /// Trained crab checkpoint dir (`brain.bin` + `normalizer.bin`). Same resolution as
+    /// `nn-crab-probe` / `play --nn-crab-checkpoint`.
+    #[arg(long, value_name = "DIR")]
+    checkpoint: Option<PathBuf>,
+    /// Sim ticks to run both peers for before comparing.
+    #[arg(long, default_value_t = 600)]
+    ticks: u64,
+    /// Shared match seed (identical on both peers, as it would be on the wire).
+    #[arg(long, default_value_t = 0x6372_6162)]
+    seed: u64,
+    /// Write peer A's per-tick `<tick> <state_hash>` log here. With B's log, `diff` them: a
+    /// byte-identical pair is the cross-peer determinism proof.
+    #[arg(long, value_name = "FILE", default_value = "xpeer_a.log")]
+    hash_log_a: PathBuf,
+    /// Write peer B's per-tick `<tick> <state_hash>` log here.
+    #[arg(long, value_name = "FILE", default_value = "xpeer_b.log")]
+    hash_log_b: PathBuf,
+}
+
 // Plain `main` (not `#[tokio::main]`): the windowed/screenshot client builds a Bevy
 // app that owns the main thread and, for networked play, spins up its OWN tokio
 // runtime inside `net_loop` — nesting that under an ambient `#[tokio::main]` runtime
@@ -234,6 +263,79 @@ fn main() -> Result<()> {
             tokio::runtime::Runtime::new()?.block_on(telemetry::run_collector(&args.key))
         }
         Command::NnCrabProbe(args) => run_nn_crab_probe(args),
+        Command::NnCrabXpeer(args) => run_nn_crab_xpeer(args),
+    }
+}
+
+/// The cross-peer NN-crab determinism gate (GCR #82): run the real rapier-NN crab on two
+/// independent in-process peers exchanging lockstep inputs, write each peer's per-tick hash log,
+/// and confirm they stayed byte-identical. Exits nonzero on any divergence so it doubles as a CI
+/// gate on "the NN crab is the deterministic multiplayer crab".
+fn run_nn_crab_xpeer(args: NnCrabXpeerArgs) -> Result<()> {
+    use rl_core::net::external_crab::run_cross_peer_probe;
+
+    let Some(dir) = nn_crab_checkpoint_dir(args.checkpoint) else {
+        anyhow::bail!("nn-crab-xpeer: no brain.bin at the resolved checkpoint dir");
+    };
+    println!("nn-crab-xpeer: checkpoint={}", dir.display());
+    println!("nn-crab-xpeer: seed={:#x} ticks={}", args.seed, args.ticks);
+
+    let result = run_cross_peer_probe(&dir, args.seed, args.ticks);
+    if result.ticks.is_empty() {
+        anyhow::bail!("nn-crab-xpeer: no ticks applied — the peers never advanced");
+    }
+
+    // Per-tick `<tick> <hash>` logs for each peer, so an operator can `diff` them directly.
+    let write_log = |path: &PathBuf, pick: &dyn Fn(&rl_core::net::external_crab::XPeerTick) -> u64| {
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(result.ticks.len() * 24);
+        for t in &result.ticks {
+            writeln!(out, "{} {:#018x}", t.tick, pick(t)).unwrap();
+        }
+        std::fs::write(path, out)
+            .with_context(|| format!("nn-crab-xpeer: writing hash log {}", path.display()))
+    };
+    write_log(&args.hash_log_a, &|t| t.hash_a)?;
+    write_log(&args.hash_log_b, &|t| t.hash_b)?;
+    println!(
+        "nn-crab-xpeer: wrote {} per-tick hashes per peer to {} / {}",
+        result.ticks.len(),
+        args.hash_log_a.display(),
+        args.hash_log_b.display(),
+    );
+
+    println!(
+        "nn-crab-xpeer: lockstep desync faults = {} (the peers' own cross-check)",
+        result.faults
+    );
+    match result.first_divergence() {
+        None => {
+            let last = result.ticks.last().unwrap();
+            println!(
+                "nn-crab-xpeer: per-tick hashes IDENTICAL across both peers \
+                 (final tick {} hash {:#018x})",
+                last.tick, last.hash_a
+            );
+        }
+        Some(d) => {
+            println!(
+                "nn-crab-xpeer: FIRST DIVERGENCE at tick {} — A={:#018x} B={:#018x}",
+                d.tick, d.hash_a, d.hash_b
+            );
+        }
+    }
+
+    if result.is_deterministic() {
+        println!(
+            "nn-crab-xpeer: PASS — the trained NN crab is the deterministic multiplayer crab \
+             (outcome 3: bit-identical across peers, 0 desyncs)"
+        );
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "nn-crab-xpeer: FAIL — the float NN crab DIVERGED across peers (outcome 4: \
+             netcode-rethink trigger; the diverging hash logs are the evidence)"
+        )
     }
 }
 
