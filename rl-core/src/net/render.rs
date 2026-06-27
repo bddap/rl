@@ -1338,15 +1338,14 @@ fn spawn_world(
         commands.entity(root).add_children(&[fuselage, wing]);
     }
 
-    // The giant crab: a big menacing box, CRAB_SCALE× a player, with a "head" wedge
-    // so its facing is legible. Gray-box placeholder for the integer-pursuit crab. When the
-    // external NN crab is armed (solo, or networked-synced) the real rapier rig (wireframe /
-    // skin) is the crab, so the box is spawned HIDDEN there — the armed gate is the tell — and
-    // the rig shows instead. (We still spawn it so `apply_transforms`'s crab query is satisfied
-    // either way; it just stays invisible.)
+    // The giant crab: Sally's real collider silhouette (see `spawn_crab_silhouette`),
+    // CRAB_SCALE× a player, for the integer-pursuit crab. When the external NN crab is
+    // armed (solo, or networked-synced) the real rapier rig (wireframe / skin) is the
+    // crab, so this silhouette is spawned HIDDEN there — the armed gate is the tell — and
+    // the rig shows instead. (We still spawn it so `apply_transforms`'s crab query is
+    // satisfied either way; it just stays invisible.)
     let crab_hidden = external_crab_armed.is_some();
     let crab_h = PLAYER_HEIGHT * CRAB_SCALE as f32;
-    let crab_w = PLAYER_RADIUS * 2.0 * CRAB_SCALE as f32;
     let crab_root = commands
         .spawn((
             Transform::from_translation(world(state.ls.sim().crab().pos(), 0.0)),
@@ -1358,7 +1357,161 @@ fn spawn_world(
             CrabAvatar,
         ))
         .id();
-    // Body: a wide flat-ish box sitting on the ground.
+    // Body: Sally's ACTUAL physics colliders (carapace box + every leg/eye/claw capsule
+    // from the render recipe), not a featureless placeholder box (#108). The shapes ride
+    // `crab_root`, which `apply_transforms` re-poses to the sim crab every frame.
+    spawn_crab_silhouette(&mut commands, &mut meshes, &mut materials, crab_root, crab_h);
+}
+
+/// Draw the giant integer-pursuit crab as its REAL physics colliders — the carapace
+/// cuboid and every link capsule that [`crate::bot::body::render_recipe`] yields,
+/// scaled to the giant height and oriented claws-forward (+Z, the crab's facing) — and
+/// parent them to `crab_root`. Drawing the SAME shapes the sim body uses is the point
+/// of #108: the cosmetic crab can't drift from the body it depicts, and it reads as
+/// Sally instead of a box. `render_recipe` is the single model-vs-fallback selector
+/// (shared with the trainer), so this never invents a second source of geometry. The
+/// integer crab carries only a root pose (no per-limb articulation), so the silhouette
+/// is the rest stance posed rigidly — the legs don't walk, but the shape is honest.
+fn spawn_crab_silhouette(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    crab_root: Entity,
+    crab_h: f32,
+) {
+    use crate::bot::rig::RestShape;
+
+    let shapes = crate::bot::rig::recipe_collider_shapes(&crate::bot::body::render_recipe());
+
+    // Orient the rig claws-forward (+Z). The recipe's forward axis isn't necessarily +Z,
+    // so DERIVE it from the geometry — carapace-center → claw/limb centroid, flattened to
+    // the ground plane — rather than hard-code a constant that could drift if the asset
+    // changes. Both vectors are horizontal, so `from_rotation_arc` yields a pure yaw; a
+    // degenerate recipe leaves the rig as-is (Vec3::Z → identity).
+    let shape_mid = |s: &RestShape| match *s {
+        RestShape::Capsule { a, b, .. } => (a + b) * 0.5,
+        RestShape::Cuboid { center, .. } => center,
+    };
+    // The carapace cuboid is pushed last by `recipe_collider_shapes`; the limbs precede it.
+    let (carapace, limbs) = match shapes.split_last() {
+        Some((c, rest)) if !rest.is_empty() => (Some(c), rest),
+        _ => (shapes.last(), shapes.as_slice()),
+    };
+    let fwd = match carapace {
+        Some(c) if !limbs.is_empty() => {
+            let cc = shape_mid(c);
+            let centroid = limbs.iter().map(shape_mid).sum::<Vec3>() / limbs.len() as f32;
+            let mut d = centroid - cc;
+            d.y = 0.0;
+            d.normalize_or_zero()
+        }
+        _ => Vec3::ZERO,
+    };
+    let r = Quat::from_rotation_arc(
+        if fwd.length_squared() < 1e-6 { Vec3::Z } else { fwd },
+        Vec3::Z,
+    );
+
+    // AABB in the claws-forward frame, so we can scale the rig to the giant height and
+    // stand its base (min-y) on the ground.
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    let mut grow = |p: Vec3| {
+        lo = lo.min(p);
+        hi = hi.max(p);
+    };
+    for s in &shapes {
+        match *s {
+            RestShape::Capsule { a, b, radius } => {
+                let rad = Vec3::splat(radius);
+                for p in [r * a, r * b] {
+                    grow(p - rad);
+                    grow(p + rad);
+                }
+            }
+            RestShape::Cuboid { center, half } => {
+                let cen = r * center;
+                for sx in [-1.0_f32, 1.0] {
+                    for sy in [-1.0_f32, 1.0] {
+                        for sz in [-1.0_f32, 1.0] {
+                            grow(cen + r * Vec3::new(sx * half.x, sy * half.y, sz * half.z));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() || (hi.y - lo.y) < 1e-4 {
+        // Empty/degenerate recipe: never leave the crab invisible — keep a plain box.
+        spawn_fallback_crab_box(commands, meshes, materials, crab_root, crab_h);
+        return;
+    }
+
+    let scale = crab_h / (hi.y - lo.y);
+    // Recenter horizontally on the root and stand the base on the ground (y=0).
+    let origin = Vec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5);
+    let map = |p: Vec3| (r * p - origin) * scale;
+
+    let carapace_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.7, 0.18, 0.12),
+        perceptual_roughness: 0.8,
+        ..default()
+    });
+    let limb_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.28, 0.18),
+        perceptual_roughness: 0.7,
+        ..default()
+    });
+
+    let mut children: Vec<Entity> = Vec::with_capacity(shapes.len());
+    for s in &shapes {
+        let child = match *s {
+            RestShape::Capsule { a, b, radius } => {
+                let a = map(a);
+                let b = map(b);
+                let seg = b - a;
+                let len = seg.length();
+                let rot = if len > 1e-5 {
+                    Quat::from_rotation_arc(Vec3::Y, seg / len)
+                } else {
+                    Quat::IDENTITY
+                };
+                commands
+                    .spawn((
+                        Mesh3d(meshes.add(Capsule3d::new(radius * scale, len))),
+                        MeshMaterial3d(limb_mat.clone()),
+                        Transform::from_translation((a + b) * 0.5).with_rotation(rot),
+                    ))
+                    .id()
+            }
+            RestShape::Cuboid { center, half } => commands
+                .spawn((
+                    Mesh3d(meshes.add(Cuboid::new(
+                        half.x * 2.0 * scale,
+                        half.y * 2.0 * scale,
+                        half.z * 2.0 * scale,
+                    ))),
+                    MeshMaterial3d(carapace_mat.clone()),
+                    Transform::from_translation(map(center)).with_rotation(r),
+                ))
+                .id(),
+        };
+        children.push(child);
+    }
+    commands.entity(crab_root).add_children(&children);
+}
+
+/// The pre-#108 placeholder: a plain red box crab with a forward claw wedge. Kept ONLY
+/// as the safety net for a degenerate/empty collider recipe, so a broken asset shows a
+/// box rather than an invisible crab.
+fn spawn_fallback_crab_box(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    crab_root: Entity,
+    crab_h: f32,
+) {
+    let crab_w = PLAYER_RADIUS * 2.0 * CRAB_SCALE as f32;
     let body = commands
         .spawn((
             Mesh3d(meshes.add(Cuboid::new(crab_w * 1.6, crab_h * 0.5, crab_w))),
