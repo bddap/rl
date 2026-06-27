@@ -1,6 +1,7 @@
-//! The demo crab's liveness loop: spawn/settle/re-tilt/fall-rescue that keep the goofy
-//! righting "journey" playing on a passive stream, the poke burst, and the keyboard/gamepad
-//! controls (reset, poke, quit, collider wireframes).
+//! The demo crab's liveness loop: spawn/settle that holds the crab steady after a
+//! respawn, the poke burst, and the keyboard/gamepad controls (respawn, poke, quit,
+//! collider wireframes). Respawn is manual only — the A button (or R) re-tilts and
+//! drops a fresh crab; there is no automatic timer or fall-triggered respawn.
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
@@ -20,33 +21,6 @@ use crate::training::systems::{RESET_GRACE_TICKS, settle_countdown};
 /// policy was trained under (0 = settled, policy back in control).
 #[derive(Resource, Default)]
 pub(super) struct DemoSettle(pub(super) u32);
-
-/// Wall-clock since the last demo re-tilt. A passive stream needs the goofy
-/// righting "journey" on a loop: a crab that lands on its feet (or never falls)
-/// would otherwise just stand there, so [`demo_retilt`] re-tilts on this timer
-/// regardless. See [`DEMO_RETILT_PERIOD_S`].
-#[derive(Resource)]
-pub(super) struct DemoRetilt {
-    since: f32,
-}
-
-impl Default for DemoRetilt {
-    fn default() -> Self {
-        // Seed near the period so the first re-tilt fires a few seconds in — the
-        // initial spawn is upright (shared spawn path, see `spawn_initial_crabs`),
-        // so this is what makes the stream go goofy shortly after launch without
-        // touching that path.
-        Self {
-            since: DEMO_RETILT_PERIOD_S - 3.0,
-        }
-    }
-}
-
-/// How often the demo re-tilts the crab to a fresh random orientation. Long
-/// enough for a full righting attempt (succeed or, with current weights, flail and
-/// fail) to play out and read clearly; short enough that the passive stream never
-/// sits on a static pose.
-const DEMO_RETILT_PERIOD_S: f32 = 9.0;
 
 /// A poke is a short force burst, not a velocity write: a multibody link's
 /// velocity lives in the multibody's generalized coordinates, which the
@@ -176,80 +150,6 @@ pub(super) fn demo_controls(
                 * POKE_TORQUE,
         };
     }
-}
-
-/// System: the arena is finite and the policy can walk off it. A crab in
-/// free fall under the world is lost to the viewer — rebuild it at spawn,
-/// same as a training episode reset would.
-pub(super) fn demo_fall_rescue(
-    mut commands: Commands,
-    assets: Res<CrabAssets>,
-    spawns: Res<CrabSpawns>,
-    parts_q: Query<Entity, With<CrabBodyPart>>,
-    carapace_q: Query<&Transform, With<CrabCarapace>>,
-    mut actions: ResMut<CrabActions>,
-    mut settle: ResMut<DemoSettle>,
-) {
-    // A fresh respawn (this tick or a settling one) holds the crab near the origin,
-    // not fallen — skipping while it settles also stops a same-tick double-respawn
-    // racing `demo_retilt`, since despawns are deferred and the stale carapace would
-    // still read as fallen in this query until the command flush.
-    if settle.0 > 0 {
-        return;
-    }
-    let Ok(t) = carapace_q.single() else { return };
-    if t.translation.y > -2.0 {
-        return;
-    }
-    demo_respawn(
-        &mut commands,
-        &assets,
-        &spawns,
-        parts_q.iter(),
-        &mut settle,
-        &mut actions,
-        random_demo_tilt(),
-    );
-}
-
-/// System: periodically re-tilt the demo crab to a fresh random orientation so the
-/// passive stream always shows the goofy righting "journey" — even when the crab
-/// lands on its feet or never falls (the fall-rescue alone wouldn't fire then). Held
-/// off while a settle is in progress so a re-tilt can't interrupt the previous spawn
-/// before it has landed and had its moment. See [`DemoRetilt`].
-// A Bevy system: every parameter is a scheduler-injected `Res`/`ResMut`/`Query`, so the
-// arity is the dependency list, not a refactor smell — bundling them into a SystemParam
-// would only hide the wiring.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn demo_retilt(
-    time: Res<Time>,
-    mut retilt: ResMut<DemoRetilt>,
-    mut commands: Commands,
-    assets: Res<CrabAssets>,
-    spawns: Res<CrabSpawns>,
-    parts_q: Query<Entity, With<CrabBodyPart>>,
-    mut actions: ResMut<CrabActions>,
-    mut settle: ResMut<DemoSettle>,
-) {
-    if settle.0 > 0 {
-        // Don't advance the clock mid-settle: time the period from when the crab is
-        // actually up and acting, not from the spawn it hasn't landed from yet.
-        return;
-    }
-    retilt.since += time.delta_secs();
-    if retilt.since < DEMO_RETILT_PERIOD_S {
-        return;
-    }
-    retilt.since = 0.0;
-    demo_respawn(
-        &mut commands,
-        &assets,
-        &spawns,
-        parts_q.iter(),
-        &mut settle,
-        &mut actions,
-        random_demo_tilt(),
-    );
 }
 
 /// System (FixedUpdate, after Think): while a demo settle is active, hold
