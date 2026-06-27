@@ -43,11 +43,11 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowMode};
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
 use crate::controls::{
-    ActiveDevice, ForceRevealControls, PAD_STICK_DEADZONE, spawn_controls_ui, track_active_device,
-    update_controls_ui,
+    ActiveContext, ActiveDevice, ForceRevealControls, PAD_STICK_DEADZONE, spawn_controls_ui,
+    track_active_device, update_controls_ui,
 };
 use crate::net::cadence::PhysicsCadence;
-use crate::net::controls::{self, Action, GcrControls};
+use crate::net::controls::{self, Action, GcrContext, GcrControls};
 use crate::net::lockstep::{Lockstep, TickMsg};
 use crate::net::net_loop::{NetDriver, PeerMsg};
 use crate::net::sim::{
@@ -260,6 +260,9 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
     // OnEnter system sets have no ordering, which would race spawn_world ahead of the install.
     app.init_non_send_resource::<PendingRound>()
         .init_resource::<ActiveDevice>()
+        // The overlay's live context starts on foot; `sync_controls_context` drives it from
+        // `LocalVehicle` each frame (the windowed path; the screenshot path sets it from env).
+        .init_resource::<ActiveContext<GcrControls>>()
         // The windowed client never forces the overlay open — it's hold-to-reveal. Inserting
         // the resource here (false) keeps `update_controls_ui` reading a plain `Res`, not an
         // `Option<Res>`; only the screenshot path sets it true.
@@ -287,8 +290,14 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
             (
                 grab_cursor_once,
                 quit_game,
-                // chained so the glyph swap reflects THIS frame's device, not last frame's.
-                (track_active_device, update_controls_ui::<GcrControls>).chain(),
+                // chained so the glyph swap reflects THIS frame's device, and the legend +
+                // context name reflect THIS frame's vehicle (sync before the overlay update).
+                (
+                    track_active_device,
+                    sync_controls_context,
+                    update_controls_ui::<GcrControls>,
+                )
+                    .chain(),
             )
                 .run_if(in_state(AppPhase::Playing)),
         );
@@ -542,13 +551,16 @@ pub fn build_screenshot_app(
         app.insert_resource(crate::net::external_crab::ExternalCrabArmed);
     }
     // Controls UI on the screenshot path too, so an evidence frame can prove the overlay +
-    // hint draw — the shared env override forces it open headless (see
-    // [`crate::controls::reveal_overrides_from_env`]).
-    let (force_reveal, active_device) = crate::controls::reveal_overrides_from_env();
+    // hint draw — the shared env override forces it open headless, and picks the CONTEXT
+    // (`RL_SHOW_CONTROLS_CONTEXT=foot|plane`) so one shot can record any context's legend
+    // (see [`crate::controls::reveal_overrides_from_env`]).
+    let (force_reveal, active_device, active_context) =
+        crate::controls::reveal_overrides_from_env::<GcrControls>();
     app.insert_resource(cfg)
         .init_resource::<ShotProgress>()
         .insert_resource(force_reveal)
         .insert_resource(active_device)
+        .insert_resource(active_context)
         .add_systems(
             Startup,
             (
@@ -801,6 +813,31 @@ enum LocalVehicle {
 impl LocalVehicle {
     fn piloting(&self) -> bool {
         matches!(self, Self::Piloting { .. })
+    }
+
+    /// The controls CONTEXT this vehicle state presents — the single mapping from "what am I
+    /// driving" to "which control set + legend is live". The overlay reads it via
+    /// [`ActiveContext`]; adding a vehicle type means adding an arm here and its rows in
+    /// [`crate::net::controls`], and the HUD names + labels it automatically.
+    fn context(&self) -> GcrContext {
+        match self {
+            Self::OnFoot => GcrContext::OnFoot,
+            Self::Piloting { .. } => GcrContext::Plane,
+        }
+    }
+}
+
+/// Keep the controls overlay's [`ActiveContext`] in sync with the live [`LocalVehicle`], so
+/// the on-screen legend + context name follow enter/exit-vehicle automatically. Pure client
+/// UI — it never reads or writes the deterministic sim. Cheap (a resource compare), and the
+/// one place vehicle state drives the HUD context, so the two can't drift.
+fn sync_controls_context(
+    vehicle: Res<LocalVehicle>,
+    mut ctx: ResMut<ActiveContext<GcrControls>>,
+) {
+    let want = vehicle.context();
+    if ctx.0 != want {
+        ctx.0 = want;
     }
 }
 
