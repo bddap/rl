@@ -39,7 +39,7 @@
 //!   to the game-world crab spot and scaling it to the giant. The physics `Transform`s are NEVER
 //!   touched: bevy_rapier syncs a changed body `Transform` back into the physics body, so a
 //!   "cosmetic" link shift teleported the body and crashed the solver. With no `sally.glb` the
-//!   rl#5 procedural fallback rig shows as a Rapier debug-wireframe body (at the ~1 m arena frame).
+//!   rig is mesh-less; the static giant silhouette (`spawn_world`) stays shown as the visible crab.
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
@@ -589,8 +589,8 @@ fn publish_skin_repose(
     bridge: Res<ExternalCrabBridge>,
     repose_out: Option<ResMut<crate::bot::skin::CrabSkinRepose>>,
 ) {
-    // No skin loaded (no `sally.glb`) ⇒ no resource ⇒ nothing to repose (the rl#5 procedural rig
-    // shows as the Rapier debug wireframe instead).
+    // No skin loaded (no `sally.glb`) ⇒ no resource ⇒ nothing to repose (the static giant
+    // silhouette is the visible crab there — `spawn_world` keeps it shown when no model loads).
     let Some(mut out) = repose_out else {
         return;
     };
