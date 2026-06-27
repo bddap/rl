@@ -6,10 +6,12 @@
 //! joints are policy-actuated and carry a [`CrabJointId`]: each leg's
 //! coxa/merus/carpus and each claw's shoulder/wrist/pincer (all revolute). Each
 //! limb collapses to those joints — a leg's proximal bones ride its coxa link, so
-//! there are no locked stubs. Only the eye-stalks spawn as locked (fixed-joint)
-//! links (they carry the reward's eye-height marker but no `CrabJointId`); the rest
-//! of the rig (shell, palpi, mouthparts) rides the carapace. Add articulation by
-//! adding a `CrabJointId` variant and a [`super::rig`] `JointSpec`.
+//! there are no locked stubs. The cosmetic eye-stalks (locked, no `CrabJointId`) are
+//! NOT given physics bodies at all — they aren't actuated, observed, or load-bearing,
+//! and their skin bones ride the carapace ([`super::skin`]); they live only in the rig
+//! for the cosmetic/debug view. The rest of the rig (shell, palpi, mouthparts) rides
+//! the carapace. Add articulation by adding a `CrabJointId` variant and a
+//! [`super::rig`] `JointSpec`.
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
@@ -222,12 +224,6 @@ impl FromWorld for CrabAssets {
 
 #[derive(Component)]
 pub struct CrabCarapace;
-
-/// Marker on the eye-tip link (the bone the eye rides). The reward reads its world
-/// height (DeepMind-`stand`-style head height); the eye-stalks are locked, so they
-/// carry no `CrabJoint` and this marker is how the reward locates them.
-#[derive(Component)]
-pub struct CrabEyeTip;
 
 /// Marker on each claw's movable-finger link (the [`CrabJointId::ClawPincer`]
 /// link — the dactyl that folds off the palm). The target-touch reward reads
@@ -521,6 +517,21 @@ pub fn spawn_crab(
             .all()
     };
     for (i, link) in recipe.links.iter().enumerate() {
+        // Cosmetic locked links (the eye-stalks: `actuated == None`) are NOT spawned as
+        // physics bodies. They carry no policy joint and aren't load-bearing (rig.rs),
+        // never enter the observation, and ride atop the carapace where their colliders
+        // never reach the ground — yet each one added a rigid body to the single-island
+        // multibody solve (the per-step bottleneck) for zero return. The skin already
+        // rides the eye bones off the carapace cosmetically (the eye link is fixed to it;
+        // see `skin::link_map`), so dropping the bodies is invisible. They survive in the
+        // rig (`recipe.links`) for the cosmetic/debug-collider view and the fallback body,
+        // which read the rig directly, not these entities. A `carapace` placeholder keeps
+        // `ents` index-aligned with `recipe.links`; it is never read as a parent because a
+        // locked link is only ever the parent of another (also-skipped) locked link.
+        if link.actuated.is_none() {
+            ents.push(carapace);
+            continue;
+        }
         let parent_ent = match link.parent {
             None => carapace,
             Some(idx) => ents[idx],
@@ -536,10 +547,9 @@ pub fn spawn_crab(
         } else {
             crab_collision(env)
         };
-        let joint = match link.actuated {
-            Some(id) => rig_revolute(id, link.axis_local, link.anchor1),
-            None => rig_fixed(link.anchor1),
-        };
+        // Every link reaching here is actuated — locked (cosmetic) links were skipped above.
+        let id = link.actuated.expect("locked links are skipped before spawn");
+        let joint = rig_revolute(id, link.axis_local, link.anchor1);
         let mut ec = commands.spawn((
             CrabBodyPart,
             CrabEnvId(env),
@@ -555,23 +565,17 @@ pub fn spawn_crab(
             Velocity::default(),
             ExternalForce::default(),
         ));
-        if let Some(id) = link.actuated {
-            ec.insert(CrabJoint {
-                id,
-                axis_local: link.axis_local,
-            });
-            // The movable-finger link is a claw tip (see [`CrabClawTip`]).
-            if matches!(id, CrabJointId::ClawPincer(_)) {
-                ec.insert(CrabClawTip);
-            }
+        ec.insert(CrabJoint {
+            id,
+            axis_local: link.axis_local,
+        });
+        // The movable-finger link is a claw tip (see [`CrabClawTip`]).
+        if matches!(id, CrabJointId::ClawPincer(_)) {
+            ec.insert(CrabClawTip);
         }
         // Grippy feet: the distal leg bone (`004`) is what plants on the ground.
         if link.bone.starts_with("Def_leg") && link.bone.contains(".004.") {
             ec.insert(Friction::coefficient(1.5));
-        }
-        // The eye rides the stalk tip — mark it so the reward can read eye height.
-        if link.bone.starts_with("Def_antennae_top") {
-            ec.insert(CrabEyeTip);
         }
         ents.push(ec.id());
     }
@@ -603,17 +607,6 @@ fn rig_revolute(id: CrabJointId, axis: Vec3, anchor1: Vec3) -> TypedJoint {
     let generic: &mut GenericJoint = joint.as_mut();
     generic.raw.softness = LIMIT_SOFTNESS;
     joint
-}
-
-/// Fixed joint for a locked rig link: welds the child to its parent at the bind
-/// pose (no DOF), so the joint is present in the body — promotable to actuated by
-/// adding a [`CrabJointId`] for it — but invisible to the policy.
-fn rig_fixed(anchor1: Vec3) -> TypedJoint {
-    no_adjacent_contacts(
-        FixedJointBuilder::new()
-            .local_anchor1(anchor1)
-            .local_anchor2(Vec3::ZERO),
-    )
 }
 
 /// A capsule collider offset within its link: the bone runs from the pivot (link

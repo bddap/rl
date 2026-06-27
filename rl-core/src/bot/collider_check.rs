@@ -30,7 +30,7 @@ use bevy_rapier3d::prelude::*;
 use bevy_rapier3d::rapier::geometry::ColliderHandle;
 use bevy_rapier3d::rapier::parry::query::contact;
 
-use super::body::{CrabBodyPart, CrabCarapace, CrabEyeTip, CrabJoint};
+use super::body::{CrabBodyPart, CrabCarapace, CrabJoint};
 use super::test_util::{headless_app, tick};
 
 /// Ticks of physics to drop the unactuated crab from its spawn pose onto the
@@ -162,9 +162,8 @@ fn joint_distances(app: &mut App) -> HashMap<(Entity, Entity), u32> {
 
 /// Every crab collider entity with its identity + live collider handle, read from
 /// Rapier's collider set so the handle indexes the same shapes/poses the solver just
-/// integrated. Names: the joint id for an actuated link, "Carapace" for the root,
-/// "EyeStalk(Tip)" for the locked eye links (no `CrabJoint`); the entity index
-/// disambiguates the otherwise-identical left/right eye bases.
+/// integrated. Names: the joint id for an actuated link, "Carapace" for the root.
+/// (The cosmetic eye-stalks aren't spawned as physics bodies, so they never appear.)
 fn collect_parts(app: &mut App) -> Vec<Part> {
     let mut colliders_q = app.world_mut().query::<&RapierContextColliders>();
     let ctx = colliders_q.single(app.world()).expect("one rapier context");
@@ -174,20 +173,18 @@ fn collect_parts(app: &mut App) -> Vec<Part> {
         .map(|(&e, &h)| (e, h))
         .collect();
 
-    let mut q = app.world_mut().query_filtered::<(
-        Entity,
-        Option<&CrabJoint>,
-        Has<CrabCarapace>,
-        Has<CrabEyeTip>,
-    ), With<CrabBodyPart>>();
+    let mut q = app
+        .world_mut()
+        .query_filtered::<(Entity, Option<&CrabJoint>, Has<CrabCarapace>), With<CrabBodyPart>>();
     q.iter(app.world())
-        .filter_map(|(entity, joint, is_carapace, is_eye_tip)| {
+        .filter_map(|(entity, joint, is_carapace)| {
             let handle = *handle_of.get(&entity)?;
-            let name = match (joint, is_carapace, is_eye_tip) {
-                (Some(j), _, _) => format!("{:?}", j.id),
-                (None, true, _) => "Carapace".to_string(),
-                (None, false, true) => format!("EyeStalkTip({})", entity.index()),
-                (None, false, false) => format!("EyeStalk({})", entity.index()),
+            // Every spawned crab body is either an actuated link (carries a `CrabJoint`)
+            // or the carapace root; the `(None, false)` fallback is unreachable.
+            let name = match (joint, is_carapace) {
+                (Some(j), _) => format!("{:?}", j.id),
+                (None, true) => "Carapace".to_string(),
+                (None, false) => format!("UnknownPart({})", entity.index()),
             };
             Some(Part {
                 entity,
