@@ -88,6 +88,13 @@ struct NetArgs {
     /// affects the match. Omit to run with no telemetry.
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
+    /// Write a full per-tick `<tick> <state_hash>` log to this file (every applied tick,
+    /// keyed by the true tick — unlike the coarse stdout report cadence). Two peers (or two
+    /// machines) running the SAME match must produce logs that `diff` byte-identically over
+    /// their overlapping tick range: the cross-peer (and cross-machine) determinism proof
+    /// (rl#94). Omit for no log.
+    #[arg(long, value_name = "FILE")]
+    hash_log: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -539,14 +546,28 @@ async fn run_net(args: NetArgs) -> Result<()> {
     let mut ticker = tokio::time::interval(tick_dt);
     let end = Instant::now() + Duration::from_secs(args.run_secs);
     let mut total_desyncs = 0usize;
-    // Report at fixed TICK boundaries (not wall-clock) so both peers print the SAME
-    // ticks — the `(tick, hash)` lines are then directly comparable across peers, an
-    // external check on the internal desync cross-check.
+    // Coarse human progress: print roughly once per second of sim. This samples the FIRST
+    // tick at/after each boundary, which a batched `try_advance` can overshoot by a tick or
+    // two — so these lines are a liveness/hash eyeball, NOT a byte-exact cross-peer compare.
+    // The authoritative cross-peer determinism proofs are the internal desync cross-check
+    // (peer-advertised hashes) and the per-tick `--hash-log` (keyed by the true tick).
     let mut next_report_tick = TICK_HZ;
     // Telemetry-side sampling cursor (independent of the stdout report cadence) and a
     // one-shot latch so RoundDecided is reported exactly once.
     let mut next_tel_tick = TELEMETRY_TICK_EVERY;
     let mut reported_outcome = false;
+    // Optional per-tick hash log (NetArgs::hash_log): every applied tick keyed by its true
+    // tick, so two peers' logs diff byte-identically over their overlap — the cross-peer
+    // (and cross-machine) determinism proof. Written one line per `advance_one` below.
+    let mut hash_log = args
+        .hash_log
+        .as_ref()
+        .map(|p| {
+            std::fs::File::create(p)
+                .map(std::io::BufWriter::new)
+                .with_context(|| format!("creating hash log {}", p.display()))
+        })
+        .transpose()?;
 
     while Instant::now() < end {
         ticker.tick().await;
@@ -571,14 +592,24 @@ async fn run_net(args: NetArgs) -> Result<()> {
         let msg = ls.submit_local_input(input);
         session.broadcast(&msg).await;
 
-        // Advance every ready tick; surface faults found as we apply.
-        for f in ls.try_advance() {
-            report_fault(&mut total_desyncs, f, tel.as_ref());
+        // Advance every ready tick ONE AT A TIME so the hash log can record each tick's
+        // closing hash at the instant it's applied — `try_advance` is exactly this loop, but
+        // logging from its post-batch snapshot could miss a tick the batch already pruned.
+        // Logging per `advance_one` writes every applied tick exactly once, regardless of how
+        // many a single iteration catches up.
+        while let Some(faults) = ls.advance_one() {
+            for f in faults {
+                report_fault(&mut total_desyncs, f, tel.as_ref());
+            }
+            if let Some((w, c)) = hash_log.as_mut().zip(ls.last_applied()) {
+                use std::io::Write as _;
+                writeln!(w, "{} {:#018x}", c.tick, c.hash).context("writing hash log")?;
+            }
         }
 
-        // Report once the sim crosses each TICK_HZ boundary. The label is the actual
-        // current tick and the hash is that same tick's state, so the pair is exact;
-        // both peers cross the same boundaries, making the lines comparable.
+        // Coarse progress print once the sim crosses each TICK_HZ boundary (see the
+        // cadence note above — a batched advance can overshoot the boundary tick, so these
+        // are not byte-comparable across peers; the `--hash-log` is).
         if ls.sim().tick() >= next_report_tick {
             next_report_tick = (ls.sim().tick() / TICK_HZ + 1) * TICK_HZ;
             println!(
@@ -636,6 +667,10 @@ async fn run_net(args: NetArgs) -> Result<()> {
     // no-op when telemetry is off.
     if tel.is_some() {
         tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    if let Some(mut w) = hash_log.take() {
+        use std::io::Write as _;
+        w.flush().context("flushing hash log")?; // surface a write error, don't swallow it on drop
     }
     drop(tel); // close the telemetry channel so its task finishes the stream cleanly
     session.shutdown().await;
