@@ -303,6 +303,17 @@ impl Lockstep {
         &self.sim
     }
 
+    /// The most recently applied tick and its closing `state_hash` on THIS peer, or `None`
+    /// before the first tick. Set by [`Self::advance_one`] the instant a tick is stepped, so
+    /// a caller that drains one `advance_one` at a time can log every applied `(tick, hash)`
+    /// exactly once — keyed by the true tick, never a report-cadence approximation. Two peers
+    /// logging these `diff` byte-identically over their overlapping range iff the sim stayed
+    /// deterministic: the external cross-machine determinism gate that the internal desync
+    /// cross-check (peer-advertised hashes) proves from the inside.
+    pub fn last_applied(&self) -> Option<Confirmed> {
+        self.confirmed
+    }
+
     /// Hand the crab to external control (the rapier NN crab) — forwards to
     /// [`Sim::enable_external_crab`]. Call once at round setup; the integer pursuit then stops
     /// and the caller drives the crab with [`Self::set_external_crab_pose`] each tick. Allowed
