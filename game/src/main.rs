@@ -180,11 +180,22 @@ struct FpScreenshotArgs {
     /// Tilt the screenshot camera this many degrees (+ up) from the first-person aim.
     #[arg(long, default_value_t = 0.0)]
     cam_pitch: f32,
+    /// Override the camera's vertical field of view (degrees). Widen it (e.g. 90) to fit the
+    /// whole towering giant crab in one frame — it stands only a body-length from the player, so
+    /// the default FOV otherwise shows just a slab of carapace. Unset keeps Bevy's default.
+    #[arg(long)]
+    cam_fov: Option<f32>,
     /// Make the NON-local players pilots (flying planes) so the captured frame shows a
     /// plane's gray box in the air — the evidence the plane renders. Needs `--players >= 2`
     /// (a lone pilot would show empty sky). Off ⇒ the unchanged on-foot shot.
     #[arg(long, default_value_t = false)]
     plane: bool,
+    /// Arm the real trained rapier-NN crab ("Sally") + skin for the shot, instead of the static
+    /// integer silhouette — the SAME `--nn-crab-checkpoint` resolution as `play`, so an evidence
+    /// frame composes the actual armed crab the windowed solo client renders (reposed + scaled to
+    /// the giant). A dir with no `brain.bin` errors out (as `play` does); omit for the silhouette shot.
+    #[arg(long, value_name = "DIR")]
+    nn_crab_checkpoint: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -555,8 +566,22 @@ fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
     };
     let ls = Lockstep::new_with_pilots(MATCH_SEED, &players, me, &pilots);
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
-        .with_cam_offset(args.cam_yaw, args.cam_pitch);
-    render::build_screenshot_app(ls, cfg).run();
+        .with_cam_offset(args.cam_yaw, args.cam_pitch)
+        .with_fov(args.cam_fov);
+    // Same checkpoint resolution as `play --nn-crab-checkpoint`: a readable brain.bin arms the real
+    // crab for the shot (errors out if pointed at a dir with none). `None` keeps the silhouette.
+    let external_crab = args
+        .nn_crab_checkpoint
+        .map(|flag| nn_crab_checkpoint_dir(Some(flag)))
+        .transpose()?;
+    // The armed NN crab steps real rapier physics, which — like the windowed solo client — must run
+    // single-threaded (the multibody solver is otherwise nondeterministic and can NaN-panic). Pin
+    // the global task pools BEFORE the app builds (idempotent OnceLock); harmless for the silhouette
+    // shot. See the same first-thing call in `run_play` and `render::pin_process_pools`.
+    if external_crab.is_some() {
+        render::pin_process_pools();
+    }
+    render::build_screenshot_app(ls, cfg, external_crab).run();
     Ok(())
 }
 
