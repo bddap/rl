@@ -33,10 +33,13 @@
 //!   the game-world crab position, which we write back into the sim with
 //!   [`Sim::set_external_crab_pose`]. Grabs / extraction / win-loss then resolve against the
 //!   REAL crab body, exactly as the prompt asks.
-//! - For rendering, every crab body part's bevy `Transform` is shifted by a render-only
-//!   offset each frame so the rig APPEARS at the game-world crab position (its physics
-//!   stays in the small arena). The sally skin, if present, rides the same parts; with
-//!   no model the rl#5 procedural fallback rig gives a Rapier debug-wireframe body.
+//! - For rendering, the giant blow-up is a RENDER-ONLY repose published into
+//!   [`crate::bot::skin::CrabSkinRepose`] each game tick ([`publish_skin_repose`]) and applied
+//!   by the skin to its render BONES only ([`crate::bot::skin::drive_bones`]) — shifting the rig
+//!   to the game-world crab spot and scaling it to the giant. The physics `Transform`s are NEVER
+//!   touched: bevy_rapier syncs a changed body `Transform` back into the physics body, so a
+//!   "cosmetic" link shift teleported the body and crashed the solver. With no `sally.glb` the
+//!   rl#5 procedural fallback rig shows as a Rapier debug-wireframe body (at the ~1 m arena frame).
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
@@ -124,6 +127,18 @@ fn pos_to_m(p: Pos) -> Vec2 {
     Vec2::new(p.x as f32 / UNIT as f32, p.z as f32 / UNIT as f32)
 }
 
+/// Where the crab rig sits in the game world before the giant SCALE is applied — the 2D (XZ)
+/// precursor that [`publish_skin_repose`] combines with [`crate::net::render::crab_render_scale`]
+/// to build the full 3D [`crate::bot::skin::SkinRepose`]. A named pair (not a bare tuple) because
+/// the two `Vec2`s are different KINDS — `shift` is an XZ delta, `pivot` an XZ world point — so
+/// they can't be swapped at the use site. See [`ExternalCrabBridge::render_placement_m`].
+struct CrabPlacement {
+    /// Arena→game-world XZ translation for each part (`world_pos_m - last_carapace_m`).
+    shift: Vec2,
+    /// The crab's game-world ground point (XZ), about which the rig is scaled up.
+    pivot: Vec2,
+}
+
 impl ExternalCrabBridge {
     /// Seed the bridge at the sim's crab spawn (so the NN crab begins where the
     /// round placed the giant crab, MIN_CRAB_SPAWN_DISTANCE from the players). `lead_m` /
@@ -163,12 +178,26 @@ impl ExternalCrabBridge {
         }
     }
 
-    /// The render-only offset (metres, XZ) from the crab's arena frame to its game-world
-    /// position: add it to every crab part's bevy `Transform` so the rig appears at the
-    /// game crab spot while its physics stays in the small arena. `None` until the crab
-    /// has been sampled once (so we never offset by a stale/zero carapace).
-    fn render_offset_m(&self) -> Option<Vec2> {
-        self.last_carapace_m.map(|c| self.world_pos_m - c)
+    /// Where the crab rig sits in the game world before SCALE, as a `(shift, pivot)` pair in
+    /// metres on the XZ `Vec2` frame:
+    /// - `shift` translates each part's raw arena `Transform` to the game-world crab spot
+    ///   (`world_pos_m - last_carapace_m`), and
+    /// - `pivot` is the crab's game-world ground point (`world_pos_m`), about which the rig is
+    ///   scaled up to the giant (see [`publish_skin_repose`]).
+    ///
+    /// WHY the giant is render-only and built here, not baked into the body: the trained policy +
+    /// rapier run at the ~1 m physics scale the policy learned under ([`crate::bot::body`]), and
+    /// the lockstep determinism hash reads that raw pose — so the giant is a RENDER-ONLY blow-up
+    /// applied to the skin AFTER the hash. With no integer silhouette to stand in (rl#114) this
+    /// rig is the ONLY crab, so without the matching blow-up it renders as a ~1 m speck in a world
+    /// framed for the [`crate::net::render::CRAB_RENDER_HEIGHT`] monster — the play-day "no crab
+    /// visible" bug. `None` until the crab has been sampled once (so we never place against a
+    /// stale/zero carapace).
+    fn render_placement_m(&self) -> Option<CrabPlacement> {
+        self.last_carapace_m.map(|c| CrabPlacement {
+            shift: self.world_pos_m - c,
+            pivot: self.world_pos_m,
+        })
     }
 
     pub fn yaw_turns(&self) -> i32 {
@@ -376,26 +405,17 @@ impl Plugin for ExternalCrabPlugin {
                 .run_if(external_crab_armed),
         );
 
-        // Render-only: shift the rendered rig to the game-world crab position. MUST run in
-        // FixedUpdate right after the physics writeback (where rapier sets each part's raw
-        // arena-frame Transform) and after `integrate_crab` (which finalises the
-        // offset for this step) — exactly ONCE per writeback. It adds the offset to the
-        // freshly-written raw pose, so it must NOT run in Update: Update can run many times
-        // between fixed steps, and `+=`-ing the offset each of those frames would
-        // accumulate and fling the rig away. Gated on Visuals — headless has no rendered
-        // transforms to place.
+        // Render-only: publish the giant-crab repose for the skin to apply to its render bones
+        // ([`crate::bot::skin::drive_bones`]). This NEVER mutates the rapier-driven crab
+        // `Transform`s — doing so teleported the body and crashed the client (see
+        // [`crate::bot::skin::CrabSkinRepose`]). After `integrate_crab`, which finalises this
+        // step's game-world position the repose is built from. Gated on Visuals — headless never
+        // renders a skin, so it has nothing to repose.
         if app.world().get_resource::<Visuals>().is_some_and(|v| v.0) {
             app.add_systems(
                 FixedUpdate,
-                offset_rendered_crab
+                publish_skin_repose
                     .after(integrate_crab)
-                    // MUST run after the determinism hash: this render-only shift mutates the
-                    // crab parts' `Transform` and is gated on `Visuals`, so hashing the
-                    // POST-shift pose would make a windowed peer and a headless peer disagree
-                    // (the headless one never applies the shift). Hash the raw arena pose
-                    // first, then cosmetically shift it.
-                    .after(hash_crab_physics)
-                    .after(PhysicsSet::Writeback)
                     .run_if(external_crab_armed),
             );
         }
@@ -550,31 +570,43 @@ fn integrate_crab(
     }
 }
 
-/// Render-only: shift every crab body part's bevy `Transform` by the bridge's arena→game
-/// offset, so the rendered rig (and its skin) appears at the game-world crab position while
-/// its rapier bodies stay in the small arena. Pure cosmetics — it never touches rapier, so
-/// physics/determinism are untouched.
+/// Render-only: publish the giant-crab repose into [`crate::bot::skin::CrabSkinRepose`] so the
+/// skin draws the small ~1 m arena rig as the game-world GIANT — shifted to the crab's game spot
+/// and scaled up about its ground point. The skin's [`crate::bot::skin::drive_bones`] applies this
+/// to the render BONES only; this system NEVER mutates the rapier-driven `CrabBodyPart`
+/// `Transform`s, because bevy_rapier reads a changed body `Transform` back into the physics body
+/// — a "cosmetic" link shift teleported the body ~12 m/step and exploded the solver into a
+/// NaN-motor crash (the play-day "there is no game to play"). So the blow-up is decoupled from
+/// physics by construction: the policy, the colliders, and the lockstep hash all keep reading the
+/// raw ~1 m pose regardless of `Visuals`, so a windowed and a headless peer stay bit-identical.
 ///
-/// Scheduled in FixedUpdate right after rapier's `Writeback` (and `integrate_crab`),
-/// so it runs EXACTLY ONCE per writeback — each writeback first overwrites every part's
-/// `Transform` with the raw arena pose, then this adds the offset once. That is why the
-/// add is safe: it must NOT run in `Update`, which can run several times between fixed
-/// steps with no intervening writeback to reset the pose — there each `+=` would stack and
-/// fling the rig away by the full (≥12 m) offset. Crab parts are always under motor torque
-/// so they never sleep out of the writeback, keeping the one-add-per-step invariant.
-fn offset_rendered_crab(
+/// The scale is what makes the armed NN crab visible: with no integer silhouette to stand in
+/// (rl#114) the skinned rig is the ONLY crab, and the world (spawn distance, camera framing, the
+/// extraction pillar) is dimensioned for the giant — without the matching blow-up the crab would
+/// render as a ~1 m speck ≥12 m away and read as "no crab". `None` until the crab is sampled once
+/// (no stale/zero carapace) or for a degenerate recipe (no scale) — identity leaves the rig at 1×.
+fn publish_skin_repose(
     bridge: Res<ExternalCrabBridge>,
-    mut parts_q: Query<(&CrabEnvId, &mut Transform), With<CrabBodyPart>>,
+    repose_out: Option<ResMut<crate::bot::skin::CrabSkinRepose>>,
 ) {
-    let Some(off) = bridge.render_offset_m() else {
+    // No skin loaded (no `sally.glb`) ⇒ no resource ⇒ nothing to repose (the rl#5 procedural rig
+    // shows as the Rapier debug wireframe instead).
+    let Some(mut out) = repose_out else {
         return;
     };
-    let shift = Vec3::new(off.x, 0.0, off.y);
-    for (env, mut t) in parts_q.iter_mut() {
-        if env.0 == 0 {
-            t.translation += shift;
-        }
-    }
+    out.0 = bridge.render_placement_m().and_then(|r| {
+        // The SAME target-height fit the integer silhouette uses (one source, no drift): the
+        // body's natural standing height is ~0.6 m, so a bare `CRAB_SCALE` multiply would render
+        // the crab several× too small.
+        crate::net::render::crab_render_scale().map(|scale| crate::bot::skin::SkinRepose {
+            shift: Vec3::new(r.shift.x, 0.0, r.shift.y),
+            // The ground pivot: the crab's game-world XZ at floor level (y=0). Scaling about it
+            // grows the rig up and outward in place — the carapace rises to the giant height, the
+            // feet (near y=0 in the arena rig) stay on the floor.
+            pivot: Vec3::new(r.pivot.x, 0.0, r.pivot.y),
+            scale,
+        })
+    });
 }
 
 // ---------------------------------------------------------------------------

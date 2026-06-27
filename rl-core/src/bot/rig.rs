@@ -824,6 +824,42 @@ pub struct CrabSilhouette {
     pub carapace: RestShape,
 }
 
+impl CrabSilhouette {
+    /// Every shape (limbs + carapace), for whole-body extent math.
+    pub fn shapes(&self) -> impl Iterator<Item = &RestShape> {
+        self.limbs.iter().chain(std::iter::once(&self.carapace))
+    }
+
+    /// The rig's natural standing height: the vertical (Y) extent of its rest-pose
+    /// collider silhouette, in metres. The ONE size source both giant-crab renders scale
+    /// against — the integer silhouette (`spawn_crab_silhouette`) fits this extent to the giant
+    /// height, and the armed NN rig ([`crate::bot::skin::CrabSkinRepose`]) scales the live skin by
+    /// the same target/height ratio, so the two crabs are the same size by construction (no drift).
+    /// Both renders orient the rig claws-forward by a pure YAW first, which leaves the Y
+    /// extent unchanged, so it's correct to measure it in the rig's own frame here. `0.0` for
+    /// a degenerate (empty/non-finite) recipe — callers guard that case.
+    pub fn natural_height(&self) -> f32 {
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for s in self.shapes() {
+            match *s {
+                RestShape::Capsule { a, b, radius } => {
+                    lo = lo.min(a.y - radius).min(b.y - radius);
+                    hi = hi.max(a.y + radius).max(b.y + radius);
+                }
+                RestShape::Cuboid { center, half } => {
+                    lo = lo.min(center.y - half.y);
+                    hi = hi.max(center.y + half.y);
+                }
+            }
+        }
+        if lo.is_finite() && hi.is_finite() {
+            hi - lo
+        } else {
+            0.0
+        }
+    }
+}
+
 /// Reconstruct `recipe`'s collider silhouette for rendering. Unlike [`rest_colliders`]
 /// (scoring: actuated links only, anchored at the model's leg hub) this is the COSMETIC
 /// view — it draws every link including the locked eye-stalks and needs no model, the

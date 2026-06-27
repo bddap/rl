@@ -83,6 +83,46 @@ pub struct BoneDrive {
     offset: Mat4,
 }
 
+/// Render-only blow-up applied to the crab's skin so the ~1 m physics rig draws as the GCR
+/// game-world giant: scale the rig up about its ground point and translate it from its small
+/// arena frame to the game-world crab spot. `None` (the default) is identity — the demo and the
+/// trainer render the crab at its true physics scale.
+///
+/// WHY a render-only repose, applied to the skin BONES in [`drive_bones`] and NEVER to the
+/// rapier-driven `CrabBodyPart` `Transform`s: bevy_rapier syncs a changed body `Transform` BACK
+/// into the physics body (`force_update_from_transform_changes` only skips UNCHANGED ones), so a
+/// system that mutated a link's `Transform` to "cosmetically" move it teleported the rapier body
+/// ~12 m every step, exploding the multibody solver into a NaN-motor panic that crashed the armed
+/// client on launch (the play-day "there is no game to play"). The bones are render-only entities
+/// (flat children of an identity skin root, no rapier body), so reposing THEM is free of physics.
+/// Set each step by [`crate::net::external_crab`] while the giant NN crab is armed.
+///
+/// Lives in `bot::skin` because [`drive_bones`] is its sole consumer (the renderer owns its own
+/// render contract); `net::external_crab` only PUBLISHES into it — so there's no `bot`→`net` cycle.
+#[derive(Resource, Default, Clone, Copy)]
+pub struct CrabSkinRepose(pub Option<SkinRepose>);
+
+/// The giant-crab repose parameters (metres / unitless), in bevy world space.
+#[derive(Clone, Copy)]
+pub struct SkinRepose {
+    /// Arena→game-world translation added to each part's raw pose before scaling.
+    pub shift: Vec3,
+    /// Ground point the rig is scaled up about (so the feet stay on the floor).
+    pub pivot: Vec3,
+    /// Uniform blow-up factor fitting the rig to the giant render height.
+    pub scale: f32,
+}
+
+impl SkinRepose {
+    /// The world-space repose matrix: `pivot + scale·((p + shift) − pivot)` for any point `p`.
+    fn matrix(&self) -> Mat4 {
+        Mat4::from_translation(self.pivot)
+            * Mat4::from_scale(Vec3::splat(self.scale))
+            * Mat4::from_translation(-self.pivot)
+            * Mat4::from_translation(self.shift)
+    }
+}
+
 /// The physics-link query shared by pairing and re-pairing: every part entity
 /// of every crab, tagged with its env and its role (joint id or carapace).
 type LinkQuery<'w, 's> = Query<
@@ -128,6 +168,8 @@ pub fn register(app: &mut App) {
         .load(GltfAssetLabel::Scene(0).from_asset(rel));
     app.insert_resource(CrabModel { scene });
     app.init_resource::<StrippedMeshes>();
+    // Identity until the GCR giant crab is armed; `crate::net::external_crab` sets it each step.
+    app.init_resource::<CrabSkinRepose>();
     app.add_systems(
         Update,
         (
@@ -346,10 +388,14 @@ fn reveal_skin(mut roots: Query<(&CrabSkin, &mut Visibility)>) {
 fn drive_bones(
     mut bones: Query<(&BoneDrive, &mut Transform)>,
     links: Query<&Transform, (With<CrabBodyPart>, Without<BoneDrive>)>,
+    repose: Res<CrabSkinRepose>,
 ) {
+    // The GCR giant blow-up rides the render bones ONLY (see [`CrabSkinRepose`]); identity for the
+    // demo/trainer, so their skin renders the crab at its true physics scale unchanged.
+    let m = repose.0.map_or(Mat4::IDENTITY, |r| r.matrix());
     for (drive, mut t) in bones.iter_mut() {
         if let Ok(link) = links.get(drive.link) {
-            *t = Transform::from_matrix(link.to_matrix() * drive.offset);
+            *t = Transform::from_matrix(m * link.to_matrix() * drive.offset);
         }
     }
 }

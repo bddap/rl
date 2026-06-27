@@ -328,13 +328,7 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
             ) {
                 panic!("{}", crab_arm_failure_message(&net));
             }
-            let crab = ls.sim().crab();
-            let spawn = crab.pos();
-            // Seed the pose with the crab's CURRENT spawn pose/yaw — writing back what's already
-            // there, so sim state is unchanged. Digest 0 to seed; the bridge's first post-step
-            // `hash_crab_physics` fills it before the first `sync_external_crab` push, so the
-            // seeded value is never cross-checked.
-            ls.set_external_crab_pose(spawn, crab.yaw(), 0);
+            let spawn = seed_external_crab_solo(&mut ls);
             let source = match net {
                 Some(n) => InputSource::Networked(Box::new(n)),
                 None => InputSource::Solo,
@@ -433,6 +427,20 @@ fn crab_arm_failure_message(net: &Option<NetDriver>) -> String {
     )
 }
 
+/// Seed the sim crab's spawn pose into `ls` so the rapier-NN body begins where the round placed
+/// the giant crab, and return that spawn for [`add_external_nn_crab`]. The ONE seed both the
+/// windowed solo `Boot::Round` client and the headless screenshot use, so the evidence shot arms
+/// the SAME way the player's client does (the manual's "one implementation per thing"). Writes
+/// back the crab's CURRENT pose, so sim state is unchanged; digest 0 to seed (the bridge's first
+/// post-step `hash_crab_physics` fills the real digest before any cross-check). Solo only — a
+/// networked round arms through the digest handshake in `ensure_round_installed`, not here.
+fn seed_external_crab_solo(ls: &mut Lockstep) -> Pos {
+    let crab = ls.sim().crab();
+    let spawn = crab.pos();
+    ls.set_external_crab_pose(spawn, crab.yaw(), 0);
+    spawn
+}
+
 /// Wire the real rapier-NN crab into the windowed solo app: the bot/physics/brain stack
 /// (the SAME plugins `rl --demo` runs, so the crab steps the exact dynamics the policy
 /// trained under) plus the [`external_crab::ExternalCrabPlugin`] bridge that walks it toward the
@@ -476,7 +484,15 @@ fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_
 /// proves the sim→render pipeline (crab, extraction marker, another player from the
 /// local eyes) without 2-peer play. Solo only (no transport): one peer's input
 /// completes every tick, which is all a single-frame render needs.
-pub fn build_screenshot_app(ls: Lockstep, cfg: ScreenshotConfig) -> App {
+///
+/// `external_crab` arms the real rapier-NN crab + skin via the SAME seed/stack/gate the windowed
+/// solo client uses, so the shot composes the actual armed scene a player sees — the trained,
+/// reposed-to-giant crab ("Sally"), not the static integer silhouette. `None` keeps the silhouette.
+pub fn build_screenshot_app(
+    mut ls: Lockstep,
+    cfg: ScreenshotConfig,
+    external_crab: Option<std::path::PathBuf>,
+) -> App {
     let mut app = App::new();
     // No window, GPU ON (render-to-image). A 60 Hz schedule runner with a real-time
     // step so the capture counter (render frames) also paces the sim and the GPU
@@ -501,6 +517,11 @@ pub fn build_screenshot_app(ls: Lockstep, cfg: ScreenshotConfig) -> App {
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_secs_f64(TICK_DT),
     ));
+    // Arm the real NN crab BEFORE `ls` moves into core (seeds the crab's spawn pose); the stack +
+    // gate go on after, mirroring the windowed `Boot::Round` solo path. One `Option<(dir, spawn)>`
+    // so the checkpoint and its seeded spawn can't disagree (both present or both absent).
+    let armed_crab: Option<(std::path::PathBuf, Pos)> =
+        external_crab.map(|dir| (dir, seed_external_crab_solo(&mut ls)));
     // Stand-in input for the absent peers so the sim advances and the scene composes:
     // walk them straight forward toward the extraction (+Z). The crab chases them up
     // the +Z lane and out of the stationary local camera's forward view, which keeps
@@ -512,6 +533,14 @@ pub fn build_screenshot_app(ls: Lockstep, cfg: ScreenshotConfig) -> App {
         ls,
         InputSource::Scripted(Input::new(0.0, 1.0, 0.0, 0)),
     );
+    // Known-armed at build (when a checkpoint was given): add the rapier-NN stack AND arm the gate
+    // now — the SAME path the windowed `Boot::Round` solo client uses — so `spawn_world` hides the
+    // static silhouette and the reposed-to-giant rig becomes the visible crab.
+    let armed = armed_crab.is_some();
+    if let Some((dir, spawn)) = armed_crab {
+        add_external_nn_crab(&mut app, dir, spawn);
+        app.insert_resource(crate::net::external_crab::ExternalCrabArmed);
+    }
     // Controls UI on the screenshot path too, so an evidence frame can prove the overlay +
     // hint draw — the shared env override forces it open headless (see
     // [`crate::controls::reveal_overrides_from_env`]).
@@ -542,6 +571,13 @@ pub fn build_screenshot_app(ls: Lockstep, cfg: ScreenshotConfig) -> App {
             )
                 .chain(),
         );
+    // When the NN crab is armed, the same single-threaded ECS pin the windowed solo client applies
+    // (see `build_windowed_app`): rapier's multibody solver is nondeterministic — and can hit a NaN
+    // that panics `step_simulation` — on the multi-threaded executor. Must run AFTER every system
+    // is wired. Unnecessary for the silhouette shot (no physics), so gated on `armed`.
+    if armed {
+        crate::bot::test_util::force_serial_schedules(&mut app);
+    }
     app
 }
 
@@ -1499,7 +1535,6 @@ fn spawn_world(
     // is the tell — and the rig shows instead. (We still spawn it so `apply_transforms`'s crab query is
     // satisfied either way; it just stays invisible.)
     let crab_hidden = external_crab_armed.is_some();
-    let crab_h = PLAYER_HEIGHT * CRAB_SCALE as f32;
     let crab_root = commands
         .spawn((
             Transform::from_translation(world(state.ls.sim().crab().pos(), 0.0)),
@@ -1514,7 +1549,26 @@ fn spawn_world(
     // Body: Sally's ACTUAL physics colliders (carapace box + every leg/eye/claw capsule
     // from the render recipe), not a featureless placeholder box (#108). The shapes ride
     // `crab_root`, which `apply_transforms` re-poses to the sim crab every frame.
-    spawn_crab_silhouette(&mut commands, &mut meshes, &mut materials, crab_root, crab_h);
+    spawn_crab_silhouette(&mut commands, &mut meshes, &mut materials, crab_root);
+}
+
+/// The giant crab's target render height: a player's height blown up by [`CRAB_SCALE`]. The
+/// world (spawn distance, camera framing, the extraction pillar) is dimensioned for a crab this
+/// tall, so BOTH crab renders — the integer silhouette and the armed NN rig — fit to it.
+pub(crate) const CRAB_RENDER_HEIGHT: f32 = PLAYER_HEIGHT * CRAB_SCALE as f32;
+
+/// The uniform scale that fits the rest-pose crab rig to [`CRAB_RENDER_HEIGHT`]: the target
+/// height over the rig's natural standing height
+/// ([`crate::bot::rig::CrabSilhouette::natural_height`]). The ONE scale source for the giant —
+/// the static integer silhouette ([`spawn_crab_silhouette`]) and the armed NN rig's skin
+/// ([`crate::bot::skin::CrabSkinRepose`]) both use it, so they render the same-sized crab by
+/// construction rather than two hand-tuned factors that could drift. The
+/// body's natural height is ~0.6 m (NOT a player's `PLAYER_HEIGHT`), so a bare `CRAB_SCALE`
+/// multiply would render the NN crab several× too small. `None` for a degenerate recipe (zero
+/// natural height) — callers fall back to the plain box.
+pub(crate) fn crab_render_scale() -> Option<f32> {
+    let h = crate::bot::rig::recipe_silhouette(&crate::bot::body::render_recipe()).natural_height();
+    (h > 1e-4).then(|| CRAB_RENDER_HEIGHT / h)
 }
 
 /// Draw the giant crab as its REAL physics colliders — the carapace cuboid and every link
@@ -1531,12 +1585,11 @@ fn spawn_crab_silhouette(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     crab_root: Entity,
-    crab_h: f32,
 ) {
     use crate::bot::rig::RestShape;
 
     let sil = crate::bot::rig::recipe_silhouette(&crate::bot::body::render_recipe());
-    let shapes = || sil.limbs.iter().chain(std::iter::once(&sil.carapace));
+    let shapes = || sil.shapes();
 
     // Orient the rig claws-forward (+Z). The recipe's forward axis isn't necessarily +Z,
     // so DERIVE it from the geometry — carapace-center → limb centroid, flattened to the
@@ -1590,13 +1643,12 @@ fn spawn_crab_silhouette(
             }
         }
     }
-    if !lo.is_finite() || !hi.is_finite() || (hi.y - lo.y) < 1e-4 {
-        // Empty/degenerate recipe: never leave the crab invisible — keep a plain box.
-        spawn_fallback_crab_box(commands, meshes, materials, crab_root, crab_h);
+    // The SAME target-height fit the armed NN rig uses (one source, no drift). A degenerate
+    // recipe (zero natural height) yields `None` — keep a plain box so the crab is never invisible.
+    let Some(scale) = crab_render_scale() else {
+        spawn_fallback_crab_box(commands, meshes, materials, crab_root, CRAB_RENDER_HEIGHT);
         return;
-    }
-
-    let scale = crab_h / (hi.y - lo.y);
+    };
     // Recenter horizontally on the root and stand the base on the ground (y=0).
     let origin = Vec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5);
     let map = |p: Vec3| (r * p - origin) * scale;
@@ -1990,6 +2042,10 @@ pub struct ScreenshotConfig {
     /// Screenshot-only camera pan/tilt for framing (see [`ScreenshotConfig::with_cam_offset`]).
     cam_yaw_deg: f32,
     cam_pitch_deg: f32,
+    /// Screenshot-only vertical field of view (degrees). `None` keeps Bevy's default FOV;
+    /// a wider value frames the whole towering crab in one first-person frame even though it
+    /// stands only a body-length away (the giant fills the default FOV otherwise).
+    cam_fov_deg: Option<f32>,
 }
 
 impl ScreenshotConfig {
@@ -2001,7 +2057,15 @@ impl ScreenshotConfig {
             height,
             cam_yaw_deg: 0.0,
             cam_pitch_deg: 0.0,
+            cam_fov_deg: None,
         }
+    }
+
+    /// Override the screenshot camera's vertical FOV (degrees) — widen it to fit the whole
+    /// giant crab in one frame. `None`/unset keeps Bevy's default.
+    pub fn with_fov(mut self, fov_deg: Option<f32>) -> Self {
+        self.cam_fov_deg = fov_deg;
+        self
     }
 
     /// Pan/tilt the screenshot camera by these degrees, applied at the local player's
@@ -2026,7 +2090,7 @@ fn spawn_offscreen_camera(
     cfg: Res<ScreenshotConfig>,
 ) {
     let handle = images.add(screenshot::new_render_target(cfg.width, cfg.height));
-    commands.spawn((
+    let mut cam = commands.spawn((
         Camera3d::default(),
         Camera {
             clear_color: ClearColorConfig::Custom(Color::srgb(0.5, 0.7, 0.92)),
@@ -2045,6 +2109,13 @@ fn spawn_offscreen_camera(
         // camera is the implicit UI target).
         bevy::ui::IsDefaultUiCamera,
     ));
+    // Optional wider FOV so the towering giant crab fits in one evidence frame.
+    if let Some(fov_deg) = cfg.cam_fov_deg {
+        cam.insert(Projection::Perspective(PerspectiveProjection {
+            fov: fov_deg.to_radians(),
+            ..default()
+        }));
+    }
     commands.insert_resource(ShotTarget(handle));
 }
 
