@@ -133,6 +133,10 @@ pub struct FromPeer {
 /// never see us. On a normal LAN this resolves in well under a second.
 const ADDR_WAIT: Duration = Duration::from_secs(10);
 
+/// Pause between the direct address arriving and the re-publish, so the freshly-spawned
+/// mDNS service loop is already subscribed and observes it (see [`publish_lan_addr`]).
+const PUBLISH_SETTLE: Duration = Duration::from_millis(300);
+
 /// Build a LAN-only iroh endpoint: relay disabled and mDNS the only address lookup,
 /// so discovery and connectivity stay on the local network with no internet
 /// dependency (couch co-op is the target — the boys + dad on one LAN). Internet
@@ -156,22 +160,28 @@ pub async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
         .context("endpoint has no address lookup registry")?
         .add(mdns.clone());
 
-    // Wait until the endpoint has a direct address to advertise. NOT `online()` —
-    // that blocks on a relay connection, which never comes with the relay disabled.
-    wait_for_direct_addr(&endpoint).await?;
+    // Wait for a direct address, then win the publish race (NOT `online()` — that blocks
+    // on a relay connection, which never comes with the relay disabled).
+    publish_lan_addr(&endpoint, SERVICE_NAME).await?;
+    Ok((endpoint, mdns))
+}
 
-    // Force one more address publish AFTER the mDNS service loop is running. iroh's
-    // first publish can land before that loop starts awaiting changes, so it misses
-    // the addresses and swarm-discovery announces nothing ("no addresses") even
-    // though `direct_addrs` is populated. Setting user data re-runs the publish path;
-    // this publish the loop observes, so it announces our addresses. The value also
-    // scopes discovery to this game (peers ignore endpoints whose user data isn't
-    // ours). The short sleep ensures the freshly-spawned loop is already subscribed.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let ud = iroh::endpoint_info::UserData::try_from(SERVICE_NAME.to_string())
+/// The mDNS publish-race dance, shared by the game transport and the telemetry endpoints
+/// ([`crate::net::telemetry`]): wait for the endpoint to enumerate a direct address, then
+/// force one more publish by setting the discovery user data to `service_name`.
+///
+/// iroh's first publish can land before the mDNS service loop starts awaiting changes, so
+/// it misses the addresses and swarm-discovery announces nothing ("no addresses") even
+/// though `direct_addrs` is populated. Setting user data re-runs the publish path; this
+/// publish the loop observes, so it announces our addresses. The value also scopes
+/// discovery to `service_name`, so endpoints in a different namespace ignore us.
+pub(crate) async fn publish_lan_addr(endpoint: &Endpoint, service_name: &str) -> Result<()> {
+    wait_for_direct_addr(endpoint).await?;
+    tokio::time::sleep(PUBLISH_SETTLE).await;
+    let ud = iroh::endpoint_info::UserData::try_from(service_name.to_string())
         .context("building discovery user data")?;
     endpoint.set_user_data_for_address_lookup(Some(ud));
-    Ok((endpoint, mdns))
+    Ok(())
 }
 
 /// Block until the endpoint reports at least one direct IP address (or [`ADDR_WAIT`]

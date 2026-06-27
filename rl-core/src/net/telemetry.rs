@@ -517,11 +517,10 @@ fn hex8(id: &[u8; 32]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Attach a TELEMETRY-scoped mDNS address lookup to `endpoint` and force an address
-/// publish, so a bare-id dial (sender → collector) resolves on the LAN. Same dance as
-/// the game's [`crate::net::transport::bind_endpoint`] (wait for a direct address, then
-/// re-publish after the mDNS loop is live), factored so sender + collector share it.
-/// Uses [`TELEMETRY_SERVICE_NAME`] — a SEPARATE service from the game's — so these
-/// endpoints live in their own discovery namespace and never perturb game pairing.
+/// publish via the shared [`crate::net::transport::publish_lan_addr`], so a bare-id dial
+/// (sender → collector) resolves on the LAN. Uses [`TELEMETRY_SERVICE_NAME`] — a SEPARATE
+/// service from the game's — so these endpoints live in their own discovery namespace and
+/// never perturb game pairing. Factored so sender + collector share it.
 fn attach_lan_mdns(endpoint: &Endpoint) -> Result<()> {
     let mdns = MdnsAddressLookup::builder()
         .service_name(TELEMETRY_SERVICE_NAME)
@@ -531,40 +530,16 @@ fn attach_lan_mdns(endpoint: &Endpoint) -> Result<()> {
         .address_lookup()
         .context("endpoint has no address lookup registry")?
         .add(mdns);
-    // Mirror transport::bind_endpoint: wait for a direct address, then re-trigger the
-    // publish (and set the discovery user data) once the mDNS loop is subscribed, so
-    // peers actually see our addresses. Spawned because attach is sync; the endpoint
-    // owns the lookup so the publish lands before any dial completes in practice.
+    // Win the mDNS publish race (shared with the game transport — same first-publish vs.
+    // service-loop-startup work-around), scoped to the telemetry namespace. Spawned
+    // because attach is sync; the endpoint owns the lookup so the publish lands before any
+    // dial completes in practice.
     let ep = endpoint.clone();
     tokio::spawn(async move {
-        if let Err(e) = republish_addr(&ep).await {
+        if let Err(e) = crate::net::transport::publish_lan_addr(&ep, TELEMETRY_SERVICE_NAME).await {
             tracing::debug!("telemetry mDNS publish: {e:#}");
         }
     });
-    Ok(())
-}
-
-/// Wait for a direct address, then re-publish it via the user-data set (the same
-/// work-around [`crate::net::transport::bind_endpoint`] documents for the first publish
-/// racing the mDNS loop startup).
-async fn republish_addr(endpoint: &Endpoint) -> Result<()> {
-    use iroh::Watcher;
-    let mut addrs = endpoint.watch_addr();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if addrs.get().ip_addrs().next().is_some() {
-            break;
-        }
-        match tokio::time::timeout_at(deadline, addrs.updated()).await {
-            Ok(Ok(_)) => continue,
-            Ok(Err(_)) => anyhow::bail!("endpoint address watcher closed"),
-            Err(_) => anyhow::bail!("no local IP address after 10s"),
-        }
-    }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let ud = iroh::endpoint_info::UserData::try_from(TELEMETRY_SERVICE_NAME.to_string())
-        .context("building discovery user data")?;
-    endpoint.set_user_data_for_address_lookup(Some(ud));
     Ok(())
 }
 
