@@ -334,6 +334,33 @@ impl Plane {
     pub fn pitch(self) -> i32 {
         self.pitch
     }
+
+    /// Spawn a plane airborne over a ground point, facing `heading` (turn units), at rest
+    /// (zero velocity, level pitch). The ONE spawn definition, shared by the deterministic
+    /// pilot spawn ([`Sim::spawn_state`]) and the windowed client's single-player
+    /// enter-vehicle toggle ([`crate::net::render`]) — so a plane boarded mid-round and a
+    /// plane spawned at round start start in the identical state, no second literal to drift.
+    pub fn spawn(ground: Pos, heading: i32) -> Self {
+        Self {
+            pos: Pos3 {
+                x: ground.x,
+                y: PLANE_SPAWN_ALTITUDE,
+                z: ground.z,
+            },
+            vel: Pos3::default(),
+            heading,
+            pitch: 0,
+        }
+    }
+
+    /// Advance this plane one tick under pilot `input` (crude arcade flight). The ONE flight
+    /// integrator, shared by the deterministic sim step (pilots in [`Sim::step`]) and the
+    /// windowed client's single-player vehicle ([`crate::net::render`]) so there is a single
+    /// physics formula, no copy to drift. See [`step_plane`] for the control map and the
+    /// integer-only determinism notes.
+    pub fn step(&mut self, input: Input) {
+        step_plane(self, input);
+    }
 }
 
 /// The fixed pickup point a player reaches to clear the round. A constant in the
@@ -579,19 +606,7 @@ impl Sim {
             // ground XZ slot but starts airborne over it (a plane, not feet).
             let x = (i as i64 - n / 2) * 2 * UNIT;
             if cfg.pilots.contains(&id) {
-                plane_map.insert(
-                    id,
-                    Plane {
-                        pos: Pos3 {
-                            x,
-                            y: PLANE_SPAWN_ALTITUDE,
-                            z: 0,
-                        },
-                        vel: Pos3::default(),
-                        heading: 0,
-                        pitch: 0,
-                    },
-                );
+                plane_map.insert(id, Plane::spawn(Pos { x, z: 0 }, 0));
             } else {
                 map.insert(
                     id,

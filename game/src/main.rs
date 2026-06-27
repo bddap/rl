@@ -180,6 +180,11 @@ struct FpScreenshotArgs {
     /// Tilt the screenshot camera this many degrees (+ up) from the first-person aim.
     #[arg(long, default_value_t = 0.0)]
     cam_pitch: f32,
+    /// Make the NON-local players pilots (flying planes) so the captured frame shows a
+    /// plane's gray box in the air — the evidence the plane renders. Needs `--players >= 2`
+    /// (a lone pilot would show empty sky). Off ⇒ the unchanged on-foot shot.
+    #[arg(long, default_value_t = false)]
+    plane: bool,
 }
 
 #[derive(Parser)]
@@ -531,14 +536,15 @@ fn nn_crab_checkpoint_dir(flag: Option<PathBuf>) -> Option<PathBuf> {
 fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
     let me = PlayerId(0);
     let players: Vec<PlayerId> = (0..args.players.max(1)).map(PlayerId).collect();
-    // RL_VEHICLE=plane: make the NON-local players pilots and keep the local (player 0)
-    // a ground observer, so the captured FP frame clearly shows a remote plane's gray box
-    // flying — the evidence the plane renders. Needs `--players >= 2`: with one player
-    // there's no remote plane to frame, so the shot stays on foot (a lone pilot would show
-    // empty sky — worthless as evidence). Unset ⇒ the unchanged foot shot.
-    let pilots: Vec<PlayerId> = match std::env::var("RL_VEHICLE").as_deref() {
-        Ok("plane") if players.len() > 1 => players[1..].to_vec(),
-        _ => Vec::new(),
+    // `--plane`: make the NON-local players pilots and keep the local (player 0) a ground
+    // observer, so the captured FP frame clearly shows a remote plane's gray box flying — the
+    // evidence the plane renders. Needs `--players >= 2`: with one player there's no remote
+    // plane to frame, so the shot stays on foot (a lone pilot would show empty sky —
+    // worthless as evidence). Off ⇒ the unchanged foot shot.
+    let pilots: Vec<PlayerId> = if args.plane && players.len() > 1 {
+        players[1..].to_vec()
+    } else {
+        Vec::new()
     };
     let ls = Lockstep::new_with_pilots(MATCH_SEED, &players, me, &pilots);
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)

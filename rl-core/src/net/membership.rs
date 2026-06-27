@@ -261,11 +261,13 @@ pub struct Membership {
     /// ([`Membership::with_asset_digest`] sets it), so a caller that never sets it behaves
     /// exactly as pre-rl#100 — `assets_synced` is then always false. Sibling of `local_digest`.
     local_asset_digest: u64,
-    /// Whether WE intend to pilot a plane (the local `RL_VEHICLE=plane` flag). Advertised as
-    /// our own entry in every [`Membership::beat`]'s `pilots` list and folded into our
-    /// agreement token, so peers converge on a shared pilot roster before freezing. `false` by
-    /// default ([`Membership::piloting`] sets it), so a caller that never sets it forms the
-    /// unchanged foot-only match (empty pilot set ⇒ byte-identical sim).
+    /// Whether WE intend to pilot a plane at formation. Advertised as our own entry in every
+    /// [`Membership::beat`]'s `pilots` list and folded into our agreement token, so peers
+    /// converge on a shared pilot roster before freezing. `false` by default
+    /// ([`Membership::piloting`] sets it); today every caller passes `false` (a single player
+    /// boards in-game via the client toggle, not at spawn), so the pilot set freezes empty —
+    /// the unchanged foot-only match (byte-identical sim). The negotiation is the seam for
+    /// networked vehicles (rl#43).
     local_pilot: bool,
 }
 
@@ -386,11 +388,12 @@ impl Membership {
         }
     }
 
-    /// Declare whether WE pilot a plane (the local `RL_VEHICLE=plane` intent), advertised in
-    /// every [`Membership::beat`] and folded into our agreement token so peers freeze ONE
-    /// shared pilot roster. Builder form (chains off [`Membership::new`] /
-    /// [`Membership::host_triggered`]) because the intent is a launch-time constant. `false`
-    /// (the default) forms the unchanged foot-only match.
+    /// Declare whether WE pilot a plane at formation, advertised in every [`Membership::beat`]
+    /// and folded into our agreement token so peers freeze ONE shared pilot roster. Builder
+    /// form (chains off [`Membership::new`] / [`Membership::host_triggered`]) because the
+    /// intent is a launch-time constant. `false` (the default, and what every caller passes
+    /// today) forms the unchanged foot-only match; the negotiation is the seam for networked
+    /// vehicles (rl#43).
     pub fn piloting(mut self, pilot: bool) -> Self {
         self.local_pilot = pilot;
         self
@@ -1206,7 +1209,7 @@ mod tests {
         let (rb, pb) = agreed_b.expect("B must agree");
         assert_eq!(ra, rb, "both peers must freeze the identical roster");
         assert_eq!(pa, pb, "both peers MUST freeze the identical pilot set");
-        assert_eq!(pa, vec![ida], "only A (which declared RL_VEHICLE=plane) flies");
+        assert_eq!(pa, vec![ida], "only A (which declared piloting=true) flies");
     }
 
     #[test]
