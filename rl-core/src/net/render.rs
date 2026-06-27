@@ -38,7 +38,7 @@ use bevy::camera::RenderTarget;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowMode};
+use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindow, WindowMode};
 
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
@@ -241,7 +241,11 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "Giant Crab Rescue".into(),
-            mode: WindowMode::Windowed,
+            // Fullscreen is the single source of truth for every GCR launch target. The Deck
+            // shows fullscreen only because gamescope forces it; on a plain desktop/TV (bothouse)
+            // a Windowed app stayed windowed. BorderlessFullscreen makes the app itself own the
+            // policy, so bothouse matches the Deck with no separate per-host window-config path.
+            mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
             ..default()
         }),
         ..default()
