@@ -500,7 +500,7 @@ fn run_play(args: PlayArgs) -> Result<()> {
     // decided in `build_windowed_app`: a SOLO round always arms the real float rapier-NN crab,
     // and a NETWORKED round arms it once peers agree on weights+assets (the digest handshake,
     // `rl_core::net::may_arm_external_crab`) — otherwise the networked round keeps the integer
-    // pursuer. The single-thread pin above (`pin_windowed_pools`) plus the schedule pin inside
+    // pursuer. The single-thread pin above (`pin_process_pools`) plus the schedule pin inside
     // `build_windowed_app` are what keep that armed float crab cross-peer deterministic.
     // Skip a dir with no `brain.bin` so a bad path degrades to the integer crab rather
     // than every-frame load failures.

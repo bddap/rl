@@ -401,7 +401,7 @@ pub fn build_windowed_app(boot: Boot, external_crab: Option<std::path::PathBuf>)
     // the same pin the trainer and #82 probe apply). Must run AFTER all systems are wired —
     // every plugin/`add_systems` above is in, the schedules now exist. This touches only the
     // main world's schedules (the sim); bevy's render sub-app keeps its own executor, so
-    // rendering isn't forced serial here — only the global pool pin (`pin_windowed_pools`,
+    // rendering isn't forced serial here — only the global pool pin (`pin_process_pools`,
     // called at process start) caps render parallelism, the unavoidable cost of bevy sharing
     // three global pools across sim and render. Correctness > a few dropped frames.
     crate::bot::test_util::force_serial_schedules(&mut app);
