@@ -67,14 +67,6 @@ const TARGET_LEAD_M: f32 = 1.6;
 /// reach-toward-and-walk target, not an overhead one.
 const TARGET_LEAD_Y: f32 = 0.3;
 
-/// Default game-world metres the crab advances per metre its carapace actually walks in its
-/// arena. 1.0 = the game crab moves exactly as far as the body does. The current policy
-/// locomotes slowly, so `RL_CRAB_WORLD_GAIN` (resolved once onto the bridge) lets the owner
-/// scale the showcase crab's map speed up WITHOUT the policy walking any harder — the
-/// giant crab already reads as huge via [`crate::net::sim::CRAB_SCALE`] rendering, so a >1
-/// gain just covers the big map faster. A real FEEL KNOB, env-tunable like `RL_CRAB_LEAD`.
-const WORLD_GAIN_DEFAULT: f32 = 1.0;
-
 /// Resource: the live bridge state between the rapier NN crab and the integer game sim.
 /// Non-trivial state (a float world position + the last carapace sample) that must
 /// persist across ticks, so it can't live on the `Copy` integer `Sim`.
@@ -107,9 +99,6 @@ pub struct ExternalCrabBridge {
     /// build (default [`TARGET_LEAD_M`], `RL_CRAB_LEAD` override) rather than re-reading the
     /// env var every tick.
     lead_m: f32,
-    /// Game-world metres advanced per metre walked (see [`WORLD_GAIN_DEFAULT`]) — resolved
-    /// once at plugin build (`RL_CRAB_WORLD_GAIN` override).
-    world_gain: f32,
     /// This tick's peer-comparable digest of the crab's full rapier physics state XORed with
     /// the policy-weights digest — recomputed each step by [`hash_crab_physics`] and pushed
     /// into the sim by [`sync_external_crab`], so the lockstep desync check covers the
@@ -141,14 +130,12 @@ struct CrabPlacement {
 
 impl ExternalCrabBridge {
     /// Seed the bridge at the sim's crab spawn (so the NN crab begins where the
-    /// round placed the giant crab, MIN_CRAB_SPAWN_DISTANCE from the players). `lead_m` /
-    /// `world_gain` are the per-tick walk-target lead and the world-speed gain, resolved
-    /// once by the plugin.
-    fn new(spawn: Pos, lead_m: f32, world_gain: f32) -> Self {
+    /// round placed the giant crab, MIN_CRAB_SPAWN_DISTANCE from the players). `lead_m` is the
+    /// per-tick walk-target lead, resolved once by the plugin.
+    fn new(spawn: Pos, lead_m: f32) -> Self {
         Self {
             world_pos_m: pos_to_m(spawn),
             lead_m,
-            world_gain,
             last_carapace_m: None,
             yaw_turns: 0,
             hunt_target_m: None,
@@ -212,16 +199,14 @@ impl ExternalCrabBridge {
         self.hunt_target_m = prey.map(pos_to_m);
     }
 
-    /// Pin the feel knobs (walk-target lead, world-speed gain) to their canonical defaults,
-    /// dropping any `RL_CRAB_LEAD` / `RL_CRAB_WORLD_GAIN` env override. MUST be called when
-    /// arming on a NETWORKED round: those knobs are a per-PROCESS solo-tuning convenience, and
-    /// they both feed the HASHED crab pose (`world_gain` scales the per-tick displacement;
-    /// `lead_m` steers the policy's trajectory), so a peer that set them differently would walk
-    /// the crab to a different pose and desync. The weights handshake covers only the brain
-    /// bytes, not these — so networked play uses the canonical feel on every peer.
-    pub fn pin_default_knobs(&mut self) {
+    /// Pin the walk-target lead to its canonical default, dropping any `RL_CRAB_LEAD` env
+    /// override. MUST be called when arming on a NETWORKED round: `lead_m` is a per-PROCESS
+    /// solo-tuning convenience that feeds the HASHED crab pose (it steers the policy's
+    /// trajectory), so a peer that set it differently would walk the crab to a different pose
+    /// and desync. The weights handshake covers only the brain bytes, not this — so networked
+    /// play uses the canonical feel on every peer.
+    pub fn pin_default_lead(&mut self) {
         self.lead_m = TARGET_LEAD_M;
-        self.world_gain = WORLD_GAIN_DEFAULT;
     }
 
     /// Re-seed the bridge to the round's spawn after a deterministic sim RESTART
@@ -340,7 +325,7 @@ impl Plugin for ExternalCrabPlugin {
             );
         }
         app.insert_non_send_resource(policy);
-        // Resolve the env-tunable knobs ONCE here (override → default), not per tick.
+        // Resolve the env-tunable walk-target lead ONCE here (override → default), not per tick.
         let env_f32 = |key: &str, default: f32| {
             std::env::var(key)
                 .ok()
@@ -349,8 +334,7 @@ impl Plugin for ExternalCrabPlugin {
                 .unwrap_or(default)
         };
         let lead_m = env_f32("RL_CRAB_LEAD", TARGET_LEAD_M);
-        let world_gain = env_f32("RL_CRAB_WORLD_GAIN", WORLD_GAIN_DEFAULT);
-        app.insert_resource(ExternalCrabBridge::new(self.crab_spawn, lead_m, world_gain));
+        app.insert_resource(ExternalCrabBridge::new(self.crab_spawn, lead_m));
 
         // Spawn the crab the first frame the gate is active (rl#58). On the scripted solo
         // path the gate is true from build, so this spawns on frame 1 exactly as before; on
@@ -516,9 +500,9 @@ fn run_crab_policy(
 }
 
 /// After a physics step, fold the carapace's horizontal walk into the game-world crab
-/// position (the displacement since last step × the world gain) and the walk heading into
-/// the yaw, storing both on the bridge. The render-loop owner ([`crate::net::render`]) then
-/// pushes them into the sim each game tick via [`sync_external_crab`].
+/// position (the displacement since last step, 1:1) and the walk heading into the yaw,
+/// storing both on the bridge. The render-loop owner ([`crate::net::render`]) then pushes
+/// them into the sim each game tick via [`sync_external_crab`].
 fn integrate_crab(
     mut bridge: ResMut<ExternalCrabBridge>,
     mut rescued: MessageReader<crate::bot::CrabRescued>,
@@ -552,8 +536,7 @@ fn integrate_crab(
     if bridge.settle == 0
         && let Some(prev) = bridge.last_carapace_m
     {
-        let step = (here - prev) * bridge.world_gain;
-        bridge.world_pos_m += step;
+        bridge.world_pos_m += here - prev;
     }
     bridge.last_carapace_m = Some(here);
 

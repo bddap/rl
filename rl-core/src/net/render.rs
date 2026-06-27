@@ -351,12 +351,12 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
             // one.
             add_external_nn_crab(&mut app, external_crab, spawn);
             app.insert_resource(crate::net::external_crab::ExternalCrabArmed);
-            // Networked: pin the feel knobs to defaults so a per-peer env override can't
-            // walk the crab to a different (hashed) pose and desync — solo keeps its tuning.
+            // Networked: pin the walk-target lead to its default so a per-peer env override
+            // can't walk the crab to a different (hashed) pose and desync — solo keeps its tuning.
             if networked {
                 app.world_mut()
                     .resource_mut::<crate::net::external_crab::ExternalCrabBridge>()
-                    .pin_default_knobs();
+                    .pin_default_lead();
             }
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
@@ -672,12 +672,12 @@ fn ensure_round_installed(world: &mut World) {
         .lockstep
         .set_external_crab_pose(crab.pos(), crab.yaw(), 0);
     world.insert_resource(crate::net::external_crab::ExternalCrabArmed);
-    // Networked: pin the feel knobs to defaults so a per-peer env override can't walk the
-    // crab to a different (hashed) pose and desync — solo keeps its tuning.
+    // Networked: pin the walk-target lead to its default so a per-peer env override can't walk
+    // the crab to a different (hashed) pose and desync — solo keeps its tuning.
     if networked {
         world
             .resource_mut::<crate::net::external_crab::ExternalCrabBridge>()
-            .pin_default_knobs();
+            .pin_default_lead();
     }
     let source = match ready.net {
         Some(n) => InputSource::Networked(Box::new(n)),
