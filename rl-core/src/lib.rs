@@ -27,6 +27,10 @@ pub mod build_info;
 /// Reusable controls + hold-to-reveal-overlay framework, generic over an app's action set
 /// (GCR and the demo each bring their own [`controls::ControlScheme`]).
 pub mod controls;
+/// The single FNV-1a/64 implementation every determinism guard folds bytes with — one offset,
+/// one prime, one loop, so cross-peer digests can't drift apart. Crate-internal: the hash is a
+/// frozen wire format (changing it desyncs peers), so it is deliberately not a public API.
+pub(crate) mod fnv;
 pub mod net;
 pub mod physics;
 pub mod training;

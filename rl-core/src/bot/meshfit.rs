@@ -104,8 +104,8 @@ pub fn model_path() -> Option<std::path::PathBuf> {
 /// the bytes captures exactly that input — conservatively (any byte change ⇒ a mismatch ⇒ the
 /// round refuses to arm the NN crab, rl#114) and WITHOUT re-introducing the float-reproducibility
 /// question that hashing the skinned vertex cloud or the fitted f32 capsule would. Uses the
-/// shared [`super::physics_digest::fnv1a`] — the same build-stable FNV-1a/64 the other GCR
-/// digests use, so two same-binary peers with byte-identical assets agree.
+/// shared [`crate::fnv::fnv1a`] — the same build-stable FNV-1a/64 the other GCR digests use,
+/// so two same-binary peers with byte-identical assets agree.
 pub fn crab_asset_digest() -> u64 {
     let Some(path) = model_path() else {
         return 0; // no model resolves → "no collider asset", never counts as synced
@@ -113,7 +113,7 @@ pub fn crab_asset_digest() -> u64 {
     let Ok(bytes) = std::fs::read(&path) else {
         return 0; // unreadable → treat as no asset (a `0` digest never counts as synced → refuse)
     };
-    super::physics_digest::fnv1a(&bytes)
+    crate::fnv::fnv1a(&bytes)
 }
 
 /// Pure resolver, factored out so the path logic is testable without touching
