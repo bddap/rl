@@ -2852,6 +2852,12 @@ mod tests {
             .init_non_send_resource::<PendingRound>()
             .add_systems(OnEnter(AppPhase::Playing), ensure_round_installed);
 
+        // The menu app always installs the NN-crab stack at build (rl#114: the checkpoint is
+        // required), and `ensure_round_installed` asserts its presence before arming. Mirror that
+        // here so the handoff exercises the real menu path rather than tripping the build-wiring
+        // assert.
+        app.world_mut().insert_resource(ExternalCrabStackInstalled);
+
         // Park a solo round (the same one the Solo button / Alone fallback produce) and ask
         // to enter Playing, exactly as the menu does on a choice.
         let seed = 0x1234_5678;
