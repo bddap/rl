@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use iroh::EndpointId;
 use net::lockstep::{INPUT_DELAY, Lockstep};
@@ -72,6 +72,14 @@ enum Command {
     /// crab. Writes each peer's `<tick> <hash>` log (`--hash-log-a` / `--hash-log-b`) so they
     /// can be `diff`ed, and exits nonzero on any divergence (so it doubles as a CI gate).
     NnCrabXpeer(NnCrabXpeerArgs),
+    /// Rig-compatibility gate for the release/deploy pipeline: load a checkpoint's
+    /// `brain.bin`, read its `(obs, action)` dims, and compare them to THIS binary's
+    /// compiled crab rig. Exits 0 only on an exact match; nonzero (with an actionable
+    /// message) if the brain is missing/unreadable or its dims differ. A mismatched
+    /// checkpoint loads "fine" at runtime but silently degrades the NN crab to its rest
+    /// pose, so the release builder runs this against the checkpoint it's about to bundle
+    /// and refuses to publish on a nonzero exit — the mismatch is loud, not silent.
+    CheckpointCheck(CheckpointCheckArgs),
 }
 
 #[derive(Parser)]
@@ -255,6 +263,14 @@ struct NnCrabXpeerArgs {
     hash_log_b: PathBuf,
 }
 
+#[derive(Parser)]
+struct CheckpointCheckArgs {
+    /// Checkpoint dir holding the `brain.bin` to rig-check against this binary. Required —
+    /// the gate names exactly the checkpoint it's about to ship, no implicit default.
+    #[arg(long, value_name = "DIR")]
+    checkpoint: PathBuf,
+}
+
 // Plain `main` (not `#[tokio::main]`): the windowed/screenshot client builds a Bevy
 // app that owns the main thread and, for networked play, spins up its OWN tokio
 // runtime inside `net_loop` — nesting that under an ambient `#[tokio::main]` runtime
@@ -280,6 +296,35 @@ fn main() -> Result<()> {
         }
         Command::NnCrabProbe(args) => run_nn_crab_probe(args),
         Command::NnCrabXpeer(args) => run_nn_crab_xpeer(args),
+        Command::CheckpointCheck(args) => run_checkpoint_check(args),
+    }
+}
+
+/// Rig-compatibility gate (see [`Command::CheckpointCheck`]): does the checkpoint at
+/// `--checkpoint` fit THIS binary's crab rig? crab-world owns the verdict
+/// ([`crab_world::play::checkpoint_fits_rig`]) and the rig spec
+/// ([`crab_world::play::rig_dims`]), so the binary answers for itself — no hand-kept number
+/// to drift; here we only turn the verdict into a message + exit code. Any non-`Ok` verdict
+/// is an error (→ nonzero exit), which the release builder treats as "do not publish this
+/// checkpoint".
+fn run_checkpoint_check(args: CheckpointCheckArgs) -> Result<()> {
+    use crab_world::play::RigFit;
+    let (rig_obs, rig_act) = crab_world::play::rig_dims();
+    let dir = args.checkpoint.display();
+    match crab_world::play::checkpoint_fits_rig(&args.checkpoint) {
+        RigFit::Ok => {
+            println!("checkpoint-check OK: {dir} matches the rig ({rig_obs} obs, {rig_act} act)");
+            Ok(())
+        }
+        RigFit::Missing => bail!(
+            "checkpoint-check: no readable brain.bin in {dir} (this binary's rig is {rig_obs} \
+             obs, {rig_act} act) — nothing to ship",
+        ),
+        RigFit::Mismatch { obs, action } => bail!(
+            "checkpoint-check MISMATCH: {dir} is {obs} obs, {action} act but this binary's rig \
+             is {rig_obs} obs, {rig_act} act — the NN crab would silently hold its rest pose. \
+             Retrain/redeploy on the current rig (or rebuild the binary to match the checkpoint).",
+        ),
     }
 }
 
