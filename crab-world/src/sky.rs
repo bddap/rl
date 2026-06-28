@@ -26,11 +26,14 @@ use bevy::render::render_resource::{
 /// background; the one-time generate is 6·1024² texels of integer hashing (~tens of ms).
 const FACE: usize = 1024;
 
-/// `Skybox.brightness` (cd/m²): the shader does `sample.rgb * brightness`. The cubemap
-/// already bakes final night colors in [0,1], so 1.0 reproduces them as-authored on the
-/// untonemapped screenshot cameras (the owner's evidence path) and reads as a dim night
-/// sky under the windowed client's tonemapper.
-const SKY_BRIGHTNESS: f32 = 1.0;
+/// `Skybox.brightness` (cd/m²). The skybox shader emits `sample.rgb * brightness *
+/// exposure`, where `exposure` is the camera's (here the default Blender EV100 9.7 ≈
+/// 1/998). The cubemap already bakes final night colors in [0,1], so we cancel the
+/// exposure with ~1000 to reproduce them as-authored on the untonemapped screenshot
+/// cameras (the owner's evidence path) — without it a brightness of 1.0 is crushed to
+/// black. The windowed client's tonemapper then maps those same [0,1] values to a dim
+/// night sky. (≈ 2^9.7·1.2; bevy's own environment-map examples use the same ~1000.)
+const SKY_BRIGHTNESS: f32 = 1000.0;
 
 /// Bevy plugin: generate the night-sky cubemap once at startup and attach a [`Skybox`]
 /// to every `Camera3d` that lacks one. Added by both surfaces' app builders; the
@@ -136,13 +139,15 @@ fn sky_color(dir: Vec3) -> [u8; 3] {
     [to_u8(c.x), to_u8(c.y), to_u8(c.z)]
 }
 
-/// Deep-blue→near-black vertical gradient: lightest near the horizon, darkest at the
+/// Deep-blue→dark-navy vertical gradient: lightest near the horizon, darkest at the
 /// zenith — the usual night look (airglow lifts the horizon a touch). Values are sRGB
-/// 0..1. Below the horizon stays at the horizon tone; it's hidden by the ground anyway.
+/// 0..1; the screenshot cameras are untonemapped so these bytes show as-is. Kept dark
+/// enough to read as night but blue enough not to be a black void. Below the horizon
+/// stays at the horizon tone; it's hidden by the ground anyway.
 fn base_gradient(dir: Vec3) -> Vec3 {
-    let horizon = Vec3::new(0.043, 0.063, 0.125); // ~(11,16,32)
-    let zenith = Vec3::new(0.012, 0.020, 0.055); //  ~(3,5,14)
-    let t = smoothstep(0.0, 0.85, dir.y.max(0.0));
+    let horizon = Vec3::new(0.078, 0.122, 0.235); // ~(20,31,60)
+    let zenith = Vec3::new(0.024, 0.039, 0.110); //  ~(6,10,28)
+    let t = smoothstep(0.0, 0.9, dir.y.max(0.0));
     horizon.lerp(zenith, t)
 }
 
@@ -154,13 +159,13 @@ fn milky_way(dir: Vec3) -> Vec3 {
     // Pole of the band plane; the band itself is where dir ⟂ pole (dir·pole ≈ 0).
     let pole = Vec3::new(0.30, 0.86, -0.41).normalize();
     let off = dir.dot(pole).abs();
-    let core = 1.0 - smoothstep(0.0, 0.42, off);
+    let core = 1.0 - smoothstep(0.0, 0.45, off);
     if core <= 0.0 {
         return Vec3::ZERO;
     }
-    let clouds = 0.45 + 0.55 * value_noise(dir * 7.0);
-    let tint = Vec3::new(0.10, 0.11, 0.16); // dusty blue-white
-    tint * (core * core * clouds * 0.7)
+    let clouds = 0.4 + 0.6 * value_noise(dir * 7.0);
+    let tint = Vec3::new(0.16, 0.17, 0.24); // dusty blue-white
+    tint * (core * core * clouds)
 }
 
 /// A star at `dir`, or zero. Direction space is partitioned into a cube lattice
@@ -170,8 +175,11 @@ fn milky_way(dir: Vec3) -> Vec3 {
 /// warm/cool tint are hashed per cell, with a few rare bright stars among many faint
 /// ones. sRGB additive on top of the gradient.
 fn star(dir: Vec3) -> Vec3 {
-    const STAR_GRID: f32 = 220.0;
-    const DENSITY: f32 = 0.16; // fraction of cells holding a star
+    // Coarse enough that a cell spans several texels: at 1024 px/face a cell is ~7 px,
+    // so a star's footprint lands on multiple pixels instead of vanishing sub-pixel (the
+    // bug a finer grid hid). ~12% of cells hold a star → a rich but not noisy field.
+    const STAR_GRID: f32 = 90.0;
+    const DENSITY: f32 = 0.12;
 
     let g = dir * STAR_GRID;
     let cell = g.floor();
@@ -179,19 +187,21 @@ fn star(dir: Vec3) -> Vec3 {
     if rand01(h) >= DENSITY {
         return Vec3::ZERO;
     }
-    // Star center safely inside the cell (0.3..0.7), so a tight footprint never clips.
+    // Star center kept inside the cell (0.34..0.66), so its footprint stays in the home
+    // cell and checking only that cell is exact.
     let center = Vec3::new(
-        0.3 + 0.4 * rand01(h ^ 0x9e37_79b9),
-        0.3 + 0.4 * rand01(h ^ 0x85eb_ca6b),
-        0.3 + 0.4 * rand01(h ^ 0xc2b2_ae35),
+        0.34 + 0.32 * rand01(h ^ 0x9e37_79b9),
+        0.34 + 0.32 * rand01(h ^ 0x85eb_ca6b),
+        0.34 + 0.32 * rand01(h ^ 0xc2b2_ae35),
     );
     let d = (g - cell) - center;
-    // Most stars small/faint; a rare few large and bright (the ^4 skews low).
+    // Most stars small/faint; a rare few large and bright (the ^3 skews low). `bright`
+    // can exceed 1 so the brightest stars clamp to a pure-white core.
     let r = rand01(h ^ 0x27d4_eb2f);
-    let bright = 0.35 + 0.65 * r * r * r * r;
-    let size = 0.05 + 0.07 * r;
+    let bright = 0.5 + 0.8 * r * r * r;
+    let size = 0.06 + 0.10 * r;
     let falloff = (-(d.length_squared()) / (size * size)).exp();
-    if falloff < 0.02 {
+    if falloff < 0.015 {
         return Vec3::ZERO;
     }
     // Slight tint: warm (orange-ish) ↔ cool (blue-white) by another hash.
@@ -274,8 +284,10 @@ mod tests {
     fn gradient_is_dark_and_top_heavy() {
         let zen = base_gradient(Vec3::Y);
         let hor = base_gradient(Vec3::X);
-        assert!(zen.max_element() < 0.1, "zenith too bright: {zen:?}");
-        assert!(hor.max_element() < 0.2, "horizon too bright: {hor:?}");
+        // Still firmly a night sky (the blue channel, the brightest, stays well below
+        // mid), but bright enough to read as deep blue rather than a black void.
+        assert!(zen.max_element() < 0.15, "zenith too bright: {zen:?}");
+        assert!(hor.max_element() < 0.3, "horizon too bright: {hor:?}");
         assert!(zen.length() < hor.length(), "zenith should be darker than horizon");
     }
 
