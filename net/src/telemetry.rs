@@ -190,6 +190,20 @@ impl TelemetryEvent {
         }
     }
 
+    /// Whether this event may be dropped under queue pressure. Only the high-frequency
+    /// SAMPLED variants ([`Tick`](TelemetryEvent::Tick)/[`Input`](TelemetryEvent::Input))
+    /// are sheddable — losing one is just coarser sampling. Everything else (faults, round
+    /// results, roster outcomes) is a CRITICAL one-shot signal that must never be silently
+    /// dropped; [`TelemetrySender::send`] routes those on the unbounded lane (rl#125).
+    fn is_sheddable(&self) -> bool {
+        // New variants default to critical (the never-dropped lane) — the safe side: an
+        // unclassified event grows memory loudly rather than vanishing silently.
+        matches!(
+            self,
+            TelemetryEvent::Tick { .. } | TelemetryEvent::Input { .. }
+        )
+    }
+
     /// One human-readable line for the collector feed (the per-event suffix after the
     /// source tag + timestamp). Dense and scannable — the operator reads dozens of
     /// these streaming by.
@@ -274,11 +288,22 @@ const MAX_FRAME_LEN: usize = 64 * 1024;
 const QUEUE_DEPTH: usize = 256;
 
 /// Handle the game holds to push telemetry. Cloneable and cheap; every method is
-/// non-blocking and infallible-by-design (a failure drops the event). Dropping all
-/// clones lets the background task finish and the telemetry endpoint close.
+/// non-blocking and never stalls the game. Dropping all clones lets the background task
+/// finish and the telemetry endpoint close.
+///
+/// Two priority lanes, so failure signals can't be lost behind chatter (rl#125):
+/// - `shed_tx` — the high-frequency SAMPLED events ([`Tick`](TelemetryEvent::Tick) /
+///   [`Input`](TelemetryEvent::Input)). Bounded; dropped under pressure is the
+///   documented thinning.
+/// - `crit_tx` — everything else (faults, round/roster outcomes). UNBOUNDED so a real
+///   failure signal is NEVER silently dropped under queue pressure. Normal volume is
+///   O(few) per round; the one way it grows is a sustained fault storm into a stalled
+///   collector (bounded by the tick rate, tiny events) — losing-telemetry-is-fine still
+///   holds, but never at the cost of a vanished fault, so unbounded is the right trade.
 #[derive(Clone)]
 pub struct TelemetrySender {
-    tx: mpsc::Sender<Envelope>,
+    shed_tx: mpsc::Sender<Envelope>,
+    crit_tx: mpsc::UnboundedSender<Envelope>,
     game_id: [u8; 32],
 }
 
@@ -297,24 +322,44 @@ impl TelemetrySender {
         let endpoint = bind_telemetry_endpoint()
             .await
             .context("binding telemetry endpoint")?;
-        let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
-        tokio::spawn(sender_task(endpoint, collector, rx));
-        Ok(Self { tx, game_id })
+        let (shed_tx, shed_rx) = mpsc::channel(QUEUE_DEPTH);
+        let (crit_tx, crit_rx) = mpsc::unbounded_channel();
+        tokio::spawn(sender_task(endpoint, collector, shed_rx, crit_rx));
+        Ok(Self {
+            shed_tx,
+            crit_tx,
+            game_id,
+        })
     }
 
     /// Queue one event for delivery, stamped with our game id + the current wall clock.
-    /// NON-BLOCKING and best-effort: if the queue is full (collector slow/down) the
-    /// event is silently DROPPED — telemetry must never stall the game. Safe to call
-    /// from the hot sim loop.
+    /// NON-BLOCKING and never stalls the game (safe from the hot sim loop), but priority
+    /// depends on the event:
+    /// - Sheddable ([`Tick`](TelemetryEvent::Tick)/[`Input`](TelemetryEvent::Input)) goes
+    ///   on the bounded lane; a full queue silently drops it — that IS the sampling.
+    /// - Critical (faults, round/roster outcomes) goes on the unbounded lane, so a real
+    ///   failure signal is never dropped under pressure. It can only fail to enqueue if the
+    ///   I/O task is already gone (all receivers dropped) — surfaced LOUDLY, never silent
+    ///   (rl#125: a vanished fault/round result with zero trace is exactly what this bans).
     pub fn send(&self, event: TelemetryEvent) {
         let env = Envelope {
             game_id: self.game_id,
             wall_ms: now_ms(),
             event,
         };
-        // try_send (never .await): a full queue or a closed receiver just drops the
-        // event. The whole side-channel is sacrificial relative to the game.
-        let _ = self.tx.try_send(env);
+        if env.event.is_sheddable() {
+            // try_send (never .await): a full bounded queue or a closed receiver just drops
+            // this sampled event — the side-channel is sacrificial relative to the game.
+            let _ = self.shed_tx.try_send(env);
+        } else if let Err(e) = self.crit_tx.send(env) {
+            // Unbounded send fails only when the I/O task has stopped (receiver dropped),
+            // so this is the telemetry stream having torn down, not back-pressure. Never
+            // let a critical event vanish silently.
+            tracing::error!(
+                "telemetry: critical event lost (I/O task gone): {:?}",
+                e.0.event
+            );
+        }
     }
 }
 
@@ -338,16 +383,21 @@ async fn bind_telemetry_endpoint() -> Result<Endpoint> {
 /// the queue, framing each [`Envelope`] onto the telemetry stream. Any send error tears
 /// down and stops — the game keeps running regardless; telemetry just goes quiet. The
 /// task ends when every [`TelemetrySender`] clone is dropped (the channel closes).
-async fn sender_task(endpoint: Endpoint, collector: EndpointId, mut rx: mpsc::Receiver<Envelope>) {
+async fn sender_task(
+    endpoint: Endpoint,
+    collector: EndpointId,
+    mut shed_rx: mpsc::Receiver<Envelope>,
+    mut crit_rx: mpsc::UnboundedReceiver<Envelope>,
+) {
     let conn = match dial_collector(&endpoint, collector).await {
         Ok(c) => c,
         Err(e) => {
-            // One line, then drain-and-drop so the game's try_send never blocks on a
-            // full queue waiting for a connection that isn't coming.
+            // One line, then drain-and-drop so the game's sends never block on a full
+            // queue waiting for a connection that isn't coming.
             tracing::warn!(
                 "telemetry: could not reach collector {collector}: {e:#} — running without telemetry"
             );
-            while rx.recv().await.is_some() {}
+            drain(&mut shed_rx, &mut crit_rx).await;
             return;
         }
     };
@@ -355,7 +405,7 @@ async fn sender_task(endpoint: Endpoint, collector: EndpointId, mut rx: mpsc::Re
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("telemetry: opening stream failed: {e:#}");
-            while rx.recv().await.is_some() {}
+            drain(&mut shed_rx, &mut crit_rx).await;
             return;
         }
     };
@@ -363,7 +413,16 @@ async fn sender_task(endpoint: Endpoint, collector: EndpointId, mut rx: mpsc::Re
         "telemetry: streaming to collector {}",
         collector.fmt_short()
     );
-    while let Some(env) = rx.recv().await {
+    loop {
+        // `biased`: always prefer the critical lane, so a fault/round result is written
+        // ahead of the sampled chatter rather than waiting behind it. Critical events are
+        // O(few) per round, so this can't starve the sampled lane.
+        let env = tokio::select! {
+            biased;
+            Some(env) = crit_rx.recv() => env,
+            Some(env) = shed_rx.recv() => env,
+            else => break, // both lanes closed (all senders dropped)
+        };
         if let Err(e) = write_frame(&mut send, &env).await {
             tracing::warn!("telemetry: send failed, stopping stream: {e:#}");
             break;
@@ -372,6 +431,21 @@ async fn sender_task(endpoint: Endpoint, collector: EndpointId, mut rx: mpsc::Re
     // Best-effort flush; ignore errors (we're shutting the side-channel down anyway).
     let _ = send.finish();
     endpoint.close().await;
+}
+
+/// Drain and drop both lanes until every sender is gone — used when the collector is
+/// unreachable, so the game's non-blocking sends never wedge on a full bounded queue.
+async fn drain(
+    shed_rx: &mut mpsc::Receiver<Envelope>,
+    crit_rx: &mut mpsc::UnboundedReceiver<Envelope>,
+) {
+    loop {
+        tokio::select! {
+            Some(_) = shed_rx.recv() => {}
+            Some(_) = crit_rx.recv() => {}
+            else => break,
+        }
+    }
 }
 
 /// Dial the collector on [`TELEMETRY_ALPN`], retrying briefly so a game that starts
@@ -628,4 +702,99 @@ fn now_ms() -> u64 {
 /// sorted); we only shorten.
 pub fn short_ids(ids: &[EndpointId]) -> Vec<String> {
     ids.iter().map(|id| id.fmt_short().to_string()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a sender wired to in-test receivers, bypassing the iroh endpoint that
+    /// [`TelemetrySender::connect`] would bind — the priority routing in `send` is what's
+    /// under test, not the transport.
+    fn test_sender() -> (
+        TelemetrySender,
+        mpsc::Receiver<Envelope>,
+        mpsc::UnboundedReceiver<Envelope>,
+    ) {
+        let (shed_tx, shed_rx) = mpsc::channel(QUEUE_DEPTH);
+        let (crit_tx, crit_rx) = mpsc::unbounded_channel();
+        (
+            TelemetrySender {
+                shed_tx,
+                crit_tx,
+                game_id: [0u8; 32],
+            },
+            shed_rx,
+            crit_rx,
+        )
+    }
+
+    fn a_tick(tick: u64) -> TelemetryEvent {
+        TelemetryEvent::Tick {
+            tick,
+            state_hash: 0,
+            desyncs: 0,
+            roster: 1,
+        }
+    }
+
+    /// rl#125: a Fault arriving while the sampled queue is saturated must still be
+    /// delivered — the whole point of the side-channel is to surface faults. The old
+    /// uniform `try_send` would have dropped it along with the ticks.
+    #[test]
+    fn critical_event_survives_sheddable_queue_pressure() {
+        let (sender, _shed_rx, mut crit_rx) = test_sender();
+        // Overfill the bounded sampled lane; these silently drop past QUEUE_DEPTH.
+        for tick in 0..(QUEUE_DEPTH as u64 + 64) {
+            sender.send(a_tick(tick));
+        }
+        // A fault under that exact pressure must still be queued on the critical lane.
+        sender.send(TelemetryEvent::Fault {
+            msg: "desync".into(),
+        });
+        match crit_rx.try_recv() {
+            Ok(env) => assert!(
+                matches!(env.event, TelemetryEvent::Fault { .. }),
+                "expected the Fault, got {:?}",
+                env.event
+            ),
+            other => panic!("critical Fault was dropped under queue pressure: {other:?}"),
+        }
+    }
+
+    /// The sheddable/critical split: only the sampled high-frequency variants may be
+    /// dropped; faults and outcomes never are.
+    #[test]
+    fn only_sampled_events_are_sheddable() {
+        assert!(a_tick(0).is_sheddable());
+        assert!(
+            TelemetryEvent::Input {
+                tick: 0,
+                strafe: 0,
+                forward: 0,
+                look: 0,
+                buttons: 0,
+            }
+            .is_sheddable()
+        );
+        for ev in [
+            TelemetryEvent::Fault { msg: "x".into() },
+            TelemetryEvent::RoundDecided {
+                outcome: Outcome::Extracted,
+                tick: 1,
+                state_hash: 0,
+            },
+            TelemetryEvent::RosterFailed {
+                reason: "timeout".into(),
+            },
+            TelemetryEvent::RosterForming { live: 1, expect: 2 },
+            TelemetryEvent::RosterAgreed {
+                members: vec![],
+                roster_hash: 0,
+                me: 0,
+            },
+        ] {
+            assert!(!ev.is_sheddable(), "{ev:?} must be critical (never dropped)");
+        }
+    }
 }
