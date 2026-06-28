@@ -88,7 +88,13 @@ pub fn pin_process_pools() {
     crab_world::bot::headless::pin_single_thread_pools();
 }
 
-pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> anyhow::Result<App> {
+/// `wire` is the debug-wireframe overlay's starting mode (off in normal play; the player
+/// cycles it live with F3, or boots into a mode via `--debug-wireframe`/`RL_DEBUG_WIREFRAME`).
+pub fn build_windowed_app(
+    boot: Boot,
+    external_crab: std::path::PathBuf,
+    wire: super::WireMode,
+) -> anyhow::Result<App> {
     // Pin the global task pools to ONE thread only for a round that actually has a remote peer.
     // The pin's sole purpose is bit-identical cross-peer float evolution (GCR#113), and it costs
     // ~30-60× frame time by serialising rapier's solver and Bevy's parallel render-prep onto a
@@ -282,6 +288,10 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> anyh
     // are wired —
     // every plugin/`add_systems` above is in, the schedules now exist. This touches only the main
     // world's schedules (the sim); bevy's render sub-app keeps its own executor.
+    // The debug-wireframe overlay (off by default). Adds its systems + rapier's debug-render
+    // plugin; MUST precede `force_serial_schedules` so that pin covers its systems too.
+    super::debug_wireframe::register(&mut app, wire);
+
     if networked {
         crab_world::bot::headless::force_serial_schedules(&mut app);
     }
@@ -380,8 +390,9 @@ pub(super) fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::Pat
     // deterministic [`PhysicsCadence`] instead (see [`park_fixed_auto_pump`]).
     park_fixed_auto_pump(app.world_mut());
 
-    // No Rapier collider wireframe here: it reads raw physics space and can't pick up the cosmetic
-    // `crab_render_scale`, so it drew a tiny crab at the ~1 m arena origin beside the giant skin
-    // (the play-day "one little, one big" mismatch). The visible crab is the scaled skin, or the
-    // scaled silhouette `spawn_world` leaves shown when no model loads.
+    // The visible crab is the scaled skin (or the scaled silhouette `spawn_world` leaves shown
+    // when no model loads). The debug-wireframe overlay (`super::debug_wireframe`, off by
+    // default) draws the colliders on demand: its `Aligned` mode reposes them by the same
+    // `crab_render_scale` so the cage sits ON the giant — rapier's RAW debug-render reads physics
+    // space and can't, which is why a bare cage drew the play-day "one little, one big" mismatch.
 }

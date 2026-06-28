@@ -150,6 +150,14 @@ struct PlayArgs {
     /// `RL_CRAB_CHECKPOINT_DIR` env var, else `assets/weights` under the asset root.
     #[arg(long, value_name = "DIR")]
     nn_crab_checkpoint: Option<PathBuf>,
+
+    /// Start the debug-wireframe collider overlay in this mode (default: off, the
+    /// player-facing showcase). `aligned` reposes the crab colliders to the giant render
+    /// scale so the cage overlays the mesh; `raw` is rapier's debug-render at true physics
+    /// scale (crab tiny + offset — the scale-mismatch diagnostic). F3 cycles it live. Unset
+    /// falls back to the `RL_DEBUG_WIREFRAME` / `RL_DEBUG_COLLIDERS` env (off otherwise).
+    #[arg(long, value_name = "off|aligned|raw")]
+    debug_wireframe: Option<String>,
 }
 
 #[derive(Parser)]
@@ -195,6 +203,12 @@ struct FpScreenshotArgs {
     /// the giant). A dir with no `brain.bin` errors out (as `play` does); omit for the silhouette shot.
     #[arg(long, value_name = "DIR")]
     nn_crab_checkpoint: Option<PathBuf>,
+
+    /// Capture the debug-wireframe collider overlay in this mode (default: off). `aligned`
+    /// draws the crab colliders reposed to the giant render scale (overlays the mesh); `raw`
+    /// is rapier's debug-render at true physics scale. The evidence path for the toggle.
+    #[arg(long, value_name = "off|aligned|raw")]
+    debug_wireframe: Option<String>,
 }
 
 #[derive(Parser)]
@@ -556,7 +570,8 @@ fn run_play(args: PlayArgs) -> Result<()> {
     // A scripted networked round whose peers disagree on the brain+colliders can't arm Sally and
     // refuses (rl#114) — surfaced here as a clean error exit with the actionable fix (rl#115), not a
     // panic/abort. The interactive menu handles its own unarmable case in-client.
-    render::build_windowed_app(boot, external_crab)?.run();
+    let wire = resolve_wire_mode(args.debug_wireframe.as_deref())?;
+    render::build_windowed_app(boot, external_crab, wire)?.run();
     Ok(())
 }
 
@@ -626,8 +641,20 @@ fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
     if external_crab.is_some() {
         render::pin_process_pools();
     }
-    render::build_screenshot_app(ls, cfg, external_crab).run();
+    let wire = resolve_wire_mode(args.debug_wireframe.as_deref())?;
+    render::build_screenshot_app(ls, cfg, external_crab, wire).run();
     Ok(())
+}
+
+/// Resolve the `--debug-wireframe` flag into a [`render::WireMode`]: an explicit value is
+/// parsed (rejecting an unknown token with an actionable error), and an absent flag falls
+/// back to the `RL_DEBUG_WIREFRAME` / `RL_DEBUG_COLLIDERS` env (off by default).
+fn resolve_wire_mode(flag: Option<&str>) -> Result<render::WireMode> {
+    match flag {
+        Some(s) => render::WireMode::parse(s)
+            .ok_or_else(|| anyhow::anyhow!("--debug-wireframe must be one of off|aligned|raw")),
+        None => Ok(render::WireMode::from_env()),
+    }
 }
 
 /// Deterministic match seed: a constant so independently-launched peers agree without a
