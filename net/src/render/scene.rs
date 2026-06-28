@@ -22,7 +22,8 @@ pub(super) struct PlayerAvatar(PlayerId);
 #[derive(Component)]
 pub(super) struct PlaneAvatar(PlayerId);
 
-/// The giant crab placeholder.
+/// Marks the giant crab's render root — the entity [`apply_transforms`] re-poses to the sim
+/// crab each frame.
 #[derive(Component)]
 pub(super) struct CrabAvatar;
 
@@ -42,10 +43,12 @@ pub(super) fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     state: NonSend<GameState>,
-    // Whether the NN crab is ACTIVE this round: when so, the placeholder crab box is spawned
-    // hidden (the real rig is the crab). A real round always arms it (rl#114); the box stays
-    // visible only on the headless screenshot path, which renders a plain sim with no NN stack.
-    // Keyed on the active gate, NOT the bridge's presence.
+    // Whether the NN crab is ACTIVE this round: when so AND a skin model resolves, the
+    // physics-bones silhouette is spawned hidden (the skinned NN rig is the visible crab). A
+    // real round always arms it (rl#114); the silhouette stays visible on the headless
+    // screenshot path (a plain sim with no NN stack) and whenever no model resolves (the
+    // silhouette is the allowed physics-bones view). Keyed on the active gate, NOT the
+    // bridge's presence.
     external_crab_armed: Option<Res<crate::external_crab::ExternalCrabArmed>>,
 ) {
     // Ground: a large gray plane at Y=0.
@@ -195,7 +198,8 @@ const CRAB_RENDER_HEIGHT: f32 = PLAYER_HEIGHT * CRAB_SCALE as f32;
 /// construction rather than two hand-tuned factors that could drift. The
 /// body's natural height is ~0.6 m (NOT a player's `PLAYER_HEIGHT`), so a bare `CRAB_SCALE`
 /// multiply would render the NN crab several× too small. `None` for a degenerate recipe (zero
-/// natural height) — callers fall back to the plain box.
+/// natural height) — a broken recipe with no honest geometry, which callers fail LOUD on rather
+/// than drawing a stand-in.
 pub(crate) fn crab_render_scale() -> Option<f32> {
     // Memoized: `render_recipe()` re-reads + re-parses the 36 MB `sally.glb` and re-fits
     // the collider cloud on every call (~1 s of work), yet the result is a property of the
@@ -216,9 +220,10 @@ pub(crate) fn crab_render_scale() -> Option<f32> {
 /// SAME shapes the sim body uses is the point of #108: the cosmetic crab can't drift from the body
 /// it depicts, and it reads as Sally instead of a box. `render_recipe` is the single
 /// model-vs-fallback selector (shared with the trainer), so this never invents a second source of
-/// geometry. This static silhouette is the headless-screenshot placeholder (no articulation) — the
-/// real armed round shows the walking NN rig instead; the silhouette is the rest stance posed
-/// rigidly, so the legs don't walk, but the shape is honest.
+/// geometry. This static silhouette is the honest physics-bones view (no articulation): the
+/// headless-screenshot render, and the in-game view whenever no skin model resolves — the rest
+/// stance posed rigidly, so the legs don't walk, but it is the REAL colliders, never a stand-in
+/// box. The real armed round with a model shows the walking skinned NN rig instead.
 fn spawn_crab_silhouette(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -283,10 +288,22 @@ fn spawn_crab_silhouette(
         }
     }
     // The SAME target-height fit the armed NN rig uses (one source, no drift). A degenerate
-    // recipe (zero natural height) yields `None` — keep a plain box so the crab is never invisible.
+    // recipe (zero natural height) yields `None`. That can only mean the collider recipe is
+    // broken (a real or even absent model both yield a positive-height procedural recipe), so
+    // there is NO honest crab geometry to draw. We refuse to paper over it with a placeholder
+    // box (the silent-fallback bug — the only crabs allowed are the Sally mesh and this
+    // physics-bones silhouette); fail LOUD instead.
     let Some(scale) = crab_render_scale() else {
-        spawn_fallback_crab_box(commands, meshes, materials, crab_root, CRAB_RENDER_HEIGHT);
-        return;
+        // Unreachable by construction: `render_recipe` yields a positive-height recipe for
+        // both a present model and the procedural fallback, so `crab_render_scale` is only
+        // `None` on a degenerate (zero natural-height) recipe — a broken collider asset with
+        // no honest geometry. We refuse to paper over that with a placeholder box (the
+        // silent-fallback bug); the only allowed crabs are the Sally mesh and this
+        // physics-bones silhouette. If this ever fires, fix the recipe, don't fake a crab.
+        unreachable!(
+            "crab silhouette: render_recipe yielded a degenerate (zero natural-height) crab \
+             — the collider recipe is broken"
+        );
     };
     // Recenter horizontally on the root and stand the base on the ground (y=0).
     let origin = Vec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5);
@@ -339,42 +356,6 @@ fn spawn_crab_silhouette(
         children.push(child);
     }
     commands.entity(crab_root).add_children(&children);
-}
-
-/// The pre-#108 placeholder: a plain red box crab with a forward claw wedge. Kept ONLY
-/// as the safety net for a degenerate/empty collider recipe, so a broken asset shows a
-/// box rather than an invisible crab.
-fn spawn_fallback_crab_box(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    crab_root: Entity,
-    crab_h: f32,
-) {
-    let crab_w = PLAYER_RADIUS * 2.0 * CRAB_SCALE as f32;
-    let body = commands
-        .spawn((
-            Mesh3d(meshes.add(Cuboid::new(crab_w * 1.6, crab_h * 0.5, crab_w))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.7, 0.18, 0.12),
-                perceptual_roughness: 0.8,
-                ..default()
-            })),
-            Transform::from_xyz(0.0, crab_h * 0.25, 0.0),
-        ))
-        .id();
-    // A forward "claw" wedge at +Z (the crab's facing) so its orientation reads.
-    let claw = commands
-        .spawn((
-            Mesh3d(meshes.add(Cuboid::new(crab_w * 0.3, crab_h * 0.25, crab_w * 0.9))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(0.85, 0.25, 0.15),
-                ..default()
-            })),
-            Transform::from_xyz(0.0, crab_h * 0.3, crab_w * 1.0),
-        ))
-        .id();
-    commands.entity(crab_root).add_children(&[body, claw]);
 }
 
 /// The three `&mut Transform` queries [`apply_transforms`] writes — player avatars,
