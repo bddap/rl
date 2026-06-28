@@ -115,7 +115,10 @@ pub struct SkinRepose {
 
 impl SkinRepose {
     /// The world-space repose matrix: `pivot + scale·((p + shift) − pivot)` for any point `p`.
-    fn matrix(&self) -> Mat4 {
+    /// `pub` so the GCR debug-wireframe overlay (`net::render::debug_wireframe`) can repose the
+    /// live crab colliders by the SAME transform the skin uses — one source, so the cage can't
+    /// drift from the rendered crab.
+    pub fn matrix(&self) -> Mat4 {
         Mat4::from_translation(self.pivot)
             * Mat4::from_scale(Vec3::splat(self.scale))
             * Mat4::from_translation(-self.pivot)

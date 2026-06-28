@@ -24,6 +24,7 @@ pub fn build_screenshot_app(
     mut ls: Lockstep,
     cfg: ScreenshotConfig,
     external_crab: Option<std::path::PathBuf>,
+    wire: super::WireMode,
 ) -> App {
     let mut app = App::new();
     // No window, GPU ON (render-to-image). A 60 Hz schedule runner with a real-time
@@ -111,6 +112,9 @@ pub fn build_screenshot_app(
     // (see `build_windowed_app`): rapier's multibody solver is nondeterministic — and can hit a NaN
     // that panics `step_simulation` — on the multi-threaded executor. Must run AFTER every system
     // is wired. Unnecessary for the silhouette shot (no physics), so gated on `armed`.
+    // The debug-wireframe overlay (off unless `wire` says otherwise), so an evidence frame can
+    // capture the collider cage. MUST precede `force_serial_schedules` so the pin covers it.
+    super::debug_wireframe::register(&mut app, wire);
     if armed {
         crab_world::bot::headless::force_serial_schedules(&mut app);
     }
