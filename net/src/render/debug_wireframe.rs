@@ -124,10 +124,12 @@ fn spawn_wire_label(mut commands: Commands) {
             ..default()
         },
         TextColor(Color::srgb(1.0, 0.92, 0.2)),
+        // Bottom-right: clear of the status HUD (top, full-width line) and the
+        // hold-to-reveal controls hint (bottom-left), so the mode line never overlaps them.
         Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(14.0),
-            left: Val::Px(14.0),
+            right: Val::Px(14.0),
             ..default()
         },
         WireLabel,
