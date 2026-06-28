@@ -9,12 +9,13 @@
 //! Why two tables, not one. The KEY for an action is context-independent (W always feeds the
 //! forward axis), so the binding lives once in [`BINDINGS`]. What CHANGES between contexts is
 //! the LABEL and which actions are relevant: on foot W is "Forward"; piloting the plane the
-//! same W is "Throttle up" (the plane sim reads `move_forward` as throttle — see
-//! [`crate::sim`]'s `step_plane`). So each context is a row list naming the actions it
-//! shows with the label correct THERE. The legend joins the rows with the bindings, so the
-//! displayed KEY can't drift from the polled key; the label's meaning (e.g. "Throttle up" =
-//! what `move_forward` does in flight) is a hand-maintained description, pinned where it's
-//! non-obvious by a test (the plane-pitch-sign test).
+//! same W is "Throttle up" (the plane sim reads `move_forward` as the throttle trim — see
+//! [`crate::sim`]'s `step_plane`, which gives the plane flight-sim controls: mouse = stick
+//! (roll + pitch), W/S = throttle, A/D = rudder). So each context is a row list naming the
+//! actions it shows with the label correct THERE. The legend joins the rows with the bindings,
+//! so the displayed KEY can't drift from the polled key; the label's meaning (e.g. "Throttle
+//! up" = what `move_forward` does in flight) is a hand-maintained description, pinned where
+//! it's non-obvious by a test (the plane-pitch-sign test).
 //!
 //! Two caveats on the single-source guarantee:
 //! - It covers the REBINDABLE discrete controls. The analog movers (sticks, mouse motion,
@@ -282,25 +283,25 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 10] = [
     ContextRow { action: Action::RevealControls, label: "Controls" },
 ];
 
-/// The PILOTING-PLANE context: the SAME move keys, re-labeled for flight to match what the
-/// plane sim ACTUALLY does with them (`step_plane` in [`crate::sim`]): `move_forward` →
-/// throttle, `move_strafe` → pitch, `look_yaw` → yaw. `Extract` is omitted — the foot player
-/// feeds the sim neutral input while piloting, so the pickup button is inert in the air.
-/// `EnterExit` now reads "Exit plane".
+/// The PILOTING-PLANE context: the SAME physical inputs, re-labeled for flight-sim controls
+/// to match what `step_plane` (in [`crate::sim`]) ACTUALLY does with them. The mouse/stick is
+/// the flight stick (horizontal → roll/ailerons, vertical → pitch/elevator), W/S trim the
+/// throttle lever, A/D are the rudder. `Extract` is omitted — the foot player feeds the sim
+/// neutral input while piloting, so the pickup button is inert in the air. `EnterExit` reads
+/// "Exit plane".
 ///
-/// Pitch sign — the subtle part the labels MUST get right: `gather_input` negates the strafe
-/// axis once (`render.rs`'s `pending.strafe = -strafe`, the screen-right↔sim-X reconcile), so
-/// A (`StrafeLeft`) reaches the sim as POSITIVE `move_strafe` and D (`StrafeRight`) as
-/// negative. `step_plane` makes positive `move_strafe` nose-UP. Net: **A climbs, D dives** —
-/// so the labels ride those actions, not the screen-intuitive ones. (Pinned by the sim-side
-/// `step_plane_positive_strafe_climbs` test + the render-side negation; reassigning the keys
-/// for FPS feel is a separate taste call.)
+/// Mapping (and the signs the labels MUST get right, pinned by the `step_plane_*` tests):
+/// - `Look` (mouse / right stick): X → ROLL (bank to turn), Y → PITCH (nose up = climb).
+/// - `MoveForward`/`MoveBack` (W/S): throttle up / down — a persistent lever.
+/// - `StrafeLeft`/`StrafeRight` (A/D): rudder yaw. `gather_input` negates the strafe axis
+///   (screen-right↔sim-X), so A reaches the sim as POSITIVE `move_strafe`, which
+///   `step_plane` yaws LEFT — hence A = "Rudder left", D = "Rudder right".
 pub const PLANE_ROWS: [ContextRow<GcrControls>; 9] = [
+    ContextRow { action: Action::Look, label: "Bank / pitch (fly)" },
     ContextRow { action: Action::MoveForward, label: "Throttle up" },
     ContextRow { action: Action::MoveBack, label: "Throttle down" },
-    ContextRow { action: Action::StrafeLeft, label: "Pitch up (climb)" },
-    ContextRow { action: Action::StrafeRight, label: "Pitch down (dive)" },
-    ContextRow { action: Action::Look, label: "Yaw / turn" },
+    ContextRow { action: Action::StrafeLeft, label: "Rudder left (yaw)" },
+    ContextRow { action: Action::StrafeRight, label: "Rudder right (yaw)" },
     ContextRow { action: Action::EnterExit, label: "Exit plane" },
     ContextRow { action: Action::Restart, label: "Restart round" },
     ContextRow { action: Action::Quit, label: "Quit" },
@@ -483,10 +484,10 @@ mod tests {
             ls.iter().map(|l| l.label).collect::<Vec<_>>()
         };
         assert_ne!(labels(&foot), labels(&plane), "the legend must change per context");
-        // Flight labels reflect what `step_plane` does with each key.
+        // Flight labels reflect what `step_plane` does with each input.
         assert!(plane.iter().any(|l| l.label == "Throttle up"));
-        assert!(plane.iter().any(|l| l.label == "Pitch up (climb)"));
-        assert!(plane.iter().any(|l| l.label == "Yaw / turn"));
+        assert!(plane.iter().any(|l| l.label == "Bank / pitch (fly)"));
+        assert!(plane.iter().any(|l| l.label == "Rudder left (yaw)"));
         assert!(plane.iter().any(|l| l.label == "Exit plane"));
         // The on-foot ground labels are gone in flight (no misleading "Strafe"/"Forward").
         assert!(!plane.iter().any(|l| l.label == "Strafe left"));
@@ -497,14 +498,14 @@ mod tests {
         assert_eq!(GcrControls::context_label(GcrContext::Plane), "Piloting plane");
     }
 
-    /// The throttle/pitch keys in the plane context are the SAME physical keys as the foot
+    /// The throttle/rudder keys in the plane context are the SAME physical keys as the foot
     /// move keys (W/S, D/A) — proof that the re-label rides one binding, not a parallel one.
     #[test]
     fn plane_reuses_the_foot_move_keys() {
         let throttle_up = binding::<GcrControls>(Action::MoveForward).unwrap();
         assert_eq!(throttle_up.keyboard.keys, &[Key::W]);
-        let climb = binding::<GcrControls>(Action::StrafeRight).unwrap();
-        assert_eq!(climb.keyboard.keys, &[Key::D]);
+        let rudder_right = binding::<GcrControls>(Action::StrafeRight).unwrap();
+        assert_eq!(rudder_right.keyboard.keys, &[Key::D]);
         // Both contexts reference these same actions (foot as Forward/Strafe, plane re-labeled).
         assert!(FOOT_ROWS.iter().any(|r| r.action == Action::MoveForward));
         assert!(PLANE_ROWS.iter().any(|r| r.action == Action::MoveForward));

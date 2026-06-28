@@ -61,8 +61,16 @@ pub struct Input {
     /// Yaw-look delta for THIS tick, in fixed-point units of 1/[`Input::AXIS_SCALE`]:
     /// ±[`Input::AXIS_SCALE`] is the per-tick yaw cap. The client integrates raw
     /// mouse/stick into this bounded delta and the sim adds it to the player's yaw —
-    /// bounded so one tick can't spin a peer arbitrarily.
+    /// bounded so one tick can't spin a peer arbitrarily. Flying, this axis is the
+    /// stick's HORIZONTAL deflection → roll (ailerons); see [`step_plane`].
     pub look_yaw: i16,
+    /// Pitch-look deflection for THIS tick, same fixed-point grid as [`look_yaw`].
+    /// On foot the camera pitch is purely client-local (the sim has no foot pitch), so
+    /// this is zero for walkers; it exists for the PLANE, where it is the stick's
+    /// VERTICAL deflection → pitch (elevator). Carried on the wire alongside `look_yaw`
+    /// so the one [`Input`] type drives both the (client-local) plane and a networked
+    /// pilot through the single [`step_plane`] formula. Positive = nose up.
+    pub look_pitch: i16,
     /// Action/button bitfield (see [`buttons`]). Held state, sampled each tick.
     pub buttons: u8,
 }
@@ -72,12 +80,14 @@ impl Input {
     /// (1.0). `move_strafe`, `move_forward`, and `look_yaw` all use this grid.
     pub const AXIS_SCALE: i16 = 1000;
     /// Wire size of one encoded [`Input`]: move_strafe(2) + move_forward(2) +
-    /// look_yaw(2) + buttons(1). Drives [`crate::transport`]'s frame size — keep
-    /// in sync with [`Input::to_bytes`].
-    pub const WIRE_LEN: usize = 7;
+    /// look_yaw(2) + look_pitch(2) + buttons(1). Drives [`crate::transport`]'s frame
+    /// size — keep in sync with [`Input::to_bytes`].
+    pub const WIRE_LEN: usize = 9;
 
     /// Full constructor: analog `strafe`, `forward`, and `look_yaw` axes in
-    /// `[-1.0, 1.0]` plus the raw button bitfield. Quantizes the analog values to the
+    /// `[-1.0, 1.0]` plus the raw button bitfield. `look_pitch` defaults to zero (the
+    /// walker case — foot pitch is client-only); the plane sets it with
+    /// [`with_look_pitch`](Input::with_look_pitch). Quantizes the analog values to the
     /// fixed-point grid at the input boundary (not in the sim), so the sim stays
     /// integer-only and the value that crosses the wire is exactly the value applied.
     pub fn new(strafe: f32, forward: f32, look_yaw: f32, buttons: u8) -> Self {
@@ -86,8 +96,18 @@ impl Input {
             move_strafe: q(strafe),
             move_forward: q(forward),
             look_yaw: q(look_yaw),
+            look_pitch: 0,
             buttons,
         }
+    }
+
+    /// Set the analog `look_pitch` axis (`[-1.0, 1.0]`, positive = nose up) on an input,
+    /// quantized like the other axes. Only the plane uses it (the elevator); foot input
+    /// leaves it zero. Separate from [`new`](Input::new) so the many walker call sites
+    /// stay 4-arg and only the flight path opts in.
+    pub fn with_look_pitch(mut self, look_pitch: f32) -> Self {
+        self.look_pitch = (look_pitch.clamp(-1.0, 1.0) * Self::AXIS_SCALE as f32).round() as i16;
+        self
     }
 
     /// Move-only input (`strafe`, `forward`; neutral look, no buttons). The 2-axis
@@ -108,7 +128,8 @@ impl Input {
         b[0..2].copy_from_slice(&self.move_strafe.to_le_bytes());
         b[2..4].copy_from_slice(&self.move_forward.to_le_bytes());
         b[4..6].copy_from_slice(&self.look_yaw.to_le_bytes());
-        b[6] = self.buttons;
+        b[6..8].copy_from_slice(&self.look_pitch.to_le_bytes());
+        b[8] = self.buttons;
         b
     }
 
@@ -118,7 +139,8 @@ impl Input {
             move_strafe: i16::from_le_bytes([b[0], b[1]]),
             move_forward: i16::from_le_bytes([b[2], b[3]]),
             look_yaw: i16::from_le_bytes([b[4], b[5]]),
-            buttons: b[6],
+            look_pitch: i16::from_le_bytes([b[6], b[7]]),
+            buttons: b[8],
         }
     }
 }
@@ -214,41 +236,92 @@ pub const EXTRACT_RADIUS: i64 = 2 * UNIT;
 const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
 
 // --- Plane flight tuning ---
-// All integer, all named, few: crude arcade flight, not a sim. Values are in
-// [`UNIT`]/tick for forces/speeds and [`trig`] turn units for the orientation rates.
+// Crude but PLANE-LIKE arcade flight (not an aerodynamics sim): forward AIRSPEED makes
+// LIFT, lift holds you up, you BANK to turn, and you STALL (lift collapses, you sink)
+// below a minimum speed. All integer fixed-point so two peers evolve it bit-identically.
+// Forces/speeds are [`UNIT`]/tick(²); orientation rates are [`trig`] turn units/tick.
+// Tuned at [`TICK_HZ`] = 30 and [`UNIT`] = 1000 (1 m), so a speed of 1000/tick = 30 m/s.
 
-/// Forward thrust at full throttle, in [`UNIT`]/tick² (added to velocity along the
-/// facing each tick). Sized so full throttle climbs against [`PLANE_GRAVITY`] with
-/// margin — the plane can gain altitude, not just arrest its fall.
+/// Forward thrust per tick at FULL throttle, in [`UNIT`]/tick² (along the facing). With
+/// [`PLANE_DAMP`](PLANE_DAMP_NUM) the terminal forward speed is
+/// `THRUST · DEN/(DEN−NUM)` ≈ 60 m/s — a brisk light aircraft.
 const PLANE_THRUST: i64 = 40;
 
-/// Downward pull per tick, in [`UNIT`]/tick² (subtracted from `vel.y`). Constant —
-/// no lift model; throttle-along-facing is what holds altitude, so nose-up + throttle
-/// is "climb" and idle is "sink".
+/// The throttle is a PERSISTENT lever in `0..`[`PLANE_THROTTLE_MAX`], like a real
+/// throttle quadrant — not a momentary push. The pilot trims it up/down and it HOLDS
+/// where set; thrust is `PLANE_THRUST · throttle / MAX`.
+const PLANE_THROTTLE_MAX: i32 = 1000;
+
+/// Throttle change per tick while the throttle-up / throttle-down control is held
+/// (~0.6 s for a full idle↔max sweep at [`TICK_HZ`]).
+const PLANE_THROTTLE_STEP: i32 = 56;
+
+/// Downward pull per tick, in [`UNIT`]/tick² (subtracted from `vel.y`). Constant; LIFT
+/// (which scales with airspeed) is what opposes it, so altitude follows from SPEED.
 const PLANE_GRAVITY: i64 = 16;
 
-/// Velocity retained per tick, as a fraction of [`PLANE_DAMP_DEN`]. `< 1` so speed
-/// bleeds off without thrust (drag) and the integrator can't run away to infinity —
-/// terminal speed is `thrust * DEN / (DEN - NUM)`. Applied to all three axes.
+/// Lift per unit of airspeed, as [`PLANE_LIFT_NUM`]/[`PLANE_LIFT_DEN`] of the speed
+/// ([`UNIT`]/tick). The vertical lift is capped at [`PLANE_GRAVITY`] (a wing trims to
+/// hold level, it doesn't balloon you upward on raw speed — you CLIMB by pitching up,
+/// which vectors thrust skyward), so this ratio only sets WHERE lift first fully
+/// supports the plane: `DEN · GRAVITY / NUM` = 800/tick = 24 m/s, the stall speed.
+const PLANE_LIFT_NUM: i64 = 1;
+const PLANE_LIFT_DEN: i64 = 50;
+
+/// Stall speed in [`UNIT`]/tick (≈24 m/s): DERIVED as the airspeed at which the
+/// airspeed-proportional lift first reaches gravity (`speed · LIFT_NUM/LIFT_DEN =
+/// GRAVITY`), so it can never drift from the lift constants. BELOW it the wing stalls —
+/// lift falls off with the SQUARE of the speed ratio, so it drops fast: the plane sinks,
+/// accelerates downward, and recovers once flying speed returns.
+const PLANE_STALL_SPEED: i64 = PLANE_LIFT_DEN * PLANE_GRAVITY / PLANE_LIFT_NUM;
+
+/// Velocity retained per tick, as a fraction of [`PLANE_DAMP_DEN`] (drag). `< 1` so
+/// speed bleeds off without thrust and the integrator can't run away to infinity —
+/// terminal speed is `thrust · DEN/(DEN−NUM)`. Applied to all three axes.
 const PLANE_DAMP_NUM: i64 = 98;
 const PLANE_DAMP_DEN: i64 = 100;
 
-/// Per-tick heading change at full yaw stick, in [`trig`] turn units. A touch brisker
-/// than a walker's turn (this is a banking aircraft, not feet); still bounded so one
-/// tick can't spin a peer.
-const PLANE_YAW_RATE: i32 = trig::TURN / 90;
-
-/// Per-tick pitch change at full pitch stick, in [`trig`] turn units.
+/// Per-tick pitch (elevator) change at full stick, in [`trig`] turn units.
 const PLANE_PITCH_RATE: i32 = trig::TURN / 120;
 
-/// Pitch clamp in [`trig`] turn units (≈±30°): the nose can climb or dive steeply but
-/// not loop. With no roll there's no way to recover from inverted, so we never let it
-/// get there — keeps the 2-angle orientation always upright.
-const PLANE_MAX_PITCH: i32 = trig::TURN * 5 / 60;
+/// Per-tick roll (aileron) change at full stick, in [`trig`] turn units. The brisk one:
+/// banking is the PRIMARY way to turn, so the ailerons respond quickly.
+const PLANE_ROLL_RATE: i32 = trig::TURN / 60;
 
-/// Plane spawn altitude in [`UNIT`] (metres): start airborne so the pilot is flying
-/// from tick 0 (no takeoff roll in this cut).
-const PLANE_SPAWN_ALTITUDE: i64 = 30 * UNIT;
+/// Per-tick heading change at full rudder, in [`trig`] turn units. Small — the rudder
+/// is for fine yaw/coordination, NOT the main turn (that's the bank, below).
+const PLANE_RUDDER_RATE: i32 = trig::TURN / 240;
+
+/// Wings auto-level toward 0 roll this many [`trig`] turn units/tick when there is no
+/// aileron input — light aircraft are roll-stable, so releasing the stick rolls back to
+/// level (and so ends the turn) instead of holding a bank forever.
+const PLANE_ROLL_RECENTER: i32 = trig::TURN / 600;
+
+/// Bank-to-turn coupling: a banked wing turns the heading. The per-tick heading change
+/// is `sin(roll) · BANK_TURN_NUM / `[`trig::ONE`] turn units — proportional to how hard
+/// the plane is banked, so a steeper bank turns faster. THE coordinated-turn coupling
+/// that makes it fly like a plane (roll to turn) rather than a car (yaw in place). Sized
+/// for a light-aircraft turn rate: ≈22°/s at a 30° bank, ≈42°/s at the 75° max — banking
+/// into a turn, not pirouetting (TURN/50 read as a fighter-like 108°/s at 30°).
+const PLANE_BANK_TURN_NUM: i64 = trig::TURN as i64 / 250;
+
+/// Pitch clamp in [`trig`] turn units (≈±45°): steep climbs and dives, but bounded so
+/// the 2-plus-roll orientation can't tumble past vertical.
+const PLANE_MAX_PITCH: i32 = trig::TURN / 8;
+
+/// Roll clamp in [`trig`] turn units (≈±75°): hard banks are allowed, short of a
+/// knife-edge (where the wing makes no vertical lift and the plane would just fall).
+const PLANE_MAX_ROLL: i32 = trig::TURN * 75 / 360;
+
+/// Plane spawn altitude in [`UNIT`] (metres): start airborne at a sensible cruise height.
+const PLANE_SPAWN_ALTITUDE: i64 = 60 * UNIT;
+
+/// Plane spawn forward speed in [`UNIT`]/tick (≈30 m/s): spawn at cruise so the wing is
+/// already making lift and the pilot is FLYING from tick 0, not stalling off the spawn.
+const PLANE_SPAWN_SPEED: i64 = 1000;
+
+/// Throttle the plane spawns with (cruise setting; see [`PLANE_THROTTLE_MAX`]).
+const PLANE_SPAWN_THROTTLE: i32 = 700;
 
 /// What a player is doing in the round. Drives both sim logic (only `Alive` players
 /// move, get hunted, and can extract) and rendering (downed = ragdoll/marker,
@@ -333,13 +406,15 @@ pub struct Pos3 {
     pub z: i64,
 }
 
-/// A pilotable plane: a flying body with 3D position + velocity and a 2D orientation
-/// (heading yaw + pitch), all integer fixed-point so two peers evolve it identically.
+/// A pilotable plane: a flying body with 3D position + velocity and a 3-angle
+/// orientation (heading + pitch + roll) plus a persistent throttle, all integer
+/// fixed-point so two peers evolve it identically.
 ///
-/// Crude arcade flight, NOT a sim: throttle thrusts along the heading-and-pitch facing,
-/// gravity pulls −Y every tick, and velocity damps so it can't integrate to infinity.
-/// Roll is omitted on purpose — yaw + pitch is enough to fly a gray box and keeps the
-/// orientation 2-angle (no integer quaternion needed).
+/// Plane-like arcade flight (see [`step_plane`]): forward airspeed makes lift, lift
+/// holds altitude, banking (roll) turns the heading, and the wing stalls below
+/// [`PLANE_STALL_SPEED`]. Orientation is heading + pitch + roll (roll added so the plane
+/// BANKS to turn like an aircraft, not a car); pitch and roll are bounded tilts (clamped,
+/// never wrapping), so the plane can't tumble inverted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plane {
     pos: Pos3,
@@ -347,8 +422,15 @@ pub struct Plane {
     /// Heading in [`trig`] turn units (the horizontal facing, like a player's yaw).
     heading: i32,
     /// Pitch in [`trig`] turn units: nose up/down off the horizon. Clamped to
-    /// ±[`PLANE_MAX_PITCH`] so it can't loop (no roll to recover from inverted).
+    /// ±[`PLANE_MAX_PITCH`].
     pitch: i32,
+    /// Roll (bank) in [`trig`] turn units: right wing down is positive. Clamped to
+    /// ±[`PLANE_MAX_ROLL`]; auto-levels toward 0 with no aileron input. Banking is what
+    /// turns the heading (see [`PLANE_BANK_TURN_NUM`]).
+    roll: i32,
+    /// Throttle, a persistent lever in `0..`[`PLANE_THROTTLE_MAX`] (see there). Trimmed
+    /// up/down by the pilot; thrust scales with it.
+    throttle: i32,
 }
 
 impl Plane {
@@ -368,22 +450,39 @@ impl Plane {
     pub fn pitch(self) -> i32 {
         self.pitch
     }
+    /// Roll/bank in [`trig`] turn units (right wing down = positive).
+    pub fn roll(self) -> i32 {
+        self.roll
+    }
+    /// Throttle setting, `0..`[`PLANE_THROTTLE_MAX`].
+    pub fn throttle(self) -> i32 {
+        self.throttle
+    }
 
-    /// Spawn a plane airborne over a ground point, facing `heading` (turn units), at rest
-    /// (zero velocity, level pitch). The ONE spawn definition, shared by the deterministic
-    /// pilot spawn ([`Sim::spawn_state`]) and the windowed client's single-player
-    /// enter-vehicle toggle ([`crate::render`]) — so a plane boarded mid-round and a
-    /// plane spawned at round start start in the identical state, no second literal to drift.
+    /// Spawn a plane airborne over a ground point, facing `heading` (turn units), already
+    /// at cruise — flying forward at [`PLANE_SPAWN_SPEED`] with [`PLANE_SPAWN_THROTTLE`]
+    /// set, wings level. The ONE spawn definition, shared by the deterministic pilot spawn
+    /// ([`Sim::spawn_state`]) and the windowed client's single-player enter-vehicle toggle
+    /// ([`crate::render`]) — so a plane boarded mid-round and a plane spawned at round start
+    /// begin in the identical state, no second literal to drift. Spawning at speed (not at
+    /// rest) means the wing makes lift immediately, so the pilot is flying, not stalling,
+    /// from tick 0.
     pub fn spawn(ground: Pos, heading: i32) -> Self {
+        // Initial velocity along the heading (level: no pitch component) at cruise speed.
+        let (sh, ch) = trig::sin_cos(heading); // · ONE
+        let vx = sh * PLANE_SPAWN_SPEED / trig::ONE as i64;
+        let vz = ch * PLANE_SPAWN_SPEED / trig::ONE as i64;
         Self {
             pos: Pos3 {
                 x: ground.x,
                 y: PLANE_SPAWN_ALTITUDE,
                 z: ground.z,
             },
-            vel: Pos3::default(),
+            vel: Pos3 { x: vx, y: 0, z: vz },
             heading,
             pitch: 0,
+            roll: 0,
+            throttle: PLANE_SPAWN_THROTTLE,
         }
     }
 
@@ -903,12 +1002,16 @@ impl Sim {
                 vel,
                 heading,
                 pitch,
+                roll,
+                throttle,
             } = plane;
             h.write(&[id.0]);
             write_pos3(&mut h, *pos);
             write_pos3(&mut h, *vel);
             h.write(&heading.to_le_bytes());
             h.write(&pitch.to_le_bytes());
+            h.write(&roll.to_le_bytes());
+            h.write(&throttle.to_le_bytes());
         }
         let Crab { pos, yaw } = crab;
         write_pos(&mut h, *pos);
@@ -1024,58 +1127,108 @@ fn within(ax: i64, az: i64, bx: i64, bz: i64, r: i64) -> bool {
     dist2_i128(ax - bx, az - bz) <= (r as i128) * (r as i128)
 }
 
-/// Advance one plane one tick from its pilot input — crude arcade flight, pure integer
-/// fixed-point so two peers evolve it bit-identically.
+/// Advance one plane one tick from its pilot input — plane-like arcade flight (see the
+/// [`Plane`] docs), pure integer fixed-point so two peers evolve it bit-identically.
 ///
-/// Control map (reuses the existing [`Input`] axes, no wire change):
-/// - [`Input::move_forward`] → throttle: thrust along the heading-and-pitch facing.
-/// - [`Input::look_yaw`] → yaw rate: turn the heading.
-/// - [`Input::move_strafe`] → pitch rate: nose up (climb) / down (dive).
+/// Flight-sim control map (the [`Input`] axes, re-read for flight):
+/// - [`Input::move_forward`] → THROTTLE: trims the persistent throttle lever up (+) /
+///   down (−). The flight-stick / WASD throttle.
+/// - [`Input::look_yaw`] → ROLL (ailerons): the stick's horizontal deflection banks the
+///   wings; banking is what TURNS the plane (see [`PLANE_BANK_TURN_NUM`]).
+/// - [`Input::look_pitch`] → PITCH (elevator): the stick's vertical deflection; nose up
+///   (+) climbs, down (−) dives.
+/// - [`Input::move_strafe`] → RUDDER (yaw): a small direct heading nudge for
+///   coordination; NOT the main turn.
 ///
-/// Order per tick: turn (yaw + pitch, clamped) → accelerate (thrust along the new
-/// facing, minus gravity) → damp → integrate position. Forces are integers; the only
-/// "trig" is the integer CORDIC [`trig`] table, never a float.
+/// Order per tick: trim throttle → integrate roll/pitch (clamped) + auto-level + the
+/// bank-to-turn and rudder heading change → build the facing → thrust + lift − gravity →
+/// damp (drag) → integrate position (with a ground clamp). The only "trig" is the integer
+/// CORDIC [`trig`] table, never a float.
 fn step_plane(plane: &mut Plane, inp: Input) {
-    // 1) Orientation: integrate bounded yaw + pitch rates from the stick axes. Same
-    //    descale pattern as the player's look (axis units of AXIS_SCALE → turn units).
-    let dyaw = (inp.look_yaw as i64 * PLANE_YAW_RATE as i64 / Input::AXIS_SCALE as i64) as i32;
-    plane.heading = trig::wrap_turns(plane.heading + dyaw);
-    let dpitch =
-        (inp.move_strafe as i64 * PLANE_PITCH_RATE as i64 / Input::AXIS_SCALE as i64) as i32;
-    // Clamp pitch to ±MAX (no wrap — pitch is a bounded tilt, not a full circle; with no
-    // roll, letting it pass vertical would leave the plane inverted with no recovery).
+    let axis = Input::AXIS_SCALE as i64;
+
+    // 1) Throttle: a persistent lever, trimmed up/down by the forward axis and held
+    //    between ticks. Sign of move_forward = trim direction; magnitude = trim rate.
+    let trim = (inp.move_forward as i64 * PLANE_THROTTLE_STEP as i64 / axis) as i32;
+    plane.throttle = (plane.throttle + trim).clamp(0, PLANE_THROTTLE_MAX);
+
+    // 2) Roll (ailerons) from the horizontal stick axis. With no input, auto-level toward
+    //    0 (roll-stable airframe) by at most PLANE_ROLL_RECENTER so releasing the stick
+    //    rolls back to wings-level. `look_yaw` is screen-reconciled: `gather_input` negates
+    //    it (screen-right↔sim-X, the same reconcile the rudder undoes), so screen-right is
+    //    NEGATIVE look_yaw — negate here so screen-right rolls RIGHT (right wing down) and
+    //    thus banks into a right turn. Mirrors the rudder's negation below.
+    let droll = (-(inp.look_yaw as i64) * PLANE_ROLL_RATE as i64 / axis) as i32;
+    if droll == 0 {
+        // Step toward zero without overshooting past it.
+        let recenter = PLANE_ROLL_RECENTER.min(plane.roll.abs());
+        plane.roll -= plane.roll.signum() * recenter;
+    } else {
+        plane.roll = (plane.roll + droll).clamp(-PLANE_MAX_ROLL, PLANE_MAX_ROLL);
+    }
+
+    // 3) Pitch (elevator) from the vertical stick axis. Bounded tilt (clamped, never
+    //    wraps), positive = nose up.
+    let dpitch = (inp.look_pitch as i64 * PLANE_PITCH_RATE as i64 / axis) as i32;
     plane.pitch = (plane.pitch + dpitch).clamp(-PLANE_MAX_PITCH, PLANE_MAX_PITCH);
 
-    // 2) Facing unit vector (scale trig::ONE) from heading + pitch. Horizontal part is
-    //    (sin,cos) of heading shrunk by cos(pitch); vertical is sin(pitch). At pitch 0
-    //    this is the player's ground facing with vy=0; nose-up tilts thrust toward +Y.
-    let (sh, ch) = trig::sin_cos(plane.heading); // heading sin/cos · ONE
-    let (sp, cp) = trig::sin_cos(plane.pitch); // pitch sin/cos · ONE
-    // fx,fz carry a trig::ONE² scale (two cosines/sines multiplied); fy carries ONE¹.
-    // Bring fy up to ONE² too so all three axes share one scale before thrusting.
-    let fx = sh * cp;
-    let fz = ch * cp;
-    let fy = sp * trig::ONE as i64;
+    // 4) Heading: the BANK turns it (coordinated turn) plus a small RUDDER nudge. A
+    //    right bank (positive roll) turns right (heading +). The rudder (move_strafe)
+    //    adds a direct yaw; negated so screen-left A yaws left.
+    let (sr, _cr) = trig::sin_cos(plane.roll); // roll sin/cos · ONE
+    let bank_turn = (sr * PLANE_BANK_TURN_NUM / trig::ONE as i64) as i32;
+    let rudder = (-(inp.move_strafe as i64) * PLANE_RUDDER_RATE as i64 / axis) as i32;
+    plane.heading = trig::wrap_turns(plane.heading + bank_turn + rudder);
 
-    // 3) Thrust along the facing at the throttle, then gravity. Descale the facing's
-    //    trig::ONE² and the throttle's AXIS_SCALE so the acceleration is in UNIT/tick².
-    let throttle = inp.move_forward as i64; // units of AXIS_SCALE, sign = fwd/reverse
-    let one2 = trig::ONE as i64 * trig::ONE as i64;
-    let denom = one2 * Input::AXIS_SCALE as i64;
-    plane.vel.x += fx * PLANE_THRUST * throttle / denom;
-    plane.vel.y += fy * PLANE_THRUST * throttle / denom;
-    plane.vel.z += fz * PLANE_THRUST * throttle / denom;
+    // 5) Facing unit vector (scale trig::ONE²) from heading + pitch. Horizontal part is
+    //    (sin,cos) of heading shrunk by cos(pitch); vertical is sin(pitch). Nose-up tilts
+    //    the thrust toward +Y — which is how you CLIMB (vector the thrust skyward).
+    let (sh, ch) = trig::sin_cos(plane.heading); // · ONE
+    let (sp, cp) = trig::sin_cos(plane.pitch); // · ONE
+    let one = trig::ONE as i64;
+    let fx = sh * cp; // · ONE²
+    let fz = ch * cp; // · ONE²
+    let fy = sp * one; // · ONE²
+
+    // 6) Thrust along the facing, scaled by the throttle lever. Descale the facing's ONE²
+    //    and the throttle's MAX so the acceleration lands in UNIT/tick².
+    let one2 = one * one;
+    let thr = plane.throttle as i64;
+    let tdenom = one2 * PLANE_THROTTLE_MAX as i64;
+    plane.vel.x += fx * PLANE_THRUST * thr / tdenom;
+    plane.vel.y += fy * PLANE_THRUST * thr / tdenom;
+    plane.vel.z += fz * PLANE_THRUST * thr / tdenom;
+
+    // 7) Lift − gravity. Lift grows with AIRSPEED (total speed magnitude) and points
+    //    "up", but its vertical share is cut by the bank (cos roll) — so a hard turn
+    //    loses altitude unless you pull up, the classic plane feel. Capped at gravity so
+    //    level flight at speed just HOLDS altitude (you climb by pitching, step 6), and
+    //    below PLANE_STALL_SPEED the wing stalls: lift falls off with the square of the
+    //    speed ratio, so the nose drops and you must regain speed to recover.
+    let speed = isqrt_i128(
+        plane.vel.x as i128 * plane.vel.x as i128
+            + plane.vel.y as i128 * plane.vel.y as i128
+            + plane.vel.z as i128 * plane.vel.z as i128,
+    ) as i64;
+    let mut lift = speed * PLANE_LIFT_NUM / PLANE_LIFT_DEN;
+    if speed < PLANE_STALL_SPEED {
+        lift = lift * speed / PLANE_STALL_SPEED; // stalled: drops off with speed²
+    }
+    lift = lift.min(PLANE_GRAVITY); // a wing trims to level, it doesn't balloon upward
+    let (_sr2, cr) = trig::sin_cos(plane.roll);
+    let lift_y = lift * cr / one; // vertical share shrinks with bank
+    plane.vel.y += lift_y;
     plane.vel.y -= PLANE_GRAVITY;
 
-    // 4) Damp (drag): bleed a fixed fraction of velocity so the integrator can't run
+    // 8) Damp (drag): bleed a fixed fraction of velocity so the integrator can't run
     //    away. Integer truncation toward zero is identical on every target.
     plane.vel.x = plane.vel.x * PLANE_DAMP_NUM / PLANE_DAMP_DEN;
     plane.vel.y = plane.vel.y * PLANE_DAMP_NUM / PLANE_DAMP_DEN;
     plane.vel.z = plane.vel.z * PLANE_DAMP_NUM / PLANE_DAMP_DEN;
 
-    // 5) Integrate position. Don't sink through the ground: clamp Y≥0 and kill a
-    //    downward velocity on contact, so a dive ends in a (crude) belly landing rather
-    //    than falling forever below the world.
+    // 9) Integrate position. Don't sink through the ground: clamp Y≥0 and kill a downward
+    //    velocity on contact, so a dive ends in a (crude) belly landing rather than
+    //    falling forever below the world.
     plane.pos.x += plane.vel.x;
     plane.pos.y += plane.vel.y;
     plane.pos.z += plane.vel.z;
@@ -1157,6 +1310,7 @@ mod tests {
                 move_strafe: i16::MIN,
                 move_forward: i16::MAX,
                 look_yaw: -123,
+                look_pitch: 4567,
                 buttons: 0xFF,
             },
         ] {
@@ -1186,26 +1340,137 @@ mod tests {
         assert_eq!(a.state_hash(), b.state_hash());
     }
 
-    /// Pins the PLANE PITCH SIGN the cockpit legend depends on: positive `move_strafe` noses
-    /// UP (climb), negative noses DOWN (dive). The GCR plane legend (`net::controls::PLANE_ROWS`)
-    /// labels A "Pitch up (climb)" / D "Pitch down (dive)" because `gather_input` negates the
-    /// strafe axis (screen-right↔sim-X), so A reaches the sim as POSITIVE `move_strafe`. If
-    /// either this sign or that negation ever flips, the labels would lie — so this test fails
-    /// loud rather than letting the HUD mislead the pilot.
+    /// Pins the PLANE PITCH SIGN the cockpit legend depends on: positive `look_pitch`
+    /// noses UP (climb), negative noses DOWN (dive). The HUD's "Pitch up (climb)" /
+    /// "Pitch down (dive)" labels ride this sign; if it flips, they'd lie — so this fails
+    /// loud rather than mislead the pilot.
     #[test]
     fn step_plane_pitch_sign_matches_the_cockpit_legend() {
         let level = Plane::spawn(Pos { x: 0, z: 0 }, 0);
         let mut climb = level;
-        climb.step(Input::from_axes(1.0, 0.0)); // positive move_strafe
-        assert!(
-            climb.pitch() > level.pitch(),
-            "positive move_strafe must nose UP (the 'Pitch up (climb)' key)"
-        );
+        climb.step(Input::default().with_look_pitch(1.0)); // positive look_pitch
+        assert!(climb.pitch() > level.pitch(), "positive look_pitch must nose UP");
         let mut dive = level;
-        dive.step(Input::from_axes(-1.0, 0.0)); // negative move_strafe
+        dive.step(Input::default().with_look_pitch(-1.0)); // negative look_pitch
+        assert!(dive.pitch() < level.pitch(), "negative look_pitch must nose DOWN");
+    }
+
+    /// Roll (ailerons) responds to the horizontal stick axis and banks to TURN, and the
+    /// SIGN matches the screen: `gather_input` makes screen-right a NEGATIVE `look_yaw`
+    /// (the screen-X↔sim reconcile), and `step_plane` negates it so screen-right rolls
+    /// RIGHT and banks into a right (heading-increasing) turn. Releasing the stick
+    /// auto-levels the wings. This is the plane-vs-car distinction — you bank to turn.
+    #[test]
+    fn step_plane_banks_and_turns_with_roll() {
+        let mut p = Plane::spawn(Pos { x: 0, z: 0 }, 0);
+        let h0 = p.heading();
+        // Screen-right (the negative look_yaw `gather_input` emits) must bank right and
+        // swing the heading right.
+        for _ in 0..20 {
+            p.step(Input::new(0.0, 0.0, -1.0, 0)); // screen-right = negative look_yaw
+        }
+        assert!(p.roll() > 0, "screen-right must roll RIGHT, got {}", p.roll());
+        // Heading swung right (positive); spawned at 0 and one bank can't pass a half-turn,
+        // so the raw difference is already signed correctly (no wrap).
+        let dh = p.heading() - h0;
+        assert!(dh > 0, "a right bank must turn the heading right, got {dh}");
+        // Release the stick: wings auto-level back toward zero.
+        let banked = p.roll();
+        for _ in 0..200 {
+            p.step(Input::default());
+        }
         assert!(
-            dive.pitch() < level.pitch(),
-            "negative move_strafe must nose DOWN (the 'Pitch down (dive)' key)"
+            p.roll().abs() < banked,
+            "wings must auto-level toward zero with no aileron input"
+        );
+    }
+
+    /// The rudder (`move_strafe`) yaws the heading directly, and screen-left (A, which
+    /// reaches the sim as POSITIVE `move_strafe` after `gather_input`'s negation) yaws
+    /// LEFT (heading decreases). Small effect — pinned for sign, not magnitude.
+    #[test]
+    fn step_plane_rudder_yaws_left_on_positive_strafe() {
+        let mut p = Plane::spawn(Pos { x: 0, z: 0 }, trig::TURN / 4);
+        let h0 = p.heading();
+        p.step(Input::new(1.0, 0.0, 0.0, 0)); // positive move_strafe = A = yaw left
+        // Spawned at TURN/4, a small yaw can't underflow zero, so the raw difference is
+        // already signed correctly (no wrap into the top of [0, TURN)).
+        let dh = p.heading() - h0;
+        assert!(dh < 0, "positive move_strafe (A) must yaw LEFT, got {dh}");
+    }
+
+    /// Throttle is a PERSISTENT lever: holding the up-trim (positive `move_forward`)
+    /// raises it and it HOLDS when released; the down-trim lowers it. Bounded to
+    /// `0..=MAX`.
+    #[test]
+    fn step_plane_throttle_is_a_persistent_lever() {
+        let mut p = Plane::spawn(Pos { x: 0, z: 0 }, 0);
+        let t0 = p.throttle();
+        p.step(Input::from_axes(0.0, 1.0)); // up-trim
+        let t1 = p.throttle();
+        assert!(t1 > t0, "up-trim must raise throttle");
+        p.step(Input::default()); // released — holds
+        assert_eq!(p.throttle(), t1, "throttle holds when the trim is released");
+        // Drive it to the rails both ways.
+        for _ in 0..100 {
+            p.step(Input::from_axes(0.0, 1.0));
+        }
+        assert_eq!(p.throttle(), PLANE_THROTTLE_MAX, "up-trim saturates at MAX");
+        for _ in 0..100 {
+            p.step(Input::from_axes(0.0, -1.0));
+        }
+        assert_eq!(p.throttle(), 0, "down-trim bottoms at 0");
+    }
+
+    /// THE plane-feel test: at cruise (spawn) speed with wings level the plane HOLDS
+    /// altitude (lift ≈ gravity), pitching up CLIMBS, and chopping the throttle bleeds
+    /// speed until the wing STALLS and the plane sinks. Behavioral, over many ticks —
+    /// the closest a headless test gets to "does it fly like a plane".
+    #[test]
+    fn step_plane_flight_envelope_cruise_climb_and_stall() {
+        // Cruise: level, spawn throttle, neutral stick. Altitude should stay ~level over
+        // a second of flight (no rocketing up, no falling out of the sky).
+        let mut cruise = Plane::spawn(Pos { x: 0, z: 0 }, 0);
+        let y0 = cruise.pos().y;
+        for _ in 0..30 {
+            cruise.step(Input::default());
+        }
+        let drift = (cruise.pos().y - y0).abs();
+        assert!(
+            drift < 4 * UNIT,
+            "level cruise must roughly hold altitude, drifted {drift} units"
+        );
+
+        // Climb: hold nose-up. Altitude must rise meaningfully above the cruise case.
+        let mut climb = Plane::spawn(Pos { x: 0, z: 0 }, 0);
+        for _ in 0..30 {
+            climb.step(Input::default().with_look_pitch(1.0));
+        }
+        assert!(
+            climb.pos().y > cruise.pos().y + 3 * UNIT,
+            "pitching up must climb (got {} vs cruise {})",
+            climb.pos().y,
+            cruise.pos().y
+        );
+
+        // Stall: chop the throttle and hold level. Speed bleeds below stall speed and the
+        // plane sinks — ending up well below where it cruised.
+        let mut stall = Plane::spawn(Pos { x: 0, z: 0 }, 0);
+        for _ in 0..120 {
+            stall.step(Input::from_axes(0.0, -1.0)); // throttle to idle, holding
+        }
+        let speed = isqrt_i128(
+            stall.vel().x as i128 * stall.vel().x as i128
+                + stall.vel().y as i128 * stall.vel().y as i128
+                + stall.vel().z as i128 * stall.vel().z as i128,
+        ) as i64;
+        assert!(
+            speed < PLANE_STALL_SPEED,
+            "idle throttle must bleed below stall speed, got {speed}"
+        );
+        assert!(
+            stall.pos().y < cruise.pos().y,
+            "a stalled plane must sink below cruise altitude"
         );
     }
 
@@ -1480,8 +1745,8 @@ mod tests {
         let mut sim = Sim::new_with_pilots(0, &players(1), &players(1));
         let y0 = sim.plane(PlayerId(0)).unwrap().pos().y;
         let mut inp = BTreeMap::new();
-        // Pitch up (strafe +) at full throttle (forward +).
-        inp.insert(PlayerId(0), Input::new(1.0, 1.0, 0.0, 0));
+        // Nose up (look_pitch +) while trimming throttle to full (forward +).
+        inp.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0).with_look_pitch(1.0));
         for _ in 0..120 {
             sim.step(&inp);
         }
@@ -1490,20 +1755,19 @@ mod tests {
     }
 
     #[test]
-    fn idle_plane_sinks_and_lands_without_falling_through() {
-        // No throttle: gravity wins, the plane descends, and the ground clamp catches it
-        // at Y=0 (never negative) — a crude belly landing, not an infinite fall.
+    fn chopped_throttle_plane_sinks_and_lands_without_falling_through() {
+        // Throttle chopped and nose held down: speed bleeds, the wing stalls, gravity
+        // wins, the plane descends, and the ground clamp catches it at Y=0 (never
+        // negative) — a crude belly landing, not an infinite fall.
         let mut sim = Sim::new_with_pilots(0, &players(1), &players(1));
-        let neutral = neutral_for(&sim);
+        let mut inputs = BTreeMap::new();
+        // Down-trim throttle, nose down — a committed descent.
+        inputs.insert(PlayerId(0), Input::from_axes(0.0, -1.0).with_look_pitch(-1.0));
         for _ in 0..400 {
-            sim.step(&neutral);
+            sim.step(&inputs);
         }
         let p = sim.plane(PlayerId(0)).unwrap();
-        assert_eq!(
-            p.pos().y,
-            0,
-            "an idle plane sinks to the ground and stops there"
-        );
+        assert_eq!(p.pos().y, 0, "a descending plane lands and stops at the ground");
     }
 
     #[test]
