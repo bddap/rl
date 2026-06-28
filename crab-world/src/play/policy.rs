@@ -59,6 +59,62 @@ pub fn checkpoint_digest(dir: &Path) -> u64 {
     crate::fnv::fnv1a(&bytes)
 }
 
+/// Load a checkpoint's brain record into an inference brain, or `None` if `brain.bin`
+/// is absent or won't deserialize. The ONE way a brain is read off disk — shared by the
+/// normalizer-paired loader and the rig-fit check ([`checkpoint_fits_rig`]) so the two
+/// can't drift on how a checkpoint is parsed.
+fn load_brain(dir: &Path, device: &NdArrayDevice) -> Option<CrabBrain<InferBackend>> {
+    let paths = CheckpointDir::new(dir);
+    if !paths.brain_file().exists() {
+        return None;
+    }
+    let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+    let record = recorder.load(paths.brain_stem(), device).ok()?;
+    Some(
+        CrabBrain::<TrainBackend>::new(device)
+            .load_record(record)
+            .valid(),
+    )
+}
+
+/// Whether a brain's `(obs, action)` dims drive THIS binary's compiled crab rig. The ONE
+/// place the fits-the-rig rule is spelled — both the runtime loader (soft-fallback) and the
+/// release gate (hard-fail) ask through here, so they can't disagree on what "fits" means.
+fn dims_fit_rig(obs: usize, action: usize) -> bool {
+    (obs, action) == (OBS_SIZE, ACTION_SIZE)
+}
+
+/// Whether the checkpoint at `dir` fits this binary's crab rig — the verdict the
+/// release/deploy gate acts on. The fit RULE lives here in crab-world (the consts it
+/// compares against are here); the caller only turns the verdict into a message + exit code.
+/// A mismatched checkpoint loads "fine" but would degrade the NN crab to its motionless rest
+/// pose (rl#36 catches it at load time, but only by going inert), so the gate refuses to ship
+/// one at all. `Mismatch` carries the checkpoint's own dims so the operator sees both sides;
+/// the rig side is [`super::rig_dims`].
+pub fn checkpoint_fits_rig(dir: &Path) -> RigFit {
+    match load_brain(dir, &NdArrayDevice::Cpu) {
+        None => RigFit::Missing,
+        Some(brain) => {
+            let (obs, action) = brain.io_dims();
+            if dims_fit_rig(obs, action) {
+                RigFit::Ok
+            } else {
+                RigFit::Mismatch { obs, action }
+            }
+        }
+    }
+}
+
+/// A checkpoint's fit against this binary's compiled crab rig (see [`checkpoint_fits_rig`]).
+pub enum RigFit {
+    /// The brain's dims match the rig — safe to drive the NN crab.
+    Ok,
+    /// No readable `brain.bin` in the dir — nothing to check.
+    Missing,
+    /// The brain loads but its dims (carried here) differ from the rig.
+    Mismatch { obs: usize, action: usize },
+}
+
 /// Load a brain + normalizer from `dir`, or `None` if the brain file is absent or
 /// fails to parse. Returning `None` (rather than a zero-action fallback) lets a
 /// hot-reload keep the policy it has when it races a mid-save write, instead of
@@ -68,14 +124,7 @@ fn load_brain_normalizer(
     device: &NdArrayDevice,
 ) -> Option<(CrabBrain<InferBackend>, ObsNormalizer)> {
     let paths = CheckpointDir::new(dir);
-    if !paths.brain_file().exists() {
-        return None;
-    }
-    let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-    let record = recorder.load(paths.brain_stem(), device).ok()?;
-    let brain = CrabBrain::<TrainBackend>::new(device)
-        .load_record(record)
-        .valid();
+    let brain = load_brain(dir, device)?;
     // A checkpoint from a different rig (e.g. a stale 77-dim brain against the
     // current OBS_SIZE) loads fine here but its mismatched first-layer weight would
     // panic in the matmul at the first `policy()` call. Reject it as if it were
@@ -83,7 +132,7 @@ fn load_brain_normalizer(
     // brain takes — so a stale `checkpoints/` degrades to the rest pose instead of
     // crashing the demo/screenshot window on launch (rl#36).
     let (obs_dim, action_dim) = brain.io_dims();
-    if obs_dim != OBS_SIZE || action_dim != ACTION_SIZE {
+    if !dims_fit_rig(obs_dim, action_dim) {
         warn!(
             "play: checkpoint dims ({obs_dim} obs, {action_dim} act) don't match the \
              current rig ({OBS_SIZE} obs, {ACTION_SIZE} act) — ignoring it",
@@ -363,6 +412,41 @@ mod tests {
             [0.0; ACTION_SIZE],
             "an unloaded policy holds the zero-action pose"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The release gate classifies a checkpoint against the rig: a current-rig brain is
+    /// `Ok`, a stale one is `Mismatch` carrying its OWN dims, and a dir with no brain is
+    /// `Missing`. This is what lets the gate refuse a mismatch loudly instead of shipping a
+    /// checkpoint that would go inert at runtime.
+    #[test]
+    fn checkpoint_fits_rig_classifies_the_on_disk_brain() {
+        let tmp = std::env::temp_dir();
+        let dir = tmp.join(format!("rl-rigfit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // No brain yet → Missing.
+        assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Missing));
+
+        // A current-rig brain fits.
+        let device = NdArrayDevice::Cpu;
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+        std::fs::create_dir_all(&dir).unwrap();
+        recorder
+            .record(
+                CrabBrain::<TrainBackend>::new(&device).into_record(),
+                CheckpointDir::new(&dir).brain_stem(),
+            )
+            .unwrap();
+        assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Ok));
+
+        // A stale brain is a Mismatch carrying its own obs dim (what the gate reports).
+        save_brain_with_obs_dim(&dir, OBS_SIZE + 4);
+        assert!(matches!(
+            checkpoint_fits_rig(&dir),
+            RigFit::Mismatch { obs, .. } if obs == OBS_SIZE + 4
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
