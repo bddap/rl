@@ -487,17 +487,18 @@ pub(super) fn apply_transforms(
     }
 
     // FP camera. A PILOT flies from the cockpit: anchor the camera to the plane's
-    // interpolated pose, looking along its heading+pitch, with the client pitch still added
-    // so the pilot can glance around. An on-foot player keeps the ground eye view.
+    // interpolated pose, looking along its heading+pitch and BANKED by its roll. The mouse
+    // now flies the plane (pitch/roll), so there is no separate free-look while piloting —
+    // the view IS the plane's attitude. An on-foot player keeps the ground eye view.
     if let Ok(mut cam) = cam_q.single_mut() {
         if let LocalVehicle::Piloting { plane, prev } = &*vehicle {
             // Single-player: fly from the CLIENT-side plane (the play layer's own body — it
             // is not in the sim, so the deterministic core stays integer-only).
-            *cam = plane_cockpit_camera(*prev, *plane, alpha, pitch.0);
+            *cam = plane_cockpit_camera(*prev, *plane, alpha);
         } else if let Some(plane_now) = sim.plane(local) {
             // A SIM-side pilot (networked vehicle, rl#43): same cockpit view from sim state.
             let plane_prev = state.prev.planes.get(&local).copied().unwrap_or(plane_now);
-            *cam = plane_cockpit_camera(plane_prev, plane_now, alpha, pitch.0);
+            *cam = plane_cockpit_camera(plane_prev, plane_now, alpha);
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
@@ -520,29 +521,39 @@ pub(super) fn apply_transforms(
 }
 
 /// The first-person cockpit camera for a plane: eye at the interpolated 3D position,
-/// looking along the interpolated heading + pitch with `extra_pitch` (the client free-look)
-/// added on. The ONE cockpit-view formula, shared by the single-player client vehicle and
-/// the sim-side networked pilot, so both fly from the identical view with no copy to drift.
-fn plane_cockpit_camera(prev: Plane, now: Plane, alpha: f32, extra_pitch: f32) -> Transform {
+/// looking along the interpolated heading + pitch, with the horizon BANKED by the plane's
+/// roll (the cockpit up-vector tilts with the wings, so a banked turn looks like one). The
+/// ONE cockpit-view formula, shared by the single-player client vehicle and the sim-side
+/// networked pilot, so both fly from the identical view with no copy to drift.
+fn plane_cockpit_camera(prev: Plane, now: Plane, alpha: f32) -> Transform {
     let eye = lerp_pos3(prev.pos(), now.pos(), alpha);
     let heading = lerp_yaw(prev.heading(), now.heading(), alpha);
-    // Pitch reuses lerp_yaw because it's a turn-unit angle too; since pitch is bounded
-    // (never wraps), the shortest-arc handling is a harmless no-op here.
+    // Pitch/roll reuse lerp_yaw because they're turn-unit angles too; since both are bounded
+    // (never wrap), the shortest-arc handling is a harmless no-op here.
     let plane_pitch = lerp_yaw(prev.pitch(), now.pitch(), alpha);
-    let look_dir = look_direction(heading, plane_pitch + extra_pitch);
-    Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y)
+    let roll = lerp_yaw(prev.roll(), now.roll(), alpha);
+    let look_dir = look_direction(heading, plane_pitch);
+    // Bank the camera's up-vector by rolling Y about the look direction. Positive sim roll
+    // is right-wing-down, which tilts the horizon clockwise from the pilot's seat — a
+    // negative rotation about the forward look axis.
+    let up = Quat::from_axis_angle(look_dir, -roll) * Vec3::Y;
+    Transform::from_translation(eye).looking_at(eye + look_dir, up)
 }
 
 /// The interpolated world transform for a plane: position lerped in 3D, orientation
-/// from heading (about +Y) then pitch (nose up about the local right axis, +X). +Z is
-/// the nose, matching the sim's heading-0 = +Z convention and the gray box's long axis.
-/// Pitch is negated like the camera's: a positive sim pitch is nose-UP, but a positive
-/// rotation about +X sends +Z toward −Y, so negate to make nose-up tilt the box up.
+/// from heading (about +Y), then pitch (nose up about the local right axis), then roll
+/// (bank about the nose). +Z is the nose, matching the sim's heading-0 = +Z convention and
+/// the gray box's long axis. Pitch is negated (a positive sim pitch is nose-UP, but a
+/// positive rotation about +X sends +Z toward −Y); roll is negated likewise so a positive
+/// sim roll (right wing down) drops the +X wing.
 fn plane_transform(prev: Plane, now: Plane, alpha: f32) -> Transform {
     let pos = lerp_pos3(prev.pos(), now.pos(), alpha);
     let heading = lerp_yaw(prev.heading(), now.heading(), alpha);
     let pitch = lerp_yaw(prev.pitch(), now.pitch(), alpha);
-    let rot = Quat::from_rotation_y(heading) * Quat::from_rotation_x(-pitch);
+    let roll = lerp_yaw(prev.roll(), now.roll(), alpha);
+    let rot = Quat::from_rotation_y(heading)
+        * Quat::from_rotation_x(-pitch)
+        * Quat::from_rotation_z(-roll);
     Transform::from_translation(pos).with_rotation(rot)
 }
 

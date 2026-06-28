@@ -187,8 +187,13 @@ impl SimSnapshot {
 pub(super) struct PendingInput {
     pub(super) strafe: f32,
     pub(super) forward: f32,
-    /// Accrued yaw-look this inter-tick interval, in radians (drained per tick).
+    /// Accrued yaw-look this inter-tick interval, in radians (drained per tick). Flying,
+    /// this drives the plane's ROLL (the stick's horizontal axis); on foot, the avatar yaw.
     pub(super) yaw_delta: f32,
+    /// Accrued pitch-look this inter-tick interval, in radians (drained per tick). Flying,
+    /// this drives the plane's PITCH (elevator); on foot it is unused for the sim (foot
+    /// camera pitch is the separate client-local [`CameraPitch`]). Positive = nose up.
+    pub(super) pitch_delta: f32,
     pub(super) action: bool,
     /// Latches if RESTART (R) was pressed in this interval. Sent as
     /// [`buttons::RESTART`] so the restart rides the deterministic input stream and all
@@ -415,10 +420,16 @@ pub(super) fn drive_lockstep(
         let input = {
             let mut pending = world.resource_mut::<PendingInput>();
             let look_axis = (pending.yaw_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
+            // The pitch axis reuses the SAME per-tick radian scale as the yaw axis, so the
+            // mouse/stick feels symmetric vertically and horizontally; the sim then applies
+            // each axis's own rate (roll vs pitch) in `step_plane`.
+            let pitch_axis = (pending.pitch_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
             let btns = (if pending.action { buttons::ACTION } else { 0 })
                 | (if pending.restart { buttons::RESTART } else { 0 });
-            let input = Input::new(pending.strafe, pending.forward, look_axis, btns);
+            let input =
+                Input::new(pending.strafe, pending.forward, look_axis, btns).with_look_pitch(pitch_axis);
             pending.yaw_delta = 0.0;
+            pending.pitch_delta = 0.0;
             pending.action = false;
             pending.restart = false;
             input
