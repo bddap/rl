@@ -2709,7 +2709,6 @@ mod menu_ui {
                 }
 
                 ui.separator();
-                ui.label("Controller: D-pad / stick to move · A to select · B to go back.");
                 ui.label("Keyboard: arrows / WASD · Enter to select · Esc to back.");
 
                 if let Some(err) = &state.error {
