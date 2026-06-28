@@ -83,44 +83,57 @@ enum AppMode {
 fn main() {
     let args = Args::parse();
 
-    // rl-demo is a PLAYER-FACING surface (the windowed couch demo and its screenshot),
-    // so the canonical Sally mesh is REQUIRED here, not optional. The only crabs allowed
-    // on a player-facing surface are the purchased Sally mesh and the physics bones we
-    // built around it; a MISSING model must NOT silently fall back to the skinless
-    // procedural body (that ships a non-Sally crab to the screen — the silent-fallback
-    // bug). Fail loud and refuse the surface instead. This is the explicit player-facing
-    // vs training split: the headless trainer (`rl-train`) is the OTHER binary and keeps
-    // the no-skin procedural body by design (a fresh policy needs no cosmetic mesh) — see
-    // `crab_world::bot::skin::register`, which only runs under render+visuals.
-    let Some(p) = bot::meshfit::model_path() else {
-        eprintln!(
-            "rl-demo: no crab model resolved — refusing to render. The demo shows the \
-             purchased Sally mesh (CRAB_MODEL_PATH, default `sally.glb`, under \
-             BEVY_ASSET_ROOT/assets); it will NOT silently fall back to a skinless crab. \
-             Fetch it with scripts/fetch-sally.sh, or point CRAB_MODEL_PATH at the model."
-        );
-        std::process::exit(1);
-    };
-    // Preflight the resolved model so a broken/incomplete asset fails fast with the real
-    // reason, instead of panicking deep in Startup (or blaming CRAB_MODEL_PATH for a
-    // parse error in a model that was present).
-    match bot::meshfit::LoadedModel::load(&p) {
-        Err(e) => {
-            eprintln!("crab model {p:?}: {e}");
-            std::process::exit(1);
-        }
-        // A model that loads but lacks the expected crab bones builds no recipe.
-        // Reject it here, not as `spawn_crab`'s expect deep in Startup with a
-        // message that wrongly blames a missing/corrupt file.
-        Ok(model) => {
-            if bot::rig::build_recipe(&model).is_none() {
-                eprintln!(
-                    "crab model {p:?}: loaded but has none of the expected crab bones (e.g. Def_leg_01.000.L)"
+    // OTEL/tracing first: install the shared subscriber so the canonical-mesh check below
+    // can report a missing asset as a LOUD error telemetry record (exported to the bothouse
+    // sink when wired, stderr always). The guard must outlive the whole run, so it's bound
+    // here and dropped only when `main` returns. rl-demo disables bevy's own LogPlugin (in
+    // the plugin arms below) so THIS is the one global subscriber.
+    let _otel = otel::init("rl-demo");
+
+    // rl-demo is a PLAYER-FACING surface (the windowed couch demo and its screenshot), so the
+    // crab the player sees should be the purchased Sally mesh. But a MISSING/broken mesh is no
+    // longer a hard refuse (owner 2026-06-28: too strict): instead fall back to the honest
+    // physics-bones view — Rapier's debug-render of the REAL colliders, the same bones the body
+    // uses — and emit a LOUD OTEL error so the absent asset is visible in telemetry. The one
+    // thing still forbidden is a SILENT skinless body (the silent-fallback bug — ships a
+    // non-Sally crab with no signal). This is the explicit player-facing vs training split: the
+    // headless trainer (`rl-train`) keeps the no-skin procedural body by design.
+    let mesh_ok = match canonical_mesh_status() {
+        Ok(()) => true,
+        Err(reason) => {
+            // LOUD via telemetry (stderr + OTLP), GRACEFUL in render. `target` namespaces the
+            // record so the sink can filter for canonical-mesh failures.
+            tracing::error!(
+                target: "rl_demo::canonical_mesh",
+                reason = %reason,
+                "rl-demo: canonical Sally mesh could not be loaded — falling back to the \
+                 physics-bones debug view (the real colliders). Fetch it with \
+                 scripts/fetch-sally.sh or point CRAB_MODEL_PATH at the model."
+            );
+            // Make every downstream consumer agree there is no usable model: the body recipe
+            // (`crab_world::bot::body::render_recipe`) then takes the procedural-collider
+            // fallback instead of panicking on a present-but-broken file, and the skin
+            // (`bot::skin::register`) self-skips instead of half-loading a broken scene. Both
+            // read `meshfit::model_path()`, so redirecting it at a guaranteed-absent path is the
+            // single switch that flips them together. The physics bones are then made VISIBLE by
+            // forcing the debug-render on (see `debug_colliders` below).
+            //
+            // SAFETY: program start, single-threaded, before `App::new` spawns any bevy thread
+            // that reads env — the same pattern (and justification) as
+            // `crab_world::bot::headless`'s `set_var`.
+            unsafe {
+                std::env::set_var(
+                    "CRAB_MODEL_PATH",
+                    "/nonexistent/rl-demo-canonical-mesh-unavailable.glb",
                 );
-                std::process::exit(1);
             }
+            false
         }
-    }
+    };
+    // Show the physics-bones view whenever the mesh is unusable, OR on explicit request. When
+    // the mesh is fine the cage defaults off (the skinned Sally crab is the view); the demo's
+    // right-arrow still toggles it live.
+    let debug_colliders = !mesh_ok || std::env::var_os("RL_DEBUG_COLLIDERS").is_some();
 
     let mode = if let Some(path) = args.screenshot.clone() {
         AppMode::Screenshot {
@@ -153,7 +166,11 @@ fn main() {
                         exit_condition: bevy::window::ExitCondition::DontExit,
                         ..default()
                     })
-                    .disable::<bevy::winit::WinitPlugin>(),
+                    .disable::<bevy::winit::WinitPlugin>()
+                    // `otel::init` already installed the global tracing subscriber; bevy's
+                    // LogPlugin would try to install a second and panic. Disable it — the
+                    // otel subscriber carries the same stderr `fmt` output.
+                    .disable::<bevy::log::LogPlugin>(),
             );
             app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
                 Duration::from_secs_f64(1.0 / 60.0),
@@ -162,7 +179,7 @@ fn main() {
             // offscreen screenshot camera (Bevy 0.18) — but only if the plugin is
             // present. The other arms add it; Screenshot has its own arm, so gate it
             // here on the same flag or the captured PNG never shows the colliders.
-            if std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
+            if debug_colliders {
                 app.add_plugins(RapierDebugRenderPlugin {
                     // Collider shapes only — the default also draws per-body axes +
                     // joint markers, which on a 31-part body is an unreadable tangle.
@@ -178,35 +195,41 @@ fn main() {
             // The demo defaults to borderless fullscreen (the Steam launch target is
             // a couch screen) unless --windowed.
             let fullscreen = !args.windowed;
-            app.add_plugins(DefaultPlugins.set(bevy::window::WindowPlugin {
-                primary_window: Some(bevy::window::Window {
-                    title: "Crab RL".into(),
-                    mode: if fullscreen {
-                        bevy::window::WindowMode::BorderlessFullscreen(
-                            bevy::window::MonitorSelection::Primary,
-                        )
-                    } else {
-                        bevy::window::WindowMode::Windowed
-                    },
-                    ..default()
-                }),
-                ..default()
-            }));
+            app.add_plugins(
+                DefaultPlugins
+                    .set(bevy::window::WindowPlugin {
+                        primary_window: Some(bevy::window::Window {
+                            title: "Crab RL".into(),
+                            mode: if fullscreen {
+                                bevy::window::WindowMode::BorderlessFullscreen(
+                                    bevy::window::MonitorSelection::Primary,
+                                )
+                            } else {
+                                bevy::window::WindowMode::Windowed
+                            },
+                            ..default()
+                        }),
+                        ..default()
+                    })
+                    // See the screenshot arm: otel owns the subscriber, so drop bevy's
+                    // LogPlugin to avoid a second-subscriber panic.
+                    .disable::<bevy::log::LogPlugin>(),
+            );
             // With the stand-in primitive meshes removed, Rapier's debug-render is
             // the only in-engine view of the true colliders, so the skin can be
             // checked against the actual physics shapes. `enabled` only sets the
             // INITIAL state — the demo's right-arrow toggles `DebugRenderContext`
-            // live — and the demo starts the cage on iff RL_DEBUG_COLLIDERS is set.
+            // live — and the demo starts the cage on iff `debug_colliders` (RL_DEBUG_COLLIDERS
+            // OR a missing canonical mesh, where the cage IS the crab the player sees).
             app.add_plugins(RapierDebugRenderPlugin {
-                enabled: std::env::var_os("RL_DEBUG_COLLIDERS").is_some(),
+                enabled: debug_colliders,
                 // Collider shapes only — the default also draws per-body axes +
                 // joint markers, which on a 31-part body is an unreadable tangle.
                 mode: DebugRenderMode::COLLIDER_SHAPES,
                 ..default()
             });
-            // Pivot markers gate on RL_DEBUG_COLLIDERS: a deliberate diagnostic, not
-            // default chrome.
-            if std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
+            // Pivot markers: a deliberate diagnostic, on with the cage.
+            if debug_colliders {
                 bot::body::register_pivot_markers(&mut app);
             }
         }
@@ -247,6 +270,29 @@ fn main() {
     }
 
     app.run();
+}
+
+/// Is the canonical Sally mesh present AND usable (loads + has the crab bones the rig needs)?
+/// `Ok(())` means render the real skinned crab; `Err(reason)` carries a human-readable cause
+/// for the OTEL error and the physics-bones fallback. This mirrors `crab_world::bot::body`'s
+/// model-vs-fallback selection (the same `model_path` / `LoadedModel::load` / `build_recipe`
+/// chain), so the demo's "is the mesh good?" verdict can't disagree with what the body would
+/// actually spawn.
+fn canonical_mesh_status() -> Result<(), String> {
+    let Some(p) = bot::meshfit::model_path() else {
+        return Err(
+            "no crab model resolved (CRAB_MODEL_PATH / default `sally.glb` not found under \
+             BEVY_ASSET_ROOT/assets)"
+            .to_string(),
+        );
+    };
+    let model = bot::meshfit::LoadedModel::load(&p).map_err(|e| format!("crab model {p:?}: {e}"))?;
+    if bot::rig::build_recipe(&model).is_none() {
+        return Err(format!(
+            "crab model {p:?}: loaded but has none of the expected crab bones (e.g. Def_leg_01.000.L)"
+        ));
+    }
+    Ok(())
 }
 
 /// Diagnostic (enable with RL_CONTACT_AUDIT=1): every 64 ticks, prints every
