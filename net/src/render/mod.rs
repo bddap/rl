@@ -78,8 +78,8 @@ const PLAYER_RADIUS: f32 = 0.4;
 const PLAYER_HEIGHT: f32 = 1.8;
 
 /// Plane gray-box dimensions (meters): a fuselage box + a wider, thinner wing box.
-/// Just enough shape to read as an aircraft and show its facing — a placeholder, like
-/// the crab box.
+/// Just enough shape to read as an aircraft and show its facing — a gray-box stand-in for
+/// the as-yet-unmodelled plane.
 const PLANE_FUSELAGE_LEN: f32 = 6.0;
 const PLANE_FUSELAGE_W: f32 = 1.2;
 const PLANE_WINGSPAN: f32 = 9.0;

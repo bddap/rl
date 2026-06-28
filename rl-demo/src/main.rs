@@ -83,27 +83,41 @@ enum AppMode {
 fn main() {
     let args = Args::parse();
 
-    // Every mode spawns the rig-derived body. Preflight a PRESENT model now so a broken
-    // asset fails fast with the real reason, instead of panicking deep in Startup (or
-    // blaming CRAB_MODEL_PATH for a parse error in a model that was present). NO model
-    // is NOT an error: the body falls back to the procedural stand-in (built in
-    // `CrabAssets::from_world`).
-    if let Some(p) = bot::meshfit::model_path() {
-        match bot::meshfit::LoadedModel::load(&p) {
-            Err(e) => {
-                eprintln!("crab model {p:?}: {e}");
+    // rl-demo is a PLAYER-FACING surface (the windowed couch demo and its screenshot),
+    // so the canonical Sally mesh is REQUIRED here, not optional. The only crabs allowed
+    // on a player-facing surface are the purchased Sally mesh and the physics bones we
+    // built around it; a MISSING model must NOT silently fall back to the skinless
+    // procedural body (that ships a non-Sally crab to the screen — the silent-fallback
+    // bug). Fail loud and refuse the surface instead. This is the explicit player-facing
+    // vs training split: the headless trainer (`rl-train`) is the OTHER binary and keeps
+    // the no-skin procedural body by design (a fresh policy needs no cosmetic mesh) — see
+    // `crab_world::bot::skin::register`, which only runs under render+visuals.
+    let Some(p) = bot::meshfit::model_path() else {
+        eprintln!(
+            "rl-demo: no crab model resolved — refusing to render. The demo shows the \
+             purchased Sally mesh (CRAB_MODEL_PATH, default `sally.glb`, under \
+             BEVY_ASSET_ROOT/assets); it will NOT silently fall back to a skinless crab. \
+             Fetch it with scripts/fetch-sally.sh, or point CRAB_MODEL_PATH at the model."
+        );
+        std::process::exit(1);
+    };
+    // Preflight the resolved model so a broken/incomplete asset fails fast with the real
+    // reason, instead of panicking deep in Startup (or blaming CRAB_MODEL_PATH for a
+    // parse error in a model that was present).
+    match bot::meshfit::LoadedModel::load(&p) {
+        Err(e) => {
+            eprintln!("crab model {p:?}: {e}");
+            std::process::exit(1);
+        }
+        // A model that loads but lacks the expected crab bones builds no recipe.
+        // Reject it here, not as `spawn_crab`'s expect deep in Startup with a
+        // message that wrongly blames a missing/corrupt file.
+        Ok(model) => {
+            if bot::rig::build_recipe(&model).is_none() {
+                eprintln!(
+                    "crab model {p:?}: loaded but has none of the expected crab bones (e.g. Def_leg_01.000.L)"
+                );
                 std::process::exit(1);
-            }
-            // A model that loads but lacks the expected crab bones builds no recipe.
-            // Reject it here, not as `spawn_crab`'s expect deep in Startup with a
-            // message that wrongly blames a missing/corrupt file.
-            Ok(model) => {
-                if bot::rig::build_recipe(&model).is_none() {
-                    eprintln!(
-                        "crab model {p:?}: loaded but has none of the expected crab bones (e.g. Def_leg_01.000.L)"
-                    );
-                    std::process::exit(1);
-                }
             }
         }
     }

@@ -207,7 +207,10 @@ fn attach_skins(
     // renders its bones at glTF bind-world from this root, so subtracting the hub puts
     // the skin's skeleton in the body's exact frame — bone-for-link aligned at rest.
     // (`register` only runs the skin systems when a model resolves, so the hub here is
-    // always the real model's — the fallback body shows the debug wireframe, no skin.)
+    // always the real model's. A model-less skinless body is intentional only on the
+    // training/headless path and the GCR physics-bones silhouette; player-facing render
+    // surfaces require the canonical mesh upstream — rl-demo's preflight fails loud without
+    // it — so this never silently ships a skinless crab to a screen.)
     let hub = assets.hub_bind_world();
     for (env, t) in crabs.iter() {
         if skins.iter().any(|s| s.env == env.0) {
