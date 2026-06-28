@@ -832,8 +832,9 @@ mod tests {
     /// The role-resolving half of pairing: a bone name must map to the physics
     /// link the re-pair then targets. Pins the cases the test relies on so a
     /// mapping change can't make the re-pair test pass against the wrong link —
-    /// including a now-coxa bone (`002`) that the old divergent map sent to the
-    /// merus, which is what forked the rendered legs.
+    /// including `002`, which rides the basis (the coxo-basal split owns `001`/`002`),
+    /// distinct from the coxa (`000`) and the merus (`003`), so a bracket slip across
+    /// the chain is caught here.
     #[test]
     fn bone_names_resolve_to_expected_links() {
         use super::super::rig::part_for_bone;
@@ -844,7 +845,7 @@ mod tests {
         );
         assert_eq!(
             part_for_bone("Def_leg_01.002.L"),
-            Some(PartId::Joint(CrabJointId::LegCoxa(Side::Left, 0)))
+            Some(PartId::Joint(CrabJointId::LegBasis(Side::Left, 0)))
         );
         assert_eq!(
             part_for_bone("Def_leg_01.003.L"),
@@ -1101,6 +1102,7 @@ mod tests {
         use super::super::rig::parts_adjacent;
         let car = PartId::Carapace;
         let coxa_r0 = PartId::Joint(CrabJointId::LegCoxa(Side::Right, 0));
+        let basis_r0 = PartId::Joint(CrabJointId::LegBasis(Side::Right, 0));
         let merus_r0 = PartId::Joint(CrabJointId::LegMerus(Side::Right, 0));
         let carpus_r0 = PartId::Joint(CrabJointId::LegCarpus(Side::Right, 0));
         let shoulder_r = PartId::Joint(CrabJointId::ClawShoulder(Side::Right));
@@ -1108,11 +1110,14 @@ mod tests {
         let pincer_r = PartId::Joint(CrabJointId::ClawPincer(Side::Right));
         let coxa_r1 = PartId::Joint(CrabJointId::LegCoxa(Side::Right, 1));
 
-        // Adjacent: chain roots to the carapace, and within-chain neighbours.
+        // Adjacent: chain roots to the carapace, and within-chain neighbours. The leg
+        // chain is coxa→basis→merus→carpus (the coxo-basal split), so each consecutive
+        // pair hinges, but coxa→merus does not (the basis sits between them).
         assert!(parts_adjacent(car, coxa_r0));
         assert!(parts_adjacent(coxa_r0, car)); // symmetric
         assert!(parts_adjacent(car, shoulder_r));
-        assert!(parts_adjacent(coxa_r0, merus_r0));
+        assert!(parts_adjacent(coxa_r0, basis_r0));
+        assert!(parts_adjacent(basis_r0, merus_r0));
         assert!(parts_adjacent(merus_r0, carpus_r0));
         assert!(parts_adjacent(shoulder_r, wrist_r));
         assert!(parts_adjacent(wrist_r, pincer_r)); // the #32 thumb seam
@@ -1122,7 +1127,8 @@ mod tests {
         assert!(!parts_adjacent(car, merus_r0));
         assert!(!parts_adjacent(car, wrist_r));
         assert!(!parts_adjacent(car, pincer_r));
-        assert!(!parts_adjacent(coxa_r0, carpus_r0)); // skips the merus
+        assert!(!parts_adjacent(coxa_r0, merus_r0)); // skips the basis
+        assert!(!parts_adjacent(coxa_r0, carpus_r0)); // skips the basis+merus
         assert!(!parts_adjacent(shoulder_r, pincer_r)); // skips the wrist
         assert!(!parts_adjacent(coxa_r0, coxa_r1)); // different legs
         assert!(!parts_adjacent(shoulder_r, coxa_r0)); // claw vs leg
