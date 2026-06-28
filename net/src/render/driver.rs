@@ -550,13 +550,38 @@ pub(super) fn drive_lockstep(
         // Sampled telemetry: a Tick snapshot + the local input every TELEMETRY_TICK_EVERY
         // applied ticks. Read-only on the sim; best-effort (drops if the link can't keep up).
         if let Some(t) = &tel {
-            let state = world.non_send_resource::<GameState>();
-            if state.ls.sim().tick() >= *next_tel_tick {
-                *next_tel_tick =
-                    (state.ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
-                t.send(TelemetryEvent::tick(state.ls.sim(), *total_desyncs, roster_len));
-                // The input the SIM actually applied this tick (neutral while piloting).
-                t.send(TelemetryEvent::input(issue_tick, sim_input));
+            let due = world.non_send_resource::<GameState>().ls.sim().tick() >= *next_tel_tick;
+            if due {
+                {
+                    let state = world.non_send_resource::<GameState>();
+                    *next_tel_tick =
+                        (state.ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
+                    t.send(TelemetryEvent::tick(state.ls.sim(), *total_desyncs, roster_len));
+                    // The input the SIM actually applied this tick (neutral while piloting).
+                    t.send(TelemetryEvent::input(issue_tick, sim_input));
+                }
+                // Aggregated rescue surface (rl#137): drain the window's `rescue_nonfinite_crabs`
+                // tally into ONE Fault event carrying the count + last offending body, so a
+                // frame-by-frame non-finite blowup shows on the hub feed as a filtered per-window
+                // count instead of a per-step flood. A stable solo Sally never enters this branch
+                // (`since_report` stays 0) — a nonzero count IS the alarm that she's exploding.
+                if let Some(mut stats) = world.get_resource_mut::<crab_world::bot::RescueStats>()
+                    && stats.since_report > 0
+                {
+                    let n = stats.since_report;
+                    let body = stats.last_body;
+                    stats.since_report = 0;
+                    let msg = match body {
+                        Some(b) => format!(
+                            "crab rescue: {n} non-finite respawn(s) this telemetry window \
+                             (last offender: {b}) — armed Sally is going non-finite (rl#137)"
+                        ),
+                        None => format!(
+                            "crab rescue: {n} non-finite respawn(s) this telemetry window (rl#137)"
+                        ),
+                    };
+                    t.send(TelemetryEvent::Fault { msg });
+                }
             }
         }
     }
