@@ -133,10 +133,19 @@ pub(super) fn orbit_camera(
     *transform = camera_transform(&orbit);
 }
 
-/// Default screenshot eye position relative to the tracked focus, and the fixed
-/// height of that focus. The single source for the camera's framing.
+/// Screenshot-camera framing: the eye sits at this fixed offset from a focus
+/// pinned to the crab's horizontal position at this fixed mid-body height.
 const SHOT_CAM_OFFSET: Vec3 = Vec3::new(1.9, 0.95, 2.5);
 const SHOT_CAM_FOCUS_Y: f32 = 0.5;
+
+/// The single source for the offscreen camera's framing transform: focus pinned
+/// to the crab's horizontal position (`crab_xz.x`/`.z`) at the fixed mid-body
+/// height, eye at the fixed offset, looking at the focus. Both the initial spawn
+/// and the per-frame tracking go through here so the two can't drift.
+fn offscreen_camera_transform(crab_xz: Vec3) -> Transform {
+    let focus = Vec3::new(crab_xz.x, SHOT_CAM_FOCUS_Y, crab_xz.z);
+    Transform::from_translation(focus + SHOT_CAM_OFFSET).looking_at(focus, Vec3::Y)
+}
 
 /// Keep the offscreen camera aimed at the (possibly drifting) crab so it stays
 /// centered in the screenshot. Tracks horizontal position only; the vertical
@@ -148,8 +157,7 @@ pub(super) fn track_offscreen_camera(
     let (Ok(crab), Ok(mut cam)) = (carapace_q.single(), cam_q.single_mut()) else {
         return;
     };
-    let focus = Vec3::new(crab.translation.x, SHOT_CAM_FOCUS_Y, crab.translation.z);
-    *cam = Transform::from_translation(focus + SHOT_CAM_OFFSET).looking_at(focus, Vec3::Y);
+    *cam = offscreen_camera_transform(crab.translation);
 }
 
 pub(super) fn spawn_offscreen_camera(
@@ -169,7 +177,9 @@ pub(super) fn spawn_offscreen_camera(
         // Default tonemapping needs a LUT asset that may not be ready in a
         // windowless render; None keeps the offscreen pass simple.
         Tonemapping::None,
-        Transform::from_xyz(1.9, 1.15, 2.5).looking_at(Vec3::new(0.0, 0.35, 0.0), Vec3::Y),
+        // Initial framing on the crab's start position (origin). `track_offscreen_camera`
+        // re-derives this every Update from the same source before any frame is captured.
+        offscreen_camera_transform(Vec3::ZERO),
         // Make UI composite into THIS offscreen target. Bevy auto-targets UI at the
         // default-WINDOW camera, but the screenshot path has no window — without this
         // marker the controls overlay never draws into the captured texture (same fix
@@ -178,4 +188,22 @@ pub(super) fn spawn_offscreen_camera(
         bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(ShotTarget(handle));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The canonical framing pins the focus to the crab's horizontal position at the
+    /// fixed mid-body height and seats the eye at the fixed offset above it. Locks the
+    /// single source so a future edit can't silently re-introduce a drifting literal.
+    #[test]
+    fn offscreen_framing_is_canonical() {
+        let t = offscreen_camera_transform(Vec3::new(3.0, 99.0, -4.0));
+        let focus = Vec3::new(3.0, SHOT_CAM_FOCUS_Y, -4.0);
+        assert_eq!(t.translation, focus + SHOT_CAM_OFFSET);
+        // Camera looks at the focus: forward points from eye to focus.
+        let fwd = t.forward().as_vec3();
+        assert!((fwd - (focus - t.translation).normalize()).length() < 1e-5);
+    }
 }
