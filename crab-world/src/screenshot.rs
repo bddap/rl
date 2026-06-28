@@ -24,12 +24,12 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 /// machinery reads it back to encode the PNG. Inserted by each subsystem's
 /// camera-spawn after it creates the target via [`new_render_target`].
 #[derive(Resource)]
-pub(crate) struct ShotTarget(pub(crate) Handle<Image>);
+pub struct ShotTarget(pub Handle<Image>);
 
 /// Progress through the settle→capture→exit cycle, advanced one render frame at a
 /// time by [`advance_capture`].
 #[derive(Resource, Default)]
-pub(crate) struct ShotProgress {
+pub struct ShotProgress {
     /// Render frames elapsed — NOT physics steps. The GPU pipeline renders black for
     /// the first few dozen frames (shaders/pipelines compiling, assets uploading), so
     /// settle is counted in rendered frames. `pub(crate)` because the crab shot's
@@ -53,7 +53,7 @@ const EXIT_COUNTDOWN_FRAMES: u32 = 30;
 /// to `Assets<Image>`, spawns its camera with `RenderTarget::Image(handle)` (and
 /// whatever scene-specific markers/clear color it needs), and stashes the handle in
 /// [`ShotTarget`].
-pub(crate) fn new_render_target(width: u32, height: u32) -> Image {
+pub fn new_render_target(width: u32, height: u32) -> Image {
     let mut image = Image::new_target_texture(width, height, TextureFormat::bevy_default(), None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     image
@@ -67,7 +67,7 @@ pub(crate) fn new_render_target(width: u32, height: u32) -> Image {
 /// scene-specific capture on `Some` then calls [`finish_capture`]; the crab shot
 /// subtracts `settle` from `frame` to phase its video sweep. Ticks a counter and can
 /// terminate the app, so call it exactly once per frame.
-pub(crate) fn advance_capture(
+pub fn advance_capture(
     progress: &mut ShotProgress,
     settle: u32,
     exit: &mut MessageWriter<AppExit>,
@@ -86,7 +86,7 @@ pub(crate) fn advance_capture(
 /// Spawn the one-shot `Screenshot` of the render target, observed by `save_to_disk`,
 /// to write `path` once the GPU readback lands. The shared half of every capture;
 /// the caller chooses the path (a single shot, or a numbered video frame).
-pub(crate) fn save_target_to(commands: &mut Commands, target: &ShotTarget, path: PathBuf) {
+pub fn save_target_to(commands: &mut Commands, target: &ShotTarget, path: PathBuf) {
     commands
         .spawn(Screenshot::image(target.0.clone()))
         .observe(save_to_disk(path));
@@ -94,6 +94,6 @@ pub(crate) fn save_target_to(commands: &mut Commands, target: &ShotTarget, path:
 
 /// Mark the capture done and arm the exit countdown. After this, [`advance_capture`]
 /// counts down and then exits, returning `None` every frame until it does.
-pub(crate) fn finish_capture(progress: &mut ShotProgress) {
+pub fn finish_capture(progress: &mut ShotProgress) {
     progress.exit_countdown = Some(EXIT_COUNTDOWN_FRAMES);
 }

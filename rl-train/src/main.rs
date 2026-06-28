@@ -1,4 +1,4 @@
-//! `rl-train` — the HEADLESS trainer. Links `rl-core` with render OFF, so it pulls NO
+//! `rl-train` — the HEADLESS trainer. Links `crab-world` with render OFF, so it pulls NO
 //! bevy_render/bevy_pbr/wgpu27: the crab machinery (bot / physics / training) and the
 //! shared `TrainConfig` come from the library, this binary is a thin entry that parses
 //! its modes and dispatches. It DOES link burn-wgpu (the GPU PPO update is the sole

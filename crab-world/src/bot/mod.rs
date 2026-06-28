@@ -18,7 +18,7 @@ pub mod skin;
 // Not test-only: the `--check-rest-colliders` diagnostic ships in the binary and
 // reuses `headless_app`/`tick` to build and settle the same windowless physics
 // world the sim tests run, so one app builder serves both.
-pub(crate) mod test_util;
+pub mod test_util;
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;

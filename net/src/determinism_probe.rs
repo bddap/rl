@@ -11,7 +11,7 @@
 //! quantity, and magnitude.
 //!
 //! Run (avoid trainer contention — see CLAUDE.md), exercising the SHIPPED config:
-//!   cargo test -p rl-core --features enhanced-determinism determinism_probe \
+//!   cargo test -p net --features enhanced-determinism determinism_probe \
 //!       -- --nocapture --test-threads=2
 //! Tick count via `PROBE_TICKS` (default 1000). Without the feature it is the informative
 //! contrast (does plain float already match same-binary, or is the feature what closes the

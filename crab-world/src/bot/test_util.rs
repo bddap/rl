@@ -168,7 +168,7 @@ pub fn tick(app: &mut App, n: u32) {
 /// The same recipe the trainer runs at process start (`training::inproc::init_process_pools`,
 /// which now delegates here), shared so the rollout apps and the determinism probe can't
 /// drift on what "single-threaded" means.
-pub(crate) fn pin_single_thread_pools() {
+pub fn pin_single_thread_pools() {
     // SAFETY: called before any pool reads its env (callers invoke this before building
     // their first App / running inference), so these set_vars race no reader thread.
     if std::env::var_os("RAYON_NUM_THREADS").is_none() {
@@ -197,7 +197,7 @@ pub(crate) fn pin_single_thread_pools() {
 /// exist until then). Used by the K-world rollout apps (so the workers don't serialise on
 /// the shared pool) and the GCR#82 determinism probe (so cross-peer float evolution can't
 /// reorder).
-pub(crate) fn force_serial_schedules(app: &mut App) {
+pub fn force_serial_schedules(app: &mut App) {
     use bevy::ecs::schedule::{ExecutorKind, Schedules};
     let mut schedules = app.world_mut().resource_mut::<Schedules>();
     for (_label, schedule) in schedules.iter_mut() {

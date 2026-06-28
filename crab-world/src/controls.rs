@@ -442,7 +442,7 @@ mod overlay {
     /// fact, two consumers — [`track_active_device`] (a resting stick mustn't flip the
     /// legend off the keyboard) and GCR's `pad_stick_axes` (a resting stick mustn't creep
     /// the avatar/view) — shared so a recalibration moves both together.
-    pub(crate) const PAD_STICK_DEADZONE: f32 = 0.15;
+    pub const PAD_STICK_DEADZONE: f32 = 0.15;
 
     /// Spawn a single glyph node (icon image OR text keycap chip) as a child of `parent`.
     fn spawn_glyph(parent: &mut ChildSpawnerCommands, asset_server: &AssetServer, glyph: Glyph) {
@@ -827,7 +827,7 @@ pub use overlay::{
 };
 
 #[cfg(feature = "render")]
-pub(crate) use overlay::PAD_STICK_DEADZONE;
+pub use overlay::PAD_STICK_DEADZONE;
 
 /// The headless/debug overlay override, from the rl env convention shared by every render
 /// bin: `RL_SHOW_CONTROLS=1` forces the (normally hold-to-reveal) overlay open,
@@ -837,7 +837,7 @@ pub(crate) use overlay::PAD_STICK_DEADZONE;
 /// source so the contract can't drift between bins (the demo's and GCR's screenshot paths
 /// both call it). Inert when unset (default context/device, overlay closed).
 #[cfg(feature = "render")]
-pub(crate) fn reveal_overrides_from_env<S: ControlScheme>()
+pub fn reveal_overrides_from_env<S: ControlScheme>()
 -> (ForceRevealControls, ActiveDevice, ActiveContext<S>) {
     let ctx = std::env::var("RL_SHOW_CONTROLS_CONTEXT")
         .ok()
