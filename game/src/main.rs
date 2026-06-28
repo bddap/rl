@@ -562,7 +562,10 @@ fn run_play(args: PlayArgs) -> Result<()> {
     // NETWORKED round arms it once peers agree on weights+assets (the digest handshake above) and
     // pins every task pool to one thread so the float crab evolves bit-identically across peers; a
     // round that can't agree FAILS LOUD rather than substituting a fake crab.
-    render::build_windowed_app(boot, external_crab).run();
+    // A scripted networked round whose peers disagree on the brain+colliders can't arm Sally and
+    // refuses (rl#114) — surfaced here as a clean error exit with the actionable fix (rl#115), not a
+    // panic/abort. The interactive menu handles its own unarmable case in-client.
+    render::build_windowed_app(boot, external_crab)?.run();
     Ok(())
 }
 

@@ -73,9 +73,10 @@ pub mod external_crab;
 /// entirely; the policy-weights digest folded into [`crate::sim::Sim::state_hash`] is the
 /// downstream half, catching a residual brain mismatch between two otherwise-armed peers.
 ///
-/// This is the SINGLE arm predicate — the [`render`] arming sites (`Boot::Round` and
-/// `ensure_round_installed`) and the rl#63 tests all call it, so the rule can't drift between
-/// them. Each caller ANDs it with "a checkpoint/NN stack is present" (no brain ⇒ nothing to
+/// This is the SINGLE arm predicate — the [`render`] arming sites (the `Boot::Round` build, the
+/// menu's `poll_formation` pre-gate, and `ensure_round_installed`) reach it through the one
+/// `crab_arm_failure` decision, and the rl#63 tests call it directly, so the rule can't drift
+/// between them. Each caller ANDs it with "a checkpoint/NN stack is present" (no brain ⇒ nothing to
 /// arm). Deliberately NOT behind `cfg(render)`: the no-feature test build (like the headless
 /// trainer) must exercise the REAL predicate, not a re-encoded copy.
 ///
@@ -367,9 +368,10 @@ mod desync_test {
     // UNLESS they share the same brain and step it identically, so it may arm only when
     // [`super::may_arm_external_crab`] allows: a SOLO round always, a NETWORKED round only with
     // SYNCED weights+assets. There is NO integer fallback (rl#114): a networked-UNSYNCED round
-    // CANNOT arm and the production sites REFUSE it LOUDLY (the `Boot::Round` arm + the menu's
-    // `ensure_round_installed` panic with an actionable peer-mismatch message) rather than
-    // substituting a fake crab. These tests pin that gate predicate.
+    // CANNOT arm and the production sites REFUSE it LOUDLY — GRACEFULLY (rl#115): the scripted
+    // `Boot::Round` build returns an `Err` (clean CLI exit) and the menu's `poll_formation` returns
+    // to the chooser showing an actionable peer-mismatch message — rather than substituting a fake
+    // crab or crashing. These tests pin that gate predicate.
     //
     // FAITHFULNESS / LIMITATION: `external_crab`/`render` are `#[cfg(feature = "render")]` (they pull
     // bevy's full GPU stack), so this suite — which builds with NO features, like the headless
@@ -379,8 +381,9 @@ mod desync_test {
     // proven at the real cadence in `determinism_probe` against the actual physics.
 
     /// Models the production arm decision exactly: a checkpoint must be present AND
-    /// [`super::may_arm_external_crab`] must allow it (the SAME predicate the `Boot::Round` and
-    /// `ensure_round_installed` arming sites call, so this can't drift from them). `net`/`checkpoint`
+    /// [`super::may_arm_external_crab`] must allow it (the SAME predicate the `Boot::Round` build,
+    /// the menu's `poll_formation` gate, and `ensure_round_installed` all call via
+    /// `crab_arm_failure`, so this can't drift from them). `net`/`checkpoint`
     /// are `Option<()>` stand-ins — only their `is_none()`/`is_some()` feeds the gate;
     /// `weights_synced`/`assets_synced` are the formation handshake's verdicts (irrelevant on a solo
     /// round). Returns whether the round WOULD arm the NN crab; on a networked round `false` means

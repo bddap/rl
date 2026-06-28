@@ -394,10 +394,22 @@ fn poll_formation(
         // `ready_from` is `None` only for Cancelled, which the barrier reports after
         // tearing its session down — return to the menu, no phantom left behind.
         Ok(match_result) => match menu::ready_from(match_result, state.seed) {
-            Some(ready) => {
-                pending.0 = Some(ready);
-                next.set(AppPhase::Playing);
-            }
+            Some(ready) => match super::app::crab_arm_failure(&ready.net) {
+                // Armable (solo always; networked with synced weights+assets): park it and play.
+                None => {
+                    pending.0 = Some(ready);
+                    next.set(AppPhase::Playing);
+                }
+                // Unarmable networked round — peers disagree on the brain/colliders (rl#114). Don't
+                // crash mid-transition (rl#115): surface the actionable message on the menu and
+                // return to the chooser so the player SEES the failure and can fix it (run rl-update
+                // on every device). Deliberately NO silent integer-crab swap — the round refuses,
+                // loud and visible, exactly as rl#114 demands.
+                Some(msg) => {
+                    state.error = Some(msg);
+                    next.set(AppPhase::Menu);
+                }
+            },
             None => next.set(AppPhase::Menu),
         },
         Err(e) => {

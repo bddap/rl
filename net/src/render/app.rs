@@ -66,9 +66,11 @@ pub enum AppPhase {
 /// rapier-simulated NN body ("real Sally", [`crate::external_crab`]). There is NO integer
 /// fallback (rl#114): a SOLO round always arms it; a NETWORKED round arms it once peers agree on a
 /// shared brain (the weights-digest handshake) and step it at the deterministic cadence (the GCR
-/// fold, rl#82). A networked-UNSYNCED round CANNOT arm Sally and FAILS LOUD (a clear peer-mismatch
-/// panic naming the fix — run rl-update on every device) rather than silently substituting a fake
-/// crab — the whole point of rl#114.
+/// fold, rl#82). A networked-UNSYNCED round CANNOT arm Sally and FAILS LOUD — a clear peer-mismatch
+/// error naming the fix (run rl-update on every device) rather than silently substituting a fake
+/// crab — the whole point of rl#114. The failure is GRACEFUL (rl#115): the scripted `Boot::Round`
+/// path returns it as an `Err` (clean CLI exit, no panic); the interactive menu pre-gates it in
+/// `poll_formation` and returns to the chooser showing the message (no mid-transition crash).
 /// Pin every process-global task pool to a single worker, so the armed float rapier-NN crab
 /// ("real Sally") evolves bit-identically across peers (GCR#113).
 ///
@@ -86,7 +88,7 @@ pub fn pin_process_pools() {
     crab_world::bot::headless::pin_single_thread_pools();
 }
 
-pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App {
+pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> anyhow::Result<App> {
     // Pin the global task pools to ONE thread only for a round that actually has a remote peer.
     // The pin's sole purpose is bit-identical cross-peer float evolution (GCR#113), and it costs
     // ~30-60× frame time by serialising rapier's solver and Bevy's parallel render-prep onto a
@@ -217,12 +219,13 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
             // ([`crate::may_arm_external_crab`], the determinism guard). With no integer
             // fallback, a networked round that CAN'T arm FAILS LOUD here rather than playing a fake
             // crab. Capture the crab's spawn + seed the pose BEFORE `ls` moves into core.
-            if !crate::may_arm_external_crab(
-                net.is_none(),
-                net.as_ref().is_some_and(NetDriver::weights_synced),
-                net.as_ref().is_some_and(NetDriver::assets_synced),
-            ) {
-                panic!("{}", crab_arm_failure_message(&net));
+            // A networked round that can't agree on the brain+colliders can't arm Sally. With no
+            // integer fallback (rl#114) it REFUSES rather than play a fake crab — but as a clean
+            // error bubbled to the CLI (rl#115), not a `panic!` process-abort. The interactive menu
+            // never reaches here (it pre-gates in `poll_formation`); this is the scripted
+            // `--host`/`--join` path, whose graceful failure is a non-zero exit with the message.
+            if let Some(msg) = crab_arm_failure(&net) {
+                anyhow::bail!(msg);
             }
             let spawn = seed_external_crab_solo(&mut ls);
             let source = match net {
@@ -292,7 +295,7 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
         crab_world::bot::headless::force_serial_schedules(&mut app);
     }
 
-    app
+    Ok(app)
 }
 
 /// Presence marker: the boot-menu app installed the NN-crab stack at build (rl#58). The checkpoint
@@ -304,26 +307,47 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
 #[derive(Resource, Clone, Copy)]
 pub(super) struct ExternalCrabStackInstalled;
 
-/// The actionable failure message when the one giant crab (the real NN body, "Sally") can't be
-/// armed for a NETWORKED round — peers disagree on the brain or the crab colliders, so a float
-/// crab would desync lockstep. With no integer fallback (rl#114) the round REFUSES rather than
-/// silently substituting a fake crab, so this message must tell the operator exactly what's wrong
-/// and how to fix it. Solo always arms, so this is only ever reached on a networked round.
-pub(super) fn crab_arm_failure_message(net: &Option<NetDriver>) -> String {
-    // weights are checked first, so reaching the `else` means weights agree but assets don't.
-    let weights_synced = net.as_ref().is_some_and(NetDriver::weights_synced);
+/// The SINGLE arm-decision-plus-message for the one giant crab (the real NN body, "Sally"):
+/// `None` if the round MAY arm it ([`crate::may_arm_external_crab`]: solo always, networked only
+/// with synced weights+assets), or `Some(message)` describing exactly why a networked round CANNOT
+/// — peers disagree on the brain or the crab colliders, so a float crab would desync lockstep — and
+/// how to fix it. With no integer fallback (rl#114) an unarmable round REFUSES rather than silently
+/// substituting a fake crab. ONE source for both the gate and the operator-facing text, used by the
+/// menu pre-gate (return to the chooser showing this, no crash — rl#115) and the scripted
+/// `Boot::Round` build (bubble it out as an error, no panic). Solo always arms, so the message only
+/// ever describes a networked round.
+pub(super) fn crab_arm_failure(net: &Option<NetDriver>) -> Option<String> {
+    crab_arm_failure_from(
+        net.is_none(),
+        net.as_ref().is_some_and(NetDriver::weights_synced),
+        net.as_ref().is_some_and(NetDriver::assets_synced),
+    )
+}
+
+/// The pure core of [`crab_arm_failure`] — the arm decision + message from the three synced flags,
+/// with no [`NetDriver`] so it's unit-testable headlessly (no tokio/iroh). `None` = armable.
+pub(super) fn crab_arm_failure_from(
+    net_is_none: bool,
+    weights_synced: bool,
+    assets_synced: bool,
+) -> Option<String> {
+    if crate::may_arm_external_crab(net_is_none, weights_synced, assets_synced) {
+        return None;
+    }
+    // Reached only on a networked round that can't arm; weights are checked first, so a synced
+    // weights flag here means weights agree but the collider asset doesn't.
     let cause = if !weights_synced {
         "the trained brain (brain.bin) differs or is missing on a peer"
     } else {
         "the crab colliders (the sally.glb model) differ on a peer"
     };
-    format!(
+    Some(format!(
         "rl#114: refusing to start the round — can't arm the trained NN crab (\"Sally\") for this \
          multiplayer match because {cause}. Every device MUST carry the IDENTICAL brain + crab \
          model, or lockstep would desync. Fix: run rl-update on every device so all peers share \
          the same weights and colliders, then re-form the match. (There is deliberately no integer \
          stand-in crab — a mismatched table refuses rather than silently dropping Sally.)"
-    )
+    ))
 }
 
 /// Seed the sim crab's spawn pose into `ls` so the rapier-NN body begins where the round placed
