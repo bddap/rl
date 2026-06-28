@@ -27,13 +27,19 @@ use bevy::render::render_resource::{
 const FACE: usize = 1024;
 
 /// `Skybox.brightness` (cd/m²). The skybox shader emits `sample.rgb * brightness *
-/// exposure`, where `exposure` is the camera's (here the default Blender EV100 9.7 ≈
-/// 1/998). The cubemap already bakes final night colors in [0,1], so we cancel the
-/// exposure with ~1000 to reproduce them as-authored on the untonemapped screenshot
-/// cameras (the owner's evidence path) — without it a brightness of 1.0 is crushed to
-/// black. The windowed client's tonemapper then maps those same [0,1] values to a dim
-/// night sky. (≈ 2^9.7·1.2; bevy's own environment-map examples use the same ~1000.)
+/// exposure`, where `exposure` is the camera's (here the default Blender EV100, ≈ 1/998).
+/// The cubemap already bakes final night colors in [0,1], so we set brightness to cancel
+/// that exposure and reproduce them as-authored on the untonemapped screenshot cameras
+/// (the owner's evidence path) — without the cancellation a brightness of 1.0 is crushed
+/// to near-black. The windowed client's tonemapper then maps those same [0,1] values to a
+/// dim night sky.
 const SKY_BRIGHTNESS: f32 = 1000.0;
+
+/// Clear color the cameras keep behind the skybox: visible only in the brief window
+/// before the cubemap finishes uploading to the GPU (or if the skybox were ever absent).
+/// A dark night tone near the gradient's dark end, so there's no bright-blue flash under
+/// the night sky — the skybox, once uploaded, is the real background.
+pub const NIGHT_CLEAR: Color = Color::srgb(0.02, 0.03, 0.09);
 
 /// Bevy plugin: generate the night-sky cubemap once at startup and attach a [`Skybox`]
 /// to every `Camera3d` that lacks one. Added by both surfaces' app builders; the
