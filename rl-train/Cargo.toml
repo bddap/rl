@@ -27,10 +27,9 @@ crab-world = { path = "../crab-world" }
 bevy.workspace = true
 clap.workspace = true
 burn.workspace = true
-# A tracing subscriber so the trainer's `info!`/`warn!`/`error!` actually surface: the
-# headless build links no bevy LogPlugin, so without an installed subscriber every log —
-# including the non-finite-observation guard — is silently discarded.
 tracing.workspace = true
-# `env-filter` owned explicitly (RUST_LOG support) rather than borrowed from bevy_log's
-# feature unification, so dropping bevy from this crate can't silently break `init_tracing`.
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+# The shared OTEL init owns the tracing subscriber (stderr fmt — so the trainer's
+# `info!`/`warn!`/`error!` still surface headless, where there is no bevy LogPlugin — plus
+# OTLP export of traces/metrics/logs when a telemetry endpoint is configured). One init for
+# every rl binary; see the `otel` crate + bddap/bothouse telemetry/README.md.
+otel = { path = "../otel" }
