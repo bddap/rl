@@ -4,8 +4,9 @@
 //!
 //! The body is a Rapier multibody tree rooted at the carapace. Only the locomotion
 //! joints are policy-actuated and carry a [`CrabJointId`]: each leg's
-//! coxa/merus/carpus and each claw's shoulder/wrist/pincer (all revolute). Each
-//! limb collapses to those joints — a leg's proximal bones ride its coxa link, so
+//! coxa/basis/merus/carpus and each claw's shoulder/wrist/pincer (all revolute). The
+//! basal joint is 2-DOF — coxa swings the leg fore/aft, basis lifts it up/down —
+//! split across two short links; the remaining proximal bones ride those links, so
 //! there are no locked stubs. The cosmetic eye-stalks (locked, no `CrabJointId`) are
 //! NOT given physics bodies at all — they aren't actuated, observed, or load-bearing,
 //! and their skin bones ride the carapace ([`super::skin`]); they live only in the rig
@@ -158,7 +159,7 @@ const CLAW_FRICTION_CAP: f32 = 0.04;
 /// well below Rapier's near-rigid `1e6` Hz default because at that stiffness a limb
 /// driven into its limit overshoots and the violent position-correction snapping it
 /// back is NOT momentum-conserving in the reduced-coordinate multibody solver: with
-/// 30 joints slammed at once the residual accumulates into net angular momentum,
+/// every joint slammed at once the residual accumulates into net angular momentum,
 /// letting an airborne crab spin up from nothing (issue #17 — actuator couples and
 /// contact were ruled out, so the joint-LIMIT impulse was the leak). 400 Hz keeps the
 /// stop firm under standing load yet caps the airborne overshoot enough to remove the
@@ -199,7 +200,7 @@ impl CrabAssets {
 
 /// The body recipe the game renders and spawns: the fitted model when one is present,
 /// else the procedural stand-in. The ONE place this model-vs-fallback selection lives —
-/// [`CrabAssets`] (the spawned/skinned body) and the crab collider silhouette
+/// [`CrabAssets`] (the spawned/skinned body) and the integer-crab collider silhouette
 /// (`net::render::spawn_crab_silhouette`) both go through here so they can't drift on
 /// which body they show. A present-but-broken model is rejected by main's preflight (not
 /// silently swapped for the stand-in), so the `expect` only fires for a future caller
@@ -273,9 +274,13 @@ pub struct CrabJoint {
 /// [`super::rig::JointSpec`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CrabJointId {
-    // Legs (8 = side L/R × leg 0..3 front→back). Coxa swings the leg off the
-    // body; merus and carpus are the two load-bearing bends down the limb.
+    // Legs (8 = side L/R × leg 0..3 front→back). The basal joint is 2-DOF: coxa
+    // swings the leg fore/aft about a vertical axis at the body root, basis lifts it
+    // up/down about a horizontal axis just distal (the levator/depressor DOF, the
+    // biggest locomotion win — bddap/rl#31); merus and carpus are the two
+    // load-bearing bends down the limb.
     LegCoxa(Side, u8),
+    LegBasis(Side, u8),
     LegMerus(Side, u8),
     LegCarpus(Side, u8),
     // Claws (1 per side): shoulder lifts the arm, wrist bends the hand, pincer
@@ -300,30 +305,38 @@ impl CrabJointId {
     /// saved checkpoints are keyed by a joint's position here, so reordering would
     /// invalidate trained checkpoints. Legs first (front→back per side, both
     /// sides), then claws (per side) — left side ahead of right within each.
-    const fn all() -> [CrabJointId; 30] {
+    const fn all() -> [CrabJointId; 38] {
         [
             CrabJointId::LegCoxa(Side::Left, 0),
+            CrabJointId::LegBasis(Side::Left, 0),
             CrabJointId::LegMerus(Side::Left, 0),
             CrabJointId::LegCarpus(Side::Left, 0),
             CrabJointId::LegCoxa(Side::Left, 1),
+            CrabJointId::LegBasis(Side::Left, 1),
             CrabJointId::LegMerus(Side::Left, 1),
             CrabJointId::LegCarpus(Side::Left, 1),
             CrabJointId::LegCoxa(Side::Left, 2),
+            CrabJointId::LegBasis(Side::Left, 2),
             CrabJointId::LegMerus(Side::Left, 2),
             CrabJointId::LegCarpus(Side::Left, 2),
             CrabJointId::LegCoxa(Side::Left, 3),
+            CrabJointId::LegBasis(Side::Left, 3),
             CrabJointId::LegMerus(Side::Left, 3),
             CrabJointId::LegCarpus(Side::Left, 3),
             CrabJointId::LegCoxa(Side::Right, 0),
+            CrabJointId::LegBasis(Side::Right, 0),
             CrabJointId::LegMerus(Side::Right, 0),
             CrabJointId::LegCarpus(Side::Right, 0),
             CrabJointId::LegCoxa(Side::Right, 1),
+            CrabJointId::LegBasis(Side::Right, 1),
             CrabJointId::LegMerus(Side::Right, 1),
             CrabJointId::LegCarpus(Side::Right, 1),
             CrabJointId::LegCoxa(Side::Right, 2),
+            CrabJointId::LegBasis(Side::Right, 2),
             CrabJointId::LegMerus(Side::Right, 2),
             CrabJointId::LegCarpus(Side::Right, 2),
             CrabJointId::LegCoxa(Side::Right, 3),
+            CrabJointId::LegBasis(Side::Right, 3),
             CrabJointId::LegMerus(Side::Right, 3),
             CrabJointId::LegCarpus(Side::Right, 3),
             CrabJointId::ClawShoulder(Side::Left),
@@ -358,7 +371,9 @@ impl CrabJointId {
     /// distinct from the joint's friction motor ([`Self::friction_cap`]).
     pub fn drive_torque_ceiling(&self) -> f32 {
         match self {
-            CrabJointId::LegCoxa(..) => COXA_TORQUE_CEILING,
+            // The basis lift is hip-class — it bears the leg's weight as it raises
+            // it — so it shares the coxa swing's ceiling.
+            CrabJointId::LegCoxa(..) | CrabJointId::LegBasis(..) => COXA_TORQUE_CEILING,
             CrabJointId::LegMerus(..) => FEMUR_TORQUE_CEILING,
             CrabJointId::LegCarpus(..) => TIBIA_TORQUE_CEILING,
             CrabJointId::ClawShoulder(_) => CLAW_SHOULDER_TORQUE_CEILING,
@@ -372,9 +387,10 @@ impl CrabJointId {
     /// crumple under ground contact and a modest command still actuates.
     pub fn friction_cap(&self) -> f32 {
         match self {
-            CrabJointId::LegCoxa(..) | CrabJointId::LegMerus(..) | CrabJointId::LegCarpus(..) => {
-                LEG_FRICTION_CAP
-            }
+            CrabJointId::LegCoxa(..)
+            | CrabJointId::LegBasis(..)
+            | CrabJointId::LegMerus(..)
+            | CrabJointId::LegCarpus(..) => LEG_FRICTION_CAP,
             CrabJointId::ClawShoulder(_)
             | CrabJointId::ClawWrist(_)
             | CrabJointId::ClawPincer(_) => CLAW_FRICTION_CAP,
@@ -389,6 +405,10 @@ impl CrabJointId {
     pub fn limits(&self) -> [f32; 2] {
         match self {
             CrabJointId::LegCoxa(..) => [-0.8, 0.8],
+            // Levator/depressor sweep about the bind rest: enough to lift a foot clear
+            // for a step and to push the body up, kept symmetric and modest so a fresh
+            // policy can't fling the leg over the shell.
+            CrabJointId::LegBasis(..) => [-0.6, 0.6],
             CrabJointId::LegMerus(..) => [-1.0, 1.0],
             CrabJointId::LegCarpus(..) => [-1.1, 1.1],
             CrabJointId::ClawShoulder(_) => [CLAW_SHOULDER_UP_STOP, CLAW_SHOULDER_DOWN_STOP],

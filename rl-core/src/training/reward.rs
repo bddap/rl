@@ -383,24 +383,26 @@ mod tests {
         let still = compute_reward(None, action_effort(&[0.0; ACTION_SIZE]));
         assert!(still.abs() < 1e-6, "a still policy with no progress is zero: {still}");
         // 2. A real STRIDE — closing ~0.5 m/s of ground (≈0.0078 m/tick at 64 Hz) with an
-        //    in-range gait drive (|d| < 1) — must net POSITIVE on progress alone. At weight
-        //    0.0006 a |d|=0.7 drive across 30 joints costs 0.0006·30·0.49 ≈ 0.009, well under
-        //    the stride's 24·0.0078 ≈ 0.19.
+        //    in-range gait drive (|d| < 1) — must net POSITIVE on progress alone. A |d|=0.7
+        //    drive over the actuated joints costs EFFORT_WEIGHT·N·0.49 (≈0.011 at N=38), well
+        //    under the stride's 24·0.0078 ≈ 0.19.
         let stride = compute_reward(Some(per_tick_closed(0.5)), action_effort(&[0.7; ACTION_SIZE]));
         assert!(stride > 0.0, "a real stride must net positive after the tax, on progress alone: {stride}");
-        // 3. The break-even DRIVE size: the per-tick stride progress (≈0.19) equals the tax at
-        //    |d| ≈ 3.2/joint — far above any gait, so a gait drive is deep in the net-positive
-        //    region while saturation is firmly net-negative.
+        // 3. The break-even DRIVE size — where the per-tick effort tax equals the per-tick stride
+        //    progress — sits FAR above any in-range gait (|d| < 1): even a |d|=2 drive on EVERY
+        //    joint is still net-positive, so a gait is deep in the net-positive region while
+        //    saturation (below) is net-negative. Checked as a bracket, not pinned to a per-joint
+        //    figure, so it holds as the actuated DOF count grows (bddap/rl#31 widened it to 38).
         let stride_progress = progress_reward(Some(per_tick_closed(0.5)));
-        let breakeven = EFFORT_WEIGHT * action_effort(&[3.2; ACTION_SIZE]);
+        let big_gait_tax = EFFORT_WEIGHT * action_effort(&[2.0; ACTION_SIZE]);
         assert!(
-            (breakeven - stride_progress).abs() < 0.03,
-            "effort break-even must sit at the per-tick stride progress: tax {breakeven} vs progress {stride_progress}"
+            big_gait_tax < stride_progress,
+            "break-even must sit above |d|=2/joint: tax {big_gait_tax} vs stride progress {stride_progress}"
         );
         // 4. A saturation-seeking drive (far past the ±1 clamp) is taxed BELOW a real stride
         //    even while closing ground — `|d|²` keeps climbing past the clamp, so the gradient
-        //    pushes the policy out of saturation. At |d|=3 the cost (0.0006·30·9 ≈ 0.16)
-        //    swamps the ≈0.19 stride progress's margin, driving reward toward/below zero.
+        //    pushes the policy out of saturation. At |d|=3 the cost (EFFORT_WEIGHT·N·9 ≈ 0.2 at
+        //    N=38) swamps the ≈0.19 stride progress's margin, driving reward toward/below zero.
         let oversaturated =
             compute_reward(Some(per_tick_closed(0.5)), action_effort(&[3.0; ACTION_SIZE]));
         assert!(

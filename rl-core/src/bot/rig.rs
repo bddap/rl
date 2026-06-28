@@ -10,11 +10,11 @@
 //! from it via [`part_for_bone`]. They can't drift, because there is only one
 //! mapping; mismatched hand-kept copies of it are what forked the rendered legs.
 //!
-//! A leg's six rig bones collapse to three physics links: the proximal cluster
-//! (`000`/`000b`/`001`/`002`) is one rigid coxa that swings at the body, then the
-//! merus and carpus bend. Only those three joints articulate in a real Sally, so
-//! the intermediate bones ride their link rather than spawning as locked stubs —
-//! that bookkeeping bought nothing and left the skin with undriven bones.
+//! A leg's six rig bones collapse to four physics links: the basal joint is 2-DOF,
+//! split into a coxa (`000`/`000b`) that swings the leg fore/aft at the body and a
+//! basis (`001`/`002`) that lifts it up/down just distal, then the merus and carpus
+//! bend. Each link carries real flesh — no massless virtual link — and the bones
+//! between the named pivots ride their link rather than spawning as locked stubs.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -205,16 +205,31 @@ fn antennae_top_bone(side: Side) -> String {
 fn joint_specs() -> Vec<Vec<JointSpec>> {
     let mut chains = Vec::new();
     for side in [Side::Left, Side::Right] {
-        // Legs: front→back, same 0..3 order as the policy. The long coxa swings at
-        // the body; the merus and carpus are the two load-bearing distal bends.
+        // Legs: front→back, same 0..3 order as the policy. The basal joint is 2-DOF,
+        // split into two short links sharing the proximal cluster: the coxa swings the
+        // leg fore/aft at the body root (`000`), then the basis lifts it up/down at the
+        // coxo-basal joint (`001`); the merus and carpus are the two load-bearing distal
+        // bends. Splitting the old single rigid coxa (`000`..`002`) this way earns back
+        // the levator/depressor DOF a real Sally has (bddap/rl#31) without a massless
+        // virtual link — each link carries real flesh. The swing and lift hinges sit at
+        // DIFFERENT pivots (`000` then `001`), not co-located: this is the real crustacean
+        // thoraco-coxal → coxo-basal arrangement, not a ball joint at the hip, so lifting
+        // also telescopes the merus origin slightly along the swung direction — intended.
         for leg in 0u8..4 {
             let b = |seg: &str| leg_bone(leg, seg, side);
             chains.push(vec![
                 JointSpec {
                     id: CrabJointId::LegCoxa(side, leg),
                     pivot: b("000"),
+                    tip: Some(b("001")),
+                    members: vec![b("000"), b("000b")],
+                    density: LEG_DENSITY,
+                },
+                JointSpec {
+                    id: CrabJointId::LegBasis(side, leg),
+                    pivot: b("001"),
                     tip: Some(b("003")),
-                    members: vec![b("000"), b("000b"), b("001"), b("002")],
+                    members: vec![b("001"), b("002")],
                     density: LEG_DENSITY,
                 },
                 JointSpec {
@@ -515,11 +530,15 @@ impl FallbackModel {
             for leg in 0u8..4 {
                 let z = 0.18 - leg as f32 * 0.16;
                 let root = hub + Vec3::new(sx * FB_CARAPACE_HALF_W, 0.0, z);
-                let coxa = root; // 000: leg root at the shell
+                let coxa = root; // 000: leg root at the shell (coxa swing pivot)
                 let knee = root + Vec3::new(sx * 0.22, -0.02, 0.0); // 003: merus pivot
+                // 001: coxo-basal joint, a short step out from the root — the basis lift
+                // pivots here (the 2-DOF basal joint's second hinge).
+                let basis = root + Vec3::new(sx * 0.09, -0.01, 0.0);
                 let ankle = knee + Vec3::new(sx * 0.16, -0.14, 0.0); // 004: carpus pivot
                 let foot = ankle + Vec3::new(sx * 0.05, -0.14, 0.0); // 005: foot tip on the ground
                 o.insert(leg_bone(leg, "000", side), coxa);
+                o.insert(leg_bone(leg, "001", side), basis);
                 o.insert(leg_bone(leg, "003", side), knee);
                 o.insert(leg_bone(leg, "004", side), ankle);
                 o.insert(leg_bone(leg, "005", side), foot);
@@ -580,7 +599,10 @@ impl BindSource for FallbackModel {
     fn radius_hint(&self, part: PartId) -> Option<f32> {
         match part {
             PartId::Joint(
-                CrabJointId::LegCoxa(..) | CrabJointId::LegMerus(..) | CrabJointId::LegCarpus(..),
+                CrabJointId::LegCoxa(..)
+                | CrabJointId::LegBasis(..)
+                | CrabJointId::LegMerus(..)
+                | CrabJointId::LegCarpus(..),
             ) => Some(FB_LEG_RADIUS),
             PartId::Joint(
                 CrabJointId::ClawShoulder(_)
@@ -723,6 +745,18 @@ fn bend_axis(actuated: Option<CrabJointId>, in_dir: Vec3, out_dir: Vec3) -> Vec3
     if matches!(actuated, Some(CrabJointId::LegCoxa(..))) {
         return Vec3::Y;
     }
+    // The basis LIFTS the leg, so its axis is horizontal and perpendicular to the
+    // leg's outward run — `out × Y` strips the bone's vertical component to leave a
+    // pure horizontal hinge, so the DOF is up/down levation, orthogonal to the coxa's
+    // fore/aft swing. Falls back to X only if the leg points straight up (it never does).
+    if matches!(actuated, Some(CrabJointId::LegBasis(..))) {
+        let axis = out_dir.cross(Vec3::Y);
+        return if axis.length() > 0.5 {
+            axis.normalize()
+        } else {
+            Vec3::X
+        };
+    }
     // Owner-tuned wrist sweep axis (az=63.5 el=-15.9). Same
     // parent/world-at-rest frame as the derived `in × out`, so it drops straight in
     // here; the owner dialed it off the kinematic bend to get the hand swinging the
@@ -854,13 +888,14 @@ impl CrabSilhouette {
     }
 
     /// The rig's natural standing height: the vertical (Y) extent of its rest-pose
-    /// collider silhouette, in metres. The ONE size source both giant-crab renders scale
-    /// against — the integer silhouette (`spawn_crab_silhouette`) fits this extent to the giant
-    /// height, and the armed NN rig ([`crate::bot::skin::CrabSkinRepose`]) scales the live skin by
-    /// the same target/height ratio, so the two crabs are the same size by construction (no drift).
-    /// Both renders orient the rig claws-forward by a pure YAW first, which leaves the Y
-    /// extent unchanged, so it's correct to measure it in the rig's own frame here. `0.0` for
-    /// a degenerate (empty/non-finite) recipe — callers guard that case.
+    /// collider silhouette, in metres. This is the ONE source both giant-crab renders
+    /// scale against — the integer silhouette ([`crate::net::render::spawn_crab_silhouette`])
+    /// fits this extent to the giant height, and the armed NN rig
+    /// ([`crate::net::external_crab`]) scales the live body by the same target/height ratio,
+    /// so the two crabs are the same size by construction (no drift). The recipe is oriented
+    /// claws-forward by a pure YAW before rendering, which leaves the Y extent unchanged, so
+    /// it's correct to take the extent in the rig's own frame here. `0.0` for a degenerate
+    /// (empty/non-finite) recipe — callers guard that case.
     pub fn natural_height(&self) -> f32 {
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         for s in self.shapes() {

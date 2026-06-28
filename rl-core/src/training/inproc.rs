@@ -737,8 +737,18 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // Resume the optimizer's Adam moments + step from the checkpoint so the update
     // continues with warm momentum instead of the brief self-correcting transient a cold
     // optimizer costs (rl#60). A pre-rl#60 checkpoint has no optimizer.bin and resumes cold
-    // — backward compatible, no error (see `load_optimizer`).
-    gpu_learner.load_adam_state(&CheckpointDir::new(&checkpoint_dir).optimizer_path());
+    // — backward compatible, no error (see `load_optimizer`). Skipped entirely when the
+    // checkpoint's shape is incompatible (a DOF change, bddap/rl#31): the moments are
+    // per-parameter, so loading old-width moments onto the fresh net would misalign them
+    // exactly as the brain would — the brain cold-starts there, and so must the optimizer.
+    let ckpt = CheckpointDir::new(&checkpoint_dir);
+    if ckpt.warm_start_compatible() {
+        gpu_learner.load_adam_state(&ckpt.optimizer_path());
+    } else {
+        eprintln!(
+            "[learner] optimizer not warm-started: checkpoint shape incompatible — cold moments"
+        );
+    }
 
     // Resume the tick odometer from the checkpoint, not from 0: the overnight loop
     // makes a learner restart the expected case, and without persistence each

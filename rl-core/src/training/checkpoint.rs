@@ -14,7 +14,9 @@ use tracing::warn;
 
 use super::algorithm::{ReturnNormalizer, ReturnNormalizerData};
 use super::atomic_write;
+use crate::bot::actuator::ACTION_SIZE;
 use crate::bot::brain::CrabBrain;
+use crate::bot::sensor::OBS_SIZE;
 
 /// The Adam optimizer over a `CrabBrain` on backend `B`. Generic over the backend so
 /// the one PPO update ([`super::update::ppo_update_core`]) serves the live GPU learner,
@@ -103,6 +105,72 @@ impl<'a> CheckpointDir<'a> {
     #[cfg(any(feature = "wgpu", test))]
     pub(crate) fn optimizer_path(&self) -> PathBuf {
         self.dir.join(OPTIMIZER_FILENAME)
+    }
+
+    fn shape_path(&self) -> PathBuf {
+        self.dir.join(SHAPE_FILENAME)
+    }
+
+    /// Whether this checkpoint's persisted obs/action widths match the running build's
+    /// — the gate every shape-bound warm load (the brain, the Adam optimizer) consults
+    /// before trusting the saved weights. `false` when the sidecar is absent (a fresh
+    /// dir, or a pre-guard checkpoint) or its widths differ, so the caller starts that
+    /// artifact cold instead of loading a shape-incompatible record. See [`SHAPE_FILENAME`].
+    pub(crate) fn warm_start_compatible(&self) -> bool {
+        match BrainShape::load(&self.shape_path()) {
+            Some(saved) => saved == BrainShape::current(),
+            None => false,
+        }
+    }
+
+    /// Persist the current obs/action widths beside the brain. Called on every brain
+    /// checkpoint so the sidecar can't lag the weights it guards.
+    pub(crate) fn save_shape(&self) {
+        let s = BrainShape::current();
+        let body = format!("{} {}\n", s.obs, s.action);
+        if let Err(e) = atomic_write(&self.shape_path(), body.as_bytes()) {
+            warn!(
+                "Failed to write brain shape sidecar to {}: {e}",
+                self.shape_path().display()
+            );
+        }
+    }
+}
+
+/// The observation/action vector widths a checkpoint's weights were trained at,
+/// recorded beside the brain as [`SHAPE_FILENAME`]. Both derive from
+/// [`crate::bot::body::CrabJointId::COUNT`] (the policy-actuated DOF set), so adding
+/// articulation (bddap/rl#31) changes them — and a brain saved at the old width is
+/// silently wrong in the new net (burn would load a `[30, …]` policy head into a
+/// `[38, …]` one). Persisting and checking the widths makes that mismatch loud and
+/// safe by construction: a resume refuses to warm-start an incompatible checkpoint and
+/// starts cold instead. A pre-guard checkpoint has no sidecar and is likewise treated
+/// as incompatible — exactly the behavior wanted across a DOF change (the stale weights
+/// are discarded, not loaded askew).
+const SHAPE_FILENAME: &str = "shape.txt";
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+struct BrainShape {
+    obs: usize,
+    action: usize,
+}
+
+impl BrainShape {
+    fn current() -> Self {
+        Self {
+            obs: OBS_SIZE,
+            action: ACTION_SIZE,
+        }
+    }
+
+    /// Parse the two whitespace-separated widths; `None` on a missing, unreadable, or
+    /// malformed sidecar (all of which the caller treats as "not warm-startable").
+    fn load(path: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let mut it = text.split_whitespace();
+        let obs = it.next()?.parse().ok()?;
+        let action = it.next()?.parse().ok()?;
+        Some(Self { obs, action })
     }
 }
 
@@ -271,6 +339,39 @@ mod tests {
     use burn::optim::{GradientsParams, Optimizer};
     use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
     use burn::tensor::Tensor;
+
+    /// The shape sidecar gates warm-starts: absent ⇒ never warm-start (a fresh dir or a
+    /// pre-guard checkpoint), matching widths ⇒ warm, differing widths ⇒ cold. This is the
+    /// guard that keeps a DOF change (bddap/rl#31) from loading an old-width brain into the
+    /// re-shaped net.
+    #[test]
+    fn shape_guard_gates_warm_start() {
+        let dir = std::env::temp_dir().join(format!("rl_test_shape_guard_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = CheckpointDir::new(&dir);
+
+        // No sidecar yet ⇒ not warm-startable.
+        assert!(!paths.warm_start_compatible(), "absent sidecar must block warm start");
+
+        // After stamping the current widths ⇒ warm-startable.
+        paths.save_shape();
+        assert!(
+            paths.warm_start_compatible(),
+            "a sidecar matching the current widths must allow warm start"
+        );
+        let parsed = BrainShape::load(&paths.shape_path()).expect("sidecar parses");
+        assert_eq!(parsed, BrainShape::current());
+
+        // A sidecar from a different DOF count ⇒ blocked again.
+        std::fs::write(paths.shape_path(), format!("{} {}\n", OBS_SIZE + 1, ACTION_SIZE + 1)).unwrap();
+        assert!(
+            !paths.warm_start_compatible(),
+            "a sidecar with different widths must block warm start"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn brain_checkpoint_round_trips() {
