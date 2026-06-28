@@ -47,7 +47,7 @@ use crab_world::controls::{
     track_active_device, update_controls_ui,
 };
 use crate::cadence::PhysicsCadence;
-use crab_world::controls::{self, Action, GcrContext, GcrControls};
+use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::lockstep::{Lockstep, TickMsg};
 use crate::net_loop::{NetDriver, PeerMsg};
 use crate::sim::{
