@@ -177,7 +177,7 @@ impl ExternalCrabBridge {
     /// the lockstep determinism hash reads that raw pose — so the giant is a RENDER-ONLY blow-up
     /// applied to the skin AFTER the hash. With no integer silhouette to stand in (rl#114) this
     /// rig is the ONLY crab, so without the matching blow-up it renders as a ~1 m speck in a world
-    /// framed for the [`crate::render::CRAB_RENDER_HEIGHT`] monster — the play-day "no crab
+    /// framed for the giant-crab render height — the play-day "no crab
     /// visible" bug. `None` until the crab has been sampled once (so we never place against a
     /// stale/zero carapace).
     fn render_placement_m(&self) -> Option<CrabPlacement> {
