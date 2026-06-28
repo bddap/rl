@@ -43,6 +43,10 @@ pub mod training;
 pub mod play;
 #[cfg(feature = "render")]
 pub mod player;
+/// Procedural night-sky skybox shared by both rendered surfaces (rl-demo + GCR). `pub`
+/// because the `net` crate's GCR app builders add its [`sky::NightSkyPlugin`] too.
+#[cfg(feature = "render")]
+pub mod sky;
 /// Shared offscreen render-to-PNG-on-settle primitive behind both headless shots
 /// (the crab inspection shot in `play`, the FP game-view shot in the `net` crate's `render`).
 /// `pub` because that `net::render` shot lives in the sibling crate and composes this.

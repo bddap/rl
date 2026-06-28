@@ -42,6 +42,8 @@ pub fn build_screenshot_app(
     app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
         Duration::from_secs_f64(1.0 / 60.0),
     ));
+    // Night-sky skybox behind the captured FP frame (same sky as the windowed GCR client).
+    app.add_plugins(crab_world::sky::NightSkyPlugin);
     // Advance the sim a FIXED amount per frame instead of by wall-clock, so the
     // composed scene is a function of the settle COUNT, not how fast software-Vulkan
     // renders each frame (otherwise a slower box advances the sim further before the
