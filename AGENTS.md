@@ -21,3 +21,21 @@ the one he asked for; he appreciates the pushback. Dry sass too.
 - `cargo fmt --check`
 - `cargo clippy --quiet --all-targets -- --deny warnings` (`--all-targets` lints test/bench/example code too, so test-only lints can't slip in)
 - `cargo test -q`
+
+## Profiling
+"Why is the game slow?" → `scripts/profile-game.sh` instead of rediscovering the
+toolchain. `--pid N` attaches to a running process (read-only — safe against a live
+session); with no `--pid` it launches a target (default the deployed game, pinned to
+the build-free cores 14-23) and kills it after. `--perf` adds a flamegraph-style
+frame breakdown (needs `perf` + privilege; skipped if absent). Run the whole script
+as user `a` for the real Vulkan client.
+
+It reports the signals that localize a bottleneck: render **backend** (Vulkan/NVIDIA
+= GPU, llvmpipe/lavapipe = software fallback, from the bevy `AdapterInfo` log line);
+**GPU util** over time (idle while slow ⇒ NOT GPU-bound); **per-thread CPU** via
+`top -H` (one thread ~100% ⇒ serial bottleneck; whole proc ~1 core while loadavg ≫
+cores ⇒ preemption starvation, corroborated by nonvoluntary context switches); and
+the optional perf frame breakdown. FPS only shows if the target logs it (add bevy
+`FrameTimeDiagnosticsPlugin` + `LogDiagnosticsPlugin`). The 2026-06-28 GCR slideshow
+was GPU-idle + ~1-core-capped at loadavg ~31 = host CPU oversubscription, not game
+code.
