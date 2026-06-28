@@ -456,10 +456,11 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
 /// SAME barrier as the menu and as `game net`, so the agreed roster + seed are identical
 /// however play was reached; a Host-alone fallback yields a solo round when nobody shows.
 fn run_play(args: PlayArgs) -> Result<()> {
-    // Pin task pools BEFORE the matchmaking / `solo_lockstep_for` / `App::new` below latch the
-    // pools — keeps the armed float NN crab cross-peer deterministic in multiplayer (GCR#113).
-    // Why this must be first: see `render::pin_process_pools`.
-    render::pin_process_pools();
+    // The single-thread pin that keeps the NN crab cross-peer deterministic is decided LATER, in
+    // `build_windowed_app`, from whether the formed round actually has a remote peer: matchmaking
+    // below resolves the roster first, so a solo round (no peer) can skip the pin and run
+    // multi-threaded (~60fps) while a networked round still pins (GCR#113). The pin lands before
+    // `App::new()` latches the task pools — see `render::build_windowed_app`.
     // The REQUIRED NN-crab checkpoint dir — the one giant crab IS the trained NN body (rl#114): no
     // integer fallback, so a missing brain is a hard, actionable failure here. Resolved BEFORE the
     // handshake so the scripted host/join path can advertise our REAL weights digest (two peers arm
@@ -508,11 +509,11 @@ fn run_play(args: PlayArgs) -> Result<()> {
             telemetry: args.telemetry,
         }
     };
-    // Arming is decided in `build_windowed_app`: a SOLO round always arms the NN crab, a NETWORKED
-    // round arms it once peers agree on weights+assets (the digest handshake above), and a round
-    // that can't agree FAILS LOUD rather than substituting a fake crab. The single-thread pin above
-    // (`pin_process_pools`) plus the schedule pin inside `build_windowed_app` keep the armed float
-    // crab cross-peer deterministic.
+    // Arming AND the cross-peer single-thread pin are both decided in `build_windowed_app`: a SOLO
+    // round always arms the NN crab and runs multi-threaded (no peer to stay in sync with); a
+    // NETWORKED round arms it once peers agree on weights+assets (the digest handshake above) and
+    // pins every task pool to one thread so the float crab evolves bit-identically across peers; a
+    // round that can't agree FAILS LOUD rather than substituting a fake crab.
     render::build_windowed_app(boot, external_crab).run();
     Ok(())
 }
@@ -574,10 +575,12 @@ fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
         .nn_crab_checkpoint
         .map(|flag| nn_crab_checkpoint_dir(Some(flag)))
         .transpose()?;
-    // The armed NN crab steps real rapier physics, which — like the windowed solo client — must run
-    // single-threaded (the multibody solver is otherwise nondeterministic and can NaN-panic). Pin
-    // the global task pools BEFORE the app builds (idempotent OnceLock); harmless for the silhouette
-    // shot. See the same first-thing call in `run_play` and `render::pin_process_pools`.
+    // The armed NN crab steps real rapier physics; pin the global task pools to one thread BEFORE
+    // the app builds (idempotent OnceLock) so this single settled frame is byte-reproducible run to
+    // run — a screenshot is evidence, so a stable solver/inference order is worth more than its
+    // (one-frame) speed. The windowed client pins ONLY for a networked round (see
+    // `render::build_windowed_app`); this evidence path always pins when a crab is armed. Harmless
+    // for the silhouette shot (no physics). See `render::pin_process_pools`.
     if external_crab.is_some() {
         render::pin_process_pools();
     }
