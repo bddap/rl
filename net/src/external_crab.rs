@@ -307,6 +307,12 @@ fn external_crab_armed(active: Option<Res<ExternalCrabArmed>>) -> bool {
 /// goes through this.
 pub fn arm(world: &mut World, networked: bool) {
     world.insert_resource(ExternalCrabArmed);
+    // The armed crab IS the one trained Sally: a `rescue_nonfinite_crabs` fire is now a
+    // physics-correctness FAULT to surface LOUDLY (error log + aggregated telemetry, hard panic
+    // in debug/test), never a silent catch-and-respawn (rl#137). Marking it HERE — the one arm
+    // path every site funnels through — means no caller can arm Sally and forget to make her
+    // rescue loud; training (which never calls `arm`) keeps the quiet routine-terminator rescue.
+    world.insert_resource(crab_world::bot::CrabRescueIsFault);
     if networked {
         world.resource_mut::<ExternalCrabBridge>().pin_default_lead();
     }

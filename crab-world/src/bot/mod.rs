@@ -87,6 +87,7 @@ impl Plugin for BotPlugin {
             .init_resource::<sensor::CrabTargets>()
             .init_resource::<CrabSpawns>()
             .init_resource::<body::CrabAssets>()
+            .init_resource::<RescueStats>()
             .add_message::<CrabRescued>()
             .add_systems(Startup, spawn_initial_crabs)
             .add_systems(FixedUpdate, rescue_nonfinite_crabs.before(BotSet::Sense))
@@ -107,13 +108,62 @@ impl Plugin for BotPlugin {
     }
 }
 
+/// Which crab body part [`rescue_nonfinite_crabs`] found non-finite first, named for the
+/// loud log + the aggregated hub telemetry. `Carapace` is the multibody root; `Joint`
+/// carries the actuated joint id (so `LegBasis(Left, 2)` pinpoints the offender). `Unknown`
+/// is a defensive fallback that should be unreachable — every spawned [`body::CrabBodyPart`]
+/// is either the carapace or an actuated joint (locked links like the eye-stalks aren't
+/// spawned as parts), so it only fires if a future body part is added without either marker.
+#[derive(Clone, Copy, Debug)]
+pub enum RescueBody {
+    Carapace,
+    Joint(body::CrabJointId),
+    Unknown,
+}
+
+impl std::fmt::Display for RescueBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RescueBody::Carapace => write!(f, "carapace"),
+            RescueBody::Joint(id) => write!(f, "{id:?}"),
+            RescueBody::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// Present iff this world runs the ONE trained "Sally" as the single armed crab — solo or
+/// networked play and the headless NN-crab probes — where a stable trained policy must NEVER
+/// drive the body non-finite. There a [`rescue_nonfinite_crabs`] fire is a physics-correctness
+/// FAULT to surface LOUDLY (and hard-fail in dev/debug/test builds), never a silent
+/// catch-and-respawn (rl#137 — the silent rescue hid a frame-by-frame blowup for weeks).
+/// Deliberately ABSENT in TRAINING, where a fresh/random policy plus the randomized-start
+/// curriculum drives crabs non-finite constantly BY DESIGN and the rescue is the routine
+/// per-episode reward terminator — making every training rescue a loud error or a panic would
+/// drown the signal and kill the run. Inserted by [`net::external_crab::arm`] — the ONE arm
+/// path every armed-Sally site (windowed play, screenshot, the headless probes) funnels through.
+#[derive(Resource)]
+pub struct CrabRescueIsFault;
+
+/// Running tally of [`rescue_nonfinite_crabs`] fires, so a rescue is OBSERVABLE rather than
+/// silent (rl#137). `total` is monotonic (a stable solo round leaves it at 0 — the verification
+/// bar); `since_report` is drained+zeroed by the windowed driver each telemetry window to emit
+/// ONE aggregated hub event per window instead of a per-step flood; `last_body` names the most
+/// recent offender for that event.
+#[derive(Resource, Default)]
+pub struct RescueStats {
+    pub total: u64,
+    pub since_report: u32,
+    pub last_body: Option<RescueBody>,
+}
+
 /// Sent when [`rescue_nonfinite_crabs`] had to rebuild an env's crab.
 /// Training must treat it as an episode terminator: the replacement crab is
 /// back at spawn, and letting the episode run on would smear that teleport
-/// into the reward stream.
+/// into the reward stream. `body` names the offending part for the loud surface.
 #[derive(Message)]
 pub struct CrabRescued {
     pub env: usize,
+    pub body: RescueBody,
 }
 
 /// System: rebuilds any crab whose pose has gone non-finite (solver blowup,
@@ -124,32 +174,102 @@ pub struct CrabRescued {
 /// on the tick after it happens; a NaN that panics the solver within the very
 /// step that created it is still fatal, and the outer auto-resume loop is the
 /// backstop for that rarer case.
+///
+/// LOUD by construction (rl#137): for the single armed Sally (the [`CrabRescueIsFault`]
+/// marker present) every fire is a physics-correctness fault — an `error!` naming the
+/// offending body + its non-finite value, a drained [`RescueStats`] tally the driver turns
+/// into an aggregated hub telemetry event, and a HARD PANIC in dev/debug/test builds so a
+/// regression can't hide. The deployed playtest is a release build (`debug_assertions` off):
+/// it logs + counts + respawns as a VISIBLE last resort rather than crashing the family's
+/// game, but never silently. In training (no marker) the fire stays quiet — it is the routine
+/// episode terminator, not a fault.
 pub fn rescue_nonfinite_crabs(
     mut commands: Commands,
     assets: Res<body::CrabAssets>,
     spawns: Res<CrabSpawns>,
-    parts: Query<(Entity, &body::CrabEnvId, &Transform), With<body::CrabBodyPart>>,
+    parts: Query<
+        (
+            Entity,
+            &body::CrabEnvId,
+            &Transform,
+            Option<&body::CrabCarapace>,
+            Option<&body::CrabJoint>,
+        ),
+        With<body::CrabBodyPart>,
+    >,
     mut rescued: MessageWriter<CrabRescued>,
+    mut stats: ResMut<RescueStats>,
+    // Present only for the single armed Sally (see [`CrabRescueIsFault`]); absent in training.
+    is_fault: Option<Res<CrabRescueIsFault>>,
+    time: Res<Time>,
+    // Throttle the LOUD log to ~1/s (fixed clock) so an every-step blowup names the offender
+    // without flooding the journal — the aggregated count rides the telemetry window instead.
+    mut last_log_secs: Local<Option<f64>>,
 ) {
-    let mut sick: Vec<usize> = Vec::new();
-    for (_, id, t) in parts.iter() {
-        if (!t.translation.is_finite() || !t.rotation.is_finite()) && !sick.contains(&id.0) {
-            sick.push(id.0);
+    // First non-finite part per sick env, captured WITH its offending value so the loud
+    // surface can NAME the body (carapace root, else the actuated joint) and the number.
+    let mut sick: Vec<(usize, RescueBody, Vec3, Quat)> = Vec::new();
+    for (_, id, t, carapace, joint) in parts.iter() {
+        if (!t.translation.is_finite() || !t.rotation.is_finite())
+            && !sick.iter().any(|(e, ..)| *e == id.0)
+        {
+            let body = if carapace.is_some() {
+                RescueBody::Carapace
+            } else if let Some(j) = joint {
+                RescueBody::Joint(j.id)
+            } else {
+                RescueBody::Unknown
+            };
+            sick.push((id.0, body, t.translation, t.rotation));
         }
     }
-    for env in sick {
+    if sick.is_empty() {
+        return;
+    }
+
+    let fault = is_fault.is_some();
+    for &(env, body, translation, rotation) in &sick {
+        stats.total += 1;
+        stats.since_report = stats.since_report.saturating_add(1);
+        stats.last_body = Some(body);
+
+        if fault {
+            let now = time.elapsed_secs_f64();
+            if last_log_secs.is_none_or(|t| now - t >= 1.0) {
+                error!(
+                    "rescue_nonfinite_crabs: armed crab (env {env}) went NON-FINITE at `{body}` \
+                     translation={translation:?} rotation={rotation:?} — respawning as a VISIBLE \
+                     last resort (physics-correctness fault, rl#137; rescue total={}). A stable \
+                     trained Sally must never trip this.",
+                    stats.total
+                );
+                *last_log_secs = Some(now);
+            }
+            // Dev/training/debug + tests hard-fail at the step boundary, surfaced at the source,
+            // so a regression can't hide. The DEPLOYED playtest (release, debug_assertions off)
+            // must NOT crash the family's game — it falls through to the loud respawn below.
+            #[cfg(debug_assertions)]
+            panic!(
+                "rescue_nonfinite_crabs: armed crab (env {env}) went NON-FINITE at `{body}` \
+                 translation={translation:?} rotation={rotation:?} (rl#137 — a stable trained \
+                 Sally must never go non-finite; this is a physics-correctness regression)"
+            );
+        }
+    }
+
+    for &(env, body, ..) in &sick {
         let origin = spawns.0.get(env).copied().unwrap_or(Vec3::ZERO);
         respawn_crab(
             &mut commands,
             &assets,
             parts
                 .iter()
-                .filter(|(_, id, _)| id.0 == env)
-                .map(|(e, _, _)| e),
+                .filter(|(_, id, ..)| id.0 == env)
+                .map(|(e, ..)| e),
             origin,
             env,
         );
-        rescued.write(CrabRescued { env });
+        rescued.write(CrabRescued { env, body });
     }
 }
 
