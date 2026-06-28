@@ -520,7 +520,7 @@ struct MergedRollout {
 #[cfg(feature = "wgpu")]
 fn snapshot_policy(state: &TrainingState, curriculum: Curriculum) -> RollRequest {
     RollRequest {
-        brain_bytes: Arc::new(snapshot_brain_bytes(&state.brain)),
+        brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
         normalizer: Arc::new(state.normalizer_snapshot()),
         curriculum,
     }
@@ -1140,13 +1140,13 @@ mod tests {
         // The learner side: owns the policy; snapshot it before and after to prove
         // the update over the thread's buffers actually moved the weights.
         let mut state = TrainingState::new(&config);
-        let before = snapshot_brain_bytes(&state.brain);
+        let before = snapshot_brain_bytes(state.brain());
 
         let thread = RolloutThread::spawn(0, config.clone(), horizon);
         thread
             .request_tx
             .send(RollRequest {
-                brain_bytes: Arc::new(snapshot_brain_bytes(&state.brain)),
+                brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
                 normalizer: Arc::new(state.normalizer_snapshot()),
                 curriculum: Curriculum::start(),
             })
@@ -1185,7 +1185,7 @@ mod tests {
                 && metrics.entropy.is_finite(),
             "PPO metrics must be finite: {metrics:?}"
         );
-        let after = snapshot_brain_bytes(&state.brain);
+        let after = snapshot_brain_bytes(state.brain());
         assert_ne!(
             before, after,
             "the PPO update must change the policy weights (learning)"
@@ -1213,7 +1213,7 @@ mod tests {
         let (config, dir) = scratch_config("parity_two_threads", m);
 
         let state = TrainingState::new(&config);
-        let brain_bytes = Arc::new(snapshot_brain_bytes(&state.brain));
+        let brain_bytes = Arc::new(snapshot_brain_bytes(state.brain()));
         let normalizer = Arc::new(state.normalizer_snapshot());
 
         let threads: Vec<RolloutThread> = (0..k)
