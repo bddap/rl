@@ -177,9 +177,18 @@ fn build_providers(service_name: &str, endpoint: &str) -> anyhow::Result<Provide
         .with_attributes(env_resource_attributes())
         .build();
 
+    // Per-signal endpoint = base + `/v1/{traces,logs,metrics}`. The OTLP/HTTP exporter only
+    // appends that path itself when the endpoint comes from `OTEL_EXPORTER_OTLP_ENDPOINT`;
+    // a `.with_endpoint(...)` value (our `RL_OTEL` default path) is used VERBATIM, so a bare
+    // base posts to `/` and the collector 404s — telemetry silently dropped. Append the path
+    // ourselves so the convenience opt-in actually delivers. (A signal-specific
+    // `OTEL_EXPORTER_OTLP_{LOGS,TRACES,METRICS}_ENDPOINT` env still wins inside the exporter
+    // and is taken verbatim, so this never double-appends.)
+    let base = endpoint.strip_suffix('/').unwrap_or(endpoint);
+
     let span_exporter = SpanExporter::builder()
         .with_http()
-        .with_endpoint(endpoint)
+        .with_endpoint(format!("{base}/v1/traces"))
         .build()?;
     let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_resource(resource.clone())
@@ -188,7 +197,7 @@ fn build_providers(service_name: &str, endpoint: &str) -> anyhow::Result<Provide
 
     let log_exporter = LogExporter::builder()
         .with_http()
-        .with_endpoint(endpoint)
+        .with_endpoint(format!("{base}/v1/logs"))
         .build()?;
     let logger_provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
         .with_resource(resource.clone())
@@ -197,7 +206,7 @@ fn build_providers(service_name: &str, endpoint: &str) -> anyhow::Result<Provide
 
     let metric_exporter = MetricExporter::builder()
         .with_http()
-        .with_endpoint(endpoint)
+        .with_endpoint(format!("{base}/v1/metrics"))
         .build()?;
     let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(metric_exporter).build();
     let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()

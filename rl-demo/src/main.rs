@@ -83,11 +83,23 @@ enum AppMode {
 fn main() {
     let args = Args::parse();
 
-    // OTEL/tracing first: install the shared subscriber so the canonical-mesh check below
-    // can report a missing asset as a LOUD error telemetry record (exported to the bothouse
-    // sink when wired, stderr always). The guard must outlive the whole run, so it's bound
-    // here and dropped only when `main` returns. rl-demo disables bevy's own LogPlugin (in
-    // the plugin arms below) so THIS is the one global subscriber.
+    // Default the log filter to WARN before `otel::init` reads it. rl-demo disables bevy's
+    // LogPlugin (below) so the otel subscriber is the only one, which means it ALSO governs
+    // OTLP export — and bevy/wgpu emit a torrent of INFO every frame. At the default `info`
+    // that torrent would flood the telemetry sink when export is on (tens of MB per run),
+    // burying the signals that matter. WARN keeps every error/warning — the canonical-mesh
+    // error and the checkpoint-mismatch refusal included — and drops the per-frame noise.
+    // `RUST_LOG` still overrides for local debugging.
+    //
+    // SAFETY: program start, single-threaded, before `App::new` spawns any thread that reads
+    // env — same pattern as `crab_world::bot::headless`'s `set_var`.
+    if std::env::var_os("RUST_LOG").is_none() {
+        unsafe { std::env::set_var("RUST_LOG", "warn") };
+    }
+    // OTEL/tracing: install the shared subscriber so the canonical-mesh check below can report
+    // a missing asset as a LOUD error telemetry record (exported to the bothouse sink when
+    // wired, stderr always). The guard must outlive the whole run, so it's bound here and
+    // dropped only when `main` returns.
     let _otel = otel::init("rl-demo");
 
     // rl-demo is a PLAYER-FACING surface (the windowed couch demo and its screenshot), so the
