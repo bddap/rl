@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 # render ON: the windowed demo + screenshot modes need the bevy renderer.
-rl-core = { path = "../rl-core", features = ["render"] }
+crab-world = { path = "../crab-world", features = ["render"] }
 bevy.workspace = true
 bevy_rapier3d.workspace = true
 clap.workspace = true

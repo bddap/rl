@@ -1,0 +1,59 @@
+[package]
+name = "net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "net"
+path = "src/lib.rs"
+
+[features]
+# OFF by default — the headless netcode (lockstep/sim/transport, and the `game`
+# binary's headless net/solo/probe modes) links NO bevy_render/bevy_egui. `render`
+# forwards to crab-world's `render` (so the crab machinery it drives is rendered too),
+# flips bevy + bevy_rapier3d back to their full default sets, and pulls `bevy_egui` for
+# the boot menu — the windowed first-person client (`render`, `menu`) is the only part
+# that needs the GPU stack.
+render = [
+    "crab-world/render",
+    "bevy/default",
+    "bevy_rapier3d/default",
+    "dep:bevy_egui",
+    "enhanced-determinism",
+]
+
+# GCR avenue 1 (rl#82): rapier's bit-level cross-platform physics determinism. Forwards
+# to crab-world's same feature (which carries `rapier3d/enhanced-determinism`); cargo
+# unifies it onto the one shared rapier3d. The two-sim `determinism_probe` regression runs
+# under this feature to exercise the shipped config headlessly.
+enhanced-determinism = ["crab-world/enhanced-determinism"]
+
+[dependencies]
+# The crab machinery this netcode drives into multiplayer (the external-crab bridge, the
+# solo-crab render path, the shared FNV/physics digests). Feature-matched: net's `render`
+# turns on crab-world's `render`.
+crab-world = { path = "../crab-world" }
+# Mirror crab-world's headless bevy set; `render` flips bevy's full default back on. net's
+# sim/lockstep use bevy ECS/math headlessly, the FP client uses the renderer.
+bevy = { workspace = true, features = [
+    "std",
+    "multi_threaded",
+    "bevy_asset",
+    "bevy_scene",
+    "bevy_state",
+    "bevy_log",
+] }
+bevy_rapier3d = { workspace = true, features = ["dim3"] }
+bevy_egui = { workspace = true, optional = true }
+rand.workspace = true
+serde.workspace = true
+bincode.workspace = true
+rand_chacha.workspace = true
+
+iroh.workspace = true
+iroh-mdns-address-lookup.workspace = true
+n0-future.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

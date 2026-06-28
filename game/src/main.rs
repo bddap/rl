@@ -1,13 +1,13 @@
 //! `game` — the giant-crab rescue game (rl#38), built multiplayer-first on the
 //! deterministic-lockstep + iroh netcode foundation (rl#39).
 //!
-//! This binary is the HEADLESS driver of the deterministic sim ([`rl_core::net::sim`] —
+//! This binary is the HEADLESS driver of the deterministic sim ([`net::sim`] —
 //! now the Phase 1 gray-box Extraction loop: first-person players, one giant crab,
-//! an extraction point) over [`rl_core::net::lockstep`] and [`rl_core::net::transport`] (iroh
+//! an extraction point) over [`net::lockstep`] and [`net::transport`] (iroh
 //! LAN discovery). It proves the netcode end to end — discovery, input exchange,
 //! deterministic tick, desync detection — without a GPU (this box renders headlessly
 //! at best). The windowed first-person client + the plane/heli vehicles are separate
-//! later subs that plug into the same sim interface (documented on [`rl_core::net::sim`]);
+//! later subs that plug into the same sim interface (documented on [`net::sim`]);
 //! they consume the state this driver advances, they don't replace it.
 //!
 //! Modes:
@@ -17,7 +17,7 @@
 //! - `solo`: run the lockstep+sim loop with no network (one peer), for a quick
 //!   smoke of the tick machinery (it stirs a placeholder input — real movement is
 //!   the client's job, not this headless smoke's).
-//! - `play`: the windowed first-person CLIENT ([`rl_core::net::render`]) — see the
+//! - `play`: the windowed first-person CLIENT ([`net::render`]) — see the
 //!   gray-box from the local player's eyes and play it, on the SAME lockstep +
 //!   transport as `net`. Boots to a Host / Join menu; `--host`/`--join <code>` skip it
 //!   for scripting/tests.
@@ -31,13 +31,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use iroh::EndpointId;
-use rl_core::net::lockstep::{INPUT_DELAY, Lockstep};
+use net::lockstep::{INPUT_DELAY, Lockstep};
 // `TICK_HZ` is the deterministic sim's tick rate. The ONE source lives in `net::sim`
 // (so a render peer and this headless driver agree); import it rather than redeclare a
 // second `30` that could silently drift from the sim's.
-use rl_core::net::sim::{Input, PlayerId, TICK_HZ};
-use rl_core::net::telemetry::{self, TELEMETRY_TICK_EVERY, TelemetryEvent, TelemetrySender};
-use rl_core::net::{net_loop, render, transport};
+use net::sim::{Input, PlayerId, TICK_HZ};
+use net::telemetry::{self, TELEMETRY_TICK_EVERY, TelemetryEvent, TelemetrySender};
+use net::{net_loop, render, transport};
 
 #[derive(Parser)]
 #[command(about = "Giant-crab rescue — Phase 1 gray-box extraction loop on deterministic lockstep + iroh")]
@@ -144,7 +144,7 @@ struct PlayArgs {
     /// giant crab IS the rapier-simulated NN body (rl#114, no integer fallback). It drives the crab
     /// on a SOLO round (a Host-alone Start, or a scripted `--host` that found no peer) AND — since
     /// the GCR fold (rl#82) — on a NETWORKED round once peers agree on the brain + collider asset
-    /// (the weights/asset handshake, [`rl_core::net::may_arm_external_crab`]): the float NN crab is
+    /// (the weights/asset handshake, [`net::may_arm_external_crab`]): the float NN crab is
     /// then cross-peer deterministic (`enhanced-determinism`, proven by `game nn-crab-xpeer`). A
     /// missing/empty dir, or a networked round whose peers DON'T agree, FAILS LOUD with an
     /// actionable message rather than substituting a fake crab. Defaults to the
@@ -203,7 +203,7 @@ struct TelemetryCollectorArgs {
     /// Path to the collector's persistent secret key (generated on first run). Pinning
     /// it keeps the collector's endpoint id STABLE across restarts, so the id baked into
     /// each game's `--telemetry` never goes stale.
-    #[arg(long, default_value = rl_core::net::telemetry::DEFAULT_KEY_PATH)]
+    #[arg(long, default_value = net::telemetry::DEFAULT_KEY_PATH)]
     key: PathBuf,
 }
 
@@ -288,7 +288,7 @@ fn main() -> Result<()> {
 /// and confirm they stayed byte-identical. Exits nonzero on any divergence so it doubles as a CI
 /// gate on "the NN crab is the deterministic multiplayer crab".
 fn run_nn_crab_xpeer(args: NnCrabXpeerArgs) -> Result<()> {
-    use rl_core::net::external_crab::run_cross_peer_probe;
+    use net::external_crab::run_cross_peer_probe;
 
     let dir = nn_crab_checkpoint_dir(args.checkpoint)?;
     println!("nn-crab-xpeer: checkpoint={}", dir.display());
@@ -302,8 +302,8 @@ fn run_nn_crab_xpeer(args: NnCrabXpeerArgs) -> Result<()> {
     // Per-tick `<tick> <hash>` logs for each peer, so an operator can `diff` them directly.
     fn write_log(
         path: &PathBuf,
-        ticks: &[rl_core::net::external_crab::XPeerTick],
-        pick: fn(&rl_core::net::external_crab::XPeerTick) -> u64,
+        ticks: &[net::external_crab::XPeerTick],
+        pick: fn(&net::external_crab::XPeerTick) -> u64,
     ) -> Result<()> {
         use std::fmt::Write as _;
         let mut out = String::with_capacity(ticks.len() * 28);
@@ -363,7 +363,7 @@ fn run_nn_crab_xpeer(args: NnCrabXpeerArgs) -> Result<()> {
 /// and a PASS/look-here verdict; exits nonzero if the crab never closed the gap (so it
 /// doubles as a regression gate on "the policy actually drives the crab toward the player").
 fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
-    use rl_core::net::external_crab::run_headless_probe;
+    use net::external_crab::run_headless_probe;
 
     let dir = nn_crab_checkpoint_dir(args.checkpoint)?;
     println!("nn-crab-probe: checkpoint={}", dir.display());
@@ -446,7 +446,7 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
 
 /// Windowed first-person client. The DEFAULT (`game play` with no flag) shows the boot menu
 /// — the player picks Host / Join — and the round is built only after the choice, never
-/// touching the deterministic sim before then (see [`rl_core::net::render::Boot`]). The
+/// touching the deterministic sim before then (see [`net::render::Boot`]). The
 /// scripted flags bypass the menu for tests/scripts:
 /// - `--host` → host directly: form over the LAN, start with whoever joins (solo if none).
 /// - `--join [CODE]` → join directly: dial CODE (or LAN-discover if bare), then form.
@@ -464,9 +464,9 @@ fn run_play(args: PlayArgs) -> Result<()> {
     // The REQUIRED NN-crab checkpoint dir — the one giant crab IS the trained NN body (rl#114): no
     // integer fallback, so a missing brain is a hard, actionable failure here. Resolved BEFORE the
     // handshake so the scripted host/join path can advertise our REAL weights digest (two peers arm
-    // the NN crab only when their brains agree — see `rl_core::net::may_arm_external_crab`).
+    // the NN crab only when their brains agree — see `net::may_arm_external_crab`).
     let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint)?;
-    let weights_digest = rl_core::play::checkpoint_digest(&external_crab);
+    let weights_digest = crab_world::play::checkpoint_digest(&external_crab);
     let boot = if args.host || args.join.is_some() {
         // Scripted host/join: dial the join code if joining (blank/absent = LAN discover),
         // form over the barrier, and hand the result to Boot::Round. Host never dials. This
@@ -486,7 +486,7 @@ fn run_play(args: PlayArgs) -> Result<()> {
             // Advertise our REAL weights + crab-asset digests so two scripted peers carrying the
             // same checkpoint arm the NN crab; a mismatch refuses the round (rl#114, no fallback).
             weights_digest,
-            rl_core::bot::meshfit::crab_asset_digest(),
+            crab_world::bot::meshfit::crab_asset_digest(),
         )?;
         match result {
             net_loop::MatchResult::Joined(joined) => {
@@ -648,7 +648,7 @@ async fn run_net(args: NetArgs) -> Result<()> {
 
     // Open the telemetry side-channel (if configured) BEFORE forming the match, so the
     // collector sees the roster fill. Best-effort + isolated: separate iroh endpoint,
-    // separate ALPN — see `rl_core::net::telemetry`. A failure yields `None` and the run is
+    // separate ALPN — see `net::telemetry`. A failure yields `None` and the run is
     // byte-for-byte the no-telemetry run.
     let tel = net_loop::connect_telemetry(args.telemetry, my_eid).await;
 
@@ -663,7 +663,7 @@ async fn run_net(args: NetArgs) -> Result<()> {
         tel.as_ref(),
         None, // headless: timer-closed barrier, no interactive lobby
         0,    // headless has no rapier-NN crab stack → 0 weights digest; the crab holds spawn (rl#114)
-        rl_core::bot::meshfit::crab_asset_digest(), // honest crab-asset digest (rl#100)
+        crab_world::bot::meshfit::crab_asset_digest(), // honest crab-asset digest (rl#100)
     )
     .await?
     {
@@ -782,7 +782,7 @@ async fn run_net(args: NetArgs) -> Result<()> {
                 t.send(TelemetryEvent::tick(ls.sim(), total_desyncs, all_ids.len()));
                 t.send(TelemetryEvent::input(issue_tick, input));
             }
-            if !reported_outcome && ls.sim().outcome() != rl_core::net::sim::Outcome::Ongoing {
+            if !reported_outcome && ls.sim().outcome() != net::sim::Outcome::Ongoing {
                 reported_outcome = true;
                 t.send(TelemetryEvent::round_decided(ls.sim()));
             }
@@ -832,10 +832,10 @@ async fn run_net(args: NetArgs) -> Result<()> {
 /// divergence the instant a deck does.
 fn report_fault(
     total: &mut usize,
-    f: rl_core::net::lockstep::Fault,
+    f: net::lockstep::Fault,
     telemetry: Option<&TelemetrySender>,
 ) {
-    use rl_core::net::lockstep::Fault;
+    use net::lockstep::Fault;
     *total += 1;
     if let Some(t) = telemetry {
         t.send(TelemetryEvent::fault(&f));

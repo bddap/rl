@@ -18,7 +18,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 use clap::Parser;
-use rl_core::{TrainConfig, Visuals, bot, physics, play};
+use crab_world::{TrainConfig, Visuals, bot, physics, play};
 
 /// Crab Combat demo — render a trained crab policy.
 ///
