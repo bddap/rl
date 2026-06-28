@@ -39,3 +39,9 @@ the optional perf frame breakdown. FPS only shows if the target logs it (add bev
 `FrameTimeDiagnosticsPlugin` + `LogDiagnosticsPlugin`). The 2026-06-28 GCR slideshow
 was GPU-idle + ~1-core-capped at loadavg ~31 = host CPU oversubscription, not game
 code.
+
+**You don't need a quiet box, and shouldn't wait for one.** You usually can't stop the
+trainer or other jobs to profile, and blocking for exclusivity risks deadlocking
+against them. `--pid`-attach the running target or pin to the build-free cores, profile
+*under* contention, and note loadavg as context — a profile taken under load (that GCR
+read was at ~31) still localizes the bottleneck. When in doubt, just profile anyway.
