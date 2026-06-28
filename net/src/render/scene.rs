@@ -74,25 +74,12 @@ pub(super) fn spawn_world(
         ..default()
     });
 
-    // Extraction point: a translucent green cylinder of the sim's EXTRACT_RADIUS,
-    // capped with a bright pillar so it's unmistakable from across the map — the
-    // objective marker.
+    // Extraction point: a tall bright glowing pillar — the objective beacon. Made
+    // taller than the giant crab (CRAB_SCALE players high) and thick enough to read at
+    // the far end of the map, so the goal stays legible even when the towering crab is
+    // between you and it. (No ground disc: a flat EXTRACT_RADIUS marker at y=0 z-fought
+    // the ground plane, and the pillar alone already marks the point unmistakably.)
     let ex = state.ls.sim().extraction().pos();
-    let r = meters(EXTRACT_RADIUS);
-    commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(r, 0.1))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgba(0.1, 0.9, 0.3, 0.55),
-            emissive: LinearRgba::new(0.0, 1.2, 0.2, 1.0),
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        })),
-        Transform::from_translation(world(ex, 0.05)),
-    ));
-    // A tall bright glowing pillar at the point — the objective beacon. Made taller
-    // than the giant crab (CRAB_SCALE players high) and thick enough to read at the
-    // far end of the map, so the goal stays legible even when the towering crab is
-    // between you and it.
     let pillar_h = PLAYER_HEIGHT * CRAB_SCALE as f32 * 1.2;
     commands.spawn((
         Mesh3d(meshes.add(Cylinder::new(0.5, pillar_h))),
