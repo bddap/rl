@@ -39,7 +39,9 @@ pub(super) fn spawn_orbit_camera(mut commands: Commands) {
         camera_transform(&orbit),
         Camera3d::default(),
         Camera {
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.45, 0.7, 0.95)),
+            // Dark fallback behind the night-sky skybox (see [`crate::sky`]); shown only
+            // until the cubemap uploads.
+            clear_color: ClearColorConfig::Custom(crate::sky::NIGHT_CLEAR),
             ..default()
         },
         orbit,
@@ -170,7 +172,9 @@ pub(super) fn spawn_offscreen_camera(
     commands.spawn((
         Camera3d::default(),
         Camera {
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.25, 0.45, 0.75)),
+            // Dark fallback behind the night-sky skybox (see [`crate::sky`]); shown only
+            // until the cubemap uploads.
+            clear_color: ClearColorConfig::Custom(crate::sky::NIGHT_CLEAR),
             ..default()
         },
         RenderTarget::Image(handle.clone().into()),

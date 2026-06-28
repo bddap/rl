@@ -587,12 +587,13 @@ pub(super) fn look_direction(yaw_radians: f32, pitch_radians: f32) -> Vec3 {
 }
 
 /// Spawn the windowed first-person camera. Its transform is overwritten every frame
-/// by [`apply_transforms`]; the sky-blue clear color frames the gray-box.
+/// by [`apply_transforms`]; the night-sky skybox ([`crab_world::sky`]) paints the
+/// background, with this dark clear color as the pre-upload fallback.
 pub(super) fn spawn_fp_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Camera {
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.5, 0.7, 0.92)),
+            clear_color: ClearColorConfig::Custom(crab_world::sky::NIGHT_CLEAR),
             ..default()
         },
         Transform::default(),

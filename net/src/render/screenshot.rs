@@ -188,7 +188,9 @@ fn spawn_offscreen_camera(
     let mut cam = commands.spawn((
         Camera3d::default(),
         Camera {
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.5, 0.7, 0.92)),
+            // Dark fallback behind the night-sky skybox (see [`crab_world::sky`]); shown
+            // only until the cubemap uploads.
+            clear_color: ClearColorConfig::Custom(crab_world::sky::NIGHT_CLEAR),
             ..default()
         },
         RenderTarget::Image(handle.clone().into()),
