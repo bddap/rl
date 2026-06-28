@@ -16,7 +16,7 @@
 
 use bevy::prelude::*;
 use clap::{Parser, Subcommand};
-use rl_core::{TrainConfig, bot, training};
+use crab_world::{TrainConfig, bot, training};
 
 use training::systems::STEPS_PER_ROLLOUT;
 

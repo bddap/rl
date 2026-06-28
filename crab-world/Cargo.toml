@@ -1,0 +1,91 @@
+[package]
+name = "crab-world"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lib]
+name = "crab_world"
+path = "src/lib.rs"
+
+[features]
+# OFF by default — the headless trainer (rl-train) links crab-world with NO features and
+# so pulls NONE of bevy_render/bevy_pbr/wgpu/naga. The rendering bins (rl-demo, game)
+# enable `render`.
+#
+# `render` flips bevy + bevy_rapier3d back to their FULL default feature sets (the GPU
+# renderer, PBR, winit, gizmos, gltf import, rapier's debug-render). Without it, bevy
+# builds with only the headless subset below — no bevy_render crate exists, so the
+# demo/screenshot/skin/solo-crab code (all `#[cfg(feature = "render")]`) compiles out and
+# the trainer never touches a graphics crate. The bins just choose render on/off, no
+# `--no-default-features` juggling. (The `net` crate has its own `render` feature that
+# forwards to this one and additionally pulls `bevy_egui` for its boot menu.)
+render = ["bevy/default", "bevy_rapier3d/default", "enhanced-determinism"]
+
+# GCR avenue 1 (rl#82): rapier's bit-level cross-platform physics determinism, so the
+# networked NN crab evolves identically on every peer. OFF by default and pulled in by
+# `render` (the game/rl-demo binaries) — the headless trainer (rl-train, no `render`) stays
+# fast-float, since enhanced-determinism forces software transcendentals (`simba/libm_force`)
+# and blocks SIMD, a rollout-throughput cost training has no reason to pay: it is
+# single-process with no cross-peer hash, and the policy is robust to the tiny play-vs-train
+# numeric drift (OQ5). Standalone so the determinism regression can exercise the shipped
+# config headlessly without the GPU render stack. enhanced-determinism's one hard conflict
+# (`parallel`) is already off (rl#9), as is simd, so enabling it costs no feature we use.
+enhanced-determinism = ["rapier3d/enhanced-determinism"]
+
+# rl#49: a GPU backend for the PPO update via burn's wgpu/Vulkan. Enables burn-wgpu +
+# the `Autodiff<Wgpu>` backend. Off by default — the production `learn` path stays
+# pure CPU ndarray. rl-train builds this for the GPU update without enabling `render`
+# (the trainer needs wgpu-compute, never the bevy renderer).
+#
+# `naga/termcolor`: bevy drags in wgpu 27 -> naga 27 alongside burn-wgpu's wgpu 26 ->
+# naga 26, and both share one `codespan-reporting` 0.12 (its features UNIFY across the
+# graph). naga 26's `term::emit` call only typechecks when codespan-reporting's
+# `termcolor` is on (its diagnostic buffer is then a `WriteColor`); without it, naga 26
+# hands a `String` to a `WriteColor`-typed emit and fails to compile. The 27 stack pulls
+# `termcolor` in, so we must flip naga 26's matching feature on too. Only under `wgpu`.
+#
+# NOTE: under `wgpu` WITHOUT `render`, bevy is still default-features=false so no wgpu 27
+# enters; only burn-wgpu's wgpu 26 does. The recursion_limit bump (lib.rs) is what that
+# deep-but-finite `Module: Send` resolution needs; it is gated on `wgpu` in code.
+wgpu = ["burn/wgpu", "dep:naga", "naga/termcolor"]
+
+[dependencies]
+# The HEADLESS bevy feature set: scheduler + ECS + math + transform (always in bevy
+# with no features) PLUS the non-render subsystems the trainer's code actually uses —
+# `std` (we're not no_std), `multi_threaded` (the rollout task pools), `bevy_asset`
+# (the AssetServer the glTF rig loader queries), `bevy_scene` + `bevy_state`, and
+# `bevy_log` (the `warn!`/`info!` the training loop emits). NONE of these pull
+# bevy_render/bevy_pbr/wgpu — that's the whole point. The `render` feature layers
+# bevy's full `default` (2d/3d/ui → the renderer) back on for the demo/game.
+bevy = { workspace = true, features = [
+    "std",
+    "multi_threaded",
+    "bevy_asset",
+    "bevy_scene",
+    "bevy_state",
+    "bevy_log",
+] }
+# `dim3` ALWAYS (the 3D physics API — `extern crate rapier3d` is gated behind it; the
+# crate doesn't compile without it). The render-only extras (debug-render-3d, which
+# pulls bevy_pbr/gizmos; async-collider, which pulls bevy_render) come in via the
+# `render` feature's `bevy_rapier3d/default`, NOT here — so the headless trainer links
+# rapier's physics but none of its render integration.
+bevy_rapier3d = { workspace = true, features = ["dim3"] }
+# Named directly ONLY to carry the `enhanced-determinism` feature (rl#82) — rapier3d is
+# already pulled transitively by bevy_rapier3d, and cargo unifies features per package, so
+# this request merges the feature onto that same rapier3d. default-features=false adds
+# nothing on its own (bevy_rapier3d still brings dim3/f32); with the `enhanced-determinism`
+# feature OFF this dep is a no-op, so the trainer's rapier is unchanged.
+rapier3d = { version = "0.32", default-features = false }
+rand.workspace = true
+serde.workspace = true
+gltf.workspace = true
+burn.workspace = true
+naga = { workspace = true, optional = true }
+rand_distr.workspace = true
+clap.workspace = true
+bincode.workspace = true
+libc.workspace = true
+tracing.workspace = true
