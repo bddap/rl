@@ -23,7 +23,7 @@ use super::manual_control::ManualControl;
 ///
 /// Non-send because the `ndarray` backend's tensors are not `Sync` (same reason
 /// as `TrainingState`).
-pub(crate) struct Policy {
+pub struct Policy {
     brain: CrabBrain<InferBackend>,
     normalizer: ObsNormalizer,
     device: NdArrayDevice,
@@ -106,7 +106,7 @@ impl Policy {
     /// Load brain + normalizer from a checkpoint dir. Missing/corrupt files fall
     /// back to a zero-action policy so the app still launches (useful before the
     /// first checkpoint exists, and to inspect the body's neutral rest pose).
-    pub(crate) fn load(checkpoint_dir: &Path) -> Self {
+    pub fn load(checkpoint_dir: &Path) -> Self {
         let device = NdArrayDevice::Cpu;
         let (brain, normalizer, loaded) = match load_brain_normalizer(checkpoint_dir, &device) {
             Some((brain, normalizer)) => {
@@ -180,21 +180,21 @@ impl Policy {
     /// Whether a usable checkpoint loaded (vs the zero-action rest-pose fallback). Lets a
     /// caller fail loud when the body will only hold its rest pose ([`Self::act`] returns the
     /// neutral pose while this is false).
-    pub(crate) fn is_loaded(&self) -> bool {
+    pub fn is_loaded(&self) -> bool {
         self.loaded
     }
 
     /// Stable digest of the loaded weights (`0` if none) — see
     /// [`weights_digest`](Self::weights_digest). The GCR bridge folds it into the crab's
     /// per-tick lockstep hash so peers running different brains desync immediately.
-    pub(crate) fn weights_digest(&self) -> u64 {
+    pub fn weights_digest(&self) -> u64 {
         self.weights_digest
     }
 
     /// Deterministic action: the policy mean (no exploration noise), so the crab
     /// holds a steady pose instead of jittering. One policy implementation, two
     /// callers — the demo and the game's solo NN-crab.
-    pub(crate) fn act(&self, raw_obs: &[f32; OBS_SIZE]) -> [f32; ACTION_SIZE] {
+    pub fn act(&self, raw_obs: &[f32; OBS_SIZE]) -> [f32; ACTION_SIZE] {
         // No checkpoint → hold the neutral (zero-action) pose: a deterministic
         // view of the body geometry, not an untrained brain's noise.
         if !self.loaded {

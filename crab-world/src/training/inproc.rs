@@ -692,7 +692,7 @@ fn log_iteration(r: &IterReport) {
 /// Gated on `wgpu` (default-on for `rl-train`): the PPO update runs ONLY on the GPU
 /// (rl#49), so the learner needs the GPU backend to exist. A `--no-default-features`
 /// trainer drops this function, turning `main`'s call site into a compile error rather
-/// than a learner with no update path. (rl-core builds without `wgpu` for the render
+/// than a learner with no update path. (crab-world builds without `wgpu` for the render
 /// bins, which only do CPU inference and never call this.)
 #[cfg(feature = "wgpu")]
 pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nice: i32) {

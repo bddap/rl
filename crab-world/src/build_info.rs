@@ -1,7 +1,7 @@
 //! Build provenance baked at compile time (commit sha + UTC build time) and a subtle
 //! always-on corner overlay that shows it. The point is staleness-at-a-glance: a binary
 //! that didn't redeploy shows an old sha/date, so a stale install is obvious without
-//! anyone having to ask. The values are set by rl-core's build.rs.
+//! anyone having to ask. The values are set by crab-world's build.rs.
 
 /// Short commit the binary was built from; a trailing `+` marks an uncommitted tree.
 pub const SHA: &str = env!("RL_BUILD_SHA");

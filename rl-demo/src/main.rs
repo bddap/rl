@@ -1,5 +1,5 @@
 //! `rl-demo` — the windowed demo + screenshot of a trained crab policy. Links
-//! `rl-core` with render ON (bevy_render/bevy_pbr/wgpu), so it can put the crab on a
+//! `crab-world` with render ON (bevy_render/bevy_pbr/wgpu), so it can put the crab on a
 //! screen; it does no training (that's the headless `rl-train` binary).
 //!
 //! Modes (mutually exclusive; one is required):

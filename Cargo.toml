@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crab-world", "net", "rl-train", "rl-demo", "game", "rl-update-ui"]
 
 # Shared metadata + dependency versions, inherited by every member via
-# `foo.workspace = true`. ONE source for each version/feature set, so the four
+# `foo.workspace = true`. ONE source for each version/feature set, so the
 # crates can't drift apart on a bump (the win the workspace is meant to lock in).
 [workspace.package]
 version = "0.1.0"
@@ -14,22 +14,22 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# --- render stack: pulled ONLY by rl-core's `render` feature + the rendering bins.
-# rl-train never enables `render`, so it links none of these. bevy/bevy_rapier3d at
+# --- render stack: pulled ONLY by the crab-world / net `render` features + the rendering
+# bins. rl-train never enables `render`, so it links none of these. bevy/bevy_rapier3d at
 # default-features=false so the render-free build drops bevy_render/bevy_pbr/wgpu and
 # rapier's render integration; the `render` feature flips their defaults back on (see
-# rl-core/Cargo.toml [features]).
+# crab-world/Cargo.toml [features]).
 bevy = { version = "0.18", default-features = false }
 bevy_rapier3d = { version = "0.34", default-features = false }
 # Immediate-mode GUI for the game's boot menu (net::menu). 0.39 tracks
-# bevy 0.18. Optional in rl-core, enabled by `render`.
+# bevy 0.18. Optional in the `net` crate, enabled by its `render` feature.
 bevy_egui = "0.39"
 
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 
 # Read the skinned glTF's skeleton (bind-pose bone transforms) + skin weights to
-# derive colliders (rl-core/src/bot/meshfit.rs). `utils` enables the accessor
+# derive colliders (crab-world/src/bot/meshfit.rs). `utils` enables the accessor
 # readers; `names` keeps node names (the bone<->part mapping keys on them). No
 # `import` (it would drag in `image`); the GLB bytes feed `Gltf::from_slice`. Already
 # in the tree via bevy at this version, so it adds no new crate. A normal dependency,
@@ -41,7 +41,7 @@ burn = { version = "0.20", features = ["autodiff", "ndarray"] }
 # Only pulled in by the `wgpu` feature, and ONLY to flip naga 26's `termcolor` feature
 # on. naga 26 is already in the lock via bevy's wgpu — this adds no crate, it just
 # activates the feature that makes naga 26 compile alongside naga 27. Not used in any
-# code path. (See rl-core's [features].wgpu for the full rationale.)
+# code path. (See crab-world's [features].wgpu for the full rationale.)
 naga = { version = "26" }
 rand_distr = "0.5"
 clap = { version = "4", features = ["derive"] }

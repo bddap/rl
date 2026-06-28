@@ -1,4 +1,4 @@
-//! Bakes build provenance — the commit sha + UTC build time — into rl-core so the
+//! Bakes build provenance — the commit sha + UTC build time — into crab-world so the
 //! rendering binaries can show a subtle always-on corner stamp (see src/build_info.rs).
 //! A binary that failed to redeploy then shows an OLD sha/date, making a stale deploy
 //! obvious at a glance — the whole reason the stamp exists.
@@ -32,7 +32,7 @@ fn main() {
     // Re-run ONLY when the checked-out commit moves — not every build. Keying on the git
     // ref files (which a commit / `reset --hard` rewrites) keeps the stamp tracking the
     // built commit no matter which crate the commit touched, without forcing a recompile
-    // of rl-core on every incremental build (which a build-time timestamp otherwise would).
+    // of crab-world on every incremental build (which a build-time timestamp otherwise would).
     for p in git_ref_paths() {
         println!("cargo:rerun-if-changed={p}");
     }
