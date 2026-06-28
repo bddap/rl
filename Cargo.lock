@@ -9510,6 +9510,8 @@ dependencies = [
  "bevy_rapier3d",
  "clap",
  "crab-world",
+ "otel",
+ "tracing",
 ]
 
 [[package]]
