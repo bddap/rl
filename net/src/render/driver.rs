@@ -98,14 +98,9 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     ready
         .lockstep
         .set_external_crab_pose(crab.pos(), crab.yaw(), 0);
-    world.insert_resource(crate::external_crab::ExternalCrabArmed);
-    // Networked: pin the walk-target lead to its default so a per-peer env override can't walk
-    // the crab to a different (hashed) pose and desync — solo keeps its tuning.
-    if networked {
-        world
-            .resource_mut::<crate::external_crab::ExternalCrabBridge>()
-            .pin_default_lead();
-    }
+    // Arm the gate (and, networked, pin the lead so a per-peer env override can't desync the
+    // hashed pose — solo keeps its tuning). One arm path, [`crate::external_crab::arm`].
+    crate::external_crab::arm(world, networked);
     let source = match ready.net {
         Some(n) => InputSource::Networked(Box::new(n)),
         None => InputSource::Solo,

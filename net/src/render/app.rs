@@ -236,14 +236,9 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> anyh
             // Known-armed at build: add the stack AND arm the gate now, so the crab spawns frame
             // one.
             add_external_nn_crab(&mut app, external_crab, spawn);
-            app.insert_resource(crate::external_crab::ExternalCrabArmed);
-            // Networked: pin the walk-target lead to its default so a per-peer env override
-            // can't walk the crab to a different (hashed) pose and desync — solo keeps its tuning.
-            if networked {
-                app.world_mut()
-                    .resource_mut::<crate::external_crab::ExternalCrabBridge>()
-                    .pin_default_lead();
-            }
+            // Arm the gate (and, networked, pin the lead so a per-peer env override can't desync
+            // the hashed pose — solo keeps its tuning). One arm path, [`crate::external_crab::arm`].
+            crate::external_crab::arm(app.world_mut(), networked);
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
                 .set(AppPhase::Playing);
