@@ -6,7 +6,7 @@
 //! Holds no rendering; the scene/HUD/input live in sibling submodules.
 
 use super::*;
-use super::app::{ExternalCrabStackInstalled, crab_arm_failure_message};
+use super::app::{ExternalCrabStackInstalled, crab_arm_failure};
 use super::input::{CameraPitch, CameraYaw};
 
 
@@ -48,13 +48,16 @@ pub(super) struct PendingRound(pub(super) Option<crate::menu::ReadyMatch>);
 ///   [`install_round`] it now, so the sim is live for the spawns.
 ///
 /// On the menu path this is ALSO where the one giant crab — the real NN body — is ARMED
-/// (rl#58 + GCR): if the resolved round may arm it ([`crate::may_arm_external_crab`]: solo
-/// always, networked only with synced weights+assets), insert
-/// [`crate::external_crab::ExternalCrabArmed`] and seed the sim crab so the rapier-NN body
-/// drives it. A networked-UNSYNCED round CANNOT arm and, with no integer fallback (rl#114), FAILS
-/// LOUD here with an actionable peer-mismatch message rather than silently substituting a fake
-/// crab. The crab's arena spawn was already seeded into the bridge at build (a pure function of
-/// the seed), so nothing about the spawn depends on the round here.
+/// (rl#58 + GCR): insert [`crate::external_crab::ExternalCrabArmed`] and seed the sim crab so the
+/// rapier-NN body drives it. The arm DECISION ([`crate::may_arm_external_crab`]: solo always,
+/// networked only with synced weights+assets) is made UPSTREAM in the menu's `poll_formation`,
+/// which refuses an unarmable networked round and returns to the chooser with an actionable
+/// peer-mismatch message (rl#115) BEFORE requesting Playing — so every round reaching this
+/// transition is armable by construction, and there is no integer fallback to silently substitute
+/// (rl#114). It must arm here rather than gate, because the chained `spawn_world` needs the
+/// installed `GameState`; a graceful in-menu refusal is only possible before the transition, which
+/// is why the decision lives in the menu. The crab's arena spawn was already seeded into the bridge
+/// at build (a pure function of the seed), so nothing about the spawn depends on the round here.
 ///
 /// Idempotent (guards on `GameState` already present), so it can't double-install if both
 /// a scripted round and a stray pending one ever coexisted. Reaching Playing with neither a
@@ -70,22 +73,26 @@ pub(super) fn ensure_round_installed(world: &mut World) {
         .get_non_send_resource_mut::<PendingRound>()
         .and_then(|mut p| p.0.take())
         .expect("entered Playing with no round to install — the menu must park a round before transitioning");
-    // Arm the one giant crab — the real NN body — iff the resolved round may (the shared GCR gate:
-    // solo always, networked only with synced weights+assets — a float crab on an unsynced
-    // networked round would desync peers). The checkpoint is required (rl#114), so the stack is
-    // always installed; a round that CAN'T arm FAILS LOUD here rather than substituting a fake
-    // crab. The stack marker must be present (it always is on the menu path) — a missing stack is a
-    // build-wiring bug, so assert it loudly too.
+    // Arm the one giant crab — the real NN body. The arm DECISION (the shared GCR gate: solo
+    // always, networked only with synced weights+assets) is made UPSTREAM, at formation time: the
+    // menu's `poll_formation` refuses an unarmable round before requesting Playing (rl#115), so by
+    // construction every round that reaches this OnEnter(Playing) transition is armable — there's no
+    // graceful recovery to attempt here anyway (the chained `spawn_world` needs the installed
+    // `GameState`), which is exactly why the decision moved to the menu where a UI can show it. The
+    // checkpoint is required (rl#114), so the stack is always installed; a missing stack is a
+    // build-wiring bug, so assert it loudly. The arm invariant is a `debug_assert` — a regression
+    // (a future path parking an unvalidated round) trips it in dev/test rather than silently arming
+    // an unsynced crab into a desync (the silent-fallback class rl#114 deletes).
     assert!(
         world.get_resource::<ExternalCrabStackInstalled>().is_some(),
         "the NN-crab stack must be installed before Playing (rl#114: the checkpoint is required)"
     );
+    debug_assert!(
+        crab_arm_failure(&ready.net).is_none(),
+        "ensure_round_installed got an unarmable round — poll_formation must gate it out before \
+         Playing (rl#115)"
+    );
     let networked = ready.net.is_some();
-    let weights_synced = ready.net.as_ref().is_some_and(NetDriver::weights_synced);
-    let assets_synced = ready.net.as_ref().is_some_and(NetDriver::assets_synced);
-    if !crate::may_arm_external_crab(ready.net.is_none(), weights_synced, assets_synced) {
-        panic!("{}", crab_arm_failure_message(&ready.net));
-    }
     let crab = ready.lockstep.sim().crab();
     // Seed the pose with the crab's current pose/yaw (writing back what's there → no state change).
     ready
