@@ -31,7 +31,7 @@ use bevy_rapier3d::rapier::geometry::ColliderHandle;
 use bevy_rapier3d::rapier::parry::query::contact;
 
 use super::body::{CrabBodyPart, CrabCarapace, CrabJoint};
-use super::test_util::{headless_app, tick};
+use super::headless::{headless_app, tick};
 
 /// Ticks of physics to drop the unactuated crab from its spawn pose onto the
 /// ground and let it settle — the same count the reset/skin sim tests settle for

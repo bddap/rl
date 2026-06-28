@@ -706,14 +706,14 @@ fn probe_step(
 }
 
 /// Build the windowless bot+physics world the headless NN-crab probes step: the SAME stack
-/// the training/tests use ([`crab_world::bot::test_util::headless_stack`], one crab in env 0) plus
+/// the training/tests use ([`crab_world::bot::headless::headless_stack`], one crab in env 0) plus
 /// [`ExternalCrabPlugin`] (the policy + arena↔game bridge) with the crab ARMED. Shared by the
 /// single-peer [`run_headless_probe`] and the two-peer [`run_cross_peer_probe`] so both step the
 /// identical dynamics the policy trained under, with no GPU/display — one app-construction, no
 /// drift between the two harnesses (the manual's "one implementation per thing"). The caller owns
 /// the [`Lockstep`] driving and seeding; this only stands up the rapier NN body.
 fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> bevy::app::App {
-    use crab_world::bot::test_util::{
+    use crab_world::bot::headless::{
         HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
     };
 

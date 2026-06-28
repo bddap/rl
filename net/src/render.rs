@@ -217,7 +217,7 @@ pub enum AppPhase {
 /// ("real Sally") evolves bit-identically across peers (GCR#113).
 ///
 /// MUST be called before `App::new` and before any sim step / matmul, because the pools latch
-/// their thread count on first use; see [`crab_world::bot::test_util::pin_single_thread_pools`] for the
+/// their thread count on first use; see [`crab_world::bot::headless::pin_single_thread_pools`] for the
 /// env-var/`OnceLock` mechanism. Same recipe the trainer and the #82 cross-peer probe run; exposed
 /// as one thin `pub` entry so `game` (a separate crate) can call it without widening the
 /// crate-internal helper.
@@ -227,7 +227,7 @@ pub enum AppPhase {
 /// common solo round runs multi-threaded (~60fps). This entry is for the headless screenshot path
 /// (`game fp-screenshot`), which pins when its single armed-crab frame needs a stable solver.
 pub fn pin_process_pools() {
-    crab_world::bot::test_util::pin_single_thread_pools();
+    crab_world::bot::headless::pin_single_thread_pools();
 }
 
 pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App {
@@ -244,7 +244,7 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
     //
     // MUST be decided here, ahead of `App::new()` latching Bevy's three task pools (first-writer
     // wins); the rayon/matmul env vars the pin sets are read lazily on the first sim step, also
-    // after this point. See [`pin_process_pools`] / [`crab_world::bot::test_util::pin_single_thread_pools`].
+    // after this point. See [`pin_process_pools`] / [`crab_world::bot::headless::pin_single_thread_pools`].
     let networked = match &boot {
         Boot::Round(round) => round.1.is_some(),
         Boot::Menu { .. } => true,
@@ -255,7 +255,7 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
     // because of that ordering, so they're kept coupled by sharing this single condition — change
     // one gate and you must change the other, or networked peers desync.
     if networked {
-        crab_world::bot::test_util::pin_single_thread_pools();
+        crab_world::bot::headless::pin_single_thread_pools();
         // Canary for the pin's one footgun: an external RAYON_NUM_THREADS override to anything but
         // "1" silently breaks cross-peer determinism. Only meaningful once we've pinned.
         debug_assert_eq!(
@@ -433,7 +433,7 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> App 
     // every plugin/`add_systems` above is in, the schedules now exist. This touches only the main
     // world's schedules (the sim); bevy's render sub-app keeps its own executor.
     if networked {
-        crab_world::bot::test_util::force_serial_schedules(&mut app);
+        crab_world::bot::headless::force_serial_schedules(&mut app);
     }
 
     app
@@ -615,7 +615,7 @@ pub fn build_screenshot_app(
     // that panics `step_simulation` — on the multi-threaded executor. Must run AFTER every system
     // is wired. Unnecessary for the silhouette shot (no physics), so gated on `armed`.
     if armed {
-        crab_world::bot::test_util::force_serial_schedules(&mut app);
+        crab_world::bot::headless::force_serial_schedules(&mut app);
     }
     app
 }
@@ -2906,7 +2906,7 @@ mod tests {
         use crab_world::bot::actuator::{ACTION_SIZE, CrabActions};
         use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint};
         use crab_world::bot::physics_digest::crab_state_digest;
-        use crab_world::bot::test_util::{HeadlessStack, WorldRole, headless_stack};
+        use crab_world::bot::headless::{HeadlessStack, WorldRole, headless_stack};
         use bevy_rapier3d::prelude::Velocity;
 
         let build = || {

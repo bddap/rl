@@ -724,7 +724,7 @@ mod tests {
     use super::super::body::{
         CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId, Side,
     };
-    use super::super::test_util::{headless_app, tick};
+    use super::super::headless::{headless_app, tick};
     use super::super::{CrabSpawns, respawn_crab};
     use super::{
         BoneDrive, CrabSkin, Pairing, PartId, carapace_region, confine_vertex, has_rigid_lane,

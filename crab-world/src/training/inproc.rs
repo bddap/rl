@@ -194,7 +194,7 @@ fn init_process_pools() {
     // and land before any pool initializes. Building each App also forces every schedule
     // onto the single-threaded executor (see `build_rollout_app`), but the pools must be
     // pinned before any App grabs the defaults.
-    crate::bot::test_util::pin_single_thread_pools();
+    crate::bot::headless::pin_single_thread_pools();
 }
 
 /// Filename of the tick-budget odometer, beside the checkpoint, so a restarted
@@ -452,7 +452,7 @@ fn warm_up_app(app: &mut App) {
 /// executor dispatches systems onto the global `ComputeTaskPool` and N apps
 /// serialize on it (flat throughput). Both are unconditional here.
 fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
-    use crate::bot::test_util::{HeadlessStack, WorldRole, headless_stack};
+    use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack};
     use crate::training::systems;
     use crate::training::systems::{brain_step, reset_crab, save_on_exit};
 
@@ -485,7 +485,7 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
     // the global ComputeTaskPool (which would serialize the K threads). Unconditional, and
     // must run AFTER add_systems above — the schedules don't exist until the systems are
     // wired. Shared with the determinism probe (see `force_serial_schedules`).
-    crate::bot::test_util::force_serial_schedules(&mut app);
+    crate::bot::headless::force_serial_schedules(&mut app);
 
     app.finish();
     app.cleanup();

@@ -23,7 +23,7 @@ use bevy_rapier3d::prelude::Velocity;
 use crab_world::bot::actuator::{ACTION_SIZE, CrabActions};
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint};
 use crab_world::bot::physics_digest::{BODY_FIELDS, DIGEST_SEED, body_bits, body_key, fold_bodies};
-use crab_world::bot::test_util::{headless_app, tick};
+use crab_world::bot::headless::{headless_app, tick};
 
 /// One rigid body's full dynamic state as raw IEEE-754 bits, keyed by the shared semantic
 /// key (see [`body_key`]) so it pairs across two independently-built worlds.

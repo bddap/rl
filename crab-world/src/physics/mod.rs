@@ -205,7 +205,7 @@ fn assert_gravity_applied(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bot::test_util::headless_app;
+    use crate::bot::headless::headless_app;
     use bevy::prelude::With;
     use bevy_rapier3d::prelude::{DefaultRapierContext, RapierContextSimulation};
 

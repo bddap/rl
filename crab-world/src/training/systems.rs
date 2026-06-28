@@ -1494,13 +1494,13 @@ mod tests {
 
     /// Headless training app (physics + bot + training), one fixed tick per
     /// `update()`, one env, with a fixed RNG `seed` so the run is deterministic. The
-    /// windowless physics+bot stack is the shared [`crate::bot::test_util::headless_stack`]
+    /// windowless physics+bot stack is the shared [`crate::bot::headless::headless_stack`]
     /// (same builder the rollout workers use); this adds the training systems on top, so
     /// these tests exercise the exact stack the sole trainer runs. Unlike the rollout
     /// worker it keeps the single-world default pool (no K-thread scaling fix needed for
     /// one app).
     fn headless_training_app(checkpoint_dir: &std::path::Path, seed: u64) -> App {
-        use crate::bot::test_util::{HeadlessStack, WorldRole, headless_stack};
+        use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack};
         use clap::Parser;
 
         // Point the checkpoint dir at an empty scratch path so no real checkpoint

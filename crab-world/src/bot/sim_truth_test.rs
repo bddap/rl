@@ -16,7 +16,7 @@ use bevy::prelude::*;
 
 use super::actuator::CrabActions;
 use super::body::{CrabJoint, CrabJointId, Side, joint_angle};
-use super::test_util::{assert_transforms_match_rapier, headless_app, tick};
+use super::headless::{assert_transforms_match_rapier, headless_app, tick};
 
 fn joint_entity(app: &mut App, id: CrabJointId) -> Entity {
     let mut q = app.world_mut().query::<(Entity, &CrabJoint)>();

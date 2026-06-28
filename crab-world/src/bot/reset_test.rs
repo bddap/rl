@@ -14,7 +14,7 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
 use super::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId};
-use super::test_util::{assert_transforms_match_rapier, headless_app, tick};
+use super::headless::{assert_transforms_match_rapier, headless_app, tick};
 use super::{CrabSpawns, respawn_crab};
 
 fn part_translations(app: &mut App) -> Vec<Vec3> {
