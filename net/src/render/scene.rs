@@ -210,8 +210,17 @@ const CRAB_RENDER_HEIGHT: f32 = PLAYER_HEIGHT * CRAB_SCALE as f32;
 /// multiply would render the NN crab several× too small. `None` for a degenerate recipe (zero
 /// natural height) — callers fall back to the plain box.
 pub(crate) fn crab_render_scale() -> Option<f32> {
-    let h = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe()).natural_height();
-    (h > 1e-4).then(|| CRAB_RENDER_HEIGHT / h)
+    // Memoized: `render_recipe()` re-reads + re-parses the 36 MB `sally.glb` and re-fits
+    // the collider cloud on every call (~1 s of work), yet the result is a property of the
+    // fixed binary+asset that never changes at runtime. `publish_skin_repose` calls this
+    // EACH FRAME the giant crab is armed, so without the cache that 1 s parse was the whole
+    // frame budget — the GCR ~0.7-fps slideshow (rl#129). Compute once, reuse forever.
+    static SCALE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        let h = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe())
+            .natural_height();
+        (h > 1e-4).then(|| CRAB_RENDER_HEIGHT / h)
+    })
 }
 
 /// Draw the giant crab as its REAL physics colliders — the carapace cuboid and every link
