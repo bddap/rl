@@ -3,6 +3,7 @@
 //! Sense→Think→Act systems ([`brain_step`], [`reset_crab`], [`save_on_exit`]) the sole
 //! trainer and each rollout thread run.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use bevy::app::AppExit;
@@ -33,7 +34,7 @@ use super::algorithm::{
     NormalizedValue, PpoConfig, ReturnNormalizer, RolloutBuffer, StepEnd, Transition,
     compute_log_prob, sample_action,
 };
-use super::TrainBackend;
+use super::{InferBackend, TrainBackend};
 use super::checkpoint::{CheckpointDir, load_return_normalizer, save_return_normalizer};
 use super::curriculum::{CURRICULUM_REACH_RADIUS, Curriculum, seed_target};
 use super::normalizer::{
@@ -146,10 +147,62 @@ pub(crate) struct EnvEpisode {
     pending: Option<Pending>,
 }
 
+/// The live PPO brain plus a lazily-built inference clone on the inner backend.
+/// A rollout thread changes the weights once per horizon (it loads the learner's
+/// snapshot, then steps the whole window) yet `forward_pass` runs every tick;
+/// `AutodiffModule::valid()` rebuilds the inference module from scratch, so running it
+/// every tick between those rare changes is wasted work. The inference clone is built on
+/// demand and reused until the train weights change — and the only way to change them is
+/// a `&mut`/`set`, both of which drop the cache, so a stale clone can't be served.
+struct InferenceCachedBrain {
+    train: CrabBrain<TrainBackend>,
+    /// Cleared whenever `train` is mutated, rebuilt on the next inference. `RefCell`
+    /// because `forward_pass` reads the state through a shared `&TrainingState` (it runs
+    /// as a Bevy system over a non-send resource) yet must refresh this cache; the state
+    /// is single-threaded, so the borrow is never contended.
+    inference: RefCell<Option<CrabBrain<InferBackend>>>,
+}
+
+impl InferenceCachedBrain {
+    fn new(train: CrabBrain<TrainBackend>) -> Self {
+        Self {
+            train,
+            inference: RefCell::new(None),
+        }
+    }
+
+    /// Read-only access to the live train brain (checkpoint save, snapshot bytes).
+    fn train(&self) -> &CrabBrain<TrainBackend> {
+        &self.train
+    }
+
+    /// Mutable access to the train brain, dropping the inference cache: the only reason
+    /// to take `&mut` is to change the weights, so the clone is now stale.
+    fn train_mut(&mut self) -> &mut CrabBrain<TrainBackend> {
+        *self.inference.get_mut() = None;
+        &mut self.train
+    }
+
+    /// Replace the train brain wholesale (a snapshot/checkpoint load), dropping the cache.
+    fn set(&mut self, train: CrabBrain<TrainBackend>) {
+        self.train = train;
+        *self.inference.get_mut() = None;
+    }
+
+    /// Run `f` against the cached inference brain, building it from the current train
+    /// weights first if the cache is cold. Bit-identical to calling `train.valid()` afresh
+    /// each time, since `valid()` is a pure detach of the same weights.
+    fn with_inference<R>(&self, f: impl FnOnce(&CrabBrain<InferBackend>) -> R) -> R {
+        let mut slot = self.inference.borrow_mut();
+        let brain = slot.get_or_insert_with(|| self.train.valid());
+        f(brain)
+    }
+}
+
 /// Stored as a non-send resource because burn tensors use `OnceCell`, which is
 /// not `Sync`.
 pub(crate) struct TrainingState {
-    pub brain: CrabBrain<TrainBackend>,
+    brain: InferenceCachedBrain,
     pub config: PpoConfig,
     /// One rollout buffer per env. Kept separate so GAE never sweeps across an
     /// env boundary — interleaving transitions from different envs in one
@@ -351,7 +404,7 @@ impl TrainingState {
         // steps no world and ships no normalizer, so it stays None.
         let normalizer_increment = worker_mode.then(IncrementAccumulator::new);
         Self {
-            brain,
+            brain: InferenceCachedBrain::new(brain),
             config: PpoConfig::default(),
             rollouts: (0..n).map(|_| RolloutBuffer::new()).collect(),
             device,
@@ -391,7 +444,7 @@ impl TrainingState {
         // leave a torn brain.bin (silently discarded on load → resume from random
         // weights).
         let brain_tmp_stem = paths.brain_tmp_stem();
-        match recorder.record(self.brain.clone().into_record(), brain_tmp_stem.clone()) {
+        match recorder.record(self.brain.train().clone().into_record(), brain_tmp_stem.clone()) {
             Ok(()) => {
                 let tmp_file = brain_tmp_stem.with_extension("bin");
                 let final_file = paths.brain_file();
@@ -427,9 +480,18 @@ impl TrainingState {
     pub fn load_brain_bytes(&mut self, bytes: &[u8]) {
         let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
         match recorder.load(bytes.to_vec(), &self.device) {
-            Ok(record) => self.brain = self.brain.clone().load_record(record),
+            Ok(record) => {
+                let updated = self.brain.train().clone().load_record(record);
+                self.brain.set(updated);
+            }
             Err(e) => warn!("rollout thread: failed to load snapshot brain: {e}"),
         }
+    }
+
+    /// The live train brain — read-only, for snapshotting its weights to bytes
+    /// (rollout-thread → learner) and the determinism test's seed clone.
+    pub(crate) fn brain(&self) -> &CrabBrain<TrainBackend> {
+        self.brain.train()
     }
 
     /// Overwrite this state's normalizer from the learner's master snapshot. The
@@ -543,7 +605,7 @@ impl TrainingState {
         &mut StdRng,
     ) {
         (
-            &mut self.brain,
+            self.brain.train_mut(),
             &self.config,
             &self.device,
             &mut self.return_normalizer,
@@ -568,7 +630,7 @@ impl TrainingState {
         &mut StdRng,
     ) {
         (
-            &mut self.brain,
+            self.brain.train_mut(),
             &self.config,
             &mut self.return_normalizer,
             &mut self.rng,
@@ -892,22 +954,26 @@ fn forward_pass(
         let z = Tensor::<NdArray, 1>::zeros([ACTION_SIZE], &device);
         return (vec![z.clone(); n], z, vec![NormalizedValue(0.0); n]);
     }
-    let inference_brain = training.brain.valid();
     let flat: Vec<f32> = obs_arrays.iter().flat_map(|a| a.iter().copied()).collect();
     let obs_batch = Tensor::<NdArray, 2>::from_data(
         burn::tensor::TensorData::new(flat, [n, OBS_SIZE]),
         &device,
     );
-    let (means_batch, log_std) = inference_brain.policy(obs_batch.clone());
-    let values: Vec<NormalizedValue> = inference_brain
-        .value(obs_batch)
-        .flatten::<1>(0, 1)
-        .to_data()
-        .to_vec::<f32>()
-        .unwrap()
-        .into_iter()
-        .map(NormalizedValue)
-        .collect();
+    // Reuse the inference brain cached for these weights — rebuilt only when the rollout
+    // thread reloads the learner's snapshot (once per horizon), not every tick.
+    let (means_batch, log_std, values) = training.brain.with_inference(|inference_brain| {
+        let (means_batch, log_std) = inference_brain.policy(obs_batch.clone());
+        let values: Vec<NormalizedValue> = inference_brain
+            .value(obs_batch)
+            .flatten::<1>(0, 1)
+            .to_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(NormalizedValue)
+            .collect();
+        (means_batch, log_std, values)
+    });
     let means_rows = (0..n)
         .map(|e| {
             means_batch
@@ -1274,6 +1340,50 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
 
+    /// The inference-cache contract `forward_pass` relies on: the cached inference brain
+    /// is BIT-IDENTICAL to rebuilding `valid()` every call (so caching can't perturb the
+    /// determinism hash when the NN crab is armed), and it REFRESHES on any weight change —
+    /// through both `set` (snapshot load) and `train_mut` (a learner update) — so a stale
+    /// clone is never served.
+    #[test]
+    fn inference_cache_is_bit_identical_and_refreshes_on_weight_change() {
+        let device = NdArrayDevice::Cpu;
+        let obs = Tensor::<InferBackend, 2>::zeros([3, OBS_SIZE], &device);
+        // Bits of EVERY inference output forward_pass reads — policy means, the shared
+        // log_std, and the value — so the cache is held to bit-identity on all three.
+        let bits = |t: &[f32]| -> Vec<u32> { t.iter().map(|v| v.to_bits()).collect() };
+        let policy_bits = |brain: &CrabBrain<InferBackend>| -> Vec<u32> {
+            let (means, log_std) = brain.policy(obs.clone());
+            let value = brain.value(obs.clone());
+            let mut out = bits(&means.to_data().to_vec::<f32>().unwrap());
+            out.extend(bits(&log_std.to_data().to_vec::<f32>().unwrap()));
+            out.extend(bits(&value.to_data().to_vec::<f32>().unwrap()));
+            out
+        };
+
+        let brain_a: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let want_a = policy_bits(&brain_a.valid());
+        let mut cached = InferenceCachedBrain::new(brain_a);
+
+        // Building the cache, then reusing it, is bit-identical to a fresh `valid()`.
+        assert_eq!(cached.with_inference(&policy_bits), want_a);
+        assert_eq!(cached.with_inference(&policy_bits), want_a);
+
+        // `set` (snapshot load) refreshes: the new weights are served, never the stale clone.
+        let brain_b: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let want_b = policy_bits(&brain_b.valid());
+        assert_ne!(want_a, want_b, "fresh brains must differ for this assertion to bite");
+        cached.set(brain_b);
+        assert_eq!(cached.with_inference(&policy_bits), want_b);
+
+        // `train_mut` (a learner update) refreshes too.
+        let brain_c: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let want_c = policy_bits(&brain_c.valid());
+        assert_ne!(want_b, want_c, "fresh brains must differ for this assertion to bite");
+        *cached.train_mut() = brain_c;
+        assert_eq!(cached.with_inference(&policy_bits), want_c);
+    }
+
     /// The terminal-vs-truncation contract the value targets depend on (rl#95): a GRAB or a
     /// fall is a TRUE terminal (GAE bootstrap 0); the step cap is a TRUNCATION (bootstrap the
     /// cut-short value); otherwise the trajectory continues. A grab OUTRANKS the cap — a step
@@ -1459,7 +1569,8 @@ mod tests {
             // Start from the SAME weights so only the seed differs across runs.
             app.world_mut()
                 .non_send_resource_mut::<TrainingState>()
-                .brain = initial_brain.clone();
+                .brain
+                .set(initial_brain.clone());
             for t in 0..TICKS {
                 if t == FORCE_RESET_AT {
                     // Drop the carapace below the kill floor so the next tick terminates the
@@ -1491,7 +1602,7 @@ mod tests {
         let brain = headless_training_app(&seed_dir, SEED)
             .world()
             .non_send_resource::<TrainingState>()
-            .brain
+            .brain()
             .clone();
         let _ = std::fs::remove_dir_all(&seed_dir);
 
