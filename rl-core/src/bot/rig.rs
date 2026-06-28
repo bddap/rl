@@ -1304,4 +1304,156 @@ mod tests {
             }
         }
     }
+
+    /// Phase 0's promised but missing fitted-vs-hand-coded drift-guard (issue #20): the
+    /// fitted body ([`build_recipe`] on the real glTF) and the hand-coded fallback
+    /// ([`fallback_recipe`]) must enumerate the SAME links in the SAME order. The RL
+    /// obs/action layout and the cosmetic skin mapping are both keyed by this link
+    /// sequence (bone, actuated joint, parent), so if the model and the stand-in ever
+    /// disagreed on it, swapping between them (asset present vs absent) would silently
+    /// re-layout the policy or mis-route the skin. They share one builder today, but
+    /// nothing pinned that — this is the "one source of truth" structural guard.
+    /// Skips cleanly when the model isn't present (the fallback half is already covered
+    /// by the model-free tests above).
+    #[test]
+    fn fitted_and_fallback_share_link_topology() {
+        let Some(path) = model_path() else {
+            eprintln!("fitted_and_fallback_share_link_topology: no model — skipping");
+            return;
+        };
+        let model = LoadedModel::load(&path).expect("load model");
+        let fitted = build_recipe(&model).expect("fitted recipe");
+        let fallback = fallback_recipe();
+        assert_eq!(
+            fitted.links.len(),
+            fallback.links.len(),
+            "fitted ({}) and fallback ({}) disagree on link count — the rig forked",
+            fitted.links.len(),
+            fallback.links.len()
+        );
+        for (i, (f, h)) in fitted.links.iter().zip(&fallback.links).enumerate() {
+            assert_eq!(f.bone, h.bone, "link {i}: bone fitted={} fallback={}", f.bone, h.bone);
+            assert_eq!(
+                f.actuated, h.actuated,
+                "link {i} ({}): actuated joint fitted={:?} fallback={:?}",
+                f.bone, f.actuated, h.actuated
+            );
+            assert_eq!(
+                f.parent, h.parent,
+                "link {i} ({}): parent fitted={:?} fallback={:?}",
+                f.bone, f.parent, h.parent
+            );
+        }
+    }
+
+    /// Golden snapshot of the fitted collider geometry, keyed by deform bone:
+    /// `(half_height, radius, center.x, center.y, center.z)`, captured from
+    /// `sally.glb` (digest [`GOLDEN_ASSET_DIGEST`]). Pins the output of the fit
+    /// pipeline so a change to `fit_capsule`/`derive_link`/`carapace_box` — or to the
+    /// asset — can't silently move the colliders. These colliders feed rapier and any
+    /// shift is a new MDP (and a determinism break against an unchanged peer binary),
+    /// so a silent move is exactly what must never happen.
+    const GOLDEN_ASSET_DIGEST: u64 = 0x5b29_217e_ad4c_7c57;
+    #[rustfmt::skip]
+    const FITTED_GOLDEN: &[(&str, [f32; 5])] = &[
+        ("Def_leg_01.000.L", [0.094680, 0.057408,  0.024866, -0.016562,  0.001032]),
+        ("Def_leg_01.001.L", [0.142467, 0.061588,  0.174220,  0.018777,  0.049600]),
+        ("Def_leg_01.003.L", [0.060660, 0.061648,  0.087472, -0.032786, -0.010803]),
+        ("Def_leg_01.004.L", [0.122645, 0.054299,  0.068538, -0.154283, -0.023502]),
+        ("Def_leg_02.000.L", [0.000000, 0.176261,  0.026321, -0.013589, -0.001256]),
+        ("Def_leg_02.001.L", [0.181178, 0.066546,  0.216730,  0.015234,  0.028623]),
+        ("Def_leg_02.003.L", [0.054145, 0.071458,  0.097444, -0.034404, -0.027830]),
+        ("Def_leg_02.004.L", [0.123662, 0.057603,  0.079551, -0.152684, -0.029877]),
+        ("Def_leg_03.000.L", [0.073876, 0.066578,  0.087574,  0.007707, -0.028267]),
+        ("Def_leg_03.001.L", [0.170628, 0.068805,  0.212199,  0.018997, -0.018147]),
+        ("Def_leg_03.003.L", [0.066288, 0.066312,  0.095621, -0.037249, -0.052509]),
+        ("Def_leg_03.004.L", [0.128524, 0.056455,  0.071998, -0.156979, -0.078652]),
+        ("Def_leg_04.000.L", [0.123769, 0.060811,  0.022075, -0.015847, -0.036792]),
+        ("Def_leg_04.001.L", [0.140865, 0.056084,  0.175245,  0.012156, -0.049158]),
+        ("Def_leg_04.003.L", [0.067575, 0.056968,  0.080249, -0.043055, -0.069306]),
+        ("Def_leg_04.004.L", [0.134749, 0.049772,  0.050016, -0.158901, -0.078713]),
+        ("Def_pincer.000a.L", [0.228180, 0.099807,  0.146852, -0.112937,  0.199940]),
+        ("Def_pincer.005.L", [0.106954, 0.073292, -0.054414, -0.106502,  0.033880]),
+        ("Def_pincer.006b.L", [0.095839, 0.050577, -0.036690, -0.090157,  0.008504]),
+        ("Def_leg_01.000.R", [0.106833, 0.057397, -0.013619, -0.016628, -0.004180]),
+        ("Def_leg_01.001.R", [0.142467, 0.061588, -0.174220,  0.018777,  0.049600]),
+        ("Def_leg_01.003.R", [0.060660, 0.061648, -0.087472, -0.032786, -0.010803]),
+        ("Def_leg_01.004.R", [0.122645, 0.054299, -0.068537, -0.154283, -0.023502]),
+        ("Def_leg_02.000.R", [0.006161, 0.164457, -0.013849, -0.016922, -0.001611]),
+        ("Def_leg_02.001.R", [0.181178, 0.066546, -0.216730,  0.015234,  0.028623]),
+        ("Def_leg_02.003.R", [0.054145, 0.071458, -0.097443, -0.034404, -0.027830]),
+        ("Def_leg_02.004.R", [0.123662, 0.057603, -0.079551, -0.152684, -0.029877]),
+        ("Def_leg_03.000.R", [0.073876, 0.066578, -0.087574,  0.007707, -0.028267]),
+        ("Def_leg_03.001.R", [0.170628, 0.068806, -0.212199,  0.018997, -0.018147]),
+        ("Def_leg_03.003.R", [0.066288, 0.066312, -0.095621, -0.037249, -0.052509]),
+        ("Def_leg_03.004.R", [0.128524, 0.056455, -0.071998, -0.156979, -0.078652]),
+        ("Def_leg_04.000.R", [0.113170, 0.059998, -0.030447, -0.015496, -0.044862]),
+        ("Def_leg_04.001.R", [0.140865, 0.056084, -0.175245,  0.012156, -0.049158]),
+        ("Def_leg_04.003.R", [0.067575, 0.056968, -0.080249, -0.043055, -0.069305]),
+        ("Def_leg_04.004.R", [0.134749, 0.049772, -0.050016, -0.158901, -0.078713]),
+        ("Def_pincer.000a.R", [0.239028, 0.100576, -0.142431, -0.113873,  0.189508]),
+        ("Def_pincer.005.R", [0.103558, 0.076635,  0.058884, -0.105650,  0.032336]),
+        ("Def_pincer.006b.R", [0.091664, 0.045815,  0.037039, -0.098493,  0.011171]),
+        ("Def_antennae.L", [0.011954, 0.030000,  0.023860,  0.021847,  0.026712]),
+        ("Def_antennae_top.L", [0.015000, 0.030000,  0.025592,  0.023433,  0.028652]),
+        ("Def_antennae.R", [0.011954, 0.030000, -0.023860,  0.021847,  0.026712]),
+        ("Def_antennae_top.R", [0.015000, 0.030000, -0.025592,  0.023433,  0.028652]),
+    ];
+
+    #[test]
+    fn fitted_geometry_matches_golden() {
+        use crate::bot::meshfit::crab_asset_digest;
+        let Some(path) = model_path() else {
+            eprintln!("fitted_geometry_matches_golden: no model — skipping");
+            return;
+        };
+        // A changed asset silently changes every collider (and the GCR asset digest),
+        // so a digest mismatch is a HARD failure, not a skip: re-capture the golden
+        // deliberately (it pins a new MDP + a retrain), don't let geometry drift slip
+        // through unbaselined.
+        let digest = crab_asset_digest();
+        assert_eq!(
+            digest, GOLDEN_ASSET_DIGEST,
+            "crab asset changed (digest {digest:#018x} != golden {GOLDEN_ASSET_DIGEST:#018x}) — \
+             the fitted colliders moved; re-capture FITTED_GOLDEN and expect a retrain"
+        );
+
+        let recipe = build_recipe(&LoadedModel::load(&path).expect("load model")).expect("recipe");
+        let golden: std::collections::HashMap<&str, [f32; 5]> =
+            FITTED_GOLDEN.iter().map(|(b, g)| (*b, *g)).collect();
+        // A duplicate bone key would silently shrink the map, letting a recipe link
+        // match a surviving row while the len check below still sees the full table.
+        assert_eq!(golden.len(), FITTED_GOLDEN.len(), "duplicate bone in FITTED_GOLDEN");
+        assert_eq!(
+            recipe.links.len(),
+            FITTED_GOLDEN.len(),
+            "fitted link count {} != golden {}",
+            recipe.links.len(),
+            FITTED_GOLDEN.len()
+        );
+        // 0.1 mm: looser than any benign float reassociation, far tighter than a real
+        // fit-algorithm change (which moves a capsule by millimetres or more).
+        const TOL: f32 = 1e-4;
+        for link in &recipe.links {
+            let g = golden
+                .get(link.bone.as_str())
+                .unwrap_or_else(|| panic!("fitted link {} absent from golden", link.bone));
+            let got = [
+                link.half_height,
+                link.radius,
+                link.center.x,
+                link.center.y,
+                link.center.z,
+            ];
+            for (k, (a, b)) in got.iter().zip(g).enumerate() {
+                let field = ["half_height", "radius", "center.x", "center.y", "center.z"][k];
+                assert!(
+                    (a - b).abs() <= TOL,
+                    "{}: {field} drifted {a:.6} vs golden {b:.6} (Δ={:.6} > {TOL})",
+                    link.bone,
+                    (a - b).abs()
+                );
+            }
+        }
+    }
 }
