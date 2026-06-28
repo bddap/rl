@@ -255,9 +255,15 @@ fn actuator_injects_no_net_wrench() {
 /// than hold the body up as a rigid frame. With ZERO actuation the only thing
 /// resisting a joint is the small force-capped friction (~0.3 N·m), below the
 /// ~0.5 N·m a leg joint needs to bear its share of the body, so an unactuated
-/// crab sags onto the ground. Standing must be ACTIVE: the policy holds the crab
-/// up, physics does not do it for free — a joint stiff enough to hold the pose
+/// crab's joints fold to their stops. Standing must be ACTIVE: the policy holds the
+/// crab up, physics does not do it for free — a joint stiff enough to hold the pose
 /// passively would let training cheat by optimizing a frozen statue.
+///
+/// Yield is measured as JOINT DEFLECTION, not carapace sag: with the 2-DOF basal
+/// joint (bddap/rl#31) a limp crab crumples by SPLAYING its legs outward (the basis
+/// lift folding alongside the distal merus/carpus) into a wide low stance, so the
+/// carapace settles near spawn height even as every leg joint folds to its limit. The
+/// vertical drop is therefore not a reliable yield signal here; the joint angle is.
 #[test]
 fn unactuated_crab_crumples_under_load() {
     use super::body::CrabCarapace;
@@ -271,7 +277,7 @@ fn unactuated_crab_crumples_under_load() {
 
     let mut app = headless_app();
     // Build the crab and let Rapier write the spawn pose back, then read height
-    // and joint angles before it can sag.
+    // and joint angles before it can crumple.
     tick(&mut app, 3);
     let start_y = carapace_y(&mut app);
 
@@ -280,24 +286,19 @@ fn unactuated_crab_crumples_under_load() {
     let end_y = carapace_y(&mut app);
     let leg_deflection = max_leg_joint_deflection(&mut app);
     println!(
-        "carapace y: spawn {start_y:.3} -> unactuated+2s {end_y:.3} (sag {:.3}); \
+        "carapace y: spawn {start_y:.3} -> unactuated+2s {end_y:.3} (Δ {:.3}); \
          max leg-joint deflection {leg_deflection:.3} rad",
         start_y - end_y
     );
-    // The body is small (~0.30 m at model scale), so the absolute sag is small (~7 cm
-    // here) and a loose bar; the leg-joint crumple below is the real "it yields, not a
-    // statue" check.
-    assert!(
-        end_y < start_y - 0.04,
-        "unactuated crab did not sag (carapace {start_y:.3} -> {end_y:.3}): the joints \
-         hold the body up rigidly instead of yielding to load — friction too stiff to \
-         crumple (a passive standing statue, the bug this fix removes)"
-    );
+    // The real "it yields, not a statue" check: a leg JOINT must fold well past rest. A
+    // floppy limp crab drives its distal joints to their stops (~1 rad); a rigid frame
+    // holding the bind pose would barely move. The threshold is a loose floor — the
+    // observed crumple is near the full ~1 rad limit — but well clear of a frozen rig.
     assert!(
         leg_deflection > 0.15,
-        "no leg JOINT yielded ({leg_deflection:.3} rad max from rest) — a carapace drop \
-         with no joint bending is a rigid-body tip/fall, not compliant crumple; the \
-         joints are too stiff to yield under load"
+        "no leg JOINT yielded ({leg_deflection:.3} rad max from rest) — the joints hold \
+         the body up rigidly instead of folding to load (a passive standing statue, the \
+         bug this guards against); friction too stiff to crumple"
     );
 }
 

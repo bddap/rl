@@ -1,9 +1,10 @@
-//! `RL_RIG_POSE` headless-screenshot diagnostic: drive the cheliped SHOULDERS to a
-//! constant action — so the actuator pins them against their travel limit — with the
-//! carapace held in place, so a rig limit/axis change can be eyeballed in the exact
-//! offending pose (the arms lifted to their up-stop). The pose the owner reported as
-//! "arms lift up through the carapace" is `RL_RIG_POSE=-1` (−action lifts the arm; see
-//! the actuator). Render-only, gated entirely on the env var; never wired into training.
+//! `RL_RIG_POSE` headless-screenshot diagnostic: drive a chosen joint FAMILY to a
+//! constant action — so the actuator pins those joints against their travel limit —
+//! with the carapace held in place, so a rig limit/axis change can be eyeballed in the
+//! exact pose it produces. `RL_RIG_POSE_PART` selects the family: `shoulder` (default,
+//! both chelipeds — the "arms lift up through the carapace" check, `RL_RIG_POSE=-1`) or
+//! `legbasis` (all eight leg LIFT DOFs, to verify the 2-DOF coxa articulates —
+//! bddap/rl#31). Render-only, gated entirely on the env var; never wired into training.
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::{ExternalForce, Velocity};
@@ -11,13 +12,13 @@ use bevy_rapier3d::prelude::{ExternalForce, Velocity};
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabCarapace, CrabJointId, Side};
 
-/// The constant shoulder action both chelipeds are driven with (clamped to [-1, 1] by
-/// the actuator, which then holds the joint at its corresponding limit). `slots` are
+/// The constant action a chosen joint family is driven with (clamped to [-1, 1] by the
+/// actuator, which then holds each joint at its corresponding limit). `slots` are
 /// resolved through [`CrabJointId::index`] so a rig reorder can't drive the wrong DOF.
-#[derive(Resource, Clone, Copy)]
+#[derive(Resource, Clone)]
 pub(super) struct RigPose {
     action: f32,
-    slots: [usize; 2],
+    slots: Vec<usize>,
 }
 
 /// Anchor for the body pin: the carapace pose captured the first tick, held every step
@@ -27,19 +28,36 @@ pub(super) struct RigPosePin {
     target: Option<Transform>,
 }
 
-/// `RL_RIG_POSE=<float>` enables the harness, driving both shoulders with that constant
-/// action — `-1` parks them at the up-stop (the offending pose). Absent or unparseable →
+/// `RL_RIG_POSE=<float>` enables the harness, driving the family named by
+/// `RL_RIG_POSE_PART` with that constant action. Absent or unparseable `RL_RIG_POSE` →
 /// `None` (a normal screenshot; the harness is never added).
 pub(super) fn rig_pose_from_env() -> Option<RigPose> {
     let raw = std::env::var("RL_RIG_POSE").ok()?;
     let action = raw.trim().parse::<f32>().ok().filter(|a| a.is_finite())?;
-    Some(RigPose {
-        action,
-        slots: [
-            CrabJointId::ClawShoulder(Side::Left).index(),
-            CrabJointId::ClawShoulder(Side::Right).index(),
-        ],
-    })
+    let part = std::env::var("RL_RIG_POSE_PART").unwrap_or_default();
+    let slots = match part.trim() {
+        "legbasis" => (0..4)
+            .flat_map(|leg| {
+                [
+                    CrabJointId::LegBasis(Side::Left, leg).index(),
+                    CrabJointId::LegBasis(Side::Right, leg).index(),
+                ]
+            })
+            .collect(),
+        // Default (empty or "shoulder"): both chelipeds, the original behavior. A
+        // non-empty but UNRECOGNIZED value is almost certainly a typo, and silently
+        // diagnosing the wrong joint wastes a screenshot — so say so, loudly.
+        other => {
+            if !other.is_empty() && other != "shoulder" {
+                eprintln!("RL_RIG_POSE_PART={other:?} unrecognized — driving the shoulders");
+            }
+            vec![
+                CrabJointId::ClawShoulder(Side::Left).index(),
+                CrabJointId::ClawShoulder(Side::Right).index(),
+            ]
+        }
+    };
+    Some(RigPose { action, slots })
 }
 
 /// System (BotSet::Think, after `policy_step`): overwrite both shoulder action slots with
@@ -48,7 +66,7 @@ pub(super) fn rig_pose_drive(pose: Res<RigPose>, mut actions: ResMut<CrabActions
     let Some(a) = actions.envs.first_mut() else {
         return;
     };
-    for slot in pose.slots {
+    for &slot in &pose.slots {
         a[slot] = pose.action;
     }
 }

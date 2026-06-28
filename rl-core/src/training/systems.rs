@@ -301,18 +301,30 @@ impl TrainingState {
         let norm_path = paths.normalizer_path();
         let ret_norm_path = paths.return_normalizer_path();
 
+        // Only warm-start the brain when the checkpoint's persisted obs/action widths
+        // match this build's. A DOF change (bddap/rl#31) re-shapes the policy net, and
+        // loading an old-width record into it would silently misalign every weight; the
+        // shape sidecar makes that a clean cold start instead (see `warm_start_compatible`).
         if paths.brain_file().exists() {
-            let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-            match recorder.load(paths.brain_stem(), &device) {
-                Ok(record) => {
-                    brain = brain.load_record(record);
-                    info!("Loaded brain weights from {}", paths.brain_file().display());
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to load brain from {}: {e} — starting fresh",
-                        paths.brain_file().display()
-                    );
+            if !paths.warm_start_compatible() {
+                warn!(
+                    "Checkpoint at {} has an incompatible obs/action shape (the actuated \
+                     DOF set changed) — starting the policy fresh",
+                    paths.brain_file().display()
+                );
+            } else {
+                let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+                match recorder.load(paths.brain_stem(), &device) {
+                    Ok(record) => {
+                        brain = brain.load_record(record);
+                        info!("Loaded brain weights from {}", paths.brain_file().display());
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to load brain from {}: {e} — starting fresh",
+                            paths.brain_file().display()
+                        );
+                    }
                 }
             }
         }
@@ -393,6 +405,9 @@ impl TrainingState {
 
         self.obs_normalizer.save(&paths.normalizer_path());
         save_return_normalizer(&self.return_normalizer, &paths.return_normalizer_path());
+        // Stamp the obs/action widths beside the brain so a later resume can reject a
+        // shape-incompatible warm start (bddap/rl#31) rather than load weights askew.
+        paths.save_shape();
     }
 
     // ---- In-process rollout-thread / learner hooks ------------------------
