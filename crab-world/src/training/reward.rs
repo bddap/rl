@@ -62,16 +62,23 @@ use crate::bot::actuator::ACTION_SIZE;
 /// metabolic activation² and stays a regularizer, not the dominant term. A per-tick CAP is
 /// deliberately avoided — it would re-flatten `|d|^L` past the cap and kill the anti-saturation
 /// gradient — so the gentle quadratic is what bounds the cost instead. With
-/// `EFFORT_WEIGHT = 0.0006`:
+/// `EFFORT_WEIGHT = 0.0012`:
 ///   * a ~0.5 m/s stride closes `0.5·PHYSICS_DT ≈ 0.0078 m/tick`, worth `24·0.0078 ≈ 0.19`;
-///   * a gait drive (`|d| ≈ 0.7`) taxes `0.0006·30·0.49 ≈ 0.009/tick` — ~5% of the stride's
-///     progress, and ~13 integrated over a 3 m traverse vs its `24·3 = 72` progress: progress
-///     dominates >5:1;
-///   * the per-joint break-even sits at `|d| ≈ 3.2` (`0.0006·30·d² = 0.19`), far above any
-///     gait. A NON-progressing saturating thrash (`|d| = 3`, ~0 progress) pays `0.16/tick`,
-///     ≈ −240 over an episode — firmly net-negative. Convex, so the gentlest sufficient drive
+///   * a gait drive (`|d| ≈ 0.7`) taxes `0.0012·30·0.49 ≈ 0.018/tick` — ~9% of the stride's
+///     progress, and ~26 integrated over a 3 m traverse vs its `24·3 = 72` progress: progress
+///     still dominates ~2.7:1;
+///   * the per-joint break-even sits at `|d| ≈ 2.3` (`0.0012·30·d² = 0.19`), still above any
+///     gait. A NON-progressing saturating thrash (`|d| = 3`, ~0 progress) pays `0.32/tick`,
+///     ≈ −486 over an episode — firmly net-negative. Convex, so the gentlest sufficient drive
 ///     is the cheapest.
-pub(crate) const EFFORT_WEIGHT: f32 = 0.0006;
+///
+/// **Why 0.0012, not the original 0.0006 (owner 2026-06-28).** The trained crab moved too
+/// energetically — frantic, over-driven motion. The energy term was the right lever but tuned
+/// as a ~5%-of-stride whisper; doubling its weight roughly halves the break-even drive
+/// (`|d|` 3.2 → 2.3) and doubles the σ-counter-pressure, taxing the over-drive while progress
+/// still dominates ~2.7:1 so the traverse/grab task stays intact. Minimal single-knob change,
+/// applied warm-started: tune up if still frantic, revert if it breaks the task.
+pub(crate) const EFFORT_WEIGHT: f32 = 0.0012;
 const EFFORT_EXP: f32 = 2.0;
 
 /// The effort summand `Σ|dᵢ|^L` that [`compute_reward`] weights by [`EFFORT_WEIGHT`], taken
@@ -415,7 +422,9 @@ mod tests {
     fn progress_episode_dominates_freezing() {
         // Defect (B) — the episode-scale mismatch — must be closed: a full band traverse must
         // CLEARLY out-earn standing still over a whole MAX_EPISODE_TICKS episode, and the
-        // integrated effort tax must stay a LIGHT regularizer, never the dominant term.
+        // integrated effort tax must stay a regularizer, never the dominant term. (The energy
+        // weight was strengthened 2× — owner 2026-06-28, "Sally too energetic" — so progress
+        // dominates the integrated tax by ~2:1 here, no longer the old >4:1, but still clearly.)
         let ticks = MAX_EPISODE_TICKS as f32;
         // WALK: closes ~3 m over the episode (telescoped progress = P·Δd, path-independent),
         // paying a gait-drive tax (|d|≈0.7) every tick.
@@ -431,9 +440,9 @@ mod tests {
             "progress must EPISODE-DOMINATE: a traverse {walk_total} ≫ freezing {freeze_total}"
         );
         assert!(
-            walk_progress > 4.0 * walk_tax,
-            "progress {walk_progress} must dominate the integrated effort {walk_tax} (a light \
-             regularizer, not the main term)"
+            walk_progress > 2.0 * walk_tax,
+            "progress {walk_progress} must dominate the integrated effort {walk_tax} (a \
+             regularizer, not the main term — strengthened 2× but still progress-dominant)"
         );
     }
 }
