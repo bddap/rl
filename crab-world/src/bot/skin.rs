@@ -334,6 +334,7 @@ fn pair_bones(
 /// reproduces the same rest pose at the same origin, so it stays exact). No
 /// re-settle and no visibility change, so the skin never flickers.
 fn repair_skins(
+    mut commands: Commands,
     mut bones: Query<(&mut BoneDrive, &Name)>,
     skins: Query<(&CrabSkin, &Children)>,
     links: LinkQuery,
@@ -353,17 +354,38 @@ fn repair_skins(
         }
 
         let link_of = link_map(&links, skin.env);
+        let mut repaired = 0usize;
         for bone in kids.iter() {
             let Ok((mut drive, name)) = bones.get_mut(bone) else {
                 continue;
             };
-            if let Some(key) = super::rig::part_for_bone(name.as_str())
-                && let Some(&link) = link_of.get(&key)
+            match super::rig::part_for_bone(name.as_str()).and_then(|key| link_of.get(&key).copied())
             {
-                drive.link = link;
+                Some(link) => {
+                    drive.link = link;
+                    repaired += 1;
+                }
+                // A respawn reproduces every role, so a bone that can't re-resolve means
+                // its physics part is genuinely gone. NEVER leave it driving the despawned
+                // link — that is a dangling driver `drive_bones` silently skips forever,
+                // freezing the bone at stale garbage with no trace. Surface it loudly and
+                // drop the dead drive so the stale handle can't linger (the bone is removed
+                // from the driven set rather than animated off nothing).
+                None => {
+                    error!(
+                        "crab skin repair: env {} bone {:?} has no live link after respawn \
+                         — dropping its dead BoneDrive (skin will be missing this part)",
+                        skin.env,
+                        name.as_str()
+                    );
+                    commands.entity(bone).remove::<BoneDrive>();
+                }
             }
         }
-        info!("crab skin re-paired after reset: env {}", skin.env);
+        info!(
+            "crab skin re-paired after reset: env {} ({repaired} bones re-pointed)",
+            skin.env
+        );
     }
 }
 
@@ -905,6 +927,71 @@ mod tests {
         );
         // And both targets are live entities (a despawned id would not resolve).
         assert!(is_live(&mut app, new_carapace) && is_live(&mut app, new_coxa));
+    }
+
+    /// A bone that can't re-resolve to a live link after a reset must NOT be left
+    /// silently driving the despawned part (rl#126): `repair_skins` drops its
+    /// `BoneDrive` (and logs loudly) so no dangling, frozen driver lingers. Built
+    /// with a non-rig bone name (`part_for_bone` → `None`) so the re-resolve fails,
+    /// alongside a real bone that re-homes normally — proving the drop is targeted.
+    #[test]
+    fn repair_skins_drops_dead_drive_when_unresolvable() {
+        let mut app = headless_app();
+        app.add_systems(PostUpdate, repair_skins);
+        tick(&mut app, 192); // spawn + settle the env-0 crab
+
+        let carapace = find_part(&mut app, Role::Carapace);
+        let (shell_bone, orphan_bone) = app
+            .world_mut()
+            .run_system_once(move |mut commands: Commands| -> (Entity, Entity) {
+                let root = commands
+                    .spawn((
+                        CrabSkin {
+                            env: 0,
+                            phase: Pairing::Paired,
+                        },
+                        Transform::default(),
+                        Visibility::Visible,
+                    ))
+                    .id();
+                let bone = |commands: &mut Commands, name: &str, link: Entity| {
+                    commands
+                        .spawn((
+                            BoneDrive {
+                                link,
+                                offset: Mat4::IDENTITY,
+                            },
+                            Name::new(name.to_owned()),
+                            ChildOf(root),
+                            Transform::default(),
+                        ))
+                        .id()
+                };
+                // A real bone (re-homes) and a bone whose name maps to no part
+                // (`part_for_bone` returns `None`) so it can't re-resolve. Both target
+                // the live carapace now, so the respawn makes both links go stale.
+                let shell = bone(&mut commands, "Def_shell", carapace);
+                let orphan = bone(&mut commands, "NotARigBone", carapace);
+                (shell, orphan)
+            })
+            .unwrap();
+
+        respawn_env0(&mut app);
+        tick(&mut app, 1); // flush despawn+respawn and run repair_skins
+
+        let new_carapace = find_part(&mut app, Role::Carapace);
+        assert_ne!(new_carapace, carapace, "respawn should make new entities");
+        // The resolvable bone re-homes; the unresolvable one loses its dead drive
+        // entirely rather than being left pointing at the despawned carapace.
+        assert_eq!(
+            bone_link(&mut app, shell_bone),
+            new_carapace,
+            "resolvable bone must re-home onto the fresh carapace"
+        );
+        assert!(
+            app.world().get::<BoneDrive>(orphan_bone).is_none(),
+            "unresolvable bone's dead BoneDrive must be dropped, not left dangling"
+        );
     }
 
     /// `reveal_skin` shows a skin only once it pairs: an unpaired root is a
