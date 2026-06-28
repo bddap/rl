@@ -31,17 +31,17 @@ use crate::bot::body::CrabCarapace;
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
 pub use policy::Policy;
-pub use policy::{RigFit, checkpoint_digest, checkpoint_fits_rig};
+pub use policy::{RigDims, RigFit, checkpoint_digest, checkpoint_fits_rig};
 
-/// The `(obs, action)` dims this binary's crab rig compiles to — the spec a checkpoint
-/// must satisfy to drive the NN crab. The rig side of the fit check [`checkpoint_fits_rig`]
+/// The [`RigDims`] this binary's crab rig compiles to — the spec a checkpoint must satisfy
+/// to drive the NN crab. The rig side of the fit check [`checkpoint_fits_rig`]
 /// performs, exposed so the gate can name both sides; "does this checkpoint fit this
 /// binary?" is answered by the binary itself, never a hand-maintained number that could drift.
-pub fn rig_dims() -> (usize, usize) {
-    (
-        crate::bot::sensor::OBS_SIZE,
-        crate::bot::actuator::ACTION_SIZE,
-    )
+pub fn rig_dims() -> RigDims {
+    RigDims {
+        obs: crate::bot::sensor::OBS_SIZE,
+        action: crate::bot::actuator::ACTION_SIZE,
+    }
 }
 
 use cameras::{orbit_camera, spawn_offscreen_camera, spawn_orbit_camera, track_offscreen_camera};
