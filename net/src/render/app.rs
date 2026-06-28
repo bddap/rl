@@ -141,6 +141,9 @@ pub fn build_windowed_app(
         }),
         ..default()
     }));
+    // Night-sky skybox behind the first-person view (attaches to the FP camera when the
+    // round spawns it). Shared with the rl-demo via `crab_world::sky`.
+    app.add_plugins(crab_world::sky::NightSkyPlugin);
     app.init_state::<AppPhase>();
 
     // The FP round systems, gated to Playing. spawn_* moved off Startup to the Playing
