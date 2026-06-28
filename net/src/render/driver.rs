@@ -101,11 +101,7 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     // Arm the gate (and, networked, pin the lead so a per-peer env override can't desync the
     // hashed pose — solo keeps its tuning). One arm path, [`crate::external_crab::arm`].
     crate::external_crab::arm(world, networked);
-    let source = match ready.net {
-        Some(n) => InputSource::Networked(Box::new(n)),
-        None => InputSource::Solo,
-    };
-    install_round(world, ready.lockstep, source);
+    install_round(world, ready.lockstep, ready.net.into());
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +126,18 @@ pub(super) enum InputSource {
     /// not a back channel. Only ever a single-machine solo run, so no peer exists to
     /// disagree with it.
     Scripted(Input),
+}
+
+impl From<Option<NetDriver>> for InputSource {
+    /// The single home of the windowed networked-vs-solo choice: real peers when a
+    /// `NetDriver` is present, one offline peer when not. (`Scripted` is headless-only
+    /// and never arises from a `NetDriver`.)
+    fn from(net: Option<NetDriver>) -> Self {
+        match net {
+            Some(n) => InputSource::Networked(Box::new(n)),
+            None => InputSource::Solo,
+        }
+    }
 }
 
 /// The networked sim, owned as a non-send Bevy resource and stepped on a

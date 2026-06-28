@@ -182,9 +182,8 @@ pub(super) fn spawn_offscreen_camera(
         offscreen_camera_transform(Vec3::ZERO),
         // Make UI composite into THIS offscreen target. Bevy auto-targets UI at the
         // default-WINDOW camera, but the screenshot path has no window — without this
-        // marker the controls overlay never draws into the captured texture (same fix
-        // net/render.rs's screenshot camera carries). The windowed demo doesn't need it:
-        // its window camera is the implicit UI target.
+        // marker the controls overlay never draws into the captured texture. The windowed
+        // demo doesn't need it: its window camera is the implicit UI target.
         bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(ShotTarget(handle));

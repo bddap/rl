@@ -8,7 +8,7 @@
 
 use super::*;
 use super::driver::{
-    InputSource, PendingRound, drive_lockstep, ensure_round_installed, insert_core,
+    PendingRound, drive_lockstep, ensure_round_installed, insert_core,
     park_fixed_auto_pump,
 };
 use super::hud::{spawn_hud, sync_controls_context, update_hud};
@@ -228,11 +228,7 @@ pub fn build_windowed_app(boot: Boot, external_crab: std::path::PathBuf) -> anyh
                 anyhow::bail!(msg);
             }
             let spawn = seed_external_crab_solo(&mut ls);
-            let source = match net {
-                Some(n) => InputSource::Networked(Box::new(n)),
-                None => InputSource::Solo,
-            };
-            insert_core(&mut app, ls, source);
+            insert_core(&mut app, ls, net.into());
             // Known-armed at build: add the stack AND arm the gate now, so the crab spawns frame
             // one.
             add_external_nn_crab(&mut app, external_crab, spawn);

@@ -1,29 +1,20 @@
-//! `game` — the giant-crab rescue game (rl#38), built multiplayer-first on the
-//! deterministic-lockstep + iroh netcode foundation (rl#39).
+//! `game` — Giant Crab Rescue (rl#38): the CLI over the deterministic-lockstep + iroh
+//! sim ([`net::sim`]/[`net::lockstep`]/[`net::transport`]). First-person players reach
+//! an extraction point while a trained-NN giant crab (Sally) hunts them; `solo` is just
+//! the zero-remote-peer case of the one networked path, not a separate mode.
 //!
-//! This binary is the HEADLESS driver of the deterministic sim ([`net::sim`] —
-//! now the Phase 1 gray-box Extraction loop: first-person players, one giant crab,
-//! an extraction point) over [`net::lockstep`] and [`net::transport`] (iroh
-//! LAN discovery). It proves the netcode end to end — discovery, input exchange,
-//! deterministic tick, desync detection — without a GPU (this box renders headlessly
-//! at best). The windowed first-person client + the plane/heli vehicles are separate
-//! later subs that plug into the same sim interface (documented on [`net::sim`]);
-//! they consume the state this driver advances, they don't replace it.
-//!
-//! Modes:
-//! - `net` (default headless): bind an iroh endpoint, discover peers on the LAN,
-//!   and run the lockstep loop for a fixed duration, printing per-second sync state.
-//!   Run two copies on a LAN to see them find each other and stay in sync.
-//! - `solo`: run the lockstep+sim loop with no network (one peer), for a quick
-//!   smoke of the tick machinery (it stirs a placeholder input — real movement is
-//!   the client's job, not this headless smoke's).
-//! - `play`: the windowed first-person CLIENT ([`net::render`]) — see the
-//!   gray-box from the local player's eyes and play it, on the SAME lockstep +
-//!   transport as `net`. Boots to a Host / Join menu; `--host`/`--join <code>` skip it
-//!   for scripting/tests.
-//! - `fp-screenshot`: render one settled frame of the first-person view to a PNG and
-//!   exit (GPU on, no window) — the headless evidence path for the sim→render
-//!   pipeline on a box with no display.
+//! Subcommands:
+//! - `net` (default headless): discover peers over iroh and run the lockstep loop,
+//!   printing per-second sync state — proves discovery/input-exchange/desync-detection.
+//! - `solo`: the same loop with no peers, a quick smoke of the tick machinery.
+//! - `play`: the windowed first-person client ([`net::render`]); Host/Join menu, or
+//!   `--host`/`--join <code>` to skip it for scripting.
+//! - `fp-screenshot`: render one settled frame to a PNG and exit (GPU, no window) — the
+//!   headless evidence path for the sim→render pipeline.
+//! - `nn-crab-probe` / `nn-crab-xpeer`: determinism gates for the armed NN crab —
+//!   single-peer and cross-peer per-tick hash logs (rl#82/#114).
+//! - `checkpoint-check`: verify a checkpoint's rig dims fit the crab before arming.
+//! - `telemetry-collector`: sink for the OTLP-over-iroh telemetry stream.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
