@@ -174,7 +174,7 @@ pub fn spawn_crab(
         // never reach the ground — yet each one added a rigid body to the single-island
         // multibody solve (the per-step bottleneck) for zero return. The skin already
         // rides the eye bones off the carapace cosmetically (the eye link is fixed to it;
-        // see `skin::link_map`), so dropping the bodies is invisible. They survive in the
+        // see `skin::pairing::link_map`), so dropping the bodies is invisible. They survive in the
         // rig (`recipe.links`) for the cosmetic/debug-collider view and the fallback body,
         // which read the rig directly, not these entities. A `carapace` placeholder keeps
         // `ents` index-aligned with `recipe.links`; it is never read as a parent because a
