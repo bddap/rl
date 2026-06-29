@@ -19,11 +19,11 @@ use std::path::{Path, PathBuf};
 /// wins. Otherwise this crate's source dir, baked in at compile time — so a fresh clone
 /// resolves the committed glyphs with no setup. Matches the root
 /// [`crate::bot::meshfit::model_path`] resolves the crab model against, so the bevy glyph
-/// loads and the model load agree. `scripts/fetch-sally.sh` now writes `sally.glb` to THIS
-/// root (`crab-world/assets/`) too, so a fetched mesh lands exactly where the renderer looks
-/// (bddap/rl#706 — it used to drop it at the repo root and silently fall back). (One other
-/// asset-root notion still differs and predates this: the `game` weights resolver roots on
-/// cwd — folding that onto this one is the remaining follow-up.)
+/// loads and the model load agree. EVERY asset the renderers resolve now roots here:
+/// [`crate::bot::meshfit::model_path`] (the crab mesh), `scripts/fetch-sally.sh`'s fetch dest
+/// (it asks `cargo metadata` for this same crate dir, so a fetched `sally.glb` lands exactly
+/// where the renderer looks — it used to drop it at the repo root and silently fall back), and
+/// the `game` NN-crab `assets/weights` checkpoint dir. One root, no drift (bddap/rl#146/#148).
 pub fn asset_root() -> PathBuf {
     std::env::var_os("BEVY_ASSET_ROOT")
         .map(PathBuf::from)

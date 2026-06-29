@@ -76,17 +76,15 @@ pub struct LoadedModel {
 
 /// Where to find the model, resolved the SAME way Bevy's `AssetServer` resolves
 /// it for the skin (`crate::bot::skin`): `CRAB_MODEL_PATH` (default `sally.glb`)
-/// names an asset under `<asset root>/assets/`, asset root being `BEVY_ASSET_ROOT`
-/// or, unset, the crate dir. Sharing this resolution is the whole point — skin and
-/// collider-fit must agree on one model. The old code read the var raw against the
-/// CWD with a hardcoded `/tmp/rl` fallback, so on any host whose CWD wasn't the
-/// asset root the skin loaded but collider-fit missed and the demo exited fatally
-/// (bddap/rl#30). Missing model → `None`, and callers self-skip.
+/// names an asset under [`crate::assets::asset_root`]`/assets/`. The asset root is
+/// the ONE source of truth ([`crate::assets::asset_root`]) — the bevy glyph load,
+/// the skin, and this collider-fit loader all resolve against it, so they cannot
+/// disagree about where assets live (bddap/rl#146). Missing model → `None`, and
+/// callers self-skip.
 pub fn model_path() -> Option<std::path::PathBuf> {
     resolve(
         std::env::var_os("CRAB_MODEL_PATH").as_deref(),
-        std::env::var_os("BEVY_ASSET_ROOT").as_deref(),
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        &crate::assets::asset_root(),
         |p| p.exists(),
     )
 }
@@ -118,11 +116,12 @@ pub fn crab_asset_digest() -> u64 {
 
 /// Pure resolver, factored out so the path logic is testable without touching
 /// process env: an absolute model path is used as-is; otherwise the path (default
-/// `sally.glb`) is looked up under `<asset_root or crate_dir>/assets/`.
+/// `sally.glb`) is looked up under `<asset_root>/assets/`. The `asset_root` is the
+/// already-resolved root ([`crate::assets::asset_root`]) — this function never
+/// re-derives it, so there is one place the root is decided.
 fn resolve(
     crab_model_path: Option<&std::ffi::OsStr>,
-    asset_root: Option<&std::ffi::OsStr>,
-    crate_dir: &std::path::Path,
+    asset_root: &std::path::Path,
     exists: impl Fn(&std::path::Path) -> bool,
 ) -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
@@ -130,8 +129,7 @@ fn resolve(
     if rel.is_absolute() {
         return exists(&rel).then_some(rel);
     }
-    let root = asset_root.map_or_else(|| crate_dir.to_path_buf(), PathBuf::from);
-    let asset = root.join("assets").join(rel);
+    let asset = asset_root.join("assets").join(rel);
     exists(&asset).then_some(asset)
 }
 
@@ -144,18 +142,15 @@ mod model_path_tests {
     // path the AssetServer hands the skin (bddap/rl#30).
     #[test]
     fn relative_resolves_under_asset_root() {
-        let got = resolve(
-            Some("sally.glb".as_ref()),
-            Some("/srv/app".as_ref()),
-            Path::new("/crate"),
-            |p| p == Path::new("/srv/app/assets/sally.glb"),
-        );
+        let got = resolve(Some("sally.glb".as_ref()), Path::new("/srv/app"), |p| {
+            p == Path::new("/srv/app/assets/sally.glb")
+        });
         assert_eq!(got, Some(PathBuf::from("/srv/app/assets/sally.glb")));
     }
 
     #[test]
-    fn defaults_to_sally_under_crate_dir_when_unset() {
-        let got = resolve(None, None, Path::new("/crate"), |p| {
+    fn defaults_to_sally_under_asset_root() {
+        let got = resolve(None, Path::new("/crate"), |p| {
             p == Path::new("/crate/assets/sally.glb")
         });
         assert_eq!(got, Some(PathBuf::from("/crate/assets/sally.glb")));
@@ -163,24 +158,16 @@ mod model_path_tests {
 
     #[test]
     fn absolute_path_used_as_is() {
-        let got = resolve(
-            Some("/models/x.glb".as_ref()),
-            Some("/srv".as_ref()),
-            Path::new("/crate"),
-            |p| p == Path::new("/models/x.glb"),
-        );
+        let got = resolve(Some("/models/x.glb".as_ref()), Path::new("/srv"), |p| {
+            p == Path::new("/models/x.glb")
+        });
         assert_eq!(got, Some(PathBuf::from("/models/x.glb")));
     }
 
     #[test]
     fn none_when_missing() {
         assert_eq!(
-            resolve(
-                Some("sally.glb".as_ref()),
-                Some("/srv".as_ref()),
-                Path::new("/crate"),
-                |_| false
-            ),
+            resolve(Some("sally.glb".as_ref()), Path::new("/srv"), |_| false),
             None
         );
     }

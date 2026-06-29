@@ -127,24 +127,19 @@ fn main() {
     // non-Sally crab with no signal). This is the explicit player-facing vs training split: the
     // headless trainer (`rl-train`) keeps the no-skin procedural body by design.
     let mesh_status = crab_world::mesh_fallback::canonical_mesh_status();
-    if mesh_status.is_err() {
-        // Make every downstream consumer agree there is no usable model: the body recipe
-        // (`crab_world::bot::body::render_recipe`) then takes the procedural-collider fallback
-        // instead of panicking on a present-but-broken file, and the skin
-        // (`bot::skin::register`) self-skips instead of half-loading a broken scene. Both read
-        // `meshfit::model_path()`, so redirecting it at a guaranteed-absent path is the single
-        // switch that flips them together. The physics bones are then made VISIBLE by booting
-        // the render-mode cycle in `colliders` (see `initial_render_mode` below).
-        unsafe {
-            std::env::set_var(
-                "CRAB_MODEL_PATH",
-                "/nonexistent/rl-demo-canonical-mesh-unavailable.glb",
-            );
-        }
-    }
+    // The crab mesh THIS run renders, decided here ONCE from the full preflight: the real Sally
+    // when usable, else `None` → the honest fallback. Inserted as `CrabModelPath` before `BotPlugin`
+    // (below) so the body, skin, and silhouette all flip together off this one explicit value — see
+    // `body::CrabModelPath` for why this replaces the old env-poison redirect. The physics bones are
+    // then made VISIBLE by booting the render-mode cycle in `colliders` (see `initial_render_mode`).
+    let mesh_state = crab_world::bot::body::CrabModelPath(if mesh_status.is_ok() {
+        crab_world::bot::meshfit::model_path()
+    } else {
+        None
+    });
 
-    // OTEL/tracing: install the shared subscriber AFTER the env is final. The guard must
-    // outlive the whole run, so it's bound here and dropped only when `main` returns.
+    // OTEL/tracing: install the shared subscriber after `RUST_LOG` is final (above). The guard
+    // must outlive the whole run, so it's bound here and dropped only when `main` returns.
     let _otel = otel::init("rl-demo");
 
     // `Some(reason)` ⇒ the canonical mesh is unusable, kept so the loudness lands in THREE
@@ -283,6 +278,9 @@ fn main() {
         // training optimizes (see physics::CrabPhysicsPlugin).
         .add_plugins(physics::CrabPhysicsPlugin)
         .add_plugins(physics::PhysicsWorldPlugin)
+        // Hand the preflighted mesh choice to the bot plugin BEFORE it builds `CrabAssets`/skin,
+        // so the fallback decision is this explicit resource, not a poisoned env (bddap/rl#147).
+        .insert_resource(mesh_state)
         .add_plugins(bot::BotPlugin)
         .add_systems(FixedUpdate, contact_audit);
 

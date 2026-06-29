@@ -229,18 +229,46 @@ impl CrabAssets {
     }
 }
 
-/// The body recipe the game renders and spawns: the fitted model when one is present,
-/// else the procedural stand-in. The ONE place this model-vs-fallback selection lives —
-/// [`CrabAssets`] (the spawned/skinned body) and the integer-crab collider silhouette
-/// (`net::render::spawn_crab_silhouette`) both go through here so they can't drift on
-/// which body they show. A present-but-broken model (`Some(p)` that loads to no recipe) makes
-/// the `expect` fire, so a caller that must not crash on a bad asset gates on mesh usability
-/// FIRST and never reaches here with a broken `Some` — rl-demo (player-facing) redirects to the
-/// procedural stand-in + emits a LOUD OTEL error instead (see its `main`). No model at all
-/// falls back to the procedural stand-in here directly.
-pub fn render_recipe() -> RigRecipe {
-    match super::meshfit::model_path() {
-        Some(p) => LoadedModel::load(&p)
+/// The crab glTF THIS app renders ("which crab does this app show?"), decided ONCE at
+/// construction: `Some(absolute path)` = the preflighted real Sally mesh; `None` = no usable
+/// model, render the honest procedural/collider fallback. [`CrabAssets`] (physics body) and
+/// [`super::skin::register`] (cosmetic skin) BOTH read this one resource, so a surface that has
+/// preflighted "no Sally" flips body + skin together off a single explicit value.
+///
+/// WHY a resource and not the old way: rl-demo used to force the fallback by poisoning the
+/// `CRAB_MODEL_PATH` env at a `/nonexistent` path so the global resolver would miss for every
+/// reader — spooky action at a distance (a reader debugging "why is CRAB_MODEL_PATH nonsense?"
+/// had to find rl-demo's main). The explicit resource replaces that (bddap/rl#147).
+///
+/// Defaults (FromWorld) to [`super::meshfit::model_path`], so a surface that does NOT override gets
+/// the live resolution unchanged. SCOPE: this resource is a `BotPlugin` resource — only present
+/// where the bot stack is. `net::render`'s collider silhouette runs WITHOUT that stack (the unarmed
+/// screenshot), so it reads the global [`super::meshfit::model_path`] directly; since net never
+/// overrides the resolver, its reads and this resource's default agree. Only a surface that
+/// actually preflights and overrides (today: rl-demo) needs the resource. Also distinct from the
+/// *world-render scale* question ("how big is the REAL crab?", `net::render::world_render_scale`),
+/// which always reads the real asset — a fallback render must not resize the world.
+#[derive(Resource, Clone)]
+pub struct CrabModelPath(pub Option<std::path::PathBuf>);
+
+impl FromWorld for CrabModelPath {
+    fn from_world(_world: &mut World) -> Self {
+        Self(super::meshfit::model_path())
+    }
+}
+
+/// The body recipe the game renders and spawns from a resolved `model`: the fitted model when one
+/// is present, else the procedural stand-in. The ONE place the model-vs-fallback BRANCH lives —
+/// [`CrabAssets`] (the spawned/skinned body, fed its [`CrabModelPath`]) and the integer-crab
+/// collider silhouette (`net::render::spawn_crab_silhouette`, fed `meshfit::model_path()`) both go
+/// through here, so the two can't draw different geometry from the same input. A present-but-broken
+/// model (`Some(p)` that loads to no recipe) makes the `expect` fire: callers that must not crash on
+/// a bad asset run the full [`crate::mesh_fallback::canonical_mesh_status`] preflight and pass `None`
+/// on failure, so a broken `Some` never reaches here (rl-demo does this + emits a LOUD OTEL error;
+/// see its `main`). No model at all falls back to the procedural stand-in here directly.
+pub fn render_recipe(model: Option<&std::path::Path>) -> RigRecipe {
+    match model {
+        Some(p) => LoadedModel::load(p)
             .ok()
             .and_then(|m| rig::build_recipe(&m))
             .expect("model preflight should have rejected a model that builds no recipe"),
@@ -249,9 +277,10 @@ pub fn render_recipe() -> RigRecipe {
 }
 
 impl FromWorld for CrabAssets {
-    fn from_world(_world: &mut World) -> Self {
+    fn from_world(world: &mut World) -> Self {
+        let model = world.resource::<CrabModelPath>().0.clone();
         Self {
-            recipe: render_recipe(),
+            recipe: render_recipe(model.as_deref()),
         }
     }
 }
