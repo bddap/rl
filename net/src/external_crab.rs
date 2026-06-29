@@ -637,4 +637,7 @@ mod probe;
 // The cross-peer / single-peer determinism + walk-verification harness lives in `probe`
 // (out of this production bridge so the shipping real-Sally MP path stays lean). Re-exported
 // here so its public entry points keep their `external_crab::…` paths.
-pub use probe::{ProbeSample, XPeerResult, XPeerTick, run_cross_peer_probe, run_headless_probe};
+pub use probe::{
+    ProbeSample, StabilityResult, XPeerResult, XPeerTick, run_cross_peer_probe,
+    run_headless_probe, run_vehicle_stability_probe,
+};

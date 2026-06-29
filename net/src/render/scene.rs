@@ -4,7 +4,7 @@
 //! client-side [`super::input::CameraYaw`] while alive).
 
 use super::*;
-use super::driver::{GameState, LocalVehicle};
+use super::driver::{CockpitPose, GameState, LocalVehicle};
 use super::input::{CameraPitch, CameraYaw};
 
 
@@ -368,6 +368,20 @@ type CrabXf<'w, 's> = Query<
     (With<CrabAvatar>, Without<PlayerAvatar>, Without<FpCamera>),
 >;
 type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
+/// Read-only access to the crab carapace's ARENA-frame Transform — the anchor the cockpit camera
+/// shifts the vehicle's arena pose against. Disjoint from the mutable Transform queries above by the
+/// `Without` filters (a carapace is none of those entities), so Bevy lets them coexist.
+type CarapaceXf<'w, 's> = Query<
+    'w,
+    's,
+    &'static Transform,
+    (
+        With<crab_world::bot::body::CrabCarapace>,
+        Without<CrabAvatar>,
+        Without<PlayerAvatar>,
+        Without<FpCamera>,
+    ),
+>;
 
 /// Place the FP camera and the dynamic avatars each frame, INTERPOLATED between the
 /// previous tick's snapshot and the live sim by the fractional accumulator. This is
@@ -384,6 +398,7 @@ pub(super) fn apply_transforms(
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
     mut cam_q: CamXf,
+    carapace_q: CarapaceXf,
 ) {
     let sim = state.ls.sim();
     let alpha = (state.accumulator / TICK_DT).clamp(0.0, 1.0) as f32;
@@ -431,10 +446,24 @@ pub(super) fn apply_transforms(
     // the view IS the craft's attitude. An on-foot player keeps the ground eye view.
     if let Ok(mut cam) = cam_q.single_mut() {
         if let Some((prev, now)) = vehicle.cockpit_poses() {
-            // Single-player: fly from the CLIENT-side vehicle (the play layer's own body — it
-            // is not in the sim, so the deterministic core stays integer-only). The one
-            // cockpit formula flies either craft from its shared pose.
-            *cam = cockpit_camera(prev, now, alpha);
+            // Single-player: fly from the rapier vehicle body (host-authoritative crab-world state,
+            // not in the integer sim). Its pose is in the ARENA frame, so map it to render space
+            // with the same shift the crab body uses — `world(crab) − arena_carapace` — so vehicle
+            // and crab share one render frame and collide where they're drawn.
+            let crab_now = sim.crab();
+            let crab_prev = state.prev.crab.unwrap_or(crab_now);
+            let crab_anchor = world(lerp_pos(crab_prev.pos(), crab_now.pos(), alpha), 0.0);
+            let arena_carapace = carapace_q
+                .iter()
+                .next()
+                .map(|t| t.translation)
+                .unwrap_or(Vec3::ZERO);
+            let shift = Vec3::new(
+                crab_anchor.x - arena_carapace.x,
+                0.0,
+                crab_anchor.z - arena_carapace.z,
+            );
+            *cam = cockpit_camera(prev, now, alpha, shift);
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
@@ -456,39 +485,23 @@ pub(super) fn apply_transforms(
     }
 }
 
-/// A sim attitude [`crate::sim::iquat::Quat`] as a renderer [`Quat`]: the body→world rotation
-/// whose +Z is the craft's nose and +Y its up. Normalized because the integer quaternion is
-/// unit only to rounding. The ONE place the sim attitude crosses into float, so the camera and
-/// the gray-box mesh can't disagree on what a craft's orientation means.
-fn attitude(q: crate::sim::iquat::Quat) -> Quat {
-    let (x, y, z, w) = iquat_client::quat_xyzw(q);
-    Quat::from_xyzw(x, y, z, w).normalize()
-}
-
-/// The first-person cockpit camera for a flyer: eye at the interpolated 3D position, looking
-/// along the craft's nose with the horizon banked/pitched/rolled by its full attitude — so a
-/// banked turn, a loop, or inverted flight all look right. The ONE cockpit-view formula,
-/// taking the shared [`CockpitPose`] so it flies EVERY craft — the single-player plane and
-/// helicopter — with no copy to drift. The two ticks' attitudes are SLERPed (shortest-arc) so
-/// the view tween is smooth through any rotation.
-fn cockpit_camera(prev: CockpitPose, now: CockpitPose, alpha: f32) -> Transform {
-    let eye = lerp_pos3(prev.pos, now.pos, alpha);
-    let rot = attitude(prev.orient).slerp(attitude(now.orient), alpha);
-    // Look along the craft's nose (+Z), with up its own up-vector (+Y) — so the pilot looks
-    // where the craft is pointed, banked/pitched/rolled by its full attitude.
+/// The first-person cockpit camera for a flyer: eye at the interpolated 3D position, looking along
+/// the craft's nose with the horizon banked/pitched/rolled by its full attitude — so a banked turn,
+/// a loop, or inverted flight all look right. The ONE cockpit-view formula, flying EVERY craft (the
+/// plane and the helicopter) from the shared [`CockpitPose`] with no copy to drift.
+///
+/// The pose is in the crab's ARENA frame (the rapier vehicle body lives in the ±10 m box with
+/// Sally). `shift` is the pure XZ translate that carries an arena point to its render spot anchored
+/// at the giant crab — the same `world(crab) − arena_carapace` the crab body's render uses — so the
+/// vehicle and the crab share one render frame and collide where they're drawn. Altitude (Y) is kept
+/// at TRUE arena scale (no shrink), like the crab's own bones, so a small craft reads correctly
+/// against the giant Sally. The two ticks' attitudes are SLERPed (shortest-arc) for a smooth tween.
+fn cockpit_camera(prev: CockpitPose, now: CockpitPose, alpha: f32, shift: Vec3) -> Transform {
+    let eye = prev.pos.lerp(now.pos, alpha) + shift;
+    let rot = prev.orient.slerp(now.orient, alpha);
+    // Look along the craft's nose (+Z), with up its own up-vector (+Y) — so the pilot looks where
+    // the craft is pointed, banked/pitched/rolled by its full attitude.
     Transform::from_translation(eye).looking_at(eye + rot * Vec3::Z, rot * Vec3::Y)
-}
-
-/// Linear-interpolate two sim 3D positions (to meters) by `alpha` — the [`Pos3`]
-/// analogue of [`lerp_pos`], including the altitude axis. Shrunk by [`world_render_scale`]
-/// like [`world`], so a piloted vehicle and its cockpit camera sit in the same render frame as
-/// the rest of the human world.
-fn lerp_pos3(a: Pos3, b: Pos3, alpha: f32) -> Vec3 {
-    Vec3::new(
-        meters(a.x) + (meters(b.x) - meters(a.x)) * alpha,
-        meters(a.y) + (meters(b.y) - meters(a.y)) * alpha,
-        meters(a.z) + (meters(b.z) - meters(a.z)) * alpha,
-    ) * world_render_scale()
 }
 
 /// Linear-interpolate two sim positions (in meters) by `alpha`.
