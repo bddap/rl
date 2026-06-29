@@ -49,6 +49,21 @@ pub struct Args {
     #[arg(long, default_value_t = 200)]
     screenshot_settle: u32,
 
+    /// Render the ball-chase headless to this mp4 and exit (windowless, GPU on).
+    /// Loads the policy from `--checkpoint-dir`, drives the crab after the moving
+    /// target, captures every sim tick, and encodes with ffmpeg. Decoupled from
+    /// wall-clock — one sim tick per rendered frame — so a slower-than-realtime render
+    /// produces a true-speed clip. Also prints an objective `DRIVE_STATS` line
+    /// (mean|drive|, mean effort) for comparing two policies' actuation.
+    #[arg(long, value_name = "PATH")]
+    render_video: Option<PathBuf>,
+
+    /// `--render-video` clip length in SIMULATED seconds (ticks = seconds × the
+    /// physics rate). The mp4 plays this many seconds of crab time; it is unrelated to
+    /// how long the render itself takes (the render is as fast as compute allows).
+    #[arg(long, default_value_t = 8.0)]
+    seconds: f32,
+
     /// Screenshot width in pixels.
     #[arg(long, default_value_t = 1280)]
     width: u32,
@@ -78,6 +93,9 @@ pub struct Args {
 enum AppMode {
     Demo,
     Screenshot { path: PathBuf, settle: u32 },
+    /// Offline ball-chase clip: step the sim one tick per frame, render that frame,
+    /// encode to `path` at the end. `seconds` is the clip's SIMULATED length.
+    RenderVideo { path: PathBuf, seconds: f32 },
 }
 
 fn main() {
@@ -150,7 +168,12 @@ fn main() {
     // right-arrow still toggles it live.
     let debug_colliders = !mesh_ok || std::env::var_os("RL_DEBUG_COLLIDERS").is_some();
 
-    let mode = if let Some(path) = args.screenshot.clone() {
+    let mode = if let Some(path) = args.render_video.clone() {
+        AppMode::RenderVideo {
+            path,
+            seconds: args.seconds,
+        }
+    } else if let Some(path) = args.screenshot.clone() {
         AppMode::Screenshot {
             path,
             settle: args.screenshot_settle,
@@ -160,20 +183,20 @@ fn main() {
     } else {
         // A bare `rl-demo` with no mode flag has nothing to show. (Training is the
         // `rl-train` binary.)
-        eprintln!("no mode selected. rl-demo needs --demo or --screenshot.");
+        eprintln!("no mode selected. rl-demo needs --demo, --screenshot, or --render-video.");
         std::process::exit(2);
     };
 
     let mut app = App::new();
 
     match &mode {
-        AppMode::Screenshot { .. } => {
-            // No window, but GPU ON so we can render to an image. Real-time 60 Hz
-            // loop at default 1x: one physics step + one render per frame, so the
-            // capture counter (render frames) also tracks simulated time and the
-            // GPU pipeline warms over the same frames. (A fast/100x clock decouples
-            // them — physics races while render frames crawl, and early frames
-            // render black before the pipeline warms up.)
+        // Both windowless render-to-image modes share the same no-window-but-GPU-on plugin
+        // set; only their schedule-runner cadence differs (set below). The screenshot's 60 Hz
+        // loop ties render frames to simulated time so the pipeline warms over the same frames
+        // it captures; render-video instead advances the sim itself (one tick per frame, see
+        // `RenderVideoPlugin`) and runs the loop as fast as compute allows.
+        AppMode::Screenshot { .. } | AppMode::RenderVideo { .. } => {
+            // No window, but GPU ON so we can render to an image.
             app.add_plugins(
                 DefaultPlugins
                     // Resolve the committed control glyphs from the bundled `assets/` dir
@@ -195,9 +218,15 @@ fn main() {
                     // otel subscriber carries the same stderr `fmt` output.
                     .disable::<bevy::log::LogPlugin>(),
             );
-            app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
-                Duration::from_secs_f64(1.0 / 60.0),
-            ));
+            // Screenshot paces at 60 Hz (render frames track sim time); render-video runs the
+            // loop flat-out (Duration::ZERO) since `step_one_tick` — not wall-clock — advances
+            // the sim, so a slower-than-realtime render still produces a true-speed clip.
+            let interval = if matches!(mode, AppMode::RenderVideo { .. }) {
+                Duration::ZERO
+            } else {
+                Duration::from_secs_f64(1.0 / 60.0)
+            };
+            app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(interval));
             // Rapier collider wireframes draw via gizmos, which DO render into the
             // offscreen screenshot camera (Bevy 0.18) — but only if the plugin is
             // present. The other arms add it; Screenshot has its own arm, so gate it
@@ -294,6 +323,15 @@ fn main() {
                 checkpoint_dir: args.train.checkpoint_dir.clone(),
                 path,
                 settle,
+                width: args.width,
+                height: args.height,
+            });
+        }
+        AppMode::RenderVideo { path, seconds } => {
+            app.add_plugins(play::RenderVideoPlugin {
+                checkpoint_dir: args.train.checkpoint_dir.clone(),
+                path,
+                seconds,
                 width: args.width,
                 height: args.height,
             });

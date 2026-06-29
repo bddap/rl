@@ -8,9 +8,13 @@
 //! but with the GPU on (render-to-image), so the trained crab can be inspected
 //! without a display or a human in the loop.
 //!
-//! Both plugins live here as the wiring core; the systems they schedule are carved into
-//! focused submodules ([`policy`], [`hot_reload`], [`manual_control`], [`cameras`],
-//! [`target_ball`], [`demo`], [`controls`]).
+//! [`RenderVideoPlugin`] is the moving-clip cousin of the screenshot: it drives the
+//! ball-chase headless, captures every sim tick, and encodes an mp4 — for showing how the
+//! gait MOVES, which a still can't.
+//!
+//! These plugins live here as the wiring core; the systems they schedule are carved into
+//! focused submodules ([`policy`], [`render_video`], [`hot_reload`], [`manual_control`],
+//! [`cameras`], [`target_ball`], [`demo`], [`controls`]).
 
 mod cameras;
 mod controls;
@@ -18,6 +22,7 @@ mod demo;
 mod hot_reload;
 mod manual_control;
 mod policy;
+mod render_video;
 mod rig_pose;
 mod target_ball;
 
@@ -32,6 +37,7 @@ use crate::screenshot::{self, ShotProgress, ShotTarget};
 
 pub use policy::Policy;
 pub use policy::{RigDims, RigFit, checkpoint_digest, checkpoint_fits_rig};
+pub use render_video::RenderVideoPlugin;
 
 /// The [`RigDims`] this binary's crab rig compiles to — the spec a checkpoint must satisfy
 /// to drive the NN crab. The rig side of the fit check [`checkpoint_fits_rig`]
