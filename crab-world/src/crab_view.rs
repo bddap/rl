@@ -109,7 +109,8 @@ struct RenderModeLabel;
 /// cage, and the corner label naming the active mode (so the HUD can't drift from the mode — one
 /// source for both GCR and the rl-demo). The mesh-visibility half lives where each mesh does —
 /// the skin in [`crate::bot::skin`] (shared, reads this resource), GCR's silhouette in
-/// `net::render`. Call once, after the bot/physics systems are installed.
+/// `net::render`. Call once; registration order vs the bot/physics plugins doesn't matter (Bevy
+/// orders systems by set-label, and `init_resource` is order-independent).
 pub fn register(app: &mut App, initial: RenderMode) {
     app.insert_resource(initial);
     // The crab's render placement (GCR's rigid shift to the game spot) is published by the
