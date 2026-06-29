@@ -393,6 +393,10 @@ pub(super) fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::Pat
         .add_plugins(crab_world::physics::CrabPhysicsPlugin)
         .add_plugins(crab_world::physics::PhysicsWorldPlugin)
         .add_plugins(crab_world::bot::BotPlugin)
+        // The player's rapier flight vehicle — a rigidbody in this same crab world, so it collides
+        // with Sally. Inert (no body, no systems firing on a spawned body) until the player boards
+        // one; `drive_lockstep` mirrors the controls into its `VehicleControl` each tick.
+        .add_plugins(crab_world::vehicle::VehiclePlugin)
         .add_plugins(crate::external_crab::ExternalCrabPlugin {
             checkpoint_dir,
             crab_spawn,

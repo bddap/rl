@@ -9,13 +9,13 @@
 //! Why two tables, not one. The KEY for an action is context-independent (W always feeds the
 //! forward axis), so the binding lives once in [`BINDINGS`]. What CHANGES between contexts is
 //! the LABEL and which actions are relevant: on foot W is "Forward"; piloting the plane the
-//! same W is "Throttle up" (the plane sim reads `move_forward` as the throttle trim — see
-//! [`crate::sim`]'s `step_plane`, which gives the plane flight-sim controls: mouse = stick
+//! same W is "Throttle up" (the rapier vehicle reads `move_forward` as the throttle trim — see
+//! [`crab_world::vehicle`], which gives the plane flight-sim controls: mouse = stick
 //! (roll + pitch), W/S = throttle, A/D = rudder). So each context is a row list naming the
 //! actions it shows with the label correct THERE. The legend joins the rows with the bindings,
 //! so the displayed KEY can't drift from the polled key; the label's meaning (e.g. "Throttle
-//! up" = what `move_forward` does in flight) is a hand-maintained description, pinned where
-//! it's non-obvious by a test (the plane-pitch-sign test).
+//! up" = what `move_forward` does in flight) is a hand-maintained description of the rapier
+//! vehicle force model ([`crab_world::vehicle`], whose own tests pin the qualitative behaviour).
 //!
 //! Two caveats on the single-source guarantee:
 //! - It covers the REBINDABLE discrete controls. The analog movers (sticks, mouse motion,
@@ -306,19 +306,21 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
     ContextRow { action: Action::RevealControls, label: "Controls" },
 ];
 
-/// The PILOTING-PLANE context: the SAME physical inputs, re-labeled for flight-sim controls
-/// to match what `step_plane` (in [`crate::sim`]) ACTUALLY does with them. The mouse/stick is
-/// the flight stick (horizontal → roll/ailerons, vertical → pitch/elevator), W/S trim the
-/// throttle lever, A/D are the rudder. `Extract` is omitted — the foot player feeds the sim
-/// neutral input while piloting, so the pickup button is inert in the air. `EnterExit` reads
-/// "Exit plane".
+/// The PILOTING-PLANE context: the SAME physical inputs, re-labeled for flight-sim controls to
+/// match what the rapier vehicle force model ([`crab_world::vehicle`]) does with them. The
+/// mouse/stick is the flight stick (horizontal → roll/ailerons, vertical → pitch/elevator), W/S
+/// trim the throttle lever, A/D are the rudder. `Extract` is omitted — the foot player feeds the
+/// sim neutral input while piloting, so the pickup button is inert in the air. `EnterExit` reads
+/// "Switch to heli".
 ///
-/// Mapping (and the signs the labels MUST get right, pinned by the `step_plane_*` tests):
+/// Mapping (the signs the labels ride — `drive_lockstep` screen-reconciles the axes into
+/// [`crab_world::vehicle::VehicleControl`] exactly as the old integer model did, so the feel and
+/// these labels are unchanged):
 /// - `Look` (mouse / right stick): X → ROLL (bank to turn), Y → PITCH (nose up = climb).
 /// - `MoveForward`/`MoveBack` (W/S): throttle up / down — a persistent lever.
 /// - `StrafeLeft`/`StrafeRight` (A/D): rudder yaw. `gather_input` negates the strafe axis
-///   (screen-right↔sim-X), so A reaches the sim as POSITIVE `move_strafe`, which
-///   `step_plane` yaws LEFT — hence A = "Rudder left", D = "Rudder right".
+///   (screen-right↔sim-X), so A reaches the vehicle as a yaw-LEFT torque — hence A = "Rudder
+///   left", D = "Rudder right". The craft turns by BANKING (lift vector), not by the rudder.
 pub const PLANE_ROWS: [ContextRow<GcrControls>; 10] = [
     ContextRow { action: Action::Look, label: "Bank / pitch (fly)" },
     ContextRow { action: Action::MoveForward, label: "Throttle up" },
@@ -333,17 +335,18 @@ pub const PLANE_ROWS: [ContextRow<GcrControls>; 10] = [
     ContextRow { action: Action::RevealControls, label: "Controls" },
 ];
 
-/// The PILOTING-HELICOPTER context: the SAME bindings as foot/plane, re-labelled for what
-/// [`crate::sim`]'s `step_helicopter` does with each — `move_forward` (W/S) trims the
-/// COLLECTIVE (climb/descend), the mouse [`Look`](Action::Look) is the CYCLIC (tilt the rotor
-/// disc to translate), and `move_strafe` (A/D) is the YAW PEDALS (tail-rotor spin). The
-/// E-cycle reaches foot from here, so `EnterExit` reads "Exit to foot". `Extract` is omitted —
-/// the foot player feeds the sim neutral input while piloting, so the pickup is inert aloft.
+/// The PILOTING-HELICOPTER context: the SAME bindings as foot/plane, re-labelled for what the
+/// rapier vehicle force model ([`crab_world::vehicle`]) does as a helicopter — `move_forward`
+/// (W/S) trims the COLLECTIVE (climb/descend; thrust along the rotor disc), the mouse
+/// [`Look`](Action::Look) is the CYCLIC (tilt the airframe to translate), and `move_strafe` (A/D)
+/// is the YAW PEDALS (tail-rotor spin). The E-cycle reaches foot from here, so `EnterExit` reads
+/// "Exit to foot". `Extract` is omitted — the foot player feeds the sim neutral input while
+/// piloting, so the pickup is inert aloft.
 ///
 /// Pedal sign: `gather_input` negates the strafe axis once (`render`'s screen-right↔sim-X
-/// reconcile), so A (`StrafeLeft`) reaches the sim as POSITIVE `move_strafe`, which
-/// `step_helicopter` yaws LEFT — so the labels ride those actions (A = yaw left, D = yaw
-/// right), pinned by the sim-side `helicopter_pedals_yaw_in_a_hover` test.
+/// reconcile), so A (`StrafeLeft`) reaches the vehicle as a yaw-LEFT torque — the labels ride
+/// those actions (A = yaw left, D = yaw right). Same axis→DOF map as the plane (only the thrust
+/// axis + tuning differ), since both are the ONE vehicle model.
 pub const HELI_ROWS: [ContextRow<GcrControls>; 10] = [
     ContextRow { action: Action::Look, label: "Cyclic — tilt to move" },
     ContextRow { action: Action::MoveForward, label: "Collective up (climb)" },
@@ -538,7 +541,7 @@ mod tests {
             ls.iter().map(|l| l.label).collect::<Vec<_>>()
         };
         assert_ne!(labels(&foot), labels(&plane), "the legend must change per context");
-        // Flight labels reflect what `step_plane` does with each input.
+        // Flight labels reflect what the rapier vehicle force model does with each input.
         assert!(plane.iter().any(|l| l.label == "Throttle up"));
         assert!(plane.iter().any(|l| l.label == "Bank / pitch (fly)"));
         assert!(plane.iter().any(|l| l.label == "Rudder left (yaw)"));
@@ -565,7 +568,7 @@ mod tests {
         };
         assert_ne!(labels(&heli), labels(&foot), "heli legend differs from foot");
         assert_ne!(labels(&heli), labels(&plane), "heli legend differs from plane");
-        // Rotorcraft labels reflect what `step_helicopter` does with each input.
+        // Rotorcraft labels reflect what the rapier vehicle force model does as a helicopter.
         assert!(heli.iter().any(|l| l.label == "Collective up (climb)"));
         assert!(heli.iter().any(|l| l.label == "Cyclic — tilt to move"));
         assert!(heli.iter().any(|l| l.label == "Yaw left (pedal)"));

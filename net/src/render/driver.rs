@@ -8,6 +8,7 @@
 use super::*;
 use super::app::{ExternalCrabStackInstalled, crab_arm_failure};
 use super::input::{CameraPitch, CameraYaw};
+use crab_world::vehicle::{Vehicle, VehicleControl, VehicleKind};
 
 
 /// Shared setup for both apps: the sim + its input source, plus the input resources.
@@ -198,31 +199,39 @@ pub(super) struct PendingInput {
     pub(super) toggle_vehicle: bool,
 }
 
+/// A flyer's first-person cockpit pose in the crab's ARENA frame: a 3D position + a full attitude
+/// quaternion (body→world). Read off the rapier vehicle body each applied tick; the renderer maps
+/// it into render space (shifted to the crab's render spot, [`super::scene`]'s `cockpit_camera`)
+/// and flies the one cockpit camera from it — so the plane and the helicopter share one camera
+/// formula with no copy to drift.
+#[derive(Clone, Copy)]
+pub(super) struct CockpitPose {
+    pub pos: Vec3,
+    pub orient: Quat,
+}
+
 /// The local player's SINGLE-PLAYER vehicle, when piloting one. `OnFoot` = not in a vehicle.
 ///
-/// Single-player vehicle flight lives ENTIRELY here in the play layer, NOT in the
-/// deterministic sim ([`crate::sim`] stays integer-only and untouched): a solo round
-/// needs no cross-peer lockstep, so each vehicle is a client-side body the client integrates
-/// itself with the shared `step` flight formula ([`Plane::step`] / [`Helicopter::step`]).
-/// While piloting, the local foot player feeds the sim a NEUTRAL input (it just stands at the
-/// boarding spot) and the camera flies from the vehicle; stepping out returns the view to the
-/// foot player. The E/X control CYCLES foot → plane → helicopter → foot.
+/// The vehicle itself is a rapier rigidbody living in the crab's ONE physics world
+/// ([`crab_world::vehicle`]) — official, host-authoritative game state that collides with Sally.
+/// This resource is the net client's MIRROR of that body: it tracks "am I piloting and which
+/// craft" (driving spawn/despawn via [`VehicleControl`]) and holds the body's last two arena poses
+/// for the cockpit camera's interpolation. While piloting, the local foot player feeds the sim a
+/// NEUTRAL input (it just stands at the boarding spot) and the camera flies from the vehicle;
+/// stepping out returns the view to the foot player. The E/X control CYCLES foot → plane →
+/// helicopter → foot.
 ///
-/// An enum (not `Option`s) so a vehicle and its previous pose are present together or not at
-/// all — the "flying but no prev pose" state is unrepresentable. `prev` is last applied tick's
-/// pose, so [`apply_transforms`] tweens the cockpit camera the same way it interpolates every
-/// sim body. Only ever in a vehicle on a windowed SOLO round (a solo [`Coordinator`]).
+/// An enum (not `Option`s) so the kind and the poses are present together or not at all. `prev` is
+/// last applied tick's pose, so [`apply_transforms`] tweens the cockpit camera the same way it
+/// interpolates every sim body. Only ever piloting on a windowed SOLO round (a solo [`Coordinator`]).
 #[derive(Resource, Default)]
 pub(super) enum LocalVehicle {
     #[default]
     OnFoot,
-    Plane {
-        plane: Plane,
-        prev: Plane,
-    },
-    Helicopter {
-        heli: Helicopter,
-        prev: Helicopter,
+    Flying {
+        kind: VehicleKind,
+        now: CockpitPose,
+        prev: CockpitPose,
     },
 }
 
@@ -231,54 +240,69 @@ impl LocalVehicle {
         !matches!(self, Self::OnFoot)
     }
 
+    /// The vehicle kind currently piloted, or `None` on foot — the net→crab-world command that
+    /// spawns the matching rapier body via [`VehicleControl`].
+    pub(super) fn kind(&self) -> Option<VehicleKind> {
+        match self {
+            Self::OnFoot => None,
+            Self::Flying { kind, .. } => Some(*kind),
+        }
+    }
+
     /// The controls CONTEXT this vehicle state presents — the single mapping from "what am I
     /// driving" to "which control set + legend is live". The overlay reads it via
-    /// [`ActiveContext`]; adding a vehicle type means adding an arm here and its rows in
-    /// [`crab_world::controls`], and the HUD names + labels it automatically.
+    /// [`ActiveContext`]; the HUD names + labels it automatically.
     pub(super) fn context(&self) -> GcrContext {
         match self {
             Self::OnFoot => GcrContext::OnFoot,
-            Self::Plane { .. } => GcrContext::Plane,
-            Self::Helicopter { .. } => GcrContext::Helicopter,
+            Self::Flying { kind: VehicleKind::Plane, .. } => GcrContext::Plane,
+            Self::Flying { kind: VehicleKind::Helicopter, .. } => GcrContext::Helicopter,
         }
     }
 
-    /// This vehicle's `(prev, now)` cockpit poses for the FP camera, or `None` on foot. The
-    /// shared [`CockpitPose`] erases the plane/helicopter difference, so the renderer flies
-    /// either craft through the one `cockpit_camera` formula (no per-vehicle camera copy).
+    /// This vehicle's `(prev, now)` cockpit poses for the FP camera, or `None` on foot.
     pub(super) fn cockpit_poses(&self) -> Option<(CockpitPose, CockpitPose)> {
         match self {
             Self::OnFoot => None,
-            Self::Plane { plane, prev } => Some((prev.cockpit_pose(), plane.cockpit_pose())),
-            Self::Helicopter { heli, prev } => Some((prev.cockpit_pose(), heli.cockpit_pose())),
+            Self::Flying { now, prev, .. } => Some((*prev, *now)),
         }
     }
 
-    /// The NEXT vehicle in the enter/exit cycle (foot → plane → helicopter → foot), or `None`
-    /// to leave the state unchanged. One place the cycle order lives, so the input toggle and
-    /// any future caller can't disagree on it. `foot` is the local foot player's spot + facing
-    /// while it's alive (`None` if downed): needed only to BOARD from foot — a vehicle→vehicle
-    /// switch spawns the new craft where the current one is, and stepping out needs no spot.
-    fn cycled(&self, foot: Option<(Pos, i32)>) -> Option<Self> {
-        match self {
-            // Board the plane from foot — only if the foot avatar is alive to board.
-            Self::OnFoot => foot.map(|(ground, yaw)| {
-                let plane = Plane::spawn(ground, yaw);
-                Self::Plane { plane, prev: plane }
-            }),
-            // Switch to the helicopter, spawned where the plane is (its XZ + heading).
-            Self::Plane { plane, .. } => {
-                let ground = Pos {
-                    x: plane.pos().x,
-                    z: plane.pos().z,
-                };
-                let heli = Helicopter::spawn(ground, plane.heading());
-                Some(Self::Helicopter { heli, prev: heli })
-            }
-            // Step out to foot.
-            Self::Helicopter { .. } => Some(Self::OnFoot),
+    /// Refresh the mirrored pose from the rapier body's freshly-stepped arena Transform: shift
+    /// `now` into `prev` and record the new pose, so the cockpit camera interpolates this tick's
+    /// motion. No-op on foot.
+    fn update_pose(&mut self, pose: CockpitPose) {
+        if let Self::Flying { now, prev, .. } = self {
+            *prev = *now;
+            *now = pose;
         }
     }
+
+    /// The NEXT vehicle in the enter/exit cycle (foot → plane → helicopter → foot). One place the
+    /// cycle order lives, so the input toggle and any future caller can't disagree on it. Boarding
+    /// from foot seeds an identity pose; the first post-pump [`update_pose`] overwrites it with the
+    /// spawned body's real arena pose, so the one-frame seed is never rendered as the craft's rest.
+    fn cycled(&self) -> Self {
+        let seed = CockpitPose { pos: Vec3::ZERO, orient: Quat::IDENTITY };
+        match self {
+            Self::OnFoot => Self::Flying { kind: VehicleKind::Plane, now: seed, prev: seed },
+            Self::Flying { kind: VehicleKind::Plane, .. } => {
+                Self::Flying { kind: VehicleKind::Helicopter, now: seed, prev: seed }
+            }
+            Self::Flying { kind: VehicleKind::Helicopter, .. } => Self::OnFoot,
+        }
+    }
+}
+
+/// Read the single vehicle rigidbody's arena-frame pose (position + attitude) from the crab world,
+/// or `None` if none is spawned (on foot, or the frame a freshly-boarded body hasn't appeared yet).
+/// One body at most — `manage_vehicle` enforces it; we take the first. The renderer shifts this
+/// arena pose to the crab's render spot in `cockpit_camera`.
+fn read_vehicle_pose(world: &mut World) -> Option<CockpitPose> {
+    let mut q = world.query_filtered::<&Transform, With<Vehicle>>();
+    q.iter(world)
+        .next()
+        .map(|t| CockpitPose { pos: t.translation, orient: t.rotation })
 }
 
 // ---------------------------------------------------------------------------
@@ -404,10 +428,10 @@ pub(super) fn drive_lockstep(
 
     world.non_send_resource_mut::<GameState>().accumulator += delta;
 
-    // Single-player enter/exit a vehicle (client-local; the sim never sees it). Drain the
-    // E-tap latch ONCE per frame and CYCLE foot → plane → helicopter → foot at the foot
-    // player's spot + facing. Solo only — a networked round is foot-only, so this toggle is
-    // inert there and the lockstep is untouched.
+    // Single-player enter/exit a vehicle. Drain the E-tap latch ONCE per frame and CYCLE foot →
+    // plane → helicopter → foot. The actual craft is a rapier body spawned/despawned in the crab
+    // world from the resulting `LocalVehicle` (mirrored into `VehicleControl` below). Solo only —
+    // a networked round is foot-only, so this toggle is inert there and the lockstep is untouched.
     {
         let toggle = std::mem::take(&mut world.resource_mut::<PendingInput>().toggle_vehicle);
         let solo = toggle
@@ -416,19 +440,21 @@ pub(super) fn drive_lockstep(
                 InputSource::Coordinated(c) if c.is_solo()
             );
         if solo {
-            // Where to board the next vehicle: the local foot player's ground spot + facing,
-            // but only while it's still alive to board (stepping OUT needs no spot).
-            let state = world.non_send_resource::<GameState>();
-            let me = state.ls.me();
-            let boarding = state
-                .ls
-                .sim()
-                .player(me)
-                .filter(|p| p.status() == PlayerStatus::Alive)
-                .map(|p| (p.pos(), p.yaw()));
+            // Board from foot ONLY while the foot avatar is alive; a vehicle→vehicle switch and
+            // stepping out need no foot. (Downed/extracted: can't board.)
+            let alive = {
+                let state = world.non_send_resource::<GameState>();
+                let me = state.ls.me();
+                state
+                    .ls
+                    .sim()
+                    .player(me)
+                    .is_some_and(|p| p.status() == PlayerStatus::Alive)
+            };
             let mut vehicle = world.resource_mut::<LocalVehicle>();
-            if let Some(next) = vehicle.cycled(boarding) {
-                *vehicle = next;
+            let boarding_from_foot = matches!(*vehicle, LocalVehicle::OnFoot);
+            if !boarding_from_foot || alive {
+                *vehicle = vehicle.cycled();
             }
         }
     }
@@ -452,8 +478,8 @@ pub(super) fn drive_lockstep(
             let mut pending = world.resource_mut::<PendingInput>();
             let look_axis = (pending.yaw_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
             // The pitch axis reuses the SAME per-tick radian scale as the yaw axis, so the
-            // mouse/stick feels symmetric vertically and horizontally; the sim then applies
-            // each axis's own rate (roll vs pitch) in `step_plane`.
+            // mouse/stick feels symmetric vertically and horizontally; the rapier vehicle then
+            // applies each axis's own control torque (roll vs pitch) in its force model.
             let pitch_axis = (pending.pitch_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
             let btns = (if pending.action { buttons::ACTION } else { 0 })
                 | (if pending.restart { buttons::RESTART } else { 0 });
@@ -521,19 +547,25 @@ pub(super) fn drive_lockstep(
         };
         report_faults(&faults, &mut total_desyncs, &tel);
 
-        // Fly the client-side vehicle one tick with the real input (single-player), keeping
-        // last tick's pose for the camera interpolation. The sim never sees this — it is the
-        // play layer's own body, so the deterministic core stays integer-only.
-        match &mut *world.resource_mut::<LocalVehicle>() {
-            LocalVehicle::Plane { plane, prev } => {
-                *prev = *plane;
-                plane.step(input);
+        // Drive the rapier vehicle (single-player): mirror the piloting state + this tick's
+        // controls into `VehicleControl`, which the crab world's force system reads on the next
+        // physics pump — spawn/despawn the body and apply thrust/lift/drag/torque. The sim never
+        // sees the vehicle (the foot player gets neutral input above); it is host-authoritative
+        // crab-world state. Axes are screen-reconciled EXACTLY as the old integer model did
+        // (`-look_yaw` → bank right, `-move_strafe` → yaw right, `look_pitch` → nose up), so the
+        // controls + their on-screen labels are unchanged for the pilot.
+        {
+            let kind = world.resource::<LocalVehicle>().kind();
+            let scale = Input::AXIS_SCALE as f32;
+            let mut ctrl = world.resource_mut::<VehicleControl>();
+            ctrl.active = kind.is_some();
+            if let Some(k) = kind {
+                ctrl.kind = k;
             }
-            LocalVehicle::Helicopter { heli, prev } => {
-                *prev = *heli;
-                heli.step(input);
-            }
-            LocalVehicle::OnFoot => {}
+            ctrl.throttle_trim = input.move_forward as f32 / scale;
+            ctrl.pitch = input.look_pitch as f32 / scale;
+            ctrl.roll = -(input.look_yaw as f32) / scale;
+            ctrl.yaw = -(input.move_strafe as f32) / scale;
         }
 
         // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step
@@ -572,6 +604,13 @@ pub(super) fn drive_lockstep(
                         crate::external_crab::sync_external_crab(&mut state.ls, &mut bridge);
                     },
                 );
+                // Mirror the vehicle body's freshly-stepped arena pose into `LocalVehicle` for the
+                // cockpit camera's interpolation (the float analogue of the `SimSnapshot::capture`
+                // above). One body at most; read its Transform and shift `now`→`prev`. None while
+                // on foot or the frame a boarded body hasn't spawned yet (the seed pose holds).
+                if let Some(pose) = read_vehicle_pose(world) {
+                    world.resource_mut::<LocalVehicle>().update_pose(pose);
+                }
             }
             let (tick_faults, restarted) = {
                 let mut state = world.non_send_resource_mut::<GameState>();

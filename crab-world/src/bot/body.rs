@@ -49,10 +49,37 @@ pub const NESTED_COLLISION: CollisionGroups = CollisionGroups::new(Group::GROUP_
 /// inside `Group`'s 32 bits with room for the arena (bit 0) and nested (bit 1) bits.
 pub const MAX_ENVS: usize = 16;
 
-// Envs occupy bits 2..=MAX_ENVS+1 of `Group`'s 32, so the highest env bit must fit.
-// A compile-time guarantee, so raising MAX_ENVS past the budget fails the build
-// instead of silently truncating env `e`'s membership bit at runtime.
-const _: () = assert!(MAX_ENVS + 2 <= 32);
+/// Bit reserved for the player's single-player VEHICLE rigidbody (the rapier plane/heli,
+/// [`crate::vehicle`]). One bit above the env range so the vehicle collides with the arena AND
+/// with every env's crab parts — the headline (owner 703): it bounces off Sally and shoves her
+/// legs by mass. At TRAINING time no vehicle entity exists, so a crab filter naming this bit (see
+/// [`crab_collision`]) matches nothing and the trained physics stays bit-identical — the vehicle
+/// is policy-safe by construction. Only ever ONE vehicle, in a solo round.
+pub const VEHICLE_GROUP: Group = Group::GROUP_19; // bit 18 = MAX_ENVS + 2
+
+// Envs occupy bits 2..=MAX_ENVS+1 of `Group`'s 32; the vehicle takes the next bit
+// (`VEHICLE_GROUP`, bit MAX_ENVS+2). Compile-time guarantees that both fit and that
+// `VEHICLE_GROUP` really is that next bit — so raising MAX_ENVS past the budget, or letting the
+// vehicle bit collide with an env bit, fails the build instead of silently truncating at runtime.
+const _: () = assert!(MAX_ENVS + 2 < 32);
+const _: () = assert!(VEHICLE_GROUP.bits() == 1 << (MAX_ENVS + 2));
+
+/// Collision groups for the player's vehicle: its own [`VEHICLE_GROUP`] bit, filtered to hit the
+/// arena (so the walls bounce it — owner Option A) and every env's crab parts (so it strikes
+/// Sally). Reciprocity needs the crab filter to name `VEHICLE_GROUP` too — [`crab_collision`]
+/// adds it. Excludes the nested bit (`GROUP_2`): those links hide inside the shell and only ever
+/// touch the arena, so a vehicle contact there would just fight the solver.
+pub fn vehicle_collision() -> CollisionGroups {
+    // Every env's membership bit: bits 2..MAX_ENVS+2 — the same `1 << (e + 2)` `crab_collision`
+    // hands each env, unioned so the one vehicle hits whichever crab is present.
+    let mut env_bits = Group::empty();
+    let mut e = 0;
+    while e < MAX_ENVS {
+        env_bits = env_bits.union(Group::from_bits_truncate(1 << (e + 2)));
+        e += 1;
+    }
+    CollisionGroups::new(VEHICLE_GROUP, Group::GROUP_1.union(env_bits))
+}
 
 /// Collision membership for env `e`'s ordinary (non-nested, distal) crab parts.
 ///
@@ -72,7 +99,11 @@ pub fn crab_collision(env: usize) -> CollisionGroups {
     );
     // Env 0 → GROUP_3 (bit 2); arena=bit 0, nested=bit 1 are reserved below it.
     let bit = Group::from_bits_truncate(1 << (env + 2));
-    CollisionGroups::new(bit, Group::GROUP_1.union(bit))
+    // Filter: the arena, this crab's own distal parts, AND the player's vehicle ([`VEHICLE_GROUP`])
+    // so a vehicle strike is a real reciprocal contact. The vehicle bit only exists in a solo round
+    // with a spawned vehicle; training never spawns one, so naming it here changes no trained
+    // physics (no collider carries `VEHICLE_GROUP` to match) — the migration stays policy-safe.
+    CollisionGroups::new(bit, Group::GROUP_1.union(bit).union(VEHICLE_GROUP))
 }
 
 /// Disable contacts between the two segments a joint connects. The joint

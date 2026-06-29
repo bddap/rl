@@ -220,6 +220,115 @@ pub fn run_headless_probe(
 }
 
 // ---------------------------------------------------------------------------
+// Crab-policy-stability gate (the vehicle migration's DONE bar #2)
+// ---------------------------------------------------------------------------
+
+/// Result of [`run_vehicle_stability_probe`]: the per-tick samples plus the tick a ram vehicle was
+/// dropped onto Sally. The caller (the `nn-crab-vehicle-stability` subcommand) gates on three facts
+/// read off this: the policy WALKED before the hit, every post-hit carapace pose stayed FINITE (no
+/// NaN/explosion), and the policy RESUMED walking after the hit (the trained gait recovered).
+pub struct StabilityResult {
+    pub samples: Vec<ProbeSample>,
+    /// The tick at which the ram vehicle was spawned on the crab.
+    pub ram_tick: u64,
+}
+
+impl StabilityResult {
+    /// Every sampled carapace pose (before AND after the hit) is finite — the crab never exploded
+    /// into NaN/inf under the collision. The hard floor of the stability gate; the caller adds the
+    /// bounded-height + stood-back-up + still-reaching checks on the [`samples`](Self::samples).
+    pub fn carapace_stayed_finite(&self) -> bool {
+        self.samples.iter().all(|s| {
+            s.carapace_arena_x.is_finite()
+                && s.carapace_y.is_finite()
+                && s.carapace_arena_z.is_finite()
+        })
+    }
+}
+
+/// Headless crab-policy-stability gate: run the trained NN crab, drop a real vehicle rigidbody onto
+/// it mid-walk (the same collider/mass/groups boarding spawns — [`crab_world::vehicle`]), and keep
+/// stepping. Proves the migration's headline (owner 703) without a GPU: the vehicle↔crab contact is
+/// real, it shoves the crab by mass, and the trained walking RECOVERS — no NaN/explosion. `warmup`
+/// ticks let the crab settle + start walking before the hit; `post` ticks watch it recover.
+///
+/// The ram is a PURE BALLISTIC body (no `VehiclePlugin`, so no force system drives it): it carries
+/// momentum into Sally's legs and bounces, isolating the COLLISION + the policy's response (the
+/// flight force model is covered by `crab_world::vehicle`'s own unit tests).
+pub fn run_vehicle_stability_probe(
+    checkpoint_dir: &std::path::Path,
+    seed: u64,
+    warmup: u64,
+    post: u64,
+) -> StabilityResult {
+    use bevy_rapier3d::prelude::Velocity;
+    use crab_world::vehicle::{VehicleKind, spawn_ram_vehicle};
+
+    let me = PlayerId(0);
+    let mut ls = Lockstep::new(seed, &[me], me);
+    let crab_spawn = ls.sim().crab().pos();
+    let crab = ls.sim().crab();
+    ls.set_external_crab_pose(crab.pos(), crab.yaw(), 0);
+
+    let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
+    app.insert_non_send_resource(ProbeDriver {
+        ls,
+        samples: Vec::new(),
+        log_every: 1,
+    });
+    app.add_systems(
+        FixedUpdate,
+        probe_step.after(integrate_crab).after(hash_crab_physics),
+    );
+
+    // Warm up: let the crab settle and begin walking toward the (still) player.
+    for _ in 0..warmup {
+        app.update();
+    }
+    let ram_tick = app
+        .world()
+        .get_non_send_resource::<ProbeDriver>()
+        .map(|d| d.ls.sim().tick())
+        .unwrap_or(warmup);
+
+    // Drop a ram vehicle beside the crab at leg height, moving INTO it — a lateral shove of the
+    // legs by mass. The carapace's arena pose (env 0) is where to aim; fall back to the origin.
+    let carapace = {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<(&CrabEnvId, &Transform), With<CrabCarapace>>();
+        q.iter(app.world())
+            .find(|(env, _)| env.0 == 0)
+            .map(|(_, t)| t.translation)
+            .unwrap_or(Vec3::ZERO)
+    };
+    // Beside the crab (+X, 1.2 m out), just below carapace height (≈ leg level), aimed back at it.
+    let spawn_at = Transform::from_translation(carapace + Vec3::new(1.2, -0.15, 0.0));
+    let ram_velocity = Velocity {
+        linear: Vec3::new(-10.0, 0.0, 0.0),
+        angular: Vec3::ZERO,
+    };
+    spawn_ram_vehicle(
+        app.world_mut(),
+        VehicleKind::Plane,
+        spawn_at,
+        ram_velocity,
+    );
+
+    // Watch the crab take the hit and recover.
+    for _ in 0..post {
+        app.update();
+    }
+
+    let samples = app
+        .world()
+        .get_non_send_resource::<ProbeDriver>()
+        .map(|d| d.samples.clone())
+        .unwrap_or_default();
+    StabilityResult { samples, ram_tick }
+}
+
+// ---------------------------------------------------------------------------
 // Cross-peer NN-crab determinism harness (the decisive GCR #82 gate)
 // ---------------------------------------------------------------------------
 
