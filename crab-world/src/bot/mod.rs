@@ -90,6 +90,10 @@ impl Plugin for BotPlugin {
             // leaves it empty (a zero target vector in the obs).
             .init_resource::<sensor::CrabTargets>()
             .init_resource::<CrabSpawns>()
+            // Resolve [`body::CrabModelPath`] (which crab this app shows) BEFORE `CrabAssets`,
+            // whose `FromWorld` reads it. A surface that pre-inserted it keeps its choice; everyone
+            // else gets the live `meshfit::model_path()` default. See `CrabModelPath` for why.
+            .init_resource::<body::CrabModelPath>()
             .init_resource::<body::CrabAssets>()
             .init_resource::<RescueStats>()
             .add_message::<CrabRescued>()

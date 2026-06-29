@@ -53,6 +53,8 @@ fn manage_silhouette_visibility(
     armed: Option<Res<crate::external_crab::ExternalCrabArmed>>,
     mut q: Query<&mut Visibility, With<CrabAvatar>>,
 ) {
+    // net's single asset source is the global resolver (the silhouette runs without the bot stack,
+    // so it can't read the `CrabModelPath` BotPlugin resource; net never overrides it anyway).
     let skin_is_the_crab = armed.is_some() && crab_world::bot::meshfit::model_path().is_some();
     let want = if !skin_is_the_crab && mode.shows_mesh() {
         Visibility::Visible

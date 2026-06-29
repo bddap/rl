@@ -157,14 +157,18 @@ fn link_map(links: &LinkQuery, env: usize) -> std::collections::HashMap<PartId, 
 }
 
 pub fn register(app: &mut App) {
-    // Skin iff a model resolves — the SAME `model_path` the body uses, so skin and
-    // physics can't disagree about asset presence. The AssetServer wants an
-    // asset-root-RELATIVE path, so feed it the relative `CRAB_MODEL_PATH` (default
-    // `sally.glb`), not the absolute `model_path`.
-    if super::meshfit::model_path().is_none() {
+    // Skin iff a model resolves — read the SAME `CrabModelPath` the body reads, so skin and
+    // physics can't disagree about which crab is present (see `body::CrabModelPath`).
+    let Some(model) = app.world().resource::<super::body::CrabModelPath>().0.clone() else {
         return;
-    }
-    let rel = std::env::var("CRAB_MODEL_PATH").unwrap_or_else(|_| "sally.glb".to_string());
+    };
+    // The AssetServer resolves names RELATIVE to its root (`assets::bevy_asset_path`), so hand it
+    // the resource's resolved path made relative to that root — NOT a fresh `CRAB_MODEL_PATH` env
+    // read, which could name a different file than the resource resolved. An out-of-root absolute
+    // override (the rare dev escape hatch) has no relative form, so pass it as-is.
+    let rel = model
+        .strip_prefix(crate::assets::bevy_asset_path())
+        .map_or_else(|_| model.clone(), std::path::Path::to_path_buf);
     let scene = app
         .world()
         .resource::<AssetServer>()

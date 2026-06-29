@@ -133,6 +133,10 @@ pub(super) fn spawn_world(
     // silhouette and the skin both render at native size, so they can't mis-size relative to each
     // other or to the colliders.
     let armed = external_crab_armed.is_some();
+    // net's single asset source is the global resolver: `CrabModelPath` is a `BotPlugin` resource
+    // and the silhouette path runs WITHOUT the bot stack (the unarmed screenshot), so it can't read
+    // that resource. net never overrides the resolver anyway, so `model_path()` here and the body's
+    // `CrabModelPath` (which defaults to it) agree — see `crab_world::bot::body::CrabModelPath`.
     let have_model = crab_world::bot::meshfit::model_path().is_some();
     let crab_hidden = armed && have_model;
     // With the crab armed but NO model, the silhouette (the real colliders, NOT the real Sally
@@ -183,8 +187,14 @@ const CRAB_RENDER_HEIGHT: f32 = PLAYER_HEIGHT * CRAB_SCALE as f32;
 fn natural_crab_height() -> Option<f32> {
     static H: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
     *H.get_or_init(|| {
-        let h = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe())
-            .natural_height();
+        // Reads the REAL asset (`meshfit::model_path`), NOT the per-app `CrabModelPath` resource:
+        // this answers "how big is the real crab?" to set the world render scale, a fixed
+        // binary+asset constant. An app choosing the fallback render must not resize the world, so
+        // this is deliberately independent of which crab THIS app shows (see `CrabModelPath`).
+        let h = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe(
+            crab_world::bot::meshfit::model_path().as_deref(),
+        ))
+        .natural_height();
         (h > 1e-4).then_some(h)
     })
 }
@@ -216,7 +226,9 @@ pub(crate) fn world_render_scale() -> f32 {
 /// geometry. This static silhouette is the honest physics-bones view (no articulation): the
 /// headless-screenshot render, and the in-game view whenever no skin model resolves — the rest
 /// stance posed rigidly, so the legs don't walk, but it is the REAL colliders, never a stand-in
-/// box. The real armed round with a model shows the walking skinned NN rig instead.
+/// box. The real armed round with a model shows the walking skinned NN rig instead. Resolves the
+/// recipe from the global `meshfit::model_path()` (net's single asset source — see `have_model` in
+/// `spawn_world`), the SAME resolver the body's `CrabModelPath` defaults to, so they agree.
 fn spawn_crab_silhouette(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -225,7 +237,9 @@ fn spawn_crab_silhouette(
 ) {
     use crab_world::bot::rig::RestShape;
 
-    let sil = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe());
+    let sil = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe(
+        crab_world::bot::meshfit::model_path().as_deref(),
+    ));
     let shapes = || sil.shapes();
 
     // Orient the rig claws-forward (+Z). The recipe's forward axis isn't necessarily +Z,

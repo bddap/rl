@@ -16,23 +16,23 @@ use net::sim::{Input, PlayerId, TICK_HZ};
 pub(crate) const MATCH_SEED: u64 = 0x6372_6162; // "crab"
 
 /// Resolve the REQUIRED NN-crab checkpoint dir: the `--nn-crab-checkpoint` flag (`flag`), else
-/// the `RL_CRAB_CHECKPOINT_DIR` env var (deploy sets this), else `assets/weights` under the
-/// asset root (`BEVY_ASSET_ROOT`, else the binary's cwd) — so a checkpoint can be chosen at
-/// runtime, no recompile. A missing `brain.bin` is a HARD, ACTIONABLE failure (rl#114): the one
-/// giant crab IS the trained NN body ("Sally"), and there is no integer point-pursuer to fall back
-/// to, so rather than silently substituting a fake crab we refuse to launch with a message naming
-/// the dir we searched and how to fix it.
+/// the `RL_CRAB_CHECKPOINT_DIR` env var (deploy sets this), else `assets/weights` under the ONE
+/// asset root ([`crab_world::assets::asset_root`] — `BEVY_ASSET_ROOT`, else the crab-world crate
+/// dir; the SAME root the mesh + control glyphs resolve against, bddap/rl#146, so the weights
+/// can't live somewhere the mesh doesn't) — so a checkpoint can be chosen at runtime, no recompile.
+/// A missing `brain.bin` is a HARD, ACTIONABLE failure (rl#114): the one giant crab IS the trained
+/// NN body ("Sally"), and there is no integer point-pursuer to fall back to, so rather than silently
+/// substituting a fake crab we refuse to launch with a message naming the dir we searched and how
+/// to fix it.
 pub(crate) fn nn_crab_checkpoint_dir(
     flag: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf> {
     let dir = flag
         .or_else(|| std::env::var_os("RL_CRAB_CHECKPOINT_DIR").map(std::path::PathBuf::from))
         .unwrap_or_else(|| {
-            let root = std::env::var_os("BEVY_ASSET_ROOT").map_or_else(
-                || std::env::current_dir().unwrap_or_default(),
-                std::path::PathBuf::from,
-            );
-            root.join("assets").join("weights")
+            crab_world::assets::asset_root()
+                .join("assets")
+                .join("weights")
         });
     if dir.join("brain.bin").exists() {
         Ok(dir)
