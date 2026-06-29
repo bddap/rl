@@ -35,6 +35,11 @@ pub mod controls;
 /// lockstep desync hash, so it is `pub`; the hash is a frozen wire format — changing it desyncs
 /// peers, so treat it as append-only, not a free-to-edit internal.
 pub mod fnv;
+/// LOUD missing-Sally-mesh signalling (OTEL error + on-screen banner) shared by the
+/// player-facing surfaces (rl-demo + game/net), so they can't drift on how a missing Sally is
+/// announced (bddap/rl#706). The banner half is render-gated inside; the OTEL half compiles
+/// headless too (it's never called there).
+pub mod mesh_fallback;
 pub mod physics;
 pub mod training;
 

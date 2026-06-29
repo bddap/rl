@@ -282,9 +282,13 @@ struct CheckpointCheckArgs {
 // builds its runtime explicitly, and the sync modes (`solo`/`play`/`fp-screenshot`)
 // never touch one they don't own.
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .init();
+    // Installs the stderr fmt subscriber (so the game's `error!`/`warn!` surface locally) AND,
+    // when a telemetry endpoint is configured, exports OTLP traces/logs/metrics — routing the
+    // missing-mesh error (rl#706) and other faults onto the telemetry stream. Inert (stderr
+    // only) when no endpoint is set, so it never perturbs lockstep. The guard flushes on drop,
+    // so it must outlive the whole run — bound here, dropped only when `main` returns. `RUST_LOG`
+    // overrides the default `info` level.
+    let _otel = otel::init("game");
     // No subcommand → the networked mode with its own defaults (parsed from an empty
     // arg list so the `default_value_t`s are the single source, not duplicated here).
     let command = Cli::parse()
@@ -656,24 +660,17 @@ fn resolve_render_mode(flag: Option<&str>) -> Result<render::RenderMode> {
     let env_override =
         std::env::var_os("RL_RENDER_MODE").is_some() || std::env::var_os("RL_DEBUG_COLLIDERS").is_some();
     if !env_override && crab_world::bot::meshfit::model_path().is_none() {
-        tracing::error!(
-            target: "gcr::canonical_mesh",
-            host = %hostname(),
-            "GCR: the canonical Sally glb could not be resolved — defaulting to the honest \
-             colliders view (the physics-bones wireframe, NOT a placeholder mesh). Fetch the \
-             model with scripts/fetch-sally.sh or set CRAB_MODEL_PATH."
+        // LOUD on the telemetry stream (and stderr). Shared with rl-demo so both surfaces name
+        // the missing Sally identically (rl#706). The on-screen banner companion is spawned on
+        // the windowed surface in `net::render::scene` (this headless-resolvable check decides
+        // only the render MODE; the banner needs the live window).
+        crab_world::mesh_fallback::log_fallback(
+            crab_world::mesh_fallback::Surface::Game,
+            crab_world::mesh_fallback::MESH_ABSENT_REASON,
         );
         return Ok(render::RenderMode::Colliders);
     }
     Ok(render::RenderMode::from_env())
-}
-
-/// This host's name for telemetry tagging — so a missing-asset error names the device it fired
-/// on. Best-effort: an unreadable hostname is reported as `unknown` rather than failing the run.
-fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 /// Deterministic match seed: a constant so independently-launched peers agree without a

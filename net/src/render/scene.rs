@@ -50,6 +50,11 @@ pub(super) fn spawn_world(
     // silhouette is the allowed physics-bones view). Keyed on the active gate, NOT the
     // bridge's presence.
     external_crab_armed: Option<Res<crate::external_crab::ExternalCrabArmed>>,
+    // A primary window exists on the WINDOWED play/solo surface (one `BorderlessFullscreen`
+    // window) but NOT on the windowless fp-screenshot path (`primary_window: None`). The
+    // missing-mesh banner is spawned only when a window exists, so it never pollutes a captured
+    // screenshot frame.
+    windows: Query<(), With<Window>>,
 ) {
     // The render-frame shrink: the human world (ground, players, planes, the pillar, the camera)
     // renders this much smaller so the true-physics-size crab towers over it (render==physics; the
@@ -176,7 +181,24 @@ pub(super) fn spawn_world(
     // or the crab vanishes. Always spawned so `apply_transforms`'s crab query is satisfied. The
     // silhouette and the skin both render at native size, so they can't mis-size relative to each
     // other or to the colliders.
-    let crab_hidden = external_crab_armed.is_some() && crab_world::bot::meshfit::model_path().is_some();
+    let armed = external_crab_armed.is_some();
+    let have_model = crab_world::bot::meshfit::model_path().is_some();
+    let crab_hidden = armed && have_model;
+    // With the crab armed but NO model, the silhouette (the real colliders, NOT the real Sally
+    // rig) stays shown AS the crab. Shipping that with no signal is the silent-fallback bug the
+    // owner most hates (rl#706), so on the WINDOWED surface name it on screen with the banner
+    // shared with rl-demo. The OTEL companion already fires in `game::resolve_render_mode`; only
+    // the live window adds the banner here. The screenshot path has no window (`primary_window:
+    // None`) so a UI band can't pollute the capture — there the OTEL error + visible silhouette
+    // are the signal. NB the gates differ on purpose: the banner shows whenever the mesh is
+    // absent (it answers "what am I looking at?"), while that OTEL error suppresses under an
+    // explicit RL_RENDER_MODE override (it means "the missing mesh FORCED the fallback").
+    if armed && !have_model && !windows.is_empty() {
+        crab_world::mesh_fallback::spawn_banner(
+            &mut commands,
+            crab_world::mesh_fallback::MESH_ABSENT_REASON,
+        );
+    }
     let crab_root = commands
         .spawn((
             Transform::from_translation(world(state.ls.sim().crab().pos(), 0.0)),
