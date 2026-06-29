@@ -101,25 +101,23 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     // Arm the gate (and, networked, pin the lead so a per-peer env override can't desync the
     // hashed pose — solo keeps its tuning). One arm path, [`crate::external_crab::arm`].
     crate::external_crab::arm(world, networked);
-    install_round(world, ready.lockstep, ready.net.into());
+    let source = InputSource::coordinated(ready.net, ready.lockstep.peers());
+    install_round(world, ready.lockstep, source);
 }
 
 // ---------------------------------------------------------------------------
 // Lockstep driver state (render-agnostic: owns the sim + transport)
 // ---------------------------------------------------------------------------
 
-/// Where the OTHER players' per-tick inputs come from this run. One field, three
-/// mutually-exclusive cases — so "broadcast to real peers AND fabricate bot inputs"
-/// (a meaningless combination) is unrepresentable rather than merely unreached.
+/// Where the OTHER players' per-tick inputs come from this run. Two mutually-exclusive cases —
+/// so "real server-coordinated peers AND fabricated bot inputs" (a meaningless combination) is
+/// unrepresentable rather than merely unreached.
 pub(super) enum InputSource {
-    /// Real peers over the transport (windowed networked play): broadcast our tick
-    /// message and ingest theirs. Boxed because [`NetDriver`] owns a tokio runtime +
-    /// the iroh session (~200 bytes), dwarfing the other variants — without the box the
-    /// whole enum (one per round) carries that weight even when solo.
-    Networked(Box<NetDriver>),
-    /// A single offline peer (windowed solo): our own input completes every tick, so
-    /// there are no other inputs to supply.
-    Solo,
+    /// Server-coordinated play (rl#151): solo (internal server, roster of one), host (internal
+    /// server + remote clients), or a remote client of a server peer — all the SAME path through
+    /// the [`Coordinator`], which is the SP=MP-uniformity proof. Boxed because it can own a
+    /// [`NetDriver`] (tokio runtime + iroh session, ~200 bytes), dwarfing the `Scripted` variant.
+    Coordinated(Box<Coordinator>),
     /// Stand-in input for the absent peers, fed for every non-local player each tick
     /// (headless screenshot only). It crosses the SAME deterministic `record_remote`
     /// path a wire peer would, so the sim can't distinguish it — a bot/replay input,
@@ -128,15 +126,12 @@ pub(super) enum InputSource {
     Scripted(Input),
 }
 
-impl From<Option<NetDriver>> for InputSource {
-    /// The single home of the windowed networked-vs-solo choice: real peers when a
-    /// `NetDriver` is present, one offline peer when not. (`Scripted` is headless-only
-    /// and never arises from a `NetDriver`.)
-    fn from(net: Option<NetDriver>) -> Self {
-        match net {
-            Some(n) => InputSource::Networked(Box::new(n)),
-            None => InputSource::Solo,
-        }
+impl InputSource {
+    /// Build the server-coordinated source for a round: `None` ⇒ a solo internal server, a host
+    /// driver ⇒ a server over the roster, a client driver ⇒ a remote client. `peers` is the sim's
+    /// participant set (solo ⇒ just the local player). The single home of the round's role choice.
+    pub(super) fn coordinated(net: Option<NetDriver>, peers: &[PlayerId]) -> Self {
+        InputSource::Coordinated(Box::new(Coordinator::for_round(net, peers)))
     }
 }
 
@@ -218,7 +213,7 @@ pub(super) struct PendingInput {
 /// An enum (not `Option`s) so a vehicle and its previous pose are present together or not at
 /// all — the "flying but no prev pose" state is unrepresentable. `prev` is last applied tick's
 /// pose, so [`apply_transforms`] tweens the cockpit camera the same way it interpolates every
-/// sim body. Only ever in a vehicle on the windowed [`InputSource::Solo`] path.
+/// sim body. Only ever in a vehicle on a windowed SOLO round (a solo [`Coordinator`]).
 #[derive(Resource, Default)]
 pub(super) enum LocalVehicle {
     #[default]
@@ -401,8 +396,8 @@ pub(super) fn drive_lockstep(
     let (tel, roster_len) = {
         let state = world.non_send_resource::<GameState>();
         match &state.input_source {
-            InputSource::Networked(net) => (net.telemetry().cloned(), net.roster_len()),
-            _ => (None, 0),
+            InputSource::Coordinated(c) => (c.telemetry().cloned(), c.roster_len()),
+            InputSource::Scripted(_) => (None, 0),
         }
     };
     if *next_tel_tick == 0 {
@@ -419,8 +414,8 @@ pub(super) fn drive_lockstep(
         let toggle = std::mem::take(&mut world.resource_mut::<PendingInput>().toggle_vehicle);
         let solo = toggle
             && matches!(
-                world.non_send_resource::<GameState>().input_source,
-                InputSource::Solo
+                &world.non_send_resource::<GameState>().input_source,
+                InputSource::Coordinated(c) if c.is_solo()
             );
         if solo {
             // Where to board the next vehicle: the local foot player's ground spot + facing,
@@ -491,11 +486,10 @@ pub(super) fn drive_lockstep(
             // `&mut *state`) before recording into `ls`.
             let st = &mut *state;
             let peer_msgs: Vec<PeerMsg> = match &mut st.input_source {
-                InputSource::Networked(net) => {
-                    net.broadcast(&msg);
-                    net.drain_inbox()
-                }
-                InputSource::Solo => Vec::new(),
+                // Server-coordinated: ship our input to the (internal or remote) server and get
+                // back the OTHER players' inputs. Solo runs the same exchange against a roster of
+                // one — its result is empty, so the sim advances on our own filed input alone.
+                InputSource::Coordinated(c) => c.exchange(me, msg),
                 InputSource::Scripted(bot) => {
                     // Stand in for the absent peers so the (otherwise-stalled) sim advances:
                     // feed every non-local player this input at the SAME apply_tick the local
