@@ -469,6 +469,25 @@ impl Sim {
         self.rng = ChaCha8Rng::seed_from_u64(self.config.seed);
     }
 
+    /// Rebuild the round to a fresh tick-0 state over a NEW participant set — the round-boundary
+    /// join (GCR MP Stage 3, bddap/rl#151). A roster change rides the lockstep input stream exactly
+    /// like [`buttons::RESTART`]: at the agreed tick every peer — the existing players AND the
+    /// joiner — calls this, so all land on the byte-identical fresh world over the new set. Going
+    /// through a fresh [`Sim::reset`] (no mid-game snapshot adopted) is what dodges job 412's
+    /// restored-vs-live rapier divergence: there is nothing to restore, only a clean respawn every
+    /// peer computes identically.
+    ///
+    /// Swaps the stored [`config`](Sim::config) roster so the rebuilt round — and every later
+    /// restart — uses the new set; leaves [`restart_held`](Sim::restart_held) alone (the edge latch
+    /// [`Sim::step`] owns), exactly as [`Sim::reset`] does.
+    pub fn rebuild_with_roster(&mut self, players: &[PlayerId]) {
+        let mut sorted = players.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        self.config.players = sorted;
+        self.reset();
+    }
+
     /// The tick-0 entity layout for a [`RoundConfig`] — the SINGLE source of the spawn
     /// arrangement, shared by [`Sim::new`] and [`Sim::reset`] so the two can't drift. Pure
     /// function of the (integer, sorted) config, so every peer composes the identical
