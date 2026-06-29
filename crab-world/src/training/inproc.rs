@@ -765,6 +765,12 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
             &CheckpointDir::new(&checkpoint_dir).curriculum_path(),
         ));
 
+    // Best-by-competence keeping (rl#157): mirror the checkpoint set into `<ckpt>/best/`
+    // whenever the policy demonstrates new competence, so a collapse stays confined to
+    // `<ckpt>/` (the trainer resumes from it) while the demo/release — which mirror
+    // `best/` — hold the high-water-mark gait. Resumes the running best from the sidecar.
+    let mut best_keeper = super::best::BestKeeper::new(&checkpoint_dir);
+
     let compute_threads = bevy::tasks::ComputeTaskPool::get().thread_num();
     eprintln!(
         "[learner] in-process: K={k} threads × M={m} envs × H={horizon} ticks/iter → {} transitions/update | budget {} ticks (0=∞), {iters} iters (0=∞) | nice {nice} | compute pool {compute_threads} thread(s), RAYON_NUM_THREADS={}",
@@ -863,6 +869,15 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
             metrics: &metrics,
             panics: merged.panics,
         });
+
+        // Consider this iter's policy for `<ckpt>/best/`. The reach signal is over THIS
+        // iter's finished episodes (None when none finished — the EMA holds); the band is
+        // the one this iter rolled at. `<ckpt>/` on disk still holds this iter's policy
+        // (persisted at the top, not rewritten until the next iter), so a snapshot now
+        // captures the policy that earned the reach. See `BestKeeper::observe`.
+        let (reached, finished) = merged.reach;
+        let reach_fraction = (finished > 0).then(|| reached as f32 / finished as f32);
+        best_keeper.observe(reach_fraction, curriculum.band().1);
 
         iter += 1;
 
