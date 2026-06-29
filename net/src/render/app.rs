@@ -400,9 +400,9 @@ pub(super) fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::Pat
     // deterministic [`PhysicsCadence`] instead (see [`park_fixed_auto_pump`]).
     park_fixed_auto_pump(app.world_mut());
 
-    // The visible crab is the scaled skin (or the scaled silhouette `spawn_world` leaves shown
-    // when no model loads). The debug-wireframe overlay (`super::debug_wireframe`, off by
-    // default) draws the colliders on demand: its `Aligned` mode reposes them by the same
-    // `crab_render_scale` so the cage sits ON the giant — rapier's RAW debug-render reads physics
-    // space and can't, which is why a bare cage drew the play-day "one little, one big" mismatch.
+    // The visible crab is the skin (or the silhouette `spawn_world` leaves shown when no model
+    // loads), rendered at TRUE physics size; the giant feel comes from the R-shrunk human world
+    // ([`crate::render::world_render_scale`]). The debug-wireframe overlay (`super::debug_wireframe`)
+    // draws the crab's live colliders translated to the same render spot, so the cage sits exactly
+    // ON the mesh — render==physics, no scale hack.
 }

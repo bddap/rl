@@ -189,8 +189,11 @@ fn world_maps_sim_frame_directly() {
         x: 2 * UNIT,
         z: 5 * UNIT,
     };
+    // The sim XZ frame maps straight to Bevy's, then the whole point shrinks by the render-frame
+    // scale so the human world renders small around the true-physics-size crab (render==physics).
+    let rs = world_render_scale();
     let v = world(p, 1.6);
-    assert_eq!(v, Vec3::new(2.0, 1.6, 5.0));
+    assert_eq!(v, Vec3::new(2.0, 1.6, 5.0) * rs);
 }
 
 /// The camera's flat (zero-pitch) facing must match the sim's yaw convention:
