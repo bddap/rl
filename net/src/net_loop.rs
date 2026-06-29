@@ -2,10 +2,13 @@
 //!
 //! [`transport::Session`] is async (tokio); the deterministic lockstep driver and
 //! the Bevy render loop are sync and own the main thread. [`NetDriver`] bridges the
-//! two: it holds a tokio runtime + the session and exposes two non-blocking calls a
-//! per-frame system can use — [`NetDriver::broadcast`] and [`NetDriver::drain_inbox`].
-//! No determinism lives here; it is pure I/O plumbing (the same split the netcode
-//! draws between [`transport`] and [`crate::lockstep`]).
+//! two: it holds a tokio runtime + the session and exposes non-blocking calls a per-frame
+//! system uses to play either server role — the host relays clients' inputs into its
+//! [`Server`] and broadcasts the assembled sets, a client ships its input up and drains the
+//! sets down. [`Coordinator`] wraps that into the single per-tick [`Coordinator::exchange`]
+//! every driver calls, so solo / host / client are one path (rl#151). No determinism lives
+//! here; it is pure I/O plumbing (the same split the netcode draws between [`transport`] and
+//! [`crate::lockstep`]/[`crate::server`]).
 //!
 //! The LAN cold-start ([`form_match`]) — run the membership barrier, [`assign_player_ids`]
 //! over the agreed set by sorted id, and collect tick inputs that arrived mid-formation —
@@ -29,6 +32,7 @@ use iroh::EndpointId;
 
 use crate::lockstep::{Lockstep, TickMsg};
 use crate::membership::{BEAT_EVERY, Membership, Role, Status};
+use crate::server::{self, Server, TickSet};
 use crate::sim::PlayerId;
 use crate::telemetry::{self, TelemetryEvent, TelemetrySender};
 use crate::transport::{self, PeerWire, Session};
@@ -43,11 +47,31 @@ pub struct PeerMsg {
     pub msg: TickMsg,
 }
 
-/// Owns the tokio runtime + iroh session and bridges them to a synchronous caller.
-/// Held by the game loop as a non-send resource (the runtime/session aren't `Sync`).
+/// Owns the tokio runtime + iroh session and bridges them to a synchronous caller — the
+/// TRANSPORT half of the server-coordinated model (rl#151). Held by the game loop as a non-send
+/// resource (the runtime/session aren't `Sync`).
+///
+/// Post-formation the peer with the lowest endpoint id ([`PlayerId(0)`]) runs the match
+/// [`Server`]; every other peer is a remote client of it. A `NetDriver` carries enough to play
+/// either role: on the host it relays clients' inputs into its server and broadcasts the assembled
+/// sets ([`NetDriver::drain_client_inputs`]/[`NetDriver::broadcast_ticksets`]); on a client it
+/// ships its input UP to the server and drains the sets DOWN ([`NetDriver::send_to_server`]/
+/// [`NetDriver::drain_ticksets`]). The role is read off the id alone — no negotiation — so both
+/// ends agree by construction. The [`Server`] itself lives in the [`Coordinator`], not here, so
+/// the host's server and the solo server are the one type down one path.
 pub struct NetDriver {
     rt: tokio::runtime::Runtime,
     session: Session,
+    /// This peer's [`PlayerId`]. `me == PlayerId(0)` ⇒ we run the server (the host).
+    me: PlayerId,
+    /// The server peer's endpoint — the lowest-id endpoint in the roster. A client routes its
+    /// input here; on the host this is our own id and is unused (the local input never crosses the
+    /// wire — it goes straight into the in-process server).
+    server_eid: EndpointId,
+    /// Inputs that arrived during formation (a peer that finished the barrier first may already be
+    /// sending), mapped to their author's [`PlayerId`]. Drained once by the host into its server at
+    /// round start (a client discards them — only the server holds the ledger).
+    early: Vec<PeerMsg>,
     /// Frozen endpoint→PlayerId map (us + peers), agreed across peers by sorting the
     /// agreed participant set. Used to tag inbound messages with their author's id.
     id_map: BTreeMap<EndpointId, PlayerId>,
@@ -98,21 +122,34 @@ impl NetDriver {
         self.assets_synced
     }
 
-    /// Broadcast our tick message to every connected peer. Non-blocking from the
-    /// caller's view: it drives the async `broadcast` to completion on the runtime,
-    /// which only does buffered QUIC writes (a dead peer is dropped inside, not
-    /// awaited — the lockstep stall on the missing input is the visible failure).
-    pub fn broadcast(&self, msg: &TickMsg) {
-        self.rt.block_on(self.session.broadcast(msg));
+    /// Whether this peer runs the match server (the host) — true iff it holds [`PlayerId(0)`], the
+    /// lowest endpoint id. The server-vs-client role with no negotiation.
+    pub fn is_host(&self) -> bool {
+        self.me == PlayerId(0)
     }
 
-    /// Drain every peer TICK message received so far, tagged with the sender's
-    /// [`PlayerId`]. Non-blocking: `try_recv` returns immediately when the inbox is
-    /// empty. Messages from an endpoint not in the frozen set are dropped (a peer not
-    /// in the agreed match isn't part of lockstep); a stray barrier beat that arrives
-    /// after formation (a peer still winding down its beat loop) is ignored here, since
-    /// the lockstep channel is the only one play cares about.
-    pub fn drain_inbox(&mut self) -> Vec<PeerMsg> {
+    /// The frozen roster (every player, incl. us) — what the host builds its [`Server`] over.
+    pub fn roster(&self) -> Vec<PlayerId> {
+        self.id_map.values().copied().collect()
+    }
+
+    /// Take the formation-time early inputs (drained once by the host into its server).
+    pub fn take_early(&mut self) -> Vec<PeerMsg> {
+        std::mem::take(&mut self.early)
+    }
+
+    /// (Client) Ship our input UP to the server. Non-blocking from the caller's view: it drives the
+    /// async `send_to` to completion on the runtime (a buffered QUIC write). Losing the server link
+    /// stalls us — the correct visible failure.
+    pub fn send_to_server(&self, msg: &TickMsg) {
+        self.rt.block_on(self.session.send_to(self.server_eid, msg));
+    }
+
+    /// (Host) Drain every client INPUT received so far, tagged with the sender's [`PlayerId`].
+    /// Non-blocking. Messages from an endpoint not in the frozen set, and any stray non-input frame
+    /// (a barrier beat from a peer still winding down formation), are dropped — the server only
+    /// ledgers rostered clients' inputs.
+    pub fn drain_client_inputs(&mut self) -> Vec<PeerMsg> {
         let mut out = Vec::new();
         while let Some(from) = self.session.try_recv() {
             if let (PeerWire::Tick(msg), Some(&pid)) = (&from.msg, self.id_map.get(&from.from)) {
@@ -120,6 +157,134 @@ impl NetDriver {
             }
         }
         out
+    }
+
+    /// (Host) Broadcast the server-assembled sets DOWN to every client. Non-blocking buffered QUIC
+    /// writes; a dead client is dropped inside the session, not awaited.
+    pub fn broadcast_ticksets(&self, sets: &[TickSet]) {
+        if sets.is_empty() {
+            return;
+        }
+        self.rt.block_on(async {
+            for s in sets {
+                self.session.broadcast_tickset(s).await;
+            }
+        });
+    }
+
+    /// (Client) Drain every assembled set received from the server so far. Non-blocking; stray
+    /// non-set frames are ignored (a client cares only about the server's sets).
+    pub fn drain_ticksets(&mut self) -> Vec<TickSet> {
+        let mut out = Vec::new();
+        while let Some(from) = self.session.try_recv() {
+            if let PeerWire::TickSet(set) = from.msg {
+                out.push(set);
+            }
+        }
+        out
+    }
+}
+
+/// One peer's per-tick input coordination — the server-coordinated replacement for the deleted P2P
+/// mesh (rl#151). Either we run the [`Server`] (solo: a roster of one, no transport; host: the
+/// whole roster + the transport to remote clients) or we are a remote client of a server peer. Solo
+/// and host are the SAME [`Coordinator::Server`] arm — that is the SP=MP-uniformity proof: there is
+/// no separate single-player code path, only the server with one client.
+pub enum Coordinator {
+    /// We run the server. `net` is `None` for solo (no remote clients, so no iroh at all — solo
+    /// stays network-free) and `Some` for a hosted match (relay to the remote clients).
+    Server {
+        server: Server,
+        net: Option<NetDriver>,
+    },
+    /// We are a remote client of another peer's server.
+    Client { net: NetDriver },
+}
+
+impl Coordinator {
+    /// Build the coordinator for a freshly-formed round. `peers` is the sim's participant set (solo
+    /// ⇒ just `me`). The carrier stays `Option<NetDriver>` so the arming + determinism-pin decisions
+    /// upstream (which key off `net.is_some()`) are untouched: `None` ⇒ a solo server; a host driver
+    /// ⇒ a server over the roster (seeded with any early inputs); a client driver ⇒ a remote client.
+    pub fn for_round(net: Option<NetDriver>, peers: &[PlayerId]) -> Self {
+        match net {
+            None => Coordinator::Server {
+                server: Server::new(peers),
+                net: None,
+            },
+            Some(mut d) if d.is_host() => {
+                let mut srv = Server::new(&d.roster());
+                // Seed the ledger with inputs a fast client sent before we started serving. Dropped
+                // (idempotent) if the client also re-sends them once play begins.
+                for pm in d.take_early() {
+                    let _ = srv.record(pm.pid, pm.msg);
+                }
+                Coordinator::Server {
+                    server: srv,
+                    net: Some(d),
+                }
+            }
+            Some(d) => Coordinator::Client { net: d },
+        }
+    }
+
+    /// Submit our input for this tick and return the OTHER players' inputs to record — every path
+    /// (solo / host / client) lands here, so the lockstep driver above is identical regardless of
+    /// role. The host also ingests its remote clients' inputs and broadcasts the assembled sets; the
+    /// client ships its input up and drains the sets down.
+    pub fn exchange(&mut self, me: PlayerId, msg: TickMsg) -> Vec<PeerMsg> {
+        match self {
+            Coordinator::Server { server, net } => {
+                let mut sets = Vec::new();
+                if let Some(net) = net.as_mut() {
+                    for pm in net.drain_client_inputs() {
+                        sets.extend(server.record(pm.pid, pm.msg));
+                    }
+                }
+                sets.extend(server.record(me, msg));
+                if let Some(net) = net.as_ref() {
+                    net.broadcast_ticksets(&sets);
+                }
+                sets.iter()
+                    .flat_map(|s| server::unpack_tickset(s, me))
+                    .collect()
+            }
+            Coordinator::Client { net } => {
+                net.send_to_server(&msg);
+                net.drain_ticksets()
+                    .iter()
+                    .flat_map(|s| server::unpack_tickset(s, me))
+                    .collect()
+            }
+        }
+    }
+
+    /// Whether this is a solo round (the server with a roster of one and no transport). Drives the
+    /// client-local vehicle toggle, which is meaningless in a networked round (pilots are frozen at
+    /// formation).
+    pub fn is_solo(&self) -> bool {
+        matches!(self, Coordinator::Server { net: None, .. })
+    }
+
+    /// The transport, if any (host or client). `None` for solo.
+    fn net(&self) -> Option<&NetDriver> {
+        match self {
+            Coordinator::Server { net, .. } => net.as_ref(),
+            Coordinator::Client { net } => Some(net),
+        }
+    }
+
+    /// The live-telemetry handle, if this round streams to a collector (`None` solo / no collector).
+    pub fn telemetry(&self) -> Option<&TelemetrySender> {
+        self.net().and_then(NetDriver::telemetry)
+    }
+
+    /// The frozen roster size — the match's player count (1 for solo).
+    pub fn roster_len(&self) -> usize {
+        match self {
+            Coordinator::Server { server, .. } => server.roster().len(),
+            Coordinator::Client { net } => net.roster_len(),
+        }
     }
 }
 
@@ -358,12 +523,18 @@ fn connect_and_form_inner(
     );
     // Build with the agreed pilot set so every peer spawns the byte-identical foot/plane mix
     // (empty ⇒ the unchanged foot-only round). The pilots were negotiated over the wire and
-    // are identical on every peer (the agreement-token guarantee).
-    let mut ls = Lockstep::new_with_pilots(seed, &all_ids, frozen.me, &frozen.pilots);
-    replay_early(&mut ls, &frozen);
+    // are identical on every peer (the agreement-token guarantee). The early inputs are NOT
+    // replayed into the client sim anymore (that would bypass the server's ledger) — they ride the
+    // driver to seed the host's server instead (see [`Coordinator::for_round`]).
+    let ls = Lockstep::new_with_pilots(seed, &all_ids, frozen.me, &frozen.pilots);
+    let server_eid = server_endpoint(&frozen.id_map);
+    let early = early_peer_msgs(&frozen);
     let driver = NetDriver {
         rt,
         session,
+        me: frozen.me,
+        server_eid,
+        early,
         id_map: frozen.id_map,
         telemetry,
         weights_synced: frozen.weights_synced,
@@ -391,8 +562,8 @@ pub async fn connect_telemetry(
 
 /// The outcome of the LAN cold-start: the frozen participant→[`PlayerId`] map (agreed
 /// identical on every peer by the barrier), which id is us, and the tick messages that
-/// arrived mid-formation (to be replayed once a [`Lockstep`] exists — see
-/// [`replay_early`]).
+/// arrived mid-formation (carried to the host to seed its server ledger — see
+/// [`Coordinator::for_round`] — since only the server holds the ledger now).
 pub struct Frozen {
     pub id_map: BTreeMap<EndpointId, PlayerId>,
     pub me: PlayerId,
@@ -802,17 +973,26 @@ pub fn solo_lockstep_for(seed: u64) -> Lockstep {
     Lockstep::new(seed, &[me], me)
 }
 
-/// Replay the inputs that arrived during formation into a freshly-built [`Lockstep`],
-/// now that ids are assigned. They predate any applied tick, so `record_remote`
-/// stashes them rather than comparing a hash — no fault is possible, hence the
-/// discard. Senders not in the agreed set are dropped (the same filter the live loop
-/// applies).
-pub fn replay_early(ls: &mut Lockstep, frozen: &Frozen) {
-    for (from, msg) in &frozen.early {
-        if let Some(&pid) = frozen.id_map.get(from) {
-            let _ = ls.record_remote(pid, *msg);
-        }
-    }
+/// The server peer's endpoint: the one holding [`PlayerId(0)`] (the lowest endpoint id). Every
+/// peer computes the same answer from the frozen map, so the star agrees on its center with no
+/// negotiation. The map is non-empty (we are always in it), so the lookup always resolves.
+fn server_endpoint(id_map: &BTreeMap<EndpointId, PlayerId>) -> EndpointId {
+    id_map
+        .iter()
+        .find(|(_, &pid)| pid == PlayerId(0))
+        .map(|(&eid, _)| eid)
+        .expect("a frozen roster always contains PlayerId(0)")
+}
+
+/// The inputs that arrived during formation, mapped to their author's [`PlayerId`] (senders not in
+/// the agreed set dropped). The host seeds its server ledger with these so a fast client's
+/// pre-serve inputs aren't lost; everyone else discards them (only the server holds the ledger).
+fn early_peer_msgs(frozen: &Frozen) -> Vec<PeerMsg> {
+    frozen
+        .early
+        .iter()
+        .filter_map(|(from, msg)| frozen.id_map.get(from).map(|&pid| PeerMsg { pid, msg: *msg }))
+        .collect()
 }
 
 /// Map endpoint ids → [`PlayerId`]s by sorting the full agreed set (us + peers). Every

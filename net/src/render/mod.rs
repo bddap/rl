@@ -10,16 +10,16 @@
 //! consumer that produces [`Input`]**. Rendering, the camera, mouse/gamepad input,
 //! and tween interpolation are ALL client-side and add ZERO nondeterminism — the
 //! only thing that ever crosses back into sim state is the per-tick [`Input`] each
-//! peer broadcasts. Two peers running this client off the same input stream stay
-//! bit-identical because none of the code here touches the sim except through
+//! peer ships to the server (rl#151). Two peers running this client off the same input
+//! stream stay bit-identical because none of the code here touches the sim except through
 //! [`Lockstep::submit_local_input`].
 //!
 //! How the three layers wire together:
 //! - **Lockstep** runs on a fixed-timestep accumulator ([`drive_lockstep`]) inside
 //!   the Bevy app, NOT in Bevy's `FixedUpdate` — the sim's tick rate ([`TICK_HZ`])
 //!   is its own clock, independent of the render/display rate. Each ready tick:
-//!   drain the local [`PendingInput`] into `submit_local_input`, pump the transport
-//!   (broadcast our [`TickMsg`], ingest peers'), then `try_advance`.
+//!   drain the local [`PendingInput`] into `submit_local_input`, exchange through the
+//!   [`Coordinator`] (ship our input to the server, get the assembled set back), then advance.
 //! - **Render** ([`apply_transforms`]) reads `Lockstep::sim()` and tweens every
 //!   entity between the previous tick's pose and the current one by the fractional
 //!   accumulator, so motion is smooth at any frame rate even though the sim steps in
@@ -48,7 +48,7 @@ use crab_world::controls::{
 use crate::cadence::PhysicsCadence;
 use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::lockstep::{Lockstep, TickMsg};
-use crate::net_loop::{NetDriver, PeerMsg};
+use crate::net_loop::{Coordinator, NetDriver, PeerMsg};
 use crate::sim::{
     CRAB_SCALE, CockpitPose, Crab, Helicopter, Input, Outcome, Plane, Player, PlayerId,
     PlayerStatus, Pos, Pos3, Sim, UNIT, buttons, trig, trig_client,

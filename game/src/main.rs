@@ -754,7 +754,30 @@ async fn run_net(args: NetArgs) -> Result<()> {
     // Use the wire-negotiated pilot set so every peer spawns the identical foot/plane mix
     // (empty ⇒ the unchanged foot-only round).
     let mut ls = Lockstep::new_with_pilots(MATCH_SEED, &all_ids, me, &frozen.pilots);
-    net_loop::replay_early(&mut ls, &frozen);
+
+    // Server-coordinated play (rl#151): the lowest-id peer (PlayerId 0) runs the match server; the
+    // rest are remote clients of it. Solo (a single peer) is the same path with a roster of one. The
+    // Server core (the input ledger + completeness gating) is the SAME type the windowed client runs
+    // — only the async-vs-sync transport plumbing differs (headless awaits the session directly; the
+    // Bevy client drives it through `NetDriver`/`Coordinator`). Inputs flow UP as `TickMsg`s, the
+    // server broadcasts the complete `TickSet` DOWN; world state never crosses the wire.
+    let am_host = me == PlayerId(0);
+    let server_eid = *id_map
+        .iter()
+        .find(|(_, &pid)| pid == PlayerId(0))
+        .map(|(eid, _)| eid)
+        .expect("a frozen roster always contains PlayerId(0)");
+    let mut server = am_host.then(|| {
+        let mut s = net::server::Server::new(&all_ids);
+        // Seed the ledger with any inputs a fast client sent during formation (idempotent if it
+        // re-sends them once play begins).
+        for (from, msg) in &frozen.early {
+            if let Some(&pid) = id_map.get(from) {
+                let _ = s.record(pid, *msg);
+            }
+        }
+        s
+    });
 
     let tick_dt = Duration::from_secs_f64(1.0 / TICK_HZ as f64);
     let mut ticker = tokio::time::interval(tick_dt);
@@ -786,25 +809,50 @@ async fn run_net(args: NetArgs) -> Result<()> {
     while Instant::now() < end {
         ticker.tick().await;
 
-        // Ingest everything the transport has for us this tick. Only lockstep ticks
-        // matter now; a stray barrier beat from a peer still winding down its formation
-        // loop is ignored. A late-arriving hash for an already-applied tick can surface
-        // a fault right here.
+        // Ingest everything the transport has for us this tick. As the server: clients' input
+        // `TickMsg`s, fed into the ledger. As a client: the server's assembled `TickSet`s. A stray
+        // barrier beat from a peer still winding down formation is ignored either way.
+        let mut sets: Vec<net::server::TickSet> = Vec::new();
         while let Some(m) = session.try_recv() {
-            if let transport::PeerWire::Tick(msg) = m.msg
-                && let Some(&pid) = id_map.get(&m.from)
-                && let Some(f) = ls.record_remote(pid, msg)
-            {
-                report_fault(&mut total_desyncs, f, tel.as_ref());
+            match m.msg {
+                transport::PeerWire::Tick(msg) => {
+                    if let (Some(srv), Some(&pid)) = (server.as_mut(), id_map.get(&m.from)) {
+                        sets.extend(srv.record(pid, msg));
+                    }
+                }
+                transport::PeerWire::TickSet(set) => {
+                    if !am_host {
+                        sets.push(set);
+                    }
+                }
+                transport::PeerWire::Beat(_) => {}
             }
         }
 
-        // Issue our input for this tick and tell every peer.
+        // Issue our input for this tick and route it through the server.
         let t = ls.next_tick() as f32 * 0.1;
         let issue_tick = ls.next_tick();
         let input = Input::from_axes(t.cos(), t.sin());
         let msg = ls.submit_local_input(input);
-        session.broadcast(&msg).await;
+        if let Some(srv) = server.as_mut() {
+            sets.extend(srv.record(me, msg));
+            for s in &sets {
+                session.broadcast_tickset(s).await;
+            }
+        } else {
+            session.send_to(server_eid, &msg).await;
+        }
+
+        // Record the OTHER players' inputs from the assembled sets — the same `record_remote` entry
+        // a mesh peer used to take, so the cross-check + advance below are unchanged. A late hash for
+        // an already-applied tick can surface a fault here.
+        for s in &sets {
+            for pm in net::server::unpack_tickset(s, me) {
+                if let Some(f) = ls.record_remote(pm.pid, pm.msg) {
+                    report_fault(&mut total_desyncs, f, tel.as_ref());
+                }
+            }
+        }
 
         // Advance every ready tick ONE AT A TIME so the hash log can record each tick's
         // closing hash at the instant it's applied — `try_advance` is exactly this loop, but

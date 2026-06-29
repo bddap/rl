@@ -333,6 +333,12 @@ impl Lockstep {
     pub fn me(&self) -> PlayerId {
         self.me
     }
+
+    /// The frozen participant set (sorted, incl. `me`). The server is built over exactly this set
+    /// (solo ⇒ just `me`), so the client and its server agree on the roster by construction.
+    pub fn peers(&self) -> &[PlayerId] {
+        &self.peers
+    }
 }
 
 /// One side of the hash cross-check: a [`Fault::Desync`] iff the two hashes for

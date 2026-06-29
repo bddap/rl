@@ -60,8 +60,8 @@ fn menu_handoff_installs_the_chosen_round() {
     // The installed sim is the chosen one: a single local player (solo), seeded as asked.
     assert_eq!(gs.ls.me(), crate::sim::PlayerId(0), "solo player id 0");
     assert!(
-        matches!(gs.input_source, InputSource::Solo),
-        "a solo handoff installs the Solo input source"
+        matches!(&gs.input_source, InputSource::Coordinated(c) if c.is_solo()),
+        "a solo handoff installs a solo (internal-server) coordinator"
     );
     // And the parked round was consumed (taken), not left to double-install.
     assert!(

@@ -23,15 +23,20 @@ use tokio::sync::mpsc;
 
 use crate::lockstep::{Confirmed, TickMsg};
 use crate::membership::{self, Beat};
+use crate::server::TickSet;
+use crate::sim::{Input, PlayerId};
 
 /// ALPN for the game's wire. The framing is `[len:u32 LE][kind:u8][body]`, where
-/// `kind` ([`Frame`]) selects a per-tick [`TickMsg`] (the lockstep channel) or a
-/// [`Beat`] (the match-formation barrier channel — rl#44). Bumped on any incompatible
-/// wire change so mismatched builds refuse to connect rather than desync. `/1` added the
-/// kind byte + the barrier channel over `/0`'s bare-TickMsg stream; `/2` added the host's
-/// start-GO byte to every [`Beat`] (rl#58), shifting the barrier-frame layout; `/3` added the
-/// per-peer policy-weights digest to every [`Beat`] (rl#82, GCR), shifting it again.
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/3";
+/// `kind` ([`Frame`]) selects a client→server [`TickMsg`] (an input), a server→client
+/// [`TickSet`] (the assembled input set), or a [`Beat`] (the match-formation barrier channel
+/// — rl#44). Bumped on any incompatible wire change so mismatched builds refuse to connect
+/// rather than desync. `/1` added the kind byte + the barrier channel over `/0`'s bare-TickMsg
+/// stream; `/2` added the host's start-GO byte to every [`Beat`] (rl#58), shifting the
+/// barrier-frame layout; `/3` added the per-peer policy-weights digest to every [`Beat`]
+/// (rl#82, GCR); `/4` replaced the P2P tick MESH with the server-coordinated model (rl#151):
+/// inputs go UP to the server as [`TickMsg`]s, the server broadcasts the complete [`TickSet`]
+/// DOWN — a new frame kind and a topology the old mesh peers can't speak.
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/4";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
@@ -45,10 +50,12 @@ pub const SERVICE_NAME: &str = "bddap-rl-game";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum Frame {
-    /// A per-tick lockstep [`TickMsg`] (the input/hash channel).
+    /// A client→server [`TickMsg`]: one client's input for a tick (+ its confirmed hash).
     Tick = 0,
     /// A [`Beat`]: heartbeat + roster advertisement for the formation barrier (rl#44).
     Beat = 1,
+    /// A server→client [`TickSet`]: the complete input set for one tick (rl#151).
+    TickSet = 2,
 }
 
 impl Frame {
@@ -56,6 +63,7 @@ impl Frame {
         match b {
             0 => Some(Frame::Tick),
             1 => Some(Frame::Beat),
+            2 => Some(Frame::TickSet),
             _ => None,
         }
     }
@@ -67,8 +75,11 @@ impl Frame {
 /// each driver from having to know the other's wire.
 #[derive(Debug, Clone)]
 pub enum PeerWire {
+    /// A client's input, received by the server.
     Tick(TickMsg),
     Beat(Beat),
+    /// The server's assembled input set for a tick, received by a client.
+    TickSet(TickSet),
 }
 
 /// Wire sentinel for [`TickMsg::confirmed`] == `None`. `u64::MAX` as the tick can
@@ -116,6 +127,61 @@ fn decode_tick_body(b: &[u8; TICKMSG_LEN]) -> TickMsg {
             hash: chash,
         }),
     }
+}
+
+/// Encode a [`TickSet`] body to its wire form (without the frame kind/length): the apply tick,
+/// then a `u16`-counted list of `(player, input)` pairs, then a `u16`-counted list of
+/// `(player, ctick, chash)` confirmed-hash triples. `u16` counts because a roster can be up to 256
+/// players (a `u8` count would overflow at the max), even though couch play is far smaller.
+fn encode_tickset_body(set: &TickSet) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8 + 2 + set.inputs.len() * (1 + IN_LEN) + 2 + set.confirmed.len() * 17);
+    b.extend_from_slice(&set.apply_tick.to_le_bytes());
+    b.extend_from_slice(&(set.inputs.len() as u16).to_le_bytes());
+    for (pid, input) in &set.inputs {
+        b.push(pid.0);
+        b.extend_from_slice(&input.to_bytes());
+    }
+    b.extend_from_slice(&(set.confirmed.len() as u16).to_le_bytes());
+    for (pid, c) in &set.confirmed {
+        b.push(pid.0);
+        b.extend_from_slice(&c.tick.to_le_bytes());
+        b.extend_from_slice(&c.hash.to_le_bytes());
+    }
+    b
+}
+
+/// Inverse of [`encode_tickset_body`]. A malformed body (truncated, or a length that overruns) is a
+/// wire mismatch surfaced as an error (closing the link), never a silently-short set.
+fn decode_tickset_body(b: &[u8]) -> Result<TickSet> {
+    let mut r = b;
+    fn take<'a>(r: &mut &'a [u8], n: usize, what: &str) -> Result<&'a [u8]> {
+        anyhow::ensure!(r.len() >= n, "tick-set frame truncated reading {what}");
+        let (head, tail) = r.split_at(n);
+        *r = tail;
+        Ok(head)
+    }
+    let apply_tick = u64::from_le_bytes(take(&mut r, 8, "apply_tick")?.try_into().unwrap());
+    let n_inputs = u16::from_le_bytes(take(&mut r, 2, "input count")?.try_into().unwrap());
+    let mut inputs = BTreeMap::new();
+    for _ in 0..n_inputs {
+        let pid = PlayerId(take(&mut r, 1, "input player")?[0]);
+        let input = Input::from_bytes(take(&mut r, IN_LEN, "input")?.try_into().unwrap());
+        inputs.insert(pid, input);
+    }
+    let n_confirmed = u16::from_le_bytes(take(&mut r, 2, "confirmed count")?.try_into().unwrap());
+    let mut confirmed = BTreeMap::new();
+    for _ in 0..n_confirmed {
+        let pid = PlayerId(take(&mut r, 1, "confirmed player")?[0]);
+        let tick = u64::from_le_bytes(take(&mut r, 8, "confirmed tick")?.try_into().unwrap());
+        let hash = u64::from_le_bytes(take(&mut r, 8, "confirmed hash")?.try_into().unwrap());
+        confirmed.insert(pid, Confirmed { tick, hash });
+    }
+    anyhow::ensure!(r.is_empty(), "tick-set frame has {} trailing bytes", r.len());
+    Ok(TickSet {
+        apply_tick,
+        inputs,
+        confirmed,
+    })
 }
 
 /// A frame received from a specific peer. `from` is the QUIC-authenticated peer id —
@@ -276,9 +342,35 @@ impl Session {
         .await
     }
 
-    /// Send our per-tick [`TickMsg`] (the lockstep channel) to every connected peer.
-    pub async fn broadcast(&self, msg: &TickMsg) {
-        self.broadcast_frame(Frame::Tick, &encode_tick_body(msg))
+    /// Send our input [`TickMsg`] UP to the server `peer` (rl#151). A client routes its input to
+    /// exactly one endpoint — the match server — not the whole mesh; the server assembles the
+    /// complete set and broadcasts it back. A send failure drops that link (the same policy as
+    /// [`Session::broadcast_frame`]); losing the link to the server stalls the client, which is the
+    /// correct visible failure. No link to `peer` is a no-op (we are not connected to the server —
+    /// surfaced as the lockstep stall, not a panic).
+    pub async fn send_to(&self, peer: EndpointId, msg: &TickMsg) {
+        let send = {
+            let links = self.links.lock().await;
+            links.get(&peer).map(|l| l.send.clone())
+        };
+        let Some(send) = send else { return };
+        let mut s = send.lock().await;
+        if let Err(e) = write_frame(&mut s, Frame::Tick, &encode_tick_body(msg)).await {
+            tracing::warn!(%peer, "sending input to server failed: {e:#}");
+            drop(s);
+            let mut links = self.links.lock().await;
+            if links.get(&peer).is_some_and(|l| Arc::ptr_eq(&l.send, &send)) {
+                links.remove(&peer);
+            }
+        }
+    }
+
+    /// Broadcast a server-assembled [`TickSet`] DOWN to every connected client (rl#151). Called
+    /// only by the peer running the server; the complete set is identical for all clients, so one
+    /// fan-out reaches them all. A dead client is dropped inside [`Session::broadcast_frame`] (its
+    /// missing future inputs are the server's visible failure, not a block on the others).
+    pub async fn broadcast_tickset(&self, set: &TickSet) {
+        self.broadcast_frame(Frame::TickSet, &encode_tickset_body(set))
             .await;
     }
 
@@ -548,6 +640,7 @@ async fn read_loop(
                 PeerWire::Tick(decode_tick_body(&arr))
             }
             Frame::Beat => PeerWire::Beat(membership::decode_beat(body)?),
+            Frame::TickSet => PeerWire::TickSet(decode_tickset_body(body)?),
         };
         if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
             return Ok(()); // session dropped
@@ -596,7 +689,45 @@ mod tests {
         // mismatch the read loop surfaces as an error).
         assert_eq!(Frame::from_byte(0), Some(Frame::Tick));
         assert_eq!(Frame::from_byte(1), Some(Frame::Beat));
-        assert_eq!(Frame::from_byte(2), None);
+        assert_eq!(Frame::from_byte(2), Some(Frame::TickSet));
+        assert_eq!(Frame::from_byte(3), None);
         assert_eq!(Frame::from_byte(0xff), None);
+    }
+
+    #[test]
+    fn tickset_wire_roundtrips() {
+        use crate::sim::PlayerId;
+        use std::collections::BTreeMap;
+        // A multi-player set with a partial confirmed map (the common case: only some clients'
+        // hashes advanced this set) round-trips byte-for-byte, including the empty-confirmed case.
+        for confirmed in [
+            BTreeMap::from([(PlayerId(1), Confirmed { tick: 12, hash: 0xfeed })]),
+            BTreeMap::new(),
+        ] {
+            let set = TickSet {
+                apply_tick: 99,
+                inputs: BTreeMap::from([
+                    (PlayerId(0), Input::from_axes(0.5, -0.5)),
+                    (PlayerId(1), Input::from_axes(-1.0, 0.25)),
+                ]),
+                confirmed,
+            };
+            let body = encode_tickset_body(&set);
+            assert_eq!(decode_tickset_body(&body).unwrap(), set);
+        }
+    }
+
+    #[test]
+    fn truncated_tickset_is_an_error_not_a_short_set() {
+        use crate::sim::PlayerId;
+        use std::collections::BTreeMap;
+        let set = TickSet {
+            apply_tick: 1,
+            inputs: BTreeMap::from([(PlayerId(0), Input::from_axes(1.0, 0.0))]),
+            confirmed: BTreeMap::new(),
+        };
+        let body = encode_tickset_body(&set);
+        // Lop off the last byte: decode must fail loudly rather than yield a corrupt/short set.
+        assert!(decode_tickset_body(&body[..body.len() - 1]).is_err());
     }
 }
