@@ -53,7 +53,7 @@ pub(super) fn spawn_world(
 ) {
     // The render-frame shrink: the human world (ground, players, the pillar, the camera)
     // renders this much smaller so the true-physics-size crab towers over it (render==physics; the
-    // crab is NOT inflated — see [`world_render_scale`]). `world`/`lerp_pos3` already apply it to
+    // crab is NOT inflated — see [`world_render_scale`]). `world` already applies it to ground
     // POSITIONS; here it sizes the human-world MESHES. The crab silhouette is the lone exception —
     // it renders at native physics size.
     let rs = world_render_scale();
@@ -195,8 +195,10 @@ fn natural_crab_height() -> Option<f32> {
 /// everything ELSE this much smaller, so the crab still reads [`CRAB_SCALE`]× a player WITHOUT
 /// inflating it (which would desync the wireframe from the colliders and force retraining Sally at
 /// a bigger collider scale). The reciprocal of the old crab blow-up: the crab's natural height over
-/// the giant target height. The ONE scale source — every sim→render position ([`world`],
-/// [`world3`], [`lerp_pos3`]) and the human-world mesh sizes multiply by it, the crab does not.
+/// the giant target height. The ONE scale source — every sim→render ground position ([`world`])
+/// and the human-world mesh sizes multiply by it, the crab does not (and the piloted vehicle, which
+/// lives at true arena scale with the crab, doesn't either — its cockpit camera is shifted, not
+/// shrunk).
 /// Physics/training are untouched: this multiplies only Bevy `Transform`s. `1.0` on a degenerate
 /// recipe (the silhouette path fails loud there anyway).
 pub(crate) fn world_render_scale() -> f32 {

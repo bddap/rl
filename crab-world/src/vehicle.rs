@@ -211,7 +211,8 @@ fn manage_vehicle(
         // Piloting and the body already matches the chosen craft — nothing to do.
         (true, Some((_, v))) if v.kind == control.kind => {}
         // Stepped into a vehicle, or cycled to a different craft: (re)spawn it. Despawn any stale
-        // body first so a kind switch can't leave two alive.
+        // body first so a kind switch can't leave two alive. A kind switch starts the new craft at
+        // its spawn pose + a zero throttle lever (the fresh body's known state), not the old one's.
         (true, current) => {
             if let Some((e, _)) = current {
                 commands.entity(e).despawn();
@@ -296,12 +297,16 @@ fn apply_vehicle_forces(
 
         ef.force = thrust + lift + drag;
 
-        // Body-frame control torque (UNCLAMPED — no leveling, no attitude bound): pitch about +X
-        // (positive axis noses up), roll about +Z (positive banks right), yaw about +Y (positive
-        // yaws right). Rotated into the world frame rapier integrates. A mild angular drag bleeds
-        // spin for control without bounding the angle.
+        // Body-frame control torque (UNCLAMPED — no leveling, no attitude bound): pitch about +X,
+        // roll about +Z, yaw about +Y, rotated into the world frame rapier integrates. A mild
+        // angular drag bleeds spin for control without bounding the angle. The pitch sign is
+        // NEGATED: a positive +X torque rotates the nose (+Z) toward −Y (DOWN), so to make positive
+        // `pitch` (the pilot's nose-UP intent) raise the nose we apply −pitch about +X — the same
+        // reconciliation the deleted integer model did. Roll/yaw already carry their reconciling
+        // sign from `drive_lockstep` (−look_yaw, −move_strafe), so the labels (bank right, yaw
+        // right) hold.
         let body_torque = Vec3::new(
-            control.pitch * p.pitch_torque,
+            -control.pitch * p.pitch_torque,
             control.yaw * p.yaw_torque,
             -control.roll * p.roll_torque,
         );
@@ -327,23 +332,16 @@ mod tests {
             c.active = true;
             c.kind = kind;
         }
-        let e = app
-            .world_mut()
-            .spawn((
-                Vehicle { kind, throttle: 1.0 },
-                RigidBody::Dynamic,
-                Collider::cuboid(VEHICLE_HALF.x, VEHICLE_HALF.y, VEHICLE_HALF.z),
-                ColliderMassProperties::Density(VEHICLE_DENSITY),
-                vehicle_collision(),
-                Transform::from_translation(at),
-                Velocity { linear: vel, angular: Vec3::ZERO },
-                ExternalForce::default(),
-            ))
-            .id();
+        // Spawn through the SHARED bundle (so the test exercises the real collider/mass/groups, not
+        // a copy that could drift), then trim the throttle full so the thrust tests have authority.
+        let transform = Transform::from_translation(at);
+        let velocity = Velocity { linear: vel, angular: Vec3::ZERO };
+        let e = app.world_mut().spawn(vehicle_bundle(kind, transform, velocity)).id();
+        app.world_mut().entity_mut(e).get_mut::<Vehicle>().unwrap().throttle = 1.0;
         (app, e)
     }
 
-    fn body<'a>(app: &'a App, e: Entity) -> (&'a Transform, &'a Velocity) {
+    fn body(app: &App, e: Entity) -> (&Transform, &Velocity) {
         let ent = app.world().entity(e);
         (ent.get::<Transform>().unwrap(), ent.get::<Velocity>().unwrap())
     }
@@ -384,6 +382,34 @@ mod tests {
             fast > slow,
             "lift did not rise with airspeed: Δvy slow={slow} fast={fast}"
         );
+    }
+
+    /// DIRECTION pin (the sign the cockpit legend rides): a positive `pitch` (the pilot's nose-UP
+    /// intent) raises the nose — the world-space forward vector's Y goes POSITIVE within a few
+    /// ticks from level. Guards the +X-torque-noses-down trap that an inversion-only test misses.
+    #[test]
+    fn positive_pitch_raises_the_nose() {
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::ZERO);
+        app.world_mut().resource_mut::<VehicleControl>().pitch = 1.0;
+        for _ in 0..10 {
+            app.update();
+        }
+        let nose_y = (body(&app, e).0.rotation * Vec3::Z).y;
+        assert!(nose_y > 0.0, "positive pitch must raise the nose, got nose.y={nose_y}");
+    }
+
+    /// DIRECTION pin: a positive `yaw` turns the nose toward +X (right) — `drive_lockstep` feeds
+    /// `yaw = -move_strafe`, so A (positive `move_strafe`) reaches the craft as a yaw-LEFT torque,
+    /// which is what the "Rudder left" label promises.
+    #[test]
+    fn positive_yaw_turns_nose_right() {
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::ZERO);
+        app.world_mut().resource_mut::<VehicleControl>().yaw = 1.0;
+        for _ in 0..10 {
+            app.update();
+        }
+        let nose_x = (body(&app, e).0.rotation * Vec3::Z).x;
+        assert!(nose_x > 0.0, "positive yaw must turn the nose right (+X), got nose.x={nose_x}");
     }
 
     /// A held pitch input inverts the plane (body-up points DOWN) with NO return to level — the

@@ -664,7 +664,10 @@ fn run_nn_crab_vehicle_stability(args: NnCrabVehicleStabilityArgs) -> Result<()>
     let bounded = max_y < 5.0; // never flew over the 2 m walls and away
     let stood_back_up =
         y_before.is_finite() && y_after.is_finite() && y_after > 0.4 * y_before && y_after < 1.8 * y_before;
-    let still_reaching = reach_after.is_finite();
+    // The policy still acts: its claw stays near the target (a bounded reach, not just finite — a
+    // crab knocked flat or flung off keeps finite claw coords, so finiteness alone is too weak).
+    // The arena is ±10 m, so a reach within a few metres means the trained reaching survived.
+    let still_reaching = reach_after.is_finite() && reach_after < 6.0;
 
     println!(
         "\nnn-crab-vehicle-stability: carapace_y before={y_before:.3} → after={y_after:.3} m \
