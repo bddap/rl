@@ -58,7 +58,7 @@ pub fn joint_angle(axis_local: Vec3, parent_rot: Quat, child_rot: Quat) -> f32 {
 /// articulation. The body also spawns the eye-stalks as locked links with no
 /// `CrabJoint`; restoring finer articulation (bddap/rl#31) means adding a variant
 /// here (which grows the observation/action vector and the net) plus a rig
-/// [`crate::bot::rig::JointSpec`].
+/// [`JointSpec`](crate::bot::rig::recipe::JointSpec).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CrabJointId {
     // Legs (8 = side L/R × leg 0..3 front→back). The basal joint is 2-DOF: coxa
