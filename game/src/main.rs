@@ -340,6 +340,21 @@ fn run_checkpoint_check(args: CheckpointCheckArgs) -> Result<()> {
 /// independent in-process peers exchanging lockstep inputs, write each peer's per-tick hash log,
 /// and confirm they stayed byte-identical. Exits nonzero on any divergence so it doubles as a CI
 /// gate on "the NN crab is the deterministic multiplayer crab".
+/// Write per-tick `<tick> <hash>` lines (zero-padded 16-hex) to a file — the cross-machine
+/// determinism log two peers `diff` to prove byte-identical sims. One writer for every gate
+/// (probe + xpeer) so the line format can never drift between them.
+fn write_tick_hash_log(
+    path: &std::path::Path,
+    entries: impl Iterator<Item = (u64, u64)>,
+) -> Result<()> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (tick, hash) in entries {
+        writeln!(out, "{} {:#018x}", tick, hash).unwrap();
+    }
+    std::fs::write(path, out).with_context(|| format!("writing hash log to {}", path.display()))
+}
+
 fn run_nn_crab_xpeer(args: NnCrabXpeerArgs) -> Result<()> {
     use net::external_crab::run_cross_peer_probe;
 
@@ -353,21 +368,8 @@ fn run_nn_crab_xpeer(args: NnCrabXpeerArgs) -> Result<()> {
     }
 
     // Per-tick `<tick> <hash>` logs for each peer, so an operator can `diff` them directly.
-    fn write_log(
-        path: &PathBuf,
-        ticks: &[net::external_crab::XPeerTick],
-        pick: fn(&net::external_crab::XPeerTick) -> u64,
-    ) -> Result<()> {
-        use std::fmt::Write as _;
-        let mut out = String::with_capacity(ticks.len() * 28);
-        for t in ticks {
-            writeln!(out, "{} {:#018x}", t.tick, pick(t)).unwrap();
-        }
-        std::fs::write(path, out)
-            .with_context(|| format!("nn-crab-xpeer: writing hash log {}", path.display()))
-    }
-    write_log(&args.hash_log_a, &result.ticks, |t| t.hash_a)?;
-    write_log(&args.hash_log_b, &result.ticks, |t| t.hash_b)?;
+    write_tick_hash_log(&args.hash_log_a, result.ticks.iter().map(|t| (t.tick, t.hash_a)))?;
+    write_tick_hash_log(&args.hash_log_b, result.ticks.iter().map(|t| (t.tick, t.hash_b)))?;
     println!(
         "nn-crab-xpeer: wrote {} per-tick hashes per peer to {} / {}",
         result.ticks.len(),
@@ -432,13 +434,7 @@ fn run_nn_crab_probe(args: NnCrabProbeArgs) -> Result<()> {
     // Cross-machine determinism gate: a plain `<tick> <hash>` line per tick. Two Decks running
     // the same (checkpoint, seed, ticks) must yield byte-identical files (see [`hash_log`]).
     if let Some(path) = &args.hash_log {
-        use std::fmt::Write as _;
-        let mut out = String::with_capacity(samples.len() * 24);
-        for s in &samples {
-            writeln!(out, "{} {:#018x}", s.tick, s.state_hash).unwrap();
-        }
-        std::fs::write(path, out)
-            .with_context(|| format!("nn-crab-probe: writing hash log to {}", path.display()))?;
+        write_tick_hash_log(path, samples.iter().map(|s| (s.tick, s.state_hash)))?;
         println!(
             "nn-crab-probe: wrote {} per-tick hashes to {}",
             samples.len(),
