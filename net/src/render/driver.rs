@@ -221,17 +221,18 @@ pub(super) struct CockpitPose {
 /// stepping out returns the view to the foot player. The E/X control CYCLES foot → plane →
 /// helicopter → foot.
 ///
-/// An enum (not `Option`s) so the kind and the poses are present together or not at all. `prev` is
-/// last applied tick's pose, so [`apply_transforms`] tweens the cockpit camera the same way it
-/// interpolates every sim body. Only ever piloting on a windowed SOLO round (a solo [`Coordinator`]).
+/// `pose` is `(prev, now)` — the last two applied ticks' arena poses, so [`apply_transforms`] tweens
+/// the cockpit camera the same way it interpolates every sim body. It is `None` from boarding until
+/// the rapier body first reports a pose (the body spawns a tick or two after `VehicleControl` goes
+/// active), so a fabricated seed pose is unrepresentable — the camera holds the foot view for those
+/// frames rather than snapping in from a fake origin. Only ever piloting on a windowed SOLO round.
 #[derive(Resource, Default)]
 pub(super) enum LocalVehicle {
     #[default]
     OnFoot,
     Flying {
         kind: VehicleKind,
-        now: CockpitPose,
-        prev: CockpitPose,
+        pose: Option<(CockpitPose, CockpitPose)>,
     },
 }
 
@@ -260,34 +261,36 @@ impl LocalVehicle {
         }
     }
 
-    /// This vehicle's `(prev, now)` cockpit poses for the FP camera, or `None` on foot.
+    /// This vehicle's `(prev, now)` cockpit poses for the FP camera, or `None` on foot OR before the
+    /// body's first pose has been read (boarding) — the renderer falls back to the foot view then.
     pub(super) fn cockpit_poses(&self) -> Option<(CockpitPose, CockpitPose)> {
         match self {
             Self::OnFoot => None,
-            Self::Flying { now, prev, .. } => Some((*prev, *now)),
+            Self::Flying { pose, .. } => *pose,
         }
     }
 
-    /// Refresh the mirrored pose from the rapier body's freshly-stepped arena Transform: shift
-    /// `now` into `prev` and record the new pose, so the cockpit camera interpolates this tick's
-    /// motion. No-op on foot.
-    fn update_pose(&mut self, pose: CockpitPose) {
-        if let Self::Flying { now, prev, .. } = self {
-            *prev = *now;
-            *now = pose;
+    /// Refresh the mirrored pose from the rapier body's freshly-stepped arena Transform: shift `now`
+    /// into `prev` and record the new pose, so the cockpit camera interpolates this tick's motion.
+    /// The FIRST pose seeds both `prev` and `now` to it (no interpolation from a fabricated origin —
+    /// the boarding-frame zoom glitch). No-op on foot.
+    fn update_pose(&mut self, p: CockpitPose) {
+        if let Self::Flying { pose, .. } = self {
+            *pose = Some(match *pose {
+                Some((_, now)) => (now, p),
+                None => (p, p),
+            });
         }
     }
 
     /// The NEXT vehicle in the enter/exit cycle (foot → plane → helicopter → foot). One place the
-    /// cycle order lives, so the input toggle and any future caller can't disagree on it. Boarding
-    /// from foot seeds an identity pose; the first post-pump [`update_pose`] overwrites it with the
-    /// spawned body's real arena pose, so the one-frame seed is never rendered as the craft's rest.
+    /// cycle order lives, so the input toggle and any future caller can't disagree on it. A boarded
+    /// craft starts with no pose (`None`); [`update_pose`] fills it from the spawned body.
     fn cycled(&self) -> Self {
-        let seed = CockpitPose { pos: Vec3::ZERO, orient: Quat::IDENTITY };
         match self {
-            Self::OnFoot => Self::Flying { kind: VehicleKind::Plane, now: seed, prev: seed },
+            Self::OnFoot => Self::Flying { kind: VehicleKind::Plane, pose: None },
             Self::Flying { kind: VehicleKind::Plane, .. } => {
-                Self::Flying { kind: VehicleKind::Helicopter, now: seed, prev: seed }
+                Self::Flying { kind: VehicleKind::Helicopter, pose: None }
             }
             Self::Flying { kind: VehicleKind::Helicopter, .. } => Self::OnFoot,
         }

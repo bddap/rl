@@ -55,7 +55,7 @@ pub const MAX_ENVS: usize = 16;
 /// legs by mass. At TRAINING time no vehicle entity exists, so a crab filter naming this bit (see
 /// [`crab_collision`]) matches nothing and the trained physics stays bit-identical — the vehicle
 /// is policy-safe by construction. Only ever ONE vehicle, in a solo round.
-pub const VEHICLE_GROUP: Group = Group::GROUP_19; // bit 18 = MAX_ENVS + 2
+pub(crate) const VEHICLE_GROUP: Group = Group::GROUP_19; // bit 18 = MAX_ENVS + 2
 
 // Envs occupy bits 2..=MAX_ENVS+1 of `Group`'s 32; the vehicle takes the next bit
 // (`VEHICLE_GROUP`, bit MAX_ENVS+2). Compile-time guarantees that both fit and that
