@@ -4,8 +4,8 @@
 //! (e.g. `sally.glb`, fetched from the private bddap-bot/rl-assets repo), each
 //! crab gets a skinned-mesh skin whose deform bones follow the physics links.
 //! The physics body stays the single source of truth; the model is cosmetic,
-//! and the colliders themselves are only ever shown by Rapier's debug-render
-//! (`RL_DEBUG_COLLIDERS`), never as stand-in meshes.
+//! and the colliders themselves are only ever shown by the shared `crab_view`
+//! collider wireframe (the render-mode cycle), never as stand-in meshes.
 //!
 //! How following works: when the scene instance is ready, every deform bone is
 //! matched to a physics link by name ([`super::rig::part_for_bone`]), and the bone's world
