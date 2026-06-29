@@ -214,11 +214,7 @@ impl Coordinator {
             },
             Some(mut d) if d.is_host() => {
                 let mut srv = Server::new(&d.roster());
-                // Seed the ledger with inputs a fast client sent before we started serving. Dropped
-                // (idempotent) if the client also re-sends them once play begins.
-                for pm in d.take_early() {
-                    let _ = srv.record(pm.pid, pm.msg);
-                }
+                srv.seed_early(&d.take_early());
                 Coordinator::Server {
                     server: srv,
                     net: Some(d),
@@ -235,19 +231,14 @@ impl Coordinator {
     pub fn exchange(&mut self, me: PlayerId, msg: TickMsg) -> Vec<PeerMsg> {
         match self {
             Coordinator::Server { server, net } => {
-                let mut sets = Vec::new();
-                if let Some(net) = net.as_mut() {
-                    for pm in net.drain_client_inputs() {
-                        sets.extend(server.record(pm.pid, pm.msg));
-                    }
-                }
-                sets.extend(server.record(me, msg));
+                // Drain any remote clients' inputs (none for solo), assemble + unpack through the ONE
+                // shared core, then broadcast the completed sets to the remotes (a no-op for solo).
+                let remote = net.as_mut().map(NetDriver::drain_client_inputs).unwrap_or_default();
+                let (sets, peer_msgs) = server::host_assemble(server, me, msg, remote);
                 if let Some(net) = net.as_ref() {
                     net.broadcast_ticksets(&sets);
                 }
-                sets.iter()
-                    .flat_map(|s| server::unpack_tickset(s, me))
-                    .collect()
+                peer_msgs
             }
             Coordinator::Client { net } => {
                 net.send_to_server(&msg);
@@ -988,9 +979,10 @@ fn server_endpoint(id_map: &BTreeMap<EndpointId, PlayerId>) -> EndpointId {
 }
 
 /// The inputs that arrived during formation, mapped to their author's [`PlayerId`] (senders not in
-/// the agreed set dropped). The host seeds its server ledger with these so a fast client's
-/// pre-serve inputs aren't lost; everyone else discards them (only the server holds the ledger).
-fn early_peer_msgs(frozen: &Frozen) -> Vec<PeerMsg> {
+/// the agreed set dropped). The host seeds its server ledger with these (via [`Server::seed_early`])
+/// so a fast client's pre-serve inputs aren't lost; everyone else discards them (only the server
+/// holds the ledger). `pub` so the headless `game net` driver builds the same set from its `Frozen`.
+pub fn early_peer_msgs(frozen: &Frozen) -> Vec<PeerMsg> {
     frozen
         .early
         .iter()
