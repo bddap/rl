@@ -660,16 +660,6 @@ pub struct Sim {
     /// First-person players. `BTreeMap` (per the determinism contract) so iteration
     /// is in `PlayerId` order on every peer.
     players: BTreeMap<PlayerId, Player>,
-    /// Pilotable planes, keyed by the [`PlayerId`] flying each one. A player is EITHER on
-    /// foot (in `players`) OR piloting (here) — the two maps are disjoint, decided once at
-    /// [`Sim::new_with_pilots`]. An empty map ⇒ the foot-only game, hashed to zero extra
-    /// bytes, so the no-plane sim is byte-identical. `BTreeMap` for `PlayerId`-ordered
-    /// iteration, per the contract.
-    ///
-    /// Planes don't participate in the objective: the crab (`nearest_living_player`),
-    /// grabs, extraction, and `settle_outcome` all read only `players`, so a pilot can't
-    /// be hunted or extract, and an all-pilot round never resolves (stays `Ongoing`).
-    planes: BTreeMap<PlayerId, Plane>,
     crab: Crab,
     extraction: ExtractionPoint,
     /// The round result. Derived from the player statuses each tick by
@@ -724,10 +714,8 @@ pub struct Sim {
 #[derive(Debug, Clone)]
 struct RoundConfig {
     seed: u64,
-    /// Foot players, in `PlayerId` order. Disjoint from `pilots`.
+    /// Foot players, in `PlayerId` order.
     players: Vec<PlayerId>,
-    /// Pilots (spawn flying a plane). Disjoint from `players`.
-    pilots: Vec<PlayerId>,
 }
 
 impl Sim {
@@ -737,36 +725,17 @@ impl Sim {
     /// is a pure function of the sorted id set, so the starting state is identical on
     /// every peer regardless of the order `players` arrives in.
     pub fn new(seed: u64, players: &[PlayerId]) -> Self {
-        Self::new_with_pilots(seed, players, &[])
-    }
-
-    /// Like [`Sim::new`], but each id in `pilots` spawns PILOTING a plane instead of
-    /// standing on foot. A pilot is removed from the foot `players` map and added to
-    /// `planes`; the two stay disjoint. `pilots` not in the `players` set are ignored.
-    /// With `pilots` empty this is byte-for-byte [`Sim::new`]. Callers MUST pass the same
-    /// `pilots` on every peer or their sims diverge — the networked path negotiates that set
-    /// over the wire so every peer agrees (see [`crate::net_loop::form_match`]).
-    pub fn new_with_pilots(seed: u64, players: &[PlayerId], pilots: &[PlayerId]) -> Self {
         let mut sorted: Vec<PlayerId> = players.to_vec();
         sorted.sort();
         sorted.dedup();
-        // Pilots not in the player set are meaningless — keep only the ones that map to
-        // a participant, in sorted order, so the retained config is canonical.
-        let pilots: Vec<PlayerId> = sorted
-            .iter()
-            .copied()
-            .filter(|id| pilots.contains(id))
-            .collect();
         let config = RoundConfig {
             seed,
             players: sorted,
-            pilots,
         };
-        let (players, planes, crab, extraction) = Self::spawn_state(&config);
+        let (players, crab, extraction) = Self::spawn_state(&config);
         Self {
             tick: 0,
             players,
-            planes,
             crab,
             extraction,
             outcome: Outcome::Ongoing,
@@ -805,10 +774,9 @@ impl Sim {
     /// level-trigger bug `restart_is_edge_triggered_not_level` guards). [`Sim::step`] owns
     /// that latch; reset only touches the round/world fields.
     fn reset(&mut self) {
-        let (players, planes, crab, extraction) = Self::spawn_state(&self.config);
+        let (players, crab, extraction) = Self::spawn_state(&self.config);
         self.tick = 0;
         self.players = players;
-        self.planes = planes;
         self.crab = crab;
         self.extraction = extraction;
         self.outcome = Outcome::Ongoing;
@@ -816,49 +784,33 @@ impl Sim {
     }
 
     /// The tick-0 entity layout for a [`RoundConfig`] — the SINGLE source of the spawn
-    /// arrangement, shared by [`Sim::new_with_pilots`] and [`Sim::reset`] so the two can't
-    /// drift. Pure function of the (integer, sorted) config, so every peer composes the
-    /// identical starting world. Returns the foot players, the pilots' planes, the crab,
-    /// and the extraction point.
+    /// arrangement, shared by [`Sim::new`] and [`Sim::reset`] so the two can't drift. Pure
+    /// function of the (integer, sorted) config, so every peer composes the identical
+    /// starting world. Returns the foot players, the crab, and the extraction point.
     fn spawn_state(
         cfg: &RoundConfig,
-    ) -> (
-        BTreeMap<PlayerId, Player>,
-        BTreeMap<PlayerId, Plane>,
-        Crab,
-        ExtractionPoint,
-    ) {
+    ) -> (BTreeMap<PlayerId, Player>, Crab, ExtractionPoint) {
         let mut map = BTreeMap::new();
-        let mut plane_map = BTreeMap::new();
         let n = cfg.players.len() as i64;
         for (i, &id) in cfg.players.iter().enumerate() {
             // Spawn ring near the origin; spacing in world units, all facing +Z
-            // (yaw 0). Integer layout → identical everywhere. A pilot takes the same
-            // ground XZ slot but starts airborne over it (a plane, not feet).
+            // (yaw 0). Integer layout → identical everywhere.
             let x = (i as i64 - n / 2) * 2 * UNIT;
-            if cfg.pilots.contains(&id) {
-                plane_map.insert(id, Plane::spawn(Pos { x, z: 0 }, 0));
-            } else {
-                map.insert(
-                    id,
-                    Player {
-                        pos: Pos { x, z: 0 },
-                        yaw: 0,
-                        status: PlayerStatus::Alive,
-                    },
-                );
-            }
+            map.insert(
+                id,
+                Player {
+                    pos: Pos { x, z: 0 },
+                    yaw: 0,
+                    status: PlayerStatus::Alive,
+                },
+            );
         }
-        debug_assert!(
-            map.keys().all(|id| !plane_map.contains_key(id)),
-            "a participant is on foot XOR piloting — the two maps must stay disjoint"
-        );
         // Extraction is across the map at +Z; players spawn at the origin.
         let extraction = ExtractionPoint {
             pos: Pos { x: 0, z: 40 * UNIT },
         };
         let crab = Self::spawn_crab(&map);
-        (map, plane_map, crab, extraction)
+        (map, crab, extraction)
     }
 
     /// The crab's spawn pose for a given set of foot players. It sits BETWEEN spawn and
@@ -901,11 +853,10 @@ impl Sim {
         Crab { pos, yaw: 0 }
     }
 
-    /// Every participant the sim simulates: each on-foot player and each pilot. The
-    /// lockstep boundary requires exactly one input per id in this set. `players` and
-    /// `planes` are kept disjoint at spawn, so no id appears twice.
+    /// Every participant the sim simulates: each on-foot player. The lockstep boundary
+    /// requires exactly one input per id in this set.
     fn participant_ids(&self) -> impl Iterator<Item = PlayerId> + '_ {
-        self.players.keys().chain(self.planes.keys()).copied()
+        self.players.keys().copied()
     }
 
     /// Fail-loud guard for the lockstep boundary (rl#105): every participant must have
@@ -927,7 +878,7 @@ impl Sim {
     /// then settle the round outcome. All in `PlayerId` order; pure integer math.
     ///
     /// `inputs` MUST hold an entry for every participant the sim tracks — each on-foot
-    /// player and each pilot. A missing input is a fail-loud determinism fault, NOT a
+    /// player. A missing input is a fail-loud determinism fault, NOT a
     /// silent neutral: defaulting a dropped input to neutral would let one peer apply
     /// real input where another applied none, diverging `state_hash` invisibly (the
     /// NN-crab pose rides on player state, which feeds the hash). The lockstep driver
@@ -984,13 +935,6 @@ impl Sim {
             let denom = Input::AXIS_SCALE as i64 * trig::ONE as i64;
             p.pos.x += vx * PLAYER_SPEED / denom;
             p.pos.z += vz * PLAYER_SPEED / denom;
-        }
-
-        // 1b) Planes. Each pilot's plane integrates its own flight from its input,
-        //     in PlayerId order (BTreeMap). Pure integer math — see `step_plane`.
-        for (id, plane) in self.planes.iter_mut() {
-            let inp = inputs[id];
-            step_plane(plane, inp);
         }
 
         // The crab's grabs are disarmed during the startup grace (see [`STARTUP_GRACE_TICKS`]).
@@ -1103,7 +1047,6 @@ impl Sim {
         let Sim {
             tick,
             players,
-            planes,
             crab,
             extraction,
             outcome,
@@ -1121,21 +1064,6 @@ impl Sim {
             write_pos(&mut h, *pos);
             h.write(&yaw.to_le_bytes());
             h.write(&[status_tag(*status)]);
-        }
-        // Planes (PlayerId order): every evolving field. An empty plane map writes
-        // nothing, so the foot-only sim's hash is unchanged.
-        for (id, plane) in planes.iter() {
-            let Plane {
-                pos,
-                vel,
-                orient,
-                throttle,
-            } = plane;
-            h.write(&[id.0]);
-            write_pos3(&mut h, *pos);
-            write_pos3(&mut h, *vel);
-            write_quat(&mut h, *orient);
-            h.write(&throttle.to_le_bytes());
         }
         let Crab { pos, yaw } = crab;
         write_pos(&mut h, *pos);
@@ -1184,18 +1112,6 @@ impl Sim {
     /// Read one player's state (for rendering its FP view / a remote avatar).
     pub fn player(&self, id: PlayerId) -> Option<Player> {
         self.players.get(&id).copied()
-    }
-
-    /// Read-only view of all planes in `PlayerId` order — for rendering each pilot's
-    /// gray box. Empty in the foot-only game. Never drives sim logic (read-only, like
-    /// [`Sim::players`]).
-    pub fn planes(&self) -> impl Iterator<Item = (PlayerId, Plane)> + '_ {
-        self.planes.iter().map(|(&id, &p)| (id, p))
-    }
-
-    /// The plane piloted by `id`, if that player is flying (for the FP camera / avatar).
-    pub fn plane(&self, id: PlayerId) -> Option<Plane> {
-        self.planes.get(&id).copied()
     }
 
     /// The giant crab (for rendering the threat).
@@ -1848,43 +1764,6 @@ mod tests {
         }
     }
 
-    /// Two peers flying the SAME scripted aerobatic input stay bit-identical, tick by tick —
-    /// the new nonlinear quaternion integrate/normalize path is folded into [`Sim::state_hash`]
-    /// and must not desync. The `determinism_probe` harness exercises the rapier crab; this
-    /// covers the integer flight model on the lockstep wire (a networked pilot's plane). The
-    /// input mixes pitch, roll, yaw, and throttle so every body axis and the renormalize are
-    /// driven hard for hundreds of ticks (well past inversion).
-    #[test]
-    fn two_peers_flying_the_same_inputs_stay_bit_identical() {
-        let ids = players(1);
-        let pilots = [PlayerId(0)];
-        let mut a = Sim::new_with_pilots(9, &ids, &pilots);
-        let mut b = Sim::new_with_pilots(9, &ids, &pilots);
-        let start = a.plane(PlayerId(0)).unwrap().orient();
-        for t in 0..600u64 {
-            // A scripted aerobatic flight: all four axes active, varying tick to tick.
-            let inp = Input::new(
-                if t % 5 == 0 { 1.0 } else { -0.3 },   // move_strafe → rudder/yaw
-                1.0,                                   // move_forward → throttle up
-                if t % 3 == 0 { -1.0 } else { 1.0 },   // look_yaw → roll
-                0,
-            )
-            .with_look_pitch(if t % 7 == 0 { 1.0 } else { -1.0 }); // pitch
-            let mut m = BTreeMap::new();
-            m.insert(PlayerId(0), inp);
-            a.step(&m);
-            b.step(&m);
-            assert_eq!(a.state_hash(), b.state_hash(), "peers diverged at tick {t}");
-        }
-        // Sanity: the script actually flew a nontrivial attitude (not stuck level), so the
-        // bit-identity above is over a real maneuver, not a no-op.
-        assert_ne!(
-            a.plane(PlayerId(0)).unwrap().orient(),
-            start,
-            "scripted flight must change the attitude"
-        );
-    }
-
     /// A craft's attitude must be a unit quaternion to ±1 in the [`trig::ONE`] grid — the
     /// renormalize floors the magnitude near ONE, never NaN, never runaway.
     fn assert_quat_unit(q: iquat::Quat) {
@@ -2134,134 +2013,6 @@ mod tests {
     }
 
     #[test]
-    fn no_pilots_is_byte_identical_to_plain_new() {
-        // The flag-OFF invariant: `new_with_pilots(.., &[])` is the foot-only game,
-        // hashed identically to `new` (empty plane map writes no bytes). If this ever
-        // breaks, every existing replay/desync hash shifts and the no-plane game is no
-        // longer the unchanged game.
-        let players = players(3);
-        let a = Sim::new(0xABCD, &players);
-        let b = Sim::new_with_pilots(0xABCD, &players, &[]);
-        assert_eq!(a.state_hash(), b.state_hash());
-        assert_eq!(a.planes().count(), 0, "no pilots ⇒ no planes");
-        assert_eq!(a.players().count(), 3);
-    }
-
-    #[test]
-    fn pilot_replaces_foot_player_and_spawns_airborne() {
-        // A pilot is in `planes`, NOT `players` (the two are disjoint), and starts above
-        // the ground (positive altitude), flying from tick 0.
-        let ids = players(2);
-        let sim = Sim::new_with_pilots(7, &ids, &[PlayerId(1)]);
-        assert!(sim.player(PlayerId(1)).is_none(), "a pilot is not on foot");
-        assert!(sim.player(PlayerId(0)).is_some(), "non-pilot stays on foot");
-        let plane = sim.plane(PlayerId(1)).expect("player 1 is a pilot");
-        assert!(plane.pos().y > 0, "plane spawns airborne");
-        assert_eq!(plane.heading(), 0, "spawns facing +Z like a player");
-    }
-
-    #[test]
-    fn throttle_with_nose_up_gains_altitude() {
-        // Full throttle while pitched up must climb: nose-up tilts thrust toward +Y
-        // enough to beat gravity, so altitude rises over a few seconds. This is the
-        // controllability check — the plane responds to its pitch+throttle inputs.
-        let mut sim = Sim::new_with_pilots(0, &players(1), &players(1));
-        let y0 = sim.plane(PlayerId(0)).unwrap().pos().y;
-        // Pulse the nose up to a climb attitude (the rate is unclamped now, so holding the
-        // stick would loop — a pilot sets the climb angle, then flies it), then hold full
-        // throttle. The nose-up attitude HOLDS (no auto-level) and the plane climbs.
-        let mut pitch_up = BTreeMap::new();
-        pitch_up.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0).with_look_pitch(1.0));
-        for _ in 0..8 {
-            sim.step(&pitch_up);
-        }
-        let mut throttle = BTreeMap::new();
-        throttle.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0));
-        for _ in 0..120 {
-            sim.step(&throttle);
-        }
-        let y1 = sim.plane(PlayerId(0)).unwrap().pos().y;
-        assert!(y1 > y0, "nose-up full throttle should climb, {y0} -> {y1}");
-    }
-
-    #[test]
-    fn chopped_throttle_plane_sinks_and_lands_without_falling_through() {
-        // Throttle chopped and nose held down: speed bleeds, the wing stalls, gravity
-        // wins, the plane descends, and the ground clamp catches it at Y=0 (never
-        // negative) — a crude belly landing, not an infinite fall.
-        let mut sim = Sim::new_with_pilots(0, &players(1), &players(1));
-        let mut inputs = BTreeMap::new();
-        // Down-trim throttle, nose down — a committed descent.
-        inputs.insert(PlayerId(0), Input::from_axes(0.0, -1.0).with_look_pitch(-1.0));
-        for _ in 0..400 {
-            sim.step(&inputs);
-        }
-        let p = sim.plane(PlayerId(0)).unwrap();
-        assert_eq!(p.pos().y, 0, "a descending plane lands and stops at the ground");
-    }
-
-    #[test]
-    fn hash_covers_plane_state() {
-        // Two pilot sims identical but for one tick of plane input must hash
-        // differently — proves the plane's state is folded into the hash (not just
-        // players/crab). One throttles, the other idles: their planes' velocity/pos
-        // diverge, so the hashes must.
-        let ids = players(1);
-        let mut a = Sim::new_with_pilots(0, &ids, &ids);
-        let mut b = Sim::new_with_pilots(0, &ids, &ids);
-        assert_eq!(a.state_hash(), b.state_hash(), "same start ⇒ same hash");
-        let mut throttle = BTreeMap::new();
-        throttle.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0));
-        a.step(&throttle);
-        let neutral = neutral_for(&b);
-        b.step(&neutral);
-        assert_ne!(
-            a.state_hash(),
-            b.state_hash(),
-            "plane motion must change the hash"
-        );
-    }
-
-    #[test]
-    fn mixed_foot_and_pilot_sims_stay_in_lockstep() {
-        // A round with BOTH a foot player and a pilot must evolve identically on two
-        // independent sims fed the same inputs — the determinism contract has to hold
-        // across the two entity kinds at once, not just foot-only or pilot-only. Step
-        // each tick with a movement input for the foot player AND a flight input for the
-        // pilot in the same map, asserting the hashes agree every tick, then prove BOTH
-        // actually moved (so a no-op match can't pass vacuously).
-        let mut a = Sim::new_with_pilots(0xF007, &players(2), &[PlayerId(1)]);
-        let mut b = Sim::new_with_pilots(0xF007, &players(2), &[PlayerId(1)]);
-        assert!(a.player(PlayerId(0)).is_some(), "player 0 is on foot");
-        assert!(a.plane(PlayerId(1)).is_some(), "player 1 is a pilot");
-        let foot_spawn = a.player(PlayerId(0)).unwrap().pos();
-        let plane_spawn = a.plane(PlayerId(1)).unwrap().pos();
-        for _ in 0..300 {
-            let mut inputs = BTreeMap::new();
-            // Foot player walks forward; pilot throttles up with some yaw + nose-up pitch.
-            inputs.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0));
-            inputs.insert(PlayerId(1), Input::new(0.5, 1.0, 0.3, 0));
-            a.step(&inputs);
-            b.step(&inputs);
-            assert_eq!(
-                a.state_hash(),
-                b.state_hash(),
-                "mixed foot+pilot sims must stay bit-identical tick-for-tick"
-            );
-        }
-        assert_ne!(
-            a.player(PlayerId(0)).unwrap().pos(),
-            foot_spawn,
-            "the foot player must have moved from spawn"
-        );
-        assert_ne!(
-            a.plane(PlayerId(1)).unwrap().pos(),
-            plane_spawn,
-            "the pilot's plane must have moved from spawn"
-        );
-    }
-
-    #[test]
     fn hash_changes_when_state_changes() {
         let mut sim = Sim::new(0, &players(2));
         let h0 = sim.state_hash();
@@ -2389,11 +2140,9 @@ mod tests {
         // field can be neither forgotten (compile error) nor faked (a binding that hashes
         // nothing fails here).
         //
-        // A sim with BOTH a foot player and a pilot, so the plane fields are real (an empty
-        // plane map hashes to nothing — see `state_hash`) and every field has a value to
-        // perturb. `hash_after` clones the base, mutates one field, and returns the hash; a
+        // `hash_after` clones the base, mutates one field, and returns the hash; a
         // hashed field must change it, the two excluded fields must not.
-        let base = Sim::new_with_pilots(7, &players(2), &[PlayerId(1)]);
+        let base = Sim::new(7, &players(2));
         let h0 = base.state_hash();
         let hash_after = |mutate: &dyn Fn(&mut Sim)| {
             let mut s = base.clone();
@@ -2401,7 +2150,6 @@ mod tests {
             s.state_hash()
         };
         let foot = PlayerId(0);
-        let pilot = PlayerId(1);
 
         // Hashed fields: perturbing each must flip the hash.
         assert_ne!(hash_after(&|s| s.tick += 1), h0, "tick must be hashed");
@@ -2425,57 +2173,6 @@ mod tests {
             hash_after(&|s| s.players.get_mut(&foot).unwrap().status = PlayerStatus::Downed),
             h0,
             "player status must be hashed"
-        );
-
-        assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().pos.x += 1),
-            h0,
-            "plane pos.x must be hashed"
-        );
-        assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().pos.y += 1),
-            h0,
-            "plane pos.y must be hashed"
-        );
-        assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().pos.z += 1),
-            h0,
-            "plane pos.z must be hashed"
-        );
-        assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().vel.x += 1),
-            h0,
-            "plane vel.x must be hashed"
-        );
-        assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().vel.y += 1),
-            h0,
-            "plane vel.y must be hashed"
-        );
-        assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().vel.z += 1),
-            h0,
-            "plane vel.z must be hashed"
-        );
-        assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().orient.w += 1),
-            h0,
-            "plane attitude w must be hashed"
-        );
-        assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().orient.x += 1),
-            h0,
-            "plane attitude x must be hashed"
-        );
-        assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().orient.y += 1),
-            h0,
-            "plane attitude y must be hashed"
-        );
-        assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().orient.z += 1),
-            h0,
-            "plane attitude z must be hashed"
         );
 
         // The crab POSE (driven externally by the NN body, rl#114) is hashed so the quantized

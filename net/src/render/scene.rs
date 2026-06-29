@@ -17,11 +17,6 @@ use super::input::{CameraPitch, CameraYaw};
 #[derive(Component)]
 pub(super) struct PlayerAvatar(PlayerId);
 
-/// A rendered gray-box plane for the pilot with this id. The local pilot's own plane
-/// is hidden (we view from its cockpit), like the local player's capsule.
-#[derive(Component)]
-pub(super) struct PlaneAvatar(PlayerId);
-
 /// Marks the giant crab's render root — the entity [`apply_transforms`] re-poses to the sim
 /// crab each frame.
 #[derive(Component)]
@@ -128,50 +123,6 @@ pub(super) fn spawn_world(
             Transform::from_translation(world(state.ls.sim().player(id).unwrap().pos(), 0.0)),
             PlayerAvatar(id),
         ));
-    }
-
-    // Pilot planes: one gray-box aircraft (fuselage + wing) per plane in the sim. The
-    // root holds the pose (placed every frame by apply_transforms); the children give
-    // it shape and a legible facing (+Z = nose, matching heading 0). The local pilot's
-    // is spawned too but hidden in apply_transforms (cockpit view).
-    let plane_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.62, 0.64, 0.67),
-        perceptual_roughness: 0.7,
-        ..default()
-    });
-    for (id, _plane) in state.ls.sim().planes() {
-        let root = commands
-            .spawn((
-                Transform::from_translation(world3(state.ls.sim().plane(id).unwrap().pos())),
-                Visibility::default(),
-                PlaneAvatar(id),
-            ))
-            .id();
-        // Fuselage: a long box down +Z (the nose direction).
-        let fuselage = commands
-            .spawn((
-                Mesh3d(meshes.add(Cuboid::new(
-                    PLANE_FUSELAGE_W * rs,
-                    PLANE_FUSELAGE_W * rs,
-                    PLANE_FUSELAGE_LEN * rs,
-                ))),
-                MeshMaterial3d(plane_mat.clone()),
-                Transform::default(),
-            ))
-            .id();
-        // Wing: a wide, thin box across X, set a bit forward of center.
-        let wing = commands
-            .spawn((
-                Mesh3d(meshes.add(Cuboid::new(
-                    PLANE_WINGSPAN * rs,
-                    PLANE_FUSELAGE_W * 0.25 * rs,
-                    PLANE_WING_CHORD * rs,
-                ))),
-                MeshMaterial3d(plane_mat.clone()),
-                Transform::from_xyz(0.0, 0.0, PLANE_FUSELAGE_LEN * 0.1 * rs),
-            ))
-            .id();
-        commands.entity(root).add_children(&[fuselage, wing]);
     }
 
     // The giant crab: Sally's collider silhouette (see `spawn_crab_silhouette`), at TRUE physics
@@ -416,20 +367,6 @@ type CrabXf<'w, 's> = Query<
     &'static mut Transform,
     (With<CrabAvatar>, Without<PlayerAvatar>, Without<FpCamera>),
 >;
-type PlaneXf<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static PlaneAvatar,
-        &'static mut Transform,
-        &'static mut Visibility,
-    ),
-    (
-        Without<PlayerAvatar>,
-        Without<CrabAvatar>,
-        Without<FpCamera>,
-    ),
->;
 type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
 
 /// Place the FP camera and the dynamic avatars each frame, INTERPOLATED between the
@@ -446,7 +383,6 @@ pub(super) fn apply_transforms(
     vehicle: Res<LocalVehicle>,
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
-    mut planes_q: PlaneXf,
     mut cam_q: CamXf,
 ) {
     let sim = state.ls.sim();
@@ -489,35 +425,16 @@ pub(super) fn apply_transforms(
             Transform::from_translation(world(pos, 0.0)).with_rotation(Quat::from_rotation_y(yaw));
     }
 
-    // Planes: interpolate pose (3D position + heading + pitch) and orient the gray box
-    // so +Z is the nose. Hide the local pilot's own plane (we fly from its cockpit).
-    for (avatar, mut tf, mut vis) in planes_q.iter_mut() {
-        let Some(now) = sim.plane(avatar.0) else {
-            continue;
-        };
-        let prev = state.prev.planes.get(&avatar.0).copied().unwrap_or(now);
-        *tf = plane_transform(prev, now, alpha);
-        *vis = if avatar.0 == local {
-            Visibility::Hidden
-        } else {
-            Visibility::Visible
-        };
-    }
-
-    // FP camera. A PILOT flies from the cockpit: anchor the camera to the plane's
+    // FP camera. A PILOT flies from the cockpit: anchor the camera to the vehicle's
     // interpolated pose, looking along its heading+pitch and BANKED by its roll. The mouse
-    // now flies the plane (pitch/roll), so there is no separate free-look while piloting —
-    // the view IS the plane's attitude. An on-foot player keeps the ground eye view.
+    // now flies the craft (pitch/roll), so there is no separate free-look while piloting —
+    // the view IS the craft's attitude. An on-foot player keeps the ground eye view.
     if let Ok(mut cam) = cam_q.single_mut() {
         if let Some((prev, now)) = vehicle.cockpit_poses() {
             // Single-player: fly from the CLIENT-side vehicle (the play layer's own body — it
             // is not in the sim, so the deterministic core stays integer-only). The one
             // cockpit formula flies either craft from its shared pose.
             *cam = cockpit_camera(prev, now, alpha);
-        } else if let Some(plane_now) = sim.plane(local) {
-            // A SIM-side pilot (networked vehicle, rl#43): same cockpit view from sim state.
-            let plane_prev = state.prev.planes.get(&local).copied().unwrap_or(plane_now);
-            *cam = cockpit_camera(plane_prev.cockpit_pose(), plane_now.cockpit_pose(), alpha);
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
@@ -552,23 +469,14 @@ fn attitude(q: crate::sim::iquat::Quat) -> Quat {
 /// along the craft's nose with the horizon banked/pitched/rolled by its full attitude — so a
 /// banked turn, a loop, or inverted flight all look right. The ONE cockpit-view formula,
 /// taking the shared [`CockpitPose`] so it flies EVERY craft — the single-player plane and
-/// helicopter and the sim-side networked pilot — with no copy to drift. The two ticks'
-/// attitudes are SLERPed (shortest-arc) so the view tween is smooth through any rotation.
+/// helicopter — with no copy to drift. The two ticks' attitudes are SLERPed (shortest-arc) so
+/// the view tween is smooth through any rotation.
 fn cockpit_camera(prev: CockpitPose, now: CockpitPose, alpha: f32) -> Transform {
     let eye = lerp_pos3(prev.pos, now.pos, alpha);
     let rot = attitude(prev.orient).slerp(attitude(now.orient), alpha);
     // Look along the craft's nose (+Z), with up its own up-vector (+Y) — so the pilot looks
     // where the craft is pointed, banked/pitched/rolled by its full attitude.
     Transform::from_translation(eye).looking_at(eye + rot * Vec3::Z, rot * Vec3::Y)
-}
-
-/// The interpolated world transform for a networked pilot's gray-box plane: position lerped in
-/// 3D, orientation the craft's attitude quaternion (its +Z is the nose, matching the gray
-/// box's long axis), SLERPed between the two ticks for a smooth spin through any attitude.
-fn plane_transform(prev: Plane, now: Plane, alpha: f32) -> Transform {
-    let pos = lerp_pos3(prev.pos(), now.pos(), alpha);
-    let rot = attitude(prev.orient()).slerp(attitude(now.orient()), alpha);
-    Transform::from_translation(pos).with_rotation(rot)
 }
 
 /// Linear-interpolate two sim 3D positions (to meters) by `alpha` — the [`Pos3`]

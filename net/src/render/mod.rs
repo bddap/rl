@@ -77,14 +77,6 @@ const EYE_HEIGHT: f32 = 1.6;
 const PLAYER_RADIUS: f32 = 0.4;
 const PLAYER_HEIGHT: f32 = 1.8;
 
-/// Plane gray-box dimensions (meters): a fuselage box + a wider, thinner wing box.
-/// Just enough shape to read as an aircraft and show its facing — a gray-box stand-in for
-/// the as-yet-unmodelled plane.
-const PLANE_FUSELAGE_LEN: f32 = 6.0;
-const PLANE_FUSELAGE_W: f32 = 1.2;
-const PLANE_WINGSPAN: f32 = 9.0;
-const PLANE_WING_CHORD: f32 = 1.6;
-
 /// Mouse look sensitivity (radians per pixel of motion). Yaw feeds the sim as a
 /// per-tick delta; pitch stays client-side.
 const MOUSE_SENS: f32 = 0.0022;
@@ -115,12 +107,6 @@ fn world(pos: Pos, y: f32) -> Vec3 {
     Vec3::new(meters(pos.x), y, meters(pos.z)) * scene::world_render_scale()
 }
 
-/// A sim 3D position ([`Pos3`], includes altitude) as a Bevy world point — the same
-/// direct unit conversion (and render-frame shrink) as [`world`], but with the entity's own Y
-/// (a flying plane), not an externally supplied ground height.
-fn world3(pos: Pos3) -> Vec3 {
-    Vec3::new(meters(pos.x), meters(pos.y), meters(pos.z)) * scene::world_render_scale()
-}
 
 /// The sim's per-tick yaw turn cap, in radians. The sim clamps a tick's yaw delta to
 /// `trig::TURN/24` turn-units (see [`crate::sim`]); we normalize our accrued

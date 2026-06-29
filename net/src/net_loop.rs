@@ -251,8 +251,8 @@ impl Coordinator {
     }
 
     /// Whether this is a solo round (the server with a roster of one and no transport). Drives the
-    /// client-local vehicle toggle, which is meaningless in a networked round (pilots are frozen at
-    /// formation).
+    /// client-local vehicle toggle, which exists only in a solo round (a networked round is
+    /// foot-only).
     pub fn is_solo(&self) -> bool {
         matches!(self, Coordinator::Server { net: None, .. })
     }
@@ -512,12 +512,10 @@ fn connect_and_form_inner(
         all_ids.len(),
         frozen.me
     );
-    // Build with the agreed pilot set so every peer spawns the byte-identical foot/plane mix
-    // (empty ⇒ the unchanged foot-only round). The pilots were negotiated over the wire and
-    // are identical on every peer (the agreement-token guarantee). The early inputs are NOT
+    // Every peer spawns the byte-identical foot-only round. The early inputs are NOT
     // replayed into the client sim anymore (that would bypass the server's ledger) — they ride the
     // driver to seed the host's server instead (see [`Coordinator::for_round`]).
-    let ls = Lockstep::new_with_pilots(seed, &all_ids, frozen.me, &frozen.pilots);
+    let ls = Lockstep::new(seed, &all_ids, frozen.me);
     let server_eid = server_endpoint(&frozen.id_map);
     let early = early_peer_msgs(&frozen);
     let driver = NetDriver {
@@ -559,11 +557,6 @@ pub struct Frozen {
     pub id_map: BTreeMap<EndpointId, PlayerId>,
     pub me: PlayerId,
     pub early: Vec<(EndpointId, TickMsg)>,
-    /// The agreed pilots as [`PlayerId`]s (⊆ the roster), mapped from the agreed pilot
-    /// endpoints through the SAME `id_map`. Every peer freezes the identical set, so handing
-    /// this to [`Lockstep::new_with_pilots`] spawns the byte-identical mix of foot + plane
-    /// bodies on all peers. Empty ⇒ the unchanged foot-only round.
-    pub pilots: Vec<PlayerId>,
     /// Carried out of the barrier so [`NetDriver::weights_synced`] can expose it; see
     /// [`Membership::weights_synced`].
     pub weights_synced: bool,
@@ -656,12 +649,6 @@ pub async fn form_match(
     };
     let id_map = assign_player_ids(my_eid, &outcome.roster)?;
     let me = id_map[&my_eid];
-    // Translate the agreed pilot ENDPOINTS to PlayerIds through the SAME map, so every peer
-    // derives the identical pilot PlayerId set (the agreed pilots are ⊆ the roster, so each is
-    // present in `id_map`). Sorted for a stable order (the sim keys pilots in a BTreeMap, so
-    // order doesn't affect determinism — this is just tidy).
-    let mut pilots: Vec<PlayerId> = outcome.pilots.iter().map(|e| id_map[e]).collect();
-    pilots.sort();
     println!(
         "match formed: {} participant(s), barrier agreed in {:.1}s",
         id_map.len(),
@@ -704,18 +691,10 @@ pub async fn form_match(
             );
         }
     }
-    if !pilots.is_empty() {
-        println!(
-            "GCR: {} of {} player(s) piloting a plane this match",
-            pilots.len(),
-            id_map.len()
-        );
-    }
     Ok(Formation::Agreed(Frozen {
         id_map,
         me,
         early: outcome.early,
-        pilots,
         weights_synced: outcome.weights_synced,
         assets_synced: outcome.assets_synced,
     }))
@@ -727,10 +706,6 @@ pub async fn form_match(
 /// took.
 struct BarrierOutcome {
     roster: Vec<EndpointId>,
-    /// The agreed pilots (⊆ `roster`, sorted by id bytes): the endpoints that spawn flying.
-    /// Identical on every peer — folded into the agreement token, so a divergent pilot view
-    /// can't close. Mapped to [`PlayerId`]s in [`form_match`].
-    pilots: Vec<EndpointId>,
     early: Vec<(EndpointId, TickMsg)>,
     elapsed: Duration,
     /// [`Membership::weights_synced`] sampled at the close instant (rl#82, GCR).
@@ -797,11 +772,7 @@ async fn run_barrier(
         None => Membership::new(me, expect, start),
     }
     .with_weights_digest(local_weights_digest)
-    .with_asset_digest(local_asset_digest)
-    // No peer declares a spawn-time pilot intent: a single player boards a plane in-game via
-    // the client's enter/exit toggle, not at formation. The pilot-roster negotiation stays
-    // wired (the seam for networked vehicles, rl#43); it just freezes empty for now.
-    .piloting(false);
+    .with_asset_digest(local_asset_digest);
     let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
     let mut ticker = tokio::time::interval(BEAT_EVERY);
     let mut last_live = 0usize;
@@ -875,13 +846,11 @@ async fn run_barrier(
         }
 
         match status {
-            Status::Agreed { roster, pilots } => {
+            Status::Agreed { roster } => {
                 // Sample the weights verdict at the close instant — `poll` (above) just expired
-                // the dead, so the live set this reflects is exactly the frozen `roster`. The
-                // pilots come straight from the agreed status (⊆ roster, identical per peer).
+                // the dead, so the live set this reflects is exactly the frozen `roster`.
                 return Ok(BarrierResult::Agreed(BarrierOutcome {
                     roster,
-                    pilots,
                     early,
                     elapsed: now.duration_since(start),
                     weights_synced: m.weights_synced(),
