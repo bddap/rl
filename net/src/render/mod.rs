@@ -108,16 +108,18 @@ fn meters(coord: i64) -> f32 {
 
 /// A sim ground position (XZ at Y=0) as a Bevy world point at height `y`. The sim's
 /// right-handed XZ frame (+X right, +Z forward, +Y up) IS Bevy's frame, so this is a
-/// direct unit conversion with no axis remap.
+/// direct unit conversion with no axis remap — then shrunk by [`scene::world_render_scale`] so
+/// the human world renders small around the true-physics-size giant crab (render==physics; the
+/// crab is NOT inflated). `y` (an eye/capsule height) scales with the rest of the frame.
 fn world(pos: Pos, y: f32) -> Vec3 {
-    Vec3::new(meters(pos.x), y, meters(pos.z))
+    Vec3::new(meters(pos.x), y, meters(pos.z)) * scene::world_render_scale()
 }
 
 /// A sim 3D position ([`Pos3`], includes altitude) as a Bevy world point — the same
-/// direct unit conversion as [`world`], but with the entity's own Y (a flying plane),
-/// not an externally supplied ground height.
+/// direct unit conversion (and render-frame shrink) as [`world`], but with the entity's own Y
+/// (a flying plane), not an externally supplied ground height.
 fn world3(pos: Pos3) -> Vec3 {
-    Vec3::new(meters(pos.x), meters(pos.y), meters(pos.z))
+    Vec3::new(meters(pos.x), meters(pos.y), meters(pos.z)) * scene::world_render_scale()
 }
 
 /// The sim's per-tick yaw turn cap, in radians. The sim clamps a tick's yaw delta to
@@ -144,4 +146,4 @@ pub use app::{AppPhase, Boot, build_windowed_app, pin_process_pools};
 pub use debug_wireframe::WireMode;
 pub use screenshot::{ScreenshotConfig, build_screenshot_app};
 pub(crate) use driver::{park_fixed_auto_pump, pump_fixed_steps};
-pub(crate) use scene::crab_render_scale;
+pub(crate) use scene::world_render_scale;

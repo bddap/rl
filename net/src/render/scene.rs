@@ -51,9 +51,16 @@ pub(super) fn spawn_world(
     // bridge's presence.
     external_crab_armed: Option<Res<crate::external_crab::ExternalCrabArmed>>,
 ) {
+    // The render-frame shrink: the human world (ground, players, planes, the pillar, the camera)
+    // renders this much smaller so the true-physics-size crab towers over it (render==physics; the
+    // crab is NOT inflated — see [`world_render_scale`]). `world`/`world3` already apply it to
+    // POSITIONS; here it sizes the human-world MESHES. The crab silhouette is the lone exception —
+    // it renders at native physics size.
+    let rs = world_render_scale();
+
     // Ground: a large gray plane at Y=0.
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(400.0, 400.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(400.0 * rs, 400.0 * rs))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.30, 0.32, 0.34),
             perceptual_roughness: 0.95,
@@ -85,7 +92,7 @@ pub(super) fn spawn_world(
     let ex = state.ls.sim().extraction().pos();
     let pillar_h = PLAYER_HEIGHT * CRAB_SCALE as f32 * 1.2;
     commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(0.5, pillar_h))),
+        Mesh3d(meshes.add(Cylinder::new(0.5 * rs, pillar_h * rs))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.1, 0.95, 0.3),
             emissive: LinearRgba::new(0.0, 2.2, 0.4, 1.0),
@@ -106,8 +113,8 @@ pub(super) fn spawn_world(
         };
         commands.spawn((
             Mesh3d(meshes.add(Capsule3d::new(
-                PLAYER_RADIUS,
-                PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS,
+                PLAYER_RADIUS * rs,
+                (PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS) * rs,
             ))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: color,
@@ -139,9 +146,9 @@ pub(super) fn spawn_world(
         let fuselage = commands
             .spawn((
                 Mesh3d(meshes.add(Cuboid::new(
-                    PLANE_FUSELAGE_W,
-                    PLANE_FUSELAGE_W,
-                    PLANE_FUSELAGE_LEN,
+                    PLANE_FUSELAGE_W * rs,
+                    PLANE_FUSELAGE_W * rs,
+                    PLANE_FUSELAGE_LEN * rs,
                 ))),
                 MeshMaterial3d(plane_mat.clone()),
                 Transform::default(),
@@ -151,22 +158,24 @@ pub(super) fn spawn_world(
         let wing = commands
             .spawn((
                 Mesh3d(meshes.add(Cuboid::new(
-                    PLANE_WINGSPAN,
-                    PLANE_FUSELAGE_W * 0.25,
-                    PLANE_WING_CHORD,
+                    PLANE_WINGSPAN * rs,
+                    PLANE_FUSELAGE_W * 0.25 * rs,
+                    PLANE_WING_CHORD * rs,
                 ))),
                 MeshMaterial3d(plane_mat.clone()),
-                Transform::from_xyz(0.0, 0.0, PLANE_FUSELAGE_LEN * 0.1),
+                Transform::from_xyz(0.0, 0.0, PLANE_FUSELAGE_LEN * 0.1 * rs),
             ))
             .id();
         commands.entity(root).add_children(&[fuselage, wing]);
     }
 
-    // The giant crab: Sally's collider silhouette (see `spawn_crab_silhouette`), CRAB_SCALE× a
-    // player. Hidden only when the armed NN rig (rl#114) has a skin model to be the visible crab;
-    // with no model the rig is mesh-less, so the silhouette must stay shown or the crab vanishes.
-    // Always spawned so `apply_transforms`'s crab query is satisfied. Both renders use the one
-    // `crab_render_scale`, so they can't mis-size.
+    // The giant crab: Sally's collider silhouette (see `spawn_crab_silhouette`), at TRUE physics
+    // size — it towers because the human world renders R× smaller around it ([`world_render_scale`]),
+    // not because the crab is inflated. Hidden only when the armed NN rig (rl#114) has a skin model
+    // to be the visible crab; with no model the rig is mesh-less, so the silhouette must stay shown
+    // or the crab vanishes. Always spawned so `apply_transforms`'s crab query is satisfied. The
+    // silhouette and the skin both render at native size, so they can't mis-size relative to each
+    // other or to the colliders.
     let crab_hidden = external_crab_armed.is_some() && crab_world::bot::meshfit::model_path().is_some();
     let crab_root = commands
         .spawn((
@@ -185,33 +194,42 @@ pub(super) fn spawn_world(
     spawn_crab_silhouette(&mut commands, &mut meshes, &mut materials, crab_root);
 }
 
-/// The giant crab's target render height: a player's height blown up by [`CRAB_SCALE`]. The
-/// world (spawn distance, camera framing, the extraction pillar) is dimensioned for a crab this
-/// tall, so BOTH crab renders — the integer silhouette and the armed NN rig — fit to it.
+/// The giant crab's apparent-height target: a player's height times [`CRAB_SCALE`] — the crab
+/// reads CRAB_SCALE players tall. We hit this RATIO by rendering the rest of the world that much
+/// SMALLER (see [`world_render_scale`]), NOT by inflating the crab: the crab renders at its TRUE
+/// physics size so a collider wireframe overlays it (render==physics). Kept only to derive the
+/// world scale.
 const CRAB_RENDER_HEIGHT: f32 = PLAYER_HEIGHT * CRAB_SCALE as f32;
 
-/// The uniform scale that fits the rest-pose crab rig to [`CRAB_RENDER_HEIGHT`]: the target
-/// height over the rig's natural standing height
-/// ([`crab_world::bot::rig::CrabSilhouette::natural_height`]). The ONE scale source for the giant —
-/// the static integer silhouette ([`spawn_crab_silhouette`]) and the armed NN rig's skin
-/// ([`crab_world::bot::skin::CrabSkinRepose`]) both use it, so they render the same-sized crab by
-/// construction rather than two hand-tuned factors that could drift. The
-/// body's natural height is ~0.6 m (NOT a player's `PLAYER_HEIGHT`), so a bare `CRAB_SCALE`
-/// multiply would render the NN crab several× too small. `None` for a degenerate recipe (zero
-/// natural height) — a broken recipe with no honest geometry, which callers fail LOUD on rather
-/// than drawing a stand-in.
-pub(crate) fn crab_render_scale() -> Option<f32> {
-    // Memoized: `render_recipe()` re-reads + re-parses the 36 MB `sally.glb` and re-fits
-    // the collider cloud on every call (~1 s of work), yet the result is a property of the
-    // fixed binary+asset that never changes at runtime. `publish_skin_repose` calls this
-    // EACH FRAME the giant crab is armed, so without the cache that 1 s parse was the whole
-    // frame budget — the GCR ~0.7-fps slideshow (rl#129). Compute once, reuse forever.
-    static SCALE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
-    *SCALE.get_or_init(|| {
+/// The crab rig's natural standing height (m) — the span of its REAL physics colliders. Memoized:
+/// [`crab_world::bot::body::render_recipe`] re-reads + re-parses the 36 MB `sally.glb` and re-fits
+/// the collider cloud (~1 s), yet the result is a property of the fixed binary+asset that never
+/// changes at runtime; without the cache that parse was the whole GCR frame budget (rl#129). `None`
+/// for a degenerate (zero-height) recipe — a broken collider asset with no honest geometry, which
+/// callers fail LOUD on rather than drawing a stand-in.
+fn natural_crab_height() -> Option<f32> {
+    static H: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *H.get_or_init(|| {
         let h = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe())
             .natural_height();
-        (h > 1e-4).then(|| CRAB_RENDER_HEIGHT / h)
+        (h > 1e-4).then_some(h)
     })
+}
+
+/// Display-only render-frame scale: rendered metres per sim metre for the HUMAN world — players,
+/// planes, the arena, the camera. The giant crab renders at its TRUE physics size (1×, so a
+/// collider wireframe overlays it natively — render==physics); the giant FEEL comes from rendering
+/// everything ELSE this much smaller, so the crab still reads [`CRAB_SCALE`]× a player WITHOUT
+/// inflating it (which would desync the wireframe from the colliders and force retraining Sally at
+/// a bigger collider scale). The reciprocal of the old crab blow-up: the crab's natural height over
+/// the giant target height. The ONE scale source — every sim→render position ([`world`],
+/// [`world3`], [`lerp_pos3`]) and the human-world mesh sizes multiply by it, the crab does not.
+/// Physics/training are untouched: this multiplies only Bevy `Transform`s. `1.0` on a degenerate
+/// recipe (the silhouette path fails loud there anyway).
+pub(crate) fn world_render_scale() -> f32 {
+    natural_crab_height()
+        .map(|h| h / CRAB_RENDER_HEIGHT)
+        .unwrap_or(1.0)
 }
 
 /// Draw the giant crab as its REAL physics colliders — the carapace cuboid and every link
@@ -287,27 +305,24 @@ fn spawn_crab_silhouette(
             }
         }
     }
-    // The SAME target-height fit the armed NN rig uses (one source, no drift). A degenerate
-    // recipe (zero natural height) yields `None`. That can only mean the collider recipe is
-    // broken (a real or even absent model both yield a positive-height procedural recipe), so
-    // there is NO honest crab geometry to draw. We refuse to paper over it with a placeholder
-    // box (the silent-fallback bug — the only crabs allowed are the Sally mesh and this
-    // physics-bones silhouette); fail LOUD instead.
-    let Some(scale) = crab_render_scale() else {
-        // Unreachable by construction: `render_recipe` yields a positive-height recipe for
-        // both a present model and the procedural fallback, so `crab_render_scale` is only
-        // `None` on a degenerate (zero natural-height) recipe — a broken collider asset with
-        // no honest geometry. We refuse to paper over that with a placeholder box (the
-        // silent-fallback bug); the only allowed crabs are the Sally mesh and this
-        // physics-bones silhouette. If this ever fires, fix the recipe, don't fake a crab.
+    // The crab draws at its TRUE physics size (render==physics): no blow-up, so a collider
+    // wireframe overlays it natively and Sally never has to be retrained at a bigger collider
+    // scale. The giant FEEL instead comes from the R-shrunk human world ([`world_render_scale`]).
+    // A degenerate recipe (zero natural height) is the ONE refusal: it can only mean the collider
+    // recipe is broken (a real OR absent model both yield a positive-height procedural recipe), so
+    // there is no honest crab geometry to draw. We refuse to paper over that with a placeholder box
+    // (the silent-fallback bug — the only crabs allowed are the Sally mesh and this physics-bones
+    // silhouette); fail LOUD instead.
+    let Some(_h) = natural_crab_height() else {
         unreachable!(
             "crab silhouette: render_recipe yielded a degenerate (zero natural-height) crab \
              — the collider recipe is broken"
         );
     };
-    // Recenter horizontally on the root and stand the base on the ground (y=0).
+    // Recenter horizontally on the root and stand the base on the ground (y=0). No scale: native
+    // physics size.
     let origin = Vec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5);
-    let map = |p: Vec3| (r * p - origin) * scale;
+    let map = |p: Vec3| r * p - origin;
 
     let carapace_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.7, 0.18, 0.12),
@@ -335,7 +350,7 @@ fn spawn_crab_silhouette(
                 };
                 commands
                     .spawn((
-                        Mesh3d(meshes.add(Capsule3d::new(radius * scale, len))),
+                        Mesh3d(meshes.add(Capsule3d::new(radius, len))),
                         MeshMaterial3d(limb_mat.clone()),
                         Transform::from_translation((a + b) * 0.5).with_rotation(rot),
                     ))
@@ -344,9 +359,9 @@ fn spawn_crab_silhouette(
             RestShape::Cuboid { center, half } => commands
                 .spawn((
                     Mesh3d(meshes.add(Cuboid::new(
-                        half.x * 2.0 * scale,
-                        half.y * 2.0 * scale,
-                        half.z * 2.0 * scale,
+                        half.x * 2.0,
+                        half.y * 2.0,
+                        half.z * 2.0,
                     ))),
                     MeshMaterial3d(carapace_mat.clone()),
                     Transform::from_translation(map(center)).with_rotation(r),
@@ -540,13 +555,15 @@ fn plane_transform(prev: Plane, now: Plane, alpha: f32) -> Transform {
 }
 
 /// Linear-interpolate two sim 3D positions (to meters) by `alpha` — the [`Pos3`]
-/// analogue of [`lerp_pos`], including the altitude axis.
+/// analogue of [`lerp_pos`], including the altitude axis. Shrunk by [`world_render_scale`]
+/// like [`world3`], so a piloted plane and its cockpit camera sit in the same render frame as
+/// the rest of the human world.
 fn lerp_pos3(a: Pos3, b: Pos3, alpha: f32) -> Vec3 {
     Vec3::new(
         meters(a.x) + (meters(b.x) - meters(a.x)) * alpha,
         meters(a.y) + (meters(b.y) - meters(a.y)) * alpha,
         meters(a.z) + (meters(b.z) - meters(a.z)) * alpha,
-    )
+    ) * world_render_scale()
 }
 
 /// Linear-interpolate two sim positions (in meters) by `alpha`.
