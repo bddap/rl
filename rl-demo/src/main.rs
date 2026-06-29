@@ -83,24 +83,23 @@ enum AppMode {
 fn main() {
     let args = Args::parse();
 
-    // Default the log filter to WARN before `otel::init` reads it. rl-demo disables bevy's
-    // LogPlugin (below) so the otel subscriber is the only one, which means it ALSO governs
-    // OTLP export — and bevy/wgpu emit a torrent of INFO every frame. At the default `info`
-    // that torrent would flood the telemetry sink when export is on (tens of MB per run),
-    // burying the signals that matter. WARN keeps every error/warning — the canonical-mesh
-    // error and the checkpoint-mismatch refusal included — and drops the per-frame noise.
-    // `RUST_LOG` still overrides for local debugging.
+    // ALL env mutation happens HERE, before `otel::init` — `otel::init` spawns the OTLP
+    // exporter's background threads (batch span/log processors, periodic metric reader) when
+    // export is enabled, and `set_var` is unsound once another thread may `getenv`.
     //
-    // SAFETY: program start, single-threaded, before `App::new` spawns any thread that reads
-    // env — same pattern as `crab_world::bot::headless`'s `set_var`.
+    // SAFETY for every `set_var` below: program start, single-threaded, before both
+    // `otel::init` and `App::new` spawn any thread — the same pattern (and justification) as
+    // `crab_world::bot::headless`'s `set_var`.
+
+    // Default the log filter to WARN. rl-demo disables bevy's LogPlugin (below) so the otel
+    // subscriber is the only one, which means it ALSO governs OTLP export — and bevy/wgpu emit
+    // a torrent of INFO every frame. At the default `info` that torrent floods the telemetry
+    // sink when export is on (tens of MB per run), burying the signals that matter. WARN keeps
+    // every error/warning — the canonical-mesh error and the checkpoint-mismatch refusal
+    // included — and drops the per-frame noise. `RUST_LOG` still overrides for local debugging.
     if std::env::var_os("RUST_LOG").is_none() {
         unsafe { std::env::set_var("RUST_LOG", "warn") };
     }
-    // OTEL/tracing: install the shared subscriber so the canonical-mesh check below can report
-    // a missing asset as a LOUD error telemetry record (exported to the bothouse sink when
-    // wired, stderr always). The guard must outlive the whole run, so it's bound here and
-    // dropped only when `main` returns.
-    let _otel = otel::init("rl-demo");
 
     // rl-demo is a PLAYER-FACING surface (the windowed couch demo and its screenshot), so the
     // crab the player sees should be the purchased Sally mesh. But a MISSING/broken mesh is no
@@ -110,7 +109,28 @@ fn main() {
     // thing still forbidden is a SILENT skinless body (the silent-fallback bug — ships a
     // non-Sally crab with no signal). This is the explicit player-facing vs training split: the
     // headless trainer (`rl-train`) keeps the no-skin procedural body by design.
-    let mesh_ok = match canonical_mesh_status() {
+    let mesh_status = canonical_mesh_status();
+    if mesh_status.is_err() {
+        // Make every downstream consumer agree there is no usable model: the body recipe
+        // (`crab_world::bot::body::render_recipe`) then takes the procedural-collider fallback
+        // instead of panicking on a present-but-broken file, and the skin
+        // (`bot::skin::register`) self-skips instead of half-loading a broken scene. Both read
+        // `meshfit::model_path()`, so redirecting it at a guaranteed-absent path is the single
+        // switch that flips them together. The physics bones are then made VISIBLE by forcing
+        // the debug-render on (see `debug_colliders` below).
+        unsafe {
+            std::env::set_var(
+                "CRAB_MODEL_PATH",
+                "/nonexistent/rl-demo-canonical-mesh-unavailable.glb",
+            );
+        }
+    }
+
+    // OTEL/tracing: install the shared subscriber AFTER the env is final. The guard must
+    // outlive the whole run, so it's bound here and dropped only when `main` returns.
+    let _otel = otel::init("rl-demo");
+
+    let mesh_ok = match mesh_status {
         Ok(()) => true,
         Err(reason) => {
             // LOUD via telemetry (stderr + OTLP), GRACEFUL in render. `target` namespaces the
@@ -122,23 +142,6 @@ fn main() {
                  physics-bones debug view (the real colliders). Fetch it with \
                  scripts/fetch-sally.sh or point CRAB_MODEL_PATH at the model."
             );
-            // Make every downstream consumer agree there is no usable model: the body recipe
-            // (`crab_world::bot::body::render_recipe`) then takes the procedural-collider
-            // fallback instead of panicking on a present-but-broken file, and the skin
-            // (`bot::skin::register`) self-skips instead of half-loading a broken scene. Both
-            // read `meshfit::model_path()`, so redirecting it at a guaranteed-absent path is the
-            // single switch that flips them together. The physics bones are then made VISIBLE by
-            // forcing the debug-render on (see `debug_colliders` below).
-            //
-            // SAFETY: program start, single-threaded, before `App::new` spawns any bevy thread
-            // that reads env — the same pattern (and justification) as
-            // `crab_world::bot::headless`'s `set_var`.
-            unsafe {
-                std::env::set_var(
-                    "CRAB_MODEL_PATH",
-                    "/nonexistent/rl-demo-canonical-mesh-unavailable.glb",
-                );
-            }
             false
         }
     };

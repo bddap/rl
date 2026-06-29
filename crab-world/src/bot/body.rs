@@ -202,9 +202,11 @@ impl CrabAssets {
 /// else the procedural stand-in. The ONE place this model-vs-fallback selection lives —
 /// [`CrabAssets`] (the spawned/skinned body) and the integer-crab collider silhouette
 /// (`net::render::spawn_crab_silhouette`) both go through here so they can't drift on
-/// which body they show. A present-but-broken model is rejected by main's preflight (not
-/// silently swapped for the stand-in), so the `expect` only fires for a future caller
-/// that skips that preflight; no model at all falls back to the procedural stand-in.
+/// which body they show. A present-but-broken model (`Some(p)` that loads to no recipe) makes
+/// the `expect` fire, so a caller that must not crash on a bad asset gates on mesh usability
+/// FIRST and never reaches here with a broken `Some` — rl-demo (player-facing) redirects to the
+/// procedural stand-in + emits a LOUD OTEL error instead (see its `main`). No model at all
+/// falls back to the procedural stand-in here directly.
 pub fn render_recipe() -> RigRecipe {
     match super::meshfit::model_path() {
         Some(p) => LoadedModel::load(&p)
