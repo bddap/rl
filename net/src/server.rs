@@ -356,6 +356,48 @@ mod tests {
         assert_eq!(sets[0].inputs.len(), 1, "no stranger leaked into the set");
     }
 
+    /// END-TO-END: two clients, each running the full deterministic [`Lockstep`] sim, kept
+    /// bit-identical purely through ONE shared [`Server`] — inputs UP, the assembled set DOWN, no
+    /// P2P mesh. The core proof that the server-coordinated path preserves lockstep (and the same
+    /// machinery a solo round runs with a roster of one — SP=MP uniformity, rl#151).
+    #[test]
+    fn two_clients_stay_in_lockstep_through_the_server() {
+        use crate::lockstep::Lockstep;
+        let roster = ids(2);
+        let mut server = Server::new(&roster);
+        let mut a = Lockstep::new(42, &roster, PlayerId(0));
+        let mut b = Lockstep::new(42, &roster, PlayerId(1));
+        for t in 0..30u64 {
+            // Each client issues its input and ships it UP to the server.
+            let ma = a.submit_local_input(Input::from_axes((t % 3) as f32 - 1.0, 0.5));
+            let mb = b.submit_local_input(Input::from_axes(0.0, (t % 2) as f32));
+            let mut sets = server.record(PlayerId(0), ma);
+            sets.extend(server.record(PlayerId(1), mb));
+            // The server broadcasts each COMPLETE set DOWN to both clients; each records the
+            // OTHERS' inputs (its own was filed by `submit_local_input`).
+            for s in &sets {
+                for pm in unpack_tickset(s, PlayerId(0)) {
+                    assert!(a.record_remote(pm.pid, pm.msg).is_none(), "no fault recording");
+                }
+                for pm in unpack_tickset(s, PlayerId(1)) {
+                    assert!(b.record_remote(pm.pid, pm.msg).is_none(), "no fault recording");
+                }
+            }
+            assert!(a.try_advance().is_empty());
+            assert!(b.try_advance().is_empty());
+        }
+        assert_eq!(a.sim().tick(), b.sim().tick());
+        assert_eq!(
+            a.sim().state_hash(),
+            b.sim().state_hash(),
+            "two clients through one server stay bit-identical (the lockstep digest oracle)"
+        );
+        assert!(
+            a.sim().tick() > INPUT_DELAY,
+            "the round advanced past the warmup window"
+        );
+    }
+
     /// `unpack_tickset` yields one message per OTHER player (never the local one — its input was
     /// already filed locally) and pairs each with that player's relayed confirmed.
     #[test]

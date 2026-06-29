@@ -1212,4 +1212,31 @@ mod tests {
              never reaches a JOIN_WINDOW Failed for this to catch"
         );
     }
+
+    /// END-TO-END solo through the new server-coordinated path: a solo [`Coordinator`] (an internal
+    /// server with a roster of one, no transport) drives a real [`Lockstep`] tick-for-tick. Proves
+    /// solo runs the SAME `exchange` machinery as a hosted match — the SP=MP-uniformity gate
+    /// (rl#151), with no special-case solo input path left behind.
+    #[test]
+    fn solo_round_advances_through_the_coordinator() {
+        use crate::sim::Input;
+        let me = PlayerId(0);
+        let mut ls = Lockstep::new(0x5A11, &[me], me);
+        let mut coord = Coordinator::for_round(None, ls.peers());
+        assert!(coord.is_solo(), "no driver ⇒ a solo internal-server coordinator");
+        let submits = 5u64;
+        for _ in 0..submits {
+            let msg = ls.submit_local_input(Input::from_axes(1.0, 0.0));
+            // The input goes UP to the internal server and the assembled set comes back DOWN; with a
+            // roster of one there are no OTHER players' inputs to record.
+            let peers = coord.exchange(me, msg);
+            assert!(peers.is_empty(), "solo has no remote players");
+            assert!(ls.try_advance().is_empty(), "solo can't desync");
+        }
+        assert_eq!(
+            ls.sim().tick(),
+            crate::lockstep::INPUT_DELAY + submits,
+            "solo advances one tick per submit through the server-coordinated path"
+        );
+    }
 }
