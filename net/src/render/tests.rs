@@ -8,6 +8,7 @@ use super::input::pad_stick_axes;
 use super::scene::{lerp_pos, lerp_yaw, look_direction};
 use crate::menu::ReadyMatch;
 use crate::net_loop;
+use crate::sim::Sim;
 
 
 /// The boot menu's handoff into the round (rl#56), exercised headlessly (no window):

@@ -27,6 +27,8 @@ use rand_chacha::ChaCha8Rng;
 
 use crab_world::fnv::Fnv;
 
+use crate::snapshot::CoreSnapshot;
+
 /// Identifies a player within the sim. Assigned from the connection set in a
 /// deterministic order so every peer agrees which id is whom (see
 /// [`crate::lockstep`]); the sim itself only relies on the ordering being
@@ -272,6 +274,15 @@ pub struct Player {
 }
 
 impl Player {
+    /// Rebuild a [`Player`] from its parts — the inverse of the [`pos`](Player::pos) /
+    /// [`yaw`](Player::yaw) / [`status`](Player::status) accessors, used by
+    /// [`CoreSnapshot::from_bytes`](crate::snapshot::CoreSnapshot::from_bytes) to decode a
+    /// player off the wire. `pub(crate)` (not `pub`): only the snapshot seam reconstructs a
+    /// player; round logic still owns every in-round transition through [`Sim::step`].
+    pub(crate) fn from_parts(pos: Pos, yaw: i32, status: PlayerStatus) -> Self {
+        Self { pos, yaw, status }
+    }
+
     /// World position on the ground plane (Y is 0).
     pub fn pos(self) -> Pos {
         self.pos
@@ -299,6 +310,15 @@ pub struct Crab {
 }
 
 impl Crab {
+    /// Rebuild a [`Crab`] from its integer pose — the inverse of the [`pos`](Crab::pos) /
+    /// [`yaw`](Crab::yaw) accessors, used by
+    /// [`CoreSnapshot::from_bytes`](crate::snapshot::CoreSnapshot::from_bytes) to decode the
+    /// crab off the wire. `pub(crate)`: live, the crab pose only ever moves through
+    /// [`Sim::set_external_crab_pose`] (rl#114) — this reconstructs it at the snapshot seam.
+    pub(crate) fn from_parts(pos: Pos, yaw: i32) -> Self {
+        Self { pos, yaw }
+    }
+
     /// World position on the ground plane.
     pub fn pos(self) -> Pos {
         self.pos
@@ -768,14 +788,14 @@ impl Sim {
             h.write(&[id.0]);
             write_pos(&mut h, *pos);
             h.write(&yaw.to_le_bytes());
-            h.write(&[status_tag(*status)]);
+            h.write(&[status.tag()]);
         }
         let Crab { pos, yaw } = crab;
         write_pos(&mut h, *pos);
         h.write(&yaw.to_le_bytes());
         let ExtractionPoint { pos } = extraction;
         write_pos(&mut h, *pos);
-        h.write(&[outcome_tag(*outcome)]);
+        h.write(&[outcome.tag()]);
         // The restart edge-latch gates whether next tick's RESTART press fires, so a
         // divergence in it would desync the restart.
         h.write(&[u8::from(*restart_held)]);
@@ -833,25 +853,106 @@ impl Sim {
     pub fn outcome(&self) -> Outcome {
         self.outcome
     }
-}
 
-/// Stable 1-byte tag for a [`PlayerStatus`] in the state hash. Explicit (not
-/// `as u8` on the enum) so reordering or inserting variants can't silently shift the
-/// hashed value out from under a peer on a different build.
-fn status_tag(s: PlayerStatus) -> u8 {
-    match s {
-        PlayerStatus::Alive => 0,
-        PlayerStatus::Downed => 1,
-        PlayerStatus::Extracted => 2,
+    /// Build the authoritative [`CoreSnapshot`] for this tick — the host-authoritative MP
+    /// seam (bddap/rl#151, increment 0; see [`crate::snapshot`]). A client reads game state
+    /// from this snapshot, not from a sim it stepped itself; single-player is the
+    /// zero-remote case of the same path ([[sp-is-mp-special-case]]).
+    ///
+    /// Completeness is COMPILE-ENFORCED exactly like [`Sim::state_hash`]: the destructure
+    /// below has NO `..`, so a newly-added authoritative `Sim` field stops this function
+    /// compiling until it is carried into the snapshot or bound to `_` as a deliberate
+    /// exclusion (make-illegal-states-unrepresentable). The four `_`-bound fields are out of
+    /// the host->client surface by design: `extraction` is a fixed gray-box constant both
+    /// sides derive from `config`; `rng` and `restart_held` are peer-invariant round
+    /// bookkeeping; and `external_crab_digest` was the lockstep float cross-check this design
+    /// dissolves (the client renders the crab POSE carried in `crab`, never the solver).
+    pub fn core_snapshot(&self) -> CoreSnapshot {
+        let Sim {
+            tick,
+            players,
+            crab,
+            extraction: _,
+            outcome,
+            rng: _,
+            restart_held: _,
+            config,
+            external_crab_digest: _,
+        } = self;
+        CoreSnapshot {
+            tick: *tick,
+            players: players.clone(),
+            crab: *crab,
+            outcome: *outcome,
+            roster: config.players.clone(),
+        }
+    }
+
+    /// Adopt a [`CoreSnapshot`] as this sim's authoritative state — the inverse of
+    /// [`core_snapshot`](Sim::core_snapshot) over the carried fields. A client applies the
+    /// host's latest snapshot here instead of stepping the sim itself.
+    ///
+    /// Overwrites exactly the carried fields and leaves the `_`-bound ones (see
+    /// [`core_snapshot`](Sim::core_snapshot)) as they are: `extraction` both sides derive
+    /// identically from `config`, and `rng` / `restart_held` / `external_crab_digest` are
+    /// not part of the host->client surface in increment 0 (SP-only, where the snapshot's
+    /// source and target are the same world). The destructure has NO `..`, so a new
+    /// `CoreSnapshot` field must be handled here too.
+    pub fn apply_core_snapshot(&mut self, snapshot: CoreSnapshot) {
+        let CoreSnapshot { tick, players, crab, outcome, roster } = snapshot;
+        self.tick = tick;
+        self.players = players;
+        self.crab = crab;
+        self.outcome = outcome;
+        self.config.players = roster;
     }
 }
 
-/// Stable 1-byte tag for an [`Outcome`] in the state hash (see [`status_tag`]).
-fn outcome_tag(o: Outcome) -> u8 {
-    match o {
-        Outcome::Ongoing => 0,
-        Outcome::Extracted => 1,
-        Outcome::Wiped => 2,
+impl PlayerStatus {
+    /// Stable 1-byte tag — explicit (not `as u8` on the enum) so reordering or inserting
+    /// variants can't silently shift the value out from under a peer on a different build.
+    /// ONE encode source, shared by [`Sim::state_hash`] and the [`CoreSnapshot`] wire
+    /// ([`crate::snapshot`]); [`from_tag`](PlayerStatus::from_tag) is its inverse, adjacent
+    /// so the two can't drift.
+    pub(crate) fn tag(self) -> u8 {
+        match self {
+            PlayerStatus::Alive => 0,
+            PlayerStatus::Downed => 1,
+            PlayerStatus::Extracted => 2,
+        }
+    }
+
+    /// Decode a [`tag`](PlayerStatus::tag); `None` on an unknown value (a malformed wire
+    /// snapshot, rejected loudly rather than defaulted).
+    pub(crate) fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(PlayerStatus::Alive),
+            1 => Some(PlayerStatus::Downed),
+            2 => Some(PlayerStatus::Extracted),
+            _ => None,
+        }
+    }
+}
+
+impl Outcome {
+    /// Stable 1-byte tag (see [`PlayerStatus::tag`]). ONE encode source for `state_hash` and
+    /// the snapshot wire; [`from_tag`](Outcome::from_tag) is the adjacent inverse.
+    pub(crate) fn tag(self) -> u8 {
+        match self {
+            Outcome::Ongoing => 0,
+            Outcome::Extracted => 1,
+            Outcome::Wiped => 2,
+        }
+    }
+
+    /// Decode a [`tag`](Outcome::tag); `None` on an unknown value.
+    pub(crate) fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Outcome::Ongoing),
+            1 => Some(Outcome::Extracted),
+            2 => Some(Outcome::Wiped),
+            _ => None,
+        }
     }
 }
 
@@ -1426,6 +1527,61 @@ mod tests {
             hash_after(&|s| s.external_crab_digest ^= 0xdead_beef),
             h0,
             "external_crab_digest must be hashed (always folded since rl#114)"
+        );
+    }
+
+    #[test]
+    fn core_snapshot_roundtrip_reproduces_authoritative_state() {
+        // The increment-0 completeness proof (bddap/rl#151): applying a serialized→
+        // deserialized `CoreSnapshot` reproduces every authoritative field — the carried
+        // ones `state_hash` observes, plus the (unhashed) roster. The COMPILE-TIME half is
+        // the no-`..` destructure in `core_snapshot`/`apply_core_snapshot`; this is the
+        // runtime half — that the carried fields are actually round-tripped, not bound and
+        // dropped.
+        //
+        // Build a non-trivial source state: step with real movement so tick + player poses
+        // carry real values, push a crab pose (digest 0 — the never-warmed value, so the
+        // un-carried `external_crab_digest` stays equal across source and target without
+        // diverging the hash), and down a player so a non-`Alive` status rides along.
+        let mut original = Sim::new(7, &players(3));
+        for _ in 0..5 {
+            original.set_external_crab_pose(Pos { x: 4200, z: -1300 }, 77, 0);
+            let mut inputs = neutral_for(&original);
+            *inputs.get_mut(&PlayerId(0)).unwrap() = Input::from_axes(0.3, 1.0);
+            original.step(&inputs);
+        }
+        original.players.get_mut(&PlayerId(1)).unwrap().status = PlayerStatus::Downed;
+
+        let restored = CoreSnapshot::from_bytes(&original.core_snapshot().to_bytes())
+            .expect("a freshly-built snapshot must round-trip through bytes");
+
+        // Apply onto a sim that DIFFERS in every carried field but agrees on the un-carried
+        // ones (it is a clone untouched on `extraction`/`rng`/`restart_held`/digest). If
+        // apply restores every carried field the destructure names, the full `state_hash`
+        // must match — a forgotten restore leaves one of these perturbations standing.
+        let mut target = original.clone();
+        target.tick = 999;
+        target.players.get_mut(&PlayerId(0)).unwrap().pos.x += 12_345;
+        target.players.get_mut(&PlayerId(2)).unwrap().yaw += 3;
+        target.players.get_mut(&PlayerId(1)).unwrap().status = PlayerStatus::Extracted;
+        target.crab.pos = Pos { x: -1, z: -2 };
+        target.crab.yaw = 9;
+        target.outcome = Outcome::Wiped;
+        target.config.players = vec![PlayerId(0)]; // roster differs (unhashed, asserted below)
+        assert_ne!(target.state_hash(), original.state_hash());
+
+        target.apply_core_snapshot(restored);
+        assert_eq!(
+            target.state_hash(),
+            original.state_hash(),
+            "applying the round-tripped snapshot reproduces every hashed carried field"
+        );
+        // The roster is config-level (not folded into `state_hash`), so the hash check above
+        // can't see it — assert directly that apply carried `config.players` back from the
+        // snapshot's `roster` (target's was perturbed to a single id before apply).
+        assert_eq!(
+            target.config.players, original.config.players,
+            "the snapshot must carry the roster too"
         );
     }
 

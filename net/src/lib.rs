@@ -43,6 +43,7 @@ pub mod net_loop;
 pub mod roster;
 pub mod server;
 pub mod sim;
+pub mod snapshot;
 pub mod telemetry;
 pub mod transport;
 
