@@ -1,28 +1,40 @@
 //! The player's single-player VEHICLE — a rapier rigidbody living in the crab's ONE
 //! `bevy_rapier3d` world, so it is official host-authoritative game state that COLLIDES with
 //! the trained crab "Sally" (owner 702/703/704). It replaces the old integer fixed-point flight
-//! integrator (`net::sim`'s `step_plane`/`step_helicopter`, deleted in this migration): ONE flight
-//! model, shared by the plane and the helicopter.
+//! integrator (`net::sim`'s deleted `step_plane`/`step_helicopter`): ONE flight model, configured
+//! as a plane or an Outer-Wilds-style ship by a [`VehicleParams`] set.
+//!
+//! ## Two craft, two feels, one force system (owner, botq#554)
+//! - **Plane = Ace Combat 6.** A persistent THROTTLE LEVER drives thrust along the nose (+Z);
+//!   wings make Bernoulli LIFT from forward airspeed; pitch/roll/yaw are control torques. The pilot
+//!   turns by banking. (The AC6 input feel — inverted pitch, left-stick fly, trigger throttle,
+//!   bumper rudder — lives in the input→[`VehicleControl`] bridge, `net`'s `drive_lockstep`.)
+//! - **Ship = Outer Wilds.** No wings (no lift) and no throttle lever — instead DIRECT body-frame
+//!   thrusters on all three axes (strafe X / vertical Y / forward Z) that you tap and then COAST on
+//!   (low drag = momentum). A held MATCH-VELOCITY brake bleeds relative velocity to rest (the cheap
+//!   arena analog of OW's match-velocity-to-zero). Right-stick aims (pitch+yaw), bumpers roll.
 //!
 //! ## Force model (all UNCLAMPED — owner 702: no rotation caps, no auto-right by construction)
-//! Each fixed step, before the rapier solve, [`apply_vehicle_forces`] reads the player's quantized
-//! control axes ([`VehicleControl`]) + the body's own pose/velocity and writes one [`ExternalForce`]
+//! Each fixed step, before the rapier solve, [`apply_vehicle_forces`] reads the player's control
+//! intents ([`VehicleControl`]) + the body's own pose/velocity and writes one [`ExternalForce`]
 //! (overwritten, never accumulated):
-//! - **thrust** along the body THRUST AXIS scaled by a persistent throttle lever — body-forward
-//!   (+Z, the nose) for the plane, body-up (+Y, the rotor disc) for the helicopter.
+//! - **thrust** = a LEVER term along the body thrust axis (plane nose; zero for the ship) PLUS a
+//!   DIRECT body-frame term `rot · (thrust ⊙ direct_thrust)` (ship strafe/vertical/forward; zero
+//!   for the plane). Both always summed — the unused term vanishes by its zeroed params, so there
+//!   is no per-craft branch.
 //! - **gravity** — rapier applies it to the dynamic body (no manual term).
-//! - **drag** opposing velocity: linear `−k·v` plus quadratic `−k₂·|v|·v`, so speed is bounded
-//!   without a cap.
-//! - **lift** along body-up scaled by FORWARD airspeed (Bernoulli — a wing for the plane, the
-//!   rotor disc for the heli): `up · (LIFT · max(0, v·forward))`.
+//! - **drag** opposing velocity: linear `−k·v` plus quadratic `−k₂·|v|·v` (per-craft: the ship's is
+//!   low, so it coasts), plus the match-velocity brake when held — speed is bounded without a cap.
+//! - **lift** along body-up scaled by FORWARD airspeed (a wing): `up · (LIFT · max(0, v·forward))`.
+//!   Zero for the ship.
 //! - **torque** in the BODY frame from the pitch/roll/yaw axes (about +X / +Z / +Y), plus a mild
-//!   angular drag so the craft is steerable. No leveling term and nothing caps the attitude, so
-//!   rapier integrates the body-frame angular velocity freely — the craft loops, rolls, and flies
-//!   inverted, exactly as the old integer model did, now with real momentum and collisions.
+//!   per-craft angular drag so the craft is steerable. No leveling term and nothing caps the
+//!   attitude, so rapier integrates the body-frame angular velocity freely — the craft loops,
+//!   rolls, and flies inverted, now with real momentum and collisions.
 //!
-//! The plane and the helicopter are NOT two code paths: they are two [`VehicleParams`] sets driving
-//! the one system, with the SAME axis→degree-of-freedom control mapping (the difference is only the
-//! thrust axis + the tuning constants). One model, per owner 702.
+//! The plane and the ship are NOT two code paths: they are two [`VehicleParams`] sets driving the
+//! one system. The difference is only the parameters (which thrust term is live, lift on/off, drag)
+//! and how the bridge maps the sticks/triggers into the shared [`VehicleControl`] intents.
 //!
 //! ## Why it is policy-safe (owner: never destabilise the trained walking)
 //! The vehicle carries the body's `VEHICLE_GROUP` collision bit (see [`vehicle_collision`]); at
@@ -56,77 +68,97 @@ const VEHICLE_HALF: Vec3 = Vec3::new(0.22, 0.07, 0.34);
 const VEHICLE_DENSITY: f32 = 50.0;
 
 /// Throttle-lever trim per tick at full deflection (lever is 0..1) — a persistent quadrant, not a
-/// momentary push, like the old integer model's throttle/collective.
+/// momentary push (the plane's AC6 throttle: RT trims it up, LT down, it holds when neither).
 const THROTTLE_TRIM_RATE: f32 = 0.03;
 
-/// Linear drag: `−(DRAG_LIN·v + DRAG_QUAD·|v|·v)` (N per m/s, N per (m/s)²). Bounds top speed and
-/// bleeds coasting velocity so the craft doesn't run away.
-const DRAG_LIN: f32 = 1.5;
-const DRAG_QUAD: f32 = 0.6;
+/// Extra linear drag (N per m/s) added while the ship holds MATCH VELOCITY — bleeds the relative
+/// velocity to rest, the cheap arena analog of Outer Wilds' match-velocity-to-zero. Dwarfs the
+/// ship's coasting drag so the brake is decisive, but it's still just drag (no teleport/clamp).
+const MATCH_VEL_DAMP: f32 = 6.0;
 
-/// Angular drag (N·m per rad/s): bleeds spin so the craft is controllable. NOT a cap — it never
-/// bounds the ANGLE, so full inversion stays free (owner 702); it only damps the rate, the angular
-/// analogue of linear drag.
-const ANGULAR_DRAG: f32 = 0.9;
-
-/// Plane tuning: forward thrust, wing lift per unit forward airspeed, control torques.
+/// Plane tuning (Ace Combat 6): a throttle LEVER drives forward (nose +Z) thrust, wings make lift
+/// from forward airspeed, brisk roll for banked turns. No direct strafe/vertical thrusters.
 const PLANE: VehicleParams = VehicleParams {
-    thrust_axis: Vec3::Z, // nose
-    thrust: 60.0,
+    thrust_axis: Vec3::Z, // nose — the lever pushes here
+    lever_thrust: 60.0,
+    direct_thrust: Vec3::ZERO,
     lift: 6.0,
+    drag_lin: 1.5,
+    drag_quad: 0.6,
+    angular_drag: 0.9,
     pitch_torque: 6.0,
     roll_torque: 9.0,
     yaw_torque: 3.0,
 };
 
-/// Helicopter tuning: thrust along the rotor disc (body-up); a touch of disc lift with airspeed;
-/// brisker cyclic/pedal authority than the plane (it pivots in a hover).
-const HELI: VehicleParams = VehicleParams {
-    thrust_axis: Vec3::Y, // rotor disc normal
-    thrust: 80.0,
-    lift: 2.0,
-    pitch_torque: 8.0,
-    roll_torque: 8.0,
-    yaw_torque: 6.0,
+/// Ship tuning (Outer Wilds): NO throttle lever and NO wings — DIRECT body-frame thrusters on all
+/// three axes (X strafe, Y vertical, Z forward) you tap and coast on. Drag is LOW so momentum
+/// carries (the thrust-and-drift feel); the match-velocity brake stops it on demand. Even rotation
+/// authority on all axes (you aim with the right stick, roll on the bumpers).
+const SHIP: VehicleParams = VehicleParams {
+    thrust_axis: Vec3::Z, // unused (lever_thrust 0) — kept a valid unit axis
+    lever_thrust: 0.0,
+    direct_thrust: Vec3::new(35.0, 35.0, 45.0), // strafe / vertical / forward
+    lift: 0.0,
+    drag_lin: 0.35, // low → long coast
+    drag_quad: 0.04,
+    angular_drag: 1.1,
+    pitch_torque: 7.0,
+    roll_torque: 7.0,
+    yaw_torque: 7.0,
 };
 
 /// Plane spawn: a few metres up over the arena centre, nosed forward (+Z) with a little cruise
-/// speed so the wing is already making lift. Helicopter spawn: low, at rest, level — it hovers off
-/// the collective from tick 0. Both are arena-frame (true scale), bounded by the ±10 m walls.
+/// speed so the wing is already making lift. Ship spawn: low, at rest, level — it hovers in place
+/// off its thrusters from tick 0. Both are arena-frame (true scale), bounded by the ±10 m walls.
 const PLANE_SPAWN_ALTITUDE: f32 = 4.0;
 const PLANE_SPAWN_SPEED: f32 = 4.0;
-const HELI_SPAWN_ALTITUDE: f32 = 1.0;
+const SHIP_SPAWN_ALTITUDE: f32 = 1.0;
 
-/// Per-mode flight constants — the two parameter sets that configure the ONE force system as a
-/// plane or a helicopter (see the module docs: not two code paths).
+/// Per-craft flight constants — the two parameter sets that configure the ONE force system as a
+/// plane or a ship (see the module docs: not two code paths). Per-craft drag is what gives the
+/// ship its long Outer-Wilds coast while the plane stays crisp.
 #[derive(Clone, Copy)]
 struct VehicleParams {
-    /// Body-frame axis thrust pushes along (plane = +Z nose, heli = +Y rotor disc).
+    /// Body-frame axis the LEVER thrust pushes along (plane = +Z nose). Unused when `lever_thrust`
+    /// is 0 (the ship).
     thrust_axis: Vec3,
-    /// Thrust force at full throttle (N).
-    thrust: f32,
-    /// Lift force per unit forward airspeed (N per m/s), along body-up.
+    /// Lever thrust force at full throttle (N), along [`thrust_axis`](Self::thrust_axis). 0 = no
+    /// lever (the ship uses `direct_thrust` instead).
+    lever_thrust: f32,
+    /// DIRECT body-frame thruster force per axis (N): x = strafe (+right), y = vertical (+up),
+    /// z = forward (+nose). Scaled component-wise by [`VehicleControl::thrust`]. `ZERO` = no direct
+    /// thrusters (the plane, which thrusts only through its lever).
+    direct_thrust: Vec3,
+    /// Lift force per unit forward airspeed (N per m/s), along body-up. 0 for the wingless ship.
     lift: f32,
+    /// Linear drag: `−(drag_lin·v + drag_quad·|v|·v)`. The ship's is LOW so it coasts.
+    drag_lin: f32,
+    drag_quad: f32,
+    /// Angular drag (N·m per rad/s): bleeds spin so the craft is steerable. NOT a cap — it never
+    /// bounds the ANGLE (owner 702), only the rate.
+    angular_drag: f32,
     /// Control torque at full deflection (N·m): pitch about body +X, roll about +Z, yaw about +Y.
     pitch_torque: f32,
     roll_torque: f32,
     yaw_torque: f32,
 }
 
-/// Which craft the one vehicle model is configured as. The plane and helicopter share the force
-/// system and the control mapping; this selects the [`VehicleParams`] + the spawn pose.
+/// Which craft the one vehicle model is configured as. The plane and ship share the force system;
+/// this selects the [`VehicleParams`] + the spawn pose. (The input→[`VehicleControl`] mapping per
+/// craft lives in `net`'s bridge — Ace Combat 6 for the plane, Outer Wilds for the ship.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum VehicleKind {
     #[default]
     Plane,
-    Helicopter,
+    Ship,
 }
 
 impl VehicleKind {
     fn params(self) -> VehicleParams {
         match self {
             VehicleKind::Plane => PLANE,
-            VehicleKind::Helicopter => HELI,
+            VehicleKind::Ship => SHIP,
         }
     }
 
@@ -134,17 +166,17 @@ impl VehicleKind {
     fn spawn_transform(self) -> Transform {
         let y = match self {
             VehicleKind::Plane => PLANE_SPAWN_ALTITUDE,
-            VehicleKind::Helicopter => HELI_SPAWN_ALTITUDE,
+            VehicleKind::Ship => SHIP_SPAWN_ALTITUDE,
         };
         Transform::from_xyz(0.0, y, 0.0)
     }
 
-    /// Initial velocity: the plane spawns at cruise (so the wing flies from tick 0), the heli at
-    /// rest (it lifts vertically off the collective).
+    /// Initial velocity: the plane spawns at cruise (so the wing flies from tick 0), the ship at
+    /// rest (it holds station on its thrusters).
     fn spawn_velocity(self) -> Velocity {
         let linear = match self {
             VehicleKind::Plane => Vec3::new(0.0, 0.0, PLANE_SPAWN_SPEED),
-            VehicleKind::Helicopter => Vec3::ZERO,
+            VehicleKind::Ship => Vec3::ZERO,
         };
         Velocity { linear, angular: Vec3::ZERO }
     }
@@ -156,28 +188,37 @@ impl VehicleKind {
 #[derive(Component)]
 pub struct Vehicle {
     pub kind: VehicleKind,
-    /// Throttle / collective lever, 0..1 — a persistent quadrant trimmed by the forward axis.
+    /// Throttle lever, 0..1 — the plane's persistent quadrant, trimmed each tick by
+    /// [`VehicleControl::throttle_trim`]. Unused by the ship (it has no lever). On the component,
+    /// not in [`VehicleControl`], so a fresh spawn starts at a known throttle.
     throttle: f32,
 }
 
 /// The player's per-tick vehicle command, written by the net client each fixed step (the bridge),
-/// read by [`apply_vehicle_forces`] + [`manage_vehicle`]. Axes are the quantized control inputs,
-/// already screen-reconciled by the caller, in `-1..1`; `throttle_trim` trims the lever this tick.
-/// `active`/`kind` drive spawn/despawn on the E-cycle. Inert (no body, no forces) until `active`.
+/// read by [`apply_vehicle_forces`] + [`manage_vehicle`]. The bridge maps the raw sticks/triggers
+/// into these per-craft (Ace Combat 6 for the plane, Outer Wilds for the ship), so this is the ONE
+/// vocabulary the force model reads regardless of craft. `active`/`kind` drive spawn/despawn on the
+/// E-cycle. Inert (no body, no forces) until `active`.
 #[derive(Resource, Default)]
 pub struct VehicleControl {
     /// Is the player currently piloting — spawns the body on the rising edge, despawns on the fall.
     pub active: bool,
     /// Which craft to be (cycled by the player). A change while active respawns the body.
     pub kind: VehicleKind,
-    /// Throttle / collective trim this tick (forward axis), `-1..1`.
+    /// Throttle-lever trim this tick (plane: RT up / LT down), `-1..1`. The ship leaves it 0.
     pub throttle_trim: f32,
-    /// Pitch (elevator / fore-aft cyclic): positive noses UP, `-1..1`.
+    /// DIRECT body-frame thrust intent (ship): x = strafe (+right), y = vertical (+up),
+    /// z = forward (+nose), each `-1..1`. The plane leaves it `ZERO` (it thrusts via the lever).
+    pub thrust: Vec3,
+    /// Pitch (elevator): positive noses UP, `-1..1`.
     pub pitch: f32,
-    /// Roll (ailerons / lateral cyclic): positive banks RIGHT, `-1..1`.
+    /// Roll (ailerons): positive banks RIGHT, `-1..1`.
     pub roll: f32,
-    /// Yaw (rudder / tail rotor): positive yaws RIGHT, `-1..1`.
+    /// Yaw (rudder): positive yaws RIGHT, `-1..1`.
     pub yaw: f32,
+    /// Hold to brake toward rest (ship: Outer Wilds match-velocity-to-zero) — boosts linear drag
+    /// this tick. The plane leaves it `false`.
+    pub match_velocity: bool,
 }
 
 /// Plugin: the vehicle resource + the spawn/despawn manager + the force system. Added to the crab
@@ -263,8 +304,8 @@ pub fn spawn_ram_vehicle(
     world.spawn(vehicle_bundle(kind, transform, velocity)).id()
 }
 
-/// The ONE flight force model (see the module docs). Reads the control axes + the body's pose and
-/// velocity, integrates the throttle lever, and overwrites the body's [`ExternalForce`] with
+/// The ONE flight force model (see the module docs). Reads the control intents + the body's pose
+/// and velocity, integrates the throttle lever, and overwrites the body's [`ExternalForce`] with
 /// thrust + lift + drag (force) and the body-frame control torque + angular drag (torque). Gravity
 /// is rapier's. Runs before the solve; the body's presence (not a flag) gates it, so it acts on
 /// whatever vehicle [`manage_vehicle`] spawned.
@@ -279,39 +320,46 @@ fn apply_vehicle_forces(
         let up = rot * Vec3::Y;
         let v = velocity.linear;
 
-        // Persistent throttle / collective lever, trimmed by the forward axis and held between
-        // ticks (clamped to 0..1).
+        // Persistent throttle lever (plane), trimmed by `throttle_trim` and held between ticks
+        // (clamped to 0..1). The ship leaves `throttle_trim` 0, so its lever idles unused.
         vehicle.throttle =
             (vehicle.throttle + control.throttle_trim * THROTTLE_TRIM_RATE).clamp(0.0, 1.0);
 
-        // Thrust along the body thrust axis (nose for the plane, rotor disc for the heli).
-        let thrust = (rot * p.thrust_axis) * (p.thrust * vehicle.throttle);
+        // Thrust = LEVER term along the body thrust axis (plane nose; `lever_thrust` 0 ⇒ 0 for the
+        // ship) + DIRECT body-frame thrusters `rot · (thrust ⊙ direct_thrust)` (ship strafe/
+        // vertical/forward; `direct_thrust` ZERO ⇒ 0 for the plane). One expression, no per-craft
+        // branch — each craft's unused term is zeroed by its params.
+        let lever = (rot * p.thrust_axis) * (p.lever_thrust * vehicle.throttle);
+        let direct = rot * (control.thrust * p.direct_thrust);
+        let thrust = lever + direct;
 
-        // Bernoulli lift along body-up, proportional to FORWARD airspeed (a wing / a rotor disc).
-        // Backward motion makes no lift, so it can't suck a reversing craft down.
+        // Bernoulli lift along body-up, proportional to FORWARD airspeed (a wing). 0 for the
+        // wingless ship. Backward motion makes no lift, so it can't suck a reversing craft down.
         let forward_airspeed = v.dot(forward).max(0.0);
         let lift = up * (p.lift * forward_airspeed);
 
-        // Drag opposing velocity: linear + quadratic, so speed is bounded with no cap.
+        // Drag opposing velocity: linear + quadratic (per-craft: the ship's is low, so it coasts),
+        // plus the match-velocity brake while held — bounds speed with no cap.
         let speed = v.length();
-        let drag = -v * (DRAG_LIN + DRAG_QUAD * speed);
+        let match_damp = if control.match_velocity { MATCH_VEL_DAMP } else { 0.0 };
+        let drag = -v * (p.drag_lin + match_damp + p.drag_quad * speed);
 
         ef.force = thrust + lift + drag;
 
         // Body-frame control torque (UNCLAMPED — no leveling, no attitude bound): pitch about +X,
         // roll about +Z, yaw about +Y, rotated into the world frame rapier integrates. A mild
-        // angular drag bleeds spin for control without bounding the angle. The pitch sign is
-        // NEGATED: a positive +X torque rotates the nose (+Z) toward −Y (DOWN), so to make positive
-        // `pitch` (the pilot's nose-UP intent) raise the nose we apply −pitch about +X — the same
-        // reconciliation the deleted integer model did. Roll/yaw already carry their reconciling
-        // sign from `drive_lockstep` (−look_yaw, −move_strafe), so the labels (bank right, yaw
-        // right) hold.
+        // per-craft angular drag bleeds spin for control without bounding the angle. The pitch sign
+        // is NEGATED: a positive +X torque rotates the nose (+Z) toward −Y (DOWN), so to make
+        // positive `pitch` (the pilot's nose-UP intent) raise the nose we apply −pitch about +X.
+        // The bridge gives each craft its feel (the plane's AC6 pitch is INVERTED at the stick, so
+        // pulling back arrives here as positive `pitch`); roll/yaw carry their reconciling sign from
+        // the bridge so "bank right"/"yaw right" hold.
         let body_torque = Vec3::new(
             -control.pitch * p.pitch_torque,
             control.yaw * p.yaw_torque,
             -control.roll * p.roll_torque,
         );
-        ef.torque = rot * body_torque - velocity.angular * ANGULAR_DRAG;
+        ef.torque = rot * body_torque - velocity.angular * p.angular_drag;
     }
 }
 
@@ -467,17 +515,69 @@ mod tests {
         app.update();
         assert_eq!(count(&mut app), 1, "one vehicle after boarding");
 
-        app.world_mut().resource_mut::<VehicleControl>().kind = VehicleKind::Helicopter;
+        app.world_mut().resource_mut::<VehicleControl>().kind = VehicleKind::Ship;
         app.update();
         assert_eq!(count(&mut app), 1, "still one vehicle after a kind cycle");
         assert_eq!(
             app.world_mut().query::<&Vehicle>().single(app.world()).unwrap().kind,
-            VehicleKind::Helicopter,
+            VehicleKind::Ship,
             "the body became the cycled kind",
         );
 
         app.world_mut().resource_mut::<VehicleControl>().active = false;
         app.update();
         assert_eq!(count(&mut app), 0, "vehicle despawned on step-out");
+    }
+
+    /// The ship's DIRECT body-frame thrusters (Outer Wilds): a forward thrust intent (+Z) with no
+    /// throttle lever accelerates it along its nose. The plane can't do this (it has no direct
+    /// thrusters and an idle lever) — this is the wingless 6-DOF thruster model.
+    #[test]
+    fn ship_direct_forward_thrust_accelerates() {
+        let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::ZERO);
+        app.world_mut().resource_mut::<VehicleControl>().thrust = Vec3::new(0.0, 0.0, 1.0);
+        let v0 = body(&app, e).1.linear.z;
+        for _ in 0..30 {
+            app.update();
+        }
+        let v1 = body(&app, e).1.linear.z;
+        assert!(v1 > v0 + 1.0, "ship forward thruster did not accelerate: {v0} -> {v1}");
+    }
+
+    /// The ship STRAFES from a lateral thrust intent (+X) — translational 6-DOF, no banking. A pure
+    /// `thrust.x` at a level attitude gains +X velocity (the wing-less sideways thruster).
+    #[test]
+    fn ship_lateral_thrust_strafes() {
+        let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::ZERO);
+        app.world_mut().resource_mut::<VehicleControl>().thrust = Vec3::new(1.0, 0.0, 0.0);
+        let v0 = body(&app, e).1.linear.x;
+        for _ in 0..30 {
+            app.update();
+        }
+        let v1 = body(&app, e).1.linear.x;
+        assert!(v1 > v0 + 1.0, "ship lateral thruster did not strafe +X: {v0} -> {v1}");
+    }
+
+    /// Match-velocity brakes the coasting ship toward rest: a moving ship with no thrust but
+    /// `match_velocity` held bleeds speed FASTER than coasting drag alone — the Outer Wilds
+    /// match-velocity-to-zero feel, implemented as boosted drag (still no clamp/teleport).
+    #[test]
+    fn ship_match_velocity_brakes_harder_than_coast() {
+        let drop = |brake: bool| {
+            let (mut app, e) =
+                app_with_vehicle(VehicleKind::Ship, FAR, Vec3::new(10.0, 0.0, 0.0));
+            app.world_mut().resource_mut::<VehicleControl>().match_velocity = brake;
+            let s0 = body(&app, e).1.linear.length();
+            for _ in 0..20 {
+                app.update();
+            }
+            s0 - body(&app, e).1.linear.length()
+        };
+        let coast = drop(false);
+        let braked = drop(true);
+        assert!(
+            braked > coast,
+            "match-velocity must brake harder than coasting drag: Δ coast={coast} braked={braked}"
+        );
     }
 }
