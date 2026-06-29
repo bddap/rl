@@ -406,8 +406,8 @@ pub(super) fn drive_lockstep(
 
     // Single-player enter/exit a vehicle (client-local; the sim never sees it). Drain the
     // E-tap latch ONCE per frame and CYCLE foot → plane → helicopter → foot at the foot
-    // player's spot + facing. Solo only — a networked round freezes its pilot set over the
-    // wire at formation (rl#43), so this toggle is inert there and the lockstep is untouched.
+    // player's spot + facing. Solo only — a networked round is foot-only, so this toggle is
+    // inert there and the lockstep is untouched.
     {
         let toggle = std::mem::take(&mut world.resource_mut::<PendingInput>().toggle_vehicle);
         let solo = toggle

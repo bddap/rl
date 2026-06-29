@@ -515,11 +515,9 @@ impl Plane {
         }
     }
 
-    /// Advance this plane one tick under pilot `input` (crude arcade flight). The ONE flight
-    /// integrator, shared by the deterministic sim step (pilots in [`Sim::step`]) and the
-    /// windowed client's single-player vehicle ([`crate::render`]) so there is a single
-    /// physics formula, no copy to drift. See [`step_plane`] for the control map and the
-    /// integer-only determinism notes.
+    /// Advance this plane one tick under pilot `input` (crude arcade flight). The flight
+    /// integrator for the windowed client's single-player vehicle ([`crate::render`]). See
+    /// [`step_plane`] for the control map and the integer-only determinism notes.
     pub fn step(&mut self, input: Input) {
         step_plane(self, input);
     }
@@ -679,11 +677,11 @@ pub struct Sim {
     /// edge-trigger latch (see [`buttons::RESTART`]). It gates a future tick's behaviour
     /// and is identical on every peer, so it is folded into [`Sim::state_hash`].
     restart_held: bool,
-    /// The immutable round CONFIG — the match seed and the foot/pilot roster — kept so a
+    /// The immutable round CONFIG — the match seed and the player roster — kept so a
     /// deterministic restart ([`buttons::RESTART`]) can rebuild the initial state in
     /// place. NOT folded into [`Sim::state_hash`]: it can't differ between in-sync peers,
     /// and a peer built with a different roster is already a different game the cross-check
-    /// surfaces via the player/plane state it does hash.
+    /// surfaces via the player state it does hash.
     config: RoundConfig,
     /// The peer-comparable digest of the REAL rapier crab's full physics state for this tick
     /// (every actuated body's pose + velocity bits — see [`crab_world::bot::physics_digest`]),
@@ -1364,27 +1362,6 @@ pub use super::cordic::{iquat, iquat_client, trig, trig_client};
 fn write_pos(h: &mut Fnv, p: Pos) {
     let Pos { x, z } = p;
     h.write(&x.to_le_bytes());
-    h.write(&z.to_le_bytes());
-}
-
-/// Fold a [`Pos3`] (all three coordinates) into the state hash — one call per 3D position so a
-/// hashed flying entity can't fold X/Z but forget the altitude Y. Exhaustively destructured for
-/// the same reason as [`write_pos`].
-fn write_pos3(h: &mut Fnv, p: Pos3) {
-    let Pos3 { x, y, z } = p;
-    h.write(&x.to_le_bytes());
-    h.write(&y.to_le_bytes());
-    h.write(&z.to_le_bytes());
-}
-
-/// Fold an attitude [`iquat::Quat`] (all four components) into the state hash — one call per
-/// flyer orientation so a hashed craft can't fold some components and forget others.
-/// Exhaustively destructured for the same reason as [`write_pos`].
-fn write_quat(h: &mut Fnv, q: iquat::Quat) {
-    let iquat::Quat { w, x, y, z } = q;
-    h.write(&w.to_le_bytes());
-    h.write(&x.to_le_bytes());
-    h.write(&y.to_le_bytes());
     h.write(&z.to_le_bytes());
 }
 
