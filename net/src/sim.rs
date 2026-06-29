@@ -281,37 +281,21 @@ const PLANE_STALL_SPEED: i64 = PLANE_LIFT_DEN * PLANE_GRAVITY / PLANE_LIFT_NUM;
 const PLANE_DAMP_NUM: i64 = 98;
 const PLANE_DAMP_DEN: i64 = 100;
 
-/// Per-tick pitch (elevator) change at full stick, in [`trig`] turn units.
+/// Per-tick body-frame PITCH (elevator) rate at full stick, in [`trig`] turn units —
+/// angular velocity about the craft's own right axis, integrated into its attitude
+/// quaternion. Held input keeps pitching, so a sustained pull loops the plane; nothing
+/// clamps it.
 const PLANE_PITCH_RATE: i32 = trig::TURN / 120;
 
-/// Per-tick roll (aileron) change at full stick, in [`trig`] turn units. The brisk one:
-/// banking is the PRIMARY way to turn, so the ailerons respond quickly.
+/// Per-tick body-frame ROLL (aileron) rate at full stick, in [`trig`] turn units. The brisk
+/// one: banking is the PRIMARY way to turn (the banked wing's lift vector pulls the nose
+/// round), so the ailerons respond quickly. Unbounded — a held aileron barrel-rolls.
 const PLANE_ROLL_RATE: i32 = trig::TURN / 60;
 
-/// Per-tick heading change at full rudder, in [`trig`] turn units. Small — the rudder
-/// is for fine yaw/coordination, NOT the main turn (that's the bank, below).
+/// Per-tick body-frame YAW (rudder) rate at full pedal, in [`trig`] turn units. Small — the
+/// rudder is for fine yaw/coordination, not the main turn (that's the bank). About the
+/// craft's OWN up axis, so it stays a rudder when the plane is banked or inverted.
 const PLANE_RUDDER_RATE: i32 = trig::TURN / 240;
-
-/// Wings auto-level toward 0 roll this many [`trig`] turn units/tick when there is no
-/// aileron input — light aircraft are roll-stable, so releasing the stick rolls back to
-/// level (and so ends the turn) instead of holding a bank forever.
-const PLANE_ROLL_RECENTER: i32 = trig::TURN / 600;
-
-/// Bank-to-turn coupling: a banked wing turns the heading. The per-tick heading change
-/// is `sin(roll) · BANK_TURN_NUM / `[`trig::ONE`] turn units — proportional to how hard
-/// the plane is banked, so a steeper bank turns faster. THE coordinated-turn coupling
-/// that makes it fly like a plane (roll to turn) rather than a car (yaw in place). Sized
-/// for a light-aircraft turn rate: ≈22°/s at a 30° bank, ≈42°/s at the 75° max — banking
-/// into a turn, not pirouetting (TURN/50 read as a fighter-like 108°/s at 30°).
-const PLANE_BANK_TURN_NUM: i64 = trig::TURN as i64 / 250;
-
-/// Pitch clamp in [`trig`] turn units (≈±45°): steep climbs and dives, but bounded so
-/// the 2-plus-roll orientation can't tumble past vertical.
-const PLANE_MAX_PITCH: i32 = trig::TURN / 8;
-
-/// Roll clamp in [`trig`] turn units (≈±75°): hard banks are allowed, short of a
-/// knife-edge (where the wing makes no vertical lift and the plane would just fall).
-const PLANE_MAX_ROLL: i32 = trig::TURN * 75 / 360;
 
 /// Plane spawn altitude in [`UNIT`] (metres): start airborne at a sensible cruise height.
 const PLANE_SPAWN_ALTITUDE: i64 = 60 * UNIT;
@@ -357,23 +341,16 @@ const HELI_MAX_LIFT: i64 = 2 * HELI_GRAVITY;
 const HELI_HOVER_COLLECTIVE: i32 =
     (HELI_GRAVITY * HELI_COLLECTIVE_MAX as i64 / HELI_MAX_LIFT) as i32;
 
-/// Per-tick cyclic tilt change at full stick, in [`trig`] turn units — how fast the disc
-/// tilts toward the commanded fore/aft (pitch) or lateral (roll) attitude.
+/// Per-tick body-frame CYCLIC rate at full stick, in [`trig`] turn units — angular velocity
+/// about the craft's own pitch/roll axes, integrated into its attitude quaternion. Tilting
+/// the airframe leans the rotor's lift so the craft translates; held cyclic keeps rotating,
+/// so a sustained input loops the helicopter — unbounded, no return-to-level.
 const HELI_CYCLIC_RATE: i32 = trig::TURN / 90;
 
-/// Cyclic tilt clamp, in [`trig`] turn units (≈30°): the disc LEANS to translate, it
-/// doesn't pitch over. Bounds the horizontal thrust (and so the cruise speed) and keeps
-/// most of the lift vertical so a hard translation only mildly bleeds altitude.
-const HELI_MAX_TILT: i32 = trig::TURN / 12;
-
-/// Cyclic auto-recenter toward level per tick with no stick input, in [`trig`] turn units:
-/// release the cyclic and the disc returns to level, so the craft slows and settles back
-/// into a hover instead of holding a tilt forever (mirrors the plane's roll auto-level).
-const HELI_TILT_RECENTER: i32 = trig::TURN / 300;
-
-/// Per-tick heading change at full yaw-pedal (tail rotor), in [`trig`] turn units. Strong
+/// Per-tick body-frame YAW rate at full pedal (tail rotor), in [`trig`] turn units. Strong
 /// authority — a helicopter pivots on the spot in a hover (≈150°/s at full pedal at
-/// [`TICK_HZ`]).
+/// [`TICK_HZ`]). About the craft's OWN up axis, so the pedals stay a heading control even
+/// when the airframe is pitched, banked, or inverted.
 const HELI_YAW_RATE: i32 = trig::TURN / 72;
 
 /// Velocity retained per tick (drag). Heavier than the plane's so the hover is stable and
@@ -469,28 +446,22 @@ pub struct Pos3 {
     pub z: i64,
 }
 
-/// A pilotable plane: a flying body with 3D position + velocity and a 3-angle
-/// orientation (heading + pitch + roll) plus a persistent throttle, all integer
-/// fixed-point so two peers evolve it identically.
+/// A pilotable plane: a flying body with 3D position + velocity, an attitude quaternion,
+/// and a persistent throttle — all integer fixed-point so two peers evolve it identically.
 ///
-/// Plane-like arcade flight (see [`step_plane`]): forward airspeed makes lift, lift
-/// holds altitude, banking (roll) turns the heading, and the wing stalls below
-/// [`PLANE_STALL_SPEED`]. Orientation is heading + pitch + roll (roll added so the plane
-/// BANKS to turn like an aircraft, not a car); pitch and roll are bounded tilts (clamped,
-/// never wrapping), so the plane can't tumble inverted.
+/// Plane-like arcade flight (see [`step_plane`]): forward airspeed makes lift along the
+/// wing (the craft's up axis), lift holds altitude, BANKING turns (the banked wing's lift
+/// vector pulls the nose round), and the wing stalls below [`PLANE_STALL_SPEED`]. Attitude
+/// is a full quaternion integrated from body-frame angular rates, UNCLAMPED — the plane can
+/// loop, roll, and fly inverted; there is no orientation bound and no auto-level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plane {
     pos: Pos3,
     vel: Pos3,
-    /// Heading in [`trig`] turn units (the horizontal facing, like a player's yaw).
-    heading: i32,
-    /// Pitch in [`trig`] turn units: nose up/down off the horizon. Clamped to
-    /// ±[`PLANE_MAX_PITCH`].
-    pitch: i32,
-    /// Roll (bank) in [`trig`] turn units: right wing down is positive. Clamped to
-    /// ±[`PLANE_MAX_ROLL`]; auto-levels toward 0 with no aileron input. Banking is what
-    /// turns the heading (see [`PLANE_BANK_TURN_NUM`]).
-    roll: i32,
+    /// Attitude (body→world rotation) as a [`trig::ONE`]-scaled unit quaternion. Integrated
+    /// in the body frame each tick (see [`iquat::Quat::integrate`]); the nose is the body +Z
+    /// axis, the wing-up the body +Y axis.
+    orient: iquat::Quat,
     /// Throttle, a persistent lever in `0..`[`PLANE_THROTTLE_MAX`] (see there). Trimmed
     /// up/down by the pilot; thrust scales with it.
     throttle: i32,
@@ -505,17 +476,14 @@ impl Plane {
     pub fn vel(self) -> Pos3 {
         self.vel
     }
-    /// Heading yaw in [`trig`] turn units; convert with [`trig_client::turns_to_radians`].
+    /// The attitude quaternion (body→world). The renderer reads it through [`CockpitPose`].
+    pub fn orient(self) -> iquat::Quat {
+        self.orient
+    }
+    /// Heading yaw in [`trig`] turn units — the nose projected to the ground plane. Derived
+    /// from the attitude; used only to spawn the next craft facing the same way on a swap.
     pub fn heading(self) -> i32 {
-        self.heading
-    }
-    /// Pitch in [`trig`] turn units (nose up = positive).
-    pub fn pitch(self) -> i32 {
-        self.pitch
-    }
-    /// Roll/bank in [`trig`] turn units (right wing down = positive).
-    pub fn roll(self) -> i32 {
-        self.roll
+        self.orient.yaw()
     }
     /// Throttle setting, `0..`[`PLANE_THROTTLE_MAX`].
     pub fn throttle(self) -> i32 {
@@ -542,9 +510,7 @@ impl Plane {
                 z: ground.z,
             },
             vel: Pos3 { x: vx, y: 0, z: vz },
-            heading,
-            pitch: 0,
-            roll: 0,
+            orient: iquat::Quat::from_yaw(heading),
             throttle: PLANE_SPAWN_THROTTLE,
         }
     }
@@ -558,57 +524,46 @@ impl Plane {
         step_plane(self, input);
     }
 
-    /// This plane's first-person cockpit pose (3D position + heading/pitch/roll). The
-    /// renderer reads it through the shared [`CockpitPose`] so one camera formula serves
-    /// every flyer (plane and helicopter) with no copy to drift.
+    /// This plane's first-person cockpit pose (3D position + attitude). The renderer reads it
+    /// through the shared [`CockpitPose`] so one camera formula serves every flyer (plane and
+    /// helicopter) with no copy to drift.
     pub fn cockpit_pose(self) -> CockpitPose {
         CockpitPose {
             pos: self.pos,
-            heading: self.heading,
-            pitch: self.pitch,
-            roll: self.roll,
+            orient: self.orient,
         }
     }
 }
 
-/// A flyer's first-person cockpit pose: 3D position plus a heading/pitch/roll attitude, all
-/// [`trig`] turn-unit angles (positive pitch = nose up, positive roll = right wing down).
-/// The shared view both the [`Plane`] and the [`Helicopter`] hand the renderer, so the one
-/// cockpit-camera formula (`crate::render`'s `cockpit_camera`) can fly either with no copy
-/// to drift.
+/// A flyer's first-person cockpit pose: 3D position plus a full attitude quaternion (body→
+/// world). The shared view both the [`Plane`] and the [`Helicopter`] hand the renderer, so
+/// the one cockpit-camera formula (`crate::render`'s `cockpit_camera`) can fly either with no
+/// copy to drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CockpitPose {
     pub pos: Pos3,
-    pub heading: i32,
-    pub pitch: i32,
-    pub roll: i32,
+    pub orient: iquat::Quat,
 }
 
-/// A pilotable helicopter: a flying body with 3D position + velocity, a heading/pitch/roll
-/// attitude, and a persistent COLLECTIVE lever — integer fixed-point, like the [`Plane`], so
-/// two peers evolve it bit-identically.
+/// A pilotable helicopter: a flying body with 3D position + velocity, an attitude quaternion,
+/// and a persistent COLLECTIVE lever — integer fixed-point, like the [`Plane`], so two peers
+/// evolve it bit-identically.
 ///
-/// Arcade rotorcraft flight (see [`step_helicopter`]): rotor lift points out of the disc, so
-/// at the hover collective a LEVEL disc just balances gravity and the craft HOVERS; trimming
-/// collective up/down climbs/descends; tilting the disc with the cyclic (pitch/roll) leans
-/// the lift vector so part of it pushes HORIZONTALLY — the craft translates and the cockpit
-/// banks into it. Yaw pedals spin the heading directly (tail rotor) at any speed, hover
-/// included. Pitch and roll are bounded tilts ([`HELI_MAX_TILT`], clamped, auto-levelling),
-/// so the disc leans to move but never flips. Unlike the plane, lift needs no airspeed, so it
-/// takes off and lands vertically — no runway.
+/// Arcade rotorcraft flight (see [`step_helicopter`]): rotor lift points out of the disc
+/// (the craft's up axis), so at the hover collective a LEVEL craft just balances gravity and
+/// HOVERS; trimming collective up/down climbs/descends; tilting the airframe with the cyclic
+/// leans the lift vector so part of it pushes HORIZONTALLY — the craft translates and banks
+/// into it. Yaw pedals spin the heading about the craft's own up axis (tail rotor) at any
+/// speed, hover included. Attitude is a full quaternion integrated from body-frame rates,
+/// UNCLAMPED and never auto-levelled — held cyclic loops the craft and it can fly inverted.
+/// Unlike the plane, lift needs no airspeed, so it takes off and lands vertically — no runway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Helicopter {
     pos: Pos3,
     vel: Pos3,
-    /// Heading in [`trig`] turn units (the horizontal facing).
-    heading: i32,
-    /// Disc fore/aft tilt in [`trig`] turn units, SAME sign convention as the plane
-    /// (positive = nose up). Nose DOWN (negative) leans the lift forward → flies forward;
-    /// clamped to ±[`HELI_MAX_TILT`], auto-levels to 0 with no cyclic input.
-    pitch: i32,
-    /// Disc lateral tilt (bank) in [`trig`] turn units: right wing down is positive →
-    /// leans the lift right → translates right. Clamped to ±[`HELI_MAX_TILT`], auto-levels.
-    roll: i32,
+    /// Attitude (body→world rotation) as a [`trig::ONE`]-scaled unit quaternion — the rotor
+    /// disc normal is the body +Y axis. Integrated in the body frame each tick.
+    orient: iquat::Quat,
     /// Collective, a persistent lever in `0..`[`HELI_COLLECTIVE_MAX`]: sets rotor lift.
     collective: i32,
 }
@@ -622,17 +577,13 @@ impl Helicopter {
     pub fn vel(self) -> Pos3 {
         self.vel
     }
-    /// Heading in [`trig`] turn units.
+    /// The attitude quaternion (body→world). The renderer reads it through [`CockpitPose`].
+    pub fn orient(self) -> iquat::Quat {
+        self.orient
+    }
+    /// Heading in [`trig`] turn units — the nose projected to the ground plane (derived).
     pub fn heading(self) -> i32 {
-        self.heading
-    }
-    /// Disc fore/aft tilt in [`trig`] turn units (positive = nose up; nose down flies forward).
-    pub fn pitch(self) -> i32 {
-        self.pitch
-    }
-    /// Disc bank in [`trig`] turn units (right wing down = positive).
-    pub fn roll(self) -> i32 {
-        self.roll
+        self.orient.yaw()
     }
     /// Collective setting, `0..`[`HELI_COLLECTIVE_MAX`].
     pub fn collective(self) -> i32 {
@@ -652,9 +603,7 @@ impl Helicopter {
                 z: ground.z,
             },
             vel: Pos3::default(),
-            heading,
-            pitch: 0,
-            roll: 0,
+            orient: iquat::Quat::from_yaw(heading),
             collective: HELI_HOVER_COLLECTIVE,
         }
     }
@@ -670,9 +619,7 @@ impl Helicopter {
     pub fn cockpit_pose(self) -> CockpitPose {
         CockpitPose {
             pos: self.pos,
-            heading: self.heading,
-            pitch: self.pitch,
-            roll: self.roll,
+            orient: self.orient,
         }
     }
 }
@@ -1181,17 +1128,13 @@ impl Sim {
             let Plane {
                 pos,
                 vel,
-                heading,
-                pitch,
-                roll,
+                orient,
                 throttle,
             } = plane;
             h.write(&[id.0]);
             write_pos3(&mut h, *pos);
             write_pos3(&mut h, *vel);
-            h.write(&heading.to_le_bytes());
-            h.write(&pitch.to_le_bytes());
-            h.write(&roll.to_le_bytes());
+            write_quat(&mut h, *orient);
             h.write(&throttle.to_le_bytes());
         }
         let Crab { pos, yaw } = crab;
@@ -1314,73 +1257,58 @@ fn within(ax: i64, az: i64, bx: i64, bz: i64, r: i64) -> bool {
 /// Flight-sim control map (the [`Input`] axes, re-read for flight):
 /// - [`Input::move_forward`] → THROTTLE: trims the persistent throttle lever up (+) /
 ///   down (−). The flight-stick / WASD throttle.
-/// - [`Input::look_yaw`] → ROLL (ailerons): the stick's horizontal deflection banks the
-///   wings; banking is what TURNS the plane (see [`PLANE_BANK_TURN_NUM`]).
-/// - [`Input::look_pitch`] → PITCH (elevator): the stick's vertical deflection; nose up
-///   (+) climbs, down (−) dives.
-/// - [`Input::move_strafe`] → RUDDER (yaw): a small direct heading nudge for
-///   coordination; NOT the main turn.
+/// - [`Input::look_yaw`] → ROLL (ailerons): the stick's horizontal deflection rolls the
+///   craft about its nose; banking is what TURNS the plane (the banked wing's lift vector
+///   pulls the velocity round — there is no separate heading coupling).
+/// - [`Input::look_pitch`] → PITCH (elevator): the stick's vertical deflection rotates about
+///   the craft's right axis; nose up (+) climbs, down (−) dives. Held, it loops the plane.
+/// - [`Input::move_strafe`] → RUDDER (yaw): a small rotation about the craft's own up axis
+///   for coordination; NOT the main turn.
 ///
-/// Order per tick: trim throttle → integrate roll/pitch (clamped) + auto-level + the
-/// bank-to-turn and rudder heading change → build the facing → thrust + lift − gravity →
-/// damp (drag) → integrate position (with a ground clamp). The only "trig" is the integer
-/// CORDIC [`trig`] table, never a float.
+/// Every angular input is a BODY-frame angular RATE integrated into the attitude quaternion,
+/// UNCLAMPED and never auto-levelled (see [`iquat::Quat::integrate`]) — so the plane holds
+/// whatever attitude the pilot flies it to, loops, rolls, and flies inverted. Order per tick:
+/// trim throttle, integrate the body-frame rates into the attitude, apply thrust along the
+/// nose and lift along the wing less gravity, damp (drag), then integrate position (with a
+/// ground clamp). The only "trig" is the integer CORDIC [`trig`]/[`iquat`] math, never a float.
 fn step_plane(plane: &mut Plane, inp: Input) {
     let axis = Input::AXIS_SCALE as i64;
+    let one = trig::ONE as i64;
 
     // 1) Throttle: a persistent lever, trimmed up/down by the forward axis and held
     //    between ticks. Sign of move_forward = trim direction; magnitude = trim rate.
     let trim = (inp.move_forward as i64 * PLANE_THROTTLE_STEP as i64 / axis) as i32;
     plane.throttle = (plane.throttle + trim).clamp(0, PLANE_THROTTLE_MAX);
 
-    // 2) Roll (ailerons) from the horizontal stick axis. With no input, auto-level toward
-    //    0 (roll-stable airframe) by at most PLANE_ROLL_RECENTER so releasing the stick
-    //    rolls back to wings-level. `look_yaw` is screen-reconciled: `gather_input` negates
-    //    it (screen-right↔sim-X, the same reconcile the rudder undoes), so screen-right is
-    //    NEGATIVE look_yaw — negate here so screen-right rolls RIGHT (right wing down) and
-    //    thus banks into a right turn. Mirrors the rudder's negation below.
-    let droll = (-(inp.look_yaw as i64) * PLANE_ROLL_RATE as i64 / axis) as i32;
-    // Same clamp + auto-level-toward-zero as the heli's cyclic — ONE formula, no drift.
-    plane.roll = recenter_or_tilt(plane.roll, droll, PLANE_ROLL_RECENTER, PLANE_MAX_ROLL);
+    // 2) Body-frame angular rates this tick → integrate the attitude (unclamped, no
+    //    auto-level). `look_yaw`/`move_strafe` are screen-reconciled (`gather_input` negates
+    //    them, screen-right↔sim-X), so a screen-right roll → right-wing-down and screen-left
+    //    rudder → yaw left. Body-axis signs: +X noses DOWN, +Y turns toward +X (right), +Z
+    //    raises the right wing — so nose-up, right-bank, and yaw-right negate to match.
+    let pitch_up = (inp.look_pitch as i64 * PLANE_PITCH_RATE as i64 / axis) as i32;
+    let bank_right = (-(inp.look_yaw as i64) * PLANE_ROLL_RATE as i64 / axis) as i32;
+    let yaw_right = (-(inp.move_strafe as i64) * PLANE_RUDDER_RATE as i64 / axis) as i32;
+    plane.orient = plane.orient.integrate(-pitch_up, yaw_right, -bank_right);
 
-    // 3) Pitch (elevator) from the vertical stick axis. Bounded tilt (clamped, never
-    //    wraps), positive = nose up.
-    let dpitch = (inp.look_pitch as i64 * PLANE_PITCH_RATE as i64 / axis) as i32;
-    plane.pitch = (plane.pitch + dpitch).clamp(-PLANE_MAX_PITCH, PLANE_MAX_PITCH);
+    // 3) The craft's nose (forward) and wing-up axes in the world.
+    let (fx, fy, fz) = plane.orient.forward();
+    let (ux, uy, uz) = plane.orient.up();
 
-    // 4) Heading: the BANK turns it (coordinated turn) plus a small RUDDER nudge. A
-    //    right bank (positive roll) turns right (heading +). The rudder (move_strafe)
-    //    adds a direct yaw; negated so screen-left A yaws left.
-    let (sr, _cr) = trig::sin_cos(plane.roll); // roll sin/cos · ONE
-    let bank_turn = (sr * PLANE_BANK_TURN_NUM / trig::ONE as i64) as i32;
-    let rudder = (-(inp.move_strafe as i64) * PLANE_RUDDER_RATE as i64 / axis) as i32;
-    plane.heading = trig::wrap_turns(plane.heading + bank_turn + rudder);
-
-    // 5) Facing unit vector (scale trig::ONE²) from heading + pitch. Horizontal part is
-    //    (sin,cos) of heading shrunk by cos(pitch); vertical is sin(pitch). Nose-up tilts
-    //    the thrust toward +Y — which is how you CLIMB (vector the thrust skyward).
-    let (sh, ch) = trig::sin_cos(plane.heading); // · ONE
-    let (sp, cp) = trig::sin_cos(plane.pitch); // · ONE
-    let one = trig::ONE as i64;
-    let fx = sh * cp; // · ONE²
-    let fz = ch * cp; // · ONE²
-    let fy = sp * one; // · ONE²
-
-    // 6) Thrust along the facing, scaled by the throttle lever. Descale the facing's ONE²
-    //    and the throttle's MAX so the acceleration lands in UNIT/tick².
-    let one2 = one * one;
+    // 4) Thrust along the nose (body +Z), scaled by the throttle lever — descale the
+    //    forward vector's ONE and the throttle's MAX so the accel lands in UNIT/tick².
     let thr = plane.throttle as i64;
-    let tdenom = one2 * PLANE_THROTTLE_MAX as i64;
+    let tdenom = one * PLANE_THROTTLE_MAX as i64;
     plane.vel.x += fx * PLANE_THRUST * thr / tdenom;
     plane.vel.y += fy * PLANE_THRUST * thr / tdenom;
     plane.vel.z += fz * PLANE_THRUST * thr / tdenom;
 
-    // 7) Lift − gravity. Lift grows with AIRSPEED (total speed magnitude) and points
-    //    "up", but its vertical share is cut by the bank (cos roll) — so a hard turn
-    //    loses altitude unless you pull up, the classic plane feel. Capped at gravity so
-    //    level flight at speed just HOLDS altitude (you climb by pitching, step 6), and
-    //    below PLANE_STALL_SPEED the wing stalls: lift falls off with the square of the
-    //    speed ratio, so the nose drops and you must regain speed to recover.
+    // 5) Lift along the WING (body +Y). Lift grows with AIRSPEED, capped at gravity so level
+    //    cruise just HOLDS altitude (you climb by pitching the nose up, step 4); below
+    //    PLANE_STALL_SPEED the wing stalls (lift ∝ speed²) so the nose drops and you must
+    //    regain speed. Applied as a vector along body-up, so banking tilts the lift: its
+    //    horizontal share TURNS the craft and its vertical share shrinks (a hard turn loses
+    //    altitude unless you pull up), and inverted the lift points down — you fall unless
+    //    you push. No separate bank-to-turn coupling; the turn is the lift vector itself.
     let speed = isqrt_i128(
         plane.vel.x as i128 * plane.vel.x as i128
             + plane.vel.y as i128 * plane.vel.y as i128
@@ -1391,18 +1319,18 @@ fn step_plane(plane: &mut Plane, inp: Input) {
         lift = lift * speed / PLANE_STALL_SPEED; // stalled: drops off with speed²
     }
     lift = lift.min(PLANE_GRAVITY); // a wing trims to level, it doesn't balloon upward
-    let (_sr2, cr) = trig::sin_cos(plane.roll);
-    let lift_y = lift * cr / one; // vertical share shrinks with bank
-    plane.vel.y += lift_y;
+    plane.vel.x += lift * ux / one;
+    plane.vel.y += lift * uy / one;
+    plane.vel.z += lift * uz / one;
     plane.vel.y -= PLANE_GRAVITY;
 
-    // 8) Damp (drag): bleed a fixed fraction of velocity so the integrator can't run
+    // 6) Damp (drag): bleed a fixed fraction of velocity so the integrator can't run
     //    away. Integer truncation toward zero is identical on every target.
     plane.vel.x = plane.vel.x * PLANE_DAMP_NUM / PLANE_DAMP_DEN;
     plane.vel.y = plane.vel.y * PLANE_DAMP_NUM / PLANE_DAMP_DEN;
     plane.vel.z = plane.vel.z * PLANE_DAMP_NUM / PLANE_DAMP_DEN;
 
-    // 9) Integrate position. Don't sink through the ground: clamp Y≥0 and kill a downward
+    // 7) Integrate position. Don't sink through the ground: clamp Y≥0 and kill a downward
     //    velocity on contact, so a dive ends in a (crude) belly landing rather than
     //    falling forever below the world.
     plane.pos.x += plane.vel.x;
@@ -1416,21 +1344,6 @@ fn step_plane(plane: &mut Plane, inp: Input) {
     }
 }
 
-/// Step one bounded, auto-levelling control axis toward the commanded change `delta`, or
-/// AUTO-LEVEL toward 0 by `recenter` (no overshoot) when there's no input — the moved value
-/// clamped to ±`max`. ONE implementation of the clamp+recenter formula, shared by the heli's
-/// two cyclic axes AND the plane's roll (auto-level), so they can't drift. Releasing the
-/// stick returns the axis to level (the heli settles back into a hover, the plane to
-/// wings-level).
-fn recenter_or_tilt(current: i32, delta: i32, recenter: i32, max: i32) -> i32 {
-    if delta == 0 {
-        let step = recenter.min(current.abs());
-        current - current.signum() * step
-    } else {
-        (current + delta).clamp(-max, max)
-    }
-}
-
 /// Advance one helicopter one tick from its pilot input — arcade rotorcraft flight (see the
 /// [`Helicopter`] docs), pure integer fixed-point so two peers evolve it bit-identically.
 ///
@@ -1438,17 +1351,22 @@ fn recenter_or_tilt(current: i32, delta: i32, recenter: i32, max: i32) -> i32 {
 /// - [`Input::move_forward`] → COLLECTIVE: trims the persistent collective lever up (+) /
 ///   down (−). More collective → more rotor lift → climb; less → descend. The W/S lever.
 /// - [`Input::look_pitch`] → CYCLIC fore/aft: pushing the stick forward (mouse-up, positive
-///   `look_pitch`) noses the disc DOWN and flies FORWARD; pulling back flies backward.
-/// - [`Input::look_yaw`] → CYCLIC lateral: banks the disc to translate sideways. Screen-
+///   `look_pitch`) noses the craft DOWN and flies FORWARD; pulling back flies backward.
+/// - [`Input::look_yaw`] → CYCLIC lateral: rolls the craft to translate sideways. Screen-
 ///   reconciled like the plane's ailerons (`gather_input` negates it), so screen-right banks
 ///   right and translates right.
-/// - [`Input::move_strafe`] → YAW PEDALS (tail rotor): a direct heading spin, authority at
-///   any speed (hover included). Negated so screen-left A yaws left, matching the plane rudder.
+/// - [`Input::move_strafe`] → YAW PEDALS (tail rotor): spin about the craft's OWN up axis,
+///   authority at any speed (hover included). Negated so screen-left A yaws left, like the
+///   plane rudder.
 ///
-/// Order per tick: trim collective → tilt the disc (cyclic, clamped + auto-level) → yaw the
-/// heading (pedals) → rotor lift along the tilted disc normal − gravity → damp (drag) →
-/// integrate position (ground clamp = a vertical landing). The only "trig" is the integer
-/// CORDIC [`trig`] table, never a float.
+/// Same body-frame, RATE-based, UNCLAMPED attitude model as the plane (the ONE
+/// [`iquat::Quat::integrate`]) — the cyclic and pedals are angular velocities about the
+/// craft's own axes, so a held cyclic loops the helicopter and the pedals stay a heading
+/// control even inverted; nothing auto-levels back to a hover. Order per tick: trim
+/// collective → integrate the body-frame rates into the attitude → rotor lift along the
+/// craft's up axis (the disc normal) − gravity → damp (drag) → integrate position (ground
+/// clamp = a vertical landing). The only "trig" is the integer CORDIC [`trig`]/[`iquat`]
+/// math, never a float.
 fn step_helicopter(heli: &mut Helicopter, inp: Input) {
     let axis = Input::AXIS_SCALE as i64;
     let one = trig::ONE as i64;
@@ -1458,43 +1376,28 @@ fn step_helicopter(heli: &mut Helicopter, inp: Input) {
     let trim = (inp.move_forward as i64 * HELI_COLLECTIVE_STEP as i64 / axis) as i32;
     heli.collective = (heli.collective + trim).clamp(0, HELI_COLLECTIVE_MAX);
 
-    // 2) Cyclic: tilt the rotor disc fore/aft (pitch) and laterally (roll), auto-levelling
-    //    to a hover when released. look_pitch is negated so pushing the stick forward
-    //    (positive look_pitch) noses DOWN (negative pitch) and flies forward; look_yaw is
-    //    negated for the screen-right↔sim-X reconcile (as the plane's ailerons are), so
-    //    screen-right banks right (positive roll).
-    let dpitch = (-(inp.look_pitch as i64) * HELI_CYCLIC_RATE as i64 / axis) as i32;
-    heli.pitch = recenter_or_tilt(heli.pitch, dpitch, HELI_TILT_RECENTER, HELI_MAX_TILT);
-    let droll = (-(inp.look_yaw as i64) * HELI_CYCLIC_RATE as i64 / axis) as i32;
-    heli.roll = recenter_or_tilt(heli.roll, droll, HELI_TILT_RECENTER, HELI_MAX_TILT);
+    // 2) Body-frame angular rates this tick → integrate the attitude (unclamped, no
+    //    auto-level). Cyclic forward (positive look_pitch) noses DOWN (+X rotation) so the
+    //    tilted lift flies the craft forward; the screen-reconciled look_yaw/move_strafe
+    //    negate as in the plane so screen-right banks right and screen-left A yaws left. Same
+    //    body-axis signs as the plane: +X noses down, +Y turns right, +Z raises the right
+    //    wing — so right-bank and yaw-right negate to match.
+    let nose_down = (inp.look_pitch as i64 * HELI_CYCLIC_RATE as i64 / axis) as i32;
+    let bank_right = (-(inp.look_yaw as i64) * HELI_CYCLIC_RATE as i64 / axis) as i32;
+    let yaw_right = (-(inp.move_strafe as i64) * HELI_YAW_RATE as i64 / axis) as i32;
+    heli.orient = heli.orient.integrate(nose_down, yaw_right, -bank_right);
 
-    // 3) Yaw pedals (tail rotor): spin the heading directly, with authority even in a
-    //    stationary hover. Negated so screen-left A yaws left (mirrors the plane rudder).
-    let pedal = (-(inp.move_strafe as i64) * HELI_YAW_RATE as i64 / axis) as i32;
-    heli.heading = trig::wrap_turns(heli.heading + pedal);
-
-    // 4) Rotor lift along the (tilted) disc normal. Build the disc normal — straight up
-    //    when level, leaning toward +x with right bank and toward +z when nosed down — then
-    //    rotate its horizontal part into the world by the heading. The lift magnitude scales
-    //    with the collective; at the hover lever a level disc's vertical lift equals gravity,
-    //    so it holds altitude, and a tilt steals some lift sideways → translation. (For the
-    //    bounded tilt the normal's magnitude stays ≈ONE, so lift ≈ constant — arcade, not a
-    //    rotor-disc model.)
-    let (sp, cp) = trig::sin_cos(heli.pitch); // · ONE
-    let (sr, cr) = trig::sin_cos(heli.roll); // · ONE
-    let nbx = sr; // bank right (roll +) → lean +x · ONE
-    let nby = cr * cp / one; // mostly-vertical share · ONE
-    let nbz = -(cr * sp) / one; // nose down (pitch −) → lean +z (forward) · ONE
-    let (sh, ch) = trig::sin_cos(heli.heading); // · ONE
-    let wnx = (nbx * ch + nbz * sh) / one; // world normal x · ONE
-    let wnz = (-(nbx * sh) + nbz * ch) / one; // world normal z · ONE
-    let wny = nby; // world normal y (heading doesn't tilt vertical) · ONE
+    // 3) Rotor lift along the craft's up axis (the disc normal, body +Y), scaled by the
+    //    collective. At the hover lever a LEVEL craft's lift exactly balances gravity, so it
+    //    holds station; tilting the airframe leans the lift so part of it TRANSLATES the
+    //    craft; inverted, the lift points down and drives the craft into the ground.
+    let (ux, uy, uz) = heli.orient.up();
     let lift_mag = HELI_MAX_LIFT * heli.collective as i64 / HELI_COLLECTIVE_MAX as i64; // UNIT/tick²
-    heli.vel.x += lift_mag * wnx / one;
-    heli.vel.y += lift_mag * wny / one - HELI_GRAVITY;
-    heli.vel.z += lift_mag * wnz / one;
+    heli.vel.x += lift_mag * ux / one;
+    heli.vel.y += lift_mag * uy / one - HELI_GRAVITY;
+    heli.vel.z += lift_mag * uz / one;
 
-    // 5) Damp (drag): bleed a fixed fraction of velocity so the hover is stable and the
+    // 4) Damp (drag): bleed a fixed fraction of velocity so the hover is stable and the
     //    craft coasts to a stop when the cyclic centres. Integer truncation toward zero is
     //    identical on every target.
     heli.vel.x = heli.vel.x * HELI_DAMP_NUM / HELI_DAMP_DEN;
@@ -1535,7 +1438,7 @@ fn isqrt_i128(n: i128) -> i128 {
 /// Deterministic integer trigonometry ([`trig`]) and its client-side float adapter
 /// ([`trig_client`]) live in [`super::cordic`]; re-exported here so the sim and its
 /// callers keep referring to them as `sim::trig` / `sim::trig_client`.
-pub use super::cordic::{trig, trig_client};
+pub use super::cordic::{iquat, iquat_client, trig, trig_client};
 
 /// Fold a [`Pos`] (both coordinates) into the state hash — one call per position so a hashed
 /// entity can't accidentally fold X but forget Z. Destructured exhaustively so a new coordinate
@@ -1553,6 +1456,17 @@ fn write_pos(h: &mut Fnv, p: Pos) {
 /// the same reason as [`write_pos`].
 fn write_pos3(h: &mut Fnv, p: Pos3) {
     let Pos3 { x, y, z } = p;
+    h.write(&x.to_le_bytes());
+    h.write(&y.to_le_bytes());
+    h.write(&z.to_le_bytes());
+}
+
+/// Fold an attitude [`iquat::Quat`] (all four components) into the state hash — one call per
+/// flyer orientation so a hashed craft can't fold some components and forget others.
+/// Exhaustively destructured for the same reason as [`write_pos`].
+fn write_quat(h: &mut Fnv, q: iquat::Quat) {
+    let iquat::Quat { w, x, y, z } = q;
+    h.write(&w.to_le_bytes());
     h.write(&x.to_le_bytes());
     h.write(&y.to_le_bytes());
     h.write(&z.to_le_bytes());
@@ -1617,45 +1531,56 @@ mod tests {
     /// Pins the PLANE PITCH SIGN the cockpit legend depends on: positive `look_pitch`
     /// noses UP (climb), negative noses DOWN (dive). The HUD's "Pitch up (climb)" /
     /// "Pitch down (dive)" labels ride this sign; if it flips, they'd lie — so this fails
-    /// loud rather than mislead the pilot.
+    /// loud rather than mislead the pilot. The nose's vertical component (the attitude's
+    /// world-space forward Y) is the directly-observable "nose up" signal.
     #[test]
     fn step_plane_pitch_sign_matches_the_cockpit_legend() {
-        let level = Plane::spawn(Pos { x: 0, z: 0 }, 0);
-        let mut climb = level;
+        let mut climb = Plane::spawn(Pos { x: 0, z: 0 }, 0);
         climb.step(Input::default().with_look_pitch(1.0)); // positive look_pitch
-        assert!(climb.pitch() > level.pitch(), "positive look_pitch must nose UP");
-        let mut dive = level;
+        assert!(
+            climb.orient().forward().1 > 0,
+            "positive look_pitch must nose UP (forward.y > 0)"
+        );
+        let mut dive = Plane::spawn(Pos { x: 0, z: 0 }, 0);
         dive.step(Input::default().with_look_pitch(-1.0)); // negative look_pitch
-        assert!(dive.pitch() < level.pitch(), "negative look_pitch must nose DOWN");
+        assert!(
+            dive.orient().forward().1 < 0,
+            "negative look_pitch must nose DOWN (forward.y < 0)"
+        );
     }
 
     /// Roll (ailerons) responds to the horizontal stick axis and banks to TURN, and the
     /// SIGN matches the screen: `gather_input` makes screen-right a NEGATIVE `look_yaw`
-    /// (the screen-X↔sim reconcile), and `step_plane` negates it so screen-right rolls
-    /// RIGHT and banks into a right (heading-increasing) turn. Releasing the stick
-    /// auto-levels the wings. This is the plane-vs-car distinction — you bank to turn.
+    /// (the screen-X↔sim reconcile), and `step_plane` negates it so screen-right banks
+    /// RIGHT (right wing down). A banked wing's lift vector points partly sideways, so the
+    /// craft accelerates that way — the plane TURNS by banking, with no separate heading
+    /// coupling. And there is NO auto-level: the bank HOLDS when the stick centres (the
+    /// owner's "auto-righting can go" — the pilot holds whatever attitude they set).
     #[test]
-    fn step_plane_banks_and_turns_with_roll() {
+    fn step_plane_banks_right_and_turns_with_no_autolevel() {
         let mut p = Plane::spawn(Pos { x: 0, z: 0 }, 0);
-        let h0 = p.heading();
-        // Screen-right (the negative look_yaw `gather_input` emits) must bank right and
-        // swing the heading right.
+        // Screen-right (the negative look_yaw `gather_input` emits) banks the craft right —
+        // its up-vector tilts toward +X (right wing down).
         for _ in 0..20 {
             p.step(Input::new(0.0, 0.0, -1.0, 0)); // screen-right = negative look_yaw
         }
-        assert!(p.roll() > 0, "screen-right must roll RIGHT, got {}", p.roll());
-        // Heading swung right (positive); spawned at 0 and one bank can't pass a half-turn,
-        // so the raw difference is already signed correctly (no wrap).
-        let dh = p.heading() - h0;
-        assert!(dh > 0, "a right bank must turn the heading right, got {dh}");
-        // Release the stick: wings auto-level back toward zero.
-        let banked = p.roll();
+        let (ux, _uy, _uz) = p.orient().up();
+        assert!(ux > 0, "screen-right must bank RIGHT (up tilts +X), got {ux}");
+        // The banked lift turns the craft right: it gains rightward (+X) velocity.
+        assert!(
+            p.vel().x > 0,
+            "a right bank must turn the craft right (+X velocity), got {}",
+            p.vel().x
+        );
+        // Release the stick: the bank HOLDS (no auto-level). The up-vector stays tilted.
+        let banked = p.orient().up().0;
         for _ in 0..200 {
             p.step(Input::default());
         }
         assert!(
-            p.roll().abs() < banked,
-            "wings must auto-level toward zero with no aileron input"
+            p.orient().up().0 > banked / 2,
+            "the bank must HOLD with no input (no auto-level), was {banked} now {}",
+            p.orient().up().0
         );
     }
 
@@ -1765,7 +1690,11 @@ mod tests {
             (0, 0, 0),
             "a hands-off hover stays at rest"
         );
-        assert_eq!((heli.pitch(), heli.roll()), (0, 0), "the disc stays level");
+        assert_eq!(
+            heli.orient(),
+            Helicopter::spawn(Pos { x: 0, z: 0 }, 0).orient(),
+            "the craft stays level (attitude unchanged with no input)"
+        );
     }
 
     /// Collective is vertical control: raising it (W) CLIMBS, dropping it (S) DESCENDS — and
@@ -1792,15 +1721,32 @@ mod tests {
     }
 
     /// Cyclic forward translates the craft FORWARD (push the stick = positive `look_pitch`)
-    /// and noses the disc DOWN to do it — tilt-to-move. Mostly +Z (its facing) with little
-    /// sideways drift, and the disc auto-LEVELS back toward a hover once the stick centres.
+    /// and noses the airframe DOWN to do it — tilt-to-move. Mostly +Z (its facing) with little
+    /// sideways drift. And there is NO auto-level: the nose-down attitude HOLDS when the stick
+    /// centres (rate-based, the owner's "auto-righting can go").
     #[test]
     fn helicopter_cyclic_pitches_down_to_fly_forward() {
         let mut heli = Helicopter::spawn(Pos { x: 0, z: 0 }, 0);
-        for _ in 0..60 {
+        // Pulse the cyclic forward to nose the craft down a modest amount (the rates are
+        // unclamped now, so holding it would loop the craft — a pilot pulses to a tilt).
+        for _ in 0..6 {
             heli.step(Input::default().with_look_pitch(1.0)); // push cyclic forward
         }
-        assert!(heli.pitch() < 0, "flying forward noses the disc DOWN");
+        assert!(
+            heli.orient().forward().1 < 0,
+            "flying forward noses the craft DOWN (forward.y < 0)"
+        );
+        // Release: the nose-down attitude HOLDS (no auto-level) and the tilted lift flies the
+        // craft forward over the next couple of seconds.
+        let nose_y = heli.orient().forward().1;
+        for _ in 0..80 {
+            heli.step(Input::default());
+        }
+        assert_eq!(
+            heli.orient().forward().1,
+            nose_y,
+            "releasing the cyclic must NOT auto-level (attitude holds)"
+        );
         assert!(
             heli.pos().z > 3 * UNIT,
             "cyclic forward must translate +Z (forward), got z={}",
@@ -1810,26 +1756,26 @@ mod tests {
             heli.pos().x.abs() < heli.pos().z / 4,
             "forward cyclic moves mostly forward, not sideways"
         );
-        // Release the cyclic: the disc levels back out (auto-hover).
-        for _ in 0..120 {
-            heli.step(Input::default());
-        }
-        assert_eq!(heli.pitch(), 0, "releasing the cyclic levels the disc");
     }
 
-    /// Cyclic right banks the disc right (right wing down, positive roll) and translates the
-    /// craft to its RIGHT (+X). Screen-right reaches the sim as NEGATIVE `look_yaw` (the same
-    /// reconcile the plane's ailerons use), so that's what a right input is here.
+    /// Cyclic right banks the airframe right (right wing down → its up-vector tilts toward
+    /// +X) and translates the craft to its RIGHT (+X). Screen-right reaches the sim as
+    /// NEGATIVE `look_yaw` (the same reconcile the plane's ailerons use), so that's a right
+    /// input here.
     #[test]
     fn helicopter_banks_right_to_translate_right() {
         let mut heli = Helicopter::spawn(Pos { x: 0, z: 0 }, 0);
-        for _ in 0..60 {
+        // Pulse a right bank to a modest tilt, then release (attitude holds) and coast.
+        for _ in 0..6 {
             heli.step(Input::new(0.0, 0.0, -1.0, 0)); // screen-right = negative look_yaw
         }
         assert!(
-            heli.roll() > 0,
-            "banking right is right-wing-down (positive roll)"
+            heli.orient().up().0 > 0,
+            "banking right tilts the up-vector toward +X (right wing down)"
         );
+        for _ in 0..80 {
+            heli.step(Input::default());
+        }
         assert!(
             heli.pos().x > 3 * UNIT,
             "a right bank must translate +X (right), got x={}",
@@ -1846,11 +1792,108 @@ mod tests {
         // through 0 to confuse the sign check).
         let h0 = trig::TURN / 4;
         let mut heli = Helicopter::spawn(Pos { x: 0, z: 0 }, h0);
-        heli.step(Input::new(1.0, 0.0, 0.0, 0)); // positive move_strafe = A = yaw left
+        for _ in 0..3 {
+            heli.step(Input::new(1.0, 0.0, 0.0, 0)); // positive move_strafe = A = yaw left
+        }
         assert!(
             heli.heading() < h0,
             "positive move_strafe (A) must yaw LEFT (heading decrease), got {} vs {h0}",
             heli.heading()
+        );
+    }
+
+    /// The owner's #1 ask: BOTH craft can fly fully UPSIDE-DOWN — the world-space caps are
+    /// gone, so a sustained pull loops the craft past vertical and inverts it, with the
+    /// attitude staying a clean unit quaternion (no gimbal blowup / NaN — it's integer). A
+    /// craft is inverted when its up-vector points DOWN (world up.y < 0).
+    #[test]
+    fn both_craft_can_fly_inverted_without_blowup() {
+        // Plane: hold the nose up; within a loop it passes through inverted.
+        let mut plane = Plane::spawn(Pos { x: 0, z: 0 }, 0);
+        let mut plane_inverted = false;
+        for _ in 0..240 {
+            plane.step(Input::default().with_look_pitch(1.0));
+            if plane.orient().up().1 < 0 {
+                plane_inverted = true;
+            }
+            assert_quat_unit(plane.orient());
+        }
+        assert!(plane_inverted, "the plane must be able to fly upside-down");
+
+        // Helicopter: hold forward cyclic; it loops the airframe over the top, inverting it.
+        let mut heli = Helicopter::spawn(Pos { x: 0, z: 0 }, 0);
+        let mut heli_inverted = false;
+        for _ in 0..240 {
+            heli.step(Input::default().with_look_pitch(1.0));
+            if heli.orient().up().1 < 0 {
+                heli_inverted = true;
+            }
+            assert_quat_unit(heli.orient());
+        }
+        assert!(heli_inverted, "the helicopter must be able to fly upside-down");
+    }
+
+    /// The attitude quaternion stays UNIT (magnitude ≈ ONE) through thousands of ticks of
+    /// hard, mixed control — the renormalize-every-tick keeps integer rounding from letting
+    /// it drift or blow up. This is the "no NaN / no gimbal" guarantee in integer form.
+    #[test]
+    fn attitude_stays_unit_under_sustained_input() {
+        let mut plane = Plane::spawn(Pos { x: 0, z: 0 }, 0);
+        for i in 0..3000 {
+            // Mixed pitch/roll/yaw so every body axis is exercised together.
+            let inp = Input::new(1.0, 0.0, if i % 2 == 0 { 1.0 } else { -1.0 }, 0)
+                .with_look_pitch(1.0);
+            plane.step(inp);
+            assert_quat_unit(plane.orient());
+        }
+    }
+
+    /// Two peers flying the SAME scripted aerobatic input stay bit-identical, tick by tick —
+    /// the new nonlinear quaternion integrate/normalize path is folded into [`Sim::state_hash`]
+    /// and must not desync. The `determinism_probe` harness exercises the rapier crab; this
+    /// covers the integer flight model on the lockstep wire (a networked pilot's plane). The
+    /// input mixes pitch, roll, yaw, and throttle so every body axis and the renormalize are
+    /// driven hard for hundreds of ticks (well past inversion).
+    #[test]
+    fn two_peers_flying_the_same_inputs_stay_bit_identical() {
+        let ids = players(1);
+        let pilots = [PlayerId(0)];
+        let mut a = Sim::new_with_pilots(9, &ids, &pilots);
+        let mut b = Sim::new_with_pilots(9, &ids, &pilots);
+        let start = a.plane(PlayerId(0)).unwrap().orient();
+        for t in 0..600u64 {
+            // A scripted aerobatic flight: all four axes active, varying tick to tick.
+            let inp = Input::new(
+                if t % 5 == 0 { 1.0 } else { -0.3 },   // move_strafe → rudder/yaw
+                1.0,                                   // move_forward → throttle up
+                if t % 3 == 0 { -1.0 } else { 1.0 },   // look_yaw → roll
+                0,
+            )
+            .with_look_pitch(if t % 7 == 0 { 1.0 } else { -1.0 }); // pitch
+            let mut m = BTreeMap::new();
+            m.insert(PlayerId(0), inp);
+            a.step(&m);
+            b.step(&m);
+            assert_eq!(a.state_hash(), b.state_hash(), "peers diverged at tick {t}");
+        }
+        // Sanity: the script actually flew a nontrivial attitude (not stuck level), so the
+        // bit-identity above is over a real maneuver, not a no-op.
+        assert_ne!(
+            a.plane(PlayerId(0)).unwrap().orient(),
+            start,
+            "scripted flight must change the attitude"
+        );
+    }
+
+    /// A craft's attitude must be a unit quaternion to ±1 in the [`trig::ONE`] grid — the
+    /// renormalize floors the magnitude near ONE, never NaN, never runaway.
+    fn assert_quat_unit(q: iquat::Quat) {
+        let one = trig::ONE as i64;
+        let n2 = q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z;
+        let mag = isqrt_i128(n2 as i128) as i64;
+        assert!(
+            (mag - one).abs() <= 2,
+            "attitude must stay unit (mag {mag} vs ONE {one}) for {q:?}"
         );
     }
 
@@ -2124,11 +2167,18 @@ mod tests {
         // controllability check — the plane responds to its pitch+throttle inputs.
         let mut sim = Sim::new_with_pilots(0, &players(1), &players(1));
         let y0 = sim.plane(PlayerId(0)).unwrap().pos().y;
-        let mut inp = BTreeMap::new();
-        // Nose up (look_pitch +) while trimming throttle to full (forward +).
-        inp.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0).with_look_pitch(1.0));
+        // Pulse the nose up to a climb attitude (the rate is unclamped now, so holding the
+        // stick would loop — a pilot sets the climb angle, then flies it), then hold full
+        // throttle. The nose-up attitude HOLDS (no auto-level) and the plane climbs.
+        let mut pitch_up = BTreeMap::new();
+        pitch_up.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0).with_look_pitch(1.0));
+        for _ in 0..8 {
+            sim.step(&pitch_up);
+        }
+        let mut throttle = BTreeMap::new();
+        throttle.insert(PlayerId(0), Input::new(0.0, 1.0, 0.0, 0));
         for _ in 0..120 {
-            sim.step(&inp);
+            sim.step(&throttle);
         }
         let y1 = sim.plane(PlayerId(0)).unwrap().pos().y;
         assert!(y1 > y0, "nose-up full throttle should climb, {y0} -> {y1}");
@@ -2408,14 +2458,24 @@ mod tests {
             "plane vel.z must be hashed"
         );
         assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().heading += 1),
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().orient.w += 1),
             h0,
-            "plane heading must be hashed"
+            "plane attitude w must be hashed"
         );
         assert_ne!(
-            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().pitch += 1),
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().orient.x += 1),
             h0,
-            "plane pitch must be hashed"
+            "plane attitude x must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().orient.y += 1),
+            h0,
+            "plane attitude y must be hashed"
+        );
+        assert_ne!(
+            hash_after(&|s| s.planes.get_mut(&pilot).unwrap().orient.z += 1),
+            h0,
+            "plane attitude z must be hashed"
         );
 
         // The crab POSE (driven externally by the NN body, rl#114) is hashed so the quantized

@@ -51,7 +51,7 @@ use crate::lockstep::{Lockstep, TickMsg};
 use crate::net_loop::{Coordinator, NetDriver, PeerMsg};
 use crate::sim::{
     CRAB_SCALE, CockpitPose, Crab, Helicopter, Input, Outcome, Plane, Player, PlayerId,
-    PlayerStatus, Pos, Pos3, Sim, UNIT, buttons, trig, trig_client,
+    PlayerStatus, Pos, Pos3, Sim, UNIT, buttons, iquat_client, trig, trig_client,
 };
 use crate::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
 
