@@ -822,9 +822,14 @@ async fn run_barrier(
                     m.on_beat(from.from, &beat, now);
                 }
                 PeerWire::Tick(msg) => early.push((from.from, msg)),
-                // No server exists yet during formation, so a tick SET can't legitimately arrive
-                // here; ignore a stray one (a peer racing ahead) rather than mishandle it.
-                PeerWire::TickSet(_) => {}
+                // No server exists yet during formation, so a tick SET / roster change / refusal
+                // can't legitimately arrive here; ignore a stray one (a peer racing ahead, or a
+                // mid-game join frame on the wrong phase) rather than mishandle it. A real mid-game
+                // join is handled by the running coordinator, not the formation barrier.
+                PeerWire::TickSet(_)
+                | PeerWire::JoinRequest(_)
+                | PeerWire::RosterChange(_)
+                | PeerWire::Refuse(_) => {}
             }
         }
 
