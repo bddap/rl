@@ -141,6 +141,18 @@ impl Server {
         out
     }
 
+    /// Seed the ledger with inputs that arrived before this server started serving (a fast client
+    /// sending during formation). The completed sets are intentionally discarded: every such input
+    /// is for a tick the clients re-drive through the live exchange anyway (a re-record is
+    /// idempotent), and an input below the emit cursor is dropped outright — so nothing downstream
+    /// needs the sets here. ONE home for this "dropping the sets is safe" reasoning, shared by every
+    /// driver that builds a server.
+    pub fn seed_early(&mut self, early: &[crate::net_loop::PeerMsg]) {
+        for pm in early {
+            let _ = self.record(pm.pid, pm.msg);
+        }
+    }
+
     /// The confirmeds that advanced since each client's last relayed one, marking them relayed. The
     /// dedup that keeps [`TickSet::confirmed`] from re-sending a stale hash (which would spam
     /// `Unverifiable` once it aged out of a client's history window).
@@ -160,6 +172,28 @@ impl Server {
         }
         fresh
     }
+}
+
+/// The role-agnostic core of one SERVER tick, shared by the sync windowed driver
+/// ([`crate::net_loop::Coordinator::exchange`]) and the async headless driver (`game net`): record
+/// the drained remote-client inputs and this peer's own local input into `server`, and return both
+/// the completed sets to broadcast to every client AND the OTHER players' messages to apply to the
+/// local sim. The ONE implementation of the assemble+unpack so the two transports — which must
+/// differ (sync `block_on` vs async `await`) — can't drift on the coordination logic itself.
+/// `remote` is empty for solo (a roster of one), so solo flows through this same function.
+pub fn host_assemble(
+    server: &mut Server,
+    me: PlayerId,
+    local: TickMsg,
+    remote: Vec<crate::net_loop::PeerMsg>,
+) -> (Vec<TickSet>, Vec<crate::net_loop::PeerMsg>) {
+    let mut sets = Vec::new();
+    for pm in remote {
+        sets.extend(server.record(pm.pid, pm.msg));
+    }
+    sets.extend(server.record(me, local));
+    let peer_msgs = sets.iter().flat_map(|s| unpack_tickset(s, me)).collect();
+    (sets, peer_msgs)
 }
 
 /// Unpack a server [`TickSet`] into the per-player messages the client records — one [`PeerMsg`]
@@ -363,24 +397,30 @@ mod tests {
     #[test]
     fn two_clients_stay_in_lockstep_through_the_server() {
         use crate::lockstep::Lockstep;
+        use crate::net_loop::PeerMsg;
+        // Player 0 is the host (owns the server + runs a local client); player 1 is a remote client.
+        // Drive them through the real `host_assemble`/`unpack_tickset` split, no transport.
         let roster = ids(2);
         let mut server = Server::new(&roster);
-        let mut a = Lockstep::new(42, &roster, PlayerId(0));
-        let mut b = Lockstep::new(42, &roster, PlayerId(1));
+        let mut a = Lockstep::new(42, &roster, PlayerId(0)); // host's local client
+        let mut b = Lockstep::new(42, &roster, PlayerId(1)); // remote client
         for t in 0..30u64 {
-            // Each client issues its input and ships it UP to the server.
             let ma = a.submit_local_input(Input::from_axes((t % 3) as f32 - 1.0, 0.5));
             let mb = b.submit_local_input(Input::from_axes(0.0, (t % 2) as f32));
-            let mut sets = server.record(PlayerId(0), ma);
-            sets.extend(server.record(PlayerId(1), mb));
-            // The server broadcasts each COMPLETE set DOWN to both clients; each records the
-            // OTHERS' inputs (its own was filed by `submit_local_input`).
+            // The remote client's input arrives at the host (drained off the transport in real life).
+            let remote = vec![PeerMsg {
+                pid: PlayerId(1),
+                msg: mb,
+            }];
+            let (sets, a_peers) = host_assemble(&mut server, PlayerId(0), ma, remote);
+            // Host applies the others' inputs to its local sim...
+            for pm in a_peers {
+                assert!(a.record_remote(pm.pid, pm.msg).is_none(), "host: no fault");
+            }
+            // ...and broadcasts the same complete sets DOWN; the remote client applies the others'.
             for s in &sets {
-                for pm in unpack_tickset(s, PlayerId(0)) {
-                    assert!(a.record_remote(pm.pid, pm.msg).is_none(), "no fault recording");
-                }
                 for pm in unpack_tickset(s, PlayerId(1)) {
-                    assert!(b.record_remote(pm.pid, pm.msg).is_none(), "no fault recording");
+                    assert!(b.record_remote(pm.pid, pm.msg).is_none(), "client: no fault");
                 }
             }
             assert!(a.try_advance().is_empty());
@@ -390,7 +430,7 @@ mod tests {
         assert_eq!(
             a.sim().state_hash(),
             b.sim().state_hash(),
-            "two clients through one server stay bit-identical (the lockstep digest oracle)"
+            "host + remote client through one server stay bit-identical (the lockstep digest oracle)"
         );
         assert!(
             a.sim().tick() > INPUT_DELAY,
