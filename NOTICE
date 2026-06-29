@@ -7,8 +7,8 @@ separately by their authors: public-domain (CC0) assets are bundled and redistri
 here (see Kenney Input Prompts below); license-restricted assets are NOT redistributed
 (see the Sally crab model below).
 
-Kenney Input Prompts — control glyphs (rl-core/assets/controls/*.png)
----------------------------------------------------------------------
+Kenney Input Prompts — control glyphs (crab-world/assets/controls/*.png)
+-----------------------------------------------------------------------
 The keyboard/mouse/gamepad button icons shown by the in-game control overlay are a
 subset of Kenney's "Input Prompts" pack (https://kenney.nl/assets/input-prompts),
 released under Creative Commons Zero (CC0 1.0, public domain:

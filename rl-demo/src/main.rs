@@ -176,6 +176,14 @@ fn main() {
             // render black before the pipeline warms up.)
             app.add_plugins(
                 DefaultPlugins
+                    // Resolve the committed control glyphs from the bundled `assets/` dir
+                    // regardless of cwd/which bin runs; `BEVY_ASSET_ROOT` overrides (deploy).
+                    .set(AssetPlugin {
+                        file_path: crab_world::assets::bevy_asset_path()
+                            .to_string_lossy()
+                            .into_owned(),
+                        ..default()
+                    })
                     .set(bevy::window::WindowPlugin {
                         primary_window: None,
                         exit_condition: bevy::window::ExitCondition::DontExit,
@@ -212,6 +220,14 @@ fn main() {
             let fullscreen = !args.windowed;
             app.add_plugins(
                 DefaultPlugins
+                    // Resolve the committed control glyphs from the bundled `assets/` dir
+                    // regardless of cwd/which bin runs; `BEVY_ASSET_ROOT` overrides (deploy).
+                    .set(AssetPlugin {
+                        file_path: crab_world::assets::bevy_asset_path()
+                            .to_string_lossy()
+                            .into_owned(),
+                        ..default()
+                    })
                     .set(bevy::window::WindowPlugin {
                         primary_window: Some(bevy::window::Window {
                             title: "Crab RL".into(),
