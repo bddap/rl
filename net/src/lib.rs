@@ -112,12 +112,6 @@ mod desync_test {
     //! pursuing and grabbing, the round resolving — so the hash equality proves
     //! determinism of the ACTUAL sim (player yaw, crab position, statuses, outcome),
     //! not a trivial placeholder.
-    //!
-    //! The vehicle first cut (rl#38) adds [`two_pilot_sims_stay_in_lockstep`]: it flies
-    //! a plane through a multi-hundred-tick throttle/turn/climb/dive sequence on two
-    //! independent sims and asserts their hashes agree every tick — the plane's full
-    //! integer state (3D pos/velocity, heading, pitch) folding into the same hash, so a
-    //! float creeping into the flight math would diverge the peers and fail here.
 
     use std::collections::BTreeMap;
 

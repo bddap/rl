@@ -51,9 +51,9 @@ pub(super) fn spawn_world(
     // screenshot frame.
     windows: Query<(), With<Window>>,
 ) {
-    // The render-frame shrink: the human world (ground, players, planes, the pillar, the camera)
+    // The render-frame shrink: the human world (ground, players, the pillar, the camera)
     // renders this much smaller so the true-physics-size crab towers over it (render==physics; the
-    // crab is NOT inflated — see [`world_render_scale`]). `world`/`world3` already apply it to
+    // crab is NOT inflated — see [`world_render_scale`]). `world`/`lerp_pos3` already apply it to
     // POSITIONS; here it sizes the human-world MESHES. The crab silhouette is the lone exception —
     // it renders at native physics size.
     let rs = world_render_scale();
@@ -481,7 +481,7 @@ fn cockpit_camera(prev: CockpitPose, now: CockpitPose, alpha: f32) -> Transform 
 
 /// Linear-interpolate two sim 3D positions (to meters) by `alpha` — the [`Pos3`]
 /// analogue of [`lerp_pos`], including the altitude axis. Shrunk by [`world_render_scale`]
-/// like [`world3`], so a piloted plane and its cockpit camera sit in the same render frame as
+/// like [`world`], so a piloted vehicle and its cockpit camera sit in the same render frame as
 /// the rest of the human world.
 fn lerp_pos3(a: Pos3, b: Pos3, alpha: f32) -> Vec3 {
     Vec3::new(
