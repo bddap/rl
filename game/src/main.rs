@@ -764,7 +764,7 @@ async fn run_net(args: NetArgs) -> Result<()> {
     let am_host = me == PlayerId(0);
     let server_eid = *id_map
         .iter()
-        .find(|(_, &pid)| pid == PlayerId(0))
+        .find(|(_, pid)| **pid == PlayerId(0))
         .map(|(eid, _)| eid)
         .expect("a frozen roster always contains PlayerId(0)");
     let mut server = am_host.then(|| {

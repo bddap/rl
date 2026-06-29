@@ -171,7 +171,7 @@ impl Server {
 pub fn unpack_tickset(set: &TickSet, me: PlayerId) -> Vec<crate::net_loop::PeerMsg> {
     set.inputs
         .iter()
-        .filter(|(&pid, _)| pid != me)
+        .filter(|(pid, _)| **pid != me)
         .map(|(&pid, &input)| crate::net_loop::PeerMsg {
             pid,
             msg: TickMsg {
@@ -286,7 +286,7 @@ mod tests {
         let mut s = Server::new(&ids(2));
         let c = Confirmed { tick: 0, hash: 0xabc };
         // Player 1's confirmed rides its input; player 0 has none yet.
-        s.record(
+        let _ = s.record(
             PlayerId(0),
             TickMsg {
                 apply_tick: INPUT_DELAY,
@@ -308,7 +308,7 @@ mod tests {
             "the fresh confirmed is relayed in the completing set"
         );
         // Re-sending the SAME confirmed must not relay it again.
-        s.record(
+        let _ = s.record(
             PlayerId(0),
             TickMsg {
                 apply_tick: INPUT_DELAY + 1,
