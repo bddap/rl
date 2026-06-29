@@ -171,6 +171,7 @@ async fn run_net(args: Args) -> Result<()> {
                 // real mid-match join is the running coordinator's job, not this harness.
                 transport::PeerWire::JoinRequest(_)
                 | transport::PeerWire::RosterChange(_)
+                | transport::PeerWire::Welcome(_)
                 | transport::PeerWire::Refuse(_) => {}
             }
         }
