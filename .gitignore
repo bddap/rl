@@ -10,6 +10,7 @@
 .cargo-home/
 .sandbox-env
 *.png
+!docs/**/*.png
 vendor/
 /assets/
 /ckpt*/
