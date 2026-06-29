@@ -146,11 +146,19 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
         let mut total_value_loss = 0.0f32;
         let mut total_entropy = 0.0f32;
         let mut update_count = 0u32;
+        let mut last_kl = 0.0f32;
 
         let bs = config.batch_size;
         let half_log_2pi = 0.5 * (2.0 * std::f32::consts::PI).ln();
 
-        for _epoch in 0..config.epochs_per_update {
+        // Target-KL trust region: the update stops the instant the policy has drifted
+        // `1.5 × target_kl` from the rollout policy. The PPO ratio clip only zeroes
+        // out-of-band sample gradients — it does not bound total KL across the epochs ×
+        // minibatches, so a sharpened policy or a cold-resumed Adam can still step off a
+        // cliff in one iteration. This bounds each iteration's movement to ~`target_kl`
+        // regardless (see `PpoConfig::target_kl`). Labeled so an over-KL minibatch
+        // breaks BOTH loops, not just the inner one.
+        'update: for _epoch in 0..config.epochs_per_update {
             let mut indices: Vec<usize> = (0..n).collect();
             indices.shuffle(rng);
 
@@ -189,12 +197,26 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
                     scaled_diff.powf_scalar(2.0).neg() * 0.5 - log_std_2d - half_log_2pi;
                 let new_lp: Tensor<B, 1> = log_probs_per_dim.sum_dim(1).flatten(0, 1);
 
+                let log_ratio = (new_lp - old_lp).clamp(-20.0, 20.0);
+                let ratio = log_ratio.clone().exp();
+
+                // Schulman's unbiased, non-negative KL estimate `mean((r-1) - ln r)`,
+                // measured on this minibatch's forward — which already reflects every
+                // step applied so far this iteration, so it is the cumulative
+                // rollout→now drift. Crossing the ceiling ends the update before the
+                // step that would walk the policy off the cliff. Checked BEFORE this
+                // minibatch is applied, so a breaking minibatch contributes no step.
+                let approx_kl =
+                    ((ratio.clone() - 1.0) - log_ratio).mean().into_scalar().elem::<f32>();
+                last_kl = approx_kl;
+                if approx_kl > 1.5 * config.target_kl {
+                    break 'update;
+                }
+
                 let entropy_per_dim = log_std.clone()
                     + (0.5 * (2.0 * std::f32::consts::PI * std::f32::consts::E).ln());
                 let entropy = entropy_per_dim.mean();
 
-                let log_ratio = (new_lp - old_lp).clamp(-20.0, 20.0);
-                let ratio = log_ratio.exp();
                 let surr1 = ratio.clone() * advs.clone();
                 let surr2 =
                     ratio.clamp(1.0 - config.clip_epsilon, 1.0 + config.clip_epsilon) * advs;
@@ -224,10 +246,16 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
             }
         }
 
+        // `update_count == 0` only if the very FIRST minibatch already exceeded the
+        // ceiling (the policy was handed in already past the trust region) — leave the
+        // brain untouched and report the drift; `max(1)` guards the average against /0.
+        let denom = update_count.max(1) as f32;
         PpoMetrics {
-            policy_loss: total_policy_loss / update_count as f32,
-            value_loss: total_value_loss / update_count as f32,
-            entropy: total_entropy / update_count as f32,
+            policy_loss: total_policy_loss / denom,
+            value_loss: total_value_loss / denom,
+            entropy: total_entropy / denom,
+            kl: last_kl,
+            steps: update_count,
         }
     }
 }
@@ -287,7 +315,15 @@ mod tests {
         let run = |shuffle_seed: u64| -> PpoMetrics {
             let mut brain = brain.clone();
             let mut optimizer = crab_optimizer::<TrainBackend>();
-            let config = PpoConfig::default();
+            // Disable the target-KL guard here: this test proves the minibatch SHUFFLE
+            // is seeded, which needs the full epochs × minibatches to actually run. The
+            // synthetic rollout's `old_log_prob`s are random (not this brain's), so the
+            // very first minibatch shows a large KL that would otherwise early-stop the
+            // update at zero steps — see `target_kl_guard_stops_an_over_kl_update`.
+            let config = PpoConfig {
+                target_kl: f32::INFINITY,
+                ..PpoConfig::default()
+            };
             let mut ret_norm = ReturnNormalizer::new();
             let mut rng = StdRng::seed_from_u64(shuffle_seed);
             ppo_update_core(
@@ -321,6 +357,51 @@ mod tests {
         assert!(
             differs,
             "a different shuffle seed must change the update result"
+        );
+    }
+
+    /// The target-KL trust region must STOP an update once the policy has moved too
+    /// far, and leave it untouched when the ceiling is infinite. The synthetic
+    /// rollout's `old_log_prob`s don't match the fresh brain, so the rollout→now KL is
+    /// already large on the first minibatch — a finite ceiling early-stops at zero
+    /// steps (the brain is never moved off a policy already past the trust region),
+    /// while an infinite ceiling runs the full `epochs × minibatches`. This is the
+    /// guard that makes the one-update collapse impossible by construction.
+    #[test]
+    fn target_kl_guard_stops_an_over_kl_update() {
+        let device = NdArrayDevice::Cpu;
+        let brain = CrabBrain::<TrainBackend>::new(&device);
+        let rollouts = make_rollouts();
+
+        let run = |target_kl: f32| -> PpoMetrics {
+            let mut brain = brain.clone();
+            let mut optimizer = crab_optimizer::<TrainBackend>();
+            let config = PpoConfig {
+                target_kl,
+                ..PpoConfig::default()
+            };
+            let mut ret_norm = ReturnNormalizer::new();
+            let mut rng = StdRng::seed_from_u64(0x5417);
+            ppo_update_core(
+                &mut brain, &mut optimizer, &config, &rollouts, &device, &mut ret_norm, &mut rng,
+            )
+        };
+
+        // n=256, batch 64, 4 epochs ⇒ 16 minibatches when nothing early-stops.
+        let unguarded = run(f32::INFINITY);
+        assert_eq!(unguarded.steps, 16, "an infinite ceiling runs every minibatch");
+
+        // The mismatched old-log-probs put minibatch 1 already past any sane ceiling, so
+        // the guard stops before applying a single step.
+        let guarded = run(0.03);
+        assert_eq!(
+            guarded.steps, 0,
+            "a finite ceiling stops an already-over-KL update before it moves the brain"
+        );
+        assert!(
+            guarded.kl > 1.5 * 0.03,
+            "the reported KL is the over-threshold drift that triggered the stop, got {}",
+            guarded.kl
         );
     }
 }
