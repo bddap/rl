@@ -5,7 +5,7 @@
 //! What "shouldn't" means, and why we ask Rapier rather than re-deriving it: the body
 //! deliberately lets some collider pairs overlap. A joint's two links overlap at
 //! their shared anchor by construction, so the body disables their contacts
-//! ([`super::body::no_adjacent_contacts`]); and the carapace-nested proximal links
+//! (`body::collision::no_adjacent_contacts`); and the carapace-nested proximal links
 //! collide only with the arena ([`super::body::NESTED_COLLISION`]), so they may sit
 //! buried in the shell. Rapier records exactly these exceptions — a suppressed or
 //! group-filtered pair generates no solver contact — so its narrow phase already

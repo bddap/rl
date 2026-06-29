@@ -25,7 +25,8 @@
 //! thrust axis + the tuning constants). One model, per owner 702.
 //!
 //! ## Why it is policy-safe (owner: never destabilise the trained walking)
-//! The vehicle carries [`crate::bot::body::VEHICLE_GROUP`]; at TRAINING time no vehicle entity
+//! The vehicle carries the body's `VEHICLE_GROUP` collision bit (see [`vehicle_collision`]); at
+//! TRAINING time no vehicle entity
 //! exists, so the crab's collision filter naming that bit matches nothing and the trained physics
 //! is bit-identical. A spawned vehicle is its own rapier island until it actually touches the crab,
 //! so its mere presence changes nothing; only a deliberate strike transfers momentum (the headline
