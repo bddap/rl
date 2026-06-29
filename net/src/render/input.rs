@@ -6,7 +6,7 @@
 //! determinism test drives the exact client arithmetic.
 
 use super::*;
-use super::driver::PendingInput;
+use super::driver::{FlightInput, PendingInput};
 
 
 /// One gamepad's contribution to this frame's control deltas: move axes from the left
@@ -90,6 +90,7 @@ pub(super) fn gather_input(
     time: Res<Time>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     mut pending: ResMut<PendingInput>,
+    mut flight: ResMut<FlightInput>,
     mut pitch: ResMut<CameraPitch>,
     mut yaw: ResMut<CameraYaw>,
 ) {
@@ -203,6 +204,44 @@ pub(super) fn gather_input(
     // sim yaw gets, so while alive it tracks the avatar and when dead it free-looks
     // seamlessly from the last facing. Wrap to keep it bounded over a long spectate.
     yaw.0 = (yaw.0 - d_yaw).rem_euclid(std::f32::consts::TAU);
+
+    // --- Flight inputs (client-local vehicle): RAW pad + keyboard, sampled fresh each frame. The
+    // plane (Ace Combat 6) and ship (Outer Wilds) map these per craft in `flight_control`; reading
+    // them raw — NOT through the sim's merged move/look axes — lets each craft assign a stick to a
+    // different degree of freedom than the foot avatar without the sim's axis-merge fighting it.
+    // The analog stick/trigger magnitudes are read directly here (the documented analog exemption to
+    // the binding round-trip); the discrete keys still come through the bindings (`held`). Never
+    // reaches the deterministic sim — the vehicle is host-authoritative crab-world state off the wire.
+    let mut fi = FlightInput {
+        wasd: Vec2::new(
+            held(Action::StrafeRight) as i32 as f32 - held(Action::StrafeLeft) as i32 as f32,
+            held(Action::MoveForward) as i32 as f32 - held(Action::MoveBack) as i32 as f32,
+        ),
+        match_vel: held(Action::MatchVelocity),
+        ..default()
+    };
+    if grabbed {
+        let d = mouse_motion.delta;
+        fi.mouse = Vec2::new(d.x, d.y) * FLIGHT_MOUSE_SENS;
+    }
+    for gp in gamepads.iter() {
+        // Deadzone on stick MAGNITUDE (matching `pad_stick_axes`), so a resting stick reads zero.
+        let l = gp.left_stick();
+        if l.length() > PAD_STICK_DEADZONE {
+            fi.left += l;
+        }
+        let r = gp.right_stick();
+        if r.length() > PAD_STICK_DEADZONE {
+            fi.right += r;
+        }
+        // Bevy names the analog triggers `*Trigger2` and the shoulder bumpers `*Trigger`.
+        fi.rt += gp.get(GamepadButton::RightTrigger2).unwrap_or(0.0);
+        fi.lt += gp.get(GamepadButton::LeftTrigger2).unwrap_or(0.0);
+        fi.lb |= gp.pressed(GamepadButton::LeftTrigger);
+        fi.rb |= gp.pressed(GamepadButton::RightTrigger);
+        fi.match_vel |= gp.pressed(GamepadButton::South);
+    }
+    *flight = fi;
 }
 
 /// Quit the game (windowed play only): the keyboard Quit key (Esc), or HOLD the gamepad

@@ -81,6 +81,11 @@ const PLAYER_HEIGHT: f32 = 1.8;
 /// per-tick delta; pitch stays client-side.
 const MOUSE_SENS: f32 = 0.0022;
 
+/// Mouse sensitivity for FLIGHT (client-local vehicle): pixels of motion → a unit attitude/aim
+/// intent (clamped to ±1 downstream). Tuned so a normal flick is firm but not twitchy; the vehicle
+/// is off the sim wire, so this only affects feel, never determinism.
+const FLIGHT_MOUSE_SENS: f32 = 0.01;
+
 /// Gamepad look speed (radians/second at full right-stick deflection), scaled by the
 /// frame dt so it's frame-rate independent.
 const PAD_LOOK_SPEED: f32 = 2.5;
