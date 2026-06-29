@@ -16,7 +16,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bevy::prelude::*;
-use bevy_rapier3d::prelude::*;
 use clap::Parser;
 use crab_world::{TrainConfig, Visuals, bot, physics, play};
 
@@ -134,8 +133,8 @@ fn main() {
         // instead of panicking on a present-but-broken file, and the skin
         // (`bot::skin::register`) self-skips instead of half-loading a broken scene. Both read
         // `meshfit::model_path()`, so redirecting it at a guaranteed-absent path is the single
-        // switch that flips them together. The physics bones are then made VISIBLE by forcing
-        // the debug-render on (see `debug_colliders` below).
+        // switch that flips them together. The physics bones are then made VISIBLE by booting
+        // the render-mode cycle in `colliders` (see `initial_render_mode` below).
         unsafe {
             std::env::set_var(
                 "CRAB_MODEL_PATH",
@@ -149,10 +148,11 @@ fn main() {
     let _otel = otel::init("rl-demo");
 
     // `Some(reason)` ⇒ the canonical mesh is unusable, kept so the loudness lands in THREE
-    // places, not just telemetry: the OTEL error below (stderr + OTLP), the forced collider
-    // view, and — in the windowed demo — an on-screen banner (see the Demo arm). The owner's
-    // bug (rl#706) was exactly this: a fallback he could SEE but not identify, so the failure
-    // must name itself on the screen he's looking at, not only in a log he isn't.
+    // places, not just telemetry: the OTEL error below (stderr + OTLP), the forced colliders
+    // render mode (`mesh_ok` decides the initial mode below), and — in the windowed demo — an
+    // on-screen banner (see the Demo arm). The owner's bug (rl#706) was exactly this: a fallback
+    // he could SEE but not identify, so the failure must name itself on the screen he's looking
+    // at, not only in a log he isn't.
     let mesh_fallback_reason: Option<String> = mesh_status.err();
     if let Some(reason) = &mesh_fallback_reason {
         // LOUD via telemetry (stderr + OTLP). `target` namespaces the record so the sink can
@@ -160,16 +160,12 @@ fn main() {
         tracing::error!(
             target: "rl_demo::canonical_mesh",
             reason = %reason,
-            "rl-demo: canonical Sally mesh could not be loaded — falling back to the \
-             physics-bones debug view (the real colliders, NOT the real Sally rig). Fetch it \
+            "rl-demo: canonical Sally mesh could not be loaded — falling back to the honest \
+             collider-wireframe view (the real colliders, NOT the real Sally rig). Fetch it \
              with scripts/fetch-sally.sh or point CRAB_MODEL_PATH at the model."
         );
     }
     let mesh_ok = mesh_fallback_reason.is_none();
-    // Show the physics-bones view whenever the mesh is unusable, OR on explicit request. When
-    // the mesh is fine the cage defaults off (the skinned Sally crab is the view); the demo's
-    // right-arrow still toggles it live.
-    let debug_colliders = !mesh_ok || std::env::var_os("RL_DEBUG_COLLIDERS").is_some();
 
     let mode = if let Some(path) = args.render_video.clone() {
         AppMode::RenderVideo {
@@ -230,21 +226,6 @@ fn main() {
                 Duration::from_secs_f64(1.0 / 60.0)
             };
             app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(interval));
-            // Rapier collider wireframes draw via gizmos, which DO render into the
-            // offscreen screenshot camera (Bevy 0.18) — but only if the plugin is
-            // present. The other arms add it; Screenshot has its own arm, so gate it
-            // here on the same flag or the captured PNG never shows the colliders.
-            if debug_colliders {
-                app.add_plugins(RapierDebugRenderPlugin {
-                    // Collider shapes only — the default also draws per-body axes +
-                    // joint markers, which on a 31-part body is an unreadable tangle.
-                    mode: DebugRenderMode::COLLIDER_SHAPES,
-                    ..default()
-                });
-                // Bright always-in-front markers at each joint pivot — the companion
-                // to the collider cage, gated on the same flag (see body.rs).
-                bot::body::register_pivot_markers(&mut app);
-            }
         }
         AppMode::Demo => {
             // The demo defaults to borderless fullscreen (the Steam launch target is
@@ -278,25 +259,23 @@ fn main() {
                     // LogPlugin to avoid a second-subscriber panic.
                     .disable::<bevy::log::LogPlugin>(),
             );
-            // With the stand-in primitive meshes removed, Rapier's debug-render is
-            // the only in-engine view of the true colliders, so the skin can be
-            // checked against the actual physics shapes. `enabled` only sets the
-            // INITIAL state — the demo's right-arrow toggles `DebugRenderContext`
-            // live — and the demo starts the cage on iff `debug_colliders` (RL_DEBUG_COLLIDERS
-            // OR a missing canonical mesh, where the cage IS the crab the player sees).
-            app.add_plugins(RapierDebugRenderPlugin {
-                enabled: debug_colliders,
-                // Collider shapes only — the default also draws per-body axes +
-                // joint markers, which on a 31-part body is an unreadable tangle.
-                mode: DebugRenderMode::COLLIDER_SHAPES,
-                ..default()
-            });
-            // Pivot markers: a deliberate diagnostic, on with the cage.
-            if debug_colliders {
-                bot::body::register_pivot_markers(&mut app);
-            }
         }
     }
+
+    // The render-mode cycle: the SHARED collider wireframe + mode-naming HUD (the same
+    // `crab_view` GCR uses — ONE wireframe impl, not Rapier's debug-render). Boots in `colliders`
+    // when the canonical Sally mesh is missing (the honest physics view IS the crab the player
+    // sees), else from the `RL_RENDER_MODE`/`RL_DEBUG_COLLIDERS` env (mesh otherwise). The demo's
+    // Right-arrow / D-pad cycles it live (see `play::demo::demo_controls`).
+    let initial_render_mode = if mesh_ok {
+        crab_world::crab_view::RenderMode::from_env()
+    } else {
+        crab_world::crab_view::RenderMode::Colliders
+    };
+    crab_world::crab_view::register(&mut app, initial_render_mode);
+    // Joint-pivot markers: the companion diagnostic, drawn with the cage (the draw self-gates on
+    // the render mode now — see `body::draw_pivot_markers`).
+    bot::body::register_pivot_markers(&mut app);
 
     // Demo and screenshot always render and drive exactly one crab (visuals on,
     // 1 env — parallel envs are a training concept, and training is `rl-train` only).

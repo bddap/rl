@@ -671,9 +671,15 @@ const PIVOT_MARKER_RADIUS: f32 = 0.02;
 /// resolved. Always-in-front comes from [`PivotGizmos`]'s `depth_bias`.
 #[cfg(feature = "render")]
 fn draw_pivot_markers(
+    mode: Option<Res<crate::crab_view::RenderMode>>,
     parts: Query<&GlobalTransform, With<CrabBodyPart>>,
     mut gizmos: Gizmos<PivotGizmos>,
 ) {
+    // The pivots are the companion to the collider cage, so they ride the same render mode —
+    // shown only when colliders are. Absent resource (no cycle wired) ⇒ draw, the prior behavior.
+    if !mode.map(|m| m.shows_colliders()).unwrap_or(true) {
+        return;
+    }
     let color = Color::srgb(1.0, 0.0, 1.0); // magenta
     for gt in &parts {
         gizmos.sphere(
@@ -684,11 +690,11 @@ fn draw_pivot_markers(
     }
 }
 
-/// Wire up the joint-pivot debug markers. Called from `main` alongside the Rapier
-/// collider debug-render and behind the same `RL_DEBUG_COLLIDERS` gate, so the two
-/// physics-truth overlays — collider cages and the pivots they hinge about — appear
-/// together. Drawn through whatever camera renders the gizmos (the windowed demo's
-/// or the offscreen screenshot's), so it shows up in `--screenshot` too.
+/// Wire up the joint-pivot debug markers. Registered unconditionally by the rl-demo; the draw
+/// self-gates on the render mode ([`crate::crab_view::RenderMode::shows_colliders`]), so the
+/// pivots and the collider cage — the two physics-truth overlays — appear together. Drawn
+/// through whatever camera renders the gizmos (the windowed demo's or the offscreen
+/// screenshot's), so it shows up in `--screenshot` too.
 #[cfg(feature = "render")]
 pub fn register_pivot_markers(app: &mut App) {
     app.insert_gizmo_config(

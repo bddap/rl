@@ -101,31 +101,30 @@ pub(super) fn demo_controls(
     mut poke_burst: ResMut<PokeBurst>,
     mut actions: ResMut<CrabActions>,
     mut settle: ResMut<DemoSettle>,
-    // Always present in the demo: the Rapier debug-render plugin is added
-    // unconditionally so this toggle works (RL_DEBUG_COLLIDERS only sets the
-    // initial on/off — see main.rs).
-    mut debug_render: ResMut<DebugRenderContext>,
+    // The SHARED render-mode cycle (the same `crab_view::RenderMode` GCR uses), so the demo and
+    // GCR show the ONE collider wireframe. Replaces the old Rapier debug-render toggle.
+    mut render_mode: ResMut<crate::crab_view::RenderMode>,
 ) {
     let mut reset = keys.just_pressed(KeyCode::KeyR);
     let mut poke = keys.just_pressed(KeyCode::Space);
     let mut quit = keys.just_pressed(KeyCode::Escape);
-    // Right arrow / D-pad Right toggles the collider wireframes live. The arrow
-    // keys are otherwise the orbit camera, but its right-yaw moved to the comma
-    // key so this single binding isn't double-bound (mouse right-drag still orbits).
-    let mut toggle_colliders = keys.just_pressed(KeyCode::ArrowRight);
+    // Right arrow / D-pad Right CYCLES the render view (mesh → mesh+colliders → colliders). The
+    // arrow keys are otherwise the orbit camera, but its right-yaw moved to the comma key so this
+    // single binding isn't double-bound (mouse right-drag still orbits).
+    let mut cycle_view = keys.just_pressed(KeyCode::ArrowRight);
     for gp in gamepads.iter() {
         reset |= gp.just_pressed(GamepadButton::South);
         poke |= gp.just_pressed(GamepadButton::West);
         quit |= gp.just_pressed(GamepadButton::Start);
-        toggle_colliders |= gp.just_pressed(GamepadButton::DPadRight);
+        cycle_view |= gp.just_pressed(GamepadButton::DPadRight);
     }
 
     if quit {
         exit.write(AppExit::Success);
     }
-    if toggle_colliders {
-        debug_render.enabled = !debug_render.enabled;
-        info!("demo collider wireframes: {}", debug_render.enabled);
+    if cycle_view {
+        *render_mode = render_mode.next();
+        info!("demo render mode: {:?}", *render_mode);
     }
     if reset {
         // A manual reset re-tilts too, so the owner can re-roll the righting attempt.

@@ -5112,6 +5112,7 @@ dependencies = [
  "iroh",
  "net",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 

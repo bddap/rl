@@ -100,19 +100,66 @@ impl RenderMode {
     }
 }
 
+/// The corner text node naming the active render mode — the shared HUD label both binaries get.
+#[derive(Component)]
+struct RenderModeLabel;
+
 /// Wire the shared render-mode cage into a render `App`, booting in `initial` (the missing-glb
-/// fallback passes [`RenderMode::Colliders`]). Inserts the [`RenderMode`] resource and the gizmo
-/// cage. The mesh-visibility half lives where each mesh does — the skin in
-/// [`crate::bot::skin`] (shared, reads this resource), GCR's silhouette in `net::render`. Call
-/// once, after the bot/physics systems are installed.
+/// fallback passes [`RenderMode::Colliders`]). Inserts the [`RenderMode`] resource, the gizmo
+/// cage, and the corner label naming the active mode (so the HUD can't drift from the mode — one
+/// source for both GCR and the rl-demo). The mesh-visibility half lives where each mesh does —
+/// the skin in [`crate::bot::skin`] (shared, reads this resource), GCR's silhouette in
+/// `net::render`. Call once, after the bot/physics systems are installed.
 pub fn register(app: &mut App, initial: RenderMode) {
     app.insert_resource(initial);
+    // The crab's render placement (GCR's rigid shift to the game spot) is published by the
+    // external-crab bridge into this resource EVERY armed frame — but `skin::register` only inits
+    // it WHEN a Sally model loads. The colliders-only fallback has no skin, so init it here too
+    // (idempotent) — else the cage would fall back to identity and draw at the ~1 m arena origin
+    // instead of overlaying the giant crab's game spot. `None` (the default) until the bridge
+    // publishes; the rl-demo, with no bridge, leaves it `None` ⇒ identity, which is correct there
+    // (the demo's crab body IS the rendered crab).
+    app.init_resource::<CrabSkinRepose>();
+    app.add_systems(Startup, spawn_render_mode_label);
+    app.add_systems(Update, update_render_mode_label);
     // Draw AFTER transform propagation so each part's `GlobalTransform` holds this frame's
     // physics pose; otherwise the cage lags a frame.
     app.add_systems(
         PostUpdate,
         draw_crab_collider_wireframe.after(TransformSystems::Propagate),
     );
+}
+
+fn spawn_render_mode_label(mut commands: Commands) {
+    commands.spawn((
+        Text::new(""),
+        TextFont {
+            font_size: 18.0,
+            ..default()
+        },
+        TextColor(Color::srgb(0.4, 1.0, 0.55)),
+        // Bottom-right: clear of the status HUD (top) and the hold-to-reveal controls hint
+        // (bottom-left), so the mode line never overlaps them.
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(14.0),
+            right: Val::Px(14.0),
+            ..default()
+        },
+        RenderModeLabel,
+    ));
+}
+
+fn update_render_mode_label(
+    mode: Res<RenderMode>,
+    mut label: Query<&mut Text, With<RenderModeLabel>>,
+) {
+    if !mode.is_changed() {
+        return;
+    }
+    if let Ok(mut text) = label.single_mut() {
+        **text = format!("Render: {}", mode.label());
+    }
 }
 
 /// Draw the crab's live colliders as a gizmo wireframe at the crab's RENDERED pose. Active in
