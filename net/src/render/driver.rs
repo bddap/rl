@@ -205,32 +205,37 @@ pub(super) struct PendingInput {
     pub(super) toggle_vehicle: bool,
 }
 
-/// The local player's SINGLE-PLAYER vehicle, when piloting one. `None` = on foot.
+/// The local player's SINGLE-PLAYER vehicle, when piloting one. `OnFoot` = not in a vehicle.
 ///
 /// Single-player vehicle flight lives ENTIRELY here in the play layer, NOT in the
 /// deterministic sim ([`crate::sim`] stays integer-only and untouched): a solo round
-/// needs no cross-peer lockstep, so the plane is a client-side body the client integrates
-/// itself with the shared [`Plane::step`] flight formula. While piloting, the local foot
-/// player feeds the sim a NEUTRAL input (it just stands at the boarding spot) and the camera
-/// flies from this plane; stepping out drops it and returns the view to the foot player.
+/// needs no cross-peer lockstep, so each vehicle is a client-side body the client integrates
+/// itself with the shared `step` flight formula ([`Plane::step`] / [`Helicopter::step`]).
+/// While piloting, the local foot player feeds the sim a NEUTRAL input (it just stands at the
+/// boarding spot) and the camera flies from the vehicle; stepping out returns the view to the
+/// foot player. The E/X control CYCLES foot → plane → helicopter → foot.
 ///
-/// An enum (not two `Option`s) so the plane and its previous pose are present together or not
-/// at all — the "flying but no prev pose" state is unrepresentable. `prev` is last applied
-/// tick's pose, so [`apply_transforms`] tweens the cockpit camera the same way it interpolates
-/// every sim body. Only ever `Piloting` on the windowed [`InputSource::Solo`] path.
+/// An enum (not `Option`s) so a vehicle and its previous pose are present together or not at
+/// all — the "flying but no prev pose" state is unrepresentable. `prev` is last applied tick's
+/// pose, so [`apply_transforms`] tweens the cockpit camera the same way it interpolates every
+/// sim body. Only ever in a vehicle on the windowed [`InputSource::Solo`] path.
 #[derive(Resource, Default)]
 pub(super) enum LocalVehicle {
     #[default]
     OnFoot,
-    Piloting {
+    Plane {
         plane: Plane,
         prev: Plane,
+    },
+    Helicopter {
+        heli: Helicopter,
+        prev: Helicopter,
     },
 }
 
 impl LocalVehicle {
     pub(super) fn piloting(&self) -> bool {
-        matches!(self, Self::Piloting { .. })
+        !matches!(self, Self::OnFoot)
     }
 
     /// The controls CONTEXT this vehicle state presents — the single mapping from "what am I
@@ -240,7 +245,45 @@ impl LocalVehicle {
     pub(super) fn context(&self) -> GcrContext {
         match self {
             Self::OnFoot => GcrContext::OnFoot,
-            Self::Piloting { .. } => GcrContext::Plane,
+            Self::Plane { .. } => GcrContext::Plane,
+            Self::Helicopter { .. } => GcrContext::Helicopter,
+        }
+    }
+
+    /// This vehicle's `(prev, now)` cockpit poses for the FP camera, or `None` on foot. The
+    /// shared [`CockpitPose`] erases the plane/helicopter difference, so the renderer flies
+    /// either craft through the one `cockpit_camera` formula (no per-vehicle camera copy).
+    pub(super) fn cockpit_poses(&self) -> Option<(CockpitPose, CockpitPose)> {
+        match self {
+            Self::OnFoot => None,
+            Self::Plane { plane, prev } => Some((prev.cockpit_pose(), plane.cockpit_pose())),
+            Self::Helicopter { heli, prev } => Some((prev.cockpit_pose(), heli.cockpit_pose())),
+        }
+    }
+
+    /// The NEXT vehicle in the enter/exit cycle (foot → plane → helicopter → foot), or `None`
+    /// to leave the state unchanged. One place the cycle order lives, so the input toggle and
+    /// any future caller can't disagree on it. `foot` is the local foot player's spot + facing
+    /// while it's alive (`None` if downed): needed only to BOARD from foot — a vehicle→vehicle
+    /// switch spawns the new craft where the current one is, and stepping out needs no spot.
+    fn cycled(&self, foot: Option<(Pos, i32)>) -> Option<Self> {
+        match self {
+            // Board the plane from foot — only if the foot avatar is alive to board.
+            Self::OnFoot => foot.map(|(ground, yaw)| {
+                let plane = Plane::spawn(ground, yaw);
+                Self::Plane { plane, prev: plane }
+            }),
+            // Switch to the helicopter, spawned where the plane is (its XZ + heading).
+            Self::Plane { plane, .. } => {
+                let ground = Pos {
+                    x: plane.pos().x,
+                    z: plane.pos().z,
+                };
+                let heli = Helicopter::spawn(ground, plane.heading());
+                Some(Self::Helicopter { heli, prev: heli })
+            }
+            // Step out to foot.
+            Self::Helicopter { .. } => Some(Self::OnFoot),
         }
     }
 }
@@ -369,9 +412,9 @@ pub(super) fn drive_lockstep(
     world.non_send_resource_mut::<GameState>().accumulator += delta;
 
     // Single-player enter/exit a vehicle (client-local; the sim never sees it). Drain the
-    // E-tap latch ONCE per frame: board a plane at the foot player's spot, or step back out.
-    // Solo only — a networked round freezes its pilot set over the wire at formation (rl#43),
-    // so this toggle is inert there and the deterministic lockstep is untouched.
+    // E-tap latch ONCE per frame and CYCLE foot → plane → helicopter → foot at the foot
+    // player's spot + facing. Solo only — a networked round freezes its pilot set over the
+    // wire at formation (rl#43), so this toggle is inert there and the lockstep is untouched.
     {
         let toggle = std::mem::take(&mut world.resource_mut::<PendingInput>().toggle_vehicle);
         let solo = toggle
@@ -380,24 +423,19 @@ pub(super) fn drive_lockstep(
                 InputSource::Solo
             );
         if solo {
-            if world.resource::<LocalVehicle>().piloting() {
-                // Step out: drop the plane, the camera falls back to the foot player.
-                *world.resource_mut::<LocalVehicle>() = LocalVehicle::OnFoot;
-            } else {
-                // Board: spawn a plane at the local player's current ground spot + facing, if
-                // it is still alive to board. Reuses the sim's one plane-spawn definition.
-                let state = world.non_send_resource::<GameState>();
-                let me = state.ls.me();
-                let boarding = state
-                    .ls
-                    .sim()
-                    .player(me)
-                    .filter(|p| p.status() == PlayerStatus::Alive)
-                    .map(|p| Plane::spawn(p.pos(), p.yaw()));
-                if let Some(plane) = boarding {
-                    *world.resource_mut::<LocalVehicle>() =
-                        LocalVehicle::Piloting { plane, prev: plane };
-                }
+            // Where to board the next vehicle: the local foot player's ground spot + facing,
+            // but only while it's still alive to board (stepping OUT needs no spot).
+            let state = world.non_send_resource::<GameState>();
+            let me = state.ls.me();
+            let boarding = state
+                .ls
+                .sim()
+                .player(me)
+                .filter(|p| p.status() == PlayerStatus::Alive)
+                .map(|p| (p.pos(), p.yaw()));
+            let mut vehicle = world.resource_mut::<LocalVehicle>();
+            if let Some(next) = vehicle.cycled(boarding) {
+                *vehicle = next;
             }
         }
     }
@@ -491,12 +529,19 @@ pub(super) fn drive_lockstep(
         };
         report_faults(&faults, &mut total_desyncs, &tel);
 
-        // Fly the client-side plane one tick with the real input (single-player vehicle),
-        // keeping last tick's pose for the camera interpolation. The sim never sees this — it
-        // is the play layer's own body, so the deterministic core stays integer-only.
-        if let LocalVehicle::Piloting { plane, prev } = &mut *world.resource_mut::<LocalVehicle>() {
-            *prev = *plane;
-            plane.step(input);
+        // Fly the client-side vehicle one tick with the real input (single-player), keeping
+        // last tick's pose for the camera interpolation. The sim never sees this — it is the
+        // play layer's own body, so the deterministic core stays integer-only.
+        match &mut *world.resource_mut::<LocalVehicle>() {
+            LocalVehicle::Plane { plane, prev } => {
+                *prev = *plane;
+                plane.step(input);
+            }
+            LocalVehicle::Helicopter { heli, prev } => {
+                *prev = *heli;
+                heli.step(input);
+            }
+            LocalVehicle::OnFoot => {}
         }
 
         // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step

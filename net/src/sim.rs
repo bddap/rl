@@ -323,6 +323,69 @@ const PLANE_SPAWN_SPEED: i64 = 1000;
 /// Throttle the plane spawns with (cruise setting; see [`PLANE_THROTTLE_MAX`]).
 const PLANE_SPAWN_THROTTLE: i32 = 700;
 
+// --- Helicopter flight tuning ---
+// Arcade rotorcraft (not an aerodynamics sim): a persistent COLLECTIVE lever sets rotor
+// lift straight out of the (tilted) rotor disc, so the craft HOVERS when lift balances
+// gravity, CLIMBS/DESCENDS as the pilot trims collective, and TRANSLATES by tilting the
+// disc with the cyclic — no airspeed is needed for lift, so it takes off and lands
+// VERTICALLY (no runway). Yaw pedals (tail rotor) spin the heading at any speed, hover
+// included. Integer fixed-point so two peers evolve it bit-identically; the same
+// [`UNIT`]/tick(²) and [`trig`] turn-unit grids the plane uses.
+
+/// Downward pull per tick, in [`UNIT`]/tick² — the same gravity the plane feels, so the
+/// two vehicles fall alike.
+const HELI_GRAVITY: i64 = PLANE_GRAVITY;
+
+/// The collective is a PERSISTENT lever in `0..`[`HELI_COLLECTIVE_MAX`] (like the plane's
+/// throttle quadrant): the pilot trims it and it HOLDS. Rotor lift is
+/// `HELI_MAX_LIFT · collective / MAX`.
+const HELI_COLLECTIVE_MAX: i32 = 1000;
+
+/// Collective change per tick while the raise/lower control is held (~0.6 s for a full
+/// idle↔max sweep at [`TICK_HZ`]) — matches the plane throttle's trim rate.
+const HELI_COLLECTIVE_STEP: i32 = 56;
+
+/// Rotor lift at FULL collective, in [`UNIT`]/tick² along the disc normal. Sized 2×
+/// [`HELI_GRAVITY`] so HALF collective hovers (lift == gravity, disc level) and full
+/// collective climbs hard — the hover trim is then DERIVED
+/// ([`HELI_HOVER_COLLECTIVE`]), never a second literal to drift.
+const HELI_MAX_LIFT: i64 = 2 * HELI_GRAVITY;
+
+/// The collective at which a LEVEL rotor's lift exactly balances gravity — a steady hover.
+/// DERIVED (`MAX_LIFT · c/MAX = GRAVITY`), so the hover trim can't drift from the lift
+/// model. The craft SPAWNS here, so it hovers hands-off from tick 0.
+const HELI_HOVER_COLLECTIVE: i32 =
+    (HELI_GRAVITY * HELI_COLLECTIVE_MAX as i64 / HELI_MAX_LIFT) as i32;
+
+/// Per-tick cyclic tilt change at full stick, in [`trig`] turn units — how fast the disc
+/// tilts toward the commanded fore/aft (pitch) or lateral (roll) attitude.
+const HELI_CYCLIC_RATE: i32 = trig::TURN / 90;
+
+/// Cyclic tilt clamp, in [`trig`] turn units (≈30°): the disc LEANS to translate, it
+/// doesn't pitch over. Bounds the horizontal thrust (and so the cruise speed) and keeps
+/// most of the lift vertical so a hard translation only mildly bleeds altitude.
+const HELI_MAX_TILT: i32 = trig::TURN / 12;
+
+/// Cyclic auto-recenter toward level per tick with no stick input, in [`trig`] turn units:
+/// release the cyclic and the disc returns to level, so the craft slows and settles back
+/// into a hover instead of holding a tilt forever (mirrors the plane's roll auto-level).
+const HELI_TILT_RECENTER: i32 = trig::TURN / 300;
+
+/// Per-tick heading change at full yaw-pedal (tail rotor), in [`trig`] turn units. Strong
+/// authority — a helicopter pivots on the spot in a hover (≈150°/s at full pedal at
+/// [`TICK_HZ`]).
+const HELI_YAW_RATE: i32 = trig::TURN / 72;
+
+/// Velocity retained per tick (drag). Heavier than the plane's so the hover is stable and
+/// the craft coasts to a stop when the cyclic centres — release it and it stops, it
+/// doesn't glide. Terminal cruise ≈14 m/s at hover power, faster with more collective.
+const HELI_DAMP_NUM: i64 = 98;
+const HELI_DAMP_DEN: i64 = 100;
+
+/// Helicopter spawn altitude, in [`UNIT`] (3 m): boots a few metres up, already hovering,
+/// so the pilot sees it hold station from tick 0 (then climbs/descends/translates on input).
+const HELI_SPAWN_ALTITUDE: i64 = 3 * UNIT;
+
 /// What a player is doing in the round. Drives both sim logic (only `Alive` players
 /// move, get hunted, and can extract) and rendering (downed = ragdoll/marker,
 /// extracted = removed/safe).
@@ -493,6 +556,124 @@ impl Plane {
     /// integer-only determinism notes.
     pub fn step(&mut self, input: Input) {
         step_plane(self, input);
+    }
+
+    /// This plane's first-person cockpit pose (3D position + heading/pitch/roll). The
+    /// renderer reads it through the shared [`CockpitPose`] so one camera formula serves
+    /// every flyer (plane and helicopter) with no copy to drift.
+    pub fn cockpit_pose(self) -> CockpitPose {
+        CockpitPose {
+            pos: self.pos,
+            heading: self.heading,
+            pitch: self.pitch,
+            roll: self.roll,
+        }
+    }
+}
+
+/// A flyer's first-person cockpit pose: 3D position plus a heading/pitch/roll attitude, all
+/// [`trig`] turn-unit angles (positive pitch = nose up, positive roll = right wing down).
+/// The shared view both the [`Plane`] and the [`Helicopter`] hand the renderer, so the one
+/// cockpit-camera formula (`crate::render`'s `cockpit_camera`) can fly either with no copy
+/// to drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CockpitPose {
+    pub pos: Pos3,
+    pub heading: i32,
+    pub pitch: i32,
+    pub roll: i32,
+}
+
+/// A pilotable helicopter: a flying body with 3D position + velocity, a heading/pitch/roll
+/// attitude, and a persistent COLLECTIVE lever — integer fixed-point, like the [`Plane`], so
+/// two peers evolve it bit-identically.
+///
+/// Arcade rotorcraft flight (see [`step_helicopter`]): rotor lift points out of the disc, so
+/// at the hover collective a LEVEL disc just balances gravity and the craft HOVERS; trimming
+/// collective up/down climbs/descends; tilting the disc with the cyclic (pitch/roll) leans
+/// the lift vector so part of it pushes HORIZONTALLY — the craft translates and the cockpit
+/// banks into it. Yaw pedals spin the heading directly (tail rotor) at any speed, hover
+/// included. Pitch and roll are bounded tilts ([`HELI_MAX_TILT`], clamped, auto-levelling),
+/// so the disc leans to move but never flips. Unlike the plane, lift needs no airspeed, so it
+/// takes off and lands vertically — no runway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Helicopter {
+    pos: Pos3,
+    vel: Pos3,
+    /// Heading in [`trig`] turn units (the horizontal facing).
+    heading: i32,
+    /// Disc fore/aft tilt in [`trig`] turn units, SAME sign convention as the plane
+    /// (positive = nose up). Nose DOWN (negative) leans the lift forward → flies forward;
+    /// clamped to ±[`HELI_MAX_TILT`], auto-levels to 0 with no cyclic input.
+    pitch: i32,
+    /// Disc lateral tilt (bank) in [`trig`] turn units: right wing down is positive →
+    /// leans the lift right → translates right. Clamped to ±[`HELI_MAX_TILT`], auto-levels.
+    roll: i32,
+    /// Collective, a persistent lever in `0..`[`HELI_COLLECTIVE_MAX`]: sets rotor lift.
+    collective: i32,
+}
+
+impl Helicopter {
+    /// World position (3D — includes altitude Y).
+    pub fn pos(self) -> Pos3 {
+        self.pos
+    }
+    /// World velocity in [`UNIT`]/tick (3D).
+    pub fn vel(self) -> Pos3 {
+        self.vel
+    }
+    /// Heading in [`trig`] turn units.
+    pub fn heading(self) -> i32 {
+        self.heading
+    }
+    /// Disc fore/aft tilt in [`trig`] turn units (positive = nose up; nose down flies forward).
+    pub fn pitch(self) -> i32 {
+        self.pitch
+    }
+    /// Disc bank in [`trig`] turn units (right wing down = positive).
+    pub fn roll(self) -> i32 {
+        self.roll
+    }
+    /// Collective setting, `0..`[`HELI_COLLECTIVE_MAX`].
+    pub fn collective(self) -> i32 {
+        self.collective
+    }
+
+    /// Spawn a helicopter HOVERING over a ground point, facing `heading` (turn units): a few
+    /// metres up ([`HELI_SPAWN_ALTITUDE`]), at rest, disc level, collective at the derived
+    /// [`HELI_HOVER_COLLECTIVE`] — so lift balances gravity and it holds station hands-off
+    /// from tick 0. The ONE spawn definition, used by the windowed client's enter-vehicle
+    /// toggle ([`crate::render`]); no second literal to drift.
+    pub fn spawn(ground: Pos, heading: i32) -> Self {
+        Self {
+            pos: Pos3 {
+                x: ground.x,
+                y: HELI_SPAWN_ALTITUDE,
+                z: ground.z,
+            },
+            vel: Pos3::default(),
+            heading,
+            pitch: 0,
+            roll: 0,
+            collective: HELI_HOVER_COLLECTIVE,
+        }
+    }
+
+    /// Advance this helicopter one tick under pilot `input` (arcade rotorcraft flight). The
+    /// ONE heli integrator; see [`step_helicopter`] for the control map and determinism notes.
+    pub fn step(&mut self, input: Input) {
+        step_helicopter(self, input);
+    }
+
+    /// This helicopter's first-person cockpit pose — the shared [`CockpitPose`] the renderer
+    /// flies, identical formula to the plane's.
+    pub fn cockpit_pose(self) -> CockpitPose {
+        CockpitPose {
+            pos: self.pos,
+            heading: self.heading,
+            pitch: self.pitch,
+            roll: self.roll,
+        }
     }
 }
 
@@ -1240,6 +1421,103 @@ fn step_plane(plane: &mut Plane, inp: Input) {
     }
 }
 
+/// Step one cyclic tilt axis (pitch or roll) toward the commanded change `delta`, or
+/// AUTO-LEVEL toward 0 by [`HELI_TILT_RECENTER`] when there's no input — clamped to
+/// ±[`HELI_MAX_TILT`]. Shared by both axes so they can't drift (the same auto-levelling the
+/// plane's roll uses, generalized). Releasing the cyclic returns the disc to level, so the
+/// craft slows and settles back into a hover.
+fn heli_tilt(current: i32, delta: i32) -> i32 {
+    if delta == 0 {
+        let recenter = HELI_TILT_RECENTER.min(current.abs());
+        current - current.signum() * recenter
+    } else {
+        (current + delta).clamp(-HELI_MAX_TILT, HELI_MAX_TILT)
+    }
+}
+
+/// Advance one helicopter one tick from its pilot input — arcade rotorcraft flight (see the
+/// [`Helicopter`] docs), pure integer fixed-point so two peers evolve it bit-identically.
+///
+/// Control map (the [`Input`] axes, re-read for the heli):
+/// - [`Input::move_forward`] → COLLECTIVE: trims the persistent collective lever up (+) /
+///   down (−). More collective → more rotor lift → climb; less → descend. The W/S lever.
+/// - [`Input::look_pitch`] → CYCLIC fore/aft: pushing the stick forward (mouse-up, positive
+///   `look_pitch`) noses the disc DOWN and flies FORWARD; pulling back flies backward.
+/// - [`Input::look_yaw`] → CYCLIC lateral: banks the disc to translate sideways. Screen-
+///   reconciled like the plane's ailerons (`gather_input` negates it), so screen-right banks
+///   right and translates right.
+/// - [`Input::move_strafe`] → YAW PEDALS (tail rotor): a direct heading spin, authority at
+///   any speed (hover included). Negated so screen-left A yaws left, matching the plane rudder.
+///
+/// Order per tick: trim collective → tilt the disc (cyclic, clamped + auto-level) → yaw the
+/// heading (pedals) → rotor lift along the tilted disc normal − gravity → damp (drag) →
+/// integrate position (ground clamp = a vertical landing). The only "trig" is the integer
+/// CORDIC [`trig`] table, never a float.
+fn step_helicopter(heli: &mut Helicopter, inp: Input) {
+    let axis = Input::AXIS_SCALE as i64;
+    let one = trig::ONE as i64;
+
+    // 1) Collective: a persistent lever trimmed up/down by the forward axis (W/S), held
+    //    between ticks. Sign of move_forward = trim direction; magnitude = trim rate.
+    let trim = (inp.move_forward as i64 * HELI_COLLECTIVE_STEP as i64 / axis) as i32;
+    heli.collective = (heli.collective + trim).clamp(0, HELI_COLLECTIVE_MAX);
+
+    // 2) Cyclic: tilt the rotor disc fore/aft (pitch) and laterally (roll), auto-levelling
+    //    to a hover when released. look_pitch is negated so pushing the stick forward
+    //    (positive look_pitch) noses DOWN (negative pitch) and flies forward; look_yaw is
+    //    negated for the screen-right↔sim-X reconcile (as the plane's ailerons are), so
+    //    screen-right banks right (positive roll).
+    let dpitch = (-(inp.look_pitch as i64) * HELI_CYCLIC_RATE as i64 / axis) as i32;
+    heli.pitch = heli_tilt(heli.pitch, dpitch);
+    let droll = (-(inp.look_yaw as i64) * HELI_CYCLIC_RATE as i64 / axis) as i32;
+    heli.roll = heli_tilt(heli.roll, droll);
+
+    // 3) Yaw pedals (tail rotor): spin the heading directly, with authority even in a
+    //    stationary hover. Negated so screen-left A yaws left (mirrors the plane rudder).
+    let pedal = (-(inp.move_strafe as i64) * HELI_YAW_RATE as i64 / axis) as i32;
+    heli.heading = trig::wrap_turns(heli.heading + pedal);
+
+    // 4) Rotor lift along the (tilted) disc normal. Build the disc normal — straight up
+    //    when level, leaning toward +x with right bank and toward +z when nosed down — then
+    //    rotate its horizontal part into the world by the heading. The lift magnitude scales
+    //    with the collective; at the hover lever a level disc's vertical lift equals gravity,
+    //    so it holds altitude, and a tilt steals some lift sideways → translation. (For the
+    //    bounded tilt the normal's magnitude stays ≈ONE, so lift ≈ constant — arcade, not a
+    //    rotor-disc model.)
+    let (sp, cp) = trig::sin_cos(heli.pitch); // · ONE
+    let (sr, cr) = trig::sin_cos(heli.roll); // · ONE
+    let nbx = sr; // bank right (roll +) → lean +x · ONE
+    let nby = cr * cp / one; // mostly-vertical share · ONE
+    let nbz = -(cr * sp) / one; // nose down (pitch −) → lean +z (forward) · ONE
+    let (sh, ch) = trig::sin_cos(heli.heading); // · ONE
+    let wnx = (nbx * ch + nbz * sh) / one; // world normal x · ONE
+    let wnz = (-(nbx * sh) + nbz * ch) / one; // world normal z · ONE
+    let wny = nby; // world normal y (heading doesn't tilt vertical) · ONE
+    let lift_mag = HELI_MAX_LIFT * heli.collective as i64 / HELI_COLLECTIVE_MAX as i64; // UNIT/tick²
+    heli.vel.x += lift_mag * wnx / one;
+    heli.vel.y += lift_mag * wny / one - HELI_GRAVITY;
+    heli.vel.z += lift_mag * wnz / one;
+
+    // 5) Damp (drag): bleed a fixed fraction of velocity so the hover is stable and the
+    //    craft coasts to a stop when the cyclic centres. Integer truncation toward zero is
+    //    identical on every target.
+    heli.vel.x = heli.vel.x * HELI_DAMP_NUM / HELI_DAMP_DEN;
+    heli.vel.y = heli.vel.y * HELI_DAMP_NUM / HELI_DAMP_DEN;
+    heli.vel.z = heli.vel.z * HELI_DAMP_NUM / HELI_DAMP_DEN;
+
+    // 6) Integrate position. Don't sink through the ground: clamp Y≥0 and kill a downward
+    //    velocity on contact — a descent ends in a (crude) vertical landing.
+    heli.pos.x += heli.vel.x;
+    heli.pos.y += heli.vel.y;
+    heli.pos.z += heli.vel.z;
+    if heli.pos.y < 0 {
+        heli.pos.y = 0;
+        if heli.vel.y < 0 {
+            heli.vel.y = 0;
+        }
+    }
+}
+
 /// Integer square root (floor) of a non-negative `i128`, via Newton's method on
 /// integers. Deterministic on every target (no float `sqrt`, whose last bit can
 /// differ across hardware); used to normalize the crab's pursuit vector from an i128
@@ -1471,6 +1749,112 @@ mod tests {
         assert!(
             stall.pos().y < cruise.pos().y,
             "a stalled plane must sink below cruise altitude"
+        );
+    }
+
+    /// The defining helicopter property: at the spawn (hover) collective with the disc level
+    /// and no input, lift EXACTLY balances gravity, so the craft holds station — same
+    /// altitude, zero velocity, indefinitely. Integer-exact (the hover collective is derived
+    /// to make `lift == gravity`), so it can't slowly sink or balloon.
+    #[test]
+    fn helicopter_hovers_hands_off() {
+        let mut heli = Helicopter::spawn(Pos { x: 0, z: 0 }, 0);
+        let spawn_y = heli.pos().y;
+        for _ in 0..120 {
+            heli.step(Input::default());
+        }
+        assert_eq!(heli.pos().y, spawn_y, "hover must hold altitude exactly");
+        assert_eq!(
+            (heli.vel().x, heli.vel().y, heli.vel().z),
+            (0, 0, 0),
+            "a hands-off hover stays at rest"
+        );
+        assert_eq!((heli.pitch(), heli.roll()), (0, 0), "the disc stays level");
+    }
+
+    /// Collective is vertical control: raising it (W) CLIMBS, dropping it (S) DESCENDS — and
+    /// a full descent ENDS ON THE GROUND (vertical landing, no runway), not falling through it.
+    #[test]
+    fn helicopter_collective_climbs_descends_and_lands() {
+        let mut heli = Helicopter::spawn(Pos { x: 0, z: 0 }, 0);
+        let y0 = heli.pos().y;
+        for _ in 0..30 {
+            heli.step(Input::from_axes(0.0, 1.0)); // raise collective, hold
+        }
+        assert!(
+            heli.pos().y > y0 + 3 * UNIT,
+            "more collective must climb (got {} vs spawn {y0})",
+            heli.pos().y
+        );
+
+        // From the climb, chop the collective and hold: it descends and settles ON the ground.
+        for _ in 0..240 {
+            heli.step(Input::from_axes(0.0, -1.0)); // collective to idle, holding
+        }
+        assert_eq!(heli.pos().y, 0, "idle collective lands it on the ground");
+        assert_eq!(heli.vel().y, 0, "a landing kills the downward velocity");
+    }
+
+    /// Cyclic forward translates the craft FORWARD (push the stick = positive `look_pitch`)
+    /// and noses the disc DOWN to do it — tilt-to-move. Mostly +Z (its facing) with little
+    /// sideways drift, and the disc auto-LEVELS back toward a hover once the stick centres.
+    #[test]
+    fn helicopter_cyclic_pitches_down_to_fly_forward() {
+        let mut heli = Helicopter::spawn(Pos { x: 0, z: 0 }, 0);
+        for _ in 0..60 {
+            heli.step(Input::default().with_look_pitch(1.0)); // push cyclic forward
+        }
+        assert!(heli.pitch() < 0, "flying forward noses the disc DOWN");
+        assert!(
+            heli.pos().z > 3 * UNIT,
+            "cyclic forward must translate +Z (forward), got z={}",
+            heli.pos().z
+        );
+        assert!(
+            heli.pos().x.abs() < heli.pos().z / 4,
+            "forward cyclic moves mostly forward, not sideways"
+        );
+        // Release the cyclic: the disc levels back out (auto-hover).
+        for _ in 0..120 {
+            heli.step(Input::default());
+        }
+        assert_eq!(heli.pitch(), 0, "releasing the cyclic levels the disc");
+    }
+
+    /// Cyclic right banks the disc right (right wing down, positive roll) and translates the
+    /// craft to its RIGHT (+X). Screen-right reaches the sim as NEGATIVE `look_yaw` (the same
+    /// reconcile the plane's ailerons use), so that's what a right input is here.
+    #[test]
+    fn helicopter_banks_right_to_translate_right() {
+        let mut heli = Helicopter::spawn(Pos { x: 0, z: 0 }, 0);
+        for _ in 0..60 {
+            heli.step(Input::new(0.0, 0.0, -1.0, 0)); // screen-right = negative look_yaw
+        }
+        assert!(
+            heli.roll() > 0,
+            "banking right is right-wing-down (positive roll)"
+        );
+        assert!(
+            heli.pos().x > 3 * UNIT,
+            "a right bank must translate +X (right), got x={}",
+            heli.pos().x
+        );
+    }
+
+    /// Yaw pedals (the `move_strafe` axis, A/D) spin the heading even from a stationary
+    /// hover — A reaches the sim as POSITIVE `move_strafe` (after `gather_input`'s negation)
+    /// and must yaw LEFT, matching the plane's rudder sign.
+    #[test]
+    fn helicopter_pedals_yaw_in_a_hover() {
+        // Spawn facing a quarter-turn so a small left yaw stays a plain decrease (no wrap
+        // through 0 to confuse the sign check).
+        let h0 = trig::TURN / 4;
+        let mut heli = Helicopter::spawn(Pos { x: 0, z: 0 }, h0);
+        heli.step(Input::new(1.0, 0.0, 0.0, 0)); // positive move_strafe = A = yaw left
+        assert!(
+            heli.heading() < h0,
+            "positive move_strafe (A) must yaw LEFT (heading decrease), got {} vs {h0}",
+            heli.heading()
         );
     }
 

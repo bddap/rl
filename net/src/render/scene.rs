@@ -472,14 +472,15 @@ pub(super) fn apply_transforms(
     // now flies the plane (pitch/roll), so there is no separate free-look while piloting —
     // the view IS the plane's attitude. An on-foot player keeps the ground eye view.
     if let Ok(mut cam) = cam_q.single_mut() {
-        if let LocalVehicle::Piloting { plane, prev } = &*vehicle {
-            // Single-player: fly from the CLIENT-side plane (the play layer's own body — it
-            // is not in the sim, so the deterministic core stays integer-only).
-            *cam = plane_cockpit_camera(*prev, *plane, alpha);
+        if let Some((prev, now)) = vehicle.cockpit_poses() {
+            // Single-player: fly from the CLIENT-side vehicle (the play layer's own body — it
+            // is not in the sim, so the deterministic core stays integer-only). The one
+            // cockpit formula flies either craft from its shared pose.
+            *cam = cockpit_camera(prev, now, alpha);
         } else if let Some(plane_now) = sim.plane(local) {
             // A SIM-side pilot (networked vehicle, rl#43): same cockpit view from sim state.
             let plane_prev = state.prev.planes.get(&local).copied().unwrap_or(plane_now);
-            *cam = plane_cockpit_camera(plane_prev, plane_now, alpha);
+            *cam = cockpit_camera(plane_prev.cockpit_pose(), plane_now.cockpit_pose(), alpha);
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
@@ -501,19 +502,19 @@ pub(super) fn apply_transforms(
     }
 }
 
-/// The first-person cockpit camera for a plane: eye at the interpolated 3D position,
-/// looking along the interpolated heading + pitch, with the horizon BANKED by the plane's
-/// roll (the cockpit up-vector tilts with the wings, so a banked turn looks like one). The
-/// ONE cockpit-view formula, shared by the single-player client vehicle and the sim-side
-/// networked pilot, so both fly from the identical view with no copy to drift.
-fn plane_cockpit_camera(prev: Plane, now: Plane, alpha: f32) -> Transform {
-    let eye = lerp_pos3(prev.pos(), now.pos(), alpha);
-    let heading = lerp_yaw(prev.heading(), now.heading(), alpha);
+/// The first-person cockpit camera for a flyer: eye at the interpolated 3D position, looking
+/// along the interpolated heading + pitch, with the horizon BANKED by the craft's roll (the
+/// cockpit up-vector tilts with the attitude, so a banked turn looks like one). The ONE
+/// cockpit-view formula, taking the shared [`CockpitPose`] so it flies EVERY craft — the
+/// single-player plane and helicopter and the sim-side networked pilot — with no copy to drift.
+fn cockpit_camera(prev: CockpitPose, now: CockpitPose, alpha: f32) -> Transform {
+    let eye = lerp_pos3(prev.pos, now.pos, alpha);
+    let heading = lerp_yaw(prev.heading, now.heading, alpha);
     // Pitch/roll reuse lerp_yaw because they're turn-unit angles too; since both are bounded
     // (never wrap), the shortest-arc handling is a harmless no-op here.
-    let plane_pitch = lerp_yaw(prev.pitch(), now.pitch(), alpha);
-    let roll = lerp_yaw(prev.roll(), now.roll(), alpha);
-    let look_dir = look_direction(heading, plane_pitch);
+    let pitch = lerp_yaw(prev.pitch, now.pitch, alpha);
+    let roll = lerp_yaw(prev.roll, now.roll, alpha);
+    let look_dir = look_direction(heading, pitch);
     // Bank the camera's up-vector by rolling Y about the look direction. Positive sim roll
     // is right-wing-down, which tilts the horizon clockwise from the pilot's seat — a
     // negative rotation about the forward look axis.

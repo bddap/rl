@@ -42,6 +42,10 @@ pub enum GcrContext {
     OnFoot,
     /// Flying the single-player plane (client-local; see [`crate::render`]'s `LocalVehicle`).
     Plane,
+    /// Flying the single-player helicopter (client-local; the other [`LocalVehicle`] mode). The
+    /// E/X enter-vehicle control CYCLES foot → plane → helicopter → foot, so each vehicle is a
+    /// context here with its own row list; the HUD names and labels the active one automatically.
+    Helicopter,
 }
 
 /// A controllable action in Giant Crab Rescue. The move axes are split into four discrete
@@ -62,10 +66,10 @@ pub enum Action {
     Restart,
     /// Quit the client (local `AppExit`; never touches the sim).
     Quit,
-    /// Enter the vehicle/plane when on foot, or exit back to foot when piloting
-    /// (single-player). A tap-toggle handled entirely in the windowed client's play
-    /// layer ([`crate::render`]) — like [`Quit`](Action::Quit) it never crosses the
-    /// wire or the deterministic sim, so the lockstep crab game is unaffected.
+    /// CYCLE the single-player vehicle: foot → plane → helicopter → foot. A tap handled
+    /// entirely in the windowed client's play layer ([`crate::render`]) — like
+    /// [`Quit`](Action::Quit) it never crosses the wire or the deterministic sim, so the
+    /// lockstep crab game is unaffected.
     EnterExit,
     /// Hold to reveal the full control overlay; release to hide. Pure client UI.
     RevealControls,
@@ -127,13 +131,14 @@ impl ControlScheme for GcrControls {
     }
 
     fn contexts() -> &'static [GcrContext] {
-        &[GcrContext::OnFoot, GcrContext::Plane]
+        &[GcrContext::OnFoot, GcrContext::Plane, GcrContext::Helicopter]
     }
 
     fn context_rows(ctx: GcrContext) -> &'static [ContextRow<Self>] {
         match ctx {
             GcrContext::OnFoot => &FOOT_ROWS,
             GcrContext::Plane => &PLANE_ROWS,
+            GcrContext::Helicopter => &HELI_ROWS,
         }
     }
 
@@ -141,6 +146,7 @@ impl ControlScheme for GcrControls {
         match ctx {
             GcrContext::OnFoot => "On foot",
             GcrContext::Plane => "Piloting plane",
+            GcrContext::Helicopter => "Piloting helicopter",
         }
     }
 
@@ -148,6 +154,7 @@ impl ControlScheme for GcrControls {
         match ctx {
             GcrContext::OnFoot => "foot",
             GcrContext::Plane => "plane",
+            GcrContext::Helicopter => "heli",
         }
     }
 
@@ -155,6 +162,7 @@ impl ControlScheme for GcrControls {
         match id {
             "foot" | "onfoot" => Some(GcrContext::OnFoot),
             "plane" => Some(GcrContext::Plane),
+            "heli" | "helicopter" => Some(GcrContext::Helicopter),
             _ => None,
         }
     }
@@ -302,7 +310,31 @@ pub const PLANE_ROWS: [ContextRow<GcrControls>; 9] = [
     ContextRow { action: Action::MoveBack, label: "Throttle down" },
     ContextRow { action: Action::StrafeLeft, label: "Rudder left (yaw)" },
     ContextRow { action: Action::StrafeRight, label: "Rudder right (yaw)" },
-    ContextRow { action: Action::EnterExit, label: "Exit plane" },
+    // E cycles foot → plane → helicopter → foot, so from the plane it boards the helicopter.
+    ContextRow { action: Action::EnterExit, label: "Switch to heli" },
+    ContextRow { action: Action::Restart, label: "Restart round" },
+    ContextRow { action: Action::Quit, label: "Quit" },
+    ContextRow { action: Action::RevealControls, label: "Controls" },
+];
+
+/// The PILOTING-HELICOPTER context: the SAME bindings as foot/plane, re-labelled for what
+/// [`crate::sim`]'s `step_helicopter` does with each — `move_forward` (W/S) trims the
+/// COLLECTIVE (climb/descend), the mouse [`Look`](Action::Look) is the CYCLIC (tilt the rotor
+/// disc to translate), and `move_strafe` (A/D) is the YAW PEDALS (tail-rotor spin). The
+/// E-cycle reaches foot from here, so `EnterExit` reads "Exit to foot". `Extract` is omitted —
+/// the foot player feeds the sim neutral input while piloting, so the pickup is inert aloft.
+///
+/// Pedal sign: `gather_input` negates the strafe axis once (`render`'s screen-right↔sim-X
+/// reconcile), so A (`StrafeLeft`) reaches the sim as POSITIVE `move_strafe`, which
+/// `step_helicopter` yaws LEFT — so the labels ride those actions (A = yaw left, D = yaw
+/// right), pinned by the sim-side `helicopter_pedals_yaw_in_a_hover` test.
+pub const HELI_ROWS: [ContextRow<GcrControls>; 9] = [
+    ContextRow { action: Action::Look, label: "Cyclic — tilt to move" },
+    ContextRow { action: Action::MoveForward, label: "Collective up (climb)" },
+    ContextRow { action: Action::MoveBack, label: "Collective down (descend)" },
+    ContextRow { action: Action::StrafeLeft, label: "Yaw left (pedal)" },
+    ContextRow { action: Action::StrafeRight, label: "Yaw right (pedal)" },
+    ContextRow { action: Action::EnterExit, label: "Exit to foot" },
     ContextRow { action: Action::Restart, label: "Restart round" },
     ContextRow { action: Action::Quit, label: "Quit" },
     ContextRow { action: Action::RevealControls, label: "Controls" },
@@ -419,7 +451,8 @@ mod tests {
         Action::RevealControls,
     ];
 
-    const ALL_CONTEXTS: [GcrContext; 2] = [GcrContext::OnFoot, GcrContext::Plane];
+    const ALL_CONTEXTS: [GcrContext; 3] =
+        [GcrContext::OnFoot, GcrContext::Plane, GcrContext::Helicopter];
 
     /// Every [`Action`] / [`GcrContext`] is exhaustively classified (so a new variant can't be
     /// added without declaring it here), and the framework proves each action has exactly one
@@ -444,7 +477,7 @@ mod tests {
         }
         fn ctx_classified(c: GcrContext) -> bool {
             match c {
-                GcrContext::OnFoot | GcrContext::Plane => true,
+                GcrContext::OnFoot | GcrContext::Plane | GcrContext::Helicopter => true,
             }
         }
         assert!(ALL_ACTIONS.iter().copied().all(action_classified));
@@ -488,7 +521,7 @@ mod tests {
         assert!(plane.iter().any(|l| l.label == "Throttle up"));
         assert!(plane.iter().any(|l| l.label == "Bank / pitch (fly)"));
         assert!(plane.iter().any(|l| l.label == "Rudder left (yaw)"));
-        assert!(plane.iter().any(|l| l.label == "Exit plane"));
+        assert!(plane.iter().any(|l| l.label == "Switch to heli"));
         // The on-foot ground labels are gone in flight (no misleading "Strafe"/"Forward").
         assert!(!plane.iter().any(|l| l.label == "Strafe left"));
         assert!(!plane.iter().any(|l| l.label == "Forward"));
@@ -496,6 +529,37 @@ mod tests {
         // The context labels name the active vehicle.
         assert_eq!(GcrControls::context_label(GcrContext::OnFoot), "On foot");
         assert_eq!(GcrControls::context_label(GcrContext::Plane), "Piloting plane");
+    }
+
+    /// The helicopter context is its OWN legend — distinct from foot AND plane — re-labelling
+    /// the same keys for rotorcraft control (collective / cyclic / pedals) and naming the
+    /// active vehicle, riding the one binding table (no parallel control system).
+    #[test]
+    fn heli_context_relabels_and_differs_from_foot_and_plane() {
+        let foot = legend::<GcrControls>(GcrContext::OnFoot, Device::KeyboardMouse);
+        let plane = legend::<GcrControls>(GcrContext::Plane, Device::KeyboardMouse);
+        let heli = legend::<GcrControls>(GcrContext::Helicopter, Device::KeyboardMouse);
+        let labels = |ls: &[crab_world::controls::LegendLine]| {
+            ls.iter().map(|l| l.label).collect::<Vec<_>>()
+        };
+        assert_ne!(labels(&heli), labels(&foot), "heli legend differs from foot");
+        assert_ne!(labels(&heli), labels(&plane), "heli legend differs from plane");
+        // Rotorcraft labels reflect what `step_helicopter` does with each input.
+        assert!(heli.iter().any(|l| l.label == "Collective up (climb)"));
+        assert!(heli.iter().any(|l| l.label == "Cyclic — tilt to move"));
+        assert!(heli.iter().any(|l| l.label == "Yaw left (pedal)"));
+        assert!(heli.iter().any(|l| l.label == "Exit to foot"));
+        // No misleading ground / plane labels in the helicopter.
+        assert!(!heli.iter().any(|l| l.label == "Throttle up"));
+        assert!(!heli.iter().any(|l| l.label == "Strafe left"));
+        assert!(!heli.iter().any(|l| l.label == "Extract"), "no Extract while piloting");
+        // The heli reuses the SAME physical keys as foot/plane (one binding, re-labelled).
+        assert_eq!(
+            binding::<GcrControls>(Action::MoveForward).unwrap().keyboard.keys,
+            &[Key::W]
+        );
+        assert!(HELI_ROWS.iter().any(|r| r.action == Action::MoveForward));
+        assert_eq!(GcrControls::context_label(GcrContext::Helicopter), "Piloting helicopter");
     }
 
     /// The throttle/rudder keys in the plane context are the SAME physical keys as the foot
@@ -516,6 +580,7 @@ mod tests {
     fn context_from_id_round_trips() {
         assert_eq!(GcrControls::context_from_id("foot"), Some(GcrContext::OnFoot));
         assert_eq!(GcrControls::context_from_id("plane"), Some(GcrContext::Plane));
+        assert_eq!(GcrControls::context_from_id("heli"), Some(GcrContext::Helicopter));
         assert_eq!(GcrControls::context_from_id("nope"), None);
     }
 
