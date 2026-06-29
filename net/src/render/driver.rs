@@ -609,8 +609,9 @@ pub(super) fn drive_lockstep(
                 );
                 // Mirror the vehicle body's freshly-stepped arena pose into `LocalVehicle` for the
                 // cockpit camera's interpolation (the float analogue of the `SimSnapshot::capture`
-                // above). One body at most; read its Transform and shift `now`→`prev`. None while
-                // on foot or the frame a boarded body hasn't spawned yet (the seed pose holds).
+                // above). One body at most; read its Transform and shift `now`→`prev`. None while on
+                // foot or before a boarded body has spawned — `cockpit_poses` then returns `None` and
+                // the camera holds the foot view (no fabricated pose).
                 if let Some(pose) = read_vehicle_pose(world) {
                     world.resource_mut::<LocalVehicle>().update_pose(pose);
                 }

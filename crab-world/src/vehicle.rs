@@ -398,9 +398,10 @@ mod tests {
         assert!(nose_y > 0.0, "positive pitch must raise the nose, got nose.y={nose_y}");
     }
 
-    /// DIRECTION pin: a positive `yaw` turns the nose toward +X (right) — `drive_lockstep` feeds
-    /// `yaw = -move_strafe`, so A (positive `move_strafe`) reaches the craft as a yaw-LEFT torque,
-    /// which is what the "Rudder left" label promises.
+    /// DIRECTION pin: a positive `yaw` control (a +Y torque) turns the nose toward +X (right). The
+    /// driver feeds `yaw = -move_strafe`, so the player's A key (positive `move_strafe`) yaws LEFT —
+    /// the sign the "Rudder left" label rides — but that reconciliation lives in `drive_lockstep`;
+    /// here we pin only the force model's own convention.
     #[test]
     fn positive_yaw_turns_nose_right() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::ZERO);
