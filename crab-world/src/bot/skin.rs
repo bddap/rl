@@ -115,7 +115,7 @@ pub struct SkinRepose {
 
 impl SkinRepose {
     /// The world-space repose matrix: `pivot + scale·((p + shift) − pivot)` for any point `p`.
-    /// `pub` so the GCR debug-wireframe overlay (`net::render::debug_wireframe`) can repose the
+    /// `pub` so the shared collider wireframe (`crate::crab_view`) can repose the
     /// live crab colliders by the SAME transform the skin uses — one source, so the cage can't
     /// drift from the rendered crab.
     pub fn matrix(&self) -> Mat4 {
@@ -395,15 +395,26 @@ fn repair_skins(
     }
 }
 
-/// Reveal a skin once it has paired. A skin spawns `Hidden` because an unpaired
-/// one is a bind-pose statue sitting off the physics body; the moment its bones
-/// are driven it should show. The colliders themselves are never rendered as
-/// meshes (Rapier's debug-render is the physics view), so the skin is the whole
-/// visible crab and just stays on after pairing. Writes only on change.
-fn reveal_skin(mut roots: Query<(&CrabSkin, &mut Visibility)>) {
+/// Reveal a paired skin — UNLESS the render mode hides the mesh. A skin spawns `Hidden`
+/// because an unpaired one is a bind-pose statue sitting off the physics body; the moment its
+/// bones are driven it should show. But the colliders-only render mode
+/// ([`crate::crab_view::RenderMode::Colliders`] — the player's view toggle, and the missing-glb
+/// fallback) hides the mesh so the wireframe cage reads clean, so the target visibility is
+/// `paired AND mode.shows_mesh()`. `Option<Res<RenderMode>>`: absent in the headless trainer
+/// (no cycle) ⇒ default to showing the paired skin, the prior behavior. Writes only on change.
+fn reveal_skin(
+    mode: Option<Res<crate::crab_view::RenderMode>>,
+    mut roots: Query<(&CrabSkin, &mut Visibility)>,
+) {
+    let show_mesh = mode.map(|m| m.shows_mesh()).unwrap_or(true);
     for (skin, mut vis) in roots.iter_mut() {
-        if matches!(skin.phase, Pairing::Paired) && *vis != Visibility::Visible {
-            *vis = Visibility::Visible;
+        let want = if matches!(skin.phase, Pairing::Paired) && show_mesh {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
         }
     }
 }

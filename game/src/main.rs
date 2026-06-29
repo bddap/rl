@@ -151,13 +151,12 @@ struct PlayArgs {
     #[arg(long, value_name = "DIR")]
     nn_crab_checkpoint: Option<PathBuf>,
 
-    /// Start the debug-wireframe collider overlay in this mode (default: off, the
-    /// player-facing showcase). `aligned` reposes the crab colliders to the giant render
-    /// scale so the cage overlays the mesh; `raw` is rapier's debug-render at true physics
-    /// scale (crab tiny + offset — the scale-mismatch diagnostic). F3 cycles it live. Unset
-    /// falls back to the `RL_DEBUG_WIREFRAME` / `RL_DEBUG_COLLIDERS` env (off otherwise).
-    #[arg(long, value_name = "off|aligned|raw")]
-    debug_wireframe: Option<String>,
+    /// Start the crab render view in this mode (default: mesh, the player-facing showcase).
+    /// `mesh+colliders` overlays the honest collider wireframe on the mesh; `colliders` shows
+    /// the wireframe alone. The `CycleRenderMode` control (V / pad B) cycles it live. Unset falls
+    /// back to the `RL_RENDER_MODE` / `RL_DEBUG_COLLIDERS` env (mesh otherwise).
+    #[arg(long, value_name = "mesh|mesh+colliders|colliders")]
+    render_mode: Option<String>,
 }
 
 #[derive(Parser)]
@@ -204,11 +203,11 @@ struct FpScreenshotArgs {
     #[arg(long, value_name = "DIR")]
     nn_crab_checkpoint: Option<PathBuf>,
 
-    /// Capture the debug-wireframe collider overlay in this mode (default: off). `aligned`
-    /// draws the crab colliders reposed to the giant render scale (overlays the mesh); `raw`
-    /// is rapier's debug-render at true physics scale. The evidence path for the toggle.
-    #[arg(long, value_name = "off|aligned|raw")]
-    debug_wireframe: Option<String>,
+    /// Capture the crab render view in this mode (default: mesh). `mesh+colliders` overlays the
+    /// honest collider wireframe on the mesh; `colliders` shows the wireframe alone. The evidence
+    /// path for the render-mode cycle + the missing-glb fallback.
+    #[arg(long, value_name = "mesh|mesh+colliders|colliders")]
+    render_mode: Option<String>,
 }
 
 #[derive(Parser)]
@@ -566,8 +565,8 @@ fn run_play(args: PlayArgs) -> Result<()> {
     // A scripted networked round whose peers disagree on the brain+colliders can't arm Sally and
     // refuses (rl#114) — surfaced here as a clean error exit with the actionable fix (rl#115), not a
     // panic/abort. The interactive menu handles its own unarmable case in-client.
-    let wire = resolve_wire_mode(args.debug_wireframe.as_deref())?;
-    render::build_windowed_app(boot, external_crab, wire)?.run();
+    let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
+    render::build_windowed_app(boot, external_crab, render_mode)?.run();
     Ok(())
 }
 
@@ -637,19 +636,20 @@ fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
     if external_crab.is_some() {
         render::pin_process_pools();
     }
-    let wire = resolve_wire_mode(args.debug_wireframe.as_deref())?;
-    render::build_screenshot_app(ls, cfg, external_crab, wire).run();
+    let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
+    render::build_screenshot_app(ls, cfg, external_crab, render_mode).run();
     Ok(())
 }
 
-/// Resolve the `--debug-wireframe` flag into a [`render::WireMode`]: an explicit value is
-/// parsed (rejecting an unknown token with an actionable error), and an absent flag falls
-/// back to the `RL_DEBUG_WIREFRAME` / `RL_DEBUG_COLLIDERS` env (off by default).
-fn resolve_wire_mode(flag: Option<&str>) -> Result<render::WireMode> {
+/// Resolve the `--render-mode` flag into a [`render::RenderMode`]: an explicit value is parsed
+/// (rejecting an unknown token with an actionable error), and an absent flag falls back to the
+/// `RL_RENDER_MODE` / `RL_DEBUG_COLLIDERS` env (mesh by default).
+fn resolve_render_mode(flag: Option<&str>) -> Result<render::RenderMode> {
     match flag {
-        Some(s) => render::WireMode::parse(s)
-            .ok_or_else(|| anyhow::anyhow!("--debug-wireframe must be one of off|aligned|raw")),
-        None => Ok(render::WireMode::from_env()),
+        Some(s) => render::RenderMode::parse(s).ok_or_else(|| {
+            anyhow::anyhow!("--render-mode must be one of mesh|mesh+colliders|colliders")
+        }),
+        None => Ok(render::RenderMode::from_env()),
     }
 }
 

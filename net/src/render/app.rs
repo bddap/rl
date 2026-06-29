@@ -88,12 +88,13 @@ pub fn pin_process_pools() {
     crab_world::bot::headless::pin_single_thread_pools();
 }
 
-/// `wire` is the debug-wireframe overlay's starting mode (off in normal play; the player
-/// cycles it live with F3, or boots into a mode via `--debug-wireframe`/`RL_DEBUG_WIREFRAME`).
+/// `render_mode` is the crab render view's starting mode (mesh in normal play; the player cycles
+/// it live with the `CycleRenderMode` control, boots into a mode via `--render-mode`/
+/// `RL_RENDER_MODE`, or — with no Sally glb — defaults to `Colliders`).
 pub fn build_windowed_app(
     boot: Boot,
     external_crab: std::path::PathBuf,
-    wire: super::WireMode,
+    render_mode: super::RenderMode,
 ) -> anyhow::Result<App> {
     // Pin the global task pools to ONE thread only for a round that actually has a remote peer.
     // The pin's sole purpose is bit-identical cross-peer float evolution (GCR#113), and it costs
@@ -299,9 +300,9 @@ pub fn build_windowed_app(
     // are wired —
     // every plugin/`add_systems` above is in, the schedules now exist. This touches only the main
     // world's schedules (the sim); bevy's render sub-app keeps its own executor.
-    // The debug-wireframe overlay (off by default). Adds its systems + rapier's debug-render
-    // plugin; MUST precede `force_serial_schedules` so that pin covers its systems too.
-    super::debug_wireframe::register(&mut app, wire);
+    // The crab render-mode cycle (shared cage + skin/silhouette visibility + the live cycle).
+    // MUST precede `force_serial_schedules` so that pin covers its systems too.
+    super::render_mode::register(&mut app, render_mode);
 
     if networked {
         crab_world::bot::headless::force_serial_schedules(&mut app);
@@ -403,7 +404,7 @@ pub(super) fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::Pat
 
     // The visible crab is the skin (or the silhouette `spawn_world` leaves shown when no model
     // loads), rendered at TRUE physics size; the giant feel comes from the R-shrunk human world
-    // ([`crate::render::world_render_scale`]). The debug-wireframe overlay (`super::debug_wireframe`)
-    // draws the crab's live colliders translated to the same render spot, so the cage sits exactly
-    // ON the mesh — render==physics, no scale hack.
+    // ([`crate::render::world_render_scale`]). The render-mode cycle (`super::render_mode`, the
+    // shared `crab_world::crab_view` cage) draws the crab's live colliders translated to the same
+    // render spot, so the cage sits exactly ON the mesh — render==physics, no scale hack.
 }

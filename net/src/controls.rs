@@ -71,6 +71,10 @@ pub enum Action {
     /// [`Quit`](Action::Quit) it never crosses the wire or the deterministic sim, so the
     /// lockstep crab game is unaffected.
     EnterExit,
+    /// CYCLE the crab render view: mesh → mesh+colliders → colliders. A tap handled in the play
+    /// layer ([`crate::render::render_mode`], the shared [`crab_world::crab_view`]); pure client
+    /// UI, never on the wire or the sim.
+    CycleRenderMode,
     /// Hold to reveal the full control overlay; release to hide. Pure client UI.
     RevealControls,
 }
@@ -85,6 +89,7 @@ pub enum Key {
     D,
     E,
     R,
+    V,
     Tab,
     Space,
     Escape,
@@ -108,6 +113,8 @@ pub enum PadButton {
     North,
     /// The "west" face button (Xbox X / PS Square).
     West,
+    /// The "east" face button (Xbox B / PS Circle).
+    East,
     /// Right trigger (alternate extract).
     RightTrigger,
     /// Start / Menu.
@@ -181,6 +188,7 @@ impl ControlScheme for GcrControls {
             Key::D => "controls/keyboard_d.png",
             Key::E => "controls/keyboard_e.png",
             Key::R => "controls/keyboard_r.png",
+            Key::V => "controls/keyboard_v.png",
             Key::Tab => "controls/keyboard_tab.png",
             Key::Space => "controls/keyboard_space.png",
             Key::Escape => "controls/keyboard_escape.png",
@@ -192,6 +200,7 @@ impl ControlScheme for GcrControls {
             PadButton::South => "controls/xbox_button_a.png",
             PadButton::North => "controls/xbox_button_y.png",
             PadButton::West => "controls/xbox_button_x.png",
+            PadButton::East => "controls/xbox_button_b.png",
             PadButton::RightTrigger => "controls/xbox_rt.png",
             PadButton::Start => "controls/xbox_button_menu.png",
             PadButton::Back => "controls/xbox_button_view.png",
@@ -221,7 +230,7 @@ impl ControlScheme for GcrControls {
 /// - **Enter/exit vehicle**: E / pad West (X) — tap to board a plane or step out
 ///   (single-player; a client-local toggle, never on the wire).
 /// - **Reveal controls**: HOLD Tab / HOLD pad Back — show the overlay while held.
-pub const BINDINGS: [Binding<GcrControls>; 10] = [
+pub const BINDINGS: [Binding<GcrControls>; 11] = [
     Binding {
         action: Action::MoveForward,
         keyboard: KbBinding::new(&[Key::W], &[]),
@@ -270,6 +279,11 @@ pub const BINDINGS: [Binding<GcrControls>; 10] = [
         pad: PadBinding::new(&[PadButton::West]),
     },
     Binding {
+        action: Action::CycleRenderMode,
+        keyboard: KbBinding::new(&[Key::V], &[]),
+        pad: PadBinding::new(&[PadButton::East]),
+    },
+    Binding {
         action: Action::RevealControls,
         keyboard: KbBinding::hold(&[Key::Tab], &[]),
         pad: PadBinding::hold(&[PadButton::Back]),
@@ -278,7 +292,7 @@ pub const BINDINGS: [Binding<GcrControls>; 10] = [
 
 /// The ON-FOOT context: the full ground control set, in legend order. The move keys walk the
 /// avatar; `EnterExit` boards the plane.
-pub const FOOT_ROWS: [ContextRow<GcrControls>; 10] = [
+pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
     ContextRow { action: Action::MoveForward, label: "Forward" },
     ContextRow { action: Action::MoveBack, label: "Back" },
     ContextRow { action: Action::StrafeLeft, label: "Strafe left" },
@@ -286,6 +300,7 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 10] = [
     ContextRow { action: Action::Look, label: "Look" },
     ContextRow { action: Action::Extract, label: "Extract" },
     ContextRow { action: Action::EnterExit, label: "Enter plane" },
+    ContextRow { action: Action::CycleRenderMode, label: "Render view" },
     ContextRow { action: Action::Restart, label: "Restart round" },
     ContextRow { action: Action::Quit, label: "Quit" },
     ContextRow { action: Action::RevealControls, label: "Controls" },
@@ -304,7 +319,7 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 10] = [
 /// - `StrafeLeft`/`StrafeRight` (A/D): rudder yaw. `gather_input` negates the strafe axis
 ///   (screen-right↔sim-X), so A reaches the sim as POSITIVE `move_strafe`, which
 ///   `step_plane` yaws LEFT — hence A = "Rudder left", D = "Rudder right".
-pub const PLANE_ROWS: [ContextRow<GcrControls>; 9] = [
+pub const PLANE_ROWS: [ContextRow<GcrControls>; 10] = [
     ContextRow { action: Action::Look, label: "Bank / pitch (fly)" },
     ContextRow { action: Action::MoveForward, label: "Throttle up" },
     ContextRow { action: Action::MoveBack, label: "Throttle down" },
@@ -312,6 +327,7 @@ pub const PLANE_ROWS: [ContextRow<GcrControls>; 9] = [
     ContextRow { action: Action::StrafeRight, label: "Rudder right (yaw)" },
     // E cycles foot → plane → helicopter → foot, so from the plane it boards the helicopter.
     ContextRow { action: Action::EnterExit, label: "Switch to heli" },
+    ContextRow { action: Action::CycleRenderMode, label: "Render view" },
     ContextRow { action: Action::Restart, label: "Restart round" },
     ContextRow { action: Action::Quit, label: "Quit" },
     ContextRow { action: Action::RevealControls, label: "Controls" },
@@ -328,13 +344,14 @@ pub const PLANE_ROWS: [ContextRow<GcrControls>; 9] = [
 /// reconcile), so A (`StrafeLeft`) reaches the sim as POSITIVE `move_strafe`, which
 /// `step_helicopter` yaws LEFT — so the labels ride those actions (A = yaw left, D = yaw
 /// right), pinned by the sim-side `helicopter_pedals_yaw_in_a_hover` test.
-pub const HELI_ROWS: [ContextRow<GcrControls>; 9] = [
+pub const HELI_ROWS: [ContextRow<GcrControls>; 10] = [
     ContextRow { action: Action::Look, label: "Cyclic — tilt to move" },
     ContextRow { action: Action::MoveForward, label: "Collective up (climb)" },
     ContextRow { action: Action::MoveBack, label: "Collective down (descend)" },
     ContextRow { action: Action::StrafeLeft, label: "Yaw left (pedal)" },
     ContextRow { action: Action::StrafeRight, label: "Yaw right (pedal)" },
     ContextRow { action: Action::EnterExit, label: "Exit to foot" },
+    ContextRow { action: Action::CycleRenderMode, label: "Render view" },
     ContextRow { action: Action::Restart, label: "Restart round" },
     ContextRow { action: Action::Quit, label: "Quit" },
     ContextRow { action: Action::RevealControls, label: "Controls" },
@@ -362,6 +379,7 @@ mod bevy_glue {
                 Key::D => KeyCode::KeyD,
                 Key::E => KeyCode::KeyE,
                 Key::R => KeyCode::KeyR,
+                Key::V => KeyCode::KeyV,
                 Key::Tab => KeyCode::Tab,
                 Key::Space => KeyCode::Space,
                 Key::Escape => KeyCode::Escape,
@@ -386,6 +404,7 @@ mod bevy_glue {
                 PadButton::South => Some(GamepadButton::South),
                 PadButton::North => Some(GamepadButton::North),
                 PadButton::West => Some(GamepadButton::West),
+                PadButton::East => Some(GamepadButton::East),
                 PadButton::RightTrigger => Some(GamepadButton::RightTrigger2),
                 PadButton::Start => Some(GamepadButton::Start),
                 PadButton::Back => Some(GamepadButton::Select),
@@ -438,7 +457,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 10] = [
+    const ALL_ACTIONS: [Action; 11] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -448,6 +467,7 @@ mod tests {
         Action::Restart,
         Action::Quit,
         Action::EnterExit,
+        Action::CycleRenderMode,
         Action::RevealControls,
     ];
 
@@ -472,6 +492,7 @@ mod tests {
                 | Action::Restart
                 | Action::Quit
                 | Action::EnterExit
+                | Action::CycleRenderMode
                 | Action::RevealControls => true,
             }
         }
