@@ -164,6 +164,14 @@ async fn run_net(args: Args) -> Result<()> {
                     }
                 }
                 transport::PeerWire::Beat(_) => {}
+                // This is a FIXED-roster run: the peer set is frozen at discovery and never
+                // grows, so the Stage 3 live-join frames (a joiner's credentials, a roster
+                // change, a refusal) can't legitimately arrive here. Ignore a stray one rather
+                // than mishandle it — the same stance `net_loop`'s formation barrier takes; a
+                // real mid-match join is the running coordinator's job, not this harness.
+                transport::PeerWire::JoinRequest(_)
+                | transport::PeerWire::RosterChange(_)
+                | transport::PeerWire::Refuse(_) => {}
             }
         }
 
