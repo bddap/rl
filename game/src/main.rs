@@ -641,16 +641,39 @@ fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the `--render-mode` flag into a [`render::RenderMode`]: an explicit value is parsed
-/// (rejecting an unknown token with an actionable error), and an absent flag falls back to the
-/// `RL_RENDER_MODE` / `RL_DEBUG_COLLIDERS` env (mesh by default).
+/// Resolve the `--render-mode` flag into a [`render::RenderMode`]. An explicit value is parsed
+/// (rejecting an unknown token with an actionable error). With NO flag and NO `RL_RENDER_MODE`/
+/// `RL_DEBUG_COLLIDERS` override, the MISSING-GLB FALLBACK kicks in: if the canonical Sally mesh
+/// can't be resolved, default to the honest `colliders` view (the wireframe IS the crab the
+/// player sees — never a placeholder) and log a host-tagged error so the absent asset is visible
+/// in telemetry. With the mesh present (or an env override), the env decides (mesh by default).
 fn resolve_render_mode(flag: Option<&str>) -> Result<render::RenderMode> {
-    match flag {
-        Some(s) => render::RenderMode::parse(s).ok_or_else(|| {
+    if let Some(s) = flag {
+        return render::RenderMode::parse(s).ok_or_else(|| {
             anyhow::anyhow!("--render-mode must be one of mesh|mesh+colliders|colliders")
-        }),
-        None => Ok(render::RenderMode::from_env()),
+        });
     }
+    let env_override =
+        std::env::var_os("RL_RENDER_MODE").is_some() || std::env::var_os("RL_DEBUG_COLLIDERS").is_some();
+    if !env_override && crab_world::bot::meshfit::model_path().is_none() {
+        tracing::error!(
+            target: "gcr::canonical_mesh",
+            host = %hostname(),
+            "GCR: the canonical Sally glb could not be resolved — defaulting to the honest \
+             colliders view (the physics-bones wireframe, NOT a placeholder mesh). Fetch the \
+             model with scripts/fetch-sally.sh or set CRAB_MODEL_PATH."
+        );
+        return Ok(render::RenderMode::Colliders);
+    }
+    Ok(render::RenderMode::from_env())
+}
+
+/// This host's name for telemetry tagging — so a missing-asset error names the device it fired
+/// on. Best-effort: an unreadable hostname is reported as `unknown` rather than failing the run.
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
 }
 
 /// Deterministic match seed: a constant so independently-launched peers agree without a

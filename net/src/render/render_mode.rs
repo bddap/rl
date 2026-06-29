@@ -14,41 +14,13 @@ use super::scene::CrabAvatar;
 use crate::controls::{self, Action};
 pub use crab_world::crab_view::RenderMode;
 
-/// The corner text node naming the active render mode.
-#[derive(Component)]
-struct RenderModeLabel;
-
 /// Wire GCR's render-mode cycle into a render `App`, booting in `initial` (the missing-glb
-/// fallback passes [`RenderMode::Colliders`]). Adds the shared cage + skin-visibility via
-/// [`crab_world::crab_view::register`], then GCR's silhouette-hide, the live cycle, and the
-/// corner label. Call once, after the sim systems are installed.
+/// fallback passes [`RenderMode::Colliders`]). Adds the shared cage + skin-visibility + the
+/// mode-naming HUD label via [`crab_world::crab_view::register`], then GCR's silhouette-hide and
+/// the live cycle. Call once, after the sim systems are installed.
 pub fn register(app: &mut App, initial: RenderMode) {
     crab_world::crab_view::register(app, initial);
-    app.add_systems(Startup, spawn_mode_label);
-    app.add_systems(
-        Update,
-        (cycle_render_mode, manage_silhouette_visibility, update_mode_label),
-    );
-}
-
-fn spawn_mode_label(mut commands: Commands) {
-    commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: 18.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.4, 1.0, 0.55)),
-        // Bottom-right: clear of the status HUD (top line) and the hold-to-reveal controls hint
-        // (bottom-left), so the mode line never overlaps them.
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(14.0),
-            right: Val::Px(14.0),
-            ..default()
-        },
-        RenderModeLabel,
-    ));
+    app.add_systems(Update, (cycle_render_mode, manage_silhouette_visibility));
 }
 
 /// Cycle the render mode on the `CycleRenderMode` control (keyboard V / pad B), read through
@@ -91,14 +63,5 @@ fn manage_silhouette_visibility(
         if *vis != want {
             *vis = want;
         }
-    }
-}
-
-fn update_mode_label(mode: Res<RenderMode>, mut label: Query<&mut Text, With<RenderModeLabel>>) {
-    if !mode.is_changed() {
-        return;
-    }
-    if let Ok(mut text) = label.single_mut() {
-        **text = format!("Render: {}", mode.label());
     }
 }

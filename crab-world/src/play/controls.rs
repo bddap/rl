@@ -264,7 +264,7 @@ pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 11] = [
     ContextRow { action: DemoAction::Zoom, label: "Zoom" },
     ContextRow { action: DemoAction::Rebuild, label: "Rebuild crab" },
     ContextRow { action: DemoAction::Poke, label: "Poke" },
-    ContextRow { action: DemoAction::Colliders, label: "Collider wireframes" },
+    ContextRow { action: DemoAction::Colliders, label: "Render view (cycle)" },
     ContextRow { action: DemoAction::JointGraph, label: "Joint graph" },
     ContextRow { action: DemoAction::Manual, label: "Manual control" },
     ContextRow { action: DemoAction::PickJoint, label: "Pick joint (manual)" },
