@@ -1,5 +1,5 @@
-//! Single source of truth for the bundled-asset root, plus a startup guard that the
-//! bundled control glyphs actually resolved.
+//! Single source of truth for the bundled-asset root, plus a startup check that loudly
+//! flags any bundled control glyph that didn't resolve (without crashing the match).
 //!
 //! The committed CC0 control glyphs (`assets/controls/*.png`) must show on the controls
 //! overlay after a bare `git clone` + `cargo run`, with no env or cwd setup. They didn't:
@@ -38,23 +38,50 @@ pub fn bevy_asset_path() -> PathBuf {
     asset_root().join("assets")
 }
 
-/// Fail loud if any bundled glyph the overlay will request is absent under the resolved
-/// asset root. Called from [`crate::controls::spawn_controls_ui`] at spawn, so a missing
-/// glyph aborts with the offending path instead of bevy logging a soft "path not found"
-/// and the HUD drawing blank boxes (the silent-fallback anti-pattern). `paths` are the
-/// `controls/…` asset paths the active scheme can surface
+/// Loudly WARN — but never crash — for any bundled glyph the overlay will request that is
+/// absent under the resolved asset root. Called from [`crate::controls::spawn_controls_ui`]
+/// at spawn. A control-prompt icon is decorative HUD: bevy renders a missing image handle
+/// as nothing, so the overlay degrades to a blank slot for that one binding while the match
+/// runs normally. Killing the whole match over a missing decorative glyph is the wrong
+/// failure mode for the deployed game (it cost the owner a match-start panic when a deploy
+/// staged the binary but not `assets/controls/`). We still log every missing path at WARN so
+/// the blank slot has a findable cause — loud, not silent (the silent-fallback anti-pattern
+/// is about silence, not about being fatal); a missing NON-ESSENTIAL asset degrades, it
+/// doesn't abort. `paths` are the `controls/…` asset paths the active scheme can surface
 /// (see [`crate::controls::icon_asset_paths`]).
-pub fn assert_glyphs_present<I: IntoIterator<Item = &'static str>>(paths: I) {
+pub fn warn_missing_glyphs<I: IntoIterator<Item = &'static str>>(paths: I) {
     let base = bevy_asset_path();
     let missing: Vec<&str> = paths
         .into_iter()
         .filter(|p| !base.join(p).exists())
         .collect();
-    assert!(
-        missing.is_empty(),
-        "control overlay glyphs missing under {}: {missing:?}\n\
-         These are CC0 Kenney Input Prompts committed at crab-world/assets/controls/ and \
-         should be present in any checkout. If your assets live elsewhere, set BEVY_ASSET_ROOT.",
-        base.display(),
-    );
+    if !missing.is_empty() {
+        tracing::warn!(
+            "control overlay glyphs missing under {} — those bindings will show a blank \
+             slot (non-fatal): {missing:?}. These are CC0 Kenney Input Prompts committed at \
+             crab-world/assets/controls/ and should be present in any checkout; if your \
+             assets live elsewhere, set BEVY_ASSET_ROOT.",
+            base.display(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of this module's change: a missing decorative glyph must NOT abort.
+    /// A bogus `controls/…` path can't exist under any asset root, so this exercises the
+    /// missing branch — it must return (warn), not panic, or a deployed match-start dies on
+    /// an un-staged HUD icon (the bug this replaced).
+    #[test]
+    fn missing_glyph_warns_does_not_panic() {
+        warn_missing_glyphs(["controls/__surely_absent_glyph__.png"]);
+    }
+
+    /// An empty path set is trivially all-present — no warn, no panic.
+    #[test]
+    fn no_glyphs_is_fine() {
+        warn_missing_glyphs(std::iter::empty());
+    }
 }
