@@ -132,7 +132,7 @@ const MAX_YAW_PER_TICK_RADIANS: f32 =
     (trig::TURN / 24) as f32 / trig::TURN as f32 * std::f32::consts::TAU;
 
 mod app;
-mod debug_wireframe;
+mod render_mode;
 mod driver;
 mod input;
 mod scene;
@@ -143,7 +143,7 @@ mod menu;
 mod tests;
 
 pub use app::{AppPhase, Boot, build_windowed_app, pin_process_pools};
-pub use debug_wireframe::WireMode;
+pub use render_mode::RenderMode;
 pub use screenshot::{ScreenshotConfig, build_screenshot_app};
 pub(crate) use driver::{park_fixed_auto_pump, pump_fixed_steps};
 pub(crate) use scene::world_render_scale;

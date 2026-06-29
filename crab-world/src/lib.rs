@@ -42,6 +42,10 @@ pub mod training;
 // render/PBR/egui types (cameras, materials, screenshots), which don't even exist when
 // bevy is built without `render`, so without this gate the trainer wouldn't compile.
 // The trainer never renders, so it loses nothing.
+/// The crab render-mode cycle + the ONE shared collider-wireframe (GCR + rl-demo). `pub`
+/// because both rendered surfaces (the `net` crate's GCR app and the rl-demo) drive it.
+#[cfg(feature = "render")]
+pub mod crab_view;
 #[cfg(feature = "render")]
 pub mod play;
 #[cfg(feature = "render")]
