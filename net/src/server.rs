@@ -46,6 +46,74 @@ pub struct Admission {
     pub roster: Vec<PlayerId>,
 }
 
+/// A would-be joiner's credentials, sent UP to the host the moment it dials a live match (Stage 3,
+/// rl#151). The host gates admission on these BEFORE allocating a [`PlayerId`]: a joiner whose
+/// policy-weights or crab-asset digest disagrees with the host's is running a different brain or a
+/// different Sally, so admitting it would put a wrong crab into the round (or desync the moment its
+/// external-crab digest folds into the state hash). Such a joiner is REFUSED LOUDLY, never silently
+/// dropped onto a mismatched body ([`may_admit_joiner`]; rl#114 refuse-rather-than-fake).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinRequest {
+    /// FNV digest of the joiner's policy weights — must equal the host's, or the two run different
+    /// brains and the external-crab digest (weights Xored in) desyncs on the first post-join tick.
+    pub weights_digest: u64,
+    /// Digest of the joiner's crab/collider assets — must equal the host's, or the joiner builds a
+    /// different-shaped rapier body and diverges.
+    pub asset_digest: u64,
+}
+
+/// Why a [`JoinRequest`] was refused — a loud, typed verdict the host sends back to the joiner and
+/// logs to telemetry (never a silent drop). Carries the offending side so the refusal message is
+/// actionable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionRefusal {
+    /// The joiner's policy-weights digest differs from the host's.
+    WeightsMismatch { host: u64, joiner: u64 },
+    /// The joiner's crab-asset/collider digest differs from the host's.
+    AssetsMismatch { host: u64, joiner: u64 },
+}
+
+impl std::fmt::Display for AdmissionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdmissionRefusal::WeightsMismatch { host, joiner } => write!(
+                f,
+                "policy-weights digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — different brain"
+            ),
+            AdmissionRefusal::AssetsMismatch { host, joiner } => write!(
+                f,
+                "crab-asset digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — different Sally/colliders"
+            ),
+        }
+    }
+}
+
+/// The admission gate: may a joiner advertising `req` enter a match the host runs on
+/// `(host_weights, host_assets)`? `Ok(())` only when BOTH digests match exactly — a single
+/// mismatch is a typed [`AdmissionRefusal`] the caller surfaces loudly. Weights are checked first
+/// so a double mismatch reports the brain (the more fundamental disagreement). The host→joiner
+/// analogue of the formation-time `may_arm_external_crab` shared-asset gate, but per-joiner and
+/// fail-LOUD rather than a silent disarm.
+pub fn may_admit_joiner(
+    host_weights: u64,
+    host_assets: u64,
+    req: &JoinRequest,
+) -> Result<(), AdmissionRefusal> {
+    if req.weights_digest != host_weights {
+        return Err(AdmissionRefusal::WeightsMismatch {
+            host: host_weights,
+            joiner: req.weights_digest,
+        });
+    }
+    if req.asset_digest != host_assets {
+        return Err(AdmissionRefusal::AssetsMismatch {
+            host: host_assets,
+            joiner: req.asset_digest,
+        });
+    }
+    Ok(())
+}
+
 /// The complete input set for ONE tick, broadcast by the server to every client once every
 /// rostered client's input for that tick is in. The down-channel counterpart to the client's
 /// up-channel [`TickMsg`]: clients ship inputs UP, the server ships the assembled set DOWN.
@@ -692,5 +760,32 @@ mod tests {
         for m in &msgs {
             assert_eq!(m.msg.apply_tick, 7);
         }
+    }
+
+    /// The admission gate admits only a digest-matched joiner and refuses (loudly, typed) on either
+    /// mismatch — the host→joiner analogue of the formation shared-asset gate, fail-LOUD per joiner.
+    #[test]
+    fn admission_gate_admits_match_and_refuses_each_mismatch() {
+        let (hw, ha) = (0xB7A1u64, 0x5A11_2233u64);
+        assert_eq!(
+            may_admit_joiner(hw, ha, &JoinRequest { weights_digest: hw, asset_digest: ha }),
+            Ok(()),
+            "matching weights AND assets are admitted"
+        );
+        assert_eq!(
+            may_admit_joiner(hw, ha, &JoinRequest { weights_digest: hw ^ 1, asset_digest: ha }),
+            Err(AdmissionRefusal::WeightsMismatch { host: hw, joiner: hw ^ 1 }),
+            "a different brain is refused"
+        );
+        assert_eq!(
+            may_admit_joiner(hw, ha, &JoinRequest { weights_digest: hw, asset_digest: ha ^ 1 }),
+            Err(AdmissionRefusal::AssetsMismatch { host: ha, joiner: ha ^ 1 }),
+            "a different Sally/colliders is refused"
+        );
+        // A double mismatch reports the brain first (the more fundamental disagreement).
+        assert!(matches!(
+            may_admit_joiner(hw, ha, &JoinRequest { weights_digest: hw ^ 1, asset_digest: ha ^ 1 }),
+            Err(AdmissionRefusal::WeightsMismatch { .. })
+        ));
     }
 }
