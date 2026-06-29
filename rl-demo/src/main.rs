@@ -148,21 +148,24 @@ fn main() {
     // outlive the whole run, so it's bound here and dropped only when `main` returns.
     let _otel = otel::init("rl-demo");
 
-    let mesh_ok = match mesh_status {
-        Ok(()) => true,
-        Err(reason) => {
-            // LOUD via telemetry (stderr + OTLP), GRACEFUL in render. `target` namespaces the
-            // record so the sink can filter for canonical-mesh failures.
-            tracing::error!(
-                target: "rl_demo::canonical_mesh",
-                reason = %reason,
-                "rl-demo: canonical Sally mesh could not be loaded — falling back to the \
-                 physics-bones debug view (the real colliders). Fetch it with \
-                 scripts/fetch-sally.sh or point CRAB_MODEL_PATH at the model."
-            );
-            false
-        }
-    };
+    // `Some(reason)` ⇒ the canonical mesh is unusable, kept so the loudness lands in THREE
+    // places, not just telemetry: the OTEL error below (stderr + OTLP), the forced collider
+    // view, and — in the windowed demo — an on-screen banner (see the Demo arm). The owner's
+    // bug (rl#706) was exactly this: a fallback he could SEE but not identify, so the failure
+    // must name itself on the screen he's looking at, not only in a log he isn't.
+    let mesh_fallback_reason: Option<String> = mesh_status.err();
+    if let Some(reason) = &mesh_fallback_reason {
+        // LOUD via telemetry (stderr + OTLP). `target` namespaces the record so the sink can
+        // filter for canonical-mesh failures.
+        tracing::error!(
+            target: "rl_demo::canonical_mesh",
+            reason = %reason,
+            "rl-demo: canonical Sally mesh could not be loaded — falling back to the \
+             physics-bones debug view (the real colliders, NOT the real Sally rig). Fetch it \
+             with scripts/fetch-sally.sh or point CRAB_MODEL_PATH at the model."
+        );
+    }
+    let mesh_ok = mesh_fallback_reason.is_none();
     // Show the physics-bones view whenever the mesh is unusable, OR on explicit request. When
     // the mesh is fine the cage defaults off (the skinned Sally crab is the view); the demo's
     // right-arrow still toggles it live.
@@ -312,6 +315,15 @@ fn main() {
 
     match mode {
         AppMode::Demo => {
+            // The windowed surface the owner is actually looking at: if the canonical mesh
+            // failed, name the failure ON SCREEN so the physics-bones fallback can never be
+            // mistaken for real Sally (rl#706). Only the windowed demo gets the banner —
+            // the screenshot/render-video arms render to image and a banner would pollute
+            // the capture; their loudness stays the OTEL error + the collider view.
+            if let Some(reason) = mesh_fallback_reason {
+                app.insert_resource(MeshFallbackBanner(reason))
+                    .add_systems(Startup, spawn_mesh_fallback_banner);
+            }
             app.add_plugins(play::DemoPlugin {
                 checkpoint_dir: args.train.checkpoint_dir.clone(),
                 live_checkpoint_dir: args.live_checkpoint_dir.clone(),
@@ -339,6 +351,55 @@ fn main() {
     }
 
     app.run();
+}
+
+/// The human-readable cause of a canonical-mesh load failure, carried to the on-screen banner.
+/// Present (inserted) only when the mesh is unusable, so the banner system runs iff there is a
+/// failure to announce — a healthy run has no banner resource and no banner.
+#[derive(Resource)]
+struct MeshFallbackBanner(String);
+
+/// Spawn the can't-miss top-center banner for the windowed demo when the Sally mesh failed to
+/// load. The render below it is the physics-bones collider view — the REAL colliders, but NOT
+/// the real Sally rig — so the banner says exactly that, killing the owner's "is this even
+/// Sally?" ambiguity (rl#706) the OTEL log alone left unanswered on the screen he's watching.
+fn spawn_mesh_fallback_banner(mut commands: Commands, banner: Res<MeshFallbackBanner>) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(0.0),
+                left: Val::Px(0.0),
+                right: Val::Px(0.0),
+                padding: UiRect::all(Val::Px(8.0)),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            // Opaque dark band so the warning reads against any scene behind it.
+            BackgroundColor(Color::srgba(0.15, 0.0, 0.0, 0.85)),
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new("SALLY MESH NOT LOADED — showing physics colliders (NOT the real Sally rig)"),
+                TextFont {
+                    font_size: 20.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(1.0, 0.5, 0.5)),
+            ));
+            b.spawn((
+                Text::new(format!(
+                    "{}  —  fetch with scripts/fetch-sally.sh",
+                    banner.0
+                )),
+                TextFont {
+                    font_size: 13.0,
+                    ..default()
+                },
+                TextColor(Color::srgba(0.95, 0.85, 0.85, 0.9)),
+            ));
+        });
 }
 
 /// Is the canonical Sally mesh present AND usable (loads + has the crab bones the rig needs)?
