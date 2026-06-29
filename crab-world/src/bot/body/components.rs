@@ -25,7 +25,7 @@ pub struct CrabAssets {
 impl CrabAssets {
     /// Bind-pose world position of the leg hub the body spawns its root at. The skin
     /// reads it to place its own root in the same frame the body uses, so the two
-    /// share one coordinate space (see [`crate::bot::skin::attach_skins`]).
+    /// share one coordinate space (see [`crate::bot::skin::pairing::attach_skins`]).
     pub fn hub_bind_world(&self) -> Vec3 {
         self.recipe.hub_bind_world
     }
