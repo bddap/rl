@@ -352,9 +352,9 @@ pub fn assert_scheme_well_formed<S: ControlScheme + ?Sized>(
 }
 
 /// Every `controls/…` icon asset path scheme `S` can surface, across all its bindings and
-/// both devices, deduped in first-seen order. Drives the startup glyph-presence guard
-/// ([`crate::assets::assert_glyphs_present`]) so a new binding with a typo'd or unvendored
-/// icon path is caught loudly, not as a blank box on the overlay.
+/// both devices, deduped in first-seen order. Drives the startup glyph-presence check
+/// ([`crate::assets::warn_missing_glyphs`]) so a new binding with a typo'd or unvendored
+/// icon path is logged loudly, instead of just drawing a blank box on the overlay.
 pub fn icon_asset_paths<S: ControlScheme + ?Sized>() -> Vec<&'static str> {
     let mut paths = Vec::new();
     for b in S::bindings() {
@@ -569,11 +569,13 @@ mod overlay {
         mut commands: Commands,
         asset_server: Res<AssetServer>,
     ) {
-        // Fail loud at spawn if a glyph this overlay will request isn't on disk under the
-        // resolved asset root — every overlay path funnels through here, so this one guard
-        // covers the game and the demo (and any future scheme). A missing icon aborts with
-        // its path instead of bevy soft-logging "path not found" and drawing a blank box.
-        crate::assets::assert_glyphs_present(super::icon_asset_paths::<S>());
+        // WARN loudly at spawn for any glyph this overlay will request that isn't on disk
+        // under the resolved asset root — every overlay path funnels through here, so this
+        // one check covers the game and the demo (and any future scheme). A missing icon is
+        // decorative HUD: it degrades to a blank slot (bevy renders a missing handle as
+        // nothing) rather than aborting the match — but it's logged with its path so the
+        // gap isn't silent.
+        crate::assets::warn_missing_glyphs(super::icon_asset_paths::<S>());
 
         let default_device = Device::default();
         let default_ctx = S::Context::default();
