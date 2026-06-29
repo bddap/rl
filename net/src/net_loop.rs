@@ -32,7 +32,7 @@ use iroh::EndpointId;
 
 use crate::lockstep::{Lockstep, TickMsg};
 use crate::membership::{BEAT_EVERY, Membership, Role, Status};
-use crate::server::{self, Server, TickSet};
+use crate::server::{self, Admission, JoinRequest, Server, TickSet, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::telemetry::{self, TelemetryEvent, TelemetrySender};
 use crate::transport::{self, PeerWire, Session};
@@ -87,6 +87,21 @@ pub struct NetDriver {
     /// (rl#100, GCR — [`Membership::assets_synced`]); ANDed with `weights_synced` at the arm
     /// sites. `false` without a resolvable model.
     assets_synced: bool,
+    /// OUR policy-weights digest and crab-asset digest (the values, not just the synced bools).
+    /// The host gates a mid-game joiner on these — [`crate::server::may_admit_joiner`] requires the
+    /// joiner's digests to equal ours, else a LOUD refusal (Stage 3, rl#151). A client never reads
+    /// them (only the host admits).
+    weights_digest: u64,
+    asset_digest: u64,
+}
+
+/// The result of [`Coordinator::exchange`]: the OTHER players' inputs to record this tick, plus any
+/// roster CHANGES the local [`Lockstep`] must schedule (a mid-game join the host admitted or a
+/// client learned over the wire). Stage 3 (rl#151): the driver applies each change via
+/// [`Lockstep::schedule_roster_change`] so every peer rebuilds the round at the same boundary.
+pub struct Exchanged {
+    pub peer_msgs: Vec<PeerMsg>,
+    pub roster_changes: Vec<crate::server::Admission>,
 }
 
 impl NetDriver {
@@ -95,13 +110,6 @@ impl NetDriver {
     /// launched without `--telemetry`.
     pub fn telemetry(&self) -> Option<&TelemetrySender> {
         self.telemetry.as_ref()
-    }
-
-    /// Size of the frozen roster (us + peers) — the match's player count. A sync,
-    /// always-correct figure for telemetry's `peers` field (the live link count is async
-    /// via the session; the agreed roster size is what the operator wants anyway).
-    pub fn roster_len(&self) -> usize {
-        self.id_map.len()
     }
 
     /// Whether the formation barrier agreed every peer loaded the SAME non-zero policy
@@ -149,14 +157,69 @@ impl NetDriver {
     /// Non-blocking. Messages from an endpoint not in the frozen set, and any stray non-input frame
     /// (a barrier beat from a peer still winding down formation), are dropped — the server only
     /// ledgers rostered clients' inputs.
-    pub fn drain_client_inputs(&mut self) -> Vec<PeerMsg> {
-        let mut out = Vec::new();
+    pub fn drain_client_inputs(&mut self) -> (Vec<PeerMsg>, Vec<(EndpointId, JoinRequest)>) {
+        let mut inputs = Vec::new();
+        let mut joins = Vec::new();
         while let Some(from) = self.session.try_recv() {
-            if let (PeerWire::Tick(msg), Some(&pid)) = (&from.msg, self.id_map.get(&from.from)) {
-                out.push(PeerMsg { pid, msg: *msg });
+            match from.msg {
+                // A rostered client's input → ledger it; a not-yet-rostered endpoint's stray input
+                // is dropped (the server's `record` would drop it anyway — it isn't rostered at that
+                // tick yet), so a joiner's pre-admit frame never blocks the round (333 stays fixed).
+                PeerWire::Tick(msg) => {
+                    if let Some(&pid) = self.id_map.get(&from.from) {
+                        inputs.push(PeerMsg { pid, msg });
+                    }
+                }
+                // A would-be joiner dialing the live match (Stage 3) — surfaced for the coordinator
+                // to gate + admit (it holds the `Server`; this driver only holds the transport).
+                PeerWire::JoinRequest(req) => joins.push((from.from, req)),
+                // Beats (a peer winding down formation), our own broadcasts echoed, etc. — not the
+                // server's concern.
+                _ => {}
             }
         }
-        out
+        (inputs, joins)
+    }
+
+    /// (Host) The host's OWN digests, the gate a mid-game joiner must match
+    /// ([`crate::server::may_admit_joiner`]).
+    pub fn local_digests(&self) -> (u64, u64) {
+        (self.weights_digest, self.asset_digest)
+    }
+
+    /// (Host) Record an admitted joiner's endpoint→[`PlayerId`] in the live id_map — append-only,
+    /// NEVER renumbering an incumbent (the determinism-stability guarantee: a positional renumber on
+    /// join would instantly desync). The pid is the Server's lowest-free allocation
+    /// ([`Server::admit`]). Now the joiner's inbound [`TickMsg`]s tag with this pid.
+    pub fn admit_endpoint(&mut self, eid: EndpointId, pid: PlayerId) {
+        self.id_map.insert(eid, pid);
+    }
+
+    /// (Host) Whether `eid` is already a rostered player — so a repeated [`JoinRequest`] (a joiner
+    /// re-dialing, or its frames racing the admit) is admitted at most once.
+    pub fn is_rostered(&self, eid: EndpointId) -> bool {
+        self.id_map.contains_key(&eid)
+    }
+
+    /// (Host) Broadcast a roster change DOWN to every client — INCUMBENTS schedule it. The
+    /// just-admitted joiner gets its OWN allocation via the unicast [`Self::welcome_joiner`] instead
+    /// (it also receives this broadcast, but ignores it until admitted, then re-applies it as an
+    /// idempotent no-op). Non-blocking buffered QUIC writes. Stage 3.
+    pub fn broadcast_roster_change(&self, adm: &Admission) {
+        self.rt.block_on(self.session.broadcast_roster_change(adm));
+    }
+
+    /// (Host) UNICAST a just-admitted joiner its OWN [`Admission`] (Stage 3) — the welcome it builds
+    /// [`Lockstep::join_at`] from. Separate from the broadcast so a joiner never adopts a concurrent
+    /// joiner's PlayerId.
+    pub fn welcome_joiner(&self, eid: EndpointId, adm: &Admission) {
+        self.rt.block_on(self.session.welcome_joiner(eid, adm));
+    }
+
+    /// (Host) LOUDLY refuse a would-be joiner `eid` with `reason` (a digest mismatch) — a typed
+    /// turn-away, never a silent drop onto a wrong crab. Stage 3.
+    pub fn refuse_joiner(&self, eid: EndpointId, reason: &str) {
+        self.rt.block_on(self.session.send_refuse(eid, reason));
     }
 
     /// (Host) Broadcast the server-assembled sets DOWN to every client. Non-blocking buffered QUIC
@@ -175,13 +238,28 @@ impl NetDriver {
     /// (Client) Drain every assembled set received from the server so far. Non-blocking; stray
     /// non-set frames are ignored (a client cares only about the server's sets).
     pub fn drain_ticksets(&mut self) -> Vec<TickSet> {
-        let mut out = Vec::new();
+        self.drain_server_down().0
+    }
+
+    /// (Client) Drain everything the server sent DOWN this tick: the assembled [`TickSet`]s AND any
+    /// roster changes (Stage 3 — a mid-game join the client must schedule, incl. one announcing the
+    /// client's OWN later co-joiners). A [`PeerWire::Refuse`] aimed at us is logged LOUD (a
+    /// established client should never get one; if it does the operator must see it), never silently
+    /// eaten. The inbox is drained ONCE here so set + roster-change frames can't starve each other.
+    pub fn drain_server_down(&mut self) -> (Vec<TickSet>, Vec<crate::server::Admission>) {
+        let mut sets = Vec::new();
+        let mut changes = Vec::new();
         while let Some(from) = self.session.try_recv() {
-            if let PeerWire::TickSet(set) = from.msg {
-                out.push(set);
+            match from.msg {
+                PeerWire::TickSet(set) => sets.push(set),
+                PeerWire::RosterChange(adm) => changes.push(adm),
+                PeerWire::Refuse(reason) => {
+                    tracing::error!("server refused us mid-match: {reason}");
+                }
+                _ => {}
             }
         }
-        out
+        (sets, changes)
     }
 }
 
@@ -228,24 +306,35 @@ impl Coordinator {
     /// (solo / host / client) lands here, so the lockstep driver above is identical regardless of
     /// role. The host also ingests its remote clients' inputs and broadcasts the assembled sets; the
     /// client ships its input up and drains the sets down.
-    pub fn exchange(&mut self, me: PlayerId, msg: TickMsg) -> Vec<PeerMsg> {
+    pub fn exchange(&mut self, me: PlayerId, msg: TickMsg) -> Exchanged {
         match self {
             Coordinator::Server { server, net } => {
-                // Drain any remote clients' inputs (none for solo), assemble + unpack through the ONE
-                // shared core, then broadcast the completed sets to the remotes (a no-op for solo).
-                let remote = net.as_mut().map(NetDriver::drain_client_inputs).unwrap_or_default();
+                // Drain remote clients' inputs AND any mid-game join requests (none for solo).
+                let (remote, joins) = net
+                    .as_mut()
+                    .map(NetDriver::drain_client_inputs)
+                    .unwrap_or_default();
+                // Gate + admit each joiner BEFORE assembling this tick, so its roster change is
+                // scheduled and broadcast the same tick it dialed. The host applies the change to
+                // its OWN lockstep via the returned `roster_changes` (it is a player too).
+                let roster_changes = net
+                    .as_mut()
+                    .map(|net| admit_joiners(server, net, joins))
+                    .unwrap_or_default();
                 let (sets, peer_msgs) = server::host_assemble(server, me, msg, remote);
                 if let Some(net) = net.as_ref() {
                     net.broadcast_ticksets(&sets);
                 }
-                peer_msgs
+                Exchanged { peer_msgs, roster_changes }
             }
             Coordinator::Client { net } => {
                 net.send_to_server(&msg);
-                net.drain_ticksets()
+                let (sets, roster_changes) = net.drain_server_down();
+                let peer_msgs = sets
                     .iter()
                     .flat_map(|s| server::unpack_tickset(s, me))
-                    .collect()
+                    .collect();
+                Exchanged { peer_msgs, roster_changes }
             }
         }
     }
@@ -269,14 +358,58 @@ impl Coordinator {
     pub fn telemetry(&self) -> Option<&TelemetrySender> {
         self.net().and_then(NetDriver::telemetry)
     }
+}
 
-    /// The frozen roster size — the match's player count (1 for solo).
-    pub fn roster_len(&self) -> usize {
-        match self {
-            Coordinator::Server { server, .. } => server.roster().len(),
-            Coordinator::Client { net } => net.roster_len(),
+/// Gate + admit each mid-game `joins` request on the host (Stage 3, rl#151), returning the
+/// [`Admission`]s the host must apply to its OWN [`Lockstep`] (it is a player too — the caller
+/// schedules them via [`Lockstep::schedule_roster_change`]). For each joiner: verify its
+/// weight/collider digests against the host's ([`may_admit_joiner`]); on a match, allocate the
+/// stable lowest-free [`PlayerId`] ([`Server::admit`]), record its endpoint→pid append-only, and
+/// broadcast the roster change DOWN to every client (incumbents schedule it, the joiner builds from
+/// it). On a mismatch, REFUSE LOUDLY — a wire refusal + an error log + telemetry — never a silent
+/// drop onto a wrong crab ([[real-sally-definition]], rl#114). An endpoint already rostered (a
+/// re-dial or a racing duplicate) is admitted at most once.
+fn admit_joiners(
+    server: &mut Server,
+    net: &mut NetDriver,
+    joins: Vec<(EndpointId, JoinRequest)>,
+) -> Vec<Admission> {
+    let (host_weights, host_assets) = net.local_digests();
+    let mut changes = Vec::new();
+    for (eid, req) in joins {
+        if net.is_rostered(eid) {
+            continue; // already in the match — a duplicate/racing JoinRequest
+        }
+        match may_admit_joiner(host_weights, host_assets, &req) {
+            Ok(()) => {
+                let adm = server.admit();
+                net.admit_endpoint(eid, adm.pid);
+                // Welcome the joiner with its OWN allocation (unicast) BEFORE telling incumbents
+                // (broadcast) — the joiner reads only its welcome, so a concurrent joiner's
+                // broadcast change can never be mistaken for its own PlayerId.
+                net.welcome_joiner(eid, &adm);
+                net.broadcast_roster_change(&adm);
+                println!(
+                    "admitted joiner {} as {:?}, roster change effective at tick {}",
+                    eid.fmt_short(),
+                    adm.pid,
+                    adm.effective_tick
+                );
+                changes.push(adm);
+            }
+            Err(refusal) => {
+                let reason = refusal.to_string();
+                tracing::error!("refused mid-game joiner {}: {reason}", eid.fmt_short());
+                net.refuse_joiner(eid, &reason);
+                if let Some(t) = net.telemetry() {
+                    t.send(TelemetryEvent::RosterFailed {
+                        reason: format!("join refused: {reason}"),
+                    });
+                }
+            }
         }
     }
+    changes
 }
 
 /// The outcome of [`connect_and_form`]: either we joined a networked match (a ready
@@ -528,8 +661,151 @@ fn connect_and_form_inner(
         telemetry,
         weights_synced: frozen.weights_synced,
         assets_synced: frozen.assets_synced,
+        weights_digest: local_weights_digest,
+        asset_digest: local_asset_digest,
     };
     Ok(MatchResult::Joined(Box::new((ls, driver))))
+}
+
+/// How long a joiner waits for the host's admission verdict after sending its [`JoinRequest`]
+/// before giving up (the host unreachable, or not running a joinable match). Generous — it spans a
+/// QUIC handshake plus the host noticing the request on its next tick drain.
+const JOIN_WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The outcome of [`connect_and_join`]: a mid-game join either took (a ready joiner [`Lockstep`] +
+/// its client [`NetDriver`]), was REFUSED by the host (a weight/collider digest mismatch — surfaced,
+/// not silent), or the host was UNREACHABLE / never answered.
+pub enum JoinResult {
+    Joined(Box<(Lockstep, NetDriver)>),
+    Refused(String),
+    Unreachable,
+}
+
+/// The host's verdict on our [`JoinRequest`], read off the wire.
+enum AdmissionVerdict {
+    Admitted(Admission),
+    Refused(String),
+    Timeout,
+}
+
+/// Read the host's verdict after we send a [`JoinRequest`]: our UNICAST [`PeerWire::Welcome`] (our
+/// own [`Admission`]) or a [`PeerWire::Refuse`]. We accept ONLY `Welcome`, never a broadcast
+/// [`PeerWire::RosterChange`] — that is an incumbent's notice and may belong to a concurrent joiner,
+/// so reading it as ours would adopt the wrong PlayerId. Frames from anyone but the host, and any
+/// other kind (incl. early TickSets — a not-yet-rostered joiner needs no pre-entry set), are
+/// ignored. Bounded by [`JOIN_WELCOME_TIMEOUT`].
+async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVerdict {
+    let deadline = tokio::time::timeout(JOIN_WELCOME_TIMEOUT, async {
+        loop {
+            let Some(from) = session.recv().await else {
+                return AdmissionVerdict::Timeout; // session closed
+            };
+            if from.from != host {
+                continue;
+            }
+            match from.msg {
+                PeerWire::Welcome(adm) => return AdmissionVerdict::Admitted(adm),
+                PeerWire::Refuse(reason) => return AdmissionVerdict::Refused(reason),
+                _ => continue,
+            }
+        }
+    })
+    .await;
+    deadline.unwrap_or(AdmissionVerdict::Timeout)
+}
+
+/// Dial INTO a live match as a mid-game joiner (GCR MP Stage 3, rl#151) — the round-boundary join's
+/// client entry, the dialing analogue of [`connect_and_form`]. Connect to `host`, send our
+/// weight/collider digests as a [`JoinRequest`], and await the host's verdict: admitted (build the
+/// joiner [`Lockstep`] via [`Lockstep::join_at`] at the agreed `effective_tick` over the new roster
+/// — NO mid-game state transfer, the round-boundary rebuild gives every peer the same fresh world),
+/// refused (a digest mismatch the host turned away LOUDLY — relayed, never a silent wrong-crab), or
+/// unreachable. `seed` is the shared [`crate::sim`] match constant every peer holds.
+pub fn connect_and_join(
+    seed: u64,
+    host: EndpointId,
+    collector: Option<EndpointId>,
+    local_weights_digest: u64,
+    local_asset_digest: u64,
+) -> Result<JoinResult> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    let (session, verdict, telemetry) = rt.block_on(async {
+        let mut session = transport::start_session().await?;
+        let my_eid = session.endpoint_id();
+        println!("joining as endpoint id: {my_eid}");
+        anyhow::ensure!(host != my_eid, "cannot join our own endpoint id");
+        if let Err(e) = session.connect_direct(host).await {
+            tracing::warn!("dialing host {} failed: {e:#}", host.fmt_short());
+            return anyhow::Ok((session, AdmissionVerdict::Timeout, None));
+        }
+        let telemetry = connect_telemetry(collector, my_eid).await;
+        session
+            .send_join_request(
+                host,
+                &JoinRequest {
+                    weights_digest: local_weights_digest,
+                    asset_digest: local_asset_digest,
+                },
+            )
+            .await;
+        let verdict = await_admission(&mut session, host).await;
+        anyhow::Ok((session, verdict, telemetry))
+    })?;
+
+    match verdict {
+        AdmissionVerdict::Refused(reason) => {
+            tracing::error!("host refused our join: {reason}");
+            rt.block_on(session.shutdown());
+            Ok(JoinResult::Refused(reason))
+        }
+        AdmissionVerdict::Timeout => {
+            drop(telemetry);
+            rt.block_on(session.shutdown());
+            Ok(JoinResult::Unreachable)
+        }
+        AdmissionVerdict::Admitted(adm) => {
+            let me = adm.pid;
+            println!(
+                "admitted as {me:?}; joining at tick {} over roster {:?}",
+                adm.effective_tick, adm.roster
+            );
+            // Round-boundary join: build the round fresh at the agreed tick over the new roster
+            // (no snapshot adopted — every peer rebuilds to the same Sim::new).
+            let ls = Lockstep::join_at(seed, &adm.roster, me, adm.effective_tick);
+            let my_eid = session.endpoint_id();
+            // A client's id_map has NO determinism-path reader (inputs route by `server_eid`, the
+            // server's sets carry their own pids, the roster count comes from the lockstep) — it is
+            // inert bookkeeping. We know only our own endpoint and the host's, so map those two. The
+            // host is PlayerId(0) by formation (the lowest endpoint id runs the server), which the
+            // admitted roster must include.
+            debug_assert!(
+                adm.roster.contains(&PlayerId(0)),
+                "the host (PlayerId 0) must be in the roster we were admitted into"
+            );
+            let mut id_map = BTreeMap::new();
+            id_map.insert(host, PlayerId(0));
+            id_map.insert(my_eid, me);
+            let driver = NetDriver {
+                rt,
+                session,
+                me,
+                server_eid: host,
+                early: Vec::new(),
+                id_map,
+                telemetry,
+                // Admitted ⇒ our weight + asset digests matched the host's (the admission gate), so
+                // the round is armable on the same Sally as everyone else.
+                weights_synced: true,
+                assets_synced: true,
+                weights_digest: local_weights_digest,
+                asset_digest: local_asset_digest,
+            };
+            Ok(JoinResult::Joined(Box::new((ls, driver))))
+        }
+    }
 }
 
 /// Open a [`TelemetrySender`] to `collector` if one was configured, tagging events with
@@ -829,7 +1105,8 @@ async fn run_barrier(
                 PeerWire::TickSet(_)
                 | PeerWire::JoinRequest(_)
                 | PeerWire::RosterChange(_)
-                | PeerWire::Refuse(_) => {}
+                | PeerWire::Refuse(_)
+                | PeerWire::Welcome(_) => {}
             }
         }
 
@@ -1195,8 +1472,9 @@ mod tests {
             let msg = ls.submit_local_input(Input::from_axes(1.0, 0.0));
             // The input goes UP to the internal server and the assembled set comes back DOWN; with a
             // roster of one there are no OTHER players' inputs to record.
-            let peers = coord.exchange(me, msg);
-            assert!(peers.is_empty(), "solo has no remote players");
+            let exch = coord.exchange(me, msg);
+            assert!(exch.peer_msgs.is_empty(), "solo has no remote players");
+            assert!(exch.roster_changes.is_empty(), "solo never admits a joiner");
             assert!(ls.try_advance().is_empty(), "solo can't desync");
         }
         assert_eq!(

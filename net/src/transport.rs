@@ -65,6 +65,12 @@ enum Frame {
     /// A server→joiner refusal: the joiner's weight/collider digests disagreed, so it is turned away
     /// LOUDLY rather than admitted onto a wrong crab. Stage 3, rl#151.
     Refuse = 5,
+    /// A server→JOINER welcome: the [`Admission`] the host allocated for THIS joiner, sent UNICAST
+    /// to it alone. Distinct from the broadcast [`Frame::RosterChange`] (which incumbents schedule)
+    /// precisely so a joiner can't mistake a concurrent joiner's broadcast change for its OWN
+    /// allocation and adopt the wrong [`crate::sim::PlayerId`]. Same payload as `RosterChange`.
+    /// Stage 3, rl#151.
+    Welcome = 6,
 }
 
 impl Frame {
@@ -76,6 +82,7 @@ impl Frame {
             3 => Some(Frame::JoinRequest),
             4 => Some(Frame::RosterChange),
             5 => Some(Frame::Refuse),
+            6 => Some(Frame::Welcome),
             _ => None,
         }
     }
@@ -94,12 +101,15 @@ pub enum PeerWire {
     TickSet(TickSet),
     /// A would-be joiner's credentials, received by the host on a live-match dial (Stage 3).
     JoinRequest(JoinRequest),
-    /// A roster change ([`Admission`]), received by a client: incumbents schedule it, the joiner
-    /// builds its session from it (Stage 3).
+    /// A roster change ([`Admission`]), received by a client: incumbents schedule it (Stage 3).
     RosterChange(Admission),
     /// A refusal reason, received by a turned-away joiner (Stage 3) — surfaced loudly, never a
     /// silent drop.
     Refuse(String),
+    /// THIS joiner's own [`Admission`], unicast by the host — the joiner builds its session from it
+    /// ([`crate::lockstep::Lockstep::join_at`]). Distinct from [`Self::RosterChange`] so it can't
+    /// confuse another joiner's broadcast change for its own allocation (Stage 3).
+    Welcome(Admission),
 }
 
 /// Wire sentinel for [`TickMsg::confirmed`] == `None`. `u64::MAX` as the tick can
@@ -482,6 +492,14 @@ impl Session {
         self.send_frame(peer, Frame::Refuse, reason.as_bytes()).await;
     }
 
+    /// UNICAST a just-admitted joiner `peer` its OWN [`Admission`] (Stage 3). Separate from the
+    /// broadcast [`Self::broadcast_roster_change`] so the joiner reads only the allocation meant for
+    /// it — never a concurrent joiner's broadcast change (which would hand it the wrong PlayerId).
+    pub async fn welcome_joiner(&self, peer: EndpointId, adm: &Admission) {
+        self.send_frame(peer, Frame::Welcome, &encode_roster_change_body(adm))
+            .await;
+    }
+
     /// Frame `body` with `kind` + length and send it to one `peer` (the unicast analogue of
     /// [`Self::broadcast_frame`]). A send failure drops that link — the same policy as the broadcast
     /// path. No link to `peer` is a no-op (surfaced as the higher-level stall, not a panic).
@@ -766,6 +784,9 @@ async fn read_loop(
             Frame::Refuse => PeerWire::Refuse(
                 String::from_utf8(body.to_vec()).context("refuse frame body is not UTF-8")?,
             ),
+            // Same payload as RosterChange — only the frame kind (unicast welcome vs broadcast
+            // notice) distinguishes the joiner's own allocation from an incumbent's notice.
+            Frame::Welcome => PeerWire::Welcome(decode_roster_change_body(body)?),
         };
         if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
             return Ok(()); // session dropped
@@ -818,7 +839,8 @@ mod tests {
         assert_eq!(Frame::from_byte(3), Some(Frame::JoinRequest));
         assert_eq!(Frame::from_byte(4), Some(Frame::RosterChange));
         assert_eq!(Frame::from_byte(5), Some(Frame::Refuse));
-        assert_eq!(Frame::from_byte(6), None);
+        assert_eq!(Frame::from_byte(6), Some(Frame::Welcome));
+        assert_eq!(Frame::from_byte(7), None);
         assert_eq!(Frame::from_byte(0xff), None);
     }
 
