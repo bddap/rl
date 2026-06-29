@@ -517,40 +517,35 @@ pub(super) fn apply_transforms(
     }
 }
 
-/// The first-person cockpit camera for a flyer: eye at the interpolated 3D position, looking
-/// along the interpolated heading + pitch, with the horizon BANKED by the craft's roll (the
-/// cockpit up-vector tilts with the attitude, so a banked turn looks like one). The ONE
-/// cockpit-view formula, taking the shared [`CockpitPose`] so it flies EVERY craft — the
-/// single-player plane and helicopter and the sim-side networked pilot — with no copy to drift.
-fn cockpit_camera(prev: CockpitPose, now: CockpitPose, alpha: f32) -> Transform {
-    let eye = lerp_pos3(prev.pos, now.pos, alpha);
-    let heading = lerp_yaw(prev.heading, now.heading, alpha);
-    // Pitch/roll reuse lerp_yaw because they're turn-unit angles too; since both are bounded
-    // (never wrap), the shortest-arc handling is a harmless no-op here.
-    let pitch = lerp_yaw(prev.pitch, now.pitch, alpha);
-    let roll = lerp_yaw(prev.roll, now.roll, alpha);
-    let look_dir = look_direction(heading, pitch);
-    // Bank the camera's up-vector by rolling Y about the look direction. Positive sim roll
-    // is right-wing-down, which tilts the horizon clockwise from the pilot's seat — a
-    // negative rotation about the forward look axis.
-    let up = Quat::from_axis_angle(look_dir, -roll) * Vec3::Y;
-    Transform::from_translation(eye).looking_at(eye + look_dir, up)
+/// A sim attitude [`crate::sim::iquat::Quat`] as a renderer [`Quat`]: the body→world rotation
+/// whose +Z is the craft's nose and +Y its up. Normalized because the integer quaternion is
+/// unit only to rounding. The ONE place the sim attitude crosses into float, so the camera and
+/// the gray-box mesh can't disagree on what a craft's orientation means.
+fn attitude(q: crate::sim::iquat::Quat) -> Quat {
+    let (x, y, z, w) = iquat_client::quat_xyzw(q);
+    Quat::from_xyzw(x, y, z, w).normalize()
 }
 
-/// The interpolated world transform for a plane: position lerped in 3D, orientation
-/// from heading (about +Y), then pitch (nose up about the local right axis), then roll
-/// (bank about the nose). +Z is the nose, matching the sim's heading-0 = +Z convention and
-/// the gray box's long axis. Pitch is negated (a positive sim pitch is nose-UP, but a
-/// positive rotation about +X sends +Z toward −Y); roll is negated likewise so a positive
-/// sim roll (right wing down) drops the +X wing.
+/// The first-person cockpit camera for a flyer: eye at the interpolated 3D position, looking
+/// along the craft's nose with the horizon banked/pitched/rolled by its full attitude — so a
+/// banked turn, a loop, or inverted flight all look right. The ONE cockpit-view formula,
+/// taking the shared [`CockpitPose`] so it flies EVERY craft — the single-player plane and
+/// helicopter and the sim-side networked pilot — with no copy to drift. The two ticks'
+/// attitudes are SLERPed (shortest-arc) so the view tween is smooth through any rotation.
+fn cockpit_camera(prev: CockpitPose, now: CockpitPose, alpha: f32) -> Transform {
+    let eye = lerp_pos3(prev.pos, now.pos, alpha);
+    let rot = attitude(prev.orient).slerp(attitude(now.orient), alpha);
+    // Look along the craft's nose (+Z), with up its own up-vector (+Y) — so the pilot looks
+    // where the craft is pointed, banked/pitched/rolled by its full attitude.
+    Transform::from_translation(eye).looking_at(eye + rot * Vec3::Z, rot * Vec3::Y)
+}
+
+/// The interpolated world transform for a networked pilot's gray-box plane: position lerped in
+/// 3D, orientation the craft's attitude quaternion (its +Z is the nose, matching the gray
+/// box's long axis), SLERPed between the two ticks for a smooth spin through any attitude.
 fn plane_transform(prev: Plane, now: Plane, alpha: f32) -> Transform {
     let pos = lerp_pos3(prev.pos(), now.pos(), alpha);
-    let heading = lerp_yaw(prev.heading(), now.heading(), alpha);
-    let pitch = lerp_yaw(prev.pitch(), now.pitch(), alpha);
-    let roll = lerp_yaw(prev.roll(), now.roll(), alpha);
-    let rot = Quat::from_rotation_y(heading)
-        * Quat::from_rotation_x(-pitch)
-        * Quat::from_rotation_z(-roll);
+    let rot = attitude(prev.orient()).slerp(attitude(now.orient()), alpha);
     Transform::from_translation(pos).with_rotation(rot)
 }
 

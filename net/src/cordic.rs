@@ -228,6 +228,164 @@ pub mod trig {
     }
 }
 
+/// Deterministic integer fixed-point quaternions — the vehicle ATTITUDE representation.
+///
+/// A craft's orientation is a unit quaternion whose components are [`trig::ONE`]-scaled
+/// (identity = `(ONE, 0, 0, 0)`), so an exact unit quaternion satisfies
+/// `w²+x²+y²+z² = ONE²`. Built only from the integer [`trig`] table and an integer sqrt —
+/// no float anywhere — so two peers evolve a craft's attitude bit-identically (it folds
+/// into [`crate::sim::Sim::state_hash`]).
+///
+/// **Why a quaternion and not Euler heading/pitch/roll:** attitude is integrated in the
+/// craft's OWN (body) frame, RATE-based and UNCLAMPED — the pilot holds whatever attitude
+/// they fly to, inverted included. Euler angles can't: a world-up "yaw" is wrong once the
+/// craft is pitched/rolled, and any pitch/roll clamp that stops a tumble also bars a loop.
+/// A quaternion has neither gimbal lock nor a natural clamp, which is exactly the freedom
+/// the flight model wants.
+pub mod iquat {
+    use super::trig::{self, ONE};
+
+    /// A [`trig::ONE`]-scaled unit quaternion `w + xi + yj + zk`. Fields are public so the
+    /// client float adapter ([`super::iquat_client`]) can read them; the sim only ever
+    /// touches them through the integer methods here.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Quat {
+        pub w: i64,
+        pub x: i64,
+        pub y: i64,
+        pub z: i64,
+    }
+
+    /// Integer square root (floor) of a non-negative `i64`, by Newton's method — the same
+    /// deterministic algorithm as the sim's [`crate::sim`] `isqrt`, kept local so this
+    /// module needs nothing from `sim`. Used only to renormalize a quaternion.
+    fn isqrt(n: i64) -> i64 {
+        debug_assert!(n >= 0);
+        if n < 2 {
+            return n;
+        }
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
+    }
+
+    impl Quat {
+        /// The identity rotation: level, nose along +Z (heading 0).
+        pub const IDENTITY: Quat = Quat {
+            w: ONE as i64,
+            x: 0,
+            y: 0,
+            z: 0,
+        };
+
+        /// A level craft facing `turns` (the spawn attitude): a pure rotation about world
+        /// +Y, so `from_yaw(h)`'s nose points where heading `h` did, wings level. Half-angle
+        /// `turns/2` because a quaternion rotates by twice its encoded angle.
+        pub fn from_yaw(turns: i32) -> Quat {
+            let (s, c) = trig::sin_cos(turns / 2); // · ONE
+            Quat {
+                w: c,
+                x: 0,
+                y: s,
+                z: 0,
+            }
+        }
+
+        /// Hamilton product `self ⊗ rhs`, descaled back to the [`ONE`] grid. Right-multiplying
+        /// by a small rotation applies it in `self`'s BODY frame — the property the integrator
+        /// relies on. (Each term is ≤ `ONE²`, four summed ≤ `4·ONE²` ≈ 1.1e9, well within
+        /// `i64`; integer truncation on the `/ONE` is identical on every target.)
+        fn mul(self, r: Quat) -> Quat {
+            let one = ONE as i64;
+            Quat {
+                w: (self.w * r.w - self.x * r.x - self.y * r.y - self.z * r.z) / one,
+                x: (self.w * r.x + self.x * r.w + self.y * r.z - self.z * r.y) / one,
+                y: (self.w * r.y - self.x * r.z + self.y * r.w + self.z * r.x) / one,
+                z: (self.w * r.z + self.x * r.y - self.y * r.x + self.z * r.w) / one,
+            }
+        }
+
+        /// Rescale back to a unit quaternion (magnitude [`ONE`]). Called every tick after the
+        /// body-rate increment so integer rounding can't let the magnitude drift; `IDENTITY`
+        /// on the impossible zero-norm so a craft can never end up with no orientation.
+        fn normalize(self) -> Quat {
+            let n2 = self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z;
+            let norm = isqrt(n2);
+            if norm == 0 {
+                return Quat::IDENTITY;
+            }
+            let one = ONE as i64;
+            Quat {
+                w: self.w * one / norm,
+                x: self.x * one / norm,
+                y: self.y * one / norm,
+                z: self.z * one / norm,
+            }
+        }
+
+        /// A small rotation of `turns` about a body axis (`ax`,`ay`,`az` a unit axis), as the
+        /// quaternion `(cos(turns/2), sin(turns/2)·axis)`. The axis components are 0/±1, so no
+        /// scaling math is needed.
+        fn axis(turns: i32, ax: i64, ay: i64, az: i64) -> Quat {
+            let (s, c) = trig::sin_cos(turns / 2); // · ONE
+            Quat {
+                w: c,
+                x: s * ax,
+                y: s * ay,
+                z: s * az,
+            }
+        }
+
+        /// Integrate one tick of BODY-frame angular rate: rotate by `d_pitch` about the body
+        /// right axis (+X), `d_yaw` about the body up axis (+Y), `d_roll` about the body
+        /// forward/nose axis (+Z), all in [`trig`] turn units, then renormalize. Right-
+        /// multiplied so the increment is in the craft's own frame regardless of its current
+        /// attitude — yaw spins about the craft's own up, not the world's. UNCLAMPED: there is
+        /// no orientation bound and no recentre, so the craft can loop and fly inverted.
+        pub fn integrate(self, d_pitch: i32, d_yaw: i32, d_roll: i32) -> Quat {
+            let delta = Quat::axis(d_pitch, 1, 0, 0)
+                .mul(Quat::axis(d_yaw, 0, 1, 0))
+                .mul(Quat::axis(d_roll, 0, 0, 1));
+            self.mul(delta).normalize()
+        }
+
+        /// The craft's nose (body +Z) in world space, [`ONE`]-scaled — the thrust direction.
+        /// (Rotation-matrix +Z column.)
+        pub fn forward(self) -> (i64, i64, i64) {
+            let one = ONE as i64;
+            (
+                2 * (self.x * self.z + self.w * self.y) / one,
+                2 * (self.y * self.z - self.w * self.x) / one,
+                one - 2 * (self.x * self.x + self.y * self.y) / one,
+            )
+        }
+
+        /// The craft's up (body +Y) in world space, [`ONE`]-scaled — the lift direction (a
+        /// wing's lift, a rotor disc's normal). When the craft is inverted this points DOWN,
+        /// so lift pulls the pilot toward the ground: inverted flight costs altitude, as it
+        /// should. (Rotation-matrix +Y column.)
+        pub fn up(self) -> (i64, i64, i64) {
+            let one = ONE as i64;
+            (
+                2 * (self.x * self.y - self.w * self.z) / one,
+                one - 2 * (self.x * self.x + self.z * self.z) / one,
+                2 * (self.y * self.z + self.w * self.x) / one,
+            )
+        }
+
+        /// The craft's heading (the nose projected onto the ground plane), in [`trig`] turn
+        /// units — used only to spawn the next craft facing the same way on a vehicle swap.
+        pub fn yaw(self) -> i32 {
+            let (fx, _fy, fz) = self.forward();
+            trig::atan2_turns(fx, fz)
+        }
+    }
+}
+
 /// Client-side float helpers for turning the sim's integer angles into the radians a
 /// renderer wants. **Deliberately OUTSIDE [`trig`]:** [`trig`] is the float-free
 /// surface the sim itself calls, so keeping every `f32`/`f64` here means "no float in
@@ -240,5 +398,23 @@ pub mod trig_client {
     /// camera. Returns `f32`, so by construction it can't be used in the sim.
     pub fn turns_to_radians(a: i32) -> f32 {
         (wrap_turns(a) as f32) / (TURN as f32) * std::f32::consts::TAU
+    }
+}
+
+/// Client-side float adapter for the integer attitude quaternion ([`super::iquat`]). Like
+/// [`super::trig_client`], it lives OUTSIDE [`super::iquat`] so "no float in the sim" stays
+/// enforced by where code lives — only the renderer turns an attitude into a float quaternion.
+pub mod iquat_client {
+    /// The [`super::iquat::Quat`]'s components as a float `(x, y, z, w)` tuple — the order a
+    /// renderer's quaternion constructor wants. Divided by [`super::trig::ONE`] back to the
+    /// unit scale; the caller normalizes (the integer quaternion is unit only to rounding).
+    pub fn quat_xyzw(q: super::iquat::Quat) -> (f32, f32, f32, f32) {
+        let one = super::trig::ONE as f32;
+        (
+            q.x as f32 / one,
+            q.y as f32 / one,
+            q.z as f32 / one,
+            q.w as f32 / one,
+        )
     }
 }
