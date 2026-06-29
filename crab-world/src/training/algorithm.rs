@@ -28,6 +28,20 @@ pub(crate) struct PpoConfig {
     /// returns (10 ≪ 2700, so every residual was clamped). A few σ is the right order:
     /// it passes honest predictions through and only tames genuine outliers.
     pub(crate) value_loss_clip: f32,
+    /// Trust-region ceiling on how far ONE update may move the policy, as an
+    /// approximate KL divergence (rollout policy → current policy, the unbiased
+    /// `mean((r-1) - ln r)` estimator). The PPO ratio clip only zeroes the gradient
+    /// for samples outside the band — it does NOT bound total KL across the 4 epochs ×
+    /// many minibatches, so a sharpened (near-deterministic) policy or a cold-resumed
+    /// optimizer can still walk the policy off a cliff in a single iteration. This is
+    /// the actual bound: once cumulative KL crosses `1.5 × target_kl` the update STOPS
+    /// for this iteration, so each iteration moves the policy by at most ~`target_kl`
+    /// regardless of optimizer state or policy sharpness. That is what makes the
+    /// reach-1.0 → reach-0.0 one-update collapse (observed continuously at iter ~4000
+    /// and instantly on every cold-optimizer warm-resume) impossible by construction.
+    /// 0.03 is generous: healthy updates here run ~0.01, so it never throttles normal
+    /// learning, but it hard-stops the 10×+ over-steps of a collapse.
+    pub(crate) target_kl: f32,
 }
 
 impl Default for PpoConfig {
@@ -53,6 +67,7 @@ impl Default for PpoConfig {
             // the value gradient. See the field doc for why this is σ, not the SB3
             // value-trust-region's 0.2.
             value_loss_clip: 3.0,
+            target_kl: 0.03,
         }
     }
 }
@@ -420,6 +435,15 @@ pub(crate) struct PpoMetrics {
     pub(crate) policy_loss: f32,
     pub(crate) value_loss: f32,
     pub(crate) entropy: f32,
+    /// Approximate KL the policy moved this update (rollout → final policy). The
+    /// target-KL guard ([`PpoConfig::target_kl`]) stops the update once this crosses
+    /// the ceiling, so it should track ~`target_kl` on a healthy run and reveals a
+    /// throttled (early-stopped) iteration when it sits at the ceiling.
+    pub(crate) kl: f32,
+    /// Optimizer steps actually applied this update. Equals
+    /// `epochs × ceil(n/batch)` on a full update; fewer when the target-KL guard
+    /// early-stopped the iteration (a visible signal the policy hit the trust region).
+    pub(crate) steps: u32,
 }
 
 #[cfg(test)]
