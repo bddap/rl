@@ -5,6 +5,7 @@ use burn::backend::ndarray::NdArray;
 
 pub mod algorithm;
 pub mod bench;
+pub mod best;
 pub mod checkpoint;
 pub mod curriculum;
 #[cfg(feature = "wgpu")]

@@ -55,7 +55,10 @@ pub(crate) const CURRICULUM_REACH_RADIUS: f32 = 0.8;
 /// not ~1.0: the goal is "the policy reliably gets there", not "every episode is
 /// perfect" — targets near the arena edge clamp short and some spawns are awkward, so
 /// demanding unanimity would stall the curriculum on noise it has effectively mastered.
-const ADVANCE_REACH_FRACTION: f32 = 0.6;
+/// Reused by [`super::best`] as the solid-reach floor a checkpoint must clear to enter
+/// `ckpt/best/` — the same bar that defines "the policy reliably gets there", so a
+/// collapse (reach below it) can never become the best regardless of band.
+pub(crate) const ADVANCE_REACH_FRACTION: f32 = 0.6;
 /// Number of recent FINISHED episodes (pooled across all rollout threads) the
 /// reach-fraction is measured over before an advance is considered. Wide enough that
 /// one lucky streak can't trip an advance, narrow enough that the signal tracks the
