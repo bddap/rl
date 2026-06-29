@@ -1340,13 +1340,8 @@ fn step_plane(plane: &mut Plane, inp: Input) {
     //    NEGATIVE look_yaw — negate here so screen-right rolls RIGHT (right wing down) and
     //    thus banks into a right turn. Mirrors the rudder's negation below.
     let droll = (-(inp.look_yaw as i64) * PLANE_ROLL_RATE as i64 / axis) as i32;
-    if droll == 0 {
-        // Step toward zero without overshooting past it.
-        let recenter = PLANE_ROLL_RECENTER.min(plane.roll.abs());
-        plane.roll -= plane.roll.signum() * recenter;
-    } else {
-        plane.roll = (plane.roll + droll).clamp(-PLANE_MAX_ROLL, PLANE_MAX_ROLL);
-    }
+    // Same clamp + auto-level-toward-zero as the heli's cyclic — ONE formula, no drift.
+    plane.roll = recenter_or_tilt(plane.roll, droll, PLANE_ROLL_RECENTER, PLANE_MAX_ROLL);
 
     // 3) Pitch (elevator) from the vertical stick axis. Bounded tilt (clamped, never
     //    wraps), positive = nose up.
@@ -1421,17 +1416,18 @@ fn step_plane(plane: &mut Plane, inp: Input) {
     }
 }
 
-/// Step one cyclic tilt axis (pitch or roll) toward the commanded change `delta`, or
-/// AUTO-LEVEL toward 0 by [`HELI_TILT_RECENTER`] when there's no input — clamped to
-/// ±[`HELI_MAX_TILT`]. Shared by both axes so they can't drift (the same auto-levelling the
-/// plane's roll uses, generalized). Releasing the cyclic returns the disc to level, so the
-/// craft slows and settles back into a hover.
-fn heli_tilt(current: i32, delta: i32) -> i32 {
+/// Step one bounded, auto-levelling control axis toward the commanded change `delta`, or
+/// AUTO-LEVEL toward 0 by `recenter` (no overshoot) when there's no input — the moved value
+/// clamped to ±`max`. ONE implementation of the clamp+recenter formula, shared by the heli's
+/// two cyclic axes AND the plane's roll (auto-level), so they can't drift. Releasing the
+/// stick returns the axis to level (the heli settles back into a hover, the plane to
+/// wings-level).
+fn recenter_or_tilt(current: i32, delta: i32, recenter: i32, max: i32) -> i32 {
     if delta == 0 {
-        let recenter = HELI_TILT_RECENTER.min(current.abs());
-        current - current.signum() * recenter
+        let step = recenter.min(current.abs());
+        current - current.signum() * step
     } else {
-        (current + delta).clamp(-HELI_MAX_TILT, HELI_MAX_TILT)
+        (current + delta).clamp(-max, max)
     }
 }
 
@@ -1468,9 +1464,9 @@ fn step_helicopter(heli: &mut Helicopter, inp: Input) {
     //    negated for the screen-right↔sim-X reconcile (as the plane's ailerons are), so
     //    screen-right banks right (positive roll).
     let dpitch = (-(inp.look_pitch as i64) * HELI_CYCLIC_RATE as i64 / axis) as i32;
-    heli.pitch = heli_tilt(heli.pitch, dpitch);
+    heli.pitch = recenter_or_tilt(heli.pitch, dpitch, HELI_TILT_RECENTER, HELI_MAX_TILT);
     let droll = (-(inp.look_yaw as i64) * HELI_CYCLIC_RATE as i64 / axis) as i32;
-    heli.roll = heli_tilt(heli.roll, droll);
+    heli.roll = recenter_or_tilt(heli.roll, droll, HELI_TILT_RECENTER, HELI_MAX_TILT);
 
     // 3) Yaw pedals (tail rotor): spin the heading directly, with authority even in a
     //    stationary hover. Negated so screen-left A yaws left (mirrors the plane rudder).
