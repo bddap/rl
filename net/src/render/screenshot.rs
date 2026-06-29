@@ -32,6 +32,14 @@ pub fn build_screenshot_app(
     // pipeline warms over the same frames — mirrors play.rs's screenshot mode.
     app.add_plugins(
         DefaultPlugins
+            // Resolve the committed control glyphs from the bundled `assets/` dir regardless
+            // of cwd/which bin runs (same fix as the windowed app); `BEVY_ASSET_ROOT` overrides.
+            .set(AssetPlugin {
+                file_path: crab_world::assets::bevy_asset_path()
+                    .to_string_lossy()
+                    .into_owned(),
+                ..default()
+            })
             .set(WindowPlugin {
                 primary_window: None,
                 exit_condition: bevy::window::ExitCondition::DontExit,

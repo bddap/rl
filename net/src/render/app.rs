@@ -129,7 +129,14 @@ pub fn build_windowed_app(
         );
     }
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    // Point bevy at the bundled `assets/` dir explicitly, so a fresh clone's `cargo run`
+    // finds the committed control glyphs regardless of cwd or which workspace bin runs (the
+    // default root is the running bin's crate dir, `game/assets`, which has no glyphs).
+    // `BEVY_ASSET_ROOT` still overrides (deploy). See `crab_world::assets`.
+    app.add_plugins(DefaultPlugins.set(AssetPlugin {
+        file_path: crab_world::assets::bevy_asset_path().to_string_lossy().into_owned(),
+        ..default()
+    }).set(WindowPlugin {
         primary_window: Some(Window {
             title: "Giant Crab Rescue".into(),
             // Fullscreen is the single source of truth for every GCR launch target. The Deck

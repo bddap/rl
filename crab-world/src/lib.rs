@@ -20,6 +20,9 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use clap::Parser;
 
+/// Single source of truth for the bundled-asset root + the startup glyph-presence guard,
+/// so a fresh clone's `cargo run` finds the committed control icons (and fails loud if not).
+pub mod assets;
 pub mod bot;
 /// Build provenance (commit sha + build time) + the subtle corner stamp that shows it.
 /// The consts compile everywhere; the overlay spawner is render-gated (UI-only).
