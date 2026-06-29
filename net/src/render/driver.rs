@@ -642,6 +642,12 @@ pub(super) fn drive_lockstep(
                 world
                     .resource_mut::<crate::external_crab::ExternalCrabBridge>()
                     .restart_to_spawn(spawn);
+                // Re-seeding the bridge alone leaves the rapier solver WARM, which desyncs a
+                // mid-game joiner's cold body against an incumbent's warm one (job 412, relocated to
+                // the join). Drop + rebuild the body so every peer's solver state is identically
+                // fresh. Same shared-input restart edge ⇒ bit-identical cross-peer; covers the plain
+                // RESTART button too (one shared edge).
+                crate::external_crab::cold_respawn_armed_crab(world);
             }
             report_faults(&tick_faults, &mut total_desyncs, &tel);
         }

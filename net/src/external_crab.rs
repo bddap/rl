@@ -236,6 +236,51 @@ impl ExternalCrabBridge {
     }
 }
 
+/// Cold-respawn the armed crab's rapier body at the round-boundary RESTART edge (GCR MP Stage 3,
+/// rl#151) — despawn the env-0 crab entity tree and rebuild it fresh from spawn, via the SAME
+/// [`crab_world::bot::respawn_crab`] path the non-finite rescue uses (one respawn implementation, no
+/// parallel reset to drift). [`ExternalCrabBridge::restart_to_spawn`] resets only the bridge's
+/// bookkeeping; the rapier solver keeps WARM contact/warm-start state across a bare restart. That
+/// was invisible for a plain button-restart (no fresh peer to diverge against), but a mid-game JOIN
+/// puts a warm incumbent body beside a cold joiner body in the same round — exactly job 412's
+/// restored-vs-live divergence, relocated to the join, and folded LOUDLY into `state_hash` via the
+/// external-crab digest. Dropping the tree and rebuilding gives every peer (incumbents AND the
+/// joiner) the IDENTICAL cold solver state, so the round stays in lockstep. Called from the one
+/// restart edge in [`crate::render`]'s `drive_lockstep`, so join and plain-restart share it.
+///
+/// Exclusive-world (the driver edge holds `&mut World`): collect the env-0 parts, lift `CrabAssets`
+/// out with `resource_scope` so a temporary [`Commands`] can borrow the world, and apply the
+/// despawn+spawn immediately — before the next `pump_fixed_steps`, so the first post-restart physics
+/// step lands on the fresh body. The spawn origin is the env's recorded [`CrabSpawns`] entry (the
+/// same point the initial spawn used), keeping the cold body bit-identical to a from-boot spawn.
+pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
+    use bevy::ecs::world::CommandQueue;
+
+    let parts: Vec<Entity> = world
+        .query_filtered::<(Entity, &CrabEnvId), With<CrabBodyPart>>()
+        .iter(world)
+        .filter(|(_, env)| env.0 == 0)
+        .map(|(e, _)| e)
+        .collect();
+    // Nothing to rebuild before the body exists (e.g. a restart in the first frames) — the guarded
+    // initial spawn will place it; respawning an absent crab would be a no-op despawn + a duplicate.
+    if parts.is_empty() {
+        return;
+    }
+    let origin = world
+        .resource::<CrabSpawns>()
+        .0
+        .first()
+        .copied()
+        .unwrap_or(Vec3::ZERO);
+    world.resource_scope(|world, assets: Mut<crab_world::bot::body::CrabAssets>| {
+        let mut queue = CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        crab_world::bot::respawn_crab(&mut commands, &assets, parts.into_iter(), origin, 0);
+        queue.apply(world);
+    });
+}
+
 /// The per-tick bridge↔sim handshake, run BEFORE each [`Lockstep::try_advance`]: push the
 /// real crab body's game position + facing into the sim (so this tick's grab/extraction
 /// resolve against it), then refresh the player the crab hunts (nearest living). ONE definition
