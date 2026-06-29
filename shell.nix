@@ -33,6 +33,11 @@ pkgs.mkShell {
     # Build tools
     clang
     mold
+
+    # Offline video render (`rl-demo --render-video`) shells out to ffmpeg to encode the
+    # captured PNG frames into an mp4. On the shell PATH so a nix-shell-driven render finds
+    # it; the binary looks it up by name.
+    ffmpeg
   ];
 
   # Point Vulkan ICD loader at the right drivers
