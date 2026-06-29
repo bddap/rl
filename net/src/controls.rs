@@ -413,8 +413,8 @@ pub const PLANE_ROWS: [ContextRow<GcrControls>; 8] = [
 /// — a brake that bleeds the drift to rest. `Extract` is omitted (neutral sim input while piloting).
 /// The E-cycle reaches foot from here, so `EnterExit` reads "Exit to foot".
 pub const SHIP_ROWS: [ContextRow<GcrControls>; 10] = [
-    ContextRow { action: Action::ShipThrust, label: "Thrust — move / strafe" },
-    ContextRow { action: Action::ShipAim, label: "Aim — pitch / yaw" },
+    ContextRow { action: Action::ShipThrust, label: "Thrust: move / strafe" },
+    ContextRow { action: Action::ShipAim, label: "Aim: pitch / yaw" },
     ContextRow { action: Action::ShipLift, label: "Thrust up / down" },
     ContextRow { action: Action::ShipRoll, label: "Roll" },
     ContextRow { action: Action::MatchVelocity, label: "Match velocity (brake)" },
@@ -656,8 +656,8 @@ mod tests {
         assert_ne!(labels(&ship), labels(&foot), "ship legend differs from foot");
         assert_ne!(labels(&ship), labels(&plane), "ship legend differs from plane");
         // Outer Wilds labels.
-        assert!(ship.iter().any(|l| l.label == "Thrust — move / strafe"));
-        assert!(ship.iter().any(|l| l.label == "Aim — pitch / yaw"));
+        assert!(ship.iter().any(|l| l.label == "Thrust: move / strafe"));
+        assert!(ship.iter().any(|l| l.label == "Aim: pitch / yaw"));
         assert!(ship.iter().any(|l| l.label == "Roll"));
         assert!(ship.iter().any(|l| l.label == "Match velocity (brake)"));
         assert!(ship.iter().any(|l| l.label == "Exit to foot"));

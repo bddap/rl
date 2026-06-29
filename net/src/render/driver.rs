@@ -672,7 +672,10 @@ pub(super) fn drive_lockstep(
         // for the plane, Outer Wilds for the ship — `flight_control`) rather than the sim's merged
         // move/look axes. The `FlightInput` snapshot is per-frame, so the intent is stable across the
         // ticks pumped this frame.
-        {
+        // `VehicleControl` only exists when `VehiclePlugin` is installed — the WINDOWED play app
+        // (`app.rs`), where you can actually board a craft. The headless screenshot app omits the
+        // plugin (no piloting there), so skip the bridge rather than demand the resource.
+        if world.get_resource::<VehicleControl>().is_some() {
             let kind = world.resource::<LocalVehicle>().kind();
             let fc = kind.map(|k| flight_control(k, world.resource::<FlightInput>()));
             let mut ctrl = world.resource_mut::<VehicleControl>();
