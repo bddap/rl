@@ -183,68 +183,6 @@ mod desync_test {
     }
 
     #[test]
-    fn two_pilot_sims_stay_in_lockstep() {
-        // The vehicle determinism proof (rl#38 first cut): a plane flown through a
-        // deliberate throttle / turn / climb / dive program on two independently-built
-        // sims must hash identically EVERY tick. The plane's whole evolving state (3D
-        // position + velocity, heading, pitch) is in the hash, so any nondeterminism in
-        // the flight integrator — a stray f32, an unordered map — diverges the two and
-        // fails this. A scripted program (not random) so the phases are legible and the
-        // motion is non-trivial: it climbs, turns, then dives, exercising both angles
-        // and all three velocity axes.
-        let pilots: Vec<PlayerId> = (0..2).map(PlayerId).collect();
-        let seed = 0xF1A11;
-        // Build the input program: 600 ticks (~20s at 30Hz) cycling through flight
-        // phases, the SAME input fed to every pilot each tick.
-        let program: Vec<BTreeMap<PlayerId, Input>> = (0..600usize)
-            .map(|t| {
-                // throttle (forward), pitch (strafe: + climbs), yaw-look (turn).
-                let (forward, strafe, look) = match t % 240 {
-                    0..60 => (1.0, 0.6, 0.0),     // climb under full throttle
-                    60..120 => (1.0, 0.0, 1.0),   // level off, hard turn
-                    120..180 => (0.7, -0.7, 0.0), // nose down, dive
-                    _ => (1.0, 0.2, -0.5),        // pull up, opposite turn
-                };
-                pilots
-                    .iter()
-                    .map(|&p| (p, Input::new(strafe, forward, look, 0)))
-                    .collect()
-            })
-            .collect();
-
-        let mut a = Sim::new_with_pilots(seed, &pilots, &pilots);
-        let mut b = Sim::new_with_pilots(seed, &pilots, &pilots);
-        assert_eq!(
-            a.state_hash(),
-            b.state_hash(),
-            "initial pilot state must match"
-        );
-
-        let start = a
-            .plane(PlayerId(0))
-            .expect("player 0 should be a pilot")
-            .pos();
-        for (t, inputs) in program.iter().enumerate() {
-            a.step(inputs);
-            b.step(inputs);
-            assert_eq!(
-                a.state_hash(),
-                b.state_hash(),
-                "plane state hash diverged at tick {t} — flight sim is nondeterministic"
-            );
-        }
-        // Non-trivial proof: the plane actually flew somewhere (not a frozen no-op that
-        // would "stay in lockstep" vacuously). It climbed (Y up from spawn) and moved
-        // horizontally (turned + thrust), so pos changed on multiple axes.
-        let end = a.plane(PlayerId(0)).unwrap().pos();
-        assert_ne!(end, start, "the plane must have moved over 600 ticks");
-        assert!(
-            end.y != start.y && (end.x != start.x || end.z != start.z),
-            "flight must change altitude AND ground position, got {start:?} -> {end:?}"
-        );
-    }
-
-    #[test]
     fn long_replay_drives_the_real_loop_and_stays_in_lockstep() {
         // Two players that hold still while the crab hunts them: a DETERMINISTIC
         // scenario (neutral input every tick) that is guaranteed to resolve — the crab

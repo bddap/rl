@@ -159,7 +159,6 @@ pub(super) struct GameState {
 #[derive(Clone, Default)]
 pub(super) struct SimSnapshot {
     pub(super) players: BTreeMap<PlayerId, Player>,
-    pub(super) planes: BTreeMap<PlayerId, Plane>,
     pub(super) crab: Option<Crab>,
 }
 
@@ -167,7 +166,6 @@ impl SimSnapshot {
     fn capture(sim: &Sim) -> Self {
         Self {
             players: sim.players().collect(),
-            planes: sim.planes().collect(),
             crab: Some(sim.crab()),
         }
     }

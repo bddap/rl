@@ -191,11 +191,6 @@ struct FpScreenshotArgs {
     /// the default FOV otherwise shows just a slab of carapace. Unset keeps Bevy's default.
     #[arg(long)]
     cam_fov: Option<f32>,
-    /// Make the NON-local players pilots (flying planes) so the captured frame shows a
-    /// plane's gray box in the air — the evidence the plane renders. Needs `--players >= 2`
-    /// (a lone pilot would show empty sky). Off ⇒ the unchanged on-foot shot.
-    #[arg(long, default_value_t = false)]
-    plane: bool,
     /// Arm the real trained rapier-NN crab ("Sally") + skin for the shot, instead of the static
     /// integer silhouette — the SAME `--nn-crab-checkpoint` resolution as `play`, so an evidence
     /// frame composes the actual armed crab the windowed solo client renders (reposed + scaled to
@@ -611,17 +606,7 @@ fn nn_crab_checkpoint_dir(flag: Option<PathBuf>) -> Result<PathBuf> {
 fn run_fp_screenshot(args: FpScreenshotArgs) -> Result<()> {
     let me = PlayerId(0);
     let players: Vec<PlayerId> = (0..args.players.max(1)).map(PlayerId).collect();
-    // `--plane`: make the NON-local players pilots and keep the local (player 0) a ground
-    // observer, so the captured FP frame clearly shows a remote plane's gray box flying — the
-    // evidence the plane renders. Needs `--players >= 2`: with one player there's no remote
-    // plane to frame, so the shot stays on foot (a lone pilot would show empty sky —
-    // worthless as evidence). Off ⇒ the unchanged foot shot.
-    let pilots: Vec<PlayerId> = if args.plane && players.len() > 1 {
-        players[1..].to_vec()
-    } else {
-        Vec::new()
-    };
-    let ls = Lockstep::new_with_pilots(MATCH_SEED, &players, me, &pilots);
+    let ls = Lockstep::new(MATCH_SEED, &players, me);
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(args.cam_yaw, args.cam_pitch)
         .with_fov(args.cam_fov);
@@ -771,9 +756,8 @@ async fn run_net(args: NetArgs) -> Result<()> {
         my_eid.fmt_short()
     );
 
-    // Use the wire-negotiated pilot set so every peer spawns the identical foot/plane mix
-    // (empty ⇒ the unchanged foot-only round).
-    let mut ls = Lockstep::new_with_pilots(MATCH_SEED, &all_ids, me, &frozen.pilots);
+    // Every peer spawns the identical foot-only round.
+    let mut ls = Lockstep::new(MATCH_SEED, &all_ids, me);
 
     // Server-coordinated play (rl#151): the lowest-id peer (PlayerId 0) runs the match server; the
     // rest are remote clients of it. Solo (a single peer) is the same path with a roster of one. The
