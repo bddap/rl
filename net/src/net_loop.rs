@@ -860,6 +860,9 @@ async fn run_barrier(
                     m.on_beat(from.from, &beat, now);
                 }
                 PeerWire::Tick(msg) => early.push((from.from, msg)),
+                // No server exists yet during formation, so a tick SET can't legitimately arrive
+                // here; ignore a stray one (a peer racing ahead) rather than mishandle it.
+                PeerWire::TickSet(_) => {}
             }
         }
 
@@ -979,7 +982,7 @@ pub fn solo_lockstep_for(seed: u64) -> Lockstep {
 fn server_endpoint(id_map: &BTreeMap<EndpointId, PlayerId>) -> EndpointId {
     id_map
         .iter()
-        .find(|(_, &pid)| pid == PlayerId(0))
+        .find(|(_, pid)| **pid == PlayerId(0))
         .map(|(&eid, _)| eid)
         .expect("a frozen roster always contains PlayerId(0)")
 }
