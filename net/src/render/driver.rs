@@ -22,7 +22,7 @@ pub(super) fn insert_core(app: &mut App, ls: Lockstep, input_source: InputSource
 /// `OnEnter(Playing)` transition system (rl#56), which only has a [`World`], not an
 /// [`App`] — one definition so the round is set up identically however it was reached.
 fn install_round(world: &mut World, ls: Lockstep, input_source: InputSource) {
-    let prev = SimSnapshot::capture(ls.sim());
+    let prev = SimSnapshot::capture(&ls);
     world.insert_non_send_resource(GameState {
         ls,
         input_source,
@@ -155,8 +155,9 @@ pub(super) struct GameState {
 }
 
 /// A minimal copy of the renderable sim state at one tick — the poses the client
-/// tweens from. NOT a second source of truth: overwritten from the authoritative
-/// [`Sim`] every tick, never fed back into it.
+/// tweens from. NOT a second source of truth: overwritten every tick from the
+/// authoritative [`CoreSnapshot`](crate::snapshot::CoreSnapshot) (via
+/// [`capture`](SimSnapshot::capture)), never fed back into it.
 #[derive(Clone, Default)]
 pub(super) struct SimSnapshot {
     pub(super) players: BTreeMap<PlayerId, Player>,
@@ -164,10 +165,16 @@ pub(super) struct SimSnapshot {
 }
 
 impl SimSnapshot {
-    fn capture(sim: &Sim) -> Self {
+    /// Capture the renderable game state through the host-authoritative snapshot seam
+    /// (bddap/rl#151 increment 0): the local client reads its interpolation source from the
+    /// SAME serialized [`CoreSnapshot`](crate::snapshot::CoreSnapshot) a wire client will,
+    /// via [`Lockstep::core_snapshot`], so SP and MP share one state-read path
+    /// ([[sp-is-mp-special-case]]). Byte-identical to reading the sim directly.
+    fn capture(ls: &Lockstep) -> Self {
+        let snap = ls.core_snapshot();
         Self {
-            players: sim.players().collect(),
-            crab: Some(sim.crab()),
+            players: snap.players,
+            crab: Some(snap.crab),
         }
     }
 }
@@ -606,7 +613,7 @@ pub(super) fn drive_lockstep(
             }
             {
                 let mut state = world.non_send_resource_mut::<GameState>();
-                state.prev = SimSnapshot::capture(state.ls.sim());
+                state.prev = SimSnapshot::capture(&state.ls);
             }
             if armed {
                 let steps = cadence.steps_for_next_tick();

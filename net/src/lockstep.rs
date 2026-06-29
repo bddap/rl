@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 
 use crate::roster::RosterSchedule;
 use crate::sim::{Input, PlayerId, Sim};
+use crate::snapshot::CoreSnapshot;
 
 /// Ticks between issuing an input and applying it. One tick of slack covers LAN
 /// round-trips at a 60 Hz tick (~16 ms/tick) without stalling; raise it for higher
@@ -359,6 +360,18 @@ impl Lockstep {
     /// Read-only sim view for rendering/inspection.
     pub fn sim(&self) -> &Sim {
         &self.sim
+    }
+
+    /// The local client's read seam onto authoritative game state (bddap/rl#151 increment 0,
+    /// [`crate::snapshot`]). SP funnels through the SAME serialized [`CoreSnapshot`] a wire
+    /// client will consume — built, encoded, and decoded here so SP and MP share ONE
+    /// state-read path with no by-reference-in-SP fork ([[sp-is-mp-special-case]],
+    /// [[silent-fallback-antipattern]]). Byte-identical to reading [`sim`](Lockstep::sim)
+    /// directly: the snapshot carries the full authoritative game state, and the round-trip
+    /// through bytes just proves the seam end to end (the copy is ~hundreds of bytes/tick).
+    pub fn core_snapshot(&self) -> CoreSnapshot {
+        let bytes = self.sim.core_snapshot().to_bytes();
+        CoreSnapshot::from_bytes(&bytes).expect("a freshly-built snapshot must round-trip")
     }
 
     /// The most recently applied tick and its closing `state_hash` on THIS peer, or `None`
