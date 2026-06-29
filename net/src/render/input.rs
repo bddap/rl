@@ -205,19 +205,30 @@ pub(super) fn gather_input(
     // seamlessly from the last facing. Wrap to keep it bounded over a long spectate.
     yaw.0 = (yaw.0 - d_yaw).rem_euclid(std::f32::consts::TAU);
 
-    // --- Flight inputs (client-local vehicle): RAW pad + keyboard, sampled fresh each frame. The
-    // plane (Ace Combat 6) and ship (Outer Wilds) map these per craft in `flight_control`; reading
-    // them raw — NOT through the sim's merged move/look axes — lets each craft assign a stick to a
-    // different degree of freedom than the foot avatar without the sim's axis-merge fighting it.
-    // The analog stick/trigger magnitudes are read directly here (the documented analog exemption to
-    // the binding round-trip); the discrete keys still come through the bindings (`held`). Never
-    // reaches the deterministic sim — the vehicle is host-authoritative crab-world state off the wire.
+    // --- Flight inputs (client-local vehicle), sampled fresh each frame and mapped per craft by
+    // `flight_control` (plane = Ace Combat 6, ship = Outer Wilds). Read THROUGH the bindings — the
+    // keys via `key_codes_for`, the pad buttons via `gamepad_buttons_for` — so the keys/buttons the
+    // legend shows are exactly the ones polled, the same no-drift round-trip the foot controls get.
+    // The ONLY raw reads are the two analog STICKS (Bevy's `left_stick`/`right_stick` API has no
+    // discrete-button equivalent) — the documented analog exemption; their glyphs still come from the
+    // one binding table. Reading these for the vehicle (not the sim's merged move/look) lets a craft
+    // map a stick to a different DOF than the foot avatar. Never reaches the deterministic sim.
+    //
+    // The N-th bound key/button of an action; the ORDER is the canonical scheme order (e.g.
+    // PlaneThrottle = [RT, LT], PlaneRudder = [LB, RB], pinned by a controls test), which the
+    // direction signs below rely on.
+    let nth_key = |a: Action, n: usize| {
+        controls::key_codes_for(a).nth(n).is_some_and(|k| keys.pressed(k))
+    };
+    let nth_pad = |a: Action, n: usize| controls::gamepad_buttons_for(a).nth(n);
     let mut fi = FlightInput {
+        // Keyboard flight axes through the FLIGHT bindings: throttle/forward = PlaneThrottle [W↑, S↓],
+        // strafe/rudder = PlaneRudder [A←, D→] (the ship reuses the same physical keys via ShipThrust).
         wasd: Vec2::new(
-            held(Action::StrafeRight) as i32 as f32 - held(Action::StrafeLeft) as i32 as f32,
-            held(Action::MoveForward) as i32 as f32 - held(Action::MoveBack) as i32 as f32,
+            nth_key(Action::PlaneRudder, 1) as i32 as f32 - nth_key(Action::PlaneRudder, 0) as i32 as f32,
+            nth_key(Action::PlaneThrottle, 0) as i32 as f32 - nth_key(Action::PlaneThrottle, 1) as i32 as f32,
         ),
-        match_vel: held(Action::MatchVelocity),
+        match_vel: nth_key(Action::MatchVelocity, 0),
         ..default()
     };
     if grabbed {
@@ -225,7 +236,8 @@ pub(super) fn gather_input(
         fi.mouse = Vec2::new(d.x, d.y) * FLIGHT_MOUSE_SENS;
     }
     for gp in gamepads.iter() {
-        // Deadzone on stick MAGNITUDE (matching `pad_stick_axes`), so a resting stick reads zero.
+        // Sticks: the analog exemption (Bevy's stick API), deadzoned on magnitude so a resting stick
+        // reads zero. PlaneAttitude/ShipThrust bind LeftStick, ShipAim binds RightStick.
         let l = gp.left_stick();
         if l.length() > PAD_STICK_DEADZONE {
             fi.left += l;
@@ -234,12 +246,18 @@ pub(super) fn gather_input(
         if r.length() > PAD_STICK_DEADZONE {
             fi.right += r;
         }
-        // Bevy names the analog triggers `*Trigger2` and the shoulder bumpers `*Trigger`.
-        fi.rt += gp.get(GamepadButton::RightTrigger2).unwrap_or(0.0);
-        fi.lt += gp.get(GamepadButton::LeftTrigger2).unwrap_or(0.0);
-        fi.lb |= gp.pressed(GamepadButton::LeftTrigger);
-        fi.rb |= gp.pressed(GamepadButton::RightTrigger);
-        fi.match_vel |= gp.pressed(GamepadButton::South);
+        // Triggers: the ANALOG value of the bound buttons (PlaneThrottle = [RT, LT]); bumpers + the
+        // match-velocity face button: the bound buttons pressed (PlaneRudder = [LB, RB], MatchVelocity
+        // = [South]). All via the bindings, so a rebind moves both the legend and the poll together.
+        if let Some(b) = nth_pad(Action::PlaneThrottle, 0) {
+            fi.rt += gp.get(b).unwrap_or(0.0);
+        }
+        if let Some(b) = nth_pad(Action::PlaneThrottle, 1) {
+            fi.lt += gp.get(b).unwrap_or(0.0);
+        }
+        fi.lb |= nth_pad(Action::PlaneRudder, 0).is_some_and(|b| gp.pressed(b));
+        fi.rb |= nth_pad(Action::PlaneRudder, 1).is_some_and(|b| gp.pressed(b));
+        fi.match_vel |= nth_pad(Action::MatchVelocity, 0).is_some_and(|b| gp.pressed(b));
     }
     *flight = fi;
 }

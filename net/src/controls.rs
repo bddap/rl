@@ -19,16 +19,21 @@
 //!   (or mouse) AIMS (pitch + yaw); RT/LT thrust up/down; LB/RB roll; A (or Space) matches velocity
 //!   (brake). 6-DOF thrust-and-coast.
 //!
-//! The flight actions are read for the CLIENT-LOCAL vehicle straight off the raw sticks/triggers
-//! (`render`'s flight-input snapshot), not through the sim's merged move/look axes — so a craft can
-//! map the same stick to a different degree of freedom than the foot avatar does without the sim's
-//! axis-merge fighting it. The label's MEANING (that "Throttle / brake" really is what RT/LT do on
-//! the plane) is a hand-maintained description of the force model ([`crab_world::vehicle`]) +
-//! `drive_lockstep`'s bridge, pinned by tests (see the plane-pitch-sign test in `vehicle`).
+//! The flight actions are read for the CLIENT-LOCAL vehicle in `render`'s flight-input snapshot,
+//! not through the sim's merged move/look axes — so a craft can map the same stick to a different
+//! degree of freedom than the foot avatar does without the sim's axis-merge fighting it. Those reads
+//! go THROUGH the bindings too: the keys via [`key_codes_for`], the pad buttons (triggers/bumpers/
+//! face) via [`gamepad_buttons_for`] — so the legend's glyph and the polled input stay one source.
+//! The label's MEANING (that "Throttle / brake" really is what RT/LT do on the plane) is a
+//! hand-maintained description of the force model ([`crab_world::vehicle`]) + `drive_lockstep`'s
+//! bridge, pinned by tests (see the plane-pitch-sign test in `vehicle`).
 //!
 //! Two caveats on the single-source guarantee:
-//! - It covers the discrete controls' GLYPH↔polled-key round-trip. The analog stick/trigger
-//!   MAGNITUDES are read directly in the flight bridge; only their glyphs appear in the bindings.
+//! - The ONE input read raw (not via a binding) is the two analog STICKS — Bevy's
+//!   `left_stick`/`right_stick` API has no discrete-button equivalent to route through a binding. Their
+//!   GLYPHS (LeftStick/RightStick) still come from the one table; only the magnitude is read directly.
+//!   Everything else — keys, the analog triggers, the bumpers, the face buttons — polls through the
+//!   bindings, so a rebind moves the legend and the poll together.
 //! - Nothing here touches the deterministic sim. A binding only decides WHICH input feeds an
 //!   [`Action`]; the foot value still funnels through `Input::new`'s fixed-point quantization
 //!   downstream, and the vehicle is client-local crab-world state off the wire — so rebinding never
@@ -694,6 +699,26 @@ mod tests {
             binding::<GcrControls>(Action::PlaneThrottle).unwrap().pad.buttons,
             &[PadButton::RightTrigger, PadButton::LeftTrigger]
         );
+    }
+
+    /// The flight bindings' ORDER is the contract the input bridge's `nth()` reads + its direction
+    /// signs depend on (`render::input` polls "the 0th bound button" = RT/LB, "the 1st" = LT/RB; the
+    /// keys W↑/S↓, A←/D→). Reorder a list and a control silently inverts — so pin the order here.
+    #[test]
+    fn flight_binding_order_is_canonical() {
+        let pad = |a| binding::<GcrControls>(a).unwrap().pad.buttons;
+        let keys = |a| binding::<GcrControls>(a).unwrap().keyboard.keys;
+        // Triggers: accelerate/up FIRST (RT), brake/down SECOND (LT).
+        assert_eq!(pad(Action::PlaneThrottle), &[PadButton::RightTrigger, PadButton::LeftTrigger]);
+        assert_eq!(pad(Action::ShipLift), &[PadButton::RightTrigger, PadButton::LeftTrigger]);
+        // Bumpers: left FIRST (LB), right SECOND (RB).
+        assert_eq!(pad(Action::PlaneRudder), &[PadButton::LeftBumper, PadButton::RightBumper]);
+        assert_eq!(pad(Action::ShipRoll), &[PadButton::LeftBumper, PadButton::RightBumper]);
+        assert_eq!(pad(Action::MatchVelocity), &[PadButton::South]);
+        // Keyboard: throttle/forward = W↑ then S↓; rudder/strafe = A← then D→.
+        assert_eq!(keys(Action::PlaneThrottle), &[Key::W, Key::S]);
+        assert_eq!(keys(Action::PlaneRudder), &[Key::A, Key::D]);
+        assert_eq!(keys(Action::MatchVelocity), &[Key::Space]);
     }
 
     /// The screenshot context override round-trips the ids the evidence harness uses (incl. the

@@ -536,7 +536,7 @@ pub(super) fn drive_lockstep(
     world.non_send_resource_mut::<GameState>().accumulator += delta;
 
     // Single-player enter/exit a vehicle. Drain the E-tap latch ONCE per frame and CYCLE foot →
-    // plane → helicopter → foot. The actual craft is a rapier body spawned/despawned in the crab
+    // plane → ship → foot. The actual craft is a rapier body spawned/despawned in the crab
     // world from the resulting `LocalVehicle` (mirrored into `VehicleControl` below). Solo only —
     // a networked round is foot-only, so this toggle is inert there and the lockstep is untouched.
     {
