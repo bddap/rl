@@ -42,7 +42,7 @@ pub mod fnv;
 pub mod mesh_fallback;
 pub mod physics;
 pub mod training;
-/// The player's single-player rapier flight vehicle (plane / helicopter), living in the crab's
+/// The player's single-player rapier flight vehicle (plane / Outer-Wilds ship), living in the crab's
 /// rapier world so it collides with Sally. Replaces the old integer flight integrator. Headless
 /// (pure physics), so it stays out of the render gate below.
 pub mod vehicle;

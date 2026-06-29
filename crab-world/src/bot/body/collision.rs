@@ -30,7 +30,7 @@ pub const NESTED_COLLISION: CollisionGroups = CollisionGroups::new(Group::GROUP_
 /// inside `Group`'s 32 bits with room for the arena (bit 0) and nested (bit 1) bits.
 pub const MAX_ENVS: usize = 16;
 
-/// Bit reserved for the player's single-player VEHICLE rigidbody (the rapier plane/heli,
+/// Bit reserved for the player's single-player VEHICLE rigidbody (the rapier plane/ship,
 /// [`crate::vehicle`]). One bit above the env range so the vehicle collides with the arena AND
 /// with every env's crab parts — the headline (owner 703): it bounces off Sally and shoves her
 /// legs by mass. At TRAINING time no vehicle entity exists, so a crab filter naming this bit (see
