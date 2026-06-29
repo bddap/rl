@@ -420,10 +420,14 @@ pub(super) fn drive_lockstep(
     // this is networked play with a collector. Telemetry never writes the sim.
     let (tel, roster_len) = {
         let state = world.non_send_resource::<GameState>();
-        match &state.input_source {
-            InputSource::Coordinated(c) => (c.telemetry().cloned(), c.roster_len()),
-            InputSource::Scripted(_) => (None, 0),
-        }
+        let tel = match &state.input_source {
+            InputSource::Coordinated(c) => c.telemetry().cloned(),
+            InputSource::Scripted(_) => None,
+        };
+        // Roster size from the AUTHORITATIVE lockstep peer set — correct on the host, an incumbent,
+        // AND a mid-game joiner (its `Lockstep` is rebuilt over the new roster). One source of
+        // truth, not a second copy in the driver's id_map (which a joiner only half-fills).
+        (tel, state.ls.peers().len())
     };
     if *next_tel_tick == 0 {
         *next_tel_tick = TELEMETRY_TICK_EVERY;
@@ -512,17 +516,19 @@ pub(super) fn drive_lockstep(
             // Collect peer messages first (releasing the `input_source`/`ls` co-borrow via
             // `&mut *state`) before recording into `ls`.
             let st = &mut *state;
-            let peer_msgs: Vec<PeerMsg> = match &mut st.input_source {
+            let exch: Exchanged = match &mut st.input_source {
                 // Server-coordinated: ship our input to the (internal or remote) server and get
-                // back the OTHER players' inputs. Solo runs the same exchange against a roster of
-                // one — its result is empty, so the sim advances on our own filed input alone.
+                // back the OTHER players' inputs (+ any mid-game roster change to schedule). Solo
+                // runs the same exchange against a roster of one — empty, so the sim advances on our
+                // own filed input alone.
                 InputSource::Coordinated(c) => c.exchange(me, msg),
                 InputSource::Scripted(bot) => {
                     // Stand in for the absent peers so the (otherwise-stalled) sim advances:
                     // feed every non-local player this input at the SAME apply_tick the local
-                    // input got. Always a single-machine solo run, so no peer disagrees.
+                    // input got. Always a single-machine solo run, so no peer disagrees + no joins.
                     let bot = *bot;
-                    st.ls
+                    let peer_msgs = st
+                        .ls
                         .sim()
                         .players()
                         .map(|(id, _)| id)
@@ -535,11 +541,19 @@ pub(super) fn drive_lockstep(
                                 confirmed: None,
                             },
                         })
-                        .collect()
+                        .collect();
+                    Exchanged { peer_msgs, roster_changes: Vec::new() }
                 }
             };
+            // Schedule any roster change BEFORE recording inputs: a mid-game join the host admitted
+            // or this client learned over the wire. `effective_tick` is JOIN_LEAD ahead, so applying
+            // it now (well before the boundary) lets `advance_one` rebuild the round in lockstep on
+            // every peer. The host applies its own admissions through this same path.
+            for adm in &exch.roster_changes {
+                state.ls.schedule_roster_change(adm.effective_tick, &adm.roster);
+            }
             let mut faults = Vec::new();
-            for from in peer_msgs {
+            for from in exch.peer_msgs {
                 if from.pid != me
                     && let Some(fault) = state.ls.record_remote(from.pid, from.msg)
                 {

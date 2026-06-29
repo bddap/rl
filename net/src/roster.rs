@@ -97,17 +97,30 @@ impl RosterSchedule {
             .flatten()
     }
 
-    /// Schedule `set` to take effect from `effective_tick`. Append-only and strictly future: the
+    /// Schedule `set` to take effect from `effective_tick`. Append-only and strictly future: a NEW
     /// tick must be beyond every existing change-point, so a recorded change can never be rewritten
-    /// (which would let two peers that applied it at different moments diverge). The server picks
+    /// (which would let two peers that applied it at different moments diverge). Re-scheduling an
+    /// EXISTING change-point with the IDENTICAL set is an idempotent no-op — a roster change is
+    /// content-addressed by `(tick, set)`, so a duplicate wire delivery (the joiner learning of its
+    /// OWN boundary it already built via [`Self::starting_at`], or a host re-broadcast) is benign;
+    /// only a CONFLICTING set at an existing tick is the append-only violation. The server picks
     /// `effective_tick` far enough ahead (≥ the input-delay lead) that every peer learns of the
     /// change before it is due.
     pub fn schedule_change(&mut self, effective_tick: u64, set: &[PlayerId]) {
+        let set = sorted(set);
+        if let Some(existing) = self.points.get(&effective_tick) {
+            debug_assert_eq!(
+                existing, &set,
+                "roster changes are append-only: a change at tick {effective_tick} cannot be \
+                 rewritten with a different set (identical re-delivery is a no-op)"
+            );
+            return; // idempotent: this exact change is already recorded
+        }
         debug_assert!(
             self.points.keys().all(|&t| effective_tick > t),
             "roster changes are append-only and strictly future: {effective_tick} must exceed every existing change-point"
         );
-        self.points.insert(effective_tick, sorted(set));
+        self.points.insert(effective_tick, set);
     }
 }
 
@@ -163,6 +176,19 @@ mod tests {
         a.schedule_change(5, &[PlayerId(2), PlayerId(0), PlayerId(1)]);
         b.schedule_change(5, &[PlayerId(0), PlayerId(1), PlayerId(2)]);
         assert_eq!(a, b, "set order must not affect the stored schedule");
+    }
+
+    #[test]
+    fn re_scheduling_the_identical_change_is_an_idempotent_no_op() {
+        // A duplicate wire delivery (or the joiner learning of its own already-built boundary)
+        // re-schedules the SAME (tick, set) — must be a benign no-op, not a panic / overwrite.
+        let mut r = RosterSchedule::frozen(&ids(2));
+        r.schedule_change(20, &ids(3));
+        r.schedule_change(20, &ids(3)); // identical re-delivery
+        // Order-independent identical set is also a no-op (the schedule stores sorted).
+        r.schedule_change(20, &[PlayerId(2), PlayerId(0), PlayerId(1)]);
+        assert_eq!(r.at(20), ids(3).as_slice());
+        assert_eq!(r.current(), ids(3).as_slice());
     }
 
     #[test]
