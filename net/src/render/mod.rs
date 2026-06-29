@@ -50,8 +50,8 @@ use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::lockstep::{Lockstep, TickMsg};
 use crate::net_loop::{NetDriver, PeerMsg};
 use crate::sim::{
-    CRAB_SCALE, Crab, Input, Outcome, Plane, Player, PlayerId, PlayerStatus, Pos,
-    Pos3, Sim, UNIT, buttons, trig, trig_client,
+    CRAB_SCALE, CockpitPose, Crab, Helicopter, Input, Outcome, Plane, Player, PlayerId,
+    PlayerStatus, Pos, Pos3, Sim, UNIT, buttons, trig, trig_client,
 };
 use crate::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
 
