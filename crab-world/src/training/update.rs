@@ -10,7 +10,7 @@ use rand::seq::SliceRandom;
 
 use super::algorithm::{
     NormalizedValue, PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer, StepEnd, Transition,
-    compute_gae,
+    compute_gae, gaussian_log_prob_rows,
 };
 use super::checkpoint::CrabOpt;
 use crate::bot::actuator::ACTION_SIZE;
@@ -131,13 +131,39 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
             .iter()
             .flat_map(|t| t.action.iter().copied())
             .collect();
-        let old_log_probs_data: Vec<f32> = transitions.iter().map(|t| t.log_prob).collect();
 
         let obs_all = Tensor::<B, 2>::from_data(TensorData::new(obs_data, [n, OBS_SIZE]), device);
         let actions_all =
             Tensor::<B, 2>::from_data(TensorData::new(actions_data, [n, ACTION_SIZE]), device);
-        let old_log_probs_all =
-            Tensor::<B, 1>::from_data(TensorData::new(old_log_probs_data, [n]), device);
+
+        // π_old: the behavior policy's log-prob of each stored action, recomputed HERE on
+        // the UPDATE backend from the pre-update brain — NOT the `t.log_prob` the rollout
+        // recorded. The rollout runs on the CPU (ndarray) backend and this update on the
+        // GPU (wgpu); the two forwards disagree enough that the CPU-recorded log-probs put
+        // the importance ratio far from 1 at update start (~0.7 KL measured on a frozen
+        // brain) — a corrupt PPO ratio and a meaningless trust-region signal. π_old is by
+        // definition the policy at update start, so a backend-consistent recompute is the
+        // correct old log-prob: the ratio starts at exactly 1 and the target-KL guard then
+        // measures true on-backend policy drift. Detached — π_old is a fixed reference, no
+        // gradient flows back through it.
+        let old_log_probs_all = {
+            let (means, log_std) = brain.policy(obs_all.clone());
+            gaussian_log_prob_rows(means, log_std, actions_all.clone()).detach()
+        };
+
+        // Diagnostic only: how far the rollout's CPU-recorded behavior log-prob sits from
+        // the on-backend recompute above. The update IGNORES `t.log_prob` (it uses
+        // `old_log_probs_all`); this just monitors the backend gap that recompute exists
+        // to close, so a regression that re-opens it is visible on the learner line.
+        let behavior_backend_div = {
+            let cpu_old: Vec<f32> = transitions.iter().map(|t| t.log_prob).collect();
+            let cpu_old = Tensor::<B, 1>::from_data(TensorData::new(cpu_old, [n]), device);
+            (old_log_probs_all.clone() - cpu_old)
+                .abs()
+                .mean()
+                .into_scalar()
+                .elem::<f32>()
+        };
         let advantages_all =
             Tensor::<B, 1>::from_data(TensorData::new(advantages_norm, [n]), device);
         let returns_all = Tensor::<B, 1>::from_data(TensorData::new(returns, [n]), device);
@@ -149,10 +175,9 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
         let mut last_kl = 0.0f32;
 
         let bs = config.batch_size;
-        let half_log_2pi = 0.5 * (2.0 * std::f32::consts::PI).ln();
 
         // Target-KL trust region: the update stops the instant the policy has drifted
-        // `1.5 × target_kl` from the rollout policy. The PPO ratio clip only zeroes
+        // `1.5 × target_kl` from the behavior policy `π_old` above. The ratio clip only zeroes
         // out-of-band sample gradients — it does not bound total KL across the epochs ×
         // minibatches, so a sharpened policy or a cold-resumed Adam can still step off a
         // cliff in one iteration. This bounds each iteration's movement to ~`target_kl`
@@ -186,16 +211,10 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
 
                 let (means, log_std) = brain.policy(obs.clone());
 
-                // log_std is pre-clamped by policy (single source of truth).
-                let diff = actions - means;
-                let log_std_2d = log_std
-                    .clone()
-                    .unsqueeze_dim::<2>(0)
-                    .expand([batch_n, ACTION_SIZE]);
-                let scaled_diff = diff / log_std_2d.clone().exp();
-                let log_probs_per_dim =
-                    scaled_diff.powf_scalar(2.0).neg() * 0.5 - log_std_2d - half_log_2pi;
-                let new_lp: Tensor<B, 1> = log_probs_per_dim.sum_dim(1).flatten(0, 1);
+                // π_new for this minibatch — same Gaussian log-prob as π_old above (one
+                // formula, `gaussian_log_prob_rows`), so the ratio can't drift on a
+                // formula mismatch. log_std is pre-clamped by policy (single source).
+                let new_lp = gaussian_log_prob_rows(means, log_std.clone(), actions);
 
                 let log_ratio = (new_lp - old_lp).clamp(-20.0, 20.0);
                 let ratio = log_ratio.clone().exp();
@@ -203,9 +222,10 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
                 // Schulman's unbiased, non-negative KL estimate `mean((r-1) - ln r)`,
                 // measured on this minibatch's forward — which already reflects every
                 // step applied so far this iteration, so it is the cumulative
-                // rollout→now drift. Crossing the ceiling ends the update before the
-                // step that would walk the policy off the cliff. Checked BEFORE this
-                // minibatch is applied, so a breaking minibatch contributes no step.
+                // π_old→now drift (and starts at ~0, since π_old was recomputed on this
+                // backend above). Crossing the ceiling ends the update before the step
+                // that would walk the policy off the cliff. Checked BEFORE this minibatch
+                // is applied, so a breaking minibatch contributes no step.
                 let approx_kl =
                     ((ratio.clone() - 1.0) - log_ratio).mean().into_scalar().elem::<f32>();
                 last_kl = approx_kl;
@@ -256,6 +276,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
             entropy: total_entropy / denom,
             kl: last_kl,
             steps: update_count,
+            behavior_backend_div,
         }
     }
 }
@@ -316,10 +337,9 @@ mod tests {
             let mut brain = brain.clone();
             let mut optimizer = crab_optimizer::<TrainBackend>();
             // Disable the target-KL guard here: this test proves the minibatch SHUFFLE
-            // is seeded, which needs the full epochs × minibatches to actually run. The
-            // synthetic rollout's `old_log_prob`s are random (not this brain's), so the
-            // very first minibatch shows a large KL that would otherwise early-stop the
-            // update at zero steps — see `target_kl_guard_stops_an_over_kl_update`.
+            // is seeded, which needs the full epochs × minibatches to actually run (a
+            // guard early-stop would mask a shuffle that secretly didn't reorder). The
+            // guard itself is covered by `target_kl_guard_stops_an_over_kl_update`.
             let config = PpoConfig {
                 target_kl: f32::INFINITY,
                 ..PpoConfig::default()
@@ -360,13 +380,12 @@ mod tests {
         );
     }
 
-    /// The target-KL trust region must STOP an update once the policy has moved too
-    /// far, and leave it untouched when the ceiling is infinite. The synthetic
-    /// rollout's `old_log_prob`s don't match the fresh brain, so the rollout→now KL is
-    /// already large on the first minibatch — a finite ceiling early-stops at zero
-    /// steps (the brain is never moved off a policy already past the trust region),
-    /// while an infinite ceiling runs the full `epochs × minibatches`. This is the
-    /// guard that makes the one-update collapse impossible by construction.
+    /// The target-KL trust region must STOP an update once the policy has drifted past
+    /// the ceiling, and run every minibatch when the ceiling is infinite. Because
+    /// `π_old` is recomputed on the update backend, the drift starts at ~0 and GROWS
+    /// with each applied step — so the FIRST (zero-drift) minibatch always passes, and
+    /// a tight ceiling then stops as soon as the first step's movement exceeds it. This
+    /// is the guard that bounds each iteration's policy movement.
     #[test]
     fn target_kl_guard_stops_an_over_kl_update() {
         let device = NdArrayDevice::Cpu;
@@ -391,15 +410,17 @@ mod tests {
         let unguarded = run(f32::INFINITY);
         assert_eq!(unguarded.steps, 16, "an infinite ceiling runs every minibatch");
 
-        // The mismatched old-log-probs put minibatch 1 already past any sane ceiling, so
-        // the guard stops before applying a single step.
-        let guarded = run(0.03);
-        assert_eq!(
-            guarded.steps, 0,
-            "a finite ceiling stops an already-over-KL update before it moves the brain"
+        // A tiny ceiling: the first (zero-drift) minibatch is applied, then the very
+        // next minibatch sees that step's drift exceed the ceiling and stops — so the
+        // update moves the brain by at most a step or two, never the full 16.
+        let guarded = run(1e-6);
+        assert!(
+            guarded.steps >= 1 && guarded.steps < unguarded.steps,
+            "a tight ceiling early-stops after the first drift (1..16 steps), got {}",
+            guarded.steps
         );
         assert!(
-            guarded.kl > 1.5 * 0.03,
+            guarded.kl > 1.5 * 1e-6,
             "the reported KL is the over-threshold drift that triggered the stop, got {}",
             guarded.kl
         );
