@@ -517,8 +517,8 @@ pub fn spawn_crab(
             crab_collision(env),
             ColliderMassProperties::Density(recipe.carapace_density),
             // No stand-in Mesh3d: the visible body is the skin, and the true colliders
-            // are shown by Rapier's debug-render (RL_DEBUG_COLLIDERS). A primitive mesh
-            // here only risked drifting out of sync with the actual collider.
+            // are shown by the shared `crab_view` collider wireframe (the render-mode cycle).
+            // A primitive mesh here only risked drifting out of sync with the actual collider.
             place(origin),
             CrabRestPose(place(origin)),
             Velocity::default(),
@@ -640,7 +640,8 @@ fn capsule_collider(center: Vec3, rot: Quat, half_height: f32, radius: f32) -> C
 }
 
 // ---------------------------------------------------------------------------
-// Debug: joint-pivot markers (RL_DEBUG_COLLIDERS)
+// Joint-pivot markers — the companion to the collider cage; drawn when the render mode
+// shows colliders (see `draw_pivot_markers`).
 // ---------------------------------------------------------------------------
 // Render-only: gizmos draw through a camera, so this whole block is dead in the
 // headless trainer and its types (Gizmos/GizmoConfig) don't exist without bevy's
