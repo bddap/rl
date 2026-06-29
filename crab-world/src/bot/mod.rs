@@ -6,6 +6,10 @@ pub mod meshfit;
 pub mod physics_digest;
 #[cfg(test)]
 mod reset_test;
+// Snapshot/restore of the entire crab physics state (MP snapshot/join + replay/debug).
+// Gated on serde-serialize: it pulls serde on the rapier sets, which the trainer never needs.
+#[cfg(feature = "serde-serialize")]
+pub mod snapshot;
 pub mod rig;
 pub mod sensor;
 #[cfg(test)]

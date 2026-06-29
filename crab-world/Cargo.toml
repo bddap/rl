@@ -34,6 +34,16 @@ render = ["bevy/default", "bevy_rapier3d/default", "enhanced-determinism"]
 # (`parallel`) is already off (rl#9), as is simd, so enabling it costs no feature we use.
 enhanced-determinism = ["rapier3d/enhanced-determinism"]
 
+# Snapshot/restore of the entire crab physics state — the foundation for MP snapshot/join,
+# replay, and self-repair.
+# Turns on serde on the rapier sets (rigid bodies, colliders, the reduced-coordinate
+# multibody with its generalized coords + velocities, narrow-phase warm-start contacts,
+# islands) via bevy_rapier3d's component-level serde — the authoritative one-source state,
+# not a hand-rolled parallel copy. OFF by default: the headless trainer never snapshots, so
+# it pays neither the serde codegen nor the `bevy/serialize` pull. The `bot::snapshot` module
+# + its round-trip/completeness tests are gated on this.
+serde-serialize = ["bevy_rapier3d/serde-serialize"]
+
 # rl#49: a GPU backend for the PPO update via burn's wgpu/Vulkan. Enables burn-wgpu +
 # the `Autodiff<Wgpu>` backend. Off by default — the production `learn` path stays
 # pure CPU ndarray. rl-train builds this for the GPU update without enabling `render`
