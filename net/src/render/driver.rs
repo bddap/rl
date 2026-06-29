@@ -30,6 +30,7 @@ fn install_round(world: &mut World, ls: Lockstep, input_source: InputSource) {
         prev,
     });
     world.init_resource::<PendingInput>();
+    world.init_resource::<FlightInput>();
     world.init_resource::<CameraPitch>();
     world.init_resource::<CameraYaw>();
     world.init_resource::<LocalVehicle>();
@@ -206,10 +207,102 @@ pub(super) struct PendingInput {
     pub(super) toggle_vehicle: bool,
 }
 
+/// RAW per-frame flight inputs for the CLIENT-LOCAL vehicle, sampled straight off the sticks/
+/// triggers/bumpers in [`super::input::gather_input`] — NOT through the sim's merged move/look axes.
+/// The plane (Ace Combat 6) maps the LEFT stick to attitude while the keyboard maps W/S to throttle;
+/// those are the same merged axis to the sim, so the vehicle bridge reads pad and keyboard SEPARATELY
+/// here to keep each craft's scheme intact. [`flight_control`] turns this into the per-craft
+/// [`VehicleControl`] intents; nothing here touches the deterministic sim (the vehicle is
+/// host-authoritative crab-world state off the wire).
+#[derive(Resource, Default)]
+pub(super) struct FlightInput {
+    /// Pad left stick, deadzoned: x = +right, y = +up/forward.
+    pub(super) left: Vec2,
+    /// Pad right stick, deadzoned: x = +right, y = +up.
+    pub(super) right: Vec2,
+    /// This frame's mouse-look intent (already sensitivity-scaled): x = +right, y = +down.
+    pub(super) mouse: Vec2,
+    /// Keyboard move keys as a digital axis: x = D − A, y = W − S.
+    pub(super) wasd: Vec2,
+    /// Analog triggers, 0..1.
+    pub(super) rt: f32,
+    pub(super) lt: f32,
+    /// Bumpers held.
+    pub(super) lb: bool,
+    pub(super) rb: bool,
+    /// Match-velocity held (ship): pad A / keyboard Space.
+    pub(super) match_vel: bool,
+}
+
+/// How much a banked turn auto-coordinates with yaw (Ace Combat 6 "Normal"): rolling the plane also
+/// noses it into the turn a little, so L/R reads as a turn, not just a barrel-roll. A clean seam for
+/// a future Expert toggle (which would set this to 0 — pure roll on the stick).
+const PLANE_TURN_COORDINATION: f32 = 0.3;
+
+/// The per-craft [`VehicleControl`] intents a set of raw [`FlightInput`]s produces. Pure (no World)
+/// so a test can pin the directions — above all the plane's INVERTED pitch and the ship's 6-DOF
+/// thrust axes — without spinning a Bevy app.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct FlightControl {
+    pub throttle_trim: f32,
+    pub thrust: Vec3,
+    pub pitch: f32,
+    pub roll: f32,
+    pub yaw: f32,
+    pub match_velocity: bool,
+}
+
+/// Map raw flight inputs to the shared force-model intents, per craft:
+/// - **Plane (AC6)**: left stick (or mouse) flies — pitch INVERTED (back = nose up) + roll, with a
+///   coordinating yaw; RT/LT (or W/S) trim the throttle lever; bumpers (or A/D) are the rudder. No
+///   direct thrusters (the plane thrusts through its lever). Right stick is the camera (unused here).
+/// - **Ship (Outer Wilds)**: left stick (or WASD) fires the body-frame thrusters (strafe/forward),
+///   RT/LT thrust up/down; right stick (or mouse) AIMS (pitch + yaw, camera-style — NOT inverted);
+///   bumpers roll; A/Space matches velocity. No throttle lever.
+pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightControl {
+    let clamp = |x: f32| x.clamp(-1.0, 1.0);
+    match kind {
+        VehicleKind::Plane => {
+            // Inverted pitch: pulling the stick DOWN/back (left.y < 0) or the mouse back (down,
+            // mouse.y > 0) raises the nose — the flight-sim convention AC6 defaults to.
+            let pitch = clamp(-fi.left.y + fi.mouse.y);
+            let roll = clamp(fi.left.x + fi.mouse.x);
+            // Rudder (bumpers / A,D) plus the coordinating yaw that turns a bank into a turn.
+            let rudder = (fi.rb as i32 - fi.lb as i32) as f32 + fi.wasd.x;
+            let yaw = clamp(rudder + PLANE_TURN_COORDINATION * roll);
+            // Throttle lever trim: RT up / LT down (analog), or W/S on the keyboard.
+            let throttle_trim = clamp(fi.rt - fi.lt + fi.wasd.y);
+            FlightControl { throttle_trim, thrust: Vec3::ZERO, pitch, roll, yaw, match_velocity: false }
+        }
+        VehicleKind::Ship => {
+            // Direct body-frame thrusters: left stick / WASD = strafe (x) + forward (z); RT/LT =
+            // vertical (y, up/down). Coast on momentum between taps.
+            let thrust = Vec3::new(
+                clamp(fi.left.x + fi.wasd.x),
+                clamp(fi.rt - fi.lt),
+                clamp(fi.left.y + fi.wasd.y),
+            );
+            // Aim with the right stick / mouse — camera-style, NOT inverted (push up = nose up).
+            let pitch = clamp(fi.right.y - fi.mouse.y);
+            let yaw = clamp(fi.right.x + fi.mouse.x);
+            // Roll on the bumpers.
+            let roll = clamp((fi.rb as i32 - fi.lb as i32) as f32);
+            FlightControl {
+                throttle_trim: 0.0,
+                thrust,
+                pitch,
+                roll,
+                yaw,
+                match_velocity: fi.match_vel,
+            }
+        }
+    }
+}
+
 /// A flyer's first-person cockpit pose in the crab's ARENA frame: a 3D position + a full attitude
 /// quaternion (body→world). Read off the rapier vehicle body each applied tick; the renderer maps
 /// it into render space (shifted to the crab's render spot, [`super::scene`]'s `cockpit_camera`)
-/// and flies the one cockpit camera from it — so the plane and the helicopter share one camera
+/// and flies the one cockpit camera from it — so the plane and the ship share one camera
 /// formula with no copy to drift.
 #[derive(Clone, Copy)]
 pub(super) struct CockpitPose {
@@ -225,8 +318,8 @@ pub(super) struct CockpitPose {
 /// craft" (driving spawn/despawn via [`VehicleControl`]) and holds the body's last two arena poses
 /// for the cockpit camera's interpolation. While piloting, the local foot player feeds the sim a
 /// NEUTRAL input (it just stands at the boarding spot) and the camera flies from the vehicle;
-/// stepping out returns the view to the foot player. The E/X control CYCLES foot → plane →
-/// helicopter → foot.
+/// stepping out returns the view to the foot player. The E/X control CYCLES foot → plane → ship →
+/// foot.
 ///
 /// `pose` is `(prev, now)` — the last two applied ticks' arena poses, so [`apply_transforms`] tweens
 /// the cockpit camera the same way it interpolates every sim body. It is `None` from boarding until
@@ -264,7 +357,7 @@ impl LocalVehicle {
         match self {
             Self::OnFoot => GcrContext::OnFoot,
             Self::Flying { kind: VehicleKind::Plane, .. } => GcrContext::Plane,
-            Self::Flying { kind: VehicleKind::Helicopter, .. } => GcrContext::Helicopter,
+            Self::Flying { kind: VehicleKind::Ship, .. } => GcrContext::Ship,
         }
     }
 
@@ -290,16 +383,16 @@ impl LocalVehicle {
         }
     }
 
-    /// The NEXT vehicle in the enter/exit cycle (foot → plane → helicopter → foot). One place the
-    /// cycle order lives, so the input toggle and any future caller can't disagree on it. A boarded
-    /// craft starts with no pose (`None`); [`update_pose`] fills it from the spawned body.
+    /// The NEXT vehicle in the enter/exit cycle (foot → plane → ship → foot). One place the cycle
+    /// order lives, so the input toggle and any future caller can't disagree on it. A boarded craft
+    /// starts with no pose (`None`); [`update_pose`] fills it from the spawned body.
     fn cycled(&self) -> Self {
         match self {
             Self::OnFoot => Self::Flying { kind: VehicleKind::Plane, pose: None },
             Self::Flying { kind: VehicleKind::Plane, .. } => {
-                Self::Flying { kind: VehicleKind::Helicopter, pose: None }
+                Self::Flying { kind: VehicleKind::Ship, pose: None }
             }
-            Self::Flying { kind: VehicleKind::Helicopter, .. } => Self::OnFoot,
+            Self::Flying { kind: VehicleKind::Ship, .. } => Self::OnFoot,
         }
     }
 }
@@ -571,25 +664,29 @@ pub(super) fn drive_lockstep(
         };
         report_faults(&faults, &mut total_desyncs, &tel);
 
-        // Drive the rapier vehicle (single-player): mirror the piloting state + this tick's
+        // Drive the rapier vehicle (single-player): mirror the piloting state + this frame's flight
         // controls into `VehicleControl`, which the crab world's force system reads on the next
         // physics pump — spawn/despawn the body and apply thrust/lift/drag/torque. The sim never
         // sees the vehicle (the foot player gets neutral input above); it is host-authoritative
-        // crab-world state. Axes are screen-reconciled EXACTLY as the old integer model did
-        // (`-look_yaw` → bank right, `-move_strafe` → yaw right, `look_pitch` → nose up), so the
-        // controls + their on-screen labels are unchanged for the pilot.
+        // crab-world state OFF the wire, so it reads the RAW per-craft flight inputs (Ace Combat 6
+        // for the plane, Outer Wilds for the ship — `flight_control`) rather than the sim's merged
+        // move/look axes. The `FlightInput` snapshot is per-frame, so the intent is stable across the
+        // ticks pumped this frame.
         {
             let kind = world.resource::<LocalVehicle>().kind();
-            let scale = Input::AXIS_SCALE as f32;
+            let fc = kind.map(|k| flight_control(k, world.resource::<FlightInput>()));
             let mut ctrl = world.resource_mut::<VehicleControl>();
             ctrl.active = kind.is_some();
             if let Some(k) = kind {
                 ctrl.kind = k;
             }
-            ctrl.throttle_trim = input.move_forward as f32 / scale;
-            ctrl.pitch = input.look_pitch as f32 / scale;
-            ctrl.roll = -(input.look_yaw as f32) / scale;
-            ctrl.yaw = -(input.move_strafe as f32) / scale;
+            let fc = fc.unwrap_or_default();
+            ctrl.throttle_trim = fc.throttle_trim;
+            ctrl.thrust = fc.thrust;
+            ctrl.pitch = fc.pitch;
+            ctrl.roll = fc.roll;
+            ctrl.yaw = fc.yaw;
+            ctrl.match_velocity = fc.match_velocity;
         }
 
         // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step

@@ -3,7 +3,10 @@
 
 use super::*;
 use super::app::ExternalCrabStackInstalled;
-use super::driver::{GameState, InputSource, PendingRound, ensure_round_installed};
+use super::driver::{
+    FlightInput, GameState, InputSource, PendingRound, ensure_round_installed, flight_control,
+};
+use crab_world::vehicle::VehicleKind;
 use super::input::pad_stick_axes;
 use super::scene::{lerp_pos, lerp_yaw, look_direction};
 use crate::menu::ReadyMatch;
@@ -377,4 +380,48 @@ fn pad_axes_are_not_pre_negated() {
         a.d_yaw > 0.0,
         "+stick X → +raw yaw (negation is downstream)"
     );
+}
+
+/// The PLANE control bridge = Ace Combat 6. Pins the directions the cockpit legend rides, above all
+/// the INVERTED pitch (the owner's complaint): pulling the left stick DOWN/back must raise the nose.
+#[test]
+fn plane_flight_control_is_ace_combat_6() {
+    let plane = |fi: FlightInput| flight_control(VehicleKind::Plane, &fi);
+    // Inverted pitch: stick DOWN (left.y < 0) → nose UP (pitch > 0); stick up → nose down.
+    assert!(plane(FlightInput { left: Vec2::new(0.0, -1.0), ..default() }).pitch > 0.0);
+    assert!(plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).pitch < 0.0);
+    // Mouse pulled back (down, +y) also raises the nose (same inversion).
+    assert!(plane(FlightInput { mouse: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
+    // Roll: stick right → bank right (+roll), with a coordinating yaw the SAME sign (turns, not just
+    // rolls).
+    let banked = plane(FlightInput { left: Vec2::new(1.0, 0.0), ..default() });
+    assert!(banked.roll > 0.0 && banked.yaw > 0.0, "right stick → bank right + coordinated yaw");
+    // Throttle: RT accelerates (+), LT brakes (−). Rudder: RB right (+yaw), LB left (−yaw).
+    assert!(plane(FlightInput { rt: 1.0, ..default() }).throttle_trim > 0.0);
+    assert!(plane(FlightInput { lt: 1.0, ..default() }).throttle_trim < 0.0);
+    assert!(plane(FlightInput { rb: true, ..default() }).yaw > 0.0);
+    assert!(plane(FlightInput { lb: true, ..default() }).yaw < 0.0);
+    // The plane thrusts through its lever, never the direct thrusters; it never match-velocities.
+    let p = plane(FlightInput { left: Vec2::new(1.0, 1.0), rt: 1.0, ..default() });
+    assert_eq!(p.thrust, Vec3::ZERO);
+    assert!(!p.match_velocity);
+}
+
+/// The SHIP control bridge = Outer Wilds. Pins the 6-DOF thrust axes + the camera-style (NON-
+/// inverted) aim, distinct from the plane.
+#[test]
+fn ship_flight_control_is_outer_wilds() {
+    let ship = |fi: FlightInput| flight_control(VehicleKind::Ship, &fi);
+    // Direct thrusters: left stick forward (+y) → +Z thrust; right (+x) → +X strafe; RT up / LT down.
+    assert!(ship(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).thrust.z > 0.0);
+    assert!(ship(FlightInput { left: Vec2::new(1.0, 0.0), ..default() }).thrust.x > 0.0);
+    assert!(ship(FlightInput { rt: 1.0, ..default() }).thrust.y > 0.0);
+    assert!(ship(FlightInput { lt: 1.0, ..default() }).thrust.y < 0.0);
+    // Aim is camera-style, NOT inverted: right stick UP → nose UP (pitch > 0); right → yaw right.
+    assert!(ship(FlightInput { right: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
+    assert!(ship(FlightInput { right: Vec2::new(1.0, 0.0), ..default() }).yaw > 0.0);
+    // Roll on the bumpers; A/Space matches velocity. The ship has no throttle lever.
+    assert!(ship(FlightInput { rb: true, ..default() }).roll > 0.0);
+    assert!(ship(FlightInput { match_vel: true, ..default() }).match_velocity);
+    assert_eq!(ship(FlightInput { rt: 1.0, ..default() }).throttle_trim, 0.0);
 }

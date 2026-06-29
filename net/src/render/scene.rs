@@ -504,7 +504,7 @@ pub(super) fn apply_transforms(
 /// The first-person cockpit camera for a flyer: eye at the interpolated 3D position, looking along
 /// the craft's nose with the horizon banked/pitched/rolled by its full attitude — so a banked turn,
 /// a loop, or inverted flight all look right. The ONE cockpit-view formula, flying EVERY craft (the
-/// plane and the helicopter) from the shared [`CockpitPose`] with no copy to drift.
+/// plane and the ship) from the shared [`CockpitPose`] with no copy to drift.
 ///
 /// The pose is in the crab's ARENA frame (the rapier vehicle body lives in the ±10 m box with
 /// Sally). `shift` is the pure XZ translate that carries an arena point to its render spot anchored
