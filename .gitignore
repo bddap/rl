@@ -11,7 +11,12 @@
 .sandbox-env
 *.png
 vendor/
-/assets/
+# The paid, non-redistributable Sally mesh (see NOTICE). fetch-sally.sh writes it
+# to the asset root the renderers resolve against (crab-world/assets); ignore it by
+# name anywhere so it can never be committed, including the old repo-root ./assets
+# spot a dev may still have. The committed CC0 control glyphs under
+# crab-world/assets/controls/ stay tracked (different name).
+sally.glb
 /ckpt*/
 .nixshell.err
 
