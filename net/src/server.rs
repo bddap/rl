@@ -21,7 +21,30 @@
 use std::collections::BTreeMap;
 
 use crate::lockstep::{Confirmed, INPUT_DELAY, TickMsg};
+use crate::roster::RosterSchedule;
 use crate::sim::{Input, PlayerId};
+
+/// Ticks of lead between admitting a joiner and its roster change taking effect (Stage 3). Past the
+/// emit cursor so every client learns of the change, and the joiner can issue its first input,
+/// before the tick is due. The `+ 2`: one tick for the [`Admission`] broadcast to reach every
+/// client past the [`INPUT_DELAY`] input pipeline, one of slack so a late packet doesn't strand the
+/// boundary — the same lead-time role [`INPUT_DELAY`] plays for ordinary input. The joiner builds
+/// its [`crate::lockstep::Lockstep`] via `join_at(effective_tick)`, issuing input for
+/// `effective_tick` onward. (Whether this margin suffices under real QUIC latency is the transport
+/// increment's to verify; a too-short lead can't silently desync — the hash oracle catches it.)
+pub const JOIN_LEAD: u64 = INPUT_DELAY + 2;
+
+/// The outcome of [`Server::admit`]: the stable [`PlayerId`] allocated to the joiner, the tick its
+/// roster change takes effect on every client (the round-boundary rebuild tick), and the complete
+/// new roster from that tick. The caller broadcasts these so every client schedules the identical
+/// change at the identical tick (and the joiner builds its session via
+/// [`crate::lockstep::Lockstep::join_at`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Admission {
+    pub pid: PlayerId,
+    pub effective_tick: u64,
+    pub roster: Vec<PlayerId>,
+}
 
 /// The complete input set for ONE tick, broadcast by the server to every client once every
 /// rostered client's input for that tick is in. The down-channel counterpart to the client's
@@ -47,10 +70,12 @@ pub struct TickSet {
 /// message and returns the sets it completed; the caller broadcasts them. Memory is bounded by play
 /// (a complete tick is removed from the ledger the instant it's emitted).
 pub struct Server {
-    /// The frozen participant set (sorted, deduped). Static for Stage 1+2 — dynamic join is a
-    /// later stage (rl#151) — so a tick is "complete" exactly when it holds an input from every
-    /// member of this set.
-    roster: Vec<PlayerId>,
+    /// The participant set over time (sorted, deduped per change-point). A tick is "complete" when
+    /// it holds an input from every member of [`RosterSchedule::at`] that tick — so a mid-match join
+    /// ([`Server::admit`], Stage 3 rl#151) shifts the required set on the agreed tick, and ticks
+    /// before it still complete on the old set. With no join scheduled it is the frozen Stage-1+2
+    /// roster.
+    roster: RosterSchedule,
     /// Per-tick input table awaiting completion: `ledger[tick][player]`. A tick leaves the ledger
     /// (into a [`TickSet`]) the moment every roster member's input for it is present.
     ledger: BTreeMap<u64, BTreeMap<PlayerId, Input>>,
@@ -71,11 +96,8 @@ impl Server {
     /// Start a server for `roster` (the frozen participant set, us + any remote clients). For solo
     /// this is just `[me]`; for a hosted match it is the whole agreed roster.
     pub fn new(roster: &[PlayerId]) -> Self {
-        let mut roster = roster.to_vec();
-        roster.sort();
-        roster.dedup();
         Self {
-            roster,
+            roster: RosterSchedule::frozen(roster),
             ledger: BTreeMap::new(),
             confirmed: BTreeMap::new(),
             emitted_confirmed: BTreeMap::new(),
@@ -83,9 +105,47 @@ impl Server {
         }
     }
 
-    /// The frozen roster (sorted).
+    /// The current roster (sorted) — the latest scheduled set. Grows on [`Server::admit`].
     pub fn roster(&self) -> &[PlayerId] {
-        &self.roster
+        self.roster.current()
+    }
+
+    /// Admit a new client mid-match (Stage 3, rl#151) and return the [`Admission`] for the caller to
+    /// broadcast to every client. Allocates the LOWEST [`PlayerId`] not currently in the roster —
+    /// append-only, so every existing player KEEPS its id (a positional renumber would desync every
+    /// peer; determinism risk #1). Schedules the new roster to take effect at `effective_tick`
+    /// ([`JOIN_LEAD`] past the emit cursor) so every client learns of it and the joiner can issue its
+    /// first input before that tick is due. From `effective_tick` a tick completes only once the
+    /// joiner's input is in too.
+    ///
+    /// Admission control (the joiner's weight/collider digests must match) is the CALLER's gate
+    /// BEFORE this — a server must refuse a mismatched joiner loudly rather than admit it onto a
+    /// wrong crab (rl#114 / [[silent-fallback-antipattern]]); `admit` is the bookkeeping once that
+    /// gate has passed.
+    pub fn admit(&mut self) -> Admission {
+        let pid = self.lowest_free_pid();
+        // Past the emit cursor by JOIN_LEAD, but always strictly after any change already scheduled
+        // (two joins admitted before a tick emits would otherwise collide on the same tick).
+        let effective_tick = (self.next_emit + JOIN_LEAD).max(self.roster.latest_change_tick() + 1);
+        let mut roster = self.roster.current().to_vec();
+        roster.push(pid);
+        self.roster.schedule_change(effective_tick, &roster);
+        Admission {
+            pid,
+            effective_tick,
+            roster: self.roster.at(effective_tick).to_vec(),
+        }
+    }
+
+    /// The lowest [`PlayerId`] not in the current roster — the stable allocation `admit` hands a
+    /// joiner. Couch-scale, so a free id always exists well inside `u8`.
+    fn lowest_free_pid(&self) -> PlayerId {
+        let in_use: std::collections::BTreeSet<PlayerId> =
+            self.roster.current().iter().copied().collect();
+        (0..=u8::MAX)
+            .map(PlayerId)
+            .find(|p| !in_use.contains(p))
+            .expect("couch-scale: a free PlayerId always exists")
     }
 
     /// Record one client's tick message — its input for `msg.apply_tick` plus its latest confirmed
@@ -96,7 +156,10 @@ impl Server {
     /// player, or for an already-emitted tick, is dropped.
     #[must_use = "the returned sets must be broadcast to every client (incl. the local one), or ticks never advance"]
     pub fn record(&mut self, from: PlayerId, msg: TickMsg) -> Vec<TickSet> {
-        if !self.roster.contains(&from) {
+        // A client may only file input for a tick at which it is rostered: this drops a stranger
+        // always AND a joiner's input for ticks before its join takes effect (it isn't required
+        // there, so buffering it would be dead weight the ledger never consumes).
+        if !self.roster.at(msg.apply_tick).contains(&from) {
             return Vec::new();
         }
         if let Some(c) = msg.confirmed {
@@ -126,7 +189,7 @@ impl Server {
         while self
             .ledger
             .get(&self.next_emit)
-            .is_some_and(|t| self.roster.iter().all(|p| t.contains_key(p)))
+            .is_some_and(|t| self.roster.at(self.next_emit).iter().all(|p| t.contains_key(p)))
         {
             let tick = self.next_emit;
             let inputs = self.ledger.remove(&tick).expect("just checked present");
@@ -220,6 +283,8 @@ pub fn unpack_tickset(set: &TickSet, me: PlayerId) -> Vec<crate::net_loop::PeerM
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lockstep::Lockstep;
+    use crate::net_loop::PeerMsg;
 
     fn ids(n: u8) -> Vec<PlayerId> {
         (0..n).map(PlayerId).collect()
@@ -227,6 +292,14 @@ mod tests {
 
     fn input(s: f32) -> Input {
         Input::from_axes(s, 0.0)
+    }
+
+    fn tickmsg(apply_tick: u64, s: f32) -> TickMsg {
+        TickMsg {
+            apply_tick,
+            input: input(s),
+            confirmed: None,
+        }
     }
 
     /// One client (solo): every input completes its tick immediately, emitted in order from the
@@ -396,8 +469,6 @@ mod tests {
     /// machinery a solo round runs with a roster of one — SP=MP uniformity, rl#151).
     #[test]
     fn two_clients_stay_in_lockstep_through_the_server() {
-        use crate::lockstep::Lockstep;
-        use crate::net_loop::PeerMsg;
         // Player 0 is the host (owns the server + runs a local client); player 1 is a remote client.
         // Drive them through the real `host_assemble`/`unpack_tickset` split, no transport.
         let roster = ids(2);
@@ -435,6 +506,162 @@ mod tests {
         assert!(
             a.sim().tick() > INPUT_DELAY,
             "the round advanced past the warmup window"
+        );
+    }
+
+    /// `admit` allocates the lowest free [`PlayerId`] and NEVER renumbers an existing one — the
+    /// Stage-3 determinism foundation (a positional renumber on join would desync every peer).
+    #[test]
+    fn admit_allocates_lowest_free_id_without_renumbering() {
+        let mut s = Server::new(&ids(2)); // [P0, P1]
+        let a = s.admit();
+        assert_eq!(a.pid, PlayerId(2), "the lowest id not already in use");
+        assert_eq!(a.roster, vec![PlayerId(0), PlayerId(1), PlayerId(2)]);
+        assert!(a.effective_tick >= INPUT_DELAY, "a join lands past the warmup window");
+        assert_eq!(s.roster(), &[PlayerId(0), PlayerId(1), PlayerId(2)], "roster grew, ids 0/1 kept");
+        // A second admit before any tick emits still gets a distinct, strictly-later effective tick
+        // (the append-only invariant) and the next free id — the incumbents are never renumbered.
+        let b = s.admit();
+        assert_eq!(b.pid, PlayerId(3));
+        assert!(b.effective_tick > a.effective_tick, "back-to-back joins don't collide");
+    }
+
+    /// A scheduled join shifts the completeness requirement on its tick: ticks before it complete on
+    /// the old roster; the join tick stalls until the joiner's input is in too.
+    #[test]
+    fn a_scheduled_join_gates_completeness_from_its_tick() {
+        let mut s = Server::new(&ids(2));
+        let adm = s.admit(); // P2 joins at adm.effective_tick
+        let t = adm.effective_tick;
+        // Fill every tick up to the join boundary on P0+P1 — they complete WITHOUT the joiner (it
+        // isn't rostered there yet), advancing the emit cursor right to the boundary.
+        for pre in INPUT_DELAY..t {
+            let _ = s.record(PlayerId(0), tickmsg(pre, 0.0));
+            let sets = s.record(PlayerId(1), tickmsg(pre, 0.0));
+            assert!(
+                sets.iter().any(|set| set.apply_tick == pre && set.inputs.len() == 2),
+                "a pre-join tick completes on the two incumbents alone"
+            );
+        }
+        // The join tick needs all THREE: P0+P1 alone no longer complete it (the joiner is required
+        // from here — there is no gap left, so this isolates the roster requirement).
+        let _ = s.record(PlayerId(0), tickmsg(t, 0.0));
+        let none = s.record(PlayerId(1), tickmsg(t, 0.0));
+        assert!(none.is_empty(), "the join tick stalls until the joiner's input arrives");
+        let sets = s.record(PlayerId(2), tickmsg(t, 0.0));
+        assert!(
+            sets.iter().any(|set| set.apply_tick == t && set.inputs.len() == 3),
+            "the join tick emits complete with all three players once the joiner is in"
+        );
+    }
+
+    /// Drive a full server-coordinated lockstep round starting from 2 clients (host P0 + remote P1),
+    /// admitting ONE new client at each iteration in `join_iters`, and assert NO
+    /// [`crate::lockstep::Fault`] on any peer at any tick. Returns the host plus every client
+    /// (incumbents + joiners) so a caller can assert final convergence. The ONE driver every join
+    /// test shares: a join is wired exactly as the transport increment will (the server `admit`s, the
+    /// allocation+effective-tick is broadcast to all current clients via `schedule_roster_change`,
+    /// and the joiner enters via `join_at`), all through the real `host_assemble`/`unpack_tickset`.
+    fn run_round_with_joins(seed: u64, iters: u64, join_iters: &[u64]) -> (Lockstep, Vec<Lockstep>) {
+        let roster0 = ids(2);
+        let mut server = Server::new(&roster0);
+        let mut host = Lockstep::new(seed, &roster0, PlayerId(0));
+        let mut clients = vec![Lockstep::new(seed, &roster0, PlayerId(1))];
+        // Deterministic, player- and tick-varied inputs so the round actually evolves (a constant
+        // input would hide an apply-order bug).
+        let inp =
+            |p: u8, t: u64| Input::from_axes(((u64::from(p) + t) % 3) as f32 - 1.0, (t % 2) as f32);
+
+        for it in 0..iters {
+            let host_msg = host.submit_local_input(inp(0, it));
+            let client_msgs: Vec<PeerMsg> = clients
+                .iter_mut()
+                .map(|c| {
+                    let pid = c.me();
+                    PeerMsg { pid, msg: c.submit_local_input(inp(pid.0, it)) }
+                })
+                .collect();
+
+            if join_iters.contains(&it) {
+                // The server admits the joiner and the allocation is broadcast to EVERY current
+                // client (incumbents AND earlier joiners — so a prior joiner rebuilds at this newer
+                // boundary too), then the new client enters at the live tick.
+                let adm = server.admit();
+                host.schedule_roster_change(adm.effective_tick, &adm.roster);
+                for c in &mut clients {
+                    c.schedule_roster_change(adm.effective_tick, &adm.roster);
+                }
+                clients.push(Lockstep::join_at(seed, &adm.roster, adm.pid, adm.effective_tick));
+            }
+
+            let (sets, host_peers) = host_assemble(&mut server, PlayerId(0), host_msg, client_msgs);
+            for pm in host_peers {
+                assert!(host.record_remote(pm.pid, pm.msg).is_none(), "host: no fault");
+            }
+            for set in &sets {
+                for c in &mut clients {
+                    for pm in unpack_tickset(set, c.me()) {
+                        assert!(c.record_remote(pm.pid, pm.msg).is_none(), "client: no fault");
+                    }
+                }
+            }
+            assert!(host.try_advance().is_empty(), "host advances with no desync");
+            for c in &mut clients {
+                assert!(c.try_advance().is_empty(), "client advances with no desync");
+            }
+        }
+        (host, clients)
+    }
+
+    /// THE Stage-3 determinism oracle: two clients run a server-coordinated lockstep round; a THIRD
+    /// client JOINS mid-match; at the agreed tick every peer rebuilds the round over the new roster
+    /// (the round-boundary join), and from there all three stay BIT-IDENTICAL — proven by the
+    /// per-tick `state_hash` agreeing tick-for-tick with no [`crate::lockstep::Fault`] raised. The
+    /// determinism risk Stage 3 exists to retire (stable ids + tick-aligned roster change + the
+    /// join mechanism), all the way through the real `Server`/`host_assemble`/`unpack_tickset` split.
+    #[test]
+    fn a_mid_game_join_keeps_every_peer_in_lockstep() {
+        let (host, clients) = run_round_with_joins(0xC0FFEE, 40, &[5]);
+        assert_eq!(clients.len(), 2, "the remote client plus the one joiner");
+        let joiner = &clients[1];
+        assert_eq!(host.next_tick(), clients[0].next_tick(), "host + client agree on the tick");
+        assert_eq!(host.next_tick(), joiner.next_tick(), "the joiner caught up to the same tick");
+        for c in &clients {
+            assert_eq!(
+                host.sim().state_hash(),
+                c.sim().state_hash(),
+                "every peer (incl. the joiner) is bit-identical after the round-boundary join"
+            );
+        }
+        assert_eq!(host.peers(), &[PlayerId(0), PlayerId(1), PlayerId(2)], "the roster grew to three");
+        assert_eq!(host.peers(), joiner.peers(), "every peer agrees on the new roster");
+        // The joiner genuinely played a stretch of the post-join round (not a degenerate 0-tick pass).
+        assert!(
+            joiner.next_tick() > JOIN_LEAD + INPUT_DELAY + 10,
+            "the joiner ran well past its entry tick"
+        );
+    }
+
+    /// TWO sequential joins: a third then a fourth client join at different ticks. The first joiner,
+    /// now an INCUMBENT, must itself rebuild at the second join's boundary — the back-to-back-admit
+    /// path (a second roster change scheduled strictly after the first). All four stay bit-identical,
+    /// proving the round-boundary join generalizes past a single join with stable, never-renumbered ids.
+    #[test]
+    fn two_sequential_joins_keep_every_peer_in_lockstep() {
+        let (host, clients) = run_round_with_joins(0x5EED, 60, &[5, 20]);
+        assert_eq!(clients.len(), 3, "two incumbents (P1, the P2 joiner) plus the P3 joiner");
+        for c in &clients {
+            assert_eq!(host.next_tick(), c.next_tick(), "all four agree on the tick");
+            assert_eq!(
+                host.sim().state_hash(),
+                c.sim().state_hash(),
+                "all four (both joiners included) are bit-identical after two round-boundary joins"
+            );
+        }
+        assert_eq!(
+            host.peers(),
+            &[PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)],
+            "stable lowest-free allocation grew the roster to four with no renumbering"
         );
     }
 

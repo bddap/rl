@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::roster::RosterSchedule;
 use crate::sim::{Input, PlayerId, Sim};
 
 /// Ticks between issuing an input and applying it. One tick of slack covers LAN
@@ -84,9 +85,12 @@ pub enum Fault {
 pub struct Lockstep {
     sim: Sim,
     me: PlayerId,
-    /// All peers in the session, including `me`. Fixed for the match; the input set
-    /// required to advance a tick is exactly this set.
-    peers: Vec<PlayerId>,
+    /// The participant set as it changes over the match (GCR MP Stage 3, rl#151), including `me`.
+    /// The input set required to advance a tick is exactly [`RosterSchedule::at`] that tick — so a
+    /// mid-match join (a scheduled change-point) shifts the required set on the agreed tick, and
+    /// every peer rebuilds the round at the same boundary. With no change scheduled this is the
+    /// frozen set, so the no-join path is unchanged.
+    roster: RosterSchedule,
     /// Per-tick input table: `inputs[tick][player]`. A tick is ready to apply when it
     /// holds an entry for every peer. `BTreeMap` so a tick's inputs iterate in
     /// `PlayerId` order, matching the sim's apply order.
@@ -107,6 +111,11 @@ pub struct Lockstep {
     /// Starts at [`INPUT_DELAY`]: the first real input lands on the tick right after
     /// the warmup window (ticks `[0, INPUT_DELAY)` run on neutral input).
     next_issue_tick: u64,
+    /// The next tick to APPLY (0-based; equals the count already applied). Kept explicitly rather
+    /// than derived from `confirmed` so a JOINER ([`Self::join_at`]) can enter at the live tick
+    /// WITHOUT advertising a confirmed hash for ticks before it existed: the apply cursor and the
+    /// advertised `confirmed` (which a never-applied joiner leaves `None`) are independent.
+    next_apply_tick: u64,
 }
 
 impl Lockstep {
@@ -120,18 +129,57 @@ impl Lockstep {
         Self {
             sim: Sim::new(seed, &peers),
             me,
-            peers,
+            roster: RosterSchedule::frozen(&peers),
             inputs: BTreeMap::new(),
             confirmed: None,
             applied_hashes: BTreeMap::new(),
             pending_peer_hashes: BTreeMap::new(),
             next_issue_tick: INPUT_DELAY,
+            next_apply_tick: 0,
         }
+    }
+
+    /// Start a session for a player JOINING an in-progress match at `at_tick` (GCR MP Stage 3,
+    /// round-boundary join). The joiner does NOT replay ticks `[0, at_tick)` — at `at_tick` every
+    /// existing peer rebuilds the round to a fresh [`Sim`] over `roster` (the new full set incl.
+    /// `me`), so the joiner simply STARTS there with that same fresh world. Its apply + issue
+    /// cursors begin at `at_tick`, and it advertises NO confirmed hash until it applies its first
+    /// tick — it has no state for the earlier ticks and must not claim one (the cross-check only
+    /// ever asks for a peer's hash on ticks where the roster includes it, so existing peers never
+    /// expect a pre-join hash from the joiner).
+    pub fn join_at(seed: u64, roster: &[PlayerId], me: PlayerId, at_tick: u64) -> Self {
+        let mut roster_set = roster.to_vec();
+        roster_set.sort();
+        roster_set.dedup();
+        debug_assert!(roster_set.contains(&me), "joining player must be in the new roster");
+        debug_assert!(
+            at_tick >= INPUT_DELAY,
+            "a join lands past the warmup window (the live tick is well past it)"
+        );
+        Self {
+            sim: Sim::new(seed, &roster_set),
+            me,
+            roster: RosterSchedule::starting_at(at_tick, &roster_set),
+            inputs: BTreeMap::new(),
+            confirmed: None,
+            applied_hashes: BTreeMap::new(),
+            pending_peer_hashes: BTreeMap::new(),
+            next_issue_tick: at_tick,
+            next_apply_tick: at_tick,
+        }
+    }
+
+    /// Record a roster change scheduled by the server: from `effective_tick`, the participant set
+    /// becomes `roster`. Append-only and strictly future (see [`RosterSchedule::schedule_change`]).
+    /// At `effective_tick`, [`Self::advance_one`] rebuilds the round over the new set on every peer
+    /// (the round-boundary join), and from then the required-input set is the new roster.
+    pub fn schedule_roster_change(&mut self, effective_tick: u64, roster: &[PlayerId]) {
+        self.roster.schedule_change(effective_tick, roster);
     }
 
     /// The next tick to be applied (0-based; equals the count already applied).
     pub fn next_tick(&self) -> u64 {
-        self.confirmed.map_or(0, |c| c.tick + 1)
+        self.next_apply_tick
     }
 
     /// Submit THIS peer's input for the next issuing tick and get the message to
@@ -180,6 +228,12 @@ impl Lockstep {
         }
 
         let c = msg.confirmed?;
+        // A hash for a tick BEFORE this peer's schedule begins (a joiner receiving a relayed
+        // confirmed for a pre-join tick) predates our participation — we never applied it, so it is
+        // not ours to verify (distinct from the applied-but-pruned `Unverifiable` below).
+        if c.tick < self.roster.baseline_tick() {
+            return None;
+        }
         match self.applied_hashes.get(&c.tick) {
             Some(&local) => check(c.tick, from, local, c.hash), // already applied → compare now
             None if c.tick < self.next_tick() => {
@@ -219,7 +273,7 @@ impl Lockstep {
             || self
                 .inputs
                 .get(&tick)
-                .is_some_and(|ti| self.peers.iter().all(|p| ti.contains_key(p)))
+                .is_some_and(|ti| self.roster.at(tick).iter().all(|p| ti.contains_key(p)))
     }
 
     /// Apply AT MOST one tick: if [`Self::next_tick_ready`], step the sim once and return
@@ -232,36 +286,51 @@ impl Lockstep {
     /// physics-step cadence + push one pose per advanced tick.
     pub fn advance_one(&mut self) -> Option<Vec<Fault>> {
         let tick = self.next_tick();
+        // The participant set required at this tick — the roster as of `tick` (Stage 3): a
+        // scheduled mid-match join shifts it on the agreed tick, so completeness, the warmup fill,
+        // and the hash cross-check all key off the SAME set every peer sees at `tick`.
+        let roster = self.roster.at(tick).to_vec();
         // Warmup window: the first INPUT_DELAY ticks have no scheduled input (the earliest
         // input any peer issues is for tick INPUT_DELAY). They apply with neutral input on
         // every peer, filling the input pipeline — the standard lockstep cold-start. Without
         // it the driver would stall at tick 0 forever waiting for inputs that, by design,
         // were never scheduled.
         let tick_inputs = if tick < INPUT_DELAY {
-            // A complete neutral map for every peer — NOT an empty map. `Sim::step`
-            // now demands an input per participant (rl#105); `self.peers` is exactly
-            // the sim's participant set, so this fills the warmup uniformly on every
-            // peer (bit-identical to the old empty-map default) while keeping the
-            // boundary fail-loud against a genuinely missing input.
-            self.peers.iter().map(|&p| (p, Input::default())).collect()
+            // A complete neutral map for every participant — NOT an empty map. `Sim::step`
+            // now demands an input per participant (rl#105); `roster` is exactly the sim's
+            // participant set at this tick, so this fills the warmup uniformly on every peer
+            // (bit-identical to the old empty-map default) while keeping the boundary fail-loud
+            // against a genuinely missing input.
+            roster.iter().map(|&p| (p, Input::default())).collect()
         } else {
             let tick_inputs = self.inputs.get(&tick)?;
-            if !self.peers.iter().all(|p| tick_inputs.contains_key(p)) {
+            if !roster.iter().all(|p| tick_inputs.contains_key(p)) {
                 return None; // not everyone's input is here yet — stall this tick.
             }
             self.inputs.remove(&tick).expect("just checked present")
         };
+        // Round-boundary join (Stage 3): a tick that is a roster CHANGE boundary rebuilds the world
+        // to a fresh round over the new set BEFORE stepping — every peer does this on the same tick,
+        // so all land on the byte-identical fresh state (no snapshot, no restored-vs-live rapier
+        // divergence; job 412's finding). At a non-boundary tick this is skipped and the round
+        // carries on. A joiner's very first tick is its own boundary, where it rebuilds the
+        // (already-fresh) round idempotently — one code path for joiner and incumbents.
+        if let Some(new_roster) = self.roster.rebuild_at(tick) {
+            self.sim.rebuild_with_roster(new_roster);
+        }
         let mut faults = Vec::new();
         self.sim.step(&tick_inputs);
         let hash = self.sim.state_hash();
         self.confirmed = Some(Confirmed { tick, hash });
+        self.next_apply_tick = tick + 1;
         self.applied_hashes.insert(tick, hash);
         while self.applied_hashes.len() as u64 > HASH_HISTORY {
             self.applied_hashes.pop_first();
         }
         // Compare against any peer hashes that arrived for this tick before we
-        // reached it (the late-hash case is in record_remote).
-        for &peer in &self.peers {
+        // reached it (the late-hash case is in record_remote). Only peers in the roster AS OF this
+        // tick can have advertised a hash for it — a joiner advertises none before it existed.
+        for &peer in &roster {
             if peer == self.me {
                 continue;
             }
@@ -318,10 +387,12 @@ impl Lockstep {
         self.me
     }
 
-    /// The frozen participant set (sorted, incl. `me`). The server is built over exactly this set
-    /// (solo ⇒ just `me`), so the client and its server agree on the roster by construction.
+    /// The CURRENT participant set (sorted, incl. `me`) — the latest scheduled roster. At round
+    /// start (the only place this is read) it is the initial set the server is built over (solo ⇒
+    /// just `me`), so the client and its server agree on the roster by construction. Stage 3 lets it
+    /// grow on a mid-match join; the required-input set at a specific tick is [`RosterSchedule::at`].
     pub fn peers(&self) -> &[PlayerId] {
-        &self.peers
+        self.roster.current()
     }
 }
 
