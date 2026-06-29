@@ -5111,9 +5111,8 @@ dependencies = [
  "crab-world",
  "iroh",
  "net",
+ "otel",
  "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

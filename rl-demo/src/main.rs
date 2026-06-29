@@ -126,7 +126,7 @@ fn main() {
     // thing still forbidden is a SILENT skinless body (the silent-fallback bug — ships a
     // non-Sally crab with no signal). This is the explicit player-facing vs training split: the
     // headless trainer (`rl-train`) keeps the no-skin procedural body by design.
-    let mesh_status = canonical_mesh_status();
+    let mesh_status = crab_world::mesh_fallback::canonical_mesh_status();
     if mesh_status.is_err() {
         // Make every downstream consumer agree there is no usable model: the body recipe
         // (`crab_world::bot::body::render_recipe`) then takes the procedural-collider fallback
@@ -155,15 +155,9 @@ fn main() {
     // at, not only in a log he isn't.
     let mesh_fallback_reason: Option<String> = mesh_status.err();
     if let Some(reason) = &mesh_fallback_reason {
-        // LOUD via telemetry (stderr + OTLP). `target` namespaces the record so the sink can
-        // filter for canonical-mesh failures.
-        tracing::error!(
-            target: "rl_demo::canonical_mesh",
-            reason = %reason,
-            "rl-demo: canonical Sally mesh could not be loaded — falling back to the honest \
-             collider-wireframe view (the real colliders, NOT the real Sally rig). Fetch it \
-             with scripts/fetch-sally.sh or point CRAB_MODEL_PATH at the model."
-        );
+        // LOUD via telemetry (stderr + OTLP), shared with the game surface so both name the
+        // missing Sally identically (rl#706).
+        crab_world::mesh_fallback::log_fallback(crab_world::mesh_fallback::Surface::RlDemo, reason);
     }
     let mesh_ok = mesh_fallback_reason.is_none();
 
@@ -339,69 +333,12 @@ fn main() {
 struct MeshFallbackBanner(String);
 
 /// Spawn the can't-miss top-center banner for the windowed demo when the Sally mesh failed to
-/// load. The render below it is the physics-bones collider view — the REAL colliders, but NOT
-/// the real Sally rig — so the banner says exactly that, killing the owner's "is this even
-/// Sally?" ambiguity (rl#706) the OTEL log alone left unanswered on the screen he's watching.
+/// load. The render below it is the collider view — the REAL colliders, but NOT the real Sally
+/// rig — so the banner says exactly that, killing the owner's "is this even Sally?" ambiguity
+/// (rl#706) the OTEL log alone left unanswered on the screen he's watching. The banner UI is
+/// `crab_world::mesh_fallback::spawn_banner`, shared with the game surface so neither drifts.
 fn spawn_mesh_fallback_banner(mut commands: Commands, banner: Res<MeshFallbackBanner>) {
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Px(0.0),
-                left: Val::Px(0.0),
-                right: Val::Px(0.0),
-                padding: UiRect::all(Val::Px(8.0)),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            // Opaque dark band so the warning reads against any scene behind it.
-            BackgroundColor(Color::srgba(0.15, 0.0, 0.0, 0.85)),
-        ))
-        .with_children(|b| {
-            b.spawn((
-                Text::new("SALLY MESH NOT LOADED — showing physics colliders (NOT the real Sally rig)"),
-                TextFont {
-                    font_size: 20.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(1.0, 0.5, 0.5)),
-            ));
-            b.spawn((
-                Text::new(format!(
-                    "{}  —  fetch with scripts/fetch-sally.sh",
-                    banner.0
-                )),
-                TextFont {
-                    font_size: 13.0,
-                    ..default()
-                },
-                TextColor(Color::srgba(0.95, 0.85, 0.85, 0.9)),
-            ));
-        });
-}
-
-/// Is the canonical Sally mesh present AND usable (loads + has the crab bones the rig needs)?
-/// `Ok(())` means render the real skinned crab; `Err(reason)` carries a human-readable cause
-/// for the OTEL error and the physics-bones fallback. This mirrors `crab_world::bot::body`'s
-/// model-vs-fallback selection (the same `model_path` / `LoadedModel::load` / `build_recipe`
-/// chain), so the demo's "is the mesh good?" verdict can't disagree with what the body would
-/// actually spawn.
-fn canonical_mesh_status() -> Result<(), String> {
-    let Some(p) = bot::meshfit::model_path() else {
-        return Err(
-            "no crab model resolved (CRAB_MODEL_PATH / default `sally.glb` not found under \
-             BEVY_ASSET_ROOT/assets)"
-            .to_string(),
-        );
-    };
-    let model = bot::meshfit::LoadedModel::load(&p).map_err(|e| format!("crab model {p:?}: {e}"))?;
-    if bot::rig::build_recipe(&model).is_none() {
-        return Err(format!(
-            "crab model {p:?}: loaded but has none of the expected crab bones (e.g. Def_leg_01.000.L)"
-        ));
-    }
-    Ok(())
+    crab_world::mesh_fallback::spawn_banner(&mut commands, &banner.0);
 }
 
 /// Diagnostic (enable with RL_CONTACT_AUDIT=1): every 64 ticks, prints every
