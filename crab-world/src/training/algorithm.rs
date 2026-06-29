@@ -29,18 +29,18 @@ pub(crate) struct PpoConfig {
     /// it passes honest predictions through and only tames genuine outliers.
     pub(crate) value_loss_clip: f32,
     /// Trust-region ceiling on how far ONE update may move the policy, as an
-    /// approximate KL divergence (rollout policy → current policy, the unbiased
-    /// `mean((r-1) - ln r)` estimator). The PPO ratio clip only zeroes the gradient
-    /// for samples outside the band — it does NOT bound total KL across the 4 epochs ×
-    /// many minibatches, so a sharpened (near-deterministic) policy or a cold-resumed
-    /// optimizer can still walk the policy off a cliff in a single iteration. This is
-    /// the actual bound: once cumulative KL crosses `1.5 × target_kl` the update STOPS
-    /// for this iteration, so each iteration moves the policy by at most ~`target_kl`
-    /// regardless of optimizer state or policy sharpness. That is what makes the
-    /// reach-1.0 → reach-0.0 one-update collapse (observed continuously at iter ~4000
-    /// and instantly on every cold-optimizer warm-resume) impossible by construction.
-    /// 0.03 is generous: healthy updates here run ~0.01, so it never throttles normal
-    /// learning, but it hard-stops the 10×+ over-steps of a collapse.
+    /// approximate KL divergence (`π_old` → current policy, the unbiased
+    /// `mean((r-1) - ln r)` estimator, both forwards on the update backend). The PPO
+    /// ratio clip only zeroes the gradient for samples outside the band — it does NOT
+    /// bound total KL across the 4 epochs × many minibatches, so a sharpened
+    /// (near-deterministic) policy can still walk off a cliff in a single iteration
+    /// (observed as the reach-1.0 → reach-0.0 collapse around iter ~4000). Once
+    /// cumulative KL crosses `1.5 × target_kl` the update STOPS for this iteration, so
+    /// each iteration moves the policy by at most ~`target_kl`. 0.03 is generous:
+    /// healthy updates run ~0.01, so it never throttles normal learning, but it
+    /// hard-stops the 10×+ over-steps of a collapse. Only meaningful because `π_old` is
+    /// recomputed on the update backend (see the update); against the rollout's
+    /// CPU-recorded log-probs the backend mismatch alone reads as ~0.7 KL.
     pub(crate) target_kl: f32,
 }
 
@@ -391,6 +391,27 @@ pub(crate) fn compute_log_prob<B: Backend>(
     log_probs.sum().into_scalar().elem::<f32>()
 }
 
+/// Diagonal-Gaussian log-prob of each action ROW under a shared per-dim `log_std`:
+/// `Σ_d [ -0.5·((aᵈ-μᵈ)/σᵈ)² - ln σᵈ - 0.5·ln(2π) ]`. The ONE batched form of
+/// [`compute_log_prob`], used by the PPO update for BOTH the pre-update behavior
+/// log-prob (`π_old`, recomputed on the update backend so the importance ratio starts
+/// at 1) and each minibatch's `π_new` — one formula, so the two can't drift. Generic
+/// over the backend; the autodiff graph flows through `means`/`log_std` for `π_new`
+/// and is detached by the caller for `π_old`.
+pub(crate) fn gaussian_log_prob_rows<B: Backend>(
+    means: Tensor<B, 2>,
+    log_std: Tensor<B, 1>,
+    actions: Tensor<B, 2>,
+) -> Tensor<B, 1> {
+    let rows = means.dims()[0];
+    let log_std_2d = log_std.unsqueeze_dim::<2>(0).expand([rows, ACTION_SIZE]);
+    let scaled_diff = (actions - means) / log_std_2d.clone().exp();
+    let half_log_2pi = 0.5 * (2.0 * std::f32::consts::PI).ln();
+    (scaled_diff.powf_scalar(2.0).neg() * 0.5 - log_std_2d - half_log_2pi)
+        .sum_dim(1)
+        .flatten::<1>(0, 1)
+}
+
 /// Draw one standard-normal sample (N(0,1)) from `rng` via the Box–Muller transform.
 /// `rand 0.8` has no normal distribution in core and the project's `rand_distr` is a
 /// later-`rand` release (incompatible RNG traits), so this keeps the noise source on the
@@ -444,6 +465,12 @@ pub(crate) struct PpoMetrics {
     /// `epochs × ceil(n/batch)` on a full update; fewer when the target-KL guard
     /// early-stopped the iteration (a visible signal the policy hit the trust region).
     pub(crate) steps: u32,
+    /// Mean `|π_old_backend − π_old_cpu|`: how far the rollout's CPU-recorded behavior
+    /// log-prob sits from the on-backend recompute the update actually uses. ~0 means
+    /// the rollout (CPU) and update (GPU) backends agree; a large value is the
+    /// importance-ratio-corrupting divergence the recompute neutralizes — so watching
+    /// it catches a regression (a backend/precision change re-opening the gap).
+    pub(crate) behavior_backend_div: f32,
 }
 
 #[cfg(test)]
