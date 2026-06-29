@@ -491,3 +491,228 @@ pub fn run_cross_peer_probe(checkpoint_dir: &std::path::Path, seed: u64, ticks: 
 
     XPeerResult { ticks: out, faults }
 }
+
+// ---------------------------------------------------------------------------
+// Cross-peer NN-crab MID-GAME-JOIN determinism harness (the GCR MP Stage 3 gate, rl#151)
+// ---------------------------------------------------------------------------
+
+/// One applied post-setup tick of the join probe: the tick number and every PRESENT peer's
+/// closing `state_hash` for it (in `PlayerId` order). A tick is in lockstep iff all present
+/// peers' hashes are equal. Before the join only the incumbent is present; from the
+/// effective tick the joiner is too, and their hashes for the SAME tick must match — the proof
+/// that the warm incumbent's cold-respawned rapier crab is bit-identical to the joiner's
+/// from-fresh one (job 412's existential risk, exercised with the real armed Sally).
+#[derive(Clone, Debug)]
+pub struct XJoinTick {
+    pub tick: u64,
+    /// `(player, state_hash)` for every peer that applied this tick, sorted by player.
+    pub hashes: Vec<(PlayerId, u64)>,
+}
+
+impl XJoinTick {
+    /// All present peers agreed on this tick's hash (vacuously true for a single-peer tick).
+    fn agrees(&self) -> bool {
+        self.hashes
+            .first()
+            .is_none_or(|(_, h0)| self.hashes.iter().all(|(_, h)| h == h0))
+    }
+}
+
+/// Result of [`run_cross_peer_join_probe`]: the per-tick hashes across peers, the lockstep's own
+/// desync-fault count, and the tick the joiner became effective. A PASS is `faults == 0`, every
+/// tick's present hashes agree, AND at least one post-join tick actually had BOTH peers present
+/// (so the join genuinely happened and was compared) — the same belt-and-suspenders shape as
+/// [`XPeerResult`], extended over a changing roster.
+pub struct XJoinResult {
+    pub ticks: Vec<XJoinTick>,
+    pub faults: usize,
+    pub effective_tick: u64,
+}
+
+impl XJoinResult {
+    /// First tick whose present peers disagree, if any — where the join broke lockstep.
+    pub fn first_divergence(&self) -> Option<&XJoinTick> {
+        self.ticks.iter().find(|t| !t.agrees())
+    }
+
+    /// Ticks at/after the join that BOTH peers applied (so the join was actually exercised).
+    pub fn compared_post_join_ticks(&self) -> usize {
+        self.ticks
+            .iter()
+            .filter(|t| t.tick >= self.effective_tick && t.hashes.len() >= 2)
+            .count()
+    }
+
+    /// All clean: no desync fault, every tick's hashes agree, and the join was genuinely
+    /// compared on at least one tick with both peers present.
+    pub fn is_deterministic(&self) -> bool {
+        self.faults == 0 && self.first_divergence().is_none() && self.compared_post_join_ticks() > 0
+    }
+}
+
+/// One peer of the join probe: its own armed headless rapier-NN crab world + its own lockstep +
+/// physics cadence. The incumbent starts at round boot; the joiner is constructed (cold) at the
+/// admission moment via [`Lockstep::join_at`]. A deterministic per-peer input counter keeps the
+/// run reproducible while the two peers drive their players DIFFERENTLY (a real two-player round).
+struct JoinPeer {
+    me: PlayerId,
+    app: bevy::app::App,
+    ls: Lockstep,
+    cad: crate::cadence::PhysicsCadence,
+    issued: u64,
+}
+
+impl JoinPeer {
+    /// Build a peer from a ready [`Lockstep`], standing up its armed crab world at `crab_spawn`
+    /// (the round's rebuilt crab pos, identical on every peer) with ZERO physics steps run — only
+    /// [`pump_fixed_steps`] advances the body from here, exactly as production does.
+    fn new(checkpoint_dir: &std::path::Path, ls: Lockstep, crab_spawn: Pos) -> Self {
+        use crate::render::park_fixed_auto_pump;
+        let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
+        park_fixed_auto_pump(app.world_mut());
+        app.update(); // run Startup (spawn the crab) with no physics steps
+        let mut ls = ls;
+        // Seed the lockstep's external-crab pose at spawn (digest 0); the first post-step sync
+        // fills the real digest before it is ever cross-checked.
+        ls.set_external_crab_pose(crab_spawn, 0, 0);
+        Self { me: ls.me(), app, ls, cad: crate::cadence::PhysicsCadence::default(), issued: 0 }
+    }
+
+    /// This peer's deterministic-but-distinct input for its next issuing tick. A per-peer phase
+    /// offset makes the two players move differently (so the round is real) while staying a pure
+    /// function of `(me, issued)` — same probe args ⇒ identical run.
+    fn next_input(&mut self) -> Input {
+        let phase = self.issued as f32 * 0.1 + self.me.0 as f32 * 1.7;
+        self.issued += 1;
+        Input::from_axes(phase.cos(), phase.sin())
+    }
+
+    /// Advance every ready tick, mirroring `render::drive_lockstep`'s drain loop EXACTLY: pump the
+    /// body the cadence's steps for the tick, push its pose+digest, advance one tick, and on the
+    /// round-boundary RESTART edge (a roster-change rebuild — `sim().tick()` rewinds) reset the
+    /// cadence, re-seed the bridge to spawn, and COLD-RESPAWN the rapier body. Records each applied
+    /// tick's `(tick, hash)`. Returns the lockstep faults observed.
+    fn drain(&mut self, target: u64, out: &mut std::collections::BTreeMap<u64, Vec<(PlayerId, u64)>>) -> usize {
+        use crate::render::pump_fixed_steps;
+        let mut faults = 0;
+        while self.ls.next_tick_ready() && self.ls.next_tick() <= target {
+            // Mirror `render::drive_lockstep`'s drain loop EXACTLY (one behaviour, faithfully
+            // reproduced so the probe MEASURES production): pump the body the cadence's steps for
+            // this tick, push its pose+digest, advance one tick, and on the RESTART edge (a
+            // roster-change rebuild OR the plain-restart button — `sim().tick()` rewinds) reset the
+            // cadence, re-seed the bridge to spawn, and cold-respawn the rapier body.
+            let steps = self.cad.steps_for_next_tick();
+            pump_fixed_steps(self.app.world_mut(), steps);
+            sync_peer(&mut self.app, &mut self.ls);
+            let before = self.ls.sim().tick();
+            let tick_faults = self.ls.advance_one().expect("next_tick_ready was true");
+            faults += tick_faults.len();
+            let restarted = self.ls.sim().tick() < before;
+            if restarted {
+                self.cad = crate::cadence::PhysicsCadence::default();
+                let spawn = self.ls.sim().crab().pos();
+                self.app
+                    .world_mut()
+                    .resource_mut::<ExternalCrabBridge>()
+                    .restart_to_spawn(spawn);
+                super::cold_respawn_armed_crab(self.app.world_mut());
+            }
+            if let Some(c) = self.ls.last_applied() {
+                out.entry(c.tick).or_default().push((self.me, c.hash));
+            }
+        }
+        faults
+    }
+}
+
+/// The GCR MP Stage 3 mid-game-join armed-Sally determinism PROBE (rl#151): run the real armed
+/// rapier-NN crab on an INCUMBENT that hosts a live round, then have a fresh peer JOIN mid-game over
+/// the round-boundary mechanism, and measure whether every peer computes the byte-identical
+/// `state_hash` for every tick the joiner participates in.
+///
+/// This is the measurement the pure-core join determinism check (increment A) structurally CANNOT
+/// do: that one folds `external_crab_digest = 0`, so it proves the INTEGER sim rebuilds
+/// bit-identically but never exercises the rapier crab. Here the crab is the real trained body,
+/// stepped at the production [`crate::cadence::PhysicsCadence`] with its full physics digest folded
+/// into the hash, and the drain loop MIRRORS `render::drive_lockstep` exactly — so the result
+/// reflects production. The measured FINDING is that the warm incumbent (cold-respawned at the
+/// boundary) DIVERGES from the joiner's from-fresh body at the join tick: `cold_respawn_armed_crab`
+/// respawns the crab entities but not the incumbent's warm `RapierContext` (solver/contact caches +
+/// handle-arena free-list), so job 412's restored-vs-live divergence surfaces at the join. See the
+/// `game nn-crab-join-xpeer` module doc for the full finding and why it confirms the state-resync
+/// direction over bit-exact lockstep.
+///
+/// The incumbent starts SOLO (roster `{P0}`) and runs `pre_join_ticks`; then a roster change to
+/// `{P0,P1}` is scheduled `JOIN_LEAD` ticks ahead (the server's real lead) and the joiner `P1` is
+/// built via [`Lockstep::join_at`] at that tick. Both then run until each has applied through the
+/// effective tick + `post_join_ticks`. Same `(checkpoint, seed, …)` ⇒ identical result.
+pub fn run_cross_peer_join_probe(
+    checkpoint_dir: &std::path::Path,
+    seed: u64,
+    pre_join_ticks: u64,
+    post_join_ticks: u64,
+) -> XJoinResult {
+    use crate::server::JOIN_LEAD;
+
+    let p0 = PlayerId(0);
+    let p1 = PlayerId(1);
+
+    // The incumbent hosts a solo round; its crab spawn is the {P0} round's spawn.
+    let solo_ls = Lockstep::new(seed, &[p0], p0);
+    let incumbent_spawn = solo_ls.sim().crab().pos();
+    let mut incumbent = JoinPeer::new(checkpoint_dir, solo_ls, incumbent_spawn);
+
+    // Per-tick hashes keyed by tick, each carrying every peer's hash for it.
+    let mut hashes: std::collections::BTreeMap<u64, Vec<(PlayerId, u64)>> = std::collections::BTreeMap::new();
+
+    // 1. Run the incumbent solo for `pre_join_ticks` applied ticks. Solo ⇒ its own input
+    //    completes every tick, so no exchange is needed yet.
+    let mut faults = 0usize;
+    while incumbent.ls.next_tick() < pre_join_ticks {
+        let input = incumbent.next_input();
+        let _ = incumbent.ls.submit_local_input(input);
+        faults += incumbent.drain(pre_join_ticks - 1, &mut hashes);
+    }
+
+    // 2. Admit the joiner: schedule the roster change JOIN_LEAD ticks ahead (the real server
+    //    lead), exactly as `Server::admit`/`admit_joiners` would, and build the joiner's session
+    //    at that effective tick over the new roster. The joiner's crab world is built COLD (fresh,
+    //    zero steps) — the asymmetry under test against the incumbent's warm-then-respawned body.
+    let effective_tick = incumbent.ls.next_tick() + JOIN_LEAD;
+    let new_roster = [p0, p1];
+    incumbent.ls.schedule_roster_change(effective_tick, &new_roster);
+    let join_ls = Lockstep::join_at(seed, &new_roster, p1, effective_tick);
+    let joiner_spawn = join_ls.sim().crab().pos();
+    let mut joiner = JoinPeer::new(checkpoint_dir, join_ls, joiner_spawn);
+
+    // 3. Run both until each has applied through the effective tick + the post-join window.
+    let target = effective_tick + post_join_ticks;
+    while incumbent.ls.next_tick() <= target || joiner.ls.next_tick() <= target {
+        // Each peer submits one input for its next issuing tick, then they EXCHANGE — each
+        // records the other's exact message (filed by the tick it carries), the in-process
+        // analogue of the wire transport. The joiner issues from the effective tick; the
+        // incumbent leads by INPUT_DELAY, so the joiner's apply is gated on the incumbent's
+        // inputs arriving (natural lockstep backpressure) and never pumps a stalled tick.
+        let inc_input = incumbent.next_input();
+        let join_input = joiner.next_input();
+        let m_inc = incumbent.ls.submit_local_input(inc_input);
+        let m_join = joiner.ls.submit_local_input(join_input);
+        if incumbent.ls.record_remote(p1, m_join).is_some() {
+            faults += 1;
+        }
+        if joiner.ls.record_remote(p0, m_inc).is_some() {
+            faults += 1;
+        }
+        faults += incumbent.drain(target, &mut hashes);
+        faults += joiner.drain(target, &mut hashes);
+    }
+
+    let ticks = hashes
+        .into_iter()
+        .map(|(tick, mut hs)| {
+            hs.sort_by_key(|(p, _)| *p);
+            XJoinTick { tick, hashes: hs }
+        })
+        .collect();
+    XJoinResult { ticks, faults, effective_tick }
+}
