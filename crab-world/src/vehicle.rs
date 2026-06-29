@@ -62,7 +62,7 @@ use crate::bot::body::vehicle_collision;
 /// bowling her over.
 const VEHICLE_HALF: Vec3 = Vec3::new(0.22, 0.07, 0.34);
 
-/// Collider density (kg/m³) → the vehicle masses ~3 kg at [`VEHICLE_HALF`]. Sets how hard a strike
+/// Collider density (kg/m³) → the vehicle masses ~2 kg at [`VEHICLE_HALF`]. Sets how hard a strike
 /// shoves Sally's legs (rapier momentum transfer): heavy enough to push, light enough that her
 /// trained gait recovers.
 const VEHICLE_DENSITY: f32 = 50.0;
@@ -92,15 +92,18 @@ const PLANE: VehicleParams = VehicleParams {
 };
 
 /// Ship tuning (Outer Wilds): NO throttle lever and NO wings — DIRECT body-frame thrusters on all
-/// three axes (X strafe, Y vertical, Z forward) you tap and coast on. Drag is LOW so momentum
-/// carries (the thrust-and-drift feel); the match-velocity brake stops it on demand. Even rotation
-/// authority on all axes (you aim with the right stick, roll on the bumpers).
+/// three axes (X strafe, Y vertical, Z forward) you tap and coast on. The ship flies in ZERO-G (see
+/// [`gravity_scale`]), so it floats neutrally and the thrusters are GENTLE — forward full-burn tops
+/// out around 6 m/s, which in the ±10 m arena reads as the slow, weighty Outer-Wilds drift (a
+/// stronger thruster would cross the box in under a second — a pinball, not a spaceship). Drag is LOW so the
+/// coast carries; the match-velocity brake stops it on demand. Even rotation authority on all axes
+/// (you aim with the right stick, roll on the bumpers).
 const SHIP: VehicleParams = VehicleParams {
     thrust_axis: Vec3::Z, // unused (lever_thrust 0) — kept a valid unit axis
     lever_thrust: 0.0,
-    direct_thrust: Vec3::new(35.0, 35.0, 45.0), // strafe / vertical / forward
+    direct_thrust: Vec3::new(3.0, 3.0, 4.0), // strafe / vertical / forward (N) — gentle, zero-g
     lift: 0.0,
-    drag_lin: 0.35, // low → long coast
+    drag_lin: 0.35, // low → long coast (~6 s velocity time-constant at ~2 kg)
     drag_quad: 0.04,
     angular_drag: 1.1,
     pitch_torque: 7.0,
@@ -179,6 +182,17 @@ impl VehicleKind {
             VehicleKind::Ship => Vec3::ZERO,
         };
         Velocity { linear, angular: Vec3::ZERO }
+    }
+
+    /// Rapier gravity multiplier. The plane is a real aircraft (gravity 1× — lift fights weight,
+    /// stalls, dives). The Outer-Wilds ship flies in ZERO-G: it floats neutrally so its gentle
+    /// thrusters drift it rather than fighting a constant fall, which is the whole thrust-and-coast
+    /// feel (and is why its vertical thruster can be as gentle as the lateral ones).
+    fn gravity_scale(self) -> f32 {
+        match self {
+            VehicleKind::Plane => 1.0,
+            VehicleKind::Ship => 0.0,
+        }
     }
 }
 
@@ -278,6 +292,8 @@ fn vehicle_bundle(kind: VehicleKind, transform: Transform, velocity: Velocity) -
         RigidBody::Dynamic,
         Collider::cuboid(VEHICLE_HALF.x, VEHICLE_HALF.y, VEHICLE_HALF.z),
         ColliderMassProperties::Density(VEHICLE_DENSITY),
+        // Per-craft gravity: the plane falls (1×), the Outer-Wilds ship floats (zero-g).
+        GravityScale(kind.gravity_scale()),
         vehicle_collision(),
         transform,
         velocity,
@@ -531,17 +547,19 @@ mod tests {
 
     /// The ship's DIRECT body-frame thrusters (Outer Wilds): a forward thrust intent (+Z) with no
     /// throttle lever accelerates it along its nose. The plane can't do this (it has no direct
-    /// thrusters and an idle lever) — this is the wingless 6-DOF thruster model.
+    /// thrusters and an idle lever) — this is the wingless 6-DOF thruster model. Thresholds are
+    /// loose: the thrusters are deliberately GENTLE (OW drift in a small arena), so this pins the
+    /// DIRECTION, not a magnitude.
     #[test]
     fn ship_direct_forward_thrust_accelerates() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::ZERO);
         app.world_mut().resource_mut::<VehicleControl>().thrust = Vec3::new(0.0, 0.0, 1.0);
         let v0 = body(&app, e).1.linear.z;
-        for _ in 0..30 {
+        for _ in 0..90 {
             app.update();
         }
         let v1 = body(&app, e).1.linear.z;
-        assert!(v1 > v0 + 1.0, "ship forward thruster did not accelerate: {v0} -> {v1}");
+        assert!(v1 > v0 + 0.5, "ship forward thruster did not accelerate: {v0} -> {v1}");
     }
 
     /// The ship STRAFES from a lateral thrust intent (+X) — translational 6-DOF, no banking. A pure
@@ -551,11 +569,30 @@ mod tests {
         let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::ZERO);
         app.world_mut().resource_mut::<VehicleControl>().thrust = Vec3::new(1.0, 0.0, 0.0);
         let v0 = body(&app, e).1.linear.x;
-        for _ in 0..30 {
+        for _ in 0..90 {
             app.update();
         }
         let v1 = body(&app, e).1.linear.x;
-        assert!(v1 > v0 + 1.0, "ship lateral thruster did not strafe +X: {v0} -> {v1}");
+        assert!(v1 > v0 + 0.5, "ship lateral thruster did not strafe +X: {v0} -> {v1}");
+    }
+
+    /// The ship flies in ZERO-G (the Outer-Wilds float): with NO thrust it neither rises nor falls,
+    /// so a gentle thruster drifts it rather than fighting a constant fall. The plane, by contrast,
+    /// falls under gravity. Pins the per-craft `gravity_scale`.
+    #[test]
+    fn ship_is_zero_g_but_plane_falls() {
+        let fall = |kind: VehicleKind| {
+            let (mut app, e) = app_with_vehicle(kind, FAR, Vec3::ZERO);
+            // Zero the lever (no thrust, hence no forward speed → no lift): the only vertical player
+            // left is gravity, so this isolates the gravity scale.
+            app.world_mut().entity_mut(e).get_mut::<Vehicle>().unwrap().throttle = 0.0;
+            for _ in 0..30 {
+                app.update();
+            }
+            body(&app, e).1.linear.y
+        };
+        assert!(fall(VehicleKind::Ship).abs() < 0.5, "ship must float (zero-g), not fall");
+        assert!(fall(VehicleKind::Plane) < -1.0, "plane must fall under gravity");
     }
 
     /// Match-velocity brakes the coasting ship toward rest: a moving ship with no thrust but
