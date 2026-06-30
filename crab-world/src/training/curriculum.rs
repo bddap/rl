@@ -56,12 +56,12 @@ pub(crate) const SOLID_REACH_FRACTION: f32 = 0.6;
 /// persist, or drift. Kept as a small type (rather than two bare constants) because every
 /// rollout thread already carries it as its per-horizon sampling band.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Curriculum {
+pub(crate) struct TargetBand {
     min: f32,
     max: f32,
 }
 
-impl Curriculum {
+impl TargetBand {
     /// The fixed full-range band — the only band there is.
     pub(crate) const fn start() -> Self {
         Self {
@@ -71,13 +71,13 @@ impl Curriculum {
     }
 
     /// The band `[min, max)` a thread samples a target distance from.
-    pub(crate) fn band(self) -> (f32, f32) {
+    pub(crate) fn range(self) -> (f32, f32) {
         (self.min, self.max)
     }
 }
 
 /// Sample a fresh target world position for a crab whose env spawns at `origin`, at a planar
-/// distance drawn uniformly from the [`Curriculum`] band and at EXACTLY that distance — by
+/// distance drawn uniformly from the [`TargetBand`] band and at EXACTLY that distance — by
 /// construction the returned target's planar distance from `origin` is the band distance, never
 /// less. A random distance in the band is fixed first; then a HEADING is chosen so the
 /// full-distance target lands inside the arena (see [`TARGET_ARENA_HALF`]): random headings are
@@ -100,8 +100,8 @@ impl Curriculum {
 /// the observation re-expresses in body axes each tick. `pub(crate)` so the demo's red-ball
 /// marker (`play::target_ball`) relocates its target through the very same rule training samples
 /// — one sampling rule, so the demo can never pose a target training never saw.
-pub(crate) fn sample_target(origin: Vec3, curriculum: Curriculum, rng: &mut impl rand::Rng) -> Vec3 {
-    let (min, max) = curriculum.band();
+pub(crate) fn sample_target(origin: Vec3, band: TargetBand, rng: &mut impl rand::Rng) -> Vec3 {
+    let (min, max) = band.range();
     let dist = rng.gen_range(min..max);
     let y = rng.gen_range(TARGET_Y_MIN..TARGET_Y_MAX);
     let at = |theta: f32| {
@@ -144,12 +144,12 @@ pub(crate) fn seed_target(
     targets: &mut CrabTargets,
     spawns: &CrabSpawns,
     e: usize,
-    curriculum: Curriculum,
+    band: TargetBand,
     rng: &mut rand::rngs::StdRng,
 ) {
     if let Some(slot) = targets.envs.get_mut(e) {
         let origin = spawns.0.get(e).copied().unwrap_or(Vec3::ZERO);
-        *slot = Some(sample_target(origin, curriculum, rng));
+        *slot = Some(sample_target(origin, band, rng));
     }
 }
 
@@ -168,15 +168,15 @@ mod tests {
         // target through this very `sample_target`, so the demo can never pose a goal training
         // never saw.
         let mut rng = rand::thread_rng();
-        let curriculum = Curriculum::start();
-        let (min, max) = curriculum.band();
+        let band = TargetBand::start();
+        let (min, max) = band.range();
         for origin in [
             Vec3::ZERO,                // central — every heading fits
             Vec3::new(6.0, 0.0, 0.0),  // edge row — only the inward half fits
             Vec3::new(8.0, 0.0, -8.0), // corner — only a narrow inward arc fits
         ] {
             for _ in 0..2000 {
-                let t = sample_target(origin, curriculum, &mut rng);
+                let t = sample_target(origin, band, &mut rng);
                 assert!(t.is_finite(), "a sampled target is always finite");
                 assert!(
                     t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF,
@@ -198,7 +198,7 @@ mod tests {
         // The bitter-lesson change: the band spans the WHOLE arena from the start (near edge to
         // the arena cap), so the policy sees far targets every episode — no near-capping growth
         // curriculum gating it to the start band.
-        let (min, max) = Curriculum::start().band();
+        let (min, max) = TargetBand::start().range();
         assert_eq!(min, BAND_START_MIN);
         assert_eq!(max, TARGET_ARENA_HALF);
         assert!(max > min, "the band is non-empty");

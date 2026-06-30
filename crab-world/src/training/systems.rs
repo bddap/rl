@@ -38,7 +38,7 @@ use super::algorithm::{
 };
 use super::{InferBackend, TrainBackend};
 use super::checkpoint::{CheckpointDir, load_return_normalizer, save_return_normalizer};
-use super::curriculum::{CURRICULUM_REACH_RADIUS, Curriculum, seed_target};
+use super::curriculum::{CURRICULUM_REACH_RADIUS, TargetBand, seed_target};
 use super::normalizer::{
     IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
 };
@@ -277,10 +277,10 @@ pub(crate) struct TrainingState {
 
     /// The fixed target-distance band a rollout thread samples targets from (the full arena
     /// range — the learner ships the one constant band down each horizon via
-    /// [`Self::set_curriculum`]; the thread only reads it in [`seed_target`]). Defaults to
-    /// the same band so a thread that somehow rolls before its first `set_curriculum` still
+    /// [`Self::set_band`]; the thread only reads it in [`seed_target`]). Defaults to
+    /// the same band so a thread that somehow rolls before its first `set_band` still
     /// samples a sane target.
-    curriculum: Curriculum,
+    band: TargetBand,
     /// This horizon's per-episode reach tally over FINISHED episodes (rollout thread →
     /// learner, drained per horizon like the rewards): `reached` of `finished` episodes
     /// came within [`CURRICULUM_REACH_RADIUS`] of the target. The learner pools these for
@@ -447,7 +447,7 @@ impl TrainingState {
             normalizer_increment,
             drift_sum: 0.0,
             drift_count: 0,
-            curriculum: Curriculum::start(),
+            band: TargetBand::start(),
             reach_reached: 0,
             reach_finished: 0,
             progress_glitch_drops: 0,
@@ -609,12 +609,12 @@ impl TrainingState {
     /// Set the target-distance band a rollout thread samples from this horizon (learner →
     /// thread, once per horizon before the roll, like `set_normalizer`). The band is the one
     /// fixed full-arena range; the thread only consumes it.
-    pub(crate) fn set_curriculum(&mut self, curriculum: Curriculum) {
-        self.curriculum = curriculum;
+    pub(crate) fn set_band(&mut self, band: TargetBand) {
+        self.band = band;
     }
 
     /// Set this horizon's exploration-σ floor (learner → thread, once per horizon before the
-    /// roll, like [`Self::set_curriculum`]). The learner evaluates the anneal schedule from the
+    /// roll, like [`Self::set_band`]). The learner evaluates the anneal schedule from the
     /// durable tick odometer and ships the scalar so the rollout samples — and the update later
     /// recomputes log-probs — under the same lower `log_std` clamp (bddap/rl#161).
     pub(crate) fn set_log_std_floor(&mut self, log_std_floor: f32) {
@@ -724,7 +724,7 @@ impl TrainingState {
         inputs: &StepInputs,
         targets: &mut CrabTargets,
         spawns: &CrabSpawns,
-        curriculum: Curriculum,
+        band: TargetBand,
     ) {
         let body = inputs.body;
         let min_tip_dists = inputs.min_tip_dists;
@@ -889,7 +889,7 @@ impl TrainingState {
                 // New episode → fresh target around this env's spawn slot from the current
                 // band, so the next episode poses a new target. Done here (the one place both
                 // the normal and rescue ends converge) so target life tracks episode life.
-                seed_target(targets, spawns, e, curriculum, &mut self.rng);
+                seed_target(targets, spawns, e, band, &mut self.rng);
 
                 // Tally this finished episode's reach for the curriculum (drained per horizon
                 // to the learner, like the rewards just below).
@@ -1223,10 +1223,10 @@ pub(crate) fn brain_step(
         return;
     }
     let device = training.device;
-    // The horizon's curriculum band (Copy), captured before the per-env borrows below so
+    // The horizon's target band (Copy), captured before the per-env borrows below so
     // both `seed_target` paths sample from the same band the learner set this horizon —
     // one band per horizon, identical for the lazy first-episode seed and every reset.
-    let curriculum = training.curriculum;
+    let band = training.band;
 
     // Sense → Think: normalize, one batched forward pass, sample an action per env.
     let obs_arrays = normalize_observations(&mut training, &obs);
@@ -1261,7 +1261,7 @@ pub(crate) fn brain_step(
     // CrabTargets stays empty and its obs target vector stays zero.
     for e in 0..n {
         if targets.get(e).is_none() {
-            seed_target(&mut targets, &spawns, e, curriculum, &mut training.rng);
+            seed_target(&mut targets, &spawns, e, band, &mut training.rng);
         }
     }
 
@@ -1299,7 +1299,7 @@ pub(crate) fn brain_step(
         efforts: &efforts,
         rescued_envs: &rescued_envs,
     };
-    training.finalize_transitions(&inputs, &mut targets, &spawns, curriculum);
+    training.finalize_transitions(&inputs, &mut targets, &spawns, band);
 
     log_effort_probe(&training.envs, &efforts);
     training.accumulate_drift(&body.drifts);
