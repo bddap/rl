@@ -71,10 +71,10 @@ impl<B: Backend> CrabBrain<B> {
 
         // The action is a per-step joint torque, so per-step noise is per-step
         // jitter. A wide std (≈0.6, log_std -0.5) resampled on every joint each
-        // tick convulses the body and topples it before any pose-holding reward
-        // accrues — it can never learn to stand. Start near-deterministic (std ≈ 0.2)
-        // so a stable pose persists long enough to earn the height/uprightness
-        // signal; the policy can widen exploration itself via the learnable log_std.
+        // tick convulses the body and topples it before it can hold a pose and walk
+        // — it can never set off. Start near-deterministic (std ≈ 0.2) so a stable
+        // gait can persist long enough to make progress toward the target (the dense
+        // reward); the policy can widen exploration itself via the learnable log_std.
         let log_std = Param::from_tensor(Tensor::full([ACTION_SIZE], LOG_STD_INIT, device));
 
         Self {
