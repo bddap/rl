@@ -161,6 +161,7 @@ pub fn tick(app: &mut App, n: u32) {
 ///     (the NN forward pass that drives the crab — the round-1 divergence source);
 ///   - bevy's three task pools — `create_default_pools` claims the global `OnceLock`s with
 ///     one worker each before any `App` build grabs the multi-threaded defaults.
+///
 /// Each env var is read once, lazily, on first pool use, so this MUST run before the first
 /// matmul / `App::new`. Idempotent: safe to call per-app (a later `create_default_pools`
 /// no-ops on the already-initialised globals).

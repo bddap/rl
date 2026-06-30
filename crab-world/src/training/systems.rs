@@ -1345,6 +1345,11 @@ mod tests {
     /// determinism hash when the NN crab is armed), and it REFRESHES on any weight change —
     /// through both `set` (snapshot load) and `train_mut` (a learner update) — so a stale
     /// clone is never served.
+    // `with_inference` takes its closure by value (`impl FnOnce`); `policy_bits` is a
+    // non-Copy closure (captures `obs`) reused across four calls, so each `&policy_bits`
+    // borrow is load-bearing — dropping it would move the closure on the first call and fail
+    // to compile on the next. The lint's "needless" verdict is a false positive here.
+    #[allow(clippy::needless_borrows_for_generic_args)]
     #[test]
     fn inference_cache_is_bit_identical_and_refreshes_on_weight_change() {
         let device = NdArrayDevice::Cpu;

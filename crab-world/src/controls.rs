@@ -360,10 +360,10 @@ pub fn icon_asset_paths<S: ControlScheme + ?Sized>() -> Vec<&'static str> {
     for b in S::bindings() {
         for device in [Device::KeyboardMouse, Device::Gamepad] {
             for glyph in b.glyphs(device) {
-                if let Glyph::Icon(p) = glyph {
-                    if !paths.contains(&p) {
-                        paths.push(p);
-                    }
+                if let Glyph::Icon(p) = glyph
+                    && !paths.contains(&p)
+                {
+                    paths.push(p);
                 }
             }
         }

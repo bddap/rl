@@ -359,14 +359,14 @@ pub fn build_recipe(model: &impl BindSource) -> Option<RigRecipe> {
 /// edit that violates it fails loudly here, not as a mysterious mis-jointed crab.
 fn assert_actuated_never_parents_locked(links: &[RigLink]) {
     for (i, link) in links.iter().enumerate() {
-        if link.actuated.is_some() {
-            if let Some(p) = link.parent {
-                assert!(
-                    links[p].actuated.is_some(),
-                    "actuated rig link {i} has a locked parent {p} — spawn_crab would \
-                     misparent it onto the carapace placeholder"
-                );
-            }
+        if link.actuated.is_some()
+            && let Some(p) = link.parent
+        {
+            assert!(
+                links[p].actuated.is_some(),
+                "actuated rig link {i} has a locked parent {p} — spawn_crab would \
+                 misparent it onto the carapace placeholder"
+            );
         }
     }
 }
