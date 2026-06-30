@@ -74,7 +74,7 @@ use crate::bot::brain::CrabBrain;
 use super::algorithm::{RolloutBuffer, Transition};
 use super::TrainBackend;
 use super::checkpoint::{CheckpointDir, TICK_WATERMARK_FILENAME};
-use super::curriculum::Curriculum;
+use super::curriculum::TargetBand;
 use super::normalizer::{NormalizerIncrement, NormalizerSnapshot};
 use super::systems::TrainingState;
 
@@ -266,7 +266,7 @@ struct RollRequest {
     normalizer: Arc<NormalizerSnapshot>,
     /// The fixed full-arena target-distance band the thread samples this horizon's targets
     /// from. `Copy` (a tiny band), so no `Arc` is warranted.
-    curriculum: Curriculum,
+    band: TargetBand,
     /// This horizon's exploration-σ floor — the lower `log_std` clamp the thread samples under
     /// (bddap/rl#161). The learner evaluates the anneal schedule from the durable tick odometer
     /// once per iteration and ships it so rollout and the subsequent update agree on σ.
@@ -448,7 +448,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
             );
             return RollOutcome::SnapshotLoadFailed;
         }
-        st.set_curriculum(req.curriculum);
+        st.set_band(req.band);
         st.set_log_std_floor(req.log_std_floor);
         st.reset_horizon_counter();
     }
@@ -577,17 +577,17 @@ struct MergedRollout {
 
 /// Phase 1 — capture the consistent per-iteration view every thread rolls: the policy
 /// weights, the master normalizer baseline (a snapshot, never an increment), and the
-/// curriculum band. Captured before any thread runs, so none sees a half-updated net.
+/// target band. Captured before any thread runs, so none sees a half-updated net.
 #[cfg(feature = "wgpu")]
 fn snapshot_policy(
     state: &TrainingState,
-    curriculum: Curriculum,
+    band: TargetBand,
     log_std_floor: f32,
 ) -> RollRequest {
     RollRequest {
         brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
         normalizer: Arc::new(state.normalizer_snapshot()),
-        curriculum,
+        band,
         log_std_floor,
     }
 }
@@ -692,7 +692,7 @@ struct IterReport<'a> {
     total_ticks: u64,
     avg_reward: f32,
     drift: (f64, u64),
-    curriculum: Curriculum,
+    band: TargetBand,
     reach: (u64, u64),
     metrics: &'a super::algorithm::PpoMetrics,
     panics: u32,
@@ -712,7 +712,7 @@ fn log_iteration(r: &IterReport) {
     } else {
         0.0
     };
-    let (band_min, band_max) = r.curriculum.band();
+    let (band_min, band_max) = r.band.range();
     let (reached, finished) = r.reach;
     // Reach fraction over finished episodes, so an advance's approach is legible (it
     // climbs toward the threshold); `-` when no episode finished this iter.
@@ -862,15 +862,15 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         anneal_epoch,
     );
 
-    // The target-distance band is FIXED at the full arena range (see `Curriculum`): every
+    // The target-distance band is FIXED at the full arena range (see `TargetBand`): every
     // episode samples a target uniformly across the whole arena, near and far. The
     // scale-free progress reward gives signal at any distance, so there is no growth
     // curriculum to advance or persist — the weights learn the far approach directly
     // (the bitter lesson). One constant band, the same on every warm resume.
-    let curriculum = Curriculum::start();
+    let band = TargetBand::start();
 
-    // Best-by-competence keeping (rl#157): mirror the checkpoint set into `<ckpt>/best/`
-    // whenever the policy demonstrates new competence, so a collapse stays confined to
+    // Best-by-reach keeping (rl#157): mirror the checkpoint set into `<ckpt>/best/`
+    // whenever the policy demonstrates a new high-water reach, so a collapse stays confined to
     // `<ckpt>/` (the trainer resumes from it) while the demo/release — which mirror
     // `best/` — hold the high-water-mark gait. Resumes the running best from the sidecar.
     let mut best_keeper = super::best::BestKeeper::new(&checkpoint_dir);
@@ -917,7 +917,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
 
         // 1) Capture the consistent per-iteration snapshot (weights + master normalizer +
         //    the fixed full-range band, none half-updated) and persist a checkpoint.
-        let request = snapshot_policy(&state, curriculum, log_std_floor);
+        let request = snapshot_policy(&state, band, log_std_floor);
         persist_checkpoint(&state, &gpu_learner, &checkpoint_dir);
 
         // 2) Roll one synchronous horizon across all threads.
@@ -978,7 +978,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
             total_ticks,
             avg_reward: state.avg_reward(20),
             drift: merged.drift,
-            curriculum,
+            band,
             reach: merged.reach,
             metrics: &metrics,
             panics: merged.panics,
@@ -987,13 +987,13 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         });
 
         // Consider this iter's policy for `<ckpt>/best/`. The reach signal is over THIS
-        // iter's finished episodes (None when none finished — the EMA holds); the band is
-        // the one this iter rolled at. `<ckpt>/` on disk still holds this iter's policy
-        // (persisted at the top, not rewritten until the next iter), so a snapshot now
-        // captures the policy that earned the reach. See `BestKeeper::observe`.
+        // iter's finished episodes (None when none finished — the EMA holds). `<ckpt>/` on
+        // disk still holds this iter's policy (persisted at the top, not rewritten until the
+        // next iter), so a snapshot now captures the policy that earned the reach. See
+        // `BestKeeper::observe`.
         let (reached, finished) = merged.reach;
         let reach_fraction = (finished > 0).then(|| reached as f32 / finished as f32);
-        best_keeper.observe(reach_fraction, curriculum.band().1);
+        best_keeper.observe(reach_fraction);
 
         iter += 1;
 
@@ -1314,7 +1314,7 @@ mod tests {
             .send(RollRequest {
                 brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
                 normalizer: Arc::new(state.normalizer_snapshot()),
-                curriculum: Curriculum::start(),
+                band: TargetBand::start(),
                 log_std_floor: crate::bot::brain::LOG_STD_MIN,
             })
             .expect("send request");
@@ -1399,7 +1399,7 @@ mod tests {
                 .send(RollRequest {
                     brain_bytes: Arc::clone(&brain_bytes),
                     normalizer: Arc::clone(&normalizer),
-                    curriculum: Curriculum::start(),
+                    band: TargetBand::start(),
                     log_std_floor: crate::bot::brain::LOG_STD_MIN,
                 })
                 .expect("send");
