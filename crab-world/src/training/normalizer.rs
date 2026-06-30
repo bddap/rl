@@ -61,10 +61,12 @@ impl Welford {
     }
 
     /// Fold one finite sample of element `i` into the running `(count, mean, m2)` — the
-    /// inner Welford step.
-    fn observe_element(&mut self, i: usize, raw: f32) {
+    /// inner Welford step. Returns `true` if `raw` was NON-finite and therefore skipped
+    /// from the stats, so the caller can count a vanished sensor reading instead of
+    /// losing it silently (bddap/rl#181).
+    fn observe_element(&mut self, i: usize, raw: f32) -> bool {
         if !raw.is_finite() {
-            return;
+            return true;
         }
         self.count[i] += 1;
         let n = self.count[i] as f64;
@@ -73,12 +75,20 @@ impl Welford {
         self.mean[i] += delta / n;
         let delta2 = x - self.mean[i];
         self.m2[i] += delta * delta2;
+        false
     }
 
-    fn observe(&mut self, obs: &[f32; OBS_SIZE]) {
+    /// Fold one observation, returning how many of its elements were non-finite and so
+    /// skipped from the running stats (0 on a clean obs). The skip is a deliberate
+    /// fail-safe; the count is what keeps it from being silent (bddap/rl#181).
+    fn observe(&mut self, obs: &[f32; OBS_SIZE]) -> u32 {
+        let mut nonfinite = 0;
         for (i, &raw) in obs.iter().enumerate() {
-            self.observe_element(i, raw);
+            if self.observe_element(i, raw) {
+                nonfinite += 1;
+            }
         }
+        nonfinite
     }
 
     /// Parallel Welford combine: fold a DISJOINT `other` stream's per-element
@@ -159,8 +169,10 @@ impl IncrementAccumulator {
     /// Count one observation toward this horizon's increment (NaN-skipped per element),
     /// WITHOUT normalizing it — the policy's normalized value comes from the master copy
     /// (full baseline+horizon stats), so the increment only needs to tally the samples.
-    pub(crate) fn observe(&mut self, obs: &[f32; OBS_SIZE]) {
-        self.welford.observe(obs);
+    /// Returns how many elements were non-finite and skipped, so the rollout thread can
+    /// surface a sensor/physics anomaly at the horizon boundary (bddap/rl#181).
+    pub(crate) fn observe(&mut self, obs: &[f32; OBS_SIZE]) -> u32 {
+        self.welford.observe(obs)
     }
 
     /// The disjoint delta to ship to the learner. A by-value `Welford` clone; the
@@ -328,6 +340,32 @@ mod tests {
             norm.welford.mean[1]
         );
         assert_eq!(norm.welford.count[1], 50);
+    }
+
+    #[test]
+    fn observe_counts_nonfinite_elements_skipped() {
+        // bddap/rl#181: the per-element finite-skip is a deliberate fail-safe, but it must not be
+        // silent — `observe` reports how many elements it dropped so a sensor/physics anomaly is
+        // visible at the horizon boundary. A clean obs reports 0; NaN and ±inf each count once.
+        let mut inc = IncrementAccumulator::new();
+
+        let clean = [0.5f32; OBS_SIZE];
+        assert_eq!(inc.observe(&clean), 0, "a fully-finite obs skips nothing");
+
+        let mut dirty = [0.5f32; OBS_SIZE];
+        dirty[0] = f32::NAN;
+        dirty[1] = f32::INFINITY;
+        dirty[2] = f32::NEG_INFINITY;
+        assert_eq!(
+            inc.observe(&dirty),
+            3,
+            "NaN and ±inf elements are each counted as one skipped sample"
+        );
+
+        // The skipped elements are excluded from the running stats (count stays put), while a
+        // finite neighbour in the same obs is still folded — the count tracks exactly the drop.
+        assert_eq!(inc.welford.count[0], 1, "the NaN element was never folded");
+        assert_eq!(inc.welford.count[3], 2, "a finite element is folded both times");
     }
 
     #[test]

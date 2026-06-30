@@ -302,6 +302,10 @@ enum RollOutcome {
         /// (bddap/rl#175); the learner sums it across threads and surfaces the total so a
         /// silent reward dropout is visible. 0 on a healthy horizon.
         glitch_drops: u64,
+        /// Count of non-finite (NaN/±inf) observation elements skipped from the normalizer this
+        /// horizon (bddap/rl#181); the learner sums it across threads and surfaces the total so a
+        /// NaN sensor/physics reading is visible. 0 on a healthy horizon.
+        nonfinite_obs: u64,
         /// Physics ticks actually rolled this horizon.
         ticks: u64,
     },
@@ -470,6 +474,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
         drift: st.drain_drift(),
         reach: st.drain_reach(),
         glitch_drops: st.drain_progress_glitches(),
+        nonfinite_obs: st.drain_nonfinite_obs(),
         ticks: rolled,
     }
 }
@@ -573,6 +578,9 @@ struct MergedRollout {
     /// Progress-term drops (non-physical deltas the reward zeroed; bddap/rl#175) pooled across
     /// threads this iter; surfaced on the log so a silent reward dropout is visible. 0 normally.
     glitch_drops: u64,
+    /// Non-finite obs elements skipped from the normalizer (bddap/rl#181) pooled across threads
+    /// this iter; surfaced on the log so a NaN sensor/physics reading is visible. 0 normally.
+    nonfinite_obs: u64,
 }
 
 /// Phase 1 — capture the consistent per-iteration view every thread rolls: the policy
@@ -640,6 +648,7 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
         drift: (0.0, 0),
         reach: (0, 0),
         glitch_drops: 0,
+        nonfinite_obs: 0,
     };
     for r in results {
         match r {
@@ -650,6 +659,7 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
                 drift,
                 reach,
                 glitch_drops,
+                nonfinite_obs,
                 ticks,
             } => {
                 merged.ticks += ticks;
@@ -662,6 +672,7 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
                 merged.reach.0 += reach.0;
                 merged.reach.1 += reach.1;
                 merged.glitch_drops += glitch_drops;
+                merged.nonfinite_obs += nonfinite_obs;
                 for env in envs {
                     merged.samples += env.len() as u64;
                     merged.rollouts.push(RolloutBuffer { transitions: env });
@@ -700,6 +711,8 @@ struct IterReport<'a> {
     snapshot_load_failures: u32,
     /// Progress-term drops this iter — non-physical deltas the reward zeroed (bddap/rl#175).
     glitch_drops: u64,
+    /// Non-finite obs elements skipped from the normalizer this iter (bddap/rl#181).
+    nonfinite_obs: u64,
 }
 
 /// Phase 4 (reporting) — emit the one steady-state learner log line. Derives the means
@@ -741,6 +754,11 @@ fn log_iteration(r: &IterReport) {
     } else {
         String::new()
     };
+    let nonfinite_obs_note = if r.nonfinite_obs > 0 {
+        format!(" | {} non-finite obs element(s) skipped (sensor/physics anomaly)", r.nonfinite_obs)
+    } else {
+        String::new()
+    };
     let nonfinite_returns_note = if r.metrics.nonfinite_returns > 0 {
         format!(" | {} non-finite return(s) skipped (env diverged)", r.metrics.nonfinite_returns)
     } else {
@@ -765,7 +783,7 @@ fn log_iteration(r: &IterReport) {
         ..
     } = *r;
     eprintln!(
-        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note} over {finished} ep) | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{panic_note}{load_fail_note}{glitch_note}{nonfinite_returns_note}",
+        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note} over {finished} ep) | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{panic_note}{load_fail_note}{glitch_note}{nonfinite_returns_note}{nonfinite_obs_note}",
         metrics.policy_loss, metrics.value_loss, metrics.entropy, metrics.kl, metrics.steps,
         metrics.behavior_backend_div,
     );
@@ -984,6 +1002,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
             panics: merged.panics,
             snapshot_load_failures: merged.snapshot_load_failures,
             glitch_drops: merged.glitch_drops,
+            nonfinite_obs: merged.nonfinite_obs,
         });
 
         // Consider this iter's policy for `<ckpt>/best/`. The reach signal is over THIS
@@ -1200,6 +1219,7 @@ mod tests {
                 drift: (0.0, 0),
                 reach: (0, 0),
                 glitch_drops: 0,
+                nonfinite_obs: 0,
                 ticks: 64,
             },
             || panic!("rebuild must NOT run on a successful roll"),
@@ -1260,6 +1280,7 @@ mod tests {
                 drift: (0.5, 2),
                 reach: (1, 3),
                 glitch_drops: 3,
+                nonfinite_obs: 7,
                 ticks: 64,
             },
             RollOutcome::SnapshotLoadFailed,
@@ -1272,6 +1293,7 @@ mod tests {
         assert_eq!(merged.samples, 0, "neither a refusal nor a panic contributes samples");
         assert!(merged.rollouts.is_empty(), "neither contributes a buffer");
         assert_eq!(merged.glitch_drops, 3, "the Rolled thread's progress-glitch count flows through");
+        assert_eq!(merged.nonfinite_obs, 7, "the Rolled thread's non-finite obs count flows through");
         assert_eq!(merged.ticks, 64, "only the Rolled thread's ticks count");
         assert_eq!(merged.drift, (0.5, 2), "the Rolled thread's drift flows through");
         assert_eq!(merged.reach, (1, 3), "the Rolled thread's reach flows through");

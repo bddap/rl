@@ -296,6 +296,14 @@ pub(crate) struct TrainingState {
     /// learner line instead of vanishing without trace (bddap/rl#175). Designed to stay 0 on a
     /// healthy run — every physical step is far below the guard — so any nonzero count is signal.
     progress_glitch_drops: u64,
+
+    /// Count of observation ELEMENTS this horizon that were non-finite (NaN/±inf) and so
+    /// skipped from the running normalizer stats (and mapped to 0.0 on normalize) — the
+    /// per-element fail-safe in [`normalizer::Welford::observe`]. Drained per horizon like
+    /// `progress_glitch_drops` and pooled across threads, so a NaN sensor/physics reading
+    /// surfaces on the learner line instead of vanishing silently (bddap/rl#181). 0 on a
+    /// healthy horizon, so any nonzero count is signal.
+    nonfinite_obs_elements: u64,
 }
 
 /// The per-env arrays captured this tick, bundled into one named borrow so
@@ -451,6 +459,7 @@ impl TrainingState {
             reach_reached: 0,
             reach_finished: 0,
             progress_glitch_drops: 0,
+            nonfinite_obs_elements: 0,
         }
     }
 
@@ -638,6 +647,14 @@ impl TrainingState {
     /// (bddap/rl#175). `0` on a healthy horizon — the common case.
     pub fn drain_progress_glitches(&mut self) -> u64 {
         std::mem::take(&mut self.progress_glitch_drops)
+    }
+
+    /// Drain this horizon's count of non-finite observation elements skipped from the normalizer
+    /// (see [`nonfinite_obs_elements`](Self::nonfinite_obs_elements)), resetting it. The learner
+    /// sums these across rollout threads and surfaces the total so a NaN sensor/physics reading is
+    /// visible (bddap/rl#181). `0` on a healthy horizon — the common case.
+    pub fn drain_nonfinite_obs(&mut self) -> u64 {
+        std::mem::take(&mut self.nonfinite_obs_elements)
     }
 
     /// Hand a CPU-backend PPO update its non-optimizer pieces (brain/config/device/
@@ -1009,9 +1026,14 @@ fn normalize_observations(
     let mut obs_arrays: Vec<[f32; OBS_SIZE]> = Vec::with_capacity(n);
     for e in 0..n {
         let normalized = training.obs_normalizer.normalize(&obs.envs[e]);
-        if let Some(inc) = training.normalizer_increment.as_mut() {
-            inc.observe(&obs.envs[e]);
-        }
+        // Count non-finite obs elements from the per-horizon increment (worker mode), the
+        // same samples that ship to the learner — so the tally matches the shipped horizon
+        // and the master's own skip isn't double-counted (bddap/rl#181).
+        let nonfinite = match training.normalizer_increment.as_mut() {
+            Some(inc) => inc.observe(&obs.envs[e]),
+            None => 0,
+        };
+        training.nonfinite_obs_elements += u64::from(nonfinite);
         obs_arrays.push(normalized);
     }
     obs_arrays
