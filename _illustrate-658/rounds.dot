@@ -1,0 +1,30 @@
+// 658 round-by-round remediation: every fix a deletion, never an addition
+digraph rounds {
+  rankdir=LR;
+  bgcolor="white";
+  node [fontname="Helvetica" fontsize=11 shape=box style=filled];
+  edge [arrowsize=0.7 fontname="Helvetica" fontsize=9];
+
+  // Round 1 — code-grade
+  r1 [label="Round 1 · grade\nWork: dry-not-overboard" fillcolor="#c0392b" fontcolor=white];
+  r1f [label="single-source the dups\n−  inline NaN-safe cmp at 4 sites\n−  centroid+eigenframe in 2 fns\n→ one comparator, one eigenframe"
+       fillcolor="#dfeadf"];
+  r1 -> r1f [label="remediate"];
+
+  // Reviewer round 1
+  r2 [label="Reviewer R1\ncorrectness · security · API · Niko-taste" fillcolor="#e67e22" fontcolor=white];
+  r2f [label="comparator reinvents stdlib\n−  bespoke partial_cmp().unwrap_or\n→ f32/f64::total_cmp (delete it)"
+       fillcolor="#dfeadf"];
+  r1f -> r2 [label="diff in"];
+  r2 -> r2f [label="remediate"];
+
+  // Reviewer round 2 (one past "done")
+  r3 [label="Reviewer R2\n(the round past 'done')" fillcolor="#e67e22" fontcolor=white];
+  r3f [label="eigenframe returns unused vars\n−  eigenvalue-magnitude tuple\n→ sig (Vec3,[Vec3;3])"
+       fillcolor="#dfeadf"];
+  r2f -> r3 [label="diff in"];
+  r3 -> r3f [label="remediate"];
+
+  done [label="net −5 lines\n18 Perfect / 4 Good / 0 Work / 2 NA\ntest + clippy clean" fillcolor="#27ae60" fontcolor=white];
+  r3f -> done;
+}
