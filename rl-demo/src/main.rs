@@ -278,6 +278,9 @@ fn main() {
         // training optimizes (see physics::CrabPhysicsPlugin).
         .add_plugins(physics::CrabPhysicsPlugin)
         .add_plugins(physics::PhysicsWorldPlugin)
+        // The standalone arena draws no other scene, so it also dresses the colliders with the
+        // visible ground quad + lights. GCR omits this — it renders its own gray-box world (rl#160).
+        .add_plugins(physics::ArenaVisualsPlugin)
         // Hand the preflighted mesh choice to the bot plugin BEFORE it builds `CrabAssets`/skin,
         // so the fallback decision is this explicit resource, not a poisoned env (bddap/rl#147).
         .insert_resource(mesh_state)
