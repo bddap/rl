@@ -4,7 +4,8 @@
 use super::*;
 use super::app::ExternalCrabStackInstalled;
 use super::driver::{
-    FlightInput, GameState, InputSource, PendingRound, ensure_round_installed, flight_control,
+    FlightInput, GameState, InputSource, PendingRound, VEHICLE_STICK_SENS, ensure_round_installed,
+    flight_control,
 };
 use crab_world::vehicle::VehicleKind;
 use super::input::pad_stick_axes;
@@ -382,20 +383,27 @@ fn pad_axes_are_not_pre_negated() {
     );
 }
 
-/// The PLANE control bridge = Ace Combat 6. Pins the directions the cockpit legend rides, above all
-/// the INVERTED pitch (the owner's complaint): pulling the left stick DOWN/back must raise the nose.
+/// The PLANE control bridge. Pins the directions the cockpit legend rides, above all the INTUITIVE
+/// (de-inverted) pitch (the owner's complaint that the old AC6 inversion felt backwards): pushing the
+/// left stick UP must raise the nose, matching the ship's aim and the on-foot look. Also pins the
+/// VEHICLE_STICK_SENS scaling of the analog attitude stick (the "too sensitive" fix).
 #[test]
-fn plane_flight_control_is_ace_combat_6() {
+fn plane_flight_control_pitch_is_intuitive_and_scaled() {
     let plane = |fi: FlightInput| flight_control(VehicleKind::Plane, &fi);
-    // Inverted pitch: stick DOWN (left.y < 0) → nose UP (pitch > 0); stick up → nose down.
-    assert!(plane(FlightInput { left: Vec2::new(0.0, -1.0), ..default() }).pitch > 0.0);
-    assert!(plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).pitch < 0.0);
-    // Mouse pulled back (down, +y) also raises the nose (same inversion).
-    assert!(plane(FlightInput { mouse: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
+    // Intuitive pitch: stick UP (left.y > 0) → nose UP (pitch > 0); stick down → nose down.
+    assert!(plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
+    assert!(plane(FlightInput { left: Vec2::new(0.0, -1.0), ..default() }).pitch < 0.0);
+    // Mouse UP (screen −y) also raises the nose (camera-style, matching the ship).
+    assert!(plane(FlightInput { mouse: Vec2::new(0.0, -1.0), ..default() }).pitch > 0.0);
+    // The analog attitude stick is scaled by VEHICLE_STICK_SENS, not raw: full deflection commands a
+    // fraction of full authority (the controller "too sensitive" fix). Mouse keeps its own scale.
+    let full = plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() });
+    assert!((full.pitch - VEHICLE_STICK_SENS).abs() < 1e-6, "full-up stick → VEHICLE_STICK_SENS pitch");
+    let rolled = plane(FlightInput { left: Vec2::new(1.0, 0.0), ..default() });
+    assert!((rolled.roll - VEHICLE_STICK_SENS).abs() < 1e-6, "full-right stick → VEHICLE_STICK_SENS roll");
     // Roll: stick right → bank right (+roll), with a coordinating yaw the SAME sign (turns, not just
     // rolls).
-    let banked = plane(FlightInput { left: Vec2::new(1.0, 0.0), ..default() });
-    assert!(banked.roll > 0.0 && banked.yaw > 0.0, "right stick → bank right + coordinated yaw");
+    assert!(rolled.roll > 0.0 && rolled.yaw > 0.0, "right stick → bank right + coordinated yaw");
     // Throttle: RT accelerates (+), LT brakes (−). Rudder: RB right (+yaw), LB left (−yaw).
     assert!(plane(FlightInput { rt: 1.0, ..default() }).throttle_trim > 0.0);
     assert!(plane(FlightInput { lt: 1.0, ..default() }).throttle_trim < 0.0);
@@ -418,8 +426,12 @@ fn ship_flight_control_is_outer_wilds() {
     assert!(ship(FlightInput { rt: 1.0, ..default() }).thrust.y > 0.0);
     assert!(ship(FlightInput { lt: 1.0, ..default() }).thrust.y < 0.0);
     // Aim is camera-style, NOT inverted: right stick UP → nose UP (pitch > 0); right → yaw right.
-    assert!(ship(FlightInput { right: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
+    // The analog AIM stick is scaled by VEHICLE_STICK_SENS (the "too sensitive" fix), like the plane.
+    let aim_up = ship(FlightInput { right: Vec2::new(0.0, 1.0), ..default() });
+    assert!((aim_up.pitch - VEHICLE_STICK_SENS).abs() < 1e-6, "full-up aim stick → VEHICLE_STICK_SENS pitch");
     assert!(ship(FlightInput { right: Vec2::new(1.0, 0.0), ..default() }).yaw > 0.0);
+    // Translational thrust keeps FULL authority — only rotation is desensitized.
+    assert_eq!(ship(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).thrust.z, 1.0);
     // Roll on the bumpers; A/Space matches velocity. The ship has no throttle lever.
     assert!(ship(FlightInput { rb: true, ..default() }).roll > 0.0);
     assert!(ship(FlightInput { match_vel: true, ..default() }).match_velocity);

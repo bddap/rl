@@ -7,7 +7,7 @@
 //! ## Two craft, two feels, one force system (owner, botq#554)
 //! - **Plane = Ace Combat 6.** A persistent THROTTLE LEVER drives thrust along the nose (+Z);
 //!   wings make Bernoulli LIFT from forward airspeed; pitch/roll/yaw are control torques. The pilot
-//!   turns by banking. (The AC6 input feel — inverted pitch, left-stick fly, trigger throttle,
+//!   turns by banking. (The AC6 input feel — intuitive pitch, left-stick fly, trigger throttle,
 //!   bumper rudder — lives in the input→[`VehicleControl`] bridge, `net`'s `drive_lockstep`.)
 //! - **Ship = Outer Wilds.** No wings (no lift) and no throttle lever — instead DIRECT body-frame
 //!   thrusters on all three axes (strafe X / vertical Y / forward Z) that you tap and then COAST on
@@ -367,9 +367,9 @@ fn apply_vehicle_forces(
         // per-craft angular drag bleeds spin for control without bounding the angle. The pitch sign
         // is NEGATED: a positive +X torque rotates the nose (+Z) toward −Y (DOWN), so to make
         // positive `pitch` (the pilot's nose-UP intent) raise the nose we apply −pitch about +X.
-        // The bridge gives each craft its feel (the plane's AC6 pitch is INVERTED at the stick, so
-        // pulling back arrives here as positive `pitch`); roll/yaw carry their reconciling sign from
-        // the bridge so "bank right"/"yaw right" hold.
+        // The bridge gives each craft its feel (both craft pitch intuitively — push the stick up to
+        // raise the nose — arriving here as positive `pitch`); roll/yaw carry their reconciling sign
+        // from the bridge so "bank right"/"yaw right" hold.
         let body_torque = Vec3::new(
             -control.pitch * p.pitch_torque,
             control.yaw * p.yaw_torque,
