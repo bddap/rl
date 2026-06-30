@@ -17,7 +17,11 @@ vendor/
 # spot a dev may still have. The committed CC0 control glyphs under
 # crab-world/assets/controls/ stay tracked (different name).
 sally.glb
-/ckpt*/
+# Checkpoint scratch dirs: the default is `checkpoints` (above), but smoke/scratch
+# runs name theirs `<prefix>-ckpt`/`ckpt-<suffix>` (e.g. `smoke-ckpt`). Ignore any
+# dir whose name contains `ckpt` so a broad `git add` can't sweep brain/optimizer
+# .bin dumps into the repo regardless of the chosen name (cost: 68367d2d, 5.6MB).
+*ckpt*/
 .nixshell.err
 
 # stray test/build output logs (do not commit)
