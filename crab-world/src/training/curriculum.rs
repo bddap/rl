@@ -227,22 +227,65 @@ impl CurriculumProgress {
 }
 
 /// Sample a fresh target world position for a crab whose env spawns at `origin`, at a
-/// planar distance drawn from the CURRENT curriculum band (see [`Curriculum`]). Picks a
-/// uniform random heading and a distance in the band, places the target that far from
-/// `origin` on the XZ plane, then CLAMPS it inside the arena (see [`TARGET_ARENA_HALF`])
-/// so an edge spawn can't throw it into a wall. Y is an independent claw-height draw.
-/// World-space (not carapace-relative) because the crab spawns at varied orientations
-/// and walks: a point fixed in the world is an unambiguous goal the observation
-/// re-expresses in body axes each tick. `pub(crate)` so the demo's red-ball marker
-/// (`play::target_ball`) relocates its target through the very same rule training
-/// samples — one sampling rule, so the demo can never pose a target training never saw.
+/// planar distance drawn from the CURRENT curriculum band (see [`Curriculum`]) and at
+/// EXACTLY that distance — by construction the returned target's planar distance from
+/// `origin` is the band distance, never less. A random distance in the band is fixed
+/// first; then a HEADING is chosen so the full-distance target lands inside the arena
+/// (see [`TARGET_ARENA_HALF`]): random headings are tried, falling back to aiming inward
+/// (toward the arena centre), which always fits for an in-arena spawn.
+///
+/// WHY not the old position-clamp: clamping the placed point into the arena SHORTENS the
+/// distance for a spawn near a wall — an edge crab's "9 m" target clamped to the wall is
+/// really ~2 m. That makes the curriculum band a LIE: the policy "masters" a far rung by
+/// grabbing clamped-near targets it never walked to, the reach metric reads high, and the
+/// band advances past what the policy can actually do (rl#159). Choosing the heading
+/// instead keeps the distance honest, so a rung means what it says.
+///
+/// Honesty is of DISTANCE, not heading: the distance is uniform-in-band from every
+/// spawn, but the heading is uniform only where the arena permits it — a spawn near a
+/// wall can only aim inward, so its targets cluster toward the arena centre. That
+/// directional bias is acceptable (the target is observed in body axes and spawns are
+/// grid-symmetric); what must not bias is the distance, which is the curriculum's signal.
+///
+/// Y is an independent claw-height draw. World-space (not carapace-relative) because the
+/// crab spawns at varied orientations and walks: a point fixed in the world is an
+/// unambiguous goal the observation re-expresses in body axes each tick. `pub(crate)` so
+/// the demo's red-ball marker (`play::target_ball`) relocates its target through the very
+/// same rule training samples — one sampling rule, so the demo can never pose a target
+/// training never saw.
 pub(crate) fn sample_target(origin: Vec3, curriculum: Curriculum, rng: &mut impl rand::Rng) -> Vec3 {
     let (min, max) = curriculum.band();
-    let theta = rng.gen_range(0.0..std::f32::consts::TAU);
     let dist = rng.gen_range(min..max);
-    let x = (origin.x + dist * theta.cos()).clamp(-TARGET_ARENA_HALF, TARGET_ARENA_HALF);
-    let z = (origin.z + dist * theta.sin()).clamp(-TARGET_ARENA_HALF, TARGET_ARENA_HALF);
-    Vec3::new(x, rng.gen_range(TARGET_Y_MIN..TARGET_Y_MAX), z)
+    let y = rng.gen_range(TARGET_Y_MIN..TARGET_Y_MAX);
+    let at = |theta: f32| {
+        Vec3::new(
+            origin.x + dist * theta.cos(),
+            y,
+            origin.z + dist * theta.sin(),
+        )
+    };
+    let in_arena =
+        |p: &Vec3| p.x.abs() <= TARGET_ARENA_HALF && p.z.abs() <= TARGET_ARENA_HALF;
+
+    // Most headings fit for a central spawn; an edge spawn fits only the inward arc, so a
+    // bounded random search lands a varied in-arena heading without computing the arc.
+    for _ in 0..32 {
+        let p = at(rng.gen_range(0.0..std::f32::consts::TAU));
+        if in_arena(&p) {
+            return p;
+        }
+    }
+    // Fallback: aim from the spawn straight toward the arena centre. Moving `dist` toward
+    // the centre from any in-arena spawn keeps both coordinates within the cap (the worst
+    // case overshoots the centre to the opposite side at distance ≤ `dist` ≤ the cap), so
+    // this always lands in-arena and never resorts to shortening the distance.
+    let inward = Vec3::new(-origin.x, 0.0, -origin.z).normalize_or_zero();
+    let theta = if inward == Vec3::ZERO {
+        0.0
+    } else {
+        inward.z.atan2(inward.x)
+    };
+    at(theta)
 }
 
 /// Install a fresh target for env `e`, sampled around its spawn slot from the current
@@ -319,51 +362,39 @@ mod tests {
     use crate::training::reward::planar_dist;
 
     #[test]
-    fn sampled_targets_lie_in_the_current_band_and_inside_the_arena() {
-        // Every sampled target lies in the CURRENT curriculum band AND is clamped inside
-        // the arena so a crab can always walk to and stand at it. The demo relocates its
-        // target through this very `sample_target`, so the demo can never pose a goal
-        // training never saw. Verified at BOTH the near start band and a far-advanced
-        // band, since the curriculum moves the band outward over a run.
+    fn sampled_targets_lie_at_the_band_distance_and_inside_the_arena() {
+        // The honest-distance invariant (rl#159): every sampled target is at EXACTLY the
+        // band distance from its spawn AND inside the arena — from any origin, including
+        // hard against a wall. The old position-clamp shortened the distance for an edge
+        // spawn, so the curriculum band lied; this pins that it never does again. Checked
+        // at both the near start band and a far-advanced band, and from a central, an
+        // edge, and a corner origin (where only the inward arc of headings fits). The demo
+        // relocates its target through this very `sample_target`, so the demo can never
+        // pose a goal training never saw.
         let mut rng = rand::thread_rng();
         for curriculum in [Curriculum::start(), advanced_to_cap()] {
             let (min, max) = curriculum.band();
-            // Worst-case CORNER origin (hard against two walls, where the clamp does the
-            // most work — a target headed into the corner is pulled well inside the band).
-            let origin = Vec3::new(8.0, 0.0, -8.0);
-            let mut saw_clamped = false;
-            for _ in 0..2000 {
-                let t = sample_target(origin, curriculum, &mut rng);
-                assert!(t.is_finite(), "a sampled target is always finite");
-                // Inside the arena interior (the clamp guarantees this from any origin).
-                assert!(
-                    t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF,
-                    "target {t:?} must stay inside ±{TARGET_ARENA_HALF} m"
-                );
-                assert!(t.y >= TARGET_Y_MIN && t.y <= TARGET_Y_MAX);
-                // Pre-clamp distance is in the band; post-clamp can only shorten it. Track
-                // that clamping actually engages at this edge origin (so the test
-                // exercises the in-arena guarantee).
-                let d = planar_dist(t, origin);
-                if d + 1e-3 < min {
-                    saw_clamped = true;
+            for origin in [
+                Vec3::ZERO,               // central — every heading fits
+                Vec3::new(6.0, 0.0, 0.0), // edge row — only the inward half fits
+                Vec3::new(8.0, 0.0, -8.0), // corner — only a narrow inward arc fits
+            ] {
+                for _ in 0..2000 {
+                    let t = sample_target(origin, curriculum, &mut rng);
+                    assert!(t.is_finite(), "a sampled target is always finite");
+                    assert!(
+                        t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF,
+                        "target {t:?} from {origin:?} must stay inside ±{TARGET_ARENA_HALF} m"
+                    );
+                    assert!(t.y >= TARGET_Y_MIN && t.y <= TARGET_Y_MAX);
+                    // The distance is the band distance, never shortened to fit the arena.
+                    let d = planar_dist(t, origin);
+                    assert!(
+                        d >= min - 1e-3 && d <= max + 1e-3,
+                        "target from {origin:?} is at {d} m, outside the band [{min}, {max}]"
+                    );
                 }
             }
-            // From a central origin, nothing is clamped and every target lies in the band.
-            let center = Vec3::ZERO;
-            for _ in 0..2000 {
-                let t = sample_target(center, curriculum, &mut rng);
-                let d = planar_dist(t, center);
-                assert!(
-                    (min..=max).contains(&d),
-                    "from center, target distance {d} must lie in the current band \
-                     [{min}, {max}]"
-                );
-            }
-            assert!(
-                saw_clamped,
-                "an edge origin must sometimes clamp a target inward (in-arena guarantee active)"
-            );
         }
     }
 

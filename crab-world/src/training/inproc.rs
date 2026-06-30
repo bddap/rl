@@ -672,7 +672,7 @@ fn log_iteration(r: &IterReport) {
         ..
     } = *r;
     eprintln!(
-        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note}) | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{panic_note}",
+        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note} over {finished} ep) | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{panic_note}",
         metrics.policy_loss, metrics.value_loss, metrics.entropy, metrics.kl, metrics.steps,
         metrics.behavior_backend_div,
     );
