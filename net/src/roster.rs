@@ -109,14 +109,19 @@ impl RosterSchedule {
     pub fn schedule_change(&mut self, effective_tick: u64, set: &[PlayerId]) {
         let set = sorted(set);
         if let Some(existing) = self.points.get(&effective_tick) {
-            debug_assert_eq!(
+            // Enforced in RELEASE too (`assert!`, not `debug_assert!`): a CONFLICTING set at an
+            // existing tick is a real append-only violation that would silently corrupt the
+            // roster in the release lockstep path — peers that applied the original change diverge
+            // from any that saw the rewrite. Fail loud. An IDENTICAL re-delivery is the benign
+            // idempotent no-op below, not a violation.
+            assert_eq!(
                 existing, &set,
                 "roster changes are append-only: a change at tick {effective_tick} cannot be \
                  rewritten with a different set (identical re-delivery is a no-op)"
             );
             return; // idempotent: this exact change is already recorded
         }
-        debug_assert!(
+        assert!(
             self.points.keys().all(|&t| effective_tick > t),
             "roster changes are append-only and strictly future: {effective_tick} must exceed every existing change-point"
         );
