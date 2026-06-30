@@ -50,14 +50,11 @@ pub fn fit_capsule(points: &[Vec3]) -> Option<FittedCapsule> {
     if points.len() < 4 {
         return None;
     }
-    let n = points.len() as f32;
-    let centroid = points.iter().copied().sum::<Vec3>() / n;
-
     // Principal axis = largest-variance eigenvector of the covariance. (When the
     // top two variances are close — a chunky near-isotropic cloud — this axis is
     // ill-defined, so a capsule is the wrong primitive there; the carapace takes a
     // box instead.)
-    let (axes, _vars) = covariance_eigenframe(points, centroid);
+    let (centroid, axes) = covariance_eigenframe(points);
     let axis = axes[0];
 
     // Project onto the axis for axial extent; perpendicular residual for radius.
@@ -73,7 +70,7 @@ pub fn fit_capsule(points: &[Vec3]) -> Option<FittedCapsule> {
     }
     // Radius from a high perpendicular-spread percentile: robust to a tail of bled
     // vertices (see RADIUS_PERCENTILE for why that exact percentile, not the max).
-    perp.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    perp.sort_by(f32::total_cmp);
     let radius = percentile(&perp, RADIUS_PERCENTILE).max(1e-4);
 
     // Pull the endpoints in by `radius` so the spherical caps land on the tips.
@@ -148,9 +145,8 @@ impl ColliderScore {
             .filter(|&d| d < 0.0)
             .map(f32::abs)
             .collect();
-        let cmp = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
-        outs.sort_by(cmp);
-        ins.sort_by(cmp);
+        outs.sort_by(f32::total_cmp);
+        ins.sort_by(f32::total_cmp);
         let pctl = |s: &[f32], q| if s.is_empty() { 0.0 } else { percentile(s, q) };
         ColliderScore {
             n: sd.len(),
@@ -181,8 +177,7 @@ pub fn score_capsule(points: &[Vec3], a: Vec3, b: Vec3, radius: f32) -> Collider
     // non-degenerate; otherwise the diagnostics stay `None`.
     let axis = seg.normalize_or_zero();
     if points.len() >= 4 && axis.length_squared() > 0.5 {
-        let centroid = points.iter().copied().sum::<Vec3>() / points.len() as f32;
-        let (axes, _) = covariance_eigenframe(points, centroid);
+        let (_centroid, axes) = covariance_eigenframe(points);
         let axis_skew_deg = axis.dot(axes[0]).abs().clamp(0.0, 1.0).acos().to_degrees();
         let mut perp: Vec<f32> = points
             .iter()
@@ -191,7 +186,7 @@ pub fn score_capsule(points: &[Vec3], a: Vec3, b: Vec3, radius: f32) -> Collider
                 (d - axis * d.dot(axis)).length()
             })
             .collect();
-        perp.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        perp.sort_by(f32::total_cmp);
         let radius_ratio = radius / percentile(&perp, 0.95).max(1e-4);
         s.capsule = Some(CapsuleDiagnostics {
             axis_skew_deg,
@@ -216,13 +211,16 @@ pub fn score_box(points: &[Vec3], center: Vec3, half: Vec3) -> ColliderScore {
 }
 
 /// Eigenframe (orthonormal eigenvectors, sorted by descending eigenvalue) of a
-/// cloud's 3x3 covariance, via cyclic Jacobi rotations. Returns the three axes
-/// longest-first and their variances. Robust and dependency-free; 3x3 converges
-/// in a handful of sweeps.
+/// cloud's 3x3 covariance, via cyclic Jacobi rotations. Returns the cloud's centroid
+/// and the three axes longest-first — centroid here so the one place that needs it
+/// for the covariance is the one place that computes it. The eigenvalues only order
+/// the axes; no caller needs their magnitudes, so they aren't returned.
+/// Robust and dependency-free; 3x3 converges in a handful of sweeps.
 // The Jacobi sweeps update two columns (p, q) of `a`/`v` per `k`; the explicit
 // index keeps the rotation readable as matrix math, so range loops stay.
 #[allow(clippy::needless_range_loop)]
-fn covariance_eigenframe(points: &[Vec3], centroid: Vec3) -> ([Vec3; 3], Vec3) {
+fn covariance_eigenframe(points: &[Vec3]) -> (Vec3, [Vec3; 3]) {
+    let centroid = points.iter().copied().sum::<Vec3>() / points.len() as f32;
     // Symmetric covariance as a [[f64;3];3].
     let mut a = [[0.0f64; 3]; 3];
     for &p in points {
@@ -285,11 +283,8 @@ fn covariance_eigenframe(points: &[Vec3], centroid: Vec3) -> ([Vec3; 3], Vec3) {
             )
         })
         .collect();
-    cols.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(std::cmp::Ordering::Equal));
-    (
-        [cols[0].1, cols[1].1, cols[2].1],
-        Vec3::new(cols[0].0 as f32, cols[1].0 as f32, cols[2].0 as f32),
-    )
+    cols.sort_by(|x, y| y.0.total_cmp(&x.0));
+    (centroid, [cols[0].1, cols[1].1, cols[2].1])
 }
 
 #[cfg(test)]
