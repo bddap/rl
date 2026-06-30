@@ -267,17 +267,17 @@ pub(crate) struct TrainingState {
     drift_sum: f64,
     drift_count: u64,
 
-    /// The curriculum band a rollout thread samples targets from THIS horizon. The
-    /// learner owns advancement and ships the current band down each horizon (set via
-    /// [`Self::set_curriculum`]); the thread only reads it in [`seed_target`]. Defaults to
-    /// the start band so a thread that somehow rolls before its first `set_curriculum`
-    /// still samples a sane (rung-1) target rather than a garbage band.
+    /// The fixed target-distance band a rollout thread samples targets from (the full arena
+    /// range — the learner ships the one constant band down each horizon via
+    /// [`Self::set_curriculum`]; the thread only reads it in [`seed_target`]). Defaults to
+    /// the same band so a thread that somehow rolls before its first `set_curriculum` still
+    /// samples a sane target.
     curriculum: Curriculum,
     /// This horizon's per-episode reach tally over FINISHED episodes (rollout thread →
     /// learner, drained per horizon like the rewards): `reached` of `finished` episodes
-    /// came within [`CURRICULUM_REACH_RADIUS`] of the target. The learner pools these
-    /// into the competence window that gates advancement. Counts only, so the learner
-    /// aggregates across threads by summing.
+    /// came within [`CURRICULUM_REACH_RADIUS`] of the target. The learner pools these for
+    /// the log's reach fraction and the best-keeper's reach floor. Counts only, so the
+    /// learner aggregates across threads by summing.
     reach_reached: u64,
     reach_finished: u64,
 
@@ -597,17 +597,17 @@ impl TrainingState {
         out
     }
 
-    /// Set the curriculum band a rollout thread samples targets from this horizon
-    /// (learner → thread, once per horizon before the roll, like `set_normalizer`). The
-    /// learner owns the single advancing curriculum; the thread only consumes the band.
+    /// Set the target-distance band a rollout thread samples from this horizon (learner →
+    /// thread, once per horizon before the roll, like `set_normalizer`). The band is the one
+    /// fixed full-arena range; the thread only consumes it.
     pub(crate) fn set_curriculum(&mut self, curriculum: Curriculum) {
         self.curriculum = curriculum;
     }
 
     /// Drain this horizon's per-episode reach tally as `(reached, finished)`, resetting
-    /// both. The learner pools these across rollout threads into the competence window
-    /// (see [`super::curriculum::CurriculumProgress`]). `(0, 0)` when no episode finished
-    /// this horizon, which records nothing.
+    /// both. The learner pools these across rollout threads for the log's reach fraction and
+    /// the best-keeper's solid-reach floor ([`super::curriculum::SOLID_REACH_FRACTION`]).
+    /// `(0, 0)` when no episode finished this horizon.
     pub fn drain_reach(&mut self) -> (u64, u64) {
         let out = (self.reach_reached, self.reach_finished);
         self.reach_reached = 0;

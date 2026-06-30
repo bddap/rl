@@ -250,9 +250,9 @@ pub fn build_windowed_app(
             // Known-armed at build: add the stack AND arm the gate now, so the crab spawns frame
             // one.
             add_external_nn_crab(&mut app, external_crab, spawn);
-            // Arm the gate (and, networked, pin the lead so a per-peer env override can't desync
-            // the hashed pose — solo keeps its tuning). One arm path, [`crate::external_crab::arm`].
-            crate::external_crab::arm(app.world_mut(), networked);
+            // Arm the gate (the crab now walks at the player's actual position — nothing per-peer
+            // to reconcile). One arm path, [`crate::external_crab::arm`].
+            crate::external_crab::arm(app.world_mut());
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
                 .set(AppPhase::Playing);

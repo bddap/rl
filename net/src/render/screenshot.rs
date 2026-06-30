@@ -82,8 +82,8 @@ pub fn build_screenshot_app(
     let armed = armed_crab.is_some();
     if let Some((dir, spawn)) = armed_crab {
         add_external_nn_crab(&mut app, dir, spawn);
-        // Solo screenshot round — arm without the networked lead-pin. One arm path.
-        crate::external_crab::arm(app.world_mut(), false);
+        // Solo screenshot round. One arm path.
+        crate::external_crab::arm(app.world_mut());
     }
     // Controls UI on the screenshot path too, so an evidence frame can prove the overlay +
     // hint draw — the shared env override forces it open headless, and picks the CONTEXT

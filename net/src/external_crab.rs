@@ -24,12 +24,18 @@
 //!
 //! - The crab lives in its OWN small rapier arena (the shared [`crab_world::bot`] /
 //!   [`crab_world::physics`] world, a ±10 m walled box), centred near the origin.
-//! - Each control step we aim its target at the nearest living game player (mapped into the
-//!   crab's frame), but clamped to the trained reach band: a player beyond the band gets a
-//!   target at the band's far edge along the heading (an in-distribution lead the lean/reach
-//!   policy chases), while a player within the band IS the target, so the crab HOMES IN
-//!   rather than chasing a fixed lead past them. The target never exceeds the band, so the
-//!   body never has to physically cross the (large, unbounded) game map inside its arena.
+//! - Each control step we place its target at the nearest living game player's ACTUAL
+//!   position, expressed in the crab's arena frame (`carapace + (player − crab)`), at any
+//!   distance — no lead, no treadmill. The observation re-expresses that true offset in
+//!   carapace-local axes, so the policy sees the real player offset and the WEIGHTS supply
+//!   the approach (the bitter lesson — the approach logic is learned, not hand-coded).
+//!   Training samples targets across the full arena band (`[1.5, ~9] m`); a player farther
+//!   than that (they spawn ≥12 m away — `sim::MIN_CRAB_SPAWN_DISTANCE`) is OUT of the trained
+//!   band, but the obs normalizer clamps `target_local` to ±5σ, so a far offset saturates to
+//!   "player is that way, far" and the crab walks full-tilt toward it — honest hunt heading,
+//!   without resolving distance past the band edge. The body's per-round physical travel is
+//!   bounded by its ±10 m arena anyway, so closing a >9 m gap needs a larger inference arena
+//!   (a separate follow-up); within the arena the policy now steers at the real player.
 //! - We integrate the carapace's horizontal displacement each game tick and add it to
 //!   the game-world crab position, which we write back into the sim with
 //!   [`Sim::set_external_crab_pose`]. Grabs / extraction / win-loss then resolve against the
@@ -52,23 +58,11 @@ use crab_world::bot::{BotSet, CrabSpawns};
 use crate::sim::{Pos, UNIT};
 use crab_world::play::Policy;
 
-/// Far clamp (metres) for the walk target: how far along the heading-to-player the target
-/// may sit when the player is OUT of reach. A player nearer than this is targeted at their
-/// actual position so the crab homes in (see [`set_crab_walk_target`]); a player farther is
-/// clamped to this. Set to the FAR EDGE of the policy's trained reach band (~1.5–2 m): the
-/// `ckpt-best.locomotion` checkpoint was trained on a claw-tip-to-target proximity reward
-/// (no base-locomotion term — see this module's report), so it LEANS/REACHES toward a
-/// target inside its band rather than walking to one beyond it. A clamp inside the band
-/// makes it lean + shuffle toward a distant player (the most pursuit this policy produces);
-/// a raw far target it just ignores (verified). `RL_CRAB_REACH` overrides it. A future
-/// WALKING checkpoint (locomotion-rewarded) would want a larger clamp — drop it in via the
-/// configurable checkpoint path and tune this.
-const TARGET_REACH_CLAMP_M: f32 = 1.6;
-
-/// Height (m) of the walk-target point. A low ground-ish Y inside the policy's trained
-/// reach band (`TARGET_Y_MIN..MAX` ≈ 0.15..0.7 in training) so the crab reads it as a
-/// reach-toward-and-walk target, not an overhead one.
-const TARGET_LEAD_Y: f32 = 0.3;
+/// Height (m) of the walk target placed at the player's position. A low ground-ish Y inside
+/// the policy's trained target-height band (`TARGET_Y_MIN..MAX` ≈ 0.15..0.7 in training) so
+/// the crab reads it as a walk-up-and-reach target. The hunt target is a planar (XZ) player
+/// position with no carried height, so we pin a single ground-level grab height here.
+const CLAW_TARGET_Y: f32 = 0.3;
 
 /// Resource: the live bridge state between the rapier NN crab and the integer game sim.
 /// Non-trivial state (a float world position + the last carapace sample) that must
@@ -98,11 +92,6 @@ pub struct ExternalCrabBridge {
     /// down (the crab then holds position). Read by [`set_crab_walk_target`] to aim the
     /// policy.
     hunt_target_m: Option<Vec2>,
-    /// Far clamp (m) on the walk target: the most the target may sit from the carapace along
-    /// the heading-to-player (a nearer player is targeted at their actual position). Resolved
-    /// ONCE at plugin build (default [`TARGET_REACH_CLAMP_M`], `RL_CRAB_REACH` override) rather
-    /// than re-reading the env var every tick.
-    reach_clamp_m: f32,
     /// This tick's peer-comparable digest of the crab's full rapier physics state XORed with
     /// the policy-weights digest — recomputed each step by [`hash_crab_physics`] and pushed
     /// into the sim by [`sync_external_crab`], so the lockstep desync check covers the
@@ -134,12 +123,10 @@ struct CrabPlacement {
 
 impl ExternalCrabBridge {
     /// Seed the bridge at the sim's crab spawn (so the NN crab begins where the
-    /// round placed the giant crab, MIN_CRAB_SPAWN_DISTANCE from the players). `reach_clamp_m` is the
-    /// per-tick walk-target far-clamp, resolved once by the plugin.
-    fn new(spawn: Pos, reach_clamp_m: f32) -> Self {
+    /// round placed the giant crab, MIN_CRAB_SPAWN_DISTANCE from the players).
+    fn new(spawn: Pos) -> Self {
         Self {
             world_pos_m: pos_to_m(spawn),
-            reach_clamp_m,
             last_carapace_m: None,
             yaw_turns: 0,
             hunt_target_m: None,
@@ -210,17 +197,6 @@ impl ExternalCrabBridge {
     /// policy.
     pub fn set_hunt_target(&mut self, prey: Option<Pos>) {
         self.hunt_target_m = prey.map(pos_to_m);
-    }
-
-    /// Pin the walk-target reach-clamp to its canonical default, dropping any `RL_CRAB_REACH` env
-    /// override. Done when arming on a NETWORKED round: `reach_clamp_m` is a per-PROCESS solo-tuning
-    /// convenience that feeds the HASHED crab pose (it steers the policy's trajectory), so a
-    /// peer that set it differently would walk the crab to a different pose and desync. The
-    /// weights handshake covers only the brain bytes, not this — so networked play uses the
-    /// canonical feel on every peer. Private + reached ONLY through [`arm`], so a caller can't
-    /// arm a networked round and forget the pin (the drift rl#132 folds out).
-    fn pin_default_reach_clamp(&mut self) {
-        self.reach_clamp_m = TARGET_REACH_CLAMP_M;
     }
 
     /// Re-seed the bridge to the round's spawn after a deterministic sim RESTART
@@ -356,14 +332,11 @@ fn external_crab_armed(active: Option<Res<ExternalCrabArmed>>) -> bool {
     active.is_some()
 }
 
-/// Arm the one giant NN crab: insert the [`ExternalCrabArmed`] gate, and — on a NETWORKED round —
-/// pin the walk-target reach-clamp to its canonical default ([`ExternalCrabBridge::pin_default_reach_clamp`]) so a
-/// per-peer `RL_CRAB_REACH` override can't steer the crab to a different (hashed) pose and desync;
-/// solo keeps its per-process tuning. The networked⇒pin invariant lives HERE, the ONE arm path, so a
-/// caller can't insert the gate and forget the pin (the drift rl#132 folds out). Every arm site —
-/// the windowed `Boot::Round` + menu-transition clients, the screenshot path, the headless probe —
-/// goes through this.
-pub fn arm(world: &mut World, networked: bool) {
+/// Arm the one giant NN crab: insert the [`ExternalCrabArmed`] gate. Every arm site — the
+/// windowed `Boot::Round` + menu-transition clients, the screenshot path, the headless probe —
+/// goes through this one path. The walk target is now the player's actual position (no per-peer
+/// tunable steering it), so there is nothing solo-vs-networked to reconcile here.
+pub fn arm(world: &mut World) {
     world.insert_resource(ExternalCrabArmed);
     // The armed crab IS the one trained Sally: a `rescue_nonfinite_crabs` fire is now a
     // physics-correctness FAULT to surface LOUDLY (error log + aggregated telemetry, hard panic
@@ -371,9 +344,6 @@ pub fn arm(world: &mut World, networked: bool) {
     // path every site funnels through — means no caller can arm Sally and forget to make her
     // rescue loud; training (which never calls `arm`) keeps the quiet routine-terminator rescue.
     world.insert_resource(crab_world::bot::CrabRescueIsFault);
-    if networked {
-        world.resource_mut::<ExternalCrabBridge>().pin_default_reach_clamp();
-    }
 }
 
 /// Plugin: the external NN crab. Adds the loaded policy + the bridge, and the systems that
@@ -418,16 +388,7 @@ impl Plugin for ExternalCrabPlugin {
             );
         }
         app.insert_non_send_resource(policy);
-        // Resolve the env-tunable walk-target reach-clamp ONCE here (override → default), not per tick.
-        let env_f32 = |key: &str, default: f32| {
-            std::env::var(key)
-                .ok()
-                .and_then(|s| s.parse::<f32>().ok())
-                .filter(|v| v.is_finite() && *v > 0.0)
-                .unwrap_or(default)
-        };
-        let reach_clamp_m = env_f32("RL_CRAB_REACH", TARGET_REACH_CLAMP_M);
-        app.insert_resource(ExternalCrabBridge::new(self.crab_spawn, reach_clamp_m));
+        app.insert_resource(ExternalCrabBridge::new(self.crab_spawn));
 
         // Spawn the crab the first frame the gate is active (rl#58). On the scripted solo
         // path the gate is true from build, so this spawns on frame 1 exactly as before; on
@@ -518,11 +479,15 @@ fn crab_not_yet_spawned(crabs: Query<(), With<CrabCarapace>>) -> bool {
     crabs.is_empty()
 }
 
-/// Aim the policy: plant env 0's touch target ON the nearest living player, clamped to the
-/// trained reach band, in the crab's ARENA frame (the frame the body + the observation live
-/// in). The observation ([`crab_world::bot::sensor::build_observation`]) rotates this into
-/// the carapace-local frame, so the policy sees "target is over there" and walks for it.
-/// With no living target (all players down) the target is dropped and the crab holds.
+/// Aim the policy at the player's ACTUAL position, in the crab's ARENA frame (the frame the
+/// body + the observation live in). The target is the carapace plus the true game-world
+/// offset to the hunted player (`carapace + (player − crab)`) — no lead, no treadmill — so the
+/// observation ([`crab_world::bot::sensor::build_observation`]) re-expresses the REAL player
+/// offset in carapace-local axes and the policy's WEIGHTS supply the approach (the bitter
+/// lesson). A player past the trained band (`[1.5, ~9] m`) saturates the obs normalizer clamp,
+/// so the crab reads "player far, that way" and walks toward it without resolving exact
+/// distance — see the module header. With no living target (all players down) the target is
+/// dropped and the crab holds.
 fn set_crab_walk_target(
     bridge: Res<ExternalCrabBridge>,
     spawns: Res<CrabSpawns>,
@@ -532,17 +497,15 @@ fn set_crab_walk_target(
     let Some(slot) = targets.envs.first_mut() else {
         return;
     };
-    // Direction to the hunted player, in GAME-world XZ, reduced to a unit heading.
+    // The hunted player's offset from the crab, in GAME-world XZ. `None` ⇒ nobody to chase.
     let Some(hunt) = bridge.hunt_target_m else {
         *slot = None; // nobody to chase → no target → policy holds (rest pose)
         return;
     };
     let to_prey = hunt - bridge.world_pos_m;
-    let dist = to_prey.length();
-    if dist < 1e-3 {
+    if to_prey.length_squared() < 1e-6 {
         return; // already on the prey; leave the last target so it doesn't flicker
     }
-    let heading = to_prey / dist;
 
     // Carapace position in the arena frame (env 0). Fall back to the env's spawn origin
     // before the body exists.
@@ -553,21 +516,13 @@ fn set_crab_walk_target(
         .map(|(_, t)| t.translation)
         .unwrap_or(origin);
 
-    // Aim AT the player, but never beyond the trained reach band. `world_pos_m` and
-    // `carapace` track the same XZ delta 1:1 (only a constant seed offset apart — no
-    // rotation), so `heading` from the game-world `to_prey` applies unchanged in the arena
-    // frame, and `carapace + heading * dist` lands exactly on the player's arena position.
-    // Clamping the reach to `reach_clamp_m` (the band's far edge) keeps a DISTANT player in
-    // distribution — a far raw target is out-of-band and the lean/reach policy just ignores
-    // it — while a player INSIDE the band gets targeted at their ACTUAL position, so the
-    // crab HOMES IN and the target shrinks to her as she arrives instead of treadmilling a
-    // fixed lead PAST the prey forever. Height [`TARGET_LEAD_Y`] is a low ground-ish Y in
-    // the trained reach band so the point reads as a reach-toward-and-walk goal.
-    let reach = dist.min(bridge.reach_clamp_m);
+    // Plant the target at the player's real position in the arena frame: the carapace plus the
+    // full game-world offset to the player, at any distance. `CLAW_TARGET_Y` is a ground-level
+    // grab height (the planar hunt target carries no height of its own).
     let target = Vec3::new(
-        carapace.x + heading.x * reach,
-        TARGET_LEAD_Y,
-        carapace.z + heading.y * reach,
+        carapace.x + to_prey.x,
+        CLAW_TARGET_Y,
+        carapace.z + to_prey.y,
     );
     *slot = Some(target);
 }
