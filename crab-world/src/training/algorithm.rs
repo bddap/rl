@@ -279,11 +279,16 @@ impl ReturnNormalizer {
         RealReturn(value.0 * self.std() + self.mean())
     }
 
-    /// Fold a batch of real returns into the running (count, mean, M2) via Welford.
-    /// Non-finite returns are skipped (a blown-up env must not poison the scale).
-    pub fn update(&mut self, returns: &[f32]) {
+    /// Fold a batch of real returns into the running (count, mean, M2) via Welford. A non-finite
+    /// return is skipped (a blown-up env must not poison the scale) — but the skip is no longer
+    /// silent: the number skipped is RETURNED so the caller can surface it loudly (bddap/rl#167),
+    /// turning "a diverging env quietly corrupts the normalizer" into a visible boundary signal.
+    #[must_use = "a nonzero non-finite-return count signals a diverging env; surface it"]
+    pub fn update(&mut self, returns: &[f32]) -> usize {
+        let mut skipped = 0usize;
         for &r in returns {
             if !r.is_finite() {
+                skipped += 1;
                 continue;
             }
             self.count += 1;
@@ -293,6 +298,7 @@ impl ReturnNormalizer {
             let delta2 = x - self.mean;
             self.m2 += delta * delta2;
         }
+        skipped
     }
 
     pub fn to_data(&self) -> ReturnNormalizerData {
@@ -471,6 +477,12 @@ pub(crate) struct PpoMetrics {
     /// importance-ratio-corrupting divergence the recompute neutralizes — so watching
     /// it catches a regression (a backend/precision change re-opening the gap).
     pub(crate) behavior_backend_div: f32,
+    /// Non-finite returns SKIPPED by [`ReturnNormalizer::update`] this update (bddap/rl#167). A
+    /// blown-up env feeding a NaN/Inf return is dropped from the running scale rather than
+    /// poisoning it — but silently dropping it hid a diverging env behind a merely-wrong
+    /// normalizer. Counted and surfaced here (loud when nonzero) so a divergence is caught at the
+    /// boundary, not inferred later from drift. 0 on a healthy update.
+    pub(crate) nonfinite_returns: u32,
 }
 
 #[cfg(test)]
@@ -619,7 +631,8 @@ mod tests {
         // A normalizer with a non-trivial, positive affine scale (built from a spread
         // of returns so μ and σ are both non-zero).
         let mut ret_norm = ReturnNormalizer::new();
-        ret_norm.update(&[-300.0, -100.0, 50.0, -250.0, 0.0, -180.0]);
+        let skipped = ret_norm.update(&[-300.0, -100.0, 50.0, -250.0, 0.0, -180.0]);
+        assert_eq!(skipped, 0, "all returns here are finite — none skipped");
         let mu = ret_norm.mean();
         let sigma = ret_norm.std();
         assert!(sigma > 1.0, "test needs a non-trivial scale, got σ={sigma}");
@@ -692,12 +705,30 @@ mod tests {
     /// the value head against the scale it trained with (a cold scale would mis-scale
     /// every value prediction on the first updates after a resume). Also pins that a
     /// corrupt (negative-M2) record is rejected rather than yielding a NaN std.
+    /// bddap/rl#167: `update` must REPORT how many non-finite returns it skipped (so a diverging
+    /// env surfaces loudly) while still folding the finite ones into the scale unperturbed — the
+    /// skip is a fail-safe, but no longer a silent one.
+    #[test]
+    fn return_normalizer_reports_skipped_nonfinite_returns() {
+        let mut norm = ReturnNormalizer::new();
+        // Two NaN/Inf returns among the finite ones.
+        let skipped = norm.update(&[1.0, f32::NAN, 2.0, f32::INFINITY, 3.0]);
+        assert_eq!(skipped, 2, "both non-finite returns must be reported as skipped");
+
+        // The scale reflects ONLY the finite returns (1,2,3 → mean 2), as if the bad ones never came.
+        let mut clean = ReturnNormalizer::new();
+        let none = clean.update(&[1.0, 2.0, 3.0]);
+        assert_eq!(none, 0, "all-finite returns skip nothing");
+        assert!((norm.mean() - clean.mean()).abs() < 1e-9, "the skip must not perturb the scale");
+        assert!((norm.std() - clean.std()).abs() < 1e-9, "the skip must not perturb the std");
+    }
+
     #[test]
     fn return_normalizer_checkpoint_round_trips() {
         let mut norm = ReturnNormalizer::new();
         // A spread of returns spanning the large-magnitude regime.
         let returns: Vec<f32> = (0..200).map(|i| -2000.0 + (i as f32) * 17.3).collect();
-        norm.update(&returns);
+        let _ = norm.update(&returns);
 
         let bytes = bincode::serialize(&norm.to_data()).expect("serialize");
         let data: ReturnNormalizerData = bincode::deserialize(&bytes).expect("deserialize");

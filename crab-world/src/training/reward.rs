@@ -98,11 +98,16 @@ pub(crate) fn action_effort(drives: &[f32; ACTION_SIZE]) -> f32 {
 /// (un-clamped) telescopes exactly to `P·(d_start − d_end)` over an episode.
 ///
 /// 24 is chosen so:
-/// * a full traversal of the curriculum band (targets 1.5→9 m out) pays ≈ 36→216 in progress —
-///   the ONLY cross-arena signal now that the per-tick reach integral is gone, and the dense
-///   shaping that carries the body to within grab range at every band, near and far. The sparse
+/// * closing the curriculum band toward the goal pays a strong dense signal at every rung — the
+///   ONLY cross-arena signal now that the per-tick reach integral is gone, the shaping that
+///   carries the body to within grab range near and far. Counting the 0.8 m grab radius
+///   (`curriculum::CURRICULUM_REACH_RADIUS`), a SUCCESSFUL episode only closes to grab range, not
+///   to d = 0: a near-band success (1.5 m start) earns ≈ 24·(1.5−0.8) = 17 progress, a far-band
+///   one (9 m) ≈ 24·(9−0.8) ≈ 197. (The bare geometric `24·distance` — 36, 216 — overstates this:
+///   no episode closes the last 0.8 m, since the grab terminates it first.) The sparse
 ///   [`GRAB_REWARD`] is then a one-shot terminal bonus ON TOP, scaled (see there) to make a grab
-///   the clearly-dominant outcome of a near-band episode without swamping the approach signal;
+///   the clearly-dominant outcome of a near-band episode while the far-band journey still
+///   dominates its own grab;
 /// * one tick of honest walking (~0.5 m/s ⇒ ~0.0078 m at 64 Hz, `physics::PHYSICS_DT`) pays
 ///   ≈ 0.19 — ~20× its ~0.009 gait-drive effort tax — a dense local gradient to set off and
 ///   keep moving;
@@ -133,15 +138,17 @@ const MAX_PROGRESS_STEP_M: f32 = 0.5;
 /// signal and the demo ball-hop, so no second radius can drift and a grab implies a reached
 /// episode.
 ///
-/// **Scale (relative to a band traverse's progress return, `PROGRESS_WEIGHT·distance`).** A
-/// near-band traverse (1.5 m) earns ≈ 36 progress to arrive, a far-band one (9 m) ≈ 216. 50
-/// makes a grab the clearly-DOMINANT outcome of a near-band episode (success ≈ 86, the grab
-/// ~58 %) without reducing the approach progress to noise, while at the far band the journey
-/// still dominates (≈ 266, the grab ~19 %). The approach itself is NOT sparse — dense progress
-/// shaping carries the body to grab range at every band, so only the terminal event is sparse
-/// and early learning is never signal-starved. A FLAT (not distance-shaped) bonus keeps the
-/// last-metre mechanic un-hand-specified: the policy is told only that touching the target is
-/// worth ~1.5 near-band traverses, and HOW the tip gets there emerges.
+/// **Scale (relative to the progress a SUCCESSFUL episode actually earns —
+/// `PROGRESS_WEIGHT·(distance − grab_radius)`, since a grab terminates the episode at the 0.8 m
+/// `curriculum::CURRICULUM_REACH_RADIUS`, not at d = 0).** A near-band success (1.5 m) earns
+/// ≈ 17 progress to arrive, a far-band one (9 m) ≈ 197. 50 makes a grab the clearly-DOMINANT
+/// outcome of a near-band episode (success ≈ 67, the grab ~75 %) — the dense approach (≈ 17) is
+/// still a meaningful, non-trivial signal that carries the body there, not noise — while at the
+/// far band the journey still dominates (≈ 247, the grab ~20 %). The approach itself is NOT
+/// sparse — dense progress shaping carries the body to grab range at every band, so only the
+/// terminal event is sparse and early learning is never signal-starved. A FLAT (not distance-
+/// shaped) bonus keeps the last-metre mechanic un-hand-specified: the policy is told only that
+/// touching the target is worth ~3 near-band approaches, and HOW the tip gets there emerges.
 pub(crate) const GRAB_REWARD: f32 = 50.0;
 
 /// The weighted progress term `P·(d_prev − d_now)` — see [`PROGRESS_WEIGHT`]. `distance_closed`
@@ -153,14 +160,29 @@ pub(crate) const GRAB_REWARD: f32 = 50.0;
 /// spawn jump would be a huge spurious delta.
 fn progress_reward(distance_closed: Option<f32>) -> f32 {
     match distance_closed {
-        // The `abs() <= MAX_PROGRESS_STEP_M` arm drops only non-physical solver-glitch jumps
-        // (see [`MAX_PROGRESS_STEP_M`]); every real step is far below it, so this neither
-        // clamps legitimate motion nor breaks the telescoping.
-        Some(delta) if delta.is_finite() && delta.abs() <= MAX_PROGRESS_STEP_M => {
-            PROGRESS_WEIGHT * delta
-        }
+        // The `is_physical_step` arm drops only non-physical solver-glitch jumps (see
+        // [`MAX_PROGRESS_STEP_M`]); every real step is far below it, so this neither clamps
+        // legitimate motion nor breaks the telescoping.
+        Some(delta) if is_physical_step(delta) => PROGRESS_WEIGHT * delta,
         _ => 0.0,
     }
+}
+
+/// Whether a present per-tick distance delta is physical enough to PAY progress: finite and
+/// within the one-tick glitch ceiling [`MAX_PROGRESS_STEP_M`]. The SINGLE predicate both
+/// [`progress_reward`] (pays `P·δ` when true) and [`is_progress_glitch`] (counts the drop
+/// when false) read, so the paid set and the counted-drop set can never disagree.
+fn is_physical_step(delta: f32) -> bool {
+    delta.is_finite() && delta.abs() <= MAX_PROGRESS_STEP_M
+}
+
+/// Whether [`progress_reward`] DROPPED a real progress signal as non-physical for this
+/// transition — a present (`Some`) delta that is non-finite or exceeds [`MAX_PROGRESS_STEP_M`]
+/// (a solver hiccup). `None` (a rescue/teleport, or a missing pose/target) is the intended-
+/// neutral case and is NOT a drop. The learner counts these per horizon and surfaces the total
+/// so a silent reward dropout — a delta zeroed without trace — becomes visible (bddap/rl#175).
+pub(crate) fn is_progress_glitch(distance_closed: Option<f32>) -> bool {
+    matches!(distance_closed, Some(delta) if !is_physical_step(delta))
 }
 
 /// The per-tick continuous reward: `P·(d_prev − d_now) − EFFORT_WEIGHT·Σ|dᵢ|^L` — the
@@ -258,6 +280,26 @@ mod tests {
     }
 
     #[test]
+    fn progress_glitch_flag_matches_what_progress_zeroes() {
+        // The instrumentation invariant (bddap/rl#175): `is_progress_glitch` is true EXACTLY when
+        // `progress_reward` zeroed a present, non-physical delta — so the surfaced count can never
+        // disagree with what was actually dropped. The neutral `None` (rescue/teleport) is NOT a
+        // glitch even though it also pays zero; that distinction is the whole point of the counter.
+        let physical = [Some(0.0_f32), Some(0.05), Some(-0.05), Some(MAX_PROGRESS_STEP_M)];
+        for d in physical {
+            assert!(!is_progress_glitch(d), "a physical/paid step is not a glitch: {d:?}");
+        }
+        // None pays zero but is intended-neutral, never counted.
+        assert!(!is_progress_glitch(None), "None (rescue/teleport) is neutral, not a glitch");
+        // A present but non-physical delta IS a glitch — and `progress_reward` does zero it.
+        let glitches = [Some(5.0_f32), Some(-5.0), Some(f32::NAN), Some(f32::INFINITY)];
+        for d in glitches {
+            assert!(is_progress_glitch(d), "a non-physical present delta is a glitch: {d:?}");
+            assert_eq!(progress_reward(d), 0.0, "a glitch delta must be zeroed: {d:?}");
+        }
+    }
+
+    #[test]
     fn progress_glitch_guard_drops_nonphysical_jumps() {
         // The single-tick spike guard: a > MAX_PROGRESS_STEP_M jump (a solver hiccup, never a
         // real crab step) earns ZERO, not P·Δd — both directions, so it can't be farmed or
@@ -282,25 +324,37 @@ mod tests {
 
     #[test]
     fn grab_bonus_dominates_a_near_band_traverse() {
+        use crate::training::curriculum::{
+            BAND_START_MIN, CURRICULUM_REACH_RADIUS, TARGET_ARENA_HALF,
+        };
         // The sparse terminal grab must be the clearly-dominant outcome of a NEAR-band episode
         // (so closing the last stretch and touching the target beats anything the dense progress
         // shaping alone pays on the way), yet the far-band JOURNEY must still out-earn the bonus
-        // (out there the traverse is the hard part). PROGRESS_WEIGHT·distance is the progress
-        // return of a full traverse (telescoped, path-independent).
-        let near_traverse = PROGRESS_WEIGHT * 1.5;
-        let far_traverse = PROGRESS_WEIGHT * 9.0;
+        // (out there the traverse is the hard part). The progress a SUCCESSFUL episode earns is
+        // `PROGRESS_WEIGHT·(distance − grab_radius)` — telescoped and path-independent, but ending
+        // at the grab radius the episode terminates on, NOT at d = 0 (the bare `P·distance`
+        // overstates it; bddap/rl#175). Derived from the real curriculum constants so the
+        // calibration can't silently drift from the band/radius it's defined against.
+        let near_approach = PROGRESS_WEIGHT * (BAND_START_MIN - CURRICULUM_REACH_RADIUS); // ≈ 17
+        // The far band's hard cap is the arena half-extent, so a far success closes to grab range
+        // from there. Derived from the same constants (not a literal 9.0) so the calibration can't
+        // drift if the arena resizes.
+        let far_approach = PROGRESS_WEIGHT * (TARGET_ARENA_HALF - CURRICULUM_REACH_RADIUS); // ≈ 197
         assert!(
-            GRAB_REWARD > near_traverse,
-            "the grab bonus must dominate a near-band traverse's progress: {GRAB_REWARD} vs {near_traverse}"
+            GRAB_REWARD > near_approach,
+            "the grab bonus must dominate a near-band approach's progress: {GRAB_REWARD} vs {near_approach}"
         );
         assert!(
-            far_traverse > GRAB_REWARD,
-            "a far-band traverse's progress must still out-earn the grab bonus: {far_traverse} vs {GRAB_REWARD}"
+            far_approach > GRAB_REWARD,
+            "a far-band approach's progress must still out-earn the grab bonus: {far_approach} vs {GRAB_REWARD}"
         );
-        // …but the bonus must not swamp the near-band APPROACH to noise — the approach progress
-        // stays a meaningful fraction of the successful-episode return (here ~42 %).
+        // …but the bonus must not reduce the near-band APPROACH to noise — even counting only the
+        // to-grab close, the dense approach stays a non-trivial share of the successful-episode
+        // return (≈ 25 %, the grab the other ≈ 75 %). The approach is what carries the body there
+        // every tick regardless of the terminal, so it must remain a real signal, not a rounding
+        // error against the bonus.
         assert!(
-            near_traverse > 0.3 * (near_traverse + GRAB_REWARD),
+            near_approach > 0.2 * (near_approach + GRAB_REWARD),
             "approach progress must remain a meaningful share of a successful near-band return, \
              not reduced to noise by the grab bonus"
         );

@@ -66,6 +66,7 @@ use std::time::Instant;
 use bevy::prelude::*;
 use burn::module::Module;
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
+use tracing::error;
 
 use crate::TrainConfig;
 use crate::bot::brain::CrabBrain;
@@ -267,12 +268,22 @@ enum RollOutcome {
         /// pools it across threads into the competence window that gates curriculum
         /// advancement.
         reach: (u64, u64),
+        /// Count of transitions this horizon whose progress term was dropped as non-physical
+        /// (bddap/rl#175); the learner sums it across threads and surfaces the total so a
+        /// silent reward dropout is visible. 0 on a healthy horizon.
+        glitch_drops: u64,
         /// Physics ticks actually rolled this horizon.
         ticks: u64,
     },
     /// The roll unwound and the thread rebuilt its App; it contributes nothing this
     /// iteration.
     Panicked,
+    /// The per-iteration snapshot (policy weights or master normalizer) FAILED to load into
+    /// this thread's state, so the horizon was REFUSED rather than rolled on a stale/off-policy
+    /// brain or mis-normalized observations (bddap/rl#177). Like `Panicked` it contributes no
+    /// samples, but it is its own variant so the learner can attribute and surface it distinctly
+    /// (a load failure is an operator/serialization fault, not a solver panic).
+    SnapshotLoadFailed,
 }
 
 /// A live rollout thread: the channels to drive it (request in, result out) and
@@ -393,8 +404,20 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
             .world_mut()
             .get_non_send_resource_mut::<TrainingState>()
             .expect("rollout TrainingState");
-        st.load_brain_bytes(&req.brain_bytes);
-        st.set_normalizer((*req.normalizer).clone());
+        // Apply the snapshot, and REFUSE the horizon if either the brain or the normalizer
+        // failed to load: rolling on a stale brain ships off-policy samples and rolling on a
+        // mis-normalized obs corrupts the inputs, both of which the learner can't distinguish
+        // from honest data. Fail loud and contribute nothing instead (bddap/rl#177). Both are
+        // attempted (not short-circuited) so the log names every failing component.
+        let brain_ok = st.load_brain_bytes(&req.brain_bytes);
+        let normalizer_ok = st.set_normalizer((*req.normalizer).clone());
+        if !brain_ok || !normalizer_ok {
+            error!(
+                "rollout thread: snapshot load failed (brain_ok={brain_ok}, normalizer_ok={normalizer_ok}); \
+                 refusing this horizon rather than rolling a stale/off-policy or mis-normalized policy"
+            );
+            return RollOutcome::SnapshotLoadFailed;
+        }
         st.set_curriculum(req.curriculum);
         st.reset_horizon_counter();
     }
@@ -415,6 +438,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
         rewards: st.drain_finished_episode_rewards(),
         drift: st.drain_drift(),
         reach: st.drain_reach(),
+        glitch_drops: st.drain_progress_glitches(),
         ticks: rolled,
     }
 }
@@ -506,12 +530,18 @@ struct MergedRollout {
     samples: u64,
     ticks: u64,
     panics: u32,
+    /// Threads that REFUSED their horizon because the snapshot failed to load (bddap/rl#177),
+    /// pooled this iter; surfaced on the log so a recurring load failure can't hide.
+    snapshot_load_failures: u32,
     /// Carapace planar drift-from-spawn this iter as `(sum, count)` over recording-env
     /// ticks, pooled across threads; the log divides it for the mean.
     drift: (f64, u64),
     /// Per-episode reach tally `(reached, finished)` pooled across threads; feeds the
     /// curriculum's competence window and the log's reach fraction.
     reach: (u64, u64),
+    /// Progress-term drops (non-physical deltas the reward zeroed; bddap/rl#175) pooled across
+    /// threads this iter; surfaced on the log so a silent reward dropout is visible. 0 normally.
+    glitch_drops: u64,
 }
 
 /// Phase 1 — capture the consistent per-iteration view every thread rolls: the policy
@@ -572,8 +602,10 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
         samples: 0,
         ticks: 0,
         panics: 0,
+        snapshot_load_failures: 0,
         drift: (0.0, 0),
         reach: (0, 0),
+        glitch_drops: 0,
     };
     for r in results {
         match r {
@@ -583,6 +615,7 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
                 rewards,
                 drift,
                 reach,
+                glitch_drops,
                 ticks,
             } => {
                 merged.ticks += ticks;
@@ -594,12 +627,14 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
                 merged.drift.1 += drift.1;
                 merged.reach.0 += reach.0;
                 merged.reach.1 += reach.1;
+                merged.glitch_drops += glitch_drops;
                 for env in envs {
                     merged.samples += env.len() as u64;
                     merged.rollouts.push(RolloutBuffer { transitions: env });
                 }
             }
             RollOutcome::Panicked => merged.panics += 1,
+            RollOutcome::SnapshotLoadFailed => merged.snapshot_load_failures += 1,
         }
     }
     merged
@@ -627,6 +662,10 @@ struct IterReport<'a> {
     reach: (u64, u64),
     metrics: &'a super::algorithm::PpoMetrics,
     panics: u32,
+    /// Threads that refused their horizon on a snapshot load failure this iter (bddap/rl#177).
+    snapshot_load_failures: u32,
+    /// Progress-term drops this iter — non-physical deltas the reward zeroed (bddap/rl#175).
+    glitch_drops: u64,
 }
 
 /// Phase 4 (reporting) — emit the one steady-state learner log line. Derives the means
@@ -653,6 +692,26 @@ fn log_iteration(r: &IterReport) {
     } else {
         String::new()
     };
+    // Surfaced only when nonzero — both are 0 on a healthy iter, so the line stays quiet until a
+    // fault actually occurs (rl#177 load refusals, rl#175 progress-zeroing).
+    let load_fail_note = if r.snapshot_load_failures > 0 {
+        format!(
+            " | {} thread(s) REFUSED a horizon (snapshot load failed)",
+            r.snapshot_load_failures
+        )
+    } else {
+        String::new()
+    };
+    let glitch_note = if r.glitch_drops > 0 {
+        format!(" | {} progress-glitch drop(s)", r.glitch_drops)
+    } else {
+        String::new()
+    };
+    let nonfinite_returns_note = if r.metrics.nonfinite_returns > 0 {
+        format!(" | {} non-finite return(s) skipped (env diverged)", r.metrics.nonfinite_returns)
+    } else {
+        String::new()
+    };
     let update_note = format!(
         " [gpu load {:.0}ms + compute {:.0}ms + store {:.0}ms]",
         r.gpu_timing.load_ms, r.gpu_timing.update_ms, r.gpu_timing.store_ms
@@ -672,7 +731,7 @@ fn log_iteration(r: &IterReport) {
         ..
     } = *r;
     eprintln!(
-        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note} over {finished} ep) | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{panic_note}",
+        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note} over {finished} ep) | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{panic_note}{load_fail_note}{glitch_note}{nonfinite_returns_note}",
         metrics.policy_loss, metrics.value_loss, metrics.entropy, metrics.kl, metrics.steps,
         metrics.behavior_backend_div,
     );
@@ -869,6 +928,8 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
             reach: merged.reach,
             metrics: &metrics,
             panics: merged.panics,
+            snapshot_load_failures: merged.snapshot_load_failures,
+            glitch_drops: merged.glitch_drops,
         });
 
         // Consider this iter's policy for `<ckpt>/best/`. The reach signal is over THIS
@@ -1089,6 +1150,7 @@ mod tests {
                 rewards: vec![1.5],
                 drift: (0.0, 0),
                 reach: (0, 0),
+                glitch_drops: 0,
                 ticks: 64,
             },
             || panic!("rebuild must NOT run on a successful roll"),
@@ -1127,6 +1189,45 @@ mod tests {
             "merging an empty (panicked-thread) increment must leave the master \
              normalizer byte-unchanged"
         );
+    }
+
+    /// The reduction must ATTRIBUTE each outcome correctly: a `SnapshotLoadFailed` refusal
+    /// (bddap/rl#177) and a `Panicked` thread each contribute NO samples/buffers and are counted
+    /// in their OWN tally, while a `Rolled` thread's aggregates — including the progress-glitch
+    /// count (bddap/rl#175) — flow through. This is the property that keeps a refused/wedged
+    /// horizon from masquerading as honest data. App-free: `merge_rollouts` over hand-built
+    /// outcomes, no rollout thread or GPU.
+    #[cfg(feature = "wgpu")]
+    #[test]
+    fn merge_rollouts_attributes_refusals_panics_and_glitches() {
+        let (config, dir) = scratch_config("merge_attr", 2);
+        let mut state = TrainingState::new(&config);
+
+        let results = vec![
+            RollOutcome::Rolled {
+                envs: vec![],                            // no env buffers → zero samples
+                increment: empty_normalizer_increment(), // a no-op merge
+                rewards: vec![1.0],
+                drift: (0.5, 2),
+                reach: (1, 3),
+                glitch_drops: 3,
+                ticks: 64,
+            },
+            RollOutcome::SnapshotLoadFailed,
+            RollOutcome::Panicked,
+        ];
+        let merged = merge_rollouts(&mut state, results);
+
+        assert_eq!(merged.snapshot_load_failures, 1, "the refusal is counted, distinct from a panic");
+        assert_eq!(merged.panics, 1, "the panic is counted, distinct from a refusal");
+        assert_eq!(merged.samples, 0, "neither a refusal nor a panic contributes samples");
+        assert!(merged.rollouts.is_empty(), "neither contributes a buffer");
+        assert_eq!(merged.glitch_drops, 3, "the Rolled thread's progress-glitch count flows through");
+        assert_eq!(merged.ticks, 64, "only the Rolled thread's ticks count");
+        assert_eq!(merged.drift, (0.5, 2), "the Rolled thread's drift flows through");
+        assert_eq!(merged.reach, (1, 3), "the Rolled thread's reach flows through");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Threaded-rollout shape: one rollout THREAD running M envs for a horizon must

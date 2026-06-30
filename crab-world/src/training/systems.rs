@@ -19,7 +19,7 @@ use rand::rngs::StdRng;
 // prelude no longer re-exports `warn!`/`info!`. tracing (a direct dep) carries the same
 // macros and is present in every build. An explicit import shadows the prelude glob, so
 // this is unambiguous in render builds too.
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::TrainConfig;
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
@@ -43,7 +43,8 @@ use super::normalizer::{
     IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
 };
 use super::reward::{
-    EFFORT_WEIGHT, GRAB_REWARD, action_effort, compute_reward, dist_3d, planar_dist,
+    EFFORT_WEIGHT, GRAB_REWARD, action_effort, compute_reward, dist_3d, is_progress_glitch,
+    planar_dist,
 };
 
 /// Default rollout horizon: the number of physics ticks each rollout thread rolls
@@ -273,6 +274,14 @@ pub(crate) struct TrainingState {
     /// aggregates across threads by summing.
     reach_reached: u64,
     reach_finished: u64,
+
+    /// Count of transitions THIS horizon whose progress term was DROPPED as non-physical — a
+    /// present per-tick distance delta the glitch/finite guard zeroed (see
+    /// [`reward::is_progress_glitch`]). Drained per horizon like the rewards and pooled across
+    /// threads, so a silent reward dropout (a solver hiccup zeroing progress) surfaces on the
+    /// learner line instead of vanishing without trace (bddap/rl#175). Designed to stay 0 on a
+    /// healthy run — every physical step is far below the guard — so any nonzero count is signal.
+    progress_glitch_drops: u64,
 }
 
 /// The per-env arrays captured this tick, bundled into one named borrow so
@@ -425,6 +434,7 @@ impl TrainingState {
             curriculum: Curriculum::start(),
             reach_reached: 0,
             reach_finished: 0,
+            progress_glitch_drops: 0,
         }
     }
 
@@ -473,17 +483,26 @@ impl TrainingState {
     /// Load brain weights from the learner's in-memory snapshot bytes (the same
     /// `FullPrecisionSettings` bincode the on-disk checkpoint uses, produced by the
     /// in-process learner once per iteration). Replaces a file load: weights move
-    /// thread-to-thread as `Send` bytes, never as the `!Send` live tensors. Leaves
-    /// the brain unchanged on a decode error (logged), the same fail-safe as the
-    /// demo hot-reload against a torn write.
-    pub fn load_brain_bytes(&mut self, bytes: &[u8]) {
+    /// thread-to-thread as `Send` bytes, never as the `!Send` live tensors.
+    ///
+    /// Returns whether the weights actually loaded. On a decode error the brain is left
+    /// UNCHANGED (stale) and `false` is returned — the caller MUST then abort the horizon
+    /// rather than roll the stale policy, since rolling on stale weights ships off-policy
+    /// samples the learner can't tell apart from on-policy ones (bddap/rl#177). `#[must_use]`
+    /// so that failure can never again be silently dropped.
+    #[must_use = "a failed brain load must abort the horizon, not roll a stale/off-policy policy"]
+    pub fn load_brain_bytes(&mut self, bytes: &[u8]) -> bool {
         let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
         match recorder.load(bytes.to_vec(), &self.device) {
             Ok(record) => {
                 let updated = self.brain.train().clone().load_record(record);
                 self.brain.set(updated);
+                true
             }
-            Err(e) => warn!("rollout thread: failed to load snapshot brain: {e}"),
+            Err(e) => {
+                error!("rollout thread: failed to load snapshot brain: {e}");
+                false
+            }
         }
     }
 
@@ -496,8 +515,14 @@ impl TrainingState {
     /// Overwrite this state's normalizer from the learner's master snapshot. The
     /// per-horizon increment is reset separately in `reset_horizon_counter`, so the
     /// increment always starts fresh each horizon regardless of this call.
-    pub(crate) fn set_normalizer(&mut self, snapshot: NormalizerSnapshot) {
-        self.obs_normalizer.load_snapshot(snapshot);
+    ///
+    /// Returns whether the snapshot actually loaded (`load_snapshot`'s verdict). On a
+    /// size/validity mismatch the normalizer is left UNCHANGED and `false` is returned — the
+    /// caller MUST abort the horizon rather than roll mis-normalized observations through the
+    /// policy (bddap/rl#177). `#[must_use]` so the failure can't be silently dropped again.
+    #[must_use = "a failed normalizer load must abort the horizon, not roll mis-normalized obs"]
+    pub(crate) fn set_normalizer(&mut self, snapshot: NormalizerSnapshot) -> bool {
+        self.obs_normalizer.load_snapshot(snapshot)
     }
 
     /// Snapshot the master normalizer's full stats (learner → rollout threads), so
@@ -581,6 +606,14 @@ impl TrainingState {
         self.reach_reached = 0;
         self.reach_finished = 0;
         out
+    }
+
+    /// Drain this horizon's count of progress-term drops (non-physical deltas the reward zeroed;
+    /// see [`progress_glitch_drops`](Self::progress_glitch_drops)), resetting it. The learner sums
+    /// these across rollout threads and surfaces the total so a silent reward dropout is visible
+    /// (bddap/rl#175). `0` on a healthy horizon — the common case.
+    pub fn drain_progress_glitches(&mut self) -> u64 {
+        std::mem::take(&mut self.progress_glitch_drops)
     }
 
     /// Hand a CPU-backend PPO update its non-optimizer pieces (brain/config/device/
@@ -729,6 +762,12 @@ impl TrainingState {
                         .target_dist
                         .zip(d_now)
                         .map(|(prev, now)| prev - now);
+                    // Count a non-physical progress delta the reward is about to zero, so the
+                    // silent dropout surfaces on the learner line (bddap/rl#175). The neutral
+                    // `None` (rescue/teleport above) is not a glitch and isn't counted.
+                    if is_progress_glitch(distance_closed) {
+                        self.progress_glitch_drops += 1;
+                    }
                     let mut reward = compute_reward(distance_closed, pending.effort);
                     // The blowup check only catches a genuine numerical explosion before the
                     // solver NaNs and Rapier panics the whole app; the threshold is high
