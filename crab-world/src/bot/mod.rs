@@ -191,6 +191,10 @@ pub struct CrabRescued {
 /// it logs + counts + respawns as a VISIBLE last resort rather than crashing the family's
 /// game, but never silently. In training (no marker) the fire stays quiet — it is the routine
 /// episode terminator, not a fault.
+// A Bevy system: its arguments ARE its dependency injection (the queries/resources it
+// reads) and the `parts` Query's tuple is the data dependency it operates on — neither the
+// arg count nor the tuple shape is reducible without inventing a one-use SystemParam bundle.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn rescue_nonfinite_crabs(
     mut commands: Commands,
     assets: Res<body::CrabAssets>,
