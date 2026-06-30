@@ -41,11 +41,6 @@ const NORMALIZER_FILENAME: &str = "normalizer.bin";
 /// resumed run de-normalizes value predictions against the same scale it trained
 /// with (a cold scale on resume would briefly mis-scale the value head).
 const RETURN_NORMALIZER_FILENAME: &str = "return_normalizer.bin";
-/// Curriculum band checkpoint, beside the brain, so a warm restart CONTINUES the
-/// distance curriculum at the rung it reached rather than resetting to near targets
-/// (which would re-teach what the policy already knows). Fallback on a missing/bad file
-/// is rung 1 (see [`super::curriculum::load_curriculum`]).
-const CURRICULUM_FILENAME: &str = "curriculum.bin";
 /// Persisted Adam optimizer state (rl#60): the per-parameter first/second moments and step
 /// (`time`) the GPU learner carries across iterations. A resume restores these so the
 /// optimizer continues with warm momentum instead of paying the brief self-correcting
@@ -96,10 +91,6 @@ impl<'a> CheckpointDir<'a> {
 
     pub(crate) fn return_normalizer_path(&self) -> PathBuf {
         self.dir.join(RETURN_NORMALIZER_FILENAME)
-    }
-
-    pub(crate) fn curriculum_path(&self) -> PathBuf {
-        self.dir.join(CURRICULUM_FILENAME)
     }
 
     #[cfg(any(feature = "wgpu", test))]

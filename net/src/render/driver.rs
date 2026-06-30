@@ -94,15 +94,14 @@ pub(super) fn ensure_round_installed(world: &mut World) {
         "ensure_round_installed got an unarmable round — poll_formation must gate it out before \
          Playing (rl#115)"
     );
-    let networked = ready.net.is_some();
     let crab = ready.lockstep.sim().crab();
     // Seed the pose with the crab's current pose/yaw (writing back what's there → no state change).
     ready
         .lockstep
         .set_external_crab_pose(crab.pos(), crab.yaw(), 0);
-    // Arm the gate (and, networked, pin the lead so a per-peer env override can't desync the
-    // hashed pose — solo keeps its tuning). One arm path, [`crate::external_crab::arm`].
-    crate::external_crab::arm(world, networked);
+    // Arm the gate (the crab now walks at the player's actual position — nothing per-peer to
+    // reconcile). One arm path, [`crate::external_crab::arm`].
+    crate::external_crab::arm(world);
     // Clone the freshly-seeded sim for the authoritative server (solo/host); the client keeps its
     // own identical sim inside `ready.lockstep` and renders the snapshots the server emits into it.
     let source = InputSource::coordinated(

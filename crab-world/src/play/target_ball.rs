@@ -95,10 +95,10 @@ pub(super) fn target_ball(
     // explicit `RL_TARGET_BALL_AT` (screenshot evidence frames) pins the seed to a
     // chosen point; otherwise sample the reach box. Seeding here, not at Startup,
     // dodges a race with `BotPlugin`'s Startup resize of `CrabTargets`.
-    // The demo runs no curriculum (it isn't training), so it samples targets from the
-    // fixed rung-1 band — a sensible near-to-mid range that reads well on the orbit
-    // camera. A trained policy generalizes to any in-arena target, so the demo band need
-    // not track the rung the weights were trained at.
+    // The demo samples from the same FIXED full-arena band the trainer uses — near to the
+    // arena edge — so the streamed demo shows the crab chasing the real target at any
+    // distance, exactly the range the weights train on (one `sample_target` rule, so the
+    // demo can never pose a target training never saw).
     let demo_band = Curriculum::start();
     let mut target = match targets.get(0) {
         Some(t) => t,

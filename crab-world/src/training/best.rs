@@ -6,25 +6,22 @@
 //! where the trainer resumes from it, while the demo holds the good gait.
 //!
 //! ONE source of truth, in the trainer: the learner already pools every rollout thread's
-//! per-episode reach and owns the advancing curriculum, so the competence signal lives
-//! here rather than in an external log-scraper that would have to re-derive both and
-//! could drift from what the trainer actually trained.
+//! per-episode reach, so the competence signal lives here rather than in an external
+//! log-scraper that would have to re-derive it and could drift from what the trainer
+//! actually trained.
 //!
-//! Why competence is `(band_max, reach)` and not reach alone: the curriculum advances the
-//! target-distance band only when the policy masters the current rung, so a farther band
-//! is strictly harder and a policy that reaches reliably out there is more capable — even
-//! at a slightly lower reach fraction — than one that saturates reach at a near band. Pure
-//! best-by-reach would freeze on the first band whose reach saturates and never follow the
-//! curriculum outward. So a farther mastered band wins; at the same band, a higher smoothed
-//! reach wins; and a nearer band never wins (the demo must not regress to easier targets).
-//! A solid-reach floor ([`ADVANCE_REACH_FRACTION`]) gates every promotion, so a collapse —
-//! which drops reach without advancing the band — can never become the best at any band.
+//! Competence is `(band_max, reach)`, ordered "farther mastered band wins; at the same band a
+//! higher smoothed reach wins". The target-distance band is now a FIXED full-arena range, so
+//! `band_max` is constant across every iter and the ordering reduces to best-by-reach in
+//! practice (the band dimension is retained but inert — a candidate simplification once the
+//! collapse fight settles). A solid-reach floor ([`SOLID_REACH_FRACTION`]) gates every
+//! promotion, so a collapse — which drops reach — can never become the best.
 
 use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
-use super::curriculum::ADVANCE_REACH_FRACTION;
+use super::curriculum::SOLID_REACH_FRACTION;
 
 /// Subdirectory of the checkpoint dir holding the best-by-competence snapshot.
 const BEST_SUBDIR: &str = "best";
@@ -49,7 +46,6 @@ const COMPETENCE_SIDECAR: &str = "competence.txt";
 const BEST_FILES: &[&str] = &[
     "normalizer.bin",
     "return_normalizer.bin",
-    "curriculum.bin",
     "optimizer.bin",
     "shape.txt",
     "ticks.txt",
@@ -66,19 +62,21 @@ const REACH_EMA_ALPHA: f32 = 0.05;
 /// EMA jitter around a plateau doesn't churn the snapshot every iter.
 const REACH_MARGIN: f32 = 0.02;
 
-/// Bands compare equal within this (metres) — guards the `band_max` float comparison; the
-/// curriculum advances in 1 m steps, so this only absorbs serialization round-trip noise.
+/// Bands compare equal within this (metres) — guards the `band_max` float comparison. With the
+/// band now fixed at the full arena range, every iter's `band_max` is identical, so this only
+/// absorbs serialization round-trip noise.
 const BAND_EPS: f32 = 0.01;
 
 /// Iters with at least one finished episode the EMA must accumulate before any snapshot is
 /// eligible, so a freshly-seeded EMA (cold at restart) can't promote on early noise.
 const MIN_EMA_UPDATES: u32 = 30;
 
-/// A policy's demonstrated competence: the farthest curriculum band it was rolled at and
-/// its smoothed reach there. Ordered so "more capable" is unambiguous (see module docs).
+/// A policy's demonstrated competence: the far edge of the target band it was rolled at and
+/// its smoothed reach there. Ordered so "more capable" is unambiguous (see module docs). The
+/// band is now fixed, so `band_max` is constant and the order reduces to best-by-reach.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Competence {
-    /// Far edge of the curriculum band the policy was rolled at (metres) — the difficulty.
+    /// Far edge of the target band the policy was rolled at (metres) — now a fixed constant.
     band_max: f32,
     /// Smoothed reach fraction at that band.
     reach: f32,
@@ -89,7 +87,7 @@ impl Competence {
     /// band wins; at the same band a higher reach (by [`REACH_MARGIN`]) wins; a nearer band
     /// never wins. Gated by the solid-reach floor so a collapse can't promote at any band.
     fn beats(&self, other: &Competence) -> bool {
-        if self.reach < ADVANCE_REACH_FRACTION {
+        if self.reach < SOLID_REACH_FRACTION {
             return false;
         }
         if self.band_max > other.band_max + BAND_EPS {
@@ -183,7 +181,7 @@ impl BestKeeper {
         let beats = match self.best {
             Some(best) => candidate.beats(&best),
             // No prior best: seed on the first policy that clears the solid-reach floor.
-            None => reach >= ADVANCE_REACH_FRACTION,
+            None => reach >= SOLID_REACH_FRACTION,
         };
         if !beats {
             return;
@@ -280,7 +278,6 @@ mod tests {
             ("brain.bin", b"brain-v1" as &[u8]),
             ("normalizer.bin", b"norm"),
             ("return_normalizer.bin", b"rnorm"),
-            ("curriculum.bin", b"curric"),
             ("shape.txt", b"92 38"),
             ("ticks.txt", b"123"),
         ] {

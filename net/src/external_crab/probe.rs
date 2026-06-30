@@ -158,9 +158,8 @@ fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> be
     });
     // The probe always arms the crab — insert the gate so the policy/integration systems run.
     // The crab already spawned via `headless_stack`'s `num_envs: 1`, so the plugin's own gated
-    // spawn is a no-op (the not-yet-spawned guard sees it present). Solo arm (no lead-pin): both
-    // probes share one process env, so there's no per-peer lead to diverge on. One arm path.
-    super::arm(app.world_mut(), false);
+    // spawn is a no-op (the not-yet-spawned guard sees it present). One arm path.
+    super::arm(app.world_mut());
     // Force the ECS executor serial now that the plugin systems are wired — fixes the system run
     // ORDER, the second half of the determinism guarantee alongside the pinned pools. A system the
     // single-peer probe adds later (`probe_step`) lands in the already-serial schedule and inherits

@@ -74,7 +74,7 @@ use crate::bot::brain::CrabBrain;
 use super::algorithm::{RolloutBuffer, Transition};
 use super::TrainBackend;
 use super::checkpoint::CheckpointDir;
-use super::curriculum::{Curriculum, CurriculumProgress, load_curriculum, save_curriculum};
+use super::curriculum::Curriculum;
 use super::normalizer::{NormalizerIncrement, NormalizerSnapshot};
 use super::systems::TrainingState;
 
@@ -237,9 +237,8 @@ fn write_tick_watermark(dir: &Path, ticks: u64) {
 struct RollRequest {
     brain_bytes: Arc<Vec<u8>>,
     normalizer: Arc<NormalizerSnapshot>,
-    /// The current curriculum band the thread samples this horizon's targets from. The
-    /// learner owns advancement and ships the band down each horizon; the thread never
-    /// advances it. `Copy` (a tiny band), so no `Arc` is warranted.
+    /// The fixed full-arena target-distance band the thread samples this horizon's targets
+    /// from. `Copy` (a tiny band), so no `Arc` is warranted.
     curriculum: Curriculum,
 }
 
@@ -265,8 +264,8 @@ enum RollOutcome {
         /// walking diagnostic).
         drift: (f64, u64),
         /// This horizon's per-episode reach tally as `(reached, finished)`; the learner
-        /// pools it across threads into the competence window that gates curriculum
-        /// advancement.
+        /// pools it across threads for the log's reach fraction and the best-keeper's
+        /// solid-reach floor.
         reach: (u64, u64),
         /// Count of transitions this horizon whose progress term was dropped as non-physical
         /// (bddap/rl#175); the learner sums it across threads and surfaces the total so a
@@ -537,7 +536,7 @@ struct MergedRollout {
     /// ticks, pooled across threads; the log divides it for the mean.
     drift: (f64, u64),
     /// Per-episode reach tally `(reached, finished)` pooled across threads; feeds the
-    /// curriculum's competence window and the log's reach fraction.
+    /// best-keeper's solid-reach floor and the log's reach fraction.
     reach: (u64, u64),
     /// Progress-term drops (non-physical deltas the reward zeroed; bddap/rl#175) pooled across
     /// threads this iter; surfaced on the log so a silent reward dropout is visible. 0 normally.
@@ -557,19 +556,17 @@ fn snapshot_policy(state: &TrainingState, curriculum: Curriculum) -> RollRequest
 }
 
 /// Phase 1 (durability) — persist the checkpoint so a live demo / a restart picks up
-/// the latest weights, normalizer, curriculum, and Adam moments. Not a handoff to the
-/// threads (they get the in-memory snapshot); the Adam state lives on the GPU learner,
-/// so it is saved here beside the brain to let a resume continue the optimizer warm.
+/// the latest weights, normalizer, and Adam moments. Not a handoff to the threads (they
+/// get the in-memory snapshot); the Adam state lives on the GPU learner, so it is saved
+/// here beside the brain to let a resume continue the optimizer warm.
 #[cfg(feature = "wgpu")]
 fn persist_checkpoint(
     state: &TrainingState,
     gpu_learner: &super::gpu::GpuLearner,
-    curriculum: Curriculum,
     checkpoint_dir: &Path,
 ) {
     let paths = CheckpointDir::new(checkpoint_dir);
     state.save_checkpoint();
-    save_curriculum(curriculum, &paths.curriculum_path());
     gpu_learner.save_adam_state(&paths.optimizer_path());
 }
 
@@ -815,15 +812,12 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // restart would re-grant the full `--ticks` budget and over-simulate.
     let mut total_ticks = read_tick_watermark(&checkpoint_dir);
 
-    // The distance curriculum: the learner owns the one advancing instance. Resume the
-    // rung from the checkpoint so a warm restart CONTINUES the curriculum; a fresh run
-    // or a pre-curriculum checkpoint loads rung 1 (see `load_curriculum`). The window is
-    // transient and starts empty — competence is re-measured from live episodes, so the
-    // next advance simply waits a full window after the restart.
-    let mut progress =
-        CurriculumProgress::new(load_curriculum(
-            &CheckpointDir::new(&checkpoint_dir).curriculum_path(),
-        ));
+    // The target-distance band is FIXED at the full arena range (see `Curriculum`): every
+    // episode samples a target uniformly across the whole arena, near and far. The
+    // scale-free progress reward gives signal at any distance, so there is no growth
+    // curriculum to advance or persist — the weights learn the far approach directly
+    // (the bitter lesson). One constant band, the same on every warm resume.
+    let curriculum = Curriculum::start();
 
     // Best-by-competence keeping (rl#157): mirror the checkpoint set into `<ckpt>/best/`
     // whenever the policy demonstrates new competence, so a collapse stays confined to
@@ -862,12 +856,10 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         }
         let wall_start = Instant::now();
 
-        // 1) Capture the consistent per-iteration snapshot (weights + master normalizer
-        //    + curriculum band, none half-updated) and persist a checkpoint. The band is
-        //    captured here so last iter's reach-driven advance takes effect on THIS roll.
-        let curriculum = progress.curriculum();
+        // 1) Capture the consistent per-iteration snapshot (weights + master normalizer +
+        //    the fixed full-range band, none half-updated) and persist a checkpoint.
         let request = snapshot_policy(&state, curriculum);
-        persist_checkpoint(&state, &gpu_learner, curriculum, &checkpoint_dir);
+        persist_checkpoint(&state, &gpu_learner, &checkpoint_dir);
 
         // 2) Roll one synchronous horizon across all threads.
         let rollout_start = Instant::now();
@@ -876,9 +868,6 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
 
         // 3) Reduce the threads' outcomes into the master + this iter's aggregates.
         let merged = merge_rollouts(&mut state, results);
-        // Feed this iter's finished episodes to the curriculum, which may advance the
-        // band — taking effect on the NEXT iter's `progress.curriculum()` snapshot.
-        progress.record_episodes(merged.reach.0, merged.reach.1);
 
         // 4) PPO update on the GPU — the SOLE update path (rl#49). The CPU policy is
         //    mirrored CPU→GPU, the one `ppo_update_core` runs on the device, and the
@@ -952,13 +941,8 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     }
 
     // Final checkpoint so the last update's weights are on disk. The rollout threads
-    // are torn down by their Drop (channel close + join) when `threads` drops. Persist
-    // the curriculum alongside so a resume continues at the rung the run reached.
+    // are torn down by their Drop (channel close + join) when `threads` drops.
     state.save_checkpoint();
-    save_curriculum(
-        progress.curriculum(),
-        &CheckpointDir::new(&checkpoint_dir).curriculum_path(),
-    );
     if timed_samples > 0 {
         let rollout_sps = timed_samples as f64 / timed_rollout_secs.max(1e-9);
         let e2e_sps = timed_samples as f64 / timed_wall_secs.max(1e-9);

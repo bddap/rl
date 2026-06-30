@@ -98,8 +98,8 @@ pub(crate) fn action_effort(drives: &[f32; ACTION_SIZE]) -> f32 {
 /// (un-clamped) telescopes exactly to `P·(d_start − d_end)` over an episode.
 ///
 /// 24 is chosen so:
-/// * closing the curriculum band toward the goal pays a strong dense signal at every rung — the
-///   ONLY cross-arena signal now that the per-tick reach integral is gone, the shaping that
+/// * closing toward the goal pays a strong dense signal at every distance — the ONLY
+///   cross-arena signal now that the per-tick reach integral is gone, the shaping that
 ///   carries the body to within grab range near and far. Counting the 0.8 m grab radius
 ///   (`curriculum::CURRICULUM_REACH_RADIUS`), a SUCCESSFUL episode only closes to grab range, not
 ///   to d = 0: a near-band success (1.5 m start) earns ≈ 24·(1.5−0.8) = 17 progress, a far-band
