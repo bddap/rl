@@ -77,6 +77,13 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
+# The deck pulls these release binaries to RUN them; the symbol tables
+# (.symtab/.strtab, ~170MB across the 3 Bevy bins) aren't needed at runtime, and
+# stripping is a safe post-link step that can't affect compilation or behaviour.
+# Shrinks the deck's rl-update download by ~30%.
+[profile.release]
+strip = true
+
 # rapier3d 0.32 (what bevy_rapier3d 0.34 resolves to) forked for two fixes upstream
 # lacks, both load-bearing for the trainer:
 #  1. MultibodyJointSet::remove panics on a None unwrap, so a multibody crab cannot be
