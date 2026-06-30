@@ -456,15 +456,15 @@ impl TrainingState {
 
         let paths = CheckpointDir::new(&self.checkpoint_dir);
         let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-        // Record to a temp stem then rename into place, so a crash mid-write can't
-        // leave a torn brain.bin (silently discarded on load → resume from random
-        // weights).
+        // Record to a temp stem then fsync-rename into place, so neither a process crash
+        // nor a power loss can leave a torn brain.bin (silently discarded on load → resume
+        // from random weights).
         let brain_tmp_stem = paths.brain_tmp_stem();
         match recorder.record(self.brain.train().clone().into_record(), brain_tmp_stem.clone()) {
             Ok(()) => {
                 let tmp_file = brain_tmp_stem.with_extension("bin");
                 let final_file = paths.brain_file();
-                match std::fs::rename(&tmp_file, &final_file) {
+                match super::fsync_rename(&tmp_file, &final_file) {
                     Ok(()) => info!("Saved brain to {}", final_file.display()),
                     Err(e) => warn!("Failed to finalize brain checkpoint: {e}"),
                 }

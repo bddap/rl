@@ -73,7 +73,7 @@ use crate::bot::brain::CrabBrain;
 
 use super::algorithm::{RolloutBuffer, Transition};
 use super::TrainBackend;
-use super::checkpoint::CheckpointDir;
+use super::checkpoint::{CheckpointDir, TICK_WATERMARK_FILENAME};
 use super::curriculum::Curriculum;
 use super::normalizer::{NormalizerIncrement, NormalizerSnapshot};
 use super::systems::TrainingState;
@@ -198,11 +198,6 @@ fn init_process_pools() {
     crate::bot::headless::pin_single_thread_pools();
 }
 
-/// Filename of the tick-budget odometer, beside the checkpoint, so a restarted
-/// learner resumes the `--ticks` budget rather than restarting it (the overnight
-/// loop makes restarts the expected case).
-const TICK_WATERMARK_FILENAME: &str = "ticks.txt";
-
 /// Total physics ticks simulated so far, from the watermark, or 0 if absent or
 /// unparsable (a fresh run, or a pre-watermark checkpoint — both start at 0).
 fn read_tick_watermark(dir: &Path) -> u64 {
@@ -212,13 +207,14 @@ fn read_tick_watermark(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Persist the tick odometer. Temp-then-rename so a crash mid-write can't leave a
-/// torn count a restart would misread; a write failure is logged, not fatal.
+/// Persist the tick odometer. Temp-then-fsync-rename so neither a process crash nor a
+/// power loss can leave a torn count a restart would misread; a write failure is logged,
+/// not fatal.
 fn write_tick_watermark(dir: &Path, ticks: u64) {
     let path = dir.join(TICK_WATERMARK_FILENAME);
     let tmp = path.with_extension("txt.tmp");
     if let Err(e) =
-        std::fs::write(&tmp, ticks.to_string()).and_then(|()| std::fs::rename(&tmp, &path))
+        std::fs::write(&tmp, ticks.to_string()).and_then(|()| super::fsync_rename(&tmp, &path))
     {
         eprintln!("[learner] failed to persist tick watermark to {path:?}: {e}");
     }

@@ -33,22 +33,32 @@ pub(crate) fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
         .init()
 }
 
-/// Stem for brain checkpoint files. `BinFileRecorder` appends `.bin` automatically,
-/// so the actual file on disk is `brain.bin`.
+/// Canonical checkpoint filenames. The single place each artifact's on-disk name lives;
+/// every reader and writer (training, resume, the demo's load + hot-reload, and the
+/// best-keeper's [`super::best`] snapshot) references these rather than re-typing the
+/// string, so the names can't drift between modules.
+///
+/// Stem (no extension) for the brain record — `BinFileRecorder` appends `.bin`, so the
+/// file on disk is [`BRAIN_FILENAME`].
 const BRAIN_STEM: &str = "brain";
-const NORMALIZER_FILENAME: &str = "normalizer.bin";
+/// `brain.bin` as it lands on disk — [`BRAIN_STEM`] plus the `.bin` the recorder appends.
+pub(crate) const BRAIN_FILENAME: &str = "brain.bin";
+pub(crate) const NORMALIZER_FILENAME: &str = "normalizer.bin";
 /// Return (value-target) normalizer checkpoint, beside the obs normalizer, so a
 /// resumed run de-normalizes value predictions against the same scale it trained
 /// with (a cold scale on resume would briefly mis-scale the value head).
-const RETURN_NORMALIZER_FILENAME: &str = "return_normalizer.bin";
+pub(crate) const RETURN_NORMALIZER_FILENAME: &str = "return_normalizer.bin";
 /// Persisted Adam optimizer state (rl#60): the per-parameter first/second moments and step
 /// (`time`) the GPU learner carries across iterations. A resume restores these so the
 /// optimizer continues with warm momentum instead of paying the brief self-correcting
 /// transient a cold restart costs. Absent in pre-rl#60 checkpoints, which then resume cold
 /// (see [`load_optimizer`]) rather than erroring — the format version inside the file
 /// (see [`OPTIMIZER_FORMAT_VERSION`]) guards a layout change the same way.
-#[cfg(any(feature = "wgpu", test))]
-const OPTIMIZER_FILENAME: &str = "optimizer.bin";
+pub(crate) const OPTIMIZER_FILENAME: &str = "optimizer.bin";
+/// Tick-budget odometer, beside the checkpoint, so a restarted learner resumes the
+/// `--ticks` budget rather than restarting it (the overnight loop makes restarts the
+/// expected case). Read/written by [`super::inproc`]; policy-independent.
+pub(crate) const TICK_WATERMARK_FILENAME: &str = "ticks.txt";
 
 /// The on-disk layout of a checkpoint directory: the single place that knows which
 /// filename each artifact uses and how its path is assembled. Callers ask for
@@ -74,7 +84,7 @@ impl<'a> CheckpointDir<'a> {
 
     /// The brain file on disk (`brain.bin`) — for existence and mtime checks.
     pub(crate) fn brain_file(&self) -> PathBuf {
-        self.brain_stem().with_extension("bin")
+        self.dir.join(BRAIN_FILENAME)
     }
 
     /// Temp stem the brain is recorded to before an atomic rename onto [`Self::brain_file`],
@@ -138,7 +148,7 @@ impl<'a> CheckpointDir<'a> {
 /// starts cold instead. A pre-guard checkpoint has no sidecar and is likewise treated
 /// as incompatible — exactly the behavior wanted across a DOF change (the stale weights
 /// are discarded, not loaded askew).
-const SHAPE_FILENAME: &str = "shape.txt";
+pub(crate) const SHAPE_FILENAME: &str = "shape.txt";
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 struct BrainShape {

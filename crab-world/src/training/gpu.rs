@@ -9,7 +9,9 @@ use std::path::Path;
 use burn::backend::Autodiff;
 use burn::backend::ndarray::NdArrayDevice;
 use burn::module::Module;
+use burn::tensor::backend::AutodiffBackend;
 use rand::rngs::StdRng;
+use tracing::info;
 
 use super::TrainBackend;
 use super::algorithm::{PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer};
@@ -49,19 +51,19 @@ pub(crate) fn init_gpu_backend() -> burn::backend::wgpu::WgpuDevice {
 
     // init_setup::<Vulkan> forces the Vulkan API, registers this device, and hands back
     // the setup so we can inspect the real adapter.
-    eprintln!("[learner] initialising wgpu/Vulkan on {device:?} …");
+    info!("[learner] initialising wgpu/Vulkan on {device:?} …");
     let setup = init_setup::<Vulkan>(&device, RuntimeOptions::default());
-    let info = setup.adapter.get_info();
-    eprintln!(
+    let adapter = setup.adapter.get_info();
+    info!(
         "[learner] wgpu adapter: name={:?} backend={:?} device_type={:?} driver={:?} {:?}",
-        info.name, info.backend, info.device_type, info.driver, info.driver_info,
+        adapter.name, adapter.backend, adapter.device_type, adapter.driver, adapter.driver_info,
     );
 
     // Hard gate: refuse a software adapter (a CPU run mislabelled as GPU is worse than no
     // result). Check the device_type via its Debug form (to avoid pinning the wgpu crate
     // version) AND the adapter name against the known software-rasteriser names.
-    let name_lc = info.name.to_lowercase();
-    let type_str = format!("{:?}", info.device_type).to_lowercase();
+    let name_lc = adapter.name.to_lowercase();
+    let type_str = format!("{:?}", adapter.device_type).to_lowercase();
     let is_software = type_str.contains("cpu")
         // Some software ICDs report `DeviceType::Other` rather than `Cpu`; reject those
         // too. A real discrete GPU reports `DiscreteGpu`, so this never rejects hardware.
@@ -75,11 +77,11 @@ pub(crate) fn init_gpu_backend() -> burn::backend::wgpu::WgpuDevice {
         "wgpu selected a SOFTWARE adapter (name={:?}, type={:?}) — refusing to run the update on \
          it. Set VK_ICD_FILENAMES=/run/opengl-driver/share/vulkan/icd.d/nvidia_icd.json to expose \
          only the NVIDIA card.",
-        info.name, info.device_type,
+        adapter.name, adapter.device_type,
     );
-    eprintln!(
+    info!(
         "[learner] adapter confirmed as hardware GPU ({}) — proceeding.",
-        info.name
+        adapter.name
     );
     device
 }
@@ -103,31 +105,46 @@ pub(crate) struct GpuUpdateTiming {
 /// carry over across updates, so this is built once and reused, never per-iter.
 ///
 /// The CPU `TrainingState.brain` stays the source of truth. Each iteration
-/// [`Self::update`] mirrors the CPU policy onto the GPU, runs the one generic
+/// [`Self::update`] mirrors the CPU policy onto the device, runs the one generic
 /// [`ppo_update_core`] there, and mirrors the result back — no second update
 /// implementation, only a device for the existing one. Weights cross the boundary as the
 /// same `FullPrecisionSettings` bincode the snapshot/checkpoint uses (records are
 /// backend-agnostic); no tensor is ever moved directly between backends.
-pub(crate) struct GpuLearner {
-    device: burn::backend::wgpu::WgpuDevice,
-    brain: CrabBrain<GpuBackend>,
-    optimizer: CrabOpt<GpuBackend>,
+///
+/// Generic over the device backend `B` — the injected-device seam. Production uses the
+/// default [`GpuBackend`] via [`GpuLearner::new`] (the real discrete GPU); a test injects a
+/// CPU backend via [`GpuLearner::with_device`] to exercise this marshalling/timing path with
+/// no GPU. The default type parameter keeps every production callsite (`GpuLearner`,
+/// `GpuLearner::new()`) unchanged.
+pub(crate) struct GpuLearner<B: AutodiffBackend = GpuBackend> {
+    device: B::Device,
+    brain: CrabBrain<B>,
+    optimizer: CrabOpt<B>,
 }
 
-impl GpuLearner {
-    /// Bring up the GPU backend and build a GPU brain + the shared [`crab_optimizer`].
-    /// The brain's initial weights are irrelevant: [`Self::update`] loads the CPU policy
-    /// onto it before every update, so the first update trains the real policy, not this
-    /// fresh net.
+impl GpuLearner<GpuBackend> {
+    /// Bring up the real discrete-GPU Vulkan backend and build the learner on it.
     ///
     /// # Panics
     /// Via [`init_gpu_backend`], if no real discrete-GPU Vulkan adapter is available (a
     /// software lavapipe/llvmpipe adapter, or none at all). Deliberate: the GPU is the
     /// only update path, so it must fail loudly at boot, never silently run on the CPU.
     pub fn new() -> Self {
-        let device = init_gpu_backend();
-        let brain: CrabBrain<GpuBackend> = CrabBrain::new(&device);
-        let optimizer: CrabOpt<GpuBackend> = crab_optimizer();
+        Self::with_device(init_gpu_backend())
+    }
+}
+
+impl<B: AutodiffBackend> GpuLearner<B> {
+    /// Build the learner on an explicitly-provided device — the injected-device seam behind
+    /// [`GpuLearner::new`]. The brain's initial weights are irrelevant: [`Self::update`] loads
+    /// the CPU policy onto it before every update, so the first update trains the real policy,
+    /// not this fresh net. Production injects the discrete GPU; a test injects a CPU device.
+    /// `pub(crate)`, not `pub`: the only public door to a learner is [`GpuLearner::new`], which
+    /// pins `B = GpuBackend` and runs the software-adapter gate, so the non-GPU constructor
+    /// can't be reached from outside the crate to build a CPU "GPU learner" in production.
+    pub(crate) fn with_device(device: B::Device) -> Self {
+        let brain: CrabBrain<B> = CrabBrain::new(&device);
+        let optimizer: CrabOpt<B> = crab_optimizer();
         Self {
             device,
             brain,
@@ -135,13 +152,14 @@ impl GpuLearner {
         }
     }
 
-    /// Run one PPO update on the GPU and mirror the result back to the CPU brain. Loads
-    /// `cpu_brain`'s current weights onto the GPU (so the GPU updates exactly the policy
-    /// the threads rolled with), runs [`ppo_update_core`] on [`GpuBackend`], then writes
-    /// the result back into `cpu_brain`. `ret_norm` (backend-independent f32 stats) is
-    /// advanced in place as the CPU path does. `rng` drives the update's minibatch shuffle
-    /// (the learner owns it, seeded from the run's master seed). Returns the metrics + the
-    /// load/update/store wall-clock split.
+    /// Run one PPO update on the device and mirror the result back to the CPU brain. Loads
+    /// `cpu_brain`'s current weights onto the device (so it updates exactly the policy the
+    /// threads rolled with), runs [`ppo_update_core`] on [`B`], then writes the result back
+    /// into `cpu_brain`. `ret_norm` (backend-independent f32 stats) is advanced in place as
+    /// the CPU path does. `rng` drives the update's minibatch shuffle (the learner owns it,
+    /// seeded from the run's master seed). Returns the metrics + the load/update/store
+    /// wall-clock split.
+    #[tracing::instrument(skip_all)]
     pub fn update(
         &mut self,
         cpu_brain: &mut CrabBrain<TrainBackend>,
@@ -181,7 +199,7 @@ impl GpuLearner {
             ret_norm,
             rng,
         );
-        <GpuBackend as burn::tensor::backend::Backend>::sync(&self.device)
+        <B as burn::tensor::backend::Backend>::sync(&self.device)
             .expect("GPU sync after PPO update");
         let update_ms = t_update.elapsed().as_secs_f64() * 1000.0;
 
@@ -221,5 +239,49 @@ impl GpuLearner {
     pub fn load_adam_state(&mut self, path: &Path) {
         let cold = std::mem::replace(&mut self.optimizer, crab_optimizer());
         self.optimizer = load_optimizer(cold, path, &self.device);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bot::sensor::OBS_SIZE;
+    use burn::tensor::Tensor;
+    use rand::SeedableRng;
+
+    fn policy_means(brain: &CrabBrain<TrainBackend>, device: &NdArrayDevice) -> Vec<f32> {
+        let obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], device);
+        brain.policy(obs).0.to_data().to_vec().unwrap()
+    }
+
+    /// The injected-device seam lets the CPU↔device marshalling + timing path run with NO
+    /// GPU: build the learner on a CPU backend ([`GpuLearner::with_device`]), round-trip a
+    /// brain through [`GpuLearner::update`] with an empty rollout (a no-op PPO step), and
+    /// confirm the weights survive the serialize→load→serialize→load bridge and the timing
+    /// split is populated. This is the coverage the production `GpuLearner::new()` path (which
+    /// requires a real discrete GPU) cannot give a unit test.
+    #[test]
+    fn cpu_device_seam_round_trips_brain_through_update() {
+        let device = NdArrayDevice::Cpu;
+        let mut learner = GpuLearner::<TrainBackend>::with_device(device);
+        let mut cpu_brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let before = policy_means(&cpu_brain, &device);
+
+        // Empty rollouts ⇒ ppo_update_core is a no-op, so update() exercises purely the
+        // CPU→device load, the sync, and the device→CPU store — the marshalling path.
+        let config = PpoConfig::default();
+        let mut ret_norm = ReturnNormalizer::new();
+        let mut rng = StdRng::seed_from_u64(0);
+        let (_metrics, timing) =
+            learner.update(&mut cpu_brain, &config, &[], &mut ret_norm, &mut rng);
+
+        let after = policy_means(&cpu_brain, &device);
+        for (i, (a, b)) in before.iter().zip(after.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "weight[{i}] not preserved by the bridge round-trip: {a} vs {b}"
+            );
+        }
+        assert!(timing.load_ms >= 0.0 && timing.update_ms >= 0.0 && timing.store_ms >= 0.0);
     }
 }
