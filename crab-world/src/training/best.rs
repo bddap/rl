@@ -21,6 +21,10 @@ use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
+use super::checkpoint::{
+    BRAIN_FILENAME, NORMALIZER_FILENAME, OPTIMIZER_FILENAME, RETURN_NORMALIZER_FILENAME,
+    SHAPE_FILENAME, TICK_WATERMARK_FILENAME,
+};
 use super::curriculum::SOLID_REACH_FRACTION;
 
 /// Subdirectory of the checkpoint dir holding the best-by-competence snapshot.
@@ -33,23 +37,32 @@ const BEST_SUBDIR: &str = "best";
 /// last on each snapshot.
 const COMPETENCE_SIDECAR: &str = "competence.txt";
 
-/// The checkpoint files copied into `best/`, in install order with `brain.bin` LAST: the
-/// release poller and demo hot-reload key pairing on `brain.bin`'s mtime, so writing it
-/// after the rest guarantees a reader never pairs a new brain with stale normalizers.
-/// `optimizer.bin` is included so `best/` is a complete, warm-resumable checkpoint, not
-/// only an inference set. `ticks.txt` (the tick odometer) is included so the set the demo
-/// loads is complete, but it is the ONE policy-INDEPENDENT entry: the learner advances it
-/// mid-iter (after the rollout, see `write_tick_watermark`), so the snapshot's odometer is
-/// up to one iter ahead of the rest — immaterial, it names a budget count, not a policy.
-/// Mirrors the on-disk names [`super::checkpoint::CheckpointDir`] owns; if a checkpoint
-/// artifact is added there, add it here too.
-const BEST_FILES: &[&str] = &[
-    "normalizer.bin",
-    "return_normalizer.bin",
-    "optimizer.bin",
-    "shape.txt",
-    "ticks.txt",
-    "brain.bin",
+/// One file in a `best/` snapshot and whether the set is incomplete without it.
+struct BestFile {
+    /// On-disk name, from [`super::checkpoint`]'s canonical consts so it can't drift.
+    name: &'static str,
+    /// A `required` file missing means an incomplete inference set — [`BestKeeper::snapshot`]
+    /// refuses to write a `best/` that would be marked valid yet missing it. The inference
+    /// set the demo loads (brain + the two normalizers) and the shape sidecar are required;
+    /// the optimizer (warm-resume only, absent on a cold-resumed run) and the tick odometer
+    /// (policy-independent budget count) are optional and skipped if absent.
+    required: bool,
+}
+
+/// The checkpoint files copied into `best/`, in install order with [`BRAIN_FILENAME`] LAST:
+/// the release poller and demo hot-reload key pairing on the brain's mtime, so writing it
+/// after the rest guarantees a reader never pairs a new brain with stale normalizers. Names
+/// reference [`super::checkpoint`]'s consts (no re-typed literals), so the set stays in
+/// lockstep with the writers; `required` makes a missing inference artifact fail loud rather
+/// than yield a silently-incomplete best set (the case that bites hardest, since `best/` is
+/// the demo's collapse-proof fallback).
+const BEST_FILES: &[BestFile] = &[
+    BestFile { name: NORMALIZER_FILENAME, required: true },
+    BestFile { name: RETURN_NORMALIZER_FILENAME, required: true },
+    BestFile { name: SHAPE_FILENAME, required: true },
+    BestFile { name: OPTIMIZER_FILENAME, required: false },
+    BestFile { name: TICK_WATERMARK_FILENAME, required: false },
+    BestFile { name: BRAIN_FILENAME, required: true },
 ];
 
 /// EMA smoothing factor for the per-iter reach fraction. Reach over one iter's finished
@@ -71,42 +84,81 @@ const BAND_EPS: f32 = 0.01;
 /// eligible, so a freshly-seeded EMA (cold at restart) can't promote on early noise.
 const MIN_EMA_UPDATES: u32 = 30;
 
-/// A policy's demonstrated competence: the far edge of the target band it was rolled at and
-/// its smoothed reach there. Ordered so "more capable" is unambiguous (see module docs). The
-/// band is now fixed, so `band_max` is constant and the order reduces to best-by-reach.
+/// A smoothed reach fraction, in `0..=1` and finite by construction. The newtype exists for
+/// one load-bearing reason: a NaN reach must never reach [`Competence::beats`]'s floor
+/// comparison, where `NaN < SOLID_REACH_FRACTION` is `false` and would let a corrupt-metric
+/// checkpoint pass the collapse guard and be accepted as "best". Rejecting non-finite at
+/// construction makes that unrepresentable. No `PartialOrd` derive on purpose: all ordering
+/// goes through [`Competence::beats`]'s explicit `.get()` float comparisons, and an implicit
+/// `<` on the newtype would re-open the very float-comparison footgun it exists to discipline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Reach(f32);
+
+impl Reach {
+    /// `Some` iff `v` is finite and in `0..=1`; `None` for NaN/∞/out-of-range.
+    fn new(v: f32) -> Option<Self> {
+        (v.is_finite() && (0.0..=1.0).contains(&v)).then_some(Self(v))
+    }
+    fn get(self) -> f32 {
+        self.0
+    }
+}
+
+/// The far edge of the target band a policy was rolled at (metres), finite and non-negative
+/// by construction. The band is now a FIXED full-arena range, so this is constant across
+/// iters and the competence order reduces to best-by-reach in practice — but a newtype still
+/// rules out a NaN/inverted band corrupting [`Competence::beats`]. No `PartialOrd` derive,
+/// for the same reason as [`Reach`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Band(f32);
+
+impl Band {
+    /// `Some` iff `v` is finite and non-negative; `None` otherwise.
+    fn new(v: f32) -> Option<Self> {
+        (v.is_finite() && v >= 0.0).then_some(Self(v))
+    }
+    fn get(self) -> f32 {
+        self.0
+    }
+}
+
+/// A policy's demonstrated competence: the band it was rolled at and its smoothed reach
+/// there. Ordered so "more capable" is unambiguous (see module docs). The band is now fixed,
+/// so it is constant and the order reduces to best-by-reach. Both fields are finite-range
+/// newtypes, so a corrupt metric can't construct a `Competence` that defeats the guards.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Competence {
-    /// Far edge of the target band the policy was rolled at (metres) — now a fixed constant.
-    band_max: f32,
-    /// Smoothed reach fraction at that band.
-    reach: f32,
+    band: Band,
+    reach: Reach,
 }
 
 impl Competence {
     /// Does `self` demonstrate strictly more competence than `other`? A farther mastered
     /// band wins; at the same band a higher reach (by [`REACH_MARGIN`]) wins; a nearer band
     /// never wins. Gated by the solid-reach floor so a collapse can't promote at any band.
+    /// Sound against a corrupt metric because [`Reach`]/[`Band`] are finite by construction.
     fn beats(&self, other: &Competence) -> bool {
-        if self.reach < SOLID_REACH_FRACTION {
+        if self.reach.get() < SOLID_REACH_FRACTION {
             return false;
         }
-        if self.band_max > other.band_max + BAND_EPS {
+        if self.band.get() > other.band.get() + BAND_EPS {
             return true;
         }
-        if (self.band_max - other.band_max).abs() <= BAND_EPS {
-            return self.reach > other.reach + REACH_MARGIN;
+        if (self.band.get() - other.band.get()).abs() <= BAND_EPS {
+            return self.reach.get() > other.reach.get() + REACH_MARGIN;
         }
         false
     }
 
-    /// Parse the `best/competence.txt` sidecar (`"<band_max> <reach>"`); `None` on a
-    /// missing, unreadable, or malformed file (a fresh `best/`, or none yet).
+    /// Parse the `best/competence.txt` sidecar (`"<band_max> <reach>"`); `None` on a missing,
+    /// unreadable, malformed, or out-of-range/non-finite file (a fresh `best/`, or a corrupt
+    /// one — both treated as "no prior best", which the seed path then re-gates by reach).
     fn load(path: &Path) -> Option<Self> {
         let text = std::fs::read_to_string(path).ok()?;
         let mut it = text.split_whitespace();
-        let band_max = it.next()?.parse().ok()?;
-        let reach = it.next()?.parse().ok()?;
-        Some(Self { band_max, reach })
+        let band = Band::new(it.next()?.parse().ok()?)?;
+        let reach = Reach::new(it.next()?.parse().ok()?)?;
+        Some(Self { band, reach })
     }
 }
 
@@ -133,8 +185,8 @@ impl BestKeeper {
             Some(c) => info!(
                 "[best] keeping best-by-competence in {}/{BEST_SUBDIR} | resumed best band {:.1}m reach {:.3}",
                 checkpoint_dir.display(),
-                c.band_max,
-                c.reach
+                c.band.get(),
+                c.reach.get()
             ),
             None => info!(
                 "[best] keeping best-by-competence in {}/{BEST_SUBDIR} | no prior best — first solid policy seeds it",
@@ -173,15 +225,23 @@ impl BestKeeper {
         if self.ema_updates < MIN_EMA_UPDATES {
             return;
         }
-        let Some(reach) = self.smoothed_reach else {
+        let Some(smoothed) = self.smoothed_reach else {
             return;
         };
-        let candidate = Competence { band_max, reach };
+        // Reject a non-finite/out-of-range metric here rather than let it slip past the floor
+        // guard (NaN < FLOOR is false). A corrupt reach or band means no eligible candidate.
+        let (Some(reach), Some(band)) = (Reach::new(smoothed), Band::new(band_max)) else {
+            warn!(
+                "[best] non-finite competence (reach={smoothed}, band={band_max}) — not eligible for snapshot"
+            );
+            return;
+        };
+        let candidate = Competence { band, reach };
 
         let beats = match self.best {
             Some(best) => candidate.beats(&best),
             // No prior best: seed on the first policy that clears the solid-reach floor.
-            None => reach >= SOLID_REACH_FRACTION,
+            None => reach.get() >= SOLID_REACH_FRACTION,
         };
         if !beats {
             return;
@@ -192,10 +252,10 @@ impl BestKeeper {
                 info!(
                     "[best] new best snapshot → {}/{BEST_SUBDIR} | band {:.1}m reach {:.3} (was {})",
                     self.checkpoint_dir.display(),
-                    candidate.band_max,
-                    candidate.reach,
+                    candidate.band.get(),
+                    candidate.reach.get(),
                     self.best
-                        .map(|c| format!("band {:.1}m reach {:.3}", c.band_max, c.reach))
+                        .map(|c| format!("band {:.1}m reach {:.3}", c.band.get(), c.reach.get()))
                         .unwrap_or_else(|| "none".to_string()),
                 );
                 self.best = Some(candidate);
@@ -207,29 +267,52 @@ impl BestKeeper {
         }
     }
 
-    /// Copy the live checkpoint set into `best/`, each file via a temp-then-rename so a
-    /// crash mid-copy can't leave a torn file, `brain.bin` last (see [`BEST_FILES`]), then
-    /// the competence sidecar last of all. A missing source file is skipped (e.g. a
-    /// cold-resumed optimizer that hasn't been written yet) rather than failing the whole
-    /// snapshot — `brain.bin` and the normalizers, the inference set the demo needs, are
-    /// always present by the time this runs.
+    /// Copy the live checkpoint set into `best/`, each file via a temp-then-fsync-rename so
+    /// no crash (process or power loss) can leave a torn file, [`BRAIN_FILENAME`] last (see
+    /// [`BEST_FILES`]), then the competence sidecar last of all.
+    ///
+    /// FAIL-LOUD: a missing REQUIRED source (the brain, the two normalizers, the shape
+    /// sidecar — see [`BestFile`]) aborts the whole snapshot with an error BEFORE any file is
+    /// touched, so `best/` is never left marked-valid-but-incomplete (the trap when `best/`
+    /// is the demo's collapse-proof fallback). Optional files (optimizer, tick odometer) are
+    /// skipped if absent. The caller logs the error and keeps the previous `best/`.
     fn snapshot(&self, competence: Competence) -> std::io::Result<()> {
+        // Pre-flight: every required source must exist before we mutate `best/`, so a missing
+        // one can't leave a half-overwritten set (new normalizer + stale brain + stale sidecar).
+        for f in BEST_FILES.iter().filter(|f| f.required) {
+            let src = self.checkpoint_dir.join(f.name);
+            if !src.exists() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "required checkpoint file {} missing from {} — refusing to write an \
+                         incomplete best set",
+                        f.name,
+                        self.checkpoint_dir.display()
+                    ),
+                ));
+            }
+        }
+
         let best_dir = self.checkpoint_dir.join(BEST_SUBDIR);
         std::fs::create_dir_all(&best_dir)?;
-        for name in BEST_FILES {
-            let src = self.checkpoint_dir.join(name);
+        for f in BEST_FILES {
+            let src = self.checkpoint_dir.join(f.name);
             if !src.exists() {
-                continue;
+                continue; // required files were pre-flighted above; this is an absent optional
             }
-            let dst = best_dir.join(name);
-            let tmp = best_dir.join(format!("{name}.tmp"));
+            let dst = best_dir.join(f.name);
+            let tmp = best_dir.join(format!("{}.tmp", f.name));
             std::fs::copy(&src, &tmp)?;
-            std::fs::rename(&tmp, &dst)?;
+            super::fsync_rename(&tmp, &dst)?;
         }
         let sidecar = best_dir.join(COMPETENCE_SIDECAR);
         let tmp = best_dir.join(format!("{COMPETENCE_SIDECAR}.tmp"));
-        std::fs::write(&tmp, format!("{} {}\n", competence.band_max, competence.reach))?;
-        std::fs::rename(&tmp, &sidecar)?;
+        std::fs::write(
+            &tmp,
+            format!("{} {}\n", competence.band.get(), competence.reach.get()),
+        )?;
+        super::fsync_rename(&tmp, &sidecar)?;
         Ok(())
     }
 }
@@ -238,8 +321,20 @@ impl BestKeeper {
 mod tests {
     use super::*;
 
-    fn comp(band_max: f32, reach: f32) -> Competence {
-        Competence { band_max, reach }
+    fn comp(band: f32, reach: f32) -> Competence {
+        Competence {
+            band: Band::new(band).expect("test band in range"),
+            reach: Reach::new(reach).expect("test reach in range"),
+        }
+    }
+
+    #[test]
+    fn reach_rejects_non_finite_and_out_of_range() {
+        assert!(Reach::new(f32::NAN).is_none());
+        assert!(Reach::new(f32::INFINITY).is_none());
+        assert!(Reach::new(-0.1).is_none());
+        assert!(Reach::new(1.1).is_none());
+        assert!(Reach::new(0.6).is_some());
     }
 
     #[test]
@@ -304,7 +399,7 @@ mod tests {
         k.observe(Some(0.7), 9.0);
         assert_eq!(std::fs::read(&best_brain).unwrap(), b"brain-v1");
         let c = Competence::load(&dir.join(BEST_SUBDIR).join(COMPETENCE_SIDECAR)).unwrap();
-        assert_eq!(c.band_max, 9.0);
+        assert_eq!(c.band.get(), 9.0);
 
         // The policy drifts on disk and then COLLAPSES: best/ must NOT be overwritten.
         std::fs::write(dir.join("brain.bin"), b"brain-collapsed").unwrap();
@@ -349,6 +444,65 @@ mod tests {
             b"brain-v1",
             "resumed bar must reject a post-restart sub-floor policy"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nan_reach_never_snapshots() {
+        // The bug this guards: a NaN reach passes `reach < FLOOR` (NaN comparisons are false),
+        // so without the finite-range newtype a corrupt metric could be accepted as "best".
+        let dir = scratch_ckpt("nan");
+        let mut k = BestKeeper::new(&dir);
+        for _ in 0..MIN_EMA_UPDATES + 5 {
+            k.observe(Some(f32::NAN), 9.0);
+        }
+        assert!(
+            !dir.join(BEST_SUBDIR).join("brain.bin").exists(),
+            "a NaN reach must never produce a best snapshot"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_required_file_fails_loud_and_keeps_previous() {
+        // A complete set seeds best/, then a REQUIRED source goes missing: the next eligible
+        // snapshot must FAIL (return Err → caller keeps the previous best) rather than write a
+        // best/ marked valid yet missing the inference file. Verified directly via snapshot().
+        let dir = scratch_ckpt("missing-required");
+        let mut k = BestKeeper::new(&dir);
+        for _ in 0..MIN_EMA_UPDATES {
+            k.observe(Some(0.7), 9.0);
+        }
+        let best_brain = dir.join(BEST_SUBDIR).join("brain.bin");
+        assert_eq!(std::fs::read(&best_brain).unwrap(), b"brain-v1", "seeded");
+
+        // Drop a required source (a normalizer) and improve the brain on disk; a snapshot
+        // attempt must error and leave best/ untouched (old brain, no torn set).
+        std::fs::remove_file(dir.join("normalizer.bin")).unwrap();
+        std::fs::write(dir.join("brain.bin"), b"brain-v2").unwrap();
+        let competence = Competence {
+            band: Band::new(9.0).unwrap(),
+            reach: Reach::new(1.0).unwrap(),
+        };
+        assert!(
+            k.snapshot(competence).is_err(),
+            "a missing required source must fail the snapshot"
+        );
+        assert_eq!(
+            std::fs::read(&best_brain).unwrap(),
+            b"brain-v1",
+            "failed snapshot must not overwrite the previous best brain"
+        );
+
+        // The optimizer is OPTIONAL: absent (scratch_ckpt never writes it), a snapshot of the
+        // restored full set still succeeds.
+        std::fs::write(dir.join("normalizer.bin"), b"norm").unwrap();
+        assert!(
+            k.snapshot(competence).is_ok(),
+            "an absent optional optimizer must not block a snapshot"
+        );
+        assert_eq!(std::fs::read(&best_brain).unwrap(), b"brain-v2");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
