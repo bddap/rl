@@ -139,7 +139,7 @@ impl ExternalCrabBridge {
             last_carapace_m: None,
             yaw_turns: 0,
             hunt_target_m: None,
-            settle: crab_world::training::systems::RESET_GRACE_TICKS,
+            settle: crab_world::bot::RESET_GRACE_TICKS,
             phys_digest: 0,
         }
     }
@@ -232,7 +232,7 @@ impl ExternalCrabBridge {
     pub fn restart_to_spawn(&mut self, spawn: Pos) {
         self.world_pos_m = pos_to_m(spawn);
         self.last_carapace_m = None;
-        self.settle = crab_world::training::systems::RESET_GRACE_TICKS;
+        self.settle = crab_world::bot::RESET_GRACE_TICKS;
     }
 }
 
@@ -568,7 +568,7 @@ fn run_crab_policy(
     // the demo/training do, so the policy doesn't drive a still-falling body into a locked
     // pose that never walks. Counts down to 0, then the policy takes over.
     if bridge.settle > 0 {
-        bridge.settle = crab_world::training::systems::settle_countdown(bridge.settle);
+        bridge.settle = crab_world::bot::settle_countdown(bridge.settle);
         if let Some(a) = actions.envs.first_mut() {
             *a = [0.0; crab_world::bot::actuator::ACTION_SIZE];
         }
@@ -596,7 +596,7 @@ fn integrate_crab(
     let was_rescued = rescued.read().any(|m| m.env == 0);
     if was_rescued {
         bridge.last_carapace_m = None;
-        bridge.settle = crab_world::training::systems::RESET_GRACE_TICKS;
+        bridge.settle = crab_world::bot::RESET_GRACE_TICKS;
     }
 
     let Some((_, t, vel)) = carapace_q.iter().find(|(env, _, _)| env.0 == 0) else {

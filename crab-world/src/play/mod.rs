@@ -19,6 +19,7 @@
 mod cameras;
 mod controls;
 mod demo;
+mod graph;
 mod hot_reload;
 mod manual_control;
 mod policy;
@@ -99,7 +100,7 @@ pub struct DemoPlugin {
 impl Plugin for DemoPlugin {
     fn build(&self, app: &mut App) {
         add_inference(app, &self.checkpoint_dir, self.live_checkpoint_dir.clone());
-        crate::player::graph::register(app);
+        graph::register(app);
         // Night-sky skybox behind the orbit view.
         app.add_plugins(crate::sky::NightSkyPlugin);
         // The reusable controls overlay (corner hint + hold-to-reveal panel), driven by the

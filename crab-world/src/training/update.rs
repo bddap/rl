@@ -1,6 +1,6 @@
 //! The learner's PPO update over all rollout buffers — the ONE update implementation,
 //! generic over the autodiff backend so the live GPU learner ([`super::gpu::GpuLearner`])
-//! and the CPU/GPU `bench-update` harness ([`super::bench`]) share it.
+//! and the CPU-backed parity test ([`super::inproc`] tests) run the exact same update.
 
 use burn::optim::{GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
@@ -39,8 +39,8 @@ use crate::bot::sensor::OBS_SIZE;
 ///
 /// Free function rather than a `TrainingState` method so the K=1 parity test
 /// ([`super::inproc`] tests) can call the exact production update over hand-built buffers.
-/// Generic over the autodiff backend `B` so the live GPU learner and the CPU/GPU
-/// `bench-update` run the one implementation — same update, one backend parameter.
+/// Generic over the autodiff backend `B` so the live GPU learner and the CPU-backed
+/// parity test run the one implementation — same update, one backend parameter.
 pub(crate) fn ppo_update_core<B: AutodiffBackend>(
     brain: &mut CrabBrain<B>,
     optimizer: &mut CrabOpt<B>,

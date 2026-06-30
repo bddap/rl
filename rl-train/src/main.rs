@@ -6,7 +6,6 @@
 //!
 //! Modes (all headless, no window, no GPU renderer):
 //! - `learn` — the trainer: K rollout threads (CPU inference) + the GPU PPO update.
-//! - `bench-update` — the PPO-update microbenchmark (rl#48/#49), CPU or `--backend gpu`.
 //! - `--verify-colliders` / `--verify-pivots` / `--check-rest-colliders` — DEV rig
 //!   audits that build a windowless physics world, print a report, and exit.
 //!
@@ -76,52 +75,6 @@ enum Command {
     /// their rollouts, and run the PPO update. Resumes from `--checkpoint-dir` and
     /// stops at the `--ticks` budget.
     Learn(LearnArgs),
-    /// Microbenchmark the PPO UPDATE phase alone (rl#48/#49): no worlds, no rollout,
-    /// no checkpoint I/O — just the autodiff backward + Adam step over synthetic
-    /// buffers at the real net/minibatch dims. Defaults match a live `learn --workers
-    /// 8 --envs 4 --horizon 512` iter's update load. `--backend {cpu,gpu}` selects the
-    /// burn backend (CPU ndarray vs GPU wgpu/Vulkan) so the SAME `ppo_update_core`
-    /// runs on either device for a direct comparison (rl#49).
-    BenchUpdate(BenchUpdateArgs),
-}
-
-/// Which burn backend `bench-update` runs the PPO update on (rl#49).
-#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BenchBackend {
-    /// CPU `Autodiff<NdArray>` — the production training backend (the baseline).
-    Cpu,
-    /// GPU `Autodiff<Wgpu>` over Vulkan. Forces a discrete-GPU adapter and prints +
-    /// asserts the adapter name so a silent lavapipe (software) fallback can't pass as
-    /// a GPU result. Only built when the `wgpu` cargo feature is on.
-    Gpu,
-}
-
-/// Args for the `bench-update` PPO-update microbenchmark (rl#48/#49). Defaults
-/// reproduce the live trainer's per-iter update load (K=8 × M=4 × H=512 = 16384
-/// transitions).
-#[derive(Parser, Debug, Clone)]
-pub struct BenchUpdateArgs {
-    /// Backend to run the update on: `cpu` (production ndarray) or `gpu` (wgpu/Vulkan).
-    #[arg(long, value_enum, default_value_t = BenchBackend::Cpu)]
-    pub backend: BenchBackend,
-    /// Rollout workers K to simulate (only scales the synthetic transition count
-    /// K×M×H; no threads are spawned — the update is single-threaded regardless).
-    #[arg(long, default_value_t = 8)]
-    pub workers: usize,
-    /// Envs M per worker (see `--workers`).
-    #[arg(long, default_value_t = 4)]
-    pub envs: usize,
-    /// Horizon H (transitions per env buffer).
-    #[arg(long, default_value_t = 512)]
-    pub horizon: usize,
-    /// Total `ppo_update_core` calls; the first is a warmup and excluded, the rest are
-    /// timed and reported as min/median/max.
-    #[arg(long, default_value_t = 6)]
-    pub reps: usize,
-    /// Minibatch size override. Defaults to the live 64; raise it (e.g. 256/512) to
-    /// probe whether the GPU stays cheap as the per-step matmul grows (rl#49 tertiary).
-    #[arg(long)]
-    pub batch: Option<usize>,
 }
 
 /// Learner orchestration: the shared training config plus how many rollout threads
@@ -185,39 +138,6 @@ fn main() {
         return;
     }
 
-    // The update microbenchmark (rl#48/#49): no worlds, no rollout, no model load.
-    if let Some(Command::BenchUpdate(b)) = cli.command {
-        match b.backend {
-            BenchBackend::Cpu => {
-                use burn::backend::ndarray::NdArrayDevice;
-                training::bench::bench_ppo_update::<training::TrainBackend>(
-                    &NdArrayDevice::Cpu,
-                    "CPU ndarray (Autodiff<NdArray>)",
-                    b.workers,
-                    b.envs,
-                    b.horizon,
-                    b.reps,
-                    b.batch,
-                );
-            }
-            BenchBackend::Gpu => {
-                #[cfg(feature = "wgpu")]
-                training::bench::bench_ppo_update_gpu(
-                    b.workers, b.envs, b.horizon, b.reps, b.batch,
-                );
-                #[cfg(not(feature = "wgpu"))]
-                {
-                    eprintln!(
-                        "bench-update --backend gpu requires the `wgpu` cargo feature \
-                         (build with `--features wgpu`)"
-                    );
-                    std::process::exit(2);
-                }
-            }
-        }
-        return;
-    }
-
     let dev = cli.dev;
 
     // DEV verify: score the live colliders against the mesh, print, exit.
@@ -265,10 +185,9 @@ fn main() {
     // No mode: this binary trains (`rl-train learn`) or runs a DEV audit; the windowed
     // demo/screenshot live in `rl-demo`.
     eprintln!(
-        "no mode selected. Train with `rl-train learn` (the sole trainer), benchmark \
-         with `rl-train bench-update`, or run a DEV rig audit \
-         (--verify-colliders / --verify-pivots / --check-rest-colliders). The windowed \
-         demo + screenshot are the `rl-demo` binary."
+        "no mode selected. Train with `rl-train learn` (the sole trainer), or run a DEV \
+         rig audit (--verify-colliders / --verify-pivots / --check-rest-colliders). The \
+         windowed demo + screenshot are the `rl-demo` binary."
     );
     std::process::exit(2);
 }

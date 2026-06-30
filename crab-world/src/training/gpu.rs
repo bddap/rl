@@ -18,8 +18,8 @@ use super::update::ppo_update_core;
 use crate::bot::brain::CrabBrain;
 
 /// The GPU training backend: `Autodiff<Wgpu>` over Vulkan. The live learner (the SOLE
-/// update path) and the `bench-update --backend gpu` comparison both run the one generic
-/// [`ppo_update_core`] on this — same update, GPU device. WGSL→Vulkan (the SPIR-V
+/// update path) runs the one generic [`ppo_update_core`] on this — the same update the
+/// CPU-backed parity test exercises, just on the GPU device. WGSL→Vulkan (the SPIR-V
 /// `burn/vulkan` path is a separate lever). Rollout inference stays on
 /// [`TrainBackend`] (CPU): rollouts are many tiny per-step obs forwards across the K
 /// worker threads, where GPU dispatch overhead would dominate; only the one batched
@@ -28,9 +28,8 @@ pub(crate) type GpuBackend = Autodiff<burn::backend::wgpu::Wgpu>;
 
 /// Bring up the wgpu/Vulkan backend on the discrete GPU and PROVE the chosen adapter
 /// is real hardware, returning the device to run on. The single source of the
-/// adapter-selection + software-fallback guard, shared by `bench-update --backend gpu`
-/// and the live `learn` learner (the SOLE update path), so there is one place that
-/// decides "is this actually the GPU".
+/// adapter-selection + software-fallback guard for the live `learn` learner (the SOLE
+/// update path), so there is one place that decides "is this actually the GPU".
 ///
 /// The guard is the load-bearing part. The box's Vulkan ICD set includes lavapipe
 /// (`lvp` — a CPU software rasteriser, `DeviceType::Cpu`); if wgpu silently fell back
@@ -40,9 +39,8 @@ pub(crate) type GpuBackend = Autodiff<burn::backend::wgpu::Wgpu>;
 /// than fall back), and (b) read the chosen adapter, PRINT it, and PANIC if it is a
 /// `Cpu`/`Other` device or a known software-rasteriser name. Pair with
 /// `VK_ICD_FILENAMES` pointing at only `nvidia_icd.json` to make the NVIDIA card the
-/// only Vulkan device at all. `tag` prefixes the log lines (e.g. `bench-update` /
-/// `learner`).
-pub(crate) fn init_gpu_backend(tag: &str) -> burn::backend::wgpu::WgpuDevice {
+/// only Vulkan device at all.
+pub(crate) fn init_gpu_backend() -> burn::backend::wgpu::WgpuDevice {
     use burn::backend::wgpu::{RuntimeOptions, WgpuDevice, graphics::Vulkan, init_setup};
 
     // DiscreteGpu(0), not DefaultDevice, so cubecl's filter excludes lavapipe before
@@ -51,11 +49,11 @@ pub(crate) fn init_gpu_backend(tag: &str) -> burn::backend::wgpu::WgpuDevice {
 
     // init_setup::<Vulkan> forces the Vulkan API, registers this device, and hands back
     // the setup so we can inspect the real adapter.
-    eprintln!("[{tag}] initialising wgpu/Vulkan on {device:?} …");
+    eprintln!("[learner] initialising wgpu/Vulkan on {device:?} …");
     let setup = init_setup::<Vulkan>(&device, RuntimeOptions::default());
     let info = setup.adapter.get_info();
     eprintln!(
-        "[{tag}] wgpu adapter: name={:?} backend={:?} device_type={:?} driver={:?} {:?}",
+        "[learner] wgpu adapter: name={:?} backend={:?} device_type={:?} driver={:?} {:?}",
         info.name, info.backend, info.device_type, info.driver, info.driver_info,
     );
 
@@ -80,7 +78,7 @@ pub(crate) fn init_gpu_backend(tag: &str) -> burn::backend::wgpu::WgpuDevice {
         info.name, info.device_type,
     );
     eprintln!(
-        "[{tag}] adapter confirmed as hardware GPU ({}) — proceeding.",
+        "[learner] adapter confirmed as hardware GPU ({}) — proceeding.",
         info.name
     );
     device
@@ -127,7 +125,7 @@ impl GpuLearner {
     /// software lavapipe/llvmpipe adapter, or none at all). Deliberate: the GPU is the
     /// only update path, so it must fail loudly at boot, never silently run on the CPU.
     pub fn new() -> Self {
-        let device = init_gpu_backend("learner");
+        let device = init_gpu_backend();
         let brain: CrabBrain<GpuBackend> = CrabBrain::new(&device);
         let optimizer: CrabOpt<GpuBackend> = crab_optimizer();
         Self {

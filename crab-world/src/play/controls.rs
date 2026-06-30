@@ -196,7 +196,7 @@ impl ControlInput for DemoControls {
 
 /// THE demo binding table — the demo's CURRENT bindings (verified against
 /// `cameras::orbit_camera`, `demo::demo_controls`, `manual_control::manual_control_step`,
-/// and `player::graph::toggle_graph`). Reveal binding: hold Tab / hold pad View — both
+/// and `graph::toggle_graph`). Reveal binding: hold Tab / hold pad View — both
 /// free in the demo's input set. Manual, PickJoint, and Torque are gamepad-only (no
 /// keyboard binding), so the keyboard legend omits them. Labels live in [`DEMO_ROWS`].
 pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [

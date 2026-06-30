@@ -9548,7 +9548,6 @@ name = "rl-train"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "burn",
  "clap",
  "crab-world",
  "otel",

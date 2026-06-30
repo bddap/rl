@@ -302,6 +302,28 @@ pub fn respawn_crab(
     respawn_crab_rotated(commands, assets, parts, origin, env, Quat::IDENTITY);
 }
 
+/// Settle ticks after a respawn: the fresh crab spawns in the rest pose with
+/// the builder motors already holding it, so this only covers the drop from
+/// spawn height onto the ground and the motors taking the load (0.5 s).
+///
+/// This is the ONE settle window for the whole project: the training reset path
+/// (`training::systems::reset_crab`), the demo's post-respawn settle
+/// (`play::demo_settle`), and the net crab-bridge all reuse it via
+/// [`settle_countdown`] so a change to the drop window keeps every surface in
+/// lock-step — they must hold zero actions for the same number of ticks or the
+/// streamed demo stops mirroring the crab the policy was actually trained to settle.
+/// It lives here beside [`respawn_crab`] because the settle is a property of the
+/// respawn, not of training — every respawn consumer needs it, training included.
+pub const RESET_GRACE_TICKS: u32 = 32;
+
+/// Advance a settle countdown by one tick: returns the grace for the next tick, or 0
+/// once the window is spent (the caller then resumes normal control — `Recording` for
+/// training, policy drive for the demo). Sole source of the post-respawn settle
+/// arithmetic so every reset path decrements the exact same way.
+pub fn settle_countdown(grace: u32) -> u32 {
+    grace.saturating_sub(1)
+}
+
 /// Like [`respawn_crab`] but spawns the fresh crab rigidly rotated by `init_rotation`
 /// (training's randomized-start curriculum — see `reset_crab`). `Quat::IDENTITY`
 /// reproduces the upright respawn exactly.

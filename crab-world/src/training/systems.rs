@@ -28,7 +28,9 @@ use crate::bot::body::{
 };
 use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
-use crate::bot::{CrabRescued, CrabSpawns, respawn_crab_rotated};
+use crate::bot::{
+    CrabRescued, CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown,
+};
 
 use super::algorithm::{
     NormalizedValue, PpoConfig, ReturnNormalizer, RolloutBuffer, StepEnd, Transition,
@@ -238,8 +240,6 @@ pub(crate) struct TrainingState {
 
     /// Stop after this many physics ticks (0 = unlimited). See `Args::ticks`.
     tick_budget: u64,
-    /// Benchmark: skip NN inference to measure the physics/overhead floor.
-    skip_nn: bool,
     /// Count of `recent_rewards` already handed to the learner. The drain returns
     /// the tail past this, so each finished episode's reward reaches the learner's
     /// reward curve exactly once. The learner's own host (which steps no world) never
@@ -418,7 +418,6 @@ impl TrainingState {
             checkpoint_dir: config.checkpoint_dir.clone(),
             saved_on_exit: false,
             tick_budget: config.ticks,
-            skip_nn: config.bench_skip_nn,
             reported_episodes: 0,
             normalizer_increment,
             drift_sum: 0.0,
@@ -588,10 +587,10 @@ impl TrainingState {
     /// return-normalizer/rng; see `super::update::ppo_update_core`). The live learner
     /// updates on the GPU (see `learner_parts_for_gpu` + the `GpuLearner`); this CPU
     /// accessor backs only the `#[cfg(test)]` CPU update test, which exercises the shared
-    /// update math without a GPU. The optimizer is not learner state: each CPU update site
-    /// (this test and the `bench-update --backend cpu` harness) builds its own via
-    /// [`super::checkpoint::crab_optimizer`], so the production learner carries no optimizer
-    /// the GPU path never steps. The return normalizer is the single copy (rollout threads
+    /// update math without a GPU. The optimizer is not learner state: the CPU update test
+    /// builds its own via [`super::checkpoint::crab_optimizer`], so the production learner
+    /// carries no optimizer the GPU path never steps. The return normalizer is the single
+    /// copy (rollout threads
     /// never touch it), handed out `&mut` to fold in the iteration's returns; `rng` drives
     /// the update's minibatch shuffle.
     #[cfg(test)]
@@ -937,9 +936,6 @@ fn normalize_observations(
 /// what makes N crabs cheaper than N apps. Returns each env's policy-mean row, the shared
 /// `log_std`, and each value. Value-head outputs enter the type system as [`NormalizedValue`]
 /// HERE (the single wrap point), so every stored value is in the head's normalized space.
-///
-/// `skip_nn` (bench mode) runs no network: the zeros it returns are irrelevant — the bench
-/// isolates physics + overhead, and the cheap sampling below still runs on them.
 fn forward_pass(
     training: &TrainingState,
     obs_arrays: &[[f32; OBS_SIZE]],
@@ -950,10 +946,6 @@ fn forward_pass(
 ) {
     let n = obs_arrays.len();
     let device = training.device;
-    if training.skip_nn {
-        let z = Tensor::<NdArray, 1>::zeros([ACTION_SIZE], &device);
-        return (vec![z.clone(); n], z, vec![NormalizedValue(0.0); n]);
-    }
     let flat: Vec<f32> = obs_arrays.iter().flat_map(|a| a.iter().copied()).collect();
     let obs_batch = Tensor::<NdArray, 2>::from_data(
         burn::tensor::TensorData::new(flat, [n, OBS_SIZE]),
@@ -1236,26 +1228,6 @@ pub(crate) fn brain_step(
         );
         exit.write(AppExit::Success);
     }
-}
-
-/// Settle ticks after a respawn: the fresh crab spawns in the rest pose with
-/// the builder motors already holding it, so this only covers the drop from
-/// spawn height onto the ground and the motors taking the load (0.5 s).
-///
-/// This is the ONE settle window for the whole project: the demo's post-respawn
-/// settle (`play::demo_settle`) reuses it via [`settle_countdown`] so a change to
-/// the drop window keeps training and the streamed demo in lock-step — they must
-/// hold zero actions for the same number of ticks or the demo stops mirroring the
-/// crab the policy was actually trained to settle.
-pub const RESET_GRACE_TICKS: u32 = 32;
-
-/// Advance a settle countdown by one tick: returns the grace for the next tick, or 0
-/// once the window is spent (the caller then resumes normal control — `Recording` for
-/// training, policy drive for the demo). Sole source of the post-respawn settle
-/// arithmetic so the training reset path ([`reset_crab`]) and the demo settle
-/// (`play::demo_settle`) decrement the exact same way.
-pub fn settle_countdown(grace: u32) -> u32 {
-    grace.saturating_sub(1)
 }
 
 /// System: rebuilds each env's crab when that env's episode ends by a normal
