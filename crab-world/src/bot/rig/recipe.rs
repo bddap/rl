@@ -571,6 +571,7 @@ fn carapace_box(model: &impl BindSource, center: Vec3) -> (Vec3, Vec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::colliders::{RestShape, link_capsule};
     use crate::bot::meshfit::{LoadedModel, model_path};
     use crate::bot::rig::fallback_recipe;
 
@@ -699,14 +700,20 @@ mod tests {
         );
     }
 
-    /// The clamped shoulder up-swing keeps BOTH reach effectors (palm `005`, pincer tip
-    /// `006`) at or below the carapace top — the regression guard for the "arm lifts up
-    /// through the shell / past the eye-stalks" bug. It reads the SPAWNED shoulder link's
-    /// own `axis_local` and bind-world pivot straight from the recipe — the exact axis the
-    /// actuator drives and the joint limit clamps — rather than re-deriving them, so the
-    /// guard can't silently test a phantom axis if the cheliped is ever re-bracketed. The
-    /// palm is the higher of the two effectors, so it's the binding one. `lo` is the
-    /// up-stop (−θ raises the arm; see the actuator). Pure geometry; skips with no model.
+    /// At the shoulder up-stop, the WHOLE cheliped CAPSULE ENVELOPE (the shoulder link
+    /// and its rigid descendants — forearm, palm, finger) stays at or below the carapace
+    /// top — the regression guard for the "arm intersects eye and carapace" bug
+    /// (bddap/rl#41 + its refinement). It checks the fitted capsule FLESH, not the bare
+    /// bone center: the highest point of each link's collider is `center + radius` along
+    /// its capsule, and at −0.6 the palm BONE CENTER sat just under the shell while the
+    /// fitted capsule still topped out ~0.09 above it — exactly the gap the old
+    /// center-only check missed. Geometry is read straight from the spawned recipe (each
+    /// link's own pivot, `axis_local`, capsule `center`/`col_rot`/`half_height`/`radius`),
+    /// so it can't drift onto a phantom axis if the cheliped is re-bracketed. The whole
+    /// subtree rides the shoulder rotation rigidly (wrist/pincer at their rest): a sweep
+    /// over the wrist/pincer travel confirmed that driving the distal joints never lifts
+    /// the flesh above this rigid-rest pose, so it is the empirical worst case for the
+    /// up-reach. Pure geometry (reuses [`link_capsule`]); skips with no model.
     #[test]
     fn shoulder_upswing_stays_below_carapace() {
         let Some(path) = model_path() else {
@@ -720,24 +727,42 @@ mod tests {
         // Bind-world origin of every link — a link's origin IS its joint pivot.
         let world = link_world_origins(&recipe.links, hub);
         for side in [Side::Left, Side::Right] {
-            let (link, &pivot) = recipe
+            let sh_idx = recipe
                 .links
                 .iter()
-                .zip(&world)
-                .find(|(l, _)| l.actuated == Some(CrabJointId::ClawShoulder(side)))
+                .position(|l| l.actuated == Some(CrabJointId::ClawShoulder(side)))
                 .expect("shoulder link present");
+            let pivot = world[sh_idx];
             // `axis_local` is in the parent frame, which is world at the bind rest (the
-            // parent carapace spawns unrotated), so it rotates the effectors directly.
+            // parent carapace spawns unrotated), so it rotates the subtree directly.
             let [lo, _hi] = CrabJointId::ClawShoulder(side).limits();
-            let rot = Quat::from_axis_angle(link.axis_local, lo);
-            for bone in ["005", "006"] {
-                let p = model.bone_origin(&pincer_bone(bone, side)).unwrap();
-                let y = (pivot + rot * (p - pivot)).y;
-                assert!(
-                    y <= box_top + 1e-3,
-                    "{side:?} cheliped {bone} reaches y={y:.3} at the up-stop θ={lo:.3}, \
-                     above the carapace top {box_top:.3} — arm clips the shell"
-                );
+            let rot = Quat::from_axis_angle(recipe.links[sh_idx].axis_local, lo);
+            // Every cheliped link on this side rides the shoulder rotation as one rigid body.
+            for (i, link) in recipe.links.iter().enumerate().filter(|(_, l)| {
+                matches!(
+                    l.actuated,
+                    Some(
+                        CrabJointId::ClawShoulder(s)
+                            | CrabJointId::ClawWrist(s)
+                            | CrabJointId::ClawPincer(s)
+                    ) if s == side
+                )
+            }) {
+                let RestShape::Capsule { a, b, radius } = link_capsule(link, world[i]) else {
+                    unreachable!("cheliped links spawn as capsules");
+                };
+                // Highest point of the rotated capsule = the higher cylinder cap (endpoint
+                // swung about the shoulder pivot) plus the hemispherical cap's radius.
+                for cap in [a, b] {
+                    let top = (pivot + rot * (cap - pivot)).y + radius;
+                    assert!(
+                        top <= box_top + 1e-3,
+                        "{side:?} cheliped {} capsule reaches y={top:.3} at the up-stop \
+                         θ={lo:.3}, above the carapace top {box_top:.3} — arm flesh clips \
+                         the shell/eye band",
+                        link.bone
+                    );
+                }
             }
         }
     }

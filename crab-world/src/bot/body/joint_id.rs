@@ -28,12 +28,17 @@ const CLAW_WRIST_TORQUE_CEILING: f32 = 3.0;
 // Cheliped shoulder travel is ASYMMETRIC about the bind rest, and a single source for
 // both sides (`CrabJointId::limits` matches `ClawShoulder(_)`). +θ swings the arm DOWN
 // toward the ground, keeping the full reach the last-metre grab needs; −θ LIFTS it. The
-// old symmetric −1.0 up-stop let the palm swing to y≈0.75 — up through the shell top
-// (≈0.61) and past the eye-stalks (≈0.52), the owner-reported "arms lift up through the
-// carapace". −0.6 rad raises the claw to about eye/shell-top level (defensive reach
-// kept) while the palm — the higher of the two reach effectors — stays below the shell.
-// Read off the bind-pose geometry; pinned by `rig::tests::shoulder_upswing_stays_below_carapace`.
-const CLAW_SHOULDER_UP_STOP: f32 = -0.6;
+// up-stop is bound by the CHELIPED CAPSULE FLESH (its highest point = collider center +
+// radius), NOT the bare bone center: at −0.6 the palm bone center sat just under the
+// shell top (≈0.61) so the old center-only guard passed, yet the fitted palm/forearm
+// capsules — which carry a real radius — still topped out ≈0.69, ~0.09 above the shell
+// and through the eye band (≈0.48–0.52), the owner-reported "arm intersects eye and
+// carapace" (bddap/rl#41 refinement). −0.35 rad lifts the claw to about eye level
+// (graceful defensive reach kept) while the whole cheliped capsule envelope stays ~2 cm
+// BELOW the carapace top — clear of the shell and eye-stalks, with margin for soft-limit
+// overshoot. Read off the bind-pose geometry; pinned by
+// `rig::tests::shoulder_upswing_stays_below_carapace` (now a capsule-flesh, not bone-center, guard).
+const CLAW_SHOULDER_UP_STOP: f32 = -0.35;
 const CLAW_SHOULDER_DOWN_STOP: f32 = 1.0;
 
 /// Breakaway torque of the leg joint-friction motor: the constant an external load

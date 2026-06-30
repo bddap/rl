@@ -134,9 +134,10 @@ pub fn recipe_silhouette(recipe: &RigRecipe) -> CrabSilhouette {
 }
 
 /// One link's capsule from its telescoped `origin`. Shared by [`rest_colliders`]
-/// (scoring) and [`recipe_silhouette`] (rendering) so the capsule geometry has a
-/// single definition that can't drift between the scored body and the drawn one.
-fn link_capsule(link: &RigLink, origin: Vec3) -> RestShape {
+/// (scoring), [`recipe_silhouette`] (rendering), and the shoulder up-stop regression
+/// guard ([`super::recipe`]'s tests) so the capsule geometry has a single definition
+/// that can't drift between the scored body, the drawn one, and the limit guard.
+pub(super) fn link_capsule(link: &RigLink, origin: Vec3) -> RestShape {
     let axis = link.col_rot * Vec3::Y * link.half_height;
     let c = origin + link.center;
     RestShape::Capsule {
