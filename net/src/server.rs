@@ -1,28 +1,31 @@
-//! The match server: the per-tick input ledger + roster coordinator (the GCR MP rewrite,
-//! Stage 1+2, bddap/rl#151).
+//! The match server: the AUTHORITATIVE per-tick stepper + input ledger + roster coordinator
+//! (the GCR host-authoritative MP rewrite, bddap/rl#151).
 //!
 //! Minecraft-style separation: server code is separate from the client even in one process,
-//! and every client (the server's own local one included) dials a server. The server is NOT
-//! authoritative over world state — lockstep is preserved (each client runs the full
-//! deterministic [`Sim`] from the shared input ledger). The server's ONE job is to be the
-//! input LEDGER + roster coordinator: it collects each client's input for a tick (up-channel
-//! [`TickMsg`]) and, once every rostered client's input for that tick is in, broadcasts the
-//! COMPLETE input set ([`TickSet`]) back down. Inputs flow UP, assembled input-sets flow DOWN;
-//! world state never crosses the wire (strict lockstep, no rewind/rollback).
+//! and every client (the server's own local one included) dials a server. As of increment 1
+//! (`docs/gcr-mp-host-authoritative.md`) the server is now AUTHORITATIVE over world state: it
+//! owns the integer [`Sim`] and steps it once per tick, emitting a [`CoreSnapshot`](crate::snapshot::CoreSnapshot) the local
+//! client APPLIES rather than stepping a sim of its own. "Solo" is the same path with a roster
+//! of one — an internal server + the single local client — so there is no separate single-player
+//! code path ([[sp-is-mp-special-case]]); SP always serializes the hand-off too (build →
+//! `to_bytes` → `from_bytes` → apply), no by-reference shortcut ([[silent-fallback-antipattern]]).
 //!
-//! "Solo" is the same path with a roster of one: an internal server + the single local client.
-//! That is the SP=MP-uniformity proof — there is no separate single-player code path, only the
-//! server with one client (see [`crate::render::driver`]).
+//! The server still ALSO keeps the input LEDGER + roster coordinator it had before — it collects
+//! each client's input for a tick (up-channel [`TickMsg`]) and, once every rostered client's input
+//! for that tick is in, both (a) feeds that assembled set to its authoritative step and (b)
+//! broadcasts the COMPLETE input set ([`TickSet`]) down to any REMOTE clients, which still run the
+//! old peer-symmetric lockstep until increment 2 migrates them onto the snapshot. Inputs flow UP;
+//! snapshots (local client) and assembled input-sets (remote clients, transitional) flow DOWN.
 //!
-//! This core is pure and transport-agnostic, exactly like [`crate::lockstep`]: it consumes
-//! recorded client messages and emits sets to broadcast. [`crate::transport`] / [`crate::net_loop`]
-//! move the bytes (loopback for the co-located client, QUIC for a remote one).
+//! The ledger/roster core is pure and transport-agnostic, exactly like [`crate::lockstep`]:
+//! [`crate::transport`] / [`crate::net_loop`] move the bytes (loopback for the co-located client,
+//! QUIC for a remote one). The one impurity is the owned [`Sim`] the authoritative step advances.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::lockstep::{Confirmed, INPUT_DELAY, TickMsg};
 use crate::roster::RosterSchedule;
-use crate::sim::{Input, PlayerId};
+use crate::sim::{Input, PlayerId, Pos, Sim};
 
 /// Ticks of lead between admitting a joiner and its roster change taking effect (Stage 3). Past the
 /// emit cursor so every client learns of the change, and the joiner can issue its first input,
@@ -158,18 +161,113 @@ pub struct Server {
     /// lockstep warmup, which each client runs on neutral input WITHOUT a server set (see
     /// [`crate::lockstep::Lockstep::advance_one`]), so the server never coordinates them.
     next_emit: u64,
+    /// The AUTHORITATIVE world this server owns and steps (rl#151 increment 1). Its per-tick
+    /// [`CoreSnapshot`](crate::snapshot::CoreSnapshot) is what every client renders; in SP the single local client applies it
+    /// instead of stepping a sim of its own ([[sp-is-mp-special-case]]). Stepped one tick at a time
+    /// by [`Server::step_next`], gated by [`Server::next_tick_ready`].
+    sim: Sim,
+    /// Assembled, in-order input sets awaiting the authoritative step — `(tick, inputs)`.
+    /// [`Coordinator::exchange`](crate::net_loop::Coordinator::exchange) files each emitted tick here
+    /// (via [`enqueue_for_step`](Server::enqueue_for_step)) so [`step_next`](Server::step_next) can
+    /// advance the sim AFTER the driver has pumped that tick's crab physics: the rapier pump needs the
+    /// bevy `World` (which this pure core can't hold), so the authoritative step can't run at drain
+    /// time. Filled ONLY on the windowed `Coordinator` path — the legacy headless `game net` host
+    /// drives `host_assemble`/`advance_one` directly and never steps the server's sim, so it never
+    /// enqueues here (no growth on the untouched remote path). Warmup ticks `[0, INPUT_DELAY)` are
+    /// never enqueued (the server emits nothing for them); `step_next` steps them on neutral input,
+    /// exactly as a client's lockstep warmup did — so the authoritative tick stream is gap-free.
+    pending_step: VecDeque<(u64, BTreeMap<PlayerId, Input>)>,
+}
+
+/// The freshly-pumped NN crab pose the authoritative server injects before stepping a tick
+/// (rl#151 increment 1). The driver owns the bevy `World`, so it pumps the rapier crab body and
+/// hands the resulting pose here; [`Server::step_next`] injects it via
+/// [`Sim::set_external_crab_pose`] at the one snapshot construction site, so the integer crab pose
+/// and the (later) render articulation can't drift ([[silent-fallback-antipattern]]). `None` to
+/// [`step_next`] leaves the crab untouched (an unarmed round behind the menu, where no body steps).
+#[derive(Debug, Clone, Copy)]
+pub struct CrabPose {
+    pub pos: Pos,
+    pub yaw: i32,
+    pub digest: u64,
 }
 
 impl Server {
-    /// Start a server for `roster` (the frozen participant set, us + any remote clients). For solo
-    /// this is just `[me]`; for a hosted match it is the whole agreed roster.
-    pub fn new(roster: &[PlayerId]) -> Self {
+    /// Start a server for `roster` (the frozen participant set, us + any remote clients) over the
+    /// authoritative `sim` it will step. For solo `roster` is just `[me]`; for a hosted match it is
+    /// the whole agreed roster. `sim` is the tick-0 world (the caller hands a clone of the client's
+    /// freshly-built sim, so the two start byte-identical and the snapshots keep the client in sync).
+    pub fn new(roster: &[PlayerId], sim: Sim) -> Self {
         Self {
             roster: RosterSchedule::frozen(roster),
             ledger: BTreeMap::new(),
             confirmed: BTreeMap::new(),
             emitted_confirmed: BTreeMap::new(),
             next_emit: INPUT_DELAY,
+            sim,
+            pending_step: VecDeque::new(),
+        }
+    }
+
+    /// Read-only view of the authoritative world (for the driver's hunt-target read + restart-edge
+    /// detection, and tests). The client renders from the SNAPSHOT this sim emits, never this sim
+    /// directly.
+    pub fn sim(&self) -> &Sim {
+        &self.sim
+    }
+
+    /// Whether the authoritative sim's next tick can be stepped NOW: a warmup tick `[0, INPUT_DELAY)`
+    /// (always steppable, on neutral input), or the next tick's complete input set has been assembled
+    /// and queued by [`drain_complete`](Server::drain_complete). `false` means the server is stalled
+    /// waiting on a client's input for this tick — exactly the wait a lockstep client would have had.
+    pub fn next_tick_ready(&self) -> bool {
+        let tick = self.sim.tick();
+        tick < INPUT_DELAY || self.pending_step.front().is_some_and(|(t, _)| *t == tick)
+    }
+
+    /// Advance the authoritative sim by exactly one tick and return the resulting [`CoreSnapshot`](crate::snapshot::CoreSnapshot)
+    /// already SERIALIZED to bytes — the host-authoritative step (rl#151 increment 1, doc 68-70).
+    /// Injects `crab` (the freshly-pumped NN crab pose; `None` ⇒ crab unchanged) FIRST so this tick's
+    /// grab/extraction resolve against the real body, then steps the sim with this tick's inputs
+    /// (warmup ⇒ a complete neutral map, exactly as [`Lockstep::advance_one`]'s warmup; otherwise the
+    /// assembled set [`next_tick_ready`](Server::next_tick_ready) gated on), then builds the snapshot
+    /// at this ONE site and returns its wire bytes. Returning bytes (not the struct) makes the
+    /// hand-off ALWAYS serialized — the client decodes and applies, no by-reference shortcut even in
+    /// SP ([[sp-is-mp-special-case]], [[silent-fallback-antipattern]]). Must be called only when
+    /// [`next_tick_ready`](Server::next_tick_ready) is `true`.
+    pub fn step_next(&mut self, crab: Option<CrabPose>) -> Vec<u8> {
+        let tick = self.sim.tick();
+        let inputs = if tick < INPUT_DELAY {
+            // Warmup: a complete neutral map for the roster at this tick — byte-identical to
+            // `Lockstep::advance_one`'s warmup fill, so the authoritative cold-start matches.
+            self.roster.at(tick).iter().map(|&p| (p, Input::default())).collect()
+        } else {
+            let (queued_tick, inputs) = self
+                .pending_step
+                .pop_front()
+                .expect("step_next called with no ready tick — guard on next_tick_ready");
+            debug_assert_eq!(
+                queued_tick, tick,
+                "authoritative step queue out of order with the sim tick"
+            );
+            inputs
+        };
+        if let Some(c) = crab {
+            self.sim.set_external_crab_pose(c.pos, c.yaw, c.digest);
+        }
+        self.sim.step(&inputs);
+        self.sim.core_snapshot().to_bytes()
+    }
+
+    /// Queue freshly-assembled [`TickSet`]s (from [`host_assemble`]) for the authoritative step, in
+    /// the order they were emitted — the windowed [`Coordinator`](crate::net_loop::Coordinator)
+    /// calls this after assembling so [`step_next`](Server::step_next) can advance the sim once the
+    /// driver has pumped each tick's crab physics. Kept OFF [`drain_complete`](Server::drain_complete)
+    /// on purpose so the legacy headless `game net` host (which assembles + steps its own lockstep,
+    /// never the server's sim) doesn't accumulate a queue it never drains.
+    pub fn enqueue_for_step(&mut self, sets: &[TickSet]) {
+        for set in sets {
+            self.pending_step.push_back((set.apply_tick, set.inputs.clone()));
         }
     }
 
@@ -358,6 +456,13 @@ mod tests {
         (0..n).map(PlayerId).collect()
     }
 
+    /// A server over `roster` with a tick-0 authoritative sim on `seed` (the ledger/roster tests
+    /// don't read the sim; the join/lockstep tests match their clients' seed so the authoritative
+    /// world agrees, though they assert on the lockstep clients, not the server's sim).
+    fn srv(seed: u64, roster: &[PlayerId]) -> Server {
+        Server::new(roster, Sim::new(seed, roster))
+    }
+
     fn input(s: f32) -> Input {
         Input::from_axes(s, 0.0)
     }
@@ -374,7 +479,7 @@ mod tests {
     /// warmup boundary. The SP=MP-uniformity core — solo is the server with a roster of one.
     #[test]
     fn solo_roster_completes_every_tick() {
-        let mut s = Server::new(&ids(1));
+        let mut s = srv(42, &ids(1));
         for t in INPUT_DELAY..INPUT_DELAY + 5 {
             let sets = s.record(
                 PlayerId(0),
@@ -394,7 +499,7 @@ mod tests {
     /// absorbs the wait so the clients never stall mid-set.
     #[test]
     fn tick_emitted_only_when_every_client_is_in() {
-        let mut s = Server::new(&ids(2));
+        let mut s = srv(42, &ids(2));
         let t = INPUT_DELAY;
         let none = s.record(
             PlayerId(0),
@@ -425,7 +530,7 @@ mod tests {
     /// client always receives a gap-free run.
     #[test]
     fn sets_emit_in_order_after_a_gap_fills() {
-        let mut s = Server::new(&ids(1));
+        let mut s = srv(42, &ids(1));
         let a = INPUT_DELAY;
         let b = INPUT_DELAY + 1;
         // Future tick first: buffered, nothing emitted (the cursor tick is still missing).
@@ -458,7 +563,7 @@ mod tests {
     /// can't spam a stale `Unverifiable`.
     #[test]
     fn confirmed_is_relayed_once_and_only_when_advancing() {
-        let mut s = Server::new(&ids(2));
+        let mut s = srv(42, &ids(2));
         let c = Confirmed { tick: 0, hash: 0xabc };
         // Player 1's confirmed rides its input; player 0 has none yet.
         let _ = s.record(
@@ -509,7 +614,7 @@ mod tests {
     /// not grow the ledger), and never blocks the rostered players.
     #[test]
     fn non_rostered_input_is_dropped() {
-        let mut s = Server::new(&ids(1));
+        let mut s = srv(42, &ids(1));
         let none = s.record(
             PlayerId(9),
             TickMsg {
@@ -540,7 +645,7 @@ mod tests {
         // Player 0 is the host (owns the server + runs a local client); player 1 is a remote client.
         // Drive them through the real `host_assemble`/`unpack_tickset` split, no transport.
         let roster = ids(2);
-        let mut server = Server::new(&roster);
+        let mut server = srv(42, &roster);
         let mut a = Lockstep::new(42, &roster, PlayerId(0)); // host's local client
         let mut b = Lockstep::new(42, &roster, PlayerId(1)); // remote client
         for t in 0..30u64 {
@@ -581,7 +686,7 @@ mod tests {
     /// Stage-3 determinism foundation (a positional renumber on join would desync every peer).
     #[test]
     fn admit_allocates_lowest_free_id_without_renumbering() {
-        let mut s = Server::new(&ids(2)); // [P0, P1]
+        let mut s = srv(42, &ids(2)); // [P0, P1]
         let a = s.admit();
         assert_eq!(a.pid, PlayerId(2), "the lowest id not already in use");
         assert_eq!(a.roster, vec![PlayerId(0), PlayerId(1), PlayerId(2)]);
@@ -598,7 +703,7 @@ mod tests {
     /// the old roster; the join tick stalls until the joiner's input is in too.
     #[test]
     fn a_scheduled_join_gates_completeness_from_its_tick() {
-        let mut s = Server::new(&ids(2));
+        let mut s = srv(42, &ids(2));
         let adm = s.admit(); // P2 joins at adm.effective_tick
         let t = adm.effective_tick;
         // Fill every tick up to the join boundary on P0+P1 — they complete WITHOUT the joiner (it
@@ -632,7 +737,7 @@ mod tests {
     /// and the joiner enters via `join_at`), all through the real `host_assemble`/`unpack_tickset`.
     fn run_round_with_joins(seed: u64, iters: u64, join_iters: &[u64]) -> (Lockstep, Vec<Lockstep>) {
         let roster0 = ids(2);
-        let mut server = Server::new(&roster0);
+        let mut server = srv(seed, &roster0);
         let mut host = Lockstep::new(seed, &roster0, PlayerId(0));
         let mut clients = vec![Lockstep::new(seed, &roster0, PlayerId(1))];
         // Deterministic, player- and tick-varied inputs so the round actually evolves (a constant
@@ -787,5 +892,104 @@ mod tests {
             may_admit_joiner(hw, ha, &JoinRequest { weights_digest: hw ^ 1, asset_digest: ha ^ 1 }),
             Err(AdmissionRefusal::WeightsMismatch { .. })
         ));
+    }
+
+    /// rl#151 increment 1 — the SP-IDENTITY invariant (doc 229). Over a scripted input + crab-pose
+    /// log, the host-authoritative path (the server steps its OWN sim and emits a snapshot the
+    /// client applies) produces the EXACT same per-tick `state_hash` as the increment-0 path (one
+    /// lockstep stepping ITSELF), tick-for-tick — proving the pivot is behavior-preserving. It also
+    /// checks the always-serialized hand-off: the client (which only ever calls `apply_core_snapshot`)
+    /// re-emits byte-identical snapshots, so it faithfully mirrors the authoritative carried state.
+    #[test]
+    fn server_authoritative_path_is_sp_identical() {
+        use crate::sim::buttons;
+        use crate::snapshot::CoreSnapshot;
+
+        const SEED: u64 = 0x00C0FFEE;
+        const SUBMITS: u64 = 40;
+        let me = PlayerId(0);
+        let roster = vec![me];
+
+        // A deterministic, tick-varied crab pose. The rapier body is external to the sim; here a
+        // synthetic stand-in is fed IDENTICALLY to both paths, so the comparison isolates the
+        // sim-stepping equivalence the increment changes, independent of the physics engine the
+        // live driver actually pumps (which feeds the SAME pose into both arms — see `drive_lockstep`).
+        let pose_at = |tick: u64| CrabPose {
+            pos: Pos { x: 700 + tick as i64 * 11, z: -300 - tick as i64 * 7 },
+            yaw: (tick as i32).wrapping_mul(4096),
+            digest: tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xABCD,
+        };
+        // Scripted local input that actually moves the player (forward + a strafe wiggle + an
+        // occasional ACTION), so the round evolves and a dropped field would diverge the hash.
+        let input_at = |i: u64| {
+            let strafe = ((i % 3) as f32 - 1.0) * 0.6;
+            let btns = if i % 5 == 4 { buttons::ACTION } else { 0 };
+            Input::new(strafe, 1.0, 0.0, btns)
+        };
+
+        // --- Path A: increment-0 baseline. One lockstep steps ITSELF: inject the pose then
+        // `advance_one`, exactly as the legacy driver arm does.
+        let mut baseline = Vec::new();
+        {
+            let mut ls = Lockstep::new(SEED, &roster, me);
+            for i in 0..SUBMITS {
+                let _ = ls.submit_local_input(input_at(i));
+                while ls.next_tick_ready() {
+                    let p = pose_at(ls.sim().tick());
+                    ls.set_external_crab_pose(p.pos, p.yaw, p.digest);
+                    ls.advance_one().expect("ready");
+                    baseline.push((ls.sim().tick(), ls.sim().state_hash()));
+                }
+            }
+        }
+
+        // --- Path B: increment-1. The server steps its OWN sim and emits a serialized snapshot; a
+        // SEPARATE client sim is advanced SOLELY by `apply_core_snapshot`. A throwaway lockstep
+        // stands in for the client's input scheduler (its `submit_local_input` is exactly what the
+        // real driver feeds the server via `exchange`).
+        let mut server_hashes = Vec::new();
+        {
+            // `client` is a real [`Lockstep`] (what the driver holds) that only ever APPLIES the
+            // server's snapshot — never `advance_one`. It doubles as the input scheduler, exactly as
+            // the windowed client's lockstep does (submit_local_input UP, apply snapshot DOWN).
+            let mut client = Lockstep::new(SEED, &roster, me);
+            let mut server = Server::new(&roster, Sim::new(SEED, &roster));
+            for i in 0..SUBMITS {
+                let msg = client.submit_local_input(input_at(i));
+                // Assemble + enqueue for the authoritative step, exactly as `Coordinator::exchange`
+                // does (record → enqueue_for_step) — a roster of one completes each tick at once.
+                let sets = server.record(me, msg);
+                server.enqueue_for_step(&sets);
+                while server.next_tick_ready() {
+                    let bytes = server.step_next(Some(pose_at(server.sim().tick())));
+                    let snap = CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
+                    client.apply_core_snapshot(snap);
+                    server_hashes.push((server.sim().tick(), server.sim().state_hash()));
+                    // The client faithfully mirrors the authoritative CARRIED state. It can't fold
+                    // the intentionally-dropped `external_crab_digest`, so its `state_hash` differs by
+                    // design — compare the snapshot it RE-EMITS, which must be byte-identical.
+                    assert_eq!(
+                        client.sim().core_snapshot().to_bytes(),
+                        bytes,
+                        "the client re-emits the server's exact snapshot (carried state mirrored)"
+                    );
+                    // The apply cursor tracks the adopted snapshot (the client doesn't step itself),
+                    // so next_tick stays honest rather than frozen at 0 while the sim advances.
+                    assert_eq!(
+                        client.next_tick(),
+                        client.sim().tick(),
+                        "applying a snapshot advances the client's apply cursor"
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            baseline, server_hashes,
+            "host-authoritative server-steps == lockstep self-steps, tick-for-tick (SP identical)"
+        );
+        // The warmup + real ticks were actually exercised, first applied tick brings the sim to 1.
+        assert_eq!(baseline.len() as u64, INPUT_DELAY + SUBMITS);
+        assert_eq!(baseline[0].0, 1);
     }
 }

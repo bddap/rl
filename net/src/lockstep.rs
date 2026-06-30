@@ -374,6 +374,36 @@ impl Lockstep {
         CoreSnapshot::from_bytes(&bytes).expect("a freshly-built snapshot must round-trip")
     }
 
+    /// Adopt the authoritative server's [`CoreSnapshot`] as this client's rendered state (rl#151
+    /// increment 1): the local client no longer STEPS its own sim — the server steps and emits a
+    /// snapshot per tick, and this overwrites the carried game state ([`Sim::apply_core_snapshot`]).
+    /// `scene::apply_transforms` then reads [`sim`](Lockstep::sim) exactly as before, tweening from
+    /// `prev`; the client's sim is the one this writes into. SP funnels the host's bytes through the
+    /// SAME decode a wire client will ([[sp-is-mp-special-case]]), so there is no by-reference SP
+    /// fork.
+    ///
+    /// Also drops our own now-stale submitted inputs: in the server-authoritative path we still call
+    /// [`submit_local_input`](Lockstep::submit_local_input) to file each tick's input UP to the
+    /// server (which schedules it `INPUT_DELAY` ahead), but we never [`advance_one`](Lockstep::advance_one)
+    /// to consume `self.inputs`, so without this prune it would grow unbounded. Everything at or
+    /// below the just-applied `tick` is spent; only the in-flight `INPUT_DELAY` window remains.
+    pub fn apply_core_snapshot(&mut self, snapshot: CoreSnapshot) {
+        let applied_tick = snapshot.tick;
+        self.sim.apply_core_snapshot(snapshot);
+        // Track the apply cursor to the snapshot we just adopted — the client no longer steps, so
+        // this is the one place it moves. `snapshot.tick` is the POST-step tick count (the sim is now
+        // AT it), so the next tick to apply equals it (mirroring `advance_one`, where after stepping
+        // tick T the cursor and `sim.tick()` are both T+1). Keeps `next_tick()` honest (it would
+        // otherwise sit at 0 forever while the sim advances, mis-stamping the `issue_tick` telemetry
+        // and leaving a stale cursor for the in_window / record_remote machinery the remote path
+        // still leans on).
+        self.next_apply_tick = applied_tick;
+        // Drop submitted inputs at or below the applied tick: we still call `submit_local_input` to
+        // file each tick's input UP to the server, but never `advance_one` to consume `self.inputs`,
+        // so without this prune the map would grow unbounded. Only the in-flight window survives.
+        self.inputs = self.inputs.split_off(&(applied_tick + 1));
+    }
+
     /// The most recently applied tick and its closing `state_hash` on THIS peer, or `None`
     /// before the first tick. Set by [`Self::advance_one`] the instant a tick is stepped, so
     /// a caller that drains one `advance_one` at a time can log every applied `(tick, hash)`

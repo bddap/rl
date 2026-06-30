@@ -272,7 +272,9 @@ pub enum Coordinator {
     /// We run the server. `net` is `None` for solo (no remote clients, so no iroh at all — solo
     /// stays network-free) and `Some` for a hosted match (relay to the remote clients).
     Server {
-        server: Server,
+        // Boxed: the [`Server`] now owns the authoritative [`crate::sim::Sim`] (rl#151 increment 1),
+        // so it dwarfs the `Client` variant's lone `NetDriver` — heap it to keep the enum balanced.
+        server: Box<Server>,
         net: Option<NetDriver>,
     },
     /// We are a remote client of another peer's server.
@@ -281,24 +283,32 @@ pub enum Coordinator {
 
 impl Coordinator {
     /// Build the coordinator for a freshly-formed round. `peers` is the sim's participant set (solo
-    /// ⇒ just `me`). The carrier stays `Option<NetDriver>` so the arming + determinism-pin decisions
-    /// upstream (which key off `net.is_some()`) are untouched: `None` ⇒ a solo server; a host driver
-    /// ⇒ a server over the roster (seeded with any early inputs); a client driver ⇒ a remote client.
-    pub fn for_round(net: Option<NetDriver>, peers: &[PlayerId]) -> Self {
+    /// ⇒ just `me`); `sim` is the tick-0 authoritative world the server steps (a clone of the
+    /// client's freshly-built sim, so the two start byte-identical). The carrier stays
+    /// `Option<NetDriver>` so the arming + determinism-pin decisions upstream (which key off
+    /// `net.is_some()`) are untouched: `None` ⇒ a solo server; a host driver ⇒ a server over the
+    /// roster (seeded with any early inputs); a client driver ⇒ a remote client (steps its own
+    /// lockstep until increment 2, so `sim` is unused there).
+    pub fn for_round(net: Option<NetDriver>, peers: &[PlayerId], sim: crate::sim::Sim) -> Self {
         match net {
             None => Coordinator::Server {
-                server: Server::new(peers),
+                server: Box::new(Server::new(peers, sim)),
                 net: None,
             },
             Some(mut d) if d.is_host() => {
-                let mut srv = Server::new(&d.roster());
+                let mut srv = Server::new(&d.roster(), sim);
                 srv.seed_early(&d.take_early());
                 Coordinator::Server {
-                    server: srv,
+                    server: Box::new(srv),
                     net: Some(d),
                 }
             }
-            Some(d) => Coordinator::Client { net: d },
+            // A remote client steps its own [`Lockstep`] (transitional, until increment 2 migrates
+            // it onto the host's snapshot), so it has no authoritative server and `sim` goes unused.
+            Some(d) => {
+                let _ = sim;
+                Coordinator::Client { net: d }
+            }
         }
     }
 
@@ -322,6 +332,11 @@ impl Coordinator {
                     .map(|net| admit_joiners(server, net, joins))
                     .unwrap_or_default();
                 let (sets, peer_msgs) = server::host_assemble(server, me, msg, remote);
+                // Queue the assembled sets for THIS server's authoritative step (rl#151 increment 1):
+                // the windowed driver pumps each tick's crab physics then calls `step_next`. Only the
+                // `Coordinator` path enqueues — the headless `game net` host assembles + steps its own
+                // lockstep directly, so it never grows this queue.
+                server.enqueue_for_step(&sets);
                 if let Some(net) = net.as_ref() {
                     net.broadcast_ticksets(&sets);
                 }
@@ -344,6 +359,31 @@ impl Coordinator {
     /// foot-only).
     pub fn is_solo(&self) -> bool {
         matches!(self, Coordinator::Server { net: None, .. })
+    }
+
+    /// Whether THIS peer runs the authoritative server for the round (solo or host) — so its local
+    /// client renders the per-tick [`CoreSnapshot`] the server emits instead of stepping its own
+    /// sim (rl#151 increment 1). A remote client returns `false` and keeps stepping its lockstep
+    /// (transitional, until increment 2). This is the Minecraft-model server/client role, NOT an
+    /// SP/MP split — SP and host take the SAME arm ([[sp-is-mp-special-case]]).
+    pub fn is_server_authoritative(&self) -> bool {
+        matches!(self, Coordinator::Server { .. })
+    }
+
+    /// The authoritative server, if THIS peer runs one (solo or host); `None` for a remote client.
+    pub fn server_mut(&mut self) -> Option<&mut Server> {
+        match self {
+            Coordinator::Server { server, .. } => Some(&mut **server),
+            Coordinator::Client { .. } => None,
+        }
+    }
+
+    /// Read-only view of the authoritative server, if THIS peer runs one.
+    pub fn server(&self) -> Option<&Server> {
+        match self {
+            Coordinator::Server { server, .. } => Some(&**server),
+            Coordinator::Client { .. } => None,
+        }
     }
 
     /// The transport, if any (host or client). `None` for solo.
@@ -1465,7 +1505,7 @@ mod tests {
         use crate::sim::Input;
         let me = PlayerId(0);
         let mut ls = Lockstep::new(0x5A11, &[me], me);
-        let mut coord = Coordinator::for_round(None, ls.peers());
+        let mut coord = Coordinator::for_round(None, ls.peers(), ls.sim().clone());
         assert!(coord.is_solo(), "no driver ⇒ a solo internal-server coordinator");
         let submits = 5u64;
         for _ in 0..submits {

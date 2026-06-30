@@ -111,7 +111,11 @@ async fn run_net(args: Args) -> Result<()> {
         .map(|(eid, _)| eid)
         .expect("a frozen roster always contains PlayerId(0)");
     let mut server = am_host.then(|| {
-        let mut s = net::server::Server::new(&all_ids);
+        // The headless host runs the Server as a pure input ledger + roster coordinator and steps its
+        // OWN lockstep `ls` (the legacy peer-symmetric path, untouched until increment 2), so the
+        // authoritative sim the Server now owns (rl#151 increment 1) is unused here — seed it from the
+        // identical tick-0 world `ls` was built from so its type is satisfied without a second seed.
+        let mut s = net::server::Server::new(&all_ids, ls.sim().clone());
         s.seed_early(&net_loop::early_peer_msgs(&frozen));
         s
     });
