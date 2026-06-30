@@ -21,16 +21,19 @@ pub(super) struct ManualControl {
 pub(super) struct ManualHud;
 
 /// System (BotSet::Think): hands-on gamepad control as an alternative to the policy.
-/// Y/triangle toggles it; while active the D-pad up/down cycles which joint is live
+/// B/circle toggles it; while active the D-pad up/down cycles which joint is live
 /// and the right stick's Y drives THAT joint's torque (effort, not a target angle),
 /// every other joint held at zero — a human feeling the joint dynamics by hand. When
-/// inactive it only refreshes the HUD; `policy_step` drives.
+/// inactive it hides its readout; `policy_step` drives. The "how to enter manual" prompt
+/// lives in the data-driven controls overlay (hold Tab/View), not an always-on banner —
+/// so this readout shows ONLY while manual is live (the joint being felt), nothing in the
+/// default policy view.
 pub(super) fn manual_control_step(
     gamepads: Query<&Gamepad>,
     joint_ids: Query<&CrabJoint>,
     mut manual: ResMut<ManualControl>,
     mut actions: ResMut<CrabActions>,
-    mut hud: Query<&mut Text, With<ManualHud>>,
+    mut hud: Query<(&mut Text, &mut Visibility), With<ManualHud>>,
 ) {
     let Some(gp) = gamepads.iter().next() else {
         return;
@@ -43,7 +46,7 @@ pub(super) fn manual_control_step(
     }
 
     let n = CrabJointId::COUNT;
-    let mut line = "POLICY  (press B / circle for hands-on manual control)".to_string();
+    let mut line = String::new();
     if manual.active {
         if gp.just_pressed(GamepadButton::DPadUp) {
             manual.selected = Some(manual.selected.map_or(0, |i| (i + 1) % n));
@@ -63,35 +66,42 @@ pub(super) fn manual_control_step(
                         .find(|j| j.id.index() == sel)
                         .map(|j| format!("{:?}", j.id))
                         .unwrap_or_else(|| format!("#{sel}"));
-                    format!(
-                        "MANUAL  (B: exit   D-pad: pick joint   R-stick Y: torque)\n\
-                         joint {sel}/{n}  {name}   torque {v:+.2}"
-                    )
+                    format!("MANUAL · {name} {}/{n} · torque {v:+.2}", sel + 1)
                 }
-                None => {
-                    "MANUAL  (B: exit   D-pad up/down: pick a joint, then R-stick Y to actuate)"
-                        .to_string()
-                }
+                None => "MANUAL · pick a joint (D-pad)".to_string(),
             };
         }
     }
-    if let Ok(mut text) = hud.single_mut() {
-        **text = line;
+    if let Ok((mut text, mut vis)) = hud.single_mut() {
+        // Touch each component only on an actual change so a hidden HUD in policy mode
+        // isn't churning change-detection every frame. `line` is empty unless active, so
+        // the text only updates while the readout is shown.
+        let want = if manual.active {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != want {
+            *vis = want;
+        }
+        if manual.active && **text != line {
+            **text = line;
+        }
     }
 }
 
-/// Top-right readout of the active driver (policy vs manual) and the live joint.
-/// Top-right because the joint-telemetry graph owns the top-left corner.
+/// Top-right readout of the live manual joint, hidden in policy mode. Top-right because the
+/// joint-telemetry graph owns the top-left corner; `manual_control_step` shows it only while
+/// hands-on control is active.
 pub(super) fn spawn_manual_hud(mut commands: Commands) {
     commands.spawn((
-        // Overwritten every frame by `manual_control_step`; seed it with the idle
-        // (policy) line so the pre-first-update frame doesn't flash a stale label.
-        Text::new("POLICY  (press B / circle for hands-on manual control)"),
+        Text::new(""),
         TextFont {
-            font_size: 18.0,
+            font_size: 16.0,
             ..default()
         },
         TextColor(Color::srgb(1.0, 0.9, 0.4)),
+        Visibility::Hidden,
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(12.0),

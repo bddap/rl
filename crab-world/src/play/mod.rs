@@ -84,6 +84,33 @@ impl Default for DemoRng {
     }
 }
 
+/// The screen height the demo's HUD is sized for — the Steam Deck's 1280×800 panel, the
+/// surface the owner actually watches the streamed demo on. Every HUD size (glyph px, font px,
+/// padding) is authored against this height.
+const UI_REFERENCE_HEIGHT: f32 = 800.0;
+
+/// Keep the UI a constant FRACTION of the screen by scaling it to the live window height
+/// against [`UI_REFERENCE_HEIGHT`]. The demo renders borderless-fullscreen at the host
+/// monitor's resolution, then Steam Remote Play scales that whole frame to the deck's
+/// 1280×800; with fixed-pixel UI and no scaling the HUD came out wrong-sized on the deck
+/// (tiny on a tall host, huge on a short one). Tying `UiScale` to height/800 makes the HUD
+/// look deck-correct whatever the host monitor is. Windowed demo only — the windowless
+/// screenshot/render paths have no window and render at the requested size with `UiScale`
+/// 1.0, which IS the 800-px reference, so the evidence frame matches the deck.
+fn sync_ui_scale(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut ui_scale: ResMut<UiScale>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    // `clamp` guards a degenerate (e.g. minimized, ~0-height) window from zeroing the UI.
+    let scale = (window.resolution.height() / UI_REFERENCE_HEIGHT).clamp(0.5, 3.0);
+    if (ui_scale.0 - scale).abs() > 1e-3 {
+        ui_scale.0 = scale;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Demo: windowed, interactive
 // ---------------------------------------------------------------------------
@@ -110,15 +137,8 @@ impl Plugin for DemoPlugin {
             .init_resource::<PokeBurst>()
             // Seeds the demo's tilt/poke/ball randomness (entropy, or RL_DEMO_SEED).
             .init_resource::<DemoRng>()
-            .add_systems(
-                Startup,
-                (
-                    spawn_orbit_camera,
-                    spawn_target_ball,
-                    crate::build_info::spawn_build_info_overlay,
-                ),
-            )
-            .add_systems(Update, (orbit_camera, demo_controls))
+            .add_systems(Startup, (spawn_orbit_camera, spawn_target_ball))
+            .add_systems(Update, (orbit_camera, demo_controls, sync_ui_scale))
             .add_systems(
                 FixedUpdate,
                 (
