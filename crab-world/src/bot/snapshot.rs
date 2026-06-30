@@ -365,6 +365,35 @@ mod tests {
         assert!(CrabPhysicsSnapshot::from_bytes(&[]).is_err());
     }
 
+    /// DETERMINISM (rl#139) — the base guarantee the restore/replay proofs build on, asserted
+    /// on its own: two FRESH worlds built and stepped from the SAME scripted torque sequence
+    /// (the "seed") produce BIT-IDENTICAL per-tick digest traces over `REPLAY` ticks. No
+    /// snapshot/restore here — this pins that the sim is reproducible *from construction*, the
+    /// precondition lockstep peers and reproducible training both rest on. A future change that
+    /// slips an unseeded RNG or an order-dependent float reduction into the hashed path fails
+    /// loudly here, on the tick it first diverges, instead of as a mysterious desync later.
+    #[test]
+    fn fresh_same_seed_worlds_step_bit_identical() {
+        let seq = scripted_actions(WARMUP + REPLAY);
+        let trace_a = step_collect(&mut warmed_world(&seq), &seq, WARMUP, REPLAY);
+        let trace_b = step_collect(&mut warmed_world(&seq), &seq, WARMUP, REPLAY);
+
+        // Non-vacuous: the trajectory genuinely evolves (the flail schedule moved the crab), so
+        // an all-equal trace can't trivially satisfy the bit-identity below.
+        assert!(
+            trace_a.iter().collect::<std::collections::HashSet<_>>().len() > 1,
+            "trajectory was static — the scripted torque didn't perturb the crab"
+        );
+        for (t, (a, b)) in trace_a.iter().zip(&trace_b).enumerate() {
+            assert_eq!(
+                a, b,
+                "DIVERGED at tick {t}/{REPLAY}: world-A {a:#018x} != world-B {b:#018x} — the sim \
+                 is NOT reproducible from identical construction (an unseeded RNG or an \
+                 order-dependent reduction entered the hashed path)"
+            );
+        }
+    }
+
     /// Restore the snapshot into a world, then step it `REPLAY` ticks under `seq`, returning the
     /// per-tick digest trace and the post-restore (pre-step) digest.
     fn restore_and_replay(build: impl Fn() -> App, bytes: &[u8], seq: &[[f32; ACTION_SIZE]]) -> (u64, Vec<u64>) {

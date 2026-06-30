@@ -85,8 +85,8 @@ fn demo_respawn(
 /// A fresh random goofy spawn tilt for a demo respawn (see
 /// [`body::random_spawn_rotation`]): mostly mild, sometimes fully inverted, random
 /// yaw — so the demo crab keeps landing at new angles to right itself from.
-fn random_demo_tilt() -> Quat {
-    body::random_spawn_rotation(&mut rand::thread_rng())
+fn random_demo_tilt(rng: &mut impl Rng) -> Quat {
+    body::random_spawn_rotation(rng)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -104,6 +104,9 @@ pub(super) fn demo_controls(
     // The SHARED render-mode cycle (the same `crab_view::RenderMode` GCR uses), so the demo and
     // GCR show the ONE collider wireframe. Replaces the old Rapier debug-render toggle.
     mut render_mode: ResMut<crate::crab_view::RenderMode>,
+    // The demo's one seedable RNG — the respawn tilt and poke impulse draw from it (RL_DEMO_SEED
+    // pins them), so the demo no longer reaches for an unseeded `thread_rng`.
+    mut rng: ResMut<super::DemoRng>,
 ) {
     let mut reset = keys.just_pressed(KeyCode::KeyR);
     let mut poke = keys.just_pressed(KeyCode::Space);
@@ -135,11 +138,11 @@ pub(super) fn demo_controls(
             parts_q.iter(),
             &mut settle,
             &mut actions,
-            random_demo_tilt(),
+            random_demo_tilt(&mut rng.0),
         );
     }
     if poke {
-        let mut rng = rand::thread_rng();
+        let rng = &mut rng.0;
         let dir =
             Vec3::new(rng.gen_range(-1.0..1.0), 0.25, rng.gen_range(-1.0..1.0)).normalize_or_zero();
         *poke_burst = PokeBurst {

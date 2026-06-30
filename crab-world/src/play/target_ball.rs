@@ -87,6 +87,7 @@ pub(super) fn target_ball(
     mut targets: ResMut<CrabTargets>,
     claw_tips_q: Query<(&body::CrabEnvId, &Transform), With<CrabClawTip>>,
     mut ball_q: Query<&mut Transform, (With<TargetBall>, Without<CrabClawTip>)>,
+    mut rng: ResMut<super::DemoRng>,
 ) {
     let origin = spawns.0.first().copied().unwrap_or(Vec3::ZERO);
 
@@ -102,7 +103,7 @@ pub(super) fn target_ball(
     let mut target = match targets.get(0) {
         Some(t) => t,
         None => target_ball_at_from_env()
-            .unwrap_or_else(|| sample_target(origin, demo_band, &mut rand::thread_rng())),
+            .unwrap_or_else(|| sample_target(origin, demo_band, &mut rng.0)),
     };
 
     // Closest 3D euclidean distance from either claw tip to the target (the reward's
@@ -118,7 +119,7 @@ pub(super) fn target_ball(
     // Reached → relocate to a fresh far target (demo watchability only; see the fn
     // doc on why training does NOT do this). The ball follows the new target below.
     if min_dist <= DEMO_REACH_RADIUS {
-        target = sample_target(origin, demo_band, &mut rand::thread_rng());
+        target = sample_target(origin, demo_band, &mut rng.0);
     }
 
     // Write the one source of truth (seed or relocation), then snap the ball to it.

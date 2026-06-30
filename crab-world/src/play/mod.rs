@@ -30,6 +30,8 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 use crate::bot::BotSet;
 use crate::bot::body::CrabCarapace;
@@ -58,6 +60,29 @@ use manual_control::{ManualControl, manual_control_step, spawn_manual_hud};
 use policy::{add_inference, policy_step};
 use target_ball::{spawn_target_ball, target_ball};
 
+/// The ONE seedable RNG behind every bit of demo/screenshot randomness — the goofy respawn
+/// tilt, the poke impulse, and the target-ball relocation. It replaces the scattered
+/// `rand::thread_rng()` those sites used: a wall-clock-seeded RNG made an evidence screenshot
+/// or a rendered clip impossible to reproduce (the exact reason `RL_TARGET_BALL_AT` had to
+/// exist to pin the ball). Defaults to entropy so a live demo still varies run-to-run; set
+/// `RL_DEMO_SEED=<u64>` to pin the whole demo's randomness for a reproducible frame or video.
+///
+/// This is the DEMO's RNG only — it never feeds the policy or the physics solver. The
+/// determinism-critical sim/training core carries its own seeded `StdRng` and seeds the
+/// weight-init backend separately (see `training::systems`); the two never cross.
+#[derive(Resource)]
+pub(super) struct DemoRng(pub(super) StdRng);
+
+impl Default for DemoRng {
+    fn default() -> Self {
+        let seed = std::env::var("RL_DEMO_SEED")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(rand::random);
+        Self(StdRng::seed_from_u64(seed))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Demo: windowed, interactive
 // ---------------------------------------------------------------------------
@@ -82,6 +107,8 @@ impl Plugin for DemoPlugin {
         app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default());
         app.init_resource::<DemoSettle>()
             .init_resource::<PokeBurst>()
+            // Seeds the demo's tilt/poke/ball randomness (entropy, or RL_DEMO_SEED).
+            .init_resource::<DemoRng>()
             .add_systems(
                 Startup,
                 (
@@ -172,7 +199,9 @@ impl Plugin for ScreenshotPlugin {
         // teleports the target exactly as in the demo. Inert by default — a plain
         // screenshot is unchanged.
         if std::env::var_os("RL_TARGET_BALL").is_some() {
-            app.add_systems(Startup, spawn_target_ball)
+            // `target_ball` relocates off DemoRng; seed it (RL_DEMO_SEED pins the frame).
+            app.init_resource::<DemoRng>()
+                .add_systems(Startup, spawn_target_ball)
                 .add_systems(FixedUpdate, target_ball.after(BotSet::Sense));
         }
         app.insert_resource(ShotConfig {
