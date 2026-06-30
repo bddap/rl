@@ -129,6 +129,8 @@ impl Plugin for RenderVideoPlugin {
         })
         .init_resource::<VideoProgress>()
         .init_resource::<DriveStats>()
+        // Seeds target_ball's relocation RNG; RL_DEMO_SEED makes the rendered clip reproducible.
+        .init_resource::<super::DemoRng>()
         .add_systems(FixedUpdate, policy_step.in_set(BotSet::Think))
         // Read the actions the policy just wrote, after Think, before they're consumed —
         // the objective effort accounting.

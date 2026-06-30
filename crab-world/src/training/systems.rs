@@ -1389,6 +1389,53 @@ mod tests {
         assert_eq!(cached.with_inference(&policy_bits), want_c);
     }
 
+    /// DETERMINISM (rl#139): a fresh brain's weight init is REPRODUCIBLE from the backend seed.
+    /// `CrabBrain::new` draws its initial weights from the backend's RNG, which `TrainState::build`
+    /// seeds per run (`Backend::seed`) precisely so a run can be replayed from its logged `--seed`.
+    /// This pins the contract the opposite way from `inference_cache_…` (which proves two UNSEEDED
+    /// brains differ): seed identically ⇒ bit-identical weights; seed differently ⇒ different. A
+    /// reseed regression that quietly made init unseedable would otherwise make every run
+    /// unrepeatable with no test to catch it.
+    #[test]
+    fn brain_init_is_reproducible_from_the_backend_seed() {
+        let device = NdArrayDevice::Cpu;
+        let obs = Tensor::<InferBackend, 2>::zeros([3, OBS_SIZE], &device);
+        // Bits of the full forward output (policy means + log_std + value) — a faithful
+        // fingerprint of the initial weights, the same projection `inference_cache_…` hashes.
+        let weight_bits = |brain: &CrabBrain<InferBackend>| -> Vec<u32> {
+            let (means, log_std) = brain.policy(obs.clone());
+            let value = brain.value(obs.clone());
+            let bits = |t: &[f32]| -> Vec<u32> { t.iter().map(|v| v.to_bits()).collect() };
+            let mut out = bits(&means.to_data().to_vec::<f32>().unwrap());
+            out.extend(bits(&log_std.to_data().to_vec::<f32>().unwrap()));
+            out.extend(bits(&value.to_data().to_vec::<f32>().unwrap()));
+            out
+        };
+        let init_with_seed = |seed: u64| -> Vec<u32> {
+            <TrainBackend as burn::tensor::backend::Backend>::seed(&device, seed);
+            weight_bits(&CrabBrain::<TrainBackend>::new(&device).valid())
+        };
+
+        // The backend's init RNG is process-GLOBAL, so under a parallel test run a sibling
+        // brain-building test can consume it between our seed and our build and perturb one
+        // sample. That race only ever makes same-seed weights spuriously DIFFER (never makes two
+        // different seeds collide), so the reproducibility check just needs ONE uncontended
+        // same-seed window — retry to find it; a genuine non-determinism never produces one.
+        let reproducible = (0..16).any(|_| init_with_seed(0x5EED) == init_with_seed(0x5EED));
+        assert!(
+            reproducible,
+            "same backend seed never reproduced identical initial weights across 16 tries — init \
+             is not seed-deterministic, so training can't replay a run from its logged --seed"
+        );
+        // Different seeds must give different weights (else seeding is a no-op). Race-immune: an
+        // interleave can't make two genuinely-different seeds produce equal weights.
+        assert_ne!(
+            init_with_seed(0x5EED),
+            init_with_seed(0xC0FFEE),
+            "different seeds must give different initial weights, else seeding does nothing"
+        );
+    }
+
     /// The terminal-vs-truncation contract the value targets depend on (rl#95): a GRAB or a
     /// fall is a TRUE terminal (GAE bootstrap 0); the step cap is a TRUNCATION (bootstrap the
     /// cut-short value); otherwise the trajectory continues. A grab OUTRANKS the cap — a step
