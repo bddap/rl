@@ -10,13 +10,12 @@ use rand::Rng;
 
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::bot::body::{self, CrabAssets, CrabBodyPart, CrabCarapace};
-use crate::bot::{CrabSpawns, respawn_crab_rotated};
-use crate::training::systems::{RESET_GRACE_TICKS, settle_countdown};
+use crate::bot::{CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown};
 
 /// Settle ticks remaining after a reset. The respawned crab starts in the
 /// rest pose with the builder motors already holding it; the settle just
 /// holds zero actions while it drops onto the ground and takes load. Seeded from
-/// training's [`RESET_GRACE_TICKS`] and decremented via the shared
+/// the shared [`RESET_GRACE_TICKS`] and decremented via the shared
 /// [`settle_countdown`] so the demo's drop window stays identical to the one the
 /// policy was trained under (0 = settled, policy back in control).
 #[derive(Resource, Default)]

@@ -36,7 +36,7 @@ pub(super) fn manual_control_step(
         return;
     };
     // East (B / circle), NOT North: North already toggles the joint-telemetry
-    // graph (player::graph), so sharing it fired both on one press.
+    // graph (play::graph), so sharing it fired both on one press.
     if gp.just_pressed(GamepadButton::East) {
         manual.active = !manual.active;
         manual.selected = None;

@@ -19,14 +19,14 @@ use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::OBS_SIZE;
 
 /// The Adam optimizer over a `CrabBrain` on backend `B`. Generic over the backend so
-/// the one PPO update ([`super::update::ppo_update_core`]) serves the live GPU learner,
-/// the GPU/CPU `bench-update` comparison, and the CPU-backed update test from one code path.
+/// the one PPO update ([`super::update::ppo_update_core`]) serves the live GPU learner
+/// and the CPU-backed update test from one code path.
 pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, CrabBrain<B>, B>;
 
 /// Build the learner's Adam optimizer (global grad-norm clip 0.5). The ONE source of
-/// the optimizer construction — the live `GpuLearner`, the `bench-update` harness, and
-/// the CPU-backed update test all call this, so the clip constant can't silently drift
-/// between paths meant to be identical.
+/// the optimizer construction — the live `GpuLearner` and the CPU-backed update test
+/// both call this, so the clip constant can't silently drift between paths meant to be
+/// identical.
 pub(crate) fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
     AdamConfig::new()
         .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))

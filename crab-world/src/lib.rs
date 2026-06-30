@@ -57,8 +57,6 @@ pub mod vehicle;
 pub mod crab_view;
 #[cfg(feature = "render")]
 pub mod play;
-#[cfg(feature = "render")]
-pub mod player;
 /// Procedural night-sky skybox shared by both rendered surfaces (rl-demo + GCR). `pub`
 /// because the `net` crate's GCR app builders add its [`sky::NightSkyPlugin`] too.
 #[cfg(feature = "render")]
@@ -95,12 +93,6 @@ pub struct TrainConfig {
     /// or after N (overshooting by up to one K·(--envs)·H iteration's worth of ticks).
     #[arg(long, default_value_t = 0)]
     pub ticks: u64,
-
-    /// Benchmark only: skip NN inference in the train loop (hold zero actions),
-    /// isolating physics + engine overhead from network cost. Training is
-    /// meaningless under this flag — it exists to measure the per-step bottleneck.
-    #[arg(long)]
-    pub bench_skip_nn: bool,
 
     /// Environments M each rollout thread steps in its one world per tick (one
     /// batched NN pass over the M crabs, which sit on a 4 m grid). Total parallel
