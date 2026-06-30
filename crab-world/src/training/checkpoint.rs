@@ -396,8 +396,10 @@ mod tests {
         let loaded = CrabBrain::<TrainBackend>::new(&device).load_record(loaded_record);
 
         let test_obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
-        let (orig_means, orig_log_std) = brain.policy(test_obs.clone());
-        let (loaded_means, loaded_log_std) = loaded.policy(test_obs);
+        let (orig_means, orig_log_std) =
+            brain.policy(test_obs.clone(), crate::bot::brain::LOG_STD_MIN);
+        let (loaded_means, loaded_log_std) =
+            loaded.policy(test_obs, crate::bot::brain::LOG_STD_MIN);
 
         let orig_m: Vec<f32> = orig_means.to_data().to_vec().unwrap();
         let loaded_m: Vec<f32> = loaded_means.to_data().to_vec().unwrap();
@@ -427,7 +429,7 @@ mod tests {
         device: &NdArrayDevice,
     ) -> (CrabBrain<TrainBackend>, CrabOpt<TrainBackend>) {
         let obs = Tensor::<TrainBackend, 2>::ones([4, OBS_SIZE], device);
-        let (means, log_std) = brain.policy(obs);
+        let (means, log_std) = brain.policy(obs, crate::bot::brain::LOG_STD_MIN);
         let loss = means.sum() + log_std.sum();
         let grads = loss.backward();
         let grads = GradientsParams::from_grads(grads, &brain);
@@ -437,7 +439,7 @@ mod tests {
 
     fn policy_means(brain: &CrabBrain<TrainBackend>, device: &NdArrayDevice) -> Vec<f32> {
         let obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], device);
-        brain.policy(obs).0.to_data().to_vec().unwrap()
+        brain.policy(obs, crate::bot::brain::LOG_STD_MIN).0.to_data().to_vec().unwrap()
     }
 
     #[test]

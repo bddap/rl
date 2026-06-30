@@ -344,7 +344,9 @@ impl Policy {
         let obs = self.normalizer.normalize_frozen(raw_obs);
         let input =
             Tensor::<InferBackend, 1>::from_floats(obs.as_slice(), &self.device).unsqueeze();
-        let (means, _log_std) = self.brain.policy(input);
+        // Eval/demo is deterministic: it takes the policy MEAN and discards `log_std`, so the
+        // exploration-σ floor never reaches a deployed action. Pass the resting floor.
+        let (means, _log_std) = self.brain.policy(input, crate::bot::brain::LOG_STD_MIN);
         let flat: Vec<f32> = means.flatten::<1>(0, 1).to_data().to_vec().unwrap();
 
         let mut out = [0.0f32; ACTION_SIZE];

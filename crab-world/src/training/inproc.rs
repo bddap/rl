@@ -220,6 +220,37 @@ fn write_tick_watermark(dir: &Path, ticks: u64) {
     }
 }
 
+/// Filename of the exploration-σ schedule epoch, beside the checkpoint. Holds the tick
+/// odometer reading at which the σ-anneal schedule began, so "wide early" is measured from
+/// THIS experiment's start, not the resumed checkpoint's absolute training age (which may
+/// already be tens of millions of ticks).
+const ANNEAL_EPOCH_FILENAME: &str = "log_std_anneal_epoch.txt";
+
+/// The tick at which the exploration-σ schedule's "early" begins, for a learner resuming at
+/// `total_ticks` (bddap/rl#161). Reads the persisted epoch so the anneal continues across the
+/// frequent restarts the overnight loop makes; on the first launch with the schedule, OR when
+/// the odometer has gone BACKWARDS versus the stored epoch (a cold checkpoint reset, which
+/// leaves this sidecar untouched), it (re)anchors the epoch at `total_ticks` and persists it.
+/// So a warm resume keeps annealing, a fresh/cold run starts wide, and neither needs the
+/// launcher to track anything.
+fn read_or_init_anneal_epoch(dir: &Path, total_ticks: u64) -> u64 {
+    let path = dir.join(ANNEAL_EPOCH_FILENAME);
+    let stored = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    match stored {
+        Some(epoch) if epoch <= total_ticks => epoch,
+        _ => {
+            // Same fsync'd atomic write the rest of the checkpoint uses (rl#179): a torn epoch
+            // sidecar would only re-anchor on the next read, but keep the durability uniform.
+            if let Err(e) = super::atomic_write(&path, total_ticks.to_string().as_bytes()) {
+                eprintln!("[learner] failed to persist σ-anneal epoch to {path:?}: {e}");
+            }
+            total_ticks
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rollout thread
 // ---------------------------------------------------------------------------
@@ -236,6 +267,10 @@ struct RollRequest {
     /// The fixed full-arena target-distance band the thread samples this horizon's targets
     /// from. `Copy` (a tiny band), so no `Arc` is warranted.
     curriculum: Curriculum,
+    /// This horizon's exploration-σ floor — the lower `log_std` clamp the thread samples under
+    /// (bddap/rl#161). The learner evaluates the anneal schedule from the durable tick odometer
+    /// once per iteration and ships it so rollout and the subsequent update agree on σ.
+    log_std_floor: f32,
 }
 
 /// What a rollout thread returns after one horizon.
@@ -414,6 +449,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
             return RollOutcome::SnapshotLoadFailed;
         }
         st.set_curriculum(req.curriculum);
+        st.set_log_std_floor(req.log_std_floor);
         st.reset_horizon_counter();
     }
 
@@ -543,11 +579,16 @@ struct MergedRollout {
 /// weights, the master normalizer baseline (a snapshot, never an increment), and the
 /// curriculum band. Captured before any thread runs, so none sees a half-updated net.
 #[cfg(feature = "wgpu")]
-fn snapshot_policy(state: &TrainingState, curriculum: Curriculum) -> RollRequest {
+fn snapshot_policy(
+    state: &TrainingState,
+    curriculum: Curriculum,
+    log_std_floor: f32,
+) -> RollRequest {
     RollRequest {
         brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
         normalizer: Arc::new(state.normalizer_snapshot()),
         curriculum,
+        log_std_floor,
     }
 }
 
@@ -808,6 +849,19 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // restart would re-grant the full `--ticks` budget and over-simulate.
     let mut total_ticks = read_tick_watermark(&checkpoint_dir);
 
+    // Anchor the exploration-σ anneal to THIS experiment's start (bddap/rl#161): the schedule
+    // ramps from a wide floor down to the refine floor over `log_std_anneal_ticks`, measured
+    // from `anneal_epoch`. Persisted beside the checkpoint so the anneal continues across the
+    // overnight loop's restarts rather than re-widening on every relaunch.
+    let anneal_epoch = read_or_init_anneal_epoch(&checkpoint_dir, total_ticks);
+    eprintln!(
+        "[learner] exploration-σ schedule: log_std floor {:.3} → {:.3} over {} ticks (epoch @ {} ticks)",
+        state.config.log_std_floor_start,
+        state.config.log_std_floor_end,
+        state.config.log_std_anneal_ticks,
+        anneal_epoch,
+    );
+
     // The target-distance band is FIXED at the full arena range (see `Curriculum`): every
     // episode samples a target uniformly across the whole arena, near and far. The
     // scale-free progress reward gives signal at any distance, so there is no growth
@@ -852,9 +906,18 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         }
         let wall_start = Instant::now();
 
+        // This iteration's exploration-σ floor from the anneal schedule, keyed to ticks since
+        // the experiment's epoch (bddap/rl#161). The SAME scalar drives the rollout sampling
+        // (via the snapshot) and the PPO update's on-backend log-prob recompute, so behavior
+        // and update policies share σ. `total_ticks` is the pre-iteration odometer here (it is
+        // bumped after the update below), so rollout and update agree within the iteration.
+        let log_std_floor = state
+            .config
+            .log_std_floor(total_ticks.saturating_sub(anneal_epoch));
+
         // 1) Capture the consistent per-iteration snapshot (weights + master normalizer +
         //    the fixed full-range band, none half-updated) and persist a checkpoint.
-        let request = snapshot_policy(&state, curriculum);
+        let request = snapshot_policy(&state, curriculum, log_std_floor);
         persist_checkpoint(&state, &gpu_learner, &checkpoint_dir);
 
         // 2) Roll one synchronous horizon across all threads.
@@ -875,8 +938,14 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
         //    so it is the honest per-iter update cost.
         let update_start = Instant::now();
         let (brain, ppo_config, ret_norm, rng) = state.learner_parts_for_gpu();
-        let (metrics, gpu_timing) =
-            gpu_learner.update(brain, ppo_config, &merged.rollouts, ret_norm, rng);
+        let (metrics, gpu_timing) = gpu_learner.update(
+            brain,
+            ppo_config,
+            &merged.rollouts,
+            ret_norm,
+            rng,
+            log_std_floor,
+        );
         let update_secs = update_start.elapsed().as_secs_f64();
         let wall_secs = wall_start.elapsed().as_secs_f64();
 
@@ -1050,8 +1119,8 @@ mod tests {
         let reloaded = CrabBrain::<TrainBackend>::new(&device).load_record(record);
 
         let obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
-        let (m0, s0) = brain.policy(obs.clone());
-        let (m1, s1) = reloaded.policy(obs);
+        let (m0, s0) = brain.policy(obs.clone(), crate::bot::brain::LOG_STD_MIN);
+        let (m1, s1) = reloaded.policy(obs, crate::bot::brain::LOG_STD_MIN);
         let (m0, m1): (Vec<f32>, Vec<f32>) = (
             m0.to_data().to_vec().unwrap(),
             m1.to_data().to_vec().unwrap(),
@@ -1246,6 +1315,7 @@ mod tests {
                 brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
                 normalizer: Arc::new(state.normalizer_snapshot()),
                 curriculum: Curriculum::start(),
+                log_std_floor: crate::bot::brain::LOG_STD_MIN,
             })
             .expect("send request");
         let RollOutcome::Rolled { envs, .. } = thread.result_rx.recv().expect("recv result") else {
@@ -1274,8 +1344,16 @@ mod tests {
         // GPU learner never steps a CPU Adam), so build the production one here.
         let mut optimizer = crab_optimizer();
         let (brain, ppo_config, device, ret_norm, rng) = state.learner_parts();
-        let metrics =
-            ppo_update_core(brain, &mut optimizer, ppo_config, &rollouts, device, ret_norm, rng);
+        let metrics = ppo_update_core(
+            brain,
+            &mut optimizer,
+            ppo_config,
+            &rollouts,
+            device,
+            ret_norm,
+            rng,
+            crate::bot::brain::LOG_STD_MIN,
+        );
         assert!(
             metrics.policy_loss.is_finite()
                 && metrics.value_loss.is_finite()
@@ -1322,6 +1400,7 @@ mod tests {
                     brain_bytes: Arc::clone(&brain_bytes),
                     normalizer: Arc::clone(&normalizer),
                     curriculum: Curriculum::start(),
+                    log_std_floor: crate::bot::brain::LOG_STD_MIN,
                 })
                 .expect("send");
         }

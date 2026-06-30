@@ -42,6 +42,10 @@ use crate::bot::sensor::OBS_SIZE;
 /// ([`super::inproc`] tests) can call the exact production update over hand-built buffers.
 /// Generic over the autodiff backend `B` so the live GPU learner and the CPU-backed
 /// parity test run the one implementation — same update, one backend parameter.
+// The PPO core legitimately threads eight distinct inputs (net, optimizer, config, data,
+// device, the two running stats, and this iteration's exploration-σ floor); none folds into
+// another without hiding a real dependency, so the arg-count heuristic doesn't apply.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ppo_update_core<B: AutodiffBackend>(
     brain: &mut CrabBrain<B>,
     optimizer: &mut CrabOpt<B>,
@@ -50,6 +54,10 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
     device: &B::Device,
     ret_norm: &mut ReturnNormalizer,
     rng: &mut StdRng,
+    // The exploration-σ floor for THIS iteration's rollout — the same lower `log_std` clamp
+    // the rollout sampled under, so π_old/π_new here are recomputed on the SAME (floored)
+    // policy the behavior data came from. A mismatch would corrupt the importance ratio.
+    log_std_floor: f32,
 ) -> PpoMetrics {
     {
         let n: usize = rollouts.iter().map(|b| b.len()).sum();
@@ -158,7 +166,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
         // measures true on-backend policy drift. Detached — π_old is a fixed reference, no
         // gradient flows back through it.
         let old_log_probs_all = {
-            let (means, log_std) = brain.policy(obs_all.clone());
+            let (means, log_std) = brain.policy(obs_all.clone(), log_std_floor);
             gaussian_log_prob_rows(means, log_std, actions_all.clone()).detach()
         };
 
@@ -220,7 +228,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
                 let advs = advantages_all.clone().select(0, idx_tensor.clone());
                 let rets = returns_all.clone().select(0, idx_tensor);
 
-                let (means, log_std) = brain.policy(obs.clone());
+                let (means, log_std) = brain.policy(obs.clone(), log_std_floor);
 
                 // π_new for this minibatch — same Gaussian log-prob as π_old above (one
                 // formula, `gaussian_log_prob_rows`), so the ratio can't drift on a
@@ -396,6 +404,7 @@ mod tests {
                 &device,
                 &mut ret_norm,
                 &mut rng,
+                crate::bot::brain::LOG_STD_MIN,
             )
         };
 
@@ -438,7 +447,7 @@ mod tests {
             TensorData::new(vec![0.1f32; OBS_SIZE], [1, OBS_SIZE]),
             &device,
         );
-        let before: Vec<f32> = brain.policy(probe.clone()).0.flatten::<1>(0, 1).to_data().to_vec().unwrap();
+        let before: Vec<f32> = brain.policy(probe.clone(), crate::bot::brain::LOG_STD_MIN).0.flatten::<1>(0, 1).to_data().to_vec().unwrap();
 
         // Rollouts with one poisoned reward → NaN advantages/returns → NaN loss.
         let mut rollouts = make_rollouts();
@@ -454,6 +463,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0x1267);
         let metrics = ppo_update_core(
             &mut brain, &mut optimizer, &config, &rollouts, &device, &mut ret_norm, &mut rng,
+            crate::bot::brain::LOG_STD_MIN,
         );
 
         assert_eq!(
@@ -461,7 +471,7 @@ mod tests {
             "a non-finite loss must abort before any Adam step (got {} steps)",
             metrics.steps
         );
-        let after: Vec<f32> = brain.policy(probe).0.flatten::<1>(0, 1).to_data().to_vec().unwrap();
+        let after: Vec<f32> = brain.policy(probe, crate::bot::brain::LOG_STD_MIN).0.flatten::<1>(0, 1).to_data().to_vec().unwrap();
         assert_eq!(
             before.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
             after.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
@@ -492,6 +502,7 @@ mod tests {
             let mut rng = StdRng::seed_from_u64(0x5417);
             ppo_update_core(
                 &mut brain, &mut optimizer, &config, &rollouts, &device, &mut ret_norm, &mut rng,
+                crate::bot::brain::LOG_STD_MIN,
             )
         };
 

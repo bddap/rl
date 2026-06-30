@@ -42,6 +42,55 @@ pub(crate) struct PpoConfig {
     /// recomputed on the update backend (see the update); against the rollout's
     /// CPU-recorded log-probs the backend mismatch alone reads as ~0.7 KL.
     pub(crate) target_kl: f32,
+    /// Exploration-σ schedule (bddap/rl#161): the annealed LOWER bound on the policy's
+    /// `log_std`, starting HIGH to force a wide exploration amplitude early — bypassing the
+    /// target-KL trust region that otherwise pins σ at its cautious init (the entropy bonus
+    /// can't widen it inside the per-update KL budget, falsified job 616) — then decaying to
+    /// `log_std_floor_end` for refinement. Composed with the OU temporally-correlated noise
+    /// ([`OuNoise`]), early exploration is both WIDE and coherent: the best shot at stumbling
+    /// into a coordinated 38-DOF gait. The schedule clamps `log_std` from below (see
+    /// [`CrabBrain::policy`]); the learned param sits beneath the early floor, so the floor —
+    /// not the (KL-throttled) entropy gradient — does the widening. TRAINING exploration only:
+    /// eval/demo takes the policy MEAN, so the floor never reaches a deployed action.
+    ///
+    /// `log_std_floor_start`/`_end` are the wide-early and refine `log_std` floors;
+    /// `log_std_anneal_ticks` is the physics-tick horizon over which it linearly anneals from
+    /// start to end. Env-overridable (`RL_LOG_STD_FLOOR_START` / `_END` /
+    /// `RL_LOG_STD_ANNEAL_TICKS`) so the window is tunable without a rebuild.
+    pub(crate) log_std_floor_start: f32,
+    pub(crate) log_std_floor_end: f32,
+    pub(crate) log_std_anneal_ticks: u64,
+}
+
+impl PpoConfig {
+    /// The exploration-σ floor (lower `log_std` clamp) for a point `ticks_into_anneal` physics
+    /// ticks into the schedule's horizon: a linear ramp from `log_std_floor_start` (wide) down
+    /// to `log_std_floor_end` (refine), holding at the end value past the horizon. The caller
+    /// passes ticks measured from the schedule's epoch (the warm-resume point, or a cold reset),
+    /// not absolute training ticks, so "wide early" means early in THIS experiment regardless of
+    /// how much prior training the resumed checkpoint carries. A zero horizon yields the end
+    /// value from the first tick (schedule effectively off).
+    pub(crate) fn log_std_floor(&self, ticks_into_anneal: u64) -> f32 {
+        if self.log_std_anneal_ticks == 0 {
+            return self.log_std_floor_end;
+        }
+        let frac = (ticks_into_anneal as f32 / self.log_std_anneal_ticks as f32).clamp(0.0, 1.0);
+        self.log_std_floor_start + (self.log_std_floor_end - self.log_std_floor_start) * frac
+    }
+}
+
+/// Read an `f32`/`u64` tuning knob from the environment, falling back to `default` when the var
+/// is unset or unparseable. Keeps the σ-schedule window tunable without a rebuild (the trainer's
+/// launcher exports the var); a typo'd value loudly falls back rather than silently changing the
+/// schedule.
+fn env_or<T: std::str::FromStr>(var: &str, default: T) -> T {
+    match std::env::var(var) {
+        Ok(s) => s.trim().parse().unwrap_or_else(|_| {
+            eprintln!("[config] {var}={s:?} did not parse; using default");
+            default
+        }),
+        Err(_) => default,
+    }
 }
 
 impl Default for PpoConfig {
@@ -68,6 +117,13 @@ impl Default for PpoConfig {
             // value-trust-region's 0.2.
             value_loss_clip: 3.0,
             target_kl: 0.03,
+            // Wide-early → refine exploration-σ floor (bddap/rl#161). Start log_std -0.7
+            // (σ≈0.50 — the amplitude that earlier found the most reach, now refinable thanks
+            // to OU correlation) and anneal to LOG_STD_MIN (σ≈0.135), the resting clamp, over
+            // ~5M ticks (~1200 iters at 4096 ticks/iter). Tunable without a rebuild.
+            log_std_floor_start: env_or("RL_LOG_STD_FLOOR_START", -0.7),
+            log_std_floor_end: env_or("RL_LOG_STD_FLOOR_END", crate::bot::brain::LOG_STD_MIN),
+            log_std_anneal_ticks: env_or("RL_LOG_STD_ANNEAL_TICKS", 5_000_000),
         }
     }
 }
@@ -550,6 +606,38 @@ pub(crate) struct PpoMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exploration-σ floor ramps linearly from the wide start to the refine end over the
+    /// horizon, holds at the end past it, and degenerates to the end value for a zero horizon
+    /// (schedule off) — the shape the gait-bootstrap lever (bddap/rl#161) depends on.
+    #[test]
+    fn log_std_floor_anneals_start_to_end_then_holds() {
+        let config = PpoConfig {
+            log_std_floor_start: -0.7,
+            log_std_floor_end: -2.0,
+            log_std_anneal_ticks: 1000,
+            ..PpoConfig::default()
+        };
+        assert!((config.log_std_floor(0) - (-0.7)).abs() < 1e-6, "wide at the epoch");
+        assert!(
+            (config.log_std_floor(500) - (-1.35)).abs() < 1e-6,
+            "linear midpoint"
+        );
+        assert!((config.log_std_floor(1000) - (-2.0)).abs() < 1e-6, "refine at horizon");
+        assert!(
+            (config.log_std_floor(10_000) - (-2.0)).abs() < 1e-6,
+            "holds at the refine floor past the horizon"
+        );
+
+        let off = PpoConfig {
+            log_std_anneal_ticks: 0,
+            ..config
+        };
+        assert!(
+            (off.log_std_floor(0) - (-2.0)).abs() < 1e-6,
+            "a zero horizon is the refine floor from tick 0 (schedule off)"
+        );
+    }
 
     fn t(reward: f32, value: f32, end: StepEnd) -> Transition {
         Transition {
