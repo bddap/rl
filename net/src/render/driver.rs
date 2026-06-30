@@ -103,7 +103,13 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     // Arm the gate (and, networked, pin the lead so a per-peer env override can't desync the
     // hashed pose — solo keeps its tuning). One arm path, [`crate::external_crab::arm`].
     crate::external_crab::arm(world, networked);
-    let source = InputSource::coordinated(ready.net, ready.lockstep.peers());
+    // Clone the freshly-seeded sim for the authoritative server (solo/host); the client keeps its
+    // own identical sim inside `ready.lockstep` and renders the snapshots the server emits into it.
+    let source = InputSource::coordinated(
+        ready.net,
+        ready.lockstep.peers(),
+        ready.lockstep.sim().clone(),
+    );
     install_round(world, ready.lockstep, source);
 }
 
@@ -131,9 +137,15 @@ pub(super) enum InputSource {
 impl InputSource {
     /// Build the server-coordinated source for a round: `None` ⇒ a solo internal server, a host
     /// driver ⇒ a server over the roster, a client driver ⇒ a remote client. `peers` is the sim's
-    /// participant set (solo ⇒ just the local player). The single home of the round's role choice.
-    pub(super) fn coordinated(net: Option<NetDriver>, peers: &[PlayerId]) -> Self {
-        InputSource::Coordinated(Box::new(Coordinator::for_round(net, peers)))
+    /// participant set (solo ⇒ just the local player); `initial_sim` is the tick-0 world the server
+    /// owns (a clone of the client's freshly-built sim — solo/host step it authoritatively; a remote
+    /// client ignores it). The single home of the round's role choice.
+    pub(super) fn coordinated(
+        net: Option<NetDriver>,
+        peers: &[PlayerId],
+        initial_sim: crate::sim::Sim,
+    ) -> Self {
+        InputSource::Coordinated(Box::new(Coordinator::for_round(net, peers, initial_sim)))
     }
 }
 
@@ -153,6 +165,26 @@ pub(super) struct GameState {
     /// toward the live sim by `alpha`. A snapshot (not the live sim) because we need
     /// "last tick" even after the sim has stepped to the current one.
     pub(super) prev: SimSnapshot,
+}
+
+impl GameState {
+    /// The authoritative server this peer runs, if any (solo or host) — `None` for a remote client
+    /// or the scripted screenshot harness. When `Some`, the local client renders the snapshots it
+    /// emits rather than stepping `ls`'s sim itself (rl#151 increment 1).
+    fn server(&self) -> Option<&crate::server::Server> {
+        match &self.input_source {
+            InputSource::Coordinated(c) => c.server(),
+            InputSource::Scripted(_) => None,
+        }
+    }
+
+    /// Mutable counterpart of [`GameState::server`], for the per-tick authoritative step.
+    fn server_mut(&mut self) -> Option<&mut crate::server::Server> {
+        match &mut self.input_source {
+            InputSource::Coordinated(c) => c.server_mut(),
+            InputSource::Scripted(_) => None,
+        }
+    }
 }
 
 /// A minimal copy of the renderable sim state at one tick — the poses the client
@@ -470,6 +502,22 @@ pub(crate) fn park_fixed_auto_pump(world: &mut World) {
         .set_timestep(std::time::Duration::from_secs(86_400));
 }
 
+/// Re-seed the crab bridge to the round's rebuilt `spawn` and cold-respawn the rapier body — run at
+/// the exact RESTART rewind edge, by BOTH drain arms ([`drive_lockstep`]). Re-seeding the bridge so
+/// the next pose push is the spawn pose (not the still-walking body's accumulated position) is half
+/// of it; the other half is the cold respawn — re-seeding alone leaves the rapier solver WARM, which
+/// would desync a mid-game joiner's cold body against an incumbent's warm one (job 412, relocated to
+/// the join). Dropping + rebuilding the body makes every peer's solver state identically fresh off
+/// the same shared-input restart edge, covering the plain RESTART button too (one shared edge).
+/// `spawn` is read from whichever sim is now authoritative for the round (the server's, or the
+/// client's lockstep on the legacy arm). Only meaningful while armed (else no bridge drives the crab).
+fn restart_crab_to_spawn(world: &mut World, spawn: crate::sim::Pos) {
+    world
+        .resource_mut::<crate::external_crab::ExternalCrabBridge>()
+        .restart_to_spawn(spawn);
+    crate::external_crab::cold_respawn_armed_crab(world);
+}
+
 /// Advance the lockstep sim by real time on a fixed-timestep accumulator. This is the ONLY
 /// writer of sim state, and (apart from the external crab pose) it writes exactly one thing:
 /// the local [`Input`] (drained from [`PendingInput`]) via `submit_local_input`. Everything
@@ -512,6 +560,14 @@ pub(super) fn drive_lockstep(
     let armed = world
         .get_resource::<crate::external_crab::ExternalCrabArmed>()
         .is_some();
+
+    // Whether THIS peer runs the authoritative server for the round (solo or host): its local client
+    // RENDERS the per-tick snapshot the server emits instead of stepping a sim of its own (rl#151
+    // increment 1). Fixed for the round. A remote client and the headless scripted screenshot harness
+    // keep the legacy lockstep advance below (the remote path migrates onto the snapshot in
+    // increment 2). This is the Minecraft-model server/client role, NOT an SP/MP split — solo and
+    // host take the SAME authoritative arm ([[sp-is-mp-special-case]]).
+    let server_auth = world.non_send_resource::<GameState>().server().is_some();
 
     let delta = world.resource::<Time>().delta().as_secs_f64();
 
@@ -645,19 +701,26 @@ pub(super) fn drive_lockstep(
                     Exchanged { peer_msgs, roster_changes: Vec::new() }
                 }
             };
-            // Schedule any roster change BEFORE recording inputs: a mid-game join the host admitted
-            // or this client learned over the wire. `effective_tick` is JOIN_LEAD ahead, so applying
-            // it now (well before the boundary) lets `advance_one` rebuild the round in lockstep on
-            // every peer. The host applies its own admissions through this same path.
-            for adm in &exch.roster_changes {
-                state.ls.schedule_roster_change(adm.effective_tick, &adm.roster);
-            }
+            // In the SERVER-AUTHORITATIVE path the server has already stepped these inputs into its
+            // OWN sim (inside `exchange`'s host_assemble), and the local client renders the snapshot
+            // it emits below — so the client never records peer inputs or schedules joins into its
+            // own (non-stepping) lockstep. The legacy path (a remote client, or the scripted
+            // screenshot harness) still records them and advances its lockstep itself.
             let mut faults = Vec::new();
-            for from in exch.peer_msgs {
-                if from.pid != me
-                    && let Some(fault) = state.ls.record_remote(from.pid, from.msg)
-                {
-                    faults.push(fault);
+            if !server_auth {
+                // Schedule any roster change BEFORE recording inputs: a mid-game join the host
+                // admitted or this client learned over the wire. `effective_tick` is JOIN_LEAD
+                // ahead, so applying it now (well before the boundary) lets `advance_one` rebuild the
+                // round in lockstep on every peer.
+                for adm in &exch.roster_changes {
+                    state.ls.schedule_roster_change(adm.effective_tick, &adm.roster);
+                }
+                for from in exch.peer_msgs {
+                    if from.pid != me
+                        && let Some(fault) = state.ls.record_remote(from.pid, from.msg)
+                    {
+                        faults.push(fault);
+                    }
                 }
             }
             (issue_tick, faults)
@@ -692,85 +755,145 @@ pub(super) fn drive_lockstep(
             ctrl.match_velocity = fc.match_velocity;
         }
 
-        // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step
-        // state for interpolation; if armed, step the crab body by the deterministic cadence
-        // and push its resulting pose + digest BEFORE advancing, so this tick's
-        // grab/extraction/outcome resolve against the real NN crab and every peer folds the
-        // identical `phys_digest`. A real round is always armed (rl#114: a round that can't arm
-        // Sally is refused at build, never reaches here unarmed).
+        // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step state
+        // for interpolation; if armed, step the crab body by the deterministic cadence and inject
+        // its resulting pose + digest into the tick BEFORE the sim advances, so this tick's
+        // grab/extraction/outcome resolve against the real NN crab and the digest is folded
+        // identically. A real round is always armed (rl#114: a round that can't arm Sally is refused
+        // at build, never reaches here unarmed).
         //
-        // This inner drain is UNBOUNDED on purpose: it applies every tick whose inputs are
-        // ready (a catch-up after a stall must apply them all, in order, to stay in lockstep —
-        // and each applied tick advances the cadence, so peers stay phase-aligned regardless of
-        // how the catch-up batches). `MAX_TICKS_PER_FRAME` bounds only input ISSUANCE (the outer
-        // loop), which is what prevents a real-time spiral.
+        // Two arms (rl#151 increment 1), chosen by the round's fixed role:
+        // - SERVER-AUTHORITATIVE (solo/host): the server steps its OWN sim with this tick's
+        //   assembled inputs + crab pose and emits a serialized snapshot; the local client APPLIES
+        //   it (no re-sim) and renders from it.
+        // - LEGACY (remote client / scripted screenshot): the client steps its own lockstep via
+        //   `advance_one` (the remote path migrates onto the snapshot in increment 2).
+        // Both inject the SAME bridge pose + digest in the SAME pre-step position, so the
+        // authoritative sim is byte-identical to what the lockstep advance produced ([[sp-is-mp-special-case]]).
+        //
+        // This inner drain is UNBOUNDED on purpose: it applies every ready tick (a catch-up after a
+        // stall must apply them all, in order — and each applied tick advances the cadence, so the
+        // physics phase stays aligned regardless of how the catch-up batches). `MAX_TICKS_PER_FRAME`
+        // bounds only input ISSUANCE (the outer loop), which prevents a real-time spiral.
         loop {
+            // Ready? The authoritative server gates on its own ledger/warmup; a legacy client gates
+            // on its lockstep.
             {
                 let state = world.non_send_resource::<GameState>();
-                if !state.ls.next_tick_ready() {
+                let ready = match state.server() {
+                    Some(server) => server.next_tick_ready(),
+                    None => state.ls.next_tick_ready(),
+                };
+                if !ready {
                     break;
                 }
             }
+            // Capture the client's pre-step state as the interpolation source — both arms render
+            // from the client sim (server-auth applies INTO it; legacy steps it).
             {
                 let mut state = world.non_send_resource_mut::<GameState>();
                 state.prev = SimSnapshot::capture(&state.ls);
             }
-            if armed {
-                let steps = cadence.steps_for_next_tick();
-                pump_fixed_steps(world, steps);
-                // Push the freshly-stepped body's pose + weights-folded digest + refresh the
-                // hunted player — the shared handshake (one source with the headless probe).
-                // `resource_scope` lifts the bridge out so we can hold it AND `GameState`'s
-                // `ls` mutably at once (both live in the same `World`).
-                world.resource_scope(
-                    |world, mut bridge: Mut<crate::external_crab::ExternalCrabBridge>| {
-                        let mut state = world.non_send_resource_mut::<GameState>();
-                        crate::external_crab::sync_external_crab(&mut state.ls, &mut bridge);
-                    },
-                );
-                // Mirror the vehicle body's freshly-stepped arena pose into `LocalVehicle` for the
-                // cockpit camera's interpolation (the float analogue of the `SimSnapshot::capture`
-                // above). One body at most; read its Transform and shift `now`→`prev`. None while on
-                // foot or before a boarded body has spawned — `cockpit_poses` then returns `None` and
-                // the camera holds the foot view (no fabricated pose).
-                if let Some(pose) = read_vehicle_pose(world) {
-                    world.resource_mut::<LocalVehicle>().update_pose(pose);
+
+            if server_auth {
+                // Pump this tick's crab physics, read the resulting pose, and aim the crab at the
+                // AUTHORITATIVE server sim's nearest living player (pre-step, exactly where
+                // `sync_external_crab` reads it on the legacy arm).
+                let crab_pose = if armed {
+                    let steps = cadence.steps_for_next_tick();
+                    pump_fixed_steps(world, steps);
+                    // `resource_scope` lifts the bridge out so we can read it AND `GameState` at once.
+                    let pose = world.resource_scope(
+                        |world, mut bridge: Mut<crate::external_crab::ExternalCrabBridge>| {
+                            let pose = crate::server::CrabPose {
+                                pos: bridge.world_pos(),
+                                yaw: bridge.yaw_turns(),
+                                digest: bridge.phys_digest(),
+                            };
+                            let state = world.non_send_resource::<GameState>();
+                            let hunt = state
+                                .server()
+                                .and_then(|s| s.sim().nearest_living_player_pos());
+                            bridge.set_hunt_target(hunt);
+                            pose
+                        },
+                    );
+                    // Mirror the vehicle body's freshly-stepped pose for the cockpit camera (as the
+                    // legacy arm does); independent of the sim.
+                    if let Some(p) = read_vehicle_pose(world) {
+                        world.resource_mut::<LocalVehicle>().update_pose(p);
+                    }
+                    Some(pose)
+                } else {
+                    None
+                };
+                // Step the authoritative sim and detect a RESTART rewind, resetting the cadence at
+                // that exact edge (same reasoning as the legacy arm: a post-restart tick stepping on
+                // the stale phase would desync; the reset must be inside the drain, not end-of-frame).
+                let (bytes, restarted) = {
+                    let mut state = world.non_send_resource_mut::<GameState>();
+                    let server = state.server_mut().expect("server_auth ⇒ a server");
+                    let before = server.sim().tick();
+                    let bytes = server.step_next(crab_pose);
+                    let restarted = server.sim().tick() < before;
+                    if restarted {
+                        *cadence = PhysicsCadence::default();
+                    }
+                    (bytes, restarted)
+                };
+                // Apply the server's snapshot as the client's rendered state — the ALWAYS-serialized
+                // hand-off (decode the bytes the server built; no by-reference shortcut even in SP).
+                {
+                    let mut state = world.non_send_resource_mut::<GameState>();
+                    let snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
+                        .expect("the authoritative server's snapshot must decode");
+                    state.ls.apply_core_snapshot(snap);
                 }
-            }
-            let (tick_faults, restarted) = {
-                let mut state = world.non_send_resource_mut::<GameState>();
-                let before = state.ls.sim().tick();
-                let faults = state.ls.advance_one().expect("next_tick_ready was true");
-                // A RESTART rewinds the sim to tick 0 INSIDE this step. Reset the cadence AT that
-                // edge — not at end-of-frame — so the new round's first ticks step in phase on
-                // every peer regardless of how each peer's frames batched the drain (an
-                // end-of-frame reset would let one peer step a few post-restart ticks on the stale
-                // phase before resetting, desyncing them).
-                let restarted = state.ls.sim().tick() < before;
-                if restarted {
-                    *cadence = PhysicsCadence::default();
+                if restarted && armed {
+                    let spawn = world
+                        .non_send_resource::<GameState>()
+                        .server()
+                        .expect("server_auth ⇒ a server")
+                        .sim()
+                        .crab()
+                        .pos();
+                    restart_crab_to_spawn(world, spawn);
                 }
-                (faults, restarted)
-            };
-            // Same restart edge as the cadence reset above: re-seed the crab bridge to the
-            // round's (rebuilt) spawn, so the next `sync_external_crab` pushes the spawn pose
-            // instead of snapping the restarted crab onto the still-walking body's accumulated
-            // position. The cross-peer-determinism argument lives on `restart_to_spawn`'s doc
-            // (it fires off this same shared-input edge). Only meaningful while armed (else there
-            // is no bridge driving the crab).
-            if restarted && armed {
-                let spawn = world.non_send_resource::<GameState>().ls.sim().crab().pos();
-                world
-                    .resource_mut::<crate::external_crab::ExternalCrabBridge>()
-                    .restart_to_spawn(spawn);
-                // Re-seeding the bridge alone leaves the rapier solver WARM, which desyncs a
-                // mid-game joiner's cold body against an incumbent's warm one (job 412, relocated to
-                // the join). Drop + rebuild the body so every peer's solver state is identically
-                // fresh. Same shared-input restart edge ⇒ bit-identical cross-peer; covers the plain
-                // RESTART button too (one shared edge).
-                crate::external_crab::cold_respawn_armed_crab(world);
+                // No peer cross-check on the authoritative path (the host IS the source of truth);
+                // faults only exist on the legacy peer-symmetric arm below.
+            } else {
+                // LEGACY arm: the client steps its own lockstep (remote client / scripted screenshot).
+                if armed {
+                    let steps = cadence.steps_for_next_tick();
+                    pump_fixed_steps(world, steps);
+                    // Push the freshly-stepped body's pose + weights-folded digest + refresh the
+                    // hunted player — the shared handshake (one source with the headless probe).
+                    world.resource_scope(
+                        |world, mut bridge: Mut<crate::external_crab::ExternalCrabBridge>| {
+                            let mut state = world.non_send_resource_mut::<GameState>();
+                            crate::external_crab::sync_external_crab(&mut state.ls, &mut bridge);
+                        },
+                    );
+                    if let Some(pose) = read_vehicle_pose(world) {
+                        world.resource_mut::<LocalVehicle>().update_pose(pose);
+                    }
+                }
+                let (tick_faults, restarted) = {
+                    let mut state = world.non_send_resource_mut::<GameState>();
+                    let before = state.ls.sim().tick();
+                    let faults = state.ls.advance_one().expect("next_tick_ready was true");
+                    let restarted = state.ls.sim().tick() < before;
+                    if restarted {
+                        *cadence = PhysicsCadence::default();
+                    }
+                    (faults, restarted)
+                };
+                if restarted && armed {
+                    let spawn = world.non_send_resource::<GameState>().ls.sim().crab().pos();
+                    restart_crab_to_spawn(world, spawn);
+                }
+                report_faults(&tick_faults, &mut total_desyncs, &tel);
             }
-            report_faults(&tick_faults, &mut total_desyncs, &tel);
         }
 
         // Sampled telemetry: a Tick snapshot + the local input every TELEMETRY_TICK_EVERY

@@ -191,6 +191,15 @@ impl ExternalCrabBridge {
         self.yaw_turns
     }
 
+    /// This tick's full rapier physics digest (every actuated body's pose+velocity bits XORed with
+    /// the policy weights — see [`hash_crab_physics`]), folded into the sim's `external_crab_digest`.
+    /// The authoritative server reads it here (alongside [`world_pos`](Self::world_pos) /
+    /// [`yaw_turns`](Self::yaw_turns)) to build the tick's [`crate::server::CrabPose`]; the legacy
+    /// driver arm reads the same field through [`sync_external_crab`].
+    pub fn phys_digest(&self) -> u64 {
+        self.phys_digest
+    }
+
     /// Set the game-world point (the nearest living player's [`Pos`]) the crab hunts, or
     /// `None` when every player is down. Called each game tick by the render loop, which
     /// owns the sim and so knows the prey; [`set_crab_walk_target`] reads it to aim the
