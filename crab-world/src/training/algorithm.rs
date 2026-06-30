@@ -134,7 +134,8 @@ impl Default for PpoConfig {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum StepEnd {
     /// The trajectory continues past this step — an in-episode step, or a
-    /// rollout-window boundary mid-episode (bootstrapped via `last_value`).
+    /// rollout-window boundary mid-episode (the tail's successor value comes from
+    /// [`RolloutBuffer::bootstrap`]).
     Continues,
     /// True terminal: the episode genuinely ended here (the crab GRABBED the target, a
     /// survival guard failed, or the sim died), so the future return is 0.
@@ -207,12 +208,26 @@ pub(crate) struct Transition {
 
 pub(crate) struct RolloutBuffer {
     pub(crate) transitions: Vec<Transition>,
+    /// GAE bootstrap `V(s_{last+1})` for a non-terminal (`Continues`) tail: the value of
+    /// the successor state this buffer was cut just before. Sourced from the rollout's
+    /// dangling `Pending` (`systems.rs`) — the un-finalized next action whose stored value
+    /// IS that successor's value, computed on the SAME (CPU rollout) backend as every body
+    /// value. ONLY consumed when the tail is `Continues`; a `Terminal`/`Truncated` tail
+    /// self-bootstraps in [`compute_gae`] and ignores this seed (it may still be `Some` —
+    /// the first `Pending` of a fresh episode that started after the terminal — harmlessly).
+    /// `None` when no action is pending (a settling/reset env) or the buffer is empty.
+    /// Binding the bootstrap to the buffer is what makes it structurally the right state on
+    /// the right backend — the alternative (recomputing `V(last_obs)` on the update backend)
+    /// read the wrong state (off-by-one from the one-tick `Pending` phasing, rl#174) on the
+    /// wrong backend (rl#173 tail).
+    pub(crate) bootstrap: Option<NormalizedValue>,
 }
 
 impl RolloutBuffer {
     pub fn new() -> Self {
         Self {
             transitions: Vec::with_capacity(2048),
+            bootstrap: None,
         }
     }
 
@@ -387,7 +402,6 @@ impl ReturnNormalizer {
 /// un-normalized GAE bit-for-bit before the head is trained against a normalized target.
 pub(crate) fn compute_gae(
     buffer: &RolloutBuffer,
-    last_value: NormalizedValue,
     gamma: f32,
     lambda: f32,
     ret_norm: &ReturnNormalizer,
@@ -396,8 +410,12 @@ pub(crate) fn compute_gae(
     let mut advantages = vec![RealReturn(0.0); n];
     let mut returns = vec![RealReturn(0.0); n];
     let mut last_gae = RealReturn(0.0);
-    // The trailing bootstrap is a value-head output (normalized) → real units.
-    let mut next_value = ret_norm.denormalize(last_value);
+    // Trailing bootstrap V(s_{last+1}): the buffer carries the successor value of its
+    // `Continues` tail (`RolloutBuffer::bootstrap`), already on the CPU rollout backend.
+    // `None` ⟹ a `Terminal`/`Truncated` tail (the per-step `match` below ignores this
+    // seed) or an empty buffer; the 0 fallback is then inert.
+    let mut next_value =
+        ret_norm.denormalize(buffer.bootstrap.unwrap_or(NormalizedValue(0.0)));
 
     for i in (0..n).rev() {
         let t = &buffer.transitions[i];
@@ -412,8 +430,8 @@ pub(crate) fn compute_gae(
         //    a *different* episode. Bootstrap from V(s_i) (this step's own value
         //    ≈ V of the cut continuation for a slowly-changing pose) so the cap
         //    isn't taught as a dead end.
-        //  - otherwise: the next entry's value (an in-episode step, or a
-        //    rollout-boundary cut bootstrapped via `last_value`).
+        //  - otherwise: the next entry's value (an in-episode step, or the
+        //    rollout-boundary cut bootstrapped via `buffer.bootstrap`).
         let bootstrap = match t.end {
             StepEnd::Terminal => RealReturn(0.0),
             StepEnd::Truncated => value,
@@ -662,6 +680,7 @@ mod tests {
         let mut env_a = RolloutBuffer::new();
         env_a.push(t(1.0, 0.5, StepEnd::Continues));
         env_a.push(t(1.0, 0.5, StepEnd::Continues));
+        env_a.bootstrap = Some(NormalizedValue(2.0));
         let mut env_b = RolloutBuffer::new();
         env_b.push(t(0.0, 1.0, StepEnd::Continues));
         env_b.push(t(0.0, 1.0, StepEnd::Terminal));
@@ -670,7 +689,7 @@ mod tests {
         // these hand-computed expectations are the un-normalized values.
         let id = ReturnNormalizer::new();
         // Per-env, hand-computed: A bootstraps from ITS next value (2.0).
-        let (adv_a, _) = compute_gae(&env_a, NormalizedValue(2.0), gamma, lambda, &id);
+        let (adv_a, _) = compute_gae(&env_a, gamma, lambda, &id);
         assert!((adv_a[1].0 - 1.5).abs() < 1e-6, "A[1]: {}", adv_a[1].0);
         assert!((adv_a[0].0 - 1.125).abs() < 1e-6, "A[0]: {}", adv_a[0].0);
 
@@ -679,7 +698,9 @@ mod tests {
         for tr in env_a.transitions.iter().chain(env_b.transitions.iter()) {
             concat.push(tr.clone());
         }
-        let (adv_concat, _) = compute_gae(&concat, NormalizedValue(0.0), gamma, lambda, &id);
+        // concat's tail is Terminal (env_b's last) → bootstrap self-zeroed, so the
+        // default `None` is correct; the corruption it pins is in env_a's interior step.
+        let (adv_concat, _) = compute_gae(&concat, gamma, lambda, &id);
         assert!(
             (adv_concat[1].0 - adv_a[1].0).abs() > 1e-3,
             "concatenated sweep should corrupt A's advantages (got {} vs {})",
@@ -703,15 +724,14 @@ mod tests {
         let id = ReturnNormalizer::new();
         let mut terminal = RolloutBuffer::new();
         terminal.push(t(reward, value, StepEnd::Terminal));
-        let (adv_term, _) = compute_gae(&terminal, NormalizedValue(0.0), gamma, lambda, &id);
+        let (adv_term, _) = compute_gae(&terminal, gamma, lambda, &id);
 
         let mut truncated = RolloutBuffer::new();
         truncated.push(Transition {
             end: StepEnd::Truncated,
             ..t(reward, value, StepEnd::Continues)
         });
-        let (adv_trunc, ret_trunc) =
-            compute_gae(&truncated, NormalizedValue(0.0), gamma, lambda, &id);
+        let (adv_trunc, ret_trunc) = compute_gae(&truncated, gamma, lambda, &id);
 
         // Terminal: advantage = reward - value (no bootstrap).
         assert!(
@@ -735,6 +755,37 @@ mod tests {
             (ret_trunc[0].0 - (reward + gamma * value)).abs() < 1e-6,
             "ret: {}",
             ret_trunc[0].0
+        );
+    }
+
+    /// The non-terminal (`Continues`) tail must bootstrap from the SUCCESSOR value
+    /// `V(s_{last+1})` the buffer carries (`RolloutBuffer::bootstrap`), NOT the tail
+    /// step's own value. The one-tick `Pending` phasing once made the trailing bootstrap
+    /// re-read the tail's own obs (rl#174), degenerating the tail delta to
+    /// `r − (1−γ)·V(s_last)`; with the successor value bound to the buffer the tail delta
+    /// is the textbook `r + γ·V(s_{last+1}) − V(s_last)`.
+    #[test]
+    fn continues_tail_bootstraps_from_successor_not_own_value() {
+        let gamma = 0.9;
+        let lambda = 0.95;
+        let id = ReturnNormalizer::new();
+        let (reward, own_v, succ_v) = (1.0f32, 5.0f32, 11.0f32);
+
+        let mut buf = RolloutBuffer::new();
+        buf.push(t(reward, own_v, StepEnd::Continues));
+        buf.bootstrap = Some(NormalizedValue(succ_v));
+        let (adv, _) = compute_gae(&buf, gamma, lambda, &id);
+
+        let correct = reward + gamma * succ_v - own_v;
+        let buggy = reward + gamma * own_v - own_v; // rl#174: bootstrapped its OWN value
+        assert!(
+            (adv[0].0 - correct).abs() < 1e-6,
+            "tail adv {}, want {correct}",
+            adv[0].0
+        );
+        assert!(
+            (adv[0].0 - buggy).abs() > 1e-3,
+            "tail must NOT bootstrap from its own value"
         );
     }
 
@@ -770,13 +821,8 @@ mod tests {
         // Un-normalized baseline: identity scale, raw values, raw trailing bootstrap.
         let id = ReturnNormalizer::new();
         let last_value_raw = -100.0f32;
-        let (adv_raw, ret_raw) = compute_gae(
-            &buf_raw,
-            NormalizedValue(last_value_raw),
-            gamma,
-            lambda,
-            &id,
-        );
+        buf_raw.bootstrap = Some(NormalizedValue(last_value_raw));
+        let (adv_raw, ret_raw) = compute_gae(&buf_raw, gamma, lambda, &id);
 
         // A normalizer with a non-trivial, positive affine scale (built from a spread
         // of returns so μ and σ are both non-zero).
@@ -793,9 +839,8 @@ mod tests {
         for &(reward, value) in &raw {
             buf_norm.push(t(reward, (value - mu) / sigma, StepEnd::Continues));
         }
-        let last_value_norm = NormalizedValue((last_value_raw - mu) / sigma);
-        let (adv_norm, ret_norm_out) =
-            compute_gae(&buf_norm, last_value_norm, gamma, lambda, &ret_norm);
+        buf_norm.bootstrap = Some(NormalizedValue((last_value_raw - mu) / sigma));
+        let (adv_norm, ret_norm_out) = compute_gae(&buf_norm, gamma, lambda, &ret_norm);
 
         // Advantages are IDENTICAL (the affine map with slope 1, offset 0): GAE saw
         // the same real-unit values either way, so the policy gradient is unchanged.

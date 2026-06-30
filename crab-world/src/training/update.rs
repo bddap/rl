@@ -10,8 +10,8 @@ use rand::seq::SliceRandom;
 use tracing::error;
 
 use super::algorithm::{
-    NormalizedValue, PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer, StepEnd, Transition,
-    compute_gae, gaussian_log_prob_rows,
+    PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer, Transition, compute_gae,
+    gaussian_log_prob_rows,
 };
 use super::checkpoint::CrabOpt;
 use crate::bot::actuator::ACTION_SIZE;
@@ -21,11 +21,10 @@ use crate::bot::sensor::OBS_SIZE;
 /// The learner's PPO update over all K·M rollout buffers.
 ///
 /// `rollouts` is one buffer per env (GAE is computed strictly per env, never
-/// across a buffer boundary). The per-env trailing bootstrap — V of each buffer's
-/// non-`Terminal` tail observation — is computed HERE from `brain`: the learner
-/// holds the brain it snapshotted to the threads (which is what they rolled with),
-/// so no precomputed value is needed. Mutating `brain`/`optimizer` in place keeps
-/// Adam's moment estimates persistent across updates.
+/// across a buffer boundary). Each buffer carries its own GAE trailing bootstrap
+/// (`RolloutBuffer::bootstrap`, the successor value the rollout already recorded on the
+/// CPU backend), so the update does not recompute it. Mutating `brain`/`optimizer` in
+/// place keeps Adam's moment estimates persistent across updates.
 ///
 /// `ret_norm` is the learner's running return scale (see [`ReturnNormalizer`]): the
 /// value head's outputs (stored per-step values and the trailing bootstrap) are
@@ -72,36 +71,22 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
         // the identity (no returns yet), so it is byte-identical to un-normalized PPO.
         let ret_norm_pre = ret_norm.clone();
 
-        // GAE strictly per env: each buffer is one env's contiguous trajectory
-        // segment, bootstrapped from ITS last observation. Advantages/returns are
-        // then concatenated in the same env-major order as the transitions below.
+        // GAE strictly per env: each buffer is one env's contiguous trajectory segment.
+        // The non-terminal tail's bootstrap V(s_{last+1}) travels WITH the buffer
+        // (`RolloutBuffer::bootstrap`, the successor value the rollout already computed on
+        // the CPU backend) rather than being recomputed here from `last_t.obs` — that
+        // recompute read the wrong state (the one-tick `Pending` phasing makes `last_t.obs`
+        // the tail's OWN state, not its successor, rl#174) on the wrong backend (the body
+        // values are CPU, rl#173 tail). Terminal/Truncated tails self-bootstrap inside
+        // `compute_gae`. Advantages/returns concatenate in the same env-major order as the
+        // transitions below.
         let mut advantages = Vec::with_capacity(n);
         let mut returns = Vec::with_capacity(n);
         for buf in rollouts.iter() {
-            let Some(last_t) = buf.transitions.last() else {
+            if buf.transitions.is_empty() {
                 continue;
-            };
-            // A `Terminal` tail genuinely ended → 0 future return; `compute_gae`
-            // hardcodes that step's bootstrap to `RealReturn(0.0)` and never reads
-            // `last_value`, so the value passed here is inert (any `NormalizedValue`
-            // would do). A non-terminal tail bootstraps V(s_tail) from the brain (the
-            // trailing obs continues into the next horizon's buffer, so its value
-            // carries the cut-off return); that output is in normalized units, which
-            // `compute_gae` de-normalizes like every stored value.
-            let last_value = if matches!(last_t.end, StepEnd::Terminal) {
-                NormalizedValue(0.0)
-            } else {
-                let obs =
-                    Tensor::<B, 1>::from_floats(last_t.obs.as_slice(), device).unsqueeze::<2>();
-                NormalizedValue(
-                    brain
-                        .value(obs)
-                        .flatten::<1>(0, 1)
-                        .into_scalar()
-                        .elem::<f32>(),
-                )
-            };
-            let (a, r) = compute_gae(buf, last_value, config.gamma, config.lambda, &ret_norm_pre);
+            }
+            let (a, r) = compute_gae(buf, config.gamma, config.lambda, &ret_norm_pre);
             advantages.extend(a);
             returns.extend(r);
         }
@@ -334,6 +319,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::algorithm::{NormalizedValue, StepEnd};
     use crate::training::TrainBackend;
     use crate::training::checkpoint::crab_optimizer;
     use burn::backend::ndarray::NdArrayDevice;
