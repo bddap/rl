@@ -7,6 +7,7 @@ use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use tracing::error;
 
 use super::algorithm::{
     NormalizedValue, PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer, StepEnd, Transition,
@@ -101,7 +102,17 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
         // value-loss targets by the refreshed scale (the residual is then in σ-units — see
         // the value-loss site below).
         let real_returns: Vec<f32> = returns.iter().map(|r| r.0).collect();
-        ret_norm.update(&real_returns);
+        let nonfinite_returns = ret_norm.update(&real_returns);
+        if nonfinite_returns > 0 {
+            // A blown-up env fed a NaN/Inf return; it's dropped from the scale (the fail-safe) but
+            // surfaced loudly here so the divergence is caught at the boundary, not inferred from a
+            // wrong normalizer later (bddap/rl#167).
+            error!(
+                "ppo_update: {nonfinite_returns}/{} returns were non-finite and skipped from the \
+                 return scale — an env diverged this iteration",
+                real_returns.len()
+            );
+        }
         let returns: Vec<f32> = returns.iter().map(|&r| ret_norm.normalize(r).0).collect();
 
         // Env-major transition view matching the advantages/returns order.
@@ -183,7 +194,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
         // cliff in one iteration. This bounds each iteration's movement to ~`target_kl`
         // regardless (see `PpoConfig::target_kl`). Labeled so an over-KL minibatch
         // breaks BOTH loops, not just the inner one.
-        'update: for _epoch in 0..config.epochs_per_update {
+        'update: for epoch in 0..config.epochs_per_update {
             let mut indices: Vec<usize> = (0..n).collect();
             indices.shuffle(rng);
 
@@ -229,6 +240,18 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
                 let approx_kl =
                     ((ratio.clone() - 1.0) - log_ratio).mean().into_scalar().elem::<f32>();
                 last_kl = approx_kl;
+                // A non-finite KL would SILENTLY DEFEAT the trust-region guard below — `NaN > x`
+                // is false, so the update would sail past the ceiling and keep stepping a policy
+                // that has already diverged. Treat it as the hardest possible trust-region
+                // violation: abort the update LOUDLY and leave the brain at its last finite state
+                // (bddap/rl#167).
+                if !approx_kl.is_finite() {
+                    error!(
+                        "ppo_update: non-finite KL ({approx_kl}) at epoch {epoch} batch \
+                         {batch_idx}; aborting the update to protect the policy (no further step)"
+                    );
+                    break 'update;
+                }
                 if approx_kl > 1.5 * config.target_kl {
                     break 'update;
                 }
@@ -255,9 +278,27 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
                 let loss = policy_loss.clone() + value_loss.clone() * config.value_coeff
                     - entropy.clone() * config.entropy_coeff;
 
-                total_policy_loss += policy_loss.clone().into_scalar().elem::<f32>();
-                total_value_loss += value_loss.clone().into_scalar().elem::<f32>();
-                total_entropy += entropy.clone().into_scalar().elem::<f32>();
+                let policy_loss_v = policy_loss.clone().into_scalar().elem::<f32>();
+                let value_loss_v = value_loss.clone().into_scalar().elem::<f32>();
+                let entropy_v = entropy.clone().into_scalar().elem::<f32>();
+                // Refuse a non-finite step: a NaN/Inf loss would push NaN gradients through Adam
+                // and PERMANENTLY corrupt the policy (every subsequent forward NaNs). The KL guard
+                // above can't catch a finite-KL/non-finite-loss case, so check the loss directly
+                // and abort the update LOUDLY here, leaving the brain at its last finite state
+                // (bddap/rl#167). Checked on the components already materialized for the metrics,
+                // so no extra device sync — `loss` is their finite combination.
+                if !(policy_loss_v.is_finite() && value_loss_v.is_finite() && entropy_v.is_finite())
+                {
+                    error!(
+                        "ppo_update: non-finite loss (policy={policy_loss_v}, value={value_loss_v}, \
+                         entropy={entropy_v}) at epoch {epoch} batch {batch_idx}; refusing the Adam \
+                         step and aborting the update to protect the policy"
+                    );
+                    break 'update;
+                }
+                total_policy_loss += policy_loss_v;
+                total_value_loss += value_loss_v;
+                total_entropy += entropy_v;
                 update_count += 1;
 
                 let grads = loss.backward();
@@ -277,6 +318,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
             kl: last_kl,
             steps: update_count,
             behavior_backend_div,
+            nonfinite_returns: nonfinite_returns as u32,
         }
     }
 }
@@ -377,6 +419,53 @@ mod tests {
         assert!(
             differs,
             "a different shuffle seed must change the update result"
+        );
+    }
+
+    /// bddap/rl#167: a non-finite loss must ABORT the update with NO step applied — never a NaN
+    /// gradient through Adam (which would permanently corrupt the policy). Inject a NaN reward so
+    /// the advantages/returns go non-finite, run the update, and assert (a) no minibatch step ran
+    /// (`steps == 0`) and (b) the policy is bit-identical before and after — proof the brain was
+    /// left untouched rather than stepped into NaN. (Pre-fix, the NaN loss flowed to `backward()`
+    /// and the Adam step, and the NaN KL slipped past `NaN > 1.5·target_kl`.)
+    #[test]
+    fn non_finite_loss_aborts_the_update_without_corrupting_the_policy() {
+        let device = NdArrayDevice::Cpu;
+        let mut brain = CrabBrain::<TrainBackend>::new(&device);
+
+        // A fixed probe observation; the policy mean on it is our "did the brain change" witness.
+        let probe = Tensor::<TrainBackend, 2>::from_data(
+            TensorData::new(vec![0.1f32; OBS_SIZE], [1, OBS_SIZE]),
+            &device,
+        );
+        let before: Vec<f32> = brain.policy(probe.clone()).0.flatten::<1>(0, 1).to_data().to_vec().unwrap();
+
+        // Rollouts with one poisoned reward → NaN advantages/returns → NaN loss.
+        let mut rollouts = make_rollouts();
+        rollouts[0].transitions[0].reward = f32::NAN;
+
+        let mut optimizer = crab_optimizer::<TrainBackend>();
+        // Infinite ceiling so a finite-KL early-stop can't be what saves us — the NaN guard must.
+        let config = PpoConfig {
+            target_kl: f32::INFINITY,
+            ..PpoConfig::default()
+        };
+        let mut ret_norm = ReturnNormalizer::new();
+        let mut rng = StdRng::seed_from_u64(0x1267);
+        let metrics = ppo_update_core(
+            &mut brain, &mut optimizer, &config, &rollouts, &device, &mut ret_norm, &mut rng,
+        );
+
+        assert_eq!(
+            metrics.steps, 0,
+            "a non-finite loss must abort before any Adam step (got {} steps)",
+            metrics.steps
+        );
+        let after: Vec<f32> = brain.policy(probe).0.flatten::<1>(0, 1).to_data().to_vec().unwrap();
+        assert_eq!(
+            before.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+            after.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+            "the policy must be bit-identical after a refused NaN update — the brain was stepped"
         );
     }
 

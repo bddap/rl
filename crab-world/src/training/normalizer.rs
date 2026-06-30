@@ -331,6 +331,38 @@ mod tests {
     }
 
     #[test]
+    fn load_snapshot_rejects_a_malformed_snapshot_and_leaves_self_unchanged() {
+        // bddap/rl#177: a failed snapshot load must report `false` (so the rollout thread can
+        // REFUSE the horizon instead of rolling mis-normalized obs) AND leave the existing stats
+        // intact — never a half-applied normalizer. Pin both: a wrong-width snapshot is rejected,
+        // and the normalizer keeps the stats it had.
+        let mut norm = ObsNormalizer::new(5.0);
+        for i in 0..30 {
+            let mut obs = [0.0f32; OBS_SIZE];
+            obs[0] = i as f32;
+            norm.normalize(&obs);
+        }
+        let before = norm.welford.mean[0];
+        let bad = NormalizerSnapshot {
+            mean: vec![0.0; OBS_SIZE + 1], // wrong width — must be rejected
+            m2: vec![0.0; OBS_SIZE + 1],
+            count: vec![0; OBS_SIZE + 1],
+            clip: 5.0,
+        };
+        assert!(!norm.load_snapshot(bad), "a wrong-width snapshot must fail to load");
+        assert_eq!(
+            norm.welford.mean[0], before,
+            "a rejected load must leave the normalizer's stats unchanged, not half-applied"
+        );
+
+        // A negative-M2 (otherwise correctly-sized) snapshot is also rejected.
+        let mut neg = norm.snapshot();
+        neg.m2[0] = -1.0;
+        assert!(!norm.load_snapshot(neg), "a negative-M2 snapshot must fail to load");
+        assert_eq!(norm.welford.mean[0], before, "still unchanged after the second rejection");
+    }
+
+    #[test]
     fn normalizer_round_trips_through_bincode() {
         let mut norm = ObsNormalizer::new(5.0);
         for i in 0..50 {
