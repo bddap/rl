@@ -1,0 +1,36 @@
+// 658 code-grade fan-out: fit.rs -> 8 fresh grader subs -> 24 criteria -> the one Work
+digraph fanout {
+  rankdir=TB;
+  bgcolor="white";
+  node [fontname="Helvetica" fontsize=11 style=filled];
+  edge [color="#888888" arrowsize=0.6];
+
+  file [label="meshfit/fit.rs\n24 calibrated criteria" shape=box
+        fillcolor="#1f3b57" fontcolor=white fontsize=13];
+
+  // 8 fresh grading sub-agents, ceil(24/3); each draws 3 random non-overlapping criteria
+  node [shape=box fillcolor="#dde6ef" fontcolor="#1f3b57"];
+  G1; G2; G3; G4; G5; G6; G7; G8;
+  { rank=same; G1 G2 G3 G4 G5 G6 G7 G8 }
+
+  file -> G1; file -> G2; file -> G3; file -> G4;
+  file -> G5; file -> G6; file -> G7; file -> G8;
+
+  // each grader -> its 3-criteria cluster (23 Perfect/Good/NA, 1 Work)
+  node [shape=ellipse fontsize=9];
+  c1 [label="3 criteria\nok" fillcolor="#cfe9cf"];
+  c2 [label="3 criteria\nok" fillcolor="#cfe9cf"];
+  c4 [label="3 criteria\nok" fillcolor="#cfe9cf"];
+  c5 [label="3 criteria\nok" fillcolor="#cfe9cf"];
+  c6 [label="3 criteria\nok" fillcolor="#cfe9cf"];
+  c7 [label="3 criteria\nok" fillcolor="#cfe9cf"];
+  c8 [label="3 criteria\nok" fillcolor="#cfe9cf"];
+  // the grader that surfaced the lone Work
+  c3 [label="2 ok +\nWORK" fillcolor="#f6d2cf"];
+  work [label="Work: dry-not-overboard\n· 1 comparator inlined at 4 sort sites\n· centroid+eigenframe dup'd\n  across fit_capsule / score_capsule"
+        shape=box fillcolor="#c0392b" fontcolor=white fontsize=11];
+
+  G1 -> c1; G2 -> c2; G3 -> c3; G4 -> c4;
+  G5 -> c5; G6 -> c6; G7 -> c7; G8 -> c8;
+  c3 -> work [color="#c0392b" penwidth=2];
+}
