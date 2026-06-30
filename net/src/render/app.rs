@@ -181,7 +181,6 @@ pub fn build_windowed_app(
                 spawn_fp_camera,
                 spawn_hud,
                 spawn_controls_ui::<GcrControls>,
-                crab_world::build_info::spawn_build_info_overlay,
             )
                 .chain(),
         )

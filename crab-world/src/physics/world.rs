@@ -3,21 +3,32 @@ use bevy_rapier3d::prelude::*;
 
 use crate::bot::body::ARENA_COLLISION;
 
-/// Plugin that sets up the physics world: ground plane, lighting. Cameras are
-/// spawned per app mode (fixed for training, orbit for demo, offscreen for
-/// screenshots).
+/// Plugin that lays the arena PHYSICS — the ground + wall colliders. No meshes or lights:
+/// the visible dressing is a SEPARATE [`ArenaVisualsPlugin`], so a host that draws its own
+/// scene (the GCR client's gray-box world) adds the colliders alone and never spawns a second
+/// coplanar ground quad to z-fight its own (rl#160). The standalone rl-demo arena, which draws
+/// no other scene, adds both.
 pub struct PhysicsWorldPlugin;
 
 impl Plugin for PhysicsWorldPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_arena);
-        // The ground/wall MESHES + lights (the visible scene) are render-only, and the
-        // material/mesh-asset types they need don't exist in the headless build, so they
-        // live in a separate system added only with `render`. Both run at Startup:
-        // `setup_arena` lays the colliders, this dresses them. Visuals can still be off
-        // at runtime in a render build (a render-on caller with Visuals(false)), so the
-        // system re-checks that.
-        #[cfg(feature = "render")]
+    }
+}
+
+/// Render-only arena dressing — the visible ground quad + lights — for a host that draws NO
+/// other scene of its own (the standalone rl-demo arena). Kept OUT of [`PhysicsWorldPlugin`]
+/// (which lays only the colliders) so the GCR client, which renders its own gray-box world,
+/// gets the colliders WITHOUT a redundant second ground quad and lights coplanar with its own
+/// (rl#160). The material/mesh-asset types this needs don't exist in the headless build, so the
+/// whole plugin is render-only; it still honors `Visuals(false)` so a render-on caller that
+/// wants no scene gets none.
+#[cfg(feature = "render")]
+pub struct ArenaVisualsPlugin;
+
+#[cfg(feature = "render")]
+impl Plugin for ArenaVisualsPlugin {
+    fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_arena_visuals);
     }
 }
@@ -79,10 +90,11 @@ fn setup_arena(mut commands: Commands) {
     }
 }
 
-/// Render-only: the visible ground quad + lights. Spawned alongside the colliders from
-/// [`setup_arena`] in render builds; gated out of the headless trainer entirely (its
-/// bevy build has no `StandardMaterial`/`Mesh3d`/`DirectionalLight`). Still honors
-/// `Visuals(false)` so a render-on caller that wants no scene gets none.
+/// Render-only: the visible ground quad + lights, added by [`ArenaVisualsPlugin`] for a
+/// standalone arena (rl-demo). Sits exactly on the collider [`setup_arena`] laid. Gated out of
+/// the headless trainer entirely (its bevy build has no `StandardMaterial`/`Mesh3d`/
+/// `DirectionalLight`). Still honors `Visuals(false)` so a render-on caller that wants no scene
+/// gets none.
 #[cfg(feature = "render")]
 fn setup_arena_visuals(
     mut commands: Commands,

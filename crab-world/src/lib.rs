@@ -24,9 +24,6 @@ use clap::Parser;
 /// so a fresh clone's `cargo run` finds the committed control icons (and fails loud if not).
 pub mod assets;
 pub mod bot;
-/// Build provenance (commit sha + build time) + the subtle corner stamp that shows it.
-/// The consts compile everywhere; the overlay spawner is render-gated (UI-only).
-pub mod build_info;
 /// Reusable controls + hold-to-reveal-overlay framework, generic over an app's action set
 /// (GCR and the demo each bring their own [`controls::ControlScheme`]).
 pub mod controls;
