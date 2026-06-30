@@ -645,53 +645,72 @@ mod overlay {
                 ));
             });
 
-        // Overlay panel (centered, dark backdrop), hidden until the reveal control is held.
+        // Hold-to-reveal overlay, hidden until the reveal control is held. The root is a
+        // full-screen flex layer that CENTERS its one child (the dark content panel) — so the
+        // panel is centered for any content size and any UiScale, and can never flow off a
+        // small screen like the Steam Deck's 1280×800 (the old fixed top/left-percent anchor
+        // pinned the panel's CORNER, so a wide legend or a scaled-up UI ran off-screen). The
+        // `max_*` caps keep the panel inside the viewport as a backstop. Display toggles on
+        // this root, unchanged — `update_controls_ui` still flips one node.
         commands
             .spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    top: Val::Percent(18.0),
-                    left: Val::Percent(34.0),
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(Val::Px(24.0)),
-                    row_gap: Val::Px(8.0),
+                    top: Val::Px(0.0),
+                    left: Val::Px(0.0),
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
                     display: Display::None,
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.82)),
                 ControlsOverlayRoot,
             ))
-            .with_children(|overlay| {
-                // Context name, big — the open panel names the live control set.
-                overlay.spawn((
-                    Text::new(default_label),
-                    TextFont {
-                        font_size: 26.0,
+            .with_children(|root| {
+                root.spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        max_width: Val::Percent(92.0),
+                        max_height: Val::Percent(92.0),
+                        padding: UiRect::all(Val::Px(24.0)),
+                        row_gap: Val::Px(8.0),
                         ..default()
                     },
-                    TextColor(Color::srgb(1.0, 0.95, 0.6)),
-                    ContextHeading,
-                ));
-                overlay.spawn((
-                    Text::new("Controls"),
-                    TextFont {
-                        font_size: 16.0,
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.7, 0.7, 0.7)),
-                ));
-                // One legend column per (context, device); only the default pair starts shown.
-                for &ctx in S::contexts() {
-                    for device in [Device::KeyboardMouse, Device::Gamepad] {
-                        spawn_legend_column::<S>(
-                            overlay,
-                            &asset_server,
-                            ctx,
-                            device,
-                            ctx == default_ctx && device == default_device,
-                        );
+                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.82)),
+                ))
+                .with_children(|overlay| {
+                    // Context name, big — the open panel names the live control set.
+                    overlay.spawn((
+                        Text::new(default_label),
+                        TextFont {
+                            font_size: 26.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(1.0, 0.95, 0.6)),
+                        ContextHeading,
+                    ));
+                    overlay.spawn((
+                        Text::new("Controls"),
+                        TextFont {
+                            font_size: 16.0,
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.7, 0.7, 0.7)),
+                    ));
+                    // One legend column per (context, device); only the default pair starts shown.
+                    for &ctx in S::contexts() {
+                        for device in [Device::KeyboardMouse, Device::Gamepad] {
+                            spawn_legend_column::<S>(
+                                overlay,
+                                &asset_server,
+                                ctx,
+                                device,
+                                ctx == default_ctx && device == default_device,
+                            );
+                        }
                     }
-                }
+                });
             });
     }
 
