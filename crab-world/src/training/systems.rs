@@ -579,10 +579,22 @@ impl TrainingState {
     /// horizon. The per-env episode accumulators (`envs`) are deliberately left
     /// untouched: an episode that spans a horizon boundary must continue cleanly
     /// across the cut rather than be force-terminated at the window edge.
-    pub fn take_rollouts(&mut self) -> Vec<Vec<Transition>> {
-        self.rollouts
-            .iter_mut()
-            .map(|buf| std::mem::take(&mut buf.transitions))
+    pub fn take_rollouts(&mut self) -> Vec<RolloutBuffer> {
+        // Each buffer carries the GAE bootstrap for its `Continues` tail: a dangling
+        // `Pending` is the un-finalized successor action of the buffer's last `Continues`
+        // transition (an episode-ending push re-seeds the env and stashes no pending), so
+        // `Pending::value` IS V(s_{last+1}) — the correct bootstrap, on the CPU rollout
+        // backend like every body value. `compute_gae` only reads it for a `Continues`
+        // tail; a Terminal/Truncated tail self-bootstraps and ignores it (it may still be
+        // `Some` from a fresh episode, harmlessly). This is the rl#174 / rl#173-tail fix:
+        // the bootstrap is the successor's value, never a recompute of the tail's own obs
+        // on the update backend. Index loop because the bootstrap reads `self.envs[e]`
+        // while transitions are taken from `self.rollouts[e]`.
+        (0..self.rollouts.len())
+            .map(|e| RolloutBuffer {
+                transitions: std::mem::take(&mut self.rollouts[e].transitions),
+                bootstrap: self.envs[e].pending.as_ref().map(|p| p.value),
+            })
             .collect()
     }
 

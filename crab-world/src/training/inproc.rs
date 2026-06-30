@@ -71,7 +71,7 @@ use tracing::error;
 use crate::TrainConfig;
 use crate::bot::brain::CrabBrain;
 
-use super::algorithm::{RolloutBuffer, Transition};
+use super::algorithm::RolloutBuffer;
 use super::TrainBackend;
 use super::checkpoint::{CheckpointDir, TICK_WATERMARK_FILENAME};
 use super::curriculum::TargetBand;
@@ -283,8 +283,9 @@ struct RollRequest {
 /// to get the data and treats `Panicked` as a no-op (trains on the other threads).
 enum RollOutcome {
     Rolled {
-        /// Per-env transition buffers (one per env; GAE never sweeps across envs).
-        envs: Vec<Vec<Transition>>,
+        /// Per-env rollout buffers (one per env; GAE never sweeps across envs). Each
+        /// carries its own GAE tail bootstrap (`RolloutBuffer::bootstrap`).
+        envs: Vec<RolloutBuffer>,
         /// Per-horizon normalizer INCREMENT — only the observations this horizon saw,
         /// so merging it into the master (which holds the baseline) never double-counts.
         increment: NormalizerIncrement,
@@ -673,9 +674,9 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
                 merged.reach.1 += reach.1;
                 merged.glitch_drops += glitch_drops;
                 merged.nonfinite_obs += nonfinite_obs;
-                for env in envs {
-                    merged.samples += env.len() as u64;
-                    merged.rollouts.push(RolloutBuffer { transitions: env });
+                for buf in envs {
+                    merged.samples += buf.len() as u64;
+                    merged.rollouts.push(buf);
                 }
             }
             RollOutcome::Panicked => merged.panics += 1,
@@ -1213,7 +1214,7 @@ mod tests {
         let r2 = roll_with_recovery(
             &mut app,
             |_app| RollOutcome::Rolled {
-                envs: vec![Vec::new()],
+                envs: vec![RolloutBuffer::new()],
                 increment: empty_normalizer_increment(),
                 rewards: vec![1.5],
                 drift: (0.0, 0),
@@ -1358,10 +1359,7 @@ mod tests {
         );
 
         // The learner update over the thread's buffers must change the policy.
-        let rollouts: Vec<RolloutBuffer> = envs
-            .into_iter()
-            .map(|transitions| RolloutBuffer { transitions })
-            .collect();
+        let rollouts: Vec<RolloutBuffer> = envs;
         // The CPU update path owns its optimizer (it isn't learner state — the live
         // GPU learner never steps a CPU Adam), so build the production one here.
         let mut optimizer = crab_optimizer();
