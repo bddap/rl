@@ -11,7 +11,7 @@
 //! it shows with the label correct THERE — the legend joins rows with bindings, so the displayed
 //! GLYPH can't drift from the polled input. On foot the move keys walk the avatar; in the air the
 //! two craft have DIFFERENT control schemes, so each gets its own flight actions + row list:
-//! - **Plane = Ace Combat 6**: LEFT stick (or mouse) flies — pitch INVERTED (back = nose up) +
+//! - **Plane = Ace Combat 6**: LEFT stick (or mouse) flies — pitch (push up = nose up, intuitive) +
 //!   roll; RT/LT throttle/brake; LB/RB rudder. (Right stick is the camera — a free-look seam, not
 //!   yet wired.) [`PlaneAttitude`](Action::PlaneAttitude)/[`PlaneThrottle`](Action::PlaneThrottle)/
 //!   [`PlaneRudder`](Action::PlaneRudder).
@@ -89,7 +89,7 @@ pub enum Action {
     RevealControls,
 
     // --- Plane (Ace Combat 6) flight actions ---
-    /// Plane attitude stick: pitch (INVERTED — back = nose up) + roll. Left stick / mouse.
+    /// Plane attitude stick: pitch (push up = nose up, intuitive) + roll. Left stick / mouse.
     PlaneAttitude,
     /// Plane throttle: RT accelerate (afterburner feel), LT brake. RT+LT / W,S.
     PlaneThrottle,
@@ -392,16 +392,17 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
     ContextRow { action: Action::RevealControls, label: "Controls" },
 ];
 
-/// The PILOTING-PLANE context (Ace Combat 6, "Normal"/Type-A default). Left stick (or mouse) flies:
-/// pitch is INVERTED (pull back = nose up, the flight-sim convention the owner expected) and L/R
-/// banks into a turn. RT/LT are the throttle/airbrake; the bumpers are the rudder. `Extract` is
-/// omitted — the foot player feeds the sim neutral input while piloting, so the pickup is inert
-/// aloft. The right stick is the camera (a free-look seam, not yet wired — so no row for it).
+/// The PILOTING-PLANE context (Ace Combat 6 layout). Left stick (or mouse) flies: pitch is INTUITIVE
+/// (push up = nose up — matches the ship's aim and the on-foot look; the owner found the old AC6
+/// inversion backwards on the controller) and L/R banks into a turn. RT/LT are the throttle/airbrake;
+/// the bumpers are the rudder. `Extract` is omitted — the foot player feeds the sim neutral input
+/// while piloting, so the pickup is inert aloft. The right stick is the camera (a free-look seam, not
+/// yet wired — so no row for it).
 ///
 /// The labels describe what `drive_lockstep`'s bridge does with each input (see
-/// [`crab_world::vehicle`]); the plane-pitch-sign test pins the non-obvious inverted-pitch link.
+/// [`crab_world::vehicle`]); the plane-pitch-sign test pins the pitch direction + sensitivity.
 pub const PLANE_ROWS: [ContextRow<GcrControls>; 8] = [
-    ContextRow { action: Action::PlaneAttitude, label: "Pitch (back = up) / roll" },
+    ContextRow { action: Action::PlaneAttitude, label: "Pitch / roll" },
     ContextRow { action: Action::PlaneThrottle, label: "Throttle / brake" },
     ContextRow { action: Action::PlaneRudder, label: "Rudder (yaw)" },
     // E cycles foot → plane → ship → foot, so from the plane it boards the ship.
@@ -639,7 +640,7 @@ mod tests {
         assert_ne!(labels(&foot), labels(&plane), "the legend must change per context");
         // AC6 flight labels.
         assert!(plane.iter().any(|l| l.label == "Throttle / brake"));
-        assert!(plane.iter().any(|l| l.label == "Pitch (back = up) / roll"));
+        assert!(plane.iter().any(|l| l.label == "Pitch / roll"));
         assert!(plane.iter().any(|l| l.label == "Rudder (yaw)"));
         assert!(plane.iter().any(|l| l.label == "Switch to ship"));
         // The on-foot ground labels are gone in flight.

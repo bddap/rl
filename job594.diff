@@ -1,0 +1,216 @@
+diff --git a/crab-world/src/vehicle.rs b/crab-world/src/vehicle.rs
+index 666994b0..59990658 100644
+--- a/crab-world/src/vehicle.rs
++++ b/crab-world/src/vehicle.rs
+@@ -7,7 +7,7 @@
+ //! ## Two craft, two feels, one force system (owner, botq#554)
+ //! - **Plane = Ace Combat 6.** A persistent THROTTLE LEVER drives thrust along the nose (+Z);
+ //!   wings make Bernoulli LIFT from forward airspeed; pitch/roll/yaw are control torques. The pilot
+-//!   turns by banking. (The AC6 input feel — inverted pitch, left-stick fly, trigger throttle,
++//!   turns by banking. (The AC6 input feel — intuitive pitch, left-stick fly, trigger throttle,
+ //!   bumper rudder — lives in the input→[`VehicleControl`] bridge, `net`'s `drive_lockstep`.)
+ //! - **Ship = Outer Wilds.** No wings (no lift) and no throttle lever — instead DIRECT body-frame
+ //!   thrusters on all three axes (strafe X / vertical Y / forward Z) that you tap and then COAST on
+@@ -367,9 +367,9 @@ fn apply_vehicle_forces(
+         // per-craft angular drag bleeds spin for control without bounding the angle. The pitch sign
+         // is NEGATED: a positive +X torque rotates the nose (+Z) toward −Y (DOWN), so to make
+         // positive `pitch` (the pilot's nose-UP intent) raise the nose we apply −pitch about +X.
+-        // The bridge gives each craft its feel (the plane's AC6 pitch is INVERTED at the stick, so
+-        // pulling back arrives here as positive `pitch`); roll/yaw carry their reconciling sign from
+-        // the bridge so "bank right"/"yaw right" hold.
++        // The bridge gives each craft its feel (both craft pitch intuitively — push the stick up to
++        // raise the nose — arriving here as positive `pitch`); roll/yaw carry their reconciling sign
++        // from the bridge so "bank right"/"yaw right" hold.
+         let body_torque = Vec3::new(
+             -control.pitch * p.pitch_torque,
+             control.yaw * p.yaw_torque,
+diff --git a/net/src/controls.rs b/net/src/controls.rs
+index 96c31006..556fd98f 100644
+--- a/net/src/controls.rs
++++ b/net/src/controls.rs
+@@ -11,7 +11,7 @@
+ //! it shows with the label correct THERE — the legend joins rows with bindings, so the displayed
+ //! GLYPH can't drift from the polled input. On foot the move keys walk the avatar; in the air the
+ //! two craft have DIFFERENT control schemes, so each gets its own flight actions + row list:
+-//! - **Plane = Ace Combat 6**: LEFT stick (or mouse) flies — pitch INVERTED (back = nose up) +
++//! - **Plane = Ace Combat 6**: LEFT stick (or mouse) flies — pitch (push up = nose up, intuitive) +
+ //!   roll; RT/LT throttle/brake; LB/RB rudder. (Right stick is the camera — a free-look seam, not
+ //!   yet wired.) [`PlaneAttitude`](Action::PlaneAttitude)/[`PlaneThrottle`](Action::PlaneThrottle)/
+ //!   [`PlaneRudder`](Action::PlaneRudder).
+@@ -89,7 +89,7 @@ pub enum Action {
+     RevealControls,
+ 
+     // --- Plane (Ace Combat 6) flight actions ---
+-    /// Plane attitude stick: pitch (INVERTED — back = nose up) + roll. Left stick / mouse.
++    /// Plane attitude stick: pitch (push up = nose up, intuitive) + roll. Left stick / mouse.
+     PlaneAttitude,
+     /// Plane throttle: RT accelerate (afterburner feel), LT brake. RT+LT / W,S.
+     PlaneThrottle,
+@@ -392,16 +392,17 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
+     ContextRow { action: Action::RevealControls, label: "Controls" },
+ ];
+ 
+-/// The PILOTING-PLANE context (Ace Combat 6, "Normal"/Type-A default). Left stick (or mouse) flies:
+-/// pitch is INVERTED (pull back = nose up, the flight-sim convention the owner expected) and L/R
+-/// banks into a turn. RT/LT are the throttle/airbrake; the bumpers are the rudder. `Extract` is
+-/// omitted — the foot player feeds the sim neutral input while piloting, so the pickup is inert
+-/// aloft. The right stick is the camera (a free-look seam, not yet wired — so no row for it).
++/// The PILOTING-PLANE context (Ace Combat 6 layout). Left stick (or mouse) flies: pitch is INTUITIVE
++/// (push up = nose up — matches the ship's aim and the on-foot look; the owner found the old AC6
++/// inversion backwards on the controller) and L/R banks into a turn. RT/LT are the throttle/airbrake;
++/// the bumpers are the rudder. `Extract` is omitted — the foot player feeds the sim neutral input
++/// while piloting, so the pickup is inert aloft. The right stick is the camera (a free-look seam, not
++/// yet wired — so no row for it).
+ ///
+ /// The labels describe what `drive_lockstep`'s bridge does with each input (see
+-/// [`crab_world::vehicle`]); the plane-pitch-sign test pins the non-obvious inverted-pitch link.
++/// [`crab_world::vehicle`]); the plane-pitch-sign test pins the pitch direction + sensitivity.
+ pub const PLANE_ROWS: [ContextRow<GcrControls>; 8] = [
+-    ContextRow { action: Action::PlaneAttitude, label: "Pitch (back = up) / roll" },
++    ContextRow { action: Action::PlaneAttitude, label: "Pitch / roll" },
+     ContextRow { action: Action::PlaneThrottle, label: "Throttle / brake" },
+     ContextRow { action: Action::PlaneRudder, label: "Rudder (yaw)" },
+     // E cycles foot → plane → ship → foot, so from the plane it boards the ship.
+@@ -639,7 +640,7 @@ mod tests {
+         assert_ne!(labels(&foot), labels(&plane), "the legend must change per context");
+         // AC6 flight labels.
+         assert!(plane.iter().any(|l| l.label == "Throttle / brake"));
+-        assert!(plane.iter().any(|l| l.label == "Pitch (back = up) / roll"));
++        assert!(plane.iter().any(|l| l.label == "Pitch / roll"));
+         assert!(plane.iter().any(|l| l.label == "Rudder (yaw)"));
+         assert!(plane.iter().any(|l| l.label == "Switch to ship"));
+         // The on-foot ground labels are gone in flight.
+diff --git a/net/src/render/driver.rs b/net/src/render/driver.rs
+index a99cc43d..f8f20559 100644
+--- a/net/src/render/driver.rs
++++ b/net/src/render/driver.rs
+@@ -271,9 +271,18 @@ pub(super) struct FlightInput {
+ /// a future Expert toggle (which would set this to 0 — pure roll on the stick).
+ const PLANE_TURN_COORDINATION: f32 = 0.3;
+ 
++/// The ONE attitude/aim sensitivity knob (owner: vehicles were "too sensitive" on the controller).
++/// Scales the ANALOG ROTATION sticks — the plane's left-stick pitch/roll and the ship's right-stick
++/// pitch/yaw — before they hit the force model, so full deflection commands a fraction of the
++/// available control torque instead of slamming it. 1.0 = raw (old, twitchy); <1 = gentler. Only the
++/// analog sticks scale: the digital bumpers/keys are bang-bang and the translational thrusters keep
++/// full authority, so this is purely the "how fast does the craft rotate per stick" feel knob the
++/// owner trims. A single constant (referenced in both craft) so the two can't drift apart.
++pub(super) const VEHICLE_STICK_SENS: f32 = 0.5;
++
+ /// The per-craft [`VehicleControl`] intents a set of raw [`FlightInput`]s produces. Pure (no World)
+-/// so a test can pin the directions — above all the plane's INVERTED pitch and the ship's 6-DOF
+-/// thrust axes — without spinning a Bevy app.
++/// so a test can pin the directions — the intuitive (push-up = nose-up) pitch shared by both craft,
++/// the ship's 6-DOF thrust axes, and the [`VEHICLE_STICK_SENS`] scaling — without spinning a Bevy app.
+ #[derive(Debug, Default, PartialEq)]
+ pub(super) struct FlightControl {
+     pub throttle_trim: f32,
+@@ -285,8 +294,8 @@ pub(super) struct FlightControl {
+ }
+ 
+ /// Map raw flight inputs to the shared force-model intents, per craft:
+-/// - **Plane (AC6)**: left stick (or mouse) flies — pitch INVERTED (back = nose up) + roll, with a
+-///   coordinating yaw; RT/LT (or W/S) trim the throttle lever; bumpers (or A/D) are the rudder. No
++/// - **Plane (AC6)**: left stick (or mouse) flies — pitch (push up = nose up, intuitive) + roll, with
++///   a coordinating yaw; RT/LT (or W/S) trim the throttle lever; bumpers (or A/D) are the rudder. No
+ ///   direct thrusters (the plane thrusts through its lever). Right stick is the camera (unused here).
+ /// - **Ship (Outer Wilds)**: left stick (or WASD) fires the body-frame thrusters (strafe/forward),
+ ///   RT/LT thrust up/down; right stick (or mouse) AIMS (pitch + yaw, camera-style — NOT inverted);
+@@ -295,10 +304,12 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
+     let clamp = |x: f32| x.clamp(-1.0, 1.0);
+     match kind {
+         VehicleKind::Plane => {
+-            // Inverted pitch: pulling the stick DOWN/back (left.y < 0) or the mouse back (down,
+-            // mouse.y > 0) raises the nose — the flight-sim convention AC6 defaults to.
+-            let pitch = clamp(-fi.left.y + fi.mouse.y);
+-            let roll = clamp(fi.left.x + fi.mouse.x);
++            // Intuitive (camera-style) pitch — the owner found the old AC6 inversion backwards on the
++            // controller: push the stick UP (left.y > 0) → nose UP, matching the ship's aim and the
++            // on-foot look. Mouse up (mouse.y < 0) also noses up. The analog stick is scaled by
++            // VEHICLE_STICK_SENS (the "too sensitive" fix); the mouse keeps its own FLIGHT_MOUSE_SENS.
++            let pitch = clamp(fi.left.y * VEHICLE_STICK_SENS - fi.mouse.y);
++            let roll = clamp(fi.left.x * VEHICLE_STICK_SENS + fi.mouse.x);
+             // Rudder (bumpers / A,D) plus the coordinating yaw that turns a bank into a turn.
+             let rudder = (fi.rb as i32 - fi.lb as i32) as f32 + fi.wasd.x;
+             let yaw = clamp(rudder + PLANE_TURN_COORDINATION * roll);
+@@ -314,9 +325,11 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
+                 clamp(fi.rt - fi.lt),
+                 clamp(fi.left.y + fi.wasd.y),
+             );
+-            // Aim with the right stick / mouse — camera-style, NOT inverted (push up = nose up).
+-            let pitch = clamp(fi.right.y - fi.mouse.y);
+-            let yaw = clamp(fi.right.x + fi.mouse.x);
++            // Aim with the right stick / mouse — camera-style, NOT inverted (push up = nose up). The
++            // analog stick is scaled by VEHICLE_STICK_SENS (the same "too sensitive" knob as the
++            // plane); the mouse keeps its own FLIGHT_MOUSE_SENS.
++            let pitch = clamp(fi.right.y * VEHICLE_STICK_SENS - fi.mouse.y);
++            let yaw = clamp(fi.right.x * VEHICLE_STICK_SENS + fi.mouse.x);
+             // Roll on the bumpers.
+             let roll = clamp((fi.rb as i32 - fi.lb as i32) as f32);
+             FlightControl {
+diff --git a/net/src/render/tests.rs b/net/src/render/tests.rs
+index 5191647b..f79110a9 100644
+--- a/net/src/render/tests.rs
++++ b/net/src/render/tests.rs
+@@ -4,7 +4,8 @@
+ use super::*;
+ use super::app::ExternalCrabStackInstalled;
+ use super::driver::{
+-    FlightInput, GameState, InputSource, PendingRound, ensure_round_installed, flight_control,
++    FlightInput, GameState, InputSource, PendingRound, VEHICLE_STICK_SENS, ensure_round_installed,
++    flight_control,
+ };
+ use crab_world::vehicle::VehicleKind;
+ use super::input::pad_stick_axes;
+@@ -382,20 +383,27 @@ fn pad_axes_are_not_pre_negated() {
+     );
+ }
+ 
+-/// The PLANE control bridge = Ace Combat 6. Pins the directions the cockpit legend rides, above all
+-/// the INVERTED pitch (the owner's complaint): pulling the left stick DOWN/back must raise the nose.
++/// The PLANE control bridge. Pins the directions the cockpit legend rides, above all the INTUITIVE
++/// (de-inverted) pitch (the owner's complaint that the old AC6 inversion felt backwards): pushing the
++/// left stick UP must raise the nose, matching the ship's aim and the on-foot look. Also pins the
++/// VEHICLE_STICK_SENS scaling of the analog attitude stick (the "too sensitive" fix).
+ #[test]
+-fn plane_flight_control_is_ace_combat_6() {
++fn plane_flight_control_pitch_is_intuitive_and_scaled() {
+     let plane = |fi: FlightInput| flight_control(VehicleKind::Plane, &fi);
+-    // Inverted pitch: stick DOWN (left.y < 0) → nose UP (pitch > 0); stick up → nose down.
+-    assert!(plane(FlightInput { left: Vec2::new(0.0, -1.0), ..default() }).pitch > 0.0);
+-    assert!(plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).pitch < 0.0);
+-    // Mouse pulled back (down, +y) also raises the nose (same inversion).
+-    assert!(plane(FlightInput { mouse: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
++    // Intuitive pitch: stick UP (left.y > 0) → nose UP (pitch > 0); stick down → nose down.
++    assert!(plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
++    assert!(plane(FlightInput { left: Vec2::new(0.0, -1.0), ..default() }).pitch < 0.0);
++    // Mouse UP (screen −y) also raises the nose (camera-style, matching the ship).
++    assert!(plane(FlightInput { mouse: Vec2::new(0.0, -1.0), ..default() }).pitch > 0.0);
++    // The analog attitude stick is scaled by VEHICLE_STICK_SENS, not raw: full deflection commands a
++    // fraction of full authority (the controller "too sensitive" fix). Mouse keeps its own scale.
++    let full = plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() });
++    assert!((full.pitch - VEHICLE_STICK_SENS).abs() < 1e-6, "full-up stick → VEHICLE_STICK_SENS pitch");
++    let rolled = plane(FlightInput { left: Vec2::new(1.0, 0.0), ..default() });
++    assert!((rolled.roll - VEHICLE_STICK_SENS).abs() < 1e-6, "full-right stick → VEHICLE_STICK_SENS roll");
+     // Roll: stick right → bank right (+roll), with a coordinating yaw the SAME sign (turns, not just
+     // rolls).
+-    let banked = plane(FlightInput { left: Vec2::new(1.0, 0.0), ..default() });
+-    assert!(banked.roll > 0.0 && banked.yaw > 0.0, "right stick → bank right + coordinated yaw");
++    assert!(rolled.roll > 0.0 && rolled.yaw > 0.0, "right stick → bank right + coordinated yaw");
+     // Throttle: RT accelerates (+), LT brakes (−). Rudder: RB right (+yaw), LB left (−yaw).
+     assert!(plane(FlightInput { rt: 1.0, ..default() }).throttle_trim > 0.0);
+     assert!(plane(FlightInput { lt: 1.0, ..default() }).throttle_trim < 0.0);
+@@ -418,8 +426,12 @@ fn ship_flight_control_is_outer_wilds() {
+     assert!(ship(FlightInput { rt: 1.0, ..default() }).thrust.y > 0.0);
+     assert!(ship(FlightInput { lt: 1.0, ..default() }).thrust.y < 0.0);
+     // Aim is camera-style, NOT inverted: right stick UP → nose UP (pitch > 0); right → yaw right.
+-    assert!(ship(FlightInput { right: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
++    // The analog AIM stick is scaled by VEHICLE_STICK_SENS (the "too sensitive" fix), like the plane.
++    let aim_up = ship(FlightInput { right: Vec2::new(0.0, 1.0), ..default() });
++    assert!((aim_up.pitch - VEHICLE_STICK_SENS).abs() < 1e-6, "full-up aim stick → VEHICLE_STICK_SENS pitch");
+     assert!(ship(FlightInput { right: Vec2::new(1.0, 0.0), ..default() }).yaw > 0.0);
++    // Translational thrust keeps FULL authority — only rotation is desensitized.
++    assert_eq!(ship(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).thrust.z, 1.0);
+     // Roll on the bumpers; A/Space matches velocity. The ship has no throttle lever.
+     assert!(ship(FlightInput { rb: true, ..default() }).roll > 0.0);
+     assert!(ship(FlightInput { match_vel: true, ..default() }).match_velocity);
