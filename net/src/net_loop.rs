@@ -1432,6 +1432,126 @@ mod tests {
         s2.shutdown().await;
     }
 
+    /// END-TO-END two-peer MATCH START over real iroh QUIC: a host (the PlayerId-0 server) and a
+    /// remote client, meshed by direct dial, form the match and then run the ACTUAL per-tick
+    /// input exchange — client ships its input UP, host assembles + broadcasts the complete
+    /// `TickSet` DOWN — and BOTH sims must advance well past tick 0. This is the regression guard
+    /// for the "MP match won't start / gray screen" class (rl#166): the gray screen is the sim
+    /// stuck at tick 0 because the remote client never gets a usable tickset. The wire calls here
+    /// (`host_assemble`/`broadcast_tickset` on the host, `send_to`/`unpack_tickset` on the client)
+    /// are exactly what the windowed `Coordinator::exchange` wraps, so a stall here is the stall a
+    /// real joiner would see. `#[ignore]` because it binds real UDP sockets.
+    #[tokio::test]
+    #[ignore = "binds real iroh UDP endpoints; run explicitly with --ignored"]
+    async fn two_peers_start_a_match_and_both_advance_over_iroh() {
+        let mut sh = transport::start_session().await.expect("start host");
+        let mut sc = transport::start_session().await.expect("start client");
+        let ha = sh.local_addr();
+        // Mesh by DIRECT dial (mDNS is flaky on a loopback/CI host); one dial orients the link.
+        sc.connect_direct(ha).await.expect("client -> host");
+
+        // Form the SAME match on both, concurrently (timer-closed barrier, no lobby).
+        let (rh, rc) = tokio::join!(
+            form_match(&mut sh, 1, 2, None, None, 0, 0),
+            form_match(&mut sc, 1, 2, None, None, 0, 0),
+        );
+        let agreed = |r: Result<Formation>, who: &str| match r.expect(who) {
+            Formation::Agreed(f) => f,
+            Formation::Alone => panic!("{who}: fell back to solo despite a peer being present"),
+            Formation::Cancelled => panic!("{who}: cancelled despite no lobby control"),
+        };
+        let (f0, f1) = (agreed(rh, "peer A forms"), agreed(rc, "peer B forms"));
+        assert_eq!(f0.id_map, f1.id_map, "both peers must freeze the same roster");
+        let all_ids: Vec<PlayerId> = f0.id_map.values().copied().collect();
+        let server_eid = server_endpoint(&f0.id_map);
+
+        // PlayerId is assigned by sorted endpoint id, not who dialed — so EITHER session may be
+        // the host (PlayerId 0). Drive each peer by its REAL role: the host runs the Server ledger
+        // + steps its own lockstep; the remote client ships its input up and applies the ticksets
+        // the host broadcasts down (the legacy peer-symmetric arm increment 1 leaves live).
+        struct Peer {
+            session: transport::Session,
+            ls: Lockstep,
+            id_map: std::collections::BTreeMap<EndpointId, PlayerId>,
+            me: PlayerId,
+            server: Option<crate::server::Server>,
+        }
+        let mk = |session: transport::Session, f: Frozen| {
+            let ls = Lockstep::new(0, &all_ids, f.me);
+            let server = (f.me == PlayerId(0)).then(|| {
+                let mut s = crate::server::Server::new(&all_ids, ls.sim().clone());
+                s.seed_early(&early_peer_msgs(&f));
+                s
+            });
+            Peer { session, ls, id_map: f.id_map, me: f.me, server }
+        };
+        let mut a = mk(sh, f0);
+        let mut b = mk(sc, f1);
+
+        // One real-wire tick for one peer: ingest, exchange through the server, advance.
+        async fn step(p: &mut Peer, server_eid: EndpointId) {
+            use crate::sim::Input;
+            let input = Input::from_axes(1.0, 0.0);
+            if let Some(server) = p.server.as_mut() {
+                let mut remote: Vec<PeerMsg> = Vec::new();
+                while let Some(m) = p.session.try_recv() {
+                    if let (transport::PeerWire::Tick(msg), Some(&pid)) =
+                        (m.msg, p.id_map.get(&m.from))
+                    {
+                        remote.push(PeerMsg { pid, msg });
+                    }
+                }
+                let msg = p.ls.submit_local_input(input);
+                let (sets, peer_msgs) =
+                    crate::server::host_assemble(server, p.me, msg, remote);
+                for s in &sets {
+                    p.session.broadcast_tickset(s).await;
+                }
+                for pm in peer_msgs {
+                    let _ = p.ls.record_remote(pm.pid, pm.msg);
+                }
+            } else {
+                let mut sets: Vec<crate::server::TickSet> = Vec::new();
+                while let Some(m) = p.session.try_recv() {
+                    if let transport::PeerWire::TickSet(set) = m.msg {
+                        sets.push(set);
+                    }
+                }
+                let msg = p.ls.submit_local_input(input);
+                p.session.send_to(server_eid, &msg).await;
+                for pm in sets.iter().flat_map(|s| crate::server::unpack_tickset(s, p.me)) {
+                    let _ = p.ls.record_remote(pm.pid, pm.msg);
+                }
+            }
+            while p.ls.advance_one().is_some() {}
+        }
+
+        // Drive ~150 ticks of real exchange, interleaved on a shared ticker so the wire moves.
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(8));
+        for _ in 0..150 {
+            ticker.tick().await;
+            step(&mut a, server_eid).await;
+            step(&mut b, server_eid).await;
+        }
+
+        // The MATCH STARTED: both peers left tick 0 and stayed roughly in step. A gray-screen
+        // stall would pin the client (or both) at/near tick 0 (only the INPUT_DELAY warmup).
+        let (host, client) = if a.me == PlayerId(0) { (&a, &b) } else { (&b, &a) };
+        assert!(
+            host.ls.sim().tick() > 60,
+            "host stalled at tick {} — match never started",
+            host.ls.sim().tick()
+        );
+        assert!(
+            client.ls.sim().tick() > 60,
+            "client stalled at tick {} — the joiner never got usable ticksets (gray screen)",
+            client.ls.sim().tick()
+        );
+
+        a.session.shutdown().await;
+        b.session.shutdown().await;
+    }
+
     /// The solo-fallback decision, exhaustively and deterministically (no socket, no real
     /// clock — the policy is the pure [`is_alone_now`] predicate). Each of the four
     /// conditions that must ALL hold is falsified in isolation to prove it's load-bearing.
