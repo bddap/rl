@@ -21,11 +21,11 @@ pub(super) struct TargetBall;
 /// target and teleports it to a fresh far point (see [`target_ball`]). Set at the edge
 /// of the claw's reach. Because the reach `d` is 3D, this 0.8 m is a SPHERE about the
 /// target, not a ground-plane cylinder: a tip standing under a raised ball is no longer
-/// "reached" until it is within 0.8 m in 3D. The training REWARD pays the smooth
-/// `1 − tanh(d/S)` everywhere with no threshold, so this radius never enters a reward; it
-/// defines a binary "reached it" event in two non-reward places that benefit from one
-/// shared definition: the demo's ball-hop here, and the training curriculum's
-/// per-episode competence signal. DERIVED from that curriculum constant
+/// "reached" until it is within 0.8 m in 3D. The training reward is dense planar PROGRESS
+/// plus a SPARSE grab terminal gated at exactly this radius (`reward::GRAB_REWARD`), so the
+/// same radius defines the "reached it" event in three places that share one definition: the
+/// grab terminal there, the demo's ball-hop here, and the training per-episode reach signal.
+/// DERIVED from that curriculum constant
 /// ([`crate::training::curriculum::CURRICULUM_REACH_RADIUS`]) — one source, in the
 /// always-compiled trainer — so the demo and curriculum can't drift apart on the
 /// radius. (0.8 m, as the doc above describes.)
@@ -69,12 +69,11 @@ pub(super) fn spawn_target_ball(
 /// rule training samples, so a demo target is always the same kind of walk-to goal the
 /// policy was trained on.
 ///
-/// **Intentional train/demo divergence.** Training uses ONE fixed target per episode
-/// (no resample on reach): the reward is a pure distance field with no reach-event
-/// bonus, so resampling-on-reach would let the optimal policy hover just outside the
-/// reach radius forever instead of touching — a degenerate optimum (see
-/// `systems::brain_step`). The DEMO deliberately teleports on reach anyway, purely for
-/// watchability: it keeps the crab walking continuously to new goals instead of parking
+/// **Intentional train/demo divergence.** Training uses ONE fixed target per episode: the
+/// sparse grab terminal ENDS the episode on reach, so there is no per-tick stream to farm by
+/// hovering (and dense progress telescopes to zero on a closed wobble — see `reward`). The
+/// DEMO instead teleports the ball to a fresh target on reach, purely for watchability: it
+/// keeps the crab walking continuously to new goals instead of parking
 /// on one. This is safe because the policy learned "walk toward the current target
 /// vector" and so generalizes to a target that moves — the demo just exercises that on
 /// a livelier schedule than training. Reached is the closest 3D euclidean claw-tip-to-target
