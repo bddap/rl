@@ -242,6 +242,14 @@ pub(crate) struct TrainingState {
     /// a warm-resume rebuilds it fresh, like the episode accumulators in [`Self::envs`].
     explore_noise: OuNoise,
 
+    /// This horizon's exploration-σ floor — the lower `log_std` clamp the rollout samples under
+    /// (bddap/rl#161). The learner evaluates the anneal schedule each iteration and ships the
+    /// scalar down with the policy snapshot (via [`Self::set_log_std_floor`]); the rollout
+    /// thread only reads it in [`brain_step`]. Defaults to the resting floor [`LOG_STD_MIN`] so
+    /// a thread that rolls before its first set still samples at the architectural σ, never a
+    /// garbage spread.
+    log_std_floor: f32,
+
     checkpoint_dir: PathBuf,
     saved_on_exit: bool,
 
@@ -425,6 +433,7 @@ impl TrainingState {
             device,
             envs: vec![EnvEpisode::default(); n],
             explore_noise: OuNoise::new(n),
+            log_std_floor: crate::bot::brain::LOG_STD_MIN,
             episode_count: 0,
             recent_rewards: Vec::new(),
             total_steps: 0,
@@ -602,6 +611,14 @@ impl TrainingState {
     /// fixed full-arena range; the thread only consumes it.
     pub(crate) fn set_curriculum(&mut self, curriculum: Curriculum) {
         self.curriculum = curriculum;
+    }
+
+    /// Set this horizon's exploration-σ floor (learner → thread, once per horizon before the
+    /// roll, like [`Self::set_curriculum`]). The learner evaluates the anneal schedule from the
+    /// durable tick odometer and ships the scalar so the rollout samples — and the update later
+    /// recomputes log-probs — under the same lower `log_std` clamp (bddap/rl#161).
+    pub(crate) fn set_log_std_floor(&mut self, log_std_floor: f32) {
+        self.log_std_floor = log_std_floor;
     }
 
     /// Drain this horizon's per-episode reach tally as `(reached, finished)`, resetting
@@ -1021,8 +1038,9 @@ fn forward_pass(
     );
     // Reuse the inference brain cached for these weights — rebuilt only when the rollout
     // thread reloads the learner's snapshot (once per horizon), not every tick.
+    let log_std_floor = training.log_std_floor;
     let (means_batch, log_std, values) = training.brain.with_inference(|inference_brain| {
-        let (means_batch, log_std) = inference_brain.policy(obs_batch.clone());
+        let (means_batch, log_std) = inference_brain.policy(obs_batch.clone(), log_std_floor);
         let values: Vec<NormalizedValue> = inference_brain
             .value(obs_batch)
             .flatten::<1>(0, 1)
@@ -1401,7 +1419,7 @@ mod tests {
         // log_std, and the value — so the cache is held to bit-identity on all three.
         let bits = |t: &[f32]| -> Vec<u32> { t.iter().map(|v| v.to_bits()).collect() };
         let policy_bits = |brain: &CrabBrain<InferBackend>| -> Vec<u32> {
-            let (means, log_std) = brain.policy(obs.clone());
+            let (means, log_std) = brain.policy(obs.clone(), crate::bot::brain::LOG_STD_MIN);
             let value = brain.value(obs.clone());
             let mut out = bits(&means.to_data().to_vec::<f32>().unwrap());
             out.extend(bits(&log_std.to_data().to_vec::<f32>().unwrap()));
@@ -1446,7 +1464,7 @@ mod tests {
         // Bits of the full forward output (policy means + log_std + value) — a faithful
         // fingerprint of the initial weights, the same projection `inference_cache_…` hashes.
         let weight_bits = |brain: &CrabBrain<InferBackend>| -> Vec<u32> {
-            let (means, log_std) = brain.policy(obs.clone());
+            let (means, log_std) = brain.policy(obs.clone(), crate::bot::brain::LOG_STD_MIN);
             let value = brain.value(obs.clone());
             let bits = |t: &[f32]| -> Vec<u32> { t.iter().map(|v| v.to_bits()).collect() };
             let mut out = bits(&means.to_data().to_vec::<f32>().unwrap());

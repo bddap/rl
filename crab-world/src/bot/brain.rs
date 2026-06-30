@@ -15,7 +15,9 @@ const LOG_STD_INIT: f32 = -1.6;
 /// Bounds the learnable log-std so entropy can't diverge or collapse. Single
 /// source of truth: `policy` clamps to this range, so downstream log-prob /
 /// entropy never re-clamp. exp(-2) ≈ 0.14 (focused), exp(0.5) ≈ 1.65 (wide).
-const LOG_STD_MIN: f32 = -2.0;
+/// `LOG_STD_MIN` is also the resting/refine floor the exploration schedule anneals
+/// back down to once the wide-early window elapses (see `PpoConfig::log_std_floor`).
+pub(crate) const LOG_STD_MIN: f32 = -2.0;
 const LOG_STD_MAX: f32 = 0.5;
 
 /// Actor-Critic network for PPO.
@@ -98,16 +100,23 @@ impl<B: Backend> CrabBrain<B> {
         burn::tensor::activation::relu(x)
     }
 
-    /// Action means (tanh-bounded to [-1, 1]) and the log-std, pre-clamped to
-    /// [`LOG_STD_MIN`, `LOG_STD_MAX`] so downstream log-prob/entropy need not re-clamp.
-    pub fn policy(&self, obs: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 1>) {
+    /// Action means (tanh-bounded to [-1, 1]) and the log-std, clamped to
+    /// `[log_std_floor, LOG_STD_MAX]` so downstream log-prob/entropy need not re-clamp.
+    ///
+    /// `log_std_floor` is the LOWER clamp bound — the minimum exploration spread for this
+    /// forward. It is the lever the training schedule raises early to FORCE σ wide (the
+    /// learned `log_std` param sits below it, so the clamp overrides it) and anneals back
+    /// down to `LOG_STD_MIN` for refinement (see `PpoConfig::log_std_floor`). Pass
+    /// [`LOG_STD_MIN`] for the unforced/default bound; eval takes the policy MEAN and
+    /// discards `log_std`, so the floor never reaches a deployed action — exploration
+    /// widening is training-only. The floor is itself clamped into `[LOG_STD_MIN,
+    /// LOG_STD_MAX]` so a misconfigured schedule can't widen past the architectural bound.
+    pub fn policy(&self, obs: Tensor<B, 2>, log_std_floor: f32) -> (Tensor<B, 2>, Tensor<B, 1>) {
         let trunk = self.trunk(obs);
         let means = self.policy_fc.forward(trunk);
         let means = burn::tensor::activation::tanh(means);
-        let log_std = self
-            .log_std
-            .val()
-            .clamp(LOG_STD_MIN as f64, LOG_STD_MAX as f64);
+        let lo = log_std_floor.clamp(LOG_STD_MIN, LOG_STD_MAX);
+        let log_std = self.log_std.val().clamp(lo as f64, LOG_STD_MAX as f64);
         (means, log_std)
     }
 

@@ -167,6 +167,10 @@ impl<B: AutodiffBackend> GpuLearner<B> {
         rollouts: &[RolloutBuffer],
         ret_norm: &mut ReturnNormalizer,
         rng: &mut StdRng,
+        // This iteration's exploration-σ floor — the SAME lower `log_std` clamp the rollout
+        // sampled under, threaded through so the on-backend π_old/π_new recompute matches the
+        // behavior policy (see [`ppo_update_core`]).
+        log_std_floor: f32,
     ) -> (PpoMetrics, GpuUpdateTiming) {
         use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
         type Bridge = BinBytesRecorder<FullPrecisionSettings>;
@@ -198,6 +202,7 @@ impl<B: AutodiffBackend> GpuLearner<B> {
             &self.device,
             ret_norm,
             rng,
+            log_std_floor,
         );
         <B as burn::tensor::backend::Backend>::sync(&self.device)
             .expect("GPU sync after PPO update");
@@ -251,7 +256,7 @@ mod tests {
 
     fn policy_means(brain: &CrabBrain<TrainBackend>, device: &NdArrayDevice) -> Vec<f32> {
         let obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], device);
-        brain.policy(obs).0.to_data().to_vec().unwrap()
+        brain.policy(obs, crate::bot::brain::LOG_STD_MIN).0.to_data().to_vec().unwrap()
     }
 
     /// The injected-device seam lets the CPU↔device marshalling + timing path run with NO
@@ -272,8 +277,14 @@ mod tests {
         let config = PpoConfig::default();
         let mut ret_norm = ReturnNormalizer::new();
         let mut rng = StdRng::seed_from_u64(0);
-        let (_metrics, timing) =
-            learner.update(&mut cpu_brain, &config, &[], &mut ret_norm, &mut rng);
+        let (_metrics, timing) = learner.update(
+            &mut cpu_brain,
+            &config,
+            &[],
+            &mut ret_norm,
+            &mut rng,
+            crate::bot::brain::LOG_STD_MIN,
+        );
 
         let after = policy_means(&cpu_brain, &device);
         for (i, (a, b)) in before.iter().zip(after.iter()).enumerate() {
