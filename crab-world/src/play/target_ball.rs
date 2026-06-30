@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::bot::CrabSpawns;
 use crate::bot::body::{self, CrabClawTip};
 use crate::bot::sensor::CrabTargets;
-use crate::training::curriculum::{Curriculum, sample_target};
+use crate::training::curriculum::{TargetBand, sample_target};
 use crate::training::reward::dist_3d;
 
 /// Marker on the demo's red target ball — the visible stand-in for the target the
@@ -98,7 +98,7 @@ pub(super) fn target_ball(
     // arena edge — so the streamed demo shows the crab chasing the real target at any
     // distance, exactly the range the weights train on (one `sample_target` rule, so the
     // demo can never pose a target training never saw).
-    let demo_band = Curriculum::start();
+    let demo_band = TargetBand::start();
     let mut target = match targets.get(0) {
         Some(t) => t,
         None => target_ball_at_from_env()
