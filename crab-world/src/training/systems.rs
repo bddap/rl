@@ -33,7 +33,7 @@ use crate::bot::{
 };
 
 use super::algorithm::{
-    NormalizedValue, PpoConfig, ReturnNormalizer, RolloutBuffer, StepEnd, Transition,
+    NormalizedValue, OuNoise, PpoConfig, ReturnNormalizer, RolloutBuffer, StepEnd, Transition,
     compute_log_prob, sample_action,
 };
 use super::{InferBackend, TrainBackend};
@@ -236,6 +236,12 @@ pub(crate) struct TrainingState {
     /// which the determinism regression test pins.
     rng: StdRng,
 
+    /// Per-env temporally-correlated exploration noise (bddap/rl#161): the `ε` in the policy's
+    /// `μ + σ·ε` draw, correlated over time so exploration is a sustained limb sweep instead of
+    /// per-tick jitter. Rollout-thread-local and reset per episode, so it is NOT checkpointed —
+    /// a warm-resume rebuilds it fresh, like the episode accumulators in [`Self::envs`].
+    explore_noise: OuNoise,
+
     checkpoint_dir: PathBuf,
     saved_on_exit: bool,
 
@@ -418,6 +424,7 @@ impl TrainingState {
             rollouts: (0..n).map(|_| RolloutBuffer::new()).collect(),
             device,
             envs: vec![EnvEpisode::default(); n],
+            explore_noise: OuNoise::new(n),
             episode_count: 0,
             recent_rewards: Vec::new(),
             total_steps: 0,
@@ -894,6 +901,28 @@ impl TrainingState {
             }
         }
     }
+
+    /// This tick's exploration `ε` per env (bddap/rl#161): a RECORDING env advances its
+    /// temporally-correlated AR(1) noise; the only other phase live here is `Settling`
+    /// (`AwaitingRespawn` is set and consumed later within this same `brain_step`, never seen at
+    /// this point — see [`EnvPhase`]), which RE-SEEDS its noise to a fresh draw so its next episode
+    /// begins uncorrelated. The returned `ε` for a Settling env is DISCARDED — `brain_step` forces
+    /// its drive to the rest pose regardless — so the `[0.0; _]` is a placeholder, not a meaningful
+    /// zero. Reset-on-not-Recording keeps the per-episode fresh start impossible to forget: the
+    /// only env that ever consumes the noise is a Recording one, and it always advances from a draw
+    /// re-seeded during its settle.
+    fn step_explore_noise(&mut self, n: usize) -> Vec<[f32; ACTION_SIZE]> {
+        (0..n)
+            .map(|e| {
+                if matches!(self.envs[e].phase, EnvPhase::Recording) {
+                    self.explore_noise.next(e, &mut self.rng)
+                } else {
+                    self.explore_noise.reset(e, &mut self.rng);
+                    [0.0; ACTION_SIZE]
+                }
+            })
+            .collect()
+    }
 }
 
 /// Effort/tax probe (RL_LOG_EFFORT only — inert otherwise): per tick, the mean drive effort
@@ -1016,22 +1045,24 @@ fn forward_pass(
     (means_rows, log_std, values)
 }
 
-/// Sample one DRIVE per env from its policy mean and the shared `log_std`, drawing the
-/// Gaussian noise from the run's seeded `rng` (so the trajectory is reproducible), with the
-/// NaN/Inf guards the live solver needs: a non-finite log-prob becomes 0 (else clamped to ±20),
+/// Sample one DRIVE per env from its policy mean and the shared `log_std`, using `noise[e]` as
+/// that env's standard-normal `ε` (the temporally-correlated draw from [`OuNoise`], aligned by
+/// env), with the NaN/Inf guards the live solver needs: a non-finite log-prob becomes 0
+/// (else clamped to ±20),
 /// and any non-finite drive element zeroes that element (warning once for the row). The
 /// log-prob and the effort tax are both over the unbounded `drive`; the ±1 torque bound is the
 /// actuator's clamp, not applied here, so the drive stays a single un-truncated quantity.
 fn sample_actions(
     means_rows: &[Tensor<NdArray, 1>],
     log_std: &Tensor<NdArray, 1>,
+    noise: &[[f32; ACTION_SIZE]],
     device: &NdArrayDevice,
-    rng: &mut StdRng,
 ) -> Vec<SampledAction> {
     means_rows
         .iter()
-        .map(|means| {
-            let drive_tensor = sample_action(means, log_std, device, rng);
+        .zip(noise)
+        .map(|(means, &eps)| {
+            let drive_tensor = sample_action(means, log_std, eps, device);
             // Log-prob of the ACTUAL sample (the unbounded drive): it must be the quantity the
             // PPO update later recomputes its ratio over, and the drive — not a clamp of it —
             // is what the Gaussian drew.
@@ -1182,7 +1213,8 @@ pub(crate) fn brain_step(
     // Sense → Think: normalize, one batched forward pass, sample an action per env.
     let obs_arrays = normalize_observations(&mut training, &obs);
     let (means_rows, log_std, values) = forward_pass(&training, &obs_arrays);
-    let sampled = sample_actions(&means_rows, &log_std, &device, &mut training.rng);
+    let noise = training.step_explore_noise(n);
+    let sampled = sample_actions(&means_rows, &log_std, &noise, &device);
 
     let drive_arrays: Vec<[f32; ACTION_SIZE]> = sampled.iter().map(|s| s.drive).collect();
     let log_probs: Vec<f32> = sampled.iter().map(|s| s.log_prob).collect();

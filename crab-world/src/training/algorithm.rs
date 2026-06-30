@@ -440,21 +440,83 @@ fn next_standard_normal(rng: &mut StdRng) -> f32 {
 /// that slams a joint onto its rail). Clamping here would erase that overshoot — the tax would
 /// see only the bounded command and lose its pull off the rail.
 ///
-/// The noise comes from the caller's `rng` (the run's seeded [`StdRng`], owned per
-/// `TrainingState`) rather than the backend's global-mutex-locked `Tensor::random`, so K
-/// rollout threads don't serialize on a hot-path lock AND the sampled trajectory is
-/// reproducible from the seed. Swapping the RNG source leaves the distribution unchanged:
-/// standard-normal noise, then `mean + std·noise`.
+/// `noise` is the standard-normal exploration `ε` the caller drew — per-tick-independent in the
+/// old design, now the temporally-correlated draw from [`OuNoise`] (bddap/rl#161). Either way it
+/// is marginally N(0,1), so the per-step Gaussian log-prob the PPO update recomputes is unchanged
+/// — only the temporal correlation of successive `ε`s differs, which is what makes a coordinated
+/// gait discoverable.
 pub(crate) fn sample_action<B: Backend>(
     means: &Tensor<B, 1>,
     log_std: &Tensor<B, 1>,
+    noise: [f32; ACTION_SIZE],
     device: &B::Device,
-    rng: &mut StdRng,
 ) -> Tensor<B, 1> {
     let std = log_std.clone().exp();
-    let noise_vals: [f32; ACTION_SIZE] = std::array::from_fn(|_| next_standard_normal(rng));
-    let noise = Tensor::<B, 1>::from_floats(noise_vals, device);
+    let noise = Tensor::<B, 1>::from_floats(noise, device);
     means.clone() + noise * std
+}
+
+/// AR(1) retention coefficient α ∈ [0, 1) for the exploration noise — the single tunable for
+/// how far over time exploration is correlated, and THE lever this experiment exists to turn
+/// (bddap/rl#161). The crab explored with per-tick-INDEPENDENT Gaussian noise on ~38 joints at
+/// 64 Hz, which can only jitter — it never holds a coordinated, periodic limb motion long
+/// enough to earn progress reward, so a walking gait never bootstraps. Correlating the noise
+/// over time makes sustained, gait-like limb sweeps the DEFAULT exploration, so the policy can
+/// stumble into one and be rewarded.
+///
+/// 0.95 ⇒ correlation time constant −1/ln α ≈ 19.5 ticks ≈ 0.3 s at 64 Hz — a coherent push
+/// lasting a meaningful fraction of a ~0.5–1 s stride, long enough for a chance-aligned
+/// multi-joint sweep to persist and earn progress (α=0.9's ~0.15 s decorrelates inside one
+/// stride). Tune by editing this constant and warm-resuming: α→1 lengthens the sweep (toward a
+/// slow drift), α=0 recovers the old per-tick-independent noise. It is variance-preserving
+/// (`x ← α·x + √(1−α²)·ε`, see [`OuNoise::next`]), so it changes only the temporal SMOOTHNESS of
+/// exploration, never its MAGNITUDE (that stays the policy's learnable `log_std`) — keeping this
+/// lever orthogonal to the entropy/sigma knobs 616 falsified.
+const EXPLORE_CORRELATION: f32 = 0.95;
+
+/// Temporally-correlated exploration noise: one variance-preserving AR(1) (discrete
+/// Ornstein–Uhlenbeck) process per env, per joint, supplying the `ε` in the policy's
+/// exploration draw `μ + σ·ε` (see [`sample_action`]). Successive draws are correlated over
+/// ~[`EXPLORE_CORRELATION`] ticks, so exploration is a sustained limb sweep rather than per-tick
+/// jitter — the lever for bootstrapping a gait (bddap/rl#161).
+///
+/// TRAINING-ROLLOUT only, by construction: it is owned by `TrainingState` and the eval/demo
+/// policy path takes the policy MEAN (no `ε` at all — see `play::policy::PolicyController::act`),
+/// so exploration noise cannot leak into the deployed/greedy action.
+pub(crate) struct OuNoise {
+    /// AR(1) state per env (`state[e]`), per joint — env `e`'s current correlated `ε`.
+    state: Vec<[f32; ACTION_SIZE]>,
+}
+
+impl OuNoise {
+    pub(crate) fn new(n_envs: usize) -> Self {
+        Self {
+            state: vec![[0.0; ACTION_SIZE]; n_envs],
+        }
+    }
+
+    /// Re-seed env `e`'s noise to a fresh standard-normal draw — called when an episode
+    /// (re)starts so the new episode's exploration begins uncorrelated with the last, with the
+    /// correct N(0,1) marginal from its first tick.
+    pub(crate) fn reset(&mut self, e: usize, rng: &mut StdRng) {
+        for s in &mut self.state[e] {
+            *s = next_standard_normal(rng);
+        }
+    }
+
+    /// Advance env `e`'s AR(1) noise one tick and return the new `ε`: `x ← α·x + √(1−α²)·ε`,
+    /// `ε ~ N(0,1)`, `α =` [`EXPLORE_CORRELATION`]. Variance-preserving — at stationarity
+    /// `Var(x) = α²·1 + (1−α²)·1 = 1` — so the marginal is standard-normal at any α (keeping the
+    /// per-step Gaussian log-prob the PPO update recomputes valid) while successive draws stay
+    /// correlated.
+    pub(crate) fn next(&mut self, e: usize, rng: &mut StdRng) -> [f32; ACTION_SIZE] {
+        let a = EXPLORE_CORRELATION;
+        let b = (1.0 - a * a).sqrt();
+        for x in &mut self.state[e] {
+            *x = a * *x + b * next_standard_normal(rng);
+        }
+        self.state[e]
+    }
 }
 
 #[derive(Debug, Default, Clone)]
