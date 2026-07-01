@@ -334,8 +334,9 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
             // plane); the mouse keeps its own FLIGHT_MOUSE_SENS.
             let pitch = clamp(fi.right.y * VEHICLE_STICK_SENS - fi.mouse.y);
             let yaw = clamp(-(fi.right.x * VEHICLE_STICK_SENS + fi.mouse.x));
-            // Roll on the bumpers.
-            let roll = clamp((fi.rb as i32 - fi.lb as i32) as f32);
+            // Roll on the bumpers: LB banks right, RB banks left (owner playtest — the ship's
+            // bumper twist read reversed; the plane rudder above keeps its own [LB−, RB+] sense).
+            let roll = clamp((fi.lb as i32 - fi.rb as i32) as f32);
             FlightControl {
                 throttle_trim: 0.0,
                 thrust,

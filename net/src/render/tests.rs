@@ -435,8 +435,10 @@ fn ship_flight_control_is_outer_wilds() {
     assert!(ship(FlightInput { right: Vec2::new(1.0, 0.0), ..default() }).yaw < 0.0);
     // Translational thrust keeps FULL authority — only rotation is desensitized.
     assert_eq!(ship(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).thrust.z, 1.0);
-    // Roll on the bumpers; A/Space matches velocity. The ship has no throttle lever.
-    assert!(ship(FlightInput { rb: true, ..default() }).roll > 0.0);
+    // Roll on the bumpers (LB banks right → positive, RB banks left → negative — owner playtest
+    // had them reversed); A/Space matches velocity. The ship has no throttle lever.
+    assert!(ship(FlightInput { lb: true, ..default() }).roll > 0.0);
+    assert!(ship(FlightInput { rb: true, ..default() }).roll < 0.0);
     assert!(ship(FlightInput { match_vel: true, ..default() }).match_velocity);
     assert_eq!(ship(FlightInput { rt: 1.0, ..default() }).throttle_trim, 0.0);
 }
