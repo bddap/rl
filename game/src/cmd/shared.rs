@@ -64,11 +64,11 @@ pub(crate) fn write_tick_hash_log(
 
 /// Resolve the `--render-mode` flag into a [`net::render::RenderMode`]. An explicit value is
 /// parsed (rejecting an unknown token with an actionable error). With NO flag and NO
-/// `RL_RENDER_MODE`/`RL_DEBUG_COLLIDERS` override, the MISSING-GLB FALLBACK kicks in: if the
-/// canonical Sally mesh can't be resolved, default to the honest `colliders` view (the wireframe
-/// IS the crab the player sees — never a placeholder) and log a host-tagged error so the absent
-/// asset is visible in telemetry. With the mesh present (or an env override), the env decides
-/// (mesh by default).
+/// `RL_RENDER_MODE`/`RL_DEBUG_COLLIDERS` override, the UNUSABLE-GLB FALLBACK kicks in: if the
+/// canonical Sally mesh can't be resolved OR is present-but-unloadable, default to the honest
+/// `colliders` view (the wireframe IS the crab the player sees — never a placeholder) and log a
+/// host-tagged error naming the actual cause so the bad asset is visible in telemetry. With the mesh
+/// usable (or an env override), the env decides (mesh by default).
 pub(crate) fn resolve_render_mode(flag: Option<&str>) -> Result<net::render::RenderMode> {
     if let Some(s) = flag {
         return net::render::RenderMode::parse(s).ok_or_else(|| {
@@ -77,15 +77,17 @@ pub(crate) fn resolve_render_mode(flag: Option<&str>) -> Result<net::render::Ren
     }
     let env_override = std::env::var_os("RL_RENDER_MODE").is_some()
         || std::env::var_os("RL_DEBUG_COLLIDERS").is_some();
-    if !env_override && crab_world::bot::meshfit::model_path().is_none() {
-        // LOUD on the telemetry stream (and stderr). Shared with rl-demo so both surfaces name
-        // the missing Sally identically (rl#706). The on-screen banner companion is spawned on
-        // the windowed surface in `net::render::scene` (this headless-resolvable check decides
-        // only the render MODE; the banner needs the live window).
-        crab_world::mesh_fallback::log_fallback(
-            crab_world::mesh_fallback::Surface::Game,
-            crab_world::mesh_fallback::MESH_ABSENT_REASON,
-        );
+    // The FULL preflight, not existence-only: a present-but-broken glb also forces the honest
+    // colliders view, with the load error as the reason (bddap/rl#154). Same `usable_model` verdict
+    // the body/silhouette flip on, so the render MODE can't disagree with the geometry drawn.
+    if !env_override
+        && let Err(reason) = crab_world::mesh_fallback::usable_model()
+    {
+        // LOUD on the telemetry stream (and stderr). Shared with rl-demo so both surfaces name the
+        // bad Sally identically (rl#706). The on-screen banner companion is spawned on the windowed
+        // surface in `net::render::scene` (this headless-resolvable check decides only the render
+        // MODE; the banner needs the live window).
+        crab_world::mesh_fallback::log_fallback(crab_world::mesh_fallback::Surface::Game, reason);
         return Ok(net::render::RenderMode::Colliders);
     }
     Ok(net::render::RenderMode::from_env())
