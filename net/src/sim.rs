@@ -508,6 +508,52 @@ impl Sim {
         self.reset();
     }
 
+    /// Spawn a mid-game joiner (GCR MP incr 4, rl#151) INTO the live round — the host-authoritative
+    /// snapshot-transfer join ([[mp-minecraft-model]]), NOT the dead lockstep round-boundary rebuild.
+    /// Inserts a fresh [`Player`] for `pid` and folds it into the [`config`](Sim::config) roster
+    /// WITHOUT disturbing the ongoing state: the crab, extraction, incumbents, `tick`, `rng`, and
+    /// `outcome` are all untouched, so the joiner drops into the match exactly where it stands rather
+    /// than resetting every peer to tick 0 — which is what the dead lockstep round-boundary join
+    /// ([`rebuild_with_roster`](Sim::rebuild_with_roster), slated for incr-5 deletion) does, and what
+    /// round RESTART does via [`reset`](Sim::reset). This is why host-auth DISSOLVES job 509: the joiner never
+    /// re-simulates the incumbent's warm rapier world — it renders the host's output pose carried in
+    /// the snapshot — so the warm-cache / handle-arena divergence that broke lockstep bit-identity is
+    /// never on the wire. Only the authoritative host calls this (a client adopts the resulting
+    /// snapshot), so the spawn position needs no cross-peer determinism — it reuses the standing ring
+    /// convention (see [`spawn_state`](Sim::spawn_state)) so the joiner appears with the pack, and
+    /// incumbents keep their live positions (a cosmetic overlap they walk out of). Idempotent: a pid
+    /// already present is left exactly as-is.
+    pub fn spawn_joining_player(&mut self, pid: PlayerId) {
+        if self.players.contains_key(&pid) {
+            return;
+        }
+        // Keep config.players the sorted/deduped roster of record so a later RESTART rebuilds with
+        // the joiner too (reset() respawns from config).
+        self.config.players.push(pid);
+        self.config.players.sort();
+        self.config.players.dedup();
+        // Ring slot from the joiner's index in the new roster — the same layout construction uses, so
+        // the joiner spawns in formation. Position is cosmetic here (host-authoritative), not hashed
+        // cross-peer state, so it need only be sane.
+        let idx = self.config.players.iter().position(|p| *p == pid).unwrap_or(0) as i64;
+        let n = self.config.players.len() as i64;
+        let x = (idx - n / 2) * 2 * UNIT;
+        self.players.insert(
+            pid,
+            Player {
+                pos: Pos { x, z: 0 },
+                yaw: 0,
+                status: PlayerStatus::Alive,
+            },
+        );
+    }
+
+    /// Whether `pid` is a foot player in the round — the [`spawn_joining_player`](Sim::spawn_joining_player)
+    /// idempotency guard the authoritative server checks before spawning a newly-rostered joiner.
+    pub fn has_player(&self, pid: PlayerId) -> bool {
+        self.players.contains_key(&pid)
+    }
+
     /// The tick-0 entity layout for a [`RoundConfig`] — the SINGLE source of the spawn
     /// arrangement, shared by [`Sim::new`] and [`Sim::reset`] so the two can't drift. Pure
     /// function of the (integer, sorted) config, so every peer composes the identical

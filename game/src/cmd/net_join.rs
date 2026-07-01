@@ -1,10 +1,12 @@
-//! `net-join`: dial INTO a live match as a mid-game joiner (GCR MP Stage 3, rl#151).
+//! `net-join`: dial INTO a live match as a host-authoritative mid-game joiner (GCR MP incr 4, rl#151).
 //!
 //! The dialing analogue of `play --host`: instead of forming a fresh match, it calls
-//! [`net_loop::connect_and_join`] to enter an in-progress round over the round-boundary join,
-//! then boots the windowed client straight into the joiner's [`Lockstep`] (built via
-//! `join_at`) + its client [`NetDriver`] — the SAME `Boot::Round` path the scripted
-//! `--host`/`--join` formation uses, so the joiner is just a normal Client with no SP/MP fork.
+//! [`net_loop::connect_and_join`] to enter an in-progress round, then boots the windowed client
+//! straight into the joiner's placeholder [`Lockstep`] + its client [`NetDriver`] — the SAME
+//! `Boot::Round` path the scripted `--host`/`--join` formation uses, so the joiner is just a normal
+//! remote-adopt Client with no SP/MP fork. The host spawns the joiner into its LIVE authoritative
+//! round, and the joiner boots from the host's next snapshot (drops into the ongoing match at its
+//! live tick + crab pose), rather than every peer resetting to a fresh round.
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -34,16 +36,31 @@ pub(crate) struct Args {
     render_mode: Option<String>,
 }
 
-/// Dial the host, join the live round over the round-boundary mechanism, and boot the windowed
-/// client into the joiner's session. The joiner resolves its REQUIRED checkpoint UP FRONT (so it
-/// advertises its real digests on the join request), then on `Joined` hands the pre-built
-/// `(Lockstep, NetDriver)` to [`render::Boot::Round`] — the joiner becomes a normal networked
-/// Client. A `Refused` (digest mismatch the host turned away) or `Unreachable` host is a clean,
-/// loud error exit — never a silent fallback to a fake/solo crab.
+/// Dial the host, join the live round via host-authoritative snapshot adoption, and boot the
+/// windowed client into the joiner's session. The joiner resolves its REQUIRED checkpoint UP FRONT
+/// and refuses to dial with a fake (zero-digest) crab, then on `Joined` hands the pre-built
+/// `(Lockstep, NetDriver)` to [`render::Boot::Round`] — the joiner becomes a normal remote-adopt
+/// Client that renders the host's snapshots. A `Refused` (digest mismatch OR a zero-digest host the
+/// gate turned away) or `Unreachable` host is a clean, loud error exit — never a silent fallback to
+/// a fake/solo crab.
 pub(crate) fn run(args: Args) -> Result<()> {
     let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint)?;
     let weights_digest = crab_world::play::checkpoint_digest(&external_crab);
     let asset_digest = crab_world::bot::meshfit::crab_asset_digest();
+
+    // Joiner host-verify, our half (rl#151 incr 4): our own checkpoint must load to a REAL Sally
+    // before we dial. With a zero digest we run the fake rest-pose crab, can't verify the host runs
+    // the real one, and the host's self-gate would refuse us anyway — so fail fast and loud here
+    // rather than after a QUIC round-trip. (An armed match only admits us when the host's digest
+    // equals ours and is non-zero, so a successful join proves BOTH peers run the same real Sally.)
+    if weights_digest == 0 {
+        bail!(
+            "our trained NN crab (\"Sally\") checkpoint at {} failed to load (weights digest 0) — \
+             refusing to join a match with a fake crab. Run rl-update on this device so it carries \
+             the real brain, then re-join.",
+            external_crab.display()
+        );
+    }
 
     let result = net_loop::connect_and_join(
         MATCH_SEED,

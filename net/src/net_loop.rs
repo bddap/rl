@@ -833,13 +833,15 @@ async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVe
     deadline.unwrap_or(AdmissionVerdict::Timeout)
 }
 
-/// Dial INTO a live match as a mid-game joiner (GCR MP Stage 3, rl#151) — the round-boundary join's
-/// client entry, the dialing analogue of [`connect_and_form`]. Connect to `host`, send our
-/// weight/collider digests as a [`JoinRequest`], and await the host's verdict: admitted (build the
-/// joiner [`Lockstep`] via [`Lockstep::join_at`] at the agreed `effective_tick` over the new roster
-/// — NO mid-game state transfer, the round-boundary rebuild gives every peer the same fresh world),
-/// refused (a digest mismatch the host turned away LOUDLY — relayed, never a silent wrong-crab), or
-/// unreachable. `seed` is the shared [`crate::sim`] match constant every peer holds.
+/// Dial INTO a live match as a host-authoritative mid-game joiner (GCR MP incr 4, rl#151) — the
+/// dialing analogue of [`connect_and_form`]. Connect to `host`, send our weight/collider digests as
+/// a [`JoinRequest`], and await the host's verdict: admitted (become a remote-adopt
+/// [`Coordinator::Client`] that boots from the host's next authoritative snapshot — the host spawns
+/// us into its LIVE round at `effective_tick`, so we drop into the ongoing match rather than
+/// resetting it; the `join_at` [`Lockstep`] is only the placeholder cursors the adopted snapshot
+/// supersedes), refused (a digest mismatch OR a zero-digest host the gate turned away LOUDLY —
+/// relayed, never a silent wrong/fake-crab), or unreachable. `seed` is the shared [`crate::sim`]
+/// match constant every peer holds.
 pub fn connect_and_join(
     seed: u64,
     host: EndpointId,
@@ -891,8 +893,14 @@ pub fn connect_and_join(
                 "admitted as {me:?}; joining at tick {} over roster {:?}",
                 adm.effective_tick, adm.roster
             );
-            // Round-boundary join: build the round fresh at the agreed tick over the new roster
-            // (no snapshot adopted — every peer rebuilds to the same Sim::new).
+            // Host-authoritative mid-game join (rl#151 incr 4): this `ls` is only a placeholder the
+            // remote-adopt client boots from — the driver is a CLIENT (not host), so `for_round`
+            // makes this a `Coordinator::Client` that ADOPTS the host's per-tick snapshots and never
+            // steps a sim of its own. The host spawns us into its LIVE authoritative round at
+            // `effective_tick` (`Server::step_next` → `Sim::spawn_joining_player`), so the first
+            // snapshot we adopt carries us at the ongoing tick with the crab at its live pose — the
+            // 509 fix by construction (we render the host's output, never re-sim its warm rapier
+            // world). `join_at` seeds the placeholder cursors/roster; the adopted snapshot supersedes.
             let ls = Lockstep::join_at(seed, &adm.roster, me, adm.effective_tick);
             let my_eid = session.endpoint_id();
             // A client's id_map has NO determinism-path reader (inputs route by `server_eid`, the
