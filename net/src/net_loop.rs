@@ -430,9 +430,11 @@ impl Coordinator {
         matches!(self, Coordinator::Client { .. })
     }
 
-    /// Whether this is a solo round (the server with a roster of one and no transport). Drives the
-    /// client-local vehicle toggle, which exists only in a solo round (a networked round is
-    /// foot-only).
+    /// Whether this is a solo round (the server with a roster of one and no transport) — a
+    /// solo-IDENTITY check used by the round-setup tests. NOT the vehicle gate: piloting was folded
+    /// off `is_solo` onto the server-authoritative role (`render::driver::PeerRole::can_pilot`, rl#151
+    /// incr 3), so a host pilots too. (Slated for deletion in incr 5 with the rest of the lockstep
+    /// machinery once its remaining callers go.)
     pub fn is_solo(&self) -> bool {
         matches!(self, Coordinator::Server { net: None, .. })
     }

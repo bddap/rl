@@ -177,6 +177,21 @@ impl PeerRole {
             PeerRole::Scripted
         }
     }
+
+    /// Whether THIS peer may board a vehicle — the server-authoritative arm ONLY (solo OR host).
+    /// Folds the old `is_solo()` gate onto the role axis (rl#151 incr 3): piloting is an input MODE,
+    /// not an SP fork ([[rl-vehicles-plane-mode-required]]), so lifting the solo-only restriction
+    /// lets a HOST pilot in a networked round too — the real MP win, since a host pumps its own
+    /// crab-world physics. The craft is a local, off-wire rapier body spawned + force-driven by
+    /// `VehiclePlugin` in `FixedUpdate`, which is advanced ONLY by [`pump_fixed_steps`] inside the
+    /// tick-drain loop. A `RemoteAdopt` client renders the host's crab from articulation and pumps
+    /// NO physics of its own (it `break`s out of that loop), so a craft would never spawn there — a
+    /// toggle-does-nothing trap ([[silent-fallback-antipattern]]). Remote-client piloting therefore
+    /// waits until the craft is pumped/synced on the adopt arm (a later increment); boarding is
+    /// gated OFF it here rather than exposed as an inert mode. The scripted harness has no avatar.
+    fn can_pilot(self) -> bool {
+        matches!(self, PeerRole::ServerAuth)
+    }
 }
 
 /// The networked sim, owned as a non-send Bevy resource and stepped on a
@@ -264,8 +279,9 @@ pub(super) struct PendingInput {
     /// peers restart on the same tick; the sim edge-triggers it. Drained per tick.
     pub(super) restart: bool,
     /// Latches if the enter/exit-vehicle key (E) was tapped this interval — a client-local
-    /// toggle drained ONCE per frame in [`drive_lockstep`] (single-player only), never sent
-    /// to the sim. Board a plane on foot / step out when piloting.
+    /// toggle drained ONCE per frame in [`drive_lockstep`] on the server-authoritative arm
+    /// (solo or host — see `can_pilot`), never sent to the sim. Board a plane on foot / step
+    /// out when piloting.
     pub(super) toggle_vehicle: bool,
 }
 
@@ -651,18 +667,18 @@ pub(super) fn drive_lockstep(
 
     world.non_send_resource_mut::<GameState>().accumulator += delta;
 
-    // Single-player enter/exit a vehicle. Drain the E-tap latch ONCE per frame and CYCLE foot →
-    // plane → ship → foot. The actual craft is a rapier body spawned/despawned in the crab
-    // world from the resulting `LocalVehicle` (mirrored into `VehicleControl` below). Solo only —
-    // a networked round is foot-only, so this toggle is inert there and the lockstep is untouched.
+    // Enter/exit a vehicle. Drain the E-tap latch ONCE per frame and CYCLE foot → plane → ship →
+    // foot. The actual craft is a rapier body spawned/despawned in the crab world from the resulting
+    // `LocalVehicle` (mirrored into `VehicleControl` below). Available on the server-authoritative
+    // arm — solo AND host (rl#151 incr 3, `can_pilot`): piloting is an input mode, not an SP fork,
+    // so folding the old `is_solo()` gate lets a host pilot in a networked round. While piloting, the
+    // foot player files NEUTRAL sim input (below), so the authoritative sim just parks the avatar at
+    // the boarding spot; the craft itself is local, off-wire crab-world state pumped by this peer's
+    // own `pump_fixed_steps`. A remote-adopt client pumps no physics, so it cannot spawn a craft yet
+    // (see `can_pilot`); the scripted harness has no live avatar.
     {
         let toggle = std::mem::take(&mut world.resource_mut::<PendingInput>().toggle_vehicle);
-        let solo = toggle
-            && matches!(
-                &world.non_send_resource::<GameState>().input_source,
-                InputSource::Coordinated(c) if c.is_solo()
-            );
-        if solo {
+        if toggle && role.can_pilot() {
             // Board from foot ONLY while the foot avatar is alive; a vehicle→vehicle switch and
             // stepping out need no foot. (Downed/extracted: can't board.)
             let alive = {
@@ -715,9 +731,9 @@ pub(super) fn drive_lockstep(
             input
         };
 
-        // While piloting (single-player), the foot player feeds the sim a NEUTRAL input — it
-        // just stands at the boarding spot — and the real input flies the client-side plane
-        // below instead. On foot, the real input drives the sim as usual.
+        // While piloting (server-authoritative arm — solo or host), the foot player feeds the sim a
+        // NEUTRAL input — it just stands at the boarding spot — and the real input flies the
+        // client-side plane below instead. On foot, the real input drives the sim as usual.
         let piloting = world.resource::<LocalVehicle>().piloting();
         let sim_input = if piloting { Input::default() } else { input };
 
@@ -795,6 +811,12 @@ pub(super) fn drive_lockstep(
                         // toward spawn), since this arm skips the drain loop that owns `prev`.
                         state.prev = SimSnapshot::capture(&state.ls);
                         state.ls.apply_core_snapshot(snap);
+                        // Local-player prediction (rl#151 incr 3): the snapshot re-seated our own
+                        // avatar to its round-trip-old authoritative position; replay our still-in-
+                        // flight inputs on it so WASD feels responsive at input latency, not RTT.
+                        // Remote players + the crab stay authoritative (pose from the host, tweened
+                        // via `prev`), never predicted. Overwritten by the next snapshot each frame.
+                        state.ls.reconcile_local_prediction();
                     }
                     // Newest crab pose (last-arrived, same reliable-stream reasoning) — applied to
                     // the World once `state` is released.
@@ -827,7 +849,7 @@ pub(super) fn drive_lockstep(
             crate::render::articulation::apply(world, &art);
         }
 
-        // Drive the rapier vehicle (single-player): mirror the piloting state + this frame's flight
+        // Drive the rapier vehicle (server-authoritative arm): mirror the piloting state + this frame's flight
         // controls into `VehicleControl`, which the crab world's force system reads on the next
         // physics pump — spawn/despawn the body and apply thrust/lift/drag/torque. The sim never
         // sees the vehicle (the foot player gets neutral input above); it is host-authoritative
@@ -1082,5 +1104,27 @@ pub(super) fn drive_lockstep(
             let state = world.non_send_resource::<GameState>();
             t.send(TelemetryEvent::round_decided(state.ls.sim()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PeerRole;
+
+    #[test]
+    fn only_the_server_authoritative_arm_can_pilot() {
+        // The folded vehicle gate (rl#151 incr 3): the old `is_solo()` restriction (solo ONLY) is
+        // lifted onto the role axis so a HOST — a real networked round — can pilot too, since it
+        // pumps its own crab-world physics. A remote-adopt client pumps NO physics (it renders the
+        // host's crab from articulation), so a craft could never spawn there; boarding is gated OFF
+        // it rather than exposed as an inert toggle ([[silent-fallback-antipattern]]). The scripted
+        // harness has no live avatar. (A live windowed host/remote toggle needs a `NetDriver`, which
+        // won't stand up headlessly — that is on-device territory; here we pin the role predicate.)
+        assert!(PeerRole::ServerAuth.can_pilot(), "solo/host pumps physics ⇒ can pilot");
+        assert!(
+            !PeerRole::RemoteAdopt.can_pilot(),
+            "a remote client pumps no physics ⇒ no craft can spawn ⇒ cannot pilot yet"
+        );
+        assert!(!PeerRole::Scripted.can_pilot(), "the scripted harness has no live avatar");
     }
 }

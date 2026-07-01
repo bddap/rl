@@ -53,10 +53,10 @@ pub struct GcrControls;
 pub enum GcrContext {
     #[default]
     OnFoot,
-    /// Flying the single-player plane (client-local; see [`crate::render`]'s `LocalVehicle`).
-    /// Ace Combat 6 controls.
+    /// Flying the client-local plane (see [`crate::render`]'s `LocalVehicle`; off-wire, so solo or
+    /// host — see `PeerRole::can_pilot`). Ace Combat 6 controls.
     Plane,
-    /// Flying the single-player Outer-Wilds-style ship (the other [`LocalVehicle`] mode). The
+    /// Flying the client-local Outer-Wilds-style ship (the other [`LocalVehicle`] mode). The
     /// E/X enter-vehicle control CYCLES foot → plane → ship → foot.
     Ship,
 }
@@ -79,7 +79,7 @@ pub enum Action {
     Restart,
     /// Quit the client (local `AppExit`; never touches the sim).
     Quit,
-    /// CYCLE the single-player vehicle: foot → plane → ship → foot. A tap handled entirely in the
+    /// CYCLE the client-local vehicle: foot → plane → ship → foot. A tap handled entirely in the
     /// windowed client's play layer ([`crate::render`]) — like [`Quit`](Action::Quit) it never
     /// crosses the wire or the deterministic sim, so the lockstep crab game is unaffected.
     EnterExit,

@@ -119,8 +119,9 @@ pub(super) fn gather_input(
     if kc(Action::Restart).is_some_and(|k| keys.just_pressed(k)) {
         pending.restart = true;
     }
-    // Enter/exit a vehicle (E). A tap-toggle, edge-triggered like restart, but client-local
-    // (single-player) — `drive_lockstep` boards/steps-out; it never reaches the sim.
+    // Enter/exit a vehicle (E). A tap-toggle, edge-triggered like restart, but client-local —
+    // `drive_lockstep` boards/steps-out on the server-authoritative arm (solo or host; see
+    // `PeerRole::can_pilot`); it never reaches the sim.
     if kc(Action::EnterExit).is_some_and(|k| keys.just_pressed(k)) {
         pending.toggle_vehicle = true;
     }
