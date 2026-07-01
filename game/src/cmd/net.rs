@@ -122,9 +122,6 @@ async fn run_net(args: Args) -> Result<()> {
 
     let mut ticker = tokio::time::interval(Duration::from_secs_f64(TICK_DT));
     let end = Instant::now() + Duration::from_secs(args.run_secs);
-    // Host-authoritative: the host is the sole source of truth, so there is no peer cross-check and
-    // no desync to count. Kept as a constant 0 for the telemetry/report fields that still name it.
-    let total_desyncs = 0usize;
     // How many authoritative snapshots this peer put on / took off the wire (rl#151 increment 2):
     // the host counts what it BROADCAST, a client what it ADOPTED. Surfaced in the `done:` line so a
     // 2-process proof can see the client is state-fed by the host, never re-stepping a sim.
@@ -178,12 +175,11 @@ async fn run_net(args: Args) -> Result<()> {
                 transport::PeerWire::Articulation(_) => {}
                 transport::PeerWire::Beat(_) => {}
                 // This is a FIXED-roster run: the peer set is frozen at discovery and never
-                // grows, so the Stage 3 live-join frames (a joiner's credentials, a roster
-                // change, a refusal) can't legitimately arrive here. Ignore a stray one rather
+                // grows, so the Stage 3 live-join frames (a joiner's credentials, a welcome,
+                // a refusal) can't legitimately arrive here. Ignore a stray one rather
                 // than mishandle it — the same stance `net_loop`'s formation barrier takes; a
                 // real mid-match join is the running coordinator's job, not this harness.
                 transport::PeerWire::JoinRequest(_)
-                | transport::PeerWire::RosterChange(_)
                 | transport::PeerWire::Welcome(_)
                 | transport::PeerWire::Refuse(_) => {}
             }
@@ -257,11 +253,10 @@ async fn run_net(args: Args) -> Result<()> {
         if ls.sim().tick() >= next_report_tick {
             next_report_tick = (ls.sim().tick() / TICK_HZ + 1) * TICK_HZ;
             println!(
-                "tick={:>5} peers={} statehash={:#018x} desyncs={}",
+                "tick={:>5} peers={} statehash={:#018x}",
                 ls.sim().tick(),
                 session.connected_peers().await.len(),
                 ls.sim().state_hash(),
-                total_desyncs,
             );
         }
 
@@ -274,7 +269,7 @@ async fn run_net(args: Args) -> Result<()> {
                 // Agreed roster size (us + peers) — the same quantity render.rs and the
                 // final snapshot report, so the feed's `roster` field means one thing
                 // across every driver.
-                t.send(TelemetryEvent::tick(ls.sim(), total_desyncs, all_ids.len()));
+                t.send(TelemetryEvent::tick(ls.sim(), all_ids.len()));
                 t.send(TelemetryEvent::input(issue_tick, input));
             }
             if !reported_outcome && ls.sim().outcome() != net::sim::Outcome::Ongoing {
@@ -285,9 +280,8 @@ async fn run_net(args: Args) -> Result<()> {
     }
 
     println!(
-        "done: {} ticks applied, {} desyncs, {} snapshots {}, final hash {:#018x}",
+        "done: {} ticks applied, {} snapshots {}, final hash {:#018x}",
         ls.sim().tick(),
-        total_desyncs,
         snapshots_io,
         if am_host { "broadcast" } else { "adopted" },
         ls.sim().state_hash()
@@ -295,7 +289,7 @@ async fn run_net(args: Args) -> Result<()> {
     // A final snapshot so the collector records where this deck ended even if the round
     // never "decided" within run_secs (the common case for a short headless run).
     if let Some(t) = tel.as_ref() {
-        t.send(TelemetryEvent::tick(ls.sim(), total_desyncs, all_ids.len()));
+        t.send(TelemetryEvent::tick(ls.sim(), all_ids.len()));
     }
     if all_ids.len() > 1
         && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(TICK_HZ)

@@ -1,19 +1,19 @@
-//! `game` — Giant Crab Rescue (rl#38): the CLI over the deterministic-lockstep + iroh
-//! sim ([`net::sim`]/[`net::lockstep`]/[`net::transport`]). First-person players reach
+//! `game` — Giant Crab Rescue (rl#38): the CLI over the host-authoritative + iroh
+//! sim ([`net::sim`]/[`net::server`]/[`net::transport`]). First-person players reach
 //! an extraction point while a trained-NN giant crab (Sally) hunts them; `solo` is just
 //! the zero-remote-peer case of the one networked path, not a separate mode.
 //!
 //! Each subcommand lives in its own module under [`cmd`] (its `Args` struct + a `run` fn);
 //! this file is only the entry point — parse [`Cli`], pick the [`cmd::Command`], dispatch:
-//! - `net` (default headless): discover peers over iroh and run the lockstep loop,
-//!   printing per-second sync state — proves discovery/input-exchange/desync-detection.
+//! - `net` (default headless): discover peers over iroh and run the host-authoritative
+//!   loop (inputs UP, snapshots DOWN), printing per-second sync state.
 //! - `solo`: the same loop with no peers, a quick smoke of the tick machinery.
 //! - `play`: the windowed first-person client ([`net::render`]); Host/Join menu, or
 //!   `--host`/`--join <code>` to skip it for scripting.
 //! - `fp-screenshot`: render one settled frame to a PNG and exit (GPU, no window) — the
 //!   headless evidence path for the sim→render pipeline.
-//! - `nn-crab-probe` / `nn-crab-xpeer`: determinism gates for the armed NN crab —
-//!   single-peer and cross-peer per-tick hash logs (rl#82/#114).
+//! - `nn-crab-probe`: determinism gate for the armed NN crab — a per-tick hash log
+//!   (rl#82/#114).
 //! - `checkpoint-check`: verify a checkpoint's rig dims fit the crab before arming.
 //! - `telemetry-collector`: sink for the OTLP-over-iroh telemetry stream.
 

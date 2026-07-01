@@ -106,14 +106,13 @@ pub enum TelemetryEvent {
     /// Formation failed (timed out without agreement) — the round never started.
     RosterFailed { reason: String },
     /// A periodic sim snapshot (sampled): the applied `tick`, its full `state_hash`,
-    /// the cumulative desync count, and the agreed `roster` size (player count). Comparing
-    /// the `(tick, state_hash)` across decks is the live cross-peer desync check;
-    /// `desyncs > 0` on any deck is the alarm. `roster` is the frozen match player count
-    /// (us + peers), reported identically by every driver so the field means one thing.
+    /// and the `roster` size (player count). Comparing the `(tick, state_hash)` across
+    /// decks is the live cross-peer desync check. `roster` is the live match player count
+    /// (us + peers — it grows on a mid-game join), reported identically by every driver
+    /// so the field means one thing.
     Tick {
         tick: u64,
         state_hash: u64,
-        desyncs: usize,
         roster: usize,
     },
     /// A sampled local input: the tick it applies at and the compact axes/buttons, so
@@ -142,13 +141,11 @@ pub enum TelemetryEvent {
 
 impl TelemetryEvent {
     /// Build a [`Tick`](TelemetryEvent::Tick) by READING an already-stepped sim — never
-    /// mutating it. `desyncs` is the driver's running fault count; `roster` is the agreed
-    /// match player count (us + peers).
-    pub fn tick(sim: &Sim, desyncs: usize, roster: usize) -> Self {
+    /// mutating it. `roster` is the live match player count (us + peers).
+    pub fn tick(sim: &Sim, roster: usize) -> Self {
         TelemetryEvent::Tick {
             tick: sim.tick(),
             state_hash: sim.state_hash(),
-            desyncs,
             roster,
         }
     }
@@ -217,10 +214,9 @@ impl TelemetryEvent {
             TelemetryEvent::Tick {
                 tick,
                 state_hash,
-                desyncs,
                 roster,
             } => {
-                format!("tick={tick:>6} hash={state_hash:#018x} desyncs={desyncs} roster={roster}")
+                format!("tick={tick:>6} hash={state_hash:#018x} roster={roster}")
             }
             TelemetryEvent::Input {
                 tick,
@@ -725,7 +721,6 @@ mod tests {
         TelemetryEvent::Tick {
             tick,
             state_hash: 0,
-            desyncs: 0,
             roster: 1,
         }
     }

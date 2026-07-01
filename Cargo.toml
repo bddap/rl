@@ -43,7 +43,6 @@ burn = { version = "0.20", features = ["autodiff", "ndarray"] }
 # activates the feature that makes naga 26 compile alongside naga 27. Not used in any
 # code path. (See crab-world's [features].wgpu for the full rationale.)
 naga = { version = "26" }
-rand_distr = "0.5"
 clap = { version = "4", features = ["derive"] }
 bincode = "1"
 # POSIX syscalls the multiprocess trainer needs and std doesn't expose:

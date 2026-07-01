@@ -42,8 +42,8 @@ pub(crate) struct Args {
     /// giant crab IS the rapier-simulated NN body (rl#114, no integer fallback). It drives the crab
     /// on a SOLO round (a Host-alone Start, or a scripted `--host` that found no peer) AND — since
     /// the GCR fold (rl#82) — on a NETWORKED round once peers agree on the brain + collider asset
-    /// (the weights/asset handshake, [`net::may_arm_external_crab`]): the float NN crab is
-    /// then cross-peer deterministic (`enhanced-determinism`, proven by `game nn-crab-xpeer`). A
+    /// (the weights/asset handshake, [`net::may_arm_external_crab`]): the host then runs the
+    /// one authoritative crab and clients render its broadcast pose. A
     /// missing/empty dir, or a networked round whose peers DON'T agree, FAILS LOUD with an
     /// actionable message rather than substituting a fake crab. Defaults to the
     /// `RL_CRAB_CHECKPOINT_DIR` env var, else `assets/weights` under the asset root.

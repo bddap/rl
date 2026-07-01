@@ -160,9 +160,8 @@ impl PeerRole {
     }
 
     /// Whether THIS peer may board a vehicle — the server-authoritative arm ONLY (solo OR host).
-    /// Folds the old `is_solo()` gate onto the role axis (rl#151 incr 3): piloting is an input MODE,
-    /// not an SP fork ([[rl-vehicles-plane-mode-required]]), so lifting the solo-only restriction
-    /// lets a HOST pilot in a networked round too — the real MP win, since a host pumps its own
+    /// Piloting is an input MODE, not an SP fork ([[rl-vehicles-plane-mode-required]]), so a HOST
+    /// pilots in a networked round too — the real MP win, since a host pumps its own
     /// crab-world physics. The craft is a local, off-wire rapier body spawned + force-driven by
     /// `VehiclePlugin` in `FixedUpdate`, which is advanced ONLY by [`pump_fixed_steps`] inside the
     /// tick-drain loop. A `RemoteAdopt` client renders the host's crab from articulation and pumps
@@ -583,8 +582,8 @@ pub(crate) fn pump_fixed_steps(world: &mut World, steps: u32) {
 /// body would desync peers. The render clock (`Time<Virtual>`/`Time<Real>`) is untouched, and
 /// rapier's `TimestepMode::Fixed { dt }` keeps its own `dt`, so each manual pump is still exactly
 /// one `PHYSICS_DT` step. One source for the magic timestep so the windowed driver
-/// ([`add_external_nn_crab`]) and the headless cross-peer probe
-/// ([`crate::external_crab::run_cross_peer_probe`]) can't drift on it.
+/// ([`add_external_nn_crab`]) and the headless probe
+/// ([`crate::external_crab::run_headless_probe`]) can't drift on it.
 pub(crate) fn park_fixed_auto_pump(world: &mut World) {
     world
         .resource_mut::<bevy::time::Time<bevy::time::Fixed>>()
@@ -598,8 +597,8 @@ pub(crate) fn park_fixed_auto_pump(world: &mut World) {
 /// would desync a mid-game joiner's cold body against an incumbent's warm one (job 412, relocated to
 /// the join). Dropping + rebuilding the body makes every peer's solver state identically fresh off
 /// the same shared-input restart edge, covering the plain RESTART button too (one shared edge).
-/// `spawn` is read from whichever sim is now authoritative for the round (the server's, or the
-/// client's lockstep on the legacy arm). Only meaningful while armed (else no bridge drives the crab).
+/// `spawn` is read from whichever sim is authoritative for the round. Only meaningful while armed
+/// (else no bridge drives the crab).
 fn restart_crab_to_spawn(world: &mut World, spawn: crate::sim::Pos) {
     world
         .resource_mut::<crate::external_crab::ExternalCrabBridge>()
@@ -607,23 +606,21 @@ fn restart_crab_to_spawn(world: &mut World, spawn: crate::sim::Pos) {
     crate::external_crab::cold_respawn_armed_crab(world);
 }
 
-/// Advance the lockstep sim by real time on a fixed-timestep accumulator. This is the ONLY
-/// writer of sim state, and (apart from the external crab pose) it writes exactly one thing:
-/// the local [`Input`] (drained from [`PendingInput`]) via `submit_local_input`. Everything
-/// else is the existing deterministic machinery — pump the transport, then advance.
+/// Advance the game by real time on a fixed-timestep accumulator. This is the ONLY writer of
+/// sim state, and (apart from the external crab pose) it writes exactly one thing: the local
+/// [`Input`] (drained from [`PendingInput`]) via `submit_local_input`, shipped UP through the
+/// [`Coordinator`]. On the server-authoritative arm the internal server then steps its own sim
+/// and this peer's client adopts + broadcasts the emitted snapshot; a remote-adopt client
+/// instead adopts the host's snapshots and steps nothing (rl#151).
 ///
 /// GCR fold: when the external NN crab is armed ([`ExternalCrabArmed`] — solo OR a
 /// networked round with synced weights, [`crate::may_arm_external_crab`]), the rapier
-/// crab body is stepped INSIDE the lockstep tick: per APPLIED tick we run the deterministic
-/// [`PhysicsCadence`] number of physics steps ([`pump_fixed_steps`]) and push the body's
-/// resulting pose + weights-folded digest via [`external_crab::sync_external_crab`] BEFORE
-/// applying that tick. We advance one tick at a time ([`Lockstep::advance_one`]) so each
-/// applied tick gets its own physics batch + pose — a batched `try_advance` (which can apply
-/// several ticks at once on catch-up) would smear one pose across them and desync peers. This
-/// is an EXCLUSIVE system because pumping the fixed schedule needs `&mut World`.
-///
-/// A desync fault is logged (lockstep can't recover); the client keeps running so the
-/// operator sees it rather than a silent freeze.
+/// crab body is stepped INSIDE the tick drain on the server-authoritative arm: per applied
+/// tick we run the deterministic [`PhysicsCadence`] number of physics steps
+/// ([`pump_fixed_steps`]) and hand the body's resulting pose + weights-folded digest to
+/// [`Server::step_next`] as that tick's [`crate::server::CrabPose`]. One tick at a time, so
+/// each applied tick gets its own physics batch + pose. This is an EXCLUSIVE system because
+/// pumping the fixed schedule needs `&mut World`.
 pub(super) fn drive_lockstep(
     world: &mut World,
     mut reported_outcome: Local<bool>,
@@ -659,10 +656,11 @@ pub(super) fn drive_lockstep(
     let (tel, roster_len) = {
         let state = world.non_send_resource::<GameState>();
         let tel = state.coord.telemetry().cloned();
-        // Roster size from the AUTHORITATIVE lockstep peer set — correct on the host, an incumbent,
-        // AND a mid-game joiner (its `Lockstep` is rebuilt over the new roster). One source of
-        // truth, not a second copy in the driver's id_map (which a joiner only half-fills).
-        (tel, state.ls.peers().len())
+        // Roster size from the SIM's player set — the roster of record rides every adopted
+        // `CoreSnapshot`, so this stays correct on the host, an incumbent, AND a mid-game joiner
+        // after a live join. (`ls.peers()` is the round-START set and would go stale on the
+        // host/incumbents when a joiner enters.)
+        (tel, state.ls.sim().players().count())
     };
     if *next_tel_tick == 0 {
         *next_tel_tick = TELEMETRY_TICK_EVERY;
@@ -673,8 +671,8 @@ pub(super) fn drive_lockstep(
     // Enter/exit a vehicle. Drain the E-tap latch ONCE per frame and CYCLE foot → plane → ship →
     // foot. The actual craft is a rapier body spawned/despawned in the crab world from the resulting
     // `LocalVehicle` (mirrored into `VehicleControl` below). Available on the server-authoritative
-    // arm — solo AND host (rl#151 incr 3, `can_pilot`): piloting is an input mode, not an SP fork,
-    // so folding the old `is_solo()` gate lets a host pilot in a networked round. While piloting, the
+    // arm — solo AND host (`can_pilot`): piloting is an input mode, not an SP fork,
+    // so a host pilots in a networked round too. While piloting, the
     // foot player files NEUTRAL sim input (below), so the authoritative sim just parks the avatar at
     // the boarding spot; the craft itself is local, off-wire crab-world state pumped by this peer's
     // own `pump_fixed_steps`. A remote-adopt client pumps no physics, so it cannot spawn a craft yet
@@ -905,8 +903,8 @@ pub(super) fn drive_lockstep(
                             pose
                         },
                     );
-                    // Mirror the vehicle body's freshly-stepped pose for the cockpit camera (as the
-                    // legacy arm does); independent of the sim.
+                    // Mirror the vehicle body's freshly-stepped pose for the cockpit camera;
+                    // independent of the sim.
                     if let Some(p) = read_vehicle_pose(world) {
                         world.resource_mut::<LocalVehicle>().update_pose(p);
                     }
@@ -915,8 +913,8 @@ pub(super) fn drive_lockstep(
                     None
                 };
                 // Step the authoritative sim and detect a RESTART rewind, resetting the cadence at
-                // that exact edge (same reasoning as the legacy arm: a post-restart tick stepping on
-                // the stale phase would desync; the reset must be inside the drain, not end-of-frame).
+                // that exact edge (a post-restart tick stepping on the stale phase would desync;
+                // the reset must be inside the drain, not end-of-frame).
                 let (bytes, restarted) = {
                     let mut state = world.non_send_resource_mut::<GameState>();
                     let server = state.server_mut().expect("server_auth ⇒ a server");
@@ -969,8 +967,7 @@ pub(super) fn drive_lockstep(
                     let state = world.non_send_resource::<GameState>();
                     *next_tel_tick =
                         (state.ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
-                    // Host-authoritative: no peer cross-check, so the desync count is always 0.
-                    t.send(TelemetryEvent::tick(state.ls.sim(), 0, roster_len));
+                    t.send(TelemetryEvent::tick(state.ls.sim(), roster_len));
                     // The input the SIM actually applied this tick (neutral while piloting).
                     t.send(TelemetryEvent::input(issue_tick, sim_input));
                 }
@@ -1071,9 +1068,8 @@ mod tests {
 
     #[test]
     fn only_the_server_authoritative_arm_can_pilot() {
-        // The folded vehicle gate (rl#151 incr 3): the old `is_solo()` restriction (solo ONLY) is
-        // lifted onto the role axis so a HOST — a real networked round — can pilot too, since it
-        // pumps its own crab-world physics. A remote-adopt client pumps NO physics (it renders the
+        // The vehicle gate rides the role axis, so a HOST — a real networked round — can
+        // pilot too, since it pumps its own crab-world physics. A remote-adopt client pumps NO physics (it renders the
         // host's crab from articulation), so a craft could never spawn there; boarding is gated OFF
         // it rather than exposed as an inert toggle ([[silent-fallback-antipattern]]). The scripted
         // harness has no live avatar. (A live windowed host/remote toggle needs a `NetDriver`, which

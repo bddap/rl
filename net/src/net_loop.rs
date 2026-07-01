@@ -99,11 +99,10 @@ pub struct NetDriver {
 }
 
 /// The result of [`Coordinator::exchange`]: on a remote client, the host-authoritative game STATE it
-/// drained this tick (snapshots + render articulation) to adopt; plus any roster CHANGES the client
-/// learned over the wire (Stage 3, rl#151). The solo/host arm returns these empty — its own server is
-/// the source of truth and it steps + broadcasts state itself.
+/// drained this tick (snapshots + render articulation) to adopt. The solo/host arm returns these
+/// empty — its own server is the source of truth and it steps + broadcasts state itself. Roster
+/// changes ride each [`CoreSnapshot`]'s `roster`, not a separate channel.
 pub struct Exchanged {
-    pub roster_changes: Vec<crate::server::Admission>,
     /// Host-authoritative game states this remote client drained (rl#151 increment 2 windowed):
     /// the driver applies the highest `tick` via [`Lockstep::apply_core_snapshot`] instead of
     /// stepping its own sim. Empty on the solo/host arm (its client reads the server it runs).
@@ -211,20 +210,12 @@ impl NetDriver {
         self.id_map.contains_key(&eid)
     }
 
-    /// (Host) Broadcast a roster change DOWN to every client — INCUMBENTS schedule it. The
-    /// just-admitted joiner gets its OWN allocation via the unicast [`Self::welcome_joiner`] instead
-    /// (it also receives this broadcast, but ignores it until admitted, then re-applies it as an
-    /// idempotent no-op). Non-blocking buffered QUIC writes. Stage 3.
-    pub fn broadcast_roster_change(&self, adm: &Admission) {
-        self.rt.block_on(self.session.broadcast(adm));
-    }
-
     /// (Host) UNICAST a just-admitted joiner its OWN [`Admission`] (Stage 3) — the welcome it builds
-    /// [`Lockstep::join_at`] from. Separate from the broadcast so a joiner never adopts a concurrent
-    /// joiner's PlayerId.
+    /// [`Lockstep::join_at`] from. Unicast so a joiner never adopts a concurrent joiner's PlayerId.
+    /// Incumbents learn the new roster from the next [`CoreSnapshot`] (it carries the roster), so no
+    /// broadcast notice is needed.
     pub fn welcome_joiner(&self, eid: EndpointId, adm: &Admission) {
-        self.rt
-            .block_on(self.session.send(eid, &transport::Welcome(adm.clone())));
+        self.rt.block_on(self.session.send(eid, adm));
     }
 
     /// (Host) LOUDLY refuse a would-be joiner `eid` with `reason` (a digest mismatch) — a typed
@@ -250,17 +241,16 @@ impl NetDriver {
 
     /// (Client) Drain everything the server sent DOWN this tick: host-authoritative
     /// [`CoreSnapshot`]s (rl#151 increment 2 windowed — the client ADOPTS them, never re-steps an
-    /// input set), the render-only [`CrabArticulation`]s beside them, AND any roster changes (a
-    /// mid-game join to schedule). A [`PeerWire::Refuse`] aimed at us is logged LOUD (an established
-    /// client should never get one), never silently eaten. Drained ONCE so no frame kind starves
-    /// another; latest-wins ordering (highest `tick`) is the caller's to apply.
+    /// input set) and the render-only [`CrabArticulation`]s beside them. A [`PeerWire::Refuse`]
+    /// aimed at us is logged LOUD (an established client should never get one), never silently
+    /// eaten. Drained ONCE so no frame kind starves another; latest-wins ordering (highest `tick`)
+    /// is the caller's to apply.
     pub fn drain_server_down(&mut self) -> ServerDown {
         let mut down = ServerDown::default();
         while let Some(from) = self.session.try_recv() {
             match from.msg {
                 PeerWire::Snapshot(snap) => down.snapshots.push(snap),
                 PeerWire::Articulation(art) => down.articulations.push(art),
-                PeerWire::RosterChange(adm) => down.roster_changes.push(adm),
                 PeerWire::Refuse(reason) => {
                     tracing::error!("server refused us mid-match: {reason}");
                 }
@@ -273,16 +263,14 @@ impl NetDriver {
 
 /// Everything a windowed client drained from the server this frame (rl#151 increment 2 windowed).
 /// The client adopts the newest [`CoreSnapshot`] and renders the newest [`CrabArticulation`]
-/// (latest-wins by `tick`), and schedules any roster change. Grouped so the single inbox drain
-/// yields them together without one frame kind starving another.
+/// (latest-wins by `tick`). Grouped so the single inbox drain yields them together without one
+/// frame kind starving another.
 #[derive(Default)]
 pub struct ServerDown {
     /// Host-authoritative game states, in arrival order (the caller applies the highest `tick`).
     pub snapshots: Vec<CoreSnapshot>,
     /// Render-only crab poses, in arrival order (the caller renders the highest `tick`).
     pub articulations: Vec<CrabArticulation>,
-    /// Mid-game roster changes for the client to schedule.
-    pub roster_changes: Vec<Admission>,
 }
 
 /// One peer's per-tick input coordination — the server-coordinated replacement for the deleted P2P
@@ -348,12 +336,11 @@ impl Coordinator {
                     .map(NetDriver::drain_client_inputs)
                     .unwrap_or_default();
                 // Gate + admit each joiner BEFORE assembling this tick, so its roster change is
-                // scheduled and broadcast the same tick it dialed. The host applies the change to
-                // its OWN lockstep via the returned `roster_changes` (it is a player too).
-                let roster_changes = net
-                    .as_mut()
-                    .map(|net| admit_joiners(server, net, joins))
-                    .unwrap_or_default();
+                // scheduled on the server the same tick it dialed (incumbents learn it from the
+                // next snapshot's roster).
+                if let Some(net) = net.as_mut() {
+                    admit_joiners(server, net, joins);
+                }
                 let sets = server::host_assemble(server, me, msg, remote);
                 // Queue the assembled sets for THIS server's authoritative step (rl#151 increment 1):
                 // the windowed driver pumps each tick's crab physics then calls `step_next`. Only the
@@ -364,7 +351,6 @@ impl Coordinator {
                 // moment it steps each tick (see `Coordinator::broadcast_step`), so a client renders
                 // state rather than re-stepping inputs. `sets` feed THIS server's own step queue.
                 Exchanged {
-                    roster_changes,
                     snapshots: Vec::new(),
                     articulations: Vec::new(),
                 }
@@ -376,7 +362,6 @@ impl Coordinator {
                 net.send_to_server(&msg);
                 let down = net.drain_server_down();
                 Exchanged {
-                    roster_changes: down.roster_changes,
                     snapshots: down.snapshots,
                     articulations: down.articulations,
                 }
@@ -405,15 +390,6 @@ impl Coordinator {
     /// authoritative solo/host peer returns `false` (it runs [`Self::is_server_authoritative`]).
     pub fn is_remote_client(&self) -> bool {
         matches!(self, Coordinator::Client { .. })
-    }
-
-    /// Whether this is a solo round (the server with a roster of one and no transport) — a
-    /// solo-IDENTITY check used by the round-setup tests. NOT the vehicle gate: piloting was folded
-    /// off `is_solo` onto the server-authoritative role (`render::driver::PeerRole::can_pilot`, rl#151
-    /// incr 3), so a host pilots too. (Slated for deletion in incr 5 with the rest of the lockstep
-    /// machinery once its remaining callers go.)
-    pub fn is_solo(&self) -> bool {
-        matches!(self, Coordinator::Server { net: None, .. })
     }
 
     /// Whether THIS peer runs the authoritative server for the round (solo or host) — so its local
@@ -456,22 +432,16 @@ impl Coordinator {
     }
 }
 
-/// Gate + admit each mid-game `joins` request on the host (Stage 3, rl#151), returning the
-/// [`Admission`]s the host must apply to its OWN [`Lockstep`] (it is a player too — the caller
-/// schedules them via [`Lockstep::schedule_roster_change`]). For each joiner: verify its
-/// weight/collider digests against the host's ([`may_admit_joiner`]); on a match, allocate the
-/// stable lowest-free [`PlayerId`] ([`Server::admit`]), record its endpoint→pid append-only, and
-/// broadcast the roster change DOWN to every client (incumbents schedule it, the joiner builds from
-/// it). On a mismatch, REFUSE LOUDLY — a wire refusal + an error log + telemetry — never a silent
-/// drop onto a wrong crab ([[real-sally-definition]], rl#114). An endpoint already rostered (a
-/// re-dial or a racing duplicate) is admitted at most once.
-fn admit_joiners(
-    server: &mut Server,
-    net: &mut NetDriver,
-    joins: Vec<(EndpointId, JoinRequest)>,
-) -> Vec<Admission> {
+/// Gate + admit each mid-game `joins` request on the host (Stage 3, rl#151). For each joiner:
+/// verify its weight/collider digests against the host's ([`may_admit_joiner`]); on a match,
+/// allocate the stable lowest-free [`PlayerId`] ([`Server::admit`] — which schedules the roster
+/// change on the authoritative server), record its endpoint→pid append-only, and UNICAST the
+/// joiner its [`Admission`] (incumbents learn the new roster from the next snapshot). On a
+/// mismatch, REFUSE LOUDLY — a wire refusal + an error log + telemetry — never a silent drop onto
+/// a wrong crab ([[real-sally-definition]], rl#114). An endpoint already rostered (a re-dial or a
+/// racing duplicate) is admitted at most once.
+fn admit_joiners(server: &mut Server, net: &mut NetDriver, joins: Vec<(EndpointId, JoinRequest)>) {
     let (host_weights, host_assets) = net.local_digests();
-    let mut changes = Vec::new();
     for (eid, req) in joins {
         if net.is_rostered(eid) {
             continue; // already in the match — a duplicate/racing JoinRequest
@@ -480,18 +450,13 @@ fn admit_joiners(
             Ok(()) => {
                 let adm = server.admit();
                 net.admit_endpoint(eid, adm.pid);
-                // Welcome the joiner with its OWN allocation (unicast) BEFORE telling incumbents
-                // (broadcast) — the joiner reads only its welcome, so a concurrent joiner's
-                // broadcast change can never be mistaken for its own PlayerId.
                 net.welcome_joiner(eid, &adm);
-                net.broadcast_roster_change(&adm);
                 println!(
                     "admitted joiner {} as {:?}, roster change effective at tick {}",
                     eid.fmt_short(),
                     adm.pid,
                     adm.effective_tick
                 );
-                changes.push(adm);
             }
             Err(refusal) => {
                 let reason = refusal.to_string();
@@ -505,7 +470,6 @@ fn admit_joiners(
             }
         }
     }
-    changes
 }
 
 /// The outcome of [`connect_and_form`]: either we joined a networked match (a ready
@@ -785,10 +749,8 @@ enum AdmissionVerdict {
 }
 
 /// Read the host's verdict after we send a [`JoinRequest`]: our UNICAST [`PeerWire::Welcome`] (our
-/// own [`Admission`]) or a [`PeerWire::Refuse`]. We accept ONLY `Welcome`, never a broadcast
-/// [`PeerWire::RosterChange`] — that is an incumbent's notice and may belong to a concurrent joiner,
-/// so reading it as ours would adopt the wrong PlayerId. Frames from anyone but the host, and any
-/// other kind, are ignored. Bounded by [`JOIN_WELCOME_TIMEOUT`].
+/// own [`Admission`]) or a [`PeerWire::Refuse`]. Frames from anyone but the host, and any other
+/// kind, are ignored. Bounded by [`JOIN_WELCOME_TIMEOUT`].
 async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVerdict {
     let deadline = tokio::time::timeout(JOIN_WELCOME_TIMEOUT, async {
         loop {
@@ -1201,14 +1163,13 @@ async fn run_barrier(
                     m.on_beat(from.from, &beat, now);
                 }
                 PeerWire::Tick(msg) => early.push((from.from, msg)),
-                // No server exists yet during formation, so a snapshot / roster change /
+                // No server exists yet during formation, so a snapshot / admission /
                 // refusal can't legitimately arrive here; ignore a stray one (a peer racing ahead,
                 // or a mid-game join frame on the wrong phase) rather than mishandle it. A real
                 // mid-game join is handled by the running coordinator, not the formation barrier.
                 PeerWire::Snapshot(_)
                 | PeerWire::Articulation(_)
                 | PeerWire::JoinRequest(_)
-                | PeerWire::RosterChange(_)
                 | PeerWire::Refuse(_)
                 | PeerWire::Welcome(_) => {}
             }
@@ -1570,14 +1531,17 @@ mod tests {
         let me = PlayerId(0);
         let mut ls = Lockstep::new(0x5A11, &[me], me);
         let mut coord = Coordinator::for_round(None, ls.peers(), ls.sim().clone());
-        assert!(coord.is_solo(), "no driver ⇒ a solo internal-server coordinator");
+        assert!(
+            matches!(coord, Coordinator::Server { net: None, .. }),
+            "no driver ⇒ a solo internal-server coordinator"
+        );
         let submits = 5u64;
         for _ in 0..submits {
             let msg = ls.submit_local_input(Input::from_axes(1.0, 0.0));
             // The input goes UP to the internal server; with a roster of one there are no OTHER
             // players' inputs and no joins.
             let exch = coord.exchange(me, msg);
-            assert!(exch.roster_changes.is_empty(), "solo never admits a joiner");
+            assert!(exch.snapshots.is_empty(), "the solo/host arm returns state empty");
             // The server steps its OWN sim and the local client ADOPTS each emitted snapshot — the
             // windowed ServerAuth arm's flow, minus the bevy crab pump (no rapier body here).
             let server = coord.server_mut().expect("solo runs an internal server");

@@ -487,11 +487,10 @@ pub(crate) fn gaussian_log_prob_rows<B: Backend>(
 }
 
 /// Draw one standard-normal sample (N(0,1)) from `rng` via the Box–Muller transform.
-/// `rand 0.8` has no normal distribution in core and the project's `rand_distr` is a
-/// later-`rand` release (incompatible RNG traits), so this keeps the noise source on the
-/// same `rand 0.8` `StdRng` the rest of the crate uses. The distribution is exactly
-/// standard-normal — identical to the backend RNG's `Distribution::Normal(0.0, 1.0)` an
-/// earlier version drew from, only off the global lock.
+/// `rand 0.8` has no normal distribution in core and `rand_distr` tracks a later `rand`
+/// (incompatible RNG traits) — so rather than carry that dep, this keeps the noise source
+/// on the same `rand 0.8` `StdRng` the rest of the crate uses. The distribution is exactly
+/// standard-normal.
 fn next_standard_normal(rng: &mut StdRng) -> f32 {
     // u1 in (0, 1] so ln(u1) is finite (open at 0); u2 in [0, 1) for the angle.
     let u1: f32 = 1.0 - rng.r#gen::<f32>();

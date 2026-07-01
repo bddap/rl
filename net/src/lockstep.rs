@@ -11,7 +11,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::roster::RosterSchedule;
 use crate::sim::{Input, PlayerId, Sim};
 use crate::snapshot::CoreSnapshot;
 
@@ -32,11 +31,11 @@ pub struct TickMsg {
 pub struct Lockstep {
     sim: Sim,
     me: PlayerId,
-    /// The participant set as it changes over the match (GCR MP Stage 3, rl#151), including `me`. The
-    /// initial (frozen) set is what the authoritative server is built over ([`Self::peers`]); a
-    /// mid-match join grows it. The client reads this at round start; the live roster of record is the
-    /// server's, carried on every adopted [`CoreSnapshot`].
-    roster: RosterSchedule,
+    /// The participant set at ROUND START (sorted, deduped, including `me`) — what the authoritative
+    /// server is built over ([`Self::peers`]). Read only at round start; the live roster of record is
+    /// the server's, carried on every adopted [`CoreSnapshot`] (a mid-game join grows the SIM's player
+    /// set, never this).
+    peers: Vec<PlayerId>,
     /// The local player's own submitted inputs, keyed by `apply_tick` — kept for
     /// [`Self::reconcile_local_prediction`] to replay the still-in-flight window after adopting a
     /// snapshot. Pruned by [`Self::apply_core_snapshot`] to the inputs the snapshot doesn't yet
@@ -63,7 +62,7 @@ impl Lockstep {
         Self {
             sim: Sim::new(seed, &peers),
             me,
-            roster: RosterSchedule::frozen(&peers),
+            peers,
             inputs: BTreeMap::new(),
             next_issue_tick: 0,
             next_apply_tick: 0,
@@ -82,17 +81,11 @@ impl Lockstep {
         Self {
             sim: Sim::new(seed, &roster_set),
             me,
-            roster: RosterSchedule::starting_at(at_tick, &roster_set),
+            peers: roster_set,
             inputs: BTreeMap::new(),
             next_issue_tick: at_tick,
             next_apply_tick: at_tick,
         }
-    }
-
-    /// Record a roster change the server scheduled: from `effective_tick`, the participant set becomes
-    /// `roster`. Append-only and strictly future (see [`RosterSchedule::schedule_change`]).
-    pub fn schedule_roster_change(&mut self, effective_tick: u64, roster: &[PlayerId]) {
-        self.roster.schedule_change(effective_tick, roster);
     }
 
     /// The next tick to be applied (0-based; equals the count already applied).
@@ -196,11 +189,11 @@ impl Lockstep {
         self.me
     }
 
-    /// The CURRENT participant set (sorted, incl. `me`) — the latest scheduled roster. At round start
-    /// (the only place this is read) it is the initial set the authoritative server is built over
-    /// (solo ⇒ just `me`), so the client and its server agree on the roster by construction.
+    /// The ROUND-START participant set (sorted, incl. `me`) — the set the authoritative server is
+    /// built over (solo ⇒ just `me`), so the client and its server agree on the roster by
+    /// construction. Read only at round start; the live roster is the sim's (snapshot-carried).
     pub fn peers(&self) -> &[PlayerId] {
-        self.roster.current()
+        &self.peers
     }
 }
 
