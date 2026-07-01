@@ -1,28 +1,23 @@
-//! Actor-critic network for PPO: a shared MLP trunk feeding separate policy
-//! (actor) and value (critic) heads.
+//! `mlp256` — the founding architecture leaf: a 256-wide two-layer MLP trunk feeding
+//! separate policy (actor) and value (critic) heads, with a state-independent learnable
+//! per-dim `log_std`. Formerly `CrabBrain`; renamed when the registry landed (bddap/rl#200)
+//! because a leaf named "the crab brain" is a drift seed once there are N crab brains.
 
 use burn::module::Param;
 use burn::nn;
 use burn::prelude::*;
 
-use super::actuator::ACTION_SIZE;
-use super::sensor::OBS_SIZE;
+use super::super::actuator::ACTION_SIZE;
+use super::super::sensor::OBS_SIZE;
 
 const HIDDEN_SIZE: usize = 256;
 
 /// Initial policy log-std (std ≈ 0.2): start with low exploration, see `new`.
 const LOG_STD_INIT: f32 = -1.6;
-/// Bounds the learnable log-std so entropy can't diverge or collapse. Single
-/// source of truth: `policy` clamps to this range, so downstream log-prob /
-/// entropy never re-clamp. exp(-2) ≈ 0.14 (focused), exp(0.5) ≈ 1.65 (wide).
-/// `LOG_STD_MIN` is also the resting/refine floor the exploration schedule anneals
-/// back down to once the wide-early window elapses (see `PpoConfig::log_std_floor`).
-pub(crate) const LOG_STD_MIN: f32 = -2.0;
-const LOG_STD_MAX: f32 = 0.5;
 
 /// Actor-Critic network for PPO.
 #[derive(Module, Debug)]
-pub struct CrabBrain<B: Backend> {
+pub struct Mlp256<B: Backend> {
     trunk_fc1: nn::Linear<B>,
     trunk_fc2: nn::Linear<B>,
     trunk_ln1: nn::LayerNorm<B>,
@@ -35,10 +30,12 @@ pub struct CrabBrain<B: Backend> {
 
     // A free learnable parameter, not a head off the trunk: exploration spread is
     // state-independent, so the policy can widen/narrow it globally as training pays.
+    // LAST field on purpose: the record's bincode layout follows field order, and this
+    // order is what every fleet `brain.bin` was written with (the golden test pins it).
     log_std: Param<Tensor<B, 1>>,
 }
 
-impl<B: Backend> CrabBrain<B> {
+impl<B: Backend> Mlp256<B> {
     pub fn new(device: &B::Device) -> Self {
         let trunk_fc1 = nn::LinearConfig::new(OBS_SIZE, HIDDEN_SIZE)
             .with_bias(true)
@@ -100,23 +97,19 @@ impl<B: Backend> CrabBrain<B> {
         burn::tensor::activation::relu(x)
     }
 
-    /// Action means (tanh-bounded to [-1, 1]) and the log-std, clamped to
-    /// `[log_std_floor, LOG_STD_MAX]` so downstream log-prob/entropy need not re-clamp.
-    ///
-    /// `log_std_floor` is the LOWER clamp bound — the minimum exploration spread for this
-    /// forward. It is the lever the training schedule raises early to FORCE σ wide (the
-    /// learned `log_std` param sits below it, so the clamp overrides it) and anneals back
-    /// down to `LOG_STD_MIN` for refinement (see `PpoConfig::log_std_floor`). Pass
-    /// [`LOG_STD_MIN`] for the unforced/default bound; eval takes the policy MEAN and
-    /// discards `log_std`, so the floor never reaches a deployed action — exploration
-    /// widening is training-only. The floor is itself clamped into `[LOG_STD_MIN,
-    /// LOG_STD_MAX]` so a misconfigured schedule can't widen past the architectural bound.
-    pub fn policy(&self, obs: Tensor<B, 2>, log_std_floor: f32) -> (Tensor<B, 2>, Tensor<B, 1>) {
+    /// RAW heads per the seam contract (see [`super::AnyBrain::policy`]): tanh-bounded
+    /// action means and the learned `log_std` broadcast per-row to `[rows, ACTION_SIZE]`
+    /// — UN-floored and UN-clamped; only [`super::GaussianHead`] may clamp.
+    pub fn policy(&self, obs: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
         let trunk = self.trunk(obs);
         let means = self.policy_fc.forward(trunk);
         let means = burn::tensor::activation::tanh(means);
-        let lo = log_std_floor.clamp(LOG_STD_MIN, LOG_STD_MAX);
-        let log_std = self.log_std.val().clamp(lo as f64, LOG_STD_MAX as f64);
+        let rows = means.dims()[0];
+        let log_std = self
+            .log_std
+            .val()
+            .unsqueeze_dim::<2>(0)
+            .expand([rows, ACTION_SIZE]);
         (means, log_std)
     }
 

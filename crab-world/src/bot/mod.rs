@@ -1,6 +1,6 @@
 pub mod actuator;
+pub mod arch;
 pub mod body;
-pub mod brain;
 pub mod collider_check;
 pub mod meshfit;
 pub mod physics_digest;

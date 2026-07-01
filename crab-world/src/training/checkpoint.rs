@@ -15,13 +15,14 @@ use tracing::warn;
 use super::algorithm::{ReturnNormalizer, ReturnNormalizerData};
 use super::atomic_write;
 use crate::bot::actuator::ACTION_SIZE;
-use crate::bot::brain::CrabBrain;
+use crate::bot::arch::AnyBrain;
 use crate::bot::sensor::OBS_SIZE;
 
-/// The Adam optimizer over a `CrabBrain` on backend `B`. Generic over the backend so
+/// The Adam optimizer over an [`AnyBrain`] on backend `B` — the moments key off leaf
+/// `ParamId`s, so the enum wrapper changes nothing about the record. Generic over the backend so
 /// the one PPO update ([`super::update::ppo_update_core`]) serves the live GPU learner
 /// and the CPU-backed update test from one code path.
-pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, CrabBrain<B>, B>;
+pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 
 /// Build the learner's Adam optimizer (global grad-norm clip 0.5). The ONE source of
 /// the optimizer construction — the live `GpuLearner` and the CPU-backed update test
@@ -330,12 +331,12 @@ pub(crate) fn load_return_normalizer(path: &Path) -> Option<ReturnNormalizer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bot::arch::ArchId;
     use crate::bot::sensor::OBS_SIZE;
     use crate::training::TrainBackend;
     use burn::backend::ndarray::NdArrayDevice;
-    use burn::module::Module;
     use burn::optim::{GradientsParams, Optimizer};
-    use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
+    use burn::record::{BinFileRecorder, FullPrecisionSettings};
     use burn::tensor::Tensor;
 
     /// The shape sidecar gates warm-starts: absent ⇒ never warm-start (a fresh dir or a
@@ -350,7 +351,10 @@ mod tests {
         let paths = CheckpointDir::new(&dir);
 
         // No sidecar yet ⇒ not warm-startable.
-        assert!(!paths.warm_start_compatible(), "absent sidecar must block warm start");
+        assert!(
+            !paths.warm_start_compatible(),
+            "absent sidecar must block warm start"
+        );
 
         // After stamping the current widths ⇒ warm-startable.
         paths.save_shape();
@@ -362,7 +366,11 @@ mod tests {
         assert_eq!(parsed, BrainShape::current());
 
         // A sidecar from a different DOF count ⇒ blocked again.
-        std::fs::write(paths.shape_path(), format!("{} {}\n", OBS_SIZE + 1, ACTION_SIZE + 1)).unwrap();
+        std::fs::write(
+            paths.shape_path(),
+            format!("{} {}\n", OBS_SIZE + 1, ACTION_SIZE + 1),
+        )
+        .unwrap();
         assert!(
             !paths.warm_start_compatible(),
             "a sidecar with different widths must block warm start"
@@ -378,25 +386,24 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let device = NdArrayDevice::Cpu;
-        let brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
 
         let paths = CheckpointDir::new(&dir);
         let stem = paths.brain_stem();
         let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-        recorder
-            .record(brain.clone().into_record(), stem.clone())
+        brain
+            .record_leaf(&recorder, stem.clone())
             .expect("save brain");
 
         assert!(paths.brain_file().exists(), "brain.bin should exist");
 
-        let loaded_record = recorder.load(stem, &device).expect("load brain");
-        let loaded = CrabBrain::<TrainBackend>::new(&device).load_record(loaded_record);
+        let loaded = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device)
+            .load_leaf_record(&recorder, stem, &device)
+            .expect("load brain");
 
         let test_obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
-        let (orig_means, orig_log_std) =
-            brain.policy(test_obs.clone(), crate::bot::brain::LOG_STD_MIN);
-        let (loaded_means, loaded_log_std) =
-            loaded.policy(test_obs, crate::bot::brain::LOG_STD_MIN);
+        let (orig_means, orig_log_std) = brain.policy(test_obs.clone());
+        let (loaded_means, loaded_log_std) = loaded.policy(test_obs);
 
         let orig_m: Vec<f32> = orig_means.to_data().to_vec().unwrap();
         let loaded_m: Vec<f32> = loaded_means.to_data().to_vec().unwrap();
@@ -421,12 +428,12 @@ mod tests {
     /// PPO machinery: a fixed input + sum loss puts non-zero grads on every parameter, so
     /// the moments + step advance as a real update would.
     fn adam_test_step(
-        brain: CrabBrain<TrainBackend>,
+        brain: AnyBrain<TrainBackend>,
         mut optimizer: CrabOpt<TrainBackend>,
         device: &NdArrayDevice,
-    ) -> (CrabBrain<TrainBackend>, CrabOpt<TrainBackend>) {
+    ) -> (AnyBrain<TrainBackend>, CrabOpt<TrainBackend>) {
         let obs = Tensor::<TrainBackend, 2>::ones([4, OBS_SIZE], device);
-        let (means, log_std) = brain.policy(obs, crate::bot::brain::LOG_STD_MIN);
+        let (means, log_std) = brain.policy(obs);
         let loss = means.sum() + log_std.sum();
         let grads = loss.backward();
         let grads = GradientsParams::from_grads(grads, &brain);
@@ -434,9 +441,9 @@ mod tests {
         (brain, optimizer)
     }
 
-    fn policy_means(brain: &CrabBrain<TrainBackend>, device: &NdArrayDevice) -> Vec<f32> {
+    fn policy_means(brain: &AnyBrain<TrainBackend>, device: &NdArrayDevice) -> Vec<f32> {
         let obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], device);
-        brain.policy(obs, crate::bot::brain::LOG_STD_MIN).0.to_data().to_vec().unwrap()
+        brain.policy(obs).0.to_data().to_vec().unwrap()
     }
 
     #[test]
@@ -448,7 +455,7 @@ mod tests {
 
         // Warm an optimizer over several steps so its Adam moments + step are non-trivial,
         // then snapshot brain + optimizer mid-run.
-        let mut brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let mut brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
         let mut warm = crab_optimizer::<TrainBackend>();
         for _ in 0..5 {
             let (b, o) = adam_test_step(brain, warm, &device);

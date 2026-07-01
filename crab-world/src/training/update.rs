@@ -11,11 +11,10 @@ use tracing::error;
 
 use super::algorithm::{
     PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer, Transition, compute_gae,
-    gaussian_log_prob_rows,
 };
 use super::checkpoint::CrabOpt;
 use crate::bot::actuator::ACTION_SIZE;
-use crate::bot::brain::CrabBrain;
+use crate::bot::arch::{AnyBrain, GaussianHead};
 use crate::bot::sensor::OBS_SIZE;
 
 /// Huber (smooth-L1) value loss on the normalized value-prediction residual `V' - R'`,
@@ -63,7 +62,7 @@ fn huber_value_loss<B: AutodiffBackend>(residual: Tensor<B, 1>, delta: f32) -> T
 // another without hiding a real dependency, so the arg-count heuristic doesn't apply.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ppo_update_core<B: AutodiffBackend>(
-    brain: &mut CrabBrain<B>,
+    brain: &mut AnyBrain<B>,
     optimizer: &mut CrabOpt<B>,
     config: &PpoConfig,
     rollouts: &[RolloutBuffer],
@@ -166,10 +165,9 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
         // correct old log-prob: the ratio starts at exactly 1 and the target-KL guard then
         // measures true on-backend policy drift. Detached — π_old is a fixed reference, no
         // gradient flows back through it.
-        let old_log_probs_all = {
-            let (means, log_std) = brain.policy(obs_all.clone(), log_std_floor);
-            gaussian_log_prob_rows(means, log_std, actions_all.clone()).detach()
-        };
+        let old_log_probs_all = GaussianHead::new(brain.policy(obs_all.clone()), log_std_floor)
+            .log_prob_rows(actions_all.clone())
+            .detach();
 
         // Diagnostic only: how far the rollout's CPU-recorded behavior log-prob sits from
         // the on-backend recompute above. The update IGNORES `t.log_prob` (it uses
@@ -229,12 +227,12 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
                 let advs = advantages_all.clone().select(0, idx_tensor.clone());
                 let rets = returns_all.clone().select(0, idx_tensor);
 
-                let (means, log_std) = brain.policy(obs.clone(), log_std_floor);
+                let head = GaussianHead::new(brain.policy(obs.clone()), log_std_floor);
 
                 // π_new for this minibatch — same Gaussian log-prob as π_old above (one
-                // formula, `gaussian_log_prob_rows`), so the ratio can't drift on a
-                // formula mismatch. log_std is pre-clamped by policy (single source).
-                let new_lp = gaussian_log_prob_rows(means, log_std.clone(), actions);
+                // formula on one floored head, `GaussianHead::log_prob_rows`), so the
+                // ratio can't drift on a formula or clamp mismatch.
+                let new_lp = head.log_prob_rows(actions);
 
                 let log_ratio = (new_lp - old_lp).clamp(-20.0, 20.0);
                 let ratio = log_ratio.clone().exp();
@@ -246,8 +244,10 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
                 // backend above). Crossing the ceiling ends the update before the step
                 // that would walk the policy off the cliff. Checked BEFORE this minibatch
                 // is applied, so a breaking minibatch contributes no step.
-                let approx_kl =
-                    ((ratio.clone() - 1.0) - log_ratio).mean().into_scalar().elem::<f32>();
+                let approx_kl = ((ratio.clone() - 1.0) - log_ratio)
+                    .mean()
+                    .into_scalar()
+                    .elem::<f32>();
                 last_kl = approx_kl;
                 // A non-finite KL would SILENTLY DEFEAT the trust-region guard below — `NaN > x`
                 // is false, so the update would sail past the ceiling and keep stepping a policy
@@ -265,9 +265,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
                     break 'update;
                 }
 
-                let entropy_per_dim = log_std.clone()
-                    + (0.5 * (2.0 * std::f32::consts::PI * std::f32::consts::E).ln());
-                let entropy = entropy_per_dim.mean();
+                let entropy = head.entropy();
 
                 let surr1 = ratio.clone() * advs.clone();
                 let surr2 =
@@ -332,8 +330,9 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::algorithm::{NormalizedValue, StepEnd};
+    use super::*;
+    use crate::bot::arch::ArchId;
     use crate::training::TrainBackend;
     use crate::training::checkpoint::crab_optimizer;
     use burn::backend::ndarray::NdArrayDevice;
@@ -380,7 +379,7 @@ mod tests {
     #[test]
     fn ppo_update_is_deterministic_under_equal_shuffle_seed() {
         let device = NdArrayDevice::Cpu;
-        let brain = CrabBrain::<TrainBackend>::new(&device);
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
         let rollouts = make_rollouts();
 
         let run = |shuffle_seed: u64| -> PpoMetrics {
@@ -404,7 +403,7 @@ mod tests {
                 &device,
                 &mut ret_norm,
                 &mut rng,
-                crate::bot::brain::LOG_STD_MIN,
+                crate::bot::arch::LOG_STD_MIN,
             )
         };
 
@@ -440,14 +439,20 @@ mod tests {
     #[test]
     fn non_finite_loss_aborts_the_update_without_corrupting_the_policy() {
         let device = NdArrayDevice::Cpu;
-        let mut brain = CrabBrain::<TrainBackend>::new(&device);
+        let mut brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
 
         // A fixed probe observation; the policy mean on it is our "did the brain change" witness.
         let probe = Tensor::<TrainBackend, 2>::from_data(
             TensorData::new(vec![0.1f32; OBS_SIZE], [1, OBS_SIZE]),
             &device,
         );
-        let before: Vec<f32> = brain.policy(probe.clone(), crate::bot::brain::LOG_STD_MIN).0.flatten::<1>(0, 1).to_data().to_vec().unwrap();
+        let before: Vec<f32> = brain
+            .policy(probe.clone())
+            .0
+            .flatten::<1>(0, 1)
+            .to_data()
+            .to_vec()
+            .unwrap();
 
         // Rollouts with one poisoned reward → NaN advantages/returns → NaN loss.
         let mut rollouts = make_rollouts();
@@ -462,8 +467,14 @@ mod tests {
         let mut ret_norm = ReturnNormalizer::new();
         let mut rng = StdRng::seed_from_u64(0x1267);
         let metrics = ppo_update_core(
-            &mut brain, &mut optimizer, &config, &rollouts, &device, &mut ret_norm, &mut rng,
-            crate::bot::brain::LOG_STD_MIN,
+            &mut brain,
+            &mut optimizer,
+            &config,
+            &rollouts,
+            &device,
+            &mut ret_norm,
+            &mut rng,
+            crate::bot::arch::LOG_STD_MIN,
         );
 
         assert_eq!(
@@ -471,7 +482,13 @@ mod tests {
             "a non-finite loss must abort before any Adam step (got {} steps)",
             metrics.steps
         );
-        let after: Vec<f32> = brain.policy(probe, crate::bot::brain::LOG_STD_MIN).0.flatten::<1>(0, 1).to_data().to_vec().unwrap();
+        let after: Vec<f32> = brain
+            .policy(probe)
+            .0
+            .flatten::<1>(0, 1)
+            .to_data()
+            .to_vec()
+            .unwrap();
         assert_eq!(
             before.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
             after.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
@@ -488,7 +505,7 @@ mod tests {
     #[test]
     fn target_kl_guard_stops_an_over_kl_update() {
         let device = NdArrayDevice::Cpu;
-        let brain = CrabBrain::<TrainBackend>::new(&device);
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
         let rollouts = make_rollouts();
 
         let run = |target_kl: f32| -> PpoMetrics {
@@ -501,14 +518,23 @@ mod tests {
             let mut ret_norm = ReturnNormalizer::new();
             let mut rng = StdRng::seed_from_u64(0x5417);
             ppo_update_core(
-                &mut brain, &mut optimizer, &config, &rollouts, &device, &mut ret_norm, &mut rng,
-                crate::bot::brain::LOG_STD_MIN,
+                &mut brain,
+                &mut optimizer,
+                &config,
+                &rollouts,
+                &device,
+                &mut ret_norm,
+                &mut rng,
+                crate::bot::arch::LOG_STD_MIN,
             )
         };
 
         // n=256, batch 64, 4 epochs ⇒ 16 minibatches when nothing early-stops.
         let unguarded = run(f32::INFINITY);
-        assert_eq!(unguarded.steps, 16, "an infinite ceiling runs every minibatch");
+        assert_eq!(
+            unguarded.steps, 16,
+            "an infinite ceiling runs every minibatch"
+        );
 
         // A tiny ceiling: the first (zero-drift) minibatch is applied, then the very
         // next minibatch sees that step's drift exceed the ceiling and stops — so the
@@ -536,8 +562,9 @@ mod tests {
         let delta = 3.0f32;
         // Two residuals inside ±δ, two well outside.
         let rs = [0.5f32, -2.0, 5.0, -8.0];
-        let residual = Tensor::<TrainBackend, 1>::from_data(TensorData::new(rs.to_vec(), [4]), &device)
-            .require_grad();
+        let residual =
+            Tensor::<TrainBackend, 1>::from_data(TensorData::new(rs.to_vec(), [4]), &device)
+                .require_grad();
 
         let per_sample = huber_value_loss(residual.clone(), delta);
         let vals: Vec<f32> = per_sample.clone().to_data().to_vec().unwrap();
@@ -549,7 +576,11 @@ mod tests {
             }
         };
         for (v, r) in vals.iter().zip(rs) {
-            assert!((v - want_val(r)).abs() < 1e-3, "huber({r}) = {v}, want {}", want_val(r));
+            assert!(
+                (v - want_val(r)).abs() < 1e-3,
+                "huber({r}) = {v}, want {}",
+                want_val(r)
+            );
         }
 
         // Gradient of the MEAN: 2r/n inside, 2δ·sign(r)/n outside — nonzero in the tail,
@@ -565,9 +596,16 @@ mod tests {
             }
         };
         for (gi, r) in g.iter().zip(rs) {
-            assert!((gi - want_g(r)).abs() < 1e-3, "grad huber({r}) = {gi}, want {}", want_g(r));
+            assert!(
+                (gi - want_g(r)).abs() < 1e-3,
+                "grad huber({r}) = {gi}, want {}",
+                want_g(r)
+            );
             if r.abs() > delta {
-                assert!(gi.abs() > 1e-3, "outlier r={r} must keep a nonzero gradient, got {gi}");
+                assert!(
+                    gi.abs() > 1e-3,
+                    "outlier r={r} must keep a nonzero gradient, got {gi}"
+                );
             }
         }
     }

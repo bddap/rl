@@ -9,10 +9,11 @@ use burn::tensor::Tensor;
 use tracing::{info, warn};
 
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
+use crate::bot::arch::GaussianHead;
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns};
-use crate::training::algorithm::{NormalizedValue, compute_log_prob, sample_action};
+use crate::training::algorithm::NormalizedValue;
 use crate::training::curriculum::seed_target;
 use crate::training::reward::{EFFORT_WEIGHT, action_effort, dist_3d, planar_dist};
 
@@ -45,7 +46,7 @@ fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32]) {
 }
 
 /// One env's sample for this tick: the policy's unbounded neural DRIVE `μ + σ·ε` (see
-/// [`sample_action`]) and its sampling log-prob. The drive is the RL action proper — the PPO
+/// [`GaussianHead::sample`]) and its sampling log-prob. The drive is the RL action proper — the PPO
 /// log-prob and the metabolic tax are both over it. The ±1 torque bound the sim runs is the
 /// actuator's job, not stored here (`apply_actions` clamps every command), so the unbounded
 /// drive is the single quantity and a saturating `|d|≫1` overshoot stays visible to the tax.
@@ -127,17 +128,14 @@ fn normalize_observations(
 }
 
 /// ONE batched forward pass for all `n` envs: `[n, OBS_SIZE]` through the trunk once — this is
-/// what makes N crabs cheaper than N apps. Returns each env's policy-mean row, the shared
-/// `log_std`, and each value. Value-head outputs enter the type system as [`NormalizedValue`]
-/// HERE (the single wrap point), so every stored value is in the head's normalized space.
+/// what makes N crabs cheaper than N apps. Returns the floored/clamped action distribution
+/// ([`GaussianHead`], one row per env) and each value. Value-head outputs enter the type
+/// system as [`NormalizedValue`] HERE (the single wrap point), so every stored value is in
+/// the head's normalized space.
 fn forward_pass(
     training: &TrainingState,
     obs_arrays: &[[f32; OBS_SIZE]],
-) -> (
-    Vec<Tensor<NdArray, 1>>,
-    Tensor<NdArray, 1>,
-    Vec<NormalizedValue>,
-) {
+) -> (GaussianHead<NdArray>, Vec<NormalizedValue>) {
     let n = obs_arrays.len();
     let device = training.device;
     let flat: Vec<f32> = obs_arrays.iter().flat_map(|a| a.iter().copied()).collect();
@@ -148,8 +146,8 @@ fn forward_pass(
     // Reuse the inference brain cached for these weights — rebuilt only when the rollout
     // thread reloads the learner's snapshot (once per horizon), not every tick.
     let log_std_floor = training.log_std_floor;
-    let (means_batch, log_std, values) = training.brain.with_inference(|inference_brain| {
-        let (means_batch, log_std) = inference_brain.policy(obs_batch.clone(), log_std_floor);
+    training.brain.with_inference(|inference_brain| {
+        let head = GaussianHead::new(inference_brain.policy(obs_batch.clone()), log_std_floor);
         let values: Vec<NormalizedValue> = inference_brain
             .value(obs_batch)
             .flatten::<1>(0, 1)
@@ -159,53 +157,50 @@ fn forward_pass(
             .into_iter()
             .map(NormalizedValue)
             .collect();
-        (means_batch, log_std, values)
-    });
-    let means_rows = (0..n)
-        .map(|e| {
-            means_batch
-                .clone()
-                .slice([e..e + 1, 0..ACTION_SIZE])
-                .flatten(0, 1)
-        })
-        .collect();
-    (means_rows, log_std, values)
+        (head, values)
+    })
 }
 
-/// Sample one DRIVE per env from its policy mean and the shared `log_std`, using `noise[e]` as
-/// that env's standard-normal `ε` (the temporally-correlated draw from [`OuNoise`], aligned by
-/// env), with the NaN/Inf guards the live solver needs: a non-finite log-prob becomes 0
-/// (else clamped to ±20),
-/// and any non-finite drive element zeroes that element (warning once for the row).
+/// Sample one DRIVE per env from the policy head, using `noise[e]` as that env's
+/// standard-normal `ε` (the temporally-correlated draw from [`OuNoise`], aligned by env),
+/// with the NaN/Inf guards the live solver needs: a non-finite log-prob becomes 0
+/// (else clamped to ±20), and any non-finite drive element zeroes that element (warning
+/// once for the row). The log-prob is of the ACTUAL sample (the unbounded drive): the
+/// quantity the PPO update later recomputes its ratio over.
 fn sample_actions(
-    means_rows: &[Tensor<NdArray, 1>],
-    log_std: &Tensor<NdArray, 1>,
+    head: &GaussianHead<NdArray>,
     noise: &[[f32; ACTION_SIZE]],
     device: &NdArrayDevice,
 ) -> Vec<SampledAction> {
-    means_rows
-        .iter()
-        .zip(noise)
-        .map(|(means, &eps)| {
-            let drive_tensor = sample_action(means, log_std, eps, device);
-            // Log-prob of the ACTUAL sample (the unbounded drive): the quantity the PPO update
-            // later recomputes its ratio over.
-            let log_prob = compute_log_prob(means, log_std, &drive_tensor);
-            let log_prob = if log_prob.is_nan() || log_prob.is_infinite() {
+    let n = noise.len();
+    let flat: Vec<f32> = noise.iter().flat_map(|r| r.iter().copied()).collect();
+    let eps = Tensor::<NdArray, 2>::from_data(
+        burn::tensor::TensorData::new(flat, [n, ACTION_SIZE]),
+        device,
+    );
+    let drives = head.sample(eps);
+    let log_probs: Vec<f32> = head
+        .log_prob_rows(drives.clone())
+        .to_data()
+        .to_vec()
+        .unwrap();
+    let drive_data: Vec<f32> = drives.to_data().to_vec().unwrap();
+    log_probs
+        .into_iter()
+        .zip(drive_data.chunks_exact(ACTION_SIZE))
+        .map(|(lp, row)| {
+            let log_prob = if lp.is_nan() || lp.is_infinite() {
                 0.0
             } else {
-                log_prob.clamp(-20.0, 20.0)
+                lp.clamp(-20.0, 20.0)
             };
-
-            let drive_data: Vec<f32> = drive_tensor.to_data().to_vec().unwrap();
             let mut drive = [0.0f32; ACTION_SIZE];
             let mut has_nan = false;
-            for (i, &v) in drive_data.iter().enumerate().take(ACTION_SIZE) {
+            for (d, &v) in drive.iter_mut().zip(row) {
                 if v.is_nan() || v.is_infinite() {
                     has_nan = true;
-                    drive[i] = 0.0;
                 } else {
-                    drive[i] = v;
+                    *d = v;
                 }
             }
             if has_nan {
@@ -325,9 +320,9 @@ pub(crate) fn brain_step(
 
     // Sense → Think: normalize, one batched forward pass, sample an action per env.
     let obs_arrays = normalize_observations(&mut training, &obs);
-    let (means_rows, log_std, values) = forward_pass(&training, &obs_arrays);
+    let (head, values) = forward_pass(&training, &obs_arrays);
     let noise = training.step_explore_noise(n);
-    let sampled = sample_actions(&means_rows, &log_std, &noise, &device);
+    let sampled = sample_actions(&head, &noise, &device);
 
     let drive_arrays: Vec<[f32; ACTION_SIZE]> = sampled.iter().map(|s| s.drive).collect();
     let log_probs: Vec<f32> = sampled.iter().map(|s| s.log_prob).collect();
@@ -417,7 +412,7 @@ mod tests {
     use super::*;
     use crate::TrainConfig;
     use crate::bot::RESET_GRACE_TICKS;
-    use crate::bot::brain::CrabBrain;
+    use crate::bot::arch::{AnyBrain, ArchId};
     use crate::training::TrainBackend;
     use crate::training::algorithm::{StepEnd, Transition};
     use crate::training::reward::GRAB_REWARD;
@@ -578,7 +573,7 @@ mod tests {
         // RNG site unchecked. Applied identically in every run, so it can't desync them.
         const FORCE_RESET_AT: u32 = RESET_GRACE_TICKS + 20;
 
-        fn run(seed: u64, initial_brain: &CrabBrain<TrainBackend>) -> Vec<Transition> {
+        fn run(seed: u64, initial_brain: &AnyBrain<TrainBackend>) -> Vec<Transition> {
             let dir = std::env::temp_dir()
                 .join(format!("rl_test_determinism_{seed}_{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
