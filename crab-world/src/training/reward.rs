@@ -62,23 +62,23 @@ use crate::bot::actuator::ACTION_SIZE;
 /// metabolic activation² and stays a regularizer, not the dominant term. A per-tick CAP is
 /// deliberately avoided — it would re-flatten `|d|^L` past the cap and kill the anti-saturation
 /// gradient — so the gentle quadratic is what bounds the cost instead. With
-/// `EFFORT_WEIGHT = 0.0012`:
+/// `EFFORT_WEIGHT = 0.0006`:
 ///   * a ~0.5 m/s stride closes `0.5·PHYSICS_DT ≈ 0.0078 m/tick`, worth `24·0.0078 ≈ 0.19`;
-///   * a gait drive (`|d| ≈ 0.7`) taxes `0.0012·30·0.49 ≈ 0.018/tick` — ~9% of the stride's
-///     progress, and ~26 integrated over a 3 m traverse vs its `24·3 = 72` progress: progress
-///     still dominates ~2.7:1;
-///   * the per-joint break-even sits at `|d| ≈ 2.3` (`0.0012·30·d² = 0.19`), still above any
-///     gait. A NON-progressing saturating thrash (`|d| = 3`, ~0 progress) pays `0.32/tick`,
-///     ≈ −486 over an episode — firmly net-negative. Convex, so the gentlest sufficient drive
+///   * a gait drive (`|d| ≈ 0.7`) taxes `0.0006·30·0.49 ≈ 0.009/tick` — ~5% of the stride's
+///     progress, and ~13 integrated over a 3 m traverse vs its `24·3 = 72` progress: progress
+///     dominates ~5.5:1;
+///   * the per-joint break-even sits at `|d| ≈ 3.2` (`0.0006·30·d² = 0.19`), well above any
+///     gait. A NON-progressing saturating thrash (`|d| = 3`, ~0 progress) pays `0.16/tick`,
+///     ≈ −243 over an episode — firmly net-negative. Convex, so the gentlest sufficient drive
 ///     is the cheapest.
 ///
-/// **Why 0.0012, not the original 0.0006 (owner 2026-06-28).** The trained crab moved too
-/// energetically — frantic, over-driven motion. The energy term was the right lever but tuned
-/// as a ~5%-of-stride whisper; doubling its weight roughly halves the break-even drive
-/// (`|d|` 3.2 → 2.3) and doubles the σ-counter-pressure, taxing the over-drive while progress
-/// still dominates ~2.7:1 so the traverse/grab task stays intact. Minimal single-knob change,
-/// applied warm-started: tune up if still frantic, revert if it breaks the task.
-pub(crate) const EFFORT_WEIGHT: f32 = 0.0012;
+/// **Why 0.0006 (reverted from 0.0012, job 712 / owner 2026-07-01).** 0.0012 was doubled from
+/// this value on 06-28 to curb frantic over-driven motion, but during the ball-pursuit regression
+/// recovery the doubled tax over-suppressed locomotion — biasing a warm policy toward a
+/// low-progress stand-and-pose local optimum (job 696 report §C). Reverting to the original gentle
+/// whisper lifted near-band reach off its plateau (0.33 → 0.45, still climbing). If over-driven
+/// motion returns once pursuit is solid, prefer a different curb than re-doubling this term.
+pub(crate) const EFFORT_WEIGHT: f32 = 0.0006;
 const EFFORT_EXP: f32 = 2.0;
 
 /// The effort summand `Σ|dᵢ|^L` that [`compute_reward`] weights by [`EFFORT_WEIGHT`], taken
