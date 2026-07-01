@@ -5,6 +5,7 @@
 use super::*;
 use super::app::{add_external_nn_crab, seed_external_crab_solo};
 use super::driver::{InputSource, drive_lockstep, insert_core};
+use crate::net_loop::NetDriver;
 use super::hud::{spawn_hud, update_hud};
 use super::input::gather_input;
 use super::scene::{FpCamera, apply_transforms, spawn_world};
@@ -26,6 +27,71 @@ pub fn build_screenshot_app(
     external_crab: Option<std::path::PathBuf>,
     render_mode: super::RenderMode,
 ) -> App {
+    let mut app = offscreen_app_scaffold();
+    // Arm the real NN crab BEFORE `ls` moves into core (seeds the crab's spawn pose); the stack +
+    // gate go on after, mirroring the windowed `Boot::Round` solo path. One `Option<(dir, spawn)>`
+    // so the checkpoint and its seeded spawn can't disagree (both present or both absent).
+    let armed_crab: Option<(std::path::PathBuf, Pos)> =
+        external_crab.map(|dir| (dir, seed_external_crab_solo(&mut ls)));
+    // Stand-in input for the absent peers so the sim advances and the scene composes:
+    // walk them straight forward toward the extraction (+Z). The crab chases them up
+    // the +Z lane and out of the stationary local camera's forward view, which keeps
+    // the players in frame early (crab shot) and clears the lane to the extraction
+    // pillar later (objective shot). Fed through the normal deterministic input path
+    // (see [`InputSource::Scripted`]) — adds no nondeterminism.
+    insert_core(
+        &mut app,
+        ls,
+        InputSource::Scripted(Input::new(0.0, 1.0, 0.0, 0)),
+    );
+    // Known-armed at build (when a checkpoint was given): add the rapier-NN stack AND arm the gate
+    // now — the SAME path the windowed `Boot::Round` solo client uses — so `spawn_world` hides the
+    // static silhouette and the reposed-to-giant rig becomes the visible crab.
+    let armed = armed_crab.is_some();
+    if let Some((dir, spawn)) = armed_crab {
+        add_external_nn_crab(&mut app, dir, spawn);
+        // Solo screenshot round. One arm path.
+        crate::external_crab::arm(app.world_mut());
+    }
+    finish_offscreen_app(&mut app, cfg, render_mode, armed);
+    app
+}
+
+/// Build the NETWORKED offscreen screenshot app (rl#151 increment 2 windowed): the same offscreen
+/// render as [`build_screenshot_app`], but its round is a real [`Coordinator`](crate::net_loop) over
+/// the wire — a HOST (the peer that formed the round with the lowest id) or a REMOTE CLIENT — instead
+/// of a scripted solo. Run two of these and the client's captured frame is the evidence that the
+/// remote client renders the host's authoritative state + articulated crab through the snapshot path
+/// (no re-sim). `net` is the formed [`NetDriver`]; `ls` its agreed tick-0 lockstep. The crab is armed
+/// on BOTH peers — the host steps + broadcasts it, the client spawns it frozen and poses it from the
+/// host's articulation. This is a two-identical-peer evidence harness (both run the SAME resolved
+/// checkpoint, so the round is weights/asset-synced by construction); the loud arm-refusal gate for
+/// a genuine mismatch lives on the interactive `play` path (`crab_arm_failure`), not here.
+pub fn build_net_screenshot_app(
+    mut ls: Lockstep,
+    net: NetDriver,
+    cfg: ScreenshotConfig,
+    external_crab: std::path::PathBuf,
+    render_mode: super::RenderMode,
+) -> App {
+    let mut app = offscreen_app_scaffold();
+    // Seed the crab spawn pose before `ls` moves into the coordinator, exactly as the windowed
+    // `Boot::Round` path does — so host and client agree on where the crab starts.
+    let spawn = seed_external_crab_solo(&mut ls);
+    let source = InputSource::coordinated(Some(net), ls.peers(), ls.sim().clone());
+    insert_core(&mut app, ls, source);
+    // Arm the NN crab on this peer: the host runs + broadcasts it, the client spawns it (frozen —
+    // never pumped) as the render target its adopted articulation poses. One arm path.
+    add_external_nn_crab(&mut app, external_crab, spawn);
+    crate::external_crab::arm(app.world_mut());
+    finish_offscreen_app(&mut app, cfg, render_mode, true);
+    app
+}
+
+/// The shared offscreen render scaffold both screenshot builders use: no window, GPU on
+/// (render-to-image), a fixed per-frame sim step, and the night sky. Keeping it in one place means
+/// the solo and networked shots compose the identical scene — only their input SOURCE differs.
+fn offscreen_app_scaffold() -> App {
     let mut app = App::new();
     // No window, GPU ON (render-to-image). A 60 Hz schedule runner with a real-time
     // step so the capture counter (render frames) also paces the sim and the GPU
@@ -60,31 +126,13 @@ pub fn build_screenshot_app(
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_secs_f64(TICK_DT),
     ));
-    // Arm the real NN crab BEFORE `ls` moves into core (seeds the crab's spawn pose); the stack +
-    // gate go on after, mirroring the windowed `Boot::Round` solo path. One `Option<(dir, spawn)>`
-    // so the checkpoint and its seeded spawn can't disagree (both present or both absent).
-    let armed_crab: Option<(std::path::PathBuf, Pos)> =
-        external_crab.map(|dir| (dir, seed_external_crab_solo(&mut ls)));
-    // Stand-in input for the absent peers so the sim advances and the scene composes:
-    // walk them straight forward toward the extraction (+Z). The crab chases them up
-    // the +Z lane and out of the stationary local camera's forward view, which keeps
-    // the players in frame early (crab shot) and clears the lane to the extraction
-    // pillar later (objective shot). Fed through the normal deterministic input path
-    // (see [`InputSource::Scripted`]) — adds no nondeterminism.
-    insert_core(
-        &mut app,
-        ls,
-        InputSource::Scripted(Input::new(0.0, 1.0, 0.0, 0)),
-    );
-    // Known-armed at build (when a checkpoint was given): add the rapier-NN stack AND arm the gate
-    // now — the SAME path the windowed `Boot::Round` solo client uses — so `spawn_world` hides the
-    // static silhouette and the reposed-to-giant rig becomes the visible crab.
-    let armed = armed_crab.is_some();
-    if let Some((dir, spawn)) = armed_crab {
-        add_external_nn_crab(&mut app, dir, spawn);
-        // Solo screenshot round. One arm path.
-        crate::external_crab::arm(app.world_mut());
-    }
+    app
+}
+
+/// Wire the offscreen screenshot systems + render-mode + determinism pin onto a scaffolded app whose
+/// round is already installed — shared by both builders so the capture path can't drift. `armed`
+/// gates the single-thread ECS pin (needed only when the rapier NN crab steps).
+fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super::RenderMode, armed: bool) {
     // Controls UI on the screenshot path too, so an evidence frame can prove the overlay +
     // hint draw — the shared env override forces it open headless, and picks the CONTEXT
     // (`RL_SHOW_CONTROLS_CONTEXT=foot|plane`) so one shot can record any context's legend
@@ -124,11 +172,10 @@ pub fn build_screenshot_app(
     // is wired. Unnecessary for the silhouette shot (no physics), so gated on `armed`.
     // The crab render-mode cycle (mesh unless `render_mode` says otherwise), so an evidence frame
     // can capture any of the views. MUST precede `force_serial_schedules` so the pin covers it.
-    super::render_mode::register(&mut app, render_mode);
+    super::render_mode::register(app, render_mode);
     if armed {
-        crab_world::bot::headless::force_serial_schedules(&mut app);
+        crab_world::bot::headless::force_serial_schedules(app);
     }
-    app
 }
 
 // ---------------------------------------------------------------------------

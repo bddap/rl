@@ -846,7 +846,12 @@ pub(super) fn drive_lockstep(
         // stall must apply them all, in order — and each applied tick advances the cadence, so the
         // physics phase stays aligned regardless of how the catch-up batches). `MAX_TICKS_PER_FRAME`
         // bounds only input ISSUANCE (the outer loop), which prevents a real-time spiral.
-        while !remote_adopt {
+        loop {
+            // A remote adopt client ran no sim to drain — it took the host's snapshot above and
+            // renders from the articulation, never stepping. Nothing to apply here.
+            if remote_adopt {
+                break;
+            }
             // Ready? The authoritative server gates on its own ledger/warmup; a legacy client gates
             // on its lockstep.
             {

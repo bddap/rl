@@ -136,6 +136,6 @@ mod tests;
 
 pub use app::{AppPhase, Boot, build_windowed_app, pin_process_pools};
 pub use render_mode::RenderMode;
-pub use screenshot::{ScreenshotConfig, build_screenshot_app};
+pub use screenshot::{ScreenshotConfig, build_net_screenshot_app, build_screenshot_app};
 pub(crate) use driver::{park_fixed_auto_pump, pump_fixed_steps};
 pub(crate) use scene::world_render_scale;
