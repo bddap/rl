@@ -15,16 +15,13 @@ use crate::roster::RosterSchedule;
 use crate::sim::{Input, PlayerId, Sim};
 use crate::snapshot::CoreSnapshot;
 
-/// Ticks between the round start and the first tick a client's input applies at — the warmup window
-/// `[0, INPUT_DELAY)` the authoritative server steps on neutral input before any client input is due.
-pub const INPUT_DELAY: u64 = 2;
-
 /// What one client publishes UP to the server for a single tick: the input it wants applied at
 /// `apply_tick`. The server records it into its ledger and, once every rostered client's input for
 /// the tick is in, steps its authoritative sim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TickMsg {
-    /// The tick at which `input` should be applied (issuing tick + [`INPUT_DELAY`]).
+    /// The tick at which `input` should be applied (the client's current issue cursor — there is no
+    /// input-delay barrier under host-authority; the server applies what it has and steps).
     pub apply_tick: u64,
     pub input: Input,
 }
@@ -46,8 +43,7 @@ pub struct Lockstep {
     /// reflect, so it can't grow unbounded (the client never steps to consume it).
     inputs: BTreeMap<u64, BTreeMap<PlayerId, Input>>,
     /// The tick the NEXT local input will apply at. Incremented once per [`Self::submit_local_input`].
-    /// Starts at [`INPUT_DELAY`]: the first real input lands on the tick right after the warmup window
-    /// (which the server steps on neutral input).
+    /// Starts at 0 — the first input applies at tick 0 (no input-delay barrier under host-authority).
     next_issue_tick: u64,
     /// The next tick to APPLY (0-based; equals the count already applied). Advanced only by
     /// [`Self::apply_core_snapshot`] — the client no longer steps, so adopting the server's snapshot
@@ -69,7 +65,7 @@ impl Lockstep {
             me,
             roster: RosterSchedule::frozen(&peers),
             inputs: BTreeMap::new(),
-            next_issue_tick: INPUT_DELAY,
+            next_issue_tick: 0,
             next_apply_tick: 0,
         }
     }
@@ -83,10 +79,6 @@ impl Lockstep {
         roster_set.sort();
         roster_set.dedup();
         debug_assert!(roster_set.contains(&me), "joining player must be in the new roster");
-        debug_assert!(
-            at_tick >= INPUT_DELAY,
-            "a join lands past the warmup window (the live tick is well past it)"
-        );
         Self {
             sim: Sim::new(seed, &roster_set),
             me,
@@ -109,7 +101,7 @@ impl Lockstep {
     }
 
     /// Submit THIS client's input for the next issuing tick and get the message to ship UP to the
-    /// server. The input applies [`INPUT_DELAY`] ticks ahead of the apply cursor.
+    /// server (which records it and steps when every rostered client's input for the tick is in).
     ///
     /// Call exactly once per tick — the scheduled tick advances by one each call, so a missed or
     /// doubled call would gap or collide the input stream. The input is also recorded locally so
@@ -145,8 +137,8 @@ impl Lockstep {
     /// ([[sp-is-mp-special-case]]), so there is no by-reference SP fork.
     ///
     /// Also drops our own now-stale submitted inputs: we still call
-    /// [`submit_local_input`](Lockstep::submit_local_input) to file each tick's input UP to the server
-    /// (which schedules it `INPUT_DELAY` ahead), but we never step to consume `self.inputs`, so
+    /// [`submit_local_input`](Lockstep::submit_local_input) to file each tick's input UP to the server,
+    /// but we never step to consume `self.inputs`, so
     /// without this prune it would grow unbounded. The prune keeps the still-in-flight window
     /// `apply_tick >= snapshot.tick` — the boundary tick is RETAINED, since a tick-T snapshot reflects
     /// inputs only up through `apply_tick == T-1`, so `apply_tick == T` hasn't landed yet and is
@@ -238,7 +230,7 @@ mod tests {
         const LATENCY: usize = 4; // snapshots the client trails the host by
         let mut wire: std::collections::VecDeque<CoreSnapshot> = std::collections::VecDeque::new();
 
-        // Stay within STARTUP_GRACE_TICKS (30): the tick reaches only INPUT_DELAY + FRAMES, so the
+        // Stay within STARTUP_GRACE_TICKS (30): the tick reaches only FRAMES, so the
         // crab stays disarmed (no grabs) and the round stays Ongoing — pure movement, so the
         // convergence is EXACT.
         const FRAMES: u64 = 24;

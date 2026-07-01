@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::EndpointId;
-use net::lockstep::{INPUT_DELAY, Lockstep};
+use net::lockstep::Lockstep;
 use net::sim::{Input, PlayerId, TICK_HZ};
 use net::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
 use net::{net_loop, transport};
@@ -304,7 +304,7 @@ async fn run_net(args: Args) -> Result<()> {
         t.send(TelemetryEvent::tick(ls.sim(), total_desyncs, all_ids.len()));
     }
     if all_ids.len() > 1
-        && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(INPUT_DELAY + TICK_HZ)
+        && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(TICK_HZ)
     {
         // We applied far fewer ticks than wall time allowed → we spent the run
         // stalled waiting for a peer's input. Flag it; a healthy link keeps pace.
