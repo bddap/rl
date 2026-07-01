@@ -309,7 +309,9 @@ fn hash_crab_physics(
             .filter(|(env, ..)| env.0 == 0)
             .map(|(_, t, v, j, c)| (t, v, j, c)),
     );
-    bridge.phys_digest = phys ^ policy.weights_digest();
+    // Fold the weight identity into the lockstep hash: `None` (rest pose / diagnostic brain,
+    // no shared checkpoint) contributes 0 — a no-op XOR — exactly as the old `0` sentinel did.
+    bridge.phys_digest = phys ^ policy.weights_digest().map_or(0, std::num::NonZeroU64::get);
 }
 
 /// Runtime gate for the external NN crab (rl#58 + GCR rl#82), as a presence marker: the

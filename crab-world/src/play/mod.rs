@@ -158,7 +158,7 @@ impl Plugin for DemoPlugin {
                 ),
             );
         // Both drivers are always present; `ManualControl.active` (seeded by the
-        // flag, toggled live with Y) decides which one writes the actions each tick.
+        // flag, toggled live with B/circle) decides which one writes the actions each tick.
         app.insert_resource(ManualControl {
             active: self.manual_control,
             selected: None,

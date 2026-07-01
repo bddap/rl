@@ -84,10 +84,10 @@ pub mod external_crab;
 /// arm). Deliberately NOT behind `cfg(render)`: the no-feature test build (like the headless
 /// trainer) must exercise the REAL predicate, not a re-encoded copy.
 ///
-/// CALLER CONTRACT: `weights_synced` must be `Policy::weights_digest() != 0`, **NOT**
-/// `is_loaded()` — `RL_RANDOM_POLICY=1` forces `is_loaded()` true on a fresh random brain whose
-/// digest is `0` (no checkpoint bytes), which would desync peers silently; a zero digest is
-/// exactly "no shared checkpoint", so gating on a non-zero digest closes that trap. Likewise
+/// CALLER CONTRACT: `weights_synced` must be `Policy::weights_digest().is_some()`, **NOT**
+/// `is_loaded()` — `RL_RANDOM_POLICY=1` forces `is_loaded()` true on a fresh random brain that
+/// has NO digest (no checkpoint bytes), which would desync peers silently; an absent digest is
+/// exactly "no shared checkpoint", so gating on a present digest closes that trap. Likewise
 /// `assets_synced` must be the [`crate::membership::Membership::assets_synced`] verdict
 /// (a non-zero asset digest agreed by every peer), not "a model loaded".
 pub fn may_arm_external_crab(net_is_none: bool, weights_synced: bool, assets_synced: bool) -> bool {
