@@ -4,7 +4,7 @@
 use super::*;
 use super::app::ExternalCrabStackInstalled;
 use super::driver::{
-    FlightInput, GameState, InputSource, PendingRound, VEHICLE_STICK_SENS, ensure_round_installed,
+    FlightInput, GameState, PendingRound, VEHICLE_STICK_SENS, ensure_round_installed,
     flight_control, park_fixed_auto_pump, pump_fixed_steps,
 };
 use crab_world::vehicle::VehicleKind;
@@ -65,7 +65,7 @@ fn menu_handoff_installs_the_chosen_round() {
     // The installed sim is the chosen one: a single local player (solo), seeded as asked.
     assert_eq!(gs.ls.me(), crate::sim::PlayerId(0), "solo player id 0");
     assert!(
-        matches!(&gs.input_source, InputSource::Coordinated(c) if c.is_solo()),
+        gs.coord.is_solo(),
         "a solo handoff installs a solo (internal-server) coordinator"
     );
     // And the parked round was consumed (taken), not left to double-install.

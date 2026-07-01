@@ -11,21 +11,34 @@ use super::input::{CameraPitch, CameraYaw};
 use crab_world::vehicle::{Vehicle, VehicleControl, VehicleKind};
 
 
-/// Shared setup for both apps: the sim + its input source, plus the input resources.
-pub(super) fn insert_core(app: &mut App, ls: Lockstep, input_source: InputSource) {
-    install_round(app.world_mut(), ls, input_source);
+/// Build the round's [`Coordinator`]: `None` ⇒ a solo internal server (roster of one), a host
+/// driver ⇒ a server over the roster, a client driver ⇒ a remote client. `peers` is the sim's
+/// participant set (solo ⇒ just the local player); `initial_sim` is the tick-0 world the server
+/// owns (a clone of the client's freshly-built sim — solo/host step it authoritatively; a remote
+/// client ignores it). The single home of the round's role choice ([[sp-is-mp-special-case]]).
+pub(super) fn coordinator(
+    net: Option<NetDriver>,
+    peers: &[PlayerId],
+    initial_sim: crate::sim::Sim,
+) -> Box<Coordinator> {
+    Box::new(Coordinator::for_round(net, peers, initial_sim))
 }
 
-/// Install the round resources into the world: the non-send [`GameState`] (sim + input
-/// source) and the input resources. Factored out of [`insert_core`] so it can be called
-/// BOTH at app build (the scripted/screenshot path) and from the menu's
-/// `OnEnter(Playing)` transition system (rl#56), which only has a [`World`], not an
-/// [`App`] — one definition so the round is set up identically however it was reached.
-fn install_round(world: &mut World, ls: Lockstep, input_source: InputSource) {
+/// Shared setup for both apps: the sim + its coordinator, plus the input resources.
+pub(super) fn insert_core(app: &mut App, ls: Lockstep, coord: Box<Coordinator>) {
+    install_round(app.world_mut(), ls, coord);
+}
+
+/// Install the round resources into the world: the non-send [`GameState`] (sim + coordinator)
+/// and the input resources. Factored out of [`insert_core`] so it can be called BOTH at app
+/// build (the screenshot path) and from the menu's `OnEnter(Playing)` transition system (rl#56),
+/// which only has a [`World`], not an [`App`] — one definition so the round is set up identically
+/// however it was reached.
+fn install_round(world: &mut World, ls: Lockstep, coord: Box<Coordinator>) {
     let prev = SimSnapshot::capture(&ls);
     world.insert_non_send_resource(GameState {
         ls,
-        input_source,
+        coord,
         accumulator: 0.0,
         prev,
     });
@@ -104,55 +117,29 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     crate::external_crab::arm(world);
     // Clone the freshly-seeded sim for the authoritative server (solo/host); the client keeps its
     // own identical sim inside `ready.lockstep` and renders the snapshots the server emits into it.
-    let source = InputSource::coordinated(
-        ready.net,
-        ready.lockstep.peers(),
-        ready.lockstep.sim().clone(),
-    );
-    install_round(world, ready.lockstep, source);
+    let coord = coordinator(ready.net, ready.lockstep.peers(), ready.lockstep.sim().clone());
+    install_round(world, ready.lockstep, coord);
 }
 
 // ---------------------------------------------------------------------------
 // Lockstep driver state (render-agnostic: owns the sim + transport)
 // ---------------------------------------------------------------------------
 
-/// Where the OTHER players' per-tick inputs come from this run. Two mutually-exclusive cases —
-/// so "real server-coordinated peers AND fabricated bot inputs" (a meaningless combination) is
-/// unrepresentable rather than merely unreached.
-pub(super) enum InputSource {
-    /// Server-coordinated play (rl#151): solo (internal server, roster of one), host (internal
-    /// server + remote clients), or a remote client of a server peer — all the SAME path through
-    /// the [`Coordinator`], which is the SP=MP-uniformity proof. Boxed because it can own a
-    /// [`NetDriver`] (tokio runtime + iroh session, ~200 bytes), dwarfing the `Scripted` variant.
-    Coordinated(Box<Coordinator>),
-    /// Stand-in input for the absent peers, fed for every non-local player each tick
-    /// (headless screenshot only). It crosses the SAME deterministic `record_remote`
-    /// path a wire peer would, so the sim can't distinguish it — a bot/replay input,
-    /// not a back channel. Only ever a single-machine solo run, so no peer exists to
-    /// disagree with it.
-    Scripted(Input),
-}
-
-impl InputSource {
-    /// Build the server-coordinated source for a round: `None` ⇒ a solo internal server, a host
-    /// driver ⇒ a server over the roster, a client driver ⇒ a remote client. `peers` is the sim's
-    /// participant set (solo ⇒ just the local player); `initial_sim` is the tick-0 world the server
-    /// owns (a clone of the client's freshly-built sim — solo/host step it authoritatively; a remote
-    /// client ignores it). The single home of the round's role choice.
-    pub(super) fn coordinated(
-        net: Option<NetDriver>,
-        peers: &[PlayerId],
-        initial_sim: crate::sim::Sim,
-    ) -> Self {
-        InputSource::Coordinated(Box::new(Coordinator::for_round(net, peers, initial_sim)))
-    }
-}
+/// A scripted stand-in input fed to every NON-local player each tick, present ONLY in the headless
+/// screenshot harness (`fp-screenshot`) so the pack walks and the scene composes. The host-
+/// authoritative server records it for each pack player exactly as it would a wire peer's input, so
+/// the sim can't distinguish it — a bot input, not a back channel. Absent in real play (windowed /
+/// networked), where every non-local input arrives over the transport. A single-machine solo run, so
+/// no peer exists to disagree with it.
+#[derive(Resource, Clone, Copy)]
+pub(super) struct ScriptedPackInput(pub(super) Input);
 
 /// This peer's fixed role for a round — the ONE axis every per-tick branch in [`drive_lockstep`]
 /// dispatches on, so "which role" lives in one place and the impossible both-server-and-client
 /// state a pair of bools would allow can't exist (make-illegal-states-unrepresentable). It's the
-/// render-side mirror of the coordinator's own arms ([`Coordinator::Server`]/[`Coordinator::Client`]
-/// + the scripted harness), NOT an SP/MP split — solo and host are the same [`PeerRole::ServerAuth`].
+/// render-side mirror of the coordinator's own arms ([`Coordinator::Server`]/[`Coordinator::Client`]),
+/// NOT an SP/MP split — solo and host are the same [`PeerRole::ServerAuth`] (the headless
+/// `fp-screenshot` harness is a solo server too, so it takes the same arm).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PeerRole {
     /// Solo or host: this peer runs the authoritative server, steps it, and RENDERS the snapshot it
@@ -161,20 +148,14 @@ enum PeerRole {
     /// A remote client (rl#151 increment 2 windowed): ADOPTS the host's snapshot into its own sim
     /// (no re-sim) and poses its frozen crab from the articulation, pumping no physics of its own.
     RemoteAdopt,
-    /// The headless scripted screenshot harness: no transport, so it steps its own lockstep against
-    /// stand-in peer inputs.
-    Scripted,
 }
 
 impl PeerRole {
     fn of(state: &GameState) -> Self {
-        if state.server().is_some() {
-            PeerRole::ServerAuth
-        } else if matches!(&state.input_source, InputSource::Coordinated(c) if c.is_remote_client())
-        {
+        if state.coord.is_remote_client() {
             PeerRole::RemoteAdopt
         } else {
-            PeerRole::Scripted
+            PeerRole::ServerAuth
         }
     }
 
@@ -199,9 +180,10 @@ impl PeerRole {
 /// + the iroh session (not `Sync`); only the main thread drives it, so that's fine.
 pub(super) struct GameState {
     pub(super) ls: Lockstep,
-    /// Where the other players' inputs come from this run (real peers / none / a
-    /// scripted stand-in). The sole writer of inputs other than the local controls.
-    pub(super) input_source: InputSource,
+    /// This peer's per-tick input coordinator (rl#151): solo internal server, host, or remote
+    /// client — the single path through which every non-local input flows. The sole writer of
+    /// inputs other than the local controls.
+    pub(super) coord: Box<Coordinator>,
     /// Fractional-tick accumulator: render time elapsed since the last applied sim
     /// tick, in [0, TICK_DT). Drives both how many ticks to step and the render
     /// interpolation alpha.
@@ -213,22 +195,16 @@ pub(super) struct GameState {
 }
 
 impl GameState {
-    /// The authoritative server this peer runs, if any (solo or host) — `None` for a remote client
-    /// or the scripted screenshot harness. When `Some`, the local client renders the snapshots it
-    /// emits rather than stepping `ls`'s sim itself (rl#151 increment 1).
+    /// The authoritative server this peer runs, if any (solo or host) — `None` for a remote client.
+    /// When `Some`, the local client renders the snapshots it emits rather than stepping `ls`'s sim
+    /// itself (rl#151 increment 1).
     fn server(&self) -> Option<&crate::server::Server> {
-        match &self.input_source {
-            InputSource::Coordinated(c) => c.server(),
-            InputSource::Scripted(_) => None,
-        }
+        self.coord.server()
     }
 
     /// Mutable counterpart of [`GameState::server`], for the per-tick authoritative step.
     fn server_mut(&mut self) -> Option<&mut crate::server::Server> {
-        match &mut self.input_source {
-            InputSource::Coordinated(c) => c.server_mut(),
-            InputSource::Scripted(_) => None,
-        }
+        self.coord.server_mut()
     }
 }
 
@@ -523,23 +499,6 @@ fn read_vehicle_pose(world: &mut World) -> Option<CockpitPose> {
 // Lockstep driver system
 // ---------------------------------------------------------------------------
 
-/// Log + count each lockstep fault and forward it to telemetry — the shared reporting both
-/// fault sites in [`drive_lockstep`] (`record_remote` and `advance_one`) use, so they can't
-/// drift. A desync can't be recovered; we surface it (log + telemetry) and play on.
-fn report_faults(
-    faults: &[crate::lockstep::Fault],
-    total: &mut usize,
-    tel: &Option<crate::telemetry::TelemetrySender>,
-) {
-    for fault in faults {
-        *total += 1;
-        warn!("lockstep fault: {fault:?}");
-        if let Some(t) = tel {
-            t.send(TelemetryEvent::fault(fault));
-        }
-    }
-}
-
 /// Advance the crab's rapier physics + brain by exactly `steps` fixed steps, NOW, from the
 /// lockstep driver — the deterministic replacement for Bevy's wall-clock `FixedUpdate`
 /// auto-pump (disabled in [`add_external_nn_crab`] by parking `Time<Fixed>` at a huge timestep).
@@ -624,10 +583,6 @@ pub(super) fn drive_lockstep(
     // telemetry stays suppressed until the counter climbs past the stale watermark, and the
     // crab's per-tick step count starts mid-sequence (a needless cross-peer phase risk).
     mut last_tick: Local<u64>,
-    // Cumulative lockstep fault count across the whole round (persists between system
-    // runs), so telemetry reports the REAL running desync total — not a per-frame 0. This
-    // is the live-debug alarm: a non-zero value on any deck means it has diverged.
-    mut total_desyncs: Local<usize>,
     // The deterministic 64:30 physics/sim cadence, advanced once per APPLIED tick while armed.
     // A `Local` (per-round state) reset on the restart edge so two peers stay phase-aligned.
     mut cadence: Local<PhysicsCadence>,
@@ -652,10 +607,7 @@ pub(super) fn drive_lockstep(
     // this is networked play with a collector. Telemetry never writes the sim.
     let (tel, roster_len) = {
         let state = world.non_send_resource::<GameState>();
-        let tel = match &state.input_source {
-            InputSource::Coordinated(c) => c.telemetry().cloned(),
-            InputSource::Scripted(_) => None,
-        };
+        let tel = state.coord.telemetry().cloned();
         // Roster size from the AUTHORITATIVE lockstep peer set — correct on the host, an incumbent,
         // AND a mid-game joiner (its `Lockstep` is rebuilt over the new roster). One source of
         // truth, not a second copy in the driver's id_map (which a joiner only half-fills).
@@ -737,65 +689,48 @@ pub(super) fn drive_lockstep(
         let piloting = world.resource::<LocalVehicle>().piloting();
         let sim_input = if piloting { Input::default() } else { input };
 
-        // Submit our input + gather the other players' inputs from whichever source this run
-        // uses, then record them — every path lands at `record_remote`, the same entry a wire
-        // peer takes, so the sim can't tell the sources apart.
-        // The newest crab pose a remote client drained this iteration, applied after the exchange's
+        // The headless `fp-screenshot` harness (only) feeds a scripted input to the absent pack
+        // players so the scene composes; real play has none (every non-local input is on the wire).
+        let scripted_pack: Option<Input> =
+            world.get_resource::<ScriptedPackInput>().map(|r| r.0);
+        // Submit our input UP to the coordinator and, on a remote client, drain the host's state DOWN.
+        // The newest crab pose a remote client drained this iteration is applied after the exchange's
         // `GameState` borrow is released (rl#151 increment 2 windowed).
         let mut pending_art: Option<crate::articulation::CrabArticulation> = None;
-        let (issue_tick, faults) = {
+        let issue_tick = {
             let mut state = world.non_send_resource_mut::<GameState>();
             let me = state.ls.me();
             let issue_tick = state.ls.next_tick();
             let msg = state.ls.submit_local_input(sim_input);
-            // Collect peer messages first (releasing the `input_source`/`ls` co-borrow via
-            // `&mut *state`) before recording into `ls`.
-            let st = &mut *state;
-            let exch: Exchanged = match &mut st.input_source {
-                // Server-coordinated: ship our input to the (internal or remote) server and get
-                // back the OTHER players' inputs (+ any mid-game roster change to schedule). Solo
-                // runs the same exchange against a roster of one — empty, so the sim advances on our
-                // own filed input alone.
-                InputSource::Coordinated(c) => c.exchange(me, msg),
-                InputSource::Scripted(bot) => {
-                    // Stand in for the absent peers so the (otherwise-stalled) sim advances:
-                    // feed every non-local player this input at the SAME apply_tick the local
-                    // input got. Always a single-machine solo run, so no peer disagrees + no joins.
-                    let bot = *bot;
-                    let peer_msgs = st
-                        .ls
-                        .sim()
-                        .players()
-                        .map(|(id, _)| id)
-                        .filter(|&id| id != me)
-                        .map(|pid| PeerMsg {
-                            pid,
-                            msg: TickMsg {
-                                apply_tick: msg.apply_tick,
-                                input: bot,
-                                confirmed: None,
-                            },
-                        })
-                        .collect();
-                    Exchanged {
-                        peer_msgs,
-                        roster_changes: Vec::new(),
-                        snapshots: Vec::new(),
-                        articulations: Vec::new(),
-                    }
+            // Scripted screenshot: file the pack's bot input into the solo server for every non-local
+            // rostered player at this tick, so the roster completes and the authoritative sim advances
+            // (real play drains these off the transport instead). A no-op with no `ScriptedPackInput`.
+            if let Some(bot) = scripted_pack
+                && let Some(server) = state.coord.server_mut()
+            {
+                let others: Vec<PlayerId> = server
+                    .roster()
+                    .iter()
+                    .copied()
+                    .filter(|&p| p != me)
+                    .collect();
+                for pid in others {
+                    let _ = server.record(
+                        pid,
+                        TickMsg { apply_tick: msg.apply_tick, input: bot, confirmed: None },
+                    );
                 }
-            };
-            // Three roles diverge here:
-            // - SERVER-AUTHORITATIVE (solo/host): the server already stepped these inputs into its
-            //   OWN sim (inside `exchange`'s host_assemble) and the local client renders the snapshot
-            //   it emits below — so it records no peer inputs and schedules no joins into its own
-            //   (non-stepping) lockstep.
+            }
+            // Ship our input to the (internal or remote) server. Solo runs the same exchange against a
+            // roster of one — the sim advances on our own filed input alone.
+            let exch: Exchanged = state.coord.exchange(me, msg);
+            // Two roles diverge here:
+            // - SERVER-AUTHORITATIVE (solo/host/fp-screenshot): the server already stepped these
+            //   inputs into its OWN sim (inside `exchange`'s host_assemble) and the local client
+            //   renders the snapshot it emits below — nothing to do here.
             // - REMOTE ADOPT (rl#151 increment 2 windowed): the client ADOPTS the host's snapshot
             //   into its own sim (no re-sim) and stashes the newest articulation for the render apply
             //   after this borrow is released.
-            // - LEGACY (scripted screenshot harness): records the stand-in peer inputs and advances
-            //   its own lockstep itself below.
-            let mut faults = Vec::new();
             match role {
                 // Handled by the server step + snapshot render below.
                 PeerRole::ServerAuth => {}
@@ -806,7 +741,7 @@ pub(super) fn drive_lockstep(
                     // host RESTART rebroadcasts and freeze the client on stale pre-restart state).
                     if let Some(snap) = exch.snapshots.into_iter().next_back() {
                         // Refresh the interpolation source from the PRE-adopt state, exactly as the
-                        // stepping arms do before advancing — else `apply_transforms` would tween
+                        // stepping arm does before advancing — else `apply_transforms` would tween
                         // avatars + the FP camera from the tick-0 spawn every frame (a per-frame snap
                         // toward spawn), since this arm skips the drain loop that owns `prev`.
                         state.prev = SimSnapshot::capture(&state.ls);
@@ -822,26 +757,9 @@ pub(super) fn drive_lockstep(
                     // the World once `state` is released.
                     pending_art = exch.articulations.into_iter().next_back();
                 }
-                PeerRole::Scripted => {
-                    // Schedule any roster change BEFORE recording inputs: a mid-game join the host
-                    // admitted or this client learned over the wire. `effective_tick` is JOIN_LEAD
-                    // ahead, so applying it now (well before the boundary) lets `advance_one` rebuild
-                    // the round in lockstep on every peer.
-                    for adm in &exch.roster_changes {
-                        state.ls.schedule_roster_change(adm.effective_tick, &adm.roster);
-                    }
-                    for from in exch.peer_msgs {
-                        if from.pid != me
-                            && let Some(fault) = state.ls.record_remote(from.pid, from.msg)
-                        {
-                            faults.push(fault);
-                        }
-                    }
-                }
             }
-            (issue_tick, faults)
+            issue_tick
         };
-        report_faults(&faults, &mut total_desyncs, &tel);
         // Render the host's crab pose (rl#151 increment 2 windowed): overwrite the client's frozen
         // crab entities + placement, so `drive_bones` skins the mesh to exactly the host's pose. The
         // `state` borrow above is released, so this can take the `&mut World` its query needs.
@@ -884,14 +802,10 @@ pub(super) fn drive_lockstep(
         // identically. A real round is always armed (rl#114: a round that can't arm Sally is refused
         // at build, never reaches here unarmed).
         //
-        // Two arms (rl#151 increment 1), chosen by the round's fixed role:
-        // - SERVER-AUTHORITATIVE (solo/host): the server steps its OWN sim with this tick's
-        //   assembled inputs + crab pose, emits a serialized snapshot the local client APPLIES (no
-        //   re-sim), captures the crab's render pose, and broadcasts both DOWN to remote clients.
-        // - LEGACY (scripted screenshot): the client steps its own lockstep via `advance_one`.
-        // Both inject the SAME bridge pose + digest in the SAME pre-step position, so the
-        // authoritative sim is byte-identical to what the lockstep advance produced ([[sp-is-mp-special-case]]).
-        // A REMOTE ADOPT client never enters this loop — it adopted the host's snapshot above and
+        // The server-authoritative arm (rl#151 increment 1): the server steps its OWN sim with this
+        // tick's assembled inputs + crab pose, emits a serialized snapshot the local client APPLIES
+        // (no re-sim), captures the crab's render pose, and broadcasts both DOWN to remote clients. A
+        // REMOTE ADOPT client never enters this loop — it adopted the host's snapshot above and
         // renders its pose from the articulation, running NO crab physics of its own.
         //
         // This inner drain is UNBOUNDED on purpose: it applies every ready tick (a catch-up after a
@@ -904,29 +818,23 @@ pub(super) fn drive_lockstep(
             if role == PeerRole::RemoteAdopt {
                 break;
             }
-            // Ready? The authoritative server gates on its own ledger/warmup; a legacy client gates
-            // on its lockstep.
+            // Ready? The authoritative server gates on its own ledger/warmup.
             {
                 let state = world.non_send_resource::<GameState>();
-                let ready = match state.server() {
-                    Some(server) => server.next_tick_ready(),
-                    None => state.ls.next_tick_ready(),
-                };
-                if !ready {
+                if !state.server().expect("server_auth ⇒ a server").next_tick_ready() {
                     break;
                 }
             }
-            // Capture the client's pre-step state as the interpolation source — both arms render
-            // from the client sim (server-auth applies INTO it; legacy steps it).
+            // Capture the client's pre-step state as the interpolation source (the server applies
+            // INTO it — the local client renders the snapshot, never stepping a sim of its own).
             {
                 let mut state = world.non_send_resource_mut::<GameState>();
                 state.prev = SimSnapshot::capture(&state.ls);
             }
 
-            if role == PeerRole::ServerAuth {
+            {
                 // Pump this tick's crab physics, read the resulting pose, and aim the crab at the
-                // AUTHORITATIVE server sim's nearest living player (pre-step, exactly where
-                // `sync_external_crab` reads it on the legacy arm).
+                // AUTHORITATIVE server sim's nearest living player (pre-step).
                 let crab_pose = if armed {
                     let steps = cadence.steps_for_next_tick();
                     pump_fixed_steps(world, steps);
@@ -980,10 +888,8 @@ pub(super) fn drive_lockstep(
                     armed.then(|| crate::render::articulation::capture(world, snap.tick));
                 {
                     let state = world.non_send_resource::<GameState>();
-                    if let InputSource::Coordinated(c) = &state.input_source {
-                        // No-op for solo (no transport); fans out for a host.
-                        c.broadcast_step(&snap, articulation.as_ref());
-                    }
+                    // No-op for solo (no transport); fans out for a host.
+                    state.coord.broadcast_step(&snap, articulation.as_ref());
                 }
                 {
                     let mut state = world.non_send_resource_mut::<GameState>();
@@ -999,40 +905,7 @@ pub(super) fn drive_lockstep(
                         .pos();
                     restart_crab_to_spawn(world, spawn);
                 }
-                // No peer cross-check on the authoritative path (the host IS the source of truth);
-                // faults only exist on the legacy peer-symmetric arm below.
-            } else {
-                // LEGACY arm: the client steps its own lockstep (remote client / scripted screenshot).
-                if armed {
-                    let steps = cadence.steps_for_next_tick();
-                    pump_fixed_steps(world, steps);
-                    // Push the freshly-stepped body's pose + weights-folded digest + refresh the
-                    // hunted player — the shared handshake (one source with the headless probe).
-                    world.resource_scope(
-                        |world, mut bridge: Mut<crate::external_crab::ExternalCrabBridge>| {
-                            let mut state = world.non_send_resource_mut::<GameState>();
-                            crate::external_crab::sync_external_crab(&mut state.ls, &mut bridge);
-                        },
-                    );
-                    if let Some(pose) = read_vehicle_pose(world) {
-                        world.resource_mut::<LocalVehicle>().update_pose(pose);
-                    }
-                }
-                let (tick_faults, restarted) = {
-                    let mut state = world.non_send_resource_mut::<GameState>();
-                    let before = state.ls.sim().tick();
-                    let faults = state.ls.advance_one().expect("next_tick_ready was true");
-                    let restarted = state.ls.sim().tick() < before;
-                    if restarted {
-                        *cadence = PhysicsCadence::default();
-                    }
-                    (faults, restarted)
-                };
-                if restarted && armed {
-                    let spawn = world.non_send_resource::<GameState>().ls.sim().crab().pos();
-                    restart_crab_to_spawn(world, spawn);
-                }
-                report_faults(&tick_faults, &mut total_desyncs, &tel);
+                // No peer cross-check on the authoritative path — the host IS the source of truth.
             }
         }
 
@@ -1045,7 +918,8 @@ pub(super) fn drive_lockstep(
                     let state = world.non_send_resource::<GameState>();
                     *next_tel_tick =
                         (state.ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
-                    t.send(TelemetryEvent::tick(state.ls.sim(), *total_desyncs, roster_len));
+                    // Host-authoritative: no peer cross-check, so the desync count is always 0.
+                    t.send(TelemetryEvent::tick(state.ls.sim(), 0, roster_len));
                     // The input the SIM actually applied this tick (neutral while piloting).
                     t.send(TelemetryEvent::input(issue_tick, sim_input));
                 }
@@ -1125,6 +999,5 @@ mod tests {
             !PeerRole::RemoteAdopt.can_pilot(),
             "a remote client pumps no physics ⇒ no craft can spawn ⇒ cannot pilot yet"
         );
-        assert!(!PeerRole::Scripted.can_pilot(), "the scripted harness has no live avatar");
     }
 }

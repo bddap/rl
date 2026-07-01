@@ -48,7 +48,7 @@ use crab_world::controls::{
 use crate::cadence::PhysicsCadence;
 use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::lockstep::{Lockstep, TickMsg};
-use crate::net_loop::{Coordinator, Exchanged, NetDriver, PeerMsg};
+use crate::net_loop::{Coordinator, Exchanged, NetDriver};
 use crate::sim::{
     CRAB_SCALE, Crab, Input, Outcome, Player, PlayerId, PlayerStatus, Pos, UNIT, buttons, trig,
     trig_client,
