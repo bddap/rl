@@ -141,8 +141,8 @@ impl Beat {
     /// deduped id bytes so it is independent of insertion order — the same members always hash
     /// the same on every peer. FNV-1a over the raw 32-byte ids: this is an agreement check
     /// among cooperating LAN peers, not an adversarial digest, so a fast non-cryptographic hash
-    /// is the right tool (a collision would at worst admit a wrong freeze, which the post-freeze
-    /// lockstep hash cross-check still catches).
+    /// is the right tool (a collision would at worst admit a wrong freeze, which then surfaces
+    /// as a roster/id-assignment disagreement the moment the round forms).
     pub fn roster_hash(&self) -> u64 {
         roster_hash(&self.members)
     }

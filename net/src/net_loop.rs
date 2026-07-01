@@ -3,9 +3,9 @@
 //! [`transport::Session`] is async (tokio); the deterministic lockstep driver and
 //! the Bevy render loop are sync and own the main thread. [`NetDriver`] bridges the
 //! two: it holds a tokio runtime + the session and exposes non-blocking calls a per-frame
-//! system uses to play either server role — the host relays clients' inputs into its
-//! [`Server`] and broadcasts the assembled sets, a client ships its input up and drains the
-//! sets down. [`Coordinator`] wraps that into the single per-tick [`Coordinator::exchange`]
+//! system uses to play either role — the host drains clients' inputs into its [`Server`]
+//! and broadcasts the authoritative [`CoreSnapshot`] it steps, a client ships its input up
+//! and adopts the snapshots down. [`Coordinator`] wraps that into the single per-tick [`Coordinator::exchange`]
 //! every driver calls, so solo / host / client are one path (rl#151). No determinism lives
 //! here; it is pure I/O plumbing (the same split the netcode draws between [`transport`] and
 //! [`crate::lockstep`]/[`crate::server`]).
@@ -99,9 +99,12 @@ pub struct NetDriver {
 }
 
 /// The result of [`Coordinator::exchange`]: on a remote client, the host-authoritative game STATE it
-/// drained this tick (snapshots + render articulation) to adopt. The solo/host arm returns these
-/// empty — its own server is the source of truth and it steps + broadcasts state itself. Roster
-/// changes ride each [`CoreSnapshot`]'s `roster`, not a separate channel.
+/// drained this tick (snapshots + render articulation) to adopt — grouped so the single inbox drain
+/// ([`NetDriver::drain_server_down`]) yields them together without one frame kind starving another.
+/// The solo/host arm returns these empty — its own server is the source of truth and it steps +
+/// broadcasts state itself. Roster changes ride each [`CoreSnapshot`]'s `roster`, not a separate
+/// channel.
+#[derive(Default)]
 pub struct Exchanged {
     /// Host-authoritative game states this remote client drained (rl#151 increment 2 windowed):
     /// the driver applies the highest `tick` via [`Lockstep::apply_core_snapshot`] instead of
@@ -245,8 +248,8 @@ impl NetDriver {
     /// aimed at us is logged LOUD (an established client should never get one), never silently
     /// eaten. Drained ONCE so no frame kind starves another; latest-wins ordering (highest `tick`)
     /// is the caller's to apply.
-    pub fn drain_server_down(&mut self) -> ServerDown {
-        let mut down = ServerDown::default();
+    pub fn drain_server_down(&mut self) -> Exchanged {
+        let mut down = Exchanged::default();
         while let Some(from) = self.session.try_recv() {
             match from.msg {
                 PeerWire::Snapshot(snap) => down.snapshots.push(snap),
@@ -259,18 +262,6 @@ impl NetDriver {
         }
         down
     }
-}
-
-/// Everything a windowed client drained from the server this frame (rl#151 increment 2 windowed).
-/// The client adopts the newest [`CoreSnapshot`] and renders the newest [`CrabArticulation`]
-/// (latest-wins by `tick`). Grouped so the single inbox drain yields them together without one
-/// frame kind starving another.
-#[derive(Default)]
-pub struct ServerDown {
-    /// Host-authoritative game states, in arrival order (the caller applies the highest `tick`).
-    pub snapshots: Vec<CoreSnapshot>,
-    /// Render-only crab poses, in arrival order (the caller renders the highest `tick`).
-    pub articulations: Vec<CrabArticulation>,
 }
 
 /// One peer's per-tick input coordination — the server-coordinated replacement for the deleted P2P
@@ -350,21 +341,14 @@ impl Coordinator {
                 // The host broadcasts the authoritative snapshot + articulation from the driver, the
                 // moment it steps each tick (see `Coordinator::broadcast_step`), so a client renders
                 // state rather than re-stepping inputs. `sets` feed THIS server's own step queue.
-                Exchanged {
-                    snapshots: Vec::new(),
-                    articulations: Vec::new(),
-                }
+                Exchanged::default()
             }
             Coordinator::Client { net } => {
                 // Host-authoritative (rl#151 increment 2 windowed): ship our input UP and drain the
                 // host's STATE down (snapshots + render articulation), never an input set to re-step.
                 // The driver applies the newest snapshot to its sim and renders the newest articulation.
                 net.send_to_server(&msg);
-                let down = net.drain_server_down();
-                Exchanged {
-                    snapshots: down.snapshots,
-                    articulations: down.articulations,
-                }
+                net.drain_server_down()
             }
         }
     }
