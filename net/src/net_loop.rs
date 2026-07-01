@@ -98,17 +98,15 @@ pub struct NetDriver {
     asset_digest: u64,
 }
 
-/// The result of [`Coordinator::exchange`]: the OTHER players' inputs to record this tick, plus any
-/// roster CHANGES the local [`Lockstep`] must schedule (a mid-game join the host admitted or a
-/// client learned over the wire). Stage 3 (rl#151): the driver applies each change via
-/// [`Lockstep::schedule_roster_change`] so every peer rebuilds the round at the same boundary.
+/// The result of [`Coordinator::exchange`]: on a remote client, the host-authoritative game STATE it
+/// drained this tick (snapshots + render articulation) to adopt; plus any roster CHANGES the client
+/// learned over the wire (Stage 3, rl#151). The solo/host arm returns these empty — its own server is
+/// the source of truth and it steps + broadcasts state itself.
 pub struct Exchanged {
-    pub peer_msgs: Vec<PeerMsg>,
     pub roster_changes: Vec<crate::server::Admission>,
     /// Host-authoritative game states this remote client drained (rl#151 increment 2 windowed):
     /// the driver applies the highest `tick` via [`Lockstep::apply_core_snapshot`] instead of
-    /// stepping its own sim. Empty on the solo/host arm (its client reads the server it runs) and
-    /// on the scripted harness.
+    /// stepping its own sim. Empty on the solo/host arm (its client reads the server it runs).
     pub snapshots: Vec<CoreSnapshot>,
     /// Render-only crab poses this remote client drained, beside the snapshots (rl#151 increment 2
     /// windowed): the driver stashes the highest `tick` for the render-side apply. Empty off the
@@ -373,18 +371,16 @@ impl Coordinator {
                     .as_mut()
                     .map(|net| admit_joiners(server, net, joins))
                     .unwrap_or_default();
-                let (sets, peer_msgs) = server::host_assemble(server, me, msg, remote);
+                let sets = server::host_assemble(server, me, msg, remote);
                 // Queue the assembled sets for THIS server's authoritative step (rl#151 increment 1):
                 // the windowed driver pumps each tick's crab physics then calls `step_next`. Only the
-                // `Coordinator` path enqueues — the headless `game net` host assembles + steps its own
-                // lockstep directly, so it never grows this queue.
+                // `Coordinator` path enqueues — the headless `game net` host steps straight off
+                // `next_tick_ready`, so it never grows this queue.
                 server.enqueue_for_step(&sets);
-                // The host no longer fans the input SETS down (rl#151 increment 2 windowed): it
-                // broadcasts the authoritative snapshot + articulation from the driver, the moment
-                // it steps each tick (see `Coordinator::broadcast_step`), so a client renders state
-                // rather than re-stepping inputs. `sets` still feed THIS server's own step queue.
+                // The host broadcasts the authoritative snapshot + articulation from the driver, the
+                // moment it steps each tick (see `Coordinator::broadcast_step`), so a client renders
+                // state rather than re-stepping inputs. `sets` feed THIS server's own step queue.
                 Exchanged {
-                    peer_msgs,
                     roster_changes,
                     snapshots: Vec::new(),
                     articulations: Vec::new(),
@@ -392,13 +388,11 @@ impl Coordinator {
             }
             Coordinator::Client { net } => {
                 // Host-authoritative (rl#151 increment 2 windowed): ship our input UP and drain the
-                // host's STATE down (snapshots + render articulation), never an input set to
-                // re-step. `peer_msgs` stays empty — the client records no peer inputs; the driver
-                // applies the newest snapshot to its sim and renders the newest articulation.
+                // host's STATE down (snapshots + render articulation), never an input set to re-step.
+                // The driver applies the newest snapshot to its sim and renders the newest articulation.
                 net.send_to_server(&msg);
                 let down = net.drain_server_down();
                 Exchanged {
-                    peer_msgs: Vec::new(),
                     roster_changes: down.roster_changes,
                     snapshots: down.snapshots,
                     articulations: down.articulations,
@@ -1521,126 +1515,6 @@ mod tests {
         s2.shutdown().await;
     }
 
-    /// END-TO-END two-peer MATCH START over real iroh QUIC: a host (the PlayerId-0 server) and a
-    /// remote client, meshed by direct dial, form the match and then run the ACTUAL per-tick
-    /// input exchange — client ships its input UP, host assembles + broadcasts the complete
-    /// `TickSet` DOWN — and BOTH sims must advance well past tick 0. This is the regression guard
-    /// for the "MP match won't start / gray screen" class (rl#166): the gray screen is the sim
-    /// stuck at tick 0 because the remote client never gets a usable tickset. The wire calls here
-    /// (`host_assemble`/`broadcast` on the host, `send`/`unpack_tickset` on the client)
-    /// are exactly what the windowed `Coordinator::exchange` wraps, so a stall here is the stall a
-    /// real joiner would see. `#[ignore]` because it binds real UDP sockets.
-    #[tokio::test]
-    #[ignore = "binds real iroh UDP endpoints; run explicitly with --ignored"]
-    async fn two_peers_start_a_match_and_both_advance_over_iroh() {
-        let mut sh = transport::start_session().await.expect("start host");
-        let mut sc = transport::start_session().await.expect("start client");
-        let ha = sh.local_addr();
-        // Mesh by DIRECT dial (mDNS is flaky on a loopback/CI host); one dial orients the link.
-        sc.connect_direct(ha).await.expect("client -> host");
-
-        // Form the SAME match on both, concurrently (timer-closed barrier, no lobby).
-        let (rh, rc) = tokio::join!(
-            form_match(&mut sh, 1, 2, None, None, 0, 0),
-            form_match(&mut sc, 1, 2, None, None, 0, 0),
-        );
-        let agreed = |r: Result<Formation>, who: &str| match r.expect(who) {
-            Formation::Agreed(f) => f,
-            Formation::Alone => panic!("{who}: fell back to solo despite a peer being present"),
-            Formation::Cancelled => panic!("{who}: cancelled despite no lobby control"),
-        };
-        let (f0, f1) = (agreed(rh, "peer A forms"), agreed(rc, "peer B forms"));
-        assert_eq!(f0.id_map, f1.id_map, "both peers must freeze the same roster");
-        let all_ids: Vec<PlayerId> = f0.id_map.values().copied().collect();
-        let server_eid = server_endpoint(&f0.id_map);
-
-        // PlayerId is assigned by sorted endpoint id, not who dialed — so EITHER session may be
-        // the host (PlayerId 0). Drive each peer by its REAL role: the host runs the Server ledger
-        // + steps its own lockstep; the remote client ships its input up and applies the ticksets
-        // the host broadcasts down (the legacy peer-symmetric arm increment 1 leaves live).
-        struct Peer {
-            session: transport::Session,
-            ls: Lockstep,
-            id_map: std::collections::BTreeMap<EndpointId, PlayerId>,
-            me: PlayerId,
-            server: Option<crate::server::Server>,
-        }
-        let mk = |session: transport::Session, f: Frozen| {
-            let ls = Lockstep::new(0, &all_ids, f.me);
-            let server = (f.me == PlayerId(0)).then(|| {
-                let mut s = crate::server::Server::new(&all_ids, ls.sim().clone());
-                s.seed_early(&early_peer_msgs(&f));
-                s
-            });
-            Peer { session, ls, id_map: f.id_map, me: f.me, server }
-        };
-        let mut a = mk(sh, f0);
-        let mut b = mk(sc, f1);
-
-        // One real-wire tick for one peer: ingest, exchange through the server, advance.
-        async fn step(p: &mut Peer, server_eid: EndpointId) {
-            use crate::sim::Input;
-            let input = Input::from_axes(1.0, 0.0);
-            if let Some(server) = p.server.as_mut() {
-                let mut remote: Vec<PeerMsg> = Vec::new();
-                while let Some(m) = p.session.try_recv() {
-                    if let (transport::PeerWire::Tick(msg), Some(&pid)) =
-                        (m.msg, p.id_map.get(&m.from))
-                    {
-                        remote.push(PeerMsg { pid, msg });
-                    }
-                }
-                let msg = p.ls.submit_local_input(input);
-                let (sets, peer_msgs) =
-                    crate::server::host_assemble(server, p.me, msg, remote);
-                for s in &sets {
-                    p.session.broadcast(s).await;
-                }
-                for pm in peer_msgs {
-                    let _ = p.ls.record_remote(pm.pid, pm.msg);
-                }
-            } else {
-                let mut sets: Vec<crate::server::TickSet> = Vec::new();
-                while let Some(m) = p.session.try_recv() {
-                    if let transport::PeerWire::TickSet(set) = m.msg {
-                        sets.push(set);
-                    }
-                }
-                let msg = p.ls.submit_local_input(input);
-                p.session.send(server_eid, &msg).await;
-                for pm in sets.iter().flat_map(|s| crate::server::unpack_tickset(s, p.me)) {
-                    let _ = p.ls.record_remote(pm.pid, pm.msg);
-                }
-            }
-            while p.ls.advance_one().is_some() {}
-        }
-
-        // Drive ~150 ticks of real exchange, interleaved on a shared ticker so the wire moves.
-        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(8));
-        for _ in 0..150 {
-            ticker.tick().await;
-            step(&mut a, server_eid).await;
-            step(&mut b, server_eid).await;
-        }
-
-        // The MATCH STARTED: both peers left tick 0 and stayed roughly in step. A gray-screen
-        // stall would pin the client (or both) at/near tick 0 (only the INPUT_DELAY warmup).
-        let (host, client) = if a.me == PlayerId(0) { (&a, &b) } else { (&b, &a) };
-        assert!(
-            host.ls.sim().tick() > 60,
-            "host stalled at tick {} — match never started",
-            host.ls.sim().tick()
-        );
-        assert!(
-            client.ls.sim().tick() > 60,
-            "client stalled at tick {} — the joiner never got usable ticksets (gray screen)",
-            client.ls.sim().tick()
-        );
-
-        a.session.shutdown().await;
-        b.session.shutdown().await;
-    }
-
     /// The solo-fallback decision, exhaustively and deterministically (no socket, no real
     /// clock — the policy is the pure [`is_alone_now`] predicate). Each of the four
     /// conditions that must ALL hold is falsified in isolation to prove it's load-bearing.
@@ -1705,10 +1579,10 @@ mod tests {
         );
     }
 
-    /// END-TO-END solo through the new server-coordinated path: a solo [`Coordinator`] (an internal
-    /// server with a roster of one, no transport) drives a real [`Lockstep`] tick-for-tick. Proves
-    /// solo runs the SAME `exchange` machinery as a hosted match — the SP=MP-uniformity gate
-    /// (rl#151), with no special-case solo input path left behind.
+    /// END-TO-END solo through the host-authoritative path: a solo [`Coordinator`] (an internal
+    /// server with a roster of one, no transport) — inputs go UP, the server steps its OWN sim, and
+    /// the local [`Lockstep`] ADOPTS the emitted snapshot. Proves solo runs the SAME `exchange` +
+    /// step machinery as a hosted match (SP=MP uniformity, rl#151), with no special-case solo path.
     #[test]
     fn solo_round_advances_through_the_coordinator() {
         use crate::sim::Input;
@@ -1719,17 +1593,24 @@ mod tests {
         let submits = 5u64;
         for _ in 0..submits {
             let msg = ls.submit_local_input(Input::from_axes(1.0, 0.0));
-            // The input goes UP to the internal server and the assembled set comes back DOWN; with a
-            // roster of one there are no OTHER players' inputs to record.
+            // The input goes UP to the internal server; with a roster of one there are no OTHER
+            // players' inputs and no joins.
             let exch = coord.exchange(me, msg);
-            assert!(exch.peer_msgs.is_empty(), "solo has no remote players");
             assert!(exch.roster_changes.is_empty(), "solo never admits a joiner");
-            assert!(ls.try_advance().is_empty(), "solo can't desync");
+            // The server steps its OWN sim and the local client ADOPTS each emitted snapshot — the
+            // windowed ServerAuth arm's flow, minus the bevy crab pump (no rapier body here).
+            let server = coord.server_mut().expect("solo runs an internal server");
+            while server.next_tick_ready() {
+                let bytes = server.step_next(None);
+                let snap =
+                    crate::snapshot::CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes");
+                ls.apply_core_snapshot(snap);
+            }
         }
         assert_eq!(
             ls.sim().tick(),
             crate::lockstep::INPUT_DELAY + submits,
-            "solo advances one tick per submit through the server-coordinated path"
+            "solo advances one tick per submit through the host-authoritative path"
         );
     }
 }

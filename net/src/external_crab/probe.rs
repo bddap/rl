@@ -1,16 +1,15 @@
 //! Headless verification harness for the external NN crab (no window / GPU / display) — the
-//! GCR #82 determinism + walk probes, kept OUT of the production bridge ([`super`]) so the
-//! shipping real-Sally MP path stays minimal. Two drivers, both stepping the SAME windowless
-//! bot+physics stack the production crab runs under ([`headless_nn_crab_app`]): a single-peer
-//! walk/reproducibility probe ([`run_headless_probe`]) and the decisive two-peer cross-peer
-//! determinism gate ([`run_cross_peer_probe`]). Nothing in the production bridge depends on this
-//! module — the arrow points one way (harness → bridge), via the parent's [`sync_external_crab`]
-//! / [`integrate_crab`] / [`hash_crab_physics`] and the [`ExternalCrabPlugin`] it arms.
+//! single-peer determinism + walk/stability probes, kept OUT of the production bridge ([`super`]) so
+//! the shipping real-Sally MP path stays minimal. Both drivers step the SAME windowless bot+physics
+//! stack the production crab runs under ([`headless_nn_crab_app`]): a walk/reproducibility probe
+//! ([`run_headless_probe`]) and a vehicle-stability probe ([`run_vehicle_stability_probe`]). Nothing
+//! in the production bridge depends on this module — the arrow points one way (harness → bridge), via
+//! the parent's [`sync_external_crab`] / [`integrate_crab`] / [`hash_crab_physics`] and the
+//! [`ExternalCrabPlugin`] it arms.
 
 use bevy::prelude::*;
 
-use crate::lockstep::Lockstep;
-use crate::sim::{Input, PlayerId, Pos, UNIT};
+use crate::sim::{Input, PlayerId, Pos, Sim, UNIT};
 use crab_world::bot::body::{CrabCarapace, CrabEnvId};
 use crab_world::bot::sensor::CrabTargets;
 
@@ -40,12 +39,11 @@ pub struct ProbeSample {
     pub min_claw_to_target_m: f32,
 }
 
-/// Probe driver state: the lockstep sim driven by hand (outside Bevy's schedules) so the
-/// harness can step it once per `app.update()`, in step with the one physics tick each
-/// update runs. Non-send because [`Lockstep`] owns a [`Sim`] whose hasher etc. need not
-/// be `Sync` here, and only the main thread drives it.
+/// Probe driver state: the [`Sim`] driven by hand (outside Bevy's schedules) so the harness can step
+/// it once per `app.update()`, in step with the one physics tick each update runs. Non-send because
+/// [`Sim`]'s hasher etc. need not be `Sync` here, and only the main thread drives it.
 struct ProbeDriver {
-    ls: Lockstep,
+    sim: Sim,
     samples: Vec<ProbeSample>,
     /// Log a sample every this-many sim ticks (keeps the output skimmable).
     log_every: u64,
@@ -67,19 +65,19 @@ fn probe_step(
 ) {
     // Push the crab body into the sim + refresh the hunted player — the SAME handshake the
     // windowed driver runs (one shared definition, no drift).
-    sync_external_crab(&mut driver.ls, &mut bridge);
-    let prey = driver.ls.sim().nearest_living_player_pos();
+    sync_external_crab(&mut driver.sim, &mut bridge);
+    let prey = driver.sim.nearest_living_player_pos();
 
-    // Local player holds still (neutral input) so the test isolates the CRAB's motion:
-    // the crab should close the gap on a stationary player. Single peer → its own input
-    // completes every tick.
-    driver.ls.submit_local_input(Input::from_axes(0.0, 0.0));
-    let _ = driver.ls.try_advance();
+    // Local player holds still (neutral input) so the test isolates the CRAB's motion: the crab
+    // should close the gap on a stationary player. Single peer, so a complete neutral map advances
+    // the sim one tick directly (no coordination — this is a determinism/walk probe, not a match).
+    let me = PlayerId(0);
+    driver.sim.step(&std::collections::BTreeMap::from([(me, Input::from_axes(0.0, 0.0))]));
 
     // Log periodically (and always at tick 1 so the start point is recorded).
-    let tick = driver.ls.sim().tick();
+    let tick = driver.sim.tick();
     if tick == 1 || tick.is_multiple_of(driver.log_every) {
-        let crab = driver.ls.sim().crab().pos();
+        let crab = driver.sim.crab().pos();
         let crab_x_m = crab.x as f32 / UNIT as f32;
         let crab_z_m = crab.z as f32 / UNIT as f32;
         let dist_to_prey_m = prey
@@ -89,7 +87,7 @@ fn probe_step(
                 (dx * dx + dz * dz).sqrt()
             })
             .unwrap_or(f32::NAN);
-        let state_hash = driver.ls.sim().state_hash();
+        let state_hash = driver.sim.state_hash();
 
         // Carapace arena pose (env 0) for the "is it walking?" diagnostic.
         let (carapace_arena_x, carapace_y, carapace_arena_z) = carapace_q
@@ -127,11 +125,10 @@ fn probe_step(
 
 /// Build the windowless bot+physics world the headless NN-crab probes step: the SAME stack
 /// the training/tests use ([`crab_world::bot::headless::headless_stack`], one crab in env 0) plus
-/// [`ExternalCrabPlugin`] (the policy + arena↔game bridge) with the crab ARMED. Shared by the
-/// single-peer [`run_headless_probe`] and the two-peer [`run_cross_peer_probe`] so both step the
-/// identical dynamics the policy trained under, with no GPU/display — one app-construction, no
-/// drift between the two harnesses (the manual's "one implementation per thing"). The caller owns
-/// the [`Lockstep`] driving and seeding; this only stands up the rapier NN body.
+/// [`ExternalCrabPlugin`] (the policy + arena↔game bridge) with the crab ARMED. Shared by the walk
+/// and vehicle-stability probes so both step the identical dynamics the policy trained under, with no
+/// GPU/display — one app-construction, no drift (the manual's "one implementation per thing"). The
+/// caller owns the [`Sim`] driving and seeding; this only stands up the rapier NN body.
 fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> bevy::app::App {
     use crab_world::bot::headless::{
         HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
@@ -169,15 +166,13 @@ fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> be
 }
 
 /// Run the NN crab headlessly for `ticks` sim steps and return the logged samples, via
-/// [`headless_nn_crab_app`] + a hand-driven lockstep — so the crab steps the exact dynamics the
-/// policy trained under, with no GPU/display. `checkpoint_dir` is the trained policy; `seed` seeds
-/// the round (same seed twice ⇒ identical samples, the determinism check). The local player holds
-/// still so a shrinking `dist_to_prey_m` proves the crab walks toward it under the policy.
+/// [`headless_nn_crab_app`] + a hand-driven [`Sim`] — so the crab steps the exact dynamics the policy
+/// trained under, with no GPU/display. `checkpoint_dir` is the trained policy; `seed` seeds the round
+/// (same seed twice ⇒ identical samples, the determinism check). The local player holds still so a
+/// shrinking `dist_to_prey_m` proves the crab walks toward it under the policy.
 ///
-/// NOTE: this single-peer probe steps the body one physics step per `app.update()` (a
-/// walking/reproducibility sanity check, where the absolute gait speed doesn't matter). The
-/// cross-peer determinism GATE [`run_cross_peer_probe`] instead steps at the PRODUCTION
-/// [`crate::cadence::PhysicsCadence`] (2–3 steps/tick), matching what networked peers run.
+/// NOTE: this probe steps the body one physics step per `app.update()` — a walking/reproducibility
+/// sanity check, where the absolute gait speed doesn't matter.
 pub fn run_headless_probe(
     checkpoint_dir: &std::path::Path,
     seed: u64,
@@ -185,19 +180,18 @@ pub fn run_headless_probe(
     log_every: u64,
 ) -> Vec<ProbeSample> {
     let me = PlayerId(0);
-    let ls = Lockstep::new(seed, &[me], me);
-    let crab_spawn = ls.sim().crab().pos();
+    let mut sim = Sim::new(seed, &[me]);
+    let crab_spawn = sim.crab().pos();
     // The crab is externally driven for the whole probe (we own its position). Seed the pose with
     // the crab's CURRENT spawn pose/yaw — writing back what's already there, so this is a no-op on
     // sim state. Seed with a zero digest; the first post-step `hash_crab_physics` fills it before
-    // the first `sync_external_crab` push, so the seeded value is never the one cross-checked.
-    let mut ls = ls;
-    let crab = ls.sim().crab();
-    ls.set_external_crab_pose(crab.pos(), crab.yaw(), 0);
+    // the first `sync_external_crab` push, so the seeded value is never the one used.
+    let crab = sim.crab();
+    sim.set_external_crab_pose(crab.pos(), crab.yaw(), 0);
 
     let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
     app.insert_non_send_resource(ProbeDriver {
-        ls,
+        sim,
         samples: Vec::new(),
         log_every: log_every.max(1),
     });
@@ -264,14 +258,14 @@ pub fn run_vehicle_stability_probe(
     use crab_world::vehicle::{VehicleKind, spawn_ram_vehicle};
 
     let me = PlayerId(0);
-    let mut ls = Lockstep::new(seed, &[me], me);
-    let crab_spawn = ls.sim().crab().pos();
-    let crab = ls.sim().crab();
-    ls.set_external_crab_pose(crab.pos(), crab.yaw(), 0);
+    let mut sim = Sim::new(seed, &[me]);
+    let crab_spawn = sim.crab().pos();
+    let crab = sim.crab();
+    sim.set_external_crab_pose(crab.pos(), crab.yaw(), 0);
 
     let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
     app.insert_non_send_resource(ProbeDriver {
-        ls,
+        sim,
         samples: Vec::new(),
         log_every: 1,
     });
@@ -287,7 +281,7 @@ pub fn run_vehicle_stability_probe(
     let ram_tick = app
         .world()
         .get_non_send_resource::<ProbeDriver>()
-        .map(|d| d.ls.sim().tick())
+        .map(|d| d.sim.tick())
         .unwrap_or(warmup);
 
     // Drop a ram vehicle beside the crab at leg height, moving INTO it — a lateral shove of the

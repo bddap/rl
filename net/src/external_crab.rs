@@ -276,9 +276,9 @@ pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
 /// so the windowed driver
 /// ([`crate::render`]'s `drive_lockstep`) and the headless probe can't drift on the
 /// contract (the manual's "one implementation per thing").
-pub fn sync_external_crab(ls: &mut crate::lockstep::Lockstep, bridge: &mut ExternalCrabBridge) {
-    ls.set_external_crab_pose(bridge.world_pos(), bridge.yaw_turns(), bridge.phys_digest);
-    bridge.set_hunt_target(ls.sim().nearest_living_player_pos());
+pub fn sync_external_crab(sim: &mut crate::sim::Sim, bridge: &mut ExternalCrabBridge) {
+    sim.set_external_crab_pose(bridge.world_pos(), bridge.yaw_turns(), bridge.phys_digest);
+    bridge.set_hunt_target(sim.nearest_living_player_pos());
 }
 
 /// Recompute env 0's full rapier physics digest (every actuated body's pose+velocity bits,

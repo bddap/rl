@@ -37,7 +37,6 @@ use iroh_mdns_address_lookup::MdnsAddressLookup;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::lockstep::Fault;
 use crate::sim::{Input, Outcome, Sim};
 
 /// How many applied ticks between sampled telemetry snapshots. The high-frequency
@@ -136,8 +135,8 @@ pub enum TelemetryEvent {
         tick: u64,
         state_hash: u64,
     },
-    /// A lockstep fault (desync / unverifiable hash) the deck detected — the loud
-    /// failure lockstep exists to surface, mirrored to the collector immediately.
+    /// A fault a deck detected (e.g. the armed crab going non-finite, rl#137) — a loud failure
+    /// mirrored to the collector immediately so a remote operator sees it the instant it happens.
     Fault { msg: String },
 }
 
@@ -180,13 +179,6 @@ impl TelemetryEvent {
             outcome,
             tick: sim.tick(),
             state_hash: sim.state_hash(),
-        }
-    }
-
-    /// Build a [`Fault`](TelemetryEvent::Fault) from a lockstep [`Fault`].
-    pub fn fault(f: &Fault) -> Self {
-        TelemetryEvent::Fault {
-            msg: format!("{f:?}"),
         }
     }
 

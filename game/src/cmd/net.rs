@@ -211,7 +211,7 @@ async fn run_net(args: Args) -> Result<()> {
             // stepped — the SAME host-authoritative path the windowed driver runs (one stepper). A
             // client adopts exactly the state the host holds; there is no peer-symmetric self-step or
             // desync cross-check any more (the host IS the source of truth).
-            let (sets, _peer_msgs) = net::server::host_assemble(srv, me, msg, remote_inputs);
+            let sets = net::server::host_assemble(srv, me, msg, remote_inputs);
             srv.enqueue_for_step(&sets);
             // Headless: weights digest 0, no rapier body → the crab holds spawn, so no pose to inject.
             while srv.next_tick_ready() {
