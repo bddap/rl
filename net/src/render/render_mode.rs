@@ -65,9 +65,14 @@ fn manage_silhouette_visibility(
     armed: Option<Res<crate::external_crab::ExternalCrabArmed>>,
     mut q: Query<&mut Visibility, With<CrabAvatar>>,
 ) {
-    // net's single asset source is the global resolver (the silhouette runs without the bot stack,
-    // so it can't read the `CrabModelPath` BotPlugin resource; net never overrides it anyway).
-    let skin_is_the_crab = armed.is_some() && crab_world::bot::meshfit::model_path().is_some();
+    // net's single asset source is the global preflight verdict (the silhouette runs without the bot
+    // stack, so it can't read the `CrabModelPath` BotPlugin resource; net never overrides it anyway).
+    // The memoized `usable_model` verdict, NOT existence-only `model_path()`, so this per-frame guard
+    // agrees with `spawn_world`'s `have_model`: a present-but-broken glb is NOT the skin (the body
+    // fell back to the silhouette), so the silhouette must stay shown (bddap/rl#154). Memoized ⇒ this
+    // stays a cheap read every frame.
+    let skin_is_the_crab =
+        armed.is_some() && crab_world::mesh_fallback::usable_model_path().is_some();
     let want = if !skin_is_the_crab && mode.shows_mesh() {
         Visibility::Visible
     } else {

@@ -42,20 +42,26 @@ impl CrabAssets {
 /// reader — spooky action at a distance (a reader debugging "why is CRAB_MODEL_PATH nonsense?"
 /// had to find rl-demo's main). The explicit resource replaces that (bddap/rl#147).
 ///
-/// Defaults (FromWorld) to [`crate::bot::meshfit::model_path`], so a surface that does NOT override
-/// gets the live resolution unchanged. SCOPE: this resource is a `BotPlugin` resource — only present
-/// where the bot stack is. `net::render`'s collider silhouette runs WITHOUT that stack (the unarmed
-/// screenshot), so it reads the global [`crate::bot::meshfit::model_path`] directly; since net never
-/// overrides the resolver, its reads and this resource's default agree. Only a surface that
-/// actually preflights and overrides (today: rl-demo) needs the resource. Also distinct from the
-/// *world-render scale* question ("how big is the REAL crab?", `net::render::world_render_scale`),
-/// which always reads the real asset — a fallback render must not resize the world.
+/// Defaults (FromWorld) to the shared preflight verdict [`crate::mesh_fallback::usable_model_path`],
+/// so a present-but-unloadable glb resolves to `None` here (the honest fallback) instead of reaching
+/// `render_recipe`'s `.expect()` (bddap/rl#154). SCOPE: this resource is a `BotPlugin` resource —
+/// only present where the bot stack is. `net::render`'s collider silhouette runs WITHOUT that stack
+/// (the unarmed screenshot), so it reads the same [`crate::mesh_fallback::usable_model_path`] verdict
+/// directly; since net never overrides the resolver, its reads and this resource's default agree.
+/// rl-demo inserts its own `CrabModelPath` from the same verdict (it also needs the `Err` reason for
+/// its banner). The *world-render scale* question ("how big is the crab THIS run draws?",
+/// `net::render::world_render_scale`) reads the same verdict too, so on a broken glb it sizes the
+/// world to the fallback height that's actually rendered — render and scale can't disagree.
 #[derive(Resource, Clone)]
 pub struct CrabModelPath(pub Option<std::path::PathBuf>);
 
 impl FromWorld for CrabModelPath {
     fn from_world(_world: &mut World) -> Self {
-        Self(crate::bot::meshfit::model_path())
+        // The full preflight, NOT bare `model_path()`: a present-but-unloadable `sally.glb` resolves
+        // to `None` here so the body degrades to the fallback recipe instead of `render_recipe`'s
+        // `.expect()` firing (bddap/rl#154). This is the game's equivalent of rl-demo's explicit
+        // preflighted `CrabModelPath` insert — the same one verdict (`mesh_fallback::usable_model`).
+        Self(crate::mesh_fallback::usable_model_path())
     }
 }
 
@@ -64,10 +70,11 @@ impl FromWorld for CrabModelPath {
 /// [`CrabAssets`] (the spawned/skinned body, fed its [`CrabModelPath`]) and the integer-crab
 /// collider silhouette (`net::render::spawn_crab_silhouette`, fed `meshfit::model_path()`) both go
 /// through here, so the two can't draw different geometry from the same input. A present-but-broken
-/// model (`Some(p)` that loads to no recipe) makes the `expect` fire: callers that must not crash on
-/// a bad asset run the full [`crate::mesh_fallback::canonical_mesh_status`] preflight and pass `None`
-/// on failure, so a broken `Some` never reaches here (rl-demo does this + emits a LOUD OTEL error;
-/// see its `main`). No model at all falls back to the procedural stand-in here directly.
+/// model (`Some(p)` that loads to no recipe) would make the `expect` fire, so EVERY player-facing
+/// caller resolves its path through the full [`crate::mesh_fallback::usable_model`] preflight — game
+/// via [`CrabModelPath`], net's silhouette directly, rl-demo via its explicit insert — and passes
+/// `None` on failure. So a broken `Some` never reaches here and the `expect` guards a now-unreachable
+/// invariant (bddap/rl#154). No model at all falls back to the procedural stand-in here directly.
 pub fn render_recipe(model: Option<&std::path::Path>) -> RigRecipe {
     match model {
         Some(p) => LoadedModel::load(p)

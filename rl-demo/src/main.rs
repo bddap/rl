@@ -133,17 +133,15 @@ fn main() {
     // thing still forbidden is a SILENT skinless body (the silent-fallback bug — ships a
     // non-Sally crab with no signal). This is the explicit player-facing vs training split: the
     // headless trainer (`rl-train`) keeps the no-skin procedural body by design.
-    let mesh_status = crab_world::mesh_fallback::canonical_mesh_status();
-    // The crab mesh THIS run renders, decided here ONCE from the full preflight: the real Sally
-    // when usable, else `None` → the honest fallback. Inserted as `CrabModelPath` before `BotPlugin`
-    // (below) so the body, skin, and silhouette all flip together off this one explicit value — see
-    // `body::CrabModelPath` for why this replaces the old env-poison redirect. The physics bones are
-    // then made VISIBLE by booting the render-mode cycle in `colliders` (see `initial_render_mode`).
-    let mesh_state = crab_world::bot::body::CrabModelPath(if mesh_status.is_ok() {
-        crab_world::bot::meshfit::model_path()
-    } else {
-        None
-    });
+    // The crab mesh THIS run renders, decided ONCE from the shared full-preflight verdict
+    // (`usable_model`): the real Sally when usable, else `None` → the honest fallback. THE same
+    // verdict game/net read — rl-demo is not a second, hand-rolled copy of the load+recipe check.
+    // Inserted as `CrabModelPath` before `BotPlugin` (below) so the body, skin, and silhouette all
+    // flip together off this one explicit value — see `body::CrabModelPath` for why this replaces
+    // the old env-poison redirect. The physics bones are then made VISIBLE by booting the render-mode
+    // cycle in `colliders` (see `initial_render_mode`).
+    let mesh_state =
+        crab_world::bot::body::CrabModelPath(crab_world::mesh_fallback::usable_model_path());
 
     // OTEL/tracing: install the shared subscriber after `RUST_LOG` is final (above). The guard
     // must outlive the whole run, so it's bound here and dropped only when `main` returns.
@@ -155,7 +153,8 @@ fn main() {
     // on-screen banner (see the Demo arm). The owner's bug (rl#706) was exactly this: a fallback
     // he could SEE but not identify, so the failure must name itself on the screen he's looking
     // at, not only in a log he isn't.
-    let mesh_fallback_reason: Option<String> = mesh_status.err();
+    let mesh_fallback_reason: Option<String> =
+        crab_world::mesh_fallback::usable_model().as_ref().err().cloned();
     if let Some(reason) = &mesh_fallback_reason {
         // LOUD via telemetry (stderr + OTLP), shared with the game surface so both name the
         // missing Sally identically (rl#706).
