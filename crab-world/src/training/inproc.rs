@@ -66,7 +66,6 @@ use std::time::Instant;
 use bevy::prelude::*;
 use burn::module::Module;
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
-use tracing::error;
 
 use crate::TrainConfig;
 use crate::bot::brain::CrabBrain;
@@ -75,8 +74,8 @@ use super::algorithm::RolloutBuffer;
 use super::TrainBackend;
 use super::checkpoint::{CheckpointDir, TICK_WATERMARK_FILENAME};
 use super::curriculum::TargetBand;
-use super::normalizer::{NormalizerIncrement, NormalizerSnapshot};
-use super::systems::TrainingState;
+use super::normalizer::NormalizerSnapshot;
+use super::systems::{HorizonOutput, HorizonRequest, TrainingState};
 
 /// Recorder for the in-memory weight snapshot. The same precision settings the
 /// on-disk checkpoint (`BinFileRecorder<FullPrecisionSettings>`) uses, so a brain
@@ -283,31 +282,12 @@ struct RollRequest {
 /// to get the data and treats `Panicked` as a no-op (trains on the other threads).
 enum RollOutcome {
     Rolled {
-        /// Per-env rollout buffers (one per env; GAE never sweeps across envs). Each
-        /// carries its own GAE tail bootstrap (`RolloutBuffer::bootstrap`).
-        envs: Vec<RolloutBuffer>,
-        /// Per-horizon normalizer INCREMENT — only the observations this horizon saw,
-        /// so merging it into the master (which holds the baseline) never double-counts.
-        increment: NormalizerIncrement,
-        /// Rewards of episodes that finished during this horizon.
-        rewards: Vec<f32>,
-        /// Carapace planar drift-from-spawn this horizon as `(sum, count)` over
-        /// recording-env ticks; the learner aggregates across threads into a mean (the
-        /// walking diagnostic).
-        drift: (f64, u64),
-        /// This horizon's per-episode reach tally as `(reached, finished)`; the learner
-        /// pools it across threads for the log's reach fraction and the best-keeper's
-        /// solid-reach floor.
-        reach: (u64, u64),
-        /// Count of transitions this horizon whose progress term was dropped as non-physical
-        /// (bddap/rl#175); the learner sums it across threads and surfaces the total so a
-        /// silent reward dropout is visible. 0 on a healthy horizon.
-        glitch_drops: u64,
-        /// Count of non-finite (NaN/±inf) observation elements skipped from the normalizer this
-        /// horizon (bddap/rl#181); the learner sums it across threads and surfaces the total so a
-        /// NaN sensor/physics reading is visible. 0 on a healthy horizon.
-        nonfinite_obs: u64,
-        /// Physics ticks actually rolled this horizon.
+        /// Everything this horizon produced for the learner to merge, drained in one shot by
+        /// [`TrainingState::end_horizon`] (bddap/rl#165): per-env buffers, normalizer increment,
+        /// finished rewards, and the drift/reach/glitch/non-finite aggregates.
+        output: HorizonOutput,
+        /// Physics ticks actually rolled this horizon (the thread's odometer diff, measured here
+        /// rather than drained from state).
         ticks: u64,
     },
     /// The roll unwound and the thread rebuilt its App; it contributes nothing this
@@ -423,33 +403,29 @@ fn roll_with_recovery(
     }
 }
 
-/// Roll exactly `horizon` ticks with the request's snapshot, then drain. Loads the
-/// snapshot weights + master normalizer into the thread's `TrainingState`, steps
-/// the App one tick per `update()` (the App's clock advances exactly one fixed dt
-/// per update), and reads the per-env buffers + increment + finished rewards out.
+/// Roll exactly `horizon` ticks with the request's snapshot, then drain. `begin_horizon` loads
+/// the snapshot weights + master normalizer into the thread's `TrainingState` (refusing the
+/// horizon on a load failure), the App steps one tick per `update()` (its clock advances exactly
+/// one fixed dt per update), and `end_horizon` drains the whole [`HorizonOutput`] back out.
 fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutcome {
     {
         let mut st = app
             .world_mut()
             .get_non_send_resource_mut::<TrainingState>()
             .expect("rollout TrainingState");
-        // Apply the snapshot, and REFUSE the horizon if either the brain or the normalizer
-        // failed to load: rolling on a stale brain ships off-policy samples and rolling on a
-        // mis-normalized obs corrupts the inputs, both of which the learner can't distinguish
-        // from honest data. Fail loud and contribute nothing instead (bddap/rl#177). Both are
-        // attempted (not short-circuited) so the log names every failing component.
-        let brain_ok = st.load_brain_bytes(&req.brain_bytes);
-        let normalizer_ok = st.set_normalizer((*req.normalizer).clone());
-        if !brain_ok || !normalizer_ok {
-            error!(
-                "rollout thread: snapshot load failed (brain_ok={brain_ok}, normalizer_ok={normalizer_ok}); \
-                 refusing this horizon rather than rolling a stale/off-policy or mis-normalized policy"
-            );
+        // Open the horizon behind the single `begin_horizon` protocol method (the load→set→reset
+        // sequence lives in systems.rs, not here). REFUSE the horizon if the snapshot did not load
+        // — rolling a stale/off-policy brain or mis-normalized obs ships data the learner can't
+        // tell from honest, so fail loud and contribute nothing (bddap/rl#177).
+        let opened = st.begin_horizon(HorizonRequest {
+            brain_bytes: &req.brain_bytes,
+            normalizer: (*req.normalizer).clone(),
+            band: req.band,
+            log_std_floor: req.log_std_floor,
+        });
+        if !opened {
             return RollOutcome::SnapshotLoadFailed;
         }
-        st.set_band(req.band);
-        st.set_log_std_floor(req.log_std_floor);
-        st.reset_horizon_counter();
     }
 
     let start = horizon_tick(app);
@@ -462,14 +438,9 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
         .world_mut()
         .get_non_send_resource_mut::<TrainingState>()
         .expect("rollout TrainingState");
+    // Close the horizon: one call moves out every per-horizon artifact (bddap/rl#165).
     RollOutcome::Rolled {
-        envs: st.take_rollouts(),
-        increment: st.normalizer_increment(),
-        rewards: st.drain_finished_episode_rewards(),
-        drift: st.drain_drift(),
-        reach: st.drain_reach(),
-        glitch_drops: st.drain_progress_glitches(),
-        nonfinite_obs: st.drain_nonfinite_obs(),
+        output: st.end_horizon(),
         ticks: rolled,
     }
 }
@@ -494,8 +465,9 @@ fn warm_up_app(app: &mut App) {
         .world_mut()
         .get_non_send_resource_mut::<TrainingState>()
         .expect("rollout TrainingState");
-    let _ = st.take_rollouts();
-    st.drain_finished_episode_rewards();
+    // Discard everything the warm-up recorded so the first real horizon starts clean — the same
+    // drain the horizon end does, run for its side effect only.
+    let _ = st.end_horizon();
 }
 
 /// Build one rollout thread's headless App: the production headless training stack
@@ -641,28 +613,19 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
     };
     for r in results {
         match r {
-            RollOutcome::Rolled {
-                envs,
-                increment,
-                rewards,
-                drift,
-                reach,
-                glitch_drops,
-                nonfinite_obs,
-                ticks,
-            } => {
+            RollOutcome::Rolled { output, ticks } => {
                 merged.ticks += ticks;
-                state.merge_normalizer(&increment);
-                for reward in rewards {
+                state.merge_normalizer(&output.increment);
+                for reward in output.rewards {
                     state.record_episode_reward(reward);
                 }
-                merged.drift.0 += drift.0;
-                merged.drift.1 += drift.1;
-                merged.reach.0 += reach.0;
-                merged.reach.1 += reach.1;
-                merged.glitch_drops += glitch_drops;
-                merged.nonfinite_obs += nonfinite_obs;
-                for buf in envs {
+                merged.drift.0 += output.drift.0;
+                merged.drift.1 += output.drift.1;
+                merged.reach.0 += output.reach.0;
+                merged.reach.1 += output.reach.1;
+                merged.glitch_drops += output.glitch_drops;
+                merged.nonfinite_obs += output.nonfinite_obs;
+                for buf in output.envs {
                     merged.samples += buf.len() as u64;
                     merged.rollouts.push(buf);
                 }
@@ -1048,6 +1011,7 @@ mod tests {
     // `ppo_update_core` math, not a second production path.
     use crate::bot::sensor::OBS_SIZE;
     use crate::training::checkpoint::crab_optimizer;
+    use crate::training::normalizer::NormalizerIncrement;
     use crate::training::update::ppo_update_core;
 
     /// A zero-count normalizer increment: a fresh accumulator's delta. Used to fill a
@@ -1201,22 +1165,24 @@ mod tests {
         let r2 = roll_with_recovery(
             &mut app,
             |_app| RollOutcome::Rolled {
-                envs: vec![RolloutBuffer::new()],
-                increment: empty_normalizer_increment(),
-                rewards: vec![1.5],
-                drift: (0.0, 0),
-                reach: (0, 0),
-                glitch_drops: 0,
-                nonfinite_obs: 0,
+                output: HorizonOutput {
+                    envs: vec![RolloutBuffer::new()],
+                    increment: empty_normalizer_increment(),
+                    rewards: vec![1.5],
+                    drift: (0.0, 0),
+                    reach: (0, 0),
+                    glitch_drops: 0,
+                    nonfinite_obs: 0,
+                },
                 ticks: 64,
             },
             || panic!("rebuild must NOT run on a successful roll"),
         );
-        let RollOutcome::Rolled { ticks, rewards, .. } = r2 else {
+        let RollOutcome::Rolled { output, ticks } = r2 else {
             panic!("the recovered roll must succeed (Rolled), got Panicked");
         };
         assert_eq!(ticks, 64, "the recovered roll's result must pass through");
-        assert_eq!(rewards, vec![1.5]);
+        assert_eq!(output.rewards, vec![1.5]);
     }
 
     /// Merging a zero-count increment must leave the master normalizer byte-unchanged
@@ -1262,13 +1228,15 @@ mod tests {
 
         let results = vec![
             RollOutcome::Rolled {
-                envs: vec![],                            // no env buffers → zero samples
-                increment: empty_normalizer_increment(), // a no-op merge
-                rewards: vec![1.0],
-                drift: (0.5, 2),
-                reach: (1, 3),
-                glitch_drops: 3,
-                nonfinite_obs: 7,
+                output: HorizonOutput {
+                    envs: vec![],                            // no env buffers → zero samples
+                    increment: empty_normalizer_increment(), // a no-op merge
+                    rewards: vec![1.0],
+                    drift: (0.5, 2),
+                    reach: (1, 3),
+                    glitch_drops: 3,
+                    nonfinite_obs: 7,
+                },
                 ticks: 64,
             },
             RollOutcome::SnapshotLoadFailed,
@@ -1328,9 +1296,10 @@ mod tests {
                 log_std_floor: crate::bot::brain::LOG_STD_MIN,
             })
             .expect("send request");
-        let RollOutcome::Rolled { envs, .. } = thread.result_rx.recv().expect("recv result") else {
+        let RollOutcome::Rolled { output, .. } = thread.result_rx.recv().expect("recv result") else {
             panic!("the roll must not panic");
         };
+        let envs = output.envs;
         assert_eq!(
             envs.len(),
             m as usize,
@@ -1414,9 +1383,10 @@ mod tests {
         let mut buffers = 0usize;
         let mut total = 0usize;
         for t in &threads {
-            let RollOutcome::Rolled { envs, .. } = t.result_rx.recv().expect("recv") else {
+            let RollOutcome::Rolled { output, .. } = t.result_rx.recv().expect("recv") else {
                 panic!("neither thread should panic");
             };
+            let envs = output.envs;
             assert_eq!(envs.len(), m as usize, "each thread returns M buffers");
             buffers += envs.len();
             total += envs.iter().map(|e| e.len()).sum::<usize>();

@@ -80,6 +80,107 @@ fn classify_step_end(grabbed: bool, fell: bool, over_cap: bool) -> StepEnd {
     }
 }
 
+/// One env's post-physics `s_{t+1}` readings for a single finalize, grouped into NAMED fields so
+/// the four same-typed scalars can't be transposed at the call site (two `f32`, two `Option<f32>`).
+/// On the rescue path every field describes the FRESH spawn and is ignored.
+struct PostStepPose {
+    /// Carapace height — the survival-guard input (feeds no reward).
+    height: f32,
+    /// Fastest body-part speed this tick — the blow-up guard input.
+    max_speed: f32,
+    /// Carapace planar distance to the target this tick (`None` if the pose or target is absent)
+    /// — the progress reward's `s_{t+1}` distance.
+    d_now: Option<f32>,
+    /// Closest claw-tip→target 3D distance this tick (`None` if absent) — the grab terminal's `d`.
+    min_tip_dist: Option<f32>,
+}
+
+/// The pure outcome of finalizing ONE env's pending action against the pose it produced —
+/// the reward/terminal decision, lifted out of the ECS driver loop so it is unit-testable.
+struct StepFinalize {
+    /// The completed transition to push into this env's rollout buffer.
+    transition: Transition,
+    /// Whether this step ENDED the episode (terminal/truncation/rescue) — the driver then
+    /// resets the env and reseeds its target.
+    ended: bool,
+    /// Whether a present per-tick progress delta was ZEROED as non-physical (bddap/rl#175) — the
+    /// driver tallies it for the horizon. Never set on the rescue path (its progress is a neutral
+    /// `None`, not a glitch).
+    progress_glitch: bool,
+}
+
+/// Finalize one env's [`Pending`] action against this tick's post-physics reading — a PURE
+/// function of the pending plus this env's `s_{t+1}` scalars, touching no env/ECS state, so the
+/// reward + terminal core is unit-testable apart from `finalize_transitions`' per-env driver
+/// loop (bddap/rl#165). Two modes:
+///   * `rescued` — the action drove the body non-finite and it was force-respawned this tick, so
+///     `height`/`d_now`/`min_tip_dist` describe the FRESH spawn, not the action's result. The
+///     action ends the episode as a terminal with NO progress or reach credit (crediting the
+///     spawn teleport would be a huge spurious progress delta); the effort tax still applies — it
+///     priced the DRIVE, not its result.
+///   * otherwise the survival guards (height band + blow-up speed) and the sparse terminal grab
+///     (a claw tip within [`CURRICULUM_REACH_RADIUS`], rl#95) decide the end, and alive past the
+///     cap is a truncation ([`classify_step_end`]). Progress is the metres the carapace's distance
+///     to the goal SHRANK from `pending.target_dist` (`s_t`) to `d_now` (`s_{t+1}`); a missing
+///     `d_now`/`target_dist` earns no progress credit.
+fn finalize_pending_step(
+    pending: &Pending,
+    pose: PostStepPose,
+    over_cap: bool,
+    rescued: bool,
+) -> StepFinalize {
+    let PostStepPose {
+        height,
+        max_speed,
+        d_now,
+        min_tip_dist,
+    } = pose;
+    let transition = |reward: f32, end: StepEnd| Transition {
+        obs: pending.obs,
+        action: pending.action,
+        reward,
+        value: pending.value,
+        log_prob: pending.log_prob,
+        end,
+    };
+
+    if rescued {
+        return StepFinalize {
+            transition: transition(compute_reward(None, pending.effort), StepEnd::Terminal),
+            ended: true,
+            progress_glitch: false,
+        };
+    }
+
+    // Progress reward: the reduction in carapace→target distance this action produced.
+    let distance_closed = pending
+        .target_dist
+        .zip(d_now)
+        .map(|(prev, now)| prev - now);
+    let progress_glitch = is_progress_glitch(distance_closed);
+    let mut reward = compute_reward(distance_closed, pending.effort);
+
+    // Survival guard: an unphysical speed blow-up (before the solver NaNs and Rapier panics the
+    // app) or a height outside the sim-sanity band ends the episode. The threshold is high —
+    // direct torque is bounded, so vigorous limb-flinging is legal; only clearly unphysical speed
+    // trips it. `height` feeds no reward, only this guard.
+    let blowing_up = max_speed > 100.0 || !height.is_finite();
+    let fell = !(0.02..=50.0).contains(&height) || blowing_up;
+    // Sparse terminal grab (rl#95): a claw tip within the reach radius this tick adds the one-shot
+    // bonus and ends the episode as a SUCCESS terminal (GAE bootstraps ZERO past it). `is_some_and`
+    // makes a missing/NaN distance a non-grab (fail-safe, no spurious terminal).
+    let grabbed = min_tip_dist.is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
+    if grabbed {
+        reward += GRAB_REWARD;
+    }
+    let end = classify_step_end(grabbed, fell, over_cap);
+    StepFinalize {
+        transition: transition(reward, end),
+        ended: end.ends_segment(),
+        progress_glitch,
+    }
+}
+
 /// Where an env sits in the record → reset → settle lifecycle. One field, not a
 /// `needs_reset: bool` + `grace: u32` pair, so an illegal combination (a respawn pending
 /// *while* already settling) is unrepresentable.
@@ -333,6 +434,43 @@ struct StepInputs<'a> {
     rescued_envs: &'a [usize],
 }
 
+/// What the learner ships a rollout thread to OPEN one horizon (bddap/rl#165): the policy
+/// weight snapshot, the master normalizer baseline, and this horizon's target band + σ-floor.
+/// Borrowed weights (the learner's `Arc<Vec<u8>>` bytes) — [`TrainingState::begin_horizon`]
+/// consumes it once and keeps nothing. One shape for the whole per-horizon setup, so the
+/// load→set→reset sequence lives behind `begin_horizon` instead of leaking into `inproc`.
+pub(crate) struct HorizonRequest<'a> {
+    pub brain_bytes: &'a [u8],
+    pub normalizer: NormalizerSnapshot,
+    pub band: TargetBand,
+    pub log_std_floor: f32,
+}
+
+/// Everything one horizon PRODUCES for the learner to merge, moved out in a single shot by
+/// [`TrainingState::end_horizon`] (bddap/rl#165). Folding the per-metric `drain_*` accessors
+/// into one output shape keeps the collection sequence inside `systems.rs` — the fixed order
+/// no longer leaks across `systems.rs`↔`inproc.rs`, and a new per-horizon metric is one field
+/// here, not a new accessor plus a matching drain call at the far call site. `ticks` is NOT
+/// here: it is the thread's own tick-odometer diff, measured by `inproc`, not drained from state.
+pub(crate) struct HorizonOutput {
+    /// Per-env rollout buffers (one per env; GAE never sweeps across envs), each carrying
+    /// its own GAE tail bootstrap.
+    pub envs: Vec<RolloutBuffer>,
+    /// Per-horizon normalizer increment — only this horizon's observations, so merging it
+    /// into the master (which holds the baseline) never double-counts.
+    pub increment: NormalizerIncrement,
+    /// Rewards of episodes that finished during this horizon.
+    pub rewards: Vec<f32>,
+    /// Carapace planar drift-from-spawn this horizon as `(sum, count)` over recording ticks.
+    pub drift: (f64, u64),
+    /// This horizon's per-episode reach tally as `(reached, finished)`.
+    pub reach: (u64, u64),
+    /// Count of progress terms dropped as non-physical this horizon (bddap/rl#175).
+    pub glitch_drops: u64,
+    /// Count of non-finite observation elements skipped from the normalizer (bddap/rl#181).
+    pub nonfinite_obs: u64,
+}
+
 impl TrainingState {
     /// The learner's policy host (and the test fixtures). The learner steps no world
     /// itself — it owns the policy and runs the PPO update from the threads' buffers,
@@ -503,6 +641,51 @@ impl TrainingState {
     // horizon (via the normal systems), then hand the buffers + per-horizon normalizer
     // increment + finished rewards back. One struct for both the learner host and the
     // rollout threads (not a parallel one) keeps their collection + update on the same code.
+    //
+    // The per-horizon protocol is hidden behind exactly two methods — `begin_horizon` /
+    // `end_horizon` (bddap/rl#165) — so `inproc` never spells out the load→set→reset setup or
+    // the fixed drain order; the private hooks below are their building blocks, not the interface.
+
+    /// OPEN one horizon on a rollout thread: load the learner's snapshot (weights + normalizer
+    /// baseline), set this horizon's target band + σ-floor, and reset the per-horizon increment.
+    /// Returns `false` — having LOGGED which component failed — if the brain OR the normalizer
+    /// snapshot did not load, in which case the caller MUST refuse the horizon (bddap/rl#177):
+    /// rolling a stale/off-policy brain or mis-normalized observations ships data the learner
+    /// can't tell from honest. Both loads are attempted (not short-circuited) so the log names
+    /// every failing component. This is the single entry point for horizon setup — the fixed
+    /// order lives here, not at the `inproc` call site.
+    #[must_use = "a failed horizon open must be refused, not rolled on a stale/mis-normalized policy"]
+    pub(crate) fn begin_horizon(&mut self, req: HorizonRequest) -> bool {
+        let brain_ok = self.load_brain_bytes(req.brain_bytes);
+        let normalizer_ok = self.set_normalizer(req.normalizer);
+        if !brain_ok || !normalizer_ok {
+            error!(
+                "rollout thread: snapshot load failed (brain_ok={brain_ok}, normalizer_ok={normalizer_ok}); \
+                 refusing this horizon rather than rolling a stale/off-policy or mis-normalized policy"
+            );
+            return false;
+        }
+        self.set_band(req.band);
+        self.set_log_std_floor(req.log_std_floor);
+        self.reset_horizon_counter();
+        true
+    }
+
+    /// CLOSE the horizon: move out every per-horizon artifact the learner merges, in one shot
+    /// (bddap/rl#165). Folds the dozen `drain_*`/`take_*` accessors so the collection sequence
+    /// is owned here and `inproc` sees only begin → roll → end. Panics via `normalizer_increment`
+    /// if called on a non-worker state — only a worker rolls a horizon.
+    pub(crate) fn end_horizon(&mut self) -> HorizonOutput {
+        HorizonOutput {
+            envs: self.take_rollouts(),
+            increment: self.normalizer_increment(),
+            rewards: self.drain_finished_episode_rewards(),
+            drift: self.drain_drift(),
+            reach: self.drain_reach(),
+            glitch_drops: self.drain_progress_glitches(),
+            nonfinite_obs: self.drain_nonfinite_obs(),
+        }
+    }
 
     /// Load brain weights from the learner's in-memory snapshot bytes (the same
     /// `FullPrecisionSettings` bincode the on-disk checkpoint uses, produced by the
@@ -515,7 +698,7 @@ impl TrainingState {
     /// samples the learner can't tell apart from on-policy ones (bddap/rl#177). `#[must_use]`
     /// so that failure can never again be silently dropped.
     #[must_use = "a failed brain load must abort the horizon, not roll a stale/off-policy policy"]
-    pub fn load_brain_bytes(&mut self, bytes: &[u8]) -> bool {
+    fn load_brain_bytes(&mut self, bytes: &[u8]) -> bool {
         let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
         match recorder.load(bytes.to_vec(), &self.device) {
             Ok(record) => {
@@ -545,7 +728,7 @@ impl TrainingState {
     /// caller MUST abort the horizon rather than roll mis-normalized observations through the
     /// policy (bddap/rl#177). `#[must_use]` so the failure can't be silently dropped again.
     #[must_use = "a failed normalizer load must abort the horizon, not roll mis-normalized obs"]
-    pub(crate) fn set_normalizer(&mut self, snapshot: NormalizerSnapshot) -> bool {
+    fn set_normalizer(&mut self, snapshot: NormalizerSnapshot) -> bool {
         self.obs_normalizer.load_snapshot(snapshot)
     }
 
@@ -560,7 +743,7 @@ impl TrainingState {
     /// [`ObsNormalizer::merge`]). Panics if called off a worker: only a worker rolls and
     /// accumulates an increment, and there is deliberately no full-snapshot fallback —
     /// shipping the cumulative snapshot here would double-count the baseline on merge.
-    pub(crate) fn normalizer_increment(&self) -> NormalizerIncrement {
+    fn normalizer_increment(&self) -> NormalizerIncrement {
         self.normalizer_increment
             .as_ref()
             .expect("normalizer increment requested on a non-worker TrainingState")
@@ -578,7 +761,7 @@ impl TrainingState {
     /// horizon. The per-env episode accumulators (`envs`) are deliberately left
     /// untouched: an episode that spans a horizon boundary must continue cleanly
     /// across the cut rather than be force-terminated at the window edge.
-    pub fn take_rollouts(&mut self) -> Vec<RolloutBuffer> {
+    fn take_rollouts(&mut self) -> Vec<RolloutBuffer> {
         // Each buffer carries the GAE bootstrap for its `Continues` tail: a dangling
         // `Pending` is the un-finalized successor action of the buffer's last `Continues`
         // transition (an episode-ending push re-seeds the env and stashes no pending), so
@@ -600,7 +783,7 @@ impl TrainingState {
     /// Reset the per-horizon normalizer increment (rollout thread, at the start of each
     /// horizon), so it always holds exactly this horizon's samples. `total_steps` stays
     /// monotonic — it is the thread's tick odometer the learner diffs for horizon length.
-    pub fn reset_horizon_counter(&mut self) {
+    fn reset_horizon_counter(&mut self) {
         if let Some(inc) = self.normalizer_increment.as_mut() {
             *inc = IncrementAccumulator::new();
         }
@@ -609,7 +792,7 @@ impl TrainingState {
     /// Drain the rewards of episodes that finished since the last drain, so the
     /// worker ships each finished episode's reward to the learner exactly once
     /// (the learner's reward-vs-samples curve aggregates all workers').
-    pub fn drain_finished_episode_rewards(&mut self) -> Vec<f32> {
+    fn drain_finished_episode_rewards(&mut self) -> Vec<f32> {
         let out = self.recent_rewards[self.reported_episodes..].to_vec();
         self.reported_episodes = self.recent_rewards.len();
         out
@@ -619,7 +802,7 @@ impl TrainingState {
     /// resetting both. The learner sums these across rollout threads and divides for the
     /// mean planar drift it logs — the walking diagnostic. `(0.0, 0)` when nothing was
     /// recorded (a fully-settling horizon), which the learner treats as no sample.
-    pub fn drain_drift(&mut self) -> (f64, u64) {
+    fn drain_drift(&mut self) -> (f64, u64) {
         let out = (self.drift_sum, self.drift_count);
         self.drift_sum = 0.0;
         self.drift_count = 0;
@@ -629,7 +812,7 @@ impl TrainingState {
     /// Set the target-distance band a rollout thread samples from this horizon (learner →
     /// thread, once per horizon before the roll, like `set_normalizer`). The band is the one
     /// fixed full-arena range; the thread only consumes it.
-    pub(crate) fn set_band(&mut self, band: TargetBand) {
+    fn set_band(&mut self, band: TargetBand) {
         self.band = band;
     }
 
@@ -637,7 +820,7 @@ impl TrainingState {
     /// roll, like [`Self::set_band`]). The learner evaluates the anneal schedule from the
     /// durable tick odometer and ships the scalar so the rollout samples — and the update later
     /// recomputes log-probs — under the same lower `log_std` clamp (bddap/rl#161).
-    pub(crate) fn set_log_std_floor(&mut self, log_std_floor: f32) {
+    fn set_log_std_floor(&mut self, log_std_floor: f32) {
         self.log_std_floor = log_std_floor;
     }
 
@@ -645,7 +828,7 @@ impl TrainingState {
     /// both. The learner pools these across rollout threads for the log's reach fraction and
     /// the best-keeper's solid-reach floor ([`super::curriculum::SOLID_REACH_FRACTION`]).
     /// `(0, 0)` when no episode finished this horizon.
-    pub fn drain_reach(&mut self) -> (u64, u64) {
+    fn drain_reach(&mut self) -> (u64, u64) {
         let out = (self.reach_reached, self.reach_finished);
         self.reach_reached = 0;
         self.reach_finished = 0;
@@ -656,7 +839,7 @@ impl TrainingState {
     /// see [`progress_glitch_drops`](Self::progress_glitch_drops)), resetting it. The learner sums
     /// these across rollout threads and surfaces the total so a silent reward dropout is visible
     /// (bddap/rl#175). `0` on a healthy horizon — the common case.
-    pub fn drain_progress_glitches(&mut self) -> u64 {
+    fn drain_progress_glitches(&mut self) -> u64 {
         std::mem::take(&mut self.progress_glitch_drops)
     }
 
@@ -664,7 +847,7 @@ impl TrainingState {
     /// (see [`nonfinite_obs_elements`](Self::nonfinite_obs_elements)), resetting it. The learner
     /// sums these across rollout threads and surfaces the total so a NaN sensor/physics reading is
     /// visible (bddap/rl#181). `0` on a healthy horizon — the common case.
-    pub fn drain_nonfinite_obs(&mut self) -> u64 {
+    fn drain_nonfinite_obs(&mut self) -> u64 {
         std::mem::take(&mut self.nonfinite_obs_elements)
     }
 
@@ -767,94 +950,41 @@ impl TrainingState {
                 continue;
             }
 
-            // Finalize the action chosen last tick using this tick's pose. Three
-            // outcomes: rescued (the action drove the body non-finite — a failure),
-            // true terminal (a survival guard tripped on the post-physics pose), or a
-            // normal step (continues / truncated-at-cap).
+            // Finalize the action chosen last tick using this tick's pose, then push it and
+            // update this env's episode accumulators. The reward/terminal decision is the pure
+            // [`finalize_pending_step`]; this loop is only the driver (take pending → push →
+            // reset on end). `min_tip_dists[e]`/pose are this tick's `s_{t+1}` — the result of
+            // `pending`'s action — so the credit lands in phase with the pose it caused.
             let episode_ended = if let Some(pending) = self.envs[e].pending.take() {
-                if rescued_envs.contains(&e) {
-                    // The pending action's result went non-finite and was force-
-                    // respawned this tick (rescue runs .before(Sense)), so the pose
-                    // read above is the FRESH spawn, not what the action produced.
-                    // Finalize the action as the episode's terminal step with NO reach
-                    // credit AND no progress credit (both `None`): the body teleported to
-                    // spawn, so neither this tick's claw-tip distance nor the carapace's
-                    // change in distance-to-target is the action's doing (crediting the
-                    // spawn jump would be a huge spurious progress delta). The effort tax
-                    // still applies — it priced the DRIVE, not its result.
-                    let reward = compute_reward(None, pending.effort);
-                    self.rollouts[e].push(Transition {
-                        obs: pending.obs,
-                        action: pending.action,
-                        reward,
-                        value: pending.value,
-                        log_prob: pending.log_prob,
-                        end: StepEnd::Terminal,
-                    });
-                    let ep = &mut self.envs[e];
-                    ep.reward += reward;
-                    ep.steps += 1;
-                    true
-                } else {
-                    let (height, _upright) =
-                        body.poses[e].expect("poses[e].is_none() handled above");
-                    // `height` feeds no reward (see `compute_reward`) — only the off-reward
-                    // blow-up/fell-through guard below. The pose's second element (uprightness)
-                    // is unused.
-                    //
-                    // Progress = the metres the carapace's distance to the goal SHRANK from `s_t`
-                    // (`pending.target_dist`) to this tick's `s_{t+1}` (see [`Pending::target_dist`]).
-                    let d_now = carapace_target_dist(body, targets, e);
-                    let distance_closed = pending
-                        .target_dist
-                        .zip(d_now)
-                        .map(|(prev, now)| prev - now);
-                    // Count a non-physical progress delta the reward is about to zero, so the
-                    // silent dropout surfaces on the learner line (bddap/rl#175). The neutral
-                    // `None` (rescue/teleport above) is not a glitch and isn't counted.
-                    if is_progress_glitch(distance_closed) {
-                        self.progress_glitch_drops += 1;
-                    }
-                    let mut reward = compute_reward(distance_closed, pending.effort);
-                    // The blowup check only catches a genuine numerical explosion before the
-                    // solver NaNs and Rapier panics the whole app; the threshold is high
-                    // because direct torque is bounded (no acceleration-motor energy pump), so
-                    // ordinary vigorous, limb-flinging motion is legal — only a part moving at
-                    // clearly unphysical speed ends the episode. The height band is sim sanity
-                    // (clipped through the floor / left the playfield).
-                    let blowing_up = body.max_speeds[e] > 100.0 || !height.is_finite();
-                    let fell = !(0.02..=50.0).contains(&height) || blowing_up;
-                    // SPARSE TERMINAL GRAB (rl#95 — see `reward` module header): a claw tip within
-                    // the grab radius of the target THIS tick adds a one-shot `GRAB_REWARD` and
-                    // ends the episode as a SUCCESS terminal (`done` ⇒ GAE bootstraps ZERO past
-                    // it). Detected on this tick's post-physics tip distance (`min_tip_dists[e]` —
-                    // the result of `pending`'s action), so the credit lands on the grabbing
-                    // action, in phase with the pose it caused. `is_some_and` makes a missing/NaN
-                    // distance a non-grab (fail-safe, no spurious terminal). The radius is the
-                    // single shared `CURRICULUM_REACH_RADIUS` (also the curriculum "reached" signal
-                    // and the demo ball-hop).
-                    let grabbed = min_tip_dists[e].is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
-                    if grabbed {
-                        reward += GRAB_REWARD;
-                    }
-                    // Alive at the cap ⇒ a TRUNCATION (see [`classify_step_end`]).
-                    let over_cap = self.envs[e].steps > MAX_EPISODE_TICKS;
-                    let end = classify_step_end(grabbed, fell, over_cap);
-                    self.rollouts[e].push(Transition {
-                        obs: pending.obs,
-                        action: pending.action,
-                        reward,
-                        value: pending.value,
-                        log_prob: pending.log_prob,
-                        end,
-                    });
-
-                    let ep = &mut self.envs[e];
-                    ep.reward += reward;
-                    ep.steps += 1;
-
-                    end.ends_segment()
+                // The pose's second element (uprightness) is unused; `height` feeds only the
+                // survival guard. On the rescue path this pose is the fresh spawn and is ignored.
+                let (height, _upright) =
+                    body.poses[e].expect("poses[e].is_none() handled above");
+                let d_now = carapace_target_dist(body, targets, e);
+                // `steps` BEFORE this step's increment — alive PAST the cap ⇒ a truncation.
+                let over_cap = self.envs[e].steps > MAX_EPISODE_TICKS;
+                let rescued = rescued_envs.contains(&e);
+                let fin = finalize_pending_step(
+                    &pending,
+                    PostStepPose {
+                        height,
+                        max_speed: body.max_speeds[e],
+                        d_now,
+                        min_tip_dist: min_tip_dists[e],
+                    },
+                    over_cap,
+                    rescued,
+                );
+                // Surface a zeroed non-physical progress delta on the learner line (bddap/rl#175).
+                if fin.progress_glitch {
+                    self.progress_glitch_drops += 1;
                 }
+                let reward = fin.transition.reward;
+                self.rollouts[e].push(fin.transition);
+                let ep = &mut self.envs[e];
+                ep.reward += reward;
+                ep.steps += 1;
+                fin.ended
             } else {
                 // No pending yet: the first recording tick of an episode only chooses
                 // an action (stashed below); its result, and thus its transition,
@@ -1534,6 +1664,93 @@ mod tests {
         assert!(classify_step_end(true, false, false).ends_segment());
         assert!(classify_step_end(false, false, true).ends_segment());
         assert!(!classify_step_end(false, false, false).ends_segment());
+    }
+
+    /// The pure per-env finalize (bddap/rl#165): the reward + terminal decision extracted from
+    /// `finalize_transitions`' ECS driver loop, now unit-testable without a world. Pins each
+    /// branch — rescue (terminal, no progress/reach credit, effort tax only), the sparse grab
+    /// (terminal + one-shot bonus), a survival fall (terminal), a plain continue, a truncation at
+    /// the cap, and the #175 glitch flag on a non-physical progress delta.
+    #[test]
+    fn finalize_pending_step_covers_each_terminal_branch() {
+        let pend = |effort: f32, target_dist: Option<f32>| Pending {
+            obs: [0.0; OBS_SIZE],
+            action: [0.0; ACTION_SIZE],
+            value: NormalizedValue(0.0),
+            log_prob: 0.0,
+            effort,
+            target_dist,
+        };
+        const ALIVE_H: f32 = 1.0;
+        const CALM: f32 = 1.0;
+        let far_tip = Some(CURRICULUM_REACH_RADIUS * 4.0);
+        // A live-pose reading closing `close` metres with the tip `tip` from the target.
+        let pose = |close: Option<f32>, tip: Option<f32>| PostStepPose {
+            height: ALIVE_H,
+            max_speed: CALM,
+            d_now: close,
+            min_tip_dist: tip,
+        };
+
+        // Rescue: terminal, NO progress/reach credit — reward is the effort tax only — no glitch.
+        // The fresh-spawn pose (NaN height, blow-up speed, a big distance delta) is IGNORED.
+        let r = finalize_pending_step(
+            &pend(0.7, Some(1.0)),
+            PostStepPose { height: f32::NAN, max_speed: 1e9, d_now: Some(0.0), min_tip_dist: Some(0.0) },
+            true,
+            true,
+        );
+        assert_eq!(r.transition.end, StepEnd::Terminal);
+        assert!(r.ended);
+        assert!(!r.progress_glitch, "the rescue's None progress is not a glitch");
+        assert_eq!(
+            r.transition.reward.to_bits(),
+            compute_reward(None, 0.7).to_bits(),
+            "a rescued step earns only the effort tax (no progress/grab credit)"
+        );
+
+        // Continue: alive, calm, closing 0.25 m (exactly representable, so the reward compares
+        // bit-exact), tip far, under the cap → Continues, no bonus.
+        let r = finalize_pending_step(&pend(0.0, Some(1.25)), pose(Some(1.0), far_tip), false, false);
+        assert_eq!(r.transition.end, StepEnd::Continues);
+        assert!(!r.ended);
+        assert_eq!(
+            r.transition.reward.to_bits(),
+            compute_reward(Some(0.25), 0.0).to_bits()
+        );
+
+        // Grab: a tip inside the reach radius ends the episode as a terminal carrying GRAB_REWARD.
+        let r = finalize_pending_step(&pend(0.0, Some(1.0)), pose(Some(1.0), Some(0.0)), false, false);
+        assert_eq!(r.transition.end, StepEnd::Terminal, "a grab is a true terminal");
+        assert!(r.ended);
+        assert_eq!(
+            r.transition.reward.to_bits(),
+            (compute_reward(Some(0.0), 0.0) + GRAB_REWARD).to_bits()
+        );
+
+        // Fall: a sub-floor height trips the survival guard → terminal, even with a far tip.
+        let r = finalize_pending_step(
+            &pend(0.0, None),
+            PostStepPose { height: 0.0, max_speed: CALM, d_now: None, min_tip_dist: far_tip },
+            false,
+            false,
+        );
+        assert_eq!(r.transition.end, StepEnd::Terminal, "a sub-floor height is a fall terminal");
+        assert!(r.ended);
+
+        // Truncation: alive PAST the cap with no grab/fall → Truncated (bootstraps its value).
+        let r = finalize_pending_step(&pend(0.0, Some(1.0)), pose(Some(1.0), far_tip), true, false);
+        assert_eq!(r.transition.end, StepEnd::Truncated);
+        assert!(r.ended);
+
+        // Glitch: a present but non-physical progress delta (> 0.5 m/tick) is flagged and zeroed.
+        let r = finalize_pending_step(&pend(0.0, Some(2.0)), pose(Some(0.0), far_tip), false, false);
+        assert!(r.progress_glitch, "a > 0.5 m/tick delta is a progress glitch");
+        assert_eq!(
+            r.transition.reward.to_bits(),
+            compute_reward(None, 0.0).to_bits(),
+            "the glitched progress is dropped to zero (effort tax only)"
+        );
     }
 
     /// Drive `build_observation` over a single hand-placed carapace and return env 0's
