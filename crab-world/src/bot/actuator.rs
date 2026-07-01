@@ -45,6 +45,7 @@ pub fn apply_actions(
     joints: Query<(Entity, &CrabJoint, &CrabEnvId, &MultibodyJoint)>,
     transforms: Query<&Transform>,
     mut forces: Query<(Entity, &mut ExternalForce), With<CrabBodyPart>>,
+    mut warned_nonfinite: Local<bool>,
 ) {
     let mut torque: HashMap<Entity, Vec3> = HashMap::new();
 
@@ -53,15 +54,27 @@ pub fn apply_actions(
             continue;
         };
         let id = joint.id;
-        let a = values[id.index()];
+        let raw = values[id.index()];
         // The SOLE ±1 torque-bound for every `CrabActions` writer (the training policy's raw
         // drive, the demo, manual control): each writes an un-clamped value and this clamp is
         // where it becomes a bounded muscle command. Keeping the bound here (not at each
         // writer) lets the training tax see the policy's unbounded drive — a saturating
         // `|a|≫1` is penalized for the overshoot, then clamped to a physical torque here.
-        let a = if a.is_finite() {
-            a.clamp(-1.0, 1.0)
+        let a = if raw.is_finite() {
+            raw.clamp(-1.0, 1.0)
         } else {
+            // A non-finite drive is a real numerical fault (a NaN-spewing brain), not a neutral
+            // output — and zeroing it degrades the crab to rest pose INDISTINGUISHABLY from a
+            // legitimately-zero command. Zero it (behavior unchanged) but surface it once —
+            // latched like `warned_no_env`, so a broken policy is visible in logs/telemetry
+            // instead of a silently-limp crab (rl#145).
+            if !*warned_nonfinite {
+                error!(
+                    "crab actuator: non-finite drive ({raw}) on joint {id:?} — zeroed; a healthy \
+                     brain never emits NaN/∞, so this flags a numerically-broken policy"
+                );
+                *warned_nonfinite = true;
+            }
             0.0
         };
         let Ok(parent_tf) = transforms.get(mj.parent) else {

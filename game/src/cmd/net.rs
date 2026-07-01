@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::EndpointId;
 use net::lockstep::Lockstep;
-use net::sim::{Input, PlayerId, TICK_HZ};
+use net::sim::{Input, PlayerId, TICK_DT, TICK_HZ};
 use net::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
 use net::{net_loop, transport};
 
@@ -120,8 +120,7 @@ async fn run_net(args: Args) -> Result<()> {
         s
     });
 
-    let tick_dt = Duration::from_secs_f64(1.0 / TICK_HZ as f64);
-    let mut ticker = tokio::time::interval(tick_dt);
+    let mut ticker = tokio::time::interval(Duration::from_secs_f64(TICK_DT));
     let end = Instant::now() + Duration::from_secs(args.run_secs);
     // Host-authoritative: the host is the sole source of truth, so there is no peer cross-check and
     // no desync to count. Kept as a constant 0 for the telemetry/report fields that still name it.

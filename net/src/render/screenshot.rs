@@ -3,7 +3,7 @@
 //! windowed client uses (see [`super::app`]) onto an offscreen camera.
 
 use super::*;
-use super::app::{add_external_nn_crab, seed_external_crab_solo};
+use super::app::{install_armed_nn_crab, seed_external_crab_solo};
 use super::driver::{ScriptedPackInput, coordinator, drive_lockstep, insert_core};
 use crate::net_loop::NetDriver;
 use super::hud::{spawn_hud, update_hud};
@@ -49,9 +49,8 @@ pub fn build_screenshot_app(
     // static silhouette and the reposed-to-giant rig becomes the visible crab.
     let armed = armed_crab.is_some();
     if let Some((dir, spawn)) = armed_crab {
-        add_external_nn_crab(&mut app, dir, spawn);
-        // Solo screenshot round. One arm path.
-        crate::external_crab::arm(app.world_mut());
+        // Solo screenshot round: add the stack and arm the gate (one path).
+        install_armed_nn_crab(&mut app, dir, spawn);
     }
     finish_offscreen_app(&mut app, cfg, render_mode, armed);
     app
@@ -81,9 +80,8 @@ pub fn build_net_screenshot_app(
     let coord = coordinator(Some(net), ls.peers(), ls.sim().clone());
     insert_core(&mut app, ls, coord);
     // Arm the NN crab on this peer: the host runs + broadcasts it, the client spawns it (frozen —
-    // never pumped) as the render target its adopted articulation poses. One arm path.
-    add_external_nn_crab(&mut app, external_crab, spawn);
-    crate::external_crab::arm(app.world_mut());
+    // never pumped) as the render target its adopted articulation poses. One path (add + arm).
+    install_armed_nn_crab(&mut app, external_crab, spawn);
     finish_offscreen_app(&mut app, cfg, render_mode, true);
     app
 }

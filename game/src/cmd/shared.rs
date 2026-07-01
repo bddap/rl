@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use net::lockstep::Lockstep;
-use net::sim::{Input, PlayerId, TICK_HZ};
+use net::sim::{Input, PlayerId, TICK_DT};
 
 /// Deterministic match seed: a constant so independently-launched peers agree without a
 /// handshake. The sim takes it as a parameter, so a future session setup can negotiate it
@@ -94,7 +94,7 @@ pub(crate) fn resolve_render_mode(flag: Option<&str>) -> Result<net::render::Ren
 }
 
 /// One offline lockstep round for `run_secs`: a single peer whose own input completes
-/// every tick (no network), ticking at [`TICK_HZ`] and printing a final summary. Shared by
+/// every tick (no network), ticking at [`net::sim::TICK_HZ`] and printing a final summary. Shared by
 /// the `solo` command and the headless `net` no-peer fallback, so the alone case runs the
 /// SAME deterministic solo path — no second sim loop to drift.
 pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
@@ -107,7 +107,7 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
     // the snapshot the server emits, never stepping a sim of its own.
     let mut ls = Lockstep::new(MATCH_SEED, &[me], me);
     let mut server = Server::new(&[me], ls.sim().clone());
-    let tick_dt = Duration::from_secs_f64(1.0 / TICK_HZ as f64);
+    let tick_dt = Duration::from_secs_f64(TICK_DT);
     let end = Instant::now() + Duration::from_secs(run_secs);
     let mut next = Instant::now();
     while Instant::now() < end {
