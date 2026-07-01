@@ -1,23 +1,25 @@
-//! Multiplayer netcode foundation (rl#39): deterministic lockstep simulation over
-//! iroh LAN transport. Multiplayer-first, so the whole game (rl#38) is built on top
-//! of these three pieces:
+//! Multiplayer netcode (rl#39 → rl#151): a host-AUTHORITATIVE client/server model over
+//! iroh LAN transport — inputs go UP, full game state comes DOWN
+//! ([[mp-minecraft-model]]). Multiplayer-first, so the whole game (rl#38) is built on
+//! these pieces:
 //!
 //! - [`sim`] — the deterministic simulation core: the Phase 1 gray-box Extraction
 //!   loop (first-person players + one giant crab + an extraction point). The contract
 //!   (pure step, complete state hash, no nondeterminism) is what every later game
 //!   system must honor; the render/vehicle subs build on the interface documented at
 //!   the top of [`sim`], they do not bypass it.
-//! - [`lockstep`] — the fixed-tick driver: exchange inputs (not state) with an
-//!   input-delay buffer, apply in a fixed peer order, advance, and compare state
-//!   hashes to catch desync. Transport-agnostic.
-//! - [`transport`] — iroh mDNS LAN discovery + per-tick message exchange over QUIC.
+//! - [`server`] — the ONE authoritative peer: records every rostered client's input
+//!   per tick, steps its own [`sim`], and emits a [`snapshot::CoreSnapshot`] per tick.
+//! - [`lockstep`] — the client session (the name predates host-authority): files the
+//!   local input UP, ADOPTS the server's snapshot DOWN (never stepping its own sim),
+//!   and predicts/reconciles the local avatar.
+//! - [`transport`] — iroh mDNS LAN discovery + framed message exchange over QUIC.
 //!
 //! Two client-side layers build ON those, consuming the sim read-only and producing
-//! [`sim::Input`] — they add NO nondeterminism (the sim contract at the top of
-//! [`sim`] spells out why this is the firewall it is):
+//! [`sim::Input`]:
 //! - [`net_loop`] — a synchronous bridge from the async [`transport`] to a game main
-//!   loop (pump broadcast/inbox without `.await`), plus the discover-and-assign
-//!   cold-start shared with the headless driver.
+//!   loop (the [`net_loop::Coordinator`]: solo and host are the SAME server arm,
+//!   [[sp-is-mp-special-case]]), plus formation and the mid-game join path.
 //! - [`render`] — the windowed first-person Bevy client (rl#38): FP camera at the
 //!   local player, the gray-box scene (players, the giant crab, the extraction
 //!   point), WASD+mouse+gamepad → [`sim::Input`], tick interpolation, and a headless
@@ -28,11 +30,11 @@
 //! gated on `render` so it unit-tests in the headless build like [`sim`]; only the
 //! Bevy-input glue is render-only.
 //!
-//! The determinism-critical code ([`sim`] + [`lockstep`]) is pure and sync; all the
-//! async/IO lives in [`transport`]/[`net_loop`] and all the rendering in [`render`].
-//! That separation is deliberate: it keeps the part that MUST be reproducible free of
-//! any source of nondeterminism, and it's why the desync test below can prove
-//! determinism without touching the network or a GPU.
+//! The determinism-critical code ([`sim`] + [`server`]'s step) is pure and sync; all
+//! the async/IO lives in [`transport`]/[`net_loop`] and all the rendering in
+//! [`render`]. That separation keeps the part that must be reproducible free of any
+//! source of nondeterminism, so the tests below can pin sim behavior without touching
+//! the network or a GPU.
 
 pub mod articulation;
 pub mod cordic;

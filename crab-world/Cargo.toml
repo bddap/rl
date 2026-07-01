@@ -83,7 +83,6 @@ serde.workspace = true
 gltf.workspace = true
 burn.workspace = true
 naga = { workspace = true, optional = true }
-rand_distr.workspace = true
 clap.workspace = true
 bincode.workspace = true
 libc.workspace = true

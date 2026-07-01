@@ -26,8 +26,7 @@ crab-world = { path = "../crab-world" }
 # transitively).
 bevy.workspace = true
 clap.workspace = true
-tracing.workspace = true
-# The shared OTEL init owns the tracing subscriber (stderr fmt — so the trainer's
+# The shared OTEL init owns the tracing subscriber (stderr fmt — so crab-world's
 # `info!`/`warn!`/`error!` still surface headless, where there is no bevy LogPlugin — plus
 # OTLP export of traces/metrics/logs when a telemetry endpoint is configured). One init for
 # every rl binary; see the `otel` crate + bddap/bothouse telemetry/README.md.

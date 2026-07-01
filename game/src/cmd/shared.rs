@@ -47,9 +47,9 @@ pub(crate) fn nn_crab_checkpoint_dir(
     }
 }
 
-/// Write per-tick `<tick> <hash>` lines (zero-padded 16-hex) to a file — the cross-machine
-/// determinism log two peers `diff` to prove byte-identical sims. One writer for every gate
-/// (probe + xpeer) so the line format can never drift between them.
+/// Write per-tick `<tick> <hash>` lines (zero-padded 16-hex) to a file — the determinism
+/// log two runs `diff` to prove byte-identical sims (the `nn-crab-probe` gate; the line
+/// format is the diff contract, so it lives in ONE writer).
 pub(crate) fn write_tick_hash_log(
     path: &std::path::Path,
     entries: impl Iterator<Item = (u64, u64)>,

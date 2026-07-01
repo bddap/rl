@@ -14,7 +14,6 @@ crab-world = { path = "../crab-world", features = ["render"] }
 bevy.workspace = true
 bevy_rapier3d.workspace = true
 clap.workspace = true
-tracing.workspace = true
 # Shared OTEL init: owns the tracing subscriber (stderr fmt + OTLP export when wired) so a
 # missing canonical mesh surfaces as a LOUD error telemetry record, not a silent skin gap.
 # rl-demo disables bevy's own LogPlugin so this subscriber is the single one (see main.rs).

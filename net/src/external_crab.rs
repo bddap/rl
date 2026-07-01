@@ -92,12 +92,12 @@ pub struct ExternalCrabBridge {
     /// down (the crab then holds position). Read by [`set_crab_walk_target`] to aim the
     /// policy.
     hunt_target_m: Option<Vec2>,
-    /// This tick's peer-comparable digest of the crab's full rapier physics state XORed with
-    /// the policy-weights digest — recomputed each step by [`hash_crab_physics`] and pushed
-    /// into the sim by [`sync_external_crab`], so the lockstep desync check covers the
-    /// articulated float body and rejects a peer running different weights (rl#82, GCR). `0`
-    /// until the first post-step hash; the integer sim ignores it unless external control is
-    /// armed.
+    /// This tick's digest of the crab's full rapier physics state XORed with the
+    /// policy-weights digest — recomputed each step by [`hash_crab_physics`] and folded into
+    /// the sim's `state_hash` with each pose push, so the probe/test hash logs cover the
+    /// articulated float body and a peer running different weights is detectable (rl#82,
+    /// GCR). `0` until the first post-step hash; the integer sim ignores it unless external
+    /// control is armed.
     phys_digest: u64,
 }
 
@@ -185,8 +185,7 @@ impl ExternalCrabBridge {
     /// This tick's full rapier physics digest (every actuated body's pose+velocity bits XORed with
     /// the policy weights — see [`hash_crab_physics`]), folded into the sim's `external_crab_digest`.
     /// The authoritative server reads it here (alongside [`world_pos`](Self::world_pos) /
-    /// [`yaw_turns`](Self::yaw_turns)) to build the tick's [`crate::server::CrabPose`]; the legacy
-    /// driver arm reads the same field through [`sync_external_crab`].
+    /// [`yaw_turns`](Self::yaw_turns)) to build the tick's [`crate::server::CrabPose`].
     pub fn phys_digest(&self) -> u64 {
         self.phys_digest
     }
@@ -202,7 +201,7 @@ impl ExternalCrabBridge {
     /// Re-seed the bridge to the round's spawn after a deterministic sim RESTART
     /// ([`buttons::RESTART`]). The sim's [`reset`](crate::sim::Sim::reset) rebuilds the
     /// crab back AT spawn, but the float body keeps walking and the bridge keeps its
-    /// accumulated `world_pos_m`; without this the next [`sync_external_crab`] would snap the
+    /// accumulated `world_pos_m`; without this the next pose push would snap the
     /// freshly-restarted crab onto the still-walking body's old position — mid-gait at the
     /// wrong place, not at the computed spawn. So move the game-world position back to the
     /// integer spawn and forget the pre-restart carapace sample (re-seeded from the fresh pose
@@ -212,10 +211,9 @@ impl ExternalCrabBridge {
     /// drop/plant grace.
     ///
     /// DETERMINISM: this fires off the sim's restart EDGE — the same edge the cadence reset
-    /// hangs off in [`crate::render`]'s `drive_lockstep`, observed identically on every
-    /// peer (the RESTART rides the shared lockstep input stream, so `advance_one` rewinds the
-    /// sim on the SAME applied tick on both peers). `spawn` is read back from the post-restart
-    /// sim, which is itself deterministic — so the re-seed is bit-identical cross-peer. Unlike
+    /// hangs off in [`crate::render`]'s `drive_lockstep` (under host-authority the restart is
+    /// the authoritative server's, so every peer observes the same rewind). `spawn` is read
+    /// back from the post-restart sim, which is itself deterministic. Unlike
     /// `CrabRescued` (a float-body teleport that leaves the game position put) this DOES move
     /// `world_pos_m`, because a restart moves the crab back to spawn.
     pub fn restart_to_spawn(&mut self, spawn: Pos) {
@@ -270,12 +268,11 @@ pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
     });
 }
 
-/// The per-tick bridge↔sim handshake, run BEFORE each [`Lockstep::try_advance`]: push the
+/// The per-tick bridge↔sim handshake for a sim driven DIRECTLY (the headless probe): push the
 /// real crab body's game position + facing into the sim (so this tick's grab/extraction
-/// resolve against it), then refresh the player the crab hunts (nearest living). ONE definition
-/// so the windowed driver
-/// ([`crate::render`]'s `drive_lockstep`) and the headless probe can't drift on the
-/// contract (the manual's "one implementation per thing").
+/// resolve against it), then refresh the player the crab hunts (nearest living). The windowed
+/// driver makes the same push through the authoritative server instead
+/// ([`crate::server::CrabPose`] into `Server::step_next`).
 pub fn sync_external_crab(sim: &mut crate::sim::Sim, bridge: &mut ExternalCrabBridge) {
     sim.set_external_crab_pose(bridge.world_pos(), bridge.yaw_turns(), bridge.phys_digest);
     bridge.set_hunt_target(sim.nearest_living_player_pos());
@@ -283,8 +280,9 @@ pub fn sync_external_crab(sim: &mut crate::sim::Sim, bridge: &mut ExternalCrabBr
 
 /// Recompute env 0's full rapier physics digest (every actuated body's pose+velocity bits,
 /// via the shared [`crab_world::bot::physics_digest`]) XORed with the loaded policy's weights
-/// digest, and store it on the bridge for [`sync_external_crab`] to push into the lockstep
-/// hash. Runs each step AFTER the physics writeback + [`integrate_crab`], so it captures
+/// digest, and store it on the bridge for the next pose push into the sim's state hash
+/// ([`sync_external_crab`] / [`crate::server::CrabPose`]).
+/// Runs each step AFTER the physics writeback + [`integrate_crab`], so it captures
 /// this tick's settled state. Folding in the weights digest makes two peers running different
 /// brains desync on the first tick (the GCR shared-checkpoint guard), and folding in the full
 /// articulated state makes a float divergence a detected desync, not just a 2D-pose one.

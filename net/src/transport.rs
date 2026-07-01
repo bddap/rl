@@ -69,17 +69,14 @@ pub(crate) enum Frame {
     /// A client→server [`JoinRequest`]: a would-be joiner's credentials when it dials a live match
     /// (Stage 3 mid-game join, rl#151).
     JoinRequest = 3,
-    /// A server→client [`Admission`]: the roster change for a mid-game join, broadcast DOWN to every
-    /// client (incumbents schedule it; the joiner builds its session from it). Stage 3, rl#151.
-    RosterChange = 4,
+    // Byte 4 was the retired broadcast roster-change frame: incumbents now learn a mid-game join
+    // from the roster on every `Snapshot`, so nothing schedules roster changes client-side.
     /// A server→joiner refusal: the joiner's weight/collider digests disagreed, so it is turned away
     /// LOUDLY rather than admitted onto a wrong crab. Stage 3, rl#151.
     Refuse = 5,
     /// A server→JOINER welcome: the [`Admission`] the host allocated for THIS joiner, sent UNICAST
-    /// to it alone. Distinct from the broadcast [`Frame::RosterChange`] (which incumbents schedule)
-    /// precisely so a joiner can't mistake a concurrent joiner's broadcast change for its OWN
-    /// allocation and adopt the wrong [`crate::sim::PlayerId`]. Same payload as `RosterChange`.
-    /// Stage 3, rl#151.
+    /// to it alone so a joiner can't mistake a concurrent joiner's allocation for its OWN (which
+    /// would adopt the wrong [`crate::sim::PlayerId`]). Stage 3, rl#151.
     Welcome = 6,
     /// A server→client [`CoreSnapshot`]: the host-authoritative full game state for one tick
     /// (rl#151 increment 2). Under host-authority a remote client no longer re-steps the sim from a
@@ -101,7 +98,6 @@ impl Frame {
             0 => Some(Frame::Tick),
             1 => Some(Frame::Beat),
             3 => Some(Frame::JoinRequest),
-            4 => Some(Frame::RosterChange),
             5 => Some(Frame::Refuse),
             6 => Some(Frame::Welcome),
             7 => Some(Frame::Snapshot),
@@ -122,14 +118,12 @@ pub enum PeerWire {
     Beat(Beat),
     /// A would-be joiner's credentials, received by the host on a live-match dial (Stage 3).
     JoinRequest(JoinRequest),
-    /// A roster change ([`Admission`]), received by a client: incumbents schedule it (Stage 3).
-    RosterChange(Admission),
     /// A refusal reason, received by a turned-away joiner (Stage 3) — surfaced loudly, never a
     /// silent drop.
     Refuse(String),
     /// THIS joiner's own [`Admission`], unicast by the host — the joiner builds its session from it
-    /// ([`crate::lockstep::Lockstep::join_at`]). Distinct from [`Self::RosterChange`] so it can't
-    /// confuse another joiner's broadcast change for its own allocation (Stage 3).
+    /// ([`crate::lockstep::Lockstep::join_at`]). Unicast so it can't confuse a concurrent joiner's
+    /// allocation for its own (Stage 3).
     Welcome(Admission),
     /// The host-authoritative full game state for one tick, received by a remote client (rl#151
     /// increment 2). The client adopts it via [`crate::lockstep::Lockstep::apply_core_snapshot`]
@@ -272,12 +266,12 @@ impl Codec for JoinRequest {
 }
 
 impl Codec for Admission {
-    const KIND: Frame = Frame::RosterChange;
+    const KIND: Frame = Frame::Welcome;
     type Bytes = Vec<u8>;
 
     /// `pid(1) | effective_tick(8) | u16 roster_len | roster pids…`. The seed is NOT carried — it is
     /// the shared build constant (`MATCH_SEED`) every peer already holds, so the joiner reuses it for
-    /// `join_at`. A [`Welcome`] frames this SAME body under a different kind.
+    /// `join_at`.
     fn encode(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(1 + 8 + 2 + self.roster.len());
         b.push(self.pid.0);
@@ -298,25 +292,8 @@ impl Codec for Admission {
         for _ in 0..n {
             roster.push(PlayerId(take(&mut r, 1, "roster pid")?[0]));
         }
-        anyhow::ensure!(r.is_empty(), "roster-change frame has {} trailing bytes", r.len());
+        anyhow::ensure!(r.is_empty(), "welcome frame has {} trailing bytes", r.len());
         Ok(Admission { pid, effective_tick, roster })
-    }
-}
-
-/// The unicast WELCOME role of an [`Admission`]: the SAME body as a broadcast [`Frame::RosterChange`]
-/// under a distinct kind, so a just-admitted joiner reads only its OWN allocation and never mistakes
-/// a concurrent joiner's broadcast change for its own (which would hand it the wrong
-/// [`crate::sim::PlayerId`]). Stage 3, rl#151.
-pub(crate) struct Welcome(pub Admission);
-
-impl Codec for Welcome {
-    const KIND: Frame = Frame::Welcome;
-    type Bytes = Vec<u8>;
-    fn encode(&self) -> Vec<u8> {
-        self.0.encode()
-    }
-    fn decode(body: &[u8]) -> Result<Self> {
-        Ok(Welcome(Admission::decode(body)?))
     }
 }
 
@@ -514,8 +491,8 @@ impl Session {
         self.send_frame(peer, M::KIND, bytes.as_ref()).await;
     }
 
-    /// Frame `msg` and send it to every connected peer — the single fan-out primitive (the
-    /// server-assembled [`crate::server::TickSet`], a roster-change [`Admission`], a formation [`Beat`]). The body is
+    /// Frame `msg` and send it to every connected peer — the single fan-out primitive (a
+    /// [`CoreSnapshot`], a [`CrabArticulation`], a formation [`Beat`]). The body is
     /// identical for all, so one write reaches them; a dead peer is dropped inside
     /// [`Session::broadcast_frame`], never blocking the others.
     pub(crate) async fn broadcast<M: Codec>(&self, msg: &M) {
@@ -798,15 +775,12 @@ async fn read_loop(
             .with_context(|| format!("unknown frame kind {:#x}", buf[0]))?;
         let body = &buf[1..];
         // Each arm is one line: the kind names the [`Codec`] type, which decodes its own body.
-        // Welcome and RosterChange share the [`Admission`] body but stay distinct kinds so the
-        // joiner reads only its OWN allocation, never an incumbent's broadcast notice.
         let msg = match kind {
             Frame::Tick => PeerWire::Tick(TickMsg::decode(body)?),
             Frame::Beat => PeerWire::Beat(Beat::decode(body)?),
             Frame::JoinRequest => PeerWire::JoinRequest(JoinRequest::decode(body)?),
-            Frame::RosterChange => PeerWire::RosterChange(Admission::decode(body)?),
             Frame::Refuse => PeerWire::Refuse(Refuse::decode(body)?.0),
-            Frame::Welcome => PeerWire::Welcome(Welcome::decode(body)?.0),
+            Frame::Welcome => PeerWire::Welcome(Admission::decode(body)?),
             Frame::Snapshot => PeerWire::Snapshot(CoreSnapshot::decode(body)?),
             Frame::Articulation => PeerWire::Articulation(CrabArticulation::decode(body)?),
         };
@@ -859,7 +833,8 @@ mod tests {
         // byte 2 was the retired server→client `TickSet` frame; it is now a rejected kind.
         assert_eq!(Frame::from_byte(2), None);
         assert_eq!(Frame::from_byte(3), Some(Frame::JoinRequest));
-        assert_eq!(Frame::from_byte(4), Some(Frame::RosterChange));
+        // byte 4 was the retired broadcast roster-change frame; it is now a rejected kind.
+        assert_eq!(Frame::from_byte(4), None);
         assert_eq!(Frame::from_byte(5), Some(Frame::Refuse));
         assert_eq!(Frame::from_byte(6), Some(Frame::Welcome));
         assert_eq!(Frame::from_byte(7), Some(Frame::Snapshot));
@@ -910,7 +885,7 @@ mod tests {
     }
 
     #[test]
-    fn roster_change_wire_roundtrips() {
+    fn welcome_wire_roundtrips() {
         use crate::sim::PlayerId;
         // The empty-roster edge and a multi-member roster both round-trip byte-for-byte.
         for roster in [vec![], vec![PlayerId(0), PlayerId(1), PlayerId(2)]] {

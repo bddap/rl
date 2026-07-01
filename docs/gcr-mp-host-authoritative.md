@@ -1,8 +1,8 @@
 # GCR Multiplayer: host-authoritative state-resync (rl#151, the post-lockstep design)
 
-Status: **design, reviewer-looped (5 lenses + one round past).** Supersedes bit-exact
-lockstep for the join path. Implementation lands as the increment sequence below (each
-compiles headless **and** render, has a test, keeps single-player playable). Owner
+Status: **SHIPPED (rl#151, complete 2026-07-01)** — the increment sequence below is
+implemented; this doc is the design record. Supersedes bit-exact lockstep for the join
+path (each increment compiled headless **and** render, has a test). Owner
 direction realized: Minecraft-model client/server ([[mp-minecraft-model]]), SP =
 MP-zero-remote one path ([[sp-is-mp-special-case]]), determinism downgraded to
 cool-to-have ([[gcr-nn-crab-determinism-hard-req]]), real-Sally-or-loud-refuse
