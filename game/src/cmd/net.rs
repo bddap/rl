@@ -176,9 +176,10 @@ async fn run_net(args: Args) -> Result<()> {
                 // nothing, so it decodes and drops it. Only the windowed client applies it.
                 transport::PeerWire::Articulation(_) => {}
                 transport::PeerWire::Beat(_) => {}
-                // A `TickSet` (server→client input set) is the pre-increment-2 remote path; a `/6`
-                // host no longer broadcasts one (it ships snapshots), and the ALPN bump keeps a `/5`
-                // peer off the wire entirely, so one arriving here is a stray to ignore, not re-step.
+                // A `TickSet` (server→client input set) is the pre-increment-2 remote path; a host
+                // on the current ALPN no longer broadcasts one (it ships snapshots), and the ALPN
+                // bump keeps a pre-snapshot peer off the wire entirely, so one arriving here is a
+                // stray to ignore, not re-step.
                 transport::PeerWire::TickSet(_) => {}
                 // This is a FIXED-roster run: the peer set is frozen at discovery and never
                 // grows, so the Stage 3 live-join frames (a joiner's credentials, a roster

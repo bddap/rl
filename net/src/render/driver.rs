@@ -148,6 +148,37 @@ impl InputSource {
     }
 }
 
+/// This peer's fixed role for a round — the ONE axis every per-tick branch in [`drive_lockstep`]
+/// dispatches on, so "which role" lives in one place and the impossible both-server-and-client
+/// state a pair of bools would allow can't exist (make-illegal-states-unrepresentable). It's the
+/// render-side mirror of the coordinator's own arms ([`Coordinator::Server`]/[`Coordinator::Client`]
+/// + the scripted harness), NOT an SP/MP split — solo and host are the same [`PeerRole::ServerAuth`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PeerRole {
+    /// Solo or host: this peer runs the authoritative server, steps it, and RENDERS the snapshot it
+    /// emits (rl#151 increment 1) — plus, when hosting, broadcasts state DOWN to remote clients.
+    ServerAuth,
+    /// A remote client (rl#151 increment 2 windowed): ADOPTS the host's snapshot into its own sim
+    /// (no re-sim) and poses its frozen crab from the articulation, pumping no physics of its own.
+    RemoteAdopt,
+    /// The headless scripted screenshot harness: no transport, so it steps its own lockstep against
+    /// stand-in peer inputs.
+    Scripted,
+}
+
+impl PeerRole {
+    fn of(state: &GameState) -> Self {
+        if state.server().is_some() {
+            PeerRole::ServerAuth
+        } else if matches!(&state.input_source, InputSource::Coordinated(c) if c.is_remote_client())
+        {
+            PeerRole::RemoteAdopt
+        } else {
+            PeerRole::Scripted
+        }
+    }
+}
+
 /// The networked sim, owned as a non-send Bevy resource and stepped on a
 /// fixed-timestep accumulator. Non-send because [`NetDriver`] holds a tokio runtime
 /// + the iroh session (not `Sync`); only the main thread drives it, so that's fine.
@@ -589,22 +620,10 @@ pub(super) fn drive_lockstep(
         .get_resource::<crate::external_crab::ExternalCrabArmed>()
         .is_some();
 
-    // Whether THIS peer runs the authoritative server for the round (solo or host): its local client
-    // RENDERS the per-tick snapshot the server emits instead of stepping a sim of its own (rl#151
-    // increment 1). Fixed for the round. A remote client and the headless scripted screenshot harness
-    // keep the legacy lockstep advance below (the remote path migrates onto the snapshot in
-    // increment 2). This is the Minecraft-model server/client role, NOT an SP/MP split — solo and
-    // host take the SAME authoritative arm ([[sp-is-mp-special-case]]).
-    let server_auth = world.non_send_resource::<GameState>().server().is_some();
-
-    // Whether THIS peer is a REMOTE client (rl#151 increment 2 windowed): it ADOPTS the host's
-    // per-tick snapshot into its own sim and renders the host's crab pose from the articulation
-    // frame, never pumping its own crab physics or stepping the sim. Fixed for the round. Distinct
-    // from the scripted screenshot harness (also `!server_auth`), which self-sims below.
-    let remote_adopt = matches!(
-        &world.non_send_resource::<GameState>().input_source,
-        InputSource::Coordinated(c) if c.is_remote_client()
-    );
+    // THIS peer's role for the round — fixed once, one source of truth for every branch below, so
+    // "which role" can't drift or reach the impossible both-server-and-adopt state a pair of bools
+    // would allow (make-illegal-states-unrepresentable). It mirrors the coordinator's own arms.
+    let role = PeerRole::of(world.non_send_resource::<GameState>());
 
     let delta = world.resource::<Time>().delta().as_secs_f64();
 
@@ -757,33 +776,40 @@ pub(super) fn drive_lockstep(
             // - LEGACY (scripted screenshot harness): records the stand-in peer inputs and advances
             //   its own lockstep itself below.
             let mut faults = Vec::new();
-            if server_auth {
-                // handled by the server step + snapshot render below
-            } else if remote_adopt {
-                // Adopt every newer snapshot in tick order (a full state supersedes an older one), so
-                // the client's sim tracks the host's without ever stepping itself.
-                let mut snaps = exch.snapshots;
-                snaps.sort_by_key(|s| s.tick);
-                for snap in snaps {
-                    if snap.tick > state.ls.sim().tick() {
+            match role {
+                // Handled by the server step + snapshot render below.
+                PeerRole::ServerAuth => {}
+                PeerRole::RemoteAdopt => {
+                    // Adopt the host's NEWEST state. Frames arrive in send order on the reliable
+                    // per-peer QUIC stream, so the LAST drained snapshot is the newest — apply it
+                    // (not a tick-`max`/`>` gate, which would silently reject the tick-0 snapshots a
+                    // host RESTART rebroadcasts and freeze the client on stale pre-restart state).
+                    if let Some(snap) = exch.snapshots.into_iter().next_back() {
+                        // Refresh the interpolation source from the PRE-adopt state, exactly as the
+                        // stepping arms do before advancing — else `apply_transforms` would tween
+                        // avatars + the FP camera from the tick-0 spawn every frame (a per-frame snap
+                        // toward spawn), since this arm skips the drain loop that owns `prev`.
+                        state.prev = SimSnapshot::capture(&state.ls);
                         state.ls.apply_core_snapshot(snap);
                     }
+                    // Newest crab pose (last-arrived, same reliable-stream reasoning) — applied to
+                    // the World once `state` is released.
+                    pending_art = exch.articulations.into_iter().next_back();
                 }
-                // Newest crab pose (highest tick) — applied to the World once `state` is released.
-                pending_art = exch.articulations.into_iter().max_by_key(|a| a.tick);
-            } else {
-                // Schedule any roster change BEFORE recording inputs: a mid-game join the host
-                // admitted or this client learned over the wire. `effective_tick` is JOIN_LEAD
-                // ahead, so applying it now (well before the boundary) lets `advance_one` rebuild the
-                // round in lockstep on every peer.
-                for adm in &exch.roster_changes {
-                    state.ls.schedule_roster_change(adm.effective_tick, &adm.roster);
-                }
-                for from in exch.peer_msgs {
-                    if from.pid != me
-                        && let Some(fault) = state.ls.record_remote(from.pid, from.msg)
-                    {
-                        faults.push(fault);
+                PeerRole::Scripted => {
+                    // Schedule any roster change BEFORE recording inputs: a mid-game join the host
+                    // admitted or this client learned over the wire. `effective_tick` is JOIN_LEAD
+                    // ahead, so applying it now (well before the boundary) lets `advance_one` rebuild
+                    // the round in lockstep on every peer.
+                    for adm in &exch.roster_changes {
+                        state.ls.schedule_roster_change(adm.effective_tick, &adm.roster);
+                    }
+                    for from in exch.peer_msgs {
+                        if from.pid != me
+                            && let Some(fault) = state.ls.record_remote(from.pid, from.msg)
+                        {
+                            faults.push(fault);
+                        }
                     }
                 }
             }
@@ -849,7 +875,7 @@ pub(super) fn drive_lockstep(
         loop {
             // A remote adopt client ran no sim to drain — it took the host's snapshot above and
             // renders from the articulation, never stepping. Nothing to apply here.
-            if remote_adopt {
+            if role == PeerRole::RemoteAdopt {
                 break;
             }
             // Ready? The authoritative server gates on its own ledger/warmup; a legacy client gates
@@ -871,7 +897,7 @@ pub(super) fn drive_lockstep(
                 state.prev = SimSnapshot::capture(&state.ls);
             }
 
-            if server_auth {
+            if role == PeerRole::ServerAuth {
                 // Pump this tick's crab physics, read the resulting pose, and aim the crab at the
                 // AUTHORITATIVE server sim's nearest living player (pre-step, exactly where
                 // `sync_external_crab` reads it on the legacy arm).
