@@ -383,27 +383,29 @@ fn pad_axes_are_not_pre_negated() {
     );
 }
 
-/// The PLANE control bridge. Pins the directions the cockpit legend rides, above all the INTUITIVE
-/// (de-inverted) pitch (the owner's complaint that the old AC6 inversion felt backwards): pushing the
-/// left stick UP must raise the nose, matching the ship's aim and the on-foot look. Also pins the
-/// VEHICLE_STICK_SENS scaling of the analog attitude stick (the "too sensitive" fix).
+/// The PLANE control bridge. Pins the directions the cockpit legend rides: the AC6 / flight-sim pitch
+/// the owner asked for (pull the stick BACK to raise the nose) and the roll's body-pose/screen
+/// reconciliation (stick-right banks right — negated like the ship strafe/yaw so body +X, which
+/// renders SCREEN-LEFT, doesn't reverse it). Also pins the VEHICLE_STICK_SENS scaling of the analog
+/// attitude stick (the "too sensitive" fix).
 #[test]
-fn plane_flight_control_pitch_is_intuitive_and_scaled() {
+fn plane_flight_control_pitch_is_ac6_and_scaled() {
     let plane = |fi: FlightInput| flight_control(VehicleKind::Plane, &fi);
-    // Intuitive pitch: stick UP (left.y > 0) → nose UP (pitch > 0); stick down → nose down.
-    assert!(plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
-    assert!(plane(FlightInput { left: Vec2::new(0.0, -1.0), ..default() }).pitch < 0.0);
-    // Mouse UP (screen −y) also raises the nose (camera-style, matching the ship).
-    assert!(plane(FlightInput { mouse: Vec2::new(0.0, -1.0), ..default() }).pitch > 0.0);
+    // AC6 pitch: pull the stick BACK/DOWN (left.y < 0) → nose UP (pitch > 0); push up → nose down.
+    assert!(plane(FlightInput { left: Vec2::new(0.0, -1.0), ..default() }).pitch > 0.0);
+    assert!(plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).pitch < 0.0);
+    // Mouse BACK (screen +y, drag down) also raises the nose (flight-sim, the pre-9e3d3b47 feel the
+    // owner praised).
+    assert!(plane(FlightInput { mouse: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
     // The analog attitude stick is scaled by VEHICLE_STICK_SENS, not raw: full deflection commands a
     // fraction of full authority (the controller "too sensitive" fix). Mouse keeps its own scale.
-    let full = plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() });
-    assert!((full.pitch - VEHICLE_STICK_SENS).abs() < 1e-6, "full-up stick → VEHICLE_STICK_SENS pitch");
+    let full = plane(FlightInput { left: Vec2::new(0.0, -1.0), ..default() });
+    assert!((full.pitch - VEHICLE_STICK_SENS).abs() < 1e-6, "full-back stick → VEHICLE_STICK_SENS pitch");
     let rolled = plane(FlightInput { left: Vec2::new(1.0, 0.0), ..default() });
-    assert!((rolled.roll - VEHICLE_STICK_SENS).abs() < 1e-6, "full-right stick → VEHICLE_STICK_SENS roll");
-    // Roll: stick right → bank right (+roll), with a coordinating yaw the SAME sign (turns, not just
-    // rolls).
-    assert!(rolled.roll > 0.0 && rolled.yaw > 0.0, "right stick → bank right + coordinated yaw");
+    assert!((rolled.roll + VEHICLE_STICK_SENS).abs() < 1e-6, "full-right stick → −VEHICLE_STICK_SENS roll (screen-reconciled)");
+    // Roll: stick right → bank right — the reconciled roll is NEGATIVE (body +X renders screen-left),
+    // and the coordinating yaw rides it the SAME sign (turns screen-right, not just rolls).
+    assert!(rolled.roll < 0.0 && rolled.yaw < 0.0, "right stick → bank right (−roll) + coordinated yaw");
     // Throttle: RT accelerates (+), LT brakes (−). Rudder: RB right (+yaw), LB left (−yaw).
     assert!(plane(FlightInput { rt: 1.0, ..default() }).throttle_trim > 0.0);
     assert!(plane(FlightInput { lt: 1.0, ..default() }).throttle_trim < 0.0);

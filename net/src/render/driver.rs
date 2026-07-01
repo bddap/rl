@@ -280,8 +280,9 @@ const PLANE_TURN_COORDINATION: f32 = 0.3;
 pub(super) const VEHICLE_STICK_SENS: f32 = 0.5;
 
 /// The per-craft [`VehicleControl`] intents a set of raw [`FlightInput`]s produces. Pure (no World)
-/// so a test can pin the directions — the intuitive (push-up = nose-up) pitch shared by both craft,
-/// the ship's 6-DOF thrust axes, and the [`VEHICLE_STICK_SENS`] scaling — without spinning a Bevy app.
+/// so a test can pin the directions — the plane's AC6 pitch (pull back = nose up) vs the ship's
+/// camera-style aim, both craft's screen-reconciled horizontal, the ship's 6-DOF thrust axes, and the
+/// [`VEHICLE_STICK_SENS`] scaling — without spinning a Bevy app.
 #[derive(Debug, Default, PartialEq)]
 pub(super) struct FlightControl {
     pub throttle_trim: f32,
@@ -293,9 +294,10 @@ pub(super) struct FlightControl {
 }
 
 /// Map raw flight inputs to the shared force-model intents, per craft:
-/// - **Plane (AC6)**: left stick (or mouse) flies — pitch (push up = nose up, intuitive) + roll, with
-///   a coordinating yaw; RT/LT (or W/S) trim the throttle lever; bumpers (or A/D) are the rudder. No
-///   direct thrusters (the plane thrusts through its lever). Right stick is the camera (unused here).
+/// - **Plane (AC6)**: left stick (or mouse) flies — pitch (AC6 flight-sim: pull back = nose UP) + roll
+///   (negated for the body-pose/screen reconciliation, like the ship), with a coordinating yaw; RT/LT
+///   (or W/S) trim the throttle lever; bumpers (or A/D) are the rudder. No direct thrusters (the plane
+///   thrusts through its lever). Right stick is the camera (unused here).
 /// - **Ship (Outer Wilds)**: left stick (or WASD) fires the body-frame thrusters (strafe/forward),
 ///   RT/LT thrust up/down; right stick (or mouse) AIMS (pitch camera-style/not-inverted, yaw negated
 ///   with strafe so stick-right reads screen-right); bumpers roll; A/Space matches velocity. No
@@ -304,12 +306,20 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
     let clamp = |x: f32| x.clamp(-1.0, 1.0);
     match kind {
         VehicleKind::Plane => {
-            // Intuitive (camera-style) pitch — the owner found the old AC6 inversion backwards on the
-            // controller: push the stick UP (left.y > 0) → nose UP, matching the ship's aim and the
-            // on-foot look. Mouse up (mouse.y < 0) also noses up. The analog stick is scaled by
-            // VEHICLE_STICK_SENS (the "too sensitive" fix); the mouse keeps its own FLIGHT_MOUSE_SENS.
-            let pitch = clamp(fi.left.y * VEHICLE_STICK_SENS - fi.mouse.y);
-            let roll = clamp(fi.left.x * VEHICLE_STICK_SENS + fi.mouse.x);
+            // Pitch: the AC6 / flight-sim convention the owner asked for ("same plane control mapping
+            // as Ace Combat 6", "actual flight simulator like controls") — pull the stick DOWN/back
+            // (left.y < 0), or the mouse back (down, mouse.y > 0), to raise the nose. This DELIBERATELY
+            // runs pitch (stick AND mouse) opposite the ship's camera-style aim and the on-foot look —
+            // a plane pulls back to climb — so don't "unify" it back; stick and mouse agree with each
+            // OTHER here, which is the property that matters. Analog stick scaled by VEHICLE_STICK_SENS
+            // (the "too sensitive" fix); the mouse keeps FLIGHT_MOUSE_SENS.
+            let pitch = clamp(-fi.left.y * VEHICLE_STICK_SENS + fi.mouse.y);
+            // Roll: stick/mouse RIGHT banks right. NEGATED for the SAME body-pose/screen reconciliation
+            // the ship strafe/yaw and the foot controls apply (see `gather_input` + the Ship arm): the
+            // cockpit camera flies from the body pose looking along body +Z, so body +X renders
+            // SCREEN-LEFT — without the negation, stick-right banked left. The coordinating yaw below
+            // rides this reconciled roll, so a right bank turns the nose screen-right too.
+            let roll = clamp(-(fi.left.x * VEHICLE_STICK_SENS + fi.mouse.x));
             // Rudder (bumpers / A,D) plus the coordinating yaw that turns a bank into a turn.
             let rudder = (fi.rb as i32 - fi.lb as i32) as f32 + fi.wasd.x;
             let yaw = clamp(rudder + PLANE_TURN_COORDINATION * roll);
