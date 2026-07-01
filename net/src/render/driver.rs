@@ -421,13 +421,23 @@ impl FlightControl {
     /// Write these per-craft intents into the shared [`VehicleControl`] the force model reads.
     /// `active`/`kind` are the caller's (they drive spawn/despawn); this copies only the force axes,
     /// so on foot the caller writes `FlightControl::default()` (all zero) to leave no stale command.
+    /// The exhaustive destructure (no `..`) makes a new `FlightControl` axis a COMPILE error here
+    /// rather than a silently-dropped command.
     fn write_into(&self, ctrl: &mut VehicleControl) {
-        ctrl.throttle_trim = self.throttle_trim;
-        ctrl.thrust = self.thrust;
-        ctrl.pitch = self.pitch;
-        ctrl.roll = self.roll;
-        ctrl.yaw = self.yaw;
-        ctrl.match_velocity = self.match_velocity;
+        let FlightControl {
+            throttle_trim,
+            thrust,
+            pitch,
+            roll,
+            yaw,
+            match_velocity,
+        } = *self;
+        ctrl.throttle_trim = throttle_trim;
+        ctrl.thrust = thrust;
+        ctrl.pitch = pitch;
+        ctrl.roll = roll;
+        ctrl.yaw = yaw;
+        ctrl.match_velocity = match_velocity;
     }
 }
 

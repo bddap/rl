@@ -44,8 +44,11 @@ use crate::snapshot::CoreSnapshot;
 /// rather than silently diverge. `/7` added the render-only [`Frame::Articulation`] the windowed
 /// host broadcasts beside each snapshot (rl#151 increment 2 windowed) so a joiner renders the
 /// host's exact crab pose without running its own physics; a `/6` peer would reject the unknown
-/// kind mid-stream, so the bump makes the two refuse to connect instead.
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/7";
+/// kind mid-stream, so the bump makes the two refuse to connect instead. `/8` shrank the
+/// per-tick [`crate::sim::Input`] wire frame (`WIRE_LEN` 9→7: the vestigial vehicle `look_pitch`
+/// axis left the foot-only input, rl#43 part 1), so a `/7` peer would mis-frame every tick against
+/// a `/8` peer — the bump makes them refuse rather than silently desync on a byte offset.
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/8";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
