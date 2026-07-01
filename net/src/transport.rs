@@ -23,24 +23,24 @@ use tokio::sync::mpsc;
 
 use crate::lockstep::TickMsg;
 use crate::membership::{self, Beat};
-use crate::server::{Admission, JoinRequest, TickSet};
-use crate::sim::{Input, PlayerId};
+use crate::server::{Admission, JoinRequest};
+use crate::sim::PlayerId;
 use crate::articulation::CrabArticulation;
 use crate::snapshot::CoreSnapshot;
 
 /// ALPN for the game's wire. The framing is `[len:u32 LE][kind:u8][body]`, where
 /// `kind` ([`Frame`]) selects a client→server [`TickMsg`] (an input), a server→client
-/// [`TickSet`] (the assembled input set), or a [`Beat`] (the match-formation barrier channel
+/// [`crate::server::TickSet`] (the assembled input set), or a [`Beat`] (the match-formation barrier channel
 /// — rl#44). Bumped on any incompatible wire change so mismatched builds refuse to connect
 /// rather than desync. `/1` added the kind byte + the barrier channel over `/0`'s bare-TickMsg
 /// stream; `/2` added the host's start-GO byte to every [`Beat`] (rl#58), shifting the
 /// barrier-frame layout; `/3` added the per-peer policy-weights digest to every [`Beat`]
 /// (rl#82, GCR); `/4` replaced the P2P tick MESH with the server-coordinated model (rl#151):
-/// inputs go UP to the server as [`TickMsg`]s, the server broadcasts the complete [`TickSet`]
+/// inputs go UP to the server as [`TickMsg`]s, the server broadcasts the complete [`crate::server::TickSet`]
 /// DOWN — a new frame kind and a topology the old mesh peers can't speak.
 /// `/6` added the host-authoritative [`Frame::Snapshot`] (rl#151 increment 2): the host
 /// broadcasts full game STATE down, not the input set, so a `/5` peer (which expects
-/// [`TickSet`]s and re-steps) and a `/6` peer can't interoperate — the bump makes them refuse
+/// [`crate::server::TickSet`]s and re-steps) and a `/6` peer can't interoperate — the bump makes them refuse
 /// rather than silently diverge. `/7` added the render-only [`Frame::Articulation`] the windowed
 /// host broadcasts beside each snapshot (rl#151 increment 2 windowed) so a joiner renders the
 /// host's exact crab pose without running its own physics; a `/6` peer would reject the unknown
@@ -66,8 +66,6 @@ pub(crate) enum Frame {
     Tick = 0,
     /// A [`Beat`]: heartbeat + roster advertisement for the formation barrier (rl#44).
     Beat = 1,
-    /// A server→client [`TickSet`]: the complete input set for one tick (rl#151).
-    TickSet = 2,
     /// A client→server [`JoinRequest`]: a would-be joiner's credentials when it dials a live match
     /// (Stage 3 mid-game join, rl#151).
     JoinRequest = 3,
@@ -85,7 +83,7 @@ pub(crate) enum Frame {
     Welcome = 6,
     /// A server→client [`CoreSnapshot`]: the host-authoritative full game state for one tick
     /// (rl#151 increment 2). Under host-authority a remote client no longer re-steps the sim from a
-    /// [`Frame::TickSet`]; it ADOPTS this snapshot whole (state on the wire, not inputs), so the
+    /// server-broadcast input set; it ADOPTS this snapshot whole (state on the wire, not inputs), so the
     /// warm-vs-cold physics divergence that killed lockstep join never crosses the link. The `tick`
     /// inside is the version — a client applies the highest it has seen and drops older arrivals.
     Snapshot = 7,
@@ -102,7 +100,6 @@ impl Frame {
         match b {
             0 => Some(Frame::Tick),
             1 => Some(Frame::Beat),
-            2 => Some(Frame::TickSet),
             3 => Some(Frame::JoinRequest),
             4 => Some(Frame::RosterChange),
             5 => Some(Frame::Refuse),
@@ -123,8 +120,6 @@ pub enum PeerWire {
     /// A client's input, received by the server.
     Tick(TickMsg),
     Beat(Beat),
-    /// The server's assembled input set for a tick, received by a client.
-    TickSet(TickSet),
     /// A would-be joiner's credentials, received by the host on a live-match dial (Stage 3).
     JoinRequest(JoinRequest),
     /// A roster change ([`Admission`]), received by a client: incumbents schedule it (Stage 3).
@@ -204,38 +199,6 @@ fn take<'a>(r: &mut &'a [u8], n: usize, what: &str) -> Result<&'a [u8]> {
     let (head, tail) = r.split_at(n);
     *r = tail;
     Ok(head)
-}
-
-impl Codec for TickSet {
-    const KIND: Frame = Frame::TickSet;
-    type Bytes = Vec<u8>;
-
-    /// apply_tick(8) | u16 input count | `(pid, input)`…. `u16` count because a roster can reach 256
-    /// players (a `u8` count would overflow at the max), even though couch play is far smaller.
-    fn encode(&self) -> Vec<u8> {
-        let mut b = Vec::with_capacity(8 + 2 + self.inputs.len() * (1 + IN_LEN));
-        b.extend_from_slice(&self.apply_tick.to_le_bytes());
-        b.extend_from_slice(&(self.inputs.len() as u16).to_le_bytes());
-        for (pid, input) in &self.inputs {
-            b.push(pid.0);
-            b.extend_from_slice(&input.to_bytes());
-        }
-        b
-    }
-
-    fn decode(body: &[u8]) -> Result<Self> {
-        let mut r = body;
-        let apply_tick = u64::from_le_bytes(take(&mut r, 8, "apply_tick")?.try_into().unwrap());
-        let n_inputs = u16::from_le_bytes(take(&mut r, 2, "input count")?.try_into().unwrap());
-        let mut inputs = BTreeMap::new();
-        for _ in 0..n_inputs {
-            let pid = PlayerId(take(&mut r, 1, "input player")?[0]);
-            let input = Input::from_bytes(take(&mut r, IN_LEN, "input")?.try_into().unwrap());
-            inputs.insert(pid, input);
-        }
-        anyhow::ensure!(r.is_empty(), "tick-set frame has {} trailing bytes", r.len());
-        Ok(TickSet { apply_tick, inputs })
-    }
 }
 
 impl Codec for CoreSnapshot {
@@ -552,7 +515,7 @@ impl Session {
     }
 
     /// Frame `msg` and send it to every connected peer — the single fan-out primitive (the
-    /// server-assembled [`TickSet`], a roster-change [`Admission`], a formation [`Beat`]). The body is
+    /// server-assembled [`crate::server::TickSet`], a roster-change [`Admission`], a formation [`Beat`]). The body is
     /// identical for all, so one write reaches them; a dead peer is dropped inside
     /// [`Session::broadcast_frame`], never blocking the others.
     pub(crate) async fn broadcast<M: Codec>(&self, msg: &M) {
@@ -840,7 +803,6 @@ async fn read_loop(
         let msg = match kind {
             Frame::Tick => PeerWire::Tick(TickMsg::decode(body)?),
             Frame::Beat => PeerWire::Beat(Beat::decode(body)?),
-            Frame::TickSet => PeerWire::TickSet(TickSet::decode(body)?),
             Frame::JoinRequest => PeerWire::JoinRequest(JoinRequest::decode(body)?),
             Frame::RosterChange => PeerWire::RosterChange(Admission::decode(body)?),
             Frame::Refuse => PeerWire::Refuse(Refuse::decode(body)?.0),
@@ -894,7 +856,8 @@ mod tests {
         // mismatch the read loop surfaces as an error).
         assert_eq!(Frame::from_byte(0), Some(Frame::Tick));
         assert_eq!(Frame::from_byte(1), Some(Frame::Beat));
-        assert_eq!(Frame::from_byte(2), Some(Frame::TickSet));
+        // byte 2 was the retired server→client `TickSet` frame; it is now a rejected kind.
+        assert_eq!(Frame::from_byte(2), None);
         assert_eq!(Frame::from_byte(3), Some(Frame::JoinRequest));
         assert_eq!(Frame::from_byte(4), Some(Frame::RosterChange));
         assert_eq!(Frame::from_byte(5), Some(Frame::Refuse));
@@ -964,32 +927,4 @@ mod tests {
         assert!(Admission::decode(&body).is_err());
     }
 
-    #[test]
-    fn tickset_wire_roundtrips() {
-        use crate::sim::PlayerId;
-        use std::collections::BTreeMap;
-        // A multi-player complete input set round-trips byte-for-byte.
-        let set = TickSet {
-            apply_tick: 99,
-            inputs: BTreeMap::from([
-                (PlayerId(0), Input::from_axes(0.5, -0.5)),
-                (PlayerId(1), Input::from_axes(-1.0, 0.25)),
-            ]),
-        };
-        let body = TickSet::encode(&set);
-        assert_eq!(TickSet::decode(&body).unwrap(), set);
-    }
-
-    #[test]
-    fn truncated_tickset_is_an_error_not_a_short_set() {
-        use crate::sim::PlayerId;
-        use std::collections::BTreeMap;
-        let set = TickSet {
-            apply_tick: 1,
-            inputs: BTreeMap::from([(PlayerId(0), Input::from_axes(1.0, 0.0))]),
-        };
-        let body = TickSet::encode(&set);
-        // Lop off the last byte: decode must fail loudly rather than yield a corrupt/short set.
-        assert!(TickSet::decode(&body[..body.len() - 1]).is_err());
-    }
 }

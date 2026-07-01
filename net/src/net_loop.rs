@@ -34,7 +34,7 @@ use crate::articulation::CrabArticulation;
 use crate::lockstep::{Lockstep, TickMsg};
 use crate::snapshot::CoreSnapshot;
 use crate::membership::{BEAT_EVERY, Membership, Role, Status};
-use crate::server::{self, Admission, JoinRequest, Server, TickSet, may_admit_joiner};
+use crate::server::{self, Admission, JoinRequest, Server, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::telemetry::{self, TelemetryEvent, TelemetrySender};
 use crate::transport::{self, PeerWire, Session};
@@ -234,22 +234,6 @@ impl NetDriver {
             .block_on(self.session.send(eid, &transport::Refuse(reason.to_string())));
     }
 
-    /// (Host) Broadcast the server-assembled sets DOWN to every client. Non-blocking buffered QUIC
-    /// writes; a dead client is dropped inside the session, not awaited. Superseded on the windowed
-    /// path by [`broadcast_snapshot`](Self::broadcast_snapshot) (rl#151 increment 2 windowed — the
-    /// host ships STATE, not the input set); retained for the still-present lockstep machinery
-    /// increment 5 removes.
-    pub fn broadcast_ticksets(&self, sets: &[TickSet]) {
-        if sets.is_empty() {
-            return;
-        }
-        self.rt.block_on(async {
-            for s in sets {
-                self.session.broadcast(s).await;
-            }
-        });
-    }
-
     /// (Host) Broadcast the host-authoritative [`CoreSnapshot`] DOWN to every client (rl#151
     /// increment 2 windowed): the windowed host ships the full game STATE its client just adopted,
     /// so a remote client renders it instead of re-stepping. Non-blocking buffered QUIC writes.
@@ -265,11 +249,10 @@ impl NetDriver {
     }
 
     /// (Client) Drain everything the server sent DOWN this tick: host-authoritative
-    /// [`CoreSnapshot`]s (rl#151 increment 2 windowed — the client ADOPTS them, never re-steps a
-    /// [`TickSet`]), the render-only [`CrabArticulation`]s beside them, AND any roster changes (a
+    /// [`CoreSnapshot`]s (rl#151 increment 2 windowed — the client ADOPTS them, never re-steps an
+    /// input set), the render-only [`CrabArticulation`]s beside them, AND any roster changes (a
     /// mid-game join to schedule). A [`PeerWire::Refuse`] aimed at us is logged LOUD (an established
-    /// client should never get one), never silently eaten. A stray [`PeerWire::TickSet`] — the
-    /// pre-snapshot path — is ignored on the `/7` wire. Drained ONCE so no frame kind starves
+    /// client should never get one), never silently eaten. Drained ONCE so no frame kind starves
     /// another; latest-wins ordering (highest `tick`) is the caller's to apply.
     pub fn drain_server_down(&mut self) -> ServerDown {
         let mut down = ServerDown::default();
@@ -805,8 +788,7 @@ enum AdmissionVerdict {
 /// own [`Admission`]) or a [`PeerWire::Refuse`]. We accept ONLY `Welcome`, never a broadcast
 /// [`PeerWire::RosterChange`] — that is an incumbent's notice and may belong to a concurrent joiner,
 /// so reading it as ours would adopt the wrong PlayerId. Frames from anyone but the host, and any
-/// other kind (incl. early TickSets — a not-yet-rostered joiner needs no pre-entry set), are
-/// ignored. Bounded by [`JOIN_WELCOME_TIMEOUT`].
+/// other kind, are ignored. Bounded by [`JOIN_WELCOME_TIMEOUT`].
 async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVerdict {
     let deadline = tokio::time::timeout(JOIN_WELCOME_TIMEOUT, async {
         loop {
@@ -1219,12 +1201,11 @@ async fn run_barrier(
                     m.on_beat(from.from, &beat, now);
                 }
                 PeerWire::Tick(msg) => early.push((from.from, msg)),
-                // No server exists yet during formation, so a tick SET / snapshot / roster change /
+                // No server exists yet during formation, so a snapshot / roster change /
                 // refusal can't legitimately arrive here; ignore a stray one (a peer racing ahead,
                 // or a mid-game join frame on the wrong phase) rather than mishandle it. A real
                 // mid-game join is handled by the running coordinator, not the formation barrier.
-                PeerWire::TickSet(_)
-                | PeerWire::Snapshot(_)
+                PeerWire::Snapshot(_)
                 | PeerWire::Articulation(_)
                 | PeerWire::JoinRequest(_)
                 | PeerWire::RosterChange(_)
