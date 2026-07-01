@@ -1,4 +1,4 @@
-//! `net`: networked headless run — discover peers over iroh and run the lockstep loop.
+//! `net`: networked headless run — discover peers over iroh and run the host-authoritative tick loop.
 
 use std::time::{Duration, Instant};
 
@@ -7,7 +7,7 @@ use clap::Parser;
 use iroh::EndpointId;
 use net::lockstep::{INPUT_DELAY, Lockstep};
 use net::sim::{Input, PlayerId, TICK_HZ};
-use net::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent, TelemetrySender};
+use net::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
 use net::{net_loop, transport};
 
 use super::shared::run_solo_round;
@@ -48,8 +48,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
 }
 
 /// Networked run: bind, discover, assign deterministic player ids from the sorted
-/// endpoint-id set, then tick lockstep — broadcasting our input and ingesting peers'
-/// each tick — and report whether we stayed in sync.
+/// endpoint-id set, then tick the host-authoritative loop — the host steps its sim and
+/// broadcasts a snapshot each tick; clients ship input up and adopt it — and report progress.
 async fn run_net(args: Args) -> Result<()> {
     let mut session = transport::start_session().await?;
     let my_eid = session.endpoint_id();
@@ -98,12 +98,13 @@ async fn run_net(args: Args) -> Result<()> {
     // Every peer spawns the identical foot-only round.
     let mut ls = Lockstep::new(super::shared::MATCH_SEED, &all_ids, me);
 
-    // Server-coordinated play (rl#151): the lowest-id peer (PlayerId 0) runs the match server; the
-    // rest are remote clients of it. Solo (a single peer) is the same path with a roster of one. The
-    // Server core (the input ledger + completeness gating) is the SAME type the windowed client runs
-    // — only the async-vs-sync transport plumbing differs (headless awaits the session directly; the
-    // Bevy client drives it through `NetDriver`/`Coordinator`). Inputs flow UP as `TickMsg`s, the
-    // server broadcasts the complete `TickSet` DOWN; world state never crosses the wire.
+    // Host-authoritative play (rl#151): the lowest-id peer (PlayerId 0) runs the AUTHORITATIVE match
+    // server; the rest are remote clients that ADOPT its snapshots. Solo (a single peer) is the same
+    // path with a roster of one ([[sp-is-mp-special-case]]). The `Server` is the SAME type the
+    // windowed driver runs — only the async-vs-sync transport plumbing differs (headless awaits the
+    // session directly; the Bevy client drives it through `NetDriver`/`Coordinator`). Inputs flow UP
+    // as `TickMsg`s; the server steps its own sim and broadcasts the authoritative `CoreSnapshot`
+    // DOWN — the only world state on the wire, adopted whole (no re-sim, no peer cross-check).
     let am_host = me == PlayerId(0);
     let server_eid = *id_map
         .iter()
@@ -111,10 +112,9 @@ async fn run_net(args: Args) -> Result<()> {
         .map(|(eid, _)| eid)
         .expect("a frozen roster always contains PlayerId(0)");
     let mut server = am_host.then(|| {
-        // The headless host runs the Server as a pure input ledger + roster coordinator and steps its
-        // OWN lockstep `ls` (the legacy peer-symmetric path, untouched until increment 2), so the
-        // authoritative sim the Server now owns (rl#151 increment 1) is unused here — seed it from the
-        // identical tick-0 world `ls` was built from so its type is satisfied without a second seed.
+        // The host owns and steps the authoritative sim (rl#151): seed it from the identical tick-0
+        // world `ls` was built from so host and clients start byte-identical. The local `ls` is the
+        // host's own client — it files input UP and adopts the snapshots, never stepping itself.
         let mut s = net::server::Server::new(&all_ids, ls.sim().clone());
         s.seed_early(&net_loop::early_peer_msgs(&frozen));
         s
@@ -123,24 +123,26 @@ async fn run_net(args: Args) -> Result<()> {
     let tick_dt = Duration::from_secs_f64(1.0 / TICK_HZ as f64);
     let mut ticker = tokio::time::interval(tick_dt);
     let end = Instant::now() + Duration::from_secs(args.run_secs);
-    let mut total_desyncs = 0usize;
+    // Host-authoritative: the host is the sole source of truth, so there is no peer cross-check and
+    // no desync to count. Kept as a constant 0 for the telemetry/report fields that still name it.
+    let total_desyncs = 0usize;
     // How many authoritative snapshots this peer put on / took off the wire (rl#151 increment 2):
     // the host counts what it BROADCAST, a client what it ADOPTED. Surfaced in the `done:` line so a
     // 2-process proof can see the client is state-fed by the host, never re-stepping a sim.
     let mut snapshots_io = 0usize;
     // Coarse human progress: print roughly once per second of sim. This samples the FIRST
-    // tick at/after each boundary, which a batched `try_advance` can overshoot by a tick or
-    // two — so these lines are a liveness/hash eyeball, NOT a byte-exact cross-peer compare.
-    // The authoritative cross-peer determinism proofs are the internal desync cross-check
-    // (peer-advertised hashes) and the per-tick `--hash-log` (keyed by the true tick).
+    // tick at/after each boundary, which a batched catch-up can overshoot by a tick or two — so
+    // these lines are a liveness/hash eyeball, NOT a byte-exact cross-peer compare. The
+    // authoritative cross-machine determinism proof is the per-tick `--hash-log` (keyed by the
+    // true tick): host and client log the identical tick→hash line for every tick both applied.
     let mut next_report_tick = TICK_HZ;
     // Telemetry-side sampling cursor (independent of the stdout report cadence) and a
     // one-shot latch so RoundDecided is reported exactly once.
     let mut next_tel_tick = TELEMETRY_TICK_EVERY;
     let mut reported_outcome = false;
     // Optional per-tick hash log (Args::hash_log): every applied tick keyed by its true
-    // tick, so two peers' logs diff byte-identically over their overlap — the cross-peer
-    // (and cross-machine) determinism proof. Written one line per `advance_one` below.
+    // tick, so two peers' logs diff byte-identically over their overlap — the cross-machine
+    // determinism proof. Written one line per stepped/adopted tick below.
     let mut hash_log = args
         .hash_log
         .as_ref()
@@ -196,7 +198,7 @@ async fn run_net(args: Args) -> Result<()> {
         // Issue our input and route it through the server (rl#151 increment 2 — host-authoritative:
         // inputs go UP, STATE comes DOWN). The host assembles via the SAME `host_assemble` the
         // windowed `Coordinator` uses (one coordination impl, two transports), steps its own
-        // authoritative `ls`, and broadcasts a `CoreSnapshot` per applied tick; a client ships its
+        // authoritative sim, and broadcasts a `CoreSnapshot` per applied tick; a client ships its
         // input up and ADOPTS the host's snapshots without ever re-stepping the sim.
         let t = ls.next_tick() as f32 * 0.1;
         let issue_tick = ls.next_tick();
@@ -204,28 +206,30 @@ async fn run_net(args: Args) -> Result<()> {
         let msg = ls.submit_local_input(input);
 
         if let Some(srv) = server.as_mut() {
-            // HOST: fold in remote clients' inputs, then step + broadcast state.
-            let (_sets, peer_msgs) = net::server::host_assemble(srv, me, msg, remote_inputs);
-            // Record the OTHER players' inputs into the host's own authoritative `ls` — the same
-            // `record_remote` entry a mesh peer used to take.
-            for pm in peer_msgs {
-                if let Some(f) = ls.record_remote(pm.pid, pm.msg) {
-                    report_fault(&mut total_desyncs, f, tel.as_ref());
-                }
-            }
-            // Advance every ready tick ONE AT A TIME and broadcast that tick's authoritative
-            // snapshot the instant it is stepped, so a client adopts exactly the state the host
-            // holds. Logging per applied tick (via `last_applied`) writes every tick once regardless
-            // of how many a single iteration catches up.
-            while let Some(faults) = ls.advance_one() {
-                for f in faults {
-                    report_fault(&mut total_desyncs, f, tel.as_ref());
-                }
-                session.broadcast_snapshot(&ls.core_snapshot()).await;
+            // HOST: fold in remote clients' inputs into the authoritative server's ledger, then step
+            // its OWN sim once per ready tick and broadcast that tick's snapshot the instant it is
+            // stepped — the SAME host-authoritative path the windowed driver runs (one stepper). A
+            // client adopts exactly the state the host holds; there is no peer-symmetric self-step or
+            // desync cross-check any more (the host IS the source of truth).
+            let (sets, _peer_msgs) = net::server::host_assemble(srv, me, msg, remote_inputs);
+            srv.enqueue_for_step(&sets);
+            // Headless: weights digest 0, no rapier body → the crab holds spawn, so no pose to inject.
+            while srv.next_tick_ready() {
+                let bytes = srv.step_next(None);
+                let snap = net::snapshot::CoreSnapshot::from_bytes(&bytes)
+                    .expect("the authoritative server's snapshot must decode");
+                session.broadcast_snapshot(&snap).await;
                 snapshots_io += 1;
-                if let Some((w, c)) = hash_log.as_mut().zip(ls.last_applied()) {
+                // The local `ls` adopts the same snapshot so `ls.sim()` mirrors the authoritative
+                // world for the report + telemetry below (exactly as the windowed local client does).
+                ls.apply_core_snapshot(snap);
+                if let Some(w) = hash_log.as_mut() {
                     use std::io::Write as _;
-                    writeln!(w, "{} {:#018x}", c.tick, c.hash).context("writing hash log")?;
+                    // Log the just-stepped tick (post-step count minus one) + its closing hash, so a
+                    // host and client diff byte-identically — the same keying the client arm uses.
+                    let applied = srv.sim().tick().saturating_sub(1);
+                    writeln!(w, "{} {:#018x}", applied, srv.sim().state_hash())
+                        .context("writing hash log")?;
                 }
             }
         } else {
@@ -243,7 +247,7 @@ async fn run_net(args: Args) -> Result<()> {
                 snapshots_io += 1;
                 if let Some(w) = hash_log.as_mut() {
                     use std::io::Write as _;
-                    // The host logs the just-stepped tick index (`last_applied().tick`); the snapshot
+                    // The host logs the just-stepped tick index (its `sim().tick() - 1`); the snapshot
                     // we just adopted carries the POST-step count (`sim.tick()`), one higher — so log
                     // `tick - 1` to line up the two peers' logs for a byte-identical `diff`.
                     let applied = ls.sim().tick().saturating_sub(1);
@@ -323,33 +327,4 @@ async fn run_net(args: Args) -> Result<()> {
     drop(tel); // close the telemetry channel so its task finishes the stream cleanly
     session.shutdown().await;
     Ok(())
-}
-
-/// Count and log a cross-check fault. A desync is unrecoverable in lockstep, but we keep
-/// running so the test harness can observe how many ticks faulted rather than aborting on
-/// the first. Also mirrored to telemetry (best-effort) so a remote operator sees the
-/// divergence the instant a deck does.
-fn report_fault(total: &mut usize, f: net::lockstep::Fault, telemetry: Option<&TelemetrySender>) {
-    use net::lockstep::Fault;
-    *total += 1;
-    if let Some(t) = telemetry {
-        t.send(TelemetryEvent::fault(&f));
-    }
-    match f {
-        Fault::Desync {
-            tick,
-            peer,
-            local_hash,
-            peer_hash,
-        } => eprintln!(
-            "DESYNC at tick {tick}: peer {peer:?} hash {peer_hash:#018x} != local {local_hash:#018x}"
-        ),
-        Fault::Unverifiable {
-            tick,
-            peer,
-            peer_hash,
-        } => eprintln!(
-            "UNVERIFIABLE at tick {tick}: peer {peer:?} hash {peer_hash:#018x} fell out of our history window"
-        ),
-    }
 }

@@ -98,17 +98,31 @@ pub(crate) fn resolve_render_mode(flag: Option<&str>) -> Result<net::render::Ren
 /// the `solo` command and the headless `net` no-peer fallback, so the alone case runs the
 /// SAME deterministic solo path — no second sim loop to drift.
 pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
+    use net::server::Server;
+    use net::snapshot::CoreSnapshot;
+
     let me = PlayerId(0);
+    // Solo is the server with a roster of one — the SAME host-authoritative stepper the windowed
+    // and networked paths run ([[sp-is-mp-special-case]]): the local `ls` files inputs UP and adopts
+    // the snapshot the server emits, never stepping a sim of its own.
     let mut ls = Lockstep::new(MATCH_SEED, &[me], me);
+    let mut server = Server::new(&[me], ls.sim().clone());
     let tick_dt = Duration::from_secs_f64(1.0 / TICK_HZ as f64);
     let end = Instant::now() + Duration::from_secs(run_secs);
     let mut next = Instant::now();
     while Instant::now() < end {
         // A lazy circular stir so the dot visibly moves.
         let t = ls.next_tick() as f32 * 0.1;
-        ls.submit_local_input(Input::from_axes(t.cos(), t.sin()));
-        let desyncs = ls.try_advance();
-        debug_assert!(desyncs.is_empty(), "solo can't desync");
+        let msg = ls.submit_local_input(Input::from_axes(t.cos(), t.sin()));
+        let sets = server.record(me, msg);
+        server.enqueue_for_step(&sets);
+        while server.next_tick_ready() {
+            // Headless smoke: no rapier crab body, so the crab holds spawn (no pose to inject).
+            let bytes = server.step_next(None);
+            ls.apply_core_snapshot(
+                CoreSnapshot::from_bytes(&bytes).expect("the server's snapshot must decode"),
+            );
+        }
         next += tick_dt;
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
     }
