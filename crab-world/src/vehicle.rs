@@ -488,10 +488,11 @@ mod tests {
         assert!(nose_y > 0.0, "positive pitch must raise the nose, got nose.y={nose_y}");
     }
 
-    /// DIRECTION pin: a positive `yaw` control (a +Y torque) turns the nose toward +X (right). The
-    /// driver feeds `yaw = -move_strafe`, so the player's A key (positive `move_strafe`) yaws LEFT —
-    /// the sign the "Rudder left" label rides — but that reconciliation lives in `drive_lockstep`;
-    /// here we pin only the force model's own convention.
+    /// DIRECTION pin: a positive `yaw` control (a +Y torque) turns the nose toward body +X. With the
+    /// cockpit camera looking along body +Z, body +X renders SCREEN-LEFT, so the driver's plane rudder
+    /// negates its input (`net`'s `flight_control`: `(lb − rb) − wasd.x`) — RB / keyboard D command
+    /// yaw < 0 to swing the nose screen-RIGHT. That screen reconciliation lives in the input bridge;
+    /// here we pin only the force model's own body-frame convention.
     #[test]
     fn positive_yaw_turns_nose_right() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::ZERO);

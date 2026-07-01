@@ -406,11 +406,13 @@ fn plane_flight_control_pitch_is_ac6_and_scaled() {
     // Roll: stick right → bank right — the reconciled roll is NEGATIVE (body +X renders screen-left),
     // and the coordinating yaw rides it the SAME sign (turns screen-right, not just rolls).
     assert!(rolled.roll < 0.0 && rolled.yaw < 0.0, "right stick → bank right (−roll) + coordinated yaw");
-    // Throttle: RT accelerates (+), LT brakes (−). Rudder: RB right (+yaw), LB left (−yaw).
+    // Throttle: RT accelerates (+), LT brakes (−). Rudder: RB noses SCREEN-RIGHT (−yaw, same
+    // sign as the coordinated right-bank turn above), LB screen-left (+yaw) — the rudder is negated at
+    // the source so RB-right matches the screen, since +yaw renders body +X = screen-LEFT.
     assert!(plane(FlightInput { rt: 1.0, ..default() }).throttle_trim > 0.0);
     assert!(plane(FlightInput { lt: 1.0, ..default() }).throttle_trim < 0.0);
-    assert!(plane(FlightInput { rb: true, ..default() }).yaw > 0.0);
-    assert!(plane(FlightInput { lb: true, ..default() }).yaw < 0.0);
+    assert!(plane(FlightInput { rb: true, ..default() }).yaw < 0.0);
+    assert!(plane(FlightInput { lb: true, ..default() }).yaw > 0.0);
     // The plane thrusts through its lever, never the direct thrusters; it never match-velocities.
     let p = plane(FlightInput { left: Vec2::new(1.0, 1.0), rt: 1.0, ..default() });
     assert_eq!(p.thrust, Vec3::ZERO);
