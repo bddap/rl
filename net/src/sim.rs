@@ -489,33 +489,14 @@ impl Sim {
         self.rng = ChaCha8Rng::seed_from_u64(self.config.seed);
     }
 
-    /// Rebuild the round to a fresh tick-0 state over a NEW participant set — the round-boundary
-    /// join (GCR MP Stage 3, bddap/rl#151). A roster change rides the lockstep input stream exactly
-    /// like [`buttons::RESTART`]: at the agreed tick every peer — the existing players AND the
-    /// joiner — calls this, so all land on the byte-identical fresh world over the new set. Going
-    /// through a fresh [`Sim::reset`] (no mid-game snapshot adopted) is what dodges job 412's
-    /// restored-vs-live rapier divergence: there is nothing to restore, only a clean respawn every
-    /// peer computes identically.
-    ///
-    /// Swaps the stored [`config`](Sim::config) roster so the rebuilt round — and every later
-    /// restart — uses the new set; leaves [`restart_held`](Sim::restart_held) alone (the edge latch
-    /// [`Sim::step`] owns), exactly as [`Sim::reset`] does.
-    pub fn rebuild_with_roster(&mut self, players: &[PlayerId]) {
-        let mut sorted = players.to_vec();
-        sorted.sort();
-        sorted.dedup();
-        self.config.players = sorted;
-        self.reset();
-    }
 
     /// Spawn a mid-game joiner (GCR MP incr 4, rl#151) INTO the live round — the host-authoritative
     /// snapshot-transfer join ([[mp-minecraft-model]]), NOT the dead lockstep round-boundary rebuild.
     /// Inserts a fresh [`Player`] for `pid` and folds it into the [`config`](Sim::config) roster
     /// WITHOUT disturbing the ongoing state: the crab, extraction, incumbents, `tick`, `rng`, and
     /// `outcome` are all untouched, so the joiner drops into the match exactly where it stands rather
-    /// than resetting every peer to tick 0 — which is what the dead lockstep round-boundary join
-    /// ([`rebuild_with_roster`](Sim::rebuild_with_roster), slated for incr-5 deletion) does, and what
-    /// round RESTART does via [`reset`](Sim::reset). This is why host-auth DISSOLVES job 509: the joiner never
+    /// than resetting every peer to tick 0 — which is what the now-deleted lockstep round-boundary
+    /// join did, and what round RESTART does via [`reset`](Sim::reset). This is why host-auth DISSOLVES job 509: the joiner never
     /// re-simulates the incumbent's warm rapier world — it renders the host's output pose carried in
     /// the snapshot — so the warm-cache / handle-arena divergence that broke lockstep bit-identity is
     /// never on the wire. Only the authoritative host calls this (a client adopts the resulting
