@@ -534,6 +534,21 @@ impl Session {
         self.broadcast_frame(M::KIND, bytes.as_ref()).await;
     }
 
+    /// Ship our per-tick input UP to the one server — the headless `net` harness's unicast
+    /// entry (the windowed client goes through [`crate::net_loop::NetDriver`]). A concrete
+    /// facade over the internal generic [`Session::send`] so the cross-crate caller needs no
+    /// access to the crate-private [`Codec`].
+    pub async fn send_to(&self, peer: EndpointId, msg: &TickMsg) {
+        self.send(peer, msg).await;
+    }
+
+    /// Broadcast an assembled [`TickSet`] DOWN to every client — the headless host's fan-out
+    /// entry. A concrete facade over the internal generic [`Session::broadcast`], keeping
+    /// [`Codec`] crate-private.
+    pub async fn broadcast_tickset(&self, set: &TickSet) {
+        self.broadcast(set).await;
+    }
+
     /// Frame `body` with `kind` + length and send it to one `peer` (the unicast analogue of
     /// [`Self::broadcast_frame`]). A send failure drops that link — the same policy as the broadcast
     /// path. No link to `peer` is a no-op (surfaced as the higher-level stall, not a panic).
