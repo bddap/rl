@@ -639,27 +639,7 @@ impl Sim {
             }
             // require_complete_inputs (step entry) guarantees an entry per participant.
             let inp = inputs[id];
-
-            // Look: integrate the bounded yaw delta, wrapping into [0, TURN).
-            let dyaw = (inp.look_yaw as i64 * MAX_YAW_TURNS_PER_TICK as i64
-                / Input::AXIS_SCALE as i64) as i32;
-            p.yaw = trig::wrap_turns(p.yaw + dyaw);
-
-            // Move relative to facing: forward is the yaw direction, strafe is +90°.
-            // velocity = (forward * move_forward + right * move_strafe), each axis
-            // scaled by PLAYER_SPEED, all in fixed-point with one final descale.
-            let (sin, cos) = trig::sin_cos(p.yaw); // fixed-point, scale trig::ONE
-            // Forward unit vector (sin, cos) in world XZ; right is (cos, -sin).
-            let strafe = inp.move_strafe as i64; // units of AXIS_SCALE
-            let forward = inp.move_forward as i64;
-            let vx = sin * forward + cos * strafe;
-            let vz = cos * forward - sin * strafe;
-            // Two descales: by AXIS_SCALE (stick) and trig::ONE (the unit vector),
-            // then up by PLAYER_SPEED. Integer division truncates identically on all
-            // targets.
-            let denom = Input::AXIS_SCALE as i64 * trig::ONE as i64;
-            p.pos.x += vx * PLAYER_SPEED / denom;
-            p.pos.z += vz * PLAYER_SPEED / denom;
+            Self::advance_player(p, inp);
         }
 
         // The crab's grabs are disarmed during the startup grace (see [`STARTUP_GRACE_TICKS`]).
@@ -700,6 +680,53 @@ impl Sim {
         // 5) Settle the round outcome (first decisive condition wins; extraction
         //    beats a wipe on the same tick — a rescue at the buzzer counts).
         self.outcome = self.settle_outcome();
+    }
+
+    /// Move ONE player by one input tick: integrate the bounded yaw delta, then translate
+    /// relative to the new facing — pure fixed-point, no dependence on other players or the
+    /// crab. The single home for the foot-player mover, shared by [`step`](Sim::step) (which
+    /// runs it per living player) and [`predict_player`](Sim::predict_player) (client-side
+    /// prediction), so the two can't drift ([[collapse-global-mutable-state-not-coordinate]]).
+    fn advance_player(p: &mut Player, inp: Input) {
+        // Look: integrate the bounded yaw delta, wrapping into [0, TURN).
+        let dyaw =
+            (inp.look_yaw as i64 * MAX_YAW_TURNS_PER_TICK as i64 / Input::AXIS_SCALE as i64) as i32;
+        p.yaw = trig::wrap_turns(p.yaw + dyaw);
+
+        // Move relative to facing: forward is the yaw direction, strafe is +90°.
+        // velocity = (forward * move_forward + right * move_strafe), each axis
+        // scaled by PLAYER_SPEED, all in fixed-point with one final descale.
+        let (sin, cos) = trig::sin_cos(p.yaw); // fixed-point, scale trig::ONE
+        // Forward unit vector (sin, cos) in world XZ; right is (cos, -sin).
+        let strafe = inp.move_strafe as i64; // units of AXIS_SCALE
+        let forward = inp.move_forward as i64;
+        let vx = sin * forward + cos * strafe;
+        let vz = cos * forward - sin * strafe;
+        // Two descales: by AXIS_SCALE (stick) and trig::ONE (the unit vector), then up by
+        // PLAYER_SPEED. Integer division truncates identically on all targets.
+        let denom = Input::AXIS_SCALE as i64 * trig::ONE as i64;
+        p.pos.x += vx * PLAYER_SPEED / denom;
+        p.pos.z += vz * PLAYER_SPEED / denom;
+    }
+
+    /// Client-side prediction of the LOCAL player only (rl#151 incr 3): re-apply one of its
+    /// still-in-flight inputs on top of an adopted authoritative snapshot, so a remote client's
+    /// own avatar responds at input latency instead of round-trip latency. Mirrors [`step`]'s
+    /// per-player guards exactly — a player only moves while ALIVE and the round is ONGOING — so
+    /// the replay lands where the host's own step will. Only the foot mover is predicted; the
+    /// crab, grabs, extraction, and outcome are authoritative and never predicted (they arrive in
+    /// the next snapshot). Purely cosmetic on the client: overwritten by the next snapshot, never
+    /// fed back into the sim's hash or shipped anywhere ([[silent-fallback-antipattern]] — this is
+    /// prediction, not a second authority).
+    pub(crate) fn predict_player(&mut self, id: PlayerId, inp: Input) {
+        if self.outcome != Outcome::Ongoing {
+            return;
+        }
+        if let Some(p) = self.players.get_mut(&id)
+            && p.status == PlayerStatus::Alive
+        {
+            Self::advance_player(p, inp);
+        }
     }
 
     /// Ground position of the living player nearest the crab, or `None` if every player
@@ -1108,6 +1135,39 @@ mod tests {
         sim.step(&left);
         let dx_left = sim.player(PlayerId(0)).unwrap().pos().x - p0.x;
         assert_eq!(dx_left, -dx, "strafe-left mirrors strafe-right exactly");
+    }
+
+    #[test]
+    fn predict_player_matches_step_for_the_local_avatar() {
+        // Client-side prediction of ONE player must land exactly where `step` puts it — both run
+        // the shared `advance_player` mover — so a remote client's local-avatar replay converges
+        // byte-for-byte with the authoritative host (rl#151 incr 3). Move + turn, so the
+        // facing-relative translate is exercised, not just an axis-aligned slide.
+        let inp = Input::new(0.6, -0.3, 0.4, 0);
+        let mut stepped = Sim::new(7, &players(1));
+        let mut inputs = BTreeMap::new();
+        inputs.insert(PlayerId(0), inp);
+        stepped.step(&inputs);
+
+        let mut predicted = Sim::new(7, &players(1));
+        predicted.predict_player(PlayerId(0), inp);
+
+        let sp = stepped.player(PlayerId(0)).unwrap();
+        let pp = predicted.player(PlayerId(0)).unwrap();
+        assert_eq!(
+            (pp.pos(), pp.yaw()),
+            (sp.pos(), sp.yaw()),
+            "predicted local avatar must equal the stepped avatar"
+        );
+
+        // Predicting an id not in the round is a harmless no-op — no panic, no ghost player.
+        let before = predicted.state_hash();
+        predicted.predict_player(PlayerId(9), inp);
+        assert_eq!(
+            predicted.state_hash(),
+            before,
+            "predicting an absent player must change nothing"
+        );
     }
 
     #[test]
