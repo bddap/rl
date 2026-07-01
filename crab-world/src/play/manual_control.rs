@@ -5,15 +5,17 @@
 use bevy::prelude::*;
 
 use crate::bot::actuator::CrabActions;
-use crate::bot::body::{CrabJoint, CrabJointId};
+use crate::bot::body::CrabJointId;
 
-/// Hands-on gamepad control state. `active` is toggled live with Y/triangle (and
-/// seeded by `--manual-control`); `selected` is the joint the right stick drives
-/// ([`CrabJointId::index`]), None = all joints at zero torque until the D-pad picks one.
+/// Hands-on gamepad control state. `active` is toggled live with B/circle (and
+/// seeded by `--manual-control`); `selected` is the joint the right stick drives,
+/// `None` = all joints at zero torque until the D-pad picks one. Typed as a
+/// [`CrabJointId`] (not a bare slot index) so the live joint is a valid joint by
+/// construction — it names itself, with no runtime lookup that could miss.
 #[derive(Resource)]
 pub(super) struct ManualControl {
     pub(super) active: bool,
-    pub(super) selected: Option<usize>,
+    pub(super) selected: Option<CrabJointId>,
 }
 
 /// Marker for the on-screen manual-control readout (the mode + the live joint).
@@ -30,7 +32,6 @@ pub(super) struct ManualHud;
 /// default policy view.
 pub(super) fn manual_control_step(
     gamepads: Query<&Gamepad>,
-    joint_ids: Query<&CrabJoint>,
     mut manual: ResMut<ManualControl>,
     mut actions: ResMut<CrabActions>,
     mut hud: Query<(&mut Text, &mut Visibility), With<ManualHud>>,
@@ -48,25 +49,25 @@ pub(super) fn manual_control_step(
     let n = CrabJointId::COUNT;
     let mut line = String::new();
     if manual.active {
+        // Cycle the live joint by slot, wrapping. `from_index` always yields a joint for a
+        // value in 0..COUNT, so `selected` becomes `Some(joint)` on the first press.
         if gp.just_pressed(GamepadButton::DPadUp) {
-            manual.selected = Some(manual.selected.map_or(0, |i| (i + 1) % n));
+            manual.selected = CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + 1) % n));
         }
         if gp.just_pressed(GamepadButton::DPadDown) {
-            manual.selected = Some(manual.selected.map_or(0, |i| (i + n - 1) % n));
+            manual.selected =
+                CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + n - 1) % n));
         }
         if let Some(a) = actions.envs.first_mut() {
             // Drive only the selected joint; hold everything else at zero torque.
             *a = [0.0; CrabJointId::COUNT];
             line = match manual.selected {
-                Some(sel) => {
+                Some(id) => {
                     let v = gp.right_stick().y.clamp(-1.0, 1.0);
+                    let sel = id.index();
                     a[sel] = v;
-                    let name = joint_ids
-                        .iter()
-                        .find(|j| j.id.index() == sel)
-                        .map(|j| format!("{:?}", j.id))
-                        .unwrap_or_else(|| format!("#{sel}"));
-                    format!("MANUAL · {name} {}/{n} · torque {v:+.2}", sel + 1)
+                    // The typed joint names itself (`Debug`) — no entity lookup that could miss.
+                    format!("MANUAL · {id:?} {}/{n} · torque {v:+.2}", sel + 1)
                 }
                 None => "MANUAL · pick a joint (D-pad)".to_string(),
             };

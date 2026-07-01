@@ -8,6 +8,7 @@
 //! is what lets the trainer-side eval reuse the SAME deterministic policy the rendered demo
 //! runs, instead of a second copy that could drift (`play` re-exports it for the renderers).
 
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
@@ -23,24 +24,17 @@ use crate::training::checkpoint::CheckpointDir;
 use crate::training::normalizer::{NORMALIZER_CLIP, ObsNormalizer};
 use crate::training::{InferBackend, TrainBackend};
 
-/// A loaded policy that maps observations to actions for inference (no learning).
+/// A policy that maps observations to actions for inference (no learning). The
+/// checkpoint-derived state — whether a brain drives the crab, and its cross-peer weight
+/// identity — lives in [`PolicyState`], which makes the illegal combinations
+/// unrepresentable (no `loaded` bool to keep in sync with the brain, no `0`-digest sentinel
+/// that could ride alongside a real brain into the lockstep hash). The fields here are the
+/// state-independent wiring: the inference device and the demo's hot-reload bookkeeping.
 ///
 /// Non-send because the `ndarray` backend's tensors are not `Sync` (same reason
 /// as `TrainingState`).
 pub struct Policy {
-    brain: CrabBrain<InferBackend>,
-    normalizer: ObsNormalizer,
     device: NdArrayDevice,
-    /// False when no checkpoint loaded — `act` then returns zero actions (a
-    /// neutral, deterministic rest pose) instead of an untrained brain's noise,
-    /// so a no-checkpoint render shows the body geometry cleanly.
-    loaded: bool,
-    /// `Some(dims)` when we LOUDLY refused to arm a wrong-rig checkpoint (its dims, for
-    /// attribution); `None` whenever the policy is armed OR holding the legitimate
-    /// no-checkpoint rest pose. The one bit that tells a silent-statue-because-no-brain-yet
-    /// (`!loaded && mismatch.is_none()`) apart from an operator error
-    /// (`!loaded && mismatch.is_some()`). See [`Self::rig_mismatch`].
-    mismatch: Option<RigDims>,
     /// Live training checkpoint dir the demo hot-reloads from while running (None
     /// disables). `last_loaded` is the mtime of the brain file last swapped in, so
     /// we reload only when training has written a newer one. See [`Self::try_hot_reload`].
@@ -50,12 +44,43 @@ pub struct Policy {
     live_dir: Option<PathBuf>,
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
     last_loaded: Option<std::time::SystemTime>,
-    /// A stable digest of the loaded checkpoint's bytes (brain + normalizer), `0` when no
-    /// checkpoint loaded. Two peers running the SAME weights get the same digest; different
-    /// weights get different ones. The GCR bridge folds this into the crab's per-tick lockstep
-    /// hash ([`Self::weights_digest`]), so two peers with mismatched brains desync by
-    /// construction on tick 1 rather than diverging silently as the float bodies drift apart.
-    weights_digest: u64,
+    state: PolicyState,
+}
+
+/// What (if anything) drives the crab, and its cross-peer weight identity — the three states
+/// a policy can be in, kept as ONE enum so an impossible combination (a brain with no digest
+/// claiming to be loaded, or a "loaded" flag with no brain, or a `0`/stale digest beside a
+/// real brain) can't be constructed.
+// `Loaded`/`Diagnostic` carry the ~6KB brain inline while `Rest` is tiny; a `Policy` is a
+// long-lived resource constructed once (or swapped on hot-reload), never passed by value on a
+// hot path, so boxing the brain would only add an indirection to every `act` call.
+#[allow(clippy::large_enum_variant)]
+enum PolicyState {
+    /// No brain drives the crab — [`Policy::act`] returns the zero-action rest pose (a
+    /// neutral, deterministic view of the body geometry, not an untrained brain's noise).
+    /// `mismatch` distinguishes the two non-arming cases (rl#121): `Some(dims)` when we
+    /// LOUDLY refused a wrong-rig checkpoint (its dims, for attribution), `None` for the
+    /// quiet, legitimate no-checkpoint-yet pose.
+    Rest { mismatch: Option<RigDims> },
+    /// `RL_RANDOM_POLICY`: an untrained current-rig brain drives the crab so an operator can
+    /// see what a FRESH policy does (vs the zero-action rest pose). It has NO on-disk weights,
+    /// hence no digest, hence — by construction, not by a runtime `!= 0` check — can never
+    /// enter networked lockstep (`weights_digest()` is `None`).
+    Diagnostic {
+        brain: CrabBrain<InferBackend>,
+        normalizer: ObsNormalizer,
+    },
+    /// A real checkpoint's brain drives the crab. `digest` is a stable hash of the checkpoint
+    /// bytes (brain + normalizer): two peers running the SAME weights get the same digest,
+    /// different weights get different ones. `NonZeroU64` because the GCR bridge folds it into
+    /// the crab's per-tick lockstep hash — a `0` there used to mean "no real brain", so a
+    /// zero/stale digest riding alongside a loaded brain was a silent-desync trap; the type now
+    /// forbids it.
+    Loaded {
+        brain: CrabBrain<InferBackend>,
+        normalizer: ObsNormalizer,
+        digest: NonZeroU64,
+    },
 }
 
 /// Digest of a checkpoint's on-disk weights (brain + normalizer bytes), or `0` if the brain
@@ -210,72 +235,79 @@ fn log_rig_mismatch(surface: &str, dir: &Path, dims: RigDims) {
     );
 }
 
+/// Build the armed state for a brain read off disk, from the checkpoint's byte digest. A real
+/// checkpoint's `NonZeroU64` digest arms [`PolicyState::Loaded`] (may enter lockstep); a `0`
+/// digest — a degenerate hash, or a brain with no readable file behind it — falls to
+/// [`PolicyState::Diagnostic`] instead, so a value that can't distinguish peers never rides
+/// into the lockstep hash pretending to. Shared by the initial load and the hot-reload so the
+/// two can't disagree on how a digest becomes a state.
+fn loaded_state(
+    brain: CrabBrain<InferBackend>,
+    normalizer: ObsNormalizer,
+    digest: u64,
+) -> PolicyState {
+    match NonZeroU64::new(digest) {
+        Some(digest) => PolicyState::Loaded {
+            brain,
+            normalizer,
+            digest,
+        },
+        None => PolicyState::Diagnostic { brain, normalizer },
+    }
+}
+
 impl Policy {
     /// Load brain + normalizer from a checkpoint dir. Missing/corrupt files fall
     /// back to a zero-action policy so the app still launches (useful before the
     /// first checkpoint exists, and to inspect the body's neutral rest pose).
     pub fn load(checkpoint_dir: &Path) -> Self {
         let device = NdArrayDevice::Cpu;
-        // A neutral rest-pose brain for the two non-arming outcomes (Absent, Mismatch):
-        // a current-rig random-init brain that `act` ignores while `loaded` is false.
-        let rest_pose = || {
-            (
-                CrabBrain::<TrainBackend>::new(&device).valid(),
-                ObsNormalizer::new(NORMALIZER_CLIP),
-            )
-        };
-        let (brain, normalizer, loaded, mismatch) =
-            match load_brain_normalizer(checkpoint_dir, &device) {
-                Loaded::Fit(brain, normalizer) => {
-                    info!("play: loaded checkpoint from {}", checkpoint_dir.display());
-                    (brain, normalizer, true, None)
+        // RL_RANDOM_POLICY drives the crab with an untrained random-init brain when there is
+        // NO usable checkpoint, to see what a FRESH policy does (vs the zero-action rest pose)
+        // — distinguishes a learned behaviour from one the dynamics produce on their own. It
+        // never overrides a real checkpoint (a Fit always wins).
+        let random_override = std::env::var("RL_RANDOM_POLICY").is_ok_and(|v| v == "1");
+        let state = match load_brain_normalizer(checkpoint_dir, &device) {
+            Loaded::Fit(brain, normalizer) => {
+                info!("play: loaded checkpoint from {}", checkpoint_dir.display());
+                loaded_state(brain, normalizer, checkpoint_digest(checkpoint_dir))
+            }
+            // No usable checkpoint, but the diagnostic override is on: drive with an untrained
+            // current-rig brain. No on-disk weights ⇒ no digest ⇒ can't enter lockstep.
+            Loaded::Absent | Loaded::Mismatch(_) if random_override => {
+                warn!(
+                    "play: RL_RANDOM_POLICY — driving with an untrained random brain \
+                     (no usable checkpoint at {})",
+                    checkpoint_dir.display()
+                );
+                PolicyState::Diagnostic {
+                    brain: CrabBrain::<TrainBackend>::new(&device).valid(),
+                    normalizer: ObsNormalizer::new(NORMALIZER_CLIP),
                 }
-                Loaded::Absent => {
-                    // The legitimate "no brain yet" rest pose — quiet, expected before the
-                    // first checkpoint exists or when inspecting the body's neutral pose.
-                    warn!(
-                        "play: no usable checkpoint at {} — using zero-action pose",
-                        checkpoint_dir.display()
-                    );
-                    let (brain, normalizer) = rest_pose();
-                    (brain, normalizer, false, None)
+            }
+            Loaded::Absent => {
+                // The legitimate "no brain yet" rest pose — quiet, expected before the
+                // first checkpoint exists or when inspecting the body's neutral pose.
+                warn!(
+                    "play: no usable checkpoint at {} — using zero-action pose",
+                    checkpoint_dir.display()
+                );
+                PolicyState::Rest { mismatch: None }
+            }
+            Loaded::Mismatch(dims) => {
+                // Wrong checkpoint for this build: refuse to arm, loud + attributable.
+                log_rig_mismatch("play", checkpoint_dir, dims);
+                PolicyState::Rest {
+                    mismatch: Some(dims),
                 }
-                Loaded::Mismatch(dims) => {
-                    // Wrong checkpoint for this build: refuse to arm, loud + attributable.
-                    log_rig_mismatch("play", checkpoint_dir, dims);
-                    let (brain, normalizer) = rest_pose();
-                    (brain, normalizer, false, Some(dims))
-                }
-            };
-
-        // Diagnostic: RL_RANDOM_POLICY drives the crab with the untrained
-        // random-init brain even without a checkpoint, to see what a FRESH
-        // policy does (vs the zero-action rest pose) — distinguishes a learned
-        // behaviour from one the dynamics produce on their own.
-        let loaded = loaded || std::env::var("RL_RANDOM_POLICY").is_ok_and(|v| v == "1");
-        // If the diagnostic override armed a (current-rig) random brain over a mismatched
-        // checkpoint, the crab is NOT inert — drop the recorded mismatch so `rig_mismatch()`
-        // never contradicts `is_loaded()`. A mismatch only stands while we hold the rest pose.
-        let mismatch = if loaded { None } else { mismatch };
-
-        // Digest the on-disk weights iff a real checkpoint loaded. A RANDOM_POLICY brain (no
-        // file) gets `0` — it must never enter networked lockstep, and the bridge's
-        // loaded-checkpoint guard refuses to arm it there.
-        let weights_digest = if loaded {
-            checkpoint_digest(checkpoint_dir)
-        } else {
-            0
+            }
         };
 
         Self {
-            brain,
-            normalizer,
             device,
-            loaded,
-            mismatch,
             live_dir: None,
             last_loaded: None,
-            weights_digest,
+            state,
         }
     }
 
@@ -307,32 +339,36 @@ impl Policy {
         }
         match load_brain_normalizer(&dir, &self.device) {
             Loaded::Fit(brain, normalizer) => {
-                self.brain = brain;
-                self.normalizer = normalizer;
-                self.loaded = true;
-                self.mismatch = None;
+                self.state = loaded_state(brain, normalizer, checkpoint_digest(&dir));
                 self.last_loaded = Some(mtime);
-                self.weights_digest = checkpoint_digest(&dir);
                 true
             }
             Loaded::Absent => false, // mid-save / unreadable — keep the current policy
             Loaded::Mismatch(dims) => {
-                // A wrong-rig brain landed in the live dir: refuse it loudly and keep the
-                // policy we have. Stamp `last_loaded` so we log once per distinct file
-                // (mtime), not every tick, until a fitting checkpoint replaces it.
+                // A wrong-rig brain landed in the live dir: refuse it loudly. If we weren't
+                // already driving a good brain, drop to the inert rest pose and record the dims
+                // so the frozen crab is attributable; if we WERE armed, keep driving it — a bad
+                // file must not blank a working demo, and a still-moving crab needs no
+                // "why inert" attribution (so `rig_mismatch()` never contradicts `is_loaded()`).
+                // Stamp `last_loaded` so we log once per distinct file (mtime), not every tick.
                 log_rig_mismatch("play (hot-reload)", &dir, dims);
-                self.mismatch = Some(dims);
+                if matches!(self.state, PolicyState::Rest { .. }) {
+                    self.state = PolicyState::Rest {
+                        mismatch: Some(dims),
+                    };
+                }
                 self.last_loaded = Some(mtime);
                 false
             }
         }
     }
 
-    /// Whether a usable checkpoint loaded (vs the zero-action rest-pose fallback). Lets a
+    /// Whether a brain drives the crab (vs the zero-action rest-pose fallback). Lets a
     /// caller fail loud when the body will only hold its rest pose ([`Self::act`] returns the
-    /// neutral pose while this is false).
+    /// neutral pose while this is false). True for both a real checkpoint and the
+    /// `RL_RANDOM_POLICY` diagnostic brain — use [`Self::weights_digest`] to tell those apart.
     pub fn is_loaded(&self) -> bool {
-        self.loaded
+        !matches!(self.state, PolicyState::Rest { .. })
     }
 
     /// `Some(dims)` when the last checkpoint we tried to load was a rig MISMATCH we refused
@@ -341,31 +377,43 @@ impl Policy {
     /// from the legitimate "no checkpoint yet" rest pose where this is `None`. `is_loaded()`
     /// is false in both, but only a mismatch is an operator error.
     pub fn rig_mismatch(&self) -> Option<RigDims> {
-        self.mismatch
+        match self.state {
+            PolicyState::Rest { mismatch } => mismatch,
+            _ => None,
+        }
     }
 
-    /// Stable digest of the loaded weights (`0` if none) — see
-    /// [`weights_digest`](Self::weights_digest). The GCR bridge folds it into the crab's
-    /// per-tick lockstep hash so peers running different brains desync immediately.
-    pub fn weights_digest(&self) -> u64 {
-        self.weights_digest
+    /// Stable digest of the loaded weights, or `None` when no real checkpoint is armed (the
+    /// rest pose OR the `RL_RANDOM_POLICY` diagnostic brain). The GCR bridge folds this into
+    /// the crab's per-tick lockstep hash so peers running different brains desync immediately;
+    /// `None` — not a `0` sentinel — is "no shared checkpoint", so a peer with no real weights
+    /// can't be admitted to lockstep by construction (see `net::may_arm_external_crab`).
+    pub fn weights_digest(&self) -> Option<NonZeroU64> {
+        match &self.state {
+            PolicyState::Loaded { digest, .. } => Some(*digest),
+            PolicyState::Rest { .. } | PolicyState::Diagnostic { .. } => None,
+        }
     }
 
     /// Deterministic action: the policy mean (no exploration noise), so the crab
     /// holds a steady pose instead of jittering. One policy implementation, three
     /// callers — the demo, the game's solo NN-crab, and the headless eval.
     pub fn act(&self, raw_obs: &[f32; OBS_SIZE]) -> [f32; ACTION_SIZE] {
-        // No checkpoint → hold the neutral (zero-action) pose: a deterministic
-        // view of the body geometry, not an untrained brain's noise.
-        if !self.loaded {
-            return [0.0; ACTION_SIZE];
-        }
-        let obs = self.normalizer.normalize_frozen(raw_obs);
+        // No brain → hold the neutral (zero-action) pose: a deterministic view of the body
+        // geometry, not an untrained brain's noise. Both driving states run the same inference.
+        let (brain, normalizer) = match &self.state {
+            PolicyState::Loaded {
+                brain, normalizer, ..
+            }
+            | PolicyState::Diagnostic { brain, normalizer } => (brain, normalizer),
+            PolicyState::Rest { .. } => return [0.0; ACTION_SIZE],
+        };
+        let obs = normalizer.normalize_frozen(raw_obs);
         let input =
             Tensor::<InferBackend, 1>::from_floats(obs.as_slice(), &self.device).unsqueeze();
         // Eval/demo is deterministic: it takes the policy MEAN and discards `log_std`, so the
         // exploration-σ floor never reaches a deployed action. Pass the resting floor.
-        let (means, _log_std) = self.brain.policy(input, crate::bot::brain::LOG_STD_MIN);
+        let (means, _log_std) = brain.policy(input, crate::bot::brain::LOG_STD_MIN);
         let flat: Vec<f32> = means.flatten::<1>(0, 1).to_data().to_vec().unwrap();
 
         let mut out = [0.0f32; ACTION_SIZE];
@@ -413,8 +461,13 @@ mod tests {
         // No checkpoint anywhere → unloaded (holds the zero-action rest pose).
         let mut policy = Policy::load(&empty);
         assert!(
-            !policy.loaded,
+            !policy.is_loaded(),
             "empty checkpoint dir should give an unloaded policy"
+        );
+        assert_eq!(
+            policy.weights_digest(),
+            None,
+            "an unloaded policy has no weight digest (no `0` sentinel)"
         );
         assert!(
             !policy.try_hot_reload(),
@@ -435,8 +488,12 @@ mod tests {
             "a new brain in the live dir must reload"
         );
         assert!(
-            policy.loaded,
+            policy.is_loaded(),
             "a successful hot-reload marks the policy loaded"
+        );
+        assert!(
+            policy.weights_digest().is_some(),
+            "a hot-reloaded real checkpoint carries a nonzero weight digest"
         );
         assert!(
             !policy.try_hot_reload(),
@@ -483,7 +540,7 @@ mod tests {
 
         let policy = Policy::load(&dir);
         assert!(
-            !policy.loaded,
+            !policy.is_loaded(),
             "a dim-mismatched checkpoint must fall back to unloaded, not load"
         );
         // The real regression: this call hits the matmul for a loaded policy; with the
@@ -513,7 +570,10 @@ mod tests {
 
         // MISSING: no checkpoint → the legitimate rest pose, NOT flagged as a mismatch.
         let missing = Policy::load(&miss);
-        assert!(!missing.loaded, "a missing checkpoint must not arm the policy");
+        assert!(
+            !missing.is_loaded(),
+            "a missing checkpoint must not arm the policy"
+        );
         assert_eq!(
             missing.rig_mismatch(),
             None,
@@ -524,7 +584,7 @@ mod tests {
         save_brain_with_obs_dim(&bad, OBS_SIZE + 4);
         let mismatched = Policy::load(&bad);
         assert!(
-            !mismatched.loaded,
+            !mismatched.is_loaded(),
             "a mismatched checkpoint must refuse to arm (drive the rest pose, not the brain)"
         );
         assert_eq!(

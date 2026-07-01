@@ -154,6 +154,13 @@ impl CrabJointId {
             .position(|j| j == self)
             .expect("every CrabJointId is listed in all()")
     }
+
+    /// The joint at slot `i` (0..COUNT), or `None` if out of range — the inverse of
+    /// [`index`](Self::index), so a caller holding a slot number can recover the typed joint
+    /// rather than carrying a bare index that could name a nonexistent slot.
+    pub fn from_index(i: usize) -> Option<CrabJointId> {
+        Self::all().get(i).copied()
+    }
 }
 
 impl CrabJointId {
