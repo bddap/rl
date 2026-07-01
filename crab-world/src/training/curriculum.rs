@@ -81,11 +81,14 @@ impl TargetBand {
 
 /// Exponent of the NEAR-HEAVY distance draw: a target distance is `min + (max−min)·u^EXP` for
 /// `u ~ U[0,1)`, so `EXP > 1` biases the draw toward the near edge while still spanning the whole
-/// band. At `EXP = 3` over the 1.5–9 m band the mass splits ~58 % into the near 1.5–3 m sub-band,
-/// ~26 % into 3–6 m, ~16 % beyond 6 m — near-dominant for the credit-assignment bootstrap, with a
-/// real far tail so far pursuit is trained, not forgotten. The single tunable knob: raise it to
-/// lean nearer, drop toward 1 for uniform. See the module doc for why near-heavy over uniform.
-const NEAR_BIAS_EXP: f32 = 3.0;
+/// band. At `EXP = 2` over the 1.5–9 m band the mass splits ~45 % into the near 1.5–3 m sub-band,
+/// ~33 % into 3–6 m, ~22 % beyond 6 m — still near-dominant for the credit-assignment bootstrap,
+/// but with a fatter far tail than `EXP = 3` (~16 %) so far pursuit re-trains instead of starving.
+/// The single tunable knob: raise it to lean nearer, drop toward 1 for uniform. See the module doc
+/// for why near-heavy over uniform. (Leaned 3→2 once near/mid were reliable and far was stalling:
+/// deterministic eval showed EXP=3 over-specialized near, closing ~3.9 m short at 8 m; EXP=2
+/// re-fed the far budget and cut the 8 m stall to ~1.1 m median.)
+const NEAR_BIAS_EXP: f32 = 2.0;
 
 /// Sample a fresh target world position for a crab whose env spawns at `origin`, at a planar
 /// distance drawn NEAR-HEAVY from the [`TargetBand`] band (see [`NEAR_BIAS_EXP`]) and at EXACTLY
@@ -218,8 +221,9 @@ mod tests {
     fn distance_draw_is_near_heavy_with_a_real_far_tail() {
         // Pins the bootstrap sampling: most targets land near (so the credit-assignment horizon
         // stays short enough to learn) while a real tail still reaches the far arena (so far
-        // pursuit is trained, not forgotten). Guards against a silent revert to a uniform draw,
-        // whose near fraction would be the band-proportion ~0.2, far below the bar here.
+        // pursuit is trained, not forgotten). Guards BOTH ways at EXP=2 (~45/33/22 near/mid/far):
+        // near must still dominate a uniform draw (whose near fraction would be ~0.2), and the far
+        // tail must stay fat — the whole point of the 3→2 lean was to un-starve far.
         let mut rng = rand::thread_rng();
         let origin = Vec3::ZERO;
         let (min, max) = TargetBand::start().range();
@@ -238,12 +242,12 @@ mod tests {
         let near_frac = near as f32 / n as f32;
         let far_frac = far as f32 / n as f32;
         assert!(
-            near_frac > 0.45,
-            "near ({min}-{near_edge} m) fraction {near_frac} should dominate (uniform would be ~0.2)"
+            near_frac > 0.40,
+            "near ({min}-{near_edge} m) fraction {near_frac} should dominate (uniform would be ~0.2; EXP=2 ~0.45)"
         );
         assert!(
-            far_frac > 0.05,
-            "far (>{far_edge} m, up to {max} m) fraction {far_frac} must keep a real tail, not collapse to near-only"
+            far_frac > 0.15,
+            "far (>{far_edge} m, up to {max} m) fraction {far_frac} must keep a FAT tail (EXP=2 ~0.22), not starve far"
         );
     }
 }
