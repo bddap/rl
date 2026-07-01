@@ -22,6 +22,11 @@ use bevy_rapier3d::prelude::Collider;
 use crate::bot::body::{CrabBodyPart, CrabEnvId};
 use crate::bot::skin::CrabSkinRepose;
 
+/// The ONE colour every physics collider wireframe draws in — the crab cage here, and GCR's piloted
+/// vehicle (the `net` render-mode glue reuses [`draw_collider_wireframe`]). One source so the
+/// honest-physics view reads uniform across both bodies.
+pub const COLLIDER_WIREFRAME_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
+
 /// What the crab render shows. A 3-state cycle, driven by one controller button (+ key) wired
 /// through each binary's controls source. `Mesh` is the default player-facing view; the two
 /// collider views overlay (or replace) it with the honest physics cage.
@@ -187,21 +192,26 @@ fn draw_crab_collider_wireframe(
         .and_then(|r| r.0)
         .map(|s| s.matrix())
         .unwrap_or(Mat4::IDENTITY);
-    let color = Color::srgb(0.2, 1.0, 0.4);
     for (gt, collider, env) in &parts {
         if env.0 != 0 {
             continue;
         }
         let world = placement * gt.to_matrix();
-        draw_collider_view(&mut gizmos, collider.as_typed_shape(), world, color);
+        draw_collider_wireframe(
+            &mut gizmos,
+            collider.as_typed_shape(),
+            world,
+            COLLIDER_WIREFRAME_COLOR,
+        );
     }
 }
 
 /// Draw one collider view as gizmo lines under world transform `world`. Handles the shapes the
-/// crab body actually uses — the carapace compound-of-cuboid and the per-link capsules; other
-/// shapes are skipped (the crab has none). render==physics, so `world` carries no scale and the
-/// shapes draw at true collider size.
-fn draw_collider_view(gizmos: &mut Gizmos, view: ColliderView<'_>, world: Mat4, color: Color) {
+/// crab body and the piloted vehicle actually use — the carapace compound-of-cuboid, the per-link
+/// capsules, and the vehicle cuboid; other shapes are skipped (neither body has them). render==physics,
+/// so `world` carries no scale and the shapes draw at true collider size. `pub` so GCR's render-mode
+/// glue draws the piloted craft's collider through this ONE drawer (no second wireframe impl).
+pub fn draw_collider_wireframe(gizmos: &mut Gizmos, view: ColliderView<'_>, world: Mat4, color: Color) {
     match view {
         ColliderView::Cuboid(c) => draw_cuboid(gizmos, world, c.half_extents(), color),
         ColliderView::Capsule(c) => {
@@ -211,7 +221,7 @@ fn draw_collider_view(gizmos: &mut Gizmos, view: ColliderView<'_>, world: Mat4, 
         ColliderView::Compound(c) => {
             for (pos, rot, sub) in c.shapes() {
                 let sub_world = world * Mat4::from_rotation_translation(rot, pos);
-                draw_collider_view(gizmos, sub, sub_world, color);
+                draw_collider_wireframe(gizmos, sub, sub_world, color);
             }
         }
         // The crab uses only the above; anything else (a future shape) is skipped rather than

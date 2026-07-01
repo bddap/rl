@@ -12,6 +12,10 @@
 use super::*;
 use super::scene::CrabAvatar;
 use crate::controls::{self, Action};
+use bevy_rapier3d::prelude::Collider;
+use crab_world::bot::skin::CrabSkinRepose;
+use crab_world::crab_view::{COLLIDER_WIREFRAME_COLOR, draw_collider_wireframe};
+use crab_world::vehicle::Vehicle;
 pub use crab_world::crab_view::RenderMode;
 
 /// Wire GCR's render-mode cycle into a render `App`, booting in `initial` (the missing-glb
@@ -21,6 +25,14 @@ pub use crab_world::crab_view::RenderMode;
 pub fn register(app: &mut App, initial: RenderMode) {
     crab_world::crab_view::register(app, initial);
     app.add_systems(Update, (cycle_render_mode, manage_silhouette_visibility));
+    // The piloted craft's collider wireframe — same cycle, same drawer, same repose as the crab
+    // cage. Drawn AFTER transform propagation so the body's `GlobalTransform` is this frame's
+    // physics pose. Only GCR spawns a `Vehicle`, so the query is empty (a no-op) in the rl-demo,
+    // which registers the shared crab cage directly and never calls this.
+    app.add_systems(
+        PostUpdate,
+        draw_vehicle_collider_wireframe.after(TransformSystems::Propagate),
+    );
 }
 
 /// Cycle the render mode on the `CycleRenderMode` control (keyboard V / pad B), read through
@@ -65,5 +77,42 @@ fn manage_silhouette_visibility(
         if *vis != want {
             *vis = want;
         }
+    }
+}
+
+/// Draw the PILOTED craft's collider as a gizmo wireframe at its RENDERED pose — the "physics debug
+/// wireframe" for the plane/ship, the sibling of the crab cage in [`crab_world::crab_view`], sharing
+/// the SAME [`RenderMode`] cycle, the SAME drawer, and the SAME [`CrabSkinRepose`] repose. Active in
+/// any mode that [`RenderMode::shows_colliders`], so the ONE `CycleRenderMode` control toggles the
+/// crab AND the craft together, every context.
+///
+/// The vehicle rapier body lives in the crab's ARENA frame (the ±10 m box with Sally), so — like the
+/// crab body — it must be reposed into render space to sit where the pilot sees it: the cockpit camera
+/// applies exactly this `world(crab) − arena_carapace` shift (see [`super::scene`]'s `apply_transforms`),
+/// so reusing the same [`CrabSkinRepose`] the crab cage uses puts the cage on the craft the camera
+/// flies. No scale (render==physics). One body at a time (the player flies a single craft); despawned
+/// on foot, so the query is empty then.
+fn draw_vehicle_collider_wireframe(
+    mode: Res<RenderMode>,
+    repose: Option<Res<CrabSkinRepose>>,
+    vehicles: Query<(&GlobalTransform, &Collider), With<Vehicle>>,
+    mut gizmos: Gizmos,
+) {
+    if !mode.shows_colliders() {
+        return;
+    }
+    let placement = repose
+        .as_deref()
+        .and_then(|r| r.0)
+        .map(|s| s.matrix())
+        .unwrap_or(Mat4::IDENTITY);
+    for (gt, collider) in &vehicles {
+        let world = placement * gt.to_matrix();
+        draw_collider_wireframe(
+            &mut gizmos,
+            collider.as_typed_shape(),
+            world,
+            COLLIDER_WIREFRAME_COLOR,
+        );
     }
 }
