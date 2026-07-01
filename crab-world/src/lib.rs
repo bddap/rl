@@ -38,7 +38,19 @@ pub mod fnv;
 /// headless too (it's never called there).
 pub mod mesh_fallback;
 pub mod physics;
+/// The trained-policy inference — load a checkpoint's brain + normalizer and run
+/// deterministic mean-action inference. Pure (burn tensors + a checkpoint reader, no bevy
+/// render types), so it lives OUTSIDE the render gate: the headless trainer-side eval
+/// ([`eval`]) reuses the SAME policy the rendered demo runs (`play` re-exports it), instead
+/// of a second copy that could drift.
+pub mod policy;
 pub mod training;
+/// The headless training-SUCCESS eval — the true measure of the policy, distinct from the
+/// training reward: reuses the demo/train crab+ball scenario headless, places the ball far,
+/// drives the loaded policy deterministically, and reports real metres of progress toward the
+/// ball plus the total applied joint torque. Pure physics + inference (no window), so it
+/// stays out of the render gate.
+pub mod eval;
 /// The player's single-player rapier flight vehicle (plane / Outer-Wilds ship), living in the crab's
 /// rapier world so it collides with Sally. Replaces the old integer flight integrator. Headless
 /// (pure physics), so it stays out of the render gate below.
