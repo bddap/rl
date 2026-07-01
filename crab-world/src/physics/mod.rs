@@ -303,7 +303,7 @@ mod tests {
                 app.update();
                 let t = *app.world().entity(body).get::<Transform>().unwrap();
                 let v = *app.world().entity(body).get::<Velocity>().unwrap();
-                hashes.push(fold_bodies(DIGEST_SEED, &[(0, body_bits(&t, &v))]));
+                hashes.push(fold_bodies(DIGEST_SEED, vec![(0, body_bits(&t, &v))]));
             }
             let t = *app.world().entity(body).get::<Transform>().unwrap();
             let v = *app.world().entity(body).get::<Velocity>().unwrap();
