@@ -5,8 +5,7 @@
 //! telescoping PROGRESS signal (`P·(d_prev − d_now)`, see [`super::reward`]) that pays the same
 //! per-metre GRADIENT at any absolute distance — so the old near→far advancement crutch (which
 //! existed only because the earlier reach reward went flat far out) is gone, and the weights
-//! learn the far approach directly (the bitter lesson): complexity lives in learned weights,
-//! not in hand-coded curriculum gating.
+//! learn the far approach directly (the bitter lesson).
 //!
 //! What the scale-free reward does NOT remove is the credit-assignment HORIZON: a far target
 //! demands a longer correct action sequence before the sparse grab terminal pays, so a far
@@ -52,9 +51,8 @@ pub(crate) const SOLID_REACH_FRACTION: f32 = 0.6;
 
 /// The fixed target-distance band `[min, max)` the policy trains on — `BAND_START_MIN` to the
 /// arena cap, the FULL arena range. Threaded from the learner to the rollout threads so they
-/// sample targets from the same range; it never changes, so there is nothing to advance,
-/// persist, or drift. Kept as a small type (rather than two bare constants) because every
-/// rollout thread already carries it as its per-horizon sampling band.
+/// sample targets from the same range. Kept as a small type (rather than two bare constants)
+/// because every rollout thread already carries it as its per-horizon sampling band.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TargetBand {
     min: f32,
@@ -164,9 +162,7 @@ mod tests {
         // distance from its spawn AND inside the arena — from any origin, including hard against
         // a wall. The old position-clamp shortened the distance for an edge spawn, so the band
         // lied; this pins that it never does again. Checked from a central, an edge, and a
-        // corner origin (where only the inward arc of headings fits). The demo relocates its
-        // target through this very `sample_target`, so the demo can never pose a goal training
-        // never saw.
+        // corner origin (where only the inward arc of headings fits).
         let mut rng = rand::thread_rng();
         let band = TargetBand::start();
         let (min, max) = band.range();
@@ -195,9 +191,8 @@ mod tests {
 
     #[test]
     fn the_band_is_the_full_arena_range() {
-        // The bitter-lesson change: the band spans the WHOLE arena from the start (near edge to
-        // the arena cap), so the policy sees far targets every episode — no near-capping growth
-        // curriculum gating it to the start band.
+        // Pins the bitter-lesson invariant: the band spans the WHOLE arena from the start (near
+        // edge to the arena cap), with no near-capping growth curriculum.
         let (min, max) = TargetBand::start().range();
         assert_eq!(min, BAND_START_MIN);
         assert_eq!(max, TARGET_ARENA_HALF);

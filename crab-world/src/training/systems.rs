@@ -114,8 +114,7 @@ pub(crate) enum EnvPhase {
 #[derive(Clone)]
 struct Pending {
     obs: [f32; OBS_SIZE],
-    /// The policy's unbounded DRIVE `μ + σ·ε` this tick — the RL action proper the PPO update
-    /// recomputes its log-prob over (the sim ran `drive.clamp(±1)`). See [`SampledAction`].
+    /// The policy's unbounded DRIVE `μ + σ·ε` this tick (see [`SampledAction`]).
     action: [f32; ACTION_SIZE],
     value: NormalizedValue,
     log_prob: f32,
@@ -142,7 +141,8 @@ pub(crate) struct EnvEpisode {
     /// [`CURRICULUM_REACH_RADIUS`]). `None` until the first finite tip reading. The MIN
     /// over the whole episode (not the final-tick distance) is the honest "did it get
     /// there", since the crab need only touch the target once, and the target then
-    /// stays fixed for the rest of the episode.
+    /// stays fixed for the rest of the episode. A 3D radius (see [`dist_3d`]): a tip on the
+    /// floor under a raised ball does not count.
     min_tip_dist: Option<f32>,
     /// Tick `t`'s chosen action awaiting tick `t+1`'s post-physics pose (see
     /// [`Pending`]). `None` outside a live recording stride — before the first action of
@@ -319,9 +319,8 @@ struct StepInputs<'a> {
     min_tip_dists: &'a [Option<f32>],
     /// Normalized observation fed to the policy this tick (stashed in the pending).
     obs: &'a [[f32; OBS_SIZE]],
-    /// The policy's unbounded DRIVE this tick — the RL action proper, carried into the
-    /// transition so the PPO log-prob recomputes over the same quantity it was sampled on
-    /// (the sim ran `drive.clamp(±1)`; that command is not stored — nothing reads it back).
+    /// The policy's unbounded DRIVE this tick, carried into the transition (see
+    /// [`SampledAction`]).
     drives: &'a [[f32; ACTION_SIZE]],
     /// Value-head output for this tick's observation.
     values: &'a [NormalizedValue],
@@ -675,10 +674,8 @@ impl TrainingState {
     /// accessor backs only the `#[cfg(test)]` CPU update test, which exercises the shared
     /// update math without a GPU. The optimizer is not learner state: the CPU update test
     /// builds its own via [`super::checkpoint::crab_optimizer`], so the production learner
-    /// carries no optimizer the GPU path never steps. The return normalizer is the single
-    /// copy (rollout threads
-    /// never touch it), handed out `&mut` to fold in the iteration's returns; `rng` drives
-    /// the update's minibatch shuffle.
+    /// carries no optimizer the GPU path never steps. The return normalizer is handed out `&mut`
+    /// to fold in the iteration's returns; `rng` drives the update's minibatch shuffle.
     #[cfg(test)]
     pub fn learner_parts(
         &mut self,
@@ -805,11 +802,8 @@ impl TrainingState {
                     // blow-up/fell-through guard below. The pose's second element (uprightness)
                     // is unused.
                     //
-                    // World-frame progress toward the (fixed, per-episode) target: the metres
-                    // the carapace's planar distance to the goal SHRANK from `s_t` (the pose
-                    // the action was chosen at, `pending.target_dist`) to this tick's `s_{t+1}`.
-                    // `None` if either distance is missing (carapace or target absent) — the
-                    // reward then degrades to reach + tax, never a spurious progress credit.
+                    // Progress = the metres the carapace's distance to the goal SHRANK from `s_t`
+                    // (`pending.target_dist`) to this tick's `s_{t+1}` (see [`Pending::target_dist`]).
                     let d_now = carapace_target_dist(body, targets, e);
                     let distance_closed = pending
                         .target_dist
@@ -838,14 +832,12 @@ impl TrainingState {
                     // action, in phase with the pose it caused. `is_some_and` makes a missing/NaN
                     // distance a non-grab (fail-safe, no spurious terminal). The radius is the
                     // single shared `CURRICULUM_REACH_RADIUS` (also the curriculum "reached" signal
-                    // and the demo ball-hop), so a grab implies a reached episode.
+                    // and the demo ball-hop).
                     let grabbed = min_tip_dists[e].is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
                     if grabbed {
                         reward += GRAB_REWARD;
                     }
-                    // The step cap is a TRUNCATION, not a failure: a crab still standing at the
-                    // cap was cut short, so GAE bootstraps its value rather than learning the cap
-                    // is a dead end (see [`classify_step_end`] / StepEnd::Truncated).
+                    // Alive at the cap ⇒ a TRUNCATION (see [`classify_step_end`]).
                     let over_cap = self.envs[e].steps > MAX_EPISODE_TICKS;
                     let end = classify_step_end(grabbed, fell, over_cap);
                     self.rollouts[e].push(Transition {
@@ -874,8 +866,8 @@ impl TrainingState {
             // still recording (a just-ended env is resetting below, and a rescued env
             // is being respawned). Settling/absent envs already `continue`d above.
             if !episode_ended && matches!(self.envs[e].phase, EnvPhase::Recording) {
-                // Carapace→target distance at THIS pose (`s_t` for the action chosen now); next
-                // tick's finalize credits the reduction to `s_{t+1}` as the progress reward.
+                // Carapace→target distance at THIS pose (`s_t` for the action chosen now), for
+                // next tick's finalize (see [`Pending::target_dist`]).
                 let target_dist = carapace_target_dist(body, targets, e);
                 self.envs[e].pending = Some(Pending {
                     obs: inputs.obs[e],
@@ -890,14 +882,10 @@ impl TrainingState {
             if episode_ended {
                 let ep = &self.envs[e];
                 let ep_reward = ep.reward;
-                // Did this episode reach the target — the curriculum's competence signal, read
-                // off the episode's closest-ever tip distance before the reset clears it. Same
-                // `CURRICULUM_REACH_RADIUS` as the grab terminal, but over the episode MINIMUM
-                // (not just this tick), so a grab ⟹ reached: the grab fires the first finalized
-                // tick the tip is inside the radius, which also drives the episode-min inside it.
-                // `None` (no finite tip all episode) and a blown-up episode that never got close
-                // both count as honest misses. A 3D radius (see [`dist_3d`]): a tip on the floor
-                // under a raised ball does not count.
+                // Did this episode reach the target (see [`EnvEpisode::min_tip_dist`]), read
+                // before the reset clears it. Same `CURRICULUM_REACH_RADIUS` as the grab terminal
+                // but over the episode MINIMUM, so a grab ⟹ reached: the grab fires the first
+                // finalized tick the tip is inside the radius, which also drives the min inside it.
                 let reached = ep.min_tip_dist.is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
                 // A rescued env was already despawned+respawned this tick by
                 // rescue_nonfinite_crabs (runs .before(Sense)); a second respawn from reset_crab
@@ -1101,9 +1089,7 @@ fn forward_pass(
 /// that env's standard-normal `ε` (the temporally-correlated draw from [`OuNoise`], aligned by
 /// env), with the NaN/Inf guards the live solver needs: a non-finite log-prob becomes 0
 /// (else clamped to ±20),
-/// and any non-finite drive element zeroes that element (warning once for the row). The
-/// log-prob and the effort tax are both over the unbounded `drive`; the ±1 torque bound is the
-/// actuator's clamp, not applied here, so the drive stays a single un-truncated quantity.
+/// and any non-finite drive element zeroes that element (warning once for the row).
 fn sample_actions(
     means_rows: &[Tensor<NdArray, 1>],
     log_std: &Tensor<NdArray, 1>,
@@ -1115,9 +1101,8 @@ fn sample_actions(
         .zip(noise)
         .map(|(means, &eps)| {
             let drive_tensor = sample_action(means, log_std, eps, device);
-            // Log-prob of the ACTUAL sample (the unbounded drive): it must be the quantity the
-            // PPO update later recomputes its ratio over, and the drive — not a clamp of it —
-            // is what the Gaussian drew.
+            // Log-prob of the ACTUAL sample (the unbounded drive): the quantity the PPO update
+            // later recomputes its ratio over.
             let log_prob = compute_log_prob(means, log_std, &drive_tensor);
             let log_prob = if log_prob.is_nan() || log_prob.is_infinite() {
                 0.0
@@ -1162,9 +1147,7 @@ fn gather_body_state(
             let up = transform.rotation * Vec3::Y;
             *p = Some((transform.translation.y, up.dot(Vec3::Y)));
         }
-        // World position for the progress reward — the call site computes its planar distance
-        // to the target and credits the per-tick reduction. Rapier writes the multibody root's
-        // world pose into this `Transform` each tick (the live `s_{t+1}`).
+        // Carapace world position for the progress reward (see [`BodyState::carapace_pos`]).
         if let Some(c) = carapace_pos.get_mut(env.0) {
             *c = Some(transform.translation);
         }
@@ -1270,12 +1253,10 @@ pub(crate) fn brain_step(
 
     let drive_arrays: Vec<[f32; ACTION_SIZE]> = sampled.iter().map(|s| s.drive).collect();
     let log_probs: Vec<f32> = sampled.iter().map(|s| s.log_prob).collect();
-    // Metabolic effort tax is taken over the unbounded DRIVE, per env (see `action_effort`) —
-    // so a saturating `|d|≫1` drive pays for the overshoot the ±1 torque bound would hide.
     let efforts: Vec<f32> = sampled.iter().map(|s| action_effort(&s.drive)).collect();
 
-    // The sim runs the drive through the actuator's ±1 clamp (`apply_actions`, the single
-    // torque-bound source), so the unbounded drive is written here as-is — no second clamp.
+    // The unbounded drive is written as-is; the actuator's ±1 clamp (`apply_actions`) is the
+    // single torque-bound source, so there is no second clamp here.
     actions.envs.copy_from_slice(&drive_arrays);
     // Settling envs hold the rest pose (action 0); the policy takes over at
     // step 0 of the new episode.

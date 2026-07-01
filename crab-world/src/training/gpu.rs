@@ -19,9 +19,9 @@ use super::checkpoint::{CrabOpt, crab_optimizer, load_optimizer, save_optimizer}
 use super::update::ppo_update_core;
 use crate::bot::brain::CrabBrain;
 
-/// The GPU training backend: `Autodiff<Wgpu>` over Vulkan. The live learner (the SOLE
-/// update path) runs the one generic [`ppo_update_core`] on this — the same update the
-/// CPU-backed parity test exercises, just on the GPU device. WGSL→Vulkan (the SPIR-V
+/// The GPU training backend: `Autodiff<Wgpu>` over Vulkan. The live learner runs the
+/// one generic [`ppo_update_core`] on this — the same update the CPU-backed parity test
+/// exercises, just on the GPU device. WGSL→Vulkan (the SPIR-V
 /// `burn/vulkan` path is a separate lever). Rollout inference stays on
 /// [`TrainBackend`] (CPU): rollouts are many tiny per-step obs forwards across the K
 /// worker threads, where GPU dispatch overhead would dominate; only the one batched
@@ -30,8 +30,8 @@ pub(crate) type GpuBackend = Autodiff<burn::backend::wgpu::Wgpu>;
 
 /// Bring up the wgpu/Vulkan backend on the discrete GPU and PROVE the chosen adapter
 /// is real hardware, returning the device to run on. The single source of the
-/// adapter-selection + software-fallback guard for the live `learn` learner (the SOLE
-/// update path), so there is one place that decides "is this actually the GPU".
+/// adapter-selection + software-fallback guard for the live `learn` learner, so there is
+/// one place that decides "is this actually the GPU".
 ///
 /// The guard is the load-bearing part. The box's Vulkan ICD set includes lavapipe
 /// (`lvp` — a CPU software rasteriser, `DeviceType::Cpu`); if wgpu silently fell back
@@ -100,8 +100,8 @@ pub(crate) struct GpuUpdateTiming {
     pub store_ms: f64,
 }
 
-/// The GPU-resident learner — the SOLE PPO-update path (rl#49). Owns a GPU brain + GPU
-/// Adam optimizer that PERSIST across iterations — the optimizer's moment estimates must
+/// The GPU-resident learner. Owns a GPU brain + GPU Adam optimizer that PERSIST across
+/// iterations — the optimizer's moment estimates must
 /// carry over across updates, so this is built once and reused, never per-iter.
 ///
 /// The CPU `TrainingState.brain` stays the source of truth. Each iteration
@@ -127,8 +127,8 @@ impl GpuLearner<GpuBackend> {
     ///
     /// # Panics
     /// Via [`init_gpu_backend`], if no real discrete-GPU Vulkan adapter is available (a
-    /// software lavapipe/llvmpipe adapter, or none at all). Deliberate: the GPU is the
-    /// only update path, so it must fail loudly at boot, never silently run on the CPU.
+    /// software lavapipe/llvmpipe adapter, or none at all). Deliberate: it must fail
+    /// loudly at boot, never silently run on the CPU.
     pub fn new() -> Self {
         Self::with_device(init_gpu_backend())
     }

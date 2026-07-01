@@ -25,10 +25,8 @@ use crate::bot::sensor::OBS_SIZE;
 use super::atomic_write;
 
 /// Per-element Welford state: running `(count, mean, M2)` for each of the `OBS_SIZE`
-/// observation elements. Both the master normalizer and a worker's per-horizon
-/// increment ARE one of these over their own sample stream — they differ only in
-/// whether a baseline was loaded first — so the fold and the parallel combine live
-/// here once and the two cannot compute them differently.
+/// observation elements. The fold and the parallel combine live here once, so the
+/// master normalizer and a worker's increment cannot compute them differently.
 ///
 /// Per-element counts (not one shared count) because the NaN-skip lets an element be
 /// observed while its neighbours are not; variance is derived from `m2` on demand, so
@@ -93,8 +91,7 @@ impl Welford {
 
     /// Parallel Welford combine: fold a DISJOINT `other` stream's per-element
     /// `(count, mean, M2)` into this one. Exact only when `other` shares no samples
-    /// with `self` — the type wall around [`NormalizerIncrement`] is what upholds that.
-    /// Per element because the NaN-skip lets counts differ across elements.
+    /// with `self`. Per element because the NaN-skip lets counts differ across elements.
     fn merge(&mut self, other: &Welford) {
         for i in 0..OBS_SIZE {
             let na = self.count[i] as f64;
@@ -115,9 +112,8 @@ impl Welford {
 }
 
 /// Running observation normalizer using Welford's online algorithm. Normalizes
-/// observations to zero mean, unit variance, and is the only Welford that carries a
-/// `clip` and a loaded baseline — so it produces a [`NormalizerSnapshot`], never an
-/// increment (an increment must be baseline-free, see [`IncrementAccumulator`]).
+/// observations to zero mean, unit variance; the only Welford that carries a `clip`
+/// and a loaded baseline, so it produces a [`NormalizerSnapshot`], never an increment.
 pub(crate) struct ObsNormalizer {
     welford: Welford,
     clip: f32, // max absolute normalized value
@@ -125,9 +121,7 @@ pub(crate) struct ObsNormalizer {
 
 /// The on-disk checkpoint format AND the cumulative baseline shipped learner→rollout
 /// thread (in-process, not over a wire). Serde-friendly because arrays > 32 don't
-/// auto-derive. A snapshot is the master's FULL stats, so it must never reach
-/// [`ObsNormalizer::merge`] — the type, not a comment, enforces that. No `var` field:
-/// variance is `m2/(count-1)`, derived on demand, so it can't drift from `m2`/`count`.
+/// auto-derive. The master's FULL cumulative stats.
 ///
 /// The field set and order are the bincode wire format on disk; changing them breaks
 /// resuming existing checkpoints, so a format change must bump a version and cold-start.
@@ -141,20 +135,18 @@ pub(crate) struct NormalizerSnapshot {
 
 /// A worker's disjoint per-horizon delta: a Welford over ONLY the observations one
 /// rollout thread saw since its last reset, counted from a zero baseline. The single
-/// input [`ObsNormalizer::merge`] accepts — never a [`NormalizerSnapshot`]. In-process
-/// only (worker→learner over a channel), so it carries no `clip` and no serde: the
-/// merge reads only `(count, mean, M2)`, and the fixed-size arrays make the old
-/// runtime size-mismatch check unrepresentable. Boxed because the `Welford` is ~2KB of
-/// inline arrays; keeping it off the `RollOutcome` enum (whose other variant is empty)
-/// avoids bloating every outcome that crosses the channel.
+/// input [`ObsNormalizer::merge`] accepts. In-process only (worker→learner over a
+/// channel), so it carries no `clip` and no serde: the merge reads only
+/// `(count, mean, M2)`, and the fixed-size arrays make the old runtime size-mismatch
+/// check unrepresentable. Boxed because the `Welford` is ~2KB of inline arrays;
+/// keeping it off the `RollOutcome` enum (whose other variant is empty) avoids
+/// bloating every outcome that crosses the channel.
 pub(crate) struct NormalizerIncrement(Box<Welford>);
 
 /// Accumulates ONLY one horizon's observations from a zero baseline — the delta a
 /// rollout thread ships back for the learner to [`ObsNormalizer::merge`]. Distinct
 /// from [`ObsNormalizer`] precisely so it can never be loaded with a baseline or used
-/// to normalize: it only `observe`s and yields a [`NormalizerIncrement`]. This is what
-/// makes "merge only a disjoint increment, never a cumulative snapshot" a property of
-/// the types rather than of a convention.
+/// to normalize: it only `observe`s and yields a [`NormalizerIncrement`].
 pub(crate) struct IncrementAccumulator {
     welford: Welford,
 }
@@ -176,9 +168,7 @@ impl IncrementAccumulator {
     }
 
     /// The disjoint delta to ship to the learner. A by-value `Welford` clone; the
-    /// accumulator is reset (replaced) at the next horizon, so no aliasing. Named
-    /// distinctly from [`ObsNormalizer::snapshot`] because it yields the opposite kind:
-    /// a delta the master may merge, never a cumulative baseline.
+    /// accumulator is reset (replaced) at the next horizon, so no aliasing.
     pub(crate) fn increment(&self) -> NormalizerIncrement {
         NormalizerIncrement(Box::new(self.welford.clone()))
     }
@@ -240,8 +230,7 @@ impl ObsNormalizer {
     }
 
     /// The cumulative baseline as the serde mirror — handed to a rollout thread, and
-    /// persisted as the checkpoint. A snapshot, never an increment, so it cannot be
-    /// merged.
+    /// persisted as the checkpoint.
     pub(crate) fn snapshot(&self) -> NormalizerSnapshot {
         NormalizerSnapshot {
             mean: self.welford.mean.to_vec(),
@@ -284,8 +273,7 @@ impl ObsNormalizer {
     }
 
     /// Fold a rollout thread's disjoint per-horizon [`NormalizerIncrement`] into the
-    /// master. Only an increment is accepted: see the module-level contract for why a
-    /// cumulative snapshot must never reach here.
+    /// master — only an increment, never a cumulative snapshot (module-level contract).
     pub(crate) fn merge(&mut self, increment: &NormalizerIncrement) {
         self.welford.merge(&increment.0);
     }
@@ -499,8 +487,7 @@ mod tests {
     /// merges. After N iterations the master must equal a single stream over every
     /// sample — no doubling. The classic bug ships the cumulative snapshot, so the
     /// master re-merges its own baseline every iteration (C → 2C+S → 4C+3S …); the
-    /// type wall (`merge` takes a `NormalizerIncrement`, never a `NormalizerSnapshot`)
-    /// now makes that bug a compile error, and this pins the loop end to end.
+    /// type wall now makes that a compile error, and this pins the loop end to end.
     #[test]
     fn snapshot_roll_merge_loop_matches_single_stream() {
         let sample = |i: usize| {

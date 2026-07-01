@@ -177,10 +177,8 @@ impl BrainShape {
 
 /// Format version of the [`OPTIMIZER_FILENAME`] envelope. Bumped whenever the serialized
 /// layout changes; a file tagged with any other version is ignored on load (→ cold
-/// moments), never deserialized blind — so both an older checkpoint (which has no such
-/// file at all) and one from a future format resume safely instead of erroring. v1 is
-/// burn's Adam record (per-param m/v + step `time`) under `FullPrecisionSettings`, wrapped
-/// in this versioned bincode envelope.
+/// moments), never deserialized blind. v1 is burn's Adam record (per-param m/v + step
+/// `time`) under `FullPrecisionSettings`, wrapped in this versioned bincode envelope.
 #[cfg(any(feature = "wgpu", test))]
 const OPTIMIZER_FORMAT_VERSION: u32 = 1;
 
@@ -201,7 +199,7 @@ struct OptimizerCheckpoint {
 /// CPU round-trip test serialize through ONE path — no save/load drift. The
 /// `FullPrecisionSettings` recorder reads the moment tensors back off the optimizer's device
 /// into host floats, exactly as the brain bridge does for weights. Best-effort: any failure
-/// is logged, not fatal — the run continues, a resume just falls back to cold moments.
+/// is logged, not fatal (a resume then loads cold — see [`OPTIMIZER_FILENAME`]).
 #[cfg(any(feature = "wgpu", test))]
 pub(crate) fn save_optimizer<B: AutodiffBackend>(optimizer: &CrabOpt<B>, path: &Path) {
     use burn::optim::Optimizer;
@@ -234,9 +232,8 @@ pub(crate) fn save_optimizer<B: AutodiffBackend>(optimizer: &CrabOpt<B>, path: &
 
 /// Load an Adam optimizer state saved by [`save_optimizer`] onto `device`, returning the
 /// optimizer with its moments + step restored. Returns the `cold` optimizer UNCHANGED — no
-/// error — when the file is absent (a pre-rl#60 checkpoint, or a fresh run), unreadable,
-/// corrupt, or tagged with a version this build doesn't recognize; all of these resume cold,
-/// which is correct, just without the warm-momentum head start. The per-parameter keys line
+/// error — when the file is absent, unreadable, corrupt, or version-unrecognized (see
+/// [`OPTIMIZER_FILENAME`] for why cold is the correct fallback). The per-parameter keys line
 /// up across the round trip because the resumed brain restores the SAME `ParamId`s from its
 /// own record, so each moment lands back on its parameter.
 #[cfg(any(feature = "wgpu", test))]
