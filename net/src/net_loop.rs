@@ -1609,7 +1609,7 @@ mod tests {
         }
         assert_eq!(
             ls.sim().tick(),
-            crate::lockstep::INPUT_DELAY + submits,
+            submits,
             "solo advances one tick per submit through the host-authoritative path"
         );
     }

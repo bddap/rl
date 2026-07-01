@@ -22,25 +22,22 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::lockstep::{INPUT_DELAY, TickMsg};
+use crate::lockstep::TickMsg;
 use crate::roster::RosterSchedule;
 use crate::sim::{Input, PlayerId, Pos, Sim};
 
 /// Ticks of lead between admitting a joiner and its roster change taking effect (Stage 3). Past the
-/// emit cursor so every client learns of the change, and the joiner can issue its first input,
-/// before the tick is due. The `+ 2`: one tick for the [`Admission`] broadcast to reach every
-/// client past the [`INPUT_DELAY`] input pipeline, one of slack so a late packet doesn't strand the
-/// boundary — the same lead-time role [`INPUT_DELAY`] plays for ordinary input. The joiner builds
-/// its [`crate::lockstep::Lockstep`] via `join_at(effective_tick)`, issuing input for
-/// `effective_tick` onward. (Whether this margin suffices under real QUIC latency is the transport
-/// increment's to verify; a too-short lead can't silently desync — the hash oracle catches it.)
-pub const JOIN_LEAD: u64 = INPUT_DELAY + 2;
+/// emit cursor so every client learns of the change (the [`Admission`] broadcast), and the joiner can
+/// issue its first input, before the tick is due — plus a tick of slack so a late packet doesn't
+/// strand the boundary. The joiner builds its [`crate::lockstep::Lockstep`] via
+/// `join_at(effective_tick)`, issuing input for `effective_tick` onward. (Whether this margin
+/// suffices under real QUIC latency is the transport increment's to verify.)
+pub const JOIN_LEAD: u64 = 3;
 
 /// The outcome of [`Server::admit`]: the stable [`PlayerId`] allocated to the joiner, the tick its
-/// roster change takes effect on every client (the round-boundary rebuild tick), and the complete
-/// new roster from that tick. The caller broadcasts these so every client schedules the identical
-/// change at the identical tick (and the joiner builds its session via
-/// [`crate::lockstep::Lockstep::join_at`]).
+/// roster change takes effect (the tick the server spawns it into the live sim), and the complete new
+/// roster from that tick. The caller broadcasts these so every client learns of the change at the
+/// identical tick (and the joiner builds its session via [`crate::lockstep::Lockstep::join_at`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admission {
     pub pid: PlayerId,
@@ -165,10 +162,8 @@ pub struct Server {
     /// Per-tick input table awaiting completion: `ledger[tick][player]`. A tick leaves the ledger
     /// (into a [`TickSet`]) the moment every roster member's input for it is present.
     ledger: BTreeMap<u64, BTreeMap<PlayerId, Input>>,
-    /// The next tick to emit. Sets are emitted strictly in order, so a client receives a gap-free
-    /// run it can apply directly. Starts at [`INPUT_DELAY`]: ticks `[0, INPUT_DELAY)` are the warmup,
-    /// which [`step_next`](Server::step_next) steps on neutral input WITHOUT any recorded set, so no
-    /// client input is required there.
+    /// The next tick to emit. Sets are emitted strictly in order (from tick 0), so a client receives a
+    /// gap-free run it can apply directly.
     next_emit: u64,
     /// The AUTHORITATIVE world this server owns and steps (rl#151 increment 1). Its per-tick
     /// [`CoreSnapshot`](crate::snapshot::CoreSnapshot) is what every client renders; in SP the single local client applies it
@@ -181,9 +176,7 @@ pub struct Server {
     /// advance the sim AFTER the driver has pumped that tick's crab physics: the rapier pump needs the
     /// bevy `World` (which this pure core can't hold), so the authoritative step can't run at drain
     /// time. The headless `game net` host has no bevy world, so it steps straight off `next_tick_ready`
-    /// without the deferral. Warmup ticks `[0, INPUT_DELAY)` are never enqueued (the server emits
-    /// nothing for them); `step_next` steps them on neutral input — so the authoritative tick stream is
-    /// gap-free.
+    /// without the deferral.
     pending_step: VecDeque<(u64, BTreeMap<PlayerId, Input>)>,
 }
 
@@ -209,7 +202,7 @@ impl Server {
         Self {
             roster: RosterSchedule::frozen(roster),
             ledger: BTreeMap::new(),
-            next_emit: INPUT_DELAY,
+            next_emit: 0,
             sim,
             pending_step: VecDeque::new(),
         }
@@ -222,22 +215,20 @@ impl Server {
         &self.sim
     }
 
-    /// Whether the authoritative sim's next tick can be stepped NOW: a warmup tick `[0, INPUT_DELAY)`
-    /// (always steppable, on neutral input), or the next tick's complete input set has been assembled
-    /// and queued by [`drain_complete`](Server::drain_complete). `false` means the server is stalled
-    /// waiting on a client's input for this tick — exactly the wait a lockstep client would have had.
+    /// Whether the authoritative sim's next tick can be stepped NOW: the next tick's complete input
+    /// set has been assembled and queued by [`drain_complete`](Server::drain_complete). `false` means
+    /// the server is stalled waiting on a client's input for this tick.
     pub fn next_tick_ready(&self) -> bool {
         let tick = self.sim.tick();
-        tick < INPUT_DELAY || self.pending_step.front().is_some_and(|(t, _)| *t == tick)
+        self.pending_step.front().is_some_and(|(t, _)| *t == tick)
     }
 
     /// Advance the authoritative sim by exactly one tick and return the resulting [`CoreSnapshot`](crate::snapshot::CoreSnapshot)
     /// already SERIALIZED to bytes — the host-authoritative step (rl#151 increment 1, doc 68-70).
     /// Injects `crab` (the freshly-pumped NN crab pose; `None` ⇒ crab unchanged) FIRST so this tick's
-    /// grab/extraction resolve against the real body, then steps the sim with this tick's inputs
-    /// (warmup ⇒ a complete neutral map; otherwise the assembled set
-    /// [`next_tick_ready`](Server::next_tick_ready) gated on), then builds the snapshot
-    /// at this ONE site and returns its wire bytes. Returning bytes (not the struct) makes the
+    /// grab/extraction resolve against the real body, then steps the sim with this tick's assembled
+    /// input set (the one [`next_tick_ready`](Server::next_tick_ready) gated on), then builds the
+    /// snapshot at this ONE site and returns its wire bytes. Returning bytes (not the struct) makes the
     /// hand-off ALWAYS serialized — the client decodes and applies, no by-reference shortcut even in
     /// SP ([[sp-is-mp-special-case]], [[silent-fallback-antipattern]]). Must be called only when
     /// [`next_tick_ready`](Server::next_tick_ready) is `true`.
@@ -254,21 +245,14 @@ impl Server {
                 self.sim.spawn_joining_player(pid);
             }
         }
-        let inputs = if tick < INPUT_DELAY {
-            // Warmup: a complete neutral map for the roster at this tick — the authoritative
-            // cold-start, before any client input is due.
-            self.roster.at(tick).iter().map(|&p| (p, Input::default())).collect()
-        } else {
-            let (queued_tick, inputs) = self
-                .pending_step
-                .pop_front()
-                .expect("step_next called with no ready tick — guard on next_tick_ready");
-            debug_assert_eq!(
-                queued_tick, tick,
-                "authoritative step queue out of order with the sim tick"
-            );
-            inputs
-        };
+        let (queued_tick, inputs) = self
+            .pending_step
+            .pop_front()
+            .expect("step_next called with no ready tick — guard on next_tick_ready");
+        debug_assert_eq!(
+            queued_tick, tick,
+            "authoritative step queue out of order with the sim tick"
+        );
         if let Some(c) = crab {
             self.sim.set_external_crab_pose(c.pos, c.yaw, c.digest);
         }
@@ -440,7 +424,7 @@ mod tests {
     #[test]
     fn solo_roster_completes_every_tick() {
         let mut s = srv(42, &ids(1));
-        for t in INPUT_DELAY..INPUT_DELAY + 5 {
+        for t in 0..5 {
             let sets = s.record(
                 PlayerId(0),
                 TickMsg {
@@ -459,7 +443,7 @@ mod tests {
     #[test]
     fn tick_emitted_only_when_every_client_is_in() {
         let mut s = srv(42, &ids(2));
-        let t = INPUT_DELAY;
+        let t = 0;
         let none = s.record(
             PlayerId(0),
             TickMsg {
@@ -488,8 +472,8 @@ mod tests {
     #[test]
     fn sets_emit_in_order_after_a_gap_fills() {
         let mut s = srv(42, &ids(1));
-        let a = INPUT_DELAY;
-        let b = INPUT_DELAY + 1;
+        let a = 0;
+        let b = 1;
         // Future tick first: buffered, nothing emitted (the cursor tick is still missing).
         let none = s.record(
             PlayerId(0),
@@ -522,7 +506,7 @@ mod tests {
         let none = s.record(
             PlayerId(9),
             TickMsg {
-                apply_tick: INPUT_DELAY,
+                apply_tick: 0,
                 input: input(1.0),
             },
         );
@@ -530,7 +514,7 @@ mod tests {
         let sets = s.record(
             PlayerId(0),
             TickMsg {
-                apply_tick: INPUT_DELAY,
+                apply_tick: 0,
                 input: input(1.0),
             },
         );
@@ -546,7 +530,7 @@ mod tests {
         let a = s.admit();
         assert_eq!(a.pid, PlayerId(2), "the lowest id not already in use");
         assert_eq!(a.roster, vec![PlayerId(0), PlayerId(1), PlayerId(2)]);
-        assert!(a.effective_tick >= INPUT_DELAY, "a join lands past the warmup window");
+        assert!(a.effective_tick >= JOIN_LEAD, "a join lands at least JOIN_LEAD ahead");
         assert_eq!(s.roster(), &[PlayerId(0), PlayerId(1), PlayerId(2)], "roster grew, ids 0/1 kept");
         // A second admit before any tick emits still gets a distinct, strictly-later effective tick
         // (the append-only invariant) and the next free id — the incumbents are never renumbered.
@@ -564,7 +548,7 @@ mod tests {
         let t = adm.effective_tick;
         // Fill every tick up to the join boundary on P0+P1 — they complete WITHOUT the joiner (it
         // isn't rostered there yet), advancing the emit cursor right to the boundary.
-        for pre in INPUT_DELAY..t {
+        for pre in 0..t {
             let _ = s.record(PlayerId(0), tickmsg(pre, 0.0));
             let sets = s.record(PlayerId(1), tickmsg(pre, 0.0));
             assert!(
@@ -670,24 +654,15 @@ mod tests {
         };
 
         // --- Path A: the reference. Step a bare [`Sim`] directly, by hand, exactly as the server does
-        // internally — warmup ticks `[0, INPUT_DELAY)` on a complete neutral map, then the scheduled
-        // input, with the crab pose injected BEFORE each step. This is what `Server::step_next` must
-        // reproduce.
+        // internally — the scheduled input each tick (from tick 0, no input-delay barrier), with the
+        // crab pose injected BEFORE each step. This is what `Server::step_next` must reproduce.
         let mut baseline = Vec::new();
         {
             let mut sim = Sim::new(SEED, &roster);
-            // The scheduled inputs keyed by the tick they apply at (issue cursor starts at INPUT_DELAY).
-            let by_tick: BTreeMap<u64, Input> =
-                (0..SUBMITS).map(|i| (INPUT_DELAY + i, input_at(i))).collect();
-            for tick in 0..(INPUT_DELAY + SUBMITS) {
-                let p = pose_at(tick);
+            for i in 0..SUBMITS {
+                let p = pose_at(i);
                 sim.set_external_crab_pose(p.pos, p.yaw, p.digest);
-                let step_inputs: BTreeMap<PlayerId, Input> = if tick < INPUT_DELAY {
-                    roster.iter().map(|&pid| (pid, Input::default())).collect()
-                } else {
-                    BTreeMap::from([(me, by_tick[&tick])])
-                };
-                sim.step(&step_inputs);
+                sim.step(&BTreeMap::from([(me, input_at(i))]));
                 baseline.push((sim.tick(), sim.state_hash()));
             }
         }
@@ -738,7 +713,7 @@ mod tests {
             "host-authoritative server-steps == lockstep self-steps, tick-for-tick (SP identical)"
         );
         // The warmup + real ticks were actually exercised, first applied tick brings the sim to 1.
-        assert_eq!(baseline.len() as u64, INPUT_DELAY + SUBMITS);
+        assert_eq!(baseline.len() as u64, SUBMITS);
         assert_eq!(baseline[0].0, 1);
     }
 
@@ -819,6 +794,6 @@ mod tests {
         // spawn. This is the 509 fix: the joiner adopts an ONGOING crab, no round-boundary rebuild.
         assert_eq!(after.crab.pos(), pose_at(eff).pos, "the crab is at its live pose at tick eff");
         assert_ne!(after.crab.pos(), crab_spawn, "the crab did NOT reset to spawn (no lockstep rebuild)");
-        assert!(eff > INPUT_DELAY + JOIN_LEAD, "the join genuinely lands mid-round, past warmup");
+        assert!(eff > JOIN_LEAD, "the join genuinely lands mid-round");
     }
 }
