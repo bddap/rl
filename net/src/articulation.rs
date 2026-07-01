@@ -21,7 +21,7 @@
 //! a correctness fault: it is superseded by the next tick's articulation.
 
 /// One crab body part's render transform for a tick: its world-space position + orientation in the
-/// crab's ARENA frame (the frame [`SkinRepose`](crate::articulation::ReposeWire) then relocates to
+/// crab's ARENA frame (the frame [`ReposeWire`] then relocates to
 /// the giant game spot), exactly the input `crab_world::bot::skin::drive_bones` reads off each
 /// physics link. No scale — the parts carry none (render==physics).
 ///

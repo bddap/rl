@@ -15,10 +15,15 @@
 
 use bevy::prelude::*;
 
-use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint};
+use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
 use crab_world::bot::skin::{CrabSkinRepose, SkinRepose};
 
 use crate::articulation::{CrabArticulation, PartTransform, ReposeWire};
+
+/// The part tag is `1 + joint.index()` in a `u8`, so the joint set must stay small enough that the
+/// tag can't wrap — pin it at compile time (COUNT is 38 today; the wire format would need a rev long
+/// before this fired, but the invariant is why the tag is a `u8`).
+const _: () = assert!(CrabJointId::COUNT < u8::MAX as usize);
 
 /// Wire tag for a body part's identity: `0` = the carapace, `1 + joint.index()` = an actuated
 /// joint's link. Host and client compute it identically from the same rig, so a transform matches
