@@ -369,8 +369,7 @@ impl Drop for RolloutThread {
 }
 
 /// One rollout thread's body: build the App once, then serve roll requests until
-/// the request channel closes. Each horizon's roll is wrapped in `catch_unwind` so
-/// a hard solver panic rebuilds only this thread's App and the run continues.
+/// the request channel closes. See [`roll_with_recovery`] for the panic isolation.
 fn rollout_thread_main(
     id: usize,
     config: TrainConfig,
@@ -403,18 +402,13 @@ fn rollout_thread_main(
     }
 }
 
-/// Run one horizon's roll, isolating a panic so one wedged env can't abort the run
-/// (the crash-isolation the multiprocess design gave, kept in-process). `roll` does
-/// the work; if it unwinds, `rebuild` produces a fresh App to replace the
-/// possibly-poisoned one and `RollOutcome::Panicked` is returned so the learner
-/// simply trains on the other threads' samples this iteration.
+/// Run one horizon's roll, isolating a panic (the module's crash-isolation backstop).
+/// `roll` does the work; if it unwinds, `rebuild` produces a fresh App to replace the
+/// possibly-poisoned one and `RollOutcome::Panicked` is returned.
 ///
 /// `&mut App` is not `UnwindSafe` (interior-mutable world state), but on a panic the
 /// App is REPLACED wholesale — no possibly-inconsistent state is read after the
-/// unwind — which is exactly what `AssertUnwindSafe` is for. The real common case
-/// (a non-finite pose) never reaches here: `rescue_nonfinite_crabs` resets that env
-/// in-world without panicking; this is the backstop for a hard solver NaN that
-/// panics rapier within the step that created it.
+/// unwind — which is exactly what `AssertUnwindSafe` is for.
 fn roll_with_recovery(
     app: &mut App,
     roll: impl FnOnce(&mut App) -> RollOutcome,
@@ -517,10 +511,6 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
     use crate::training::systems;
     use crate::training::systems::{brain_step, reset_crab, save_on_exit};
 
-    // The shared windowless physics+bot stack in rollout-worker mode: the 1-thread
-    // task pool + ScheduleRunner loop (the K-world scaling fix — see
-    // `WorldRole::RolloutWorker`), one physics tick per update so a horizon is EXACTLY
-    // H ticks (reproducible sample counts).
     let mut app = headless_stack(HeadlessStack {
         num_envs,
         role: WorldRole::RolloutWorker,
@@ -542,9 +532,7 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
         )
         .add_systems(Last, save_on_exit);
 
-    // Force every schedule onto the single-threaded executor so ECS never dispatches onto
-    // the global ComputeTaskPool (which would serialize the K threads). Unconditional, and
-    // must run AFTER add_systems above — the schedules don't exist until the systems are
+    // Must run AFTER add_systems above — the schedules don't exist until the systems are
     // wired. Shared with the determinism probe (see `force_serial_schedules`).
     crate::bot::headless::force_serial_schedules(&mut app);
 
@@ -1043,9 +1031,8 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     drop(threads);
 }
 
-/// Serialize a brain to the in-memory snapshot bytes the rollout threads load.
-/// `FullPrecisionSettings` bincode — the same the on-disk checkpoint uses, so the
-/// round-trip is exact.
+/// Serialize a brain to the in-memory snapshot bytes the rollout threads load (via
+/// [`SnapshotRecorder`]).
 fn snapshot_brain_bytes(brain: &CrabBrain<TrainBackend>) -> Vec<u8> {
     SnapshotRecorder::default()
         .record(brain.clone().into_record(), ())

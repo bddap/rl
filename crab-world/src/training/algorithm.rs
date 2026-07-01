@@ -111,10 +111,6 @@ impl Default for PpoConfig {
             learning_rate: 3e-4,
             epochs_per_update: 4,
             batch_size: 64,
-            // ~3σ of the (now unit-scale) return target: loose enough not to clip
-            // honest predictions, tight enough that a single outlier can't dominate
-            // the value gradient. See the field doc for why this is σ, not the SB3
-            // value-trust-region's 0.2.
             value_loss_clip: 3.0,
             target_kl: 0.03,
             // Wide-early → refine exploration-σ floor (bddap/rl#161). Start log_std -0.7

@@ -26,12 +26,10 @@ use crate::bot::sensor::OBS_SIZE;
 /// CPU backend), so the update does not recompute it. Mutating `brain`/`optimizer` in
 /// place keeps Adam's moment estimates persistent across updates.
 ///
-/// `ret_norm` is the learner's running return scale (see [`ReturnNormalizer`]): the
-/// value head's outputs (stored per-step values and the trailing bootstrap) are
-/// de-normalized by it so GAE/advantages stay in real reward units, then this
-/// update's real-unit returns are folded in and the value-loss targets normalized by
-/// the refreshed scale. It is `&mut` because the update advances it; the learner owns
-/// the one copy, so passing it in keeps a single source of truth.
+/// `ret_norm` is the learner's running return scale (see [`ReturnNormalizer`]; the
+/// PopArt de-normalize/fold ordering is at the `ret_norm_pre` call-site below). It is
+/// `&mut` because the update advances it; the learner owns the one copy, so passing it
+/// in keeps a single source of truth.
 ///
 /// `rng` drives the per-epoch minibatch shuffle. The caller owns it (seeded from the
 /// run's master seed) so the shuffle order is reproducible across a run and varies
@@ -39,8 +37,6 @@ use crate::bot::sensor::OBS_SIZE;
 ///
 /// Free function rather than a `TrainingState` method so the K=1 parity test
 /// ([`super::inproc`] tests) can call the exact production update over hand-built buffers.
-/// Generic over the autodiff backend `B` so the live GPU learner and the CPU-backed
-/// parity test run the one implementation — same update, one backend parameter.
 // The PPO core legitimately threads eight distinct inputs (net, optimizer, config, data,
 // device, the two running stats, and this iteration's exploration-σ floor); none folds into
 // another without hiding a real dependency, so the arg-count heuristic doesn't apply.
@@ -54,8 +50,7 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
     ret_norm: &mut ReturnNormalizer,
     rng: &mut StdRng,
     // The exploration-σ floor for THIS iteration's rollout — the same lower `log_std` clamp
-    // the rollout sampled under, so π_old/π_new here are recomputed on the SAME (floored)
-    // policy the behavior data came from. A mismatch would corrupt the importance ratio.
+    // the rollout sampled under (why it must match: the π_old block below).
     log_std_floor: f32,
 ) -> PpoMetrics {
     {
