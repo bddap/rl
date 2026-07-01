@@ -244,9 +244,8 @@ pub fn build_windowed_app(
                 anyhow::bail!(msg);
             }
             let spawn = seed_external_crab_solo(&mut ls);
-            let source =
-                super::driver::InputSource::coordinated(net, ls.peers(), ls.sim().clone());
-            insert_core(&mut app, ls, source);
+            let coord = super::driver::coordinator(net, ls.peers(), ls.sim().clone());
+            insert_core(&mut app, ls, coord);
             // Known-armed at build: add the stack AND arm the gate now, so the crab spawns frame
             // one.
             add_external_nn_crab(&mut app, external_crab, spawn);

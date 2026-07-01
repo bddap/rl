@@ -4,7 +4,7 @@
 
 use super::*;
 use super::app::{add_external_nn_crab, seed_external_crab_solo};
-use super::driver::{InputSource, drive_lockstep, insert_core};
+use super::driver::{ScriptedPackInput, coordinator, drive_lockstep, insert_core};
 use crate::net_loop::NetDriver;
 use super::hud::{spawn_hud, update_hud};
 use super::input::gather_input;
@@ -33,17 +33,17 @@ pub fn build_screenshot_app(
     // so the checkpoint and its seeded spawn can't disagree (both present or both absent).
     let armed_crab: Option<(std::path::PathBuf, Pos)> =
         external_crab.map(|dir| (dir, seed_external_crab_solo(&mut ls)));
-    // Stand-in input for the absent peers so the sim advances and the scene composes:
-    // walk them straight forward toward the extraction (+Z). The crab chases them up
-    // the +Z lane and out of the stationary local camera's forward view, which keeps
-    // the players in frame early (crab shot) and clears the lane to the extraction
-    // pillar later (objective shot). Fed through the normal deterministic input path
-    // (see [`InputSource::Scripted`]) — adds no nondeterminism.
-    insert_core(
-        &mut app,
-        ls,
-        InputSource::Scripted(Input::new(0.0, 1.0, 0.0, 0)),
-    );
+    // A solo host-authoritative server steps the round (the SAME stepper the windowed client runs —
+    // no self-stepping lockstep). The pack (every non-local player) walks straight forward toward the
+    // extraction (+Z) so the scene composes: the crab chases them up the +Z lane and out of the
+    // stationary local camera's forward view, keeping the players in frame early (crab shot) and
+    // clearing the lane to the extraction pillar later (objective shot). `ScriptedPackInput` supplies
+    // that per-tick input; the driver records it into the server for each pack player exactly as a
+    // wire peer's would be (deterministic, adds no nondeterminism). The local player (0) holds still
+    // — it is the camera — so nothing needs to move it.
+    let coord = coordinator(None, ls.peers(), ls.sim().clone());
+    insert_core(&mut app, ls, coord);
+    app.insert_resource(ScriptedPackInput(Input::new(0.0, 1.0, 0.0, 0)));
     // Known-armed at build (when a checkpoint was given): add the rapier-NN stack AND arm the gate
     // now — the SAME path the windowed `Boot::Round` solo client uses — so `spawn_world` hides the
     // static silhouette and the reposed-to-giant rig becomes the visible crab.
@@ -78,8 +78,8 @@ pub fn build_net_screenshot_app(
     // Seed the crab spawn pose before `ls` moves into the coordinator, exactly as the windowed
     // `Boot::Round` path does — so host and client agree on where the crab starts.
     let spawn = seed_external_crab_solo(&mut ls);
-    let source = InputSource::coordinated(Some(net), ls.peers(), ls.sim().clone());
-    insert_core(&mut app, ls, source);
+    let coord = coordinator(Some(net), ls.peers(), ls.sim().clone());
+    insert_core(&mut app, ls, coord);
     // Arm the NN crab on this peer: the host runs + broadcasts it, the client spawns it (frozen —
     // never pumped) as the render target its adopted articulation poses. One arm path.
     add_external_nn_crab(&mut app, external_crab, spawn);
