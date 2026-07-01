@@ -420,16 +420,19 @@ fn plane_flight_control_pitch_is_intuitive_and_scaled() {
 #[test]
 fn ship_flight_control_is_outer_wilds() {
     let ship = |fi: FlightInput| flight_control(VehicleKind::Ship, &fi);
-    // Direct thrusters: left stick forward (+y) → +Z thrust; right (+x) → +X strafe; RT up / LT down.
+    // Direct thrusters: left stick forward (+y) → +Z thrust; RT up / LT down. Stick RIGHT (+x)
+    // strafes screen-right = body −X (body +X renders screen-left at this facing, the same
+    // reconciliation the foot strafe negation makes), so thrust.x < 0.
     assert!(ship(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).thrust.z > 0.0);
-    assert!(ship(FlightInput { left: Vec2::new(1.0, 0.0), ..default() }).thrust.x > 0.0);
+    assert!(ship(FlightInput { left: Vec2::new(1.0, 0.0), ..default() }).thrust.x < 0.0);
     assert!(ship(FlightInput { rt: 1.0, ..default() }).thrust.y > 0.0);
     assert!(ship(FlightInput { lt: 1.0, ..default() }).thrust.y < 0.0);
-    // Aim is camera-style, NOT inverted: right stick UP → nose UP (pitch > 0); right → yaw right.
+    // Aim is camera-style: right stick UP → nose UP (pitch > 0, NOT inverted). Stick RIGHT turns the
+    // view RIGHT — negated like the strafe and the foot yaw-look — so the yaw intent is < 0.
     // The analog AIM stick is scaled by VEHICLE_STICK_SENS (the "too sensitive" fix), like the plane.
     let aim_up = ship(FlightInput { right: Vec2::new(0.0, 1.0), ..default() });
     assert!((aim_up.pitch - VEHICLE_STICK_SENS).abs() < 1e-6, "full-up aim stick → VEHICLE_STICK_SENS pitch");
-    assert!(ship(FlightInput { right: Vec2::new(1.0, 0.0), ..default() }).yaw > 0.0);
+    assert!(ship(FlightInput { right: Vec2::new(1.0, 0.0), ..default() }).yaw < 0.0);
     // Translational thrust keeps FULL authority — only rotation is desensitized.
     assert_eq!(ship(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).thrust.z, 1.0);
     // Roll on the bumpers; A/Space matches velocity. The ship has no throttle lever.

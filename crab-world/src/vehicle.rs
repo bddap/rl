@@ -96,8 +96,12 @@ const PLANE: VehicleParams = VehicleParams {
 /// [`gravity_scale`]), so it floats neutrally and the thrusters are GENTLE — forward full-burn tops
 /// out around 6 m/s, which in the ±10 m arena reads as the slow, weighty Outer-Wilds drift (a
 /// stronger thruster would cross the box in under a second — a pinball, not a spaceship). Drag is LOW so the
-/// coast carries; the match-velocity brake stops it on demand. Even rotation authority on all axes
-/// (you aim with the right stick, roll on the bumpers).
+/// coast carries; the match-velocity brake stops it on demand. Full aim authority (pitch/yaw on the
+/// right stick); bumper roll is a GENTLE quarter of that so a barrel-roll is a slow deliberate twist.
+///
+/// Ship aim torque (pitch/yaw at full deflection, N·m); bumper roll derives from it so the two can't
+/// drift. The one source for the ship's rotation feel.
+const SHIP_AIM_TORQUE: f32 = 7.0;
 const SHIP: VehicleParams = VehicleParams {
     thrust_axis: Vec3::Z, // unused (lever_thrust 0) — kept a valid unit axis
     lever_thrust: 0.0,
@@ -106,9 +110,11 @@ const SHIP: VehicleParams = VehicleParams {
     drag_lin: 0.35, // low → long coast (~6 s velocity time-constant at ~2 kg)
     drag_quad: 0.04,
     angular_drag: 1.1,
-    pitch_torque: 7.0,
-    roll_torque: 7.0,
-    yaw_torque: 7.0,
+    pitch_torque: SHIP_AIM_TORQUE,
+    // Bumper roll is one source: a quarter of the aim torque (owner playtest — a slow deliberate
+    // twist, not a snap), so retuning the aim keeps the "quarter" relation instead of drifting.
+    roll_torque: SHIP_AIM_TORQUE * 0.25,
+    yaw_torque: SHIP_AIM_TORQUE,
 };
 
 /// Plane spawn: a few metres up over the arena centre, nosed forward (+Z) with a little cruise

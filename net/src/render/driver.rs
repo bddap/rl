@@ -297,8 +297,9 @@ pub(super) struct FlightControl {
 ///   a coordinating yaw; RT/LT (or W/S) trim the throttle lever; bumpers (or A/D) are the rudder. No
 ///   direct thrusters (the plane thrusts through its lever). Right stick is the camera (unused here).
 /// - **Ship (Outer Wilds)**: left stick (or WASD) fires the body-frame thrusters (strafe/forward),
-///   RT/LT thrust up/down; right stick (or mouse) AIMS (pitch + yaw, camera-style — NOT inverted);
-///   bumpers roll; A/Space matches velocity. No throttle lever.
+///   RT/LT thrust up/down; right stick (or mouse) AIMS (pitch camera-style/not-inverted, yaw negated
+///   with strafe so stick-right reads screen-right); bumpers roll; A/Space matches velocity. No
+///   throttle lever.
 pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightControl {
     let clamp = |x: f32| x.clamp(-1.0, 1.0);
     match kind {
@@ -318,17 +319,21 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
         }
         VehicleKind::Ship => {
             // Direct body-frame thrusters: left stick / WASD = strafe (x) + forward (z); RT/LT =
-            // vertical (y, up/down). Coast on momentum between taps.
+            // vertical (y, up/down). Coast on momentum between taps. Strafe is NEGATED for the same
+            // reason the foot controls negate it (see `gather_input`): a cockpit looking along body
+            // +Z sees body +X on the SCREEN-LEFT, so stick-right must command −X to strafe right.
             let thrust = Vec3::new(
-                clamp(fi.left.x + fi.wasd.x),
+                clamp(-(fi.left.x + fi.wasd.x)),
                 clamp(fi.rt - fi.lt),
                 clamp(fi.left.y + fi.wasd.y),
             );
-            // Aim with the right stick / mouse — camera-style, NOT inverted (push up = nose up). The
-            // analog stick is scaled by VEHICLE_STICK_SENS (the same "too sensitive" knob as the
+            // Aim with the right stick / mouse — camera-style, NOT inverted in pitch (push up = nose
+            // up). Yaw is NEGATED (like the foot yaw-look and the strafe above) so stick/mouse-right
+            // turns the view RIGHT: +yaw noses toward +X, which renders screen-left at this facing.
+            // The analog stick is scaled by VEHICLE_STICK_SENS (the same "too sensitive" knob as the
             // plane); the mouse keeps its own FLIGHT_MOUSE_SENS.
             let pitch = clamp(fi.right.y * VEHICLE_STICK_SENS - fi.mouse.y);
-            let yaw = clamp(fi.right.x * VEHICLE_STICK_SENS + fi.mouse.x);
+            let yaw = clamp(-(fi.right.x * VEHICLE_STICK_SENS + fi.mouse.x));
             // Roll on the bumpers.
             let roll = clamp((fi.rb as i32 - fi.lb as i32) as f32);
             FlightControl {
