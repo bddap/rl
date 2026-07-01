@@ -239,25 +239,11 @@ fn spawn_offscreen_camera(
 ) {
     let handle = images.add(screenshot::new_render_target(cfg.width, cfg.height));
     let mut cam = commands.spawn((
-        Camera3d::default(),
-        Camera {
-            // Dark fallback behind the night-sky skybox (see [`crab_world::sky`]); shown
-            // only until the cubemap uploads.
-            clear_color: ClearColorConfig::Custom(crab_world::sky::NIGHT_CLEAR),
-            ..default()
-        },
-        RenderTarget::Image(handle.clone().into()),
-        // Default tonemapping needs a LUT asset that may not be loaded in a windowless
-        // render; None keeps the offscreen pass simple (mirrors play.rs).
-        Tonemapping::None,
+        screenshot::offscreen_camera_bundle(handle.clone()),
+        // This cam carries the first-person marker so `apply_transforms` drives its aim;
+        // `Transform::default` is a placeholder until the first Update.
         Transform::default(),
         FpCamera,
-        // Make UI render into THIS offscreen target. Bevy renders UI to the default-window
-        // camera automatically, but the screenshot path has no window — without this marker
-        // the HUD + controls overlay never composite into the captured texture, so an
-        // evidence frame would miss them. The windowed client doesn't need it (its window
-        // camera is the implicit UI target).
-        bevy::ui::IsDefaultUiCamera,
     ));
     // Match the windowed FP camera's render-frame-scaled near plane (else the shrunk human world
     // clips at the default 0.1 m), plus an optional wider FOV so the towering giant crab fits in

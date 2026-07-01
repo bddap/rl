@@ -7,7 +7,8 @@
 //! vs the FP camera driven by `apply_transforms`), so the camera-spawn and the
 //! per-frame capture stay as their own systems. What they share — and what was
 //! copied verbatim in both, the classic drift hazard — is the mechanics underneath:
-//! the COPY_SRC render-target image, the settle→capture→exit-countdown bookkeeping,
+//! the COPY_SRC render-target image, the camera's render-to-image recipe
+//! ([`offscreen_camera_bundle`]), the settle→capture→exit-countdown bookkeeping,
 //! and the save-to-disk spawn. That lives here once.
 //!
 //! Render-only, so nothing here touches sim/training determinism.
@@ -15,6 +16,8 @@
 use std::path::PathBuf;
 
 use bevy::app::AppExit;
+use bevy::camera::RenderTarget;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
@@ -57,6 +60,28 @@ pub fn new_render_target(width: u32, height: u32) -> Image {
     let mut image = Image::new_target_texture(width, height, TextureFormat::bevy_default(), None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     image
+}
+
+/// The offscreen render-to-image camera recipe every windowless render path shares —
+/// draw into `target`, clear to the night sky behind the skybox, skip tonemapping, and
+/// be the default UI target. Each subtle bit lives here once instead of copied per
+/// subsystem: `Tonemapping::None` because the default tonemapper needs a LUT asset that
+/// may not be loaded in a windowless render, and `IsDefaultUiCamera` because Bevy
+/// auto-targets UI at the default-WINDOW camera — the screenshot path has no window, so
+/// without this marker the HUD/overlay never composite into the captured texture. The
+/// caller spawns this alongside its own framing `Transform`, scene marker, and any
+/// projection override (the parts that genuinely differ between the shot cams).
+pub fn offscreen_camera_bundle(target: Handle<Image>) -> impl Bundle {
+    (
+        Camera3d::default(),
+        Camera {
+            clear_color: ClearColorConfig::Custom(crate::sky::NIGHT_CLEAR),
+            ..default()
+        },
+        RenderTarget::Image(target.into()),
+        Tonemapping::None,
+        bevy::ui::IsDefaultUiCamera,
+    )
 }
 
 /// Tick the shared settle→capture→exit bookkeeping one render frame (the part both
