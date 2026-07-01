@@ -749,9 +749,8 @@ mod tests {
     /// as a fresh `Alive` player, (b) preserve the LIVE crab pose — NOT reset to spawn — and (c) keep
     /// the live, monotonic tick. That is the whole point: the joiner drops INTO the ongoing match, so
     /// a client adopting the snapshot renders the real Sally at the host's exact pose — what job 509
-    /// couldn't do under lockstep. A `rebuild_with_roster` round-boundary reset (the dead lockstep
-    /// join) would instead zero the tick and respawn the crab at spawn; these assertions would catch
-    /// that regression.
+    /// couldn't do under lockstep. The now-deleted lockstep round-boundary reset would instead zero
+    /// the tick and respawn the crab at spawn; these assertions would catch that regression.
     #[test]
     fn mid_game_join_transfers_live_state_without_reset() {
         use crate::snapshot::CoreSnapshot;
