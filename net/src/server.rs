@@ -70,6 +70,16 @@ pub struct JoinRequest {
 /// actionable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRefusal {
+    /// The HOST is not running the real Sally — its own policy-weights digest is `0` (a failed or
+    /// absent checkpoint drives the zero-action rest pose, not a trained crab). Under
+    /// host-authoritative MP the host serves the crab POSE to every client (rl#151), so a
+    /// zero-digest host would feed a FAKE Sally to whoever joins — and two both-missing peers
+    /// (`0 == 0`) would otherwise slip past the equality check and admit each other into a fake-crab
+    /// match. This is the host self-gate that RELOCATES the lockstep peer-symmetric `weights_synced`
+    /// upstream ([[real-sally-definition]], [[silent-fallback-antipattern]]; incr 4). Refused before
+    /// the equality checks so a zero-digest host reports THIS, not a spurious mismatch. A unit
+    /// variant — the digest is `0` by definition of the branch, so carrying it would be dead weight.
+    HostNotArmed,
     /// The joiner's policy-weights digest differs from the host's.
     WeightsMismatch { host: u64, joiner: u64 },
     /// The joiner's crab-asset/collider digest differs from the host's.
@@ -79,6 +89,11 @@ pub enum AdmissionRefusal {
 impl std::fmt::Display for AdmissionRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AdmissionRefusal::HostNotArmed => write!(
+                f,
+                "host is not running the real trained Sally (its weights digest is 0 — a \
+                 failed/absent checkpoint); refusing to admit a joiner into a fake-crab match"
+            ),
             AdmissionRefusal::WeightsMismatch { host, joiner } => write!(
                 f,
                 "policy-weights digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — different brain"
@@ -92,16 +107,22 @@ impl std::fmt::Display for AdmissionRefusal {
 }
 
 /// The admission gate: may a joiner advertising `req` enter a match the host runs on
-/// `(host_weights, host_assets)`? `Ok(())` only when BOTH digests match exactly — a single
-/// mismatch is a typed [`AdmissionRefusal`] the caller surfaces loudly. Weights are checked first
-/// so a double mismatch reports the brain (the more fundamental disagreement). The host→joiner
-/// analogue of the formation-time `may_arm_external_crab` shared-asset gate, but per-joiner and
-/// fail-LOUD rather than a silent disarm.
+/// `(host_weights, host_assets)`? `Ok(())` only when the HOST itself runs the real Sally
+/// (`host_weights != 0`) AND both digests match exactly. The host self-gate is checked FIRST so a
+/// zero-digest host is turned away as [`AdmissionRefusal::HostNotArmed`] — not a spurious mismatch —
+/// and, critically, so two both-missing peers can't pass the equality check on `0 == 0` and admit
+/// each other into a fake-crab match ([[real-sally-definition]], incr 4). Then weights (before
+/// assets, so a double mismatch reports the brain — the more fundamental disagreement). The
+/// host→joiner analogue of the formation-time `may_arm_external_crab` shared-asset gate, but
+/// per-joiner and fail-LOUD rather than a silent disarm.
 pub fn may_admit_joiner(
     host_weights: u64,
     host_assets: u64,
     req: &JoinRequest,
 ) -> Result<(), AdmissionRefusal> {
+    if host_weights == 0 {
+        return Err(AdmissionRefusal::HostNotArmed);
+    }
     if req.weights_digest != host_weights {
         return Err(AdmissionRefusal::WeightsMismatch {
             host: host_weights,
@@ -237,6 +258,17 @@ impl Server {
     /// [`next_tick_ready`](Server::next_tick_ready) is `true`.
     pub fn step_next(&mut self, crab: Option<CrabPose>) -> Vec<u8> {
         let tick = self.sim.tick();
+        // Mid-game join (rl#151 incr 4): a pid rostered at THIS tick but absent from the
+        // authoritative sim is a joiner whose admission ([`Server::admit`]) takes effect now — spawn
+        // it into the LIVE round so THIS tick's snapshot carries it and the joiner boots
+        // host-authoritatively from the broadcast, with no lockstep round-boundary reset (the 509
+        // fix). Derived from the roster schedule (one source), so there's no separate pending-join
+        // table to drift; idempotent past the effective tick via `has_player`.
+        for &pid in self.roster.at(tick) {
+            if !self.sim.has_player(pid) {
+                self.sim.spawn_joining_player(pid);
+            }
+        }
         let inputs = if tick < INPUT_DELAY {
             // Warmup: a complete neutral map for the roster at this tick — byte-identical to
             // `Lockstep::advance_one`'s warmup fill, so the authoritative cold-start matches.
@@ -894,6 +926,31 @@ mod tests {
         ));
     }
 
+    /// The relocated real-Sally host self-gate (rl#151 incr 4): a host whose OWN weights digest is 0
+    /// (a failed/absent checkpoint — the fake rest-pose crab) is refused as [`HostNotArmed`] BEFORE
+    /// the equality checks. Crucially this closes the `0 == 0` hole — two both-missing peers can no
+    /// longer pass the digest-equality check and admit each other into a fake-crab match — so the
+    /// weights guarantee lockstep enforced symmetrically survives host-auth's removal of the
+    /// peer-symmetric run ([[real-sally-definition]], [[silent-fallback-antipattern]]).
+    #[test]
+    fn zero_digest_host_is_refused_before_the_equality_check() {
+        let ha = 0x5A11_2233u64;
+        // The 0 == 0 hole: without the self-gate this would pass (no mismatch) and admit a
+        // fake-crab match. The self-gate makes it HostNotArmed instead.
+        assert_eq!(
+            may_admit_joiner(0, ha, &JoinRequest { weights_digest: 0, asset_digest: ha }),
+            Err(AdmissionRefusal::HostNotArmed),
+            "a zero-digest host can't admit even a zero-digest joiner (no fake-crab match)"
+        );
+        // A zero-digest host reports HostNotArmed, not a spurious weights mismatch, even when the
+        // joiner runs a real brain.
+        assert_eq!(
+            may_admit_joiner(0, ha, &JoinRequest { weights_digest: 0xB7A1, asset_digest: ha }),
+            Err(AdmissionRefusal::HostNotArmed),
+            "the self-gate is checked first, so the host's own failure is what's reported"
+        );
+    }
+
     /// rl#151 increment 1 — the SP-IDENTITY invariant (doc 229). Over a scripted input + crab-pose
     /// log, the host-authoritative path (the server steps its OWN sim and emits a snapshot the
     /// client applies) produces the EXACT same per-tick `state_hash` as the increment-0 path (one
@@ -991,5 +1048,86 @@ mod tests {
         // The warmup + real ticks were actually exercised, first applied tick brings the sim to 1.
         assert_eq!(baseline.len() as u64, INPUT_DELAY + SUBMITS);
         assert_eq!(baseline[0].0, 1);
+    }
+
+    /// Mid-game join via snapshot transfer (rl#151 incr 4) — the host-authoritative 509 fix, proven
+    /// at the authoritative-server seam. A solo host runs an armed round, stepping its OWN sim and
+    /// walking the crab far off its spawn; then a joiner is admitted (`admit`). The moment the sim
+    /// steps THROUGH the admission's `effective_tick`, the emitted snapshot must (a) carry the joiner
+    /// as a fresh `Alive` player, (b) preserve the LIVE crab pose — NOT reset to spawn — and (c) keep
+    /// the live, monotonic tick. That is the whole point: the joiner drops INTO the ongoing match, so
+    /// a client adopting the snapshot renders the real Sally at the host's exact pose — what job 509
+    /// couldn't do under lockstep. A `rebuild_with_roster` round-boundary reset (the dead lockstep
+    /// join) would instead zero the tick and respawn the crab at spawn; these assertions would catch
+    /// that regression.
+    #[test]
+    fn mid_game_join_transfers_live_state_without_reset() {
+        use crate::snapshot::CoreSnapshot;
+
+        const SEED: u64 = 0x105E_F00D;
+        const JOIN_AT: u64 = 12; // submits before the join (well past warmup)
+        const SUBMITS: u64 = 60;
+        let host = PlayerId(0);
+        let mut server = srv(SEED, &[host]);
+        let crab_spawn = server.sim().crab().pos();
+
+        // A crab pose walked steadily away from spawn, so "crab is at its live pose, not reset" is
+        // unambiguous. Fed to `step_next` as the authoritative body pose each tick.
+        let pose_at = |tick: u64| CrabPose {
+            pos: Pos { x: 5000 + tick as i64 * 13, z: -4000 - tick as i64 * 9 },
+            yaw: (tick as i32).wrapping_mul(2048),
+            digest: tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x1234,
+        };
+        let input_at = |i: u64| Input::from_axes(((i % 3) as f32 - 1.0) * 0.5, 1.0);
+
+        // The host's input scheduler (a lockstep used ONLY for `submit_local_input`, exactly as the
+        // windowed client feeds the server via `exchange`); the joiner's is created on admission.
+        let mut host_sched = Lockstep::new(SEED, &[host], host);
+        let mut joiner: Option<(PlayerId, u64, Lockstep)> = None; // (pid, effective_tick, scheduler)
+        let mut snaps: Vec<CoreSnapshot> = Vec::new();
+
+        for i in 0..SUBMITS {
+            // Admit ONE joiner mid-round: the server schedules its roster change at `effective_tick`,
+            // and from then a tick completes only once the joiner's input is in too.
+            if i == JOIN_AT {
+                let adm = server.admit();
+                let sched = Lockstep::join_at(SEED, &adm.roster, adm.pid, adm.effective_tick);
+                joiner = Some((adm.pid, adm.effective_tick, sched));
+            }
+            let mut sets = server.record(host, host_sched.submit_local_input(input_at(i)));
+            if let Some((jpid, _, sched)) = joiner.as_mut() {
+                sets.extend(server.record(*jpid, sched.submit_local_input(input_at(i))));
+            }
+            server.enqueue_for_step(&sets);
+            while server.next_tick_ready() {
+                let tick = server.sim().tick();
+                let bytes = server.step_next(Some(pose_at(tick)));
+                snaps.push(CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes"));
+            }
+        }
+
+        let (jpid, eff, _) = joiner.expect("a joiner was admitted");
+        // Snapshot ticks are strictly increasing — no reset to 0 anywhere across the join.
+        for w in snaps.windows(2) {
+            assert!(w[1].tick > w[0].tick, "the tick is monotonic — the join never resets the round");
+        }
+        // The pre-join snapshot AT the effective tick (produced by stepping tick eff-1, when the
+        // roster is still host-only) does NOT carry the joiner.
+        let before = snaps.iter().find(|s| s.tick == eff).expect("the sim stepped up to eff");
+        assert!(!before.players.contains_key(&jpid), "no joiner before its effective tick");
+        // Stepping tick `eff` spawns the joiner into the LIVE sim, so the next snapshot carries it.
+        let after = snaps.iter().find(|s| s.tick == eff + 1).expect("the sim stepped through eff");
+        assert!(after.players.contains_key(&jpid), "the joiner appears in the snapshot at its entry");
+        assert_eq!(
+            after.players[&jpid].status(),
+            crate::sim::PlayerStatus::Alive,
+            "the joiner spawns Alive"
+        );
+        assert!(after.roster.contains(&jpid), "the snapshot roster carries the joiner");
+        // The crab is at its LIVE walked pose for that tick — the round kept running, NOT reset to
+        // spawn. This is the 509 fix: the joiner adopts an ONGOING crab, no round-boundary rebuild.
+        assert_eq!(after.crab.pos(), pose_at(eff).pos, "the crab is at its live pose at tick eff");
+        assert_ne!(after.crab.pos(), crab_spawn, "the crab did NOT reset to spawn (no lockstep rebuild)");
+        assert!(eff > INPUT_DELAY + JOIN_LEAD, "the join genuinely lands mid-round, past warmup");
     }
 }

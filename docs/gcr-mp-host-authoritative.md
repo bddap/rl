@@ -138,9 +138,17 @@ run, so it must **add the upstream guard host-auth needs** rather than drop it:
 2. **The joiner must verify the host serves real Sally.** On dial, the joiner checks the
    host's advertised weights digest equals the canonical real-Sally digest (refuse a host
    running a random/zero brain — loud, never connect-and-render-a-fake). `may_admit_joiner`
-   (`server.rs:97`) keeps refusing a digest-mismatched joiner; add the reciprocal host-side
-   non-zero check so two both-missing peers (`0 == 0`) can't admit each other into a
-   fake-crab match.
+   keeps refusing a digest-mismatched joiner; the reciprocal host-side non-zero self-gate
+   (`AdmissionRefusal::HostNotArmed`, checked FIRST) makes two both-missing peers (`0 == 0`)
+   unable to admit each other into a fake-crab match. Realized (incr 4) as: admission requires
+   `host_weights != 0` AND `joiner == host`, so an admitted joiner is guaranteed the host runs
+   its own non-zero brain — transitive verification, since a joiner only dials after loading its
+   own real checkpoint (`net-join` bails loud on a local digest of `0`). NOTE — the fleet has no
+   single hardcoded "canonical Sally" constant (that would drift every retrain); "real Sally" is
+   *whatever trained checkpoint the fleet carries*, so the check authenticates digest **sameness**
+   (both peers run the identical non-zero brain), not pedigree — two peers on the same wrong-but-
+   non-zero checkpoint would still admit each other. That residual is inherent to the digest model,
+   not an incr-4 gap.
 3. **Asset digest already protects the joiner's render.** Under host-sends-pose the joiner
    *renders the Sally mesh skinned to the host's pose*. The existing `asset_digest` is
    `crab_asset_digest()`, which **hashes the raw `sally.glb` file bytes** (`crab-world/src/
