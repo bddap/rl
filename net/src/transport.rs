@@ -49,7 +49,7 @@ pub const SERVICE_NAME: &str = "bddap-rl-game";
 /// frame is rejected (closing the link) rather than guessed at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-enum Frame {
+pub(crate) enum Frame {
     /// A client→server [`TickMsg`]: one client's input for a tick (+ its confirmed hash).
     Tick = 0,
     /// A [`Beat`]: heartbeat + roster advertisement for the formation barrier (rl#44).
@@ -130,143 +130,222 @@ const OFF_CHASH: usize = OFF_CTICK + 8; // after confirmed_tick(8)
 /// confirmed_hash(8).
 const TICKMSG_LEN: usize = OFF_CHASH + 8;
 
-/// Encode a [`TickMsg`] body to its fixed-width little-endian wire form (without the
-/// frame kind/length, which [`write_frame`] prepends).
-fn encode_tick_body(m: &TickMsg) -> [u8; TICKMSG_LEN] {
-    let (ctick, chash) = match m.confirmed {
-        Some(c) => (c.tick, c.hash),
-        None => (NO_CONFIRMED_TICK, 0),
-    };
-    let mut b = [0u8; TICKMSG_LEN];
-    b[0..OFF_INPUT].copy_from_slice(&m.apply_tick.to_le_bytes());
-    b[OFF_INPUT..OFF_CTICK].copy_from_slice(&m.input.to_bytes());
-    b[OFF_CTICK..OFF_CHASH].copy_from_slice(&ctick.to_le_bytes());
-    b[OFF_CHASH..].copy_from_slice(&chash.to_le_bytes());
-    b
+/// A wire message: owns its [`Frame`] kind byte and its body codec, so adding or changing a frame
+/// touches ONE impl instead of rippling across [`Frame`], [`Frame::from_byte`], a bespoke send
+/// wrapper, and the [`read_loop`] decode arm. `encode`/`decode` are byte-exact inverses (the
+/// roundtrip tests pin every impl); [`Codec::Bytes`] keeps the per-tick [`TickMsg`] send zero-alloc
+/// (a fixed array) while variable-length frames use `Vec<u8>`.
+pub(crate) trait Codec: Sized {
+    /// The kind byte this message frames as.
+    const KIND: Frame;
+    /// The encoded-body representation — a fixed array for fixed-width bodies (no heap), `Vec<u8>`
+    /// for variable-length ones.
+    type Bytes: AsRef<[u8]>;
+    /// Encode the body WITHOUT the kind/length, which [`write_frame`] prepends.
+    fn encode(&self) -> Self::Bytes;
+    /// Decode a body, failing LOUDLY (which closes the link) on any short/overlong/malformed input
+    /// rather than yielding a corrupt value.
+    fn decode(body: &[u8]) -> Result<Self>;
 }
 
-/// Inverse of [`encode_tick_body`].
-fn decode_tick_body(b: &[u8; TICKMSG_LEN]) -> TickMsg {
-    let ctick = u64::from_le_bytes(b[OFF_CTICK..OFF_CHASH].try_into().unwrap());
-    let chash = u64::from_le_bytes(b[OFF_CHASH..].try_into().unwrap());
-    TickMsg {
-        apply_tick: u64::from_le_bytes(b[0..OFF_INPUT].try_into().unwrap()),
-        input: crate::sim::Input::from_bytes(b[OFF_INPUT..OFF_CTICK].try_into().unwrap()),
-        confirmed: (ctick != NO_CONFIRMED_TICK).then_some(Confirmed {
-            tick: ctick,
-            hash: chash,
-        }),
-    }
-}
+impl Codec for TickMsg {
+    const KIND: Frame = Frame::Tick;
+    type Bytes = [u8; TICKMSG_LEN];
 
-/// Encode a [`TickSet`] body to its wire form (without the frame kind/length): the apply tick,
-/// then a `u16`-counted list of `(player, input)` pairs, then a `u16`-counted list of
-/// `(player, ctick, chash)` confirmed-hash triples. `u16` counts because a roster can be up to 256
-/// players (a `u8` count would overflow at the max), even though couch play is far smaller.
-fn encode_tickset_body(set: &TickSet) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8 + 2 + set.inputs.len() * (1 + IN_LEN) + 2 + set.confirmed.len() * 17);
-    b.extend_from_slice(&set.apply_tick.to_le_bytes());
-    b.extend_from_slice(&(set.inputs.len() as u16).to_le_bytes());
-    for (pid, input) in &set.inputs {
-        b.push(pid.0);
-        b.extend_from_slice(&input.to_bytes());
+    /// Fixed-width little-endian: apply_tick(8) | input | confirmed_tick(8) | confirmed_hash(8). A
+    /// `None` confirmed is carried as the [`NO_CONFIRMED_TICK`] sentinel.
+    fn encode(&self) -> [u8; TICKMSG_LEN] {
+        let (ctick, chash) = match self.confirmed {
+            Some(c) => (c.tick, c.hash),
+            None => (NO_CONFIRMED_TICK, 0),
+        };
+        let mut b = [0u8; TICKMSG_LEN];
+        b[0..OFF_INPUT].copy_from_slice(&self.apply_tick.to_le_bytes());
+        b[OFF_INPUT..OFF_CTICK].copy_from_slice(&self.input.to_bytes());
+        b[OFF_CTICK..OFF_CHASH].copy_from_slice(&ctick.to_le_bytes());
+        b[OFF_CHASH..].copy_from_slice(&chash.to_le_bytes());
+        b
     }
-    b.extend_from_slice(&(set.confirmed.len() as u16).to_le_bytes());
-    for (pid, c) in &set.confirmed {
-        b.push(pid.0);
-        b.extend_from_slice(&c.tick.to_le_bytes());
-        b.extend_from_slice(&c.hash.to_le_bytes());
-    }
-    b
-}
 
-/// Inverse of [`encode_tickset_body`]. A malformed body (truncated, or a length that overruns) is a
-/// wire mismatch surfaced as an error (closing the link), never a silently-short set.
-fn decode_tickset_body(b: &[u8]) -> Result<TickSet> {
-    let mut r = b;
-    fn take<'a>(r: &mut &'a [u8], n: usize, what: &str) -> Result<&'a [u8]> {
-        anyhow::ensure!(r.len() >= n, "tick-set frame truncated reading {what}");
-        let (head, tail) = r.split_at(n);
-        *r = tail;
-        Ok(head)
+    fn decode(body: &[u8]) -> Result<Self> {
+        let b: &[u8; TICKMSG_LEN] = body.try_into().map_err(|_| {
+            anyhow::anyhow!("tick frame body is {} B, want {TICKMSG_LEN}", body.len())
+        })?;
+        let ctick = u64::from_le_bytes(b[OFF_CTICK..OFF_CHASH].try_into().unwrap());
+        let chash = u64::from_le_bytes(b[OFF_CHASH..].try_into().unwrap());
+        Ok(TickMsg {
+            apply_tick: u64::from_le_bytes(b[0..OFF_INPUT].try_into().unwrap()),
+            input: crate::sim::Input::from_bytes(b[OFF_INPUT..OFF_CTICK].try_into().unwrap()),
+            confirmed: (ctick != NO_CONFIRMED_TICK).then_some(Confirmed {
+                tick: ctick,
+                hash: chash,
+            }),
+        })
     }
-    let apply_tick = u64::from_le_bytes(take(&mut r, 8, "apply_tick")?.try_into().unwrap());
-    let n_inputs = u16::from_le_bytes(take(&mut r, 2, "input count")?.try_into().unwrap());
-    let mut inputs = BTreeMap::new();
-    for _ in 0..n_inputs {
-        let pid = PlayerId(take(&mut r, 1, "input player")?[0]);
-        let input = Input::from_bytes(take(&mut r, IN_LEN, "input")?.try_into().unwrap());
-        inputs.insert(pid, input);
-    }
-    let n_confirmed = u16::from_le_bytes(take(&mut r, 2, "confirmed count")?.try_into().unwrap());
-    let mut confirmed = BTreeMap::new();
-    for _ in 0..n_confirmed {
-        let pid = PlayerId(take(&mut r, 1, "confirmed player")?[0]);
-        let tick = u64::from_le_bytes(take(&mut r, 8, "confirmed tick")?.try_into().unwrap());
-        let hash = u64::from_le_bytes(take(&mut r, 8, "confirmed hash")?.try_into().unwrap());
-        confirmed.insert(pid, Confirmed { tick, hash });
-    }
-    anyhow::ensure!(r.is_empty(), "tick-set frame has {} trailing bytes", r.len());
-    Ok(TickSet {
-        apply_tick,
-        inputs,
-        confirmed,
-    })
 }
 
 /// Split `n` bytes off the front of `r`, advancing it; a typed error (naming `what`) on truncation
-/// so a short/garbled frame fails LOUDLY at decode rather than corrupting silently. Shared by the
-/// Stage-3 join codecs below.
+/// so a short/garbled frame fails LOUDLY at decode rather than corrupting silently. Shared by every
+/// variable-length body codec.
 fn take<'a>(r: &mut &'a [u8], n: usize, what: &str) -> Result<&'a [u8]> {
-    anyhow::ensure!(r.len() >= n, "join frame truncated reading {what}");
+    anyhow::ensure!(r.len() >= n, "frame truncated reading {what}");
     let (head, tail) = r.split_at(n);
     *r = tail;
     Ok(head)
 }
 
-/// Encode a [`JoinRequest`] body: `weights_digest(8) | asset_digest(8)`, little-endian.
-fn encode_join_request_body(req: &JoinRequest) -> [u8; 16] {
-    let mut b = [0u8; 16];
-    b[0..8].copy_from_slice(&req.weights_digest.to_le_bytes());
-    b[8..16].copy_from_slice(&req.asset_digest.to_le_bytes());
-    b
-}
+impl Codec for TickSet {
+    const KIND: Frame = Frame::TickSet;
+    type Bytes = Vec<u8>;
 
-/// Inverse of [`encode_join_request_body`].
-fn decode_join_request_body(b: &[u8]) -> Result<JoinRequest> {
-    let mut r = b;
-    let weights_digest = u64::from_le_bytes(take(&mut r, 8, "weights_digest")?.try_into().unwrap());
-    let asset_digest = u64::from_le_bytes(take(&mut r, 8, "asset_digest")?.try_into().unwrap());
-    anyhow::ensure!(r.is_empty(), "join-request frame has {} trailing bytes", r.len());
-    Ok(JoinRequest { weights_digest, asset_digest })
-}
-
-/// Encode an [`Admission`] (roster-change) body: `pid(1) | effective_tick(8) | roster_len(u16) |
-/// roster pids…`. The seed is NOT carried — it is the shared build constant every peer already
-/// holds (`MATCH_SEED`), so the joiner reuses it for `join_at`.
-fn encode_roster_change_body(adm: &Admission) -> Vec<u8> {
-    let mut b = Vec::with_capacity(1 + 8 + 2 + adm.roster.len());
-    b.push(adm.pid.0);
-    b.extend_from_slice(&adm.effective_tick.to_le_bytes());
-    b.extend_from_slice(&(adm.roster.len() as u16).to_le_bytes());
-    for pid in &adm.roster {
-        b.push(pid.0);
+    /// apply_tick(8) | u16 input count | `(pid, input)`… | u16 confirmed count |
+    /// `(pid, ctick, chash)`…. `u16` counts because a roster can reach 256 players (a `u8` count
+    /// would overflow at the max), even though couch play is far smaller.
+    fn encode(&self) -> Vec<u8> {
+        let mut b =
+            Vec::with_capacity(8 + 2 + self.inputs.len() * (1 + IN_LEN) + 2 + self.confirmed.len() * 17);
+        b.extend_from_slice(&self.apply_tick.to_le_bytes());
+        b.extend_from_slice(&(self.inputs.len() as u16).to_le_bytes());
+        for (pid, input) in &self.inputs {
+            b.push(pid.0);
+            b.extend_from_slice(&input.to_bytes());
+        }
+        b.extend_from_slice(&(self.confirmed.len() as u16).to_le_bytes());
+        for (pid, c) in &self.confirmed {
+            b.push(pid.0);
+            b.extend_from_slice(&c.tick.to_le_bytes());
+            b.extend_from_slice(&c.hash.to_le_bytes());
+        }
+        b
     }
-    b
+
+    fn decode(body: &[u8]) -> Result<Self> {
+        let mut r = body;
+        let apply_tick = u64::from_le_bytes(take(&mut r, 8, "apply_tick")?.try_into().unwrap());
+        let n_inputs = u16::from_le_bytes(take(&mut r, 2, "input count")?.try_into().unwrap());
+        let mut inputs = BTreeMap::new();
+        for _ in 0..n_inputs {
+            let pid = PlayerId(take(&mut r, 1, "input player")?[0]);
+            let input = Input::from_bytes(take(&mut r, IN_LEN, "input")?.try_into().unwrap());
+            inputs.insert(pid, input);
+        }
+        let n_confirmed = u16::from_le_bytes(take(&mut r, 2, "confirmed count")?.try_into().unwrap());
+        let mut confirmed = BTreeMap::new();
+        for _ in 0..n_confirmed {
+            let pid = PlayerId(take(&mut r, 1, "confirmed player")?[0]);
+            let tick = u64::from_le_bytes(take(&mut r, 8, "confirmed tick")?.try_into().unwrap());
+            let hash = u64::from_le_bytes(take(&mut r, 8, "confirmed hash")?.try_into().unwrap());
+            confirmed.insert(pid, Confirmed { tick, hash });
+        }
+        anyhow::ensure!(r.is_empty(), "tick-set frame has {} trailing bytes", r.len());
+        Ok(TickSet {
+            apply_tick,
+            inputs,
+            confirmed,
+        })
+    }
 }
 
-/// Inverse of [`encode_roster_change_body`].
-fn decode_roster_change_body(b: &[u8]) -> Result<Admission> {
-    let mut r = b;
-    let pid = PlayerId(take(&mut r, 1, "pid")?[0]);
-    let effective_tick = u64::from_le_bytes(take(&mut r, 8, "effective_tick")?.try_into().unwrap());
-    let n = u16::from_le_bytes(take(&mut r, 2, "roster len")?.try_into().unwrap());
-    let mut roster = Vec::with_capacity(n as usize);
-    for _ in 0..n {
-        roster.push(PlayerId(take(&mut r, 1, "roster pid")?[0]));
+impl Codec for Beat {
+    const KIND: Frame = Frame::Beat;
+    type Bytes = Vec<u8>;
+
+    /// The [`Beat`] body layout is owned by [`crate::membership`] (which owns the type); transport
+    /// owns only the kind byte.
+    fn encode(&self) -> Vec<u8> {
+        membership::encode_beat(self)
     }
-    anyhow::ensure!(r.is_empty(), "roster-change frame has {} trailing bytes", r.len());
-    Ok(Admission { pid, effective_tick, roster })
+
+    fn decode(body: &[u8]) -> Result<Self> {
+        membership::decode_beat(body)
+    }
+}
+
+impl Codec for JoinRequest {
+    const KIND: Frame = Frame::JoinRequest;
+    type Bytes = [u8; 16];
+
+    /// `weights_digest(8) | asset_digest(8)`, little-endian.
+    fn encode(&self) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        b[0..8].copy_from_slice(&self.weights_digest.to_le_bytes());
+        b[8..16].copy_from_slice(&self.asset_digest.to_le_bytes());
+        b
+    }
+
+    fn decode(body: &[u8]) -> Result<Self> {
+        let mut r = body;
+        let weights_digest = u64::from_le_bytes(take(&mut r, 8, "weights_digest")?.try_into().unwrap());
+        let asset_digest = u64::from_le_bytes(take(&mut r, 8, "asset_digest")?.try_into().unwrap());
+        anyhow::ensure!(r.is_empty(), "join-request frame has {} trailing bytes", r.len());
+        Ok(JoinRequest { weights_digest, asset_digest })
+    }
+}
+
+impl Codec for Admission {
+    const KIND: Frame = Frame::RosterChange;
+    type Bytes = Vec<u8>;
+
+    /// `pid(1) | effective_tick(8) | u16 roster_len | roster pids…`. The seed is NOT carried — it is
+    /// the shared build constant (`MATCH_SEED`) every peer already holds, so the joiner reuses it for
+    /// `join_at`. A [`Welcome`] frames this SAME body under a different kind.
+    fn encode(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(1 + 8 + 2 + self.roster.len());
+        b.push(self.pid.0);
+        b.extend_from_slice(&self.effective_tick.to_le_bytes());
+        b.extend_from_slice(&(self.roster.len() as u16).to_le_bytes());
+        for pid in &self.roster {
+            b.push(pid.0);
+        }
+        b
+    }
+
+    fn decode(body: &[u8]) -> Result<Self> {
+        let mut r = body;
+        let pid = PlayerId(take(&mut r, 1, "pid")?[0]);
+        let effective_tick = u64::from_le_bytes(take(&mut r, 8, "effective_tick")?.try_into().unwrap());
+        let n = u16::from_le_bytes(take(&mut r, 2, "roster len")?.try_into().unwrap());
+        let mut roster = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            roster.push(PlayerId(take(&mut r, 1, "roster pid")?[0]));
+        }
+        anyhow::ensure!(r.is_empty(), "roster-change frame has {} trailing bytes", r.len());
+        Ok(Admission { pid, effective_tick, roster })
+    }
+}
+
+/// The unicast WELCOME role of an [`Admission`]: the SAME body as a broadcast [`Frame::RosterChange`]
+/// under a distinct kind, so a just-admitted joiner reads only its OWN allocation and never mistakes
+/// a concurrent joiner's broadcast change for its own (which would hand it the wrong
+/// [`crate::sim::PlayerId`]). Stage 3, rl#151.
+pub(crate) struct Welcome(pub Admission);
+
+impl Codec for Welcome {
+    const KIND: Frame = Frame::Welcome;
+    type Bytes = Vec<u8>;
+    fn encode(&self) -> Vec<u8> {
+        self.0.encode()
+    }
+    fn decode(body: &[u8]) -> Result<Self> {
+        Ok(Welcome(Admission::decode(body)?))
+    }
+}
+
+/// A loud join REFUSAL body (a UTF-8 reason). Its own type so it routes as [`Frame::Refuse`] through
+/// the one generic send path — a turned-away joiner surfaces the reason, never a silent drop.
+pub(crate) struct Refuse(pub String);
+
+impl Codec for Refuse {
+    const KIND: Frame = Frame::Refuse;
+    type Bytes = Vec<u8>;
+    fn encode(&self) -> Vec<u8> {
+        self.0.as_bytes().to_vec()
+    }
+    fn decode(body: &[u8]) -> Result<Self> {
+        Ok(Refuse(
+            String::from_utf8(body.to_vec()).context("refuse frame body is not UTF-8")?,
+        ))
+    }
 }
 
 /// A frame received from a specific peer. `from` is the QUIC-authenticated peer id —
@@ -354,11 +433,20 @@ async fn wait_for_direct_addr(endpoint: &Endpoint) -> Result<()> {
     }
 }
 
+/// A peer's outbound send half, shared (behind an async mutex) between the frame writers and the
+/// eviction paths. Cloned Arc identity (`ptr_eq`) is how [`drop_if_same`] tells a stale link from a
+/// reconnect's replacement.
+type Link = Arc<tokio::sync::Mutex<SendStream>>;
+
+/// The per-peer outbound link table, shared by the accept path, the discovery dialer, and every
+/// reader task.
+type Links = Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>;
+
 /// Half a peer link: a [`TickMsg`] sender. The receive side feeds a shared mpsc
 /// channel that [`Session`] owns, so the caller polls one queue for all peers.
 #[derive(Clone, Debug)]
 struct PeerLink {
-    send: Arc<tokio::sync::Mutex<SendStream>>,
+    send: Link,
 }
 
 /// A running networked session: the bound endpoint, the discovery task, and the
@@ -374,7 +462,7 @@ pub struct Session {
     /// wire its reader into the same shared inbox the discovery/accept paths feed.
     inbox_tx: mpsc::Sender<FromPeer>,
     /// Outbound links keyed by peer id. Grows as peers connect (discovery or accept).
-    links: Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>,
+    links: Links,
     /// The mDNS discovery loop. Held only to abort it on drop (it owns the mDNS
     /// subscription); aborting on drop stops the dialing loop when the session ends.
     discovery: tokio::task::JoinHandle<()>,
@@ -427,77 +515,23 @@ impl Session {
         .await
     }
 
-    /// Send our input [`TickMsg`] UP to the server `peer` (rl#151). A client routes its input to
-    /// exactly one endpoint — the match server — not the whole mesh; the server assembles the
-    /// complete set and broadcasts it back. A send failure drops that link (the same policy as
-    /// [`Session::broadcast_frame`]); losing the link to the server stalls the client, which is the
-    /// correct visible failure. No link to `peer` is a no-op (we are not connected to the server —
-    /// surfaced as the lockstep stall, not a panic).
-    pub async fn send_to(&self, peer: EndpointId, msg: &TickMsg) {
-        let send = {
-            let links = self.links.lock().await;
-            links.get(&peer).map(|l| l.send.clone())
-        };
-        let Some(send) = send else { return };
-        let mut s = send.lock().await;
-        if let Err(e) = write_frame(&mut s, Frame::Tick, &encode_tick_body(msg)).await {
-            tracing::warn!(%peer, "sending input to server failed: {e:#}");
-            drop(s);
-            let mut links = self.links.lock().await;
-            if links.get(&peer).is_some_and(|l| Arc::ptr_eq(&l.send, &send)) {
-                links.remove(&peer);
-            }
-        }
+    /// Frame `msg` (its [`Codec::KIND`] + body) and send it to exactly one `peer` — the single
+    /// unicast primitive. A client ships its input UP to the one server; a host UNICASTs a joiner its
+    /// [`Welcome`] or [`Refuse`]. The message type picks the kind, so there is no per-kind wrapper. A
+    /// send failure drops that link (same reconnect-safe policy as [`Session::broadcast`]); losing
+    /// the server link stalls the client, the correct visible failure. No link to `peer` is a no-op.
+    pub(crate) async fn send<M: Codec>(&self, peer: EndpointId, msg: &M) {
+        let bytes = msg.encode();
+        self.send_frame(peer, M::KIND, bytes.as_ref()).await;
     }
 
-    /// Broadcast a server-assembled [`TickSet`] DOWN to every connected client (rl#151). Called
-    /// only by the peer running the server; the complete set is identical for all clients, so one
-    /// fan-out reaches them all. A dead client is dropped inside [`Session::broadcast_frame`] (its
-    /// missing future inputs are the server's visible failure, not a block on the others).
-    pub async fn broadcast_tickset(&self, set: &TickSet) {
-        self.broadcast_frame(Frame::TickSet, &encode_tickset_body(set))
-            .await;
-    }
-
-    /// Send our [`Beat`] (the formation-barrier channel, rl#44) to every connected
-    /// peer. Used only during cold-start; once the match starts the lockstep channel
-    /// takes over. Separate from [`Session::broadcast`] so the barrier driver and the
-    /// tick driver each speak only their own channel.
-    pub async fn broadcast_beat(&self, beat: &Beat) {
-        self.broadcast_frame(Frame::Beat, &membership::encode_beat(beat))
-            .await;
-    }
-
-    /// Send our [`JoinRequest`] UP to the host `peer` when dialing a live match (Stage 3). Routed to
-    /// exactly the host (the only peer a joiner is connected to at dial time); the host gates it
-    /// ([`crate::server::may_admit_joiner`]) and replies with a [`Frame::RosterChange`] (admitted)
-    /// or a [`Frame::Refuse`] (turned away). A no-link is a no-op surfaced as the join stalling.
-    pub async fn send_join_request(&self, peer: EndpointId, req: &JoinRequest) {
-        self.send_frame(peer, Frame::JoinRequest, &encode_join_request_body(req))
-            .await;
-    }
-
-    /// Broadcast a roster change ([`Admission`]) DOWN to every connected client (Stage 3 mid-game
-    /// join). One fan-out reaches incumbents (who schedule the change) AND the joiner (who builds its
-    /// session from it), exactly as [`Self::broadcast_tickset`] fans the per-tick set; the change is
-    /// identical for all, so every peer schedules the same rebuild at the same tick.
-    pub async fn broadcast_roster_change(&self, adm: &Admission) {
-        self.broadcast_frame(Frame::RosterChange, &encode_roster_change_body(adm))
-            .await;
-    }
-
-    /// Tell a would-be joiner `peer` it is REFUSED, with `reason` (Stage 3). A loud turn-away — the
-    /// joiner surfaces the reason rather than being silently dropped onto a mismatched crab.
-    pub async fn send_refuse(&self, peer: EndpointId, reason: &str) {
-        self.send_frame(peer, Frame::Refuse, reason.as_bytes()).await;
-    }
-
-    /// UNICAST a just-admitted joiner `peer` its OWN [`Admission`] (Stage 3). Separate from the
-    /// broadcast [`Self::broadcast_roster_change`] so the joiner reads only the allocation meant for
-    /// it — never a concurrent joiner's broadcast change (which would hand it the wrong PlayerId).
-    pub async fn welcome_joiner(&self, peer: EndpointId, adm: &Admission) {
-        self.send_frame(peer, Frame::Welcome, &encode_roster_change_body(adm))
-            .await;
+    /// Frame `msg` and send it to every connected peer — the single fan-out primitive (the
+    /// server-assembled [`TickSet`], a roster-change [`Admission`], a formation [`Beat`]). The body is
+    /// identical for all, so one write reaches them; a dead peer is dropped inside
+    /// [`Session::broadcast_frame`], never blocking the others.
+    pub(crate) async fn broadcast<M: Codec>(&self, msg: &M) {
+        let bytes = msg.encode();
+        self.broadcast_frame(M::KIND, bytes.as_ref()).await;
     }
 
     /// Frame `body` with `kind` + length and send it to one `peer` (the unicast analogue of
@@ -513,10 +547,7 @@ impl Session {
         if let Err(e) = write_frame(&mut s, kind, body).await {
             tracing::warn!(%peer, ?kind, "sending frame to peer failed: {e:#}");
             drop(s);
-            let mut links = self.links.lock().await;
-            if links.get(&peer).is_some_and(|l| Arc::ptr_eq(&l.send, &send)) {
-                links.remove(&peer);
-            }
+            drop_if_same(&self.links, peer, &send).await;
         }
     }
 
@@ -529,7 +560,7 @@ impl Session {
         // network write. Holding the map lock across `write_frame().await` would let
         // one backpressured peer stall every other map user (link insert/remove,
         // connected_peers); the per-`send` mutex still serializes that peer's frames.
-        let targets: Vec<(EndpointId, Arc<tokio::sync::Mutex<SendStream>>)> = {
+        let targets: Vec<(EndpointId, Link)> = {
             let links = self.links.lock().await;
             links
                 .iter()
@@ -544,19 +575,8 @@ impl Session {
                 dead.push((id, send.clone()));
             }
         }
-        if !dead.is_empty() {
-            let mut links = self.links.lock().await;
-            for (id, failed_send) in dead {
-                // Only drop the link if it's still the SAME send half that failed —
-                // a reconnect may have replaced it for this id between the write and
-                // here, and we must not evict the fresh link.
-                if links
-                    .get(&id)
-                    .is_some_and(|l| Arc::ptr_eq(&l.send, &failed_send))
-                {
-                    links.remove(&id);
-                }
-            }
+        for (id, failed_send) in dead {
+            drop_if_same(&self.links, id, &failed_send).await;
         }
     }
 
@@ -584,7 +604,7 @@ pub async fn start_session() -> Result<Session> {
     let my_id = endpoint.id();
 
     let (inbox_tx, inbox_rx) = mpsc::channel(256);
-    let links: Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>> =
+    let links: Links =
         Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
 
     // Accept side: register the lockstep protocol. Each accepted connection spawns a
@@ -655,7 +675,7 @@ pub async fn start_session() -> Result<Session> {
 struct LockstepProto {
     my_id: EndpointId,
     inbox: mpsc::Sender<FromPeer>,
-    links: Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>,
+    links: Links,
 }
 
 impl ProtocolHandler for LockstepProto {
@@ -696,7 +716,7 @@ async fn wire_connection(
     my_id: EndpointId,
     conn: Connection,
     inbox: mpsc::Sender<FromPeer>,
-    links: Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>,
+    links: Links,
 ) -> Result<()> {
     let peer = conn.remote_id();
     let dialer = my_id.as_bytes() < peer.as_bytes();
@@ -724,16 +744,9 @@ async fn wire_connection(
         if let Err(e) = read_loop(recv, peer, inbox).await {
             tracing::debug!(%peer, "peer read loop ended: {e:#}");
         }
-        // Peer's stream closed → drop its link so broadcast stops targeting it, BUT
-        // only if it's still THIS connection's link: a reconnect may have replaced it
-        // for the same id, and a late EOF from the old reader must not evict the new.
-        let mut links = links_for_reader.lock().await;
-        if links
-            .get(&peer)
-            .is_some_and(|l| Arc::ptr_eq(&l.send, &send))
-        {
-            links.remove(&peer);
-        }
+        // Peer's stream closed → drop its link so broadcast stops targeting it (reconnect-safe: a
+        // late EOF from a link a reconnect already replaced must not evict the fresh one).
+        drop_if_same(&links_for_reader, peer, &send).await;
     });
     Ok(())
 }
@@ -770,27 +783,31 @@ async fn read_loop(
         let kind = Frame::from_byte(buf[0])
             .with_context(|| format!("unknown frame kind {:#x}", buf[0]))?;
         let body = &buf[1..];
+        // Each arm is one line: the kind names the [`Codec`] type, which decodes its own body.
+        // Welcome and RosterChange share the [`Admission`] body but stay distinct kinds so the
+        // joiner reads only its OWN allocation, never an incumbent's broadcast notice.
         let msg = match kind {
-            Frame::Tick => {
-                let arr: [u8; TICKMSG_LEN] = body.try_into().map_err(|_| {
-                    anyhow::anyhow!("tick frame body is {} B, want {TICKMSG_LEN}", body.len())
-                })?;
-                PeerWire::Tick(decode_tick_body(&arr))
-            }
-            Frame::Beat => PeerWire::Beat(membership::decode_beat(body)?),
-            Frame::TickSet => PeerWire::TickSet(decode_tickset_body(body)?),
-            Frame::JoinRequest => PeerWire::JoinRequest(decode_join_request_body(body)?),
-            Frame::RosterChange => PeerWire::RosterChange(decode_roster_change_body(body)?),
-            Frame::Refuse => PeerWire::Refuse(
-                String::from_utf8(body.to_vec()).context("refuse frame body is not UTF-8")?,
-            ),
-            // Same payload as RosterChange — only the frame kind (unicast welcome vs broadcast
-            // notice) distinguishes the joiner's own allocation from an incumbent's notice.
-            Frame::Welcome => PeerWire::Welcome(decode_roster_change_body(body)?),
+            Frame::Tick => PeerWire::Tick(TickMsg::decode(body)?),
+            Frame::Beat => PeerWire::Beat(Beat::decode(body)?),
+            Frame::TickSet => PeerWire::TickSet(TickSet::decode(body)?),
+            Frame::JoinRequest => PeerWire::JoinRequest(JoinRequest::decode(body)?),
+            Frame::RosterChange => PeerWire::RosterChange(Admission::decode(body)?),
+            Frame::Refuse => PeerWire::Refuse(Refuse::decode(body)?.0),
+            Frame::Welcome => PeerWire::Welcome(Welcome::decode(body)?.0),
         };
         if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
             return Ok(()); // session dropped
         }
+    }
+}
+
+/// Evict `id`'s link, but ONLY if it is still `failed` — a reconnect may have replaced the link for
+/// this id since the write began, and the fresh link must survive a late failure/EOF from the stale
+/// one. The single link-eviction path, shared by unicast send, broadcast fan-out, and reader EOF.
+async fn drop_if_same(links: &Links, id: EndpointId, failed: &Link) {
+    let mut links = links.lock().await;
+    if links.get(&id).is_some_and(|l| Arc::ptr_eq(&l.send, failed)) {
+        links.remove(&id);
     }
 }
 
@@ -825,7 +842,7 @@ mod tests {
                 input: Input::from_axes(0.5, -0.25),
                 confirmed,
             };
-            assert_eq!(decode_tick_body(&encode_tick_body(&m)), m);
+            assert_eq!(TickMsg::decode(TickMsg::encode(&m).as_ref()).unwrap(), m);
         }
     }
 
@@ -847,11 +864,11 @@ mod tests {
     #[test]
     fn join_request_wire_roundtrips() {
         let req = JoinRequest { weights_digest: 0xdead_beef_cafe_f00d, asset_digest: 0x0102_0304 };
-        assert_eq!(decode_join_request_body(&encode_join_request_body(&req)).unwrap(), req);
+        assert_eq!(JoinRequest::decode(JoinRequest::encode(&req).as_ref()).unwrap(), req);
         // A short body is a loud error, not a guessed-at request.
-        assert!(decode_join_request_body(&[0u8; 8]).is_err());
+        assert!(JoinRequest::decode(&[0u8; 8]).is_err());
         // Trailing bytes too (a longer/mixed-version frame must not be silently truncated).
-        assert!(decode_join_request_body(&[0u8; 17]).is_err());
+        assert!(JoinRequest::decode(&[0u8; 17]).is_err());
     }
 
     #[test]
@@ -860,16 +877,16 @@ mod tests {
         // The empty-roster edge and a multi-member roster both round-trip byte-for-byte.
         for roster in [vec![], vec![PlayerId(0), PlayerId(1), PlayerId(2)]] {
             let adm = Admission { pid: PlayerId(2), effective_tick: 1_234_567, roster };
-            assert_eq!(decode_roster_change_body(&encode_roster_change_body(&adm)).unwrap(), adm);
+            assert_eq!(Admission::decode(Admission::encode(&adm).as_ref()).unwrap(), adm);
         }
         // Truncation (a roster_len claiming more pids than present) is a loud error.
-        let mut body = encode_roster_change_body(&Admission {
+        let mut body = Admission::encode(&Admission {
             pid: PlayerId(0),
             effective_tick: 7,
             roster: vec![PlayerId(0), PlayerId(1)],
         });
         body.pop(); // drop the last pid byte → count says 2 but only 1 present
-        assert!(decode_roster_change_body(&body).is_err());
+        assert!(Admission::decode(&body).is_err());
     }
 
     #[test]
@@ -890,8 +907,8 @@ mod tests {
                 ]),
                 confirmed,
             };
-            let body = encode_tickset_body(&set);
-            assert_eq!(decode_tickset_body(&body).unwrap(), set);
+            let body = TickSet::encode(&set);
+            assert_eq!(TickSet::decode(&body).unwrap(), set);
         }
     }
 
@@ -904,8 +921,8 @@ mod tests {
             inputs: BTreeMap::from([(PlayerId(0), Input::from_axes(1.0, 0.0))]),
             confirmed: BTreeMap::new(),
         };
-        let body = encode_tickset_body(&set);
+        let body = TickSet::encode(&set);
         // Lop off the last byte: decode must fail loudly rather than yield a corrupt/short set.
-        assert!(decode_tickset_body(&body[..body.len() - 1]).is_err());
+        assert!(TickSet::decode(&body[..body.len() - 1]).is_err());
     }
 }
