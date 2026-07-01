@@ -21,7 +21,7 @@ use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::lockstep::{Confirmed, TickMsg};
+use crate::lockstep::TickMsg;
 use crate::membership::{self, Beat};
 use crate::server::{Admission, JoinRequest, TickSet};
 use crate::sim::{Input, PlayerId};
@@ -59,7 +59,7 @@ pub const SERVICE_NAME: &str = "bddap-rl-game";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum Frame {
-    /// A client→server [`TickMsg`]: one client's input for a tick (+ its confirmed hash).
+    /// A client→server [`TickMsg`]: one client's input for a tick.
     Tick = 0,
     /// A [`Beat`]: heartbeat + roster advertisement for the formation barrier (rl#44).
     Beat = 1,
@@ -143,23 +143,14 @@ pub enum PeerWire {
     Articulation(CrabArticulation),
 }
 
-/// Wire sentinel for [`TickMsg::confirmed`] == `None`. `u64::MAX` as the tick can
-/// never occur in play (the sim would overflow long before), so it unambiguously
-/// means "no tick confirmed yet" on the wire while the in-memory type stays an
-/// honest `Option`.
-const NO_CONFIRMED_TICK: u64 = u64::MAX;
-
 /// Field offsets in the encoded [`TickMsg`], derived from the field widths so the
 /// input growing (Phase 1 widened [`Input`]) shifts the trailing fields automatically
 /// rather than silently corrupting them — the offsets can't drift from
 /// [`crate::sim::Input::WIRE_LEN`] because they're computed from it.
 const IN_LEN: usize = crate::sim::Input::WIRE_LEN;
 const OFF_INPUT: usize = 8; // after apply_tick(8)
-const OFF_CTICK: usize = OFF_INPUT + IN_LEN; // after input
-const OFF_CHASH: usize = OFF_CTICK + 8; // after confirmed_tick(8)
-/// Wire size of an encoded [`TickMsg`]: apply_tick(8) + input + confirmed_tick(8) +
-/// confirmed_hash(8).
-const TICKMSG_LEN: usize = OFF_CHASH + 8;
+/// Wire size of an encoded [`TickMsg`]: apply_tick(8) + input.
+const TICKMSG_LEN: usize = OFF_INPUT + IN_LEN;
 
 /// A wire message: owns its [`Frame`] kind byte and its body codec, so adding or changing a frame
 /// touches ONE impl instead of rippling across [`Frame`], [`Frame::from_byte`], a bespoke send
@@ -183,18 +174,11 @@ impl Codec for TickMsg {
     const KIND: Frame = Frame::Tick;
     type Bytes = [u8; TICKMSG_LEN];
 
-    /// Fixed-width little-endian: apply_tick(8) | input | confirmed_tick(8) | confirmed_hash(8). A
-    /// `None` confirmed is carried as the [`NO_CONFIRMED_TICK`] sentinel.
+    /// Fixed-width little-endian: apply_tick(8) | input.
     fn encode(&self) -> [u8; TICKMSG_LEN] {
-        let (ctick, chash) = match self.confirmed {
-            Some(c) => (c.tick, c.hash),
-            None => (NO_CONFIRMED_TICK, 0),
-        };
         let mut b = [0u8; TICKMSG_LEN];
         b[0..OFF_INPUT].copy_from_slice(&self.apply_tick.to_le_bytes());
-        b[OFF_INPUT..OFF_CTICK].copy_from_slice(&self.input.to_bytes());
-        b[OFF_CTICK..OFF_CHASH].copy_from_slice(&ctick.to_le_bytes());
-        b[OFF_CHASH..].copy_from_slice(&chash.to_le_bytes());
+        b[OFF_INPUT..].copy_from_slice(&self.input.to_bytes());
         b
     }
 
@@ -202,15 +186,9 @@ impl Codec for TickMsg {
         let b: &[u8; TICKMSG_LEN] = body.try_into().map_err(|_| {
             anyhow::anyhow!("tick frame body is {} B, want {TICKMSG_LEN}", body.len())
         })?;
-        let ctick = u64::from_le_bytes(b[OFF_CTICK..OFF_CHASH].try_into().unwrap());
-        let chash = u64::from_le_bytes(b[OFF_CHASH..].try_into().unwrap());
         Ok(TickMsg {
             apply_tick: u64::from_le_bytes(b[0..OFF_INPUT].try_into().unwrap()),
-            input: crate::sim::Input::from_bytes(b[OFF_INPUT..OFF_CTICK].try_into().unwrap()),
-            confirmed: (ctick != NO_CONFIRMED_TICK).then_some(Confirmed {
-                tick: ctick,
-                hash: chash,
-            }),
+            input: crate::sim::Input::from_bytes(b[OFF_INPUT..].try_into().unwrap()),
         })
     }
 }
@@ -229,23 +207,15 @@ impl Codec for TickSet {
     const KIND: Frame = Frame::TickSet;
     type Bytes = Vec<u8>;
 
-    /// apply_tick(8) | u16 input count | `(pid, input)`… | u16 confirmed count |
-    /// `(pid, ctick, chash)`…. `u16` counts because a roster can reach 256 players (a `u8` count
-    /// would overflow at the max), even though couch play is far smaller.
+    /// apply_tick(8) | u16 input count | `(pid, input)`…. `u16` count because a roster can reach 256
+    /// players (a `u8` count would overflow at the max), even though couch play is far smaller.
     fn encode(&self) -> Vec<u8> {
-        let mut b =
-            Vec::with_capacity(8 + 2 + self.inputs.len() * (1 + IN_LEN) + 2 + self.confirmed.len() * 17);
+        let mut b = Vec::with_capacity(8 + 2 + self.inputs.len() * (1 + IN_LEN));
         b.extend_from_slice(&self.apply_tick.to_le_bytes());
         b.extend_from_slice(&(self.inputs.len() as u16).to_le_bytes());
         for (pid, input) in &self.inputs {
             b.push(pid.0);
             b.extend_from_slice(&input.to_bytes());
-        }
-        b.extend_from_slice(&(self.confirmed.len() as u16).to_le_bytes());
-        for (pid, c) in &self.confirmed {
-            b.push(pid.0);
-            b.extend_from_slice(&c.tick.to_le_bytes());
-            b.extend_from_slice(&c.hash.to_le_bytes());
         }
         b
     }
@@ -260,20 +230,8 @@ impl Codec for TickSet {
             let input = Input::from_bytes(take(&mut r, IN_LEN, "input")?.try_into().unwrap());
             inputs.insert(pid, input);
         }
-        let n_confirmed = u16::from_le_bytes(take(&mut r, 2, "confirmed count")?.try_into().unwrap());
-        let mut confirmed = BTreeMap::new();
-        for _ in 0..n_confirmed {
-            let pid = PlayerId(take(&mut r, 1, "confirmed player")?[0]);
-            let tick = u64::from_le_bytes(take(&mut r, 8, "confirmed tick")?.try_into().unwrap());
-            let hash = u64::from_le_bytes(take(&mut r, 8, "confirmed hash")?.try_into().unwrap());
-            confirmed.insert(pid, Confirmed { tick, hash });
-        }
         anyhow::ensure!(r.is_empty(), "tick-set frame has {} trailing bytes", r.len());
-        Ok(TickSet {
-            apply_tick,
-            inputs,
-            confirmed,
-        })
+        Ok(TickSet { apply_tick, inputs })
     }
 }
 
@@ -844,7 +802,7 @@ async fn wire_connection(
 /// Upper bound on a single frame body, to reject a hostile/garbled length before
 /// allocating. The two largest legitimate frames both fit comfortably: a full-roster [`Beat`]
 /// (kind + start + count + weights digest + 256×32-byte ids ≈ 8 KiB) and a full-roster
-/// [`crate::server::TickSet`] (256 inputs + 256 confirmed triples ≈ 7 KiB); 16 KiB is generous
+/// [`crate::server::TickSet`] (256 inputs ≈ 3 KiB); 16 KiB is generous
 /// slack and still bounds a bad length to a small allocation.
 const MAX_FRAME_LEN: usize = 16 * 1024;
 
@@ -920,22 +878,11 @@ mod tests {
 
     #[test]
     fn tick_body_wire_roundtrips() {
-        // Both the confirmed-Some case and the None case (which uses the wire
-        // sentinel) must round-trip exactly.
-        for confirmed in [
-            Some(Confirmed {
-                tick: 1232,
-                hash: 0xdead_beef_cafe_f00d,
-            }),
-            None,
-        ] {
-            let m = TickMsg {
-                apply_tick: 1234,
-                input: Input::from_axes(0.5, -0.25),
-                confirmed,
-            };
-            assert_eq!(TickMsg::decode(TickMsg::encode(&m).as_ref()).unwrap(), m);
-        }
+        let m = TickMsg {
+            apply_tick: 1234,
+            input: Input::from_axes(0.5, -0.25),
+        };
+        assert_eq!(TickMsg::decode(TickMsg::encode(&m).as_ref()).unwrap(), m);
     }
 
     #[test]
@@ -1018,23 +965,16 @@ mod tests {
     fn tickset_wire_roundtrips() {
         use crate::sim::PlayerId;
         use std::collections::BTreeMap;
-        // A multi-player set with a partial confirmed map (the common case: only some clients'
-        // hashes advanced this set) round-trips byte-for-byte, including the empty-confirmed case.
-        for confirmed in [
-            BTreeMap::from([(PlayerId(1), Confirmed { tick: 12, hash: 0xfeed })]),
-            BTreeMap::new(),
-        ] {
-            let set = TickSet {
-                apply_tick: 99,
-                inputs: BTreeMap::from([
-                    (PlayerId(0), Input::from_axes(0.5, -0.5)),
-                    (PlayerId(1), Input::from_axes(-1.0, 0.25)),
-                ]),
-                confirmed,
-            };
-            let body = TickSet::encode(&set);
-            assert_eq!(TickSet::decode(&body).unwrap(), set);
-        }
+        // A multi-player complete input set round-trips byte-for-byte.
+        let set = TickSet {
+            apply_tick: 99,
+            inputs: BTreeMap::from([
+                (PlayerId(0), Input::from_axes(0.5, -0.5)),
+                (PlayerId(1), Input::from_axes(-1.0, 0.25)),
+            ]),
+        };
+        let body = TickSet::encode(&set);
+        assert_eq!(TickSet::decode(&body).unwrap(), set);
     }
 
     #[test]
@@ -1044,7 +984,6 @@ mod tests {
         let set = TickSet {
             apply_tick: 1,
             inputs: BTreeMap::from([(PlayerId(0), Input::from_axes(1.0, 0.0))]),
-            confirmed: BTreeMap::new(),
         };
         let body = TickSet::encode(&set);
         // Lop off the last byte: decode must fail loudly rather than yield a corrupt/short set.

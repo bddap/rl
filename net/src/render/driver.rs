@@ -715,10 +715,7 @@ pub(super) fn drive_lockstep(
                     .filter(|&p| p != me)
                     .collect();
                 for pid in others {
-                    let _ = server.record(
-                        pid,
-                        TickMsg { apply_tick: msg.apply_tick, input: bot, confirmed: None },
-                    );
+                    let _ = server.record(pid, TickMsg { apply_tick: msg.apply_tick, input: bot });
                 }
             }
             // Ship our input to the (internal or remote) server. Solo runs the same exchange against a

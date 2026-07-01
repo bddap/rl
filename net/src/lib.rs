@@ -94,12 +94,6 @@ pub fn may_arm_external_crab(net_is_none: bool, weights_synced: bool, assets_syn
     net_is_none || (weights_synced && assets_synced)
 }
 
-/// Two-sim cross-determinism regression for the articulated NN-crab physics: it couples
-/// `crab_world`'s physics with this crate's lockstep/cadence, so it lives in `net` (a
-/// crab-world-side test couldn't reach lockstep without a dependency cycle).
-#[cfg(test)]
-mod determinism_probe;
-
 #[cfg(test)]
 mod desync_test {
     //! The headless determinism proof (rl#39): replay ONE input log through two
@@ -121,7 +115,6 @@ mod desync_test {
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
-    use crate::lockstep::Lockstep;
     use crate::sim::{Input, Outcome, PlayerId, Pos, Sim, buttons};
 
     /// Generate a deterministic pseudo-random input log: `ticks` ticks, each with one
@@ -313,8 +306,8 @@ mod desync_test {
     // bevy's full GPU stack), so this suite — which builds with NO features, like the headless
     // trainer — cannot reference `ExternalCrabPlugin`/`ExternalCrabArmed`/`build_windowed_app`
     // directly, nor stand up a real iroh transport. These re-encode the SAME `may_arm_external_crab`
-    // predicate the production sites use. The armed-networked determinism (the synced case) is
-    // proven at the real cadence in `determinism_probe` against the actual physics.
+    // predicate the production sites use. The armed crab against the actual physics is exercised by
+    // the headless NN-crab probes (`game nn-crab-probe` / `nn-crab-vehicle-stability`).
 
     /// Models the production arm decision exactly: a checkpoint must be present AND
     /// [`super::may_arm_external_crab`] must allow it (the SAME predicate the `Boot::Round` build,
@@ -378,52 +371,47 @@ mod desync_test {
     /// state hashes to diverge — so a peer that loaded the wrong brain can't masquerade as
     /// in-sync.
     ///
-    /// SCOPE: this drives two `Lockstep`s by HAND with a synthetic digest — it proves the FOLD
-    /// has teeth (a digest mismatch surfaces as a hash divergence) in isolation. The armed
-    /// networked crab against the REAL physics, at the production 64:30 cadence, is proven in
-    /// `determinism_probe`; cross-MACHINE bit-identity is the 2-Deck gate's job.
+    /// SCOPE: this steps two `Sim`s by HAND with a synthetic digest — it proves the FOLD has teeth
+    /// (a digest mismatch surfaces as a `state_hash` divergence) in isolation. The armed crab against
+    /// the REAL physics is exercised by the headless NN-crab probes; cross-MACHINE bit-identity is the
+    /// 2-Deck gate's job.
     #[test]
     fn external_crab_with_mismatched_weights_desyncs() {
         let seed = 0x5151_8202;
-        let players = [PlayerId(0), PlayerId(1)];
-        let mut a = Lockstep::new(seed, &players, PlayerId(0));
-        let mut b = Lockstep::new(seed, &players, PlayerId(1));
+        let players: Vec<PlayerId> = (0..2).map(PlayerId).collect();
+        let neutral: BTreeMap<PlayerId, Input> =
+            players.iter().map(|&p| (p, Input::default())).collect();
         let pose = Pos { x: 1234, z: -567 };
         // Two distinct weights digests fold into otherwise-identical external crab state.
         let (weights_a, weights_b) = (0xAAAA_AAAA_AAAA_AAAA, 0xBBBB_BBBB_BBBB_BBBB);
+
+        let mut a = Sim::new(seed, &players);
+        let mut b = Sim::new(seed, &players);
         for _ in 0..10u64 {
-            let ma = a.submit_local_input(Input::default());
-            let mb = b.submit_local_input(Input::default());
-            let _ = a.record_remote(PlayerId(1), mb);
-            let _ = b.record_remote(PlayerId(0), ma);
             a.set_external_crab_pose(pose, 7, weights_a);
             b.set_external_crab_pose(pose, 7, weights_b);
-            let _ = a.try_advance();
-            let _ = b.try_advance();
+            a.step(&neutral);
+            b.step(&neutral);
         }
         assert_ne!(
-            a.sim().state_hash(),
-            b.sim().state_hash(),
+            a.state_hash(),
+            b.state_hash(),
             "identical pose + DIFFERENT weights digest must desync (shared-checkpoint guard)"
         );
 
-        // Control: the SAME weights digest with the same pose stays in sync — the desync above
-        // is the weights mismatch, not a spurious always-diverge.
-        let mut c = Lockstep::new(seed, &players, PlayerId(0));
-        let mut d = Lockstep::new(seed, &players, PlayerId(1));
+        // Control: the SAME weights digest with the same pose stays in sync — the desync above is the
+        // weights mismatch, not a spurious always-diverge.
+        let mut c = Sim::new(seed, &players);
+        let mut d = Sim::new(seed, &players);
         for _ in 0..10u64 {
-            let mc = c.submit_local_input(Input::default());
-            let md = d.submit_local_input(Input::default());
-            let _ = c.record_remote(PlayerId(1), md);
-            let _ = d.record_remote(PlayerId(0), mc);
             c.set_external_crab_pose(pose, 7, weights_a);
             d.set_external_crab_pose(pose, 7, weights_a);
-            let _ = c.try_advance();
-            let _ = d.try_advance();
+            c.step(&neutral);
+            d.step(&neutral);
         }
         assert_eq!(
-            c.sim().state_hash(),
-            d.sim().state_hash(),
+            c.state_hash(),
+            d.state_hash(),
             "identical pose + SAME weights digest must stay in sync"
         );
     }
