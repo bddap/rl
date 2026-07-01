@@ -49,9 +49,17 @@ pub mod buttons {
     pub const RESTART: u8 = 1 << 1;
 }
 
-/// One player's input for a single tick — the unit that crosses the wire (see
-/// [`Input::to_bytes`]). The move/look axes are facing-relative (named for the control
-/// intent), not world axes: at a nonzero yaw they do not map to world X/Z.
+/// One on-foot player's input for a single tick — the unit that crosses the wire (see
+/// [`Input::to_bytes`]). This is a FOOT-ONLY control set: the only thing the deterministic
+/// sim simulates is walkers, so the only input it carries is the walker's. A piloting player
+/// feeds the sim a neutral (default) `Input` — its craft is client-local, host-authoritative
+/// crab-world state off the wire (see [`crate::render::driver`]'s `LocalControl`/`FlightControl`),
+/// so no flight axis lives here and a walker cannot carry one (the illegal on-foot+piloting
+/// state the flat struct used to permit is now unrepresentable). Networking the pilots (a wire
+/// that carries flight input too) is rl#43 part 2.
+///
+/// The move/look axes are facing-relative (named for the control intent), not world axes: at a
+/// nonzero yaw they do not map to world X/Z.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Input {
     /// Strafe axis (right +, i.e. toward +X at yaw 0) in fixed-point units of
@@ -63,17 +71,10 @@ pub struct Input {
     /// Yaw-look delta for THIS tick, in fixed-point units of 1/[`Input::AXIS_SCALE`]:
     /// ±[`Input::AXIS_SCALE`] is the per-tick yaw cap. The client integrates raw
     /// mouse/stick into this bounded delta and the sim adds it to the player's yaw —
-    /// bounded so one tick can't spin a peer arbitrarily. Flying, this axis is the
-    /// stick's HORIZONTAL deflection → roll (ailerons / lateral cyclic); see
-    /// [`crab_world::vehicle`]'s force model.
+    /// bounded so one tick can't spin a peer arbitrarily. Always a per-tick FOOT yaw
+    /// delta; the in-air turn-rate is a different axis on a different type
+    /// ([`crate::render::driver::FlightControl`]), so the two never share a field.
     pub look_yaw: i16,
-    /// Pitch-look deflection for THIS tick, same fixed-point grid as [`look_yaw`].
-    /// On foot the camera pitch is purely client-local (the sim has no foot pitch), so
-    /// this is zero for walkers; it exists for the VEHICLE, where it is the stick's
-    /// VERTICAL deflection → pitch (elevator / fore-aft cyclic). Read by the client and
-    /// fed into the rapier vehicle's controls ([`crab_world::vehicle::VehicleControl`]).
-    /// Positive = nose up.
-    pub look_pitch: i16,
     /// Action/button bitfield (see [`buttons`]). Held state, sampled each tick.
     pub buttons: u8,
 }
@@ -83,14 +84,12 @@ impl Input {
     /// (1.0). `move_strafe`, `move_forward`, and `look_yaw` all use this grid.
     pub const AXIS_SCALE: i16 = 1000;
     /// Wire size of one encoded [`Input`]: move_strafe(2) + move_forward(2) +
-    /// look_yaw(2) + look_pitch(2) + buttons(1). Drives [`crate::transport`]'s frame
-    /// size — keep in sync with [`Input::to_bytes`].
-    pub const WIRE_LEN: usize = 9;
+    /// look_yaw(2) + buttons(1). Drives [`crate::transport`]'s frame size — keep in
+    /// sync with [`Input::to_bytes`].
+    pub const WIRE_LEN: usize = 7;
 
     /// Full constructor: analog `strafe`, `forward`, and `look_yaw` axes in
-    /// `[-1.0, 1.0]` plus the raw button bitfield. `look_pitch` defaults to zero (the
-    /// walker case — foot pitch is client-only); the plane sets it with
-    /// [`with_look_pitch`](Input::with_look_pitch). Quantizes the analog values to the
+    /// `[-1.0, 1.0]` plus the raw button bitfield. Quantizes the analog values to the
     /// fixed-point grid at the input boundary (not in the sim), so the sim stays
     /// integer-only and the value that crosses the wire is exactly the value applied.
     pub fn new(strafe: f32, forward: f32, look_yaw: f32, buttons: u8) -> Self {
@@ -99,18 +98,8 @@ impl Input {
             move_strafe: q(strafe),
             move_forward: q(forward),
             look_yaw: q(look_yaw),
-            look_pitch: 0,
             buttons,
         }
-    }
-
-    /// Set the analog `look_pitch` axis (`[-1.0, 1.0]`, positive = nose up) on an input,
-    /// quantized like the other axes. Only the plane uses it (the elevator); foot input
-    /// leaves it zero. Separate from [`new`](Input::new) so the many walker call sites
-    /// stay 4-arg and only the flight path opts in.
-    pub fn with_look_pitch(mut self, look_pitch: f32) -> Self {
-        self.look_pitch = (look_pitch.clamp(-1.0, 1.0) * Self::AXIS_SCALE as f32).round() as i16;
-        self
     }
 
     /// Move-only input (`strafe`, `forward`; neutral look, no buttons). The 2-axis
@@ -131,8 +120,7 @@ impl Input {
         b[0..2].copy_from_slice(&self.move_strafe.to_le_bytes());
         b[2..4].copy_from_slice(&self.move_forward.to_le_bytes());
         b[4..6].copy_from_slice(&self.look_yaw.to_le_bytes());
-        b[6..8].copy_from_slice(&self.look_pitch.to_le_bytes());
-        b[8] = self.buttons;
+        b[6] = self.buttons;
         b
     }
 
@@ -142,8 +130,7 @@ impl Input {
             move_strafe: i16::from_le_bytes([b[0], b[1]]),
             move_forward: i16::from_le_bytes([b[2], b[3]]),
             look_yaw: i16::from_le_bytes([b[4], b[5]]),
-            look_pitch: i16::from_le_bytes([b[6], b[7]]),
-            buttons: b[8],
+            buttons: b[6],
         }
     }
 }
@@ -1088,12 +1075,41 @@ mod tests {
                 move_strafe: i16::MIN,
                 move_forward: i16::MAX,
                 look_yaw: -123,
-                look_pitch: 4567,
                 buttons: 0xFF,
             },
         ] {
             assert_eq!(Input::from_bytes(inp.to_bytes()), inp);
         }
+    }
+
+    /// Mixed foot + piloting determinism (rl#43 part 1). A piloting player is client-local: its
+    /// craft flies OFF the wire, so the sim receives a NEUTRAL foot input for it (see
+    /// [`crate::render::driver::LocalControl`]). This pins the sim-side contract that a round mixing
+    /// a walking player (real foot input) with a "piloting" one (neutral) steps deterministically and
+    /// the neutral player stays put — the sim has no separate pilot state to desync, so folding the
+    /// pilot in honestly means folding a stationary walker.
+    #[test]
+    fn mixed_foot_and_neutral_pilot_steps_deterministically() {
+        // Step a 2-player round 20 ticks: P0 walks forward (real foot input), P1 "pilots" → the sim
+        // sees its NEUTRAL input. Returns the state hash plus each player's start/end position.
+        let run = || {
+            let mut sim = Sim::new(7, &players(2));
+            let p0_start = sim.player(PlayerId(0)).unwrap().pos();
+            let p1_start = sim.player(PlayerId(1)).unwrap().pos();
+            for _ in 0..20 {
+                let mut inputs = neutral_for(&sim);
+                inputs.insert(PlayerId(0), Input::from_axes(0.0, 1.0));
+                sim.step(&inputs);
+            }
+            let p0_end = sim.player(PlayerId(0)).unwrap().pos();
+            let p1_end = sim.player(PlayerId(1)).unwrap().pos();
+            (sim.state_hash(), p0_start, p0_end, p1_start, p1_end)
+        };
+        let (h1, ..) = run();
+        let (h2, p0_start, p0_end, p1_start, p1_end) = run();
+        assert_eq!(h1, h2, "the same mixed foot+pilot inputs must reproduce the state hash");
+        assert_eq!(p1_start, p1_end, "a piloting (neutral-input) player's foot avatar stays put");
+        assert_ne!(p0_start, p0_end, "the walking player actually moved (not a no-op step)");
     }
 
     #[test]

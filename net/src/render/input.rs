@@ -194,10 +194,6 @@ pub(super) fn gather_input(
     pending.strafe = (-strafe).clamp(-1.0, 1.0);
     pending.forward = forward.clamp(-1.0, 1.0);
     pending.yaw_delta -= d_yaw;
-    // Accrue the pitch-look too (drained per tick like the yaw). Flying, it commands the
-    // plane's elevator; on foot it's unused for the sim — the foot camera pitch is the
-    // client-local `CameraPitch` integrated just below. Positive d_pitch = nose/look up.
-    pending.pitch_delta += d_pitch;
     pending.action |= action;
 
     pitch.0 = (pitch.0 + d_pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
