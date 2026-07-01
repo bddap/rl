@@ -17,16 +17,14 @@ pub(crate) struct PpoConfig {
     pub(crate) learning_rate: f64,
     pub(crate) epochs_per_update: u32,
     pub(crate) batch_size: usize,
-    /// Max absolute per-sample value-prediction ERROR `|V' - R'|` admitted into the
-    /// value loss, in NORMALIZED units (the value head fits `R' = (R-μ)/σ`, so the
-    /// unit is one standard deviation of the return). This is a plain RESIDUAL clamp
-    /// — a Huber-style cap that bounds the squared loss's gradient so one mispredicted
-    /// outlier can't dominate the update — NOT SB3's `clip_range_vf`, which trust-
-    /// region-clips how far the new value may move from the OLD prediction. A residual
-    /// that small (0.2σ) would clip almost every sample early in training and freeze
-    /// the head, which is exactly the failure the old 10.0 produced against ~-2700
-    /// returns (10 ≪ 2700, so every residual was clamped). A few σ is the right order:
-    /// it passes honest predictions through and only tames genuine outliers.
+    /// Huber knee δ for the value loss (see `huber_value_loss` for the squared-core/
+    /// linear-tail math and why it beats a hard clamp), on the value-prediction
+    /// ERROR `|V' - R'|` in NORMALIZED units — the value head fits `R' = (R-μ)/σ`, so the unit
+    /// is one standard deviation of the return. NOT SB3's `clip_range_vf`, which trust-region-
+    /// clips how far the new value may move from the OLD prediction. A knee that small (0.2σ)
+    /// would push almost every sample into the linear tail and under-fit the head — the failure
+    /// the old 10.0 produced against ~-2700 returns (10 ≪ 2700); a few σ keeps honest
+    /// predictions in the quadratic band and only outliers in the tail.
     pub(crate) value_loss_clip: f32,
     /// Trust-region ceiling on how far ONE update may move the policy, as an
     /// approximate KL divergence (`π_old` → current policy, the unbiased

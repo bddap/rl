@@ -18,6 +18,27 @@ use crate::bot::actuator::ACTION_SIZE;
 use crate::bot::brain::CrabBrain;
 use crate::bot::sensor::OBS_SIZE;
 
+/// Huber (smooth-L1) value loss on the normalized value-prediction residual `V' - R'`,
+/// with knee `delta` in σ-units. Returns the PER-SAMPLE loss (caller means it): squared
+/// inside ±δ, linear with slope 2δ outside. A hard residual `clamp` (the old form) has
+/// ZERO derivative past ±δ, so the worst-mispredicted samples — the ones that should most
+/// drive the fit — contribute no gradient; after a return-scale shift (PopArt lag) a whole
+/// batch can land beyond δ of the stale scale and silently lose its gradient while `vloss`
+/// reads ~0 (bddap/rl#186). The linear tail keeps a bounded but nonzero gradient out there.
+/// C¹ at the knee: both branches equal δ² there and the tail's slope matches the square's,
+/// and inside ±δ the loss is exactly the plain squared residual.
+fn huber_value_loss<B: AutodiffBackend>(residual: Tensor<B, 1>, delta: f32) -> Tensor<B, 1> {
+    // Quadratic branch: residual clamped to ±δ ⇒ δ² at/outside the knee.
+    let quad = residual.clone().clamp(-delta, delta).powf_scalar(2.0);
+    // Linear branch: 2δ·(|residual|−δ), zero inside the band, ≥0 outside.
+    let lin = residual
+        .abs()
+        .sub_scalar(delta)
+        .clamp_min(0.0)
+        .mul_scalar(2.0 * delta);
+    quad + lin
+}
+
 /// The learner's PPO update over all K·M rollout buffers.
 ///
 /// `rollouts` is one buffer per env (GAE is computed strictly per env, never
@@ -255,13 +276,11 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
 
                 // The value head's raw output is in NORMALIZED units, and `rets` was
                 // normalized by the same running scale above, so this residual is in
-                // σ-units and `value_loss_clip` is a σ-count. The head therefore fits
-                // unit-scale targets regardless of the reward magnitude — the whole
-                // point of return normalization.
+                // σ-units — which is why the Huber knee is a σ-count and the head fits
+                // unit-scale targets regardless of the reward magnitude (the whole point
+                // of return normalization).
                 let values: Tensor<B, 1> = brain.value(obs).flatten(0, 1);
-                let value_diff =
-                    (values - rets).clamp(-config.value_loss_clip, config.value_loss_clip);
-                let value_loss = value_diff.powf_scalar(2.0).mean();
+                let value_loss = huber_value_loss(values - rets, config.value_loss_clip).mean();
 
                 let loss = policy_loss.clone() + value_loss.clone() * config.value_coeff
                     - entropy.clone() * config.entropy_coeff;
@@ -505,5 +524,51 @@ mod tests {
             "the reported KL is the over-threshold drift that triggered the stop, got {}",
             guarded.kl
         );
+    }
+
+    /// #186: the value loss is a Huber, not a hard residual clamp — squared inside the ±δ
+    /// knee (byte-identical to the old form there), linear with a NONZERO gradient outside.
+    /// The old clamp zeroed the gradient of every sample past ±δ, silently dropping the
+    /// worst-predicted ones from the fit; this asserts they now keep a bounded gradient.
+    #[test]
+    fn huber_value_loss_square_core_linear_tail_with_gradient() {
+        let device = NdArrayDevice::Cpu;
+        let delta = 3.0f32;
+        // Two residuals inside ±δ, two well outside.
+        let rs = [0.5f32, -2.0, 5.0, -8.0];
+        let residual = Tensor::<TrainBackend, 1>::from_data(TensorData::new(rs.to_vec(), [4]), &device)
+            .require_grad();
+
+        let per_sample = huber_value_loss(residual.clone(), delta);
+        let vals: Vec<f32> = per_sample.clone().to_data().to_vec().unwrap();
+        let want_val = |r: f32| {
+            if r.abs() <= delta {
+                r * r
+            } else {
+                2.0 * delta * r.abs() - delta * delta
+            }
+        };
+        for (v, r) in vals.iter().zip(rs) {
+            assert!((v - want_val(r)).abs() < 1e-3, "huber({r}) = {v}, want {}", want_val(r));
+        }
+
+        // Gradient of the MEAN: 2r/n inside, 2δ·sign(r)/n outside — nonzero in the tail,
+        // which is the whole point (a hard clamp would give 0 there).
+        let grads = per_sample.mean().backward();
+        let g: Vec<f32> = residual.grad(&grads).unwrap().to_data().to_vec().unwrap();
+        let n = rs.len() as f32;
+        let want_g = |r: f32| {
+            if r.abs() <= delta {
+                2.0 * r / n
+            } else {
+                2.0 * delta * r.signum() / n
+            }
+        };
+        for (gi, r) in g.iter().zip(rs) {
+            assert!((gi - want_g(r)).abs() < 1e-3, "grad huber({r}) = {gi}, want {}", want_g(r));
+            if r.abs() > delta {
+                assert!(gi.abs() > 1e-3, "outlier r={r} must keep a nonzero gradient, got {gi}");
+            }
+        }
     }
 }
