@@ -60,8 +60,10 @@ use crate::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
 /// in lockstep; the client renders faster and interpolates between ticks.
 pub use crate::sim::TICK_HZ;
 
-/// Seconds per sim tick — the fixed dt the lockstep accumulator drains in.
-const TICK_DT: f64 = 1.0 / TICK_HZ as f64;
+/// Seconds per sim tick — the fixed dt the lockstep accumulator drains in. Re-exported
+/// from [`crate::sim::TICK_DT`] (the one source) so the render accumulator and the
+/// headless pacers can't disagree.
+pub use crate::sim::TICK_DT;
 
 /// Most sim ticks to apply in a single render frame, so a long stall (window drag,
 /// GPU hitch) can't trigger an unbounded catch-up spiral that freezes the client.

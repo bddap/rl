@@ -246,12 +246,10 @@ pub fn build_windowed_app(
             let spawn = seed_external_crab_solo(&mut ls);
             let coord = super::driver::coordinator(net, ls.peers(), ls.sim().clone());
             insert_core(&mut app, ls, coord);
-            // Known-armed at build: add the stack AND arm the gate now, so the crab spawns frame
-            // one.
-            add_external_nn_crab(&mut app, external_crab, spawn);
-            // Arm the gate (the crab now walks at the player's actual position — nothing per-peer
-            // to reconcile). One arm path, [`crate::external_crab::arm`].
-            crate::external_crab::arm(app.world_mut());
+            // Known-armed at build: add the stack AND arm the gate now (one path,
+            // [`install_armed_nn_crab`]), so the crab spawns frame one at the player's actual
+            // position — nothing per-peer to reconcile.
+            install_armed_nn_crab(&mut app, external_crab, spawn);
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
                 .set(AppPhase::Playing);
@@ -410,4 +408,15 @@ pub(super) fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::Pat
     // ([`crate::render::world_render_scale`]). The render-mode cycle (`super::render_mode`, the
     // shared `crab_world::crab_view` cage) draws the crab's live colliders translated to the same
     // render spot, so the cage sits exactly ON the mesh — render==physics, no scale hack.
+}
+
+/// Add the rapier-NN crab stack AND arm the gate in one call — the known-armed-at-build pairing
+/// every scripted/screenshot solo+net path funnels through (the windowed `Boot::Round`, the solo
+/// and networked screenshot builders). Bundling the two so no site can install the stack and forget
+/// to arm Sally (or arm with no stack behind it). The boot-MENU path is the deliberate exception: it
+/// adds the stack UNarmed at build (gate off, `NumEnvs 0`) and arms only once the round resolves
+/// armable, so it calls [`add_external_nn_crab`] directly.
+pub(super) fn install_armed_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_spawn: Pos) {
+    add_external_nn_crab(app, checkpoint_dir, crab_spawn);
+    crate::external_crab::arm(app.world_mut());
 }

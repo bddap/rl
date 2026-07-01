@@ -144,6 +144,13 @@ impl Input {
 /// forgiving on a LAN.
 pub const TICK_HZ: u64 = 30;
 
+/// Seconds per sim tick — the fixed dt one tick advances. Derived from [`TICK_HZ`] in
+/// ONE place so every wall-clock pacer (the headless `net`/`solo` loops, the windowed
+/// render accumulator) and the fixed per-frame screenshot step read the same value
+/// instead of re-spelling `1.0 / TICK_HZ` and risking drift. Pure pacing/interpolation —
+/// never part of the deterministic sim state.
+pub const TICK_DT: f64 = 1.0 / TICK_HZ as f64;
+
 /// Fixed-point world scale: a position/length value of [`UNIT`] equals one world
 /// meter. All world coordinates, radii, and speeds are integers in these units.
 pub const UNIT: i64 = 1000;
