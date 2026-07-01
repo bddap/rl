@@ -300,12 +300,16 @@ mod tests {
     #[test]
     fn default_far_distance_is_the_training_band_edge() {
         assert_eq!(DEFAULT_TARGET_DISTANCE_M, TARGET_ARENA_HALF);
-        assert!(
-            DEFAULT_TARGET_DISTANCE_M > CURRICULUM_REACH_RADIUS,
-            "the ball must start FAR — well outside the reach radius"
-        );
-        // The fixed claw height sits inside the training target-Y band (a genuine reach).
-        assert!(TARGET_Y > TARGET_Y_MIN && TARGET_Y < TARGET_Y_MAX);
+        // Both operands are `const`, so pin these as compile-time checks (a `const` block) —
+        // the invariant can never regress into a run-only failure.
+        const {
+            assert!(
+                DEFAULT_TARGET_DISTANCE_M > CURRICULUM_REACH_RADIUS,
+                "the ball must start FAR — well outside the reach radius"
+            );
+            // The fixed claw height sits inside the training target-Y band (a genuine reach).
+            assert!(TARGET_Y > TARGET_Y_MIN && TARGET_Y < TARGET_Y_MAX);
+        }
     }
 
     /// End-to-end harness invariant on the honest metrics, with NO checkpoint: the zero-action

@@ -1,3 +1,21 @@
+// The trainer subsystem is UNREACHABLE in an isolated `render` build of crab-world (rl-demo /
+// game link only the inference slice — load a checkpoint, drive the policy — never the
+// optimizer/rollout/best-keeper), so `cargo clippy -p crab-world --features render` flags all
+// of `training::*` as dead_code. It is NOT dead: the headless trainer lives in the `rl-train`
+// binary, which drives this subsystem via its pub API (`training::inproc::run_learner`, …).
+//
+// It can't be `cfg`-gated out under `render`: the workspace resolver unifies features, so the
+// canonical `cargo clippy --all-targets` builds crab-world render-ON (from rl-demo/game/net)
+// and rl-train links THAT same build — a `#[cfg(not(feature = "render"))]` on these modules
+// would make rl-train fail to find them. So scope a render-only dead_code allow to exactly
+// this subsystem (it propagates to every `training::*` submodule). Dead code anywhere else in
+// a render build — play, crab_view, sky, the inference path — is still caught. In the unified
+// workspace build the items are live (rl-train uses them), so the allow is a harmless no-op.
+#![cfg_attr(
+    feature = "render",
+    allow(dead_code, unused_imports, unused_variables)
+)]
+
 use std::path::{Path, PathBuf};
 
 use burn::backend::Autodiff;
