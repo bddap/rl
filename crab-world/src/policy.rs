@@ -439,17 +439,16 @@ mod tests {
 
     use crate::bot::arch::Mlp256;
 
-    /// Save a freshly-initialised brain into `dir` the way training does (the LEAF
-    /// record — see [`AnyBrain::record_leaf`]), so a hot-reload has a real checkpoint
-    /// file to pick up.
+    /// Save a freshly-initialised brain into `dir` through the PRODUCTION writer
+    /// ([`save_brain_record`], the same recipe `save_checkpoint` uses) — so every
+    /// save→`Policy::load` test here is an end-to-end writer↔loader format guard,
+    /// not a test-only round trip that would stay green through a writer drift.
     fn save_brain(dir: &Path) {
+        use crate::training::checkpoint::save_brain_record;
         std::fs::create_dir_all(dir).unwrap();
         let device = NdArrayDevice::Cpu;
         let brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
-        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-        brain
-            .record_leaf(&recorder, CheckpointDir::new(dir).brain_stem())
-            .unwrap();
+        save_brain_record(&brain, CheckpointDir::new(dir).brain_stem()).unwrap();
     }
 
     /// GOLDEN FILE (bddap/rl#200 increment 1): `tests/data/golden-mlp256/brain.bin` was

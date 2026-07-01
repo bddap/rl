@@ -24,6 +24,22 @@ use crate::bot::sensor::OBS_SIZE;
 /// and the CPU-backed update test from one code path.
 pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 
+/// Write a brain's LEAF record to `stem` (the recorder appends `.bin`) — the ONE recipe
+/// for how a brain lands on disk, shared by the trainer's checkpoint write and the test
+/// fixtures. That sharing is the writer-side drift guard: the save→`Policy::load` tests
+/// exercise this exact function, so a regression that made it round-trip the enum record
+/// (see [`AnyBrain::record_leaf`]) turns those tests red instead of silently stranding
+/// the fleet on the rest pose.
+pub(crate) fn save_brain_record<B: burn::tensor::backend::Backend>(
+    brain: &AnyBrain<B>,
+    stem: std::path::PathBuf,
+) -> Result<(), burn::record::RecorderError> {
+    use burn::record::{BinFileRecorder, FullPrecisionSettings};
+    brain
+        .record_leaf(&BinFileRecorder::<FullPrecisionSettings>::default(), stem)
+        .map(|_| ())
+}
+
 /// Build the learner's Adam optimizer (global grad-norm clip 0.5). The ONE source of
 /// the optimizer construction — the live `GpuLearner` and the CPU-backed update test
 /// both call this, so the clip constant can't silently drift between paths meant to be

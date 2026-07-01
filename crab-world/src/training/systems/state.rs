@@ -16,7 +16,9 @@ use tracing::{error, info, warn};
 use crate::TrainConfig;
 use crate::bot::arch::{AnyBrain, ArchId};
 use crate::training::algorithm::{OuNoise, PpoConfig, ReturnNormalizer, RolloutBuffer};
-use crate::training::checkpoint::{CheckpointDir, load_return_normalizer, save_return_normalizer};
+use crate::training::checkpoint::{
+    CheckpointDir, load_return_normalizer, save_brain_record, save_return_normalizer,
+};
 use crate::training::curriculum::TargetBand;
 use crate::training::normalizer::{
     IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
@@ -331,16 +333,11 @@ impl TrainingState {
         }
 
         let paths = CheckpointDir::new(&self.checkpoint_dir);
-        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
         // Record to a temp stem then fsync-rename into place, so neither a process crash
         // nor a power loss can leave a torn brain.bin (silently discarded on load → resume
         // from random weights).
         let brain_tmp_stem = paths.brain_tmp_stem();
-        match self
-            .brain
-            .train()
-            .record_leaf(&recorder, brain_tmp_stem.clone())
-        {
+        match save_brain_record(self.brain.train(), brain_tmp_stem.clone()) {
             Ok(()) => {
                 let tmp_file = brain_tmp_stem.with_extension("bin");
                 let final_file = paths.brain_file();
