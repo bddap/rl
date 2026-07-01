@@ -30,7 +30,7 @@ use crate::snapshot::CoreSnapshot;
 
 /// ALPN for the game's wire. The framing is `[len:u32 LE][kind:u8][body]`, where
 /// `kind` ([`Frame`]) selects a client→server [`TickMsg`] (an input), a server→client
-/// [`crate::server::TickSet`] (the assembled input set), or a [`Beat`] (the match-formation barrier channel
+/// [`CoreSnapshot`] (the authoritative state), or a [`Beat`] (the match-formation barrier channel
 /// — rl#44). Bumped on any incompatible wire change so mismatched builds refuse to connect
 /// rather than desync. `/1` added the kind byte + the barrier channel over `/0`'s bare-TickMsg
 /// stream; `/2` added the host's start-GO byte to every [`Beat`] (rl#58), shifting the
@@ -266,6 +266,8 @@ impl Codec for JoinRequest {
 }
 
 impl Codec for Admission {
+    // An Admission travels ONLY as the unicast joiner welcome — never broadcast it: a concurrent
+    // joiner would read the frame as its OWN allocation and adopt the wrong PlayerId.
     const KIND: Frame = Frame::Welcome;
     type Bytes = Vec<u8>;
 

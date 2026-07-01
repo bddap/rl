@@ -31,16 +31,8 @@ impl RosterSchedule {
     /// A schedule that is `initial` from tick 0 with no changes — the Stage-1+2 frozen-roster
     /// behaviour. `at` returns `initial` for every tick until a change is scheduled.
     pub fn frozen(initial: &[PlayerId]) -> Self {
-        Self::starting_at(0, initial)
-    }
-
-    /// A schedule whose FIRST effective set is `set` from `effective_tick` — used for a joiner that
-    /// enters the match at the live tick rather than from tick 0 (it never plays the pre-join
-    /// ticks, so its schedule begins at the join). `at` is only ever queried at ticks
-    /// `>= effective_tick` for such a peer.
-    pub fn starting_at(effective_tick: u64, set: &[PlayerId]) -> Self {
         let mut points = BTreeMap::new();
-        points.insert(effective_tick, sorted(set));
+        points.insert(0, sorted(initial));
         Self { points }
     }
 
@@ -169,15 +161,4 @@ mod tests {
         r.schedule_change(20, &ids(4)); // same tick → not strictly future → rejected
     }
 
-    #[test]
-    fn starting_at_a_join_tick_resolves_from_there() {
-        let r = RosterSchedule::starting_at(20, &ids(3));
-        assert_eq!(
-            r.at(20),
-            ids(3).as_slice(),
-            "the joiner's roster begins at the join tick"
-        );
-        assert_eq!(r.at(50), ids(3).as_slice());
-        assert_eq!(r.current(), ids(3).as_slice());
-    }
 }

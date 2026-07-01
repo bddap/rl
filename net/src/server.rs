@@ -27,17 +27,17 @@ use crate::roster::RosterSchedule;
 use crate::sim::{Input, PlayerId, Pos, Sim};
 
 /// Ticks of lead between admitting a joiner and its roster change taking effect (Stage 3). Past the
-/// emit cursor so every client learns of the change (the [`Admission`] broadcast), and the joiner can
-/// issue its first input, before the tick is due — plus a tick of slack so a late packet doesn't
-/// strand the boundary. The joiner builds its [`crate::lockstep::Lockstep`] via
+/// emit cursor so the joiner can receive its welcome and issue its first input before the tick is
+/// due — plus a tick of slack so a late packet doesn't strand the boundary. The joiner builds its [`crate::lockstep::Lockstep`] via
 /// `join_at(effective_tick)`, issuing input for `effective_tick` onward. (Whether this margin
 /// suffices under real QUIC latency is the transport increment's to verify.)
 pub const JOIN_LEAD: u64 = 3;
 
 /// The outcome of [`Server::admit`]: the stable [`PlayerId`] allocated to the joiner, the tick its
 /// roster change takes effect (the tick the server spawns it into the live sim), and the complete new
-/// roster from that tick. The caller broadcasts these so every client learns of the change at the
-/// identical tick (and the joiner builds its session via [`crate::lockstep::Lockstep::join_at`]).
+/// roster from that tick. The caller UNICASTS this to the joiner alone, which builds its session via
+/// [`crate::lockstep::Lockstep::join_at`]; incumbents learn the new roster from the next
+/// [`crate::snapshot::CoreSnapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admission {
     pub pid: PlayerId,
@@ -134,11 +134,11 @@ pub fn may_admit_joiner(
     Ok(())
 }
 
-/// The complete input set for ONE tick, broadcast by the server to every client once every
-/// rostered client's input for that tick is in. The down-channel counterpart to the client's
-/// up-channel [`TickMsg`]: clients ship inputs UP, the server ships the assembled set DOWN.
-/// Complete by construction — a client never stalls mid-set waiting on a straggler, because the
-/// server absorbed that wait before emitting.
+/// The complete input set for ONE tick, assembled by the server once every rostered client's
+/// input for that tick is in — the unit its own authoritative step consumes (clients ship inputs
+/// UP; only [`crate::snapshot::CoreSnapshot`] state goes DOWN, never a set to re-step). Complete
+/// by construction — a step never runs mid-set waiting on a straggler, because the server absorbed
+/// that wait before assembling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickSet {
     /// The tick these inputs apply at.
@@ -278,10 +278,10 @@ impl Server {
     }
 
     /// Admit a new client mid-match (Stage 3, rl#151) and return the [`Admission`] for the caller to
-    /// broadcast to every client. Allocates the LOWEST [`PlayerId`] not currently in the roster —
+    /// UNICAST to the joiner. Allocates the LOWEST [`PlayerId`] not currently in the roster —
     /// append-only, so every existing player KEEPS its id (a positional renumber would desync every
     /// peer; determinism risk #1). Schedules the new roster to take effect at `effective_tick`
-    /// ([`JOIN_LEAD`] past the emit cursor) so every client learns of it and the joiner can issue its
+    /// ([`JOIN_LEAD`] past the emit cursor) so the joiner can issue its
     /// first input before that tick is due. From `effective_tick` a tick completes only once the
     /// joiner's input is in too.
     ///
