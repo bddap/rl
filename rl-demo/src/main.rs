@@ -114,8 +114,15 @@ fn main() {
     // sink when export is on (tens of MB per run), burying the signals that matter. WARN keeps
     // every error/warning — the canonical-mesh error and the checkpoint-mismatch refusal
     // included — and drops the per-frame noise. `RUST_LOG` still overrides for local debugging.
+    //
+    // Exception: `crab_world::play=info`. The blanket WARN silenced the demo's OWN
+    // low-volume INFO lines too — chiefly `play: hot-reloaded a newer checkpoint`, the
+    // one signal that says the left-open demo is tracking live training (rl#158). Those
+    // fire at PPO-save cadence (a handful/min), not per frame, so they neither flood the
+    // log nor the export; the per-frame torrent lives under `bevy`/`wgpu`, still capped at
+    // WARN. This is a level filter, not a buffering issue — WARN lines were always flowing.
     if std::env::var_os("RUST_LOG").is_none() {
-        unsafe { std::env::set_var("RUST_LOG", "warn") };
+        unsafe { std::env::set_var("RUST_LOG", "warn,crab_world::play=info") };
     }
 
     // rl-demo is a PLAYER-FACING surface (the windowed couch demo and its screenshot), so the
