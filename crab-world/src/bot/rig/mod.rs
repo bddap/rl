@@ -76,6 +76,7 @@ impl BindSource for LoadedModel {
 
 /// One physics link to spawn, fully derived from the bind pose. Links are emitted
 /// parent-before-child, so `parent` indexes an earlier entry.
+#[derive(Clone)]
 pub struct RigLink {
     /// The deform bone at this link's joint pivot (skin mapping + debugging).
     pub bone: String,
@@ -105,6 +106,11 @@ pub struct RigLink {
 }
 
 /// The full body recipe: a carapace root box plus the derived link chain.
+///
+/// `Clone` so the memoized [`crate::mesh_fallback::usable_model`] verdict — which builds
+/// this ONCE from the 36 MB glb — can hand a copy to each render surface, instead of every
+/// caller re-parsing and re-fitting the mesh (bddap/rl#153).
+#[derive(Clone)]
 pub struct RigRecipe {
     /// Bind-pose world position of the leg-hub centroid — the point the link chain
     /// anchors off (`anchor1` deltas telescope back to it). The body spawns its
