@@ -55,16 +55,25 @@ use crate::bot::body::vehicle_collision;
 // defaults — the owner feel-tests and trims them; the unit tests pin QUALITATIVE behaviour
 // (accelerates, lift rises with airspeed, a torque inverts the body with no auto-right, drag
 // bounds speed), never specific speeds, so a tuning change doesn't churn the tests.
+//
+// Scale (owner 843): both craft are HALF their old linear size AND slowed to match, so a smaller
+// craft reads as proportionally slower buzzing the giant crab. The invariant: shrink size, top
+// speed, angular rate, and spawn as ONE set — a smaller model still at the old speed just zooms
+// past faster. Per-quantity factors live on each constant below. The one off-law knob is the
+// plane's LIFT: gravity is fixed (9.81, not scaled), so lift is set to keep a flyable envelope
+// (stall well under cruise) rather than shrunk proportionally; the zero-g ship has no such tie.
 // ---------------------------------------------------------------------------
 
 /// Half-extents of the vehicle's box collider (m). Deliberately SMALLER than the ~0.5 m crab so it
 /// reads as a little craft buzzing the giant Sally, and light enough to bounce off her without
-/// bowling her over.
-const VEHICLE_HALF: Vec3 = Vec3::new(0.22, 0.07, 0.34);
+/// bowling her over. Half the old size (see the scale note above) — the collider IS the visual
+/// size (the vehicle renders at true arena scale), so this shrinks the craft on screen too.
+const VEHICLE_HALF: Vec3 = Vec3::new(0.11, 0.035, 0.17);
 
-/// Collider density (kg/m³) → the vehicle masses ~2 kg at [`VEHICLE_HALF`]. Sets how hard a strike
-/// shoves Sally's legs (rapier momentum transfer): heavy enough to push, light enough that her
-/// trained gait recovers.
+/// Collider density (kg/m³) → the vehicle masses ~0.26 kg at [`VEHICLE_HALF`]. Sets how hard a
+/// strike shoves Sally's legs (rapier momentum transfer): the shrink makes it ×0.125 lighter (mass
+/// follows volume at fixed density), so the smaller craft bumps her gait more gently — still enough
+/// to shove, easily inside what her trained gait recovers from.
 const VEHICLE_DENSITY: f32 = 50.0;
 
 /// Throttle-lever trim per tick at full deflection (lever is 0..1) — a persistent quadrant, not a
@@ -74,42 +83,48 @@ const THROTTLE_TRIM_RATE: f32 = 0.03;
 /// Extra linear drag (N per m/s) added while the ship holds MATCH VELOCITY — bleeds the relative
 /// velocity to rest, the cheap arena analog of Outer Wilds' match-velocity-to-zero. Dwarfs the
 /// ship's coasting drag so the brake is decisive, but it's still just drag (no teleport/clamp).
-const MATCH_VEL_DAMP: f32 = 6.0;
+/// Scaled with the ship's coasting drag (see the scale note) so the brake keeps its old ~17× bite.
+const MATCH_VEL_DAMP: f32 = 0.9;
 
 /// Plane tuning (Ace Combat 6): a throttle LEVER drives forward (nose +Z) thrust, wings make lift
-/// from forward airspeed, brisk roll for banked turns. No direct strafe/vertical thrusters.
+/// from forward airspeed, brisk roll for banked turns. No direct strafe/vertical thrusters. Halved
+/// in size + speed (scale note): full-throttle tops out ~4.5 m/s (was ~9), so it crosses the ±10 m
+/// box at a crab-appropriate pace instead of blowing past. `lift` is NOT halved — gravity is fixed,
+/// so it is set to hold the OLD craft's lift-to-weight feel (stall ~1.4 m/s, well under cruise) at
+/// the low speed, rather than scaled down (which would sink it).
 const PLANE: VehicleParams = VehicleParams {
     thrust_axis: Vec3::Z, // nose — the lever pushes here
-    lever_thrust: 60.0,
+    lever_thrust: 4.0,
     direct_thrust: Vec3::ZERO,
-    lift: 6.0,
-    drag_lin: 1.5,
-    drag_quad: 0.6,
-    angular_drag: 0.9,
-    pitch_torque: 6.0,
-    roll_torque: 9.0,
-    yaw_torque: 3.0,
+    lift: 1.8,
+    drag_lin: 0.2,
+    drag_quad: 0.15,
+    angular_drag: 0.06,
+    pitch_torque: 0.2,
+    roll_torque: 0.3,
+    yaw_torque: 0.1,
 };
 
 /// Ship tuning (Outer Wilds): NO throttle lever and NO wings — DIRECT body-frame thrusters on all
 /// three axes (X strafe, Y vertical, Z forward) you tap and coast on. The ship flies in ZERO-G (see
 /// [`gravity_scale`]), so it floats neutrally and the thrusters are GENTLE — forward full-burn tops
-/// out around 6 m/s, which in the ±10 m arena reads as the slow, weighty Outer-Wilds drift (a
-/// stronger thruster would cross the box in under a second — a pinball, not a spaceship). Drag is LOW so the
-/// coast carries; the match-velocity brake stops it on demand. Full aim authority (pitch/yaw on the
-/// right stick); bumper roll is a GENTLE quarter of that so a barrel-roll is a slow deliberate twist.
+/// out around 3 m/s (halved with the shrink, scale note), which in the ±10 m arena reads as the
+/// slow, weighty Outer-Wilds drift (a stronger thruster would cross the box in a blink — a pinball,
+/// not a spaceship). Drag is LOW so the coast carries (~5 s velocity time-constant); the
+/// match-velocity brake stops it on demand. Full aim authority (pitch/yaw on the right stick);
+/// bumper roll is a GENTLE quarter of that so a barrel-roll is a slow deliberate twist.
 ///
 /// Ship aim torque (pitch/yaw at full deflection, N·m); bumper roll derives from it so the two can't
-/// drift. The one source for the ship's rotation feel.
-const SHIP_AIM_TORQUE: f32 = 7.0;
+/// drift. The one source for the ship's rotation feel — halved with the shrink so it turns calmly.
+const SHIP_AIM_TORQUE: f32 = 0.2;
 const SHIP: VehicleParams = VehicleParams {
     thrust_axis: Vec3::Z, // unused (lever_thrust 0) — kept a valid unit axis
     lever_thrust: 0.0,
-    direct_thrust: Vec3::new(3.0, 3.0, 4.0), // strafe / vertical / forward (N) — gentle, zero-g
+    direct_thrust: Vec3::new(0.3, 0.3, 0.4), // strafe / vertical / forward (N) — gentle, zero-g
     lift: 0.0,
-    drag_lin: 0.35, // low → long coast (~6 s velocity time-constant at ~2 kg)
-    drag_quad: 0.04,
-    angular_drag: 1.1,
+    drag_lin: 0.05, // low → long coast (~5 s velocity time-constant at ~0.26 kg)
+    drag_quad: 0.02,
+    angular_drag: 0.07,
     pitch_torque: SHIP_AIM_TORQUE,
     // Bumper roll is one source: a quarter of the aim torque (owner playtest — a slow deliberate
     // twist, not a snap), so retuning the aim keeps the "quarter" relation instead of drifting.
@@ -120,9 +135,11 @@ const SHIP: VehicleParams = VehicleParams {
 /// Plane spawn: a few metres up over the arena centre, nosed forward (+Z) with a little cruise
 /// speed so the wing is already making lift. Ship spawn: low, at rest, level — it hovers in place
 /// off its thrusters from tick 0. Both are arena-frame (true scale), bounded by the ±10 m walls.
-const PLANE_SPAWN_ALTITUDE: f32 = 4.0;
-const PLANE_SPAWN_SPEED: f32 = 4.0;
-const SHIP_SPAWN_ALTITUDE: f32 = 1.0;
+/// Altitude + cruise halved with the shrink (scale note); the ~2 m/s cruise still exceeds the
+/// plane's ~1.3 m/s stall, so the wing flies from tick 0.
+const PLANE_SPAWN_ALTITUDE: f32 = 2.0;
+const PLANE_SPAWN_SPEED: f32 = 2.0;
+const SHIP_SPAWN_ALTITUDE: f32 = 0.5;
 
 /// Per-craft flight constants — the two parameter sets that configure the ONE force system as a
 /// plane or a ship (see the module docs: not two code paths). Per-craft drag is what gives the
@@ -420,17 +437,19 @@ mod tests {
     const FAR: Vec3 = Vec3::new(500.0, 300.0, 500.0);
 
     /// Full throttle along the nose accelerates the plane forward (+Z). Held with a little starting
-    /// speed (so lift roughly offsets gravity), the forward speed must RISE.
+    /// speed (above stall, so lift roughly offsets gravity), the forward speed must RISE. The start
+    /// is kept well below the ~4.5 m/s top speed so there is real headroom to accelerate into —
+    /// pinning the qualitative "thrust pushes forward", not a specific speed.
     #[test]
     fn plane_thrust_accelerates_forward() {
-        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 2.0));
         app.world_mut().resource_mut::<VehicleControl>().throttle_trim = 1.0;
         let v0 = body(&app, e).1.linear.z;
         for _ in 0..30 {
             app.update();
         }
         let v1 = body(&app, e).1.linear.z;
-        assert!(v1 > v0 + 1.0, "forward speed did not rise: {v0} -> {v1}");
+        assert!(v1 > v0 + 0.5, "forward speed did not rise: {v0} -> {v1}");
     }
 
     /// Lift grows with FORWARD airspeed: a fast-flying plane gets more upward force than a slow one.
