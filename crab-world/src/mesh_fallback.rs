@@ -37,62 +37,74 @@ impl Surface {
     }
 }
 
-/// Resolve the crab model path AND run the full load+recipe preflight: `Ok(path)` ⇒ the canonical
-/// Sally mesh is present AND usable (loads + has the crab bones the rig needs), render the real
-/// skinned crab from `path`; `Err(reason)` carries a human-readable cause (absent, or
-/// present-but-unloadable) for the OTEL error and the collider fallback. THE single verdict
-/// function — [`usable_model`] memoizes it — so the "is the mesh good?" answer has one source and
-/// mirrors the model-vs-fallback selection [`crate::bot::body::render_recipe`] performs, meaning a
-/// surface's verdict can't disagree with what the body would actually spawn.
-fn checked_model_path() -> Result<PathBuf, String> {
-    let Some(p) = bot::meshfit::model_path() else {
+/// The canonical crab mesh, resolved AND validated in one shot: its file `path` plus the body
+/// [`RigRecipe`](bot::rig::RigRecipe) built from it. A value of this type EXISTS only when the mesh
+/// loaded and yielded the crab bones the rig needs — so holding one is the type-level proof of
+/// "usable by construction", and the recipe was built ONCE (the 36 MB parse + collider fit) rather
+/// than re-derived per render surface (bddap/rl#153).
+pub struct UsableModel {
+    pub path: PathBuf,
+    pub recipe: bot::rig::RigRecipe,
+}
+
+/// Resolve the crab model path AND run the full load+recipe preflight, KEEPING the built recipe:
+/// `Ok(UsableModel)` ⇒ the canonical Sally mesh is present AND usable (loads + has the crab bones the
+/// rig needs), carrying the path to render from and the recipe to spawn; `Err(reason)` carries a
+/// human-readable cause (absent, or present-but-unloadable) for the OTEL error and the collider
+/// fallback. THE single verdict function — [`usable_model`] memoizes it — so the "is the mesh good?"
+/// answer has one source AND the recipe [`crate::bot::body::render_recipe`] spawns is the very one
+/// this validated, meaning a surface's verdict can't disagree with what the body actually spawns.
+fn checked_model() -> Result<UsableModel, String> {
+    let Some(path) = bot::meshfit::model_path() else {
         return Err(MESH_ABSENT_REASON.to_string());
     };
-    mesh_status_of(&p).map(|()| p)
+    let recipe = checked_recipe(&path)?;
+    Ok(UsableModel { path, recipe })
 }
 
-/// The load+recipe verdict for an already-resolved model path — split out so the
-/// present-but-unloadable case (bddap/rl#154) is unit-testable without touching process env or the
-/// memoized [`usable_model`]. `Err` names the cause: a load failure (corrupt/truncated/wrong-format
-/// glb) carries the parser's message; a load that succeeds but yields no crab bones is called out
-/// distinctly.
-fn mesh_status_of(p: &std::path::Path) -> Result<(), String> {
+/// Load an already-resolved model path and build its rig recipe — the actual usability test, split
+/// out so the present-but-unloadable case (bddap/rl#154) is unit-testable without touching process
+/// env or the memoized [`usable_model`]. `Err` names the cause: a load failure
+/// (corrupt/truncated/wrong-format glb) carries the parser's message; a load that succeeds but yields
+/// no crab bones is called out distinctly. `Ok` returns the built recipe so the caller need not
+/// rebuild it — the load+fit happens exactly once (bddap/rl#153).
+fn checked_recipe(p: &std::path::Path) -> Result<bot::rig::RigRecipe, String> {
     let model = bot::meshfit::LoadedModel::load(p).map_err(|e| format!("crab model {p:?}: {e}"))?;
-    if bot::rig::build_recipe(&model).is_none() {
-        return Err(format!(
+    bot::rig::build_recipe(&model).ok_or_else(|| {
+        format!(
             "crab model {p:?}: loaded but has none of the expected crab bones (e.g. Def_leg_01.000.L)"
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
-/// Memoized player-facing crab-mesh verdict shared by the `game` and `net` render surfaces:
-/// `Ok(path)` — render the real skinned Sally from `path`; `Err(reason)` — the mesh is absent OR
-/// present-but-unloadable (corrupt/truncated, or parses with none of the crab bones), so fall back
-/// to the honest collider silhouette and go LOUD with `reason`. THE one "is the mesh good?" answer
-/// every render decision on these surfaces reads, so a present-but-broken `sally.glb` degrades once,
-/// everywhere, to `None` instead of a hard `.expect()` in [`crate::bot::body::render_recipe`]
-/// (bddap/rl#154) — collapsing the old existence-only `model_path().is_some()` checks and the full
-/// [`checked_model_path`] preflight into ONE verdict, so a surface's "is the mesh present?" and "is
-/// the mesh usable?" answers can no longer disagree.
+/// Memoized player-facing crab-mesh verdict shared by every render surface (`game`, `net`, rl-demo):
+/// `Ok(UsableModel)` — render the real skinned Sally from its `path` and spawn its `recipe`;
+/// `Err(reason)` — the mesh is absent OR present-but-unloadable (corrupt/truncated, or parses with
+/// none of the crab bones), so fall back to the honest collider silhouette and go LOUD with `reason`.
+/// THE one "is the mesh good?" answer every render decision reads, so a present-but-broken `sally.glb`
+/// degrades once, everywhere, to the fallback instead of a hard `.expect()` in
+/// [`crate::bot::body::render_recipe`] (bddap/rl#154) — collapsing the old existence-only
+/// `model_path().is_some()` checks and the load+recipe preflight into ONE verdict that also OWNS the
+/// built recipe, so a surface's "is the mesh present?", "is the mesh usable?", and "which recipe do I
+/// spawn?" answers can no longer disagree (bddap/rl#153).
 ///
-/// Memoized because the preflight re-parses the 36 MB glb, the crab mesh never changes at runtime (a
-/// fixed binary+asset constant, like [`crate::bot::rig`]'s memoized natural height), and the
-/// per-frame silhouette-visibility system reads this — so it must be cheap after the first call. All
-/// three player-facing surfaces read this one verdict for their `CrabModelPath`/silhouette; rl-demo
-/// additionally reads the `Err` reason (`usable_model().err()`) to thread the cause into its own
-/// on-screen banner and forced render mode.
-pub fn usable_model() -> &'static Result<PathBuf, String> {
-    static VERDICT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
-    VERDICT.get_or_init(checked_model_path)
+/// Memoized because the preflight re-parses the 36 MB glb + fits the collider cloud (~1 s), the crab
+/// mesh never changes at runtime (a fixed binary+asset constant, like [`crate::bot::rig`]'s memoized
+/// natural height), and the per-frame silhouette-visibility system reads this — so it must be cheap
+/// after the first call. Every surface reads this one verdict for its `CrabModelPath`/recipe/
+/// silhouette; rl-demo + game additionally read the `Err` reason (`usable_model().err()`) to thread
+/// the cause into the banner and forced render mode.
+pub fn usable_model() -> &'static Result<UsableModel, String> {
+    static VERDICT: OnceLock<Result<UsableModel, String>> = OnceLock::new();
+    VERDICT.get_or_init(checked_model)
 }
 
 /// The crab model to RENDER from on the player-facing surfaces: `Some(path)` iff the mesh is present
 /// AND usable, else `None` → the honest fallback. The [`usable_model`] verdict as a plain path option
-/// for the sites that pick geometry (they can't crash on a broken `Some`); sites that go LOUD read
-/// the `Err(reason)` from [`usable_model`] directly.
+/// for the sites that pick geometry (the skin, the world scale); the body recipe comes from
+/// [`usable_model`] directly, and sites that go LOUD read its `Err(reason)`.
 pub fn usable_model_path() -> Option<PathBuf> {
-    usable_model().as_ref().ok().cloned()
+    usable_model().as_ref().ok().map(|u| u.path.clone())
 }
 
 /// Emit the LOUD canonical-mesh error: a `tracing::error!` that names the absent/broken Sally
@@ -177,12 +189,12 @@ mod banner {
 
 #[cfg(test)]
 mod tests {
-    use super::mesh_status_of;
+    use super::checked_recipe;
 
     /// The bug this fixes (bddap/rl#154): a present-but-unloadable `sally.glb` must yield `Err`, so
-    /// the player-facing surfaces fall back to `None` instead of `render_recipe` `.expect()`-panicking.
-    /// A garbage file (fails glTF parse) is the corrupt/truncated case; the verdict is an honest
-    /// `Err`, never a panic.
+    /// the player-facing surfaces fall back instead of `render_recipe` `.expect()`-panicking. A
+    /// garbage file (fails glTF parse) is the corrupt/truncated case; the verdict is an honest `Err`,
+    /// never a panic — and never a recipe.
     #[test]
     fn present_but_unloadable_glb_is_err_not_panic() {
         let dir = std::env::temp_dir().join(format!("rl154-badglb-{}", std::process::id()));
@@ -190,10 +202,11 @@ mod tests {
         let bad = dir.join("sally.glb");
         std::fs::write(&bad, b"this is not a glb, it is garbage bytes").unwrap();
 
-        let status = mesh_status_of(&bad);
+        let status = checked_recipe(&bad);
         assert!(
             status.is_err(),
-            "a garbage present-but-unloadable glb must report Err (rl#154), got {status:?}"
+            "a garbage present-but-unloadable glb must report Err (rl#154), got a recipe: {:?}",
+            status.is_ok()
         );
 
         std::fs::remove_dir_all(&dir).ok();

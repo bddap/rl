@@ -139,9 +139,8 @@ pub(super) fn spawn_world(
     // the body's `CrabModelPath` (which defaults to the same verdict) agree — see
     // `crab_world::bot::body::CrabModelPath`. Preflighted (not existence-only `model_path()`), so a
     // present-but-broken glb resolves to `None` → the silhouette below draws the fallback recipe
-    // instead of `render_recipe` panicking (bddap/rl#154).
-    let render_model = crab_world::mesh_fallback::usable_model_path();
-    let have_model = render_model.is_some();
+    // instead of the real one (bddap/rl#154).
+    let have_model = crab_world::mesh_fallback::usable_model_path().is_some();
     let crab_hidden = armed && have_model;
     // With the crab armed but NO model, the silhouette (the real colliders, NOT the real Sally
     // rig) stays shown AS the crab. Shipping that with no signal is the silent-fallback bug the
@@ -181,7 +180,7 @@ pub(super) fn spawn_world(
         &mut meshes,
         &mut materials,
         crab_root,
-        render_model.as_deref(),
+        have_model,
     );
 }
 
@@ -193,22 +192,23 @@ pub(super) fn spawn_world(
 const CRAB_RENDER_HEIGHT: f32 = PLAYER_HEIGHT * CRAB_SCALE as f32;
 
 /// The crab rig's natural standing height (m) — the span of its REAL physics colliders. Memoized:
-/// [`crab_world::bot::body::render_recipe`] re-reads + re-parses the 36 MB `sally.glb` and re-fits
-/// the collider cloud (~1 s), yet the result is a property of the fixed binary+asset that never
-/// changes at runtime; without the cache that parse was the whole GCR frame budget (rl#129). `None`
-/// for a degenerate (zero-height) recipe — a broken collider asset with no honest geometry, which
-/// callers fail LOUD on rather than drawing a stand-in.
+/// the recipe + silhouette geometry it derives are a property of the fixed binary+asset that never
+/// changes at runtime, yet this is read to set the world render scale on a per-frame path, so the
+/// derivation is cached rather than re-run each read (rl#129). The underlying 36 MB glb parse + fit is
+/// itself memoized once in [`crab_world::mesh_fallback::usable_model`] (rl#153), so
+/// [`crab_world::bot::body::render_recipe`] here only clones that recipe. `None` for a degenerate
+/// (zero-height) recipe — a broken collider asset with no honest geometry, which callers fail LOUD on
+/// rather than drawing a stand-in.
 fn natural_crab_height() -> Option<f32> {
     static H: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
     *H.get_or_init(|| {
-        // Reads the preflighted verdict (`mesh_fallback::usable_model_path`), NOT the per-app
+        // Flips off the preflight verdict (`mesh_fallback::usable_model_path`), NOT the per-app
         // `CrabModelPath` resource: this answers "how big is the crab this run draws?" to set the
         // world render scale, a fixed binary+asset constant. Preflighted so a present-but-broken glb
-        // yields `None` → the fallback recipe's height (what's actually drawn) instead of
-        // `render_recipe` panicking (bddap/rl#154). net has one asset source, so this and the
-        // silhouette below resolve the same path.
+        // draws the fallback recipe's height (what's actually rendered) instead of the real one
+        // (bddap/rl#154). net has one asset source, so this and the silhouette below flip together.
         let h = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe(
-            crab_world::mesh_fallback::usable_model_path().as_deref(),
+            crab_world::mesh_fallback::usable_model_path().is_some(),
         ))
         .natural_height();
         (h > 1e-4).then_some(h)
@@ -242,20 +242,22 @@ pub(crate) fn world_render_scale() -> f32 {
 /// geometry. This static silhouette is the honest physics-bones view (no articulation): the
 /// headless-screenshot render, and the in-game view whenever no skin model resolves — the rest
 /// stance posed rigidly, so the legs don't walk, but it is the REAL colliders, never a stand-in
-/// box. The real armed round with a model shows the walking skinned NN rig instead. `model` is the
-/// preflighted usable path (`mesh_fallback::usable_model_path`) resolved ONCE in `spawn_world` — net's
-/// single asset source, the SAME verdict the body's `CrabModelPath` defaults to, so they agree — and
-/// `None` (absent or broken glb) draws the fallback recipe, never `render_recipe`'s `.expect()`.
+/// box. The real armed round with a model shows the walking skinned NN rig instead. `have_model` is
+/// the preflight verdict's flip (`mesh_fallback::usable_model_path().is_some()`) resolved ONCE in
+/// `spawn_world` — net's single asset source, the SAME verdict the body's `CrabModelPath` defaults to,
+/// so they agree — and `false` (absent or broken glb) draws the fallback recipe; `true` draws the
+/// memoized real recipe the verdict already built (bddap/rl#153), never a re-parse or an `.expect()`.
 fn spawn_crab_silhouette(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     crab_root: Entity,
-    model: Option<&std::path::Path>,
+    have_model: bool,
 ) {
     use crab_world::bot::rig::RestShape;
 
-    let sil = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe(model));
+    let sil =
+        crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe(have_model));
     let shapes = || sil.shapes();
 
     // Orient the rig claws-forward (+Z). The recipe's forward axis isn't necessarily +Z,

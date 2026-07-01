@@ -6,7 +6,6 @@
 use bevy::prelude::*;
 
 use super::joint_id::CrabJointId;
-use crate::bot::meshfit::LoadedModel;
 use crate::bot::rig::{self, RigRecipe};
 
 /// The crab body recipe, derived once at startup. Held in a resource because
@@ -43,8 +42,8 @@ impl CrabAssets {
 /// had to find rl-demo's main). The explicit resource replaces that (bddap/rl#147).
 ///
 /// Defaults (FromWorld) to the shared preflight verdict [`crate::mesh_fallback::usable_model_path`],
-/// so a present-but-unloadable glb resolves to `None` here (the honest fallback) instead of reaching
-/// `render_recipe`'s `.expect()` (bddap/rl#154). SCOPE: this resource is a `BotPlugin` resource —
+/// so a present-but-unloadable glb resolves to `None` here (the honest fallback); the body then
+/// spawns the fallback recipe, never a broken real one (bddap/rl#154). SCOPE: this resource is a `BotPlugin` resource —
 /// only present where the bot stack is. `net::render`'s collider silhouette runs WITHOUT that stack
 /// (the unarmed screenshot), so it reads the same [`crate::mesh_fallback::usable_model_path`] verdict
 /// directly; since net never overrides the resolver, its reads and this resource's default agree.
@@ -58,38 +57,46 @@ pub struct CrabModelPath(pub Option<std::path::PathBuf>);
 impl FromWorld for CrabModelPath {
     fn from_world(_world: &mut World) -> Self {
         // The full preflight, NOT bare `model_path()`: a present-but-unloadable `sally.glb` resolves
-        // to `None` here so the body degrades to the fallback recipe instead of `render_recipe`'s
-        // `.expect()` firing (bddap/rl#154). This is the game's equivalent of rl-demo's explicit
-        // preflighted `CrabModelPath` insert — the same one verdict (`mesh_fallback::usable_model`).
+        // to `None` here so the body degrades to the fallback recipe (bddap/rl#154). This is the
+        // game's equivalent of rl-demo's explicit preflighted `CrabModelPath` insert — the same one
+        // verdict (`mesh_fallback::usable_model`), which also OWNS the recipe `render_recipe` spawns.
         Self(crate::mesh_fallback::usable_model_path())
     }
 }
 
-/// The body recipe the game renders and spawns from a resolved `model`: the fitted model when one
-/// is present, else the procedural stand-in. The ONE place the model-vs-fallback BRANCH lives —
+/// The body recipe the game renders and spawns: the fitted real-Sally recipe when the mesh is
+/// usable, else the procedural stand-in. The ONE place the model-vs-fallback BRANCH lives —
 /// [`CrabAssets`] (the spawned/skinned body, fed its [`CrabModelPath`]) and the integer-crab
-/// collider silhouette (`net::render::spawn_crab_silhouette`, fed `meshfit::model_path()`) both go
-/// through here, so the two can't draw different geometry from the same input. A present-but-broken
-/// model (`Some(p)` that loads to no recipe) would make the `expect` fire, so EVERY player-facing
-/// caller resolves its path through the full [`crate::mesh_fallback::usable_model`] preflight — game
-/// via [`CrabModelPath`], net's silhouette directly, rl-demo via its explicit insert — and passes
-/// `None` on failure. So a broken `Some` never reaches here and the `expect` guards a now-unreachable
-/// invariant (bddap/rl#154). No model at all falls back to the procedural stand-in here directly.
-pub fn render_recipe(model: Option<&std::path::Path>) -> RigRecipe {
-    match model {
-        Some(p) => LoadedModel::load(p)
-            .ok()
-            .and_then(|m| rig::build_recipe(&m))
-            .expect("model preflight should have rejected a model that builds no recipe"),
-        None => rig::fallback_recipe(),
+/// collider silhouette (`net::render::spawn_crab_silhouette`) both go through here, so the two can't
+/// draw different geometry.
+///
+/// `has_model` is the surface's [`CrabModelPath`] flip: `true` → render the real crab, `false` → the
+/// stand-in. When `true`, the recipe is the one the memoized [`crate::mesh_fallback::usable_model`]
+/// verdict ALREADY built and validated — cloned out, NOT re-parsed from the 36 MB glb (bddap/rl#153:
+/// the load+fit happens exactly ONCE, in the verdict; there is no second "is the mesh good?" check
+/// here, and the old `.expect("preflight should have rejected …")` is gone). A `bool`, not a
+/// path: the caller can only say real-or-fallback, never hand in a path that DISAGREES with the one
+/// asset the verdict validated — so the flip can't drift from the recipe. `has_model` co-derives with
+/// the verdict (`usable_model_path().is_some()`), so the `Err` arm is unreachable but degrades to the
+/// honest fallback rather than panicking.
+pub fn render_recipe(has_model: bool) -> RigRecipe {
+    if has_model {
+        match crate::mesh_fallback::usable_model() {
+            Ok(u) => u.recipe.clone(),
+            Err(_) => rig::fallback_recipe(),
+        }
+    } else {
+        rig::fallback_recipe()
     }
 }
 
 impl FromWorld for CrabAssets {
     fn from_world(world: &mut World) -> Self {
-        let model = world.resource::<CrabModelPath>().0.clone();
+        // The body flips off the same `CrabModelPath` the skin reads (so the two can't disagree about
+        // which crab is present); the fitted recipe itself comes from the memoized verdict.
+        let has_model = world.resource::<CrabModelPath>().0.is_some();
         Self {
-            recipe: render_recipe(model.as_deref()),
+            recipe: render_recipe(has_model),
         }
     }
 }
