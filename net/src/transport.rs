@@ -25,6 +25,7 @@ use crate::lockstep::{Confirmed, TickMsg};
 use crate::membership::{self, Beat};
 use crate::server::{Admission, JoinRequest, TickSet};
 use crate::sim::{Input, PlayerId};
+use crate::snapshot::CoreSnapshot;
 
 /// ALPN for the game's wire. The framing is `[len:u32 LE][kind:u8][body]`, where
 /// `kind` ([`Frame`]) selects a client→server [`TickMsg`] (an input), a server→client
@@ -36,7 +37,11 @@ use crate::sim::{Input, PlayerId};
 /// (rl#82, GCR); `/4` replaced the P2P tick MESH with the server-coordinated model (rl#151):
 /// inputs go UP to the server as [`TickMsg`]s, the server broadcasts the complete [`TickSet`]
 /// DOWN — a new frame kind and a topology the old mesh peers can't speak.
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/5";
+/// `/6` added the host-authoritative [`Frame::Snapshot`] (rl#151 increment 2): the host
+/// broadcasts full game STATE down, not the input set, so a `/5` peer (which expects
+/// [`TickSet`]s and re-steps) and a `/6` peer can't interoperate — the bump makes them refuse
+/// rather than silently diverge.
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/6";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
@@ -71,6 +76,12 @@ pub(crate) enum Frame {
     /// allocation and adopt the wrong [`crate::sim::PlayerId`]. Same payload as `RosterChange`.
     /// Stage 3, rl#151.
     Welcome = 6,
+    /// A server→client [`CoreSnapshot`]: the host-authoritative full game state for one tick
+    /// (rl#151 increment 2). Under host-authority a remote client no longer re-steps the sim from a
+    /// [`Frame::TickSet`]; it ADOPTS this snapshot whole (state on the wire, not inputs), so the
+    /// warm-vs-cold physics divergence that killed lockstep join never crosses the link. The `tick`
+    /// inside is the version — a client applies the highest it has seen and drops older arrivals.
+    Snapshot = 7,
 }
 
 impl Frame {
@@ -83,6 +94,7 @@ impl Frame {
             4 => Some(Frame::RosterChange),
             5 => Some(Frame::Refuse),
             6 => Some(Frame::Welcome),
+            7 => Some(Frame::Snapshot),
             _ => None,
         }
     }
@@ -110,6 +122,10 @@ pub enum PeerWire {
     /// ([`crate::lockstep::Lockstep::join_at`]). Distinct from [`Self::RosterChange`] so it can't
     /// confuse another joiner's broadcast change for its own allocation (Stage 3).
     Welcome(Admission),
+    /// The host-authoritative full game state for one tick, received by a remote client (rl#151
+    /// increment 2). The client adopts it via [`crate::lockstep::Lockstep::apply_core_snapshot`]
+    /// instead of stepping its own sim.
+    Snapshot(CoreSnapshot),
 }
 
 /// Wire sentinel for [`TickMsg::confirmed`] == `None`. `u64::MAX` as the tick can
@@ -243,6 +259,23 @@ impl Codec for TickSet {
             inputs,
             confirmed,
         })
+    }
+}
+
+impl Codec for CoreSnapshot {
+    const KIND: Frame = Frame::Snapshot;
+    type Bytes = Vec<u8>;
+
+    /// The body layout is owned by [`crate::snapshot`] (which owns the type and its
+    /// deterministic little-endian form); transport owns only the kind byte.
+    fn encode(&self) -> Vec<u8> {
+        self.to_bytes()
+    }
+
+    fn decode(body: &[u8]) -> Result<Self> {
+        // Surface a malformed host snapshot LOUDLY (closing the link) — a client must never render
+        // a half-decoded authoritative state ([[silent-fallback-antipattern]]).
+        CoreSnapshot::from_bytes(body).map_err(|e| anyhow::anyhow!("decoding snapshot frame: {e}"))
     }
 }
 
@@ -542,11 +575,13 @@ impl Session {
         self.send(peer, msg).await;
     }
 
-    /// Broadcast an assembled [`TickSet`] DOWN to every client — the headless host's fan-out
-    /// entry. A concrete facade over the internal generic [`Session::broadcast`], keeping
-    /// [`Codec`] crate-private.
-    pub async fn broadcast_tickset(&self, set: &TickSet) {
-        self.broadcast(set).await;
+    /// Broadcast a host-authoritative [`CoreSnapshot`] DOWN to every client (rl#151 increment 2) —
+    /// the headless host's fan-out entry: the host ships game STATE, not an input set, and the
+    /// client ADOPTS it rather than re-stepping. A concrete facade over the generic
+    /// [`Session::broadcast`], keeping [`Codec`] crate-private (the windowed path fans out through
+    /// [`crate::net_loop::NetDriver`] directly).
+    pub async fn broadcast_snapshot(&self, snapshot: &CoreSnapshot) {
+        self.broadcast(snapshot).await;
     }
 
     /// Frame `body` with `kind` + length and send it to one `peer` (the unicast analogue of
@@ -809,6 +844,7 @@ async fn read_loop(
             Frame::RosterChange => PeerWire::RosterChange(Admission::decode(body)?),
             Frame::Refuse => PeerWire::Refuse(Refuse::decode(body)?.0),
             Frame::Welcome => PeerWire::Welcome(Welcome::decode(body)?.0),
+            Frame::Snapshot => PeerWire::Snapshot(CoreSnapshot::decode(body)?),
         };
         if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
             return Ok(()); // session dropped
@@ -872,8 +908,22 @@ mod tests {
         assert_eq!(Frame::from_byte(4), Some(Frame::RosterChange));
         assert_eq!(Frame::from_byte(5), Some(Frame::Refuse));
         assert_eq!(Frame::from_byte(6), Some(Frame::Welcome));
-        assert_eq!(Frame::from_byte(7), None);
+        assert_eq!(Frame::from_byte(7), Some(Frame::Snapshot));
+        assert_eq!(Frame::from_byte(8), None);
         assert_eq!(Frame::from_byte(0xff), None);
+    }
+
+    #[test]
+    fn snapshot_wire_roundtrips() {
+        use crate::sim::{PlayerId, Pos, Sim};
+        // A stepped sim's authoritative snapshot round-trips byte-for-byte through the frame codec,
+        // and a truncated body is a loud error (never a half-decoded state on the client).
+        let mut sim = Sim::new(3, &[PlayerId(0), PlayerId(1)]);
+        sim.set_external_crab_pose(Pos { x: 77, z: -88 }, 5, 0);
+        let snap = sim.core_snapshot();
+        let body = CoreSnapshot::encode(&snap);
+        assert_eq!(CoreSnapshot::decode(&body).unwrap(), snap);
+        assert!(CoreSnapshot::decode(&body[..body.len() - 1]).is_err());
     }
 
     #[test]

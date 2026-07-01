@@ -124,6 +124,10 @@ async fn run_net(args: Args) -> Result<()> {
     let mut ticker = tokio::time::interval(tick_dt);
     let end = Instant::now() + Duration::from_secs(args.run_secs);
     let mut total_desyncs = 0usize;
+    // How many authoritative snapshots this peer put on / took off the wire (rl#151 increment 2):
+    // the host counts what it BROADCAST, a client what it ADOPTED. Surfaced in the `done:` line so a
+    // 2-process proof can see the client is state-fed by the host, never re-stepping a sim.
+    let mut snapshots_io = 0usize;
     // Coarse human progress: print roughly once per second of sim. This samples the FIRST
     // tick at/after each boundary, which a batched `try_advance` can overshoot by a tick or
     // two — so these lines are a liveness/hash eyeball, NOT a byte-exact cross-peer compare.
@@ -151,10 +155,11 @@ async fn run_net(args: Args) -> Result<()> {
         ticker.tick().await;
 
         // Ingest everything the transport has for us this tick. As the host: remote clients' input
-        // `TickMsg`s. As a client: the server's assembled `TickSet`s. A stray barrier beat from a
-        // peer still winding down formation is ignored either way.
+        // `TickMsg`s. As a client: the host's authoritative `CoreSnapshot`s (rl#151 increment 2 —
+        // STATE down, not the input set: the client adopts it whole and never re-steps). A stray
+        // barrier beat from a peer still winding down formation is ignored either way.
         let mut remote_inputs: Vec<net_loop::PeerMsg> = Vec::new();
-        let mut sets: Vec<net::server::TickSet> = Vec::new();
+        let mut snapshots: Vec<net::snapshot::CoreSnapshot> = Vec::new();
         while let Some(m) = session.try_recv() {
             match m.msg {
                 transport::PeerWire::Tick(msg) => {
@@ -162,12 +167,16 @@ async fn run_net(args: Args) -> Result<()> {
                         remote_inputs.push(net_loop::PeerMsg { pid, msg });
                     }
                 }
-                transport::PeerWire::TickSet(set) => {
+                transport::PeerWire::Snapshot(snap) => {
                     if !am_host {
-                        sets.push(set);
+                        snapshots.push(snap);
                     }
                 }
                 transport::PeerWire::Beat(_) => {}
+                // A `TickSet` (server→client input set) is the pre-increment-2 remote path; a `/6`
+                // host no longer broadcasts one (it ships snapshots), and the ALPN bump keeps a `/5`
+                // peer off the wire entirely, so one arriving here is a stray to ignore, not re-step.
+                transport::PeerWire::TickSet(_) => {}
                 // This is a FIXED-roster run: the peer set is frozen at discovery and never
                 // grows, so the Stage 3 live-join frames (a joiner's credentials, a roster
                 // change, a refusal) can't legitimately arrive here. Ignore a stray one rather
@@ -180,47 +189,63 @@ async fn run_net(args: Args) -> Result<()> {
             }
         }
 
-        // Issue our input and route it through the server. The host assembles via the SAME
-        // `host_assemble` the windowed `Coordinator` uses (one coordination impl, two transports);
-        // a client ships its input up and unpacks the sets it drained.
+        // Issue our input and route it through the server (rl#151 increment 2 — host-authoritative:
+        // inputs go UP, STATE comes DOWN). The host assembles via the SAME `host_assemble` the
+        // windowed `Coordinator` uses (one coordination impl, two transports), steps its own
+        // authoritative `ls`, and broadcasts a `CoreSnapshot` per applied tick; a client ships its
+        // input up and ADOPTS the host's snapshots without ever re-stepping the sim.
         let t = ls.next_tick() as f32 * 0.1;
         let issue_tick = ls.next_tick();
         let input = Input::from_axes(t.cos(), t.sin());
         let msg = ls.submit_local_input(input);
-        let peer_msgs: Vec<net_loop::PeerMsg> = if let Some(srv) = server.as_mut() {
-            let (out_sets, peer_msgs) = net::server::host_assemble(srv, me, msg, remote_inputs);
-            for s in &out_sets {
-                session.broadcast_tickset(s).await;
+
+        if let Some(srv) = server.as_mut() {
+            // HOST: fold in remote clients' inputs, then step + broadcast state.
+            let (_sets, peer_msgs) = net::server::host_assemble(srv, me, msg, remote_inputs);
+            // Record the OTHER players' inputs into the host's own authoritative `ls` — the same
+            // `record_remote` entry a mesh peer used to take.
+            for pm in peer_msgs {
+                if let Some(f) = ls.record_remote(pm.pid, pm.msg) {
+                    report_fault(&mut total_desyncs, f, tel.as_ref());
+                }
             }
-            peer_msgs
+            // Advance every ready tick ONE AT A TIME and broadcast that tick's authoritative
+            // snapshot the instant it is stepped, so a client adopts exactly the state the host
+            // holds. Logging per applied tick (via `last_applied`) writes every tick once regardless
+            // of how many a single iteration catches up.
+            while let Some(faults) = ls.advance_one() {
+                for f in faults {
+                    report_fault(&mut total_desyncs, f, tel.as_ref());
+                }
+                session.broadcast_snapshot(&ls.core_snapshot()).await;
+                snapshots_io += 1;
+                if let Some((w, c)) = hash_log.as_mut().zip(ls.last_applied()) {
+                    use std::io::Write as _;
+                    writeln!(w, "{} {:#018x}", c.tick, c.hash).context("writing hash log")?;
+                }
+            }
         } else {
+            // CLIENT: ship our input up, then ADOPT the host's authoritative snapshots — no re-sim,
+            // no cross-check (the host IS the source of truth). Apply in tick order and skip any
+            // snapshot no newer than the one we already hold (latest-wins: a full state supersedes an
+            // older one), which on the reliable ordered stream applies each tick exactly once.
             session.send_to(server_eid, &msg).await;
-            sets.iter()
-                .flat_map(|s| net::server::unpack_tickset(s, me))
-                .collect()
-        };
-
-        // Record the OTHER players' inputs — the same `record_remote` entry a mesh peer used to take,
-        // so the cross-check + advance below are unchanged. A late hash for an already-applied tick
-        // can surface a fault here.
-        for pm in peer_msgs {
-            if let Some(f) = ls.record_remote(pm.pid, pm.msg) {
-                report_fault(&mut total_desyncs, f, tel.as_ref());
-            }
-        }
-
-        // Advance every ready tick ONE AT A TIME so the hash log can record each tick's
-        // closing hash at the instant it's applied — `try_advance` is exactly this loop, but
-        // logging from its post-batch snapshot could miss a tick the batch already pruned.
-        // Logging per `advance_one` writes every applied tick exactly once, regardless of how
-        // many a single iteration catches up.
-        while let Some(faults) = ls.advance_one() {
-            for f in faults {
-                report_fault(&mut total_desyncs, f, tel.as_ref());
-            }
-            if let Some((w, c)) = hash_log.as_mut().zip(ls.last_applied()) {
-                use std::io::Write as _;
-                writeln!(w, "{} {:#018x}", c.tick, c.hash).context("writing hash log")?;
+            snapshots.sort_by_key(|s| s.tick);
+            for snap in snapshots {
+                if snap.tick <= ls.sim().tick() {
+                    continue; // already at/past this state — a stale/duplicate arrival.
+                }
+                ls.apply_core_snapshot(snap);
+                snapshots_io += 1;
+                if let Some(w) = hash_log.as_mut() {
+                    use std::io::Write as _;
+                    // The host logs the just-stepped tick index (`last_applied().tick`); the snapshot
+                    // we just adopted carries the POST-step count (`sim.tick()`), one higher — so log
+                    // `tick - 1` to line up the two peers' logs for a byte-identical `diff`.
+                    let applied = ls.sim().tick().saturating_sub(1);
+                    writeln!(w, "{} {:#018x}", applied, ls.sim().state_hash())
+                        .context("writing hash log")?;
+                }
             }
         }
 
@@ -258,9 +283,11 @@ async fn run_net(args: Args) -> Result<()> {
     }
 
     println!(
-        "done: {} ticks applied, {} desyncs, final hash {:#018x}",
+        "done: {} ticks applied, {} desyncs, {} snapshots {}, final hash {:#018x}",
         ls.sim().tick(),
         total_desyncs,
+        snapshots_io,
+        if am_host { "broadcast" } else { "adopted" },
         ls.sim().state_hash()
     );
     // A final snapshot so the collector records where this deck ended even if the round
