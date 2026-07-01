@@ -34,8 +34,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bevy::app::AppExit;
-use bevy::camera::RenderTarget;
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindow, WindowMode};

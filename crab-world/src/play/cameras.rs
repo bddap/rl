@@ -2,8 +2,6 @@
 //! tracks the tumbling crab) and the windowless offscreen camera the screenshot mode
 //! renders through.
 
-use bevy::camera::RenderTarget;
-use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 
@@ -170,25 +168,10 @@ pub(super) fn spawn_offscreen_camera(
     let handle = images.add(screenshot::new_render_target(cfg.width, cfg.height));
 
     commands.spawn((
-        Camera3d::default(),
-        Camera {
-            // Dark fallback behind the night-sky skybox (see [`crate::sky`]); shown only
-            // until the cubemap uploads.
-            clear_color: ClearColorConfig::Custom(crate::sky::NIGHT_CLEAR),
-            ..default()
-        },
-        RenderTarget::Image(handle.clone().into()),
-        // Default tonemapping needs a LUT asset that may not be ready in a
-        // windowless render; None keeps the offscreen pass simple.
-        Tonemapping::None,
+        screenshot::offscreen_camera_bundle(handle.clone()),
         // Initial framing on the crab's start position (origin). `track_offscreen_camera`
         // re-derives this every Update from the same source before any frame is captured.
         offscreen_camera_transform(Vec3::ZERO),
-        // Make UI composite into THIS offscreen target. Bevy auto-targets UI at the
-        // default-WINDOW camera, but the screenshot path has no window — without this
-        // marker the controls overlay never draws into the captured texture. The windowed
-        // demo doesn't need it: its window camera is the implicit UI target.
-        bevy::ui::IsDefaultUiCamera,
     ));
     commands.insert_resource(ShotTarget(handle));
 }
