@@ -1,18 +1,23 @@
 //! The target-distance band the policy trains on, and the target sampling defined over it.
 //!
-//! There is no growth curriculum: the band is FIXED at the full arena distance range, so every
-//! episode samples a target uniformly from near to the arena edge. The reward is a scale-free
-//! telescoping PROGRESS signal (`P·(d_prev − d_now)`, see [`super::reward`]) that pays the same
-//! per-metre GRADIENT at any absolute distance — so the old near→far advancement crutch (which
-//! existed only because the earlier reach reward went flat far out) is gone, and the weights
-//! learn the far approach directly (the bitter lesson).
+//! There is no growth curriculum: the band is FIXED at the full arena distance range. The reward
+//! is a scale-free telescoping PROGRESS signal (`P·(d_prev − d_now)`, see [`super::reward`]) that
+//! pays the same per-metre GRADIENT at any absolute distance — so the old near→far advancement
+//! crutch (which existed only because the earlier reach reward went flat far out) is gone, and
+//! the weights learn the far approach directly (the bitter lesson).
 //!
 //! What the scale-free reward does NOT remove is the credit-assignment HORIZON: a far target
 //! demands a longer correct action sequence before the sparse grab terminal pays, so a far
-//! episode leans harder on the dense progress crumbs. Uniform full-range keeps near targets in
-//! the mix (~1/N of episodes) so the bootstrap path stays available; if a cold/collapsed policy
-//! still fails to set off, the minimal next step is distance-WEIGHTED (near-heavy) sampling —
-//! still full-range, still no advancement machinery — not resurrecting the growth curriculum.
+//! episode leans harder on the dense progress crumbs. So the full-range distance is sampled
+//! NEAR-HEAVY (see [`NEAR_BIAS_EXP`] / [`sample_target`]): most episodes get a near target — the
+//! bootstrap the horizon needs — while a real tail still reaches the far edge so far pursuit is
+//! learned, not forgotten. Be honest about what this is: a hand-chosen difficulty bias IS a mild
+//! curriculum — the bitter-lesson ideal is a UNIFORM draw and the weights learning the far
+//! approach unaided. What it is NOT is a GROWTH curriculum: it is stationary — nothing advances,
+//! gates, persists, or drifts, the band never changes, only how a distance is drawn within it —
+//! so the advancement-machinery drift that cost a live run cannot recur. It was adopted (job 748)
+//! to re-bootstrap a warm-but-degraded policy that a uniform draw stalled on far targets; the
+//! intended end state is to lean [`NEAR_BIAS_EXP`] back toward 1 (uniform) once reach is healthy.
 
 use bevy::prelude::Vec3;
 
@@ -74,24 +79,32 @@ impl TargetBand {
     }
 }
 
+/// Exponent of the NEAR-HEAVY distance draw: a target distance is `min + (max−min)·u^EXP` for
+/// `u ~ U[0,1)`, so `EXP > 1` biases the draw toward the near edge while still spanning the whole
+/// band. At `EXP = 3` over the 1.5–9 m band the mass splits ~58 % into the near 1.5–3 m sub-band,
+/// ~26 % into 3–6 m, ~16 % beyond 6 m — near-dominant for the credit-assignment bootstrap, with a
+/// real far tail so far pursuit is trained, not forgotten. The single tunable knob: raise it to
+/// lean nearer, drop toward 1 for uniform. See the module doc for why near-heavy over uniform.
+const NEAR_BIAS_EXP: f32 = 3.0;
+
 /// Sample a fresh target world position for a crab whose env spawns at `origin`, at a planar
-/// distance drawn uniformly from the [`TargetBand`] band and at EXACTLY that distance — by
-/// construction the returned target's planar distance from `origin` is the band distance, never
-/// less. A random distance in the band is fixed first; then a HEADING is chosen so the
-/// full-distance target lands inside the arena (see [`TARGET_ARENA_HALF`]): random headings are
-/// tried, falling back to aiming inward (toward the arena centre), which always fits for an
-/// in-arena spawn.
+/// distance drawn NEAR-HEAVY from the [`TargetBand`] band (see [`NEAR_BIAS_EXP`]) and at EXACTLY
+/// that distance — by construction the returned target's planar distance from `origin` is the
+/// drawn distance, never less. A random distance in the band is fixed first; then a HEADING is
+/// chosen so the full-distance target lands inside the arena (see [`TARGET_ARENA_HALF`]): random
+/// headings are tried, falling back to aiming inward (toward the arena centre), which always fits
+/// for an in-arena spawn.
 ///
 /// WHY choose the heading rather than clamp the placed point: clamping the point into the arena
 /// SHORTENS the distance for a spawn near a wall — an edge crab's "9 m" target clamped to the
 /// wall is really ~2 m — so the policy would "master" a far distance by grabbing clamped-near
 /// targets it never walked to (rl#159). Choosing the heading keeps the distance honest.
 ///
-/// Honesty is of DISTANCE, not heading: the distance is uniform-in-band from every spawn, but
-/// the heading is uniform only where the arena permits it — a spawn near a wall can only aim
-/// inward, so its targets cluster toward the arena centre. That directional bias is acceptable
-/// (the target is observed in body axes and spawns are grid-symmetric); what must not bias is
-/// the distance.
+/// Honesty is of DISTANCE, not heading: the distance is drawn near-heavy but at its TRUE value
+/// from every spawn (the bias is in the distribution, never in shortening a placed target); the
+/// heading is uniform only where the arena permits it — a spawn near a wall can only aim inward,
+/// so its targets cluster toward the arena centre. That directional bias is acceptable (the target
+/// is observed in body axes and spawns are grid-symmetric); what must not bias is the distance.
 ///
 /// Y is an independent claw-height draw. World-space (not carapace-relative) because the crab
 /// spawns at varied orientations and walks: a point fixed in the world is an unambiguous goal
@@ -100,7 +113,9 @@ impl TargetBand {
 /// — one sampling rule, so the demo can never pose a target training never saw.
 pub(crate) fn sample_target(origin: Vec3, band: TargetBand, rng: &mut impl rand::Rng) -> Vec3 {
     let (min, max) = band.range();
-    let dist = rng.gen_range(min..max);
+    // Near-heavy: u^EXP pushes the uniform draw toward `min` (near), still spanning to `max`.
+    let u: f32 = rng.gen_range(0.0..1.0);
+    let dist = min + (max - min) * u.powf(NEAR_BIAS_EXP);
     let y = rng.gen_range(TARGET_Y_MIN..TARGET_Y_MAX);
     let at = |theta: f32| {
         Vec3::new(
@@ -197,5 +212,38 @@ mod tests {
         assert_eq!(min, BAND_START_MIN);
         assert_eq!(max, TARGET_ARENA_HALF);
         assert!(max > min, "the band is non-empty");
+    }
+
+    #[test]
+    fn distance_draw_is_near_heavy_with_a_real_far_tail() {
+        // Pins the bootstrap sampling: most targets land near (so the credit-assignment horizon
+        // stays short enough to learn) while a real tail still reaches the far arena (so far
+        // pursuit is trained, not forgotten). Guards against a silent revert to a uniform draw,
+        // whose near fraction would be the band-proportion ~0.2, far below the bar here.
+        let mut rng = rand::thread_rng();
+        let origin = Vec3::ZERO;
+        let (min, max) = TargetBand::start().range();
+        let near_edge = 3.0; // the 1.5-3 m near sub-band
+        let far_edge = 6.0;
+        let (mut near, mut far, n) = (0u32, 0u32, 20_000u32);
+        for _ in 0..n {
+            let d = planar_dist(sample_target(origin, TargetBand::start(), &mut rng), origin);
+            if d < near_edge {
+                near += 1;
+            }
+            if d > far_edge {
+                far += 1;
+            }
+        }
+        let near_frac = near as f32 / n as f32;
+        let far_frac = far as f32 / n as f32;
+        assert!(
+            near_frac > 0.45,
+            "near ({min}-{near_edge} m) fraction {near_frac} should dominate (uniform would be ~0.2)"
+        );
+        assert!(
+            far_frac > 0.05,
+            "far (>{far_edge} m, up to {max} m) fraction {far_frac} must keep a real tail, not collapse to near-only"
+        );
     }
 }

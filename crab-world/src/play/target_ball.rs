@@ -18,7 +18,7 @@ use crate::training::reward::dist_3d;
 pub(super) struct TargetBall;
 
 /// 3D euclidean distance at which the DEMO counts a claw tip as having reached the
-/// target and teleports it to a fresh far point (see [`target_ball`]). Set at the edge
+/// target and teleports it to a fresh target (see [`target_ball`]). Set at the edge
 /// of the claw's reach. Because the reach `d` is 3D, this 0.8 m is a SPHERE about the
 /// target, not a ground-plane cylinder: a tip standing under a raised ball is no longer
 /// "reached" until it is within 0.8 m in 3D. The training reward is dense planar PROGRESS
@@ -62,12 +62,12 @@ pub(super) fn spawn_target_ball(
 }
 
 /// FixedUpdate (demo only): drive the red ball off env 0's target, and TELEPORT the
-/// target to a fresh far point when a claw tip reaches it. [`CrabTargets`] is the single
+/// target to a fresh point when a claw tip reaches it. [`CrabTargets`] is the single
 /// source of truth — the same resource the observation reads; here we seed/relocate it
 /// and snap the ball to it, so the ball can never disagree with the target the policy
-/// perceives. Seeding and relocation both reuse [`sample_target`], the exact FAR-target
-/// rule training samples, so a demo target is always the same kind of walk-to goal the
-/// policy was trained on.
+/// perceives. Seeding and relocation both reuse [`sample_target`], the exact near-heavy
+/// full-range rule training samples, so a demo target is always the same kind of walk-to
+/// goal the policy was trained on (mostly near, with the same far tail).
 ///
 /// **Intentional train/demo divergence.** Training uses ONE fixed target per episode: the
 /// sparse grab terminal ENDS the episode on reach, so there is no per-tick stream to farm by
@@ -94,10 +94,10 @@ pub(super) fn target_ball(
     // explicit `RL_TARGET_BALL_AT` (screenshot evidence frames) pins the seed to a
     // chosen point; otherwise sample the reach box. Seeding here, not at Startup,
     // dodges a race with `BotPlugin`'s Startup resize of `CrabTargets`.
-    // The demo samples from the same FIXED full-arena band the trainer uses — near to the
-    // arena edge — so the streamed demo shows the crab chasing the real target at any
-    // distance, exactly the range the weights train on (one `sample_target` rule, so the
-    // demo can never pose a target training never saw).
+    // The demo samples from the same FIXED full-arena band the trainer uses, with the same
+    // near-heavy weighting — so the streamed demo shows the crab chasing the real target at
+    // the same distances the weights train on (mostly near, with a far tail): one
+    // `sample_target` rule, so the demo can never pose a target training never saw.
     let demo_band = TargetBand::start();
     let mut target = match targets.get(0) {
         Some(t) => t,
@@ -115,7 +115,7 @@ pub(super) fn target_ball(
         }
     }
 
-    // Reached → relocate to a fresh far target (demo watchability only; see the fn
+    // Reached → relocate to a fresh target (demo watchability only; see the fn
     // doc on why training does NOT do this). The ball follows the new target below.
     if min_dist <= DEMO_REACH_RADIUS {
         target = sample_target(origin, demo_band, &mut rng.0);
@@ -133,7 +133,7 @@ pub(super) fn target_ball(
 /// Read `RL_TARGET_BALL_AT="x,y,z"` into an explicit world target for the screenshot
 /// ball, so an evidence frame can place the red ball at a chosen point in the arena
 /// (and a second frame at a moved point) deterministically, instead of a random
-/// sample. `None` (the default) lets [`target_ball`] sample a fresh far target.
+/// sample. `None` (the default) lets [`target_ball`] sample a fresh target.
 fn target_ball_at_from_env() -> Option<Vec3> {
     let raw = std::env::var("RL_TARGET_BALL_AT").ok()?;
     let parts: Vec<f32> = raw
