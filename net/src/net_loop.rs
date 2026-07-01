@@ -147,10 +147,10 @@ impl NetDriver {
     }
 
     /// (Client) Ship our input UP to the server. Non-blocking from the caller's view: it drives the
-    /// async `send_to` to completion on the runtime (a buffered QUIC write). Losing the server link
+    /// async `send` to completion on the runtime (a buffered QUIC write). Losing the server link
     /// stalls us — the correct visible failure.
     pub fn send_to_server(&self, msg: &TickMsg) {
-        self.rt.block_on(self.session.send_to(self.server_eid, msg));
+        self.rt.block_on(self.session.send(self.server_eid, msg));
     }
 
     /// (Host) Drain every client INPUT received so far, tagged with the sender's [`PlayerId`].
@@ -206,20 +206,22 @@ impl NetDriver {
     /// (it also receives this broadcast, but ignores it until admitted, then re-applies it as an
     /// idempotent no-op). Non-blocking buffered QUIC writes. Stage 3.
     pub fn broadcast_roster_change(&self, adm: &Admission) {
-        self.rt.block_on(self.session.broadcast_roster_change(adm));
+        self.rt.block_on(self.session.broadcast(adm));
     }
 
     /// (Host) UNICAST a just-admitted joiner its OWN [`Admission`] (Stage 3) — the welcome it builds
     /// [`Lockstep::join_at`] from. Separate from the broadcast so a joiner never adopts a concurrent
     /// joiner's PlayerId.
     pub fn welcome_joiner(&self, eid: EndpointId, adm: &Admission) {
-        self.rt.block_on(self.session.welcome_joiner(eid, adm));
+        self.rt
+            .block_on(self.session.send(eid, &transport::Welcome(adm.clone())));
     }
 
     /// (Host) LOUDLY refuse a would-be joiner `eid` with `reason` (a digest mismatch) — a typed
     /// turn-away, never a silent drop onto a wrong crab. Stage 3.
     pub fn refuse_joiner(&self, eid: EndpointId, reason: &str) {
-        self.rt.block_on(self.session.send_refuse(eid, reason));
+        self.rt
+            .block_on(self.session.send(eid, &transport::Refuse(reason.to_string())));
     }
 
     /// (Host) Broadcast the server-assembled sets DOWN to every client. Non-blocking buffered QUIC
@@ -230,7 +232,7 @@ impl NetDriver {
         }
         self.rt.block_on(async {
             for s in sets {
-                self.session.broadcast_tickset(s).await;
+                self.session.broadcast(s).await;
             }
         });
     }
@@ -783,7 +785,7 @@ pub fn connect_and_join(
         }
         let telemetry = connect_telemetry(collector, my_eid).await;
         session
-            .send_join_request(
+            .send(
                 host,
                 &JoinRequest {
                     weights_digest: local_weights_digest,
@@ -1154,7 +1156,7 @@ async fn run_barrier(
         // advertise reflects the freshly-pruned set — we never gossip a just-expired
         // phantom for an extra round.
         let status = m.poll(now);
-        session.broadcast_beat(&m.beat()).await;
+        session.broadcast(&m.beat()).await;
 
         // Push the live roster to the lobby UI when it changes. Best-effort — a
         // closed/full channel just drops it. The set is the membership's own `live_set`,
@@ -1438,7 +1440,7 @@ mod tests {
     /// `TickSet` DOWN — and BOTH sims must advance well past tick 0. This is the regression guard
     /// for the "MP match won't start / gray screen" class (rl#166): the gray screen is the sim
     /// stuck at tick 0 because the remote client never gets a usable tickset. The wire calls here
-    /// (`host_assemble`/`broadcast_tickset` on the host, `send_to`/`unpack_tickset` on the client)
+    /// (`host_assemble`/`broadcast` on the host, `send`/`unpack_tickset` on the client)
     /// are exactly what the windowed `Coordinator::exchange` wraps, so a stall here is the stall a
     /// real joiner would see. `#[ignore]` because it binds real UDP sockets.
     #[tokio::test]
@@ -1505,7 +1507,7 @@ mod tests {
                 let (sets, peer_msgs) =
                     crate::server::host_assemble(server, p.me, msg, remote);
                 for s in &sets {
-                    p.session.broadcast_tickset(s).await;
+                    p.session.broadcast(s).await;
                 }
                 for pm in peer_msgs {
                     let _ = p.ls.record_remote(pm.pid, pm.msg);
@@ -1518,7 +1520,7 @@ mod tests {
                     }
                 }
                 let msg = p.ls.submit_local_input(input);
-                p.session.send_to(server_eid, &msg).await;
+                p.session.send(server_eid, &msg).await;
                 for pm in sets.iter().flat_map(|s| crate::server::unpack_tickset(s, p.me)) {
                     let _ = p.ls.record_remote(pm.pid, pm.msg);
                 }
