@@ -13,6 +13,8 @@
 //! the multiplayer game in `game`. Splitting them off is what lets THIS binary link no
 //! graphics crate (rl#51).
 
+use std::path::PathBuf;
+
 use bevy::prelude::*;
 use clap::{Parser, Subcommand};
 use crab_world::{TrainConfig, bot, training};
@@ -75,6 +77,14 @@ enum Command {
     /// their rollouts, and run the PPO update. Resumes from `--checkpoint-dir` and
     /// stops at the `--ticks` budget.
     Learn(LearnArgs),
+
+    /// Judge a checkpoint's TRAINING SUCCESS directly (not by reward): headless, load the
+    /// checkpoint, place a ball at a FIXED far distance, drive the policy DETERMINISTICALLY, and
+    /// print two honest numbers — real metres of progress the crab closed toward the ball, and
+    /// the total applied joint torque (lower = done with minimal torque). Deterministic + fast,
+    /// so the daemon can run it against the live checkpoint on demand to plot progress-toward-ball
+    /// over training instead of watching the reward curve.
+    Eval(EvalArgs),
 }
 
 /// Learner orchestration: the shared training config plus how many rollout threads
@@ -112,6 +122,28 @@ struct LearnArgs {
     nice: i32,
 }
 
+/// The `eval` subcommand: which checkpoint to judge, how long to roll, and how far to place the
+/// ball. Deterministic — no seed knob, because the eval fixes the spawn, the target, and takes the
+/// policy mean, so the report reproduces from these args alone.
+#[derive(Parser, Debug, Clone)]
+struct EvalArgs {
+    /// Checkpoint directory to load (`brain.bin` + `normalizer.bin`). The daemon points this at
+    /// the LIVE training checkpoint to judge the run in flight.
+    #[arg(long, default_value = "checkpoints")]
+    checkpoint_dir: PathBuf,
+
+    /// Physics ticks to run the policy for (after a short settle drop). At 64 Hz the default is
+    /// ~23 s of crab time — enough for a working gait to traverse a far target.
+    #[arg(long, default_value_t = 1500)]
+    ticks: u64,
+
+    /// Fixed planar distance (m) to place the ball from the crab's spawn. Default is the far edge
+    /// of the training band ([`crab_world::eval::DEFAULT_TARGET_DISTANCE_M`]) — the hardest
+    /// in-distribution target, challenging but reachable.
+    #[arg(long)]
+    distance: Option<f32>,
+}
+
 fn main() {
     // Installs the tracing subscriber (stderr fmt, so the trainer's `info!`/`warn!`/`error!`
     // still surface headless where there is no bevy `LogPlugin` — a fail-loud guard that
@@ -122,20 +154,53 @@ fn main() {
     let _otel = otel::init("rl-train");
     let cli = Cli::parse();
 
-    // The `learn` entry point: the learner steps no world itself (it owns the policy
-    // and runs PPO), and spawns K rollout threads that each drive their own headless
-    // app by hand. See `training::inproc`.
-    if let Some(Command::Learn(l)) = cli.command {
-        // run_learner owns nicing (it lowers process priority before building any
-        // world) so a foreground game preempts training.
-        training::inproc::run_learner(
-            &l.train,
-            training::inproc::default_workers(l.workers),
-            l.horizon,
-            l.iters,
-            l.nice,
-        );
-        return;
+    // The subcommands. `learn` steps no world itself (it owns the policy and runs PPO) and spawns
+    // K rollout threads that each drive their own headless app; `eval` judges a checkpoint's
+    // training success headlessly. Both return; a bare invocation falls through to the DEV audits.
+    match cli.command {
+        Some(Command::Learn(l)) => {
+            // run_learner owns nicing (it lowers process priority before building any
+            // world) so a foreground game preempts training.
+            training::inproc::run_learner(
+                &l.train,
+                training::inproc::default_workers(l.workers),
+                l.horizon,
+                l.iters,
+                l.nice,
+            );
+            return;
+        }
+        Some(Command::Eval(e)) => {
+            let distance = e.distance.unwrap_or(crab_world::eval::DEFAULT_TARGET_DISTANCE_M);
+            let r = crab_world::eval::run_eval(&e.checkpoint_dir, e.ticks, distance);
+            // The two headline numbers first (progress_m, total_torque), then the context that
+            // lets them be trusted at face value. `EVAL_RESULT` is a stable, greppable prefix the
+            // daemon parses to plot progress-toward-ball over training.
+            println!(
+                "EVAL_RESULT progress_m={:.4} total_torque={:.2} mean_torque_per_tick={:.4} \
+                 initial_m={:.4} closest_m={:.4} final_m={:.4} target_m={:.2} reached={} \
+                 ticks={} policy_loaded={}",
+                r.progress_m,
+                r.total_torque,
+                r.mean_torque_per_tick,
+                r.initial_distance_m,
+                r.closest_distance_m,
+                r.final_distance_m,
+                r.target_distance_m,
+                r.reached,
+                r.active_ticks,
+                r.policy_loaded,
+            );
+            if !r.policy_loaded {
+                eprintln!(
+                    "eval: no usable checkpoint at {} — the numbers above are the zero-action \
+                     rest-pose baseline, NOT a trained policy",
+                    e.checkpoint_dir.display()
+                );
+            }
+            return;
+        }
+        None => {}
     }
 
     let dev = cli.dev;

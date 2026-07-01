@@ -5,7 +5,7 @@
 
 use bevy::prelude::*;
 
-use super::policy::Policy;
+use crate::policy::Policy;
 
 /// Interval between demo hot-reload checks. Loading the brain is cheap but not
 /// free, and training saves no faster than its PPO-update cadence, so a couple of

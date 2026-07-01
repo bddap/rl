@@ -26,8 +26,8 @@ pub(crate) const BAND_START_MIN: f32 = 1.5;
 /// has walked up to the target still finishes with a real reach, not a foot-level
 /// touch. Kept low and narrow — the reward is about getting THERE, so the target sits
 /// just high enough to demand a genuine reach, no higher.
-const TARGET_Y_MIN: f32 = 0.15;
-const TARGET_Y_MAX: f32 = 0.7;
+pub(crate) const TARGET_Y_MIN: f32 = 0.15;
+pub(crate) const TARGET_Y_MAX: f32 = 0.7;
 /// Far edge of the band, and the half-extent the target's planar position is clamped within:
 /// a 1 m margin inside the arena walls, DERIVED from the wall position so a wall move can't
 /// strand a far target in or beyond a wall where the crab can't stand on it. The margin leaves

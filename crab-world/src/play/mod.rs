@@ -38,8 +38,10 @@ use crate::bot::BotSet;
 use crate::bot::body::CrabCarapace;
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
-pub use policy::Policy;
-pub use policy::{RigDims, RigFit, checkpoint_digest, checkpoint_fits_rig};
+// The trained-policy inference lives at the crate root ([`crate::policy`]) so the headless
+// eval can reuse it too; re-exported here so the renderers (and net/game) keep addressing it
+// as `crab_world::play::…`.
+pub use crate::policy::{Policy, RigDims, RigFit, checkpoint_digest, checkpoint_fits_rig};
 pub use render_video::RenderVideoPlugin;
 
 /// The [`RigDims`] this binary's crab rig compiles to — the spec a checkpoint must satisfy
