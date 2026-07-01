@@ -352,7 +352,11 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
             // rides this reconciled roll, so a right bank turns the nose screen-right too.
             let roll = clamp(-(fi.left.x * VEHICLE_STICK_SENS + fi.mouse.x));
             // Rudder (bumpers / A,D) plus the coordinating yaw that turns a bank into a turn.
-            let rudder = (fi.rb as i32 - fi.lb as i32) as f32 + fi.wasd.x;
+            // NEGATED at the source (RB/D command rudder-RIGHT, yet +yaw noses the plane toward body
+            // +X, which renders SCREEN-LEFT) — the yaw torque has no reconciling negation of its own
+            // (crab-world/vehicle.rs), so RB-right needs −yaw to swing the nose screen-right. Negate the
+            // rudder input, NOT the torque, so the coordinating bank term below keeps its (correct) sign.
+            let rudder = (fi.lb as i32 - fi.rb as i32) as f32 - fi.wasd.x;
             let yaw = clamp(rudder + PLANE_TURN_COORDINATION * roll);
             // Throttle lever trim: RT up / LT down (analog), or W/S on the keyboard.
             let throttle_trim = clamp(fi.rt - fi.lt + fi.wasd.y);
@@ -376,7 +380,7 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
             let pitch = clamp(fi.right.y * VEHICLE_STICK_SENS - fi.mouse.y);
             let yaw = clamp(-(fi.right.x * VEHICLE_STICK_SENS + fi.mouse.x));
             // Roll on the bumpers: LB banks right, RB banks left (owner playtest — the ship's
-            // bumper twist read reversed; the plane rudder above keeps its own [LB−, RB+] sense).
+            // bumper twist read reversed; the plane rudder above uses the same [LB+, RB−] sense).
             let roll = clamp((fi.lb as i32 - fi.rb as i32) as f32);
             FlightControl {
                 throttle_trim: 0.0,
