@@ -10,6 +10,7 @@ mod checkpoint_check;
 mod fp_screenshot;
 mod net;
 mod net_join;
+mod net_screenshot;
 mod nn_crab_join_xpeer;
 mod nn_crab_probe;
 mod nn_crab_vehicle_stability;
@@ -34,6 +35,11 @@ pub(crate) enum Command {
     NetJoin(net_join::Args),
     /// Render one frame of the first-person view to a PNG and exit (no window).
     FpScreenshot(fp_screenshot::Args),
+    /// Form a real networked round over iroh and render one OFFSCREEN frame of this peer's view to
+    /// a PNG (rl#151 increment 2 windowed): the headless analogue of `play --host`/`--join`. Run
+    /// two — the remote CLIENT's captured frame is the evidence it renders the host's authoritative
+    /// state + articulated crab through the snapshot path (no re-sim).
+    NetScreenshot(net_screenshot::Args),
     /// Run the live-telemetry collector: bind a stable-id iroh endpoint, print its id,
     /// and stream every connected game's events as a merged human feed (for remote
     /// debugging — `Monitor` its stdout). Pass each game `--telemetry <printed id>`.
@@ -91,6 +97,7 @@ pub(crate) fn dispatch(command: Command) -> Result<()> {
         Command::Play(args) => play::run(args),
         Command::NetJoin(args) => net_join::run(args),
         Command::FpScreenshot(args) => fp_screenshot::run(args),
+        Command::NetScreenshot(args) => net_screenshot::run(args),
         Command::TelemetryCollector(args) => telemetry_collector::run(args),
         Command::NnCrabProbe(args) => nn_crab_probe::run(args),
         Command::NnCrabXpeer(args) => nn_crab_xpeer::run(args),

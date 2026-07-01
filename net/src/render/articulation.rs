@@ -108,3 +108,76 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crab_world::bot::body::{CrabJointId, Side};
+
+    /// Spawn one env-0 crab's keyed render parts — a carapace + one joint link — at the given
+    /// transforms, the minimal rig [`capture`]/[`apply`] key off (no physics/GPU needed).
+    fn spawn_parts(
+        world: &mut World,
+        carapace: Transform,
+        joint_id: CrabJointId,
+        joint: Transform,
+    ) -> (Entity, Entity) {
+        let cara = world.spawn((CrabBodyPart, CrabCarapace, CrabEnvId(0), carapace)).id();
+        let jnt = world
+            .spawn((
+                CrabBodyPart,
+                CrabJoint { id: joint_id, axis_local: Vec3::X },
+                CrabEnvId(0),
+                joint,
+            ))
+            .id();
+        (cara, jnt)
+    }
+
+    #[test]
+    fn capture_then_apply_reproduces_the_hosts_exact_pose() {
+        let joint_id = CrabJointId::ClawShoulder(Side::Left);
+        let cara_t = Transform::from_xyz(1.0, 2.0, 3.0).with_rotation(Quat::from_rotation_y(0.5));
+        let joint_t = Transform::from_xyz(-4.0, 0.25, 9.0).with_rotation(Quat::from_rotation_x(0.3));
+
+        // HOST: known part poses + a published giant-blow-up placement.
+        let mut host = World::new();
+        spawn_parts(&mut host, cara_t, joint_id, joint_t);
+        host.insert_resource(CrabSkinRepose(Some(SkinRepose {
+            shift: Vec3::new(10.0, 0.0, -20.0),
+            pivot: Vec3::Y,
+            scale: 8.0,
+        })));
+
+        // Capture and send it exactly as the transport does — through the wire codec.
+        let art = capture(&mut host, 42);
+        assert_eq!(art.tick, 42);
+        assert_eq!(art.parts.len(), 2);
+        let art = crate::articulation::CrabArticulation::from_bytes(&art.to_bytes()).unwrap();
+
+        // CLIENT: the SAME rig at DIFFERENT poses with no placement yet (a frozen just-spawned crab).
+        let mut client = World::new();
+        let (c_cara, c_joint) = spawn_parts(
+            &mut client,
+            Transform::from_xyz(-1.0, -1.0, -1.0),
+            joint_id,
+            Transform::from_xyz(5.0, 5.0, 5.0),
+        );
+        client.insert_resource(CrabSkinRepose(None));
+
+        apply(&mut client, &art);
+
+        // The client's parts + placement now match the host's EXACTLY — it renders the host's pose,
+        // never its own physics.
+        let got_cara = *client.entity(c_cara).get::<Transform>().unwrap();
+        let got_joint = *client.entity(c_joint).get::<Transform>().unwrap();
+        assert_eq!(got_cara.translation, cara_t.translation);
+        assert_eq!(got_cara.rotation, cara_t.rotation);
+        assert_eq!(got_joint.translation, joint_t.translation);
+        assert_eq!(got_joint.rotation, joint_t.rotation);
+        let repose = client.resource::<CrabSkinRepose>().0.expect("repose applied");
+        assert_eq!(repose.shift, Vec3::new(10.0, 0.0, -20.0));
+        assert_eq!(repose.pivot, Vec3::Y);
+        assert_eq!(repose.scale, 8.0);
+    }
+}
