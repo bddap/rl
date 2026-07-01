@@ -124,6 +124,7 @@ const MAX_YAW_PER_TICK_RADIANS: f32 =
 
 mod app;
 mod render_mode;
+mod articulation;
 mod driver;
 mod input;
 mod scene;

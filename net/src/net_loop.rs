@@ -30,7 +30,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use iroh::EndpointId;
 
+use crate::articulation::CrabArticulation;
 use crate::lockstep::{Lockstep, TickMsg};
+use crate::snapshot::CoreSnapshot;
 use crate::membership::{BEAT_EVERY, Membership, Role, Status};
 use crate::server::{self, Admission, JoinRequest, Server, TickSet, may_admit_joiner};
 use crate::sim::PlayerId;
@@ -53,10 +55,11 @@ pub struct PeerMsg {
 ///
 /// Post-formation the peer with the lowest endpoint id ([`PlayerId(0)`]) runs the match
 /// [`Server`]; every other peer is a remote client of it. A `NetDriver` carries enough to play
-/// either role: on the host it relays clients' inputs into its server and broadcasts the assembled
-/// sets ([`NetDriver::drain_client_inputs`]/[`NetDriver::broadcast_ticksets`]); on a client it
-/// ships its input UP to the server and drains the sets DOWN ([`NetDriver::send_to_server`]/
-/// [`NetDriver::drain_ticksets`]). The role is read off the id alone — no negotiation — so both
+/// either role: on the host it relays clients' inputs into its server and broadcasts the
+/// authoritative STATE ([`NetDriver::drain_client_inputs`]/[`NetDriver::broadcast_snapshot`] +
+/// [`NetDriver::broadcast_articulation`]); on a client it ships its input UP to the server and
+/// drains the state DOWN ([`NetDriver::send_to_server`]/[`NetDriver::drain_server_down`]) to adopt,
+/// never re-stepping (rl#151 increment 2 windowed). The role is read off the id alone — no negotiation — so both
 /// ends agree by construction. The [`Server`] itself lives in the [`Coordinator`], not here, so
 /// the host's server and the solo server are the one type down one path.
 pub struct NetDriver {
@@ -102,6 +105,15 @@ pub struct NetDriver {
 pub struct Exchanged {
     pub peer_msgs: Vec<PeerMsg>,
     pub roster_changes: Vec<crate::server::Admission>,
+    /// Host-authoritative game states this remote client drained (rl#151 increment 2 windowed):
+    /// the driver applies the highest `tick` via [`Lockstep::apply_core_snapshot`] instead of
+    /// stepping its own sim. Empty on the solo/host arm (its client reads the server it runs) and
+    /// on the scripted harness.
+    pub snapshots: Vec<CoreSnapshot>,
+    /// Render-only crab poses this remote client drained, beside the snapshots (rl#151 increment 2
+    /// windowed): the driver stashes the highest `tick` for the render-side apply. Empty off the
+    /// remote-client arm.
+    pub articulations: Vec<CrabArticulation>,
 }
 
 impl NetDriver {
@@ -225,7 +237,10 @@ impl NetDriver {
     }
 
     /// (Host) Broadcast the server-assembled sets DOWN to every client. Non-blocking buffered QUIC
-    /// writes; a dead client is dropped inside the session, not awaited.
+    /// writes; a dead client is dropped inside the session, not awaited. Superseded on the windowed
+    /// path by [`broadcast_snapshot`](Self::broadcast_snapshot) (rl#151 increment 2 windowed — the
+    /// host ships STATE, not the input set); retained for the still-present lockstep machinery
+    /// increment 5 removes.
     pub fn broadcast_ticksets(&self, sets: &[TickSet]) {
         if sets.is_empty() {
             return;
@@ -237,32 +252,56 @@ impl NetDriver {
         });
     }
 
-    /// (Client) Drain every assembled set received from the server so far. Non-blocking; stray
-    /// non-set frames are ignored (a client cares only about the server's sets).
-    pub fn drain_ticksets(&mut self) -> Vec<TickSet> {
-        self.drain_server_down().0
+    /// (Host) Broadcast the host-authoritative [`CoreSnapshot`] DOWN to every client (rl#151
+    /// increment 2 windowed): the windowed host ships the full game STATE its client just adopted,
+    /// so a remote client renders it instead of re-stepping. Non-blocking buffered QUIC writes.
+    pub fn broadcast_snapshot(&self, snapshot: &CoreSnapshot) {
+        self.rt.block_on(self.session.broadcast_snapshot(snapshot));
     }
 
-    /// (Client) Drain everything the server sent DOWN this tick: the assembled [`TickSet`]s AND any
-    /// roster changes (Stage 3 — a mid-game join the client must schedule, incl. one announcing the
-    /// client's OWN later co-joiners). A [`PeerWire::Refuse`] aimed at us is logged LOUD (a
-    /// established client should never get one; if it does the operator must see it), never silently
-    /// eaten. The inbox is drained ONCE here so set + roster-change frames can't starve each other.
-    pub fn drain_server_down(&mut self) -> (Vec<TickSet>, Vec<crate::server::Admission>) {
-        let mut sets = Vec::new();
-        let mut changes = Vec::new();
+    /// (Host) Broadcast the render-only [`CrabArticulation`] DOWN to every client (rl#151 increment
+    /// 2 windowed), beside the snapshot, so a remote client renders the host's exact crab pose
+    /// without simulating physics. Non-blocking buffered QUIC writes.
+    pub fn broadcast_articulation(&self, articulation: &CrabArticulation) {
+        self.rt.block_on(self.session.broadcast_articulation(articulation));
+    }
+
+    /// (Client) Drain everything the server sent DOWN this tick: host-authoritative
+    /// [`CoreSnapshot`]s (rl#151 increment 2 windowed — the client ADOPTS them, never re-steps a
+    /// [`TickSet`]), the render-only [`CrabArticulation`]s beside them, AND any roster changes (a
+    /// mid-game join to schedule). A [`PeerWire::Refuse`] aimed at us is logged LOUD (an established
+    /// client should never get one), never silently eaten. A stray [`PeerWire::TickSet`] — the
+    /// pre-snapshot path — is ignored on the `/7` wire. Drained ONCE so no frame kind starves
+    /// another; latest-wins ordering (highest `tick`) is the caller's to apply.
+    pub fn drain_server_down(&mut self) -> ServerDown {
+        let mut down = ServerDown::default();
         while let Some(from) = self.session.try_recv() {
             match from.msg {
-                PeerWire::TickSet(set) => sets.push(set),
-                PeerWire::RosterChange(adm) => changes.push(adm),
+                PeerWire::Snapshot(snap) => down.snapshots.push(snap),
+                PeerWire::Articulation(art) => down.articulations.push(art),
+                PeerWire::RosterChange(adm) => down.roster_changes.push(adm),
                 PeerWire::Refuse(reason) => {
                     tracing::error!("server refused us mid-match: {reason}");
                 }
                 _ => {}
             }
         }
-        (sets, changes)
+        down
     }
+}
+
+/// Everything a windowed client drained from the server this frame (rl#151 increment 2 windowed).
+/// The client adopts the newest [`CoreSnapshot`] and renders the newest [`CrabArticulation`]
+/// (latest-wins by `tick`), and schedules any roster change. Grouped so the single inbox drain
+/// yields them together without one frame kind starving another.
+#[derive(Default)]
+pub struct ServerDown {
+    /// Host-authoritative game states, in arrival order (the caller applies the highest `tick`).
+    pub snapshots: Vec<CoreSnapshot>,
+    /// Render-only crab poses, in arrival order (the caller renders the highest `tick`).
+    pub articulations: Vec<CrabArticulation>,
+    /// Mid-game roster changes for the client to schedule.
+    pub roster_changes: Vec<Admission>,
 }
 
 /// One peer's per-tick input coordination — the server-coordinated replacement for the deleted P2P
@@ -305,8 +344,9 @@ impl Coordinator {
                     net: Some(d),
                 }
             }
-            // A remote client steps its own [`Lockstep`] (transitional, until increment 2 migrates
-            // it onto the host's snapshot), so it has no authoritative server and `sim` goes unused.
+            // A remote client ADOPTS the host's per-tick snapshot into its OWN `ls` (rl#151 increment
+            // 2 windowed — no re-sim), so the Coordinator holds no authoritative server and this
+            // tick-0 `sim` goes unused (the client's `GameState.ls` is what the snapshots advance).
             Some(d) => {
                 let _ = sim;
                 Coordinator::Client { net: d }
@@ -314,10 +354,10 @@ impl Coordinator {
         }
     }
 
-    /// Submit our input for this tick and return the OTHER players' inputs to record — every path
-    /// (solo / host / client) lands here, so the lockstep driver above is identical regardless of
-    /// role. The host also ingests its remote clients' inputs and broadcasts the assembled sets; the
-    /// client ships its input up and drains the sets down.
+    /// Submit our input for this tick. On the solo/host arm this returns the OTHER players' inputs to
+    /// record and steps the authoritative server behind the scenes; on the remote-client arm it ships
+    /// our input UP and returns the host's STATE drained down (snapshots + articulation) for the
+    /// driver to adopt — no peer inputs, no re-sim (rl#151 increment 2 windowed).
     pub fn exchange(&mut self, me: PlayerId, msg: TickMsg) -> Exchanged {
         match self {
             Coordinator::Server { server, net } => {
@@ -339,21 +379,55 @@ impl Coordinator {
                 // `Coordinator` path enqueues — the headless `game net` host assembles + steps its own
                 // lockstep directly, so it never grows this queue.
                 server.enqueue_for_step(&sets);
-                if let Some(net) = net.as_ref() {
-                    net.broadcast_ticksets(&sets);
+                // The host no longer fans the input SETS down (rl#151 increment 2 windowed): it
+                // broadcasts the authoritative snapshot + articulation from the driver, the moment
+                // it steps each tick (see `Coordinator::broadcast_step`), so a client renders state
+                // rather than re-stepping inputs. `sets` still feed THIS server's own step queue.
+                Exchanged {
+                    peer_msgs,
+                    roster_changes,
+                    snapshots: Vec::new(),
+                    articulations: Vec::new(),
                 }
-                Exchanged { peer_msgs, roster_changes }
             }
             Coordinator::Client { net } => {
+                // Host-authoritative (rl#151 increment 2 windowed): ship our input UP and drain the
+                // host's STATE down (snapshots + render articulation), never an input set to
+                // re-step. `peer_msgs` stays empty — the client records no peer inputs; the driver
+                // applies the newest snapshot to its sim and renders the newest articulation.
                 net.send_to_server(&msg);
-                let (sets, roster_changes) = net.drain_server_down();
-                let peer_msgs = sets
-                    .iter()
-                    .flat_map(|s| server::unpack_tickset(s, me))
-                    .collect();
-                Exchanged { peer_msgs, roster_changes }
+                let down = net.drain_server_down();
+                Exchanged {
+                    peer_msgs: Vec::new(),
+                    roster_changes: down.roster_changes,
+                    snapshots: down.snapshots,
+                    articulations: down.articulations,
+                }
             }
         }
+    }
+
+    /// (Host) Broadcast the authoritative game STATE for the tick the server just stepped: the
+    /// `snapshot` bytes it emitted plus the render-only crab `articulation` (rl#151 increment 2
+    /// windowed). Called by the windowed driver right after `Server::step_next`, so a remote client
+    /// adopts exactly the state the host holds and renders its exact crab pose. A no-op for solo (no
+    /// transport) and for a remote client (it broadcasts nothing). `snapshot` is the already-encoded
+    /// bytes the driver decoded to apply locally, reused so the wire and the local render agree.
+    pub fn broadcast_step(&self, snapshot: &CoreSnapshot, articulation: Option<&CrabArticulation>) {
+        if let Coordinator::Server { net: Some(net), .. } = self {
+            net.broadcast_snapshot(snapshot);
+            if let Some(art) = articulation {
+                net.broadcast_articulation(art);
+            }
+        }
+    }
+
+    /// Whether THIS peer is a REMOTE client of another peer's server (rl#151 increment 2 windowed):
+    /// it adopts the host's snapshots + renders its articulation, never pumping its own crab physics
+    /// or stepping the sim. Distinct from the scripted screenshot harness, which self-sims. The
+    /// authoritative solo/host peer returns `false` (it runs [`Self::is_server_authoritative`]).
+    pub fn is_remote_client(&self) -> bool {
+        matches!(self, Coordinator::Client { .. })
     }
 
     /// Whether this is a solo round (the server with a roster of one and no transport). Drives the
@@ -365,9 +439,10 @@ impl Coordinator {
 
     /// Whether THIS peer runs the authoritative server for the round (solo or host) — so its local
     /// client renders the per-tick [`CoreSnapshot`] the server emits instead of stepping its own
-    /// sim (rl#151 increment 1). A remote client returns `false` and keeps stepping its lockstep
-    /// (transitional, until increment 2). This is the Minecraft-model server/client role, NOT an
-    /// SP/MP split — SP and host take the SAME arm ([[sp-is-mp-special-case]]).
+    /// sim (rl#151 increment 1). A remote client returns `false` and instead ADOPTS the host's
+    /// snapshots ([`Self::is_remote_client`], rl#151 increment 2 windowed). This is the
+    /// Minecraft-model server/client role, NOT an SP/MP split — SP and host take the SAME arm
+    /// ([[sp-is-mp-special-case]]).
     pub fn is_server_authoritative(&self) -> bool {
         matches!(self, Coordinator::Server { .. })
     }
@@ -1146,6 +1221,7 @@ async fn run_barrier(
                 // mid-game join is handled by the running coordinator, not the formation barrier.
                 PeerWire::TickSet(_)
                 | PeerWire::Snapshot(_)
+                | PeerWire::Articulation(_)
                 | PeerWire::JoinRequest(_)
                 | PeerWire::RosterChange(_)
                 | PeerWire::Refuse(_)
