@@ -172,6 +172,9 @@ async fn run_net(args: Args) -> Result<()> {
                         snapshots.push(snap);
                     }
                 }
+                // Render-only crab pose (rl#151 increment 2 windowed): this HEADLESS harness renders
+                // nothing, so it decodes and drops it. Only the windowed client applies it.
+                transport::PeerWire::Articulation(_) => {}
                 transport::PeerWire::Beat(_) => {}
                 // A `TickSet` (server→client input set) is the pre-increment-2 remote path; a `/6`
                 // host no longer broadcasts one (it ships snapshots), and the ALPN bump keeps a `/5`

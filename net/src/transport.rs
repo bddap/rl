@@ -25,6 +25,7 @@ use crate::lockstep::{Confirmed, TickMsg};
 use crate::membership::{self, Beat};
 use crate::server::{Admission, JoinRequest, TickSet};
 use crate::sim::{Input, PlayerId};
+use crate::articulation::CrabArticulation;
 use crate::snapshot::CoreSnapshot;
 
 /// ALPN for the game's wire. The framing is `[len:u32 LE][kind:u8][body]`, where
@@ -40,8 +41,11 @@ use crate::snapshot::CoreSnapshot;
 /// `/6` added the host-authoritative [`Frame::Snapshot`] (rl#151 increment 2): the host
 /// broadcasts full game STATE down, not the input set, so a `/5` peer (which expects
 /// [`TickSet`]s and re-steps) and a `/6` peer can't interoperate — the bump makes them refuse
-/// rather than silently diverge.
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/6";
+/// rather than silently diverge. `/7` added the render-only [`Frame::Articulation`] the windowed
+/// host broadcasts beside each snapshot (rl#151 increment 2 windowed) so a joiner renders the
+/// host's exact crab pose without running its own physics; a `/6` peer would reject the unknown
+/// kind mid-stream, so the bump makes the two refuse to connect instead.
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/7";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
@@ -82,6 +86,12 @@ pub(crate) enum Frame {
     /// warm-vs-cold physics divergence that killed lockstep join never crosses the link. The `tick`
     /// inside is the version — a client applies the highest it has seen and drops older arrivals.
     Snapshot = 7,
+    /// A server→client [`CrabArticulation`]: the render-only per-part crab pose for one tick (rl#151
+    /// increment 2 windowed), broadcast beside a [`Frame::Snapshot`]. Not authoritative — float
+    /// render garnish a windowed client writes onto its own frozen crab so it renders the host's
+    /// exact pose without simulating physics. The `tick` inside is the version; a headless client
+    /// (which renders nothing) decodes and ignores it.
+    Articulation = 8,
 }
 
 impl Frame {
@@ -95,6 +105,7 @@ impl Frame {
             5 => Some(Frame::Refuse),
             6 => Some(Frame::Welcome),
             7 => Some(Frame::Snapshot),
+            8 => Some(Frame::Articulation),
             _ => None,
         }
     }
@@ -126,6 +137,10 @@ pub enum PeerWire {
     /// increment 2). The client adopts it via [`crate::lockstep::Lockstep::apply_core_snapshot`]
     /// instead of stepping its own sim.
     Snapshot(CoreSnapshot),
+    /// The render-only crab pose for one tick, received by a windowed remote client (rl#151
+    /// increment 2 windowed). Written onto the client's frozen crab render entities via
+    /// `net::render`; a headless client ignores it.
+    Articulation(CrabArticulation),
 }
 
 /// Wire sentinel for [`TickMsg::confirmed`] == `None`. `u64::MAX` as the tick can
@@ -276,6 +291,23 @@ impl Codec for CoreSnapshot {
         // Surface a malformed host snapshot LOUDLY (closing the link) — a client must never render
         // a half-decoded authoritative state ([[silent-fallback-antipattern]]).
         CoreSnapshot::from_bytes(body).map_err(|e| anyhow::anyhow!("decoding snapshot frame: {e}"))
+    }
+}
+
+impl Codec for CrabArticulation {
+    const KIND: Frame = Frame::Articulation;
+    type Bytes = Vec<u8>;
+
+    /// The body layout is owned by [`crate::articulation`]; transport owns only the kind byte.
+    fn encode(&self) -> Vec<u8> {
+        self.to_bytes()
+    }
+
+    fn decode(body: &[u8]) -> Result<Self> {
+        // Fail LOUDLY on a malformed pose — a client must never render a half-decoded articulation
+        // (though a DROPPED one is merely a skipped render frame, superseded by the next tick).
+        CrabArticulation::from_bytes(body)
+            .map_err(|e| anyhow::anyhow!("decoding articulation frame: {e}"))
     }
 }
 
@@ -584,6 +616,14 @@ impl Session {
         self.broadcast(snapshot).await;
     }
 
+    /// Broadcast a render-only [`CrabArticulation`] DOWN to every client (rl#151 increment 2
+    /// windowed) — the windowed host ships it beside each [`CoreSnapshot`] so a joiner renders the
+    /// host's exact crab pose. A concrete facade over the generic [`Session::broadcast`], keeping
+    /// [`Codec`] crate-private (the windowed host fans out through [`crate::net_loop::NetDriver`]).
+    pub async fn broadcast_articulation(&self, articulation: &CrabArticulation) {
+        self.broadcast(articulation).await;
+    }
+
     /// Frame `body` with `kind` + length and send it to one `peer` (the unicast analogue of
     /// [`Self::broadcast_frame`]). A send failure drops that link — the same policy as the broadcast
     /// path. No link to `peer` is a no-op (surfaced as the higher-level stall, not a panic).
@@ -845,6 +885,7 @@ async fn read_loop(
             Frame::Refuse => PeerWire::Refuse(Refuse::decode(body)?.0),
             Frame::Welcome => PeerWire::Welcome(Welcome::decode(body)?.0),
             Frame::Snapshot => PeerWire::Snapshot(CoreSnapshot::decode(body)?),
+            Frame::Articulation => PeerWire::Articulation(CrabArticulation::decode(body)?),
         };
         if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
             return Ok(()); // session dropped
@@ -909,8 +950,27 @@ mod tests {
         assert_eq!(Frame::from_byte(5), Some(Frame::Refuse));
         assert_eq!(Frame::from_byte(6), Some(Frame::Welcome));
         assert_eq!(Frame::from_byte(7), Some(Frame::Snapshot));
-        assert_eq!(Frame::from_byte(8), None);
+        assert_eq!(Frame::from_byte(8), Some(Frame::Articulation));
+        assert_eq!(Frame::from_byte(9), None);
         assert_eq!(Frame::from_byte(0xff), None);
+    }
+
+    #[test]
+    fn articulation_wire_roundtrips() {
+        use crate::articulation::{CrabArticulation, PartTransform, ReposeWire};
+        // A render pose round-trips byte-for-byte through the frame codec, and a truncated body is a
+        // loud error (never a half-decoded pose on the client).
+        let art = CrabArticulation {
+            tick: 909,
+            parts: vec![
+                PartTransform { part: 0, pos: [0.5, -1.0, 2.0], rot: [0.0, 0.0, 0.0, 1.0] },
+                PartTransform { part: 12, pos: [3.0, 4.0, 5.0], rot: [0.5, 0.5, 0.5, 0.5] },
+            ],
+            repose: Some(ReposeWire { shift: [1.0, 0.0, -2.0], pivot: [0.0, 0.5, 0.0], scale: 9.0 }),
+        };
+        let body = CrabArticulation::encode(&art);
+        assert_eq!(CrabArticulation::decode(&body).unwrap(), art);
+        assert!(CrabArticulation::decode(&body[..body.len() - 1]).is_err());
     }
 
     #[test]
