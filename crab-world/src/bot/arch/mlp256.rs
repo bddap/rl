@@ -1,7 +1,7 @@
 //! `mlp256` — the founding architecture leaf: a 256-wide two-layer MLP trunk feeding
 //! separate policy (actor) and value (critic) heads, with a state-independent learnable
-//! per-dim `log_std`. Formerly `CrabBrain`; renamed when the registry landed (bddap/rl#200)
-//! because a leaf named "the crab brain" is a drift seed once there are N crab brains.
+//! per-dim `log_std`. Named for its shape, not "the crab brain" — a name that claims to
+//! BE the policy is a drift seed once N architectures live behind the seam (bddap/rl#200).
 
 use burn::module::Param;
 use burn::nn;
