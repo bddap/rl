@@ -13,12 +13,12 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 use burn::backend::ndarray::NdArrayDevice;
-use burn::module::{AutodiffModule, Module};
-use burn::record::{BinFileRecorder, FullPrecisionSettings, Recorder};
+use burn::module::AutodiffModule;
+use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use burn::tensor::Tensor;
 
 use crate::bot::actuator::ACTION_SIZE;
-use crate::bot::brain::CrabBrain;
+use crate::bot::arch::{AnyBrain, ArchId};
 use crate::bot::sensor::OBS_SIZE;
 use crate::training::checkpoint::CheckpointDir;
 use crate::training::normalizer::{NORMALIZER_CLIP, ObsNormalizer};
@@ -67,7 +67,7 @@ enum PolicyState {
     /// hence no digest, hence — by construction, not by a runtime `!= 0` check — can never
     /// enter networked lockstep (`weights_digest()` is `None`).
     Diagnostic {
-        brain: CrabBrain<InferBackend>,
+        brain: AnyBrain<InferBackend>,
         normalizer: ObsNormalizer,
     },
     /// A real checkpoint's brain drives the crab. `digest` is a stable hash of the checkpoint
@@ -77,7 +77,7 @@ enum PolicyState {
     /// zero/stale digest riding alongside a loaded brain was a silent-desync trap; the type now
     /// forbids it.
     Loaded {
-        brain: CrabBrain<InferBackend>,
+        brain: AnyBrain<InferBackend>,
         normalizer: ObsNormalizer,
         digest: NonZeroU64,
     },
@@ -102,16 +102,18 @@ pub fn checkpoint_digest(dir: &Path) -> u64 {
 /// is absent or won't deserialize. The ONE way a brain is read off disk — shared by the
 /// normalizer-paired loader and the rig-fit check ([`checkpoint_fits_rig`]) so the two
 /// can't drift on how a checkpoint is parsed.
-fn load_brain(dir: &Path, device: &NdArrayDevice) -> Option<CrabBrain<InferBackend>> {
+fn load_brain(dir: &Path, device: &NdArrayDevice) -> Option<AnyBrain<InferBackend>> {
     let paths = CheckpointDir::new(dir);
     if !paths.brain_file().exists() {
         return None;
     }
+    // `brain.bin` is an UN-tagged mlp256 leaf record until increment 2's envelope lands;
+    // the arch to decode is pinned here, and the envelope tag will replace this pin.
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-    let record = recorder.load(paths.brain_stem(), device).ok()?;
     Some(
-        CrabBrain::<TrainBackend>::new(device)
-            .load_record(record)
+        AnyBrain::<TrainBackend>::init(ArchId::Mlp256, device)
+            .load_leaf_record(&recorder, paths.brain_stem(), device)
+            .ok()?
             .valid(),
     )
 }
@@ -176,7 +178,7 @@ pub enum RigFit {
 #[allow(clippy::large_enum_variant)]
 enum Loaded {
     /// Brain + normalizer parsed and the dims fit the rig — arm the NN crab with it.
-    Fit(CrabBrain<InferBackend>, ObsNormalizer),
+    Fit(AnyBrain<InferBackend>, ObsNormalizer),
     /// No readable `brain.bin`: the file is absent, or a hot-reload raced a mid-save
     /// write and got a torn read. The LEGITIMATE "no brain yet" case — keep the current
     /// policy / hold the neutral rest pose. Not an error.
@@ -242,7 +244,7 @@ fn log_rig_mismatch(surface: &str, dir: &Path, dims: RigDims) {
 /// into the lockstep hash pretending to. Shared by the initial load and the hot-reload so the
 /// two can't disagree on how a digest becomes a state.
 fn loaded_state(
-    brain: CrabBrain<InferBackend>,
+    brain: AnyBrain<InferBackend>,
     normalizer: ObsNormalizer,
     digest: u64,
 ) -> PolicyState {
@@ -281,7 +283,7 @@ impl Policy {
                     checkpoint_dir.display()
                 );
                 PolicyState::Diagnostic {
-                    brain: CrabBrain::<TrainBackend>::new(&device).valid(),
+                    brain: AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device).valid(),
                     normalizer: ObsNormalizer::new(NORMALIZER_CLIP),
                 }
             }
@@ -411,9 +413,10 @@ impl Policy {
         let obs = normalizer.normalize_frozen(raw_obs);
         let input =
             Tensor::<InferBackend, 1>::from_floats(obs.as_slice(), &self.device).unsqueeze();
-        // Eval/demo is deterministic: it takes the policy MEAN and discards `log_std`, so the
-        // exploration-σ floor never reaches a deployed action. Pass the resting floor.
-        let (means, _log_std) = brain.policy(input, crate::bot::brain::LOG_STD_MIN);
+        // Eval/demo is deterministic: it takes the policy MEAN and discards `log_std`
+        // entirely — no `GaussianHead` is built, so the exploration-σ floor never
+        // reaches a deployed action by construction.
+        let (means, _log_std) = brain.policy(input);
         let flat: Vec<f32> = means.flatten::<1>(0, 1).to_data().to_vec().unwrap();
 
         let mut out = [0.0f32; ACTION_SIZE];
@@ -432,17 +435,64 @@ impl Policy {
 mod tests {
     use super::*;
     use burn::prelude::Module;
+    use burn::record::Recorder;
 
-    /// Save a freshly-initialised brain into `dir` the way training does, so a
-    /// hot-reload has a real checkpoint file to pick up.
+    use crate::bot::arch::Mlp256;
+
+    /// Save a freshly-initialised brain into `dir` the way training does (the LEAF
+    /// record — see [`AnyBrain::record_leaf`]), so a hot-reload has a real checkpoint
+    /// file to pick up.
     fn save_brain(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
         let device = NdArrayDevice::Cpu;
-        let brain = CrabBrain::<TrainBackend>::new(&device);
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
         let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-        recorder
-            .record(brain.into_record(), CheckpointDir::new(dir).brain_stem())
+        brain
+            .record_leaf(&recorder, CheckpointDir::new(dir).brain_stem())
             .unwrap();
+    }
+
+    /// GOLDEN FILE (bddap/rl#200 increment 1): `tests/data/golden-mlp256/brain.bin` was
+    /// written by pre-`AnyBrain` main (`CrabBrain` + `BinFileRecorder`), and `actions.hex`
+    /// holds the bit patterns `Policy::act` produced on this fixture obs at that commit.
+    /// Loading it through today's loader and reproducing those bits EXACTLY proves (a) the
+    /// on-disk record format did not drift (e.g. an enum-index prefix from accidentally
+    /// round-tripping `AnyBrainRecord` — which would strand every fleet checkpoint on the
+    /// quiet rest-pose path while all save/load-symmetric tests stayed green), and (b) the
+    /// seam refactor left deployed actions bit-identical.
+    #[test]
+    fn golden_main_checkpoint_loads_and_acts_bit_identically() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256");
+
+        let policy = Policy::load(&dir);
+        assert!(
+            policy.is_loaded(),
+            "the pre-AnyBrain golden brain.bin no longer loads — the on-disk brain record \
+             format drifted (fleet checkpoints would silently fall to the rest pose)"
+        );
+
+        // Same fixture the generator used: deterministic, integer-derived (no libm).
+        let mut obs = [0.0f32; OBS_SIZE];
+        for (i, o) in obs.iter_mut().enumerate() {
+            *o = ((i * 37 % 101) as f32) / 50.5 - 1.0;
+        }
+        let expected: Vec<u32> = std::fs::read_to_string(dir.join("actions.hex"))
+            .expect("read golden actions.hex")
+            .lines()
+            .map(|l| u32::from_str_radix(l.trim(), 16).expect("parse golden bits"))
+            .collect();
+        assert_eq!(
+            expected.len(),
+            ACTION_SIZE,
+            "golden fixture is for this rig"
+        );
+
+        let act = policy.act(&obs);
+        let got: Vec<u32> = act.iter().map(|v| v.to_bits()).collect();
+        assert_eq!(
+            got, expected,
+            "actions on the fixture obs are not bit-identical to pre-AnyBrain main"
+        );
     }
 
     /// The demo's "always fresh" guarantee: when training writes a new checkpoint
@@ -506,15 +556,17 @@ mod tests {
 
     /// Save a brain whose first trunk layer expects `obs_dim` inputs instead of the
     /// current `OBS_SIZE` — the on-disk shape a checkpoint from an older rig has. We
-    /// can't get one from `CrabBrain::new` (it bakes in today's `OBS_SIZE`), so swap
+    /// can't get one from `Mlp256::new` (it bakes in today's `OBS_SIZE`), so swap
     /// the `trunk_fc1` weight in the record for a `[obs_dim, HIDDEN]` tensor before
     /// recording. This is exactly the file that used to reach the matmul and panic.
+    /// Built on the LEAF module directly: what lands on disk is the same leaf record
+    /// production writes.
     fn save_brain_with_obs_dim(dir: &Path, obs_dim: usize) {
         use burn::module::{Param, ParamId};
         use burn::tensor::Tensor;
         std::fs::create_dir_all(dir).unwrap();
         let device = NdArrayDevice::Cpu;
-        let mut record = CrabBrain::<TrainBackend>::new(&device).into_record();
+        let mut record = Mlp256::<TrainBackend>::new(&device).into_record();
         let [_obs, hidden] = record.trunk_fc1.weight.shape().dims();
         let weight = Tensor::<TrainBackend, 2>::zeros([obs_dim, hidden], &device);
         record.trunk_fc1.weight = Param::initialized(ParamId::new(), weight);
@@ -620,15 +672,7 @@ mod tests {
         assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Missing));
 
         // A current-rig brain fits.
-        let device = NdArrayDevice::Cpu;
-        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-        std::fs::create_dir_all(&dir).unwrap();
-        recorder
-            .record(
-                CrabBrain::<TrainBackend>::new(&device).into_record(),
-                CheckpointDir::new(&dir).brain_stem(),
-            )
-            .unwrap();
+        save_brain(&dir);
         assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Ok));
 
         // A stale brain is a Mismatch carrying its own obs dim (what the gate reports).

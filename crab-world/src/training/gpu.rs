@@ -8,7 +8,6 @@ use std::path::Path;
 
 use burn::backend::Autodiff;
 use burn::backend::ndarray::NdArrayDevice;
-use burn::module::Module;
 use burn::tensor::backend::AutodiffBackend;
 use rand::rngs::StdRng;
 use tracing::info;
@@ -17,7 +16,7 @@ use super::TrainBackend;
 use super::algorithm::{PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer};
 use super::checkpoint::{CrabOpt, crab_optimizer, load_optimizer, save_optimizer};
 use super::update::ppo_update_core;
-use crate::bot::brain::CrabBrain;
+use crate::bot::arch::{AnyBrain, ArchId};
 
 /// The GPU training backend: `Autodiff<Wgpu>` over Vulkan. The live learner runs the
 /// one generic [`ppo_update_core`] on this — the same update the CPU-backed parity test
@@ -118,7 +117,7 @@ pub(crate) struct GpuUpdateTiming {
 /// `GpuLearner::new()`) unchanged.
 pub(crate) struct GpuLearner<B: AutodiffBackend = GpuBackend> {
     device: B::Device,
-    brain: CrabBrain<B>,
+    brain: AnyBrain<B>,
     optimizer: CrabOpt<B>,
 }
 
@@ -143,7 +142,9 @@ impl<B: AutodiffBackend> GpuLearner<B> {
     /// pins `B = GpuBackend` and runs the software-adapter gate, so the non-GPU constructor
     /// can't be reached from outside the crate to build a CPU "GPU learner" in production.
     pub(crate) fn with_device(device: B::Device) -> Self {
-        let brain: CrabBrain<B> = CrabBrain::new(&device);
+        // Same variant as the CPU brain it mirrors (see `update`'s leaf-record bridge);
+        // the arch threads in with increment 4's `--arch` flag.
+        let brain: AnyBrain<B> = AnyBrain::init(ArchId::Mlp256, &device);
         let optimizer: CrabOpt<B> = crab_optimizer();
         Self {
             device,
@@ -162,7 +163,7 @@ impl<B: AutodiffBackend> GpuLearner<B> {
     #[tracing::instrument(skip_all)]
     pub fn update(
         &mut self,
-        cpu_brain: &mut CrabBrain<TrainBackend>,
+        cpu_brain: &mut AnyBrain<TrainBackend>,
         config: &PpoConfig,
         rollouts: &[RolloutBuffer],
         ret_norm: &mut ReturnNormalizer,
@@ -172,18 +173,21 @@ impl<B: AutodiffBackend> GpuLearner<B> {
         // behavior policy (see [`ppo_update_core`]).
         log_std_floor: f32,
     ) -> (PpoMetrics, GpuUpdateTiming) {
-        use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
+        use burn::record::{BinBytesRecorder, FullPrecisionSettings};
         type Bridge = BinBytesRecorder<FullPrecisionSettings>;
 
-        // CPU → GPU: serialize the CPU policy to bincode, then load it into the GPU brain.
+        // CPU → GPU: serialize the CPU policy's LEAF record to bincode, then load it into
+        // the GPU brain. `load_leaf_record` decodes the GPU brain's own variant, so a
+        // cross-variant bridge fails loudly here instead of training the wrong net.
         let t_load = std::time::Instant::now();
-        let bytes = Bridge::default()
-            .record(cpu_brain.clone().into_record(), ())
+        let bytes = cpu_brain
+            .record_leaf(&Bridge::default(), ())
             .expect("serialize CPU brain for GPU update");
-        let record = Bridge::default()
-            .load(bytes, &self.device)
+        self.brain = self
+            .brain
+            .clone()
+            .load_leaf_record(&Bridge::default(), bytes, &self.device)
             .expect("load brain record onto GPU");
-        self.brain = self.brain.clone().load_record(record);
         let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
 
         // GPU: the one production update, on the device. `ppo_update_core` reads each
@@ -211,14 +215,15 @@ impl<B: AutodiffBackend> GpuLearner<B> {
         // GPU → CPU: mirror the updated weights back so the next rollout snapshot +
         // the checkpoint (both off the CPU brain) carry this iteration's update.
         let t_store = std::time::Instant::now();
-        let bytes = Bridge::default()
-            .record(self.brain.clone().into_record(), ())
+        let bytes = self
+            .brain
+            .record_leaf(&Bridge::default(), ())
             .expect("serialize GPU brain back to CPU");
         let cpu_device = NdArrayDevice::Cpu;
-        let record = Bridge::default()
-            .load(bytes, &cpu_device)
+        *cpu_brain = cpu_brain
+            .clone()
+            .load_leaf_record(&Bridge::default(), bytes, &cpu_device)
             .expect("load updated brain record onto CPU");
-        *cpu_brain = cpu_brain.clone().load_record(record);
         let store_ms = t_store.elapsed().as_secs_f64() * 1000.0;
 
         (
@@ -254,9 +259,9 @@ mod tests {
     use burn::tensor::Tensor;
     use rand::SeedableRng;
 
-    fn policy_means(brain: &CrabBrain<TrainBackend>, device: &NdArrayDevice) -> Vec<f32> {
+    fn policy_means(brain: &AnyBrain<TrainBackend>, device: &NdArrayDevice) -> Vec<f32> {
         let obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], device);
-        brain.policy(obs, crate::bot::brain::LOG_STD_MIN).0.to_data().to_vec().unwrap()
+        brain.policy(obs).0.to_data().to_vec().unwrap()
     }
 
     /// The injected-device seam lets the CPU↔device marshalling + timing path run with NO
@@ -269,7 +274,7 @@ mod tests {
     fn cpu_device_seam_round_trips_brain_through_update() {
         let device = NdArrayDevice::Cpu;
         let mut learner = GpuLearner::<TrainBackend>::with_device(device);
-        let mut cpu_brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let mut cpu_brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
         let before = policy_means(&cpu_brain, &device);
 
         // Empty rollouts ⇒ ppo_update_core is a no-op, so update() exercises purely the
@@ -283,7 +288,7 @@ mod tests {
             &[],
             &mut ret_norm,
             &mut rng,
-            crate::bot::brain::LOG_STD_MIN,
+            crate::bot::arch::LOG_STD_MIN,
         );
 
         let after = policy_means(&cpu_brain, &device);

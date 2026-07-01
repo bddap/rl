@@ -47,7 +47,7 @@ pub(crate) struct PpoConfig {
     /// `log_std_floor_end` for refinement. Composed with the OU temporally-correlated noise
     /// ([`OuNoise`]), early exploration is both WIDE and coherent: the best shot at stumbling
     /// into a coordinated 38-DOF gait. The schedule clamps `log_std` from below (see
-    /// [`CrabBrain::policy`]); the learned param sits beneath the early floor, so the floor —
+    /// [`crate::bot::arch::GaussianHead`]); the learned param sits beneath the early floor, so the floor —
     /// not the (KL-throttled) entropy gradient — does the widening. TRAINING exploration only:
     /// eval/demo takes the policy MEAN, so the floor never reaches a deployed action.
     ///
@@ -116,7 +116,7 @@ impl Default for PpoConfig {
             // to OU correlation) and anneal to LOG_STD_MIN (σ≈0.135), the resting clamp, over
             // ~5M ticks (~1200 iters at 4096 ticks/iter). Tunable without a rebuild.
             log_std_floor_start: env_or("RL_LOG_STD_FLOOR_START", -0.7),
-            log_std_floor_end: env_or("RL_LOG_STD_FLOOR_END", crate::bot::brain::LOG_STD_MIN),
+            log_std_floor_end: env_or("RL_LOG_STD_FLOOR_END", crate::bot::arch::LOG_STD_MIN),
             log_std_anneal_ticks: env_or("RL_LOG_STD_ANNEAL_TICKS", 5_000_000),
         }
     }
@@ -408,8 +408,7 @@ pub(crate) fn compute_gae(
     // `Continues` tail (`RolloutBuffer::bootstrap`), already on the CPU rollout backend.
     // `None` ⟹ a `Terminal`/`Truncated` tail (the per-step `match` below ignores this
     // seed) or an empty buffer; the 0 fallback is then inert.
-    let mut next_value =
-        ret_norm.denormalize(buffer.bootstrap.unwrap_or(NormalizedValue(0.0)));
+    let mut next_value = ret_norm.denormalize(buffer.bootstrap.unwrap_or(NormalizedValue(0.0)));
 
     for i in (0..n).rev() {
         let t = &buffer.transitions[i];
@@ -449,43 +448,6 @@ pub(crate) fn compute_gae(
     (advantages, returns)
 }
 
-/// Log-space throughout to avoid dividing by a tiny variance.
-pub(crate) fn compute_log_prob<B: Backend>(
-    means: &Tensor<B, 1>,
-    log_std: &Tensor<B, 1>,
-    actions: &Tensor<B, 1>,
-) -> f32 {
-    // log_std arrives pre-clamped from CrabBrain::policy (single source of truth).
-    let diff = actions.clone() - means.clone();
-    // log p = -0.5 * ((a - mu) / sigma)^2 - log(sigma) - 0.5 * log(2*pi)
-    let scaled_diff = diff / log_std.clone().exp();
-    let log_probs = scaled_diff.powf_scalar(2.0).neg() * 0.5
-        - log_std.clone()
-        - 0.5 * (2.0 * std::f32::consts::PI).ln();
-    log_probs.sum().into_scalar().elem::<f32>()
-}
-
-/// Diagonal-Gaussian log-prob of each action ROW under a shared per-dim `log_std`:
-/// `Σ_d [ -0.5·((aᵈ-μᵈ)/σᵈ)² - ln σᵈ - 0.5·ln(2π) ]`. The ONE batched form of
-/// [`compute_log_prob`], used by the PPO update for BOTH the pre-update behavior
-/// log-prob (`π_old`, recomputed on the update backend so the importance ratio starts
-/// at 1) and each minibatch's `π_new` — one formula, so the two can't drift. Generic
-/// over the backend; the autodiff graph flows through `means`/`log_std` for `π_new`
-/// and is detached by the caller for `π_old`.
-pub(crate) fn gaussian_log_prob_rows<B: Backend>(
-    means: Tensor<B, 2>,
-    log_std: Tensor<B, 1>,
-    actions: Tensor<B, 2>,
-) -> Tensor<B, 1> {
-    let rows = means.dims()[0];
-    let log_std_2d = log_std.unsqueeze_dim::<2>(0).expand([rows, ACTION_SIZE]);
-    let scaled_diff = (actions - means) / log_std_2d.clone().exp();
-    let half_log_2pi = 0.5 * (2.0 * std::f32::consts::PI).ln();
-    (scaled_diff.powf_scalar(2.0).neg() * 0.5 - log_std_2d - half_log_2pi)
-        .sum_dim(1)
-        .flatten::<1>(0, 1)
-}
-
 /// Draw one standard-normal sample (N(0,1)) from `rng` via the Box–Muller transform.
 /// `rand 0.8` has no normal distribution in core and `rand_distr` tracks a later `rand`
 /// (incompatible RNG traits) — so rather than carry that dep, this keeps the noise source
@@ -496,31 +458,6 @@ fn next_standard_normal(rng: &mut StdRng) -> f32 {
     let u1: f32 = 1.0 - rng.r#gen::<f32>();
     let u2: f32 = rng.r#gen::<f32>();
     (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
-}
-
-/// Sample one DRIVE per joint from the Gaussian policy: `dᵢ = μᵢ + σ·εᵢ`, UN-clamped.
-///
-/// Returns the raw pre-clamp drive — the random variable the policy actually drew, and the
-/// quantity the reward's metabolic tax and the PPO log-prob are both taken over (see
-/// `sample_actions`). The ±1 clamp that bounds the sim's torque command is applied by the
-/// caller, so the unbounded drive survives for the tax to bite on saturation (a `|d|≫1` drive
-/// that slams a joint onto its rail). Clamping here would erase that overshoot — the tax would
-/// see only the bounded command and lose its pull off the rail.
-///
-/// `noise` is the standard-normal exploration `ε` the caller drew — per-tick-independent in the
-/// old design, now the temporally-correlated draw from [`OuNoise`] (bddap/rl#161). Either way it
-/// is marginally N(0,1), so the per-step Gaussian log-prob the PPO update recomputes is unchanged
-/// — only the temporal correlation of successive `ε`s differs, which is what makes a coordinated
-/// gait discoverable.
-pub(crate) fn sample_action<B: Backend>(
-    means: &Tensor<B, 1>,
-    log_std: &Tensor<B, 1>,
-    noise: [f32; ACTION_SIZE],
-    device: &B::Device,
-) -> Tensor<B, 1> {
-    let std = log_std.clone().exp();
-    let noise = Tensor::<B, 1>::from_floats(noise, device);
-    means.clone() + noise * std
 }
 
 /// AR(1) retention coefficient α ∈ [0, 1) for the exploration noise — the single tunable for
@@ -543,7 +480,7 @@ const EXPLORE_CORRELATION: f32 = 0.95;
 
 /// Temporally-correlated exploration noise: one variance-preserving AR(1) (discrete
 /// Ornstein–Uhlenbeck) process per env, per joint, supplying the `ε` in the policy's
-/// exploration draw `μ + σ·ε` (see [`sample_action`]). Successive draws are correlated over
+/// exploration draw `μ + σ·ε` (see [`crate::bot::arch::GaussianHead::sample`]). Successive draws are correlated over
 /// ~[`EXPLORE_CORRELATION`] ticks, so exploration is a sustained limb sweep rather than per-tick
 /// jitter — the lever for bootstrapping a gait (bddap/rl#161).
 ///
@@ -629,12 +566,18 @@ mod tests {
             log_std_anneal_ticks: 1000,
             ..PpoConfig::default()
         };
-        assert!((config.log_std_floor(0) - (-0.7)).abs() < 1e-6, "wide at the epoch");
+        assert!(
+            (config.log_std_floor(0) - (-0.7)).abs() < 1e-6,
+            "wide at the epoch"
+        );
         assert!(
             (config.log_std_floor(500) - (-1.35)).abs() < 1e-6,
             "linear midpoint"
         );
-        assert!((config.log_std_floor(1000) - (-2.0)).abs() < 1e-6, "refine at horizon");
+        assert!(
+            (config.log_std_floor(1000) - (-2.0)).abs() < 1e-6,
+            "refine at horizon"
+        );
         assert!(
             (config.log_std_floor(10_000) - (-2.0)).abs() < 1e-6,
             "holds at the refine floor past the horizon"
@@ -901,14 +844,23 @@ mod tests {
         let mut norm = ReturnNormalizer::new();
         // Two NaN/Inf returns among the finite ones.
         let skipped = norm.update(&[1.0, f32::NAN, 2.0, f32::INFINITY, 3.0]);
-        assert_eq!(skipped, 2, "both non-finite returns must be reported as skipped");
+        assert_eq!(
+            skipped, 2,
+            "both non-finite returns must be reported as skipped"
+        );
 
         // The scale reflects ONLY the finite returns (1,2,3 → mean 2), as if the bad ones never came.
         let mut clean = ReturnNormalizer::new();
         let none = clean.update(&[1.0, 2.0, 3.0]);
         assert_eq!(none, 0, "all-finite returns skip nothing");
-        assert!((norm.mean() - clean.mean()).abs() < 1e-9, "the skip must not perturb the scale");
-        assert!((norm.std() - clean.std()).abs() < 1e-9, "the skip must not perturb the std");
+        assert!(
+            (norm.mean() - clean.mean()).abs() < 1e-9,
+            "the skip must not perturb the scale"
+        );
+        assert!(
+            (norm.std() - clean.std()).abs() < 1e-9,
+            "the skip must not perturb the std"
+        );
     }
 
     #[test]

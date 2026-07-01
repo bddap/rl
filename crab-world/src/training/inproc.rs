@@ -26,8 +26,8 @@
 //! parity the tests pin (K=1 collection == one-thread reference; merge == one
 //! stream), which lets the K>1 path inherit the single-thread correctness.
 //!
-//! # Weight sharing — why a byte snapshot, not a shared `Arc<CrabBrain>`
-//! The NdArray tensors a `CrabBrain` holds are `!Send`, so a live brain cannot be
+//! # Weight sharing — why a byte snapshot, not a shared `Arc<AnyBrain>`
+//! The NdArray tensors an `AnyBrain` holds are `!Send`, so a live brain cannot be
 //! shared across the thread boundary at all. Instead the learner serializes the
 //! policy to bytes once per iteration with burn's in-memory `BinBytesRecorder`
 //! (the exact `FullPrecisionSettings` bincode the checkpoint uses, so the weights
@@ -68,10 +68,10 @@ use burn::module::Module;
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
 
 use crate::TrainConfig;
-use crate::bot::brain::CrabBrain;
+use crate::bot::arch::AnyBrain;
 
-use super::algorithm::RolloutBuffer;
 use super::TrainBackend;
+use super::algorithm::RolloutBuffer;
 use super::checkpoint::{CheckpointDir, TICK_WATERMARK_FILENAME};
 use super::curriculum::TargetBand;
 use super::normalizer::NormalizerSnapshot;
@@ -548,11 +548,7 @@ struct MergedRollout {
 /// weights, the master normalizer baseline (a snapshot, never an increment), and the
 /// target band. Captured before any thread runs, so none sees a half-updated net.
 #[cfg(feature = "wgpu")]
-fn snapshot_policy(
-    state: &TrainingState,
-    band: TargetBand,
-    log_std_floor: f32,
-) -> RollRequest {
+fn snapshot_policy(state: &TrainingState, band: TargetBand, log_std_floor: f32) -> RollRequest {
     RollRequest {
         brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
         normalizer: Arc::new(state.normalizer_snapshot()),
@@ -707,12 +703,18 @@ fn log_iteration(r: &IterReport) {
         String::new()
     };
     let nonfinite_obs_note = if r.nonfinite_obs > 0 {
-        format!(" | {} non-finite obs element(s) skipped (sensor/physics anomaly)", r.nonfinite_obs)
+        format!(
+            " | {} non-finite obs element(s) skipped (sensor/physics anomaly)",
+            r.nonfinite_obs
+        )
     } else {
         String::new()
     };
     let nonfinite_returns_note = if r.metrics.nonfinite_returns > 0 {
-        format!(" | {} non-finite return(s) skipped (env diverged)", r.metrics.nonfinite_returns)
+        format!(
+            " | {} non-finite return(s) skipped (env diverged)",
+            r.metrics.nonfinite_returns
+        )
     } else {
         String::new()
     };
@@ -736,7 +738,11 @@ fn log_iteration(r: &IterReport) {
     } = *r;
     eprintln!(
         "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note} over {finished} ep) | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{panic_note}{load_fail_note}{glitch_note}{nonfinite_returns_note}{nonfinite_obs_note}",
-        metrics.policy_loss, metrics.value_loss, metrics.entropy, metrics.kl, metrics.steps,
+        metrics.policy_loss,
+        metrics.value_loss,
+        metrics.entropy,
+        metrics.kl,
+        metrics.steps,
         metrics.behavior_backend_div,
     );
 }
@@ -996,9 +1002,9 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
 
 /// Serialize a brain to the in-memory snapshot bytes the rollout threads load (via
 /// [`SnapshotRecorder`]).
-fn snapshot_brain_bytes(brain: &CrabBrain<TrainBackend>) -> Vec<u8> {
-    SnapshotRecorder::default()
-        .record(brain.clone().into_record(), ())
+fn snapshot_brain_bytes(brain: &AnyBrain<TrainBackend>) -> Vec<u8> {
+    brain
+        .record_leaf(&SnapshotRecorder::default(), ())
         .expect("serialize brain snapshot")
 }
 
@@ -1076,22 +1082,21 @@ mod tests {
     /// `snapshot_brain_bytes` and reloaded produces the same policy means/log_std.
     #[test]
     fn brain_snapshot_round_trips_in_memory() {
+        use crate::bot::arch::ArchId;
         use burn::backend::ndarray::NdArrayDevice;
-        use burn::module::Module;
         use burn::tensor::Tensor;
 
         let device = NdArrayDevice::Cpu;
-        let brain: CrabBrain<TrainBackend> = CrabBrain::new(&device);
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
         let bytes = snapshot_brain_bytes(&brain);
 
-        let record = SnapshotRecorder::default()
-            .load(bytes, &device)
+        let reloaded = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device)
+            .load_leaf_record(&SnapshotRecorder::default(), bytes, &device)
             .expect("load snapshot");
-        let reloaded = CrabBrain::<TrainBackend>::new(&device).load_record(record);
 
         let obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
-        let (m0, s0) = brain.policy(obs.clone(), crate::bot::brain::LOG_STD_MIN);
-        let (m1, s1) = reloaded.policy(obs, crate::bot::brain::LOG_STD_MIN);
+        let (m0, s0) = brain.policy(obs.clone());
+        let (m1, s1) = reloaded.policy(obs);
         let (m0, m1): (Vec<f32>, Vec<f32>) = (
             m0.to_data().to_vec().unwrap(),
             m1.to_data().to_vec().unwrap(),
@@ -1244,15 +1249,38 @@ mod tests {
         ];
         let merged = merge_rollouts(&mut state, results);
 
-        assert_eq!(merged.snapshot_load_failures, 1, "the refusal is counted, distinct from a panic");
-        assert_eq!(merged.panics, 1, "the panic is counted, distinct from a refusal");
-        assert_eq!(merged.samples, 0, "neither a refusal nor a panic contributes samples");
+        assert_eq!(
+            merged.snapshot_load_failures, 1,
+            "the refusal is counted, distinct from a panic"
+        );
+        assert_eq!(
+            merged.panics, 1,
+            "the panic is counted, distinct from a refusal"
+        );
+        assert_eq!(
+            merged.samples, 0,
+            "neither a refusal nor a panic contributes samples"
+        );
         assert!(merged.rollouts.is_empty(), "neither contributes a buffer");
-        assert_eq!(merged.glitch_drops, 3, "the Rolled thread's progress-glitch count flows through");
-        assert_eq!(merged.nonfinite_obs, 7, "the Rolled thread's non-finite obs count flows through");
+        assert_eq!(
+            merged.glitch_drops, 3,
+            "the Rolled thread's progress-glitch count flows through"
+        );
+        assert_eq!(
+            merged.nonfinite_obs, 7,
+            "the Rolled thread's non-finite obs count flows through"
+        );
         assert_eq!(merged.ticks, 64, "only the Rolled thread's ticks count");
-        assert_eq!(merged.drift, (0.5, 2), "the Rolled thread's drift flows through");
-        assert_eq!(merged.reach, (1, 3), "the Rolled thread's reach flows through");
+        assert_eq!(
+            merged.drift,
+            (0.5, 2),
+            "the Rolled thread's drift flows through"
+        );
+        assert_eq!(
+            merged.reach,
+            (1, 3),
+            "the Rolled thread's reach flows through"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1293,10 +1321,11 @@ mod tests {
                 brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
                 normalizer: Arc::new(state.normalizer_snapshot()),
                 band: TargetBand::start(),
-                log_std_floor: crate::bot::brain::LOG_STD_MIN,
+                log_std_floor: crate::bot::arch::LOG_STD_MIN,
             })
             .expect("send request");
-        let RollOutcome::Rolled { output, .. } = thread.result_rx.recv().expect("recv result") else {
+        let RollOutcome::Rolled { output, .. } = thread.result_rx.recv().expect("recv result")
+        else {
             panic!("the roll must not panic");
         };
         let envs = output.envs;
@@ -1328,7 +1357,7 @@ mod tests {
             device,
             ret_norm,
             rng,
-            crate::bot::brain::LOG_STD_MIN,
+            crate::bot::arch::LOG_STD_MIN,
         );
         assert!(
             metrics.policy_loss.is_finite()
@@ -1376,7 +1405,7 @@ mod tests {
                     brain_bytes: Arc::clone(&brain_bytes),
                     normalizer: Arc::clone(&normalizer),
                     band: TargetBand::start(),
-                    log_std_floor: crate::bot::brain::LOG_STD_MIN,
+                    log_std_floor: crate::bot::arch::LOG_STD_MIN,
                 })
                 .expect("send");
         }

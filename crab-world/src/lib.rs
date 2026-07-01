@@ -8,7 +8,7 @@
 //! physics / brain implementation across binaries.
 
 // rl#49: the `--features wgpu` build resolves `Module: Send` on `load_record` for
-// `CrabBrain<Autodiff<Wgpu>>`, chasing wgpu_core's nested generics past the default
+// `AnyBrain<Autodiff<Wgpu>>`, chasing wgpu_core's nested generics past the default
 // 128-deep recursion limit and aborting with E0275 (overflow, not a genuine !Send). A
 // higher limit lets that finite-but-deep resolution complete. ONLY needed under `wgpu`
 // — every other build (the headless CPU trainer, the renderers) compiles at the default
