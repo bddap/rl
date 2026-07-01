@@ -242,13 +242,10 @@ impl SimSnapshot {
 pub(super) struct PendingInput {
     pub(super) strafe: f32,
     pub(super) forward: f32,
-    /// Accrued yaw-look this inter-tick interval, in radians (drained per tick). Flying,
-    /// this drives the plane's ROLL (the stick's horizontal axis); on foot, the avatar yaw.
+    /// Accrued yaw-look this inter-tick interval, in radians (drained per tick), integrated
+    /// into the on-foot avatar's yaw. The in-air controls read the sticks/mouse directly
+    /// ([`FlightInput`]), not this foot accumulator, so no field does double duty.
     pub(super) yaw_delta: f32,
-    /// Accrued pitch-look this inter-tick interval, in radians (drained per tick). Flying,
-    /// this drives the plane's PITCH (elevator); on foot it is unused for the sim (foot
-    /// camera pitch is the separate client-local [`CameraPitch`]). Positive = nose up.
-    pub(super) pitch_delta: f32,
     pub(super) action: bool,
     /// Latches if RESTART (R) was pressed in this interval. Sent as
     /// [`buttons::RESTART`] so the restart rides the deterministic input stream and all
@@ -386,6 +383,54 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
     }
 }
 
+/// This tick's LOCAL control intent, TAGGED by mode so the on-foot avatar's control axes and a
+/// craft's flight axes can never both be live (rl#43 part 1). The old flat input let a walker
+/// carry a throttle and a pilot carry foot move-axes — two mutually-exclusive control sets in one
+/// value, reconciled only by a downstream `if piloting`; here the mode picks exactly one variant,
+/// so the illegal combination is unrepresentable by construction.
+///
+/// Client-local: the deterministic sim only ever applies the FOOT [`Input`] (neutral while
+/// piloting — see [`LocalControl::sim_input`]), and the craft is host-authoritative crab-world
+/// state OFF the wire. Networking the pilots (a wire that carries flight input) is rl#43 part 2;
+/// until then the tag lives here at the client, where the piloting state actually is. Produced
+/// once per tick in [`drive_lockstep`] from [`LocalVehicle`].
+enum LocalControl {
+    /// Walking: this foot [`Input`] drives the sim; no craft is active.
+    OnFoot(Input),
+    /// Piloting `kind`: the sim gets a NEUTRAL foot input and this per-craft [`FlightControl`]
+    /// commands the rapier vehicle body via [`VehicleControl`].
+    Piloting {
+        kind: VehicleKind,
+        control: FlightControl,
+    },
+}
+
+impl LocalControl {
+    /// The foot input the deterministic sim applies this tick: the real walker input on foot, a
+    /// neutral (default) input while piloting — the pilot's foot avatar just stands at the boarding
+    /// spot while the craft flies off the wire.
+    fn sim_input(&self) -> Input {
+        match self {
+            LocalControl::OnFoot(input) => *input,
+            LocalControl::Piloting { .. } => Input::default(),
+        }
+    }
+}
+
+impl FlightControl {
+    /// Write these per-craft intents into the shared [`VehicleControl`] the force model reads.
+    /// `active`/`kind` are the caller's (they drive spawn/despawn); this copies only the force axes,
+    /// so on foot the caller writes `FlightControl::default()` (all zero) to leave no stale command.
+    fn write_into(&self, ctrl: &mut VehicleControl) {
+        ctrl.throttle_trim = self.throttle_trim;
+        ctrl.thrust = self.thrust;
+        ctrl.pitch = self.pitch;
+        ctrl.roll = self.roll;
+        ctrl.yaw = self.yaw;
+        ctrl.match_velocity = self.match_velocity;
+    }
+}
+
 /// A flyer's first-person cockpit pose in the crab's ARENA frame: a 3D position + a full attitude
 /// quaternion (body→world). Read off the rapier vehicle body each applied tick; the renderer maps
 /// it into render space (shifted to the crab's render spot, [`super::scene`]'s `cockpit_camera`)
@@ -424,10 +469,6 @@ pub(super) enum LocalVehicle {
 }
 
 impl LocalVehicle {
-    pub(super) fn piloting(&self) -> bool {
-        !matches!(self, Self::OnFoot)
-    }
-
     /// The vehicle kind currently piloted, or `None` on foot — the net→crab-world command that
     /// spawns the matching rapier body via [`VehicleControl`].
     pub(super) fn kind(&self) -> Option<VehicleKind> {
@@ -663,31 +704,35 @@ pub(super) fn drive_lockstep(
         world.non_send_resource_mut::<GameState>().accumulator -= TICK_DT;
         applied += 1;
 
-        // Build THIS tick's local input from the accumulated controls, draining the accrued
-        // look + latched buttons (movement axes are re-sampled next frame).
-        let input = {
+        // Build THIS tick's FOOT input from the accumulated controls, draining the accrued look +
+        // latched buttons (movement axes are re-sampled next frame). Drained EVERY tick, even while
+        // piloting, so accrued mouse-look and a latched Extract can't pile up and fire on stepping
+        // out of the craft.
+        let foot_input = {
             let mut pending = world.resource_mut::<PendingInput>();
             let look_axis = (pending.yaw_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
-            // The pitch axis reuses the SAME per-tick radian scale as the yaw axis, so the
-            // mouse/stick feels symmetric vertically and horizontally; the rapier vehicle then
-            // applies each axis's own control torque (roll vs pitch) in its force model.
-            let pitch_axis = (pending.pitch_delta / MAX_YAW_PER_TICK_RADIANS).clamp(-1.0, 1.0);
             let btns = (if pending.action { buttons::ACTION } else { 0 })
                 | (if pending.restart { buttons::RESTART } else { 0 });
-            let input =
-                Input::new(pending.strafe, pending.forward, look_axis, btns).with_look_pitch(pitch_axis);
+            let input = Input::new(pending.strafe, pending.forward, look_axis, btns);
             pending.yaw_delta = 0.0;
-            pending.pitch_delta = 0.0;
             pending.action = false;
             pending.restart = false;
             input
         };
 
-        // While piloting (server-authoritative arm — solo or host), the foot player feeds the sim a
-        // NEUTRAL input — it just stands at the boarding spot — and the real input flies the
-        // client-side plane below instead. On foot, the real input drives the sim as usual.
-        let piloting = world.resource::<LocalVehicle>().piloting();
-        let sim_input = if piloting { Input::default() } else { input };
+        // Tag the control by the active mode: on foot the foot input drives the sim and no craft is
+        // live; piloting, this frame's per-craft flight control commands the vehicle and the sim gets
+        // a neutral foot input. Exactly one arm — a walker holding a throttle (or a pilot holding foot
+        // move-axes) is unrepresentable (rl#43 part 1). The `FlightInput` snapshot is per-frame, so the
+        // intent is stable across the ticks pumped this frame.
+        let local = match world.resource::<LocalVehicle>().kind() {
+            None => LocalControl::OnFoot(foot_input),
+            Some(kind) => LocalControl::Piloting {
+                kind,
+                control: flight_control(kind, world.resource::<FlightInput>()),
+            },
+        };
+        let sim_input = local.sim_input();
 
         // The headless `fp-screenshot` harness (only) feeds a scripted input to the absent pack
         // players so the scene composes; real play has none (every non-local input is on the wire).
@@ -764,32 +809,31 @@ pub(super) fn drive_lockstep(
             crate::render::articulation::apply(world, &art);
         }
 
-        // Drive the rapier vehicle (server-authoritative arm): mirror the piloting state + this frame's flight
-        // controls into `VehicleControl`, which the crab world's force system reads on the next
-        // physics pump — spawn/despawn the body and apply thrust/lift/drag/torque. The sim never
-        // sees the vehicle (the foot player gets neutral input above); it is host-authoritative
-        // crab-world state OFF the wire, so it reads the RAW per-craft flight inputs (Ace Combat 6
-        // for the plane, Outer Wilds for the ship — `flight_control`) rather than the sim's merged
-        // move/look axes. The `FlightInput` snapshot is per-frame, so the intent is stable across the
-        // ticks pumped this frame.
+        // Drive the rapier vehicle (server-authoritative arm) from the SAME tagged `local` control the
+        // sim input came from — so the vehicle is active exactly when the sim got a neutral input, with
+        // no second read of the mode to drift out of sync. The crab world's force system reads
+        // `VehicleControl` on the next physics pump (spawn/despawn the body, apply thrust/lift/drag/
+        // torque). The sim never sees the vehicle (the foot player gets neutral input above); it is
+        // host-authoritative crab-world state OFF the wire, reading the RAW per-craft flight inputs
+        // (Ace Combat 6 for the plane, Outer Wilds for the ship) rather than the sim's foot axes.
         // `VehicleControl` only exists when `VehiclePlugin` is installed — the WINDOWED play app
         // (`app.rs`), where you can actually board a craft. The headless screenshot app omits the
         // plugin (no piloting there), so skip the bridge rather than demand the resource.
         if world.get_resource::<VehicleControl>().is_some() {
-            let kind = world.resource::<LocalVehicle>().kind();
-            let fc = kind.map(|k| flight_control(k, world.resource::<FlightInput>()));
             let mut ctrl = world.resource_mut::<VehicleControl>();
-            ctrl.active = kind.is_some();
-            if let Some(k) = kind {
-                ctrl.kind = k;
+            match &local {
+                // No body exists while inactive (`manage_vehicle` despawned it), but write zeros so no
+                // stale piloting force can ride the despawn edge for a frame.
+                LocalControl::OnFoot(_) => {
+                    ctrl.active = false;
+                    FlightControl::default().write_into(&mut ctrl);
+                }
+                LocalControl::Piloting { kind, control } => {
+                    ctrl.active = true;
+                    ctrl.kind = *kind;
+                    control.write_into(&mut ctrl);
+                }
             }
-            let fc = fc.unwrap_or_default();
-            ctrl.throttle_trim = fc.throttle_trim;
-            ctrl.thrust = fc.thrust;
-            ctrl.pitch = fc.pitch;
-            ctrl.roll = fc.roll;
-            ctrl.yaw = fc.yaw;
-            ctrl.match_velocity = fc.match_velocity;
         }
 
         // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step state
@@ -980,7 +1024,40 @@ pub(super) fn drive_lockstep(
 
 #[cfg(test)]
 mod tests {
-    use super::PeerRole;
+    use super::{FlightControl, LocalControl, PeerRole};
+    use crate::sim::{Input, buttons};
+    use crab_world::vehicle::VehicleKind;
+
+    /// The tagged-control invariant (rl#43 part 1): the deterministic sim only ever applies a FOOT
+    /// [`Input`] — the real walker input on foot, a neutral one while piloting. A piloting player
+    /// CANNOT leak a flight axis (throttle/pitch/roll) into the sim, because `Piloting` carries a
+    /// [`FlightControl`], not an `Input`, and its `sim_input()` is `Input::default()` by
+    /// construction — the old flat struct's "walker holding a throttle" is unrepresentable.
+    #[test]
+    fn piloting_feeds_the_sim_a_neutral_foot_input() {
+        let walk = Input::new(0.5, -0.5, 0.25, buttons::ACTION);
+        assert_eq!(
+            LocalControl::OnFoot(walk).sim_input(),
+            walk,
+            "on foot the real walker input drives the sim unchanged"
+        );
+        let flying = LocalControl::Piloting {
+            kind: VehicleKind::Plane,
+            control: FlightControl {
+                throttle_trim: 1.0,
+                pitch: 1.0,
+                roll: -1.0,
+                yaw: 1.0,
+                match_velocity: true,
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            flying.sim_input(),
+            Input::default(),
+            "piloting: the sim gets a neutral foot input, never a flight axis"
+        );
+    }
 
     #[test]
     fn only_the_server_authoritative_arm_can_pilot() {
