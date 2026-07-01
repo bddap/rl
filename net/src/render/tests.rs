@@ -5,7 +5,7 @@ use super::*;
 use super::app::ExternalCrabStackInstalled;
 use super::driver::{
     FlightInput, GameState, InputSource, PendingRound, VEHICLE_STICK_SENS, ensure_round_installed,
-    flight_control,
+    flight_control, park_fixed_auto_pump, pump_fixed_steps,
 };
 use crab_world::vehicle::VehicleKind;
 use super::input::pad_stick_axes;

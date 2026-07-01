@@ -11,10 +11,8 @@ mod fp_screenshot;
 mod net;
 mod net_join;
 mod net_screenshot;
-mod nn_crab_join_xpeer;
 mod nn_crab_probe;
 mod nn_crab_vehicle_stability;
-mod nn_crab_xpeer;
 mod play;
 mod shared;
 mod solo;
@@ -50,20 +48,6 @@ pub(crate) enum Command {
     /// player under the trained policy. Runs the seed TWICE and compares the final state
     /// hash, the single-peer reproducibility check.
     NnCrabProbe(nn_crab_probe::Args),
-    /// The decisive GCR #82 gate: run the real rapier-NN crab as the giant crab on TWO
-    /// independent in-process peers exchanging lockstep inputs, and confirm their per-tick
-    /// state hashes stay byte-identical — the float NN crab IS the deterministic multiplayer
-    /// crab. Writes each peer's `<tick> <hash>` log (`--hash-log-a` / `--hash-log-b`) so they
-    /// can be `diff`ed, and exits nonzero on any divergence (so it doubles as a CI gate).
-    NnCrabXpeer(nn_crab_xpeer::Args),
-    /// The decisive GCR MP Stage 3 gate (rl#151): run the real rapier-NN crab on an INCUMBENT
-    /// hosting a solo round, admit a fresh COLD joiner over the round-boundary mid-game-join
-    /// mechanism, and confirm every peer computes the byte-identical per-tick state hash for every
-    /// tick the joiner participates in. Exits nonzero on any divergence (so it doubles as a CI
-    /// gate) — the existential proof that the cold-respawn keeps the warm incumbent's rapier crab
-    /// bit-identical to the joiner's from-fresh one. The pure-core join test folds the crab digest
-    /// to 0 and cannot exercise this; this drives the armed Sally across the join.
-    NnCrabJoinXpeer(nn_crab_join_xpeer::Args),
     /// Rig-compatibility gate for the release/deploy pipeline: load a checkpoint's
     /// `brain.bin`, read its `(obs, action)` dims, and compare them to THIS binary's
     /// compiled crab rig. Exits 0 only on an exact match; nonzero (with an actionable
@@ -100,8 +84,6 @@ pub(crate) fn dispatch(command: Command) -> Result<()> {
         Command::NetScreenshot(args) => net_screenshot::run(args),
         Command::TelemetryCollector(args) => telemetry_collector::run(args),
         Command::NnCrabProbe(args) => nn_crab_probe::run(args),
-        Command::NnCrabXpeer(args) => nn_crab_xpeer::run(args),
-        Command::NnCrabJoinXpeer(args) => nn_crab_join_xpeer::run(args),
         Command::CheckpointCheck(args) => checkpoint_check::run(args),
         Command::NnCrabVehicleStability(args) => nn_crab_vehicle_stability::run(args),
     }
