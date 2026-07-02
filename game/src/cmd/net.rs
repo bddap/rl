@@ -8,8 +8,8 @@ use iroh::EndpointId;
 use net::lockstep::Lockstep;
 use net::sim::{Input, PlayerId, TICK_DT, TICK_HZ};
 use net::telemetry::{TelemetryEvent, next_sample_tick};
-use tracing::{info, warn};
 use net::{formation, net_loop, transport};
+use tracing::{info, warn};
 
 use super::shared::run_solo_round;
 

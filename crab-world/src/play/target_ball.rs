@@ -100,9 +100,7 @@ pub(super) fn target_ball(
     // `sample_target` rule, so the demo can never pose a target training never saw.
     let mut target = match targets.get(0) {
         Some(t) => t,
-        None => {
-            target_ball_at_from_env().unwrap_or_else(|| sample_target(origin, &mut rng.0))
-        }
+        None => target_ball_at_from_env().unwrap_or_else(|| sample_target(origin, &mut rng.0)),
     };
 
     // Closest 3D euclidean distance from either claw tip to the target (the reward's
