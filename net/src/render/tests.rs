@@ -43,7 +43,7 @@ fn menu_handoff_installs_the_chosen_round() {
     let seed = 0x1234_5678;
     app.world_mut()
         .insert_non_send_resource(PendingRound(Some(ReadyMatch {
-            lockstep: net_loop::solo_lockstep_for(seed),
+            lockstep: crate::formation::solo_lockstep_for(seed),
             net: None,
         })));
     app.world_mut()

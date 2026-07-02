@@ -274,7 +274,7 @@ pub fn build_windowed_app(
             // `ensure_round_installed` FAILS LOUD rather than substituting a fake crab.
             {
                 let dir = external_crab;
-                let crab_spawn = crate::net_loop::solo_lockstep_for(seed)
+                let crab_spawn = crate::formation::solo_lockstep_for(seed)
                     .sim()
                     .crab()
                     .pos();

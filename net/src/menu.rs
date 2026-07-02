@@ -13,7 +13,7 @@
 //! channel:
 //! - The pre-round phases (`Menu`/`Connecting` — see [`crate::render::AppPhase`])
 //!   hold no [`Lockstep`] and no sim. The sim is built only at the `Playing` transition,
-//!   from the same [`net_loop::connect_and_form_lobby`]/[`net_loop::solo_lockstep_for`] the
+//!   from the same [`net_loop::connect_and_form_lobby`]/[`crate::formation::solo_lockstep_for`] the
 //!   pre-menu boot used — so the agreed roster + seed form EXACTLY as before. The menu
 //!   chooses *when* and *whether to network*; it contributes zero bytes to sim state.
 //! - Networked formation runs on a background thread ([`spawn_formation`]); the menu
@@ -39,7 +39,8 @@ pub use iroh::EndpointId;
 
 use crate::lockstep::Lockstep;
 use crate::membership::Role;
-use crate::net_loop::{self, LobbyControl, MatchResult, NetDriver};
+use crate::formation::{self, LobbyControl};
+use crate::net_loop::{self, MatchResult, NetDriver};
 
 /// The role the player picked on the menu (rl#58: the menu is just Host / Join — the old
 /// separate Solo button is gone, since Host-with-no-joiners IS solo). Selects which side of
@@ -285,10 +286,10 @@ pub fn ready_from(result: MatchResult, seed: u64) -> Option<ReadyMatch> {
 /// Build an OFFLINE round directly (no networking): the Host-alone Start (the UI forms it
 /// the instant a host clicks Start with zero peers) and the barrier's Alone fallback both
 /// use it, so the instant-solo path and the "nobody joined" path are the byte-identical
-/// deterministic round from [`net_loop::solo_lockstep_for`].
+/// deterministic round from [`crate::formation::solo_lockstep_for`].
 pub fn solo_round(seed: u64) -> ReadyMatch {
     ReadyMatch {
-        lockstep: net_loop::solo_lockstep_for(seed),
+        lockstep: formation::solo_lockstep_for(seed),
         net: None,
     }
 }
