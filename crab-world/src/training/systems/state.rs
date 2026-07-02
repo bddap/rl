@@ -253,10 +253,11 @@ impl TrainingState {
         <TrainBackend as burn::tensor::backend::Backend>::seed(&device, seed);
 
         // Cold-start / worker arch: the `--arch` request (a worker's is the learner's
-        // resolved arch), defaulting to mlp256. A warm resume below replaces this brain
-        // with the checkpoint's — whose TAG is authoritative — after the flag↔tag check.
+        // resolved arch), defaulting per the registry. A warm resume below replaces this
+        // brain with the checkpoint's — whose TAG is authoritative — after the flag↔tag
+        // check.
         let mut brain: AnyBrain<TrainBackend> =
-            AnyBrain::init(requested.unwrap_or(ArchId::Mlp256), &device);
+            AnyBrain::init(requested.unwrap_or(ArchId::DEFAULT), &device);
 
         let mut obs_normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
         let mut return_normalizer = ReturnNormalizer::new();
@@ -318,7 +319,12 @@ impl TrainingState {
                     // The deliberate DOF cold start stays on the CHECKPOINT's arch (tag
                     // still authoritative — without a flag the default above could
                     // otherwise silently switch a non-default run's architecture).
-                    brain = AnyBrain::init(loaded.arch(), &device);
+                    // Guarded so the matching-arch case keeps the FIRST init (a second
+                    // init consumes another backend-RNG draw, which would change a
+                    // fixed-`--seed` cold start's initial weights for nothing).
+                    if brain.arch() != loaded.arch() {
+                        brain = AnyBrain::init(loaded.arch(), &device);
+                    }
                 }
             }
             // No brain file: a fresh checkpoint dir — the legitimate cold start.
