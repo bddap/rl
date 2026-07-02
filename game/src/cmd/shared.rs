@@ -20,13 +20,18 @@ pub(crate) const MATCH_SEED: u64 = 0x6372_6162; // "crab"
 /// asset root ([`crab_world::assets::asset_root`] — `BEVY_ASSET_ROOT`, else the crab-world crate
 /// dir; the SAME root the mesh + control glyphs resolve against, bddap/rl#146, so the weights
 /// can't live somewhere the mesh doesn't) — so a checkpoint can be chosen at runtime, no recompile.
-/// A missing `brain.bin` is a HARD, ACTIONABLE failure (rl#114): the one giant crab IS the trained
+/// An unusable checkpoint is a HARD, ACTIONABLE launch failure: the one giant crab IS the trained
 /// NN body ("Sally"), and there is no integer point-pursuer to fall back to, so rather than silently
-/// substituting a fake crab we refuse to launch with a message naming the dir we searched and how
-/// to fix it.
+/// substituting a fake crab we refuse to launch with a message naming the dir and how to fix it.
+/// Two ways a checkpoint is unusable, both refused here: no readable `brain.bin` (rl#114), and a
+/// brain built for a DIFFERENT rig (rl#199) — a wrong-rig brain passes an existence check but the
+/// runtime loader refuses to arm it, so letting launch proceed would ship an inert rest-pose Sally
+/// that looks frozen-but-fine. Same [`crab_world::play::checkpoint_fits_rig`] verdict the
+/// release/deploy gate (`checkpoint-check`) acts on, so launch and the gate can't disagree.
 pub(crate) fn nn_crab_checkpoint_dir(
     flag: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf> {
+    use crab_world::play::{RigDims, RigFit};
     let dir = flag
         .or_else(|| std::env::var_os("RL_CRAB_CHECKPOINT_DIR").map(std::path::PathBuf::from))
         .unwrap_or_else(|| {
@@ -34,16 +39,29 @@ pub(crate) fn nn_crab_checkpoint_dir(
                 .join("assets")
                 .join("weights")
         });
-    if dir.join("brain.bin").exists() {
-        Ok(dir)
-    } else {
-        anyhow::bail!(
+    match crab_world::play::checkpoint_fits_rig(&dir) {
+        RigFit::Ok => Ok(dir),
+        RigFit::Missing => anyhow::bail!(
             "rl#114: no trained crab brain (brain.bin) under {} — the giant crab IS the trained NN \
              body (\"Sally\"), and there is no integer stand-in. Point --nn-crab-checkpoint or the \
              RL_CRAB_CHECKPOINT_DIR env var at a trained checkpoint dir (deploy/rl-update must set \
              it, and EVERY device needs the IDENTICAL brain + crab model), then relaunch.",
             dir.display()
-        );
+        ),
+        RigFit::Mismatch(RigDims { obs, action }) => {
+            let RigDims {
+                obs: rig_obs,
+                action: rig_act,
+            } = crab_world::play::rig_dims();
+            anyhow::bail!(
+                "rl#199: checkpoint under {} was built for a DIFFERENT rig — its brain wants \
+                 {obs} obs / {action} act but this binary's crab rig is {rig_obs} obs / \
+                 {rig_act} act. Sally would launch as an inert rest-pose statue, so refusing to \
+                 launch instead. Retrain/redeploy a checkpoint for this rig, or run a binary \
+                 whose rig matches the checkpoint.",
+                dir.display()
+            )
+        }
     }
 }
 
