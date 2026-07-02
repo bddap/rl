@@ -476,9 +476,10 @@ mod tests {
     }
 
     /// GOLDEN FILE (bddap/rl#200 increment 2): `tests/data/golden-mlp256-env/` holds the
-    /// ENVELOPED form of the legacy golden brain (same weights, wrapped by
-    /// `migrate-checkpoint`, plus an identity obs normalizer — the legacy fixture had
-    /// none, which was the identity). Loading it through today's loader and reproducing
+    /// ENVELOPED form of the legacy golden brain (same weights, wrapped by the
+    /// since-deleted `migrate-checkpoint` tool, plus an identity obs normalizer — the
+    /// legacy fixture had none, which was the identity). Loading it through today's
+    /// loader and reproducing
     /// the pinned action bits EXACTLY proves the tagged on-disk format did not drift
     /// (a reader/writer change that re-mapped envelope fields would strand every
     /// migrated fleet checkpoint while all save/load-symmetric tests stayed green).
@@ -509,10 +510,10 @@ mod tests {
         );
     }
 
-    /// The legacy (pre-envelope) golden checkpoint must now be REFUSED — the loud
-    /// `Refused` verdict pointing at the migration tool, never the quiet rest pose or a
-    /// blind load (bddap/rl#200 §2: the loader has no untagged-read path;
-    /// `migrate-checkpoint` is the sole legacy parser).
+    /// The legacy (pre-envelope) golden checkpoint must now be REFUSED — a loud
+    /// `Refused` verdict naming the legacy diagnosis, never the quiet rest pose or a
+    /// blind load (bddap/rl#200 §2: the loader has no untagged-read path; the sole
+    /// legacy parser, `migrate-checkpoint`, was deleted with the fleet migration).
     #[test]
     fn legacy_golden_checkpoint_is_refused() {
         let policy = Policy::load(&legacy_golden_dir());
@@ -523,58 +524,37 @@ mod tests {
         // The non-arming is graceful: the rest pose, never a panic.
         assert_eq!(policy.act(&golden_obs()), [0.0; ACTION_SIZE]);
 
-        // The gates speak the same classifier: a loud, attributable refusal naming the fix.
+        // The gates speak the same classifier: a loud, attributable refusal naming the
+        // diagnosis (pre-envelope, i.e. predates the rl#200 fleet migration).
         match checkpoint_fits_rig(&legacy_golden_dir()) {
             RigFit::Refused(why) => assert!(
-                why.contains("migrate-checkpoint"),
-                "the refusal must point the operator at the migration tool, got: {why}"
+                why.contains("pre-envelope"),
+                "the refusal must name the legacy (pre-envelope) diagnosis, got: {why}"
             ),
             _ => panic!("a legacy checkpoint must classify as Refused, not Missing/Ok"),
         }
     }
 
-    /// END-TO-END migration: `migrate-checkpoint` over (a copy of) the legacy golden
-    /// fixture yields a checkpoint that loads through the envelope-only loader and acts
-    /// BIT-IDENTICALLY to the pinned pre-envelope bits — weights survive the migration
-    /// verbatim. The identity normalizer written beside it matches the legacy fixture's
-    /// no-normalizer identity.
-    #[test]
-    fn migrated_legacy_golden_acts_bit_identically() {
-        let dir = std::env::temp_dir().join(format!("rl-migrate-golden-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::copy(legacy_golden_dir().join("brain.bin"), dir.join("brain.bin")).unwrap();
-        crate::training::migrate::migrate_dir(&dir).expect("migration succeeds");
-        ObsNormalizer::new(NORMALIZER_CLIP)
-            .save(ArchId::Mlp256, &CheckpointDir::new(&dir).normalizer_path());
-
-        let policy = Policy::load(&dir);
-        assert!(policy.is_loaded(), "the migrated golden checkpoint loads");
-        let got: Vec<u32> = policy
-            .act(&golden_obs())
-            .iter()
-            .map(|v| v.to_bits())
-            .collect();
-        assert_eq!(
-            got,
-            golden_action_bits(),
-            "migration must preserve the weights bit-exactly"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Regenerates `tests/data/golden-mlp256-env/` from the legacy golden fixture (run
-    /// with `cargo test -- --ignored regenerate_enveloped_golden_fixture` and commit the
-    /// result). Ignored because a golden fixture that silently regenerates guards nothing.
+    /// Regenerates `tests/data/golden-mlp256-env/` in place — load the fixture brain
+    /// through the current reader, re-save it through the current production writer —
+    /// then commit the result (run with `cargo test -- --ignored
+    /// regenerate_enveloped_golden_fixture`). Only valid on a DELIBERATE format version
+    /// bump, in the commit where the reader still accepts the old version and the writer
+    /// emits the new one. Ignored because a golden fixture that silently regenerates
+    /// guards nothing.
     #[test]
     #[ignore = "fixture generator, run manually on a deliberate format version bump"]
     fn regenerate_enveloped_golden_fixture() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256-env");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::copy(legacy_golden_dir().join("brain.bin"), dir.join("brain.bin")).unwrap();
-        crate::training::migrate::migrate_dir(&dir).expect("migration succeeds");
-        ObsNormalizer::new(NORMALIZER_CLIP)
-            .save(ArchId::Mlp256, &CheckpointDir::new(&dir).normalizer_path());
+        let paths = CheckpointDir::new(&dir);
+        let device = NdArrayDevice::Cpu;
+        let brain = crate::training::checkpoint::load_brain_file::<TrainBackend>(
+            &paths.brain_file(),
+            &device,
+        )
+        .expect("current fixture loads through the current reader");
+        crate::training::checkpoint::save_brain(&brain, &paths.brain_file()).unwrap();
+        ObsNormalizer::new(NORMALIZER_CLIP).save(brain.arch(), &paths.normalizer_path());
     }
 
     /// The demo's "always fresh" guarantee: when training writes a new checkpoint
