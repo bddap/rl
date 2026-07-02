@@ -46,17 +46,13 @@ pub(crate) struct Args {
 /// mismatch OR a zero-digest host the gate turned away) or `Unreachable` host is a clean, loud
 /// error exit — never a silent fallback to a fake/solo crab.
 pub(crate) fn run(args: Args) -> Result<()> {
+    // `nn_crab_checkpoint_dir` is the joiner's real pre-dial guard: it hard-fails on a
+    // missing/refused/rig-mismatched checkpoint, and the join gate needs no weights digest from
+    // us beyond that (rl#206) — only the crab-asset digest crosses the wire.
     let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint)?;
-    let weights_digest = crab_world::play::checkpoint_digest(&external_crab);
     let asset_digest = crab_world::bot::meshfit::crab_asset_digest();
 
-    let result = net_loop::connect_and_join(
-        MATCH_SEED,
-        args.host,
-        args.telemetry,
-        weights_digest,
-        asset_digest,
-    )?;
+    let result = net_loop::connect_and_join(MATCH_SEED, args.host, args.telemetry, asset_digest)?;
 
     let boot = match result {
         net_loop::JoinResult::Joined(joined) => {

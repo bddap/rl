@@ -797,7 +797,6 @@ pub fn connect_and_join(
     seed: u64,
     host: EndpointId,
     collector: Option<EndpointId>,
-    local_weights_digest: u64,
     local_asset_digest: u64,
 ) -> Result<JoinResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -881,7 +880,10 @@ pub fn connect_and_join(
                     host_brain: true,
                     assets: true,
                 },
-                weights_digest: local_weights_digest,
+                // A join-constructed driver is always a Client — it can never reach the Server
+                // arm that reads `local_digests` (a joiner never admits) — so no weights digest is
+                // computed or threaded here at all (rl#206): 0 marks it deliberately absent.
+                weights_digest: 0,
                 asset_digest: local_asset_digest,
             };
             Ok(JoinResult::Joined(Box::new((ls, driver))))

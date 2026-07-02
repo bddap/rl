@@ -152,7 +152,11 @@ run, so it must **add the upstream guard host-auth needs** rather than drop it:
    *whatever trained checkpoint the fleet carries*, so the check authenticates digest **sameness**
    (both peers run the identical non-zero brain), not pedigree — two peers on the same wrong-but-
    non-zero checkpoint would still admit each other. That residual is inherent to the digest model,
-   not an incr-4 gap.
+   not an incr-4 gap. **Superseded (rl#206):** the joiner-weights equality was deleted — admission
+   is now the `HostNotArmed` self-gate + crab-asset equality only. A joiner's brain is ungated (it
+   never executes; the host serves every pose), `JoinRequest` carries no weights digest on the
+   wire, and `net-join` dials regardless of its local digest — the join-side twin of rl#199's
+   formation collapse, one rule per invariant.
 3. **Asset digest already protects the joiner's render.** Under host-sends-pose the joiner
    *renders the Sally mesh skinned to the host's pose*. The existing `asset_digest` is
    `crab_asset_digest()`, which **hashes the raw `sally.glb` file bytes** (`crab-world/src/
@@ -258,7 +262,8 @@ asset/mesh check, loud `Refuse`) → server adds to roster → next snapshot car
 joiner boots from it. The armed-Sally join that *failed* under lockstep now works by
 construction. **Test:** the multi-process armed-Sally join (job 509's failing probe) shows
 the joiner seeing the real Sally at the host's exact pose; an asset/brain-mismatched joiner —
-and a zero-digest host — are refused loudly.
+and a zero-digest host — are refused loudly. *(Superseded by rl#206: the "joiner host-verify" /
+brain-mismatch half is gone — only the host self-gate and the asset equality refuse.)*
 
 **5 — delete the dead lockstep machinery.** Host-auth now primary and proven: remove the
 `Fault` cross-check / `applied_hashes` / `pending_peer_hashes` / `Confirmed` / `INPUT_DELAY` /
@@ -284,7 +289,8 @@ Increments 0–1 are SP-only and behavior-preserving; 2–4 add the MP path besi
 4. **Host-sends-pose beats clients-run-the-policy** — no per-client brain, no drift, dumb
    renderer, recurrent policy state stays host-local. It narrows real-Sally admission to "can
    the joiner render her" + "does the host run her," with the weights guard *relocated* (host
-   self-check + joiner host-verify), not dropped.
+   self-check + joiner host-verify), not dropped. *(rl#206 later deleted the joiner-host-verify
+   half too: the self-check alone is the guard — the joiner's brain never runs.)*
 5. **The real-Sally guard had to MOVE, not vanish** (the reviewer-loop's sharpest catch):
    removing the peer-symmetric `weights_synced` opens a silent non-Sally-host hole unless
    host-auth adds the upstream non-zero-digest self-gate. Folded into the design above.

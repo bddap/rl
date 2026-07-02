@@ -383,9 +383,11 @@ impl Policy {
 
     /// Stable digest of the loaded weights, or `None` when no real checkpoint is armed (the
     /// rest pose OR the `RL_RANDOM_POLICY` diagnostic brain). The GCR bridge folds this into
-    /// the crab's per-tick lockstep hash so peers running different brains desync immediately;
-    /// `None` — not a `0` sentinel — is "no shared checkpoint", so a peer with no real weights
-    /// can't be admitted to lockstep by construction (see `net::may_arm_external_crab`).
+    /// the crab's per-tick state hash on the peer that PUMPS the physics — under host-auth
+    /// the host (rl#151); clients adopt its snapshots. `None` — not a `0` sentinel — is "no
+    /// real brain", which is what keeps an unarmed HOST from arming/admitting a round
+    /// (`net::may_arm_external_crab`'s `host_brain` half / `HostNotArmed` — the single weights
+    /// guard since rl#199/rl#206; a client's own brain is never executed and never gated).
     pub fn weights_digest(&self) -> Option<NonZeroU64> {
         match &self.state {
             PolicyState::Loaded { digest, .. } => Some(*digest),
