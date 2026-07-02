@@ -158,8 +158,12 @@ pub(super) fn spawn_world(
     // Ground: a checkered gray plane at Y=0, camera-following ([`follow_ground`]) so it
     // has no reachable edge — the physics ground is unbounded, and a fixed quad puts
     // "the end of the world" seconds of flight out (rl#197). The checker's optic flow
-    // is what gives the pilot altitude and speed; plain gray gave none.
+    // is what gives the pilot altitude and speed; plain gray gave none. Every round
+    // entity here is DespawnOnExit(Playing): leaving the round (rl#203's disconnect
+    // return to the menu) tears the scene down, so re-entering Playing respawns it
+    // fresh instead of stacking a second world.
     commands.spawn((
+        DespawnOnExit(AppPhase::Playing),
         GroundPlane,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(GROUND_SIZE, GROUND_SIZE))),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -177,6 +181,7 @@ pub(super) fn spawn_world(
     // Sun-ish directional light so the gray-box reads with shape, plus a little
     // ambient so shadowed faces aren't pure black.
     commands.spawn((
+        DespawnOnExit(AppPhase::Playing),
         DirectionalLight {
             illuminance: 12_000.0,
             shadows_enabled: true,
@@ -197,6 +202,7 @@ pub(super) fn spawn_world(
     let ex = state.ls.sim().extraction().pos();
     let pillar_h = PLAYER_HEIGHT * CRAB_SCALE as f32 * 1.2;
     commands.spawn((
+        DespawnOnExit(AppPhase::Playing),
         Mesh3d(meshes.add(Cylinder::new(0.5 * rs, pillar_h * rs))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.1, 0.95, 0.3),
@@ -260,10 +266,16 @@ pub(super) fn spawn_world(
             .map_or(crab_world::mesh_fallback::MESH_ABSENT_REASON, |s| {
                 s.as_str()
             });
-        crab_world::mesh_fallback::spawn_banner(&mut commands, reason);
+        let banner = crab_world::mesh_fallback::spawn_banner(&mut commands, reason);
+        // Round-scoped like everything else spawned here — without the tag the band would
+        // persist over the menu after a disconnect return and stack on re-entry.
+        commands
+            .entity(banner)
+            .insert(DespawnOnExit(AppPhase::Playing));
     }
     let crab_root = commands
         .spawn((
+            DespawnOnExit(AppPhase::Playing),
             Transform::from_translation(world(state.ls.sim().crab().pos(), 0.0)),
             if crab_hidden {
                 Visibility::Hidden
@@ -340,6 +352,7 @@ pub(super) fn reconcile_avatars(
             &assets.remote
         };
         commands.spawn((
+            DespawnOnExit(AppPhase::Playing),
             Mesh3d(assets.mesh.clone()),
             MeshMaterial3d(material.clone()),
             Transform::from_translation(world(p.pos(), 0.0)),
@@ -753,6 +766,7 @@ pub(super) fn look_direction(yaw_radians: f32, pitch_radians: f32) -> Vec3 {
 /// relative near clip the unscaled world had.
 pub(super) fn spawn_fp_camera(mut commands: Commands) {
     commands.spawn((
+        DespawnOnExit(AppPhase::Playing),
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
             near: DEFAULT_CAMERA_NEAR * world_render_scale(),

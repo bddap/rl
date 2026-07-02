@@ -158,6 +158,12 @@ async fn run_net(args: Args) -> Result<()> {
     while Instant::now() < end {
         ticker.tick().await;
 
+        // (Client) A round-terminal server-down verdict this tick, set by the drain (a
+        // mid-match Refuse) or the link check below (rl#203) — ends the run loudly rather
+        // than adopting nothing forever. The shared [`net_loop::ServerDown`], so this
+        // harness's failure wording can't fork from the windowed client's.
+        let mut server_down: Option<net_loop::ServerDown> = None;
+
         // Ingest everything the transport has for us this tick. As the host: remote clients' input
         // `TickMsg`s. As a client: the host's authoritative `CoreSnapshot`s (rl#151 increment 2 —
         // STATE down, not the input set: the client adopts it whole and never re-steps). A stray
@@ -180,15 +186,21 @@ async fn run_net(args: Args) -> Result<()> {
                 // nothing, so it decodes and drops it. Only the windowed client applies it.
                 transport::PeerWire::Articulation(_) => {}
                 transport::PeerWire::Beat(_) => {}
+                // A mid-match Refuse aimed at us means the host DEPARTED us (rl#198's one-shot
+                // answer to a dropped-but-re-linked peer): round-terminal for this client
+                // (rl#203) — surfaced below beside the link-loss check, never silently eaten.
+                transport::PeerWire::Refuse(reason) => {
+                    if !am_host {
+                        server_down = Some(net_loop::ServerDown::Refused(reason));
+                    }
+                }
                 // The roster never GROWS in this run: the peer set is frozen at discovery (it can
                 // only SHRINK on departure, rl#198), so the Stage 3 live-join frames (a joiner's
-                // credentials, a welcome, a refusal) can't legitimately arrive here. Ignore a
+                // credentials, a welcome) can't legitimately arrive here. Ignore a
                 // stray one rather than mishandle it — the same stance `net_loop`'s formation
                 // barrier takes; a real mid-match join is the running coordinator's job, not this
                 // harness.
-                transport::PeerWire::JoinRequest(_)
-                | transport::PeerWire::Welcome(_)
-                | transport::PeerWire::Refuse(_) => {}
+                transport::PeerWire::JoinRequest(_) | transport::PeerWire::Welcome(_) => {}
             }
         }
 
@@ -261,6 +273,19 @@ async fn run_net(args: Args) -> Result<()> {
                     writeln!(w, "{line}").context("writing hash log")?;
                 }
             }
+            // The client half of rl#198's departure handling (rl#203): the same level-triggered
+            // link-table check the host runs above, mirrored — a gone server link means the
+            // host quit/crashed (or departed us and the connection closed).
+            if server_down.is_none() && !session.connected_peers().await.contains(&server_eid) {
+                server_down = Some(net_loop::ServerDown::LinkLost);
+            }
+        }
+
+        // Round-terminal for a client: surface it and end the run early — the headless
+        // analogue of the windowed client's return-to-menu (rl#203).
+        if let Some(down) = server_down {
+            warn!("ending run at tick {}: {down}", ls.sim().tick());
+            break;
         }
 
         // Coarse progress print once the sim crosses each TICK_HZ boundary (see the

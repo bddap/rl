@@ -96,6 +96,38 @@ pub struct Exchanged {
     pub articulations: Vec<CrabArticulation>,
 }
 
+/// The server stopped serving this remote client — the round-terminal verdict a client-arm
+/// [`Coordinator::exchange`] returns as its `Err` (rl#203, the client half of rl#198). An
+/// `Err`, not a field a caller could drop on the floor: the round is OVER and the caller MUST
+/// surface it and leave — without that the client freezes silently on its last adopted frame
+/// ([[silent-fallback-antipattern]]). The solo/host arm never returns it (its server is
+/// in-process and can't be lost). [`std::fmt::Display`] is the one operator-facing wording,
+/// shared by the windowed and headless clients so the two can't drift.
+#[derive(Debug)]
+pub enum ServerDown {
+    /// The link to the server peer is GONE from the link table (host exit/crash, or the
+    /// connection died) — the same level-triggered check the host runs in [`depart_gone_peers`],
+    /// mirrored client-side.
+    LinkLost,
+    /// The host REFUSED us mid-match: we were departed (e.g. after a stall) and our re-linked
+    /// inputs were answered with a one-shot [`transport::Refuse`]. Carries the host's reason.
+    Refused(String),
+}
+
+impl std::fmt::Display for ServerDown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServerDown::LinkLost => write!(
+                f,
+                "Connection to the host was lost — the host quit, crashed, or the link died."
+            ),
+            ServerDown::Refused(reason) => {
+                write!(f, "The host dropped us from the match: {reason}")
+            }
+        }
+    }
+}
+
 impl NetDriver {
     /// The live-telemetry handle, if this client is streaming to a collector (`None` when
     /// launched without `--telemetry`).
@@ -230,13 +262,32 @@ impl NetDriver {
         self.rt.block_on(self.session.connected_peers())
     }
 
+    /// (Client) Whether the link to the server peer is still in the link table — the client
+    /// mirror of the host's [`depart_gone_peers`] check (rl#203), off the SAME table: a link
+    /// exists by construction (formation or the join dial ran over it), so its absence means the
+    /// connection CLOSED (host exit/crash, write failure, or eviction). Level-triggered — a loss
+    /// missed one tick is caught the next.
+    fn server_linked(&self) -> bool {
+        self.rt
+            .block_on(self.session.connected_peers())
+            .contains(&self.server_eid)
+    }
+
+    /// (Client) The server peer's endpoint id — what a disconnected client re-dials to REJOIN
+    /// the live match (fresh endpoint + [`JoinRequest`], the [`connect_and_join`] path).
+    pub fn server_endpoint_id(&self) -> EndpointId {
+        self.server_eid
+    }
+
     /// (Client) Drain everything the server sent DOWN this tick: host-authoritative
     /// [`CoreSnapshot`]s (the client ADOPTS them, never re-steps an input set) and the render-only
-    /// [`CrabArticulation`]s beside them. A [`PeerWire::Refuse`] aimed at us is logged LOUD (an
-    /// established client should never get one), never silently eaten. Drained ONCE so no frame
-    /// kind starves another; snapshots are handed over in ARRIVAL order for
-    /// [`Lockstep::adopt_snapshots`] (the one shared adopt policy) to apply.
-    pub fn drain_server_down(&mut self) -> Exchanged {
+    /// [`CrabArticulation`]s beside them. A [`PeerWire::Refuse`] aimed at us means we were
+    /// DEPARTED from the match (rl#198's one-shot answer to a dropped-but-re-linked peer): logged
+    /// LOUD and returned as the round-terminal [`ServerDown`] verdict so the caller LEAVES the
+    /// round instead of spectating with dead controls (frames drained beside it are moot).
+    /// Drained ONCE so no frame kind starves another; snapshots are handed over in ARRIVAL order
+    /// for [`Lockstep::adopt_snapshots`] (the one shared adopt policy) to apply.
+    pub fn drain_server_down(&mut self) -> Result<Exchanged, ServerDown> {
         let mut down = Exchanged::default();
         while let Some(from) = self.session.try_recv() {
             match from.msg {
@@ -244,11 +295,12 @@ impl NetDriver {
                 PeerWire::Articulation(art) => down.articulations.push(art),
                 PeerWire::Refuse(reason) => {
                     tracing::error!("server refused us mid-match: {reason}");
+                    return Err(ServerDown::Refused(reason));
                 }
                 _ => {}
             }
         }
-        down
+        Ok(down)
     }
 }
 
@@ -306,7 +358,11 @@ impl Coordinator {
     /// record and steps the authoritative server behind the scenes; on the remote-client arm it ships
     /// our input UP and returns the host's STATE drained down (snapshots + articulation) for the
     /// driver to adopt — no peer inputs, no re-sim.
-    pub fn exchange(&mut self, me: PlayerId, msg: TickMsg) -> Exchanged {
+    ///
+    /// `Err(ServerDown)` (remote-client arm only) means the round is OVER for this client — the
+    /// server link died or the host refused us (rl#203). A `Result`, so no caller can adopt
+    /// frames while silently dropping the verdict.
+    pub fn exchange(&mut self, me: PlayerId, msg: TickMsg) -> Result<Exchanged, ServerDown> {
         match self {
             Coordinator::Server { server, net } => {
                 // Drain remote clients' inputs AND any mid-game join requests (none for solo).
@@ -338,7 +394,7 @@ impl Coordinator {
                 // The host broadcasts the authoritative snapshot + articulation from the driver, the
                 // moment it steps each tick (see `Coordinator::broadcast_step`), so a client renders
                 // state rather than re-stepping inputs. `sets` feed THIS server's own step queue.
-                Exchanged::default()
+                Ok(Exchanged::default())
             }
             Coordinator::Client { net } => {
                 // Ship our input UP and drain the host's STATE down (snapshots + render
@@ -346,7 +402,16 @@ impl Coordinator {
                 // snapshot ([`Lockstep::adopt_snapshots`]) and renders the last-arrived
                 // articulation.
                 net.send_to_server(&msg);
-                net.drain_server_down()
+                let down = net.drain_server_down()?;
+                // The client half of rl#198's departure handling (rl#203): the same
+                // level-triggered link-table check the host runs, so a dead server link is a
+                // round-terminal verdict — never a silent freeze on the last adopted frame. A
+                // Refuse drained above wins (it names the cause); the check runs after the
+                // drain so a verdict can't be missed between them.
+                if !net.server_linked() {
+                    return Err(ServerDown::LinkLost);
+                }
+                Ok(down)
             }
         }
     }
@@ -380,6 +445,15 @@ impl Coordinator {
     /// split — SP and host take the SAME arm ([[sp-is-mp-special-case]]).
     pub fn is_server_authoritative(&self) -> bool {
         matches!(self, Coordinator::Server { .. })
+    }
+
+    /// (Client) The server peer's endpoint id, for the rejoin affordance after a server-down
+    /// verdict; `None` when THIS peer runs the server (nothing to re-dial).
+    pub fn server_endpoint(&self) -> Option<EndpointId> {
+        match self {
+            Coordinator::Server { .. } => None,
+            Coordinator::Client { net } => Some(net.server_endpoint_id()),
+        }
     }
 
     /// The authoritative server, if THIS peer runs one (solo or host); `None` for a remote client.
@@ -918,7 +992,9 @@ mod tests {
             let msg = ls.submit_local_input(Input::from_axes(1.0, 0.0));
             // The input goes UP to the internal server; with a roster of one there are no OTHER
             // players' inputs and no joins.
-            let exch = coord.exchange(me, msg);
+            let exch = coord
+                .exchange(me, msg)
+                .expect("the solo/host arm can never lose its in-process server (rl#203)");
             assert!(
                 exch.snapshots.is_empty(),
                 "the solo/host arm returns state empty"

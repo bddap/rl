@@ -320,6 +320,14 @@ pub enum LobbyItem {
     Cancel,
 }
 
+/// A focusable item on the "connection lost" prompt (rl#203) — rejoin the match we were
+/// dropped from, or go back to the chooser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisconnectedItem {
+    Rejoin,
+    Leave,
+}
+
 /// One device-agnostic menu navigation event. Keyboard arrows/WASD, gamepad D-pad/stick,
 /// and egui clicks all reduce to these (a click is `Confirm` after focusing the clicked
 /// item). Left/Right collapse into Up/Down because every menu screen is a vertical list.
@@ -348,6 +356,9 @@ pub enum MenuAction {
     StartSolo,
     /// Lobby: leave — cancel the formation and return to the chooser.
     Cancel,
+    /// Disconnected prompt: re-dial the lost match's host and send a fresh
+    /// [`crate::server::JoinRequest`] (the [`net_loop::connect_and_join`] path, rl#203).
+    Rejoin,
 }
 
 /// The pure menu state: which screen, and the focus within it. Built by [`MenuNav::new`]
@@ -367,6 +378,13 @@ pub enum MenuNav {
     HostLobby { focus: LobbyItem },
     /// A joiner's lobby (AppPhase::Connecting): no choices but Cancel, so no focus to hold.
     JoinLobby,
+    /// The "connection lost — rejoin?" prompt (AppPhase::Menu, rl#203), shown when a live
+    /// round's server link died: a Rejoin / Leave focus ring. Entered only by the disconnect
+    /// return (never navigable-to), so a rejoinable host id always exists behind it.
+    Disconnected { focus: DisconnectedItem },
+    /// A rejoin dial is in flight (AppPhase::Connecting): like [`MenuNav::JoinLobby`], the only
+    /// action is Cancel — the verdict (admitted / refused / unreachable) arrives on a poll.
+    Rejoining,
 }
 
 impl Default for MenuNav {
@@ -462,6 +480,40 @@ impl MenuNav {
                     MenuAction::Cancel
                 }
             },
+            // "Connection lost — rejoin?": a two-item vertical ring, like the chooser.
+            // Back declines (the chooser, with the disconnect message still shown).
+            MenuNav::Disconnected { focus } => match input {
+                MenuInput::Up | MenuInput::Down => {
+                    *focus = match focus {
+                        DisconnectedItem::Rejoin => DisconnectedItem::Leave,
+                        DisconnectedItem::Leave => DisconnectedItem::Rejoin,
+                    };
+                    MenuAction::None
+                }
+                MenuInput::Confirm => match focus {
+                    DisconnectedItem::Rejoin => {
+                        *self = MenuNav::Rejoining;
+                        MenuAction::Rejoin
+                    }
+                    DisconnectedItem::Leave => {
+                        *self = MenuNav::new();
+                        MenuAction::None
+                    }
+                },
+                MenuInput::Back => {
+                    *self = MenuNav::new();
+                    MenuAction::None
+                }
+            },
+            // A rejoin in flight can only be waited out or abandoned — the same shape as the
+            // joiner's lobby; the admitted/refused/unreachable verdict arrives via a poll.
+            MenuNav::Rejoining => match input {
+                MenuInput::Up | MenuInput::Down => MenuAction::None,
+                MenuInput::Confirm | MenuInput::Back => {
+                    *self = MenuNav::new();
+                    MenuAction::Cancel
+                }
+            },
         }
     }
 
@@ -478,6 +530,22 @@ impl MenuNav {
     /// focus). The click counterpart of [`Self::focus_chooser`].
     pub fn focus_lobby(&mut self, item: LobbyItem) {
         if let MenuNav::HostLobby { focus } = self {
+            *focus = item;
+        }
+    }
+
+    /// Enter the "connection lost — rejoin?" prompt (rl#203), Rejoin focused — the one
+    /// disconnect-return entry, so the prompt always starts on the affirmative.
+    pub fn disconnected() -> Self {
+        MenuNav::Disconnected {
+            focus: DisconnectedItem::Rejoin,
+        }
+    }
+
+    /// Move focus to a specific disconnected-prompt item (no-op off the prompt). The click
+    /// counterpart of [`Self::focus_chooser`].
+    pub fn focus_disconnected(&mut self, item: DisconnectedItem) {
+        if let MenuNav::Disconnected { focus } = self {
             *focus = item;
         }
     }
@@ -663,6 +731,46 @@ mod tests {
         // Confirm can only ever cancel; even a populated roster yields no Start.
         assert_eq!(nav.step(MenuInput::Confirm, 9), MenuAction::Cancel);
         assert_eq!(nav, MenuNav::new());
+    }
+
+    /// THE disconnect flow (rl#203): the prompt starts on Rejoin, Up/Down toggles the two
+    /// items, confirming Rejoin fires the rejoin dial and moves to Rejoining, and a rejoin in
+    /// flight can only be cancelled — the same wait-or-leave shape as the joiner's lobby.
+    #[test]
+    fn disconnected_prompt_rejoins_or_leaves() {
+        let mut nav = MenuNav::disconnected();
+        assert_eq!(
+            nav,
+            MenuNav::Disconnected {
+                focus: DisconnectedItem::Rejoin
+            },
+            "the prompt starts on the affirmative"
+        );
+        assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
+        assert_eq!(
+            nav,
+            MenuNav::Disconnected {
+                focus: DisconnectedItem::Leave
+            }
+        );
+        assert_eq!(nav.step(MenuInput::Up, 0), MenuAction::None);
+        assert_eq!(nav.step(MenuInput::Confirm, 0), MenuAction::Rejoin);
+        assert_eq!(nav, MenuNav::Rejoining);
+
+        // A rejoin in flight: navigation is inert; Confirm or Back abandons it.
+        assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
+        assert_eq!(nav, MenuNav::Rejoining);
+        assert_eq!(nav.step(MenuInput::Back, 0), MenuAction::Cancel);
+        assert_eq!(nav, MenuNav::new(), "an abandoned rejoin lands on the chooser");
+
+        // Declining the prompt (Leave, or Back) returns to the chooser with no side effect.
+        let mut decline = MenuNav::disconnected();
+        decline.step(MenuInput::Down, 0); // focus Leave
+        assert_eq!(decline.step(MenuInput::Confirm, 0), MenuAction::None);
+        assert_eq!(decline, MenuNav::new());
+        let mut back = MenuNav::disconnected();
+        assert_eq!(back.step(MenuInput::Back, 0), MenuAction::None);
+        assert_eq!(back, MenuNav::new());
     }
 
     /// A click routes through the SAME `step` path as a pad/keyboard confirm: focus the
