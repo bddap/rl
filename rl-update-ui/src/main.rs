@@ -515,6 +515,9 @@ fn main() {
     }
 
     let mut app = App::new();
+    // Deliberately NOT `crab_world::app_boot::base_plugins`: the updater must stay
+    // standalone (no crab-world/otel deps — it has to build and run when the main tree
+    // is broken), it bundles no assets, and LogPlugin IS its subscriber (no otel::init).
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "rl Update".into(),

@@ -56,7 +56,8 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
 
     let worker = matches!(cfg.role, WorldRole::RolloutWorker);
 
-    // The windowless plugin set every headless entry shares — `DefaultPlugins` either
+    // The windowless plugin set every headless entry shares (the rendered surfaces boot
+    // from the sibling recipe, `crate::app_boot::base_plugins`) — `DefaultPlugins` either
     // way, because the sim needs the non-render core plugins it brings (TransformPlugin
     // for GlobalTransform propagation, AssetPlugin, ScenePlugin, InputPlugin); a bare
     // MinimalPlugins omits those and rapier/bot systems then panic "Resource does not
