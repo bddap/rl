@@ -92,23 +92,7 @@ fn offscreen_app_scaffold() -> App {
     // No window, GPU ON (render-to-image). A 60 Hz schedule runner with a real-time
     // step so the capture counter (render frames) also paces the sim and the GPU
     // pipeline warms over the same frames — mirrors play.rs's screenshot mode.
-    app.add_plugins(
-        DefaultPlugins
-            // Resolve the committed control glyphs from the bundled `assets/` dir regardless
-            // of cwd/which bin runs (same fix as the windowed app); `BEVY_ASSET_ROOT` overrides.
-            .set(AssetPlugin {
-                file_path: crab_world::assets::bevy_asset_path()
-                    .to_string_lossy()
-                    .into_owned(),
-                ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
-            })
-            .disable::<bevy::winit::WinitPlugin>(),
-    );
+    app.add_plugins(crab_world::app_boot::base_plugins(None));
     app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
         Duration::from_secs_f64(1.0 / 60.0),
     ));

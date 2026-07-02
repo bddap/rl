@@ -86,31 +86,15 @@ pub fn build_windowed_app(
     // actually consumed: the trainer, eval, and the #82 probe
     // ([`crab_world::bot::headless::pin_single_thread_pools`]).
     let mut app = App::new();
-    // Point bevy at the bundled `assets/` dir explicitly, so a fresh clone's `cargo run`
-    // finds the committed control glyphs regardless of cwd or which workspace bin runs (the
-    // default root is the running bin's crate dir, `game/assets`, which has no glyphs).
-    // `BEVY_ASSET_ROOT` still overrides (deploy). See `crab_world::assets`.
-    app.add_plugins(
-        DefaultPlugins
-            .set(AssetPlugin {
-                file_path: crab_world::assets::bevy_asset_path()
-                    .to_string_lossy()
-                    .into_owned(),
-                ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "Giant Crab Rescue".into(),
-                    // Fullscreen is the single source of truth for every GCR launch target. The Deck
-                    // shows fullscreen only because gamescope forces it; on a plain desktop/TV (bothouse)
-                    // a Windowed app stayed windowed. BorderlessFullscreen makes the app itself own the
-                    // policy, so bothouse matches the Deck with no separate per-host window-config path.
-                    mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-                    ..default()
-                }),
-                ..default()
-            }),
-    );
+    app.add_plugins(crab_world::app_boot::base_plugins(Some(Window {
+        title: "Giant Crab Rescue".into(),
+        // Fullscreen is the single source of truth for every GCR launch target. The Deck
+        // shows fullscreen only because gamescope forces it; on a plain desktop/TV (bothouse)
+        // a Windowed app stayed windowed. BorderlessFullscreen makes the app itself own the
+        // policy, so bothouse matches the Deck with no separate per-host window-config path.
+        mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+        ..default()
+    })));
     // Night-sky skybox behind the first-person view (attaches to the FP camera when the
     // round spawns it). Shared with the rl-demo via `crab_world::sky`.
     app.add_plugins(crab_world::sky::NightSkyPlugin);
