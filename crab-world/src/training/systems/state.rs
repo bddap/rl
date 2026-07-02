@@ -201,22 +201,34 @@ pub(crate) struct HorizonOutput {
 impl TrainingState {
     /// The learner's policy host (and the test fixtures). The learner steps no world
     /// itself — it owns the policy and runs the PPO update from the threads' buffers,
-    /// checkpointing every iteration directly.
-    pub fn new(config: &TrainConfig) -> Self {
-        Self::build(config, false, 0)
+    /// checkpointing every iteration directly. `requested` is the `--arch` flag:
+    /// `None` defers to the checkpoint's envelope tag (fresh dir → the default arch);
+    /// `Some` pins a fresh start's arch and must AGREE with the tag on a resume
+    /// (disagreement ABORTS — see [`Self::build`]).
+    pub fn new(config: &TrainConfig, requested: Option<ArchId>) -> Self {
+        Self::build(config, false, 0, requested)
     }
 
     /// In-process rollout thread: collects transitions but never runs the PPO update
     /// locally (the learner does). `worker_mode` turns on the per-horizon normalizer
     /// increment the thread ships back; `worker_index` mixes into the RNG seed so each
     /// thread explores an independent stream even under a fixed `--seed` (see
-    /// [`Self::build`]). Everything else (env count, reset/grace/rescue, reward) is the
-    /// shared per-env machinery.
-    pub fn new_worker(config: &TrainConfig, worker_index: usize) -> Self {
-        Self::build(config, true, worker_index)
+    /// [`Self::build`]). `arch` is the learner's RESOLVED architecture: the worker never
+    /// resolves it itself (it skips the checkpoint read entirely), and every
+    /// `begin_horizon` replaces its brain from the learner's LEAF-record snapshot — a
+    /// load that refuses cross-variant — so the worker must be built holding the same
+    /// variant. Everything else (env count, reset/grace/rescue, reward) is the shared
+    /// per-env machinery.
+    pub fn new_worker(config: &TrainConfig, worker_index: usize, arch: ArchId) -> Self {
+        Self::build(config, true, worker_index, Some(arch))
     }
 
-    fn build(config: &TrainConfig, worker_mode: bool, worker_index: usize) -> Self {
+    fn build(
+        config: &TrainConfig,
+        worker_mode: bool,
+        worker_index: usize,
+        requested: Option<ArchId>,
+    ) -> Self {
         let device = NdArrayDevice::Cpu;
 
         // Resolve the run's RNG seed: an explicit `--seed`, else a fresh draw from
@@ -240,7 +252,11 @@ impl TrainingState {
         // reseeds never reach training.
         <TrainBackend as burn::tensor::backend::Backend>::seed(&device, seed);
 
-        let mut brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        // Cold-start / worker arch: the `--arch` request (a worker's is the learner's
+        // resolved arch), defaulting to mlp256. A warm resume below replaces this brain
+        // with the checkpoint's — whose TAG is authoritative — after the flag↔tag check.
+        let mut brain: AnyBrain<TrainBackend> =
+            AnyBrain::init(requested.unwrap_or(ArchId::Mlp256), &device);
 
         let mut obs_normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
         let mut return_normalizer = ReturnNormalizer::new();
@@ -268,6 +284,22 @@ impl TrainingState {
         {
             None => {} // worker: no load at all
             Some(Ok(loaded)) => {
+                // Resume is TAG-authoritative; an explicit `--arch` that disagrees with
+                // the tag is an operator error and ABORTS (bddap/rl#200 §3). Cold-starting
+                // into the flag's arch here would silently discard the trained policy;
+                // proceeding with the tag's would silently ignore the flag.
+                if let Some(req) = requested {
+                    assert_eq!(
+                        req,
+                        loaded.arch(),
+                        "REFUSING to train over checkpoint dir {}: --arch {req} disagrees \
+                         with the checkpoint's arch tag {} (the tag is authoritative on a \
+                         resume). Drop the flag, or point --checkpoint-dir at a fresh dir \
+                         for a {req} run.",
+                        config.checkpoint_dir.display(),
+                        loaded.arch(),
+                    );
+                }
                 let (obs, action) = loaded.io_dims();
                 if crate::policy::dims_fit_rig(obs, action) {
                     info!(
@@ -283,6 +315,10 @@ impl TrainingState {
                          the actuated DOF set changed) — starting the policy fresh",
                         paths.brain_file().display()
                     );
+                    // The deliberate DOF cold start stays on the CHECKPOINT's arch (tag
+                    // still authoritative — without a flag the default above could
+                    // otherwise silently switch a non-default run's architecture).
+                    brain = AnyBrain::init(loaded.arch(), &device);
                 }
             }
             // No brain file: a fresh checkpoint dir — the legitimate cold start.

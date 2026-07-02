@@ -43,8 +43,12 @@ pub enum ArchId {
 }
 
 impl ArchId {
-    /// The stable on-disk / CLI name. Kebab-case, never reused after a cull. Keep
-    /// [`TryFrom<String>`] below in lockstep — it is the inverse of this table.
+    /// Every living architecture. `TryFrom<String>` inverts [`Self::name`] through this
+    /// list, so the name table lives in exactly one place; a new variant that misses
+    /// this list is caught by `roundtrips_every_arch` below.
+    pub const ALL: &'static [ArchId] = &[Self::Mlp256];
+
+    /// The stable on-disk / CLI name. Kebab-case, never reused after a cull.
     pub fn name(self) -> &'static str {
         match self {
             Self::Mlp256 => "mlp256",
@@ -61,10 +65,17 @@ impl std::fmt::Display for ArchId {
 impl TryFrom<String> for ArchId {
     type Error = String;
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        match s.as_str() {
-            "mlp256" => Ok(Self::Mlp256),
-            other => Err(format!("unknown policy architecture {other:?}")),
-        }
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|a| a.name() == s)
+            .ok_or_else(|| {
+                let known: Vec<_> = Self::ALL.iter().map(|a| a.name()).collect();
+                format!(
+                    "unknown policy architecture {s:?} (known: {})",
+                    known.join(", ")
+                )
+            })
     }
 }
 
@@ -227,5 +238,20 @@ impl<B: Backend> GaussianHead<B> {
     pub(crate) fn entropy(&self) -> Tensor<B, 1> {
         (self.log_std.clone() + 0.5 * (2.0 * std::f32::consts::PI * std::f32::consts::E).ln())
             .mean()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArchId;
+
+    /// Every registered arch's name parses back to itself — catches a new variant
+    /// missing from `ArchId::ALL` (which would make its checkpoints unloadable) or a
+    /// name collision between variants.
+    #[test]
+    fn roundtrips_every_arch() {
+        for &arch in ArchId::ALL {
+            assert_eq!(ArchId::try_from(arch.name().to_string()), Ok(arch));
+        }
     }
 }

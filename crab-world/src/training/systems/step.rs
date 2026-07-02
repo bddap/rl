@@ -537,7 +537,7 @@ mod tests {
         // Think→Act systems, so these tests exercise the brain_step / reset_crab /
         // rescue semantics the sole trainer runs. Worker index 0 → the seed is used
         // unmixed, so a fixed `seed` reproduces the trajectory exactly.
-        let state = TrainingState::new_worker(&config, 0);
+        let state = TrainingState::new_worker(&config, 0, crate::bot::arch::ArchId::Mlp256);
         app.insert_non_send_resource(state)
             .add_systems(
                 FixedUpdate,
