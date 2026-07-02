@@ -228,22 +228,22 @@ async fn run_net(args: Args) -> Result<()> {
             // policy ([`net::lockstep::Lockstep::adopt_snapshots`]: arrival order, no tick gate/sort
             // — see its doc for the restart-freeze rationale).
             session.send_to(server_eid, &msg).await;
-            // The adopt callback can't `?`; stash the first hash-log write error and surface it after.
-            let mut log_err: Option<std::io::Error> = None;
+            // The adopt callback can't `?`; collect the per-adopt observations and write them after,
+            // where the error propagates through normal control flow.
+            let mut adopted_hashes: Vec<(u64, u64)> = Vec::new();
             snapshots_io += ls.adopt_snapshots(snapshots, |ls| {
-                if let (Some(w), None) = (hash_log.as_mut(), log_err.as_ref()) {
-                    use std::io::Write as _;
+                if hash_log.is_some() {
                     // The host logs the just-stepped tick index (its `sim().tick() - 1`); the snapshot
                     // we just adopted carries the POST-step count (`sim.tick()`), one higher — so log
                     // `tick - 1` to line up the two peers' logs for a byte-identical `diff`.
-                    let applied = ls.sim().tick().saturating_sub(1);
-                    if let Err(e) = writeln!(w, "{} {:#018x}", applied, ls.sim().state_hash()) {
-                        log_err = Some(e);
-                    }
+                    adopted_hashes.push((ls.sim().tick().saturating_sub(1), ls.sim().state_hash()));
                 }
             });
-            if let Some(e) = log_err {
-                return Err(e).context("writing hash log");
+            if let Some(w) = hash_log.as_mut() {
+                use std::io::Write as _;
+                for (applied, hash) in adopted_hashes {
+                    writeln!(w, "{} {:#018x}", applied, hash).context("writing hash log")?;
+                }
             }
         }
 

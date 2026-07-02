@@ -164,10 +164,15 @@ impl Lockstep {
     /// state overwrite, so applying intermediates is cheap (~hundreds of bytes/tick) and keeps
     /// per-adopt observers exact.
     ///
-    /// `on_adopt` runs after each apply (the `--hash-log` writer; pass `|_| ()` to skip). Returns
-    /// how many snapshots were adopted; callers gate their post-adopt work
-    /// ([`reconcile_local_prediction`](Lockstep::reconcile_local_prediction), `prev` refresh) on
-    /// having drained at least one.
+    /// `on_adopt` runs after each apply (the `--hash-log` observer; pass `|_| ()` to skip). Returns
+    /// how many snapshots were adopted; callers gate POST-adopt work
+    /// ([`reconcile_local_prediction`](Lockstep::reconcile_local_prediction)) on it having been at
+    /// least one. PRE-adopt work (the driver's `prev` interpolation-source refresh) must instead be
+    /// gated on the batch being nonempty BEFORE this call — the count comes back too late.
+    ///
+    /// Scope: this polices a DRAINED REMOTE batch. Host/solo self-mirrors of the single snapshot
+    /// their own in-process server just stepped stay on raw
+    /// [`apply_core_snapshot`](Lockstep::apply_core_snapshot) — no batch, no ordering question.
     pub fn adopt_snapshots(
         &mut self,
         snapshots: impl IntoIterator<Item = CoreSnapshot>,
