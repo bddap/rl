@@ -32,9 +32,8 @@ opentelemetry-otlp = { version = "0.28", default-features = false, features = [
 tracing-opentelemetry = "0.29"
 opentelemetry-appender-tracing = "0.28"
 tracing = { workspace = true }
-# The `log`->tracing bridge (LogTracer). The rendered surfaces disable bevy's LogPlugin
-# (`init` here owns the subscriber), so the bridge it used to install lives here instead —
-# wgpu_hal and friends log via the `log` crate and would otherwise vanish.
-tracing-log = "0.2"
+# tracing-subscriber's default `tracing-log` feature installs the `log`->tracing bridge
+# (wgpu_hal, rapier, …) inside `.init()`, so no direct tracing-log dep here — a pre-set
+# LogTracer makes `.init()` panic (see init()).
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow = { workspace = true }

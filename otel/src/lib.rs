@@ -66,12 +66,11 @@ impl Drop for OtelGuard {
 /// `RUST_LOG` overrides the default `info` filter. Call once at process start; the
 /// returned guard must outlive the work whose telemetry you want delivered.
 pub fn init(service_name: &str) -> OtelGuard {
-    // Bridge `log`-crate records (wgpu_hal, rapier, …) into this subscriber. The rendered
-    // surfaces disable bevy's `LogPlugin` (this subscriber owns the process — see
-    // `crab_world::app_boot::base_plugins`), and the bridge was the one thing LogPlugin
-    // still contributed, so it lives in the one init every binary calls. Errs only if a
-    // logger is already set (a second `init` call) — nothing to do then.
-    let _ = tracing_log::LogTracer::init();
+    // `log`-crate records (wgpu_hal, rapier, …) reach this subscriber via
+    // tracing-subscriber's default `tracing-log` feature: every `.init()` below installs
+    // the LogTracer bridge itself. Do NOT also call `tracing_log::LogTracer::init()` here —
+    // a pre-set logger makes those `.init()` calls PANIC (SetLoggerError), which took down
+    // every binary at startup and broke the rl-release checkpoint gate (2026-07-02).
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
