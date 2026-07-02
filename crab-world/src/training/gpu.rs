@@ -128,8 +128,8 @@ impl GpuLearner<GpuBackend> {
     /// Via [`init_gpu_backend`], if no real discrete-GPU Vulkan adapter is available (a
     /// software lavapipe/llvmpipe adapter, or none at all). Deliberate: it must fail
     /// loudly at boot, never silently run on the CPU.
-    pub fn new() -> Self {
-        Self::with_device(init_gpu_backend())
+    pub fn new(arch: ArchId) -> Self {
+        Self::with_device(arch, init_gpu_backend())
     }
 }
 
@@ -137,14 +137,14 @@ impl<B: AutodiffBackend> GpuLearner<B> {
     /// Build the learner on an explicitly-provided device — the injected-device seam behind
     /// [`GpuLearner::new`]. The brain's initial weights are irrelevant: [`Self::update`] loads
     /// the CPU policy onto it before every update, so the first update trains the real policy,
-    /// not this fresh net. Production injects the discrete GPU; a test injects a CPU device.
+    /// not this fresh net — but `arch` must be the run's RESOLVED architecture (the CPU
+    /// brain's), because that load is a cross-variant-refusing leaf-record bridge.
+    /// Production injects the discrete GPU; a test injects a CPU device.
     /// `pub(crate)`, not `pub`: the only public door to a learner is [`GpuLearner::new`], which
     /// pins `B = GpuBackend` and runs the software-adapter gate, so the non-GPU constructor
     /// can't be reached from outside the crate to build a CPU "GPU learner" in production.
-    pub(crate) fn with_device(device: B::Device) -> Self {
-        // Same variant as the CPU brain it mirrors (see `update`'s leaf-record bridge);
-        // the arch threads in with increment 4's `--arch` flag.
-        let brain: AnyBrain<B> = AnyBrain::init(ArchId::Mlp256, &device);
+    pub(crate) fn with_device(arch: ArchId, device: B::Device) -> Self {
+        let brain: AnyBrain<B> = AnyBrain::init(arch, &device);
         let optimizer: CrabOpt<B> = crab_optimizer();
         Self {
             device,
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn cpu_device_seam_round_trips_brain_through_update() {
         let device = NdArrayDevice::Cpu;
-        let mut learner = GpuLearner::<TrainBackend>::with_device(device);
+        let mut learner = GpuLearner::<TrainBackend>::with_device(ArchId::Mlp256, device);
         let mut cpu_brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
         let before = policy_means(&cpu_brain, &device);
 

@@ -98,9 +98,18 @@ struct LearnArgs {
     /// Default is PHYSICAL cores minus 2 (floored at one) — physical, not logical,
     /// so it never oversubscribes a hyperthreaded pair onto one core — leaving the
     /// rest of the machine a couple of cores. Pass an explicit value to use more.
-    /// Clamped to 1..=64.
+    /// Clamped to 1..=64. Concurrent per-arch runs (bddap/rl#200) MUST each pass an
+    /// explicit value partitioning the physical cores: two default-workers processes
+    /// would EACH take physical−2 and oversubscribe the machine.
     #[arg(long)]
     workers: Option<usize>,
+
+    /// Policy architecture for a FRESH start (an empty --checkpoint-dir); default
+    /// mlp256. On a RESUME the checkpoint's arch tag is authoritative and this flag
+    /// is only a cross-check — a value that disagrees with the tag ABORTS (never a
+    /// cold start over the trained policy, never a silently ignored flag).
+    #[arg(long, value_parser = parse_arch)]
+    arch: Option<bot::arch::ArchId>,
 
     /// Rollout horizon H: physics ticks each thread rolls per iteration before
     /// handing its buffers back. Per-iteration sample count is K·(--envs)·H.
@@ -144,6 +153,12 @@ struct EvalArgs {
     distance: Option<f32>,
 }
 
+/// clap value-parser for `--arch`: delegates to the registry's `TryFrom<String>`, whose
+/// error already names the unknown arch and lists the known ones.
+fn parse_arch(s: &str) -> Result<bot::arch::ArchId, String> {
+    bot::arch::ArchId::try_from(s.to_string())
+}
+
 fn main() {
     // Installs the tracing subscriber (stderr fmt, so the trainer's `info!`/`warn!`/`error!`
     // still surface headless where there is no bevy `LogPlugin` — a fail-loud guard that
@@ -163,6 +178,7 @@ fn main() {
             // world) so a foreground game preempts training.
             training::inproc::run_learner(
                 &l.train,
+                l.arch,
                 training::inproc::default_workers(l.workers),
                 l.horizon,
                 l.iters,

@@ -68,7 +68,7 @@ use burn::module::Module;
 use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
 
 use crate::TrainConfig;
-use crate::bot::arch::AnyBrain;
+use crate::bot::arch::{AnyBrain, ArchId};
 
 use super::TrainBackend;
 use super::algorithm::RolloutBuffer;
@@ -322,13 +322,15 @@ impl RolloutThread {
     /// Spawn thread `id`: build its headless App once, then loop
     /// {recv request → load snapshot → roll H ticks → send result}. The loop ends
     /// when `request_tx` is dropped (learner shutdown), which closes the recv. `id`
-    /// names the OS thread and tags its panic-recovery log line.
-    fn spawn(id: usize, config: TrainConfig, horizon: u64) -> Self {
+    /// names the OS thread and tags its panic-recovery log line. `arch` is the
+    /// learner's RESOLVED architecture (the snapshot loads are cross-variant-refusing
+    /// leaf records, so the worker must hold the same variant).
+    fn spawn(id: usize, config: TrainConfig, arch: ArchId, horizon: u64) -> Self {
         let (request_tx, request_rx) = channel::<RollRequest>();
         let (result_tx, result_rx) = channel::<RollOutcome>();
         let handle = std::thread::Builder::new()
             .name(format!("rollout-{id}"))
-            .spawn(move || rollout_thread_main(id, config, horizon, request_rx, result_tx))
+            .spawn(move || rollout_thread_main(id, config, arch, horizon, request_rx, result_tx))
             .expect("spawn rollout thread");
         Self {
             request_tx,
@@ -360,12 +362,13 @@ impl Drop for RolloutThread {
 fn rollout_thread_main(
     id: usize,
     config: TrainConfig,
+    arch: ArchId,
     horizon: u64,
     request_rx: Receiver<RollRequest>,
     result_tx: Sender<RollOutcome>,
 ) {
     let num_envs = config.envs.max(1) as usize;
-    let mut app = build_rollout_app(id, &config, num_envs);
+    let mut app = build_rollout_app(id, &config, arch, num_envs);
     warm_up_app(&mut app);
 
     while let Ok(req) = request_rx.recv() {
@@ -377,7 +380,7 @@ fn rollout_thread_main(
                     "[rollout-{id}] env panicked mid-roll (likely a solver NaN); \
                      rebuilding this thread's world, run continues"
                 );
-                let mut fresh = build_rollout_app(id, &config, num_envs);
+                let mut fresh = build_rollout_app(id, &config, arch, num_envs);
                 warm_up_app(&mut fresh);
                 fresh
             },
@@ -485,7 +488,7 @@ fn warm_up_app(app: &mut App) {
 /// onto the single-threaded executor — without the latter bevy's multithreaded
 /// executor dispatches systems onto the global `ComputeTaskPool` and N apps
 /// serialize on it (flat throughput). Both are unconditional here.
-fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
+fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: usize) -> App {
     use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack};
     use crate::training::systems;
     use crate::training::systems::{brain_step, reset_crab, save_on_exit};
@@ -501,7 +504,7 @@ fn build_rollout_app(id: usize, config: &TrainConfig, num_envs: usize) -> App {
     // here).
     // `id` is the worker index — mixed into the RNG seed so each thread explores an
     // independent stream even under a fixed `--seed` (see `TrainingState::build`).
-    let state = systems::TrainingState::new_worker(config, id);
+    let state = systems::TrainingState::new_worker(config, id, arch);
     app.insert_non_send_resource(state)
         .add_systems(
             FixedUpdate,
@@ -772,7 +775,14 @@ fn log_iteration(r: &IterReport) {
 /// than a learner with no update path. (crab-world builds without `wgpu` for the render
 /// bins, which only do CPU inference and never call this.)
 #[cfg(feature = "wgpu")]
-pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nice: i32) {
+pub fn run_learner(
+    config: &TrainConfig,
+    requested_arch: Option<ArchId>,
+    k: usize,
+    horizon: u64,
+    iters: u64,
+    nice: i32,
+) {
     // Own nicing here (one place): lowers this whole process's priority before any
     // world is built, so a foreground game preempts training. The rollout threads
     // spawned below inherit it (POSIX priority is per-process).
@@ -801,7 +811,12 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // checkpoint in checkpoint_dir — that is the resume. The CPU brain stays the source
     // of truth (rollout snapshots + checkpoints read it); the GPU learner only borrows
     // it each iter to update on the device.
-    let mut state = TrainingState::new(config);
+    let mut state = TrainingState::new(config, requested_arch);
+    // The run's RESOLVED architecture: the checkpoint tag on a resume, the `--arch`
+    // request (default mlp256) on a fresh start. Everything downstream that must hold
+    // the same variant — the GPU learner and every rollout worker — is built from this,
+    // never from the flag.
+    let arch = state.brain().arch();
 
     // The GPU learner (rl#49): the SOLE PPO-update path. Its GPU brain + Adam optimizer
     // persist across iters, like the CPU optimizer's moments. The adapter probe +
@@ -809,7 +824,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
     // fails at boot before any rollout. (The first GPU update still pays a one-time
     // shader-compile warmup; that lands in iter 0's update time, excluded by
     // `warmup_iters` from the steady-state rate.)
-    let mut gpu_learner = super::gpu::GpuLearner::new();
+    let mut gpu_learner = super::gpu::GpuLearner::new(arch);
 
     // Resume the optimizer's Adam moments + step from the checkpoint so the update
     // continues with warm momentum instead of the brief self-correcting transient a cold
@@ -866,7 +881,7 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
 
     // Spawn the K rollout threads; each builds its App (seconds) before serving.
     let threads: Vec<RolloutThread> = (0..k)
-        .map(|id| RolloutThread::spawn(id, config.clone(), horizon))
+        .map(|id| RolloutThread::spawn(id, config.clone(), arch, horizon))
         .collect();
     eprintln!("[learner] {k} rollout thread(s) building worlds…");
 
@@ -1234,7 +1249,7 @@ mod tests {
     #[test]
     fn merge_rollouts_attributes_refusals_panics_and_glitches() {
         let (config, dir) = scratch_config("merge_attr", 2);
-        let mut state = TrainingState::new(&config);
+        let mut state = TrainingState::new(&config, None);
 
         let results = vec![
             RollOutcome::Rolled {
@@ -1316,10 +1331,10 @@ mod tests {
 
         // The learner side: owns the policy; snapshot it before and after to prove
         // the update over the thread's buffers actually moved the weights.
-        let mut state = TrainingState::new(&config);
+        let mut state = TrainingState::new(&config, None);
         let before = snapshot_brain_bytes(state.brain());
 
-        let thread = RolloutThread::spawn(0, config.clone(), horizon);
+        let thread = RolloutThread::spawn(0, config.clone(), state.brain().arch(), horizon);
         thread
             .request_tx
             .send(RollRequest {
@@ -1397,12 +1412,12 @@ mod tests {
         let k = 2usize;
         let (config, dir) = scratch_config("parity_two_threads", m);
 
-        let state = TrainingState::new(&config);
+        let state = TrainingState::new(&config, None);
         let brain_bytes = Arc::new(snapshot_brain_bytes(state.brain()));
         let normalizer = Arc::new(state.normalizer_snapshot());
 
         let threads: Vec<RolloutThread> = (0..k)
-            .map(|id| RolloutThread::spawn(id, config.clone(), horizon))
+            .map(|id| RolloutThread::spawn(id, config.clone(), state.brain().arch(), horizon))
             .collect();
         for t in &threads {
             t.request_tx
