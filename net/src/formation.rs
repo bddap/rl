@@ -166,30 +166,31 @@ pub async fn form_match(
     }
     // GCR shared-asset guard (rl#82 weights + rl#100 crab asset): make the verdict LOUD. With a
     // checkpoint loaded (`local_weights_digest != 0`) the operator needs to know whether the NN
-    // crab will arm — it needs BOTH synced weights AND a synced crab asset; a mismatch on either
-    // means it WON'T, and with no integer fallback (rl#114) the windowed client REFUSES the round
-    // rather than substituting a fake crab. The asset verdict is reported whenever weights are
-    // synced (so an asset-only mismatch — the rl#100 hole this closes — is diagnosable, never
-    // silent).
+    // crab will arm — the HOST must verifiably run a real brain AND the crab asset must match
+    // on every peer; failing either means it WON'T, and with no integer fallback (rl#114) the
+    // windowed client REFUSES the round rather than substituting a fake crab. The asset verdict
+    // is reported whenever the host gate passes (so an asset-only mismatch — the rl#100 hole
+    // this closes — is diagnosable, never silent).
     if local_weights_digest != 0 {
         if !outcome.sync.weights {
             tracing::warn!(
-                "GCR: weights NOT synced across peers (digest mismatch or a peer has no \
-                 checkpoint) — cannot arm the NN crab; the windowed client will REFUSE this round \
-                 (rl#114, no integer fallback). Run rl-update on every device so all carry the \
-                 identical brain."
+                "GCR: the HOST is not verifiably running the real Sally (its advertised weights \
+                 digest is 0 — a failed/absent checkpoint — or it was never heard directly) — \
+                 cannot arm the NN crab; the windowed client will REFUSE this round (rl#114, no \
+                 integer fallback). Run rl-update on the host device, or relaunch together."
             );
         } else if !outcome.sync.assets {
             tracing::warn!(
-                "GCR: weights synced but crab MODEL ASSET NOT synced across peers (a peer has a \
-                 different sally.glb / no model — different colliders would desync) — cannot arm \
-                 the NN crab; the windowed client will REFUSE this round (rl#114, no integer \
-                 fallback). Run rl-update on every device so all carry the identical crab model."
+                "GCR: host brain verified but crab MODEL ASSET NOT synced across peers (a peer \
+                 has a different sally.glb / no model — it would build and render a different \
+                 crab) — cannot arm the NN crab; the windowed client will REFUSE this round \
+                 (rl#114, no integer fallback). Run rl-update on every device so all carry the \
+                 identical crab model."
             );
         } else {
             println!(
-                "GCR: policy weights AND crab asset synced across all {} peer(s) — NN crab \
-                 eligible for lockstep",
+                "GCR: host runs the real Sally AND the crab asset is synced across all {} \
+                 peer(s) — NN crab eligible for lockstep",
                 id_map.len()
             );
         }

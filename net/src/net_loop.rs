@@ -548,9 +548,10 @@ pub fn connect_and_form(
     expect: usize,
     collector: Option<iroh::EndpointId>,
 ) -> Result<MatchResult> {
-    // No Policy is loaded on the scripted/headless path (weights digest `0` ⇒ the NN crab never
-    // arms here), but advertise our REAL crab-asset digest (rl#100) so the value is honest if
-    // this peer ever forms with a rendered peer that does arm.
+    // No Policy is loaded on the scripted/headless path (weights digest `0` ⇒ a round HOSTED
+    // by this peer can never arm the NN crab), but advertise our REAL crab-asset digest
+    // (rl#100) so the value is honest if this peer ever forms with a rendered peer that does
+    // arm.
     connect_and_form_dialing(
         seed,
         discover_secs,
@@ -583,9 +584,9 @@ pub fn connect_and_form(
 ///
 /// `local_weights_digest` is OUR policy-checkpoint digest (rl#82, GCR), `0` for none, and
 /// `local_asset_digest` OUR crab-model-asset digest (rl#100, GCR), `0` for none. Both are
-/// advertised in the formation beats; the agreed [`NetDriver::sync_verdict`]
-/// tells the caller whether every peer matched them (the upstream
-/// shared-asset guard — the NN crab arms only when both hold).
+/// advertised in the formation beats; the agreed [`NetDriver::sync_verdict`] tells the
+/// caller whether the round may arm the NN crab (the HOST's brain verified + the crab asset
+/// matched on every peer — the upstream shared-asset guard).
 #[allow(clippy::too_many_arguments)] // each arg is a distinct formation knob.
 pub fn connect_and_form_dialing(
     seed: u64,

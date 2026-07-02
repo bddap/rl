@@ -66,16 +66,17 @@ pub mod external_crab;
 /// physics (rl#82 + rl#100, GCR) — computed ONCE by [`crate::membership::Membership::sync_verdict`]
 /// at the barrier's close and carried as this single value (never as loose parallel bools)
 /// through `Frozen` → `NetDriver` to the arm sites:
-/// - `weights`: every peer advertised the SAME non-zero policy-weights digest. A random-init
-///   or unloadable brain differs per peer (burn seeds fresh weights from process entropy), so
-///   it would desync by construction. Backed by a present checkpoint digest, **not**
-///   `Policy::is_loaded()` — `RL_RANDOM_POLICY=1` forces `is_loaded()` true on a fresh random
-///   brain with NO digest, which would desync peers silently.
+/// - `weights`: the HOST — the peer that will run the authoritative server, the only one
+///   that EXECUTES the brain (clients adopt its snapshots and render its articulation) —
+///   advertised a non-zero policy-weights digest, proving it runs a real trained Sally and
+///   not a failed/absent-checkpoint rest pose. The host self-gate; the mid-game admission
+///   analogue is [`crate::server::may_admit_joiner`]'s `HostNotArmed`. Backed by a present
+///   checkpoint digest, **not** `Policy::is_loaded()` — `RL_RANDOM_POLICY=1` forces
+///   `is_loaded()` true on a fresh random brain with NO digest.
 /// - `assets` (rl#100): every peer advertised the SAME non-zero crab-model-asset digest. The
 ///   giant crab's rapier colliders are derived from the crab MODEL asset
-///   ([`crab_world::bot::meshfit::crab_asset_digest`]), so two peers with different crab models
-///   build different colliders and desync the moment the float crab is stepped — even with
-///   identical brains.
+///   ([`crab_world::bot::meshfit::crab_asset_digest`]), so peers with different crab models
+///   diverge client-side the moment the crab is built — this half stays peer-symmetric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncVerdict {
     pub weights: bool,
@@ -101,7 +102,7 @@ pub struct SyncVerdict {
 /// arm). Deliberately NOT behind `cfg(render)`: the no-feature test build (like the headless
 /// trainer) must exercise the REAL predicate, not a re-encoded copy.
 pub fn may_arm_external_crab(sync: Option<SyncVerdict>) -> bool {
-    sync.map_or(true, |v| v.weights && v.assets)
+    sync.is_none_or(|v| v.weights && v.assets)
 }
 
 #[cfg(test)]
