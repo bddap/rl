@@ -88,17 +88,19 @@ fn menu_handoff_installs_the_chosen_round() {
 #[test]
 fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
     use super::app::crab_arm_failure_from;
+    use crate::SyncVerdict;
+    let synced = |weights, assets| Some(SyncVerdict { weights, assets });
     // Armable: solo always arms; a fully-synced networked round arms. No refusal, no message.
     assert!(
-        crab_arm_failure_from(true, false, false).is_none(),
-        "solo (no net) always arms — the synced flags are irrelevant"
+        crab_arm_failure_from(None).is_none(),
+        "solo (no net, no formation verdict) always arms"
     );
     assert!(
-        crab_arm_failure_from(false, true, true).is_none(),
+        crab_arm_failure_from(synced(true, true)).is_none(),
         "a networked round with synced weights AND assets arms"
     );
     // A mismatched/absent brain refuses LOUD, naming the brain + the rl-update fix.
-    let brain = crab_arm_failure_from(false, false, false)
+    let brain = crab_arm_failure_from(synced(false, false))
         .expect("an unsynced-weights networked round must refuse, not arm a fake crab");
     assert!(brain.contains("brain.bin"), "names the brain mismatch: {brain}");
     assert!(
@@ -110,7 +112,7 @@ fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
         "the round REFUSES (no silent integer fallback): {brain}"
     );
     // Brain agrees but the colliders differ: refuse with the collider cause.
-    let colliders = crab_arm_failure_from(false, true, false)
+    let colliders = crab_arm_failure_from(synced(true, false))
         .expect("an unsynced-assets networked round must refuse, not arm a fake crab");
     assert!(
         colliders.contains("sally.glb"),
