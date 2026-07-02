@@ -445,7 +445,12 @@ fn apply_action(
             let (tx, rx) = mpsc::channel();
             let (seed, telemetry, asset_digest) = (state.seed, state.telemetry, state.asset_digest);
             std::thread::spawn(move || {
-                let _ = tx.send(net_loop::connect_and_join(seed, host, telemetry, asset_digest));
+                let _ = tx.send(net_loop::connect_and_join(
+                    seed,
+                    host,
+                    telemetry,
+                    asset_digest,
+                ));
             });
             state.rejoining = Some(rx);
             next.set(AppPhase::Connecting);

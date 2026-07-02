@@ -761,7 +761,11 @@ mod tests {
         assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
         assert_eq!(nav, MenuNav::Rejoining);
         assert_eq!(nav.step(MenuInput::Back, 0), MenuAction::Cancel);
-        assert_eq!(nav, MenuNav::new(), "an abandoned rejoin lands on the chooser");
+        assert_eq!(
+            nav,
+            MenuNav::new(),
+            "an abandoned rejoin lands on the chooser"
+        );
 
         // Declining the prompt (Leave, or Back) returns to the chooser with no side effect.
         let mut decline = MenuNav::disconnected();
