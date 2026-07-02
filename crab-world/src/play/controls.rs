@@ -73,7 +73,7 @@ pub(crate) enum DemoKey {
 /// The demo's mouse glyph tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DemoMouse {
-    /// Right-drag to orbit (reuses the move icon).
+    /// Hold-and-drag to orbit (reuses the move icon; button: [`ORBIT_DRAG_BUTTON`]).
     Drag,
     /// Wheel to zoom (text glyph; no bundled wheel icon).
     Wheel,
@@ -220,7 +220,8 @@ impl ControlInput for DemoControls {
 /// THE demo binding table. The tap verbs DISPATCH from it (via
 /// [`crate::controls::just_pressed`]); only the analog rows (Orbit/Zoom in
 /// `cameras::orbit_camera`, PickJoint/Torque in `manual_control`) are read directly and
-/// must match by hand. Reveal binding: hold Tab /
+/// must match by hand — their concrete inputs are named right below the table.
+/// Reveal binding: hold Tab /
 /// hold pad View — both free in the demo's input set. Manual, PickJoint, and Torque are
 /// gamepad-only (no keyboard binding), so the keyboard legend omits them. Labels live in
 /// [`DEMO_ROWS`].
@@ -281,6 +282,45 @@ pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [
         pad: PadBinding::hold(&[DemoPad::View]),
     },
 ];
+
+// The analog rows' concrete inputs. These four rows (Orbit/Zoom/PickJoint/Torque) carry
+// direction/sign semantics the table can't dispatch, so their systems read the device
+// directly — these names keep that hand-matched surface HERE, with the table in view:
+// rebinding an analog row means editing its const/accessor below AND its glyph token in
+// [`DEMO_BINDINGS`] above, together.
+
+/// Orbit keys, shown as the one [`DemoKey::Arrows`] glyph. Right-yaw is Comma, not
+/// ArrowRight: the right arrow is the RenderView tap verb, and mouse drag already
+/// covers free-look orbiting in every direction.
+pub(super) const ORBIT_YAW_LEFT_KEY: KeyCode = KeyCode::ArrowLeft;
+pub(super) const ORBIT_YAW_RIGHT_KEY: KeyCode = KeyCode::Comma;
+pub(super) const ORBIT_PITCH_UP_KEY: KeyCode = KeyCode::ArrowUp;
+pub(super) const ORBIT_PITCH_DOWN_KEY: KeyCode = KeyCode::ArrowDown;
+
+/// Orbit mouse: hold-and-drag free-look ([`DemoMouse::Drag`]).
+pub(super) const ORBIT_DRAG_BUTTON: MouseButton = MouseButton::Right;
+
+/// Orbit stick ([`DemoPad::LeftStick`]) as (yaw, pitch) input. (The RIGHT stick is
+/// reserved for manual-control joint torque; left-stick orbit is the convention anyway.)
+pub(super) fn orbit_stick(gp: &Gamepad) -> Vec2 {
+    gp.left_stick()
+}
+
+/// Zoom keys ([`DemoKey::ZoomKeys`], "- / =") and triggers ([`DemoPad::RightTrigger`] /
+/// [`DemoPad::LeftTrigger`]). "Out" grows the orbit radius, "in" shrinks it.
+pub(super) const ZOOM_OUT_KEY: KeyCode = KeyCode::Minus;
+pub(super) const ZOOM_IN_KEY: KeyCode = KeyCode::Equal;
+pub(super) const ZOOM_OUT_TRIGGER: GamepadButton = GamepadButton::RightTrigger2;
+pub(super) const ZOOM_IN_TRIGGER: GamepadButton = GamepadButton::LeftTrigger2;
+
+/// Manual-mode joint pick ([`DemoPad::DpadUpDown`]): up cycles forward, down back.
+pub(super) const PICK_JOINT_NEXT_BUTTON: GamepadButton = GamepadButton::DPadUp;
+pub(super) const PICK_JOINT_PREV_BUTTON: GamepadButton = GamepadButton::DPadDown;
+
+/// Torque input ([`DemoPad::RightStick`]): the right stick's Y drives the picked joint.
+pub(super) fn torque_stick_y(gp: &Gamepad) -> f32 {
+    gp.right_stick().y
+}
 
 /// The demo's one context's legend, in display order — each verb's human label. (The demo
 /// never switches context, so this is the whole legend.)
