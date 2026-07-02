@@ -80,15 +80,13 @@ pub fn build_windowed_app(
     external_crab: std::path::PathBuf,
     render_mode: super::RenderMode,
 ) -> anyhow::Result<App> {
-    // NO determinism pin, on ANY boot (rl#199). The pinned era's rationale — bit-identical
-    // cross-peer float evolution (GCR#113, lockstep) — dissolved with the host-authoritative
-    // rewrite (rl#151): only the solo/host peer steps the float NN crab; a remote client adopts
-    // snapshots and steps nothing, so no runtime path compares float state across peers (the
-    // hash-log/telemetry hashes are offline diagnostics). The pin cost ~30-60× frame time by
-    // serialising rapier's solver, inference, and Bevy's render-prep onto one core — and taxed
-    // hardest the one peer that steps brain + rapier + render (the host; menu-boot solo paid it
-    // too). Single-thread pinning lives where reproducibility is actually consumed: the trainer,
-    // eval, and the #82 probe ([`crab_world::bot::headless::pin_single_thread_pools`]).
+    // NO determinism pin, on ANY boot (rl#199). The pin's rationale — bit-identical cross-peer
+    // float evolution (GCR#113, lockstep) — dissolved with the host-authoritative rewrite
+    // (rl#151): only the solo/host peer steps the float NN crab; a remote client adopts snapshots
+    // and steps nothing, so no runtime path compares float state across peers (hash-log/telemetry
+    // hashes are offline diagnostics). Single-thread pinning lives where reproducibility is
+    // actually consumed: the trainer, eval, and the #82 probe
+    // ([`crab_world::bot::headless::pin_single_thread_pools`]).
     let mut app = App::new();
     // Point bevy at the bundled `assets/` dir explicitly, so a fresh clone's `cargo run`
     // finds the committed control glyphs regardless of cwd or which workspace bin runs (the

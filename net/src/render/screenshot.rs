@@ -163,12 +163,11 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
                 .chain(),
         );
     // The crab render-mode cycle (mesh unless `render_mode` says otherwise), so an evidence frame
-    // can capture any of the views. No determinism pin here (rl#199): this build's rapier has the
-    // `parallel` feature OFF (single-threaded solver regardless of executor), Bevy's executor never
-    // overlaps conflicting-access systems, and the capture chain above is fully `chain()`ed. The
-    // pinned era's "multi-threaded executor can NaN the solver" claim (born unevidenced in commit
-    // 9e3d3b4) was tested empirically: 3 unpinned armed 900-tick runs completed clean — no
-    // NaN/panic — and produced byte-identical frames.
+    // can capture any of the views. No determinism pin here (rl#199): rapier's `parallel` feature
+    // is off (it conflicts with `enhanced-determinism` — see crab-world/Cargo.toml), so the solver
+    // is single-threaded on any executor; Bevy never overlaps conflicting-access systems, and the
+    // capture chain above is `chain()`ed. The old pin's solver-NaN rationale was tested and
+    // refuted (rl#199).
     super::render_mode::register(app, render_mode);
 }
 
