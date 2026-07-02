@@ -354,7 +354,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A legacy (pre-envelope) brain file is REFUSED with the migrate-pointing verdict —
+    /// A legacy (pre-envelope) brain file is REFUSED with the legacy-naming verdict —
     /// the loader has no untagged-read path, so the old quiet-rest-pose degrade on a raw
     /// record is impossible by construction.
     #[test]
@@ -519,7 +519,8 @@ mod tests {
         );
 
         // (b) A legacy pre-envelope file (the old `OptimizerCheckpoint` bincode) has no
-        //     magic → refused, cold, no panic. The migrate tool is its only parser.
+        //     magic → refused, cold, no panic. Its only parser was the migration tool,
+        //     deleted with the rl#200 fleet migration.
         std::fs::write(&path, bincode::serialize(&(1u32, vec![0u8; 4])).unwrap()).unwrap();
         let cold2 = load_optimizer(
             crab_optimizer::<TrainBackend>(),

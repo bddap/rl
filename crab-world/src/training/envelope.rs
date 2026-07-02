@@ -12,9 +12,10 @@
 //! enum variants by index and ignores rename attrs, so culling an architecture variant
 //! would silently re-map every tagged file. String on the wire, enum in process.
 //!
-//! Legacy (pre-envelope) files are parsed by exactly ONE place — the
-//! [`super::migrate`] tool — never by any loader here, so there is no dual-read window
-//! to later close.
+//! Legacy (pre-envelope) files are parsed NOWHERE: their sole parser, the one-shot
+//! `migrate-checkpoint` tool, was deleted once the fleet was migrated (rl#200
+//! increment 3). A stray legacy file today is refused; its bytes are recoverable only
+//! via that tool in git history.
 
 use std::path::Path;
 
@@ -23,10 +24,9 @@ use crate::bot::arch::ArchId;
 use super::atomic_write;
 
 /// File magic identifying an enveloped artifact. Its ONE job is to make "legacy
-/// untagged file" a distinct, attributable verdict ([`EnvelopeError::Legacy`], pointing
-/// the operator at `migrate-checkpoint`) instead of a probabilistic bincode decode
-/// failure indistinguishable from corruption. Format evolution rides the per-kind
-/// `version` field inside the envelope, not this constant.
+/// untagged file" a distinct, attributable verdict ([`EnvelopeError::Legacy`]) instead
+/// of a probabilistic bincode decode failure indistinguishable from corruption. Format
+/// evolution rides the per-kind `version` field inside the envelope, not this constant.
 pub(crate) const MAGIC: &[u8; 8] = b"CRABCKPT";
 
 /// Which artifact an envelope carries. A mis-copied file (an optimizer renamed to
@@ -140,8 +140,9 @@ impl std::fmt::Display for EnvelopeError {
             Self::Io(e) => write!(f, "read failed: {e}"),
             Self::Legacy => write!(
                 f,
-                "legacy pre-envelope file — migrate the checkpoint dir with \
-                 `rl-train migrate-checkpoint <dir>`"
+                "legacy pre-envelope file — the fleet was migrated to tagged envelopes \
+                 (rl#200); re-copy from a migrated checkpoint, or resurrect the deleted \
+                 `migrate-checkpoint` tool from git history"
             ),
             Self::Corrupt(e) => write!(f, "corrupt envelope: {e}"),
             Self::WrongKind { found, expected } => write!(
@@ -186,11 +187,6 @@ pub(crate) fn write_envelope(
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&body);
     atomic_write(path, &bytes)
-}
-
-/// Whether `bytes` are an enveloped artifact — the migrate tool's already-tagged check.
-pub(crate) fn is_enveloped(bytes: &[u8]) -> bool {
-    bytes.starts_with(MAGIC)
 }
 
 /// Read and fully validate the envelope at `path`, expecting `expected` (kind and its
@@ -285,8 +281,8 @@ mod tests {
             Err(EnvelopeError::Absent)
         ));
 
-        // A pre-envelope file (no magic) is Legacy, not Corrupt — the migrate hint hangs
-        // off this distinction.
+        // A pre-envelope file (no magic) is Legacy, not Corrupt — "predates the fleet
+        // migration" and "damaged" are different diagnoses.
         std::fs::write(&path, b"old raw burn record bytes").unwrap();
         assert!(matches!(
             read_envelope(&path, ArtifactKind::Brain),
