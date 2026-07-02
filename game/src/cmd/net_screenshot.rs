@@ -90,10 +90,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let role = if driver.is_host() { "host" } else { "client" };
     println!("net-screenshot: formed as {role}; rendering to {}", args.out.display());
 
-    // A networked round arms the deterministic NN crab, so pin the process task pools single-thread
-    // BEFORE the app latches them (the same pin the windowed networked client uses). Harmless here
-    // regardless of role; the client never steps the crab but shares the build path.
-    render::pin_process_pools();
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(0.0, args.cam_pitch)
         .with_fov(Some(args.cam_fov));

@@ -70,15 +70,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .nn_crab_checkpoint
         .map(|flag| nn_crab_checkpoint_dir(Some(flag)))
         .transpose()?;
-    // The armed NN crab steps real rapier physics; pin the global task pools to one thread BEFORE
-    // the app builds (idempotent OnceLock) so this single settled frame is byte-reproducible run to
-    // run — a screenshot is evidence, so a stable solver/inference order is worth more than its
-    // (one-frame) speed. The windowed client pins ONLY for a networked round (see
-    // `render::build_windowed_app`); this evidence path always pins when a crab is armed. Harmless
-    // for the silhouette shot (no physics). See `render::pin_process_pools`.
-    if external_crab.is_some() {
-        render::pin_process_pools();
-    }
     let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
     render::build_screenshot_app(ls, cfg, external_crab, render_mode).run();
     Ok(())
