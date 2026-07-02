@@ -543,8 +543,9 @@ mod tests {
 
     /// A zero-count normalizer increment: a fresh accumulator's delta. Used to fill a
     /// `Rolled` outcome's `increment` in tests that don't exercise real stats, and to
-    /// pin the no-op-merge property the normalizer relies on.
-    fn empty_normalizer_increment() -> NormalizerIncrement {
+    /// pin the no-op-merge property the normalizer relies on. `pub(super)` so the
+    /// gated `learner::tests` shares it.
+    pub(super) fn empty_normalizer_increment() -> NormalizerIncrement {
         crate::training::normalizer::IncrementAccumulator::new().increment()
     }
 
@@ -639,7 +640,8 @@ mod tests {
 
     /// A `TrainConfig` pointing at an empty scratch dir (no checkpoint loads), with
     /// `m` envs per thread. Every other field keeps its default (tick budget 0).
-    fn scratch_config(tag: &str, m: u64) -> (TrainConfig, std::path::PathBuf) {
+    /// `pub(super)` so the gated `learner::tests` shares it.
+    pub(super) fn scratch_config(tag: &str, m: u64) -> (TrainConfig, std::path::PathBuf) {
         use clap::Parser;
         let dir = std::env::temp_dir().join(format!("rl_test_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -738,72 +740,6 @@ mod tests {
             "merging an empty (panicked-thread) increment must leave the master \
              normalizer byte-unchanged"
         );
-    }
-
-    /// The reduction must ATTRIBUTE each outcome correctly: a `SnapshotLoadFailed` refusal
-    /// (bddap/rl#177) and a `Panicked` thread each contribute NO samples/buffers and are counted
-    /// in their OWN tally, while a `Rolled` thread's aggregates — including the progress-glitch
-    /// count (bddap/rl#175) — flow through. This is the property that keeps a refused/wedged
-    /// horizon from masquerading as honest data. App-free: `merge_rollouts` over hand-built
-    /// outcomes, no rollout thread or GPU.
-    #[cfg(feature = "wgpu")]
-    #[test]
-    fn merge_rollouts_attributes_refusals_panics_and_glitches() {
-        let (config, dir) = scratch_config("merge_attr", 2);
-        let mut state = TrainingState::new(&config, None);
-
-        let results = vec![
-            RollOutcome::Rolled {
-                output: HorizonOutput {
-                    envs: vec![],                            // no env buffers → zero samples
-                    increment: empty_normalizer_increment(), // a no-op merge
-                    rewards: vec![1.0],
-                    drift: (0.5, 2),
-                    reach: (1, 3),
-                    glitch_drops: 3,
-                    nonfinite_obs: 7,
-                },
-                ticks: 64,
-            },
-            RollOutcome::SnapshotLoadFailed,
-            RollOutcome::Panicked,
-        ];
-        let merged = learner::merge_rollouts(&mut state, results);
-
-        assert_eq!(
-            merged.snapshot_load_failures, 1,
-            "the refusal is counted, distinct from a panic"
-        );
-        assert_eq!(
-            merged.panics, 1,
-            "the panic is counted, distinct from a refusal"
-        );
-        assert_eq!(
-            merged.samples, 0,
-            "neither a refusal nor a panic contributes samples"
-        );
-        assert!(merged.rollouts.is_empty(), "neither contributes a buffer");
-        assert_eq!(
-            merged.glitch_drops, 3,
-            "the Rolled thread's progress-glitch count flows through"
-        );
-        assert_eq!(
-            merged.nonfinite_obs, 7,
-            "the Rolled thread's non-finite obs count flows through"
-        );
-        assert_eq!(merged.ticks, 64, "only the Rolled thread's ticks count");
-        assert_eq!(
-            merged.drift,
-            (0.5, 2),
-            "the Rolled thread's drift flows through"
-        );
-        assert_eq!(
-            merged.reach,
-            (1, 3),
-            "the Rolled thread's reach flows through"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Threaded-rollout shape: one rollout THREAD running M envs for a horizon must
