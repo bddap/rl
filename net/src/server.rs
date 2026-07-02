@@ -158,6 +158,21 @@ pub struct Server {
     pending_step: VecDeque<(u64, BTreeMap<PlayerId, Input>)>,
 }
 
+/// The product of one authoritative step ([`Server::step_next`]): the tick's
+/// [`CoreSnapshot`](crate::snapshot::CoreSnapshot) already serialized to wire bytes, plus
+/// whether the tick was a RESTART edge. The edge rides the return value (an event, not
+/// state) because the tick counter can no longer signal it: a restart is a state-reset at
+/// the current tick, never a tick rewind (rl#204) — the driver hangs its per-round resets
+/// (physics cadence, crab-body respawn) off this exact edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteppedTick {
+    /// The tick's authoritative snapshot, serialized — the always-serialized hand-off the
+    /// local client decodes and applies (no by-reference shortcut even in SP).
+    pub snapshot: Vec<u8>,
+    /// Whether this tick was a RESTART edge (the sim rebuilt to spawn state at this tick).
+    pub restarted: bool,
+}
+
 /// The freshly-pumped NN crab pose the authoritative server injects before stepping a tick.
 /// The driver owns the bevy `World`, so it pumps the rapier crab body and hands the resulting
 /// pose here; [`Server::step_next`] injects it via [`Sim::set_external_crab_pose`] at the one
@@ -202,14 +217,14 @@ impl Server {
     }
 
     /// Advance the authoritative sim by exactly one tick and return the resulting
-    /// [`CoreSnapshot`](crate::snapshot::CoreSnapshot) already SERIALIZED to bytes. Injects `crab`
-    /// (the freshly-pumped NN crab pose; `None` ⇒ crab unchanged) FIRST so this tick's
-    /// grab/extraction resolve against the real body, then steps the sim with this tick's assembled
-    /// input set, then builds the snapshot at this ONE site and returns its wire bytes. Returning
-    /// bytes (not the struct) makes the hand-off ALWAYS serialized — the client decodes and applies,
-    /// no by-reference shortcut even in SP. Must be called only when
-    /// [`next_tick_ready`](Server::next_tick_ready) is `true`.
-    pub fn step_next(&mut self, crab: Option<CrabPose>) -> Vec<u8> {
+    /// [`SteppedTick`]: the [`CoreSnapshot`](crate::snapshot::CoreSnapshot) already SERIALIZED to
+    /// bytes, plus whether the tick was a RESTART edge. Injects `crab` (the freshly-pumped NN crab
+    /// pose; `None` ⇒ crab unchanged) FIRST so this tick's grab/extraction resolve against the real
+    /// body, then steps the sim with this tick's assembled input set, then builds the snapshot at
+    /// this ONE site and returns its wire bytes. Returning bytes (not the struct) makes the
+    /// hand-off ALWAYS serialized — the client decodes and applies, no by-reference shortcut even
+    /// in SP. Must be called only when [`next_tick_ready`](Server::next_tick_ready) is `true`.
+    pub fn step_next(&mut self, crab: Option<CrabPose>) -> SteppedTick {
         let tick = self.sim.tick();
         // Mid-game join: a pid rostered at THIS tick but absent from the authoritative sim is a
         // joiner whose admission ([`Server::admit`]) takes effect now — spawn it into the LIVE
@@ -245,8 +260,11 @@ impl Server {
         if let Some(c) = crab {
             self.sim.set_external_crab_pose(c.pos, c.yaw, c.digest);
         }
-        self.sim.step(&inputs);
-        self.sim.core_snapshot().to_bytes()
+        let restarted = self.sim.step(&inputs);
+        SteppedTick {
+            snapshot: self.sim.core_snapshot().to_bytes(),
+            restarted,
+        }
     }
 
     /// Queue freshly-assembled [`TickSet`]s (from [`host_assemble`] or [`Server::depart`]) for the
@@ -701,14 +719,14 @@ mod tests {
         let _ = s.record(PlayerId(0), tickmsg(0, 0.0));
         let sets = s.record(PlayerId(1), tickmsg(0, 0.0));
         s.enqueue_for_step(&sets);
-        let snap = CoreSnapshot::from_bytes(&s.step_next(None)).expect("snapshot decodes");
+        let snap = CoreSnapshot::from_bytes(&s.step_next(None).snapshot).expect("snapshot decodes");
         assert!(snap.players.contains_key(&PlayerId(1)), "both play tick 0");
         // P1 departs; the survivor drives the next ticks alone.
         let sets = s.depart(PlayerId(1));
         assert!(sets.is_empty(), "tick 1 awaits the survivor");
         let sets = s.record(PlayerId(0), tickmsg(1, 1.0));
         s.enqueue_for_step(&sets);
-        let snap = CoreSnapshot::from_bytes(&s.step_next(None)).expect("snapshot decodes");
+        let snap = CoreSnapshot::from_bytes(&s.step_next(None).snapshot).expect("snapshot decodes");
         assert_eq!(
             snap.tick, 2,
             "the round kept its live tick — departure never resets"
@@ -911,7 +929,7 @@ mod tests {
                 let sets = server.record(me, msg);
                 server.enqueue_for_step(&sets);
                 while server.next_tick_ready() {
-                    let bytes = server.step_next(Some(pose_at(server.sim().tick())));
+                    let bytes = server.step_next(Some(pose_at(server.sim().tick()))).snapshot;
                     let snap =
                         CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
                     client.apply_core_snapshot(snap);
@@ -942,6 +960,59 @@ mod tests {
         // The warmup + real ticks were actually exercised, first applied tick brings the sim to 1.
         assert_eq!(baseline.len() as u64, SUBMITS);
         assert_eq!(baseline[0].0, 1);
+    }
+
+    /// The rl#204 wedge, distilled at the authoritative-server seam: a RESTART press used to
+    /// rewind `Sim::tick` to 0 while the ledger-tick space (`next_emit`, the pending-step queue)
+    /// stayed monotone — `next_tick_ready` compared the pending front tick against a sim frozen
+    /// at 0 and the match wedged permanently, in MP and solo alike. Now a restart is a
+    /// state-reset at the CURRENT tick: press R mid-round and assert the match keeps ticking —
+    /// every subsequent input still completes, steps, and emits a monotone snapshot, and the
+    /// restart tick's own snapshot carries the spawn-state world.
+    #[test]
+    fn restart_does_not_wedge_the_ledger() {
+        use crate::snapshot::CoreSnapshot;
+        use crate::sim::buttons;
+
+        // Two rostered players — the MP shape from the issue; solo hits the same mismatch and
+        // is covered by every other test's roster-of-one.
+        let mut s = srv(42, &ids(2));
+        let fresh_players: Vec<_> = Sim::new(42, &ids(2)).players().collect();
+        const RESTART_AT: u64 = 10;
+        const TOTAL: u64 = 25;
+        let mut last_snap_tick = 0;
+        for t in 0..TOTAL {
+            let btns = if t == RESTART_AT { buttons::RESTART } else { 0 };
+            let _ = s.record(PlayerId(0), tickmsg(t, 1.0));
+            let sets = s.record(
+                PlayerId(1),
+                TickMsg {
+                    apply_tick: t,
+                    input: Input::new(0.0, 1.0, 0.0, btns),
+                },
+            );
+            assert_eq!(sets.len(), 1, "tick {t} completes (the ledger never stalls)");
+            s.enqueue_for_step(&sets);
+            assert!(s.next_tick_ready(), "tick {t} is steppable — no wedge");
+            let stepped = s.step_next(None);
+            assert_eq!(
+                stepped.restarted,
+                t == RESTART_AT,
+                "the restart edge fires exactly on the RESTART tick"
+            );
+            let snap = CoreSnapshot::from_bytes(&stepped.snapshot).expect("snapshot decodes");
+            assert_eq!(snap.tick, t + 1, "snapshot ticks stay monotone and gap-free");
+            assert!(snap.tick > last_snap_tick || t == 0);
+            last_snap_tick = snap.tick;
+            if t == RESTART_AT {
+                assert_eq!(
+                    snap.players.values().map(|p| p.pos()).collect::<Vec<_>>(),
+                    fresh_players.iter().map(|(_, p)| p.pos()).collect::<Vec<_>>(),
+                    "the restart tick's snapshot carries the spawn-state world"
+                );
+            }
+        }
+        assert_eq!(s.sim().tick(), TOTAL, "the match ran to the end — no freeze");
     }
 
     /// Mid-game join via snapshot transfer, proven at the authoritative-server seam. A solo host
@@ -997,7 +1068,7 @@ mod tests {
             server.enqueue_for_step(&sets);
             while server.next_tick_ready() {
                 let tick = server.sim().tick();
-                let bytes = server.step_next(Some(pose_at(tick)));
+                let bytes = server.step_next(Some(pose_at(tick))).snapshot;
                 snaps.push(CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes"));
             }
         }

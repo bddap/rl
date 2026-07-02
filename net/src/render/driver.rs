@@ -612,7 +612,8 @@ pub(crate) fn park_fixed_auto_pump(world: &mut World) {
 }
 
 /// Re-seed the crab bridge to the round's rebuilt `spawn` and cold-respawn the rapier body — run at
-/// the exact RESTART rewind edge, by BOTH drain arms ([`drive_lockstep`]). Re-seeding the bridge so
+/// the exact RESTART edge (as reported by `Server::step_next`) in [`drive_lockstep`]'s
+/// server-authoritative drain, the one arm that pumps a crab body. Re-seeding the bridge so
 /// the next pose push is the spawn pose (not the still-walking body's accumulated position) is half
 /// of it; the other half is the cold respawn — re-seeding alone leaves the rapier solver WARM, which
 /// would desync a mid-game joiner's cold body against an incumbent's warm one.
@@ -646,14 +647,9 @@ pub(super) fn drive_lockstep(
     world: &mut World,
     mut reported_outcome: Local<bool>,
     mut next_tel_tick: Local<u64>,
-    // Last sim tick this system saw, to detect a deterministic restart (RESTART rewinds
-    // the sim to tick 0). When it does, the round-decided latch, telemetry cursor, AND the
-    // physics cadence below must reset, or the NEXT round never reports "decided", tick
-    // telemetry stays suppressed until the counter climbs past the stale watermark, and the
-    // crab's per-tick step count starts mid-sequence (a needless cross-peer phase risk).
-    mut last_tick: Local<u64>,
     // The deterministic 64:30 physics/sim cadence, advanced once per APPLIED tick while armed.
-    // A `Local` (per-round state) reset on the restart edge so two peers stay phase-aligned.
+    // A `Local` (per-round state) reset on the restart edge (reported by `step_next` — a
+    // restart no longer rewinds the tick, rl#204) so two peers stay phase-aligned.
     mut cadence: Local<PhysicsCadence>,
 ) {
     // Whether the external NN crab drives the sim this round (solo, or networked + synced
@@ -820,7 +816,15 @@ pub(super) fn drive_lockstep(
                         // avatars + the FP camera from the tick-0 spawn every frame (a per-frame snap
                         // toward spawn), since this arm skips the drain loop that owns `prev`.
                         state.prev = SimSnapshot::capture(&state.ls);
-                        state.ls.adopt_snapshots(exch.snapshots, |_| ());
+                        // Clear the round-decided latch on every Ongoing snapshot IN the batch,
+                        // not off the frame-end outcome: a batch spanning a restart AND a fresh
+                        // decision (a catch-up after a stall) never shows Ongoing at the frame
+                        // boundary, which would swallow the new round's report.
+                        state.ls.adopt_snapshots(exch.snapshots, |c| {
+                            if c.sim().outcome() == Outcome::Ongoing {
+                                *reported_outcome = false;
+                            }
+                        });
                         // Local-player prediction: the snapshot re-seated our own
                         // avatar to its round-trip-old authoritative position; replay our still-in-
                         // flight inputs on it so WASD feels responsive at input latency, not RTT.
@@ -941,19 +945,18 @@ pub(super) fn drive_lockstep(
                 } else {
                     None
                 };
-                // Step the authoritative sim and detect a RESTART rewind, resetting the cadence at
-                // that exact edge (a post-restart tick stepping on the stale phase would desync;
-                // the reset must be inside the drain, not end-of-frame).
+                // Step the authoritative sim; a RESTART edge (reported by the step itself — the
+                // tick stays monotone across a restart, rl#204) resets the cadence at that exact
+                // edge (a post-restart tick stepping on the stale phase would desync; the reset
+                // must be inside the drain, not end-of-frame).
                 let (bytes, restarted) = {
                     let mut state = world.non_send_resource_mut::<GameState>();
                     let server = state.server_mut().expect("server_auth ⇒ a server");
-                    let before = server.sim().tick();
-                    let bytes = server.step_next(crab_pose);
-                    let restarted = server.sim().tick() < before;
-                    if restarted {
+                    let stepped = server.step_next(crab_pose);
+                    if stepped.restarted {
                         *cadence = PhysicsCadence::default();
                     }
-                    (bytes, restarted)
+                    (stepped.snapshot, stepped.restarted)
                 };
                 // The ALWAYS-serialized hand-off (decode the bytes the server built; no by-reference
                 // shortcut even in SP). The host renders this snapshot locally AND ships it — plus
@@ -962,6 +965,12 @@ pub(super) fn drive_lockstep(
                 // client (which never touches the crab entities), so it is the host's live crab.
                 let snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
                     .expect("the authoritative server's snapshot must decode");
+                // Same per-tick latch clear as the adopt arm: an Ongoing tick means the round
+                // is (or just became, via RESTART) live, so the next decision must report even
+                // if this frame's unbounded catch-up drain also re-decides it.
+                if snap.outcome == Outcome::Ongoing {
+                    *reported_outcome = false;
+                }
                 let articulation =
                     armed.then(|| crate::render::articulation::capture(world, snap.tick));
                 {
@@ -1031,22 +1040,13 @@ pub(super) fn drive_lockstep(
         state.accumulator = state.accumulator.min(TICK_DT);
     }
 
-    // Restart detector: a RESTART press rewinds the sim to tick 0, so a tick lower than last
-    // frame's means the round restarted. Clear the round-decided latch and snap the telemetry
-    // cursor back to the new (low) tick. (The cadence reset is NOT here — it must happen at the
-    // exact rewind edge inside the drain above, or post-restart ticks applied in the same frame
-    // would step on the stale phase; these two resets are reporting-only, so frame-relative is
-    // fine.)
-    let (now_tick, outcome) = {
-        let state = world.non_send_resource::<GameState>();
-        (state.ls.sim().tick(), state.ls.sim().outcome())
-    };
-    if now_tick < *last_tick {
-        *reported_outcome = false;
-        *next_tel_tick = next_sample_tick(now_tick);
-    }
-    *last_tick = now_tick;
-
+    // Round-decided reporting: report once per decided round. The latch clears per applied /
+    // adopted Ongoing SNAPSHOT inside the drain arms above (a RESTART revives a decided round
+    // to Ongoing without rewinding the tick, rl#204 — and sampling only the frame-end outcome
+    // would miss a batch that restarts AND re-decides within one catch-up frame). The
+    // telemetry cursor needs no restart handling: the tick is monotone, so it never climbs
+    // past a stale watermark.
+    let outcome = world.non_send_resource::<GameState>().ls.sim().outcome();
     if !*reported_outcome && outcome != Outcome::Ongoing {
         *reported_outcome = true;
         info!("round decided: {outcome:?}");

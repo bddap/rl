@@ -148,7 +148,7 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
         server.enqueue_for_step(&sets);
         while server.next_tick_ready() {
             // Headless smoke: no rapier crab body, so the crab holds spawn (no pose to inject).
-            let bytes = server.step_next(None);
+            let bytes = server.step_next(None).snapshot;
             ls.apply_core_snapshot(
                 CoreSnapshot::from_bytes(&bytes).expect("the server's snapshot must decode"),
             );

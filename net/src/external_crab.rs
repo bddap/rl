@@ -199,9 +199,12 @@ impl ExternalCrabBridge {
     /// and inject a multi-metre false step). Re-settle too, so the round opens with the spawn
     /// drop/plant grace.
     ///
-    /// DETERMINISM: this fires off the sim's restart EDGE — the same edge the cadence reset
-    /// hangs off in [`crate::render`]'s `drive_lockstep` (under host-authority the restart is
-    /// the authoritative server's, so every peer observes the same rewind). `spawn` is read
+    /// DETERMINISM: this fires off the sim's restart EDGE (returned by the authoritative
+    /// step — a restart never rewinds the tick, rl#204) — the same edge the cadence reset
+    /// hangs off in [`crate::render`]'s `drive_lockstep`. Under host-authority only the
+    /// server-auth peer steps (and so observes the edge); a remote client renders the host's
+    /// articulation — its own armed body is never pumped, so there is nothing to re-seed.
+    /// `spawn` is read
     /// back from the post-restart sim, which is itself deterministic. Unlike
     /// `CrabRescued` (a float-body teleport that leaves the game position put) this DOES move
     /// `world_pos_m`, because a restart moves the crab back to spawn.

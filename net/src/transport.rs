@@ -71,8 +71,9 @@ pub(crate) enum Frame {
     /// A server→client [`CoreSnapshot`]: the host-authoritative full game state for one tick.
     /// A remote client never re-steps the sim from an input set; it ADOPTS this snapshot whole
     /// (state on the wire, not inputs), so warm-vs-cold physics divergence between peers never
-    /// crosses the link. Adopted in ARRIVAL order, no tick gate — a highest-tick gate would
-    /// freeze a client across a host restart; see [`crate::lockstep::Lockstep::adopt_snapshots`].
+    /// crosses the link. Adopted in ARRIVAL order, no tick gate — the ordered stream already delivers
+    /// them in step order (rl#204: ticks stay monotone even across a host restart); see
+    /// [`crate::lockstep::Lockstep::adopt_snapshots`].
     Snapshot = 7,
     /// A server→client [`CrabArticulation`]: the render-only per-part crab pose for one tick,
     /// broadcast beside a [`Frame::Snapshot`]. Not authoritative — float
