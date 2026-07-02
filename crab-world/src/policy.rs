@@ -461,35 +461,31 @@ mod tests {
         obs
     }
 
-    /// The pre-envelope legacy fixture dir (written by pre-`AnyBrain` main) and its
-    /// pinned action bits.
-    fn legacy_golden_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256")
+    /// The golden fixture dir: the enveloped golden brain plus `actions.hex`, its
+    /// pinned action bits over [`golden_obs`].
+    fn golden_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256-env")
     }
 
     fn golden_action_bits() -> Vec<u32> {
-        std::fs::read_to_string(legacy_golden_dir().join("actions.hex"))
+        std::fs::read_to_string(golden_dir().join("actions.hex"))
             .expect("read golden actions.hex")
             .lines()
             .map(|l| u32::from_str_radix(l.trim(), 16).expect("parse golden bits"))
             .collect()
     }
 
-    /// GOLDEN FILE (bddap/rl#200 increment 2): `tests/data/golden-mlp256-env/` holds the
-    /// ENVELOPED form of the legacy golden brain (same weights, wrapped by the
-    /// since-deleted `migrate-checkpoint` tool, plus an identity obs normalizer — the
-    /// legacy fixture had none, which was the identity). Loading it through today's
-    /// loader and reproducing
-    /// the pinned action bits EXACTLY proves the tagged on-disk format did not drift
-    /// (a reader/writer change that re-mapped envelope fields would strand every
-    /// migrated fleet checkpoint while all save/load-symmetric tests stayed green).
-    /// Regenerate with `regenerate_enveloped_golden_fixture` below on a DELIBERATE
-    /// format version bump.
+    /// GOLDEN FILE (bddap/rl#200 increment 2): `tests/data/golden-mlp256-env/` holds
+    /// the ENVELOPED form of the golden brain (weights written by pre-`AnyBrain` main,
+    /// wrapped by the since-deleted `migrate-checkpoint` tool, plus an identity obs
+    /// normalizer). Loading it through today's loader and reproducing the pinned action
+    /// bits EXACTLY proves the tagged on-disk format did not drift (a reader/writer
+    /// change that re-mapped envelope fields would strand every migrated fleet
+    /// checkpoint while all save/load-symmetric tests stayed green). Regenerate with
+    /// `regenerate_enveloped_golden_fixture` below on a DELIBERATE format version bump.
     #[test]
     fn golden_enveloped_checkpoint_loads_and_acts_bit_identically() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256-env");
-
-        let policy = Policy::load(&dir);
+        let policy = Policy::load(&golden_dir());
         assert!(
             policy.is_loaded(),
             "the enveloped golden checkpoint no longer loads — the tagged on-disk format \
@@ -510,13 +506,26 @@ mod tests {
         );
     }
 
-    /// The legacy (pre-envelope) golden checkpoint must now be REFUSED — a loud
-    /// `Refused` verdict naming the legacy diagnosis, never the quiet rest pose or a
-    /// blind load (bddap/rl#200 §2: the loader has no untagged-read path; the sole
-    /// legacy parser, `migrate-checkpoint`, was deleted with the fleet migration).
+    /// A legacy (pre-envelope) checkpoint must be REFUSED — a loud `Refused` verdict
+    /// naming the legacy diagnosis, never the quiet rest pose or a blind load
+    /// (bddap/rl#200 §2: the loader has no untagged-read path; the sole legacy parser,
+    /// `migrate-checkpoint`, was deleted with the fleet migration). The legacy file is
+    /// synthesized — exactly what a pre-envelope writer produced was the bare leaf
+    /// record bytes, and the classifier is a magic-prefix check, so real historical
+    /// bytes would add nothing.
     #[test]
-    fn legacy_golden_checkpoint_is_refused() {
-        let policy = Policy::load(&legacy_golden_dir());
+    fn legacy_checkpoint_is_refused() {
+        let dir = std::env::temp_dir().join(format!("rl-legacy-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let device = NdArrayDevice::Cpu;
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let raw = brain
+            .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
+            .unwrap();
+        std::fs::write(CheckpointDir::new(&dir).brain_file(), raw).unwrap();
+
+        let policy = Policy::load(&dir);
         assert!(
             !policy.is_loaded(),
             "a legacy untagged brain.bin must not load — the loader has no untagged path"
@@ -526,26 +535,28 @@ mod tests {
 
         // The gates speak the same classifier: a loud, attributable refusal naming the
         // diagnosis (pre-envelope, i.e. predates the rl#200 fleet migration).
-        match checkpoint_fits_rig(&legacy_golden_dir()) {
+        match checkpoint_fits_rig(&dir) {
             RigFit::Refused(why) => assert!(
                 why.contains("pre-envelope"),
                 "the refusal must name the legacy (pre-envelope) diagnosis, got: {why}"
             ),
             _ => panic!("a legacy checkpoint must classify as Refused, not Missing/Ok"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Regenerates `tests/data/golden-mlp256-env/` in place — load the fixture brain
-    /// through the current reader, re-save it through the current production writer —
-    /// then commit the result (run with `cargo test -- --ignored
-    /// regenerate_enveloped_golden_fixture`). Only valid on a DELIBERATE format version
-    /// bump, in the commit where the reader still accepts the old version and the writer
-    /// emits the new one. Ignored because a golden fixture that silently regenerates
-    /// guards nothing.
+    /// Regenerates the golden fixture brain in place — load it through the reader,
+    /// re-save it through the production writer — then commit the result (run with
+    /// `cargo test -- --ignored regenerate_enveloped_golden_fixture`). Only for a
+    /// DELIBERATE format version bump, and the bump commit must TEMPORARILY teach
+    /// `read_envelope` the outgoing version (the reader otherwise exact-matches
+    /// `current_version`, by design — no standing dual-read window), run this, then
+    /// drop that shim before landing. Ignored because a golden fixture that silently
+    /// regenerates guards nothing.
     #[test]
     #[ignore = "fixture generator, run manually on a deliberate format version bump"]
     fn regenerate_enveloped_golden_fixture() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256-env");
+        let dir = golden_dir();
         let paths = CheckpointDir::new(&dir);
         let device = NdArrayDevice::Cpu;
         let brain = crate::training::checkpoint::load_brain_file::<TrainBackend>(

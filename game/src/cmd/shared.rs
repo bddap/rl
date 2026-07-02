@@ -52,9 +52,7 @@ pub(crate) fn nn_crab_checkpoint_dir(
             dir.display()
         ),
         RigFit::Refused(why) => anyhow::bail!(
-            "checkpoint under {} was REFUSED — {why}. A truncated deploy copy needs a redeploy; \
-             a legacy (pre-envelope) checkpoint predates the rl#200 fleet migration — redeploy \
-             from the release store. Fix the checkpoint, then relaunch.",
+            "checkpoint under {} was REFUSED — {why}. Fix the checkpoint, then relaunch.",
             dir.display()
         ),
         RigFit::Mismatch(RigDims { obs, action }) => {
