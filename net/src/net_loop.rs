@@ -106,13 +106,14 @@ pub struct NetDriver {
 /// channel.
 #[derive(Default)]
 pub struct Exchanged {
-    /// Host-authoritative game states this remote client drained (rl#151 increment 2 windowed):
-    /// the driver applies the highest `tick` via [`Lockstep::apply_core_snapshot`] instead of
-    /// stepping its own sim. Empty on the solo/host arm (its client reads the server it runs).
+    /// Host-authoritative game states this remote client drained (rl#151 increment 2 windowed),
+    /// in ARRIVAL order: the driver adopts every one via [`Lockstep::adopt_snapshots`] (the one
+    /// shared adopt policy — see its doc) instead of stepping its own sim. Empty on the solo/host
+    /// arm (its client reads the server it runs).
     pub snapshots: Vec<CoreSnapshot>,
     /// Render-only crab poses this remote client drained, beside the snapshots (rl#151 increment 2
-    /// windowed): the driver stashes the highest `tick` for the render-side apply. Empty off the
-    /// remote-client arm.
+    /// windowed): the driver stashes the LAST-ARRIVED (= newest on the reliable ordered stream)
+    /// for the render-side apply. Empty off the remote-client arm.
     pub articulations: Vec<CrabArticulation>,
 }
 
@@ -246,8 +247,8 @@ impl NetDriver {
     /// [`CoreSnapshot`]s (rl#151 increment 2 windowed — the client ADOPTS them, never re-steps an
     /// input set) and the render-only [`CrabArticulation`]s beside them. A [`PeerWire::Refuse`]
     /// aimed at us is logged LOUD (an established client should never get one), never silently
-    /// eaten. Drained ONCE so no frame kind starves another; latest-wins ordering (highest `tick`)
-    /// is the caller's to apply.
+    /// eaten. Drained ONCE so no frame kind starves another; snapshots are handed over in ARRIVAL
+    /// order for [`Lockstep::adopt_snapshots`] (the one shared adopt policy) to apply.
     pub fn drain_server_down(&mut self) -> Exchanged {
         let mut down = Exchanged::default();
         while let Some(from) = self.session.try_recv() {
@@ -346,7 +347,8 @@ impl Coordinator {
             Coordinator::Client { net } => {
                 // Host-authoritative (rl#151 increment 2 windowed): ship our input UP and drain the
                 // host's STATE down (snapshots + render articulation), never an input set to re-step.
-                // The driver applies the newest snapshot to its sim and renders the newest articulation.
+                // The driver adopts every drained snapshot ([`Lockstep::adopt_snapshots`]) and
+                // renders the last-arrived articulation.
                 net.send_to_server(&msg);
                 net.drain_server_down()
             }
