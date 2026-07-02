@@ -207,7 +207,9 @@ impl Plugin for ScreenshotPlugin {
                 .init_resource::<rig_pose::RigPosePin>()
                 .add_systems(
                     FixedUpdate,
-                    rig_pose::rig_pose_drive.in_set(BotSet::Think).after(policy_step),
+                    rig_pose::rig_pose_drive
+                        .in_set(BotSet::Think)
+                        .after(policy_step),
                 )
                 .add_systems(
                     FixedUpdate,

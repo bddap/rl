@@ -11,10 +11,7 @@
 // this subsystem (it propagates to every `training::*` submodule). Dead code anywhere else in
 // a render build — play, crab_view, sky, the inference path — is still caught. In the unified
 // workspace build the items are live (rl-train uses them), so the allow is a harmless no-op.
-#![cfg_attr(
-    feature = "render",
-    allow(dead_code, unused_imports, unused_variables)
-)]
+#![cfg_attr(feature = "render", allow(dead_code, unused_imports, unused_variables))]
 
 use std::path::{Path, PathBuf};
 
@@ -25,9 +22,11 @@ pub mod algorithm;
 pub mod best;
 pub mod checkpoint;
 pub mod curriculum;
+pub(crate) mod envelope;
 #[cfg(feature = "wgpu")]
 pub mod gpu;
 pub mod inproc;
+pub mod migrate;
 pub mod normalizer;
 pub mod reward;
 pub mod systems;

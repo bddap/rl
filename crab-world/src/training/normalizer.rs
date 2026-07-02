@@ -20,9 +20,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::bot::arch::ArchId;
 use crate::bot::sensor::OBS_SIZE;
 
-use super::atomic_write;
+use super::envelope::{ArtifactKind, EnvelopeError, read_envelope, write_envelope};
 
 /// Per-element Welford state: running `(count, mean, M2)` for each of the `OBS_SIZE`
 /// observation elements. The fold and the parallel combine live here once, so the
@@ -216,7 +217,10 @@ impl ObsNormalizer {
         normalized
     }
 
-    pub(crate) fn save(&self, path: &Path) {
+    /// Persist the running stats inside an [`ArtifactKind::ObsNormalizer`] envelope
+    /// tagged with `arch` — the brain these obs scales were trained against. A write
+    /// failure is logged, not fatal — the run continues, only resume loses the scale.
+    pub(crate) fn save(&self, arch: ArchId, path: &Path) {
         let bytes = match bincode::serialize(&self.snapshot()) {
             Ok(b) => b,
             Err(e) => {
@@ -224,7 +228,7 @@ impl ObsNormalizer {
                 return;
             }
         };
-        if let Err(e) = atomic_write(path, &bytes) {
+        if let Err(e) = write_envelope(path, ArtifactKind::ObsNormalizer, arch, bytes) {
             warn!("Failed to write normalizer to {}: {e}", path.display());
         }
     }
@@ -278,25 +282,24 @@ impl ObsNormalizer {
         self.welford.merge(&increment.0);
     }
 
-    pub(crate) fn load(path: &Path) -> Option<Self> {
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("Failed to read normalizer from {}: {e}", path.display());
-                return None;
-            }
-        };
-        let data: NormalizerSnapshot = match bincode::deserialize(&bytes) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(
-                    "Failed to deserialize normalizer from {}: {e}",
-                    path.display()
-                );
-                return None;
-            }
-        };
-        Self::from_snapshot(data)
+    /// Load the checkpointed stats, refusing an envelope whose arch tag differs from
+    /// `expected_arch` (the loaded brain's — normalizers are brain-PAIRED and must never
+    /// load cross-arch, bddap/rl#200 §2). The caller applies the refusal policy: the
+    /// trainer aborts, inference refuses the whole checkpoint — never a warm brain
+    /// normalizing against cold or mis-paired stats.
+    pub(crate) fn load(path: &Path, expected_arch: ArchId) -> Result<Self, EnvelopeError> {
+        let env = read_envelope(path, ArtifactKind::ObsNormalizer)?;
+        if env.arch != expected_arch {
+            return Err(EnvelopeError::ArchMismatch {
+                found: env.arch,
+                expected: expected_arch,
+            });
+        }
+        let data: NormalizerSnapshot = bincode::deserialize(&env.payload)
+            .map_err(|e| EnvelopeError::Corrupt(format!("obs normalizer payload: {e}")))?;
+        Self::from_snapshot(data).ok_or_else(|| {
+            EnvelopeError::Corrupt("obs normalizer stats invalid (see log for detail)".to_string())
+        })
     }
 }
 
@@ -353,7 +356,10 @@ mod tests {
         // The skipped elements are excluded from the running stats (count stays put), while a
         // finite neighbour in the same obs is still folded — the count tracks exactly the drop.
         assert_eq!(inc.welford.count[0], 1, "the NaN element was never folded");
-        assert_eq!(inc.welford.count[3], 2, "a finite element is folded both times");
+        assert_eq!(
+            inc.welford.count[3], 2,
+            "a finite element is folded both times"
+        );
     }
 
     #[test]
@@ -375,7 +381,10 @@ mod tests {
             count: vec![0; OBS_SIZE + 1],
             clip: 5.0,
         };
-        assert!(!norm.load_snapshot(bad), "a wrong-width snapshot must fail to load");
+        assert!(
+            !norm.load_snapshot(bad),
+            "a wrong-width snapshot must fail to load"
+        );
         assert_eq!(
             norm.welford.mean[0], before,
             "a rejected load must leave the normalizer's stats unchanged, not half-applied"
@@ -384,8 +393,14 @@ mod tests {
         // A negative-M2 (otherwise correctly-sized) snapshot is also rejected.
         let mut neg = norm.snapshot();
         neg.m2[0] = -1.0;
-        assert!(!norm.load_snapshot(neg), "a negative-M2 snapshot must fail to load");
-        assert_eq!(norm.welford.mean[0], before, "still unchanged after the second rejection");
+        assert!(
+            !norm.load_snapshot(neg),
+            "a negative-M2 snapshot must fail to load"
+        );
+        assert_eq!(
+            norm.welford.mean[0], before,
+            "still unchanged after the second rejection"
+        );
     }
 
     #[test]
@@ -511,7 +526,10 @@ mod tests {
             // only the samples it is about to see this horizon. The thread's full copy
             // keeps normalizing against baseline+horizon, but only the increment ships.
             let mut worker_full = ObsNormalizer::new(5.0);
-            assert!(worker_full.load_snapshot(master.snapshot()), "load snapshot");
+            assert!(
+                worker_full.load_snapshot(master.snapshot()),
+                "load snapshot"
+            );
             let mut increment = IncrementAccumulator::new();
             for _ in 0..per_iter {
                 let obs = sample(next);

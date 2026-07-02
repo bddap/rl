@@ -13,16 +13,15 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 use burn::backend::ndarray::NdArrayDevice;
-use burn::module::AutodiffModule;
-use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use burn::tensor::Tensor;
 
 use crate::bot::actuator::ACTION_SIZE;
 use crate::bot::arch::{AnyBrain, ArchId};
 use crate::bot::sensor::OBS_SIZE;
-use crate::training::checkpoint::CheckpointDir;
+use crate::training::InferBackend;
+use crate::training::checkpoint::{BrainLoadError, CheckpointDir, load_brain_file};
+use crate::training::envelope::EnvelopeError;
 use crate::training::normalizer::{NORMALIZER_CLIP, ObsNormalizer};
-use crate::training::{InferBackend, TrainBackend};
 
 /// A policy that maps observations to actions for inference (no learning). The
 /// checkpoint-derived state — whether a brain drives the crab, and its cross-peer weight
@@ -59,8 +58,8 @@ enum PolicyState {
     /// No brain drives the crab — [`Policy::act`] returns the zero-action rest pose (a
     /// neutral, deterministic view of the body geometry, not an untrained brain's noise).
     /// Two ways here, distinguished at load time by their logs (rl#121): a LOUDLY refused
-    /// wrong-rig checkpoint ([`log_rig_mismatch`]) and the quiet, legitimate
-    /// no-checkpoint-yet pose.
+    /// checkpoint (wrong-rig [`log_rig_mismatch`], or envelope-refused
+    /// [`log_checkpoint_refusal`]) and the quiet, legitimate no-checkpoint-yet pose.
     Rest,
     /// `RL_RANDOM_POLICY`: an untrained current-rig brain drives the crab so an operator can
     /// see what a FRESH policy does (vs the zero-action rest pose). It has NO on-disk weights,
@@ -98,56 +97,28 @@ pub fn checkpoint_digest(dir: &Path) -> u64 {
     crate::fnv::fnv1a(&bytes)
 }
 
-/// Load a checkpoint's brain record into an inference brain, or `None` if `brain.bin`
-/// is absent or won't deserialize. The ONE way a brain is read off disk — shared by the
-/// normalizer-paired loader and the rig-fit check ([`checkpoint_fits_rig`]) so the two
-/// can't drift on how a checkpoint is parsed.
-fn load_brain(dir: &Path, device: &NdArrayDevice) -> Option<AnyBrain<InferBackend>> {
-    let paths = CheckpointDir::new(dir);
-    if !paths.brain_file().exists() {
-        return None;
-    }
-    // `brain.bin` is an UN-tagged mlp256 leaf record until increment 2's envelope lands;
-    // the arch to decode is pinned here, and the envelope tag will replace this pin.
-    let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-    Some(
-        AnyBrain::<TrainBackend>::init(ArchId::Mlp256, device)
-            .load_leaf_record(&recorder, paths.brain_stem(), device)
-            .ok()?
-            .valid(),
-    )
-}
-
 /// Whether a brain's `(obs, action)` dims drive THIS binary's compiled crab rig. The ONE
 /// place the fits-the-rig rule is spelled — the runtime loader (soft-fallback), the release
-/// gate, and the game's launch gate (both hard-fail) all ask through here, so they can't
-/// disagree on what "fits" means.
-fn dims_fit_rig(obs: usize, action: usize) -> bool {
+/// gate, the game's launch gate (both hard-fail), and the trainer's warm-start check
+/// (`training::systems::state`) all ask through here, so they can't disagree on what
+/// "fits" means.
+pub(crate) fn dims_fit_rig(obs: usize, action: usize) -> bool {
     (obs, action) == (OBS_SIZE, ACTION_SIZE)
 }
 
 /// Whether the checkpoint at `dir` fits this binary's crab rig — the verdict the
-/// release/deploy gate and the game's launch gate act on. The fit RULE lives here in
-/// crab-world (the consts it compares against are here); the caller only turns the verdict
-/// into a message + exit code. A mismatched checkpoint loads "fine" but would degrade the NN
-/// crab to its motionless rest pose (rl#36 catches it at load time, but only by going inert),
-/// so the gates refuse it outright. `Mismatch` carries the checkpoint's own dims so the
-/// operator sees both sides; the rig side is `crate::play::rig_dims` (render-gated, so not
-/// linked here).
+/// release/deploy gate and the game's launch gate act on, produced by the SAME classifier
+/// the runtime loader uses ([`load_brain_normalizer`]), so the gates can never pass a
+/// checkpoint the runtime would refuse. The caller only turns the verdict into a message +
+/// exit code. A dim-mismatched or envelope-refused checkpoint would degrade the NN crab to
+/// its motionless rest pose, so the gates refuse it outright; the rig side of `Mismatch`
+/// is `crate::play::rig_dims` (render-gated, so not linked here).
 pub fn checkpoint_fits_rig(dir: &Path) -> RigFit {
-    if !CheckpointDir::new(dir).brain_file().exists() {
-        return RigFit::Missing;
-    }
-    match load_brain(dir, &NdArrayDevice::Cpu) {
-        None => RigFit::Unreadable,
-        Some(brain) => {
-            let (obs, action) = brain.io_dims();
-            if dims_fit_rig(obs, action) {
-                RigFit::Ok
-            } else {
-                RigFit::Mismatch(RigDims { obs, action })
-            }
-        }
+    match load_brain_normalizer(dir, &NdArrayDevice::Cpu) {
+        Loaded::Fit(..) => RigFit::Ok,
+        Loaded::Absent => RigFit::Missing,
+        Loaded::Mismatch(dims) => RigFit::Mismatch(dims),
+        Loaded::Refused(why) => RigFit::Refused(why),
     }
 }
 
@@ -168,10 +139,12 @@ pub enum RigFit {
     Ok,
     /// No `brain.bin` in the dir — nothing to check.
     Missing,
-    /// `brain.bin` exists but won't deserialize — a truncated/corrupt copy (chunked deploy
-    /// transfers produce these). Distinct from `Missing` so the operator is told to redeploy
-    /// the file they can SEE, instead of chasing path/env resolution.
-    Unreadable,
+    /// The checkpoint was refused before any dims existed to compare, with the reason
+    /// preformatted: a truncated/corrupt file (distinct from `Missing` so the operator
+    /// redeploys the file they can SEE instead of chasing path resolution), a legacy
+    /// unmigrated file, an unregistered architecture named in the reason (the bddap/rl#200
+    /// §2 arch arm), a mis-copied artifact, or a missing/mis-paired obs normalizer.
+    Refused(String),
     /// The brain loads but its dims (carried here) differ from the rig.
     Mismatch(RigDims),
 }
@@ -186,27 +159,37 @@ pub enum RigFit {
 // straight into `Policy`), so boxing it would only add a heap alloc on the cold load path.
 #[allow(clippy::large_enum_variant)]
 enum Loaded {
-    /// Brain + normalizer parsed and the dims fit the rig — arm the NN crab with it.
+    /// Brain + its paired normalizer parsed and the dims fit the rig — arm the NN crab.
     Fit(AnyBrain<InferBackend>, ObsNormalizer),
-    /// No readable `brain.bin`: the file is absent, or a hot-reload raced a mid-save
-    /// write and got a torn read. The LEGITIMATE "no brain yet" case — keep the current
-    /// policy / hold the neutral rest pose. Not an error.
+    /// No `brain.bin`. The LEGITIMATE "no brain yet" case — keep the current policy /
+    /// hold the neutral rest pose. Not an error.
     Absent,
     /// The brain parsed but its dims don't fit the compiled rig (carried here so the caller
     /// can name both sides). Arming it would degrade the crab to an inert rest pose that
     /// looks frozen-but-fine, or panic in the first matmul (rl#36) — so the caller LOUDLY
     /// refuses to arm. An operator error (wrong checkpoint for this build), never a transient.
     Mismatch(RigDims),
+    /// The envelope refused the checkpoint — corrupt/truncated, legacy (unmigrated), an
+    /// unregistered arch, a mis-copied file, or a missing/mis-paired normalizer. Like
+    /// `Mismatch`, an operator error refused LOUDLY with the reason; what used to degrade
+    /// to the quiet rest pose misattributed as "no checkpoint" (bddap/rl#200 §2's
+    /// silent-fallback class) is now this distinct verdict.
+    Refused(String),
 }
 
-/// Read a brain + normalizer from `dir`, classifying the result for the caller. A torn
-/// mid-save read presents as `Absent` (load fails to parse), so a hot-reload keeps the
-/// policy it has rather than blanking the running demo to a rest pose; a wrong-rig brain
-/// presents as `Mismatch` so the caller can refuse it loudly instead of silently degrading.
+/// Read a brain + normalizer from `dir`, classifying the result for the caller — THE one
+/// checkpoint classifier: the runtime loaders (initial + hot-reload) and the gates
+/// ([`checkpoint_fits_rig`]) all speak this verdict, so they can't drift. The brain load
+/// dispatches on the envelope's arch tag ([`load_brain_file`]); the normalizer is
+/// brain-PAIRED — it must exist and carry the brain's own arch tag, because a real brain
+/// normalizing against cold or mis-paired stats acts silently wrong, a worse failure
+/// than not arming.
 fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
     let paths = CheckpointDir::new(dir);
-    let Some(brain) = load_brain(dir, device) else {
-        return Loaded::Absent;
+    let brain = match load_brain_file::<InferBackend>(&paths.brain_file(), device) {
+        Ok(brain) => brain,
+        Err(BrainLoadError::Envelope(EnvelopeError::Absent)) => return Loaded::Absent,
+        Err(e) => return Loaded::Refused(format!("brain.bin: {e}")),
     };
     // A checkpoint from a different rig (e.g. a stale 77-dim brain against the current
     // OBS_SIZE) parses fine here but its mismatched first-layer weight would panic in the
@@ -218,16 +201,12 @@ fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
     if !dims_fit_rig(obs, action) {
         return Loaded::Mismatch(RigDims { obs, action });
     }
-    // Same clip the trainer wrote the normalizer with, so the demo de-normalizes on the
-    // exact scale training used — sourced from the one const, never a bare literal.
-    let mut normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
-    let norm_path = paths.normalizer_path();
-    if norm_path.exists()
-        && let Some(loaded) = ObsNormalizer::load(&norm_path)
-    {
-        normalizer = loaded;
+    match ObsNormalizer::load(&paths.normalizer_path(), brain.arch()) {
+        Ok(normalizer) => Loaded::Fit(brain, normalizer),
+        Err(e) => Loaded::Refused(format!(
+            "normalizer.bin: {e} (a brain never arms without its paired obs normalizer)"
+        )),
     }
-    Loaded::Fit(brain, normalizer)
 }
 
 /// The loud, actionable refusal logged when a checkpoint's dims don't fit this binary's
@@ -242,6 +221,16 @@ fn log_rig_mismatch(surface: &str, dir: &Path, dims: RigDims) {
          {ACTION_SIZE} act. REFUSING to arm the NN crab: it would hold an inert rest \
          pose that looks frozen-but-fine. Rebuild the checkpoint for this rig, or run a \
          binary whose rig matches the checkpoint.",
+        dir.display(),
+    );
+}
+
+/// The loud refusal for an envelope-level rejection (corrupt/legacy/unknown-arch/
+/// mis-paired) — `log_rig_mismatch`'s sibling, one message for both arming sites.
+fn log_checkpoint_refusal(surface: &str, dir: &Path, why: &str) {
+    error!(
+        "{surface}: REFUSING checkpoint at {} — {why}. The NN crab will NOT arm (it \
+         would hold an inert rest pose that looks frozen-but-fine).",
         dir.display(),
     );
 }
@@ -268,9 +257,11 @@ fn loaded_state(
 }
 
 impl Policy {
-    /// Load brain + normalizer from a checkpoint dir. Missing/corrupt files fall
-    /// back to a zero-action policy so the app still launches (useful before the
-    /// first checkpoint exists, and to inspect the body's neutral rest pose).
+    /// Load brain + normalizer from a checkpoint dir. A missing checkpoint falls back
+    /// QUIETLY to the zero-action rest pose so the app still launches (useful before the
+    /// first checkpoint exists, and to inspect the body's neutral pose); a present-but-
+    /// unusable one (wrong rig, or envelope-refused — corrupt/legacy/wrong-arch) is
+    /// refused LOUDLY and also rests.
     pub fn load(checkpoint_dir: &Path) -> Self {
         let device = NdArrayDevice::Cpu;
         // RL_RANDOM_POLICY drives the crab with an untrained random-init brain when there is
@@ -285,14 +276,14 @@ impl Policy {
             }
             // No usable checkpoint, but the diagnostic override is on: drive with an untrained
             // current-rig brain. No on-disk weights ⇒ no digest ⇒ can't enter lockstep.
-            Loaded::Absent | Loaded::Mismatch(_) if random_override => {
+            Loaded::Absent | Loaded::Mismatch(_) | Loaded::Refused(_) if random_override => {
                 warn!(
                     "play: RL_RANDOM_POLICY — driving with an untrained random brain \
                      (no usable checkpoint at {})",
                     checkpoint_dir.display()
                 );
                 PolicyState::Diagnostic {
-                    brain: AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device).valid(),
+                    brain: AnyBrain::<InferBackend>::init(ArchId::Mlp256, &device),
                     normalizer: ObsNormalizer::new(NORMALIZER_CLIP),
                 }
             }
@@ -308,6 +299,10 @@ impl Policy {
             Loaded::Mismatch(dims) => {
                 // Wrong checkpoint for this build: refuse to arm, loud + attributable.
                 log_rig_mismatch("play", checkpoint_dir, dims);
+                PolicyState::Rest
+            }
+            Loaded::Refused(why) => {
+                log_checkpoint_refusal("play", checkpoint_dir, &why);
                 PolicyState::Rest
             }
         };
@@ -330,9 +325,9 @@ impl Policy {
     }
 
     /// If the live training dir holds a brain file newer than the one we're
-    /// running, swap it in; returns whether it did. Safe against a mid-save race:
-    /// a torn read makes [`load_brain_normalizer`] return [`Loaded::Absent`] and we keep
-    /// the current policy rather than blanking the demo to a rest pose.
+    /// running, swap it in; returns whether it did. Safe against a bad file appearing
+    /// mid-run: any non-`Fit` verdict keeps the current policy rather than blanking the
+    /// demo to a rest pose (envelope writes are atomic, so a torn read can't occur).
     // Demo-only (render-gated) hot-reload; the headless eval/trainer never swaps mid-run.
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
     pub(crate) fn try_hot_reload(&mut self) -> bool {
@@ -352,13 +347,18 @@ impl Policy {
                 self.last_loaded = Some(mtime);
                 true
             }
-            Loaded::Absent => false, // mid-save / unreadable — keep the current policy
+            Loaded::Absent => false, // no brain file yet — keep the current policy
+            // A wrong-rig or envelope-refused brain landed in the live dir: refuse it
+            // loudly but keep whatever we're driving (a bad file must not blank a working
+            // demo; an unarmed policy just stays at rest). Stamp `last_loaded` so we log
+            // once per distinct file (mtime), not every tick.
             Loaded::Mismatch(dims) => {
-                // A wrong-rig brain landed in the live dir: refuse it loudly but keep whatever
-                // we're driving (a bad file must not blank a working demo; an unarmed policy
-                // just stays at rest). Stamp `last_loaded` so we log once per distinct file
-                // (mtime), not every tick.
                 log_rig_mismatch("play (hot-reload)", &dir, dims);
+                self.last_loaded = Some(mtime);
+                false
+            }
+            Loaded::Refused(why) => {
+                log_checkpoint_refusal("play (hot-reload)", &dir, &why);
                 self.last_loaded = Some(mtime);
                 false
             }
@@ -423,63 +423,150 @@ impl Policy {
 mod tests {
     use super::*;
     use burn::prelude::Module;
-    use burn::record::Recorder;
+    use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
 
     use crate::bot::arch::Mlp256;
+    use crate::training::TrainBackend;
+    use crate::training::envelope::{ArtifactKind, write_envelope};
 
-    /// Save a freshly-initialised brain into `dir` through the PRODUCTION writer
-    /// ([`save_brain_record`], the same recipe `save_checkpoint` uses) — so every
+    /// Save a freshly-initialised brain + its paired identity normalizer into `dir`
+    /// through the PRODUCTION writers ([`save_brain`](crate::training::checkpoint::save_brain)
+    /// / [`ObsNormalizer::save`], the same recipes `save_checkpoint` uses) — so every
     /// save→`Policy::load` test here is an end-to-end writer↔loader format guard,
     /// not a test-only round trip that would stay green through a writer drift.
     fn save_brain(dir: &Path) {
-        use crate::training::checkpoint::save_brain_record;
         std::fs::create_dir_all(dir).unwrap();
         let device = NdArrayDevice::Cpu;
         let brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
-        save_brain_record(&brain, CheckpointDir::new(dir).brain_stem()).unwrap();
+        let paths = CheckpointDir::new(dir);
+        crate::training::checkpoint::save_brain(&brain, &paths.brain_file()).unwrap();
+        ObsNormalizer::new(NORMALIZER_CLIP).save(brain.arch(), &paths.normalizer_path());
     }
 
-    /// GOLDEN FILE (bddap/rl#200 increment 1): `tests/data/golden-mlp256/brain.bin` was
-    /// written by pre-`AnyBrain` main (`CrabBrain` + `BinFileRecorder`), and `actions.hex`
-    /// holds the bit patterns `Policy::act` produced on this fixture obs at that commit.
-    /// Loading it through today's loader and reproducing those bits EXACTLY proves (a) the
-    /// on-disk record format did not drift (e.g. an enum-index prefix from accidentally
-    /// round-tripping `AnyBrainRecord` — which would strand every fleet checkpoint on the
-    /// quiet rest-pose path while all save/load-symmetric tests stayed green), and (b) the
-    /// seam refactor left deployed actions bit-identical.
-    #[test]
-    fn golden_main_checkpoint_loads_and_acts_bit_identically() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256");
-
-        let policy = Policy::load(&dir);
-        assert!(
-            policy.is_loaded(),
-            "the pre-AnyBrain golden brain.bin no longer loads — the on-disk brain record \
-             format drifted (fleet checkpoints would silently fall to the rest pose)"
-        );
-
-        // Same fixture the generator used: deterministic, integer-derived (no libm).
+    /// The fixture obs the golden `actions.hex` was generated over: deterministic,
+    /// integer-derived (no libm), shared by the golden tests.
+    fn golden_obs() -> [f32; OBS_SIZE] {
         let mut obs = [0.0f32; OBS_SIZE];
         for (i, o) in obs.iter_mut().enumerate() {
             *o = ((i * 37 % 101) as f32) / 50.5 - 1.0;
         }
-        let expected: Vec<u32> = std::fs::read_to_string(dir.join("actions.hex"))
+        obs
+    }
+
+    /// The pre-envelope legacy fixture dir (written by pre-`AnyBrain` main) and its
+    /// pinned action bits.
+    fn legacy_golden_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256")
+    }
+
+    fn golden_action_bits() -> Vec<u32> {
+        std::fs::read_to_string(legacy_golden_dir().join("actions.hex"))
             .expect("read golden actions.hex")
             .lines()
             .map(|l| u32::from_str_radix(l.trim(), 16).expect("parse golden bits"))
-            .collect();
+            .collect()
+    }
+
+    /// GOLDEN FILE (bddap/rl#200 increment 2): `tests/data/golden-mlp256-env/` holds the
+    /// ENVELOPED form of the legacy golden brain (same weights, wrapped by
+    /// `migrate-checkpoint`, plus an identity obs normalizer — the legacy fixture had
+    /// none, which was the identity). Loading it through today's loader and reproducing
+    /// the pinned action bits EXACTLY proves the tagged on-disk format did not drift
+    /// (a reader/writer change that re-mapped envelope fields would strand every
+    /// migrated fleet checkpoint while all save/load-symmetric tests stayed green).
+    /// Regenerate with `regenerate_enveloped_golden_fixture` below on a DELIBERATE
+    /// format version bump.
+    #[test]
+    fn golden_enveloped_checkpoint_loads_and_acts_bit_identically() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256-env");
+
+        let policy = Policy::load(&dir);
+        assert!(
+            policy.is_loaded(),
+            "the enveloped golden checkpoint no longer loads — the tagged on-disk format \
+             drifted (every migrated fleet checkpoint would refuse to arm)"
+        );
+
+        let expected = golden_action_bits();
         assert_eq!(
             expected.len(),
             ACTION_SIZE,
             "golden fixture is for this rig"
         );
-
-        let act = policy.act(&obs);
+        let act = policy.act(&golden_obs());
         let got: Vec<u32> = act.iter().map(|v| v.to_bits()).collect();
         assert_eq!(
             got, expected,
-            "actions on the fixture obs are not bit-identical to pre-AnyBrain main"
+            "actions on the fixture obs are not bit-identical to the pinned golden bits"
         );
+    }
+
+    /// The legacy (pre-envelope) golden checkpoint must now be REFUSED — the loud
+    /// `Refused` verdict pointing at the migration tool, never the quiet rest pose or a
+    /// blind load (bddap/rl#200 §2: the loader has no untagged-read path;
+    /// `migrate-checkpoint` is the sole legacy parser).
+    #[test]
+    fn legacy_golden_checkpoint_is_refused() {
+        let policy = Policy::load(&legacy_golden_dir());
+        assert!(
+            !policy.is_loaded(),
+            "a legacy untagged brain.bin must not load — the loader has no untagged path"
+        );
+        // The non-arming is graceful: the rest pose, never a panic.
+        assert_eq!(policy.act(&golden_obs()), [0.0; ACTION_SIZE]);
+
+        // The gates speak the same classifier: a loud, attributable refusal naming the fix.
+        match checkpoint_fits_rig(&legacy_golden_dir()) {
+            RigFit::Refused(why) => assert!(
+                why.contains("migrate-checkpoint"),
+                "the refusal must point the operator at the migration tool, got: {why}"
+            ),
+            _ => panic!("a legacy checkpoint must classify as Refused, not Missing/Ok"),
+        }
+    }
+
+    /// END-TO-END migration: `migrate-checkpoint` over (a copy of) the legacy golden
+    /// fixture yields a checkpoint that loads through the envelope-only loader and acts
+    /// BIT-IDENTICALLY to the pinned pre-envelope bits — weights survive the migration
+    /// verbatim. The identity normalizer written beside it matches the legacy fixture's
+    /// no-normalizer identity.
+    #[test]
+    fn migrated_legacy_golden_acts_bit_identically() {
+        let dir = std::env::temp_dir().join(format!("rl-migrate-golden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(legacy_golden_dir().join("brain.bin"), dir.join("brain.bin")).unwrap();
+        crate::training::migrate::migrate_dir(&dir).expect("migration succeeds");
+        ObsNormalizer::new(NORMALIZER_CLIP)
+            .save(ArchId::Mlp256, &CheckpointDir::new(&dir).normalizer_path());
+
+        let policy = Policy::load(&dir);
+        assert!(policy.is_loaded(), "the migrated golden checkpoint loads");
+        let got: Vec<u32> = policy
+            .act(&golden_obs())
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(
+            got,
+            golden_action_bits(),
+            "migration must preserve the weights bit-exactly"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regenerates `tests/data/golden-mlp256-env/` from the legacy golden fixture (run
+    /// with `cargo test -- --ignored regenerate_enveloped_golden_fixture` and commit the
+    /// result). Ignored because a golden fixture that silently regenerates guards nothing.
+    #[test]
+    #[ignore = "fixture generator, run manually on a deliberate format version bump"]
+    fn regenerate_enveloped_golden_fixture() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256-env");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(legacy_golden_dir().join("brain.bin"), dir.join("brain.bin")).unwrap();
+        crate::training::migrate::migrate_dir(&dir).expect("migration succeeds");
+        ObsNormalizer::new(NORMALIZER_CLIP)
+            .save(ArchId::Mlp256, &CheckpointDir::new(&dir).normalizer_path());
     }
 
     /// The demo's "always fresh" guarantee: when training writes a new checkpoint
@@ -546,8 +633,9 @@ mod tests {
     /// can't get one from `Mlp256::new` (it bakes in today's `OBS_SIZE`), so swap
     /// the `trunk_fc1` weight in the record for a `[obs_dim, HIDDEN]` tensor before
     /// recording. This is exactly the file that used to reach the matmul and panic.
-    /// Built on the LEAF module directly: what lands on disk is the same leaf record
-    /// production writes.
+    /// Built on the LEAF record inside a proper envelope: what lands on disk is the same
+    /// layout production writes, only with foreign dims. The paired normalizer rides
+    /// along so the verdict tested is the DIM mismatch, nothing else.
     fn save_brain_with_obs_dim(dir: &Path, obs_dim: usize) {
         use burn::module::{Param, ParamId};
         use burn::tensor::Tensor;
@@ -557,10 +645,18 @@ mod tests {
         let [_obs, hidden] = record.trunk_fc1.weight.shape().dims();
         let weight = Tensor::<TrainBackend, 2>::zeros([obs_dim, hidden], &device);
         record.trunk_fc1.weight = Param::initialized(ParamId::new(), weight);
-        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-        recorder
-            .record(record, CheckpointDir::new(dir).brain_stem())
+        let bytes = BinBytesRecorder::<FullPrecisionSettings>::default()
+            .record(record, ())
             .unwrap();
+        let paths = CheckpointDir::new(dir);
+        write_envelope(
+            &paths.brain_file(),
+            ArtifactKind::Brain,
+            ArchId::Mlp256,
+            bytes,
+        )
+        .unwrap();
+        ObsNormalizer::new(NORMALIZER_CLIP).save(ArchId::Mlp256, &paths.normalizer_path());
     }
 
     /// rl#36: a checkpoint built for a different `OBS_SIZE` must NOT panic in the matmul —
@@ -594,10 +690,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// rl#121 + rl#199: the gates classify a checkpoint against the rig — a current-rig
-    /// brain is `Ok`, a stale one is `Mismatch` carrying its OWN dims, a dir with no brain
-    /// is `Missing`, and a present-but-undeserializable `brain.bin` (truncated deploy copy)
-    /// is `Unreadable`, distinct from `Missing` so the operator redeploys the file they can
+    /// rl#121 + rl#199 + rl#200: the gates classify a checkpoint against the rig — a
+    /// current-rig brain is `Ok`, a stale one is `Mismatch` carrying its OWN dims, a dir
+    /// with no brain is `Missing`, and a present-but-unusable `brain.bin` (corrupt,
+    /// legacy, mis-copied, wrong arch, or missing its paired normalizer) is `Refused`
+    /// with the reason — distinct from `Missing` so the operator fixes the file they can
     /// see instead of chasing path resolution. This verdict is what lets the release gate
     /// and the game's launch gate refuse a bad checkpoint loudly instead of shipping/arming
     /// an inert rest-pose crab.
@@ -610,9 +707,15 @@ mod tests {
         // No brain yet → Missing.
         assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Missing));
 
-        // A current-rig brain fits.
+        // A current-rig brain (with its paired normalizer) fits.
         save_brain(&dir);
         assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Ok));
+
+        // A brain whose paired normalizer is MISSING is Refused — a real brain must never
+        // arm against silently-cold normalizer stats.
+        std::fs::remove_file(CheckpointDir::new(&dir).normalizer_path()).unwrap();
+        assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Refused(_)));
+        save_brain(&dir); // restore the pair
 
         // A stale brain is a Mismatch carrying its own obs dim (what the gate reports).
         save_brain_with_obs_dim(&dir, OBS_SIZE + 4);
@@ -621,9 +724,9 @@ mod tests {
             RigFit::Mismatch(RigDims { obs, .. }) if obs == OBS_SIZE + 4
         ));
 
-        // A present-but-corrupt brain.bin is Unreadable, not Missing.
+        // A present-but-corrupt brain.bin is Refused, not Missing.
         std::fs::write(CheckpointDir::new(&dir).brain_file(), b"truncated garbage").unwrap();
-        assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Unreadable));
+        assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Refused(_)));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

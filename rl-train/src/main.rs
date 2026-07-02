@@ -85,6 +85,23 @@ enum Command {
     /// so the daemon can run it against the live checkpoint on demand to plot progress-toward-ball
     /// over training instead of watching the reward curve.
     Eval(EvalArgs),
+
+    /// One-shot migration of a LEGACY (pre-envelope) checkpoint dir into tagged
+    /// `CheckpointEnvelope` files (bddap/rl#200 §2). The SOLE legacy parser: every loader
+    /// reads only tagged files, so an unmigrated dir is refused loudly everywhere until
+    /// this has run. Validates each artifact before wrapping (tagged `arch: mlp256` — the
+    /// only arch that has ever existed), unwraps the old optimizer envelope, deletes the
+    /// superseded `shape.txt`, and migrates a `best/` snapshot alongside. Refuses
+    /// already-tagged files, so a rerun is safe. Deleted with the tool once the fleet is
+    /// migrated (epic increment 3).
+    MigrateCheckpoint(MigrateArgs),
+}
+
+/// The `migrate-checkpoint` subcommand: which legacy checkpoint dir to rewrite in place.
+#[derive(Parser, Debug, Clone)]
+struct MigrateArgs {
+    /// Checkpoint dir to migrate (rewritten IN PLACE; its `best/` subdir rides along).
+    dir: PathBuf,
 }
 
 /// Learner orchestration: the shared training config plus how many rollout threads
@@ -171,7 +188,9 @@ fn main() {
             return;
         }
         Some(Command::Eval(e)) => {
-            let distance = e.distance.unwrap_or(crab_world::eval::DEFAULT_TARGET_DISTANCE_M);
+            let distance = e
+                .distance
+                .unwrap_or(crab_world::eval::DEFAULT_TARGET_DISTANCE_M);
             let r = crab_world::eval::run_eval(&e.checkpoint_dir, e.ticks, distance);
             // The two headline numbers first (progress_m, total_torque), then the context that
             // lets them be trusted at face value. `EVAL_RESULT` is a stable, greppable prefix the
@@ -197,6 +216,33 @@ fn main() {
                      rest-pose baseline, NOT a trained policy",
                     e.checkpoint_dir.display()
                 );
+            }
+            return;
+        }
+        Some(Command::MigrateCheckpoint(m)) => {
+            match training::migrate::migrate_dir(&m.dir) {
+                Ok(report) => {
+                    for line in &report.lines {
+                        println!("{line}");
+                    }
+                    if report.migrated == 0 {
+                        // Nothing legacy found: wrong dir, or already migrated. Nonzero so
+                        // a scripted fleet migration can't silently no-op on a typo'd path.
+                        eprintln!(
+                            "migrate-checkpoint: nothing to migrate in {}",
+                            m.dir.display()
+                        );
+                        std::process::exit(1);
+                    }
+                    println!(
+                        "migrate-checkpoint: migrated {} artifact(s)",
+                        report.migrated
+                    );
+                }
+                Err(e) => {
+                    eprintln!("migrate-checkpoint: {e}");
+                    std::process::exit(1);
+                }
             }
             return;
         }
@@ -304,10 +350,7 @@ fn verify_colliders() -> i32 {
         let label = format!("{:?}", rc.part);
         let (score, rnorm, fail) = match rc.shape {
             RestShape::Capsule { a, b, radius } => {
-                let pts = clouds
-                    .get(&rc.part)
-                    .map(|p| p.as_slice())
-                    .unwrap_or(&[]);
+                let pts = clouds.get(&rc.part).map(|p| p.as_slice()).unwrap_or(&[]);
                 let s = score_capsule(pts, a, b, radius);
                 // Pass: little flesh escapes, the worst poke is shallow vs the part's
                 // own radius, the collider isn't grossly oversized, the axis tracks

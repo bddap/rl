@@ -1,22 +1,23 @@
 //! Persisted training artifacts and the backend/optimizer types they serialize: the
-//! atomic-write primitive, checkpoint file names, the Adam optimizer construction +
-//! its versioned on-disk envelope, and the return-normalizer round trip. The brain and
-//! obs-normalizer checkpoints are written by their owners ([`super::systems::TrainingState`]
-//! and [`super::normalizer::ObsNormalizer`]); this module owns the shared plumbing.
+//! checkpoint file names/layout, the enveloped brain + Adam-optimizer + return-normalizer
+//! round trips, and the Adam construction. Every artifact ships inside a
+//! [`CheckpointEnvelope`](super::envelope) (kind + per-kind version + arch), so a loader
+//! always knows WHAT it is decoding and for WHICH architecture — see [`load_brain_file`]
+//! for the arch dispatch. The obs-normalizer round trip lives with its owner
+//! ([`super::normalizer::ObsNormalizer`]); this module owns the shared plumbing.
 
 use std::path::{Path, PathBuf};
 
 use burn::grad_clipping::GradientClippingConfig;
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig};
-use burn::tensor::backend::AutodiffBackend;
+use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use tracing::warn;
 
 use super::algorithm::{ReturnNormalizer, ReturnNormalizerData};
-use super::atomic_write;
-use crate::bot::actuator::ACTION_SIZE;
-use crate::bot::arch::AnyBrain;
-use crate::bot::sensor::OBS_SIZE;
+use super::envelope::{ArtifactKind, EnvelopeError, read_envelope, write_envelope};
+use crate::bot::arch::{AnyBrain, ArchId};
 
 /// The Adam optimizer over an [`AnyBrain`] on backend `B` — the moments key off leaf
 /// `ParamId`s, so the enum wrapper changes nothing about the record. Generic over the backend so
@@ -24,20 +25,73 @@ use crate::bot::sensor::OBS_SIZE;
 /// and the CPU-backed update test from one code path.
 pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 
-/// Write a brain's LEAF record to `stem` (the recorder appends `.bin`) — the ONE recipe
-/// for how a brain lands on disk, shared by the trainer's checkpoint write and the test
-/// fixtures. That sharing is the writer-side drift guard: the save→`Policy::load` tests
-/// exercise this exact function, so a regression that made it round-trip the enum record
-/// (see [`AnyBrain::record_leaf`]) turns those tests red instead of silently stranding
-/// the fleet on the rest pose.
-pub(crate) fn save_brain_record<B: burn::tensor::backend::Backend>(
-    brain: &AnyBrain<B>,
-    stem: std::path::PathBuf,
-) -> Result<(), burn::record::RecorderError> {
-    use burn::record::{BinFileRecorder, FullPrecisionSettings};
-    brain
-        .record_leaf(&BinFileRecorder::<FullPrecisionSettings>::default(), stem)
-        .map(|_| ())
+/// Write a brain to `path` as its LEAF record inside a [`ArtifactKind::Brain`] envelope
+/// tagged with the brain's own arch — the ONE recipe for how a brain lands on disk,
+/// shared by the trainer's checkpoint write and the test fixtures. That sharing is the
+/// writer-side drift guard: the save→`Policy::load` tests exercise this exact function,
+/// so a regression that made it round-trip the enum record (see [`AnyBrain::record_leaf`])
+/// or drop the envelope turns those tests red instead of silently stranding the fleet.
+/// Atomic (temp + fsync-rename), so a crash mid-write can't leave a torn `brain.bin`.
+pub(crate) fn save_brain<B: Backend>(brain: &AnyBrain<B>, path: &Path) -> std::io::Result<()> {
+    let bytes = brain
+        .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
+        .map_err(std::io::Error::other)?;
+    write_envelope(path, ArtifactKind::Brain, brain.arch(), bytes)
+}
+
+/// Why a brain file did not yield a brain. `Envelope` wraps the tag-level refusals
+/// (absent/legacy/corrupt/unknown-arch/…); `Record` means the envelope validated but the
+/// payload didn't decode as that arch's leaf record.
+#[derive(Debug)]
+pub(crate) enum BrainLoadError {
+    Envelope(EnvelopeError),
+    Record(String),
+}
+
+impl std::fmt::Display for BrainLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Envelope(e) => e.fmt(f),
+            Self::Record(e) => write!(f, "leaf record does not decode: {e}"),
+        }
+    }
+}
+
+/// Decode `payload` as `arch`'s leaf record on `device`. burn's bytes recorder PANICS on
+/// malformed input (it unwraps its internal bincode decode), so the decode is contained
+/// here — the one place record bytes from DISK meet the recorder — and a bad payload
+/// surfaces as an `Err` the callers' refusal policies can act on, never a crash. (The
+/// in-process snapshot/GPU bridges keep their bare recorder calls: they move a live
+/// brain's own bytes, where a decode failure IS a bug worth the panic.)
+pub(crate) fn decode_brain_payload<B: Backend>(
+    arch: ArchId,
+    payload: Vec<u8>,
+    device: &B::Device,
+) -> Result<AnyBrain<B>, String> {
+    let device = device.clone();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        AnyBrain::<B>::init(arch, &device).load_leaf_record(
+            &BinBytesRecorder::<FullPrecisionSettings>::default(),
+            payload,
+            &device,
+        )
+    }))
+    .map_err(|_| "record bytes do not decode (malformed payload)".to_string())?
+    .map_err(|e| e.to_string())
+}
+
+/// Load the brain at `path`, DISPATCHING on the envelope's arch tag: read the envelope,
+/// `AnyBrain::init` the tagged architecture, then load the leaf record into it. The one
+/// chokepoint where a checkpoint chooses its architecture — no code path blind-loads a
+/// record into a guessed variant, and an unregistered arch is refused by name before any
+/// payload decode. Callers apply their own refusal policy to the error (trainer aborts,
+/// inference refuses loudly, see bddap/rl#200 §2).
+pub(crate) fn load_brain_file<B: Backend>(
+    path: &Path,
+    device: &B::Device,
+) -> Result<AnyBrain<B>, BrainLoadError> {
+    let env = read_envelope(path, ArtifactKind::Brain).map_err(BrainLoadError::Envelope)?;
+    decode_brain_payload::<B>(env.arch, env.payload, device).map_err(BrainLoadError::Record)
 }
 
 /// Build the learner's Adam optimizer (global grad-norm clip 0.5). The ONE source of
@@ -54,11 +108,6 @@ pub(crate) fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
 /// every reader and writer (training, resume, the demo's load + hot-reload, and the
 /// best-keeper's [`super::best`] snapshot) references these rather than re-typing the
 /// string, so the names can't drift between modules.
-///
-/// Stem (no extension) for the brain record — `BinFileRecorder` appends `.bin`, so the
-/// file on disk is [`BRAIN_FILENAME`].
-const BRAIN_STEM: &str = "brain";
-/// `brain.bin` as it lands on disk — [`BRAIN_STEM`] plus the `.bin` the recorder appends.
 pub(crate) const BRAIN_FILENAME: &str = "brain.bin";
 pub(crate) const NORMALIZER_FILENAME: &str = "normalizer.bin";
 /// Return (value-target) normalizer checkpoint, beside the obs normalizer, so a
@@ -68,18 +117,18 @@ pub(crate) const RETURN_NORMALIZER_FILENAME: &str = "return_normalizer.bin";
 /// Persisted Adam optimizer state (rl#60): the per-parameter first/second moments and step
 /// (`time`) the GPU learner carries across iterations. A resume restores these so the
 /// optimizer continues with warm momentum instead of paying the brief self-correcting
-/// transient a cold restart costs. Absent in pre-rl#60 checkpoints, which then resume cold
-/// (see [`load_optimizer`]) rather than erroring — the format version inside the file
-/// (see [`OPTIMIZER_FORMAT_VERSION`]) guards a layout change the same way.
+/// transient a cold restart costs. Absent in older checkpoints, which then resume cold
+/// (see [`load_optimizer`]) rather than erroring.
 pub(crate) const OPTIMIZER_FILENAME: &str = "optimizer.bin";
 /// Tick-budget odometer, beside the checkpoint, so a restarted learner resumes the
 /// `--ticks` budget rather than restarting it (the overnight loop makes restarts the
-/// expected case). Read/written by [`super::inproc`]; policy-independent.
+/// expected case). Read/written by [`super::inproc`]; policy-independent plain text,
+/// so it carries no envelope.
 pub(crate) const TICK_WATERMARK_FILENAME: &str = "ticks.txt";
 
 /// The on-disk layout of a checkpoint directory: the single place that knows which
 /// filename each artifact uses and how its path is assembled. Callers ask for
-/// [`Self::brain_stem`] / [`Self::normalizer_path`] / … instead of re-deriving
+/// [`Self::brain_file`] / [`Self::normalizer_path`] / … instead of re-deriving
 /// `dir.join(CONST)` by hand, so a layout change lands in one place and every reader and
 /// writer (training, resume, the demo's load + hot-reload) stays in lockstep. Borrows the
 /// dir, so it's free to construct at each use.
@@ -92,24 +141,9 @@ impl<'a> CheckpointDir<'a> {
         Self { dir }
     }
 
-    /// Stem (no extension) for the brain record — pass this to the recorder's
-    /// `record`/`load`, which append `.bin` themselves. Use [`Self::brain_file`] for the
-    /// file as it lands on disk.
-    pub(crate) fn brain_stem(&self) -> PathBuf {
-        self.dir.join(BRAIN_STEM)
-    }
-
-    /// The brain file on disk (`brain.bin`) — for existence and mtime checks.
+    /// The brain file on disk (`brain.bin`).
     pub(crate) fn brain_file(&self) -> PathBuf {
         self.dir.join(BRAIN_FILENAME)
-    }
-
-    /// Temp stem the brain is recorded to before an atomic rename onto [`Self::brain_file`],
-    /// so a crash mid-write can't leave a torn `brain.bin` (silently discarded on load →
-    /// resume from random weights). Dot-free for the same reason the stem is: the recorder
-    /// forces the `.bin` extension, so a "brain.tmp" stem would clobber the live file.
-    pub(crate) fn brain_tmp_stem(&self) -> PathBuf {
-        self.dir.join("brain-tmp")
     }
 
     pub(crate) fn normalizer_path(&self) -> PathBuf {
@@ -124,103 +158,23 @@ impl<'a> CheckpointDir<'a> {
     pub(crate) fn optimizer_path(&self) -> PathBuf {
         self.dir.join(OPTIMIZER_FILENAME)
     }
-
-    fn shape_path(&self) -> PathBuf {
-        self.dir.join(SHAPE_FILENAME)
-    }
-
-    /// Whether this checkpoint's persisted obs/action widths match the running build's
-    /// — the gate every shape-bound warm load (the brain, the Adam optimizer) consults
-    /// before trusting the saved weights. `false` when the sidecar is absent (a fresh
-    /// dir, or a pre-guard checkpoint) or its widths differ, so the caller starts that
-    /// artifact cold instead of loading a shape-incompatible record. See [`SHAPE_FILENAME`].
-    pub(crate) fn warm_start_compatible(&self) -> bool {
-        match BrainShape::load(&self.shape_path()) {
-            Some(saved) => saved == BrainShape::current(),
-            None => false,
-        }
-    }
-
-    /// Persist the current obs/action widths beside the brain. Called on every brain
-    /// checkpoint so the sidecar can't lag the weights it guards.
-    pub(crate) fn save_shape(&self) {
-        let s = BrainShape::current();
-        let body = format!("{} {}\n", s.obs, s.action);
-        if let Err(e) = atomic_write(&self.shape_path(), body.as_bytes()) {
-            warn!(
-                "Failed to write brain shape sidecar to {}: {e}",
-                self.shape_path().display()
-            );
-        }
-    }
-}
-
-/// The observation/action vector widths a checkpoint's weights were trained at,
-/// recorded beside the brain as [`SHAPE_FILENAME`]. Both derive from
-/// [`crate::bot::body::CrabJointId::COUNT`] (the policy-actuated DOF set), so adding
-/// articulation (bddap/rl#31) changes them — and a brain saved at the old width is
-/// silently wrong in the new net (burn would load a `[30, …]` policy head into a
-/// `[38, …]` one). Persisting and checking the widths makes that mismatch loud and
-/// safe by construction: a resume refuses to warm-start an incompatible checkpoint and
-/// starts cold instead. A pre-guard checkpoint has no sidecar and is likewise treated
-/// as incompatible — exactly the behavior wanted across a DOF change (the stale weights
-/// are discarded, not loaded askew).
-pub(crate) const SHAPE_FILENAME: &str = "shape.txt";
-
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-struct BrainShape {
-    obs: usize,
-    action: usize,
-}
-
-impl BrainShape {
-    fn current() -> Self {
-        Self {
-            obs: OBS_SIZE,
-            action: ACTION_SIZE,
-        }
-    }
-
-    /// Parse the two whitespace-separated widths; `None` on a missing, unreadable, or
-    /// malformed sidecar (all of which the caller treats as "not warm-startable").
-    fn load(path: &Path) -> Option<Self> {
-        let text = std::fs::read_to_string(path).ok()?;
-        let mut it = text.split_whitespace();
-        let obs = it.next()?.parse().ok()?;
-        let action = it.next()?.parse().ok()?;
-        Some(Self { obs, action })
-    }
-}
-
-/// Format version of the [`OPTIMIZER_FILENAME`] envelope. Bumped whenever the serialized
-/// layout changes; a file tagged with any other version is ignored on load (→ cold
-/// moments), never deserialized blind. v1 is burn's Adam record (per-param m/v + step
-/// `time`) under `FullPrecisionSettings`, wrapped in this versioned bincode envelope.
-#[cfg(any(feature = "wgpu", test))]
-const OPTIMIZER_FORMAT_VERSION: u32 = 1;
-
-/// On-disk envelope for the optimizer state: a version tag wrapping the burn optimizer
-/// record's bytes. The bytes are device-independent — the `FullPrecisionSettings` recorder
-/// reads the moment tensors off whatever device the optimizer lives on (the GPU, in
-/// production) into host floats on save, and uploads them back on load — so one file
-/// restores onto whichever device the next learner brings up.
-#[cfg(any(feature = "wgpu", test))]
-#[derive(serde::Serialize, serde::Deserialize)]
-struct OptimizerCheckpoint {
-    version: u32,
-    record: Vec<u8>,
 }
 
 /// Persist an Adam optimizer's state (per-param first/second moments + step) to `path`,
-/// atomically and version-tagged. Generic over the backend so the live GPU learner and the
-/// CPU round-trip test serialize through ONE path — no save/load drift. The
-/// `FullPrecisionSettings` recorder reads the moment tensors back off the optimizer's device
-/// into host floats, exactly as the brain bridge does for weights. Best-effort: any failure
-/// is logged, not fatal (a resume then loads cold — see [`OPTIMIZER_FILENAME`]).
+/// atomically, inside an [`ArtifactKind::Optimizer`] envelope tagged with `arch` — the
+/// architecture of the brain these moments belong to. The tag is the optimizer's SOLE
+/// cross-arch guard: the record is a `HashMap<ParamId, …>`, so a wrong-arch load would
+/// not even fail — every lookup would silently miss and the moments go cold. Generic over
+/// the backend so the live GPU learner and the CPU round-trip test serialize through ONE
+/// path — no save/load drift. Best-effort: any failure is logged, not fatal (a resume
+/// then loads cold — see [`OPTIMIZER_FILENAME`]).
 #[cfg(any(feature = "wgpu", test))]
-pub(crate) fn save_optimizer<B: AutodiffBackend>(optimizer: &CrabOpt<B>, path: &Path) {
+pub(crate) fn save_optimizer<B: AutodiffBackend>(
+    optimizer: &CrabOpt<B>,
+    arch: ArchId,
+    path: &Path,
+) {
     use burn::optim::Optimizer;
-    use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
 
     let record = optimizer.to_record();
     let bytes = match BinBytesRecorder::<FullPrecisionSettings>::default().record(record, ()) {
@@ -230,67 +184,62 @@ pub(crate) fn save_optimizer<B: AutodiffBackend>(optimizer: &CrabOpt<B>, path: &
             return;
         }
     };
-    let envelope = OptimizerCheckpoint {
-        version: OPTIMIZER_FORMAT_VERSION,
-        record: bytes,
-    };
-    match bincode::serialize(&envelope) {
-        Ok(encoded) => {
-            if let Err(e) = atomic_write(path, &encoded) {
-                warn!(
-                    "Failed to write Adam optimizer state to {}: {e}",
-                    path.display()
-                );
-            }
-        }
-        Err(e) => warn!("Failed to encode Adam optimizer state: {e}"),
+    if let Err(e) = write_envelope(path, ArtifactKind::Optimizer, arch, bytes) {
+        warn!(
+            "Failed to write Adam optimizer state to {}: {e}",
+            path.display()
+        );
     }
 }
 
 /// Load an Adam optimizer state saved by [`save_optimizer`] onto `device`, returning the
-/// optimizer with its moments + step restored. Returns the `cold` optimizer UNCHANGED — no
-/// error — when the file is absent, unreadable, corrupt, or version-unrecognized (see
-/// [`OPTIMIZER_FILENAME`] for why cold is the correct fallback). The per-parameter keys line
-/// up across the round trip because the resumed brain restores the SAME `ParamId`s from its
-/// own record, so each moment lands back on its parameter.
+/// optimizer with its moments + step restored. REFUSE-AND-COLD is this artifact's whole
+/// refusal policy (bddap/rl#200 §2): the `cold` optimizer is returned UNCHANGED — logged,
+/// no error — when the file is absent, legacy, corrupt, version-unrecognized, or tagged
+/// with an arch other than `expected_arch` (the resumed brain's — the dir-coherence
+/// check). Cold moments only cost a brief self-correcting transient; wrong moments would
+/// silently miss every `ParamId` lookup. The per-parameter keys line up across an honest
+/// round trip because the resumed brain restores the SAME `ParamId`s from its own record.
 #[cfg(any(feature = "wgpu", test))]
 pub(crate) fn load_optimizer<B: AutodiffBackend>(
     cold: CrabOpt<B>,
     path: &Path,
     device: &B::Device,
+    expected_arch: ArchId,
 ) -> CrabOpt<B> {
     use burn::optim::Optimizer;
-    use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
 
-    let Ok(bytes) = std::fs::read(path) else {
-        // Absent file is the EXPECTED case for a pre-rl#60 checkpoint, so info, not warn —
-        // a warm-continue of an older policy with cold moments is normal, not a fault.
-        tracing::info!(
-            "No Adam optimizer state at {} — starting the optimizer cold",
-            path.display()
-        );
-        return cold;
-    };
-    let envelope: OptimizerCheckpoint = match bincode::deserialize(&bytes) {
-        Ok(e) => e,
+    let env = match read_envelope(path, ArtifactKind::Optimizer) {
+        Ok(env) => env,
+        Err(EnvelopeError::Absent) => {
+            // Absent is the EXPECTED case for an older checkpoint, so info, not warn — a
+            // warm-continue of a policy with cold moments is normal, not a fault.
+            tracing::info!(
+                "No Adam optimizer state at {} — starting the optimizer cold",
+                path.display()
+            );
+            return cold;
+        }
         Err(e) => {
             warn!(
-                "Corrupt Adam optimizer state at {}: {e} — starting the optimizer cold",
+                "Refusing Adam optimizer state at {}: {e} — starting cold",
                 path.display()
             );
             return cold;
         }
     };
-    if envelope.version != OPTIMIZER_FORMAT_VERSION {
+    if env.arch != expected_arch {
         warn!(
-            "Adam optimizer state at {} is format v{}, this build writes v{} — starting cold",
+            "Refusing Adam optimizer state at {}: {} — starting cold",
             path.display(),
-            envelope.version,
-            OPTIMIZER_FORMAT_VERSION
+            EnvelopeError::ArchMismatch {
+                found: env.arch,
+                expected: expected_arch
+            }
         );
         return cold;
     }
-    match BinBytesRecorder::<FullPrecisionSettings>::default().load(envelope.record, device) {
+    match BinBytesRecorder::<FullPrecisionSettings>::default().load(env.payload, device) {
         Ok(record) => {
             tracing::info!("Restored Adam optimizer state from {}", path.display());
             cold.load_record(record)
@@ -305,95 +254,56 @@ pub(crate) fn load_optimizer<B: AutodiffBackend>(
     }
 }
 
-/// Persist the return normalizer's running stats (bincode, like the obs normalizer).
-/// A write failure is logged, not fatal — the run continues, only resume loses the
-/// scale.
-pub(crate) fn save_return_normalizer(norm: &ReturnNormalizer, path: &Path) {
-    match bincode::serialize(&norm.to_data()) {
-        Ok(bytes) => {
-            if let Err(e) = atomic_write(path, &bytes) {
-                warn!(
-                    "Failed to write return normalizer to {}: {e}",
-                    path.display()
-                );
-            }
+/// Persist the return normalizer's running stats inside a
+/// [`ArtifactKind::ReturnNormalizer`] envelope tagged with `arch` — the brain these value
+/// scales were trained against. A write failure is logged, not fatal — the run continues,
+/// only resume loses the scale.
+pub(crate) fn save_return_normalizer(norm: &ReturnNormalizer, arch: ArchId, path: &Path) {
+    let bytes = match bincode::serialize(&norm.to_data()) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Failed to serialize return normalizer: {e}");
+            return;
         }
-        Err(e) => warn!("Failed to serialize return normalizer: {e}"),
+    };
+    if let Err(e) = write_envelope(path, ArtifactKind::ReturnNormalizer, arch, bytes) {
+        warn!(
+            "Failed to write return normalizer to {}: {e}",
+            path.display()
+        );
     }
 }
 
-/// Load the return normalizer from a checkpoint, or `None` on a read/parse error or
-/// a corrupt (negative-M2) record — a missing/bad file leaves a fresh identity scale.
-pub(crate) fn load_return_normalizer(path: &Path) -> Option<ReturnNormalizer> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| {
-            warn!(
-                "Failed to read return normalizer from {}: {e}",
-                path.display()
-            )
-        })
-        .ok()?;
-    let data: ReturnNormalizerData = bincode::deserialize(&bytes)
-        .map_err(|e| {
-            warn!(
-                "Failed to deserialize return normalizer from {}: {e}",
-                path.display()
-            )
-        })
-        .ok()?;
-    ReturnNormalizer::from_data(data)
+/// Load the return normalizer from a checkpoint, refusing an envelope whose arch tag
+/// differs from `expected_arch` (the resumed brain's — normalizers are brain-PAIRED and
+/// must never load cross-arch, bddap/rl#200 §2). The caller applies the refusal policy:
+/// the trainer aborts rather than train warm weights against cold/mis-paired scales.
+pub(crate) fn load_return_normalizer(
+    path: &Path,
+    expected_arch: ArchId,
+) -> Result<ReturnNormalizer, EnvelopeError> {
+    let env = read_envelope(path, ArtifactKind::ReturnNormalizer)?;
+    if env.arch != expected_arch {
+        return Err(EnvelopeError::ArchMismatch {
+            found: env.arch,
+            expected: expected_arch,
+        });
+    }
+    let data: ReturnNormalizerData = bincode::deserialize(&env.payload)
+        .map_err(|e| EnvelopeError::Corrupt(format!("return normalizer payload: {e}")))?;
+    ReturnNormalizer::from_data(data).ok_or_else(|| {
+        EnvelopeError::Corrupt("return normalizer stats invalid (negative M2)".to_string())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bot::arch::ArchId;
     use crate::bot::sensor::OBS_SIZE;
     use crate::training::TrainBackend;
     use burn::backend::ndarray::NdArrayDevice;
     use burn::optim::{GradientsParams, Optimizer};
-    use burn::record::{BinFileRecorder, FullPrecisionSettings};
     use burn::tensor::Tensor;
-
-    /// The shape sidecar gates warm-starts: absent ⇒ never warm-start (a fresh dir or a
-    /// pre-guard checkpoint), matching widths ⇒ warm, differing widths ⇒ cold. This is the
-    /// guard that keeps a DOF change (bddap/rl#31) from loading an old-width brain into the
-    /// re-shaped net.
-    #[test]
-    fn shape_guard_gates_warm_start() {
-        let dir = std::env::temp_dir().join(format!("rl_test_shape_guard_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths = CheckpointDir::new(&dir);
-
-        // No sidecar yet ⇒ not warm-startable.
-        assert!(
-            !paths.warm_start_compatible(),
-            "absent sidecar must block warm start"
-        );
-
-        // After stamping the current widths ⇒ warm-startable.
-        paths.save_shape();
-        assert!(
-            paths.warm_start_compatible(),
-            "a sidecar matching the current widths must allow warm start"
-        );
-        let parsed = BrainShape::load(&paths.shape_path()).expect("sidecar parses");
-        assert_eq!(parsed, BrainShape::current());
-
-        // A sidecar from a different DOF count ⇒ blocked again.
-        std::fs::write(
-            paths.shape_path(),
-            format!("{} {}\n", OBS_SIZE + 1, ACTION_SIZE + 1),
-        )
-        .unwrap();
-        assert!(
-            !paths.warm_start_compatible(),
-            "a sidecar with different widths must block warm start"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn brain_checkpoint_round_trips() {
@@ -405,17 +315,12 @@ mod tests {
         let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
 
         let paths = CheckpointDir::new(&dir);
-        let stem = paths.brain_stem();
-        let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-        brain
-            .record_leaf(&recorder, stem.clone())
-            .expect("save brain");
-
+        save_brain(&brain, &paths.brain_file()).expect("save brain");
         assert!(paths.brain_file().exists(), "brain.bin should exist");
 
-        let loaded = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device)
-            .load_leaf_record(&recorder, stem, &device)
-            .expect("load brain");
+        let loaded = load_brain_file::<TrainBackend>(&paths.brain_file(), &device)
+            .expect("load brain via the arch-dispatching loader");
+        assert_eq!(loaded.arch(), ArchId::Mlp256, "arch restored from the tag");
 
         let test_obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
         let (orig_means, orig_log_std) = brain.policy(test_obs.clone());
@@ -436,6 +341,56 @@ mod tests {
             assert!((a - b).abs() < 1e-6, "log_std[{i}] diverged: {a} vs {b}");
         }
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A legacy (pre-envelope) brain file is REFUSED with the migrate-pointing verdict —
+    /// the loader has no untagged-read path, so the old quiet-rest-pose degrade on a raw
+    /// record is impossible by construction.
+    #[test]
+    fn legacy_brain_file_is_refused_not_blind_loaded() {
+        let dir = std::env::temp_dir().join("rl_test_brain_legacy_refuse");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let device = NdArrayDevice::Cpu;
+
+        // Exactly what a pre-envelope writer produced: the bare leaf record bytes.
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let raw = brain
+            .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
+            .unwrap();
+        let path = CheckpointDir::new(&dir).brain_file();
+        std::fs::write(&path, raw).unwrap();
+
+        match load_brain_file::<TrainBackend>(&path, &device) {
+            Err(BrainLoadError::Envelope(EnvelopeError::Legacy)) => {}
+            other => panic!("expected Legacy refusal, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn return_normalizer_round_trips_and_refuses_cross_arch() {
+        let dir = std::env::temp_dir().join("rl_test_retnorm_envelope");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = CheckpointDir::new(&dir).return_normalizer_path();
+
+        let norm = ReturnNormalizer::new();
+        save_return_normalizer(&norm, ArchId::Mlp256, &path);
+        assert!(
+            load_return_normalizer(&path, ArchId::Mlp256).is_ok(),
+            "matching arch loads"
+        );
+        // No second arch is registered yet, so the cross-arch refusal is exercised at the
+        // envelope layer instead: a WRONG-KIND read of the same file must refuse.
+        assert!(
+            matches!(
+                read_envelope(&path, ArtifactKind::ObsNormalizer),
+                Err(EnvelopeError::WrongKind { .. })
+            ),
+            "a return-normalizer envelope read as an obs normalizer must refuse by kind"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -484,14 +439,19 @@ mod tests {
         );
 
         let path = CheckpointDir::new(&dir).optimizer_path();
-        save_optimizer(&warm, &path);
+        save_optimizer(&warm, ArchId::Mlp256, &path);
         assert!(path.exists(), "optimizer.bin should be written");
 
         // A fresh cold optimizer loaded from the snapshot must take the NEXT step
         // identically to the warm one (same momentum + step/bias-correction), and
         // DIFFERENTLY from a truly cold optimizer — that difference is exactly the
         // self-correcting transient a warm resume avoids.
-        let restored = load_optimizer(crab_optimizer::<TrainBackend>(), &path, &device);
+        let restored = load_optimizer(
+            crab_optimizer::<TrainBackend>(),
+            &path,
+            &device,
+            ArchId::Mlp256,
+        );
         assert_eq!(
             restored.to_record().len(),
             warm.to_record().len(),
@@ -528,32 +488,52 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_unknown_optimizer_state_loads_cold_without_error() {
+    fn missing_legacy_or_miscopied_optimizer_state_loads_cold_without_error() {
         let dir = std::env::temp_dir().join("rl_test_adam_compat");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let device = NdArrayDevice::Cpu;
         let path = CheckpointDir::new(&dir).optimizer_path();
 
-        // (a) Absent file — a pre-rl#60 checkpoint. Loads cold, no panic/error.
+        // (a) Absent file — an older checkpoint. Loads cold, no panic/error.
         assert!(!path.exists());
-        let cold = load_optimizer(crab_optimizer::<TrainBackend>(), &path, &device);
+        let cold = load_optimizer(
+            crab_optimizer::<TrainBackend>(),
+            &path,
+            &device,
+            ArchId::Mlp256,
+        );
         assert!(
             cold.to_record().is_empty(),
             "an absent optimizer file must leave the optimizer cold"
         );
 
-        // (b) A file tagged with a version this build doesn't recognize (a future format)
-        //     is ignored rather than deserialized blind → cold, no panic.
-        let bogus = OptimizerCheckpoint {
-            version: OPTIMIZER_FORMAT_VERSION + 1,
-            record: vec![0xde, 0xad, 0xbe, 0xef],
-        };
-        std::fs::write(&path, bincode::serialize(&bogus).unwrap()).unwrap();
-        let cold2 = load_optimizer(crab_optimizer::<TrainBackend>(), &path, &device);
+        // (b) A legacy pre-envelope file (the old `OptimizerCheckpoint` bincode) has no
+        //     magic → refused, cold, no panic. The migrate tool is its only parser.
+        std::fs::write(&path, bincode::serialize(&(1u32, vec![0u8; 4])).unwrap()).unwrap();
+        let cold2 = load_optimizer(
+            crab_optimizer::<TrainBackend>(),
+            &path,
+            &device,
+            ArchId::Mlp256,
+        );
         assert!(
             cold2.to_record().is_empty(),
-            "an unknown-version optimizer file must leave the optimizer cold"
+            "a legacy optimizer file must leave the optimizer cold"
+        );
+
+        // (c) A mis-copied file — a BRAIN envelope at the optimizer path — fails the kind
+        //     check → cold, never decoded as moments.
+        write_envelope(&path, ArtifactKind::Brain, ArchId::Mlp256, vec![1, 2, 3]).unwrap();
+        let cold3 = load_optimizer(
+            crab_optimizer::<TrainBackend>(),
+            &path,
+            &device,
+            ArchId::Mlp256,
+        );
+        assert!(
+            cold3.to_record().is_empty(),
+            "a wrong-kind file must leave the optimizer cold"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

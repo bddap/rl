@@ -7,8 +7,8 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use burn::backend::ndarray::NdArrayDevice;
-use burn::module::{AutodiffModule, Module};
-use burn::record::{BinBytesRecorder, BinFileRecorder, FullPrecisionSettings, Recorder};
+use burn::module::AutodiffModule;
+use burn::record::{BinBytesRecorder, FullPrecisionSettings};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use tracing::{error, info, warn};
@@ -17,9 +17,11 @@ use crate::TrainConfig;
 use crate::bot::arch::{AnyBrain, ArchId};
 use crate::training::algorithm::{OuNoise, PpoConfig, ReturnNormalizer, RolloutBuffer};
 use crate::training::checkpoint::{
-    CheckpointDir, load_return_normalizer, save_brain_record, save_return_normalizer,
+    BrainLoadError, CheckpointDir, load_brain_file, load_return_normalizer, save_brain,
+    save_return_normalizer,
 };
 use crate::training::curriculum::TargetBand;
+use crate::training::envelope::EnvelopeError;
 use crate::training::normalizer::{
     IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
 };
@@ -119,6 +121,11 @@ pub(crate) struct TrainingState {
 
     pub(super) checkpoint_dir: PathBuf,
     pub(super) saved_on_exit: bool,
+
+    /// Whether the brain actually warm-started from the checkpoint dir at build time.
+    /// The optimizer's warm/cold gate ([`super::super::inproc`]): Adam moments are
+    /// per-parameter, so they resume iff the brain they belong to did.
+    warm_started: bool,
 
     /// Stop after this many physics ticks (0 = unlimited). See `Args::ticks`.
     pub(super) tick_budget: u64,
@@ -239,55 +246,82 @@ impl TrainingState {
         let mut return_normalizer = ReturnNormalizer::new();
 
         let paths = CheckpointDir::new(&config.checkpoint_dir);
-        let norm_path = paths.normalizer_path();
-        let ret_norm_path = paths.return_normalizer_path();
 
-        // Only warm-start the brain when the checkpoint's persisted obs/action widths
-        // match this build's. A DOF change (bddap/rl#31) re-shapes the policy net, and
-        // loading an old-width record into it would silently misalign every weight; the
-        // shape sidecar makes that a clean cold start instead (see `warm_start_compatible`).
-        if paths.brain_file().exists() {
-            if !paths.warm_start_compatible() {
-                warn!(
-                    "Checkpoint at {} has an incompatible obs/action shape (the actuated \
-                     DOF set changed) — starting the policy fresh",
-                    paths.brain_file().display()
-                );
-            } else {
-                let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-                match brain
-                    .clone()
-                    .load_leaf_record(&recorder, paths.brain_stem(), &device)
-                {
-                    Ok(loaded) => {
-                        brain = loaded;
-                        info!("Loaded brain weights from {}", paths.brain_file().display());
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Failed to load brain from {}: {e} — starting fresh",
-                            paths.brain_file().display()
-                        );
-                    }
+        // Warm-start from the checkpoint's envelope tag — the tag is AUTHORITATIVE for
+        // which architecture resumes (bddap/rl#200 §2/§3). The refusal policy here is
+        // ABORT, not cold-start: a present-but-unusable brain (legacy, corrupt, unknown
+        // arch/version, mis-copied) must never silently discard the trained policy of a
+        // live run by cold-starting over it. The ONE deliberate cold start is a DOF
+        // change (bddap/rl#31): same arch, but the checkpoint's obs/action widths — read
+        // from the loaded record via `io_dims`, the post-load check that replaced the
+        // `shape.txt` sidecar — no longer fit this build's rig, so the stale weights are
+        // discarded on purpose, loudly.
+        let mut warm_started = false;
+        match load_brain_file::<TrainBackend>(&paths.brain_file(), &device) {
+            Ok(loaded) => {
+                let (obs, action) = loaded.io_dims();
+                if crate::policy::dims_fit_rig(obs, action) {
+                    info!(
+                        "Loaded {} brain weights from {}",
+                        loaded.arch(),
+                        paths.brain_file().display()
+                    );
+                    brain = loaded;
+                    warm_started = true;
+                } else {
+                    warn!(
+                        "Checkpoint at {} has an incompatible obs/action shape ({obs}/{action}; \
+                         the actuated DOF set changed) — starting the policy fresh",
+                        paths.brain_file().display()
+                    );
                 }
             }
+            // No brain file: a fresh checkpoint dir — the legitimate cold start.
+            Err(BrainLoadError::Envelope(EnvelopeError::Absent)) => {}
+            Err(e) => panic!(
+                "REFUSING to train over checkpoint dir {}: brain checkpoint is unusable \
+                 ({e}). Cold-starting here would silently discard the trained policy; fix \
+                 or move the checkpoint before resuming.",
+                config.checkpoint_dir.display()
+            ),
         }
 
-        if norm_path.exists()
-            && let Some(loaded) = ObsNormalizer::load(&norm_path)
-        {
-            info!("Loaded normalizer state from {}", norm_path.display());
-            obs_normalizer = loaded;
-        }
-
-        if ret_norm_path.exists()
-            && let Some(loaded) = load_return_normalizer(&ret_norm_path)
-        {
-            info!(
-                "Loaded return normalizer state from {}",
-                ret_norm_path.display()
-            );
-            return_normalizer = loaded;
+        // Normalizers are brain-PAIRED: they load iff the brain warm-started, tagged with
+        // its arch (the dir-coherence check), and a warm brain with unusable normalizer
+        // stats is an ABORT — training trained weights against cold or mis-paired scales
+        // mis-normalizes every observation/value, the exact silent skew the envelope
+        // exists to refuse. On a cold start they stay fresh with the fresh brain.
+        if warm_started {
+            let arch = brain.arch();
+            let norm_path = paths.normalizer_path();
+            match ObsNormalizer::load(&norm_path, arch) {
+                Ok(loaded) => {
+                    info!("Loaded normalizer state from {}", norm_path.display());
+                    obs_normalizer = loaded;
+                }
+                Err(e) => panic!(
+                    "REFUSING to resume {}: obs normalizer at {} is unusable ({e}) — a \
+                     warm brain never trains against cold or mis-paired normalizer stats.",
+                    config.checkpoint_dir.display(),
+                    norm_path.display()
+                ),
+            }
+            let ret_norm_path = paths.return_normalizer_path();
+            match load_return_normalizer(&ret_norm_path, arch) {
+                Ok(loaded) => {
+                    info!(
+                        "Loaded return normalizer state from {}",
+                        ret_norm_path.display()
+                    );
+                    return_normalizer = loaded;
+                }
+                Err(e) => panic!(
+                    "REFUSING to resume {}: return normalizer at {} is unusable ({e}) — a \
+                     warm brain never trains against cold or mis-paired normalizer stats.",
+                    config.checkpoint_dir.display(),
+                    ret_norm_path.display()
+                ),
+            }
         }
 
         let n = config.envs.max(1) as usize;
@@ -310,6 +344,7 @@ impl TrainingState {
             rng,
             checkpoint_dir: config.checkpoint_dir.clone(),
             saved_on_exit: false,
+            warm_started,
             tick_budget: config.ticks,
             reported_episodes: 0,
             normalizer_increment,
@@ -323,6 +358,12 @@ impl TrainingState {
         }
     }
 
+    /// Whether the brain warm-started from the checkpoint dir at build time — the
+    /// optimizer's warm/cold gate.
+    pub(crate) fn warm_started(&self) -> bool {
+        self.warm_started
+    }
+
     pub(crate) fn save_checkpoint(&self) {
         if let Err(e) = std::fs::create_dir_all(&self.checkpoint_dir) {
             warn!(
@@ -332,28 +373,21 @@ impl TrainingState {
             return;
         }
 
+        // Every artifact is written atomically (temp + fsync-rename inside the envelope
+        // writer), tagged with THIS brain's arch, so a crash can't tear a file and the
+        // set can't cross-pair.
         let paths = CheckpointDir::new(&self.checkpoint_dir);
-        // Record to a temp stem then fsync-rename into place, so neither a process crash
-        // nor a power loss can leave a torn brain.bin (silently discarded on load → resume
-        // from random weights).
-        let brain_tmp_stem = paths.brain_tmp_stem();
-        match save_brain_record(self.brain.train(), brain_tmp_stem.clone()) {
-            Ok(()) => {
-                let tmp_file = brain_tmp_stem.with_extension("bin");
-                let final_file = paths.brain_file();
-                match crate::training::fsync_rename(&tmp_file, &final_file) {
-                    Ok(()) => info!("Saved brain to {}", final_file.display()),
-                    Err(e) => warn!("Failed to finalize brain checkpoint: {e}"),
-                }
-            }
+        let arch = self.brain.train().arch();
+        match save_brain(self.brain.train(), &paths.brain_file()) {
+            Ok(()) => info!("Saved brain to {}", paths.brain_file().display()),
             Err(e) => warn!("Failed to save brain: {e}"),
         }
-
-        self.obs_normalizer.save(&paths.normalizer_path());
-        save_return_normalizer(&self.return_normalizer, &paths.return_normalizer_path());
-        // Stamp the obs/action widths beside the brain so a later resume can reject a
-        // shape-incompatible warm start (bddap/rl#31) rather than load weights askew.
-        paths.save_shape();
+        self.obs_normalizer.save(arch, &paths.normalizer_path());
+        save_return_normalizer(
+            &self.return_normalizer,
+            arch,
+            &paths.return_normalizer_path(),
+        );
     }
 
     // ---- In-process rollout-thread / learner hooks ------------------------

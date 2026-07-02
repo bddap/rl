@@ -34,14 +34,14 @@ pub(crate) fn run(args: Args) -> Result<()> {
             "checkpoint-check: no brain.bin in {dir} (this binary's rig is {rig_obs} \
              obs, {rig_act} act) — nothing to ship",
         ),
-        RigFit::Unreadable => bail!(
-            "checkpoint-check: brain.bin in {dir} exists but won't deserialize (truncated or \
-             corrupt) — do not ship it",
-        ),
         RigFit::Mismatch(RigDims { obs, action }) => bail!(
             "checkpoint-check MISMATCH: {dir} is {obs} obs, {action} act but this binary's rig \
              is {rig_obs} obs, {rig_act} act — the NN crab would silently hold its rest pose. \
              Retrain/redeploy on the current rig (or rebuild the binary to match the checkpoint).",
+        ),
+        RigFit::Refused(why) => bail!(
+            "checkpoint-check REFUSED: {dir} — {why}. The runtime loader would refuse this \
+             checkpoint the same way, so it must not ship.",
         ),
     }
 }

@@ -23,13 +23,14 @@ pub(crate) const MATCH_SEED: u64 = 0x6372_6162; // "crab"
 /// An unusable checkpoint is a HARD, ACTIONABLE launch failure: the one giant crab IS the trained
 /// NN body ("Sally"), and there is no integer point-pursuer to fall back to, so rather than silently
 /// substituting a fake crab we refuse to launch with a message naming the dir and how to fix it.
-/// Three ways a checkpoint is unusable, all refused here: no `brain.bin` (rl#114), a corrupt one,
-/// and a brain built for a DIFFERENT rig (rl#199) — a wrong-rig brain passes an existence check
-/// but the runtime loader refuses to arm it, so letting launch proceed would ship an inert
-/// rest-pose Sally that looks frozen-but-fine. Same [`crab_world::play::checkpoint_fits_rig`]
-/// verdict the release/deploy gate (`checkpoint-check`) acts on, so launch and the gate can't
-/// disagree. This hard gate outranks `RL_RANDOM_POLICY` in the game binary — that diagnostic
-/// belongs to rl-demo, which loads checkpoints ungated.
+/// Three ways a checkpoint is unusable, all refused here: no `brain.bin` (rl#114), an
+/// envelope-refused one (corrupt/legacy/wrong-arch/mis-paired, rl#200), and a brain built for a
+/// DIFFERENT rig (rl#199) — a wrong-rig brain passes an existence check but the runtime loader
+/// refuses to arm it, so letting launch proceed would ship an inert rest-pose Sally that looks
+/// frozen-but-fine. Same [`crab_world::play::checkpoint_fits_rig`] verdict the release/deploy
+/// gate (`checkpoint-check`) acts on, so launch and the gate can't disagree. This hard gate
+/// outranks `RL_RANDOM_POLICY` in the game binary — that diagnostic belongs to rl-demo, which
+/// loads checkpoints ungated.
 pub(crate) fn nn_crab_checkpoint_dir(
     flag: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf> {
@@ -50,9 +51,10 @@ pub(crate) fn nn_crab_checkpoint_dir(
              it, and EVERY device needs the IDENTICAL brain + crab model), then relaunch.",
             dir.display()
         ),
-        RigFit::Unreadable => anyhow::bail!(
-            "brain.bin under {} exists but won't deserialize — likely a truncated or corrupt \
-             copy (interrupted deploy transfer). Redeploy the checkpoint, then relaunch.",
+        RigFit::Refused(why) => anyhow::bail!(
+            "checkpoint under {} was REFUSED — {why}. A truncated deploy copy needs a redeploy; \
+             a legacy (pre-envelope) checkpoint needs `rl-train migrate-checkpoint`. Fix the \
+             checkpoint, then relaunch.",
             dir.display()
         ),
         RigFit::Mismatch(RigDims { obs, action }) => {
@@ -105,9 +107,7 @@ pub(crate) fn resolve_render_mode(flag: Option<&str>) -> Result<net::render::Ren
     // The FULL preflight, not existence-only: a present-but-broken glb also forces the honest
     // colliders view, with the load error as the reason (bddap/rl#154). Same `usable_model` verdict
     // the body/silhouette flip on, so the render MODE can't disagree with the geometry drawn.
-    if !env_override
-        && let Err(reason) = crab_world::mesh_fallback::usable_model()
-    {
+    if !env_override && let Err(reason) = crab_world::mesh_fallback::usable_model() {
         // LOUD on the telemetry stream (and stderr). Shared with rl-demo so both surfaces name the
         // bad Sally identically (rl#706). The on-screen banner companion is spawned on the windowed
         // surface in `net::render::scene` (this headless-resolvable check decides only the render
