@@ -93,6 +93,12 @@ fn offscreen_app_scaffold() -> App {
     // step so the capture counter (render frames) also paces the sim and the GPU
     // pipeline warms over the same frames — mirrors play.rs's screenshot mode.
     app.add_plugins(crab_world::app_boot::base_plugins(None));
+    // The screenshot app has no menu: its round is installed before the first frame, so it is
+    // in [`AppPhase::Playing`] for its whole life (one boot-time enter, never an exit). Saying
+    // so keeps every Playing-gated system — the render-mode gizmos above all (rl#211) — on the
+    // ONE stock `in_state` idiom, fail-closed: were the state merely absent, `in_state` would
+    // silently return false and collider-view evidence shots would capture no cage.
+    app.insert_state(super::AppPhase::Playing);
     app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(
         Duration::from_secs_f64(1.0 / 60.0),
     ));

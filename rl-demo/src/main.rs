@@ -239,7 +239,9 @@ fn main() {
     } else {
         crab_world::crab_view::RenderMode::Colliders
     };
-    crab_world::crab_view::register(&mut app, initial_render_mode);
+    // Cage gate open always: the demo has no menu phase — it renders the round for its whole
+    // life, so there is no screen the gizmos could leak behind (the gate exists for GCR, rl#211).
+    crab_world::crab_view::register(&mut app, initial_render_mode, || true);
     // Joint-pivot markers: the companion diagnostic, drawn with the cage (the draw self-gates on
     // the render mode now — see `body::draw_pivot_markers`).
     bot::body::register_pivot_markers(&mut app);
