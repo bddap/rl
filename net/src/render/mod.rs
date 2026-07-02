@@ -10,9 +10,8 @@
 //! consumer that produces [`Input`]**. Rendering, the camera, mouse/gamepad input,
 //! and tween interpolation are ALL client-side and add ZERO nondeterminism — the
 //! only thing that ever crosses back into sim state is the per-tick [`Input`] each
-//! peer ships to the server (rl#151). Two peers running this client off the same input
-//! stream stay bit-identical because none of the code here touches the sim except through
-//! [`Lockstep::submit_local_input`].
+//! peer ships to the server (rl#151); none of the code here touches the sim except
+//! through [`Lockstep::submit_local_input`].
 //!
 //! How the three layers wire together:
 //! - **Lockstep** runs on a fixed-timestep accumulator ([`drive_lockstep`]) inside
