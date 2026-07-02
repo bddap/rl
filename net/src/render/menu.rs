@@ -360,7 +360,11 @@ fn apply_action(
                 f.cancel();
             }
             state.forming = None;
-            pending.0 = Some(menu::solo_round(state.seed));
+            // A solo round carries no formation verdict, so the gate structurally passes.
+            pending.0 = Some(
+                super::app::arm_round(menu::solo_round(state.seed))
+                    .expect("a solo round always arms (net is None — nothing to desync)"),
+            );
             next.set(AppPhase::Playing);
             true
         }
@@ -394,10 +398,11 @@ fn poll_formation(
         // `ready_from` is `None` only for Cancelled, which the barrier reports after
         // tearing its session down — return to the menu, no phantom left behind.
         Ok(match_result) => match menu::ready_from(match_result, state.seed) {
-            Some(ready) => match super::app::crab_arm_failure(&ready.net) {
-                // Armable (solo always; networked with synced weights+assets): park it and play.
-                None => {
-                    pending.0 = Some(ready);
+            Some(ready) => match super::app::arm_round(ready) {
+                // Armable (solo always; networked with synced weights+assets): park the PROOF
+                // (the only thing `PendingRound` accepts — rl#138) and play.
+                Ok(armed) => {
+                    pending.0 = Some(armed);
                     next.set(AppPhase::Playing);
                 }
                 // Unarmable networked round — peers disagree on the brain/colliders (rl#114). Don't
@@ -405,7 +410,7 @@ fn poll_formation(
                 // return to the chooser so the player SEES the failure and can fix it (run rl-update
                 // on every device). Deliberately NO silent integer-crab swap — the round refuses,
                 // loud and visible, exactly as rl#114 demands.
-                Some(msg) => {
+                Err(msg) => {
                     state.error = Some(msg);
                     next.set(AppPhase::Menu);
                 }

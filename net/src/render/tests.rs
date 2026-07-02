@@ -39,13 +39,16 @@ fn menu_handoff_installs_the_chosen_round() {
     app.world_mut().insert_resource(ExternalCrabStackInstalled);
 
     // Park a solo round (the same one the Solo button / Alone fallback produce) and ask
-    // to enter Playing, exactly as the menu does on a choice.
+    // to enter Playing, exactly as the menu does on a choice — through the arm gate, the
+    // only way to mint the ArmedRound proof PendingRound accepts (rl#138).
     let seed = 0x1234_5678;
+    let armed = super::app::arm_round(ReadyMatch {
+        lockstep: crate::formation::solo_lockstep_for(seed),
+        net: None,
+    })
+    .expect("a solo round always arms");
     app.world_mut()
-        .insert_non_send_resource(PendingRound(Some(ReadyMatch {
-            lockstep: crate::formation::solo_lockstep_for(seed),
-            net: None,
-        })));
+        .insert_non_send_resource(PendingRound(Some(armed)));
     app.world_mut()
         .resource_mut::<NextState<AppPhase>>()
         .set(AppPhase::Playing);
@@ -79,7 +82,7 @@ fn menu_handoff_installs_the_chosen_round() {
 
 /// An unarmable networked round (peers disagree on the brain/colliders) must drive the GRACEFUL
 /// refusal, NOT a crash and NOT a silent integer-crab swap (rl#115 + rl#114). The arm decision +
-/// operator message is the single [`super::app::crab_arm_failure_from`]; this pins that a solo or
+/// operator message is the single [`super::app::check_armable`]; this pins that a solo or
 /// fully-synced round arms (no message), while either mismatch REFUSES with an actionable message
 /// naming the cause and the fix — the value the menu's `poll_formation` gate returns to the chooser
 /// on instead of panicking. (The live 2-peer menu transition still needs on-device testing; the
@@ -87,21 +90,21 @@ fn menu_handoff_installs_the_chosen_round() {
 /// decision the gate is built on.)
 #[test]
 fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
-    use super::app::crab_arm_failure_from;
+    use super::app::check_armable;
     use crate::SyncVerdict;
     let synced = |weights, assets| Some(SyncVerdict { weights, assets });
     // Armable: solo always arms; a fully-synced networked round arms. No refusal, no message.
     assert!(
-        crab_arm_failure_from(None).is_none(),
+        check_armable(None).is_ok(),
         "solo (no net, no formation verdict) always arms"
     );
     assert!(
-        crab_arm_failure_from(synced(true, true)).is_none(),
+        check_armable(synced(true, true)).is_ok(),
         "a networked round with synced weights AND assets arms"
     );
     // A mismatched/absent brain refuses LOUD, naming the brain + the rl-update fix.
-    let brain = crab_arm_failure_from(synced(false, false))
-        .expect("an unsynced-weights networked round must refuse, not arm a fake crab");
+    let brain = check_armable(synced(false, false))
+        .expect_err("an unsynced-weights networked round must refuse, not arm a fake crab");
     assert!(brain.contains("brain.bin"), "names the brain mismatch: {brain}");
     assert!(
         brain.contains("rl-update"),
@@ -112,8 +115,8 @@ fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
         "the round REFUSES (no silent integer fallback): {brain}"
     );
     // Brain agrees but the colliders differ: refuse with the collider cause.
-    let colliders = crab_arm_failure_from(synced(true, false))
-        .expect("an unsynced-assets networked round must refuse, not arm a fake crab");
+    let colliders = check_armable(synced(true, false))
+        .expect_err("an unsynced-assets networked round must refuse, not arm a fake crab");
     assert!(
         colliders.contains("sally.glb"),
         "names the collider mismatch: {colliders}"
