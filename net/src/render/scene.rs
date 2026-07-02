@@ -441,6 +441,10 @@ pub(super) fn apply_transforms(
     // Player avatars: lerp position and yaw from the previous snapshot to now.
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
         let Some(now) = sim.player(avatar.0) else {
+            // No sim player behind this avatar: the player DEPARTED mid-match (rl#198 — the
+            // adopted snapshot no longer carries them). Hide the capsule rather than leave it
+            // frozen at their last pose; a rejoiner reusing the freed PlayerId un-hides it.
+            *vis = Visibility::Hidden;
             continue;
         };
         let prev = state.prev.players.get(&avatar.0).copied().unwrap_or(now);

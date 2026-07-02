@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use iroh::endpoint::{Connection, RecvStream, SendStream, presets};
+use iroh::endpoint::{
+    Connection, IdleTimeout, QuicTransportConfig, RecvStream, SendStream, presets,
+};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointId};
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
@@ -344,8 +346,22 @@ pub async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
     // endpoint never reaches the internet, then mDNS is the sole address lookup. (The
     // `N0` preset would attach n0's DNS/pkarr publisher and a relay — internet
     // dependencies we don't want for couch co-op.)
+    //
+    // Keep-alive + a short idle timeout so a SILENTLY-dead peer (crash, cable pull — no QUIC
+    // close on the wire) is detected in seconds, not iroh's ~30s default: the timeout kills the
+    // connection, the reader EOFs, the link is evicted, and the host DEPARTS the player
+    // (rl#198) instead of stalling the match on its missing inputs. A graceful exit closes the
+    // connection immediately and never needs this. Keep-alives are a packet a second per peer —
+    // nothing at couch scale.
+    let transport = QuicTransportConfig::builder()
+        .keep_alive_interval(Duration::from_secs(1))
+        .max_idle_timeout(Some(
+            IdleTimeout::try_from(Duration::from_secs(5)).expect("constant timeout fits"),
+        ))
+        .build();
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
+        .transport_config(transport)
         .bind()
         .await
         .context("binding iroh endpoint")?;
@@ -401,17 +417,34 @@ async fn wait_for_direct_addr(endpoint: &Endpoint) -> Result<()> {
     }
 }
 
-/// A peer's outbound send half, shared (behind an async mutex) between the frame writers and the
-/// eviction paths. Cloned Arc identity (`ptr_eq`) is how [`drop_if_same`] tells a stale link from a
-/// reconnect's replacement.
-type Link = Arc<tokio::sync::Mutex<SendStream>>;
+/// One queued outbound frame. The body is `Arc`'d so a broadcast encodes once and every peer's
+/// queue shares the same bytes.
+struct OutFrame {
+    kind: Frame,
+    body: Arc<[u8]>,
+}
+
+/// A peer's outbound frame queue: the caller ENQUEUES (never awaits a network write) and the
+/// per-link writer task spawned in [`wire_connection`] owns the [`SendStream`] — so a dead or
+/// backpressured peer can never block the caller, which on the windowed host is the bevy main
+/// thread inside `block_on` (the rl#198 freeze). Unbounded on purpose: growth is bounded by the
+/// QUIC idle timeout killing a dead connection (the write then errors and the link is evicted),
+/// and dropping frames instead would silently starve a live peer of state. `Arc`'d so cloned
+/// identity (`Weak::ptr_eq`) is how [`drop_if_same`] tells a stale link from a reconnect's
+/// replacement — and so dropping the map entry closes the channel, which is what tells the writer
+/// task to exit.
+type Link = Arc<mpsc::UnboundedSender<OutFrame>>;
+
+/// The identity handle the reader/writer tasks keep for eviction: weak, so a task holding it
+/// doesn't keep its own channel (and hence itself) alive after the link is replaced or removed.
+type LinkId = std::sync::Weak<mpsc::UnboundedSender<OutFrame>>;
 
 /// The per-peer outbound link table, shared by the accept path, the discovery dialer, and every
 /// reader task.
 type Links = Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>;
 
-/// Half a peer link: a [`TickMsg`] sender. The receive side feeds a shared mpsc
-/// channel that [`Session`] owns, so the caller polls one queue for all peers.
+/// Half a peer link: a frame queue into the peer's writer task. The receive side feeds a shared
+/// mpsc channel that [`Session`] owns, so the caller polls one queue for all peers.
 #[derive(Clone, Debug)]
 struct PeerLink {
     send: Link,
@@ -490,7 +523,7 @@ impl Session {
     /// the server link stalls the client, the correct visible failure. No link to `peer` is a no-op.
     pub(crate) async fn send<M: Codec>(&self, peer: EndpointId, msg: &M) {
         let bytes = msg.encode();
-        self.send_frame(peer, M::KIND, bytes.as_ref()).await;
+        self.send_frame(peer, M::KIND, bytes.as_ref().into()).await;
     }
 
     /// Frame `msg` and send it to every connected peer — the single fan-out primitive (a
@@ -499,7 +532,7 @@ impl Session {
     /// [`Session::broadcast_frame`], never blocking the others.
     pub(crate) async fn broadcast<M: Codec>(&self, msg: &M) {
         let bytes = msg.encode();
-        self.broadcast_frame(M::KIND, bytes.as_ref()).await;
+        self.broadcast_frame(M::KIND, bytes.as_ref().into()).await;
     }
 
     /// Ship our per-tick input UP to the one server — the headless `net` harness's unicast
@@ -527,49 +560,26 @@ impl Session {
         self.broadcast(articulation).await;
     }
 
-    /// Frame `body` with `kind` + length and send it to one `peer` (the unicast analogue of
-    /// [`Self::broadcast_frame`]). A send failure drops that link — the same policy as the broadcast
-    /// path. No link to `peer` is a no-op (surfaced as the higher-level stall, not a panic).
-    async fn send_frame(&self, peer: EndpointId, kind: Frame, body: &[u8]) {
-        let send = {
-            let links = self.links.lock().await;
-            links.get(&peer).map(|l| l.send.clone())
-        };
-        let Some(send) = send else { return };
-        let mut s = send.lock().await;
-        if let Err(e) = write_frame(&mut s, kind, body).await {
-            tracing::warn!(%peer, ?kind, "sending frame to peer failed: {e:#}");
-            drop(s);
-            drop_if_same(&self.links, peer, &send).await;
+    /// Frame `body` with `kind` and queue it to one `peer` (the unicast analogue of
+    /// [`Self::broadcast_frame`]). ENQUEUE-only — the peer's writer task performs the network
+    /// write, so this never blocks on the peer; a write failure surfaces there and drops the
+    /// link. No link to `peer` (or a writer already dead) is a no-op (surfaced as the
+    /// higher-level stall, not a panic).
+    async fn send_frame(&self, peer: EndpointId, kind: Frame, body: Arc<[u8]>) {
+        let links = self.links.lock().await;
+        if let Some(link) = links.get(&peer) {
+            let _ = link.send.send(OutFrame { kind, body });
         }
     }
 
-    /// Frame `body` with `kind` + length and send it to every connected peer. A send
-    /// failure on one link is logged and the link dropped — a dead peer must not block
-    /// the others (the lockstep stall on its missing input, or its expiry from the
-    /// barrier, is the correct visible failure).
-    async fn broadcast_frame(&self, kind: Frame, body: &[u8]) {
-        // Snapshot the send halves under the map lock, then RELEASE it before any
-        // network write. Holding the map lock across `write_frame().await` would let
-        // one backpressured peer stall every other map user (link insert/remove,
-        // connected_peers); the per-`send` mutex still serializes that peer's frames.
-        let targets: Vec<(EndpointId, Link)> = {
-            let links = self.links.lock().await;
-            links
-                .iter()
-                .map(|(id, link)| (*id, link.send.clone()))
-                .collect()
-        };
-        let mut dead = Vec::new();
-        for (id, send) in targets {
-            let mut s = send.lock().await;
-            if let Err(e) = write_frame(&mut s, kind, body).await {
-                tracing::warn!(%id, "peer send failed, dropping link: {e:#}");
-                dead.push((id, send.clone()));
-            }
-        }
-        for (id, failed_send) in dead {
-            drop_if_same(&self.links, id, &failed_send).await;
+    /// Frame `body` with `kind` and queue it to every connected peer. ENQUEUE-only, like
+    /// [`Self::send_frame`]: a dead peer's write failure surfaces in its writer task (which drops
+    /// the link) and can never block the others — nor the caller, which on the windowed host is
+    /// the game's main thread (rl#198).
+    async fn broadcast_frame(&self, kind: Frame, body: Arc<[u8]>) {
+        let links = self.links.lock().await;
+        for link in links.values() {
+            let _ = link.send.send(OutFrame { kind, body: body.clone() });
         }
     }
 
@@ -726,11 +736,28 @@ async fn wire_connection(
         anyhow::ensure!(h[0] == HELLO, "bad stream-open byte {:#x}", h[0]);
     }
 
-    let send = Arc::new(tokio::sync::Mutex::new(send));
-    links
-        .lock()
-        .await
-        .insert(peer, PeerLink { send: send.clone() });
+    let (tx, mut rx) = mpsc::unbounded_channel::<OutFrame>();
+    let tx = Arc::new(tx);
+    let link_id: LinkId = Arc::downgrade(&tx);
+    // Replacing an existing entry drops the old link's only strong Arc, which closes the old
+    // channel — the old writer task then drains, exits, and drops its (old-connection) stream.
+    links.lock().await.insert(peer, PeerLink { send: tx });
+
+    // Writer: the ONE owner of the send stream. Draining the queue here (instead of the caller
+    // awaiting the write) is what keeps a dead/backpressured peer from ever blocking the game
+    // thread (rl#198); a write failure evicts the link, and the reader EOF below (or a
+    // roster-level departure) is how the rest of the system learns the peer is gone.
+    let links_for_writer = links.clone();
+    let writer_id = link_id.clone();
+    tokio::spawn(async move {
+        while let Some(f) = rx.recv().await {
+            if let Err(e) = write_frame(&mut send, f.kind, &f.body).await {
+                tracing::warn!(%peer, "peer send failed, dropping link: {e:#}");
+                break;
+            }
+        }
+        drop_if_same(&links_for_writer, peer, &writer_id).await;
+    });
 
     let links_for_reader = links.clone();
     tokio::spawn(async move {
@@ -739,7 +766,7 @@ async fn wire_connection(
         }
         // Peer's stream closed → drop its link so broadcast stops targeting it (reconnect-safe: a
         // late EOF from a link a reconnect already replaced must not evict the fresh one).
-        drop_if_same(&links_for_reader, peer, &send).await;
+        drop_if_same(&links_for_reader, peer, &link_id).await;
     });
     Ok(())
 }
@@ -793,11 +820,14 @@ async fn read_loop(
 }
 
 /// Evict `id`'s link, but ONLY if it is still `failed` — a reconnect may have replaced the link for
-/// this id since the write began, and the fresh link must survive a late failure/EOF from the stale
-/// one. The single link-eviction path, shared by unicast send, broadcast fan-out, and reader EOF.
-async fn drop_if_same(links: &Links, id: EndpointId, failed: &Link) {
+/// this id since the failure, and the fresh link must survive a late failure/EOF from the stale
+/// one. The single link-eviction path, shared by the writer (send failure) and reader (EOF) tasks.
+async fn drop_if_same(links: &Links, id: EndpointId, failed: &LinkId) {
     let mut links = links.lock().await;
-    if links.get(&id).is_some_and(|l| Arc::ptr_eq(&l.send, failed)) {
+    if links
+        .get(&id)
+        .is_some_and(|l| std::sync::Weak::ptr_eq(&Arc::downgrade(&l.send), failed))
+    {
         links.remove(&id);
     }
 }

@@ -245,6 +245,19 @@ impl Server {
                 self.sim.spawn_joining_player(pid);
             }
         }
+        // The departure mirror (rl#198): a sim player NOT rostered at THIS tick has left
+        // ([`Server::depart`] shrank the roster when its link died) — remove it from the live world
+        // before stepping, so this tick's input set (which no longer carries it) matches the sim's
+        // participant set and the snapshot broadcasts the removal to every client.
+        let departed: Vec<PlayerId> = self
+            .sim
+            .players()
+            .map(|(pid, _)| pid)
+            .filter(|pid| !self.roster.at(tick).contains(pid))
+            .collect();
+        for pid in departed {
+            self.sim.despawn_departed_player(pid);
+        }
         let (queued_tick, inputs) = self
             .pending_step
             .pop_front()
@@ -272,7 +285,8 @@ impl Server {
         }
     }
 
-    /// The current roster (sorted) — the latest scheduled set. Grows on [`Server::admit`].
+    /// The current roster (sorted) — the latest scheduled set. Grows on [`Server::admit`], shrinks
+    /// on [`Server::depart`].
     pub fn roster(&self) -> &[PlayerId] {
         self.roster.current()
     }
@@ -302,6 +316,46 @@ impl Server {
             effective_tick,
             roster: self.roster.at(effective_tick).to_vec(),
         }
+    }
+
+    /// Remove a departed client from the match (bddap/rl#198) — the inverse of [`Server::admit`],
+    /// called by the host when a rostered peer's link dies. Without this the ledger waits FOREVER
+    /// on the departed player's next input and the authoritative sim never ticks again: the
+    /// host-freezes-on-player-exit hang. Schedules the shrunk roster at the earliest legal tick
+    /// (the emit cursor, or just past any already-scheduled change), then:
+    ///
+    /// - BACKFILLS a neutral input for the departed player on any still-pending tick before the
+    ///   boundary (its real input, if already ledgered, wins). Under host-authority this cannot
+    ///   desync anyone — the server is the one stepper and clients adopt its snapshots — it just
+    ///   lets the ticks the departed player still gates complete instead of stalling the match
+    ///   (the rl#105 fail-loud rule guarded the peer-symmetric lockstep, where a fabricated input
+    ///   diverged peers; there are no symmetric steppers anymore).
+    /// - SCRUBS any input it pre-filed at/after the boundary, so no stray non-rostered entry rides
+    ///   an emitted [`TickSet`].
+    ///
+    /// Returns the [`TickSet`]s this releases (the departed player was usually exactly what the
+    /// cursor tick was waiting on), for [`enqueue_for_step`](Server::enqueue_for_step) like any
+    /// `record`. The sim-side removal happens in [`step_next`](Server::step_next), derived from the
+    /// roster schedule — one source, same as the join spawn. A pid not in the current roster is a
+    /// no-op (a double departure report).
+    #[must_use = "the released sets feed this server's own authoritative step (enqueue_for_step), or ticks never advance"]
+    pub fn depart(&mut self, pid: PlayerId) -> Vec<TickSet> {
+        let current = self.roster.current();
+        if !current.contains(&pid) {
+            return Vec::new();
+        }
+        let remaining: Vec<PlayerId> = current.iter().copied().filter(|p| *p != pid).collect();
+        let effective_tick = self.next_emit.max(self.roster.latest_change_tick() + 1);
+        self.roster.schedule_change(effective_tick, &remaining);
+        for t in self.next_emit..effective_tick {
+            if self.roster.at(t).contains(&pid) {
+                self.ledger.entry(t).or_default().entry(pid).or_default();
+            }
+        }
+        for (_, inputs) in self.ledger.range_mut(effective_tick..) {
+            inputs.remove(&pid);
+        }
+        self.drain_complete()
     }
 
     /// The lowest [`PlayerId`] not in the current roster — the stable allocation `admit` hands a
@@ -520,6 +574,139 @@ mod tests {
         );
         assert_eq!(sets.len(), 1, "the roster still completes on its own input");
         assert_eq!(sets[0].inputs.len(), 1, "no stranger leaked into the set");
+    }
+
+    /// The rl#198 hang, distilled: two players, one departs mid-round with the cursor tick waiting
+    /// on its input. Before `depart` the tick can never complete (the host freezes forever);
+    /// `depart` releases it and every later tick completes on the remaining player alone.
+    #[test]
+    fn depart_releases_the_stalled_tick_and_the_match_continues() {
+        let mut s = srv(42, &ids(2));
+        // P0 (the host) files tick 0; P1 never will — the exact freeze state.
+        let none = s.record(PlayerId(0), tickmsg(0, 1.0));
+        assert!(none.is_empty(), "tick 0 stalls on the departed player's input");
+        // P1's link dies. Departure releases tick 0 with a neutral backfill for P1.
+        let sets = s.depart(PlayerId(1));
+        assert_eq!(sets.len(), 1, "the stalled tick releases on departure");
+        assert_eq!(sets[0].apply_tick, 0);
+        assert_eq!(sets[0].inputs[&PlayerId(1)], Input::default(), "missing input backfilled neutral");
+        assert_eq!(s.roster(), &[PlayerId(0)], "the roster shrank");
+        // From here the match ticks on the host alone — no trace of the departed player.
+        for t in 1..5 {
+            let sets = s.record(PlayerId(0), tickmsg(t, 1.0));
+            assert_eq!(sets.len(), 1, "post-departure ticks complete on the survivor alone");
+            assert!(!sets[0].inputs.contains_key(&PlayerId(1)), "no stray departed entry");
+        }
+    }
+
+    /// The departure boundary is the emit cursor: a departed player's PRE-FILED not-yet-emitted
+    /// inputs are scrubbed, and every tick from the cursor on completes (and emits) without its
+    /// entry — no stray non-rostered input ever rides a [`TickSet`].
+    #[test]
+    fn depart_scrubs_prefiled_future_inputs() {
+        let mut s = srv(42, &ids(2));
+        // Both file tick 0 (completes; cursor moves to 1). P1 pre-files ticks 1 and 3, then leaves.
+        let _ = s.record(PlayerId(0), tickmsg(0, 0.0));
+        let _ = s.record(PlayerId(1), tickmsg(0, 0.0));
+        let _ = s.record(PlayerId(1), tickmsg(1, -1.0));
+        let _ = s.record(PlayerId(1), tickmsg(3, 1.0));
+        let sets = s.depart(PlayerId(1));
+        assert!(sets.is_empty(), "the cursor tick still awaits the survivor's input");
+        for t in 1..5 {
+            let sets = s.record(PlayerId(0), tickmsg(t, 0.5));
+            assert_eq!(sets.len(), 1, "each tick completes on the survivor alone");
+            assert_eq!(
+                sets[0].inputs.keys().collect::<Vec<_>>(),
+                vec![&PlayerId(0)],
+                "the departed player's pre-filed input was scrubbed, not emitted"
+            );
+        }
+    }
+
+    /// A departure while a JOIN is still pending lands past the join boundary (roster changes are
+    /// append-only), and the gap ticks — which still roster the leaver — are neutral-backfilled so
+    /// the match crosses the boundary instead of stalling on a player who will never file again.
+    #[test]
+    fn depart_with_a_pending_join_backfills_the_gap() {
+        let mut s = srv(42, &ids(2));
+        let adm = s.admit(); // P2 joins at adm.effective_tick (= JOIN_LEAD, nothing emitted yet)
+        let sets = s.depart(PlayerId(1));
+        assert!(sets.is_empty(), "every tick still awaits P0 (and later the joiner)");
+        assert_eq!(
+            s.roster(),
+            &[PlayerId(0), PlayerId(2)],
+            "the final roster is survivor + joiner"
+        );
+        // Ticks before the join boundary complete on P0 alone (P1 backfilled neutral).
+        for t in 0..adm.effective_tick {
+            let sets = s.record(PlayerId(0), tickmsg(t, 0.0));
+            assert!(
+                sets.iter().any(|set| set.apply_tick == t
+                    && set.inputs[&PlayerId(1)] == Input::default()),
+                "a pre-boundary tick emits with the leaver neutral-backfilled"
+            );
+        }
+        // The join tick (still pre-departure-boundary: the removal lands just past the pending
+        // join) needs the joiner, and carries the leaver's neutral backfill one last time.
+        let _ = s.record(PlayerId(0), tickmsg(adm.effective_tick, 0.0));
+        let sets = s.record(PlayerId(2), tickmsg(adm.effective_tick, 0.0));
+        assert!(
+            sets.iter().any(|set| set.apply_tick == adm.effective_tick
+                && set.inputs.len() == 3
+                && set.inputs[&PlayerId(1)] == Input::default()),
+            "the join tick emits with all three (the leaver backfilled)"
+        );
+        // From the departure boundary the leaver gates (and rides) nothing.
+        let t = adm.effective_tick + 1;
+        let _ = s.record(PlayerId(0), tickmsg(t, 0.0));
+        let sets = s.record(PlayerId(2), tickmsg(t, 0.0));
+        assert!(
+            sets.iter().any(|set| set.apply_tick == t
+                && set.inputs.len() == 2
+                && !set.inputs.contains_key(&PlayerId(1))),
+            "past the boundary ticks emit on survivor + joiner alone"
+        );
+    }
+
+    /// Departing frees the [`PlayerId`] for a later joiner (`admit` allocates the lowest free id),
+    /// and a double departure report is a harmless no-op.
+    #[test]
+    fn depart_is_idempotent_and_frees_the_pid() {
+        let mut s = srv(42, &ids(2));
+        let _ = s.record(PlayerId(0), tickmsg(0, 0.0));
+        let first = s.depart(PlayerId(1));
+        assert_eq!(first.len(), 1, "departure releases the stalled tick");
+        assert!(s.depart(PlayerId(1)).is_empty(), "a repeat departure is a no-op");
+        assert!(s.depart(PlayerId(9)).is_empty(), "departing a stranger is a no-op");
+        assert_eq!(s.roster(), &[PlayerId(0)]);
+        let adm = s.admit();
+        assert_eq!(adm.pid, PlayerId(1), "the departed id is free for the next joiner");
+    }
+
+    /// The sim side of departure (rl#198): stepping through the departure boundary DESPAWNS the
+    /// leaver from the authoritative world — the snapshot no longer carries it (clients adopt the
+    /// removal), the round keeps its live tick (no reset), and the survivor plays on.
+    #[test]
+    fn stepping_through_a_departure_despawns_the_player() {
+        use crate::snapshot::CoreSnapshot;
+        let mut s = srv(42, &ids(2));
+        // Tick 0 completes with both players; step it.
+        let _ = s.record(PlayerId(0), tickmsg(0, 0.0));
+        let sets = s.record(PlayerId(1), tickmsg(0, 0.0));
+        s.enqueue_for_step(&sets);
+        let snap = CoreSnapshot::from_bytes(&s.step_next(None)).expect("snapshot decodes");
+        assert!(snap.players.contains_key(&PlayerId(1)), "both play tick 0");
+        // P1 departs; the survivor drives the next ticks alone.
+        let sets = s.depart(PlayerId(1));
+        assert!(sets.is_empty(), "tick 1 awaits the survivor");
+        let sets = s.record(PlayerId(0), tickmsg(1, 1.0));
+        s.enqueue_for_step(&sets);
+        let snap = CoreSnapshot::from_bytes(&s.step_next(None)).expect("snapshot decodes");
+        assert_eq!(snap.tick, 2, "the round kept its live tick — departure never resets");
+        assert!(!snap.players.contains_key(&PlayerId(1)), "the leaver is despawned");
+        assert!(!snap.roster.contains(&PlayerId(1)), "the wire roster shrank");
+        assert!(!s.sim().has_player(PlayerId(1)), "the authoritative sim dropped it");
+        assert!(s.sim().has_player(PlayerId(0)), "the survivor plays on");
     }
 
     /// `admit` allocates the lowest free [`PlayerId`] and NEVER renumbers an existing one — the
