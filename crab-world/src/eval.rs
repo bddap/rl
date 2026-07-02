@@ -38,10 +38,8 @@ use crate::bot::headless::{
 use crate::bot::sensor::{CrabObservation, CrabTargets};
 use crate::bot::{BotSet, CrabSpawns};
 use crate::policy::Policy;
-use crate::training::targets::{
-    REACH_RADIUS, TARGET_ARENA_HALF, TARGET_Y_MAX, TARGET_Y_MIN,
-};
 use crate::training::reward::dist_3d;
+use crate::training::targets::{REACH_RADIUS, TARGET_ARENA_HALF, TARGET_Y_MAX, TARGET_Y_MIN};
 
 /// The default FAR target distance (planar metres from the crab's spawn): the far edge of the
 /// FIXED training band ([`TARGET_ARENA_HALF`]) — the hardest target still IN the distribution the

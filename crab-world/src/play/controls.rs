@@ -217,7 +217,6 @@ impl ControlInput for DemoControls {
     }
 }
 
-
 /// THE demo binding table. The tap verbs DISPATCH from it (via
 /// [`crate::controls::just_pressed`]); only the analog rows (Orbit/Zoom in
 /// `cameras::orbit_camera`, PickJoint/Torque in `manual_control`) are read directly and

@@ -14,8 +14,8 @@ use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns};
 use crate::training::algorithm::NormalizedValue;
-use crate::training::targets::seed_target;
 use crate::training::reward::{EFFORT_WEIGHT, action_effort, dist_3d, planar_dist};
+use crate::training::targets::seed_target;
 
 use super::lifecycle::{EnvEpisode, EnvPhase};
 use super::state::TrainingState;

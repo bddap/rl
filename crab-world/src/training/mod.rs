@@ -21,7 +21,6 @@ use burn::backend::ndarray::NdArray;
 pub mod algorithm;
 pub mod best;
 pub mod checkpoint;
-pub mod targets;
 pub(crate) mod envelope;
 #[cfg(feature = "wgpu")]
 pub mod gpu;
@@ -29,6 +28,7 @@ pub mod inproc;
 pub mod normalizer;
 pub mod reward;
 pub mod systems;
+pub mod targets;
 pub mod update;
 
 /// Backend type aliases — the foundational training types every other module builds on.

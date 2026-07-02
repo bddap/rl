@@ -8,8 +8,8 @@ use bevy::prelude::*;
 use crate::bot::CrabSpawns;
 use crate::bot::body::{self, CrabClawTip};
 use crate::bot::sensor::CrabTargets;
-use crate::training::targets::sample_target;
 use crate::training::reward::dist_3d;
+use crate::training::targets::sample_target;
 
 /// Marker on the demo's red target ball — the visible stand-in for the target the
 /// policy is reaching for. Demo-only: training renders nothing and reads the target

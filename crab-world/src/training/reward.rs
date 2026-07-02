@@ -351,9 +351,7 @@ mod tests {
 
     #[test]
     fn grab_bonus_dominates_a_near_band_traverse() {
-        use crate::training::targets::{
-            BAND_START_MIN, REACH_RADIUS, TARGET_ARENA_HALF,
-        };
+        use crate::training::targets::{BAND_START_MIN, REACH_RADIUS, TARGET_ARENA_HALF};
         // The sparse terminal grab must be the clearly-dominant outcome of a NEAR-band episode
         // (so closing the last stretch and touching the target beats anything the dense progress
         // shaping alone pays on the way), yet the far-band JOURNEY must still out-earn the bonus
