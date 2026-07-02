@@ -99,7 +99,7 @@ pub(crate) fn action_effort(drives: &[f32; ACTION_SIZE]) -> f32 {
 /// * closing toward the goal pays a strong dense signal at every distance — the ONLY
 ///   cross-arena signal now that the per-tick reach integral is gone, the shaping that
 ///   carries the body to within grab range near and far. Counting the 0.8 m grab radius
-///   (`curriculum::CURRICULUM_REACH_RADIUS`), a SUCCESSFUL episode only closes to grab range, not
+///   (`targets::REACH_RADIUS`), a SUCCESSFUL episode only closes to grab range, not
 ///   to d = 0: a near-band success (1.5 m start) earns ≈ 24·(1.5−0.8) = 17 progress, a far-band
 ///   one (9 m) ≈ 24·(9−0.8) ≈ 197. (The bare geometric `24·distance` — 36, 216 — overstates this:
 ///   no episode closes the last 0.8 m, since the grab terminates it first.) The sparse
@@ -132,13 +132,13 @@ const MAX_PROGRESS_STEP_M: f32 = 0.5;
 /// header). Applied at the episode boundary in `systems::finalize_transitions`, NOT inside
 /// [`compute_reward`] (the per-tick continuous reward): a claw tip within the grab radius adds
 /// this to the grabbing transition's reward and ends the episode as a TRUE terminal. The radius
-/// is the SINGLE `curriculum::CURRICULUM_REACH_RADIUS`, shared with the curriculum "reached"
+/// is the SINGLE `targets::REACH_RADIUS`, shared with the per-episode "reached"
 /// signal and the demo ball-hop, so no second radius can drift and a grab implies a reached
 /// episode.
 ///
 /// **Scale (relative to the progress a SUCCESSFUL episode actually earns —
 /// `PROGRESS_WEIGHT·(distance − grab_radius)`, since a grab terminates the episode at the 0.8 m
-/// `curriculum::CURRICULUM_REACH_RADIUS`, not at d = 0).** A near-band success (1.5 m) earns
+/// `targets::REACH_RADIUS`, not at d = 0).** A near-band success (1.5 m) earns
 /// ≈ 17 progress to arrive, a far-band one (9 m) ≈ 197. 50 makes a grab the clearly-DOMINANT
 /// outcome of a near-band episode (success ≈ 67, the grab ~75 %) — the dense approach (≈ 17) is
 /// still a meaningful, non-trivial signal that carries the body there, not noise — while at the
@@ -199,7 +199,7 @@ pub(crate) fn compute_reward(distance_closed: Option<f32>, effort: f32) -> f32 {
 
 /// Planar (XZ) distance between two world points. The carapace→target distance the progress
 /// term is the per-tick reduction OF (and the carapace→spawn drift diagnostic, and the
-/// curriculum band) — all DEFINED on the floor plane. NOT the grab test's `d` (that is the
+/// target band) — all DEFINED on the floor plane. NOT the grab test's `d` (that is the
 /// 3D [`dist_3d`], so lowering a claw onto a low target counts).
 pub(crate) fn planar_dist(a: Vec3, b: Vec3) -> f32 {
     let d = a - b;
@@ -209,7 +209,7 @@ pub(crate) fn planar_dist(a: Vec3, b: Vec3) -> f32 {
 /// Full 3D euclidean distance between two world points — the grab test's `d` (claw tip →
 /// target). 3D (not planar) so lowering a claw onto a low ball counts: a ground-only `d` would
 /// treat a tip hovering a metre above the target as a grab. `pub(crate)` so the demo's
-/// reached-test (`play::target_ball`) measures the SAME `d` the grab/curriculum does.
+/// reached-test (`play::target_ball`) measures the SAME `d` the grab/reached signal does.
 pub(crate) fn dist_3d(a: Vec3, b: Vec3) -> f32 {
     (a - b).length()
 }
@@ -351,8 +351,8 @@ mod tests {
 
     #[test]
     fn grab_bonus_dominates_a_near_band_traverse() {
-        use crate::training::curriculum::{
-            BAND_START_MIN, CURRICULUM_REACH_RADIUS, TARGET_ARENA_HALF,
+        use crate::training::targets::{
+            BAND_START_MIN, REACH_RADIUS, TARGET_ARENA_HALF,
         };
         // The sparse terminal grab must be the clearly-dominant outcome of a NEAR-band episode
         // (so closing the last stretch and touching the target beats anything the dense progress
@@ -360,13 +360,13 @@ mod tests {
         // (out there the traverse is the hard part). The progress a SUCCESSFUL episode earns is
         // `PROGRESS_WEIGHT·(distance − grab_radius)` — telescoped and path-independent, but ending
         // at the grab radius the episode terminates on, NOT at d = 0 (the bare `P·distance`
-        // overstates it; bddap/rl#175). Derived from the real curriculum constants so the
+        // overstates it; bddap/rl#175). Derived from the real band constants so the
         // calibration can't silently drift from the band/radius it's defined against.
-        let near_approach = PROGRESS_WEIGHT * (BAND_START_MIN - CURRICULUM_REACH_RADIUS); // ≈ 17
+        let near_approach = PROGRESS_WEIGHT * (BAND_START_MIN - REACH_RADIUS); // ≈ 17
         // The far band's hard cap is the arena half-extent, so a far success closes to grab range
         // from there. Derived from the same constants (not a literal 9.0) so the calibration can't
         // drift if the arena resizes.
-        let far_approach = PROGRESS_WEIGHT * (TARGET_ARENA_HALF - CURRICULUM_REACH_RADIUS); // ≈ 197
+        let far_approach = PROGRESS_WEIGHT * (TARGET_ARENA_HALF - REACH_RADIUS); // ≈ 197
         assert!(
             GRAB_REWARD > near_approach,
             "the grab bonus must dominate a near-band approach's progress: {GRAB_REWARD} vs {near_approach}"

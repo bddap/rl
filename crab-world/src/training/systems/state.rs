@@ -142,7 +142,7 @@ pub(crate) struct TrainingState {
     pub(super) drift_count: u64,
 
     /// This horizon's per-episode reach tally over FINISHED episodes as `(reached,
-    /// finished)` — the curriculum's competence signal, drained per horizon.
+    /// finished)` — the reach-fraction competence signal, drained per horizon.
     pub(super) reach_reached: u64,
     pub(super) reach_finished: u64,
 
@@ -623,7 +623,7 @@ impl TrainingState {
 
     /// Drain this horizon's per-episode reach tally as `(reached, finished)`, resetting
     /// both. The learner pools these across rollout threads for the log's reach fraction and
-    /// the best-keeper's solid-reach floor ([`crate::training::curriculum::SOLID_REACH_FRACTION`]).
+    /// the best-keeper's solid-reach floor ([`crate::training::targets::SOLID_REACH_FRACTION`]).
     /// `(0, 0)` when no episode finished this horizon.
     fn drain_reach(&mut self) -> (u64, u64) {
         let out = (self.reach_reached, self.reach_finished);

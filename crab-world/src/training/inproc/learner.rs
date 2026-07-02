@@ -8,7 +8,7 @@ use super::*;
 
 /// Everything one horizon's K rollouts contribute to the learner, reduced from the
 /// threads' [`RollOutcome`]s in one place: the per-env buffers the PPO update consumes,
-/// plus the aggregates the log and curriculum read. One struct so the reduction's
+/// plus the aggregates the log and best-keeper read. One struct so the reduction's
 /// accumulators don't smear across the iteration body as a dozen loose locals.
 struct MergedRollout {
     rollouts: Vec<RolloutBuffer>,
@@ -327,7 +327,7 @@ pub fn run_learner(
     );
 
     // The target-distance band is FIXED at the full arena range: every episode samples a
-    // target across the whole arena, near and far (see `curriculum::sample_target`). The
+    // target across the whole arena, near and far (see `targets::sample_target`). The
     // scale-free progress reward gives signal at any distance, so there is no growth
     // curriculum to advance, persist, or even thread — the sampling rule reads the two
     // band constants directly, the same on every warm resume (the bitter lesson).

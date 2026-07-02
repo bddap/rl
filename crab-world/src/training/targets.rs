@@ -46,7 +46,7 @@ pub(crate) const TARGET_ARENA_HALF: f32 = crate::physics::world::ARENA_HALF_SIZE
 /// event a viewer sees the ball teleport on. Lives in the always-compiled trainer so the
 /// headless build owns the source. A touch looser than zero so a near-miss the policy clearly
 /// solved still counts.
-pub(crate) const CURRICULUM_REACH_RADIUS: f32 = 0.8;
+pub(crate) const REACH_RADIUS: f32 = 0.8;
 /// Reach-fraction at or above which the policy is judged to "reliably get there". Reused by
 /// [`super::best`] as the solid-reach floor a checkpoint must clear to enter `ckpt/best/`, so a
 /// collapse (reach below it) can never become the best. 0.6, not ~1.0: targets near the arena

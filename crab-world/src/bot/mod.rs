@@ -140,8 +140,8 @@ impl std::fmt::Display for RescueBody {
 /// drive the body non-finite. There a [`rescue_nonfinite_crabs`] fire is a physics-correctness
 /// FAULT to surface LOUDLY (and hard-fail in dev/debug/test builds), never a silent
 /// catch-and-respawn (rl#137 — the silent rescue hid a frame-by-frame blowup for weeks).
-/// Deliberately ABSENT in TRAINING, where a fresh/random policy plus the randomized-start
-/// curriculum drives crabs non-finite constantly BY DESIGN and the rescue is the routine
+/// Deliberately ABSENT in TRAINING, where a fresh/random policy plus the randomized
+/// starts drive crabs non-finite constantly BY DESIGN and the rescue is the routine
 /// per-episode reward terminator — making every training rescue a loud error or a panic would
 /// drown the signal and kill the run. Inserted by [`net::external_crab::arm`] — the ONE arm
 /// path every armed-Sally site (windowed play, screenshot, the headless probes) funnels through.
@@ -321,7 +321,7 @@ pub fn settle_countdown(grace: u32) -> u32 {
 }
 
 /// Like [`respawn_crab`] but spawns the fresh crab rigidly rotated by `init_rotation`
-/// (training's randomized-start curriculum — see `reset_crab`). `Quat::IDENTITY`
+/// (training's randomized starts — see `reset_crab`). `Quat::IDENTITY`
 /// reproduces the upright respawn exactly.
 pub fn respawn_crab_rotated(
     commands: &mut Commands,
@@ -359,7 +359,7 @@ pub fn spawn_initial_crabs(
     for env in 0..n {
         let origin = grid_offset(env, n);
         spawns.0.push(origin);
-        // Initial spawn stays upright; the randomized-start curriculum kicks in on the
+        // Initial spawn stays upright; the randomized starts kick in on the
         // first reset (see `reset_crab`). A clean first frame also keeps any non-training
         // caller of this system (the demo) upright.
         body::spawn_crab(&mut commands, &assets, origin, env, Quat::IDENTITY);

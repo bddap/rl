@@ -21,7 +21,7 @@ use burn::backend::ndarray::NdArray;
 pub mod algorithm;
 pub mod best;
 pub mod checkpoint;
-pub mod curriculum;
+pub mod targets;
 pub(crate) mod envelope;
 #[cfg(feature = "wgpu")]
 pub mod gpu;
