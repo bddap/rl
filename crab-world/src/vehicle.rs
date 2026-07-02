@@ -1,8 +1,7 @@
 //! The player's single-player VEHICLE — a rapier rigidbody living in the crab's ONE
 //! `bevy_rapier3d` world, so it is official host-authoritative game state that COLLIDES with
-//! the trained crab "Sally" (owner 702/703/704). It replaces the old integer fixed-point flight
-//! integrator (`net::sim`'s deleted `step_plane`/`step_helicopter`): ONE flight model, configured
-//! as a plane or an Outer-Wilds-style ship by a [`VehicleParams`] set.
+//! the trained crab "Sally" (owner 702/703/704). ONE flight model, configured as a plane or an
+//! Outer-Wilds-style ship by a [`VehicleParams`] set.
 //!
 //! ## Two craft, two feels, one force system (owner, botq#554)
 //! - **Plane = Ace Combat 6.** A persistent THROTTLE LEVER drives thrust along the nose (+Z);
