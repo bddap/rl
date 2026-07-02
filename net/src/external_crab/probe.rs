@@ -154,6 +154,9 @@ fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> be
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
+        // The probe models the GCR client, so it steps the client's OPEN inference
+        // field (rl#209), not the walled training box.
+        arena: crab_world::physics::Arena::OpenField,
     });
     app.add_plugins(ExternalCrabPlugin {
         checkpoint_dir: checkpoint_dir.to_path_buf(),

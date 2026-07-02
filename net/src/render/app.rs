@@ -338,7 +338,12 @@ pub(super) fn add_external_nn_crab(
         // order that applies the spring, so the solo crab's physics can't drift from what
         // the policy optimised under (see physics::CrabPhysicsPlugin).
         .add_plugins(crab_world::physics::CrabPhysicsPlugin)
-        .add_plugins(crab_world::physics::PhysicsWorldPlugin)
+        // The OPEN inference field — unbounded ground, no walls — so the crab's per-round
+        // travel isn't capped at the ±10 m training box and it can chase a player (spawned
+        // ≥12 m out) clear across the map (rl#209). Training keeps the walled box.
+        .add_plugins(crab_world::physics::PhysicsWorldPlugin {
+            arena: crab_world::physics::Arena::OpenField,
+        })
         .add_plugins(crab_world::bot::BotPlugin)
         // The player's rapier flight vehicle — a rigidbody in this same crab world, so it collides
         // with Sally. Inert (no body, no systems firing on a spawned body) until the player boards

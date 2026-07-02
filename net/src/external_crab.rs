@@ -21,20 +21,25 @@
 //! the carapace's local frame, and it has learned to WALK the body toward that vector
 //! (the `ckpt-best.locomotion` weights walk + reach). We exploit that directly:
 //!
-//! - The crab lives in its OWN small rapier arena (the shared [`crab_world::bot`] /
-//!   [`crab_world::physics`] world, a ±10 m walled box), centred near the origin.
+//! - The crab lives in its OWN rapier world (the shared [`crab_world::bot`] /
+//!   [`crab_world::physics`] stack) on the OPEN inference field
+//!   ([`crab_world::physics::Arena::OpenField`], rl#209): an unbounded ground with no
+//!   walls, so its per-round travel is unlimited. Training keeps its ±10 m walled box;
+//!   the ground contact dynamics are identical (same y=0 surface, same material).
 //! - Each control step we place its target at the nearest living game player's ACTUAL
 //!   position, expressed in the crab's arena frame (`carapace + (player − crab)`), at any
 //!   distance — no lead, no treadmill. The observation re-expresses that true offset in
 //!   carapace-local axes, so the policy sees the real player offset and the WEIGHTS supply
 //!   the approach (the bitter lesson — the approach logic is learned, not hand-coded).
-//!   Training samples targets across the full arena band (`[1.5, ~9] m`); a player farther
+//!   Training samples targets across the arena band (`[1.5, ~9] m`); a player farther
 //!   than that (they spawn ≥12 m away — `sim::MIN_CRAB_SPAWN_DISTANCE`) is OUT of the trained
 //!   band, but the obs normalizer clamps `target_local` to ±5σ, so a far offset saturates to
 //!   "player is that way, far" and the crab walks full-tilt toward it — honest hunt heading,
-//!   without resolving distance past the band edge. The body's per-round physical travel is
-//!   bounded by its ±10 m arena anyway, so closing a >9 m gap needs a larger inference arena
-//!   (a separate follow-up); within the arena the policy now steers at the real player.
+//!   without resolving distance past the band edge — and with the open field it keeps
+//!   walking until the gap re-enters the band. (The observation's spawn-relative `body.pos`
+//!   slots saturate the same clamp once the crab is far from its arena spawn — a regime
+//!   training never sampled; heading + gait slots stay in-distribution, and probe runs
+//!   ~2× past the old wall still close the gap, but very long chases are less charted.)
 //! - We integrate the carapace's horizontal displacement each game tick and add it to
 //!   the game-world crab position, which we write back into the sim with
 //!   [`Sim::set_external_crab_pose`]. Grabs / extraction / win-loss then resolve against the
@@ -456,7 +461,8 @@ fn crab_not_yet_spawned(crabs: Query<(), With<CrabCarapace>>) -> bool {
 /// offset in carapace-local axes and the policy's WEIGHTS supply the approach (the bitter
 /// lesson). A player past the trained band (`[1.5, ~9] m`) saturates the obs normalizer clamp,
 /// so the crab reads "player far, that way" and walks toward it without resolving exact
-/// distance — see the module header. With no living target (all players down) the target is
+/// distance; on the open inference field (rl#209) it keeps walking until the gap re-enters
+/// the band — see the module header. With no living target (all players down) the target is
 /// dropped and the crab holds.
 fn set_crab_walk_target(
     bridge: Res<ExternalCrabBridge>,

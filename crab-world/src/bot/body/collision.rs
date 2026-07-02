@@ -46,7 +46,8 @@ const _: () = assert!(MAX_ENVS + 2 < 32);
 const _: () = assert!(VEHICLE_GROUP.bits() == 1 << (MAX_ENVS + 2));
 
 /// Collision groups for the player's vehicle: its own [`VEHICLE_GROUP`] bit, filtered to hit the
-/// arena (so the walls bounce it — owner Option A) and every env's crab parts (so it strikes
+/// arena ground (production GCR runs the open field, rl#209 — no walls to bounce off; only the
+/// walled training box has them) and every env's crab parts (so it strikes
 /// Sally). Reciprocity needs the crab filter to name `VEHICLE_GROUP` too — [`crab_collision`]
 /// adds it. Excludes the nested bit (`GROUP_2`): those links hide inside the shell and only ever
 /// touch the arena, so a vehicle contact there would just fight the solver.

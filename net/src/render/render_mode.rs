@@ -91,7 +91,7 @@ fn manage_silhouette_visibility(
 /// any mode that [`RenderMode::shows_colliders`], so the ONE `CycleRenderMode` control toggles the
 /// crab AND the craft together, every context.
 ///
-/// The vehicle rapier body lives in the crab's ARENA frame (the ±10 m box with Sally), so — like the
+/// The vehicle rapier body lives in the crab's ARENA frame (the open inference field with Sally — rl#209), so — like the
 /// crab body — it must be reposed into render space to sit where the pilot sees it: the cockpit camera
 /// applies exactly this `world(crab) − arena_carapace` shift (see [`super::scene`]'s `apply_transforms`),
 /// so reusing the same [`CrabSkinRepose`] the crab cage uses puts the cage on the craft the camera
