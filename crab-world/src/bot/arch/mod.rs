@@ -14,12 +14,14 @@
 //! future seam-extension epic, not a leaf.
 
 pub mod mlp256;
+pub mod mlp512x3;
 
 use burn::module::Module;
 use burn::prelude::*;
 use burn::record::{Recorder, RecorderError};
 
 pub use mlp256::Mlp256;
+pub use mlp512x3::Mlp512x3;
 
 /// Bounds the learnable log-std so entropy can't diverge or collapse. Applied ONCE, in
 /// [`GaussianHead::new`] — leaves emit RAW heads and never clamp. `LOG_STD_MIN` is also the
@@ -40,13 +42,14 @@ pub(crate) const LOG_STD_MAX: f32 = 0.5;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchId {
     Mlp256,
+    Mlp512x3,
 }
 
 impl ArchId {
     /// Every living architecture. `TryFrom<String>` inverts [`Self::name`] through this
     /// list, so the name table lives in exactly one place; a new variant that misses
     /// this list is caught by `roundtrips_every_arch` below.
-    pub const ALL: &'static [ArchId] = &[Self::Mlp256];
+    pub const ALL: &'static [ArchId] = &[Self::Mlp256, Self::Mlp512x3];
 
     /// The arch a fresh start gets when `--arch` is omitted (the founding run's; the
     /// trainer's CLI help states it in prose — keep that in sync).
@@ -56,6 +59,7 @@ impl ArchId {
     pub fn name(self) -> &'static str {
         match self {
             Self::Mlp256 => "mlp256",
+            Self::Mlp512x3 => "mlp512x3",
         }
     }
 }
@@ -97,6 +101,7 @@ impl From<ArchId> for String {
 #[derive(Module, Debug)]
 pub enum AnyBrain<B: Backend> {
     Mlp256(Mlp256<B>),
+    Mlp512x3(Mlp512x3<B>),
 }
 
 impl<B: Backend> AnyBrain<B> {
@@ -105,12 +110,14 @@ impl<B: Backend> AnyBrain<B> {
     pub fn init(arch: ArchId, device: &B::Device) -> Self {
         match arch {
             ArchId::Mlp256 => Self::Mlp256(Mlp256::new(device)),
+            ArchId::Mlp512x3 => Self::Mlp512x3(Mlp512x3::new(device)),
         }
     }
 
     pub fn arch(&self) -> ArchId {
         match self {
             Self::Mlp256(_) => ArchId::Mlp256,
+            Self::Mlp512x3(_) => ArchId::Mlp512x3,
         }
     }
 
@@ -122,6 +129,7 @@ impl<B: Backend> AnyBrain<B> {
     pub fn policy(&self, obs: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
         match self {
             Self::Mlp256(m) => m.policy(obs),
+            Self::Mlp512x3(m) => m.policy(obs),
         }
     }
 
@@ -129,6 +137,7 @@ impl<B: Backend> AnyBrain<B> {
     pub fn value(&self, obs: Tensor<B, 2>) -> Tensor<B, 2> {
         match self {
             Self::Mlp256(m) => m.value(obs),
+            Self::Mlp512x3(m) => m.value(obs),
         }
     }
 
@@ -137,6 +146,7 @@ impl<B: Backend> AnyBrain<B> {
     pub fn io_dims(&self) -> (usize, usize) {
         match self {
             Self::Mlp256(m) => m.io_dims(),
+            Self::Mlp512x3(m) => m.io_dims(),
         }
     }
 
@@ -154,6 +164,7 @@ impl<B: Backend> AnyBrain<B> {
     ) -> Result<R::RecordOutput, RecorderError> {
         match self {
             Self::Mlp256(m) => recorder.record(m.clone().into_record(), args),
+            Self::Mlp512x3(m) => recorder.record(m.clone().into_record(), args),
         }
     }
 
@@ -170,6 +181,9 @@ impl<B: Backend> AnyBrain<B> {
     ) -> Result<Self, RecorderError> {
         match self {
             Self::Mlp256(m) => Ok(Self::Mlp256(m.load_record(recorder.load(args, device)?))),
+            Self::Mlp512x3(m) => {
+                Ok(Self::Mlp512x3(m.load_record(recorder.load(args, device)?)))
+            }
         }
     }
 }
@@ -247,7 +261,11 @@ impl<B: Backend> GaussianHead<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::ArchId;
+    use super::super::actuator::ACTION_SIZE;
+    use super::super::sensor::OBS_SIZE;
+    use super::{AnyBrain, ArchId};
+    use crate::training::TrainBackend;
+    use burn::prelude::*;
 
     /// Every registered arch's name parses back to itself — catches a new variant
     /// missing from `ArchId::ALL` (which would make its checkpoints unloadable) or a
@@ -256,6 +274,28 @@ mod tests {
     fn roundtrips_every_arch() {
         for &arch in ArchId::ALL {
             assert_eq!(ArchId::try_from(arch.name().to_string()), Ok(arch));
+        }
+    }
+
+    /// Every registered arch honors the v1 seam contract on a fresh init: rig-matched
+    /// `io_dims`, `[rows, ACTION_SIZE]` heads with means in the tanh bound, per-row
+    /// `log_std`, and a `[rows, 1]` value — so a leaf that broadcasts wrong or forgets
+    /// the mean bound fails HERE, not as NaNs mid-run.
+    #[test]
+    fn every_arch_honors_the_seam_contract() {
+        let device = Default::default();
+        let rows = 3;
+        let obs = Tensor::<TrainBackend, 2>::zeros([rows, OBS_SIZE], &device);
+        for &arch in ArchId::ALL {
+            let brain = AnyBrain::<TrainBackend>::init(arch, &device);
+            assert_eq!(brain.arch(), arch);
+            assert_eq!(brain.io_dims(), (OBS_SIZE, ACTION_SIZE), "{arch}");
+            let (means, log_std) = brain.policy(obs.clone());
+            assert_eq!(means.dims(), [rows, ACTION_SIZE], "{arch}");
+            assert_eq!(log_std.dims(), [rows, ACTION_SIZE], "{arch}");
+            let peak = means.abs().max().into_scalar();
+            assert!(peak <= 1.0, "{arch}: means outside the tanh bound: {peak}");
+            assert_eq!(brain.value(obs.clone()).dims(), [rows, 1], "{arch}");
         }
     }
 }
