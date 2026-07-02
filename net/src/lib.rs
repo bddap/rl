@@ -254,7 +254,7 @@ mod desync_test {
         // and a periodic press is the only thing the gamepad's Start adds to the input
         // stream that the other desync logs don't already cover. Drive two independent
         // sims with a moving log that presses RESTART every ~50 ticks and assert they
-        // hash-match EVERY tick, including across each mid-replay rewind to tick 0 — so
+        // hash-match EVERY tick, including across each mid-replay round rebuild — so
         // the edge-triggered restart (sim.rs `restart_held` latch) is proven to fire on
         // the SAME tick on every peer. (Determinism of the analog AXES is covered by
         // `two_sims_stay_in_lockstep_on_one_input_log`, which feeds full-range f32 axes
@@ -281,8 +281,9 @@ mod desync_test {
         let mut a = Sim::new(0xC0FFEE, &players);
         let mut b = Sim::new(0xC0FFEE, &players);
         assert_eq!(a.state_hash(), b.state_hash(), "initial state must match");
+        let mut restarts = 0u32;
         for (t, inputs) in log.iter().enumerate() {
-            a.step(inputs);
+            restarts += u32::from(a.step(inputs));
             b.step(inputs);
             assert_eq!(
                 a.state_hash(),
@@ -290,14 +291,15 @@ mod desync_test {
                 "sims diverged at tick {t} across a RESTART edge"
             );
         }
-        // Non-vacuous: the last rewind (tick 257) leaves the counter well below the log
-        // length, proving the RESTART bit actually drove the sim — not a no-op that would
-        // "stay in lockstep" trivially.
-        assert!(
-            a.tick() < log.len() as u64,
-            "restart edges must have rewound the sim (tick {} vs {} ticks)",
+        // Non-vacuous: every periodic press fired (t = 7, 57, ... 257), proving the RESTART
+        // bit actually drove the sim — not a no-op that would "stay in lockstep" trivially.
+        // The tick counter stays monotone through all of them (a restart is a state-reset at
+        // the current tick, never a rewind — rl#204).
+        assert_eq!(restarts, 6, "each periodic RESTART press fired once");
+        assert_eq!(
             a.tick(),
-            log.len()
+            log.len() as u64,
+            "restarts never rewind the tick counter"
         );
     }
 

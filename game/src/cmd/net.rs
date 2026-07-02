@@ -141,7 +141,10 @@ async fn run_net(args: Args) -> Result<()> {
     let mut reported_outcome = false;
     // Optional per-tick hash log (Args::hash_log): every applied tick keyed by its true
     // tick, so two peers' logs diff byte-identically over their overlap — the cross-machine
-    // determinism proof. Written one line per stepped/adopted tick below.
+    // determinism proof. Written one line per stepped/adopted tick below. Sound because this
+    // harness's scripted inputs never press RESTART (and no rapier body runs, digest 0): the
+    // host hashes its STEPPING sim, the client its adopted mirror, and the stepping-side-only
+    // fields (`restart_held`, `round_start`) diverge the two the moment a restart fires.
     let mut hash_log = args
         .hash_log
         .as_ref()
@@ -217,7 +220,7 @@ async fn run_net(args: Args) -> Result<()> {
             srv.enqueue_for_step(&sets);
             // Headless: weights digest 0, no rapier body → the crab holds spawn, so no pose to inject.
             while srv.next_tick_ready() {
-                let bytes = srv.step_next(None);
+                let bytes = srv.step_next(None).snapshot;
                 let snap = net::snapshot::CoreSnapshot::from_bytes(&bytes)
                     .expect("the authoritative server's snapshot must decode");
                 session.broadcast_snapshot(&snap).await;

@@ -166,9 +166,10 @@ impl Lockstep {
     /// client apply, in what order?" for both remote clients (the windowed driver's `RemoteAdopt`
     /// arm and headless `game net`'s client arm): apply EVERY snapshot, in ARRIVAL order, with NO
     /// tick gate. The reliable ordered per-peer stream delivers snapshots in the host's send
-    /// (= step) order, so arrival order IS authoritative — including the tick-0 snapshots a host
-    /// RESTART rebroadcasts, which a `tick <=`/`max` gate (or a sort-by-tick) would silently
-    /// reject/reorder, freezing the client on stale pre-restart state. Each snapshot is a FULL
+    /// (= step) order, so arrival order IS authoritative — a `tick <=`/`max` gate or a
+    /// sort-by-tick would add nothing but a place to go wrong (and historically froze clients
+    /// across a host RESTART, back when a restart rewound the tick; ticks are monotone across a
+    /// restart now — rl#204 — so there is nothing to gate). Each snapshot is a FULL
     /// state overwrite, so applying intermediates is cheap (~hundreds of bytes/tick) and keeps
     /// per-adopt observers exact.
     ///
@@ -304,52 +305,46 @@ mod tests {
         }
     }
 
-    /// The restart-freeze regression ([`Lockstep::adopt_snapshots`]): a host RESTART rebroadcasts
-    /// from tick 0, so the client's drained batch contains a tick REGRESSION. The policy must adopt
-    /// it (arrival order is authoritative) — the old per-caller `tick <=` gate rejected it and froze
-    /// the client on stale pre-restart state forever.
+    /// A remote client follows a host RESTART (rl#204): the restart is a state-reset at the
+    /// current tick, so the wire carries a gap-free MONOTONE tick stream whose restart-tick
+    /// snapshot holds the spawn-state world. The client adopts every arrival in order and ends
+    /// on the fresh round — no gate, no freeze, no tick regression anywhere.
     #[test]
-    fn adopt_snapshots_follows_a_host_restart_tick_regression() {
+    fn adopt_snapshots_follows_a_host_restart() {
+        use crate::sim::buttons;
+
         let me = PlayerId(0);
         let roster = ids(1);
         let mut client = Lockstep::new(7, &roster, me);
+        let spawn = Sim::new(7, &roster).player(me).expect("rostered").pos();
 
-        // Pre-restart host: stepped several ticks.
+        // One host: walk away from spawn for 5 ticks, press RESTART, then one neutral tick.
         let mut sched = Lockstep::new(7, &roster, me);
-        let mut old_host = Server::new(&roster, Sim::new(7, &roster));
+        let mut host = Server::new(&roster, Sim::new(7, &roster));
         let mut arrivals = Vec::new();
-        for _ in 0..5 {
-            let sets = old_host.record(me, sched.submit_local_input(Input::from_axes(1.0, 0.0)));
-            old_host.enqueue_for_step(&sets);
-            while old_host.next_tick_ready() {
-                let _ = old_host.step_next(None);
+        for t in 0..7u64 {
+            let btns = if t == 5 { buttons::RESTART } else { 0 };
+            let input = Input::new(0.0, if t < 5 { 1.0 } else { 0.0 }, 0.0, btns);
+            let sets = host.record(me, sched.submit_local_input(input));
+            host.enqueue_for_step(&sets);
+            while host.next_tick_ready() {
+                let _ = host.step_next(None);
             }
-            arrivals.push(old_host.sim().core_snapshot());
+            arrivals.push(host.sim().core_snapshot());
         }
-        // The host restarts: a fresh sim rebroadcasts from tick 0 — a regression on the wire.
-        let mut sched2 = Lockstep::new(7, &roster, me);
-        let mut new_host = Server::new(&roster, Sim::new(7, &roster));
-        let sets = new_host.record(me, sched2.submit_local_input(Input::from_axes(0.0, 1.0)));
-        new_host.enqueue_for_step(&sets);
-        while new_host.next_tick_ready() {
-            let _ = new_host.step_next(None);
-        }
-        arrivals.push(new_host.sim().core_snapshot());
 
         let mut seen = Vec::new();
         let adopted = client.adopt_snapshots(arrivals, |c| seen.push(c.sim().tick()));
-        assert_eq!(adopted, 6, "every arrival adopted — none gated away");
-        // Ticks are POST-step counts: five pre-restart arrivals (1..=5), then the restarted
-        // host's tick-1 — the regression a `tick <=` gate would reject, freezing the client at 5.
+        assert_eq!(adopted, 7, "every arrival adopted — none gated away");
         assert_eq!(
             seen,
-            [1, 2, 3, 4, 5, 1],
-            "adopted in arrival order, regression included"
+            [1, 2, 3, 4, 5, 6, 7],
+            "the wire tick stream is monotone and gap-free across the restart"
         );
         assert_eq!(
-            client.sim().tick(),
-            1,
-            "the client ends on the post-restart state, not frozen pre-restart"
+            client.sim().player(me).expect("rostered").pos(),
+            spawn,
+            "the client ends on the restarted round's spawn state"
         );
     }
 }

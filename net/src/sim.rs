@@ -45,7 +45,10 @@ pub mod buttons {
     pub const ACTION: u8 = 1 << 0;
     /// Restart the round. Bit 1. Routed through the input stream (not a client-local
     /// reset) so every peer restarts on the SAME tick and stays in lockstep — a
-    /// local-only reset would desync. Edge-triggered (see [`Sim::step`]).
+    /// local-only reset would desync. Edge-triggered (see [`Sim::step`]). A restart is a
+    /// STATE reset at the current tick, never a tick rewind: [`Sim::tick`] stays monotone
+    /// so the server's ledger-tick space (input ledger, emit cursor, roster schedule)
+    /// remains aligned with the sim across a restart (rl#204).
     pub const RESTART: u8 = 1 << 1;
 }
 
@@ -174,11 +177,11 @@ const CRAB_SPEED: i64 = 130;
 /// the real bridge's hunt target uses, then pushes the pose. `#[cfg(test)]` only — it can NEVER
 /// stand in for the NN crab in a release build, so it is not a production fallback. ONE
 /// definition. Call it each tick BEFORE [`Sim::step`]: it moves
-/// the crab once `tick() >= STARTUP_GRACE_TICKS`, so the pose is in place for the first armed step
-/// (the one that increments the tick PAST the grace and turns on grabs).
+/// the crab once the round is `STARTUP_GRACE_TICKS` old, so the pose is in place for the first
+/// armed step (the one that increments the tick PAST the grace and turns on grabs).
 #[cfg(test)]
 pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) {
-    if sim.tick() < STARTUP_GRACE_TICKS {
+    if sim.tick() < sim.round_start + STARTUP_GRACE_TICKS {
         return; // hold spawn through the grace, matching the grab gate's head-start
     }
     let Some(target) = sim.nearest_living_player_pos() else {
@@ -397,6 +400,15 @@ pub struct Sim {
     /// edge-trigger latch (see [`buttons::RESTART`]). It gates a future tick's behaviour
     /// and is identical on every peer, so it is folded into [`Sim::state_hash`].
     restart_held: bool,
+    /// The tick the CURRENT round began at: 0 for a fresh sim, the restart tick after a
+    /// [`buttons::RESTART`] (which resets state without rewinding the tick — rl#204). The
+    /// startup grace ([`STARTUP_GRACE_TICKS`]) counts from here, so a restarted round gets
+    /// its full crab head-start. Gates behaviour, so it is folded into [`Sim::state_hash`] —
+    /// identical on every peer that STEPS. (An adopting client mirror never steps and keeps
+    /// its construction value, so a stepping-vs-mirror hash comparison — the `game net`
+    /// `--hash-log` proof — is sound only while no restart fires; same scoping as
+    /// `restart_held` and `external_crab_digest`, likewise hashed but not snapshot-carried.)
+    round_start: u64,
     /// The immutable round CONFIG — the match seed and the player roster — kept so a
     /// deterministic restart ([`buttons::RESTART`]) can rebuild the initial state in
     /// place. NOT folded into [`Sim::state_hash`]: it can't differ between in-sync peers,
@@ -448,6 +460,7 @@ impl Sim {
             outcome: Outcome::Ongoing,
             rng: ChaCha8Rng::seed_from_u64(seed),
             restart_held: false,
+            round_start: 0,
             config,
             external_crab_digest: 0,
         }
@@ -467,21 +480,28 @@ impl Sim {
         self.external_crab_digest = phys_digest;
     }
 
-    /// Rebuild the round to its tick-0 state from the stored [`config`](Sim::config) —
-    /// the deterministic restart ([`buttons::RESTART`] in [`Sim::step`]). Rebuilds the
-    /// SAME way construction does (both call [`Sim::spawn_state`]), so a restarted round
-    /// is byte-identical to a freshly-constructed one. The RNG is re-seeded from the
-    /// (constant) match seed; since every peer restarts on the same tick from the same
+    /// Rebuild the round's WORLD to its spawn state from the stored [`config`](Sim::config)
+    /// — the deterministic restart ([`buttons::RESTART`] in [`Sim::step`]). Rebuilds the
+    /// SAME way construction does (both call [`Sim::spawn_state`]) and re-seeds the RNG from
+    /// the (constant) match seed; since every peer restarts on the same tick from the same
     /// config, all peers land on the identical fresh state.
     ///
-    /// Deliberately leaves [`config`](Sim::config) and [`restart_held`](Sim::restart_held)
-    /// alone: `config` is the rebuild source, and the restart-edge latch MUST survive the
+    /// Deliberately does NOT rewind [`tick`](Sim::tick): the restart is a state-reset AT the
+    /// current tick, recorded in [`round_start`](Sim::round_start). The tick is the shared
+    /// currency between the sim and the server's ledger space (`next_emit`, the pending-step
+    /// queue, the roster schedule), all of which are monotone — a tick rewind desynced them
+    /// and wedged the match permanently on `next_tick_ready` (rl#204), and would make the
+    /// roster mirrors in [`crate::server::Server::step_next`] consult the ancient tick-0
+    /// roster.
+    ///
+    /// Also leaves [`config`](Sim::config) and [`restart_held`](Sim::restart_held) alone:
+    /// `config` is the rebuild source, and the restart-edge latch MUST survive the
     /// rebuild — clearing it would let a still-held R re-trigger every tick (the
     /// level-trigger bug `restart_is_edge_triggered_not_level` guards). [`Sim::step`] owns
     /// that latch; reset only touches the round/world fields.
     fn reset(&mut self) {
         let (players, crab, extraction) = Self::spawn_state(&self.config);
-        self.tick = 0;
+        self.round_start = self.tick;
         self.players = players;
         self.crab = crab;
         self.extraction = extraction;
@@ -493,8 +513,8 @@ impl Sim {
     /// join ([[mp-minecraft-model]]). Inserts a fresh [`Player`] for `pid` and folds it into the
     /// [`config`](Sim::config) roster WITHOUT disturbing the ongoing state: the crab, extraction,
     /// incumbents, `tick`, `rng`, and `outcome` are all untouched, so the joiner drops into the
-    /// match exactly where it stands rather than resetting every peer to tick 0 (which is what
-    /// round RESTART does via [`reset`](Sim::reset)). The joiner never re-simulates the
+    /// match exactly where it stands rather than rebuilding the world to spawn state (which is
+    /// what round RESTART does via [`reset`](Sim::reset)). The joiner never re-simulates the
     /// incumbents' warm rapier world — it renders the host's output pose carried in the snapshot —
     /// so warm-cache divergence is never on the wire. Only the authoritative host calls this (a
     /// client adopts the resulting snapshot), so the spawn position needs no cross-peer
@@ -644,25 +664,31 @@ impl Sim {
     ///
     /// `inputs` MUST hold an entry for every participant the sim tracks; a missing input
     /// panics ([`Sim::require_complete_inputs`]) rather than fabricating a neutral.
-    pub fn step(&mut self, inputs: &BTreeMap<PlayerId, Input>) {
+    ///
+    /// Returns whether this tick was a RESTART edge — the world was rebuilt to spawn state
+    /// at this (monotone) tick. An event, not state: the driver hangs its per-round resets
+    /// (physics cadence, crab-body respawn) off this exact edge, which the tick counter can
+    /// no longer signal since a restart doesn't rewind it (rl#204).
+    pub fn step(&mut self, inputs: &BTreeMap<PlayerId, Input>) -> bool {
         self.require_complete_inputs(inputs);
         self.tick += 1;
 
         // Restart, edge-triggered: any player newly pressing RESTART rebuilds the round
-        // to tick 0 and stops. Checked BEFORE the freeze below so a decided (won/lost)
-        // round can be restarted. Edge, not level: holding R restarts once.
+        // to spawn state at this tick and stops. Checked BEFORE the freeze below so a
+        // decided (won/lost) round can be restarted. Edge, not level: holding R restarts
+        // once.
         let restart_now = inputs.values().any(|i| i.pressed(buttons::RESTART));
         let restart_edge = restart_now && !self.restart_held;
         self.restart_held = restart_now;
         if restart_edge {
             self.reset();
-            return;
+            return true;
         }
 
         // Once the round is decided, freeze the world: no more movement or grabs, so
         // every peer that reached the same outcome holds an identical final state.
         if self.outcome != Outcome::Ongoing {
-            return;
+            return false;
         }
 
         // 1) Players. Iterate the players map (BTreeMap → PlayerId order), not the
@@ -678,7 +704,9 @@ impl Sim {
         }
 
         // The crab's grabs are disarmed during the startup grace (see [`STARTUP_GRACE_TICKS`]).
-        let armed = self.tick > STARTUP_GRACE_TICKS;
+        // Counted from round_start, not tick 0, so a RESTART (state-reset at the current
+        // tick) grants the fresh round its full head-start too.
+        let armed = self.tick > self.round_start + STARTUP_GRACE_TICKS;
 
         // 2) Crab MOVE: the crab pose is whatever the external NN body last pushed
         //    ([`Sim::set_external_crab_pose`], the only mover); the grab/extraction below read
@@ -712,6 +740,7 @@ impl Sim {
         // 5) Settle the round outcome (first decisive condition wins; extraction
         //    beats a wipe on the same tick — a rescue at the buzzer counts).
         self.outcome = self.settle_outcome();
+        false
     }
 
     /// Move ONE player by one input tick: integrate the bounded yaw delta, then translate
@@ -836,6 +865,7 @@ impl Sim {
             outcome,
             rng,
             restart_held,
+            round_start,
             config: _,
             external_crab_digest,
         } = self;
@@ -858,6 +888,9 @@ impl Sim {
         // The restart edge-latch gates whether next tick's RESTART press fires, so a
         // divergence in it would desync the restart.
         h.write(&[u8::from(*restart_held)]);
+        // round_start gates the post-restart startup grace, so a divergence in it would
+        // arm the crab on different ticks across peers.
+        h.write(&round_start.to_le_bytes());
         // Hash the RNG stream position so a desync in random draws is caught even before
         // it manifests in an entity. Cloning and drawing one block reflects the
         // generator's position without disturbing the real stream.
@@ -919,10 +952,11 @@ impl Sim {
     /// Completeness is COMPILE-ENFORCED exactly like [`Sim::state_hash`]: the destructure
     /// below has NO `..`, so a newly-added authoritative `Sim` field stops this function
     /// compiling until it is carried into the snapshot or bound to `_` as a deliberate
-    /// exclusion. The four `_`-bound fields are out of the host->client surface by design:
-    /// `extraction` is a fixed gray-box constant both sides derive from `config`; `rng` and
-    /// `restart_held` are peer-invariant round bookkeeping; and `external_crab_digest` is not
-    /// carried (the client renders the crab POSE carried in `crab`, never the solver).
+    /// exclusion. The `_`-bound fields are out of the host->client surface by design:
+    /// `extraction` is a fixed gray-box constant both sides derive from `config`; `rng`,
+    /// `restart_held`, and `round_start` are peer-invariant round bookkeeping the server
+    /// alone steps on; and `external_crab_digest` is not carried (the client renders the
+    /// crab POSE carried in `crab`, never the solver).
     pub fn core_snapshot(&self) -> CoreSnapshot {
         let Sim {
             tick,
@@ -932,6 +966,7 @@ impl Sim {
             outcome,
             rng: _,
             restart_held: _,
+            round_start: _,
             config,
             external_crab_digest: _,
         } = self;
@@ -1633,6 +1668,11 @@ mod tests {
             h0,
             "restart_held must be hashed"
         );
+        assert_ne!(
+            hash_after(&|s| s.round_start += 1),
+            h0,
+            "round_start must be hashed (it gates the post-restart grace)"
+        );
         // Advancing the generator (without touching anything else) must flip the hash, so a
         // desync in random draws is caught before it surfaces in an entity.
         assert_ne!(
@@ -1686,7 +1726,7 @@ mod tests {
             .expect("a freshly-built snapshot must round-trip through bytes");
 
         // Apply onto a sim that DIFFERS in every carried field but agrees on the un-carried
-        // ones (it is a clone untouched on `extraction`/`rng`/`restart_held`/digest). If
+        // ones (a clone untouched on `extraction`/`rng`/`restart_held`/`round_start`/digest). If
         // apply restores every carried field the destructure names, the full `state_hash`
         // must match — a forgotten restore leaves one of these perturbations standing.
         let mut target = original.clone();
@@ -1773,13 +1813,15 @@ mod tests {
 
     #[test]
     fn restart_resets_the_round_to_spawn() {
-        // Press RESTART and the WORLD rebuilds to its tick-0 state: tick back to 0,
-        // players Alive at spawn, crab at its spawn, outcome Ongoing — matching a fresh
-        // round. (The hash also folds the restart edge-latch, which is legitimately set
-        // here because R is held and clear in a never-restarted sim — so we compare the
-        // observable round state, not the raw hash. The full-hash agreement BETWEEN
-        // peers who both apply the restart is the lockstep test's job.) Run a few ticks
-        // and move first so there's real state to discard.
+        // Press RESTART and the WORLD rebuilds to its spawn state — players Alive at
+        // spawn, crab at its spawn, outcome Ongoing, matching a fresh round — while the
+        // TICK stays monotone: a restart is a state-reset at the current tick, never a
+        // tick rewind, so the server's ledger-tick space stays aligned (rl#204). (The
+        // hash also folds the restart edge-latch, which is legitimately set here because
+        // R is held and clear in a never-restarted sim — so we compare the observable
+        // round state, not the raw hash. The full-hash agreement BETWEEN peers who both
+        // apply the restart is the lockstep test's job.) Run a few ticks and move first
+        // so there's real state to discard.
         let mut sim = Sim::new(0xBEEF, &players(2));
         let fresh = Sim::new(0xBEEF, &players(2));
         let mut fwd = BTreeMap::new();
@@ -1788,9 +1830,9 @@ mod tests {
         for _ in 0..50 {
             sim.step(&fwd);
         }
-        let round = |s: &Sim| {
+        // The world minus the tick: the tick deliberately does NOT rewind on restart.
+        let world = |s: &Sim| {
             (
-                s.tick(),
                 s.players().collect::<Vec<_>>(),
                 s.crab(),
                 s.extraction(),
@@ -1798,20 +1840,21 @@ mod tests {
             )
         };
         assert_ne!(
-            round(&sim),
-            round(&fresh),
+            world(&sim),
+            world(&fresh),
             "the round should have diverged from spawn before restart"
         );
         // Press R (only player 0 holds it — one peer's press restarts everyone).
         let mut restart = BTreeMap::new();
         restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
         restart.insert(PlayerId(1), Input::default());
-        sim.step(&restart);
-        assert_eq!(sim.tick(), 0, "restart resets the tick counter");
+        let edge = sim.step(&restart);
+        assert!(edge, "the press reports the restart edge");
+        assert_eq!(sim.tick(), 51, "the tick stays monotone across a restart");
         assert_eq!(sim.outcome(), Outcome::Ongoing);
         assert_eq!(
-            round(&sim),
-            round(&fresh),
+            world(&sim),
+            world(&fresh),
             "a restarted round's world matches a fresh one"
         );
     }
@@ -1831,11 +1874,12 @@ mod tests {
             sim.step(&neutral);
         }
         assert_eq!(sim.outcome(), Outcome::Wiped, "round should have ended");
+        let tick_at_loss = sim.tick();
         let mut restart = BTreeMap::new();
         restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
         sim.step(&restart);
         assert_eq!(sim.outcome(), Outcome::Ongoing, "restart revives the round");
-        assert_eq!(sim.tick(), 0);
+        assert_eq!(sim.tick(), tick_at_loss + 1, "the tick keeps counting");
         assert_eq!(
             sim.player(PlayerId(0)).unwrap().status(),
             PlayerStatus::Alive,
@@ -1846,20 +1890,20 @@ mod tests {
     #[test]
     fn restart_is_edge_triggered_not_level() {
         // Holding RESTART across ticks must restart ONCE (on the press), then let the
-        // round advance — otherwise a held key would pin the sim at tick 0 forever.
+        // round advance — otherwise a held key would re-spawn the world every tick.
+        // The tick is monotone regardless (a restart never rewinds it), so the edge is
+        // observed through `step`'s return value.
         let mut sim = Sim::new(0, &players(1));
         let mut held = BTreeMap::new();
         held.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
-        sim.step(&held); // tick 1 → restart fires, back to tick 0
-        assert_eq!(sim.tick(), 0, "first press restarts");
+        assert!(sim.step(&held), "first press restarts");
         // Keep holding: the latch is set, so subsequent ticks advance normally.
-        sim.step(&held);
-        sim.step(&held);
-        assert_eq!(sim.tick(), 2, "a held key doesn't re-restart every tick");
+        assert!(!sim.step(&held), "a held key doesn't re-restart");
+        assert!(!sim.step(&held), "still held, still no re-restart");
+        assert_eq!(sim.tick(), 3, "every tick counted, restart included");
         // Release, then press again: that fresh edge restarts once more.
-        sim.step(&neutral_for(&sim)); // release (tick 3)
-        sim.step(&held); // fresh press → restart
-        assert_eq!(sim.tick(), 0, "a new press after release restarts again");
+        assert!(!sim.step(&neutral_for(&sim)), "release: no restart");
+        assert!(sim.step(&held), "a new press after release restarts again");
     }
 
     #[test]
@@ -1870,13 +1914,14 @@ mod tests {
         // applies the same RESTART on the same tick).
         let mut a = Sim::new(0x5151, &players(2));
         let mut b = Sim::new(0x5151, &players(2));
+        let mut restarts = 0u32;
         for t in 0..120u64 {
             let mut inputs = BTreeMap::new();
             // Both players move; player 1 presses R once at tick 40.
             let restart_bit = if t == 40 { buttons::RESTART } else { 0 };
             inputs.insert(PlayerId(0), Input::new(0.4, 1.0, 0.2, 0));
             inputs.insert(PlayerId(1), Input::new(-0.3, 1.0, -0.1, restart_bit));
-            a.step(&inputs);
+            restarts += u32::from(a.step(&inputs));
             b.step(&inputs);
             assert_eq!(
                 a.state_hash(),
@@ -1884,11 +1929,42 @@ mod tests {
                 "peers must stay bit-identical across a restart (tick {t})"
             );
         }
-        // And the restart actually happened: by tick 41 the sim is freshly at a low tick,
-        // not 41 ticks deep.
-        assert!(
-            a.tick() < 120,
-            "the mid-run restart rewound the tick counter"
+        // Non-vacuous: the restart actually fired, and the tick stayed monotone through it.
+        assert_eq!(restarts, 1, "the mid-run restart fired exactly once");
+        assert_eq!(a.tick(), 120, "a restart never rewinds the tick");
+    }
+
+    #[test]
+    fn restart_grants_a_fresh_startup_grace() {
+        // The grace window counts from the ROUND start, not tick 0 — a restart deep into
+        // a match must give the fresh round its full crab head-start, or the crab would
+        // be instantly armed and grab anyone respawned near it. Run well past the initial
+        // grace, restart, park the player ON the crab, and assert the grace holds for
+        // exactly STARTUP_GRACE_TICKS before the grab lands.
+        let mut sim = Sim::new(0, &players(1));
+        let neutral = neutral_for(&sim);
+        for _ in 0..(3 * STARTUP_GRACE_TICKS) {
+            sim.step(&neutral);
+        }
+        let mut restart = BTreeMap::new();
+        restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
+        assert!(sim.step(&restart), "the restart fires");
+        // Harshest case: the player stands exactly on the restarted crab's spawn.
+        let crab0 = sim.crab().pos();
+        sim.players.get_mut(&PlayerId(0)).unwrap().pos = crab0;
+        for i in 0..STARTUP_GRACE_TICKS {
+            sim.step(&neutral);
+            assert_eq!(
+                sim.player(PlayerId(0)).unwrap().status(),
+                PlayerStatus::Alive,
+                "no grab during the post-restart grace (tick {i} into the round)"
+            );
+        }
+        sim.step(&neutral);
+        assert_eq!(
+            sim.player(PlayerId(0)).unwrap().status(),
+            PlayerStatus::Downed,
+            "the crab arms once the post-restart grace ends"
         );
     }
 

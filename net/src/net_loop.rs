@@ -927,7 +927,7 @@ mod tests {
             // windowed ServerAuth arm's flow, minus the bevy crab pump (no rapier body here).
             let server = coord.server_mut().expect("solo runs an internal server");
             while server.next_tick_ready() {
-                let bytes = server.step_next(None);
+                let bytes = server.step_next(None).snapshot;
                 let snap =
                     crate::snapshot::CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes");
                 ls.apply_core_snapshot(snap);
