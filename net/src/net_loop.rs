@@ -24,9 +24,9 @@ use iroh::EndpointId;
 use crate::articulation::CrabArticulation;
 use crate::formation::{Formation, LobbyControl, early_peer_msgs, form_match};
 use crate::lockstep::{Lockstep, PeerMsg, TickMsg};
-use crate::snapshot::CoreSnapshot;
 use crate::server::{self, Admission, JoinRequest, Server, may_admit_joiner};
 use crate::sim::PlayerId;
+use crate::snapshot::CoreSnapshot;
 use crate::telemetry::{TelemetryEvent, TelemetrySender};
 use crate::transport::{self, PeerWire, Session};
 
@@ -75,9 +75,10 @@ pub struct NetDriver {
     /// checkpoint/resolvable model.
     sync: crate::SyncVerdict,
     /// OUR policy-weights digest and crab-asset digest (the values, not just the synced bools).
-    /// The host gates a mid-game joiner on these — [`crate::server::may_admit_joiner`] requires the
-    /// joiner's digests to equal ours, else a LOUD refusal (Stage 3, rl#151). A client never reads
-    /// them (only the host admits).
+    /// The host gates a mid-game joiner on these — [`crate::server::may_admit_joiner`] requires a
+    /// non-zero `weights_digest` of the HOST itself (the self-gate; the joiner's brain is never
+    /// executed, rl#206) and the joiner's asset digest to equal ours, else a LOUD refusal (Stage 3,
+    /// rl#151). A client never reads them (only the host admits).
     weights_digest: u64,
     asset_digest: u64,
 }
@@ -162,7 +163,10 @@ impl NetDriver {
                         // loudly (its client error-logs a mid-match Refuse), rather than let it
                         // spectate with dead controls (rl#198). A fresh joiner is untouched: it
                         // was never in `departed`.
-                        self.refuse_joiner(from.from, "you were dropped from the match (connection lost) — rejoin");
+                        self.refuse_joiner(
+                            from.from,
+                            "you were dropped from the match (connection lost) — rejoin",
+                        );
                     }
                 }
                 // A would-be joiner dialing the live match (Stage 3) — surfaced for the coordinator
@@ -176,7 +180,8 @@ impl NetDriver {
         (inputs, joins)
     }
 
-    /// (Host) The host's OWN digests, the gate a mid-game joiner must match
+    /// (Host) The host's OWN digests, feeding the mid-game admission gate: the weights digest is
+    /// the host self-gate, the asset digest the equality a joiner must match
     /// ([`crate::server::may_admit_joiner`]).
     pub fn local_digests(&self) -> (u64, u64) {
         (self.weights_digest, self.asset_digest)
@@ -207,8 +212,10 @@ impl NetDriver {
     /// (Host) LOUDLY refuse a would-be joiner `eid` with `reason` (a digest mismatch) — a typed
     /// turn-away, never a silent drop onto a wrong crab. Stage 3.
     pub fn refuse_joiner(&self, eid: EndpointId, reason: &str) {
-        self.rt
-            .block_on(self.session.send(eid, &transport::Refuse(reason.to_string())));
+        self.rt.block_on(
+            self.session
+                .send(eid, &transport::Refuse(reason.to_string())),
+        );
     }
 
     /// (Host) Broadcast the host-authoritative [`CoreSnapshot`] DOWN to every client (rl#151
@@ -223,7 +230,8 @@ impl NetDriver {
     /// 2 windowed), beside the snapshot, so a remote client renders the host's exact crab pose
     /// without simulating physics. Non-blocking, like [`Self::broadcast_snapshot`].
     pub fn broadcast_articulation(&self, articulation: &CrabArticulation) {
-        self.rt.block_on(self.session.broadcast_articulation(articulation));
+        self.rt
+            .block_on(self.session.broadcast_articulation(articulation));
     }
 
     /// (Host) The endpoints we currently hold a link to — the sync view of
@@ -459,7 +467,7 @@ pub fn depart_gone_peers(
 }
 
 /// Gate + admit each mid-game `joins` request on the host (Stage 3, rl#151). For each joiner:
-/// verify its weight/collider digests against the host's ([`may_admit_joiner`]); on a match,
+/// verify the host is armed and the joiner's collider digest matches ([`may_admit_joiner`]); then,
 /// allocate the stable lowest-free [`PlayerId`] ([`Server::admit`] — which schedules the roster
 /// change on the authoritative server), record its endpoint→pid append-only, and UNICAST the
 /// joiner its [`Admission`] (incumbents learn the new roster from the next snapshot). On a
@@ -518,7 +526,6 @@ pub enum MatchResult {
     /// `Cancelled` is "play nothing, go back".
     Cancelled,
 }
-
 
 /// Bind the LAN endpoint, run the shared [`form_match`] cold-start (the membership
 /// barrier), and either return a ready [`Lockstep`] + the [`NetDriver`] that pumps its
@@ -739,8 +746,8 @@ fn connect_and_form_inner(
 const JOIN_WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The outcome of [`connect_and_join`]: a mid-game join either took (a ready joiner [`Lockstep`] +
-/// its client [`NetDriver`]), was REFUSED by the host (a weight/collider digest mismatch — surfaced,
-/// not silent), or the host was UNREACHABLE / never answered.
+/// its client [`NetDriver`]), was REFUSED by the host (an unarmed host or a collider-digest
+/// mismatch — surfaced, not silent), or the host was UNREACHABLE / never answered.
 pub enum JoinResult {
     Joined(Box<(Lockstep, NetDriver)>),
     Refused(String),
@@ -778,12 +785,12 @@ async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVe
 }
 
 /// Dial INTO a live match as a host-authoritative mid-game joiner (GCR MP incr 4, rl#151) — the
-/// dialing analogue of [`connect_and_form`]. Connect to `host`, send our weight/collider digests as
+/// dialing analogue of [`connect_and_form`]. Connect to `host`, send our collider digest as
 /// a [`JoinRequest`], and await the host's verdict: admitted (become a remote-adopt
 /// [`Coordinator::Client`] that boots from the host's next authoritative snapshot — the host spawns
 /// us into its LIVE round at `effective_tick`, so we drop into the ongoing match rather than
 /// resetting it; the `join_at` [`Lockstep`] is only the placeholder cursors the adopted snapshot
-/// supersedes), refused (a digest mismatch OR a zero-digest host the gate turned away LOUDLY —
+/// supersedes), refused (a collider mismatch OR a zero-digest host the gate turned away LOUDLY —
 /// relayed, never a silent wrong/fake-crab), or unreachable. `seed` is the shared [`crate::sim`]
 /// match constant every peer holds.
 pub fn connect_and_join(
@@ -811,7 +818,6 @@ pub fn connect_and_join(
             .send(
                 host,
                 &JoinRequest {
-                    weights_digest: local_weights_digest,
                     asset_digest: local_asset_digest,
                 },
             )
@@ -900,7 +906,6 @@ pub async fn connect_telemetry(
     }
 }
 
-
 /// The server peer's endpoint: the one holding [`PlayerId(0)`] (the lowest endpoint id). Every
 /// peer computes the same answer from the frozen map, so the star agrees on its center with no
 /// negotiation. The map is non-empty (we are always in it), so the lookup always resolves.
@@ -936,7 +941,10 @@ mod tests {
             // The input goes UP to the internal server; with a roster of one there are no OTHER
             // players' inputs and no joins.
             let exch = coord.exchange(me, msg);
-            assert!(exch.snapshots.is_empty(), "the solo/host arm returns state empty");
+            assert!(
+                exch.snapshots.is_empty(),
+                "the solo/host arm returns state empty"
+            );
             // The server steps its OWN sim and the local client ADOPTS each emitted snapshot — the
             // windowed ServerAuth arm's flow, minus the bevy crab pump (no rapier body here).
             let server = coord.server_mut().expect("solo runs an internal server");

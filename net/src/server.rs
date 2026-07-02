@@ -48,17 +48,14 @@ pub struct Admission {
 /// A would-be joiner's credentials, sent UP to the host the moment it dials a live match (Stage 3,
 /// rl#151). The host gates admission on these BEFORE allocating a [`PlayerId`] and REFUSES
 /// LOUDLY, never silently dropping a joiner onto a mismatched body ([`may_admit_joiner`]; rl#114
-/// refuse-rather-than-fake). What each digest actually protects under host-auth: the ASSET
-/// equality is load-bearing (the joiner renders the crab it builds from its own model — a
-/// different sally.glb is a visibly wrong Sally); the WEIGHTS equality is a conservative
-/// fleet-sameness check — the joiner never executes the brain (it adopts host snapshots), so
-/// the real weights guard is the host-side [`AdmissionRefusal::HostNotArmed`] self-gate.
-/// Candidate de-slop: collapse the weights equality to that self-gate (formation already did,
-/// rl#199).
+/// refuse-rather-than-fake). Only the ASSET digest travels: it is the load-bearing equality (the
+/// joiner renders the crab it builds from its own model — a different sally.glb is a visibly
+/// wrong Sally). The joiner's WEIGHTS are deliberately absent — a joiner never executes the
+/// brain (it adopts host snapshots and renders host articulation), so the one weights guard is
+/// the host-side [`AdmissionRefusal::HostNotArmed`] self-gate, matching formation's collapse of
+/// the same invariant (rl#199, rl#206).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinRequest {
-    /// FNV digest of the joiner's policy weights (`0` = no checkpoint).
-    pub weights_digest: u64,
     /// Digest of the joiner's crab/collider assets — must equal the host's, or the joiner builds
     /// and renders a different-shaped crab.
     pub asset_digest: u64,
@@ -79,8 +76,6 @@ pub enum AdmissionRefusal {
     /// the equality checks so a zero-digest host reports THIS, not a spurious mismatch. A unit
     /// variant — the digest is `0` by definition of the branch, so carrying it would be dead weight.
     HostNotArmed,
-    /// The joiner's policy-weights digest differs from the host's.
-    WeightsMismatch { host: u64, joiner: u64 },
     /// The joiner's crab-asset/collider digest differs from the host's.
     AssetsMismatch { host: u64, joiner: u64 },
 }
@@ -93,10 +88,6 @@ impl std::fmt::Display for AdmissionRefusal {
                 "host is not running the real trained Sally (its weights digest is 0 — a \
                  failed/absent checkpoint); refusing to admit a joiner into a fake-crab match"
             ),
-            AdmissionRefusal::WeightsMismatch { host, joiner } => write!(
-                f,
-                "policy-weights digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — different brain"
-            ),
             AdmissionRefusal::AssetsMismatch { host, joiner } => write!(
                 f,
                 "crab-asset digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — different Sally/colliders"
@@ -107,13 +98,14 @@ impl std::fmt::Display for AdmissionRefusal {
 
 /// The admission gate: may a joiner advertising `req` enter a match the host runs on
 /// `(host_weights, host_assets)`? `Ok(())` only when the HOST itself runs the real Sally
-/// (`host_weights != 0`) AND both digests match exactly. The host self-gate is checked FIRST so a
-/// zero-digest host is turned away as [`AdmissionRefusal::HostNotArmed`] — not a spurious mismatch —
-/// and, critically, so two both-missing peers can't pass the equality check on `0 == 0` and admit
-/// each other into a fake-crab match ([[real-sally-definition]], incr 4). Then weights (before
-/// assets, so a double mismatch reports the brain — the more fundamental disagreement). The
-/// host→joiner analogue of the formation-time `may_arm_external_crab` shared-asset gate, but
-/// per-joiner and fail-LOUD rather than a silent disarm.
+/// (`host_weights != 0`) AND the asset digests match exactly. The host self-gate is checked FIRST
+/// — a zero-digest host is turned away as [`AdmissionRefusal::HostNotArmed`] before any equality,
+/// because under host-auth the host serves the crab pose to everyone, so ITS brain is the only
+/// one that matters ([[real-sally-definition]], incr 4). The joiner's brain is deliberately
+/// ungated (rl#206): a joiner never executes it, exactly as a cold-start formation client never
+/// does (rl#199) — one rule per invariant. The host→joiner analogue of the formation-time
+/// `may_arm_external_crab` shared-asset gate, but per-joiner and fail-LOUD rather than a silent
+/// disarm.
 pub fn may_admit_joiner(
     host_weights: u64,
     host_assets: u64,
@@ -121,12 +113,6 @@ pub fn may_admit_joiner(
 ) -> Result<(), AdmissionRefusal> {
     if host_weights == 0 {
         return Err(AdmissionRefusal::HostNotArmed);
-    }
-    if req.weights_digest != host_weights {
-        return Err(AdmissionRefusal::WeightsMismatch {
-            host: host_weights,
-            joiner: req.weights_digest,
-        });
     }
     if req.asset_digest != host_assets {
         return Err(AdmissionRefusal::AssetsMismatch {
@@ -284,7 +270,8 @@ impl Server {
     /// crab pump, enqueues and steps in the same pass).
     pub fn enqueue_for_step(&mut self, sets: &[TickSet]) {
         for set in sets {
-            self.pending_step.push_back((set.apply_tick, set.inputs.clone()));
+            self.pending_step
+                .push_back((set.apply_tick, set.inputs.clone()));
         }
     }
 
@@ -401,11 +388,12 @@ impl Server {
     /// now waiting on that tick's missing client, exactly the wait the clients are spared).
     fn drain_complete(&mut self) -> Vec<TickSet> {
         let mut out = Vec::new();
-        while self
-            .ledger
-            .get(&self.next_emit)
-            .is_some_and(|t| self.roster.at(self.next_emit).iter().all(|p| t.contains_key(p)))
-        {
+        while self.ledger.get(&self.next_emit).is_some_and(|t| {
+            self.roster
+                .at(self.next_emit)
+                .iter()
+                .all(|p| t.contains_key(p))
+        }) {
             let tick = self.next_emit;
             let inputs = self.ledger.remove(&tick).expect("just checked present");
             out.push(TickSet {
@@ -428,7 +416,6 @@ impl Server {
             let _ = self.record(pm.pid, pm.msg);
         }
     }
-
 }
 
 /// The role-agnostic core of one SERVER tick, shared by the sync windowed driver
@@ -473,7 +460,10 @@ mod tests {
     }
 
     fn tickmsg(apply_tick: u64, s: f32) -> TickMsg {
-        TickMsg { apply_tick, input: input(s) }
+        TickMsg {
+            apply_tick,
+            input: input(s),
+        }
     }
 
     /// One client (solo): every input completes its tick immediately, emitted in order from the
@@ -587,18 +577,32 @@ mod tests {
         let mut s = srv(42, &ids(2));
         // P0 (the host) files tick 0; P1 never will — the exact freeze state.
         let none = s.record(PlayerId(0), tickmsg(0, 1.0));
-        assert!(none.is_empty(), "tick 0 stalls on the departed player's input");
+        assert!(
+            none.is_empty(),
+            "tick 0 stalls on the departed player's input"
+        );
         // P1's link dies. Departure releases tick 0 with a neutral backfill for P1.
         let sets = s.depart(PlayerId(1));
         assert_eq!(sets.len(), 1, "the stalled tick releases on departure");
         assert_eq!(sets[0].apply_tick, 0);
-        assert_eq!(sets[0].inputs[&PlayerId(1)], Input::default(), "missing input backfilled neutral");
+        assert_eq!(
+            sets[0].inputs[&PlayerId(1)],
+            Input::default(),
+            "missing input backfilled neutral"
+        );
         assert_eq!(s.roster(), &[PlayerId(0)], "the roster shrank");
         // From here the match ticks on the host alone — no trace of the departed player.
         for t in 1..5 {
             let sets = s.record(PlayerId(0), tickmsg(t, 1.0));
-            assert_eq!(sets.len(), 1, "post-departure ticks complete on the survivor alone");
-            assert!(!sets[0].inputs.contains_key(&PlayerId(1)), "no stray departed entry");
+            assert_eq!(
+                sets.len(),
+                1,
+                "post-departure ticks complete on the survivor alone"
+            );
+            assert!(
+                !sets[0].inputs.contains_key(&PlayerId(1)),
+                "no stray departed entry"
+            );
         }
     }
 
@@ -614,7 +618,10 @@ mod tests {
         let _ = s.record(PlayerId(1), tickmsg(1, -1.0));
         let _ = s.record(PlayerId(1), tickmsg(3, 1.0));
         let sets = s.depart(PlayerId(1));
-        assert!(sets.is_empty(), "the cursor tick still awaits the survivor's input");
+        assert!(
+            sets.is_empty(),
+            "the cursor tick still awaits the survivor's input"
+        );
         for t in 1..5 {
             let sets = s.record(PlayerId(0), tickmsg(t, 0.5));
             assert_eq!(sets.len(), 1, "each tick completes on the survivor alone");
@@ -637,7 +644,10 @@ mod tests {
         // the neutral backfill (only genuinely missing ticks are fabricated).
         let _ = s.record(PlayerId(1), tickmsg(1, 0.7));
         let sets = s.depart(PlayerId(1));
-        assert!(sets.is_empty(), "every tick still awaits P0 (and later the joiner)");
+        assert!(
+            sets.is_empty(),
+            "every tick still awaits P0 (and later the joiner)"
+        );
         assert_eq!(
             s.roster(),
             &[PlayerId(0), PlayerId(2)],
@@ -684,11 +694,21 @@ mod tests {
         let _ = s.record(PlayerId(0), tickmsg(0, 0.0));
         let first = s.depart(PlayerId(1));
         assert_eq!(first.len(), 1, "departure releases the stalled tick");
-        assert!(s.depart(PlayerId(1)).is_empty(), "a repeat departure is a no-op");
-        assert!(s.depart(PlayerId(9)).is_empty(), "departing a stranger is a no-op");
+        assert!(
+            s.depart(PlayerId(1)).is_empty(),
+            "a repeat departure is a no-op"
+        );
+        assert!(
+            s.depart(PlayerId(9)).is_empty(),
+            "departing a stranger is a no-op"
+        );
         assert_eq!(s.roster(), &[PlayerId(0)]);
         let adm = s.admit();
-        assert_eq!(adm.pid, PlayerId(1), "the departed id is free for the next joiner");
+        assert_eq!(
+            adm.pid,
+            PlayerId(1),
+            "the departed id is free for the next joiner"
+        );
     }
 
     /// The sim side of departure (rl#198): stepping through the departure boundary DESPAWNS the
@@ -710,10 +730,22 @@ mod tests {
         let sets = s.record(PlayerId(0), tickmsg(1, 1.0));
         s.enqueue_for_step(&sets);
         let snap = CoreSnapshot::from_bytes(&s.step_next(None)).expect("snapshot decodes");
-        assert_eq!(snap.tick, 2, "the round kept its live tick — departure never resets");
-        assert!(!snap.players.contains_key(&PlayerId(1)), "the leaver is despawned");
-        assert!(!snap.roster.contains(&PlayerId(1)), "the wire roster shrank");
-        assert!(!s.sim().has_player(PlayerId(1)), "the authoritative sim dropped it");
+        assert_eq!(
+            snap.tick, 2,
+            "the round kept its live tick — departure never resets"
+        );
+        assert!(
+            !snap.players.contains_key(&PlayerId(1)),
+            "the leaver is despawned"
+        );
+        assert!(
+            !snap.roster.contains(&PlayerId(1)),
+            "the wire roster shrank"
+        );
+        assert!(
+            !s.sim().has_player(PlayerId(1)),
+            "the authoritative sim dropped it"
+        );
         assert!(s.sim().has_player(PlayerId(0)), "the survivor plays on");
     }
 
@@ -725,13 +757,23 @@ mod tests {
         let a = s.admit();
         assert_eq!(a.pid, PlayerId(2), "the lowest id not already in use");
         assert_eq!(a.roster, vec![PlayerId(0), PlayerId(1), PlayerId(2)]);
-        assert!(a.effective_tick >= JOIN_LEAD, "a join lands at least JOIN_LEAD ahead");
-        assert_eq!(s.roster(), &[PlayerId(0), PlayerId(1), PlayerId(2)], "roster grew, ids 0/1 kept");
+        assert!(
+            a.effective_tick >= JOIN_LEAD,
+            "a join lands at least JOIN_LEAD ahead"
+        );
+        assert_eq!(
+            s.roster(),
+            &[PlayerId(0), PlayerId(1), PlayerId(2)],
+            "roster grew, ids 0/1 kept"
+        );
         // A second admit before any tick emits still gets a distinct, strictly-later effective tick
         // (the append-only invariant) and the next free id — the incumbents are never renumbered.
         let b = s.admit();
         assert_eq!(b.pid, PlayerId(3));
-        assert!(b.effective_tick > a.effective_tick, "back-to-back joins don't collide");
+        assert!(
+            b.effective_tick > a.effective_tick,
+            "back-to-back joins don't collide"
+        );
     }
 
     /// A scheduled join shifts the completeness requirement on its tick: ticks before it complete on
@@ -747,7 +789,8 @@ mod tests {
             let _ = s.record(PlayerId(0), tickmsg(pre, 0.0));
             let sets = s.record(PlayerId(1), tickmsg(pre, 0.0));
             assert!(
-                sets.iter().any(|set| set.apply_tick == pre && set.inputs.len() == 2),
+                sets.iter()
+                    .any(|set| set.apply_tick == pre && set.inputs.len() == 2),
                 "a pre-join tick completes on the two incumbents alone"
             );
         }
@@ -755,63 +798,57 @@ mod tests {
         // from here — there is no gap left, so this isolates the roster requirement).
         let _ = s.record(PlayerId(0), tickmsg(t, 0.0));
         let none = s.record(PlayerId(1), tickmsg(t, 0.0));
-        assert!(none.is_empty(), "the join tick stalls until the joiner's input arrives");
+        assert!(
+            none.is_empty(),
+            "the join tick stalls until the joiner's input arrives"
+        );
         let sets = s.record(PlayerId(2), tickmsg(t, 0.0));
         assert!(
-            sets.iter().any(|set| set.apply_tick == t && set.inputs.len() == 3),
+            sets.iter()
+                .any(|set| set.apply_tick == t && set.inputs.len() == 3),
             "the join tick emits complete with all three players once the joiner is in"
         );
     }
 
-    /// The admission gate admits only a digest-matched joiner and refuses (loudly, typed) on either
-    /// mismatch — the host→joiner analogue of the formation shared-asset gate, fail-LOUD per joiner.
+    /// The admission gate: an armed host admits an asset-matched joiner regardless of the joiner's
+    /// brain (the joiner never executes one — rl#206) and refuses an asset mismatch loudly, typed —
+    /// the host→joiner analogue of the formation shared-asset gate, fail-LOUD per joiner.
     #[test]
-    fn admission_gate_admits_match_and_refuses_each_mismatch() {
+    fn admission_gate_admits_asset_match_and_refuses_mismatch() {
         let (hw, ha) = (0xB7A1u64, 0x5A11_2233u64);
         assert_eq!(
-            may_admit_joiner(hw, ha, &JoinRequest { weights_digest: hw, asset_digest: ha }),
+            may_admit_joiner(hw, ha, &JoinRequest { asset_digest: ha }),
             Ok(()),
-            "matching weights AND assets are admitted"
+            "an armed host admits a matching-asset joiner"
         );
         assert_eq!(
-            may_admit_joiner(hw, ha, &JoinRequest { weights_digest: hw ^ 1, asset_digest: ha }),
-            Err(AdmissionRefusal::WeightsMismatch { host: hw, joiner: hw ^ 1 }),
-            "a different brain is refused"
-        );
-        assert_eq!(
-            may_admit_joiner(hw, ha, &JoinRequest { weights_digest: hw, asset_digest: ha ^ 1 }),
-            Err(AdmissionRefusal::AssetsMismatch { host: ha, joiner: ha ^ 1 }),
+            may_admit_joiner(
+                hw,
+                ha,
+                &JoinRequest {
+                    asset_digest: ha ^ 1
+                }
+            ),
+            Err(AdmissionRefusal::AssetsMismatch {
+                host: ha,
+                joiner: ha ^ 1
+            }),
             "a different Sally/colliders is refused"
         );
-        // A double mismatch reports the brain first (the more fundamental disagreement).
-        assert!(matches!(
-            may_admit_joiner(hw, ha, &JoinRequest { weights_digest: hw ^ 1, asset_digest: ha ^ 1 }),
-            Err(AdmissionRefusal::WeightsMismatch { .. })
-        ));
     }
 
     /// The relocated real-Sally host self-gate (rl#151 incr 4): a host whose OWN weights digest is 0
-    /// (a failed/absent checkpoint — the fake rest-pose crab) is refused as [`HostNotArmed`] BEFORE
-    /// the equality checks. Crucially this closes the `0 == 0` hole — two both-missing peers can no
-    /// longer pass the digest-equality check and admit each other into a fake-crab match — so the
-    /// weights guarantee lockstep enforced symmetrically survives host-auth's removal of the
-    /// peer-symmetric run ([[real-sally-definition]], [[silent-fallback-antipattern]]).
+    /// (a failed/absent checkpoint — the fake rest-pose crab) refuses every joiner as
+    /// [`HostNotArmed`], even an asset-matched one. Under host-auth the host serves the crab pose
+    /// to everyone, so this single gate is what keeps a fake-crab match from ever admitting anyone
+    /// ([[real-sally-definition]], [[silent-fallback-antipattern]]).
     #[test]
-    fn zero_digest_host_is_refused_before_the_equality_check() {
+    fn zero_digest_host_refuses_every_joiner() {
         let ha = 0x5A11_2233u64;
-        // The 0 == 0 hole: without the self-gate this would pass (no mismatch) and admit a
-        // fake-crab match. The self-gate makes it HostNotArmed instead.
         assert_eq!(
-            may_admit_joiner(0, ha, &JoinRequest { weights_digest: 0, asset_digest: ha }),
+            may_admit_joiner(0, ha, &JoinRequest { asset_digest: ha }),
             Err(AdmissionRefusal::HostNotArmed),
-            "a zero-digest host can't admit even a zero-digest joiner (no fake-crab match)"
-        );
-        // A zero-digest host reports HostNotArmed, not a spurious weights mismatch, even when the
-        // joiner runs a real brain.
-        assert_eq!(
-            may_admit_joiner(0, ha, &JoinRequest { weights_digest: 0xB7A1, asset_digest: ha }),
-            Err(AdmissionRefusal::HostNotArmed),
-            "the self-gate is checked first, so the host's own failure is what's reported"
+            "an unarmed host can't admit anyone into its fake-crab match"
         );
     }
 
@@ -836,7 +873,10 @@ mod tests {
         // sim-stepping equivalence the increment changes, independent of the physics engine the
         // live driver actually pumps (which feeds the SAME pose into both arms — see `drive_lockstep`).
         let pose_at = |tick: u64| CrabPose {
-            pos: Pos { x: 700 + tick as i64 * 11, z: -300 - tick as i64 * 7 },
+            pos: Pos {
+                x: 700 + tick as i64 * 11,
+                z: -300 - tick as i64 * 7,
+            },
             yaw: (tick as i32).wrapping_mul(4096),
             digest: tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xABCD,
         };
@@ -881,7 +921,8 @@ mod tests {
                 server.enqueue_for_step(&sets);
                 while server.next_tick_ready() {
                     let bytes = server.step_next(Some(pose_at(server.sim().tick())));
-                    let snap = CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
+                    let snap =
+                        CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
                     client.apply_core_snapshot(snap);
                     server_hashes.push((server.sim().tick(), server.sim().state_hash()));
                     // The client faithfully mirrors the authoritative CARRIED state. It can't fold
@@ -935,7 +976,10 @@ mod tests {
         // A crab pose walked steadily away from spawn, so "crab is at its live pose, not reset" is
         // unambiguous. Fed to `step_next` as the authoritative body pose each tick.
         let pose_at = |tick: u64| CrabPose {
-            pos: Pos { x: 5000 + tick as i64 * 13, z: -4000 - tick as i64 * 9 },
+            pos: Pos {
+                x: 5000 + tick as i64 * 13,
+                z: -4000 - tick as i64 * 9,
+            },
             yaw: (tick as i32).wrapping_mul(2048),
             digest: tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x1234,
         };
@@ -970,25 +1014,51 @@ mod tests {
         let (jpid, eff, _) = joiner.expect("a joiner was admitted");
         // Snapshot ticks are strictly increasing — no reset to 0 anywhere across the join.
         for w in snaps.windows(2) {
-            assert!(w[1].tick > w[0].tick, "the tick is monotonic — the join never resets the round");
+            assert!(
+                w[1].tick > w[0].tick,
+                "the tick is monotonic — the join never resets the round"
+            );
         }
         // The pre-join snapshot AT the effective tick (produced by stepping tick eff-1, when the
         // roster is still host-only) does NOT carry the joiner.
-        let before = snaps.iter().find(|s| s.tick == eff).expect("the sim stepped up to eff");
-        assert!(!before.players.contains_key(&jpid), "no joiner before its effective tick");
+        let before = snaps
+            .iter()
+            .find(|s| s.tick == eff)
+            .expect("the sim stepped up to eff");
+        assert!(
+            !before.players.contains_key(&jpid),
+            "no joiner before its effective tick"
+        );
         // Stepping tick `eff` spawns the joiner into the LIVE sim, so the next snapshot carries it.
-        let after = snaps.iter().find(|s| s.tick == eff + 1).expect("the sim stepped through eff");
-        assert!(after.players.contains_key(&jpid), "the joiner appears in the snapshot at its entry");
+        let after = snaps
+            .iter()
+            .find(|s| s.tick == eff + 1)
+            .expect("the sim stepped through eff");
+        assert!(
+            after.players.contains_key(&jpid),
+            "the joiner appears in the snapshot at its entry"
+        );
         assert_eq!(
             after.players[&jpid].status(),
             crate::sim::PlayerStatus::Alive,
             "the joiner spawns Alive"
         );
-        assert!(after.roster.contains(&jpid), "the snapshot roster carries the joiner");
+        assert!(
+            after.roster.contains(&jpid),
+            "the snapshot roster carries the joiner"
+        );
         // The crab is at its LIVE walked pose for that tick — the round kept running, NOT reset to
         // spawn. This is the 509 fix: the joiner adopts an ONGOING crab, no round-boundary rebuild.
-        assert_eq!(after.crab.pos(), pose_at(eff).pos, "the crab is at its live pose at tick eff");
-        assert_ne!(after.crab.pos(), crab_spawn, "the crab did NOT reset to spawn (no lockstep rebuild)");
+        assert_eq!(
+            after.crab.pos(),
+            pose_at(eff).pos,
+            "the crab is at its live pose at tick eff"
+        );
+        assert_ne!(
+            after.crab.pos(),
+            crab_spawn,
+            "the crab did NOT reset to spawn (no lockstep rebuild)"
+        );
         assert!(eff > JOIN_LEAD, "the join genuinely lands mid-round");
     }
 }
