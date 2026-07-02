@@ -189,7 +189,12 @@ fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
     let brain = match load_brain_file::<InferBackend>(&paths.brain_file(), device) {
         Ok(brain) => brain,
         Err(BrainLoadError::Envelope(EnvelopeError::Absent)) => return Loaded::Absent,
-        Err(e) => return Loaded::Refused(format!("brain.bin: {e}")),
+        Err(e) => {
+            return Loaded::Refused(format!(
+                "{}: {e}",
+                crate::training::checkpoint::BRAIN_FILENAME
+            ));
+        }
     };
     // A checkpoint from a different rig (e.g. a stale 77-dim brain against the current
     // OBS_SIZE) parses fine here but its mismatched first-layer weight would panic in the
@@ -204,7 +209,8 @@ fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
     match ObsNormalizer::load(&paths.normalizer_path(), brain.arch()) {
         Ok(normalizer) => Loaded::Fit(brain, normalizer),
         Err(e) => Loaded::Refused(format!(
-            "normalizer.bin: {e} (a brain never arms without its paired obs normalizer)"
+            "{}: {e} (a brain never arms without its paired obs normalizer)",
+            crate::training::checkpoint::NORMALIZER_FILENAME
         )),
     }
 }
@@ -269,7 +275,16 @@ impl Policy {
         // — distinguishes a learned behaviour from one the dynamics produce on their own. It
         // never overrides a real checkpoint (a Fit always wins).
         let random_override = std::env::var("RL_RANDOM_POLICY").is_ok_and(|v| v == "1");
-        let state = match load_brain_normalizer(checkpoint_dir, &device) {
+        let loaded = load_brain_normalizer(checkpoint_dir, &device);
+        // The loud refusals fire FIRST, unconditionally — the diagnostic override below
+        // must not swallow the reason (a corrupt/legacy/wrong-rig checkpoint is exactly
+        // what an operator debugging with the random brain needs to see).
+        match &loaded {
+            Loaded::Mismatch(dims) => log_rig_mismatch("play", checkpoint_dir, *dims),
+            Loaded::Refused(why) => log_checkpoint_refusal("play", checkpoint_dir, why),
+            Loaded::Fit(..) | Loaded::Absent => {}
+        }
+        let state = match loaded {
             Loaded::Fit(brain, normalizer) => {
                 info!("play: loaded checkpoint from {}", checkpoint_dir.display());
                 loaded_state(brain, normalizer, checkpoint_digest(checkpoint_dir))
@@ -296,15 +311,8 @@ impl Policy {
                 );
                 PolicyState::Rest
             }
-            Loaded::Mismatch(dims) => {
-                // Wrong checkpoint for this build: refuse to arm, loud + attributable.
-                log_rig_mismatch("play", checkpoint_dir, dims);
-                PolicyState::Rest
-            }
-            Loaded::Refused(why) => {
-                log_checkpoint_refusal("play", checkpoint_dir, &why);
-                PolicyState::Rest
-            }
+            // Refusal already logged above; the state is the (attributed) rest pose.
+            Loaded::Mismatch(_) | Loaded::Refused(_) => PolicyState::Rest,
         };
 
         Self {

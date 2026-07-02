@@ -256,9 +256,18 @@ impl TrainingState {
         // from the loaded record via `io_dims`, the post-load check that replaced the
         // `shape.txt` sidecar — no longer fit this build's rig, so the stale weights are
         // discarded on purpose, loudly.
+        //
+        // LEARNER-ONLY: a rollout worker skips the load entirely. Its brain + obs
+        // normalizer are replaced by the learner's snapshot at the first `begin_horizon`
+        // (a failed load there refuses the horizon), and the return normalizer /
+        // `warm_started` are learner-side state — so a worker read would be K redundant
+        // disk loads that RACE the learner's non-atomic set write (brain lands before
+        // the normalizers), where this abort policy would misfire on a fresh dir.
         let mut warm_started = false;
-        match load_brain_file::<TrainBackend>(&paths.brain_file(), &device) {
-            Ok(loaded) => {
+        match (!worker_mode).then(|| load_brain_file::<TrainBackend>(&paths.brain_file(), &device))
+        {
+            None => {} // worker: no load at all
+            Some(Ok(loaded)) => {
                 let (obs, action) = loaded.io_dims();
                 if crate::policy::dims_fit_rig(obs, action) {
                     info!(
@@ -277,8 +286,8 @@ impl TrainingState {
                 }
             }
             // No brain file: a fresh checkpoint dir — the legitimate cold start.
-            Err(BrainLoadError::Envelope(EnvelopeError::Absent)) => {}
-            Err(e) => panic!(
+            Some(Err(BrainLoadError::Envelope(EnvelopeError::Absent))) => {}
+            Some(Err(e)) => panic!(
                 "REFUSING to train over checkpoint dir {}: brain checkpoint is unusable \
                  ({e}). Cold-starting here would silently discard the trained policy; fix \
                  or move the checkpoint before resuming.",

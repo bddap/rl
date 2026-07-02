@@ -16,7 +16,9 @@ use burn::tensor::backend::{AutodiffBackend, Backend};
 use tracing::warn;
 
 use super::algorithm::{ReturnNormalizer, ReturnNormalizerData};
-use super::envelope::{ArtifactKind, EnvelopeError, read_envelope, write_envelope};
+use super::envelope::{
+    ArtifactKind, EnvelopeError, read_envelope, read_envelope_expecting, write_envelope,
+};
 use crate::bot::arch::{AnyBrain, ArchId};
 
 /// The Adam optimizer over an [`AnyBrain`] on backend `B` — the moments key off leaf
@@ -57,12 +59,23 @@ impl std::fmt::Display for BrainLoadError {
     }
 }
 
+/// A contained panic's message, for attribution in the refusal it becomes.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_string())
+}
+
 /// Decode `payload` as `arch`'s leaf record on `device`. burn's bytes recorder PANICS on
 /// malformed input (it unwraps its internal bincode decode), so the decode is contained
-/// here — the one place record bytes from DISK meet the recorder — and a bad payload
+/// here — where brain record bytes from DISK meet the recorder — and a bad payload
 /// surfaces as an `Err` the callers' refusal policies can act on, never a crash. (The
-/// in-process snapshot/GPU bridges keep their bare recorder calls: they move a live
-/// brain's own bytes, where a decode failure IS a bug worth the panic.)
+/// containment is control-flow only: `catch_unwind` doesn't suppress the panic hook, so
+/// stderr still shows the panic + backtrace before the tidy refusal line. The in-process
+/// snapshot/GPU bridges keep their bare recorder calls: they move a live brain's own
+/// bytes, where a decode failure IS a bug worth the panic.)
 pub(crate) fn decode_brain_payload<B: Backend>(
     arch: ArchId,
     payload: Vec<u8>,
@@ -76,7 +89,7 @@ pub(crate) fn decode_brain_payload<B: Backend>(
             &device,
         )
     }))
-    .map_err(|_| "record bytes do not decode (malformed payload)".to_string())?
+    .map_err(|p| format!("record bytes do not decode: {}", panic_message(p)))?
     .map_err(|e| e.to_string())
 }
 
@@ -209,7 +222,7 @@ pub(crate) fn load_optimizer<B: AutodiffBackend>(
 ) -> CrabOpt<B> {
     use burn::optim::Optimizer;
 
-    let env = match read_envelope(path, ArtifactKind::Optimizer) {
+    let env = match read_envelope_expecting(path, ArtifactKind::Optimizer, expected_arch) {
         Ok(env) => env,
         Err(EnvelopeError::Absent) => {
             // Absent is the EXPECTED case for an older checkpoint, so info, not warn — a
@@ -228,26 +241,29 @@ pub(crate) fn load_optimizer<B: AutodiffBackend>(
             return cold;
         }
     };
-    if env.arch != expected_arch {
-        warn!(
-            "Refusing Adam optimizer state at {}: {} — starting cold",
-            path.display(),
-            EnvelopeError::ArchMismatch {
-                found: env.arch,
-                expected: expected_arch
-            }
-        );
-        return cold;
-    }
-    match BinBytesRecorder::<FullPrecisionSettings>::default().load(env.payload, device) {
-        Ok(record) => {
+    // Contained like `decode_brain_payload`: burn's bytes recorder PANICS on malformed
+    // input, and this artifact's policy is refuse-and-cold, never a crash at resume.
+    let device_owned = device.clone();
+    let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        BinBytesRecorder::<FullPrecisionSettings>::default().load(env.payload, &device_owned)
+    }));
+    match loaded {
+        Ok(Ok(record)) => {
             tracing::info!("Restored Adam optimizer state from {}", path.display());
             cold.load_record(record)
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             warn!(
                 "Failed to decode Adam optimizer record at {}: {e} — starting cold",
                 path.display()
+            );
+            cold
+        }
+        Err(p) => {
+            warn!(
+                "Failed to decode Adam optimizer record at {}: {} — starting cold",
+                path.display(),
+                panic_message(p)
             );
             cold
         }
@@ -282,13 +298,7 @@ pub(crate) fn load_return_normalizer(
     path: &Path,
     expected_arch: ArchId,
 ) -> Result<ReturnNormalizer, EnvelopeError> {
-    let env = read_envelope(path, ArtifactKind::ReturnNormalizer)?;
-    if env.arch != expected_arch {
-        return Err(EnvelopeError::ArchMismatch {
-            found: env.arch,
-            expected: expected_arch,
-        });
-    }
+    let env = read_envelope_expecting(path, ArtifactKind::ReturnNormalizer, expected_arch)?;
     let data: ReturnNormalizerData = bincode::deserialize(&env.payload)
         .map_err(|e| EnvelopeError::Corrupt(format!("return normalizer payload: {e}")))?;
     ReturnNormalizer::from_data(data).ok_or_else(|| {
@@ -534,6 +544,27 @@ mod tests {
         assert!(
             cold3.to_record().is_empty(),
             "a wrong-kind file must leave the optimizer cold"
+        );
+
+        // (d) A VALID envelope whose inner record bytes are corrupt: burn's bytes recorder
+        //     panics on malformed input, so this pins the containment — refuse-and-cold,
+        //     never a crash at resume.
+        write_envelope(
+            &path,
+            ArtifactKind::Optimizer,
+            ArchId::Mlp256,
+            vec![0xde, 0xad, 0xbe, 0xef],
+        )
+        .unwrap();
+        let cold4 = load_optimizer(
+            crab_optimizer::<TrainBackend>(),
+            &path,
+            &device,
+            ArchId::Mlp256,
+        );
+        assert!(
+            cold4.to_record().is_empty(),
+            "a corrupt optimizer payload must leave the optimizer cold, not panic"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

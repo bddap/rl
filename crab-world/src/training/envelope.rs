@@ -230,6 +230,26 @@ pub(crate) fn read_envelope(
     })
 }
 
+/// [`read_envelope`] plus the arch-COHERENCE check for brain-PAIRED artifacts (optimizer,
+/// normalizers): the envelope must be tagged with `expected_arch` — the checkpoint set's
+/// brain's — or the read refuses with [`EnvelopeError::ArchMismatch`]. The one place the
+/// coherence rule is spelled; the brain itself reads via the plain [`read_envelope`]
+/// because its tag IS the authority the others are checked against.
+pub(crate) fn read_envelope_expecting(
+    path: &Path,
+    kind: ArtifactKind,
+    expected_arch: ArchId,
+) -> Result<CheckpointEnvelope, EnvelopeError> {
+    let env = read_envelope(path, kind)?;
+    if env.arch != expected_arch {
+        return Err(EnvelopeError::ArchMismatch {
+            found: env.arch,
+            expected: expected_arch,
+        });
+    }
+    Ok(env)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
