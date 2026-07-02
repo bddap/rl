@@ -176,11 +176,12 @@ async fn run_net(args: Args) -> Result<()> {
                 // nothing, so it decodes and drops it. Only the windowed client applies it.
                 transport::PeerWire::Articulation(_) => {}
                 transport::PeerWire::Beat(_) => {}
-                // This is a FIXED-roster run: the peer set is frozen at discovery and never
-                // grows, so the Stage 3 live-join frames (a joiner's credentials, a welcome,
-                // a refusal) can't legitimately arrive here. Ignore a stray one rather
-                // than mishandle it — the same stance `net_loop`'s formation barrier takes; a
-                // real mid-match join is the running coordinator's job, not this harness.
+                // The roster never GROWS in this run: the peer set is frozen at discovery (it can
+                // only SHRINK on departure, rl#198), so the Stage 3 live-join frames (a joiner's
+                // credentials, a welcome, a refusal) can't legitimately arrive here. Ignore a
+                // stray one rather than mishandle it — the same stance `net_loop`'s formation
+                // barrier takes; a real mid-match join is the running coordinator's job, not this
+                // harness.
                 transport::PeerWire::JoinRequest(_)
                 | transport::PeerWire::Welcome(_)
                 | transport::PeerWire::Refuse(_) => {}
@@ -204,19 +205,14 @@ async fn run_net(args: Args) -> Result<()> {
             // client adopts exactly the state the host holds; there is no peer-symmetric self-step or
             // desync cross-check any more (the host IS the source of truth).
             let mut sets = net::server::host_assemble(srv, me, msg, remote_inputs);
-            // Departures (rl#198), after this tick's drained inputs are recorded — the same
-            // predicate the windowed host runs (`departed_players`): a rostered peer whose link is
-            // gone left the match; drop it and keep ticking rather than waiting on its input
-            // forever (the host-freeze hang).
+            // Departures (rl#198), after this tick's drained inputs are recorded — the SAME
+            // handling the windowed host runs (`depart_gone_peers`): a rostered peer whose link
+            // is gone left the match; drop it and keep ticking rather than waiting on its input
+            // forever (the host-freeze hang). This harness sends no refusals, so the returned
+            // departed endpoints go unused.
             let connected = session.connected_peers().await;
-            for (eid, pid) in net_loop::departed_players(&id_map, me, &connected) {
-                id_map.remove(&eid);
-                println!(
-                    "player {pid:?} ({}) departed — continuing without them",
-                    eid.fmt_short()
-                );
-                sets.extend(srv.depart(pid));
-            }
+            let (dsets, _) = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected);
+            sets.extend(dsets);
             srv.enqueue_for_step(&sets);
             // Headless: weights digest 0, no rapier body → the crab holds spawn, so no pose to inject.
             while srv.next_tick_ready() {
@@ -281,10 +277,10 @@ async fn run_net(args: Args) -> Result<()> {
         if let Some(t) = tel.as_ref() {
             if ls.sim().tick() >= next_tel_tick {
                 next_tel_tick = (ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
-                // Agreed roster size (us + peers) — the same quantity render.rs and the
-                // final snapshot report, so the feed's `roster` field means one thing
+                // LIVE roster size (a departure shrinks it, rl#198) — the same quantity render.rs
+                // and the final snapshot report, so the feed's `roster` field means one thing
                 // across every driver.
-                t.send(TelemetryEvent::tick(ls.sim(), all_ids.len()));
+                t.send(TelemetryEvent::tick(ls.sim(), ls.sim().players().count()));
                 t.send(TelemetryEvent::input(issue_tick, input));
             }
             if !reported_outcome && ls.sim().outcome() != net::sim::Outcome::Ongoing {
@@ -304,7 +300,7 @@ async fn run_net(args: Args) -> Result<()> {
     // A final snapshot so the collector records where this deck ended even if the round
     // never "decided" within run_secs (the common case for a short headless run).
     if let Some(t) = tel.as_ref() {
-        t.send(TelemetryEvent::tick(ls.sim(), all_ids.len()));
+        t.send(TelemetryEvent::tick(ls.sim(), ls.sim().players().count()));
     }
     if all_ids.len() > 1
         && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(TICK_HZ)

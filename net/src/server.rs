@@ -175,8 +175,8 @@ pub struct Server {
     /// (via [`enqueue_for_step`](Server::enqueue_for_step)) so [`step_next`](Server::step_next) can
     /// advance the sim AFTER the driver has pumped that tick's crab physics: the rapier pump needs the
     /// bevy `World` (which this pure core can't hold), so the authoritative step can't run at drain
-    /// time. The headless `game net` host has no bevy world, so it steps straight off `next_tick_ready`
-    /// without the deferral.
+    /// time. The headless `game net` host (no bevy world, no crab pump) enqueues and steps in the
+    /// same pass, so the queue never dwells there.
     pending_step: VecDeque<(u64, BTreeMap<PlayerId, Input>)>,
 }
 
@@ -273,12 +273,12 @@ impl Server {
         self.sim.core_snapshot().to_bytes()
     }
 
-    /// Queue freshly-assembled [`TickSet`]s (from [`host_assemble`]) for the authoritative step, in
-    /// the order they were emitted — the windowed [`Coordinator`](crate::net_loop::Coordinator)
-    /// calls this after assembling so [`step_next`](Server::step_next) can advance the sim once the
-    /// driver has pumped each tick's crab physics. Kept OFF [`drain_complete`](Server::drain_complete)
-    /// so the windowed driver controls exactly when the deferred step runs (the headless `game net`
-    /// host, with no bevy world, steps straight off `next_tick_ready` and never enqueues).
+    /// Queue freshly-assembled [`TickSet`]s (from [`host_assemble`] or [`Server::depart`]) for the
+    /// authoritative step, in the order they were emitted — every host driver calls this after
+    /// assembling so [`step_next`](Server::step_next) can advance the sim once the driver has
+    /// pumped each tick's crab physics. Kept OFF [`drain_complete`](Server::drain_complete) so the
+    /// driver controls exactly when the deferred step runs (the headless `game net` host, with no
+    /// crab pump, enqueues and steps in the same pass).
     pub fn enqueue_for_step(&mut self, sets: &[TickSet]) {
         for set in sets {
             self.pending_step.push_back((set.apply_tick, set.inputs.clone()));
@@ -307,7 +307,7 @@ impl Server {
         let pid = self.lowest_free_pid();
         // Past the emit cursor by JOIN_LEAD, but always strictly after any change already scheduled
         // (two joins admitted before a tick emits would otherwise collide on the same tick).
-        let effective_tick = (self.next_emit + JOIN_LEAD).max(self.roster.latest_change_tick() + 1);
+        let effective_tick = self.roster.earliest_change_at(self.next_emit + JOIN_LEAD);
         let mut roster = self.roster.current().to_vec();
         roster.push(pid);
         self.roster.schedule_change(effective_tick, &roster);
@@ -345,7 +345,7 @@ impl Server {
             return Vec::new();
         }
         let remaining: Vec<PlayerId> = current.iter().copied().filter(|p| *p != pid).collect();
-        let effective_tick = self.next_emit.max(self.roster.latest_change_tick() + 1);
+        let effective_tick = self.roster.earliest_change_at(self.next_emit);
         self.roster.schedule_change(effective_tick, &remaining);
         for t in self.next_emit..effective_tick {
             if self.roster.at(t).contains(&pid) {
@@ -630,6 +630,9 @@ mod tests {
     fn depart_with_a_pending_join_backfills_the_gap() {
         let mut s = srv(42, &ids(2));
         let adm = s.admit(); // P2 joins at adm.effective_tick (= JOIN_LEAD, nothing emitted yet)
+        // P1's REAL input for gap tick 1 is already ledgered when it departs — it must win over
+        // the neutral backfill (only genuinely missing ticks are fabricated).
+        let _ = s.record(PlayerId(1), tickmsg(1, 0.7));
         let sets = s.depart(PlayerId(1));
         assert!(sets.is_empty(), "every tick still awaits P0 (and later the joiner)");
         assert_eq!(
@@ -637,13 +640,15 @@ mod tests {
             &[PlayerId(0), PlayerId(2)],
             "the final roster is survivor + joiner"
         );
-        // Ticks before the join boundary complete on P0 alone (P1 backfilled neutral).
+        // Ticks before the join boundary complete on P0 alone (P1 backfilled neutral, except the
+        // tick it really filed).
         for t in 0..adm.effective_tick {
+            let expect = if t == 1 { input(0.7) } else { Input::default() };
             let sets = s.record(PlayerId(0), tickmsg(t, 0.0));
             assert!(
-                sets.iter().any(|set| set.apply_tick == t
-                    && set.inputs[&PlayerId(1)] == Input::default()),
-                "a pre-boundary tick emits with the leaver neutral-backfilled"
+                sets.iter()
+                    .any(|set| set.apply_tick == t && set.inputs[&PlayerId(1)] == expect),
+                "a pre-boundary tick emits with the leaver's real input where filed, neutral elsewhere"
             );
         }
         // The join tick (still pre-departure-boundary: the removal lands just past the pending
