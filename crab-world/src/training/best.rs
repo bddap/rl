@@ -272,9 +272,7 @@ impl BestKeeper {
             super::fsync_rename(&tmp, &dst)?;
         }
         let sidecar = best_dir.join(REACH_SIDECAR);
-        let tmp = best_dir.join(format!("{REACH_SIDECAR}.tmp"));
-        std::fs::write(&tmp, format!("{}\n", reach.get()))?;
-        super::fsync_rename(&tmp, &sidecar)?;
+        super::atomic_write(&sidecar, format!("{}\n", reach.get()).as_bytes())?;
         Ok(())
     }
 }

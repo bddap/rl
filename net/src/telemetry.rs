@@ -44,8 +44,9 @@ use crate::sim::{Input, Outcome, Sim};
 /// one snapshot per simulated second — [`TICK_HZ`](crate::sim::TICK_HZ) ticks, derived,
 /// not restated — so a round streams a couple events/sec per deck instead of flooding
 /// the collector. Both drivers (`game net` and the windowed client) share this one
-/// constant so their feeds read the same.
-pub const TELEMETRY_TICK_EVERY: u64 = crate::sim::TICK_HZ;
+/// constant so their feeds read the same. Private: [`next_sample_tick`] is the sole
+/// cursor API, so a driver can't hand-roll the boundary formula against it again.
+const TELEMETRY_TICK_EVERY: u64 = crate::sim::TICK_HZ;
 
 /// The first sampling boundary strictly after `now` — the ONE cursor rule every driver
 /// advances its telemetry watermark by (initialize with `next_sample_tick(0)`), so the

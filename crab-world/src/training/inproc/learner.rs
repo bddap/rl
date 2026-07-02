@@ -10,26 +10,26 @@ use super::*;
 /// threads' [`RollOutcome`]s in one place: the per-env buffers the PPO update consumes,
 /// plus the aggregates the log and curriculum read. One struct so the reduction's
 /// accumulators don't smear across the iteration body as a dozen loose locals.
-pub(super) struct MergedRollout {
-    pub(super) rollouts: Vec<RolloutBuffer>,
-    pub(super) samples: u64,
-    pub(super) ticks: u64,
-    pub(super) panics: u32,
+struct MergedRollout {
+    rollouts: Vec<RolloutBuffer>,
+    samples: u64,
+    ticks: u64,
+    panics: u32,
     /// Threads that REFUSED their horizon because the snapshot failed to load (bddap/rl#177),
     /// pooled this iter; surfaced on the log so a recurring load failure can't hide.
-    pub(super) snapshot_load_failures: u32,
+    snapshot_load_failures: u32,
     /// Carapace planar drift-from-spawn this iter as `(sum, count)` over recording-env
     /// ticks, pooled across threads; the log divides it for the mean.
-    pub(super) drift: (f64, u64),
+    drift: (f64, u64),
     /// Per-episode reach tally `(reached, finished)` pooled across threads; feeds the
     /// best-keeper's solid-reach floor and the log's reach fraction.
-    pub(super) reach: (u64, u64),
+    reach: (u64, u64),
     /// Progress-term drops (non-physical deltas the reward zeroed; bddap/rl#175) pooled across
     /// threads this iter; surfaced on the log so a silent reward dropout is visible. 0 normally.
-    pub(super) glitch_drops: u64,
+    glitch_drops: u64,
     /// Non-finite obs elements skipped from the normalizer (bddap/rl#181) pooled across threads
     /// this iter; surfaced on the log so a NaN sensor/physics reading is visible. 0 normally.
-    pub(super) nonfinite_obs: u64,
+    nonfinite_obs: u64,
 }
 
 /// Phase 1 — capture the consistent per-iteration view every thread rolls: the policy
@@ -78,7 +78,7 @@ fn dispatch_horizon(threads: &[RolloutThread], request: &RollRequest) -> Vec<Rol
 /// (counting each sample once, since the master holds the baseline), record its
 /// rewards, and pool its buffers + aggregates. A `Panicked` thread contributes nothing
 /// — no merge, no buffers — so a wedged thread can't corrupt the master.
-pub(super) fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> MergedRollout {
+fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> MergedRollout {
     let mut merged = MergedRollout {
         rollouts: Vec::new(),
         samples: 0,
@@ -484,4 +484,76 @@ pub fn run_learner(
         eprintln!("[learner] Tick budget reached ({total_ticks} ticks) — stopping training.");
     }
     drop(threads);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Shared scratch helpers live beside the other inproc tests.
+    use super::super::tests::{empty_normalizer_increment, scratch_config};
+
+    /// The reduction must ATTRIBUTE each outcome correctly: a `SnapshotLoadFailed` refusal
+    /// (bddap/rl#177) and a `Panicked` thread each contribute NO samples/buffers and are counted
+    /// in their OWN tally, while a `Rolled` thread's aggregates — including the progress-glitch
+    /// count (bddap/rl#175) — flow through. This is the property that keeps a refused/wedged
+    /// horizon from masquerading as honest data. App-free: `merge_rollouts` over hand-built
+    /// outcomes, no rollout thread or GPU.
+    #[test]
+    fn merge_rollouts_attributes_refusals_panics_and_glitches() {
+        let (config, dir) = scratch_config("merge_attr", 2);
+        let mut state = TrainingState::new(&config, None);
+
+        let results = vec![
+            RollOutcome::Rolled {
+                output: HorizonOutput {
+                    envs: vec![],                            // no env buffers → zero samples
+                    increment: empty_normalizer_increment(), // a no-op merge
+                    rewards: vec![1.0],
+                    drift: (0.5, 2),
+                    reach: (1, 3),
+                    glitch_drops: 3,
+                    nonfinite_obs: 7,
+                },
+                ticks: 64,
+            },
+            RollOutcome::SnapshotLoadFailed,
+            RollOutcome::Panicked,
+        ];
+        let merged = merge_rollouts(&mut state, results);
+
+        assert_eq!(
+            merged.snapshot_load_failures, 1,
+            "the refusal is counted, distinct from a panic"
+        );
+        assert_eq!(
+            merged.panics, 1,
+            "the panic is counted, distinct from a refusal"
+        );
+        assert_eq!(
+            merged.samples, 0,
+            "neither a refusal nor a panic contributes samples"
+        );
+        assert!(merged.rollouts.is_empty(), "neither contributes a buffer");
+        assert_eq!(
+            merged.glitch_drops, 3,
+            "the Rolled thread's progress-glitch count flows through"
+        );
+        assert_eq!(
+            merged.nonfinite_obs, 7,
+            "the Rolled thread's non-finite obs count flows through"
+        );
+        assert_eq!(merged.ticks, 64, "only the Rolled thread's ticks count");
+        assert_eq!(
+            merged.drift,
+            (0.5, 2),
+            "the Rolled thread's drift flows through"
+        );
+        assert_eq!(
+            merged.reach,
+            (1, 3),
+            "the Rolled thread's reach flows through"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
