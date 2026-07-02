@@ -1,8 +1,9 @@
-//! The ONE bevy plugin-group recipe every rendered rl surface boots from.
+//! The ONE bevy plugin-group recipe every rendered rl surface boots from (GCR's windowed
+//! client, its offscreen screenshot scaffold, rl-demo's demo + render-to-image arms).
 //!
-//! Was open-coded ×4 (GCR's windowed client, its offscreen screenshot scaffold, and
-//! rl-demo's demo + render-to-image arms) and the copies disagreed on `LogPlugin` —
-//! rl-demo disabled it, the `net` copies kept it. [`base_plugins`] resolves that once.
+//! Sibling recipe: [`crate::bot::headless::headless_stack`] is the SIM-world counterpart
+//! (GPU off, no asset root, compiles with render OFF) — a window/winit change here may
+//! need mirroring there.
 
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
@@ -15,14 +16,20 @@ use bevy::prelude::*;
 ///   `BEVY_ASSET_ROOT` still overrides (deploy). See [`crate::assets`].
 /// - `LogPlugin` DISABLED. Every rl binary installs the shared `otel` subscriber at the
 ///   top of `main` — it owns the process' tracing (stderr fmt + OTLP export) and the
-///   `log`-crate bridge, so `LogPlugin` can only lose the subscriber race: bevy 0.18
-///   `error!`s "already set" and no-ops. The pre-dedup copies disagreed here; disabled
-///   is the one answer (rl-demo's arms already shipped this way).
+///   `log`-crate bridge, so `LogPlugin` could only lose the subscriber race: bevy 0.18
+///   `error!`s "already set" and no-ops.
 /// - `Some(window)`: that window, winit event loop as normal.
 /// - `None`: offscreen — no window but the GPU ON (render-to-image), winit disabled.
 ///   Callers pace frames with their own `ScheduleRunnerPlugin` cadence (the one thing
 ///   the offscreen surfaces genuinely differ on).
 pub fn base_plugins(window: Option<Window>) -> PluginGroupBuilder {
+    // With LogPlugin gone, a caller that skipped `otel::init` would boot with NO
+    // subscriber at all — every log silently dropped, the exact silent-fallback class
+    // this repo bans. Fail at boot naming the fix instead.
+    assert!(
+        tracing::dispatcher::has_been_set(),
+        "install the shared tracing subscriber (otel::init) before base_plugins — LogPlugin is disabled here"
+    );
     let plugins = DefaultPlugins
         .build()
         .set(AssetPlugin {
