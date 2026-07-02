@@ -2,7 +2,7 @@ pub mod world;
 
 #[cfg(feature = "render")]
 pub use world::ArenaVisualsPlugin;
-pub use world::PhysicsWorldPlugin;
+pub use world::{Arena, PhysicsWorldPlugin};
 
 use bevy_rapier3d::math::Vect;
 use bevy_rapier3d::plugin::RapierContextInitialization;

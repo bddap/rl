@@ -130,6 +130,7 @@ pub fn run_eval(checkpoint_dir: &Path, active_ticks: u64, target_distance: f32) 
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
+        arena: crate::physics::Arena::WalledBox,
     });
     app.insert_resource(EvalConfig {
         target_distance,

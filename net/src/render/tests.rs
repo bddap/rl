@@ -148,6 +148,9 @@ fn manual_pump_matches_auto_pump_step_for_step() {
         headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
+            // Models the GCR client's world, so it steps the client's OPEN inference
+            // field (rl#209), not the walled training box.
+            arena: crab_world::physics::Arena::OpenField,
         })
     };
     let mut auto = build();

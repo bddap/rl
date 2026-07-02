@@ -20,17 +20,23 @@ use crate::Visuals;
 use crate::physics::PhysicsWorldPlugin;
 
 /// The dimensions that legitimately differ between headless entry points: how many
-/// envs the world drives, and whether it runs as one of K parallel rollout workers or
-/// on its own. Everything else — the windowless render/winit setup, the production
-/// fixed timestep + contact spring, the disabled log/gamepad plugins, the physics/bot
-/// plugin stack, the one-physics-tick-per-`update()` clock — is identical for all
-/// callers and lives once in [`headless_stack`].
+/// envs the world drives, whether it runs as one of K parallel rollout workers or
+/// on its own, and which arena physics it gets. Everything else — the windowless
+/// render/winit setup, the production fixed timestep + contact spring, the disabled
+/// log/gamepad plugins, the physics/bot plugin stack, the
+/// one-physics-tick-per-`update()` clock — is identical for all callers and lives
+/// once in [`headless_stack`].
 pub struct HeadlessStack {
     /// `NumEnvs` for this world (1 for the demo/tests; `--envs` for a rollout worker).
     pub num_envs: usize,
     /// Whether this world is one of K parallel rollout workers or a standalone world —
     /// the only thing that changes the bevy task-pool / executor setup.
     pub role: WorldRole,
+    /// Which arena physics this world gets: the ±10 m walled training box, or the
+    /// unbounded GCR inference field ([`crate::physics::Arena`]). A headless world that
+    /// models the GCR client (the NN-crab probes, the pump-equivalence test) MUST pick
+    /// `OpenField` so it steps the same world the client does.
+    pub arena: crate::physics::Arena,
 }
 
 /// How a headless world relates to the rest of the process, which decides its bevy
@@ -131,7 +137,7 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
         // the one order that applies the spring — bundled so headless callers can't run
         // physics the demo/training never uses (see physics::CrabPhysicsPlugin).
         .add_plugins(crate::physics::CrabPhysicsPlugin)
-        .add_plugins(PhysicsWorldPlugin)
+        .add_plugins(PhysicsWorldPlugin { arena: cfg.arena })
         .add_plugins(BotPlugin);
     app
 }
@@ -139,11 +145,13 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
 /// A windowless, GPU-less app running the real physics + bot plugins, one fixed
 /// physics tick ([`crate::physics::PHYSICS_DT`]) per `app.update()`. The crab is the
 /// rig-derived one model. Thin wrapper over [`headless_stack`] for the sim tests and
-/// `--check-rest-colliders`.
+/// `--check-rest-colliders` — on the walled TRAINING arena; a world that models the
+/// GCR client must call [`headless_stack`] with `Arena::OpenField` instead.
 pub fn headless_app() -> App {
     headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
+        arena: crate::physics::Arena::WalledBox,
     })
 }
 

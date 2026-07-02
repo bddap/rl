@@ -530,6 +530,7 @@ mod tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
+            arena: crate::physics::Arena::WalledBox,
         });
 
         // Wire the training world the same way the `rl learn` rollout worlds do

@@ -583,8 +583,9 @@ pub(super) fn apply_transforms(
 /// a loop, or inverted flight all look right. The ONE cockpit-view formula, flying EVERY craft (the
 /// plane and the ship) from the shared [`CockpitPose`] with no copy to drift.
 ///
-/// The pose is in the crab's ARENA frame (the rapier vehicle body lives in the ±10 m box with
-/// Sally). `shift` is the pure XZ translate that carries an arena point to its render spot anchored
+/// The pose is in the crab's ARENA frame (the rapier vehicle body lives on the open inference
+/// field with Sally — rl#209). `shift` is the pure XZ translate that carries an arena point to its
+/// render spot anchored
 /// at the giant crab — the same `world(crab) − arena_carapace` the crab body's render uses — so the
 /// vehicle and the crab share one render frame and collide where they're drawn. Altitude (Y) is kept
 /// at TRUE arena scale (no shrink), like the crab's own bones, so a small craft reads correctly

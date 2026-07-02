@@ -487,6 +487,7 @@ fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: us
     let mut app = headless_stack(HeadlessStack {
         num_envs,
         role: WorldRole::RolloutWorker,
+        arena: crate::physics::Arena::WalledBox,
     });
 
     // Worker-mode training state + the Sense→Think→Act systems. No PPO-update step

@@ -255,7 +255,11 @@ fn main() {
         // ordering is enforced internally, so the demo can't drift from the physics
         // training optimizes (see physics::CrabPhysicsPlugin).
         .add_plugins(physics::CrabPhysicsPlugin)
-        .add_plugins(physics::PhysicsWorldPlugin)
+        // The demo mirrors the TRAINING world (targets sampled inside the box), so it keeps
+        // the walled arena; only GCR inference runs the open field (rl#209).
+        .add_plugins(physics::PhysicsWorldPlugin {
+            arena: physics::Arena::WalledBox,
+        })
         // The standalone arena draws no other scene, so it also dresses the colliders with the
         // visible ground quad + lights. GCR omits this — it renders its own gray-box world (rl#160).
         .add_plugins(physics::ArenaVisualsPlugin)

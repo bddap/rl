@@ -92,14 +92,14 @@ pub(crate) fn run(args: Args) -> Result<()> {
     // height recovering to near its pre-ram baseline is "the trained walking came back" (not
     // collapsed flat or flung up); the reach staying finite means the policy still acts.
     let finite = result.carapace_stayed_finite();
-    let bounded = max_y < 5.0; // never flew over the 2 m walls and away
+    let bounded = max_y < 5.0; // the ram never launched her skyward
     let stood_back_up = y_before.is_finite()
         && y_after.is_finite()
         && y_after > 0.4 * y_before
         && y_after < 1.8 * y_before;
     // The policy still acts: its claw stays near the target (a bounded reach, not just finite — a
     // crab knocked flat or flung off keeps finite claw coords, so finiteness alone is too weak).
-    // The arena is ±10 m, so a reach within a few metres means the trained reaching survived.
+    // A reach within a few metres means the trained reaching survived.
     let still_reaching = reach_after.is_finite() && reach_after < 6.0;
 
     println!(
