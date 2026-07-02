@@ -80,8 +80,8 @@ fn menu_handoff_installs_the_chosen_round() {
     );
 }
 
-/// An unarmable networked round (peers disagree on the brain/colliders) must drive the GRACEFUL
-/// refusal, NOT a crash and NOT a silent integer-crab swap (rl#115 + rl#114). The arm decision +
+/// An unarmable networked round (host brain unverified / colliders differ on a peer) must drive
+/// the GRACEFUL refusal, NOT a crash and NOT a silent integer-crab swap (rl#115 + rl#114). The arm decision +
 /// operator message is the single [`super::app::check_armable`]; this pins that a solo or
 /// fully-synced round arms (no message), while either mismatch REFUSES with an actionable message
 /// naming the cause and the fix — the value the menu's `poll_formation` gate returns to the chooser
@@ -92,7 +92,7 @@ fn menu_handoff_installs_the_chosen_round() {
 fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
     use super::app::check_armable;
     use crate::SyncVerdict;
-    let synced = |weights, assets| Some(SyncVerdict { weights, assets });
+    let synced = |host_brain, assets| Some(SyncVerdict { host_brain, assets });
     // Armable: solo always arms; a fully-synced networked round arms. No refusal, no message.
     assert!(
         check_armable(None).is_ok(),
@@ -102,10 +102,10 @@ fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
         check_armable(synced(true, true)).is_ok(),
         "a networked round with synced weights AND assets arms"
     );
-    // A mismatched/absent brain refuses LOUD, naming the brain + the rl-update fix.
+    // An unverified host brain refuses LOUD, naming brain.bin + the rl-update fix.
     let brain = check_armable(synced(false, false))
-        .expect_err("an unsynced-weights networked round must refuse, not arm a fake crab");
-    assert!(brain.contains("brain.bin"), "names the brain mismatch: {brain}");
+        .expect_err("an unverified-host-brain networked round must refuse, not arm a fake crab");
+    assert!(brain.contains("brain.bin"), "names the host brain problem: {brain}");
     assert!(
         brain.contains("rl-update"),
         "tells the operator how to fix it: {brain}"

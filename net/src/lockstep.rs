@@ -25,6 +25,16 @@ pub struct TickMsg {
     pub input: Input,
 }
 
+/// A peer [`TickMsg`] tagged with the sender's already-resolved [`PlayerId`]. The
+/// id is mapped from the QUIC-authenticated endpoint id via the frozen
+/// participant set (never read from the message body — see [`crate::transport::FromPeer`]),
+/// so the lockstep driver can trust it as the input's true author.
+#[derive(Debug, Clone, Copy)]
+pub struct PeerMsg {
+    pub pid: PlayerId,
+    pub msg: TickMsg,
+}
+
 /// The local client's per-round state: schedules the local input UP, adopts the authoritative
 /// snapshot DOWN, and predicts/reconciles the local avatar. Owns the client's sim as the surface the
 /// snapshot writes into — it never steps that sim itself (the server is authoritative, rl#151).

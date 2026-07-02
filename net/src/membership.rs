@@ -524,7 +524,7 @@ impl Membership {
                 .unwrap_or(0)
         };
         crate::SyncVerdict {
-            weights: host_weights != 0,
+            host_brain: host_weights != 0,
             assets: self.local_asset_digest != 0
                 && self
                     .peers
@@ -855,7 +855,7 @@ mod tests {
         a.on_beat(client, &bt_d(vec![host, client], BRAIN ^ 0xFF), t0);
         a.poll(t0);
         assert!(
-            a.sync_verdict().weights,
+            a.sync_verdict().host_brain,
             "the host self-gate passes on its own non-zero digest"
         );
 
@@ -865,7 +865,7 @@ mod tests {
         b.on_beat(client, &bt_d(vec![host, client], BRAIN), t0);
         b.poll(t0);
         assert!(
-            !b.sync_verdict().weights,
+            !b.sync_verdict().host_brain,
             "a zero-digest host must not arm, whatever the clients carry"
         );
 
@@ -875,7 +875,7 @@ mod tests {
         c.on_beat(host, &bt_d(vec![host, client], BRAIN), t0);
         c.poll(t0);
         assert!(
-            c.sync_verdict().weights,
+            c.sync_verdict().host_brain,
             "a client verifies the HOST's digest, not its own"
         );
 
@@ -884,7 +884,7 @@ mod tests {
         d.on_beat(host, &bt_d(vec![host, client], 0), t0);
         d.poll(t0);
         assert!(
-            !d.sync_verdict().weights,
+            !d.sync_verdict().host_brain,
             "a zero-digest HOST is refused by its clients"
         );
     }
@@ -906,14 +906,14 @@ mod tests {
         a.on_beat(mid, &bt_d(vec![host, mid, top], BRAIN), t0);
         a.poll(t0);
         assert!(
-            !a.sync_verdict().weights,
+            !a.sync_verdict().host_brain,
             "a relay-only HOST (digest None) must block the gate"
         );
         // The host speaks for itself with a real brain → armable.
         a.on_beat(host, &bt_d(vec![host, mid, top], BRAIN), t0);
         a.poll(t0);
         assert!(
-            a.sync_verdict().weights,
+            a.sync_verdict().host_brain,
             "once the host is heard directly with a real brain, armable"
         );
 
@@ -923,7 +923,7 @@ mod tests {
         b.on_beat(mid, &bt_d(vec![host, mid, top], 0), t0);
         b.poll(t0);
         assert!(
-            b.sync_verdict().weights,
+            b.sync_verdict().host_brain,
             "non-host digests (zero or relay-only) gate nothing"
         );
     }
@@ -1021,7 +1021,7 @@ mod tests {
         };
         a.on_beat(idb, &mismatched_asset, t0);
         a.poll(t0);
-        assert!(a.sync_verdict().weights, "a real host brain → weights gate passes");
+        assert!(a.sync_verdict().host_brain, "a real host brain → weights gate passes");
         assert!(
             !a.sync_verdict().assets,
             "a different crab asset must leave assets NOT synced (independent of weights)"
