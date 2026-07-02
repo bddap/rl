@@ -46,18 +46,21 @@ pub struct Admission {
 }
 
 /// A would-be joiner's credentials, sent UP to the host the moment it dials a live match (Stage 3,
-/// rl#151). The host gates admission on these BEFORE allocating a [`PlayerId`]: a joiner whose
-/// policy-weights or crab-asset digest disagrees with the host's is running a different brain or a
-/// different Sally, so admitting it would put a wrong crab into the round (or desync the moment its
-/// external-crab digest folds into the state hash). Such a joiner is REFUSED LOUDLY, never silently
-/// dropped onto a mismatched body ([`may_admit_joiner`]; rl#114 refuse-rather-than-fake).
+/// rl#151). The host gates admission on these BEFORE allocating a [`PlayerId`] and REFUSES
+/// LOUDLY, never silently dropping a joiner onto a mismatched body ([`may_admit_joiner`]; rl#114
+/// refuse-rather-than-fake). What each digest actually protects under host-auth: the ASSET
+/// equality is load-bearing (the joiner renders the crab it builds from its own model — a
+/// different sally.glb is a visibly wrong Sally); the WEIGHTS equality is a conservative
+/// fleet-sameness check — the joiner never executes the brain (it adopts host snapshots), so
+/// the real weights guard is the host-side [`AdmissionRefusal::HostNotArmed`] self-gate.
+/// Candidate de-slop: collapse the weights equality to that self-gate (formation already did,
+/// rl#199).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinRequest {
-    /// FNV digest of the joiner's policy weights — must equal the host's, or the two run different
-    /// brains and the external-crab digest (weights Xored in) desyncs on the first post-join tick.
+    /// FNV digest of the joiner's policy weights (`0` = no checkpoint).
     pub weights_digest: u64,
-    /// Digest of the joiner's crab/collider assets — must equal the host's, or the joiner builds a
-    /// different-shaped rapier body and diverges.
+    /// Digest of the joiner's crab/collider assets — must equal the host's, or the joiner builds
+    /// and renders a different-shaped crab.
     pub asset_digest: u64,
 }
 
@@ -420,7 +423,7 @@ impl Server {
     /// idempotent), and an input below the emit cursor is dropped outright — so nothing downstream
     /// needs the sets here. ONE home for this "dropping the sets is safe" reasoning, shared by every
     /// driver that builds a server.
-    pub fn seed_early(&mut self, early: &[crate::net_loop::PeerMsg]) {
+    pub fn seed_early(&mut self, early: &[crate::lockstep::PeerMsg]) {
         for pm in early {
             let _ = self.record(pm.pid, pm.msg);
         }
@@ -439,7 +442,7 @@ pub fn host_assemble(
     server: &mut Server,
     me: PlayerId,
     local: TickMsg,
-    remote: Vec<crate::net_loop::PeerMsg>,
+    remote: Vec<crate::lockstep::PeerMsg>,
 ) -> Vec<TickSet> {
     let mut sets = Vec::new();
     for pm in remote {

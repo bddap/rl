@@ -66,7 +66,7 @@ pub mod external_crab;
 /// physics (rl#82 + rl#100, GCR) — computed ONCE by [`crate::membership::Membership::sync_verdict`]
 /// at the barrier's close and carried as this single value (never as loose parallel bools)
 /// through `Frozen` → `NetDriver` to the arm sites:
-/// - `weights`: the HOST — the peer that will run the authoritative server, the only one
+/// - `host_brain`: the HOST — the peer that will run the authoritative server, the only one
 ///   that EXECUTES the brain (clients adopt its snapshots and render its articulation) —
 ///   advertised a non-zero policy-weights digest, proving it runs a real trained Sally and
 ///   not a failed/absent-checkpoint rest pose. The host self-gate; the mid-game admission
@@ -79,7 +79,7 @@ pub mod external_crab;
 ///   diverge client-side the moment the crab is built — this half stays peer-symmetric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncVerdict {
-    pub weights: bool,
+    pub host_brain: bool,
     pub assets: bool,
 }
 
@@ -89,11 +89,12 @@ pub struct SyncVerdict {
 /// SOLO (no networked formation ran) — one peer, nothing to desync, always arms. A NETWORKED
 /// round arms ONLY on a fully-synced [`SyncVerdict`].
 ///
-/// On either mismatch the round CANNOT arm the NN crab and — with no integer fallback (rl#114) —
-/// the production sites REFUSE it loudly rather than substituting a fake crab. This is the UPSTREAM
-/// half of the guard: it keeps an *unsynced* brain OR *unsynced* collider asset out of lockstep
-/// entirely; the policy-weights digest folded into [`crate::sim::Sim::state_hash`] is the
-/// downstream half, catching a residual brain mismatch between two otherwise-armed peers.
+/// On either failure the round CANNOT arm the NN crab and — with no integer fallback (rl#114) —
+/// the production sites REFUSE it loudly rather than substituting a fake crab. This keeps an
+/// unverified host brain OR an unsynced collider asset out of a round entirely; the
+/// policy-weights digest the bridge folds into [`crate::sim::Sim::state_hash`] additionally pins
+/// the HOST's brain identity into the authoritative state (exercised by the desync tests —
+/// under host-auth clients adopt that state rather than comparing hashes at runtime).
 ///
 /// This is the SINGLE arm predicate — the [`render`] arming sites (the `Boot::Round` build, the
 /// menu's `poll_formation` pre-gate, and `ensure_round_installed`) reach it through the one
@@ -102,7 +103,7 @@ pub struct SyncVerdict {
 /// arm). Deliberately NOT behind `cfg(render)`: the no-feature test build (like the headless
 /// trainer) must exercise the REAL predicate, not a re-encoded copy.
 pub fn may_arm_external_crab(sync: Option<SyncVerdict>) -> bool {
-    sync.is_none_or(|v| v.weights && v.assets)
+    sync.is_none_or(|v| v.host_brain && v.assets)
 }
 
 #[cfg(test)]
@@ -334,8 +335,8 @@ mod desync_test {
     }
 
     /// Shorthand for a networked round's verdict in these tests.
-    fn synced(weights: bool, assets: bool) -> Option<SyncVerdict> {
-        Some(SyncVerdict { weights, assets })
+    fn synced(host_brain: bool, assets: bool) -> Option<SyncVerdict> {
+        Some(SyncVerdict { host_brain, assets })
     }
 
     #[test]

@@ -158,13 +158,13 @@ async fn run_net(args: Args) -> Result<()> {
         // `TickMsg`s. As a client: the host's authoritative `CoreSnapshot`s (rl#151 increment 2 —
         // STATE down, not the input set: the client adopts it whole and never re-steps). A stray
         // barrier beat from a peer still winding down formation is ignored either way.
-        let mut remote_inputs: Vec<net_loop::PeerMsg> = Vec::new();
+        let mut remote_inputs: Vec<net::lockstep::PeerMsg> = Vec::new();
         let mut snapshots: Vec<net::snapshot::CoreSnapshot> = Vec::new();
         while let Some(m) = session.try_recv() {
             match m.msg {
                 transport::PeerWire::Tick(msg) => {
                     if let Some(&pid) = id_map.get(&m.from) {
-                        remote_inputs.push(net_loop::PeerMsg { pid, msg });
+                        remote_inputs.push(net::lockstep::PeerMsg { pid, msg });
                     }
                 }
                 transport::PeerWire::Snapshot(snap) => {

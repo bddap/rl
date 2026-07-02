@@ -25,9 +25,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use iroh::EndpointId;
 
-use crate::lockstep::{Lockstep, TickMsg};
+use crate::lockstep::{Lockstep, PeerMsg, TickMsg};
 use crate::membership::{BEAT_EVERY, Membership, Role, Status};
-use crate::net_loop::PeerMsg;
 use crate::sim::PlayerId;
 use crate::telemetry::{self, TelemetryEvent, TelemetrySender};
 use crate::transport::{self, PeerWire, Session};
@@ -172,7 +171,7 @@ pub async fn form_match(
     // is reported whenever the host gate passes (so an asset-only mismatch — the rl#100 hole
     // this closes — is diagnosable, never silent).
     if local_weights_digest != 0 {
-        if !outcome.sync.weights {
+        if !outcome.sync.host_brain {
             tracing::warn!(
                 "GCR: the HOST is not verifiably running the real Sally (its advertised weights \
                  digest is 0 — a failed/absent checkpoint — or it was never heard directly) — \
@@ -531,7 +530,7 @@ mod tests {
     /// A THIRD peer is started a beat late (a staggered join) to prove the barrier waits
     /// it in rather than freezing {A,B} first. `#[ignore]` because it binds real UDP
     /// sockets and takes a couple seconds (the STABLE_FOR settle); run with
-    /// `cargo test --lib net::net_loop -- --ignored --nocapture`.
+    /// `cargo test --lib formation -- --ignored --nocapture`.
     #[tokio::test]
     #[ignore = "binds real iroh UDP endpoints; run explicitly with --ignored"]
     async fn three_endpoints_form_the_identical_match_over_iroh() {

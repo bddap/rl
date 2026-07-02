@@ -350,20 +350,27 @@ pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), Stri
     if crate::may_arm_external_crab(sync) {
         return Ok(());
     }
-    // Reached only on a networked round that can't arm (so `sync` is present); weights are
-    // checked first, so a synced weights flag here means weights agree but the collider asset
-    // doesn't.
-    let cause = if !sync.is_some_and(|v| v.weights) {
-        "the trained brain (brain.bin) differs or is missing on a peer"
+    // Reached only on a networked round that can't arm (so `sync` is present); the host-brain
+    // half is checked first, so a passing flag here means the host is fine but the collider
+    // asset differs on a peer.
+    let (cause, fix) = if !sync.is_some_and(|v| v.host_brain) {
+        (
+            "the HOST is not verifiably running the real trained Sally — its brain.bin failed \
+             to load or is absent (weights digest 0), or its digest was never heard directly",
+            "run rl-update on the HOST device (or host from a device with a working brain)",
+        )
     } else {
-        "the crab colliders (the sally.glb model) differ on a peer"
+        (
+            "the crab colliders (the sally.glb model) differ on a peer — it would build and \
+             render a different crab",
+            "run rl-update on every device so all peers share the same crab model",
+        )
     };
     Err(format!(
         "rl#114: refusing to start the round — can't arm the trained NN crab (\"Sally\") for this \
-         multiplayer match because {cause}. Every device MUST carry the IDENTICAL brain + crab \
-         model, or lockstep would desync. Fix: run rl-update on every device so all peers share \
-         the same weights and colliders, then re-form the match. (There is deliberately no integer \
-         stand-in crab — a mismatched table refuses rather than silently dropping Sally.)"
+         multiplayer match because {cause}. Fix: {fix}, then re-form the match. (There is \
+         deliberately no integer stand-in crab — an unarmable round refuses rather than silently \
+         dropping Sally.)"
     ))
 }
 

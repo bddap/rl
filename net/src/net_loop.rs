@@ -23,22 +23,12 @@ use iroh::EndpointId;
 
 use crate::articulation::CrabArticulation;
 use crate::formation::{Formation, LobbyControl, early_peer_msgs, form_match};
-use crate::lockstep::{Lockstep, TickMsg};
+use crate::lockstep::{Lockstep, PeerMsg, TickMsg};
 use crate::snapshot::CoreSnapshot;
 use crate::server::{self, Admission, JoinRequest, Server, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::telemetry::{TelemetryEvent, TelemetrySender};
 use crate::transport::{self, PeerWire, Session};
-
-/// A peer tick message tagged with the sender's already-resolved [`PlayerId`]. The
-/// id is mapped from the QUIC-authenticated endpoint id via the frozen
-/// participant set (never read from the message body — see [`transport::FromPeer`]),
-/// so the lockstep driver can trust it as the input's true author.
-#[derive(Debug, Clone, Copy)]
-pub struct PeerMsg {
-    pub pid: PlayerId,
-    pub msg: TickMsg,
-}
 
 /// Owns the tokio runtime + iroh session and bridges them to a synchronous caller — the
 /// TRANSPORT half of the server-coordinated model (rl#151). Held by the game loop as a non-send
@@ -878,10 +868,11 @@ pub fn connect_and_join(
                 id_map,
                 departed: Default::default(),
                 telemetry,
-                // Admitted ⇒ our weight + asset digests matched the host's (the admission gate), so
-                // the round is armable on the same Sally as everyone else.
+                // Admitted ⇒ the host proved a non-zero brain (`HostNotArmed` is checked first
+                // in the admission gate) and our asset digest matched its — both verdict halves
+                // hold by the gate we just passed.
                 sync: crate::SyncVerdict {
-                    weights: true,
+                    host_brain: true,
                     assets: true,
                 },
                 weights_digest: local_weights_digest,
