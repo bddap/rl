@@ -70,11 +70,6 @@ pub(crate) struct Args {
 /// SAME barrier as the menu and as `game net`, so the agreed roster + seed are identical
 /// however play was reached; a Host-alone fallback yields a solo round when nobody shows.
 pub(crate) fn run(args: Args) -> Result<()> {
-    // The single-thread pin that keeps the NN crab cross-peer deterministic is decided LATER, in
-    // `build_windowed_app`, from whether the formed round actually has a remote peer: matchmaking
-    // below resolves the roster first, so a solo round (no peer) can skip the pin and run
-    // multi-threaded (~60fps) while a networked round still pins (GCR#113). The pin lands before
-    // `App::new()` latches the task pools — see `render::build_windowed_app`.
     // The REQUIRED NN-crab checkpoint dir — the one giant crab IS the trained NN body (rl#114): no
     // integer fallback, so a missing brain is a hard, actionable failure here. Resolved BEFORE the
     // handshake so the scripted host/join path can advertise our REAL weights digest (two peers arm
@@ -123,11 +118,9 @@ pub(crate) fn run(args: Args) -> Result<()> {
             telemetry: args.telemetry,
         }
     };
-    // Arming AND the cross-peer single-thread pin are both decided in `build_windowed_app`: a SOLO
-    // round always arms the NN crab and runs multi-threaded (no peer to stay in sync with); a
-    // NETWORKED round arms it once peers agree on weights+assets (the digest handshake above) and
-    // pins every task pool to one thread so the float crab evolves bit-identically across peers; a
-    // round that can't agree FAILS LOUD rather than substituting a fake crab.
+    // Arming is decided in `build_windowed_app`: a SOLO round always arms the NN crab; a NETWORKED
+    // round arms it once peers agree on weights+assets (the digest handshake above); a round that
+    // can't agree FAILS LOUD rather than substituting a fake crab.
     // A scripted networked round whose peers disagree on the brain+colliders can't arm Sally and
     // refuses (rl#114) — surfaced here as a clean error exit with the actionable fix (rl#115), not a
     // panic/abort. The interactive menu handles its own unarmable case in-client.

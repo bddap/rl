@@ -47,12 +47,11 @@ pub fn build_screenshot_app(
     // Known-armed at build (when a checkpoint was given): add the rapier-NN stack AND arm the gate
     // now — the SAME path the windowed `Boot::Round` solo client uses — so `spawn_world` hides the
     // static silhouette and the reposed-to-giant rig becomes the visible crab.
-    let armed = armed_crab.is_some();
     if let Some((dir, spawn)) = armed_crab {
         // Solo screenshot round: add the stack and arm the gate (one path).
         install_armed_nn_crab(&mut app, dir, spawn);
     }
-    finish_offscreen_app(&mut app, cfg, render_mode, armed);
+    finish_offscreen_app(&mut app, cfg, render_mode);
     app
 }
 
@@ -82,7 +81,7 @@ pub fn build_net_screenshot_app(
     // Arm the NN crab on this peer: the host runs + broadcasts it, the client spawns it (frozen —
     // never pumped) as the render target its adopted articulation poses. One path (add + arm).
     install_armed_nn_crab(&mut app, external_crab, spawn);
-    finish_offscreen_app(&mut app, cfg, render_mode, true);
+    finish_offscreen_app(&mut app, cfg, render_mode);
     app
 }
 
@@ -127,10 +126,9 @@ fn offscreen_app_scaffold() -> App {
     app
 }
 
-/// Wire the offscreen screenshot systems + render-mode + determinism pin onto a scaffolded app whose
-/// round is already installed — shared by both builders so the capture path can't drift. `armed`
-/// gates the single-thread ECS pin (needed only when the rapier NN crab steps).
-fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super::RenderMode, armed: bool) {
+/// Wire the offscreen screenshot systems + render-mode onto a scaffolded app whose round is
+/// already installed — shared by both builders so the capture path can't drift.
+fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super::RenderMode) {
     // Controls UI on the screenshot path too, so an evidence frame can prove the overlay +
     // hint draw — the shared env override forces it open headless, and picks the CONTEXT
     // (`RL_SHOW_CONTROLS_CONTEXT=foot|plane`) so one shot can record any context's legend
@@ -164,16 +162,14 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
             )
                 .chain(),
         );
-    // When the NN crab is armed, the same single-threaded ECS pin the windowed solo client applies
-    // (see `build_windowed_app`): rapier's multibody solver is nondeterministic — and can hit a NaN
-    // that panics `step_simulation` — on the multi-threaded executor. Must run AFTER every system
-    // is wired. Unnecessary for the silhouette shot (no physics), so gated on `armed`.
     // The crab render-mode cycle (mesh unless `render_mode` says otherwise), so an evidence frame
-    // can capture any of the views. MUST precede `force_serial_schedules` so the pin covers it.
+    // can capture any of the views. No determinism pin here (rl#199): this build's rapier has the
+    // `parallel` feature OFF (single-threaded solver regardless of executor), Bevy's executor never
+    // overlaps conflicting-access systems, and the capture chain above is fully `chain()`ed. The
+    // pinned era's "multi-threaded executor can NaN the solver" claim (born unevidenced in commit
+    // 9e3d3b4) was tested empirically: 3 unpinned armed 900-tick runs completed clean — no
+    // NaN/panic — and produced byte-identical frames.
     super::render_mode::register(app, render_mode);
-    if armed {
-        crab_world::bot::headless::force_serial_schedules(app);
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -71,23 +71,7 @@ pub enum AppPhase {
 /// crab — the whole point of rl#114. The failure is GRACEFUL (rl#115): the scripted `Boot::Round`
 /// path returns it as an `Err` (clean CLI exit, no panic); the interactive menu pre-gates it in
 /// `poll_formation` and returns to the chooser showing the message (no mid-transition crash).
-/// Pin every process-global task pool to a single worker, so the armed float rapier-NN crab
-/// ("real Sally") evolves bit-identically across peers (GCR#113).
 ///
-/// MUST be called before `App::new` and before any sim step / matmul, because the pools latch
-/// their thread count on first use; see [`crab_world::bot::headless::pin_single_thread_pools`] for the
-/// env-var/`OnceLock` mechanism. Same recipe the trainer and the #82 cross-peer probe run; exposed
-/// as one thin `pub` entry so `game` (a separate crate) can call it without widening the
-/// crate-internal helper.
-///
-/// The windowed client does NOT call this directly: [`build_windowed_app`] pins (this plus the
-/// matching `force_serial_schedules` run-order pin) ONLY for a round with a remote peer, so the
-/// common solo round runs multi-threaded (~60fps). This entry is for the headless screenshot path
-/// (`game fp-screenshot`), which pins when its single armed-crab frame needs a stable solver.
-pub fn pin_process_pools() {
-    crab_world::bot::headless::pin_single_thread_pools();
-}
-
 /// `render_mode` is the crab render view's starting mode (mesh in normal play; the player cycles
 /// it live with the `CycleRenderMode` control, boots into a mode via `--render-mode`/
 /// `RL_RENDER_MODE`, or — with no Sally glb — defaults to `Colliders`).
@@ -96,39 +80,15 @@ pub fn build_windowed_app(
     external_crab: std::path::PathBuf,
     render_mode: super::RenderMode,
 ) -> anyhow::Result<App> {
-    // Pin the global task pools to ONE thread only for a round that actually has a remote peer.
-    // The pin's sole purpose is bit-identical cross-peer float evolution (GCR#113), and it costs
-    // ~30-60× frame time by serialising rapier's solver and Bevy's parallel render-prep onto a
-    // single core. A SOLO round (a scripted `--host`/`--join` that found no peer → `None` driver)
-    // has nobody to stay in sync with, so it skips the pin and runs multi-threaded (~60fps); a
-    // NETWORKED round pins, exactly as before. The MENU boot builds its `App` — which latches the
-    // pools — BEFORE the player picks Host/Join, so peer presence isn't known yet, and it pins
-    // defensively so a round that later goes networked stays deterministic. This is the one path
-    // parameterised by peer count, not an SP/MP mode branch (single-player IS multiplayer with
-    // zero remote players, rl).
-    //
-    // MUST be decided here, ahead of `App::new()` latching Bevy's three task pools (first-writer
-    // wins); the rayon/matmul env vars the pin sets are read lazily on the first sim step, also
-    // after this point. See [`pin_process_pools`] / [`crab_world::bot::headless::pin_single_thread_pools`].
-    let networked = match &boot {
-        Boot::Round(round) => round.1.is_some(),
-        Boot::Menu { .. } => true,
-    };
-    // The determinism pin has TWO halves gated on this one `networked` bool: the task-pool pin
-    // here (MUST precede `App::new()` — Bevy's pools latch first-writer-wins) and the matching
-    // `force_serial_schedules` near the end (MUST follow system wiring). They can't be one call
-    // because of that ordering, so they're kept coupled by sharing this single condition — change
-    // one gate and you must change the other, or networked peers desync.
-    if networked {
-        crab_world::bot::headless::pin_single_thread_pools();
-        // Canary for the pin's one footgun: an external RAYON_NUM_THREADS override to anything but
-        // "1" silently breaks cross-peer determinism. Only meaningful once we've pinned.
-        debug_assert_eq!(
-            std::env::var("RAYON_NUM_THREADS").ok().as_deref(),
-            Some("1"),
-            "networked round must pin RAYON_NUM_THREADS=1 (and no external override)"
-        );
-    }
+    // NO determinism pin, on ANY boot (rl#199). The pinned era's rationale — bit-identical
+    // cross-peer float evolution (GCR#113, lockstep) — dissolved with the host-authoritative
+    // rewrite (rl#151): only the solo/host peer steps the float NN crab; a remote client adopts
+    // snapshots and steps nothing, so no runtime path compares float state across peers (the
+    // hash-log/telemetry hashes are offline diagnostics). The pin cost ~30-60× frame time by
+    // serialising rapier's solver, inference, and Bevy's render-prep onto one core — and taxed
+    // hardest the one peer that steps brain + rapier + render (the host; menu-boot solo paid it
+    // too). Single-thread pinning lives where reproducibility is actually consumed: the trainer,
+    // eval, and the #82 probe ([`crab_world::bot::headless::pin_single_thread_pools`]).
     let mut app = App::new();
     // Point bevy at the bundled `assets/` dir explicitly, so a fresh clone's `cargo run`
     // finds the committed control glyphs regardless of cwd or which workspace bin runs (the
@@ -229,7 +189,6 @@ pub fn build_windowed_app(
         // found no peer is a solo round here, so it gets the real NN crab.
         Boot::Round(round) => {
             let (ls, net) = *round;
-            // `networked` (== `net.is_some()`) was decided at the top of the fn to drive the pin.
             // The one giant crab is the real NN body (rl#114) — arm it now, through the SAME
             // [`arm_round`] gate the menu path uses ([`crate::may_arm_external_crab`], the
             // determinism guard). A networked round that can't agree on the brain+colliders
@@ -285,23 +244,8 @@ pub fn build_windowed_app(
         }
     }
 
-    // Pin ECS run order for a NETWORKED round: force every MAIN-world schedule onto the
-    // single-threaded executor so systems never dispatch onto the global ComputeTaskPool, where
-    // thread scheduling would reorder the float evolution that drives the armed NN crab and
-    // desync peers (GCR#113, the same pin the trainer and #82 probe apply). The SECOND half of the
-    // determinism pin — gated on the SAME `networked` bool as the task-pool pin near the top of the
-    // fn (the two MUST stay coupled; see that block): a solo round keeps the parallel executor
-    // (~60fps) — with no peer there is no cross-peer order to preserve. Must run AFTER all systems
-    // are wired —
-    // every plugin/`add_systems` above is in, the schedules now exist. This touches only the main
-    // world's schedules (the sim); bevy's render sub-app keeps its own executor.
     // The crab render-mode cycle (shared cage + skin/silhouette visibility + the live cycle).
-    // MUST precede `force_serial_schedules` so that pin covers its systems too.
     super::render_mode::register(&mut app, render_mode);
-
-    if networked {
-        crab_world::bot::headless::force_serial_schedules(&mut app);
-    }
 
     Ok(app)
 }
