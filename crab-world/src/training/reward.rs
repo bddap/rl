@@ -107,8 +107,8 @@ pub(crate) fn action_effort(drives: &[f32; ACTION_SIZE]) -> f32 {
 ///   the clearly-dominant outcome of a near-band episode while the far-band journey still
 ///   dominates its own grab;
 /// * one tick of honest walking (~0.5 m/s ⇒ ~0.0078 m at 64 Hz, `physics::PHYSICS_DT`) pays
-///   ≈ 0.19 — ~20× its ~0.009 gait-drive effort tax — a dense local gradient to set off and
-///   keep moving;
+///   ≈ 0.19 — ~17× its gait-drive effort tax (calibrated at [`EFFORT_WEIGHT`]) — a dense
+///   local gradient to set off and keep moving;
 /// * it is the SAME per-tick signal strength the velocity-form first cut intended
 ///   (`P_vel·v = 0.4·0.5 = 0.2`), re-expressed as the exactly-telescoping potential rather
 ///   than a clipped per-tick velocity (which reopened an oscillation exploit — see the module
