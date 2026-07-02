@@ -14,7 +14,7 @@
 //!   giant blow-up ([`SkinRepose`]/[`CrabSkinRepose`]), re-exported here so
 //!   `net::external_crab` and `crate::crab_view` keep their `bot::skin::…` paths.
 //! - [`weights`] — a one-time skin-weight strip confining each vertex's weights to
-//!   its dominant physics part, so a rigidly-driven bone can't drag the wrong flesh.
+//!   its owner physics part, so a rigidly-driven bone can't drag the wrong flesh.
 
 use bevy::prelude::*;
 
