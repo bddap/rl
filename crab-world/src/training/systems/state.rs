@@ -749,6 +749,28 @@ mod tests {
             out
         };
 
+        // The refresh assertions below need a fresh brain whose weights DIFFER from the
+        // previous one. Fresh inits draw from the backend's process-GLOBAL RNG, so under a
+        // parallel test run a sibling reseeding it (`brain_init_is_reproducible_…` below, or
+        // any `TrainingState::new` caller) can make two draws straddling its reseed come back
+        // bit-identical (rl#207). Retry across that transient window — the dual of the
+        // sibling's same-seed retry: a race can only make fresh draws spuriously EQUAL, while
+        // an init that stopped drawing from the RNG never yields a differing pair, so the
+        // bound still bites.
+        let fresh_brain_differing_from = |prev: &[u32]| -> (AnyBrain<TrainBackend>, Vec<u32>) {
+            for _ in 0..16 {
+                let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+                let bits = policy_bits(&brain.valid());
+                if bits != prev {
+                    return (brain, bits);
+                }
+            }
+            panic!(
+                "16 fresh inits all bit-identical to the previous brain — init is not drawing \
+                 fresh weights, so the refresh assertions cannot bite"
+            );
+        };
+
         let brain_a: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
         let want_a = policy_bits(&brain_a.valid());
         let mut cached = InferenceCachedBrain::new(brain_a);
@@ -758,22 +780,12 @@ mod tests {
         assert_eq!(cached.with_inference(&policy_bits), want_a);
 
         // `set` (snapshot load) refreshes: the new weights are served, never the stale clone.
-        let brain_b: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
-        let want_b = policy_bits(&brain_b.valid());
-        assert_ne!(
-            want_a, want_b,
-            "fresh brains must differ for this assertion to bite"
-        );
+        let (brain_b, want_b) = fresh_brain_differing_from(&want_a);
         cached.set(brain_b);
         assert_eq!(cached.with_inference(&policy_bits), want_b);
 
         // `train_mut` (a learner update) refreshes too.
-        let brain_c: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
-        let want_c = policy_bits(&brain_c.valid());
-        assert_ne!(
-            want_b, want_c,
-            "fresh brains must differ for this assertion to bite"
-        );
+        let (brain_c, want_c) = fresh_brain_differing_from(&want_b);
         *cached.train_mut() = brain_c;
         assert_eq!(cached.with_inference(&policy_bits), want_c);
     }
