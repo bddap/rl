@@ -685,7 +685,7 @@ pub(super) fn drive_lockstep(
         (tel, state.ls.sim().players().count())
     };
     if *next_tel_tick == 0 {
-        *next_tel_tick = TELEMETRY_TICK_EVERY;
+        *next_tel_tick = next_sample_tick(0);
     }
 
     world.non_send_resource_mut::<GameState>().accumulator += delta;
@@ -995,8 +995,7 @@ pub(super) fn drive_lockstep(
             if due {
                 {
                     let state = world.non_send_resource::<GameState>();
-                    *next_tel_tick =
-                        (state.ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
+                    *next_tel_tick = next_sample_tick(state.ls.sim().tick());
                     t.send(TelemetryEvent::tick(state.ls.sim(), roster_len));
                     // The input the SIM actually applied this tick (neutral while piloting).
                     t.send(TelemetryEvent::input(issue_tick, sim_input));
@@ -1045,7 +1044,7 @@ pub(super) fn drive_lockstep(
     };
     if now_tick < *last_tick {
         *reported_outcome = false;
-        *next_tel_tick = (now_tick / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
+        *next_tel_tick = next_sample_tick(now_tick);
     }
     *last_tick = now_tick;
 

@@ -41,11 +41,18 @@ use crate::sim::{Input, Outcome, Sim};
 
 /// How many applied ticks between sampled telemetry snapshots. The high-frequency
 /// [`Tick`](TelemetryEvent::Tick)/[`Input`](TelemetryEvent::Input) events are thinned to
-/// one per this many ticks so a 30 Hz round streams a couple events/sec per deck instead
-/// of flooding the collector. At [`TICK_HZ`](crate::sim::TICK_HZ)
-/// = 30 that's ~one snapshot per simulated second, and both drivers (`game net` and the
-/// windowed client) share this one constant so their feeds read the same.
-pub const TELEMETRY_TICK_EVERY: u64 = 30;
+/// one snapshot per simulated second — [`TICK_HZ`](crate::sim::TICK_HZ) ticks, derived,
+/// not restated — so a round streams a couple events/sec per deck instead of flooding
+/// the collector. Both drivers (`game net` and the windowed client) share this one
+/// constant so their feeds read the same.
+pub const TELEMETRY_TICK_EVERY: u64 = crate::sim::TICK_HZ;
+
+/// The first sampling boundary strictly after `now` — the ONE cursor rule every driver
+/// advances its telemetry watermark by (initialize with `next_sample_tick(0)`), so the
+/// feeds sample on identical tick boundaries.
+pub fn next_sample_tick(now: u64) -> u64 {
+    (now / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY
+}
 
 /// serde shim for the foreign [`Outcome`] enum so it rides the telemetry wire by value
 /// (the sim's own type, no presentation string). Kept here, not on [`Outcome`] itself, so

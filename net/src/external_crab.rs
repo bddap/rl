@@ -51,7 +51,7 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use crate::sim::{Pos, UNIT};
+use crate::sim::Pos;
 use crab_world::Visuals;
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint};
 use crab_world::bot::sensor::CrabTargets;
@@ -102,11 +102,11 @@ pub struct ExternalCrabBridge {
 }
 
 /// The sim's fixed-point [`Pos`] (XZ) as game-world metres on the bridge's `Vec2` frame
-/// (sim `x`→`Vec2.x`, sim `z`→`Vec2.y`). One definition for every Pos→metres conversion in
-/// this module, so the `/ UNIT` cast can't drift between the spawn seed, the restart re-seed,
-/// and the hunt target (the manual's "one source, derive the rest").
+/// (sim `x`→`Vec2.x`, sim `z`→`Vec2.y`) — just [`Pos::to_meters`] (the one conversion
+/// rule) repackaged onto `Vec2`.
 fn pos_to_m(p: Pos) -> Vec2 {
-    Vec2::new(p.x as f32 / UNIT as f32, p.z as f32 / UNIT as f32)
+    let (x, z) = p.to_meters();
+    Vec2::new(x, z)
 }
 
 /// Where the crab rig sits in the game world — the 2D (XZ) precursor that [`publish_skin_repose`]
@@ -150,10 +150,7 @@ impl ExternalCrabBridge {
             "external crab world_pos_m out of live bounds: {:?}",
             self.world_pos_m
         );
-        Pos {
-            x: (self.world_pos_m.x * UNIT as f32) as i64,
-            z: (self.world_pos_m.y * UNIT as f32) as i64,
-        }
+        Pos::from_meters(self.world_pos_m.x, self.world_pos_m.y)
     }
 
     /// Where the crab rig sits in the game world before SCALE, as a `(shift, pivot)` pair in

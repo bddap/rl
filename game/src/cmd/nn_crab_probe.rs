@@ -22,8 +22,8 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 100)]
     log_every: u64,
     /// Match seed (also the determinism check: the run is repeated with this seed and the
-    /// final hashes compared).
-    #[arg(long, default_value_t = 0x6372_6162)]
+    /// final hashes compared). Defaults to the round's own [`super::shared::MATCH_SEED`].
+    #[arg(long, default_value_t = super::shared::MATCH_SEED)]
     seed: u64,
     /// Write a full per-tick `<tick> <state_hash>` log to this file (forces a sample every
     /// tick). Two machines running the SAME `(checkpoint, seed, ticks)` must produce

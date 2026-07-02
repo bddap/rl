@@ -5089,6 +5089,7 @@ dependencies = [
  "net",
  "otel",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

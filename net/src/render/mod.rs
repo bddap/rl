@@ -42,10 +42,10 @@ use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::lockstep::{Lockstep, TickMsg};
 use crate::net_loop::{Coordinator, Exchanged, NetDriver};
 use crate::sim::{
-    CRAB_SCALE, Crab, Input, Outcome, Player, PlayerId, PlayerStatus, Pos, UNIT, buttons, trig,
+    CRAB_SCALE, Crab, Input, Outcome, Player, PlayerId, PlayerStatus, Pos, buttons, trig,
     trig_client,
 };
-use crate::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
+use crate::telemetry::{TelemetryEvent, next_sample_tick};
 use crab_world::controls::{
     ActiveContext, ActiveDevice, ForceRevealControls, PAD_STICK_DEADZONE, spawn_controls_ui,
     track_active_device, update_controls_ui,
@@ -96,28 +96,24 @@ const PAD_QUIT_HOLD_SECS: f32 = 1.0;
 /// Pitch clamp (radians) so the FP camera can't flip over the poles.
 const PITCH_LIMIT: f32 = 1.5;
 
-/// Convert a sim fixed-point coordinate to meters.
-fn meters(coord: i64) -> f32 {
-    coord as f32 / UNIT as f32
-}
-
 /// A sim ground position (XZ at Y=0) as a Bevy world point at height `y`. The sim's
 /// right-handed XZ frame (+X right, +Z forward, +Y up) IS Bevy's frame, so this is a
-/// direct unit conversion with no axis remap — then shrunk by [`scene::world_render_scale`] so
-/// the human world renders small around the true-physics-size giant crab (render==physics; the
-/// crab is NOT inflated). `y` (an eye/capsule height) scales with the rest of the frame.
+/// direct unit conversion ([`Pos::to_meters`]) with no axis remap — then shrunk by
+/// [`scene::world_render_scale`] so the human world renders small around the
+/// true-physics-size giant crab (render==physics; the crab is NOT inflated). `y` (an
+/// eye/capsule height) scales with the rest of the frame.
 fn world(pos: Pos, y: f32) -> Vec3 {
-    Vec3::new(meters(pos.x), y, meters(pos.z)) * scene::world_render_scale()
+    let (x, z) = pos.to_meters();
+    Vec3::new(x, y, z) * scene::world_render_scale()
 }
 
-/// The sim's per-tick yaw turn cap, in radians. The sim clamps a tick's yaw delta to
-/// `trig::TURN/24` turn-units (see [`crate::sim`]); we normalize our accrued
-/// look radians by this same cap so full `look_yaw` deflection means exactly "the
-/// most the sim turns in one tick" — commanding more would only make the camera lag
-/// the avatar, since the sim would clamp it. Derived from the same integer `trig::TURN`
-/// the sim uses, so the two can't drift.
+/// The sim's per-tick yaw turn cap, in radians. We normalize our accrued look radians
+/// by this same cap so full `look_yaw` deflection means exactly "the most the sim
+/// turns in one tick" — commanding more would only make the camera lag the avatar,
+/// since the sim would clamp it. Derived from the sim's own
+/// [`crate::sim::MAX_YAW_TURNS_PER_TICK`], so the two can't drift.
 const MAX_YAW_PER_TICK_RADIANS: f32 =
-    (trig::TURN / 24) as f32 / trig::TURN as f32 * std::f32::consts::TAU;
+    crate::sim::MAX_YAW_TURNS_PER_TICK as f32 / trig::TURN as f32 * std::f32::consts::TAU;
 
 mod app;
 mod articulation;

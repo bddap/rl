@@ -9,7 +9,7 @@
 
 use bevy::prelude::*;
 
-use crate::sim::{Input, PlayerId, Pos, Sim, UNIT};
+use crate::sim::{Input, PlayerId, Pos, Sim};
 use crab_world::bot::body::{CrabCarapace, CrabEnvId};
 use crab_world::bot::sensor::CrabTargets;
 
@@ -80,12 +80,16 @@ fn probe_step(
     let tick = driver.sim.tick();
     if tick == 1 || tick.is_multiple_of(driver.log_every) {
         let crab = driver.sim.crab().pos();
-        let crab_x_m = crab.x as f32 / UNIT as f32;
-        let crab_z_m = crab.z as f32 / UNIT as f32;
+        let (crab_x_m, crab_z_m) = crab.to_meters();
         let dist_to_prey_m = prey
             .map(|p| {
-                let dx = (p.x - crab.x) as f32 / UNIT as f32;
-                let dz = (p.z - crab.z) as f32 / UNIT as f32;
+                // Integer delta first, then the one Pos→meters rule — bit-identical to
+                // the old inline `/ UNIT` casts.
+                let (dx, dz) = Pos {
+                    x: p.x - crab.x,
+                    z: p.z - crab.z,
+                }
+                .to_meters();
                 (dx * dx + dz * dz).sqrt()
             })
             .unwrap_or(f32::NAN);

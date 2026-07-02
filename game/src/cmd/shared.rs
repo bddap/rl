@@ -72,9 +72,16 @@ pub(crate) fn nn_crab_checkpoint_dir(
     }
 }
 
-/// Write per-tick `<tick> <hash>` lines (zero-padded 16-hex) to a file — the determinism
-/// log two runs `diff` to prove byte-identical sims (the `nn-crab-probe` gate; the line
-/// format is the diff contract, so it lives in ONE writer).
+/// One determinism-log line, `<tick> <hash>` (zero-padded 16-hex) — the format two
+/// peers/runs `diff` to prove byte-identical sims. The line IS the cross-peer diff
+/// contract, so every writer (this file's whole-log writer and `game net`'s streaming
+/// host/client writers) formats through here (#133).
+pub(crate) fn tick_hash_line(tick: u64, hash: u64) -> String {
+    format!("{tick} {hash:#018x}")
+}
+
+/// Write per-tick [`tick_hash_line`]s to a file — the whole-log form the `nn-crab-probe`
+/// gate diffs.
 pub(crate) fn write_tick_hash_log(
     path: &std::path::Path,
     entries: impl Iterator<Item = (u64, u64)>,
@@ -82,7 +89,7 @@ pub(crate) fn write_tick_hash_log(
     use std::fmt::Write as _;
     let mut out = String::new();
     for (tick, hash) in entries {
-        writeln!(out, "{} {:#018x}", tick, hash).unwrap();
+        writeln!(out, "{}", tick_hash_line(tick, hash)).unwrap();
     }
     std::fs::write(path, out).with_context(|| format!("writing hash log to {}", path.display()))
 }
