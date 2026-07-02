@@ -15,7 +15,7 @@
 //!   σ-widening) for `active_ticks` ticks — the same [`Policy::act`] the demo runs. It measures
 //!   the settled policy, not the explorer.
 //!
-//! Two HONEST numbers, both read off the REAL physics — never a reward term, a curriculum-clamped
+//! Two HONEST numbers, both read off the REAL physics — never a reward term, a band-clamped
 //! value, or a finish-time artifact (the gait work has misread proxy metrics repeatedly):
 //! 1. **progress_m** — real metres the carapace CLOSED toward the ball: initial carapace→ball
 //!    distance minus the CLOSEST it ever got, in true 3D euclidean metres ([`dist_3d`], the same
@@ -38,8 +38,8 @@ use crate::bot::headless::{
 use crate::bot::sensor::{CrabObservation, CrabTargets};
 use crate::bot::{BotSet, CrabSpawns};
 use crate::policy::Policy;
-use crate::training::curriculum::{
-    CURRICULUM_REACH_RADIUS, TARGET_ARENA_HALF, TARGET_Y_MAX, TARGET_Y_MIN,
+use crate::training::targets::{
+    REACH_RADIUS, TARGET_ARENA_HALF, TARGET_Y_MAX, TARGET_Y_MIN,
 };
 use crate::training::reward::dist_3d;
 
@@ -77,7 +77,7 @@ pub struct EvalReport {
     pub final_distance_m: f32,
     /// The fixed target distance the ball was placed at (planar m from spawn).
     pub target_distance_m: f32,
-    /// Whether the crab got within the canonical reach radius ([`CURRICULUM_REACH_RADIUS`]) of the
+    /// Whether the crab got within the canonical reach radius ([`REACH_RADIUS`]) of the
     /// ball at any point — the same "reached it" event the demo/training use.
     pub reached: bool,
     /// Active ticks actually rolled (excludes the settle window).
@@ -179,7 +179,7 @@ pub fn run_eval(checkpoint_dir: &Path, active_ticks: u64, target_distance: f32) 
         closest_distance_m: state.closest_dist,
         final_distance_m: state.last_dist,
         target_distance_m: target_distance,
-        reached: state.closest_dist <= CURRICULUM_REACH_RADIUS,
+        reached: state.closest_dist <= REACH_RADIUS,
         active_ticks: state.torque_ticks,
         policy_loaded,
     }
@@ -308,7 +308,7 @@ mod tests {
         // the invariant can never regress into a run-only failure.
         const {
             assert!(
-                DEFAULT_TARGET_DISTANCE_M > CURRICULUM_REACH_RADIUS,
+                DEFAULT_TARGET_DISTANCE_M > REACH_RADIUS,
                 "the ball must start FAR — well outside the reach radius"
             );
             // The fixed claw height sits inside the training target-Y band (a genuine reach).
@@ -347,7 +347,7 @@ mod tests {
         );
         // The ball is far: the crab spawns ~target_distance away and, undriven, can't reach it.
         assert!(
-            r.initial_distance_m > CURRICULUM_REACH_RADIUS,
+            r.initial_distance_m > REACH_RADIUS,
             "the ball starts far outside reach ({} m)",
             r.initial_distance_m
         );

@@ -22,7 +22,7 @@ use super::checkpoint::{
     BRAIN_FILENAME, NORMALIZER_FILENAME, OPTIMIZER_FILENAME, RETURN_NORMALIZER_FILENAME,
     TICK_WATERMARK_FILENAME,
 };
-use super::curriculum::SOLID_REACH_FRACTION;
+use super::targets::SOLID_REACH_FRACTION;
 
 /// Subdirectory of the checkpoint dir holding the best-by-reach snapshot.
 const BEST_SUBDIR: &str = "best";

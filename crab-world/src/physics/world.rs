@@ -34,7 +34,7 @@ impl Plugin for ArenaVisualsPlugin {
 }
 
 /// Half-extent of the square arena (ground + walls) in metres. `pub(crate)` so the
-/// reward's target-spawn clamp ([`crate::training::curriculum`]) can derive its inset
+/// reward's target-spawn clamp ([`crate::training::targets`]) can derive its inset
 /// from the true wall position rather than hand-copying it — a wall move then can't
 /// strand far targets inside a wall.
 pub(crate) const ARENA_HALF_SIZE: f32 = 10.0;

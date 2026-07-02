@@ -11,7 +11,7 @@ use crate::bot::body::{CrabAssets, CrabBodyPart, CrabEnvId, random_spawn_rotatio
 use crate::bot::sensor::{CrabTargets, OBS_SIZE};
 use crate::bot::{CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown};
 use crate::training::algorithm::{NormalizedValue, StepEnd, Transition};
-use crate::training::curriculum::{CURRICULUM_REACH_RADIUS, seed_target};
+use crate::training::targets::{REACH_RADIUS, seed_target};
 use crate::training::reward::{GRAB_REWARD, compute_reward, is_progress_glitch, planar_dist};
 
 use super::state::TrainingState;
@@ -85,7 +85,7 @@ struct StepFinalize {
 ///     spawn teleport would be a huge spurious progress delta); the effort tax still applies — it
 ///     priced the DRIVE, not its result.
 ///   * otherwise the survival guards (height band + blow-up speed) and the sparse terminal grab
-///     (a claw tip within [`CURRICULUM_REACH_RADIUS`], rl#95) decide the end, and alive past the
+///     (a claw tip within [`REACH_RADIUS`], rl#95) decide the end, and alive past the
 ///     cap is a truncation ([`classify_step_end`]). Progress is the metres the carapace's distance
 ///     to the goal SHRANK from `pending.target_dist` (`s_t`) to `d_now` (`s_{t+1}`); a missing
 ///     `d_now`/`target_dist` earns no progress credit.
@@ -132,7 +132,7 @@ fn finalize_pending_step(
     // Sparse terminal grab (rl#95): a claw tip within the reach radius this tick adds the one-shot
     // bonus and ends the episode as a SUCCESS terminal (GAE bootstraps ZERO past it). `is_some_and`
     // makes a missing/NaN distance a non-grab (fail-safe, no spurious terminal).
-    let grabbed = min_tip_dist.is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
+    let grabbed = min_tip_dist.is_some_and(|d| d < REACH_RADIUS);
     if grabbed {
         reward += GRAB_REWARD;
     }
@@ -202,8 +202,8 @@ pub(crate) struct EnvEpisode {
     pub(crate) steps: u32,
     pub(crate) phase: EnvPhase,
     /// Closest claw-tip→target 3D euclidean distance seen at any tick this episode — the
-    /// curriculum's competence signal (an episode "reached" if this drops below
-    /// [`CURRICULUM_REACH_RADIUS`]). `None` until the first finite tip reading. The MIN
+    /// reach-fraction competence signal (an episode "reached" if this drops below
+    /// [`REACH_RADIUS`]). `None` until the first finite tip reading. The MIN
     /// over the whole episode (not the final-tick distance) is the honest "did it get
     /// there", since the crab need only touch the target once, and the target then
     /// stays fixed for the rest of the episode. A 3D radius (see [`dist_3d`]): a tip on the
@@ -308,10 +308,10 @@ impl TrainingState {
                 let ep = &self.envs[e];
                 let ep_reward = ep.reward;
                 // Did this episode reach the target (see [`EnvEpisode::min_tip_dist`]), read
-                // before the reset clears it. Same `CURRICULUM_REACH_RADIUS` as the grab terminal
+                // before the reset clears it. Same `REACH_RADIUS` as the grab terminal
                 // but over the episode MINIMUM, so a grab ⟹ reached: the grab fires the first
                 // finalized tick the tip is inside the radius, which also drives the min inside it.
-                let reached = ep.min_tip_dist.is_some_and(|d| d < CURRICULUM_REACH_RADIUS);
+                let reached = ep.min_tip_dist.is_some_and(|d| d < REACH_RADIUS);
                 // A rescued env was already despawned+respawned this tick by
                 // rescue_nonfinite_crabs (runs .before(Sense)); a second respawn from reset_crab
                 // would tear down that zero-tick-old fresh crab and rebuild an identical one. So
@@ -333,8 +333,8 @@ impl TrainingState {
                 // the normal and rescue ends converge) so target life tracks episode life.
                 seed_target(targets, spawns, e, &mut self.rng);
 
-                // Tally this finished episode's reach for the curriculum (drained per horizon
-                // to the learner, like the rewards just below).
+                // Tally this finished episode's reach for the reach fraction (drained per
+                // horizon to the learner, like the rewards just below).
                 self.reach_finished += 1;
                 if reached {
                     self.reach_reached += 1;
@@ -417,7 +417,7 @@ pub(crate) fn reset_crab(
     spawns: Res<CrabSpawns>,
     parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>,
 ) {
-    // Randomized-start curriculum: each respawning env gets a fresh random orientation
+    // Randomized starts: each respawning env gets a fresh random orientation
     // so the policy learns to stand (and right itself) from varied, even inverted,
     // starts instead of memorising the one bind pose (the demo's respawn draws the same
     // tilt — see `play::demo::random_demo_tilt`). The rotation is drawn from the run's
@@ -516,7 +516,7 @@ mod tests {
         };
         const ALIVE_H: f32 = 1.0;
         const CALM: f32 = 1.0;
-        let far_tip = Some(CURRICULUM_REACH_RADIUS * 4.0);
+        let far_tip = Some(REACH_RADIUS * 4.0);
         // A live-pose reading closing `close` metres with the tip `tip` from the target.
         let pose = |close: Option<f32>, tip: Option<f32>| PostStepPose {
             height: ALIVE_H,

@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::bot::CrabSpawns;
 use crate::bot::body::{self, CrabClawTip};
 use crate::bot::sensor::CrabTargets;
-use crate::training::curriculum::sample_target;
+use crate::training::targets::sample_target;
 use crate::training::reward::dist_3d;
 
 /// Marker on the demo's red target ball — the visible stand-in for the target the
@@ -25,11 +25,11 @@ pub(super) struct TargetBall;
 /// plus a SPARSE grab terminal gated at exactly this radius (`reward::GRAB_REWARD`), so the
 /// same radius defines the "reached it" event in three places that share one definition: the
 /// grab terminal there, the demo's ball-hop here, and the training per-episode reach signal.
-/// DERIVED from that curriculum constant
-/// ([`crate::training::curriculum::CURRICULUM_REACH_RADIUS`]) — one source, in the
-/// always-compiled trainer — so the demo and curriculum can't drift apart on the
+/// DERIVED from that training constant
+/// ([`crate::training::targets::REACH_RADIUS`]) — one source, in the
+/// always-compiled trainer — so the demo and training can't drift apart on the
 /// radius. (0.8 m, as the doc above describes.)
-const DEMO_REACH_RADIUS: f32 = crate::training::curriculum::CURRICULUM_REACH_RADIUS;
+const DEMO_REACH_RADIUS: f32 = crate::training::targets::REACH_RADIUS;
 
 /// Radius (m) of the demo target ball. Bigger than [`DEMO_REACH_RADIUS`] so the
 /// claw visibly reaches *into* the ball before it registers a reach and jumps —

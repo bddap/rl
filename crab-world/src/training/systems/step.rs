@@ -14,7 +14,7 @@ use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns};
 use crate::training::algorithm::NormalizedValue;
-use crate::training::curriculum::seed_target;
+use crate::training::targets::seed_target;
 use crate::training::reward::{EFFORT_WEIGHT, action_effort, dist_3d, planar_dist};
 
 use super::lifecycle::{EnvEpisode, EnvPhase};
@@ -85,7 +85,7 @@ pub(super) struct StepInputs<'a> {
     /// walking-diagnostic inputs.
     pub(super) body: &'a BodyState,
     /// Closest claw-tip→target 3D distance per env this tick — the grab terminal's `d` (and
-    /// the curriculum "reached" signal's, via the per-episode minimum).
+    /// the per-episode "reached" signal's, via the per-episode minimum).
     pub(super) min_tip_dists: &'a [Option<f32>],
     /// Normalized observation fed to the policy this tick (stashed in the pending).
     pub(super) obs: &'a [[f32; OBS_SIZE]],
@@ -355,7 +355,7 @@ pub(crate) fn brain_step(
 
     let min_tip_dists = closest_tip_dists(n, &targets, &claw_tips_q);
     // Fold this tick's closest tip distance into each RECORDING env's episode minimum —
-    // the curriculum's competence signal. Recording-only: a Settling env already holds
+    // the reach-fraction competence signal. Recording-only: a Settling env already holds
     // the NEXT episode's target (seeded at reset), so crediting its settle-pose distances
     // would contaminate that episode's reach with poses the policy never chose.
     for (e, tip) in min_tip_dists.iter().enumerate() {
@@ -755,7 +755,7 @@ mod tests {
     /// The sparse-grab path end-to-end (rl#95): a claw tip within the reach radius of the target
     /// ENDS the episode as a TRUE terminal carrying the one-shot grab bonus, and the env resets.
     /// We force the grab by moving the target ONTO a live claw tip of env 0, so this tick's
-    /// minimum tip distance is ~0 (well under `CURRICULUM_REACH_RADIUS`).
+    /// minimum tip distance is ~0 (well under `REACH_RADIUS`).
     #[test]
     fn grab_within_radius_ends_episode_with_terminal_bonus() {
         let checkpoint_dir =

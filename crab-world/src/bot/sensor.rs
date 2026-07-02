@@ -224,7 +224,7 @@ pub fn build_observation(
         // carapace to the target, rotated into body axes so "target is to my
         // left / above my back" reads the same regardless of world yaw — the
         // orientation-invariance the policy needs to reach from any heading (the
-        // randomized-start curriculum spawns it facing anywhere).
+        // randomized starts spawn it facing anywhere).
         o.target_local = targets
             .get(env.0)
             .map(|t| transform.rotation.inverse() * (t - transform.translation))
