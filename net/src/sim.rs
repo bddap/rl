@@ -229,8 +229,10 @@ pub const EXTRACT_RADIUS: i64 = 2 * UNIT;
 /// Per-tick cap on yaw turn from look input, in [`trig::TURN`] units (a full circle
 /// is [`trig::TURN`]). At 30 Hz, [`trig::TURN`]/24 per tick ≈ half a turn per second
 /// at full deflection — brisk but not instant, and bounded so a single tick can't
-/// spin a peer wildly.
-const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
+/// spin a peer wildly. `pub(crate)`: the render layer derives its radians-per-tick cap
+/// from this one constant (`render::MAX_YAW_PER_TICK_RADIANS`), so the divisor is
+/// stated exactly once.
+pub(crate) const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
 
 /// What a player is doing in the round. Drives both sim logic (only `Alive` players
 /// move, get hunted, and can extract) and rendering (downed = ragdoll/marker,
@@ -249,11 +251,29 @@ pub enum PlayerStatus {
 /// A point on the ground plane, in [`UNIT`] fixed-point world coordinates. The world
 /// is the XZ-plane (`x` right, `z` forward) at Y=0 — so this is named `x`/`z`, not a
 /// bare `(i64, i64)` whose `.1` a reader would mistake for the (unused) up axis. One
-/// type for every entity's position; convert to meters with `x as f32 / UNIT as f32`.
+/// type for every entity's position; convert with [`Pos::to_meters`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Pos {
     pub x: i64,
     pub z: i64,
+}
+
+impl Pos {
+    /// This position in meters, as `(x, z)` — THE fixed-point→meters rule (`coord / UNIT`),
+    /// stated once so the render/bridge/probe conversions can't drift. The f32 view is for
+    /// presentation and diagnostics only; sim logic never reads it back.
+    pub fn to_meters(self) -> (f32, f32) {
+        (self.x as f32 / UNIT as f32, self.z as f32 / UNIT as f32)
+    }
+
+    /// Inverse of [`Pos::to_meters`]: meters onto the fixed-point grid (truncating cast,
+    /// exactly the cast the external-crab bridge has always used).
+    pub fn from_meters(x_m: f32, z_m: f32) -> Self {
+        Pos {
+            x: (x_m * UNIT as f32) as i64,
+            z: (z_m * UNIT as f32) as i64,
+        }
+    }
 }
 
 /// A first-person player: a capsule on the ground plane with a facing yaw. Position is

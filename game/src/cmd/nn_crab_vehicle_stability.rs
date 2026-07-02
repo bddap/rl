@@ -18,8 +18,8 @@ pub(crate) struct Args {
     /// Ticks to watch the crab AFTER the ram (it absorbs the hit, then must recover).
     #[arg(long, default_value_t = 600)]
     post: u64,
-    /// Match seed.
-    #[arg(long, default_value_t = 0x6372_6162)]
+    /// Match seed. Defaults to the round's own [`super::shared::MATCH_SEED`].
+    #[arg(long, default_value_t = super::shared::MATCH_SEED)]
     seed: u64,
 }
 

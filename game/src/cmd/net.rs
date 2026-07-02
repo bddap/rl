@@ -7,7 +7,8 @@ use clap::Parser;
 use iroh::EndpointId;
 use net::lockstep::Lockstep;
 use net::sim::{Input, PlayerId, TICK_DT, TICK_HZ};
-use net::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
+use net::telemetry::{TelemetryEvent, next_sample_tick};
+use tracing::{info, warn};
 use net::{formation, net_loop, transport};
 
 use super::shared::run_solo_round;
@@ -53,7 +54,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
 async fn run_net(args: Args) -> Result<()> {
     let mut session = transport::start_session().await?;
     let my_eid = session.endpoint_id();
-    println!("game endpoint id: {my_eid}");
+    info!("game endpoint id: {my_eid}");
 
     // Open the telemetry side-channel (if configured) BEFORE forming the match, so the
     // collector sees the roster fill. Best-effort + isolated: separate iroh endpoint,
@@ -90,7 +91,7 @@ async fn run_net(args: Args) -> Result<()> {
     // input — the live roster of record past this point is the server's schedule.
     let mut id_map = frozen.id_map.clone();
     let all_ids: Vec<PlayerId> = id_map.values().copied().collect();
-    println!(
+    info!(
         "starting lockstep: {} player(s), I am {:?} ({})",
         all_ids.len(),
         me,
@@ -134,9 +135,9 @@ async fn run_net(args: Args) -> Result<()> {
     // authoritative cross-machine determinism proof is the per-tick `--hash-log` (keyed by the
     // true tick): host and client log the identical tick→hash line for every tick both applied.
     let mut next_report_tick = TICK_HZ;
-    // Telemetry-side sampling cursor (independent of the stdout report cadence) and a
+    // Telemetry-side sampling cursor (independent of the progress-report cadence) and a
     // one-shot latch so RoundDecided is reported exactly once.
-    let mut next_tel_tick = TELEMETRY_TICK_EVERY;
+    let mut next_tel_tick = next_sample_tick(0);
     let mut reported_outcome = false;
     // Optional per-tick hash log (Args::hash_log): every applied tick keyed by its true
     // tick, so two peers' logs diff byte-identically over their overlap — the cross-machine
@@ -229,8 +230,8 @@ async fn run_net(args: Args) -> Result<()> {
                     // Log the just-stepped tick (post-step count minus one) + its closing hash, so a
                     // host and client diff byte-identically — the same keying the client arm uses.
                     let applied = srv.sim().tick().saturating_sub(1);
-                    writeln!(w, "{} {:#018x}", applied, srv.sim().state_hash())
-                        .context("writing hash log")?;
+                    let line = super::shared::tick_hash_line(applied, srv.sim().state_hash());
+                    writeln!(w, "{line}").context("writing hash log")?;
                 }
             }
         } else {
@@ -253,7 +254,8 @@ async fn run_net(args: Args) -> Result<()> {
             if let Some(w) = hash_log.as_mut() {
                 use std::io::Write as _;
                 for (applied, hash) in adopted_hashes {
-                    writeln!(w, "{} {:#018x}", applied, hash).context("writing hash log")?;
+                    let line = super::shared::tick_hash_line(applied, hash);
+                    writeln!(w, "{line}").context("writing hash log")?;
                 }
             }
         }
@@ -263,7 +265,7 @@ async fn run_net(args: Args) -> Result<()> {
         // are not byte-comparable across peers; the `--hash-log` is).
         if ls.sim().tick() >= next_report_tick {
             next_report_tick = (ls.sim().tick() / TICK_HZ + 1) * TICK_HZ;
-            println!(
+            info!(
                 "tick={:>5} peers={} statehash={:#018x}",
                 ls.sim().tick(),
                 session.connected_peers().await.len(),
@@ -276,7 +278,7 @@ async fn run_net(args: Args) -> Result<()> {
         // All read-only on the sim; all best-effort (a send that can't keep up drops).
         if let Some(t) = tel.as_ref() {
             if ls.sim().tick() >= next_tel_tick {
-                next_tel_tick = (ls.sim().tick() / TELEMETRY_TICK_EVERY + 1) * TELEMETRY_TICK_EVERY;
+                next_tel_tick = next_sample_tick(ls.sim().tick());
                 // LIVE roster size (a departure shrinks it, rl#198) — the same quantity render.rs
                 // and the final snapshot report, so the feed's `roster` field means one thing
                 // across every driver.
@@ -290,7 +292,7 @@ async fn run_net(args: Args) -> Result<()> {
         }
     }
 
-    println!(
+    info!(
         "done: {} ticks applied, {} snapshots {}, final hash {:#018x}",
         ls.sim().tick(),
         snapshots_io,
@@ -305,8 +307,8 @@ async fn run_net(args: Args) -> Result<()> {
     if all_ids.len() > 1 && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(TICK_HZ) {
         // We applied far fewer ticks than wall time allowed → we spent the run
         // stalled waiting for a peer's input. Flag it; a healthy link keeps pace.
-        eprintln!(
-            "WARNING: only {} ticks in {}s — peer link stalled (missing inputs)",
+        warn!(
+            "only {} ticks in {}s — peer link stalled (missing inputs)",
             ls.sim().tick(),
             args.run_secs
         );

@@ -19,10 +19,12 @@ crab-world = { path = "../crab-world", features = ["render"] }
 # tracing → OTLP bridge: installs the stderr fmt subscriber (always) and exports OTLP
 # traces/logs/metrics when a telemetry endpoint is configured (inert otherwise). Routes the
 # missing-mesh error and other game faults onto the telemetry stream — the "rl-game next
-# wiring" the otel crate was built for. Pulls tracing/tracing-subscriber transitively, so the
-# game no longer names them directly.
+# wiring" the otel crate was built for.
 otel = { path = "../otel" }
 anyhow.workspace = true
 clap.workspace = true
 iroh.workspace = true
 tokio.workspace = true
+# The headless net loop reports progress/faults as tracing events (not println), so they
+# ride the same subscriber + OTLP export as every other game fault (#133).
+tracing.workspace = true
