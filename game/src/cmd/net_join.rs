@@ -18,8 +18,9 @@ use super::shared::{MATCH_SEED, nn_crab_checkpoint_dir, resolve_render_mode};
 #[derive(Parser)]
 pub(crate) struct Args {
     /// The host's endpoint-id code (printed by the host's `game endpoint id: …` line) to dial
-    /// into. We send our weight/collider digests as a join request; the host admits us at an
-    /// agreed future tick over the new roster, or refuses loudly on a digest mismatch.
+    /// into. We send our collider digest as a join request; the host admits us at an
+    /// agreed future tick over the new roster, or refuses loudly on a collider mismatch or an
+    /// unarmed host.
     #[arg(value_name = "HOST_ENDPOINT_ID")]
     host: EndpointId,
     /// Stream live telemetry to this collector endpoint id (separate ALPN/connection — never
@@ -27,8 +28,9 @@ pub(crate) struct Args {
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
     /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`) — REQUIRED, as
-    /// for `play`: the joiner advertises its weights+asset digests so the host's admission gate
-    /// can verify it runs the SAME Sally (a mismatch is refused, never a silent wrong crab).
+    /// for `play`. Like a cold-start formation client (rl#199), the joiner never executes the
+    /// brain — the host's self-gate is the one weights guard (rl#206) — so only the crab-ASSET
+    /// digest is gated (a mismatch is refused, never a silent wrong crab).
     #[arg(long, value_name = "DIR")]
     nn_crab_checkpoint: Option<std::path::PathBuf>,
     /// Start the crab render view in this mode (default: mesh). Same as `play --render-mode`.
@@ -37,30 +39,16 @@ pub(crate) struct Args {
 }
 
 /// Dial the host, join the live round via host-authoritative snapshot adoption, and boot the
-/// windowed client into the joiner's session. The joiner resolves its REQUIRED checkpoint UP FRONT
-/// and refuses to dial with a fake (zero-digest) crab, then on `Joined` hands the pre-built
+/// windowed client into the joiner's session. On `Joined` it hands the pre-built
 /// `(Lockstep, NetDriver)` to [`render::Boot::Round`] — the joiner becomes a normal remote-adopt
-/// Client that renders the host's snapshots. A `Refused` (digest mismatch OR a zero-digest host the
-/// gate turned away) or `Unreachable` host is a clean, loud error exit — never a silent fallback to
-/// a fake/solo crab.
+/// Client that renders the host's snapshots; like a formation client, its own brain digest is
+/// ungated (rl#206 — the host's self-gate guards the one brain that runs). A `Refused` (collider
+/// mismatch OR a zero-digest host the gate turned away) or `Unreachable` host is a clean, loud
+/// error exit — never a silent fallback to a fake/solo crab.
 pub(crate) fn run(args: Args) -> Result<()> {
     let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint)?;
     let weights_digest = crab_world::play::checkpoint_digest(&external_crab);
     let asset_digest = crab_world::bot::meshfit::crab_asset_digest();
-
-    // Joiner host-verify, our half (rl#151 incr 4): our own checkpoint must load to a REAL Sally
-    // before we dial. With a zero digest we run the fake rest-pose crab, can't verify the host runs
-    // the real one, and the host's self-gate would refuse us anyway — so fail fast and loud here
-    // rather than after a QUIC round-trip. (An armed match only admits us when the host's digest
-    // equals ours and is non-zero, so a successful join proves BOTH peers run the same real Sally.)
-    if weights_digest == 0 {
-        bail!(
-            "our trained NN crab (\"Sally\") checkpoint at {} failed to load (weights digest 0) — \
-             refusing to join a match with a fake crab. Run rl-update on this device so it carries \
-             the real brain, then re-join.",
-            external_crab.display()
-        );
-    }
 
     let result = net_loop::connect_and_join(
         MATCH_SEED,
@@ -77,8 +65,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
         }
         net_loop::JoinResult::Refused(reason) => {
             bail!(
-                "host refused our join: {reason}. We are running a different brain or Sally than \
-                 the host — run rl-update on this device so every peer carries the same checkpoint."
+                "host refused our join: {reason}. Run rl-update so every device carries the same \
+                 build and assets, then re-join."
             )
         }
         net_loop::JoinResult::Unreachable => {

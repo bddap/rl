@@ -23,11 +23,11 @@ use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_future::StreamExt;
 use tokio::sync::mpsc;
 
+use crate::articulation::CrabArticulation;
 use crate::lockstep::TickMsg;
 use crate::membership::{self, Beat};
 use crate::server::{Admission, JoinRequest};
 use crate::sim::PlayerId;
-use crate::articulation::CrabArticulation;
 use crate::snapshot::CoreSnapshot;
 
 /// ALPN for the game's wire. The framing is `[len:u32 LE][kind:u8][body]`, where
@@ -248,22 +248,25 @@ impl Codec for Beat {
 
 impl Codec for JoinRequest {
     const KIND: Frame = Frame::JoinRequest;
-    type Bytes = [u8; 16];
+    type Bytes = [u8; 8];
 
-    /// `weights_digest(8) | asset_digest(8)`, little-endian.
-    fn encode(&self) -> [u8; 16] {
-        let mut b = [0u8; 16];
-        b[0..8].copy_from_slice(&self.weights_digest.to_le_bytes());
-        b[8..16].copy_from_slice(&self.asset_digest.to_le_bytes());
-        b
+    /// `asset_digest(8)`, little-endian. The joiner's weights digest was dropped from the wire
+    /// (rl#206) — a joiner never executes the brain, so the host self-gate is the one weights
+    /// guard. The strict length checks make a pre-rl#206 16-byte frame a loud decode error, never
+    /// a silently misread request (the fleet updates atomically via rl-update).
+    fn encode(&self) -> [u8; 8] {
+        self.asset_digest.to_le_bytes()
     }
 
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = body;
-        let weights_digest = u64::from_le_bytes(take(&mut r, 8, "weights_digest")?.try_into().unwrap());
         let asset_digest = u64::from_le_bytes(take(&mut r, 8, "asset_digest")?.try_into().unwrap());
-        anyhow::ensure!(r.is_empty(), "join-request frame has {} trailing bytes", r.len());
-        Ok(JoinRequest { weights_digest, asset_digest })
+        anyhow::ensure!(
+            r.is_empty(),
+            "join-request frame has {} trailing bytes",
+            r.len()
+        );
+        Ok(JoinRequest { asset_digest })
     }
 }
 
@@ -290,14 +293,19 @@ impl Codec for Admission {
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = body;
         let pid = PlayerId(take(&mut r, 1, "pid")?[0]);
-        let effective_tick = u64::from_le_bytes(take(&mut r, 8, "effective_tick")?.try_into().unwrap());
+        let effective_tick =
+            u64::from_le_bytes(take(&mut r, 8, "effective_tick")?.try_into().unwrap());
         let n = u16::from_le_bytes(take(&mut r, 2, "roster len")?.try_into().unwrap());
         let mut roster = Vec::with_capacity(n as usize);
         for _ in 0..n {
             roster.push(PlayerId(take(&mut r, 1, "roster pid")?[0]));
         }
         anyhow::ensure!(r.is_empty(), "welcome frame has {} trailing bytes", r.len());
-        Ok(Admission { pid, effective_tick, roster })
+        Ok(Admission {
+            pid,
+            effective_tick,
+            roster,
+        })
     }
 }
 
@@ -603,9 +611,10 @@ impl Session {
         {
             let links = self.links.lock().await;
             for (id, link) in links.iter() {
-                if let Err(mpsc::error::TrySendError::Full(_)) =
-                    link.send.try_send(OutFrame { kind, body: body.clone() })
-                {
+                if let Err(mpsc::error::TrySendError::Full(_)) = link.send.try_send(OutFrame {
+                    kind,
+                    body: body.clone(),
+                }) {
                     wedged.push((*id, Arc::downgrade(&link.send)));
                 }
             }
@@ -640,8 +649,7 @@ pub async fn start_session() -> Result<Session> {
     let my_id = endpoint.id();
 
     let (inbox_tx, inbox_rx) = mpsc::channel(256);
-    let links: Links =
-        Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
+    let links: Links = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
 
     // Accept side: register the lockstep protocol. Each accepted connection spawns a
     // reader feeding the shared inbox and records its send half as a link.
@@ -928,10 +936,22 @@ mod tests {
         let art = CrabArticulation {
             tick: 909,
             parts: vec![
-                PartTransform { part: 0, pos: [0.5, -1.0, 2.0], rot: [0.0, 0.0, 0.0, 1.0] },
-                PartTransform { part: 12, pos: [3.0, 4.0, 5.0], rot: [0.5, 0.5, 0.5, 0.5] },
+                PartTransform {
+                    part: 0,
+                    pos: [0.5, -1.0, 2.0],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                },
+                PartTransform {
+                    part: 12,
+                    pos: [3.0, 4.0, 5.0],
+                    rot: [0.5, 0.5, 0.5, 0.5],
+                },
             ],
-            repose: Some(ReposeWire { shift: [1.0, 0.0, -2.0], pivot: [0.0, 0.5, 0.0], scale: 9.0 }),
+            repose: Some(ReposeWire {
+                shift: [1.0, 0.0, -2.0],
+                pivot: [0.0, 0.5, 0.0],
+                scale: 9.0,
+            }),
         };
         let body = CrabArticulation::encode(&art);
         assert_eq!(CrabArticulation::decode(&body).unwrap(), art);
@@ -953,12 +973,18 @@ mod tests {
 
     #[test]
     fn join_request_wire_roundtrips() {
-        let req = JoinRequest { weights_digest: 0xdead_beef_cafe_f00d, asset_digest: 0x0102_0304 };
-        assert_eq!(JoinRequest::decode(JoinRequest::encode(&req).as_ref()).unwrap(), req);
+        let req = JoinRequest {
+            asset_digest: 0xdead_beef_cafe_f00d,
+        };
+        assert_eq!(
+            JoinRequest::decode(JoinRequest::encode(&req).as_ref()).unwrap(),
+            req
+        );
         // A short body is a loud error, not a guessed-at request.
-        assert!(JoinRequest::decode(&[0u8; 8]).is_err());
-        // Trailing bytes too (a longer/mixed-version frame must not be silently truncated).
-        assert!(JoinRequest::decode(&[0u8; 17]).is_err());
+        assert!(JoinRequest::decode(&[0u8; 4]).is_err());
+        // Trailing bytes too — notably a pre-rl#206 16-byte (weights|assets) frame must be a loud
+        // version-skew error, never silently truncated to just its first field.
+        assert!(JoinRequest::decode(&[0u8; 16]).is_err());
     }
 
     #[test]
@@ -966,8 +992,15 @@ mod tests {
         use crate::sim::PlayerId;
         // The empty-roster edge and a multi-member roster both round-trip byte-for-byte.
         for roster in [vec![], vec![PlayerId(0), PlayerId(1), PlayerId(2)]] {
-            let adm = Admission { pid: PlayerId(2), effective_tick: 1_234_567, roster };
-            assert_eq!(Admission::decode(Admission::encode(&adm).as_ref()).unwrap(), adm);
+            let adm = Admission {
+                pid: PlayerId(2),
+                effective_tick: 1_234_567,
+                roster,
+            };
+            assert_eq!(
+                Admission::decode(Admission::encode(&adm).as_ref()).unwrap(),
+                adm
+            );
         }
         // Truncation (a roster_len claiming more pids than present) is a loud error.
         let mut body = Admission::encode(&Admission {
@@ -978,5 +1011,4 @@ mod tests {
         body.pop(); // drop the last pid byte → count says 2 but only 1 present
         assert!(Admission::decode(&body).is_err());
     }
-
 }
