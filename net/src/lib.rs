@@ -62,17 +62,31 @@ pub mod render;
 #[cfg(feature = "render")]
 pub mod external_crab;
 
+/// The formation barrier's verdict on the two inputs that determine the float NN crab's
+/// physics (rl#82 + rl#100, GCR) — computed ONCE by [`crate::membership::Membership::sync_verdict`]
+/// at the barrier's close and carried as this single value (never as loose parallel bools)
+/// through `Frozen` → `NetDriver` to the arm sites:
+/// - `weights`: every peer advertised the SAME non-zero policy-weights digest. A random-init
+///   or unloadable brain differs per peer (burn seeds fresh weights from process entropy), so
+///   it would desync by construction. Backed by a present checkpoint digest, **not**
+///   `Policy::is_loaded()` — `RL_RANDOM_POLICY=1` forces `is_loaded()` true on a fresh random
+///   brain with NO digest, which would desync peers silently.
+/// - `assets` (rl#100): every peer advertised the SAME non-zero crab-model-asset digest. The
+///   giant crab's rapier colliders are derived from the crab MODEL asset
+///   ([`crab_world::bot::meshfit::crab_asset_digest`]), so two peers with different crab models
+///   build different colliders and desync the moment the float crab is stepped — even with
+///   identical brains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncVerdict {
+    pub weights: bool,
+    pub assets: bool,
+}
+
 /// The shared-asset guard for handing the crab to the float NN body in LOCKSTEP (rl#82 +
 /// rl#100, GCR): a round may arm the external crab only when it can't desync peers on the
-/// inputs that determine the float crab's physics — its BRAIN (`weights_synced`) and its
-/// COLLIDER ASSET (`assets_synced`). SOLO rounds always may — one peer, nothing to desync. A
-/// NETWORKED round may arm ONLY when BOTH agree across every peer:
-/// - `weights_synced`: a random-init or unloadable brain differs per peer (burn seeds fresh
-///   weights from process entropy), so it would desync by construction.
-/// - `assets_synced` (rl#100): the giant crab's rapier colliders are derived from the crab
-///   MODEL asset ([`crab_world::bot::meshfit::crab_asset_digest`]), so two peers with different crab
-///   models build different colliders and desync the moment the float crab is stepped — even
-///   with identical brains.
+/// brain + collider asset that drive the float crab's physics. `None` means the round is
+/// SOLO (no networked formation ran) — one peer, nothing to desync, always arms. A NETWORKED
+/// round arms ONLY on a fully-synced [`SyncVerdict`].
 ///
 /// On either mismatch the round CANNOT arm the NN crab and — with no integer fallback (rl#114) —
 /// the production sites REFUSE it loudly rather than substituting a fake crab. This is the UPSTREAM
@@ -86,15 +100,8 @@ pub mod external_crab;
 /// between them. Each caller ANDs it with "a checkpoint/NN stack is present" (no brain ⇒ nothing to
 /// arm). Deliberately NOT behind `cfg(render)`: the no-feature test build (like the headless
 /// trainer) must exercise the REAL predicate, not a re-encoded copy.
-///
-/// CALLER CONTRACT: `weights_synced` must be `Policy::weights_digest().is_some()`, **NOT**
-/// `is_loaded()` — `RL_RANDOM_POLICY=1` forces `is_loaded()` true on a fresh random brain that
-/// has NO digest (no checkpoint bytes), which would desync peers silently; an absent digest is
-/// exactly "no shared checkpoint", so gating on a present digest closes that trap. Likewise
-/// `assets_synced` must be the [`crate::membership::Membership::assets_synced`] verdict
-/// (a non-zero asset digest agreed by every peer), not "a model loaded".
-pub fn may_arm_external_crab(net_is_none: bool, weights_synced: bool, assets_synced: bool) -> bool {
-    net_is_none || (weights_synced && assets_synced)
+pub fn may_arm_external_crab(sync: Option<SyncVerdict>) -> bool {
+    sync.map_or(true, |v| v.weights && v.assets)
 }
 
 #[cfg(test)]
@@ -118,6 +125,7 @@ mod desync_test {
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
+    use crate::SyncVerdict;
     use crate::sim::{Input, Outcome, PlayerId, Pos, Sim, buttons};
 
     /// Generate a deterministic pseudo-random input log: `ticks` ticks, each with one
@@ -315,19 +323,18 @@ mod desync_test {
     /// Models the production arm decision exactly: a checkpoint must be present AND
     /// [`super::may_arm_external_crab`] must allow it (the SAME predicate the `Boot::Round` build,
     /// the menu's `poll_formation` gate, and `ensure_round_installed` all call via
-    /// `crab_arm_failure`, so this can't drift from them). `net`/`checkpoint`
-    /// are `Option<()>` stand-ins — only their `is_none()`/`is_some()` feeds the gate;
-    /// `weights_synced`/`assets_synced` are the formation handshake's verdicts (irrelevant on a solo
-    /// round). Returns whether the round WOULD arm the NN crab; on a networked round `false` means
-    /// the production sites REFUSE the round (rl#114, no integer fallback), not a silent downgrade.
-    fn would_arm_external_crab(
-        net: Option<()>,
-        checkpoint: Option<()>,
-        weights_synced: bool,
-        assets_synced: bool,
-    ) -> bool {
-        checkpoint.is_some()
-            && super::may_arm_external_crab(net.is_none(), weights_synced, assets_synced)
+    /// `crab_arm_failure`, so this can't drift from them). `checkpoint` is an `Option<()>`
+    /// stand-in — only its `is_some()` feeds the gate; `sync` is the formation handshake's
+    /// verdict (`None` = solo round). Returns whether the round WOULD arm the NN crab; on a
+    /// networked round `false` means the production sites REFUSE the round (rl#114, no integer
+    /// fallback), not a silent downgrade.
+    fn would_arm_external_crab(sync: Option<SyncVerdict>, checkpoint: Option<()>) -> bool {
+        checkpoint.is_some() && super::may_arm_external_crab(sync)
+    }
+
+    /// Shorthand for a networked round's verdict in these tests.
+    fn synced(weights: bool, assets: bool) -> Option<SyncVerdict> {
+        Some(SyncVerdict { weights, assets })
     }
 
     #[test]
@@ -339,32 +346,32 @@ mod desync_test {
         // Networked + UNSYNCED weights (assets synced): must NOT arm (a float crab on mismatched
         // brains would desync peers) → the round is refused.
         assert!(
-            !would_arm_external_crab(Some(()), Some(()), false, true),
+            !would_arm_external_crab(synced(false, true), Some(())),
             "a networked round with UNSYNCED weights must NOT arm the NN crab (round refused)"
         );
 
         // Networked + SYNCED weights but UNSYNCED crab assets (rl#100): must NOT arm — two peers
         // with different crab models build different colliders and desync even sharing a brain.
         assert!(
-            !would_arm_external_crab(Some(()), Some(()), true, false),
+            !would_arm_external_crab(synced(true, false), Some(())),
             "a networked round with mismatched crab ASSETS must NOT arm the NN crab (round refused)"
         );
 
         // Networked + SYNCED weights + SYNCED assets + checkpoint: DOES arm (the GCR fold) — peers
         // share the brain AND the collider asset, so the float crab is safe in lockstep.
         assert!(
-            would_arm_external_crab(Some(()), Some(()), true, true),
+            would_arm_external_crab(synced(true, true), Some(())),
             "a networked round with SYNCED weights and assets must arm the NN crab"
         );
 
-        // Solo + checkpoint: always arms (one peer, nothing to desync), regardless of the
-        // weights/assets-synced flags (no peer to be synced WITH).
-        assert!(would_arm_external_crab(None, Some(()), false, false));
+        // Solo + checkpoint: always arms (one peer, nothing to desync) — solo is `None`, so
+        // there is no verdict to consult (no peer to be synced WITH).
+        assert!(would_arm_external_crab(None, Some(())));
 
         // No checkpoint never arms — neither solo nor networked-synced. (Production rejects a
         // missing checkpoint even earlier, at `nn_crab_checkpoint_dir`.)
-        assert!(!would_arm_external_crab(None, None, false, false));
-        assert!(!would_arm_external_crab(Some(()), None, true, true));
+        assert!(!would_arm_external_crab(None, None));
+        assert!(!would_arm_external_crab(synced(true, true), None));
     }
 
     /// The shared-checkpoint guard (rl#82): two peers running the SAME float crab pose but
@@ -424,27 +431,23 @@ mod desync_test {
     #[test]
     fn may_arm_external_crab_rules() {
         assert!(
-            super::may_arm_external_crab(true, true, true),
-            "solo + synced → arm"
+            super::may_arm_external_crab(None),
+            "solo (no formation ran, no verdict) always arms"
         );
         assert!(
-            super::may_arm_external_crab(true, false, false),
-            "solo may arm even unsynced (rest pose, single peer, nothing to desync)"
-        );
-        assert!(
-            super::may_arm_external_crab(false, true, true),
+            super::may_arm_external_crab(synced(true, true)),
             "networked + synced weights AND assets → may arm (the GCR path)"
         );
         assert!(
-            !super::may_arm_external_crab(false, false, true),
+            !super::may_arm_external_crab(synced(false, true)),
             "networked + UNSYNCED weights → must NOT arm (a random-init brain desyncs peers)"
         );
         assert!(
-            !super::may_arm_external_crab(false, true, false),
+            !super::may_arm_external_crab(synced(true, false)),
             "networked + UNSYNCED crab assets → must NOT arm (different colliders desync peers)"
         );
         assert!(
-            !super::may_arm_external_crab(false, false, false),
+            !super::may_arm_external_crab(synced(false, false)),
             "networked + neither synced → must NOT arm"
         );
     }

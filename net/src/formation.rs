@@ -57,17 +57,15 @@ pub struct LobbyControl {
 /// The outcome of the LAN cold-start: the frozen participant→[`PlayerId`] map (agreed
 /// identical on every peer by the barrier), which id is us, and the tick messages that
 /// arrived mid-formation (carried to the host to seed its server ledger — see
-/// [`Coordinator::for_round`] — since only the server holds the ledger now).
+/// [`crate::net_loop::Coordinator::for_round`] — since only the server holds the ledger now).
 pub struct Frozen {
     pub id_map: BTreeMap<EndpointId, PlayerId>,
     pub me: PlayerId,
     pub early: Vec<(EndpointId, TickMsg)>,
-    /// Carried out of the barrier so [`NetDriver::weights_synced`] can expose it; see
-    /// [`Membership::weights_synced`].
-    pub weights_synced: bool,
-    /// Likewise the crab-asset verdict (rl#100), for [`NetDriver::assets_synced`]; see
-    /// [`Membership::assets_synced`].
-    pub assets_synced: bool,
+    /// The barrier's shared-asset verdict, carried out so
+    /// [`crate::net_loop::NetDriver::sync_verdict`] can expose it to the arm sites; see
+    /// [`Membership::sync_verdict`].
+    pub sync: crate::SyncVerdict,
 }
 
 /// What [`form_match`] resolves to: a real agreed match, the genuinely-alone case, or a
@@ -174,14 +172,14 @@ pub async fn form_match(
     // synced (so an asset-only mismatch — the rl#100 hole this closes — is diagnosable, never
     // silent).
     if local_weights_digest != 0 {
-        if !outcome.weights_synced {
+        if !outcome.sync.weights {
             tracing::warn!(
                 "GCR: weights NOT synced across peers (digest mismatch or a peer has no \
                  checkpoint) — cannot arm the NN crab; the windowed client will REFUSE this round \
                  (rl#114, no integer fallback). Run rl-update on every device so all carry the \
                  identical brain."
             );
-        } else if !outcome.assets_synced {
+        } else if !outcome.sync.assets {
             tracing::warn!(
                 "GCR: weights synced but crab MODEL ASSET NOT synced across peers (a peer has a \
                  different sally.glb / no model — different colliders would desync) — cannot arm \
@@ -200,8 +198,7 @@ pub async fn form_match(
         id_map,
         me,
         early: outcome.early,
-        weights_synced: outcome.weights_synced,
-        assets_synced: outcome.assets_synced,
+        sync: outcome.sync,
     }))
 }
 
@@ -213,10 +210,8 @@ struct BarrierOutcome {
     roster: Vec<EndpointId>,
     early: Vec<(EndpointId, TickMsg)>,
     elapsed: Duration,
-    /// [`Membership::weights_synced`] sampled at the close instant (rl#82, GCR).
-    weights_synced: bool,
-    /// [`Membership::assets_synced`] sampled at the close instant (rl#100, GCR).
-    assets_synced: bool,
+    /// [`Membership::sync_verdict`] sampled at the close instant (rl#82 + rl#100, GCR).
+    sync: crate::SyncVerdict,
 }
 
 /// The non-error outcomes of [`run_barrier`]: a real agreement, the alone fallback, or a
@@ -364,8 +359,7 @@ async fn run_barrier(
                     roster,
                     early,
                     elapsed: now.duration_since(start),
-                    weights_synced: m.weights_synced(),
-                    assets_synced: m.assets_synced(),
+                    sync: m.sync_verdict(),
                 }));
             }
             Status::Failed => {

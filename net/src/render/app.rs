@@ -327,26 +327,20 @@ pub(super) struct ExternalCrabStackInstalled;
 /// `Boot::Round` build (bubble it out as an error, no panic). Solo always arms, so the message only
 /// ever describes a networked round.
 pub(super) fn crab_arm_failure(net: &Option<NetDriver>) -> Option<String> {
-    crab_arm_failure_from(
-        net.is_none(),
-        net.as_ref().is_some_and(NetDriver::weights_synced),
-        net.as_ref().is_some_and(NetDriver::assets_synced),
-    )
+    crab_arm_failure_from(net.as_ref().map(NetDriver::sync_verdict))
 }
 
-/// The pure core of [`crab_arm_failure`] — the arm decision + message from the three synced flags,
-/// with no [`NetDriver`] so it's unit-testable headlessly (no tokio/iroh). `None` = armable.
-pub(super) fn crab_arm_failure_from(
-    net_is_none: bool,
-    weights_synced: bool,
-    assets_synced: bool,
-) -> Option<String> {
-    if crate::may_arm_external_crab(net_is_none, weights_synced, assets_synced) {
+/// The pure core of [`crab_arm_failure`] — the arm decision + message from the formation
+/// verdict (`None` = solo), with no [`NetDriver`] so it's unit-testable headlessly (no
+/// tokio/iroh). Returns `None` when armable.
+pub(super) fn crab_arm_failure_from(sync: Option<crate::SyncVerdict>) -> Option<String> {
+    if crate::may_arm_external_crab(sync) {
         return None;
     }
-    // Reached only on a networked round that can't arm; weights are checked first, so a synced
-    // weights flag here means weights agree but the collider asset doesn't.
-    let cause = if !weights_synced {
+    // Reached only on a networked round that can't arm (so `sync` is present); weights are
+    // checked first, so a synced weights flag here means weights agree but the collider asset
+    // doesn't.
+    let cause = if !sync.is_some_and(|v| v.weights) {
         "the trained brain (brain.bin) differs or is missing on a peer"
     } else {
         "the crab colliders (the sally.glb model) differ on a peer"

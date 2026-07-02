@@ -120,7 +120,7 @@ pub struct Beat {
     /// and close behaviour is unchanged.
     pub start: bool,
     /// The sender's policy-weights digest (rl#82, GCR), `0` for no checkpoint — see
-    /// [`Membership::weights_synced`] for what it gates. Deliberately NOT folded into
+    /// [`Membership::sync_verdict`] for what it gates. Deliberately NOT folded into
     /// [`Beat::roster_hash`]: it is a capability advertisement, not membership, so two peers
     /// with the identical roster still freeze the same set regardless of their brains (a
     /// weights mismatch refuses to arm the NN crab, rl#114; it never breaks match formation).
@@ -131,7 +131,7 @@ pub struct Beat {
     /// build different colliders and silently desync. A SIBLING of `weights_digest`, handled
     /// identically: NOT folded into [`Beat::roster_hash`] (a capability advertisement, not
     /// membership — a mismatch refuses to arm the NN crab, never breaks formation), self-declared,
-    /// never relayed. See [`Membership::assets_synced`] for what it gates.
+    /// never relayed. See [`Membership::sync_verdict`] for what it gates.
     pub asset_digest: u64,
 }
 
@@ -220,14 +220,14 @@ pub struct Membership {
     /// after a GO re-gates on the new hash. The joiner's sole close trigger in the lobby.
     host_go_on_my_roster: bool,
     /// OUR policy-weights digest (rl#82, GCR), `0` for no checkpoint. Advertised in every
-    /// [`Membership::beat`] and the basis of [`Membership::weights_synced`]. `0` by default
+    /// [`Membership::beat`] and the basis of [`Membership::sync_verdict`]. `0` by default
     /// ([`Membership::with_weights_digest`] sets it), so a caller that never sets it behaves
-    /// exactly as pre-rl#82 — `weights_synced` is then always false.
+    /// exactly as pre-rl#82 — the verdict's `weights` is then always false.
     local_digest: u64,
     /// OUR crab-model-asset digest (rl#100, GCR), `0` for no resolvable model. Advertised in
-    /// every [`Membership::beat`] and the basis of [`Membership::assets_synced`]. `0` by default
+    /// every [`Membership::beat`] and the basis of [`Membership::sync_verdict`]. `0` by default
     /// ([`Membership::with_asset_digest`] sets it), so a caller that never sets it behaves
-    /// exactly as pre-rl#100 — `assets_synced` is then always false. Sibling of `local_digest`.
+    /// exactly as pre-rl#100 — the verdict's `assets` is then always false. Sibling of `local_digest`.
     local_asset_digest: u64,
 }
 
@@ -271,13 +271,13 @@ struct PeerView {
     started: bool,
     /// The policy-weights digest this peer last advertised in its OWN direct beat (rl#82),
     /// or `None` if heard only via relay. Like `advertised`, `None` can never equal our
-    /// non-zero digest, so a peer not yet heard directly blocks [`Membership::weights_synced`]
+    /// non-zero digest, so a peer not yet heard directly blocks [`Membership::sync_verdict`]
     /// until it speaks for itself.
     weights_digest: Option<u64>,
     /// The crab-model-asset digest this peer last advertised in its OWN direct beat (rl#100),
     /// or `None` if heard only via relay. Sibling of `weights_digest`: like it, a `None` can
     /// never equal our non-zero digest, so a peer not yet heard directly blocks
-    /// [`Membership::assets_synced`] until it speaks for itself.
+    /// [`Membership::sync_verdict`] until it speaks for itself.
     asset_digest: Option<u64>,
 }
 
@@ -484,43 +484,29 @@ impl Membership {
         }
     }
 
-    /// Whether every peer in the match (us + all live peers) advertised the SAME, NON-ZERO
-    /// policy-weights digest (rl#82, GCR) — the upstream half of the shared-checkpoint guard.
-    /// True only when we have a real checkpoint (`local_digest != 0`) AND every live peer's
+    /// The shared-asset guard's verdict (rl#82 weights + rl#100 crab asset, GCR), the ONE
+    /// value the formation carries to the arm sites ([`crate::SyncVerdict`]). Each dimension
+    /// is true only when we have a real digest ourselves (non-zero) AND every live peer's
     /// last DIRECT beat carried that exact digest. A `None` (relay-only, never heard directly)
-    /// or any differing/zero digest fails it, so an unsynced brain can never be armed into
-    /// lockstep. This is an OUTPUT, never a close gate: a weights mismatch still FORMS the match
-    /// (it never breaks formation), but the round can't arm the NN crab and — with no integer
-    /// fallback (rl#114) — the windowed client REFUSES it loudly rather than playing a fake crab.
-    /// Call after [`Membership::poll`] (which expires
-    /// the dead) so the live set is current; pairs with [`crate::may_arm_external_crab`].
-    pub fn weights_synced(&self) -> bool {
-        self.local_digest != 0
-            && self
-                .peers
-                .values()
-                .all(|v| v.weights_digest == Some(self.local_digest))
-    }
-
-    /// Whether every peer in the match (us + all live peers) advertised the SAME, NON-ZERO
-    /// crab-model-asset digest (rl#100, GCR) — the collider half of the shared-asset guard, a
-    /// SIBLING of [`Membership::weights_synced`] with the identical rules. True only when we
-    /// have a real asset (`local_asset_digest != 0`) AND every live peer's last DIRECT beat
-    /// carried that exact digest. A `None` (relay-only) or any differing/zero digest fails it,
-    /// so two peers whose crab models (and thus colliders) differ never arm the float NN crab
-    /// into lockstep. An OUTPUT, never a close gate: an asset mismatch still FORMS the match, but
-    /// the round can't arm the NN crab and — with no integer fallback (rl#114) — the windowed
-    /// client REFUSES it loudly rather than playing a fake crab. The NN crab arms only when BOTH
-    /// this and
-    /// `weights_synced` hold (peers agree on brain AND collider asset) — see
-    /// [`crate::may_arm_external_crab`]. Call after [`Membership::poll`] so the live set
-    /// is current.
-    pub fn assets_synced(&self) -> bool {
-        self.local_asset_digest != 0
-            && self
-                .peers
-                .values()
-                .all(|v| v.asset_digest == Some(self.local_asset_digest))
+    /// or any differing/zero digest fails it, so an unsynced brain — or two peers whose crab
+    /// models (and thus rapier colliders) differ — can never be armed into lockstep. This is
+    /// an OUTPUT, never a close gate: a mismatch still FORMS the match, but the round can't
+    /// arm the NN crab and — with no integer fallback (rl#114) — the windowed client REFUSES
+    /// it loudly rather than playing a fake crab ([`crate::may_arm_external_crab`]). Call
+    /// after [`Membership::poll`] (which expires the dead) so the live set is current.
+    pub fn sync_verdict(&self) -> crate::SyncVerdict {
+        crate::SyncVerdict {
+            weights: self.local_digest != 0
+                && self
+                    .peers
+                    .values()
+                    .all(|v| v.weights_digest == Some(self.local_digest)),
+            assets: self.local_asset_digest != 0
+                && self
+                    .peers
+                    .values()
+                    .all(|v| v.asset_digest == Some(self.local_asset_digest)),
+        }
     }
 
     /// Advance the clock and return the verdict — the SINGLE per-round entry point.
@@ -837,25 +823,25 @@ mod tests {
         let mut a = Membership::new(ida, 2, t0).with_weights_digest(BRAIN);
         a.on_beat(idb, &bt_d(vec![ida, idb], BRAIN), t0);
         a.poll(t0);
-        assert!(a.weights_synced(), "equal non-zero digests must be synced");
+        assert!(a.sync_verdict().weights, "equal non-zero digests must be synced");
 
         // A peer on a DIFFERENT brain → not synced (the mismatch case the guard exists for).
         let mut b = Membership::new(ida, 2, t0).with_weights_digest(BRAIN);
         b.on_beat(idb, &bt_d(vec![ida, idb], BRAIN ^ 0xFF), t0);
         b.poll(t0);
-        assert!(!b.weights_synced(), "a differing peer digest must not be synced");
+        assert!(!b.sync_verdict().weights, "a differing peer digest must not be synced");
 
         // A peer advertising a ZERO digest (no checkpoint) → not synced.
         let mut c = Membership::new(ida, 2, t0).with_weights_digest(BRAIN);
         c.on_beat(idb, &bt_d(vec![ida, idb], 0), t0);
         c.poll(t0);
-        assert!(!c.weights_synced(), "a zero peer digest must not be synced");
+        assert!(!c.sync_verdict().weights, "a zero peer digest must not be synced");
 
         // OUR OWN digest zero (no checkpoint locally) → never synced, even if a peer has one.
         let mut d = Membership::new(ida, 2, t0); // local_digest defaults to 0
         d.on_beat(idb, &bt_d(vec![ida, idb], BRAIN), t0);
         d.poll(t0);
-        assert!(!d.weights_synced(), "a zero local digest is never synced");
+        assert!(!d.sync_verdict().weights, "a zero local digest is never synced");
     }
 
     #[test]
@@ -872,13 +858,13 @@ mod tests {
         a.on_beat(idb, &bt_d(vec![ida, idb, idc], BRAIN), t0);
         a.poll(t0);
         assert!(
-            !a.weights_synced(),
+            !a.sync_verdict().weights,
             "a relay-only peer (digest None) must block synced"
         );
         // Now C beats directly with the matching brain → all heard, all matched → synced.
         a.on_beat(idc, &bt_d(vec![ida, idb, idc], BRAIN), t0);
         a.poll(t0);
-        assert!(a.weights_synced(), "once every peer is heard with the same brain, synced");
+        assert!(a.sync_verdict().weights, "once every peer is heard with the same brain, synced");
     }
 
     // ── Asset-digest handshake (rl#100, GCR — the shared-collider-asset guard) ────────
@@ -931,31 +917,31 @@ mod tests {
         let mut a = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
         a.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
         a.poll(t0);
-        assert!(a.assets_synced(), "equal non-zero asset digests must be synced");
+        assert!(a.sync_verdict().assets, "equal non-zero asset digests must be synced");
 
         // A peer on a DIFFERENT crab model → not synced (the desync the guard exists for).
         let mut b = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
         b.on_beat(idb, &bt_ad(vec![ida, idb], ASSET ^ 0xFF), t0);
         b.poll(t0);
-        assert!(!b.assets_synced(), "a differing peer asset digest must not be synced");
+        assert!(!b.sync_verdict().assets, "a differing peer asset digest must not be synced");
 
         // A peer advertising a ZERO digest (no resolvable model) → not synced.
         let mut c = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
         c.on_beat(idb, &bt_ad(vec![ida, idb], 0), t0);
         c.poll(t0);
-        assert!(!c.assets_synced(), "a zero peer asset digest must not be synced");
+        assert!(!c.sync_verdict().assets, "a zero peer asset digest must not be synced");
 
         // OUR OWN digest zero (no model locally) → never synced, even if a peer has one.
         let mut d = Membership::new(ida, 2, t0); // local_asset_digest defaults to 0
         d.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
         d.poll(t0);
-        assert!(!d.assets_synced(), "a zero local asset digest is never synced");
+        assert!(!d.sync_verdict().assets, "a zero local asset digest is never synced");
     }
 
     #[test]
     fn weights_and_assets_synced_are_independent_gates() {
         // The two guards are orthogonal: matching brains but mismatched crab assets must leave
-        // `weights_synced` true yet `assets_synced` false (and the arm site ANDs them, so the
+        // a verdict with `weights` true yet `assets` false (and the arm site ANDs them, so the
         // round can't arm Sally and is refused — rl#114). Proves a refactor can't collapse the two
         // into one digest.
         let t0 = Instant::now();
@@ -974,9 +960,9 @@ mod tests {
         };
         a.on_beat(idb, &mismatched_asset, t0);
         a.poll(t0);
-        assert!(a.weights_synced(), "matching brains → weights synced");
+        assert!(a.sync_verdict().weights, "matching brains → weights synced");
         assert!(
-            !a.assets_synced(),
+            !a.sync_verdict().assets,
             "a different crab asset must leave assets NOT synced (independent of weights)"
         );
     }

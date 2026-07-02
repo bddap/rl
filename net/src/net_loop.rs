@@ -79,14 +79,11 @@ pub struct NetDriver {
     /// collector). Best-effort and read-only — see [`crate::telemetry`]; the
     /// windowed driver pushes Tick/Input/RoundDecided/Fault through it.
     telemetry: Option<TelemetrySender>,
-    /// Whether the barrier agreed every peer loaded the same non-zero weights (rl#82, GCR —
-    /// [`Membership::weights_synced`]); read by the arm sites via
-    /// [`crate::may_arm_external_crab`]. `false` without a supplied checkpoint.
-    weights_synced: bool,
-    /// Whether the barrier agreed every peer resolved the same non-zero crab-model asset
-    /// (rl#100, GCR — [`Membership::assets_synced`]); ANDed with `weights_synced` at the arm
-    /// sites. `false` without a resolvable model.
-    assets_synced: bool,
+    /// The formation barrier's shared-asset verdict (rl#82 weights + rl#100 crab asset, GCR —
+    /// [`crate::membership::Membership::sync_verdict`]); read by the arm sites via
+    /// [`crate::may_arm_external_crab`]. Each half is `false` without a supplied
+    /// checkpoint/resolvable model.
+    sync: crate::SyncVerdict,
     /// OUR policy-weights digest and crab-asset digest (the values, not just the synced bools).
     /// The host gates a mid-game joiner on these — [`crate::server::may_admit_joiner`] requires the
     /// joiner's digests to equal ours, else a LOUD refusal (Stage 3, rl#151). A client never reads
@@ -122,22 +119,13 @@ impl NetDriver {
         self.telemetry.as_ref()
     }
 
-    /// Whether the formation barrier agreed every peer loaded the SAME non-zero policy
-    /// weights (rl#82, GCR — [`Membership::weights_synced`]). The arm sites gate the float
-    /// NN crab on this via [`crate::may_arm_external_crab`]; `false` means the round can't
-    /// arm Sally and is refused (rl#114, no integer fallback). Always `false` without a supplied
-    /// checkpoint (the digest exchanged was `0`).
-    pub fn weights_synced(&self) -> bool {
-        self.weights_synced
-    }
-
-    /// Whether the formation barrier agreed every peer resolved the SAME non-zero crab-model
-    /// asset (rl#100, GCR — [`Membership::assets_synced`]). The arm sites AND this with
-    /// [`NetDriver::weights_synced`] via [`crate::may_arm_external_crab`]; a mismatch means
-    /// the round can't arm Sally and is refused (rl#114, no integer fallback). Always `false`
-    /// without a resolvable model (asset digest exchanged `0`).
-    pub fn assets_synced(&self) -> bool {
-        self.assets_synced
+    /// The formation barrier's shared-asset verdict (rl#82 weights + rl#100 crab asset, GCR —
+    /// [`crate::membership::Membership::sync_verdict`]). The arm sites gate the float NN crab
+    /// on it via [`crate::may_arm_external_crab`]; an unsynced half means the round can't arm
+    /// Sally and is refused (rl#114, no integer fallback). A half is always `false` without a
+    /// supplied checkpoint / resolvable model (that digest exchanged as `0`).
+    pub fn sync_verdict(&self) -> crate::SyncVerdict {
+        self.sync
     }
 
     /// Whether this peer runs the match server (the host) — true iff it holds [`PlayerId(0)`], the
@@ -595,8 +583,8 @@ pub fn connect_and_form(
 ///
 /// `local_weights_digest` is OUR policy-checkpoint digest (rl#82, GCR), `0` for none, and
 /// `local_asset_digest` OUR crab-model-asset digest (rl#100, GCR), `0` for none. Both are
-/// advertised in the formation beats; the agreed [`NetDriver::weights_synced`]/
-/// [`NetDriver::assets_synced`] tell the caller whether every peer matched them (the upstream
+/// advertised in the formation beats; the agreed [`NetDriver::sync_verdict`]
+/// tells the caller whether every peer matched them (the upstream
 /// shared-asset guard — the NN crab arms only when both hold).
 #[allow(clippy::too_many_arguments)] // each arg is a distinct formation knob.
 pub fn connect_and_form_dialing(
@@ -747,8 +735,7 @@ fn connect_and_form_inner(
         id_map: frozen.id_map,
         departed: Default::default(),
         telemetry,
-        weights_synced: frozen.weights_synced,
-        assets_synced: frozen.assets_synced,
+        sync: frozen.sync,
         weights_digest: local_weights_digest,
         asset_digest: local_asset_digest,
     };
@@ -892,8 +879,10 @@ pub fn connect_and_join(
                 telemetry,
                 // Admitted ⇒ our weight + asset digests matched the host's (the admission gate), so
                 // the round is armable on the same Sally as everyone else.
-                weights_synced: true,
-                assets_synced: true,
+                sync: crate::SyncVerdict {
+                    weights: true,
+                    assets: true,
+                },
                 weights_digest: local_weights_digest,
                 asset_digest: local_asset_digest,
             };
