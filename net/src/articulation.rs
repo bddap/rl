@@ -58,8 +58,10 @@ pub struct ReposeWire {
 /// spawn) — the client then leaves its placement untouched.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CrabArticulation {
-    /// The tick this pose is OF — the version, matching the [`CoreSnapshot`](crate::snapshot::CoreSnapshot)
-    /// tick it rides beside. A client renders the highest it has seen and drops older arrivals.
+    /// The tick this pose is OF, matching the [`CoreSnapshot`](crate::snapshot::CoreSnapshot)
+    /// tick it rides beside. A client stashes and renders the LAST-ARRIVED pose — arrival
+    /// order, not highest-tick, mirroring snapshot adoption
+    /// ([`Lockstep::adopt_snapshots`](crate::lockstep::Lockstep::adopt_snapshots)).
     pub tick: u64,
     /// Every crab body part's arena-frame transform, in ascending `part`-tag order.
     pub parts: Vec<PartTransform>,

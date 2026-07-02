@@ -419,9 +419,9 @@ pub(crate) fn reset_crab(
 ) {
     // Randomized-start curriculum: each respawning env gets a fresh random orientation
     // so the policy learns to stand (and right itself) from varied, even inverted,
-    // starts instead of memorising the one bind pose. This is training-only — reset_crab
-    // never runs in the demo (no `TrainingState`), which respawns upright. The rotation
-    // is drawn from the run's seeded RNG so a resumed/replayed run reproduces it.
+    // starts instead of memorising the one bind pose (the demo's respawn draws the same
+    // tilt — see `play::demo::random_demo_tilt`). The rotation is drawn from the run's
+    // seeded RNG so a resumed/replayed run reproduces it.
     for e in 0..training.envs.len() {
         if matches!(training.envs[e].phase, EnvPhase::AwaitingRespawn) {
             training.envs[e].phase = EnvPhase::Settling {
