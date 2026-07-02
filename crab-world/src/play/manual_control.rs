@@ -9,7 +9,7 @@ use crate::bot::body::CrabJointId;
 use crate::controls::just_pressed;
 
 use super::controls::{
-    torque_stick_y, DemoAction, DemoControls, PICK_JOINT_NEXT_BUTTON, PICK_JOINT_PREV_BUTTON,
+    DemoAction, DemoControls, PICK_JOINT_NEXT_BUTTON, PICK_JOINT_PREV_BUTTON, torque_stick_y,
 };
 
 /// Hands-on gamepad control state. `active` is toggled live with B/circle (and
