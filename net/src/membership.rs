@@ -223,7 +223,7 @@ pub struct Membership {
     /// OUR policy-weights digest (rl#82, GCR), `0` for no checkpoint. Advertised in every
     /// [`Membership::beat`] and the basis of [`Membership::sync_verdict`]. `0` by default
     /// ([`Membership::with_weights_digest`] sets it), so a caller that never sets it behaves
-    /// exactly as pre-rl#82 — the verdict's `weights` is then always false.
+    /// exactly as pre-rl#82 — the verdict's `host_brain` is then always false.
     local_digest: u64,
     /// OUR crab-model-asset digest (rl#100, GCR), `0` for no resolvable model. Advertised in
     /// every [`Membership::beat`] and the basis of [`Membership::sync_verdict`]. `0` by default
@@ -489,7 +489,7 @@ impl Membership {
     /// The shared-asset guard's verdict (rl#82 weights + rl#100 crab asset, GCR), the ONE
     /// value the formation carries to the arm sites ([`crate::SyncVerdict`]).
     ///
-    /// - `weights` — the HOST self-gate, host-auth's relocation of the old peer-symmetric
+    /// - `host_brain` — the HOST self-gate, host-auth's relocation of the old peer-symmetric
     ///   equality (the design doc's end state; [[real-sally-definition]]): true iff the peer
     ///   that will run the authoritative server — the lowest live endpoint id, PlayerId(0) by
     ///   [`crate::formation::assign_player_ids`]'s sorted assignment — advertised a NON-ZERO
@@ -1002,7 +1002,7 @@ mod tests {
     #[test]
     fn weights_and_assets_synced_are_independent_gates() {
         // The two guards are orthogonal: a real host brain but mismatched crab assets must
-        // leave a verdict with `weights` true yet `assets` false (and the arm site ANDs them,
+        // leave a verdict with `host_brain` true yet `assets` false (and the arm site ANDs them,
         // so the round can't arm Sally and is refused — rl#114). Proves a refactor can't
         // collapse the two into one digest.
         let t0 = Instant::now();

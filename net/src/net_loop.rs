@@ -869,7 +869,7 @@ pub fn connect_and_join(
                 departed: Default::default(),
                 telemetry,
                 // Admitted ⇒ the host proved a non-zero brain (`HostNotArmed` is checked first
-                // in the admission gate) and our asset digest matched its — both verdict halves
+                // in the admission gate) and our asset digest matched the host's — both verdict halves
                 // hold by the gate we just passed.
                 sync: crate::SyncVerdict {
                     host_brain: true,
