@@ -293,7 +293,10 @@ impl NetDriver {
             match from.msg {
                 PeerWire::Snapshot(snap) => down.snapshots.push(snap),
                 PeerWire::Articulation(art) => down.articulations.push(art),
-                PeerWire::Refuse(reason) => {
+                // Only the SERVER's refusal ends our round; a stray Refuse from any other
+                // linked peer (the mDNS dialer holds a full mesh) is not a verdict about
+                // THIS match — same sender check the headless client applies.
+                PeerWire::Refuse(reason) if from.from == self.server_eid => {
                     tracing::error!("server refused us mid-match: {reason}");
                     return Err(ServerDown::Refused(reason));
                 }
@@ -859,9 +862,19 @@ pub fn connect_and_join(
         let my_eid = session.endpoint_id();
         println!("joining as endpoint id: {my_eid}");
         anyhow::ensure!(host != my_eid, "cannot join our own endpoint id");
-        if let Err(e) = session.connect_direct(host).await {
-            tracing::warn!("dialing host {} failed: {e:#}", host.fmt_short());
-            return anyhow::Ok((session, AdmissionVerdict::Timeout, None));
+        // The dial gets the same bound as the verdict wait: without its own timeout a wedged
+        // dial (host half-dead, address resolving but never answering) could hold the joiner —
+        // and the menu's "Rejoining…" screen behind it (rl#203) — indefinitely.
+        match tokio::time::timeout(JOIN_WELCOME_TIMEOUT, session.connect_direct(host)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("dialing host {} failed: {e:#}", host.fmt_short());
+                return anyhow::Ok((session, AdmissionVerdict::Timeout, None));
+            }
+            Err(_) => {
+                tracing::warn!("dialing host {} timed out", host.fmt_short());
+                return anyhow::Ok((session, AdmissionVerdict::Timeout, None));
+            }
         }
         let telemetry = connect_telemetry(collector, my_eid).await;
         session
