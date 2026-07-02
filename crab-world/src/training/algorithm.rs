@@ -1,6 +1,5 @@
 //! PPO (Proximal Policy Optimization) support functions.
 
-use burn::prelude::*;
 use rand::Rng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};

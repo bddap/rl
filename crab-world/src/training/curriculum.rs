@@ -180,16 +180,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_band_is_the_full_arena_range() {
-        // Pins the bitter-lesson invariant: the band spans the WHOLE arena (near edge to the
-        // arena cap), with no near-capping growth curriculum, and is non-empty.
-        assert!(BAND_START_MIN < TARGET_ARENA_HALF, "the band is non-empty");
-        assert!(
-            TARGET_ARENA_HALF > 5.0,
-            "the far edge reaches a real far distance, not a near-capped range"
-        );
-    }
+    // (No "band is the full arena" test: with TargetBand deleted the band IS the two
+    // constants — a test would just restate them. The honest-distance test above pins
+    // that samples span [BAND_START_MIN, TARGET_ARENA_HALF].)
 
     #[test]
     fn distance_draw_is_near_heavy_with_a_real_far_tail() {
