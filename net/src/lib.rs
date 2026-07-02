@@ -42,6 +42,7 @@ pub mod cadence;
 pub mod controls;
 pub mod lockstep;
 pub mod membership;
+pub mod formation;
 pub mod net_loop;
 pub mod roster;
 pub mod server;

@@ -8,7 +8,7 @@ use iroh::EndpointId;
 use net::lockstep::Lockstep;
 use net::sim::{Input, PlayerId, TICK_DT, TICK_HZ};
 use net::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
-use net::{net_loop, transport};
+use net::{formation, net_loop, transport};
 
 use super::shared::run_solo_round;
 
@@ -65,7 +65,7 @@ async fn run_net(args: Args) -> Result<()> {
     // client runs, so the two can't drift apart and desync). Replay any inputs that
     // arrived during formation into the fresh sim. If discovery finds no peer, tear down
     // the network side and run a solo round instead of awaiting an empty match.
-    let frozen = match net_loop::form_match(
+    let frozen = match formation::form_match(
         &mut session,
         args.discover_secs,
         args.expect,
@@ -76,14 +76,14 @@ async fn run_net(args: Args) -> Result<()> {
     )
     .await?
     {
-        net_loop::Formation::Agreed(frozen) => frozen,
-        net_loop::Formation::Alone => {
+        formation::Formation::Agreed(frozen) => frozen,
+        formation::Formation::Alone => {
             drop(tel);
             session.shutdown().await;
             return run_solo_round(args.run_secs);
         }
         // No cancel channel on the headless path, so a Cancel can never be signalled.
-        net_loop::Formation::Cancelled => unreachable!("headless net has no lobby to cancel"),
+        formation::Formation::Cancelled => unreachable!("headless net has no lobby to cancel"),
     };
     let me = frozen.me;
     // Mutable: a departed peer (link gone, rl#198) is removed so the host stops requiring its
@@ -118,7 +118,7 @@ async fn run_net(args: Args) -> Result<()> {
         // world `ls` was built from so host and clients start byte-identical. The local `ls` is the
         // host's own client — it files input UP and adopts the snapshots, never stepping itself.
         let mut s = net::server::Server::new(&all_ids, ls.sim().clone());
-        s.seed_early(&net_loop::early_peer_msgs(&frozen));
+        s.seed_early(&formation::early_peer_msgs(&frozen));
         s
     });
 

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::Parser;
 use iroh::EndpointId;
-use net::{net_loop, render};
+use net::{formation, net_loop, render};
 
 use super::shared::{MATCH_SEED, nn_crab_checkpoint_dir, resolve_render_mode};
 
@@ -109,7 +109,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             }
             // Nobody showed: play the shared solo round (the Host-alone outcome).
             net_loop::MatchResult::Alone => {
-                render::Boot::Round(Box::new((net_loop::solo_lockstep_for(MATCH_SEED), None)))
+                render::Boot::Round(Box::new((formation::solo_lockstep_for(MATCH_SEED), None)))
             }
             // The scripted path runs no interactive lobby, so a Cancel is impossible.
             net_loop::MatchResult::Cancelled => {
