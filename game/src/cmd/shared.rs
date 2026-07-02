@@ -23,11 +23,13 @@ pub(crate) const MATCH_SEED: u64 = 0x6372_6162; // "crab"
 /// An unusable checkpoint is a HARD, ACTIONABLE launch failure: the one giant crab IS the trained
 /// NN body ("Sally"), and there is no integer point-pursuer to fall back to, so rather than silently
 /// substituting a fake crab we refuse to launch with a message naming the dir and how to fix it.
-/// Two ways a checkpoint is unusable, both refused here: no readable `brain.bin` (rl#114), and a
-/// brain built for a DIFFERENT rig (rl#199) — a wrong-rig brain passes an existence check but the
-/// runtime loader refuses to arm it, so letting launch proceed would ship an inert rest-pose Sally
-/// that looks frozen-but-fine. Same [`crab_world::play::checkpoint_fits_rig`] verdict the
-/// release/deploy gate (`checkpoint-check`) acts on, so launch and the gate can't disagree.
+/// Three ways a checkpoint is unusable, all refused here: no `brain.bin` (rl#114), a corrupt one,
+/// and a brain built for a DIFFERENT rig (rl#199) — a wrong-rig brain passes an existence check
+/// but the runtime loader refuses to arm it, so letting launch proceed would ship an inert
+/// rest-pose Sally that looks frozen-but-fine. Same [`crab_world::play::checkpoint_fits_rig`]
+/// verdict the release/deploy gate (`checkpoint-check`) acts on, so launch and the gate can't
+/// disagree. This hard gate outranks `RL_RANDOM_POLICY` in the game binary — that diagnostic
+/// belongs to rl-demo, which loads checkpoints ungated.
 pub(crate) fn nn_crab_checkpoint_dir(
     flag: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf> {
@@ -46,6 +48,11 @@ pub(crate) fn nn_crab_checkpoint_dir(
              body (\"Sally\"), and there is no integer stand-in. Point --nn-crab-checkpoint or the \
              RL_CRAB_CHECKPOINT_DIR env var at a trained checkpoint dir (deploy/rl-update must set \
              it, and EVERY device needs the IDENTICAL brain + crab model), then relaunch.",
+            dir.display()
+        ),
+        RigFit::Unreadable => anyhow::bail!(
+            "brain.bin under {} exists but won't deserialize — likely a truncated or corrupt \
+             copy (interrupted deploy transfer). Redeploy the checkpoint, then relaunch.",
             dir.display()
         ),
         RigFit::Mismatch(RigDims { obs, action }) => {

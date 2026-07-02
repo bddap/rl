@@ -58,10 +58,10 @@ pub struct Policy {
 enum PolicyState {
     /// No brain drives the crab — [`Policy::act`] returns the zero-action rest pose (a
     /// neutral, deterministic view of the body geometry, not an untrained brain's noise).
-    /// `mismatch` distinguishes the two non-arming cases (rl#121): `Some(dims)` when we
-    /// LOUDLY refused a wrong-rig checkpoint (its dims, for attribution), `None` for the
-    /// quiet, legitimate no-checkpoint-yet pose.
-    Rest { mismatch: Option<RigDims> },
+    /// Two ways here, distinguished at load time by their logs (rl#121): a LOUDLY refused
+    /// wrong-rig checkpoint ([`log_rig_mismatch`]) and the quiet, legitimate
+    /// no-checkpoint-yet pose.
+    Rest,
     /// `RL_RANDOM_POLICY`: an untrained current-rig brain drives the crab so an operator can
     /// see what a FRESH policy does (vs the zero-action rest pose). It has NO on-disk weights,
     /// hence no digest, hence — by construction, not by a runtime `!= 0` check — can never
@@ -119,22 +119,27 @@ fn load_brain(dir: &Path, device: &NdArrayDevice) -> Option<AnyBrain<InferBacken
 }
 
 /// Whether a brain's `(obs, action)` dims drive THIS binary's compiled crab rig. The ONE
-/// place the fits-the-rig rule is spelled — both the runtime loader (soft-fallback) and the
-/// release gate (hard-fail) ask through here, so they can't disagree on what "fits" means.
+/// place the fits-the-rig rule is spelled — the runtime loader (soft-fallback), the release
+/// gate, and the game's launch gate (both hard-fail) all ask through here, so they can't
+/// disagree on what "fits" means.
 fn dims_fit_rig(obs: usize, action: usize) -> bool {
     (obs, action) == (OBS_SIZE, ACTION_SIZE)
 }
 
 /// Whether the checkpoint at `dir` fits this binary's crab rig — the verdict the
-/// release/deploy gate acts on. The fit RULE lives here in crab-world (the consts it
-/// compares against are here); the caller only turns the verdict into a message + exit code.
-/// A mismatched checkpoint loads "fine" but would degrade the NN crab to its motionless rest
-/// pose (rl#36 catches it at load time, but only by going inert), so the gate refuses to ship
-/// one at all. `Mismatch` carries the checkpoint's own dims so the operator sees both sides;
-/// the rig side is `crate::play::rig_dims` (render-gated, so not linked here).
+/// release/deploy gate and the game's launch gate act on. The fit RULE lives here in
+/// crab-world (the consts it compares against are here); the caller only turns the verdict
+/// into a message + exit code. A mismatched checkpoint loads "fine" but would degrade the NN
+/// crab to its motionless rest pose (rl#36 catches it at load time, but only by going inert),
+/// so the gates refuse it outright. `Mismatch` carries the checkpoint's own dims so the
+/// operator sees both sides; the rig side is `crate::play::rig_dims` (render-gated, so not
+/// linked here).
 pub fn checkpoint_fits_rig(dir: &Path) -> RigFit {
+    if !CheckpointDir::new(dir).brain_file().exists() {
+        return RigFit::Missing;
+    }
     match load_brain(dir, &NdArrayDevice::Cpu) {
-        None => RigFit::Missing,
+        None => RigFit::Unreadable,
         Some(brain) => {
             let (obs, action) = brain.io_dims();
             if dims_fit_rig(obs, action) {
@@ -149,8 +154,8 @@ pub fn checkpoint_fits_rig(dir: &Path) -> RigFit {
 /// A brain's `(obs, action)` input/output dimensions — the pair a checkpoint is checked
 /// against the rig with. A named pair, not a bare `(usize, usize)`, so the two same-typed
 /// fields can't be swapped at a call site or a struct field; the whole rig-fit machinery
-/// (the [`RigFit`] verdict, the runtime loader's refusal, the stored `Policy::mismatch`)
-/// speaks this one type rather than re-spelling the pair three ways.
+/// (the [`RigFit`] verdict, the runtime loader's refusal)
+/// speaks this one type rather than re-spelling the pair each way.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RigDims {
     pub obs: usize,
@@ -161,8 +166,12 @@ pub struct RigDims {
 pub enum RigFit {
     /// The brain's dims match the rig — safe to drive the NN crab.
     Ok,
-    /// No readable `brain.bin` in the dir — nothing to check.
+    /// No `brain.bin` in the dir — nothing to check.
     Missing,
+    /// `brain.bin` exists but won't deserialize — a truncated/corrupt copy (chunked deploy
+    /// transfers produce these). Distinct from `Missing` so the operator is told to redeploy
+    /// the file they can SEE, instead of chasing path/env resolution.
+    Unreadable,
     /// The brain loads but its dims (carried here) differ from the rig.
     Mismatch(RigDims),
 }
@@ -294,14 +303,12 @@ impl Policy {
                     "play: no usable checkpoint at {} — using zero-action pose",
                     checkpoint_dir.display()
                 );
-                PolicyState::Rest { mismatch: None }
+                PolicyState::Rest
             }
             Loaded::Mismatch(dims) => {
                 // Wrong checkpoint for this build: refuse to arm, loud + attributable.
                 log_rig_mismatch("play", checkpoint_dir, dims);
-                PolicyState::Rest {
-                    mismatch: Some(dims),
-                }
+                PolicyState::Rest
             }
         };
 
@@ -347,18 +354,11 @@ impl Policy {
             }
             Loaded::Absent => false, // mid-save / unreadable — keep the current policy
             Loaded::Mismatch(dims) => {
-                // A wrong-rig brain landed in the live dir: refuse it loudly. If we weren't
-                // already driving a good brain, drop to the inert rest pose and record the dims
-                // so the frozen crab is attributable; if we WERE armed, keep driving it — a bad
-                // file must not blank a working demo, and a still-moving crab needs no
-                // "why inert" attribution (so `rig_mismatch()` never contradicts `is_loaded()`).
-                // Stamp `last_loaded` so we log once per distinct file (mtime), not every tick.
+                // A wrong-rig brain landed in the live dir: refuse it loudly but keep whatever
+                // we're driving (a bad file must not blank a working demo; an unarmed policy
+                // just stays at rest). Stamp `last_loaded` so we log once per distinct file
+                // (mtime), not every tick.
                 log_rig_mismatch("play (hot-reload)", &dir, dims);
-                if matches!(self.state, PolicyState::Rest { .. }) {
-                    self.state = PolicyState::Rest {
-                        mismatch: Some(dims),
-                    };
-                }
                 self.last_loaded = Some(mtime);
                 false
             }
@@ -370,19 +370,7 @@ impl Policy {
     /// neutral pose while this is false). True for both a real checkpoint and the
     /// `RL_RANDOM_POLICY` diagnostic brain — use [`Self::weights_digest`] to tell those apart.
     pub fn is_loaded(&self) -> bool {
-        !matches!(self.state, PolicyState::Rest { .. })
-    }
-
-    /// `Some(dims)` when the last checkpoint we tried to load was a rig MISMATCH we refused
-    /// to arm (and logged loudly) — the checkpoint's own dims, so a caller (HUD, the GCR
-    /// bridge's arming log) can attribute the inert crab to a wrong-rig checkpoint, distinct
-    /// from the legitimate "no checkpoint yet" rest pose where this is `None`. `is_loaded()`
-    /// is false in both, but only a mismatch is an operator error.
-    pub fn rig_mismatch(&self) -> Option<RigDims> {
-        match self.state {
-            PolicyState::Rest { mismatch } => mismatch,
-            _ => None,
-        }
+        !matches!(self.state, PolicyState::Rest)
     }
 
     /// Stable digest of the loaded weights, or `None` when no real checkpoint is armed (the
@@ -393,7 +381,7 @@ impl Policy {
     pub fn weights_digest(&self) -> Option<NonZeroU64> {
         match &self.state {
             PolicyState::Loaded { digest, .. } => Some(*digest),
-            PolicyState::Rest { .. } | PolicyState::Diagnostic { .. } => None,
+            PolicyState::Rest | PolicyState::Diagnostic { .. } => None,
         }
     }
 
@@ -408,7 +396,7 @@ impl Policy {
                 brain, normalizer, ..
             }
             | PolicyState::Diagnostic { brain, normalizer } => (brain, normalizer),
-            PolicyState::Rest { .. } => return [0.0; ACTION_SIZE],
+            PolicyState::Rest => return [0.0; ACTION_SIZE],
         };
         let obs = normalizer.normalize_frozen(raw_obs);
         let input =
@@ -577,9 +565,10 @@ mod tests {
 
     /// rl#36: a checkpoint built for a different `OBS_SIZE` must NOT panic in the matmul —
     /// loading leaves the policy unloaded and `act` returns zeros without ever running the
-    /// mismatched weights through a forward pass. (The loud-vs-quiet distinction between this
-    /// refused mismatch and a legitimate missing checkpoint is rl#121, asserted separately in
-    /// `rig_mismatch_refuses_loudly_missing_rests_quietly`.)
+    /// mismatched weights through a forward pass. (The mismatch-vs-missing distinction is
+    /// rl#121, asserted on the [`checkpoint_fits_rig`] verdict in
+    /// `checkpoint_fits_rig_classifies_the_on_disk_brain`; the game's launch gate acts on
+    /// it, rl#199.)
     #[test]
     fn dim_mismatched_checkpoint_falls_back_instead_of_panicking() {
         let tmp = std::env::temp_dir();
@@ -605,62 +594,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// rl#121: the runtime loader must DISTINGUISH a rig MISMATCH from a MISSING checkpoint.
-    /// Both hold the inert rest pose (`!loaded`, `act` returns zeros), but a mismatch is the
-    /// loud-refuse path — it records the offending dims via `rig_mismatch()` (the loud
-    /// `error!` rides alongside) so the inert crab is attributable, NOT a silent statue that
-    /// looks like the legitimate "no brain yet" pose (where `rig_mismatch()` is `None`).
-    #[test]
-    fn rig_mismatch_refuses_loudly_missing_rests_quietly() {
-        let tmp = std::env::temp_dir();
-        let id = std::process::id();
-        let miss = tmp.join(format!("rl-rt-missing-{id}"));
-        let bad = tmp.join(format!("rl-rt-mismatch-{id}"));
-        let _ = std::fs::remove_dir_all(&miss);
-        let _ = std::fs::remove_dir_all(&bad);
-
-        // MISSING: no checkpoint → the legitimate rest pose, NOT flagged as a mismatch.
-        let missing = Policy::load(&miss);
-        assert!(
-            !missing.is_loaded(),
-            "a missing checkpoint must not arm the policy"
-        );
-        assert_eq!(
-            missing.rig_mismatch(),
-            None,
-            "a missing checkpoint is the quiet rest pose, not a rig mismatch"
-        );
-
-        // MISMATCH: a wrong-rig brain → refuse to arm AND record the dims for attribution.
-        save_brain_with_obs_dim(&bad, OBS_SIZE + 4);
-        let mismatched = Policy::load(&bad);
-        assert!(
-            !mismatched.is_loaded(),
-            "a mismatched checkpoint must refuse to arm (drive the rest pose, not the brain)"
-        );
-        assert_eq!(
-            mismatched.rig_mismatch(),
-            Some(RigDims {
-                obs: OBS_SIZE + 4,
-                action: ACTION_SIZE
-            }),
-            "a mismatch must be recorded with the checkpoint's own dims for the loud refusal"
-        );
-        // The non-arming is still graceful: it holds the rest pose, never panics in the matmul.
-        assert_eq!(
-            mismatched.act(&[0.0; OBS_SIZE]),
-            [0.0; ACTION_SIZE],
-            "a refused mismatch holds the zero-action pose without running the bad weights"
-        );
-
-        let _ = std::fs::remove_dir_all(&miss);
-        let _ = std::fs::remove_dir_all(&bad);
-    }
-
-    /// The release gate classifies a checkpoint against the rig: a current-rig brain is
-    /// `Ok`, a stale one is `Mismatch` carrying its OWN dims, and a dir with no brain is
-    /// `Missing`. This is what lets the gate refuse a mismatch loudly instead of shipping a
-    /// checkpoint that would go inert at runtime.
+    /// rl#121 + rl#199: the gates classify a checkpoint against the rig — a current-rig
+    /// brain is `Ok`, a stale one is `Mismatch` carrying its OWN dims, a dir with no brain
+    /// is `Missing`, and a present-but-undeserializable `brain.bin` (truncated deploy copy)
+    /// is `Unreadable`, distinct from `Missing` so the operator redeploys the file they can
+    /// see instead of chasing path resolution. This verdict is what lets the release gate
+    /// and the game's launch gate refuse a bad checkpoint loudly instead of shipping/arming
+    /// an inert rest-pose crab.
     #[test]
     fn checkpoint_fits_rig_classifies_the_on_disk_brain() {
         let tmp = std::env::temp_dir();
@@ -680,6 +620,10 @@ mod tests {
             checkpoint_fits_rig(&dir),
             RigFit::Mismatch(RigDims { obs, .. }) if obs == OBS_SIZE + 4
         ));
+
+        // A present-but-corrupt brain.bin is Unreadable, not Missing.
+        std::fs::write(CheckpointDir::new(&dir).brain_file(), b"truncated garbage").unwrap();
+        assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Unreadable));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

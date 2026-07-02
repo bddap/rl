@@ -31,8 +31,12 @@ pub(crate) fn run(args: Args) -> Result<()> {
             Ok(())
         }
         RigFit::Missing => bail!(
-            "checkpoint-check: no readable brain.bin in {dir} (this binary's rig is {rig_obs} \
+            "checkpoint-check: no brain.bin in {dir} (this binary's rig is {rig_obs} \
              obs, {rig_act} act) — nothing to ship",
+        ),
+        RigFit::Unreadable => bail!(
+            "checkpoint-check: brain.bin in {dir} exists but won't deserialize (truncated or \
+             corrupt) — do not ship it",
         ),
         RigFit::Mismatch(RigDims { obs, action }) => bail!(
             "checkpoint-check MISMATCH: {dir} is {obs} obs, {action} act but this binary's rig \
