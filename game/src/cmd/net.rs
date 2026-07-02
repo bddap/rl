@@ -224,26 +224,26 @@ async fn run_net(args: Args) -> Result<()> {
             }
         } else {
             // CLIENT: ship our input up, then ADOPT the host's authoritative snapshots — no re-sim,
-            // no cross-check (the host IS the source of truth). Apply in tick order and skip any
-            // snapshot no newer than the one we already hold (latest-wins: a full state supersedes an
-            // older one), which on the reliable ordered stream applies each tick exactly once.
+            // no cross-check (the host IS the source of truth) — via the ONE shared client adopt
+            // policy ([`net::lockstep::Lockstep::adopt_snapshots`]: arrival order, no tick gate/sort
+            // — see its doc for the restart-freeze rationale).
             session.send_to(server_eid, &msg).await;
-            snapshots.sort_by_key(|s| s.tick);
-            for snap in snapshots {
-                if snap.tick <= ls.sim().tick() {
-                    continue; // already at/past this state — a stale/duplicate arrival.
-                }
-                ls.apply_core_snapshot(snap);
-                snapshots_io += 1;
-                if let Some(w) = hash_log.as_mut() {
+            // The adopt callback can't `?`; stash the first hash-log write error and surface it after.
+            let mut log_err: Option<std::io::Error> = None;
+            snapshots_io += ls.adopt_snapshots(snapshots, |ls| {
+                if let (Some(w), None) = (hash_log.as_mut(), log_err.as_ref()) {
                     use std::io::Write as _;
                     // The host logs the just-stepped tick index (its `sim().tick() - 1`); the snapshot
                     // we just adopted carries the POST-step count (`sim.tick()`), one higher — so log
                     // `tick - 1` to line up the two peers' logs for a byte-identical `diff`.
                     let applied = ls.sim().tick().saturating_sub(1);
-                    writeln!(w, "{} {:#018x}", applied, ls.sim().state_hash())
-                        .context("writing hash log")?;
+                    if let Err(e) = writeln!(w, "{} {:#018x}", applied, ls.sim().state_hash()) {
+                        log_err = Some(e);
+                    }
                 }
+            });
+            if let Some(e) = log_err {
+                return Err(e).context("writing hash log");
             }
         }
 

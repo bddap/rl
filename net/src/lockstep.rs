@@ -154,6 +154,34 @@ impl Lockstep {
         self.inputs = self.inputs.split_off(&applied_tick);
     }
 
+    /// THE remote-client adopt policy — the one shared answer to "which drained snapshots does a
+    /// client apply, in what order?" for both remote clients (the windowed driver's `RemoteAdopt`
+    /// arm and headless `game net`'s client arm): apply EVERY snapshot, in ARRIVAL order, with NO
+    /// tick gate. The reliable ordered per-peer stream delivers snapshots in the host's send
+    /// (= step) order, so arrival order IS authoritative — including the tick-0 snapshots a host
+    /// RESTART rebroadcasts, which a `tick <=`/`max` gate (or a sort-by-tick) would silently
+    /// reject/reorder, freezing the client on stale pre-restart state. Each snapshot is a FULL
+    /// state overwrite, so applying intermediates is cheap (~hundreds of bytes/tick) and keeps
+    /// per-adopt observers exact.
+    ///
+    /// `on_adopt` runs after each apply (the `--hash-log` writer; pass `|_| ()` to skip). Returns
+    /// how many snapshots were adopted; callers gate their post-adopt work
+    /// ([`reconcile_local_prediction`](Lockstep::reconcile_local_prediction), `prev` refresh) on
+    /// having drained at least one.
+    pub fn adopt_snapshots(
+        &mut self,
+        snapshots: impl IntoIterator<Item = CoreSnapshot>,
+        mut on_adopt: impl FnMut(&Self),
+    ) -> usize {
+        let mut adopted = 0;
+        for snap in snapshots {
+            self.apply_core_snapshot(snap);
+            adopted += 1;
+            on_adopt(self);
+        }
+        adopted
+    }
+
     /// Re-predict the LOCAL player over its still-in-flight inputs after adopting an authoritative
     /// snapshot, so a remote client's own avatar responds at input latency instead of round-trip
     /// latency (rl#151 incr 3). Call ONCE, right after
@@ -261,5 +289,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The restart-freeze regression ([`Lockstep::adopt_snapshots`]): a host RESTART rebroadcasts
+    /// from tick 0, so the client's drained batch contains a tick REGRESSION. The policy must adopt
+    /// it (arrival order is authoritative) — the old per-caller `tick <=` gate rejected it and froze
+    /// the client on stale pre-restart state forever.
+    #[test]
+    fn adopt_snapshots_follows_a_host_restart_tick_regression() {
+        let me = PlayerId(0);
+        let roster = ids(1);
+        let mut client = Lockstep::new(7, &roster, me);
+
+        // Pre-restart host: stepped several ticks.
+        let mut sched = Lockstep::new(7, &roster, me);
+        let mut old_host = Server::new(&roster, Sim::new(7, &roster));
+        let mut arrivals = Vec::new();
+        for _ in 0..5 {
+            let sets = old_host.record(me, sched.submit_local_input(Input::from_axes(1.0, 0.0)));
+            old_host.enqueue_for_step(&sets);
+            while old_host.next_tick_ready() {
+                let _ = old_host.step_next(None);
+            }
+            arrivals.push(old_host.sim().core_snapshot());
+        }
+        // The host restarts: a fresh sim rebroadcasts from tick 0 — a regression on the wire.
+        let mut sched2 = Lockstep::new(7, &roster, me);
+        let mut new_host = Server::new(&roster, Sim::new(7, &roster));
+        let sets = new_host.record(me, sched2.submit_local_input(Input::from_axes(0.0, 1.0)));
+        new_host.enqueue_for_step(&sets);
+        while new_host.next_tick_ready() {
+            let _ = new_host.step_next(None);
+        }
+        arrivals.push(new_host.sim().core_snapshot());
+
+        let mut seen = Vec::new();
+        let adopted = client.adopt_snapshots(arrivals, |c| seen.push(c.sim().tick()));
+        assert_eq!(adopted, 6, "every arrival adopted — none gated away");
+        // Ticks are POST-step counts: five pre-restart arrivals (1..=5), then the restarted
+        // host's tick-1 — the regression a `tick <=` gate would reject, freezing the client at 5.
+        assert_eq!(seen, [1, 2, 3, 4, 5, 1], "adopted in arrival order, regression included");
+        assert_eq!(
+            client.sim().tick(),
+            1,
+            "the client ends on the post-restart state, not frozen pre-restart"
+        );
     }
 }

@@ -785,17 +785,16 @@ pub(super) fn drive_lockstep(
                 // Handled by the server step + snapshot render below.
                 PeerRole::ServerAuth => {}
                 PeerRole::RemoteAdopt => {
-                    // Adopt the host's NEWEST state. Frames arrive in send order on the reliable
-                    // per-peer QUIC stream, so the LAST drained snapshot is the newest — apply it
-                    // (not a tick-`max`/`>` gate, which would silently reject the tick-0 snapshots a
-                    // host RESTART rebroadcasts and freeze the client on stale pre-restart state).
-                    if let Some(snap) = exch.snapshots.into_iter().next_back() {
+                    // Adopt the host's drained snapshots via the ONE shared client adopt policy
+                    // ([`Lockstep::adopt_snapshots`]: arrival order, no tick gate — see its doc for
+                    // the restart-freeze rationale).
+                    if !exch.snapshots.is_empty() {
                         // Refresh the interpolation source from the PRE-adopt state, exactly as the
                         // stepping arm does before advancing — else `apply_transforms` would tween
                         // avatars + the FP camera from the tick-0 spawn every frame (a per-frame snap
                         // toward spawn), since this arm skips the drain loop that owns `prev`.
                         state.prev = SimSnapshot::capture(&state.ls);
-                        state.ls.apply_core_snapshot(snap);
+                        state.ls.adopt_snapshots(exch.snapshots, |_| ());
                         // Local-player prediction (rl#151 incr 3): the snapshot re-seated our own
                         // avatar to its round-trip-old authoritative position; replay our still-in-
                         // flight inputs on it so WASD feels responsive at input latency, not RTT.
