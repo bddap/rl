@@ -8,12 +8,11 @@ use bevy::prelude::*;
 use crate::bot::body::CrabCarapace;
 use crate::screenshot::{self, ShotTarget};
 
-use super::controls::{
-    orbit_stick, ORBIT_DRAG_BUTTON, ORBIT_PITCH_DOWN_KEY, ORBIT_PITCH_UP_KEY,
-    ORBIT_YAW_LEFT_KEY, ORBIT_YAW_RIGHT_KEY, ZOOM_IN_KEY, ZOOM_IN_TRIGGER, ZOOM_OUT_KEY,
-    ZOOM_OUT_TRIGGER,
-};
 use super::ShotConfig;
+use super::controls::{
+    ORBIT_DRAG_BUTTON, ORBIT_PITCH_DOWN_KEY, ORBIT_PITCH_UP_KEY, ORBIT_YAW_LEFT_KEY,
+    ORBIT_YAW_RIGHT_KEY, ZOOM_IN_KEY, ZOOM_IN_TRIGGER, ZOOM_OUT_KEY, ZOOM_OUT_TRIGGER, orbit_stick,
+};
 
 /// Orbit camera state. `focus` tracks the crab so it stays centered.
 #[derive(Component)]

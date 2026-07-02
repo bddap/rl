@@ -929,7 +929,9 @@ mod tests {
                 let sets = server.record(me, msg);
                 server.enqueue_for_step(&sets);
                 while server.next_tick_ready() {
-                    let bytes = server.step_next(Some(pose_at(server.sim().tick()))).snapshot;
+                    let bytes = server
+                        .step_next(Some(pose_at(server.sim().tick())))
+                        .snapshot;
                     let snap =
                         CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
                     client.apply_core_snapshot(snap);
@@ -971,8 +973,8 @@ mod tests {
     /// restart tick's own snapshot carries the spawn-state world.
     #[test]
     fn restart_does_not_wedge_the_ledger() {
-        use crate::snapshot::CoreSnapshot;
         use crate::sim::buttons;
+        use crate::snapshot::CoreSnapshot;
 
         // Two rostered players — the MP shape from the issue; solo hits the same mismatch and
         // is covered by every other test's roster-of-one.
@@ -991,7 +993,11 @@ mod tests {
                     input: Input::new(0.0, 1.0, 0.0, btns),
                 },
             );
-            assert_eq!(sets.len(), 1, "tick {t} completes (the ledger never stalls)");
+            assert_eq!(
+                sets.len(),
+                1,
+                "tick {t} completes (the ledger never stalls)"
+            );
             s.enqueue_for_step(&sets);
             assert!(s.next_tick_ready(), "tick {t} is steppable — no wedge");
             let stepped = s.step_next(None);
@@ -1001,18 +1007,29 @@ mod tests {
                 "the restart edge fires exactly on the RESTART tick"
             );
             let snap = CoreSnapshot::from_bytes(&stepped.snapshot).expect("snapshot decodes");
-            assert_eq!(snap.tick, t + 1, "snapshot ticks stay monotone and gap-free");
+            assert_eq!(
+                snap.tick,
+                t + 1,
+                "snapshot ticks stay monotone and gap-free"
+            );
             assert!(snap.tick > last_snap_tick || t == 0);
             last_snap_tick = snap.tick;
             if t == RESTART_AT {
                 assert_eq!(
                     snap.players.values().map(|p| p.pos()).collect::<Vec<_>>(),
-                    fresh_players.iter().map(|(_, p)| p.pos()).collect::<Vec<_>>(),
+                    fresh_players
+                        .iter()
+                        .map(|(_, p)| p.pos())
+                        .collect::<Vec<_>>(),
                     "the restart tick's snapshot carries the spawn-state world"
                 );
             }
         }
-        assert_eq!(s.sim().tick(), TOTAL, "the match ran to the end — no freeze");
+        assert_eq!(
+            s.sim().tick(),
+            TOTAL,
+            "the match ran to the end — no freeze"
+        );
     }
 
     /// Mid-game join via snapshot transfer, proven at the authoritative-server seam. A solo host
