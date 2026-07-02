@@ -570,8 +570,8 @@ fn carapace_box(model: &impl BindSource, center: Vec3) -> (Vec3, Vec3) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::colliders::{RestShape, link_capsule};
+    use super::*;
     use crate::bot::meshfit::{LoadedModel, model_path};
     use crate::bot::rig::fallback_recipe;
 
@@ -835,7 +835,11 @@ mod tests {
             fallback.links.len()
         );
         for (i, (f, h)) in fitted.links.iter().zip(&fallback.links).enumerate() {
-            assert_eq!(f.bone, h.bone, "link {i}: bone fitted={} fallback={}", f.bone, h.bone);
+            assert_eq!(
+                f.bone, h.bone,
+                "link {i}: bone fitted={} fallback={}",
+                f.bone, h.bone
+            );
             assert_eq!(
                 f.actuated, h.actuated,
                 "link {i} ({}): actuated joint fitted={:?} fallback={:?}",
@@ -926,7 +930,11 @@ mod tests {
             FITTED_GOLDEN.iter().map(|(b, g)| (*b, *g)).collect();
         // A duplicate bone key would silently shrink the map, letting a recipe link
         // match a surviving row while the len check below still sees the full table.
-        assert_eq!(golden.len(), FITTED_GOLDEN.len(), "duplicate bone in FITTED_GOLDEN");
+        assert_eq!(
+            golden.len(),
+            FITTED_GOLDEN.len(),
+            "duplicate bone in FITTED_GOLDEN"
+        );
         assert_eq!(
             recipe.links.len(),
             FITTED_GOLDEN.len(),

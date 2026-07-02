@@ -449,7 +449,12 @@ pub fn early_peer_msgs(frozen: &Frozen) -> Vec<PeerMsg> {
     frozen
         .early
         .iter()
-        .filter_map(|(from, msg)| frozen.id_map.get(from).map(|&pid| PeerMsg { pid, msg: *msg }))
+        .filter_map(|(from, msg)| {
+            frozen
+                .id_map
+                .get(from)
+                .map(|&pid| PeerMsg { pid, msg: *msg })
+        })
         .collect()
 }
 

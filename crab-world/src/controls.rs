@@ -257,8 +257,9 @@ pub fn legend<S: ControlScheme + ?Sized>(ctx: S::Context, device: Device) -> Vec
             // Every context row's action has a binding (proven by `assert_scheme_well_formed`),
             // so a miss is a malformed scheme — panic loudly rather than silently dropping the
             // line from the HUD (which would read as "that control doesn't exist").
-            let b = binding::<S>(row.action)
-                .expect("context row's action has no binding — assert_scheme_well_formed missed it");
+            let b = binding::<S>(row.action).expect(
+                "context row's action has no binding — assert_scheme_well_formed missed it",
+            );
             let glyphs = b.glyphs(device);
             if glyphs.is_empty() {
                 return None;
@@ -306,7 +307,10 @@ pub fn assert_scheme_well_formed<S: ControlScheme + ?Sized>(
         all_actions.len(),
         "the binding table has rows for actions not in the exhaustive list (a stale/dup row)"
     );
-    assert!(!all_contexts.is_empty(), "a scheme needs at least one context");
+    assert!(
+        !all_contexts.is_empty(),
+        "a scheme needs at least one context"
+    );
     // The default context (the overlay's spawn/idle state) must be a real, listed context —
     // else the HUD boots showing a context that isn't in `contexts()` and shows no column.
     assert!(

@@ -3,10 +3,9 @@
 //! render rate. Reads the sim read-only; writes only Bevy `Transform`s (and the
 //! client-side [`super::input::CameraYaw`] while alive).
 
-use super::*;
 use super::driver::{CockpitPose, GameState, LocalVehicle};
 use super::input::{CameraPitch, CameraYaw};
-
+use super::*;
 
 // ---------------------------------------------------------------------------
 // Entity markers
@@ -158,7 +157,9 @@ pub(super) fn spawn_world(
         let reason = crab_world::mesh_fallback::usable_model()
             .as_ref()
             .err()
-            .map_or(crab_world::mesh_fallback::MESH_ABSENT_REASON, |s| s.as_str());
+            .map_or(crab_world::mesh_fallback::MESH_ABSENT_REASON, |s| {
+                s.as_str()
+            });
         crab_world::mesh_fallback::spawn_banner(&mut commands, reason);
     }
     let crab_root = commands
@@ -279,7 +280,11 @@ fn spawn_crab_silhouette(
         d.normalize_or_zero()
     };
     let r = Quat::from_rotation_arc(
-        if fwd.length_squared() < 1e-6 { Vec3::Z } else { fwd },
+        if fwd.length_squared() < 1e-6 {
+            Vec3::Z
+        } else {
+            fwd
+        },
         Vec3::Z,
     );
 
@@ -365,11 +370,7 @@ fn spawn_crab_silhouette(
             }
             RestShape::Cuboid { center, half } => commands
                 .spawn((
-                    Mesh3d(meshes.add(Cuboid::new(
-                        half.x * 2.0,
-                        half.y * 2.0,
-                        half.z * 2.0,
-                    ))),
+                    Mesh3d(meshes.add(Cuboid::new(half.x * 2.0, half.y * 2.0, half.z * 2.0))),
                     MeshMaterial3d(carapace_mat.clone()),
                     Transform::from_translation(map(center)).with_rotation(r),
                 ))

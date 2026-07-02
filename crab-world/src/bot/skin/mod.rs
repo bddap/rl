@@ -32,7 +32,12 @@ struct CrabModel {
 pub fn register(app: &mut App) {
     // Skin iff a model resolves — read the SAME `CrabModelPath` the body reads, so skin and
     // physics can't disagree about which crab is present (see `body::CrabModelPath`).
-    let Some(model) = app.world().resource::<super::body::CrabModelPath>().0.clone() else {
+    let Some(model) = app
+        .world()
+        .resource::<super::body::CrabModelPath>()
+        .0
+        .clone()
+    else {
         return;
     };
     // The AssetServer resolves names RELATIVE to its root (`assets::bevy_asset_path`), so hand it

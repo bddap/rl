@@ -6,15 +6,13 @@
 //! (`gather_input`, `drive_lockstep`, `apply_transforms`, `update_hud`) live in the
 //! sibling submodules.
 
-use super::*;
 use super::driver::{
-    PendingRound, drive_lockstep, ensure_round_installed, insert_core,
-    park_fixed_auto_pump,
+    PendingRound, drive_lockstep, ensure_round_installed, insert_core, park_fixed_auto_pump,
 };
 use super::hud::{spawn_hud, sync_controls_context, update_hud};
 use super::input::{gather_input, grab_cursor_once, quit_game};
 use super::scene::{apply_transforms, spawn_fp_camera, spawn_world};
-
+use super::*;
 
 /// How the windowed client starts up: at the boot MENU (the interactive default — the
 /// player picks Host/Join, rl#58), or straight into a prebuilt ROUND (the scripted
@@ -92,21 +90,27 @@ pub fn build_windowed_app(
     // finds the committed control glyphs regardless of cwd or which workspace bin runs (the
     // default root is the running bin's crate dir, `game/assets`, which has no glyphs).
     // `BEVY_ASSET_ROOT` still overrides (deploy). See `crab_world::assets`.
-    app.add_plugins(DefaultPlugins.set(AssetPlugin {
-        file_path: crab_world::assets::bevy_asset_path().to_string_lossy().into_owned(),
-        ..default()
-    }).set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "Giant Crab Rescue".into(),
-            // Fullscreen is the single source of truth for every GCR launch target. The Deck
-            // shows fullscreen only because gamescope forces it; on a plain desktop/TV (bothouse)
-            // a Windowed app stayed windowed. BorderlessFullscreen makes the app itself own the
-            // policy, so bothouse matches the Deck with no separate per-host window-config path.
-            mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-            ..default()
-        }),
-        ..default()
-    }));
+    app.add_plugins(
+        DefaultPlugins
+            .set(AssetPlugin {
+                file_path: crab_world::assets::bevy_asset_path()
+                    .to_string_lossy()
+                    .into_owned(),
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Giant Crab Rescue".into(),
+                    // Fullscreen is the single source of truth for every GCR launch target. The Deck
+                    // shows fullscreen only because gamescope forces it; on a plain desktop/TV (bothouse)
+                    // a Windowed app stayed windowed. BorderlessFullscreen makes the app itself own the
+                    // policy, so bothouse matches the Deck with no separate per-host window-config path.
+                    mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+                    ..default()
+                }),
+                ..default()
+            }),
+    );
     // Night-sky skybox behind the first-person view (attaches to the FP camera when the
     // round spawns it). Shared with the rl-demo via `crab_world::sky`.
     app.add_plugins(crab_world::sky::NightSkyPlugin);
@@ -196,7 +200,10 @@ pub fn build_windowed_app(
             // pre-gates in `poll_formation` and never reaches here).
             let armed = arm_round(crate::menu::ReadyMatch { lockstep: ls, net })
                 .map_err(|msg| anyhow::anyhow!(msg))?;
-            let crate::menu::ReadyMatch { lockstep: mut ls, net } = armed.into_ready();
+            let crate::menu::ReadyMatch {
+                lockstep: mut ls,
+                net,
+            } = armed.into_ready();
             // Capture the crab's spawn + seed the pose BEFORE `ls` moves into core.
             let spawn = seed_external_crab_solo(&mut ls);
             let coord = super::driver::coordinator(net, ls.peers(), ls.sim().clone());
@@ -229,10 +236,7 @@ pub fn build_windowed_app(
             // `ensure_round_installed` FAILS LOUD rather than substituting a fake crab.
             {
                 let dir = external_crab;
-                let crab_spawn = crate::formation::solo_lockstep_for(seed)
-                    .sim()
-                    .crab()
-                    .pos();
+                let crab_spawn = crate::formation::solo_lockstep_for(seed).sim().crab().pos();
                 add_external_nn_crab(&mut app, dir, crab_spawn);
                 // Gate OFF: leave `ExternalCrabArmed` ABSENT (presence is the state). The
                 // transition (`ensure_round_installed`) inserts it iff the round resolves armable.
@@ -336,7 +340,11 @@ pub(super) fn seed_external_crab_solo(ls: &mut Lockstep) -> Pos {
 /// player and feeds its body position back into the sim. With the model present the cosmetic
 /// skin rides the body; with no `sally.glb` the visible crab is the static giant silhouette
 /// (`spawn_world` keeps it shown when no skin loads).
-pub(super) fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_spawn: Pos) {
+pub(super) fn add_external_nn_crab(
+    app: &mut App,
+    checkpoint_dir: std::path::PathBuf,
+    crab_spawn: Pos,
+) {
     app.insert_resource(crab_world::Visuals(true))
         .insert_resource(crab_world::bot::NumEnvs(1))
         // Same fixed timestep + softened contact spring as training/demo, with Rapier in
@@ -372,7 +380,11 @@ pub(super) fn add_external_nn_crab(app: &mut App, checkpoint_dir: std::path::Pat
 /// to arm Sally (or arm with no stack behind it). The boot-MENU path is the deliberate exception: it
 /// adds the stack UNarmed at build (gate off, `NumEnvs 0`) and arms only once the round resolves
 /// armable, so it calls [`add_external_nn_crab`] directly.
-pub(super) fn install_armed_nn_crab(app: &mut App, checkpoint_dir: std::path::PathBuf, crab_spawn: Pos) {
+pub(super) fn install_armed_nn_crab(
+    app: &mut App,
+    checkpoint_dir: std::path::PathBuf,
+    crab_spawn: Pos,
+) {
     add_external_nn_crab(app, checkpoint_dir, crab_spawn);
     crate::external_crab::arm(app.world_mut());
 }

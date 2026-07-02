@@ -44,10 +44,12 @@ fn part_tag(is_carapace: bool, joint: Option<&CrabJoint>) -> Option<u8> {
 /// only before the bridge has published one (transiently at spawn).
 pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
     let mut parts = Vec::new();
-    let mut q = world.query_filtered::<
-        (&Transform, &CrabEnvId, Option<&CrabJoint>, Option<&CrabCarapace>),
-        With<CrabBodyPart>,
-    >();
+    let mut q = world.query_filtered::<(
+        &Transform,
+        &CrabEnvId,
+        Option<&CrabJoint>,
+        Option<&CrabCarapace>,
+    ), With<CrabBodyPart>>();
     for (t, env, joint, carapace) in q.iter(world) {
         if env.0 != 0 {
             continue;
@@ -73,7 +75,11 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
             scale: s.scale,
         });
 
-    CrabArticulation { tick, parts, repose }
+    CrabArticulation {
+        tick,
+        parts,
+        repose,
+    }
 }
 
 /// (Client) Write a received crab pose onto env 0's own crab render entities — overwriting each
@@ -86,10 +92,12 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
     let by_tag: std::collections::HashMap<u8, &PartTransform> =
         art.parts.iter().map(|p| (p.part, p)).collect();
 
-    let mut q = world.query_filtered::<
-        (&mut Transform, &CrabEnvId, Option<&CrabJoint>, Option<&CrabCarapace>),
-        With<CrabBodyPart>,
-    >();
+    let mut q = world.query_filtered::<(
+        &mut Transform,
+        &CrabEnvId,
+        Option<&CrabJoint>,
+        Option<&CrabCarapace>,
+    ), With<CrabBodyPart>>();
     for (mut t, env, joint, carapace) in q.iter_mut(world) {
         if env.0 != 0 {
             continue;
@@ -127,11 +135,16 @@ mod tests {
         joint_id: CrabJointId,
         joint: Transform,
     ) -> (Entity, Entity) {
-        let cara = world.spawn((CrabBodyPart, CrabCarapace, CrabEnvId(0), carapace)).id();
+        let cara = world
+            .spawn((CrabBodyPart, CrabCarapace, CrabEnvId(0), carapace))
+            .id();
         let jnt = world
             .spawn((
                 CrabBodyPart,
-                CrabJoint { id: joint_id, axis_local: Vec3::X },
+                CrabJoint {
+                    id: joint_id,
+                    axis_local: Vec3::X,
+                },
                 CrabEnvId(0),
                 joint,
             ))
@@ -143,7 +156,8 @@ mod tests {
     fn capture_then_apply_reproduces_the_hosts_exact_pose() {
         let joint_id = CrabJointId::ClawShoulder(Side::Left);
         let cara_t = Transform::from_xyz(1.0, 2.0, 3.0).with_rotation(Quat::from_rotation_y(0.5));
-        let joint_t = Transform::from_xyz(-4.0, 0.25, 9.0).with_rotation(Quat::from_rotation_x(0.3));
+        let joint_t =
+            Transform::from_xyz(-4.0, 0.25, 9.0).with_rotation(Quat::from_rotation_x(0.3));
 
         // HOST: known part poses + a published giant-blow-up placement.
         let mut host = World::new();
@@ -180,7 +194,10 @@ mod tests {
         assert_eq!(got_cara.rotation, cara_t.rotation);
         assert_eq!(got_joint.translation, joint_t.translation);
         assert_eq!(got_joint.rotation, joint_t.rotation);
-        let repose = client.resource::<CrabSkinRepose>().0.expect("repose applied");
+        let repose = client
+            .resource::<CrabSkinRepose>()
+            .0
+            .expect("repose applied");
         assert_eq!(repose.shift, Vec3::new(10.0, 0.0, -20.0));
         assert_eq!(repose.pivot, Vec3::Y);
         assert_eq!(repose.scale, 8.0);

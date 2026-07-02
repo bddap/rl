@@ -92,7 +92,9 @@ struct DriveStats {
 
 impl Plugin for RenderVideoPlugin {
     fn build(&self, app: &mut App) {
-        let total = ((self.seconds.max(0.0)) * VIDEO_FPS as f32).round().max(1.0) as u32;
+        let total = ((self.seconds.max(0.0)) * VIDEO_FPS as f32)
+            .round()
+            .max(1.0) as u32;
         // Scratch dir for the PNG sequence, beside the mp4 (per-run by pid so two renders
         // never collide). ffmpeg globs `frame_%05d.png` out of it.
         let parent = self
@@ -140,7 +142,10 @@ impl Plugin for RenderVideoPlugin {
         // observation consumed; the policy then sees the relocated target next tick.
         .add_systems(Startup, (spawn_offscreen_camera, spawn_target_ball))
         .add_systems(FixedUpdate, target_ball.after(BotSet::Sense))
-        .add_systems(Update, (track_offscreen_camera, capture_video_frame).chain())
+        .add_systems(
+            Update,
+            (track_offscreen_camera, capture_video_frame).chain(),
+        )
         // Decouple the sim from wall-clock: inject exactly one fixed tick of overstep per
         // app update, BEFORE the fixed-main loop consumes it. With virtual time paused at
         // startup this is the ONLY thing that advances FixedUpdate, so the sim steps exactly
@@ -264,7 +269,10 @@ fn encode(cfg: &VideoConfig) {
     let status = std::process::Command::new("ffmpeg")
         .arg("-y")
         .args(["-framerate", &VIDEO_FPS.to_string()])
-        .args(["-i", &cfg.frame_dir.join("frame_%05d.png").to_string_lossy()])
+        .args([
+            "-i",
+            &cfg.frame_dir.join("frame_%05d.png").to_string_lossy(),
+        ])
         .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
         .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
         .arg(&cfg.out_path)
@@ -273,7 +281,10 @@ fn encode(cfg: &VideoConfig) {
         Ok(s) if s.success() => {
             info!("render-video: wrote {:?}", cfg.out_path);
             if let Err(e) = std::fs::remove_dir_all(&cfg.frame_dir) {
-                warn!("render-video: could not remove scratch {:?}: {e}", cfg.frame_dir);
+                warn!(
+                    "render-video: could not remove scratch {:?}: {e}",
+                    cfg.frame_dir
+                );
             }
         }
         Ok(s) => error!(
@@ -303,7 +314,11 @@ mod tests {
         );
         let ticks = |s: f32| ((s.max(0.0)) * VIDEO_FPS as f32).round().max(1.0) as u32;
         assert_eq!(ticks(1.0), VIDEO_FPS);
-        assert_eq!(ticks(0.0), 1, "a zero/negative length still renders ≥1 frame");
+        assert_eq!(
+            ticks(0.0),
+            1,
+            "a zero/negative length still renders ≥1 frame"
+        );
         assert_eq!(ticks(2.5), (2.5 * VIDEO_FPS as f32).round() as u32);
     }
 
@@ -316,6 +331,9 @@ mod tests {
         assert_eq!(video_seq_path(dir, 12345), dir.join("frame_12345.png"));
         let a = video_seq_path(dir, 2).to_string_lossy().into_owned();
         let b = video_seq_path(dir, 10).to_string_lossy().into_owned();
-        assert!(a < b, "padded frame 2 must sort before frame 10 ({a} vs {b})");
+        assert!(
+            a < b,
+            "padded frame 2 must sort before frame 10 ({a} vs {b})"
+        );
     }
 }

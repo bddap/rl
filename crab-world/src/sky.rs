@@ -248,8 +248,7 @@ fn value_noise(p: Vec3) -> f32 {
 /// A stable integer hash of a 3D lattice cell — deterministic, so the sky is identical
 /// every launch (no `rand`).
 fn hash3(x: i32, y: i32, z: i32) -> u32 {
-    let mut h = (x as u32)
-        .wrapping_mul(0x8da6_b343)
+    let mut h = (x as u32).wrapping_mul(0x8da6_b343)
         ^ (y as u32).wrapping_mul(0xd816_3841)
         ^ (z as u32).wrapping_mul(0xcb1a_b31f);
     h ^= h >> 13;
@@ -294,7 +293,10 @@ mod tests {
         // mid), but bright enough to read as deep blue rather than a black void.
         assert!(zen.max_element() < 0.15, "zenith too bright: {zen:?}");
         assert!(hor.max_element() < 0.3, "horizon too bright: {hor:?}");
-        assert!(zen.length() < hor.length(), "zenith should be darker than horizon");
+        assert!(
+            zen.length() < hor.length(),
+            "zenith should be darker than horizon"
+        );
     }
 
     /// Stars are sparse: only a small fraction of sampled directions light one up, so

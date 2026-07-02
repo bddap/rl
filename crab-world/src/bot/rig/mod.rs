@@ -34,12 +34,10 @@ mod colliders;
 mod fallback;
 mod recipe;
 
-pub use colliders::{
-    CrabSilhouette, RestCollider, RestShape, recipe_silhouette, rest_colliders,
-};
+pub use colliders::{CrabSilhouette, RestCollider, RestShape, recipe_silhouette, rest_colliders};
 pub use fallback::fallback_recipe;
-pub use recipe::{TRUNK_BONES, build_recipe, part_for_bone, parts_adjacent};
 pub(crate) use recipe::link_world_origins;
+pub use recipe::{TRUNK_BONES, build_recipe, part_for_bone, parts_adjacent};
 
 /// Bind-pose geometry source, so the real [`LoadedModel`] and the procedural
 /// [`FallbackModel`] share ONE recipe-builder ([`build_recipe`]) — no second spawn

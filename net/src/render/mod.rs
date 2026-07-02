@@ -37,11 +37,6 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindow, WindowMode};
 
-
-use crab_world::controls::{
-    ActiveContext, ActiveDevice, ForceRevealControls, PAD_STICK_DEADZONE, spawn_controls_ui,
-    track_active_device, update_controls_ui,
-};
 use crate::cadence::PhysicsCadence;
 use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::lockstep::{Lockstep, TickMsg};
@@ -51,6 +46,10 @@ use crate::sim::{
     trig_client,
 };
 use crate::telemetry::{TELEMETRY_TICK_EVERY, TelemetryEvent};
+use crab_world::controls::{
+    ActiveContext, ActiveDevice, ForceRevealControls, PAD_STICK_DEADZONE, spawn_controls_ui,
+    track_active_device, update_controls_ui,
+};
 
 /// Sim tick rate (Hz). Re-exported from [`crate::sim::TICK_HZ`] (the one source)
 /// so this windowed client and the headless driver advance at the same rate and stay
@@ -111,7 +110,6 @@ fn world(pos: Pos, y: f32) -> Vec3 {
     Vec3::new(meters(pos.x), y, meters(pos.z)) * scene::world_render_scale()
 }
 
-
 /// The sim's per-tick yaw turn cap, in radians. The sim clamps a tick's yaw delta to
 /// `trig::TURN/24` turn-units (see [`crate::sim`]); we normalize our accrued
 /// look radians by this same cap so full `look_yaw` deflection means exactly "the
@@ -122,18 +120,18 @@ const MAX_YAW_PER_TICK_RADIANS: f32 =
     (trig::TURN / 24) as f32 / trig::TURN as f32 * std::f32::consts::TAU;
 
 mod app;
-mod render_mode;
 mod articulation;
 mod driver;
-mod input;
-mod scene;
 mod hud;
-mod screenshot;
+mod input;
 mod menu;
+mod render_mode;
+mod scene;
+mod screenshot;
 #[cfg(test)]
 mod tests;
 
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use render_mode::RenderMode;
-pub use screenshot::{ScreenshotConfig, build_net_screenshot_app, build_screenshot_app};
 pub(crate) use scene::world_render_scale;
+pub use screenshot::{ScreenshotConfig, build_net_screenshot_app, build_screenshot_app};

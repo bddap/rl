@@ -302,9 +302,7 @@ async fn run_net(args: Args) -> Result<()> {
     if let Some(t) = tel.as_ref() {
         t.send(TelemetryEvent::tick(ls.sim(), ls.sim().players().count()));
     }
-    if all_ids.len() > 1
-        && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(TICK_HZ)
-    {
+    if all_ids.len() > 1 && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(TICK_HZ) {
         // We applied far fewer ticks than wall time allowed → we spent the run
         // stalled waiting for a peer's input. Flag it; a healthy link keeps pace.
         eprintln!(

@@ -170,5 +170,4 @@ mod tests {
         r.schedule_change(20, &ids(3));
         r.schedule_change(20, &ids(4)); // same tick → not strictly future → rejected
     }
-
 }

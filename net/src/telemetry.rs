@@ -780,7 +780,10 @@ mod tests {
                 me: 0,
             },
         ] {
-            assert!(!ev.is_sheddable(), "{ev:?} must be critical (never dropped)");
+            assert!(
+                !ev.is_sheddable(),
+                "{ev:?} must be critical (never dropped)"
+            );
         }
     }
 }

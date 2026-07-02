@@ -52,7 +52,8 @@ pub(super) fn manual_control_step(
         // Cycle the live joint by slot, wrapping. `from_index` always yields a joint for a
         // value in 0..COUNT, so `selected` becomes `Some(joint)` on the first press.
         if gp.just_pressed(GamepadButton::DPadUp) {
-            manual.selected = CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + 1) % n));
+            manual.selected =
+                CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + 1) % n));
         }
         if gp.just_pressed(GamepadButton::DPadDown) {
             manual.selected =

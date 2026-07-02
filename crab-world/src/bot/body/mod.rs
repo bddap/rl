@@ -27,7 +27,9 @@ mod spawn;
 #[cfg(feature = "render")]
 mod debug_gizmos;
 
-pub use collision::{ARENA_COLLISION, MAX_ENVS, NESTED_COLLISION, crab_collision, vehicle_collision};
+pub use collision::{
+    ARENA_COLLISION, MAX_ENVS, NESTED_COLLISION, crab_collision, vehicle_collision,
+};
 
 pub use components::{
     CrabAssets, CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint, CrabModelPath,
@@ -36,8 +38,8 @@ pub use components::{
 
 pub use joint_id::{CrabJointId, LEG_FRICTION_CAP, Side, joint_angle};
 
-pub use spawn::{LIMIT_SOFTNESS, SPAWN_HEIGHT, spawn_crab};
 pub(crate) use spawn::random_spawn_rotation;
+pub use spawn::{LIMIT_SOFTNESS, SPAWN_HEIGHT, spawn_crab};
 
 #[cfg(feature = "render")]
 pub use debug_gizmos::{PivotGizmos, register_pivot_markers};

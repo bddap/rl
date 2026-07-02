@@ -87,7 +87,10 @@ impl Lockstep {
         let mut roster_set = roster.to_vec();
         roster_set.sort();
         roster_set.dedup();
-        debug_assert!(roster_set.contains(&me), "joining player must be in the new roster");
+        debug_assert!(
+            roster_set.contains(&me),
+            "joining player must be in the new roster"
+        );
         Self {
             sim: Sim::new(seed, &roster_set),
             me,
@@ -112,7 +115,10 @@ impl Lockstep {
     pub fn submit_local_input(&mut self, input: Input) -> TickMsg {
         let apply_tick = self.next_issue_tick;
         self.next_issue_tick += 1;
-        self.inputs.entry(apply_tick).or_default().insert(self.me, input);
+        self.inputs
+            .entry(apply_tick)
+            .or_default()
+            .insert(self.me, input);
         TickMsg { apply_tick, input }
     }
 
@@ -343,7 +349,11 @@ mod tests {
         assert_eq!(adopted, 6, "every arrival adopted — none gated away");
         // Ticks are POST-step counts: five pre-restart arrivals (1..=5), then the restarted
         // host's tick-1 — the regression a `tick <=` gate would reject, freezing the client at 5.
-        assert_eq!(seen, [1, 2, 3, 4, 5, 1], "adopted in arrival order, regression included");
+        assert_eq!(
+            seen,
+            [1, 2, 3, 4, 5, 1],
+            "adopted in arrival order, regression included"
+        );
         assert_eq!(
             client.sim().tick(),
             1,

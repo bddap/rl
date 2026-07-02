@@ -1,18 +1,17 @@
 //! Headless tests for the render client (no window/GPU): the menu->round handoff, the
 //! manual-vs-auto crab pump determinism, and the client input/interpolation math.
 
-use super::*;
 use super::app::ExternalCrabStackInstalled;
 use super::driver::{
     FlightInput, GameState, PendingRound, VEHICLE_STICK_SENS, ensure_round_installed,
     flight_control, park_fixed_auto_pump, pump_fixed_steps,
 };
-use crab_world::vehicle::VehicleKind;
 use super::input::pad_stick_axes;
 use super::scene::{lerp_pos, lerp_yaw, look_direction};
+use super::*;
 use crate::menu::ReadyMatch;
 use crate::sim::Sim;
-
+use crab_world::vehicle::VehicleKind;
 
 /// The boot menu's handoff into the round (rl#56), exercised headlessly (no window):
 /// park a chosen [`ReadyMatch`] in [`PendingRound`], request the Playing transition,
@@ -67,7 +66,10 @@ fn menu_handoff_installs_the_chosen_round() {
     // The installed sim is the chosen one: a single local player (solo), seeded as asked.
     assert_eq!(gs.ls.me(), crate::sim::PlayerId(0), "solo player id 0");
     assert!(
-        matches!(*gs.coord, crate::net_loop::Coordinator::Server { net: None, .. }),
+        matches!(
+            *gs.coord,
+            crate::net_loop::Coordinator::Server { net: None, .. }
+        ),
         "a solo handoff installs a solo (internal-server) coordinator"
     );
     // And the parked round was consumed (taken), not left to double-install.
@@ -104,7 +106,10 @@ fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
     // An unverified host brain refuses LOUD, naming brain.bin + the rl-update fix.
     let brain = check_armable(synced(false, false))
         .expect_err("an unverified-host-brain networked round must refuse, not arm a fake crab");
-    assert!(brain.contains("brain.bin"), "names the host brain problem: {brain}");
+    assert!(
+        brain.contains("brain.bin"),
+        "names the host brain problem: {brain}"
+    );
     assert!(
         brain.contains("rl-update"),
         "tells the operator how to fix it: {brain}"
@@ -133,11 +138,11 @@ fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
 /// rapier+bot stack — but headless: no window/GPU.)
 #[test]
 fn manual_pump_matches_auto_pump_step_for_step() {
+    use bevy_rapier3d::prelude::Velocity;
     use crab_world::bot::actuator::{ACTION_SIZE, CrabActions};
     use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint};
-    use crab_world::bot::physics_digest::crab_state_digest;
     use crab_world::bot::headless::{HeadlessStack, WorldRole, headless_stack};
-    use bevy_rapier3d::prelude::Velocity;
+    use crab_world::bot::physics_digest::crab_state_digest;
 
     let build = || {
         headless_stack(HeadlessStack {
@@ -316,8 +321,7 @@ fn move_and_action_map_to_input() {
 #[test]
 fn camera_right_is_negative_x_facing_plus_z() {
     let eye = Vec3::new(0.0, EYE_HEIGHT, 0.0);
-    let cam =
-        Transform::from_translation(eye).looking_at(eye + look_direction(0.0, 0.0), Vec3::Y);
+    let cam = Transform::from_translation(eye).looking_at(eye + look_direction(0.0, 0.0), Vec3::Y);
     let right = cam.right().as_vec3();
     assert!(
         (right - Vec3::NEG_X).length() < 1e-5,
@@ -396,29 +400,95 @@ fn pad_axes_are_not_pre_negated() {
 fn plane_flight_control_pitch_is_ac6_and_scaled() {
     let plane = |fi: FlightInput| flight_control(VehicleKind::Plane, &fi);
     // AC6 pitch: pull the stick BACK/DOWN (left.y < 0) → nose UP (pitch > 0); push up → nose down.
-    assert!(plane(FlightInput { left: Vec2::new(0.0, -1.0), ..default() }).pitch > 0.0);
-    assert!(plane(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).pitch < 0.0);
+    assert!(
+        plane(FlightInput {
+            left: Vec2::new(0.0, -1.0),
+            ..default()
+        })
+        .pitch
+            > 0.0
+    );
+    assert!(
+        plane(FlightInput {
+            left: Vec2::new(0.0, 1.0),
+            ..default()
+        })
+        .pitch
+            < 0.0
+    );
     // Mouse BACK (screen +y, drag down) also raises the nose (flight-sim, the pre-9e3d3b47 feel the
     // owner praised).
-    assert!(plane(FlightInput { mouse: Vec2::new(0.0, 1.0), ..default() }).pitch > 0.0);
+    assert!(
+        plane(FlightInput {
+            mouse: Vec2::new(0.0, 1.0),
+            ..default()
+        })
+        .pitch
+            > 0.0
+    );
     // The analog attitude stick is scaled by VEHICLE_STICK_SENS, not raw: full deflection commands a
     // fraction of full authority (the controller "too sensitive" fix). Mouse keeps its own scale.
-    let full = plane(FlightInput { left: Vec2::new(0.0, -1.0), ..default() });
-    assert!((full.pitch - VEHICLE_STICK_SENS).abs() < 1e-6, "full-back stick → VEHICLE_STICK_SENS pitch");
-    let rolled = plane(FlightInput { left: Vec2::new(1.0, 0.0), ..default() });
-    assert!((rolled.roll + VEHICLE_STICK_SENS).abs() < 1e-6, "full-right stick → −VEHICLE_STICK_SENS roll (screen-reconciled)");
+    let full = plane(FlightInput {
+        left: Vec2::new(0.0, -1.0),
+        ..default()
+    });
+    assert!(
+        (full.pitch - VEHICLE_STICK_SENS).abs() < 1e-6,
+        "full-back stick → VEHICLE_STICK_SENS pitch"
+    );
+    let rolled = plane(FlightInput {
+        left: Vec2::new(1.0, 0.0),
+        ..default()
+    });
+    assert!(
+        (rolled.roll + VEHICLE_STICK_SENS).abs() < 1e-6,
+        "full-right stick → −VEHICLE_STICK_SENS roll (screen-reconciled)"
+    );
     // Roll: stick right → bank right — the reconciled roll is NEGATIVE (body +X renders screen-left),
     // and the coordinating yaw rides it the SAME sign (turns screen-right, not just rolls).
-    assert!(rolled.roll < 0.0 && rolled.yaw < 0.0, "right stick → bank right (−roll) + coordinated yaw");
+    assert!(
+        rolled.roll < 0.0 && rolled.yaw < 0.0,
+        "right stick → bank right (−roll) + coordinated yaw"
+    );
     // Throttle: RT accelerates (+), LT brakes (−). Rudder: RB noses SCREEN-RIGHT (−yaw, same
     // sign as the coordinated right-bank turn above), LB screen-left (+yaw) — the rudder is negated at
     // the source so RB-right matches the screen, since +yaw renders body +X = screen-LEFT.
-    assert!(plane(FlightInput { rt: 1.0, ..default() }).throttle_trim > 0.0);
-    assert!(plane(FlightInput { lt: 1.0, ..default() }).throttle_trim < 0.0);
-    assert!(plane(FlightInput { rb: true, ..default() }).yaw < 0.0);
-    assert!(plane(FlightInput { lb: true, ..default() }).yaw > 0.0);
+    assert!(
+        plane(FlightInput {
+            rt: 1.0,
+            ..default()
+        })
+        .throttle_trim
+            > 0.0
+    );
+    assert!(
+        plane(FlightInput {
+            lt: 1.0,
+            ..default()
+        })
+        .throttle_trim
+            < 0.0
+    );
+    assert!(
+        plane(FlightInput {
+            rb: true,
+            ..default()
+        })
+        .yaw < 0.0
+    );
+    assert!(
+        plane(FlightInput {
+            lb: true,
+            ..default()
+        })
+        .yaw > 0.0
+    );
     // The plane thrusts through its lever, never the direct thrusters; it never match-velocities.
-    let p = plane(FlightInput { left: Vec2::new(1.0, 1.0), rt: 1.0, ..default() });
+    let p = plane(FlightInput {
+        left: Vec2::new(1.0, 1.0),
+        rt: 1.0,
+        ..default()
+    });
     assert_eq!(p.thrust, Vec3::ZERO);
     assert!(!p.match_velocity);
 }
@@ -431,22 +501,97 @@ fn ship_flight_control_is_outer_wilds() {
     // Direct thrusters: left stick forward (+y) → +Z thrust; RT up / LT down. Stick RIGHT (+x)
     // strafes screen-right = body −X (body +X renders screen-left at this facing, the same
     // reconciliation the foot strafe negation makes), so thrust.x < 0.
-    assert!(ship(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).thrust.z > 0.0);
-    assert!(ship(FlightInput { left: Vec2::new(1.0, 0.0), ..default() }).thrust.x < 0.0);
-    assert!(ship(FlightInput { rt: 1.0, ..default() }).thrust.y > 0.0);
-    assert!(ship(FlightInput { lt: 1.0, ..default() }).thrust.y < 0.0);
+    assert!(
+        ship(FlightInput {
+            left: Vec2::new(0.0, 1.0),
+            ..default()
+        })
+        .thrust
+        .z > 0.0
+    );
+    assert!(
+        ship(FlightInput {
+            left: Vec2::new(1.0, 0.0),
+            ..default()
+        })
+        .thrust
+        .x < 0.0
+    );
+    assert!(
+        ship(FlightInput {
+            rt: 1.0,
+            ..default()
+        })
+        .thrust
+        .y > 0.0
+    );
+    assert!(
+        ship(FlightInput {
+            lt: 1.0,
+            ..default()
+        })
+        .thrust
+        .y < 0.0
+    );
     // Aim is camera-style: right stick UP → nose UP (pitch > 0, NOT inverted). Stick RIGHT turns the
     // view RIGHT — negated like the strafe and the foot yaw-look — so the yaw intent is < 0.
     // The analog AIM stick is scaled by VEHICLE_STICK_SENS (the "too sensitive" fix), like the plane.
-    let aim_up = ship(FlightInput { right: Vec2::new(0.0, 1.0), ..default() });
-    assert!((aim_up.pitch - VEHICLE_STICK_SENS).abs() < 1e-6, "full-up aim stick → VEHICLE_STICK_SENS pitch");
-    assert!(ship(FlightInput { right: Vec2::new(1.0, 0.0), ..default() }).yaw < 0.0);
+    let aim_up = ship(FlightInput {
+        right: Vec2::new(0.0, 1.0),
+        ..default()
+    });
+    assert!(
+        (aim_up.pitch - VEHICLE_STICK_SENS).abs() < 1e-6,
+        "full-up aim stick → VEHICLE_STICK_SENS pitch"
+    );
+    assert!(
+        ship(FlightInput {
+            right: Vec2::new(1.0, 0.0),
+            ..default()
+        })
+        .yaw < 0.0
+    );
     // Translational thrust keeps FULL authority — only rotation is desensitized.
-    assert_eq!(ship(FlightInput { left: Vec2::new(0.0, 1.0), ..default() }).thrust.z, 1.0);
+    assert_eq!(
+        ship(FlightInput {
+            left: Vec2::new(0.0, 1.0),
+            ..default()
+        })
+        .thrust
+        .z,
+        1.0
+    );
     // Roll on the bumpers (LB banks right → positive, RB banks left → negative — owner playtest
     // had them reversed); A/Space matches velocity. The ship has no throttle lever.
-    assert!(ship(FlightInput { lb: true, ..default() }).roll > 0.0);
-    assert!(ship(FlightInput { rb: true, ..default() }).roll < 0.0);
-    assert!(ship(FlightInput { match_vel: true, ..default() }).match_velocity);
-    assert_eq!(ship(FlightInput { rt: 1.0, ..default() }).throttle_trim, 0.0);
+    assert!(
+        ship(FlightInput {
+            lb: true,
+            ..default()
+        })
+        .roll
+            > 0.0
+    );
+    assert!(
+        ship(FlightInput {
+            rb: true,
+            ..default()
+        })
+        .roll
+            < 0.0
+    );
+    assert!(
+        ship(FlightInput {
+            match_vel: true,
+            ..default()
+        })
+        .match_velocity
+    );
+    assert_eq!(
+        ship(FlightInput {
+            rt: 1.0,
+            ..default()
+        })
+        .throttle_trim,
+        0.0
+    );
 }

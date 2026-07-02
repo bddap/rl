@@ -181,9 +181,7 @@ impl<B: Backend> AnyBrain<B> {
     ) -> Result<Self, RecorderError> {
         match self {
             Self::Mlp256(m) => Ok(Self::Mlp256(m.load_record(recorder.load(args, device)?))),
-            Self::Mlp512x3(m) => {
-                Ok(Self::Mlp512x3(m.load_record(recorder.load(args, device)?)))
-            }
+            Self::Mlp512x3(m) => Ok(Self::Mlp512x3(m.load_record(recorder.load(args, device)?))),
         }
     }
 }

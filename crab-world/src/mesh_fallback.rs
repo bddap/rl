@@ -15,8 +15,7 @@ use std::sync::OnceLock;
 /// The reason a surface fell back: no `sally.glb` resolved at all (the common case, vs a
 /// present-but-unloadable one). The absent branch of the shared [`usable_model`] verdict, so every
 /// surface names the missing mesh identically.
-pub const MESH_ABSENT_REASON: &str =
-    "no crab model resolved (CRAB_MODEL_PATH / default `sally.glb` not found under \
+pub const MESH_ABSENT_REASON: &str = "no crab model resolved (CRAB_MODEL_PATH / default `sally.glb` not found under \
      BEVY_ASSET_ROOT/assets)";
 
 /// Which player-facing binary raised the fallback. A closed enum, not a free string, so the

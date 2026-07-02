@@ -17,7 +17,6 @@ use super::{
     ExternalCrabBridge, ExternalCrabPlugin, hash_crab_physics, integrate_crab, sync_external_crab,
 };
 
-
 /// One logged sample of the headless probe: tick, the NN crab's game position (m), and
 /// its distance to the hunted player (m). The shrinking distance over a run is the
 /// evidence the policy actually WALKS the crab toward the player.
@@ -72,7 +71,10 @@ fn probe_step(
     // should close the gap on a stationary player. Single peer, so a complete neutral map advances
     // the sim one tick directly (no coordination — this is a determinism/walk probe, not a match).
     let me = PlayerId(0);
-    driver.sim.step(&std::collections::BTreeMap::from([(me, Input::from_axes(0.0, 0.0))]));
+    driver.sim.step(&std::collections::BTreeMap::from([(
+        me,
+        Input::from_axes(0.0, 0.0),
+    )]));
 
     // Log periodically (and always at tick 1 so the start point is recorded).
     let tick = driver.sim.tick();
@@ -301,12 +303,7 @@ pub fn run_vehicle_stability_probe(
         linear: Vec3::new(-10.0, 0.0, 0.0),
         angular: Vec3::ZERO,
     };
-    spawn_ram_vehicle(
-        app.world_mut(),
-        VehicleKind::Plane,
-        spawn_at,
-        ram_velocity,
-    );
+    spawn_ram_vehicle(app.world_mut(), VehicleKind::Plane, spawn_at, ram_velocity);
 
     // Watch the crab take the hit and recover.
     for _ in 0..post {

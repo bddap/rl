@@ -93,7 +93,9 @@ impl RenderMode {
     pub fn from_env() -> Self {
         if let Ok(v) = std::env::var("RL_RENDER_MODE") {
             return RenderMode::parse(&v).unwrap_or_else(|| {
-                warn!("RL_RENDER_MODE={v:?} not one of mesh|mesh+colliders|colliders; defaulting mesh");
+                warn!(
+                    "RL_RENDER_MODE={v:?} not one of mesh|mesh+colliders|colliders; defaulting mesh"
+                );
                 RenderMode::Mesh
             });
         }
@@ -211,7 +213,12 @@ fn draw_crab_collider_wireframe(
 /// capsules, and the vehicle cuboid; other shapes are skipped (neither body has them). render==physics,
 /// so `world` carries no scale and the shapes draw at true collider size. `pub` so GCR's render-mode
 /// glue draws the piloted craft's collider through this ONE drawer (no second wireframe impl).
-pub fn draw_collider_wireframe(gizmos: &mut Gizmos, view: ColliderView<'_>, world: Mat4, color: Color) {
+pub fn draw_collider_wireframe(
+    gizmos: &mut Gizmos,
+    view: ColliderView<'_>,
+    world: Mat4,
+    color: Color,
+) {
     match view {
         ColliderView::Cuboid(c) => draw_cuboid(gizmos, world, c.half_extents(), color),
         ColliderView::Capsule(c) => {
@@ -247,9 +254,18 @@ fn draw_cuboid(gizmos: &mut Gizmos, world: Mat4, half: Vec3, color: Color) {
         corner(-1.0, 1.0, 1.0),
     ];
     let edges = [
-        (0, 1), (1, 2), (2, 3), (3, 0),
-        (4, 5), (5, 6), (6, 7), (7, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
     ];
     for (a, b) in edges {
         gizmos.line(c[a], c[b], color);

@@ -231,9 +231,7 @@ fn pair_bones(
                 continue;
             }
             Pairing::Settling { frames } if frames < SETTLE_FRAMES => {
-                skin.phase = Pairing::Settling {
-                    frames: frames + 1,
-                };
+                skin.phase = Pairing::Settling { frames: frames + 1 };
                 continue;
             }
             Pairing::Settling { .. } => {}
@@ -328,7 +326,8 @@ fn repair_skins(
             let Ok((mut drive, name)) = bones.get_mut(bone) else {
                 continue;
             };
-            match crate::bot::rig::part_for_bone(name.as_str()).and_then(|key| link_of.get(&key).copied())
+            match crate::bot::rig::part_for_bone(name.as_str())
+                .and_then(|key| link_of.get(&key).copied())
             {
                 Some(link) => {
                     drive.link = link;

@@ -26,7 +26,7 @@ use std::thread;
 
 use bevy::app::AppExit;
 use bevy::prelude::*;
-use bevy::render::view::window::screenshot::{save_to_disk, Screenshot};
+use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::window::{MonitorSelection, WindowMode};
 use clap::Parser;
 
@@ -206,7 +206,9 @@ fn read_events(mut child: Child, state: Arc<Mutex<State>>) {
     s.child_code = code;
     if s.result.is_none() {
         s.phase = Phase::Done;
-        let code_str = code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
+        let code_str = code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".into());
         s.result = Some(DoneInfo {
             ok: false,
             message: format!("rl-update exited ({code_str}) with no result"),
@@ -458,11 +460,7 @@ fn update_ui(
             }
             Slot::Bytes => {
                 text.0 = if s.total > 0 {
-                    format!(
-                        "{:.1} / {:.1} MB  ({pct:.0}%)",
-                        mb(s.done),
-                        mb(s.total)
-                    )
+                    format!("{:.1} / {:.1} MB  ({pct:.0}%)", mb(s.done), mb(s.total))
                 } else {
                     String::new()
                 };
@@ -495,7 +493,9 @@ fn handle_dismiss(
     let pressed = keys.get_just_pressed().next().is_some()
         || mouse.get_just_pressed().next().is_some()
         || touches.iter_just_pressed().next().is_some()
-        || gamepads.iter().any(|gp| gp.get_just_pressed().next().is_some());
+        || gamepads
+            .iter()
+            .any(|gp| gp.get_just_pressed().next().is_some());
     if pressed {
         exit.write(AppExit::Success);
     }
@@ -556,8 +556,13 @@ fn main() {
     // the shell wrapper treats that as a crash and falls back.
     let code = {
         let s = lock(&state);
-        s.child_code
-            .unwrap_or_else(|| if s.result.as_ref().is_some_and(|d| d.ok) { 0 } else { 1 })
+        s.child_code.unwrap_or_else(|| {
+            if s.result.as_ref().is_some_and(|d| d.ok) {
+                0
+            } else {
+                1
+            }
+        })
     };
     std::process::exit(code);
 }

@@ -82,7 +82,8 @@ fn strip_cross_part_weights(
                 all_named = false;
                 break;
             };
-            lane_parts.push(crate::bot::rig::part_for_bone(name.as_str()).unwrap_or(PartId::Carapace));
+            lane_parts
+                .push(crate::bot::rig::part_for_bone(name.as_str()).unwrap_or(PartId::Carapace));
         }
         if !all_named {
             continue;

@@ -37,9 +37,9 @@ use std::thread;
 use anyhow::Result;
 pub use iroh::EndpointId;
 
+use crate::formation::{self, LobbyControl};
 use crate::lockstep::Lockstep;
 use crate::membership::Role;
-use crate::formation::{self, LobbyControl};
 use crate::net_loop::{self, MatchResult, NetDriver};
 
 /// The role the player picked on the menu (rl#58: the menu is just Host / Join — the old
@@ -549,16 +549,41 @@ mod tests {
     #[test]
     fn chooser_navigates_between_host_and_join() {
         let mut nav = MenuNav::new();
-        assert_eq!(nav, MenuNav::Chooser { focus: ChooserItem::Host });
+        assert_eq!(
+            nav,
+            MenuNav::Chooser {
+                focus: ChooserItem::Host
+            }
+        );
         assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
-        assert_eq!(nav, MenuNav::Chooser { focus: ChooserItem::Join });
+        assert_eq!(
+            nav,
+            MenuNav::Chooser {
+                focus: ChooserItem::Join
+            }
+        );
         assert_eq!(nav.step(MenuInput::Up, 0), MenuAction::None);
-        assert_eq!(nav, MenuNav::Chooser { focus: ChooserItem::Host });
+        assert_eq!(
+            nav,
+            MenuNav::Chooser {
+                focus: ChooserItem::Host
+            }
+        );
         // Either direction toggles; Back at the root is inert.
         assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
-        assert_eq!(nav, MenuNav::Chooser { focus: ChooserItem::Join });
+        assert_eq!(
+            nav,
+            MenuNav::Chooser {
+                focus: ChooserItem::Join
+            }
+        );
         assert_eq!(nav.step(MenuInput::Back, 0), MenuAction::None);
-        assert_eq!(nav, MenuNav::Chooser { focus: ChooserItem::Join });
+        assert_eq!(
+            nav,
+            MenuNav::Chooser {
+                focus: ChooserItem::Join
+            }
+        );
     }
 
     /// Confirming Host enters the lobby as a host (Start focused) and emits `Host`;
@@ -568,7 +593,12 @@ mod tests {
     fn confirm_host_or_join_enters_the_lobby_with_the_right_role() {
         let mut host = MenuNav::new();
         assert_eq!(host.step(MenuInput::Confirm, 0), MenuAction::Host);
-        assert_eq!(host, MenuNav::HostLobby { focus: LobbyItem::Start });
+        assert_eq!(
+            host,
+            MenuNav::HostLobby {
+                focus: LobbyItem::Start
+            }
+        );
 
         let mut join = MenuNav::new();
         join.step(MenuInput::Down, 0); // focus Join
@@ -591,10 +621,15 @@ mod tests {
         assert_eq!(empty.step(MenuInput::Confirm, 0), MenuAction::StartSolo);
 
         let mut networked = MenuNav::lobby(true);
-        assert_eq!(networked.step(MenuInput::Confirm, 2), MenuAction::StartNetworked);
+        assert_eq!(
+            networked.step(MenuInput::Confirm, 2),
+            MenuAction::StartNetworked
+        );
         assert_eq!(
             networked,
-            MenuNav::HostLobby { focus: LobbyItem::Start },
+            MenuNav::HostLobby {
+                focus: LobbyItem::Start
+            },
             "networked Start stays in the lobby until the match forms"
         );
     }
@@ -605,7 +640,12 @@ mod tests {
     fn host_lobby_navigates_and_cancels() {
         let mut nav = MenuNav::lobby(true);
         assert_eq!(nav.step(MenuInput::Down, 0), MenuAction::None);
-        assert_eq!(nav, MenuNav::HostLobby { focus: LobbyItem::Cancel });
+        assert_eq!(
+            nav,
+            MenuNav::HostLobby {
+                focus: LobbyItem::Cancel
+            }
+        );
         assert_eq!(nav.step(MenuInput::Confirm, 0), MenuAction::Cancel);
         assert_eq!(nav, MenuNav::new(), "Cancel returns to the chooser");
 
@@ -643,6 +683,10 @@ mod tests {
         // focus_lobby is a no-op off the lobby (and vice-versa) — it can't corrupt state.
         let mut chooser = MenuNav::new();
         chooser.focus_lobby(LobbyItem::Cancel);
-        assert_eq!(chooser, MenuNav::new(), "focus_lobby is inert on the chooser");
+        assert_eq!(
+            chooser,
+            MenuNav::new(),
+            "focus_lobby is inert on the chooser"
+        );
     }
 }

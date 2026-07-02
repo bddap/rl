@@ -37,12 +37,12 @@
 //! the network or a GPU.
 
 pub mod articulation;
-pub mod cordic;
 pub mod cadence;
 pub mod controls;
+pub mod cordic;
+pub mod formation;
 pub mod lockstep;
 pub mod membership;
-pub mod formation;
 pub mod net_loop;
 pub mod roster;
 pub mod server;
@@ -56,11 +56,11 @@ pub mod transport;
 // transforms). The headless netcode (sim/lockstep/transport) and the trainer don't
 // need them.
 #[cfg(feature = "render")]
+pub mod external_crab;
+#[cfg(feature = "render")]
 pub mod menu;
 #[cfg(feature = "render")]
 pub mod render;
-#[cfg(feature = "render")]
-pub mod external_crab;
 
 /// The formation barrier's verdict on the two inputs that determine the float NN crab's
 /// physics (rl#82 + rl#100, GCR) — computed ONCE by [`crate::membership::Membership::sync_verdict`]

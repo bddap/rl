@@ -7,11 +7,11 @@ mod lifecycle;
 mod state;
 mod step;
 
-pub(crate) use lifecycle::{reset_crab, save_on_exit};
-pub use state::STEPS_PER_ROLLOUT;
 /// Re-exported only for `reward`'s calibration tests; `finalize_transitions` uses the
 /// [`lifecycle`]-local constant directly, so no non-test path needs it.
 #[cfg(test)]
 pub(crate) use lifecycle::MAX_EPISODE_TICKS;
+pub(crate) use lifecycle::{reset_crab, save_on_exit};
+pub use state::STEPS_PER_ROLLOUT;
 pub(crate) use state::{HorizonOutput, HorizonRequest, TrainingState};
 pub(crate) use step::brain_step;

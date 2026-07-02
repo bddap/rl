@@ -157,7 +157,13 @@ impl CoreSnapshot {
         if !r.is_empty() {
             return Err(SnapshotDecodeError::TrailingBytes);
         }
-        Ok(Self { tick, players, crab, outcome, roster })
+        Ok(Self {
+            tick,
+            players,
+            crab,
+            outcome,
+            roster,
+        })
     }
 }
 
@@ -187,8 +193,14 @@ impl<'a> Reader<'a> {
 
     /// Read a fixed `N`-byte array, advancing the cursor.
     fn take<const N: usize>(&mut self) -> Result<[u8; N], SnapshotDecodeError> {
-        let end = self.at.checked_add(N).ok_or(SnapshotDecodeError::Truncated)?;
-        let slice = self.buf.get(self.at..end).ok_or(SnapshotDecodeError::Truncated)?;
+        let end = self
+            .at
+            .checked_add(N)
+            .ok_or(SnapshotDecodeError::Truncated)?;
+        let slice = self
+            .buf
+            .get(self.at..end)
+            .ok_or(SnapshotDecodeError::Truncated)?;
         self.at = end;
         Ok(slice.try_into().expect("slice length checked above"))
     }
@@ -228,14 +240,20 @@ mod tests {
             CoreSnapshot::from_bytes(&bytes[..bytes.len() - 1]),
             Err(SnapshotDecodeError::Truncated)
         );
-        assert_eq!(CoreSnapshot::from_bytes(&[]), Err(SnapshotDecodeError::Truncated));
+        assert_eq!(
+            CoreSnapshot::from_bytes(&[]),
+            Err(SnapshotDecodeError::Truncated)
+        );
     }
 
     #[test]
     fn trailing_bytes_are_rejected() {
         let mut bytes = sample().to_bytes();
         bytes.push(0);
-        assert_eq!(CoreSnapshot::from_bytes(&bytes), Err(SnapshotDecodeError::TrailingBytes));
+        assert_eq!(
+            CoreSnapshot::from_bytes(&bytes),
+            Err(SnapshotDecodeError::TrailingBytes)
+        );
     }
 
     #[test]
@@ -246,6 +264,9 @@ mod tests {
         let status_off = 8 + 4 + 1 + 8 + 8 + 4;
         let mut bytes = sample().to_bytes();
         bytes[status_off] = 99;
-        assert_eq!(CoreSnapshot::from_bytes(&bytes), Err(SnapshotDecodeError::BadTag));
+        assert_eq!(
+            CoreSnapshot::from_bytes(&bytes),
+            Err(SnapshotDecodeError::BadTag)
+        );
     }
 }
