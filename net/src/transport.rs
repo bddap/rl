@@ -131,8 +131,8 @@ pub enum PeerWire {
 /// rather than silently corrupting them — the offsets can't drift from
 /// [`crate::sim::Input::WIRE_LEN`] because they're computed from it.
 const IN_LEN: usize = crate::sim::Input::WIRE_LEN;
-const OFF_INPUT: usize = 8; // after apply_tick(8)
-/// Wire size of an encoded [`TickMsg`]: apply_tick(8) + input.
+const OFF_INPUT: usize = 8; // after issue_tick(8)
+/// Wire size of an encoded [`TickMsg`]: issue_tick(8) + input.
 const TICKMSG_LEN: usize = OFF_INPUT + IN_LEN;
 
 /// A wire message: owns its [`Frame`] kind byte and its body codec, so adding or changing a frame
@@ -157,10 +157,10 @@ impl Codec for TickMsg {
     const KIND: Frame = Frame::Tick;
     type Bytes = [u8; TICKMSG_LEN];
 
-    /// Fixed-width little-endian: apply_tick(8) | input.
+    /// Fixed-width little-endian: issue_tick(8) | input.
     fn encode(&self) -> [u8; TICKMSG_LEN] {
         let mut b = [0u8; TICKMSG_LEN];
-        b[0..OFF_INPUT].copy_from_slice(&self.apply_tick.to_le_bytes());
+        b[0..OFF_INPUT].copy_from_slice(&self.issue_tick.to_le_bytes());
         b[OFF_INPUT..].copy_from_slice(&self.input.to_bytes());
         b
     }
@@ -170,7 +170,7 @@ impl Codec for TickMsg {
             anyhow::anyhow!("tick frame body is {} B, want {TICKMSG_LEN}", body.len())
         })?;
         Ok(TickMsg {
-            apply_tick: u64::from_le_bytes(b[0..OFF_INPUT].try_into().unwrap()),
+            issue_tick: u64::from_le_bytes(b[0..OFF_INPUT].try_into().unwrap()),
             input: crate::sim::Input::from_bytes(b[OFF_INPUT..].try_into().unwrap()),
         })
     }
@@ -896,7 +896,7 @@ mod tests {
     #[test]
     fn tick_body_wire_roundtrips() {
         let m = TickMsg {
-            apply_tick: 1234,
+            issue_tick: 1234,
             input: Input::from_axes(0.5, -0.25),
         };
         assert_eq!(TickMsg::decode(TickMsg::encode(&m).as_ref()).unwrap(), m);

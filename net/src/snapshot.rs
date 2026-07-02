@@ -61,6 +61,17 @@ pub struct CoreSnapshot {
     /// [`Sim::state_hash`](crate::sim::Sim::state_hash) (config-level, can't differ between
     /// in-sync peers), so the round-trip test asserts it separately.
     pub roster: Vec<PlayerId>,
+    /// Per player, the first [`TickMsg::issue_tick`](crate::lockstep::TickMsg::issue_tick) NOT
+    /// yet consumed into this state — the input watermark a remote client prunes + replays its
+    /// own prediction window against
+    /// ([`Lockstep::reconcile_local_prediction`](crate::lockstep::Lockstep::reconcile_local_prediction)).
+    /// The host steps at its own pace and consumes a remote's inputs as they arrive
+    /// ([`crate::server`]), so consumption trails issuance by the transit lag — this map is
+    /// what keeps the client's replay exact. SERVER-owned coordination metadata, not sim state:
+    /// [`Sim::core_snapshot`](crate::sim::Sim::core_snapshot) leaves it empty, the server
+    /// stamps it, and the client's `Lockstep` stashes + re-stamps it, so it is outside
+    /// `state_hash` (like `roster`).
+    pub input_next: BTreeMap<PlayerId, u64>,
 }
 
 /// Why decoding a [`CoreSnapshot`] from bytes failed. A snapshot is host-authored and a
@@ -115,6 +126,12 @@ impl CoreSnapshot {
         for id in &self.roster {
             out.push(id.0);
         }
+
+        out.extend_from_slice(&(self.input_next.len() as u32).to_le_bytes());
+        for (id, next) in &self.input_next {
+            out.push(id.0);
+            out.extend_from_slice(&next.to_le_bytes());
+        }
         out
     }
 
@@ -153,6 +170,13 @@ impl CoreSnapshot {
             roster.push(PlayerId(r.byte()?));
         }
 
+        let n_watermarks = u32::from_le_bytes(r.take::<4>()?) as usize;
+        let mut input_next = BTreeMap::new();
+        for _ in 0..n_watermarks {
+            let id = PlayerId(r.byte()?);
+            input_next.insert(id, u64::from_le_bytes(r.take()?));
+        }
+
         if !r.is_empty() {
             return Err(SnapshotDecodeError::TrailingBytes);
         }
@@ -162,6 +186,7 @@ impl CoreSnapshot {
             crab,
             outcome,
             roster,
+            input_next,
         })
     }
 }
@@ -223,7 +248,11 @@ mod tests {
     fn sample() -> CoreSnapshot {
         let mut sim = Sim::new(9, &[PlayerId(0), PlayerId(1)]);
         sim.set_external_crab_pose(Pos { x: 1234, z: -5678 }, 42, 0);
-        sim.core_snapshot()
+        let mut snap = sim.core_snapshot();
+        // Server-stamped watermarks (`Sim::core_snapshot` leaves them empty) — nonempty here so
+        // the roundtrip exercises the map encoding.
+        snap.input_next = BTreeMap::from([(PlayerId(0), 7), (PlayerId(1), 0)]);
+        snap
     }
 
     #[test]

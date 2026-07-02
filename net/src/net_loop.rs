@@ -24,7 +24,7 @@ use iroh::EndpointId;
 use crate::articulation::CrabArticulation;
 use crate::formation::{Formation, LobbyControl, early_peer_msgs, form_match};
 use crate::lockstep::{Lockstep, PeerMsg, TickMsg};
-use crate::server::{self, Admission, JoinRequest, Server, may_admit_joiner};
+use crate::server::{Admission, JoinRequest, Server, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
 use crate::telemetry::{TelemetryEvent, TelemetrySender};
@@ -54,7 +54,7 @@ pub struct NetDriver {
     server_eid: EndpointId,
     /// Inputs that arrived during formation (a peer that finished the barrier first may already be
     /// sending), mapped to their author's [`PlayerId`]. Drained once by the host into its server at
-    /// round start (a client discards them — only the server holds the ledger).
+    /// round start (a client discards them — only the server holds the input streams).
     early: Vec<PeerMsg>,
     /// Live endpoint→PlayerId map (us + peers), seeded by formation (sorted agreed set), grown by
     /// admission ([`NetDriver::admit_endpoint`]) and SHRUNK by departure ([`depart_gone_peers`]).
@@ -170,15 +170,15 @@ impl NetDriver {
     /// (Host) Drain every client INPUT received so far, tagged with the sender's [`PlayerId`].
     /// Non-blocking. Messages from an endpoint not in the frozen set, and any stray non-input frame
     /// (a barrier beat from a peer still winding down formation), are dropped — the server only
-    /// ledgers rostered clients' inputs.
+    /// streams rostered clients' inputs.
     pub fn drain_client_inputs(&mut self) -> (Vec<PeerMsg>, Vec<(EndpointId, JoinRequest)>) {
         let mut inputs = Vec::new();
         let mut joins = Vec::new();
         while let Some(from) = self.session.try_recv() {
             match from.msg {
-                // A rostered client's input → ledger it; a not-yet-rostered endpoint's stray input
-                // is dropped (the server's `record` would drop it anyway — it isn't rostered at that
-                // tick yet), so a joiner's pre-admit frame never blocks the round.
+                // A rostered client's input → file it; a not-yet-rostered endpoint's stray input
+                // is dropped (the server's `record_remote` would drop it anyway — it isn't
+                // rostered yet), so a joiner's pre-admit frame never blocks the round.
                 PeerWire::Tick(msg) => {
                     if let Some(&pid) = self.id_map.get(&from.from) {
                         inputs.push(PeerMsg { pid, msg });
@@ -326,21 +326,28 @@ pub enum Coordinator {
 }
 
 impl Coordinator {
-    /// Build the coordinator for a freshly-formed round. `peers` is the sim's participant set (solo
-    /// ⇒ just `me`); `sim` is the tick-0 authoritative world the server steps (a clone of the
-    /// client's freshly-built sim, so the two start byte-identical). The carrier stays
-    /// `Option<NetDriver>` so the arming + determinism-pin decisions upstream (which key off
-    /// `net.is_some()`) are untouched: `None` ⇒ a solo server; a host driver ⇒ a server over the
-    /// roster (seeded with any early inputs); a client driver ⇒ a remote client (`sim` unused —
-    /// it adopts the host's snapshots).
-    pub fn for_round(net: Option<NetDriver>, peers: &[PlayerId], sim: crate::sim::Sim) -> Self {
+    /// Build the coordinator for a freshly-formed round. `me` is the LOCAL player (the server it
+    /// builds stores it as the pacing host — see [`Server::new`]); `peers` is the sim's
+    /// participant set (solo ⇒ just `me`); `sim` is the tick-0 authoritative world the server
+    /// steps (a clone of the client's freshly-built sim, so the two start byte-identical). The
+    /// carrier stays `Option<NetDriver>` so the arming + determinism-pin decisions upstream
+    /// (which key off `net.is_some()`) are untouched: `None` ⇒ a solo server; a host driver ⇒ a
+    /// server over the roster (seeded with any early inputs); a client driver ⇒ a remote client
+    /// (`sim` unused — it adopts the host's snapshots).
+    pub fn for_round(
+        net: Option<NetDriver>,
+        peers: &[PlayerId],
+        me: PlayerId,
+        sim: crate::sim::Sim,
+    ) -> Self {
         match net {
             None => Coordinator::Server {
-                server: Box::new(Server::new(peers, sim)),
+                server: Box::new(Server::new(me, peers, sim)),
                 net: None,
             },
             Some(mut d) if d.is_host() => {
-                let mut srv = Server::new(&d.roster(), sim);
+                debug_assert_eq!(me, d.me, "the host driver's id is the local player");
+                let mut srv = Server::new(me, &d.roster(), sim);
                 srv.seed_early(&d.take_early());
                 Coordinator::Server {
                     server: Box::new(srv),
@@ -357,15 +364,15 @@ impl Coordinator {
         }
     }
 
-    /// Submit our input for this tick. On the solo/host arm this returns the OTHER players' inputs to
-    /// record and steps the authoritative server behind the scenes; on the remote-client arm it ships
-    /// our input UP and returns the host's STATE drained down (snapshots + articulation) for the
-    /// driver to adopt — no peer inputs, no re-sim.
+    /// Submit our input for this tick. On the solo/host arm this files the drained remote
+    /// inputs and assembles the tick on the authoritative server behind the scenes; on the
+    /// remote-client arm it ships our input UP and returns the host's STATE drained down
+    /// (snapshots + articulation) for the driver to adopt — no peer inputs, no re-sim.
     ///
     /// `Err(ServerDown)` (remote-client arm only) means the round is OVER for this client — the
     /// server link died or the host refused us (rl#203). A `Result`, so no caller can adopt
     /// frames while silently dropping the verdict.
-    pub fn exchange(&mut self, me: PlayerId, msg: TickMsg) -> Result<Exchanged, ServerDown> {
+    pub fn exchange(&mut self, msg: TickMsg) -> Result<Exchanged, ServerDown> {
         match self {
             Coordinator::Server { server, net } => {
                 // Drain remote clients' inputs AND any mid-game join requests (none for solo).
@@ -379,24 +386,23 @@ impl Coordinator {
                 if let Some(net) = net.as_mut() {
                     admit_joiners(server, net, joins);
                 }
-                let mut sets = server::host_assemble(server, me, msg, remote);
-                // Departures LAST, after this tick's drained inputs are recorded — a leaver's
-                // inputs for ticks before the departure boundary are still honored; anything
-                // at/after it is scrubbed by `depart`. Without this the ledger waits forever on
-                // the departed player and the match hard-freezes for everyone who stayed.
+                // File the drained remote inputs into their per-player streams, then handle
+                // departures: a gone peer's stream is dropped and the roster shrinks — pure
+                // bookkeeping, since host pacing means nothing ever WAITED on it.
+                for pm in remote {
+                    server.record_remote(pm.pid, pm.msg);
+                }
                 if let Some(net) = net.as_mut() {
                     let connected = net.connected_peers_now();
-                    let (dsets, gone) =
-                        depart_gone_peers(server, &mut net.id_map, net.me, &connected);
-                    sets.extend(dsets);
+                    let gone = depart_gone_peers(server, &mut net.id_map, net.me, &connected);
                     net.departed.extend(gone);
                 }
-                // Queue the assembled sets for THIS server's authoritative step: the windowed
-                // driver pumps each tick's crab physics then calls `step_next`.
-                server.enqueue_for_step(&sets);
-                // The host broadcasts the authoritative snapshot + articulation from the driver, the
-                // moment it steps each tick (see `Coordinator::broadcast_step`), so a client renders
-                // state rather than re-stepping inputs. `sets` feed THIS server's own step queue.
+                // Assemble THIS tick from our own input + each remote stream's next queued input
+                // (or a starved hold) — the host paces the match; a remote can delay nothing
+                // (rl#193/#194/#195). The windowed driver pumps the tick's crab physics, then
+                // steps it (`step_next`) and broadcasts the snapshot (`broadcast_step`), so a
+                // client renders state rather than re-stepping inputs.
+                server.advance(msg);
                 Ok(Exchanged::default())
             }
             Coordinator::Client { net } => {
@@ -499,23 +505,21 @@ impl Coordinator {
 /// exit, a dead-connection write failure, or a wedged-peer eviction; never merely "not yet
 /// connected". Each departed player is removed from `id_map` (which is what lets the same person
 /// REJOIN: a fresh process dials as a new endpoint through the normal [`JoinRequest`] admission)
-/// and [`Server::depart`]ed; the released [`TickSet`]s are returned for
-/// [`Server::enqueue_for_step`] beside the tick's assembled sets, and the departed endpoints are
-/// returned for the caller's departed-endpoint bookkeeping ([`NetDriver::drain_client_inputs`]'s
-/// refuse-once). Level-triggered off the link table (no event to lose): a departure missed this
-/// tick is caught the next.
+/// and [`Server::depart`]ed; the departed endpoints are returned for the caller's
+/// departed-endpoint bookkeeping ([`NetDriver::drain_client_inputs`]'s refuse-once).
+/// Level-triggered off the link table (no event to lose): a departure missed this tick is caught
+/// the next. The match itself never noticed: host pacing means no tick ever waited on the leaver.
 pub fn depart_gone_peers(
     server: &mut Server,
     id_map: &mut BTreeMap<EndpointId, PlayerId>,
     me: PlayerId,
     connected: &[EndpointId],
-) -> (Vec<server::TickSet>, Vec<EndpointId>) {
+) -> Vec<EndpointId> {
     let gone: Vec<(EndpointId, PlayerId)> = id_map
         .iter()
         .filter(|(eid, pid)| **pid != me && !connected.contains(eid))
         .map(|(eid, pid)| (*eid, *pid))
         .collect();
-    let mut sets = Vec::new();
     let mut eids = Vec::new();
     for (eid, pid) in gone {
         id_map.remove(&eid);
@@ -523,10 +527,10 @@ pub fn depart_gone_peers(
             "player {pid:?} ({}) departed — continuing without them",
             eid.fmt_short()
         );
-        sets.extend(server.depart(pid));
+        server.depart(pid);
         eids.push(eid);
     }
-    (sets, eids)
+    eids
 }
 
 /// Gate + admit each mid-game `joins` request on the host. For each joiner: verify the host is
@@ -775,7 +779,7 @@ fn connect_and_form_inner(
     );
     // Every peer spawns the byte-identical foot-only round. Early inputs ride the driver to
     // seed the host's server (see [`Coordinator::for_round`]) — never replayed into the client
-    // sim, which would bypass the server's ledger.
+    // sim, which would bypass the server's input streams.
     let ls = Lockstep::new(seed, &all_ids, frozen.me);
     let server_eid = server_endpoint(&frozen.id_map);
     let early = early_peer_msgs(&frozen);
@@ -995,7 +999,7 @@ mod tests {
         use crate::sim::Input;
         let me = PlayerId(0);
         let mut ls = Lockstep::new(0x5A11, &[me], me);
-        let mut coord = Coordinator::for_round(None, ls.peers(), ls.sim().clone());
+        let mut coord = Coordinator::for_round(None, ls.peers(), me, ls.sim().clone());
         assert!(
             matches!(coord, Coordinator::Server { net: None, .. }),
             "no driver ⇒ a solo internal-server coordinator"
@@ -1006,7 +1010,7 @@ mod tests {
             // The input goes UP to the internal server; with a roster of one there are no OTHER
             // players' inputs and no joins.
             let exch = coord
-                .exchange(me, msg)
+                .exchange(msg)
                 .expect("the solo/host arm can never lose its in-process server (rl#203)");
             assert!(
                 exch.snapshots.is_empty(),

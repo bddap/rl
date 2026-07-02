@@ -44,11 +44,12 @@ pub mod buttons {
     /// Context action: at the extraction point, confirm the pickup. Bit 0.
     pub const ACTION: u8 = 1 << 0;
     /// Restart the round. Bit 1. Routed through the input stream (not a client-local
-    /// reset) so every peer restarts on the SAME tick and stays in lockstep — a
-    /// local-only reset would desync. Edge-triggered (see [`Sim::step`]). A restart is a
-    /// STATE reset at the current tick, never a tick rewind: [`Sim::tick`] stays monotone
-    /// so the server's ledger-tick space (input ledger, emit cursor, roster schedule)
-    /// remains aligned with the sim across a restart (rl#204).
+    /// reset) so the ONE authoritative server applies it and every client adopts the
+    /// reset via the snapshot — a local-only reset would desync. Edge-triggered (see
+    /// [`Sim::step`]). A restart is a STATE reset at the current tick, never a tick
+    /// rewind: [`Sim::tick`] stays monotone so the server's tick space (the assemble
+    /// cursor, the roster schedule) remains aligned with the sim across a restart
+    /// (rl#204).
     pub const RESTART: u8 = 1 << 1;
 }
 
@@ -114,6 +115,19 @@ impl Input {
     /// Whether a button bit (see [`buttons`]) is held this tick.
     pub fn pressed(self, bit: u8) -> bool {
         self.buttons & bit != 0
+    }
+
+    /// The input the server substitutes for a tick where this player's stream is STARVED
+    /// (transit lag): keep the held-state move axes, zero the rest — `look_yaw` is a per-tick
+    /// DELTA (re-applying it would keep the avatar turning) and a re-fired button tap would
+    /// double a grab/restart. See [`crate::server`]'s hold semantics.
+    pub fn hold(self) -> Self {
+        Self {
+            move_strafe: self.move_strafe,
+            move_forward: self.move_forward,
+            look_yaw: 0,
+            buttons: 0,
+        }
     }
 
     /// Encode for the wire: little-endian, fixed width. Decoding the result yields
@@ -488,8 +502,8 @@ impl Sim {
     ///
     /// Deliberately does NOT rewind [`tick`](Sim::tick): the restart is a state-reset AT the
     /// current tick, recorded in [`round_start`](Sim::round_start). The tick is the shared
-    /// currency between the sim and the server's ledger space (`next_emit`, the pending-step
-    /// queue, the roster schedule), all of which are monotone — a tick rewind desynced them
+    /// currency between the sim and the server's tick space (the assemble cursor, the pending
+    /// tick, the roster schedule), all of which are monotone — a tick rewind desynced them
     /// and wedged the match permanently on `next_tick_ready` (rl#204), and would make the
     /// roster mirrors in [`crate::server::Server::step_next`] consult the ancient tick-0
     /// roster.
@@ -560,7 +574,7 @@ impl Sim {
     /// Remove a DEPARTED player from the live round — the inverse of
     /// [`spawn_joining_player`](Sim::spawn_joining_player), driven the same way: the authoritative
     /// server derives it from the roster schedule ([`crate::server::Server::depart`] shrank the
-    /// roster after the peer's link died), so the sim, the ledger, and the wire roster stay one
+    /// roster after the peer's link died), so the sim, the server, and the wire roster stay one
     /// source. Dropped from [`config`](Sim::config) too, so a later RESTART rebuilds without the
     /// departed player. Only the host calls this; clients adopt the resulting snapshot (which no
     /// longer carries the player). Idempotent: an absent pid is a no-op.
@@ -976,6 +990,10 @@ impl Sim {
             crab: *crab,
             outcome: *outcome,
             roster: config.players.clone(),
+            // Input watermarks are SERVER coordination metadata, not sim state — the sim holds
+            // none. [`crate::server::Server::step_next`] stamps them; the client's `Lockstep`
+            // stashes + re-stamps them for its mirror re-emit.
+            input_next: std::collections::BTreeMap::new(),
         }
     }
 
@@ -993,6 +1011,9 @@ impl Sim {
             crab,
             outcome,
             roster,
+            // Coordination metadata, not sim state — the client's `Lockstep` stashes it
+            // (prediction-window prune + mirror re-emit) before handing the snapshot here.
+            input_next: _,
         } = snapshot;
         self.tick = tick;
         self.players = players;
@@ -1816,7 +1837,7 @@ mod tests {
         // Press RESTART and the WORLD rebuilds to its spawn state — players Alive at
         // spawn, crab at its spawn, outcome Ongoing, matching a fresh round — while the
         // TICK stays monotone: a restart is a state-reset at the current tick, never a
-        // tick rewind, so the server's ledger-tick space stays aligned (rl#204). (The
+        // tick rewind, so the server's tick space stays aligned (rl#204). (The
         // hash also folds the restart edge-latch, which is legitimately set here because
         // R is held and clear in a never-restarted sim — so we compare the observable
         // round state, not the raw hash. The full-hash agreement BETWEEN peers who both

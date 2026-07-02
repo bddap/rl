@@ -47,6 +47,14 @@ the integer `Sim` **and** the rapier world (the one Sally) and steps them. Each 
 
 1. Server collects each client's `Input` (clients send inputs up; the server's own local
    client included). No INPUT_DELAY barrier — the server applies what it has and steps.
+   Concretely (rl#193/#194/#195, `server.rs`): the HOST's own input paces the match — one
+   assembled tick per issued local input; each remote player's inputs stream into a
+   per-player queue consumed in issue order, one per tick, with a starved tick HOLDING the
+   last consumed move axes (the look delta + button taps never re-fire; a capped backlog
+   coalesces, folding taps forward, so a tap is never lost). A remote can delay nothing —
+   the first shipped cut gated every tick on every rostered input, which put the host's
+   whole world at remote latency (the MP wiggle/stutter/latency playtest reports) and made
+   a silent remote a match freeze; both failure classes are now unrepresentable.
 2. Server steps the NN policy + rapier, derives the crab pose, injects it via
    `set_external_crab_pose`, then `Sim::step(inputs)` — the authoritative advance.
 3. Server emits a **snapshot** (built at exactly one site, post-injection — see types).
@@ -89,11 +97,14 @@ wholesale.
   is the deferred knob — gated on the owner's eye (the visual oracle, [[owner-visual-spatial-oracle]]),
   not baked in speculatively.
 - **The local foot player only**: client-side prediction + reconciliation. Apply own input
-  immediately (responsive WASD); keep a small ring of recent `(tick, input)`; on each
-  snapshot re-seat to the authoritative position and replay inputs newer than the snapshot's
-  tick. The foot player is a trivial integer facing-relative mover (`sim.rs:616`), so this is
-  a few lines and the correction is sub-tick on LAN; it's the one place WAN latency would
-  show, and keeping it makes the local/remote player path uniform.
+  immediately (responsive WASD); keep a small ring of recent `(issue, input)`; on each
+  snapshot re-seat to the authoritative position and replay the inputs the snapshot's
+  per-player `input_next` watermark says the server has NOT yet consumed (the server
+  consumes a remote's inputs as they arrive, so the watermark — not the snapshot tick — is
+  the one true consumption cursor). The foot player is a trivial integer facing-relative
+  mover (`sim.rs`), so this is a few lines and the correction is sub-tick on LAN; it's the
+  one place WAN latency would show, and keeping it makes the local/remote player path
+  uniform.
 
 **Vehicle / plane mode is an input mode, not an SP fork** ([[rl-vehicles-plane-mode-required]]
 — a hard req). Today the pilot toggle is gated on `is_solo()` (`render/driver.rs:444`) — a

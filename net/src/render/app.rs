@@ -202,7 +202,7 @@ pub fn build_windowed_app(
             } = armed.into_ready();
             // Capture the crab's spawn + seed the pose BEFORE `ls` moves into core.
             let spawn = seed_external_crab_solo(&mut ls);
-            let coord = super::driver::coordinator(net, ls.peers(), ls.sim().clone());
+            let coord = super::driver::coordinator(net, ls.peers(), ls.me(), ls.sim().clone());
             insert_core(&mut app, ls, coord);
             // Known-armed at build: add the stack AND arm the gate now (one path,
             // [`install_armed_nn_crab`]), so the crab spawns frame one at the player's actual
