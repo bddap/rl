@@ -1,9 +1,8 @@
-//! Best-by-reach checkpoint keeping (rl#157 / job 556): mirror the full checkpoint
+//! Best-by-reach checkpoint keeping (rl#157): mirror the full checkpoint
 //! set into `<ckpt>/best/` whenever the live policy demonstrates a NEW high-water reach, so a
-//! later training COLLAPSE can neither destroy the best policy nor ship it to the demo.
-//! The release/demo pipeline mirrors `<ckpt>/best/`, not the latest `<ckpt>/`, so the
-//! high-water-mark policy is what reaches the TV — a collapse stays confined to `<ckpt>/`
-//! where the trainer resumes from it, while the demo holds the good gait.
+//! later training COLLAPSE can never destroy the best policy. Note the demo pipeline streams
+//! the LATEST `<ckpt>/` (owner call: show the in-progress journey, warts and all) — `best/`
+//! is the durable high-water archive a wrecked run recovers from, not the demo's source.
 //!
 //! ONE source of truth, in the trainer: the learner already pools every rollout thread's
 //! per-episode reach, so the competence signal lives here rather than in an external

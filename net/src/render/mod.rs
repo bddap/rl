@@ -1,16 +1,16 @@
-//! First-person Bevy client for the deterministic gray-box (rl#38 render sub).
+//! First-person Bevy client for the deterministic gray-box.
 //!
 //! This is the windowed `play` mode of the `game` binary: it makes the
 //! giant-crab-rescue sim VISIBLE and PLAYABLE on top of the existing lockstep +
-//! transport netcode. It boots to a client-side Host / Join menu (rl#58,
-//! [`AppPhase`]/[`menu`]) and builds the round only once the player chooses — the
+//! transport netcode. It boots to a client-side Host / Join menu
+//! ([`AppPhase`]/[`menu`]) and builds the round only once the player chooses — the
 //! menu is gated to its own pre-round phases and never touches the sim. The split it
 //! honors is the one documented at the top of
 //! [`crate::sim`]: **the sim is the authority, this client is a read-only
 //! consumer that produces [`Input`]**. Rendering, the camera, mouse/gamepad input,
 //! and tween interpolation are ALL client-side and add ZERO nondeterminism — the
 //! only thing that ever crosses back into sim state is the per-tick [`Input`] each
-//! peer ships to the server (rl#151); none of the code here touches the sim except
+//! peer ships to the server; none of the code here touches the sim except
 //! through [`Lockstep::submit_local_input`].
 //!
 //! How the three layers wire together:
@@ -88,9 +88,10 @@ const FLIGHT_MOUSE_SENS: f32 = 0.01;
 /// frame dt so it's frame-rate independent.
 const PAD_LOOK_SPEED: f32 = 2.5;
 
-/// How long Select/Back must be HELD to quit (seconds). A hold, not a tap, so a stray
-/// press can't end the round for everyone on the couch — the kid-safe equivalent of
-/// Esc. Client-local (sends AppExit, never touches the sim), so it can't desync a peer.
+/// How long the pad Quit button (North/Y) must be HELD to quit (seconds). A hold, not a
+/// tap, so a stray press can't end the round for everyone on the couch — the kid-safe
+/// equivalent of Esc. Client-local (sends AppExit, never touches the sim), so it can't
+/// desync a peer.
 const PAD_QUIT_HOLD_SECS: f32 = 1.0;
 
 /// Pitch clamp (radians) so the FP camera can't flip over the poles.

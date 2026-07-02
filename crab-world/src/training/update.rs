@@ -87,14 +87,10 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
         let ret_norm_pre = ret_norm.clone();
 
         // GAE strictly per env: each buffer is one env's contiguous trajectory segment.
-        // The non-terminal tail's bootstrap V(s_{last+1}) travels WITH the buffer
-        // (`RolloutBuffer::bootstrap`, the successor value the rollout already computed on
-        // the CPU backend) rather than being recomputed here from `last_t.obs` — that
-        // recompute read the wrong state (the one-tick `Pending` phasing makes `last_t.obs`
-        // the tail's OWN state, not its successor, rl#174) on the wrong backend (the body
-        // values are CPU, rl#173 tail). Terminal/Truncated tails self-bootstrap inside
-        // `compute_gae`. Advantages/returns concatenate in the same env-major order as the
-        // transitions below.
+        // The non-terminal tail's bootstrap V(s_{last+1}) travels WITH the buffer — see
+        // [`RolloutBuffer::bootstrap`] for why it must not be recomputed here (rl#173/rl#174).
+        // Terminal/Truncated tails self-bootstrap inside `compute_gae`. Advantages/returns
+        // concatenate in the same env-major order as the transitions below.
         let mut advantages = Vec::with_capacity(n);
         let mut returns = Vec::with_capacity(n);
         for buf in rollouts.iter() {

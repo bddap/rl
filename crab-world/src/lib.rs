@@ -52,8 +52,8 @@ pub mod physics;
 pub mod policy;
 pub mod training;
 /// The player's single-player rapier flight vehicle (plane / Outer-Wilds ship), living in the crab's
-/// rapier world so it collides with Sally. Replaces the old integer flight integrator. Headless
-/// (pure physics), so it stays out of the render gate below.
+/// rapier world so it collides with Sally. Headless (pure physics), so it stays out of the
+/// render gate below.
 pub mod vehicle;
 
 // Rendering-only modules — gated out of the headless trainer build. They pull bevy's

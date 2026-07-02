@@ -6,7 +6,7 @@
 //! system uses to play either role — the host drains clients' inputs into its [`Server`]
 //! and broadcasts the authoritative [`CoreSnapshot`] it steps, a client ships its input up
 //! and adopts the snapshots down. [`Coordinator`] wraps that into the single per-tick [`Coordinator::exchange`]
-//! every driver calls, so solo / host / client are one path (rl#151). No determinism lives
+//! every driver calls, so solo / host / client are one path. No determinism lives
 //! here; it is pure I/O plumbing (the same split the netcode draws between [`transport`] and
 //! [`crate::lockstep`]/[`crate::server`]).
 //!
@@ -31,7 +31,7 @@ use crate::telemetry::{TelemetryEvent, TelemetrySender};
 use crate::transport::{self, PeerWire, Session};
 
 /// Owns the tokio runtime + iroh session and bridges them to a synchronous caller — the
-/// TRANSPORT half of the server-coordinated model (rl#151). Held by the game loop as a non-send
+/// TRANSPORT half of the server-coordinated model. Held by the game loop as a non-send
 /// resource (the runtime/session aren't `Sync`).
 ///
 /// Post-formation the peer with the lowest endpoint id ([`PlayerId(0)`]) runs the match
@@ -40,7 +40,7 @@ use crate::transport::{self, PeerWire, Session};
 /// authoritative STATE ([`NetDriver::drain_client_inputs`]/[`NetDriver::broadcast_snapshot`] +
 /// [`NetDriver::broadcast_articulation`]); on a client it ships its input UP to the server and
 /// drains the state DOWN ([`NetDriver::send_to_server`]/[`NetDriver::drain_server_down`]) to adopt,
-/// never re-stepping (rl#151 increment 2 windowed). The role is read off the id alone — no negotiation — so both
+/// never re-stepping. The role is read off the id alone — no negotiation — so both
 /// ends agree by construction. The [`Server`] itself lives in the [`Coordinator`], not here, so
 /// the host's server and the solo server are the one type down one path.
 pub struct NetDriver {
@@ -57,10 +57,10 @@ pub struct NetDriver {
     /// round start (a client discards them — only the server holds the ledger).
     early: Vec<PeerMsg>,
     /// Live endpoint→PlayerId map (us + peers), seeded by formation (sorted agreed set), grown by
-    /// admission ([`NetDriver::admit_endpoint`]) and SHRUNK by departure ([`depart_gone_peers`],
-    /// rl#198). Used to tag inbound messages with their author's id.
+    /// admission ([`NetDriver::admit_endpoint`]) and SHRUNK by departure ([`depart_gone_peers`]).
+    /// Used to tag inbound messages with their author's id.
     id_map: BTreeMap<EndpointId, PlayerId>,
-    /// Endpoints DEPARTED from the live match (rl#198) — kept so a departed-but-alive peer that
+    /// Endpoints DEPARTED from the live match — kept so a departed-but-alive peer that
     /// re-links (the mDNS dialer runs all match) and keeps sending inputs is REFUSED once, loudly,
     /// instead of silently spectating with dead controls ([[silent-fallback-antipattern]]). An
     /// entry is consumed by the refusal; couch-scale, so never more than a handful.
@@ -69,16 +69,11 @@ pub struct NetDriver {
     /// collector). Best-effort and read-only — see [`crate::telemetry`]; the
     /// windowed driver pushes Tick/Input/RoundDecided/Fault through it.
     telemetry: Option<TelemetrySender>,
-    /// The formation barrier's shared-asset verdict (rl#82 weights + rl#100 crab asset, GCR —
-    /// [`crate::membership::Membership::sync_verdict`]); read by the arm sites via
-    /// [`crate::may_arm_external_crab`]. Each half is `false` without a supplied
-    /// checkpoint/resolvable model.
+    /// The formation barrier's shared-asset verdict — see [`NetDriver::sync_verdict`].
     sync: crate::SyncVerdict,
-    /// OUR policy-weights digest and crab-asset digest (the values, not just the synced bools).
-    /// The host gates a mid-game joiner on these — [`crate::server::may_admit_joiner`] requires a
-    /// non-zero `weights_digest` of the HOST itself (the self-gate; the joiner's brain is never
-    /// executed, rl#206) and the joiner's asset digest to equal ours, else a LOUD refusal (Stage 3,
-    /// rl#151). A client never reads them (only the host admits).
+    /// OUR policy-weights digest and crab-asset digest (the values, not just the synced bools) —
+    /// the host's side of the mid-game admission gate ([`admit_joiners`]). A client never reads
+    /// them (only the host admits).
     weights_digest: u64,
     asset_digest: u64,
 }
@@ -91,36 +86,34 @@ pub struct NetDriver {
 /// channel.
 #[derive(Default)]
 pub struct Exchanged {
-    /// Host-authoritative game states this remote client drained (rl#151 increment 2 windowed),
-    /// in ARRIVAL order: the driver adopts every one via [`Lockstep::adopt_snapshots`] (the one
-    /// shared adopt policy — see its doc) instead of stepping its own sim. Empty on the solo/host
-    /// arm (its client reads the server it runs).
+    /// Host-authoritative game states this remote client drained, in ARRIVAL order: the driver
+    /// adopts every one via [`Lockstep::adopt_snapshots`] (the one shared adopt policy — see its
+    /// doc). Empty on the solo/host arm (its client reads the server it runs).
     pub snapshots: Vec<CoreSnapshot>,
-    /// Render-only crab poses this remote client drained, beside the snapshots (rl#151 increment 2
-    /// windowed): the driver stashes the LAST-ARRIVED (= newest on the reliable ordered stream)
-    /// for the render-side apply. Empty off the remote-client arm.
+    /// Render-only crab poses drained beside the snapshots: the driver stashes the LAST-ARRIVED
+    /// (= newest on the reliable ordered stream) for the render-side apply. Empty off the
+    /// remote-client arm.
     pub articulations: Vec<CrabArticulation>,
 }
 
 impl NetDriver {
-    /// The live-telemetry handle, if this client is streaming to a collector. The
-    /// render loop reads it to push events (Tick/Input/RoundDecided/Fault). `None` when
-    /// launched without `--telemetry`.
+    /// The live-telemetry handle, if this client is streaming to a collector (`None` when
+    /// launched without `--telemetry`).
     pub fn telemetry(&self) -> Option<&TelemetrySender> {
         self.telemetry.as_ref()
     }
 
-    /// The formation barrier's shared-asset verdict (rl#82 weights + rl#100 crab asset, GCR —
+    /// The formation barrier's shared-asset verdict (weights + crab asset —
     /// [`crate::membership::Membership::sync_verdict`]). The arm sites gate the float NN crab
     /// on it via [`crate::may_arm_external_crab`]; an unsynced half means the round can't arm
-    /// Sally and is refused (rl#114, no integer fallback). A half is always `false` without a
+    /// Sally and is refused (no integer fallback). A half is always `false` without a
     /// supplied checkpoint / resolvable model (that digest exchanged as `0`).
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
         self.sync
     }
 
     /// Whether this peer runs the match server (the host) — true iff it holds [`PlayerId(0)`], the
-    /// lowest endpoint id. The server-vs-client role with no negotiation.
+    /// lowest endpoint id.
     pub fn is_host(&self) -> bool {
         self.me == PlayerId(0)
     }
@@ -153,7 +146,7 @@ impl NetDriver {
             match from.msg {
                 // A rostered client's input → ledger it; a not-yet-rostered endpoint's stray input
                 // is dropped (the server's `record` would drop it anyway — it isn't rostered at that
-                // tick yet), so a joiner's pre-admit frame never blocks the round (333 stays fixed).
+                // tick yet), so a joiner's pre-admit frame never blocks the round.
                 PeerWire::Tick(msg) => {
                     if let Some(&pid) = self.id_map.get(&from.from) {
                         inputs.push(PeerMsg { pid, msg });
@@ -161,7 +154,7 @@ impl NetDriver {
                         // A DEPARTED endpoint re-linked (the mDNS dialer runs all match) and is
                         // still sending inputs — it doesn't know it was dropped. Tell it ONCE,
                         // loudly (its client error-logs a mid-match Refuse), rather than let it
-                        // spectate with dead controls (rl#198). A fresh joiner is untouched: it
+                        // spectate with dead controls. A fresh joiner is untouched: it
                         // was never in `departed`.
                         self.refuse_joiner(
                             from.from,
@@ -169,7 +162,7 @@ impl NetDriver {
                         );
                     }
                 }
-                // A would-be joiner dialing the live match (Stage 3) — surfaced for the coordinator
+                // A would-be joiner dialing the live match — surfaced for the coordinator
                 // to gate + admit (it holds the `Server`; this driver only holds the transport).
                 PeerWire::JoinRequest(req) => joins.push((from.from, req)),
                 // Beats (a peer winding down formation), our own broadcasts echoed, etc. — not the
@@ -180,9 +173,7 @@ impl NetDriver {
         (inputs, joins)
     }
 
-    /// (Host) The host's OWN digests, feeding the mid-game admission gate: the weights digest is
-    /// the host self-gate, the asset digest the equality a joiner must match
-    /// ([`crate::server::may_admit_joiner`]).
+    /// (Host) The host's OWN digests, feeding the mid-game admission gate ([`admit_joiners`]).
     pub fn local_digests(&self) -> (u64, u64) {
         (self.weights_digest, self.asset_digest)
     }
@@ -201,7 +192,7 @@ impl NetDriver {
         self.id_map.contains_key(&eid)
     }
 
-    /// (Host) UNICAST a just-admitted joiner its OWN [`Admission`] (Stage 3) — the welcome it builds
+    /// (Host) UNICAST a just-admitted joiner its OWN [`Admission`] — the welcome it builds
     /// [`Lockstep::join_at`] from. Unicast so a joiner never adopts a concurrent joiner's PlayerId.
     /// Incumbents learn the new roster from the next [`CoreSnapshot`] (it carries the roster), so no
     /// broadcast notice is needed.
@@ -210,7 +201,7 @@ impl NetDriver {
     }
 
     /// (Host) LOUDLY refuse a would-be joiner `eid` with `reason` (a digest mismatch) — a typed
-    /// turn-away, never a silent drop onto a wrong crab. Stage 3.
+    /// turn-away, never a silent drop onto a wrong crab.
     pub fn refuse_joiner(&self, eid: EndpointId, reason: &str) {
         self.rt.block_on(
             self.session
@@ -218,17 +209,16 @@ impl NetDriver {
         );
     }
 
-    /// (Host) Broadcast the host-authoritative [`CoreSnapshot`] DOWN to every client (rl#151
-    /// increment 2 windowed): the windowed host ships the full game STATE its client just adopted,
-    /// so a remote client renders it instead of re-stepping. Non-blocking: enqueued to each link's
-    /// writer task, so a dead peer can never hold this (main-thread) call (rl#198).
+    /// (Host) Broadcast the host-authoritative [`CoreSnapshot`] DOWN to every client — the full
+    /// game STATE, so a remote client renders it instead of re-stepping. Non-blocking: enqueued to
+    /// each link's writer task, so a dead peer can never hold this (main-thread) call.
     pub fn broadcast_snapshot(&self, snapshot: &CoreSnapshot) {
         self.rt.block_on(self.session.broadcast_snapshot(snapshot));
     }
 
-    /// (Host) Broadcast the render-only [`CrabArticulation`] DOWN to every client (rl#151 increment
-    /// 2 windowed), beside the snapshot, so a remote client renders the host's exact crab pose
-    /// without simulating physics. Non-blocking, like [`Self::broadcast_snapshot`].
+    /// (Host) Broadcast the render-only [`CrabArticulation`] DOWN to every client, beside the
+    /// snapshot, so a remote client renders the host's exact crab pose without simulating
+    /// physics. Non-blocking, like [`Self::broadcast_snapshot`].
     pub fn broadcast_articulation(&self, articulation: &CrabArticulation) {
         self.rt
             .block_on(self.session.broadcast_articulation(articulation));
@@ -241,11 +231,11 @@ impl NetDriver {
     }
 
     /// (Client) Drain everything the server sent DOWN this tick: host-authoritative
-    /// [`CoreSnapshot`]s (rl#151 increment 2 windowed — the client ADOPTS them, never re-steps an
-    /// input set) and the render-only [`CrabArticulation`]s beside them. A [`PeerWire::Refuse`]
-    /// aimed at us is logged LOUD (an established client should never get one), never silently
-    /// eaten. Drained ONCE so no frame kind starves another; snapshots are handed over in ARRIVAL
-    /// order for [`Lockstep::adopt_snapshots`] (the one shared adopt policy) to apply.
+    /// [`CoreSnapshot`]s (the client ADOPTS them, never re-steps an input set) and the render-only
+    /// [`CrabArticulation`]s beside them. A [`PeerWire::Refuse`] aimed at us is logged LOUD (an
+    /// established client should never get one), never silently eaten. Drained ONCE so no frame
+    /// kind starves another; snapshots are handed over in ARRIVAL order for
+    /// [`Lockstep::adopt_snapshots`] (the one shared adopt policy) to apply.
     pub fn drain_server_down(&mut self) -> Exchanged {
         let mut down = Exchanged::default();
         while let Some(from) = self.session.try_recv() {
@@ -262,17 +252,17 @@ impl NetDriver {
     }
 }
 
-/// One peer's per-tick input coordination — the server-coordinated replacement for the deleted P2P
-/// mesh (rl#151). Either we run the [`Server`] (solo: a roster of one, no transport; host: the
-/// whole roster + the transport to remote clients) or we are a remote client of a server peer. Solo
-/// and host are the SAME [`Coordinator::Server`] arm — that is the SP=MP-uniformity proof: there is
-/// no separate single-player code path, only the server with one client.
+/// One peer's per-tick input coordination. Either we run the [`Server`] (solo: a roster of one,
+/// no transport; host: the whole roster + the transport to remote clients) or we are a remote
+/// client of a server peer. Solo and host are the SAME [`Coordinator::Server`] arm — that is the
+/// SP=MP-uniformity proof: there is no separate single-player code path, only the server with one
+/// client.
 pub enum Coordinator {
     /// We run the server. `net` is `None` for solo (no remote clients, so no iroh at all — solo
     /// stays network-free) and `Some` for a hosted match (relay to the remote clients).
     Server {
-        // Boxed: the [`Server`] now owns the authoritative [`crate::sim::Sim`] (rl#151 increment 1),
-        // so it dwarfs the `Client` variant's lone `NetDriver` — heap it to keep the enum balanced.
+        // Boxed: the [`Server`] owns the authoritative [`crate::sim::Sim`], so it dwarfs the
+        // `Client` variant's lone `NetDriver` — heap it to keep the enum balanced.
         server: Box<Server>,
         net: Option<NetDriver>,
     },
@@ -286,8 +276,8 @@ impl Coordinator {
     /// client's freshly-built sim, so the two start byte-identical). The carrier stays
     /// `Option<NetDriver>` so the arming + determinism-pin decisions upstream (which key off
     /// `net.is_some()`) are untouched: `None` ⇒ a solo server; a host driver ⇒ a server over the
-    /// roster (seeded with any early inputs); a client driver ⇒ a remote client (steps its own
-    /// lockstep until increment 2, so `sim` is unused there).
+    /// roster (seeded with any early inputs); a client driver ⇒ a remote client (`sim` unused —
+    /// it adopts the host's snapshots).
     pub fn for_round(net: Option<NetDriver>, peers: &[PlayerId], sim: crate::sim::Sim) -> Self {
         match net {
             None => Coordinator::Server {
@@ -302,9 +292,9 @@ impl Coordinator {
                     net: Some(d),
                 }
             }
-            // A remote client ADOPTS the host's per-tick snapshot into its OWN `ls` (rl#151 increment
-            // 2 windowed — no re-sim), so the Coordinator holds no authoritative server and this
-            // tick-0 `sim` goes unused (the client's `GameState.ls` is what the snapshots advance).
+            // A remote client ADOPTS the host's per-tick snapshot into its OWN `ls` (no re-sim),
+            // so the Coordinator holds no authoritative server and this tick-0 `sim` goes unused
+            // (the client's `GameState.ls` is what the snapshots advance).
             Some(d) => {
                 let _ = sim;
                 Coordinator::Client { net: d }
@@ -315,7 +305,7 @@ impl Coordinator {
     /// Submit our input for this tick. On the solo/host arm this returns the OTHER players' inputs to
     /// record and steps the authoritative server behind the scenes; on the remote-client arm it ships
     /// our input UP and returns the host's STATE drained down (snapshots + articulation) for the
-    /// driver to adopt — no peer inputs, no re-sim (rl#151 increment 2 windowed).
+    /// driver to adopt — no peer inputs, no re-sim.
     pub fn exchange(&mut self, me: PlayerId, msg: TickMsg) -> Exchanged {
         match self {
             Coordinator::Server { server, net } => {
@@ -331,11 +321,10 @@ impl Coordinator {
                     admit_joiners(server, net, joins);
                 }
                 let mut sets = server::host_assemble(server, me, msg, remote);
-                // Departures LAST (bddap/rl#198), after this tick's drained inputs are recorded —
-                // a leaver's inputs for ticks before the departure boundary are still honored;
-                // anything at/after it is scrubbed by `depart`. Without this the ledger waits
-                // forever on the departed player and the match hard-freezes for everyone who
-                // stayed.
+                // Departures LAST, after this tick's drained inputs are recorded — a leaver's
+                // inputs for ticks before the departure boundary are still honored; anything
+                // at/after it is scrubbed by `depart`. Without this the ledger waits forever on
+                // the departed player and the match hard-freezes for everyone who stayed.
                 if let Some(net) = net.as_mut() {
                     let connected = net.connected_peers_now();
                     let (dsets, gone) =
@@ -343,8 +332,8 @@ impl Coordinator {
                     sets.extend(dsets);
                     net.departed.extend(gone);
                 }
-                // Queue the assembled sets for THIS server's authoritative step (rl#151 increment 1):
-                // the windowed driver pumps each tick's crab physics then calls `step_next`.
+                // Queue the assembled sets for THIS server's authoritative step: the windowed
+                // driver pumps each tick's crab physics then calls `step_next`.
                 server.enqueue_for_step(&sets);
                 // The host broadcasts the authoritative snapshot + articulation from the driver, the
                 // moment it steps each tick (see `Coordinator::broadcast_step`), so a client renders
@@ -352,10 +341,10 @@ impl Coordinator {
                 Exchanged::default()
             }
             Coordinator::Client { net } => {
-                // Host-authoritative (rl#151 increment 2 windowed): ship our input UP and drain the
-                // host's STATE down (snapshots + render articulation), never an input set to re-step.
-                // The driver adopts every drained snapshot ([`Lockstep::adopt_snapshots`]) and
-                // renders the last-arrived articulation.
+                // Ship our input UP and drain the host's STATE down (snapshots + render
+                // articulation), never an input set to re-step. The driver adopts every drained
+                // snapshot ([`Lockstep::adopt_snapshots`]) and renders the last-arrived
+                // articulation.
                 net.send_to_server(&msg);
                 net.drain_server_down()
             }
@@ -363,11 +352,11 @@ impl Coordinator {
     }
 
     /// (Host) Broadcast the authoritative game STATE for the tick the server just stepped: the
-    /// `snapshot` bytes it emitted plus the render-only crab `articulation` (rl#151 increment 2
-    /// windowed). Called by the windowed driver right after `Server::step_next`, so a remote client
-    /// adopts exactly the state the host holds and renders its exact crab pose. A no-op for solo (no
-    /// transport) and for a remote client (it broadcasts nothing). `snapshot` is the already-encoded
-    /// bytes the driver decoded to apply locally, reused so the wire and the local render agree.
+    /// `snapshot` bytes it emitted plus the render-only crab `articulation`. Called by the
+    /// windowed driver right after `Server::step_next`, so a remote client adopts exactly the
+    /// state the host holds and renders its exact crab pose. A no-op for solo (no transport) and
+    /// for a remote client (it broadcasts nothing). `snapshot` is the already-encoded bytes the
+    /// driver decoded to apply locally, reused so the wire and the local render agree.
     pub fn broadcast_step(&self, snapshot: &CoreSnapshot, articulation: Option<&CrabArticulation>) {
         if let Coordinator::Server { net: Some(net), .. } = self {
             net.broadcast_snapshot(snapshot);
@@ -377,20 +366,18 @@ impl Coordinator {
         }
     }
 
-    /// Whether THIS peer is a REMOTE client of another peer's server (rl#151 increment 2 windowed):
-    /// it adopts the host's snapshots + renders its articulation, never pumping its own crab physics
-    /// or stepping the sim. Distinct from the scripted screenshot harness, which self-sims. The
-    /// authoritative solo/host peer returns `false` (it runs [`Self::is_server_authoritative`]).
+    /// Whether THIS peer is a REMOTE client of another peer's server: it adopts the host's
+    /// snapshots + renders its articulation, never pumping its own crab physics or stepping the
+    /// sim. Distinct from the scripted screenshot harness, which self-sims.
     pub fn is_remote_client(&self) -> bool {
         matches!(self, Coordinator::Client { .. })
     }
 
     /// Whether THIS peer runs the authoritative server for the round (solo or host) — so its local
     /// client renders the per-tick [`CoreSnapshot`] the server emits instead of stepping its own
-    /// sim (rl#151 increment 1). A remote client returns `false` and instead ADOPTS the host's
-    /// snapshots ([`Self::is_remote_client`], rl#151 increment 2 windowed). This is the
-    /// Minecraft-model server/client role, NOT an SP/MP split — SP and host take the SAME arm
-    /// ([[sp-is-mp-special-case]]).
+    /// sim. A remote client returns `false` and instead ADOPTS the host's snapshots
+    /// ([`Self::is_remote_client`]). This is the Minecraft-model server/client role, NOT an SP/MP
+    /// split — SP and host take the SAME arm ([[sp-is-mp-special-case]]).
     pub fn is_server_authoritative(&self) -> bool {
         matches!(self, Coordinator::Server { .. })
     }
@@ -425,10 +412,9 @@ impl Coordinator {
     }
 }
 
-/// Detect and CONSUME client departures on a host (bddap/rl#198) — the ONE departure-handling
-/// home, shared by the windowed [`Coordinator::exchange`] and the headless `game net` driver
-/// (the same sync/async split precedent as [`host_assemble`]; the caller supplies `connected`
-/// because only it knows whether to `block_on` or `await` the session).
+/// Detect and CONSUME client departures on a host — the ONE departure-handling home, shared by
+/// the windowed [`Coordinator::exchange`] and the headless `game net` driver (the caller supplies
+/// `connected` because only it knows whether to `block_on` or `await` the session).
 ///
 /// A rostered endpoint (excluding `me` — the host holds no link to itself) with no entry in
 /// `connected` has DEPARTED: a link exists for every rostered remote by construction (formation
@@ -466,14 +452,14 @@ pub fn depart_gone_peers(
     (sets, eids)
 }
 
-/// Gate + admit each mid-game `joins` request on the host (Stage 3, rl#151). For each joiner:
-/// verify the host is armed and the joiner's collider digest matches ([`may_admit_joiner`]); then,
-/// allocate the stable lowest-free [`PlayerId`] ([`Server::admit`] — which schedules the roster
-/// change on the authoritative server), record its endpoint→pid append-only, and UNICAST the
-/// joiner its [`Admission`] (incumbents learn the new roster from the next snapshot). On a
-/// mismatch, REFUSE LOUDLY — a wire refusal + an error log + telemetry — never a silent drop onto
-/// a wrong crab ([[real-sally-definition]], rl#114). An endpoint already rostered (a re-dial or a
-/// racing duplicate) is admitted at most once.
+/// Gate + admit each mid-game `joins` request on the host. For each joiner: verify the host is
+/// armed and the joiner's collider digest matches ([`may_admit_joiner`]); then allocate the stable
+/// lowest-free [`PlayerId`] ([`Server::admit`] — which schedules the roster change on the
+/// authoritative server), record its endpoint→pid append-only, and UNICAST the joiner its
+/// [`Admission`] (incumbents learn the new roster from the next snapshot). On a mismatch, REFUSE
+/// LOUDLY — a wire refusal + an error log + telemetry — never a silent drop onto a wrong crab
+/// ([[real-sally-definition]]). An endpoint already rostered (a re-dial or a racing duplicate) is
+/// admitted at most once.
 fn admit_joiners(server: &mut Server, net: &mut NetDriver, joins: Vec<(EndpointId, JoinRequest)>) {
     let (host_weights, host_assets) = net.local_digests();
     for (eid, req) in joins {
@@ -516,9 +502,8 @@ pub enum MatchResult {
     /// Boxed because both payloads are large and `Alone` is empty: without the box the
     /// enum is sized to `Joined`, so every `Alone` carries that dead weight too.
     Joined(Box<(Lockstep, NetDriver)>),
-    /// Discovery completed with only us on the LAN (no peer ever beat us within the
-    /// window). The caller starts a deterministic solo round instead of awaiting an
-    /// empty networked match — see the module-level solo-fallback note.
+    /// Discovery completed with only us on the LAN — the caller starts a deterministic
+    /// solo round (see [`crate::formation`]'s solo fallback).
     Alone,
     /// The user cancelled out of the host-triggered lobby before a match formed. The
     /// session is torn down before returning, so no LAN phantom lingers. The caller drops
@@ -527,18 +512,12 @@ pub enum MatchResult {
     Cancelled,
 }
 
-/// Bind the LAN endpoint, run the shared [`form_match`] cold-start (the membership
-/// barrier), and either return a ready [`Lockstep`] + the [`NetDriver`] that pumps its
-/// transport ([`MatchResult::Joined`]) — the windowed client's entry into a match — or,
-/// when the discovery window elapses with no other peer present, [`MatchResult::Alone`]
-/// so the caller falls back to a solo round. The match `seed` must be identical on every
-/// peer (the caller passes the shared constant). `expect` is the minimum participant count
-/// to close on (see [`form_match`]); `discover_secs` bounds how long we wait for a peer
-/// before concluding we are alone.
+/// Bind the LAN endpoint, run the shared [`form_match`] cold-start, and either return a
+/// ready [`Lockstep`] + [`NetDriver`] ([`MatchResult::Joined`]) or [`MatchResult::Alone`]
+/// for a solo round. The match `seed` must be identical on every peer; `expect` and
+/// `discover_secs` are [`form_match`]'s knobs.
 ///
-/// Pure mDNS discovery (no explicit dial). The boot-menu Join-by-code path uses
-/// [`connect_and_form_dialing`] to additionally direct-dial a host's endpoint id; this is
-/// that with `dial == None`.
+/// Pure mDNS discovery: [`connect_and_form_dialing`] with `dial == None`.
 pub fn connect_and_form(
     seed: u64,
     discover_secs: u64,
@@ -546,9 +525,8 @@ pub fn connect_and_form(
     collector: Option<iroh::EndpointId>,
 ) -> Result<MatchResult> {
     // No Policy is loaded on the scripted/headless path (weights digest `0` ⇒ a round HOSTED
-    // by this peer can never arm the NN crab), but advertise our REAL crab-asset digest
-    // (rl#100) so the value is honest if this peer ever forms with a rendered peer that does
-    // arm.
+    // by this peer can never arm the NN crab), but advertise our REAL crab-asset digest so
+    // the value is honest if this peer ever forms with a rendered peer that does arm.
     connect_and_form_dialing(
         seed,
         discover_secs,
@@ -579,8 +557,8 @@ pub fn connect_and_form(
 /// the slow barrier — so a Host UI can display the join code to share while waiting. A
 /// closed receiver is ignored (the caller stopped caring); it never gates formation.
 ///
-/// `local_weights_digest` is OUR policy-checkpoint digest (rl#82, GCR), `0` for none, and
-/// `local_asset_digest` OUR crab-model-asset digest (rl#100, GCR), `0` for none. Both are
+/// `local_weights_digest` is OUR policy-checkpoint digest, `0` for none, and
+/// `local_asset_digest` OUR crab-model-asset digest, `0` for none. Both are
 /// advertised in the formation beats; the agreed [`NetDriver::sync_verdict`] tells the
 /// caller whether the round may arm the NN crab (the HOST's brain verified + the crab asset
 /// matched on every peer — the upstream shared-asset guard).
@@ -718,9 +696,9 @@ fn connect_and_form_inner(
         all_ids.len(),
         frozen.me
     );
-    // Every peer spawns the byte-identical foot-only round. The early inputs are NOT
-    // replayed into the client sim anymore (that would bypass the server's ledger) — they ride the
-    // driver to seed the host's server instead (see [`Coordinator::for_round`]).
+    // Every peer spawns the byte-identical foot-only round. Early inputs ride the driver to
+    // seed the host's server (see [`Coordinator::for_round`]) — never replayed into the client
+    // sim, which would bypass the server's ledger.
     let ls = Lockstep::new(seed, &all_ids, frozen.me);
     let server_eid = server_endpoint(&frozen.id_map);
     let early = early_peer_msgs(&frozen);
@@ -784,15 +762,14 @@ async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVe
     deadline.unwrap_or(AdmissionVerdict::Timeout)
 }
 
-/// Dial INTO a live match as a host-authoritative mid-game joiner (GCR MP incr 4, rl#151) — the
-/// dialing analogue of [`connect_and_form`]. Connect to `host`, send our collider digest as
-/// a [`JoinRequest`], and await the host's verdict: admitted (become a remote-adopt
-/// [`Coordinator::Client`] that boots from the host's next authoritative snapshot — the host spawns
-/// us into its LIVE round at `effective_tick`, so we drop into the ongoing match rather than
-/// resetting it; the `join_at` [`Lockstep`] is only the placeholder cursors the adopted snapshot
-/// supersedes), refused (a collider mismatch OR a zero-digest host the gate turned away LOUDLY —
-/// relayed, never a silent wrong/fake-crab), or unreachable. `seed` is the shared [`crate::sim`]
-/// match constant every peer holds.
+/// Dial INTO a live match as a host-authoritative mid-game joiner — the dialing analogue of
+/// [`connect_and_form`]. Connect to `host`, send our collider digest as a [`JoinRequest`], and
+/// await the host's verdict: admitted (become a remote-adopt [`Coordinator::Client`] that boots
+/// from the host's next authoritative snapshot — the host spawns us into its LIVE round at
+/// `effective_tick`, so we drop into the ongoing match rather than resetting it), refused (a
+/// collider mismatch OR a zero-digest host the gate turned away LOUDLY — relayed, never a silent
+/// wrong/fake-crab), or unreachable. `seed` is the shared [`crate::sim`] match constant every
+/// peer holds.
 pub fn connect_and_join(
     seed: u64,
     host: EndpointId,
@@ -842,14 +819,13 @@ pub fn connect_and_join(
                 "admitted as {me:?}; joining at tick {} over roster {:?}",
                 adm.effective_tick, adm.roster
             );
-            // Host-authoritative mid-game join (rl#151 incr 4): this `ls` is only a placeholder the
-            // remote-adopt client boots from — the driver is a CLIENT (not host), so `for_round`
-            // makes this a `Coordinator::Client` that ADOPTS the host's per-tick snapshots and never
-            // steps a sim of its own. The host spawns us into its LIVE authoritative round at
-            // `effective_tick` (`Server::step_next` → `Sim::spawn_joining_player`), so the first
-            // snapshot we adopt carries us at the ongoing tick with the crab at its live pose — the
-            // 509 fix by construction (we render the host's output, never re-sim its warm rapier
-            // world). `join_at` seeds the placeholder cursors/roster; the adopted snapshot supersedes.
+            // This `ls` is only a placeholder the remote-adopt client boots from — the driver is
+            // a CLIENT (not host), so `for_round` makes this a `Coordinator::Client` that ADOPTS
+            // the host's per-tick snapshots and never steps a sim of its own. The host spawns us
+            // into its LIVE authoritative round at `effective_tick` (`Server::step_next` →
+            // `Sim::spawn_joining_player`), so we render the host's output, never re-simming its
+            // warm rapier world. `join_at` seeds the placeholder cursors/roster; the adopted
+            // snapshot supersedes.
             let ls = Lockstep::join_at(seed, &adm.roster, me, adm.effective_tick);
             let my_eid = session.endpoint_id();
             // A client's id_map has NO determinism-path reader (inputs route by `server_eid`, the
@@ -882,7 +858,7 @@ pub fn connect_and_join(
                 },
                 // A join-constructed driver is always a Client — it can never reach the Server
                 // arm that reads `local_digests` (a joiner never admits) — so no weights digest is
-                // computed or threaded here at all (rl#206): 0 marks it deliberately absent.
+                // computed or threaded here at all: 0 marks it deliberately absent.
                 weights_digest: 0,
                 asset_digest: local_asset_digest,
             };
@@ -926,7 +902,7 @@ mod tests {
     /// END-TO-END solo through the host-authoritative path: a solo [`Coordinator`] (an internal
     /// server with a roster of one, no transport) — inputs go UP, the server steps its OWN sim, and
     /// the local [`Lockstep`] ADOPTS the emitted snapshot. Proves solo runs the SAME `exchange` +
-    /// step machinery as a hosted match (SP=MP uniformity, rl#151), with no special-case solo path.
+    /// step machinery as a hosted match (SP=MP uniformity), with no special-case solo path.
     #[test]
     fn solo_round_advances_through_the_coordinator() {
         use crate::sim::Input;

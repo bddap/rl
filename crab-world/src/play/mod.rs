@@ -133,7 +133,7 @@ impl Plugin for DemoPlugin {
         // Night-sky skybox behind the orbit view.
         app.add_plugins(crate::sky::NightSkyPlugin);
         // The reusable controls overlay (corner hint + hold-to-reveal panel), driven by the
-        // demo's own DEMO_CONTROL_MAP — replaces the old static bottom-left HUD text.
+        // demo's own [`controls::DEMO_BINDINGS`].
         app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default());
         app.init_resource::<DemoSettle>()
             .init_resource::<PokeBurst>()

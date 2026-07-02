@@ -55,8 +55,8 @@ pub mod buttons {
 /// feeds the sim a neutral (default) `Input` — its craft is client-local, host-authoritative
 /// crab-world state off the wire (see [`crate::render::driver`]'s `LocalControl`/`FlightControl`),
 /// so no flight axis lives here and a walker cannot carry one (the illegal on-foot+piloting
-/// state the flat struct used to permit is now unrepresentable). Networking the pilots (a wire
-/// that carries flight input too) is rl#43 part 2.
+/// state is unrepresentable). Networking the pilots (a wire that carries flight input too) is
+/// rl#43 part 2.
 ///
 /// The move/look axes are facing-relative (named for the control intent), not world axes: at a
 /// nonzero yaw they do not map to world X/Z.
@@ -159,7 +159,7 @@ pub const UNIT: i64 = 1000;
 /// realism: ~5 m/s at 30 Hz (`SPEED * 30 / UNIT`).
 const PLAYER_SPEED: i64 = 166;
 
-/// TEST-FIXTURE crab speed, in [`UNIT`]/tick (rl#114). The production crab is driven entirely by
+/// TEST-FIXTURE crab speed, in [`UNIT`]/tick. The production crab is driven entirely by
 /// the rapier-NN body, so its real speed comes from physics, not a constant. This value only
 /// powers the deterministic test driver ([`drive_crab_toward_prey`]) that walks a stand-in crab so
 /// the grab/extraction/outcome MECHANICS stay exercised. Kept below [`PLAYER_SPEED`] (166) so the
@@ -167,13 +167,13 @@ const PLAYER_SPEED: i64 = 166;
 #[cfg(test)]
 const CRAB_SPEED: i64 = 130;
 
-/// Deterministic stand-in for the production crab driver (rl#114), shared by every test in this
+/// Deterministic stand-in for the production crab driver, shared by every test in this
 /// crate that needs a HUNTING crab (the sim mechanic tests + the `net` desync replay). Production
 /// drives the crab from the rapier-NN body via [`Sim::set_external_crab_pose`]; tests have no
 /// rapier stack, so this walks a crab toward the nearest living prey with the SAME integer math
 /// the real bridge's hunt target uses, then pushes the pose. `#[cfg(test)]` only — it can NEVER
-/// stand in for the NN crab in a release build, so it is not a production fallback. ONE definition
-/// (the manual's "one implementation per thing"). Call it each tick BEFORE [`Sim::step`]: it moves
+/// stand in for the NN crab in a release build, so it is not a production fallback. ONE
+/// definition. Call it each tick BEFORE [`Sim::step`]: it moves
 /// the crab once `tick() >= STARTUP_GRACE_TICKS`, so the pose is in place for the first armed step
 /// (the one that increments the tick PAST the grace and turns on grabs).
 #[cfg(test)]
@@ -313,9 +313,9 @@ impl Player {
 }
 
 /// The one giant crab: a ground-plane position with a facing yaw, driven from OUTSIDE the sim by
-/// the real rapier-NN body (rl#114, via [`Sim::set_external_crab_pose`]) — there is no built-in
-/// integer pursuit. Rendered [`CRAB_SCALE`]× a player; the sim models only its position and a
-/// [`CRAB_GRAB_RADIUS`] reach (the limbs live in the NN body, not here).
+/// the real rapier-NN body ([`Sim::set_external_crab_pose`], the only way it moves). Rendered
+/// [`CRAB_SCALE`]× a player; the sim models only its position and a [`CRAB_GRAB_RADIUS`] reach
+/// (the limbs live in the NN body, not here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Crab {
     pos: Pos,
@@ -327,7 +327,7 @@ impl Crab {
     /// [`yaw`](Crab::yaw) accessors, used by
     /// [`CoreSnapshot::from_bytes`](crate::snapshot::CoreSnapshot::from_bytes) to decode the
     /// crab off the wire. `pub(crate)`: live, the crab pose only ever moves through
-    /// [`Sim::set_external_crab_pose`] (rl#114) — this reconstructs it at the snapshot seam.
+    /// [`Sim::set_external_crab_pose`] — this reconstructs it at the snapshot seam.
     pub(crate) fn from_parts(pos: Pos, yaw: i32) -> Self {
         Self { pos, yaw }
     }
@@ -408,21 +408,10 @@ pub struct Sim {
     /// supplied each tick by the deterministic driver alongside the pose via
     /// [`Sim::set_external_crab_pose`]. ALWAYS folded into [`Sim::state_hash`], so two peers whose
     /// float bodies — or whose policy weights, folded into this digest by the bridge — diverge
-    /// desync on the tick it happens. The giant crab's ground position is ALWAYS driven from
-    /// OUTSIDE the sim by the real NN crab body (rl#114): there is no built-in integer
-    /// point-pursuer to fall back to, so a round that can't arm the NN crab REFUSES LOUDLY rather
-    /// than silently substituting a fake crab. `0` until a pose is first pushed (a never-driven
-    /// crab — e.g. a headless determinism-machinery sim — folds a constant `0`, still
-    /// deterministic).
-    ///
-    /// CADENCE (rl#82, the GCR fold): this digest is sound cross-peer ONLY because the rapier
-    /// crab now steps a deterministic, wall-clock-free number of physics steps per lockstep tick
-    /// — `net::render::drive_lockstep` pumps the fixed schedule itself via
-    /// [`crate::cadence::PhysicsCadence`] (64:30), pushing ONE pose+digest per APPLIED tick,
-    /// so every peer folds the identical digest into the identical tick regardless of frame rate.
-    /// (Before the fold, physics ran on Bevy's wall-clock `FixedUpdate`, so the networked arm had
-    /// to stay gated off — different-framerate peers would fold the same digest into a different
-    /// number of ticks.)
+    /// desync on the tick it happens. Sound cross-peer only because the driver pumps a
+    /// deterministic, wall-clock-free number of physics steps per lockstep tick
+    /// ([`crate::cadence::PhysicsCadence`]), pushing ONE pose+digest per APPLIED tick. `0` until
+    /// a pose is first pushed (a never-driven crab folds a constant `0`, still deterministic).
     external_crab_digest: u64,
 }
 
@@ -465,14 +454,13 @@ impl Sim {
     }
 
     /// Drive the crab's ground position + facing yaw from outside the sim — the ONLY way the
-    /// giant crab moves (rl#114: there is no built-in integer pursuit). The real rapier-NN crab
+    /// giant crab moves (rl#114: there is no built-in integer pursuit, so a round that can't arm
+    /// the NN crab REFUSES loudly rather than substituting a fake crab). The real rapier-NN crab
     /// body ([`crate::external_crab`]) calls this each tick BEFORE advancing, so the
     /// grab/extraction checks resolve against the body's current position. `pos`/`yaw` are genuine
     /// hashed state; `phys_digest` is the float body's per-tick digest (see
-    /// [`external_crab_digest`](Sim::external_crab_digest)) the desync check folds in — the bridge
-    /// computes it from the rapier bodies and the loaded policy weights, so any cross-peer
-    /// divergence is caught. Seed it once at round setup with the crab's spawn pose, then push the
-    /// body's pose each tick.
+    /// [`external_crab_digest`](Sim::external_crab_digest)). Seed it once at round setup with the
+    /// crab's spawn pose, then push the body's pose each tick.
     pub fn set_external_crab_pose(&mut self, pos: Pos, yaw: i32, phys_digest: u64) {
         self.crab.pos = pos;
         self.crab.yaw = yaw;
@@ -501,20 +489,18 @@ impl Sim {
         self.rng = ChaCha8Rng::seed_from_u64(self.config.seed);
     }
 
-    /// Spawn a mid-game joiner (GCR MP incr 4, rl#151) INTO the live round — the host-authoritative
-    /// snapshot-transfer join ([[mp-minecraft-model]]), NOT the dead lockstep round-boundary rebuild.
-    /// Inserts a fresh [`Player`] for `pid` and folds it into the [`config`](Sim::config) roster
-    /// WITHOUT disturbing the ongoing state: the crab, extraction, incumbents, `tick`, `rng`, and
-    /// `outcome` are all untouched, so the joiner drops into the match exactly where it stands rather
-    /// than resetting every peer to tick 0 — which is what the now-deleted lockstep round-boundary
-    /// join did, and what round RESTART does via [`reset`](Sim::reset). This is why host-auth DISSOLVES job 509: the joiner never
-    /// re-simulates the incumbent's warm rapier world — it renders the host's output pose carried in
-    /// the snapshot — so the warm-cache / handle-arena divergence that broke lockstep bit-identity is
-    /// never on the wire. Only the authoritative host calls this (a client adopts the resulting
-    /// snapshot), so the spawn position needs no cross-peer determinism — it reuses the standing ring
-    /// convention (see [`spawn_state`](Sim::spawn_state)) so the joiner appears with the pack, and
-    /// incumbents keep their live positions (a cosmetic overlap they walk out of). Idempotent: a pid
-    /// already present is left exactly as-is.
+    /// Spawn a mid-game joiner INTO the live round — the host-authoritative snapshot-transfer
+    /// join ([[mp-minecraft-model]]). Inserts a fresh [`Player`] for `pid` and folds it into the
+    /// [`config`](Sim::config) roster WITHOUT disturbing the ongoing state: the crab, extraction,
+    /// incumbents, `tick`, `rng`, and `outcome` are all untouched, so the joiner drops into the
+    /// match exactly where it stands rather than resetting every peer to tick 0 (which is what
+    /// round RESTART does via [`reset`](Sim::reset)). The joiner never re-simulates the
+    /// incumbents' warm rapier world — it renders the host's output pose carried in the snapshot —
+    /// so warm-cache divergence is never on the wire. Only the authoritative host calls this (a
+    /// client adopts the resulting snapshot), so the spawn position needs no cross-peer
+    /// determinism — it reuses the standing ring convention (see [`spawn_state`](Sim::spawn_state))
+    /// so the joiner appears with the pack, and incumbents keep their live positions (a cosmetic
+    /// overlap they walk out of). Idempotent: a pid already present is left exactly as-is.
     pub fn spawn_joining_player(&mut self, pid: PlayerId) {
         if self.players.contains_key(&pid) {
             return;
@@ -551,7 +537,7 @@ impl Sim {
         self.players.contains_key(&pid)
     }
 
-    /// Remove a DEPARTED player from the live round (bddap/rl#198) — the inverse of
+    /// Remove a DEPARTED player from the live round — the inverse of
     /// [`spawn_joining_player`](Sim::spawn_joining_player), driven the same way: the authoritative
     /// server derives it from the roster schedule ([`crate::server::Server::depart`] shrank the
     /// roster after the peer's link died), so the sim, the ledger, and the wire roster stay one
@@ -638,8 +624,9 @@ impl Sim {
     }
 
     /// Fail-loud guard for the lockstep boundary (rl#105): every participant must have
-    /// supplied this tick's input. Panics naming a missing id rather than letting
-    /// [`Sim::step`] default it to neutral and silently desync peers.
+    /// supplied this tick's input. Panics naming the missing id rather than letting
+    /// [`Sim::step`] default it to neutral — one peer applying real input where another
+    /// applied none diverges `state_hash` invisibly.
     fn require_complete_inputs(&self, inputs: &BTreeMap<PlayerId, Input>) {
         for id in self.participant_ids() {
             assert!(
@@ -655,13 +642,8 @@ impl Sim {
     /// step the crab toward its nearest living prey, resolve grabs and extractions,
     /// then settle the round outcome. All in `PlayerId` order; pure integer math.
     ///
-    /// `inputs` MUST hold an entry for every participant the sim tracks — each on-foot
-    /// player. A missing input is a fail-loud determinism fault, NOT a
-    /// silent neutral: defaulting a dropped input to neutral would let one peer apply
-    /// real input where another applied none, diverging `state_hash` invisibly (the
-    /// NN-crab pose rides on player state, which feeds the hash). The lockstep driver
-    /// guarantees completeness by stalling a tick until every peer's input arrives, so
-    /// reaching `step` short is a bug — we panic rather than fabricate input (rl#105).
+    /// `inputs` MUST hold an entry for every participant the sim tracks; a missing input
+    /// panics ([`Sim::require_complete_inputs`]) rather than fabricating a neutral.
     pub fn step(&mut self, inputs: &BTreeMap<PlayerId, Input>) {
         self.require_complete_inputs(inputs);
         self.tick += 1;
@@ -698,12 +680,9 @@ impl Sim {
         // The crab's grabs are disarmed during the startup grace (see [`STARTUP_GRACE_TICKS`]).
         let armed = self.tick > STARTUP_GRACE_TICKS;
 
-        // 2) Crab MOVE: the giant crab's position is driven entirely from outside the sim by the
-        //    real rapier-NN crab body (rl#114, via [`Sim::set_external_crab_pose`]) — there is no
-        //    built-in integer point-pursuer here. A round that can't arm the NN crab REFUSES at
-        //    build time (see [`crate::render`]) rather than reaching `step` with a fake crab,
-        //    so by the time we step, the crab pose is whatever the body last pushed. The
-        //    grab/extraction below read `self.crab.pos`.
+        // 2) Crab MOVE: the crab pose is whatever the external NN body last pushed
+        //    ([`Sim::set_external_crab_pose`], the only mover); the grab/extraction below read
+        //    `self.crab.pos`.
 
         // 3) Grabs: any living player within the crab's reach is downed (disarmed during
         //    the startup grace, so a player spawned near the crab isn't grabbed before
@@ -762,7 +741,7 @@ impl Sim {
         p.pos.z += vz * PLAYER_SPEED / denom;
     }
 
-    /// Client-side prediction of the LOCAL player only (rl#151 incr 3): re-apply one of its
+    /// Client-side prediction of the LOCAL player only: re-apply one of its
     /// still-in-flight inputs on top of an adopted authoritative snapshot, so a remote client's
     /// own avatar responds at input latency instead of round-trip latency. Mirrors [`step`]'s
     /// per-player guards exactly — a player only moves while ALIVE and the round is ONGOING — so
@@ -883,11 +862,9 @@ impl Sim {
         // it manifests in an entity. Cloning and drawing one block reflects the
         // generator's position without disturbing the real stream.
         h.write(&rand::Rng::r#gen::<u64>(&mut rng.clone()).to_le_bytes());
-        // The float NN crab's per-tick physics+weights digest — ALWAYS folded (rl#114: the crab
-        // is always externally driven). It makes the articulated body (and the policy weights,
-        // via the bridge) part of the desync check, not just the quantized 2D `crab.pos`/`yaw`
-        // hashed above. A never-driven crab folds the constant `0` it was seeded with — still
-        // deterministic across peers.
+        // The float NN crab's per-tick physics+weights digest — always folded, so the
+        // articulated body (and the policy weights, via the bridge) is part of the desync check,
+        // not just the quantized 2D pose hashed above. A never-driven crab folds its seeded `0`.
         h.write(&external_crab_digest.to_le_bytes());
         h.finish()
     }
@@ -935,18 +912,17 @@ impl Sim {
     }
 
     /// Build the authoritative [`CoreSnapshot`] for this tick — the host-authoritative MP
-    /// seam (bddap/rl#151, increment 0; see [`crate::snapshot`]). A client reads game state
-    /// from this snapshot, not from a sim it stepped itself; single-player is the
-    /// zero-remote case of the same path ([[sp-is-mp-special-case]]).
+    /// seam (see [`crate::snapshot`]). A client reads game state from this snapshot, not from
+    /// a sim it stepped itself; single-player is the zero-remote case of the same path
+    /// ([[sp-is-mp-special-case]]).
     ///
     /// Completeness is COMPILE-ENFORCED exactly like [`Sim::state_hash`]: the destructure
     /// below has NO `..`, so a newly-added authoritative `Sim` field stops this function
     /// compiling until it is carried into the snapshot or bound to `_` as a deliberate
-    /// exclusion (make-illegal-states-unrepresentable). The four `_`-bound fields are out of
-    /// the host->client surface by design: `extraction` is a fixed gray-box constant both
-    /// sides derive from `config`; `rng` and `restart_held` are peer-invariant round
-    /// bookkeeping; and `external_crab_digest` was the lockstep float cross-check this design
-    /// dissolves (the client renders the crab POSE carried in `crab`, never the solver).
+    /// exclusion. The four `_`-bound fields are out of the host->client surface by design:
+    /// `extraction` is a fixed gray-box constant both sides derive from `config`; `rng` and
+    /// `restart_held` are peer-invariant round bookkeeping; and `external_crab_digest` is not
+    /// carried (the client renders the crab POSE carried in `crab`, never the solver).
     pub fn core_snapshot(&self) -> CoreSnapshot {
         let Sim {
             tick,
@@ -973,11 +949,8 @@ impl Sim {
     /// host's latest snapshot here instead of stepping the sim itself.
     ///
     /// Overwrites exactly the carried fields and leaves the `_`-bound ones (see
-    /// [`core_snapshot`](Sim::core_snapshot)) as they are: `extraction` both sides derive
-    /// identically from `config`, and `rng` / `restart_held` / `external_crab_digest` are
-    /// not part of the host->client surface in increment 0 (SP-only, where the snapshot's
-    /// source and target are the same world). The destructure has NO `..`, so a new
-    /// `CoreSnapshot` field must be handled here too.
+    /// [`core_snapshot`](Sim::core_snapshot)) as they are. The destructure has NO `..`, so a
+    /// new `CoreSnapshot` field must be handled here too.
     pub fn apply_core_snapshot(&mut self, snapshot: CoreSnapshot) {
         let CoreSnapshot {
             tick,
@@ -1084,7 +1057,7 @@ pub use super::cordic::{trig, trig_client};
 
 /// Fold a [`Pos`] (both coordinates) into the state hash — one call per position so a hashed
 /// entity can't accidentally fold X but forget Z. Destructured exhaustively so a new coordinate
-/// forces a compile error here (the rl#70 guard, extended to `Pos`). A free function rather than
+/// forces a compile error here (the [`Sim::state_hash`] guard, extended to `Pos`). A free function rather than
 /// an `Fnv` method because the hasher is the shared [`crab_world::fnv::Fnv`], which can't name sim's
 /// `Pos`.
 fn write_pos(h: &mut Fnv, p: Pos) {
@@ -1102,7 +1075,7 @@ mod tests {
     }
 
     /// A complete neutral input map for every participant in `sim`. The lockstep
-    /// boundary now REQUIRES an entry per participant (rl#105), so a test driving
+    /// boundary REQUIRES an entry per participant, so a test driving
     /// idle players spells out their neutral input instead of relying on a
     /// missing-key default.
     fn neutral_for(sim: &Sim) -> BTreeMap<PlayerId, Input> {
@@ -1128,7 +1101,7 @@ mod tests {
         }
     }
 
-    /// Mixed foot + piloting determinism (rl#43 part 1). A piloting player is client-local: its
+    /// Mixed foot + piloting determinism. A piloting player is client-local: its
     /// craft flies OFF the wire, so the sim receives a NEUTRAL foot input for it (see
     /// [`crate::render::driver::LocalControl`]). This pins the sim-side contract that a round mixing
     /// a walking player (real foot input) with a "piloting" one (neutral) steps deterministically and
@@ -1238,7 +1211,7 @@ mod tests {
     fn predict_player_matches_step_for_the_local_avatar() {
         // Client-side prediction of ONE player must land exactly where `step` puts it — both run
         // the shared `advance_player` mover — so a remote client's local-avatar replay converges
-        // byte-for-byte with the authoritative host (rl#151 incr 3). Move + turn, so the
+        // byte-for-byte with the authoritative host. Move + turn, so the
         // facing-relative translate is exercised, not just an axis-aligned slide.
         let inp = Input::new(0.6, -0.3, 0.4, 0);
         let mut stepped = Sim::new(7, &players(1));
@@ -1332,7 +1305,7 @@ mod tests {
 
     #[test]
     fn external_crab_pose_seeds_and_digest_is_hashed() {
-        // `set_external_crab_pose` is the ONLY way the crab moves (rl#114): it seeds/updates the
+        // `set_external_crab_pose` is the ONLY way the crab moves: it seeds/updates the
         // pose AND the per-tick physics digest, which is always folded into the hash.
         let pos = Pos {
             x: 7 * UNIT,
@@ -1471,7 +1444,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "lockstep input incomplete")]
     fn missing_lockstep_input_panics_not_defaults_to_neutral() {
-        // rl#105: a tick stepped without EVERY participant's input must fail loud, not
+        // A tick stepped without EVERY participant's input must fail loud, not
         // silently default the absentee to neutral — which would desync a peer whose
         // input map WAS complete (the NN-crab pose rides on player state, in the hash).
         // Two players, only one input supplied → hard error at the boundary.
@@ -1578,7 +1551,7 @@ mod tests {
 
     #[test]
     fn state_hash_is_sensitive_to_every_hashed_field() {
-        // Runtime half of the rl#70 guard. The COMPILE-TIME half lives in `state_hash`
+        // Runtime half of the every-field-hashed guard. The COMPILE-TIME half lives in `state_hash`
         // itself: its exhaustive `let Sim { .. }` (and per-entity) destructures stop that
         // function compiling until a newly-added field is folded in or bound to `_`. This
         // test proves the other direction — that each field the destructure *names* is
@@ -1621,7 +1594,7 @@ mod tests {
             "player status must be hashed"
         );
 
-        // The crab POSE (driven externally by the NN body, rl#114) is hashed so the quantized
+        // The crab POSE (driven externally by the NN body) is hashed so the quantized
         // 2D pose stays desync-safe.
         assert_ne!(
             hash_after(&|s| s.crab.pos.x += 1),
@@ -1677,9 +1650,9 @@ mod tests {
             h0,
             "config is deliberately not hashed (see Sim::config)"
         );
-        // `external_crab_digest` is ALWAYS folded into the hash now (rl#114: the crab is always
-        // externally driven — no integer-crab gate to fold it out), so perturbing it MUST move the
-        // hash. This is the desync teeth for the float body / weights mismatch (rl#82).
+        // `external_crab_digest` is ALWAYS folded into the hash (the crab is always externally
+        // driven — no integer-crab gate to fold it out), so perturbing it MUST move the hash:
+        // the desync teeth for the float body / weights mismatch.
         assert_ne!(
             hash_after(&|s| s.external_crab_digest ^= 0xdead_beef),
             h0,
@@ -1689,7 +1662,7 @@ mod tests {
 
     #[test]
     fn core_snapshot_roundtrip_reproduces_authoritative_state() {
-        // The increment-0 completeness proof (bddap/rl#151): applying a serialized→
+        // The snapshot-completeness proof: applying a serialized→
         // deserialized `CoreSnapshot` reproduces every authoritative field — the carried
         // ones `state_hash` observes, plus the (unhashed) roster. The COMPILE-TIME half is
         // the no-`..` destructure in `core_snapshot`/`apply_core_snapshot`; this is the

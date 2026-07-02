@@ -1,8 +1,7 @@
 //! A real rapier-simulated, NN-driven giant crab — the trained RL body ("real Sally"), the ONLY
-//! crab the game has (rl#114: there is no integer point-pursuer to fall back to). Armed by the
+//! crab the game has (no integer point-pursuer to fall back to). Armed by the
 //! [`ExternalCrabArmed`] runtime gate on a SOLO round (a Host-alone Start, or scripted `--host`
-//! that found no peer), and — since the GCR fold (rl#82) — on a NETWORKED round with synced
-//! weights.
+//! that found no peer) and on a NETWORKED round with synced weights.
 //!
 //! # When it drives the crab (and why it's safe)
 //! The game's [`crate::sim`] is a bit-deterministic INTEGER lockstep sim so two peers
@@ -40,13 +39,10 @@
 //!   the game-world crab position, which we write back into the sim with
 //!   [`Sim::set_external_crab_pose`]. Grabs / extraction / win-loss then resolve against the
 //!   REAL crab body, exactly as the prompt asks.
-//! - For rendering, the giant blow-up is a RENDER-ONLY repose published into
-//!   [`crab_world::bot::skin::CrabSkinRepose`] each game tick ([`publish_skin_repose`]) and applied
-//!   by the skin to its render BONES only ([`crab_world::bot::skin::drive_bones`]) — shifting the rig
-//!   to the game-world crab spot and scaling it to the giant. The physics `Transform`s are NEVER
-//!   touched: bevy_rapier syncs a changed body `Transform` back into the physics body, so a
-//!   "cosmetic" link shift teleported the body and crashed the solver. With no `sally.glb` the
-//!   rig is mesh-less; the static giant silhouette (`spawn_world`) stays shown as the visible crab.
+//! - For rendering, the rig is carried to the game-world crab spot by a RENDER-ONLY repose
+//!   published into [`crab_world::bot::skin::CrabSkinRepose`] each game tick and applied to the
+//!   render BONES only; physics `Transform`s are never touched, and the giant FEEL comes from
+//!   the R-shrunk human world — see [`publish_skin_repose`].
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
@@ -93,11 +89,8 @@ pub struct ExternalCrabBridge {
     /// policy.
     hunt_target_m: Option<Vec2>,
     /// This tick's digest of the crab's full rapier physics state XORed with the
-    /// policy-weights digest — recomputed each step by [`hash_crab_physics`] and folded into
-    /// the sim's `state_hash` with each pose push, so the probe/test hash logs cover the
-    /// articulated float body and a peer running different weights is detectable (rl#82,
-    /// GCR). `0` until the first post-step hash; the integer sim ignores it unless external
-    /// control is armed.
+    /// policy-weights digest — recomputed each step by [`hash_crab_physics`] (see its doc).
+    /// `0` until the first post-step hash.
     phys_digest: u64,
 }
 
@@ -117,7 +110,7 @@ fn pos_to_m(p: Pos) -> Vec2 {
 struct CrabPlacement {
     /// Arena→game-world XZ translation for each part (`world_pos_m - last_carapace_m`).
     shift: Vec2,
-    /// The crab's game-world ground point (XZ), about which the rig is scaled up.
+    /// The crab's game-world ground point (XZ).
     pivot: Vec2,
 }
 
@@ -153,21 +146,15 @@ impl ExternalCrabBridge {
         Pos::from_meters(self.world_pos_m.x, self.world_pos_m.y)
     }
 
-    /// Where the crab rig sits in the game world before SCALE, as a `(shift, pivot)` pair in
-    /// metres on the XZ `Vec2` frame:
+    /// Where the crab rig sits in the game world, as a `(shift, pivot)` pair in metres on the
+    /// XZ `Vec2` frame:
     /// - `shift` translates each part's raw arena `Transform` to the game-world crab spot
     ///   (`world_pos_m - last_carapace_m`), and
-    /// - `pivot` is the crab's game-world ground point (`world_pos_m`), about which the rig is
-    ///   scaled up to the giant (see [`publish_skin_repose`]).
+    /// - `pivot` is the crab's game-world ground point (`world_pos_m`).
     ///
-    /// WHY the giant is render-only and built here, not baked into the body: the trained policy +
-    /// rapier run at the ~1 m physics scale the policy learned under ([`crab_world::bot::body`]), and
-    /// the lockstep determinism hash reads that raw pose — so the giant is a RENDER-ONLY blow-up
-    /// applied to the skin AFTER the hash. With no integer silhouette to stand in (rl#114) this
-    /// rig is the ONLY crab, so without the matching blow-up it renders as a ~1 m speck in a world
-    /// framed for the giant-crab render height — the play-day "no crab
-    /// visible" bug. `None` until the crab has been sampled once (so we never place against a
-    /// stale/zero carapace).
+    /// Feeds the render-only repose — see [`publish_skin_repose`] for why placement never
+    /// touches physics. `None` until the crab has been sampled once (so we never place against
+    /// a stale/zero carapace).
     fn render_placement_m(&self) -> Option<CrabPlacement> {
         self.last_carapace_m.map(|c| CrabPlacement {
             shift: self.world_pos_m - c,
@@ -220,17 +207,16 @@ impl ExternalCrabBridge {
     }
 }
 
-/// Cold-respawn the armed crab's rapier body at the round-boundary RESTART edge (GCR MP Stage 3,
-/// rl#151) — despawn the env-0 crab entity tree and rebuild it fresh from spawn, via the SAME
-/// [`crab_world::bot::respawn_crab`] path the non-finite rescue uses (one respawn implementation, no
-/// parallel reset to drift). [`ExternalCrabBridge::restart_to_spawn`] resets only the bridge's
-/// bookkeeping; the rapier solver keeps WARM contact/warm-start state across a bare restart. That
-/// was invisible for a plain button-restart (no fresh peer to diverge against), but a mid-game JOIN
-/// puts a warm incumbent body beside a cold joiner body in the same round — exactly job 412's
-/// restored-vs-live divergence, relocated to the join, and folded LOUDLY into `state_hash` via the
-/// external-crab digest. Dropping the tree and rebuilding gives every peer (incumbents AND the
-/// joiner) the IDENTICAL cold solver state, so the round stays in lockstep. Called from the one
-/// restart edge in [`crate::render`]'s `drive_lockstep`, so join and plain-restart share it.
+/// Cold-respawn the armed crab's rapier body at the round-boundary RESTART edge — despawn the
+/// env-0 crab entity tree and rebuild it fresh from spawn, via the SAME
+/// [`crab_world::bot::respawn_crab`] path the non-finite rescue uses (one respawn implementation,
+/// no parallel reset to drift). [`ExternalCrabBridge::restart_to_spawn`] resets only the bridge's
+/// bookkeeping; the rapier solver keeps WARM contact/warm-start state across a bare restart, so a
+/// mid-game JOIN would put a warm incumbent body beside a cold joiner body in the same round — a
+/// divergence folded LOUDLY into `state_hash` via the external-crab digest. Dropping the tree and
+/// rebuilding gives every peer (incumbents AND the joiner) the IDENTICAL cold solver state, so the
+/// round stays in lockstep. Called from the one restart edge in [`crate::render`]'s
+/// `drive_lockstep`, so join and plain-restart share it.
 ///
 /// Exclusive-world (the driver edge holds `&mut World`): collect the env-0 parts, lift `CrabAssets`
 /// out with `resource_scope` so a temporary [`Commands`] can borrow the world, and apply the
@@ -281,8 +267,8 @@ pub fn sync_external_crab(sim: &mut crate::sim::Sim, bridge: &mut ExternalCrabBr
 /// ([`sync_external_crab`] / [`crate::server::CrabPose`]).
 /// Runs each step AFTER the physics writeback + [`integrate_crab`], so it captures
 /// this tick's settled state. Folding in the weights digest makes two peers running different
-/// brains desync on the first tick (the GCR shared-checkpoint guard), and folding in the full
-/// articulated state makes a float divergence a detected desync, not just a 2D-pose one.
+/// brains desync on the first tick, and folding in the full articulated state makes a float
+/// divergence a detected desync, not just a 2D-pose one.
 #[allow(clippy::type_complexity)]
 fn hash_crab_physics(
     policy: NonSend<Policy>,
@@ -309,17 +295,17 @@ fn hash_crab_physics(
     bridge.phys_digest = phys ^ policy.weights_digest().map_or(0, std::num::NonZeroU64::get);
 }
 
-/// Runtime gate for the external NN crab (rl#58 + GCR rl#82), as a presence marker: the
-/// resource exists iff the NN crab is armed. The boot-menu path adds the whole NN stack at app
-/// build (plugins can't be added later) but does NOT know yet how the round resolves — so every
-/// NN system is gated on this, present ONLY once the round arms the crab
-/// ([`crate::may_arm_external_crab`]: solo always, networked only with synced weights).
-/// While absent (only behind the boot menu, before a round resolves — NumEnvs 0) the crab never
-/// spawns and `drive_lockstep` never pumps physics or calls [`sync_external_crab`]. Once a round
-/// resolves it is ARMED, or — if it can't be (networked-unsynced) — the round is REFUSED loudly
-/// (rl#114, no integer fallback; see [`crate::render`]'s `ensure_round_installed`). The
-/// scripted `Boot::Round` path inserts it armed at build; there is ONE gate for all paths. The
-/// run-condition and render's reads gate on `Option<Res<ExternalCrabArmed>>::is_some()`.
+/// Runtime gate for the external NN crab, as a presence marker: the resource exists iff the NN
+/// crab is armed. The boot-menu path adds the whole NN stack at app build (plugins can't be
+/// added later) but does NOT know yet how the round resolves — so every NN system is gated on
+/// this, present ONLY once the round arms the crab ([`crate::may_arm_external_crab`]: solo
+/// always, networked only with synced weights). While absent (only behind the boot menu, before
+/// a round resolves — NumEnvs 0) the crab never spawns and `drive_lockstep` never pumps physics
+/// or calls [`sync_external_crab`]. Once a round resolves it is ARMED, or — if it can't be
+/// (networked-unsynced) — the round is REFUSED loudly (no integer fallback; see
+/// [`crate::render`]'s `ensure_round_installed`). The scripted `Boot::Round` path inserts it
+/// armed at build; there is ONE gate for all paths. The run-condition and render's reads gate on
+/// `Option<Res<ExternalCrabArmed>>::is_some()`.
 #[derive(Resource)]
 pub struct ExternalCrabArmed;
 
@@ -331,13 +317,13 @@ fn external_crab_armed(active: Option<Res<ExternalCrabArmed>>) -> bool {
 
 /// Arm the one giant NN crab: insert the [`ExternalCrabArmed`] gate. Every arm site — the
 /// windowed `Boot::Round` + menu-transition clients, the screenshot path, the headless probe —
-/// goes through this one path. The walk target is now the player's actual position (no per-peer
+/// goes through this one path. The walk target is the player's actual position (no per-peer
 /// tunable steering it), so there is nothing solo-vs-networked to reconcile here.
 pub fn arm(world: &mut World) {
     world.insert_resource(ExternalCrabArmed);
-    // The armed crab IS the one trained Sally: a `rescue_nonfinite_crabs` fire is now a
+    // The armed crab IS the one trained Sally: a `rescue_nonfinite_crabs` fire is a
     // physics-correctness FAULT to surface LOUDLY (error log + aggregated telemetry, hard panic
-    // in debug/test), never a silent catch-and-respawn (rl#137). Marking it HERE — the one arm
+    // in debug/test), never a silent catch-and-respawn. Marking it HERE — the one arm
     // path every site funnels through — means no caller can arm Sally and forget to make her
     // rescue loud; training (which never calls `arm`) keeps the quiet routine-terminator rescue.
     world.insert_resource(crab_world::bot::CrabRescueIsFault);
@@ -349,7 +335,7 @@ pub fn arm(world: &mut World) {
 /// (`RapierPhysicsPlugin` + `PhysicsWorldPlugin` + `BotPlugin`) to the same app — see
 /// [`crate::render`]'s `add_external_nn_crab` — so the rig actually exists and steps. Every
 /// system is gated on [`ExternalCrabArmed`]: the scripted `Boot::Round` path arms it at build;
-/// the boot menu arms it only once the round resolves armable (rl#58 + GCR).
+/// the boot menu arms it only once the round resolves armable.
 pub struct ExternalCrabPlugin {
     /// Directory the brain (`brain.bin`) + normalizer (`normalizer.bin`) load from.
     /// Configurable so deploy can point it at the chosen checkpoint.
@@ -363,9 +349,8 @@ impl Plugin for ExternalCrabPlugin {
         let policy = Policy::load(&self.checkpoint_dir);
         // The NN crab only moves when a fitting checkpoint armed it; otherwise it stands
         // inert. `Policy::load` already logged WHY (a loud `error!` for a refused wrong-rig
-        // checkpoint, rl#121) — and every game entry point hard-fails on a bad checkpoint
-        // before this plugin is even built (rl#199), so a non-arming here is the legitimate
-        // "no brain yet" rest pose.
+        // checkpoint) — and every game entry point hard-fails on a bad checkpoint before this
+        // plugin is even built, so a non-arming here is the legitimate "no brain yet" rest pose.
         if !policy.is_loaded() {
             warn!(
                 "external_crab: no usable checkpoint at {} — NN crab holds rest pose",
@@ -375,7 +360,7 @@ impl Plugin for ExternalCrabPlugin {
         app.insert_non_send_resource(policy);
         app.insert_resource(ExternalCrabBridge::new(self.crab_spawn));
 
-        // Spawn the crab the first frame the gate is active (rl#58). On the scripted solo
+        // Spawn the crab the first frame the gate is active. On the scripted solo
         // path the gate is true from build, so this spawns on frame 1 exactly as before; on
         // the menu path it spawns only once the solo round is chosen. Reuses the bot stack's
         // own [`spawn_initial_crabs`] (one spawn path, no drift) after bumping NumEnvs to 1.
@@ -522,9 +507,8 @@ fn run_crab_policy(
     obs: Res<crab_world::bot::sensor::CrabObservation>,
     mut actions: ResMut<crab_world::bot::actuator::CrabActions>,
 ) {
-    // Spawn settle: hold zero torque while the fresh crab drops onto its legs, exactly as
-    // the demo/training do, so the policy doesn't drive a still-falling body into a locked
-    // pose that never walks. Counts down to 0, then the policy takes over.
+    // Spawn settle: hold zero torque while the fresh crab drops onto its legs (see the
+    // `settle` field doc), then the policy takes over.
     if bridge.settle > 0 {
         bridge.settle = crab_world::bot::settle_countdown(bridge.settle);
         if let Some(a) = actions.envs.first_mut() {
@@ -595,10 +579,10 @@ fn integrate_crab(
 /// draws the arena rig at the crab's game spot. The skin's [`crab_world::bot::skin::drive_bones`]
 /// applies this to the render BONES only; this system NEVER mutates the rapier-driven `CrabBodyPart`
 /// `Transform`s, because bevy_rapier reads a changed body `Transform` back into the physics body —
-/// a "cosmetic" link shift teleported the body ~12 m/step and exploded the solver into a NaN-motor
-/// crash (the play-day "there is no game to play"). So the render placement is decoupled from physics
-/// by construction: the policy, the colliders, and the lockstep hash all keep reading the raw ~1 m
-/// pose regardless of `Visuals`, so a windowed and a headless peer stay bit-identical.
+/// a "cosmetic" link shift teleports the body and explodes the solver. So the render placement is
+/// decoupled from physics by construction: the policy, the colliders, and the lockstep hash all
+/// keep reading the raw ~1 m pose regardless of `Visuals`, so a windowed and a headless peer stay
+/// bit-identical.
 ///
 /// The repose is a pure rigid translate (NO scale): the crab renders at its TRUE physics size so a
 /// collider wireframe overlays the mesh (render==physics). The giant FEEL comes from the human world
@@ -614,13 +598,9 @@ fn publish_skin_repose(
     let Some(mut out) = repose_out else {
         return;
     };
-    // The crab renders at its TRUE physics size (scale 1): the skin overlays its own colliders, so
-    // a collider wireframe sits exactly on the mesh (render==physics) and Sally never needs
-    // retraining at a bigger collider scale. The giant FEEL comes from the R-shrunk human world
-    // ([`crate::render::world_render_scale`]) instead of inflating the crab. The only repose left is
-    // a rigid translate (NO scale) carrying the arena rig (native parts near the arena origin) to
-    // the crab's render-frame game spot: `shift = game_spot·R − arena_carapace`. (`render_placement_m`
-    // gives `pivot` = the game spot and `pivot − shift` = the arena carapace.)
+    // Rigid translate carrying the arena rig to the crab's render-frame game spot:
+    // `shift = game_spot·R − arena_carapace` (`render_placement_m` gives `pivot` = the game spot
+    // and `pivot − shift` = the arena carapace). See the doc above for why no scale.
     let rs = crate::render::world_render_scale();
     out.0 = bridge.render_placement_m().map(|r| {
         let game = r.pivot; // crab's game-world XZ (m)

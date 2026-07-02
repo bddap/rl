@@ -1,5 +1,5 @@
-//! Render-side capture + apply for the crab pose extension frame (bddap/rl#151, increment 2
-//! windowed) — the render-only halves of [`crate::articulation`].
+//! Render-side capture + apply for the crab pose extension frame — the render-only halves
+//! of [`crate::articulation`].
 //!
 //! Under host-authority the windowed HOST runs the one rapier Sally; a windowed remote CLIENT
 //! renders the host's exact pose without simulating physics ([[silent-fallback-antipattern]]: no

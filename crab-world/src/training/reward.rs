@@ -64,20 +64,18 @@ use crate::bot::actuator::ACTION_SIZE;
 /// gradient — so the gentle quadratic is what bounds the cost instead. With
 /// `EFFORT_WEIGHT = 0.0006`:
 ///   * a ~0.5 m/s stride closes `0.5·PHYSICS_DT ≈ 0.0078 m/tick`, worth `24·0.0078 ≈ 0.19`;
-///   * a gait drive (`|d| ≈ 0.7`) taxes `0.0006·30·0.49 ≈ 0.009/tick` — ~5% of the stride's
-///     progress, and ~13 integrated over a 3 m traverse vs its `24·3 = 72` progress: progress
-///     dominates ~5.5:1;
-///   * the per-joint break-even sits at `|d| ≈ 3.2` (`0.0006·30·d² = 0.19`), well above any
-///     gait. A NON-progressing saturating thrash (`|d| = 3`, ~0 progress) pays `0.16/tick`,
-///     ≈ −243 over an episode — firmly net-negative. Convex, so the gentlest sufficient drive
+///   * a gait drive (`|d| ≈ 0.7`) taxes `0.0006·38·0.49 ≈ 0.011/tick` — ~6% of the stride's
+///     progress, and ~17 integrated over a full episode vs a 3 m traverse's `24·3 = 72`
+///     progress: progress dominates ~4:1;
+///   * the per-joint break-even sits at `|d| ≈ 2.9` (`0.0006·38·d² = 0.19`), well above any
+///     gait. A NON-progressing saturating thrash (`|d| = 3`, ~0 progress) pays `0.21/tick`,
+///     ≈ −308 over an episode — firmly net-negative. Convex, so the gentlest sufficient drive
 ///     is the cheapest.
 ///
-/// **Why 0.0006 (reverted from 0.0012, job 712 / owner 2026-07-01).** 0.0012 was doubled from
-/// this value on 06-28 to curb frantic over-driven motion, but during the ball-pursuit regression
-/// recovery the doubled tax over-suppressed locomotion — biasing a warm policy toward a
-/// low-progress stand-and-pose local optimum (job 696 report §C). Reverting to the original gentle
-/// whisper lifted near-band reach off its plateau (0.33 → 0.45, still climbing). If over-driven
-/// motion returns once pursuit is solid, prefer a different curb than re-doubling this term.
+/// **Why 0.0006 and not more.** A 2× (0.0012) variant meant to curb frantic over-driven motion
+/// instead over-suppressed locomotion, biasing a warm policy toward a low-progress
+/// stand-and-pose local optimum; reverting it lifted near-band reach off its plateau. If
+/// over-driven motion returns, prefer a different curb than re-raising this term.
 pub(crate) const EFFORT_WEIGHT: f32 = 0.0006;
 const EFFORT_EXP: f32 = 2.0;
 
@@ -520,11 +518,10 @@ mod tests {
 
     #[test]
     fn progress_episode_dominates_freezing() {
-        // Defect (B) — the episode-scale mismatch — must be closed: a full band traverse must
-        // CLEARLY out-earn standing still over a whole MAX_EPISODE_TICKS episode, and the
-        // integrated effort tax must stay a regularizer, never the dominant term. (The energy
-        // weight was strengthened 2× — owner 2026-06-28, "Sally too energetic" — so progress
-        // dominates the integrated tax by ~2:1 here, no longer the old >4:1, but still clearly.)
+        // Episode-scale check: a full band traverse must CLEARLY out-earn standing still
+        // over a whole MAX_EPISODE_TICKS episode, and the integrated effort tax must stay
+        // a regularizer, never the dominant term (~4:1 progress-dominant at the current
+        // EFFORT_WEIGHT).
         let ticks = MAX_EPISODE_TICKS as f32;
         // WALK: closes ~3 m over the episode (telescoped progress = P·Δd, path-independent),
         // paying a gait-drive tax (|d|≈0.7) every tick.
@@ -545,7 +542,7 @@ mod tests {
         assert!(
             walk_progress > 2.0 * walk_tax,
             "progress {walk_progress} must dominate the integrated effort {walk_tax} (a \
-             regularizer, not the main term — strengthened 2× but still progress-dominant)"
+             regularizer, not the main term)"
         );
     }
 }

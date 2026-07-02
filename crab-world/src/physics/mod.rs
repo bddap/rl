@@ -149,13 +149,8 @@ impl bevy::app::Plugin for CrabPhysicsPlugin {
     }
 }
 
-/// Fail loud, in every world, if the spawned Rapier context doesn't carry the
-/// crab's softened contact spring — the runtime backstop for the last-write-wins
-/// resource trap [`CrabPhysicsPlugin`] can't close at compile time. Runs once at
-/// `PostStartup` (after `RapierPhysicsPlugin` spawns the context at `PreStartup`):
-/// read-only, so it can't perturb the physics it guards. A panic here means the
-/// init was overridden after the plugin — wrong physics that would otherwise pass
-/// silently into the GCR lockstep.
+/// Runtime backstop that the spawned context carries [`CONTACT_SOFTNESS`] — see
+/// [`CrabPhysicsPlugin`] for the last-write-wins trap this guards.
 fn assert_contact_spring_applied(
     ctx: bevy::ecs::system::Query<
         &bevy_rapier3d::plugin::context::RapierContextSimulation,
@@ -179,13 +174,9 @@ fn assert_contact_spring_applied(
     );
 }
 
-/// Fail loud, in every world, if the spawned Rapier context's gravity isn't our
-/// explicit [`PHYSICS_GRAVITY`] — the runtime backstop, alongside
-/// [`assert_contact_spring_applied`], for the same last-write-wins resource trap.
-/// Gravity lives on the `RapierConfiguration` component (not the integration
-/// parameters), so it needs its own read-only query. A panic here means the config
-/// was overridden after the plugin — wrong physics that would otherwise pass silently
-/// into the GCR lockstep.
+/// Runtime backstop that the spawned context's gravity is [`PHYSICS_GRAVITY`] — see
+/// [`CrabPhysicsPlugin`] for the last-write-wins trap this guards. Gravity lives on
+/// `RapierConfiguration` (not the integration parameters), hence its own query.
 fn assert_gravity_applied(
     config: bevy::ecs::system::Query<
         &RapierConfiguration,
@@ -211,8 +202,7 @@ mod tests {
     use bevy::prelude::With;
     use bevy_rapier3d::prelude::{DefaultRapierContext, RapierContextSimulation};
 
-    /// The runtime guard the init-ordering comment used to be: after the real
-    /// production stack builds and runs `PreStartup`, the spawned Rapier context must
+    /// After the real production stack builds and runs `PreStartup`, the spawned Rapier context must
     /// carry our softened [`CONTACT_SOFTNESS`], not Rapier's stiff default. If a
     /// future plugin reorder broke the ordering [`CrabPhysicsPlugin`] enforces, the
     /// plugin would seed its own default context and this assert fails loudly —

@@ -54,7 +54,7 @@ pub fn build_screenshot_app(
     app
 }
 
-/// Build the NETWORKED offscreen screenshot app (rl#151 increment 2 windowed): the same offscreen
+/// Build the NETWORKED offscreen screenshot app: the same offscreen
 /// render as [`build_screenshot_app`], but its round is a real [`Coordinator`](crate::net_loop) over
 /// the wire — a HOST (the peer that formed the round with the lowest id) or a REMOTE CLIENT — instead
 /// of a scripted solo. Run two of these and the client's captured frame is the evidence that the
@@ -146,11 +146,8 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
                 .chain(),
         );
     // The crab render-mode cycle (mesh unless `render_mode` says otherwise), so an evidence frame
-    // can capture any of the views. No determinism pin here (rl#199): rapier's `parallel` feature
-    // is off (it conflicts with `enhanced-determinism` — see crab-world/Cargo.toml), so the solver
-    // is single-threaded on any executor; Bevy never overlaps conflicting-access systems, and the
-    // capture chain above is `chain()`ed. The old pin's solver-NaN rationale was tested and
-    // refuted (rl#199).
+    // can capture any of the views. No determinism pin here either — see the note in
+    // [`super::app::build_windowed_app`] (rl#199).
     super::render_mode::register(app, render_mode);
 }
 

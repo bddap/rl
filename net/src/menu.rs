@@ -1,10 +1,9 @@
-//! Boot menu for the windowed client: **Host / Join** (rl#58 — the old separate Solo
-//! button is gone, because Host-with-no-joiners IS solo, one codepath). Shown before any
+//! Boot menu for the windowed client: **Host / Join** (no separate Solo button —
+//! Host-with-no-joiners IS solo, one codepath). Shown before any
 //! round so the player picks a ROLE. Host opens a lobby and a **Start** button forms the
 //! round NOW: alone → an instant solo round, peers present → a host-commanded networked
-//! lockstep. Join sits in the lobby until the host Starts. This supersedes the old
-//! discover-or-fail boot (#55): there is no fragile discovery timeout — the host decides
-//! when to begin.
+//! lockstep. Join sits in the lobby until the host Starts. There is no fragile discovery
+//! timeout — the host decides when to begin.
 //!
 //! ## Determinism isolation — why the menu can't desync the sim
 //!
@@ -13,23 +12,21 @@
 //! channel:
 //! - The pre-round phases (`Menu`/`Connecting` — see [`crate::render::AppPhase`])
 //!   hold no [`Lockstep`] and no sim. The sim is built only at the `Playing` transition,
-//!   from the same [`net_loop::connect_and_form_lobby`]/[`crate::formation::solo_lockstep_for`] the
-//!   pre-menu boot used — so the agreed roster + seed form EXACTLY as before. The menu
+//!   by [`net_loop::connect_and_form_lobby`]/[`crate::formation::solo_lockstep_for`]. The menu
 //!   chooses *when* and *whether to network*; it contributes zero bytes to sim state.
 //! - Networked formation runs on a background thread ([`spawn_formation`]); the menu
 //!   only polls a channel for the finished [`net_loop::MatchResult`]. The barrier
-//!   ([`crate::membership`]) is the determinism-critical code — every peer still
-//!   freezes the byte-identical sorted roster. The host-triggered start (rl#58) moves only
-//!   the *moment* the barrier closes (the host's GO instead of a timer); the roster a peer
+//!   ([`crate::membership`]) is the determinism-critical code — every peer
+//!   freezes the byte-identical sorted roster. The host-triggered start decides only
+//!   the *moment* the barrier closes (the host's GO, not a timer); the roster a peer
 //!   freezes is the membership core's same `live_set`, so it can't fork the agreed set.
 //! - The only menu output that reaches the round is the [`StartChoice`] role, for Join the
 //!   host's endpoint id to DIAL, and the host's Start/Cancel signals — addressing +
 //!   commands, never sim data. Dialing only opens a QUIC link; the roster still comes from
 //!   the barrier, so a typo'd code fails to form a match, it can't form a WRONG one.
 //!
-//! So two peers that reach a round via the menu are bit-identical to two that reached
-//! it via the old auto-discover boot: the menu is a gate in front of the same machinery,
-//! not a new path into the sim.
+//! So the menu is a gate in front of the formation machinery, not a new path into
+//! the sim.
 
 use std::sync::mpsc;
 use std::thread;
@@ -42,13 +39,13 @@ use crate::lockstep::Lockstep;
 use crate::membership::Role;
 use crate::net_loop::{self, MatchResult, NetDriver};
 
-/// The role the player picked on the menu (rl#58: the menu is just Host / Join — the old
-/// separate Solo button is gone, since Host-with-no-joiners IS solo). Selects which side of
+/// The role the player picked on the menu (just Host / Join — Host-with-no-joiners IS
+/// solo). Selects which side of
 /// the host-triggered lobby we run; NOT sim state — the resulting roster/seed is the
 /// barrier's.
 #[derive(Debug, Clone)]
 pub enum StartChoice {
-    /// Host a match: open a host-triggered lobby (rl#58). Peers join by our code or mDNS;
+    /// Host a match: open a host-triggered lobby. Peers join by our code or mDNS;
     /// the host clicks **Start** to begin. Start with zero joiners is the SOLO round (the
     /// UI forms it locally and instantly — see [`solo_round`] — never depending on the
     /// barrier), and Start with peers present commands a synchronized networked start.
@@ -80,11 +77,11 @@ pub struct Formation {
     /// channel value isn't lost across frames.
     bound_rx: mpsc::Receiver<EndpointId>,
     bound: std::cell::Cell<Option<EndpointId>>,
-    /// The host's Start command (rl#58): one send commands the barrier's synchronized GO.
+    /// The host's Start command: one send commands the barrier's synchronized GO.
     /// `Some` only for a Host; a Join has no Start to give. `take`-n on first use so Start
     /// fires exactly once.
     start_tx: std::cell::Cell<Option<mpsc::Sender<()>>>,
-    /// The Cancel command (rl#58): a send (or simply dropping this [`Formation`]) tells the
+    /// The Cancel command: a send (or simply dropping this [`Formation`]) tells the
     /// barrier to bail and shut the session down with no phantom.
     cancel_tx: mpsc::Sender<()>,
     /// Live roster feed from the barrier (us + peers, sorted), updated each beat. Drained
@@ -147,7 +144,7 @@ impl Formation {
         self.roster().len()
     }
 
-    /// Host: command the barrier's synchronized start (rl#58). Fires the GO exactly once
+    /// Host: command the barrier's synchronized start. Fires the GO exactly once
     /// (the sender is taken on first call); a Join or a second call is a no-op. The caller
     /// uses this only when peers are present — a host alone takes the local instant-solo
     /// path instead.
@@ -157,7 +154,7 @@ impl Formation {
         }
     }
 
-    /// Cancel the formation (rl#58): tell the barrier to bail and shut its session down now,
+    /// Cancel the formation: tell the barrier to bail and shut its session down now,
     /// so leaving the lobby strands no ~12 s LAN phantom. Idempotent and also implied by
     /// simply dropping this [`Formation`] (the barrier's `cancel_rx` then disconnects).
     pub fn cancel(&self) {
@@ -235,8 +232,8 @@ fn spawn_formation(
 /// Kick off the host-triggered formation for a [`StartChoice`] (Host or Join). The single
 /// place the menu turns a choice into a running lobby, so the Host vs Join parameterization
 /// (who dials whom, who holds the Start command) lives in one spot. `weights_digest` is our
-/// loaded NN-crab checkpoint's digest (rl#82, GCR) and `asset_digest` our crab-model digest
-/// (rl#100, GCR), `0` for none — both advertised in formation so peers can agree on a shared
+/// loaded NN-crab checkpoint's digest and `asset_digest` our crab-model digest,
+/// `0` for none — both advertised in formation so peers can agree on a shared
 /// brain AND a shared collider asset before arming the float crab.
 pub fn begin(
     choice: &StartChoice,
@@ -257,9 +254,8 @@ pub fn begin(
 
 /// The match a finished formation yielded, ready to drive a round: the agreed
 /// [`Lockstep`] plus the [`NetDriver`] for its peers, or a solo lockstep when the barrier
-/// fell back to alone (rl#47) — either way a playable round, mirroring the old boot's
-/// `MatchResult` handling so the menu and the headless `net` driver treat "nobody showed"
-/// identically.
+/// fell back to alone — either way a playable round, so the menu and the headless `net`
+/// driver treat "nobody showed" identically.
 pub struct ReadyMatch {
     pub lockstep: Lockstep,
     pub net: Option<NetDriver>,
@@ -294,17 +290,16 @@ pub fn solo_round(seed: u64) -> ReadyMatch {
     }
 }
 
-// ── Pure menu navigation state machine (rl#82) ──────────────────────────────
+// ── Pure menu navigation state machine ──────────────────────────────────────
 //
 // The boot menu's focus + transitions as a Bevy-free, egui-free VALUE, so navigation and
 // the Start transition are unit-testable without a live window. The render layer gathers
 // raw input (keyboard, gamepad, egui clicks), reduces it to a [`MenuInput`], folds it
 // through [`MenuNav::step`], and EXECUTES the returned [`MenuAction`] in one exhaustive
-// `match`. So a focusable item with no wired action is a COMPILE error, not a silently dead
-// button — the failure mode that left the lobby Start unreachable for a gamepad-only player
-// (the boot menu had no controller input at all, so on the Deck nothing in it was operable,
-// Start included). Like [`StartChoice`], the FSM never touches the sim/[`Lockstep`]/
-// [`Formation`]; it only decides which abstract action a confirm means.
+// `match`. So a focusable item with no wired action is a COMPILE error, not a silently
+// dead button unreachable for a gamepad-only player. Like [`StartChoice`], the FSM never
+// touches the sim/[`Lockstep`]/[`Formation`]; it only decides which abstract action a
+// confirm means.
 
 /// A focusable item on the Host / Join chooser. The join-code text field sits between the
 /// two but is NOT in this ring — it's edited with mouse/keyboard, while a gamepad player
@@ -492,7 +487,7 @@ impl MenuNav {
 mod tests {
     use super::*;
 
-    /// Only a Host formation hands back a usable Start command (rl#58); a Join has no Start
+    /// Only a Host formation hands back a usable Start command; a Join has no Start
     /// to give (it waits for the host's), so its `start_tx` is dropped at spawn. Pins that
     /// `request_start` is a no-op for a joiner — it can never command a start it isn't
     /// allowed to — and that `cancel`/`hosting` route per role. `#[ignore]` because `begin`
@@ -540,9 +535,8 @@ mod tests {
     }
 
     // ── MenuNav: the pure navigation FSM (no window needed) ──────────────────
-    // These are the unit tests the controller refactor exists to enable: every
-    // navigation move and Start transition exercised as plain values, so the menu's
-    // logic is proven without a live Bevy/egui window or a gamepad.
+    // Every navigation move and Start transition exercised as plain values, so the
+    // menu's logic is proven without a live Bevy/egui window or a gamepad.
 
     /// The chooser starts on Host and Up/Down toggles between the two items (a two-item
     /// vertical list wraps trivially), with no side effect.
@@ -606,7 +600,7 @@ mod tests {
         assert_eq!(join, MenuNav::JoinLobby);
     }
 
-    /// THE Start transition, the bug this job fixes: a host confirming Start resolves against
+    /// THE Start transition: a host confirming Start resolves against
     /// the live roster — alone (≤1) → an instant solo round, peers present (≥2) → the
     /// networked GO. Solo resets to a clean chooser (we're entering Playing); networked stays
     /// in the lobby waiting for the formed match.

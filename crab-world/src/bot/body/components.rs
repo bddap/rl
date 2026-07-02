@@ -36,10 +36,9 @@ impl CrabAssets {
 /// [`crate::bot::skin::register`] (cosmetic skin) BOTH read this one resource, so a surface that has
 /// preflighted "no Sally" flips body + skin together off a single explicit value.
 ///
-/// WHY a resource and not the old way: rl-demo used to force the fallback by poisoning the
-/// `CRAB_MODEL_PATH` env at a `/nonexistent` path so the global resolver would miss for every
-/// reader — spooky action at a distance (a reader debugging "why is CRAB_MODEL_PATH nonsense?"
-/// had to find rl-demo's main). The explicit resource replaces that (bddap/rl#147).
+/// WHY a resource and not a `CRAB_MODEL_PATH` env override: poisoning a global env var to
+/// force the fallback is spooky action at a distance every other reader of the resolver
+/// feels (bddap/rl#147); an explicit value can't mislead a third reader.
 ///
 /// Defaults (FromWorld) to the shared preflight verdict [`crate::mesh_fallback::usable_model_path`],
 /// so a present-but-unloadable glb resolves to `None` here (the honest fallback); the body then
@@ -74,7 +73,7 @@ impl FromWorld for CrabModelPath {
 /// stand-in. When `true`, the recipe is the one the memoized [`crate::mesh_fallback::usable_model`]
 /// verdict ALREADY built and validated — cloned out, NOT re-parsed from the 36 MB glb (bddap/rl#153:
 /// the load+fit happens exactly ONCE, in the verdict; there is no second "is the mesh good?" check
-/// here, and the old `.expect("preflight should have rejected …")` is gone). A `bool`, not a
+/// here). A `bool`, not a
 /// path: the caller can only say real-or-fallback, never hand in a path that DISAGREES with the one
 /// asset the verdict validated — so the flip can't drift from the recipe. `has_model` co-derives with
 /// the verdict (`usable_model_path().is_some()`), so the `Err` arm is unreachable but degrades to the

@@ -101,10 +101,10 @@ pub(super) fn demo_controls(
     mut actions: ResMut<CrabActions>,
     mut settle: ResMut<DemoSettle>,
     // The SHARED render-mode cycle (the same `crab_view::RenderMode` GCR uses), so the demo and
-    // GCR show the ONE collider wireframe. Replaces the old Rapier debug-render toggle.
+    // GCR show the ONE collider wireframe.
     mut render_mode: ResMut<crate::crab_view::RenderMode>,
     // The demo's one seedable RNG — the respawn tilt and poke impulse draw from it (RL_DEMO_SEED
-    // pins them), so the demo no longer reaches for an unseeded `thread_rng`.
+    // pins them).
     mut rng: ResMut<super::DemoRng>,
 ) {
     let mut reset = keys.just_pressed(KeyCode::KeyR);

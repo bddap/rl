@@ -55,7 +55,7 @@ use crate::bot::body::vehicle_collision;
 // (accelerates, lift rises with airspeed, a torque inverts the body with no auto-right, drag
 // bounds speed), never specific speeds, so a tuning change doesn't churn the tests.
 //
-// Scale (owner 843): both craft are HALF their old linear size AND slowed to match, so a smaller
+// Scale (owner call): both craft are HALF their old linear size AND slowed to match, so a smaller
 // craft reads as proportionally slower buzzing the giant crab. The invariant: shrink size, top
 // speed, angular rate, and spawn as ONE set — a smaller model still at the old speed just zooms
 // past faster. Per-quantity factors live on each constant below. The one off-law knob is the
