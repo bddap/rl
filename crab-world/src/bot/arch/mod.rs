@@ -48,6 +48,10 @@ impl ArchId {
     /// this list is caught by `roundtrips_every_arch` below.
     pub const ALL: &'static [ArchId] = &[Self::Mlp256];
 
+    /// The arch a fresh start gets when `--arch` is omitted (the founding run's; the
+    /// trainer's CLI help states it in prose — keep that in sync).
+    pub const DEFAULT: ArchId = Self::Mlp256;
+
     /// The stable on-disk / CLI name. Kebab-case, never reused after a cull.
     pub fn name(self) -> &'static str {
         match self {
