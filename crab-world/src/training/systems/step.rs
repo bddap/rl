@@ -412,7 +412,7 @@ mod tests {
     use super::*;
     use crate::TrainConfig;
     use crate::bot::RESET_GRACE_TICKS;
-    use crate::bot::arch::{AnyBrain, ArchId};
+    use crate::bot::arch::AnyBrain;
     use crate::training::TrainBackend;
     use crate::training::algorithm::{StepEnd, Transition};
     use crate::training::reward::GRAB_REWARD;
