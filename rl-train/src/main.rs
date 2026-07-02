@@ -141,9 +141,10 @@ struct EvalArgs {
     #[arg(long, default_value = "checkpoints")]
     checkpoint_dir: PathBuf,
 
-    /// Physics ticks to run the policy for (after a short settle drop). At 64 Hz the default is
-    /// ~23 s of crab time — enough for a working gait to traverse a far target.
-    #[arg(long, default_value_t = 1500)]
+    /// Physics ticks to run the policy for (after a short settle drop). Defaults to one
+    /// training episode horizon ([`crab_world::training::systems::MAX_EPISODE_TICKS`],
+    /// ~23 s of crab time at 64 Hz) — enough for a working gait to traverse a far target.
+    #[arg(long, default_value_t = crab_world::training::systems::MAX_EPISODE_TICKS as u64)]
     ticks: u64,
 
     /// Fixed planar distance (m) to place the ball from the crab's spawn. Default is the far edge

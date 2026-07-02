@@ -190,6 +190,10 @@ fn sample_actions(
         .zip(drive_data.chunks_exact(ACTION_SIZE))
         .map(|(lp, row)| {
             let log_prob = if lp.is_nan() || lp.is_infinite() {
+                // Loud, like the drive-NaN guard below: a non-finite log-prob means the
+                // policy head is emitting garbage, and a silent 0.0 would skew the PPO
+                // importance ratio with no trace (#199 small-dupes: no silent zeroing).
+                warn!("non-finite log_prob from the policy head, substituting 0.0");
                 0.0
             } else {
                 lp.clamp(-20.0, 20.0)
@@ -313,10 +317,6 @@ pub(crate) fn brain_step(
         return;
     }
     let device = training.device;
-    // The horizon's target band (Copy), captured before the per-env borrows below so
-    // both `seed_target` paths sample from the same band the learner set this horizon —
-    // one band per horizon, identical for the lazy first-episode seed and every reset.
-    let band = training.band;
 
     // Sense → Think: normalize, one batched forward pass, sample an action per env.
     let obs_arrays = normalize_observations(&mut training, &obs);
@@ -349,7 +349,7 @@ pub(crate) fn brain_step(
     // CrabTargets stays empty and its obs target vector stays zero.
     for e in 0..n {
         if targets.get(e).is_none() {
-            seed_target(&mut targets, &spawns, e, band, &mut training.rng);
+            seed_target(&mut targets, &spawns, e, &mut training.rng);
         }
     }
 
@@ -387,7 +387,7 @@ pub(crate) fn brain_step(
         efforts: &efforts,
         rescued_envs: &rescued_envs,
     };
-    training.finalize_transitions(&inputs, &mut targets, &spawns, band);
+    training.finalize_transitions(&inputs, &mut targets, &spawns);
 
     log_effort_probe(&training.envs, &efforts);
     training.accumulate_drift(&body.drifts);

@@ -7,10 +7,10 @@ mod lifecycle;
 mod state;
 mod step;
 
-/// Re-exported only for `reward`'s calibration tests; `finalize_transitions` uses the
-/// [`lifecycle`]-local constant directly, so no non-test path needs it.
-#[cfg(test)]
-pub(crate) use lifecycle::MAX_EPISODE_TICKS;
+/// Re-exported for `reward`'s calibration tests and for `rl-train`'s eval `--ticks`
+/// default (one episode horizon); `finalize_transitions` uses the [`lifecycle`]-local
+/// constant directly.
+pub use lifecycle::MAX_EPISODE_TICKS;
 pub(crate) use lifecycle::{reset_crab, save_on_exit};
 pub use state::STEPS_PER_ROLLOUT;
 pub(crate) use state::{HorizonOutput, HorizonRequest, TrainingState};

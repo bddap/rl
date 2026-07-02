@@ -54,31 +54,6 @@ pub(crate) const CURRICULUM_REACH_RADIUS: f32 = 0.8;
 /// that has effectively mastered the task.
 pub(crate) const SOLID_REACH_FRACTION: f32 = 0.6;
 
-/// The fixed target-distance band `[min, max)` the policy trains on — `BAND_START_MIN` to the
-/// arena cap, the FULL arena range. Threaded from the learner to the rollout threads so they
-/// sample targets from the same range. Kept as a small type (rather than two bare constants)
-/// because every rollout thread already carries it as its per-horizon sampling band.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TargetBand {
-    min: f32,
-    max: f32,
-}
-
-impl TargetBand {
-    /// The fixed full-range band — the only band there is.
-    pub(crate) const fn start() -> Self {
-        Self {
-            min: BAND_START_MIN,
-            max: TARGET_ARENA_HALF,
-        }
-    }
-
-    /// The band `[min, max)` a thread samples a target distance from.
-    pub(crate) fn range(self) -> (f32, f32) {
-        (self.min, self.max)
-    }
-}
-
 /// Exponent of the NEAR-HEAVY distance draw: a target distance is `min + (max−min)·u^EXP` for
 /// `u ~ U[0,1)`, so `EXP > 1` biases the draw toward the near edge while still spanning the whole
 /// band. At `EXP = 2` over the 1.5–9 m band the mass splits ~45 % into the near 1.5–3 m sub-band,
@@ -91,7 +66,8 @@ impl TargetBand {
 const NEAR_BIAS_EXP: f32 = 2.0;
 
 /// Sample a fresh target world position for a crab whose env spawns at `origin`, at a planar
-/// distance drawn NEAR-HEAVY from the [`TargetBand`] band (see [`NEAR_BIAS_EXP`]) and at EXACTLY
+/// distance drawn NEAR-HEAVY (see [`NEAR_BIAS_EXP`]) from the fixed full-arena band
+/// `[BAND_START_MIN, TARGET_ARENA_HALF)` and at EXACTLY
 /// that distance — by construction the returned target's planar distance from `origin` is the
 /// drawn distance, never less. A random distance in the band is fixed first; then a HEADING is
 /// chosen so the full-distance target lands inside the arena (see [`TARGET_ARENA_HALF`]): random
@@ -114,8 +90,8 @@ const NEAR_BIAS_EXP: f32 = 2.0;
 /// the observation re-expresses in body axes each tick. `pub(crate)` so the demo's red-ball
 /// marker (`play::target_ball`) relocates its target through the very same rule training samples
 /// — one sampling rule, so the demo can never pose a target training never saw.
-pub(crate) fn sample_target(origin: Vec3, band: TargetBand, rng: &mut impl rand::Rng) -> Vec3 {
-    let (min, max) = band.range();
+pub(crate) fn sample_target(origin: Vec3, rng: &mut impl rand::Rng) -> Vec3 {
+    let (min, max) = (BAND_START_MIN, TARGET_ARENA_HALF);
     // Near-heavy: u^EXP pushes the uniform draw toward `min` (near), still spanning to `max`.
     let u: f32 = rng.gen_range(0.0..1.0);
     let dist = min + (max - min) * u.powf(NEAR_BIAS_EXP);
@@ -150,8 +126,8 @@ pub(crate) fn sample_target(origin: Vec3, band: TargetBand, rng: &mut impl rand:
     at(theta)
 }
 
-/// Install a fresh target for env `e`, sampled around its spawn slot from the current
-/// `band` using the training run's seeded RNG. The one home for "a new target is needed" —
+/// Install a fresh target for env `e`, sampled around its spawn slot using the training
+/// run's seeded RNG. The one home for "a new target is needed" —
 /// called to seed the first episode (envs start target-less) and to refresh on every reset, so
 /// both callers sample it identically. (Training holds the target fixed within an episode — no
 /// resample on reach; see the reach-hover note in `brain_step`.)
@@ -159,12 +135,11 @@ pub(crate) fn seed_target(
     targets: &mut CrabTargets,
     spawns: &CrabSpawns,
     e: usize,
-    band: TargetBand,
     rng: &mut rand::rngs::StdRng,
 ) {
     if let Some(slot) = targets.envs.get_mut(e) {
         let origin = spawns.0.get(e).copied().unwrap_or(Vec3::ZERO);
-        *slot = Some(sample_target(origin, band, rng));
+        *slot = Some(sample_target(origin, rng));
     }
 }
 
@@ -181,15 +156,14 @@ mod tests {
         // lied; this pins that it never does again. Checked from a central, an edge, and a
         // corner origin (where only the inward arc of headings fits).
         let mut rng = rand::thread_rng();
-        let band = TargetBand::start();
-        let (min, max) = band.range();
+        let (min, max) = (BAND_START_MIN, TARGET_ARENA_HALF);
         for origin in [
             Vec3::ZERO,                // central — every heading fits
             Vec3::new(6.0, 0.0, 0.0),  // edge row — only the inward half fits
             Vec3::new(8.0, 0.0, -8.0), // corner — only a narrow inward arc fits
         ] {
             for _ in 0..2000 {
-                let t = sample_target(origin, band, &mut rng);
+                let t = sample_target(origin, &mut rng);
                 assert!(t.is_finite(), "a sampled target is always finite");
                 assert!(
                     t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF,
@@ -208,12 +182,13 @@ mod tests {
 
     #[test]
     fn the_band_is_the_full_arena_range() {
-        // Pins the bitter-lesson invariant: the band spans the WHOLE arena from the start (near
-        // edge to the arena cap), with no near-capping growth curriculum.
-        let (min, max) = TargetBand::start().range();
-        assert_eq!(min, BAND_START_MIN);
-        assert_eq!(max, TARGET_ARENA_HALF);
-        assert!(max > min, "the band is non-empty");
+        // Pins the bitter-lesson invariant: the band spans the WHOLE arena (near edge to the
+        // arena cap), with no near-capping growth curriculum, and is non-empty.
+        assert!(BAND_START_MIN < TARGET_ARENA_HALF, "the band is non-empty");
+        assert!(
+            TARGET_ARENA_HALF > 5.0,
+            "the far edge reaches a real far distance, not a near-capped range"
+        );
     }
 
     #[test]
@@ -225,12 +200,12 @@ mod tests {
         // tail must stay fat — the whole point of the 3→2 lean was to un-starve far.
         let mut rng = rand::thread_rng();
         let origin = Vec3::ZERO;
-        let (min, max) = TargetBand::start().range();
+        let (min, max) = (BAND_START_MIN, TARGET_ARENA_HALF);
         let near_edge = 3.0; // the 1.5-3 m near sub-band
         let far_edge = 6.0;
         let (mut near, mut far, n) = (0u32, 0u32, 20_000u32);
         for _ in 0..n {
-            let d = planar_dist(sample_target(origin, TargetBand::start(), &mut rng), origin);
+            let d = planar_dist(sample_target(origin, &mut rng), origin);
             if d < near_edge {
                 near += 1;
             }
