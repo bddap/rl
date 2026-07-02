@@ -23,7 +23,7 @@ use tracing::warn;
 use crate::bot::arch::ArchId;
 use crate::bot::sensor::OBS_SIZE;
 
-use super::envelope::{ArtifactKind, EnvelopeError, read_envelope, write_envelope};
+use super::envelope::{ArtifactKind, EnvelopeError, read_envelope_expecting, write_envelope};
 
 /// Per-element Welford state: running `(count, mean, M2)` for each of the `OBS_SIZE`
 /// observation elements. The fold and the parallel combine live here once, so the
@@ -288,13 +288,7 @@ impl ObsNormalizer {
     /// trainer aborts, inference refuses the whole checkpoint — never a warm brain
     /// normalizing against cold or mis-paired stats.
     pub(crate) fn load(path: &Path, expected_arch: ArchId) -> Result<Self, EnvelopeError> {
-        let env = read_envelope(path, ArtifactKind::ObsNormalizer)?;
-        if env.arch != expected_arch {
-            return Err(EnvelopeError::ArchMismatch {
-                found: env.arch,
-                expected: expected_arch,
-            });
-        }
+        let env = read_envelope_expecting(path, ArtifactKind::ObsNormalizer, expected_arch)?;
         let data: NormalizerSnapshot = bincode::deserialize(&env.payload)
             .map_err(|e| EnvelopeError::Corrupt(format!("obs normalizer payload: {e}")))?;
         Self::from_snapshot(data).ok_or_else(|| {

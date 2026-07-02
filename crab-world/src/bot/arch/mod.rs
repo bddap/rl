@@ -31,11 +31,13 @@ pub(crate) const LOG_STD_MAX: f32 = 0.5;
 
 /// Architecture identity — the registry's key. In process it is this enum (an unregistered
 /// arch is unrepresentable); on disk / on the wire it is ALWAYS its stable kebab-case
-/// string via the serde attrs below, NEVER a serde enum: bincode-1 (the workspace encoder)
-/// encodes enum variants by index and ignores rename attrs, so a bare enum field would
-/// re-map every tagged file when a variant is culled.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(try_from = "String", into = "String")]
+/// string via [`ArchId::name`]/[`TryFrom<String>`], NEVER a serde enum: bincode-1 (the
+/// workspace encoder) encodes enum variants by index and ignores rename attrs, so a bare
+/// enum field would re-map every tagged file when a variant is culled. Deliberately NO
+/// serde derive — the checkpoint envelope encodes a plain `String` and validates through
+/// `TryFrom` explicitly (so an unknown arch is attributed by name), and a derive would be
+/// a second, unused encoding waiting to be reached for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchId {
     Mlp256,
 }

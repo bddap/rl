@@ -156,6 +156,34 @@ fn migrate_file(path: &Path, kind: ArtifactKind) -> Result<FileVerdict, String> 
                     legacy.version
                 ));
             }
+            // Validate the INNER record too (validate-then-wrap applies to every arm):
+            // decode it into a real Adam optimizer, contained because burn's bytes
+            // recorder panics on malformed input. An unparseable inner record fails the
+            // migration here instead of surfacing as a cold-moments warn at every resume.
+            let record_bytes = legacy.record.clone();
+            let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                use burn::optim::Optimizer;
+                use burn::record::Recorder;
+                crate::training::checkpoint::crab_optimizer::<crate::training::TrainBackend>()
+                    .load_record(
+                        BinBytesRecorder::<FullPrecisionSettings>::default()
+                            .load(record_bytes, &device)?,
+                    );
+                Ok::<(), burn::record::RecorderError>(())
+            }))
+            .map_err(|_| {
+                format!(
+                    "{} carries an optimizer record that does not decode",
+                    path.display()
+                )
+            })?
+            .map_err(|e| {
+                format!(
+                    "{} carries an optimizer record that does not decode: {e}",
+                    path.display()
+                )
+            })?;
             legacy.record
         }
         ArtifactKind::ObsNormalizer => {
@@ -210,11 +238,21 @@ mod tests {
             bincode::serialize(&ReturnNormalizer::new().to_data()).unwrap(),
         )
         .unwrap();
+        // A REAL (fresh/empty) Adam record, not junk bytes — the migration validates the
+        // inner record, so the fixture must carry what legacy `save_optimizer` wrote.
+        let opt_record = {
+            use burn::optim::Optimizer;
+            use burn::record::Recorder;
+            let opt = crate::training::checkpoint::crab_optimizer::<TrainBackend>();
+            BinBytesRecorder::<FullPrecisionSettings>::default()
+                .record(opt.to_record(), ())
+                .unwrap()
+        };
         std::fs::write(
             dir.join("optimizer.bin"),
             bincode::serialize(&LegacyOptimizerCheckpoint {
                 version: LEGACY_OPTIMIZER_VERSION,
-                record: vec![],
+                record: opt_record,
             })
             .unwrap(),
         )
