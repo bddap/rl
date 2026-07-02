@@ -137,11 +137,19 @@ fn face_dir(f: usize, x: usize, y: usize) -> Vec3 {
     .normalize()
 }
 
+/// Below-horizon tone: near-black, darker than the zenith, so "down" is the darkest
+/// direction in the sky and the horizon reads as a crisp bright→dark edge.
+const BELOW_HORIZON: Vec3 = Vec3::new(0.008, 0.010, 0.022);
+
 /// The final sRGB color of the sky in direction `dir`: base gradient + Milky-Way glow,
-/// then any star on top.
+/// then any star on top — then everything fades to [`BELOW_HORIZON`] within ~3° under
+/// the horizon. The sky below eye level IS visible in flight (past the ground's draw
+/// distance), and a crisp bright→dark edge there is the pilot's attitude reference
+/// (rl#197); fading stars and Milky Way too keeps "starry" an unambiguous up-cue.
 fn sky_color(dir: Vec3) -> [u8; 3] {
     let mut c = base_gradient(dir) + milky_way(dir);
     c += star(dir);
+    c = c.lerp(BELOW_HORIZON, smoothstep(0.0, 0.05, -dir.y));
     [to_u8(c.x), to_u8(c.y), to_u8(c.z)]
 }
 
@@ -149,7 +157,7 @@ fn sky_color(dir: Vec3) -> [u8; 3] {
 /// zenith — the usual night look (airglow lifts the horizon a touch). Values are sRGB
 /// 0..1; the screenshot cameras are untonemapped so these bytes show as-is. Kept dark
 /// enough to read as night but blue enough not to be a black void. Below the horizon
-/// stays at the horizon tone; it's hidden by the ground anyway.
+/// this clamps to the horizon tone; [`sky_color`] then fades it to [`BELOW_HORIZON`].
 fn base_gradient(dir: Vec3) -> Vec3 {
     let horizon = Vec3::new(0.078, 0.122, 0.235); // ~(20,31,60)
     let zenith = Vec3::new(0.024, 0.039, 0.110); //  ~(6,10,28)
@@ -297,6 +305,21 @@ mod tests {
             zen.length() < hor.length(),
             "zenith should be darker than horizon"
         );
+    }
+
+    /// Below the horizon the FULL sky (gradient + band + stars) is darker than the
+    /// zenith, so the horizon reads as a crisp edge and "starry" means up (rl#197).
+    #[test]
+    fn below_horizon_is_darkest() {
+        let zenith = base_gradient(Vec3::Y).length();
+        for dir in [Vec3::new(0.6, -0.3, 0.5).normalize(), Vec3::NEG_Y] {
+            let [r, g, b] = sky_color(dir);
+            let below = Vec3::new(r as f32, g as f32, b as f32) / 255.0;
+            assert!(
+                below.length() < zenith,
+                "below-horizon sky should be darker than the zenith: {below:?}"
+            );
+        }
     }
 
     /// Stars are sparse: only a small fraction of sampled directions light one up, so

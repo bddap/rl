@@ -6,7 +6,7 @@ use super::app::{install_armed_nn_crab, seed_external_crab_solo};
 use super::driver::{ScriptedPackInput, coordinator, drive_lockstep, insert_core};
 use super::hud::{spawn_hud, update_hud};
 use super::input::gather_input;
-use super::scene::{FpCamera, apply_transforms, reconcile_avatars, spawn_world};
+use super::scene::{FpCamera, apply_transforms, follow_ground, reconcile_avatars, spawn_world};
 use super::*;
 use crate::net_loop::NetDriver;
 use crab_world::screenshot::{self, ShotProgress, ShotTarget};
@@ -139,6 +139,7 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
                 drive_lockstep,
                 reconcile_avatars,
                 apply_transforms,
+                follow_ground,
                 apply_shot_cam_offset,
                 update_hud,
                 update_controls_ui::<GcrControls>,

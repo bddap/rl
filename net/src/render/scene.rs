@@ -6,6 +6,10 @@
 use super::driver::{CockpitPose, GameState, LocalVehicle};
 use super::input::{CameraPitch, CameraYaw};
 use super::*;
+use bevy::asset::RenderAssetUsages;
+use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::math::Affine2;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 // ---------------------------------------------------------------------------
 // Entity markers
@@ -29,6 +33,101 @@ pub(super) struct FpCamera;
 // Scene + interpolated transforms
 // ---------------------------------------------------------------------------
 
+/// Visual ground quad edge length (render m). The quad is re-centered on the camera
+/// every frame ([`follow_ground`]), so all that matters is that its edge sits past the
+/// cameras' 1000 render-m far plane in every direction — 4000 gives 2× margin. Together
+/// the two make the visual ground unbounded by construction, matching the unbounded
+/// physics ground: there is no reachable edge.
+const GROUND_SIZE: f32 = 4000.0;
+
+/// Checker repeat period (render m): one texture repeat is 2×2 coarse cells, each a
+/// 16×16 sub-checker. Deliberately RENDER-frame meters, NOT human-world meters shrunk
+/// by [`world_render_scale`]: the pilot flies at TRUE arena scale ([`cockpit_camera`])
+/// and is who the cue serves (rl#197) — the 2 m coarse cells read from cruise altitude,
+/// the 0.125 m fine sub-cells (≈4.5 human-m) give optic flow at landing height and on
+/// foot.
+const CHECKER_PERIOD: f32 = 4.0;
+
+/// The ground quad, re-centered on the camera each frame by [`follow_ground`].
+#[derive(Component)]
+pub(super) struct GroundPlane;
+
+/// Re-center the ground quad on the camera, snapped to the checker repeat period so the
+/// pattern stays world-stationary (a non-multiple shift would make it swim underfoot).
+/// With the quad's edge past the far plane ([`GROUND_SIZE`]), flying off the ground is
+/// impossible, not merely far away.
+pub(super) fn follow_ground(
+    cams: Query<&Transform, (With<FpCamera>, Without<GroundPlane>)>,
+    mut grounds: Query<&mut Transform, (With<GroundPlane>, Without<FpCamera>)>,
+) {
+    let Ok(cam) = cams.single() else { return };
+    for mut ground in &mut grounds {
+        ground.translation.x = (cam.translation.x / CHECKER_PERIOD).round() * CHECKER_PERIOD;
+        ground.translation.z = (cam.translation.z / CHECKER_PERIOD).round() * CHECKER_PERIOD;
+    }
+}
+
+/// The ground's repeat-tiled checker texture: a coarse 2×2 checker with a fainter
+/// sub-checker on top (two spatial frequencies — see [`CHECKER_PERIOD`]), tinting the
+/// material's `base_color` so the ground keeps its gray-box tone. Built with a full mip
+/// chain — box-filtering per level — so the pattern fades to flat gray in the distance
+/// instead of shimmering (a generated `Image` gets no auto-mips).
+fn ground_checker(images: &mut Assets<Image>) -> Handle<Image> {
+    const SIZE: usize = 256; // level-0 px; power of two so mip dims match wgpu's size>>level
+    let mut levels: Vec<Vec<u8>> = vec![
+        (0..SIZE * SIZE)
+            .flat_map(|i| {
+                let (x, y) = (i % SIZE, i / SIZE);
+                let coarse = (x / (SIZE / 2) + y / (SIZE / 2)).is_multiple_of(2);
+                let fine = (x / (SIZE / 32) + y / (SIZE / 32)).is_multiple_of(2);
+                let v = 225 + if coarse { 16u8 } else { 0 } + if fine { 14 } else { 0 };
+                [v, v, v, 255]
+            })
+            .collect(),
+    ];
+    let mut w = SIZE;
+    while w > 1 {
+        let prev = levels.last().unwrap();
+        let half = w / 2;
+        levels.push(
+            (0..half * half)
+                .flat_map(|i| {
+                    let (x, y) = ((i % half) * 2, (i / half) * 2);
+                    let at = |x: usize, y: usize| prev[(y * w + x) * 4] as u16;
+                    let v = ((at(x, y) + at(x + 1, y) + at(x, y + 1) + at(x + 1, y + 1)) / 4) as u8;
+                    [v, v, v, 255]
+                })
+                .collect(),
+        );
+        w = half;
+    }
+    let mip_count = levels.len() as u32;
+    // `Image::new` asserts data == level-0 size, so build uninit and attach the full
+    // mip chain (levels concatenated largest-first, bevy's expected layout) by hand.
+    let mut image = Image::new_uninit(
+        Extent3d {
+            width: SIZE as u32,
+            height: SIZE as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.data = Some(levels.concat());
+    image.texture_descriptor.mip_level_count = mip_count;
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        // Most of a cockpit view meets the ground at grazing angles, where isotropic
+        // trilinear blurs the checker to flat gray — right where the optic-flow cue
+        // matters most.
+        anisotropy_clamp: 16,
+        ..ImageSamplerDescriptor::linear()
+    });
+    images.add(image)
+}
+
 /// Spawn the static gray-box world (ground + extraction marker + a light) and the giant
 /// crab. Player avatars are spawned by [`reconcile_avatars`] as sim players appear. Poses
 /// are placed every frame by [`apply_transforms`]; here we just create the meshes once.
@@ -36,6 +135,7 @@ pub(super) fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     state: NonSend<GameState>,
     // Whether the NN crab is ACTIVE this round: when so AND a skin model resolves, the
     // physics-bones silhouette is spawned hidden (the skinned NN rig is the visible crab). A
@@ -55,11 +155,19 @@ pub(super) fn spawn_world(
     // lone exception — it renders at native physics size.
     let rs = world_render_scale();
 
-    // Ground: a large gray plane at Y=0.
+    // Ground: a checkered gray plane at Y=0, camera-following ([`follow_ground`]) so it
+    // has no reachable edge — the physics ground is unbounded, and a fixed quad puts
+    // "the end of the world" seconds of flight out (rl#197). The checker's optic flow
+    // is what gives the pilot altitude and speed; plain gray gave none.
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(400.0 * rs, 400.0 * rs))),
+        GroundPlane,
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(GROUND_SIZE, GROUND_SIZE))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.30, 0.32, 0.34),
+            base_color_texture: Some(ground_checker(&mut images)),
+            // Plane3d UVs span 0..1 across the whole quad; scale them so one texture
+            // repeat covers CHECKER_PERIOD meters.
+            uv_transform: Affine2::from_scale(Vec2::splat(GROUND_SIZE / CHECKER_PERIOD)),
             perceptual_roughness: 0.95,
             ..default()
         })),

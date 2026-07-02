@@ -11,7 +11,9 @@ use super::driver::{
 };
 use super::hud::{spawn_hud, sync_controls_context, update_hud};
 use super::input::{gather_input, grab_cursor_once, quit_game};
-use super::scene::{apply_transforms, reconcile_avatars, spawn_fp_camera, spawn_world};
+use super::scene::{
+    apply_transforms, follow_ground, reconcile_avatars, spawn_fp_camera, spawn_world,
+};
 use super::*;
 
 /// How the windowed client starts up: at the boot MENU (the interactive default — the
@@ -134,6 +136,7 @@ pub fn build_windowed_app(
                 drive_lockstep,
                 reconcile_avatars,
                 apply_transforms,
+                follow_ground,
                 update_hud,
             )
                 .chain()
