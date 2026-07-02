@@ -110,7 +110,8 @@ pub(crate) enum EnvelopeError {
     Absent,
     Io(std::io::Error),
     /// No [`MAGIC`]: a pre-envelope legacy file. The loader has no untagged-read path;
-    /// the fix is the one-shot migration tool.
+    /// the fix is re-copying from a migrated checkpoint (the fleet migrated in rl#200,
+    /// then the one-shot migration tool was deleted).
     Legacy,
     /// Magic present but the envelope doesn't decode — a torn or corrupt file.
     Corrupt(String),
@@ -141,10 +142,13 @@ impl std::fmt::Display for EnvelopeError {
             Self::Legacy => write!(
                 f,
                 "legacy pre-envelope file — the fleet was migrated to tagged envelopes \
-                 (rl#200); re-copy from a migrated checkpoint, or resurrect the deleted \
-                 `migrate-checkpoint` tool from git history"
+                 (rl#200); re-copy from a migrated checkpoint, or build the pre-deletion \
+                 tree from git history for its `migrate-checkpoint` tool"
             ),
-            Self::Corrupt(e) => write!(f, "corrupt envelope: {e}"),
+            Self::Corrupt(e) => write!(
+                f,
+                "corrupt envelope: {e} — a torn or truncated copy; re-copy or redeploy"
+            ),
             Self::WrongKind { found, expected } => write!(
                 f,
                 "file holds a {found:?} artifact, not the {expected} expected here — \
