@@ -100,9 +100,9 @@ pub trait ControlScheme: 'static + Send + Sync {
     /// is reachable by a stable id — a new context can't be added screenshot-unreachable.
     fn context_id(ctx: Self::Context) -> &'static str;
 
-    /// Resolve a context id (from `RL_SHOW_CONTROLS_CONTEXT`) to a context, accepting the
-    /// canonical [`context_id`](ControlScheme::context_id) plus any aliases. `None` for an
-    /// unknown id (the override then leaves the default context).
+    /// Resolve a canonical [`context_id`](ControlScheme::context_id) (from
+    /// `RL_SHOW_CONTROLS_CONTEXT`) back to its context. `None` for an unknown id (the
+    /// override then leaves the default context).
     fn context_from_id(id: &str) -> Option<Self::Context>;
 
     /// The action whose HOLD reveals the overlay (and whose glyph the corner hint shows).

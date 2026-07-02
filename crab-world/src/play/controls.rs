@@ -127,7 +127,7 @@ impl ControlScheme for DemoControls {
 
     fn context_from_id(id: &str) -> Option<DemoContext> {
         match id {
-            "inspect" | "demo" => Some(DemoContext::Inspect),
+            "inspect" => Some(DemoContext::Inspect),
             _ => None,
         }
     }
