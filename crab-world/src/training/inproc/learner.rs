@@ -154,8 +154,8 @@ fn log_iteration(r: &IterReport) {
         0.0
     };
     let (reached, finished) = r.reach;
-    // Reach fraction over finished episodes, so an advance's approach is legible (it
-    // climbs toward the threshold); `-` when no episode finished this iter.
+    // Reach fraction over finished episodes — the same signal the best-keeper gates
+    // promotion on (`SOLID_REACH_FRACTION`); `-` when no episode finished this iter.
     let reach_note = if finished > 0 {
         format!("{:.2}", reached as f64 / finished as f64)
     } else {
