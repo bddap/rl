@@ -8,7 +8,9 @@ use crate::bot::actuator::CrabActions;
 use crate::bot::body::CrabJointId;
 use crate::controls::just_pressed;
 
-use super::controls::{DemoAction, DemoControls};
+use super::controls::{
+    torque_stick_y, DemoAction, DemoControls, PICK_JOINT_NEXT_BUTTON, PICK_JOINT_PREV_BUTTON,
+};
 
 /// Hands-on gamepad control state. `active` is toggled live with B/circle (and
 /// seeded by `--manual-control`); `selected` is the joint the right stick drives,
@@ -57,11 +59,11 @@ pub(super) fn manual_control_step(
     if manual.active {
         // Cycle the live joint by slot, wrapping. `from_index` always yields a joint for a
         // value in 0..COUNT, so `selected` becomes `Some(joint)` on the first press.
-        if gp.just_pressed(GamepadButton::DPadUp) {
+        if gp.just_pressed(PICK_JOINT_NEXT_BUTTON) {
             manual.selected =
                 CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + 1) % n));
         }
-        if gp.just_pressed(GamepadButton::DPadDown) {
+        if gp.just_pressed(PICK_JOINT_PREV_BUTTON) {
             manual.selected =
                 CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + n - 1) % n));
         }
@@ -70,7 +72,7 @@ pub(super) fn manual_control_step(
             *a = [0.0; CrabJointId::COUNT];
             line = match manual.selected {
                 Some(id) => {
-                    let v = gp.right_stick().y.clamp(-1.0, 1.0);
+                    let v = torque_stick_y(gp).clamp(-1.0, 1.0);
                     let sel = id.index();
                     a[sel] = v;
                     // The typed joint names itself (`Debug`) — no entity lookup that could miss.

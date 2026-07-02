@@ -8,6 +8,11 @@ use bevy::prelude::*;
 use crate::bot::body::CrabCarapace;
 use crate::screenshot::{self, ShotTarget};
 
+use super::controls::{
+    orbit_stick, ORBIT_DRAG_BUTTON, ORBIT_PITCH_DOWN_KEY, ORBIT_PITCH_UP_KEY,
+    ORBIT_YAW_LEFT_KEY, ORBIT_YAW_RIGHT_KEY, ZOOM_IN_KEY, ZOOM_IN_TRIGGER, ZOOM_OUT_KEY,
+    ZOOM_OUT_TRIGGER,
+};
 use super::ShotConfig;
 
 /// Orbit camera state. `focus` tracks the crab so it stays centered.
@@ -70,8 +75,8 @@ pub(super) fn orbit_camera(
     let dt = time.delta_secs();
     let (mut d_yaw, mut d_pitch, mut d_zoom) = (0.0f32, 0.0f32, 0.0f32);
 
-    // Mouse: right-drag to orbit, wheel to zoom.
-    if mouse.pressed(MouseButton::Right) {
+    // Mouse: drag to orbit, wheel to zoom.
+    if mouse.pressed(ORBIT_DRAG_BUTTON) {
         for ev in motion.read() {
             d_yaw -= ev.delta.x * 0.006;
             d_pitch -= ev.delta.y * 0.006;
@@ -83,40 +88,37 @@ pub(super) fn orbit_camera(
         d_zoom -= ev.y * 0.4;
     }
 
-    // Keyboard orbit; -/= zoom. Right-yaw is the comma key, not the right arrow:
-    // the right arrow toggles the collider wireframes (see `demo::demo_controls`), and
-    // mouse right-drag already covers free-look orbiting in every direction.
-    if keys.pressed(KeyCode::ArrowLeft) {
+    // Keyboard orbit + zoom (key choices and their why live beside DEMO_BINDINGS).
+    if keys.pressed(ORBIT_YAW_LEFT_KEY) {
         d_yaw += dt;
     }
-    if keys.pressed(KeyCode::ArrowUp) {
+    if keys.pressed(ORBIT_PITCH_UP_KEY) {
         d_pitch += dt;
     }
-    if keys.pressed(KeyCode::ArrowDown) {
+    if keys.pressed(ORBIT_PITCH_DOWN_KEY) {
         d_pitch -= dt;
     }
-    if keys.pressed(KeyCode::Comma) {
+    if keys.pressed(ORBIT_YAW_RIGHT_KEY) {
         d_yaw -= dt;
     }
-    if keys.pressed(KeyCode::Minus) {
+    if keys.pressed(ZOOM_OUT_KEY) {
         d_zoom += dt * 3.0;
     }
-    if keys.pressed(KeyCode::Equal) {
+    if keys.pressed(ZOOM_IN_KEY) {
         d_zoom -= dt * 3.0;
     }
 
-    // Gamepad: left stick orbits, triggers zoom. (The RIGHT stick is reserved for
-    // --manual-control joint actuation; left-stick orbit is the convention anyway.)
+    // Gamepad: stick orbits, triggers zoom.
     for gp in gamepads.iter() {
-        let ls = gp.left_stick();
+        let ls = orbit_stick(gp);
         if ls.length() > 0.15 {
             d_yaw -= ls.x * dt * 2.5;
             d_pitch += ls.y * dt * 2.5;
         }
-        if gp.pressed(GamepadButton::RightTrigger2) {
+        if gp.pressed(ZOOM_OUT_TRIGGER) {
             d_zoom += dt * 4.0;
         }
-        if gp.pressed(GamepadButton::LeftTrigger2) {
+        if gp.pressed(ZOOM_IN_TRIGGER) {
             d_zoom -= dt * 4.0;
         }
     }
