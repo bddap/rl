@@ -50,7 +50,11 @@ use crate::snapshot::CoreSnapshot;
 /// per-tick [`crate::sim::Input`] wire frame (`WIRE_LEN` 9→7: the vestigial vehicle `look_pitch`
 /// axis left the foot-only input, rl#43 part 1), so a `/7` peer would mis-frame every tick against
 /// a `/8` peer — the bump makes them refuse rather than silently desync on a byte offset.
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/8";
+/// `/9` shrank the [`JoinRequest`] frame (16 → 8 bytes: the joiner's weights digest left the
+/// wire — the host self-gate is the one weights guard, rl#206); the strict decode already makes
+/// a mixed-version join a loud error, but the bump keeps the refusal at connect time, before a
+/// joiner waits out the admission timeout.
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/9";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
@@ -73,8 +77,9 @@ pub(crate) enum Frame {
     JoinRequest = 3,
     // Byte 4 was the retired broadcast roster-change frame: incumbents now learn a mid-game join
     // from the roster on every `Snapshot`, so nothing schedules roster changes client-side.
-    /// A server→joiner refusal: the joiner's weight/collider digests disagreed, so it is turned away
-    /// LOUDLY rather than admitted onto a wrong crab. Stage 3, rl#151.
+    /// A server→joiner refusal: the host isn't armed with a real brain, or the crab-asset digests
+    /// disagreed (rl#206) — the joiner is turned away LOUDLY rather than admitted onto a wrong
+    /// crab. Stage 3, rl#151.
     Refuse = 5,
     /// A server→JOINER welcome: the [`Admission`] the host allocated for THIS joiner, sent UNICAST
     /// to it alone so a joiner can't mistake a concurrent joiner's allocation for its OWN (which
@@ -814,8 +819,12 @@ async fn wire_connection(
 
     let links_for_reader = links.clone();
     tokio::spawn(async move {
+        // WARN, not debug: read_loop returns Ok on every normal ending (clean EOF, session drop),
+        // so an Err here is a real protocol violation — a mis-framed/unknown/truncated frame (e.g.
+        // an ALPN-matched build with a drifted codec) — and must be visible, not a silent link
+        // drop the joiner mis-reads as "host unreachable" ([[silent-fallback-antipattern]]).
         if let Err(e) = read_loop(recv, peer, inbox).await {
-            tracing::debug!(%peer, "peer read loop ended: {e:#}");
+            tracing::warn!(%peer, "peer read loop ended on a protocol violation: {e:#}");
         }
         // Peer's stream closed → drop its link so broadcast stops targeting it (reconnect-safe: a
         // late EOF from a link a reconnect already replaced must not evict the fresh one).

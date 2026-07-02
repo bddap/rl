@@ -289,7 +289,7 @@ impl Server {
     /// first input before that tick is due. From `effective_tick` a tick completes only once the
     /// joiner's input is in too.
     ///
-    /// Admission control (the joiner's weight/collider digests must match) is the CALLER's gate
+    /// Admission control (the host self-gate + the joiner's crab-asset equality, rl#206) is the CALLER's gate
     /// BEFORE this — a server must refuse a mismatched joiner loudly rather than admit it onto a
     /// wrong crab (rl#114 / [[silent-fallback-antipattern]]); `admit` is the bookkeeping once that
     /// gate has passed.
@@ -849,6 +849,19 @@ mod tests {
             may_admit_joiner(0, ha, &JoinRequest { asset_digest: ha }),
             Err(AdmissionRefusal::HostNotArmed),
             "an unarmed host can't admit anyone into its fake-crab match"
+        );
+        // Self-gate FIRST (the documented order): even an asset-MISMATCHED joiner is reported as
+        // HostNotArmed — the host's own failure, never a spurious asset verdict.
+        assert_eq!(
+            may_admit_joiner(
+                0,
+                ha,
+                &JoinRequest {
+                    asset_digest: ha ^ 1
+                }
+            ),
+            Err(AdmissionRefusal::HostNotArmed),
+            "the self-gate is checked before the asset equality"
         );
     }
 
