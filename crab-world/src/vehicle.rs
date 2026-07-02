@@ -93,7 +93,6 @@ const MATCH_VEL_DAMP: f32 = 0.9;
 /// so it is set to hold the OLD craft's lift-to-weight feel (stall ~1.4 m/s, well under cruise) at
 /// the low speed, rather than scaled down (which would sink it).
 const PLANE: VehicleParams = VehicleParams {
-    thrust_axis: Vec3::Z, // nose — the lever pushes here
     lever_thrust: 4.0,
     direct_thrust: Vec3::ZERO,
     lift: 1.8,
@@ -118,7 +117,6 @@ const PLANE: VehicleParams = VehicleParams {
 /// drift. The one source for the ship's rotation feel — halved with the shrink so it turns calmly.
 const SHIP_AIM_TORQUE: f32 = 0.2;
 const SHIP: VehicleParams = VehicleParams {
-    thrust_axis: Vec3::Z, // unused (lever_thrust 0) — kept a valid unit axis
     lever_thrust: 0.0,
     direct_thrust: Vec3::new(0.3, 0.3, 0.4), // strafe / vertical / forward (N) — gentle, zero-g
     lift: 0.0,
@@ -146,10 +144,7 @@ const SHIP_SPAWN_ALTITUDE: f32 = 0.5;
 /// ship its long Outer-Wilds coast while the plane stays crisp.
 #[derive(Clone, Copy)]
 struct VehicleParams {
-    /// Body-frame axis the LEVER thrust pushes along (plane = +Z nose). Unused when `lever_thrust`
-    /// is 0 (the ship).
-    thrust_axis: Vec3,
-    /// Lever thrust force at full throttle (N), along [`thrust_axis`](Self::thrust_axis). 0 = no
+    /// Lever thrust force at full throttle (N), along the body nose (+Z). 0 = no
     /// lever (the ship uses `direct_thrust` instead).
     lever_thrust: f32,
     /// DIRECT body-frame thruster force per axis (N): x = strafe (+right), y = vertical (+up),
@@ -364,11 +359,11 @@ fn apply_vehicle_forces(
         vehicle.throttle =
             (vehicle.throttle + control.throttle_trim * THROTTLE_TRIM_RATE).clamp(0.0, 1.0);
 
-        // Thrust = LEVER term along the body thrust axis (plane nose; `lever_thrust` 0 ⇒ 0 for the
-        // ship) + DIRECT body-frame thrusters `rot · (thrust ⊙ direct_thrust)` (ship strafe/
-        // vertical/forward; `direct_thrust` ZERO ⇒ 0 for the plane). One expression, no per-craft
-        // branch — each craft's unused term is zeroed by its params.
-        let lever = (rot * p.thrust_axis) * (p.lever_thrust * vehicle.throttle);
+        // Thrust = LEVER term along the nose (`lever_thrust` 0 ⇒ 0 for the ship) + DIRECT
+        // body-frame thrusters `rot · (thrust ⊙ direct_thrust)` (ship strafe/vertical/forward;
+        // `direct_thrust` ZERO ⇒ 0 for the plane). One expression, no per-craft branch — each
+        // craft's unused term is zeroed by its params.
+        let lever = forward * (p.lever_thrust * vehicle.throttle);
         let direct = rot * (control.thrust * p.direct_thrust);
         let thrust = lever + direct;
 

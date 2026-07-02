@@ -203,11 +203,9 @@ impl ControlScheme for GcrControls {
 
     fn context_from_id(id: &str) -> Option<GcrContext> {
         match id {
-            "foot" | "onfoot" => Some(GcrContext::OnFoot),
+            "foot" => Some(GcrContext::OnFoot),
             "plane" => Some(GcrContext::Plane),
-            // The vehicle used to be a helicopter; accept the old slugs so existing
-            // screenshot-evidence harnesses still resolve to the ship context.
-            "ship" | "heli" | "helicopter" => Some(GcrContext::Ship),
+            "ship" => Some(GcrContext::Ship),
             _ => None,
         }
     }
@@ -722,14 +720,12 @@ mod tests {
         assert_eq!(keys(Action::MatchVelocity), &[Key::Space]);
     }
 
-    /// The screenshot context override round-trips the ids the evidence harness uses (incl. the
-    /// legacy "heli" alias for the ship).
+    /// The screenshot context override round-trips the ids the evidence harness uses.
     #[test]
     fn context_from_id_round_trips() {
         assert_eq!(GcrControls::context_from_id("foot"), Some(GcrContext::OnFoot));
         assert_eq!(GcrControls::context_from_id("plane"), Some(GcrContext::Plane));
         assert_eq!(GcrControls::context_from_id("ship"), Some(GcrContext::Ship));
-        assert_eq!(GcrControls::context_from_id("heli"), Some(GcrContext::Ship));
         assert_eq!(GcrControls::context_from_id("nope"), None);
     }
 
