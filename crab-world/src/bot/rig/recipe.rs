@@ -212,7 +212,8 @@ pub fn part_for_bone(name: &str) -> Option<PartId> {
 /// The skin weight strip ([`crate::bot::skin`]) keeps both parts' lanes at an adjacent
 /// seam — a vertex spanning a hinge must bend with both links, not rigidly drag with
 /// one — but still zeroes a lane on a NON-adjacent (spatially disjoint) part, so the
-/// carapace-vs-arm bleed it fixes stays fixed. This is the one place that knows which
+/// carapace-vs-arm bleed it fixes stays fixed (a carapace-owned vertex drops even an
+/// adjacent chain root's lane: the rigid shell never deforms). This is the one place that knows which
 /// seams are real, and it reads the same [`joint_specs`] decomposition the body
 /// spawns from, so it cannot disagree with the rig about which links are joined.
 fn part_adjacency() -> &'static std::collections::HashSet<(PartId, PartId)> {
