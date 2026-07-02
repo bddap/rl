@@ -9,14 +9,14 @@
 //! (GCR's own physics-bones entity, separate from the skin), and the persistent corner label
 //! naming the mode.
 
-use super::*;
 use super::scene::CrabAvatar;
+use super::*;
 use crate::controls::{self, Action};
 use bevy_rapier3d::prelude::Collider;
 use crab_world::bot::skin::CrabSkinRepose;
+pub use crab_world::crab_view::RenderMode;
 use crab_world::crab_view::{COLLIDER_WIREFRAME_COLOR, draw_collider_wireframe};
 use crab_world::vehicle::Vehicle;
-pub use crab_world::crab_view::RenderMode;
 
 /// Wire GCR's render-mode cycle into a render `App`, booting in `initial` (the missing-glb
 /// fallback passes [`RenderMode::Colliders`]). Adds the shared cage + skin-visibility + the

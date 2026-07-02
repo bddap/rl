@@ -224,7 +224,11 @@ fn eval_step(
         && let Some(slot) = targets.envs.first_mut()
     {
         let origin = spawns.0.first().copied().unwrap_or(Vec3::ZERO);
-        *slot = Some(Vec3::new(origin.x + cfg.target_distance, TARGET_Y, origin.z));
+        *slot = Some(Vec3::new(
+            origin.x + cfg.target_distance,
+            TARGET_Y,
+            origin.z,
+        ));
         state.target_set = true;
     }
     // Until the ball is seeded there is nothing meaningful to measure; skip the tick rather than

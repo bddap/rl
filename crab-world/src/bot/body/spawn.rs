@@ -199,7 +199,9 @@ pub fn spawn_crab(
             crab_collision(env)
         };
         // Every link reaching here is actuated — locked (cosmetic) links were skipped above.
-        let id = link.actuated.expect("locked links are skipped before spawn");
+        let id = link
+            .actuated
+            .expect("locked links are skipped before spawn");
         let joint = rig_revolute(id, link.axis_local, link.anchor1);
         let mut ec = commands.spawn((
             CrabBodyPart,

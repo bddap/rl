@@ -27,6 +27,12 @@ pub mod bot;
 /// Reusable controls + hold-to-reveal-overlay framework, generic over an app's action set
 /// (GCR and the demo each bring their own [`controls::ControlScheme`]).
 pub mod controls;
+/// The headless training-SUCCESS eval — the true measure of the policy, distinct from the
+/// training reward: reuses the demo/train crab+ball scenario headless, places the ball far,
+/// drives the loaded policy deterministically, and reports real metres of progress toward the
+/// ball plus the total applied joint torque. Pure physics + inference (no window), so it
+/// stays out of the render gate.
+pub mod eval;
 /// The single FNV-1a/64 implementation every determinism guard folds bytes with — one offset,
 /// one prime, one loop, so cross-peer digests can't drift apart. Shared with the `net` crate's
 /// lockstep desync hash, so it is `pub`; the hash is a frozen wire format — changing it desyncs
@@ -45,12 +51,6 @@ pub mod physics;
 /// of a second copy that could drift.
 pub mod policy;
 pub mod training;
-/// The headless training-SUCCESS eval — the true measure of the policy, distinct from the
-/// training reward: reuses the demo/train crab+ball scenario headless, places the ball far,
-/// drives the loaded policy deterministically, and reports real metres of progress toward the
-/// ball plus the total applied joint torque. Pure physics + inference (no window), so it
-/// stays out of the render gate.
-pub mod eval;
 /// The player's single-player rapier flight vehicle (plane / Outer-Wilds ship), living in the crab's
 /// rapier world so it collides with Sally. Replaces the old integer flight integrator. Headless
 /// (pure physics), so it stays out of the render gate below.
@@ -66,15 +66,15 @@ pub mod vehicle;
 pub mod crab_view;
 #[cfg(feature = "render")]
 pub mod play;
-/// Procedural night-sky skybox shared by both rendered surfaces (rl-demo + GCR). `pub`
-/// because the `net` crate's GCR app builders add its [`sky::NightSkyPlugin`] too.
-#[cfg(feature = "render")]
-pub mod sky;
 /// Shared offscreen render-to-PNG-on-settle primitive behind both headless shots
 /// (the crab inspection shot in `play`, the FP game-view shot in the `net` crate's `render`).
 /// `pub` because that `net::render` shot lives in the sibling crate and composes this.
 #[cfg(feature = "render")]
 pub mod screenshot;
+/// Procedural night-sky skybox shared by both rendered surfaces (rl-demo + GCR). `pub`
+/// because the `net` crate's GCR app builders add its [`sky::NightSkyPlugin`] too.
+#[cfg(feature = "render")]
+pub mod sky;
 
 /// Whether to spawn visual assets (meshes, lights). The `rl learn` rollout worlds
 /// set this false (rendering off entirely); the rendering modes (demo/screenshot, and

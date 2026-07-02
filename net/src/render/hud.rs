@@ -1,9 +1,8 @@
 //! HUD: the status line and the controls-overlay context sync. Pure client UI; reads the
 //! sim/vehicle state read-only and never writes it.
 
-use super::*;
 use super::driver::{GameState, LocalVehicle};
-
+use super::*;
 
 /// Keep the controls overlay's [`ActiveContext`] in sync with the live [`LocalVehicle`], so
 /// the on-screen legend + context name follow enter/exit-vehicle automatically. Pure client

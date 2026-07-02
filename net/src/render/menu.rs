@@ -49,21 +49,21 @@ impl Plugin for MenuPlugin {
             self.weights_digest,
             self.asset_digest,
         ))
-            // A 2D camera for the menu so bevy_egui has a context to render into.
-            // Spawned on entering Menu (the default phase, so it fires at startup on the
-            // menu boot; never on the scripted Boot::Round path, which supersedes Menu
-            // with Playing before any transition). Re-entering Menu (Cancel/error from
-            // Connecting) despawns any prior one first, so there's never a duplicate.
-            .add_systems(OnEnter(AppPhase::Menu), (spawn_menu_camera, reset_menu_nav))
-            // Tear it down as the round begins, before the FP Camera3d spawns, so the
-            // two never coexist.
-            .add_systems(OnEnter(AppPhase::Playing), despawn_menu_camera)
-            // The menu + connecting poll draw in the egui pass (per render frame),
-            // gated to the two pre-round phases so they vanish once Playing.
-            .add_systems(
-                EguiPrimaryContextPass,
-                menu_screen.run_if(not(in_state(AppPhase::Playing))),
-            );
+        // A 2D camera for the menu so bevy_egui has a context to render into.
+        // Spawned on entering Menu (the default phase, so it fires at startup on the
+        // menu boot; never on the scripted Boot::Round path, which supersedes Menu
+        // with Playing before any transition). Re-entering Menu (Cancel/error from
+        // Connecting) despawns any prior one first, so there's never a duplicate.
+        .add_systems(OnEnter(AppPhase::Menu), (spawn_menu_camera, reset_menu_nav))
+        // Tear it down as the round begins, before the FP Camera3d spawns, so the
+        // two never coexist.
+        .add_systems(OnEnter(AppPhase::Playing), despawn_menu_camera)
+        // The menu + connecting poll draw in the egui pass (per render frame),
+        // gated to the two pre-round phases so they vanish once Playing.
+        .add_systems(
+            EguiPrimaryContextPass,
+            menu_screen.run_if(not(in_state(AppPhase::Playing))),
+        );
     }
 }
 
@@ -502,11 +502,7 @@ fn draw_chooser(ctx: &egui::Context, state: &mut MenuState) -> Option<ChooserIte
 /// Draw the lobby / connecting screen: the role, the join code (Host) or dial status
 /// (Join), the live roster, and the focusable Start (host) + Cancel. Returns the clicked
 /// item, if any. Polling already happened in `menu_screen`, so this only renders + reports.
-fn draw_lobby(
-    ctx: &egui::Context,
-    state: &MenuState,
-    lobby: &[EndpointId],
-) -> Option<LobbyItem> {
+fn draw_lobby(ctx: &egui::Context, state: &MenuState, lobby: &[EndpointId]) -> Option<LobbyItem> {
     let (hosting, focus) = match state.nav {
         MenuNav::HostLobby { focus } => (true, focus),
         MenuNav::JoinLobby => (false, LobbyItem::Cancel),

@@ -242,4 +242,3 @@ pub mod trig_client {
         (wrap_turns(a) as f32) / (TURN as f32) * std::f32::consts::TAU
     }
 }
-

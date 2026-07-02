@@ -72,7 +72,10 @@ pub fn init(service_name: &str) -> OtelGuard {
     let endpoint = resolve_endpoint();
     let Some(endpoint) = endpoint else {
         // Disabled: stderr only, no export. Inert in the game sim until a deck is wired.
-        tracing_subscriber::registry().with(filter).with(fmt_layer).init();
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .init();
         return OtelGuard {
             tracer_provider: None,
             logger_provider: None,
@@ -90,11 +93,10 @@ pub fn init(service_name: &str) -> OtelGuard {
             let trace_layer = tracing_opentelemetry::layer()
                 .with_tracer(tracer)
                 .with_filter(tracing_subscriber::filter::filter_fn(not_otel_internal));
-            let log_layer =
-                opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
-                    &logger_provider,
-                )
-                .with_filter(tracing_subscriber::filter::filter_fn(not_otel_internal));
+            let log_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                &logger_provider,
+            )
+            .with_filter(tracing_subscriber::filter::filter_fn(not_otel_internal));
             opentelemetry::global::set_meter_provider(meter_provider.clone());
 
             tracing_subscriber::registry()
@@ -112,7 +114,10 @@ pub fn init(service_name: &str) -> OtelGuard {
         }
         Err(e) => {
             // Never let a telemetry-setup failure take down the app — fall back to stderr.
-            tracing_subscriber::registry().with(filter).with(fmt_layer).init();
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(fmt_layer)
+                .init();
             tracing::warn!("OTLP telemetry setup failed, continuing with stderr only: {e:#}");
             OtelGuard {
                 tracer_provider: None,
@@ -229,8 +234,7 @@ fn env_resource_attributes() -> Vec<KeyValue> {
         .filter_map(|pair| {
             let (k, v) = pair.split_once('=')?;
             let (k, v) = (k.trim(), v.trim());
-            (!k.is_empty() && !v.is_empty())
-                .then(|| KeyValue::new(k.to_string(), v.to_string()))
+            (!k.is_empty() && !v.is_empty()).then(|| KeyValue::new(k.to_string(), v.to_string()))
         })
         .collect()
 }

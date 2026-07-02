@@ -5,11 +5,10 @@
 //! pump ([`pump_fixed_steps`]), and the menu->round handoff ([`ensure_round_installed`]).
 //! Holds no rendering; the scene/HUD/input live in sibling submodules.
 
-use super::*;
 use super::app::{ArmedRound, ExternalCrabStackInstalled};
 use super::input::{CameraPitch, CameraYaw};
+use super::*;
 use crab_world::vehicle::{Vehicle, VehicleControl, VehicleKind};
-
 
 /// Build the round's [`Coordinator`]: `None` ⇒ a solo internal server (roster of one), a host
 /// driver ⇒ a server over the roster, a client driver ⇒ a remote client. `peers` is the sim's
@@ -112,7 +111,11 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     crate::external_crab::arm(world);
     // Clone the freshly-seeded sim for the authoritative server (solo/host); the client keeps its
     // own identical sim inside `ready.lockstep` and renders the snapshots the server emits into it.
-    let coord = coordinator(ready.net, ready.lockstep.peers(), ready.lockstep.sim().clone());
+    let coord = coordinator(
+        ready.net,
+        ready.lockstep.peers(),
+        ready.lockstep.sim().clone(),
+    );
     install_round(world, ready.lockstep, coord);
 }
 
@@ -343,7 +346,14 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
             let yaw = clamp(rudder + PLANE_TURN_COORDINATION * roll);
             // Throttle lever trim: RT up / LT down (analog), or W/S on the keyboard.
             let throttle_trim = clamp(fi.rt - fi.lt + fi.wasd.y);
-            FlightControl { throttle_trim, thrust: Vec3::ZERO, pitch, roll, yaw, match_velocity: false }
+            FlightControl {
+                throttle_trim,
+                thrust: Vec3::ZERO,
+                pitch,
+                roll,
+                yaw,
+                match_velocity: false,
+            }
         }
         VehicleKind::Ship => {
             // Direct body-frame thrusters: left stick / WASD = strafe (x) + forward (z); RT/LT =
@@ -488,8 +498,14 @@ impl LocalVehicle {
     pub(super) fn context(&self) -> GcrContext {
         match self {
             Self::OnFoot => GcrContext::OnFoot,
-            Self::Flying { kind: VehicleKind::Plane, .. } => GcrContext::Plane,
-            Self::Flying { kind: VehicleKind::Ship, .. } => GcrContext::Ship,
+            Self::Flying {
+                kind: VehicleKind::Plane,
+                ..
+            } => GcrContext::Plane,
+            Self::Flying {
+                kind: VehicleKind::Ship,
+                ..
+            } => GcrContext::Ship,
         }
     }
 
@@ -520,11 +536,21 @@ impl LocalVehicle {
     /// starts with no pose (`None`); [`update_pose`] fills it from the spawned body.
     fn cycled(&self) -> Self {
         match self {
-            Self::OnFoot => Self::Flying { kind: VehicleKind::Plane, pose: None },
-            Self::Flying { kind: VehicleKind::Plane, .. } => {
-                Self::Flying { kind: VehicleKind::Ship, pose: None }
-            }
-            Self::Flying { kind: VehicleKind::Ship, .. } => Self::OnFoot,
+            Self::OnFoot => Self::Flying {
+                kind: VehicleKind::Plane,
+                pose: None,
+            },
+            Self::Flying {
+                kind: VehicleKind::Plane,
+                ..
+            } => Self::Flying {
+                kind: VehicleKind::Ship,
+                pose: None,
+            },
+            Self::Flying {
+                kind: VehicleKind::Ship,
+                ..
+            } => Self::OnFoot,
         }
     }
 }
@@ -535,9 +561,10 @@ impl LocalVehicle {
 /// arena pose to the crab's render spot in `cockpit_camera`.
 fn read_vehicle_pose(world: &mut World) -> Option<CockpitPose> {
     let mut q = world.query_filtered::<&Transform, With<Vehicle>>();
-    q.iter(world)
-        .next()
-        .map(|t| CockpitPose { pos: t.translation, orient: t.rotation })
+    q.iter(world).next().map(|t| CockpitPose {
+        pos: t.translation,
+        orient: t.rotation,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -739,8 +766,7 @@ pub(super) fn drive_lockstep(
 
         // The headless `fp-screenshot` harness (only) feeds a scripted input to the absent pack
         // players so the scene composes; real play has none (every non-local input is on the wire).
-        let scripted_pack: Option<Input> =
-            world.get_resource::<ScriptedPackInput>().map(|r| r.0);
+        let scripted_pack: Option<Input> = world.get_resource::<ScriptedPackInput>().map(|r| r.0);
         // Submit our input UP to the coordinator and, on a remote client, drain the host's state DOWN.
         // The newest crab pose a remote client drained this iteration is applied after the exchange's
         // `GameState` borrow is released (rl#151 increment 2 windowed).
@@ -763,7 +789,13 @@ pub(super) fn drive_lockstep(
                     .filter(|&p| p != me)
                     .collect();
                 for pid in others {
-                    let _ = server.record(pid, TickMsg { apply_tick: msg.apply_tick, input: bot });
+                    let _ = server.record(
+                        pid,
+                        TickMsg {
+                            apply_tick: msg.apply_tick,
+                            input: bot,
+                        },
+                    );
                 }
             }
             // Ship our input to the (internal or remote) server. Solo runs the same exchange against a
@@ -864,7 +896,11 @@ pub(super) fn drive_lockstep(
             // Ready? The authoritative server gates on its own ledger/warmup.
             {
                 let state = world.non_send_resource::<GameState>();
-                if !state.server().expect("server_auth ⇒ a server").next_tick_ready() {
+                if !state
+                    .server()
+                    .expect("server_auth ⇒ a server")
+                    .next_tick_ready()
+                {
                     break;
                 }
             }
@@ -1068,7 +1104,10 @@ mod tests {
         // it rather than exposed as an inert toggle ([[silent-fallback-antipattern]]). The scripted
         // harness has no live avatar. (A live windowed host/remote toggle needs a `NetDriver`, which
         // won't stand up headlessly — that is on-device territory; here we pin the role predicate.)
-        assert!(PeerRole::ServerAuth.can_pilot(), "solo/host pumps physics ⇒ can pilot");
+        assert!(
+            PeerRole::ServerAuth.can_pilot(),
+            "solo/host pumps physics ⇒ can pilot"
+        );
         assert!(
             !PeerRole::RemoteAdopt.can_pilot(),
             "a remote client pumps no physics ⇒ no craft can spawn ⇒ cannot pilot yet"

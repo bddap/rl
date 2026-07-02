@@ -51,11 +51,11 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
+use crate::sim::{Pos, UNIT};
 use crab_world::Visuals;
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint};
 use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns};
-use crate::sim::{Pos, UNIT};
 use crab_world::play::Policy;
 
 /// Height (m) of the walk target placed at the player's position. A low ground-ish Y inside

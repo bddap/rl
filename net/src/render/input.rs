@@ -5,9 +5,8 @@
 //! touches the sim. The analog pad transform ([`pad_stick_axes`]) is split out so the
 //! determinism test drives the exact client arithmetic.
 
-use super::*;
 use super::driver::{FlightInput, PendingInput};
-
+use super::*;
 
 /// One gamepad's contribution to this frame's control deltas: move axes from the left
 /// stick, look deltas from the right. Raw f32 — like the keyboard/mouse contributions,
@@ -215,15 +214,19 @@ pub(super) fn gather_input(
     // PlaneThrottle = [RT, LT], PlaneRudder = [LB, RB], pinned by a controls test), which the
     // direction signs below rely on.
     let nth_key = |a: Action, n: usize| {
-        controls::key_codes_for(a).nth(n).is_some_and(|k| keys.pressed(k))
+        controls::key_codes_for(a)
+            .nth(n)
+            .is_some_and(|k| keys.pressed(k))
     };
     let nth_pad = |a: Action, n: usize| controls::gamepad_buttons_for(a).nth(n);
     let mut fi = FlightInput {
         // Keyboard flight axes through the FLIGHT bindings: throttle/forward = PlaneThrottle [W↑, S↓],
         // strafe/rudder = PlaneRudder [A←, D→] (the ship reuses the same physical keys via ShipThrust).
         wasd: Vec2::new(
-            nth_key(Action::PlaneRudder, 1) as i32 as f32 - nth_key(Action::PlaneRudder, 0) as i32 as f32,
-            nth_key(Action::PlaneThrottle, 0) as i32 as f32 - nth_key(Action::PlaneThrottle, 1) as i32 as f32,
+            nth_key(Action::PlaneRudder, 1) as i32 as f32
+                - nth_key(Action::PlaneRudder, 0) as i32 as f32,
+            nth_key(Action::PlaneThrottle, 0) as i32 as f32
+                - nth_key(Action::PlaneThrottle, 1) as i32 as f32,
         ),
         match_vel: nth_key(Action::MatchVelocity, 0),
         ..default()

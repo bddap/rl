@@ -377,17 +377,50 @@ pub const BINDINGS: [Binding<GcrControls>; 19] = [
 /// The ON-FOOT context: the full ground control set, in legend order. The move keys walk the
 /// avatar; `EnterExit` boards the plane.
 pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
-    ContextRow { action: Action::MoveForward, label: "Forward" },
-    ContextRow { action: Action::MoveBack, label: "Back" },
-    ContextRow { action: Action::StrafeLeft, label: "Strafe left" },
-    ContextRow { action: Action::StrafeRight, label: "Strafe right" },
-    ContextRow { action: Action::Look, label: "Look" },
-    ContextRow { action: Action::Extract, label: "Extract" },
-    ContextRow { action: Action::EnterExit, label: "Enter plane" },
-    ContextRow { action: Action::CycleRenderMode, label: "Render view" },
-    ContextRow { action: Action::Restart, label: "Restart round" },
-    ContextRow { action: Action::Quit, label: "Quit" },
-    ContextRow { action: Action::RevealControls, label: "Controls" },
+    ContextRow {
+        action: Action::MoveForward,
+        label: "Forward",
+    },
+    ContextRow {
+        action: Action::MoveBack,
+        label: "Back",
+    },
+    ContextRow {
+        action: Action::StrafeLeft,
+        label: "Strafe left",
+    },
+    ContextRow {
+        action: Action::StrafeRight,
+        label: "Strafe right",
+    },
+    ContextRow {
+        action: Action::Look,
+        label: "Look",
+    },
+    ContextRow {
+        action: Action::Extract,
+        label: "Extract",
+    },
+    ContextRow {
+        action: Action::EnterExit,
+        label: "Enter plane",
+    },
+    ContextRow {
+        action: Action::CycleRenderMode,
+        label: "Render view",
+    },
+    ContextRow {
+        action: Action::Restart,
+        label: "Restart round",
+    },
+    ContextRow {
+        action: Action::Quit,
+        label: "Quit",
+    },
+    ContextRow {
+        action: Action::RevealControls,
+        label: "Controls",
+    },
 ];
 
 /// The PILOTING-PLANE context (Ace Combat 6 layout). Left stick (or mouse) flies: pitch is the AC6
@@ -400,15 +433,39 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
 /// The labels describe what `drive_lockstep`'s bridge does with each input (see
 /// [`crab_world::vehicle`]); the plane-pitch-sign test pins the pitch direction + sensitivity.
 pub const PLANE_ROWS: [ContextRow<GcrControls>; 8] = [
-    ContextRow { action: Action::PlaneAttitude, label: "Pitch / roll" },
-    ContextRow { action: Action::PlaneThrottle, label: "Throttle / brake" },
-    ContextRow { action: Action::PlaneRudder, label: "Rudder (yaw)" },
+    ContextRow {
+        action: Action::PlaneAttitude,
+        label: "Pitch / roll",
+    },
+    ContextRow {
+        action: Action::PlaneThrottle,
+        label: "Throttle / brake",
+    },
+    ContextRow {
+        action: Action::PlaneRudder,
+        label: "Rudder (yaw)",
+    },
     // E cycles foot → plane → ship → foot, so from the plane it boards the ship.
-    ContextRow { action: Action::EnterExit, label: "Switch to ship" },
-    ContextRow { action: Action::CycleRenderMode, label: "Render view" },
-    ContextRow { action: Action::Restart, label: "Restart round" },
-    ContextRow { action: Action::Quit, label: "Quit" },
-    ContextRow { action: Action::RevealControls, label: "Controls" },
+    ContextRow {
+        action: Action::EnterExit,
+        label: "Switch to ship",
+    },
+    ContextRow {
+        action: Action::CycleRenderMode,
+        label: "Render view",
+    },
+    ContextRow {
+        action: Action::Restart,
+        label: "Restart round",
+    },
+    ContextRow {
+        action: Action::Quit,
+        label: "Quit",
+    },
+    ContextRow {
+        action: Action::RevealControls,
+        label: "Controls",
+    },
 ];
 
 /// The PILOTING-SHIP context (Outer Wilds). Newtonian 6-DOF thrust-and-coast: the left stick (or
@@ -417,16 +474,46 @@ pub const PLANE_ROWS: [ContextRow<GcrControls>; 8] = [
 /// — a brake that bleeds the drift to rest. `Extract` is omitted (neutral sim input while piloting).
 /// The E-cycle reaches foot from here, so `EnterExit` reads "Exit to foot".
 pub const SHIP_ROWS: [ContextRow<GcrControls>; 10] = [
-    ContextRow { action: Action::ShipThrust, label: "Thrust: move / strafe" },
-    ContextRow { action: Action::ShipAim, label: "Aim: pitch / yaw" },
-    ContextRow { action: Action::ShipLift, label: "Thrust up / down" },
-    ContextRow { action: Action::ShipRoll, label: "Roll" },
-    ContextRow { action: Action::MatchVelocity, label: "Match velocity (brake)" },
-    ContextRow { action: Action::EnterExit, label: "Exit to foot" },
-    ContextRow { action: Action::CycleRenderMode, label: "Render view" },
-    ContextRow { action: Action::Restart, label: "Restart round" },
-    ContextRow { action: Action::Quit, label: "Quit" },
-    ContextRow { action: Action::RevealControls, label: "Controls" },
+    ContextRow {
+        action: Action::ShipThrust,
+        label: "Thrust: move / strafe",
+    },
+    ContextRow {
+        action: Action::ShipAim,
+        label: "Aim: pitch / yaw",
+    },
+    ContextRow {
+        action: Action::ShipLift,
+        label: "Thrust up / down",
+    },
+    ContextRow {
+        action: Action::ShipRoll,
+        label: "Roll",
+    },
+    ContextRow {
+        action: Action::MatchVelocity,
+        label: "Match velocity (brake)",
+    },
+    ContextRow {
+        action: Action::EnterExit,
+        label: "Exit to foot",
+    },
+    ContextRow {
+        action: Action::CycleRenderMode,
+        label: "Render view",
+    },
+    ContextRow {
+        action: Action::Restart,
+        label: "Restart round",
+    },
+    ContextRow {
+        action: Action::Quit,
+        label: "Quit",
+    },
+    ContextRow {
+        action: Action::RevealControls,
+        label: "Controls",
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -439,8 +526,8 @@ pub const SHIP_ROWS: [ContextRow<GcrControls>; 10] = [
 #[cfg(feature = "render")]
 mod bevy_glue {
     use super::*;
-    use crab_world::controls::{ControlInput, binding};
     use bevy::prelude::{GamepadButton, KeyCode, MouseButton};
+    use crab_world::controls::{ControlInput, binding};
 
     impl Key {
         fn key_code(self) -> KeyCode {
@@ -635,7 +722,11 @@ mod tests {
         let labels = |ls: &[crab_world::controls::LegendLine]| {
             ls.iter().map(|l| l.label).collect::<Vec<_>>()
         };
-        assert_ne!(labels(&foot), labels(&plane), "the legend must change per context");
+        assert_ne!(
+            labels(&foot),
+            labels(&plane),
+            "the legend must change per context"
+        );
         // AC6 flight labels.
         assert!(plane.iter().any(|l| l.label == "Throttle / brake"));
         assert!(plane.iter().any(|l| l.label == "Pitch / roll"));
@@ -643,8 +734,14 @@ mod tests {
         assert!(plane.iter().any(|l| l.label == "Switch to ship"));
         // The on-foot ground labels are gone in flight.
         assert!(!plane.iter().any(|l| l.label == "Strafe left"));
-        assert!(!plane.iter().any(|l| l.label == "Extract"), "no Extract while piloting");
-        assert_eq!(GcrControls::context_label(GcrContext::Plane), "Piloting plane");
+        assert!(
+            !plane.iter().any(|l| l.label == "Extract"),
+            "no Extract while piloting"
+        );
+        assert_eq!(
+            GcrControls::context_label(GcrContext::Plane),
+            "Piloting plane"
+        );
     }
 
     /// The ship context is its OWN legend — distinct from foot AND plane — with the Outer Wilds
@@ -657,8 +754,16 @@ mod tests {
         let labels = |ls: &[crab_world::controls::LegendLine]| {
             ls.iter().map(|l| l.label).collect::<Vec<_>>()
         };
-        assert_ne!(labels(&ship), labels(&foot), "ship legend differs from foot");
-        assert_ne!(labels(&ship), labels(&plane), "ship legend differs from plane");
+        assert_ne!(
+            labels(&ship),
+            labels(&foot),
+            "ship legend differs from foot"
+        );
+        assert_ne!(
+            labels(&ship),
+            labels(&plane),
+            "ship legend differs from plane"
+        );
         // Outer Wilds labels.
         assert!(ship.iter().any(|l| l.label == "Thrust: move / strafe"));
         assert!(ship.iter().any(|l| l.label == "Aim: pitch / yaw"));
@@ -667,8 +772,14 @@ mod tests {
         assert!(ship.iter().any(|l| l.label == "Exit to foot"));
         // No misleading ground / plane labels in the ship.
         assert!(!ship.iter().any(|l| l.label == "Throttle / brake"));
-        assert!(!ship.iter().any(|l| l.label == "Extract"), "no Extract while piloting");
-        assert_eq!(GcrControls::context_label(GcrContext::Ship), "Piloting ship");
+        assert!(
+            !ship.iter().any(|l| l.label == "Extract"),
+            "no Extract while piloting"
+        );
+        assert_eq!(
+            GcrControls::context_label(GcrContext::Ship),
+            "Piloting ship"
+        );
     }
 
     /// The plane's flight controls ride the SAME physical pad inputs as foot/ship (one binding
@@ -678,24 +789,33 @@ mod tests {
     fn flight_rides_the_one_binding_table() {
         // Plane attitude + ship thrust both poll the LEFT stick — the same physical input the foot
         // move axes use, proving the relabel rides one binding table.
-        assert!(binding::<GcrControls>(Action::PlaneAttitude)
-            .unwrap()
-            .pad
-            .buttons
-            .contains(&PadButton::LeftStick));
-        assert!(binding::<GcrControls>(Action::ShipThrust)
-            .unwrap()
-            .pad
-            .buttons
-            .contains(&PadButton::LeftStick));
-        assert!(binding::<GcrControls>(Action::MoveForward)
-            .unwrap()
-            .pad
-            .buttons
-            .contains(&PadButton::LeftStick));
+        assert!(
+            binding::<GcrControls>(Action::PlaneAttitude)
+                .unwrap()
+                .pad
+                .buttons
+                .contains(&PadButton::LeftStick)
+        );
+        assert!(
+            binding::<GcrControls>(Action::ShipThrust)
+                .unwrap()
+                .pad
+                .buttons
+                .contains(&PadButton::LeftStick)
+        );
+        assert!(
+            binding::<GcrControls>(Action::MoveForward)
+                .unwrap()
+                .pad
+                .buttons
+                .contains(&PadButton::LeftStick)
+        );
         // The throttle pad inputs are the analog triggers (RT then LT).
         assert_eq!(
-            binding::<GcrControls>(Action::PlaneThrottle).unwrap().pad.buttons,
+            binding::<GcrControls>(Action::PlaneThrottle)
+                .unwrap()
+                .pad
+                .buttons,
             &[PadButton::RightTrigger, PadButton::LeftTrigger]
         );
     }
@@ -708,11 +828,23 @@ mod tests {
         let pad = |a| binding::<GcrControls>(a).unwrap().pad.buttons;
         let keys = |a| binding::<GcrControls>(a).unwrap().keyboard.keys;
         // Triggers: accelerate/up FIRST (RT), brake/down SECOND (LT).
-        assert_eq!(pad(Action::PlaneThrottle), &[PadButton::RightTrigger, PadButton::LeftTrigger]);
-        assert_eq!(pad(Action::ShipLift), &[PadButton::RightTrigger, PadButton::LeftTrigger]);
+        assert_eq!(
+            pad(Action::PlaneThrottle),
+            &[PadButton::RightTrigger, PadButton::LeftTrigger]
+        );
+        assert_eq!(
+            pad(Action::ShipLift),
+            &[PadButton::RightTrigger, PadButton::LeftTrigger]
+        );
         // Bumpers: left FIRST (LB), right SECOND (RB).
-        assert_eq!(pad(Action::PlaneRudder), &[PadButton::LeftBumper, PadButton::RightBumper]);
-        assert_eq!(pad(Action::ShipRoll), &[PadButton::LeftBumper, PadButton::RightBumper]);
+        assert_eq!(
+            pad(Action::PlaneRudder),
+            &[PadButton::LeftBumper, PadButton::RightBumper]
+        );
+        assert_eq!(
+            pad(Action::ShipRoll),
+            &[PadButton::LeftBumper, PadButton::RightBumper]
+        );
         assert_eq!(pad(Action::MatchVelocity), &[PadButton::South]);
         // Keyboard: throttle/forward = W↑ then S↓; rudder/strafe = A← then D→.
         assert_eq!(keys(Action::PlaneThrottle), &[Key::W, Key::S]);
@@ -723,8 +855,14 @@ mod tests {
     /// The screenshot context override round-trips the ids the evidence harness uses.
     #[test]
     fn context_from_id_round_trips() {
-        assert_eq!(GcrControls::context_from_id("foot"), Some(GcrContext::OnFoot));
-        assert_eq!(GcrControls::context_from_id("plane"), Some(GcrContext::Plane));
+        assert_eq!(
+            GcrControls::context_from_id("foot"),
+            Some(GcrContext::OnFoot)
+        );
+        assert_eq!(
+            GcrControls::context_from_id("plane"),
+            Some(GcrContext::Plane)
+        );
         assert_eq!(GcrControls::context_from_id("ship"), Some(GcrContext::Ship));
         assert_eq!(GcrControls::context_from_id("nope"), None);
     }
@@ -773,7 +911,10 @@ mod tests {
                     .into_iter()
                     .find(|l| l.label == "Controls")
                     .unwrap();
-                assert!(reveal.hold, "RevealControls must read as a hold in {ctx:?}/{device:?}");
+                assert!(
+                    reveal.hold,
+                    "RevealControls must read as a hold in {ctx:?}/{device:?}"
+                );
             }
         }
     }

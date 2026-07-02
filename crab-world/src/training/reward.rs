@@ -239,8 +239,14 @@ mod tests {
         let closing_more = compute_reward(Some(0.02), effort);
         let receding = compute_reward(Some(-0.01), effort);
         assert!(closing > still, "closing ground out-earns standing still");
-        assert!(closing_more > closing, "closing more earns more (linear, un-capped)");
-        assert!(receding < still, "losing ground lowers the reward below standing still");
+        assert!(
+            closing_more > closing,
+            "closing more earns more (linear, un-capped)"
+        );
+        assert!(
+            receding < still,
+            "losing ground lowers the reward below standing still"
+        );
         assert!(
             ((closing - still) - (still - receding)).abs() < 1e-6,
             "the progress term is symmetric: +δ closing gains what −δ receding loses"
@@ -285,17 +291,40 @@ mod tests {
         // `progress_reward` zeroed a present, non-physical delta — so the surfaced count can never
         // disagree with what was actually dropped. The neutral `None` (rescue/teleport) is NOT a
         // glitch even though it also pays zero; that distinction is the whole point of the counter.
-        let physical = [Some(0.0_f32), Some(0.05), Some(-0.05), Some(MAX_PROGRESS_STEP_M)];
+        let physical = [
+            Some(0.0_f32),
+            Some(0.05),
+            Some(-0.05),
+            Some(MAX_PROGRESS_STEP_M),
+        ];
         for d in physical {
-            assert!(!is_progress_glitch(d), "a physical/paid step is not a glitch: {d:?}");
+            assert!(
+                !is_progress_glitch(d),
+                "a physical/paid step is not a glitch: {d:?}"
+            );
         }
         // None pays zero but is intended-neutral, never counted.
-        assert!(!is_progress_glitch(None), "None (rescue/teleport) is neutral, not a glitch");
+        assert!(
+            !is_progress_glitch(None),
+            "None (rescue/teleport) is neutral, not a glitch"
+        );
         // A present but non-physical delta IS a glitch — and `progress_reward` does zero it.
-        let glitches = [Some(5.0_f32), Some(-5.0), Some(f32::NAN), Some(f32::INFINITY)];
+        let glitches = [
+            Some(5.0_f32),
+            Some(-5.0),
+            Some(f32::NAN),
+            Some(f32::INFINITY),
+        ];
         for d in glitches {
-            assert!(is_progress_glitch(d), "a non-physical present delta is a glitch: {d:?}");
-            assert_eq!(progress_reward(d), 0.0, "a glitch delta must be zeroed: {d:?}");
+            assert!(
+                is_progress_glitch(d),
+                "a non-physical present delta is a glitch: {d:?}"
+            );
+            assert_eq!(
+                progress_reward(d),
+                0.0,
+                "a glitch delta must be zeroed: {d:?}"
+            );
         }
     }
 
@@ -423,8 +452,14 @@ mod tests {
         let saturating_drive = [5.0_f32; ACTION_SIZE]; // slams far past it
         // Both clamp to the SAME command — the sim cannot tell them apart.
         let gentle_cmd: Vec<f32> = gentle_drive.iter().map(|d| d.clamp(-1.0, 1.0)).collect();
-        let sat_cmd: Vec<f32> = saturating_drive.iter().map(|d| d.clamp(-1.0, 1.0)).collect();
-        assert_eq!(gentle_cmd, sat_cmd, "both drives produce the identical clamped command");
+        let sat_cmd: Vec<f32> = saturating_drive
+            .iter()
+            .map(|d| d.clamp(-1.0, 1.0))
+            .collect();
+        assert_eq!(
+            gentle_cmd, sat_cmd,
+            "both drives produce the identical clamped command"
+        );
         // …yet the reward must charge the saturating drive strictly more.
         let r_gentle = compute_reward(Some(0.01), action_effort(&gentle_drive));
         let r_sat = compute_reward(Some(0.01), action_effort(&saturating_drive));
@@ -442,13 +477,22 @@ mod tests {
         // from `physics::PHYSICS_DT` (64 Hz):
         // 1. A still policy with no progress pays no tax and earns nothing — zero.
         let still = compute_reward(None, action_effort(&[0.0; ACTION_SIZE]));
-        assert!(still.abs() < 1e-6, "a still policy with no progress is zero: {still}");
+        assert!(
+            still.abs() < 1e-6,
+            "a still policy with no progress is zero: {still}"
+        );
         // 2. A real STRIDE — closing ~0.5 m/s of ground (≈0.0078 m/tick at 64 Hz) with an
         //    in-range gait drive (|d| < 1) — must net POSITIVE on progress alone. A |d|=0.7
         //    drive over the actuated joints costs EFFORT_WEIGHT·N·0.49 (≈0.011 at N=38), well
         //    under the stride's 24·0.0078 ≈ 0.19.
-        let stride = compute_reward(Some(per_tick_closed(0.5)), action_effort(&[0.7; ACTION_SIZE]));
-        assert!(stride > 0.0, "a real stride must net positive after the tax, on progress alone: {stride}");
+        let stride = compute_reward(
+            Some(per_tick_closed(0.5)),
+            action_effort(&[0.7; ACTION_SIZE]),
+        );
+        assert!(
+            stride > 0.0,
+            "a real stride must net positive after the tax, on progress alone: {stride}"
+        );
         // 3. The break-even DRIVE size — where the per-tick effort tax equals the per-tick stride
         //    progress — sits FAR above any in-range gait (|d| < 1): even a |d|=2 drive on EVERY
         //    joint is still net-positive, so a gait is deep in the net-positive region while
@@ -464,8 +508,10 @@ mod tests {
         //    even while closing ground — `|d|²` keeps climbing past the clamp, so the gradient
         //    pushes the policy out of saturation. At |d|=3 the cost (EFFORT_WEIGHT·N·9 ≈ 0.2 at
         //    N=38) swamps the ≈0.19 stride progress's margin, driving reward toward/below zero.
-        let oversaturated =
-            compute_reward(Some(per_tick_closed(0.5)), action_effort(&[3.0; ACTION_SIZE]));
+        let oversaturated = compute_reward(
+            Some(per_tick_closed(0.5)),
+            action_effort(&[3.0; ACTION_SIZE]),
+        );
         assert!(
             oversaturated < stride,
             "saturation-seeking must be taxed below a real stride: {oversaturated} vs {stride}"
@@ -488,7 +534,10 @@ mod tests {
         let walk_total = walk_progress - walk_tax;
         // FREEZE: closes ~0 m, paying only the near-still drive tax (μ→0, σ≈0.2 ⇒ |d|≈0.1).
         let freeze_total = -(ticks * EFFORT_WEIGHT * action_effort(&[0.1; ACTION_SIZE]));
-        assert!(walk_total > 0.0, "a full traverse must net positive over an episode: {walk_total}");
+        assert!(
+            walk_total > 0.0,
+            "a full traverse must net positive over an episode: {walk_total}"
+        );
         assert!(
             walk_total > freeze_total + 30.0,
             "progress must EPISODE-DOMINATE: a traverse {walk_total} ≫ freezing {freeze_total}"

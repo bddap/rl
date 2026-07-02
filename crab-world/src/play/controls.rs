@@ -14,7 +14,9 @@
 
 use bevy::prelude::*;
 
-use crate::controls::{Binding, ContextRow, ControlInput, ControlScheme, Glyph, KbBinding, PadBinding};
+use crate::controls::{
+    Binding, ContextRow, ControlInput, ControlScheme, Glyph, KbBinding, PadBinding,
+};
 
 /// The demo's control scheme — a zero-size marker the overlay framework is instantiated
 /// with. Disjoint from GCR's `net::controls::GcrControls`: different verbs, own data.
@@ -260,17 +262,50 @@ pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [
 /// The demo's one context's legend, in display order — each verb's human label. (The demo
 /// never switches context, so this is the whole legend.)
 pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 11] = [
-    ContextRow { action: DemoAction::Orbit, label: "Orbit camera" },
-    ContextRow { action: DemoAction::Zoom, label: "Zoom" },
-    ContextRow { action: DemoAction::Rebuild, label: "Rebuild crab" },
-    ContextRow { action: DemoAction::Poke, label: "Poke" },
-    ContextRow { action: DemoAction::Colliders, label: "Render view (cycle)" },
-    ContextRow { action: DemoAction::JointGraph, label: "Joint graph" },
-    ContextRow { action: DemoAction::Manual, label: "Manual control" },
-    ContextRow { action: DemoAction::PickJoint, label: "Pick joint (manual)" },
-    ContextRow { action: DemoAction::Torque, label: "Joint torque (manual)" },
-    ContextRow { action: DemoAction::Quit, label: "Quit" },
-    ContextRow { action: DemoAction::RevealControls, label: "Controls" },
+    ContextRow {
+        action: DemoAction::Orbit,
+        label: "Orbit camera",
+    },
+    ContextRow {
+        action: DemoAction::Zoom,
+        label: "Zoom",
+    },
+    ContextRow {
+        action: DemoAction::Rebuild,
+        label: "Rebuild crab",
+    },
+    ContextRow {
+        action: DemoAction::Poke,
+        label: "Poke",
+    },
+    ContextRow {
+        action: DemoAction::Colliders,
+        label: "Render view (cycle)",
+    },
+    ContextRow {
+        action: DemoAction::JointGraph,
+        label: "Joint graph",
+    },
+    ContextRow {
+        action: DemoAction::Manual,
+        label: "Manual control",
+    },
+    ContextRow {
+        action: DemoAction::PickJoint,
+        label: "Pick joint (manual)",
+    },
+    ContextRow {
+        action: DemoAction::Torque,
+        label: "Joint torque (manual)",
+    },
+    ContextRow {
+        action: DemoAction::Quit,
+        label: "Quit",
+    },
+    ContextRow {
+        action: DemoAction::RevealControls,
+        label: "Controls",
+    },
 ];
 
 #[cfg(test)]

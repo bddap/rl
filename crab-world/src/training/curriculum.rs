@@ -127,8 +127,7 @@ pub(crate) fn sample_target(origin: Vec3, band: TargetBand, rng: &mut impl rand:
             origin.z + dist * theta.sin(),
         )
     };
-    let in_arena =
-        |p: &Vec3| p.x.abs() <= TARGET_ARENA_HALF && p.z.abs() <= TARGET_ARENA_HALF;
+    let in_arena = |p: &Vec3| p.x.abs() <= TARGET_ARENA_HALF && p.z.abs() <= TARGET_ARENA_HALF;
 
     // Most headings fit for a central spawn; an edge spawn fits only the inward arc, so a
     // bounded random search lands a varied in-arena heading without computing the arc.

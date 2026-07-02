@@ -232,7 +232,6 @@ pub const EXTRACT_RADIUS: i64 = 2 * UNIT;
 /// spin a peer wildly.
 const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
 
-
 /// What a player is doing in the round. Drives both sim logic (only `Alive` players
 /// move, get hunted, and can extract) and rendering (downed = ragdoll/marker,
 /// extracted = removed/safe).
@@ -322,7 +321,6 @@ impl Crab {
         self.yaw
     }
 }
-
 
 /// The fixed pickup point a player reaches to clear the round. A constant in the
 /// gray-box, but carried in state (and hashed) so a later sub can move/randomize it
@@ -483,7 +481,6 @@ impl Sim {
         self.rng = ChaCha8Rng::seed_from_u64(self.config.seed);
     }
 
-
     /// Spawn a mid-game joiner (GCR MP incr 4, rl#151) INTO the live round — the host-authoritative
     /// snapshot-transfer join ([[mp-minecraft-model]]), NOT the dead lockstep round-boundary rebuild.
     /// Inserts a fresh [`Player`] for `pid` and folds it into the [`config`](Sim::config) roster
@@ -510,7 +507,12 @@ impl Sim {
         // Ring slot from the joiner's index in the new roster — the same layout construction uses, so
         // the joiner spawns in formation. Position is cosmetic here (host-authoritative), not hashed
         // cross-peer state, so it need only be sane.
-        let idx = self.config.players.iter().position(|p| *p == pid).unwrap_or(0) as i64;
+        let idx = self
+            .config
+            .players
+            .iter()
+            .position(|p| *p == pid)
+            .unwrap_or(0) as i64;
         let n = self.config.players.len() as i64;
         let x = (idx - n / 2) * 2 * UNIT;
         self.players.insert(
@@ -545,9 +547,7 @@ impl Sim {
     /// arrangement, shared by [`Sim::new`] and [`Sim::reset`] so the two can't drift. Pure
     /// function of the (integer, sorted) config, so every peer composes the identical
     /// starting world. Returns the foot players, the crab, and the extraction point.
-    fn spawn_state(
-        cfg: &RoundConfig,
-    ) -> (BTreeMap<PlayerId, Player>, Crab, ExtractionPoint) {
+    fn spawn_state(cfg: &RoundConfig) -> (BTreeMap<PlayerId, Player>, Crab, ExtractionPoint) {
         let mut map = BTreeMap::new();
         let n = cfg.players.len() as i64;
         for (i, &id) in cfg.players.iter().enumerate() {
@@ -959,7 +959,13 @@ impl Sim {
     /// source and target are the same world). The destructure has NO `..`, so a new
     /// `CoreSnapshot` field must be handled here too.
     pub fn apply_core_snapshot(&mut self, snapshot: CoreSnapshot) {
-        let CoreSnapshot { tick, players, crab, outcome, roster } = snapshot;
+        let CoreSnapshot {
+            tick,
+            players,
+            crab,
+            outcome,
+            roster,
+        } = snapshot;
         self.tick = tick;
         self.players = players;
         self.crab = crab;
@@ -1033,7 +1039,6 @@ fn within(ax: i64, az: i64, bx: i64, bz: i64, r: i64) -> bool {
     dist2_i128(ax - bx, az - bz) <= (r as i128) * (r as i128)
 }
 
-
 /// Integer square root (floor) of a non-negative `i128`, via Newton's method on
 /// integers. Deterministic on every target (no float `sqrt`, whose last bit can
 /// differ across hardware); used to normalize the crab's pursuit vector from an i128
@@ -1081,7 +1086,9 @@ mod tests {
     /// idle players spells out their neutral input instead of relying on a
     /// missing-key default.
     fn neutral_for(sim: &Sim) -> BTreeMap<PlayerId, Input> {
-        sim.participant_ids().map(|id| (id, Input::default())).collect()
+        sim.participant_ids()
+            .map(|id| (id, Input::default()))
+            .collect()
     }
 
     #[test]
@@ -1126,9 +1133,18 @@ mod tests {
         };
         let (h1, ..) = run();
         let (h2, p0_start, p0_end, p1_start, p1_end) = run();
-        assert_eq!(h1, h2, "the same mixed foot+pilot inputs must reproduce the state hash");
-        assert_eq!(p1_start, p1_end, "a piloting (neutral-input) player's foot avatar stays put");
-        assert_ne!(p0_start, p0_end, "the walking player actually moved (not a no-op step)");
+        assert_eq!(
+            h1, h2,
+            "the same mixed foot+pilot inputs must reproduce the state hash"
+        );
+        assert_eq!(
+            p1_start, p1_end,
+            "a piloting (neutral-input) player's foot avatar stays put"
+        );
+        assert_ne!(
+            p0_start, p0_end,
+            "the walking player actually moved (not a no-op step)"
+        );
     }
 
     #[test]
@@ -1152,7 +1168,6 @@ mod tests {
         let b = Sim::new(42, &[PlayerId(0), PlayerId(1), PlayerId(2)]);
         assert_eq!(a.state_hash(), b.state_hash());
     }
-
 
     #[test]
     fn forward_input_moves_along_facing() {

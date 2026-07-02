@@ -88,7 +88,10 @@ pub(crate) fn run(args: Args) -> Result<()> {
         net_loop::MatchResult::Cancelled => unreachable!("no interactive lobby on this path"),
     };
     let role = if driver.is_host() { "host" } else { "client" };
-    println!("net-screenshot: formed as {role}; rendering to {}", args.out.display());
+    println!(
+        "net-screenshot: formed as {role}; rendering to {}",
+        args.out.display()
+    );
 
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(0.0, args.cam_pitch)

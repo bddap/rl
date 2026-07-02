@@ -147,14 +147,22 @@ impl CrabArticulation {
                 let shift = read_vec3(&mut r)?;
                 let pivot = read_vec3(&mut r)?;
                 let scale = f32::from_le_bytes(r.take()?);
-                Some(ReposeWire { shift, pivot, scale })
+                Some(ReposeWire {
+                    shift,
+                    pivot,
+                    scale,
+                })
             }
             _ => return Err(ArticulationDecodeError::BadFlag),
         };
         if !r.is_empty() {
             return Err(ArticulationDecodeError::TrailingBytes);
         }
-        Ok(Self { tick, parts, repose })
+        Ok(Self {
+            tick,
+            parts,
+            repose,
+        })
     }
 }
 
@@ -188,8 +196,14 @@ impl<'a> Reader<'a> {
     }
 
     fn take<const N: usize>(&mut self) -> Result<[u8; N], ArticulationDecodeError> {
-        let end = self.at.checked_add(N).ok_or(ArticulationDecodeError::Truncated)?;
-        let slice = self.buf.get(self.at..end).ok_or(ArticulationDecodeError::Truncated)?;
+        let end = self
+            .at
+            .checked_add(N)
+            .ok_or(ArticulationDecodeError::Truncated)?;
+        let slice = self
+            .buf
+            .get(self.at..end)
+            .ok_or(ArticulationDecodeError::Truncated)?;
         self.at = end;
         Ok(slice.try_into().expect("slice length checked above"))
     }
@@ -211,8 +225,16 @@ mod tests {
         CrabArticulation {
             tick: 4242,
             parts: vec![
-                PartTransform { part: 0, pos: [1.0, 2.0, 3.0], rot: [0.0, 0.0, 0.0, 1.0] },
-                PartTransform { part: 7, pos: [-4.5, 0.25, 9.0], rot: [0.5, 0.5, 0.5, 0.5] },
+                PartTransform {
+                    part: 0,
+                    pos: [1.0, 2.0, 3.0],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                },
+                PartTransform {
+                    part: 7,
+                    pos: [-4.5, 0.25, 9.0],
+                    rot: [0.5, 0.5, 0.5, 0.5],
+                },
             ],
             repose: Some(ReposeWire {
                 shift: [10.0, 0.0, -20.0],
@@ -237,7 +259,11 @@ mod tests {
 
     #[test]
     fn empty_parts_roundtrip() {
-        let a = CrabArticulation { tick: 0, parts: vec![], repose: None };
+        let a = CrabArticulation {
+            tick: 0,
+            parts: vec![],
+            repose: None,
+        };
         assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
     }
 
@@ -248,14 +274,20 @@ mod tests {
             CrabArticulation::from_bytes(&bytes[..bytes.len() - 1]),
             Err(ArticulationDecodeError::Truncated)
         );
-        assert_eq!(CrabArticulation::from_bytes(&[]), Err(ArticulationDecodeError::Truncated));
+        assert_eq!(
+            CrabArticulation::from_bytes(&[]),
+            Err(ArticulationDecodeError::Truncated)
+        );
     }
 
     #[test]
     fn trailing_bytes_are_rejected() {
         let mut bytes = sample().to_bytes();
         bytes.push(0);
-        assert_eq!(CrabArticulation::from_bytes(&bytes), Err(ArticulationDecodeError::TrailingBytes));
+        assert_eq!(
+            CrabArticulation::from_bytes(&bytes),
+            Err(ArticulationDecodeError::TrailingBytes)
+        );
     }
 
     #[test]
@@ -265,6 +297,9 @@ mod tests {
         let flag_off = 8 + 4 + 2 * (1 + 12 + 16);
         let mut bytes = sample().to_bytes();
         bytes[flag_off] = 2;
-        assert_eq!(CrabArticulation::from_bytes(&bytes), Err(ArticulationDecodeError::BadFlag));
+        assert_eq!(
+            CrabArticulation::from_bytes(&bytes),
+            Err(ArticulationDecodeError::BadFlag)
+        );
     }
 }

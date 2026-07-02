@@ -91,10 +91,16 @@ pub struct Args {
 #[derive(Clone)]
 enum AppMode {
     Demo,
-    Screenshot { path: PathBuf, settle: u32 },
+    Screenshot {
+        path: PathBuf,
+        settle: u32,
+    },
     /// Offline ball-chase clip: step the sim one tick per frame, render that frame,
     /// encode to `path` at the end. `seconds` is the clip's SIMULATED length.
-    RenderVideo { path: PathBuf, seconds: f32 },
+    RenderVideo {
+        path: PathBuf,
+        seconds: f32,
+    },
 }
 
 fn main() {
@@ -153,8 +159,10 @@ fn main() {
     // on-screen banner (see the Demo arm). The owner's bug (rl#706) was exactly this: a fallback
     // he could SEE but not identify, so the failure must name itself on the screen he's looking
     // at, not only in a log he isn't.
-    let mesh_fallback_reason: Option<String> =
-        crab_world::mesh_fallback::usable_model().as_ref().err().cloned();
+    let mesh_fallback_reason: Option<String> = crab_world::mesh_fallback::usable_model()
+        .as_ref()
+        .err()
+        .cloned();
     if let Some(reason) = &mesh_fallback_reason {
         // LOUD via telemetry (stderr + OTLP), shared with the game surface so both name the
         // missing Sally identically (rl#706).

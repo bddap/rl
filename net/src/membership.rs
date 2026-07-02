@@ -949,7 +949,10 @@ mod tests {
         );
         let decoded = decode_beat(&encode_beat(&a)).unwrap();
         assert_eq!(decoded.asset_digest, 0xC0FF_EE00_1234_5678);
-        assert_eq!(decoded.weights_digest, 0, "asset digest must not bleed into weights");
+        assert_eq!(
+            decoded.weights_digest, 0,
+            "asset digest must not bleed into weights"
+        );
     }
 
     #[test]
@@ -978,25 +981,37 @@ mod tests {
         let mut a = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
         a.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
         a.poll(t0);
-        assert!(a.sync_verdict().assets, "equal non-zero asset digests must be synced");
+        assert!(
+            a.sync_verdict().assets,
+            "equal non-zero asset digests must be synced"
+        );
 
         // A peer on a DIFFERENT crab model → not synced (the desync the guard exists for).
         let mut b = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
         b.on_beat(idb, &bt_ad(vec![ida, idb], ASSET ^ 0xFF), t0);
         b.poll(t0);
-        assert!(!b.sync_verdict().assets, "a differing peer asset digest must not be synced");
+        assert!(
+            !b.sync_verdict().assets,
+            "a differing peer asset digest must not be synced"
+        );
 
         // A peer advertising a ZERO digest (no resolvable model) → not synced.
         let mut c = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
         c.on_beat(idb, &bt_ad(vec![ida, idb], 0), t0);
         c.poll(t0);
-        assert!(!c.sync_verdict().assets, "a zero peer asset digest must not be synced");
+        assert!(
+            !c.sync_verdict().assets,
+            "a zero peer asset digest must not be synced"
+        );
 
         // OUR OWN digest zero (no model locally) → never synced, even if a peer has one.
         let mut d = Membership::new(ida, 2, t0); // local_asset_digest defaults to 0
         d.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
         d.poll(t0);
-        assert!(!d.sync_verdict().assets, "a zero local asset digest is never synced");
+        assert!(
+            !d.sync_verdict().assets,
+            "a zero local asset digest is never synced"
+        );
     }
 
     #[test]
@@ -1021,7 +1036,10 @@ mod tests {
         };
         a.on_beat(idb, &mismatched_asset, t0);
         a.poll(t0);
-        assert!(a.sync_verdict().host_brain, "a real host brain → weights gate passes");
+        assert!(
+            a.sync_verdict().host_brain,
+            "a real host brain → weights gate passes"
+        );
         assert!(
             !a.sync_verdict().assets,
             "a different crab asset must leave assets NOT synced (independent of weights)"

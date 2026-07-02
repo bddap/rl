@@ -198,7 +198,10 @@ impl VehicleKind {
             VehicleKind::Plane => Vec3::new(0.0, 0.0, PLANE_SPAWN_SPEED),
             VehicleKind::Ship => Vec3::ZERO,
         };
-        Velocity { linear, angular: Vec3::ZERO }
+        Velocity {
+            linear,
+            angular: Vec3::ZERO,
+        }
     }
 
     /// Rapier gravity multiplier. The plane is a real aircraft (gravity 1× — lift fights weight,
@@ -305,7 +308,10 @@ fn manage_vehicle(
 /// body's motion and write its forces.
 fn vehicle_bundle(kind: VehicleKind, transform: Transform, velocity: Velocity) -> impl Bundle {
     (
-        Vehicle { kind, throttle: 0.0 },
+        Vehicle {
+            kind,
+            throttle: 0.0,
+        },
         RigidBody::Dynamic,
         Collider::cuboid(VEHICLE_HALF.x, VEHICLE_HALF.y, VEHICLE_HALF.z),
         ColliderMassProperties::Density(VEHICLE_DENSITY),
@@ -321,7 +327,11 @@ fn vehicle_bundle(kind: VehicleKind, transform: Transform, velocity: Velocity) -
 /// Spawn one vehicle rigidbody of `kind` at its arena spawn pose — the boarding path
 /// ([`manage_vehicle`]).
 fn spawn_vehicle(commands: &mut Commands, kind: VehicleKind) {
-    commands.spawn(vehicle_bundle(kind, kind.spawn_transform(), kind.spawn_velocity()));
+    commands.spawn(vehicle_bundle(
+        kind,
+        kind.spawn_transform(),
+        kind.spawn_velocity(),
+    ));
 }
 
 /// Spawn a vehicle rigidbody directly into a `World` at an explicit pose + velocity, returning its
@@ -374,7 +384,11 @@ fn apply_vehicle_forces(
         // Drag opposing velocity: linear + quadratic (per-craft: the ship's is low, so it coasts),
         // plus the match-velocity brake while held — bounds speed with no cap.
         let speed = v.length();
-        let match_damp = if control.match_velocity { MATCH_VEL_DAMP } else { 0.0 };
+        let match_damp = if control.match_velocity {
+            MATCH_VEL_DAMP
+        } else {
+            0.0
+        };
         let drag = -v * (p.drag_lin + match_damp + p.drag_quad * speed);
 
         ef.force = thrust + lift + drag;
@@ -417,15 +431,28 @@ mod tests {
         // Spawn through the SHARED bundle (so the test exercises the real collider/mass/groups, not
         // a copy that could drift), then trim the throttle full so the thrust tests have authority.
         let transform = Transform::from_translation(at);
-        let velocity = Velocity { linear: vel, angular: Vec3::ZERO };
-        let e = app.world_mut().spawn(vehicle_bundle(kind, transform, velocity)).id();
-        app.world_mut().entity_mut(e).get_mut::<Vehicle>().unwrap().throttle = 1.0;
+        let velocity = Velocity {
+            linear: vel,
+            angular: Vec3::ZERO,
+        };
+        let e = app
+            .world_mut()
+            .spawn(vehicle_bundle(kind, transform, velocity))
+            .id();
+        app.world_mut()
+            .entity_mut(e)
+            .get_mut::<Vehicle>()
+            .unwrap()
+            .throttle = 1.0;
         (app, e)
     }
 
     fn body(app: &App, e: Entity) -> (&Transform, &Velocity) {
         let ent = app.world().entity(e);
-        (ent.get::<Transform>().unwrap(), ent.get::<Velocity>().unwrap())
+        (
+            ent.get::<Transform>().unwrap(),
+            ent.get::<Velocity>().unwrap(),
+        )
     }
 
     const FAR: Vec3 = Vec3::new(500.0, 300.0, 500.0);
@@ -437,7 +464,9 @@ mod tests {
     #[test]
     fn plane_thrust_accelerates_forward() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 2.0));
-        app.world_mut().resource_mut::<VehicleControl>().throttle_trim = 1.0;
+        app.world_mut()
+            .resource_mut::<VehicleControl>()
+            .throttle_trim = 1.0;
         let v0 = body(&app, e).1.linear.z;
         for _ in 0..30 {
             app.update();
@@ -452,8 +481,11 @@ mod tests {
     #[test]
     fn lift_rises_with_airspeed() {
         let dy = |speed: f32| {
-            let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, speed));
-            app.world_mut().resource_mut::<VehicleControl>().throttle_trim = -1.0; // throttle to 0
+            let (mut app, e) =
+                app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, speed));
+            app.world_mut()
+                .resource_mut::<VehicleControl>()
+                .throttle_trim = -1.0; // throttle to 0
             let y0 = body(&app, e).1.linear.y;
             for _ in 0..5 {
                 app.update();
@@ -479,7 +511,10 @@ mod tests {
             app.update();
         }
         let nose_y = (body(&app, e).0.rotation * Vec3::Z).y;
-        assert!(nose_y > 0.0, "positive pitch must raise the nose, got nose.y={nose_y}");
+        assert!(
+            nose_y > 0.0,
+            "positive pitch must raise the nose, got nose.y={nose_y}"
+        );
     }
 
     /// DIRECTION pin: a positive `yaw` control (a +Y torque) turns the nose toward body +X. With the
@@ -495,7 +530,10 @@ mod tests {
             app.update();
         }
         let nose_x = (body(&app, e).0.rotation * Vec3::Z).x;
-        assert!(nose_x > 0.0, "positive yaw must turn the nose right (+X), got nose.x={nose_x}");
+        assert!(
+            nose_x > 0.0,
+            "positive yaw must turn the nose right (+X), got nose.x={nose_x}"
+        );
     }
 
     /// A held pitch input inverts the plane (body-up points DOWN) with NO return to level — the
@@ -513,7 +551,10 @@ mod tests {
                 went_inverted = true;
             }
         }
-        assert!(went_inverted, "held pitch never inverted the craft — a cap or auto-level crept in");
+        assert!(
+            went_inverted,
+            "held pitch never inverted the craft — a cap or auto-level crept in"
+        );
     }
 
     /// Drag bounds speed: a fast body with no thrust must SLOW down (drag opposes velocity), so a
@@ -521,7 +562,9 @@ mod tests {
     #[test]
     fn drag_bleeds_speed() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(20.0, 0.0, 0.0));
-        app.world_mut().resource_mut::<VehicleControl>().throttle_trim = -1.0; // throttle to 0
+        app.world_mut()
+            .resource_mut::<VehicleControl>()
+            .throttle_trim = -1.0; // throttle to 0
         let s0 = body(&app, e).1.linear.length();
         for _ in 0..20 {
             app.update();
@@ -537,7 +580,10 @@ mod tests {
         let mut app = headless_app();
         app.add_plugins(VehiclePlugin);
         let count = |app: &mut App| {
-            app.world_mut().query::<&Vehicle>().iter(app.world()).count()
+            app.world_mut()
+                .query::<&Vehicle>()
+                .iter(app.world())
+                .count()
         };
 
         app.update();
@@ -555,7 +601,11 @@ mod tests {
         app.update();
         assert_eq!(count(&mut app), 1, "still one vehicle after a kind cycle");
         assert_eq!(
-            app.world_mut().query::<&Vehicle>().single(app.world()).unwrap().kind,
+            app.world_mut()
+                .query::<&Vehicle>()
+                .single(app.world())
+                .unwrap()
+                .kind,
             VehicleKind::Ship,
             "the body became the cycled kind",
         );
@@ -579,7 +629,10 @@ mod tests {
             app.update();
         }
         let v1 = body(&app, e).1.linear.z;
-        assert!(v1 > v0 + 0.5, "ship forward thruster did not accelerate: {v0} -> {v1}");
+        assert!(
+            v1 > v0 + 0.5,
+            "ship forward thruster did not accelerate: {v0} -> {v1}"
+        );
     }
 
     /// The ship STRAFES from a lateral thrust intent (+X) — translational 6-DOF, no banking. A pure
@@ -593,7 +646,10 @@ mod tests {
             app.update();
         }
         let v1 = body(&app, e).1.linear.x;
-        assert!(v1 > v0 + 0.5, "ship lateral thruster did not strafe +X: {v0} -> {v1}");
+        assert!(
+            v1 > v0 + 0.5,
+            "ship lateral thruster did not strafe +X: {v0} -> {v1}"
+        );
     }
 
     /// The ship flies in ZERO-G (the Outer-Wilds float): with NO thrust it neither rises nor falls,
@@ -605,14 +661,24 @@ mod tests {
             let (mut app, e) = app_with_vehicle(kind, FAR, Vec3::ZERO);
             // Zero the lever (no thrust, hence no forward speed → no lift): the only vertical player
             // left is gravity, so this isolates the gravity scale.
-            app.world_mut().entity_mut(e).get_mut::<Vehicle>().unwrap().throttle = 0.0;
+            app.world_mut()
+                .entity_mut(e)
+                .get_mut::<Vehicle>()
+                .unwrap()
+                .throttle = 0.0;
             for _ in 0..30 {
                 app.update();
             }
             body(&app, e).1.linear.y
         };
-        assert!(fall(VehicleKind::Ship).abs() < 0.5, "ship must float (zero-g), not fall");
-        assert!(fall(VehicleKind::Plane) < -1.0, "plane must fall under gravity");
+        assert!(
+            fall(VehicleKind::Ship).abs() < 0.5,
+            "ship must float (zero-g), not fall"
+        );
+        assert!(
+            fall(VehicleKind::Plane) < -1.0,
+            "plane must fall under gravity"
+        );
     }
 
     /// Match-velocity brakes the coasting ship toward rest: a moving ship with no thrust but
@@ -621,9 +687,10 @@ mod tests {
     #[test]
     fn ship_match_velocity_brakes_harder_than_coast() {
         let drop = |brake: bool| {
-            let (mut app, e) =
-                app_with_vehicle(VehicleKind::Ship, FAR, Vec3::new(10.0, 0.0, 0.0));
-            app.world_mut().resource_mut::<VehicleControl>().match_velocity = brake;
+            let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::new(10.0, 0.0, 0.0));
+            app.world_mut()
+                .resource_mut::<VehicleControl>()
+                .match_velocity = brake;
             let s0 = body(&app, e).1.linear.length();
             for _ in 0..20 {
                 app.update();

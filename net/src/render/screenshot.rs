@@ -2,15 +2,14 @@
 //! the evidence path on a display-less box. Composes the same scene/HUD/input systems the
 //! windowed client uses (see [`super::app`]) onto an offscreen camera.
 
-use super::*;
 use super::app::{install_armed_nn_crab, seed_external_crab_solo};
 use super::driver::{ScriptedPackInput, coordinator, drive_lockstep, insert_core};
-use crate::net_loop::NetDriver;
 use super::hud::{spawn_hud, update_hud};
 use super::input::gather_input;
 use super::scene::{FpCamera, apply_transforms, spawn_world};
+use super::*;
+use crate::net_loop::NetDriver;
 use crab_world::screenshot::{self, ShotProgress, ShotTarget};
-
 
 /// Build the HEADLESS screenshot app: GPU on, no window, render one settled frame of
 /// the FP view to `path` and exit. The evidence path on a box with no display — it
