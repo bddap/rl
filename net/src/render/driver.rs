@@ -40,6 +40,9 @@ fn install_round(world: &mut World, ls: Lockstep, coord: Box<Coordinator>) {
         coord,
         accumulator: 0.0,
         prev,
+        reported_outcome: false,
+        next_tel_tick: next_sample_tick(0),
+        cadence: PhysicsCadence::default(),
     });
     // OVERWRITE with fresh defaults (not `init_resource`, which keeps an existing value):
     // this install is the ONE owner of per-round input/camera state, so a round entered
@@ -140,7 +143,8 @@ pub(super) fn ensure_round_installed(world: &mut World) {
 /// neither covers:
 /// - [`GameState`], which is load-bearing twice: dropping it drops the round's [`NetDriver`]
 ///   (session teardown, so the host departs us cleanly) and its absence is what lets
-///   [`ensure_round_installed`] install the next round instead of resuming the dead one;
+///   [`ensure_round_installed`] install the next round instead of resuming the dead one —
+///   and, with it, every per-round driver latch/watermark it carries (rl#210);
 /// - the crab ARM gate ([`crate::external_crab::ExternalCrabArmed`] — presence IS the state,
 ///   so removal is the whole disarm). The NN stack + crab body persist across rounds by
 ///   design (the menu boot installs them once at build); [`ensure_round_installed`]
@@ -178,7 +182,9 @@ fn end_round_server_down(
             .non_send_resource::<GameState>()
             .coord
             .server_endpoint()
-            .expect("a ServerDown only occurs on the client arm, which always has a server endpoint");
+            .expect(
+                "a ServerDown only occurs on the client arm, which always has a server endpoint",
+            );
         world.insert_resource(super::app::RoundOver { message, host });
         world
             .resource_mut::<NextState<AppPhase>>()
@@ -258,6 +264,19 @@ pub(super) struct GameState {
     /// toward the live sim by `alpha`. A snapshot (not the live sim) because we need
     /// "last tick" even after the sim has stepped to the current one.
     pub(super) prev: SimSnapshot,
+    /// Round-decided latch: set when this round's decided outcome has been reported, cleared
+    /// per Ongoing snapshot inside [`drive_lockstep`]'s drain arms (a RESTART revives a decided
+    /// round without rewinding the tick, rl#204). Lives here — not a system `Local` — so a new
+    /// round starts unlatched by construction (rl#210).
+    reported_outcome: bool,
+    /// The next telemetry sampling boundary ([`next_sample_tick`]), in this ROUND's ticks.
+    /// Per-round for the same reason: a fresh Lockstep restarts at tick 0, so a surviving
+    /// watermark would suppress tick telemetry until the counter climbed past it (rl#210).
+    next_tel_tick: u64,
+    /// The deterministic 64:30 physics/sim cadence, advanced once per APPLIED tick while
+    /// armed and reset on the restart edge (reported by `step_next`, rl#204) so two peers
+    /// stay phase-aligned.
+    cadence: PhysicsCadence,
 }
 
 impl GameState {
@@ -712,15 +731,11 @@ fn restart_crab_to_spawn(world: &mut World, spawn: crate::sim::Pos) {
 /// [`Server::step_next`] as that tick's [`crate::server::CrabPose`]. One tick at a time, so
 /// each applied tick gets its own physics batch + pose. This is an EXCLUSIVE system because
 /// pumping the fixed schedule needs `&mut World`.
-pub(super) fn drive_lockstep(
-    world: &mut World,
-    mut reported_outcome: Local<bool>,
-    mut next_tel_tick: Local<u64>,
-    // The deterministic 64:30 physics/sim cadence, advanced once per APPLIED tick while armed.
-    // A `Local` (per-round state) reset on the restart edge (reported by `step_next` — a
-    // restart no longer rewinds the tick, rl#204) so two peers stay phase-aligned.
-    mut cadence: Local<PhysicsCadence>,
-) {
+///
+/// Takes NO system `Local`s: the per-round driver state (round-decided latch, telemetry
+/// watermark, physics cadence) lives in [`GameState`], whose install/teardown IS the round
+/// lifetime — a `Local` outlives the round across a Playing→Menu→Playing cycle (rl#210).
+pub(super) fn drive_lockstep(world: &mut World) {
     // Whether the external NN crab drives the sim this round (solo, or networked + synced
     // weights). Read once — the gate is fixed for the round. A real round is always armed
     // (a round that can't arm Sally is refused at build); when off (e.g. behind the boot menu)
@@ -748,9 +763,6 @@ pub(super) fn drive_lockstep(
         // host/incumbents when a joiner enters.)
         (tel, state.ls.sim().players().count())
     };
-    if *next_tel_tick == 0 {
-        *next_tel_tick = next_sample_tick(0);
-    }
 
     world.non_send_resource_mut::<GameState>().accumulator += delta;
 
@@ -838,6 +850,9 @@ pub(super) fn drive_lockstep(
         let mut server_down: Option<crate::net_loop::ServerDown> = None;
         let issue_tick = {
             let mut state = world.non_send_resource_mut::<GameState>();
+            // Plain `&mut GameState` (not `Mut`) so the adopt closure below can borrow the
+            // `reported_outcome` field disjointly from the `ls` it runs against.
+            let state = &mut *state;
             let me = state.ls.me();
             let issue_tick = state.ls.next_tick();
             let msg = state.ls.submit_local_input(sim_input);
@@ -898,6 +913,7 @@ pub(super) fn drive_lockstep(
                         // not off the frame-end outcome: a batch spanning a restart AND a fresh
                         // decision (a catch-up after a stall) never shows Ongoing at the frame
                         // boundary, which would swallow the new round's report.
+                        let reported_outcome = &mut state.reported_outcome;
                         state.ls.adopt_snapshots(exch.snapshots, |c| {
                             if c.sim().outcome() == Outcome::Ongoing {
                                 *reported_outcome = false;
@@ -1003,7 +1019,10 @@ pub(super) fn drive_lockstep(
                 // Pump this tick's crab physics, read the resulting pose, and aim the crab at the
                 // AUTHORITATIVE server sim's nearest living player (pre-step).
                 let crab_pose = if armed {
-                    let steps = cadence.steps_for_next_tick();
+                    let steps = world
+                        .non_send_resource_mut::<GameState>()
+                        .cadence
+                        .steps_for_next_tick();
                     pump_fixed_steps(world, steps);
                     // `resource_scope` lifts the bridge out so we can read it AND `GameState` at once.
                     let pose = world.resource_scope(
@@ -1036,10 +1055,12 @@ pub(super) fn drive_lockstep(
                 // must be inside the drain, not end-of-frame).
                 let (bytes, restarted) = {
                     let mut state = world.non_send_resource_mut::<GameState>();
-                    let server = state.server_mut().expect("server_auth ⇒ a server");
-                    let stepped = server.step_next(crab_pose);
+                    let stepped = state
+                        .server_mut()
+                        .expect("server_auth ⇒ a server")
+                        .step_next(crab_pose);
                     if stepped.restarted {
-                        *cadence = PhysicsCadence::default();
+                        state.cadence = PhysicsCadence::default();
                     }
                     (stepped.snapshot, stepped.restarted)
                 };
@@ -1050,12 +1071,6 @@ pub(super) fn drive_lockstep(
                 // client (which never touches the crab entities), so it is the host's live crab.
                 let snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
                     .expect("the authoritative server's snapshot must decode");
-                // Same per-tick latch clear as the adopt arm: an Ongoing tick means the round
-                // is (or just became, via RESTART) live, so the next decision must report even
-                // if this frame's unbounded catch-up drain also re-decides it.
-                if snap.outcome == Outcome::Ongoing {
-                    *reported_outcome = false;
-                }
                 let articulation =
                     armed.then(|| crate::render::articulation::capture(world, snap.tick));
                 {
@@ -1065,6 +1080,12 @@ pub(super) fn drive_lockstep(
                 }
                 {
                     let mut state = world.non_send_resource_mut::<GameState>();
+                    // Same per-tick latch clear as the adopt arm: an Ongoing tick means the
+                    // round is (or just became, via RESTART) live, so the next decision must
+                    // report even if this frame's unbounded catch-up drain also re-decides it.
+                    if snap.outcome == Outcome::Ongoing {
+                        state.reported_outcome = false;
+                    }
                     state.ls.apply_core_snapshot(snap);
                 }
                 if restarted && armed {
@@ -1084,37 +1105,39 @@ pub(super) fn drive_lockstep(
         // Sampled telemetry: a Tick snapshot + the local input every TELEMETRY_TICK_EVERY
         // applied ticks. Read-only on the sim; best-effort (drops if the link can't keep up).
         if let Some(t) = &tel {
-            let due = world.non_send_resource::<GameState>().ls.sim().tick() >= *next_tel_tick;
-            if due {
-                {
-                    let state = world.non_send_resource::<GameState>();
-                    *next_tel_tick = next_sample_tick(state.ls.sim().tick());
+            let due = {
+                let mut state = world.non_send_resource_mut::<GameState>();
+                let due = state.ls.sim().tick() >= state.next_tel_tick;
+                if due {
+                    state.next_tel_tick = next_sample_tick(state.ls.sim().tick());
                     t.send(TelemetryEvent::tick(state.ls.sim(), roster_len));
                     // The input the SIM actually applied this tick (neutral while piloting).
                     t.send(TelemetryEvent::input(issue_tick, sim_input));
                 }
-                // Aggregated rescue surface: drain the window's `rescue_nonfinite_crabs`
-                // tally into ONE Fault event carrying the count + last offending body, so a
-                // frame-by-frame non-finite blowup shows on the hub feed as a filtered per-window
-                // count instead of a per-step flood. A stable solo Sally never enters this branch
-                // (`since_report` stays 0) — a nonzero count IS the alarm that she's exploding.
-                if let Some(mut stats) = world.get_resource_mut::<crab_world::bot::RescueStats>()
-                    && stats.since_report > 0
-                {
-                    let n = stats.since_report;
-                    let body = stats.last_body;
-                    stats.since_report = 0;
-                    let msg = match body {
-                        Some(b) => format!(
-                            "crab rescue: {n} non-finite respawn(s) this telemetry window \
-                             (last offender: {b}) — armed Sally is going non-finite (rl#137)"
-                        ),
-                        None => format!(
-                            "crab rescue: {n} non-finite respawn(s) this telemetry window (rl#137)"
-                        ),
-                    };
-                    t.send(TelemetryEvent::Fault { msg });
-                }
+                due
+            };
+            // Aggregated rescue surface: drain the window's `rescue_nonfinite_crabs`
+            // tally into ONE Fault event carrying the count + last offending body, so a
+            // frame-by-frame non-finite blowup shows on the hub feed as a filtered per-window
+            // count instead of a per-step flood. A stable solo Sally never enters this branch
+            // (`since_report` stays 0) — a nonzero count IS the alarm that she's exploding.
+            if due
+                && let Some(mut stats) = world.get_resource_mut::<crab_world::bot::RescueStats>()
+                && stats.since_report > 0
+            {
+                let n = stats.since_report;
+                let body = stats.last_body;
+                stats.since_report = 0;
+                let msg = match body {
+                    Some(b) => format!(
+                        "crab rescue: {n} non-finite respawn(s) this telemetry window \
+                         (last offender: {b}) — armed Sally is going non-finite (rl#137)"
+                    ),
+                    None => format!(
+                        "crab rescue: {n} non-finite respawn(s) this telemetry window (rl#137)"
+                    ),
+                };
+                t.send(TelemetryEvent::Fault { msg });
             }
         }
     }
@@ -1131,12 +1154,12 @@ pub(super) fn drive_lockstep(
     // would miss a batch that restarts AND re-decides within one catch-up frame). The
     // telemetry cursor needs no restart handling: the tick is monotone, so it never climbs
     // past a stale watermark.
-    let outcome = world.non_send_resource::<GameState>().ls.sim().outcome();
-    if !*reported_outcome && outcome != Outcome::Ongoing {
-        *reported_outcome = true;
+    let mut state = world.non_send_resource_mut::<GameState>();
+    let outcome = state.ls.sim().outcome();
+    if !state.reported_outcome && outcome != Outcome::Ongoing {
+        state.reported_outcome = true;
         info!("round decided: {outcome:?}");
         if let Some(t) = &tel {
-            let state = world.non_send_resource::<GameState>();
             t.send(TelemetryEvent::round_decided(state.ls.sim()));
         }
     }
