@@ -120,10 +120,11 @@ pub struct Beat {
     /// and close behaviour is unchanged.
     pub start: bool,
     /// The sender's policy-weights digest (rl#82, GCR), `0` for no checkpoint — see
-    /// [`Membership::sync_verdict`] for what it gates. Deliberately NOT folded into
-    /// [`Beat::roster_hash`]: it is a capability advertisement, not membership, so two peers
-    /// with the identical roster still freeze the same set regardless of their brains (a
-    /// weights mismatch refuses to arm the NN crab, rl#114; it never breaks match formation).
+    /// [`Membership::sync_verdict`] for what it gates (the HOST self-gate under host-auth).
+    /// Deliberately NOT folded into [`Beat::roster_hash`]: it is a capability advertisement,
+    /// not membership, so two peers with the identical roster still freeze the same set
+    /// regardless of their brains (an unverified host refuses to arm the NN crab, rl#114; it
+    /// never breaks match formation).
     pub weights_digest: u64,
     /// The sender's crab-MODEL-asset digest (rl#100, GCR), `0` for no resolvable model — the
     /// giant crab's rapier colliders are derived from this asset
@@ -270,9 +271,10 @@ struct PeerView {
     /// joiner that's on a different roster. A relay never sets this (only a direct beat).
     started: bool,
     /// The policy-weights digest this peer last advertised in its OWN direct beat (rl#82),
-    /// or `None` if heard only via relay. Like `advertised`, `None` can never equal our
-    /// non-zero digest, so a peer not yet heard directly blocks [`Membership::sync_verdict`]
-    /// until it speaks for itself.
+    /// or `None` if heard only via relay. Read only when this peer is the HOST (the
+    /// [`Membership::sync_verdict`] self-gate); like `advertised`, `None` counts as
+    /// unverified, so a host not yet heard directly blocks the gate until it speaks for
+    /// itself.
     weights_digest: Option<u64>,
     /// The crab-model-asset digest this peer last advertised in its OWN direct beat (rl#100),
     /// or `None` if heard only via relay. Sibling of `weights_digest`: like it, a `None` can
@@ -485,22 +487,44 @@ impl Membership {
     }
 
     /// The shared-asset guard's verdict (rl#82 weights + rl#100 crab asset, GCR), the ONE
-    /// value the formation carries to the arm sites ([`crate::SyncVerdict`]). Each dimension
-    /// is true only when we have a real digest ourselves (non-zero) AND every live peer's
-    /// last DIRECT beat carried that exact digest. A `None` (relay-only, never heard directly)
-    /// or any differing/zero digest fails it, so an unsynced brain — or two peers whose crab
-    /// models (and thus rapier colliders) differ — can never be armed into lockstep. This is
-    /// an OUTPUT, never a close gate: a mismatch still FORMS the match, but the round can't
-    /// arm the NN crab and — with no integer fallback (rl#114) — the windowed client REFUSES
-    /// it loudly rather than playing a fake crab ([`crate::may_arm_external_crab`]). Call
-    /// after [`Membership::poll`] (which expires the dead) so the live set is current.
+    /// value the formation carries to the arm sites ([`crate::SyncVerdict`]).
+    ///
+    /// - `weights` — the HOST self-gate, host-auth's relocation of the old peer-symmetric
+    ///   equality (the design doc's end state; [[real-sally-definition]]): true iff the peer
+    ///   that will run the authoritative server — the lowest live endpoint id, PlayerId(0) by
+    ///   [`crate::formation::assign_player_ids`]'s sorted assignment — advertised a NON-ZERO
+    ///   policy-weights digest in its own direct beats. Only the host EXECUTES the brain
+    ///   (clients adopt its snapshots and render its articulation, rl#151), so brain equality
+    ///   across peers gates nothing real; what must hold is "the host runs a real Sally, not
+    ///   a failed/absent-checkpoint rest pose". The mid-game analogue is
+    ///   [`crate::server::may_admit_joiner`]'s `HostNotArmed` self-gate.
+    /// - `assets` — peer-symmetric as before: true only when we have a real crab-model asset
+    ///   ourselves (non-zero digest) AND every live peer's last DIRECT beat carried that exact
+    ///   digest. Every peer builds its rendered crab from this asset, so a mismatch is a real
+    ///   client-side divergence even under host-auth.
+    ///
+    /// In both halves a `None` (relay-only, never heard directly) or zero digest fails —
+    /// an unverifiable host, or an asset-divergent peer, can never be armed into lockstep.
+    /// This is an OUTPUT, never a close gate: a failed verdict still FORMS the match, but the
+    /// round can't arm the NN crab and — with no integer fallback (rl#114) — the windowed
+    /// client REFUSES it loudly rather than playing a fake crab
+    /// ([`crate::may_arm_external_crab`]). Call after [`Membership::poll`] (which expires the
+    /// dead) so the live set is current.
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
+        let host = *self
+            .live_set()
+            .first()
+            .expect("live_set always contains at least us");
+        let host_weights = if host == self.me {
+            self.local_digest
+        } else {
+            self.peers
+                .get(&host)
+                .and_then(|v| v.weights_digest)
+                .unwrap_or(0)
+        };
         crate::SyncVerdict {
-            weights: self.local_digest != 0
-                && self
-                    .peers
-                    .values()
-                    .all(|v| v.weights_digest == Some(self.local_digest)),
+            weights: host_weights != 0,
             assets: self.local_asset_digest != 0
                 && self
                     .peers
@@ -814,57 +838,94 @@ mod tests {
     }
 
     #[test]
-    fn weights_synced_only_when_all_peers_share_one_nonzero_digest() {
+    fn weights_gate_keys_on_the_hosts_digest_alone() {
+        // Host-auth: only the host executes the brain (clients adopt its snapshots), so the
+        // weights half of the verdict is the HOST self-gate — "the lowest live endpoint id
+        // advertised a real (non-zero) digest" — never peer-symmetric brain equality (that
+        // rule is superseded; see `sync_verdict`).
         let t0 = Instant::now();
-        let (ida, idb) = (eid(1), eid(2));
+        let mut ids = [eid(1), eid(2)];
+        ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let (host, client) = (ids[0], ids[1]);
         const BRAIN: u64 = 0xABCD_0000_1234_5678;
 
-        // Matched, non-zero brains on both peers → synced.
-        let mut a = Membership::new(ida, 2, t0).with_weights_digest(BRAIN);
-        a.on_beat(idb, &bt_d(vec![ida, idb], BRAIN), t0);
+        // We ARE the host with a real brain: armable regardless of the client's digest — a
+        // client's drifted/absent brain gates nothing (it never runs).
+        let mut a = Membership::new(host, 2, t0).with_weights_digest(BRAIN);
+        a.on_beat(client, &bt_d(vec![host, client], BRAIN ^ 0xFF), t0);
         a.poll(t0);
-        assert!(a.sync_verdict().weights, "equal non-zero digests must be synced");
+        assert!(
+            a.sync_verdict().weights,
+            "the host self-gate passes on its own non-zero digest"
+        );
 
-        // A peer on a DIFFERENT brain → not synced (the mismatch case the guard exists for).
-        let mut b = Membership::new(ida, 2, t0).with_weights_digest(BRAIN);
-        b.on_beat(idb, &bt_d(vec![ida, idb], BRAIN ^ 0xFF), t0);
+        // We ARE the host with NO checkpoint (digest 0): refused — a zero-digest host would
+        // serve a rest-pose fake Sally to everyone ([[real-sally-definition]]).
+        let mut b = Membership::new(host, 2, t0);
+        b.on_beat(client, &bt_d(vec![host, client], BRAIN), t0);
         b.poll(t0);
-        assert!(!b.sync_verdict().weights, "a differing peer digest must not be synced");
+        assert!(
+            !b.sync_verdict().weights,
+            "a zero-digest host must not arm, whatever the clients carry"
+        );
 
-        // A peer advertising a ZERO digest (no checkpoint) → not synced.
-        let mut c = Membership::new(ida, 2, t0).with_weights_digest(BRAIN);
-        c.on_beat(idb, &bt_d(vec![ida, idb], 0), t0);
+        // We are a CLIENT and the host advertised a real brain: armable even with no local
+        // checkpoint — we render the host's Sally, we don't run her.
+        let mut c = Membership::new(client, 2, t0);
+        c.on_beat(host, &bt_d(vec![host, client], BRAIN), t0);
         c.poll(t0);
-        assert!(!c.sync_verdict().weights, "a zero peer digest must not be synced");
+        assert!(
+            c.sync_verdict().weights,
+            "a client verifies the HOST's digest, not its own"
+        );
 
-        // OUR OWN digest zero (no checkpoint locally) → never synced, even if a peer has one.
-        let mut d = Membership::new(ida, 2, t0); // local_digest defaults to 0
-        d.on_beat(idb, &bt_d(vec![ida, idb], BRAIN), t0);
+        // We are a CLIENT and the host advertised digest 0: refused on our side too.
+        let mut d = Membership::new(client, 2, t0).with_weights_digest(BRAIN);
+        d.on_beat(host, &bt_d(vec![host, client], 0), t0);
         d.poll(t0);
-        assert!(!d.sync_verdict().weights, "a zero local digest is never synced");
+        assert!(
+            !d.sync_verdict().weights,
+            "a zero-digest HOST is refused by its clients"
+        );
     }
 
     #[test]
-    fn relay_only_peer_blocks_weights_synced() {
-        // A peer we know only via another's relay (never a DIRECT beat) has `weights_digest:
-        // None`, which can't equal our digest — so it blocks synced until it speaks for itself,
-        // exactly like the roster-agreement `advertised: None` rule. Prevents arming the NN
-        // crab against a peer whose brain we've never actually heard.
+    fn relay_only_host_blocks_the_weights_gate() {
+        // The host's digest counts only from its OWN direct beat: a host known only via
+        // another peer's relay has `weights_digest: None` — an unverifiable brain, blocked
+        // exactly like the roster-agreement `advertised: None` rule. A relay-only NON-host
+        // peer does not block (its brain gates nothing under host-auth).
         let t0 = Instant::now();
-        let (ida, idb, idc) = (eid(1), eid(2), eid(3));
+        let mut ids = [eid(1), eid(2), eid(3)];
+        ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let (host, mid, top) = (ids[0], ids[1], ids[2]);
         const BRAIN: u64 = 0x9999_8888_7777_6666;
-        let mut a = Membership::new(ida, 3, t0).with_weights_digest(BRAIN);
-        // B beats directly with the matching brain AND relays C's existence (no C digest).
-        a.on_beat(idb, &bt_d(vec![ida, idb, idc], BRAIN), t0);
+
+        // We are `top`; `mid` beats directly, relaying the host's existence (no host digest).
+        let mut a = Membership::new(top, 3, t0).with_weights_digest(BRAIN);
+        a.on_beat(mid, &bt_d(vec![host, mid, top], BRAIN), t0);
         a.poll(t0);
         assert!(
             !a.sync_verdict().weights,
-            "a relay-only peer (digest None) must block synced"
+            "a relay-only HOST (digest None) must block the gate"
         );
-        // Now C beats directly with the matching brain → all heard, all matched → synced.
-        a.on_beat(idc, &bt_d(vec![ida, idb, idc], BRAIN), t0);
+        // The host speaks for itself with a real brain → armable.
+        a.on_beat(host, &bt_d(vec![host, mid, top], BRAIN), t0);
         a.poll(t0);
-        assert!(a.sync_verdict().weights, "once every peer is heard with the same brain, synced");
+        assert!(
+            a.sync_verdict().weights,
+            "once the host is heard directly with a real brain, armable"
+        );
+
+        // Mirror: we ARE the host — a relay-only (and even zero-digest) non-host peer does
+        // NOT block the weights gate.
+        let mut b = Membership::new(host, 3, t0).with_weights_digest(BRAIN);
+        b.on_beat(mid, &bt_d(vec![host, mid, top], 0), t0);
+        b.poll(t0);
+        assert!(
+            b.sync_verdict().weights,
+            "non-host digests (zero or relay-only) gate nothing"
+        );
     }
 
     // ── Asset-digest handshake (rl#100, GCR — the shared-collider-asset guard) ────────
@@ -940,10 +1001,10 @@ mod tests {
 
     #[test]
     fn weights_and_assets_synced_are_independent_gates() {
-        // The two guards are orthogonal: matching brains but mismatched crab assets must leave
-        // a verdict with `weights` true yet `assets` false (and the arm site ANDs them, so the
-        // round can't arm Sally and is refused — rl#114). Proves a refactor can't collapse the two
-        // into one digest.
+        // The two guards are orthogonal: a real host brain but mismatched crab assets must
+        // leave a verdict with `weights` true yet `assets` false (and the arm site ANDs them,
+        // so the round can't arm Sally and is refused — rl#114). Proves a refactor can't
+        // collapse the two into one digest.
         let t0 = Instant::now();
         let (ida, idb) = (eid(1), eid(2));
         const BRAIN: u64 = 0xB0B0_0000_1234_5678;
@@ -960,7 +1021,7 @@ mod tests {
         };
         a.on_beat(idb, &mismatched_asset, t0);
         a.poll(t0);
-        assert!(a.sync_verdict().weights, "matching brains → weights synced");
+        assert!(a.sync_verdict().weights, "a real host brain → weights gate passes");
         assert!(
             !a.sync_verdict().assets,
             "a different crab asset must leave assets NOT synced (independent of weights)"

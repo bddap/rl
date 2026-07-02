@@ -135,6 +135,10 @@ run, so it must **add the upstream guard host-auth needs** rather than drop it:
    self-gate:** refuse to host a networked match (and surface it loudly in SP — a non-Sally
    crab is a failure, not a fallback) when `weights_digest == 0`. This is the upstream half
    that replaces the peer-symmetric `weights_synced`.
+   *Realized (rl#199): mid-game admission gates via `AdmissionRefusal::HostNotArmed`, and
+   formation's `Membership::sync_verdict` keys its weights half on the HOST's advertised
+   digest alone — the peer-symmetric equality is gone; a solo zero-digest launch already
+   hard-fails at the rl#114 checkpoint + rig gates.*
 2. **The joiner must verify the host serves real Sally.** On dial, the joiner checks the
    host's advertised weights digest equals the canonical real-Sally digest (refuse a host
    running a random/zero brain — loud, never connect-and-render-a-fake). `may_admit_joiner`
