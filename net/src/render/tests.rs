@@ -597,3 +597,20 @@ fn ship_flight_control_is_outer_wilds() {
         0.0
     );
 }
+
+/// The FP perspective's EFFECTIVE clip must sit at its configured `near`. Bevy 0.18
+/// clips by `PerspectiveProjection::near_clip_plane` (an oblique portals/mirrors
+/// plane), not `near` — its default is the stock 0.1 m plane, so a custom `near` with
+/// a stale default plane still clips at 0.1 render-m ≈ 2 eye-heights: looking down
+/// while standing saw straight through the floor (rl#196). For a straight-ahead
+/// (non-oblique) plane matching `near`, the oblique adjustment is a no-op and the
+/// infinite-reverse matrix carries `near` at w_axis.z — pin that so the pair can't
+/// drift apart again on a bevy bump.
+#[test]
+fn fp_camera_effective_clip_is_the_scaled_near() {
+    use bevy::camera::CameraProjection;
+    let projection = scene::fp_perspective();
+    let clip_from_view = projection.get_clip_from_view();
+    assert_eq!(clip_from_view.w_axis.z, projection.near);
+    assert!(projection.near < 0.01, "near plane must shrink with the render frame");
+}
