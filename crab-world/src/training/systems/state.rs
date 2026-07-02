@@ -20,7 +20,6 @@ use crate::training::checkpoint::{
     BrainLoadError, CheckpointDir, load_brain_file, load_return_normalizer, save_brain,
     save_return_normalizer,
 };
-use crate::training::curriculum::TargetBand;
 use crate::training::envelope::EnvelopeError;
 use crate::training::normalizer::{
     IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
@@ -142,9 +141,6 @@ pub(crate) struct TrainingState {
     pub(super) drift_sum: f64,
     pub(super) drift_count: u64,
 
-    /// This horizon's target-distance band (learner → thread each horizon via
-    /// [`Self::set_band`]); the thread only reads it in `seed_target`.
-    pub(super) band: TargetBand,
     /// This horizon's per-episode reach tally over FINISHED episodes as `(reached,
     /// finished)` — the curriculum's competence signal, drained per horizon.
     pub(super) reach_reached: u64,
@@ -162,14 +158,13 @@ pub(crate) struct TrainingState {
 }
 
 /// What the learner ships a rollout thread to OPEN one horizon (bddap/rl#165): the policy
-/// weight snapshot, the master normalizer baseline, and this horizon's target band + σ-floor.
+/// weight snapshot, the master normalizer baseline, and this horizon's σ-floor.
 /// Borrowed weights (the learner's `Arc<Vec<u8>>` bytes) — [`TrainingState::begin_horizon`]
 /// consumes it once and keeps nothing. One shape for the whole per-horizon setup, so the
 /// load→set→reset sequence lives behind `begin_horizon` instead of leaking into `inproc`.
 pub(crate) struct HorizonRequest<'a> {
     pub brain_bytes: &'a [u8],
     pub normalizer: NormalizerSnapshot,
-    pub band: TargetBand,
     pub log_std_floor: f32,
 }
 
@@ -401,7 +396,6 @@ impl TrainingState {
             normalizer_increment,
             drift_sum: 0.0,
             drift_count: 0,
-            band: TargetBand::start(),
             reach_reached: 0,
             reach_finished: 0,
             progress_glitch_drops: 0,
@@ -454,7 +448,7 @@ impl TrainingState {
     // the fixed drain order; the private hooks below are their building blocks, not the interface.
 
     /// OPEN one horizon on a rollout thread: load the learner's snapshot (weights + normalizer
-    /// baseline), set this horizon's target band + σ-floor, and reset the per-horizon increment.
+    /// baseline), set this horizon's σ-floor, and reset the per-horizon increment.
     /// Returns `false` — having LOGGED which component failed — if the brain OR the normalizer
     /// snapshot did not load, in which case the caller MUST refuse the horizon (bddap/rl#177):
     /// rolling a stale/off-policy brain or mis-normalized observations ships data the learner
@@ -472,7 +466,6 @@ impl TrainingState {
             );
             return false;
         }
-        self.set_band(req.band);
         self.set_log_std_floor(req.log_std_floor);
         self.reset_horizon_counter();
         true
@@ -620,15 +613,8 @@ impl TrainingState {
         out
     }
 
-    /// Set the target-distance band a rollout thread samples from this horizon (learner →
-    /// thread, once per horizon before the roll, like `set_normalizer`). The band is the one
-    /// fixed full-arena range; the thread only consumes it.
-    pub(super) fn set_band(&mut self, band: TargetBand) {
-        self.band = band;
-    }
-
     /// Set this horizon's exploration-σ floor (learner → thread, once per horizon before the
-    /// roll, like [`Self::set_band`]). The learner evaluates the anneal schedule from the
+    /// roll, like `set_normalizer`). The learner evaluates the anneal schedule from the
     /// durable tick odometer and ships the scalar so the rollout samples — and the update later
     /// recomputes log-probs — under the same lower `log_std` clamp (bddap/rl#161).
     fn set_log_std_floor(&mut self, log_std_floor: f32) {

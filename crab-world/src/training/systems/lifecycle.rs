@@ -11,7 +11,7 @@ use crate::bot::body::{CrabAssets, CrabBodyPart, CrabEnvId, random_spawn_rotatio
 use crate::bot::sensor::{CrabTargets, OBS_SIZE};
 use crate::bot::{CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown};
 use crate::training::algorithm::{NormalizedValue, StepEnd, Transition};
-use crate::training::curriculum::{CURRICULUM_REACH_RADIUS, TargetBand, seed_target};
+use crate::training::curriculum::{CURRICULUM_REACH_RADIUS, seed_target};
 use crate::training::reward::{GRAB_REWARD, compute_reward, is_progress_glitch, planar_dist};
 
 use super::state::TrainingState;
@@ -22,8 +22,8 @@ use super::step::{BodyState, StepInputs};
 /// crab-time. The reward calibration is balanced over exactly this horizon (a full traverse's
 /// progress must out-earn the integrated effort tax across these ticks — see
 /// `reward::EFFORT_WEIGHT`), so it is named once here and shared, never duplicated as a magic
-/// `1500`.
-pub(crate) const MAX_EPISODE_TICKS: u32 = 1500;
+/// `1500` (`rl-train eval --ticks` derives its default from it too).
+pub const MAX_EPISODE_TICKS: u32 = 1500;
 
 /// Classify a recorded step's episode end from its three independent end conditions, in
 /// PRIORITY order — the single place the terminal-vs-truncation contract is decided, kept pure
@@ -230,7 +230,6 @@ impl TrainingState {
         inputs: &StepInputs,
         targets: &mut CrabTargets,
         spawns: &CrabSpawns,
-        band: TargetBand,
     ) {
         let body = inputs.body;
         let min_tip_dists = inputs.min_tip_dists;
@@ -329,10 +328,10 @@ impl TrainingState {
                     ..EnvEpisode::default()
                 };
 
-                // New episode → fresh target around this env's spawn slot from the current
-                // band, so the next episode poses a new target. Done here (the one place both
+                // New episode → fresh target around this env's spawn slot, so the next
+                // episode poses a new target. Done here (the one place both
                 // the normal and rescue ends converge) so target life tracks episode life.
-                seed_target(targets, spawns, e, band, &mut self.rng);
+                seed_target(targets, spawns, e, &mut self.rng);
 
                 // Tally this finished episode's reach for the curriculum (drained per horizon
                 // to the learner, like the rewards just below).

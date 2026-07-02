@@ -73,7 +73,6 @@ use crate::bot::arch::{AnyBrain, ArchId};
 use super::TrainBackend;
 use super::algorithm::RolloutBuffer;
 use super::checkpoint::{CheckpointDir, TICK_WATERMARK_FILENAME};
-use super::curriculum::TargetBand;
 use super::normalizer::NormalizerSnapshot;
 use super::systems::{HorizonOutput, HorizonRequest, TrainingState};
 
@@ -213,15 +212,12 @@ fn read_tick_watermark(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Persist the tick odometer. Temp-then-fsync-rename so neither a process crash nor a
-/// power loss can leave a torn count a restart would misread; a write failure is logged,
-/// not fatal.
+/// Persist the tick odometer via the crate-wide [`super::atomic_write`] (temp + fsync +
+/// rename), so neither a process crash nor a power loss can leave a torn count a restart
+/// would misread; a write failure is logged, not fatal.
 fn write_tick_watermark(dir: &Path, ticks: u64) {
     let path = dir.join(TICK_WATERMARK_FILENAME);
-    let tmp = path.with_extension("txt.tmp");
-    if let Err(e) =
-        std::fs::write(&tmp, ticks.to_string()).and_then(|()| super::fsync_rename(&tmp, &path))
-    {
+    if let Err(e) = super::atomic_write(&path, ticks.to_string().as_bytes()) {
         eprintln!("[learner] failed to persist tick watermark to {path:?}: {e}");
     }
 }
@@ -264,15 +260,12 @@ fn read_or_init_anneal_epoch(dir: &Path, total_ticks: u64) -> u64 {
 /// What the learner hands a rollout thread for one horizon: the policy weight
 /// snapshot (bincode bytes, shared read-only) and the master normalizer stats. An
 /// `Arc` so K threads share one allocation per iteration rather than K copies — and
-/// `Clone` is therefore cheap (bumps the Arcs, copies the tiny band), letting one
+/// `Clone` is therefore cheap (bumps the Arcs), letting one
 /// captured snapshot be sent to every thread.
 #[derive(Clone)]
 struct RollRequest {
     brain_bytes: Arc<Vec<u8>>,
     normalizer: Arc<NormalizerSnapshot>,
-    /// The fixed full-arena target-distance band the thread samples this horizon's targets
-    /// from. `Copy` (a tiny band), so no `Arc` is warranted.
-    band: TargetBand,
     /// This horizon's exploration-σ floor — the lower `log_std` clamp the thread samples under
     /// (bddap/rl#161). The learner evaluates the anneal schedule from the durable tick odometer
     /// once per iteration and ships it so rollout and the subsequent update agree on σ.
@@ -430,7 +423,6 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
         let opened = st.begin_horizon(HorizonRequest {
             brain_bytes: &req.brain_bytes,
             normalizer: (*req.normalizer).clone(),
-            band: req.band,
             log_std_floor: req.log_std_floor,
         });
         if !opened {
@@ -555,14 +547,13 @@ struct MergedRollout {
 }
 
 /// Phase 1 — capture the consistent per-iteration view every thread rolls: the policy
-/// weights, the master normalizer baseline (a snapshot, never an increment), and the
-/// target band. Captured before any thread runs, so none sees a half-updated net.
+/// weights and the master normalizer baseline (a snapshot, never an increment).
+/// Captured before any thread runs, so none sees a half-updated net.
 #[cfg(feature = "wgpu")]
-fn snapshot_policy(state: &TrainingState, band: TargetBand, log_std_floor: f32) -> RollRequest {
+fn snapshot_policy(state: &TrainingState, log_std_floor: f32) -> RollRequest {
     RollRequest {
         brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
         normalizer: Arc::new(state.normalizer_snapshot()),
-        band,
         log_std_floor,
     }
 }
@@ -661,7 +652,6 @@ struct IterReport<'a> {
     total_ticks: u64,
     avg_reward: f32,
     drift: (f64, u64),
-    band: TargetBand,
     reach: (u64, u64),
     metrics: &'a super::algorithm::PpoMetrics,
     panics: u32,
@@ -683,7 +673,6 @@ fn log_iteration(r: &IterReport) {
     } else {
         0.0
     };
-    let (band_min, band_max) = r.band.range();
     let (reached, finished) = r.reach;
     // Reach fraction over finished episodes, so an advance's approach is legible (it
     // climbs toward the threshold); `-` when no episode finished this iter.
@@ -747,7 +736,7 @@ fn log_iteration(r: &IterReport) {
         ..
     } = *r;
     eprintln!(
-        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | band {band_min:.1}-{band_max:.1}m (reach {reach_note} over {finished} ep) | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{panic_note}{load_fail_note}{glitch_note}{nonfinite_returns_note}{nonfinite_obs_note}",
+        "[learner] iter {iter} | {samples} samples | rollout {rollout_secs:.3}s ({ticks} ticks) update {update_secs:.3}s{update_note} | sps(iter rollout) {sps_iter:.0} sps(steady rollout) {sps_rollout:.0} | total {total_samples} ({total_ticks} ticks) | reward(20) {avg_reward:.3} | drift {drift:.2}m | reach {reach_note} over {finished} ep | ploss {:.3} vloss {:.3} ent {:.3} kl {:.4} steps {} bdiv {:.3}{panic_note}{load_fail_note}{glitch_note}{nonfinite_returns_note}{nonfinite_obs_note}",
         metrics.policy_loss,
         metrics.value_loss,
         metrics.entropy,
@@ -858,12 +847,11 @@ pub fn run_learner(
         anneal_epoch,
     );
 
-    // The target-distance band is FIXED at the full arena range (see `TargetBand`): every
-    // episode samples a target uniformly across the whole arena, near and far. The
+    // The target-distance band is FIXED at the full arena range: every episode samples a
+    // target across the whole arena, near and far (see `curriculum::sample_target`). The
     // scale-free progress reward gives signal at any distance, so there is no growth
-    // curriculum to advance or persist — the weights learn the far approach directly
-    // (the bitter lesson). One constant band, the same on every warm resume.
-    let band = TargetBand::start();
+    // curriculum to advance, persist, or even thread — the sampling rule reads the two
+    // band constants directly, the same on every warm resume (the bitter lesson).
 
     // Best-by-reach keeping (rl#157): mirror the checkpoint set into `<ckpt>/best/`
     // whenever the policy demonstrates a new high-water reach, so a collapse stays confined to
@@ -911,9 +899,9 @@ pub fn run_learner(
             .config
             .log_std_floor(total_ticks.saturating_sub(anneal_epoch));
 
-        // 1) Capture the consistent per-iteration snapshot (weights + master normalizer +
-        //    the fixed full-range band, none half-updated) and persist a checkpoint.
-        let request = snapshot_policy(&state, band, log_std_floor);
+        // 1) Capture the consistent per-iteration snapshot (weights + master normalizer,
+        //    none half-updated) and persist a checkpoint.
+        let request = snapshot_policy(&state, log_std_floor);
         persist_checkpoint(&state, &gpu_learner, &checkpoint_dir);
 
         // 2) Roll one synchronous horizon across all threads.
@@ -974,7 +962,6 @@ pub fn run_learner(
             total_ticks,
             avg_reward: state.avg_reward(20),
             drift: merged.drift,
-            band,
             reach: merged.reach,
             metrics: &metrics,
             panics: merged.panics,
@@ -1340,7 +1327,6 @@ mod tests {
             .send(RollRequest {
                 brain_bytes: Arc::new(snapshot_brain_bytes(state.brain())),
                 normalizer: Arc::new(state.normalizer_snapshot()),
-                band: TargetBand::start(),
                 log_std_floor: crate::bot::arch::LOG_STD_MIN,
             })
             .expect("send request");
@@ -1424,7 +1410,6 @@ mod tests {
                 .send(RollRequest {
                     brain_bytes: Arc::clone(&brain_bytes),
                     normalizer: Arc::clone(&normalizer),
-                    band: TargetBand::start(),
                     log_std_floor: crate::bot::arch::LOG_STD_MIN,
                 })
                 .expect("send");

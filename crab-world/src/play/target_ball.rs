@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::bot::CrabSpawns;
 use crate::bot::body::{self, CrabClawTip};
 use crate::bot::sensor::CrabTargets;
-use crate::training::curriculum::{TargetBand, sample_target};
+use crate::training::curriculum::sample_target;
 use crate::training::reward::dist_3d;
 
 /// Marker on the demo's red target ball — the visible stand-in for the target the
@@ -98,11 +98,11 @@ pub(super) fn target_ball(
     // near-heavy weighting — so the streamed demo shows the crab chasing the real target at
     // the same distances the weights train on (mostly near, with a far tail): one
     // `sample_target` rule, so the demo can never pose a target training never saw.
-    let demo_band = TargetBand::start();
     let mut target = match targets.get(0) {
         Some(t) => t,
-        None => target_ball_at_from_env()
-            .unwrap_or_else(|| sample_target(origin, demo_band, &mut rng.0)),
+        None => {
+            target_ball_at_from_env().unwrap_or_else(|| sample_target(origin, &mut rng.0))
+        }
     };
 
     // Closest 3D euclidean distance from either claw tip to the target (the reward's
@@ -118,7 +118,7 @@ pub(super) fn target_ball(
     // Reached → relocate to a fresh target (demo watchability only; see the fn
     // doc on why training does NOT do this). The ball follows the new target below.
     if min_dist <= DEMO_REACH_RADIUS {
-        target = sample_target(origin, demo_band, &mut rng.0);
+        target = sample_target(origin, &mut rng.0);
     }
 
     // Write the one source of truth (seed or relocation), then snap the ball to it.
