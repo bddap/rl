@@ -21,7 +21,7 @@ use tracing::{info, warn};
 
 use super::checkpoint::{
     BRAIN_FILENAME, NORMALIZER_FILENAME, OPTIMIZER_FILENAME, RETURN_NORMALIZER_FILENAME,
-    SHAPE_FILENAME, TICK_WATERMARK_FILENAME,
+    TICK_WATERMARK_FILENAME,
 };
 use super::curriculum::SOLID_REACH_FRACTION;
 
@@ -40,8 +40,8 @@ struct BestFile {
     name: &'static str,
     /// A `required` file missing means an incomplete inference set — [`BestKeeper::snapshot`]
     /// refuses to write a `best/` that would be marked valid yet missing it. The inference
-    /// set the demo loads (brain + the two normalizers) and the shape sidecar are required;
-    /// the optimizer (warm-resume only, absent on a cold-resumed run) and the tick odometer
+    /// set the demo loads (brain + the two normalizers) is required; the optimizer
+    /// (warm-resume only, absent on a cold-resumed run) and the tick odometer
     /// (policy-independent budget count) are optional and skipped if absent.
     required: bool,
 }
@@ -54,12 +54,26 @@ struct BestFile {
 /// than yield a silently-incomplete best set (the case that bites hardest, since `best/` is
 /// the demo's collapse-proof fallback).
 const BEST_FILES: &[BestFile] = &[
-    BestFile { name: NORMALIZER_FILENAME, required: true },
-    BestFile { name: RETURN_NORMALIZER_FILENAME, required: true },
-    BestFile { name: SHAPE_FILENAME, required: true },
-    BestFile { name: OPTIMIZER_FILENAME, required: false },
-    BestFile { name: TICK_WATERMARK_FILENAME, required: false },
-    BestFile { name: BRAIN_FILENAME, required: true },
+    BestFile {
+        name: NORMALIZER_FILENAME,
+        required: true,
+    },
+    BestFile {
+        name: RETURN_NORMALIZER_FILENAME,
+        required: true,
+    },
+    BestFile {
+        name: OPTIMIZER_FILENAME,
+        required: false,
+    },
+    BestFile {
+        name: TICK_WATERMARK_FILENAME,
+        required: false,
+    },
+    BestFile {
+        name: BRAIN_FILENAME,
+        required: true,
+    },
 ];
 
 /// EMA smoothing factor for the per-iter reach fraction. Reach over one iter's finished
@@ -307,7 +321,6 @@ mod tests {
             ("brain.bin", b"brain-v1" as &[u8]),
             ("normalizer.bin", b"norm"),
             ("return_normalizer.bin", b"rnorm"),
-            ("shape.txt", b"92 38"),
             ("ticks.txt", b"123"),
         ] {
             std::fs::write(dir.join(name), body).unwrap();

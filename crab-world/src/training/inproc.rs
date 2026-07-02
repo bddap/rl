@@ -78,8 +78,9 @@ use super::normalizer::NormalizerSnapshot;
 use super::systems::{HorizonOutput, HorizonRequest, TrainingState};
 
 /// Recorder for the in-memory weight snapshot. The same precision settings the
-/// on-disk checkpoint (`BinFileRecorder<FullPrecisionSettings>`) uses, so a brain
-/// round-trips identically through either.
+/// on-disk checkpoint's envelope payload uses, so a brain round-trips identically
+/// through either. In-process only, learner→thread of the SAME live brain, so it
+/// carries no envelope — the tag guards files, not this channel.
 type SnapshotRecorder = BinBytesRecorder<FullPrecisionSettings>;
 
 /// Lower the calling process's scheduling priority to `nice` (POSIX
@@ -575,7 +576,7 @@ fn persist_checkpoint(
 ) {
     let paths = CheckpointDir::new(checkpoint_dir);
     state.save_checkpoint();
-    gpu_learner.save_adam_state(&paths.optimizer_path());
+    gpu_learner.save_adam_state(&paths.optimizer_path(), state.brain().arch());
 }
 
 /// Phase 2 — roll one synchronous horizon across all threads: send each its request,
@@ -812,18 +813,16 @@ pub fn run_learner(config: &TrainConfig, k: usize, horizon: u64, iters: u64, nic
 
     // Resume the optimizer's Adam moments + step from the checkpoint so the update
     // continues with warm momentum instead of the brief self-correcting transient a cold
-    // optimizer costs (rl#60). A pre-rl#60 checkpoint has no optimizer.bin and resumes cold
-    // — backward compatible, no error (see `load_optimizer`). Skipped entirely when the
-    // checkpoint's shape is incompatible (a DOF change, bddap/rl#31): the moments are
-    // per-parameter, so loading old-width moments onto the fresh net would misalign them
-    // exactly as the brain would — the brain cold-starts there, and so must the optimizer.
+    // optimizer costs (rl#60). An absent optimizer.bin resumes cold — backward compatible,
+    // no error (see `load_optimizer`, which also refuses a wrong-arch/legacy/corrupt file
+    // to cold). Skipped entirely when the brain itself cold-started (a fresh dir, or a DOF
+    // change, bddap/rl#31): the moments are per-parameter, so loading old moments onto a
+    // fresh net would misalign them exactly as the old brain would.
     let ckpt = CheckpointDir::new(&checkpoint_dir);
-    if ckpt.warm_start_compatible() {
-        gpu_learner.load_adam_state(&ckpt.optimizer_path());
+    if state.warm_started() {
+        gpu_learner.load_adam_state(&ckpt.optimizer_path(), state.brain().arch());
     } else {
-        eprintln!(
-            "[learner] optimizer not warm-started: checkpoint shape incompatible — cold moments"
-        );
+        eprintln!("[learner] optimizer not warm-started: the brain cold-started — cold moments");
     }
 
     // Resume the tick odometer from the checkpoint, not from 0: the overnight loop
