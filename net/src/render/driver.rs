@@ -41,11 +41,15 @@ fn install_round(world: &mut World, ls: Lockstep, coord: Box<Coordinator>) {
         accumulator: 0.0,
         prev,
     });
-    world.init_resource::<PendingInput>();
-    world.init_resource::<FlightInput>();
-    world.init_resource::<CameraPitch>();
-    world.init_resource::<CameraYaw>();
-    world.init_resource::<LocalVehicle>();
+    // OVERWRITE with fresh defaults (not `init_resource`, which keeps an existing value):
+    // this install is the ONE owner of per-round input/camera state, so a round entered
+    // after a disconnect return (rl#203) can't inherit the previous round's accrued look,
+    // latched buttons, or piloting state.
+    world.insert_resource(PendingInput::default());
+    world.insert_resource(FlightInput::default());
+    world.insert_resource(CameraPitch::default());
+    world.insert_resource(CameraYaw::default());
+    world.insert_resource(LocalVehicle::default());
 }
 
 /// The round the boot menu chose, parked here between the menu's Playing transition and
@@ -109,6 +113,15 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     // Arm the gate (the crab now walks at the player's actual position — nothing per-peer to
     // reconcile). One arm path, [`crate::external_crab::arm`].
     crate::external_crab::arm(world);
+    // A round AFTER a disconnect return (rl#203): the previous round's crab body persists
+    // across the menu (the stack installs once at build), still WARM and wherever it walked to.
+    // Rebuild it COLD at this round's spawn, exactly as the restart edge does; a first round
+    // has no body yet and the cold respawn no-ops (the guarded initial spawn places it).
+    // Gated on the bridge — the stack's real presence signal — because a headless test
+    // harness exercises this install with the marker but no crab plugins.
+    if world.contains_resource::<crate::external_crab::ExternalCrabBridge>() {
+        restart_crab_to_spawn(world, crab.pos());
+    }
     // Clone the freshly-seeded sim for the authoritative server (solo/host); the client keeps its
     // own identical sim inside `ready.lockstep` and renders the snapshots the server emits into it.
     let coord = coordinator(
@@ -117,6 +130,62 @@ pub(super) fn ensure_round_installed(world: &mut World) {
         ready.lockstep.sim().clone(),
     );
     install_round(world, ready.lockstep, coord);
+}
+
+/// Tear a finished round back OUT of the world — the `OnExit(Playing)` mirror of
+/// [`install_round`] + the OnEnter spawns, so re-entering Playing installs a FRESH round
+/// (rl#203: the disconnect return to the menu). Round ENTITIES despawn via
+/// `DespawnOnExit(AppPhase::Playing)` at their spawn sites, and the per-round input/camera
+/// resources are overwritten fresh by the next [`install_round`]; this removes only what
+/// neither covers:
+/// - [`GameState`], which is load-bearing twice: dropping it drops the round's [`NetDriver`]
+///   (session teardown, so the host departs us cleanly) and its absence is what lets
+///   [`ensure_round_installed`] install the next round instead of resuming the dead one;
+/// - the crab ARM gate ([`crate::external_crab::ExternalCrabArmed`] — presence IS the state,
+///   so removal is the whole disarm). The NN stack + crab body persist across rounds by
+///   design (the menu boot installs them once at build); [`ensure_round_installed`]
+///   cold-respawns the body at the next round's spawn;
+/// - any live piloting command (the same zeroing as `drive_lockstep`'s OnFoot arm), so no
+///   stale force rides into the next round's physics pump.
+pub(super) fn teardown_round(world: &mut World) {
+    world.remove_non_send_resource::<GameState>();
+    world.remove_resource::<crate::external_crab::ExternalCrabArmed>();
+    if let Some(mut ctrl) = world.get_resource_mut::<VehicleControl>() {
+        ctrl.active = false;
+        FlightControl::default().write_into(&mut ctrl);
+    }
+}
+
+/// End the round because the server stopped serving this remote client (rl#203) — the ONE
+/// consumer of [`Exchanged::server_down`]. Loud everywhere it can be: an error log, a telemetry
+/// Fault, and then EITHER the menu return (a [`RoundOver`] for the "connection lost — rejoin?"
+/// prompt, on a [`super::app::BootedWithMenu`] app) or a loud process exit (the scripted
+/// `--join`/`net-join` boots, which have no menu to return to).
+fn end_round_server_down(
+    world: &mut World,
+    down: crate::net_loop::ServerDown,
+    tel: Option<&crate::telemetry::TelemetrySender>,
+) {
+    let message = down.to_string();
+    error!("leaving the round — {message}");
+    if let Some(t) = tel {
+        t.send(TelemetryEvent::Fault {
+            msg: format!("client server-down (rl#203): {message}"),
+        });
+    }
+    if world.get_resource::<super::app::BootedWithMenu>().is_some() {
+        let host = world
+            .non_send_resource::<GameState>()
+            .coord
+            .server_endpoint()
+            .expect("a ServerDown only occurs on the client arm, which always has a server endpoint");
+        world.insert_resource(super::app::RoundOver { message, host });
+        world
+            .resource_mut::<NextState<AppPhase>>()
+            .set(AppPhase::Menu);
+    } else {
+        world.write_message(AppExit::error());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -764,8 +833,9 @@ pub(super) fn drive_lockstep(
         let scripted_pack: Option<Input> = world.get_resource::<ScriptedPackInput>().map(|r| r.0);
         // Submit our input UP to the coordinator and, on a remote client, drain the host's state DOWN.
         // The newest crab pose a remote client drained this iteration is applied after the exchange's
-        // `GameState` borrow is released.
+        // `GameState` borrow is released — as is a server-down verdict (it ends the round).
         let mut pending_art: Option<crate::articulation::CrabArticulation> = None;
+        let mut server_down: Option<crate::net_loop::ServerDown> = None;
         let issue_tick = {
             let mut state = world.non_send_resource_mut::<GameState>();
             let me = state.ls.me();
@@ -794,8 +864,16 @@ pub(super) fn drive_lockstep(
                 }
             }
             // Ship our input to the (internal or remote) server. Solo runs the same exchange against a
-            // roster of one — the sim advances on our own filed input alone.
-            let exch: Exchanged = state.coord.exchange(me, msg);
+            // roster of one — the sim advances on our own filed input alone. An Err is the
+            // remote client's round-terminal server-down verdict (rl#203), handled below once
+            // this borrow is released; the empty default keeps this tick inert meanwhile.
+            let exch: Exchanged = match state.coord.exchange(me, msg) {
+                Ok(exch) => exch,
+                Err(down) => {
+                    server_down = Some(down);
+                    Exchanged::default()
+                }
+            };
             // Two roles diverge here:
             // - SERVER-AUTHORITATIVE (solo/host/fp-screenshot): the server already stepped these
             //   inputs into its OWN sim (inside `exchange`'s host_assemble) and the local client
@@ -844,6 +922,13 @@ pub(super) fn drive_lockstep(
         // `state` borrow above is released, so this can take the `&mut World` its query needs.
         if let Some(art) = pending_art {
             crate::render::articulation::apply(world, &art);
+        }
+        // The server stopped serving us (rl#203): surface it and LEAVE the round — never the
+        // silent last-frame freeze. Nothing else this frame matters; the Playing→Menu
+        // transition (or the scripted exit) takes it from here.
+        if let Some(down) = server_down {
+            end_round_server_down(world, down, tel.as_ref());
+            return;
         }
 
         // Drive the rapier vehicle (server-authoritative arm) from the SAME tagged `local` control the

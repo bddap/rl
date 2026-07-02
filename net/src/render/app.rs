@@ -8,9 +8,10 @@
 
 use super::driver::{
     PendingRound, drive_lockstep, ensure_round_installed, insert_core, park_fixed_auto_pump,
+    teardown_round,
 };
 use super::hud::{spawn_hud, sync_controls_context, update_hud};
-use super::input::{gather_input, grab_cursor_once, quit_game};
+use super::input::{gather_input, grab_cursor, quit_game, release_cursor};
 use super::scene::{
     apply_transforms, follow_ground, reconcile_avatars, spawn_fp_camera, spawn_world,
 };
@@ -126,6 +127,7 @@ pub fn build_windowed_app(
                 spawn_fp_camera,
                 spawn_hud,
                 spawn_controls_ui::<GcrControls>,
+                tag_controls_ui_for_round,
             )
                 .chain(),
         )
@@ -142,10 +144,15 @@ pub fn build_windowed_app(
                 .chain()
                 .run_if(in_state(AppPhase::Playing)),
         )
+        // The OnExit mirror of the OnEnter installs (rl#203: the disconnect return): round
+        // ENTITIES despawn via `DespawnOnExit(Playing)` at their spawns; this removes the round
+        // resources, disarms the crab, and hands the cursor back to the menu, so re-entering
+        // Playing installs a fresh round.
+        .add_systems(OnExit(AppPhase::Playing), (teardown_round, release_cursor))
         .add_systems(
             Update,
             (
-                grab_cursor_once,
+                grab_cursor,
                 quit_game,
                 // chained so the glyph swap reflects THIS frame's device, and the legend +
                 // context name reflect THIS frame's vehicle (sync before the overlay update).
@@ -208,6 +215,10 @@ pub fn build_windowed_app(
         // Interactive boot: add the menu plugin (egui menu + lobby poll). The sim is built
         // later, at the Playing transition, from the choice the menu records.
         Boot::Menu { seed, telemetry } => {
+            // A server-down verdict mid-round returns to this menu (rl#203); the scripted
+            // Boot::Round path has no menu, so there it exits instead — this marker is how
+            // `drive_lockstep` tells the two apart.
+            app.insert_resource(BootedWithMenu);
             app.add_plugins(menu::MenuPlugin {
                 seed,
                 telemetry,
@@ -239,6 +250,45 @@ pub fn build_windowed_app(
     super::render_mode::register(&mut app, render_mode);
 
     Ok(app)
+}
+
+/// Tag the controls hint + overlay roots for round teardown. They're spawned by the SHARED
+/// crab-world [`spawn_controls_ui`] (chained just before this), which can't know our
+/// [`AppPhase`] — so the tag rides in here, keeping ALL round-entity cleanup on the one
+/// `DespawnOnExit(Playing)` mechanism (rl#203: the disconnect return; without the tag the
+/// round HUD would render over the menu and stack on re-entry).
+#[allow(clippy::type_complexity)] // the Or-of-markers filter is the whole point of the query.
+fn tag_controls_ui_for_round(
+    mut commands: Commands,
+    roots: Query<
+        Entity,
+        Or<(
+            With<crab_world::controls::ControlsHintRoot>,
+            With<crab_world::controls::ControlsOverlayRoot>,
+        )>,
+    >,
+) {
+    for e in roots.iter() {
+        commands.entity(e).insert(DespawnOnExit(AppPhase::Playing));
+    }
+}
+
+/// Presence marker: this app booted with the interactive menu ([`Boot::Menu`]), so a mid-round
+/// server-down verdict (rl#203) has a menu to return to. Absent on the scripted [`Boot::Round`]
+/// path, which exits loudly instead — a presence marker, not a bool, for the same reason as
+/// [`ExternalCrabStackInstalled`].
+#[derive(Resource, Clone, Copy)]
+pub(super) struct BootedWithMenu;
+
+/// Why the live round just ended out from under the player (rl#203: the server link died or the
+/// host refused us) — inserted by `drive_lockstep` alongside the Playing→Menu transition, and
+/// consumed by the menu's OnEnter to show the "connection lost — rejoin?" prompt. `host` is the
+/// lost match's server endpoint, for the rejoin re-dial — non-optional, because a server-down
+/// verdict only exists on a remote client, which always knows its server's endpoint.
+#[derive(Resource)]
+pub(super) struct RoundOver {
+    pub(super) message: String,
+    pub(super) host: crate::menu::EndpointId,
 }
 
 /// Presence marker: the boot-menu app installed the NN-crab stack at build. The checkpoint

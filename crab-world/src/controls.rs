@@ -900,9 +900,9 @@ mod overlay {
 
 #[cfg(feature = "render")]
 pub use overlay::{
-    ActiveContext, ActiveDevice, ControlInput, ControlsOverlayPlugin, ForceRevealControls,
-    gamepad_buttons_for, just_pressed, key_codes_for, pressed, spawn_controls_ui,
-    track_active_device, update_controls_ui,
+    ActiveContext, ActiveDevice, ControlInput, ControlsHintRoot, ControlsOverlayPlugin,
+    ControlsOverlayRoot, ForceRevealControls, gamepad_buttons_for, just_pressed, key_codes_for,
+    pressed, spawn_controls_ui, track_active_device, update_controls_ui,
 };
 
 #[cfg(feature = "render")]

@@ -3,15 +3,19 @@
 //! parent's [`super::driver::ensure_round_installed`]), so it never touches the sim. The
 //! pure, Bevy-free connection orchestration lives in [`crate::menu`].
 
+use std::sync::mpsc;
+
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
 use super::AppPhase;
+use super::app::RoundOver;
 use super::driver::PendingRound;
 use crate::menu::{
-    self, ChooserItem, EndpointId, Formation, LobbyItem, MenuAction, MenuInput, MenuNav,
-    StartChoice,
+    self, ChooserItem, DisconnectedItem, EndpointId, Formation, LobbyItem, MenuAction, MenuInput,
+    MenuNav, StartChoice,
 };
+use crate::net_loop::{self, JoinResult};
 
 /// Wires the boot menu into the windowed app: the egui menu + connecting-poll pass.
 /// The round install at `OnEnter(Playing)` is `ensure_round_installed` in the parent
@@ -54,7 +58,13 @@ impl Plugin for MenuPlugin {
         // menu boot; never on the scripted Boot::Round path, which supersedes Menu
         // with Playing before any transition). Re-entering Menu (Cancel/error from
         // Connecting) despawns any prior one first, so there's never a duplicate.
-        .add_systems(OnEnter(AppPhase::Menu), (spawn_menu_camera, reset_menu_nav))
+        // `consume_round_over` is chained AFTER the nav reset: a disconnect return (rl#203)
+        // must land on the "connection lost — rejoin?" prompt, not the clean chooser the
+        // reset produces.
+        .add_systems(
+            OnEnter(AppPhase::Menu),
+            (spawn_menu_camera, reset_menu_nav, consume_round_over).chain(),
+        )
         // Tear it down as the round begins, before the FP Camera3d spawns, so the
         // two never coexist.
         .add_systems(OnEnter(AppPhase::Playing), despawn_menu_camera)
@@ -112,6 +122,14 @@ struct MenuState {
     /// Last error to surface on the menu (bad code, formation failed), cleared when the
     /// player retries.
     error: Option<String>,
+    /// The host endpoint of the match we were just disconnected from (rl#203) — the rejoin
+    /// re-dial target behind the "connection lost — rejoin?" prompt. Set from [`RoundOver`],
+    /// cleared once a rejoin verdict says it can't work (refused/unreachable).
+    last_host: Option<EndpointId>,
+    /// A rejoin dial ([`net_loop::connect_and_join`]) running on a background thread, while
+    /// Connecting with [`MenuNav::Rejoining`]. Dropping it abandons the dial (the thread's
+    /// send fails and its session tears down; the dial itself is bounded by the join timeout).
+    rejoining: Option<mpsc::Receiver<anyhow::Result<JoinResult>>>,
 }
 
 impl MenuState {
@@ -131,6 +149,8 @@ impl MenuState {
             code_input: String::new(),
             forming: None,
             error: None,
+            last_host: None,
+            rejoining: None,
         }
     }
 }
@@ -140,6 +160,20 @@ impl MenuState {
 fn reset_menu_nav(mut state: NonSendMut<MenuState>) {
     state.nav = MenuNav::new();
     state.stick_latched = false;
+}
+
+/// Consume a [`RoundOver`] left by `drive_lockstep` (rl#203: the live round's server link died
+/// or the host refused us): surface its message and land on the "connection lost — rejoin?"
+/// prompt. Chained after [`reset_menu_nav`], which it refines; a normal menu entry has no
+/// `RoundOver` and this no-ops.
+fn consume_round_over(world: &mut World) {
+    let Some(over) = world.remove_resource::<RoundOver>() else {
+        return;
+    };
+    let mut state = world.non_send_resource_mut::<MenuState>();
+    state.error = Some(over.message);
+    state.last_host = Some(over.host);
+    state.nav = MenuNav::disconnected();
 }
 
 /// The single egui system for the boot flow: poll the formation, gather
@@ -165,10 +199,12 @@ fn menu_screen(
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
-    // Connecting: poll the background formation FIRST, so a finished match transitions
-    // this frame before we draw or take any input on a screen that's about to vanish.
+    // Connecting: poll the background formation (or rejoin dial) FIRST, so a finished match
+    // transitions this frame before we draw or take any input on a screen that's about to
+    // vanish.
     if matches!(phase.get(), AppPhase::Connecting)
-        && poll_formation(&mut state, &mut pending, &mut next)
+        && (poll_formation(&mut state, &mut pending, &mut next)
+            || poll_rejoin(&mut state, &mut pending, &mut next))
     {
         return Ok(());
     }
@@ -194,23 +230,39 @@ fn menu_screen(
     // Draw the current screen and route any click through the SAME FSM path (focus the
     // clicked item, then Confirm), so a click and a controller confirm can't diverge.
     match phase.get() {
+        // The Menu phase draws the "connection lost — rejoin?" prompt when a disconnect
+        // return landed us on it (rl#203), else the Host/Join chooser.
         AppPhase::Menu => {
-            if let Some(item) = draw_chooser(ctx, &mut state) {
+            if matches!(state.nav, MenuNav::Disconnected { .. }) {
+                if let Some(item) = draw_disconnected(ctx, &state) {
+                    state.nav.focus_disconnected(item);
+                    let action = state.nav.step(MenuInput::Confirm, lobby_len);
+                    apply_action(action, &mut state, &mut pending, &mut next);
+                }
+            } else if let Some(item) = draw_chooser(ctx, &mut state) {
                 state.nav.focus_chooser(item);
                 let action = state.nav.step(MenuInput::Confirm, lobby_len);
                 apply_action(action, &mut state, &mut pending, &mut next);
             }
         }
+        // Connecting draws the rejoin dial when one is in flight, else the lobby.
         AppPhase::Connecting => {
-            let lobby = state
-                .forming
-                .as_ref()
-                .map(|f| f.roster())
-                .unwrap_or_default();
-            if let Some(item) = draw_lobby(ctx, &state, &lobby) {
-                state.nav.focus_lobby(item);
-                let action = state.nav.step(MenuInput::Confirm, lobby_len);
-                apply_action(action, &mut state, &mut pending, &mut next);
+            if state.rejoining.is_some() {
+                if draw_rejoining(ctx, &state) {
+                    let action = state.nav.step(MenuInput::Confirm, lobby_len);
+                    apply_action(action, &mut state, &mut pending, &mut next);
+                }
+            } else {
+                let lobby = state
+                    .forming
+                    .as_ref()
+                    .map(|f| f.roster())
+                    .unwrap_or_default();
+                if let Some(item) = draw_lobby(ctx, &state, &lobby) {
+                    state.nav.focus_lobby(item);
+                    let action = state.nav.step(MenuInput::Confirm, lobby_len);
+                    apply_action(action, &mut state, &mut pending, &mut next);
+                }
             }
         }
         // Playing is gated out by the run condition; nothing to draw.
@@ -369,12 +421,34 @@ fn apply_action(
         }
         MenuAction::Cancel => {
             // Tell the barrier to bail and tear its session down (no ~12s LAN phantom),
-            // drop the handle, and return to the menu.
+            // drop the handle, and return to the menu. An in-flight rejoin dial is dropped
+            // the same way (its thread self-bounds on the join timeout and tears down).
             if let Some(f) = &state.forming {
                 f.cancel();
             }
             state.forming = None;
+            state.rejoining = None;
             next.set(AppPhase::Menu);
+            true
+        }
+        MenuAction::Rejoin => {
+            // Re-dial the lost match's host and JoinRequest back in (rl#203) — the SAME
+            // [`net_loop::connect_and_join`] path `game net-join` scripts, run off-thread so
+            // the menu never blocks on the dial. The verdict arrives in [`poll_rejoin`].
+            let Some(host) = state.last_host else {
+                // Unreachable by construction (the prompt is only entered with a host), but
+                // degrade to the chooser rather than panic in UI code.
+                state.nav = MenuNav::new();
+                return false;
+            };
+            state.error = None;
+            let (tx, rx) = mpsc::channel();
+            let (seed, telemetry, asset_digest) = (state.seed, state.telemetry, state.asset_digest);
+            std::thread::spawn(move || {
+                let _ = tx.send(net_loop::connect_and_join(seed, host, telemetry, asset_digest));
+            });
+            state.rejoining = Some(rx);
+            next.set(AppPhase::Connecting);
             true
         }
     }
@@ -397,23 +471,7 @@ fn poll_formation(
         // `ready_from` is `None` only for Cancelled, which the barrier reports after
         // tearing its session down — return to the menu, no phantom left behind.
         Ok(match_result) => match menu::ready_from(match_result, state.seed) {
-            Some(ready) => match super::app::arm_round(ready) {
-                // Armable (solo always; networked with synced weights+assets): park the PROOF
-                // (the only thing `PendingRound` accepts) and play.
-                Ok(armed) => {
-                    pending.0 = Some(armed);
-                    next.set(AppPhase::Playing);
-                }
-                // Unarmable networked round — peers disagree on the brain/colliders. Don't
-                // crash mid-transition: surface the actionable message on the menu and
-                // return to the chooser so the player SEES the failure and can fix it (run rl-update
-                // on every device). Deliberately NO silent integer-crab swap — the round refuses,
-                // loud and visible.
-                Err(msg) => {
-                    state.error = Some(msg);
-                    next.set(AppPhase::Menu);
-                }
-            },
+            Some(ready) => arm_and_play(ready, state, pending, next),
             None => next.set(AppPhase::Menu),
         },
         Err(e) => {
@@ -422,6 +480,89 @@ fn poll_formation(
         }
     }
     true
+}
+
+/// Poll the background rejoin dial (rl#203); returns `true` if a verdict landed and we
+/// transitioned this frame: admitted → park the round and enter Playing; refused /
+/// unreachable / failed → back to the chooser with the verdict shown (and no further rejoin
+/// offered — the verdict was terminal, so a re-dial can't change it).
+fn poll_rejoin(
+    state: &mut MenuState,
+    pending: &mut PendingRound,
+    next: &mut NextState<AppPhase>,
+) -> bool {
+    let Some(rx) = &state.rejoining else {
+        return false;
+    };
+    let result = match rx.try_recv() {
+        Ok(r) => r,
+        Err(mpsc::TryRecvError::Empty) => return false,
+        // The worker dropped its sender without sending — only a panic does that.
+        Err(mpsc::TryRecvError::Disconnected) => {
+            Err(anyhow::anyhow!("rejoin thread ended unexpectedly"))
+        }
+    };
+    state.rejoining = None;
+    state.nav = MenuNav::new();
+    match result {
+        // Admitted: the joiner's driver carries the gate-passed sync verdict, so the arm
+        // gate structurally passes — but it stays the ONE gate every round crosses.
+        Ok(JoinResult::Joined(joined)) => {
+            let (lockstep, net) = *joined;
+            state.last_host = None;
+            arm_and_play(
+                menu::ReadyMatch {
+                    lockstep,
+                    net: Some(net),
+                },
+                state,
+                pending,
+                next,
+            );
+        }
+        Ok(JoinResult::Refused(reason)) => {
+            state.error = Some(format!("The host refused our rejoin: {reason}"));
+            state.last_host = None;
+            next.set(AppPhase::Menu);
+        }
+        Ok(JoinResult::Unreachable) => {
+            state.error = Some(
+                "The host is unreachable — it may have quit. Host a new match, or join a \
+                 fresh code."
+                    .into(),
+            );
+            state.last_host = None;
+            next.set(AppPhase::Menu);
+        }
+        Err(e) => {
+            state.error = Some(format!("Rejoin failed: {e:#}"));
+            next.set(AppPhase::Menu);
+        }
+    }
+    true
+}
+
+/// Gate a finished round through the ONE arm gate and act on the verdict: park the
+/// [`ArmedRound`](super::app::ArmedRound) proof and enter Playing, or surface the actionable
+/// refusal (peers disagree on the brain/colliders — run rl-update on every device) on the
+/// chooser. Deliberately NO silent integer-crab swap — the round refuses, loud and visible.
+/// The shared tail of [`poll_formation`] and [`poll_rejoin`], so the two can't drift.
+fn arm_and_play(
+    ready: menu::ReadyMatch,
+    state: &mut MenuState,
+    pending: &mut PendingRound,
+    next: &mut NextState<AppPhase>,
+) {
+    match super::app::arm_round(ready) {
+        Ok(armed) => {
+            pending.0 = Some(armed);
+            next.set(AppPhase::Playing);
+        }
+        Err(msg) => {
+            state.error = Some(msg);
+            next.set(AppPhase::Menu);
+        }
+    }
 }
 
 /// Open the host-triggered lobby for a Host/Join choice and move to Connecting. Shared by
@@ -498,6 +639,73 @@ fn draw_chooser(ctx: &egui::Context, state: &mut MenuState) -> Option<ChooserIte
     clicked
 }
 
+/// Draw the "connection lost — rejoin?" prompt (rl#203): the disconnect message and the
+/// focusable Rejoin / Leave pair. Returns the clicked item, for the caller to route through
+/// the SAME FSM path as a controller confirm.
+fn draw_disconnected(ctx: &egui::Context, state: &MenuState) -> Option<DisconnectedItem> {
+    let focus = match state.nav {
+        MenuNav::Disconnected { focus } => focus,
+        // Only drawn on the prompt; a sane default keeps a stray frame rendering.
+        _ => DisconnectedItem::Rejoin,
+    };
+    let mut clicked = None;
+    egui::Window::new("Connection lost")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.heading("Connection lost");
+            if let Some(err) = &state.error {
+                ui.colored_label(egui::Color32::from_rgb(230, 120, 120), err);
+            }
+            ui.separator();
+            let rejoin_label = match state.last_host {
+                Some(host) => format!("Rejoin the match (host {})", host.fmt_short()),
+                None => "Rejoin the match".to_string(),
+            };
+            if ui
+                .selectable_label(focus == DisconnectedItem::Rejoin, rejoin_label)
+                .clicked()
+            {
+                clicked = Some(DisconnectedItem::Rejoin);
+            }
+            if ui
+                .selectable_label(focus == DisconnectedItem::Leave, "Back to menu")
+                .clicked()
+            {
+                clicked = Some(DisconnectedItem::Leave);
+            }
+            ui.separator();
+            ui.label("Controller: A to select · B to back. Keyboard: Enter · Esc.");
+        });
+    clicked
+}
+
+/// Draw the rejoin-in-flight screen: the dial status + Cancel (the only action — the FSM's
+/// [`MenuNav::Rejoining`] mirrors the joiner's lobby). Returns `true` on a Cancel click, which
+/// the caller routes through the FSM as a Confirm (Confirm on `Rejoining` IS Cancel).
+fn draw_rejoining(ctx: &egui::Context, state: &MenuState) -> bool {
+    let mut clicked = false;
+    egui::Window::new("Rejoining")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.heading("Rejoining the match…");
+            if let Some(host) = state.last_host {
+                ui.label(format!("Dialing host {}…", host.fmt_short()));
+            }
+            ui.spinner();
+            ui.separator();
+            if ui.selectable_label(true, "Cancel").clicked() {
+                clicked = true;
+            }
+            ui.separator();
+            ui.label("Controller: A or B to cancel. Keyboard: Enter · Esc.");
+        });
+    clicked
+}
+
 /// Draw the lobby / connecting screen: the role, the join code (Host) or dial status
 /// (Join), the live roster, and the focusable Start (host) + Cancel. Returns the clicked
 /// item, if any. Polling already happened in `menu_screen`, so this only renders + reports.
@@ -507,7 +715,7 @@ fn draw_lobby(ctx: &egui::Context, state: &MenuState, lobby: &[EndpointId]) -> O
         MenuNav::JoinLobby => (false, LobbyItem::Cancel),
         // Off-screen default; the lobby only draws in Connecting where nav is a lobby
         // variant. Fall back to the formation's role so the frame still renders sanely.
-        MenuNav::Chooser { .. } => (
+        _ => (
             state.forming.as_ref().is_some_and(|f| f.hosting),
             LobbyItem::Cancel,
         ),

@@ -28,6 +28,7 @@ pub(super) struct StatusHud;
 
 pub(super) fn spawn_hud(mut commands: Commands) {
     commands.spawn((
+        DespawnOnExit(AppPhase::Playing),
         Text::new("…"),
         TextFont {
             font_size: 22.0,

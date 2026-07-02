@@ -291,21 +291,27 @@ pub(super) fn quit_game(
     }
 }
 
-/// Grab + hide the cursor once the window's [`CursorOptions`] exist, so mouse-look
-/// works and the pointer stays captured. Runs every frame but no-ops after the first
-/// successful grab. (Grabbing AFTER the window is live, rather than via the plugin's
-/// initial options, avoids a too-early lock failing on some platforms.)
-pub(super) fn grab_cursor_once(
-    mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
-    mut done: Local<bool>,
-) {
-    if *done {
-        return;
-    }
-    if let Ok(mut c) = cursor.single_mut() {
+/// Grab + hide the cursor while a round runs, so mouse-look works and the pointer stays
+/// captured. Level-triggered (grab whenever not yet locked), NOT a one-shot latch, so a round
+/// entered AGAIN after a disconnect return (rl#203) re-grabs; the steady state is a read, so
+/// no per-frame change-detection churn. (Grabbing AFTER the window is live, rather than via
+/// the plugin's initial options, avoids a too-early lock failing on some platforms.)
+pub(super) fn grab_cursor(mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    if let Ok(mut c) = cursor.single_mut()
+        && c.grab_mode != CursorGrabMode::Locked
+    {
         c.grab_mode = CursorGrabMode::Locked;
         c.visible = false;
-        *done = true;
+    }
+}
+
+/// Release + show the cursor as the round ends — the OnExit(Playing) mirror of
+/// [`grab_cursor`]. Without it the disconnect return (rl#203) lands on the menu's
+/// "connection lost — rejoin?" prompt with a locked, invisible pointer, unclickable by mouse.
+pub(super) fn release_cursor(mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+    if let Ok(mut c) = cursor.single_mut() {
+        c.grab_mode = CursorGrabMode::None;
+        c.visible = true;
     }
 }
 

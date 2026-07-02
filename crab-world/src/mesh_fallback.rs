@@ -148,8 +148,10 @@ mod banner {
     /// from a startup system (rl-demo) or directly during scene spawn (game/net) — the caller
     /// owns WHEN and gates it to the windowed surface; this owns the one banner both share.
     /// `reason` is the human-readable cause (from [`super::usable_model`] /
-    /// [`super::MESH_ABSENT_REASON`]).
-    pub fn spawn_banner(commands: &mut Commands, reason: &str) {
+    /// [`super::MESH_ABSENT_REASON`]). Returns the band's root entity so a caller with a
+    /// bounded round lifetime (game/net) can tag it for teardown; a whole-app caller
+    /// (rl-demo) ignores it.
+    pub fn spawn_banner(commands: &mut Commands, reason: &str) -> Entity {
         commands
             .spawn((
                 Node {
@@ -182,7 +184,8 @@ mod banner {
                     },
                     TextColor(Color::srgba(0.95, 0.85, 0.85, 0.9)),
                 ));
-            });
+            })
+            .id()
     }
 }
 
