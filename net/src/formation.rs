@@ -54,8 +54,8 @@ pub struct LobbyControl {
 
 /// The outcome of the LAN cold-start: the frozen participant→[`PlayerId`] map (agreed
 /// identical on every peer by the barrier), which id is us, and the tick messages that
-/// arrived mid-formation (carried to the host to seed its server ledger — see
-/// [`crate::net_loop::Coordinator::for_round`] — since only the server holds the ledger now).
+/// arrived mid-formation (carried to the host to seed its server input streams — see
+/// [`crate::net_loop::Coordinator::for_round`] — since only the server holds them).
 pub struct Frozen {
     pub id_map: BTreeMap<EndpointId, PlayerId>,
     pub me: PlayerId,
@@ -422,9 +422,10 @@ pub fn solo_lockstep_for(seed: u64) -> Lockstep {
 }
 
 /// The inputs that arrived during formation, mapped to their author's [`PlayerId`] (senders not in
-/// the agreed set dropped). The host seeds its server ledger with these (via [`Server::seed_early`])
-/// so a fast client's pre-serve inputs aren't lost; everyone else discards them (only the server
-/// holds the ledger). `pub` so the headless `game net` driver builds the same set from its `Frozen`.
+/// the agreed set dropped). The host seeds its server input streams with these (via
+/// [`Server::seed_early`]) so a fast client's pre-serve inputs aren't lost; everyone else discards
+/// them (only the server holds the streams). `pub` so the headless `game net` driver builds the
+/// same set from its `Frozen`.
 pub fn early_peer_msgs(frozen: &Frozen) -> Vec<PeerMsg> {
     frozen
         .early

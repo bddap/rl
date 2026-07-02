@@ -87,8 +87,8 @@ async fn run_net(args: Args) -> Result<()> {
         formation::Formation::Cancelled => unreachable!("headless net has no lobby to cancel"),
     };
     let me = frozen.me;
-    // Mutable: a departed peer (link gone, rl#198) is removed so the host stops requiring its
-    // input — the live roster of record past this point is the server's schedule.
+    // Mutable: a departed peer (link gone, rl#198) is removed so its stale entry can't tag
+    // inbound frames — the live roster of record past this point is the server's schedule.
     let mut id_map = frozen.id_map.clone();
     let all_ids: Vec<PlayerId> = id_map.values().copied().collect();
     info!(
@@ -118,7 +118,7 @@ async fn run_net(args: Args) -> Result<()> {
         // The host owns and steps the authoritative sim (rl#151): seed it from the identical tick-0
         // world `ls` was built from so host and clients start byte-identical. The local `ls` is the
         // host's own client — it files input UP and adopts the snapshots, never stepping itself.
-        let mut s = net::server::Server::new(&all_ids, ls.sim().clone());
+        let mut s = net::server::Server::new(me, &all_ids, ls.sim().clone());
         s.seed_early(&formation::early_peer_msgs(&frozen));
         s
     });
@@ -207,31 +207,35 @@ async fn run_net(args: Args) -> Result<()> {
         }
 
         // Issue our input and route it through the server (rl#151 increment 2 — host-authoritative:
-        // inputs go UP, STATE comes DOWN). The host assembles via the SAME `host_assemble` the
-        // windowed `Coordinator` uses (one coordination impl, two transports), steps its own
-        // authoritative sim, and broadcasts a `CoreSnapshot` per applied tick; a client ships its
-        // input up and ADOPTS the host's snapshots without ever re-stepping the sim.
+        // inputs go UP, STATE comes DOWN). The host assembles host-paced via the SAME
+        // `Server::advance` the windowed `Coordinator` uses (one coordination impl, two
+        // transports), steps its own authoritative sim, and broadcasts a `CoreSnapshot` per
+        // applied tick; a client ships its input up and ADOPTS the host's snapshots without ever
+        // re-stepping the sim.
         let t = ls.next_tick() as f32 * 0.1;
-        let issue_tick = ls.next_tick();
         let input = Input::from_axes(t.cos(), t.sin());
         let msg = ls.submit_local_input(input);
+        // The telemetry stamp is the ISSUE tick — on a remote client `ls.next_tick()` (the
+        // snapshot-apply cursor) trails it by the transit lag.
+        let issue_tick = msg.issue_tick;
 
         if let Some(srv) = server.as_mut() {
-            // HOST: fold in remote clients' inputs into the authoritative server's ledger, then step
-            // its OWN sim once per ready tick and broadcast that tick's snapshot the instant it is
-            // stepped — the SAME host-authoritative path the windowed driver runs (one stepper). A
-            // client adopts exactly the state the host holds; there is no peer-symmetric self-step or
-            // desync cross-check any more (the host IS the source of truth).
-            let mut sets = net::server::host_assemble(srv, me, msg, remote_inputs);
-            // Departures (rl#198), after this tick's drained inputs are recorded — the SAME
-            // handling the windowed host runs (`depart_gone_peers`): a rostered peer whose link
-            // is gone left the match; drop it and keep ticking rather than waiting on its input
-            // forever (the host-freeze hang). This harness sends no refusals, so the returned
-            // departed endpoints go unused.
+            // HOST: file remote clients' inputs into their per-player streams, then assemble +
+            // step THIS tick at our own pace (a remote can delay nothing — rl#193/#194/#195) and
+            // broadcast the snapshot the instant it is stepped — the SAME host-authoritative path
+            // the windowed driver runs (one stepper). A client adopts exactly the state the host
+            // holds; there is no peer-symmetric self-step or desync cross-check (the
+            // host IS the source of truth).
+            for pm in remote_inputs {
+                srv.record_remote(pm.pid, pm.msg);
+            }
+            // Departures (rl#198) — the SAME handling the windowed host runs
+            // (`depart_gone_peers`): a rostered peer whose link is gone left the match; drop its
+            // stream + roster entry (nothing ever waits on it). This harness sends no refusals,
+            // so the returned departed endpoints go unused.
             let connected = session.connected_peers().await;
-            let (dsets, _) = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected);
-            sets.extend(dsets);
-            srv.enqueue_for_step(&sets);
+            let _ = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected);
+            srv.advance(msg);
             // Headless: weights digest 0, no rapier body → the crab holds spawn, so no pose to inject.
             while srv.next_tick_ready() {
                 let bytes = srv.step_next(None).snapshot;

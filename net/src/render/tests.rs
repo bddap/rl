@@ -612,5 +612,8 @@ fn fp_camera_effective_clip_is_the_scaled_near() {
     let projection = scene::fp_perspective();
     let clip_from_view = projection.get_clip_from_view();
     assert_eq!(clip_from_view.w_axis.z, projection.near);
-    assert!(projection.near < 0.01, "near plane must shrink with the render frame");
+    assert!(
+        projection.near < 0.01,
+        "near plane must shrink with the render frame"
+    );
 }

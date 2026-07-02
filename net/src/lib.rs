@@ -8,8 +8,9 @@
 //!   (pure step, complete state hash, no nondeterminism) is what every other game
 //!   system must honor; the render/vehicle subs build on the interface documented at
 //!   the top of [`sim`], they do not bypass it.
-//! - [`server`] — the ONE authoritative peer: records every rostered client's input
-//!   per tick, steps its own [`sim`], and emits a [`snapshot::CoreSnapshot`] per tick.
+//! - [`server`] — the ONE authoritative peer: steps its own [`sim`] at the HOST's pace
+//!   (remote inputs stream in per player and are consumed as they arrive — a remote can
+//!   delay nothing) and emits a [`snapshot::CoreSnapshot`] per tick.
 //! - [`lockstep`] — the client session (the name predates host-authority): files the
 //!   local input UP, ADOPTS the server's snapshot DOWN (never stepping its own sim),
 //!   and predicts/reconciles the local avatar.

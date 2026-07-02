@@ -4,8 +4,9 @@
 //! A roster change is determinism-critical: it MUST take effect on the identical tick
 //! everywhere, or the server and its clients disagree on who is in the match. This type is the
 //! ONE source of "who is in the match at tick T", consulted by the [`crate::server::Server`]
-//! (when is a tick's input set complete, and when to spawn a scheduled joiner) so completeness
-//! and the authoritative spawn key off the same set.
+//! (which players contribute to a tick's assembled input set, and when to spawn a scheduled
+//! joiner / despawn a leaver) so the assembled inputs and the authoritative spawn key off the
+//! same set.
 //!
 //! With no changes scheduled the schedule is exactly the frozen initial set — there is ONE
 //! roster mechanism, not a parallel dynamic one bolted beside the static path.

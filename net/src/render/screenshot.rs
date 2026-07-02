@@ -40,7 +40,7 @@ pub fn build_screenshot_app(
     // that per-tick input; the driver records it into the server for each pack player exactly as a
     // wire peer's would be (deterministic, adds no nondeterminism). The local player (0) holds still
     // — it is the camera — so nothing needs to move it.
-    let coord = coordinator(None, ls.peers(), ls.sim().clone());
+    let coord = coordinator(None, ls.peers(), ls.me(), ls.sim().clone());
     insert_core(&mut app, ls, coord);
     app.insert_resource(ScriptedPackInput(Input::new(0.0, 1.0, 0.0, 0)));
     // Known-armed at build (when a checkpoint was given): add the rapier-NN stack AND arm the gate
@@ -75,7 +75,7 @@ pub fn build_net_screenshot_app(
     // Seed the crab spawn pose before `ls` moves into the coordinator, exactly as the windowed
     // `Boot::Round` path does — so host and client agree on where the crab starts.
     let spawn = seed_external_crab_solo(&mut ls);
-    let coord = coordinator(Some(net), ls.peers(), ls.sim().clone());
+    let coord = coordinator(Some(net), ls.peers(), ls.me(), ls.sim().clone());
     insert_core(&mut app, ls, coord);
     // Arm the NN crab on this peer: the host runs + broadcasts it, the client spawns it (frozen —
     // never pumped) as the render target its adopted articulation poses. One path (add + arm).

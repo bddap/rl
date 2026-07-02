@@ -136,7 +136,7 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
     // and networked paths run ([[sp-is-mp-special-case]]): the local `ls` files inputs UP and adopts
     // the snapshot the server emits, never stepping a sim of its own.
     let mut ls = Lockstep::new(MATCH_SEED, &[me], me);
-    let mut server = Server::new(&[me], ls.sim().clone());
+    let mut server = Server::new(me, &[me], ls.sim().clone());
     let tick_dt = Duration::from_secs_f64(TICK_DT);
     let end = Instant::now() + Duration::from_secs(run_secs);
     let mut next = Instant::now();
@@ -144,8 +144,7 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
         // A lazy circular stir so the dot visibly moves.
         let t = ls.next_tick() as f32 * 0.1;
         let msg = ls.submit_local_input(Input::from_axes(t.cos(), t.sin()));
-        let sets = server.record(me, msg);
-        server.enqueue_for_step(&sets);
+        server.advance(msg);
         while server.next_tick_ready() {
             // Headless smoke: no rapier crab body, so the crab holds spawn (no pose to inject).
             let bytes = server.step_next(None).snapshot;

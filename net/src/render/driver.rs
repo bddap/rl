@@ -18,9 +18,10 @@ use crab_world::vehicle::{Vehicle, VehicleControl, VehicleKind};
 pub(super) fn coordinator(
     net: Option<NetDriver>,
     peers: &[PlayerId],
+    me: PlayerId,
     initial_sim: crate::sim::Sim,
 ) -> Box<Coordinator> {
-    Box::new(Coordinator::for_round(net, peers, initial_sim))
+    Box::new(Coordinator::for_round(net, peers, me, initial_sim))
 }
 
 /// Shared setup for both apps: the sim + its coordinator, plus the input resources.
@@ -130,6 +131,7 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     let coord = coordinator(
         ready.net,
         ready.lockstep.peers(),
+        ready.lockstep.me(),
         ready.lockstep.sim().clone(),
     );
     install_round(world, ready.lockstep, coord);
@@ -333,8 +335,9 @@ pub(super) struct PendingInput {
     pub(super) yaw_delta: f32,
     pub(super) action: bool,
     /// Latches if RESTART (R) was pressed in this interval. Sent as
-    /// [`buttons::RESTART`] so the restart rides the deterministic input stream and all
-    /// peers restart on the same tick; the sim edge-triggers it. Drained per tick.
+    /// [`buttons::RESTART`] so the restart rides the input stream to the authoritative
+    /// server (applied at the tick that consumes it) and every client adopts the reset
+    /// via the snapshot; the sim edge-triggers it. Drained per tick.
     pub(super) restart: bool,
     /// Latches if the enter/exit-vehicle key (E) was tapped this interval — a client-local
     /// toggle drained ONCE per frame in [`drive_lockstep`] on the server-authoritative arm
@@ -854,10 +857,12 @@ pub(super) fn drive_lockstep(world: &mut World) {
             // `reported_outcome` field disjointly from the `ls` it runs against.
             let state = &mut *state;
             let me = state.ls.me();
-            let issue_tick = state.ls.next_tick();
             let msg = state.ls.submit_local_input(sim_input);
+            // The tick this input was ISSUED as — the telemetry stamp. On a remote client this
+            // differs from `ls.next_tick()` (the snapshot-apply cursor) by the transit lag.
+            let issue_tick = msg.issue_tick;
             // Scripted screenshot: file the pack's bot input into the solo server for every non-local
-            // rostered player at this tick, so the roster completes and the authoritative sim advances
+            // rostered player at this tick, so the scene composes with the pack moving in step
             // (real play drains these off the transport instead). A no-op with no `ScriptedPackInput`.
             if let Some(bot) = scripted_pack
                 && let Some(server) = state.coord.server_mut()
@@ -869,10 +874,10 @@ pub(super) fn drive_lockstep(world: &mut World) {
                     .filter(|&p| p != me)
                     .collect();
                 for pid in others {
-                    let _ = server.record(
+                    server.record_remote(
                         pid,
                         TickMsg {
-                            apply_tick: msg.apply_tick,
+                            issue_tick: msg.issue_tick,
                             input: bot,
                         },
                     );
@@ -882,7 +887,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
             // roster of one — the sim advances on our own filed input alone. An Err is the
             // remote client's round-terminal server-down verdict (rl#203), handled below once
             // this borrow is released; the empty default keeps this tick inert meanwhile.
-            let exch: Exchanged = match state.coord.exchange(me, msg) {
+            let exch: Exchanged = match state.coord.exchange(msg) {
                 Ok(exch) => exch,
                 Err(down) => {
                     server_down = Some(down);
@@ -891,7 +896,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
             };
             // Two roles diverge here:
             // - SERVER-AUTHORITATIVE (solo/host/fp-screenshot): the server already stepped these
-            //   inputs into its OWN sim (inside `exchange`'s host_assemble) and the local client
+            //   inputs into its OWN sim (assembled host-paced by `exchange`) and the local client
             //   renders the snapshot it emits below — nothing to do here.
             // - REMOTE ADOPT: the client ADOPTS the host's snapshot
             //   into its own sim (no re-sim) and stashes the newest articulation for the render apply
@@ -997,7 +1002,8 @@ pub(super) fn drive_lockstep(world: &mut World) {
             if role == PeerRole::RemoteAdopt {
                 break;
             }
-            // Ready? The authoritative server gates on its own ledger/warmup.
+            // Ready? Host-paced: `exchange` assembled one tick per issued local input, so this
+            // drains exactly what this frame issued (a remote can delay nothing — rl#195).
             {
                 let state = world.non_send_resource::<GameState>();
                 if !state
