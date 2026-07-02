@@ -96,7 +96,7 @@ pub struct SyncVerdict {
 ///
 /// This is the SINGLE arm predicate — the [`render`] arming sites (the `Boot::Round` build, the
 /// menu's `poll_formation` pre-gate, and `ensure_round_installed`) reach it through the one
-/// `crab_arm_failure` decision, and the rl#63 tests call it directly, so the rule can't drift
+/// `arm_round` gate (whose `ArmedRound` proof the install path consumes), and the rl#63 tests call it directly, so the rule can't drift
 /// between them. Each caller ANDs it with "a checkpoint/NN stack is present" (no brain ⇒ nothing to
 /// arm). Deliberately NOT behind `cfg(render)`: the no-feature test build (like the headless
 /// trainer) must exercise the REAL predicate, not a re-encoded copy.
@@ -323,7 +323,7 @@ mod desync_test {
     /// Models the production arm decision exactly: a checkpoint must be present AND
     /// [`super::may_arm_external_crab`] must allow it (the SAME predicate the `Boot::Round` build,
     /// the menu's `poll_formation` gate, and `ensure_round_installed` all call via
-    /// `crab_arm_failure`, so this can't drift from them). `checkpoint` is an `Option<()>`
+    /// `arm_round`, so this can't drift from them). `checkpoint` is an `Option<()>`
     /// stand-in — only its `is_some()` feeds the gate; `sync` is the formation handshake's
     /// verdict (`None` = solo round). Returns whether the round WOULD arm the NN crab; on a
     /// networked round `false` means the production sites REFUSE the round (rl#114, no integer

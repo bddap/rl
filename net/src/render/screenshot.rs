@@ -65,7 +65,7 @@ pub fn build_screenshot_app(
 /// on BOTH peers — the host steps + broadcasts it, the client spawns it frozen and poses it from the
 /// host's articulation. This is a two-identical-peer evidence harness (both run the SAME resolved
 /// checkpoint, so the round is weights/asset-synced by construction); the loud arm-refusal gate for
-/// a genuine mismatch lives on the interactive `play` path (`crab_arm_failure`), not here.
+/// a genuine mismatch lives on the interactive `play` path (`arm_round`), not here.
 pub fn build_net_screenshot_app(
     mut ls: Lockstep,
     net: NetDriver,
