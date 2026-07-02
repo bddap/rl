@@ -6,6 +6,9 @@ use bevy::prelude::*;
 
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::CrabJointId;
+use crate::controls::gamepad_buttons_for;
+
+use super::controls::{DemoAction, DemoControls};
 
 /// Hands-on gamepad control state. `active` is toggled live with B/circle (and
 /// seeded by `--manual-control`); `selected` is the joint the right stick drives,
@@ -39,9 +42,9 @@ pub(super) fn manual_control_step(
     let Some(gp) = gamepads.iter().next() else {
         return;
     };
-    // East (B / circle), NOT North: North already toggles the joint-telemetry
-    // graph (play::graph), so sharing it fired both on one press.
-    if gp.just_pressed(GamepadButton::East) {
+    // Dispatched from DEMO_BINDINGS: East (B / circle), NOT North — North already toggles
+    // the joint-telemetry graph (play::graph), so sharing it fired both on one press.
+    if gamepad_buttons_for::<DemoControls>(DemoAction::Manual).any(|b| gp.just_pressed(b)) {
         manual.active = !manual.active;
         manual.selected = None;
     }

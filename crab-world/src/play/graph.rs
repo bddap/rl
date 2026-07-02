@@ -26,6 +26,8 @@ use bevy_rapier3d::prelude::*;
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabEnvId, CrabJoint, CrabJointId, joint_angle};
 
+use super::controls::{self, DemoAction};
+
 /// Samples kept per joint trace (~4 s at 60 Hz).
 const CAPACITY: usize = 240;
 /// The overlay camera's render layer, isolated from the 3D scene (layer 0) so
@@ -141,8 +143,8 @@ fn toggle_graph(
     mut graph: ResMut<JointGraph>,
     mut ui: Query<&mut Visibility, With<GraphUi>>,
 ) {
-    let pad = pads.iter().any(|p| p.just_pressed(GamepadButton::North));
-    if keys.just_pressed(KeyCode::KeyG) || pad {
+    // Dispatched from DEMO_BINDINGS (G / pad North), so the legend can't drift from the key.
+    if controls::just_pressed(DemoAction::JointGraph, &keys, &pads) {
         graph.visible = !graph.visible;
         for mut v in ui.iter_mut() {
             *v = if graph.visible {

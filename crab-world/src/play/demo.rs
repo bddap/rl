@@ -12,6 +12,8 @@ use crate::bot::actuator::{ACTION_SIZE, CrabActions};
 use crate::bot::body::{self, CrabAssets, CrabBodyPart, CrabCarapace};
 use crate::bot::{CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown};
 
+use super::controls::{self, DemoAction};
+
 /// Settle ticks remaining after a reset. The respawned crab starts in the
 /// rest pose with the builder motors already holding it; the settle just
 /// holds zero actions while it drops onto the ground and takes load. Seeded from
@@ -107,19 +109,16 @@ pub(super) fn demo_controls(
     // pins them).
     mut rng: ResMut<super::DemoRng>,
 ) {
-    let mut reset = keys.just_pressed(KeyCode::KeyR);
-    let mut poke = keys.just_pressed(KeyCode::Space);
-    let mut quit = keys.just_pressed(KeyCode::Escape);
-    // Right arrow / D-pad Right CYCLES the render view (mesh → mesh+colliders → colliders). The
-    // arrow keys are otherwise the orbit camera, but its right-yaw moved to the comma key so this
-    // single binding isn't double-bound (mouse right-drag still orbits).
-    let mut cycle_view = keys.just_pressed(KeyCode::ArrowRight);
-    for gp in gamepads.iter() {
-        reset |= gp.just_pressed(GamepadButton::South);
-        poke |= gp.just_pressed(GamepadButton::West);
-        quit |= gp.just_pressed(GamepadButton::Start);
-        cycle_view |= gp.just_pressed(GamepadButton::DPadRight);
-    }
+    // All four verbs dispatch from DEMO_BINDINGS, so they trigger on exactly the inputs the
+    // legend shows. Colliders (→ / D-pad Right) CYCLES the render view (mesh →
+    // mesh+colliders → colliders); the other arrow keys are the orbit camera — its
+    // right-yaw moved to the comma key so → isn't double-bound (mouse right-drag still
+    // orbits).
+    let just = |a| controls::just_pressed(a, &keys, &gamepads);
+    let reset = just(DemoAction::Rebuild);
+    let poke = just(DemoAction::Poke);
+    let quit = just(DemoAction::Quit);
+    let cycle_view = just(DemoAction::Colliders);
 
     if quit {
         exit.write(AppExit::Success);

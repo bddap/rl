@@ -1,10 +1,12 @@
 //! The demo's control scheme — the demo's verbs for the reusable controls overlay
-//! (`crate::controls`). This is the single source of the on-screen LEGEND (it replaces the
-//! old hand-written HUD string, so the legend can't drift from the bindings). The demo's
-//! live input is analog/multi-key and read directly in its own systems (`cameras::orbit_camera`,
-//! `demo::demo_controls`, `manual_control::manual_control_step`, `toggle_graph`) — the
-//! bindings drive only the overlay, at the granularity that reads well (orbit's four arrow
-//! keys show as one glyph).
+//! (`crate::controls`). This is the single source of BOTH the on-screen legend AND the
+//! discrete-verb dispatch: the tap verbs (rebuild/poke/quit/render-view/joint-graph/manual)
+//! are polled through [`just_pressed`], which resolves [`DEMO_BINDINGS`] via the
+//! [`ControlInput`] glue — rebind the table and the poll and legend move together, so the
+//! legend can't lie. Only the genuinely analog/directional inputs (orbit, zoom, the manual
+//! joint pick + torque stick) are read directly in their own systems
+//! (`cameras::orbit_camera`, `manual_control::manual_control_step`), at the display
+//! granularity that reads well (orbit's four keys show as one "Arrows" glyph).
 //!
 //! The demo never switches context (one inspection screen), so it has a single
 //! [`DemoContext`] whose row list ([`DEMO_ROWS`]) names every demo verb. The split between
@@ -89,8 +91,12 @@ pub(crate) enum DemoPad {
     East,
     North,
     Start,
-    /// One glyph for two D-pad roles: collider toggle on Right, joint-pick on Up/Down.
-    Dpad,
+    /// D-pad Right (render-view cycle). Split from [`DemoPad::DpadUpDown`] so the discrete
+    /// verb resolves to its one button; both show the same D-pad glyph.
+    DpadRight,
+    /// D-pad Up/Down (joint pick in manual mode) — a directional pair, read directly in
+    /// `manual_control`, so it resolves to no single button.
+    DpadUpDown,
     View,
 }
 
@@ -159,7 +165,7 @@ impl ControlScheme for DemoControls {
             DemoPad::South => Glyph::Icon("controls/xbox_button_a.png"),
             DemoPad::North => Glyph::Icon("controls/xbox_button_y.png"),
             DemoPad::Start => Glyph::Icon("controls/xbox_button_menu.png"),
-            DemoPad::Dpad => Glyph::Icon("controls/xbox_dpad.png"),
+            DemoPad::DpadRight | DemoPad::DpadUpDown => Glyph::Icon("controls/xbox_dpad.png"),
             DemoPad::View => Glyph::Icon("controls/xbox_button_view.png"),
             // No bundled icon for these — text keycaps.
             DemoPad::LeftTrigger => Glyph::Label("LT"),
@@ -178,29 +184,60 @@ impl ControlScheme for DemoControls {
 
 impl ControlInput for DemoControls {
     fn key_code(key: DemoKey) -> Option<KeyCode> {
-        // Only the reveal control (Tab) is polled by the overlay; the demo's other keys are
-        // analog/multi-key and read directly in its own systems, so they map to no single
-        // KeyCode here.
         match key {
+            DemoKey::R => Some(KeyCode::KeyR),
+            DemoKey::Space => Some(KeyCode::Space),
+            DemoKey::Escape => Some(KeyCode::Escape),
             DemoKey::Tab => Some(KeyCode::Tab),
-            _ => None,
+            DemoKey::ColliderKey => Some(KeyCode::ArrowRight),
+            DemoKey::Graph => Some(KeyCode::KeyG),
+            // Multi-key analog tokens (orbit's four keys, the zoom pair) — read directly
+            // in `cameras::orbit_camera`, so no single KeyCode.
+            DemoKey::Arrows | DemoKey::ZoomKeys => None,
         }
     }
 
     fn gamepad_button(pad: DemoPad) -> Option<GamepadButton> {
-        // Likewise: only the reveal control (View) need resolve for the overlay's hold read.
         match pad {
+            DemoPad::South => Some(GamepadButton::South),
+            DemoPad::West => Some(GamepadButton::West),
+            DemoPad::East => Some(GamepadButton::East),
+            DemoPad::North => Some(GamepadButton::North),
+            DemoPad::Start => Some(GamepadButton::Start),
+            DemoPad::DpadRight => Some(GamepadButton::DPadRight),
             DemoPad::View => Some(GamepadButton::Select),
-            _ => None,
+            // Analog/directional tokens (sticks, the zoom triggers, the joint-pick D-pad
+            // pair) — read via their own axis/multi-button APIs in their systems.
+            DemoPad::LeftStick
+            | DemoPad::RightStick
+            | DemoPad::RightTrigger
+            | DemoPad::LeftTrigger
+            | DemoPad::DpadUpDown => None,
         }
     }
 }
 
-/// THE demo binding table — the demo's CURRENT bindings (verified against
-/// `cameras::orbit_camera`, `demo::demo_controls`, `manual_control::manual_control_step`,
-/// and `graph::toggle_graph`). Reveal binding: hold Tab / hold pad View — both
-/// free in the demo's input set. Manual, PickJoint, and Torque are gamepad-only (no
-/// keyboard binding), so the keyboard legend omits them. Labels live in [`DEMO_ROWS`].
+/// Whether `action` was just pressed this frame — on any of its bound keys or any bound
+/// button of any connected pad, resolved from [`DEMO_BINDINGS`]. The demo's tap verbs all
+/// dispatch through this, so they trigger on exactly the inputs the legend shows.
+pub(super) fn just_pressed(
+    action: DemoAction,
+    keys: &ButtonInput<KeyCode>,
+    gamepads: &Query<&Gamepad>,
+) -> bool {
+    use crate::controls::{gamepad_buttons_for, key_codes_for};
+    key_codes_for::<DemoControls>(action).any(|k| keys.just_pressed(k))
+        || gamepads
+            .iter()
+            .any(|gp| gamepad_buttons_for::<DemoControls>(action).any(|b| gp.just_pressed(b)))
+}
+
+/// THE demo binding table. The tap verbs DISPATCH from it (via [`just_pressed`]); only the
+/// analog rows (Orbit/Zoom in `cameras::orbit_camera`, PickJoint/Torque in
+/// `manual_control`) are read directly and must match by hand. Reveal binding: hold Tab /
+/// hold pad View — both free in the demo's input set. Manual, PickJoint, and Torque are
+/// gamepad-only (no keyboard binding), so the keyboard legend omits them. Labels live in
+/// [`DEMO_ROWS`].
 pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [
     Binding {
         action: DemoAction::Orbit,
@@ -225,7 +262,7 @@ pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [
     Binding {
         action: DemoAction::Colliders,
         keyboard: KbBinding::new(&[DemoKey::ColliderKey], &[]),
-        pad: PadBinding::new(&[DemoPad::Dpad]),
+        pad: PadBinding::new(&[DemoPad::DpadRight]),
     },
     Binding {
         action: DemoAction::JointGraph,
@@ -240,7 +277,7 @@ pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [
     Binding {
         action: DemoAction::PickJoint,
         keyboard: KbBinding::NONE,
-        pad: PadBinding::new(&[DemoPad::Dpad]),
+        pad: PadBinding::new(&[DemoPad::DpadUpDown]),
     },
     Binding {
         action: DemoAction::Torque,
@@ -350,6 +387,37 @@ mod tests {
         }
         assert!(ALL.iter().copied().all(classified));
         assert_scheme_well_formed::<DemoControls>(&ALL, &[DemoContext::Inspect]);
+    }
+
+    /// The tap verbs dispatch via [`just_pressed`], which drops binding tokens that don't
+    /// resolve to a live Bevy input — so a rebind to an unresolvable token would show in the
+    /// legend but never fire. Force every token on a tap verb's row to resolve.
+    #[test]
+    fn tap_verb_bindings_all_resolve_to_live_inputs() {
+        use crate::controls::{ControlInput, binding};
+        const TAP_VERBS: [DemoAction; 6] = [
+            DemoAction::Rebuild,
+            DemoAction::Poke,
+            DemoAction::Colliders,
+            DemoAction::JointGraph,
+            DemoAction::Manual,
+            DemoAction::Quit,
+        ];
+        for action in TAP_VERBS {
+            let b = binding::<DemoControls>(action).expect("well-formed scheme");
+            for &k in b.keyboard.keys {
+                assert!(
+                    DemoControls::key_code(k).is_some(),
+                    "{action:?}: key token {k:?} resolves to no KeyCode — legend would show a dead key"
+                );
+            }
+            for &p in b.pad.buttons {
+                assert!(
+                    DemoControls::gamepad_button(p).is_some(),
+                    "{action:?}: pad token {p:?} resolves to no button — legend would show a dead button"
+                );
+            }
+        }
     }
 
     /// Every icon glyph the demo bindings surface points under `controls/`; the text-keycap
