@@ -527,7 +527,7 @@ pub const SHIP_ROWS: [ContextRow<GcrControls>; 10] = [
 mod bevy_glue {
     use super::*;
     use bevy::prelude::{GamepadButton, KeyCode, MouseButton};
-    use crab_world::controls::{ControlInput, binding};
+    use crab_world::controls::ControlInput;
 
     impl Key {
         fn key_code(self) -> KeyCode {
@@ -593,28 +593,20 @@ mod bevy_glue {
     /// every bound key: callers that need every key (the multi-key flight actions) use
     /// [`key_codes_for`].
     pub fn key_code_for(action: Action) -> Option<KeyCode> {
-        binding::<GcrControls>(action)
-            .and_then(|b| b.keyboard.keys.first().copied())
-            .map(Key::key_code)
+        key_codes_for(action).next()
     }
 
     /// Every `KeyCode` bound to an action (for the multi-key flight actions, e.g. throttle = W,S).
-    /// Reads [`BINDINGS`] so the polled keys are exactly the legend's.
+    /// Monomorphic front for the shared framework resolver, so the polled keys are exactly
+    /// the legend's.
     pub fn key_codes_for(action: Action) -> impl Iterator<Item = KeyCode> {
-        binding::<GcrControls>(action)
-            .into_iter()
-            .flat_map(|b| b.keyboard.keys.iter().copied())
-            .map(Key::key_code)
+        crab_world::controls::key_codes_for::<GcrControls>(action)
     }
 
     /// The pad `GamepadButton`(s) that trigger an action (every mapped button), for the
-    /// discrete buttons. Sticks/D-pad yield nothing (read via their dedicated APIs). An
-    /// iterator, not a `Vec`: callers just `.any(...)` each frame, so no heap alloc.
+    /// discrete buttons. Sticks/D-pad yield nothing (read via their dedicated APIs).
     pub fn gamepad_buttons_for(action: Action) -> impl Iterator<Item = GamepadButton> {
-        binding::<GcrControls>(action)
-            .into_iter()
-            .flat_map(|b| b.pad.buttons.iter().copied())
-            .filter_map(PadButton::gamepad_button)
+        crab_world::controls::gamepad_buttons_for::<GcrControls>(action)
     }
 }
 

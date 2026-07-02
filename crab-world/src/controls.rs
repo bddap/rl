@@ -8,11 +8,11 @@
 //! The no-drift guarantee, in two halves:
 //! - **One binding table.** A scheme's [`ControlScheme::bindings`] is the ONE table that says
 //!   which key/button triggers each action. The legend glyphs derive from it (via the
-//!   `*_glyph` resolvers), and an app whose live input ALSO reads it (GCR, via the
-//!   [`ControlInput`] glue + its own `key_code_for`) gets a full round-trip — rebind in the
-//!   table, both the poll and the legend move together. So the displayed bindings can't drift
-//!   from the dispatched ones: the HUD resolves every key through the SAME `binding(action)`
-//!   the input layer dispatches from.
+//!   `*_glyph` resolvers), and live input reads it too — both apps dispatch their discrete
+//!   verbs via `key_codes_for`/`gamepad_buttons_for` over the [`ControlInput`] glue — so the
+//!   round-trip is closed: rebind in the table, both the poll and the legend move together.
+//!   The displayed bindings can't drift from the dispatched ones: the HUD resolves every key
+//!   through the SAME `binding(action)` the input layer dispatches from.
 //! - **Context as data.** The active control set is a CONTEXT (on-foot / piloting / …). Each
 //!   context is a [`ContextRow`] list — the actions shown in that context, in legend order,
 //!   each with the human label that's correct THERE ("Forward" on foot, "Throttle up" in the
@@ -385,16 +385,39 @@ mod overlay {
     use super::*;
     use bevy::prelude::*;
 
-    /// The Bevy-input glue a scheme needs for the overlay to poll its reveal control. Only
-    /// the discrete reveal key/button is polled here, so analog inputs (sticks, mouse
-    /// motion, wheel) return `None` — they're never the reveal control. An app's GAMEPLAY
-    /// input reading (GCR's `gather_input`) stays in the app; this is overlay-only.
+    /// The Bevy-input glue a scheme needs so its DISCRETE controls can be polled from the
+    /// binding table — the overlay's reveal control and any tap verb an app dispatches via
+    /// [`key_codes_for`]/[`gamepad_buttons_for`]. Analog/multi-role inputs (sticks, mouse
+    /// motion, wheel, directional D-pad pairs) return `None` — they're read via their own
+    /// axis/multi-input APIs in the app's systems.
     pub trait ControlInput: ControlScheme {
         /// The Bevy `KeyCode` for a key, if it maps to one (analog/non-key inputs: `None`).
         fn key_code(key: Self::Key) -> Option<KeyCode>;
         /// The Bevy `GamepadButton` for a pad control, if it's a discrete button (sticks /
         /// D-pad read via their own axis/multi-button APIs: `None`).
         fn gamepad_button(pad: Self::Pad) -> Option<GamepadButton>;
+    }
+
+    /// Every `KeyCode` bound to `action`, resolved from the scheme's binding table through
+    /// its [`ControlInput`] glue — so a handler polls exactly the keys the legend shows;
+    /// rebind the table and the poll and legend move together (the no-drift round-trip).
+    /// Tokens with no single `KeyCode` (analog/multi-key) drop out. An iterator, not a
+    /// `Vec`: callers just `.any(...)` each frame, so no heap alloc.
+    pub fn key_codes_for<S: ControlInput>(action: S::Action) -> impl Iterator<Item = KeyCode> {
+        binding::<S>(action)
+            .into_iter()
+            .flat_map(|b| b.keyboard.keys.iter().copied())
+            .filter_map(S::key_code)
+    }
+
+    /// Every pad `GamepadButton` bound to `action` — the pad half of [`key_codes_for`].
+    pub fn gamepad_buttons_for<S: ControlInput>(
+        action: S::Action,
+    ) -> impl Iterator<Item = GamepadButton> {
+        binding::<S>(action)
+            .into_iter()
+            .flat_map(|b| b.pad.buttons.iter().copied())
+            .filter_map(S::gamepad_button)
     }
 
     /// The input device the player is currently using, refreshed each frame by
@@ -753,22 +776,9 @@ mod overlay {
         keys: &ButtonInput<KeyCode>,
         gamepads: &Query<&Gamepad>,
     ) -> bool {
-        let Some(b) = binding::<S>(S::reveal_action()) else {
-            return false;
-        };
-        let key_down = b
-            .keyboard
-            .keys
-            .iter()
-            .filter_map(|&k| S::key_code(k))
-            .any(|k| keys.pressed(k));
-        let pad_down = b
-            .pad
-            .buttons
-            .iter()
-            .filter_map(|&p| S::gamepad_button(p))
-            .any(|btn| gamepads.iter().any(|gp| gp.pressed(btn)));
-        key_down || pad_down
+        key_codes_for::<S>(S::reveal_action()).any(|k| keys.pressed(k))
+            || gamepad_buttons_for::<S>(S::reveal_action())
+                .any(|btn| gamepads.iter().any(|gp| gp.pressed(btn)))
     }
 
     /// Each frame: show the overlay iff the reveal control is held; show only the active
@@ -874,7 +884,8 @@ mod overlay {
 #[cfg(feature = "render")]
 pub use overlay::{
     ActiveContext, ActiveDevice, ControlInput, ControlsOverlayPlugin, ForceRevealControls,
-    spawn_controls_ui, track_active_device, update_controls_ui,
+    gamepad_buttons_for, key_codes_for, spawn_controls_ui, track_active_device,
+    update_controls_ui,
 };
 
 #[cfg(feature = "render")]
