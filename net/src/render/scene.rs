@@ -29,9 +29,9 @@ pub(super) struct FpCamera;
 // Scene + interpolated transforms
 // ---------------------------------------------------------------------------
 
-/// Spawn the static gray-box world (ground + extraction marker + a light) and the
-/// dynamic avatars (one capsule per sim player, the scaled crab). Poses are placed
-/// every frame by [`apply_transforms`]; here we just create the meshes once.
+/// Spawn the static gray-box world (ground + extraction marker + a light) and the giant
+/// crab. Player avatars are spawned by [`reconcile_avatars`] as sim players appear. Poses
+/// are placed every frame by [`apply_transforms`]; here we just create the meshes once.
 pub(super) fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -98,29 +98,24 @@ pub(super) fn spawn_world(
         Transform::from_translation(world(ex, pillar_h * 0.5)),
     ));
 
-    // Player avatars: one capsule per sim player. The local player's is spawned too
-    // (kept hidden in apply_transforms — we view from its eyes).
-    let local = state.ls.me();
-    for (id, _p) in state.ls.sim().players() {
-        let is_local = id == local;
-        let color = if is_local {
-            Color::srgb(0.9, 0.8, 0.2)
-        } else {
-            Color::srgb(0.2, 0.5, 0.95)
-        };
-        commands.spawn((
-            Mesh3d(meshes.add(Capsule3d::new(
-                PLAYER_RADIUS * rs,
-                (PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS) * rs,
-            ))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: color,
-                ..default()
-            })),
-            Transform::from_translation(world(state.ls.sim().player(id).unwrap().pos(), 0.0)),
-            PlayerAvatar(id),
-        ));
-    }
+    // Player avatars are NOT spawned here — [`reconcile_avatars`] owns the render roster
+    // (rl#205). Here we just create their shared assets once: one capsule mesh and one
+    // material per color, cloned per spawn (the same handle-sharing the crab silhouette's
+    // materials use), so roster churn never accretes duplicate assets.
+    commands.insert_resource(AvatarAssets {
+        mesh: meshes.add(Capsule3d::new(
+            PLAYER_RADIUS * rs,
+            (PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS) * rs,
+        )),
+        local: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.9, 0.8, 0.2),
+            ..default()
+        }),
+        remote: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.2, 0.5, 0.95),
+            ..default()
+        }),
+    });
 
     // The giant crab: Sally's collider silhouette (see `spawn_crab_silhouette`), at TRUE physics
     // size ([`world_render_scale`]). Hidden only when the armed NN rig has a skin model
@@ -180,6 +175,69 @@ pub(super) fn spawn_world(
         crab_root,
         have_model,
     );
+}
+
+/// The avatar capsule's shared render assets — ONE mesh, one material per color — created
+/// once in [`spawn_world`] and cloned per spawn.
+#[derive(Resource)]
+pub(super) struct AvatarAssets {
+    mesh: Handle<Mesh>,
+    local: Handle<StandardMaterial>,
+    remote: Handle<StandardMaterial>,
+}
+
+/// The SINGLE owner of the render-side player roster: every frame, spawn a capsule avatar
+/// for each sim player that lacks one and despawn each avatar whose player left the sim.
+/// A one-shot setup spawn left the roster static — a mid-game joiner with a genuinely new
+/// `PlayerId` was invisible to incumbents (rl#205) — and a departed player's capsule froze
+/// at its last pose (#198); deriving the roster from sim state each frame makes both
+/// unrepresentable, with no join/leave event channel to miss. A rejoiner reusing a freed
+/// pid gets a fresh spawn — or, when the depart and rejoin ticks land in one frame's
+/// batch, recycles the still-live capsule, which is indistinguishable: pose and
+/// visibility re-derive from the sim each frame, and a recycled pid is always
+/// remote→remote (the local pid can't be freed while this client runs), so the
+/// spawn-time material stays right. Chained ahead of [`apply_transforms`], whose
+/// auto-inserted sync point applies the spawns/despawns the same frame; it re-poses and
+/// re-hides every avatar each frame, so the placeholder transform here never shows.
+pub(super) fn reconcile_avatars(
+    mut commands: Commands,
+    assets: Res<AvatarAssets>,
+    state: NonSend<GameState>,
+    avatars: Query<(Entity, &PlayerAvatar)>,
+) {
+    let sim = state.ls.sim();
+    let have: std::collections::HashSet<PlayerId> = avatars
+        .iter()
+        .filter_map(|(entity, avatar)| {
+            if sim.player(avatar.0).is_some() {
+                Some(avatar.0)
+            } else {
+                // The player DEPARTED mid-match (the adopted snapshot no longer carries
+                // them): drop the capsule, freeing its pid for a fresh rejoin spawn.
+                commands.entity(entity).despawn();
+                None
+            }
+        })
+        .collect();
+    let local = state.ls.me();
+    for (id, p) in sim.players() {
+        if have.contains(&id) {
+            continue;
+        }
+        // The local player's avatar is spawned too (kept hidden in apply_transforms — we
+        // view from its eyes) so status handling stays uniform.
+        let material = if id == local {
+            &assets.local
+        } else {
+            &assets.remote
+        };
+        commands.spawn((
+            Mesh3d(assets.mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(world(p.pos(), 0.0)),
+            PlayerAvatar(id),
+        ));
+    }
 }
 
 /// The giant crab's apparent-height target: a player's height times [`CRAB_SCALE`] — the crab
@@ -435,11 +493,14 @@ pub(super) fn apply_transforms(
     // Player avatars: lerp position and yaw from the previous snapshot to now.
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
         let Some(now) = sim.player(avatar.0) else {
-            // No sim player behind this avatar: the player DEPARTED mid-match (the
-            // adopted snapshot no longer carries them). Hide the capsule rather than leave it
-            // frozen at their last pose; a rejoiner reusing the freed PlayerId un-hides it.
-            *vis = Visibility::Hidden;
-            continue;
+            // [`reconcile_avatars`] (chained just ahead, and the sim only changes in
+            // `drive_lockstep` before both) despawned every avatar without a sim player,
+            // so one here can only mean the roster reconcile was unwired — fail loud
+            // rather than pose a ghost.
+            unreachable!(
+                "avatar for departed player {:?} survived reconcile_avatars",
+                avatar.0
+            );
         };
         let prev = state.prev.players.get(&avatar.0).copied().unwrap_or(now);
         let pos = lerp_pos(prev.pos(), now.pos(), alpha);
