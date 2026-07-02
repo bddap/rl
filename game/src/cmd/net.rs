@@ -189,8 +189,10 @@ async fn run_net(args: Args) -> Result<()> {
                 // A mid-match Refuse aimed at us means the host DEPARTED us (rl#198's one-shot
                 // answer to a dropped-but-re-linked peer): round-terminal for this client
                 // (rl#203) — surfaced below beside the link-loss check, never silently eaten.
+                // Only the SERVER's refusal counts: a stray Refuse from another linked peer
+                // (the mDNS dialer holds a full mesh) is not a verdict about this match.
                 transport::PeerWire::Refuse(reason) => {
-                    if !am_host {
+                    if !am_host && m.from == server_eid {
                         server_down = Some(net_loop::ServerDown::Refused(reason));
                     }
                 }
