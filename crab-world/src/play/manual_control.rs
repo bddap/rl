@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::CrabJointId;
-use crate::controls::gamepad_buttons_for;
+use crate::controls::just_pressed;
 
 use super::controls::{DemoAction, DemoControls};
 
@@ -34,6 +34,7 @@ pub(super) struct ManualHud;
 /// so this readout shows ONLY while manual is live (the joint being felt), nothing in the
 /// default policy view.
 pub(super) fn manual_control_step(
+    keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
     mut manual: ResMut<ManualControl>,
     mut actions: ResMut<CrabActions>,
@@ -42,9 +43,11 @@ pub(super) fn manual_control_step(
     let Some(gp) = gamepads.iter().next() else {
         return;
     };
-    // Dispatched from DEMO_BINDINGS: East (B / circle), NOT North — North already toggles
-    // the joint-telemetry graph (play::graph), so sharing it fired both on one press.
-    if gamepad_buttons_for::<DemoControls>(DemoAction::Manual).any(|b| gp.just_pressed(b)) {
+    // Dispatched from DEMO_BINDINGS like every tap verb (pad-only today — East, B/circle —
+    // NOT North: North already toggles the joint-telemetry graph (play::graph), so sharing
+    // it fired both on one press). The analog joint pick + torque below stay on the FIRST
+    // pad; the toggle accepts any pad like the other verbs.
+    if just_pressed::<DemoControls>(DemoAction::Manual, &keys, &gamepads) {
         manual.active = !manual.active;
         manual.selected = None;
     }
