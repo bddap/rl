@@ -114,7 +114,7 @@ fn main() {
     // `otel::init` and `App::new` spawn any thread — the same pattern (and justification) as
     // `crab_world::bot::headless`'s `set_var`.
 
-    // Default the log filter to WARN. rl-demo disables bevy's LogPlugin (below) so the otel
+    // Default the log filter to WARN. bevy's LogPlugin is disabled (`base_plugins`) so the otel
     // subscriber is the only one, which means it ALSO governs OTLP export — and bevy/wgpu emit
     // a torrent of INFO every frame. At the default `info` that torrent floods the telemetry
     // sink when export is on (tens of MB per run), burying the signals that matter. WARN keeps
@@ -198,28 +198,7 @@ fn main() {
         // it captures; render-video instead advances the sim itself (one tick per frame, see
         // `RenderVideoPlugin`) and runs the loop as fast as compute allows.
         AppMode::Screenshot { .. } | AppMode::RenderVideo { .. } => {
-            // No window, but GPU ON so we can render to an image.
-            app.add_plugins(
-                DefaultPlugins
-                    // Resolve the committed control glyphs from the bundled `assets/` dir
-                    // regardless of cwd/which bin runs; `BEVY_ASSET_ROOT` overrides (deploy).
-                    .set(AssetPlugin {
-                        file_path: crab_world::assets::bevy_asset_path()
-                            .to_string_lossy()
-                            .into_owned(),
-                        ..default()
-                    })
-                    .set(bevy::window::WindowPlugin {
-                        primary_window: None,
-                        exit_condition: bevy::window::ExitCondition::DontExit,
-                        ..default()
-                    })
-                    .disable::<bevy::winit::WinitPlugin>()
-                    // `otel::init` already installed the global tracing subscriber; bevy's
-                    // LogPlugin would try to install a second and panic. Disable it — the
-                    // otel subscriber carries the same stderr `fmt` output.
-                    .disable::<bevy::log::LogPlugin>(),
-            );
+            app.add_plugins(crab_world::app_boot::base_plugins(None));
             // Screenshot paces at 60 Hz (render frames track sim time); render-video runs the
             // loop flat-out (Duration::ZERO) since `step_one_tick` — not wall-clock — advances
             // the sim, so a slower-than-realtime render still produces a true-speed clip.
@@ -234,34 +213,19 @@ fn main() {
             // The demo defaults to borderless fullscreen (the Steam launch target is
             // a couch screen) unless --windowed.
             let fullscreen = !args.windowed;
-            app.add_plugins(
-                DefaultPlugins
-                    // Resolve the committed control glyphs from the bundled `assets/` dir
-                    // regardless of cwd/which bin runs; `BEVY_ASSET_ROOT` overrides (deploy).
-                    .set(AssetPlugin {
-                        file_path: crab_world::assets::bevy_asset_path()
-                            .to_string_lossy()
-                            .into_owned(),
-                        ..default()
-                    })
-                    .set(bevy::window::WindowPlugin {
-                        primary_window: Some(bevy::window::Window {
-                            title: "Crab RL".into(),
-                            mode: if fullscreen {
-                                bevy::window::WindowMode::BorderlessFullscreen(
-                                    bevy::window::MonitorSelection::Primary,
-                                )
-                            } else {
-                                bevy::window::WindowMode::Windowed
-                            },
-                            ..default()
-                        }),
-                        ..default()
-                    })
-                    // See the screenshot arm: otel owns the subscriber, so drop bevy's
-                    // LogPlugin to avoid a second-subscriber panic.
-                    .disable::<bevy::log::LogPlugin>(),
-            );
+            app.add_plugins(crab_world::app_boot::base_plugins(Some(
+                bevy::window::Window {
+                    title: "Crab RL".into(),
+                    mode: if fullscreen {
+                        bevy::window::WindowMode::BorderlessFullscreen(
+                            bevy::window::MonitorSelection::Primary,
+                        )
+                    } else {
+                        bevy::window::WindowMode::Windowed
+                    },
+                    ..default()
+                },
+            )));
         }
     }
 

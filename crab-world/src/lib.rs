@@ -60,6 +60,10 @@ pub mod vehicle;
 // render/PBR/egui types (cameras, materials, screenshots), which don't even exist when
 // bevy is built without `render`, so without this gate the trainer wouldn't compile.
 // The trainer never renders, so it loses nothing.
+/// The ONE `DefaultPlugins` recipe (asset root, LogPlugin-disabled, window/offscreen)
+/// every rendered surface boots from — GCR windowed + screenshot, rl-demo both arms.
+#[cfg(feature = "render")]
+pub mod app_boot;
 /// The crab render-mode cycle + the ONE shared collider-wireframe (GCR + rl-demo). `pub`
 /// because both rendered surfaces (the `net` crate's GCR app and the rl-demo) drive it.
 #[cfg(feature = "render")]

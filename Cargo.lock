@@ -8397,6 +8397,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "tracing",
+ "tracing-log",
  "tracing-opentelemetry",
  "tracing-subscriber",
 ]
