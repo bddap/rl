@@ -159,9 +159,9 @@ impl NetDriver {
         std::mem::take(&mut self.early)
     }
 
-    /// (Client) Ship our input UP to the server. Non-blocking from the caller's view: it drives the
-    /// async `send` to completion on the runtime (a buffered QUIC write). Losing the server link
-    /// stalls us — the correct visible failure.
+    /// (Client) Ship our input UP to the server. Non-blocking: `send` only ENQUEUES to the link's
+    /// writer task (see [`transport`]), so the `block_on` returns immediately. Losing the server
+    /// link stalls us — the correct visible failure.
     pub fn send_to_server(&self, msg: &TickMsg) {
         self.rt.block_on(self.session.send(self.server_eid, msg));
     }
@@ -231,16 +231,33 @@ impl NetDriver {
 
     /// (Host) Broadcast the host-authoritative [`CoreSnapshot`] DOWN to every client (rl#151
     /// increment 2 windowed): the windowed host ships the full game STATE its client just adopted,
-    /// so a remote client renders it instead of re-stepping. Non-blocking buffered QUIC writes.
+    /// so a remote client renders it instead of re-stepping. Non-blocking: enqueued to each link's
+    /// writer task, so a dead peer can never hold this (main-thread) call (rl#198).
     pub fn broadcast_snapshot(&self, snapshot: &CoreSnapshot) {
         self.rt.block_on(self.session.broadcast_snapshot(snapshot));
     }
 
     /// (Host) Broadcast the render-only [`CrabArticulation`] DOWN to every client (rl#151 increment
     /// 2 windowed), beside the snapshot, so a remote client renders the host's exact crab pose
-    /// without simulating physics. Non-blocking buffered QUIC writes.
+    /// without simulating physics. Non-blocking, like [`Self::broadcast_snapshot`].
     pub fn broadcast_articulation(&self, articulation: &CrabArticulation) {
         self.rt.block_on(self.session.broadcast_articulation(articulation));
+    }
+
+    /// (Host) Detect and CONSUME client departures (bddap/rl#198): every rostered endpoint whose
+    /// transport link is gone — the reader hit EOF (a clean exit) or a write failed (a dead
+    /// connection), either of which evicted the link — is removed from the live id_map and
+    /// returned, for the coordinator to [`Server::depart`]. Removing the map entry is what lets
+    /// the same person REJOIN: their fresh process dials as a new endpoint and goes through the
+    /// normal [`JoinRequest`] admission. Level-triggered off the link table (no event to lose): a
+    /// departure missed this tick is caught the next.
+    pub fn drain_departed(&mut self) -> Vec<(EndpointId, PlayerId)> {
+        let connected = self.rt.block_on(self.session.connected_peers());
+        let gone = departed_players(&self.id_map, self.me, &connected);
+        for (eid, _) in &gone {
+            self.id_map.remove(eid);
+        }
+        gone
     }
 
     /// (Client) Drain everything the server sent DOWN this tick: host-authoritative
@@ -333,11 +350,22 @@ impl Coordinator {
                 if let Some(net) = net.as_mut() {
                     admit_joiners(server, net, joins);
                 }
-                let sets = server::host_assemble(server, me, msg, remote);
+                let mut sets = server::host_assemble(server, me, msg, remote);
+                // Departures LAST (bddap/rl#198), after this tick's drained inputs are recorded, so
+                // a leaver's final real inputs are used where they arrived and only the genuinely
+                // missing ticks are neutral-backfilled. Without this the ledger waits forever on
+                // the departed player and the match hard-freezes for everyone who stayed.
+                if let Some(net) = net.as_mut() {
+                    for (eid, pid) in net.drain_departed() {
+                        println!(
+                            "player {pid:?} ({}) departed — continuing without them",
+                            eid.fmt_short()
+                        );
+                        sets.extend(server.depart(pid));
+                    }
+                }
                 // Queue the assembled sets for THIS server's authoritative step (rl#151 increment 1):
-                // the windowed driver pumps each tick's crab physics then calls `step_next`. Only the
-                // `Coordinator` path enqueues — the headless `game net` host steps straight off
-                // `next_tick_ready`, so it never grows this queue.
+                // the windowed driver pumps each tick's crab physics then calls `step_next`.
                 server.enqueue_for_step(&sets);
                 // The host broadcasts the authoritative snapshot + articulation from the driver, the
                 // moment it steps each tick (see `Coordinator::broadcast_step`), so a client renders
@@ -416,6 +444,24 @@ impl Coordinator {
     pub fn telemetry(&self) -> Option<&TelemetrySender> {
         self.net().and_then(NetDriver::telemetry)
     }
+}
+
+/// The rostered players whose transport link is GONE (bddap/rl#198): every `id_map` entry (except
+/// `me` — the host holds no link to itself) with no endpoint in `connected`. Pure, so the windowed
+/// host ([`NetDriver::drain_departed`]) and the headless `game net` host share the one predicate.
+/// A link exists for every rostered remote by construction (formation and admission both ran over
+/// it), so its absence means the connection CLOSED — a clean peer exit or a dead-connection write
+/// failure, either way a departure, never merely "not yet connected".
+pub fn departed_players(
+    id_map: &BTreeMap<EndpointId, PlayerId>,
+    me: PlayerId,
+    connected: &[EndpointId],
+) -> Vec<(EndpointId, PlayerId)> {
+    id_map
+        .iter()
+        .filter(|(eid, pid)| **pid != me && !connected.contains(eid))
+        .map(|(eid, pid)| (*eid, *pid))
+        .collect()
 }
 
 /// Gate + admit each mid-game `joins` request on the host (Stage 3, rl#151). For each joiner:

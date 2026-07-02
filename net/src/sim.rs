@@ -529,6 +529,18 @@ impl Sim {
         self.players.contains_key(&pid)
     }
 
+    /// Remove a DEPARTED player from the live round (bddap/rl#198) — the inverse of
+    /// [`spawn_joining_player`](Sim::spawn_joining_player), driven the same way: the authoritative
+    /// server derives it from the roster schedule ([`crate::server::Server::depart`] shrank the
+    /// roster after the peer's link died), so the sim, the ledger, and the wire roster stay one
+    /// source. Dropped from [`config`](Sim::config) too, so a later RESTART rebuilds without the
+    /// departed player. Only the host calls this; clients adopt the resulting snapshot (which no
+    /// longer carries the player). Idempotent: an absent pid is a no-op.
+    pub fn despawn_departed_player(&mut self, pid: PlayerId) {
+        self.players.remove(&pid);
+        self.config.players.retain(|p| *p != pid);
+    }
+
     /// The tick-0 entity layout for a [`RoundConfig`] — the SINGLE source of the spawn
     /// arrangement, shared by [`Sim::new`] and [`Sim::reset`] so the two can't drift. Pure
     /// function of the (integer, sorted) config, so every peer composes the identical

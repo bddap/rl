@@ -86,7 +86,9 @@ async fn run_net(args: Args) -> Result<()> {
         net_loop::Formation::Cancelled => unreachable!("headless net has no lobby to cancel"),
     };
     let me = frozen.me;
-    let id_map = &frozen.id_map;
+    // Mutable: a departed peer (link gone, rl#198) is removed so the host stops requiring its
+    // input — the live roster of record past this point is the server's schedule.
+    let mut id_map = frozen.id_map.clone();
     let all_ids: Vec<PlayerId> = id_map.values().copied().collect();
     println!(
         "starting lockstep: {} player(s), I am {:?} ({})",
@@ -201,7 +203,20 @@ async fn run_net(args: Args) -> Result<()> {
             // stepped — the SAME host-authoritative path the windowed driver runs (one stepper). A
             // client adopts exactly the state the host holds; there is no peer-symmetric self-step or
             // desync cross-check any more (the host IS the source of truth).
-            let sets = net::server::host_assemble(srv, me, msg, remote_inputs);
+            let mut sets = net::server::host_assemble(srv, me, msg, remote_inputs);
+            // Departures (rl#198), after this tick's drained inputs are recorded — the same
+            // predicate the windowed host runs (`departed_players`): a rostered peer whose link is
+            // gone left the match; drop it and keep ticking rather than waiting on its input
+            // forever (the host-freeze hang).
+            let connected = session.connected_peers().await;
+            for (eid, pid) in net_loop::departed_players(&id_map, me, &connected) {
+                id_map.remove(&eid);
+                println!(
+                    "player {pid:?} ({}) departed — continuing without them",
+                    eid.fmt_short()
+                );
+                sets.extend(srv.depart(pid));
+            }
             srv.enqueue_for_step(&sets);
             // Headless: weights digest 0, no rapier body → the crab holds spawn, so no pose to inject.
             while srv.next_tick_ready() {
