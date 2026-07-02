@@ -75,9 +75,15 @@ pub struct NetDriver {
     /// sending), mapped to their author's [`PlayerId`]. Drained once by the host into its server at
     /// round start (a client discards them — only the server holds the ledger).
     early: Vec<PeerMsg>,
-    /// Frozen endpoint→PlayerId map (us + peers), agreed across peers by sorting the
-    /// agreed participant set. Used to tag inbound messages with their author's id.
+    /// Live endpoint→PlayerId map (us + peers), seeded by formation (sorted agreed set), grown by
+    /// admission ([`NetDriver::admit_endpoint`]) and SHRUNK by departure ([`depart_gone_peers`],
+    /// rl#198). Used to tag inbound messages with their author's id.
     id_map: BTreeMap<EndpointId, PlayerId>,
+    /// Endpoints DEPARTED from the live match (rl#198) — kept so a departed-but-alive peer that
+    /// re-links (the mDNS dialer runs all match) and keeps sending inputs is REFUSED once, loudly,
+    /// instead of silently spectating with dead controls ([[silent-fallback-antipattern]]). An
+    /// entry is consumed by the refusal; couch-scale, so never more than a handful.
+    departed: std::collections::BTreeSet<EndpointId>,
     /// Optional live-telemetry stream (set iff the client was launched with a
     /// collector). Best-effort and read-only — see [`crate::telemetry`]; the
     /// windowed driver pushes Tick/Input/RoundDecided/Fault through it.
@@ -181,6 +187,13 @@ impl NetDriver {
                 PeerWire::Tick(msg) => {
                     if let Some(&pid) = self.id_map.get(&from.from) {
                         inputs.push(PeerMsg { pid, msg });
+                    } else if self.departed.remove(&from.from) {
+                        // A DEPARTED endpoint re-linked (the mDNS dialer runs all match) and is
+                        // still sending inputs — it doesn't know it was dropped. Tell it ONCE,
+                        // loudly (its client error-logs a mid-match Refuse), rather than let it
+                        // spectate with dead controls (rl#198). A fresh joiner is untouched: it
+                        // was never in `departed`.
+                        self.refuse_joiner(from.from, "you were dropped from the match (connection lost) — rejoin");
                     }
                 }
                 // A would-be joiner dialing the live match (Stage 3) — surfaced for the coordinator
@@ -244,20 +257,10 @@ impl NetDriver {
         self.rt.block_on(self.session.broadcast_articulation(articulation));
     }
 
-    /// (Host) Detect and CONSUME client departures (bddap/rl#198): every rostered endpoint whose
-    /// transport link is gone — the reader hit EOF (a clean exit) or a write failed (a dead
-    /// connection), either of which evicted the link — is removed from the live id_map and
-    /// returned, for the coordinator to [`Server::depart`]. Removing the map entry is what lets
-    /// the same person REJOIN: their fresh process dials as a new endpoint and goes through the
-    /// normal [`JoinRequest`] admission. Level-triggered off the link table (no event to lose): a
-    /// departure missed this tick is caught the next.
-    pub fn drain_departed(&mut self) -> Vec<(EndpointId, PlayerId)> {
-        let connected = self.rt.block_on(self.session.connected_peers());
-        let gone = departed_players(&self.id_map, self.me, &connected);
-        for (eid, _) in &gone {
-            self.id_map.remove(eid);
-        }
-        gone
+    /// (Host) The endpoints we currently hold a link to — the sync view of
+    /// [`Session::connected_peers`] that [`depart_gone_peers`] diffs the roster against.
+    pub fn connected_peers_now(&self) -> Vec<EndpointId> {
+        self.rt.block_on(self.session.connected_peers())
     }
 
     /// (Client) Drain everything the server sent DOWN this tick: host-authoritative
@@ -351,18 +354,17 @@ impl Coordinator {
                     admit_joiners(server, net, joins);
                 }
                 let mut sets = server::host_assemble(server, me, msg, remote);
-                // Departures LAST (bddap/rl#198), after this tick's drained inputs are recorded, so
-                // a leaver's final real inputs are used where they arrived and only the genuinely
-                // missing ticks are neutral-backfilled. Without this the ledger waits forever on
-                // the departed player and the match hard-freezes for everyone who stayed.
+                // Departures LAST (bddap/rl#198), after this tick's drained inputs are recorded —
+                // a leaver's inputs for ticks before the departure boundary are still honored;
+                // anything at/after it is scrubbed by `depart`. Without this the ledger waits
+                // forever on the departed player and the match hard-freezes for everyone who
+                // stayed.
                 if let Some(net) = net.as_mut() {
-                    for (eid, pid) in net.drain_departed() {
-                        println!(
-                            "player {pid:?} ({}) departed — continuing without them",
-                            eid.fmt_short()
-                        );
-                        sets.extend(server.depart(pid));
-                    }
+                    let connected = net.connected_peers_now();
+                    let (dsets, gone) =
+                        depart_gone_peers(server, &mut net.id_map, net.me, &connected);
+                    sets.extend(dsets);
+                    net.departed.extend(gone);
                 }
                 // Queue the assembled sets for THIS server's authoritative step (rl#151 increment 1):
                 // the windowed driver pumps each tick's crab physics then calls `step_next`.
@@ -446,22 +448,45 @@ impl Coordinator {
     }
 }
 
-/// The rostered players whose transport link is GONE (bddap/rl#198): every `id_map` entry (except
-/// `me` — the host holds no link to itself) with no endpoint in `connected`. Pure, so the windowed
-/// host ([`NetDriver::drain_departed`]) and the headless `game net` host share the one predicate.
-/// A link exists for every rostered remote by construction (formation and admission both ran over
-/// it), so its absence means the connection CLOSED — a clean peer exit or a dead-connection write
-/// failure, either way a departure, never merely "not yet connected".
-pub fn departed_players(
-    id_map: &BTreeMap<EndpointId, PlayerId>,
+/// Detect and CONSUME client departures on a host (bddap/rl#198) — the ONE departure-handling
+/// home, shared by the windowed [`Coordinator::exchange`] and the headless `game net` driver
+/// (the same sync/async split precedent as [`host_assemble`]; the caller supplies `connected`
+/// because only it knows whether to `block_on` or `await` the session).
+///
+/// A rostered endpoint (excluding `me` — the host holds no link to itself) with no entry in
+/// `connected` has DEPARTED: a link exists for every rostered remote by construction (formation
+/// and admission both ran over it), so its absence means the connection CLOSED — a clean peer
+/// exit, a dead-connection write failure, or a wedged-peer eviction; never merely "not yet
+/// connected". Each departed player is removed from `id_map` (which is what lets the same person
+/// REJOIN: a fresh process dials as a new endpoint through the normal [`JoinRequest`] admission)
+/// and [`Server::depart`]ed; the released [`TickSet`]s are returned for
+/// [`Server::enqueue_for_step`] beside the tick's assembled sets, and the departed endpoints are
+/// returned for the caller's departed-endpoint bookkeeping ([`NetDriver::drain_client_inputs`]'s
+/// refuse-once). Level-triggered off the link table (no event to lose): a departure missed this
+/// tick is caught the next.
+pub fn depart_gone_peers(
+    server: &mut Server,
+    id_map: &mut BTreeMap<EndpointId, PlayerId>,
     me: PlayerId,
     connected: &[EndpointId],
-) -> Vec<(EndpointId, PlayerId)> {
-    id_map
+) -> (Vec<server::TickSet>, Vec<EndpointId>) {
+    let gone: Vec<(EndpointId, PlayerId)> = id_map
         .iter()
         .filter(|(eid, pid)| **pid != me && !connected.contains(eid))
         .map(|(eid, pid)| (*eid, *pid))
-        .collect()
+        .collect();
+    let mut sets = Vec::new();
+    let mut eids = Vec::new();
+    for (eid, pid) in gone {
+        id_map.remove(&eid);
+        println!(
+            "player {pid:?} ({}) departed — continuing without them",
+            eid.fmt_short()
+        );
+        sets.extend(server.depart(pid));
+        eids.push(eid);
+    }
+    (sets, eids)
 }
 
 /// Gate + admit each mid-game `joins` request on the host (Stage 3, rl#151). For each joiner:
@@ -750,6 +775,7 @@ fn connect_and_form_inner(
         server_eid,
         early,
         id_map: frozen.id_map,
+        departed: Default::default(),
         telemetry,
         weights_synced: frozen.weights_synced,
         assets_synced: frozen.assets_synced,
@@ -892,6 +918,7 @@ pub fn connect_and_join(
                 server_eid: host,
                 early: Vec::new(),
                 id_map,
+                departed: Default::default(),
                 telemetry,
                 // Admitted ⇒ our weight + asset digests matched the host's (the admission gate), so
                 // the round is armable on the same Sally as everyone else.

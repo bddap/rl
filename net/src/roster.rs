@@ -63,6 +63,16 @@ impl RosterSchedule {
         *self.points.keys().next_back().expect("non-empty schedule")
     }
 
+    /// The earliest tick a NEW change may take effect: at or after the caller's `floor` (the emit
+    /// cursor, plus any lead), and strictly after every existing change-point — so the value is
+    /// always legal to [`Self::schedule_change`]. The ONE home for this formula, shared by
+    /// [`Server::admit`](crate::server::Server::admit) and
+    /// [`Server::depart`](crate::server::Server::depart) so the two can't drift on the append-only
+    /// rule.
+    pub fn earliest_change_at(&self, floor: u64) -> u64 {
+        floor.max(self.latest_change_tick() + 1)
+    }
+
     /// Schedule `set` to take effect from `effective_tick`. Append-only and strictly future: a NEW
     /// tick must be beyond every existing change-point, so a recorded change can never be rewritten
     /// (which would let the server and a client that applied it at different moments disagree).

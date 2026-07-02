@@ -427,17 +427,29 @@ struct OutFrame {
 /// A peer's outbound frame queue: the caller ENQUEUES (never awaits a network write) and the
 /// per-link writer task spawned in [`wire_connection`] owns the [`SendStream`] — so a dead or
 /// backpressured peer can never block the caller, which on the windowed host is the bevy main
-/// thread inside `block_on` (the rl#198 freeze). Unbounded on purpose: growth is bounded by the
-/// QUIC idle timeout killing a dead connection (the write then errors and the link is evicted),
-/// and dropping frames instead would silently starve a live peer of state. `Arc`'d so cloned
-/// identity (`Weak::ptr_eq`) is how [`drop_if_same`] tells a stale link from a reconnect's
-/// replacement — and so dropping the map entry closes the channel, which is what tells the writer
-/// task to exit.
-type Link = Arc<mpsc::UnboundedSender<OutFrame>>;
+/// thread inside `block_on` (the rl#198 freeze). Bounded at [`OUT_QUEUE_FRAMES`]: a peer whose
+/// queue FILLS is not draining (a wedged process whose runtime still answers keep-alives — the
+/// idle timeout never fires for it), so the link is dropped LOUDLY and the departure machinery
+/// takes over — never a silent frame drop to a peer presumed live ([[silent-fallback-antipattern]]).
+/// `Arc`'d so cloned identity (`Weak::ptr_eq`) is how [`drop_if_same`] tells a stale link from a
+/// reconnect's replacement — and so dropping the map entry closes the channel, which is what tells
+/// the writer task to exit.
+type Link = Arc<mpsc::Sender<OutFrame>>;
 
 /// The identity handle the reader/writer tasks keep for eviction: weak, so a task holding it
 /// doesn't keep its own channel (and hence itself) alive after the link is replaced or removed.
-type LinkId = std::sync::Weak<mpsc::UnboundedSender<OutFrame>>;
+type LinkId = std::sync::Weak<mpsc::Sender<OutFrame>>;
+
+/// Outbound queue depth per peer before the link is declared wedged and dropped. The windowed
+/// host enqueues ~2 frames/tick at 30 Hz, so this is a few seconds of a peer not draining —
+/// far past any healthy hiccup QUIC's own flow control absorbs.
+const OUT_QUEUE_FRAMES: usize = 256;
+
+/// Upper bound on ONE frame write before the writer declares the peer wedged. Only reachable for
+/// a QUIC-alive peer whose stream flow-control window is full (it stopped reading); a genuinely
+/// dead connection errors out at the idle timeout, well before this. Without it the parked write
+/// would pin the stream (and the writer task) for as long as the peer stays alive-but-wedged.
+const WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The per-peer outbound link table, shared by the accept path, the discovery dialer, and every
 /// reader task.
@@ -564,22 +576,43 @@ impl Session {
     /// [`Self::broadcast_frame`]). ENQUEUE-only — the peer's writer task performs the network
     /// write, so this never blocks on the peer; a write failure surfaces there and drops the
     /// link. No link to `peer` (or a writer already dead) is a no-op (surfaced as the
-    /// higher-level stall, not a panic).
+    /// higher-level stall, not a panic); a FULL queue means the peer stopped draining — drop the
+    /// link loudly (see [`OUT_QUEUE_FRAMES`]).
     async fn send_frame(&self, peer: EndpointId, kind: Frame, body: Arc<[u8]>) {
-        let links = self.links.lock().await;
-        if let Some(link) = links.get(&peer) {
-            let _ = link.send.send(OutFrame { kind, body });
+        let wedged = {
+            let links = self.links.lock().await;
+            let Some(link) = links.get(&peer) else { return };
+            match link.send.try_send(OutFrame { kind, body }) {
+                Err(mpsc::error::TrySendError::Full(_)) => Some(Arc::downgrade(&link.send)),
+                _ => None, // sent, or Closed (the writer died; eviction is under way)
+            }
+        };
+        if let Some(link_id) = wedged {
+            tracing::warn!(%peer, ?kind, "peer outbound queue full (not draining) — dropping link");
+            drop_if_same(&self.links, peer, &link_id).await;
         }
     }
 
     /// Frame `body` with `kind` and queue it to every connected peer. ENQUEUE-only, like
     /// [`Self::send_frame`]: a dead peer's write failure surfaces in its writer task (which drops
     /// the link) and can never block the others — nor the caller, which on the windowed host is
-    /// the game's main thread (rl#198).
+    /// the game's main thread (rl#198). A peer whose queue is FULL is dropped loudly. Eviction
+    /// happens after the map lock is released — [`drop_if_same`] re-takes it.
     async fn broadcast_frame(&self, kind: Frame, body: Arc<[u8]>) {
-        let links = self.links.lock().await;
-        for link in links.values() {
-            let _ = link.send.send(OutFrame { kind, body: body.clone() });
+        let mut wedged: Vec<(EndpointId, LinkId)> = Vec::new();
+        {
+            let links = self.links.lock().await;
+            for (id, link) in links.iter() {
+                if let Err(mpsc::error::TrySendError::Full(_)) =
+                    link.send.try_send(OutFrame { kind, body: body.clone() })
+                {
+                    wedged.push((*id, Arc::downgrade(&link.send)));
+                }
+            }
+        }
+        for (id, link_id) in wedged {
+            tracing::warn!(%id, "peer outbound queue full (not draining) — dropping link");
+            drop_if_same(&self.links, id, &link_id).await;
         }
     }
 
@@ -736,7 +769,7 @@ async fn wire_connection(
         anyhow::ensure!(h[0] == HELLO, "bad stream-open byte {:#x}", h[0]);
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<OutFrame>();
+    let (tx, mut rx) = mpsc::channel::<OutFrame>(OUT_QUEUE_FRAMES);
     let tx = Arc::new(tx);
     let link_id: LinkId = Arc::downgrade(&tx);
     // Replacing an existing entry drops the old link's only strong Arc, which closes the old
@@ -745,15 +778,27 @@ async fn wire_connection(
 
     // Writer: the ONE owner of the send stream. Draining the queue here (instead of the caller
     // awaiting the write) is what keeps a dead/backpressured peer from ever blocking the game
-    // thread (rl#198); a write failure evicts the link, and the reader EOF below (or a
+    // thread (rl#198); a write failure or stall evicts the link, and the reader EOF below (or a
     // roster-level departure) is how the rest of the system learns the peer is gone.
     let links_for_writer = links.clone();
     let writer_id = link_id.clone();
     tokio::spawn(async move {
         while let Some(f) = rx.recv().await {
-            if let Err(e) = write_frame(&mut send, f.kind, &f.body).await {
-                tracing::warn!(%peer, "peer send failed, dropping link: {e:#}");
-                break;
+            match tokio::time::timeout(WRITE_STALL_TIMEOUT, write_frame(&mut send, f.kind, &f.body))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(%peer, "peer send failed, dropping link: {e:#}");
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        %peer,
+                        "peer write stalled >{WRITE_STALL_TIMEOUT:?} (alive but not reading) — dropping link"
+                    );
+                    break;
+                }
             }
         }
         drop_if_same(&links_for_writer, peer, &writer_id).await;
