@@ -118,7 +118,12 @@ struct RenderModeLabel;
 /// the skin in [`crate::bot::skin`] (shared, reads this resource), GCR's silhouette in
 /// `net::render`. Call once; registration order vs the bot/physics plugins doesn't matter (Bevy
 /// orders systems by set-label, and `init_resource` is order-independent).
-pub fn register(app: &mut App, initial: RenderMode) {
+///
+/// `cage_gate` gates the cage DRAW: gizmos render through ANY camera — including a menu's
+/// Camera2d — and GCR's crab body deliberately survives round teardown, so without a gate the
+/// cage would draw over the post-disconnect menu (rl#211). This module can't know the caller's
+/// phase type, so the caller supplies the condition; the rl-demo (no phases) passes `|| true`.
+pub fn register<M>(app: &mut App, initial: RenderMode, cage_gate: impl SystemCondition<M>) {
     app.insert_resource(initial);
     // The crab's render placement (GCR's rigid shift to the game spot) is published by the
     // external-crab bridge into this resource EVERY armed frame — but `skin::register` only inits
@@ -134,7 +139,9 @@ pub fn register(app: &mut App, initial: RenderMode) {
     // physics pose; otherwise the cage lags a frame.
     app.add_systems(
         PostUpdate,
-        draw_crab_collider_wireframe.after(TransformSystems::Propagate),
+        draw_crab_collider_wireframe
+            .after(TransformSystems::Propagate)
+            .run_if(cage_gate),
     );
 }
 

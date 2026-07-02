@@ -23,15 +23,28 @@ use crab_world::vehicle::Vehicle;
 /// mode-naming HUD label via [`crab_world::crab_view::register`], then GCR's silhouette-hide and
 /// the live cycle. Call once, after the sim systems are installed.
 pub fn register(app: &mut App, initial: RenderMode) {
-    crab_world::crab_view::register(app, initial);
-    app.add_systems(Update, (cycle_render_mode, manage_silhouette_visibility));
+    // Everything render-mode is gated on Playing (rl#211): gizmos render through ANY camera —
+    // the menu's Camera2d included — and the crab body deliberately survives round teardown, so
+    // ungated the cage draws over the post-disconnect menu; and pad East is ALSO menu Back, so
+    // ungated cycle input means dismissing that screen cycles the mode. Both callers hold the
+    // state: the windowed app inits it, the screenshot app boots pinned to Playing.
+    crab_world::crab_view::register(app, initial, in_state(AppPhase::Playing));
+    app.add_systems(
+        Update,
+        (
+            cycle_render_mode.run_if(in_state(AppPhase::Playing)),
+            manage_silhouette_visibility,
+        ),
+    );
     // The piloted craft's collider wireframe — same cycle, same drawer, same repose as the crab
     // cage. Drawn AFTER transform propagation so the body's `GlobalTransform` is this frame's
     // physics pose. Only GCR spawns a `Vehicle`, so the query is empty (a no-op) in the rl-demo,
     // which registers the shared crab cage directly and never calls this.
     app.add_systems(
         PostUpdate,
-        draw_vehicle_collider_wireframe.after(TransformSystems::Propagate),
+        draw_vehicle_collider_wireframe
+            .after(TransformSystems::Propagate)
+            .run_if(in_state(AppPhase::Playing)),
     );
 }
 
