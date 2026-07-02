@@ -420,6 +420,35 @@ mod overlay {
             .filter_map(S::gamepad_button)
     }
 
+    /// Whether `action` was just pressed this frame — on any of its bound keys or any bound
+    /// button of any connected pad. THE tap-verb dispatch: apps route their discrete verbs
+    /// through this one composition (the demo's verbs, GCR's render-mode cycle), so the
+    /// composition itself can't drift per app. Reads with genuinely per-device semantics
+    /// (GCR's kb-tap vs pad-hold quit, pad-only held actions) legitimately stay app-side.
+    pub fn just_pressed<S: ControlInput>(
+        action: S::Action,
+        keys: &ButtonInput<KeyCode>,
+        gamepads: &Query<&Gamepad>,
+    ) -> bool {
+        key_codes_for::<S>(action).any(|k| keys.just_pressed(k))
+            || gamepads
+                .iter()
+                .any(|gp| gamepad_buttons_for::<S>(action).any(|b| gp.just_pressed(b)))
+    }
+
+    /// The held twin of [`just_pressed`] — any bound key or pad button currently DOWN.
+    /// (The overlay's hold-to-reveal read.)
+    pub fn pressed<S: ControlInput>(
+        action: S::Action,
+        keys: &ButtonInput<KeyCode>,
+        gamepads: &Query<&Gamepad>,
+    ) -> bool {
+        key_codes_for::<S>(action).any(|k| keys.pressed(k))
+            || gamepads
+                .iter()
+                .any(|gp| gamepad_buttons_for::<S>(action).any(|b| gp.pressed(b)))
+    }
+
     /// The input device the player is currently using, refreshed each frame by
     /// [`track_active_device`]. Drives which legend column + hint glyph show. Pure client UI.
     #[derive(Resource, Clone, Copy, Default)]
@@ -769,18 +798,6 @@ mod overlay {
         }
     }
 
-    /// Whether the reveal control is currently held — any of its keyboard keys down OR any
-    /// of its pad buttons down on any connected pad. Reads the scheme's binding table via the
-    /// [`ControlInput`] glue, so the hint advertises exactly the control that opens the panel.
-    fn reveal_held<S: ControlInput>(
-        keys: &ButtonInput<KeyCode>,
-        gamepads: &Query<&Gamepad>,
-    ) -> bool {
-        key_codes_for::<S>(S::reveal_action()).any(|k| keys.pressed(k))
-            || gamepad_buttons_for::<S>(S::reveal_action())
-                .any(|btn| gamepads.iter().any(|gp| gp.pressed(btn)))
-    }
-
     /// Each frame: show the overlay iff the reveal control is held; show only the active
     /// context's active-device legend column and the active device's hint glyph; and keep
     /// the context name (corner hint + panel heading) in sync with [`ActiveContext`]. Pure
@@ -815,7 +832,7 @@ mod overlay {
         mut headings: Query<&mut Text, (With<ContextHeading>, Without<ContextHintLabel>)>,
         mut hint_labels: Query<&mut Text, (With<ContextHintLabel>, Without<ContextHeading>)>,
     ) {
-        let revealed = force_reveal.0 || reveal_held::<S>(&keys, &gamepads);
+        let revealed = force_reveal.0 || pressed::<S>(S::reveal_action(), &keys, &gamepads);
 
         if let Ok(mut node) = overlay.single_mut() {
             node.display = if revealed {
@@ -884,8 +901,8 @@ mod overlay {
 #[cfg(feature = "render")]
 pub use overlay::{
     ActiveContext, ActiveDevice, ControlInput, ControlsOverlayPlugin, ForceRevealControls,
-    gamepad_buttons_for, key_codes_for, spawn_controls_ui, track_active_device,
-    update_controls_ui,
+    gamepad_buttons_for, just_pressed, key_codes_for, pressed, spawn_controls_ui,
+    track_active_device, update_controls_ui,
 };
 
 #[cfg(feature = "render")]

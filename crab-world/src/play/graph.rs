@@ -26,7 +26,9 @@ use bevy_rapier3d::prelude::*;
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{CrabEnvId, CrabJoint, CrabJointId, joint_angle};
 
-use super::controls::{self, DemoAction};
+use crate::controls::just_pressed;
+
+use super::controls::{DemoAction, DemoControls};
 
 /// Samples kept per joint trace (~4 s at 60 Hz).
 const CAPACITY: usize = 240;
@@ -144,7 +146,7 @@ fn toggle_graph(
     mut ui: Query<&mut Visibility, With<GraphUi>>,
 ) {
     // Dispatched from DEMO_BINDINGS (G / pad North), so the legend can't drift from the key.
-    if controls::just_pressed(DemoAction::JointGraph, &keys, &pads) {
+    if just_pressed::<DemoControls>(DemoAction::JointGraph, &keys, &pads) {
         graph.visible = !graph.visible;
         for mut v in ui.iter_mut() {
             *v = if graph.visible {

@@ -43,11 +43,11 @@ fn cycle_render_mode(
     pads: Query<&Gamepad>,
     mut mode: ResMut<RenderMode>,
 ) {
-    let key = controls::key_code_for(Action::CycleRenderMode).is_some_and(|k| keys.just_pressed(k));
-    let pad = pads.iter().any(|gp| {
-        controls::gamepad_buttons_for(Action::CycleRenderMode).any(|b| gp.just_pressed(b))
-    });
-    if key || pad {
+    if crab_world::controls::just_pressed::<controls::GcrControls>(
+        Action::CycleRenderMode,
+        &keys,
+        &pads,
+    ) {
         *mode = mode.next();
         info!("render mode: {:?}", *mode);
     }
