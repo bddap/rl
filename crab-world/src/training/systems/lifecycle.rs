@@ -11,8 +11,8 @@ use crate::bot::body::{CrabAssets, CrabBodyPart, CrabEnvId, random_spawn_rotatio
 use crate::bot::sensor::{CrabTargets, OBS_SIZE};
 use crate::bot::{CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown};
 use crate::training::algorithm::{NormalizedValue, StepEnd, Transition};
-use crate::training::targets::{REACH_RADIUS, seed_target};
 use crate::training::reward::{GRAB_REWARD, compute_reward, is_progress_glitch, planar_dist};
+use crate::training::targets::{REACH_RADIUS, seed_target};
 
 use super::state::TrainingState;
 use super::step::{BodyState, StepInputs};
