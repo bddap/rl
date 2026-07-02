@@ -110,26 +110,34 @@ fn apply_nice(nice: i32) {
 }
 
 /// Resolve the thread count: an explicit `--workers` wins; otherwise default to
-/// PHYSICAL cores minus a couple for headroom (floor 1), clamped to [1, 64]. The
+/// usable cores minus a couple for headroom (floor 1), clamped to [1, 64]. The
 /// learner's PPO update runs on the main thread but is mostly idle during rollout
 /// (it blocks on the threads), so it isn't counted against the 2 reserved cores.
-///
-/// Physical, not logical: each rollout thread saturates a core with rapier + a burn
-/// forward pass, and two such threads sharing one physical core via hyperthreading
-/// contend for the same FPU/cache and net well under 2× — so a default keyed off
-/// `available_parallelism()` (which counts logical CPUs) would oversubscribe ~2×
-/// and thrash. `physical_cores()` reads the real core count; `available_parallelism`
-/// is the portable fallback if that can't be determined.
 pub fn default_workers(explicit: Option<usize>) -> usize {
-    let k = explicit.unwrap_or_else(|| physical_cores().saturating_sub(2).max(1));
+    let k = explicit.unwrap_or_else(|| usable_cores().saturating_sub(2).max(1));
     k.clamp(1, 64)
 }
 
-/// Physical CPU core count. On Linux, count the distinct (physical id, core id)
-/// pairs in `/proc/cpuinfo` — that collapses hyperthreads onto their shared core.
-/// Falls back to `available_parallelism()` (logical CPUs) if `/proc/cpuinfo` is
-/// unavailable or yields nothing.
-fn physical_cores() -> usize {
+/// At most the cores this process can actually run on: the PHYSICAL core count
+/// capped by `available_parallelism()`.
+///
+/// Physical, not logical, as the base: each rollout thread saturates a core with
+/// rapier + a burn forward pass, and two such threads sharing one physical core
+/// via hyperthreading contend for the same FPU/cache and net well under 2× — so
+/// a count keyed off logical CPUs alone would oversubscribe ~2× and thrash. On
+/// Linux the physical count is the distinct (physical id, core id) pairs in
+/// `/proc/cpuinfo`, which collapses hyperthreads onto their shared core.
+///
+/// Capped by `available_parallelism()` because `/proc/cpuinfo` is host-wide
+/// while `available_parallelism()` honors cgroup CPU quotas and affinity masks:
+/// under a capped cgroup (CI, botq workers) the host may show 12 physical cores
+/// while the scheduler grants 8 — planning threads for cores the cgroup denies
+/// just adds contention. Falls back to `available_parallelism()` alone if
+/// `/proc/cpuinfo` is unavailable or yields nothing.
+fn usable_cores() -> usize {
+    let granted = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     if let Ok(info) = std::fs::read_to_string("/proc/cpuinfo") {
         let mut pairs = std::collections::HashSet::new();
         let (mut phys, mut core) = (None, None);
@@ -156,12 +164,10 @@ fn physical_cores() -> usize {
             pairs.insert((p, c));
         }
         if !pairs.is_empty() {
-            return pairs.len();
+            return pairs.len().min(granted);
         }
     }
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    granted
 }
 
 /// Pin every process-global thread pool to 1 thread BEFORE any `App` is built, the
@@ -1027,29 +1033,29 @@ mod tests {
         crate::training::normalizer::IncrementAccumulator::new().increment()
     }
 
-    /// The thread count cap the owner asked for: the default is PHYSICAL cores minus
+    /// The thread count cap the owner asked for: the default is usable cores minus
     /// a couple (floor 1), and an explicit `--workers` still wins. Both clamp into
-    /// [1, 64]. Keyed off physical cores so it never oversubscribes hyperthreads.
+    /// [1, 64]. `usable_cores` must never exceed what the scheduler will actually
+    /// grant (`available_parallelism` is cgroup/affinity-aware; raw `/proc/cpuinfo`
+    /// is not — see #190), so the default never plans threads a CPU quota denies.
     #[test]
-    fn default_workers_leaves_two_physical_cores_and_honors_override() {
-        let physical = physical_cores();
-        assert!(physical >= 1, "physical core count must be >= 1");
-        // Physical cores must not exceed logical CPUs (hyperthreads only add logical).
-        let logical = std::thread::available_parallelism()
+    fn default_workers_leaves_two_usable_cores_and_honors_override() {
+        let usable = usable_cores();
+        let granted = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
         assert!(
-            physical <= logical,
-            "physical {physical} must be <= logical {logical}"
+            (1..=granted).contains(&usable),
+            "usable {usable} must be in 1..=granted {granted}"
         );
 
         let k = default_workers(None);
         assert!(k >= 1, "thread count must be at least 1, got {k}");
-        if physical > 2 {
+        if usable > 2 {
             assert_eq!(
                 k,
-                physical - 2,
-                "default must leave exactly 2 physical cores free"
+                usable - 2,
+                "default must leave exactly 2 usable cores free"
             );
         }
 
