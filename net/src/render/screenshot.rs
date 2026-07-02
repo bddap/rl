@@ -222,17 +222,13 @@ fn spawn_offscreen_camera(
         Transform::default(),
         FpCamera,
     ));
-    // Match the windowed FP camera's render-frame-scaled near plane (else the shrunk human world
-    // clips at the default 0.1 m), plus an optional wider FOV so the towering giant crab fits in
-    // one evidence frame.
-    cam.insert(Projection::Perspective(PerspectiveProjection {
-        near: super::scene::DEFAULT_CAMERA_NEAR * super::scene::world_render_scale(),
-        fov: cfg
-            .cam_fov_deg
-            .map(f32::to_radians)
-            .unwrap_or(PerspectiveProjection::default().fov),
-        ..default()
-    }));
+    // The windowed FP camera's perspective (shared render-frame-scaled near clip), plus an
+    // optional wider FOV so the towering giant crab fits in one evidence frame.
+    let mut projection = super::scene::fp_perspective();
+    if let Some(fov_deg) = cfg.cam_fov_deg {
+        projection.fov = fov_deg.to_radians();
+    }
+    cam.insert(Projection::Perspective(projection));
     commands.insert_resource(ShotTarget(handle));
 }
 

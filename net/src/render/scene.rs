@@ -757,21 +757,32 @@ pub(super) fn look_direction(yaw_radians: f32, pitch_radians: f32) -> Vec3 {
     (rot * Vec3::Z).normalize()
 }
 
+/// The FP cameras' perspective: Bevy's default 0.1 m near plane, shrunk by
+/// [`world_render_scale`] like the rest of the human frame — the world renders ~36× smaller,
+/// so unscaled it would sit a player-height-and-a-half out and clip near geometry (the
+/// looming crab's nearest legs, a cockpit). What actually clips in Bevy 0.18 is the oblique
+/// `near_clip_plane` (a portals/mirrors feature), which DEFAULTS to the stock 0.1 m plane
+/// independent of `near` — leave it stale and the view still clips at 0.1 render-m, ~2
+/// eye-heights out (looking down while standing saw through the floor, rl#196) — so the two
+/// move together here. The ONE perspective source for the windowed and screenshot FP
+/// cameras, so their clips can't drift.
+pub(super) fn fp_perspective() -> PerspectiveProjection {
+    let near = 0.1 * world_render_scale();
+    PerspectiveProjection {
+        near,
+        near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -near),
+        ..default()
+    }
+}
+
 /// Spawn the windowed first-person camera. Its transform is overwritten every frame
 /// by [`apply_transforms`]; the night-sky skybox ([`crab_world::sky`]) paints the
-/// background, with this dark clear color as the pre-upload fallback. The near plane is shrunk
-/// by [`world_render_scale`] like the rest of the human frame: the whole world renders ~36×
-/// smaller, so the default 0.1 m near plane would sit a player-height-and-a-half out and clip
-/// near geometry (the looming crab's nearest legs, a cockpit) — scaling it keeps the same
-/// relative near clip the unscaled world had.
+/// background, with this dark clear color as the pre-upload fallback.
 pub(super) fn spawn_fp_camera(mut commands: Commands) {
     commands.spawn((
         DespawnOnExit(AppPhase::Playing),
         Camera3d::default(),
-        Projection::Perspective(PerspectiveProjection {
-            near: DEFAULT_CAMERA_NEAR * world_render_scale(),
-            ..default()
-        }),
+        Projection::Perspective(fp_perspective()),
         Camera {
             clear_color: ClearColorConfig::Custom(crab_world::sky::NIGHT_CLEAR),
             ..default()
@@ -780,7 +791,3 @@ pub(super) fn spawn_fp_camera(mut commands: Commands) {
         FpCamera,
     ));
 }
-
-/// Bevy's default perspective near plane (m). We scale it by [`world_render_scale`] for the
-/// shrunk GCR frame; named so the FP and screenshot cameras can't drift to different near clips.
-pub(super) const DEFAULT_CAMERA_NEAR: f32 = 0.1;
