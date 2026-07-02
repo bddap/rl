@@ -364,24 +364,12 @@ pub struct ExternalCrabPlugin {
 impl Plugin for ExternalCrabPlugin {
     fn build(&self, app: &mut App) {
         let policy = Policy::load(&self.checkpoint_dir);
-        // The NN crab only moves when a fitting checkpoint armed it; otherwise it stands inert.
-        // Distinguish the two non-arming cases so the operator knows WHY (rl#121): a rig
-        // MISMATCH (wrong checkpoint for this build) is an operator error — refuse it LOUDLY
-        // (`error!`; `Policy::load` already logged the dims too); a MISSING checkpoint is the
-        // legitimate "no brain yet" rest pose — a quiet `warn!`.
-        if let Some(dims) = policy.rig_mismatch() {
-            let rig = crab_world::play::rig_dims();
-            error!(
-                "external_crab: checkpoint at {} was built for a DIFFERENT rig \
-                 ({} obs / {} act vs this binary's {} obs / {} act) \
-                 — NN crab REFUSED to arm and is INERT. Rebuild the checkpoint for this rig.",
-                self.checkpoint_dir.display(),
-                dims.obs,
-                dims.action,
-                rig.obs,
-                rig.action,
-            );
-        } else if !policy.is_loaded() {
+        // The NN crab only moves when a fitting checkpoint armed it; otherwise it stands
+        // inert. `Policy::load` already logged WHY (a loud `error!` for a refused wrong-rig
+        // checkpoint, rl#121) — and every game entry point hard-fails on a bad checkpoint
+        // before this plugin is even built (rl#199), so a non-arming here is the legitimate
+        // "no brain yet" rest pose.
+        if !policy.is_loaded() {
             warn!(
                 "external_crab: no usable checkpoint at {} — NN crab holds rest pose",
                 self.checkpoint_dir.display()
