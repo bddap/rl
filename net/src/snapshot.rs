@@ -1,6 +1,6 @@
-//! `CoreSnapshot` — the host-authoritative game-state seam (bddap/rl#151, increment 0).
+//! `CoreSnapshot` — the host-authoritative game-state seam.
 //!
-//! The post-lockstep MP design (`docs/gcr-mp-host-authoritative.md`) makes the integer
+//! The host-authoritative MP design (`docs/gcr-mp-host-authoritative.md`) makes the integer
 //! [`Sim`](crate::sim::Sim) the authoritative state and ships it whole each tick: the host
 //! steps the sim and broadcasts a snapshot; every client — including the host's own local
 //! client, and in single-player the *only* client — reads game state from that snapshot
@@ -8,11 +8,10 @@
 //! ([[sp-is-mp-special-case]]), so SP **always serializes too** — no by-reference-in-SP
 //! fork ([[silent-fallback-antipattern]]).
 //!
-//! This is increment 0: the seam only. `CoreSnapshot` carries the authoritative integer
-//! game state and **nothing render-only** — the ~13 crab body-part transforms the skinned
-//! mesh needs ride a SEPARATE `#[cfg(feature = "render")]` extension frame in a later
-//! increment, never this struct, so the no-render trainer build never pulls a render type
-//! through here ([[verify-all-bins-on-module-moves]]).
+//! `CoreSnapshot` carries the authoritative integer game state and **nothing render-only** —
+//! the ~13 crab body-part transforms the skinned mesh needs ride a SEPARATE
+//! `#[cfg(feature = "render")]` extension frame, never this struct, so the no-render trainer
+//! build never pulls a render type through here.
 //!
 //! It reuses [`Sim`](crate::sim::Sim)'s own field types ([`Player`], [`Crab`], …) instead
 //! of re-encoding into parallel structs, so completeness is caught at the one construction
@@ -44,23 +43,23 @@ use crate::sim::{Crab, Outcome, Player, PlayerId, PlayerStatus, Pos};
 /// [`from_bytes`]: CoreSnapshot::from_bytes
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreSnapshot {
-    /// The tick this snapshot is OF. Also the version: a client applies the highest `tick`
-    /// it has seen and drops older arrivals (a snapshot is a full state, so a newer one
-    /// supersedes an older). This versions the roster too — no separate roster epoch.
+    /// The tick this snapshot is OF. A snapshot is a FULL state, so it versions the roster
+    /// too — no separate roster epoch. (Clients adopt snapshots in arrival order:
+    /// [`crate::lockstep::Lockstep::adopt_snapshots`].)
     pub tick: u64,
     /// First-person players, in `PlayerId` order. Reuses [`Sim`](crate::sim::Sim)'s own
     /// `BTreeMap` so a new `Player` field is carried by construction, not re-encoded.
     pub players: BTreeMap<PlayerId, Player>,
     /// The giant crab's authoritative integer pose (`Pos` + yaw). The float rapier body and
     /// its per-tick physics digest are NOT carried — the client renders the pose, never the
-    /// solver; the digest was a lockstep cross-check this design dissolves.
+    /// solver.
     pub crab: Crab,
     /// The round result the client reads to end the round.
     pub outcome: Outcome,
-    /// The participant set the server owns (sorted, deduped). Replaces the peer-symmetric
-    /// `RosterSchedule`: the server ships the roster instead of every peer agreeing it
-    /// tick-for-tick. Not in [`Sim::state_hash`](crate::sim::Sim::state_hash) (config-level,
-    /// can't differ between in-sync peers), so the round-trip test asserts it separately.
+    /// The participant set the server owns (sorted, deduped) — the server ships the roster;
+    /// peers never agree it tick-for-tick. Not in
+    /// [`Sim::state_hash`](crate::sim::Sim::state_hash) (config-level, can't differ between
+    /// in-sync peers), so the round-trip test asserts it separately.
     pub roster: Vec<PlayerId>,
 }
 

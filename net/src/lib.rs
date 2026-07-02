@@ -1,11 +1,11 @@
-//! Multiplayer netcode (rl#39 → rl#151): a host-AUTHORITATIVE client/server model over
+//! Multiplayer netcode: a host-AUTHORITATIVE client/server model over
 //! iroh LAN transport — inputs go UP, full game state comes DOWN
-//! ([[mp-minecraft-model]]). Multiplayer-first, so the whole game (rl#38) is built on
+//! ([[mp-minecraft-model]]). Multiplayer-first, so the whole game is built on
 //! these pieces:
 //!
-//! - [`sim`] — the deterministic simulation core: the Phase 1 gray-box Extraction
+//! - [`sim`] — the deterministic simulation core: the gray-box Extraction
 //!   loop (first-person players + one giant crab + an extraction point). The contract
-//!   (pure step, complete state hash, no nondeterminism) is what every later game
+//!   (pure step, complete state hash, no nondeterminism) is what every other game
 //!   system must honor; the render/vehicle subs build on the interface documented at
 //!   the top of [`sim`], they do not bypass it.
 //! - [`server`] — the ONE authoritative peer: records every rostered client's input
@@ -20,13 +20,13 @@
 //! - [`net_loop`] — a synchronous bridge from the async [`transport`] to a game main
 //!   loop (the [`net_loop::Coordinator`]: solo and host are the SAME server arm,
 //!   [[sp-is-mp-special-case]]), plus formation and the mid-game join path.
-//! - [`render`] — the windowed first-person Bevy client (rl#38): FP camera at the
+//! - [`render`] — the windowed first-person Bevy client: FP camera at the
 //!   local player, the gray-box scene (players, the giant crab, the extraction
 //!   point), WASD+mouse+gamepad → [`sim::Input`], tick interpolation, and a headless
 //!   screenshot mode for evidence.
 //!
-//! [`controls`] is the data-driven control map both [`render`]'s input handling AND its
-//! on-screen legend derive from (one source, can't drift — rl#57). Its pure core is NOT
+//! [`controls`] is the data-driven binding table both [`render`]'s input handling AND its
+//! on-screen legend derive from (one source, can't drift). Its pure core is NOT
 //! gated on `render` so it unit-tests in the headless build like [`sim`]; only the
 //! Bevy-input glue is render-only.
 //!
@@ -63,7 +63,7 @@ pub mod menu;
 pub mod render;
 
 /// The formation barrier's verdict on the two inputs that determine the float NN crab's
-/// physics (rl#82 + rl#100, GCR) — computed ONCE by [`crate::membership::Membership::sync_verdict`]
+/// physics — computed ONCE by [`crate::membership::Membership::sync_verdict`]
 /// at the barrier's close and carried as this single value (never as loose parallel bools)
 /// through `Frozen` → `NetDriver` to the arm sites:
 /// - `host_brain`: the HOST — the peer that will run the authoritative server, the only one
@@ -73,7 +73,7 @@ pub mod render;
 ///   analogue is [`crate::server::may_admit_joiner`]'s `HostNotArmed`. Backed by a present
 ///   checkpoint digest, **not** `Policy::is_loaded()` — `RL_RANDOM_POLICY=1` forces
 ///   `is_loaded()` true on a fresh random brain with NO digest.
-/// - `assets` (rl#100): every peer advertised the SAME non-zero crab-model-asset digest. The
+/// - `assets`: every peer advertised the SAME non-zero crab-model-asset digest. The
 ///   giant crab's rapier colliders are derived from the crab MODEL asset
 ///   ([`crab_world::bot::meshfit::crab_asset_digest`]), so peers with different crab models
 ///   diverge client-side the moment the crab is built — this half stays peer-symmetric.
@@ -83,8 +83,8 @@ pub struct SyncVerdict {
     pub assets: bool,
 }
 
-/// The shared-asset guard for handing the crab to the float NN body in LOCKSTEP (rl#82 +
-/// rl#100, GCR): a round may arm the external crab only when it can't desync peers on the
+/// The shared-asset guard for handing the crab to the float NN body in LOCKSTEP:
+/// a round may arm the external crab only when it can't desync peers on the
 /// brain + collider asset that drive the float crab's physics. `None` means the round is
 /// SOLO (no networked formation ran) — one peer, nothing to desync, always arms. A NETWORKED
 /// round arms ONLY on a fully-synced [`SyncVerdict`].
@@ -98,7 +98,8 @@ pub struct SyncVerdict {
 ///
 /// This is the SINGLE arm predicate — the [`render`] arming sites (the `Boot::Round` build, the
 /// menu's `poll_formation` pre-gate, and `ensure_round_installed`) reach it through the one
-/// `arm_round` gate (whose `ArmedRound` proof the install path consumes), and the rl#63 tests call it directly, so the rule can't drift
+/// `arm_round` gate (whose `ArmedRound` proof the install path consumes), and the tests
+/// below call it directly, so the rule can't drift
 /// between them. Each caller ANDs it with "a checkpoint/NN stack is present" (no brain ⇒ nothing to
 /// arm). Deliberately NOT behind `cfg(render)`: the no-feature test build (like the headless
 /// trainer) must exercise the REAL predicate, not a re-encoded copy.
@@ -108,19 +109,18 @@ pub fn may_arm_external_crab(sync: Option<SyncVerdict>) -> bool {
 
 #[cfg(test)]
 mod desync_test {
-    //! The headless determinism proof (rl#39): replay ONE input log through two
+    //! The headless determinism proof: replay ONE input log through two
     //! independently-constructed sims and assert their state hashes match
     //! tick-for-tick. If the sim ever acquires a nondeterminism bug (a `HashMap`
     //! walk, a `thread_rng` draw, a wall-clock read, a raw `f32::sin`), the two
-    //! diverge and a tick's hashes disagree — this test goes red. It is the empirical
-    //! guard the issue calls for: determinism is testable, so test it.
+    //! diverge and a tick's hashes disagree — this test goes red. Determinism is
+    //! testable, so test it.
     //!
-    //! Phase 1 (rl#38) extends it past the old dot world: the log now exercises the
-    //! FULL [`Input`] surface (move + yaw-look + the action bit), and a long replay
-    //! drives the real gray-box — players turning and moving by facing, the giant crab
-    //! pursuing and grabbing, the round resolving — so the hash equality proves
-    //! determinism of the ACTUAL sim (player yaw, crab position, statuses, outcome),
-    //! not a trivial placeholder.
+    //! The log exercises the FULL [`Input`] surface (move + yaw-look + the action
+    //! bit), and a long replay drives the real gray-box — players turning and moving
+    //! by facing, the giant crab pursuing and grabbing, the round resolving — so the
+    //! hash equality proves determinism of the ACTUAL sim (player yaw, crab position,
+    //! statuses, outcome), not a trivial placeholder.
 
     use std::collections::BTreeMap;
 
@@ -189,15 +189,15 @@ mod desync_test {
     fn long_replay_drives_the_real_loop_and_stays_in_lockstep() {
         // Two players that hold still while the crab hunts them: a DETERMINISTIC
         // scenario (neutral input every tick) that is guaranteed to resolve — the crab
-        // (driven by the shared deterministic test driver, since rl#114 removed the integer
-        // pursuit) closes in and wipes the round. Two sims must agree EVERY tick, including
+        // (driven by the shared deterministic test driver; the sim has no integer
+        // pursuit of its own) closes in and wipes the round. Two sims must agree EVERY tick, including
         // across the outcome transition and the frozen-after-decided ticks, so
         // determinism is proven for the crab drive, the grab, and the freeze — not
         // just free movement. The guaranteed `Wiped` keeps the test honest (a no-op sim
         // would also "stay in lockstep") WITHOUT leaning on random inputs happening to
         // resolve, so it can't flake.
         let players: Vec<PlayerId> = (0..2).map(PlayerId).collect();
-        // Complete neutral map — `Sim::step` requires one input per participant (rl#105),
+        // Complete neutral map — `Sim::step` requires one input per participant,
         // never an empty map silently defaulted to all-neutral.
         let neutral: BTreeMap<PlayerId, Input> =
             players.iter().map(|&p| (p, Input::default())).collect();
@@ -302,15 +302,15 @@ mod desync_test {
     }
 
     // -----------------------------------------------------------------------------
-    // External NN-crab arm gate (rl#63 + GCR rl#82)
+    // External NN-crab arm gate
     // -----------------------------------------------------------------------------
     //
     // The external NN crab (`net::external_crab`, render-only) drives a FLOAT rapier crab and writes
     // its pose into the integer `Sim` via `set_external_crab_pose`. A float crab desyncs peers
     // UNLESS they share the same brain and step it identically, so it may arm only when
     // [`super::may_arm_external_crab`] allows: a SOLO round always, a NETWORKED round only with
-    // SYNCED weights+assets. There is NO integer fallback (rl#114): a networked-UNSYNCED round
-    // CANNOT arm and the production sites REFUSE it LOUDLY — GRACEFULLY (rl#115): the scripted
+    // SYNCED weights+assets. There is NO integer fallback: a networked-UNSYNCED round
+    // CANNOT arm and the production sites REFUSE it LOUDLY — GRACEFULLY: the scripted
     // `Boot::Round` build returns an `Err` (clean CLI exit) and the menu's `poll_formation` returns
     // to the chooser showing an actionable peer-mismatch message — rather than substituting a fake
     // crab or crashing. These tests pin that gate predicate.
@@ -328,7 +328,7 @@ mod desync_test {
     /// `arm_round`, so this can't drift from them). `checkpoint` is an `Option<()>`
     /// stand-in — only its `is_some()` feeds the gate; `sync` is the formation handshake's
     /// verdict (`None` = solo round). Returns whether the round WOULD arm the NN crab; on a
-    /// networked round `false` means the production sites REFUSE the round (rl#114, no integer
+    /// networked round `false` means the production sites REFUSE the round (no integer
     /// fallback), not a silent downgrade.
     fn would_arm_external_crab(sync: Option<SyncVerdict>, checkpoint: Option<()>) -> bool {
         checkpoint.is_some() && super::may_arm_external_crab(sync)
@@ -343,7 +343,7 @@ mod desync_test {
     fn arm_gate_keys_on_solo_or_synced_weights_and_assets() {
         // The invariant: a networked round arms ONLY with synced weights AND synced crab assets;
         // solo always arms (with a checkpoint); no checkpoint never arms. A networked round that
-        // does NOT arm is REFUSED by the production sites (rl#114) — there is no integer crab.
+        // does NOT arm is REFUSED by the production sites — there is no integer crab.
 
         // Networked + UNSYNCED weights (assets synced): must NOT arm (a float crab on mismatched
         // brains would desync peers) → the round is refused.
@@ -352,14 +352,14 @@ mod desync_test {
             "a networked round with UNSYNCED weights must NOT arm the NN crab (round refused)"
         );
 
-        // Networked + SYNCED weights but UNSYNCED crab assets (rl#100): must NOT arm — two peers
+        // Networked + SYNCED weights but UNSYNCED crab assets: must NOT arm — two peers
         // with different crab models build different colliders and desync even sharing a brain.
         assert!(
             !would_arm_external_crab(synced(true, false), Some(())),
             "a networked round with mismatched crab ASSETS must NOT arm the NN crab (round refused)"
         );
 
-        // Networked + SYNCED weights + SYNCED assets + checkpoint: DOES arm (the GCR fold) — peers
+        // Networked + SYNCED weights + SYNCED assets + checkpoint: DOES arm — peers
         // share the brain AND the collider asset, so the float crab is safe in lockstep.
         assert!(
             would_arm_external_crab(synced(true, true), Some(())),
@@ -376,7 +376,7 @@ mod desync_test {
         assert!(!would_arm_external_crab(synced(true, true), None));
     }
 
-    /// The shared-checkpoint guard (rl#82): two peers running the SAME float crab pose but
+    /// The shared-checkpoint guard: two peers running the SAME float crab pose but
     /// DIFFERENT policy weights must desync, because the bridge folds the weights digest into
     /// the per-tick physics hash. Here we push an identical pose to both externally-driven
     /// sims but a different `phys_digest` (standing in for "different weights"), and require the

@@ -30,7 +30,7 @@ pub(super) fn insert_core(app: &mut App, ls: Lockstep, coord: Box<Coordinator>) 
 
 /// Install the round resources into the world: the non-send [`GameState`] (sim + coordinator)
 /// and the input resources. Factored out of [`insert_core`] so it can be called BOTH at app
-/// build (the screenshot path) and from the menu's `OnEnter(Playing)` transition system (rl#56),
+/// build (the screenshot path) and from the menu's `OnEnter(Playing)` transition system,
 /// which only has a [`World`], not an [`App`] — one definition so the round is set up identically
 /// however it was reached.
 fn install_round(world: &mut World, ls: Lockstep, coord: Box<Coordinator>) {
@@ -51,7 +51,7 @@ fn install_round(world: &mut World, ls: Lockstep, coord: Box<Coordinator>) {
 /// The round the boot menu chose, parked here between the menu's Playing transition and
 /// the `OnEnter(Playing)` install. Holds the [`ArmedRound`] PROOF, not a bare round — only
 /// the arm gate ([`super::app::arm_round`]) can construct one, so no path can park an
-/// unarmable round for install (rl#138, impossible-by-construction). Non-send because the
+/// unarmable round for install (impossible-by-construction). Non-send because the
 /// round holds a `NetDriver` (tokio runtime). `None` on the scripted `Boot::Round` path,
 /// which installs `GameState` at app build instead — so [`ensure_round_installed`] no-ops
 /// there.
@@ -64,13 +64,13 @@ pub(super) struct PendingRound(pub(super) Option<ArmedRound>);
 /// - **Menu**: take the parked [`PendingRound`] (set by the menu on its choice) and
 ///   [`install_round`] it now, so the sim is live for the spawns.
 ///
-/// On the menu path this is ALSO where the one giant crab — the real NN body — is ARMED
-/// (rl#58 + GCR): insert [`crate::external_crab::ExternalCrabArmed`] and seed the sim crab so the
+/// On the menu path this is ALSO where the one giant crab — the real NN body — is ARMED:
+/// insert [`crate::external_crab::ExternalCrabArmed`] and seed the sim crab so the
 /// rapier-NN body drives it. The arm DECISION ([`crate::may_arm_external_crab`]: solo always,
 /// networked only with synced weights+assets) is made UPSTREAM in the menu's `poll_formation`,
 /// which refuses an unarmable networked round and returns to the chooser with an actionable
-/// peer-mismatch message (rl#115) BEFORE requesting Playing. The [`ArmedRound`] taken from
-/// [`PendingRound`] is the PROOF of that decision — only the gate can mint one (rl#138) — so
+/// peer-mismatch message BEFORE requesting Playing. The [`ArmedRound`] taken from
+/// [`PendingRound`] is the PROOF of that decision — only the gate can mint one — so
 /// arming here without re-checking is sound by type, not by trust. It must arm here rather
 /// than gate, because the chained `spawn_world` needs the installed `GameState`; a graceful
 /// in-menu refusal is only possible before the transition, which is why the decision lives in
@@ -93,9 +93,9 @@ pub(super) fn ensure_round_installed(world: &mut World) {
         .expect("entered Playing with no round to install — the menu must park a round before transitioning")
         .into_ready();
     // Arm the one giant crab — the real NN body. Taking the round out of an [`ArmedRound`]
-    // IS the arm verdict (rl#138): only `poll_formation`'s gate pass can have minted it, so
+    // IS the arm verdict: only `poll_formation`'s gate pass can have minted it, so
     // there is no re-check here — a path that could reach this transition with an unarmable
-    // round cannot exist. The checkpoint is required (rl#114), so the stack is always
+    // round cannot exist. The checkpoint is required, so the stack is always
     // installed; a missing stack is a build-wiring bug, so assert it loudly.
     assert!(
         world.get_resource::<ExternalCrabStackInstalled>().is_some(),
@@ -141,9 +141,9 @@ pub(super) struct ScriptedPackInput(pub(super) Input);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PeerRole {
     /// Solo or host: this peer runs the authoritative server, steps it, and RENDERS the snapshot it
-    /// emits (rl#151 increment 1) — plus, when hosting, broadcasts state DOWN to remote clients.
+    /// emits — plus, when hosting, broadcasts state DOWN to remote clients.
     ServerAuth,
-    /// A remote client (rl#151 increment 2 windowed): ADOPTS the host's snapshot into its own sim
+    /// A remote client: ADOPTS the host's snapshot into its own sim
     /// (no re-sim) and poses its frozen crab from the articulation, pumping no physics of its own.
     RemoteAdopt,
 }
@@ -177,7 +177,7 @@ impl PeerRole {
 /// + the iroh session (not `Sync`); only the main thread drives it, so that's fine.
 pub(super) struct GameState {
     pub(super) ls: Lockstep,
-    /// This peer's per-tick input coordinator (rl#151): solo internal server, host, or remote
+    /// This peer's per-tick input coordinator: solo internal server, host, or remote
     /// client — the single path through which every non-local input flows. The sole writer of
     /// inputs other than the local controls.
     pub(super) coord: Box<Coordinator>,
@@ -194,7 +194,7 @@ pub(super) struct GameState {
 impl GameState {
     /// The authoritative server this peer runs, if any (solo or host) — `None` for a remote client.
     /// When `Some`, the local client renders the snapshots it emits rather than stepping `ls`'s sim
-    /// itself (rl#151 increment 1).
+    /// itself.
     fn server(&self) -> Option<&crate::server::Server> {
         self.coord.server()
     }
@@ -216,8 +216,8 @@ pub(super) struct SimSnapshot {
 }
 
 impl SimSnapshot {
-    /// Capture the renderable game state through the host-authoritative snapshot seam
-    /// (bddap/rl#151 increment 0): the local client reads its interpolation source from the
+    /// Capture the renderable game state through the host-authoritative snapshot seam:
+    /// the local client reads its interpolation source from the
     /// SAME serialized [`CoreSnapshot`](crate::snapshot::CoreSnapshot) a wire client will,
     /// via [`Lockstep::core_snapshot`], so SP and MP share one state-read path
     /// ([[sp-is-mp-special-case]]). Byte-identical to reading the sim directly.
@@ -388,10 +388,9 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
 }
 
 /// This tick's LOCAL control intent, TAGGED by mode so the on-foot avatar's control axes and a
-/// craft's flight axes can never both be live (rl#43 part 1). The old flat input let a walker
-/// carry a throttle and a pilot carry foot move-axes — two mutually-exclusive control sets in one
-/// value, reconciled only by a downstream `if piloting`; here the mode picks exactly one variant,
-/// so the illegal combination is unrepresentable by construction.
+/// craft's flight axes can never both be live: the mode picks exactly one variant,
+/// so a walker holding a throttle (or a pilot holding foot move-axes) is unrepresentable by
+/// construction.
 ///
 /// Client-local: the deterministic sim only ever applies the FOOT [`Input`] (neutral while
 /// piloting — see [`LocalControl::sim_input`]), and the craft is host-authoritative crab-world
@@ -616,8 +615,8 @@ pub(crate) fn park_fixed_auto_pump(world: &mut World) {
 /// the exact RESTART rewind edge, by BOTH drain arms ([`drive_lockstep`]). Re-seeding the bridge so
 /// the next pose push is the spawn pose (not the still-walking body's accumulated position) is half
 /// of it; the other half is the cold respawn — re-seeding alone leaves the rapier solver WARM, which
-/// would desync a mid-game joiner's cold body against an incumbent's warm one (job 412, relocated to
-/// the join). Dropping + rebuilding the body makes every peer's solver state identically fresh off
+/// would desync a mid-game joiner's cold body against an incumbent's warm one.
+/// Dropping + rebuilding the body makes every peer's solver state identically fresh off
 /// the same shared-input restart edge, covering the plain RESTART button too (one shared edge).
 /// `spawn` is read from whichever sim is authoritative for the round. Only meaningful while armed
 /// (else no bridge drives the crab).
@@ -633,9 +632,9 @@ fn restart_crab_to_spawn(world: &mut World, spawn: crate::sim::Pos) {
 /// [`Input`] (drained from [`PendingInput`]) via `submit_local_input`, shipped UP through the
 /// [`Coordinator`]. On the server-authoritative arm the internal server then steps its own sim
 /// and this peer's client adopts + broadcasts the emitted snapshot; a remote-adopt client
-/// instead adopts the host's snapshots and steps nothing (rl#151).
+/// instead adopts the host's snapshots and steps nothing.
 ///
-/// GCR fold: when the external NN crab is armed ([`ExternalCrabArmed`] — solo OR a
+/// When the external NN crab is armed ([`ExternalCrabArmed`] — solo OR a
 /// networked round with synced weights, [`crate::may_arm_external_crab`]), the rapier
 /// crab body is stepped INSIDE the tick drain on the server-authoritative arm: per applied
 /// tick we run the deterministic [`PhysicsCadence`] number of physics steps
@@ -658,9 +657,9 @@ pub(super) fn drive_lockstep(
     mut cadence: Local<PhysicsCadence>,
 ) {
     // Whether the external NN crab drives the sim this round (solo, or networked + synced
-    // weights). Read once — the gate is fixed for the round. A real round is always armed (rl#114:
-    // a round that can't arm Sally is refused at build); when off (e.g. behind the boot menu) no
-    // physics is pumped and the crab holds its spawn.
+    // weights). Read once — the gate is fixed for the round. A real round is always armed
+    // (a round that can't arm Sally is refused at build); when off (e.g. behind the boot menu)
+    // no physics is pumped and the crab holds its spawn.
     let armed = world
         .get_resource::<crate::external_crab::ExternalCrabArmed>()
         .is_some();
@@ -753,7 +752,7 @@ pub(super) fn drive_lockstep(
         // Tag the control by the active mode: on foot the foot input drives the sim and no craft is
         // live; piloting, this frame's per-craft flight control commands the vehicle and the sim gets
         // a neutral foot input. Exactly one arm — a walker holding a throttle (or a pilot holding foot
-        // move-axes) is unrepresentable (rl#43 part 1). The `FlightInput` snapshot is per-frame, so the
+        // move-axes) is unrepresentable. The `FlightInput` snapshot is per-frame, so the
         // intent is stable across the ticks pumped this frame.
         let local = match world.resource::<LocalVehicle>().kind() {
             None => LocalControl::OnFoot(foot_input),
@@ -769,7 +768,7 @@ pub(super) fn drive_lockstep(
         let scripted_pack: Option<Input> = world.get_resource::<ScriptedPackInput>().map(|r| r.0);
         // Submit our input UP to the coordinator and, on a remote client, drain the host's state DOWN.
         // The newest crab pose a remote client drained this iteration is applied after the exchange's
-        // `GameState` borrow is released (rl#151 increment 2 windowed).
+        // `GameState` borrow is released.
         let mut pending_art: Option<crate::articulation::CrabArticulation> = None;
         let issue_tick = {
             let mut state = world.non_send_resource_mut::<GameState>();
@@ -805,7 +804,7 @@ pub(super) fn drive_lockstep(
             // - SERVER-AUTHORITATIVE (solo/host/fp-screenshot): the server already stepped these
             //   inputs into its OWN sim (inside `exchange`'s host_assemble) and the local client
             //   renders the snapshot it emits below — nothing to do here.
-            // - REMOTE ADOPT (rl#151 increment 2 windowed): the client ADOPTS the host's snapshot
+            // - REMOTE ADOPT: the client ADOPTS the host's snapshot
             //   into its own sim (no re-sim) and stashes the newest articulation for the render apply
             //   after this borrow is released.
             match role {
@@ -822,7 +821,7 @@ pub(super) fn drive_lockstep(
                         // toward spawn), since this arm skips the drain loop that owns `prev`.
                         state.prev = SimSnapshot::capture(&state.ls);
                         state.ls.adopt_snapshots(exch.snapshots, |_| ());
-                        // Local-player prediction (rl#151 incr 3): the snapshot re-seated our own
+                        // Local-player prediction: the snapshot re-seated our own
                         // avatar to its round-trip-old authoritative position; replay our still-in-
                         // flight inputs on it so WASD feels responsive at input latency, not RTT.
                         // Remote players + the crab stay authoritative (pose from the host, tweened
@@ -836,7 +835,7 @@ pub(super) fn drive_lockstep(
             }
             issue_tick
         };
-        // Render the host's crab pose (rl#151 increment 2 windowed): overwrite the client's frozen
+        // Render the host's crab pose: overwrite the client's frozen
         // crab entities + placement, so `drive_bones` skins the mesh to exactly the host's pose. The
         // `state` borrow above is released, so this can take the `&mut World` its query needs.
         if let Some(art) = pending_art {
@@ -874,10 +873,10 @@ pub(super) fn drive_lockstep(
         // for interpolation; if armed, step the crab body by the deterministic cadence and inject
         // its resulting pose + digest into the tick BEFORE the sim advances, so this tick's
         // grab/extraction/outcome resolve against the real NN crab and the digest is folded
-        // identically. A real round is always armed (rl#114: a round that can't arm Sally is refused
+        // identically. A real round is always armed (a round that can't arm Sally is refused
         // at build, never reaches here unarmed).
         //
-        // The server-authoritative arm (rl#151 increment 1): the server steps its OWN sim with this
+        // The server-authoritative arm: the server steps its OWN sim with this
         // tick's assembled inputs + crab pose, emits a serialized snapshot the local client APPLIES
         // (no re-sim), captures the crab's render pose, and broadcasts both DOWN to remote clients. A
         // REMOTE ADOPT client never enters this loop — it adopted the host's snapshot above and
@@ -959,7 +958,7 @@ pub(super) fn drive_lockstep(
                 // The ALWAYS-serialized hand-off (decode the bytes the server built; no by-reference
                 // shortcut even in SP). The host renders this snapshot locally AND ships it — plus
                 // the crab's render pose — DOWN to every remote client so they render the identical
-                // state (rl#151 increment 2 windowed). Capture the pose BEFORE applying to the local
+                // state. Capture the pose BEFORE applying to the local
                 // client (which never touches the crab entities), so it is the host's live crab.
                 let snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
                     .expect("the authoritative server's snapshot must decode");
@@ -1000,7 +999,7 @@ pub(super) fn drive_lockstep(
                     // The input the SIM actually applied this tick (neutral while piloting).
                     t.send(TelemetryEvent::input(issue_tick, sim_input));
                 }
-                // Aggregated rescue surface (rl#137): drain the window's `rescue_nonfinite_crabs`
+                // Aggregated rescue surface: drain the window's `rescue_nonfinite_crabs`
                 // tally into ONE Fault event carrying the count + last offending body, so a
                 // frame-by-frame non-finite blowup shows on the hub feed as a filtered per-window
                 // count instead of a per-step flood. A stable solo Sally never enters this branch
@@ -1064,11 +1063,11 @@ mod tests {
     use crate::sim::{Input, buttons};
     use crab_world::vehicle::VehicleKind;
 
-    /// The tagged-control invariant (rl#43 part 1): the deterministic sim only ever applies a FOOT
+    /// The tagged-control invariant: the deterministic sim only ever applies a FOOT
     /// [`Input`] — the real walker input on foot, a neutral one while piloting. A piloting player
     /// CANNOT leak a flight axis (throttle/pitch/roll) into the sim, because `Piloting` carries a
     /// [`FlightControl`], not an `Input`, and its `sim_input()` is `Input::default()` by
-    /// construction — the old flat struct's "walker holding a throttle" is unrepresentable.
+    /// construction — "walker holding a throttle" is unrepresentable.
     #[test]
     fn piloting_feeds_the_sim_a_neutral_foot_input() {
         let walk = Input::new(0.5, -0.5, 0.25, buttons::ACTION);

@@ -1,5 +1,4 @@
-//! `CrabArticulation` — the render-only crab pose extension frame (bddap/rl#151, increment 2
-//! windowed).
+//! `CrabArticulation` — the render-only crab pose extension frame.
 //!
 //! The host-authoritative snapshot ([`CoreSnapshot`](crate::snapshot::CoreSnapshot)) carries the
 //! integer game state and NOTHING render-only — a render type in it would break the no-`render`

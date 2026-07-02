@@ -1,21 +1,18 @@
 //! LAN match-formation barrier: agree on ONE participant set before anyone ticks.
 //!
-//! The cold-start's job is to turn "some processes launched on a LAN" into a single
-//! agreed match. The hard requirement is the determinism invariant of
-//! [`crate::lockstep`]: every peer MUST freeze the byte-identical sorted
-//! participant set, or the deterministic sims assign different [`PlayerId`]s and
-//! desync. The old `discover_and_freeze` was best-effort — poll the connected set for
-//! a few seconds, then freeze whatever showed up — which broke in three ways during a
-//! live playtest: a stale/phantom `game` endpoint lingering on the LAN got pulled into
-//! the roster; racy discovery let peers freeze divergent sets (A saw {A,B}, B saw
-//! {A,B,C}); and a staggered launch left one peer mid-formation when another froze. Any
-//! of these freezes mismatched rosters → the lockstep stalls forever on inputs from a
-//! "member" who isn't really there (or whom others don't have), and the world freezes.
+//! The hard requirement is the determinism invariant of [`crate::lockstep`]: every
+//! peer MUST freeze the byte-identical sorted participant set, or the deterministic
+//! sims assign different [`PlayerId`]s and desync. Best-effort discovery fails three
+//! ways: a stale/phantom endpoint lingering on the LAN gets pulled into the roster;
+//! racy discovery lets peers freeze divergent sets (A sees {A,B}, B sees {A,B,C});
+//! and a staggered launch leaves one peer mid-formation when another freezes. Any
+//! mismatched freeze stalls the lockstep forever on inputs from a "member" who isn't
+//! really there.
 //!
-//! This module is the real barrier. The protocol is deliberately couch-scale-simple —
-//! a handful of peers on one LAN, not a matchmaking service — and splits into a pure,
-//! fully-tested core ([`Membership`], the agreement state machine) and a thin async
-//! driver ([`run_barrier`]) that does only I/O around it.
+//! The protocol is deliberately couch-scale-simple — a handful of peers on one LAN,
+//! not a matchmaking service — and splits into a pure, fully-tested core
+//! ([`Membership`], the agreement state machine) and a thin async driver
+//! ([`run_barrier`]) that does only I/O around it.
 //!
 //! ## Why it guarantees an identical frozen set
 //!
@@ -50,8 +47,7 @@
 //!    even found the others (LAN mDNS can take a second or two).
 //!
 //! The frozen set is then handed to [`crate::net_loop`], which assigns
-//! [`PlayerId`]s by sorted endpoint id exactly as before — but now over a set proven
-//! identical on every peer, not merely hoped to be.
+//! [`PlayerId`]s by sorted endpoint id over a set proven identical on every peer.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -90,15 +86,11 @@ pub const STABLE_FOR: Duration = Duration::from_millis(1500);
 pub const JOIN_WINDOW: Duration = Duration::from_secs(20);
 
 /// Hard cap on the TOTAL roster (us + peers), so a peer flooding a [`Beat`] with bogus
-/// relayed ids can't inflate our set without bound (and thus can't push our own
-/// advertised beat past the transport's frame cap, which would make honest peers drop
-/// us). [`PlayerId`] is a `u8`, so the rest of the stack — id assignment, the beat wire
-/// ([`MAX_BEAT_MEMBERS`]) — tops out at exactly 256 total; couch co-op is a handful.
-/// Once `live_set` would reach this, we stop ADMITTING new ids (existing members and
-/// their direct beats are unaffected) — a roster this large would never agree+freeze on
-/// a real LAN, so refusing further growth only bounds memory, it can't lose a real match.
-/// The cap is on the TOTAL (hence the `+ 1` for `me` at the admission sites) so our own
-/// max beat stays ≤ 256 ids and every honest peer can still decode it.
+/// relayed ids can't inflate our set without bound or push our own advertised beat past
+/// the wire cap ([`MAX_BEAT_MEMBERS`]). [`PlayerId`] is a `u8`, so the rest of the stack
+/// tops out at exactly 256 total; couch co-op is a handful. At the cap we stop ADMITTING
+/// new ids (existing members and their direct beats are unaffected) — refusing further
+/// growth only bounds memory, it can't lose a real match.
 pub const MAX_MEMBERS: usize = u8::MAX as usize + 1;
 
 /// What a peer broadcasts each [`BEAT_EVERY`] on the barrier channel: a heartbeat that
@@ -111,39 +103,32 @@ pub struct Beat {
     /// the sender. The receiver unions these ids into its own view (transitive gossip)
     /// and reads [`Beat::roster_hash`] to check agreement.
     pub members: Vec<EndpointId>,
-    /// The host's synchronized-start command (rl#58): `true` once the host has clicked
-    /// Start, commanding the round to begin on the roster carried in THIS same beat. A
-    /// joiner closes the barrier on a direct `start` beat whose roster hash equals its
-    /// own — so host and joiners freeze the byte-identical set the GO names, never a
-    /// divergent one (the same unanimity safety as the timer close, just host-triggered).
-    /// Always `false` outside the host-triggered menu path, so every other caller's wire
-    /// and close behaviour is unchanged.
+    /// The host's synchronized-start command: `true` once the host has clicked Start,
+    /// commanding the round to begin on the roster carried in THIS same beat. A joiner
+    /// closes the barrier on a direct `start` beat whose roster hash equals its own —
+    /// so host and joiners freeze the byte-identical set the GO names. Always `false`
+    /// outside the host-triggered menu path.
     pub start: bool,
-    /// The sender's policy-weights digest (rl#82, GCR), `0` for no checkpoint — see
-    /// [`Membership::sync_verdict`] for what it gates (the HOST self-gate under host-auth).
-    /// Deliberately NOT folded into [`Beat::roster_hash`]: it is a capability advertisement,
-    /// not membership, so two peers with the identical roster still freeze the same set
-    /// regardless of their brains (an unverified host refuses to arm the NN crab, rl#114; it
-    /// never breaks match formation).
+    /// The sender's policy-weights digest, `0` for no checkpoint — see
+    /// [`Membership::sync_verdict`] for what it gates. Deliberately NOT folded into
+    /// [`Beat::roster_hash`]: it is a capability advertisement, not membership — a
+    /// mismatch refuses to arm the NN crab, never breaks match formation.
     pub weights_digest: u64,
-    /// The sender's crab-MODEL-asset digest (rl#100, GCR), `0` for no resolvable model — the
-    /// giant crab's rapier colliders are derived from this asset
-    /// ([`crab_world::bot::meshfit::crab_asset_digest`]), so two peers with different crab models
-    /// build different colliders and silently desync. A SIBLING of `weights_digest`, handled
-    /// identically: NOT folded into [`Beat::roster_hash`] (a capability advertisement, not
-    /// membership — a mismatch refuses to arm the NN crab, never breaks formation), self-declared,
-    /// never relayed. See [`Membership::sync_verdict`] for what it gates.
+    /// The sender's crab-MODEL-asset digest, `0` for no resolvable model — the giant
+    /// crab's rapier colliders are derived from this asset
+    /// ([`crab_world::bot::meshfit::crab_asset_digest`]), so two peers with different
+    /// crab models build different colliders and silently desync. Handled exactly like
+    /// its sibling `weights_digest` (a capability advertisement, not membership).
     pub asset_digest: u64,
 }
 
 impl Beat {
     /// The agreement token: a hash of the member set. Two peers advertising the same token
-    /// have the identical participant set (the freeze precondition). Computed from the sorted,
-    /// deduped id bytes so it is independent of insertion order — the same members always hash
-    /// the same on every peer. FNV-1a over the raw 32-byte ids: this is an agreement check
-    /// among cooperating LAN peers, not an adversarial digest, so a fast non-cryptographic hash
-    /// is the right tool (a collision would at worst admit a wrong freeze, which then surfaces
-    /// as a roster/id-assignment disagreement the moment the round forms).
+    /// have the identical participant set (the freeze precondition). FNV-1a over the raw
+    /// 32-byte ids: this is an agreement check among cooperating LAN peers, not an
+    /// adversarial digest, so a fast non-cryptographic hash is the right tool (a collision
+    /// would at worst admit a wrong freeze, which then surfaces as a roster/id-assignment
+    /// disagreement the moment the round forms).
     pub fn roster_hash(&self) -> u64 {
         roster_hash(&self.members)
     }
@@ -165,18 +150,14 @@ pub fn roster_hash(ids: &[EndpointId]) -> u64 {
 
 /// The agreement state machine: who is currently live, what each peer is advertising,
 /// and whether the agreement predicate has held long enough to close on an identical
-/// set. Pure and time-injected (every mutator takes `now`) so the whole protocol is
-/// unit-testable with a fake clock and no network — the async driver ([`run_barrier`])
-/// only feeds it [`Membership::on_beat`] events and reads [`Membership::poll`].
+/// set (see the module docs for why the CONTINUOUS hold is load-bearing). Pure and
+/// time-injected (every mutator takes `now`) so the whole protocol is unit-testable
+/// with a fake clock and no network — the async driver ([`run_barrier`]) only feeds it
+/// [`Membership::on_beat`] events and reads [`Membership::poll`].
 ///
 /// Membership during the join window grows by admission and shrinks by expiry: a member
 /// that stops beating directly EXPIRES ([`MEMBER_TIMEOUT`]) — the phantom-endpoint
-/// eviction. The close decision rests on the *agreement predicate* (enough players AND
-/// every live peer echoing our roster hash) having held CONTINUOUSLY for [`STABLE_FOR`];
-/// any change to the live set, or any peer's advertised hash drifting off ours, rewinds
-/// that timer. Sampling agreement only at the close instant would be unsound (a one-beat
-/// flicker of a stale cached hash could close a set a peer is abandoning); the held timer
-/// is what makes "everyone closes the same set or nobody closes" a guarantee, not a hope.
+/// eviction.
 pub struct Membership {
     me: EndpointId,
     /// How many participants (incl. us) must be present before we may close. Stops a
@@ -206,13 +187,9 @@ pub struct Membership {
     agreed_since: Option<(Instant, u64)>,
     /// When formation began, for the [`JOIN_WINDOW`] hard deadline.
     started: Instant,
-    /// rl#58 close mode. The sum type that decides HOW the barrier closes, so the two-mode
-    /// behaviour can't be a soup of bools and "only the host may GO" is enforced by the type,
-    /// not by external wiring. [`LobbyMode::Off`] (the default [`Membership::new`]) is the
-    /// unchanged barrier — close on the [`STABLE_FOR`] timer. The lobby variants
-    /// ([`Membership::host_triggered`]) replace that with a host's explicit GO; the roster a
-    /// peer freezes is the same `live_set` either way (only the close *moment* differs), so
-    /// determinism is untouched.
+    /// How the barrier closes — see [`LobbyMode`]. The roster a peer freezes is the same
+    /// `live_set` in every mode (only the close *moment* differs), so determinism is
+    /// untouched.
     lobby: LobbyMode,
     /// Whether we've received a direct [`Beat`] with `start` set from a peer whose roster
     /// hash equals our CURRENT one — the host's GO landing on a roster we agree with.
@@ -220,27 +197,22 @@ pub struct Membership {
     /// stale roster: a GO seen while our sets disagreed does not close us, and a set change
     /// after a GO re-gates on the new hash. The joiner's sole close trigger in the lobby.
     host_go_on_my_roster: bool,
-    /// OUR policy-weights digest (rl#82, GCR), `0` for no checkpoint. Advertised in every
-    /// [`Membership::beat`] and the basis of [`Membership::sync_verdict`]. `0` by default
-    /// ([`Membership::with_weights_digest`] sets it), so a caller that never sets it behaves
-    /// exactly as pre-rl#82 — the verdict's `host_brain` is then always false.
+    /// OUR policy-weights digest, `0` (the default) for no checkpoint — set via
+    /// [`Membership::with_weights_digest`]. Advertised in every [`Membership::beat`] and
+    /// the basis of [`Membership::sync_verdict`].
     local_digest: u64,
-    /// OUR crab-model-asset digest (rl#100, GCR), `0` for no resolvable model. Advertised in
-    /// every [`Membership::beat`] and the basis of [`Membership::sync_verdict`]. `0` by default
-    /// ([`Membership::with_asset_digest`] sets it), so a caller that never sets it behaves
-    /// exactly as pre-rl#100 — the verdict's `assets` is then always false. Sibling of `local_digest`.
+    /// OUR crab-model-asset digest, `0` (the default) for no resolvable model — set via
+    /// [`Membership::with_asset_digest`]. Sibling of `local_digest`.
     local_asset_digest: u64,
 }
 
-/// How a [`Membership`] barrier decides to close (rl#58). A sum type so the
-/// determinism-critical mode is explicit, not inferred, and so the "only a host commands the
-/// start" rule is unrepresentable to violate (a [`LobbyMode::Joiner`] has no `starting` to
-/// set).
+/// How a [`Membership`] barrier decides to close. A sum type so the "only a host
+/// commands the start" rule is unrepresentable to violate (a [`LobbyMode::Joiner`] has
+/// no `starting` to set).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LobbyMode {
     /// The default barrier: close on [`STABLE_FOR`] continuous agreement, fail at
-    /// [`JOIN_WINDOW`]. Used by the headless `net` driver and the scripted entrypoints —
-    /// byte-identical to pre-rl#58.
+    /// [`JOIN_WINDOW`]. Used by the headless `net` driver and the scripted entrypoints.
     Off,
     /// Host of an interactive lobby: `started` flips true on the Start click
     /// ([`Membership::set_starting`]); while true the host advertises the `start` GO and
@@ -265,21 +237,19 @@ struct PeerView {
     /// The roster hash this peer last advertised in its own beat, or `None` if not yet
     /// heard directly (gossip-admitted only).
     advertised: Option<u64>,
-    /// Whether this peer's most recent DIRECT beat carried the host's `start` GO (rl#58).
+    /// Whether this peer's most recent DIRECT beat carried the host's `start` GO.
     /// Paired with `advertised` so the close check requires the GO and a matching roster
     /// hash *from the same beat* — a host that commanded start on roster R can't close a
     /// joiner that's on a different roster. A relay never sets this (only a direct beat).
     started: bool,
-    /// The policy-weights digest this peer last advertised in its OWN direct beat (rl#82),
-    /// or `None` if heard only via relay. Read only when this peer is the HOST (the
+    /// The policy-weights digest this peer last advertised in its OWN direct beat, or
+    /// `None` if heard only via relay. Read only when this peer is the HOST (the
     /// [`Membership::sync_verdict`] self-gate); like `advertised`, `None` counts as
     /// unverified, so a host not yet heard directly blocks the gate until it speaks for
     /// itself.
     weights_digest: Option<u64>,
-    /// The crab-model-asset digest this peer last advertised in its OWN direct beat (rl#100),
-    /// or `None` if heard only via relay. Sibling of `weights_digest`: like it, a `None` can
-    /// never equal our non-zero digest, so a peer not yet heard directly blocks
-    /// [`Membership::sync_verdict`] until it speaks for itself.
+    /// The crab-model-asset digest this peer last advertised in its OWN direct beat, or
+    /// `None` if heard only via relay. Sibling of `weights_digest`.
     asset_digest: Option<u64>,
 }
 
@@ -292,14 +262,14 @@ pub enum Status {
     Forming { live: usize },
     /// The agreement predicate held continuously for [`STABLE_FOR`]. Freeze EXACTLY
     /// these ids (sorted, includes us). Every peer that reaches this state computed the
-    /// identical roster — that is the guarantee (it is the agreement token, so it can't diverge).
+    /// identical roster — that is the guarantee.
     Agreed { roster: Vec<EndpointId> },
     /// [`JOIN_WINDOW`] elapsed without sustained agreement. The caller must surface this
     /// and retry rather than freeze a guessed set.
     Failed,
 }
 
-/// Which side of an interactive lobby a peer is (rl#58) — passed to
+/// Which side of an interactive lobby a peer is — passed to
 /// [`Membership::host_triggered`] so the barrier knows whether it may command the start. The
 /// boot menu's Host button is [`Role::Host`], Join is [`Role::Joiner`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,33 +305,28 @@ impl Membership {
         }
     }
 
-    /// Set OUR policy-weights digest (rl#82, GCR), advertised in every [`Membership::beat`]
-    /// so peers can agree on a shared checkpoint before arming the float NN crab in lockstep.
-    /// Builder form (chains off [`Membership::new`] / [`Membership::host_triggered`]) because
-    /// the digest is a launch-time constant — the loaded checkpoint can't change mid-formation.
-    /// `0` (the default) means "no usable checkpoint"; it never counts as synced.
+    /// Set OUR policy-weights digest. Builder form because the digest is a launch-time
+    /// constant — the loaded checkpoint can't change mid-formation. `0` (the default)
+    /// means "no usable checkpoint"; it never counts as synced.
     pub fn with_weights_digest(mut self, digest: u64) -> Self {
         self.local_digest = digest;
         self
     }
 
-    /// Set OUR crab-model-asset digest (rl#100, GCR), advertised in every [`Membership::beat`]
-    /// so peers can agree on a shared crab collider asset before arming the float NN crab in
-    /// lockstep. Sibling of [`Membership::with_weights_digest`]; same launch-time-constant
-    /// builder form (the resolved model can't change mid-formation). `0` (the default) means
-    /// "no usable asset"; it never counts as synced.
+    /// Set OUR crab-model-asset digest. Sibling of [`Membership::with_weights_digest`],
+    /// same builder form. `0` (the default) means "no usable asset"; it never counts as
+    /// synced.
     pub fn with_asset_digest(mut self, digest: u64) -> Self {
         self.local_asset_digest = digest;
         self
     }
 
-    /// Begin a host-triggered (interactive lobby) formation (rl#58, boot-menu networked
-    /// Host/Join only). Same agreement core as [`Membership::new`], but the close trigger is
-    /// a host's explicit GO instead of the [`STABLE_FOR`] timer: a joiner lobbies until the
-    /// host clicks Start, and the host (via [`Membership::set_starting`]) commands the start
-    /// on click. `role` decides which: only a [`Role::Host`] can `set_starting` and advertise
-    /// the GO. `expect` is still the participant floor. The frozen roster is identical to the
-    /// timer path — only the close *moment* changes — so this introduces no new divergence.
+    /// Begin a host-triggered (interactive lobby) formation — the boot menu's networked
+    /// Host/Join. Same agreement core as [`Membership::new`], but the close trigger is a
+    /// host's explicit GO ([`Membership::set_starting`]) instead of the [`STABLE_FOR`]
+    /// timer; only a [`Role::Host`] can command it. `expect` is still the participant
+    /// floor. The frozen roster is identical to the timer path — only the close *moment*
+    /// changes.
     pub fn host_triggered(role: Role, me: EndpointId, expect: usize, now: Instant) -> Self {
         let lobby = match role {
             Role::Host => LobbyMode::Host { started: false },
@@ -425,20 +390,14 @@ impl Membership {
                 // Latch the host's GO from THIS direct beat; paired with `advertised` so the
                 // joiner close requires both the GO and a matching roster from one beat.
                 view.started = beat.start;
-                // Record the peer's advertised brain digest (rl#82) for the weights-synced
-                // check; only a direct beat sets it, like `advertised`/`started`.
+                // The digests, like `advertised`/`started`, are set only by a direct beat.
                 view.weights_digest = Some(beat.weights_digest);
-                // Likewise the peer's crab-asset digest (rl#100) for the assets-synced check.
                 view.asset_digest = Some(beat.asset_digest);
             }
         }
-        // Transitive admission: a relayed id we don't track yet and that isn't
-        // quarantined is a real peer we simply haven't connected to directly — admit it
-        // (seeding only its existence, `advertised = None`) so we go hear it directly and
-        // the views converge. We never refresh a known member from a relay, never
-        // resurrect a tombstoned id from a relay, and never invent an advertised hash —
-        // so a gossip-admitted peer blocks the close until it agrees on its own beat.
-        // Capped at MAX_MEMBERS (total) so a flooded beat can't inflate our roster.
+        // Transitive admission (see the method docs): seed only the id's existence
+        // (`advertised = None`), capped at MAX_MEMBERS so a flooded beat can't inflate
+        // our roster.
         for &id in &beat.members {
             if id != self.me
                 && !self.peers.contains_key(&id)
@@ -478,38 +437,34 @@ impl Membership {
     pub fn beat(&self) -> Beat {
         Beat {
             members: self.live_set(),
-            // Only a host that has clicked Start advertises the GO; everything else sends a
-            // plain beat. So a joiner/timer barrier can never put `start` on the wire.
             start: matches!(self.lobby, LobbyMode::Host { started: true }),
             weights_digest: self.local_digest,
             asset_digest: self.local_asset_digest,
         }
     }
 
-    /// The shared-asset guard's verdict (rl#82 weights + rl#100 crab asset, GCR), the ONE
-    /// value the formation carries to the arm sites ([`crate::SyncVerdict`]).
+    /// The shared-asset guard's verdict, the ONE value the formation carries to the arm
+    /// sites ([`crate::SyncVerdict`]).
     ///
-    /// - `host_brain` — the HOST self-gate, host-auth's relocation of the old peer-symmetric
-    ///   equality (the design doc's end state; [[real-sally-definition]]): true iff the peer
-    ///   that will run the authoritative server — the lowest live endpoint id, PlayerId(0) by
-    ///   [`crate::formation::assign_player_ids`]'s sorted assignment — advertised a NON-ZERO
-    ///   policy-weights digest in its own direct beats. Only the host EXECUTES the brain
-    ///   (clients adopt its snapshots and render its articulation, rl#151), so brain equality
-    ///   across peers gates nothing real; what must hold is "the host runs a real Sally, not
-    ///   a failed/absent-checkpoint rest pose". The mid-game analogue is
+    /// - `host_brain` — the HOST self-gate: true iff the peer that will run the
+    ///   authoritative server — the lowest live endpoint id, PlayerId(0) by
+    ///   [`crate::formation::assign_player_ids`]'s sorted assignment — advertised a
+    ///   NON-ZERO policy-weights digest in its own direct beats. Only the host EXECUTES
+    ///   the brain (clients adopt its snapshots and render its articulation), so brain
+    ///   equality across peers gates nothing real; what must hold is "the host runs a
+    ///   real Sally, not a failed/absent-checkpoint rest pose". The mid-game analogue is
     ///   [`crate::server::may_admit_joiner`]'s `HostNotArmed` self-gate.
-    /// - `assets` — peer-symmetric as before: true only when we have a real crab-model asset
-    ///   ourselves (non-zero digest) AND every live peer's last DIRECT beat carried that exact
-    ///   digest. Every peer builds its rendered crab from this asset, so a mismatch is a real
-    ///   client-side divergence even under host-auth.
+    /// - `assets` — peer-symmetric: true only when we have a real crab-model asset
+    ///   ourselves (non-zero digest) AND every live peer's last DIRECT beat carried that
+    ///   exact digest. Every peer builds its rendered crab from this asset, so a
+    ///   mismatch is a real client-side divergence even under host-auth.
     ///
-    /// In both halves a `None` (relay-only, never heard directly) or zero digest fails —
-    /// an unverifiable host, or an asset-divergent peer, can never be armed into lockstep.
-    /// This is an OUTPUT, never a close gate: a failed verdict still FORMS the match, but the
-    /// round can't arm the NN crab and — with no integer fallback (rl#114) — the windowed
+    /// In both halves a `None` (relay-only, never heard directly) or zero digest fails.
+    /// This is an OUTPUT, never a close gate: a failed verdict still FORMS the match,
+    /// but the round can't arm the NN crab and — with no integer fallback — the windowed
     /// client REFUSES it loudly rather than playing a fake crab
-    /// ([`crate::may_arm_external_crab`]). Call after [`Membership::poll`] (which expires the
-    /// dead) so the live set is current.
+    /// ([`crate::may_arm_external_crab`]). Call after [`Membership::poll`] (which
+    /// expires the dead) so the live set is current.
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
         let host = *self
             .live_set()
@@ -534,16 +489,13 @@ impl Membership {
     }
 
     /// Advance the clock and return the verdict — the SINGLE per-round entry point.
-    /// Folds expiry + agreement-timer maintenance + the verdict into one call so the
-    /// ordering can't be gotten wrong (an earlier two-call `expire` then `status` split
-    /// let a caller read a verdict over stale liveness). Call once per beat interval.
+    /// Folds expiry + agreement-timer maintenance + the verdict into one call so a
+    /// caller can't read a verdict over stale liveness. Call once per beat interval.
     ///
-    /// The agreement predicate is: at least `expect` participants are live AND every live
-    /// peer is advertising our exact roster hash (a peer not heard directly has
-    /// `advertised == None ≠ Some(my_hash)`, so it blocks). We track when that predicate
-    /// became true (`agreed_since`) and reset it the instant it goes false — so closing
-    /// requires it to have held *continuously* for [`STABLE_FOR`], not merely to be true
-    /// at this instant. That continuity is the safety guarantee (see the type docs).
+    /// The agreement predicate is: at least `expect` participants are live AND every
+    /// live peer is advertising our exact roster hash (a peer not heard directly has
+    /// `advertised == None ≠ Some(my_hash)`, so it blocks). Closing requires the
+    /// predicate to have held *continuously* for [`STABLE_FOR`] (see module docs).
     pub fn poll(&mut self, now: Instant) -> Status {
         // Expire peers silent past MEMBER_TIMEOUT and tombstone them so a relay can't
         // immediately re-admit. Also prune tombstones older than the quarantine window.
@@ -567,21 +519,14 @@ impl Membership {
         let unanimous = self.peers.values().all(|v| v.advertised == Some(my_hash));
         let agreed_now = enough && unanimous;
 
-        // The host's GO landing on a roster we agree with: a peer whose latest direct beat
-        // both commanded start AND advertised our exact current hash. Recomputed here (never
-        // latched) so a GO seen while sets disagreed can't close us, and a later set change
-        // re-gates the GO on the new hash. Only the host ever sets `start`, so in practice
-        // this is "the host commanded the start on the roster we're holding".
+        // Recomputed, never latched — see `host_go_on_my_roster` for why.
         self.host_go_on_my_roster = self
             .peers
             .values()
             .any(|v| v.started && v.advertised == Some(my_hash));
 
-        // Maintain the continuous-agreement timer, KEYED ON the agreed hash: (re)start it
-        // when the predicate holds on a hash different from what the timer tracks; clear
-        // it the instant the predicate fails. So the elapsed time always measures how long
-        // we've agreed on THIS exact set — a set change (which shifts `my_hash`) rewinds
-        // it even in the degenerate all-peers-flip-at-once case.
+        // Maintain the continuous-agreement timer — see `agreed_since` for why it is
+        // keyed on the hash, not just a bool.
         self.agreed_since = match (agreed_now, self.agreed_since) {
             (true, Some((t, h))) if h == my_hash => Some((t, h)), // same set, keep holding
             (true, _) => Some((now, my_hash)),                    // newly agreed (or new set)
@@ -589,18 +534,13 @@ impl Membership {
         };
 
         // EVERY mode requires the agreement predicate to have held CONTINUOUSLY for
-        // [`STABLE_FOR`] before closing — that settle is what absorbs a staggered/late join
-        // (a peer growing its set shifts `my_hash`, breaks unanimity, and rewinds the timer),
-        // so it's load-bearing for the lobby modes too, NOT just the timer one. The mode only
-        // adds an EXTRA gate on top of that settle (rl#58):
-        // - Host: also requires the Start click (`started`). The settle still runs, so a peer
-        //   that joins right as the host clicks can't be frozen out mid-join — the host waits
-        //   the dust out exactly like the timer path, then closes on the click.
-        // - Joiner: also requires the host's GO on its matching roster.
-        // - Off (default): no extra gate — the settle alone closes, as before rl#58.
-        // Every mode freezes the IDENTICAL `live` set; only the extra gate (and, for the lobby
-        // modes, the lack of a [`JOIN_WINDOW`] fail — a lobby is open-ended, the user cancels)
-        // differs, so determinism is untouched.
+        // [`STABLE_FOR`] before closing — the settle is load-bearing for the lobby modes
+        // too, NOT just the timer one (a peer that joins right as the host clicks Start
+        // can't be frozen out mid-join). The mode only adds an EXTRA gate on top: Host
+        // also requires the Start click, Joiner the host's GO on its matching roster,
+        // Off nothing. Only the lobby modes skip the [`JOIN_WINDOW`] fail (a lobby is
+        // open-ended, the user cancels); every mode freezes the IDENTICAL `live` set,
+        // so determinism is untouched.
         let held = self
             .agreed_since
             .is_some_and(|(since, _)| now.duration_since(since) >= STABLE_FOR);
@@ -625,11 +565,8 @@ impl Membership {
 /// Encode a [`Beat`] for the wire:
 /// `[start:u8][count:u16 LE][weights_digest:u64 LE][asset_digest:u64 LE][id:32]*count`,
 /// the id list sorted+deduped. Fixed 32-byte ids (an [`EndpointId`] is a 32-byte public
-/// key) so there is no per-id length. The leading `start` byte is the host's GO flag (rl#58);
-/// `weights_digest` (rl#82) is the sender's checkpoint digest and `asset_digest` (rl#100) its
-/// crab-model digest (NEITHER folded into [`roster_hash`] — capabilities, not membership). The
-/// member count is bounded on decode ([`MAX_BEAT_MEMBERS`]) so a hostile/garbled frame can't
-/// trigger a huge allocation.
+/// key) so there is no per-id length. The member count is bounded on decode
+/// ([`MAX_BEAT_MEMBERS`]) so a hostile/garbled frame can't trigger a huge allocation.
 pub fn encode_beat(beat: &Beat) -> Vec<u8> {
     let canon = |ids: &[EndpointId]| -> Vec<EndpointId> {
         let mut v = ids.to_vec();
@@ -710,8 +647,7 @@ mod tests {
     }
 
     /// A plain (non-start) [`Beat`] for the given members — the default heartbeat every
-    /// peer sends until a host commands the start. Keeps the membership tests reading about
-    /// rosters, not the rl#58 GO flag they don't exercise.
+    /// peer sends until a host commands the start.
     fn bt(members: Vec<EndpointId>) -> Beat {
         Beat {
             members,
@@ -765,7 +701,7 @@ mod tests {
     }
 
     /// The host's start GO survives the wire as a distinct field and does NOT change the
-    /// roster hash (rl#58): a `start` beat and a plain beat over the SAME members hash
+    /// roster hash: a `start` beat and a plain beat over the SAME members hash
     /// identically (so a host commanding the start can't accidentally fork the agreed set),
     /// but the decoded `start` flag faithfully reflects which was sent.
     #[test]
@@ -796,7 +732,7 @@ mod tests {
         );
     }
 
-    // ── Weights-digest handshake (rl#82, GCR — the shared-checkpoint guard) ──────────
+    // ── Weights-digest handshake (the shared-checkpoint guard) ───────────────────────
 
     /// A heartbeat carrying a weights digest, for the synced-brain tests.
     fn bt_d(members: Vec<EndpointId>, weights_digest: u64) -> Beat {
@@ -808,7 +744,7 @@ mod tests {
         }
     }
 
-    /// A heartbeat carrying a crab-asset digest (rl#100), for the synced-asset tests. Sibling
+    /// A heartbeat carrying a crab-asset digest, for the synced-asset tests. Sibling
     /// of [`bt_d`]; weights digest left `0` so these isolate the asset-handshake path.
     fn bt_ad(members: Vec<EndpointId>, asset_digest: u64) -> Beat {
         Beat {
@@ -841,8 +777,7 @@ mod tests {
     fn weights_gate_keys_on_the_hosts_digest_alone() {
         // Host-auth: only the host executes the brain (clients adopt its snapshots), so the
         // weights half of the verdict is the HOST self-gate — "the lowest live endpoint id
-        // advertised a real (non-zero) digest" — never peer-symmetric brain equality (that
-        // rule is superseded; see `sync_verdict`).
+        // advertised a real (non-zero) digest" — never peer-symmetric brain equality.
         let t0 = Instant::now();
         let mut ids = [eid(1), eid(2)];
         ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
@@ -860,7 +795,7 @@ mod tests {
         );
 
         // We ARE the host with NO checkpoint (digest 0): refused — a zero-digest host would
-        // serve a rest-pose fake Sally to everyone ([[real-sally-definition]]).
+        // serve a rest-pose fake Sally to everyone.
         let mut b = Membership::new(host, 2, t0);
         b.on_beat(client, &bt_d(vec![host, client], BRAIN), t0);
         b.poll(t0);
@@ -928,11 +863,8 @@ mod tests {
         );
     }
 
-    // ── Asset-digest handshake (rl#100, GCR — the shared-collider-asset guard) ────────
-    // A SIBLING of the weights handshake above: the crab-model digest rides its own Beat
-    // field, is never folded into the roster hash, and gates arming the float NN crab on every
-    // peer agreeing — so two peers whose crab colliders differ can't arm Sally and the round is
-    // refused (rl#114, no integer fallback).
+    // ── Asset-digest handshake (the shared-collider-asset guard) ──────────────────────
+    // A sibling of the weights handshake above; see `Beat::asset_digest`.
 
     #[test]
     fn asset_digest_roundtrips_on_the_wire() {
@@ -1018,8 +950,8 @@ mod tests {
     fn weights_and_assets_synced_are_independent_gates() {
         // The two guards are orthogonal: a real host brain but mismatched crab assets must
         // leave a verdict with `host_brain` true yet `assets` false (and the arm site ANDs them,
-        // so the round can't arm Sally and is refused — rl#114). Proves a refactor can't
-        // collapse the two into one digest.
+        // so the round can't arm Sally and is refused). Proves a refactor can't collapse the
+        // two into one digest.
         let t0 = Instant::now();
         let (ida, idb) = (eid(1), eid(2));
         const BRAIN: u64 = 0xB0B0_0000_1234_5678;
@@ -1265,7 +1197,7 @@ mod tests {
 
     #[test]
     fn flickering_agreement_never_closes() {
-        // The CRITICAL fix (rl#44 review): the close needs CONTINUOUS agreement for
+        // The close needs CONTINUOUS agreement for
         // STABLE_FOR, not a single instant of it. A peer B whose view keeps oscillating —
         // agreeing on {A,B} one beat, then pulling in an extra member the next — must
         // NEVER let A close, because the agreement timer rewinds whenever the predicate
@@ -1303,7 +1235,7 @@ mod tests {
 
     #[test]
     fn late_joiner_within_settle_rewinds_everyone_off_the_partial_set() {
-        // The LOAD-BEARING staggered case the reviewers flagged as untested: with
+        // The load-bearing staggered case: with
         // expect=2, A and B could LEGITIMATELY freeze {A,B} (the count floor does NOT save
         // us here — 2 >= 2). C joins WITHIN STABLE_FOR of A+B's agreement, so the
         // timer-rewind-on-set-growth is the ONLY thing that stops a premature {A,B} freeze.
@@ -1353,7 +1285,7 @@ mod tests {
 
     #[test]
     fn relayed_phantom_does_not_ping_pong_back_into_the_set() {
-        // The phantom ping-pong (rl#44 review): a once-seen dead endpoint P that two
+        // The phantom ping-pong: a once-seen dead endpoint P that two
         // peers expire at SLIGHTLY DIFFERENT times must not be relayed back and forth and
         // re-admitted forever (each re-admission would rewind the agreement timer → the
         // barrier would never settle and spuriously FAIL). The tombstone-on-expiry +
@@ -1438,7 +1370,7 @@ mod tests {
 
     #[test]
     fn host_triggered_joiner_waits_for_the_go_then_both_freeze_the_identical_set() {
-        // rl#58 determinism gate. A host (H) and a joiner (J) form a host-triggered barrier.
+        // A host (H) and a joiner (J) form a host-triggered barrier.
         // Neither may close on agreement ALONE — the lobby waits for H's Start click (the
         // STABLE_FOR settle still runs underneath, absorbing late joins, but it's not enough
         // to close in lobby mode) — and when H clicks, BOTH must freeze the byte-identical
@@ -1499,7 +1431,7 @@ mod tests {
 
     #[test]
     fn host_go_on_a_mismatched_roster_does_not_close_a_joiner() {
-        // The determinism SAFETY gate (rl#58): a host GO closes a joiner ONLY when the GO's
+        // The determinism SAFETY gate: a host GO closes a joiner ONLY when the GO's
         // roster hash equals the joiner's own. Here the host commands start on {H} (it hasn't
         // yet heard J), while J already sees {H,J}. J must NOT close — its set {H,J} ≠ the
         // GO's {H} — so the two can never freeze divergent rosters off a premature GO. (In
@@ -1537,11 +1469,10 @@ mod tests {
 
     #[test]
     fn only_a_host_ever_advertises_the_start_go() {
-        // The protocol guarantee that the [`LobbyMode`] type now ENFORCES (rl#58): only a
-        // host can put `start` on the wire. A timer barrier and a JOINER both stay silent on
-        // the GO even after `set_starting` — so a non-menu caller's wire is unchanged, and a
-        // joiner can never command a start it isn't entitled to (the determinism-adjacent
-        // "joiner can't GO" rule, in the type rather than in external channel wiring).
+        // The protocol guarantee the [`LobbyMode`] type ENFORCES: only a host can put
+        // `start` on the wire. A timer barrier and a JOINER both stay silent on the GO
+        // even after `set_starting`, so a joiner can never command a start it isn't
+        // entitled to.
         let t0 = Instant::now();
         for mut m in [
             Membership::new(eid(1), 1, t0), // timer barrier
@@ -1562,7 +1493,7 @@ mod tests {
 
     #[test]
     fn host_clicking_start_during_a_late_join_does_not_freeze_a_partial_set() {
-        // The rl#58 race a reviewer flagged: the host has clicked Start and agrees with J on
+        // The click-during-join race: the host has clicked Start and agrees with J on
         // {H,J}, but C joins in that same window so J's set grows to {H,J,C}. The host must
         // NOT freeze {H,J} (which would leave it waiting forever on J's inputs while J is on a
         // different roster). The per-mode [`STABLE_FOR`] settle is what saves it: C's arrival

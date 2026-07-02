@@ -8,12 +8,11 @@
 //! what they do with the session after (wrap it in a [`crate::net_loop::NetDriver`], or drive
 //! it raw).
 //!
-//! Solo auto-fallback: the common launch is ALONE (one process, no LAN peer). The barrier
-//! rightly refuses to freeze a guessed roster, so awaiting a match would leave a frozen,
-//! unplayable round. So the cold-start has a SECOND outcome ([`Formation::Alone`]) — when
-//! discovery elapses with no peer ever heard, the caller plays a deterministic solo round.
-//! It fires ONLY in the genuinely-alone case (see [`run_barrier`]); the moment any peer is
-//! present the full agreement barrier is back in force, so multiplayer is never weakened.
+//! Solo auto-fallback: the common launch is ALONE (one process, no LAN peer), and the
+//! barrier rightly refuses to freeze a guessed roster — so the cold-start has a SECOND
+//! outcome ([`Formation::Alone`]): play a deterministic solo round. The exact policy is
+//! the [`is_alone_now`] / [`is_alone_at_timeout`] predicates; the moment any peer is
+//! present the full agreement barrier is in force, so multiplayer is never weakened.
 //!
 //! The pure agreement logic lives in [`crate::membership`]; this module is the I/O around
 //! it, plus the solo and lobby policies layered on top. The [`crate::net_loop::NetDriver`]
@@ -68,16 +67,12 @@ pub struct Frozen {
 }
 
 /// What [`form_match`] resolves to: a real agreed match, the genuinely-alone case, or a
-/// lobby cancel. [`Formation::Alone`] is returned ONLY when the discovery window elapsed
-/// with no other peer ever heard — never when peers are present-but-not-yet-agreed (that
-/// still drives the full barrier to agreement or errors).
+/// lobby cancel.
 pub enum Formation {
     /// The membership barrier agreed on a roster; play networked over it.
     Agreed(Frozen),
-    /// Formation ended with only us live — play solo. Both routes are genuinely-alone (a
-    /// peer present-and-live at the moment of decision keeps us on the barrier, never here):
-    /// the `discover_secs` deadline elapsed never having heard a peer, or the JOIN_WINDOW
-    /// expired with `live == 1`. See the [`run_barrier`] fallback notes.
+    /// Formation ended with only us live — play solo. Fires only in the genuinely-alone
+    /// case: see [`is_alone_now`] / [`is_alone_at_timeout`].
     Alone,
     /// The player cancelled the host-triggered lobby before a match formed. The caller tears
     /// the session down and reports [`MatchResult::Cancelled`].
@@ -85,19 +80,16 @@ pub enum Formation {
 }
 
 /// Run the LAN match-formation barrier ([`run_barrier`]), then freeze the AGREED
-/// participant set and assign deterministic [`PlayerId`]s by sorted endpoint id. The
+/// participant set and assign deterministic [`PlayerId`]s by sorted endpoint id — the
 /// ONE cold-start both the windowed client ([`connect_and_form`]) and the headless
-/// `game net` driver run — shared verbatim (not just described as shared) because it
-/// must stay behaviorally identical on every peer for the sims to agree, and a drift
-/// here would silently desync.
+/// `game net` driver run (shared verbatim; see the module docs for why).
 ///
 /// `expect` is the minimum participant count (incl. us) the barrier requires before it
 /// will close — it stops a peer from freezing a lone `{self}` match before LAN discovery
 /// has even found the others, and makes a too-small turnout time out ([`Status::Failed`])
-/// rather than form a short match. `discover_secs` is the alone-fallback deadline: if it
-/// elapses with no other peer ever heard, this returns [`Formation::Alone`] for a
-/// solo round. It does NOT bound a formation that has peers — once any peer is present the
-/// barrier waits for agreement within its own [`crate::membership::JOIN_WINDOW`].
+/// rather than form a short match. `discover_secs` is the alone-fallback deadline; it
+/// does NOT bound a formation that has peers — once any peer is present the barrier
+/// waits for agreement within its own [`crate::membership::JOIN_WINDOW`].
 pub async fn form_match(
     session: &mut transport::Session,
     discover_secs: u64,
@@ -163,13 +155,12 @@ pub async fn form_match(
             me: me.0,
         });
     }
-    // GCR shared-asset guard (rl#82 weights + rl#100 crab asset): make the verdict LOUD. With a
-    // checkpoint loaded (`local_weights_digest != 0`) the operator needs to know whether the NN
-    // crab will arm — the HOST must verifiably run a real brain AND the crab asset must match
-    // on every peer; failing either means it WON'T, and with no integer fallback (rl#114) the
-    // windowed client REFUSES the round rather than substituting a fake crab. The asset verdict
-    // is reported whenever the host gate passes (so an asset-only mismatch — the rl#100 hole
-    // this closes — is diagnosable, never silent).
+    // GCR shared-asset guard: make the verdict LOUD. With a checkpoint loaded
+    // (`local_weights_digest != 0`) the operator needs to know whether the NN crab will arm —
+    // the HOST must verifiably run a real brain AND the crab asset must match on every peer;
+    // failing either means it WON'T, and with no integer fallback the windowed client REFUSES
+    // the round rather than substituting a fake crab. The asset verdict is reported whenever
+    // the host gate passes (so an asset-only mismatch is diagnosable, never silent).
     if local_weights_digest != 0 {
         if !outcome.sync.host_brain {
             tracing::warn!(
@@ -210,7 +201,7 @@ struct BarrierOutcome {
     roster: Vec<EndpointId>,
     early: Vec<(EndpointId, TickMsg)>,
     elapsed: Duration,
-    /// [`Membership::sync_verdict`] sampled at the close instant (rl#82 + rl#100, GCR).
+    /// [`Membership::sync_verdict`] sampled at the close instant.
     sync: crate::SyncVerdict,
 }
 
@@ -234,13 +225,11 @@ enum BarrierResult {
 /// I/O around it, plus the solo and lobby policies layered ON TOP (so `Membership` stays
 /// pure and never itself freezes a guessed roster or aborts a formation that has peers):
 ///
-/// - Solo fallback: when defaulted-networked and genuinely alone past the discovery
-///   window, return [`BarrierResult::Alone`] so the caller plays solo. The exact predicate
-///   (and why "alone" must mean never-heard-a-peer, not lost-a-peer) is [`is_alone_now`]
-///   for the `Forming` deadline and [`is_alone_at_timeout`] for the `Failed` window expiry;
-///   both read `live` AFTER `poll`, so a peer mid-handshake shows `live >= 2` and holds us
-///   on the real barrier. A `live >= 2` failure stays the loud `Failed` ("relaunch
-///   together") — real peers that never agreed is a genuine multi-peer fault.
+/// - Solo fallback: when defaulted-networked and genuinely alone, return
+///   [`BarrierResult::Alone`] so the caller plays solo. The exact predicate (and why
+///   "alone" must mean never-heard-a-peer, not lost-a-peer) is [`is_alone_now`] for the
+///   `Forming` deadline and [`is_alone_at_timeout`] for the `Failed` window expiry; both
+///   read `live` AFTER `poll`, so a peer mid-handshake holds us on the real barrier.
 /// - Lobby (`lobby == Some`): the barrier closes on the host's GO, not the timer. Each beat
 ///   we call [`Membership::set_starting`] once `start_rx` fires, return
 ///   [`BarrierResult::Cancelled`] the instant `cancel_rx` fires (so the session tears down
@@ -265,8 +254,8 @@ async fn run_barrier(
     let start = Instant::now();
     // `Some(control)` is the interactive lobby (host-triggered close per its `role`); `None`
     // is the default timer barrier. The mode is this explicit choice, never inferred. Our
-    // weights digest (rl#82) and crab-asset digest (rl#100) ride every beat so peers can agree
-    // on a shared checkpoint AND a shared collider asset before arming the float NN crab.
+    // weights and crab-asset digests ride every beat so peers can agree on a shared
+    // checkpoint AND a shared collider asset before arming the float NN crab.
     let mut m = match lobby {
         Some(c) => Membership::host_triggered(c.role, me, expect, start),
         None => Membership::new(me, expect, start),
@@ -277,13 +266,11 @@ async fn run_barrier(
     let mut ticker = tokio::time::interval(BEAT_EVERY);
     let mut last_live = 0usize;
     let mut last_roster: Vec<EndpointId> = Vec::new();
-    // Whether we've EVER received a direct beat from any peer this formation. Gates the solo
-    // fallback: heard-then-lost is a link failure (loud `Failed`), only never-heard is solo.
+    // Whether we've EVER received a direct beat from any peer this formation — gates the
+    // solo fallback ([`is_alone_now`]).
     let mut ever_heard_peer = false;
     // Deadline past which "still only us" means play solo. `.max(1)` so a `discover_secs`
-    // of 0 can't declare us alone before discovery has run a single beat. (The `expect > 1`
-    // and never-heard-a-peer gates that keep this from preempting a deliberate solo-over-
-    // network run or silently dropping a lost peer live in `is_alone_now`.)
+    // of 0 can't declare us alone before discovery has run a single beat.
     let alone_deadline = start + Duration::from_secs(discover_secs.max(1));
 
     loop {
@@ -313,9 +300,7 @@ async fn run_barrier(
         while let Some(from) = session.try_recv() {
             match from.msg {
                 PeerWire::Beat(beat) => {
-                    // A direct beat from a peer (never ourselves) — we are not alone, now
-                    // or retroactively. Latch it so a peer that later goes silent fails
-                    // loud instead of falling back to solo.
+                    // A direct beat from a peer — latch it (gates the solo fallback).
                     if from.from != me {
                         ever_heard_peer = true;
                     }
@@ -364,11 +349,8 @@ async fn run_barrier(
             }
             Status::Failed => {
                 // The JOIN_WINDOW elapsed without a closed roster. On the DEFAULT
-                // (non-lobby) path this is the last-resort alone-fallback, not always an
-                // error: if we are alone right now ([`is_alone_at_timeout`], `live` fresh
-                // from the `poll` above) play solo rather than strand the player; `live >=
-                // 2` stays the loud failure. The lobby path has no JOIN_WINDOW, so this is
-                // the scripted/headless timer barrier only.
+                // (non-lobby) path, alone-at-expiry plays solo rather than stranding the
+                // player ([`is_alone_at_timeout`]); `live >= 2` stays the loud failure.
                 if lobby.is_none() && is_alone_at_timeout(expect, m.live_set().len()) {
                     return Ok(BarrierResult::Alone);
                 }
@@ -379,10 +361,8 @@ async fn run_barrier(
                 );
             }
             Status::Forming { live } => {
-                // Solo fallback — DEFAULT (non-lobby) path only; a lone host never reaches
-                // this barrier (the UI's instant-solo path handles it). `live` is fresh
-                // from the `poll` above, so any peer that ever beat us makes `live >= 2`
-                // AND latches `ever_heard_peer` — see [`is_alone_now`] for the full guard.
+                // Solo fallback — DEFAULT (non-lobby) path only ([`is_alone_now`]; `live`
+                // is fresh from the `poll` above).
                 if lobby.is_none()
                     && is_alone_now(expect, live, ever_heard_peer, now >= alone_deadline)
                 {
@@ -435,7 +415,7 @@ fn is_alone_at_timeout(expect: usize, live: usize) -> bool {
 /// they all play the byte-identical deterministic solo round with no second construction to
 /// drift. `seed` is the shared match seed (the caller passes the one constant every peer
 /// uses). The player always starts ON FOOT; piloting a plane is reached in-game via the
-/// client's enter/exit toggle ([`crate::render`]), not an env flag at spawn.
+/// client's enter/exit toggle ([`crate::render`]).
 pub fn solo_lockstep_for(seed: u64) -> Lockstep {
     let me = PlayerId(0);
     Lockstep::new(seed, &[me], me)

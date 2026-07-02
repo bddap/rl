@@ -31,29 +31,11 @@ use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
 
 /// ALPN for the game's wire. The framing is `[len:u32 LE][kind:u8][body]`, where
-/// `kind` ([`Frame`]) selects a client→server [`TickMsg`] (an input), a server→client
-/// [`CoreSnapshot`] (the authoritative state), or a [`Beat`] (the match-formation barrier channel
-/// — rl#44). Bumped on any incompatible wire change so mismatched builds refuse to connect
-/// rather than desync. `/1` added the kind byte + the barrier channel over `/0`'s bare-TickMsg
-/// stream; `/2` added the host's start-GO byte to every [`Beat`] (rl#58), shifting the
-/// barrier-frame layout; `/3` added the per-peer policy-weights digest to every [`Beat`]
-/// (rl#82, GCR); `/4` replaced the P2P tick MESH with the server-coordinated model (rl#151):
-/// inputs go UP to the server as [`TickMsg`]s, the server broadcasts the complete [`crate::server::TickSet`]
-/// DOWN — a new frame kind and a topology the old mesh peers can't speak.
-/// `/6` added the host-authoritative [`Frame::Snapshot`] (rl#151 increment 2): the host
-/// broadcasts full game STATE down, not the input set, so a `/5` peer (which expects
-/// [`crate::server::TickSet`]s and re-steps) and a `/6` peer can't interoperate — the bump makes them refuse
-/// rather than silently diverge. `/7` added the render-only [`Frame::Articulation`] the windowed
-/// host broadcasts beside each snapshot (rl#151 increment 2 windowed) so a joiner renders the
-/// host's exact crab pose without running its own physics; a `/6` peer would reject the unknown
-/// kind mid-stream, so the bump makes the two refuse to connect instead. `/8` shrank the
-/// per-tick [`crate::sim::Input`] wire frame (`WIRE_LEN` 9→7: the vestigial vehicle `look_pitch`
-/// axis left the foot-only input, rl#43 part 1), so a `/7` peer would mis-frame every tick against
-/// a `/8` peer — the bump makes them refuse rather than silently desync on a byte offset.
-/// `/9` shrank the [`JoinRequest`] frame (16 → 8 bytes: the joiner's weights digest left the
-/// wire — the host self-gate is the one weights guard, rl#206); the strict decode already makes
-/// a mixed-version join a loud error, but the bump keeps the refusal at connect time, before a
-/// joiner waits out the admission timeout.
+/// `kind` ([`Frame`]) selects how the body decodes. BUMP the trailing version on ANY
+/// incompatible wire change — a new/changed frame kind or a shifted body layout — so
+/// mismatched builds refuse at connect time rather than mis-frame or silently desync
+/// mid-stream (the fleet updates atomically via rl-update, so a refused connect means
+/// "update the other device", never a mixed-version match).
 pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/9";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
@@ -70,29 +52,30 @@ pub const SERVICE_NAME: &str = "bddap-rl-game";
 pub(crate) enum Frame {
     /// A client→server [`TickMsg`]: one client's input for a tick.
     Tick = 0,
-    /// A [`Beat`]: heartbeat + roster advertisement for the formation barrier (rl#44).
+    /// A [`Beat`]: heartbeat + roster advertisement for the formation barrier.
     Beat = 1,
+    // Byte 2 was the retired server→client `TickSet` frame (host-authority ships state,
+    // not input sets); it is a rejected kind.
     /// A client→server [`JoinRequest`]: a would-be joiner's credentials when it dials a live match
-    /// (Stage 3 mid-game join, rl#151).
+    /// (mid-game join).
     JoinRequest = 3,
-    // Byte 4 was the retired broadcast roster-change frame: incumbents now learn a mid-game join
+    // Byte 4 was the retired broadcast roster-change frame: incumbents learn a mid-game join
     // from the roster on every `Snapshot`, so nothing schedules roster changes client-side.
     /// A server→joiner refusal: the host isn't armed with a real brain, or the crab-asset digests
-    /// disagreed (rl#206) — the joiner is turned away LOUDLY rather than admitted onto a wrong
-    /// crab. Stage 3, rl#151.
+    /// disagreed — the joiner is turned away LOUDLY rather than admitted onto a wrong crab.
     Refuse = 5,
     /// A server→JOINER welcome: the [`Admission`] the host allocated for THIS joiner, sent UNICAST
     /// to it alone so a joiner can't mistake a concurrent joiner's allocation for its OWN (which
-    /// would adopt the wrong [`crate::sim::PlayerId`]). Stage 3, rl#151.
+    /// would adopt the wrong [`crate::sim::PlayerId`]).
     Welcome = 6,
-    /// A server→client [`CoreSnapshot`]: the host-authoritative full game state for one tick
-    /// (rl#151 increment 2). Under host-authority a remote client no longer re-steps the sim from a
-    /// server-broadcast input set; it ADOPTS this snapshot whole (state on the wire, not inputs), so the
-    /// warm-vs-cold physics divergence that killed lockstep join never crosses the link. The `tick`
+    /// A server→client [`CoreSnapshot`]: the host-authoritative full game state for one tick.
+    /// A remote client never re-steps the sim from an input set; it ADOPTS this snapshot whole
+    /// (state on the wire, not inputs), so warm-vs-cold physics divergence between peers never
+    /// crosses the link. The `tick`
     /// inside is the version — a client applies the highest it has seen and drops older arrivals.
     Snapshot = 7,
-    /// A server→client [`CrabArticulation`]: the render-only per-part crab pose for one tick (rl#151
-    /// increment 2 windowed), broadcast beside a [`Frame::Snapshot`]. Not authoritative — float
+    /// A server→client [`CrabArticulation`]: the render-only per-part crab pose for one tick,
+    /// broadcast beside a [`Frame::Snapshot`]. Not authoritative — float
     /// render garnish a windowed client writes onto its own frozen crab so it renders the host's
     /// exact pose without simulating physics. The `tick` inside is the version; a headless client
     /// (which renders nothing) decodes and ignores it.
@@ -123,27 +106,27 @@ pub enum PeerWire {
     /// A client's input, received by the server.
     Tick(TickMsg),
     Beat(Beat),
-    /// A would-be joiner's credentials, received by the host on a live-match dial (Stage 3).
+    /// A would-be joiner's credentials, received by the host on a live-match dial.
     JoinRequest(JoinRequest),
-    /// A refusal reason, received by a turned-away joiner (Stage 3) — surfaced loudly, never a
+    /// A refusal reason, received by a turned-away joiner — surfaced loudly, never a
     /// silent drop.
     Refuse(String),
     /// THIS joiner's own [`Admission`], unicast by the host — the joiner builds its session from it
     /// ([`crate::lockstep::Lockstep::join_at`]). Unicast so it can't confuse a concurrent joiner's
-    /// allocation for its own (Stage 3).
+    /// allocation for its own.
     Welcome(Admission),
-    /// The host-authoritative full game state for one tick, received by a remote client (rl#151
-    /// increment 2). The client adopts it via [`crate::lockstep::Lockstep::apply_core_snapshot`]
+    /// The host-authoritative full game state for one tick, received by a remote client.
+    /// The client adopts it via [`crate::lockstep::Lockstep::apply_core_snapshot`]
     /// instead of stepping its own sim.
     Snapshot(CoreSnapshot),
-    /// The render-only crab pose for one tick, received by a windowed remote client (rl#151
-    /// increment 2 windowed). Written onto the client's frozen crab render entities via
+    /// The render-only crab pose for one tick, received by a windowed remote client.
+    /// Written onto the client's frozen crab render entities via
     /// `net::render`; a headless client ignores it.
     Articulation(CrabArticulation),
 }
 
-/// Field offsets in the encoded [`TickMsg`], derived from the field widths so the
-/// input growing (Phase 1 widened [`Input`]) shifts the trailing fields automatically
+/// Field offsets in the encoded [`TickMsg`], derived from the field widths so a change
+/// to the input's width shifts the trailing fields automatically
 /// rather than silently corrupting them — the offsets can't drift from
 /// [`crate::sim::Input::WIRE_LEN`] because they're computed from it.
 const IN_LEN: usize = crate::sim::Input::WIRE_LEN;
@@ -363,7 +346,7 @@ pub async fn bind_endpoint() -> Result<(Endpoint, MdnsAddressLookup)> {
     // Keep-alive + a short idle timeout so a SILENTLY-dead peer (crash, cable pull — no QUIC
     // close on the wire) is detected in seconds, not iroh's ~30s default: the timeout kills the
     // connection, the reader EOFs, the link is evicted, and the host DEPARTS the player
-    // (rl#198) instead of stalling the match on its missing inputs. A graceful exit closes the
+    // instead of stalling the match on its missing inputs. A graceful exit closes the
     // connection immediately and never needs this. Keep-alives are a packet a second per peer —
     // nothing at couch scale.
     let transport = QuicTransportConfig::builder()
@@ -568,7 +551,7 @@ impl Session {
         self.send(peer, msg).await;
     }
 
-    /// Broadcast a host-authoritative [`CoreSnapshot`] DOWN to every client (rl#151 increment 2) —
+    /// Broadcast a host-authoritative [`CoreSnapshot`] DOWN to every client —
     /// the headless host's fan-out entry: the host ships game STATE, not an input set, and the
     /// client ADOPTS it rather than re-stepping. A concrete facade over the generic
     /// [`Session::broadcast`], keeping [`Codec`] crate-private (the windowed path fans out through
@@ -577,8 +560,8 @@ impl Session {
         self.broadcast(snapshot).await;
     }
 
-    /// Broadcast a render-only [`CrabArticulation`] DOWN to every client (rl#151 increment 2
-    /// windowed) — the windowed host ships it beside each [`CoreSnapshot`] so a joiner renders the
+    /// Broadcast a render-only [`CrabArticulation`] DOWN to every client
+    /// — the windowed host ships it beside each [`CoreSnapshot`] so a joiner renders the
     /// host's exact crab pose. A concrete facade over the generic [`Session::broadcast`], keeping
     /// [`Codec`] crate-private (the windowed host fans out through [`crate::net_loop::NetDriver`]).
     pub async fn broadcast_articulation(&self, articulation: &CrabArticulation) {
@@ -609,7 +592,7 @@ impl Session {
     /// Frame `body` with `kind` and queue it to every connected peer. ENQUEUE-only, like
     /// [`Self::send_frame`]: a dead peer's write failure surfaces in its writer task (which drops
     /// the link) and can never block the others — nor the caller, which on the windowed host is
-    /// the game's main thread (rl#198). A peer whose queue is FULL is dropped loudly. Eviction
+    /// the game's main thread. A peer whose queue is FULL is dropped loudly. Eviction
     /// happens after the map lock is released — [`drop_if_same`] re-takes it.
     async fn broadcast_frame(&self, kind: Frame, body: Arc<[u8]>) {
         let mut wedged: Vec<(EndpointId, LinkId)> = Vec::new();
@@ -791,7 +774,7 @@ async fn wire_connection(
 
     // Writer: the ONE owner of the send stream. Draining the queue here (instead of the caller
     // awaiting the write) is what keeps a dead/backpressured peer from ever blocking the game
-    // thread (rl#198); a write failure or stall evicts the link, and the reader EOF below (or a
+    // thread; a write failure or stall evicts the link, and the reader EOF below (or a
     // roster-level departure) is how the rest of the system learns the peer is gone.
     let links_for_writer = links.clone();
     let writer_id = link_id.clone();

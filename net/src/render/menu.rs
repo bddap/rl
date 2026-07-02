@@ -1,4 +1,4 @@
-//! Boot menu (rl#58): the client-side egui Host / Join UI + host-triggered lobby, gated to
+//! Boot menu: the client-side egui Host / Join UI + host-triggered lobby, gated to
 //! the Menu/Connecting phases. Builds the round only at the Playing transition (via the
 //! parent's [`super::driver::ensure_round_installed`]), so it never touches the sim. The
 //! pure, Bevy-free connection orchestration lives in [`crate::menu`].
@@ -21,10 +21,10 @@ use crate::menu::{
 pub struct MenuPlugin {
     pub seed: u64,
     pub telemetry: Option<EndpointId>,
-    /// Our NN-crab checkpoint digest (rl#82, GCR), `0` for none. Advertised in networked
+    /// Our NN-crab checkpoint digest, `0` for none. Advertised in networked
     /// formation so peers can agree on a shared brain before arming the float crab.
     pub weights_digest: u64,
-    /// Our crab-model-asset digest (rl#100, GCR), `0` for none. Advertised alongside
+    /// Our crab-model-asset digest, `0` for none. Advertised alongside
     /// `weights_digest` so peers can agree on a shared collider asset before arming.
     pub asset_digest: u64,
 }
@@ -92,10 +92,10 @@ fn despawn_menu_camera(mut commands: Commands, cams: Query<Entity, With<MenuCame
 struct MenuState {
     seed: u64,
     telemetry: Option<EndpointId>,
-    /// Our NN-crab checkpoint digest (rl#82, GCR), `0` for none — handed to
+    /// Our NN-crab checkpoint digest, `0` for none — handed to
     /// [`crate::menu::begin`] so networked formation advertises it.
     weights_digest: u64,
-    /// Our crab-model-asset digest (rl#100, GCR), `0` for none — handed to
+    /// Our crab-model-asset digest, `0` for none — handed to
     /// [`crate::menu::begin`] alongside `weights_digest`.
     asset_digest: u64,
     /// The pure navigation FSM ([`MenuNav`]) — focus + the chooser/lobby transition.
@@ -142,15 +142,14 @@ fn reset_menu_nav(mut state: NonSendMut<MenuState>) {
     state.stick_latched = false;
 }
 
-/// The single egui system for the boot flow (rl#58, rl#82): poll the formation, gather
+/// The single egui system for the boot flow: poll the formation, gather
 /// controller/keyboard navigation, draw the current screen, and drive every transition
 /// through the pure [`MenuNav`] FSM + one exhaustive [`apply_action`] dispatch.
 ///
-/// Input unification (rl#82): controller (D-pad/stick + A/B), keyboard (arrows/WASD +
+/// Input unification: controller (D-pad/stick + A/B), keyboard (arrows/WASD +
 /// Enter/Esc), and egui clicks ALL reduce to a [`MenuInput`] folded through `MenuNav`, so
-/// every confirm — Start included — takes the same wired path. A gamepad-only player (the
-/// Steam Deck case) can now operate the whole menu; before, the menu was mouse-click only,
-/// so on the Deck nothing in it worked, the dead lobby Start among them.
+/// every confirm — Start included — takes the same wired path and a gamepad-only player
+/// (the Steam Deck case) can operate the whole menu.
 ///
 /// Determinism: this only ever *selects/commands* a formation and reads its finished
 /// result. The round it parks (in [`PendingRound`]) is built by [`menu::ready_from`] /
@@ -400,16 +399,16 @@ fn poll_formation(
         Ok(match_result) => match menu::ready_from(match_result, state.seed) {
             Some(ready) => match super::app::arm_round(ready) {
                 // Armable (solo always; networked with synced weights+assets): park the PROOF
-                // (the only thing `PendingRound` accepts — rl#138) and play.
+                // (the only thing `PendingRound` accepts) and play.
                 Ok(armed) => {
                     pending.0 = Some(armed);
                     next.set(AppPhase::Playing);
                 }
-                // Unarmable networked round — peers disagree on the brain/colliders (rl#114). Don't
-                // crash mid-transition (rl#115): surface the actionable message on the menu and
+                // Unarmable networked round — peers disagree on the brain/colliders. Don't
+                // crash mid-transition: surface the actionable message on the menu and
                 // return to the chooser so the player SEES the failure and can fix it (run rl-update
                 // on every device). Deliberately NO silent integer-crab swap — the round refuses,
-                // loud and visible, exactly as rl#114 demands.
+                // loud and visible.
                 Err(msg) => {
                     state.error = Some(msg);
                     next.set(AppPhase::Menu);
@@ -440,7 +439,7 @@ fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextSta
     next.set(AppPhase::Connecting);
 }
 
-/// Draw the Host / Join chooser (rl#58 — no separate Solo button; Host-alone IS solo).
+/// Draw the Host / Join chooser (no separate Solo button; Host-alone IS solo).
 /// The focused item (from [`MenuNav`]) is highlighted via `selectable_label`; returns the
 /// item the player clicked, if any, for the caller to route through the FSM.
 fn draw_chooser(ctx: &egui::Context, state: &mut MenuState) -> Option<ChooserItem> {
@@ -546,7 +545,7 @@ fn draw_lobby(ctx: &egui::Context, state: &MenuState, lobby: &[EndpointId]) -> O
                 }
             }
 
-            // Live roster: the players currently in the lobby (rl#58). Host alone shows
+            // Live roster: the players currently in the lobby. Host alone shows
             // just itself, which is the cue that Start = a solo round. When hosting, the
             // host's own id is its join code (`display_code`), so mark it "you"; a joiner
             // doesn't know which id is its own here, so nothing is marked for it.
@@ -556,7 +555,7 @@ fn draw_lobby(ctx: &egui::Context, state: &MenuState, lobby: &[EndpointId]) -> O
 
             ui.separator();
             if hosting {
-                // The host commands the start (rl#58). Alone → an instant solo round;
+                // The host commands the start. Alone → an instant solo round;
                 // with peers → the synchronized networked start. The label reflects which,
                 // read from the live roster so it's honest about what Start does.
                 let solo = lobby.len() <= 1;
@@ -589,7 +588,7 @@ fn draw_lobby(ctx: &egui::Context, state: &MenuState, lobby: &[EndpointId]) -> O
     clicked
 }
 
-/// Draw the lobby's live player list (rl#58): one line per player, `me` (if given)
+/// Draw the lobby's live player list: one line per player, `me` (if given)
 /// marked. `roster` is the barrier's current `live_set` (sorted by id bytes), empty until
 /// the session binds.
 fn lobby_roster(ui: &mut egui::Ui, roster: &[EndpointId], me: Option<EndpointId>) {

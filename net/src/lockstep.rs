@@ -1,4 +1,4 @@
-//! The local client's per-round state on the host-authoritative path (GCR MP rewrite, bddap/rl#151).
+//! The local client's per-round state on the host-authoritative path.
 //!
 //! Under host-authoritative state-resync the client does NOT step a sim of its own: the authoritative
 //! [`crate::server::Server`] steps the world and emits a [`CoreSnapshot`] per tick, and this type
@@ -37,7 +37,7 @@ pub struct PeerMsg {
 
 /// The local client's per-round state: schedules the local input UP, adopts the authoritative
 /// snapshot DOWN, and predicts/reconciles the local avatar. Owns the client's sim as the surface the
-/// snapshot writes into — it never steps that sim itself (the server is authoritative, rl#151).
+/// snapshot writes into — it never steps that sim itself (the server is authoritative).
 pub struct Lockstep {
     sim: Sim,
     me: PlayerId,
@@ -79,10 +79,10 @@ impl Lockstep {
         }
     }
 
-    /// Start a client JOINING an in-progress match at `at_tick` (GCR MP Stage 3). The joiner does NOT
-    /// replay ticks `[0, at_tick)`: it boots host-authoritatively from the server's snapshot for the
-    /// live round (the incr-4 mid-game-join fix), so this only seeds the placeholder cursors + roster
-    /// the adopted snapshot then supersedes. Its apply + issue cursors begin at `at_tick`.
+    /// Start a client JOINING an in-progress match at `at_tick`. The joiner does NOT replay ticks
+    /// `[0, at_tick)`: it boots host-authoritatively from the server's snapshot for the live
+    /// round, so this only seeds the placeholder cursors + roster the adopted snapshot then
+    /// supersedes. Its apply + issue cursors begin at `at_tick`.
     pub fn join_at(seed: u64, roster: &[PlayerId], me: PlayerId, at_tick: u64) -> Self {
         let mut roster_set = roster.to_vec();
         roster_set.sort();
@@ -127,31 +127,29 @@ impl Lockstep {
         &self.sim
     }
 
-    /// The local client's read seam onto authoritative game state (bddap/rl#151 increment 0,
-    /// [`crate::snapshot`]). SP funnels through the SAME serialized [`CoreSnapshot`] a wire client
-    /// consumes — built, encoded, and decoded here so SP and MP share ONE state-read path with no
-    /// by-reference-in-SP fork ([[sp-is-mp-special-case]], [[silent-fallback-antipattern]]).
-    /// Byte-identical to reading [`sim`](Lockstep::sim) directly; the round-trip through bytes just
-    /// proves the seam end to end (the copy is ~hundreds of bytes/tick).
+    /// The local client's read seam onto authoritative game state ([`crate::snapshot`]). SP
+    /// funnels through the SAME serialized [`CoreSnapshot`] a wire client consumes — one
+    /// state-read path, no by-reference-in-SP fork ([[sp-is-mp-special-case]]). Byte-identical to
+    /// reading [`sim`](Lockstep::sim) directly; the round-trip through bytes just proves the seam
+    /// end to end (the copy is ~hundreds of bytes/tick).
     pub fn core_snapshot(&self) -> CoreSnapshot {
         let bytes = self.sim.core_snapshot().to_bytes();
         CoreSnapshot::from_bytes(&bytes).expect("a freshly-built snapshot must round-trip")
     }
 
-    /// Adopt the authoritative server's [`CoreSnapshot`] as this client's rendered state (rl#151
-    /// increment 1): the client never steps its own sim — the server steps and emits a snapshot per
-    /// tick, and this overwrites the carried game state ([`Sim::apply_core_snapshot`]).
+    /// Adopt the authoritative server's [`CoreSnapshot`] as this client's rendered state: the
+    /// client never steps its own sim — the server steps and emits a snapshot per tick, and this
+    /// overwrites the carried game state ([`Sim::apply_core_snapshot`]).
     /// `scene::apply_transforms` then reads [`sim`](Lockstep::sim) exactly as before, tweening from
     /// `prev`. SP funnels the server's bytes through the SAME decode a wire client does
     /// ([[sp-is-mp-special-case]]), so there is no by-reference SP fork.
     ///
-    /// Also drops our own now-stale submitted inputs: we still call
-    /// [`submit_local_input`](Lockstep::submit_local_input) to file each tick's input UP to the server,
-    /// but we never step to consume `self.inputs`, so
-    /// without this prune it would grow unbounded. The prune keeps the still-in-flight window
-    /// `apply_tick >= snapshot.tick` — the boundary tick is RETAINED, since a tick-T snapshot reflects
-    /// inputs only up through `apply_tick == T-1`, so `apply_tick == T` hasn't landed yet and is
-    /// exactly what [`reconcile_local_prediction`] replays.
+    /// Also prunes our own submitted inputs to the still-in-flight window
+    /// `apply_tick >= snapshot.tick` (we file inputs UP but never step to consume them, so without
+    /// the prune the map grows unbounded). The boundary tick is deliberately RETAINED: a tick-T
+    /// snapshot is the POST-step state that consumed inputs up through `apply_tick == T-1`, so the
+    /// input filed for `apply_tick == T` has not landed yet — the survivors are exactly what
+    /// [`reconcile_local_prediction`] replays on the local avatar.
     pub fn apply_core_snapshot(&mut self, snapshot: CoreSnapshot) {
         let applied_tick = snapshot.tick;
         self.sim.apply_core_snapshot(snapshot);
@@ -160,13 +158,7 @@ impl Lockstep {
         // it), so the next tick to apply equals it. Keeps `next_tick()` honest (it would otherwise sit
         // at 0 forever while the sim advances, mis-stamping the `issue_tick` telemetry).
         self.next_apply_tick = applied_tick;
-        // Drop submitted inputs the snapshot ALREADY reflects, keeping only the still-in-flight window
-        // `apply_tick >= applied_tick`. The boundary tick is deliberately KEPT: a snapshot at tick T is
-        // the POST-step state that consumed inputs up through `apply_tick == T-1`, so the input filed
-        // for `apply_tick == T` has NOT reached this state yet — it is in flight. Those survivors are
-        // exactly the set `reconcile_local_prediction` replays on the local avatar (and, on the
-        // server-authoritative arm that never reconciles, a couple of harmless entries the next
-        // snapshot prunes). Without a prune the map would grow unbounded.
+        // Prune to the still-in-flight window, boundary tick kept — see the doc above.
         self.inputs = self.inputs.split_off(&applied_tick);
     }
 
@@ -205,7 +197,7 @@ impl Lockstep {
 
     /// Re-predict the LOCAL player over its still-in-flight inputs after adopting an authoritative
     /// snapshot, so a remote client's own avatar responds at input latency instead of round-trip
-    /// latency (rl#151 incr 3). Call ONCE, right after
+    /// latency. Call ONCE, right after
     /// [`apply_core_snapshot`](Lockstep::apply_core_snapshot), on the remote-adopt arm only: that call
     /// re-seats every entity to the host's authoritative state (our avatar included, at its
     /// round-trip-old position) and prunes `self.inputs` to the inputs the snapshot doesn't yet
@@ -227,7 +219,7 @@ impl Lockstep {
     }
 
     /// Drive the crab's ground position + yaw + physics digest from the real NN crab body — forwards
-    /// to [`Sim::set_external_crab_pose`], the ONLY way the crab moves (rl#114). Used by the headless
+    /// to [`Sim::set_external_crab_pose`], the ONLY way the crab moves. Used by the headless
     /// screenshot/probe seed path and the round-setup crab-pose seed.
     pub fn set_external_crab_pose(&mut self, pos: crate::sim::Pos, yaw: i32, phys_digest: u64) {
         self.sim.set_external_crab_pose(pos, yaw, phys_digest);
@@ -255,7 +247,7 @@ mod tests {
         (0..n).map(PlayerId).collect()
     }
 
-    /// The reconciliation property (rl#151 incr 3): a remote-adopt client that adopts the host's
+    /// The reconciliation property: a remote-adopt client that adopts the host's
     /// snapshot several ticks LATE, then reconciles, must render its own avatar exactly where a
     /// fully-caught-up host has it — hiding the round-trip lag with no residual snap. The
     /// authoritative reference is a real [`Server`] (the one stepper); the client only ever

@@ -140,7 +140,7 @@ fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> be
         HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
     };
 
-    // GCR#82: pin every parallel-reduction pool to one thread BEFORE building the app, so the
+    // Pin every parallel-reduction pool to one thread BEFORE building the app, so the
     // rapier physics AND the burn matmul inference run in a single fixed float-op order — the
     // precondition for the crab to evolve bit-identically across processes. Today the unpinned
     // path happens to match cross-process too (rapier is serial — `parallel` off — and the
@@ -219,7 +219,7 @@ pub fn run_headless_probe(
 }
 
 // ---------------------------------------------------------------------------
-// Crab-policy-stability gate (the vehicle migration's DONE bar #2)
+// Crab-policy-stability gate
 // ---------------------------------------------------------------------------
 
 /// Result of [`run_vehicle_stability_probe`]: the per-tick samples plus the tick a ram vehicle was
@@ -247,7 +247,7 @@ impl StabilityResult {
 
 /// Headless crab-policy-stability gate: run the trained NN crab, drop a real vehicle rigidbody onto
 /// it mid-walk (the same collider/mass/groups boarding spawns — [`crab_world::vehicle`]), and keep
-/// stepping. Proves the migration's headline (owner 703) without a GPU: the vehicle↔crab contact is
+/// stepping. Proves without a GPU that the vehicle↔crab contact is
 /// real, it shoves the crab by mass, and the trained walking RECOVERS — no NaN/explosion. `warmup`
 /// ticks let the crab settle + start walking before the hit; `post` ticks watch it recover.
 ///

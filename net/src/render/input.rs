@@ -73,7 +73,7 @@ pub(super) struct CameraYaw(pub(super) f32);
 /// - look: mouse / right stick (yaw → sim, pitch → client-only)
 /// - action (extract): Space / mouse-left / pad South / pad RT
 /// - restart: R / pad Start (edge-triggered → [`buttons::RESTART`], lockstep)
-/// - quit: Esc / hold pad Select (handled in [`exit_on_esc`])
+/// - quit: Esc / hold pad North (handled in [`quit_game`])
 ///
 /// Analog stick magnitudes are raw f32 here, but the ONLY path from this function to
 /// the sim is via [`Input::new`] in [`drive_lockstep`], which quantizes every axis to
@@ -95,8 +95,8 @@ pub(super) fn gather_input(
 ) {
     let dt = time.delta_secs();
 
-    // Every DISCRETE key/button below is looked up in the one control map
-    // (`controls::CONTROL_MAP`) via these helpers, never hardcoded — so the keys the
+    // Every DISCRETE key/button below is looked up in the one binding table
+    // (`controls::BINDINGS`) via these helpers, never hardcoded — so the keys the
     // client polls are exactly the keys the on-screen legend shows (no drift).
     // `kc(action)` is the keyboard key; `pad_pressed`/`pad_just_pressed` fold the pad's
     // primary+alternate buttons. The ANALOG channels (stick→axis math, mouse motion,
@@ -263,8 +263,8 @@ pub(super) fn gather_input(
 }
 
 /// Quit the game (windowed play only): the keyboard Quit key (Esc), or HOLD the gamepad
-/// Quit button (North/Y) for [`PAD_QUIT_HOLD_SECS`]. Both bindings come from the one control
-/// map ([`controls::CONTROL_MAP`]), so this matches the legend. Purely client-local — sends
+/// Quit button (North/Y) for [`PAD_QUIT_HOLD_SECS`]. Both bindings come from the one
+/// binding table ([`controls::BINDINGS`]), so this matches the legend. Purely client-local — sends
 /// Bevy's [`AppExit`]; no sim/lockstep involvement, so it can't desync a peer (each client
 /// just closes its own window) and the others play on. The pad Quit is a HOLD on its OWN
 /// button (not Start, which restarts), so a stray press can't end the round for the couch.

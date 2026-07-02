@@ -50,11 +50,9 @@ pub(super) fn spawn_world(
     // screenshot frame.
     windows: Query<(), With<Window>>,
 ) {
-    // The render-frame shrink: the human world (ground, players, the pillar, the camera)
-    // renders this much smaller so the true-physics-size crab towers over it (render==physics; the
-    // crab is NOT inflated — see [`world_render_scale`]). `world` already applies it to ground
-    // POSITIONS; here it sizes the human-world MESHES. The crab silhouette is the lone exception —
-    // it renders at native physics size.
+    // The render-frame shrink (see [`world_render_scale`]). `world` already applies it to
+    // ground POSITIONS; here it sizes the human-world MESHES. The crab silhouette is the
+    // lone exception — it renders at native physics size.
     let rs = world_render_scale();
 
     // Ground: a large gray plane at Y=0.
@@ -125,8 +123,7 @@ pub(super) fn spawn_world(
     }
 
     // The giant crab: Sally's collider silhouette (see `spawn_crab_silhouette`), at TRUE physics
-    // size — it towers because the human world renders R× smaller around it ([`world_render_scale`]),
-    // not because the crab is inflated. Hidden only when the armed NN rig (rl#114) has a skin model
+    // size ([`world_render_scale`]). Hidden only when the armed NN rig has a skin model
     // to be the visible crab; with no model the rig is mesh-less, so the silhouette must stay shown
     // or the crab vanishes. Always spawned so `apply_transforms`'s crab query is satisfied. The
     // silhouette and the skin both render at native size, so they can't mis-size relative to each
@@ -138,12 +135,12 @@ pub(super) fn spawn_world(
     // the body's `CrabModelPath` (which defaults to the same verdict) agree — see
     // `crab_world::bot::body::CrabModelPath`. Preflighted (not existence-only `model_path()`), so a
     // present-but-broken glb resolves to `None` → the silhouette below draws the fallback recipe
-    // instead of the real one (bddap/rl#154).
+    // instead of the real one.
     let have_model = crab_world::mesh_fallback::usable_model_path().is_some();
     let crab_hidden = armed && have_model;
     // With the crab armed but NO model, the silhouette (the real colliders, NOT the real Sally
-    // rig) stays shown AS the crab. Shipping that with no signal is the silent-fallback bug the
-    // owner most hates (rl#706), so on the WINDOWED surface name it on screen with the banner
+    // rig) stays shown AS the crab. Shipping that with no signal is a silent fallback, so on
+    // the WINDOWED surface name it on screen with the banner
     // shared with rl-demo. The OTEL companion already fires in `game::resolve_render_mode`; only
     // the live window adds the banner here. The screenshot path has no window (`primary_window:
     // None`) so a UI band can't pollute the capture — there the OTEL error + visible silhouette
@@ -152,7 +149,7 @@ pub(super) fn spawn_world(
     // explicit RL_RENDER_MODE override (it means "the missing mesh FORCED the fallback").
     if armed && !have_model && !windows.is_empty() {
         // `!have_model` ⇒ the verdict is `Err`, so name the ACTUAL cause (absent vs broken) on
-        // screen (bddap/rl#154); `MESH_ABSENT_REASON` is only the fallback if the verdict somehow
+        // screen; `MESH_ABSENT_REASON` is only the fallback if the verdict somehow
         // lacks a reason.
         let reason = crab_world::mesh_fallback::usable_model()
             .as_ref()
@@ -186,17 +183,15 @@ pub(super) fn spawn_world(
 }
 
 /// The giant crab's apparent-height target: a player's height times [`CRAB_SCALE`] — the crab
-/// reads CRAB_SCALE players tall. We hit this RATIO by rendering the rest of the world that much
-/// SMALLER (see [`world_render_scale`]), NOT by inflating the crab: the crab renders at its TRUE
-/// physics size so a collider wireframe overlays it (render==physics). Kept only to derive the
-/// world scale.
+/// reads CRAB_SCALE players tall. Hit by shrinking the rest of the world, never the crab
+/// (see [`world_render_scale`]). Kept only to derive the world scale.
 const CRAB_RENDER_HEIGHT: f32 = PLAYER_HEIGHT * CRAB_SCALE as f32;
 
 /// The crab rig's natural standing height (m) — the span of its REAL physics colliders. Memoized:
 /// the recipe + silhouette geometry it derives are a property of the fixed binary+asset that never
 /// changes at runtime, yet this is read to set the world render scale on a per-frame path, so the
-/// derivation is cached rather than re-run each read (rl#129). The underlying 36 MB glb parse + fit is
-/// itself memoized once in [`crab_world::mesh_fallback::usable_model`] (rl#153), so
+/// derivation is cached rather than re-run each read. The underlying 36 MB glb parse + fit is
+/// itself memoized once in [`crab_world::mesh_fallback::usable_model`], so
 /// [`crab_world::bot::body::render_recipe`] here only clones that recipe. `None` for a degenerate
 /// (zero-height) recipe — a broken collider asset with no honest geometry, which callers fail LOUD on
 /// rather than drawing a stand-in.
@@ -206,8 +201,8 @@ fn natural_crab_height() -> Option<f32> {
         // Flips off the preflight verdict (`mesh_fallback::usable_model_path`), NOT the per-app
         // `CrabModelPath` resource: this answers "how big is the crab this run draws?" to set the
         // world render scale, a fixed binary+asset constant. Preflighted so a present-but-broken glb
-        // draws the fallback recipe's height (what's actually rendered) instead of the real one
-        // (bddap/rl#154). net has one asset source, so this and the silhouette below flip together.
+        // draws the fallback recipe's height (what's actually rendered) instead of the real one.
+        // net has one asset source, so this and the silhouette below flip together.
         let h = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe(
             crab_world::mesh_fallback::usable_model_path().is_some(),
         ))
@@ -221,8 +216,8 @@ fn natural_crab_height() -> Option<f32> {
 /// collider wireframe overlays it natively — render==physics); the giant FEEL comes from rendering
 /// everything ELSE this much smaller, so the crab still reads [`CRAB_SCALE`]× a player WITHOUT
 /// inflating it (which would desync the wireframe from the colliders and force retraining Sally at
-/// a bigger collider scale). The reciprocal of the old crab blow-up: the crab's natural height over
-/// the giant target height. The ONE scale source — every sim→render ground position ([`world`])
+/// a bigger collider scale). The crab's natural height over the giant target height.
+/// The ONE scale source — every sim→render ground position ([`world`])
 /// and the human-world mesh sizes multiply by it, the crab does not (and the piloted vehicle, which
 /// lives at true arena scale with the crab, doesn't either — its cockpit camera is shifted, not
 /// shrunk).
@@ -237,7 +232,7 @@ pub(crate) fn world_render_scale() -> f32 {
 /// Draw the giant crab as its REAL physics colliders — the carapace cuboid and every link
 /// capsule that [`crab_world::bot::body::render_recipe`] yields, scaled to the giant height and
 /// oriented claws-forward (+Z, the crab's facing) — and parent them to `crab_root`. Drawing the
-/// SAME shapes the sim body uses is the point of #108: the cosmetic crab can't drift from the body
+/// SAME shapes the sim body uses means the cosmetic crab can't drift from the body
 /// it depicts, and it reads as Sally instead of a box. `render_recipe` is the single
 /// model-vs-fallback selector (shared with the trainer), so this never invents a second source of
 /// geometry. This static silhouette is the honest physics-bones view (no articulation): the
@@ -247,7 +242,7 @@ pub(crate) fn world_render_scale() -> f32 {
 /// the preflight verdict's flip (`mesh_fallback::usable_model_path().is_some()`) resolved ONCE in
 /// `spawn_world` — net's single asset source, the SAME verdict the body's `CrabModelPath` defaults to,
 /// so they agree — and `false` (absent or broken glb) draws the fallback recipe; `true` draws the
-/// memoized real recipe the verdict already built (bddap/rl#153), never a re-parse or an `.expect()`.
+/// memoized real recipe the verdict already built, never a re-parse or an `.expect()`.
 fn spawn_crab_silhouette(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -317,9 +312,7 @@ fn spawn_crab_silhouette(
             }
         }
     }
-    // The crab draws at its TRUE physics size (render==physics): no blow-up, so a collider
-    // wireframe overlays it natively and Sally never has to be retrained at a bigger collider
-    // scale. The giant FEEL instead comes from the R-shrunk human world ([`world_render_scale`]).
+    // The crab draws at its TRUE physics size ([`world_render_scale`]).
     // A degenerate recipe (zero natural height) is the ONE refusal: it can only mean the collider
     // recipe is broken (a real OR absent model both yield a positive-height procedural recipe), so
     // there is no honest crab geometry to draw. We refuse to paper over that with a placeholder box
@@ -442,7 +435,7 @@ pub(super) fn apply_transforms(
     // Player avatars: lerp position and yaw from the previous snapshot to now.
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
         let Some(now) = sim.player(avatar.0) else {
-            // No sim player behind this avatar: the player DEPARTED mid-match (rl#198 — the
+            // No sim player behind this avatar: the player DEPARTED mid-match (the
             // adopted snapshot no longer carries them). Hide the capsule rather than leave it
             // frozen at their last pose; a rejoiner reusing the freed PlayerId un-hides it.
             *vis = Visibility::Hidden;

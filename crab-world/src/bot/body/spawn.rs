@@ -55,10 +55,11 @@ pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f3
 // Spawn the crab — instantiate the rig-derived recipe
 // ---------------------------------------------------------------------------
 
-/// A random spawn orientation for the `RL_RANDOM_INIT` curriculum: ~80% a mild tilt
-/// (≤ ~25°) off upright, ~20% a heavy tilt up to fully inverted — each about a random
-/// horizontal axis, with a random yaw on top. Forces the policy to stand and right
-/// itself from a varied start rather than memorising the one bind pose.
+/// A random spawn orientation for respawns (every training reset, and demo resets):
+/// ~80% a mild tilt (≤ ~25°) off upright, ~20% a heavy tilt up to fully inverted —
+/// each about a random horizontal axis, with a random yaw on top. Forces the policy
+/// to stand and right itself from a varied start rather than memorising the one bind
+/// pose.
 pub(crate) fn random_spawn_rotation(rng: &mut impl rand::Rng) -> Quat {
     use std::f32::consts::{PI, TAU};
     let yaw = rng.gen_range(0.0..TAU);

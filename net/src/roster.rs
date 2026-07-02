@@ -1,16 +1,14 @@
 //! The match participant set as it changes over a session: an append-only, tick-aligned
-//! schedule of change-points (GCR MP Stage 3, bddap/rl#151).
+//! schedule of change-points.
 //!
-//! Stage 1+2 froze the roster at construction. Stage 3 makes it dynamic so a player can join
-//! mid-match — but a roster change is determinism-critical: it MUST take effect on the identical
-//! tick everywhere, or the server and its clients disagree on who is in the match. This type is the
-//! ONE source of "who is in the match at tick T", consulted by the [`crate::server::Server`] (when is
-//! a tick's input set complete, and when to spawn a scheduled joiner) so completeness and the
-//! authoritative spawn key off the same set.
+//! A roster change is determinism-critical: it MUST take effect on the identical tick
+//! everywhere, or the server and its clients disagree on who is in the match. This type is the
+//! ONE source of "who is in the match at tick T", consulted by the [`crate::server::Server`]
+//! (when is a tick's input set complete, and when to spawn a scheduled joiner) so completeness
+//! and the authoritative spawn key off the same set.
 //!
-//! With no changes scheduled the schedule is exactly the frozen initial set, so the no-join path is
-//! byte-identical to the old fixed `Vec<PlayerId>` — there is ONE roster mechanism, not a parallel
-//! dynamic one bolted beside the static path.
+//! With no changes scheduled the schedule is exactly the frozen initial set — there is ONE
+//! roster mechanism, not a parallel dynamic one bolted beside the static path.
 
 use std::collections::BTreeMap;
 
@@ -28,8 +26,8 @@ pub struct RosterSchedule {
 }
 
 impl RosterSchedule {
-    /// A schedule that is `initial` from tick 0 with no changes — the Stage-1+2 frozen-roster
-    /// behaviour. `at` returns `initial` for every tick until a change is scheduled.
+    /// A schedule that is `initial` from tick 0 with no changes. `at` returns `initial` for
+    /// every tick until a change is scheduled.
     pub fn frozen(initial: &[PlayerId]) -> Self {
         let mut points = BTreeMap::new();
         points.insert(0, sorted(initial));

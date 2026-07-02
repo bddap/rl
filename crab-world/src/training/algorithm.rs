@@ -42,7 +42,7 @@ pub(crate) struct PpoConfig {
     /// Exploration-σ schedule (bddap/rl#161): the annealed LOWER bound on the policy's
     /// `log_std`, starting HIGH to force a wide exploration amplitude early — bypassing the
     /// target-KL trust region that otherwise pins σ at its cautious init (the entropy bonus
-    /// can't widen it inside the per-update KL budget, falsified job 616) — then decaying to
+    /// can't widen it inside the per-update KL budget — falsified experimentally) — then decaying to
     /// `log_std_floor_end` for refinement. Composed with the OU temporally-correlated noise
     /// ([`OuNoise`]), early exploration is both WIDE and coherent: the best shot at stumbling
     /// into a coordinated 38-DOF gait. The schedule clamps `log_std` from below (see
@@ -97,12 +97,11 @@ impl Default for PpoConfig {
             lambda: 0.95,
             clip_epsilon: 0.2,
             // Per-dim mean entropy (not sum), so scale-invariant. It's a constant upward
-            // force on the policy's log_std, opposed only by the reach-reward gradient —
-            // which weakens as the curriculum moves the target farther (~⅓ less pull from
-            // band 1.5-3.0m to 2.5-4.0m), so the coeff must sit below what the FARTHEST
-            // band's reach can contain, else log_std inflates unbounded and the policy
-            // dissolves into noise (ran away at 0.01; 0.003 still crept up in band 1, then
-            // diffused once band 2 weakened the reach signal). 0.001 leaves margin.
+            // force on the policy's log_std, opposed only by the reward gradient — which
+            // is weakest on far-target episodes (long credit-assignment horizon), so the
+            // coeff must sit below what the weakest episodes can contain, else log_std
+            // inflates unbounded and the policy dissolves into noise (ran away at 0.01;
+            // 0.003 still crept up before diffusing). 0.001 leaves margin.
             entropy_coeff: 0.001,
             value_coeff: 0.5,
             learning_rate: 3e-4,
@@ -474,7 +473,7 @@ fn next_standard_normal(rng: &mut StdRng) -> f32 {
 /// slow drift), α=0 recovers the old per-tick-independent noise. It is variance-preserving
 /// (`x ← α·x + √(1−α²)·ε`, see [`OuNoise::next`]), so it changes only the temporal SMOOTHNESS of
 /// exploration, never its MAGNITUDE (that stays the policy's learnable `log_std`) — keeping this
-/// lever orthogonal to the entropy/sigma knobs 616 falsified.
+/// lever orthogonal to the falsified entropy/sigma knobs.
 const EXPLORE_CORRELATION: f32 = 0.95;
 
 /// Temporally-correlated exploration noise: one variance-preserving AR(1) (discrete

@@ -6,7 +6,7 @@
 //! reads the SAME [`BINDINGS`] via [`key_code_for`]/[`gamepad_buttons_for`], so the keys the
 //! client polls are exactly the keys the legend shows — no drift.
 //!
-//! ## One source of truth, two flight feels (botq#554)
+//! ## One source of truth, two flight feels
 //! Each [`Action`] binds one key/button (context-independent), and each context names the actions
 //! it shows with the label correct THERE — the legend joins rows with bindings, so the displayed
 //! GLYPH can't drift from the polled input. On foot the move keys walk the avatar; in the air the

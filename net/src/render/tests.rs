@@ -13,7 +13,7 @@ use crate::menu::ReadyMatch;
 use crate::sim::{Sim, UNIT};
 use crab_world::vehicle::VehicleKind;
 
-/// The boot menu's handoff into the round (rl#56), exercised headlessly (no window):
+/// The boot menu's handoff into the round, exercised headlessly (no window):
 /// park a chosen [`ReadyMatch`] in [`PendingRound`], request the Playing transition,
 /// and prove `OnEnter(Playing)`'s [`ensure_round_installed`] builds a live
 /// [`GameState`] from it — the determinism-critical link the menu depends on (the menu
@@ -30,7 +30,7 @@ fn menu_handoff_installs_the_chosen_round() {
         .init_non_send_resource::<PendingRound>()
         .add_systems(OnEnter(AppPhase::Playing), ensure_round_installed);
 
-    // The menu app always installs the NN-crab stack at build (rl#114: the checkpoint is
+    // The menu app always installs the NN-crab stack at build (the checkpoint is
     // required), and `ensure_round_installed` asserts its presence before arming. Mirror that
     // here so the handoff exercises the real menu path rather than tripping the build-wiring
     // assert.
@@ -38,7 +38,7 @@ fn menu_handoff_installs_the_chosen_round() {
 
     // Park a solo round (the same one the Solo button / Alone fallback produce) and ask
     // to enter Playing, exactly as the menu does on a choice — through the arm gate, the
-    // only way to mint the ArmedRound proof PendingRound accepts (rl#138).
+    // only way to mint the ArmedRound proof PendingRound accepts.
     let seed = 0x1234_5678;
     let armed = super::app::arm_round(ReadyMatch {
         lockstep: crate::formation::solo_lockstep_for(seed),
@@ -82,7 +82,7 @@ fn menu_handoff_installs_the_chosen_round() {
 }
 
 /// An unarmable networked round (host brain unverified / colliders differ on a peer) must drive
-/// the GRACEFUL refusal, NOT a crash and NOT a silent integer-crab swap (rl#115 + rl#114). The arm decision +
+/// the GRACEFUL refusal, NOT a crash and NOT a silent integer-crab swap. The arm decision +
 /// operator message is the single [`super::app::check_armable`]; this pins that a solo or
 /// fully-synced round arms (no message), while either mismatch REFUSES with an actionable message
 /// naming the cause and the fix — the value the menu's `poll_formation` gate returns to the chooser
@@ -416,8 +416,7 @@ fn plane_flight_control_pitch_is_ac6_and_scaled() {
         .pitch
             < 0.0
     );
-    // Mouse BACK (screen +y, drag down) also raises the nose (flight-sim, the pre-9e3d3b47 feel the
-    // owner praised).
+    // Mouse BACK (screen +y, drag down) also raises the nose (flight-sim).
     assert!(
         plane(FlightInput {
             mouse: Vec2::new(0.0, 1.0),

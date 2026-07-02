@@ -15,8 +15,8 @@
 //! curriculum — the bitter-lesson ideal is a UNIFORM draw and the weights learning the far
 //! approach unaided. What it is NOT is a GROWTH curriculum: it is stationary — nothing advances,
 //! gates, persists, or drifts, the band never changes, only how a distance is drawn within it —
-//! so the advancement-machinery drift that cost a live run cannot recur. It was adopted (job 748)
-//! to re-bootstrap a warm-but-degraded policy that a uniform draw stalled on far targets; the
+//! so the advancement-machinery drift that cost a live run cannot recur. It was adopted to
+//! re-bootstrap a warm-but-degraded policy that a uniform draw stalled on far targets; the
 //! intended end state is to lean [`NEAR_BIAS_EXP`] back toward 1 (uniform) once reach is healthy.
 
 use bevy::prelude::Vec3;

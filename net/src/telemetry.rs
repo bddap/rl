@@ -141,7 +141,7 @@ pub enum TelemetryEvent {
         tick: u64,
         state_hash: u64,
     },
-    /// A fault a deck detected (e.g. the armed crab going non-finite, rl#137) — a loud failure
+    /// A fault a deck detected (e.g. the armed crab going non-finite) — a loud failure
     /// mirrored to the collector immediately so a remote operator sees it the instant it happens.
     Fault { msg: String },
 }
@@ -190,7 +190,7 @@ impl TelemetryEvent {
     /// SAMPLED variants ([`Tick`](TelemetryEvent::Tick)/[`Input`](TelemetryEvent::Input))
     /// are sheddable — losing one is just coarser sampling. Everything else (faults, round
     /// results, roster outcomes) is a CRITICAL one-shot signal that must never be silently
-    /// dropped; [`TelemetrySender::send`] routes those on the unbounded lane (rl#125).
+    /// dropped; [`TelemetrySender::send`] routes those on the unbounded lane.
     fn is_sheddable(&self) -> bool {
         // New variants default to critical (the never-dropped lane) — the safe side: an
         // unclassified event grows memory loudly rather than vanishing silently.
@@ -335,7 +335,7 @@ impl TelemetrySender {
     /// - Critical (faults, round/roster outcomes) goes on the unbounded lane, so a real
     ///   failure signal is never dropped under pressure. It can only fail to enqueue if the
     ///   I/O task is already gone (all receivers dropped) — surfaced LOUDLY, never silent
-    ///   (rl#125: a vanished fault/round result with zero trace is exactly what this bans).
+    ///   (a vanished fault/round result with zero trace is exactly what the two lanes ban).
     pub fn send(&self, event: TelemetryEvent) {
         let env = Envelope {
             game_id: self.game_id,
@@ -732,9 +732,9 @@ mod tests {
         }
     }
 
-    /// rl#125: a Fault arriving while the sampled queue is saturated must still be
-    /// delivered — the whole point of the side-channel is to surface faults. The old
-    /// uniform `try_send` would have dropped it along with the ticks.
+    /// A Fault arriving while the sampled queue is saturated must still be
+    /// delivered — the whole point of the side-channel is to surface faults. A
+    /// uniform bounded `try_send` would drop it along with the ticks.
     #[test]
     fn critical_event_survives_sheddable_queue_pressure() {
         let (sender, _shed_rx, mut crit_rx) = test_sender();
