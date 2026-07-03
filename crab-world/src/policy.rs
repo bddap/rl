@@ -186,8 +186,8 @@ enum Loaded {
 /// than not arming.
 fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
     let paths = CheckpointDir::new(dir);
-    let brain = match load_brain_file::<InferBackend>(&paths.brain_file(), device) {
-        Ok(brain) => brain,
+    let loaded = match load_brain_file::<InferBackend>(&paths.brain_file(), device) {
+        Ok(loaded) => loaded,
         Err(BrainLoadError::Envelope(EnvelopeError::Absent)) => return Loaded::Absent,
         Err(e) => {
             return Loaded::Refused(format!(
@@ -196,6 +196,21 @@ fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
             ));
         }
     };
+    // Body↔policy identity (bddap/rl#214): a policy trained on a different body than the
+    // one this process constructs is not this crab — refuse to arm it (same class as the
+    // rig-dims mismatch below), never drive the wrong body "mostly fine". A pre-stamp
+    // checkpoint passes on trust (read-only surfaces don't stamp; the trainer's next
+    // save migrates it).
+    if let Err(why) = crate::training::checkpoint::check_body_identity(
+        loaded.body_digest,
+        crate::mesh_fallback::constructed_body_digest(),
+    ) {
+        return Loaded::Refused(format!(
+            "{}: {why}",
+            crate::training::checkpoint::BRAIN_FILENAME
+        ));
+    }
+    let brain = loaded.brain;
     // A checkpoint from a different rig (e.g. a stale 77-dim brain against the current
     // OBS_SIZE) parses fine here but its mismatched first-layer weight would panic in the
     // matmul at the first `policy()` call. Surface it as a distinct `Mismatch` (carrying
@@ -549,15 +564,17 @@ mod tests {
     }
 
     /// Regenerates the golden fixture brain in place — load it through the reader,
-    /// re-save it through the production writer — then commit the result (run with
+    /// re-save it — then commit the result (run with
     /// `cargo test -- --ignored regenerate_enveloped_golden_fixture`). Only for a
-    /// DELIBERATE format version bump, and the bump commit must TEMPORARILY teach
-    /// `read_envelope` the outgoing version (the reader otherwise exact-matches
-    /// `current_version`, by design — no standing dual-read window), run this, then
-    /// drop that shim before landing. Ignored because a golden fixture that silently
-    /// regenerates guards nothing.
+    /// DELIBERATE format change; ignored because a golden fixture that silently
+    /// regenerates guards nothing. Writes the LEGACY v1 shape, NOT the production
+    /// writer: the production writer stamps the regenerating machine's constructed body
+    /// digest (bddap/rl#214), which would make the committed fixture refuse to arm on
+    /// every machine whose `sally.glb` differs or is absent — the fixture must stay v1
+    /// (trust-on-first-use) to remain machine-portable, which also keeps it the
+    /// end-to-end guard of the fleet's v1-resume path.
     #[test]
-    #[ignore = "fixture generator, run manually on a deliberate format version bump"]
+    #[ignore = "fixture generator, run manually on a deliberate format change"]
     fn regenerate_enveloped_golden_fixture() {
         let dir = golden_dir();
         let paths = CheckpointDir::new(&dir);
@@ -566,9 +583,54 @@ mod tests {
             &paths.brain_file(),
             &device,
         )
-        .expect("current fixture loads through the current reader");
-        crate::training::checkpoint::save_brain(&brain, &paths.brain_file()).unwrap();
+        .expect("current fixture loads through the current reader")
+        .brain;
+        let bytes = brain
+            .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
+            .unwrap();
+        crate::training::envelope::write_v1_brain_envelope(&paths.brain_file(), brain.arch(), bytes)
+            .unwrap();
         ObsNormalizer::new(NORMALIZER_CLIP).save(brain.arch(), &paths.normalizer_path());
+    }
+
+    /// bddap/rl#214 WIRING guard (the pure `check_body_identity` matrix is unit-tested
+    /// beside it): a checkpoint stamped with a different body digest than this process
+    /// constructs must refuse to arm through the one classifier — deleting or
+    /// reordering the identity check in `load_brain_normalizer` turns this red.
+    #[test]
+    fn wrong_body_digest_checkpoint_refuses_to_arm() {
+        let dir = std::env::temp_dir().join(format!("rl-bodydigest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let device = NdArrayDevice::Cpu;
+
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
+        let bytes = brain
+            .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
+            .unwrap();
+        let paths = CheckpointDir::new(&dir);
+        // Differs from the constructed digest whatever the test env's body is.
+        let wrong = crate::mesh_fallback::constructed_body_digest() ^ 0xdead_beef;
+        write_envelope(
+            &paths.brain_file(),
+            ArtifactKind::Brain,
+            ArchId::Mlp256,
+            bytes,
+            Some(wrong),
+        )
+        .unwrap();
+        ObsNormalizer::new(NORMALIZER_CLIP).save(ArchId::Mlp256, &paths.normalizer_path());
+
+        let policy = Policy::load(&dir);
+        assert!(!policy.is_loaded(), "a wrong-body checkpoint must not arm");
+        match checkpoint_fits_rig(&dir) {
+            RigFit::Refused(why) => assert!(
+                why.contains("DIFFERENT crab body"),
+                "the refusal must name the body mismatch, got: {why}"
+            ),
+            _ => panic!("a wrong-body checkpoint must classify as Refused"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The demo's "always fresh" guarantee: when training writes a new checkpoint
@@ -646,6 +708,7 @@ mod tests {
             ArtifactKind::Brain,
             ArchId::Mlp256,
             bytes,
+            Some(crate::mesh_fallback::constructed_body_digest()),
         )
         .unwrap();
         ObsNormalizer::new(NORMALIZER_CLIP).save(ArchId::Mlp256, &paths.normalizer_path());

@@ -50,7 +50,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     // missing/refused/rig-mismatched checkpoint, and the join gate needs no weights digest from
     // us beyond that (rl#206) — only the crab-asset digest crosses the wire.
     let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint)?;
-    let asset_digest = crab_world::bot::meshfit::crab_asset_digest();
+    let asset_digest = crab_world::mesh_fallback::constructed_body_digest();
 
     let result = net_loop::connect_and_join(MATCH_SEED, args.host, args.telemetry, asset_digest)?;
 

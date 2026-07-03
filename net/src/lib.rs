@@ -76,7 +76,7 @@ pub mod render;
 ///   `is_loaded()` true on a fresh random brain with NO digest.
 /// - `assets`: every peer advertised the SAME non-zero crab-model-asset digest. The
 ///   giant crab's rapier colliders are derived from the crab MODEL asset
-///   ([`crab_world::bot::meshfit::crab_asset_digest`]), so peers with different crab models
+///   ([`crab_world::mesh_fallback::constructed_body_digest`]), so peers with different crab models
 ///   diverge client-side the moment the crab is built — this half stays peer-symmetric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncVerdict {

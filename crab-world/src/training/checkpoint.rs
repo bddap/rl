@@ -34,11 +34,23 @@ pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 /// so a regression that made it round-trip the enum record (see [`AnyBrain::record_leaf`])
 /// or drop the envelope turns those tests red instead of silently stranding the fleet.
 /// Atomic (temp + fsync-rename), so a crash mid-write can't leave a torn `brain.bin`.
+///
+/// The envelope is stamped with THIS process's constructed body digest
+/// ([`crate::mesh_fallback::constructed_body_digest`], bddap/rl#214) — read here, not
+/// taken as a parameter, so no caller can stamp a body the process didn't actually
+/// build; the resume check ([`check_body_identity`]) aborts a mismatch BEFORE any save,
+/// so the stamp can never launder a wrong-body resume either.
 pub(crate) fn save_brain<B: Backend>(brain: &AnyBrain<B>, path: &Path) -> std::io::Result<()> {
     let bytes = brain
         .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
         .map_err(std::io::Error::other)?;
-    write_envelope(path, ArtifactKind::Brain, brain.arch(), bytes)
+    write_envelope(
+        path,
+        ArtifactKind::Brain,
+        brain.arch(),
+        bytes,
+        Some(crate::mesh_fallback::constructed_body_digest()),
+    )
 }
 
 /// Why a brain file did not yield a brain. `Envelope` wraps the tag-level refusals
@@ -93,18 +105,69 @@ pub(crate) fn decode_brain_payload<B: Backend>(
     .map_err(|e| e.to_string())
 }
 
+/// A loaded brain plus the body identity its envelope carried — [`load_brain_file`]'s
+/// result, so no caller can take the weights while dropping the body stamp on the floor.
+pub(crate) struct BrainFile<B: Backend> {
+    pub(crate) brain: AnyBrain<B>,
+    /// See [`CheckpointEnvelope::body_digest`](super::envelope::CheckpointEnvelope):
+    /// `None` = a pre-#214 v1 brain (trust-on-first-use).
+    pub(crate) body_digest: Option<u64>,
+}
+
 /// Load the brain at `path`, DISPATCHING on the envelope's arch tag: read the envelope,
 /// `AnyBrain::init` the tagged architecture, then load the leaf record into it. The one
 /// chokepoint where a checkpoint chooses its architecture — no code path blind-loads a
 /// record into a guessed variant, and an unregistered arch is refused by name before any
 /// payload decode. Callers apply their own refusal policy to the error (trainer aborts,
-/// inference refuses loudly, see bddap/rl#200 §2).
+/// inference refuses loudly, see bddap/rl#200 §2) and to the body digest
+/// ([`check_body_identity`]).
 pub(crate) fn load_brain_file<B: Backend>(
     path: &Path,
     device: &B::Device,
-) -> Result<AnyBrain<B>, BrainLoadError> {
+) -> Result<BrainFile<B>, BrainLoadError> {
     let env = read_envelope(path, ArtifactKind::Brain).map_err(BrainLoadError::Envelope)?;
-    decode_brain_payload::<B>(env.arch, env.payload, device).map_err(BrainLoadError::Record)
+    let brain =
+        decode_brain_payload::<B>(env.arch, env.payload, device).map_err(BrainLoadError::Record)?;
+    Ok(BrainFile {
+        brain,
+        body_digest: env.body_digest,
+    })
+}
+
+/// A [`check_body_identity`] pass: the checkpoint matches the constructed body, or
+/// predates the stamp and is trusted on first use (the next save stamps it).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BodyIdentity {
+    Match,
+    TrustOnFirstUse,
+}
+
+/// THE body↔policy identity check (bddap/rl#214): a checkpoint stamped with one body
+/// digest must never drive or train the body this process actually constructs if the two
+/// differ — that policy is not this crab. Pure over (checkpoint stamp, constructed
+/// digest) so the matrix is unit-testable; callers pass
+/// [`crate::mesh_fallback::constructed_body_digest`] and apply their refusal policy to
+/// the `Err` (the trainer aborts, inference refuses to arm).
+pub(crate) fn check_body_identity(
+    checkpoint: Option<u64>,
+    constructed: u64,
+) -> Result<BodyIdentity, String> {
+    match checkpoint {
+        None => Ok(BodyIdentity::TrustOnFirstUse),
+        Some(d) if d == constructed => Ok(BodyIdentity::Match),
+        Some(d) => Err(format!(
+            "checkpoint is stamped body digest {d:#018x} but this process constructs body \
+             digest {constructed:#018x} ({}) — the policy was trained on a DIFFERENT crab \
+             body (the asset changed, or one side is the procedural fallback; digest 0 = \
+             fallback). A policy is only Sally on the body it trained on (bddap/rl#214); \
+             restore the matching sally.glb or use a checkpoint trained on this body.",
+            if constructed == 0 {
+                "the procedural fallback"
+            } else {
+                "the canonical mesh"
+            },
+        )),
+    }
 }
 
 /// Build the learner's Adam optimizer (global grad-norm clip 0.5). The ONE source of
@@ -197,7 +260,7 @@ pub(crate) fn save_optimizer<B: AutodiffBackend>(
             return;
         }
     };
-    if let Err(e) = write_envelope(path, ArtifactKind::Optimizer, arch, bytes) {
+    if let Err(e) = write_envelope(path, ArtifactKind::Optimizer, arch, bytes, None) {
         warn!(
             "Failed to write Adam optimizer state to {}: {e}",
             path.display()
@@ -282,7 +345,7 @@ pub(crate) fn save_return_normalizer(norm: &ReturnNormalizer, arch: ArchId, path
             return;
         }
     };
-    if let Err(e) = write_envelope(path, ArtifactKind::ReturnNormalizer, arch, bytes) {
+    if let Err(e) = write_envelope(path, ArtifactKind::ReturnNormalizer, arch, bytes, None) {
         warn!(
             "Failed to write return normalizer to {}: {e}",
             path.display()
@@ -329,7 +392,8 @@ mod tests {
         assert!(paths.brain_file().exists(), "brain.bin should exist");
 
         let loaded = load_brain_file::<TrainBackend>(&paths.brain_file(), &device)
-            .expect("load brain via the arch-dispatching loader");
+            .expect("load brain via the arch-dispatching loader")
+            .brain;
         assert_eq!(loaded.arch(), ArchId::Mlp256, "arch restored from the tag");
 
         let test_obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
@@ -374,7 +438,8 @@ mod tests {
 
         match load_brain_file::<TrainBackend>(&path, &device) {
             Err(BrainLoadError::Envelope(EnvelopeError::Legacy)) => {}
-            other => panic!("expected Legacy refusal, got {other:?}"),
+            Err(other) => panic!("expected Legacy refusal, got {other:?}"),
+            Ok(_) => panic!("expected Legacy refusal, got a loaded brain"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -535,7 +600,7 @@ mod tests {
 
         // (c) A mis-copied file — a BRAIN envelope at the optimizer path — fails the kind
         //     check → cold, never decoded as moments.
-        write_envelope(&path, ArtifactKind::Brain, ArchId::Mlp256, vec![1, 2, 3]).unwrap();
+        write_envelope(&path, ArtifactKind::Brain, ArchId::Mlp256, vec![1, 2, 3], Some(0)).unwrap();
         let cold3 = load_optimizer(
             crab_optimizer::<TrainBackend>(),
             &path,
@@ -555,6 +620,7 @@ mod tests {
             ArtifactKind::Optimizer,
             ArchId::Mlp256,
             vec![0xde, 0xad, 0xbe, 0xef],
+            None,
         )
         .unwrap();
         let cold4 = load_optimizer(
@@ -566,6 +632,51 @@ mod tests {
         assert!(
             cold4.to_record().is_empty(),
             "a corrupt optimizer payload must leave the optimizer cold, not panic"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bddap/rl#214 body↔policy matrix: pre-stamp checkpoints are trusted on first
+    /// use (never invalidated), a matching stamp passes, and a mismatched stamp is the
+    /// loud refusal — in BOTH directions (Sally checkpoint on a fallback body, and a
+    /// fallback-trained checkpoint on Sally).
+    #[test]
+    fn body_identity_matrix() {
+        assert_eq!(
+            check_body_identity(None, 0xabc),
+            Ok(BodyIdentity::TrustOnFirstUse)
+        );
+        assert_eq!(
+            check_body_identity(Some(0xabc), 0xabc),
+            Ok(BodyIdentity::Match)
+        );
+        assert_eq!(check_body_identity(Some(0), 0), Ok(BodyIdentity::Match));
+        let err = check_body_identity(Some(0xabc), 0).unwrap_err();
+        assert!(err.contains("DIFFERENT crab body"), "{err}");
+        assert!(check_body_identity(Some(0), 0xabc).is_err());
+    }
+
+    /// `save_brain` stamps the CONSTRUCTED body digest and `load_brain_file` hands it
+    /// back — the stamp round-trips and, being read from the process-global verdict on
+    /// both sides, always passes [`check_body_identity`] for a same-process round trip.
+    #[test]
+    fn save_brain_stamps_constructed_body_digest() {
+        let dir = std::env::temp_dir().join("rl_test_body_stamp");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let device = NdArrayDevice::Cpu;
+
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let path = CheckpointDir::new(&dir).brain_file();
+        save_brain(&brain, &path).unwrap();
+
+        let loaded = load_brain_file::<TrainBackend>(&path, &device).unwrap();
+        let constructed = crate::mesh_fallback::constructed_body_digest();
+        assert_eq!(loaded.body_digest, Some(constructed));
+        assert_eq!(
+            check_body_identity(loaded.body_digest, constructed),
+            Ok(BodyIdentity::Match)
         );
 
         let _ = std::fs::remove_dir_all(&dir);

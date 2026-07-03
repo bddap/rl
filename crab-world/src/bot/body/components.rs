@@ -38,7 +38,12 @@ impl CrabAssets {
 ///
 /// WHY a resource and not a `CRAB_MODEL_PATH` env override: poisoning a global env var to
 /// force the fallback is spooky action at a distance every other reader of the resolver
-/// feels (bddap/rl#147); an explicit value can't mislead a third reader.
+/// feels (bddap/rl#147); an explicit value can't mislead a third reader. CAVEAT for any
+/// future explicit insert that DISAGREES with the verdict (none exists today; rl-demo's is
+/// verdict-derived): the checkpoint body stamp
+/// ([`crate::mesh_fallback::constructed_body_digest`], bddap/rl#214) is keyed off the
+/// VERDICT, so a forced-fallback override would drive one body while stamping another —
+/// don't add one without re-keying the stamp.
 ///
 /// Defaults (FromWorld) to the shared preflight verdict [`crate::mesh_fallback::usable_model_path`],
 /// so a present-but-unloadable glb resolves to `None` here (the honest fallback); the body then
