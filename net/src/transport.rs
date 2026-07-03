@@ -35,7 +35,8 @@ use crate::snapshot::CoreSnapshot;
 /// incompatible wire change — a new/changed frame kind or a shifted body layout — so
 /// mismatched builds refuse at connect time rather than mis-frame or silently desync
 /// mid-stream (the fleet updates atomically via rl-update, so a refused connect means
-/// "update the other device", never a mixed-version match).
+/// "update the other device", never a mixed-version match). NEXT BUMP: fold in
+/// rl#221 — carry the typed refusal verdict in [`Refuse`] instead of a string.
 pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/10";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
