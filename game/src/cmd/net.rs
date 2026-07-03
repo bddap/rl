@@ -17,7 +17,7 @@ use super::shared::run_solo_round;
 pub(crate) struct Args {
     /// Wait this long for peers to be discovered before starting the tick loop.
     /// Discovery is mDNS, so a couple seconds covers a quiet LAN.
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = super::shared::DEFAULT_DISCOVER_SECS)]
     discover_secs: u64,
     /// Run the lockstep loop for this many seconds, then report and exit.
     #[arg(long, default_value_t = 10)]
@@ -25,7 +25,7 @@ pub(crate) struct Args {
     /// Expected peer count (including us). The loop waits up to `discover_secs` to
     /// reach it; if fewer are found it proceeds with whoever showed up (and a single
     /// peer simply runs solo over the network stack).
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = super::shared::DEFAULT_EXPECT)]
     expect: usize,
     /// Stream live telemetry to the collector with this endpoint id (from
     /// `game telemetry-collector`). Opens a SEPARATE iroh connection on a distinct ALPN

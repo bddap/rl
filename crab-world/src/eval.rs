@@ -30,7 +30,7 @@ use std::path::Path;
 use bevy::prelude::*;
 
 use crate::bot::RESET_GRACE_TICKS;
-use crate::bot::actuator::{ACTION_SIZE, CrabActions};
+use crate::bot::actuator::{ACTION_SIZE, CrabActions, applied_torque};
 use crate::bot::body::{CrabCarapace, CrabEnvId, CrabJoint};
 use crate::bot::headless::{
     HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
@@ -302,22 +302,16 @@ fn eval_step(
     }
 
     // Applied joint torque this active tick: exactly what `apply_actions` will put on the body —
-    // Σ over env-0 joints of |clamp(action)|·drive_torque_ceiling. Measured on the action just
-    // written, reusing the actuator's clamp + per-joint ceiling so it can't drift from what's
-    // applied. Settle ticks (zero actions) don't count.
+    // Σ over env-0 joints of |applied_torque(id, action)|. Measured on the action just written,
+    // through the actuator's OWN formula so it can't drift from what's applied. Settle ticks
+    // (zero actions) don't count.
     if !settling && let Some(a) = actions.envs.first() {
         let mut tick_torque = 0.0f32;
         for (joint, env) in joints.iter() {
             if env.0 != 0 {
                 continue;
             }
-            let raw = a[joint.id.index()];
-            let clamped = if raw.is_finite() {
-                raw.clamp(-1.0, 1.0)
-            } else {
-                0.0
-            };
-            tick_torque += clamped.abs() * joint.id.drive_torque_ceiling();
+            tick_torque += applied_torque(joint.id, a[joint.id.index()]).abs();
         }
         state.torque_sum += tick_torque as f64;
         state.torque_ticks += 1;

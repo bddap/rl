@@ -571,7 +571,7 @@ fn carapace_box(model: &impl BindSource, center: Vec3) -> (Vec3, Vec3) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::colliders::{RestShape, link_capsule};
+    use super::super::colliders::{LinkCapsule, link_capsule};
     use super::*;
     use crate::bot::meshfit::{LoadedModel, model_path};
     use crate::bot::rig::fallback_recipe;
@@ -749,9 +749,7 @@ mod tests {
                     ) if s == side
                 )
             }) {
-                let RestShape::Capsule { a, b, radius } = link_capsule(link, world[i]) else {
-                    unreachable!("cheliped links spawn as capsules");
-                };
+                let LinkCapsule { a, b, radius } = link_capsule(link, world[i]);
                 // Highest point of the rotated capsule = the higher cylinder cap (endpoint
                 // swung about the shoulder pivot) plus the hemispherical cap's radius.
                 for cap in [a, b] {

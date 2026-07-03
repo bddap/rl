@@ -94,34 +94,43 @@ pub(crate) fn write_tick_hash_log(
     std::fs::write(path, out).with_context(|| format!("writing hash log to {}", path.display()))
 }
 
-/// Resolve the `--render-mode` flag into a [`net::render::RenderMode`]. An explicit value is
-/// parsed (rejecting an unknown token with an actionable error). With NO flag and NO
-/// `RL_RENDER_MODE`/`RL_DEBUG_COLLIDERS` override, the UNUSABLE-GLB FALLBACK kicks in: if the
-/// canonical Sally mesh can't be resolved OR is present-but-unloadable, default to the honest
-/// `colliders` view (the wireframe IS the crab the player sees — never a placeholder) and log a
-/// host-tagged error naming the actual cause so the bad asset is visible in telemetry. With the mesh
-/// usable (or an env override), the env decides (mesh by default).
+/// Resolve the `--render-mode` flag into a [`net::render::RenderMode`]: parse an explicit value
+/// (rejecting an unknown token with an actionable error), then hand the precedence decision —
+/// flag beats env beats the unusable-glb fallback — to the ONE shared
+/// [`crab_world::mesh_fallback::initial_render_mode`], the same decision rl-demo boots from, so
+/// the two player-facing surfaces can't diverge on a broken-glb + env-set launch. An unusable
+/// mesh is logged LOUDLY in there; the on-screen banner companion is spawned on the windowed
+/// surface in `net::render::scene` (this headless-resolvable check decides only the render MODE;
+/// the banner needs the live window).
 pub(crate) fn resolve_render_mode(flag: Option<&str>) -> Result<net::render::RenderMode> {
-    if let Some(s) = flag {
-        return net::render::RenderMode::parse(s).ok_or_else(|| {
-            anyhow::anyhow!("--render-mode must be one of mesh|mesh+colliders|colliders")
-        });
-    }
-    let env_override = std::env::var_os("RL_RENDER_MODE").is_some()
-        || std::env::var_os("RL_DEBUG_COLLIDERS").is_some();
-    // The FULL preflight, not existence-only: a present-but-broken glb also forces the honest
-    // colliders view, with the load error as the reason (bddap/rl#154). Same `usable_model` verdict
-    // the body/silhouette flip on, so the render MODE can't disagree with the geometry drawn.
-    if !env_override && let Err(reason) = crab_world::mesh_fallback::usable_model() {
-        // LOUD on the telemetry stream (and stderr). Shared with rl-demo so both surfaces name the
-        // bad Sally identically (rl#706). The on-screen banner companion is spawned on the windowed
-        // surface in `net::render::scene` (this headless-resolvable check decides only the render
-        // MODE; the banner needs the live window).
-        crab_world::mesh_fallback::log_fallback(crab_world::mesh_fallback::Surface::Game, reason);
-        return Ok(net::render::RenderMode::Colliders);
-    }
-    Ok(net::render::RenderMode::from_env())
+    let flag = flag
+        .map(|s| {
+            net::render::RenderMode::parse(s).ok_or_else(|| {
+                anyhow::anyhow!("--render-mode must be one of mesh|mesh+colliders|colliders")
+            })
+        })
+        .transpose()?;
+    Ok(crab_world::mesh_fallback::initial_render_mode(
+        flag,
+        crab_world::mesh_fallback::Surface::Game,
+    ))
 }
+
+/// Parse a `--join` code into the endpoint to dial: `Some(code)` with a non-blank code dials
+/// it; a bare/blank `--join` (or none) falls back to LAN discovery. One parser for every
+/// joining command (`play`, `net-screenshot`) so the blank-means-discover rule can't drift.
+pub(crate) fn parse_join_dial(join: Option<&str>) -> Result<Option<iroh::EndpointId>> {
+    Ok(match join {
+        Some(code) if !code.trim().is_empty() => Some(code.trim().parse()?),
+        _ => None,
+    })
+}
+
+/// Default peer-formation knobs shared by every networked command (`net`, `play`,
+/// `net-screenshot`): expected peer count including us, and how long discovery waits for
+/// them (mDNS on a quiet LAN — a couple of seconds covers it).
+pub(crate) const DEFAULT_EXPECT: usize = 2;
+pub(crate) const DEFAULT_DISCOVER_SECS: u64 = 4;
 
 /// One offline lockstep round for `run_secs`: a single peer whose own input completes
 /// every tick (no network), ticking at [`net::sim::TICK_HZ`] and printing a final summary. Shared by

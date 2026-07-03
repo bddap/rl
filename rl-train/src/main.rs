@@ -364,7 +364,7 @@ fn verify_colliders() -> i32 {
     let mut ranking: Vec<(String, f32, bool)> = Vec::new();
     let mut any_fail = false;
 
-    for rc in bot::rig::rest_colliders(&model, &recipe) {
+    for rc in bot::rig::rest_colliders(&recipe) {
         let label = format!("{:?}", rc.part);
         let (score, rnorm, fail) = match rc.shape {
             RestShape::Capsule { a, b, radius } => {
@@ -484,7 +484,7 @@ fn verify_pivots() -> i32 {
     // Self-checks. Interior reference = the leg-hub centroid (the carapace pivot the
     // rig anchors every limb to), which is solidly inside the body shell; it must
     // read ~+1. A point 10 units past the bbox must read ~0.
-    let hub = bot::rig::rest_colliders(&model, &recipe)
+    let hub = bot::rig::rest_colliders(&recipe)
         .iter()
         .find(|rc| rc.part == bot::meshfit::PartId::Carapace)
         .map(|rc| rc.pivot)
@@ -532,7 +532,7 @@ fn verify_pivots() -> i32 {
     let mut windings: Vec<f32> = Vec::new();
     let yn = |b: bool| if b { "IN" } else { "OUT" };
 
-    for rc in bot::rig::rest_colliders(&model, &recipe) {
+    for rc in bot::rig::rest_colliders(&recipe) {
         let label = format!("{:?}", rc.part);
         let (pwn, pdist, pin) = probe(rc.pivot);
         windings.push(pwn);

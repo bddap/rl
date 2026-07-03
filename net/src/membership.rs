@@ -148,6 +148,19 @@ pub fn roster_hash(ids: &[EndpointId]) -> u64 {
     h.finish()
 }
 
+/// THE "lowest endpoint id is the host" rule — the single spelling of how a roster picks the
+/// peer that runs the authoritative server. [`crate::formation::assign_player_ids`]'s sorted
+/// assignment hands that same peer `PlayerId(0)` (cross-locked by a test there), so "host",
+/// "server", and "PlayerId(0)" all name this one pick. Every peer computes the same answer
+/// from the same set, so the star agrees on its center with no negotiation. Panics on an
+/// empty roster — every roster contains at least the caller.
+pub fn host_of(roster: &[EndpointId]) -> EndpointId {
+    *roster
+        .iter()
+        .min_by(|a, b| a.as_bytes().cmp(b.as_bytes()))
+        .expect("a roster always contains at least us")
+}
+
 /// The agreement state machine: who is currently live, what each peer is advertising,
 /// and whether the agreement predicate has held long enough to close on an identical
 /// set (see the module docs for why the CONTINUOUS hold is load-bearing). Pure and
@@ -447,8 +460,7 @@ impl Membership {
     /// sites ([`crate::SyncVerdict`]).
     ///
     /// - `host_brain` — the HOST self-gate: true iff the peer that will run the
-    ///   authoritative server — the lowest live endpoint id, PlayerId(0) by
-    ///   [`crate::formation::assign_player_ids`]'s sorted assignment — advertised a
+    ///   authoritative server ([`host_of`] the live set) advertised a
     ///   NON-ZERO policy-weights digest in its own direct beats. Only the host EXECUTES
     ///   the brain (clients adopt its snapshots and render its articulation), so brain
     ///   equality across peers gates nothing real; what must hold is "the host runs a
@@ -466,10 +478,7 @@ impl Membership {
     /// ([`crate::may_arm_external_crab`]). Call after [`Membership::poll`] (which
     /// expires the dead) so the live set is current.
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
-        let host = *self
-            .live_set()
-            .first()
-            .expect("live_set always contains at least us");
+        let host = host_of(&self.live_set());
         let host_weights = if host == self.me {
             self.local_digest
         } else {

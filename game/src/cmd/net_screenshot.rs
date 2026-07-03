@@ -7,10 +7,9 @@
 
 use anyhow::Result;
 use clap::Parser;
-use iroh::EndpointId;
 use net::{net_loop, render};
 
-use super::shared::{MATCH_SEED, nn_crab_checkpoint_dir, resolve_render_mode};
+use super::shared::{MATCH_SEED, nn_crab_checkpoint_dir, parse_join_dial, resolve_render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -24,7 +23,7 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 5)]
     discover_secs: u64,
     /// Expected peer count including us; proceeds with whoever showed up after `discover_secs`.
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = super::shared::DEFAULT_EXPECT)]
     expect: usize,
     /// Output PNG for this peer's captured frame.
     #[arg(long, default_value = "net.png")]
@@ -33,9 +32,9 @@ pub(crate) struct Args {
     /// adopted the host's crab pose and the crab is in frame. Also GPU warmup.
     #[arg(long, default_value_t = 140)]
     settle: u32,
-    #[arg(long, default_value_t = 1280)]
+    #[arg(long, default_value_t = crab_world::screenshot::DEFAULT_WIDTH)]
     width: u32,
-    #[arg(long, default_value_t = 720)]
+    #[arg(long, default_value_t = crab_world::screenshot::DEFAULT_HEIGHT)]
     height: u32,
     /// Vertical FOV (degrees) — widen to fit the towering giant crab in one frame.
     #[arg(long, default_value_t = 95.0)]
@@ -61,10 +60,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let weights_digest = crab_world::play::checkpoint_digest(&external_crab);
     let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
 
-    let dial = match &args.join {
-        Some(code) if !code.trim().is_empty() => Some(code.trim().parse::<EndpointId>()?),
-        _ => None,
-    };
+    let dial = parse_join_dial(args.join.as_deref())?;
     let result = net_loop::connect_and_form_dialing(
         MATCH_SEED,
         args.discover_secs,

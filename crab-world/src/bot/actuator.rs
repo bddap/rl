@@ -33,6 +33,23 @@ impl CrabActions {
     }
 }
 
+/// The ONE raw-drive → applied-joint-torque formula: the SOLE ±1 torque-bound for every
+/// `CrabActions` writer (the training policy's raw drive, the demo, manual control) — each
+/// writes an un-clamped value and this clamp is where it becomes a bounded muscle command,
+/// scaled by the joint's ceiling. Keeping the bound here (not at each writer) lets the
+/// training tax see the policy's unbounded drive — a saturating `|a|≫1` is penalized for the
+/// overshoot, then clamped to a physical torque here. A non-finite drive applies zero (the
+/// caller decides whether to warn — see [`apply_actions`]). Shared by the actuator itself and
+/// the eval's applied-torque meter, so the measured torque can't drift from the applied one.
+pub fn applied_torque(id: CrabJointId, raw: f32) -> f32 {
+    let a = if raw.is_finite() {
+        raw.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    a * id.drive_torque_ceiling()
+}
+
 /// Applies each env's action vector as joint torques.
 ///
 /// Every crab part's `ExternalForce` is overwritten each step (set, not
@@ -55,28 +72,18 @@ pub fn apply_actions(
         };
         let id = joint.id;
         let raw = values[id.index()];
-        // The SOLE ±1 torque-bound for every `CrabActions` writer (the training policy's raw
-        // drive, the demo, manual control): each writes an un-clamped value and this clamp is
-        // where it becomes a bounded muscle command. Keeping the bound here (not at each
-        // writer) lets the training tax see the policy's unbounded drive — a saturating
-        // `|a|≫1` is penalized for the overshoot, then clamped to a physical torque here.
-        let a = if raw.is_finite() {
-            raw.clamp(-1.0, 1.0)
-        } else {
-            // A non-finite drive is a real numerical fault (a NaN-spewing brain), not a neutral
-            // output — and zeroing it degrades the crab to rest pose INDISTINGUISHABLY from a
-            // legitimately-zero command. Zero it (behavior unchanged) but surface it once —
-            // latched like `warned_no_env`, so a broken policy is visible in logs/telemetry
-            // instead of a silently-limp crab (rl#145).
-            if !*warned_nonfinite {
-                error!(
-                    "crab actuator: non-finite drive ({raw}) on joint {id:?} — zeroed; a healthy \
-                     brain never emits NaN/∞, so this flags a numerically-broken policy"
-                );
-                *warned_nonfinite = true;
-            }
-            0.0
-        };
+        // A non-finite drive is a real numerical fault (a NaN-spewing brain), not a neutral
+        // output — and `applied_torque` zeroing it degrades the crab to rest pose
+        // INDISTINGUISHABLY from a legitimately-zero command. Surface it once — latched like
+        // `warned_no_env`, so a broken policy is visible in logs/telemetry instead of a
+        // silently-limp crab (rl#145).
+        if !raw.is_finite() && !*warned_nonfinite {
+            error!(
+                "crab actuator: non-finite drive ({raw}) on joint {id:?} — zeroed; a healthy \
+                 brain never emits NaN/∞, so this flags a numerically-broken policy"
+            );
+            *warned_nonfinite = true;
+        }
         let Ok(parent_tf) = transforms.get(mj.parent) else {
             continue;
         };
@@ -85,7 +92,7 @@ pub fn apply_actions(
         // torque couple on child and parent — a free vector, internal by
         // construction (zero net torque/force on the crab).
         let world_axis = parent_tf.rotation * joint.axis_local;
-        let wrench = world_axis * (a * id.drive_torque_ceiling());
+        let wrench = world_axis * applied_torque(id, raw);
         *torque.entry(child).or_default() += wrench;
         *torque.entry(mj.parent).or_default() -= wrench;
     }

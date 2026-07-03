@@ -241,4 +241,13 @@ pub mod trig_client {
     pub fn turns_to_radians(a: i32) -> f32 {
         (wrap_turns(a) as f32) / (TURN as f32) * std::f32::consts::TAU
     }
+
+    /// Inverse of [`turns_to_radians`]: a float radians angle (e.g. an `atan2` heading) to
+    /// wrapped turn units, nearest-turn rounded. Client/bridge-side like the forward — a
+    /// place where a float measurement enters the integer sim's angle convention (the
+    /// external-crab yaw bridge feeds `state_hash` through this), so the rounding must have
+    /// exactly one spelling.
+    pub fn radians_to_turns(r: f32) -> i32 {
+        wrap_turns((r / std::f32::consts::TAU * TURN as f32).round() as i32)
+    }
 }

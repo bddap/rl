@@ -64,11 +64,11 @@ pub struct Args {
     seconds: f32,
 
     /// Screenshot width in pixels.
-    #[arg(long, default_value_t = 1280)]
+    #[arg(long, default_value_t = crab_world::screenshot::DEFAULT_WIDTH)]
     width: u32,
 
     /// Screenshot height in pixels.
-    #[arg(long, default_value_t = 720)]
+    #[arg(long, default_value_t = crab_world::screenshot::DEFAULT_HEIGHT)]
     height: u32,
 
     /// Directory the DEMO hot-reloads the policy from while running — the LIVE
@@ -154,21 +154,16 @@ fn main() {
     let _otel = otel::init("rl-demo");
 
     // `Some(reason)` ⇒ the canonical mesh is unusable, kept so the loudness lands in THREE
-    // places, not just telemetry: the OTEL error below (stderr + OTLP), the forced colliders
-    // render mode (`mesh_ok` decides the initial mode below), and — in the windowed demo — an
-    // on-screen banner (see the Demo arm). The owner's bug (rl#706) was exactly this: a fallback
-    // he could SEE but not identify, so the failure must name itself on the screen he's looking
-    // at, not only in a log he isn't.
+    // places, not just telemetry: the OTEL error (raised inside `initial_render_mode` below,
+    // stderr + OTLP, shared with the game surface so both name the missing Sally identically),
+    // the forced colliders render mode, and — in the windowed demo — an on-screen banner (see
+    // the Demo arm). The owner's bug (rl#706) was exactly this: a fallback he could SEE but not
+    // identify, so the failure must name itself on the screen he's looking at, not only in a
+    // log he isn't.
     let mesh_fallback_reason: Option<String> = crab_world::mesh_fallback::usable_model()
         .as_ref()
         .err()
         .cloned();
-    if let Some(reason) = &mesh_fallback_reason {
-        // LOUD via telemetry (stderr + OTLP), shared with the game surface so both name the
-        // missing Sally identically (rl#706).
-        crab_world::mesh_fallback::log_fallback(crab_world::mesh_fallback::Surface::RlDemo, reason);
-    }
-    let mesh_ok = mesh_fallback_reason.is_none();
 
     let mode = if let Some(path) = args.render_video.clone() {
         AppMode::RenderVideo {
@@ -230,15 +225,16 @@ fn main() {
     }
 
     // The render-mode cycle: the SHARED collider wireframe + mode-naming HUD (the same
-    // `crab_view` GCR uses — ONE wireframe impl, not Rapier's debug-render). Boots in `colliders`
-    // when the canonical Sally mesh is missing (the honest physics view IS the crab the player
-    // sees), else from the `RL_RENDER_MODE`/`RL_DEBUG_COLLIDERS` env (mesh otherwise). The demo's
-    // Right-arrow / D-pad cycles it live (see `play::demo::demo_controls`).
-    let initial_render_mode = if mesh_ok {
-        crab_world::crab_view::RenderMode::from_env()
-    } else {
-        crab_world::crab_view::RenderMode::Colliders
-    };
+    // `crab_view` GCR uses — ONE wireframe impl, not Rapier's debug-render). Boots from the ONE
+    // shared precedence decision (`mesh_fallback::initial_render_mode`, same as game/net's
+    // commands, so the two surfaces can't diverge): env override, else `colliders` when the
+    // canonical Sally mesh is unusable (the honest physics view IS the crab the player sees),
+    // else mesh. The demo has no --render-mode flag (`None`). The demo's Right-arrow / D-pad
+    // cycles it live (see `play::demo::demo_controls`).
+    let initial_render_mode = crab_world::mesh_fallback::initial_render_mode(
+        None,
+        crab_world::mesh_fallback::Surface::RlDemo,
+    );
     // Cage gate open always: the demo has no menu phase — it renders the round for its whole
     // life, so there is no screen the gizmos could leak behind (the gate exists for GCR, rl#211).
     crab_world::crab_view::register(&mut app, initial_render_mode, || true);
