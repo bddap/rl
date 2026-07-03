@@ -180,10 +180,10 @@ fn sample_graph(
         let idx = id.index();
 
         let angle = joint_angle(joint.axis_local, parent_tf.rotation, child_tf.rotation);
-        // `actions.envs` holds the policy's UNBOUNDED drive `μ+σ·ε`, so clamp to ±1 here to
-        // recover the signed torque command the sim actually runs (the actuator's bound) for
-        // the plot.
-        let torque = action[idx].clamp(-1.0, 1.0);
+        // `actions.envs` holds the policy's UNBOUNDED drive `μ+σ·ε`; the actuator's own bound
+        // recovers the signed command the sim actually runs for the plot (a non-finite drive
+        // plots as the 0 the actuator applies, not a plot-breaking NaN).
+        let torque = crate::bot::actuator::bounded_drive(action[idx]);
 
         push(&mut graph.angle[idx], angle);
         push(&mut graph.torque[idx], torque);

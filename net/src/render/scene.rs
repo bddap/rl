@@ -250,12 +250,11 @@ pub(super) fn spawn_world(
     // With the crab armed but NO model, the silhouette (the real colliders, NOT the real Sally
     // rig) stays shown AS the crab. Shipping that with no signal is a silent fallback, so on
     // the WINDOWED surface name it on screen with the banner
-    // shared with rl-demo. The OTEL companion already fires in `game::resolve_render_mode`; only
+    // shared with rl-demo. The OTEL companion already fires in
+    // `crab_world::mesh_fallback::initial_render_mode` (via `game::resolve_render_mode`); only
     // the live window adds the banner here. The screenshot path has no window (`primary_window:
     // None`) so a UI band can't pollute the capture — there the OTEL error + visible silhouette
-    // are the signal. NB the gates differ on purpose: the banner shows whenever the mesh is
-    // absent (it answers "what am I looking at?"), while that OTEL error suppresses under an
-    // explicit RL_RENDER_MODE override (it means "the missing mesh FORCED the fallback").
+    // are the signal.
     if armed && !have_model && !windows.is_empty() {
         // `!have_model` ⇒ the verdict is `Err`, so name the ACTUAL cause (absent vs broken) on
         // screen; `MESH_ABSENT_REASON` is only the fallback if the verdict somehow
