@@ -54,6 +54,72 @@ pub const JOIN_LEAD: u64 = 3;
 /// ahead. Folding also bounds queue memory at the record seam.
 const TARGET_BACKLOG: usize = 2;
 
+/// Starvation-observability window, in assembled ticks (1 s). [`Server::advance`] counts each
+/// remote player's starved fills — a stream hold, or the no-stream neutral of a player that
+/// never delivered ONE input (the maximal starvation) — per window, keyed off the ROSTER, and
+/// turns a chronic count into a [`StarvationReport`] at each window boundary. A WINDOWED count
+/// (not a consecutive-run counter) on purpose: the chronic case rl#213 names — a late client
+/// permanently one-tick-held — alternates hold/consume and would never form a long run.
+const STARVATION_WINDOW: u64 = crate::sim::TICK_HZ;
+
+/// Starved fills within one [`STARVATION_WINDOW`] at which a player counts as chronically
+/// starved (half the window ≈ 0.5 s of holds per second — rl#213's magnitude). Below this,
+/// occasional holds are normal jitter absorption and stay quiet.
+const STARVATION_REPORT_THRESHOLD: u64 = STARVATION_WINDOW / 2;
+
+/// Minimum ticks between two reports for the SAME player (10 s), so a chronically bad link
+/// re-reports at a human cadence instead of once per window — the flood bound rl#213 requires.
+const STARVATION_REPORT_COOLDOWN: u64 = 10 * crate::sim::TICK_HZ;
+
+/// At most this many un-drained [`StarvationReport`]s are held on the [`Server`]; beyond it,
+/// new ones are dropped WITHOUT arming the player's cooldown, so a capped-out player retries
+/// at the next boundary once the driver drains. Only a driver that never drains could hit it —
+/// the bound exists so telemetry bookkeeping can never grow without limit.
+const STARVATION_REPORT_CAP: usize = 16;
+
+/// One chronic input-starvation observation (rl#213): `pid` filled `starved` of the `window`
+/// assembled ticks closing at `tick` with holds/neutral. Produced by [`Server::advance`] at
+/// window boundaries (rate-limited per player), drained by the driver via
+/// [`Server::take_starvation_reports`] and surfaced as telemetry
+/// ([`crate::telemetry::surface_starvation`]). Pure observability — the hold itself already
+/// keeps the sim correct and bounded (95d3c7b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StarvationReport {
+    pub pid: PlayerId,
+    /// Starved fills within the window — ≥ half the window by construction.
+    pub starved: u64,
+    /// The window length in ticks, so the consumer renders a rate without re-deriving it.
+    pub window: u64,
+    /// The assemble tick at which the window closed (the window covers the `window` fills
+    /// before it).
+    pub tick: u64,
+}
+
+impl std::fmt::Display for StarvationReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "input starvation: player {} held on {}/{} ticks in the window closing at tick {} \
+             — its input stream is chronically late (rl#213)",
+            self.pid.0, self.starved, self.window, self.tick
+        )
+    }
+}
+
+/// Per-remote-player starvation bookkeeping (rl#213), keyed off the ROSTER — deliberately NOT
+/// stored on [`InputStream`], whose lifetime starts at the first delivered input: the
+/// never-sent player (no stream at all) is the maximal starvation and must count too. Entries
+/// persist across windows so the report cooldown survives a clean window; a departed player's
+/// entry is pruned at the window boundary once its roster shrink lands.
+#[derive(Default)]
+struct StarvationTally {
+    /// Starved fills in the current [`STARVATION_WINDOW`]; reset at each boundary.
+    starved_in_window: u64,
+    /// The boundary tick of this player's last [`StarvationReport`], for the per-player
+    /// [`STARVATION_REPORT_COOLDOWN`]. `None` = never reported.
+    last_report: Option<u64>,
+}
+
 /// The outcome of [`Server::admit`]: the stable [`PlayerId`] allocated to the joiner, the tick its
 /// roster change takes effect, and the complete new roster from that tick. The caller UNICASTS
 /// this to the joiner alone, which builds its session via [`crate::lockstep::Lockstep::join_at`];
@@ -188,14 +254,16 @@ impl InputStream {
 
     /// The input this player contributes to the tick being assembled: the next queued input
     /// (exactly once, in issue order), or a hold of the last consumed move axes when starved.
-    fn consume(&mut self) -> Input {
+    /// The returned flag is the ONE source of "this fill was starved" — the caller's rl#213
+    /// tally counts it rather than re-deriving queue emptiness.
+    fn consume(&mut self) -> (Input, bool) {
         match self.queue.pop_front() {
             Some(m) => {
                 self.held = m.input;
                 self.input_next = m.issue_tick + 1;
-                m.input
+                (m.input, false)
             }
-            None => self.held.hold(),
+            None => (self.held.hold(), true),
         }
     }
 }
@@ -232,6 +300,12 @@ pub struct Server {
     /// [`CoreSnapshot`](crate::snapshot::CoreSnapshot) is what every client renders. Stepped one
     /// tick at a time by [`Server::step_next`], gated by [`Server::next_tick_ready`].
     sim: Sim,
+    /// Per-remote-player starvation tallies (rl#213), roster-keyed (see [`StarvationTally`]).
+    starvation: BTreeMap<PlayerId, StarvationTally>,
+    /// Pending chronic-starvation observations (rl#213), pushed by [`Server::advance`] at
+    /// window boundaries and drained by [`Server::take_starvation_reports`]. Bounded at
+    /// [`STARVATION_REPORT_CAP`].
+    starvation_reports: Vec<StarvationReport>,
     /// The assembled tick awaiting the authoritative step, if any. At most ONE by construction
     /// ([`Server::advance`] refuses to assemble past an unstepped tick), which is what lets each
     /// [`PendingTick`] carry the watermark map for exactly its own snapshot. Held (rather than
@@ -287,6 +361,8 @@ impl Server {
             streams: BTreeMap::new(),
             sim,
             pending: None,
+            starvation: BTreeMap::new(),
+            starvation_reports: Vec::new(),
         }
     }
 
@@ -329,6 +405,13 @@ impl Server {
             .record(msg);
     }
 
+    /// Drain the pending chronic-starvation observations (rl#213) for the driver to surface
+    /// (telemetry + log). Empty in the healthy case at zero cost; un-drained reports are
+    /// bounded at [`STARVATION_REPORT_CAP`], so a driver that never calls this leaks nothing.
+    pub fn take_starvation_reports(&mut self) -> Vec<StarvationReport> {
+        std::mem::take(&mut self.starvation_reports)
+    }
+
     /// Assemble the next authoritative tick, NOW — host-paced: `local` is the host's own input
     /// (issued exactly once per wall-clock tick, which is what paces the match), and every other
     /// player rostered at this tick contributes its stream's next queued input or a starved
@@ -346,25 +429,60 @@ impl Server {
             local.issue_tick, tick,
             "the host issues exactly one input per assembled tick"
         );
+        // Starvation-window boundary (rl#213): close the window of the STARVATION_WINDOW fills
+        // before `tick` (this runs before this tick's consumes), turning a chronic starved
+        // count into a report — per-player cooldown bounds the rate, the cap bounds the
+        // memory. Pruning first (level-triggered against the roster, like the sim's departure
+        // mirror) retires a departed player's tally without relying on `depart` bookkeeping.
+        // At tick 0 the tally map is empty, so the boundary there is a no-op.
+        if tick.is_multiple_of(STARVATION_WINDOW) {
+            let rostered = self.roster.at(tick);
+            self.starvation.retain(|pid, _| rostered.contains(pid));
+            for (&pid, tally) in &mut self.starvation {
+                if tally.starved_in_window >= STARVATION_REPORT_THRESHOLD
+                    && tally
+                        .last_report
+                        .is_none_or(|t0| tick - t0 >= STARVATION_REPORT_COOLDOWN)
+                    && self.starvation_reports.len() < STARVATION_REPORT_CAP
+                {
+                    tally.last_report = Some(tick);
+                    self.starvation_reports.push(StarvationReport {
+                        pid,
+                        starved: tally.starved_in_window,
+                        window: STARVATION_WINDOW,
+                        tick,
+                    });
+                }
+                tally.starved_in_window = 0;
+            }
+        }
         let mut inputs = BTreeMap::new();
         let mut input_next = BTreeMap::new();
         for &pid in self.roster.at(tick) {
             let input = if pid == self.me {
                 input_next.insert(pid, local.issue_tick + 1);
                 local.input
-            } else if let Some(s) = self.streams.get_mut(&pid) {
-                let input = s.consume();
-                if s.input_next > 0 {
-                    input_next.insert(pid, s.input_next);
+            } else {
+                let (input, starved) = if let Some(s) = self.streams.get_mut(&pid) {
+                    let (input, starved) = s.consume();
+                    if s.input_next > 0 {
+                        input_next.insert(pid, s.input_next);
+                    }
+                    (input, starved)
+                } else {
+                    // No stream: this player never sent an input, or it DEPARTED with its roster
+                    // removal still pending ([`Server::depart`] drops the stream immediately but
+                    // the shrink can land after an already-scheduled change). Play neutral, and
+                    // create no stream/watermark state — resurrecting a departed player's
+                    // bookkeeping here would leak it into every later snapshot, since `depart`
+                    // never runs twice. It still COUNTS as starved: the never-sent uplink is
+                    // rl#213's maximal starvation (the tally prunes on the roster, not here).
+                    (Input::default(), true)
+                };
+                if starved {
+                    self.starvation.entry(pid).or_default().starved_in_window += 1;
                 }
                 input
-            } else {
-                // No stream: this player never sent an input, or it DEPARTED with its roster
-                // removal still pending ([`Server::depart`] drops the stream immediately but the
-                // shrink can land after an already-scheduled change). Play neutral, and create
-                // no stream/watermark state — resurrecting a departed player's bookkeeping here
-                // would leak it into every later snapshot, since `depart` never runs twice.
-                Input::default()
             };
             inputs.insert(pid, input);
         }
@@ -630,6 +748,97 @@ mod tests {
         assert!(s.queued(PlayerId(1)).is_empty(), "the burst fully consumed");
     }
 
+    /// Drive `s` through ticks `0..=last`, recording one real input for player 1 whenever
+    /// `send(t)` says so (issue ticks count up independently of `t`), and collect every
+    /// [`StarvationReport`] as it surfaces. The starvation-observability test harness (rl#213).
+    fn run_with_sender(
+        s: &mut Server,
+        last: u64,
+        send: impl Fn(u64) -> bool,
+    ) -> Vec<StarvationReport> {
+        let mut reports = Vec::new();
+        let mut issue = 0u64;
+        for t in 0..=last {
+            if send(t) {
+                s.record_remote(PlayerId(1), tickmsg(issue, 1.0));
+                issue += 1;
+            }
+            s.advance(tickmsg(t, 0.0));
+            let _ = s.step_next(None);
+            reports.extend(s.take_starvation_reports());
+        }
+        reports
+    }
+
+    /// rl#213: a stream that goes SILENT reports at the first window boundary — naming the
+    /// player and the starved count — and then re-reports at the cooldown cadence, never once
+    /// per window (the flood bound).
+    #[test]
+    fn silent_stream_reports_starvation_once_per_cooldown() {
+        let mut s = srv(42, &ids(2));
+        // One real input creates the stream, then silence — permanently held.
+        let reports = run_with_sender(&mut s, STARVATION_REPORT_COOLDOWN + STARVATION_WINDOW, |t| {
+            t == 0
+        });
+        assert_eq!(
+            reports.len(),
+            2,
+            "one report at the first window boundary, the next only after the cooldown: {reports:?}"
+        );
+        assert_eq!(
+            (reports[0].pid, reports[0].tick, reports[0].starved),
+            (PlayerId(1), STARVATION_WINDOW, STARVATION_WINDOW - 1),
+            "first window: every fill after the one consumed input was a hold"
+        );
+        assert_eq!(
+            (reports[1].pid, reports[1].tick, reports[1].starved),
+            (
+                PlayerId(1),
+                STARVATION_WINDOW + STARVATION_REPORT_COOLDOWN,
+                STARVATION_WINDOW
+            ),
+            "re-report exactly one cooldown after the first"
+        );
+    }
+
+    /// The maximal starvation — a rostered player that never delivered ONE input, so it has no
+    /// stream at all — counts too: the tally keys off the ROSTER, not stream existence.
+    #[test]
+    fn never_sending_player_reports_full_window_starvation() {
+        let mut s = srv(42, &ids(2));
+        let reports = run_with_sender(&mut s, STARVATION_WINDOW, |_| false);
+        assert_eq!(reports.len(), 1, "one report at the boundary: {reports:?}");
+        assert_eq!(
+            (reports[0].pid, reports[0].starved),
+            (PlayerId(1), STARVATION_WINDOW),
+            "every fill of the window was the no-stream neutral"
+        );
+    }
+
+    /// rl#213's chronic case: a late client running at HALF rate alternates hold/consume —
+    /// no long consecutive run ever forms, but half of every window is starved. The WINDOWED
+    /// count catches it (a consecutive-run counter would stay silent forever).
+    #[test]
+    fn chronic_half_rate_stream_reports_starvation() {
+        let mut s = srv(42, &ids(2));
+        let reports = run_with_sender(&mut s, STARVATION_WINDOW, |t| t % 2 == 0);
+        assert_eq!(reports.len(), 1, "half-rate is chronic: {reports:?}");
+        assert_eq!(
+            reports[0].starved,
+            STARVATION_WINDOW / 2,
+            "every other fill was a hold"
+        );
+    }
+
+    /// A healthy full-rate stream never reports — occasional-holds-only noise would train
+    /// operators to ignore the signal.
+    #[test]
+    fn healthy_stream_reports_no_starvation() {
+        let mut s = srv(42, &ids(2));
+        let reports = run_with_sender(&mut s, 2 * STARVATION_WINDOW, |_| true);
+        assert!(reports.is_empty(), "full-rate stream is healthy: {reports:?}");
+    }
+
     /// A starved stream HOLDS the last consumed move axes but zeroes the per-tick look delta
     /// (else the avatar spins) and the button taps (else a grab/restart re-fires).
     #[test]
@@ -639,9 +848,11 @@ mod tests {
             issue_tick: 0,
             input: Input::new(0.5, 1.0, 0.7, buttons::ACTION),
         });
-        let consumed = stream.consume();
+        let (consumed, starved) = stream.consume();
         assert_eq!(consumed, Input::new(0.5, 1.0, 0.7, buttons::ACTION));
-        let held = stream.consume(); // starved
+        assert!(!starved, "a real consume is not starved");
+        let (held, starved) = stream.consume();
+        assert!(starved, "an empty queue is a starved hold");
         assert_eq!(
             held,
             Input::new(0.5, 1.0, 0.0, 0),
@@ -693,7 +904,7 @@ mod tests {
             TARGET_BACKLOG,
             "a burst folds down to the target depth at record time"
         );
-        let consumed = stream.consume();
+        let (consumed, _) = stream.consume();
         assert!(
             consumed.pressed(buttons::RESTART),
             "the folded oldest input's tap rode forward to the consumed input"

@@ -255,6 +255,8 @@ async fn run_net(args: Args) -> Result<()> {
                     writeln!(w, "{line}").context("writing hash log")?;
                 }
             }
+            // Chronic input-starvation surface (rl#213) — the one shared drain policy.
+            net::telemetry::surface_starvation(Some(srv), tel.as_ref());
         } else {
             // CLIENT: ship our input up, then ADOPT the host's authoritative snapshots — no re-sim,
             // no cross-check (the host IS the source of truth) — via the ONE shared client adopt
