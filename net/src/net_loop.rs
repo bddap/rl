@@ -90,9 +90,9 @@ pub struct Exchanged {
     /// adopts every one via [`Lockstep::adopt_snapshots`] (the one shared adopt policy — see its
     /// doc). Empty on the solo/host arm (its client reads the server it runs).
     pub snapshots: Vec<CoreSnapshot>,
-    /// Render-only crab poses drained beside the snapshots: the driver stashes the LAST-ARRIVED
-    /// (= newest on the reliable ordered stream) for the render-side apply. Empty off the
-    /// remote-client arm.
+    /// Render-only crab poses drained beside the snapshots, tick-tagged: the driver buffers
+    /// them alongside the snapshots and applies the frame riding the ADOPTED tick (the pacing
+    /// lives in the driver's jitter buffer — rl#194). Empty off the remote-client arm.
     pub articulations: Vec<CrabArticulation>,
 }
 

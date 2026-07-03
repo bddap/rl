@@ -44,6 +44,8 @@ fn install_round(world: &mut World, ls: Lockstep, coord: Box<Coordinator>) {
         reported_outcome: false,
         next_tel_tick: next_sample_tick(0),
         cadence: PhysicsCadence::default(),
+        snap_buf: std::collections::VecDeque::new(),
+        art_buf: std::collections::VecDeque::new(),
     });
     // OVERWRITE with fresh defaults (not `init_resource`, which keeps an existing value):
     // this install is the ONE owner of per-round input/camera state, so a round entered
@@ -279,6 +281,34 @@ pub(super) struct GameState {
     /// armed and reset on the restart edge (reported by `step_next`, rl#204) so two peers
     /// stay phase-aligned.
     cadence: PhysicsCadence,
+    /// (Remote client only) Arrived-but-not-yet-adopted host snapshots — the jitter buffer.
+    /// Arrivals beat against the local tick clock (0 or 2 per tick), and adopting a burst
+    /// whole renders as a freeze-then-jump (rl#194); instead ONE is adopted per local tick,
+    /// catching down past [`JITTER_BUF_MAX`] so buffered latency stays bounded.
+    snap_buf: std::collections::VecDeque<crate::snapshot::CoreSnapshot>,
+    /// (Remote client only) The crab articulation frames riding beside `snap_buf`, tick-tagged
+    /// and applied WITH their snapshot — rendering the newest ARRIVED frame instead would put
+    /// arrival jitter back on the most visible body on screen.
+    art_buf: std::collections::VecDeque<crate::articulation::CrabArticulation>,
+}
+
+/// Snapshots the remote client's jitter buffer may hold before it catches down (adopting the
+/// excess in one tick) — the cap on buffered render latency, ~100 ms. Holding 1 (the target it
+/// drains back to) rides out one tick of arrival jitter, the common case.
+const JITTER_BUF_MAX: usize = 3;
+/// Where a catch-down drains the buffer back to: one in hand to ride the next arrival gap.
+const JITTER_BUF_TARGET: usize = 1;
+
+/// How many buffered snapshots the remote client adopts this local tick: one while the buffer
+/// is inside the jitter margin (even pacing — the rl#194 fix), the excess down to
+/// [`JITTER_BUF_TARGET`] past [`JITTER_BUF_MAX`] (catch-down after a stall or a faster host
+/// clock, bounding buffered render latency), zero when empty (hold the last state one tick).
+fn jitter_take(buffered: usize) -> usize {
+    if buffered > JITTER_BUF_MAX {
+        buffered - JITTER_BUF_TARGET
+    } else {
+        usize::from(buffered > 0)
+    }
 }
 
 impl GameState {
@@ -898,17 +928,23 @@ pub(super) fn drive_lockstep(world: &mut World) {
             // - SERVER-AUTHORITATIVE (solo/host/fp-screenshot): the server already stepped these
             //   inputs into its OWN sim (assembled host-paced by `exchange`) and the local client
             //   renders the snapshot it emits below — nothing to do here.
-            // - REMOTE ADOPT: the client ADOPTS the host's snapshot
-            //   into its own sim (no re-sim) and stashes the newest articulation for the render apply
-            //   after this borrow is released.
+            // - REMOTE ADOPT: the client buffers the host's snapshots, ADOPTS them at the local
+            //   tick pace (no re-sim), and stashes the adopted tick's articulation for the render
+            //   apply after this borrow is released.
             match role {
                 // Handled by the server step + snapshot render below.
                 PeerRole::ServerAuth => {}
                 PeerRole::RemoteAdopt => {
-                    // Adopt the host's drained snapshots via the ONE shared client adopt policy
-                    // ([`Lockstep::adopt_snapshots`]: arrival order, no tick gate — see its doc for
-                    // the restart-freeze rationale).
-                    if !exch.snapshots.is_empty() {
+                    // Buffer arrivals, then adopt at the LOCAL tick pace — normally ONE snapshot
+                    // per tick. Arrivals beat against our clock (0 or 2 per tick, plus wire
+                    // jitter), and adopting a burst whole tweens `prev`→now across several host
+                    // ticks in one local tick: the rl#194 freeze-then-jump stutter. Past
+                    // [`JITTER_BUF_MAX`] the buffer catches down in one tick so a real stall
+                    // (or a slower host clock) never accrues unbounded render latency.
+                    state.snap_buf.extend(exch.snapshots);
+                    state.art_buf.extend(exch.articulations);
+                    let take = jitter_take(state.snap_buf.len());
+                    if take > 0 {
                         // Refresh the interpolation source from the PRE-adopt state, exactly as the
                         // stepping arm does before advancing — else `apply_transforms` would tween
                         // avatars + the FP camera from the tick-0 spawn every frame (a per-frame snap
@@ -916,10 +952,11 @@ pub(super) fn drive_lockstep(world: &mut World) {
                         state.prev = SimSnapshot::capture(&state.ls);
                         // Clear the round-decided latch on every Ongoing snapshot IN the batch,
                         // not off the frame-end outcome: a batch spanning a restart AND a fresh
-                        // decision (a catch-up after a stall) never shows Ongoing at the frame
+                        // decision (a catch-down) never shows Ongoing at the frame
                         // boundary, which would swallow the new round's report.
                         let reported_outcome = &mut state.reported_outcome;
-                        state.ls.adopt_snapshots(exch.snapshots, |c| {
+                        let snaps: Vec<_> = state.snap_buf.drain(..take).collect();
+                        state.ls.adopt_snapshots(snaps, |c| {
                             if c.sim().outcome() == Outcome::Ongoing {
                                 *reported_outcome = false;
                             }
@@ -930,10 +967,18 @@ pub(super) fn drive_lockstep(world: &mut World) {
                         // Remote players + the crab stay authoritative (pose from the host, tweened
                         // via `prev`), never predicted. Overwritten by the next snapshot each frame.
                         state.ls.reconcile_local_prediction();
+                        // Render the crab pose that RIDES the adopted tick (frames are tick-tagged
+                        // and arrive in host order): drop frames at/behind it, apply the newest of
+                        // those. Applied to the World once `state` is released.
+                        let adopted_tick = state.ls.next_tick();
+                        while state
+                            .art_buf
+                            .front()
+                            .is_some_and(|a| a.tick <= adopted_tick)
+                        {
+                            pending_art = state.art_buf.pop_front();
+                        }
                     }
-                    // Newest crab pose (last-arrived, same reliable-stream reasoning) — applied to
-                    // the World once `state` is released.
-                    pending_art = exch.articulations.into_iter().next_back();
                 }
             }
             issue_tick
@@ -1173,7 +1218,9 @@ pub(super) fn drive_lockstep(world: &mut World) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlightControl, LocalControl, PeerRole};
+    use super::{
+        FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, PeerRole, jitter_take,
+    };
     use crate::sim::{Input, buttons};
     use crab_world::vehicle::VehicleKind;
 
@@ -1224,5 +1271,21 @@ mod tests {
             !PeerRole::RemoteAdopt.can_pilot(),
             "a remote client pumps no physics ⇒ no craft can spawn ⇒ cannot pilot yet"
         );
+    }
+
+    /// The jitter buffer's pacing curve: hold on empty, exactly one inside the margin (the
+    /// even 30 Hz pacing that kills the freeze-then-jump), catch down to the target past it.
+    #[test]
+    fn jitter_take_paces_one_and_catches_down() {
+        assert_eq!(jitter_take(0), 0, "empty ⇒ hold last state");
+        for buffered in 1..=JITTER_BUF_MAX {
+            assert_eq!(jitter_take(buffered), 1, "in-margin ⇒ even pacing");
+        }
+        assert_eq!(
+            jitter_take(JITTER_BUF_MAX + 1),
+            JITTER_BUF_MAX + 1 - JITTER_BUF_TARGET,
+            "past the margin ⇒ drain to the target in one tick"
+        );
+        assert_eq!(jitter_take(10), 10 - JITTER_BUF_TARGET);
     }
 }
