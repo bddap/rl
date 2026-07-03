@@ -36,7 +36,7 @@ use crate::snapshot::CoreSnapshot;
 /// mismatched builds refuse at connect time rather than mis-frame or silently desync
 /// mid-stream (the fleet updates atomically via rl-update, so a refused connect means
 /// "update the other device", never a mixed-version match).
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/9";
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/10";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
@@ -923,7 +923,7 @@ mod tests {
 
     #[test]
     fn articulation_wire_roundtrips() {
-        use crate::articulation::{CrabArticulation, PartTransform, ReposeWire};
+        use crate::articulation::{CrabArticulation, PartTransform, ReposeWire, VehiclePoseWire};
         // A render pose round-trips byte-for-byte through the frame codec, and a truncated body is a
         // loud error (never a half-decoded pose on the client).
         let art = CrabArticulation {
@@ -944,6 +944,10 @@ mod tests {
                 shift: [1.0, 0.0, -2.0],
                 pivot: [0.0, 0.5, 0.0],
                 scale: 9.0,
+            }),
+            vehicle: Some(VehiclePoseWire {
+                pos: [2.0, 5.5, -1.0],
+                rot: [0.0, 0.7071, 0.0, 0.7071],
             }),
         };
         let body = CrabArticulation::encode(&art);

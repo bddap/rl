@@ -39,7 +39,9 @@ pub fn register(app: &mut App, initial: RenderMode) {
     // The piloted craft's collider wireframe — same cycle, same drawer, same repose as the crab
     // cage. Drawn AFTER transform propagation so the body's `GlobalTransform` is this frame's
     // physics pose. Only GCR spawns a `Vehicle`, so the query is empty (a no-op) in the rl-demo,
-    // which registers the shared crab cage directly and never calls this.
+    // which registers the shared crab cage directly and never calls this. The `RemoteVehicle`
+    // mirror it reads is owned per-round by `install_round`, which runs before Playing (the
+    // drawer's gate) on every path.
     app.add_systems(
         PostUpdate,
         draw_vehicle_collider_wireframe
@@ -110,25 +112,48 @@ fn manage_silhouette_visibility(
 /// so reusing the same [`CrabSkinRepose`] the crab cage uses puts the cage on the craft the camera
 /// flies. No scale (render==physics). One body at a time (the player flies a single craft); despawned
 /// on foot, so the query is empty then.
+///
+/// A remote MP client has no `Vehicle` body at all (host-authoritative — only the host steps the
+/// craft's rapier); its view of the host's craft is the [`RemoteVehicle`] pose mirror off the wire,
+/// drawn here in EVERY mode, not just the collider views: the craft has no mesh, so the cage IS its
+/// visual (the missing-glb precedent — with no model the honest physics view is the thing itself),
+/// and the second player must see the host fly regardless of their view cycle (rl#192). The
+/// spectator is never inside it, so the always-on cage can't sit over the camera.
+///
+/// [`RemoteVehicle`]: super::articulation::RemoteVehicle
 fn draw_vehicle_collider_wireframe(
     mode: Res<RenderMode>,
     repose: Option<Res<CrabSkinRepose>>,
+    remote: Res<super::articulation::RemoteVehicle>,
     vehicles: Query<(&GlobalTransform, &Collider), With<Vehicle>>,
     mut gizmos: Gizmos,
 ) {
-    if !mode.shows_colliders() {
-        return;
-    }
     let placement = repose
         .as_deref()
         .and_then(|r| r.0)
         .map(|s| s.matrix())
         .unwrap_or(Mat4::IDENTITY);
-    for (gt, collider) in &vehicles {
-        let world = placement * gt.to_matrix();
+    // The locally-piloted body: collider views only — the pilot flies FP from inside it.
+    if mode.shows_colliders() {
+        for (gt, collider) in &vehicles {
+            let world = placement * gt.to_matrix();
+            draw_collider_wireframe(
+                &mut gizmos,
+                collider.as_typed_shape(),
+                world,
+                COLLIDER_WIREFRAME_COLOR,
+            );
+        }
+    }
+    // The host's craft mirrored off the wire, rebuilt from the ONE collider source
+    // ([`crab_world::vehicle::vehicle_collider`]) so the drawn cage can't drift from the body
+    // it depicts.
+    if let Some(v) = remote.0 {
+        let world = placement
+            * Mat4::from_rotation_translation(Quat::from_array(v.rot), Vec3::from_array(v.pos));
         draw_collider_wireframe(
             &mut gizmos,
-            collider.as_typed_shape(),
+            crab_world::vehicle::vehicle_collider().as_typed_shape(),
             world,
             COLLIDER_WIREFRAME_COLOR,
         );
