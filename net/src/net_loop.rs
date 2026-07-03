@@ -394,7 +394,13 @@ impl Coordinator {
                 }
                 if let Some(net) = net.as_mut() {
                     let connected = net.connected_peers_now();
-                    let gone = depart_gone_peers(server, &mut net.id_map, net.me, &connected);
+                    let gone = depart_gone_peers(
+                        server,
+                        &mut net.id_map,
+                        net.me,
+                        &connected,
+                        net.telemetry.as_ref(),
+                    );
                     net.departed.extend(gone);
                 }
                 // Assemble THIS tick from our own input + each remote stream's next queued input
@@ -514,6 +520,7 @@ pub fn depart_gone_peers(
     id_map: &mut BTreeMap<EndpointId, PlayerId>,
     me: PlayerId,
     connected: &[EndpointId],
+    telemetry: Option<&TelemetrySender>,
 ) -> Vec<EndpointId> {
     let gone: Vec<(EndpointId, PlayerId)> = id_map
         .iter()
@@ -523,10 +530,16 @@ pub fn depart_gone_peers(
     let mut eids = Vec::new();
     for (eid, pid) in gone {
         id_map.remove(&eid);
-        println!(
+        tracing::info!(
             "player {pid:?} ({}) departed — continuing without them",
             eid.fmt_short()
         );
+        if let Some(t) = telemetry {
+            t.send(TelemetryEvent::Departed {
+                player: pid.0,
+                endpoint: eid.fmt_short().to_string(),
+            });
+        }
         server.depart(pid);
         eids.push(eid);
     }
@@ -552,12 +565,19 @@ fn admit_joiners(server: &mut Server, net: &mut NetDriver, joins: Vec<(EndpointI
                 let adm = server.admit();
                 net.admit_endpoint(eid, adm.pid);
                 net.welcome_joiner(eid, &adm);
-                println!(
+                tracing::info!(
                     "admitted joiner {} as {:?}, roster change effective at tick {}",
                     eid.fmt_short(),
                     adm.pid,
                     adm.effective_tick
                 );
+                if let Some(t) = net.telemetry() {
+                    t.send(TelemetryEvent::Admitted {
+                        player: adm.pid.0,
+                        endpoint: eid.fmt_short().to_string(),
+                        effective_tick: adm.effective_tick,
+                    });
+                }
             }
             Err(refusal) => {
                 let reason = refusal.to_string();

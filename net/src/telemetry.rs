@@ -73,7 +73,7 @@ enum OutcomeWire {
 /// pairing or the deterministic transport. Bump the trailing version on any
 /// incompatible change to the telemetry frame so a mismatched collector/sender refuse
 /// to talk rather than mis-decode (telemetry-only — never affects the game wire).
-pub const TELEMETRY_ALPN: &[u8] = b"bddap-rl-telemetry/0";
+pub const TELEMETRY_ALPN: &[u8] = b"bddap-rl-telemetry/1";
 
 /// mDNS service name for telemetry discovery. CRUCIALLY DISTINCT from the game's
 /// [`SERVICE_NAME`](crate::transport::SERVICE_NAME): if telemetry reused the game's
@@ -110,8 +110,21 @@ pub enum TelemetryEvent {
         roster_hash: u64,
         me: u8,
     },
-    /// Formation failed (timed out without agreement) — the round never started.
+    /// A roster change that DIDN'T happen: formation failed (timed out without
+    /// agreement — the round never started) or a mid-game join was refused.
     RosterFailed { reason: String },
+    /// A rostered player DEPARTED mid-match — their link closed (clean exit, dead
+    /// connection, or wedged-peer eviction) and the match continues without them
+    /// (rl#198). `endpoint` is the short endpoint id.
+    Departed { player: u8, endpoint: String },
+    /// A mid-game joiner was ADMITTED as `player`; the roster change lands at
+    /// `effective_tick`. A refused joiner reports as
+    /// [`RosterFailed`](TelemetryEvent::RosterFailed) instead.
+    Admitted {
+        player: u8,
+        endpoint: String,
+        effective_tick: u64,
+    },
     /// A periodic sim snapshot (sampled): the applied `tick`, its full `state_hash`,
     /// and the `roster` size (player count). Comparing the `(tick, state_hash)` across
     /// decks is the live cross-peer desync check. `roster` is the live match player count
@@ -218,6 +231,14 @@ impl TelemetryEvent {
                 members
             ),
             TelemetryEvent::RosterFailed { reason } => format!("ROSTER FAILED: {reason}"),
+            TelemetryEvent::Departed { player, endpoint } => {
+                format!("DEPARTED: P{player} ({endpoint}) — continuing without them")
+            }
+            TelemetryEvent::Admitted {
+                player,
+                endpoint,
+                effective_tick,
+            } => format!("ADMITTED: {endpoint} as P{player}, effective at tick {effective_tick}"),
             TelemetryEvent::Tick {
                 tick,
                 state_hash,
@@ -806,6 +827,15 @@ mod tests {
                 members: vec![],
                 roster_hash: 0,
                 me: 0,
+            },
+            TelemetryEvent::Departed {
+                player: 1,
+                endpoint: "abcd".into(),
+            },
+            TelemetryEvent::Admitted {
+                player: 2,
+                endpoint: "abcd".into(),
+                effective_tick: 42,
             },
         ] {
             assert!(

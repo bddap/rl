@@ -234,7 +234,7 @@ async fn run_net(args: Args) -> Result<()> {
             // stream + roster entry (nothing ever waits on it). This harness sends no refusals,
             // so the returned departed endpoints go unused.
             let connected = session.connected_peers().await;
-            let _ = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected);
+            let _ = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected, tel.as_ref());
             srv.advance(msg);
             // Headless: weights digest 0, no rapier body → the crab holds spawn, so no pose to inject.
             while srv.next_tick_ready() {
