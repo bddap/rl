@@ -284,7 +284,7 @@ mod tests {
             }),
             vehicle: Some(VehiclePoseWire {
                 pos: [2.0, 5.5, -1.0],
-                rot: [0.0, 0.7071, 0.0, 0.7071],
+                rot: [0.0, std::f32::consts::FRAC_1_SQRT_2, 0.0, std::f32::consts::FRAC_1_SQRT_2],
             }),
         }
     }
