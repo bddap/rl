@@ -116,7 +116,7 @@ pub struct Beat {
     pub weights_digest: u64,
     /// The sender's crab-MODEL-asset digest, `0` for no resolvable model — the giant
     /// crab's rapier colliders are derived from this asset
-    /// ([`crab_world::bot::meshfit::crab_asset_digest`]), so two peers with different
+    /// ([`crab_world::mesh_fallback::constructed_body_digest`]), so two peers with different
     /// crab models build different colliders and silently desync. Handled exactly like
     /// its sibling `weights_digest` (a capability advertisement, not membership).
     pub asset_digest: u64,

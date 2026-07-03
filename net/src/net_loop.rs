@@ -636,7 +636,7 @@ pub fn connect_and_form(
         collector,
         None,
         0,
-        crab_world::bot::meshfit::crab_asset_digest(),
+        crab_world::mesh_fallback::constructed_body_digest(),
     )
 }
 

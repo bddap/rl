@@ -73,7 +73,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         None,
         None,
         weights_digest,
-        crab_world::bot::meshfit::crab_asset_digest(),
+        crab_world::mesh_fallback::constructed_body_digest(),
     )?;
 
     let (ls, driver) = match result {

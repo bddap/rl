@@ -17,8 +17,8 @@ use crate::TrainConfig;
 use crate::bot::arch::{AnyBrain, ArchId};
 use crate::training::algorithm::{OuNoise, PpoConfig, ReturnNormalizer, RolloutBuffer};
 use crate::training::checkpoint::{
-    BrainLoadError, CheckpointDir, load_brain_file, load_return_normalizer, save_brain,
-    save_return_normalizer,
+    BodyIdentity, BrainFile, BrainLoadError, CheckpointDir, check_body_identity, load_brain_file,
+    load_return_normalizer, save_brain, save_return_normalizer,
 };
 use crate::training::envelope::EnvelopeError;
 use crate::training::normalizer::{
@@ -279,7 +279,7 @@ impl TrainingState {
         match (!worker_mode).then(|| load_brain_file::<TrainBackend>(&paths.brain_file(), &device))
         {
             None => {} // worker: no load at all
-            Some(Ok(loaded)) => {
+            Some(Ok(BrainFile { brain: loaded, body_digest })) => {
                 // Resume is TAG-authoritative; an explicit `--arch` that disagrees with
                 // the tag is an operator error and ABORTS (bddap/rl#200 §3). Cold-starting
                 // into the flag's arch here would silently discard the trained policy;
@@ -295,6 +295,39 @@ impl TrainingState {
                         config.checkpoint_dir.display(),
                         loaded.arch(),
                     );
+                }
+                // Body↔policy identity (bddap/rl#214): training this checkpoint on a
+                // different body than it was trained on silently retrains a not-Sally
+                // policy — abort, same class as the arch refusals above. A pre-stamp
+                // checkpoint is trusted on first use; `save_checkpoint`'s next write
+                // stamps it (the one-time migration, never an invalidation).
+                let constructed = crate::mesh_fallback::constructed_body_digest();
+                match check_body_identity(body_digest, constructed) {
+                    Ok(BodyIdentity::Match) => {}
+                    // TOFU exists to grandfather the fleet's live pre-stamp checkpoints
+                    // ONTO SALLY — a pre-stamp checkpoint is almost certainly
+                    // Sally-trained, so trusting it onto the FALLBACK body
+                    // (--allow-fallback-body on a mesh-less box) would retrain it wrong
+                    // AND stamp it `0` on the next save, irreversibly relabelling a
+                    // Sally lineage as fallback-trained. Fallback runs get a fresh dir.
+                    Ok(BodyIdentity::TrustOnFirstUse) if constructed == 0 => panic!(
+                        "REFUSING to train over checkpoint dir {}: this run constructs \
+                         the procedural fallback body, but the checkpoint predates \
+                         body-identity stamps (bddap/rl#214) and is presumably \
+                         Sally-trained. Point --checkpoint-dir at a fresh dir for a \
+                         fallback run.",
+                        config.checkpoint_dir.display()
+                    ),
+                    Ok(BodyIdentity::TrustOnFirstUse) => warn!(
+                        "checkpoint at {} predates body-identity stamping (bddap/rl#214) — \
+                         trusting on first use; the next save stamps body digest \
+                         {constructed:#018x}",
+                        paths.brain_file().display(),
+                    ),
+                    Err(why) => panic!(
+                        "REFUSING to train over checkpoint dir {}: {why}",
+                        config.checkpoint_dir.display()
+                    ),
                 }
                 let (obs, action) = loaded.io_dims();
                 if crate::policy::dims_fit_rig(obs, action) {

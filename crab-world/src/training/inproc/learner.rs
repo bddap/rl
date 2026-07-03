@@ -243,7 +243,12 @@ fn log_iteration(r: &IterReport) {
 /// trainer drops this function, turning `main`'s call site into a compile error rather
 /// than a learner with no update path. (crab-world builds without `wgpu` for the render
 /// bins, which only do CPU inference and never call this.)
+///
+/// `_body_gate` does nothing at runtime — it is the PROOF the bddap/rl#214 body
+/// preflight ran ([`crate::mesh_fallback::require_canonical_body`]), required here so a
+/// new entry point can't build training worlds while silently on the fallback body.
 pub fn run_learner(
+    _body_gate: crate::mesh_fallback::BodyGate,
     config: &TrainConfig,
     requested_arch: Option<ArchId>,
     k: usize,

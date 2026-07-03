@@ -89,31 +89,6 @@ pub fn model_path() -> Option<std::path::PathBuf> {
     )
 }
 
-/// FNV-1a/64 digest of the crab MODEL file's raw bytes (rl#100, GCR), or `0` when no
-/// model resolves — the per-peer "same collider asset?" check the membership handshake
-/// advertises alongside the policy-weights digest.
-///
-/// WHY hash the raw file bytes (not the post-load mesh or the fitted capsule spec): the
-/// giant crab's rapier colliders are a DETERMINISTIC pure function of this file's bytes
-/// GIVEN a fixed binary — `sally.glb` → [`ParsedGltf::open`] → [`skin_to_bind_world`] →
-/// [`fit_capsule`]/box → `Collider::capsule`/`cuboid`. The binary is already an unstated
-/// GCR baseline (two peers on different binaries desync on everything, not just colliders),
-/// so the ONLY collider-affecting input not yet guarded is the asset file itself. Hashing
-/// the bytes captures exactly that input — conservatively (any byte change ⇒ a mismatch ⇒ the
-/// round refuses to arm the NN crab, rl#114) and WITHOUT re-introducing the float-reproducibility
-/// question that hashing the skinned vertex cloud or the fitted f32 capsule would. Uses the
-/// shared [`crate::fnv::fnv1a`] — the same build-stable FNV-1a/64 the other GCR digests use,
-/// so two same-binary peers with byte-identical assets agree.
-pub fn crab_asset_digest() -> u64 {
-    let Some(path) = model_path() else {
-        return 0; // no model resolves → "no collider asset", never counts as synced
-    };
-    let Ok(bytes) = std::fs::read(&path) else {
-        return 0; // unreadable → treat as no asset (a `0` digest never counts as synced → refuse)
-    };
-    crate::fnv::fnv1a(&bytes)
-}
-
 /// Pure resolver, factored out so the path logic is testable without touching
 /// process env: an absolute model path is used as-is; otherwise the path (default
 /// `sally.glb`) is looked up under `<asset_root>/assets/`. The `asset_root` is the
@@ -197,7 +172,15 @@ impl ParsedGltf {
     /// offsets in.
     fn open(path: &std::path::Path) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("read {path:?}: {e}"))?;
-        let gltf = gltf::Gltf::from_slice(&bytes).map_err(|e| format!("parse glb: {e}"))?;
+        Self::from_slice(&bytes)
+    }
+
+    /// Decode from bytes already in hand — split from [`Self::open`] so a caller that
+    /// also DIGESTS the asset (the canonical-mesh verdict, bddap/rl#214) parses the
+    /// exact bytes it hashed: one read, so the recipe and the digest cannot describe
+    /// two different file states.
+    fn from_slice(bytes: &[u8]) -> Result<Self, String> {
+        let gltf = gltf::Gltf::from_slice(bytes).map_err(|e| format!("parse glb: {e}"))?;
         let blob = gltf.blob.clone().ok_or("GLB has no binary chunk")?;
 
         // Bind-pose world transforms: walk every scene root down, composing
@@ -292,7 +275,14 @@ impl LoadedModel {
     /// transforms and every vertex's dominant bone. Errors surface as a string
     /// so the test can fail loudly rather than panic deep in the gltf crate.
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
-        let parsed = ParsedGltf::open(path)?;
+        let bytes = std::fs::read(path).map_err(|e| format!("read {path:?}: {e}"))?;
+        Self::from_slice(&bytes)
+    }
+
+    /// Parse a GLB from bytes already in hand — see [`ParsedGltf::from_slice`] for why
+    /// the digesting caller must parse the exact bytes it hashed.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, String> {
+        let parsed = ParsedGltf::from_slice(bytes)?;
         let node_name: HashMap<usize, String> = parsed
             .gltf
             .nodes()

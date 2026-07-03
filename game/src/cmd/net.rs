@@ -73,7 +73,7 @@ async fn run_net(args: Args) -> Result<()> {
         tel.as_ref(),
         None, // headless: timer-closed barrier, no interactive lobby
         0, // headless has no rapier-NN crab stack → 0 weights digest; the crab holds spawn (rl#114)
-        crab_world::bot::meshfit::crab_asset_digest(), // honest crab-asset digest (rl#100)
+        crab_world::mesh_fallback::constructed_body_digest(), // honest crab-asset digest (rl#100)
     )
     .await?
     {

@@ -116,11 +116,43 @@ struct EvalState {
 /// `target_distance` planar metres, for `active_ticks` ticks after a settle window, and return the
 /// two honest numbers (+ context). Deterministic: fixed spawn, fixed target, mean-action policy,
 /// single-threaded pools + serial schedules, so the same checkpoint yields the same report.
-pub fn run_eval(checkpoint_dir: &Path, active_ticks: u64, target_distance: f32) -> EvalReport {
+///
+/// `_body_gate` is the PROOF the bddap/rl#214 body preflight ran (see
+/// [`crate::mesh_fallback::require_canonical_body`]); it does nothing at runtime.
+///
+/// `Err` — a REFUSED checkpoint (corrupt/legacy/wrong-arch, or trained on a different
+/// body than this process constructs) or one built for a different rig: judging those
+/// yields wrong-body/garbage numbers, so no `EvalReport` exists for the daemon to plot,
+/// unlike the legitimate ABSENT case (fresh run: report with `policy_loaded: false`, the
+/// zero-action baseline).
+pub fn run_eval(
+    _body_gate: crate::mesh_fallback::BodyGate,
+    checkpoint_dir: &Path,
+    active_ticks: u64,
+    target_distance: f32,
+) -> Result<EvalReport, String> {
     // Pin every process-global pool to one thread BEFORE building the App, so the sim + the tiny
     // inference matmul run in one fixed float-op order and the report reproduces run-to-run (the
     // same recipe the trainer uses; see `pin_single_thread_pools`).
     pin_single_thread_pools();
+
+    // Classify BEFORE judging (the same one classifier every arming surface uses):
+    // an eval of a checkpoint the runtime would refuse to arm must be a refusal, not a
+    // rest-pose baseline quietly printed as the run's training progress.
+    match crate::policy::checkpoint_fits_rig(checkpoint_dir) {
+        crate::policy::RigFit::Ok | crate::policy::RigFit::Missing => {}
+        crate::policy::RigFit::Refused(why) => {
+            return Err(format!("checkpoint at {} refused: {why}", checkpoint_dir.display()));
+        }
+        crate::policy::RigFit::Mismatch(dims) => {
+            return Err(format!(
+                "checkpoint at {} was built for a different rig ({}/{} obs/act)",
+                checkpoint_dir.display(),
+                dims.obs,
+                dims.action,
+            ));
+        }
+    }
 
     let policy = Policy::load(checkpoint_dir);
     let policy_loaded = policy.is_loaded();
@@ -170,7 +202,7 @@ pub fn run_eval(checkpoint_dir: &Path, active_ticks: u64, target_distance: f32) 
     } else {
         0.0
     };
-    EvalReport {
+    Ok(EvalReport {
         progress_m,
         total_torque: state.torque_sum as f32,
         mean_torque_per_tick,
@@ -181,7 +213,7 @@ pub fn run_eval(checkpoint_dir: &Path, active_ticks: u64, target_distance: f32) 
         reached: state.closest_dist <= REACH_RADIUS,
         active_ticks: state.torque_ticks,
         policy_loaded,
-    }
+    })
 }
 
 /// Active ticks `eval_step` has measured so far — the loop drives updates until this reaches the
@@ -330,7 +362,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let r = run_eval(&dir, 200, DEFAULT_TARGET_DISTANCE_M);
+        // Explicit, greppable test-only opt-in: this eval deliberately runs whatever
+        // body the test env constructs (usually the fallback — no sally.glb in CI).
+        let r = run_eval(
+            crate::mesh_fallback::BodyGate::FallbackAllowed,
+            &dir,
+            200,
+            DEFAULT_TARGET_DISTANCE_M,
+        )
+        .expect("an absent checkpoint is the legitimate baseline, never a refusal");
 
         assert!(!r.policy_loaded, "an empty dir loads no policy (rest pose)");
         // Zero-action rest pose ⇒ every commanded torque is 0 ⇒ total is EXACTLY 0.

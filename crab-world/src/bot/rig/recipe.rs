@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn fitted_geometry_matches_golden() {
-        use crate::bot::meshfit::crab_asset_digest;
+        use crate::mesh_fallback::constructed_body_digest;
         let Some(path) = model_path() else {
             eprintln!("fitted_geometry_matches_golden: no model — skipping");
             return;
@@ -919,7 +919,7 @@ mod tests {
         // so a digest mismatch is a HARD failure, not a skip: re-capture the golden
         // deliberately (it pins a new MDP + a retrain), don't let geometry drift slip
         // through unbaselined.
-        let digest = crab_asset_digest();
+        let digest = constructed_body_digest();
         assert_eq!(
             digest, GOLDEN_ASSET_DIGEST,
             "crab asset changed (digest {digest:#018x} != golden {GOLDEN_ASSET_DIGEST:#018x}) — \

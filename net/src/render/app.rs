@@ -174,11 +174,11 @@ pub fn build_windowed_app(
     // SAME checkpoint, or a hot-reload could split the two.
     let weights_digest = crab_world::play::checkpoint_digest(&external_crab);
     // OUR crab-MODEL-asset digest: the giant crab's rapier colliders are derived
-    // from this asset ([`crab_world::bot::meshfit::crab_asset_digest`]), so peers must agree on it
+    // from this asset ([`crab_world::mesh_fallback::constructed_body_digest`]), so peers must agree on it
     // before arming the float crab in lockstep — a different model builds different colliders
     // and desyncs even with identical brains. Computed unconditionally (it's a property of this
     // peer's installed crab model, independent of whether a checkpoint loaded); `0` for no model.
-    let asset_digest = crab_world::bot::meshfit::crab_asset_digest();
+    let asset_digest = crab_world::mesh_fallback::constructed_body_digest();
 
     match boot {
         // Scripted boot: insert the round now and jump straight to Playing (the menu

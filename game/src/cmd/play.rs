@@ -95,7 +95,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             // Advertise our REAL weights + crab-asset digests so two scripted peers carrying the
             // same checkpoint arm the NN crab; a mismatch refuses the round (rl#114, no fallback).
             weights_digest,
-            crab_world::bot::meshfit::crab_asset_digest(),
+            crab_world::mesh_fallback::constructed_body_digest(),
         )?;
         match result {
             net_loop::MatchResult::Joined(joined) => {

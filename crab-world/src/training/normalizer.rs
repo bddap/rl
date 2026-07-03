@@ -228,7 +228,7 @@ impl ObsNormalizer {
                 return;
             }
         };
-        if let Err(e) = write_envelope(path, ArtifactKind::ObsNormalizer, arch, bytes) {
+        if let Err(e) = write_envelope(path, ArtifactKind::ObsNormalizer, arch, bytes, None) {
             warn!("Failed to write normalizer to {}: {e}", path.display());
         }
     }

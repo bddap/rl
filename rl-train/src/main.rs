@@ -129,6 +129,13 @@ struct LearnArgs {
     /// priority and needs privilege, so it is floored to 0 rather than attempted).
     #[arg(long, default_value_t = 10)]
     nice: i32,
+
+    /// DEV: train the procedural fallback body when no usable `sally.glb` resolves,
+    /// instead of refusing to start (bddap/rl#214). The checkpoints it writes carry
+    /// body digest 0 and will be REFUSED by every canonical-body surface — a policy
+    /// trained on the fallback is not Sally.
+    #[arg(long)]
+    allow_fallback_body: bool,
 }
 
 /// The `eval` subcommand: which checkpoint to judge, how long to roll, and how far to place the
@@ -152,12 +159,36 @@ struct EvalArgs {
     /// in-distribution target, challenging but reachable.
     #[arg(long)]
     distance: Option<f32>,
+
+    /// DEV: judge on the procedural fallback body when no usable `sally.glb` resolves,
+    /// instead of refusing to start (bddap/rl#214). Only meaningful against a
+    /// checkpoint trained on the fallback (body digest 0) or an unstamped pre-#214
+    /// one; a Sally-stamped checkpoint still refuses (wrong body).
+    #[arg(long)]
+    allow_fallback_body: bool,
 }
 
 /// clap value-parser for `--arch`: delegates to the registry's `TryFrom<String>`, whose
 /// error already names the unknown arch and lists the known ones.
 fn parse_arch(s: &str) -> Result<bot::arch::ArchId, String> {
     bot::arch::ArchId::try_from(s.to_string())
+}
+
+/// The bddap/rl#214 body preflight, MANDATORY for the two subcommands that build rollout
+/// worlds: without it, `learn`/`eval` reached the body's SILENT fallback and trained or
+/// judged the procedural body as if it were Sally. The lib half logs the verdict (loud
+/// refusal / latched fallback error / positive body line); a refusal exits nonzero here,
+/// before any world is built. Placed on the subcommands, not in the lib entry points,
+/// so the glb-less lib tests (which call `headless_stack`/`run_eval` directly on the
+/// fallback body on purpose) stay hermetic.
+fn require_canonical_body_or_exit(
+    context: &str,
+    allow_fallback: bool,
+) -> crab_world::mesh_fallback::BodyGate {
+    match crab_world::mesh_fallback::require_canonical_body(context, allow_fallback) {
+        Ok(gate) => gate,
+        Err(_) => std::process::exit(1), // refusal already logged loudly by the preflight
+    }
 }
 
 fn main() {
@@ -175,9 +206,11 @@ fn main() {
     // training success headlessly. Both return; a bare invocation falls through to the DEV audits.
     match cli.command {
         Some(Command::Learn(l)) => {
+            let body_gate = require_canonical_body_or_exit("learn", l.allow_fallback_body);
             // run_learner owns nicing (it lowers process priority before building any
             // world) so a foreground game preempts training.
             training::inproc::run_learner(
+                body_gate,
                 &l.train,
                 l.arch,
                 training::inproc::default_workers(l.workers),
@@ -188,10 +221,22 @@ fn main() {
             return;
         }
         Some(Command::Eval(e)) => {
+            let body_gate = require_canonical_body_or_exit("eval", e.allow_fallback_body);
             let distance = e
                 .distance
                 .unwrap_or(crab_world::eval::DEFAULT_TARGET_DISTANCE_M);
-            let r = crab_world::eval::run_eval(&e.checkpoint_dir, e.ticks, distance);
+            // A refused/mismatched checkpoint is a hard exit-1 with NO `EVAL_RESULT` line
+            // (the daemon greps that prefix; wrong-body baseline numbers plotted as
+            // training progress would be the eval-side rl#214). Absent stays the
+            // legitimate zero-action baseline below.
+            let r = match crab_world::eval::run_eval(body_gate, &e.checkpoint_dir, e.ticks, distance)
+            {
+                Ok(r) => r,
+                Err(refusal) => {
+                    eprintln!("eval: {refusal}");
+                    std::process::exit(1);
+                }
+            };
             // The two headline numbers first (progress_m, total_torque), then the context that
             // lets them be trusted at face value. `EVAL_RESULT` is a stable, greppable prefix the
             // daemon parses to plot progress-toward-ball over training.
