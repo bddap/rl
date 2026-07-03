@@ -358,6 +358,26 @@ impl TelemetrySender {
     }
 }
 
+/// Drain + surface the server's chronic input-starvation reports (rl#213): one local `warn!`
+/// per report, mirrored as a [`Fault`](TelemetryEvent::Fault) when a collector is wired. The
+/// ONE drain policy every server driver (windowed + headless host) shares, so log-and-mirror
+/// can't drift between them. Lives here, not on [`Server`], so server.rs stays free of
+/// telemetry/log concerns; `server`/`tel` are `Option`s so a driver arm without one (a remote
+/// client, a collector-less run) calls it the same way. Reports are rate-limited server-side
+/// (≤1 per player per cooldown), so each one is worth a line.
+pub fn surface_starvation(
+    server: Option<&mut crate::server::Server>,
+    tel: Option<&TelemetrySender>,
+) {
+    let Some(server) = server else { return };
+    for r in server.take_starvation_reports() {
+        tracing::warn!("{r}");
+        if let Some(t) = tel {
+            t.send(TelemetryEvent::Fault { msg: r.to_string() });
+        }
+    }
+}
+
 /// Bind the telemetry sender's own LAN endpoint: same LAN-only shape as the game's
 /// transport (relay disabled, mDNS the sole lookup, scoped to the TELEMETRY service —
 /// [`TELEMETRY_SERVICE_NAME`], not the game's — so it can resolve the collector by id)

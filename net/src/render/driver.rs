@@ -1197,6 +1197,14 @@ pub(super) fn drive_lockstep(world: &mut World) {
         }
     }
 
+    // Chronic input-starvation surface (rl#213): reports appear at most once per second per
+    // player, so once per frame — after the tick drain — is plenty. A remote-adopt client has
+    // no server and drains nothing.
+    crate::telemetry::surface_starvation(
+        world.non_send_resource_mut::<GameState>().server_mut(),
+        tel.as_ref(),
+    );
+
     if applied == MAX_TICKS_PER_FRAME {
         // Shed the backlog rather than spiral: drop accumulated time past one tick.
         let mut state = world.non_send_resource_mut::<GameState>();
