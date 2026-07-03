@@ -52,8 +52,7 @@ pub struct ShotProgress {
 const EXIT_COUNTDOWN_FRAMES: u32 = 30;
 
 /// Default capture size (720p) for every screenshot/render-video CLI across the binaries
-/// (rl-demo, `game fp-screenshot`, `game net-screenshot`) — one source instead of a
-/// re-typed `1280`/`720` per arg struct.
+/// (rl-demo, `game fp-screenshot`, `game net-screenshot`).
 pub const DEFAULT_WIDTH: u32 = 1280;
 pub const DEFAULT_HEIGHT: u32 = 720;
 

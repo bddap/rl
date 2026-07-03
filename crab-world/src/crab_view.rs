@@ -87,23 +87,23 @@ impl RenderMode {
         }
     }
 
-    /// The initial mode from the environment, for callers with no explicit flag. Honors
-    /// `RL_RENDER_MODE=<mode>`, else falls back to the legacy idiom where `RL_DEBUG_COLLIDERS`
-    /// (any value) boots the colliders-only view. Default [`RenderMode::Mesh`].
-    pub fn from_env() -> Self {
+    /// The mode the environment asks for, `None` when it doesn't: `RL_RENDER_MODE=<mode>`,
+    /// else the legacy idiom where `RL_DEBUG_COLLIDERS` (any value) means the colliders-only
+    /// view. THE one reader of these two env vars — the precedence over flags and the
+    /// unusable-mesh fallback lives in [`crate::mesh_fallback::initial_render_mode`], which
+    /// treats `None` as "env didn't decide". An unparsable `RL_RENDER_MODE` warns and returns
+    /// `None` (it decides nothing), so it can't suppress the honest broken-mesh fallback.
+    pub fn env_mode() -> Option<Self> {
         if let Ok(v) = std::env::var("RL_RENDER_MODE") {
-            return RenderMode::parse(&v).unwrap_or_else(|| {
-                warn!(
-                    "RL_RENDER_MODE={v:?} not one of mesh|mesh+colliders|colliders; defaulting mesh"
-                );
-                RenderMode::Mesh
-            });
+            let parsed = RenderMode::parse(&v);
+            if parsed.is_none() {
+                warn!("RL_RENDER_MODE={v:?} not one of mesh|mesh+colliders|colliders; ignoring it");
+            }
+            return parsed;
         }
-        if std::env::var_os("RL_DEBUG_COLLIDERS").is_some() {
-            RenderMode::Colliders
-        } else {
-            RenderMode::Mesh
-        }
+        std::env::var_os("RL_DEBUG_COLLIDERS")
+            .is_some()
+            .then_some(RenderMode::Colliders)
     }
 }
 

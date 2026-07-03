@@ -21,9 +21,9 @@
 //!    distance minus the CLOSEST it ever got, in true 3D euclidean metres ([`dist_3d`], the same
 //!    `d` the grab/reach event is defined on). "Does the crab make progress toward the ball."
 //! 2. **total_torque** — the actual applied joint torque summed over the rollout: each active
-//!    tick, Σ over joints |clamp(action)|·`drive_torque_ceiling`, i.e. the exact muscle command
-//!    [`apply_actions`](crate::bot::actuator::apply_actions) puts on the body. "Done using minimal
-//!    torques" — lower is better.
+//!    tick, Σ over joints |[`applied_torque`](crate::bot::actuator::applied_torque)|, i.e. the
+//!    exact muscle command [`apply_actions`](crate::bot::actuator::apply_actions) puts on the
+//!    body. "Done using minimal torques" — lower is better.
 
 use std::path::Path;
 

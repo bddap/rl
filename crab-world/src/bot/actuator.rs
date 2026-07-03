@@ -33,21 +33,26 @@ impl CrabActions {
     }
 }
 
-/// The ONE raw-drive → applied-joint-torque formula: the SOLE ±1 torque-bound for every
-/// `CrabActions` writer (the training policy's raw drive, the demo, manual control) — each
-/// writes an un-clamped value and this clamp is where it becomes a bounded muscle command,
-/// scaled by the joint's ceiling. Keeping the bound here (not at each writer) lets the
+/// The SOLE ±1 torque-bound for every `CrabActions` writer (the training policy's raw drive,
+/// the demo, manual control): each writes an un-clamped value and this clamp is where it
+/// becomes a bounded muscle command. Keeping the bound here (not at each writer) lets the
 /// training tax see the policy's unbounded drive — a saturating `|a|≫1` is penalized for the
-/// overshoot, then clamped to a physical torque here. A non-finite drive applies zero (the
-/// caller decides whether to warn — see [`apply_actions`]). Shared by the actuator itself and
-/// the eval's applied-torque meter, so the measured torque can't drift from the applied one.
-pub fn applied_torque(id: CrabJointId, raw: f32) -> f32 {
-    let a = if raw.is_finite() {
+/// overshoot, then clamped here. A non-finite drive yields zero (the caller decides whether
+/// to warn — see [`apply_actions`]). Callers wanting the physical torque scale through
+/// [`applied_torque`]; the demo's joint plot reads this normalized command directly.
+pub fn bounded_drive(raw: f32) -> f32 {
+    if raw.is_finite() {
         raw.clamp(-1.0, 1.0)
     } else {
         0.0
-    };
-    a * id.drive_torque_ceiling()
+    }
+}
+
+/// The ONE raw-drive → applied-joint-torque formula: [`bounded_drive`] scaled by the joint's
+/// ceiling. Shared by the actuator itself and the eval's applied-torque meter, so the
+/// measured torque can't drift from the applied one.
+pub fn applied_torque(id: CrabJointId, raw: f32) -> f32 {
+    bounded_drive(raw) * id.drive_torque_ceiling()
 }
 
 /// Applies each env's action vector as joint torques.

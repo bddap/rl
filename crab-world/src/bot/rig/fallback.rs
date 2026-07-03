@@ -180,15 +180,16 @@ mod tests {
             2,
             "two claw-tip links (the reach effectors)"
         );
-        // Grippy feet attach on the distal leg bone `.004.`; one per leg (8).
+        // Grippy feet: the carpus link is what plants on the ground; one per leg (8).
+        // Counted by the typed id — the SAME predicate the spawn's friction gate uses.
         assert_eq!(
             recipe
                 .links
                 .iter()
-                .filter(|l| l.bone.starts_with("Def_leg") && l.bone.contains(".004."))
+                .filter(|l| matches!(l.actuated, Some(CrabJointId::LegCarpus(..))))
                 .count(),
             8,
-            "eight feet (the .004 distal leg links that plant on the ground)"
+            "eight feet (the leg-carpus links that plant on the ground)"
         );
 
         // A real, non-degenerate carapace box.

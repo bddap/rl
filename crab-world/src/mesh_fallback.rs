@@ -225,33 +225,30 @@ pub fn require_canonical_body(context: &str, allow_fallback: bool) -> Result<Bod
 }
 
 /// THE initial-render-mode decision for every player-facing surface (game/net's commands and
-/// rl-demo) — ONE precedence order, so a broken-glb + env-set launch can't boot two surfaces in
-/// two different modes (the two copies had drifted: game let the env beat the fallback, rl-demo
-/// the reverse). Explicit intent outranks the automatic fallback: a parsed `--render-mode` flag
-/// wins outright; else a set `RL_RENDER_MODE`/`RL_DEBUG_COLLIDERS` env decides
-/// ([`crate::crab_view::RenderMode::from_env`]); else an unusable canonical mesh
-/// ([`usable_model`]) forces the honest `Colliders` view; else the `Mesh` default. Whenever the
-/// mesh is unusable this also raises the [`log_fallback`] OTEL error for `surface` — regardless
-/// of the mode picked, since the crab drawn is the fallback body either way (in `Mesh` mode the
+/// rl-demo) — ONE precedence order, so a broken-glb + env-set launch can't boot two surfaces
+/// in two different modes. Explicit intent outranks the automatic fallback: a parsed
+/// `--render-mode` flag wins outright; else the env decides
+/// ([`crate::crab_view::RenderMode::env_mode`]); else an unusable canonical mesh
+/// ([`usable_model`]) forces the honest `Colliders` view; else `Mesh`. Whenever the mesh is
+/// unusable this also raises the [`log_fallback`] OTEL error for `surface` — regardless of
+/// the mode picked, since the crab drawn is the fallback body either way (in `Mesh` mode the
 /// physics-bones silhouette).
 #[cfg(feature = "render")]
 pub fn initial_render_mode(
     flag: Option<crate::crab_view::RenderMode>,
     surface: Surface,
 ) -> crate::crab_view::RenderMode {
+    use crate::crab_view::RenderMode;
     let mesh_err = usable_model().as_ref().err();
     if let Some(reason) = mesh_err {
         log_fallback(surface, reason);
     }
-    if let Some(mode) = flag {
-        return mode;
-    }
-    let env_override = std::env::var_os("RL_RENDER_MODE").is_some()
-        || std::env::var_os("RL_DEBUG_COLLIDERS").is_some();
-    if !env_override && mesh_err.is_some() {
-        return crate::crab_view::RenderMode::Colliders;
-    }
-    crate::crab_view::RenderMode::from_env()
+    flag.or_else(RenderMode::env_mode)
+        .unwrap_or(if mesh_err.is_some() {
+            RenderMode::Colliders
+        } else {
+            RenderMode::Mesh
+        })
 }
 
 /// Emit the LOUD canonical-mesh error: a `tracing::error!` that names the absent/broken Sally
