@@ -313,7 +313,7 @@ fn vehicle_bundle(kind: VehicleKind, transform: Transform, velocity: Velocity) -
             throttle: 0.0,
         },
         RigidBody::Dynamic,
-        Collider::cuboid(VEHICLE_HALF.x, VEHICLE_HALF.y, VEHICLE_HALF.z),
+        vehicle_collider(),
         ColliderMassProperties::Density(VEHICLE_DENSITY),
         // Per-craft gravity: the plane falls (1×), the Outer-Wilds ship floats (zero-g).
         GravityScale(kind.gravity_scale()),
@@ -322,6 +322,14 @@ fn vehicle_bundle(kind: VehicleKind, transform: Transform, velocity: Velocity) -
         velocity,
         ExternalForce::default(),
     )
+}
+
+/// The vehicle's collider shape — the ONE source for its physical (and, render==physics, visual)
+/// extent. Shared by the live body ([`vehicle_bundle`]) and by a remote MP client's wireframe of
+/// the host's craft (`net`'s render glue), which has no body and rebuilds the shape from this, so
+/// the drawn cage can't drift from the collider it depicts.
+pub fn vehicle_collider() -> Collider {
+    Collider::cuboid(VEHICLE_HALF.x, VEHICLE_HALF.y, VEHICLE_HALF.z)
 }
 
 /// Spawn one vehicle rigidbody of `kind` at its arena spawn pose — the boarding path

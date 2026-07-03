@@ -17,8 +17,16 @@ use bevy::prelude::*;
 
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
 use crab_world::bot::skin::{CrabSkinRepose, SkinRepose};
+use crab_world::vehicle::Vehicle;
 
-use crate::articulation::{CrabArticulation, PartTransform, ReposeWire};
+use crate::articulation::{CrabArticulation, PartTransform, ReposeWire, VehiclePoseWire};
+
+/// (Client) The host's piloted craft's arena-frame pose off the wire, `None` while the host is on
+/// foot. A remote client runs none of the vehicle's rapier (host-authoritative), so this mirror is
+/// all it knows of the craft; `render_mode`'s wireframe drawer renders it (rl#192). Written by
+/// [`apply`] each adopted tick; stays `None` on the host/solo, whose craft is the live body.
+#[derive(Resource, Default)]
+pub(super) struct RemoteVehicle(pub(super) Option<VehiclePoseWire>);
 
 /// The part tag is `1 + joint.index()` in a `u8`, so the joint set must stay small enough that the
 /// tag can't wrap — pin it at compile time (COUNT is 38 today; the wire format would need a rev long
@@ -75,10 +83,23 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
             scale: s.scale,
         });
 
+    // The piloted craft, if the host is flying one — at most one body exists (`manage_vehicle`),
+    // despawned on foot, so the query itself is the presence signal. Its `Transform` is
+    // arena-frame like the parts (a top-level rapier body).
+    let vehicle = world
+        .query_filtered::<&Transform, With<Vehicle>>()
+        .iter(world)
+        .next()
+        .map(|t| VehiclePoseWire {
+            pos: t.translation.to_array(),
+            rot: t.rotation.to_array(),
+        });
+
     CrabArticulation {
         tick,
         parts,
         repose,
+        vehicle,
     }
 }
 
@@ -120,6 +141,11 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
             scale: r.scale,
         });
     }
+
+    // Mirror the host's piloted craft — including `None` (the host stepped out; a stale mirror
+    // would freeze a ghost craft mid-air). Insert rather than get-mut so the mirror exists from
+    // the first adopted frame.
+    world.insert_resource(RemoteVehicle(art.vehicle));
 }
 
 #[cfg(test)]
@@ -159,7 +185,7 @@ mod tests {
         let joint_t =
             Transform::from_xyz(-4.0, 0.25, 9.0).with_rotation(Quat::from_rotation_x(0.3));
 
-        // HOST: known part poses + a published giant-blow-up placement.
+        // HOST: known part poses + a published giant-blow-up placement + a piloted craft.
         let mut host = World::new();
         spawn_parts(&mut host, cara_t, joint_id, joint_t);
         host.insert_resource(CrabSkinRepose(Some(SkinRepose {
@@ -167,6 +193,14 @@ mod tests {
             pivot: Vec3::Y,
             scale: 8.0,
         })));
+        let craft_t = Transform::from_xyz(2.0, 5.5, -1.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        crab_world::vehicle::spawn_ram_vehicle(
+            &mut host,
+            crab_world::vehicle::VehicleKind::Plane,
+            craft_t,
+            bevy_rapier3d::prelude::Velocity::default(),
+        );
 
         // Capture and send it exactly as the transport does — through the wire codec.
         let art = capture(&mut host, 42);
@@ -201,5 +235,13 @@ mod tests {
         assert_eq!(repose.shift, Vec3::new(10.0, 0.0, -20.0));
         assert_eq!(repose.pivot, Vec3::Y);
         assert_eq!(repose.scale, 8.0);
+        // The host's piloted craft crossed too — the client's mirror holds its exact pose
+        // (rl#192: this is what the second player's wireframe drawer renders).
+        let craft = client
+            .resource::<RemoteVehicle>()
+            .0
+            .expect("piloted craft applied");
+        assert_eq!(Vec3::from_array(craft.pos), craft_t.translation);
+        assert_eq!(Quat::from_array(craft.rot), craft_t.rotation);
     }
 }

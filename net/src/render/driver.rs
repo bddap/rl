@@ -56,6 +56,10 @@ fn install_round(world: &mut World, ls: Lockstep, coord: Box<Coordinator>) {
     world.insert_resource(CameraPitch::default());
     world.insert_resource(CameraYaw::default());
     world.insert_resource(LocalVehicle::default());
+    // The remote-host craft mirror too: only the RemoteAdopt arm ever writes it, so a round
+    // entered as solo/host after a remote round would otherwise draw the previous host's
+    // craft frozen at its last adopted pose, forever.
+    world.insert_resource(super::articulation::RemoteVehicle::default());
 }
 
 /// The round the boot menu chose, parked here between the menu's Playing transition and

@@ -5,7 +5,9 @@
 //! trainer build ([[verify-all-bins-on-module-moves]]). But a windowed remote client no longer
 //! runs the crab's rapier physics (host-authoritative: the host owns the one Sally, the client
 //! renders the host's pose), so it has no per-part transforms to skin the mesh from. Those ride
-//! HERE, in a SEPARATE frame the host broadcasts beside the snapshot.
+//! HERE, in a SEPARATE frame the host broadcasts beside the snapshot — along with the pose of
+//! the host's piloted craft ([`VehiclePoseWire`]), the other host-only rapier body a remote
+//! client must render without simulating (rl#192).
 //!
 //! The wire type is plain POD (`f32` arrays + a `u8` part tag) with a hand-rolled little-endian
 //! codec — deliberately NO bevy/glam type crosses this boundary, so this module compiles in the
@@ -66,6 +68,24 @@ pub struct CrabArticulation {
     pub parts: Vec<PartTransform>,
     /// The giant-blow-up placement, or `None` before the host has published one.
     pub repose: Option<ReposeWire>,
+    /// The host's piloted craft's pose, or `None` while the host is on foot (the body is
+    /// despawned then, so absence IS the on-foot signal — a client clears its drawn craft on
+    /// `None` rather than freezing a stale one).
+    pub vehicle: Option<VehiclePoseWire>,
+}
+
+/// The host's piloted craft for one tick — its arena-frame rigidbody pose. Like the crab, the
+/// vehicle is rapier state only the HOST steps (host-authoritative, off the integer sim), so a
+/// remote client can't compute where it is; this riding beside the crab pose is how the second
+/// player sees the host fly (rl#192). The client draws the craft's collider wireframe — its one
+/// visual (the craft has no mesh) — at this pose, under the same [`ReposeWire`] placement as the
+/// crab cage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VehiclePoseWire {
+    /// Arena-frame translation, `[x, y, z]`.
+    pub pos: [f32; 3],
+    /// Arena-frame rotation quaternion, `[x, y, z, w]`.
+    pub rot: [f32; 4],
 }
 
 /// Why decoding a [`CrabArticulation`] failed. Like a snapshot, a client must never render a
@@ -74,7 +94,7 @@ pub struct CrabArticulation {
 pub enum ArticulationDecodeError {
     /// The buffer ended before a field the format requires was fully read.
     Truncated,
-    /// The 1-byte `repose-present` flag held a value other than 0 or 1.
+    /// A 1-byte present-flag (repose or vehicle) held a value other than 0 or 1.
     BadFlag,
     /// Bytes remained after a complete articulation decoded — a framing/length mismatch.
     TrailingBytes,
@@ -84,7 +104,7 @@ impl std::fmt::Display for ArticulationDecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let msg = match self {
             Self::Truncated => "articulation buffer ended mid-field",
-            Self::BadFlag => "articulation repose flag was neither 0 nor 1",
+            Self::BadFlag => "articulation present-flag was neither 0 nor 1",
             Self::TrailingBytes => "trailing bytes after a complete articulation",
         };
         f.write_str(msg)
@@ -95,8 +115,8 @@ impl std::error::Error for ArticulationDecodeError {}
 
 impl CrabArticulation {
     /// Little-endian wire form: `tick(8) | n_parts(4) | part[ tag(1) pos(3×4) rot(4×4) ]… |
-    /// repose_present(1) | [ shift(3×4) pivot(3×4) scale(4) ]`. [`from_bytes`](Self::from_bytes) is
-    /// its exact inverse.
+    /// repose_present(1) | [ shift(3×4) pivot(3×4) scale(4) ] | vehicle_present(1) |
+    /// [ pos(3×4) rot(4×4) ]`. [`from_bytes`](Self::from_bytes) is its exact inverse.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.tick.to_le_bytes());
@@ -121,6 +141,18 @@ impl CrabArticulation {
                     out.extend_from_slice(&v.to_le_bytes());
                 }
                 out.extend_from_slice(&r.scale.to_le_bytes());
+            }
+        }
+        match &self.vehicle {
+            None => out.push(0),
+            Some(v) => {
+                out.push(1);
+                for c in v.pos {
+                    out.extend_from_slice(&c.to_le_bytes());
+                }
+                for c in v.rot {
+                    out.extend_from_slice(&c.to_le_bytes());
+                }
             }
         }
         out
@@ -155,6 +187,14 @@ impl CrabArticulation {
             }
             _ => return Err(ArticulationDecodeError::BadFlag),
         };
+        let vehicle = match r.byte()? {
+            0 => None,
+            1 => Some(VehiclePoseWire {
+                pos: read_vec3(&mut r)?,
+                rot: read_vec4(&mut r)?,
+            }),
+            _ => return Err(ArticulationDecodeError::BadFlag),
+        };
         if !r.is_empty() {
             return Err(ArticulationDecodeError::TrailingBytes);
         }
@@ -162,6 +202,7 @@ impl CrabArticulation {
             tick,
             parts,
             repose,
+            vehicle,
         })
     }
 }
@@ -241,6 +282,10 @@ mod tests {
                 pivot: [0.0, 1.0, 0.0],
                 scale: 8.0,
             }),
+            vehicle: Some(VehiclePoseWire {
+                pos: [2.0, 5.5, -1.0],
+                rot: [0.0, 0.7071, 0.0, 0.7071],
+            }),
         }
     }
 
@@ -258,11 +303,19 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_without_vehicle() {
+        let mut a = sample();
+        a.vehicle = None;
+        assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
+    }
+
+    #[test]
     fn empty_parts_roundtrip() {
         let a = CrabArticulation {
             tick: 0,
             parts: vec![],
             repose: None,
+            vehicle: None,
         };
         assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
     }
@@ -297,6 +350,13 @@ mod tests {
         let flag_off = 8 + 4 + 2 * (1 + 12 + 16);
         let mut bytes = sample().to_bytes();
         bytes[flag_off] = 2;
+        assert_eq!(
+            CrabArticulation::from_bytes(&bytes),
+            Err(ArticulationDecodeError::BadFlag)
+        );
+        // And the vehicle-present flag, right after the repose block (flag + 3+3+1 f32s).
+        let mut bytes = sample().to_bytes();
+        bytes[flag_off + 1 + 7 * 4] = 2;
         assert_eq!(
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::BadFlag)
