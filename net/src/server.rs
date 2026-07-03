@@ -777,9 +777,11 @@ mod tests {
     fn silent_stream_reports_starvation_once_per_cooldown() {
         let mut s = srv(42, &ids(2));
         // One real input creates the stream, then silence — permanently held.
-        let reports = run_with_sender(&mut s, STARVATION_REPORT_COOLDOWN + STARVATION_WINDOW, |t| {
-            t == 0
-        });
+        let reports = run_with_sender(
+            &mut s,
+            STARVATION_REPORT_COOLDOWN + STARVATION_WINDOW,
+            |t| t == 0,
+        );
         assert_eq!(
             reports.len(),
             2,
@@ -836,7 +838,10 @@ mod tests {
     fn healthy_stream_reports_no_starvation() {
         let mut s = srv(42, &ids(2));
         let reports = run_with_sender(&mut s, 2 * STARVATION_WINDOW, |_| true);
-        assert!(reports.is_empty(), "full-rate stream is healthy: {reports:?}");
+        assert!(
+            reports.is_empty(),
+            "full-rate stream is healthy: {reports:?}"
+        );
     }
 
     /// A starved stream HOLDS the last consumed move axes but zeroes the per-tick look delta
