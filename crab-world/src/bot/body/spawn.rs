@@ -189,7 +189,11 @@ pub fn spawn_crab(
             Some(idx) => ents[idx],
         };
         let here = world_pos[i]; // unrotated bind-pose origin
-        let collider = capsule_collider(link.center, link.col_rot, link.half_height, link.radius);
+        // The link's LIVE rapier capsule, from the SAME `link_capsule` endpoints the scored and
+        // drawn silhouettes use (origin zero: this collider is link-local, offset baked into the
+        // shape), so the simulated shape can't drift from the shared definition.
+        let cap = rig::link_capsule(link, Vec3::ZERO);
+        let collider = Collider::capsule(cap.a, cap.b, cap.radius);
         // A link whose collider center sits inside the carapace box is a proximal
         // stub tucked under the shell; group it so it can't fight the carapace
         // collider (see [`NESTED_COLLISION`]). Distal limb segments reach outside the
@@ -227,8 +231,10 @@ pub fn spawn_crab(
         if matches!(id, CrabJointId::ClawPincer(_)) {
             ec.insert(CrabClawTip);
         }
-        // Grippy feet: the distal leg bone (`004`) is what plants on the ground.
-        if link.bone.starts_with("Def_leg") && link.bone.contains(".004.") {
+        // Grippy feet: the carpus link (distal leg segment) is what plants on the ground.
+        // Gated on the typed joint id, not the bone-name string — a bone rename in the glb
+        // can't silently drop the trained-behavior-critical friction.
+        if matches!(id, CrabJointId::LegCarpus(..)) {
             ec.insert(Friction::coefficient(1.5));
         }
         ents.push(ec.id());
@@ -261,12 +267,4 @@ fn rig_revolute(id: CrabJointId, axis: Vec3, anchor1: Vec3) -> TypedJoint {
     let generic: &mut GenericJoint = joint.as_mut();
     generic.raw.softness = LIMIT_SOFTNESS;
     joint
-}
-
-/// A capsule collider offset within its link: the bone runs from the pivot (link
-/// origin) along `rot·Y`, so the shape sits centred at `center` and oriented to
-/// match — the same offset-baked-into-the-shape trick the fitted path uses.
-fn capsule_collider(center: Vec3, rot: Quat, half_height: f32, radius: f32) -> Collider {
-    let axis = rot * Vec3::Y * half_height;
-    Collider::capsule(center - axis, center + axis, radius)
 }

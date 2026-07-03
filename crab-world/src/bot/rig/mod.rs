@@ -34,6 +34,7 @@ mod colliders;
 mod fallback;
 mod recipe;
 
+pub(crate) use colliders::link_capsule;
 pub use colliders::{CrabSilhouette, RestCollider, RestShape, recipe_silhouette, rest_colliders};
 pub use fallback::fallback_recipe;
 pub(crate) use recipe::link_world_origins;

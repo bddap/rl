@@ -18,9 +18,9 @@ pub(crate) struct Args {
     /// frame; higher lets the round play out.
     #[arg(long, default_value_t = 90)]
     settle: u32,
-    #[arg(long, default_value_t = 1280)]
+    #[arg(long, default_value_t = crab_world::screenshot::DEFAULT_WIDTH)]
     width: u32,
-    #[arg(long, default_value_t = 720)]
+    #[arg(long, default_value_t = crab_world::screenshot::DEFAULT_HEIGHT)]
     height: u32,
     /// Number of players to spawn in the solo scene, so the shot shows another
     /// player's avatar alongside the local one (player 0 is the local camera).

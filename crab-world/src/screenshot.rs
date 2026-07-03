@@ -51,6 +51,12 @@ pub struct ShotProgress {
 /// and PNG encode complete before [`AppExit`].
 const EXIT_COUNTDOWN_FRAMES: u32 = 30;
 
+/// Default capture size (720p) for every screenshot/render-video CLI across the binaries
+/// (rl-demo, `game fp-screenshot`, `game net-screenshot`) — one source instead of a
+/// re-typed `1280`/`720` per arg struct.
+pub const DEFAULT_WIDTH: u32 = 1280;
+pub const DEFAULT_HEIGHT: u32 = 720;
+
 /// Create an offscreen render-target image of the given size, marked `COPY_SRC` so
 /// the screenshot machinery can read the rendered texture back. The caller adds it
 /// to `Assets<Image>`, spawns its camera with `RenderTarget::Image(handle)` (and

@@ -506,6 +506,17 @@ mod tests {
         assert_eq!(got, vec![PlayerId(0), PlayerId(1)]);
     }
 
+    #[test]
+    fn player_zero_is_host_of() {
+        // Cross-lock the two spellings of the host rule: `assign_player_ids`' PlayerId(0)
+        // (the sorted assignment's first slot) must be exactly the peer
+        // `membership::host_of` picks, or "host" and "server" could name different peers.
+        let roster = [eid(9), eid(3), eid(6)];
+        let map = assign_player_ids(eid(3), &roster).unwrap();
+        let host = crate::membership::host_of(&roster);
+        assert_eq!(map[&host], PlayerId(0), "host_of must hold PlayerId(0)");
+    }
+
     /// Live multi-endpoint formation over REAL iroh QUIC (not the pure state machine):
     /// three sessions on the loopback, fully meshed by direct dial, run the actual
     /// [`form_match`] barrier concurrently and MUST all freeze the byte-identical

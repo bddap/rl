@@ -577,10 +577,7 @@ fn integrate_crab(
     let v = Vec2::new(vel.linear.x, vel.linear.z);
     if v.length_squared() > 1e-4 {
         let radians = v.x.atan2(v.y); // (x, z) → heading
-        let turn = crate::sim::trig::TURN as f32;
-        let mut t = (radians / std::f32::consts::TAU * turn).round() as i32;
-        t = t.rem_euclid(crate::sim::trig::TURN);
-        bridge.yaw_turns = t;
+        bridge.yaw_turns = crate::sim::trig_client::radians_to_turns(radians);
     }
 }
 

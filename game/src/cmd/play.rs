@@ -5,7 +5,7 @@ use clap::Parser;
 use iroh::EndpointId;
 use net::{formation, net_loop, render};
 
-use super::shared::{MATCH_SEED, nn_crab_checkpoint_dir, resolve_render_mode};
+use super::shared::{MATCH_SEED, nn_crab_checkpoint_dir, parse_join_dial, resolve_render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -27,11 +27,11 @@ pub(crate) struct Args {
     )]
     join: Option<String>,
     /// Wait this long for peers before starting (the scripted `--host`/`--join` paths only).
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = super::shared::DEFAULT_DISCOVER_SECS)]
     discover_secs: u64,
     /// Expected peer count including us (the scripted `--host`/`--join` paths only); proceeds
     /// with whoever showed up after `discover_secs`.
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = super::shared::DEFAULT_EXPECT)]
     expect: usize,
     /// Stream live telemetry to this collector endpoint id (networked play only; see
     /// `NetArgs::telemetry`). Separate ALPN/connection — never perturbs the lockstep.
@@ -81,10 +81,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         // form over the barrier, and hand the result to Boot::Round. Host never dials. This
         // is the default timer-closed barrier (no interactive lobby), so it can't be
         // cancelled — only Joined or the Alone solo fallback.
-        let dial = match &args.join {
-            Some(code) if !code.trim().is_empty() => Some(code.trim().parse::<EndpointId>()?),
-            _ => None,
-        };
+        let dial = parse_join_dial(args.join.as_deref())?;
         let result = net_loop::connect_and_form_dialing(
             MATCH_SEED,
             args.discover_secs,

@@ -8,8 +8,8 @@ use bevy::prelude::*;
 
 use crate::bot::meshfit::PartId;
 
-use super::recipe::{leg_hub_centroid, link_world_origins};
-use super::{BindSource, RigLink, RigRecipe};
+use super::recipe::link_world_origins;
+use super::{RigLink, RigRecipe};
 
 /// A collider reconstructed in bind-pose world (the rest stance), paired with the
 /// part whose vertex cloud it should hug. The verifier (the `rl --verify-colliders`
@@ -35,11 +35,11 @@ pub enum RestShape {
 
 /// Reconstruct every scoreable collider of `recipe` in bind-pose world. Locked
 /// eye-stalk links are skipped (no fitted cloud to score). The carapace box is
-/// world-axis-aligned at the hub + offset.
-pub fn rest_colliders(model: &impl BindSource, recipe: &RigRecipe) -> Vec<RestCollider> {
-    let Some(o_root) = leg_hub_centroid(model) else {
-        return Vec::new();
-    };
+/// world-axis-aligned at the hub + offset. Anchored at `recipe.hub_bind_world` — the
+/// leg-hub centroid the recipe build already derived from the model — so this needs
+/// no second look at the model and can't disagree with the recipe's own frame.
+pub fn rest_colliders(recipe: &RigRecipe) -> Vec<RestCollider> {
+    let o_root = recipe.hub_bind_world;
     let world_origin = link_world_origins(&recipe.links, o_root);
     let mut out: Vec<RestCollider> = Vec::new();
     for (link, &origin) in recipe.links.iter().zip(&world_origin) {
@@ -48,7 +48,7 @@ pub fn rest_colliders(model: &impl BindSource, recipe: &RigRecipe) -> Vec<RestCo
         if let Some(id) = link.actuated {
             out.push(RestCollider {
                 part: PartId::Joint(id),
-                shape: link_capsule(link, origin),
+                shape: link_capsule(link, origin).into(),
                 pivot: origin,
             });
         }
@@ -125,7 +125,7 @@ pub fn recipe_silhouette(recipe: &RigRecipe) -> CrabSilhouette {
         .links
         .iter()
         .zip(&world_origin)
-        .map(|(link, &origin)| link_capsule(link, origin))
+        .map(|(link, &origin)| link_capsule(link, origin).into())
         .collect();
     CrabSilhouette {
         limbs,
@@ -133,14 +133,33 @@ pub fn recipe_silhouette(recipe: &RigRecipe) -> CrabSilhouette {
     }
 }
 
+/// One link's capsule endpoints, capsule-by-type (no enum to re-match) — see [`link_capsule`].
+pub(crate) struct LinkCapsule {
+    pub a: Vec3,
+    pub b: Vec3,
+    pub radius: f32,
+}
+
+impl From<LinkCapsule> for RestShape {
+    fn from(c: LinkCapsule) -> Self {
+        RestShape::Capsule {
+            a: c.a,
+            b: c.b,
+            radius: c.radius,
+        }
+    }
+}
+
 /// One link's capsule from its telescoped `origin`. Shared by [`rest_colliders`]
-/// (scoring), [`recipe_silhouette`] (rendering), and the shoulder up-stop regression
-/// guard ([`super::recipe`]'s tests) so the capsule geometry has a single definition
-/// that can't drift between the scored body, the drawn one, and the limit guard.
-pub(super) fn link_capsule(link: &RigLink, origin: Vec3) -> RestShape {
+/// (scoring), [`recipe_silhouette`] (rendering), the shoulder up-stop regression
+/// guard ([`super::recipe`]'s tests), AND the live rapier collider the body spawns
+/// (`bot::body::spawn` passes `Vec3::ZERO` — its capsule is link-local), so the
+/// capsule geometry has a single definition that can't drift between the scored
+/// body, the drawn one, the limit guard, and the one physics actually simulates.
+pub(crate) fn link_capsule(link: &RigLink, origin: Vec3) -> LinkCapsule {
     let axis = link.col_rot * Vec3::Y * link.half_height;
     let c = origin + link.center;
-    RestShape::Capsule {
+    LinkCapsule {
         a: c - axis,
         b: c + axis,
         radius: link.radius,
