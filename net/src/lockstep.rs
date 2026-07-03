@@ -178,14 +178,17 @@ impl Lockstep {
 
     /// THE remote-client adopt policy — the one shared answer to "which drained snapshots does a
     /// client apply, in what order?" for both remote clients (the windowed driver's `RemoteAdopt`
-    /// arm and headless `game net`'s client arm): apply EVERY snapshot, in ARRIVAL order, with NO
-    /// tick gate. The reliable ordered per-peer stream delivers snapshots in the host's send
-    /// (= step) order, so arrival order IS authoritative — a `tick <=`/`max` gate or a
-    /// sort-by-tick would add nothing but a place to go wrong (and historically froze clients
+    /// arm and headless `game net`'s client arm): apply EVERY snapshot it is handed, in ARRIVAL
+    /// order, with NO tick gate. The reliable ordered per-peer stream delivers snapshots in the
+    /// host's send (= step) order, so arrival order IS authoritative — a `tick <=`/`max` gate or
+    /// a sort-by-tick would add nothing but a place to go wrong (and historically froze clients
     /// across a host RESTART, back when a restart rewound the tick; ticks are monotone across a
     /// restart now — rl#204 — so there is nothing to gate). Each snapshot is a FULL
     /// state overwrite, so applying intermediates is cheap (~hundreds of bytes/tick) and keeps
-    /// per-adopt observers exact.
+    /// per-adopt observers exact. (How MANY to hand over per frame is the caller's pacing
+    /// concern: the windowed driver feeds this from a small jitter buffer, one per local tick,
+    /// so burst arrivals don't render as a freeze-then-jump — rl#194. The headless client,
+    /// which renders nothing, adopts every arrival directly.)
     ///
     /// `on_adopt` runs after each apply (the `--hash-log` observer; pass `|_| ()` to skip). Returns
     /// how many snapshots were adopted; callers gate POST-adopt work
