@@ -398,6 +398,14 @@ impl Policy {
     /// Deterministic action: the policy mean (no exploration noise), so the crab
     /// holds a steady pose instead of jittering. One policy implementation, three
     /// callers — the demo, the game's solo NN-crab, and the headless eval.
+    ///
+    /// Returns the RAW mean — unclamped like every `CrabActions` writer (the trainer
+    /// writes unclamped μ+σ·ε too; the actuator's `apply_actions` is the sole ±1
+    /// torque-bound) and, on this path, un-sanitized: a non-finite mean flows through
+    /// to the actuator's latched `error!` (rl#145). Sanitizing here zeroed a
+    /// NaN-spewing checkpoint upstream of that guard, degrading it to rest pose
+    /// silently (rl#219). (The trainer alone pre-zeroes non-finite drive, with a
+    /// `warn!` — a NaN there would poison the PPO buffer, not just one tick's torque.)
     pub fn act(&self, raw_obs: &[f32; OBS_SIZE]) -> [f32; ACTION_SIZE] {
         // No brain → hold the neutral (zero-action) pose: a deterministic view of the body
         // geometry, not an untrained brain's noise. Both driving states run the same inference.
@@ -417,15 +425,8 @@ impl Policy {
         let (means, _log_std) = brain.policy(input);
         let flat: Vec<f32> = means.flatten::<1>(0, 1).to_data().to_vec().unwrap();
 
-        let mut out = [0.0f32; ACTION_SIZE];
-        for (o, &v) in out.iter_mut().zip(flat.iter()) {
-            *o = if v.is_finite() {
-                v.clamp(-1.0, 1.0)
-            } else {
-                0.0
-            };
-        }
-        out
+        flat.try_into()
+            .expect("policy mean count == ACTION_SIZE (the rig gates refuse mismatched brains)")
     }
 }
 
@@ -629,23 +630,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
     }
 
-    /// Save a brain whose first trunk layer expects `obs_dim` inputs instead of the
-    /// current `OBS_SIZE` — the on-disk shape a checkpoint from an older rig has. We
-    /// can't get one from `Mlp256::new` (it bakes in today's `OBS_SIZE`), so swap
-    /// the `trunk_fc1` weight in the record for a `[obs_dim, HIDDEN]` tensor before
-    /// recording. This is exactly the file that used to reach the matmul and panic.
-    /// Built on the LEAF record inside a proper envelope: what lands on disk is the same
-    /// layout production writes, only with foreign dims. The paired normalizer rides
-    /// along so the verdict tested is the DIM mismatch, nothing else.
-    fn save_brain_with_obs_dim(dir: &Path, obs_dim: usize) {
-        use burn::module::{Param, ParamId};
-        use burn::tensor::Tensor;
+    /// Write a hand-mutated `Mlp256` LEAF record inside a proper envelope — the same
+    /// on-disk layout production writes — plus the paired identity normalizer, so each
+    /// caller's test exercises ONLY the defect its record mutation planted. Concrete
+    /// record type on purpose: the envelope is tagged `ArchId::Mlp256`, so accepting any
+    /// `Record` would let the tag lie about the bytes.
+    fn save_brain_record(dir: &Path, record: crate::bot::arch::mlp256::Mlp256Record<TrainBackend>) {
         std::fs::create_dir_all(dir).unwrap();
-        let device = NdArrayDevice::Cpu;
-        let mut record = Mlp256::<TrainBackend>::new(&device).into_record();
-        let [_obs, hidden] = record.trunk_fc1.weight.shape().dims();
-        let weight = Tensor::<TrainBackend, 2>::zeros([obs_dim, hidden], &device);
-        record.trunk_fc1.weight = Param::initialized(ParamId::new(), weight);
         let bytes = BinBytesRecorder::<FullPrecisionSettings>::default()
             .record(record, ())
             .unwrap();
@@ -658,6 +649,21 @@ mod tests {
         )
         .unwrap();
         ObsNormalizer::new(NORMALIZER_CLIP).save(ArchId::Mlp256, &paths.normalizer_path());
+    }
+
+    /// Save a brain whose first trunk layer expects `obs_dim` inputs instead of the
+    /// current `OBS_SIZE` — the on-disk shape a checkpoint from an older rig has. We
+    /// can't get one from `Mlp256::new` (it bakes in today's `OBS_SIZE`), so swap
+    /// the `trunk_fc1` weight in the record for a `[obs_dim, HIDDEN]` tensor before
+    /// recording. This is exactly the file that used to reach the matmul and panic.
+    fn save_brain_with_obs_dim(dir: &Path, obs_dim: usize) {
+        use burn::module::{Param, ParamId};
+        let device = NdArrayDevice::Cpu;
+        let mut record = Mlp256::<TrainBackend>::new(&device).into_record();
+        let [_obs, hidden] = record.trunk_fc1.weight.shape().dims();
+        let weight = Tensor::<TrainBackend, 2>::zeros([obs_dim, hidden], &device);
+        record.trunk_fc1.weight = Param::initialized(ParamId::new(), weight);
+        save_brain_record(dir, record);
     }
 
     /// rl#36: a checkpoint built for a different `OBS_SIZE` must NOT panic in the matmul —
@@ -686,6 +692,43 @@ mod tests {
             policy.act(&[0.0; OBS_SIZE]),
             [0.0; ACTION_SIZE],
             "an unloaded policy holds the zero-action pose"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A shape-valid checkpoint whose policy head is all-NaN — numerically broken in a
+    /// way no load gate can see (the gates classify dims, not values).
+    fn save_nan_brain(dir: &Path) {
+        use burn::module::{Param, ParamId};
+        let device = NdArrayDevice::Cpu;
+        let mut record = Mlp256::<TrainBackend>::new(&device).into_record();
+        let dims: [usize; 2] = record.policy_fc.weight.shape().dims();
+        let weight = Tensor::<TrainBackend, 2>::full(dims, f32::NAN, &device);
+        record.policy_fc.weight = Param::initialized(ParamId::new(), weight);
+        save_brain_record(dir, record);
+    }
+
+    /// rl#219: a NaN-spewing brain must be VISIBLE in `act()`'s output. The raw non-finite
+    /// mean flows into `CrabActions`, where the actuator — the sole sanitizer — zeroes it
+    /// under its latched `error!` (rl#145). `act()` sanitizing upstream masked the fault
+    /// as a legitimate rest pose and that guard could never fire.
+    #[test]
+    fn act_propagates_a_non_finite_brain_output() {
+        let dir = std::env::temp_dir().join(format!("rl-nanbrain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        save_nan_brain(&dir);
+
+        let policy = Policy::load(&dir);
+        assert!(
+            policy.is_loaded(),
+            "the NaN brain is shape-valid, so the dim gates must load it"
+        );
+        let act = policy.act(&golden_obs());
+        assert!(
+            act.iter().any(|v| !v.is_finite()),
+            "a numerically-broken brain's non-finite mean must reach the caller \
+             (the actuator owns zeroing + the loud latched error), got {act:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
