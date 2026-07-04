@@ -35,9 +35,10 @@ use crate::snapshot::CoreSnapshot;
 /// incompatible wire change — a new/changed frame kind or a shifted body layout — so
 /// mismatched builds refuse at connect time rather than mis-frame or silently desync
 /// mid-stream (the fleet updates atomically via rl-update, so a refused connect means
-/// "update the other device", never a mixed-version match). NEXT BUMP: fold in
-/// rl#221 — carry the typed refusal verdict in [`Refuse`] instead of a string.
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/10";
+/// "update the other device", never a mixed-version match). /11 is the rl#200 per-crab
+/// break (Beat/Snapshot/Articulation all reframed); rl#221's typed [`Refuse`] can still
+/// ride /11 if it lands before the fleet releases it, else it takes /12.
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/11";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
@@ -62,8 +63,8 @@ pub(crate) enum Frame {
     JoinRequest = 3,
     // Byte 4 was the retired broadcast roster-change frame: incumbents learn a mid-game join
     // from the roster on every `Snapshot`, so nothing schedules roster changes client-side.
-    /// A server→joiner refusal: the host isn't armed with a real brain, or the crab-asset digests
-    /// disagreed — the joiner is turned away LOUDLY rather than admitted onto a wrong crab.
+    /// A server→joiner refusal: the admission gate refused (a crab-asset digest mismatch) —
+    /// the joiner is turned away LOUDLY rather than admitted onto a wrong crab.
     Refuse = 5,
     /// A server→JOINER welcome: the [`Admission`] the host allocated for THIS joiner, sent UNICAST
     /// to it alone so a joiner can't mistake a concurrent joiner's allocation for its OWN (which
@@ -820,10 +821,11 @@ async fn wire_connection(
 
 /// Upper bound on a single frame body, to reject a hostile/garbled length before
 /// allocating. The largest legitimate frames all fit comfortably: a full-roster [`Beat`]
-/// (kind + start + count + weights digest + 256×32-byte ids ≈ 8 KiB), a full-roster
-/// [`CoreSnapshot`] (~14 B/player, ≈ 4 KiB at 256), and a [`CrabArticulation`] (rl#192:
-/// 39 parts × 29 B each + repose + vehicle ≈ 1.2 KiB); 16 KiB is generous
-/// slack and still bounds a bad length to a small allocation.
+/// (start + count + asset digest + 256×32-byte ids ≈ 8 KiB), a full-roster
+/// [`CoreSnapshot`] (~14 B/player + ~20 B/crab, ≈ 4 KiB at 256), and a [`CrabArticulation`]
+/// (rl#192: per crab 39 parts × 29 B each + repose, + vehicle ≈ 1.2 KiB/crab); 16 KiB is
+/// generous slack for any sane binding count and still bounds a bad length to a small
+/// allocation.
 const MAX_FRAME_LEN: usize = 16 * 1024;
 
 /// Read `[len:u32 LE][kind:u8][body]` frames from a peer's recv stream until it closes,

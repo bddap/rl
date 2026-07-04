@@ -187,7 +187,7 @@ pub fn build_windowed_app(
             let (ls, net) = *round;
             // Arm the one giant crab — the real NN body — through the SAME [`arm_round`] gate
             // the menu path uses ([`crate::may_arm_external_crab`], the determinism guard). A
-            // networked round that can't agree on the brain+colliders can't arm Sally; it
+            // networked round that can't agree on the crab colliders can't arm Sally; it
             // REFUSES rather than play a fake crab — but as a clean error bubbled to the CLI,
             // not a `panic!` process-abort (this is the scripted `--host`/`--join` path; the
             // interactive menu pre-gates in `poll_formation` and never reaches here).
@@ -199,7 +199,7 @@ pub fn build_windowed_app(
             } = armed.into_ready();
             // Size the crab set to the binding count, then capture the spawns + seed the
             // poses BEFORE `ls` moves into core.
-            let spawns = seed_external_crab_solo(&mut ls, external_crab.len());
+            let spawns = seed_round_crabs(&mut ls, external_crab.len());
             let coord = super::driver::coordinator(net, ls.peers(), ls.me(), ls.sim().clone());
             insert_core(&mut app, ls, coord);
             // Known-armed at build: add the stack AND arm the gate now (one path,
@@ -352,13 +352,13 @@ pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), Stri
 
 /// Size the round's crab set to the binding count (`crabs`), then seed each sim crab's spawn
 /// pose into `ls` so every rapier-NN body begins where the round placed its giant crab, and
-/// return those spawns for [`add_external_nn_crab`]. The ONE seed both the windowed solo
-/// `Boot::Round` client and the headless screenshot use, so the evidence shot arms the SAME
-/// way the player's client does (one implementation per thing). Writes back each crab's
-/// CURRENT pose, so sim state is unchanged; digest 0 to seed (the bridge's first post-step
-/// `hash_crab_physics` fills the real digests before any cross-check). Solo only — a networked
-/// round arms through the asset handshake in `ensure_round_installed`, not here.
-pub(super) fn seed_external_crab_solo(ls: &mut Lockstep, crabs: usize) -> Vec<Pos> {
+/// return those spawns for [`add_external_nn_crab`]. The ONE configure+seed every round
+/// install funnels through — the windowed `Boot::Round` build, the menu path's
+/// `ensure_round_installed`, and the headless screenshot builders — so they can't drift
+/// (one implementation per thing). Writes back each crab's CURRENT pose, so sim state is
+/// unchanged; digest 0 to seed (the bridge's first post-step `hash_crab_physics` fills the
+/// real digests before any cross-check).
+pub(super) fn seed_round_crabs(ls: &mut Lockstep, crabs: usize) -> Vec<Pos> {
     ls.configure_crabs(crabs);
     let spawns: Vec<Pos> = ls.sim().crabs().iter().map(|c| c.pos()).collect();
     for (idx, crab) in ls.sim().crabs().to_vec().into_iter().enumerate() {

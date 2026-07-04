@@ -81,7 +81,7 @@ pub(super) struct PendingRound(pub(super) Option<ArmedRound>);
 /// On the menu path this is ALSO where the one giant crab — the real NN body — is ARMED:
 /// insert [`crate::external_crab::ExternalCrabArmed`] and seed the sim crab so the
 /// rapier-NN body drives it. The arm DECISION ([`crate::may_arm_external_crab`]: solo always,
-/// networked only with synced weights+assets) is made UPSTREAM in the menu's `poll_formation`,
+/// networked only with synced crab assets) is made UPSTREAM in the menu's `poll_formation`,
 /// which refuses an unarmable networked round and returns to the chooser with an actionable
 /// peer-mismatch message BEFORE requesting Playing. The [`ArmedRound`] taken from
 /// [`PendingRound`] is the PROOF of that decision — only the gate can mint one — so
@@ -115,28 +115,19 @@ pub(super) fn ensure_round_installed(world: &mut World) {
         world.get_resource::<ExternalCrabStackInstalled>().is_some(),
         "the NN-crab stack must be installed before Playing (rl#114: the checkpoint is required)"
     );
-    // Size the round's crab set to this peer's brain-binding count (rl#200) — the bridge is
+    // Size the round's crab set to this peer's brain-binding count and seed each spawn pose —
+    // the ONE shared configure+seed ([`super::app::seed_round_crabs`], rl#200). The bridge is
     // built one-per-binding, so it IS the count. On the host this is the authoritative crab
     // set the server below serves; on a remote client it's a placeholder the first adopted
     // snapshot replaces. Gated on the bridge — the stack's real presence signal — because a
     // headless test harness exercises this install with the marker but no crab plugins.
-    if let Some(bridge) = world.get_resource::<crate::external_crab::ExternalCrabBridge>() {
-        ready.lockstep.configure_crabs(bridge.crab_count());
-    }
-    // Seed each pose with the crab's current pose/yaw (writing back what's there → no state
-    // change).
-    let spawns: Vec<crate::sim::Pos> = ready
-        .lockstep
-        .sim()
-        .crabs()
-        .iter()
-        .map(|c| c.pos())
-        .collect();
-    for (idx, crab) in ready.lockstep.sim().crabs().to_vec().into_iter().enumerate() {
-        ready
-            .lockstep
-            .set_external_crab_pose(idx, crab.pos(), crab.yaw(), 0);
-    }
+    let spawns = match world.get_resource::<crate::external_crab::ExternalCrabBridge>() {
+        Some(bridge) => {
+            let n = bridge.crab_count();
+            super::app::seed_round_crabs(&mut ready.lockstep, n)
+        }
+        None => Vec::new(),
+    };
     // Arm the gate (each crab now walks at a player's actual position — nothing per-peer to
     // reconcile). One arm path, [`crate::external_crab::arm`].
     crate::external_crab::arm(world);
@@ -144,8 +135,8 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     // across the menu (the stack installs once at build), still WARM and wherever they walked
     // to. Rebuild them COLD at this round's spawns, exactly as the restart edge does; a first
     // round has no bodies yet and the cold respawn no-ops (the guarded initial spawn places
-    // them). Same bridge gate as above.
-    if world.contains_resource::<crate::external_crab::ExternalCrabBridge>() {
+    // them). Same bridge gate as above (an empty `spawns` ⇒ no bridge).
+    if !spawns.is_empty() {
         restart_crab_to_spawn(world, &spawns);
     }
     // Clone the freshly-seeded sim for the authoritative server (solo/host); the client keeps its
@@ -777,13 +768,13 @@ fn restart_crab_to_spawn(world: &mut World, spawns: &[crate::sim::Pos]) {
 /// and this peer's client adopts + broadcasts the emitted snapshot; a remote-adopt client
 /// instead adopts the host's snapshots and steps nothing.
 ///
-/// When the external NN crab is armed ([`ExternalCrabArmed`] — solo OR a
-/// networked round with synced weights, [`crate::may_arm_external_crab`]), the rapier
-/// crab body is stepped INSIDE the tick drain on the server-authoritative arm: per applied
+/// When the external NN crabs are armed ([`ExternalCrabArmed`] — solo OR a
+/// networked round with synced crab assets, [`crate::may_arm_external_crab`]), the rapier
+/// crab bodies are stepped INSIDE the tick drain on the server-authoritative arm: per applied
 /// tick we run the deterministic [`PhysicsCadence`] number of physics steps
-/// ([`pump_fixed_steps`]) and hand the body's resulting pose + weights-folded digest to
-/// [`Server::step_next`] as that tick's [`crate::server::CrabPose`]. One tick at a time, so
-/// each applied tick gets its own physics batch + pose. This is an EXCLUSIVE system because
+/// ([`pump_fixed_steps`]) and hand each body's resulting pose + weights-folded digest to
+/// [`Server::step_next`] as that tick's [`crate::server::CrabPose`] set. One tick at a time,
+/// so each applied tick gets its own physics batch + poses. This is an EXCLUSIVE system because
 /// pumping the fixed schedule needs `&mut World`.
 ///
 /// Takes NO system `Local`s: the per-round driver state (round-decided latch, telemetry
