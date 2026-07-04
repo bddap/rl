@@ -2,7 +2,7 @@
 //! the evidence path on a display-less box. Composes the same scene/HUD/input systems the
 //! windowed client uses (see [`super::app`]) onto an offscreen camera.
 
-use super::app::{install_armed_nn_crab, seed_external_crab_solo};
+use super::app::{install_armed_nn_crab, seed_round_crabs};
 use super::driver::{ScriptedPackInput, coordinator, drive_lockstep, insert_core};
 use super::hud::{spawn_hud, update_hud};
 use super::input::gather_input;
@@ -32,7 +32,7 @@ pub fn build_screenshot_app(
     // so the checkpoint and its seeded spawn can't disagree (both present or both absent). The
     // evidence shot stays single-binding — one crab is the composed scene.
     let armed_crab: Option<(std::path::PathBuf, Vec<Pos>)> =
-        external_crab.map(|dir| (dir, seed_external_crab_solo(&mut ls, 1)));
+        external_crab.map(|dir| (dir, seed_round_crabs(&mut ls, 1)));
     // A solo host-authoritative server steps the round (the SAME stepper the windowed client runs —
     // no self-stepping lockstep). The pack (every non-local player) walks straight forward toward the
     // extraction (+Z) so the scene composes: the crab chases them up the +Z lane and out of the
@@ -76,7 +76,7 @@ pub fn build_net_screenshot_app(
     // Seed the crab spawn pose before `ls` moves into the coordinator, exactly as the windowed
     // `Boot::Round` path does — so host and client agree on where the crab starts. The 2-peer
     // evidence harness stays single-binding.
-    let spawns = seed_external_crab_solo(&mut ls, 1);
+    let spawns = seed_round_crabs(&mut ls, 1);
     let coord = coordinator(Some(net), ls.peers(), ls.me(), ls.sim().clone());
     insert_core(&mut app, ls, coord);
     // Arm the NN crab on this peer: the host runs + broadcasts it, the client spawns it (frozen —

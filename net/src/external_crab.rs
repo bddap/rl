@@ -338,6 +338,14 @@ fn hash_crab_physics(
         With<CrabBodyPart>,
     >,
 ) {
+    // The zip below would silently 0-digest tail crabs on a length drift — the exact class
+    // these digests exist to catch — so refuse it instead (both vecs are built one-per-binding
+    // by [`ExternalCrabPlugin`]; a mismatch is a wiring bug).
+    assert_eq!(
+        policies.0.len(),
+        bridge.crabs.len(),
+        "one policy per bridged crab"
+    );
     for (idx, (policy, crab)) in policies.0.iter().zip(bridge.crabs.iter_mut()).enumerate() {
         let phys = crab_world::bot::physics_digest::crab_state_digest(
             bodies
@@ -593,6 +601,12 @@ fn run_crab_policy(
     obs: Res<crab_world::bot::sensor::CrabObservation>,
     mut actions: ResMut<crab_world::bot::actuator::CrabActions>,
 ) {
+    // Same length guard as `hash_crab_physics`: a drift would silently freeze tail crabs.
+    assert_eq!(
+        policies.0.len(),
+        bridge.crabs.len(),
+        "one policy per bridged crab"
+    );
     for (idx, (policy, crab)) in policies.0.iter().zip(bridge.crabs.iter_mut()).enumerate() {
         // Spawn settle: hold zero torque while a fresh crab drops onto its legs (see the
         // `settle` field doc), then the policy takes over.

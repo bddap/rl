@@ -149,25 +149,25 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
     }
 
     if let Some(mut repose) = world.get_resource_mut::<CrabSkinRepose>() {
-        // Mirror the host's per-crab placements wholesale — including an env DROPPING out of
-        // the map (its repose is transiently unpublished; identity is the honest render then).
-        repose.0 = art
-            .crabs
-            .iter()
-            .enumerate()
-            .filter_map(|(env, frame)| {
-                frame.repose.map(|r| {
-                    (
-                        env,
-                        SkinRepose {
-                            shift: Vec3::from_array(r.shift),
-                            pivot: Vec3::from_array(r.pivot),
-                            scale: r.scale,
-                        },
-                    )
-                })
-            })
-            .collect();
+        // MERGE, never replace wholesale: a frame's `None` repose is "not published this
+        // tick" (transient — spawn, or the rescue tick that clears the carapace sample), and
+        // the documented contract is the client LEAVES its placement untouched then. Wiping
+        // the entry would snap that crab to identity (arena scale at the arena origin) for a
+        // frame — a visible glitch for an honest one-tick gap.
+        for (env, frame) in art.crabs.iter().enumerate() {
+            if let Some(r) = frame.repose {
+                repose.0.insert(
+                    env,
+                    SkinRepose {
+                        shift: Vec3::from_array(r.shift),
+                        pivot: Vec3::from_array(r.pivot),
+                        scale: r.scale,
+                    },
+                );
+            }
+        }
+        // A crab the host no longer carries at all (a smaller adopted round) does drop out.
+        repose.0.retain(|env, _| *env < art.crabs.len());
     }
 
     // Mirror the host's piloted craft — including `None` (the host stepped out; a stale mirror

@@ -83,6 +83,10 @@ pub enum SnapshotDecodeError {
     Truncated,
     /// A 1-byte enum tag (player status or outcome) held a value no variant maps to.
     BadTag,
+    /// The snapshot carried ZERO crabs — a round always runs at least one (rl#114), and
+    /// applying an empty set would leave `crabs()[0]` sites to panic later; refuse at the
+    /// decode boundary instead.
+    NoCrabs,
     /// Bytes remained after a complete snapshot was decoded — a framing/length mismatch.
     TrailingBytes,
 }
@@ -92,6 +96,7 @@ impl std::fmt::Display for SnapshotDecodeError {
         let msg = match self {
             Self::Truncated => "snapshot buffer ended mid-field",
             Self::BadTag => "snapshot held an unknown enum tag",
+            Self::NoCrabs => "snapshot carried zero crabs (a round always has one — rl#114)",
             Self::TrailingBytes => "trailing bytes after a complete snapshot",
         };
         f.write_str(msg)
@@ -157,6 +162,9 @@ impl CoreSnapshot {
         }
 
         let n_crabs = u32::from_le_bytes(r.take::<4>()?) as usize;
+        if n_crabs == 0 {
+            return Err(SnapshotDecodeError::NoCrabs);
+        }
         // Growth bounded by the buffer, not the untrusted count (see `roster` below).
         let mut crabs = Vec::new();
         for _ in 0..n_crabs {
