@@ -98,6 +98,7 @@ pub async fn form_match(
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
     local_asset_digest: u64,
+    local_crab_count: u8,
 ) -> Result<Formation> {
     let my_eid = session.endpoint_id();
     println!(
@@ -112,6 +113,7 @@ pub async fn form_match(
         telemetry,
         lobby,
         local_asset_digest,
+        local_crab_count,
     )
     .await
     {
@@ -240,6 +242,7 @@ async fn run_barrier(
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
     local_asset_digest: u64,
+    local_crab_count: u8,
 ) -> Result<BarrierResult> {
     let start = Instant::now();
     // `Some(control)` is the interactive lobby (host-triggered close per its `role`); `None`
@@ -250,7 +253,8 @@ async fn run_barrier(
         Some(c) => Membership::host_triggered(c.role, me, expect, start),
         None => Membership::new(me, expect, start),
     }
-    .with_asset_digest(local_asset_digest);
+    .with_asset_digest(local_asset_digest)
+    .with_crab_count(local_crab_count);
     let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
     let mut ticker = tokio::time::interval(BEAT_EVERY);
     let mut last_live = 0usize;
@@ -539,14 +543,14 @@ mod tests {
         // Run all three barriers concurrently. s2's dials are issued from inside its
         // future after a short delay, so it shows up mid-formation. `None` lobby — this
         // exercises the unchanged timer-closed barrier.
-        let f0 = form_match(&mut s0, 1, 3, None, None, 0);
-        let f1 = form_match(&mut s1, 1, 3, None, None, 0);
+        let f0 = form_match(&mut s0, 1, 3, None, None, 0, 0);
+        let f1 = form_match(&mut s1, 1, 3, None, None, 0, 0);
         let f2 = async {
             // Stagger: let s0/s1 form their partial view first, then s2 meshes in.
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             s2.connect_direct(a0.clone()).await.expect("s2->s0");
             s2.connect_direct(a1.clone()).await.expect("s2->s1");
-            form_match(&mut s2, 1, 3, None, None, 0).await
+            form_match(&mut s2, 1, 3, None, None, 0, 0).await
         };
         let (r0, r1, r2) = tokio::join!(f0, f1, f2);
         // Each peer must AGREE (not fall back to solo — they all see each other), so unwrap

@@ -133,17 +133,21 @@ pub struct Admission {
 
 /// A would-be joiner's credentials, sent UP to the host the moment it dials a live match. The
 /// host gates admission on these BEFORE allocating a [`PlayerId`] and REFUSES LOUDLY, never
-/// silently dropping a joiner onto a mismatched body ([`may_admit_joiner`]). Only the ASSET
-/// digest travels: the joiner renders the crabs it builds from its own model, so a different
-/// sally.glb is a visibly wrong Sally. The joiner's WEIGHTS are deliberately absent — a joiner
-/// never executes a brain (it adopts host snapshots and renders host articulation) — and the
-/// host's own brains need no gate here either: every binding is validated fail-loud at launch
-/// (rl#200 increment 6 deleted the old `HostNotArmed` digest self-gate that duplicated it).
+/// silently dropping a joiner onto a mismatched body ([`may_admit_joiner`]). The joiner's
+/// WEIGHTS are deliberately absent — a joiner never executes a brain (it adopts host snapshots
+/// and renders host articulation) — and the host's own brains need no gate here either: every
+/// binding is validated fail-loud at launch (rl#200 increment 6 deleted the old `HostNotArmed`
+/// digest self-gate that duplicated it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinRequest {
     /// Digest of the joiner's crab/collider assets — must equal the host's, or the joiner builds
     /// and renders different-shaped crabs.
     pub asset_digest: u64,
+    /// The joiner's render-rig count (its brain-binding count; `0` = a headless peer that
+    /// renders nothing). A WINDOWED joiner must match the host's serving count, or the host's
+    /// extra crabs would be INVISIBLE on it while still grabbing players (rl#200) — the same
+    /// silent-wrong-crab class the asset gate refuses. `0` is always admissible.
+    pub crab_count: u8,
 }
 
 /// Why a [`JoinRequest`] was refused — a loud, typed verdict the host sends back to the joiner and
@@ -153,6 +157,9 @@ pub struct JoinRequest {
 pub enum AdmissionRefusal {
     /// The joiner's crab-asset/collider digest differs from the host's.
     AssetsMismatch { host: u64, joiner: u64 },
+    /// The joiner is a RENDERING peer whose rig count differs from the host's serving count —
+    /// it would render too few (invisible lethal crabs) or too many (frozen ghost rigs) crabs.
+    CrabCountMismatch { host: u8, joiner: u8 },
 }
 
 impl std::fmt::Display for AdmissionRefusal {
@@ -162,21 +169,37 @@ impl std::fmt::Display for AdmissionRefusal {
                 f,
                 "crab-asset digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — different Sally/colliders"
             ),
+            AdmissionRefusal::CrabCountMismatch { host, joiner } => write!(
+                f,
+                "crab-count mismatch (host serves {host}, joiner renders {joiner}) — the joiner \
+                 would show the wrong number of crabs; launch it with the host's binding list"
+            ),
         }
     }
 }
 
 /// The admission gate: may a joiner advertising `req` enter a match the host runs on
-/// `host_assets`? `Ok(())` only when the asset digests match exactly. The joiner's brain is
-/// deliberately ungated — a joiner never executes one — and the host's brains are validated
-/// fail-loud at launch, not here. The host→joiner analogue of the formation-time
-/// `may_arm_external_crab` shared-asset gate, but per-joiner and fail-LOUD rather than a silent
-/// disarm.
-pub fn may_admit_joiner(host_assets: u64, req: &JoinRequest) -> Result<(), AdmissionRefusal> {
+/// `(host_assets, host_crabs)`? `Ok(())` only when the asset digests match exactly AND the
+/// joiner's rig count is compatible (equal to the host's serving count, or `0` for a headless
+/// peer that renders nothing). The joiner's brain is deliberately ungated — a joiner never
+/// executes one — and the host's brains are validated fail-loud at launch, not here. The
+/// host→joiner analogue of the formation-time `may_arm_external_crab` gate, but per-joiner and
+/// fail-LOUD rather than a silent disarm.
+pub fn may_admit_joiner(
+    host_assets: u64,
+    host_crabs: u8,
+    req: &JoinRequest,
+) -> Result<(), AdmissionRefusal> {
     if req.asset_digest != host_assets {
         return Err(AdmissionRefusal::AssetsMismatch {
             host: host_assets,
             joiner: req.asset_digest,
+        });
+    }
+    if req.crab_count != 0 && req.crab_count != host_crabs {
+        return Err(AdmissionRefusal::CrabCountMismatch {
+            host: host_crabs,
+            joiner: req.crab_count,
         });
     }
     Ok(())
@@ -1353,30 +1376,41 @@ mod tests {
         assert!(eff > JOIN_LEAD, "the join genuinely lands mid-round");
     }
 
-    /// The admission gate: the host admits an asset-matched joiner regardless of the joiner's
-    /// brain (the joiner never executes one) and refuses an asset mismatch loudly, typed —
-    /// the host→joiner analogue of the formation shared-asset gate, fail-LOUD per joiner.
-    /// (No host-brain half: the host's bindings are validated fail-loud at launch — rl#200.)
+    /// The admission gate: the host admits an asset-matched, count-compatible joiner
+    /// regardless of the joiner's brain (a joiner never executes one) and refuses an asset or
+    /// rig-count mismatch loudly, typed — the host→joiner analogue of the formation gate,
+    /// fail-LOUD per joiner. (No host-brain half: the host's bindings are validated fail-loud
+    /// at launch — rl#200.)
     #[test]
-    fn admission_gate_admits_asset_match_and_refuses_mismatch() {
+    fn admission_gate_admits_match_and_refuses_mismatches() {
         let ha = 0x5A11_2233u64;
+        let req = |asset_digest, crab_count| JoinRequest {
+            asset_digest,
+            crab_count,
+        };
         assert_eq!(
-            may_admit_joiner(ha, &JoinRequest { asset_digest: ha }),
+            may_admit_joiner(ha, 2, &req(ha, 2)),
             Ok(()),
-            "the host admits a matching-asset joiner"
+            "the host admits a matching joiner"
         );
         assert_eq!(
-            may_admit_joiner(
-                ha,
-                &JoinRequest {
-                    asset_digest: ha ^ 1
-                }
-            ),
+            may_admit_joiner(ha, 2, &req(ha, 0)),
+            Ok(()),
+            "a headless joiner (rig count 0) renders nothing — always count-admissible"
+        );
+        assert_eq!(
+            may_admit_joiner(ha, 2, &req(ha ^ 1, 2)),
             Err(AdmissionRefusal::AssetsMismatch {
                 host: ha,
                 joiner: ha ^ 1
             }),
             "a different Sally/colliders is refused"
+        );
+        assert_eq!(
+            may_admit_joiner(ha, 2, &req(ha, 1)),
+            Err(AdmissionRefusal::CrabCountMismatch { host: 2, joiner: 1 }),
+            "a rendering joiner with the wrong rig count is refused (it would show the wrong \
+             number of crabs)"
         );
     }
 }

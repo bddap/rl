@@ -28,6 +28,8 @@ pub struct MenuPlugin {
     /// Our crab-model-asset digest, `0` for none. Advertised in networked formation so
     /// peers can agree on a shared collider asset before arming the float crabs.
     pub asset_digest: u64,
+    /// Our NN-crab binding/rig count — the count half of the formation gate (rl#200).
+    pub crab_count: u8,
 }
 
 /// The camera the menu/connecting screens render into. bevy_egui 0.39 is
@@ -48,6 +50,7 @@ impl Plugin for MenuPlugin {
             self.seed,
             self.telemetry,
             self.asset_digest,
+            self.crab_count,
         ))
         // A 2D camera for the menu so bevy_egui has a context to render into.
         // Spawned on entering Menu (the default phase, so it fires at startup on the
@@ -101,6 +104,8 @@ struct MenuState {
     /// Our crab-model-asset digest, `0` for none — handed to
     /// [`crate::menu::begin`] so networked formation advertises it.
     asset_digest: u64,
+    /// Our NN-crab binding/rig count, advertised beside it (rl#200).
+    crab_count: u8,
     /// The pure navigation FSM ([`MenuNav`]) — focus + the chooser/lobby transition.
     /// Folded by controller/keyboard input AND egui clicks through one path, so every
     /// confirm (Start included) routes through the same tested dispatch.
@@ -126,11 +131,12 @@ struct MenuState {
 }
 
 impl MenuState {
-    fn new(seed: u64, telemetry: Option<EndpointId>, asset_digest: u64) -> Self {
+    fn new(seed: u64, telemetry: Option<EndpointId>, asset_digest: u64, crab_count: u8) -> Self {
         Self {
             seed,
             telemetry,
             asset_digest,
+            crab_count,
             nav: MenuNav::new(),
             stick_latched: false,
             code_input: String::new(),
@@ -430,13 +436,19 @@ fn apply_action(
             };
             state.error = None;
             let (tx, rx) = mpsc::channel();
-            let (seed, telemetry, asset_digest) = (state.seed, state.telemetry, state.asset_digest);
+            let (seed, telemetry, asset_digest, crab_count) = (
+                state.seed,
+                state.telemetry,
+                state.asset_digest,
+                state.crab_count,
+            );
             std::thread::spawn(move || {
                 let _ = tx.send(net_loop::connect_and_join(
                     seed,
                     host,
                     telemetry,
                     asset_digest,
+                    crab_count,
                 ));
             });
             state.rejoining = Some(rx);
@@ -567,6 +579,7 @@ fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextSta
         state.seed,
         state.telemetry,
         state.asset_digest,
+        state.crab_count,
     ));
     next.set(AppPhase::Connecting);
 }

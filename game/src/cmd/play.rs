@@ -88,9 +88,11 @@ pub(crate) fn run(args: Args) -> Result<()> {
             dial,
             args.telemetry,
             None,
-            // Advertise our REAL crab-asset digest so peers agree on the collider asset; a
-            // mismatch refuses the round (rl#114, no fallback).
+            // Advertise our REAL crab-asset digest + binding count so peers agree on the
+            // collider asset and the crab count; a mismatch refuses the round (rl#114/rl#200,
+            // no fallback).
             crab_world::mesh_fallback::constructed_body_digest(),
+            external_crab.len() as u8,
         )?;
         match result {
             net_loop::MatchResult::Joined(joined) => {

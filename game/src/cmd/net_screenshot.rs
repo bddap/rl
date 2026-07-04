@@ -68,6 +68,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         None,
         None,
         crab_world::mesh_fallback::constructed_body_digest(),
+        1, // the 2-peer evidence harness is single-binding
     )?;
 
     let (ls, driver) = match result {

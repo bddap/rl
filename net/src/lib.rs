@@ -81,6 +81,12 @@ pub mod render;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncVerdict {
     pub assets: bool,
+    /// The HOST-keyed crab-count gate (rl#200): the host serves ≥1 NN crab (a 0-count host is
+    /// the headless driver — a rest-pose match) AND this peer's own rig count matches it (or
+    /// is 0 — a headless peer renders nothing). A mismatch would render the wrong NUMBER of
+    /// crabs — invisible lethal ones or frozen ghosts — the same silent-wrong-crab class the
+    /// asset gate refuses.
+    pub crabs: bool,
 }
 
 /// The shared-asset guard for handing the crabs to the float NN bodies:
@@ -100,7 +106,7 @@ pub struct SyncVerdict {
 /// arm). Deliberately NOT behind `cfg(render)`: the no-feature test build (like the headless
 /// trainer) must exercise the REAL predicate, not a re-encoded copy.
 pub fn may_arm_external_crab(sync: Option<SyncVerdict>) -> bool {
-    sync.is_none_or(|v| v.assets)
+    sync.is_none_or(|v| v.assets && v.crabs)
 }
 
 #[cfg(test)]
@@ -334,7 +340,10 @@ mod desync_test {
 
     /// Shorthand for a networked round's verdict in these tests.
     fn synced(assets: bool) -> Option<SyncVerdict> {
-        Some(SyncVerdict { assets })
+        Some(SyncVerdict {
+            assets,
+            crabs: true,
+        })
     }
 
     #[test]
