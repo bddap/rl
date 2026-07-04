@@ -97,7 +97,6 @@ pub async fn form_match(
     expect: usize,
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
-    local_weights_digest: u64,
     local_asset_digest: u64,
 ) -> Result<Formation> {
     let my_eid = session.endpoint_id();
@@ -112,7 +111,6 @@ pub async fn form_match(
         expect,
         telemetry,
         lobby,
-        local_weights_digest,
         local_asset_digest,
     )
     .await
@@ -156,32 +154,24 @@ pub async fn form_match(
             me: me.0,
         });
     }
-    // GCR shared-asset guard: make the verdict LOUD. With a checkpoint loaded
-    // (`local_weights_digest != 0`) the operator needs to know whether the NN crab will arm —
-    // the HOST must verifiably run a real brain AND the crab asset must match on every peer;
-    // failing either means it WON'T, and with no integer fallback the windowed client REFUSES
-    // the round rather than substituting a fake crab. The asset verdict is reported whenever
-    // the host gate passes (so an asset-only mismatch is diagnosable, never silent).
-    if local_weights_digest != 0 {
-        if !outcome.sync.host_brain {
+    // GCR shared-asset guard: make the verdict LOUD. With a resolvable crab model
+    // (`local_asset_digest != 0`) the operator needs to know whether the NN crabs will arm —
+    // the crab asset must match on every peer; a mismatch means they WON'T, and with no
+    // integer fallback the windowed client REFUSES the round rather than substituting a fake
+    // crab. (The host's own brains are validated fail-loud at launch, so there is no
+    // brain half to report here — rl#200 increment 6.)
+    if local_asset_digest != 0 {
+        if !outcome.sync.assets {
             tracing::warn!(
-                "GCR: the HOST is not verifiably running the real Sally (its advertised weights \
-                 digest is 0 — a failed/absent checkpoint — or it was never heard directly) — \
-                 cannot arm the NN crab; the windowed client will REFUSE this round (rl#114, no \
-                 integer fallback). Run rl-update on the host device, or relaunch together."
-            );
-        } else if !outcome.sync.assets {
-            tracing::warn!(
-                "GCR: host brain verified but crab MODEL ASSET NOT synced across peers (a peer \
-                 has a different sally.glb / no model — it would build and render a different \
-                 crab) — cannot arm the NN crab; the windowed client will REFUSE this round \
-                 (rl#114, no integer fallback). Run rl-update on every device so all carry the \
-                 identical crab model."
+                "GCR: crab MODEL ASSET NOT synced across peers (a peer has a different \
+                 sally.glb / no model — it would build and render a different crab) — cannot \
+                 arm the NN crabs; the windowed client will REFUSE this round (rl#114, no \
+                 integer fallback). Run rl-update on every device so all carry the identical \
+                 crab model."
             );
         } else {
             println!(
-                "GCR: host runs the real Sally AND the crab asset is synced across all {} \
-                 peer(s) — NN crab eligible for lockstep",
+                "GCR: the crab asset is synced across all {} peer(s) — NN crabs eligible",
                 id_map.len()
             );
         }
@@ -249,19 +239,17 @@ async fn run_barrier(
     expect: usize,
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
-    local_weights_digest: u64,
     local_asset_digest: u64,
 ) -> Result<BarrierResult> {
     let start = Instant::now();
     // `Some(control)` is the interactive lobby (host-triggered close per its `role`); `None`
     // is the default timer barrier. The mode is this explicit choice, never inferred. Our
-    // weights and crab-asset digests ride every beat so peers can agree on a shared
-    // checkpoint AND a shared collider asset before arming the float NN crab.
+    // crab-asset digest rides every beat so peers can agree on a shared collider asset
+    // before arming the float NN crabs.
     let mut m = match lobby {
         Some(c) => Membership::host_triggered(c.role, me, expect, start),
         None => Membership::new(me, expect, start),
     }
-    .with_weights_digest(local_weights_digest)
     .with_asset_digest(local_asset_digest);
     let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
     let mut ticker = tokio::time::interval(BEAT_EVERY);
@@ -551,14 +539,14 @@ mod tests {
         // Run all three barriers concurrently. s2's dials are issued from inside its
         // future after a short delay, so it shows up mid-formation. `None` lobby — this
         // exercises the unchanged timer-closed barrier.
-        let f0 = form_match(&mut s0, 1, 3, None, None, 0, 0);
-        let f1 = form_match(&mut s1, 1, 3, None, None, 0, 0);
+        let f0 = form_match(&mut s0, 1, 3, None, None, 0);
+        let f1 = form_match(&mut s1, 1, 3, None, None, 0);
         let f2 = async {
             // Stagger: let s0/s1 form their partial view first, then s2 meshes in.
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             s2.connect_direct(a0.clone()).await.expect("s2->s0");
             s2.connect_direct(a1.clone()).await.expect("s2->s1");
-            form_match(&mut s2, 1, 3, None, None, 0, 0).await
+            form_match(&mut s2, 1, 3, None, None, 0).await
         };
         let (r0, r1, r2) = tokio::join!(f0, f1, f2);
         // Each peer must AGREE (not fall back to solo — they all see each other), so unwrap

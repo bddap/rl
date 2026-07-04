@@ -177,13 +177,14 @@ fn update_render_mode_label(
     }
 }
 
-/// Draw the crab's live colliders as a gizmo wireframe at the crab's RENDERED pose. Active in
+/// Draw every crab's live colliders as a gizmo wireframe at the crab's RENDERED pose. Active in
 /// any mode that [`RenderMode::shows_colliders`]. The transform is `repose · part_global`: each
 /// part's `GlobalTransform` is its raw physics pose, and [`crate::bot::skin::SkinRepose::matrix`]
-/// is the rigid shift the skin applies to relocate the arena rig to its game spot (identity in
-/// the rl-demo, where the body IS the rendered crab). Reusing it — not a re-derived factor — is
-/// why the cage can't drift from the rendered crab. There is no scale: render==physics. Crab env
-/// 0 only (both binaries render one env).
+/// is the rigid shift the skin applies to relocate that env's arena rig to its game spot
+/// (identity for an env with no repose entry — the rl-demo, where the body IS the rendered
+/// crab). Reusing it — not a re-derived factor — is why a cage can't drift from its rendered
+/// crab. There is no scale: render==physics. Per-env (rl#200: a GCR round renders one crab per
+/// brain binding).
 fn draw_crab_collider_wireframe(
     mode: Res<RenderMode>,
     repose: Option<Res<CrabSkinRepose>>,
@@ -193,18 +194,15 @@ fn draw_crab_collider_wireframe(
     if !mode.shows_colliders() {
         return;
     }
-    // The crab's render placement: the skin's rigid shift in GCR, identity in the rl-demo (no
-    // bridge ⇒ no repose ⇒ the body is already the rendered crab). render==physics, so there is
-    // no scale to apply to the cage.
-    let placement = repose
-        .as_deref()
-        .and_then(|r| r.0)
-        .map(|s| s.matrix())
-        .unwrap_or(Mat4::IDENTITY);
     for (gt, collider, env) in &parts {
-        if env.0 != 0 {
-            continue;
-        }
+        // The crab's render placement: the skin's rigid shift in GCR, identity in the rl-demo
+        // (no bridge ⇒ no repose entry ⇒ the body is already the rendered crab).
+        // render==physics, so there is no scale to apply to the cage.
+        let placement = repose
+            .as_deref()
+            .and_then(|r| r.0.get(&env.0))
+            .map(|s| s.matrix())
+            .unwrap_or(Mat4::IDENTITY);
         let world = placement * gt.to_matrix();
         draw_collider_wireframe(
             &mut gizmos,

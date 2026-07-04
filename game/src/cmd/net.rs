@@ -72,7 +72,6 @@ async fn run_net(args: Args) -> Result<()> {
         args.expect,
         tel.as_ref(),
         None, // headless: timer-closed barrier, no interactive lobby
-        0, // headless has no rapier-NN crab stack → 0 weights digest; the crab holds spawn (rl#114)
         crab_world::mesh_fallback::constructed_body_digest(), // honest crab-asset digest (rl#100)
     )
     .await?
@@ -238,7 +237,7 @@ async fn run_net(args: Args) -> Result<()> {
             srv.advance(msg);
             // Headless: weights digest 0, no rapier body → the crab holds spawn, so no pose to inject.
             while srv.next_tick_ready() {
-                let bytes = srv.step_next(None).snapshot;
+                let bytes = srv.step_next(&[]).snapshot;
                 let snap = net::snapshot::CoreSnapshot::from_bytes(&bytes)
                     .expect("the authoritative server's snapshot must decode");
                 session.broadcast_snapshot(&snap).await;

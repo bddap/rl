@@ -20,10 +20,10 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 #[derive(Component)]
 pub(super) struct PlayerAvatar(PlayerId);
 
-/// Marks the giant crab's render root — the entity [`apply_transforms`] re-poses to the sim
-/// crab each frame.
+/// Marks one giant crab's render root — the entity [`apply_transforms`] re-poses to the sim
+/// crab of the carried index each frame (rl#200: one root per brain binding).
 #[derive(Component)]
-pub(super) struct CrabAvatar;
+pub(super) struct CrabAvatar(pub(super) usize);
 
 /// The first-person camera, anchored to the local player each frame.
 #[derive(Component)]
@@ -272,28 +272,32 @@ pub(super) fn spawn_world(
             .entity(banner)
             .insert(DespawnOnExit(AppPhase::Playing));
     }
-    let crab_root = commands
-        .spawn((
-            DespawnOnExit(AppPhase::Playing),
-            Transform::from_translation(world(state.ls.sim().crab().pos(), 0.0)),
-            if crab_hidden {
-                Visibility::Hidden
-            } else {
-                Visibility::default()
-            },
-            CrabAvatar,
-        ))
-        .id();
-    // Body: Sally's ACTUAL physics colliders (carapace box + every leg/eye/claw capsule
-    // from the render recipe), not a featureless placeholder box (#108). The shapes ride
-    // `crab_root`, which `apply_transforms` re-poses to the sim crab every frame.
-    spawn_crab_silhouette(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        crab_root,
-        have_model,
-    );
+    // One root per sim crab (rl#200: a multi-brain round runs several), each re-posed to its
+    // own sim crab every frame by `apply_transforms`.
+    for (idx, crab) in state.ls.sim().crabs().iter().enumerate() {
+        let crab_root = commands
+            .spawn((
+                DespawnOnExit(AppPhase::Playing),
+                Transform::from_translation(world(crab.pos(), 0.0)),
+                if crab_hidden {
+                    Visibility::Hidden
+                } else {
+                    Visibility::default()
+                },
+                CrabAvatar(idx),
+            ))
+            .id();
+        // Body: Sally's ACTUAL physics colliders (carapace box + every leg/eye/claw capsule
+        // from the render recipe), not a featureless placeholder box (#108). The shapes ride
+        // `crab_root`, which `apply_transforms` re-poses to the sim crab every frame.
+        spawn_crab_silhouette(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            crab_root,
+            have_model,
+        );
+    }
 }
 
 /// The avatar capsule's shared render assets — ONE mesh, one material per color — created
@@ -570,17 +574,18 @@ type AvatarXf<'w, 's> = Query<
 type CrabXf<'w, 's> = Query<
     'w,
     's,
-    &'static mut Transform,
-    (With<CrabAvatar>, Without<PlayerAvatar>, Without<FpCamera>),
+    (&'static CrabAvatar, &'static mut Transform),
+    (Without<PlayerAvatar>, Without<FpCamera>),
 >;
 type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
-/// Read-only access to the crab carapace's ARENA-frame Transform — the anchor the cockpit camera
-/// shifts the vehicle's arena pose against. Disjoint from the mutable Transform queries above by the
-/// `Without` filters (a carapace is none of those entities), so Bevy lets them coexist.
+/// Read-only access to the crab carapaces' ARENA-frame Transforms (tagged by env) — env 0's is
+/// the anchor the cockpit camera shifts the vehicle's arena pose against. Disjoint from the
+/// mutable Transform queries above by the `Without` filters (a carapace is none of those
+/// entities), so Bevy lets them coexist.
 type CarapaceXf<'w, 's> = Query<
     'w,
     's,
-    &'static Transform,
+    (&'static Transform, &'static crab_world::bot::body::CrabEnvId),
     (
         With<crab_world::bot::body::CrabCarapace>,
         Without<CrabAvatar>,
@@ -643,10 +648,12 @@ pub(super) fn apply_transforms(
         }
     }
 
-    // Crab: interpolate position + yaw.
-    if let (Ok(mut tf), Some(crab_now), Some(crab_prev)) =
-        (crab_q.single_mut(), Some(sim.crab()), state.prev.crab)
-    {
+    // Crabs: interpolate each root's position + yaw from its own sim crab (matched by index).
+    for (avatar, mut tf) in crab_q.iter_mut() {
+        let Some(crab_now) = sim.crabs().get(avatar.0).copied() else {
+            continue; // the adopted crab set shrank below this root's index — leave it parked
+        };
+        let crab_prev = state.prev.crabs.get(avatar.0).copied().unwrap_or(crab_now);
         let pos = lerp_pos(crab_prev.pos(), crab_now.pos(), alpha);
         let yaw = lerp_yaw(crab_prev.yaw(), crab_now.yaw(), alpha);
         *tf =
@@ -662,14 +669,15 @@ pub(super) fn apply_transforms(
             // Single-player: fly from the rapier vehicle body (host-authoritative crab-world state,
             // not in the integer sim). Its pose is in the ARENA frame, so map it to render space
             // with the same shift the crab body uses — `world(crab) − arena_carapace` — so vehicle
-            // and crab share one render frame and collide where they're drawn.
-            let crab_now = sim.crab();
-            let crab_prev = state.prev.crab.unwrap_or(crab_now);
+            // and crab share one render frame and collide where they're drawn. Crab 0 is the
+            // frame reference (the carapace query below reads env 0's body first too).
+            let crab_now = sim.crabs()[0];
+            let crab_prev = state.prev.crabs.first().copied().unwrap_or(crab_now);
             let crab_anchor = world(lerp_pos(crab_prev.pos(), crab_now.pos(), alpha), 0.0);
             let arena_carapace = carapace_q
                 .iter()
-                .next()
-                .map(|t| t.translation)
+                .find(|(_, env)| env.0 == 0)
+                .map(|(t, _)| t.translation)
                 .unwrap_or(Vec3::ZERO);
             let shift = Vec3::new(
                 crab_anchor.x - arena_carapace.x,

@@ -54,10 +54,9 @@ pub(crate) struct Args {
 /// peer's role (host / remote client) is decided by the formation (lowest endpoint id hosts); we
 /// print it so the two captured PNGs can be told apart — the CLIENT's is the increment-2 evidence.
 pub(crate) fn run(args: Args) -> Result<()> {
-    // The one giant crab IS the trained NN body (rl#114) — resolve the checkpoint before forming so
-    // we advertise our real weights digest; two peers arm Sally only when their brains agree.
+    // The giant crab IS the trained NN body (rl#114) — resolve the checkpoint before forming.
+    // Peers arm Sally once the crab-model asset matches (no weights handshake — rl#200).
     let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint)?;
-    let weights_digest = crab_world::play::checkpoint_digest(&external_crab);
     let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
 
     let dial = parse_join_dial(args.join.as_deref())?;
@@ -68,7 +67,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
         dial,
         None,
         None,
-        weights_digest,
         crab_world::mesh_fallback::constructed_body_digest(),
     )?;
 

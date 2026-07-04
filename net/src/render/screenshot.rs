@@ -28,10 +28,11 @@ pub fn build_screenshot_app(
 ) -> App {
     let mut app = offscreen_app_scaffold();
     // Arm the real NN crab BEFORE `ls` moves into core (seeds the crab's spawn pose); the stack +
-    // gate go on after, mirroring the windowed `Boot::Round` solo path. One `Option<(dir, spawn)>`
-    // so the checkpoint and its seeded spawn can't disagree (both present or both absent).
-    let armed_crab: Option<(std::path::PathBuf, Pos)> =
-        external_crab.map(|dir| (dir, seed_external_crab_solo(&mut ls)));
+    // gate go on after, mirroring the windowed `Boot::Round` solo path. One `Option<(dir, spawns)>`
+    // so the checkpoint and its seeded spawn can't disagree (both present or both absent). The
+    // evidence shot stays single-binding — one crab is the composed scene.
+    let armed_crab: Option<(std::path::PathBuf, Vec<Pos>)> =
+        external_crab.map(|dir| (dir, seed_external_crab_solo(&mut ls, 1)));
     // A solo host-authoritative server steps the round (the SAME stepper the windowed client runs —
     // no self-stepping lockstep). The pack (every non-local player) walks straight forward toward the
     // extraction (+Z) so the scene composes: the crab chases them up the +Z lane and out of the
@@ -46,9 +47,9 @@ pub fn build_screenshot_app(
     // Known-armed at build (when a checkpoint was given): add the rapier-NN stack AND arm the gate
     // now — the SAME path the windowed `Boot::Round` solo client uses — so `spawn_world` hides the
     // static silhouette and the reposed-to-giant rig becomes the visible crab.
-    if let Some((dir, spawn)) = armed_crab {
+    if let Some((dir, spawns)) = armed_crab {
         // Solo screenshot round: add the stack and arm the gate (one path).
-        install_armed_nn_crab(&mut app, dir, spawn);
+        install_armed_nn_crab(&mut app, vec![dir], spawns);
     }
     finish_offscreen_app(&mut app, cfg, render_mode);
     app
@@ -73,13 +74,14 @@ pub fn build_net_screenshot_app(
 ) -> App {
     let mut app = offscreen_app_scaffold();
     // Seed the crab spawn pose before `ls` moves into the coordinator, exactly as the windowed
-    // `Boot::Round` path does — so host and client agree on where the crab starts.
-    let spawn = seed_external_crab_solo(&mut ls);
+    // `Boot::Round` path does — so host and client agree on where the crab starts. The 2-peer
+    // evidence harness stays single-binding.
+    let spawns = seed_external_crab_solo(&mut ls, 1);
     let coord = coordinator(Some(net), ls.peers(), ls.me(), ls.sim().clone());
     insert_core(&mut app, ls, coord);
     // Arm the NN crab on this peer: the host runs + broadcasts it, the client spawns it (frozen —
     // never pumped) as the render target its adopted articulation poses. One path (add + arm).
-    install_armed_nn_crab(&mut app, external_crab, spawn);
+    install_armed_nn_crab(&mut app, vec![external_crab], spawns);
     finish_offscreen_app(&mut app, cfg, render_mode);
     app
 }

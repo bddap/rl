@@ -134,14 +134,15 @@ pub struct Admission {
 /// A would-be joiner's credentials, sent UP to the host the moment it dials a live match. The
 /// host gates admission on these BEFORE allocating a [`PlayerId`] and REFUSES LOUDLY, never
 /// silently dropping a joiner onto a mismatched body ([`may_admit_joiner`]). Only the ASSET
-/// digest travels: the joiner renders the crab it builds from its own model, so a different
+/// digest travels: the joiner renders the crabs it builds from its own model, so a different
 /// sally.glb is a visibly wrong Sally. The joiner's WEIGHTS are deliberately absent — a joiner
-/// never executes the brain (it adopts host snapshots and renders host articulation), so the
-/// one weights guard is the host-side [`AdmissionRefusal::HostNotArmed`] self-gate.
+/// never executes a brain (it adopts host snapshots and renders host articulation) — and the
+/// host's own brains need no gate here either: every binding is validated fail-loud at launch
+/// (rl#200 increment 6 deleted the old `HostNotArmed` digest self-gate that duplicated it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinRequest {
     /// Digest of the joiner's crab/collider assets — must equal the host's, or the joiner builds
-    /// and renders a different-shaped crab.
+    /// and renders different-shaped crabs.
     pub asset_digest: u64,
 }
 
@@ -150,14 +151,6 @@ pub struct JoinRequest {
 /// actionable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRefusal {
-    /// The HOST is not running the real Sally — its own policy-weights digest is `0` (a failed or
-    /// absent checkpoint drives the zero-action rest pose, not a trained crab). The host serves
-    /// the crab POSE to every client, so a zero-digest host would feed a FAKE Sally to whoever
-    /// joins — and two both-missing peers (`0 == 0`) would otherwise slip past the equality check
-    /// and admit each other into a fake-crab match. Refused before the equality checks so a
-    /// zero-digest host reports THIS, not a spurious mismatch. A unit variant — the digest is `0`
-    /// by definition of the branch.
-    HostNotArmed,
     /// The joiner's crab-asset/collider digest differs from the host's.
     AssetsMismatch { host: u64, joiner: u64 },
 }
@@ -165,11 +158,6 @@ pub enum AdmissionRefusal {
 impl std::fmt::Display for AdmissionRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AdmissionRefusal::HostNotArmed => write!(
-                f,
-                "host is not running the real trained Sally (its weights digest is 0 — a \
-                 failed/absent checkpoint); refusing to admit a joiner into a fake-crab match"
-            ),
             AdmissionRefusal::AssetsMismatch { host, joiner } => write!(
                 f,
                 "crab-asset digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — different Sally/colliders"
@@ -179,20 +167,12 @@ impl std::fmt::Display for AdmissionRefusal {
 }
 
 /// The admission gate: may a joiner advertising `req` enter a match the host runs on
-/// `(host_weights, host_assets)`? `Ok(())` only when the HOST itself runs the real Sally
-/// (`host_weights != 0`) AND the asset digests match exactly. The host self-gate is checked
-/// FIRST (see [`AdmissionRefusal::HostNotArmed`]); the joiner's brain is deliberately ungated —
-/// a joiner never executes it. The host→joiner analogue of the formation-time
+/// `host_assets`? `Ok(())` only when the asset digests match exactly. The joiner's brain is
+/// deliberately ungated — a joiner never executes one — and the host's brains are validated
+/// fail-loud at launch, not here. The host→joiner analogue of the formation-time
 /// `may_arm_external_crab` shared-asset gate, but per-joiner and fail-LOUD rather than a silent
 /// disarm.
-pub fn may_admit_joiner(
-    host_weights: u64,
-    host_assets: u64,
-    req: &JoinRequest,
-) -> Result<(), AdmissionRefusal> {
-    if host_weights == 0 {
-        return Err(AdmissionRefusal::HostNotArmed);
-    }
+pub fn may_admit_joiner(host_assets: u64, req: &JoinRequest) -> Result<(), AdmissionRefusal> {
     if req.asset_digest != host_assets {
         return Err(AdmissionRefusal::AssetsMismatch {
             host: host_assets,
@@ -331,12 +311,14 @@ pub struct SteppedTick {
     pub restarted: bool,
 }
 
-/// The freshly-pumped NN crab pose the authoritative server injects before stepping a tick.
-/// The driver owns the bevy `World`, so it pumps the rapier crab body and hands the resulting
-/// pose here; [`Server::step_next`] injects it via [`Sim::set_external_crab_pose`] at the one
-/// snapshot construction site, so the integer crab pose and the (later) render articulation
-/// can't drift. `None` to [`step_next`] leaves the crab untouched (an unarmed round behind the
-/// menu, where no body steps).
+/// One freshly-pumped NN crab pose the authoritative server injects before stepping a tick.
+/// The driver owns the bevy `World`, so it pumps the rapier crab bodies and hands the resulting
+/// poses here — one per crab, in crab-index order (rl#200); [`Server::step_next`] injects them
+/// via [`Sim::set_external_crab_pose`] at the one snapshot construction site, so the integer
+/// crab poses and the (later) render articulation can't drift. An EMPTY slice to [`step_next`]
+/// leaves the crabs untouched (an unarmed round behind the menu, where no body steps); a
+/// non-empty slice must cover every crab — a partial set is a bridge/sim count mismatch
+/// refused loudly.
 #[derive(Debug, Clone, Copy)]
 pub struct CrabPose {
     pub pos: Pos,
@@ -495,14 +477,15 @@ impl Server {
 
     /// Advance the authoritative sim by exactly one tick and return the resulting
     /// [`SteppedTick`]: the [`CoreSnapshot`](crate::snapshot::CoreSnapshot) already SERIALIZED to
-    /// bytes, plus whether the tick was a RESTART edge. Injects `crab` (the freshly-pumped NN crab
-    /// pose; `None` ⇒ crab unchanged) FIRST so this tick's grab/extraction resolve against the real
-    /// body, then steps the sim with this tick's assembled input set, then builds the snapshot at
+    /// bytes, plus whether the tick was a RESTART edge. Injects `crabs` (the freshly-pumped NN
+    /// crab poses, one per crab in index order; empty ⇒ crabs unchanged) FIRST so this tick's
+    /// grab/extraction resolve against the real bodies, then steps the sim with this tick's
+    /// assembled input set, then builds the snapshot at
     /// this ONE site — stamping the per-player `input_next` watermarks — and returns its wire
     /// bytes. Returning bytes (not the struct) makes the hand-off ALWAYS serialized — the client
     /// decodes and applies, no by-reference shortcut even in SP. Must be called only when
     /// [`next_tick_ready`](Server::next_tick_ready) is `true`.
-    pub fn step_next(&mut self, crab: Option<CrabPose>) -> SteppedTick {
+    pub fn step_next(&mut self, crabs: &[CrabPose]) -> SteppedTick {
         let tick = self.sim.tick();
         // Mid-game join: a pid rostered at THIS tick but absent from the authoritative sim is a
         // joiner whose admission ([`Server::admit`]) takes effect now — spawn it into the LIVE
@@ -535,8 +518,18 @@ impl Server {
             pending.tick, tick,
             "the assembled tick is out of step with the sim tick"
         );
-        if let Some(c) = crab {
-            self.sim.set_external_crab_pose(c.pos, c.yaw, c.digest);
+        if !crabs.is_empty() {
+            // One pose per crab, index-aligned; a count mismatch is refused inside the sim
+            // (set_external_crab_pose panics past the crab set) and a SHORT slice is refused
+            // here — a partially-driven round would silently freeze the tail crabs.
+            assert_eq!(
+                crabs.len(),
+                self.sim.crabs().len(),
+                "the driver's crab poses must cover every sim crab"
+            );
+            for (idx, c) in crabs.iter().enumerate() {
+                self.sim.set_external_crab_pose(idx, c.pos, c.yaw, c.digest);
+            }
         }
         let restarted = self.sim.step(&pending.inputs);
         let mut snapshot = self.sim.core_snapshot();
@@ -665,7 +658,7 @@ mod tests {
     fn step_ready(s: &mut Server) -> Vec<CoreSnapshot> {
         let mut out = Vec::new();
         while s.next_tick_ready() {
-            let bytes = s.step_next(None).snapshot;
+            let bytes = s.step_next(&[]).snapshot;
             out.push(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
         }
         out
@@ -699,7 +692,7 @@ mod tests {
         for t in 0..10 {
             s.advance(tickmsg(t, 1.0));
             assert!(s.next_tick_ready(), "tick {t} steps with no remote input");
-            let _ = s.step_next(None);
+            let _ = s.step_next(&[]);
         }
         assert_eq!(s.sim().tick(), 10, "the match ran at host pace");
         assert_eq!(
@@ -764,7 +757,7 @@ mod tests {
                 issue += 1;
             }
             s.advance(tickmsg(t, 0.0));
-            let _ = s.step_next(None);
+            let _ = s.step_next(&[]);
             reports.extend(s.take_starvation_reports());
         }
         reports
@@ -876,7 +869,7 @@ mod tests {
         let mut positions = vec![s.sim().player(PlayerId(1)).expect("rostered").pos()];
         for t in 0..3 {
             s.advance(tickmsg(t, 0.0));
-            let _ = s.step_next(None);
+            let _ = s.step_next(&[]);
             positions.push(s.sim().player(PlayerId(1)).expect("rostered").pos());
         }
         let step0 = positions[1].x - positions[0].x;
@@ -1139,7 +1132,7 @@ mod tests {
             let mut sim = Sim::new(SEED, &roster);
             for i in 0..SUBMITS {
                 let p = pose_at(i);
-                sim.set_external_crab_pose(p.pos, p.yaw, p.digest);
+                sim.set_external_crab_pose(0, p.pos, p.yaw, p.digest);
                 sim.step(&BTreeMap::from([(me, input_at(i))]));
                 baseline.push((sim.tick(), sim.state_hash()));
             }
@@ -1157,7 +1150,7 @@ mod tests {
                 server.advance(msg);
                 while server.next_tick_ready() {
                     let bytes = server
-                        .step_next(Some(pose_at(server.sim().tick())))
+                        .step_next(&[pose_at(server.sim().tick())])
                         .snapshot;
                     let snap =
                         CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
@@ -1216,7 +1209,7 @@ mod tests {
             );
             s.advance(tickmsg(t, 1.0));
             assert!(s.next_tick_ready(), "tick {t} is steppable — no wedge");
-            let stepped = s.step_next(None);
+            let stepped = s.step_next(&[]);
             assert_eq!(
                 stepped.restarted,
                 t == RESTART_AT,
@@ -1264,7 +1257,7 @@ mod tests {
         const SUBMITS: u64 = 60;
         let host = PlayerId(0);
         let mut server = srv(SEED, &[host]);
-        let crab_spawn = server.sim().crab().pos();
+        let crab_spawn = server.sim().crabs()[0].pos();
 
         // A crab pose walked steadily away from spawn, so "crab is at its live pose, not reset" is
         // unambiguous. Fed to `step_next` as the authoritative body pose each tick.
@@ -1304,7 +1297,7 @@ mod tests {
             });
             while server.next_tick_ready() {
                 let tick = server.sim().tick();
-                let bytes = server.step_next(Some(pose_at(tick))).snapshot;
+                let bytes = server.step_next(&[pose_at(tick)]).snapshot;
                 snaps.push(CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes"));
             }
         }
@@ -1348,32 +1341,32 @@ mod tests {
         // The crab is at its LIVE walked pose for that tick — the round kept running, NOT reset to
         // spawn: the joiner adopts an ONGOING crab, no round-boundary rebuild.
         assert_eq!(
-            after.crab.pos(),
+            after.crabs[0].pos(),
             pose_at(eff).pos,
             "the crab is at its live pose at tick eff"
         );
         assert_ne!(
-            after.crab.pos(),
+            after.crabs[0].pos(),
             crab_spawn,
             "the crab did NOT reset to spawn (no lockstep rebuild)"
         );
         assert!(eff > JOIN_LEAD, "the join genuinely lands mid-round");
     }
 
-    /// The admission gate: an armed host admits an asset-matched joiner regardless of the joiner's
+    /// The admission gate: the host admits an asset-matched joiner regardless of the joiner's
     /// brain (the joiner never executes one) and refuses an asset mismatch loudly, typed —
     /// the host→joiner analogue of the formation shared-asset gate, fail-LOUD per joiner.
+    /// (No host-brain half: the host's bindings are validated fail-loud at launch — rl#200.)
     #[test]
     fn admission_gate_admits_asset_match_and_refuses_mismatch() {
-        let (hw, ha) = (0xB7A1u64, 0x5A11_2233u64);
+        let ha = 0x5A11_2233u64;
         assert_eq!(
-            may_admit_joiner(hw, ha, &JoinRequest { asset_digest: ha }),
+            may_admit_joiner(ha, &JoinRequest { asset_digest: ha }),
             Ok(()),
-            "an armed host admits a matching-asset joiner"
+            "the host admits a matching-asset joiner"
         );
         assert_eq!(
             may_admit_joiner(
-                hw,
                 ha,
                 &JoinRequest {
                     asset_digest: ha ^ 1
@@ -1384,33 +1377,6 @@ mod tests {
                 joiner: ha ^ 1
             }),
             "a different Sally/colliders is refused"
-        );
-    }
-
-    /// The real-Sally host self-gate: a host whose OWN weights digest is 0
-    /// (a failed/absent checkpoint — the fake rest-pose crab) refuses every joiner as
-    /// [`HostNotArmed`], even an asset-matched one. Under host-auth the host serves the crab pose
-    /// to everyone, so this single gate is what keeps a fake-crab match from ever admitting anyone.
-    #[test]
-    fn zero_digest_host_refuses_every_joiner() {
-        let ha = 0x5A11_2233u64;
-        assert_eq!(
-            may_admit_joiner(0, ha, &JoinRequest { asset_digest: ha }),
-            Err(AdmissionRefusal::HostNotArmed),
-            "an unarmed host can't admit anyone into its fake-crab match"
-        );
-        // Self-gate FIRST (the documented order): even an asset-MISMATCHED joiner is reported as
-        // HostNotArmed — the host's own failure, never a spurious asset verdict.
-        assert_eq!(
-            may_admit_joiner(
-                0,
-                ha,
-                &JoinRequest {
-                    asset_digest: ha ^ 1
-                }
-            ),
-            Err(AdmissionRefusal::HostNotArmed),
-            "the self-gate is checked before the asset equality"
         );
     }
 }

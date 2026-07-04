@@ -50,10 +50,10 @@ pub struct CoreSnapshot {
     /// First-person players, in `PlayerId` order. Reuses [`Sim`](crate::sim::Sim)'s own
     /// `BTreeMap` so a new `Player` field is carried by construction, not re-encoded.
     pub players: BTreeMap<PlayerId, Player>,
-    /// The giant crab's authoritative integer pose (`Pos` + yaw). The float rapier body and
-    /// its per-tick physics digest are NOT carried — the client renders the pose, never the
-    /// solver.
-    pub crab: Crab,
+    /// The giant crabs' authoritative integer poses (`Pos` + yaw), in crab-index order — one
+    /// per brain binding (rl#200). The float rapier bodies and their per-tick physics digests
+    /// are NOT carried — the client renders the poses, never the solvers.
+    pub crabs: Vec<Crab>,
     /// The round result the client reads to end the round.
     pub outcome: Outcome,
     /// The participant set the server owns (sorted, deduped) — the server ships the roster;
@@ -117,8 +117,11 @@ impl CoreSnapshot {
             out.push(player.status().tag());
         }
 
-        write_pos(&mut out, self.crab.pos());
-        out.extend_from_slice(&self.crab.yaw().to_le_bytes());
+        out.extend_from_slice(&(self.crabs.len() as u32).to_le_bytes());
+        for crab in &self.crabs {
+            write_pos(&mut out, crab.pos());
+            out.extend_from_slice(&crab.yaw().to_le_bytes());
+        }
 
         out.push(self.outcome.tag());
 
@@ -153,11 +156,14 @@ impl CoreSnapshot {
             players.insert(id, Player::from_parts(pos, yaw, status));
         }
 
-        let crab = {
+        let n_crabs = u32::from_le_bytes(r.take::<4>()?) as usize;
+        // Growth bounded by the buffer, not the untrusted count (see `roster` below).
+        let mut crabs = Vec::new();
+        for _ in 0..n_crabs {
             let pos = read_pos(&mut r)?;
             let yaw = i32::from_le_bytes(r.take()?);
-            Crab::from_parts(pos, yaw)
-        };
+            crabs.push(Crab::from_parts(pos, yaw));
+        }
 
         let outcome = Outcome::from_tag(r.byte()?).ok_or(SnapshotDecodeError::BadTag)?;
 
@@ -183,7 +189,7 @@ impl CoreSnapshot {
         Ok(Self {
             tick,
             players,
-            crab,
+            crabs,
             outcome,
             roster,
             input_next,
@@ -247,7 +253,7 @@ mod tests {
 
     fn sample() -> CoreSnapshot {
         let mut sim = Sim::new(9, &[PlayerId(0), PlayerId(1)]);
-        sim.set_external_crab_pose(Pos { x: 1234, z: -5678 }, 42, 0);
+        sim.set_external_crab_pose(0, Pos { x: 1234, z: -5678 }, 42, 0);
         let mut snap = sim.core_snapshot();
         // Server-stamped watermarks (`Sim::core_snapshot` leaves them empty) — nonempty here so
         // the roundtrip exercises the map encoding.

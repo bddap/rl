@@ -13,7 +13,7 @@ use clap::Parser;
 use iroh::EndpointId;
 use net::{net_loop, render};
 
-use super::shared::{MATCH_SEED, nn_crab_checkpoint_dir, resolve_render_mode};
+use super::shared::{MATCH_SEED, nn_crab_checkpoint_dirs, resolve_render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -27,12 +27,12 @@ pub(crate) struct Args {
     /// perturbs the match; see `play --telemetry`).
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
-    /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`) — REQUIRED, as
-    /// for `play`. Like a cold-start formation client (rl#199), the joiner never executes the
-    /// brain — the host's self-gate is the one weights guard (rl#206) — so only the crab-ASSET
+    /// Directory holding a trained crab policy (`brain.bin` + `normalizer.bin`) — REQUIRED, as
+    /// for `play`; repeatable (rl#200), one binding per local render rig. The joiner never
+    /// executes a brain (it renders the host's broadcast state), so only the crab-ASSET
     /// digest is gated (a mismatch is refused, never a silent wrong crab).
     #[arg(long, value_name = "DIR")]
-    nn_crab_checkpoint: Option<std::path::PathBuf>,
+    nn_crab_checkpoint: Vec<std::path::PathBuf>,
     /// Start the crab render view in this mode (default: mesh). Same as `play --render-mode`.
     #[arg(long, value_name = "mesh|mesh+colliders|colliders")]
     render_mode: Option<String>,
@@ -46,10 +46,10 @@ pub(crate) struct Args {
 /// mismatch OR a zero-digest host the gate turned away) or `Unreachable` host is a clean, loud
 /// error exit — never a silent fallback to a fake/solo crab.
 pub(crate) fn run(args: Args) -> Result<()> {
-    // `nn_crab_checkpoint_dir` is the joiner's real pre-dial guard: it hard-fails on a
-    // missing/refused/rig-mismatched checkpoint, and the join gate needs no weights digest from
-    // us beyond that (rl#206) — only the crab-asset digest crosses the wire.
-    let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint)?;
+    // `nn_crab_checkpoint_dirs` is the joiner's real pre-dial guard: it hard-fails on a
+    // missing/refused/rig-mismatched checkpoint, per binding — only the crab-asset digest
+    // crosses the wire.
+    let external_crab = nn_crab_checkpoint_dirs(args.nn_crab_checkpoint)?;
     let asset_digest = crab_world::mesh_fallback::constructed_body_digest();
 
     let result = net_loop::connect_and_join(MATCH_SEED, args.host, args.telemetry, asset_digest)?;
