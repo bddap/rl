@@ -46,15 +46,19 @@ fn snapshot_policy(state: &TrainingState, log_std_floor: f32) -> RollRequest {
 /// Phase 1 (durability) — persist the checkpoint so a live demo / a restart picks up
 /// the latest weights, normalizer, and Adam moments. Not a handoff to the threads (they
 /// get the in-memory snapshot); the Adam state lives on the GPU learner, so it is saved
-/// here beside the brain to let a resume continue the optimizer warm.
+/// here beside the brain, stamped with the set's generation so a resume can verify the
+/// moments belong to this brain (bddap/rl#215). If the set itself didn't complete, the
+/// optimizer is skipped too — the previous save's optimizer stays paired with the
+/// previous save's brain.
 fn persist_checkpoint(
     state: &TrainingState,
     gpu_learner: &crate::training::gpu::GpuLearner,
     checkpoint_dir: &Path,
 ) {
     let paths = CheckpointDir::new(checkpoint_dir);
-    state.save_checkpoint();
-    gpu_learner.save_adam_state(&paths.optimizer_path(), state.brain().arch());
+    if let Some(generation) = state.save_checkpoint() {
+        gpu_learner.save_adam_state(&paths.optimizer_path(), state.brain().arch(), generation);
+    }
 }
 
 /// Phase 2 — roll one synchronous horizon across all threads: send each its request,
@@ -308,7 +312,11 @@ pub fn run_learner(
     // fresh net would misalign them exactly as the old brain would.
     let ckpt = CheckpointDir::new(&checkpoint_dir);
     if state.warm_started() {
-        gpu_learner.load_adam_state(&ckpt.optimizer_path(), state.brain().arch());
+        gpu_learner.load_adam_state(
+            &ckpt.optimizer_path(),
+            state.brain().arch(),
+            state.resumed_generation(),
+        );
     } else {
         eprintln!("[learner] optimizer not warm-started: the brain cold-started — cold moments");
     }
@@ -473,9 +481,12 @@ pub fn run_learner(
         }
     }
 
-    // Final checkpoint so the last update's weights are on disk. The rollout threads
-    // are torn down by their Drop (channel close + join) when `threads` drops.
-    state.save_checkpoint();
+    // Final checkpoint so the last update's weights are on disk — through
+    // `persist_checkpoint`, optimizer included, so the whole dir carries ONE generation
+    // and a later resume warm-starts the moments instead of refusing a stale stamp
+    // (bddap/rl#215). The rollout threads are torn down by their Drop (channel close +
+    // join) when `threads` drops.
+    persist_checkpoint(&state, &gpu_learner, &checkpoint_dir);
     if timed_samples > 0 {
         let rollout_sps = timed_samples as f64 / timed_rollout_secs.max(1e-9);
         let e2e_sps = timed_samples as f64 / timed_wall_secs.max(1e-9);

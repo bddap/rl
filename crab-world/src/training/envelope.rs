@@ -64,14 +64,15 @@ impl ArtifactKind {
     /// The format version this build writes and accepts for this kind — each kind owns
     /// its counter, so e.g. an optimizer-record layout change bumps only the optimizer's.
     /// A file tagged with any other version is refused, never deserialized blind
-    /// (the `OptimizerCheckpoint` precedent this module generalizes) — with ONE
-    /// deliberate exception: a v1 BRAIN (predates the bddap/rl#214 body-digest field) is
-    /// still read, as `body_digest: None`, so the fleet's live checkpoints resume
-    /// trust-on-first-use instead of being invalidated; their next save writes v2.
+    /// (the `OptimizerCheckpoint` precedent this module generalizes) — with deliberate
+    /// BACKWARD exceptions so the fleet's live checkpoints resume instead of being
+    /// invalidated: every kind's v1 is still read (predates both stamps), and a v2 BRAIN
+    /// (predates the bddap/rl#215 generation field) is still read — each with the absent
+    /// stamps as `None` (trust-on-first-use); the next save writes the current version.
     pub(crate) fn current_version(self) -> u32 {
         match self {
-            Self::Brain => 2,
-            Self::Optimizer | Self::ObsNormalizer | Self::ReturnNormalizer => 1,
+            Self::Brain => 3,
+            Self::Optimizer | Self::ObsNormalizer | Self::ReturnNormalizer => 2,
         }
     }
 }
@@ -96,17 +97,25 @@ pub(crate) struct CheckpointEnvelope {
     /// carries one (the BRAIN is the body authority, as its arch tag is the arch
     /// authority the paired artifacts are checked against).
     pub(crate) body_digest: Option<u64>,
+    /// The checkpoint-SET generation stamp (bddap/rl#215): one random value drawn per
+    /// `save_checkpoint`, written into every member saved together, so a partial save
+    /// (e.g. ENOSPC landing the small normalizer while the big brain write fails) is
+    /// DETECTABLE at load — a paired member whose stamp differs from the brain's comes
+    /// from a different save and must not pair with it. `None` = predates the stamp
+    /// (brain ≤v2, paired v1), checked as a set: an all-`None` set is trusted on first
+    /// use, a mixed set is exactly a partial save straddling the upgrade and refuses.
+    pub(crate) generation: Option<u64>,
 }
 
 /// The serde mirrors actually encoded after [`MAGIC`] — `kind`/`arch` as plain strings so
 /// a read can DECODE first and VALIDATE second, attributing an unknown arch by name
 /// ([`EnvelopeError::UnknownArch`] carries the string) instead of failing opaquely inside
-/// bincode. ONE shape per format version, `V2` a strict append-only extension of `V1`;
-/// each version has one encoder and one decoder, both through its shape, so the two can't
+/// bincode. ONE shape per (kind, version), each a strict append-only extension of `V1`;
+/// each has one encoder and one decoder, both through its shape, so the two can't
 /// drift. Field set + order are the on-disk format; changing them is a version bump. The
 /// reader picks the shape off [`RawHeader`], the common `kind`+`version` prefix (bincode
 /// decodes fields sequentially and the crate's legacy config tolerates trailing bytes, so
-/// the prefix decodes from either shape).
+/// the prefix decodes from every shape).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RawEnvelopeV1 {
     kind: String,
@@ -123,6 +132,30 @@ struct RawEnvelopeV2 {
     arch: String,
     payload: Vec<u8>,
     body_digest: u64,
+}
+
+/// Brain V3: V2 plus the checkpoint-set generation stamp (bddap/rl#215).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RawEnvelopeV3 {
+    kind: String,
+    version: u32,
+    arch: String,
+    payload: Vec<u8>,
+    body_digest: u64,
+    generation: u64,
+}
+
+/// Paired-kind V2 (optimizer, normalizers): V1 plus the generation stamp (bddap/rl#215).
+/// Bincode-identical layout to the brain's [`RawEnvelopeV2`] (both append one u64), but a
+/// distinct type because the u64 MEANS something different — reusing the struct would let
+/// a body digest be read as a generation without any decode failing.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RawEnvelopePairedV2 {
+    kind: String,
+    version: u32,
+    arch: String,
+    payload: Vec<u8>,
+    generation: u64,
 }
 
 /// The shared decode prefix of every raw shape: enough to pick the full shape to decode
@@ -165,6 +198,21 @@ pub(crate) enum EnvelopeError {
         found: ArchId,
         expected: ArchId,
     },
+    /// The generation stamp differs from the one this checkpoint set's brain carries —
+    /// this member and the brain were written by DIFFERENT saves, i.e. a partial/torn
+    /// save or copy mis-paired the set (bddap/rl#215). `None` = unstamped (pre-#215).
+    GenerationMismatch {
+        found: Option<u64>,
+        expected: Option<u64>,
+    },
+}
+
+/// Render a generation stamp for refusal messages: the hex value, or its absence named.
+fn generation_str(g: Option<u64>) -> String {
+    match g {
+        Some(g) => format!("{g:#018x}"),
+        None => "none (pre-rl#215, unstamped)".to_string(),
+    }
 }
 
 impl std::fmt::Display for EnvelopeError {
@@ -200,6 +248,15 @@ impl std::fmt::Display for EnvelopeError {
                 "tagged arch {found} but this checkpoint set's brain is {expected} — \
                  a cross-paired checkpoint dir"
             ),
+            Self::GenerationMismatch { found, expected } => write!(
+                f,
+                "stamped save-generation {} but this checkpoint set's brain carries {} — \
+                 this member and the brain come from DIFFERENT saves (a partial or torn \
+                 save/copy mis-paired the set, bddap/rl#215); restore a coherent set \
+                 (e.g. the best/ snapshot) or point at a fresh dir",
+                generation_str(*found),
+                generation_str(*expected),
+            ),
         }
     }
 }
@@ -207,41 +264,44 @@ impl std::fmt::Display for EnvelopeError {
 /// Wrap `payload` in an envelope for `kind`/`arch` and write it atomically. The ONE
 /// writer — every artifact save goes through here, so a file without magic + tags can't
 /// be produced by any production path. Always writes the kind's CURRENT version, so
-/// `body_digest` is required exactly when the kind carries one (the brain, v2) and
-/// forbidden otherwise — a call that disagrees is a programming error, caught by every
-/// save-path test, never a silently mis-shaped file.
+/// `body_digest` is required exactly when the kind carries one (the brain) and forbidden
+/// otherwise — a call that disagrees is a programming error, caught by every save-path
+/// test, never a silently mis-shaped file. `generation` is the checkpoint-set stamp
+/// (bddap/rl#215), required on every kind: all members of one save share one value.
 pub(crate) fn write_envelope(
     path: &Path,
     kind: ArtifactKind,
     arch: ArchId,
     payload: Vec<u8>,
     body_digest: Option<u64>,
+    generation: u64,
 ) -> std::io::Result<()> {
     let kind_name = kind.name().to_string();
     let version = kind.current_version();
     let arch_name = arch.name().to_string();
-    let body = match version {
-        1 => {
-            assert!(
-                body_digest.is_none(),
-                "{kind} envelopes (v1) carry no body digest"
-            );
-            bincode::serialize(&RawEnvelopeV1 {
-                kind: kind_name,
-                version,
-                arch: arch_name,
-                payload,
-            })
-        }
-        2 => bincode::serialize(&RawEnvelopeV2 {
+    let body = match kind {
+        ArtifactKind::Brain => bincode::serialize(&RawEnvelopeV3 {
             kind: kind_name,
             version,
             arch: arch_name,
             payload,
             body_digest: body_digest
-                .unwrap_or_else(|| panic!("{kind} envelopes (v2) require a body digest")),
+                .unwrap_or_else(|| panic!("{kind} envelopes require a body digest")),
+            generation,
         }),
-        v => unreachable!("no writer for {kind} envelope version {v}"),
+        ArtifactKind::Optimizer | ArtifactKind::ObsNormalizer | ArtifactKind::ReturnNormalizer => {
+            assert!(
+                body_digest.is_none(),
+                "{kind} envelopes carry no body digest (the brain is the body authority)"
+            );
+            bincode::serialize(&RawEnvelopePairedV2 {
+                kind: kind_name,
+                version,
+                arch: arch_name,
+                payload,
+                generation,
+            })
+        }
     }
     .map_err(std::io::Error::other)?;
     let mut bytes = Vec::with_capacity(MAGIC.len() + body.len());
@@ -250,19 +310,22 @@ pub(crate) fn write_envelope(
     atomic_write(path, &bytes)
 }
 
-/// TEST-ONLY writer of a LEGACY v1 brain envelope. The golden checkpoint fixture must
-/// stay v1 forever: the production writer stamps the writing machine's constructed body
-/// digest, which would make a committed fixture refuse to arm on every machine whose
-/// `sally.glb` differs or is absent — v1 reads as trust-on-first-use everywhere, i.e.
-/// machine-portable. Also the writer for reader-side TOFU tests.
+/// TEST-ONLY writer of a LEGACY v1 envelope (any kind). The golden checkpoint fixture
+/// must stay v1 forever: the production writer stamps the writing machine's constructed
+/// body digest and a per-save generation, which would make a committed fixture refuse to
+/// arm on every machine whose `sally.glb` differs or is absent — v1 reads as
+/// trust-on-first-use everywhere, i.e. machine-portable (and the fixture's brain and
+/// normalizer must BOTH be v1: an unstamped brain refuses a stamped partner,
+/// bddap/rl#215). Also the writer for reader-side TOFU tests.
 #[cfg(test)]
-pub(crate) fn write_v1_brain_envelope(
+pub(crate) fn write_v1_envelope(
     path: &Path,
+    kind: ArtifactKind,
     arch: ArchId,
     payload: Vec<u8>,
 ) -> std::io::Result<()> {
     let raw = RawEnvelopeV1 {
-        kind: ArtifactKind::Brain.name().to_string(),
+        kind: kind.name().to_string(),
         version: 1,
         arch: arch.name().to_string(),
         payload,
@@ -298,18 +361,37 @@ pub(crate) fn read_envelope(
             expected,
         });
     }
-    // Accepted versions per kind: the current one, plus v1 for the brain (pre-#214
-    // files, trust-on-first-use — `body_digest: None`). Anything else is refused.
-    let (arch, payload, body_digest) = match (expected, hdr.version) {
+    // Accepted versions per kind: the current one, plus the pre-stamp backward reads —
+    // every kind's v1 (predates both stamps) and the brain's v2 (pre-#215) — each with
+    // the absent stamps as `None` (trust-on-first-use). Anything else is refused.
+    let (arch, payload, body_digest, generation) = match (expected, hdr.version) {
+        (ArtifactKind::Brain, 3) => {
+            let raw: RawEnvelopeV3 =
+                bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+            (
+                raw.arch,
+                raw.payload,
+                Some(raw.body_digest),
+                Some(raw.generation),
+            )
+        }
         (ArtifactKind::Brain, 2) => {
             let raw: RawEnvelopeV2 =
                 bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
-            (raw.arch, raw.payload, Some(raw.body_digest))
+            (raw.arch, raw.payload, Some(raw.body_digest), None)
         }
-        (_, 1) if expected.current_version() == 1 || expected == ArtifactKind::Brain => {
+        (
+            ArtifactKind::Optimizer | ArtifactKind::ObsNormalizer | ArtifactKind::ReturnNormalizer,
+            2,
+        ) => {
+            let raw: RawEnvelopePairedV2 =
+                bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+            (raw.arch, raw.payload, None, Some(raw.generation))
+        }
+        (_, 1) => {
             let raw: RawEnvelopeV1 =
                 bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
-            (raw.arch, raw.payload, None)
+            (raw.arch, raw.payload, None, None)
         }
         (_, found) => {
             return Err(EnvelopeError::UnknownVersion {
@@ -323,24 +405,37 @@ pub(crate) fn read_envelope(
         arch,
         payload,
         body_digest,
+        generation,
     })
 }
 
-/// [`read_envelope`] plus the arch-COHERENCE check for brain-PAIRED artifacts (optimizer,
-/// normalizers): the envelope must be tagged with `expected_arch` — the checkpoint set's
-/// brain's — or the read refuses with [`EnvelopeError::ArchMismatch`]. The one place the
-/// coherence rule is spelled; the brain itself reads via the plain [`read_envelope`]
-/// because its tag IS the authority the others are checked against.
+/// [`read_envelope`] plus the SET-COHERENCE checks for brain-PAIRED artifacts (optimizer,
+/// normalizers): the envelope must be tagged with `expected_arch` AND stamped with
+/// `expected_generation` — both the checkpoint set's brain's — or the read refuses with
+/// [`EnvelopeError::ArchMismatch`] / [`EnvelopeError::GenerationMismatch`]. The one place
+/// the coherence rules are spelled; the brain itself reads via the plain
+/// [`read_envelope`] because its tags ARE the authority the others are checked against.
+/// The generation check is EXACT over `Option` (bddap/rl#215): `None == None` passes (a
+/// wholly pre-stamp set, trust-on-first-use), while a stamped member against an
+/// unstamped brain — or vice versa — is a partial save straddling the upgrade and
+/// refuses like any other mismatch.
 pub(crate) fn read_envelope_expecting(
     path: &Path,
     kind: ArtifactKind,
     expected_arch: ArchId,
+    expected_generation: Option<u64>,
 ) -> Result<CheckpointEnvelope, EnvelopeError> {
     let env = read_envelope(path, kind)?;
     if env.arch != expected_arch {
         return Err(EnvelopeError::ArchMismatch {
             found: env.arch,
             expected: expected_arch,
+        });
+    }
+    if env.generation != expected_generation {
+        return Err(EnvelopeError::GenerationMismatch {
+            found: env.generation,
+            expected: expected_generation,
         });
     }
     Ok(env)
@@ -358,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_payload_arch_and_body_digest() {
+    fn round_trips_payload_arch_body_digest_and_generation() {
         let dir = scratch("roundtrip");
         let path = dir.join("brain.bin");
         write_envelope(
@@ -367,34 +462,116 @@ mod tests {
             ArchId::DEFAULT,
             vec![1, 2, 3],
             Some(0xfeed_beef),
+            0x6e6e_7261_7469_6f6e,
         )
         .unwrap();
         let env = read_envelope(&path, ArtifactKind::Brain).unwrap();
         assert_eq!(env.arch, ArchId::DEFAULT);
         assert_eq!(env.payload, vec![1, 2, 3]);
         assert_eq!(env.body_digest, Some(0xfeed_beef));
+        assert_eq!(env.generation, Some(0x6e6e_7261_7469_6f6e));
 
-        // Paired kinds stay v1 and never carry a digest.
+        // Paired kinds carry the generation but never a body digest.
         let path = dir.join("optimizer.bin");
-        write_envelope(&path, ArtifactKind::Optimizer, ArchId::DEFAULT, vec![9], None).unwrap();
+        write_envelope(
+            &path,
+            ArtifactKind::Optimizer,
+            ArchId::DEFAULT,
+            vec![9],
+            None,
+            0x6e6e_7261_7469_6f6e,
+        )
+        .unwrap();
         let env = read_envelope(&path, ArtifactKind::Optimizer).unwrap();
         assert_eq!(env.payload, vec![9]);
         assert_eq!(env.body_digest, None);
+        assert_eq!(env.generation, Some(0x6e6e_7261_7469_6f6e));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A v1 brain — every checkpoint written before bddap/rl#214 — still reads, as
-    /// `body_digest: None` (trust-on-first-use), so shipping the digest does NOT
-    /// invalidate the fleet's live checkpoints.
+    /// Pre-stamp files — every checkpoint written before bddap/rl#214/#215 — still read,
+    /// with the absent stamps as `None` (trust-on-first-use), so shipping the stamps does
+    /// NOT invalidate the fleet's live checkpoints: a v1 brain, a v2 brain, and a v1
+    /// paired artifact each resume.
     #[test]
-    fn v1_brain_reads_as_tofu() {
+    fn pre_stamp_files_read_as_tofu() {
         let dir = scratch("tofu");
         let path = dir.join("brain.bin");
-        write_v1_brain_envelope(&path, ArchId::DEFAULT, vec![4, 5]).unwrap();
+        write_v1_envelope(&path, ArtifactKind::Brain, ArchId::DEFAULT, vec![4, 5]).unwrap();
         let env = read_envelope(&path, ArtifactKind::Brain).unwrap();
         assert_eq!(env.arch, ArchId::DEFAULT);
         assert_eq!(env.payload, vec![4, 5]);
         assert_eq!(env.body_digest, None);
+        assert_eq!(env.generation, None);
+
+        // A v2 brain (bddap/rl#214, pre-#215): body digest present, generation None.
+        let raw = RawEnvelopeV2 {
+            kind: "brain".into(),
+            version: 2,
+            arch: ArchId::DEFAULT.name().into(),
+            payload: vec![6],
+            body_digest: 0xabc,
+        };
+        std::fs::write(
+            &path,
+            [MAGIC.as_slice(), &bincode::serialize(&raw).unwrap()].concat(),
+        )
+        .unwrap();
+        let env = read_envelope(&path, ArtifactKind::Brain).unwrap();
+        assert_eq!(env.body_digest, Some(0xabc));
+        assert_eq!(env.generation, None);
+
+        // A v1 paired artifact: no stamps at all.
+        let path = dir.join("normalizer.bin");
+        write_v1_envelope(&path, ArtifactKind::ObsNormalizer, ArchId::DEFAULT, vec![7]).unwrap();
+        let env = read_envelope(&path, ArtifactKind::ObsNormalizer).unwrap();
+        assert_eq!(env.body_digest, None);
+        assert_eq!(env.generation, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bddap/rl#215 coherence matrix on `read_envelope_expecting`: a paired member
+    /// pairs only with the brain generation it was saved with — equal stamps pass, a
+    /// wholly pre-stamp set passes on trust, and every mixed case (different stamps, or
+    /// stamped-vs-unstamped in either direction — a partial save straddling the upgrade)
+    /// is the distinct `GenerationMismatch` refusal.
+    #[test]
+    fn generation_pairing_matrix() {
+        let dir = scratch("genmatrix");
+        let stamped = dir.join("stamped.bin");
+        write_envelope(
+            &stamped,
+            ArtifactKind::ObsNormalizer,
+            ArchId::DEFAULT,
+            vec![1],
+            None,
+            77,
+        )
+        .unwrap();
+        let unstamped = dir.join("unstamped.bin");
+        write_v1_envelope(&unstamped, ArtifactKind::ObsNormalizer, ArchId::DEFAULT, vec![1])
+            .unwrap();
+
+        let read = |path, expected_generation| {
+            read_envelope_expecting(
+                path,
+                ArtifactKind::ObsNormalizer,
+                ArchId::DEFAULT,
+                expected_generation,
+            )
+        };
+        assert!(read(&stamped, Some(77)).is_ok(), "matching stamps pair");
+        assert!(read(&unstamped, None).is_ok(), "a wholly pre-stamp set pairs on trust");
+        for (path, expected) in [
+            (&stamped, Some(78)), // different saves
+            (&stamped, None),     // stamped member, unstamped brain (brain write failed)
+            (&unstamped, Some(77)), // unstamped member, stamped brain (member write failed)
+        ] {
+            match read(path, expected) {
+                Err(EnvelopeError::GenerationMismatch { .. }) => {}
+                other => panic!("expected GenerationMismatch for {expected:?}, got {other:?}"),
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -427,7 +604,7 @@ mod tests {
         ));
 
         // A mis-copied file: optimizer envelope read as the brain.
-        write_envelope(&path, ArtifactKind::Optimizer, ArchId::DEFAULT, vec![], None).unwrap();
+        write_envelope(&path, ArtifactKind::Optimizer, ArchId::DEFAULT, vec![], None, 1).unwrap();
         assert!(matches!(
             read_envelope(&path, ArtifactKind::Brain),
             Err(EnvelopeError::WrongKind { .. })
@@ -469,14 +646,15 @@ mod tests {
             Err(EnvelopeError::UnknownVersion { .. })
         ));
 
-        // v1-legacy acceptance is a BRAIN-only carve-out: a paired kind at v2 (even
-        // with a well-formed V2 shape) is refused, never TOFU'd.
-        let raw = RawEnvelopeV2 {
+        // Version acceptance is per KIND: a paired kind at the brain's v3 (even with a
+        // well-formed V3 shape) is refused, never decoded through the brain's carve-outs.
+        let raw = RawEnvelopeV3 {
             kind: "optimizer".into(),
-            version: 2,
+            version: 3,
             arch: ArchId::DEFAULT.name().into(),
             payload: vec![],
             body_digest: 7,
+            generation: 7,
         };
         std::fs::write(
             &path,
@@ -485,7 +663,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             read_envelope(&path, ArtifactKind::Optimizer),
-            Err(EnvelopeError::UnknownVersion { found: 2, .. })
+            Err(EnvelopeError::UnknownVersion { found: 3, .. })
         ));
 
         let _ = std::fs::remove_dir_all(&dir);

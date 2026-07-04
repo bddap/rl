@@ -212,6 +212,7 @@ fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
         ));
     }
     let brain = loaded.brain;
+    let generation = loaded.generation;
     // A checkpoint from a different rig (e.g. a stale 77-dim brain against the current
     // OBS_SIZE) parses fine here but its mismatched first-layer weight would panic in the
     // matmul at the first `policy()` call. Surface it as a distinct `Mismatch` (carrying
@@ -222,7 +223,11 @@ fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
     if !dims_fit_rig(obs, action) {
         return Loaded::Mismatch(RigDims { obs, action });
     }
-    match ObsNormalizer::load(&paths.normalizer_path(), brain.arch()) {
+    // The generation stamp (bddap/rl#215) keys the pairing to the brain's own SAVE, not
+    // just its arch: a partial save (or a copy torn across one) leaves one member from an
+    // older set, which would normalize this brain with another generation's statistics —
+    // refused here like any other mis-pair.
+    match ObsNormalizer::load(&paths.normalizer_path(), brain.arch(), generation) {
         Ok(normalizer) => Loaded::Fit(brain, normalizer),
         Err(e) => Loaded::Refused(format!(
             "{}: {e} (a brain never arms without its paired obs normalizer)",
@@ -466,8 +471,10 @@ mod tests {
         let device = NdArrayDevice::Cpu;
         let brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
         let paths = CheckpointDir::new(dir);
-        crate::training::checkpoint::save_brain(&brain, &paths.brain_file()).unwrap();
-        ObsNormalizer::new(NORMALIZER_CLIP).save(brain.arch(), &paths.normalizer_path());
+        crate::training::checkpoint::save_brain(&brain, &paths.brain_file(), 21).unwrap();
+        ObsNormalizer::new(NORMALIZER_CLIP)
+            .save(brain.arch(), &paths.normalizer_path(), 21)
+            .unwrap();
     }
 
     /// The fixture obs the golden `actions.hex` was generated over: deterministic,
@@ -569,12 +576,14 @@ mod tests {
     /// [`golden_obs`] into `actions.hex` — then commit the result (run with
     /// `cargo test -- --ignored regenerate_enveloped_golden_fixture`). Only for a
     /// DELIBERATE format change or an arch cull; ignored because a golden fixture that
-    /// silently regenerates guards nothing. Writes the LEGACY v1 shape, NOT the
-    /// production writer: the production writer stamps the regenerating machine's
-    /// constructed body digest (bddap/rl#214), which would make the committed fixture
-    /// refuse to arm on every machine whose `sally.glb` differs or is absent — the
-    /// fixture must stay v1 (trust-on-first-use) to remain machine-portable, which also
-    /// keeps it the end-to-end guard of the fleet's v1-resume path.
+    /// silently regenerates guards nothing. Writes the LEGACY v1 shape — for BOTH
+    /// members — NOT the production writers: the production writer stamps the
+    /// regenerating machine's constructed body digest (bddap/rl#214) plus a save
+    /// generation (bddap/rl#215); the digest would make the committed fixture refuse to
+    /// arm on every machine whose `sally.glb` differs or is absent, and a stamped
+    /// normalizer refuses to pair with the unstamped v1 brain. The fixture must stay
+    /// wholly v1 (trust-on-first-use) to remain machine-portable, which also keeps it
+    /// the end-to-end guard of the fleet's v1-resume path.
     #[test]
     #[ignore = "fixture generator, run manually on a deliberate format change or arch cull"]
     fn regenerate_enveloped_golden_fixture() {
@@ -586,9 +595,20 @@ mod tests {
         let bytes = brain
             .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
             .unwrap();
-        crate::training::envelope::write_v1_brain_envelope(&paths.brain_file(), brain.arch(), bytes)
-            .unwrap();
-        ObsNormalizer::new(NORMALIZER_CLIP).save(brain.arch(), &paths.normalizer_path());
+        crate::training::envelope::write_v1_envelope(
+            &paths.brain_file(),
+            ArtifactKind::Brain,
+            brain.arch(),
+            bytes,
+        )
+        .unwrap();
+        crate::training::envelope::write_v1_envelope(
+            &paths.normalizer_path(),
+            ArtifactKind::ObsNormalizer,
+            brain.arch(),
+            bincode::serialize(&ObsNormalizer::new(NORMALIZER_CLIP).snapshot()).unwrap(),
+        )
+        .unwrap();
 
         let policy = Policy::load(&dir);
         assert!(policy.is_loaded(), "the fixture just written must load");
@@ -624,9 +644,12 @@ mod tests {
             ArchId::DEFAULT,
             bytes,
             Some(wrong),
+            21,
         )
         .unwrap();
-        ObsNormalizer::new(NORMALIZER_CLIP).save(ArchId::DEFAULT, &paths.normalizer_path());
+        ObsNormalizer::new(NORMALIZER_CLIP)
+            .save(ArchId::DEFAULT, &paths.normalizer_path(), 21)
+            .unwrap();
 
         let policy = Policy::load(&dir);
         assert!(!policy.is_loaded(), "a wrong-body checkpoint must not arm");
@@ -716,9 +739,12 @@ mod tests {
             ArchId::DEFAULT,
             bytes,
             Some(crate::mesh_fallback::constructed_body_digest()),
+            21,
         )
         .unwrap();
-        ObsNormalizer::new(NORMALIZER_CLIP).save(ArchId::DEFAULT, &paths.normalizer_path());
+        ObsNormalizer::new(NORMALIZER_CLIP)
+            .save(ArchId::DEFAULT, &paths.normalizer_path(), 21)
+            .unwrap();
     }
 
     /// Save a brain whose first trunk layer expects `obs_dim` inputs instead of the
