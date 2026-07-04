@@ -819,9 +819,10 @@ async fn wire_connection(
 }
 
 /// Upper bound on a single frame body, to reject a hostile/garbled length before
-/// allocating. The two largest legitimate frames both fit comfortably: a full-roster [`Beat`]
-/// (kind + start + count + weights digest + 256×32-byte ids ≈ 8 KiB) and a full-roster
-/// [`CoreSnapshot`] (~14 B/player, ≈ 4 KiB at 256); 16 KiB is generous
+/// allocating. The largest legitimate frames all fit comfortably: a full-roster [`Beat`]
+/// (kind + start + count + weights digest + 256×32-byte ids ≈ 8 KiB), a full-roster
+/// [`CoreSnapshot`] (~14 B/player, ≈ 4 KiB at 256), and a [`CrabArticulation`] (rl#192:
+/// 39 parts × 29 B each + repose + vehicle ≈ 1.2 KiB); 16 KiB is generous
 /// slack and still bounds a bad length to a small allocation.
 const MAX_FRAME_LEN: usize = 16 * 1024;
 

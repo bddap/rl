@@ -1,19 +1,20 @@
 //! A real rapier-simulated, NN-driven giant crab — the trained RL body ("real Sally"), the ONLY
 //! crab the game has (no integer point-pursuer to fall back to). Armed by the
 //! [`ExternalCrabArmed`] runtime gate on a SOLO round (a Host-alone Start, or scripted `--host`
-//! that found no peer) and on a NETWORKED round with synced weights.
+//! that found no peer) and on a NETWORKED round that passes the sync verdict below.
 //!
 //! # When it drives the crab (and why it's safe)
-//! The game's [`crate::sim`] is a bit-deterministic INTEGER lockstep sim so two peers
-//! evolve identically. A rapier crab is FLOAT physics, so it can drive a *networked* crab
-//! without desyncing ONLY when every peer (a) loaded the same brain (the weights-digest
-//! handshake) and (b) steps the body the identical number of physics steps per lockstep tick
-//! (the deterministic [`crate::cadence::PhysicsCadence`], pumped by
-//! `net::render::drive_lockstep`). [`crate::may_arm_external_crab`] is the gate that
-//! enforces both. On a solo round there's no peer to desync against, so it always arms. A
-//! networked-UNSYNCED round CANNOT arm and — with no integer fallback — REFUSES LOUDLY (the
-//! windowed client fails with an actionable peer-mismatch message; see [`crate::render`])
-//! rather than silently substituting a fake crab for Sally.
+//! Host-authoritative: the HOST is the only peer that steps the crab — clients adopt its
+//! snapshots and render its broadcast articulation — so cross-peer float divergence is not a
+//! failure mode. On a NETWORKED round [`crate::may_arm_external_crab`] gates on the two
+//! things that ARE real (see [`crate::membership::Membership::sync_verdict`]): (a) the HOST
+//! loaded a real brain — a non-zero policy-weights digest in its own beats; only the host
+//! executes the brain, so brain equality across peers gates nothing — and (b) asset identity:
+//! every peer builds its rendered crab from the same crab-model asset, so a digest mismatch
+//! is a real client-side divergence even under host-auth. On a solo round there's no peer, so
+//! it always arms. A networked-UNSYNCED round CANNOT arm and — with no integer fallback —
+//! REFUSES LOUDLY (the windowed client fails with an actionable peer-mismatch message; see
+//! [`crate::render`]) rather than silently substituting a fake crab for Sally.
 //!
 //! # How it works
 //! The trained policy ([`crab_world::play::Policy`], loaded from a checkpoint) is a
@@ -219,12 +220,13 @@ impl ExternalCrabBridge {
 /// env-0 crab entity tree and rebuild it fresh from spawn, via the SAME
 /// [`crab_world::bot::respawn_crab`] path the non-finite rescue uses (one respawn implementation,
 /// no parallel reset to drift). [`ExternalCrabBridge::restart_to_spawn`] resets only the bridge's
-/// bookkeeping; the rapier solver keeps WARM contact/warm-start state across a bare restart, so a
-/// mid-game JOIN would put a warm incumbent body beside a cold joiner body in the same round — a
-/// divergence folded LOUDLY into `state_hash` via the external-crab digest. Dropping the tree and
-/// rebuilding gives every peer (incumbents AND the joiner) the IDENTICAL cold solver state, so the
-/// round stays in lockstep. Called from the one restart edge in [`crate::render`]'s
-/// `drive_lockstep`, so join and plain-restart share it.
+/// bookkeeping; the rapier solver keeps WARM contact/warm-start state across a bare restart, so
+/// re-seeding alone would make the new round's physics path-dependent on the round before it (and
+/// visible in the per-tick external-crab digest folded into `state_hash`). Dropping the tree and
+/// rebuilding starts every round from the IDENTICAL from-boot solver state — a respawn, not a
+/// teleport of the old body. Two callers, both round starts: the RESTART edge in
+/// [`crate::render`]'s `drive_lockstep`, and the round install after a disconnect return
+/// (rl#203), where the previous round's warm body persists across the menu.
 ///
 /// Exclusive-world (the driver edge holds `&mut World`): collect the env-0 parts, lift `CrabAssets`
 /// out with `resource_scope` so a temporary [`Commands`] can borrow the world, and apply the

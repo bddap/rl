@@ -1,13 +1,14 @@
 //! Deterministic physics/sim cadence reconciliation for the networked NN crab (GCR).
 //!
 //! The crab body + its Sense→Think→Act brain step at [`crab_world::physics::PHYSICS_HZ`] (64 Hz);
-//! the lockstep sim advances at [`crate::sim::TICK_HZ`] (30 Hz). On a NETWORKED round
-//! every peer MUST advance the float body the SAME number of physics steps between two
-//! lockstep ticks — otherwise the per-tick `phys_digest` folded into
-//! [`crate::sim::Sim::state_hash`] differs and the peers desync by construction. Wall
-//! clock can't decide that count (it differs per machine and per frame rate), so this is a
-//! pure INTEGER accumulator keyed off the tick index alone: identical on every peer from the
-//! shared [`Default`] start.
+//! the sim advances at [`crate::sim::TICK_HZ`] (30 Hz). Host-authoritative: the HOST is the
+//! only peer that steps the crab (clients render its broadcast pose), and this is the host's
+//! 64:30 pacer — how many physics steps to pump per applied sim tick. Wall clock must not
+//! decide that count (it differs per frame rate and per run, and the per-tick
+//! `phys_digest` folded into [`crate::sim::Sim::state_hash`] would then be irreproducible),
+//! so this is a pure INTEGER accumulator keyed off the tick index alone: the same tick
+//! sequence always pumps the same steps, which is what keeps restarts and the determinism
+//! probes exact.
 //!
 //! 64 / 30 is not an integer, so the per-tick step count alternates (mostly 2, periodically
 //! 3). The Bresenham-style accumulator emits a deterministic sequence that sums to exactly
@@ -21,9 +22,9 @@ use crab_world::physics::PHYSICS_HZ;
 /// `PHYSICS_HZ` of credit, emits the whole steps that buys (`credit / TICK_HZ`), and carries
 /// the remainder — so over `TICK_HZ` ticks it emits exactly `PHYSICS_HZ` steps.
 ///
-/// `Copy` and its whole state is one `u64`: two peers starting from [`Default`] and stepping
-/// the same number of ticks always agree on the per-tick AND cumulative step counts, which is
-/// the property the GCR fold relies on.
+/// `Copy` and its whole state is one `u64`: any two runs starting from [`Default`] and
+/// stepping the same number of ticks agree on the per-tick AND cumulative step counts, which
+/// is the reproducibility the GCR fold relies on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PhysicsCadence {
     /// Physics-step credit not yet spent as a whole step, in `PHYSICS_HZ·tick` units. Always
@@ -32,9 +33,9 @@ pub struct PhysicsCadence {
 }
 
 impl PhysicsCadence {
-    /// Physics steps to run for the next lockstep tick. Call EXACTLY once per ADVANCED tick
+    /// Physics steps to run for the next sim tick. Call EXACTLY once per ADVANCED tick
     /// (never for a stalled/attempted tick), so the accumulator stays in phase with the sim
-    /// and so two peers that advanced the same ticks ran the same number of physics steps.
+    /// and the same tick sequence always maps to the same physics-step sequence.
     pub fn steps_for_next_tick(&mut self) -> u32 {
         self.acc += PHYSICS_HZ;
         let n = self.acc / TICK_HZ;

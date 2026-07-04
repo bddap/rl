@@ -57,9 +57,9 @@ pub struct CoreSnapshot {
     /// The round result the client reads to end the round.
     pub outcome: Outcome,
     /// The participant set the server owns (sorted, deduped) — the server ships the roster;
-    /// peers never agree it tick-for-tick. Not in
-    /// [`Sim::state_hash`](crate::sim::Sim::state_hash) (config-level, can't differ between
-    /// in-sync peers), so the round-trip test asserts it separately.
+    /// clients adopt it, never negotiate it. Not in
+    /// [`Sim::state_hash`](crate::sim::Sim::state_hash) (config-level, not evolving state),
+    /// so the round-trip test asserts it separately.
     pub roster: Vec<PlayerId>,
     /// Per player, the first [`TickMsg::issue_tick`](crate::lockstep::TickMsg::issue_tick) NOT
     /// yet consumed into this state — the input watermark a remote client prunes + replays its

@@ -34,7 +34,7 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = super::shared::DEFAULT_EXPECT)]
     expect: usize,
     /// Stream live telemetry to this collector endpoint id (networked play only; see
-    /// `NetArgs::telemetry`). Separate ALPN/connection — never perturbs the lockstep.
+    /// `NetArgs::telemetry`). Separate ALPN/connection — never perturbs the match.
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
 

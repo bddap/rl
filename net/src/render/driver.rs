@@ -282,8 +282,8 @@ pub(super) struct GameState {
     /// watermark would suppress tick telemetry until the counter climbed past it (rl#210).
     next_tel_tick: u64,
     /// The deterministic 64:30 physics/sim cadence, advanced once per APPLIED tick while
-    /// armed and reset on the restart edge (reported by `step_next`, rl#204) so two peers
-    /// stay phase-aligned.
+    /// armed and reset on the restart edge (reported by `step_next`, rl#204) so every round
+    /// pumps the same physics-step schedule from tick 0.
     cadence: PhysicsCadence,
     /// (Remote client only) Arrived-but-not-yet-adopted host snapshots — the jitter buffer.
     /// Arrivals beat against the local tick clock (0 or 2 per tick), and adopting a burst
@@ -703,8 +703,8 @@ fn read_vehicle_pose(world: &mut World) -> Option<CockpitPose> {
 /// We mirror Bevy's own `run_fixed_main_schedule`: swap the generic `Time` to `Time<Fixed>`
 /// for the step (so any system reading `Res<Time>` inside the fixed schedule sees the fixed
 /// clock), then restore `Time<Virtual>` for the rest of `Update`/render. The step COUNT comes
-/// from the integer [`PhysicsCadence`] (not wall clock), so every peer runs the identical
-/// number of steps per lockstep tick and the per-tick `phys_digest` matches bit-for-bit.
+/// from the integer [`PhysicsCadence`] (not wall clock), so the same tick sequence always
+/// pumps the same steps and the per-tick `phys_digest` is reproducible bit-for-bit.
 pub(crate) fn pump_fixed_steps(world: &mut World, steps: u32) {
     use bevy::app::FixedMain;
     use bevy::time::{Fixed, Time, Virtual};
@@ -736,14 +736,15 @@ pub(crate) fn park_fixed_auto_pump(world: &mut World) {
         .set_timestep(std::time::Duration::from_secs(86_400));
 }
 
-/// Re-seed the crab bridge to the round's rebuilt `spawn` and cold-respawn the rapier body — run at
-/// the exact RESTART edge (as reported by `Server::step_next`) in [`drive_lockstep`]'s
-/// server-authoritative drain, the one arm that pumps a crab body. Re-seeding the bridge so
+/// Re-seed the crab bridge to the round's rebuilt `spawn` and cold-respawn the rapier body — run
+/// at the RESTART edge (as reported by `Server::step_next`) in [`drive_lockstep`]'s
+/// server-authoritative drain, and from [`ensure_round_installed`] on a round after a disconnect
+/// return (rl#203, warm body persists across the menu). Re-seeding the bridge so
 /// the next pose push is the spawn pose (not the still-walking body's accumulated position) is half
-/// of it; the other half is the cold respawn — re-seeding alone leaves the rapier solver WARM, which
-/// would desync a mid-game joiner's cold body against an incumbent's warm one.
-/// Dropping + rebuilding the body makes every peer's solver state identically fresh off
-/// the same shared-input restart edge, covering the plain RESTART button too (one shared edge).
+/// of it; the other half is the cold respawn — re-seeding alone leaves the rapier solver WARM
+/// (carried contacts/warm-start impulses), so the new round's physics would be path-dependent on
+/// the round before it. Dropping + rebuilding the body makes every round start from the identical
+/// from-boot solver state — a respawn, not a teleport of the old body.
 /// `spawn` is read from whichever sim is authoritative for the round. Only meaningful while armed
 /// (else no bridge drives the crab).
 fn restart_crab_to_spawn(world: &mut World, spawn: crate::sim::Pos) {

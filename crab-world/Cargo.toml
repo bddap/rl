@@ -22,14 +22,15 @@ path = "src/lib.rs"
 # forwards to this one and additionally pulls `bevy_egui` for its boot menu.)
 render = ["bevy/default", "bevy_rapier3d/default", "enhanced-determinism"]
 
-# GCR avenue 1 (rl#82): rapier's bit-level cross-platform physics determinism, so the
-# networked NN crab evolves identically on every peer. OFF by default and pulled in by
-# `render` (the game/rl-demo binaries) — the headless trainer (rl-train, no `render`) stays
-# fast-float, since enhanced-determinism forces software transcendentals (`simba/libm_force`)
-# and blocks SIMD, a rollout-throughput cost training has no reason to pay: it is
-# single-process with no cross-peer hash, and the policy is robust to the tiny play-vs-train
-# numeric drift (OQ5). Standalone so the determinism regression can exercise the shipped
-# config headlessly without the GPU render stack. enhanced-determinism's one hard conflict
+# GCR avenue 1 (rl#82): rapier's bit-level cross-platform physics determinism, so armed-crab
+# physics is bit-reproducible across runs and platforms (the `nn-crab-probe` hash gate and
+# probe/telemetry hash comparisons; whether it still earns its cost under host-authority is
+# rl#130). OFF by default and pulled in by `render` (the game/rl-demo binaries) — the headless
+# trainer (rl-train, no `render`) stays fast-float, since enhanced-determinism forces software
+# transcendentals (`simba/libm_force`) and blocks SIMD, a rollout-throughput cost training has
+# no reason to pay: it is single-process with no hash gate, and the policy is robust to the
+# tiny play-vs-train numeric drift (OQ5). Standalone so a headless probe can exercise the
+# shipped config without the GPU render stack. enhanced-determinism's one hard conflict
 # (`parallel`) is already off (rl#9), as is simd, so enabling it costs no feature we use.
 enhanced-determinism = ["rapier3d/enhanced-determinism"]
 

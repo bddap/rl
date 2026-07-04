@@ -793,7 +793,7 @@ fn connect_and_form_inner(
 
     let all_ids: Vec<PlayerId> = frozen.id_map.values().copied().collect();
     println!(
-        "starting lockstep: {} player(s), I am {:?}",
+        "starting round: {} player(s), I am {:?}",
         all_ids.len(),
         frozen.me
     );

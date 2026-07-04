@@ -30,7 +30,7 @@ use crate::controls::just_pressed;
 
 use super::controls::{DemoAction, DemoControls};
 
-/// Samples kept per joint trace (~4 s at 60 Hz).
+/// Samples kept per joint trace — one per physics step, so 3.75 s at `PHYSICS_HZ` = 64.
 const CAPACITY: usize = 240;
 /// The overlay camera's render layer, isolated from the 3D scene (layer 0) so
 /// its gizmos draw only here.
