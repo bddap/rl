@@ -109,16 +109,14 @@ pub struct Beat {
     /// so host and joiners freeze the byte-identical set the GO names. Always `false`
     /// outside the host-triggered menu path.
     pub start: bool,
-    /// The sender's policy-weights digest, `0` for no checkpoint — see
-    /// [`Membership::sync_verdict`] for what it gates. Deliberately NOT folded into
-    /// [`Beat::roster_hash`]: it is a capability advertisement, not membership — a
-    /// mismatch refuses to arm the NN crab, never breaks match formation.
-    pub weights_digest: u64,
     /// The sender's crab-MODEL-asset digest, `0` for no resolvable model — the giant
-    /// crab's rapier colliders are derived from this asset
+    /// crabs' rapier colliders are derived from this asset
     /// ([`crab_world::mesh_fallback::constructed_body_digest`]), so two peers with different
-    /// crab models build different colliders and silently desync. Handled exactly like
-    /// its sibling `weights_digest` (a capability advertisement, not membership).
+    /// crab models build different colliders and render different Sallys. Deliberately NOT
+    /// folded into [`Beat::roster_hash`]: it is a capability advertisement, not membership —
+    /// a mismatch refuses to arm the NN crabs, never breaks match formation. (The old
+    /// sibling weights digest is GONE — rl#200 increment 6: clients run no inference, so a
+    /// weights advertisement guarded nothing.)
     pub asset_digest: u64,
 }
 
@@ -210,12 +208,9 @@ pub struct Membership {
     /// stale roster: a GO seen while our sets disagreed does not close us, and a set change
     /// after a GO re-gates on the new hash. The joiner's sole close trigger in the lobby.
     host_go_on_my_roster: bool,
-    /// OUR policy-weights digest, `0` (the default) for no checkpoint — set via
-    /// [`Membership::with_weights_digest`]. Advertised in every [`Membership::beat`] and
-    /// the basis of [`Membership::sync_verdict`].
-    local_digest: u64,
     /// OUR crab-model-asset digest, `0` (the default) for no resolvable model — set via
-    /// [`Membership::with_asset_digest`]. Sibling of `local_digest`.
+    /// [`Membership::with_asset_digest`]. Advertised in every [`Membership::beat`] and the
+    /// basis of [`Membership::sync_verdict`].
     local_asset_digest: u64,
 }
 
@@ -255,14 +250,9 @@ struct PeerView {
     /// hash *from the same beat* — a host that commanded start on roster R can't close a
     /// joiner that's on a different roster. A relay never sets this (only a direct beat).
     started: bool,
-    /// The policy-weights digest this peer last advertised in its OWN direct beat, or
-    /// `None` if heard only via relay. Read only when this peer is the HOST (the
-    /// [`Membership::sync_verdict`] self-gate); like `advertised`, `None` counts as
-    /// unverified, so a host not yet heard directly blocks the gate until it speaks for
-    /// itself.
-    weights_digest: Option<u64>,
     /// The crab-model-asset digest this peer last advertised in its OWN direct beat, or
-    /// `None` if heard only via relay. Sibling of `weights_digest`.
+    /// `None` if heard only via relay. Like `advertised`, `None` counts as unverified, so
+    /// a peer not yet heard directly blocks the asset gate until it speaks for itself.
     asset_digest: Option<u64>,
 }
 
@@ -313,22 +303,13 @@ impl Membership {
             started: now,
             lobby: LobbyMode::Off,
             host_go_on_my_roster: false,
-            local_digest: 0,
             local_asset_digest: 0,
         }
     }
 
-    /// Set OUR policy-weights digest. Builder form because the digest is a launch-time
-    /// constant — the loaded checkpoint can't change mid-formation. `0` (the default)
-    /// means "no usable checkpoint"; it never counts as synced.
-    pub fn with_weights_digest(mut self, digest: u64) -> Self {
-        self.local_digest = digest;
-        self
-    }
-
-    /// Set OUR crab-model-asset digest. Sibling of [`Membership::with_weights_digest`],
-    /// same builder form. `0` (the default) means "no usable asset"; it never counts as
-    /// synced.
+    /// Set OUR crab-model-asset digest. Builder form because the digest is a launch-time
+    /// constant — the installed crab model can't change mid-formation. `0` (the default)
+    /// means "no usable asset"; it never counts as synced.
     pub fn with_asset_digest(mut self, digest: u64) -> Self {
         self.local_asset_digest = digest;
         self
@@ -395,7 +376,6 @@ impl Membership {
                     last_direct: now,
                     advertised: None,
                     started: false,
-                    weights_digest: None,
                     asset_digest: None,
                 });
                 view.last_direct = now;
@@ -404,7 +384,6 @@ impl Membership {
                 // joiner close requires both the GO and a matching roster from one beat.
                 view.started = beat.start;
                 // The digests, like `advertised`/`started`, are set only by a direct beat.
-                view.weights_digest = Some(beat.weights_digest);
                 view.asset_digest = Some(beat.asset_digest);
             }
         }
@@ -423,7 +402,6 @@ impl Membership {
                         last_direct: now,
                         advertised: None,
                         started: false,
-                        weights_digest: None,
                         asset_digest: None,
                     },
                 );
@@ -451,7 +429,6 @@ impl Membership {
         Beat {
             members: self.live_set(),
             start: matches!(self.lobby, LobbyMode::Host { started: true }),
-            weights_digest: self.local_digest,
             asset_digest: self.local_asset_digest,
         }
     }
@@ -459,36 +436,22 @@ impl Membership {
     /// The shared-asset guard's verdict, the ONE value the formation carries to the arm
     /// sites ([`crate::SyncVerdict`]).
     ///
-    /// - `host_brain` — the HOST self-gate: true iff the peer that will run the
-    ///   authoritative server ([`host_of`] the live set) advertised a
-    ///   NON-ZERO policy-weights digest in its own direct beats. Only the host EXECUTES
-    ///   the brain (clients adopt its snapshots and render its articulation), so brain
-    ///   equality across peers gates nothing real; what must hold is "the host runs a
-    ///   real Sally, not a failed/absent-checkpoint rest pose". The mid-game analogue is
-    ///   [`crate::server::may_admit_joiner`]'s `HostNotArmed` self-gate.
-    /// - `assets` — peer-symmetric: true only when we have a real crab-model asset
-    ///   ourselves (non-zero digest) AND every live peer's last DIRECT beat carried that
-    ///   exact digest. Every peer builds its rendered crab from this asset, so a
-    ///   mismatch is a real client-side divergence even under host-auth.
+    /// `assets` is peer-symmetric: true only when we have a real crab-model asset
+    /// ourselves (non-zero digest) AND every live peer's last DIRECT beat carried that
+    /// exact digest. Every peer builds its rendered crabs from this asset, so a
+    /// mismatch is a real client-side divergence even under host-auth. A `None`
+    /// (relay-only, never heard directly) or zero digest fails.
     ///
-    /// In both halves a `None` (relay-only, never heard directly) or zero digest fails.
+    /// (There is no brain/weights half — rl#200 increment 6 deleted that stale all-peers
+    /// gate; see [`crate::SyncVerdict`] for why it guarded nothing under host-authority.)
+    ///
     /// This is an OUTPUT, never a close gate: a failed verdict still FORMS the match,
-    /// but the round can't arm the NN crab and — with no integer fallback — the windowed
+    /// but the round can't arm the NN crabs and — with no integer fallback — the windowed
     /// client REFUSES it loudly rather than playing a fake crab
     /// ([`crate::may_arm_external_crab`]). Call after [`Membership::poll`] (which
     /// expires the dead) so the live set is current.
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
-        let host = host_of(&self.live_set());
-        let host_weights = if host == self.me {
-            self.local_digest
-        } else {
-            self.peers
-                .get(&host)
-                .and_then(|v| v.weights_digest)
-                .unwrap_or(0)
-        };
         crate::SyncVerdict {
-            host_brain: host_weights != 0,
             assets: self.local_asset_digest != 0
                 && self
                     .peers
@@ -572,7 +535,7 @@ impl Membership {
 }
 
 /// Encode a [`Beat`] for the wire:
-/// `[start:u8][count:u16 LE][weights_digest:u64 LE][asset_digest:u64 LE][id:32]*count`,
+/// `[start:u8][count:u16 LE][asset_digest:u64 LE][id:32]*count`,
 /// the id list sorted+deduped. Fixed 32-byte ids (an [`EndpointId`] is a 32-byte public
 /// key) so there is no per-id length. The member count is bounded on decode
 /// ([`MAX_BEAT_MEMBERS`]) so a hostile/garbled frame can't trigger a huge allocation.
@@ -584,10 +547,9 @@ pub fn encode_beat(beat: &Beat) -> Vec<u8> {
         v
     };
     let members = canon(&beat.members);
-    let mut out = Vec::with_capacity(19 + 32 * members.len());
+    let mut out = Vec::with_capacity(11 + 32 * members.len());
     out.push(beat.start as u8);
     out.extend_from_slice(&(members.len() as u16).to_le_bytes());
-    out.extend_from_slice(&beat.weights_digest.to_le_bytes());
     out.extend_from_slice(&beat.asset_digest.to_le_bytes());
     for id in &members {
         out.extend_from_slice(id.as_bytes());
@@ -605,8 +567,8 @@ const MAX_BEAT_MEMBERS: usize = 256;
 /// over-allocating.
 pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     anyhow::ensure!(
-        body.len() >= 19,
-        "barrier frame too short for start+count+weights+asset digests"
+        body.len() >= 11,
+        "barrier frame too short for start+count+asset digest"
     );
     let start = body[0] != 0;
     let count = u16::from_le_bytes([body[1], body[2]]) as usize;
@@ -614,9 +576,8 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
         count <= MAX_BEAT_MEMBERS,
         "barrier frame claims {count} members (> {MAX_BEAT_MEMBERS})"
     );
-    let weights_digest = u64::from_le_bytes(body[3..11].try_into().expect("8-byte slice"));
-    let asset_digest = u64::from_le_bytes(body[11..19].try_into().expect("8-byte slice"));
-    let need = 19 + 32 * count;
+    let asset_digest = u64::from_le_bytes(body[3..11].try_into().expect("8-byte slice"));
+    let need = 11 + 32 * count;
     anyhow::ensure!(
         body.len() == need,
         "barrier frame length {} != expected {need} for {count} members",
@@ -624,7 +585,7 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     );
     let mut members = Vec::with_capacity(count);
     for i in 0..count {
-        let off = 19 + 32 * i;
+        let off = 11 + 32 * i;
         let bytes: [u8; 32] = body[off..off + 32].try_into().expect("32-byte slice");
         let id = EndpointId::from_bytes(&bytes)
             .map_err(|e| anyhow::anyhow!("bad endpoint id in barrier frame: {e}"))?;
@@ -633,7 +594,6 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     Ok(Beat {
         members,
         start,
-        weights_digest,
         asset_digest,
     })
 }
@@ -661,7 +621,6 @@ mod tests {
         Beat {
             members,
             start: false,
-            weights_digest: 0,
             asset_digest: 0,
         }
     }
@@ -694,18 +653,16 @@ mod tests {
             decode_beat(&[0]).is_err(),
             "too short for start+count+digests"
         );
-        // Valid header (start + count=5 + weights + asset digests) but no member bodies.
+        // Valid header (start + count=5 + asset digest) but no member bodies.
         let mut truncated = vec![0u8];
         truncated.extend_from_slice(&5u16.to_le_bytes());
-        truncated.extend_from_slice(&0u64.to_le_bytes()); // weights digest
         truncated.extend_from_slice(&0u64.to_le_bytes()); // asset digest
         assert!(decode_beat(&truncated).is_err(), "truncated body");
-        // count past the cap (start byte + bogus count + both digests + filler).
+        // count past the cap (start byte + bogus count + digest + filler).
         let mut huge = vec![0u8];
         huge.extend_from_slice(&(300u16).to_le_bytes());
-        huge.extend_from_slice(&0u64.to_le_bytes()); // weights digest
         huge.extend_from_slice(&0u64.to_le_bytes()); // asset digest
-        huge.resize(19 + 32 * 300, 0);
+        huge.resize(11 + 32 * 300, 0);
         assert!(decode_beat(&huge).is_err(), "over-large count rejected");
     }
 
@@ -720,7 +677,6 @@ mod tests {
         let go = Beat {
             members,
             start: true,
-            weights_digest: 0,
             asset_digest: 0,
         };
         assert_eq!(
@@ -741,145 +697,24 @@ mod tests {
         );
     }
 
-    // ── Weights-digest handshake (the shared-checkpoint guard) ───────────────────────
+    // ── Asset-digest handshake (the shared-collider-asset guard) ──────────────────────
+    // See `Beat::asset_digest`. (The weights-digest handshake it was once a sibling of is
+    // deleted — rl#200 increment 6.)
 
-    /// A heartbeat carrying a weights digest, for the synced-brain tests.
-    fn bt_d(members: Vec<EndpointId>, weights_digest: u64) -> Beat {
-        Beat {
-            members,
-            start: false,
-            weights_digest,
-            asset_digest: 0,
-        }
-    }
-
-    /// A heartbeat carrying a crab-asset digest, for the synced-asset tests. Sibling
-    /// of [`bt_d`]; weights digest left `0` so these isolate the asset-handshake path.
+    /// A heartbeat carrying a crab-asset digest, for the synced-asset tests.
     fn bt_ad(members: Vec<EndpointId>, asset_digest: u64) -> Beat {
         Beat {
             members,
             start: false,
-            weights_digest: 0,
             asset_digest,
         }
     }
 
     #[test]
-    fn weights_digest_roundtrips_on_the_wire() {
-        // The digest survives encode→decode and (like `start`) does NOT perturb the roster
-        // hash: two beats with the same members but different brains still agree on the set.
-        let members = vec![eid(1), eid(2)];
-        let a = bt_d(members.clone(), 0xDEAD_BEEF_F00D_1234);
-        let b = bt_d(members, 0x1111_2222_3333_4444);
-        assert_eq!(
-            a.roster_hash(),
-            b.roster_hash(),
-            "the weights digest must not be part of the roster hash"
-        );
-        assert_eq!(
-            decode_beat(&encode_beat(&a)).unwrap().weights_digest,
-            0xDEAD_BEEF_F00D_1234
-        );
-    }
-
-    #[test]
-    fn weights_gate_keys_on_the_hosts_digest_alone() {
-        // Host-auth: only the host executes the brain (clients adopt its snapshots), so the
-        // weights half of the verdict is the HOST self-gate — "the lowest live endpoint id
-        // advertised a real (non-zero) digest" — never peer-symmetric brain equality.
-        let t0 = Instant::now();
-        let mut ids = [eid(1), eid(2)];
-        ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-        let (host, client) = (ids[0], ids[1]);
-        const BRAIN: u64 = 0xABCD_0000_1234_5678;
-
-        // We ARE the host with a real brain: armable regardless of the client's digest — a
-        // client's drifted/absent brain gates nothing (it never runs).
-        let mut a = Membership::new(host, 2, t0).with_weights_digest(BRAIN);
-        a.on_beat(client, &bt_d(vec![host, client], BRAIN ^ 0xFF), t0);
-        a.poll(t0);
-        assert!(
-            a.sync_verdict().host_brain,
-            "the host self-gate passes on its own non-zero digest"
-        );
-
-        // We ARE the host with NO checkpoint (digest 0): refused — a zero-digest host would
-        // serve a rest-pose fake Sally to everyone.
-        let mut b = Membership::new(host, 2, t0);
-        b.on_beat(client, &bt_d(vec![host, client], BRAIN), t0);
-        b.poll(t0);
-        assert!(
-            !b.sync_verdict().host_brain,
-            "a zero-digest host must not arm, whatever the clients carry"
-        );
-
-        // We are a CLIENT and the host advertised a real brain: armable even with no local
-        // checkpoint — we render the host's Sally, we don't run her.
-        let mut c = Membership::new(client, 2, t0);
-        c.on_beat(host, &bt_d(vec![host, client], BRAIN), t0);
-        c.poll(t0);
-        assert!(
-            c.sync_verdict().host_brain,
-            "a client verifies the HOST's digest, not its own"
-        );
-
-        // We are a CLIENT and the host advertised digest 0: refused on our side too.
-        let mut d = Membership::new(client, 2, t0).with_weights_digest(BRAIN);
-        d.on_beat(host, &bt_d(vec![host, client], 0), t0);
-        d.poll(t0);
-        assert!(
-            !d.sync_verdict().host_brain,
-            "a zero-digest HOST is refused by its clients"
-        );
-    }
-
-    #[test]
-    fn relay_only_host_blocks_the_weights_gate() {
-        // The host's digest counts only from its OWN direct beat: a host known only via
-        // another peer's relay has `weights_digest: None` — an unverifiable brain, blocked
-        // exactly like the roster-agreement `advertised: None` rule. A relay-only NON-host
-        // peer does not block (its brain gates nothing under host-auth).
-        let t0 = Instant::now();
-        let mut ids = [eid(1), eid(2), eid(3)];
-        ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-        let (host, mid, top) = (ids[0], ids[1], ids[2]);
-        const BRAIN: u64 = 0x9999_8888_7777_6666;
-
-        // We are `top`; `mid` beats directly, relaying the host's existence (no host digest).
-        let mut a = Membership::new(top, 3, t0).with_weights_digest(BRAIN);
-        a.on_beat(mid, &bt_d(vec![host, mid, top], BRAIN), t0);
-        a.poll(t0);
-        assert!(
-            !a.sync_verdict().host_brain,
-            "a relay-only HOST (digest None) must block the gate"
-        );
-        // The host speaks for itself with a real brain → armable.
-        a.on_beat(host, &bt_d(vec![host, mid, top], BRAIN), t0);
-        a.poll(t0);
-        assert!(
-            a.sync_verdict().host_brain,
-            "once the host is heard directly with a real brain, armable"
-        );
-
-        // Mirror: we ARE the host — a relay-only (and even zero-digest) non-host peer does
-        // NOT block the weights gate.
-        let mut b = Membership::new(host, 3, t0).with_weights_digest(BRAIN);
-        b.on_beat(mid, &bt_d(vec![host, mid, top], 0), t0);
-        b.poll(t0);
-        assert!(
-            b.sync_verdict().host_brain,
-            "non-host digests (zero or relay-only) gate nothing"
-        );
-    }
-
-    // ── Asset-digest handshake (the shared-collider-asset guard) ──────────────────────
-    // A sibling of the weights handshake above; see `Beat::asset_digest`.
-
-    #[test]
     fn asset_digest_roundtrips_on_the_wire() {
-        // The digest survives encode→decode and (like `weights_digest`) does NOT perturb the
-        // roster hash, NOR collide with the weights digest field — a beat carrying an asset
-        // digest but no weights digest roundtrips both fields independently.
+        // The digest survives encode→decode and (like `start`) does NOT perturb the
+        // roster hash: two beats with the same members but different assets still agree on
+        // the set.
         let members = vec![eid(1), eid(2)];
         let a = bt_ad(members.clone(), 0xC0FF_EE00_1234_5678);
         let b = bt_ad(members, 0x9876_5432_10AB_CDEF);
@@ -890,26 +725,6 @@ mod tests {
         );
         let decoded = decode_beat(&encode_beat(&a)).unwrap();
         assert_eq!(decoded.asset_digest, 0xC0FF_EE00_1234_5678);
-        assert_eq!(
-            decoded.weights_digest, 0,
-            "asset digest must not bleed into weights"
-        );
-    }
-
-    #[test]
-    fn weights_and_asset_digests_are_independent_on_the_wire() {
-        // Both digests present and DISTINCT must roundtrip to their own values — proves the two
-        // sibling u64 fields don't alias (a layout bug in the wire format would swap them).
-        let members = vec![eid(1), eid(2)];
-        let beat = Beat {
-            members,
-            start: false,
-            weights_digest: 0x1111_2222_3333_4444,
-            asset_digest: 0x5555_6666_7777_8888,
-        };
-        let decoded = decode_beat(&encode_beat(&beat)).unwrap();
-        assert_eq!(decoded.weights_digest, 0x1111_2222_3333_4444);
-        assert_eq!(decoded.asset_digest, 0x5555_6666_7777_8888);
     }
 
     #[test]
@@ -956,34 +771,26 @@ mod tests {
     }
 
     #[test]
-    fn weights_and_assets_synced_are_independent_gates() {
-        // The two guards are orthogonal: a real host brain but mismatched crab assets must
-        // leave a verdict with `host_brain` true yet `assets` false (and the arm site ANDs them,
-        // so the round can't arm Sally and is refused). Proves a refactor can't collapse the
-        // two into one digest.
+    fn relay_only_peer_blocks_the_asset_gate() {
+        // A peer's digest counts only from its OWN direct beat: a peer known only via
+        // another peer's relay has `asset_digest: None` — an unverifiable model, blocked
+        // exactly like the roster-agreement `advertised: None` rule.
         let t0 = Instant::now();
-        let (ida, idb) = (eid(1), eid(2));
-        const BRAIN: u64 = 0xB0B0_0000_1234_5678;
-        const ASSET: u64 = 0xA55E_0000_8765_4321;
-        let mut a = Membership::new(ida, 2, t0)
-            .with_weights_digest(BRAIN)
-            .with_asset_digest(ASSET);
-        // Peer matches the brain but runs a DIFFERENT crab model.
-        let mismatched_asset = Beat {
-            members: vec![ida, idb],
-            start: false,
-            weights_digest: BRAIN,
-            asset_digest: ASSET ^ 0x1,
-        };
-        a.on_beat(idb, &mismatched_asset, t0);
+        let (me, direct, relayed) = (eid(1), eid(2), eid(3));
+        const ASSET: u64 = 0x9999_8888_7777_6666;
+        let mut a = Membership::new(me, 3, t0).with_asset_digest(ASSET);
+        a.on_beat(direct, &bt_ad(vec![me, direct, relayed], ASSET), t0);
         a.poll(t0);
         assert!(
-            a.sync_verdict().host_brain,
-            "a real host brain → weights gate passes"
-        );
-        assert!(
             !a.sync_verdict().assets,
-            "a different crab asset must leave assets NOT synced (independent of weights)"
+            "a relay-only peer (digest None) must block the asset gate"
+        );
+        // The relayed peer speaks for itself with the matching asset → synced.
+        a.on_beat(relayed, &bt_ad(vec![me, direct, relayed], ASSET), t0);
+        a.poll(t0);
+        assert!(
+            a.sync_verdict().assets,
+            "once every peer is heard directly with the same asset, synced"
         );
     }
 
@@ -1455,7 +1262,6 @@ mod tests {
         let host_go_on_partial = Beat {
             members: vec![idh],
             start: true,
-            weights_digest: 0,
             asset_digest: 0,
         };
         let mut t = 0u64;

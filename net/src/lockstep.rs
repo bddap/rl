@@ -236,11 +236,24 @@ impl Lockstep {
         }
     }
 
-    /// Drive the crab's ground position + yaw + physics digest from the real NN crab body — forwards
-    /// to [`Sim::set_external_crab_pose`], the ONLY way the crab moves. Used by the headless
-    /// screenshot/probe seed path and the round-setup crab-pose seed.
-    pub fn set_external_crab_pose(&mut self, pos: crate::sim::Pos, yaw: i32, phys_digest: u64) {
-        self.sim.set_external_crab_pose(pos, yaw, phys_digest);
+    /// Drive one crab's ground position + yaw + physics digest from its real NN crab body —
+    /// forwards to [`Sim::set_external_crab_pose`], the ONLY way a crab moves. Used by the
+    /// headless screenshot/probe seed path and the round-setup crab-pose seed.
+    pub fn set_external_crab_pose(
+        &mut self,
+        crab: usize,
+        pos: crate::sim::Pos,
+        yaw: i32,
+        phys_digest: u64,
+    ) {
+        self.sim.set_external_crab_pose(crab, pos, yaw, phys_digest);
+    }
+
+    /// Set the round's crab count from the host's brain-binding list (rl#200) — forwards to
+    /// [`Sim::configure_crabs`]. Round SETUP only, before the authoritative server clones this
+    /// sim; a client's count is a placeholder its first adopted snapshot replaces.
+    pub fn configure_crabs(&mut self, crabs: usize) {
+        self.sim.configure_crabs(crabs);
     }
 
     /// This client's id.
@@ -306,7 +319,7 @@ mod tests {
             }
             server.advance(host_sched.submit_local_input(Input::default()));
             while server.next_tick_ready() {
-                let bytes = server.step_next(None).snapshot;
+                let bytes = server.step_next(&[]).snapshot;
                 wire_down.push_back(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
             if wire_down.len() > LATENCY {
@@ -333,7 +346,7 @@ mod tests {
             }
             server.advance(host_sched.submit_local_input(Input::default()));
             while server.next_tick_ready() {
-                let bytes = server.step_next(None).snapshot;
+                let bytes = server.step_next(&[]).snapshot;
                 wire_down.push_back(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
             let mut adopted = false;
@@ -382,7 +395,7 @@ mod tests {
             let input = Input::new(0.0, if t < 5 { 1.0 } else { 0.0 }, 0.0, btns);
             host.advance(sched.submit_local_input(input));
             while host.next_tick_ready() {
-                let bytes = host.step_next(None).snapshot;
+                let bytes = host.step_next(&[]).snapshot;
                 arrivals.push(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
         }

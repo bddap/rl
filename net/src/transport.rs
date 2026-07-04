@@ -925,28 +925,32 @@ mod tests {
 
     #[test]
     fn articulation_wire_roundtrips() {
-        use crate::articulation::{CrabArticulation, PartTransform, ReposeWire, VehiclePoseWire};
+        use crate::articulation::{
+            CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire,
+        };
         // A render pose round-trips byte-for-byte through the frame codec, and a truncated body is a
         // loud error (never a half-decoded pose on the client).
         let art = CrabArticulation {
             tick: 909,
-            parts: vec![
-                PartTransform {
-                    part: 0,
-                    pos: [0.5, -1.0, 2.0],
-                    rot: [0.0, 0.0, 0.0, 1.0],
-                },
-                PartTransform {
-                    part: 12,
-                    pos: [3.0, 4.0, 5.0],
-                    rot: [0.5, 0.5, 0.5, 0.5],
-                },
-            ],
-            repose: Some(ReposeWire {
-                shift: [1.0, 0.0, -2.0],
-                pivot: [0.0, 0.5, 0.0],
-                scale: 9.0,
-            }),
+            crabs: vec![CrabFrame {
+                parts: vec![
+                    PartTransform {
+                        part: 0,
+                        pos: [0.5, -1.0, 2.0],
+                        rot: [0.0, 0.0, 0.0, 1.0],
+                    },
+                    PartTransform {
+                        part: 12,
+                        pos: [3.0, 4.0, 5.0],
+                        rot: [0.5, 0.5, 0.5, 0.5],
+                    },
+                ],
+                repose: Some(ReposeWire {
+                    shift: [1.0, 0.0, -2.0],
+                    pivot: [0.0, 0.5, 0.0],
+                    scale: 9.0,
+                }),
+            }],
             vehicle: Some(VehiclePoseWire {
                 pos: [2.0, 5.5, -1.0],
                 rot: [
@@ -968,7 +972,7 @@ mod tests {
         // A stepped sim's authoritative snapshot round-trips byte-for-byte through the frame codec,
         // and a truncated body is a loud error (never a half-decoded state on the client).
         let mut sim = Sim::new(3, &[PlayerId(0), PlayerId(1)]);
-        sim.set_external_crab_pose(Pos { x: 77, z: -88 }, 5, 0);
+        sim.set_external_crab_pose(0, Pos { x: 77, z: -88 }, 5, 0);
         let snap = sim.core_snapshot();
         let body = CoreSnapshot::encode(&snap);
         assert_eq!(CoreSnapshot::decode(&body).unwrap(), snap);

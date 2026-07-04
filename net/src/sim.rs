@@ -203,21 +203,23 @@ pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) {
     if sim.tick() < sim.round_start + STARTUP_GRACE_TICKS {
         return; // hold spawn through the grace, matching the grab gate's head-start
     }
-    let Some(target) = sim.nearest_living_player_pos() else {
-        return;
-    };
-    let mut pos = sim.crab().pos();
-    let dx = target.x - pos.x;
-    let dz = target.z - pos.z;
-    let yaw = trig::atan2_turns(dx, dz);
-    let dist = isqrt_i128(dist2_i128(dx, dz));
-    if dist <= CRAB_SPEED as i128 {
-        pos = target;
-    } else if dist > 0 {
-        pos.x += (dx as i128 * CRAB_SPEED as i128 / dist) as i64;
-        pos.z += (dz as i128 * CRAB_SPEED as i128 / dist) as i64;
+    for idx in 0..sim.crabs().len() {
+        let Some(target) = sim.nearest_living_player_pos(idx) else {
+            continue;
+        };
+        let mut pos = sim.crabs()[idx].pos();
+        let dx = target.x - pos.x;
+        let dz = target.z - pos.z;
+        let yaw = trig::atan2_turns(dx, dz);
+        let dist = isqrt_i128(dist2_i128(dx, dz));
+        if dist <= CRAB_SPEED as i128 {
+            pos = target;
+        } else if dist > 0 {
+            pos.x += (dx as i128 * CRAB_SPEED as i128 / dist) as i64;
+            pos.z += (dz as i128 * CRAB_SPEED as i128 / dist) as i64;
+        }
+        sim.set_external_crab_pose(idx, pos, yaw, 0);
     }
-    sim.set_external_crab_pose(pos, yaw, 0);
 }
 
 /// Render hint only: how many times bigger than a player to draw the crab. It is a
@@ -334,10 +336,12 @@ impl Player {
     }
 }
 
-/// The one giant crab: a ground-plane position with a facing yaw, driven from OUTSIDE the sim by
-/// the real rapier-NN body ([`Sim::set_external_crab_pose`], the only way it moves). Rendered
+/// One giant crab: a ground-plane position with a facing yaw, driven from OUTSIDE the sim by
+/// its real rapier-NN body ([`Sim::set_external_crab_pose`], the only way it moves). Rendered
 /// [`CRAB_SCALE`]× a player; the sim models only its position and a [`CRAB_GRAB_RADIUS`] reach
-/// (the limbs live in the NN body, not here).
+/// (the limbs live in the NN body, not here). A round holds one PER BRAIN BINDING
+/// ([`Sim::crabs`], rl#200 — multi-architecture rounds run several concurrently); each is
+/// identified by its index, which is also its crab-world env id on the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Crab {
     pos: Pos,
@@ -400,7 +404,10 @@ pub struct Sim {
     /// First-person players. `BTreeMap` (per the determinism contract) so iteration
     /// is in `PlayerId` order on every peer.
     players: BTreeMap<PlayerId, Player>,
-    crab: Crab,
+    /// The giant crabs, indexed by crab index == host crab-world env id (rl#200). Count is
+    /// round CONFIG ([`RoundConfig::crabs`], one per brain binding), fixed for the round;
+    /// on a client the adopted snapshot's set replaces this wholesale.
+    crabs: Vec<Crab>,
     extraction: ExtractionPoint,
     /// The round result. Derived from the player statuses each tick by
     /// [`Sim::settle_outcome`] AND stored, because [`Sim::step`] needs it to freeze the
@@ -426,7 +433,7 @@ pub struct Sim {
     /// identical on every peer that STEPS. (An adopting client mirror never steps and keeps
     /// its construction value, so a stepping-vs-mirror hash comparison — the `game net`
     /// `--hash-log` proof — is sound only while no restart fires; same scoping as
-    /// `restart_held` and `external_crab_digest`, likewise hashed but not snapshot-carried.)
+    /// `restart_held` and `external_crab_digests`, likewise hashed but not snapshot-carried.)
     round_start: u64,
     /// The immutable round CONFIG — the match seed and the player roster — kept so a
     /// deterministic restart ([`buttons::RESTART`]) can rebuild the initial state in
@@ -434,16 +441,17 @@ pub struct Sim {
     /// and a peer built with a different roster is already a different game the cross-check
     /// surfaces via the player state it does hash.
     config: RoundConfig,
-    /// The peer-comparable digest of the REAL rapier crab's full physics state for this tick
-    /// (every actuated body's pose + velocity bits — see [`crab_world::bot::physics_digest`]),
+    /// Per-crab peer-comparable digests of each REAL rapier crab's full physics state for this
+    /// tick (every actuated body's pose + velocity bits — see [`crab_world::bot::physics_digest`]),
     /// supplied each tick by the deterministic driver alongside the pose via
-    /// [`Sim::set_external_crab_pose`]. ALWAYS folded into [`Sim::state_hash`], so two peers whose
-    /// float bodies — or whose policy weights, folded into this digest by the bridge — diverge
-    /// desync on the tick it happens. Sound cross-peer only because the driver pumps a
-    /// deterministic, wall-clock-free number of physics steps per lockstep tick
-    /// ([`crate::cadence::PhysicsCadence`]), pushing ONE pose+digest per APPLIED tick. `0` until
-    /// a pose is first pushed (a never-driven crab folds a constant `0`, still deterministic).
-    external_crab_digest: u64,
+    /// [`Sim::set_external_crab_pose`]. Parallel to [`crabs`](Sim::crabs). ALWAYS folded into
+    /// [`Sim::state_hash`], so two peers whose float bodies — or whose policy weights, folded
+    /// into each digest by the bridge — diverge desync on the tick it happens. Sound cross-peer
+    /// only because the driver pumps a deterministic, wall-clock-free number of physics steps per
+    /// lockstep tick ([`crate::cadence::PhysicsCadence`]), pushing ONE pose+digest per APPLIED
+    /// tick. `0` until a pose is first pushed (a never-driven crab folds a constant `0`, still
+    /// deterministic).
+    external_crab_digests: Vec<u64>,
 }
 
 /// The arguments that built a [`Sim`], retained so [`Sim::step`] can rebuild the
@@ -454,6 +462,10 @@ struct RoundConfig {
     seed: u64,
     /// Foot players, in `PlayerId` order.
     players: Vec<PlayerId>,
+    /// How many giant crabs the round runs — one per brain binding (rl#200). Defaults to 1 at
+    /// construction; the HOST sets it from its binding list via [`Sim::configure_crabs`] before
+    /// the round serves (a client's value is a placeholder its first adopted snapshot replaces).
+    crabs: usize,
 }
 
 impl Sim {
@@ -469,34 +481,63 @@ impl Sim {
         let config = RoundConfig {
             seed,
             players: sorted,
+            crabs: 1,
         };
-        let (players, crab, extraction) = Self::spawn_state(&config);
+        let (players, crabs, extraction) = Self::spawn_state(&config);
+        let n_crabs = crabs.len();
         Self {
             tick: 0,
             players,
-            crab,
+            crabs,
             extraction,
             outcome: Outcome::Ongoing,
             rng: ChaCha8Rng::seed_from_u64(seed),
             restart_held: false,
             round_start: 0,
             config,
-            external_crab_digest: 0,
+            external_crab_digests: vec![0; n_crabs],
         }
     }
 
-    /// Drive the crab's ground position + facing yaw from outside the sim — the ONLY way the
+    /// Set the round's crab COUNT — one per brain binding (rl#200) — and respawn the crab set
+    /// accordingly. The HOST calls this once at round setup, from its validated binding list,
+    /// BEFORE the round serves (the authoritative server clones the sim after this); a restart
+    /// then rebuilds the same count from config. Refused after tick 0: the count is round
+    /// config, not live state — resizing a running round would strand bridge/env state.
+    pub fn configure_crabs(&mut self, crabs: usize) {
+        assert!(crabs >= 1, "a round runs at least one giant crab (rl#114)");
+        assert_eq!(
+            self.tick, 0,
+            "configure_crabs is round SETUP — the crab count is fixed once the round steps"
+        );
+        self.config.crabs = crabs;
+        let (players, crabs, extraction) = Self::spawn_state(&self.config);
+        self.players = players;
+        self.crabs = crabs;
+        self.extraction = extraction;
+        self.external_crab_digests = vec![0; self.config.crabs];
+    }
+
+    /// Drive one crab's ground position + facing yaw from outside the sim — the ONLY way a
     /// giant crab moves (rl#114: there is no built-in integer pursuit, so a round that can't arm
     /// the NN crab REFUSES loudly rather than substituting a fake crab). The real rapier-NN crab
-    /// body ([`crate::external_crab`]) calls this each tick BEFORE advancing, so the
-    /// grab/extraction checks resolve against the body's current position. `pos`/`yaw` are genuine
-    /// hashed state; `phys_digest` is the float body's per-tick digest (see
-    /// [`external_crab_digest`](Sim::external_crab_digest)). Seed it once at round setup with the
-    /// crab's spawn pose, then push the body's pose each tick.
-    pub fn set_external_crab_pose(&mut self, pos: Pos, yaw: i32, phys_digest: u64) {
-        self.crab.pos = pos;
-        self.crab.yaw = yaw;
-        self.external_crab_digest = phys_digest;
+    /// bodies ([`crate::external_crab`]) call this each tick BEFORE advancing, so the
+    /// grab/extraction checks resolve against each body's current position. `crab` is the crab
+    /// index (== host crab-world env id); an out-of-range index is a host/bridge count mismatch
+    /// and panics rather than dropping the pose. `pos`/`yaw` are genuine hashed state;
+    /// `phys_digest` is that float body's per-tick digest (see
+    /// [`external_crab_digests`](Sim::external_crab_digests)). Seed each once at round setup with
+    /// its spawn pose, then push the body's pose each tick.
+    pub fn set_external_crab_pose(&mut self, crab: usize, pos: Pos, yaw: i32, phys_digest: u64) {
+        assert!(
+            crab < self.crabs.len(),
+            "external crab pose for crab {crab}, but the round has {} — the bridge and the sim \
+             disagree on the binding count",
+            self.crabs.len()
+        );
+        self.crabs[crab].pos = pos;
+        self.crabs[crab].yaw = yaw;
+        self.external_crab_digests[crab] = phys_digest;
     }
 
     /// Rebuild the round's WORLD to its spawn state from the stored [`config`](Sim::config)
@@ -519,10 +560,10 @@ impl Sim {
     /// level-trigger bug `restart_is_edge_triggered_not_level` guards). [`Sim::step`] owns
     /// that latch; reset only touches the round/world fields.
     fn reset(&mut self) {
-        let (players, crab, extraction) = Self::spawn_state(&self.config);
+        let (players, crabs, extraction) = Self::spawn_state(&self.config);
         self.round_start = self.tick;
         self.players = players;
-        self.crab = crab;
+        self.crabs = crabs;
         self.extraction = extraction;
         self.outcome = Outcome::Ongoing;
         self.rng = ChaCha8Rng::seed_from_u64(self.config.seed);
@@ -589,10 +630,10 @@ impl Sim {
     }
 
     /// The tick-0 entity layout for a [`RoundConfig`] — the SINGLE source of the spawn
-    /// arrangement, shared by [`Sim::new`] and [`Sim::reset`] so the two can't drift. Pure
-    /// function of the (integer, sorted) config, so every peer composes the identical
-    /// starting world. Returns the foot players, the crab, and the extraction point.
-    fn spawn_state(cfg: &RoundConfig) -> (BTreeMap<PlayerId, Player>, Crab, ExtractionPoint) {
+    /// arrangement, shared by [`Sim::new`], [`Sim::configure_crabs`], and [`Sim::reset`] so they
+    /// can't drift. Pure function of the (integer, sorted) config, so every peer composes the
+    /// identical starting world. Returns the foot players, the crabs, and the extraction point.
+    fn spawn_state(cfg: &RoundConfig) -> (BTreeMap<PlayerId, Player>, Vec<Crab>, ExtractionPoint) {
         let mut map = BTreeMap::new();
         let n = cfg.players.len() as i64;
         for (i, &id) in cfg.players.iter().enumerate() {
@@ -612,20 +653,21 @@ impl Sim {
         let extraction = ExtractionPoint {
             pos: Pos { x: 0, z: 40 * UNIT },
         };
-        let crab = Self::spawn_crab(&map);
-        (map, crab, extraction)
+        let crabs = (0..cfg.crabs).map(|i| Self::spawn_crab(&map, i)).collect();
+        (map, crabs, extraction)
     }
 
-    /// The crab's spawn pose for a given set of foot players. It sits BETWEEN spawn and
+    /// Crab `idx`'s spawn pose for a given set of foot players. It sits BETWEEN spawn and
     /// the +Z extraction (around the midpoint, offset in X so it's an obstacle to dodge,
-    /// not a head-on instant grab). Then, as a guard against any roster/layout that
-    /// would drop a player right next to it, push it OUT along the spawn→nearest-player
-    /// line until at least [`MIN_CRAB_SPAWN_DISTANCE`] away — so no one ever starts inside
-    /// its reach. Pure integer math (the same deterministic isqrt the pursuit uses), so
-    /// every peer computes the identical spawn.
-    fn spawn_crab(players: &BTreeMap<PlayerId, Player>) -> Crab {
+    /// not a head-on instant grab); additional crabs (rl#200 multi-brain rounds) stagger
+    /// further out in +X so bindings don't spawn stacked. Then, as a guard against any
+    /// roster/layout that would drop a player right next to it, push it OUT along the
+    /// spawn→nearest-player line until at least [`MIN_CRAB_SPAWN_DISTANCE`] away — so no one
+    /// ever starts inside its reach. Pure integer math (the same deterministic isqrt the
+    /// pursuit uses), so every peer computes the identical spawn.
+    fn spawn_crab(players: &BTreeMap<PlayerId, Player>, idx: usize) -> Crab {
         let mut pos = Pos {
-            x: 6 * UNIT,
+            x: (6 + 8 * idx as i64) * UNIT,
             z: 20 * UNIT,
         };
         // Nearest foot player to the nominal spawn (PlayerId order via BTreeMap breaks
@@ -727,20 +769,21 @@ impl Sim {
         // tick) grants the fresh round its full head-start too.
         let armed = self.tick > self.round_start + STARTUP_GRACE_TICKS;
 
-        // 2) Crab MOVE: the crab pose is whatever the external NN body last pushed
+        // 2) Crab MOVE: each crab pose is whatever its external NN body last pushed
         //    ([`Sim::set_external_crab_pose`], the only mover); the grab/extraction below read
-        //    `self.crab.pos`.
+        //    the stored poses.
 
-        // 3) Grabs: any living player within the crab's reach is downed (disarmed during
-        //    the startup grace, so a player spawned near the crab isn't grabbed before
+        // 3) Grabs: any living player within ANY crab's reach is downed (disarmed during
+        //    the startup grace, so a player spawned near a crab isn't grabbed before
         //    they can move).
-        let crab = self.crab.pos;
         if armed {
-            for p in self.players.values_mut() {
-                if p.status == PlayerStatus::Alive
-                    && within(p.pos.x, p.pos.z, crab.x, crab.z, CRAB_GRAB_RADIUS)
-                {
-                    p.status = PlayerStatus::Downed;
+            for crab in &self.crabs {
+                for p in self.players.values_mut() {
+                    if p.status == PlayerStatus::Alive
+                        && within(p.pos.x, p.pos.z, crab.pos.x, crab.pos.z, CRAB_GRAB_RADIUS)
+                    {
+                        p.status = PlayerStatus::Downed;
+                    }
                 }
             }
         }
@@ -809,17 +852,17 @@ impl Sim {
         }
     }
 
-    /// Ground position of the living player nearest the crab, or `None` if every player
-    /// is downed/extracted. The NN-crab bridge reads this to aim the rapier crab at its
-    /// prey, keeping the crab hunting the same player the round's grab logic resolves against.
-    pub fn nearest_living_player_pos(&self) -> Option<Pos> {
-        self.nearest_living_player().map(|p| p.pos)
+    /// Ground position of the living player nearest crab `crab` (by index), or `None` if every
+    /// player is downed/extracted. The NN-crab bridge reads this to aim each rapier crab at its
+    /// own prey, keeping every crab hunting the same player the round's grab logic resolves
+    /// against.
+    pub fn nearest_living_player_pos(&self, crab: usize) -> Option<Pos> {
+        self.nearest_living_player(self.crabs[crab].pos).map(|p| p.pos)
     }
 
-    /// The living player nearest the crab (ties broken by `PlayerId` order via the
+    /// The living player nearest `c` (ties broken by `PlayerId` order via the
     /// `<` comparison, so the choice is deterministic), or `None` if none are alive.
-    fn nearest_living_player(&self) -> Option<Player> {
-        let c = self.crab.pos;
+    fn nearest_living_player(&self, c: Pos) -> Option<Player> {
         // Squared distance in i128 (positions are unbounded — see the crab step), so
         // the compare can't overflow on a long round.
         let mut best: Option<(i128, Player)> = None;
@@ -875,18 +918,18 @@ impl Sim {
     /// (a field bound here but never written).
     pub fn state_hash(&self) -> u64 {
         // config is deliberately not hashed (see its field doc); bound to `_` so the destructure
-        // stays exhaustive without folding it. external_crab_digest IS folded (below).
+        // stays exhaustive without folding it. external_crab_digests ARE folded (below).
         let Sim {
             tick,
             players,
-            crab,
+            crabs,
             extraction,
             outcome,
             rng,
             restart_held,
             round_start,
             config: _,
-            external_crab_digest,
+            external_crab_digests,
         } = self;
 
         let mut h = Fnv::new();
@@ -898,9 +941,14 @@ impl Sim {
             h.write(&yaw.to_le_bytes());
             h.write(&[status.tag()]);
         }
-        let Crab { pos, yaw } = crab;
-        write_pos(&mut h, *pos);
-        h.write(&yaw.to_le_bytes());
+        // Crab count first (an explicit length, so N crabs can't alias N+1 with a colliding
+        // layout), then each pose in index order — the index IS the identity, so no per-crab tag.
+        h.write(&(crabs.len() as u32).to_le_bytes());
+        for crab in crabs {
+            let Crab { pos, yaw } = crab;
+            write_pos(&mut h, *pos);
+            h.write(&yaw.to_le_bytes());
+        }
         let ExtractionPoint { pos } = extraction;
         write_pos(&mut h, *pos);
         h.write(&[outcome.tag()]);
@@ -914,10 +962,13 @@ impl Sim {
         // it manifests in an entity. Cloning and drawing one block reflects the
         // generator's position without disturbing the real stream.
         h.write(&rand::Rng::r#gen::<u64>(&mut rng.clone()).to_le_bytes());
-        // The float NN crab's per-tick physics+weights digest — always folded, so the
-        // articulated body (and the policy weights, via the bridge) is part of the desync check,
-        // not just the quantized 2D pose hashed above. A never-driven crab folds its seeded `0`.
-        h.write(&external_crab_digest.to_le_bytes());
+        // Each float NN crab's per-tick physics+weights digest — always folded, so the
+        // articulated bodies (and the policy weights, via the bridge) are part of the desync
+        // check, not just the quantized 2D poses hashed above. A never-driven crab folds its
+        // seeded `0`. No length prefix: the vec is parallel to `crabs`, whose length is folded.
+        for digest in external_crab_digests {
+            h.write(&digest.to_le_bytes());
+        }
         h.finish()
     }
 
@@ -948,9 +999,10 @@ impl Sim {
         self.players.get(&id).copied()
     }
 
-    /// The giant crab (for rendering the threat).
-    pub fn crab(&self) -> Crab {
-        self.crab
+    /// The giant crabs, in crab-index order (for rendering the threats and seeding the
+    /// per-crab NN bridges). Always at least one (rl#114).
+    pub fn crabs(&self) -> &[Crab] {
+        &self.crabs
     }
 
     /// The extraction point (for rendering the objective marker).
@@ -974,25 +1026,25 @@ impl Sim {
     /// exclusion. The `_`-bound fields are out of the host->client surface by design:
     /// `extraction` is a fixed gray-box constant both sides derive from `config`; `rng`,
     /// `restart_held`, and `round_start` are peer-invariant round bookkeeping the server
-    /// alone steps on; and `external_crab_digest` is not carried (the client renders the
-    /// crab POSE carried in `crab`, never the solver).
+    /// alone steps on; and `external_crab_digests` are not carried (the client renders the
+    /// crab POSES carried in `crabs`, never the solvers).
     pub fn core_snapshot(&self) -> CoreSnapshot {
         let Sim {
             tick,
             players,
-            crab,
+            crabs,
             extraction: _,
             outcome,
             rng: _,
             restart_held: _,
             round_start: _,
             config,
-            external_crab_digest: _,
+            external_crab_digests: _,
         } = self;
         CoreSnapshot {
             tick: *tick,
             players: players.clone(),
-            crab: *crab,
+            crabs: crabs.clone(),
             outcome: *outcome,
             roster: config.players.clone(),
             // Input watermarks are SERVER coordination metadata, not sim state — the sim holds
@@ -1013,7 +1065,7 @@ impl Sim {
         let CoreSnapshot {
             tick,
             players,
-            crab,
+            crabs,
             outcome,
             roster,
             // Coordination metadata, not sim state — the client's `Lockstep` stashes it
@@ -1022,7 +1074,12 @@ impl Sim {
         } = snapshot;
         self.tick = tick;
         self.players = players;
-        self.crab = crab;
+        // The host's crab set is authoritative — a client's construction-time count is a
+        // placeholder. Keep the (host-only, un-carried) digest vec parallel so a later local
+        // hash can't index past it.
+        self.external_crab_digests.resize(crabs.len(), 0);
+        self.config.crabs = crabs.len();
+        self.crabs = crabs;
         self.outcome = outcome;
         self.config.players = roster;
     }
@@ -1338,12 +1395,12 @@ mod tests {
             drive_crab_toward_prey(&mut sim);
             sim.step(&neutral);
         }
-        let crab_armed = sim.crab().pos();
+        let crab_armed = sim.crabs()[0].pos();
         let prey = sim.player(PlayerId(0)).unwrap().pos();
         let d_start = dist2(crab_armed, prey);
         drive_crab_toward_prey(&mut sim);
         sim.step(&neutral);
-        let d_next = dist2(sim.crab().pos(), sim.player(PlayerId(0)).unwrap().pos());
+        let d_next = dist2(sim.crabs()[0].pos(), sim.player(PlayerId(0)).unwrap().pos());
         assert!(d_next < d_start, "crab must close distance once driven");
         // Run until the round resolves (bounded).
         for _ in 0..2000 {
@@ -1376,13 +1433,13 @@ mod tests {
 
         let mut sim = Sim::new(0, &players(1));
         let digest = 0xFEED_FACE_DEAD_BEEF;
-        sim.set_external_crab_pose(pos, yaw, digest);
-        assert_eq!(sim.crab().pos(), pos, "must seed the pose");
-        assert_eq!(sim.crab().yaw(), yaw, "must seed the yaw");
+        sim.set_external_crab_pose(0, pos, yaw, digest);
+        assert_eq!(sim.crabs()[0].pos(), pos, "must seed the pose");
+        assert_eq!(sim.crabs()[0].yaw(), yaw, "must seed the yaw");
         // A different digest must move the hash — the desync teeth for the float body / weights
         // mismatch. (The digest is always folded now, no arm flag to gate it.)
         let h_seed = sim.state_hash();
-        sim.set_external_crab_pose(pos, yaw, digest ^ 1);
+        sim.set_external_crab_pose(0, pos, yaw, digest ^ 1);
         assert_ne!(
             h_seed,
             sim.state_hash(),
@@ -1472,7 +1529,7 @@ mod tests {
         let snapshot = |s: &Sim| {
             (
                 s.players().collect::<Vec<_>>(),
-                s.crab(),
+                s.crabs().to_vec(),
                 s.extraction(),
                 s.outcome(),
             )
@@ -1658,17 +1715,17 @@ mod tests {
         // The crab POSE (driven externally by the NN body) is hashed so the quantized
         // 2D pose stays desync-safe.
         assert_ne!(
-            hash_after(&|s| s.crab.pos.x += 1),
+            hash_after(&|s| s.crabs[0].pos.x += 1),
             h0,
             "crab pos.x must be hashed"
         );
         assert_ne!(
-            hash_after(&|s| s.crab.pos.z += 1),
+            hash_after(&|s| s.crabs[0].pos.z += 1),
             h0,
             "crab pos.z must be hashed"
         );
         assert_ne!(
-            hash_after(&|s| s.crab.yaw += 1),
+            hash_after(&|s| s.crabs[0].yaw += 1),
             h0,
             "crab yaw must be hashed"
         );
@@ -1716,13 +1773,13 @@ mod tests {
             h0,
             "config is deliberately not hashed (see Sim::config)"
         );
-        // `external_crab_digest` is ALWAYS folded into the hash (the crab is always externally
+        // `external_crab_digests` are ALWAYS folded into the hash (the crab is always externally
         // driven — no integer-crab gate to fold it out), so perturbing it MUST move the hash:
         // the desync teeth for the float body / weights mismatch.
         assert_ne!(
-            hash_after(&|s| s.external_crab_digest ^= 0xdead_beef),
+            hash_after(&|s| s.external_crab_digests[0] ^= 0xdead_beef),
             h0,
-            "external_crab_digest must be hashed (always folded since rl#114)"
+            "external_crab_digests must be hashed (always folded since rl#114)"
         );
     }
 
@@ -1737,11 +1794,11 @@ mod tests {
         //
         // Build a non-trivial source state: step with real movement so tick + player poses
         // carry real values, push a crab pose (digest 0 — the never-warmed value, so the
-        // un-carried `external_crab_digest` stays equal across source and target without
+        // un-carried `external_crab_digests` stay equal across source and target without
         // diverging the hash), and down a player so a non-`Alive` status rides along.
         let mut original = Sim::new(7, &players(3));
         for _ in 0..5 {
-            original.set_external_crab_pose(Pos { x: 4200, z: -1300 }, 77, 0);
+            original.set_external_crab_pose(0, Pos { x: 4200, z: -1300 }, 77, 0);
             let mut inputs = neutral_for(&original);
             *inputs.get_mut(&PlayerId(0)).unwrap() = Input::from_axes(0.3, 1.0);
             original.step(&inputs);
@@ -1760,8 +1817,8 @@ mod tests {
         target.players.get_mut(&PlayerId(0)).unwrap().pos.x += 12_345;
         target.players.get_mut(&PlayerId(2)).unwrap().yaw += 3;
         target.players.get_mut(&PlayerId(1)).unwrap().status = PlayerStatus::Extracted;
-        target.crab.pos = Pos { x: -1, z: -2 };
-        target.crab.yaw = 9;
+        target.crabs[0].pos = Pos { x: -1, z: -2 };
+        target.crabs[0].yaw = 9;
         target.outcome = Outcome::Wiped;
         target.config.players = vec![PlayerId(0)]; // roster differs (unhashed, asserted below)
         assert_ne!(target.state_hash(), original.state_hash());
@@ -1791,13 +1848,13 @@ mod tests {
         // grace could be suppressing, then step through the grace and assert: crab
         // stationary, player still Alive, round still Ongoing.
         let mut sim = Sim::new(0, &players(1));
-        let crab0 = sim.crab().pos();
+        let crab0 = sim.crabs()[0].pos();
         // Place the player exactly on the crab (the harshest case the grace must cover).
         sim.players.get_mut(&PlayerId(0)).unwrap().pos = crab0;
         let neutral = neutral_for(&sim);
         for _ in 0..STARTUP_GRACE_TICKS {
             sim.step(&neutral);
-            assert_eq!(sim.crab().pos(), crab0, "crab holds its spawn during grace");
+            assert_eq!(sim.crabs()[0].pos(), crab0, "crab holds its spawn during grace");
             assert_eq!(
                 sim.player(PlayerId(0)).unwrap().status(),
                 PlayerStatus::Alive,
@@ -1822,7 +1879,7 @@ mod tests {
         // grace gone no one is in grab range at tick 0.)
         for n in 1..=8u8 {
             let sim = Sim::new(0, &players(n));
-            let crab = sim.crab().pos();
+            let crab = sim.crabs()[0].pos();
             let nearest = sim
                 .players()
                 .map(|(_, p)| dist2_i128(crab.x - p.pos().x, crab.z - p.pos().z))
@@ -1860,7 +1917,7 @@ mod tests {
         let world = |s: &Sim| {
             (
                 s.players().collect::<Vec<_>>(),
-                s.crab(),
+                s.crabs().to_vec(),
                 s.extraction(),
                 s.outcome(),
             )
@@ -1976,7 +2033,7 @@ mod tests {
         restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
         assert!(sim.step(&restart), "the restart fires");
         // Harshest case: the player stands exactly on the restarted crab's spawn.
-        let crab0 = sim.crab().pos();
+        let crab0 = sim.crabs()[0].pos();
         sim.players.get_mut(&PlayerId(0)).unwrap().pos = crab0;
         for i in 0..STARTUP_GRACE_TICKS {
             sim.step(&neutral);
@@ -1992,6 +2049,79 @@ mod tests {
             PlayerStatus::Downed,
             "the crab arms once the post-restart grace ends"
         );
+    }
+
+    #[test]
+    fn multi_crab_round_spawns_hashes_and_grabs_per_crab() {
+        // rl#200 increment 6: a round configured with N brain bindings runs N crabs. Pins the
+        // per-crab surface end to end: distinct clear spawns, count + per-crab digest folded
+        // into the hash, a grab landed by the SECOND crab, restart rebuilding the same count,
+        // and a 1-crab client resizing on snapshot adopt.
+        let mut sim = Sim::new(0, &players(2));
+        sim.configure_crabs(2);
+        assert_eq!(sim.crabs().len(), 2);
+        assert_ne!(
+            sim.crabs()[0].pos(),
+            sim.crabs()[1].pos(),
+            "crabs spawn staggered, not stacked"
+        );
+        for (i, crab) in sim.crabs().iter().enumerate() {
+            let nearest = sim
+                .players()
+                .map(|(_, p)| dist2(crab.pos(), p.pos()))
+                .min()
+                .unwrap();
+            let min = MIN_CRAB_SPAWN_DISTANCE as i128;
+            assert!(nearest >= min * min, "crab {i} spawns clear of every player");
+        }
+
+        // Count is hash-visible (N can't alias N+1), and so is EACH crab's digest.
+        assert_ne!(sim.state_hash(), Sim::new(0, &players(2)).state_hash());
+        let h0 = sim.state_hash();
+        let c1 = sim.crabs()[1];
+        sim.set_external_crab_pose(1, c1.pos(), c1.yaw(), 0xBEEF);
+        assert_ne!(sim.state_hash(), h0, "crab 1's digest folds into the hash");
+
+        // The SECOND crab grabs: park it on a player once armed.
+        let neutral = neutral_for(&sim);
+        for _ in 0..=STARTUP_GRACE_TICKS {
+            sim.step(&neutral);
+        }
+        let prey = sim.player(PlayerId(1)).unwrap().pos();
+        sim.set_external_crab_pose(1, prey, 0, 0);
+        sim.step(&neutral);
+        assert_eq!(
+            sim.player(PlayerId(1)).unwrap().status(),
+            PlayerStatus::Downed,
+            "the second crab's reach downs a player"
+        );
+
+        // Snapshot carries both crabs; a 1-crab client resizes on adopt.
+        let snap = sim.core_snapshot();
+        assert_eq!(snap.crabs.len(), 2);
+        let restored = CoreSnapshot::from_bytes(&snap.to_bytes()).unwrap();
+        let mut client = Sim::new(0, &players(2));
+        client.apply_core_snapshot(restored);
+        assert_eq!(
+            client.crabs().len(),
+            2,
+            "an adopting client takes the host's crab count"
+        );
+
+        // A restart rebuilds the configured pair (count is round config).
+        let mut restart = neutral_for(&sim);
+        restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
+        assert!(sim.step(&restart));
+        assert_eq!(sim.crabs().len(), 2, "restart rebuilds the configured count");
+    }
+
+    #[test]
+    #[should_panic(expected = "disagree on the binding count")]
+    fn pose_for_an_unconfigured_crab_panics() {
+        // A pose push for a crab the round doesn't have is a bridge/sim count mismatch —
+        // fail loud, never drop the pose ([[silent-fallback-antipattern]]).
+        let mut sim = Sim::new(0, &players(1));
+        sim.set_external_crab_pose(1, Pos::default(), 0, 0);
     }
 
     fn dist2(a: Pos, b: Pos) -> i128 {

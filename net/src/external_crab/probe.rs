@@ -65,7 +65,7 @@ fn probe_step(
     // Push the crab body into the sim + refresh the hunted player — the SAME handshake the
     // windowed driver runs (one shared definition, no drift).
     sync_external_crab(&mut driver.sim, &mut bridge);
-    let prey = driver.sim.nearest_living_player_pos();
+    let prey = driver.sim.nearest_living_player_pos(0);
 
     // Local player holds still (neutral input) so the test isolates the CRAB's motion: the crab
     // should close the gap on a stationary player. Single peer, so a complete neutral map advances
@@ -79,7 +79,7 @@ fn probe_step(
     // Log periodically (and always at tick 1 so the start point is recorded).
     let tick = driver.sim.tick();
     if tick == 1 || tick.is_multiple_of(driver.log_every) {
-        let crab = driver.sim.crab().pos();
+        let crab = driver.sim.crabs()[0].pos();
         let (crab_x_m, crab_z_m) = crab.to_meters();
         let dist_to_prey_m = prey
             .map(|p| {
@@ -159,8 +159,8 @@ fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> be
         arena: crab_world::physics::Arena::OpenField,
     });
     app.add_plugins(ExternalCrabPlugin {
-        checkpoint_dir: checkpoint_dir.to_path_buf(),
-        crab_spawn,
+        checkpoint_dirs: vec![checkpoint_dir.to_path_buf()],
+        crab_spawns: vec![crab_spawn],
     });
     // The probe always arms the crab — insert the gate so the policy/integration systems run.
     // The crab already spawned via `headless_stack`'s `num_envs: 1`, so the plugin's own gated
@@ -190,13 +190,13 @@ pub fn run_headless_probe(
 ) -> Vec<ProbeSample> {
     let me = PlayerId(0);
     let mut sim = Sim::new(seed, &[me]);
-    let crab_spawn = sim.crab().pos();
+    let crab_spawn = sim.crabs()[0].pos();
     // The crab is externally driven for the whole probe (we own its position). Seed the pose with
     // the crab's CURRENT spawn pose/yaw — writing back what's already there, so this is a no-op on
     // sim state. Seed with a zero digest; the first post-step `hash_crab_physics` fills it before
     // the first `sync_external_crab` push, so the seeded value is never the one used.
-    let crab = sim.crab();
-    sim.set_external_crab_pose(crab.pos(), crab.yaw(), 0);
+    let crab = sim.crabs()[0];
+    sim.set_external_crab_pose(0, crab.pos(), crab.yaw(), 0);
 
     let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
     app.insert_non_send_resource(ProbeDriver {
@@ -268,9 +268,9 @@ pub fn run_vehicle_stability_probe(
 
     let me = PlayerId(0);
     let mut sim = Sim::new(seed, &[me]);
-    let crab_spawn = sim.crab().pos();
-    let crab = sim.crab();
-    sim.set_external_crab_pose(crab.pos(), crab.yaw(), 0);
+    let crab_spawn = sim.crabs()[0].pos();
+    let crab = sim.crabs()[0];
+    sim.set_external_crab_pose(0, crab.pos(), crab.yaw(), 0);
 
     let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
     app.insert_non_send_resource(ProbeDriver {

@@ -115,22 +115,38 @@ pub(super) fn ensure_round_installed(world: &mut World) {
         world.get_resource::<ExternalCrabStackInstalled>().is_some(),
         "the NN-crab stack must be installed before Playing (rl#114: the checkpoint is required)"
     );
-    let crab = ready.lockstep.sim().crab();
-    // Seed the pose with the crab's current pose/yaw (writing back what's there → no state change).
-    ready
+    // Size the round's crab set to this peer's brain-binding count (rl#200) — the bridge is
+    // built one-per-binding, so it IS the count. On the host this is the authoritative crab
+    // set the server below serves; on a remote client it's a placeholder the first adopted
+    // snapshot replaces. Gated on the bridge — the stack's real presence signal — because a
+    // headless test harness exercises this install with the marker but no crab plugins.
+    if let Some(bridge) = world.get_resource::<crate::external_crab::ExternalCrabBridge>() {
+        ready.lockstep.configure_crabs(bridge.crab_count());
+    }
+    // Seed each pose with the crab's current pose/yaw (writing back what's there → no state
+    // change).
+    let spawns: Vec<crate::sim::Pos> = ready
         .lockstep
-        .set_external_crab_pose(crab.pos(), crab.yaw(), 0);
-    // Arm the gate (the crab now walks at the player's actual position — nothing per-peer to
+        .sim()
+        .crabs()
+        .iter()
+        .map(|c| c.pos())
+        .collect();
+    for (idx, crab) in ready.lockstep.sim().crabs().to_vec().into_iter().enumerate() {
+        ready
+            .lockstep
+            .set_external_crab_pose(idx, crab.pos(), crab.yaw(), 0);
+    }
+    // Arm the gate (each crab now walks at a player's actual position — nothing per-peer to
     // reconcile). One arm path, [`crate::external_crab::arm`].
     crate::external_crab::arm(world);
-    // A round AFTER a disconnect return (rl#203): the previous round's crab body persists
-    // across the menu (the stack installs once at build), still WARM and wherever it walked to.
-    // Rebuild it COLD at this round's spawn, exactly as the restart edge does; a first round
-    // has no body yet and the cold respawn no-ops (the guarded initial spawn places it).
-    // Gated on the bridge — the stack's real presence signal — because a headless test
-    // harness exercises this install with the marker but no crab plugins.
+    // A round AFTER a disconnect return (rl#203): the previous round's crab bodies persist
+    // across the menu (the stack installs once at build), still WARM and wherever they walked
+    // to. Rebuild them COLD at this round's spawns, exactly as the restart edge does; a first
+    // round has no bodies yet and the cold respawn no-ops (the guarded initial spawn places
+    // them). Same bridge gate as above.
     if world.contains_resource::<crate::external_crab::ExternalCrabBridge>() {
-        restart_crab_to_spawn(world, crab.pos());
+        restart_crab_to_spawn(world, &spawns);
     }
     // Clone the freshly-seeded sim for the authoritative server (solo/host); the client keeps its
     // own identical sim inside `ready.lockstep` and renders the snapshots the server emits into it.
@@ -336,7 +352,7 @@ impl GameState {
 #[derive(Clone, Default)]
 pub(super) struct SimSnapshot {
     pub(super) players: BTreeMap<PlayerId, Player>,
-    pub(super) crab: Option<Crab>,
+    pub(super) crabs: Vec<Crab>,
 }
 
 impl SimSnapshot {
@@ -349,7 +365,7 @@ impl SimSnapshot {
         let snap = ls.core_snapshot();
         Self {
             players: snap.players,
-            crab: Some(snap.crab),
+            crabs: snap.crabs,
         }
     }
 }
@@ -736,21 +752,21 @@ pub(crate) fn park_fixed_auto_pump(world: &mut World) {
         .set_timestep(std::time::Duration::from_secs(86_400));
 }
 
-/// Re-seed the crab bridge to the round's rebuilt `spawn` and cold-respawn the rapier body — run
-/// at the RESTART edge (as reported by `Server::step_next`) in [`drive_lockstep`]'s
+/// Re-seed the crab bridges to the round's rebuilt `spawns` and cold-respawn the rapier bodies —
+/// run at the RESTART edge (as reported by `Server::step_next`) in [`drive_lockstep`]'s
 /// server-authoritative drain, and from [`ensure_round_installed`] on a round after a disconnect
-/// return (rl#203, warm body persists across the menu). Re-seeding the bridge so
-/// the next pose push is the spawn pose (not the still-walking body's accumulated position) is half
-/// of it; the other half is the cold respawn — re-seeding alone leaves the rapier solver WARM
-/// (carried contacts/warm-start impulses), so the new round's physics would be path-dependent on
-/// the round before it. Dropping + rebuilding the body makes every round start from the identical
-/// from-boot solver state — a respawn, not a teleport of the old body.
-/// `spawn` is read from whichever sim is authoritative for the round. Only meaningful while armed
-/// (else no bridge drives the crab).
-fn restart_crab_to_spawn(world: &mut World, spawn: crate::sim::Pos) {
+/// return (rl#203, warm bodies persist across the menu). Re-seeding the bridges so
+/// the next pose pushes are the spawn poses (not the still-walking bodies' accumulated positions)
+/// is half of it; the other half is the cold respawn — re-seeding alone leaves the rapier solver
+/// WARM (carried contacts/warm-start impulses), so the new round's physics would be
+/// path-dependent on the round before it. Dropping + rebuilding the bodies makes every round
+/// start from the identical from-boot solver state — a respawn, not a teleport of the old bodies.
+/// `spawns` is read from whichever sim is authoritative for the round (its full crab set, in
+/// index order). Only meaningful while armed (else no bridge drives the crabs).
+fn restart_crab_to_spawn(world: &mut World, spawns: &[crate::sim::Pos]) {
     world
         .resource_mut::<crate::external_crab::ExternalCrabBridge>()
-        .restart_to_spawn(spawn);
+        .restart_to_spawns(spawns);
     crate::external_crab::cold_respawn_armed_crab(world);
 }
 
@@ -1072,28 +1088,26 @@ pub(super) fn drive_lockstep(world: &mut World) {
             }
 
             {
-                // Pump this tick's crab physics, read the resulting pose, and aim the crab at the
-                // AUTHORITATIVE server sim's nearest living player (pre-step).
-                let crab_pose = if armed {
+                // Pump this tick's crab physics, read the resulting poses, and aim each crab at
+                // the AUTHORITATIVE server sim's nearest living player (pre-step).
+                let crab_poses = if armed {
                     let steps = world
                         .non_send_resource_mut::<GameState>()
                         .cadence
                         .steps_for_next_tick();
                     pump_fixed_steps(world, steps);
                     // `resource_scope` lifts the bridge out so we can read it AND `GameState` at once.
-                    let pose = world.resource_scope(
+                    let poses = world.resource_scope(
                         |world, mut bridge: Mut<crate::external_crab::ExternalCrabBridge>| {
-                            let pose = crate::server::CrabPose {
-                                pos: bridge.world_pos(),
-                                yaw: bridge.yaw_turns(),
-                                digest: bridge.phys_digest(),
-                            };
+                            let poses = bridge.crab_poses();
                             let state = world.non_send_resource::<GameState>();
-                            let hunt = state
-                                .server()
-                                .and_then(|s| s.sim().nearest_living_player_pos());
-                            bridge.set_hunt_target(hunt);
-                            pose
+                            for idx in 0..bridge.crab_count() {
+                                let hunt = state
+                                    .server()
+                                    .and_then(|s| s.sim().nearest_living_player_pos(idx));
+                                bridge.set_hunt_target(idx, hunt);
+                            }
+                            poses
                         },
                     );
                     // Mirror the vehicle body's freshly-stepped pose for the cockpit camera;
@@ -1101,9 +1115,9 @@ pub(super) fn drive_lockstep(world: &mut World) {
                     if let Some(p) = read_vehicle_pose(world) {
                         world.resource_mut::<LocalVehicle>().update_pose(p);
                     }
-                    Some(pose)
+                    poses
                 } else {
-                    None
+                    Vec::new()
                 };
                 // Step the authoritative sim; a RESTART edge (reported by the step itself — the
                 // tick stays monotone across a restart, rl#204) resets the cadence at that exact
@@ -1114,7 +1128,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
                     let stepped = state
                         .server_mut()
                         .expect("server_auth ⇒ a server")
-                        .step_next(crab_pose);
+                        .step_next(&crab_poses);
                     if stepped.restarted {
                         state.cadence = PhysicsCadence::default();
                     }
@@ -1145,14 +1159,16 @@ pub(super) fn drive_lockstep(world: &mut World) {
                     state.ls.apply_core_snapshot(snap);
                 }
                 if restarted && armed {
-                    let spawn = world
+                    let spawns: Vec<crate::sim::Pos> = world
                         .non_send_resource::<GameState>()
                         .server()
                         .expect("server_auth ⇒ a server")
                         .sim()
-                        .crab()
-                        .pos();
-                    restart_crab_to_spawn(world, spawn);
+                        .crabs()
+                        .iter()
+                        .map(|c| c.pos())
+                        .collect();
+                    restart_crab_to_spawn(world, &spawns);
                 }
                 // No peer cross-check on the authoritative path — the host IS the source of truth.
             }

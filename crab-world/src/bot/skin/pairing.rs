@@ -68,10 +68,11 @@ struct BoneDrive {
     offset: Mat4,
 }
 
-/// Render-only blow-up applied to the crab's skin so the ~1 m physics rig draws as the GCR
-/// game-world giant: scale the rig up about its ground point and translate it from its small
-/// arena frame to the game-world crab spot. `None` (the default) is identity — the demo and the
-/// trainer render the crab at its true physics scale.
+/// Render-only blow-up applied to each crab's skin so the ~1 m physics rigs draw as the GCR
+/// game-world giants: scale a rig up about its ground point and translate it from its small
+/// arena frame to that crab's game-world spot. Keyed by crab-world env id — one entry per
+/// armed crab (rl#200 multi-brain rounds run several); an env with no entry (the default,
+/// and always the demo/trainer) renders at identity, i.e. its true physics pose.
 ///
 /// WHY a render-only repose, applied to the skin BONES in [`drive_bones`] and NEVER to the
 /// rapier-driven `CrabBodyPart` `Transform`s: bevy_rapier syncs a changed body `Transform` BACK
@@ -80,12 +81,12 @@ struct BoneDrive {
 /// ~12 m every step, exploding the multibody solver into a NaN-motor panic that crashed the armed
 /// client on launch (the play-day "there is no game to play"). The bones are render-only entities
 /// (flat children of an identity skin root, no rapier body), so reposing THEM is free of physics.
-/// Set each step by `net::external_crab` while the giant NN crab is armed.
+/// Set each step by `net::external_crab` while the giant NN crabs are armed.
 ///
 /// Lives in `bot::skin` because [`drive_bones`] is its sole consumer (the renderer owns its own
 /// render contract); `net::external_crab` only PUBLISHES into it — so there's no `bot`→`net` cycle.
-#[derive(Resource, Default, Clone, Copy)]
-pub struct CrabSkinRepose(pub Option<SkinRepose>);
+#[derive(Resource, Default, Clone)]
+pub struct CrabSkinRepose(pub std::collections::BTreeMap<usize, SkinRepose>);
 
 /// The giant-crab repose parameters (metres / unitless), in bevy world space.
 #[derive(Clone, Copy)]
@@ -386,16 +387,21 @@ fn reveal_skin(
 /// `GlobalTransform`, which lags until propagation). Bones are top-level
 /// children of an identity root, so writing world poses into `Transform` is
 /// exact.
+#[allow(clippy::type_complexity)]
 fn drive_bones(
     mut bones: Query<(&BoneDrive, &mut Transform)>,
-    links: Query<&Transform, (With<CrabBodyPart>, Without<BoneDrive>)>,
+    links: Query<(&Transform, &CrabEnvId), (With<CrabBodyPart>, Without<BoneDrive>)>,
     repose: Res<CrabSkinRepose>,
 ) {
-    // The GCR giant blow-up rides the render bones ONLY (see [`CrabSkinRepose`]); identity for the
-    // demo/trainer, so their skin renders the crab at its true physics scale unchanged.
-    let m = repose.0.map_or(Mat4::IDENTITY, |r| r.matrix());
+    // The GCR giant blow-up rides the render bones ONLY (see [`CrabSkinRepose`]), per env so each
+    // armed crab carries its own game spot; identity for an env with no entry (the demo/trainer),
+    // so their skins render the crab at its true physics scale unchanged.
     for (drive, mut t) in bones.iter_mut() {
-        if let Ok(link) = links.get(drive.link) {
+        if let Ok((link, env)) = links.get(drive.link) {
+            let m = repose
+                .0
+                .get(&env.0)
+                .map_or(Mat4::IDENTITY, |r| r.matrix());
             *t = Transform::from_matrix(m * link.to_matrix() * drive.offset);
         }
     }

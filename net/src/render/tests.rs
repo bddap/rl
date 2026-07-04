@@ -81,49 +81,42 @@ fn menu_handoff_installs_the_chosen_round() {
     );
 }
 
-/// An unarmable networked round (host brain unverified / colliders differ on a peer) must drive
-/// the GRACEFUL refusal, NOT a crash and NOT a silent integer-crab swap. The arm decision +
-/// operator message is the single [`super::app::check_armable`]; this pins that a solo or
-/// fully-synced round arms (no message), while either mismatch REFUSES with an actionable message
-/// naming the cause and the fix — the value the menu's `poll_formation` gate returns to the chooser
-/// on instead of panicking. (The live 2-peer menu transition still needs on-device testing; the
-/// `NetDriver` it carries owns a tokio/iroh session that won't stand up headlessly — this pins the
+/// An unarmable networked round (colliders differ on a peer) must drive the GRACEFUL refusal,
+/// NOT a crash and NOT a silent integer-crab swap. The arm decision + operator message is the
+/// single [`super::app::check_armable`]; this pins that a solo or synced round arms (no
+/// message), while an asset mismatch REFUSES with an actionable message naming the cause and
+/// the fix — the value the menu's `poll_formation` gate returns to the chooser on instead of
+/// panicking. (The live 2-peer menu transition still needs on-device testing; the `NetDriver`
+/// it carries owns a tokio/iroh session that won't stand up headlessly — this pins the
 /// decision the gate is built on.)
 #[test]
 fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
     use super::app::check_armable;
     use crate::SyncVerdict;
-    let synced = |host_brain, assets| Some(SyncVerdict { host_brain, assets });
-    // Armable: solo always arms; a fully-synced networked round arms. No refusal, no message.
+    let synced = |assets| Some(SyncVerdict { assets });
+    // Armable: solo always arms; a synced networked round arms. No refusal, no message.
     assert!(
         check_armable(None).is_ok(),
         "solo (no net, no formation verdict) always arms"
     );
     assert!(
-        check_armable(synced(true, true)).is_ok(),
-        "a networked round with synced weights AND assets arms"
+        check_armable(synced(true)).is_ok(),
+        "a networked round with synced assets arms"
     );
-    // An unverified host brain refuses LOUD, naming brain.bin + the rl-update fix.
-    let brain = check_armable(synced(false, false))
-        .expect_err("an unverified-host-brain networked round must refuse, not arm a fake crab");
-    assert!(
-        brain.contains("brain.bin"),
-        "names the host brain problem: {brain}"
-    );
-    assert!(
-        brain.contains("rl-update"),
-        "tells the operator how to fix it: {brain}"
-    );
-    assert!(
-        brain.contains("refusing"),
-        "the round REFUSES (no silent integer fallback): {brain}"
-    );
-    // Brain agrees but the colliders differ: refuse with the collider cause.
-    let colliders = check_armable(synced(true, false))
+    // The colliders differ on a peer: refuse with the collider cause + the rl-update fix.
+    let colliders = check_armable(synced(false))
         .expect_err("an unsynced-assets networked round must refuse, not arm a fake crab");
     assert!(
         colliders.contains("sally.glb"),
         "names the collider mismatch: {colliders}"
+    );
+    assert!(
+        colliders.contains("rl-update"),
+        "tells the operator how to fix it: {colliders}"
+    );
+    assert!(
+        colliders.contains("refusing"),
+        "the round REFUSES (no silent integer fallback): {colliders}"
     );
 }
 

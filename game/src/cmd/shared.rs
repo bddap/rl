@@ -35,6 +35,8 @@ pub(crate) fn nn_crab_checkpoint_dir(
     flag: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf> {
     use crab_world::play::{RigDims, RigFit};
+    // (Multi-binding callers go through [`nn_crab_checkpoint_dirs`], which loops this ONE
+    // validator per binding — a single validation source, rl#200.)
     let dir = flag
         .or_else(|| std::env::var_os("RL_CRAB_CHECKPOINT_DIR").map(std::path::PathBuf::from))
         .unwrap_or_else(|| {
@@ -70,6 +72,28 @@ pub(crate) fn nn_crab_checkpoint_dir(
             )
         }
     }
+}
+
+/// Resolve the windowed client's REQUIRED brain-binding LIST (rl#200): each repeated
+/// `--nn-crab-checkpoint DIR` is one crab's binding, in crab-index order; no flag falls back to
+/// the single default binding ([`nn_crab_checkpoint_dir`]'s env-var/asset-root resolution).
+/// Every binding is validated fail-loud through the ONE validator — a crab that can't load its
+/// assigned brain refuses the launch naming the crab index, the dir, and the reason, never
+/// ships an inert rest-pose Sally.
+pub(crate) fn nn_crab_checkpoint_dirs(
+    flags: Vec<std::path::PathBuf>,
+) -> Result<Vec<std::path::PathBuf>> {
+    if flags.is_empty() {
+        return Ok(vec![nn_crab_checkpoint_dir(None)?]);
+    }
+    flags
+        .into_iter()
+        .enumerate()
+        .map(|(idx, dir)| {
+            nn_crab_checkpoint_dir(Some(dir))
+                .with_context(|| format!("crab {idx}'s brain binding is unusable (rl#200)"))
+        })
+        .collect()
 }
 
 /// One determinism-log line, `<tick> <hash>` (zero-padded 16-hex) — the format two
@@ -156,7 +180,7 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
         server.advance(msg);
         while server.next_tick_ready() {
             // Headless smoke: no rapier crab body, so the crab holds spawn (no pose to inject).
-            let bytes = server.step_next(None).snapshot;
+            let bytes = server.step_next(&[]).snapshot;
             ls.apply_core_snapshot(
                 CoreSnapshot::from_bytes(&bytes).expect("the server's snapshot must decode"),
             );
@@ -166,7 +190,7 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
     }
     let p = ls.sim().player(me).unwrap();
     let pos = p.pos();
-    let crab = ls.sim().crab().pos();
+    let crab = ls.sim().crabs()[0].pos();
     println!(
         "solo: {} ticks, player=({}, {}) yaw={} status={:?}, crab=({}, {}), outcome={:?}, hash={:#018x}",
         ls.sim().tick(),

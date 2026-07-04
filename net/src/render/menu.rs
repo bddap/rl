@@ -25,11 +25,8 @@ use crate::net_loop::{self, JoinResult};
 pub struct MenuPlugin {
     pub seed: u64,
     pub telemetry: Option<EndpointId>,
-    /// Our NN-crab checkpoint digest, `0` for none. Advertised in networked
-    /// formation so peers can agree on a shared brain before arming the float crab.
-    pub weights_digest: u64,
-    /// Our crab-model-asset digest, `0` for none. Advertised alongside
-    /// `weights_digest` so peers can agree on a shared collider asset before arming.
+    /// Our crab-model-asset digest, `0` for none. Advertised in networked formation so
+    /// peers can agree on a shared collider asset before arming the float crabs.
     pub asset_digest: u64,
 }
 
@@ -50,7 +47,6 @@ impl Plugin for MenuPlugin {
         app.insert_non_send_resource(MenuState::new(
             self.seed,
             self.telemetry,
-            self.weights_digest,
             self.asset_digest,
         ))
         // A 2D camera for the menu so bevy_egui has a context to render into.
@@ -102,11 +98,8 @@ fn despawn_menu_camera(mut commands: Commands, cams: Query<Entity, With<MenuCame
 struct MenuState {
     seed: u64,
     telemetry: Option<EndpointId>,
-    /// Our NN-crab checkpoint digest, `0` for none — handed to
-    /// [`crate::menu::begin`] so networked formation advertises it.
-    weights_digest: u64,
     /// Our crab-model-asset digest, `0` for none — handed to
-    /// [`crate::menu::begin`] alongside `weights_digest`.
+    /// [`crate::menu::begin`] so networked formation advertises it.
     asset_digest: u64,
     /// The pure navigation FSM ([`MenuNav`]) — focus + the chooser/lobby transition.
     /// Folded by controller/keyboard input AND egui clicks through one path, so every
@@ -133,16 +126,10 @@ struct MenuState {
 }
 
 impl MenuState {
-    fn new(
-        seed: u64,
-        telemetry: Option<EndpointId>,
-        weights_digest: u64,
-        asset_digest: u64,
-    ) -> Self {
+    fn new(seed: u64, telemetry: Option<EndpointId>, asset_digest: u64) -> Self {
         Self {
             seed,
             telemetry,
-            weights_digest,
             asset_digest,
             nav: MenuNav::new(),
             stick_latched: false,
@@ -579,7 +566,6 @@ fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextSta
         choice,
         state.seed,
         state.telemetry,
-        state.weights_digest,
         state.asset_digest,
     ));
     next.set(AppPhase::Connecting);

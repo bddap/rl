@@ -71,10 +71,9 @@ pub struct NetDriver {
     telemetry: Option<TelemetrySender>,
     /// The formation barrier's shared-asset verdict — see [`NetDriver::sync_verdict`].
     sync: crate::SyncVerdict,
-    /// OUR policy-weights digest and crab-asset digest (the values, not just the synced bools) —
-    /// the host's side of the mid-game admission gate ([`admit_joiners`]). A client never reads
-    /// them (only the host admits).
-    weights_digest: u64,
+    /// OUR crab-asset digest (the value, not just the synced bool) — the host's side of the
+    /// mid-game admission gate ([`admit_joiners`]). A client never reads it (only the host
+    /// admits).
     asset_digest: u64,
 }
 
@@ -135,11 +134,11 @@ impl NetDriver {
         self.telemetry.as_ref()
     }
 
-    /// The formation barrier's shared-asset verdict (weights + crab asset —
-    /// [`crate::membership::Membership::sync_verdict`]). The arm sites gate the float NN crab
-    /// on it via [`crate::may_arm_external_crab`]; an unsynced half means the round can't arm
-    /// Sally and is refused (no integer fallback). A half is always `false` without a
-    /// supplied checkpoint / resolvable model (that digest exchanged as `0`).
+    /// The formation barrier's shared-asset verdict (the crab asset —
+    /// [`crate::membership::Membership::sync_verdict`]). The arm sites gate the float NN crabs
+    /// on it via [`crate::may_arm_external_crab`]; unsynced means the round can't arm
+    /// Sally and is refused (no integer fallback). Always `false` without a resolvable model
+    /// (that digest exchanged as `0`).
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
         self.sync
     }
@@ -205,9 +204,10 @@ impl NetDriver {
         (inputs, joins)
     }
 
-    /// (Host) The host's OWN digests, feeding the mid-game admission gate ([`admit_joiners`]).
-    pub fn local_digests(&self) -> (u64, u64) {
-        (self.weights_digest, self.asset_digest)
+    /// (Host) The host's OWN crab-asset digest, feeding the mid-game admission gate
+    /// ([`admit_joiners`]).
+    pub fn local_asset_digest(&self) -> u64 {
+        self.asset_digest
     }
 
     /// (Host) Record an admitted joiner's endpoint→[`PlayerId`] in the live id_map — append-only,
@@ -546,8 +546,8 @@ pub fn depart_gone_peers(
     eids
 }
 
-/// Gate + admit each mid-game `joins` request on the host. For each joiner: verify the host is
-/// armed and the joiner's collider digest matches ([`may_admit_joiner`]); then allocate the stable
+/// Gate + admit each mid-game `joins` request on the host. For each joiner: verify the joiner's
+/// collider digest matches the host's ([`may_admit_joiner`]); then allocate the stable
 /// lowest-free [`PlayerId`] ([`Server::admit`] — which schedules the roster change on the
 /// authoritative server), record its endpoint→pid append-only, and UNICAST the joiner its
 /// [`Admission`] (incumbents learn the new roster from the next snapshot). On a mismatch, REFUSE
@@ -555,12 +555,12 @@ pub fn depart_gone_peers(
 /// ([[real-sally-definition]]). An endpoint already rostered (a re-dial or a racing duplicate) is
 /// admitted at most once.
 fn admit_joiners(server: &mut Server, net: &mut NetDriver, joins: Vec<(EndpointId, JoinRequest)>) {
-    let (host_weights, host_assets) = net.local_digests();
+    let host_assets = net.local_asset_digest();
     for (eid, req) in joins {
         if net.is_rostered(eid) {
             continue; // already in the match — a duplicate/racing JoinRequest
         }
-        match may_admit_joiner(host_weights, host_assets, &req) {
+        match may_admit_joiner(host_assets, &req) {
             Ok(()) => {
                 let adm = server.admit();
                 net.admit_endpoint(eid, adm.pid);
@@ -625,9 +625,8 @@ pub fn connect_and_form(
     expect: usize,
     collector: Option<iroh::EndpointId>,
 ) -> Result<MatchResult> {
-    // No Policy is loaded on the scripted/headless path (weights digest `0` ⇒ a round HOSTED
-    // by this peer can never arm the NN crab), but advertise our REAL crab-asset digest so
-    // the value is honest if this peer ever forms with a rendered peer that does arm.
+    // Advertise our REAL crab-asset digest so the value is honest if this headless peer
+    // ever forms with a rendered peer that arms the NN crabs.
     connect_and_form_dialing(
         seed,
         discover_secs,
@@ -635,7 +634,6 @@ pub fn connect_and_form(
         None,
         collector,
         None,
-        0,
         crab_world::mesh_fallback::constructed_body_digest(),
     )
 }
@@ -658,11 +656,9 @@ pub fn connect_and_form(
 /// the slow barrier — so a Host UI can display the join code to share while waiting. A
 /// closed receiver is ignored (the caller stopped caring); it never gates formation.
 ///
-/// `local_weights_digest` is OUR policy-checkpoint digest, `0` for none, and
-/// `local_asset_digest` OUR crab-model-asset digest, `0` for none. Both are
-/// advertised in the formation beats; the agreed [`NetDriver::sync_verdict`] tells the
-/// caller whether the round may arm the NN crab (the HOST's brain verified + the crab asset
-/// matched on every peer — the upstream shared-asset guard).
+/// `local_asset_digest` is OUR crab-model-asset digest, `0` for none — advertised in the
+/// formation beats; the agreed [`NetDriver::sync_verdict`] tells the caller whether the round
+/// may arm the NN crabs (the crab asset matched on every peer — the shared-asset guard).
 #[allow(clippy::too_many_arguments)] // each arg is a distinct formation knob.
 pub fn connect_and_form_dialing(
     seed: u64,
@@ -671,7 +667,6 @@ pub fn connect_and_form_dialing(
     dial: Option<iroh::EndpointId>,
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
-    local_weights_digest: u64,
     local_asset_digest: u64,
 ) -> Result<MatchResult> {
     // The scripted/headless path: no interactive lobby (`None`), so the default
@@ -684,7 +679,6 @@ pub fn connect_and_form_dialing(
         collector,
         on_bound,
         None,
-        local_weights_digest,
         local_asset_digest,
     )
 }
@@ -704,7 +698,6 @@ pub fn connect_and_form_lobby(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     control: LobbyControl,
-    local_weights_digest: u64,
     local_asset_digest: u64,
 ) -> Result<MatchResult> {
     connect_and_form_inner(
@@ -715,7 +708,6 @@ pub fn connect_and_form_lobby(
         collector,
         on_bound,
         Some(control),
-        local_weights_digest,
         local_asset_digest,
     )
 }
@@ -733,7 +725,6 @@ fn connect_and_form_inner(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     lobby: Option<LobbyControl>,
-    local_weights_digest: u64,
     local_asset_digest: u64,
 ) -> Result<MatchResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -770,7 +761,6 @@ fn connect_and_form_inner(
             expect,
             telemetry.as_ref(),
             lobby.as_ref(),
-            local_weights_digest,
             local_asset_digest,
         )
         .await?;
@@ -813,7 +803,6 @@ fn connect_and_form_inner(
         departed: Default::default(),
         telemetry,
         sync: frozen.sync,
-        weights_digest: local_weights_digest,
         asset_digest: local_asset_digest,
     };
     Ok(MatchResult::Joined(Box::new((ls, driver))))
@@ -960,17 +949,9 @@ pub fn connect_and_join(
                 id_map,
                 departed: Default::default(),
                 telemetry,
-                // Admitted ⇒ the host proved a non-zero brain (`HostNotArmed` is checked first
-                // in the admission gate) and our asset digest matched the host's — both verdict halves
-                // hold by the gate we just passed.
-                sync: crate::SyncVerdict {
-                    host_brain: true,
-                    assets: true,
-                },
-                // A join-constructed driver is always a Client — it can never reach the Server
-                // arm that reads `local_digests` (a joiner never admits) — so no weights digest is
-                // computed or threaded here at all: 0 marks it deliberately absent.
-                weights_digest: 0,
+                // Admitted ⇒ our asset digest matched the host's — the verdict holds by the
+                // gate we just passed.
+                sync: crate::SyncVerdict { assets: true },
                 asset_digest: local_asset_digest,
             };
             Ok(JoinResult::Joined(Box::new((ls, driver))))
@@ -1040,7 +1021,7 @@ mod tests {
             // windowed ServerAuth arm's flow, minus the bevy crab pump (no rapier body here).
             let server = coord.server_mut().expect("solo runs an internal server");
             while server.next_tick_ready() {
-                let bytes = server.step_next(None).snapshot;
+                let bytes = server.step_next(&[]).snapshot;
                 let snap =
                     crate::snapshot::CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes");
                 ls.apply_core_snapshot(snap);

@@ -128,9 +128,11 @@ fn draw_vehicle_collider_wireframe(
     vehicles: Query<(&GlobalTransform, &Collider), With<Vehicle>>,
     mut gizmos: Gizmos,
 ) {
+    // The piloted craft flies in the shared arena; env 0's repose is the render placement
+    // reference (identity when absent, e.g. the rl-demo).
     let placement = repose
         .as_deref()
-        .and_then(|r| r.0)
+        .and_then(|r| r.0.get(&0).copied())
         .map(|s| s.matrix())
         .unwrap_or(Mat4::IDENTITY);
     // The locally-piloted body: collider views only — the pilot flies FP from inside it.

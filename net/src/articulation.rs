@@ -3,10 +3,12 @@
 //! The host-authoritative snapshot ([`CoreSnapshot`](crate::snapshot::CoreSnapshot)) carries the
 //! integer game state and NOTHING render-only — a render type in it would break the no-`render`
 //! trainer build ([[verify-all-bins-on-module-moves]]). But a windowed remote client no longer
-//! runs the crab's rapier physics (host-authoritative: the host owns the one Sally, the client
-//! renders the host's pose), so it has no per-part transforms to skin the mesh from. Those ride
-//! HERE, in a SEPARATE frame the host broadcasts beside the snapshot — along with the pose of
-//! the host's piloted craft ([`VehiclePoseWire`]), the other host-only rapier body a remote
+//! runs the crabs' rapier physics (host-authoritative: the host owns every Sally, the client
+//! renders the host's poses), so it has no per-part transforms to skin the meshes from. Those
+//! ride HERE, in a SEPARATE frame the host broadcasts beside the snapshot — one [`CrabFrame`]
+//! per crab, in crab-index order (the index IS the crab's identity, matching the snapshot's
+//! `crabs` and the host's crab-world env ids — rl#200 multi-brain rounds), along with the pose
+//! of the host's piloted craft ([`VehiclePoseWire`]), the other host-only rapier body a remote
 //! client must render without simulating (rl#192).
 //!
 //! The wire type is plain POD (`f32` arrays + a `u8` part tag) with a hand-rolled little-endian
@@ -53,30 +55,41 @@ pub struct ReposeWire {
     pub scale: f32,
 }
 
-/// A whole crab's render pose for one tick — every body part plus the giant-blow-up placement. The
-/// host captures it after stepping (post-`integrate_crab`/`publish_skin_repose`, so it is this
-/// tick's settled pose) and broadcasts it; a windowed client writes it onto its own frozen crab's
-/// render entities. `repose` is `None` only before the bridge has published one (transiently at
+/// ONE crab's render pose for one tick: every keyed body part plus that crab's giant-blow-up
+/// placement. Its position in [`CrabArticulation::crabs`] IS its identity — the crab index the
+/// client routes the frame to its own matching render rig by ([`crab_world`'s `CrabEnvId`]).
+/// `repose` is `None` only before the bridge has published one for that crab (transiently at
 /// spawn) — the client then leaves its placement untouched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrabFrame {
+    /// Every keyed body part's arena-frame transform, in ascending `part`-tag order.
+    pub parts: Vec<PartTransform>,
+    /// The giant-blow-up placement, or `None` before the host has published one.
+    pub repose: Option<ReposeWire>,
+}
+
+/// Every crab's render pose for one tick — one [`CrabFrame`] per crab, in crab-index order. The
+/// host captures it after stepping (post-`integrate_crab`/`publish_skin_repose`, so it is this
+/// tick's settled pose) and broadcasts it; a windowed client writes each frame onto its own
+/// frozen matching crab's render entities.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CrabArticulation {
     /// The tick this pose is OF, matching the [`CoreSnapshot`](crate::snapshot::CoreSnapshot)
     /// tick it rides beside — what lets the windowed client pair the frame with the snapshot it
     /// ADOPTS from its jitter buffer (rl#194), instead of rendering the newest arrival raw.
     pub tick: u64,
-    /// Every crab body part's arena-frame transform, in ascending `part`-tag order.
-    pub parts: Vec<PartTransform>,
-    /// The giant-blow-up placement, or `None` before the host has published one.
-    pub repose: Option<ReposeWire>,
+    /// One frame per crab, in crab-index order (index = the snapshot's crab index = the host's
+    /// crab-world env id).
+    pub crabs: Vec<CrabFrame>,
     /// The host's piloted craft's pose, or `None` while the host is on foot (the body is
     /// despawned then, so absence IS the on-foot signal — a client clears its drawn craft on
     /// `None` rather than freezing a stale one).
     pub vehicle: Option<VehiclePoseWire>,
 }
 
-/// The host's piloted craft for one tick — its arena-frame rigidbody pose. Like the crab, the
+/// The host's piloted craft for one tick — its arena-frame rigidbody pose. Like the crabs, the
 /// vehicle is rapier state only the HOST steps (host-authoritative, off the integer sim), so a
-/// remote client can't compute where it is; this riding beside the crab pose is how the second
+/// remote client can't compute where it is; this riding beside the crab poses is how the second
 /// player sees the host fly (rl#192). The client draws the craft's collider wireframe — its one
 /// visual (the craft has no mesh) — at this pose, under the same [`ReposeWire`] placement as the
 /// crab cage.
@@ -114,33 +127,36 @@ impl std::fmt::Display for ArticulationDecodeError {
 impl std::error::Error for ArticulationDecodeError {}
 
 impl CrabArticulation {
-    /// Little-endian wire form: `tick(8) | n_parts(4) | part[ tag(1) pos(3×4) rot(4×4) ]… |
-    /// repose_present(1) | [ shift(3×4) pivot(3×4) scale(4) ] | vehicle_present(1) |
+    /// Little-endian wire form: `tick(8) | n_crabs(4) | crab[ n_parts(4) part[ tag(1) pos(3×4)
+    /// rot(4×4) ]… repose_present(1) [ shift(3×4) pivot(3×4) scale(4) ] ]… | vehicle_present(1) |
     /// [ pos(3×4) rot(4×4) ]`. [`from_bytes`](Self::from_bytes) is its exact inverse.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.tick.to_le_bytes());
-        out.extend_from_slice(&(self.parts.len() as u32).to_le_bytes());
-        for p in &self.parts {
-            out.push(p.part);
-            for v in p.pos {
-                out.extend_from_slice(&v.to_le_bytes());
-            }
-            for v in p.rot {
-                out.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        match &self.repose {
-            None => out.push(0),
-            Some(r) => {
-                out.push(1);
-                for v in r.shift {
+        out.extend_from_slice(&(self.crabs.len() as u32).to_le_bytes());
+        for crab in &self.crabs {
+            out.extend_from_slice(&(crab.parts.len() as u32).to_le_bytes());
+            for p in &crab.parts {
+                out.push(p.part);
+                for v in p.pos {
                     out.extend_from_slice(&v.to_le_bytes());
                 }
-                for v in r.pivot {
+                for v in p.rot {
                     out.extend_from_slice(&v.to_le_bytes());
                 }
-                out.extend_from_slice(&r.scale.to_le_bytes());
+            }
+            match &crab.repose {
+                None => out.push(0),
+                Some(r) => {
+                    out.push(1);
+                    for v in r.shift {
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
+                    for v in r.pivot {
+                        out.extend_from_slice(&v.to_le_bytes());
+                    }
+                    out.extend_from_slice(&r.scale.to_le_bytes());
+                }
             }
         }
         match &self.vehicle {
@@ -163,30 +179,35 @@ impl CrabArticulation {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ArticulationDecodeError> {
         let mut r = Reader::new(bytes);
         let tick = u64::from_le_bytes(r.take()?);
-        let n_parts = u32::from_le_bytes(r.take::<4>()?) as usize;
-        // Don't pre-allocate from the untrusted count — grow bounded by the buffer (each `take`
-        // Truncates the moment the real bytes run out), never by the claimed length.
-        let mut parts = Vec::new();
-        for _ in 0..n_parts {
-            let part = r.byte()?;
-            let pos = read_vec3(&mut r)?;
-            let rot = read_vec4(&mut r)?;
-            parts.push(PartTransform { part, pos, rot });
-        }
-        let repose = match r.byte()? {
-            0 => None,
-            1 => {
-                let shift = read_vec3(&mut r)?;
-                let pivot = read_vec3(&mut r)?;
-                let scale = f32::from_le_bytes(r.take()?);
-                Some(ReposeWire {
-                    shift,
-                    pivot,
-                    scale,
-                })
+        let n_crabs = u32::from_le_bytes(r.take::<4>()?) as usize;
+        // Don't pre-allocate from the untrusted counts — grow bounded by the buffer (each `take`
+        // Truncates the moment the real bytes run out), never by a claimed length.
+        let mut crabs = Vec::new();
+        for _ in 0..n_crabs {
+            let n_parts = u32::from_le_bytes(r.take::<4>()?) as usize;
+            let mut parts = Vec::new();
+            for _ in 0..n_parts {
+                let part = r.byte()?;
+                let pos = read_vec3(&mut r)?;
+                let rot = read_vec4(&mut r)?;
+                parts.push(PartTransform { part, pos, rot });
             }
-            _ => return Err(ArticulationDecodeError::BadFlag),
-        };
+            let repose = match r.byte()? {
+                0 => None,
+                1 => {
+                    let shift = read_vec3(&mut r)?;
+                    let pivot = read_vec3(&mut r)?;
+                    let scale = f32::from_le_bytes(r.take()?);
+                    Some(ReposeWire {
+                        shift,
+                        pivot,
+                        scale,
+                    })
+                }
+                _ => return Err(ArticulationDecodeError::BadFlag),
+            };
+            crabs.push(CrabFrame { parts, repose });
+        }
         let vehicle = match r.byte()? {
             0 => None,
             1 => Some(VehiclePoseWire {
@@ -200,8 +221,7 @@ impl CrabArticulation {
         }
         Ok(Self {
             tick,
-            parts,
-            repose,
+            crabs,
             vehicle,
         })
     }
@@ -265,23 +285,37 @@ mod tests {
     fn sample() -> CrabArticulation {
         CrabArticulation {
             tick: 4242,
-            parts: vec![
-                PartTransform {
-                    part: 0,
-                    pos: [1.0, 2.0, 3.0],
-                    rot: [0.0, 0.0, 0.0, 1.0],
+            crabs: vec![
+                CrabFrame {
+                    parts: vec![
+                        PartTransform {
+                            part: 0,
+                            pos: [1.0, 2.0, 3.0],
+                            rot: [0.0, 0.0, 0.0, 1.0],
+                        },
+                        PartTransform {
+                            part: 7,
+                            pos: [-4.5, 0.25, 9.0],
+                            rot: [0.5, 0.5, 0.5, 0.5],
+                        },
+                    ],
+                    repose: Some(ReposeWire {
+                        shift: [10.0, 0.0, -20.0],
+                        pivot: [0.0, 1.0, 0.0],
+                        scale: 8.0,
+                    }),
                 },
-                PartTransform {
-                    part: 7,
-                    pos: [-4.5, 0.25, 9.0],
-                    rot: [0.5, 0.5, 0.5, 0.5],
+                // A second crab (rl#200 multi-brain) with a distinct pose and no repose yet,
+                // so the per-crab framing + optional repose are both exercised.
+                CrabFrame {
+                    parts: vec![PartTransform {
+                        part: 3,
+                        pos: [7.0, 0.5, -2.0],
+                        rot: [0.0, 1.0, 0.0, 0.0],
+                    }],
+                    repose: None,
                 },
             ],
-            repose: Some(ReposeWire {
-                shift: [10.0, 0.0, -20.0],
-                pivot: [0.0, 1.0, 0.0],
-                scale: 8.0,
-            }),
             vehicle: Some(VehiclePoseWire {
                 pos: [2.0, 5.5, -1.0],
                 rot: [
@@ -303,7 +337,7 @@ mod tests {
     #[test]
     fn roundtrip_without_repose() {
         let mut a = sample();
-        a.repose = None;
+        a.crabs[0].repose = None;
         assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
     }
 
@@ -315,11 +349,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_parts_roundtrip() {
+    fn empty_crabs_roundtrip() {
         let a = CrabArticulation {
             tick: 0,
-            parts: vec![],
-            repose: None,
+            crabs: vec![],
             vehicle: None,
         };
         assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
@@ -350,18 +383,19 @@ mod tests {
 
     #[test]
     fn bad_present_flag_is_rejected() {
-        // Corrupt the repose-present flag: it sits right after tick(8) + n_parts(4) + the two
-        // parts (each 1 + 12 + 16 = 29 B).
-        let flag_off = 8 + 4 + 2 * (1 + 12 + 16);
+        // Corrupt crab 0's repose-present flag: it sits after tick(8) + n_crabs(4) + crab 0's
+        // n_parts(4) + its two parts (each 1 + 12 + 16 = 29 B).
+        let flag_off = 8 + 4 + 4 + 2 * (1 + 12 + 16);
         let mut bytes = sample().to_bytes();
         bytes[flag_off] = 2;
         assert_eq!(
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::BadFlag)
         );
-        // And the vehicle-present flag, right after the repose block (flag + 3+3+1 f32s).
+        // And the vehicle-present flag, after crab 0's repose block (flag + 3+3+1 f32s) and the
+        // whole of crab 1 (n_parts(4) + one part (29) + repose flag(1)).
         let mut bytes = sample().to_bytes();
-        bytes[flag_off + 1 + 7 * 4] = 2;
+        bytes[flag_off + 1 + 7 * 4 + 4 + 29 + 1] = 2;
         assert_eq!(
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::BadFlag)

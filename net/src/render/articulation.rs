@@ -1,12 +1,14 @@
 //! Render-side capture + apply for the crab pose extension frame — the render-only halves
 //! of [`crate::articulation`].
 //!
-//! Under host-authority the windowed HOST runs the one rapier Sally; a windowed remote CLIENT
-//! renders the host's exact pose without simulating physics ([[silent-fallback-antipattern]]: no
-//! second "run my own crab for visuals" path). So the host [`capture`]s its live crab's per-part
-//! transforms + giant-blow-up placement each stepped tick and broadcasts them beside the snapshot;
-//! the client [`apply`]s them onto its OWN crab entities — which it spawns but never physics-steps,
-//! so the writes stick and `crab_world::bot::skin::drive_bones` skins the mesh to the host's pose.
+//! Under host-authority the windowed HOST runs every rapier Sally; a windowed remote CLIENT
+//! renders the host's exact poses without simulating physics ([[silent-fallback-antipattern]]: no
+//! second "run my own crab for visuals" path). So the host [`capture`]s each live crab's per-part
+//! transforms + giant-blow-up placement each stepped tick — one [`CrabFrame`] per env, in env
+//! order (rl#200: a multi-brain round runs several crabs) — and broadcasts them beside the
+//! snapshot; the client [`apply`]s each frame onto its OWN matching env's crab entities — which
+//! it spawns but never physics-steps, so the writes stick and
+//! `crab_world::bot::skin::drive_bones` skins each mesh to the host's pose.
 //!
 //! Only the parts a skin bone actually follows are carried: those with a stable `PartId` (each
 //! actuated joint link + the carapace). The cosmetic eye-stalk links carry no `PartId` and no bone
@@ -19,7 +21,7 @@ use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, Cr
 use crab_world::bot::skin::{CrabSkinRepose, SkinRepose};
 use crab_world::vehicle::Vehicle;
 
-use crate::articulation::{CrabArticulation, PartTransform, ReposeWire, VehiclePoseWire};
+use crate::articulation::{CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire};
 
 /// (Client) The host's piloted craft's arena-frame pose off the wire, `None` while the host is on
 /// foot. A remote client runs none of the vehicle's rapier (host-authoritative), so this mirror is
@@ -45,13 +47,17 @@ fn part_tag(is_carapace: bool, joint: Option<&CrabJoint>) -> Option<u8> {
     }
 }
 
-/// (Host) Snapshot env 0's crab render pose for `tick`: every keyed body part's arena-frame
-/// transform (world-space — the parts are top-level, so `Transform` already is) plus the current
-/// giant-blow-up placement. Called right after `Server::step_next`, so it is this tick's settled
-/// pose (`integrate_crab`/`publish_skin_repose` ran during the physics pump). `repose` is `None`
-/// only before the bridge has published one (transiently at spawn).
+/// (Host) Snapshot every crab's render pose for `tick`: per env, each keyed body part's
+/// arena-frame transform (world-space — the parts are top-level, so `Transform` already is) plus
+/// that crab's current giant-blow-up placement. Frames are emitted for envs `0..n_crabs`
+/// contiguously (`n_crabs` = the bridge's binding count via [`CrabSkinRepose`]'s keys ∪ spawned
+/// envs), so the frame index IS the crab index on the wire. Called right after
+/// `Server::step_next`, so it is this tick's settled pose (`integrate_crab`/
+/// `publish_skin_repose` ran during the physics pump). A frame's `repose` is `None` only before
+/// the bridge has published one for that crab (transiently at spawn).
 pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
-    let mut parts = Vec::new();
+    // Group each env's keyed parts. BTreeMap so envs emit in index order.
+    let mut by_env: std::collections::BTreeMap<usize, Vec<PartTransform>> = Default::default();
     let mut q = world.query_filtered::<(
         &Transform,
         &CrabEnvId,
@@ -59,29 +65,38 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         Option<&CrabCarapace>,
     ), With<CrabBodyPart>>();
     for (t, env, joint, carapace) in q.iter(world) {
-        if env.0 != 0 {
-            continue;
-        }
         let Some(tag) = part_tag(carapace.is_some(), joint) else {
             continue;
         };
-        parts.push(PartTransform {
+        by_env.entry(env.0).or_default().push(PartTransform {
             part: tag,
             pos: t.translation.to_array(),
             rot: t.rotation.to_array(),
         });
     }
-    // Ascending tag order — a deterministic wire, and the client matches by tag regardless.
-    parts.sort_by_key(|p| p.part);
 
-    let repose = world
+    let reposes = world
         .get_resource::<CrabSkinRepose>()
-        .and_then(|r| r.0)
-        .map(|s| ReposeWire {
-            shift: s.shift.to_array(),
-            pivot: s.pivot.to_array(),
-            scale: s.scale,
-        });
+        .map(|r| r.0.clone())
+        .unwrap_or_default();
+
+    // One frame per env, contiguous from 0 — the wire's index IS the crab index. Spawned envs
+    // are contiguous by construction (`spawn_initial_crabs` fills 0..NumEnvs), so this covers
+    // exactly the armed crabs.
+    let n_crabs = by_env.keys().last().map_or(0, |&max| max + 1);
+    let crabs = (0..n_crabs)
+        .map(|env| {
+            let mut parts = by_env.remove(&env).unwrap_or_default();
+            // Ascending tag order — a deterministic wire, and the client matches by tag anyway.
+            parts.sort_by_key(|p| p.part);
+            let repose = reposes.get(&env).map(|s| ReposeWire {
+                shift: s.shift.to_array(),
+                pivot: s.pivot.to_array(),
+                scale: s.scale,
+            });
+            CrabFrame { parts, repose }
+        })
+        .collect();
 
     // The piloted craft, if the host is flying one — at most one body exists (`manage_vehicle`),
     // despawned on foot, so the query itself is the presence signal. Its `Transform` is
@@ -97,21 +112,25 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
 
     CrabArticulation {
         tick,
-        parts,
-        repose,
+        crabs,
         vehicle,
     }
 }
 
-/// (Client) Write a received crab pose onto env 0's own crab render entities — overwriting each
-/// keyed part's `Transform` and the giant-blow-up placement. The client never pumps the crab
-/// physics, so these writes are not fought back by the rapier solver and persist for
-/// `crab_world::bot::skin::drive_bones` (PostUpdate) to skin the mesh from. A part in the frame with
-/// no matching local entity (or vice versa) is simply skipped — the rig is identical on both peers,
-/// so this only elides the transient pre-spawn frames.
+/// (Client) Write a received crab pose onto each env's own crab render entities — overwriting
+/// every keyed part's `Transform` and each crab's giant-blow-up placement, routing frame `i` to
+/// env `i`. The client never pumps the crab physics, so these writes are not fought back by the
+/// rapier solver and persist for `crab_world::bot::skin::drive_bones` (PostUpdate) to skin the
+/// meshes from. A part in a frame with no matching local entity (or vice versa, including a
+/// whole env the client hasn't spawned) is simply skipped — the rigs are identical on both
+/// peers, so this only elides the transient pre-spawn frames.
 pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
-    let by_tag: std::collections::HashMap<u8, &PartTransform> =
-        art.parts.iter().map(|p| (p.part, p)).collect();
+    let by_env_tag: std::collections::HashMap<(usize, u8), &PartTransform> = art
+        .crabs
+        .iter()
+        .enumerate()
+        .flat_map(|(env, frame)| frame.parts.iter().map(move |p| ((env, p.part), p)))
+        .collect();
 
     let mut q = world.query_filtered::<(
         &mut Transform,
@@ -120,26 +139,35 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
         Option<&CrabCarapace>,
     ), With<CrabBodyPart>>();
     for (mut t, env, joint, carapace) in q.iter_mut(world) {
-        if env.0 != 0 {
-            continue;
-        }
         let Some(tag) = part_tag(carapace.is_some(), joint) else {
             continue;
         };
-        if let Some(p) = by_tag.get(&tag) {
+        if let Some(p) = by_env_tag.get(&(env.0, tag)) {
             t.translation = Vec3::from_array(p.pos);
             t.rotation = Quat::from_array(p.rot);
         }
     }
 
-    if let Some(r) = &art.repose
-        && let Some(mut repose) = world.get_resource_mut::<CrabSkinRepose>()
-    {
-        repose.0 = Some(SkinRepose {
-            shift: Vec3::from_array(r.shift),
-            pivot: Vec3::from_array(r.pivot),
-            scale: r.scale,
-        });
+    if let Some(mut repose) = world.get_resource_mut::<CrabSkinRepose>() {
+        // Mirror the host's per-crab placements wholesale — including an env DROPPING out of
+        // the map (its repose is transiently unpublished; identity is the honest render then).
+        repose.0 = art
+            .crabs
+            .iter()
+            .enumerate()
+            .filter_map(|(env, frame)| {
+                frame.repose.map(|r| {
+                    (
+                        env,
+                        SkinRepose {
+                            shift: Vec3::from_array(r.shift),
+                            pivot: Vec3::from_array(r.pivot),
+                            scale: r.scale,
+                        },
+                    )
+                })
+            })
+            .collect();
     }
 
     // Mirror the host's piloted craft — including `None` (the host stepped out; a stale mirror
@@ -153,16 +181,17 @@ mod tests {
     use super::*;
     use crab_world::bot::body::{CrabJointId, Side};
 
-    /// Spawn one env-0 crab's keyed render parts — a carapace + one joint link — at the given
+    /// Spawn one env's crab's keyed render parts — a carapace + one joint link — at the given
     /// transforms, the minimal rig [`capture`]/[`apply`] key off (no physics/GPU needed).
     fn spawn_parts(
         world: &mut World,
+        env: usize,
         carapace: Transform,
         joint_id: CrabJointId,
         joint: Transform,
     ) -> (Entity, Entity) {
         let cara = world
-            .spawn((CrabBodyPart, CrabCarapace, CrabEnvId(0), carapace))
+            .spawn((CrabBodyPart, CrabCarapace, CrabEnvId(env), carapace))
             .id();
         let jnt = world
             .spawn((
@@ -171,7 +200,7 @@ mod tests {
                     id: joint_id,
                     axis_local: Vec3::X,
                 },
-                CrabEnvId(0),
+                CrabEnvId(env),
                 joint,
             ))
             .id();
@@ -179,20 +208,33 @@ mod tests {
     }
 
     #[test]
-    fn capture_then_apply_reproduces_the_hosts_exact_pose() {
+    fn capture_then_apply_reproduces_the_hosts_exact_pose_per_crab() {
         let joint_id = CrabJointId::ClawShoulder(Side::Left);
         let cara_t = Transform::from_xyz(1.0, 2.0, 3.0).with_rotation(Quat::from_rotation_y(0.5));
         let joint_t =
             Transform::from_xyz(-4.0, 0.25, 9.0).with_rotation(Quat::from_rotation_x(0.3));
+        // A SECOND crab (rl#200) at distinct poses, so cross-env routing is actually pinned —
+        // a capture/apply that collapsed envs would smear one crab onto the other.
+        let cara_t1 = Transform::from_xyz(9.0, 1.0, -6.0).with_rotation(Quat::from_rotation_y(1.2));
+        let joint_t1 =
+            Transform::from_xyz(8.0, 0.5, -5.0).with_rotation(Quat::from_rotation_x(0.9));
 
-        // HOST: known part poses + a published giant-blow-up placement + a piloted craft.
+        // HOST: known part poses per env + a published env-0 placement + a piloted craft.
         let mut host = World::new();
-        spawn_parts(&mut host, cara_t, joint_id, joint_t);
-        host.insert_resource(CrabSkinRepose(Some(SkinRepose {
-            shift: Vec3::new(10.0, 0.0, -20.0),
-            pivot: Vec3::Y,
-            scale: 8.0,
-        })));
+        spawn_parts(&mut host, 0, cara_t, joint_id, joint_t);
+        spawn_parts(&mut host, 1, cara_t1, joint_id, joint_t1);
+        host.insert_resource(CrabSkinRepose(
+            [(
+                0usize,
+                SkinRepose {
+                    shift: Vec3::new(10.0, 0.0, -20.0),
+                    pivot: Vec3::Y,
+                    scale: 8.0,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
         let craft_t = Transform::from_xyz(2.0, 5.5, -1.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
         crab_world::vehicle::spawn_ram_vehicle(
@@ -205,36 +247,59 @@ mod tests {
         // Capture and send it exactly as the transport does — through the wire codec.
         let art = capture(&mut host, 42);
         assert_eq!(art.tick, 42);
-        assert_eq!(art.parts.len(), 2);
+        assert_eq!(art.crabs.len(), 2, "one frame per env");
+        assert_eq!(art.crabs[0].parts.len(), 2);
+        assert_eq!(art.crabs[1].parts.len(), 2);
+        assert!(art.crabs[0].repose.is_some());
+        assert!(art.crabs[1].repose.is_none(), "env 1 has no placement yet");
         let art = crate::articulation::CrabArticulation::from_bytes(&art.to_bytes()).unwrap();
 
-        // CLIENT: the SAME rig at DIFFERENT poses with no placement yet (a frozen just-spawned crab).
+        // CLIENT: the SAME rigs at DIFFERENT poses with no placement yet (frozen just-spawned
+        // crabs).
         let mut client = World::new();
         let (c_cara, c_joint) = spawn_parts(
             &mut client,
+            0,
             Transform::from_xyz(-1.0, -1.0, -1.0),
             joint_id,
             Transform::from_xyz(5.0, 5.0, 5.0),
         );
-        client.insert_resource(CrabSkinRepose(None));
+        let (c_cara1, c_joint1) = spawn_parts(
+            &mut client,
+            1,
+            Transform::from_xyz(-2.0, -2.0, -2.0),
+            joint_id,
+            Transform::from_xyz(6.0, 6.0, 6.0),
+        );
+        client.insert_resource(CrabSkinRepose::default());
 
         apply(&mut client, &art);
 
-        // The client's parts + placement now match the host's EXACTLY — it renders the host's pose,
-        // never its own physics.
-        let got_cara = *client.entity(c_cara).get::<Transform>().unwrap();
-        let got_joint = *client.entity(c_joint).get::<Transform>().unwrap();
+        // Each env's parts + placement now match the host's EXACTLY — the client renders the
+        // host's poses, never its own physics, and never crab 1's pose on crab 0.
+        let tf = |world: &mut World, e: Entity| *world.entity(e).get::<Transform>().unwrap();
+        let got_cara = tf(&mut client, c_cara);
+        let got_joint = tf(&mut client, c_joint);
         assert_eq!(got_cara.translation, cara_t.translation);
         assert_eq!(got_cara.rotation, cara_t.rotation);
         assert_eq!(got_joint.translation, joint_t.translation);
         assert_eq!(got_joint.rotation, joint_t.rotation);
-        let repose = client
-            .resource::<CrabSkinRepose>()
-            .0
-            .expect("repose applied");
-        assert_eq!(repose.shift, Vec3::new(10.0, 0.0, -20.0));
-        assert_eq!(repose.pivot, Vec3::Y);
-        assert_eq!(repose.scale, 8.0);
+        let got_cara1 = tf(&mut client, c_cara1);
+        let got_joint1 = tf(&mut client, c_joint1);
+        assert_eq!(got_cara1.translation, cara_t1.translation);
+        assert_eq!(got_cara1.rotation, cara_t1.rotation);
+        assert_eq!(got_joint1.translation, joint_t1.translation);
+        assert_eq!(got_joint1.rotation, joint_t1.rotation);
+
+        let reposes = client.resource::<CrabSkinRepose>().0.clone();
+        let repose0 = reposes.get(&0).expect("env 0's repose applied");
+        assert_eq!(repose0.shift, Vec3::new(10.0, 0.0, -20.0));
+        assert_eq!(repose0.pivot, Vec3::Y);
+        assert_eq!(repose0.scale, 8.0);
+        assert!(
+            !reposes.contains_key(&1),
+            "an unpublished env stays at identity"
+        );
         // The host's piloted craft crossed too — the client's mirror holds its exact pose
         // (rl#192: this is what the second player's wireframe drawer renders).
         let craft = client

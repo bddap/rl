@@ -63,22 +63,24 @@ pub enum AppPhase {
 /// `Plugin::build(&self)` can't move a non-`Clone` `Lockstep`/`NetDriver` out of
 /// itself — inserting them as resources at the `Playing` transition is the clean path.
 ///
-/// `external_crab` is the REQUIRED trained checkpoint dir for the one giant crab — the REAL
-/// rapier-simulated NN body ("real Sally", [`crate::external_crab`]). There is NO integer
-/// fallback (rl#114): a SOLO round always arms it; a NETWORKED round arms it once peers agree on a
-/// shared brain (the weights-digest handshake) and step it at the deterministic cadence. A
-/// networked-UNSYNCED round CANNOT arm Sally and FAILS LOUD — a clear peer-mismatch
-/// error naming the fix (run rl-update on every device) rather than silently substituting a fake
-/// crab. The failure is GRACEFUL: the scripted `Boot::Round`
-/// path returns it as an `Err` (clean CLI exit, no panic); the interactive menu pre-gates it in
-/// `poll_formation` and returns to the chooser showing the message (no mid-transition crash).
+/// `external_crab` is the REQUIRED trained brain-binding list for the giant crabs — one
+/// checkpoint dir per crab, in crab-index order (rl#200: a multi-brain round runs several REAL
+/// rapier-simulated NN bodies, [`crate::external_crab`]). Every binding was validated fail-loud
+/// by the CLI before this is called. There is NO integer fallback (rl#114): a SOLO round always
+/// arms them; a NETWORKED round arms them once peers agree on the crab-model asset and the host
+/// steps them at the deterministic cadence. A networked-UNSYNCED round CANNOT arm Sally and
+/// FAILS LOUD — a clear peer-mismatch error naming the fix (run rl-update on every device)
+/// rather than silently substituting a fake crab. The failure is GRACEFUL: the scripted
+/// `Boot::Round` path returns it as an `Err` (clean CLI exit, no panic); the interactive menu
+/// pre-gates it in `poll_formation` and returns to the chooser showing the message (no
+/// mid-transition crash).
 ///
 /// `render_mode` is the crab render view's starting mode (mesh in normal play; the player cycles
 /// it live with the `CycleRenderMode` control, boots into a mode via `--render-mode`/
 /// `RL_RENDER_MODE`, or — with no Sally glb — defaults to `Colliders`).
 pub fn build_windowed_app(
     boot: Boot,
-    external_crab: std::path::PathBuf,
+    external_crab: Vec<std::path::PathBuf>,
     render_mode: super::RenderMode,
 ) -> anyhow::Result<App> {
     // NO determinism pin, on ANY boot (rl#199): only the solo/host peer steps the float NN
@@ -166,18 +168,13 @@ pub fn build_windowed_app(
                 .run_if(in_state(AppPhase::Playing)),
         );
 
-    // OUR policy-weights digest, advertised in networked formation so peers can
-    // agree on a shared brain (see [`crate::may_arm_external_crab`]). `0` for no checkpoint.
-    // MUST equal the digest the per-tick bridge folds into the lockstep hash — both come from
-    // [`crab_world::play::checkpoint_digest`] (here from the path; on the bridge via
-    // `Policy::weights_digest()`), so the arming path must source its folded digest from the
-    // SAME checkpoint, or a hot-reload could split the two.
-    let weights_digest = crab_world::play::checkpoint_digest(&external_crab);
-    // OUR crab-MODEL-asset digest: the giant crab's rapier colliders are derived
+    // OUR crab-MODEL-asset digest: the giant crabs' rapier colliders are derived
     // from this asset ([`crab_world::mesh_fallback::constructed_body_digest`]), so peers must agree on it
-    // before arming the float crab in lockstep — a different model builds different colliders
-    // and desyncs even with identical brains. Computed unconditionally (it's a property of this
-    // peer's installed crab model, independent of whether a checkpoint loaded); `0` for no model.
+    // before arming the float crabs — a different model builds and renders different crabs.
+    // Computed unconditionally (it's a property of this peer's installed crab model,
+    // independent of whether a checkpoint loaded); `0` for no model. (No weights digest is
+    // advertised any more — rl#200 increment 6: clients run no inference, and each binding was
+    // validated fail-loud at launch.)
     let asset_digest = crab_world::mesh_fallback::constructed_body_digest();
 
     match boot {
@@ -200,14 +197,15 @@ pub fn build_windowed_app(
                 lockstep: mut ls,
                 net,
             } = armed.into_ready();
-            // Capture the crab's spawn + seed the pose BEFORE `ls` moves into core.
-            let spawn = seed_external_crab_solo(&mut ls);
+            // Size the crab set to the binding count, then capture the spawns + seed the
+            // poses BEFORE `ls` moves into core.
+            let spawns = seed_external_crab_solo(&mut ls, external_crab.len());
             let coord = super::driver::coordinator(net, ls.peers(), ls.me(), ls.sim().clone());
             insert_core(&mut app, ls, coord);
             // Known-armed at build: add the stack AND arm the gate now (one path,
-            // [`install_armed_nn_crab`]), so the crab spawns frame one at the player's actual
-            // position — nothing per-peer to reconcile.
-            install_armed_nn_crab(&mut app, external_crab, spawn);
+            // [`install_armed_nn_crab`]), so the crabs spawn frame one at the players' actual
+            // positions — nothing per-peer to reconcile.
+            install_armed_nn_crab(&mut app, external_crab, spawns);
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
                 .set(AppPhase::Playing);
@@ -222,22 +220,25 @@ pub fn build_windowed_app(
             app.add_plugins(menu::MenuPlugin {
                 seed,
                 telemetry,
-                weights_digest,
                 asset_digest,
             });
-            // NN crab on the round: the menu can't know at BUILD time whether the
+            // NN crabs on the round: the menu can't know at BUILD time whether the
             // round will be solo, networked-synced, or networked-unsynced, so add the whole NN
             // stack now with the gate OFF and no crab spawned (NumEnvs 0), and arm it only if
             // the resolved round may ([`ensure_round_installed`] → [`crate::may_arm_external_crab`]:
-            // solo always, networked only with synced weights). The crab's arena spawn is a pure
-            // function of the seed (a throwaway solo lockstep reads it), so it's known here
-            // without the round existing yet. The checkpoint is REQUIRED, so the stack is
-            // always installed; a networked-UNSYNCED round leaves the gate off and
-            // `ensure_round_installed` FAILS LOUD rather than substituting a fake crab.
+            // solo always, networked only with synced assets). The crabs' arena spawns are a
+            // pure function of the seed + binding count (a throwaway solo lockstep reads them),
+            // so they're known here without the round existing yet. The checkpoints are
+            // REQUIRED, so the stack is always installed; a networked-UNSYNCED round leaves the
+            // gate off and `ensure_round_installed` FAILS LOUD rather than substituting a fake
+            // crab.
             {
-                let dir = external_crab;
-                let crab_spawn = crate::formation::solo_lockstep_for(seed).sim().crab().pos();
-                add_external_nn_crab(&mut app, dir, crab_spawn);
+                let dirs = external_crab;
+                let mut throwaway = crate::formation::solo_lockstep_for(seed);
+                throwaway.configure_crabs(dirs.len());
+                let crab_spawns: Vec<Pos> =
+                    throwaway.sim().crabs().iter().map(|c| c.pos()).collect();
+                add_external_nn_crab(&mut app, dirs, crab_spawns);
                 // Gate OFF: leave `ExternalCrabArmed` ABSENT (presence is the state). The
                 // transition (`ensure_round_installed`) inserts it iff the round resolves armable.
                 app.insert_resource(crab_world::bot::NumEnvs(0)); // no crab spawns behind the menu
@@ -335,57 +336,50 @@ pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), Stri
     if crate::may_arm_external_crab(sync) {
         return Ok(());
     }
-    // Reached only on a networked round that can't arm (so `sync` is present); the host-brain
-    // half is checked first, so a passing flag here means the host is fine but the collider
-    // asset differs on a peer.
-    let (cause, fix) = if !sync.is_some_and(|v| v.host_brain) {
-        (
-            "the HOST is not verifiably running the real trained Sally — its brain.bin failed \
-             to load or is absent (weights digest 0), or its digest was never heard directly",
-            "run rl-update on the HOST device (or host from a device with a working brain)",
-        )
-    } else {
-        (
-            "the crab colliders (the sally.glb model) differ on a peer — it would build and \
-             render a different crab",
-            "run rl-update on every device so all peers share the same crab model",
-        )
-    };
-    Err(format!(
-        "rl#114: refusing to start the round — can't arm the trained NN crab (\"Sally\") for this \
-         multiplayer match because {cause}. Fix: {fix}, then re-form the match. (There is \
-         deliberately no integer stand-in crab — an unarmable round refuses rather than silently \
-         dropping Sally.)"
-    ))
+    // Reached only on a networked round that can't arm (so `sync` is present): the collider
+    // asset differs on a peer. (The host's own brains are validated fail-loud at launch, so
+    // there is no host-brain cause any more — rl#200 increment 6.)
+    Err(
+        "rl#114: refusing to start the round — can't arm the trained NN crabs (\"Sally\") for \
+         this multiplayer match because the crab colliders (the sally.glb model) differ on a \
+         peer — it would build and render a different crab. Fix: run rl-update on every device \
+         so all peers share the same crab model, then re-form the match. (There is deliberately \
+         no integer stand-in crab — an unarmable round refuses rather than silently dropping \
+         Sally.)"
+            .to_string(),
+    )
 }
 
-/// Seed the sim crab's spawn pose into `ls` so the rapier-NN body begins where the round placed
-/// the giant crab, and return that spawn for [`add_external_nn_crab`]. The ONE seed both the
-/// windowed solo `Boot::Round` client and the headless screenshot use, so the evidence shot arms
-/// the SAME way the player's client does (one implementation per thing). Writes
-/// back the crab's CURRENT pose, so sim state is unchanged; digest 0 to seed (the bridge's first
-/// post-step `hash_crab_physics` fills the real digest before any cross-check). Solo only — a
-/// networked round arms through the digest handshake in `ensure_round_installed`, not here.
-pub(super) fn seed_external_crab_solo(ls: &mut Lockstep) -> Pos {
-    let crab = ls.sim().crab();
-    let spawn = crab.pos();
-    ls.set_external_crab_pose(spawn, crab.yaw(), 0);
-    spawn
+/// Size the round's crab set to the binding count (`crabs`), then seed each sim crab's spawn
+/// pose into `ls` so every rapier-NN body begins where the round placed its giant crab, and
+/// return those spawns for [`add_external_nn_crab`]. The ONE seed both the windowed solo
+/// `Boot::Round` client and the headless screenshot use, so the evidence shot arms the SAME
+/// way the player's client does (one implementation per thing). Writes back each crab's
+/// CURRENT pose, so sim state is unchanged; digest 0 to seed (the bridge's first post-step
+/// `hash_crab_physics` fills the real digests before any cross-check). Solo only — a networked
+/// round arms through the asset handshake in `ensure_round_installed`, not here.
+pub(super) fn seed_external_crab_solo(ls: &mut Lockstep, crabs: usize) -> Vec<Pos> {
+    ls.configure_crabs(crabs);
+    let spawns: Vec<Pos> = ls.sim().crabs().iter().map(|c| c.pos()).collect();
+    for (idx, crab) in ls.sim().crabs().to_vec().into_iter().enumerate() {
+        ls.set_external_crab_pose(idx, crab.pos(), crab.yaw(), 0);
+    }
+    spawns
 }
 
-/// Wire the real rapier-NN crab into the windowed solo app: the bot/physics/brain stack
-/// (the SAME plugins `rl --demo` runs, so the crab steps the exact dynamics the policy
-/// trained under) plus the [`external_crab::ExternalCrabPlugin`] bridge that walks it toward the
-/// player and feeds its body position back into the sim. With the model present the cosmetic
-/// skin rides the body; with no `sally.glb` the visible crab is the static giant silhouette
-/// (`spawn_world` keeps it shown when no skin loads).
+/// Wire the real rapier-NN crabs into the windowed solo app: the bot/physics/brain stack
+/// (the SAME plugins `rl --demo` runs, so the crabs step the exact dynamics the policies
+/// trained under) plus the [`external_crab::ExternalCrabPlugin`] bridge that walks each toward
+/// its player and feeds its body position back into the sim. With the model present the
+/// cosmetic skins ride the bodies; with no `sally.glb` the visible crab is the static giant
+/// silhouette (`spawn_world` keeps it shown when no skin loads).
 pub(super) fn add_external_nn_crab(
     app: &mut App,
-    checkpoint_dir: std::path::PathBuf,
-    crab_spawn: Pos,
+    checkpoint_dirs: Vec<std::path::PathBuf>,
+    crab_spawns: Vec<Pos>,
 ) {
     app.insert_resource(crab_world::Visuals(true))
-        .insert_resource(crab_world::bot::NumEnvs(1))
+        .insert_resource(crab_world::bot::NumEnvs(checkpoint_dirs.len()))
         // Same fixed timestep + softened contact spring as training/demo, with Rapier in
         // FixedUpdate (lockstep with the Sense→Think→Act brain loop) — bundled in the one
         // order that applies the spring, so the solo crab's physics can't drift from what
@@ -403,8 +397,8 @@ pub(super) fn add_external_nn_crab(
         // one; `drive_lockstep` mirrors the controls into its `VehicleControl` each tick.
         .add_plugins(crab_world::vehicle::VehiclePlugin)
         .add_plugins(crate::external_crab::ExternalCrabPlugin {
-            checkpoint_dir,
-            crab_spawn,
+            checkpoint_dirs,
+            crab_spawns,
         });
 
     // Park the wall-clock FixedUpdate auto-pump; `drive_lockstep` pumps the body at the
@@ -426,9 +420,9 @@ pub(super) fn add_external_nn_crab(
 /// armable, so it calls [`add_external_nn_crab`] directly.
 pub(super) fn install_armed_nn_crab(
     app: &mut App,
-    checkpoint_dir: std::path::PathBuf,
-    crab_spawn: Pos,
+    checkpoint_dirs: Vec<std::path::PathBuf>,
+    crab_spawns: Vec<Pos>,
 ) {
-    add_external_nn_crab(app, checkpoint_dir, crab_spawn);
+    add_external_nn_crab(app, checkpoint_dirs, crab_spawns);
     crate::external_crab::arm(app.world_mut());
 }
