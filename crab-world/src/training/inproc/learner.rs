@@ -46,7 +46,7 @@ fn snapshot_policy(state: &TrainingState, log_std_floor: f32) -> RollRequest {
 /// Phase 1 (durability) — persist the checkpoint so a live demo / a restart picks up
 /// the latest weights, normalizer, and Adam moments. Not a handoff to the threads (they
 /// get the in-memory snapshot); the Adam state lives on the GPU learner, so it is saved
-/// here beside the brain, stamped with the set's generation so a resume can verify the
+/// here beside the brain, stamped with the set's save stamp so a resume can verify the
 /// moments belong to this brain (bddap/rl#215). If the set itself didn't complete, the
 /// optimizer is skipped too — the previous save's optimizer stays paired with the
 /// previous save's brain.
@@ -56,8 +56,8 @@ fn persist_checkpoint(
     checkpoint_dir: &Path,
 ) {
     let paths = CheckpointDir::new(checkpoint_dir);
-    if let Some(generation) = state.save_checkpoint() {
-        gpu_learner.save_adam_state(&paths.optimizer_path(), state.brain().arch(), generation);
+    if let Some(save_stamp) = state.save_checkpoint() {
+        gpu_learner.save_adam_state(&paths.optimizer_path(), state.brain().arch(), save_stamp);
     }
 }
 
@@ -306,17 +306,14 @@ pub fn run_learner(
     // Resume the optimizer's Adam moments + step from the checkpoint so the update
     // continues with warm momentum instead of the brief self-correcting transient a cold
     // optimizer costs (rl#60). An absent optimizer.bin resumes cold — backward compatible,
-    // no error (see `load_optimizer`, which also refuses a wrong-arch/legacy/corrupt file
-    // to cold). Skipped entirely when the brain itself cold-started (a fresh dir, or a DOF
-    // change, bddap/rl#31): the moments are per-parameter, so loading old moments onto a
-    // fresh net would misalign them exactly as the old brain would.
+    // no error (see `load_optimizer`, which also refuses a wrong-arch/legacy/corrupt or
+    // cross-save file to cold). Skipped entirely when the brain itself cold-started (a
+    // fresh dir, or a DOF change, bddap/rl#31): the moments are per-parameter, so loading
+    // old moments onto a fresh net would misalign them exactly as the old brain would —
+    // hence the load is keyed on the resumed set's key, which only a warm start has.
     let ckpt = CheckpointDir::new(&checkpoint_dir);
-    if state.warm_started() {
-        gpu_learner.load_adam_state(
-            &ckpt.optimizer_path(),
-            state.brain().arch(),
-            state.resumed_generation(),
-        );
+    if let Some(key) = state.resumed_set_key() {
+        gpu_learner.load_adam_state(&ckpt.optimizer_path(), key);
     } else {
         eprintln!("[learner] optimizer not warm-started: the brain cold-started — cold moments");
     }
@@ -482,7 +479,7 @@ pub fn run_learner(
     }
 
     // Final checkpoint so the last update's weights are on disk — through
-    // `persist_checkpoint`, optimizer included, so the whole dir carries ONE generation
+    // `persist_checkpoint`, optimizer included, so the whole dir carries ONE save stamp
     // and a later resume warm-starts the moments instead of refusing a stale stamp
     // (bddap/rl#215). The rollout threads are torn down by their Drop (channel close +
     // join) when `threads` drops.

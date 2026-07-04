@@ -20,7 +20,7 @@ use crate::training::checkpoint::{
     BodyIdentity, BrainFile, BrainLoadError, CheckpointDir, check_body_identity, load_brain_file,
     load_return_normalizer, save_brain, save_return_normalizer,
 };
-use crate::training::envelope::EnvelopeError;
+use crate::training::envelope::{EnvelopeError, SetKey};
 use crate::training::normalizer::{
     IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
 };
@@ -119,18 +119,15 @@ pub(crate) struct TrainingState {
     pub(super) log_std_floor: f32,
 
     pub(super) checkpoint_dir: PathBuf,
-    pub(super) saved_on_exit: bool,
 
-    /// Whether the brain actually warm-started from the checkpoint dir at build time.
-    /// The optimizer's warm/cold gate ([`super::super::inproc`]): Adam moments are
-    /// per-parameter, so they resume iff the brain they belong to did.
-    warm_started: bool,
-
-    /// The generation stamp of the checkpoint set the brain warm-started from
-    /// (bddap/rl#215) — what the optimizer's resume must match, since the optimizer is
-    /// saved beside the set but loaded later ([`super::super::inproc`]). `None` on a
-    /// cold start or a pre-stamp brain.
-    resumed_generation: Option<u64>,
+    /// `Some` iff the brain warm-started from the checkpoint dir at build time,
+    /// carrying that set's pairing key (arch + save stamp). The optimizer's warm/cold
+    /// gate ([`super::super::inproc`]): Adam moments are per-parameter, so they resume
+    /// iff the brain they belong to did — and only under this key (bddap/rl#215), since
+    /// the optimizer is saved beside the set but loaded later. One field, not a
+    /// `warm_started` bool beside a stamp, so "cold start with a leftover key" is
+    /// unrepresentable.
+    resumed: Option<SetKey>,
 
     /// Stop after this many physics ticks (0 = unlimited). See `Args::ticks`.
     pub(super) tick_budget: u64,
@@ -278,21 +275,23 @@ impl TrainingState {
         // LEARNER-ONLY: a rollout worker skips the load entirely. Its brain + obs
         // normalizer are replaced by the learner's snapshot at the first `begin_horizon`
         // (a failed load there refuses the horizon), and the return normalizer /
-        // `warm_started` are learner-side state — so a worker read would be K redundant
+        // `resumed` key are learner-side state — so a worker read would be K redundant
         // disk loads that RACE the learner's non-atomic set write (brain lands before
         // the normalizers), where this abort policy would misfire on a fresh dir.
-        let mut warm_started = false;
-        // The resumed set's generation stamp (bddap/rl#215): the brain's, which every
-        // paired artifact must match. Stays `None` on a cold start or a pre-stamp brain.
-        let mut resumed_generation = None;
+        // `Some(key)` once the brain warm-starts: the resumed set's pairing key
+        // (bddap/rl#200 §2 + #215), which every paired artifact must match. Stays `None`
+        // on every cold start.
+        let mut resumed: Option<SetKey> = None;
         match (!worker_mode).then(|| load_brain_file::<TrainBackend>(&paths.brain_file(), &device))
         {
             None => {} // worker: no load at all
-            Some(Ok(BrainFile {
-                brain: loaded,
-                body_digest,
-                generation,
-            })) => {
+            Some(Ok(file)) => {
+                let key = file.set_key();
+                let BrainFile {
+                    brain: loaded,
+                    body_digest,
+                    ..
+                } = file;
                 // Resume is TAG-authoritative; an explicit `--arch` that disagrees with
                 // the tag is an operator error and ABORTS (bddap/rl#200 §3). Cold-starting
                 // into the flag's arch here would silently discard the trained policy;
@@ -350,8 +349,7 @@ impl TrainingState {
                         paths.brain_file().display()
                     );
                     brain = loaded;
-                    warm_started = true;
-                    resumed_generation = generation;
+                    resumed = Some(key);
                 } else {
                     warn!(
                         "Checkpoint at {} has an incompatible obs/action shape ({obs}/{action}; \
@@ -380,16 +378,15 @@ impl TrainingState {
         }
 
         // Normalizers are brain-PAIRED: they load iff the brain warm-started, tagged with
-        // its arch and stamped with its save-generation (the set-coherence checks,
+        // its arch and stamped with its save stamp (the set-coherence checks,
         // bddap/rl#200 §2 + #215 — a partial save landing one member without the others
         // must refuse here, not load clean), and a warm brain with unusable normalizer
         // stats is an ABORT — training trained weights against cold or mis-paired scales
         // mis-normalizes every observation/value, the exact silent skew the envelope
         // exists to refuse. On a cold start they stay fresh with the fresh brain.
-        if warm_started {
-            let arch = brain.arch();
+        if let Some(key) = resumed {
             let norm_path = paths.normalizer_path();
-            match ObsNormalizer::load(&norm_path, arch, resumed_generation) {
+            match ObsNormalizer::load(&norm_path, key) {
                 Ok(loaded) => {
                     info!("Loaded normalizer state from {}", norm_path.display());
                     obs_normalizer = loaded;
@@ -402,7 +399,7 @@ impl TrainingState {
                 ),
             }
             let ret_norm_path = paths.return_normalizer_path();
-            match load_return_normalizer(&ret_norm_path, arch, resumed_generation) {
+            match load_return_normalizer(&ret_norm_path, key) {
                 Ok(loaded) => {
                     info!(
                         "Loaded return normalizer state from {}",
@@ -438,9 +435,7 @@ impl TrainingState {
             return_normalizer,
             rng,
             checkpoint_dir: config.checkpoint.checkpoint_dir.clone(),
-            saved_on_exit: false,
-            warm_started,
-            resumed_generation,
+            resumed,
             tick_budget: config.ticks,
             reported_episodes: 0,
             normalizer_increment,
@@ -453,21 +448,16 @@ impl TrainingState {
         }
     }
 
-    /// Whether the brain warm-started from the checkpoint dir at build time — the
-    /// optimizer's warm/cold gate.
-    pub(crate) fn warm_started(&self) -> bool {
-        self.warm_started
-    }
-
-    /// The generation stamp of the set the brain warm-started from (bddap/rl#215) — the
-    /// optimizer resume's pairing check. `None` on a cold start or a pre-stamp brain.
-    pub(crate) fn resumed_generation(&self) -> Option<u64> {
-        self.resumed_generation
+    /// `Some(key)` iff the brain warm-started from the checkpoint dir at build time —
+    /// the optimizer's warm/cold gate AND its pairing key in one: the moments resume
+    /// only under the resumed set's key (bddap/rl#215), never onto a cold-started brain.
+    pub(crate) fn resumed_set_key(&self) -> Option<SetKey> {
+        self.resumed
     }
 
     /// Save the checkpoint SET (brain + obs normalizer + return normalizer), every
-    /// member stamped with one freshly-drawn generation (bddap/rl#215) so a loader can
-    /// verify the set was written together. Returns that generation on a complete save —
+    /// member stamped with one freshly-drawn save_stamp (bddap/rl#215) so a loader can
+    /// verify the set was written together. Returns that save_stamp on a complete save —
     /// the caller stamps anything saved BESIDE the set (the optimizer) with it — or
     /// `None` when any member failed.
     ///
@@ -476,7 +466,7 @@ impl TrainingState {
     /// remaining writes are SKIPPED, not warn-and-proceed. The brain (the largest file,
     /// the one ENOSPC kills) goes first: its failure leaves the previous set intact and
     /// loadable, instead of landing fresh normalizers under a stale brain every
-    /// iteration. A failure between members still mis-pairs the dir, but the generation
+    /// iteration. A failure between members still mis-pairs the dir, but the save_stamp
     /// stamps make that a loud load-time refusal, never a clean mis-paired load.
     pub(crate) fn save_checkpoint(&self) -> Option<u64> {
         if let Err(e) = std::fs::create_dir_all(&self.checkpoint_dir) {
@@ -489,15 +479,15 @@ impl TrainingState {
 
         let paths = CheckpointDir::new(&self.checkpoint_dir);
         let arch = self.brain.train().arch();
-        let generation: u64 = rand::random();
-        if let Err(e) = save_brain(self.brain.train(), &paths.brain_file(), generation) {
+        let save_stamp: u64 = rand::random();
+        if let Err(e) = save_brain(self.brain.train(), &paths.brain_file(), save_stamp) {
             warn!("Failed to save brain: {e} — skipping the rest of the checkpoint set so the previous save stays coherent");
             return None;
         }
         info!("Saved brain to {}", paths.brain_file().display());
         if let Err(e) = self
             .obs_normalizer
-            .save(arch, &paths.normalizer_path(), generation)
+            .save(arch, &paths.normalizer_path(), save_stamp)
         {
             warn!("Failed to save obs normalizer: {e} — checkpoint set incomplete (the stamp makes this refuse at load)");
             return None;
@@ -506,12 +496,12 @@ impl TrainingState {
             &self.return_normalizer,
             arch,
             &paths.return_normalizer_path(),
-            generation,
+            save_stamp,
         ) {
             warn!("Failed to save return normalizer: {e} — checkpoint set incomplete (the stamp makes this refuse at load)");
             return None;
         }
-        Some(generation)
+        Some(save_stamp)
     }
 
     // ---- In-process rollout-thread / learner hooks ------------------------

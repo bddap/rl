@@ -418,7 +418,7 @@ mod tests {
     use crate::training::reward::GRAB_REWARD;
     use bevy::ecs::system::RunSystemOnce;
 
-    use super::super::lifecycle::{reset_crab, save_on_exit};
+    use super::super::lifecycle::reset_crab;
 
     /// Drive `build_observation` over a single hand-placed carapace and return env 0's
     /// observation. No physics/rig — just the resources the system reads plus one
@@ -545,8 +545,7 @@ mod tests {
                 (brain_step, reset_crab)
                     .chain()
                     .in_set(crate::bot::BotSet::Think),
-            )
-            .add_systems(Last, save_on_exit);
+            );
         app
     }
 

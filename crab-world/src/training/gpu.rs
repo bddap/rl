@@ -15,6 +15,7 @@ use tracing::info;
 use super::TrainBackend;
 use super::algorithm::{PpoConfig, PpoMetrics, ReturnNormalizer, RolloutBuffer};
 use super::checkpoint::{CrabOpt, crab_optimizer, load_optimizer, save_optimizer};
+use super::envelope::SetKey;
 use super::update::ppo_update_core;
 use crate::bot::arch::{AnyBrain, ArchId};
 
@@ -240,26 +241,19 @@ impl<B: AutodiffBackend> GpuLearner<B> {
     /// moment tensors back off the GPU, tagged with `arch` — the CPU-source brain's, which
     /// this learner's device brain mirrors by construction (the leaf-record bridge fails
     /// loudly cross-variant). Called each iteration beside the brain checkpoint, stamped
-    /// with that set's `generation` (bddap/rl#215), so a resume warm-starts the
+    /// with that set's `save_stamp` (bddap/rl#215), so a resume warm-starts the
     /// optimizer. Best-effort (see [`save_optimizer`]).
-    pub fn save_adam_state(&self, path: &Path, arch: ArchId, generation: u64) {
-        save_optimizer(&self.optimizer, arch, path, generation);
+    pub fn save_adam_state(&self, path: &Path, arch: ArchId, save_stamp: u64) {
+        save_optimizer(&self.optimizer, arch, path, save_stamp);
     }
 
     /// Restore the optimizer's Adam state from `path`, uploading the moments back onto this
     /// learner's GPU device. A missing file leaves the optimizer cold without error, as does
-    /// a refused one — legacy, corrupt, unknown version, tagged with an arch other than
-    /// `expected_arch`, or stamped with a generation other than `expected_generation`
-    /// (both the resumed brain's; see [`load_optimizer`]).
-    pub fn load_adam_state(
-        &mut self,
-        path: &Path,
-        expected_arch: ArchId,
-        expected_generation: Option<u64>,
-    ) {
+    /// a refused one — legacy, corrupt, unknown version, or failing either half of `key`
+    /// (the resumed brain's [`SetKey`]; see [`load_optimizer`]).
+    pub fn load_adam_state(&mut self, path: &Path, key: SetKey) {
         let cold = std::mem::replace(&mut self.optimizer, crab_optimizer());
-        self.optimizer =
-            load_optimizer(cold, path, &self.device, expected_arch, expected_generation);
+        self.optimizer = load_optimizer(cold, path, &self.device, key);
     }
 }
 

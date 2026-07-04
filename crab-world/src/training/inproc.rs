@@ -482,7 +482,7 @@ fn warm_up_app(app: &mut App) {
 fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: usize) -> App {
     use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack};
     use crate::training::systems;
-    use crate::training::systems::{brain_step, reset_crab, save_on_exit};
+    use crate::training::systems::{brain_step, reset_crab};
 
     let mut app = headless_stack(HeadlessStack {
         num_envs,
@@ -492,8 +492,8 @@ fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: us
 
     // Worker-mode training state + the Sense→Think→Act systems. No PPO-update step
     // runs in this app: the driver thread reads the per-env buffers out each horizon
-    // and the learner owns the update. save_on_exit stays harmless (no AppExit fires
-    // here).
+    // and the learner owns the update — and no exit-save either: only the learner
+    // writes the checkpoint dir (a worker's brain is a snapshot copy).
     // `id` is the worker index — mixed into the RNG seed so each thread explores an
     // independent stream even under a fixed `--seed` (see `TrainingState::build`).
     let state = systems::TrainingState::new_worker(config, id, arch);
@@ -503,8 +503,7 @@ fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: us
             (brain_step, reset_crab)
                 .chain()
                 .in_set(crate::bot::BotSet::Think),
-        )
-        .add_systems(Last, save_on_exit);
+        );
 
     // Must run AFTER add_systems above — the schedules don't exist until the systems are
     // wired. Shared with the determinism probe (see `force_serial_schedules`).
