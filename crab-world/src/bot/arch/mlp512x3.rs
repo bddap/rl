@@ -56,8 +56,8 @@ impl<B: Backend> Mlp512x3<B> {
         let trunk_ln2 = nn::LayerNormConfig::new(HIDDEN_SIZE).init(device);
         let trunk_ln3 = nn::LayerNormConfig::new(HIDDEN_SIZE).init(device);
 
-        // Small-gain init on the policy head: the trunk ends
-        // in a LayerNorm (unit-scale output), and the action IS the joint torque — a
+        // Small-gain init on the policy head: the trunk ends in a LayerNorm
+        // (unit-scale output), and the action IS the joint torque — a
         // default-init head would command near-max torque everywhere and launch the
         // crab. Tiny weights start it near-limp.
         let policy_fc = nn::LinearConfig::new(HIDDEN_SIZE, ACTION_SIZE)

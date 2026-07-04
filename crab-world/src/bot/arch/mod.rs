@@ -94,11 +94,10 @@ impl From<ArchId> for String {
 /// this a `Module`/`AutodiffModule` (so `.valid()`, optimizer adaptors, and gradient
 /// collection all work over the enum), and every shared holder (`TrainingState`,
 /// `GpuLearner`, `Policy`) stores this type concretely — no generics over the leaf.
-// Variant sizes legitimately diverge as capacity leaves land, and a
-// brain is a held-once singleton (TrainingState/GpuLearner/Policy each hold ONE), never
-// hot-array data — boxing the big leaf would buy nothing and cost an indirection on every
-// forward pass.
-#[allow(clippy::large_enum_variant)]
+// A brain is a held-once singleton (TrainingState/GpuLearner/Policy each hold ONE),
+// never hot-array data — when variant sizes diverge again as capacity leaves land,
+// boxing the big leaf would buy nothing and cost an indirection on every forward pass
+// (so: allow large_enum_variant then, don't box).
 #[derive(Module, Debug)]
 pub enum AnyBrain<B: Backend> {
     Mlp512x3(Mlp512x3<B>),
