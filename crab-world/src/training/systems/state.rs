@@ -792,7 +792,7 @@ mod tests {
         // bound still bites.
         let fresh_brain_differing_from = |prev: &[u32]| -> (AnyBrain<TrainBackend>, Vec<u32>) {
             for _ in 0..16 {
-                let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+                let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
                 let bits = policy_bits(&brain.valid());
                 if bits != prev {
                     return (brain, bits);
@@ -804,7 +804,7 @@ mod tests {
             );
         };
 
-        let brain_a: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let brain_a: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
         let want_a = policy_bits(&brain_a.valid());
         let mut cached = InferenceCachedBrain::new(brain_a);
 
@@ -847,7 +847,7 @@ mod tests {
         };
         let init_with_seed = |seed: u64| -> Vec<u32> {
             <TrainBackend as burn::tensor::backend::Backend>::seed(&device, seed);
-            weight_bits(&AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device).valid())
+            weight_bits(&AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device).valid())
         };
 
         // The backend's init RNG is process-GLOBAL, so under a parallel test run a sibling

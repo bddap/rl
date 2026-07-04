@@ -1,10 +1,10 @@
-//! `mlp512x3` — the second architecture leaf (bddap/rl#200 increment 5): a 512-wide
-//! THREE-layer MLP trunk feeding the same separate policy/value heads as `mlp256`, with
-//! the same state-independent learnable per-dim `log_std`. ~5.5× the parameters of
-//! `mlp256` (~730k vs ~130k at the 92/38 rig) — a deliberate single-variable capacity
-//! A/B: everything except trunk depth×width (and the value head scaling with it) is
-//! copied from `mlp256`, including the small-gain head init and `LOG_STD_INIT`, so an
-//! equal-env-step curve difference is attributable to capacity, not init policy.
+//! `mlp512x3` — a 512-wide THREE-layer MLP trunk feeding separate policy/value heads,
+//! with a state-independent learnable per-dim `log_std` (~730k params at the 92/38
+//! rig). Landed as bddap/rl#200 increment 5a's single-variable capacity A/B against the
+//! founding 1×256 leaf (`mlp256`, ~130k params; everything but trunk depth×width held
+//! equal), and became the sole surviving architecture at the 5b cull: its seed curves
+//! separated cleanly above `mlp256`'s at equal env-steps (2026-07-04, evidence on the
+//! epic issue).
 
 use burn::module::Param;
 use burn::nn;
@@ -15,12 +15,11 @@ use super::super::sensor::OBS_SIZE;
 
 const HIDDEN_SIZE: usize = 512;
 
-/// Initial policy log-std (std ≈ 0.2) — same value and rationale as `mlp256`
-/// (start near-deterministic so a gait can persist; the policy widens itself): the
-/// A/B must not vary exploration init alongside capacity.
+/// Initial policy log-std (std ≈ 0.2): start near-deterministic so a nascent gait can
+/// persist long enough to be rewarded; the exploration schedule widens σ itself.
 const LOG_STD_INIT: f32 = -1.6;
 
-/// Actor-Critic network for PPO — `mlp256`'s shape scaled to a 3×512 trunk.
+/// Actor-Critic network for PPO — a 3×512 LayerNorm trunk with separate policy/value heads.
 #[derive(Module, Debug)]
 pub struct Mlp512x3<B: Backend> {
     trunk_fc1: nn::Linear<B>,
@@ -57,7 +56,7 @@ impl<B: Backend> Mlp512x3<B> {
         let trunk_ln2 = nn::LayerNormConfig::new(HIDDEN_SIZE).init(device);
         let trunk_ln3 = nn::LayerNormConfig::new(HIDDEN_SIZE).init(device);
 
-        // Small-gain init on the policy head, same rationale as mlp256: the trunk ends
+        // Small-gain init on the policy head: the trunk ends
         // in a LayerNorm (unit-scale output), and the action IS the joint torque — a
         // default-init head would command near-max torque everywhere and launch the
         // crab. Tiny weights start it near-limp.
@@ -128,9 +127,10 @@ impl<B: Backend> Mlp512x3<B> {
         self.value_fc2.forward(x)
     }
 
-    /// The `(obs_dim, action_dim)` this brain's weights were built for — same
-    /// read-off-the-weights contract as `mlp256` (see its doc for why: rejects a
-    /// wrong-rig checkpoint before a forward pass panics in the matmul).
+    /// The `(obs_dim, action_dim)` this brain's weights were built for — read off the
+    /// LOADED weights, never the compiled rig constants (post-`load_record` they reflect
+    /// the checkpoint), so a wrong-rig checkpoint is rejected by the fit gate before a
+    /// forward pass panics in the matmul.
     pub fn io_dims(&self) -> (usize, usize) {
         let [obs_dim, _hidden] = self.trunk_fc1.weight.shape().dims();
         let [_hidden, action_dim] = self.policy_fc.weight.shape().dims();

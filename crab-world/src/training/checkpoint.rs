@@ -385,7 +385,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let device = NdArrayDevice::Cpu;
-        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
 
         let paths = CheckpointDir::new(&dir);
         save_brain(&brain, &paths.brain_file()).expect("save brain");
@@ -394,7 +394,7 @@ mod tests {
         let loaded = load_brain_file::<TrainBackend>(&paths.brain_file(), &device)
             .expect("load brain via the arch-dispatching loader")
             .brain;
-        assert_eq!(loaded.arch(), ArchId::Mlp256, "arch restored from the tag");
+        assert_eq!(loaded.arch(), ArchId::DEFAULT, "arch restored from the tag");
 
         let test_obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], &device);
         let (orig_means, orig_log_std) = brain.policy(test_obs.clone());
@@ -429,7 +429,7 @@ mod tests {
         let device = NdArrayDevice::Cpu;
 
         // Exactly what a pre-envelope writer produced: the bare leaf record bytes.
-        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
         let raw = brain
             .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
             .unwrap();
@@ -452,9 +452,9 @@ mod tests {
         let path = CheckpointDir::new(&dir).return_normalizer_path();
 
         let norm = ReturnNormalizer::new();
-        save_return_normalizer(&norm, ArchId::Mlp256, &path);
+        save_return_normalizer(&norm, ArchId::DEFAULT, &path);
         assert!(
-            load_return_normalizer(&path, ArchId::Mlp256).is_ok(),
+            load_return_normalizer(&path, ArchId::DEFAULT).is_ok(),
             "matching arch loads"
         );
         // No second arch is registered yet, so the cross-arch refusal is exercised at the
@@ -469,10 +469,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One deterministic Adam step on a tiny constant-gradient loss, returning the updated
-    /// brain + optimizer. Warms the Adam moments for the round-trip test without the full
-    /// PPO machinery: a fixed input + sum loss puts non-zero grads on every parameter, so
-    /// the moments + step advance as a real update would.
+    /// One deterministic Adam step on a tiny quadratic target-pulling loss, returning the
+    /// updated brain + optimizer. Warms the Adam moments for the round-trip test without
+    /// the full PPO machinery. The loss MUST be non-linear in the outputs: gradients then
+    /// change as the parameters move, so the warmed moments genuinely alter the next step.
+    /// A plain `sum()` loss has constant gradients, and Adam's normalized step under a
+    /// constant gradient is `lr·sign(g)` REGARDLESS of moment history — warm and cold
+    /// steps come out identical and the round-trip test's divergence probe has nothing to
+    /// measure (it only ever passed on trunk-path numerical residue). The 0.5 / +1.0
+    /// targets sit away from the init values so every parameter, `log_std` included,
+    /// starts with a non-zero gradient.
     fn adam_test_step(
         brain: AnyBrain<TrainBackend>,
         mut optimizer: CrabOpt<TrainBackend>,
@@ -480,16 +486,25 @@ mod tests {
     ) -> (AnyBrain<TrainBackend>, CrabOpt<TrainBackend>) {
         let obs = Tensor::<TrainBackend, 2>::ones([4, OBS_SIZE], device);
         let (means, log_std) = brain.policy(obs);
-        let loss = means.sum() + log_std.sum();
+        let loss = (means - 0.5).powf_scalar(2.0).sum() + (log_std + 1.0).powf_scalar(2.0).sum();
         let grads = loss.backward();
         let grads = GradientsParams::from_grads(grads, &brain);
         let brain = optimizer.step(1e-2, brain, grads);
         (brain, optimizer)
     }
 
-    fn policy_means(brain: &AnyBrain<TrainBackend>, device: &NdArrayDevice) -> Vec<f32> {
+    /// Policy means CONCATENATED with the (broadcast) log_std row. The round-trip
+    /// assertions probe both: means exercise the whole trunk, while log_std is a free
+    /// parameter with a direct constant gradient in [`adam_test_step`]'s loss — so the
+    /// warm-vs-cold moment difference registers here even for a deep LayerNorm trunk
+    /// whose head-mean shift falls below the comparison tolerance (tanh + three LNs
+    /// damp it under 1e-6 at the 3×512 arch).
+    fn policy_probe(brain: &AnyBrain<TrainBackend>, device: &NdArrayDevice) -> Vec<f32> {
         let obs = Tensor::<TrainBackend, 2>::zeros([1, OBS_SIZE], device);
-        brain.policy(obs).0.to_data().to_vec().unwrap()
+        let (means, log_std) = brain.policy(obs);
+        let mut probe: Vec<f32> = means.to_data().to_vec().unwrap();
+        probe.extend(log_std.to_data().to_vec::<f32>().unwrap());
+        probe
     }
 
     #[test]
@@ -501,7 +516,7 @@ mod tests {
 
         // Warm an optimizer over several steps so its Adam moments + step are non-trivial,
         // then snapshot brain + optimizer mid-run.
-        let mut brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let mut brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
         let mut warm = crab_optimizer::<TrainBackend>();
         for _ in 0..5 {
             let (b, o) = adam_test_step(brain, warm, &device);
@@ -514,7 +529,7 @@ mod tests {
         );
 
         let path = CheckpointDir::new(&dir).optimizer_path();
-        save_optimizer(&warm, ArchId::Mlp256, &path);
+        save_optimizer(&warm, ArchId::DEFAULT, &path);
         assert!(path.exists(), "optimizer.bin should be written");
 
         // A fresh cold optimizer loaded from the snapshot must take the NEXT step
@@ -525,7 +540,7 @@ mod tests {
             crab_optimizer::<TrainBackend>(),
             &path,
             &device,
-            ArchId::Mlp256,
+            ArchId::DEFAULT,
         );
         assert_eq!(
             restored.to_record().len(),
@@ -538,14 +553,14 @@ mod tests {
         let (cold_next, _) =
             adam_test_step(brain.clone(), crab_optimizer::<TrainBackend>(), &device);
 
-        let warm_m = policy_means(&warm_next, &device);
-        let restored_m = policy_means(&restored_next, &device);
-        let cold_m = policy_means(&cold_next, &device);
+        let warm_m = policy_probe(&warm_next, &device);
+        let restored_m = policy_probe(&restored_next, &device);
+        let cold_m = policy_probe(&cold_next, &device);
 
         for (i, (a, b)) in warm_m.iter().zip(restored_m.iter()).enumerate() {
             assert!(
                 (a - b).abs() < 1e-6,
-                "restored step diverged from warm at mean[{i}]: {a} vs {b}"
+                "restored step diverged from warm at probe[{i}]: {a} vs {b}"
             );
         }
         // The moments must actually matter: a cold optimizer's step differs from the warm
@@ -576,7 +591,7 @@ mod tests {
             crab_optimizer::<TrainBackend>(),
             &path,
             &device,
-            ArchId::Mlp256,
+            ArchId::DEFAULT,
         );
         assert!(
             cold.to_record().is_empty(),
@@ -591,7 +606,7 @@ mod tests {
             crab_optimizer::<TrainBackend>(),
             &path,
             &device,
-            ArchId::Mlp256,
+            ArchId::DEFAULT,
         );
         assert!(
             cold2.to_record().is_empty(),
@@ -600,12 +615,12 @@ mod tests {
 
         // (c) A mis-copied file — a BRAIN envelope at the optimizer path — fails the kind
         //     check → cold, never decoded as moments.
-        write_envelope(&path, ArtifactKind::Brain, ArchId::Mlp256, vec![1, 2, 3], Some(0)).unwrap();
+        write_envelope(&path, ArtifactKind::Brain, ArchId::DEFAULT, vec![1, 2, 3], Some(0)).unwrap();
         let cold3 = load_optimizer(
             crab_optimizer::<TrainBackend>(),
             &path,
             &device,
-            ArchId::Mlp256,
+            ArchId::DEFAULT,
         );
         assert!(
             cold3.to_record().is_empty(),
@@ -618,7 +633,7 @@ mod tests {
         write_envelope(
             &path,
             ArtifactKind::Optimizer,
-            ArchId::Mlp256,
+            ArchId::DEFAULT,
             vec![0xde, 0xad, 0xbe, 0xef],
             None,
         )
@@ -627,7 +642,7 @@ mod tests {
             crab_optimizer::<TrainBackend>(),
             &path,
             &device,
-            ArchId::Mlp256,
+            ArchId::DEFAULT,
         );
         assert!(
             cold4.to_record().is_empty(),
@@ -667,7 +682,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let device = NdArrayDevice::Cpu;
 
-        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
         let path = CheckpointDir::new(&dir).brain_file();
         save_brain(&brain, &path).unwrap();
 

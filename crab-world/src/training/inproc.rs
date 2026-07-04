@@ -610,10 +610,10 @@ mod tests {
         use burn::tensor::Tensor;
 
         let device = NdArrayDevice::Cpu;
-        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
         let bytes = snapshot_brain_bytes(&brain);
 
-        let reloaded = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device)
+        let reloaded = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device)
             .load_leaf_record(&SnapshotRecorder::default(), bytes, &device)
             .expect("load snapshot");
 

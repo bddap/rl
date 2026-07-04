@@ -364,19 +364,19 @@ mod tests {
         write_envelope(
             &path,
             ArtifactKind::Brain,
-            ArchId::Mlp256,
+            ArchId::DEFAULT,
             vec![1, 2, 3],
             Some(0xfeed_beef),
         )
         .unwrap();
         let env = read_envelope(&path, ArtifactKind::Brain).unwrap();
-        assert_eq!(env.arch, ArchId::Mlp256);
+        assert_eq!(env.arch, ArchId::DEFAULT);
         assert_eq!(env.payload, vec![1, 2, 3]);
         assert_eq!(env.body_digest, Some(0xfeed_beef));
 
         // Paired kinds stay v1 and never carry a digest.
         let path = dir.join("optimizer.bin");
-        write_envelope(&path, ArtifactKind::Optimizer, ArchId::Mlp256, vec![9], None).unwrap();
+        write_envelope(&path, ArtifactKind::Optimizer, ArchId::DEFAULT, vec![9], None).unwrap();
         let env = read_envelope(&path, ArtifactKind::Optimizer).unwrap();
         assert_eq!(env.payload, vec![9]);
         assert_eq!(env.body_digest, None);
@@ -390,9 +390,9 @@ mod tests {
     fn v1_brain_reads_as_tofu() {
         let dir = scratch("tofu");
         let path = dir.join("brain.bin");
-        write_v1_brain_envelope(&path, ArchId::Mlp256, vec![4, 5]).unwrap();
+        write_v1_brain_envelope(&path, ArchId::DEFAULT, vec![4, 5]).unwrap();
         let env = read_envelope(&path, ArtifactKind::Brain).unwrap();
-        assert_eq!(env.arch, ArchId::Mlp256);
+        assert_eq!(env.arch, ArchId::DEFAULT);
         assert_eq!(env.payload, vec![4, 5]);
         assert_eq!(env.body_digest, None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -427,7 +427,7 @@ mod tests {
         ));
 
         // A mis-copied file: optimizer envelope read as the brain.
-        write_envelope(&path, ArtifactKind::Optimizer, ArchId::Mlp256, vec![], None).unwrap();
+        write_envelope(&path, ArtifactKind::Optimizer, ArchId::DEFAULT, vec![], None).unwrap();
         assert!(matches!(
             read_envelope(&path, ArtifactKind::Brain),
             Err(EnvelopeError::WrongKind { .. })
@@ -456,7 +456,7 @@ mod tests {
         let raw = RawEnvelopeV1 {
             kind: "brain".into(),
             version: ArtifactKind::Brain.current_version() + 1,
-            arch: "mlp256".into(),
+            arch: "mlp512x3".into(),
             payload: vec![],
         };
         std::fs::write(
@@ -474,7 +474,7 @@ mod tests {
         let raw = RawEnvelopeV2 {
             kind: "optimizer".into(),
             version: 2,
-            arch: "mlp256".into(),
+            arch: "mlp512x3".into(),
             payload: vec![],
             body_digest: 7,
         };

@@ -105,7 +105,7 @@ struct LearnArgs {
     workers: Option<usize>,
 
     /// Policy architecture for a FRESH start (an empty --checkpoint-dir); default
-    /// mlp256. On a RESUME the checkpoint's arch tag is authoritative and this flag
+    /// mlp512x3 (the sole registered arch since the 5b cull). On a RESUME the checkpoint's arch tag is authoritative and this flag
     /// is only a cross-check — a value that disagrees with the tag ABORTS (never a
     /// cold start over the trained policy, never a silently ignored flag).
     #[arg(long, value_parser = parse_arch)]
