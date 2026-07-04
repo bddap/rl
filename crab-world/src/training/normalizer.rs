@@ -218,19 +218,13 @@ impl ObsNormalizer {
     }
 
     /// Persist the running stats inside an [`ArtifactKind::ObsNormalizer`] envelope
-    /// tagged with `arch` — the brain these obs scales were trained against. A write
-    /// failure is logged, not fatal — the run continues, only resume loses the scale.
-    pub(crate) fn save(&self, arch: ArchId, path: &Path) {
-        let bytes = match bincode::serialize(&self.snapshot()) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("Failed to serialize normalizer: {e}");
-                return;
-            }
-        };
-        if let Err(e) = write_envelope(path, ArtifactKind::ObsNormalizer, arch, bytes, None) {
-            warn!("Failed to write normalizer to {}: {e}", path.display());
-        }
+    /// tagged with `arch` and stamped with `generation` — the brain these obs scales
+    /// were trained against, and the save it belongs to (bddap/rl#215). Returns the
+    /// failure instead of swallowing it: the caller (`save_checkpoint`) aborts the SET
+    /// on a member failure so a partial save never poses as a complete one.
+    pub(crate) fn save(&self, arch: ArchId, path: &Path, generation: u64) -> std::io::Result<()> {
+        let bytes = bincode::serialize(&self.snapshot()).map_err(std::io::Error::other)?;
+        write_envelope(path, ArtifactKind::ObsNormalizer, arch, bytes, None, generation)
     }
 
     /// The cumulative baseline as the serde mirror — handed to a rollout thread, and
@@ -282,13 +276,23 @@ impl ObsNormalizer {
         self.welford.merge(&increment.0);
     }
 
-    /// Load the checkpointed stats, refusing an envelope whose arch tag differs from
-    /// `expected_arch` (the loaded brain's — normalizers are brain-PAIRED and must never
-    /// load cross-arch, bddap/rl#200 §2). The caller applies the refusal policy: the
+    /// Load the checkpointed stats, refusing an envelope whose arch tag or generation
+    /// stamp differ from `expected_arch` / `expected_generation` (both the loaded
+    /// brain's — normalizers are brain-PAIRED and must never load cross-arch or
+    /// cross-save, bddap/rl#200 §2, #215). The caller applies the refusal policy: the
     /// trainer aborts, inference refuses the whole checkpoint — never a warm brain
     /// normalizing against cold or mis-paired stats.
-    pub(crate) fn load(path: &Path, expected_arch: ArchId) -> Result<Self, EnvelopeError> {
-        let env = read_envelope_expecting(path, ArtifactKind::ObsNormalizer, expected_arch)?;
+    pub(crate) fn load(
+        path: &Path,
+        expected_arch: ArchId,
+        expected_generation: Option<u64>,
+    ) -> Result<Self, EnvelopeError> {
+        let env = read_envelope_expecting(
+            path,
+            ArtifactKind::ObsNormalizer,
+            expected_arch,
+            expected_generation,
+        )?;
         let data: NormalizerSnapshot = bincode::deserialize(&env.payload)
             .map_err(|e| EnvelopeError::Corrupt(format!("obs normalizer payload: {e}")))?;
         Self::from_snapshot(data).ok_or_else(|| {

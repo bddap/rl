@@ -39,8 +39,13 @@ pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 /// ([`crate::mesh_fallback::constructed_body_digest`], bddap/rl#214) — read here, not
 /// taken as a parameter, so no caller can stamp a body the process didn't actually
 /// build; the resume check ([`check_body_identity`]) aborts a mismatch BEFORE any save,
-/// so the stamp can never launder a wrong-body resume either.
-pub(crate) fn save_brain<B: Backend>(brain: &AnyBrain<B>, path: &Path) -> std::io::Result<()> {
+/// so the stamp can never launder a wrong-body resume either. `generation` is the
+/// checkpoint-set stamp shared with the paired artifacts saved beside it (bddap/rl#215).
+pub(crate) fn save_brain<B: Backend>(
+    brain: &AnyBrain<B>,
+    path: &Path,
+    generation: u64,
+) -> std::io::Result<()> {
     let bytes = brain
         .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
         .map_err(std::io::Error::other)?;
@@ -50,6 +55,7 @@ pub(crate) fn save_brain<B: Backend>(brain: &AnyBrain<B>, path: &Path) -> std::i
         brain.arch(),
         bytes,
         Some(crate::mesh_fallback::constructed_body_digest()),
+        generation,
     )
 }
 
@@ -112,6 +118,10 @@ pub(crate) struct BrainFile<B: Backend> {
     /// See [`CheckpointEnvelope::body_digest`](super::envelope::CheckpointEnvelope):
     /// `None` = a pre-#214 v1 brain (trust-on-first-use).
     pub(crate) body_digest: Option<u64>,
+    /// The checkpoint-set generation the paired artifacts must carry to load with this
+    /// brain (bddap/rl#215); `None` = a pre-stamp brain, pairing only with unstamped
+    /// partners. See [`CheckpointEnvelope::generation`](super::envelope::CheckpointEnvelope).
+    pub(crate) generation: Option<u64>,
 }
 
 /// Load the brain at `path`, DISPATCHING on the envelope's arch tag: read the envelope,
@@ -131,6 +141,7 @@ pub(crate) fn load_brain_file<B: Backend>(
     Ok(BrainFile {
         brain,
         body_digest: env.body_digest,
+        generation: env.generation,
     })
 }
 
@@ -242,13 +253,15 @@ impl<'a> CheckpointDir<'a> {
 /// cross-arch guard: the record is a `HashMap<ParamId, …>`, so a wrong-arch load would
 /// not even fail — every lookup would silently miss and the moments go cold. Generic over
 /// the backend so the live GPU learner and the CPU round-trip test serialize through ONE
-/// path — no save/load drift. Best-effort: any failure is logged, not fatal (a resume
-/// then loads cold — see [`OPTIMIZER_FILENAME`]).
+/// path — no save/load drift. `generation` is the set stamp of the checkpoint these
+/// moments were saved beside (bddap/rl#215). Best-effort: any failure is logged, not
+/// fatal (a resume then loads cold — see [`OPTIMIZER_FILENAME`]).
 #[cfg(any(feature = "wgpu", test))]
 pub(crate) fn save_optimizer<B: AutodiffBackend>(
     optimizer: &CrabOpt<B>,
     arch: ArchId,
     path: &Path,
+    generation: u64,
 ) {
     use burn::optim::Optimizer;
 
@@ -260,7 +273,7 @@ pub(crate) fn save_optimizer<B: AutodiffBackend>(
             return;
         }
     };
-    if let Err(e) = write_envelope(path, ArtifactKind::Optimizer, arch, bytes, None) {
+    if let Err(e) = write_envelope(path, ArtifactKind::Optimizer, arch, bytes, None, generation) {
         warn!(
             "Failed to write Adam optimizer state to {}: {e}",
             path.display()
@@ -271,21 +284,30 @@ pub(crate) fn save_optimizer<B: AutodiffBackend>(
 /// Load an Adam optimizer state saved by [`save_optimizer`] onto `device`, returning the
 /// optimizer with its moments + step restored. REFUSE-AND-COLD is this artifact's whole
 /// refusal policy (bddap/rl#200 §2): the `cold` optimizer is returned UNCHANGED — logged,
-/// no error — when the file is absent, legacy, corrupt, version-unrecognized, or tagged
-/// with an arch other than `expected_arch` (the resumed brain's — the dir-coherence
-/// check). Cold moments only cost a brief self-correcting transient; wrong moments would
-/// silently miss every `ParamId` lookup. The per-parameter keys line up across an honest
-/// round trip because the resumed brain restores the SAME `ParamId`s from its own record.
+/// no error — when the file is absent, legacy, corrupt, version-unrecognized, tagged
+/// with an arch other than `expected_arch`, or stamped with a generation other than
+/// `expected_generation` (both the resumed brain's — the set-coherence checks; a
+/// mismatched generation means these moments were saved beside a DIFFERENT brain,
+/// bddap/rl#215). Cold moments only cost a brief self-correcting transient; wrong moments
+/// would silently miss every `ParamId` lookup. The per-parameter keys line up across an
+/// honest round trip because the resumed brain restores the SAME `ParamId`s from its own
+/// record.
 #[cfg(any(feature = "wgpu", test))]
 pub(crate) fn load_optimizer<B: AutodiffBackend>(
     cold: CrabOpt<B>,
     path: &Path,
     device: &B::Device,
     expected_arch: ArchId,
+    expected_generation: Option<u64>,
 ) -> CrabOpt<B> {
     use burn::optim::Optimizer;
 
-    let env = match read_envelope_expecting(path, ArtifactKind::Optimizer, expected_arch) {
+    let env = match read_envelope_expecting(
+        path,
+        ArtifactKind::Optimizer,
+        expected_arch,
+        expected_generation,
+    ) {
         Ok(env) => env,
         Err(EnvelopeError::Absent) => {
             // Absent is the EXPECTED case for an older checkpoint, so info, not warn — a
@@ -334,34 +356,44 @@ pub(crate) fn load_optimizer<B: AutodiffBackend>(
 }
 
 /// Persist the return normalizer's running stats inside a
-/// [`ArtifactKind::ReturnNormalizer`] envelope tagged with `arch` — the brain these value
-/// scales were trained against. A write failure is logged, not fatal — the run continues,
-/// only resume loses the scale.
-pub(crate) fn save_return_normalizer(norm: &ReturnNormalizer, arch: ArchId, path: &Path) {
-    let bytes = match bincode::serialize(&norm.to_data()) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!("Failed to serialize return normalizer: {e}");
-            return;
-        }
-    };
-    if let Err(e) = write_envelope(path, ArtifactKind::ReturnNormalizer, arch, bytes, None) {
-        warn!(
-            "Failed to write return normalizer to {}: {e}",
-            path.display()
-        );
-    }
+/// [`ArtifactKind::ReturnNormalizer`] envelope tagged with `arch` and stamped with
+/// `generation` — the brain these value scales were trained against, and the save it
+/// belongs to (bddap/rl#215). Returns the failure instead of swallowing it: the caller
+/// (`save_checkpoint`) aborts the SET on a member failure so a partial save never poses
+/// as a complete one.
+pub(crate) fn save_return_normalizer(
+    norm: &ReturnNormalizer,
+    arch: ArchId,
+    path: &Path,
+    generation: u64,
+) -> std::io::Result<()> {
+    let bytes = bincode::serialize(&norm.to_data()).map_err(std::io::Error::other)?;
+    write_envelope(
+        path,
+        ArtifactKind::ReturnNormalizer,
+        arch,
+        bytes,
+        None,
+        generation,
+    )
 }
 
-/// Load the return normalizer from a checkpoint, refusing an envelope whose arch tag
-/// differs from `expected_arch` (the resumed brain's — normalizers are brain-PAIRED and
-/// must never load cross-arch, bddap/rl#200 §2). The caller applies the refusal policy:
-/// the trainer aborts rather than train warm weights against cold/mis-paired scales.
+/// Load the return normalizer from a checkpoint, refusing an envelope whose arch tag or
+/// generation stamp differ from `expected_arch` / `expected_generation` (both the resumed
+/// brain's — normalizers are brain-PAIRED and must never load cross-arch or cross-save,
+/// bddap/rl#200 §2, #215). The caller applies the refusal policy: the trainer aborts
+/// rather than train warm weights against cold/mis-paired scales.
 pub(crate) fn load_return_normalizer(
     path: &Path,
     expected_arch: ArchId,
+    expected_generation: Option<u64>,
 ) -> Result<ReturnNormalizer, EnvelopeError> {
-    let env = read_envelope_expecting(path, ArtifactKind::ReturnNormalizer, expected_arch)?;
+    let env = read_envelope_expecting(
+        path,
+        ArtifactKind::ReturnNormalizer,
+        expected_arch,
+        expected_generation,
+    )?;
     let data: ReturnNormalizerData = bincode::deserialize(&env.payload)
         .map_err(|e| EnvelopeError::Corrupt(format!("return normalizer payload: {e}")))?;
     ReturnNormalizer::from_data(data).ok_or_else(|| {
@@ -388,7 +420,7 @@ mod tests {
         let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
 
         let paths = CheckpointDir::new(&dir);
-        save_brain(&brain, &paths.brain_file()).expect("save brain");
+        save_brain(&brain, &paths.brain_file(), 1).expect("save brain");
         assert!(paths.brain_file().exists(), "brain.bin should exist");
 
         let loaded = load_brain_file::<TrainBackend>(&paths.brain_file(), &device)
@@ -452,10 +484,20 @@ mod tests {
         let path = CheckpointDir::new(&dir).return_normalizer_path();
 
         let norm = ReturnNormalizer::new();
-        save_return_normalizer(&norm, ArchId::DEFAULT, &path);
+        save_return_normalizer(&norm, ArchId::DEFAULT, &path, 3).expect("save return normalizer");
         assert!(
-            load_return_normalizer(&path, ArchId::DEFAULT).is_ok(),
-            "matching arch loads"
+            load_return_normalizer(&path, ArchId::DEFAULT, Some(3)).is_ok(),
+            "matching arch + generation loads"
+        );
+        // A generation stamp from a different save refuses — the bddap/rl#215 mis-pair
+        // (e.g. this normalizer landed but the brain write failed, so the dir's brain is
+        // an older save's).
+        assert!(
+            matches!(
+                load_return_normalizer(&path, ArchId::DEFAULT, Some(4)),
+                Err(EnvelopeError::GenerationMismatch { .. })
+            ),
+            "a cross-save return normalizer must refuse by generation"
         );
         // No second arch is registered yet, so the cross-arch refusal is exercised at the
         // envelope layer instead: a WRONG-KIND read of the same file must refuse.
@@ -529,8 +571,22 @@ mod tests {
         );
 
         let path = CheckpointDir::new(&dir).optimizer_path();
-        save_optimizer(&warm, ArchId::DEFAULT, &path);
+        save_optimizer(&warm, ArchId::DEFAULT, &path, 5);
         assert!(path.exists(), "optimizer.bin should be written");
+
+        // A generation from a different save refuses to cold (bddap/rl#215): these
+        // moments belong to a different brain than the one resuming.
+        let cross_save = load_optimizer(
+            crab_optimizer::<TrainBackend>(),
+            &path,
+            &device,
+            ArchId::DEFAULT,
+            Some(6),
+        );
+        assert!(
+            cross_save.to_record().is_empty(),
+            "a cross-save optimizer must load cold"
+        );
 
         // A fresh cold optimizer loaded from the snapshot must take the NEXT step
         // identically to the warm one (same momentum + step/bias-correction), and
@@ -541,6 +597,7 @@ mod tests {
             &path,
             &device,
             ArchId::DEFAULT,
+            Some(5),
         );
         assert_eq!(
             restored.to_record().len(),
@@ -592,6 +649,7 @@ mod tests {
             &path,
             &device,
             ArchId::DEFAULT,
+            None,
         );
         assert!(
             cold.to_record().is_empty(),
@@ -607,6 +665,7 @@ mod tests {
             &path,
             &device,
             ArchId::DEFAULT,
+            None,
         );
         assert!(
             cold2.to_record().is_empty(),
@@ -615,12 +674,21 @@ mod tests {
 
         // (c) A mis-copied file — a BRAIN envelope at the optimizer path — fails the kind
         //     check → cold, never decoded as moments.
-        write_envelope(&path, ArtifactKind::Brain, ArchId::DEFAULT, vec![1, 2, 3], Some(0)).unwrap();
+        write_envelope(
+            &path,
+            ArtifactKind::Brain,
+            ArchId::DEFAULT,
+            vec![1, 2, 3],
+            Some(0),
+            9,
+        )
+        .unwrap();
         let cold3 = load_optimizer(
             crab_optimizer::<TrainBackend>(),
             &path,
             &device,
             ArchId::DEFAULT,
+            Some(9),
         );
         assert!(
             cold3.to_record().is_empty(),
@@ -636,6 +704,7 @@ mod tests {
             ArchId::DEFAULT,
             vec![0xde, 0xad, 0xbe, 0xef],
             None,
+            9,
         )
         .unwrap();
         let cold4 = load_optimizer(
@@ -643,6 +712,7 @@ mod tests {
             &path,
             &device,
             ArchId::DEFAULT,
+            Some(9),
         );
         assert!(
             cold4.to_record().is_empty(),
@@ -684,11 +754,12 @@ mod tests {
 
         let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
         let path = CheckpointDir::new(&dir).brain_file();
-        save_brain(&brain, &path).unwrap();
+        save_brain(&brain, &path, 11).unwrap();
 
         let loaded = load_brain_file::<TrainBackend>(&path, &device).unwrap();
         let constructed = crate::mesh_fallback::constructed_body_digest();
         assert_eq!(loaded.body_digest, Some(constructed));
+        assert_eq!(loaded.generation, Some(11), "the set stamp round-trips");
         assert_eq!(
             check_body_identity(loaded.body_digest, constructed),
             Ok(BodyIdentity::Match)
