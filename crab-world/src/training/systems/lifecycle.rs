@@ -1,9 +1,9 @@
 //! The per-env episode lifecycle: the phase machine ([`EnvPhase`], [`EnvEpisode`]), the pure
 //! reward/terminal decision ([`classify_step_end`], [`finalize_pending_step`]), the per-env
-//! driver [`TrainingState::finalize_transitions`], and the reset/save systems ([`reset_crab`],
-//! [`save_on_exit`]). The per-tick Sense→Think→Act step lives in [`super::step`].
+//! driver [`TrainingState::finalize_transitions`], and the reset system
+//! ([`reset_crab`]). The per-tick Sense→Think→Act step lives in [`super::step`].
 
-use bevy::app::AppExit;
+
 use bevy::prelude::*;
 
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
@@ -453,21 +453,6 @@ pub(crate) fn reset_crab(
                 g => EnvPhase::Settling { grace: g },
             };
         }
-    }
-}
-
-/// System: saves a final checkpoint when the app is about to exit.
-pub(crate) fn save_on_exit(
-    mut training: NonSendMut<TrainingState>,
-    mut exit_events: bevy::prelude::MessageReader<AppExit>,
-) {
-    if training.saved_on_exit {
-        return;
-    }
-    if exit_events.read().next().is_some() {
-        info!("App exiting — saving final checkpoint...");
-        training.save_checkpoint();
-        training.saved_on_exit = true;
     }
 }
 

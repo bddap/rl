@@ -43,6 +43,12 @@ pub struct Policy {
     live_dir: Option<PathBuf>,
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
     last_loaded: Option<std::time::SystemTime>,
+    /// Brain-file mtime whose REFUSAL was already logged, so a persistently-bad
+    /// checkpoint logs once per distinct file while still being retried each poll —
+    /// unlike `last_loaded`, a refusal never suppresses the retry itself, because it may
+    /// be the transient mid-save window (see [`Self::try_hot_reload`], bddap/rl#215).
+    #[cfg_attr(not(feature = "render"), allow(dead_code))]
+    last_refused: Option<std::time::SystemTime>,
     state: PolicyState,
 }
 
@@ -211,8 +217,8 @@ fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
             crate::training::checkpoint::BRAIN_FILENAME
         ));
     }
+    let key = loaded.set_key();
     let brain = loaded.brain;
-    let generation = loaded.generation;
     // A checkpoint from a different rig (e.g. a stale 77-dim brain against the current
     // OBS_SIZE) parses fine here but its mismatched first-layer weight would panic in the
     // matmul at the first `policy()` call. Surface it as a distinct `Mismatch` (carrying
@@ -223,11 +229,11 @@ fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
     if !dims_fit_rig(obs, action) {
         return Loaded::Mismatch(RigDims { obs, action });
     }
-    // The generation stamp (bddap/rl#215) keys the pairing to the brain's own SAVE, not
+    // The set key (bddap/rl#215) keys the pairing to the brain's own SAVE, not
     // just its arch: a partial save (or a copy torn across one) leaves one member from an
-    // older set, which would normalize this brain with another generation's statistics —
+    // older set, which would normalize this brain with another save's statistics —
     // refused here like any other mis-pair.
-    match ObsNormalizer::load(&paths.normalizer_path(), brain.arch(), generation) {
+    match ObsNormalizer::load(&paths.normalizer_path(), key) {
         Ok(normalizer) => Loaded::Fit(brain, normalizer),
         Err(e) => Loaded::Refused(format!(
             "{}: {e} (a brain never arms without its paired obs normalizer)",
@@ -340,6 +346,7 @@ impl Policy {
             device,
             live_dir: None,
             last_loaded: None,
+            last_refused: None,
             state,
         }
     }
@@ -356,7 +363,12 @@ impl Policy {
     /// If the live training dir holds a brain file newer than the one we're
     /// running, swap it in; returns whether it did. Safe against a bad file appearing
     /// mid-run: any non-`Fit` verdict keeps the current policy rather than blanking the
-    /// demo to a rest pose (envelope writes are atomic, so a torn read can't occur).
+    /// demo to a rest pose. Each FILE is written atomically, so a torn read of one can't
+    /// occur — but the SET is not: the trainer renames `brain.bin` before the
+    /// normalizers, so a poll landing in that window sees a set-torn dir (a save-stamp
+    /// refusal, bddap/rl#215) whose trailing members arrive without touching the brain's
+    /// mtime. A `Refused` verdict is therefore treated as possibly TRANSIENT — retried
+    /// next poll — never cached against the mtime like `Fit`/`Mismatch` are.
     // Demo-only (render-gated) hot-reload; the headless eval/trainer never swaps mid-run.
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
     pub(crate) fn try_hot_reload(&mut self) -> bool {
@@ -377,18 +389,26 @@ impl Policy {
                 true
             }
             Loaded::Absent => false, // no brain file yet — keep the current policy
-            // A wrong-rig or envelope-refused brain landed in the live dir: refuse it
-            // loudly but keep whatever we're driving (a bad file must not blank a working
-            // demo; an unarmed policy just stays at rest). Stamp `last_loaded` so we log
-            // once per distinct file (mtime), not every tick.
+            // A wrong-rig brain landed in the live dir: refuse it loudly but keep
+            // whatever we're driving (a bad file must not blank a working demo; an
+            // unarmed policy just stays at rest). A rig mismatch is a property of the
+            // brain FILE itself, so stamp `last_loaded` — log once per distinct file
+            // (mtime), no pointless re-reads.
             Loaded::Mismatch(dims) => {
                 log_rig_mismatch("play (hot-reload)", &dir, dims);
                 self.last_loaded = Some(mtime);
                 false
             }
+            // Same keep-driving policy, but do NOT stamp `last_loaded`: the refusal may
+            // be the transient mid-save window above, and the completed set won't change
+            // the brain's mtime — stamping here would refuse a run's FINAL save forever.
+            // A genuinely bad checkpoint just gets re-read (and re-refused) each poll;
+            // `last_refused` keeps the log at once per distinct file.
             Loaded::Refused(why) => {
-                log_checkpoint_refusal("play (hot-reload)", &dir, &why);
-                self.last_loaded = Some(mtime);
+                if self.last_refused != Some(mtime) {
+                    log_checkpoint_refusal("play (hot-reload)", &dir, &why);
+                    self.last_refused = Some(mtime);
+                }
                 false
             }
         }
@@ -579,7 +599,7 @@ mod tests {
     /// silently regenerates guards nothing. Writes the LEGACY v1 shape — for BOTH
     /// members — NOT the production writers: the production writer stamps the
     /// regenerating machine's constructed body digest (bddap/rl#214) plus a save
-    /// generation (bddap/rl#215); the digest would make the committed fixture refuse to
+    /// save_stamp (bddap/rl#215); the digest would make the committed fixture refuse to
     /// arm on every machine whose `sally.glb` differs or is absent, and a stamped
     /// normalizer refuses to pair with the unstamped v1 brain. The fixture must stay
     /// wholly v1 (trust-on-first-use) to remain machine-portable, which also keeps it
@@ -717,6 +737,52 @@ mod tests {
             !policy.try_hot_reload(),
             "the same checkpoint must not reload again"
         );
+
+        let _ = std::fs::remove_dir_all(&live);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// bddap/rl#215: the trainer renames `brain.bin` BEFORE the normalizers, so a poll
+    /// can catch a set-torn dir (new brain, previous save's normalizer). The refusal
+    /// must keep the current policy AND not cache the verdict against the brain's mtime:
+    /// the trailing normalizer lands WITHOUT touching `brain.bin`, so the next poll must
+    /// arm the completed set. (Stamping `last_loaded` on the refusal would refuse a
+    /// run's FINAL save forever — there is no later save to bump the mtime.)
+    #[test]
+    fn hot_reload_retries_a_set_torn_refusal_once_the_set_completes() {
+        let tmp = std::env::temp_dir();
+        let live = tmp.join(format!("rl-hotreload-torn-{}", std::process::id()));
+        let empty = tmp.join(format!("rl-hotreload-torn-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&live);
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+
+        // The mid-save window: brain from save 22, normalizer still from save 21.
+        let device = NdArrayDevice::Cpu;
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
+        let paths = CheckpointDir::new(&live);
+        crate::training::checkpoint::save_brain(&brain, &paths.brain_file(), 22).unwrap();
+        ObsNormalizer::new(NORMALIZER_CLIP)
+            .save(brain.arch(), &paths.normalizer_path(), 21)
+            .unwrap();
+
+        let mut policy = Policy::load(&empty);
+        policy.live_dir = Some(live.clone());
+        assert!(
+            !policy.try_hot_reload(),
+            "a set-torn dir must refuse, keeping the current policy"
+        );
+
+        // The trailing normalizer lands; brain.bin is untouched (same mtime).
+        ObsNormalizer::new(NORMALIZER_CLIP)
+            .save(brain.arch(), &paths.normalizer_path(), 22)
+            .unwrap();
+        assert!(
+            policy.try_hot_reload(),
+            "the completed set must arm on the next poll despite the unchanged brain mtime"
+        );
+        assert!(policy.is_loaded());
 
         let _ = std::fs::remove_dir_all(&live);
         let _ = std::fs::remove_dir_all(&empty);
