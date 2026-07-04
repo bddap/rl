@@ -456,7 +456,7 @@ mod tests {
         let raw = RawEnvelopeV1 {
             kind: "brain".into(),
             version: ArtifactKind::Brain.current_version() + 1,
-            arch: "mlp512x3".into(),
+            arch: ArchId::DEFAULT.name().into(),
             payload: vec![],
         };
         std::fs::write(
@@ -474,7 +474,7 @@ mod tests {
         let raw = RawEnvelopeV2 {
             kind: "optimizer".into(),
             version: 2,
-            arch: "mlp512x3".into(),
+            arch: ArchId::DEFAULT.name().into(),
             payload: vec![],
             body_digest: 7,
         };

@@ -499,10 +499,8 @@ mod tests {
     /// Loading it through today's loader and reproducing those bits EXACTLY proves the
     /// tagged on-disk format did not drift (a reader/writer change that re-mapped
     /// envelope fields would strand every fleet checkpoint while all save/load-symmetric
-    /// tests stayed green). The original fixture was the mlp256 brain the fleet
-    /// migration wrapped; regenerated for the surviving arch at the 5b cull. Regenerate
-    /// with `regenerate_enveloped_golden_fixture` below ONLY on a deliberate format
-    /// version bump or an arch cull.
+    /// tests stayed green). Regenerate with `regenerate_enveloped_golden_fixture` below
+    /// ONLY on a deliberate format version bump or an arch cull.
     #[test]
     fn golden_enveloped_checkpoint_loads_and_acts_bit_identically() {
         let policy = Policy::load(&golden_dir());
