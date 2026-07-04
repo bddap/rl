@@ -17,18 +17,20 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use clap::Parser;
-use crab_world::{TrainConfig, Visuals, bot, physics, play};
+use crab_world::{CheckpointArgs, Visuals, bot, physics, play};
 
 /// Crab Combat demo — render a trained crab policy.
 ///
 /// One of `--demo` / `--screenshot` is required (a bare invocation has nothing to
 /// show). The checkpoint to load comes from `--checkpoint-dir` (the shared
-/// [`TrainConfig`]); training itself is the separate `rl-train` binary.
+/// [`CheckpointArgs`]); training itself is the separate `rl-train` binary, and
+/// training knobs (`--envs`/`--ticks`/`--seed`) are parse errors here, not silent
+/// no-ops (rl#217).
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct Args {
     #[command(flatten)]
-    pub train: TrainConfig,
+    pub checkpoint: CheckpointArgs,
 
     /// Play with a trained crab: load the checkpoint, drive it with the policy
     /// (no learning), orbit camera + poke/reset controls.
@@ -279,14 +281,14 @@ fn main() {
                     .add_systems(Startup, spawn_mesh_fallback_banner);
             }
             app.add_plugins(play::DemoPlugin {
-                checkpoint_dir: args.train.checkpoint_dir.clone(),
+                checkpoint_dir: args.checkpoint.checkpoint_dir.clone(),
                 live_checkpoint_dir: args.live_checkpoint_dir.clone(),
                 manual_control: args.manual_control,
             });
         }
         AppMode::Screenshot { path, settle } => {
             app.add_plugins(play::ScreenshotPlugin {
-                checkpoint_dir: args.train.checkpoint_dir.clone(),
+                checkpoint_dir: args.checkpoint.checkpoint_dir.clone(),
                 path,
                 settle,
                 width: args.width,
@@ -295,7 +297,7 @@ fn main() {
         }
         AppMode::RenderVideo { path, seconds } => {
             app.add_plugins(play::RenderVideoPlugin {
-                checkpoint_dir: args.train.checkpoint_dir.clone(),
+                checkpoint_dir: args.checkpoint.checkpoint_dir.clone(),
                 path,
                 seconds,
                 width: args.width,

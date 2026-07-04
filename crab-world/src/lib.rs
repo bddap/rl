@@ -86,17 +86,24 @@ pub mod sky;
 #[derive(Resource, Clone, Copy)]
 pub struct Visuals(pub bool);
 
-/// Training config (consumed by the learner and its rollout threads, which build a
-/// `TrainingState`) plus the render modes' shared knobs. The `learn` subcommand
-/// flattens it so e.g. `--checkpoint-dir` / `--ticks` mean the same thing
-/// everywhere.
-#[derive(Parser, Debug, Clone)]
-pub struct TrainConfig {
-    /// Directory for checkpoint files. On startup, if the directory contains a
-    /// previous checkpoint it will be loaded automatically. During training,
-    /// checkpoints are saved here periodically and on exit.
+/// The one knob shared by every mode that loads a checkpoint (`learn`, `eval`,
+/// rl-demo). Split out of [`TrainConfig`] so binaries that only LOAD flatten just
+/// this, and a stray training knob like `--envs` is a parse error there instead of
+/// a silent no-op (bddap/rl#217).
+#[derive(clap::Args, Debug, Clone)]
+pub struct CheckpointArgs {
+    /// Directory of checkpoint files: loaded on startup if one is present; the
+    /// trainer also saves here periodically and on exit.
     #[arg(long, default_value = "checkpoints")]
     pub checkpoint_dir: PathBuf,
+}
+
+/// Training config, consumed by the learner and its rollout threads (which build a
+/// `TrainingState`). Parsed only by the `learn` subcommand.
+#[derive(Parser, Debug, Clone)]
+pub struct TrainConfig {
+    #[command(flatten)]
+    pub checkpoint: CheckpointArgs,
 
     /// Stop training after this many physics ticks (0 = run until killed). The budget
     /// is counted in ticks, never wall-clock, so a run simulates an identical amount

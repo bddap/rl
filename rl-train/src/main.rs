@@ -13,11 +13,10 @@
 //! the multiplayer game in `game`. Splitting them off is what lets THIS binary link no
 //! graphics crate (rl#51).
 
-use std::path::PathBuf;
 
 use bevy::prelude::*;
 use clap::{Parser, Subcommand};
-use crab_world::{TrainConfig, bot, training};
+use crab_world::{CheckpointArgs, TrainConfig, bot, training};
 
 use training::systems::STEPS_PER_ROLLOUT;
 
@@ -143,10 +142,10 @@ struct LearnArgs {
 /// policy mean, so the report reproduces from these args alone.
 #[derive(Parser, Debug, Clone)]
 struct EvalArgs {
-    /// Checkpoint directory to load (`brain.bin` + `normalizer.bin`). The daemon points this at
-    /// the LIVE training checkpoint to judge the run in flight.
-    #[arg(long, default_value = "checkpoints")]
-    checkpoint_dir: PathBuf,
+    // The daemon points `--checkpoint-dir` at the LIVE training checkpoint to judge
+    // the run in flight.
+    #[command(flatten)]
+    checkpoint: CheckpointArgs,
 
     /// Physics ticks to run the policy for (after a short settle drop). Defaults to one
     /// training episode horizon ([`crab_world::training::systems::MAX_EPISODE_TICKS`],
@@ -229,7 +228,7 @@ fn main() {
             // (the daemon greps that prefix; wrong-body baseline numbers plotted as
             // training progress would be the eval-side rl#214). Absent stays the
             // legitimate zero-action baseline below.
-            let r = match crab_world::eval::run_eval(body_gate, &e.checkpoint_dir, e.ticks, distance)
+            let r = match crab_world::eval::run_eval(body_gate, &e.checkpoint.checkpoint_dir, e.ticks, distance)
             {
                 Ok(r) => r,
                 Err(refusal) => {
@@ -259,7 +258,7 @@ fn main() {
                 eprintln!(
                     "eval: no usable checkpoint at {} — the numbers above are the zero-action \
                      rest-pose baseline, NOT a trained policy",
-                    e.checkpoint_dir.display()
+                    e.checkpoint.checkpoint_dir.display()
                 );
             }
             return;
