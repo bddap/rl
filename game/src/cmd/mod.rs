@@ -20,11 +20,11 @@ mod telemetry_collector;
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Networked headless run: discover LAN peers over iroh and run lockstep.
+    /// Networked headless run: discover LAN peers over iroh and run the host-authoritative loop.
     Net(net::Args),
     /// Single-peer headless smoke of the tick machinery (no network).
     Solo(solo::Args),
-    /// Windowed first-person client: see + play the gray-box on the lockstep sim.
+    /// Windowed first-person client: see + play the gray-box.
     Play(play::Args),
     /// Windowed first-person client that JOINS a live match mid-game (GCR MP Stage 3): dial the
     /// host's endpoint id, get admitted at an agreed round-boundary tick over the new roster, and

@@ -25,8 +25,8 @@ render = [
 
 # GCR avenue 1 (rl#82): rapier's bit-level cross-platform physics determinism. Forwards
 # to crab-world's same feature (which carries `rapier3d/enhanced-determinism`); cargo
-# unifies it onto the one shared rapier3d. The two-sim `determinism_probe` regression runs
-# under this feature to exercise the shipped config headlessly.
+# unifies it onto the one shared rapier3d. The render-gated pump-equivalence test
+# (`render/tests.rs`) and `game nn-crab-probe` exercise the shipped config headlessly.
 enhanced-determinism = ["crab-world/enhanced-determinism"]
 
 [dependencies]

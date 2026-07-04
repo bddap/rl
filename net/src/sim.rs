@@ -1,6 +1,12 @@
-//! Deterministic simulation core for lockstep multiplayer: peers run independent
-//! copies and only inputs cross the wire (see [`crate::lockstep`]), so the sim
-//! must be bit-identical across machines. The contract that buys that:
+//! Deterministic simulation core for the networked game. Host-authoritative: ONE
+//! copy steps per round — inside the host's [`crate::server::Server`] — and state
+//! crosses the wire as [`CoreSnapshot`]s that clients adopt without stepping (see
+//! [`crate::lockstep`]). Determinism no longer keeps peers in agreement (no client
+//! steps, so there is nothing to agree tick-for-tick); it buys restart
+//! reproducibility (a round restart rebuilds bit-identically from the retained
+//! config), prediction-replay exactness (a client replaying its unconsumed inputs
+//! over an adopted snapshot reproduces what the server will compute from them), and
+//! stable probe/telemetry hashes. The contract that buys that:
 //!
 //! - [`Sim::step`] is a pure function of `(prior state, inputs)`. No wall-clock, no
 //!   thread-local/global RNG, no iteration over `HashMap`/`HashSet` (their order is
@@ -11,9 +17,9 @@
 //!   velocities) and angles go through an integer sin/cos table ([`trig`]). `f32`
 //!   appears ONLY at the input boundary ([`Input::from_axes`]), which quantizes to
 //!   the integer grid before anything reaches the sim.
-//! - [`Sim::state_hash`] folds the FULL observable state into one `u64` — the desync
-//!   detector. Every field added to the state MUST be hashed there, or a desync in it
-//!   goes undetected.
+//! - [`Sim::state_hash`] folds the FULL observable state into one `u64` — the
+//!   divergence detector for the determinism tests, probes, and telemetry. Every field
+//!   added to the state MUST be hashed there, or a divergence in it goes undetected.
 //!
 //! **Coordinate frame.** Right-handed: world is the XZ ground plane at Y=0, +X right,
 //! +Z forward, +Y up. A yaw of 0 faces +Z and increases turning toward +X (see
@@ -154,11 +160,10 @@ impl Input {
 
 /// Tick rate of the deterministic sim (Hz). The CANONICAL value: the headless driver
 /// (`game`), the windowed client's render loop (`net::render`), and the per-tick speed
-/// tuning here all read this one constant, so a render peer and a headless peer step
-/// at the same rate and stay in lockstep. Lives in `sim` (the render-free determinism
-/// core) so it is available even in the headless trainer build where `net::render` is
-/// gated out. 30 Hz is plenty for the gray-box and keeps the lockstep stall window
-/// forgiving on a LAN.
+/// tuning here all read this one constant, so the headless driver and the windowed
+/// client pace the same sim. Lives in `sim` (the render-free determinism core) so it is
+/// available even in the headless trainer build where `net::render` is gated out. 30 Hz
+/// is plenty for the gray-box.
 pub const TICK_HZ: u64 = 30;
 
 /// Seconds per sim tick — the fixed dt one tick advances. Derived from [`TICK_HZ`] in
@@ -497,8 +502,8 @@ impl Sim {
     /// Rebuild the round's WORLD to its spawn state from the stored [`config`](Sim::config)
     /// — the deterministic restart ([`buttons::RESTART`] in [`Sim::step`]). Rebuilds the
     /// SAME way construction does (both call [`Sim::spawn_state`]) and re-seeds the RNG from
-    /// the (constant) match seed; since every peer restarts on the same tick from the same
-    /// config, all peers land on the identical fresh state.
+    /// the (constant) match seed, so a restart rebuilds the identical fresh state from the
+    /// retained config.
     ///
     /// Deliberately does NOT rewind [`tick`](Sim::tick): the restart is a state-reset AT the
     /// current tick, recorded in [`round_start`](Sim::round_start). The tick is the shared
@@ -853,8 +858,8 @@ impl Sim {
         Outcome::Ongoing
     }
 
-    /// Fold the entire observable state into one value. Equal hashes across peers ⇒
-    /// in sync; any divergence flips it (see [`crate::lockstep`] desync check).
+    /// Fold the entire observable state into one value — the divergence detector for the
+    /// determinism tests, the probes, and telemetry's cross-deck `(tick, state_hash)` samples.
     ///
     /// Uses FNV-1a over a canonical byte serialization rather than `Hash`/`Hasher`:
     /// the algorithm is fixed in-code, so the value is stable across processes,
@@ -916,13 +921,13 @@ impl Sim {
         h.finish()
     }
 
-    /// The sanctioned randomness source for sim logic. Drawing from it advances shared
-    /// state every peer tracks; never reach for `thread_rng`. (The gray-box crab is
-    /// pure arithmetic and uses none; this is here for later loop variation.)
+    /// The sanctioned randomness source for sim logic. Drawing from it advances state the
+    /// hash tracks; never reach for `thread_rng`. (The gray-box crab is pure arithmetic
+    /// and uses none; this is here for later loop variation.)
     ///
     /// Exposes the concrete `ChaCha8Rng` deliberately: the exact generator is part of
-    /// the determinism contract (a different RNG would desync peers), so pinning it in
-    /// the type is honest, not a leak.
+    /// the determinism contract (restarts and replays must reproduce its stream), so
+    /// pinning it in the type is honest, not a leak.
     pub fn rng(&mut self) -> &mut ChaCha8Rng {
         &mut self.rng
     }

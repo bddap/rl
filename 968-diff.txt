@@ -1,0 +1,442 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index d00a001..5b3a231 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -45,10 +45,9 @@ burn = { version = "0.20", features = ["autodiff", "ndarray"] }
+ naga = { version = "26" }
+ clap = { version = "4", features = ["derive"] }
+ bincode = "1"
+-# POSIX syscalls the multiprocess trainer needs and std doesn't expose:
+-# setpriority (nice the learner + workers so a foreground game preempts them) and
+-# setpgid/killpg (put workers in one process group, kill the group on shutdown so
+-# none are orphaned). Already in the tree transitively, so it adds no new crate.
++# One POSIX syscall std doesn't expose: setpriority (nice the in-process trainer so a
++# foreground game preempts it — `training/inproc.rs`). Already in the tree
++# transitively, so it adds no new crate.
+ libc = "0.2"
+ 
+ # --- multiplayer netcode foundation (net/, game) ---------------------------------
+diff --git a/crab-world/Cargo.toml b/crab-world/Cargo.toml
+index 7370a2a..935d4f0 100644
+--- a/crab-world/Cargo.toml
++++ b/crab-world/Cargo.toml
+@@ -22,14 +22,15 @@ path = "src/lib.rs"
+ # forwards to this one and additionally pulls `bevy_egui` for its boot menu.)
+ render = ["bevy/default", "bevy_rapier3d/default", "enhanced-determinism"]
+ 
+-# GCR avenue 1 (rl#82): rapier's bit-level cross-platform physics determinism, so the
+-# networked NN crab evolves identically on every peer. OFF by default and pulled in by
+-# `render` (the game/rl-demo binaries) — the headless trainer (rl-train, no `render`) stays
+-# fast-float, since enhanced-determinism forces software transcendentals (`simba/libm_force`)
+-# and blocks SIMD, a rollout-throughput cost training has no reason to pay: it is
+-# single-process with no cross-peer hash, and the policy is robust to the tiny play-vs-train
+-# numeric drift (OQ5). Standalone so the determinism regression can exercise the shipped
+-# config headlessly without the GPU render stack. enhanced-determinism's one hard conflict
++# GCR avenue 1 (rl#82): rapier's bit-level cross-platform physics determinism, so armed-crab
++# physics is bit-reproducible across runs and platforms (the `nn-crab-probe` hash gate and
++# probe/telemetry hash comparisons; whether it still earns its cost under host-authority is
++# rl#130). OFF by default and pulled in by `render` (the game/rl-demo binaries) — the headless
++# trainer (rl-train, no `render`) stays fast-float, since enhanced-determinism forces software
++# transcendentals (`simba/libm_force`) and blocks SIMD, a rollout-throughput cost training has
++# no reason to pay: it is single-process with no hash gate, and the policy is robust to the
++# tiny play-vs-train numeric drift (OQ5). Standalone so a headless probe can exercise the
++# shipped config without the GPU render stack. enhanced-determinism's one hard conflict
+ # (`parallel`) is already off (rl#9), as is simd, so enabling it costs no feature we use.
+ enhanced-determinism = ["rapier3d/enhanced-determinism"]
+ 
+diff --git a/crab-world/src/play/graph.rs b/crab-world/src/play/graph.rs
+index df4213d..d995e34 100644
+--- a/crab-world/src/play/graph.rs
++++ b/crab-world/src/play/graph.rs
+@@ -30,7 +30,7 @@ use crate::controls::just_pressed;
+ 
+ use super::controls::{DemoAction, DemoControls};
+ 
+-/// Samples kept per joint trace (~4 s at 60 Hz).
++/// Samples kept per joint trace — one per physics step, so 3.75 s at `PHYSICS_HZ` = 64.
+ const CAPACITY: usize = 240;
+ /// The overlay camera's render layer, isolated from the 3D scene (layer 0) so
+ /// its gizmos draw only here.
+diff --git a/docs/gcr-mp-host-authoritative.md b/docs/gcr-mp-host-authoritative.md
+index df65215..c71847d 100644
+--- a/docs/gcr-mp-host-authoritative.md
++++ b/docs/gcr-mp-host-authoritative.md
+@@ -201,6 +201,10 @@ stopgap-first dual-broken window, [[no-stopgap-first-stepping-stone]]).
+    in `CoreSnapshot.roster` ([[collapse-global-mutable-state-not-coordinate]]). Delete only
+    after `Server` is rewritten to own the roster directly (`Server` embeds it today,
+    `server.rs:146`).
++   *Survived, repurposed (rl#216): `roster.rs` was NOT deleted — the SERVER now owns it as
++   its tick-aligned live-join schedule, the one source of "who is in the match at tick T"
++   for input assembly and scheduled join/leave. The peer-symmetric agreement purpose died;
++   the type stayed useful on the authoritative side.*
+ 3. **`Lockstep`'s peer-symmetric advance** (`lockstep.rs:287-357`): the
+    stall-until-every-peer's-input loop, **`INPUT_DELAY`** (`lockstep.rs:19`, also `Server::new
+    next_emit`, `server.rs:172`), the symmetric `TickMsg` broadcast. Replaced by: server
+diff --git a/game/src/cmd/mod.rs b/game/src/cmd/mod.rs
+index 4cd53e4..a731fe9 100644
+--- a/game/src/cmd/mod.rs
++++ b/game/src/cmd/mod.rs
+@@ -20,11 +20,11 @@ mod telemetry_collector;
+ 
+ #[derive(Subcommand)]
+ pub(crate) enum Command {
+-    /// Networked headless run: discover LAN peers over iroh and run lockstep.
++    /// Networked headless run: discover LAN peers over iroh and run the host-authoritative loop.
+     Net(net::Args),
+     /// Single-peer headless smoke of the tick machinery (no network).
+     Solo(solo::Args),
+-    /// Windowed first-person client: see + play the gray-box on the lockstep sim.
++    /// Windowed first-person client: see + play the gray-box.
+     Play(play::Args),
+     /// Windowed first-person client that JOINS a live match mid-game (GCR MP Stage 3): dial the
+     /// host's endpoint id, get admitted at an agreed round-boundary tick over the new roster, and
+diff --git a/game/src/cmd/net.rs b/game/src/cmd/net.rs
+index c624c5c..46e5a10 100644
+--- a/game/src/cmd/net.rs
++++ b/game/src/cmd/net.rs
+@@ -29,7 +29,7 @@ pub(crate) struct Args {
+     expect: usize,
+     /// Stream live telemetry to the collector with this endpoint id (from
+     /// `game telemetry-collector`). Opens a SEPARATE iroh connection on a distinct ALPN
+-    /// — the lockstep transport/determinism is untouched, and a telemetry failure never
++    /// — the match transport is untouched, and a telemetry failure never
+     /// affects the match. Omit to run with no telemetry.
+     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
+     telemetry: Option<EndpointId>,
+@@ -92,7 +92,7 @@ async fn run_net(args: Args) -> Result<()> {
+     let mut id_map = frozen.id_map.clone();
+     let all_ids: Vec<PlayerId> = id_map.values().copied().collect();
+     info!(
+-        "starting lockstep: {} player(s), I am {:?} ({})",
++        "starting round: {} player(s), I am {:?} ({})",
+         all_ids.len(),
+         me,
+         my_eid.fmt_short()
+diff --git a/game/src/cmd/net_join.rs b/game/src/cmd/net_join.rs
+index bc92d40..9e838ee 100644
+--- a/game/src/cmd/net_join.rs
++++ b/game/src/cmd/net_join.rs
+@@ -24,7 +24,7 @@ pub(crate) struct Args {
+     #[arg(value_name = "HOST_ENDPOINT_ID")]
+     host: EndpointId,
+     /// Stream live telemetry to this collector endpoint id (separate ALPN/connection — never
+-    /// perturbs the lockstep; see `play --telemetry`).
++    /// perturbs the match; see `play --telemetry`).
+     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
+     telemetry: Option<EndpointId>,
+     /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`) — REQUIRED, as
+diff --git a/game/src/cmd/play.rs b/game/src/cmd/play.rs
+index e792775..16a65ee 100644
+--- a/game/src/cmd/play.rs
++++ b/game/src/cmd/play.rs
+@@ -34,7 +34,7 @@ pub(crate) struct Args {
+     #[arg(long, default_value_t = super::shared::DEFAULT_EXPECT)]
+     expect: usize,
+     /// Stream live telemetry to this collector endpoint id (networked play only; see
+-    /// `NetArgs::telemetry`). Separate ALPN/connection — never perturbs the lockstep.
++    /// `NetArgs::telemetry`). Separate ALPN/connection — never perturbs the match.
+     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
+     telemetry: Option<EndpointId>,
+ 
+diff --git a/game/src/main.rs b/game/src/main.rs
+index bd9bcd1..3265b2e 100644
+--- a/game/src/main.rs
++++ b/game/src/main.rs
+@@ -24,7 +24,7 @@ use clap::Parser;
+ 
+ #[derive(Parser)]
+ #[command(
+-    about = "Giant-crab rescue — Phase 1 gray-box extraction loop on deterministic lockstep + iroh"
++    about = "Giant-crab rescue — Phase 1 gray-box extraction loop, host-authoritative over iroh"
+ )]
+ struct Cli {
+     #[command(subcommand)]
+@@ -41,7 +41,7 @@ fn main() -> Result<()> {
+     // Installs the stderr fmt subscriber (so the game's `error!`/`warn!` surface locally) AND,
+     // when a telemetry endpoint is configured, exports OTLP traces/logs/metrics — routing the
+     // missing-mesh error (rl#706) and other faults onto the telemetry stream. Inert (stderr
+-    // only) when no endpoint is set, so it never perturbs lockstep. The guard flushes on drop,
++    // only) when no endpoint is set, so it never perturbs the game. The guard flushes on drop,
+     // so it must outlive the whole run — bound here, dropped only when `main` returns. `RUST_LOG`
+     // overrides the default `info` level.
+     let _otel = otel::init("game");
+diff --git a/net/Cargo.toml b/net/Cargo.toml
+index eb6f3c2..97a6ecf 100644
+--- a/net/Cargo.toml
++++ b/net/Cargo.toml
+@@ -25,8 +25,8 @@ render = [
+ 
+ # GCR avenue 1 (rl#82): rapier's bit-level cross-platform physics determinism. Forwards
+ # to crab-world's same feature (which carries `rapier3d/enhanced-determinism`); cargo
+-# unifies it onto the one shared rapier3d. The two-sim `determinism_probe` regression runs
+-# under this feature to exercise the shipped config headlessly.
++# unifies it onto the one shared rapier3d. The render-gated pump-equivalence test
++# (`render/tests.rs`) and `game nn-crab-probe` exercise the shipped config headlessly.
+ enhanced-determinism = ["crab-world/enhanced-determinism"]
+ 
+ [dependencies]
+diff --git a/net/src/cadence.rs b/net/src/cadence.rs
+index 367541f..1fd65bc 100644
+--- a/net/src/cadence.rs
++++ b/net/src/cadence.rs
+@@ -1,13 +1,14 @@
+ //! Deterministic physics/sim cadence reconciliation for the networked NN crab (GCR).
+ //!
+ //! The crab body + its Sense→Think→Act brain step at [`crab_world::physics::PHYSICS_HZ`] (64 Hz);
+-//! the lockstep sim advances at [`crate::sim::TICK_HZ`] (30 Hz). On a NETWORKED round
+-//! every peer MUST advance the float body the SAME number of physics steps between two
+-//! lockstep ticks — otherwise the per-tick `phys_digest` folded into
+-//! [`crate::sim::Sim::state_hash`] differs and the peers desync by construction. Wall
+-//! clock can't decide that count (it differs per machine and per frame rate), so this is a
+-//! pure INTEGER accumulator keyed off the tick index alone: identical on every peer from the
+-//! shared [`Default`] start.
++//! the sim advances at [`crate::sim::TICK_HZ`] (30 Hz). Host-authoritative: the HOST is the
++//! only peer that steps the crab (clients render its broadcast pose), and this is the host's
++//! 64:30 pacer — how many physics steps to pump per applied sim tick. Wall clock must not
++//! decide that count (it differs per machine and per frame rate, and the per-tick
++//! `phys_digest` folded into [`crate::sim::Sim::state_hash`] would then be irreproducible),
++//! so this is a pure INTEGER accumulator keyed off the tick index alone: the same tick
++//! sequence always pumps the same steps, which is what keeps restarts, the determinism
++//! probes, and prediction replay exact.
+ //!
+ //! 64 / 30 is not an integer, so the per-tick step count alternates (mostly 2, periodically
+ //! 3). The Bresenham-style accumulator emits a deterministic sequence that sums to exactly
+@@ -21,9 +22,9 @@ use crab_world::physics::PHYSICS_HZ;
+ /// `PHYSICS_HZ` of credit, emits the whole steps that buys (`credit / TICK_HZ`), and carries
+ /// the remainder — so over `TICK_HZ` ticks it emits exactly `PHYSICS_HZ` steps.
+ ///
+-/// `Copy` and its whole state is one `u64`: two peers starting from [`Default`] and stepping
+-/// the same number of ticks always agree on the per-tick AND cumulative step counts, which is
+-/// the property the GCR fold relies on.
++/// `Copy` and its whole state is one `u64`: any two runs starting from [`Default`] and
++/// stepping the same number of ticks agree on the per-tick AND cumulative step counts, which
++/// is the reproducibility the GCR fold relies on.
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct PhysicsCadence {
+     /// Physics-step credit not yet spent as a whole step, in `PHYSICS_HZ·tick` units. Always
+@@ -32,9 +33,9 @@ pub struct PhysicsCadence {
+ }
+ 
+ impl PhysicsCadence {
+-    /// Physics steps to run for the next lockstep tick. Call EXACTLY once per ADVANCED tick
++    /// Physics steps to run for the next sim tick. Call EXACTLY once per ADVANCED tick
+     /// (never for a stalled/attempted tick), so the accumulator stays in phase with the sim
+-    /// and so two peers that advanced the same ticks ran the same number of physics steps.
++    /// and the same tick sequence always maps to the same physics-step sequence.
+     pub fn steps_for_next_tick(&mut self) -> u32 {
+         self.acc += PHYSICS_HZ;
+         let n = self.acc / TICK_HZ;
+diff --git a/net/src/external_crab.rs b/net/src/external_crab.rs
+index 8362b77..1bb055c 100644
+--- a/net/src/external_crab.rs
++++ b/net/src/external_crab.rs
+@@ -1,19 +1,20 @@
+ //! A real rapier-simulated, NN-driven giant crab — the trained RL body ("real Sally"), the ONLY
+ //! crab the game has (no integer point-pursuer to fall back to). Armed by the
+ //! [`ExternalCrabArmed`] runtime gate on a SOLO round (a Host-alone Start, or scripted `--host`
+-//! that found no peer) and on a NETWORKED round with synced weights.
++//! that found no peer) and on a NETWORKED round that passes the sync verdict below.
+ //!
+ //! # When it drives the crab (and why it's safe)
+-//! The game's [`crate::sim`] is a bit-deterministic INTEGER lockstep sim so two peers
+-//! evolve identically. A rapier crab is FLOAT physics, so it can drive a *networked* crab
+-//! without desyncing ONLY when every peer (a) loaded the same brain (the weights-digest
+-//! handshake) and (b) steps the body the identical number of physics steps per lockstep tick
+-//! (the deterministic [`crate::cadence::PhysicsCadence`], pumped by
+-//! `net::render::drive_lockstep`). [`crate::may_arm_external_crab`] is the gate that
+-//! enforces both. On a solo round there's no peer to desync against, so it always arms. A
+-//! networked-UNSYNCED round CANNOT arm and — with no integer fallback — REFUSES LOUDLY (the
+-//! windowed client fails with an actionable peer-mismatch message; see [`crate::render`])
+-//! rather than silently substituting a fake crab for Sally.
++//! Host-authoritative: the HOST is the only peer that steps the crab — clients adopt its
++//! snapshots and render its broadcast articulation — so cross-peer float divergence is not a
++//! failure mode. On a NETWORKED round [`crate::may_arm_external_crab`] gates on the two
++//! things that ARE real (see [`crate::membership::Membership::sync_verdict`]): (a) the HOST
++//! loaded a real brain — a non-zero policy-weights digest in its own beats; only the host
++//! executes the brain, so brain equality across peers gates nothing — and (b) asset identity:
++//! every peer builds its rendered crab from the same crab-model asset, so a digest mismatch
++//! is a real client-side divergence even under host-auth. On a solo round there's no peer, so
++//! it always arms. A networked-UNSYNCED round CANNOT arm and — with no integer fallback —
++//! REFUSES LOUDLY (the windowed client fails with an actionable peer-mismatch message; see
++//! [`crate::render`]) rather than silently substituting a fake crab for Sally.
+ //!
+ //! # How it works
+ //! The trained policy ([`crab_world::play::Policy`], loaded from a checkpoint) is a
+@@ -219,11 +220,11 @@ impl ExternalCrabBridge {
+ /// env-0 crab entity tree and rebuild it fresh from spawn, via the SAME
+ /// [`crab_world::bot::respawn_crab`] path the non-finite rescue uses (one respawn implementation,
+ /// no parallel reset to drift). [`ExternalCrabBridge::restart_to_spawn`] resets only the bridge's
+-/// bookkeeping; the rapier solver keeps WARM contact/warm-start state across a bare restart, so a
+-/// mid-game JOIN would put a warm incumbent body beside a cold joiner body in the same round — a
+-/// divergence folded LOUDLY into `state_hash` via the external-crab digest. Dropping the tree and
+-/// rebuilding gives every peer (incumbents AND the joiner) the IDENTICAL cold solver state, so the
+-/// round stays in lockstep. Called from the one restart edge in [`crate::render`]'s
++/// bookkeeping; the rapier solver keeps WARM contact/warm-start state across a bare restart, so
++/// re-seeding alone would make the new round's physics path-dependent on the round before it (and
++/// visible in the per-tick external-crab digest folded into `state_hash`). Dropping the tree and
++/// rebuilding starts every round from the IDENTICAL from-boot solver state — a respawn, not a
++/// teleport of the old body. Called from the one restart edge in [`crate::render`]'s
+ /// `drive_lockstep`, so join and plain-restart share it.
+ ///
+ /// Exclusive-world (the driver edge holds `&mut World`): collect the env-0 parts, lift `CrabAssets`
+diff --git a/net/src/lib.rs b/net/src/lib.rs
+index 2838e88..42b3146 100644
+--- a/net/src/lib.rs
++++ b/net/src/lib.rs
+@@ -165,7 +165,7 @@ mod desync_test {
+     fn two_sims_stay_in_lockstep_on_one_input_log() {
+         let players: Vec<PlayerId> = (0..4).map(PlayerId).collect();
+         let seed = 0xA11CE;
+-        let log = input_log(0xBEEF, &players, 240); // ~4s at 60Hz
++        let log = input_log(0xBEEF, &players, 240); // 8s at TICK_HZ=30
+ 
+         // Two sims built separately from the same seed — like two peers booting the
+         // same match. They must agree from tick 0.
+diff --git a/net/src/net_loop.rs b/net/src/net_loop.rs
+index 930dddd..14b6b13 100644
+--- a/net/src/net_loop.rs
++++ b/net/src/net_loop.rs
+@@ -793,7 +793,7 @@ fn connect_and_form_inner(
+ 
+     let all_ids: Vec<PlayerId> = frozen.id_map.values().copied().collect();
+     println!(
+-        "starting lockstep: {} player(s), I am {:?}",
++        "starting round: {} player(s), I am {:?}",
+         all_ids.len(),
+         frozen.me
+     );
+diff --git a/net/src/render/driver.rs b/net/src/render/driver.rs
+index 391a8dc..100ae50 100644
+--- a/net/src/render/driver.rs
++++ b/net/src/render/driver.rs
+@@ -282,8 +282,8 @@ pub(super) struct GameState {
+     /// watermark would suppress tick telemetry until the counter climbed past it (rl#210).
+     next_tel_tick: u64,
+     /// The deterministic 64:30 physics/sim cadence, advanced once per APPLIED tick while
+-    /// armed and reset on the restart edge (reported by `step_next`, rl#204) so two peers
+-    /// stay phase-aligned.
++    /// armed and reset on the restart edge (reported by `step_next`, rl#204) so every round
++    /// pumps the same physics-step schedule from tick 0.
+     cadence: PhysicsCadence,
+     /// (Remote client only) Arrived-but-not-yet-adopted host snapshots — the jitter buffer.
+     /// Arrivals beat against the local tick clock (0 or 2 per tick), and adopting a burst
+@@ -703,8 +703,8 @@ fn read_vehicle_pose(world: &mut World) -> Option<CockpitPose> {
+ /// We mirror Bevy's own `run_fixed_main_schedule`: swap the generic `Time` to `Time<Fixed>`
+ /// for the step (so any system reading `Res<Time>` inside the fixed schedule sees the fixed
+ /// clock), then restore `Time<Virtual>` for the rest of `Update`/render. The step COUNT comes
+-/// from the integer [`PhysicsCadence`] (not wall clock), so every peer runs the identical
+-/// number of steps per lockstep tick and the per-tick `phys_digest` matches bit-for-bit.
++/// from the integer [`PhysicsCadence`] (not wall clock), so the same tick sequence always
++/// pumps the same steps and the per-tick `phys_digest` is reproducible bit-for-bit.
+ pub(crate) fn pump_fixed_steps(world: &mut World, steps: u32) {
+     use bevy::app::FixedMain;
+     use bevy::time::{Fixed, Time, Virtual};
+@@ -740,10 +740,10 @@ pub(crate) fn park_fixed_auto_pump(world: &mut World) {
+ /// the exact RESTART edge (as reported by `Server::step_next`) in [`drive_lockstep`]'s
+ /// server-authoritative drain, the one arm that pumps a crab body. Re-seeding the bridge so
+ /// the next pose push is the spawn pose (not the still-walking body's accumulated position) is half
+-/// of it; the other half is the cold respawn — re-seeding alone leaves the rapier solver WARM, which
+-/// would desync a mid-game joiner's cold body against an incumbent's warm one.
+-/// Dropping + rebuilding the body makes every peer's solver state identically fresh off
+-/// the same shared-input restart edge, covering the plain RESTART button too (one shared edge).
++/// of it; the other half is the cold respawn — re-seeding alone leaves the rapier solver WARM
++/// (carried contacts/warm-start impulses), so the new round's physics would be path-dependent on
++/// the round before it. Dropping + rebuilding the body makes every round start from the identical
++/// from-boot solver state — a respawn, not a teleport of the old body.
+ /// `spawn` is read from whichever sim is authoritative for the round. Only meaningful while armed
+ /// (else no bridge drives the crab).
+ fn restart_crab_to_spawn(world: &mut World, spawn: crate::sim::Pos) {
+diff --git a/net/src/render/tests.rs b/net/src/render/tests.rs
+index d3cd0df..d3455c8 100644
+--- a/net/src/render/tests.rs
++++ b/net/src/render/tests.rs
+@@ -128,14 +128,13 @@ fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
+ }
+ 
+ /// The GCR fold's manual fixed-step pump ([`pump_fixed_steps`]) must reproduce, bit-for-bit,
+-/// the physics Bevy's wall-clock auto-pump produces — the stepping `bot::determinism_probe`
+-/// proves deterministic. Build two identical headless crab worlds; step one with `app.update()`
+-/// (the auto-pump path) and the other with `pump_fixed_steps` after parking `Time<Fixed>` (the
+-/// windowed driver's path); drive both with the SAME scripted torque and assert their full
+-/// articulated crab digests agree every tick. If they do, the windowed crab inherits ALL of
+-/// the probe's determinism guarantees; if `pump_fixed_steps` ever double-stepped, skipped a
+-/// fixed sub-schedule, or fed the wrong clock, this diverges. (Render-only — it needs the real
+-/// rapier+bot stack — but headless: no window/GPU.)
++/// the physics Bevy's wall-clock auto-pump produces. Build two identical headless crab worlds;
++/// step one with `app.update()` (the auto-pump path) and the other with `pump_fixed_steps`
++/// after parking `Time<Fixed>` (the windowed driver's path); drive both with the SAME scripted
++/// torque and assert their full articulated crab digests agree every tick. If they do, the
++/// windowed driver's pump is just the auto-pump on a deterministic clock; if `pump_fixed_steps`
++/// ever double-stepped, skipped a fixed sub-schedule, or fed the wrong clock, this diverges.
++/// (Render-only — it needs the real rapier+bot stack — but headless: no window/GPU.)
+ #[test]
+ fn manual_pump_matches_auto_pump_step_for_step() {
+     use bevy_rapier3d::prelude::Velocity;
+diff --git a/net/src/sim.rs b/net/src/sim.rs
+index c84f67b..5b35853 100644
+--- a/net/src/sim.rs
++++ b/net/src/sim.rs
+@@ -1,6 +1,12 @@
+-//! Deterministic simulation core for lockstep multiplayer: peers run independent
+-//! copies and only inputs cross the wire (see [`crate::lockstep`]), so the sim
+-//! must be bit-identical across machines. The contract that buys that:
++//! Deterministic simulation core for the networked game. Host-authoritative: ONE
++//! copy steps per round — inside the host's [`crate::server::Server`] — and state
++//! crosses the wire as [`CoreSnapshot`]s that clients adopt without stepping (see
++//! [`crate::lockstep`]). Determinism no longer keeps peers in agreement (no client
++//! steps, so there is nothing to agree tick-for-tick); it buys restart
++//! reproducibility (a round restart rebuilds bit-identically from the retained
++//! config), prediction-replay exactness (a client replaying its unconsumed inputs
++//! over an adopted snapshot reproduces what the server will compute from them), and
++//! stable probe/telemetry hashes. The contract that buys that:
+ //!
+ //! - [`Sim::step`] is a pure function of `(prior state, inputs)`. No wall-clock, no
+ //!   thread-local/global RNG, no iteration over `HashMap`/`HashSet` (their order is
+@@ -11,9 +17,9 @@
+ //!   velocities) and angles go through an integer sin/cos table ([`trig`]). `f32`
+ //!   appears ONLY at the input boundary ([`Input::from_axes`]), which quantizes to
+ //!   the integer grid before anything reaches the sim.
+-//! - [`Sim::state_hash`] folds the FULL observable state into one `u64` — the desync
+-//!   detector. Every field added to the state MUST be hashed there, or a desync in it
+-//!   goes undetected.
++//! - [`Sim::state_hash`] folds the FULL observable state into one `u64` — the
++//!   divergence detector for the determinism tests, probes, and telemetry. Every field
++//!   added to the state MUST be hashed there, or a divergence in it goes undetected.
+ //!
+ //! **Coordinate frame.** Right-handed: world is the XZ ground plane at Y=0, +X right,
+ //! +Z forward, +Y up. A yaw of 0 faces +Z and increases turning toward +X (see
+diff --git a/net/src/snapshot.rs b/net/src/snapshot.rs
+index 0924c78..5f72689 100644
+--- a/net/src/snapshot.rs
++++ b/net/src/snapshot.rs
+@@ -57,9 +57,9 @@ pub struct CoreSnapshot {
+     /// The round result the client reads to end the round.
+     pub outcome: Outcome,
+     /// The participant set the server owns (sorted, deduped) — the server ships the roster;
+-    /// peers never agree it tick-for-tick. Not in
+-    /// [`Sim::state_hash`](crate::sim::Sim::state_hash) (config-level, can't differ between
+-    /// in-sync peers), so the round-trip test asserts it separately.
++    /// clients adopt it, never negotiate it. Not in
++    /// [`Sim::state_hash`](crate::sim::Sim::state_hash) (config-level, not evolving state),
++    /// so the round-trip test asserts it separately.
+     pub roster: Vec<PlayerId>,
+     /// Per player, the first [`TickMsg::issue_tick`](crate::lockstep::TickMsg::issue_tick) NOT
+     /// yet consumed into this state — the input watermark a remote client prunes + replays its
+diff --git a/net/src/transport.rs b/net/src/transport.rs
+index fb9c20d..c63e9e6 100644
+--- a/net/src/transport.rs
++++ b/net/src/transport.rs
+@@ -819,9 +819,10 @@ async fn wire_connection(
+ }
+ 
+ /// Upper bound on a single frame body, to reject a hostile/garbled length before
+-/// allocating. The two largest legitimate frames both fit comfortably: a full-roster [`Beat`]
+-/// (kind + start + count + weights digest + 256×32-byte ids ≈ 8 KiB) and a full-roster
+-/// [`CoreSnapshot`] (~14 B/player, ≈ 4 KiB at 256); 16 KiB is generous
++/// allocating. The largest legitimate frames all fit comfortably: a full-roster [`Beat`]
++/// (kind + start + count + weights digest + 256×32-byte ids ≈ 8 KiB), a full-roster
++/// [`CoreSnapshot`] (~14 B/player, ≈ 4 KiB at 256), and a [`CrabArticulation`] (rl#192:
++/// 39 parts × 29 B each + repose + vehicle ≈ 1.2 KiB); 16 KiB is generous
+ /// slack and still bounds a bad length to a small allocation.
+ const MAX_FRAME_LEN: usize = 16 * 1024;
+ 

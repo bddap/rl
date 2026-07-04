@@ -4,7 +4,8 @@
 //! over the agreed set by sorted id, and collect tick inputs that arrived mid-formation —
 //! is shared verbatim by the windowed client ([`crate::net_loop::connect_and_form`]) and the
 //! headless `game net` driver. Same code on every peer on purpose: the agreed set + id
-//! assignment MUST be byte-identical or the sims silently desync. The callers differ only in
+//! assignment MUST be byte-identical or inputs and snapshots are silently mis-attributed
+//! across peers. The callers differ only in
 //! what they do with the session after (wrap it in a [`crate::net_loop::NetDriver`], or drive
 //! it raw).
 //!

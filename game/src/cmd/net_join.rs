@@ -24,7 +24,7 @@ pub(crate) struct Args {
     #[arg(value_name = "HOST_ENDPOINT_ID")]
     host: EndpointId,
     /// Stream live telemetry to this collector endpoint id (separate ALPN/connection — never
-    /// perturbs the lockstep; see `play --telemetry`).
+    /// perturbs the match; see `play --telemetry`).
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
     /// Directory holding the trained crab policy (`brain.bin` + `normalizer.bin`) — REQUIRED, as

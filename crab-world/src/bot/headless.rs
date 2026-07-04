@@ -205,8 +205,8 @@ pub fn pin_single_thread_pools() {
 /// systems onto the global `ComputeTaskPool` — system run order becomes fixed rather than
 /// thread-scheduling-dependent. Must run AFTER all systems are added (the schedules don't
 /// exist until then). Used by the K-world rollout apps (so the workers don't serialise on
-/// the shared pool), eval, and the GCR#82 determinism probe (so cross-peer float evolution
-/// can't reorder).
+/// the shared pool), eval, and the GCR#82 NN-crab probe (so float evolution is
+/// schedule-independent, bit-reproducible).
 pub fn force_serial_schedules(app: &mut App) {
     use bevy::ecs::schedule::{ExecutorKind, Schedules};
     let mut schedules = app.world_mut().resource_mut::<Schedules>();

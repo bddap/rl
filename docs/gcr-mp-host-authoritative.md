@@ -201,6 +201,10 @@ stopgap-first dual-broken window, [[no-stopgap-first-stepping-stone]]).
    in `CoreSnapshot.roster` ([[collapse-global-mutable-state-not-coordinate]]). Delete only
    after `Server` is rewritten to own the roster directly (`Server` embeds it today,
    `server.rs:146`).
+   *Survived, repurposed (rl#216): `roster.rs` was NOT deleted — the SERVER now owns it as
+   its tick-aligned live-join schedule, the one source of "who is in the match at tick T"
+   for input assembly and scheduled join/leave. The peer-symmetric agreement purpose died;
+   the type stayed useful on the authoritative side.*
 3. **`Lockstep`'s peer-symmetric advance** (`lockstep.rs:287-357`): the
    stall-until-every-peer's-input loop, **`INPUT_DELAY`** (`lockstep.rs:19`, also `Server::new
    next_emit`, `server.rs:172`), the symmetric `TickMsg` broadcast. Replaced by: server

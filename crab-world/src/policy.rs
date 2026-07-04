@@ -24,8 +24,8 @@ use crate::training::envelope::EnvelopeError;
 use crate::training::normalizer::{NORMALIZER_CLIP, ObsNormalizer};
 
 /// A policy that maps observations to actions for inference (no learning). The
-/// checkpoint-derived state — whether a brain drives the crab, and its cross-peer weight
-/// identity — lives in [`PolicyState`], which makes the illegal combinations
+/// checkpoint-derived state — whether a brain drives the crab, and its weight-identity
+/// digest — lives in [`PolicyState`], which makes the illegal combinations
 /// unrepresentable (no `loaded` bool to keep in sync with the brain, no `0`-digest sentinel
 /// that could ride alongside a real brain into the lockstep hash). The fields here are the
 /// state-independent wiring: the inference device and the demo's hot-reload bookkeeping.
@@ -46,7 +46,7 @@ pub struct Policy {
     state: PolicyState,
 }
 
-/// What (if anything) drives the crab, and its cross-peer weight identity — the three states
+/// What (if anything) drives the crab, and its weight-identity digest — the three states
 /// a policy can be in, kept as ONE enum so an impossible combination (a brain with no digest
 /// claiming to be loaded, or a "loaded" flag with no brain, or a `0`/stale digest beside a
 /// real brain) can't be constructed.
@@ -64,7 +64,7 @@ enum PolicyState {
     /// `RL_RANDOM_POLICY`: an untrained current-rig brain drives the crab so an operator can
     /// see what a FRESH policy does (vs the zero-action rest pose). It has NO on-disk weights,
     /// hence no digest, hence — by construction, not by a runtime `!= 0` check — can never
-    /// enter networked lockstep (`weights_digest()` is `None`).
+    /// arm a networked round (`weights_digest()` is `None`).
     Diagnostic {
         brain: AnyBrain<InferBackend>,
         normalizer: ObsNormalizer,
@@ -83,8 +83,9 @@ enum PolicyState {
 }
 
 /// Digest of a checkpoint's on-disk weights (brain + normalizer bytes), or `0` if the brain
-/// file is unreadable. The cross-peer "same weights?" check: identical files → identical
-/// digest. Reads the raw bytes rather than the deserialized tensors so it needs no backend
+/// file is unreadable. The brain-identity check: identical files → identical digest — the
+/// HOST's non-zero digest is what arms a networked round (`sync_verdict`), and telemetry
+/// compares it across decks. Reads the raw bytes rather than the deserialized tensors so it needs no backend
 /// and can't drift from how the weights are stored.
 pub fn checkpoint_digest(dir: &Path) -> u64 {
     let paths = CheckpointDir::new(dir);

@@ -29,7 +29,7 @@ pub(crate) struct Args {
     expect: usize,
     /// Stream live telemetry to the collector with this endpoint id (from
     /// `game telemetry-collector`). Opens a SEPARATE iroh connection on a distinct ALPN
-    /// — the lockstep transport/determinism is untouched, and a telemetry failure never
+    /// — the match transport is untouched, and a telemetry failure never
     /// affects the match. Omit to run with no telemetry.
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
@@ -92,7 +92,7 @@ async fn run_net(args: Args) -> Result<()> {
     let mut id_map = frozen.id_map.clone();
     let all_ids: Vec<PlayerId> = id_map.values().copied().collect();
     info!(
-        "starting lockstep: {} player(s), I am {:?} ({})",
+        "starting round: {} player(s), I am {:?} ({})",
         all_ids.len(),
         me,
         my_eid.fmt_short()

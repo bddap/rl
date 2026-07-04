@@ -24,7 +24,7 @@ use clap::Parser;
 
 #[derive(Parser)]
 #[command(
-    about = "Giant-crab rescue — Phase 1 gray-box extraction loop on deterministic lockstep + iroh"
+    about = "Giant-crab rescue — Phase 1 gray-box extraction loop, host-authoritative over iroh"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -41,7 +41,7 @@ fn main() -> Result<()> {
     // Installs the stderr fmt subscriber (so the game's `error!`/`warn!` surface locally) AND,
     // when a telemetry endpoint is configured, exports OTLP traces/logs/metrics — routing the
     // missing-mesh error (rl#706) and other faults onto the telemetry stream. Inert (stderr
-    // only) when no endpoint is set, so it never perturbs lockstep. The guard flushes on drop,
+    // only) when no endpoint is set, so it never perturbs the game. The guard flushes on drop,
     // so it must outlive the whole run — bound here, dropped only when `main` returns. `RUST_LOG`
     // overrides the default `info` level.
     let _otel = otel::init("game");

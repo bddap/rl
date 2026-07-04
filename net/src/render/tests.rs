@@ -128,14 +128,13 @@ fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
 }
 
 /// The GCR fold's manual fixed-step pump ([`pump_fixed_steps`]) must reproduce, bit-for-bit,
-/// the physics Bevy's wall-clock auto-pump produces — the stepping `bot::determinism_probe`
-/// proves deterministic. Build two identical headless crab worlds; step one with `app.update()`
-/// (the auto-pump path) and the other with `pump_fixed_steps` after parking `Time<Fixed>` (the
-/// windowed driver's path); drive both with the SAME scripted torque and assert their full
-/// articulated crab digests agree every tick. If they do, the windowed crab inherits ALL of
-/// the probe's determinism guarantees; if `pump_fixed_steps` ever double-stepped, skipped a
-/// fixed sub-schedule, or fed the wrong clock, this diverges. (Render-only — it needs the real
-/// rapier+bot stack — but headless: no window/GPU.)
+/// the physics Bevy's wall-clock auto-pump produces. Build two identical headless crab worlds;
+/// step one with `app.update()` (the auto-pump path) and the other with `pump_fixed_steps`
+/// after parking `Time<Fixed>` (the windowed driver's path); drive both with the SAME scripted
+/// torque and assert their full articulated crab digests agree every tick. If they do, the
+/// windowed driver's pump is just the auto-pump on a deterministic clock; if `pump_fixed_steps`
+/// ever double-stepped, skipped a fixed sub-schedule, or fed the wrong clock, this diverges.
+/// (Render-only — it needs the real rapier+bot stack — but headless: no window/GPU.)
 #[test]
 fn manual_pump_matches_auto_pump_step_for_step() {
     use bevy_rapier3d::prelude::Velocity;

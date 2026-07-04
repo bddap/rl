@@ -78,8 +78,8 @@ pub(super) struct CameraYaw(pub(super) f32);
 /// Analog stick magnitudes are raw f32 here, but the ONLY path from this function to
 /// the sim is via [`Input::new`] in [`drive_lockstep`], which quantizes every axis to
 /// the fixed-point grid — the identical boundary keyboard/mouse cross. So no f32 ever
-/// reaches the deterministic sim; the i16 [`Input`] that each peer broadcasts is the
-/// shared truth, and a pad input is bit-for-bit a keyboard input of the same magnitude.
+/// reaches the deterministic sim; the i16 [`Input`] each client ships up to the server
+/// is the truth, and a pad input is bit-for-bit a keyboard input of the same magnitude.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn gather_input(
     keys: Res<ButtonInput<KeyCode>>,
@@ -114,7 +114,8 @@ pub(super) fn gather_input(
 
     let mut action = held(Action::Extract);
     // Restart the round (R). Latched here, sent as buttons::RESTART, edge-triggered in
-    // the sim — so it restarts every peer in lockstep, not a local-only reset.
+    // the sim — the server applies it and every client adopts the reset via the snapshot,
+    // not a local-only reset (see `buttons::RESTART`).
     if kc(Action::Restart).is_some_and(|k| keys.just_pressed(k)) {
         pending.restart = true;
     }
@@ -166,8 +167,8 @@ pub(super) fn gather_input(
             - gp.pressed(GamepadButton::DPadLeft) as i32) as f32;
         action |= controls::gamepad_buttons_for(Action::Extract).any(|b| gp.pressed(b));
         // Restart on Start (tap), edge-triggered exactly like keyboard R: latched here,
-        // sent as buttons::RESTART, so every peer restarts on the same tick in lockstep (a
-        // local-only reset would desync). Edge (just_pressed), not held. Quit is on its OWN
+        // sent as buttons::RESTART — the server applies it, clients adopt the reset via
+        // the snapshot (see `buttons::RESTART`). Edge (just_pressed), not held. Quit is on its OWN
         // pad button (North, held), NOT Start — so beginning a quit can't fire this restart.
         if controls::gamepad_buttons_for(Action::Restart).any(|b| gp.just_pressed(b)) {
             pending.restart = true;
