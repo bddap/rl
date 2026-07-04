@@ -257,7 +257,7 @@ impl TrainingState {
         let mut obs_normalizer = ObsNormalizer::new(NORMALIZER_CLIP);
         let mut return_normalizer = ReturnNormalizer::new();
 
-        let paths = CheckpointDir::new(&config.checkpoint_dir);
+        let paths = CheckpointDir::new(&config.checkpoint.checkpoint_dir);
 
         // Warm-start from the checkpoint's envelope tag — the tag is AUTHORITATIVE for
         // which architecture resumes (bddap/rl#200 §2/§3). The refusal policy here is
@@ -292,7 +292,7 @@ impl TrainingState {
                          with the checkpoint's arch tag {} (the tag is authoritative on a \
                          resume). Drop the flag, or point --checkpoint-dir at a fresh dir \
                          for a {req} run.",
-                        config.checkpoint_dir.display(),
+                        config.checkpoint.checkpoint_dir.display(),
                         loaded.arch(),
                     );
                 }
@@ -316,7 +316,7 @@ impl TrainingState {
                          body-identity stamps (bddap/rl#214) and is presumably \
                          Sally-trained. Point --checkpoint-dir at a fresh dir for a \
                          fallback run.",
-                        config.checkpoint_dir.display()
+                        config.checkpoint.checkpoint_dir.display()
                     ),
                     Ok(BodyIdentity::TrustOnFirstUse) => warn!(
                         "checkpoint at {} predates body-identity stamping (bddap/rl#214) — \
@@ -326,7 +326,7 @@ impl TrainingState {
                     ),
                     Err(why) => panic!(
                         "REFUSING to train over checkpoint dir {}: {why}",
-                        config.checkpoint_dir.display()
+                        config.checkpoint.checkpoint_dir.display()
                     ),
                 }
                 let (obs, action) = loaded.io_dims();
@@ -361,7 +361,7 @@ impl TrainingState {
                 "REFUSING to train over checkpoint dir {}: brain checkpoint is unusable \
                  ({e}). Cold-starting here would silently discard the trained policy; fix \
                  or move the checkpoint before resuming.",
-                config.checkpoint_dir.display()
+                config.checkpoint.checkpoint_dir.display()
             ),
         }
 
@@ -381,7 +381,7 @@ impl TrainingState {
                 Err(e) => panic!(
                     "REFUSING to resume {}: obs normalizer at {} is unusable ({e}) — a \
                      warm brain never trains against cold or mis-paired normalizer stats.",
-                    config.checkpoint_dir.display(),
+                    config.checkpoint.checkpoint_dir.display(),
                     norm_path.display()
                 ),
             }
@@ -397,7 +397,7 @@ impl TrainingState {
                 Err(e) => panic!(
                     "REFUSING to resume {}: return normalizer at {} is unusable ({e}) — a \
                      warm brain never trains against cold or mis-paired normalizer stats.",
-                    config.checkpoint_dir.display(),
+                    config.checkpoint.checkpoint_dir.display(),
                     ret_norm_path.display()
                 ),
             }
@@ -421,7 +421,7 @@ impl TrainingState {
             obs_normalizer,
             return_normalizer,
             rng,
-            checkpoint_dir: config.checkpoint_dir.clone(),
+            checkpoint_dir: config.checkpoint.checkpoint_dir.clone(),
             saved_on_exit: false,
             warm_started,
             tick_budget: config.ticks,

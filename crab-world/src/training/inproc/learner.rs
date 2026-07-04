@@ -275,7 +275,7 @@ pub fn run_learner(
 
     let m = config.envs as usize;
     let tick_budget = config.ticks;
-    let checkpoint_dir = config.checkpoint_dir.clone();
+    let checkpoint_dir = config.checkpoint.checkpoint_dir.clone();
     std::fs::create_dir_all(&checkpoint_dir).expect("create checkpoint dir");
 
     // The learner hosts the policy through a normal TrainingState (brain on the CPU
