@@ -286,7 +286,7 @@ pub fn run_learner(
     // it each iter to update on the device.
     let mut state = TrainingState::new(config, requested_arch);
     // The run's RESOLVED architecture: the checkpoint tag on a resume, the `--arch`
-    // request (default mlp256) on a fresh start. Everything downstream that must hold
+    // request (default mlp512x3) on a fresh start. Everything downstream that must hold
     // the same variant — the GPU learner and every rollout worker — is built from this,
     // never from the flag.
     let arch = state.brain().arch();

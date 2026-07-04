@@ -313,7 +313,7 @@ impl Policy {
                     checkpoint_dir.display()
                 );
                 PolicyState::Diagnostic {
-                    brain: AnyBrain::<InferBackend>::init(ArchId::Mlp256, &device),
+                    brain: AnyBrain::<InferBackend>::init(ArchId::DEFAULT, &device),
                     normalizer: ObsNormalizer::new(NORMALIZER_CLIP),
                 }
             }
@@ -451,7 +451,7 @@ mod tests {
     use burn::prelude::Module;
     use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
 
-    use crate::bot::arch::Mlp256;
+    use crate::bot::arch::Mlp512x3;
     use crate::training::TrainBackend;
     use crate::training::envelope::{ArtifactKind, write_envelope};
 
@@ -463,7 +463,7 @@ mod tests {
     fn save_brain(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
         let device = NdArrayDevice::Cpu;
-        let brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
         let paths = CheckpointDir::new(dir);
         crate::training::checkpoint::save_brain(&brain, &paths.brain_file()).unwrap();
         ObsNormalizer::new(NORMALIZER_CLIP).save(brain.arch(), &paths.normalizer_path());
@@ -482,7 +482,7 @@ mod tests {
     /// The golden fixture dir: the enveloped golden brain plus `actions.hex`, its
     /// pinned action bits over [`golden_obs`].
     fn golden_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp256-env")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/golden-mlp512x3-env")
     }
 
     fn golden_action_bits() -> Vec<u32> {
@@ -493,14 +493,16 @@ mod tests {
             .collect()
     }
 
-    /// GOLDEN FILE (bddap/rl#200 increment 2): `tests/data/golden-mlp256-env/` holds
-    /// the ENVELOPED form of the golden brain (weights written by pre-`AnyBrain` main,
-    /// wrapped by the since-deleted `migrate-checkpoint` tool, plus an identity obs
-    /// normalizer). Loading it through today's loader and reproducing the pinned action
-    /// bits EXACTLY proves the tagged on-disk format did not drift (a reader/writer
-    /// change that re-mapped envelope fields would strand every migrated fleet
-    /// checkpoint while all save/load-symmetric tests stayed green). Regenerate with
-    /// `regenerate_enveloped_golden_fixture` below on a DELIBERATE format version bump.
+    /// GOLDEN FILE (bddap/rl#200 increment 2): `tests/data/golden-mlp512x3-env/` holds
+    /// an ENVELOPED golden brain (v1/TOFU shape, plus an identity obs normalizer) with
+    /// its action bits over [`golden_obs`] pinned in `actions.hex` at generation time.
+    /// Loading it through today's loader and reproducing those bits EXACTLY proves the
+    /// tagged on-disk format did not drift (a reader/writer change that re-mapped
+    /// envelope fields would strand every fleet checkpoint while all save/load-symmetric
+    /// tests stayed green). The original fixture was the mlp256 brain the fleet
+    /// migration wrapped; regenerated for the surviving arch at the 5b cull. Regenerate
+    /// with `regenerate_enveloped_golden_fixture` below ONLY on a deliberate format
+    /// version bump or an arch cull.
     #[test]
     fn golden_enveloped_checkpoint_loads_and_acts_bit_identically() {
         let policy = Policy::load(&golden_dir());
@@ -537,7 +539,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let device = NdArrayDevice::Cpu;
-        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
         let raw = brain
             .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
             .unwrap();
@@ -563,34 +565,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Regenerates the golden fixture brain in place — load it through the reader,
-    /// re-save it — then commit the result (run with
+    /// Regenerates the golden fixture from a FRESH [`ArchId::DEFAULT`] brain — writes
+    /// the enveloped brain + identity normalizer, then pins its action bits over
+    /// [`golden_obs`] into `actions.hex` — then commit the result (run with
     /// `cargo test -- --ignored regenerate_enveloped_golden_fixture`). Only for a
-    /// DELIBERATE format change; ignored because a golden fixture that silently
-    /// regenerates guards nothing. Writes the LEGACY v1 shape, NOT the production
-    /// writer: the production writer stamps the regenerating machine's constructed body
-    /// digest (bddap/rl#214), which would make the committed fixture refuse to arm on
-    /// every machine whose `sally.glb` differs or is absent — the fixture must stay v1
-    /// (trust-on-first-use) to remain machine-portable, which also keeps it the
-    /// end-to-end guard of the fleet's v1-resume path.
+    /// DELIBERATE format change or an arch cull; ignored because a golden fixture that
+    /// silently regenerates guards nothing. Writes the LEGACY v1 shape, NOT the
+    /// production writer: the production writer stamps the regenerating machine's
+    /// constructed body digest (bddap/rl#214), which would make the committed fixture
+    /// refuse to arm on every machine whose `sally.glb` differs or is absent — the
+    /// fixture must stay v1 (trust-on-first-use) to remain machine-portable, which also
+    /// keeps it the end-to-end guard of the fleet's v1-resume path.
     #[test]
-    #[ignore = "fixture generator, run manually on a deliberate format change"]
+    #[ignore = "fixture generator, run manually on a deliberate format change or arch cull"]
     fn regenerate_enveloped_golden_fixture() {
         let dir = golden_dir();
+        std::fs::create_dir_all(&dir).unwrap();
         let paths = CheckpointDir::new(&dir);
         let device = NdArrayDevice::Cpu;
-        let brain = crate::training::checkpoint::load_brain_file::<TrainBackend>(
-            &paths.brain_file(),
-            &device,
-        )
-        .expect("current fixture loads through the current reader")
-        .brain;
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
         let bytes = brain
             .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
             .unwrap();
         crate::training::envelope::write_v1_brain_envelope(&paths.brain_file(), brain.arch(), bytes)
             .unwrap();
         ObsNormalizer::new(NORMALIZER_CLIP).save(brain.arch(), &paths.normalizer_path());
+
+        let policy = Policy::load(&dir);
+        assert!(policy.is_loaded(), "the fixture just written must load");
+        let bits: Vec<String> = policy
+            .act(&golden_obs())
+            .iter()
+            .map(|v| format!("{:08x}", v.to_bits()))
+            .collect();
+        std::fs::write(dir.join("actions.hex"), bits.join("\n") + "\n").unwrap();
     }
 
     /// bddap/rl#214 WIRING guard (the pure `check_body_identity` matrix is unit-tested
@@ -604,7 +612,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let device = NdArrayDevice::Cpu;
 
-        let brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
         let bytes = brain
             .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
             .unwrap();
@@ -614,12 +622,12 @@ mod tests {
         write_envelope(
             &paths.brain_file(),
             ArtifactKind::Brain,
-            ArchId::Mlp256,
+            ArchId::DEFAULT,
             bytes,
             Some(wrong),
         )
         .unwrap();
-        ObsNormalizer::new(NORMALIZER_CLIP).save(ArchId::Mlp256, &paths.normalizer_path());
+        ObsNormalizer::new(NORMALIZER_CLIP).save(ArchId::DEFAULT, &paths.normalizer_path());
 
         let policy = Policy::load(&dir);
         assert!(!policy.is_loaded(), "a wrong-body checkpoint must not arm");
@@ -692,12 +700,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
     }
 
-    /// Write a hand-mutated `Mlp256` LEAF record inside a proper envelope — the same
+    /// Write a hand-mutated `Mlp512x3` LEAF record inside a proper envelope — the same
     /// on-disk layout production writes — plus the paired identity normalizer, so each
     /// caller's test exercises ONLY the defect its record mutation planted. Concrete
-    /// record type on purpose: the envelope is tagged `ArchId::Mlp256`, so accepting any
+    /// record type on purpose: the envelope is tagged `ArchId::DEFAULT`, so accepting any
     /// `Record` would let the tag lie about the bytes.
-    fn save_brain_record(dir: &Path, record: crate::bot::arch::mlp256::Mlp256Record<TrainBackend>) {
+    fn save_brain_record(dir: &Path, record: crate::bot::arch::mlp512x3::Mlp512x3Record<TrainBackend>) {
         std::fs::create_dir_all(dir).unwrap();
         let bytes = BinBytesRecorder::<FullPrecisionSettings>::default()
             .record(record, ())
@@ -706,23 +714,23 @@ mod tests {
         write_envelope(
             &paths.brain_file(),
             ArtifactKind::Brain,
-            ArchId::Mlp256,
+            ArchId::DEFAULT,
             bytes,
             Some(crate::mesh_fallback::constructed_body_digest()),
         )
         .unwrap();
-        ObsNormalizer::new(NORMALIZER_CLIP).save(ArchId::Mlp256, &paths.normalizer_path());
+        ObsNormalizer::new(NORMALIZER_CLIP).save(ArchId::DEFAULT, &paths.normalizer_path());
     }
 
     /// Save a brain whose first trunk layer expects `obs_dim` inputs instead of the
     /// current `OBS_SIZE` — the on-disk shape a checkpoint from an older rig has. We
-    /// can't get one from `Mlp256::new` (it bakes in today's `OBS_SIZE`), so swap
+    /// can't get one from `Mlp512x3::new` (it bakes in today's `OBS_SIZE`), so swap
     /// the `trunk_fc1` weight in the record for a `[obs_dim, HIDDEN]` tensor before
     /// recording. This is exactly the file that used to reach the matmul and panic.
     fn save_brain_with_obs_dim(dir: &Path, obs_dim: usize) {
         use burn::module::{Param, ParamId};
         let device = NdArrayDevice::Cpu;
-        let mut record = Mlp256::<TrainBackend>::new(&device).into_record();
+        let mut record = Mlp512x3::<TrainBackend>::new(&device).into_record();
         let [_obs, hidden] = record.trunk_fc1.weight.shape().dims();
         let weight = Tensor::<TrainBackend, 2>::zeros([obs_dim, hidden], &device);
         record.trunk_fc1.weight = Param::initialized(ParamId::new(), weight);
@@ -765,7 +773,7 @@ mod tests {
     fn save_nan_brain(dir: &Path) {
         use burn::module::{Param, ParamId};
         let device = NdArrayDevice::Cpu;
-        let mut record = Mlp256::<TrainBackend>::new(&device).into_record();
+        let mut record = Mlp512x3::<TrainBackend>::new(&device).into_record();
         let dims: [usize; 2] = record.policy_fc.weight.shape().dims();
         let weight = Tensor::<TrainBackend, 2>::full(dims, f32::NAN, &device);
         record.policy_fc.weight = Param::initialized(ParamId::new(), weight);

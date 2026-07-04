@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn ppo_update_is_deterministic_under_equal_shuffle_seed() {
         let device = NdArrayDevice::Cpu;
-        let brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
         let rollouts = make_rollouts();
 
         let run = |shuffle_seed: u64| -> PpoMetrics {
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn non_finite_loss_aborts_the_update_without_corrupting_the_policy() {
         let device = NdArrayDevice::Cpu;
-        let mut brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
+        let mut brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
 
         // A fixed probe observation; the policy mean on it is our "did the brain change" witness.
         let probe = Tensor::<TrainBackend, 2>::from_data(
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn target_kl_guard_stops_an_over_kl_update() {
         let device = NdArrayDevice::Cpu;
-        let brain = AnyBrain::<TrainBackend>::init(ArchId::Mlp256, &device);
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
         let rollouts = make_rollouts();
 
         let run = |target_kl: f32| -> PpoMetrics {

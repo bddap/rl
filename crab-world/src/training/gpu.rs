@@ -276,8 +276,8 @@ mod tests {
     #[test]
     fn cpu_device_seam_round_trips_brain_through_update() {
         let device = NdArrayDevice::Cpu;
-        let mut learner = GpuLearner::<TrainBackend>::with_device(ArchId::Mlp256, device);
-        let mut cpu_brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::Mlp256, &device);
+        let mut learner = GpuLearner::<TrainBackend>::with_device(ArchId::DEFAULT, device);
+        let mut cpu_brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
         let before = policy_means(&cpu_brain, &device);
 
         // Empty rollouts ⇒ ppo_update_core is a no-op, so update() exercises purely the
