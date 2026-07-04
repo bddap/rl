@@ -73,6 +73,7 @@ async fn run_net(args: Args) -> Result<()> {
         tel.as_ref(),
         None, // headless: timer-closed barrier, no interactive lobby
         crab_world::mesh_fallback::constructed_body_digest(), // honest crab-asset digest (rl#100)
+        0, // no crab stack here — a windowed peer must not arm a round this driver hosts (rl#200)
     )
     .await?
     {

@@ -239,25 +239,33 @@ impl Codec for Beat {
 
 impl Codec for JoinRequest {
     const KIND: Frame = Frame::JoinRequest;
-    type Bytes = [u8; 8];
+    type Bytes = [u8; 9];
 
-    /// `asset_digest(8)`, little-endian. The joiner's weights digest was dropped from the wire
-    /// (rl#206) — a joiner never executes the brain, so the host self-gate is the one weights
-    /// guard. The strict length checks make a pre-rl#206 16-byte frame a loud decode error, never
-    /// a silently misread request (the fleet updates atomically via rl-update).
-    fn encode(&self) -> [u8; 8] {
-        self.asset_digest.to_le_bytes()
+    /// `asset_digest(8) | crab_count(1)`, little-endian. The joiner's weights digest was dropped
+    /// from the wire (rl#206) — a joiner never executes a brain; `crab_count` is its render-rig
+    /// count, gated against the host's serving count (rl#200). The strict length checks make a
+    /// differently-sized older frame a loud decode error, never a silently misread request (the
+    /// fleet updates atomically via rl-update).
+    fn encode(&self) -> [u8; 9] {
+        let mut out = [0u8; 9];
+        out[0..8].copy_from_slice(&self.asset_digest.to_le_bytes());
+        out[8] = self.crab_count;
+        out
     }
 
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = body;
         let asset_digest = u64::from_le_bytes(take(&mut r, 8, "asset_digest")?.try_into().unwrap());
+        let crab_count = take(&mut r, 1, "crab_count")?[0];
         anyhow::ensure!(
             r.is_empty(),
             "join-request frame has {} trailing bytes",
             r.len()
         );
-        Ok(JoinRequest { asset_digest })
+        Ok(JoinRequest {
+            asset_digest,
+            crab_count,
+        })
     }
 }
 
@@ -985,6 +993,7 @@ mod tests {
     fn join_request_wire_roundtrips() {
         let req = JoinRequest {
             asset_digest: 0xdead_beef_cafe_f00d,
+            crab_count: 3,
         };
         assert_eq!(
             JoinRequest::decode(JoinRequest::encode(&req).as_ref()).unwrap(),

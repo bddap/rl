@@ -221,6 +221,7 @@ pub fn build_windowed_app(
                 seed,
                 telemetry,
                 asset_digest,
+                crab_count: external_crab.len() as u8,
             });
             // NN crabs on the round: the menu can't know at BUILD time whether the
             // round will be solo, networked-synced, or networked-unsynced, so add the whole NN
@@ -336,18 +337,30 @@ pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), Stri
     if crate::may_arm_external_crab(sync) {
         return Ok(());
     }
-    // Reached only on a networked round that can't arm (so `sync` is present): the collider
-    // asset differs on a peer. (The host's own brains are validated fail-loud at launch, so
-    // there is no host-brain cause any more — rl#200 increment 6.)
-    Err(
+    // Reached only on a networked round that can't arm (so `sync` is present). Name the
+    // failing half: the collider asset, or the host-keyed crab count (a 0-count host is a
+    // rest-pose match — the headless driver; a count mismatch renders the wrong number of
+    // crabs). The host's own brains are validated fail-loud at launch — no brain cause here.
+    let (cause, fix) = if !sync.is_some_and(|v| v.crabs) {
+        (
+            "the HOST's NN-crab count doesn't line up — it serves no crabs at all (a headless \
+             driver hosting a rest-pose match) or a different count than this device renders",
+            "host from a windowed device, and launch every device with the same \
+             --nn-crab-checkpoint binding list",
+        )
+    } else {
+        (
+            "the crab colliders (the sally.glb model) differ on a peer — it would build and \
+             render a different crab",
+            "run rl-update on every device so all peers share the same crab model",
+        )
+    };
+    Err(format!(
         "rl#114: refusing to start the round — can't arm the trained NN crabs (\"Sally\") for \
-         this multiplayer match because the crab colliders (the sally.glb model) differ on a \
-         peer — it would build and render a different crab. Fix: run rl-update on every device \
-         so all peers share the same crab model, then re-form the match. (There is deliberately \
-         no integer stand-in crab — an unarmable round refuses rather than silently dropping \
-         Sally.)"
-            .to_string(),
-    )
+         this multiplayer match because {cause}. Fix: {fix}, then re-form the match. (There is \
+         deliberately no integer stand-in crab — an unarmable round refuses rather than \
+         silently dropping Sally.)"
+    ))
 }
 
 /// Size the round's crab set to the binding count (`crabs`), then seed each sim crab's spawn

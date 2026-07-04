@@ -71,10 +71,11 @@ pub struct NetDriver {
     telemetry: Option<TelemetrySender>,
     /// The formation barrier's shared-asset verdict — see [`NetDriver::sync_verdict`].
     sync: crate::SyncVerdict,
-    /// OUR crab-asset digest (the value, not just the synced bool) — the host's side of the
-    /// mid-game admission gate ([`admit_joiners`]). A client never reads it (only the host
-    /// admits).
+    /// OUR crab-asset digest + NN-crab serving count (the values, not just the synced bools) —
+    /// the host's side of the mid-game admission gate ([`admit_joiners`]). A client never reads
+    /// them (only the host admits).
     asset_digest: u64,
+    crab_count: u8,
 }
 
 /// The result of [`Coordinator::exchange`]: on a remote client, the host-authoritative game STATE it
@@ -204,10 +205,15 @@ impl NetDriver {
         (inputs, joins)
     }
 
-    /// (Host) The host's OWN crab-asset digest, feeding the mid-game admission gate
-    /// ([`admit_joiners`]).
+    /// (Host) The host's OWN crab-asset digest + serving crab count, feeding the mid-game
+    /// admission gate ([`admit_joiners`]).
     pub fn local_asset_digest(&self) -> u64 {
         self.asset_digest
+    }
+
+    /// (Host) The host's NN-crab serving count — see [`local_asset_digest`](Self::local_asset_digest).
+    pub fn local_crab_count(&self) -> u8 {
+        self.crab_count
     }
 
     /// (Host) Record an admitted joiner's endpoint→[`PlayerId`] in the live id_map — append-only,
@@ -556,11 +562,12 @@ pub fn depart_gone_peers(
 /// admitted at most once.
 fn admit_joiners(server: &mut Server, net: &mut NetDriver, joins: Vec<(EndpointId, JoinRequest)>) {
     let host_assets = net.local_asset_digest();
+    let host_crabs = net.local_crab_count();
     for (eid, req) in joins {
         if net.is_rostered(eid) {
             continue; // already in the match — a duplicate/racing JoinRequest
         }
-        match may_admit_joiner(host_assets, &req) {
+        match may_admit_joiner(host_assets, host_crabs, &req) {
             Ok(()) => {
                 let adm = server.admit();
                 net.admit_endpoint(eid, adm.pid);
@@ -626,7 +633,9 @@ pub fn connect_and_form(
     collector: Option<iroh::EndpointId>,
 ) -> Result<MatchResult> {
     // Advertise our REAL crab-asset digest so the value is honest if this headless peer
-    // ever forms with a rendered peer that arms the NN crabs.
+    // ever forms with a rendered peer that arms the NN crabs — and crab count 0: this
+    // driver has NO crab stack, so a windowed peer must NOT arm a round it hosts (the
+    // rest-pose-match refusal the count gate restores, rl#200).
     connect_and_form_dialing(
         seed,
         discover_secs,
@@ -635,6 +644,7 @@ pub fn connect_and_form(
         collector,
         None,
         crab_world::mesh_fallback::constructed_body_digest(),
+        0,
     )
 }
 
@@ -656,9 +666,11 @@ pub fn connect_and_form(
 /// the slow barrier — so a Host UI can display the join code to share while waiting. A
 /// closed receiver is ignored (the caller stopped caring); it never gates formation.
 ///
-/// `local_asset_digest` is OUR crab-model-asset digest, `0` for none — advertised in the
-/// formation beats; the agreed [`NetDriver::sync_verdict`] tells the caller whether the round
-/// may arm the NN crabs (the crab asset matched on every peer — the shared-asset guard).
+/// `local_asset_digest` is OUR crab-model-asset digest (`0` for none) and `local_crab_count`
+/// OUR NN-crab binding/rig count (`0` for no crab stack — the headless driver) — both
+/// advertised in the formation beats; the agreed [`NetDriver::sync_verdict`] tells the caller
+/// whether the round may arm the NN crabs (asset matched on every peer + the host-keyed
+/// count gate).
 #[allow(clippy::too_many_arguments)] // each arg is a distinct formation knob.
 pub fn connect_and_form_dialing(
     seed: u64,
@@ -668,6 +680,7 @@ pub fn connect_and_form_dialing(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     local_asset_digest: u64,
+    local_crab_count: u8,
 ) -> Result<MatchResult> {
     // The scripted/headless path: no interactive lobby (`None`), so the default
     // (timer-closed) barrier.
@@ -680,6 +693,7 @@ pub fn connect_and_form_dialing(
         on_bound,
         None,
         local_asset_digest,
+        local_crab_count,
     )
 }
 
@@ -699,6 +713,7 @@ pub fn connect_and_form_lobby(
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     control: LobbyControl,
     local_asset_digest: u64,
+    local_crab_count: u8,
 ) -> Result<MatchResult> {
     connect_and_form_inner(
         seed,
@@ -709,6 +724,7 @@ pub fn connect_and_form_lobby(
         on_bound,
         Some(control),
         local_asset_digest,
+        local_crab_count,
     )
 }
 
@@ -726,6 +742,7 @@ fn connect_and_form_inner(
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     lobby: Option<LobbyControl>,
     local_asset_digest: u64,
+    local_crab_count: u8,
 ) -> Result<MatchResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -762,6 +779,7 @@ fn connect_and_form_inner(
             telemetry.as_ref(),
             lobby.as_ref(),
             local_asset_digest,
+            local_crab_count,
         )
         .await?;
         anyhow::Ok((session, formation, telemetry))
@@ -804,6 +822,7 @@ fn connect_and_form_inner(
         telemetry,
         sync: frozen.sync,
         asset_digest: local_asset_digest,
+        crab_count: local_crab_count,
     };
     Ok(MatchResult::Joined(Box::new((ls, driver))))
 }
@@ -865,6 +884,7 @@ pub fn connect_and_join(
     host: EndpointId,
     collector: Option<EndpointId>,
     local_asset_digest: u64,
+    local_crab_count: u8,
 ) -> Result<JoinResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -895,6 +915,7 @@ pub fn connect_and_join(
                 host,
                 &JoinRequest {
                     asset_digest: local_asset_digest,
+                    crab_count: local_crab_count,
                 },
             )
             .await;
@@ -949,10 +970,14 @@ pub fn connect_and_join(
                 id_map,
                 departed: Default::default(),
                 telemetry,
-                // Admitted ⇒ our asset digest matched the host's — the verdict holds by the
-                // gate we just passed.
-                sync: crate::SyncVerdict { assets: true },
+                // Admitted ⇒ our asset digest + rig count passed the host's gate — the
+                // verdict holds by the admission we were just granted.
+                sync: crate::SyncVerdict {
+                    assets: true,
+                    crabs: true,
+                },
                 asset_digest: local_asset_digest,
+                crab_count: local_crab_count,
             };
             Ok(JoinResult::Joined(Box::new((ls, driver))))
         }

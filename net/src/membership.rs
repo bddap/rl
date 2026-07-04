@@ -118,6 +118,13 @@ pub struct Beat {
     /// sibling weights digest is GONE — rl#200 increment 6: clients run no inference, so a
     /// weights advertisement guarded nothing.)
     pub asset_digest: u64,
+    /// The sender's NN-crab count: the brain-binding count it would SERVE if it hosts (and
+    /// the render-rig count it spawns as a client); `0` = no crab stack at all (the headless
+    /// `game net` driver). A capability advertisement like `asset_digest`, feeding
+    /// [`Membership::sync_verdict`]'s count gate (rl#200): a rendering peer whose count
+    /// differs from the HOST's would show the wrong number of crabs — invisible lethal ones
+    /// or frozen ghosts — so the round refuses to arm instead.
+    pub crab_count: u8,
 }
 
 impl Beat {
@@ -212,6 +219,10 @@ pub struct Membership {
     /// [`Membership::with_asset_digest`]. Advertised in every [`Membership::beat`] and the
     /// basis of [`Membership::sync_verdict`].
     local_asset_digest: u64,
+    /// OUR NN-crab count (binding/rig count; `0` = no crab stack, the headless driver) — set
+    /// via [`Membership::with_crab_count`]. Advertised in every beat; the count half of
+    /// [`Membership::sync_verdict`].
+    local_crab_count: u8,
 }
 
 /// How a [`Membership`] barrier decides to close. A sum type so the "only a host
@@ -254,6 +265,10 @@ struct PeerView {
     /// `None` if heard only via relay. Like `advertised`, `None` counts as unverified, so
     /// a peer not yet heard directly blocks the asset gate until it speaks for itself.
     asset_digest: Option<u64>,
+    /// The NN-crab count this peer last advertised in its OWN direct beat, or `None` if
+    /// heard only via relay. Read when this peer is the HOST (the count gate is host-keyed —
+    /// clients render what the host serves); `None` counts as unverified.
+    crab_count: Option<u8>,
 }
 
 /// The barrier's verdict on each [`Membership::poll`]: keep waiting, freeze this exact
@@ -304,6 +319,7 @@ impl Membership {
             lobby: LobbyMode::Off,
             host_go_on_my_roster: false,
             local_asset_digest: 0,
+            local_crab_count: 0,
         }
     }
 
@@ -312,6 +328,13 @@ impl Membership {
     /// means "no usable asset"; it never counts as synced.
     pub fn with_asset_digest(mut self, digest: u64) -> Self {
         self.local_asset_digest = digest;
+        self
+    }
+
+    /// Set OUR NN-crab count (binding/rig count; `0` = no crab stack). Same launch-time
+    /// builder form as [`Membership::with_asset_digest`].
+    pub fn with_crab_count(mut self, count: u8) -> Self {
+        self.local_crab_count = count;
         self
     }
 
@@ -377,14 +400,16 @@ impl Membership {
                     advertised: None,
                     started: false,
                     asset_digest: None,
+                    crab_count: None,
                 });
                 view.last_direct = now;
                 view.advertised = Some(beat.roster_hash());
                 // Latch the host's GO from THIS direct beat; paired with `advertised` so the
                 // joiner close requires both the GO and a matching roster from one beat.
                 view.started = beat.start;
-                // The digests, like `advertised`/`started`, are set only by a direct beat.
+                // The capability fields, like `advertised`/`started`, are set only by a direct beat.
                 view.asset_digest = Some(beat.asset_digest);
+                view.crab_count = Some(beat.crab_count);
             }
         }
         // Transitive admission (see the method docs): seed only the id's existence
@@ -403,6 +428,7 @@ impl Membership {
                         advertised: None,
                         started: false,
                         asset_digest: None,
+                        crab_count: None,
                     },
                 );
             }
@@ -430,6 +456,7 @@ impl Membership {
             members: self.live_set(),
             start: matches!(self.lobby, LobbyMode::Host { started: true }),
             asset_digest: self.local_asset_digest,
+            crab_count: self.local_crab_count,
         }
     }
 
@@ -445,18 +472,33 @@ impl Membership {
     /// (There is no brain/weights half — rl#200 increment 6 deleted that stale all-peers
     /// gate; see [`crate::SyncVerdict`] for why it guarded nothing under host-authority.)
     ///
+    /// `crabs` is HOST-keyed (rl#200): clients render exactly what the host serves, so what
+    /// must hold is "the host serves ≥1 NN crab (a `0` host is the headless driver — a
+    /// rest-pose match, the old `HostNotArmed` class) AND my own rig count matches it (or I
+    /// render nothing — count 0)". A host heard only via relay (`None`) is unverified and
+    /// blocks, like the roster rule.
+    ///
     /// This is an OUTPUT, never a close gate: a failed verdict still FORMS the match,
     /// but the round can't arm the NN crabs and — with no integer fallback — the windowed
     /// client REFUSES it loudly rather than playing a fake crab
     /// ([`crate::may_arm_external_crab`]). Call after [`Membership::poll`] (which
     /// expires the dead) so the live set is current.
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
+        let host = host_of(&self.live_set());
+        let host_crabs = if host == self.me {
+            Some(self.local_crab_count)
+        } else {
+            self.peers.get(&host).and_then(|v| v.crab_count)
+        };
         crate::SyncVerdict {
             assets: self.local_asset_digest != 0
                 && self
                     .peers
                     .values()
                     .all(|v| v.asset_digest == Some(self.local_asset_digest)),
+            crabs: host_crabs.is_some_and(|h| {
+                h >= 1 && (self.local_crab_count == 0 || self.local_crab_count == h)
+            }),
         }
     }
 
@@ -535,7 +577,7 @@ impl Membership {
 }
 
 /// Encode a [`Beat`] for the wire:
-/// `[start:u8][count:u16 LE][asset_digest:u64 LE][id:32]*count`,
+/// `[start:u8][count:u16 LE][asset_digest:u64 LE][crab_count:u8][id:32]*count`,
 /// the id list sorted+deduped. Fixed 32-byte ids (an [`EndpointId`] is a 32-byte public
 /// key) so there is no per-id length. The member count is bounded on decode
 /// ([`MAX_BEAT_MEMBERS`]) so a hostile/garbled frame can't trigger a huge allocation.
@@ -547,10 +589,11 @@ pub fn encode_beat(beat: &Beat) -> Vec<u8> {
         v
     };
     let members = canon(&beat.members);
-    let mut out = Vec::with_capacity(11 + 32 * members.len());
+    let mut out = Vec::with_capacity(12 + 32 * members.len());
     out.push(beat.start as u8);
     out.extend_from_slice(&(members.len() as u16).to_le_bytes());
     out.extend_from_slice(&beat.asset_digest.to_le_bytes());
+    out.push(beat.crab_count);
     for id in &members {
         out.extend_from_slice(id.as_bytes());
     }
@@ -567,8 +610,8 @@ const MAX_BEAT_MEMBERS: usize = 256;
 /// over-allocating.
 pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     anyhow::ensure!(
-        body.len() >= 11,
-        "barrier frame too short for start+count+asset digest"
+        body.len() >= 12,
+        "barrier frame too short for start+count+asset digest+crab count"
     );
     let start = body[0] != 0;
     let count = u16::from_le_bytes([body[1], body[2]]) as usize;
@@ -577,7 +620,8 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
         "barrier frame claims {count} members (> {MAX_BEAT_MEMBERS})"
     );
     let asset_digest = u64::from_le_bytes(body[3..11].try_into().expect("8-byte slice"));
-    let need = 11 + 32 * count;
+    let crab_count = body[11];
+    let need = 12 + 32 * count;
     anyhow::ensure!(
         body.len() == need,
         "barrier frame length {} != expected {need} for {count} members",
@@ -585,7 +629,7 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     );
     let mut members = Vec::with_capacity(count);
     for i in 0..count {
-        let off = 11 + 32 * i;
+        let off = 12 + 32 * i;
         let bytes: [u8; 32] = body[off..off + 32].try_into().expect("32-byte slice");
         let id = EndpointId::from_bytes(&bytes)
             .map_err(|e| anyhow::anyhow!("bad endpoint id in barrier frame: {e}"))?;
@@ -595,6 +639,7 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
         members,
         start,
         asset_digest,
+        crab_count,
     })
 }
 
@@ -622,6 +667,7 @@ mod tests {
             members,
             start: false,
             asset_digest: 0,
+            crab_count: 0,
         }
     }
 
@@ -653,16 +699,18 @@ mod tests {
             decode_beat(&[0]).is_err(),
             "too short for start+count+digests"
         );
-        // Valid header (start + count=5 + asset digest) but no member bodies.
+        // Valid header (start + count=5 + asset digest + crab count) but no member bodies.
         let mut truncated = vec![0u8];
         truncated.extend_from_slice(&5u16.to_le_bytes());
         truncated.extend_from_slice(&0u64.to_le_bytes()); // asset digest
+        truncated.push(0); // crab count
         assert!(decode_beat(&truncated).is_err(), "truncated body");
-        // count past the cap (start byte + bogus count + digest + filler).
+        // count past the cap (start byte + bogus count + digest + crab count + filler).
         let mut huge = vec![0u8];
         huge.extend_from_slice(&(300u16).to_le_bytes());
         huge.extend_from_slice(&0u64.to_le_bytes()); // asset digest
-        huge.resize(11 + 32 * 300, 0);
+        huge.push(0); // crab count
+        huge.resize(12 + 32 * 300, 0);
         assert!(decode_beat(&huge).is_err(), "over-large count rejected");
     }
 
@@ -678,6 +726,7 @@ mod tests {
             members,
             start: true,
             asset_digest: 0,
+            crab_count: 0,
         };
         assert_eq!(
             plain.roster_hash(),
@@ -707,6 +756,7 @@ mod tests {
             members,
             start: false,
             asset_digest,
+            crab_count: 1,
         }
     }
 
@@ -725,6 +775,61 @@ mod tests {
         );
         let decoded = decode_beat(&encode_beat(&a)).unwrap();
         assert_eq!(decoded.asset_digest, 0xC0FF_EE00_1234_5678);
+    }
+
+    #[test]
+    fn crab_count_gate_is_host_keyed() {
+        // rl#200: the count half of the verdict — the HOST must serve ≥1 NN crab and a
+        // RENDERING peer's own count must match it; a headless peer (count 0) never blocks
+        // itself. Beats carry the count on the wire.
+        let beat_c = |members: Vec<EndpointId>, crab_count: u8| Beat {
+            members,
+            start: false,
+            asset_digest: 0,
+            crab_count,
+        };
+        let decoded = decode_beat(&encode_beat(&beat_c(vec![eid(1)], 3))).unwrap();
+        assert_eq!(decoded.crab_count, 3, "the count survives the wire");
+
+        let t0 = Instant::now();
+        let mut ids = [eid(1), eid(2)];
+        ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let (host, client) = (ids[0], ids[1]);
+
+        // Rendering client matching the host's count → gate passes.
+        let mut a = Membership::new(client, 2, t0).with_crab_count(2);
+        a.on_beat(host, &beat_c(vec![host, client], 2), t0);
+        a.poll(t0);
+        assert!(a.sync_verdict().crabs, "matching host count passes");
+
+        // Host serves a DIFFERENT count than this client renders → refused.
+        let mut b = Membership::new(client, 2, t0).with_crab_count(1);
+        b.on_beat(host, &beat_c(vec![host, client], 2), t0);
+        b.poll(t0);
+        assert!(!b.sync_verdict().crabs, "a count mismatch must not arm");
+
+        // Host advertises count 0 (a headless driver hosting a rest-pose match) → refused,
+        // restoring the old HostNotArmed protection.
+        let mut c = Membership::new(client, 2, t0).with_crab_count(1);
+        c.on_beat(host, &beat_c(vec![host, client], 0), t0);
+        c.poll(t0);
+        assert!(!c.sync_verdict().crabs, "a crab-less host must not arm");
+
+        // We ARE the host: our own count is authoritative; a client's count gates nothing
+        // on OUR side (the client refuses on ITS side).
+        let mut d = Membership::new(host, 2, t0).with_crab_count(2);
+        d.on_beat(client, &beat_c(vec![host, client], 1), t0);
+        d.poll(t0);
+        assert!(d.sync_verdict().crabs, "the host self-passes on its own count");
+
+        // A relay-only host (never heard directly) is unverified → blocked.
+        let mut ids3 = [eid(1), eid(2), eid(3)];
+        ids3.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let (h3, mid, top) = (ids3[0], ids3[1], ids3[2]);
+        let mut e = Membership::new(top, 3, t0).with_crab_count(1);
+        e.on_beat(mid, &beat_c(vec![h3, mid, top], 1), t0);
+        e.poll(t0);
+        assert!(!e.sync_verdict().crabs, "a relay-only host is unverified");
     }
 
     #[test]
@@ -1263,6 +1368,7 @@ mod tests {
             members: vec![idh],
             start: true,
             asset_digest: 0,
+            crab_count: 0,
         };
         let mut t = 0u64;
         let mut closed = false;

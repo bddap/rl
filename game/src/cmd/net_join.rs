@@ -52,7 +52,13 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let external_crab = nn_crab_checkpoint_dirs(args.nn_crab_checkpoint)?;
     let asset_digest = crab_world::mesh_fallback::constructed_body_digest();
 
-    let result = net_loop::connect_and_join(MATCH_SEED, args.host, args.telemetry, asset_digest)?;
+    let result = net_loop::connect_and_join(
+        MATCH_SEED,
+        args.host,
+        args.telemetry,
+        asset_digest,
+        external_crab.len() as u8,
+    )?;
 
     let boot = match result {
         net_loop::JoinResult::Joined(joined) => {

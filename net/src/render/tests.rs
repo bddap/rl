@@ -93,18 +93,29 @@ fn menu_handoff_installs_the_chosen_round() {
 fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
     use super::app::check_armable;
     use crate::SyncVerdict;
-    let synced = |assets| Some(SyncVerdict { assets });
+    let synced = |assets, crabs| Some(SyncVerdict { assets, crabs });
     // Armable: solo always arms; a synced networked round arms. No refusal, no message.
     assert!(
         check_armable(None).is_ok(),
         "solo (no net, no formation verdict) always arms"
     );
     assert!(
-        check_armable(synced(true)).is_ok(),
-        "a networked round with synced assets arms"
+        check_armable(synced(true, true)).is_ok(),
+        "a networked round with synced assets + crab count arms"
+    );
+    // The host-keyed crab count fails (headless host / count mismatch): refuse naming it.
+    let count = check_armable(synced(true, false))
+        .expect_err("a count-mismatched networked round must refuse, not arm the wrong crabs");
+    assert!(
+        count.contains("crab count") || count.contains("NN-crab count"),
+        "names the count cause: {count}"
+    );
+    assert!(
+        count.contains("binding list"),
+        "tells the operator the fix: {count}"
     );
     // The colliders differ on a peer: refuse with the collider cause + the rl-update fix.
-    let colliders = check_armable(synced(false))
+    let colliders = check_armable(synced(false, true))
         .expect_err("an unsynced-assets networked round must refuse, not arm a fake crab");
     assert!(
         colliders.contains("sally.glb"),
