@@ -90,7 +90,7 @@ pub struct Visuals(pub bool);
 /// panic mid-codepoint. THE one implementation for every human-facing string bound (the
 /// brain-label display cap, the articulation wire's label clamp) — the loop is easy to
 /// re-spell subtly wrong, so it lives once. A boundary exists within 3 bytes of any index,
-/// so this trims at most 3 bytes past `max`.
+/// so the cut lands at `max` or at most 3 bytes below it — never above.
 pub fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
