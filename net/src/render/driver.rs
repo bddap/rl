@@ -164,8 +164,8 @@ pub(super) fn ensure_round_installed(world: &mut World) {
 ///   so removal is the whole disarm). The NN stack + crab body persist across rounds by
 ///   design (the menu boot installs them once at build); [`ensure_round_installed`]
 ///   cold-respawns the body at the next round's spawn;
-/// - any live piloting command (the same zeroing as `drive_lockstep`'s OnFoot arm), so no
-///   stale force rides into the next round's physics pump.
+/// - any live piloting entries (`drive_lockstep`'s OnFoot arm removes only OUR own), so no
+///   pilot's craft or command rides into the next round's physics pump.
 pub(super) fn teardown_round(world: &mut World) {
     world.remove_non_send_resource::<GameState>();
     world.remove_resource::<crate::external_crab::ExternalCrabArmed>();
@@ -265,6 +265,20 @@ impl PeerRole {
     fn can_pilot(self) -> bool {
         matches!(self, PeerRole::ServerAuth)
     }
+}
+
+/// The HOST's pilot id — the ONE place "the host is pilot 0" is written down. Sound by
+/// construction: formation gives the lowest endpoint id [`PlayerId(0)`] and that peer runs the
+/// server (solo constructs `me = PlayerId(0)` outright), and a host departure ends the round, so
+/// pid 0 is never reallocated within one. The articulation capture keys the wire's host-craft
+/// slot off this; [`local_pilot`] must agree with it on the server-authoritative arm (asserted in
+/// [`drive_lockstep`]).
+pub(super) const HOST_PILOT: PilotId = PilotId(0);
+
+/// This peer's [`PilotId`] — the ONE PlayerId→PilotId mapping (crab-world's key is a bare `u8`;
+/// every crossing of that seam goes through here so the two id spaces can't drift).
+fn local_pilot(state: &GameState) -> PilotId {
+    PilotId(state.ls.me().0)
 }
 
 /// The networked sim, owned as a non-send Bevy resource and stepped on a
@@ -563,7 +577,7 @@ impl FlightControl {
     /// removes the entry, so there is no stale-command state to zero). The exhaustive destructure
     /// (no `..`) makes a new `FlightControl` axis a COMPILE error here rather than a
     /// silently-dropped command.
-    fn command(&self, kind: VehicleKind) -> PilotCommand {
+    fn to_command(&self, kind: VehicleKind) -> PilotCommand {
         let FlightControl {
             throttle_trim,
             thrust,
@@ -595,7 +609,7 @@ pub(super) struct CockpitPose {
     pub orient: Quat,
 }
 
-/// The local player's SINGLE-PLAYER vehicle, when piloting one. `OnFoot` = not in a vehicle.
+/// The LOCAL player's vehicle, when piloting one. `OnFoot` = not in a vehicle.
 ///
 /// The vehicle itself is a rapier rigidbody living in the crab's ONE physics world
 /// ([`crab_world::vehicle`]) — official, host-authoritative game state that collides with Sally.
@@ -608,9 +622,11 @@ pub(super) struct CockpitPose {
 ///
 /// `pose` is `(prev, now)` — the last two applied ticks' arena poses, so [`apply_transforms`] tweens
 /// the cockpit camera the same way it interpolates every sim body. It is `None` from boarding until
-/// the rapier body first reports a pose (the body spawns a tick or two after our `VehicleControls` entry goes
-/// active), so a fabricated seed pose is unrepresentable — the camera holds the foot view for those
-/// frames rather than snapping in from a fake origin. Only ever piloting on a windowed SOLO round.
+/// the rapier body first reports a pose (the body spawns a tick or two after our `VehicleControls`
+/// entry is inserted), so a fabricated seed pose is unrepresentable — the camera holds the foot
+/// view for those frames rather than snapping in from a fake origin. Piloting is live on the
+/// server-authoritative arm (solo AND host — see `can_pilot`); the remote-adopt boarding arm is a
+/// later rl#191 increment.
 #[derive(Resource, Default)]
 pub(super) enum LocalVehicle {
     #[default]
@@ -1028,19 +1044,29 @@ pub(super) fn drive_lockstep(world: &mut World) {
         // stale command left to zero. The sim never sees the vehicle (the foot player gets neutral
         // input above); it is host-authoritative crab-world state OFF the wire, reading the RAW
         // per-craft flight inputs (Ace Combat 6 for the plane, Outer Wilds for the ship) rather than
-        // the sim's foot axes. `VehicleControls` only exists when `VehiclePlugin` is installed — the
-        // WINDOWED play app (`app.rs`), where you can actually board a craft. The headless screenshot
-        // app omits the plugin (no piloting there), so skip the bridge rather than demand the
-        // resource.
-        if world.get_resource::<VehicleControls>().is_some() {
-            let me = PilotId(world.non_send_resource::<GameState>().ls.me().0);
+        // the sim's foot axes. `VehicleControls` only exists when `VehiclePlugin` is installed —
+        // it rides the NN-crab stack (`add_external_nn_crab`), so a harness driving this system
+        // without that stack has no resource; skip the bridge rather than demand it.
+        // Role-gated EXPLICITLY, not just by can_pilot's side effects: the resource exists on a
+        // remote-adopt client too (the menu boot installs `VehiclePlugin` before the role is
+        // known), and when a later rl#191 increment lets that client CYCLE `LocalVehicle`, this
+        // write would otherwise fly a client-local, non-authoritative craft beside the host's —
+        // the second-implementation trap. A remote client's piloting goes UP the wire; only the
+        // server-authoritative arm writes the local crab world's controls.
+        if role == PeerRole::ServerAuth && world.get_resource::<VehicleControls>().is_some() {
+            let me = local_pilot(world.non_send_resource::<GameState>());
+            debug_assert_eq!(
+                me, HOST_PILOT,
+                "server-auth peer must be pilot 0 (formation gives the host PlayerId(0)) — \
+                 the articulation capture's host-craft slot depends on it"
+            );
             let mut ctrl = world.resource_mut::<VehicleControls>();
             match &local {
                 LocalControl::OnFoot(_) => {
                     ctrl.0.remove(&me);
                 }
                 LocalControl::Piloting { kind, control } => {
-                    ctrl.0.insert(me, control.command(*kind));
+                    ctrl.0.insert(me, control.to_command(*kind));
                 }
             }
         }
@@ -1112,7 +1138,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
                     );
                     // Mirror OUR vehicle body's freshly-stepped pose for the cockpit camera;
                     // independent of the sim.
-                    let me = PilotId(world.non_send_resource::<GameState>().ls.me().0);
+                    let me = local_pilot(world.non_send_resource::<GameState>());
                     if let Some(p) = read_vehicle_pose(world, me) {
                         world.resource_mut::<LocalVehicle>().update_pose(p);
                     }

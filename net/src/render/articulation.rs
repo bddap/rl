@@ -111,14 +111,15 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         })
         .collect();
 
-    // The HOST's own piloted craft, if it is flying one — pilot 0 by construction (the host holds
-    // PlayerId(0)); despawned on foot, so the query itself is the presence signal. The wire still
-    // carries just this one craft — per-pilot poses for remote pilots' crafts are the rl#191
-    // articulation rev. Its `Transform` is arena-frame like the parts (a top-level rapier body).
+    // The HOST's own piloted craft, if it is flying one ([`super::driver::HOST_PILOT`] — the one
+    // home of "the host is pilot 0"); despawned on foot, so the query itself is the presence
+    // signal. The wire still carries just this one craft — per-pilot poses for remote pilots'
+    // crafts are the rl#191 articulation rev. Its `Transform` is arena-frame like the parts (a
+    // top-level rapier body).
     let vehicle = world
         .query::<(&Transform, &Vehicle)>()
         .iter(world)
-        .find(|(_, v)| v.pilot == crab_world::vehicle::PilotId(0))
+        .find(|(_, v)| v.pilot == super::driver::HOST_PILOT)
         .map(|(t, _)| VehiclePoseWire {
             pos: t.translation.to_array(),
             rot: t.rotation.to_array(),
