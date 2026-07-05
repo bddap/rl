@@ -214,7 +214,7 @@ async fn run_net(args: Args) -> Result<()> {
         // re-stepping the sim.
         let t = ls.next_tick() as f32 * 0.1;
         let input = Input::from_axes(t.cos(), t.sin());
-        let msg = ls.submit_local_input(input);
+        let msg = ls.submit_local_input(input, None);
         // The telemetry stamp is the ISSUE tick — on a remote client `ls.next_tick()` (the
         // snapshot-apply cursor) trails it by the transit lag.
         let issue_tick = msg.issue_tick;

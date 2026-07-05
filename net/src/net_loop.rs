@@ -24,7 +24,7 @@ use iroh::EndpointId;
 use crate::articulation::CrabArticulation;
 use crate::formation::{Formation, LobbyControl, early_peer_msgs, form_match};
 use crate::lockstep::{Lockstep, PeerMsg, TickMsg};
-use crate::server::{Admission, JoinRequest, Server, may_admit_joiner};
+use crate::server::{Admission, JoinRequest, Refusal, Server, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
 use crate::telemetry::{TelemetryEvent, TelemetrySender};
@@ -110,8 +110,9 @@ pub enum ServerDown {
     /// mirrored client-side.
     LinkLost,
     /// The host REFUSED us mid-match: we were departed (e.g. after a stall) and our re-linked
-    /// inputs were answered with a one-shot [`transport::Refuse`]. Carries the host's reason.
-    Refused(String),
+    /// inputs were answered with a one-shot refuse frame. Carries the host's typed verdict
+    /// (rl#221) — rendered at the display edge, here in [`std::fmt::Display`].
+    Refused(Refusal),
 }
 
 impl std::fmt::Display for ServerDown {
@@ -188,10 +189,7 @@ impl NetDriver {
                         // loudly (its client error-logs a mid-match Refuse), rather than let it
                         // spectate with dead controls. A fresh joiner is untouched: it
                         // was never in `departed`.
-                        self.refuse_joiner(
-                            from.from,
-                            "you were dropped from the match (connection lost) — rejoin",
-                        );
+                        self.refuse_joiner(from.from, Refusal::Departed);
                     }
                 }
                 // A would-be joiner dialing the live match — surfaced for the coordinator
@@ -238,13 +236,10 @@ impl NetDriver {
         self.rt.block_on(self.session.send(eid, adm));
     }
 
-    /// (Host) LOUDLY refuse a would-be joiner `eid` with `reason` (a digest mismatch) — a typed
-    /// turn-away, never a silent drop onto a wrong crab.
-    pub fn refuse_joiner(&self, eid: EndpointId, reason: &str) {
-        self.rt.block_on(
-            self.session
-                .send(eid, &transport::Refuse(reason.to_string())),
-        );
+    /// (Host) LOUDLY refuse peer `eid` with the typed `verdict` (an admission mismatch, or a
+    /// departed re-link) — a typed turn-away, never a silent drop onto a wrong crab.
+    pub fn refuse_joiner(&self, eid: EndpointId, verdict: Refusal) {
+        self.rt.block_on(self.session.send(eid, &verdict));
     }
 
     /// (Host) Broadcast the host-authoritative [`CoreSnapshot`] DOWN to every client — the full
@@ -302,9 +297,9 @@ impl NetDriver {
                 // Only the SERVER's refusal ends our round; a stray Refuse from any other
                 // linked peer (the mDNS dialer holds a full mesh) is not a verdict about
                 // THIS match — same sender check the headless client applies.
-                PeerWire::Refuse(reason) if from.from == self.server_eid => {
-                    tracing::error!("server refused us mid-match: {reason}");
-                    return Err(ServerDown::Refused(reason));
+                PeerWire::Refuse(verdict) if from.from == self.server_eid => {
+                    tracing::error!("server refused us mid-match: {verdict}");
+                    return Err(ServerDown::Refused(verdict));
                 }
                 _ => {}
             }
@@ -587,12 +582,11 @@ fn admit_joiners(server: &mut Server, net: &mut NetDriver, joins: Vec<(EndpointI
                 }
             }
             Err(refusal) => {
-                let reason = refusal.to_string();
-                tracing::error!("refused mid-game joiner {}: {reason}", eid.fmt_short());
-                net.refuse_joiner(eid, &reason);
+                tracing::error!("refused mid-game joiner {}: {refusal}", eid.fmt_short());
+                net.refuse_joiner(eid, Refusal::Admission(refusal));
                 if let Some(t) = net.telemetry() {
                     t.send(TelemetryEvent::RosterFailed {
-                        reason: format!("join refused: {reason}"),
+                        reason: format!("join refused: {refusal}"),
                     });
                 }
             }
@@ -837,14 +831,15 @@ const JOIN_WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
 /// mismatch — surfaced, not silent), or the host was UNREACHABLE / never answered.
 pub enum JoinResult {
     Joined(Box<(Lockstep, NetDriver)>),
-    Refused(String),
+    /// The host's typed verdict (rl#221) — the caller renders it at its display edge.
+    Refused(Refusal),
     Unreachable,
 }
 
 /// The host's verdict on our [`JoinRequest`], read off the wire.
 enum AdmissionVerdict {
     Admitted(Admission),
-    Refused(String),
+    Refused(Refusal),
     Timeout,
 }
 
@@ -862,7 +857,7 @@ async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVe
             }
             match from.msg {
                 PeerWire::Welcome(adm) => return AdmissionVerdict::Admitted(adm),
-                PeerWire::Refuse(reason) => return AdmissionVerdict::Refused(reason),
+                PeerWire::Refuse(verdict) => return AdmissionVerdict::Refused(verdict),
                 _ => continue,
             }
         }
@@ -924,10 +919,10 @@ pub fn connect_and_join(
     })?;
 
     match verdict {
-        AdmissionVerdict::Refused(reason) => {
-            tracing::error!("host refused our join: {reason}");
+        AdmissionVerdict::Refused(verdict) => {
+            tracing::error!("host refused our join: {verdict}");
             rt.block_on(session.shutdown());
-            Ok(JoinResult::Refused(reason))
+            Ok(JoinResult::Refused(verdict))
         }
         AdmissionVerdict::Timeout => {
             drop(telemetry);
@@ -1032,7 +1027,7 @@ mod tests {
         );
         let submits = 5u64;
         for _ in 0..submits {
-            let msg = ls.submit_local_input(Input::from_axes(1.0, 0.0));
+            let msg = ls.submit_local_input(Input::from_axes(1.0, 0.0), None);
             // The input goes UP to the internal server; with a roster of one there are no OTHER
             // players' inputs and no joins.
             let exch = coord

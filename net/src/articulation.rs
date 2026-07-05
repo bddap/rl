@@ -7,9 +7,9 @@
 //! renders the host's poses), so it has no per-part transforms to skin the meshes from. Those
 //! ride HERE, in a SEPARATE frame the host broadcasts beside the snapshot — one [`CrabFrame`]
 //! per crab, in crab-index order (the index IS the crab's identity, matching the snapshot's
-//! `crabs` and the host's crab-world env ids — rl#200 multi-brain rounds), along with the pose
-//! of the host's piloted craft ([`VehiclePoseWire`]), the other host-only rapier body a remote
-//! client must render without simulating (rl#192).
+//! `crabs` and the host's crab-world env ids — rl#200 multi-brain rounds), along with every
+//! piloting player's craft pose ([`VehiclePoseWire`], keyed by pilot — rl#191), the other
+//! host-only rapier bodies a remote client must render without simulating (rl#192).
 //!
 //! The wire type is plain POD (`f32` arrays + a `u8` part tag) with a hand-rolled little-endian
 //! codec — deliberately NO bevy/glam type crosses this boundary, so this module compiles in the
@@ -86,20 +86,24 @@ pub struct CrabArticulation {
     /// One frame per crab, in crab-index order (index = the snapshot's crab index = the host's
     /// crab-world env id).
     pub crabs: Vec<CrabFrame>,
-    /// The host's piloted craft's pose, or `None` while the host is on foot (the body is
-    /// despawned then, so absence IS the on-foot signal — a client clears its drawn craft on
-    /// `None` rather than freezing a stale one).
-    pub vehicle: Option<VehiclePoseWire>,
+    /// Every currently-piloting player's craft pose, in ascending pilot order (rl#191
+    /// increment 2: one body per pilot). A pilot absent from the list is ON FOOT — its body is
+    /// despawned host-side, so absence IS the on-foot signal and a client clears that craft
+    /// rather than freezing a stale one. Empty when nobody flies.
+    pub vehicles: Vec<VehiclePoseWire>,
 }
 
-/// The host's piloted craft for one tick — its arena-frame rigidbody pose. Like the crabs, the
-/// vehicle is rapier state only the HOST steps (host-authoritative, off the integer sim), so a
-/// remote client can't compute where it is; this riding beside the crab poses is how the second
-/// player sees the host fly (rl#192). The client draws the craft's collider wireframe — its one
-/// visual (the craft has no mesh) — at this pose, under the same [`ReposeWire`] placement as the
-/// crab cage.
+/// One pilot's craft for one tick — its arena-frame rigidbody pose, keyed by the pilot it
+/// belongs to. Like the crabs, a vehicle is rapier state only the HOST steps
+/// (host-authoritative, off the integer sim), so a remote client can't compute where it is;
+/// these riding beside the crab poses is how every player sees the others fly (rl#192/rl#191).
+/// The client draws each craft's collider wireframe — its one visual (the craft has no mesh) —
+/// at this pose, under the same [`ReposeWire`] placement as the crab cage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VehiclePoseWire {
+    /// Whose craft this is — the crab-world `PilotId` (= the sim `PlayerId.0`; the net driver
+    /// owns that one mapping).
+    pub pilot: u8,
     /// Arena-frame translation, `[x, y, z]`.
     pub pos: [f32; 3],
     /// Arena-frame rotation quaternion, `[x, y, z, w]`.
@@ -112,7 +116,7 @@ pub struct VehiclePoseWire {
 pub enum ArticulationDecodeError {
     /// The buffer ended before a field the format requires was fully read.
     Truncated,
-    /// A 1-byte present-flag (repose or vehicle) held a value other than 0 or 1.
+    /// A 1-byte present-flag (a crab's repose) held a value other than 0 or 1.
     BadFlag,
     /// Bytes remained after a complete articulation decoded — a framing/length mismatch.
     TrailingBytes,
@@ -137,8 +141,8 @@ impl std::error::Error for ArticulationDecodeError {}
 impl CrabArticulation {
     /// Little-endian wire form: `tick(8) | n_crabs(4) | crab[ n_parts(4) part[ tag(1) pos(3×4)
     /// rot(4×4) ]… repose_present(1) [ shift(3×4) ] label_len(1) label… ]… |
-    /// vehicle_present(1) | [ pos(3×4) rot(4×4) ]`. [`from_bytes`](Self::from_bytes) is its
-    /// exact inverse.
+    /// n_vehicles(2) | vehicle[ pilot(1) pos(3×4) rot(4×4) ]…`. [`from_bytes`](Self::from_bytes)
+    /// is its exact inverse.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.tick.to_le_bytes());
@@ -167,16 +171,16 @@ impl CrabArticulation {
             out.push(label.len() as u8);
             out.extend_from_slice(label.as_bytes());
         }
-        match &self.vehicle {
-            None => out.push(0),
-            Some(v) => {
-                out.push(1);
-                for c in v.pos {
-                    out.extend_from_slice(&c.to_le_bytes());
-                }
-                for c in v.rot {
-                    out.extend_from_slice(&c.to_le_bytes());
-                }
+        // u16 like the welcome's roster length: pilot ids are u8, so up to 256 distinct
+        // crafts — one more than a u8 count can name.
+        out.extend_from_slice(&(self.vehicles.len() as u16).to_le_bytes());
+        for v in &self.vehicles {
+            out.push(v.pilot);
+            for c in v.pos {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+            for c in v.rot {
+                out.extend_from_slice(&c.to_le_bytes());
             }
         }
         out
@@ -217,21 +221,22 @@ impl CrabArticulation {
                 brain_label,
             });
         }
-        let vehicle = match r.byte()? {
-            0 => None,
-            1 => Some(VehiclePoseWire {
+        let n_vehicles = u16::from_le_bytes(r.take::<2>()?) as usize;
+        let mut vehicles = Vec::new();
+        for _ in 0..n_vehicles {
+            vehicles.push(VehiclePoseWire {
+                pilot: r.byte()?,
                 pos: read_vec3(&mut r)?,
                 rot: read_vec4(&mut r)?,
-            }),
-            _ => return Err(ArticulationDecodeError::BadFlag),
-        };
+            });
+        }
         if !r.is_empty() {
             return Err(ArticulationDecodeError::TrailingBytes);
         }
         Ok(Self {
             tick,
             crabs,
-            vehicle,
+            vehicles,
         })
     }
 }
@@ -348,15 +353,24 @@ mod tests {
                     brain_label: "REFUSED: wrong rig".to_string(),
                 },
             ],
-            vehicle: Some(VehiclePoseWire {
-                pos: [2.0, 5.5, -1.0],
-                rot: [
-                    0.0,
-                    std::f32::consts::FRAC_1_SQRT_2,
-                    0.0,
-                    std::f32::consts::FRAC_1_SQRT_2,
-                ],
-            }),
+            // Two pilots' crafts (rl#191): the host's and a remote player's, distinct poses.
+            vehicles: vec![
+                VehiclePoseWire {
+                    pilot: 0,
+                    pos: [2.0, 5.5, -1.0],
+                    rot: [
+                        0.0,
+                        std::f32::consts::FRAC_1_SQRT_2,
+                        0.0,
+                        std::f32::consts::FRAC_1_SQRT_2,
+                    ],
+                },
+                VehiclePoseWire {
+                    pilot: 2,
+                    pos: [-3.0, 1.5, 4.0],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                },
+            ],
         }
     }
 
@@ -374,9 +388,9 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_without_vehicle() {
+    fn roundtrip_without_vehicles() {
         let mut a = sample();
-        a.vehicle = None;
+        a.vehicles.clear();
         assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
     }
 
@@ -385,7 +399,7 @@ mod tests {
         let a = CrabArticulation {
             tick: 0,
             crabs: vec![],
-            vehicle: None,
+            vehicles: vec![],
         };
         assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
     }
@@ -408,8 +422,8 @@ mod tests {
         a.crabs[1].brain_label = "x".to_string();
         let mut bytes = a.to_bytes();
         // Corrupt the single label byte of the LAST crab: it sits right before the trailing
-        // vehicle block (present-flag 1 + pos 12 + rot 16).
-        let label_off = bytes.len() - (1 + 12 + 16) - 1;
+        // vehicles block (count 2 + two entries of pilot 1 + pos 12 + rot 16).
+        let label_off = bytes.len() - (2 + 2 * (1 + 12 + 16)) - 1;
         assert_eq!(bytes[label_off], b'x');
         bytes[label_off] = 0xFF;
         assert_eq!(
@@ -452,15 +466,20 @@ mod tests {
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::BadFlag)
         );
-        // And the vehicle-present flag, after crab 0's repose block (flag + 3 f32s) + label
-        // (len byte + bytes) and the whole of crab 1 (n_parts(4) + one part (29) + repose
-        // flag(1) + its label).
-        let label = |i: usize| 1 + sample().crabs[i].brain_label.len();
-        let mut bytes = sample().to_bytes();
-        bytes[flag_off + 1 + 3 * 4 + label(0) + 4 + 29 + 1 + label(1)] = 2;
+    }
+
+    #[test]
+    fn vehicle_count_past_the_bytes_is_rejected() {
+        // A vehicles count claiming more entries than the buffer holds is a loud truncation,
+        // never a short list: bump the trailing block's u16 count on an otherwise-valid frame.
+        let a = sample();
+        let mut bytes = a.to_bytes();
+        let count_off = bytes.len() - 2 * (1 + 12 + 16) - 2;
+        assert_eq!(bytes[count_off], a.vehicles.len() as u8);
+        bytes[count_off] += 1;
         assert_eq!(
             CrabArticulation::from_bytes(&bytes),
-            Err(ArticulationDecodeError::BadFlag)
+            Err(ArticulationDecodeError::Truncated)
         );
     }
 }

@@ -176,7 +176,7 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
     while Instant::now() < end {
         // A lazy circular stir so the dot visibly moves.
         let t = ls.next_tick() as f32 * 0.1;
-        let msg = ls.submit_local_input(Input::from_axes(t.cos(), t.sin()));
+        let msg = ls.submit_local_input(Input::from_axes(t.cos(), t.sin()), None);
         server.advance(msg);
         while server.next_tick_ready() {
             // Headless smoke: no rapier crab body, so the crab holds spawn (no pose to inject).

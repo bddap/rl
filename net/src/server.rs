@@ -178,6 +178,31 @@ impl std::fmt::Display for AdmissionRefusal {
     }
 }
 
+/// Every verdict the host answers a peer's frames with over the Refuse channel — typed
+/// END-TO-END (rl#221): it crosses the wire as tag+fields, and the message is rendered from
+/// this one [`std::fmt::Display`] at the receiver's display edge, so the wording can't fork
+/// per surface and a consumer can dispatch on the CAUSE, not a string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// A would-be joiner failed the admission gate ([`may_admit_joiner`]).
+    Admission(AdmissionRefusal),
+    /// A DEPARTED peer re-linked mid-match (the mDNS dialer runs all match) and kept sending
+    /// inputs — told once, loudly, that it was dropped, rather than left spectating with dead
+    /// controls (rl#198).
+    Departed,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Admission(r) => r.fmt(f),
+            Refusal::Departed => {
+                write!(f, "you were dropped from the match (connection lost) — rejoin")
+            }
+        }
+    }
+}
+
 /// The admission gate: may a joiner advertising `req` enter a match the host runs on
 /// `(host_assets, host_crabs)`? `Ok(())` only when the asset digests match exactly AND the
 /// joiner's rig count is compatible (equal to the host's serving count, or `0` for a headless
@@ -233,14 +258,16 @@ impl InputStream {
 
     /// File one input, then fold the queue down to [`TARGET_BACKLOG`] (see the constant). A
     /// stale or duplicate `issue_tick` (≤ anything already queued or consumed) is dropped —
-    /// the live stream can re-deliver what [`Server::seed_early`] already queued.
-    fn record(&mut self, msg: TickMsg) {
+    /// the live stream can re-deliver what [`Server::seed_early`] already queued. Returns
+    /// whether the message was accepted (fresh), so the caller's LEVEL pilot-intent state
+    /// follows only the newest message, never a stale re-delivery.
+    fn record(&mut self, msg: TickMsg) -> bool {
         let next_fresh = self
             .queue
             .back()
             .map_or(self.input_next, |m| m.issue_tick + 1);
         if msg.issue_tick < next_fresh {
-            return;
+            return false;
         }
         self.queue.push_back(msg);
         while self.queue.len() > TARGET_BACKLOG {
@@ -253,6 +280,7 @@ impl InputStream {
             next.buttons |= dropped.input.buttons;
             next.look_yaw = next.look_yaw.saturating_add(dropped.input.look_yaw);
         }
+        true
     }
 
     /// The input this player contributes to the tick being assembled: the next queued input
@@ -299,6 +327,15 @@ pub struct Server {
     /// Per-REMOTE-player input streams. Created on a player's first recorded input, dropped on
     /// its departure — so stream presence implies currently rostered.
     streams: BTreeMap<PlayerId, InputStream>,
+    /// Each player's LATEST piloting intent (rl#191 increment 2) — LEVEL state, entry presence
+    /// IS "piloting" (mirroring `VehicleControls` itself): the newest accepted [`TickMsg`]'s
+    /// `pilot` overwrites (or, `None`, removes) the sender's entry, the host's own rides
+    /// [`Server::advance`]. NOT part of the deterministic tick assembly — the driver reads it
+    /// ([`Server::pilot_intents`]) to file the crab world's `VehicleControls`. Pruned
+    /// LEVEL-TRIGGERED against the roster each [`Server::advance`] (not just on the departure
+    /// event): pids are reused by [`Server::lowest_free_pid`], so a leaked entry would hand a
+    /// departed pilot's craft to the next joiner.
+    pilot_intents: BTreeMap<PlayerId, crate::lockstep::PilotIntent>,
     /// The AUTHORITATIVE world this server owns and steps. Its per-tick
     /// [`CoreSnapshot`](crate::snapshot::CoreSnapshot) is what every client renders. Stepped one
     /// tick at a time by [`Server::step_next`], gated by [`Server::next_tick_ready`].
@@ -364,6 +401,7 @@ impl Server {
             me,
             roster: RosterSchedule::frozen(roster),
             streams: BTreeMap::new(),
+            pilot_intents: BTreeMap::new(),
             sim,
             pending: None,
             starvation: BTreeMap::new(),
@@ -404,10 +442,23 @@ impl Server {
         if from == self.me || !self.roster.current().contains(&from) {
             return;
         }
-        self.streams
+        let accepted = self
+            .streams
             .entry(from)
             .or_insert_with(InputStream::new)
             .record(msg);
+        // Latest-wins pilot intent, but only off an ACCEPTED (fresh) message — a stale
+        // re-delivery (seed_early overlap) must not regress the level state.
+        if accepted {
+            match msg.pilot {
+                Some(intent) => {
+                    self.pilot_intents.insert(from, intent);
+                }
+                None => {
+                    self.pilot_intents.remove(&from);
+                }
+            }
+        }
     }
 
     /// Drain the pending chronic-starvation observations (rl#213) for the driver to surface
@@ -434,6 +485,21 @@ impl Server {
             local.issue_tick, tick,
             "the host issues exactly one input per assembled tick"
         );
+        // The host's own pilot intent (its message never streams), then the LEVEL-triggered
+        // roster prune: any intent whose pid is not rostered at this tick is dropped, so a
+        // departed pilot's craft can't outlive it — nor leak to a joiner that reuses the pid.
+        match local.pilot {
+            Some(intent) => {
+                self.pilot_intents.insert(self.me, intent);
+            }
+            None => {
+                self.pilot_intents.remove(&self.me);
+            }
+        }
+        {
+            let rostered = self.roster.at(tick);
+            self.pilot_intents.retain(|pid, _| rostered.contains(pid));
+        }
         // Starvation-window boundary (rl#213): close the window of the STARVATION_WINDOW fills
         // before `tick` (this runs before this tick's consumes), turning a chronic starved
         // count into a report — per-player cooldown bounds the rate, the cap bounds the
@@ -615,6 +681,16 @@ impl Server {
         let effective_tick = self.roster.earliest_change_at(self.next_assemble());
         self.roster.schedule_change(effective_tick, &remaining);
         self.streams.remove(&pid);
+        // Drop the leaver's craft immediately; the level prune in `advance` is the guarantee
+        // (it also covers a shrink that lands without this call), this just saves the gap ticks.
+        self.pilot_intents.remove(&pid);
+    }
+
+    /// Every player's LATEST piloting intent (entry presence = piloting) — what the driver
+    /// files into the crab world's `VehicleControls` each tick, alive-gated at that seam.
+    /// Level state beside the deterministic input streams, roster-pruned per [`Server::advance`].
+    pub fn pilot_intents(&self) -> &BTreeMap<PlayerId, crate::lockstep::PilotIntent> {
+        &self.pilot_intents
     }
 
     /// The lowest [`PlayerId`] not in the current roster — the stable allocation `admit` hands a
@@ -674,7 +750,98 @@ mod tests {
         TickMsg {
             issue_tick,
             input: input(s),
+            pilot: None,
         }
+    }
+
+    /// A neutral-axes piloting intent of `kind`, for the intent-map tests.
+    fn intent(kind: crab_world::vehicle::VehicleKind) -> crate::lockstep::PilotIntent {
+        crate::lockstep::PilotIntent {
+            kind,
+            throttle_trim: 0.0,
+            thrust: [0.0; 3],
+            pitch: 0.0,
+            roll: 0.0,
+            yaw: 0.0,
+            match_velocity: false,
+        }
+    }
+
+    /// The pilot-intent map is LEVEL state off the tick stream (rl#191 increment 2): the newest
+    /// ACCEPTED message wins (a stale re-delivery can't regress it), the host's own rides
+    /// `advance`, on-foot (`pilot: None`) removes, and a departed player's entry dies with it —
+    /// so a joiner reusing the pid ([`Server::lowest_free_pid`]) never inherits a craft.
+    #[test]
+    fn pilot_intents_follow_latest_message_and_roster() {
+        use crab_world::vehicle::VehicleKind;
+        let p1 = PlayerId(1);
+        let mut s = srv(42, &ids(2));
+
+        // A remote boards a plane; a STALE re-delivery (same issue, on foot) must not regress.
+        s.record_remote(
+            p1,
+            TickMsg {
+                pilot: Some(intent(VehicleKind::Plane)),
+                ..tickmsg(0, 0.0)
+            },
+        );
+        assert_eq!(s.pilot_intents()[&p1].kind, VehicleKind::Plane);
+        s.record_remote(p1, tickmsg(0, 0.0));
+        assert_eq!(
+            s.pilot_intents()[&p1].kind,
+            VehicleKind::Plane,
+            "a stale duplicate is rejected by the stream and must not clear the intent"
+        );
+
+        // The freshest message wins: cycle to the ship, then step out.
+        s.record_remote(
+            p1,
+            TickMsg {
+                pilot: Some(intent(VehicleKind::Ship)),
+                ..tickmsg(1, 0.0)
+            },
+        );
+        assert_eq!(s.pilot_intents()[&p1].kind, VehicleKind::Ship);
+        s.record_remote(p1, tickmsg(2, 0.0));
+        assert!(
+            !s.pilot_intents().contains_key(&p1),
+            "pilot: None is on foot — the entry is removed, not zeroed"
+        );
+
+        // The host's own intent rides advance (its input never streams).
+        s.advance(TickMsg {
+            pilot: Some(intent(VehicleKind::Plane)),
+            ..tickmsg(0, 0.0)
+        });
+        assert_eq!(s.pilot_intents()[&PlayerId(0)].kind, VehicleKind::Plane);
+        step_ready(&mut s);
+
+        // P1 flies again, then departs: its craft dies with it, and the joiner that REUSES
+        // pid 1 starts on foot — no inherited craft (the lowest_free_pid reuse trap).
+        s.record_remote(
+            p1,
+            TickMsg {
+                pilot: Some(intent(VehicleKind::Ship)),
+                ..tickmsg(3, 0.0)
+            },
+        );
+        assert!(s.pilot_intents().contains_key(&p1));
+        s.depart(p1);
+        assert!(
+            !s.pilot_intents().contains_key(&p1),
+            "departure drops the craft"
+        );
+        // Advance past the shrink so the reused allocation is real, then admit.
+        for t in 1..=4 {
+            s.advance(tickmsg(t, 0.0));
+            step_ready(&mut s);
+        }
+        let adm = s.admit();
+        assert_eq!(adm.pid, p1, "the departed pid is reused");
+        assert!(
+            !s.pilot_intents().contains_key(&p1),
+            "the joiner reusing the pid starts intent-free"
+        );
     }
 
     /// Step every tick `advance` has assembled and return the decoded snapshots.
@@ -868,6 +1035,7 @@ mod tests {
         stream.record(TickMsg {
             issue_tick: 0,
             input: Input::new(0.5, 1.0, 0.7, buttons::ACTION),
+            pilot: None,
         });
         let (consumed, starved) = stream.consume();
         assert_eq!(consumed, Input::new(0.5, 1.0, 0.7, buttons::ACTION));
@@ -918,6 +1086,7 @@ mod tests {
             stream.record(TickMsg {
                 issue_tick: i,
                 input: Input::new(0.0, 0.1, 0.1, btns),
+                pilot: None,
             });
         }
         assert_eq!(
@@ -1087,6 +1256,7 @@ mod tests {
             TickMsg {
                 issue_tick: adm.effective_tick,
                 input: input(1.0),
+                pilot: None,
             },
         );
         for t in 0..adm.effective_tick + 2 {
@@ -1169,7 +1339,7 @@ mod tests {
             let mut client = Lockstep::new(SEED, &roster, me);
             let mut server = Server::new(me, &roster, Sim::new(SEED, &roster));
             for i in 0..SUBMITS {
-                let msg = client.submit_local_input(input_at(i));
+                let msg = client.submit_local_input(input_at(i), None);
                 server.advance(msg);
                 while server.next_tick_ready() {
                     let bytes = server
@@ -1228,6 +1398,7 @@ mod tests {
                 TickMsg {
                     issue_tick: t,
                     input: Input::new(0.0, 1.0, 0.0, btns),
+                    pilot: None,
                 },
             );
             s.advance(tickmsg(t, 1.0));
@@ -1310,6 +1481,7 @@ mod tests {
                     TickMsg {
                         issue_tick: *next_issue,
                         input: input_at(i),
+                        pilot: None,
                     },
                 );
                 *next_issue += 1;
@@ -1317,6 +1489,7 @@ mod tests {
             server.advance(TickMsg {
                 issue_tick: i,
                 input: input_at(i),
+                pilot: None,
             });
             while server.next_tick_ready() {
                 let tick = server.sim().tick();

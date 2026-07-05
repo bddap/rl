@@ -8,6 +8,7 @@
 use super::app::{ArmedRound, ExternalCrabStackInstalled};
 use super::input::{CameraPitch, CameraYaw};
 use super::*;
+use crate::lockstep::PilotIntent;
 use crab_world::vehicle::{PilotCommand, PilotId, Vehicle, VehicleControls, VehicleKind};
 
 /// Build the round's [`Coordinator`]: `None` ⇒ a solo internal server (roster of one), a host
@@ -267,18 +268,15 @@ impl PeerRole {
     }
 }
 
-/// The HOST's pilot id — the ONE place "the host is pilot 0" is written down. Sound by
-/// construction: formation gives the lowest endpoint id [`PlayerId(0)`] and that peer runs the
-/// server (solo constructs `me = PlayerId(0)` outright), and a host departure ends the round, so
-/// pid 0 is never reallocated within one. The articulation capture keys the wire's host-craft
-/// slot off this; [`local_pilot`] must agree with it on the server-authoritative arm (asserted in
-/// [`drive_lockstep`]).
-pub(super) const HOST_PILOT: PilotId = PilotId(0);
-
-/// This peer's [`PilotId`] — the ONE PlayerId→PilotId mapping (crab-world's key is a bare `u8`;
+/// A player's [`PilotId`] — the ONE PlayerId→PilotId mapping (crab-world's key is a bare `u8`;
 /// every crossing of that seam goes through here so the two id spaces can't drift).
+fn pilot_of(pid: PlayerId) -> PilotId {
+    PilotId(pid.0)
+}
+
+/// This peer's own [`PilotId`] ([`pilot_of`] on the local player).
 fn local_pilot(state: &GameState) -> PilotId {
-    PilotId(state.ls.me().0)
+    pilot_of(state.ls.me())
 }
 
 /// The networked sim, owned as a non-send Bevy resource and stepped on a
@@ -545,9 +543,10 @@ pub(super) fn flight_control(kind: VehicleKind, fi: &FlightInput) -> FlightContr
 ///
 /// Client-local: the deterministic sim only ever applies the FOOT [`Input`] (neutral while
 /// piloting — see [`LocalControl::sim_input`]), and the craft is host-authoritative crab-world
-/// state OFF the wire. Networking the pilots (a wire that carries flight input) is rl#43 part 2;
-/// until then the tag lives here at the client, where the piloting state actually is. Produced
-/// once per tick in [`drive_lockstep`] from [`LocalVehicle`].
+/// state kept OUT of the sim. The flight axes ride the wire BESIDE the foot input
+/// ([`LocalControl::pilot_intent`] → [`crate::lockstep::TickMsg::pilot`], rl#191 increment 2),
+/// and the host files every player's latest intent into `VehicleControls`. Produced once per
+/// tick in [`drive_lockstep`] from [`LocalVehicle`].
 enum LocalControl {
     /// Walking: this foot [`Input`] drives the sim; no craft is active.
     OnFoot(Input),
@@ -569,31 +568,35 @@ impl LocalControl {
             LocalControl::Piloting { .. } => Input::default(),
         }
     }
-}
 
-impl FlightControl {
-    /// These per-craft intents as the [`PilotCommand`] the crab-world force model reads — the
-    /// pilot's map entry in [`VehicleControls`], whose presence IS "piloting" (stepping out
-    /// removes the entry, so there is no stale-command state to zero). The exhaustive destructure
-    /// (no `..`) makes a new `FlightControl` axis a COMPILE error here rather than a
-    /// silently-dropped command.
-    fn to_command(&self, kind: VehicleKind) -> PilotCommand {
-        let FlightControl {
-            throttle_trim,
-            thrust,
-            pitch,
-            roll,
-            yaw,
-            match_velocity,
-        } = *self;
-        PilotCommand {
-            kind,
-            throttle_trim,
-            thrust,
-            pitch,
-            roll,
-            yaw,
-            match_velocity,
+    /// This tick's piloting intent in wire form (`None` = on foot) — what rides BESIDE the foot
+    /// input on the [`crate::lockstep::TickMsg`]. The ONE FlightControl→wire conversion: local
+    /// and remote pilots alike reach [`VehicleControls`] through the server's intent map and
+    /// [`PilotIntent::to_command`], so there is no second client-side command path to drift.
+    /// The exhaustive destructure (no `..`) makes a new `FlightControl` axis a COMPILE error
+    /// here rather than a silently-dropped command.
+    fn pilot_intent(&self) -> Option<PilotIntent> {
+        match self {
+            LocalControl::OnFoot(_) => None,
+            LocalControl::Piloting { kind, control } => {
+                let FlightControl {
+                    throttle_trim,
+                    thrust,
+                    pitch,
+                    roll,
+                    yaw,
+                    match_velocity,
+                } = *control;
+                Some(PilotIntent {
+                    kind: *kind,
+                    throttle_trim,
+                    thrust: thrust.to_array(),
+                    pitch,
+                    roll,
+                    yaw,
+                    match_velocity,
+                })
+            }
         }
     }
 }
@@ -715,6 +718,27 @@ impl LocalVehicle {
 /// yet). At most one body per pilot — `manage_vehicles` enforces it. Keyed by pilot because the
 /// host's world will also carry REMOTE pilots' crafts (rl#191): the cockpit camera must fly from
 /// ours alone. The renderer shifts this arena pose to the crab's render spot in `cockpit_camera`.
+/// Overwrite the crab world's [`VehicleControls`] from the server's intent map — the ONE
+/// writer, run each tick on the server-authoritative arm. `entries` is `(pilot, alive,
+/// command)` for every player with a live intent; the map is REBUILT wholesale, so the
+/// level-triggered roster prune upstream ([`crate::server::Server::advance`]) is what despawns
+/// a departed pilot's craft. BOARDING is alive-gated — the same rule as the local E-cycle: a
+/// pilot with no existing entry files only while its foot avatar is alive, while an
+/// already-flying pilot keeps its craft (cycling kinds and stepping out are ungated, and death
+/// mid-flight doesn't eject). Pure (no World) so the gate is unit-testable.
+fn sync_pilot_entries(
+    controls: &mut BTreeMap<PilotId, PilotCommand>,
+    entries: &[(PilotId, bool, PilotCommand)],
+) {
+    let was_flying: Vec<PilotId> = controls.keys().copied().collect();
+    controls.clear();
+    for (pilot, alive, cmd) in entries {
+        if *alive || was_flying.contains(pilot) {
+            controls.insert(*pilot, *cmd);
+        }
+    }
+}
+
 fn read_vehicle_pose(world: &mut World, me: PilotId) -> Option<CockpitPose> {
     let mut q = world.query::<(&Transform, &Vehicle)>();
     q.iter(world)
@@ -840,7 +864,8 @@ pub(super) fn drive_lockstep(world: &mut World) {
 
     // Enter/exit a vehicle. Drain the E-tap latch ONCE per frame and CYCLE foot → plane → ship →
     // foot. The actual craft is a rapier body spawned/despawned in the crab world from the resulting
-    // `LocalVehicle` (mirrored into `VehicleControls` below). Available on the server-authoritative
+    // `LocalVehicle` (its intent rides this tick's `TickMsg` into the server's intent map, which
+    // files `VehicleControls` below). Available on the server-authoritative
     // arm — solo AND host (`can_pilot`): piloting is an input mode, not an SP fork,
     // so a host pilots in a networked round too. While piloting, the
     // foot player files NEUTRAL sim input (below), so the authoritative sim just parks the avatar at
@@ -911,6 +936,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
             },
         };
         let sim_input = local.sim_input();
+        let pilot_intent = local.pilot_intent();
 
         // The headless `fp-screenshot` harness (only) feeds a scripted input to the absent pack
         // players so the scene composes; real play has none (every non-local input is on the wire).
@@ -926,7 +952,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
             // `reported_outcome` field disjointly from the `ls` it runs against.
             let state = &mut *state;
             let me = state.ls.me();
-            let msg = state.ls.submit_local_input(sim_input);
+            let msg = state.ls.submit_local_input(sim_input, pilot_intent);
             // The tick this input was ISSUED as — the telemetry stamp. On a remote client this
             // differs from `ls.next_tick()` (the snapshot-apply cursor) by the transit lag.
             let issue_tick = msg.issue_tick;
@@ -948,6 +974,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
                         TickMsg {
                             issue_tick: msg.issue_tick,
                             input: bot,
+                            pilot: None,
                         },
                     );
                 }
@@ -1036,39 +1063,43 @@ pub(super) fn drive_lockstep(world: &mut World) {
             return;
         }
 
-        // Drive the rapier vehicle (server-authoritative arm) from the SAME tagged `local` control the
-        // sim input came from — so the craft is live exactly when the sim got a neutral input, with
-        // no second read of the mode to drift out of sync. The crab world's force system reads OUR
-        // pilot entry in `VehicleControls` on the next physics pump (spawn/despawn the body, apply
-        // thrust/lift/drag/torque); entry presence IS piloting, so stepping out is a remove, with no
-        // stale command left to zero. The sim never sees the vehicle (the foot player gets neutral
-        // input above); it is host-authoritative crab-world state OFF the wire, reading the RAW
-        // per-craft flight inputs (Ace Combat 6 for the plane, Outer Wilds for the ship) rather than
-        // the sim's foot axes. `VehicleControls` only exists when `VehiclePlugin` is installed —
-        // it rides the NN-crab stack (`add_external_nn_crab`), so a harness driving this system
-        // without that stack has no resource; skip the bridge rather than demand it.
-        // Role-gated EXPLICITLY, not just by can_pilot's side effects: the resource exists on a
-        // remote-adopt client too (the menu boot installs `VehiclePlugin` before the role is
-        // known), and when a later rl#191 increment lets that client CYCLE `LocalVehicle`, this
-        // write would otherwise fly a client-local, non-authoritative craft beside the host's —
-        // the second-implementation trap. A remote client's piloting goes UP the wire; only the
-        // server-authoritative arm writes the local crab world's controls.
+        // Drive the rapier vehicles (server-authoritative arm) from the SERVER's per-player
+        // intent map — the host's own intent rode this tick's `TickMsg` through `exchange` into
+        // that map (the same wire-shaped path a remote pilot's takes, rl#191 increment 2), so
+        // local and remote crafts are filed by ONE writer with no second command path to drift.
+        // The crab world's force system reads each pilot's `VehicleControls` entry on the next
+        // physics pump (spawn/despawn the body, apply thrust/lift/drag/torque); entry presence
+        // IS piloting, so stepping out is a remove, with no stale command left to zero. The sim
+        // never sees a vehicle (a piloting player's foot input is neutral); the intents ride
+        // BESIDE the sim inputs, never in them. `VehicleControls` only exists when
+        // `VehiclePlugin` is installed — it rides the NN-crab stack (`add_external_nn_crab`),
+        // so a harness driving this system without that stack has no resource; skip rather
+        // than demand it. Role-gated EXPLICITLY, not just by can_pilot's side effects: the
+        // resource exists on a remote-adopt client too (the menu boot installs `VehiclePlugin`
+        // before the role is known), and when increment 3 lets that client CYCLE
+        // `LocalVehicle`, this write would otherwise fly a client-local, non-authoritative
+        // craft beside the host's — the second-implementation trap. A remote client's piloting
+        // goes UP the wire; only the server-authoritative arm writes the crab world's controls.
         if role == PeerRole::ServerAuth && world.get_resource::<VehicleControls>().is_some() {
-            let me = local_pilot(world.non_send_resource::<GameState>());
-            debug_assert_eq!(
-                me, HOST_PILOT,
-                "server-auth peer must be pilot 0 (formation gives the host PlayerId(0)) — \
-                 the articulation capture's host-craft slot depends on it"
-            );
+            let entries: Vec<(PilotId, bool, PilotCommand)> = {
+                let state = world.non_send_resource::<GameState>();
+                let server = state.coord.server().expect("server_auth ⇒ a server");
+                server
+                    .pilot_intents()
+                    .iter()
+                    .map(|(&pid, intent)| {
+                        // Alive as of the last stepped tick of the AUTHORITATIVE sim — the
+                        // boarding gate below is the same rule the local E-cycle applies.
+                        let alive = server
+                            .sim()
+                            .player(pid)
+                            .is_some_and(|p| p.status() == PlayerStatus::Alive);
+                        (pilot_of(pid), alive, intent.to_command())
+                    })
+                    .collect()
+            };
             let mut ctrl = world.resource_mut::<VehicleControls>();
-            match &local {
-                LocalControl::OnFoot(_) => {
-                    ctrl.0.remove(&me);
-                }
-                LocalControl::Piloting { kind, control } => {
-                    ctrl.0.insert(me, control.to_command(*kind));
-                }
-            }
+            sync_pilot_entries(&mut ctrl.0, &entries);
         }
 
         // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step state
@@ -1276,9 +1307,10 @@ pub(super) fn drive_lockstep(world: &mut World) {
 mod tests {
     use super::{
         FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, PeerRole, jitter_take,
+        sync_pilot_entries,
     };
     use crate::sim::{Input, buttons};
-    use crab_world::vehicle::VehicleKind;
+    use crab_world::vehicle::{PilotCommand, PilotId, VehicleKind};
 
     /// The tagged-control invariant: the deterministic sim only ever applies a FOOT
     /// [`Input`] — the real walker input on foot, a neutral one while piloting. A piloting player
@@ -1309,6 +1341,32 @@ mod tests {
             Input::default(),
             "piloting: the sim gets a neutral foot input, never a flight axis"
         );
+    }
+
+    /// The one [`VehicleControls`] writer applies the local-boarding rule to EVERY pilot
+    /// (rl#191 increment 2): a dead newcomer can't board, an alive one can, a pilot that dies
+    /// MID-FLIGHT keeps its craft (only boarding is gated), and a vanished intent (stepped
+    /// out, or roster-pruned upstream) removes the entry — despawning the body.
+    #[test]
+    fn vehicle_entry_boarding_is_alive_gated_but_flight_survives_death() {
+        let p1 = PilotId(1);
+        let cmd = PilotCommand::new(VehicleKind::Plane);
+        let mut controls = std::collections::BTreeMap::new();
+
+        sync_pilot_entries(&mut controls, &[(p1, false, cmd)]);
+        assert!(controls.is_empty(), "a dead newcomer cannot board");
+
+        sync_pilot_entries(&mut controls, &[(p1, true, cmd)]);
+        assert!(controls.contains_key(&p1), "an alive pilot boards");
+
+        sync_pilot_entries(&mut controls, &[(p1, false, cmd)]);
+        assert!(
+            controls.contains_key(&p1),
+            "death mid-flight does not eject — only boarding is alive-gated"
+        );
+
+        sync_pilot_entries(&mut controls, &[]);
+        assert!(controls.is_empty(), "no intent ⇒ entry removed, body despawns");
     }
 
     #[test]
