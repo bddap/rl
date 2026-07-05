@@ -407,7 +407,7 @@ pub(super) fn add_external_nn_crab(
         .add_plugins(crab_world::bot::BotPlugin)
         // The player's rapier flight vehicle — a rigidbody in this same crab world, so it collides
         // with Sally. Inert (no body, no systems firing on a spawned body) until the player boards
-        // one; `drive_lockstep` mirrors the controls into its `VehicleControl` each tick.
+        // one; `drive_lockstep` files the pilot's `PilotCommand` into its `VehicleControls` each tick.
         .add_plugins(crab_world::vehicle::VehiclePlugin)
         .add_plugins(crate::external_crab::ExternalCrabPlugin {
             checkpoint_dirs,

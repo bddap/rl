@@ -7,7 +7,7 @@
 //! - **Plane = Ace Combat 6.** A persistent THROTTLE LEVER drives thrust along the nose (+Z);
 //!   wings make Bernoulli LIFT from forward airspeed; pitch/roll/yaw are control torques. The pilot
 //!   turns by banking. (The AC6 input feel — intuitive pitch, left-stick fly, trigger throttle,
-//!   bumper rudder — lives in the input→[`VehicleControl`] bridge, `net`'s `drive_lockstep`.)
+//!   bumper rudder — lives in the input→[`PilotCommand`] bridge, `net`'s `drive_lockstep`.)
 //! - **Ship = Outer Wilds.** No wings (no lift) and no throttle lever — instead DIRECT body-frame
 //!   thrusters on all three axes (strafe X / vertical Y / forward Z) that you tap and then COAST on
 //!   (low drag = momentum). A held MATCH-VELOCITY brake bleeds relative velocity to rest (the cheap
@@ -15,7 +15,7 @@
 //!
 //! ## Force model (all UNCLAMPED — owner 702: no rotation caps, no auto-right by construction)
 //! Each fixed step, before the rapier solve, [`apply_vehicle_forces`] reads the player's control
-//! intents ([`VehicleControl`]) + the body's own pose/velocity and writes one [`ExternalForce`]
+//! intents ([`PilotCommand`]) + the body's own pose/velocity and writes one [`ExternalForce`]
 //! (overwritten, never accumulated):
 //! - **thrust** = a LEVER term along the body thrust axis (plane nose; zero for the ship) PLUS a
 //!   DIRECT body-frame term `rot · (thrust ⊙ direct_thrust)` (ship strafe/vertical/forward; zero
@@ -33,7 +33,7 @@
 //!
 //! The plane and the ship are NOT two code paths: they are two [`VehicleParams`] sets driving the
 //! one system. The difference is only the parameters (which thrust term is live, lift on/off, drag)
-//! and how the bridge maps the sticks/triggers into the shared [`VehicleControl`] intents.
+//! and how the bridge maps the sticks/triggers into the shared [`PilotCommand`] intents.
 //!
 //! ## Why it is policy-safe (owner: never destabilise the trained walking)
 //! The vehicle carries the body's `VEHICLE_GROUP` collision bit (see [`vehicle_collision`]); at
@@ -147,7 +147,7 @@ struct VehicleParams {
     /// lever (the ship uses `direct_thrust` instead).
     lever_thrust: f32,
     /// DIRECT body-frame thruster force per axis (N): x = strafe (+right), y = vertical (+up),
-    /// z = forward (+nose). Scaled component-wise by [`VehicleControl::thrust`]. `ZERO` = no direct
+    /// z = forward (+nose). Scaled component-wise by [`PilotCommand::thrust`]. `ZERO` = no direct
     /// thrusters (the plane, which thrusts only through its lever).
     direct_thrust: Vec3,
     /// Lift force per unit forward airspeed (N per m/s), along body-up. 0 for the wingless ship.
@@ -165,7 +165,7 @@ struct VehicleParams {
 }
 
 /// Which craft the one vehicle model is configured as. The plane and ship share the force system;
-/// this selects the [`VehicleParams`] + the spawn pose. (The input→[`VehicleControl`] mapping per
+/// this selects the [`VehicleParams`] + the spawn pose. (The input→[`PilotCommand`] mapping per
 /// craft lives in `net`'s bridge — Ace Combat 6 for the plane, Outer Wilds for the ship.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum VehicleKind {
@@ -216,28 +216,36 @@ impl VehicleKind {
     }
 }
 
-/// Marks the one vehicle rigidbody and carries its persistent throttle lever (0..1, trimmed each
-/// tick). On the component, not in [`VehicleControl`], so a fresh spawn starts at a known throttle
-/// and the lever can't outlive the body.
+/// Which player a craft belongs to — the crab-world key for per-player vehicles (rl#191: every
+/// piloting player gets its OWN body in the host's one physics world). A plain `u8` newtype, not
+/// `net`'s `PlayerId`, because this crate sits under `net`; the net bridge maps `PlayerId.0` in.
+/// The server-authoritative local player is always pilot 0 (the host holds `PlayerId(0)` by
+/// formation, and solo IS a host with a roster of one).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct PilotId(pub u8);
+
+/// Marks one pilot's vehicle rigidbody and carries its persistent throttle lever (0..1, trimmed
+/// each tick). On the component, not in [`VehicleControls`], so a fresh spawn starts at a known
+/// throttle and the lever can't outlive the body.
 #[derive(Component)]
 pub struct Vehicle {
+    /// Whose craft this body is — at most one body per pilot ([`manage_vehicles`]).
+    pub pilot: PilotId,
     pub kind: VehicleKind,
     /// Throttle lever, 0..1 — the plane's persistent quadrant, trimmed each tick by
-    /// [`VehicleControl::throttle_trim`]. Unused by the ship (it has no lever). On the component,
-    /// not in [`VehicleControl`], so a fresh spawn starts at a known throttle.
+    /// [`PilotCommand::throttle_trim`]. Unused by the ship (it has no lever). On the component,
+    /// not in [`PilotCommand`], so a fresh spawn starts at a known throttle.
     throttle: f32,
 }
 
-/// The player's per-tick vehicle command, written by the net client each fixed step (the bridge),
-/// read by [`apply_vehicle_forces`] + [`manage_vehicle`]. The bridge maps the raw sticks/triggers
+/// One piloting player's per-tick vehicle command, written by the net bridge each fixed step,
+/// read by [`apply_vehicle_forces`] + [`manage_vehicles`]. The bridge maps the raw sticks/triggers
 /// into these per-craft (Ace Combat 6 for the plane, Outer Wilds for the ship), so this is the ONE
-/// vocabulary the force model reads regardless of craft. `active`/`kind` drive spawn/despawn on the
-/// E-cycle. Inert (no body, no forces) until `active`.
-#[derive(Resource, Default)]
-pub struct VehicleControl {
-    /// Is the player currently piloting — spawns the body on the rising edge, despawns on the fall.
-    pub active: bool,
-    /// Which craft to be (cycled by the player). A change while active respawns the body.
+/// vocabulary the force model reads regardless of craft. Presence in [`VehicleControls`] IS
+/// "piloting" — there is no `active` flag, so a stale command with no pilot is unrepresentable.
+#[derive(Clone, Copy, Default)]
+pub struct PilotCommand {
+    /// Which craft to be (cycled by the player). A change while piloting respawns the body.
     pub kind: VehicleKind,
     /// Throttle-lever trim this tick (plane: RT up / LT down), `-1..1`. The ship leaves it 0.
     pub throttle_trim: f32,
@@ -255,6 +263,13 @@ pub struct VehicleControl {
     pub match_velocity: bool,
 }
 
+/// Every currently-piloting player's command, keyed by pilot: an entry spawns + drives that
+/// pilot's body; removing it despawns the body ([`manage_vehicles`]). The single seam the net
+/// layer writes — solo/host write their own entry today; remote pilots' entries arrive off the
+/// wire in a later rl#191 increment.
+#[derive(Resource, Default)]
+pub struct VehicleControls(pub std::collections::BTreeMap<PilotId, PilotCommand>);
+
 /// Plugin: the vehicle resource + the spawn/despawn manager + the force system. Added to the crab
 /// world wherever a player can pilot (the net client and the headless policy-stability gate); the
 /// trainer doesn't add it, so training never carries the vehicle systems. Both systems run in
@@ -264,40 +279,41 @@ pub struct VehiclePlugin;
 
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<VehicleControl>().add_systems(
+        app.init_resource::<VehicleControls>().add_systems(
             FixedUpdate,
-            (manage_vehicle, apply_vehicle_forces)
+            (manage_vehicles, apply_vehicle_forces)
                 .chain()
                 .before(PhysicsSet::SyncBackend),
         );
     }
 }
 
-/// Spawn the vehicle on the rising edge of [`VehicleControl::active`] (and respawn it on a kind
-/// change); despawn it when the player steps out. One body at a time — the player flies a single
-/// craft. The body is a dynamic box with the [`vehicle_collision`] groups (arena + every crab), so
-/// it bounces off the walls and strikes Sally.
-fn manage_vehicle(
+/// Keep the spawned bodies matched to [`VehicleControls`]: a new entry spawns that pilot's craft
+/// (a kind change respawns it — the fresh body starts at its spawn pose + a zero throttle lever,
+/// the known state, not the old craft's); a removed entry despawns it. At most one body per pilot:
+/// a body only spawns for a pilot with no matching body, and a mismatched one is despawned in the
+/// same pass. Each body is a dynamic box with the [`vehicle_collision`] groups (arena + every
+/// crab), so it bounces off the walls and strikes Sally.
+fn manage_vehicles(
     mut commands: Commands,
-    control: Res<VehicleControl>,
+    controls: Res<VehicleControls>,
     existing: Query<(Entity, &Vehicle)>,
 ) {
-    let current = existing.iter().next();
-    match (control.active, current) {
-        // Piloting and the body already matches the chosen craft — nothing to do.
-        (true, Some((_, v))) if v.kind == control.kind => {}
-        // Stepped into a vehicle, or cycled to a different craft: (re)spawn it. Despawn any stale
-        // body first so a kind switch can't leave two alive. A kind switch starts the new craft at
-        // its spawn pose + a zero throttle lever (the fresh body's known state), not the old one's.
-        (true, current) => {
-            if let Some((e, _)) = current {
-                commands.entity(e).despawn();
+    let mut matched = std::collections::BTreeSet::new();
+    for (e, v) in existing.iter() {
+        match controls.0.get(&v.pilot) {
+            // This pilot's body already is the chosen craft — keep it.
+            Some(cmd) if cmd.kind == v.kind => {
+                matched.insert(v.pilot);
             }
-            spawn_vehicle(&mut commands, control.kind);
+            // Kind changed or the pilot stepped out: despawn (a kind change spawns fresh below).
+            _ => commands.entity(e).despawn(),
         }
-        // Stepped out: despawn the body if present.
-        (false, Some((e, _))) => commands.entity(e).despawn(),
-        (false, None) => {}
+    }
+    for (&pilot, cmd) in &controls.0 {
+        if !matched.contains(&pilot) {
+            spawn_vehicle(&mut commands, pilot, cmd.kind);
+        }
     }
 }
 
@@ -306,9 +322,15 @@ fn manage_vehicle(
 /// and collision groups can't drift between them. Mass comes from the collider density (so a
 /// strike's momentum follows the size); `Velocity`/`ExternalForce` let the force system read the
 /// body's motion and write its forces.
-fn vehicle_bundle(kind: VehicleKind, transform: Transform, velocity: Velocity) -> impl Bundle {
+fn vehicle_bundle(
+    pilot: PilotId,
+    kind: VehicleKind,
+    transform: Transform,
+    velocity: Velocity,
+) -> impl Bundle {
     (
         Vehicle {
+            pilot,
             kind,
             throttle: 0.0,
         },
@@ -332,14 +354,19 @@ pub fn vehicle_collider() -> Collider {
     Collider::cuboid(VEHICLE_HALF.x, VEHICLE_HALF.y, VEHICLE_HALF.z)
 }
 
-/// Spawn one vehicle rigidbody of `kind` at its arena spawn pose — the boarding path
-/// ([`manage_vehicle`]).
-fn spawn_vehicle(commands: &mut Commands, kind: VehicleKind) {
-    commands.spawn(vehicle_bundle(
-        kind,
-        kind.spawn_transform(),
-        kind.spawn_velocity(),
-    ));
+/// Lateral spacing between different pilots' spawn spots (m). Crafts don't collide with each
+/// other ([`vehicle_collision`] filters only arena + crabs), so this is about legibility, not
+/// physics: two players boarding the same tick must not materialise inside one another. Pilot 0
+/// keeps the exact arena-centre pose solo always had.
+const VEHICLE_SPAWN_SPACING: f32 = 1.0;
+
+/// Spawn `pilot`'s vehicle rigidbody of `kind` at its arena spawn pose — the boarding path
+/// ([`manage_vehicles`]). Each pilot's spot is offset along +X by its id so simultaneous
+/// boarders don't overlap.
+fn spawn_vehicle(commands: &mut Commands, pilot: PilotId, kind: VehicleKind) {
+    let mut transform = kind.spawn_transform();
+    transform.translation.x += pilot.0 as f32 * VEHICLE_SPAWN_SPACING;
+    commands.spawn(vehicle_bundle(pilot, kind, transform, kind.spawn_velocity()));
 }
 
 /// Spawn a vehicle rigidbody directly into a `World` at an explicit pose + velocity, returning its
@@ -352,19 +379,27 @@ pub fn spawn_ram_vehicle(
     transform: Transform,
     velocity: Velocity,
 ) -> Entity {
-    world.spawn(vehicle_bundle(kind, transform, velocity)).id()
+    // Pilot 0: the gate rams one craft with no pilot roster; 0 is the server-auth local player.
+    world
+        .spawn(vehicle_bundle(PilotId(0), kind, transform, velocity))
+        .id()
 }
 
-/// The ONE flight force model (see the module docs). Reads the control intents + the body's pose
-/// and velocity, integrates the throttle lever, and overwrites the body's [`ExternalForce`] with
-/// thrust + lift + drag (force) and the body-frame control torque + angular drag (torque). Gravity
-/// is rapier's. Runs before the solve; the body's presence (not a flag) gates it, so it acts on
-/// whatever vehicle [`manage_vehicle`] spawned.
+/// The ONE flight force model (see the module docs). For each spawned body, reads ITS pilot's
+/// command + the body's own pose and velocity, integrates the throttle lever, and overwrites the
+/// body's [`ExternalForce`] with thrust + lift + drag (force) and the body-frame control torque +
+/// angular drag (torque). Gravity is rapier's. Runs before the solve; the body's presence (not a
+/// flag) gates it, so it acts on whatever [`manage_vehicles`] spawned. A body whose pilot has no
+/// command is skipped — only the ram gate's plugin-less ballistic craft, or the one frame between
+/// a step-out and the deferred despawn; either way no force belongs on it.
 fn apply_vehicle_forces(
-    control: Res<VehicleControl>,
+    controls: Res<VehicleControls>,
     mut q: Query<(&mut Vehicle, &Transform, &Velocity, &mut ExternalForce)>,
 ) {
     for (mut vehicle, transform, velocity, mut ef) in q.iter_mut() {
+        let Some(control) = controls.0.get(&vehicle.pilot) else {
+            continue;
+        };
         let p = vehicle.kind.params();
         let rot = transform.rotation;
         let forward = rot * Vec3::Z;
@@ -423,19 +458,26 @@ mod tests {
     use super::*;
     use crate::bot::headless::headless_app;
 
+    /// The tests' one pilot (the server-authoritative local player's id).
+    const P0: PilotId = PilotId(0);
+
+    /// Mutate pilot 0's [`PilotCommand`] in place (inserted if absent — the manage tests board by
+    /// exactly this insert).
+    fn set_cmd(app: &mut App, f: impl FnOnce(&mut PilotCommand)) {
+        let mut controls = app.world_mut().resource_mut::<VehicleControls>();
+        f(controls.0.entry(P0).or_default())
+    }
+
     /// A windowless world with the vehicle systems, plus one vehicle spawned FAR from the arena
     /// (origin) so the force model is tested in free space — no ground/wall/crab contact to muddy
     /// the reading. Returns the body entity.
     fn app_with_vehicle(kind: VehicleKind, at: Vec3, vel: Vec3) -> (App, Entity) {
         let mut app = headless_app();
         app.add_plugins(VehiclePlugin);
-        // Mark piloting so `manage_vehicle` keeps the body we spawn directly below (it despawns any
-        // vehicle while `active` is false). Matching kind ⇒ no respawn, our entity persists.
-        {
-            let mut c = app.world_mut().resource_mut::<VehicleControl>();
-            c.active = true;
-            c.kind = kind;
-        }
+        // File pilot 0's command so `manage_vehicles` keeps the body we spawn directly below (it
+        // despawns a body whose pilot has no entry). Matching kind ⇒ no respawn, our entity
+        // persists.
+        set_cmd(&mut app, |c| c.kind = kind);
         // Spawn through the SHARED bundle (so the test exercises the real collider/mass/groups, not
         // a copy that could drift), then trim the throttle full so the thrust tests have authority.
         let transform = Transform::from_translation(at);
@@ -445,7 +487,7 @@ mod tests {
         };
         let e = app
             .world_mut()
-            .spawn(vehicle_bundle(kind, transform, velocity))
+            .spawn(vehicle_bundle(P0, kind, transform, velocity))
             .id();
         app.world_mut()
             .entity_mut(e)
@@ -472,9 +514,7 @@ mod tests {
     #[test]
     fn plane_thrust_accelerates_forward() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 2.0));
-        app.world_mut()
-            .resource_mut::<VehicleControl>()
-            .throttle_trim = 1.0;
+        set_cmd(&mut app, |c| c.throttle_trim = 1.0);
         let v0 = body(&app, e).1.linear.z;
         for _ in 0..30 {
             app.update();
@@ -491,9 +531,7 @@ mod tests {
         let dy = |speed: f32| {
             let (mut app, e) =
                 app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, speed));
-            app.world_mut()
-                .resource_mut::<VehicleControl>()
-                .throttle_trim = -1.0; // throttle to 0
+            set_cmd(&mut app, |c| c.throttle_trim = -1.0); // throttle to 0
             let y0 = body(&app, e).1.linear.y;
             for _ in 0..5 {
                 app.update();
@@ -514,7 +552,7 @@ mod tests {
     #[test]
     fn positive_pitch_raises_the_nose() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::ZERO);
-        app.world_mut().resource_mut::<VehicleControl>().pitch = 1.0;
+        set_cmd(&mut app, |c| c.pitch = 1.0);
         for _ in 0..10 {
             app.update();
         }
@@ -533,7 +571,7 @@ mod tests {
     #[test]
     fn positive_yaw_turns_nose_right() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::ZERO);
-        app.world_mut().resource_mut::<VehicleControl>().yaw = 1.0;
+        set_cmd(&mut app, |c| c.yaw = 1.0);
         for _ in 0..10 {
             app.update();
         }
@@ -550,7 +588,7 @@ mod tests {
     #[test]
     fn pitch_input_loops_the_craft_without_autoright() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::ZERO);
-        app.world_mut().resource_mut::<VehicleControl>().pitch = 1.0;
+        set_cmd(&mut app, |c| c.pitch = 1.0);
         let mut went_inverted = false;
         for _ in 0..240 {
             app.update();
@@ -570,9 +608,7 @@ mod tests {
     #[test]
     fn drag_bleeds_speed() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(20.0, 0.0, 0.0));
-        app.world_mut()
-            .resource_mut::<VehicleControl>()
-            .throttle_trim = -1.0; // throttle to 0
+        set_cmd(&mut app, |c| c.throttle_trim = -1.0); // throttle to 0
         let s0 = body(&app, e).1.linear.length();
         for _ in 0..20 {
             app.update();
@@ -582,7 +618,7 @@ mod tests {
     }
 
     /// Stepping into a vehicle spawns exactly one body; cycling kind respawns (still one); stepping
-    /// out despawns it. The one-craft-at-a-time invariant `manage_vehicle` enforces.
+    /// out despawns it. The one-craft-per-pilot invariant `manage_vehicles` enforces.
     #[test]
     fn manage_spawns_and_despawns_one_vehicle() {
         let mut app = headless_app();
@@ -597,15 +633,11 @@ mod tests {
         app.update();
         assert_eq!(count(&mut app), 0, "no vehicle before piloting");
 
-        {
-            let mut c = app.world_mut().resource_mut::<VehicleControl>();
-            c.active = true;
-            c.kind = VehicleKind::Plane;
-        }
+        set_cmd(&mut app, |c| c.kind = VehicleKind::Plane);
         app.update();
         assert_eq!(count(&mut app), 1, "one vehicle after boarding");
 
-        app.world_mut().resource_mut::<VehicleControl>().kind = VehicleKind::Ship;
+        set_cmd(&mut app, |c| c.kind = VehicleKind::Ship);
         app.update();
         assert_eq!(count(&mut app), 1, "still one vehicle after a kind cycle");
         assert_eq!(
@@ -618,9 +650,83 @@ mod tests {
             "the body became the cycled kind",
         );
 
-        app.world_mut().resource_mut::<VehicleControl>().active = false;
+        app.world_mut()
+            .resource_mut::<VehicleControls>()
+            .0
+            .remove(&P0);
         app.update();
         assert_eq!(count(&mut app), 0, "vehicle despawned on step-out");
+    }
+
+    /// Per-pilot multiplicity (rl#191): two pilots board on the same tick ⇒ two bodies, each the
+    /// kind ITS pilot chose, at distinct spawn spots (the per-pilot offset); a command drives only
+    /// its own pilot's body; one pilot stepping out despawns only ITS craft.
+    #[test]
+    fn each_pilot_gets_its_own_craft() {
+        let p1 = PilotId(1);
+        let mut app = headless_app();
+        app.add_plugins(VehiclePlugin);
+        {
+            let mut c = app.world_mut().resource_mut::<VehicleControls>();
+            c.0.insert(
+                P0,
+                PilotCommand {
+                    kind: VehicleKind::Ship,
+                    // Pilot 0 burns forward from tick 0; pilot 1's ship holds station.
+                    thrust: Vec3::new(0.0, 0.0, 1.0),
+                    ..Default::default()
+                },
+            );
+            c.0.insert(
+                p1,
+                PilotCommand {
+                    kind: VehicleKind::Ship,
+                    ..Default::default()
+                },
+            );
+        }
+        for _ in 0..60 {
+            app.update();
+        }
+
+        let crafts: Vec<(PilotId, Vec3, Vec3)> = app
+            .world_mut()
+            .query::<(&Vehicle, &Transform, &Velocity)>()
+            .iter(app.world())
+            .map(|(v, t, vel)| (v.pilot, t.translation, vel.linear))
+            .collect();
+        assert_eq!(crafts.len(), 2, "one body per boarded pilot");
+        let by = |p: PilotId| crafts.iter().find(|(o, ..)| *o == p).unwrap();
+        let (_, pos0, vel0) = by(P0);
+        let (_, pos1, vel1) = by(p1);
+        assert_ne!(
+            pos0.x, pos1.x,
+            "pilots spawn at distinct spots (per-pilot offset)"
+        );
+        assert!(
+            vel0.z > 0.5,
+            "pilot 0's thrust command drives pilot 0's ship: vz={}",
+            vel0.z
+        );
+        assert!(
+            vel1.z.abs() < 0.1,
+            "pilot 1's idle ship must not pick up pilot 0's thrust: vz={}",
+            vel1.z
+        );
+
+        // Pilot 1 steps out: only ITS body despawns.
+        app.world_mut()
+            .resource_mut::<VehicleControls>()
+            .0
+            .remove(&p1);
+        app.update();
+        let left: Vec<PilotId> = app
+            .world_mut()
+            .query::<&Vehicle>()
+            .iter(app.world())
+            .map(|v| v.pilot)
+            .collect();
+        assert_eq!(left, vec![P0], "stepping out despawns only that pilot's craft");
     }
 
     /// The ship's DIRECT body-frame thrusters (Outer Wilds): a forward thrust intent (+Z) with no
@@ -631,7 +737,7 @@ mod tests {
     #[test]
     fn ship_direct_forward_thrust_accelerates() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::ZERO);
-        app.world_mut().resource_mut::<VehicleControl>().thrust = Vec3::new(0.0, 0.0, 1.0);
+        set_cmd(&mut app, |c| c.thrust = Vec3::new(0.0, 0.0, 1.0));
         let v0 = body(&app, e).1.linear.z;
         for _ in 0..90 {
             app.update();
@@ -648,7 +754,7 @@ mod tests {
     #[test]
     fn ship_lateral_thrust_strafes() {
         let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::ZERO);
-        app.world_mut().resource_mut::<VehicleControl>().thrust = Vec3::new(1.0, 0.0, 0.0);
+        set_cmd(&mut app, |c| c.thrust = Vec3::new(1.0, 0.0, 0.0));
         let v0 = body(&app, e).1.linear.x;
         for _ in 0..90 {
             app.update();
@@ -696,9 +802,7 @@ mod tests {
     fn ship_match_velocity_brakes_harder_than_coast() {
         let drop = |brake: bool| {
             let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::new(10.0, 0.0, 0.0));
-            app.world_mut()
-                .resource_mut::<VehicleControl>()
-                .match_velocity = brake;
+            set_cmd(&mut app, |c| c.match_velocity = brake);
             let s0 = body(&app, e).1.linear.length();
             for _ in 0..20 {
                 app.update();
