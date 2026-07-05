@@ -86,6 +86,22 @@ pub mod sky;
 #[derive(Resource, Clone, Copy)]
 pub struct Visuals(pub bool);
 
+/// Truncate `s` to at most `max` BYTES, cutting back to a char boundary so the slice can't
+/// panic mid-codepoint. THE one implementation for every human-facing string bound (the
+/// brain-label display cap, the articulation wire's label clamp) — the loop is easy to
+/// re-spell subtly wrong, so it lives once. A boundary exists within 3 bytes of any index,
+/// so this trims at most 3 bytes past `max`.
+pub fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// The one knob shared by every mode that loads a checkpoint (`learn`, `eval`,
 /// rl-demo). Split out of [`TrainConfig`] so binaries that only LOAD flatten just
 /// this, and a stray training knob like `--envs` is a parse error there instead of

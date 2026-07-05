@@ -16,7 +16,7 @@
 //! scale anywhere — render==physics, so the cage is the colliders at true size.
 
 use bevy::prelude::*;
-use bevy::ui::IsDefaultUiCamera;
+use bevy::ui::{IsDefaultUiCamera, UiScale};
 use bevy_rapier3d::geometry::ColliderView;
 use bevy_rapier3d::prelude::Collider;
 
@@ -27,6 +27,10 @@ use crate::bot::skin::CrabSkinRepose;
 /// vehicle (the `net` render-mode glue reuses [`draw_collider_wireframe`]). One source so the
 /// honest-physics view reads uniform across both bodies.
 pub const COLLIDER_WIREFRAME_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
+
+/// The ONE HUD-text green, shared by the corner render-mode label and the floating brain
+/// labels — one source, so the overlay can't drift into two near-greens.
+const HUD_TEXT_COLOR: Color = Color::srgb(0.4, 1.0, 0.55);
 
 /// What the crab render shows. A 3-state cycle, driven by one controller button (+ key) wired
 /// through each binary's controls source. `Mesh` is the default player-facing view; the two
@@ -138,9 +142,9 @@ pub fn register<M>(app: &mut App, initial: RenderMode, cage_gate: impl SystemCon
     app.add_systems(Update, update_render_mode_label);
     // The per-crab brain labels (rl#200 increment 7). Visibility follows the DATA, not a
     // phase gate: nodes exist iff `CrabBrainLabels` has entries, so each binary controls the
-    // labels by publishing/clearing the resource (the demo publishes once and never clears;
-    // GCR publishes from its bindings and clears at round teardown — no stale label can
-    // float over a menu the way an ungated gizmo cage did, rl#211).
+    // labels by publishing/clearing the resource (the demo republishes write-on-change and
+    // never clears; GCR publishes from its bindings and clears at round teardown — no stale
+    // label can float over a menu the way an ungated gizmo cage did, rl#211).
     app.init_resource::<CrabBrainLabels>();
     app.add_systems(Update, sync_brain_label_nodes);
     // After transform propagation for the same reason as the cage: project THIS frame's
@@ -166,7 +170,7 @@ fn spawn_render_mode_label(mut commands: Commands) {
             font_size: 18.0,
             ..default()
         },
-        TextColor(Color::srgb(0.4, 1.0, 0.55)),
+        TextColor(HUD_TEXT_COLOR),
         // Bottom-right: clear of the status HUD (top) and the hold-to-reveal controls hint
         // (bottom-left), so the mode line never overlaps them.
         Node {
@@ -243,8 +247,7 @@ fn sync_brain_label_nodes(
                 font_size: 16.0,
                 ..default()
             },
-            // Matches the mode label's HUD green — one visual voice for the shared overlay.
-            TextColor(Color::srgb(0.4, 1.0, 0.55)),
+            TextColor(HUD_TEXT_COLOR),
             Node {
                 position_type: PositionType::Absolute,
                 ..default()
@@ -262,6 +265,7 @@ fn sync_brain_label_nodes(
 /// 3D camera), and hides a label whose crab is missing, behind the camera, or off-screen.
 fn position_brain_labels(
     repose: Option<Res<CrabSkinRepose>>,
+    ui_scale: Res<UiScale>,
     carapaces: Query<(&GlobalTransform, &CrabEnvId), With<CrabCarapace>>,
     cameras: Query<(&Camera, &GlobalTransform, Has<IsDefaultUiCamera>), With<Camera3d>>,
     mut nodes: Query<(&BrainLabelNode, &mut Node, &mut Visibility, &ComputedNode)>,
@@ -272,6 +276,14 @@ fn position_brain_labels(
         .max_by_key(|(.., is_ui)| *is_ui)
         .map(|(cam, gt, _)| (cam, gt));
     for (node, mut ui, mut vis, computed) in &mut nodes {
+        // Layout hasn't measured this node yet (it spawned this frame — `ComputedNode`
+        // is still the size-zero default): keep it hidden rather than reveal it
+        // un-centered at a stale spot. Next frame's layout has the size. An EMPTY label
+        // (the wire's pre-publish "" filler) measures zero forever and so never shows.
+        if computed.size() == Vec2::ZERO {
+            *vis = Visibility::Hidden;
+            continue;
+        }
         let anchor = carapaces.iter().find(|(_, env)| env.0 == node.0).map(
             |(carapace, env)| {
                 let placement = repose
@@ -287,8 +299,12 @@ fn position_brain_labels(
             .and_then(|((cam, cam_gt), anchor)| cam.world_to_viewport(cam_gt, anchor).ok());
         match projected {
             Some(vp) => {
-                // Center the text on the anchor; ComputedNode is in physical pixels while
-                // viewport coords are logical.
+                // `world_to_viewport` is in viewport-logical pixels but `Val::Px` is in
+                // UI-logical pixels — they differ by `UiScale` (the demo scales its HUD
+                // by window height), so divide it out or every label drifts off its crab
+                // on any non-reference window size.
+                let vp = vp / ui_scale.0;
+                // X-centered on the anchor, text bottom sitting AT the anchor.
                 let size = computed.size() * computed.inverse_scale_factor();
                 ui.left = Val::Px(vp.x - size.x * 0.5);
                 ui.top = Val::Px(vp.y - size.y);

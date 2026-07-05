@@ -36,9 +36,10 @@ use crate::snapshot::CoreSnapshot;
 /// mismatched builds refuse at connect time rather than mis-frame or silently desync
 /// mid-stream (the fleet updates atomically via rl-update, so a refused connect means
 /// "update the other device", never a mixed-version match). /11 is the rl#200 per-crab
-/// break (Beat/Snapshot/Articulation all reframed); rl#221's typed [`Refuse`] can still
-/// ride /11 if it lands before the fleet releases it, else it takes /12.
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/11";
+/// break (Beat/Snapshot/Articulation all reframed); /12 is the rl#200 increment-7 brain
+/// label riding in every articulation crab frame (a /11 release had already shipped, so
+/// the label bytes could not ride /11 without risking a mid-stream mis-frame against it).
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/12";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh

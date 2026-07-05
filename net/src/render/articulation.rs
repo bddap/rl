@@ -82,8 +82,8 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         .unwrap_or_default();
 
     // The host's own on-screen labels, published from its brain bindings
-    // (`publish_host_brain_labels`) — shipped verbatim so every client renders the host's
-    // exact who's-who strings (rl#200 increment 7).
+    // (`external_crab`'s `publish_brain_labels`) — shipped verbatim so every client renders
+    // the host's exact who's-who strings (rl#200 increment 7).
     let labels = world
         .get_resource::<CrabBrainLabels>()
         .map(|l| l.0.clone())

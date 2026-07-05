@@ -254,15 +254,7 @@ impl CrabArticulation {
 /// formatter (`Policy::brain_label`) already keeps labels far shorter; this is the codec's own
 /// guarantee that `label.len() as u8` can't wrap regardless of what a caller hands it.
 fn clamp_label(label: &str) -> &str {
-    const MAX: usize = u8::MAX as usize;
-    if label.len() <= MAX {
-        return label;
-    }
-    let mut end = MAX;
-    while !label.is_char_boundary(end) {
-        end -= 1;
-    }
-    &label[..end]
+    crab_world::truncate_at_char_boundary(label, u8::MAX as usize)
 }
 
 fn read_vec3(r: &mut Reader<'_>) -> Result<[f32; 3], ArticulationDecodeError> {
