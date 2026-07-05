@@ -16,10 +16,11 @@
 //! scale anywhere — render==physics, so the cage is the colliders at true size.
 
 use bevy::prelude::*;
+use bevy::ui::IsDefaultUiCamera;
 use bevy_rapier3d::geometry::ColliderView;
 use bevy_rapier3d::prelude::Collider;
 
-use crate::bot::body::{CrabBodyPart, CrabEnvId};
+use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId};
 use crate::bot::skin::CrabSkinRepose;
 
 /// The ONE colour every physics collider wireframe draws in — the crab cage here, and GCR's piloted
@@ -135,6 +136,19 @@ pub fn register<M>(app: &mut App, initial: RenderMode, cage_gate: impl SystemCon
     app.init_resource::<CrabSkinRepose>();
     app.add_systems(Startup, spawn_render_mode_label);
     app.add_systems(Update, update_render_mode_label);
+    // The per-crab brain labels (rl#200 increment 7). Visibility follows the DATA, not a
+    // phase gate: nodes exist iff `CrabBrainLabels` has entries, so each binary controls the
+    // labels by publishing/clearing the resource (the demo publishes once and never clears;
+    // GCR publishes from its bindings and clears at round teardown — no stale label can
+    // float over a menu the way an ungated gizmo cage did, rl#211).
+    app.init_resource::<CrabBrainLabels>();
+    app.add_systems(Update, sync_brain_label_nodes);
+    // After transform propagation for the same reason as the cage: project THIS frame's
+    // camera + carapace poses, not last frame's.
+    app.add_systems(
+        PostUpdate,
+        position_brain_labels.after(TransformSystems::Propagate),
+    );
     // Draw AFTER transform propagation so each part's `GlobalTransform` holds this frame's
     // physics pose; otherwise the cage lags a frame.
     app.add_systems(
@@ -174,6 +188,114 @@ fn update_render_mode_label(
     }
     if let Ok(mut text) = label.single_mut() {
         **text = format!("Render: {}", mode.label());
+    }
+}
+
+/// Per-crab brain labels, index-aligned with [`CrabEnvId`]: `labels.0[i]` is the finished
+/// display string for env `i`'s crab — `arch @shortdigest`, or its attributed failure state
+/// ("REFUSED: …", "no brain (rest pose)"). The ONE world-space label system for both
+/// binaries (rl#200 increment 7): each publisher formats through `Policy::brain_label`
+/// (the demo and the GCR host directly; GCR clients receive the host's strings over the
+/// articulation wire), and this module renders whatever is here. Empty (the default) means
+/// no labels — publishing and clearing IS the visibility control.
+#[derive(Resource, Default, Clone, PartialEq, Eq, Debug)]
+pub struct CrabBrainLabels(pub Vec<String>);
+
+/// How far above the carapace center a crab's brain label floats, in world meters
+/// (render==physics: the crab stands ~0.5 m, so this clears the raised claws in both
+/// binaries — the GCR "giant" feel comes from shrinking the world, not scaling the crab).
+const BRAIN_LABEL_LIFT: f32 = 0.75;
+
+/// One floating brain-label text node, tagged with the crab index it follows.
+#[derive(Component)]
+struct BrainLabelNode(usize);
+
+/// Reconcile the label UI nodes with [`CrabBrainLabels`]: one `Text` node per entry, text
+/// kept current, extras despawned. Spawned hidden — [`position_brain_labels`] reveals a node
+/// only once it has projected a real on-screen position for it (no one-frame corner flash).
+fn sync_brain_label_nodes(
+    labels: Res<CrabBrainLabels>,
+    mut nodes: Query<(Entity, &BrainLabelNode, &mut Text)>,
+    mut commands: Commands,
+) {
+    if !labels.is_changed() {
+        return;
+    }
+    let mut have = vec![false; labels.0.len()];
+    for (entity, node, mut text) in &mut nodes {
+        match labels.0.get(node.0) {
+            Some(want) => {
+                have[node.0] = true;
+                if text.as_str() != want {
+                    **text = want.clone();
+                }
+            }
+            None => commands.entity(entity).despawn(),
+        }
+    }
+    for (i, label) in labels.0.iter().enumerate() {
+        if have[i] {
+            continue;
+        }
+        commands.spawn((
+            Text::new(label.clone()),
+            TextFont {
+                font_size: 16.0,
+                ..default()
+            },
+            // Matches the mode label's HUD green — one visual voice for the shared overlay.
+            TextColor(Color::srgb(0.4, 1.0, 0.55)),
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            Visibility::Hidden,
+            BrainLabelNode(i),
+        ));
+    }
+}
+
+/// Project each label to the viewport point above its crab's RENDERED carapace. The world
+/// anchor is `repose · carapace_translation + lift` — the same placement the cage reuses, so
+/// a label can't drift from the crab it names. Projects through the UI's own camera (the
+/// `IsDefaultUiCamera` — the demo's offscreen screenshot/video target — else the one active
+/// 3D camera), and hides a label whose crab is missing, behind the camera, or off-screen.
+fn position_brain_labels(
+    repose: Option<Res<CrabSkinRepose>>,
+    carapaces: Query<(&GlobalTransform, &CrabEnvId), With<CrabCarapace>>,
+    cameras: Query<(&Camera, &GlobalTransform, Has<IsDefaultUiCamera>), With<Camera3d>>,
+    mut nodes: Query<(&BrainLabelNode, &mut Node, &mut Visibility, &ComputedNode)>,
+) {
+    let camera = cameras
+        .iter()
+        .filter(|(cam, ..)| cam.is_active)
+        .max_by_key(|(.., is_ui)| *is_ui)
+        .map(|(cam, gt, _)| (cam, gt));
+    for (node, mut ui, mut vis, computed) in &mut nodes {
+        let anchor = carapaces.iter().find(|(_, env)| env.0 == node.0).map(
+            |(carapace, env)| {
+                let placement = repose
+                    .as_deref()
+                    .and_then(|r| r.0.get(&env.0))
+                    .map(|s| s.matrix())
+                    .unwrap_or(Mat4::IDENTITY);
+                placement.transform_point3(carapace.translation()) + Vec3::Y * BRAIN_LABEL_LIFT
+            },
+        );
+        let projected = camera
+            .zip(anchor)
+            .and_then(|((cam, cam_gt), anchor)| cam.world_to_viewport(cam_gt, anchor).ok());
+        match projected {
+            Some(vp) => {
+                // Center the text on the anchor; ComputedNode is in physical pixels while
+                // viewport coords are logical.
+                let size = computed.size() * computed.inverse_scale_factor();
+                ui.left = Val::Px(vp.x - size.x * 0.5);
+                ui.top = Val::Px(vp.y - size.y);
+                *vis = Visibility::Visible;
+            }
+            None => *vis = Visibility::Hidden,
+        }
     }
 }
 
