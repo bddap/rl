@@ -41,21 +41,18 @@ pub struct PartTransform {
     pub rot: [f32; 4],
 }
 
-/// The giant-crab blow-up placement for a tick — the render-only rigid shift + scale
-/// `crab_world::bot::skin::SkinRepose` applies to relocate the ~1 m arena rig to its game spot and
-/// size it to the giant. The client can't recompute it (it doesn't run the bridge that integrates
-/// the crab's game-world walk), so the host ships it here alongside the parts.
+/// The crab's game-spot placement for a tick — the render-only rigid shift
+/// `crab_world::bot::skin::SkinRepose` applies to relocate the ~1 m arena rig to its game spot.
+/// No scale crosses the wire (render==physics; rl#222 deleted the dead field). The client can't
+/// recompute it (it doesn't run the bridge that integrates the crab's game-world walk), so the
+/// host ships it here alongside the parts.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReposeWire {
-    /// Arena→game-world translation added to each part before scaling.
+    /// Arena→game-world translation added to each part.
     pub shift: [f32; 3],
-    /// Ground pivot the rig is scaled up about (feet stay on the floor).
-    pub pivot: [f32; 3],
-    /// Uniform blow-up factor.
-    pub scale: f32,
 }
 
-/// ONE crab's render pose for one tick: every keyed body part plus that crab's giant-blow-up
+/// ONE crab's render pose for one tick: every keyed body part plus that crab's game-spot
 /// placement. Its position in [`CrabArticulation::crabs`] IS its identity — the crab index the
 /// client routes the frame to its own matching render rig by ([`crab_world`'s `CrabEnvId`]).
 /// `repose` is `None` only before the bridge has published one for that crab (transiently at
@@ -64,7 +61,7 @@ pub struct ReposeWire {
 pub struct CrabFrame {
     /// Every keyed body part's arena-frame transform, in ascending `part`-tag order.
     pub parts: Vec<PartTransform>,
-    /// The giant-blow-up placement, or `None` before the host has published one.
+    /// The game-spot placement, or `None` before the host has published one.
     pub repose: Option<ReposeWire>,
     /// This crab's brain label, exactly as the HOST formatted it (`Policy::brain_label` —
     /// `arch @shortdigest`, or an attributed failure state): a client renders the string
@@ -139,7 +136,7 @@ impl std::error::Error for ArticulationDecodeError {}
 
 impl CrabArticulation {
     /// Little-endian wire form: `tick(8) | n_crabs(4) | crab[ n_parts(4) part[ tag(1) pos(3×4)
-    /// rot(4×4) ]… repose_present(1) [ shift(3×4) pivot(3×4) scale(4) ] label_len(1) label… ]… |
+    /// rot(4×4) ]… repose_present(1) [ shift(3×4) ] label_len(1) label… ]… |
     /// vehicle_present(1) | [ pos(3×4) rot(4×4) ]`. [`from_bytes`](Self::from_bytes) is its
     /// exact inverse.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -164,10 +161,6 @@ impl CrabArticulation {
                     for v in r.shift {
                         out.extend_from_slice(&v.to_le_bytes());
                     }
-                    for v in r.pivot {
-                        out.extend_from_slice(&v.to_le_bytes());
-                    }
-                    out.extend_from_slice(&r.scale.to_le_bytes());
                 }
             }
             let label = clamp_label(&crab.brain_label);
@@ -209,16 +202,9 @@ impl CrabArticulation {
             }
             let repose = match r.byte()? {
                 0 => None,
-                1 => {
-                    let shift = read_vec3(&mut r)?;
-                    let pivot = read_vec3(&mut r)?;
-                    let scale = f32::from_le_bytes(r.take()?);
-                    Some(ReposeWire {
-                        shift,
-                        pivot,
-                        scale,
-                    })
-                }
+                1 => Some(ReposeWire {
+                    shift: read_vec3(&mut r)?,
+                }),
                 _ => return Err(ArticulationDecodeError::BadFlag),
             };
             let label_len = r.byte()? as usize;
@@ -345,8 +331,6 @@ mod tests {
                     ],
                     repose: Some(ReposeWire {
                         shift: [10.0, 0.0, -20.0],
-                        pivot: [0.0, 1.0, 0.0],
-                        scale: 8.0,
                     }),
                     brain_label: "mlp512x3 @1a2b3c4d".to_string(),
                 },
@@ -468,12 +452,12 @@ mod tests {
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::BadFlag)
         );
-        // And the vehicle-present flag, after crab 0's repose block (flag + 3+3+1 f32s) + label
+        // And the vehicle-present flag, after crab 0's repose block (flag + 3 f32s) + label
         // (len byte + bytes) and the whole of crab 1 (n_parts(4) + one part (29) + repose
         // flag(1) + its label).
         let label = |i: usize| 1 + sample().crabs[i].brain_label.len();
         let mut bytes = sample().to_bytes();
-        bytes[flag_off + 1 + 7 * 4 + label(0) + 4 + 29 + 1 + label(1)] = 2;
+        bytes[flag_off + 1 + 3 * 4 + label(0) + 4 + 29 + 1 + label(1)] = 2;
         assert_eq!(
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::BadFlag)

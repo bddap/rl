@@ -38,8 +38,10 @@ use crate::snapshot::CoreSnapshot;
 /// "update the other device", never a mixed-version match). /11 is the rl#200 per-crab
 /// break (Beat/Snapshot/Articulation all reframed); /12 is the rl#200 increment-7 brain
 /// label riding in every articulation crab frame (a /11 release had already shipped, so
-/// the label bytes could not ride /11 without risking a mid-stream mis-frame against it).
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/12";
+/// the label bytes could not ride /11 without risking a mid-stream mis-frame against it);
+/// /13 drops the dead repose pivot+scale from the articulation frame (rl#222 — the repose
+/// is a pure translate under render==physics, so only `shift` crosses the wire).
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/13";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
@@ -958,8 +960,6 @@ mod tests {
                 ],
                 repose: Some(ReposeWire {
                     shift: [1.0, 0.0, -2.0],
-                    pivot: [0.0, 0.5, 0.0],
-                    scale: 9.0,
                 }),
                 brain_label: "mlp512x3 @deadbeef".to_string(),
             }],

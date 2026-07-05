@@ -68,9 +68,9 @@ struct BoneDrive {
     offset: Mat4,
 }
 
-/// Render-only blow-up applied to each crab's skin so the ~1 m physics rigs draw as the GCR
-/// game-world giants: scale a rig up about its ground point and translate it from its small
-/// arena frame to that crab's game-world spot. Keyed by crab-world env id — one entry per
+/// Render-only placement applied to each crab's skin so the ~1 m physics rigs draw at the GCR
+/// game-world spots: translate a rig from its small arena frame to that crab's game-world
+/// position. Keyed by crab-world env id — one entry per
 /// armed crab (rl#200 multi-brain rounds run several); an env with no entry (the default,
 /// and always the demo/trainer) renders at identity, i.e. its true physics pose.
 ///
@@ -88,27 +88,25 @@ struct BoneDrive {
 #[derive(Resource, Default, Clone)]
 pub struct CrabSkinRepose(pub std::collections::BTreeMap<usize, SkinRepose>);
 
-/// The giant-crab repose parameters (metres / unitless), in bevy world space.
+/// One crab's repose (metres), in bevy world space — a pure rigid translate. Render==physics:
+/// a crab renders at its TRUE physics size (the giant FEEL comes from the world rendering
+/// smaller around it, `net::render`'s `world_render_scale`), so no scale exists here — and the
+/// consumers depend on that isometry (the collider cage overlays the mesh exactly;
+/// `crate::crab_view`'s brain-label lift adds its metres AFTER this transform). rl#222 deleted
+/// the dead scale/pivot fields rather than leave two silent scale==1 assumers.
 #[derive(Clone, Copy)]
 pub struct SkinRepose {
-    /// Arena→game-world translation added to each part's raw pose before scaling.
+    /// Arena→game-world translation added to each part's raw pose.
     pub shift: Vec3,
-    /// Ground point the rig is scaled up about (so the feet stay on the floor).
-    pub pivot: Vec3,
-    /// Uniform blow-up factor fitting the rig to the giant render height.
-    pub scale: f32,
 }
 
 impl SkinRepose {
-    /// The world-space repose matrix: `pivot + scale·((p + shift) − pivot)` for any point `p`.
-    /// `pub` so the shared collider wireframe (`crate::crab_view`) can repose the
+    /// The world-space repose matrix — translation by `shift`. A `Mat4` (not a bare `Vec3` add)
+    /// and `pub` so the shared collider wireframe (`crate::crab_view`) can repose the
     /// live crab colliders by the SAME transform the skin uses — one source, so the cage can't
     /// drift from the rendered crab.
     pub fn matrix(&self) -> Mat4 {
-        Mat4::from_translation(self.pivot)
-            * Mat4::from_scale(Vec3::splat(self.scale))
-            * Mat4::from_translation(-self.pivot)
-            * Mat4::from_translation(self.shift)
+        Mat4::from_translation(self.shift)
     }
 }
 
@@ -393,9 +391,9 @@ fn drive_bones(
     links: Query<(&Transform, &CrabEnvId), (With<CrabBodyPart>, Without<BoneDrive>)>,
     repose: Res<CrabSkinRepose>,
 ) {
-    // The GCR giant blow-up rides the render bones ONLY (see [`CrabSkinRepose`]), per env so each
-    // armed crab carries its own game spot; identity for an env with no entry (the demo/trainer),
-    // so their skins render the crab at its true physics scale unchanged.
+    // The GCR game-spot placement rides the render bones ONLY (see [`CrabSkinRepose`]), per env
+    // so each armed crab carries its own game spot; identity for an env with no entry (the
+    // demo/trainer), so their skins render the crab at its raw physics pose unchanged.
     for (drive, mut t) in bones.iter_mut() {
         if let Ok((link, env)) = links.get(drive.link) {
             let m = repose

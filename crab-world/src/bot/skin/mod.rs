@@ -11,7 +11,7 @@
 //! wires the two submodules:
 //! - [`pairing`] — the skin lifecycle: pair each deform bone to its physics link,
 //!   drive it every frame, re-pair after an episode reset. Owns the render-only
-//!   giant blow-up ([`SkinRepose`]/[`CrabSkinRepose`]), re-exported here so
+//!   game-spot placement ([`SkinRepose`]/[`CrabSkinRepose`]), re-exported here so
 //!   `net::external_crab` and `crate::crab_view` keep their `bot::skin::…` paths.
 //! - [`weights`] — a one-time skin-weight strip confining each vertex's weights to
 //!   its owner physics part, so a rigidly-driven bone can't drag the wrong flesh.
