@@ -480,9 +480,10 @@ impl Plugin for ExternalCrabPlugin {
                 .run_if(external_crab_armed),
         );
         // Publish each binding's on-screen brain label (rl#200 increment 7). In FixedUpdate
-        // deliberately: only the physics-pumping peer (solo/host) ever advances FixedUpdate
-        // (the wall-clock auto-pump is parked; `pump_fixed_steps` is lockstep-driven), so
-        // this is host-only BY CONSTRUCTION — on a remote-adopt client the articulation
+        // deliberately: only the physics-pumping peer (solo/host) advances FixedUpdate
+        // (the wall-clock auto-pump is PARKED — to a 86400s timestep, so "never" really
+        // means "not within a day's uptime" — and `pump_fixed_steps` is lockstep-driven),
+        // so this is host-only by construction; on a remote-adopt client the articulation
         // `apply` is the sole label writer and the two can't fight over the resource.
         app.init_resource::<CrabBrainLabels>();
         app.add_systems(

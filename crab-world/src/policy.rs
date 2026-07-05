@@ -246,6 +246,14 @@ fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
     }
 }
 
+/// The one spelling of the wrong-rig refusal reason that rides into
+/// [`PolicyState::Rest`] (and from there the on-screen brain label) — shared by the
+/// initial load and the hot-reload so the attribution can't be re-phrased per site.
+fn rig_mismatch_reason(dims: RigDims) -> String {
+    let RigDims { obs, action } = dims;
+    format!("wrong rig: {obs} obs/{action} act (this build: {OBS_SIZE}/{ACTION_SIZE})")
+}
+
 /// The loud, actionable refusal logged when a checkpoint's dims don't fit this binary's
 /// rig. One message for both arming sites (initial load + hot-reload) so they stay
 /// consistent: names the surface, the path, and BOTH dim pairs, and states the
@@ -344,10 +352,8 @@ impl Policy {
             }
             // Refusal already logged above; the state is the ATTRIBUTED rest pose — the
             // reason rides in the state so the on-screen brain label renders it (rl#200).
-            Loaded::Mismatch(RigDims { obs, action }) => PolicyState::Rest {
-                refused: Some(format!(
-                    "wrong rig: {obs} obs/{action} act (this build: {OBS_SIZE}/{ACTION_SIZE})"
-                )),
+            Loaded::Mismatch(dims) => PolicyState::Rest {
+                refused: Some(rig_mismatch_reason(dims)),
             },
             Loaded::Refused(why) => PolicyState::Rest { refused: Some(why) },
         };
@@ -400,24 +406,36 @@ impl Policy {
             }
             Loaded::Absent => false, // no brain file yet — keep the current policy
             // A wrong-rig brain landed in the live dir: refuse it loudly but keep
-            // whatever we're driving (a bad file must not blank a working demo; an
-            // unarmed policy just stays at rest). A rig mismatch is a property of the
-            // brain FILE itself, so stamp `last_loaded` — log once per distinct file
-            // (mtime), no pointless re-reads.
+            // whatever we're DRIVING (a bad file must not blank a working demo). An
+            // UNARMED policy has nothing to protect — re-attribute its rest state so the
+            // on-screen label says REFUSED and why, not "no brain" (the attribution
+            // promise holds on hot-reload, not just the initial load). A rig mismatch is
+            // a property of the brain FILE itself, so stamp `last_loaded` — log once per
+            // distinct file (mtime), no pointless re-reads.
             Loaded::Mismatch(dims) => {
                 log_rig_mismatch("play (hot-reload)", &dir, dims);
                 self.last_loaded = Some(mtime);
+                if matches!(self.state, PolicyState::Rest { .. }) {
+                    self.state = PolicyState::Rest {
+                        refused: Some(rig_mismatch_reason(dims)),
+                    };
+                }
                 false
             }
-            // Same keep-driving policy, but do NOT stamp `last_loaded`: the refusal may
-            // be the transient mid-save window above, and the completed set won't change
-            // the brain's mtime — stamping here would refuse a run's FINAL save forever.
-            // A genuinely bad checkpoint just gets re-read (and re-refused) each poll;
-            // `last_refused` keeps the log at once per distinct file.
+            // Same keep-driving policy (with the same rest re-attribution), but do NOT
+            // stamp `last_loaded`: the refusal may be the transient mid-save window above,
+            // and the completed set won't change the brain's mtime — stamping here would
+            // refuse a run's FINAL save forever. A genuinely bad checkpoint just gets
+            // re-read (and re-refused) each poll; `last_refused` keeps the log at once per
+            // distinct file. (A transient REFUSED label self-heals the same way: the next
+            // poll's Fit overwrites it.)
             Loaded::Refused(why) => {
                 if self.last_refused != Some(mtime) {
                     log_checkpoint_refusal("play (hot-reload)", &dir, &why);
                     self.last_refused = Some(mtime);
+                }
+                if matches!(self.state, PolicyState::Rest { .. }) {
+                    self.state = PolicyState::Rest { refused: Some(why) };
                 }
                 false
             }
@@ -468,16 +486,9 @@ impl Policy {
                 // A floating label, not a log line: keep it readable in-world. The full
                 // reason is already in the load-time `error!`.
                 const MAX: usize = 60;
-                let mut why = why.as_str();
-                let truncated = why.len() > MAX;
-                if truncated {
-                    let mut end = MAX;
-                    while !why.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    why = &why[..end];
-                }
-                format!("REFUSED: {why}{}", if truncated { "…" } else { "" })
+                let short = crate::truncate_at_char_boundary(why, MAX);
+                let ellipsis = if short.len() < why.len() { "…" } else { "" };
+                format!("REFUSED: {short}{ellipsis}")
             }
         }
     }
