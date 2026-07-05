@@ -4,7 +4,7 @@
 //! Under host-authority the windowed HOST runs every rapier Sally; a windowed remote CLIENT
 //! renders the host's exact poses without simulating physics ([[silent-fallback-antipattern]]: no
 //! second "run my own crab for visuals" path). So the host [`capture`]s each live crab's per-part
-//! transforms + giant-blow-up placement each stepped tick — one [`CrabFrame`] per env, in env
+//! transforms + game-spot placement each stepped tick — one [`CrabFrame`] per env, in env
 //! order (rl#200: a multi-brain round runs several crabs) — and broadcasts them beside the
 //! snapshot; the client [`apply`]s each frame onto its OWN matching env's crab entities — which
 //! it spawns but never physics-steps, so the writes stick and
@@ -50,7 +50,7 @@ fn part_tag(is_carapace: bool, joint: Option<&CrabJoint>) -> Option<u8> {
 
 /// (Host) Snapshot every crab's render pose for `tick`: per env, each keyed body part's
 /// arena-frame transform (world-space — the parts are top-level, so `Transform` already is) plus
-/// that crab's current giant-blow-up placement. Frames are emitted for envs `0..n_crabs`
+/// that crab's current game-spot placement. Frames are emitted for envs `0..n_crabs`
 /// contiguously (`n_crabs` = the bridge's binding count via [`CrabSkinRepose`]'s keys ∪ spawned
 /// envs), so the frame index IS the crab index on the wire. Called right after
 /// `Server::step_next`, so it is this tick's settled pose (`integrate_crab`/
@@ -100,8 +100,6 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
             parts.sort_by_key(|p| p.part);
             let repose = reposes.get(&env).map(|s| ReposeWire {
                 shift: s.shift.to_array(),
-                pivot: s.pivot.to_array(),
-                scale: s.scale,
             });
             CrabFrame {
                 parts,
@@ -133,7 +131,7 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
 }
 
 /// (Client) Write a received crab pose onto each env's own crab render entities — overwriting
-/// every keyed part's `Transform` and each crab's giant-blow-up placement, routing frame `i` to
+/// every keyed part's `Transform` and each crab's game-spot placement, routing frame `i` to
 /// env `i`. The client never pumps the crab physics, so these writes are not fought back by the
 /// rapier solver and persist for `crab_world::bot::skin::drive_bones` (PostUpdate) to skin the
 /// meshes from. A part in a frame with no matching local entity (or vice versa, including a
@@ -167,7 +165,7 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
         // MERGE, never replace wholesale: a frame's `None` repose is "not published this
         // tick" (transient — spawn, or the rescue tick that clears the carapace sample), and
         // the documented contract is the client LEAVES its placement untouched then. Wiping
-        // the entry would snap that crab to identity (arena scale at the arena origin) for a
+        // the entry would snap that crab to identity (the arena origin) for a
         // frame — a visible glitch for an honest one-tick gap.
         for (env, frame) in art.crabs.iter().enumerate() {
             if let Some(r) = frame.repose {
@@ -175,8 +173,6 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
                     env,
                     SkinRepose {
                         shift: Vec3::from_array(r.shift),
-                        pivot: Vec3::from_array(r.pivot),
-                        scale: r.scale,
                     },
                 );
             }
@@ -251,8 +247,6 @@ mod tests {
                 0usize,
                 SkinRepose {
                     shift: Vec3::new(10.0, 0.0, -20.0),
-                    pivot: Vec3::Y,
-                    scale: 8.0,
                 },
             )]
             .into_iter()
@@ -323,8 +317,6 @@ mod tests {
         let reposes = client.resource::<CrabSkinRepose>().0.clone();
         let repose0 = reposes.get(&0).expect("env 0's repose applied");
         assert_eq!(repose0.shift, Vec3::new(10.0, 0.0, -20.0));
-        assert_eq!(repose0.pivot, Vec3::Y);
-        assert_eq!(repose0.scale, 8.0);
         assert!(
             !reposes.contains_key(&1),
             "an unpublished env stays at identity"

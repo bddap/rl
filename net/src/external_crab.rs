@@ -125,13 +125,13 @@ fn pos_to_m(p: Pos) -> Vec2 {
 /// Where a crab rig sits in the game world — the 2D (XZ) precursor that [`publish_skin_repose`]
 /// combines with the render-frame scale ([`crate::render::world_render_scale`]) to build the full
 /// 3D [`crab_world::bot::skin::SkinRepose`]. A named pair (not a bare tuple) because
-/// the two `Vec2`s are different KINDS — `shift` is an XZ delta, `pivot` an XZ world point — so
-/// they can't be swapped at the use site. See [`CrabBridge::render_placement_m`].
+/// the two `Vec2`s are different KINDS — `shift` is an XZ delta, `game_spot` an XZ world point —
+/// so they can't be swapped at the use site. See [`CrabBridge::render_placement_m`].
 struct CrabPlacement {
     /// Arena→game-world XZ translation for each part (`world_pos_m - last_carapace_m`).
     shift: Vec2,
     /// The crab's game-world ground point (XZ).
-    pivot: Vec2,
+    game_spot: Vec2,
 }
 
 impl CrabBridge {
@@ -166,11 +166,11 @@ impl CrabBridge {
         Pos::from_meters(self.world_pos_m.x, self.world_pos_m.y)
     }
 
-    /// Where the crab rig sits in the game world, as a `(shift, pivot)` pair in metres on the
-    /// XZ `Vec2` frame:
+    /// Where the crab rig sits in the game world, as a `(shift, game_spot)` pair in metres on
+    /// the XZ `Vec2` frame:
     /// - `shift` translates each part's raw arena `Transform` to the game-world crab spot
     ///   (`world_pos_m - last_carapace_m`), and
-    /// - `pivot` is the crab's game-world ground point (`world_pos_m`).
+    /// - `game_spot` is the crab's game-world ground point (`world_pos_m`).
     ///
     /// Feeds the render-only repose — see [`publish_skin_repose`] for why placement never
     /// touches physics. `None` until the crab has been sampled once (so we never place against
@@ -178,7 +178,7 @@ impl CrabBridge {
     fn render_placement_m(&self) -> Option<CrabPlacement> {
         self.last_carapace_m.map(|c| CrabPlacement {
             shift: self.world_pos_m - c,
-            pivot: self.world_pos_m,
+            game_spot: self.world_pos_m,
         })
     }
 
@@ -724,8 +724,8 @@ fn publish_skin_repose(
         return;
     };
     // Rigid translate carrying each arena rig to its crab's render-frame game spot:
-    // `shift = game_spot·R − arena_carapace` (`render_placement_m` gives `pivot` = the game spot
-    // and `pivot − shift` = the arena carapace). See the doc above for why no scale.
+    // `shift = game_spot·R − arena_carapace` (`game_spot − shift` = the arena carapace the rig
+    // sits at). See the doc above for why no scale.
     let rs = crate::render::world_render_scale();
     out.0 = bridge
         .crabs
@@ -733,17 +733,11 @@ fn publish_skin_repose(
         .enumerate()
         .filter_map(|(idx, crab)| {
             crab.render_placement_m().map(|r| {
-                let game = r.pivot; // crab's game-world XZ (m)
-                let arena = r.pivot - r.shift; // the arena carapace XZ the rig sits at
-                let s = game * rs - arena;
+                let s = r.game_spot * rs - (r.game_spot - r.shift);
                 (
                     idx,
                     crab_world::bot::skin::SkinRepose {
                         shift: Vec3::new(s.x, 0.0, s.y),
-                        // Unused at scale 1 (the repose matrix is a pure translate); kept for
-                        // the field.
-                        pivot: Vec3::ZERO,
-                        scale: 1.0,
                     },
                 )
             })
