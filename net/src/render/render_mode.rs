@@ -147,10 +147,10 @@ fn draw_vehicle_collider_wireframe(
             );
         }
     }
-    // The host's craft mirrored off the wire, rebuilt from the ONE collider source
-    // ([`crab_world::vehicle::vehicle_collider`]) so the drawn cage can't drift from the body
-    // it depicts.
-    if let Some(v) = remote.0 {
+    // Every pilot's craft mirrored off the wire (rl#191: one per piloting player), rebuilt
+    // from the ONE collider source ([`crab_world::vehicle::vehicle_collider`]) so the drawn
+    // cages can't drift from the bodies they depict.
+    for v in &remote.0 {
         let world = placement
             * Mat4::from_rotation_translation(Quat::from_array(v.rot), Vec3::from_array(v.pos));
         draw_collider_wireframe(

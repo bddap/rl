@@ -24,12 +24,13 @@ use crab_world::vehicle::Vehicle;
 
 use crate::articulation::{CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire};
 
-/// (Client) The host's piloted craft's arena-frame pose off the wire, `None` while the host is on
-/// foot. A remote client runs none of the vehicle's rapier (host-authoritative), so this mirror is
-/// all it knows of the craft; `render_mode`'s wireframe drawer renders it (rl#192). Written by
-/// [`apply`] each adopted tick; stays `None` on the host/solo, whose craft is the live body.
+/// (Client) Every piloting player's craft pose off the wire (rl#191: one per pilot, ascending
+/// pilot order; empty = nobody flies). A remote client runs none of the vehicles' rapier
+/// (host-authoritative), so this mirror is all it knows of the crafts; `render_mode`'s
+/// wireframe drawer renders them (rl#192). Written by [`apply`] each adopted tick; stays empty
+/// on the host/solo, whose crafts are the live bodies.
 #[derive(Resource, Default)]
-pub(super) struct RemoteVehicle(pub(super) Option<VehiclePoseWire>);
+pub(super) struct RemoteVehicle(pub(super) Vec<VehiclePoseWire>);
 
 /// The part tag is `1 + joint.index()` in a `u8`, so the joint set must stay small enough that the
 /// tag can't wrap — pin it at compile time (COUNT is 38 today; the wire format would need a rev long
@@ -109,24 +110,25 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         })
         .collect();
 
-    // The HOST's own piloted craft, if it is flying one ([`super::driver::HOST_PILOT`] — the one
-    // home of "the host is pilot 0"); despawned on foot, so the query itself is the presence
-    // signal. The wire still carries just this one craft — per-pilot poses for remote pilots'
-    // crafts are the rl#191 articulation rev. Its `Transform` is arena-frame like the parts (a
-    // top-level rapier body).
-    let vehicle = world
+    // EVERY pilot's craft (rl#191: one body per piloting player, host-simulated); a pilot on
+    // foot has no body (`manage_vehicles` despawns it), so the query itself is the presence
+    // signal. Sorted by pilot for a deterministic wire. Each `Transform` is arena-frame like
+    // the parts (top-level rapier bodies).
+    let mut vehicles: Vec<VehiclePoseWire> = world
         .query::<(&Transform, &Vehicle)>()
         .iter(world)
-        .find(|(_, v)| v.pilot == super::driver::HOST_PILOT)
-        .map(|(t, _)| VehiclePoseWire {
+        .map(|(t, v)| VehiclePoseWire {
+            pilot: v.pilot.0,
             pos: t.translation.to_array(),
             rot: t.rotation.to_array(),
-        });
+        })
+        .collect();
+    vehicles.sort_by_key(|v| v.pilot);
 
     CrabArticulation {
         tick,
         crabs,
-        vehicle,
+        vehicles,
     }
 }
 
@@ -189,10 +191,10 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
         world.insert_resource(CrabBrainLabels(labels));
     }
 
-    // Mirror the host's piloted craft — including `None` (the host stepped out; a stale mirror
-    // would freeze a ghost craft mid-air). Insert rather than get-mut so the mirror exists from
-    // the first adopted frame.
-    world.insert_resource(RemoteVehicle(art.vehicle));
+    // Mirror every pilot's craft — including the EMPTY list (everyone stepped out; a stale
+    // mirror would freeze a ghost craft mid-air). Insert rather than get-mut so the mirror
+    // exists from the first adopted frame.
+    world.insert_resource(RemoteVehicle(art.vehicles.clone()));
 }
 
 #[cfg(test)]
@@ -330,13 +332,12 @@ mod tests {
                 "REFUSED: wrong rig".to_string()
             ]
         );
-        // The host's piloted craft crossed too — the client's mirror holds its exact pose
-        // (rl#192: this is what the second player's wireframe drawer renders).
-        let craft = client
-            .resource::<RemoteVehicle>()
-            .0
-            .expect("piloted craft applied");
-        assert_eq!(Vec3::from_array(craft.pos), craft_t.translation);
-        assert_eq!(Quat::from_array(craft.rot), craft_t.rotation);
+        // The piloted craft crossed too, keyed by its pilot — the client's mirror holds its
+        // exact pose (rl#192: this is what the second player's wireframe drawer renders).
+        let crafts = &client.resource::<RemoteVehicle>().0;
+        assert_eq!(crafts.len(), 1, "one piloted craft applied");
+        assert_eq!(crafts[0].pilot, 0, "the ram helper spawns pilot 0's craft");
+        assert_eq!(Vec3::from_array(crafts[0].pos), craft_t.translation);
+        assert_eq!(Quat::from_array(crafts[0].rot), craft_t.rotation);
     }
 }

@@ -24,9 +24,9 @@ use n0_future::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::articulation::CrabArticulation;
-use crate::lockstep::TickMsg;
+use crate::lockstep::{PilotIntent, TickMsg};
 use crate::membership::{self, Beat};
-use crate::server::{Admission, JoinRequest};
+use crate::server::{Admission, AdmissionRefusal, JoinRequest, Refusal};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
 
@@ -40,8 +40,11 @@ use crate::snapshot::CoreSnapshot;
 /// label riding in every articulation crab frame (a /11 release had already shipped, so
 /// the label bytes could not ride /11 without risking a mid-stream mis-frame against it);
 /// /13 drops the dead repose pivot+scale from the articulation frame (rl#222 — the repose
-/// is a pure translate under render==physics, so only `shift` crosses the wire).
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/13";
+/// is a pure translate under render==physics, so only `shift` crosses the wire);
+/// /14 is rl#191 increment 2 — the pilot intent beside the foot input in every Tick frame
+/// and the per-pilot craft-pose list in Articulation — plus rl#221's typed refusal verdict
+/// in Refuse frames, folded into the same bump.
+pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/14";
 
 /// mDNS service name — scopes discovery to THIS game so we don't pick up unrelated
 /// iroh endpoints on the LAN (the default `irohv1` service is shared by all iroh
@@ -114,9 +117,10 @@ pub enum PeerWire {
     Beat(Beat),
     /// A would-be joiner's credentials, received by the host on a live-match dial.
     JoinRequest(JoinRequest),
-    /// A refusal reason, received by a turned-away joiner — surfaced loudly, never a
-    /// silent drop.
-    Refuse(String),
+    /// The host's typed refusal verdict, received by a turned-away joiner (or a departed,
+    /// re-linked peer) — surfaced loudly, never a silent drop. Typed end-to-end (rl#221):
+    /// the message is rendered at the display edge, not on the wire.
+    Refuse(Refusal),
     /// THIS joiner's own [`Admission`], unicast by the host — the joiner builds its session from it
     /// ([`crate::lockstep::Lockstep::join_at`]). Unicast so it can't confuse a concurrent joiner's
     /// allocation for its own.
@@ -137,8 +141,15 @@ pub enum PeerWire {
 /// [`crate::sim::Input::WIRE_LEN`] because they're computed from it.
 const IN_LEN: usize = crate::sim::Input::WIRE_LEN;
 const OFF_INPUT: usize = 8; // after issue_tick(8)
-/// Wire size of an encoded [`TickMsg`]: issue_tick(8) + input.
-const TICKMSG_LEN: usize = OFF_INPUT + IN_LEN;
+/// Offset of the pilot-intent block: after issue_tick(8) + input.
+const OFF_PILOT: usize = OFF_INPUT + IN_LEN;
+/// Wire size of the pilot-intent block, ALWAYS present (fixed-width message, zero-alloc
+/// send): `kind(1) | throttle_trim(4) | thrust(3×4) | pitch(4) | roll(4) | yaw(4) |
+/// match_velocity(1)`. `kind` 0 = on foot (the rest of the block must be zero), 1 = plane,
+/// 2 = ship.
+const PILOT_LEN: usize = 1 + 4 + 12 + 4 + 4 + 4 + 1;
+/// Wire size of an encoded [`TickMsg`]: issue_tick(8) + input + pilot intent.
+const TICKMSG_LEN: usize = OFF_PILOT + PILOT_LEN;
 
 /// A wire message: owns its [`Frame`] kind byte and its body codec, so adding or changing a frame
 /// touches ONE impl instead of rippling across [`Frame`], [`Frame::from_byte`], a bespoke send
@@ -158,15 +169,37 @@ pub(crate) trait Codec: Sized {
     fn decode(body: &[u8]) -> Result<Self>;
 }
 
+/// Byte tag for [`VehicleKind`] in the pilot-intent block. `0` is reserved for "on foot"
+/// (no intent), so a kind is always nonzero — the one place the enum meets the wire.
+fn vehicle_kind_byte(kind: crab_world::vehicle::VehicleKind) -> u8 {
+    match kind {
+        crab_world::vehicle::VehicleKind::Plane => 1,
+        crab_world::vehicle::VehicleKind::Ship => 2,
+    }
+}
+
 impl Codec for TickMsg {
     const KIND: Frame = Frame::Tick;
     type Bytes = [u8; TICKMSG_LEN];
 
-    /// Fixed-width little-endian: issue_tick(8) | input.
+    /// Fixed-width little-endian: issue_tick(8) | input | pilot intent ([`PILOT_LEN`]).
+    /// On foot the intent block is all zeros (kind 0), keeping the frame fixed-width.
     fn encode(&self) -> [u8; TICKMSG_LEN] {
         let mut b = [0u8; TICKMSG_LEN];
         b[0..OFF_INPUT].copy_from_slice(&self.issue_tick.to_le_bytes());
-        b[OFF_INPUT..].copy_from_slice(&self.input.to_bytes());
+        b[OFF_INPUT..OFF_PILOT].copy_from_slice(&self.input.to_bytes());
+        if let Some(p) = &self.pilot {
+            let w = &mut b[OFF_PILOT..];
+            w[0] = vehicle_kind_byte(p.kind);
+            w[1..5].copy_from_slice(&p.throttle_trim.to_le_bytes());
+            for (i, t) in p.thrust.iter().enumerate() {
+                w[5 + 4 * i..9 + 4 * i].copy_from_slice(&t.to_le_bytes());
+            }
+            w[17..21].copy_from_slice(&p.pitch.to_le_bytes());
+            w[21..25].copy_from_slice(&p.roll.to_le_bytes());
+            w[25..29].copy_from_slice(&p.yaw.to_le_bytes());
+            w[29] = p.match_velocity as u8;
+        }
         b
     }
 
@@ -174,9 +207,45 @@ impl Codec for TickMsg {
         let b: &[u8; TICKMSG_LEN] = body.try_into().map_err(|_| {
             anyhow::anyhow!("tick frame body is {} B, want {TICKMSG_LEN}", body.len())
         })?;
+        let p = &b[OFF_PILOT..];
+        let f = |off: usize| f32::from_le_bytes(p[off..off + 4].try_into().unwrap());
+        let pilot = match p[0] {
+            // On foot: the whole block must be zero — a nonzero tail is a mis-framed or
+            // drifted peer, rejected loudly rather than silently ignored.
+            0 => {
+                anyhow::ensure!(
+                    p[1..].iter().all(|&x| x == 0),
+                    "on-foot tick frame has nonzero pilot-intent bytes"
+                );
+                None
+            }
+            kind @ (1 | 2) => {
+                let kind = if kind == 1 {
+                    crab_world::vehicle::VehicleKind::Plane
+                } else {
+                    crab_world::vehicle::VehicleKind::Ship
+                };
+                let match_velocity = match p[29] {
+                    0 => false,
+                    1 => true,
+                    x => anyhow::bail!("pilot-intent match_velocity flag is {x}, want 0/1"),
+                };
+                Some(PilotIntent {
+                    kind,
+                    throttle_trim: f(1),
+                    thrust: [f(5), f(9), f(13)],
+                    pitch: f(17),
+                    roll: f(21),
+                    yaw: f(25),
+                    match_velocity,
+                })
+            }
+            x => anyhow::bail!("unknown pilot-intent kind byte {x:#x}"),
+        };
         Ok(TickMsg {
             issue_tick: u64::from_le_bytes(b[0..OFF_INPUT].try_into().unwrap()),
-            input: crate::sim::Input::from_bytes(b[OFF_INPUT..].try_into().unwrap()),
+            input: crate::sim::Input::from_bytes(b[OFF_INPUT..OFF_PILOT].try_into().unwrap()),
+            pilot,
         })
     }
 }
@@ -311,20 +380,45 @@ impl Codec for Admission {
     }
 }
 
-/// A loud join REFUSAL body (a UTF-8 reason). Its own type so it routes as [`Frame::Refuse`] through
-/// the one generic send path — a turned-away joiner surfaces the reason, never a silent drop.
-pub(crate) struct Refuse(pub String);
-
-impl Codec for Refuse {
+impl Codec for Refusal {
     const KIND: Frame = Frame::Refuse;
     type Bytes = Vec<u8>;
+
+    /// Typed verdict, tag + fields (rl#221 — no stringly wire): `0` =
+    /// [`AdmissionRefusal::AssetsMismatch`] `host(8) joiner(8)`, `1` =
+    /// [`AdmissionRefusal::CrabCountMismatch`] `host(1) joiner(1)`, `2` =
+    /// [`Refusal::Departed`]. The receiver renders the message at ITS display edge.
     fn encode(&self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
+        match self {
+            Refusal::Admission(AdmissionRefusal::AssetsMismatch { host, joiner }) => {
+                let mut b = vec![0u8];
+                b.extend_from_slice(&host.to_le_bytes());
+                b.extend_from_slice(&joiner.to_le_bytes());
+                b
+            }
+            Refusal::Admission(AdmissionRefusal::CrabCountMismatch { host, joiner }) => {
+                vec![1, *host, *joiner]
+            }
+            Refusal::Departed => vec![2],
+        }
     }
+
     fn decode(body: &[u8]) -> Result<Self> {
-        Ok(Refuse(
-            String::from_utf8(body.to_vec()).context("refuse frame body is not UTF-8")?,
-        ))
+        let mut r = body;
+        let verdict = match take(&mut r, 1, "refusal tag")?[0] {
+            0 => Refusal::Admission(AdmissionRefusal::AssetsMismatch {
+                host: u64::from_le_bytes(take(&mut r, 8, "host digest")?.try_into().unwrap()),
+                joiner: u64::from_le_bytes(take(&mut r, 8, "joiner digest")?.try_into().unwrap()),
+            }),
+            1 => Refusal::Admission(AdmissionRefusal::CrabCountMismatch {
+                host: take(&mut r, 1, "host crab count")?[0],
+                joiner: take(&mut r, 1, "joiner crab count")?[0],
+            }),
+            2 => Refusal::Departed,
+            x => anyhow::bail!("unknown refusal tag {x:#x}"),
+        };
+        anyhow::ensure!(r.is_empty(), "refuse frame has {} trailing bytes", r.len());
+        Ok(verdict)
     }
 }
 
@@ -834,7 +928,7 @@ async fn wire_connection(
 /// allocating. The largest legitimate frames all fit comfortably: a full-roster [`Beat`]
 /// (start + count + asset digest + 256×32-byte ids ≈ 8 KiB), a full-roster
 /// [`CoreSnapshot`] (~14 B/player + ~20 B/crab, ≈ 4 KiB at 256), and a [`CrabArticulation`]
-/// (rl#192: per crab 39 parts × 29 B each + repose, + vehicle ≈ 1.2 KiB/crab); 16 KiB is
+/// (rl#192: per crab 39 parts × 29 B each + repose, + ~30 B per piloted craft ≈ 1.2 KiB/crab); 16 KiB is
 /// generous slack for any sane binding count and still bounds a bad length to a small
 /// allocation.
 const MAX_FRAME_LEN: usize = 16 * 1024;
@@ -869,7 +963,7 @@ async fn read_loop(
             Frame::Tick => PeerWire::Tick(TickMsg::decode(body)?),
             Frame::Beat => PeerWire::Beat(Beat::decode(body)?),
             Frame::JoinRequest => PeerWire::JoinRequest(JoinRequest::decode(body)?),
-            Frame::Refuse => PeerWire::Refuse(Refuse::decode(body)?.0),
+            Frame::Refuse => PeerWire::Refuse(Refusal::decode(body)?),
             Frame::Welcome => PeerWire::Welcome(Admission::decode(body)?),
             Frame::Snapshot => PeerWire::Snapshot(CoreSnapshot::decode(body)?),
             Frame::Articulation => PeerWire::Articulation(CrabArticulation::decode(body)?),
@@ -910,11 +1004,75 @@ mod tests {
 
     #[test]
     fn tick_body_wire_roundtrips() {
-        let m = TickMsg {
+        // On foot (no intent) and piloting both round-trip byte-exact.
+        let on_foot = TickMsg {
             issue_tick: 1234,
             input: Input::from_axes(0.5, -0.25),
+            pilot: None,
         };
-        assert_eq!(TickMsg::decode(TickMsg::encode(&m).as_ref()).unwrap(), m);
+        assert_eq!(
+            TickMsg::decode(TickMsg::encode(&on_foot).as_ref()).unwrap(),
+            on_foot
+        );
+        let piloting = TickMsg {
+            pilot: Some(PilotIntent {
+                kind: crab_world::vehicle::VehicleKind::Ship,
+                throttle_trim: -0.5,
+                thrust: [0.25, -1.0, 1.0],
+                pitch: 0.125,
+                roll: -0.75,
+                yaw: 1.0,
+                match_velocity: true,
+            }),
+            ..on_foot
+        };
+        assert_eq!(
+            TickMsg::decode(TickMsg::encode(&piloting).as_ref()).unwrap(),
+            piloting
+        );
+    }
+
+    #[test]
+    fn tick_pilot_block_is_strict() {
+        let on_foot = TickMsg {
+            issue_tick: 7,
+            input: Input::from_axes(0.0, 1.0),
+            pilot: None,
+        };
+        // On-foot frames must carry an all-zero intent block: nonzero tail bytes are a
+        // mis-framed/drifted peer, rejected loudly.
+        let mut b = TickMsg::encode(&on_foot);
+        b[TICKMSG_LEN - 1] = 1;
+        assert!(TickMsg::decode(&b).is_err(), "nonzero on-foot tail rejected");
+        // An unknown craft kind byte is rejected, never guessed at.
+        let mut b = TickMsg::encode(&on_foot);
+        b[OFF_PILOT] = 3;
+        assert!(TickMsg::decode(&b).is_err(), "unknown kind byte rejected");
+        // The old, intent-less frame size is a loud version-skew error.
+        assert!(TickMsg::decode(&b[..OFF_PILOT]).is_err(), "short frame rejected");
+    }
+
+    #[test]
+    fn refusal_wire_roundtrips_typed() {
+        // Every verdict crosses typed (rl#221) — tag+fields, message rendered at the edge.
+        for verdict in [
+            Refusal::Admission(AdmissionRefusal::AssetsMismatch {
+                host: 0x1122_3344_5566_7788,
+                joiner: 0x99aa_bbcc_ddee_ff00,
+            }),
+            Refusal::Admission(AdmissionRefusal::CrabCountMismatch { host: 3, joiner: 1 }),
+            Refusal::Departed,
+        ] {
+            assert_eq!(
+                Refusal::decode(Refusal::encode(&verdict).as_ref()).unwrap(),
+                verdict
+            );
+        }
+        // Unknown tag / trailing bytes / a pre-rl#221 UTF-8 reason are loud decode errors,
+        // never a silently misread verdict.
+        assert!(Refusal::decode(&[9]).is_err());
+        assert!(Refusal::decode(&[2, 0]).is_err());
+        assert!(Refusal::decode(b"host gone").is_err());
     }
 
     #[test]
@@ -963,7 +1121,8 @@ mod tests {
                 }),
                 brain_label: "mlp512x3 @deadbeef".to_string(),
             }],
-            vehicle: Some(VehiclePoseWire {
+            vehicles: vec![VehiclePoseWire {
+                pilot: 1,
                 pos: [2.0, 5.5, -1.0],
                 rot: [
                     0.0,
@@ -971,7 +1130,7 @@ mod tests {
                     0.0,
                     std::f32::consts::FRAC_1_SQRT_2,
                 ],
-            }),
+            }],
         };
         let body = CrabArticulation::encode(&art);
         assert_eq!(CrabArticulation::decode(&body).unwrap(), art);

@@ -12,6 +12,8 @@
 
 use std::collections::BTreeMap;
 
+use crab_world::vehicle::{PilotCommand, VehicleKind};
+
 use crate::sim::{Input, PlayerId, Sim};
 use crate::snapshot::CoreSnapshot;
 
@@ -20,13 +22,62 @@ use crate::snapshot::CoreSnapshot;
 /// a REMOTE client's inputs are consumed by the server in issue order as they arrive — typically
 /// a transit-lag of ticks later — with the consumption reported back per snapshot
 /// ([`CoreSnapshot::input_next`]) so the client's prediction replays exactly the unconsumed tail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TickMsg {
     /// This input's position in the sender's issue sequence (one per wall-clock tick, strictly
     /// increasing). NOT a promise of the tick it applies at — the server never waits on a remote
     /// (rl#193/#194/#195).
     pub issue_tick: u64,
     pub input: Input,
+    /// The sender's piloting intent this tick, BESIDE the foot input (rl#191 increment 2):
+    /// `None` = on foot. Riding the ONE per-tick message keeps ordering/departure/backpressure
+    /// shared with the input stream, and deliberately OUT of the deterministic sim [`Input`] —
+    /// the craft is host-authoritative rapier state, not sim state. The host files the latest
+    /// intent per player into the crab world's `VehicleControls`
+    /// ([`crate::server::Server::pilot_intents`]).
+    pub pilot: Option<PilotIntent>,
+}
+
+/// One player's craft intent for a tick — the wire form of the crab world's
+/// [`PilotCommand`], as plain POD (`f32` arrays, no bevy/glam) like every wire type, so the
+/// codec layout is explicit. Existence means "piloting `kind`"; on-foot is the absent
+/// [`TickMsg::pilot`], so a stale intent with no pilot is unrepresentable — the same
+/// presence-IS-piloting rule as `VehicleControls` itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PilotIntent {
+    /// Which craft to fly (cycled by the player). A change respawns the body host-side.
+    pub kind: VehicleKind,
+    /// Throttle-lever trim this tick (plane), `-1..1`.
+    pub throttle_trim: f32,
+    /// Direct body-frame thrust intent (ship): strafe/vertical/forward, each `-1..1`.
+    pub thrust: [f32; 3],
+    /// Pitch/roll/yaw control intents, each `-1..1`.
+    pub pitch: f32,
+    pub roll: f32,
+    pub yaw: f32,
+    /// Match-velocity brake held (ship).
+    pub match_velocity: bool,
+}
+
+impl PilotIntent {
+    /// This intent as the [`PilotCommand`] the crab-world force model reads — the host's
+    /// filing seam. Every axis is SANITIZED here (non-finite → 0, then clamped to `-1..1`):
+    /// a remote client's floats are untrusted, and the force model multiplies them straight
+    /// into thrust/torque, so a hostile or garbled intent must not command unbounded force.
+    /// The local path already clamps in `flight_control`; re-clamping is idempotent, so host
+    /// and remote intents go through the ONE seam.
+    pub fn to_command(&self) -> PilotCommand {
+        let s = |v: f32| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
+        PilotCommand {
+            kind: self.kind,
+            throttle_trim: s(self.throttle_trim),
+            thrust: bevy::math::Vec3::new(s(self.thrust[0]), s(self.thrust[1]), s(self.thrust[2])),
+            pitch: s(self.pitch),
+            roll: s(self.roll),
+            yaw: s(self.yaw),
+            match_velocity: self.match_velocity,
+        }
+    }
 }
 
 /// A peer [`TickMsg`] tagged with the sender's already-resolved [`PlayerId`]. The
@@ -124,11 +175,17 @@ impl Lockstep {
     /// Call exactly once per tick — the issue cursor advances by one each call, so a missed or
     /// doubled call would gap or collide the input stream. The input is also recorded locally so
     /// [`Self::reconcile_local_prediction`] can replay the still-unconsumed window after an adopt.
-    pub fn submit_local_input(&mut self, input: Input) -> TickMsg {
+    /// `pilot` is the piloting intent riding beside the foot input (`None` = on foot); only the
+    /// foot input is recorded for prediction — the craft is host-authoritative, never predicted.
+    pub fn submit_local_input(&mut self, input: Input, pilot: Option<PilotIntent>) -> TickMsg {
         let issue_tick = self.next_issue_tick;
         self.next_issue_tick += 1;
         self.inputs.insert(issue_tick, input);
-        TickMsg { issue_tick, input }
+        TickMsg {
+            issue_tick,
+            input,
+            pilot,
+        }
     }
 
     /// Read-only sim view for rendering/inspection.
@@ -278,6 +335,30 @@ mod tests {
         (0..n).map(PlayerId).collect()
     }
 
+    /// The filing seam sanitizes UNTRUSTED wire floats: a remote's intent reaches the force
+    /// model only through [`PilotIntent::to_command`], which zeroes non-finite axes and clamps
+    /// to `-1..1` — a hostile/garbled intent can't command unbounded thrust or torque.
+    #[test]
+    fn intent_to_command_sanitizes_untrusted_axes() {
+        let cmd = PilotIntent {
+            kind: VehicleKind::Ship,
+            throttle_trim: f32::NAN,
+            thrust: [55.0, f32::NEG_INFINITY, -0.5],
+            pitch: -9.0,
+            roll: 0.25,
+            yaw: f32::INFINITY,
+            match_velocity: true,
+        }
+        .to_command();
+        assert_eq!(cmd.kind, VehicleKind::Ship);
+        assert_eq!(cmd.throttle_trim, 0.0, "NaN → neutral");
+        assert_eq!(cmd.thrust.to_array(), [1.0, 0.0, -0.5], "clamped / zeroed");
+        assert_eq!(cmd.pitch, -1.0, "clamped");
+        assert_eq!(cmd.roll, 0.25, "an in-range axis passes through exactly");
+        assert_eq!(cmd.yaw, 0.0, "∞ → neutral");
+        assert!(cmd.match_velocity);
+    }
+
     /// The reconciliation property under host pacing: a REMOTE client whose inputs reach the host
     /// a few ticks late (and whose snapshots come back just as late) must, after adopt +
     /// reconcile, render its own avatar exactly where replaying ALL of its issued inputs lands —
@@ -311,13 +392,13 @@ mod tests {
                 ((f % 4) as f32 - 1.5) / 1.5,
                 0,
             );
-            wire_up.push_back(client.submit_local_input(inp));
+            wire_up.push_back(client.submit_local_input(inp, None));
             reference.sim.predict_player(me, inp); // zero-latency ideal, applied at issue
             if wire_up.len() > LATENCY {
                 let msg = wire_up.pop_front().expect("len checked");
                 server.record_remote(me, msg);
             }
-            server.advance(host_sched.submit_local_input(Input::default()));
+            server.advance(host_sched.submit_local_input(Input::default(), None));
             while server.next_tick_ready() {
                 let bytes = server.step_next(&[]).snapshot;
                 wire_down.push_back(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
@@ -344,7 +425,7 @@ mod tests {
             if let Some(msg) = wire_up.pop_front() {
                 server.record_remote(me, msg);
             }
-            server.advance(host_sched.submit_local_input(Input::default()));
+            server.advance(host_sched.submit_local_input(Input::default(), None));
             while server.next_tick_ready() {
                 let bytes = server.step_next(&[]).snapshot;
                 wire_down.push_back(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
@@ -393,7 +474,7 @@ mod tests {
         for t in 0..7u64 {
             let btns = if t == 5 { buttons::RESTART } else { 0 };
             let input = Input::new(0.0, if t < 5 { 1.0 } else { 0.0 }, 0.0, btns);
-            host.advance(sched.submit_local_input(input));
+            host.advance(sched.submit_local_input(input, None));
             while host.next_tick_ready() {
                 let bytes = host.step_next(&[]).snapshot;
                 arrivals.push(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
@@ -424,7 +505,7 @@ mod tests {
         let roster = ids(2);
         let mut client = Lockstep::new(9, &roster, me);
         for _ in 0..3 {
-            let _ = client.submit_local_input(Input::from_axes(1.0, 0.0));
+            let _ = client.submit_local_input(Input::from_axes(1.0, 0.0), None);
         }
         // A tick-10 snapshot that consumed NONE of our inputs (watermark 0 — e.g. they are all
         // still in flight).
