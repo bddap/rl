@@ -19,6 +19,7 @@ use bevy::prelude::*;
 
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
 use crab_world::bot::skin::{CrabSkinRepose, SkinRepose};
+use crab_world::crab_view::CrabBrainLabels;
 use crab_world::vehicle::Vehicle;
 
 use crate::articulation::{CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire};
@@ -80,6 +81,14 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         .map(|r| r.0.clone())
         .unwrap_or_default();
 
+    // The host's own on-screen labels, published from its brain bindings
+    // (`publish_host_brain_labels`) — shipped verbatim so every client renders the host's
+    // exact who's-who strings (rl#200 increment 7).
+    let labels = world
+        .get_resource::<CrabBrainLabels>()
+        .map(|l| l.0.clone())
+        .unwrap_or_default();
+
     // One frame per env, contiguous from 0 — the wire's index IS the crab index. Spawned envs
     // are contiguous by construction (`spawn_initial_crabs` fills 0..NumEnvs), so this covers
     // exactly the armed crabs.
@@ -94,7 +103,11 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
                 pivot: s.pivot.to_array(),
                 scale: s.scale,
             });
-            CrabFrame { parts, repose }
+            CrabFrame {
+                parts,
+                repose,
+                brain_label: labels.get(env).cloned().unwrap_or_default(),
+            }
         })
         .collect();
 
@@ -170,6 +183,14 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
         repose.0.retain(|env, _| *env < art.crabs.len());
     }
 
+    // Adopt the host's brain labels (write-on-change so the shared label UI only reconciles
+    // when something actually changed). Like the parts, the client renders these verbatim —
+    // it never re-derives who's who.
+    let labels: Vec<String> = art.crabs.iter().map(|f| f.brain_label.clone()).collect();
+    if world.get_resource::<CrabBrainLabels>().map(|l| &l.0) != Some(&labels) {
+        world.insert_resource(CrabBrainLabels(labels));
+    }
+
     // Mirror the host's piloted craft — including `None` (the host stepped out; a stale mirror
     // would freeze a ghost craft mid-air). Insert rather than get-mut so the mirror exists from
     // the first adopted frame.
@@ -235,6 +256,12 @@ mod tests {
             .into_iter()
             .collect(),
         ));
+        // Per-crab brain labels, one a failure state — the who's-who channel crosses the
+        // wire verbatim (rl#200 increment 7).
+        host.insert_resource(CrabBrainLabels(vec![
+            "mlp512x3 @cafef00d".to_string(),
+            "REFUSED: wrong rig".to_string(),
+        ]));
         let craft_t = Transform::from_xyz(2.0, 5.5, -1.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
         crab_world::vehicle::spawn_ram_vehicle(
@@ -299,6 +326,15 @@ mod tests {
         assert!(
             !reposes.contains_key(&1),
             "an unpublished env stays at identity"
+        );
+        // The host's exact label strings crossed too — the client renders them verbatim,
+        // never re-deriving who's who (and the failure attribution survives the wire).
+        assert_eq!(
+            client.resource::<CrabBrainLabels>().0,
+            vec![
+                "mlp512x3 @cafef00d".to_string(),
+                "REFUSED: wrong rig".to_string()
+            ]
         );
         // The host's piloted craft crossed too — the client's mirror holds its exact pose
         // (rl#192: this is what the second player's wireframe drawer renders).

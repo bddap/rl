@@ -59,6 +59,7 @@ use crab_world::Visuals;
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint};
 use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns};
+use crab_world::crab_view::CrabBrainLabels;
 use crab_world::play::Policy;
 
 /// Height (m) of the walk target placed at the player's position. A low ground-ish Y inside
@@ -478,6 +479,16 @@ impl Plugin for ExternalCrabPlugin {
             )
                 .run_if(external_crab_armed),
         );
+        // Publish each binding's on-screen brain label (rl#200 increment 7). In FixedUpdate
+        // deliberately: only the physics-pumping peer (solo/host) ever advances FixedUpdate
+        // (the wall-clock auto-pump is parked; `pump_fixed_steps` is lockstep-driven), so
+        // this is host-only BY CONSTRUCTION — on a remote-adopt client the articulation
+        // `apply` is the sole label writer and the two can't fight over the resource.
+        app.init_resource::<CrabBrainLabels>();
+        app.add_systems(
+            FixedUpdate,
+            publish_brain_labels.run_if(external_crab_armed),
+        );
         // After physics has moved the bodies this fixed step, fold their displacement into
         // the game-world crab positions. Runs in FixedUpdate (one physics step per run) so
         // every bit of walk is captured, not just the frames the render samples.
@@ -529,6 +540,18 @@ fn ensure_crab_env(
     let want = bridge.crab_count();
     if num_envs.0 < want {
         num_envs.0 = want;
+    }
+}
+
+/// Keep [`CrabBrainLabels`] current with the bindings — one label per env, formatted by the
+/// ONE formatter (`Policy::brain_label`), write-on-change. GCR policies never hot-reload, so
+/// this settles to one write per arm; it stays a system (not an arm-time one-shot) so the
+/// labels can never go stale against whatever drives the crabs. Teardown clears the resource
+/// ([`crate::render`]'s `teardown_round`), un-labeling the crab bodies that outlive the round.
+fn publish_brain_labels(policies: NonSend<CrabPolicies>, mut labels: ResMut<CrabBrainLabels>) {
+    let want: Vec<String> = policies.0.iter().map(|p| p.brain_label()).collect();
+    if labels.0 != want {
+        labels.0 = want;
     }
 }
 

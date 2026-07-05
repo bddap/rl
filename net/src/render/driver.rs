@@ -169,6 +169,12 @@ pub(super) fn ensure_round_installed(world: &mut World) {
 pub(super) fn teardown_round(world: &mut World) {
     world.remove_non_send_resource::<GameState>();
     world.remove_resource::<crate::external_crab::ExternalCrabArmed>();
+    // Un-label the crab bodies that persist across rounds: labels are round state (the host
+    // republishes on the next arm; a client re-adopts from the next round's articulation),
+    // and a survivor here would float brain labels over the menu (the rl#211 class).
+    if let Some(mut labels) = world.get_resource_mut::<crab_world::crab_view::CrabBrainLabels>() {
+        labels.0.clear();
+    }
     if let Some(mut ctrl) = world.get_resource_mut::<VehicleControl>() {
         ctrl.active = false;
         FlightControl::default().write_into(&mut ctrl);

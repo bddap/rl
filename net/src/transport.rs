@@ -960,6 +960,7 @@ mod tests {
                     pivot: [0.0, 0.5, 0.0],
                     scale: 9.0,
                 }),
+                brain_label: "mlp512x3 @deadbeef".to_string(),
             }],
             vehicle: Some(VehiclePoseWire {
                 pos: [2.0, 5.5, -1.0],
