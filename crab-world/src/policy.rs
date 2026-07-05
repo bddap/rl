@@ -66,7 +66,11 @@ enum PolicyState {
     /// Two ways here, distinguished at load time by their logs (rl#121): a LOUDLY refused
     /// checkpoint (wrong-rig [`log_rig_mismatch`], or envelope-refused
     /// [`log_checkpoint_refusal`]) and the quiet, legitimate no-checkpoint-yet pose.
-    Rest,
+    /// `refused` carries which: `Some(reason)` for a refusal, `None` for no-checkpoint-yet —
+    /// IN the state (not a sidecar field) so an armed brain can't sit beside a stale refusal.
+    /// It feeds [`Policy::brain_label`]: a refused crab is ATTRIBUTED on screen (rl#200
+    /// increment 7), not just in the log, so a playtest can tell "refused" from "no brain".
+    Rest { refused: Option<String> },
     /// `RL_RANDOM_POLICY`: an untrained current-rig brain drives the crab so an operator can
     /// see what a FRESH policy does (vs the zero-action rest pose). It has NO on-disk weights,
     /// hence no digest, hence — by construction, not by a runtime `!= 0` check — can never
@@ -336,10 +340,16 @@ impl Policy {
                     "play: no usable checkpoint at {} — using zero-action pose",
                     checkpoint_dir.display()
                 );
-                PolicyState::Rest
+                PolicyState::Rest { refused: None }
             }
-            // Refusal already logged above; the state is the (attributed) rest pose.
-            Loaded::Mismatch(_) | Loaded::Refused(_) => PolicyState::Rest,
+            // Refusal already logged above; the state is the ATTRIBUTED rest pose — the
+            // reason rides in the state so the on-screen brain label renders it (rl#200).
+            Loaded::Mismatch(RigDims { obs, action }) => PolicyState::Rest {
+                refused: Some(format!(
+                    "wrong rig: {obs} obs/{action} act (this build: {OBS_SIZE}/{ACTION_SIZE})"
+                )),
+            },
+            Loaded::Refused(why) => PolicyState::Rest { refused: Some(why) },
         };
 
         Self {
@@ -419,7 +429,7 @@ impl Policy {
     /// neutral pose while this is false). True for both a real checkpoint and the
     /// `RL_RANDOM_POLICY` diagnostic brain — use [`Self::weights_digest`] to tell those apart.
     pub fn is_loaded(&self) -> bool {
-        !matches!(self.state, PolicyState::Rest)
+        !matches!(self.state, PolicyState::Rest { .. })
     }
 
     /// Stable digest of the loaded weights, or `None` when no real checkpoint is armed (the
@@ -433,7 +443,42 @@ impl Policy {
     pub fn weights_digest(&self) -> Option<NonZeroU64> {
         match &self.state {
             PolicyState::Loaded { digest, .. } => Some(*digest),
-            PolicyState::Rest | PolicyState::Diagnostic { .. } => None,
+            PolicyState::Rest { .. } | PolicyState::Diagnostic { .. } => None,
+        }
+    }
+
+    /// The human-facing identity of the brain driving this policy — the on-screen crab label
+    /// (rl#200 increment 7): `arch @shortdigest` for a real checkpoint, and every OTHER state
+    /// attributed honestly ("who's who" includes who FAILED and why). THE one label formatter:
+    /// the demo, the GCR host, and (via the articulation wire) every GCR client render this
+    /// exact string, so the label can't drift per surface.
+    pub fn brain_label(&self) -> String {
+        match &self.state {
+            PolicyState::Loaded { brain, digest, .. } => {
+                // First 8 hex chars of the full checkpoint digest — enough to tell two live
+                // checkpoints apart at a glance, short enough to read in a playtest.
+                let hex = format!("{:016x}", u64::from(*digest));
+                format!("{} @{}", brain.arch(), &hex[..8])
+            }
+            PolicyState::Diagnostic { brain, .. } => {
+                format!("{} (random, untrained)", brain.arch())
+            }
+            PolicyState::Rest { refused: None } => "no brain (rest pose)".to_string(),
+            PolicyState::Rest { refused: Some(why) } => {
+                // A floating label, not a log line: keep it readable in-world. The full
+                // reason is already in the load-time `error!`.
+                const MAX: usize = 60;
+                let mut why = why.as_str();
+                let truncated = why.len() > MAX;
+                if truncated {
+                    let mut end = MAX;
+                    while !why.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    why = &why[..end];
+                }
+                format!("REFUSED: {why}{}", if truncated { "…" } else { "" })
+            }
         }
     }
 
@@ -456,7 +501,7 @@ impl Policy {
                 brain, normalizer, ..
             }
             | PolicyState::Diagnostic { brain, normalizer } => (brain, normalizer),
-            PolicyState::Rest => return [0.0; ACTION_SIZE],
+            PolicyState::Rest { .. } => return [0.0; ACTION_SIZE],
         };
         let obs = normalizer.normalize_frozen(raw_obs);
         let input =
