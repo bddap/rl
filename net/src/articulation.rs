@@ -66,6 +66,14 @@ pub struct CrabFrame {
     pub parts: Vec<PartTransform>,
     /// The giant-blow-up placement, or `None` before the host has published one.
     pub repose: Option<ReposeWire>,
+    /// This crab's brain label, exactly as the HOST formatted it (`Policy::brain_label` —
+    /// `arch @shortdigest`, or an attributed failure state): a client renders the string
+    /// verbatim, so who's-who can't be re-derived differently per peer (rl#200 increment 7).
+    /// It rides the articulation stream — not a join-time table — because articulation
+    /// already reaches BOTH client kinds (formation and mid-join) index-aligned with the
+    /// crabs, and stays current if a future round ever rebinds; ~30 bytes/crab/frame is
+    /// noise beside the part transforms. Capped at 255 bytes on the wire ([`clamp_label`]).
+    pub brain_label: String,
 }
 
 /// Every crab's render pose for one tick — one [`CrabFrame`] per crab, in crab-index order. The
@@ -111,6 +119,8 @@ pub enum ArticulationDecodeError {
     BadFlag,
     /// Bytes remained after a complete articulation decoded — a framing/length mismatch.
     TrailingBytes,
+    /// A brain label's bytes were not valid UTF-8.
+    BadLabel,
 }
 
 impl std::fmt::Display for ArticulationDecodeError {
@@ -119,6 +129,7 @@ impl std::fmt::Display for ArticulationDecodeError {
             Self::Truncated => "articulation buffer ended mid-field",
             Self::BadFlag => "articulation present-flag was neither 0 nor 1",
             Self::TrailingBytes => "trailing bytes after a complete articulation",
+            Self::BadLabel => "articulation brain label was not valid UTF-8",
         };
         f.write_str(msg)
     }
@@ -128,8 +139,9 @@ impl std::error::Error for ArticulationDecodeError {}
 
 impl CrabArticulation {
     /// Little-endian wire form: `tick(8) | n_crabs(4) | crab[ n_parts(4) part[ tag(1) pos(3×4)
-    /// rot(4×4) ]… repose_present(1) [ shift(3×4) pivot(3×4) scale(4) ] ]… | vehicle_present(1) |
-    /// [ pos(3×4) rot(4×4) ]`. [`from_bytes`](Self::from_bytes) is its exact inverse.
+    /// rot(4×4) ]… repose_present(1) [ shift(3×4) pivot(3×4) scale(4) ] label_len(1) label… ]… |
+    /// vehicle_present(1) | [ pos(3×4) rot(4×4) ]`. [`from_bytes`](Self::from_bytes) is its
+    /// exact inverse.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.tick.to_le_bytes());
@@ -158,6 +170,9 @@ impl CrabArticulation {
                     out.extend_from_slice(&r.scale.to_le_bytes());
                 }
             }
+            let label = clamp_label(&crab.brain_label);
+            out.push(label.len() as u8);
+            out.extend_from_slice(label.as_bytes());
         }
         match &self.vehicle {
             None => out.push(0),
@@ -206,7 +221,15 @@ impl CrabArticulation {
                 }
                 _ => return Err(ArticulationDecodeError::BadFlag),
             };
-            crabs.push(CrabFrame { parts, repose });
+            let label_len = r.byte()? as usize;
+            let brain_label = std::str::from_utf8(r.slice(label_len)?)
+                .map_err(|_| ArticulationDecodeError::BadLabel)?
+                .to_string();
+            crabs.push(CrabFrame {
+                parts,
+                repose,
+                brain_label,
+            });
         }
         let vehicle = match r.byte()? {
             0 => None,
@@ -225,6 +248,21 @@ impl CrabArticulation {
             vehicle,
         })
     }
+}
+
+/// Bound a brain label to the wire's 1-byte length prefix, cutting on a char boundary. The
+/// formatter (`Policy::brain_label`) already keeps labels far shorter; this is the codec's own
+/// guarantee that `label.len() as u8` can't wrap regardless of what a caller hands it.
+fn clamp_label(label: &str) -> &str {
+    const MAX: usize = u8::MAX as usize;
+    if label.len() <= MAX {
+        return label;
+    }
+    let mut end = MAX;
+    while !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    &label[..end]
 }
 
 fn read_vec3(r: &mut Reader<'_>) -> Result<[f32; 3], ArticulationDecodeError> {
@@ -273,6 +311,20 @@ impl<'a> Reader<'a> {
         Ok(self.take::<1>()?[0])
     }
 
+    /// A runtime-length read (the label bytes) — same bounds discipline as [`Self::take`].
+    fn slice(&mut self, n: usize) -> Result<&'a [u8], ArticulationDecodeError> {
+        let end = self
+            .at
+            .checked_add(n)
+            .ok_or(ArticulationDecodeError::Truncated)?;
+        let slice = self
+            .buf
+            .get(self.at..end)
+            .ok_or(ArticulationDecodeError::Truncated)?;
+        self.at = end;
+        Ok(slice)
+    }
+
     fn is_empty(&self) -> bool {
         self.at == self.buf.len()
     }
@@ -304,6 +356,7 @@ mod tests {
                         pivot: [0.0, 1.0, 0.0],
                         scale: 8.0,
                     }),
+                    brain_label: "mlp512x3 @1a2b3c4d".to_string(),
                 },
                 // A second crab (rl#200 multi-brain) with a distinct pose and no repose yet,
                 // so the per-crab framing + optional repose are both exercised.
@@ -314,6 +367,9 @@ mod tests {
                         rot: [0.0, 1.0, 0.0, 0.0],
                     }],
                     repose: None,
+                    // Distinct per-crab labels, and a failure state on the wire — the
+                    // attribution channel is part of the format, not just the happy path.
+                    brain_label: "REFUSED: wrong rig".to_string(),
                 },
             ],
             vehicle: Some(VehiclePoseWire {
@@ -359,6 +415,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_and_oversize_labels_roundtrip_bounded() {
+        let mut a = sample();
+        a.crabs[1].brain_label = String::new();
+        // 300 bytes of 2-byte chars: the codec clamps to ≤255 on a char boundary (254 here)
+        // rather than wrapping the length prefix or splitting a char.
+        a.crabs[0].brain_label = "é".repeat(150);
+        let back = CrabArticulation::from_bytes(&a.to_bytes()).unwrap();
+        assert_eq!(back.crabs[1].brain_label, "");
+        assert_eq!(back.crabs[0].brain_label, "é".repeat(127));
+    }
+
+    #[test]
+    fn bad_label_utf8_is_rejected() {
+        let mut a = sample();
+        a.crabs[1].brain_label = "x".to_string();
+        let mut bytes = a.to_bytes();
+        // Corrupt the single label byte of the LAST crab: it sits right before the trailing
+        // vehicle block (present-flag 1 + pos 12 + rot 16).
+        let label_off = bytes.len() - (1 + 12 + 16) - 1;
+        assert_eq!(bytes[label_off], b'x');
+        bytes[label_off] = 0xFF;
+        assert_eq!(
+            CrabArticulation::from_bytes(&bytes),
+            Err(ArticulationDecodeError::BadLabel)
+        );
+    }
+
+    #[test]
     fn truncated_buffer_is_rejected() {
         let bytes = sample().to_bytes();
         assert_eq!(
@@ -392,10 +476,12 @@ mod tests {
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::BadFlag)
         );
-        // And the vehicle-present flag, after crab 0's repose block (flag + 3+3+1 f32s) and the
-        // whole of crab 1 (n_parts(4) + one part (29) + repose flag(1)).
+        // And the vehicle-present flag, after crab 0's repose block (flag + 3+3+1 f32s) + label
+        // (len byte + bytes) and the whole of crab 1 (n_parts(4) + one part (29) + repose
+        // flag(1) + its label).
+        let label = |i: usize| 1 + sample().crabs[i].brain_label.len();
         let mut bytes = sample().to_bytes();
-        bytes[flag_off + 1 + 7 * 4 + 4 + 29 + 1] = 2;
+        bytes[flag_off + 1 + 7 * 4 + label(0) + 4 + 29 + 1 + label(1)] = 2;
         assert_eq!(
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::BadFlag)
