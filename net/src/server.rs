@@ -450,13 +450,32 @@ impl Server {
         // Latest-wins pilot intent, but only off an ACCEPTED (fresh) message — a stale
         // re-delivery (seed_early overlap) must not regress the level state.
         if accepted {
-            match msg.pilot {
-                Some(intent) => {
-                    self.pilot_intents.insert(from, intent);
+            self.file_intent(from, msg.pilot);
+        }
+    }
+
+    /// Apply one player's freshly-arrived pilot intent to the LEVEL map — the ONE boarding
+    /// gate, shared by the remote path ([`Server::record_remote`]) and the host's own
+    /// ([`Server::advance`]): a player with NO craft boards only while its avatar is Alive
+    /// (the same rule the local E-cycle applies client-side — this is the authoritative
+    /// re-check, since a client's alive-view lags by transit); an already-piloting player
+    /// keeps its entry (kind cycles and stepping out are ungated, death mid-flight doesn't
+    /// eject). Gating at the INSERT makes `pilot_intents` the single truth of "who pilots" —
+    /// a not-alive player's boarding attempt is DROPPED, not parked to auto-board at respawn.
+    fn file_intent(&mut self, pid: PlayerId, pilot: Option<crate::lockstep::PilotIntent>) {
+        match pilot {
+            Some(intent) => {
+                let may_board = self.pilot_intents.contains_key(&pid)
+                    || self
+                        .sim
+                        .player(pid)
+                        .is_some_and(|p| p.status() == crate::sim::PlayerStatus::Alive);
+                if may_board {
+                    self.pilot_intents.insert(pid, intent);
                 }
-                None => {
-                    self.pilot_intents.remove(&from);
-                }
+            }
+            None => {
+                self.pilot_intents.remove(&pid);
             }
         }
     }
@@ -488,14 +507,7 @@ impl Server {
         // The host's own pilot intent (its message never streams), then the LEVEL-triggered
         // roster prune: any intent whose pid is not rostered at this tick is dropped, so a
         // departed pilot's craft can't outlive it — nor leak to a joiner that reuses the pid.
-        match local.pilot {
-            Some(intent) => {
-                self.pilot_intents.insert(self.me, intent);
-            }
-            None => {
-                self.pilot_intents.remove(&self.me);
-            }
-        }
+        self.file_intent(self.me, local.pilot);
         {
             let rostered = self.roster.at(tick);
             self.pilot_intents.retain(|pid, _| rostered.contains(pid));
@@ -686,9 +698,10 @@ impl Server {
         self.pilot_intents.remove(&pid);
     }
 
-    /// Every player's LATEST piloting intent (entry presence = piloting) — what the driver
-    /// files into the crab world's `VehicleControls` each tick, alive-gated at that seam.
-    /// Level state beside the deterministic input streams, roster-pruned per [`Server::advance`].
+    /// Every currently-piloting player's LATEST intent — the SINGLE truth of "who pilots":
+    /// boarding is alive-gated at the insert ([`Server::file_intent`]), departures are
+    /// roster-pruned per [`Server::advance`], so the driver mirrors this into the crab
+    /// world's `VehicleControls` verbatim.
     pub fn pilot_intents(&self) -> &BTreeMap<PlayerId, crate::lockstep::PilotIntent> {
         &self.pilot_intents
     }
@@ -841,6 +854,74 @@ mod tests {
         assert!(
             !s.pilot_intents().contains_key(&p1),
             "the joiner reusing the pid starts intent-free"
+        );
+    }
+
+    /// Boarding is alive-gated AT THE INSERT ([`Server::file_intent`] — the intent map is
+    /// the single truth of "who pilots"): a not-alive player's fresh intent is DROPPED
+    /// outright (no parked intent to auto-board at respawn), while an already-flying pilot
+    /// keeps its craft through death — only boarding is gated, matching the local E-cycle.
+    #[test]
+    fn boarding_is_alive_gated_at_the_intent_insert() {
+        use crab_world::vehicle::VehicleKind;
+        use crate::sim::{Player, PlayerStatus};
+        let p1 = PlayerId(1);
+        // Down p1 in the authoritative sim before serving (snapshot surgery — the round
+        // logic owns live transitions, so a test constructs the state through the seam).
+        let mut sim = Sim::new(42, &ids(2));
+        let mut snap = sim.core_snapshot();
+        let p = snap.players[&p1];
+        snap.players
+            .insert(p1, Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed));
+        sim.apply_core_snapshot(snap);
+        let mut s = Server::new(PlayerId(0), &ids(2), sim);
+
+        s.record_remote(
+            p1,
+            TickMsg {
+                pilot: Some(intent(VehicleKind::Plane)),
+                ..tickmsg(0, 0.0)
+            },
+        );
+        assert!(
+            !s.pilot_intents().contains_key(&p1),
+            "a downed player's boarding intent is dropped, not parked"
+        );
+
+        // Hand-file the craft as if boarded while alive, then verify death doesn't eject:
+        // a downed pilot's NEXT intent still updates its existing entry.
+        s.file_intent(p1, Some(intent(VehicleKind::Plane)));
+        assert!(!s.pilot_intents().contains_key(&p1), "file_intent applies the same gate");
+        // Board legitimately: revive, board, re-down, then keep flying.
+        let mut snap = s.sim().core_snapshot();
+        let p = snap.players[&p1];
+        snap.players
+            .insert(p1, Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Alive));
+        s.sim.apply_core_snapshot(snap);
+        s.record_remote(
+            p1,
+            TickMsg {
+                pilot: Some(intent(VehicleKind::Plane)),
+                ..tickmsg(1, 0.0)
+            },
+        );
+        assert!(s.pilot_intents().contains_key(&p1), "alive ⇒ boards");
+        let mut snap = s.sim().core_snapshot();
+        let p = snap.players[&p1];
+        snap.players
+            .insert(p1, Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed));
+        s.sim.apply_core_snapshot(snap);
+        s.record_remote(
+            p1,
+            TickMsg {
+                pilot: Some(intent(VehicleKind::Ship)),
+                ..tickmsg(2, 0.0)
+            },
+        );
+        assert_eq!(
+            s.pilot_intents()[&p1].kind,
+            VehicleKind::Ship,
+            "death mid-flight does not eject — the flying pilot's intent still applies"
         );
     }
 
