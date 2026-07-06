@@ -75,3 +75,78 @@ fn target_ball_at_from_env() -> Option<Vec3> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bot::BotSet;
+    use crate::bot::body::CrabCarapace;
+    use crate::bot::headless::{headless_app, tick};
+    use crate::bot::sensor::{CrabObservation, TARGET_SLOT};
+
+    /// Env 0's carapace transform, read straight off the world.
+    fn carapace(app: &mut App) -> Transform {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, With<CrabCarapace>>();
+        *q.single(app.world()).expect("carapace")
+    }
+
+    /// The target slots of env 0's serialized observation — exactly the floats
+    /// `policy_step` hands the network.
+    fn obs_target(app: &App) -> Vec3 {
+        let o = app.world().resource::<CrabObservation>().envs[0];
+        Vec3::new(o[TARGET_SLOT], o[TARGET_SLOT + 1], o[TARGET_SLOT + 2])
+    }
+
+    /// Pins the demo's target WIRE end to end: [`target_ball`] seeds/holds
+    /// [`CrabTargets`], Sense rotates the LIVE ball position into the carapace frame,
+    /// and the slots the policy reads TRACK a moved ball. This is the wire the rl#228
+    /// playtest put in question ("ignores ball location") — with it pinned, a
+    /// no-pursuit demo is attributable to the brain, never to a silently dead or
+    /// constant target input.
+    #[test]
+    fn demo_target_obs_tracks_moved_ball() {
+        let mut app = headless_app();
+        app.init_resource::<super::super::DemoRng>();
+        // The demo/render-video schedule for this system, minus rendering: after Sense,
+        // so it reads the post-physics state the observation consumed.
+        app.add_systems(FixedUpdate, target_ball.after(BotSet::Sense));
+
+        // Let target_ball seed a target and the un-driven crab settle to rest, so the
+        // carapace barely moves between a tick's Sense and its end-of-tick transform
+        // (the comparison below reads the transform after the tick).
+        tick(&mut app, 240);
+        let seeded = app
+            .world()
+            .resource::<CrabTargets>()
+            .get(0)
+            .expect("target_ball seeds env 0's target");
+        assert!(
+            seeded != Vec3::ZERO && obs_target(&app) != Vec3::ZERO,
+            "seeded target must reach the observation"
+        );
+
+        // Move the ball to two distinct world points through the same slot the demo
+        // writes; the obs the policy reads must follow each move, carapace-local.
+        let mut seen = Vec::new();
+        for p in [Vec3::new(6.0, 1.0, 0.0), Vec3::new(-4.0, 1.0, 5.0)] {
+            app.world_mut().resource_mut::<CrabTargets>().envs[0] = Some(p);
+            tick(&mut app, 1);
+            let c = carapace(&mut app);
+            let expected = c.rotation.inverse() * (p - c.translation);
+            let got = obs_target(&app);
+            assert!(
+                (got - expected).length() < 0.05,
+                "obs target {got} != carapace-local ball {expected} for world ball {p}"
+            );
+            seen.push(got);
+        }
+        assert!(
+            (seen[0] - seen[1]).length() > 1.0,
+            "obs must vary when the ball moves: {} vs {}",
+            seen[0],
+            seen[1]
+        );
+    }
+}
