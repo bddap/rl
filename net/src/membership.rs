@@ -1,53 +1,3 @@
-//! LAN match-formation barrier: agree on ONE participant set before anyone ticks.
-//!
-//! The hard requirement is the determinism invariant of [`crate::lockstep`]: every
-//! peer MUST freeze the byte-identical sorted participant set, or the deterministic
-//! sims assign different [`PlayerId`]s and desync. Best-effort discovery fails three
-//! ways: a stale/phantom endpoint lingering on the LAN gets pulled into the roster;
-//! racy discovery lets peers freeze divergent sets (A sees {A,B}, B sees {A,B,C});
-//! and a staggered launch leaves one peer mid-formation when another freezes. Any
-//! mismatched freeze stalls the lockstep forever on inputs from a "member" who isn't
-//! really there.
-//!
-//! The protocol is deliberately couch-scale-simple — a handful of peers on one LAN,
-//! not a matchmaking service — and splits into a pure, fully-tested core
-//! ([`Membership`], the agreement state machine) and a thin async driver
-//! ([`run_barrier`]) that does only I/O around it.
-//!
-//! ## Why it guarantees an identical frozen set
-//!
-//! 1. **Liveness kills phantoms.** A peer counts toward the roster only while we are
-//!    receiving recent [`Beat`]s from it (a heartbeat carried on the barrier channel
-//!    over its live QUIC link). A crashed/stale endpoint sends none, so it expires
-//!    ([`MEMBER_TIMEOUT`]) and is never admitted — even if its mDNS record lingers.
-//! 2. **Gossip to a fixpoint handles races + stagger.** Every peer periodically
-//!    advertises its *full* view — its sorted live-member set — and merges any ids it
-//!    hears from others (transitive: a late joiner B that only A saw is relayed by A
-//!    to C). Within the join window the set only grows, and every member echoes the
-//!    whole set, so all peers' views converge to the same union.
-//! 3. **CONTINUOUS unanimous agreement on one hash is the close condition.** Each
-//!    advertisement carries a [`roster_hash`] of the sender's set. The agreement
-//!    predicate is: enough players are present (`live >= expect`) AND *every* live
-//!    member is advertising the SAME hash as our own. A peer closes the barrier only
-//!    when that predicate has held **continuously** for [`STABLE_FOR`] — a single
-//!    beat's worth of agreement does NOT count; any peer's hash drifting away, or any
-//!    membership change, rewinds the timer. That continuity is what makes the freeze
-//!    identical: A cannot close on {A,B} while B closes on {A,B,C}, because closing
-//!    requires B to have been echoing hash({A,B}) for the whole window — which it will
-//!    not do while it knows about C. So either everyone closes on the same set, or
-//!    nobody closes. (Sampling agreement only at the close instant would be a bug: a
-//!    one-beat flicker of a stale cached hash could let one peer close a set another
-//!    abandons. The continuous timer closes that hole.)
-//! 4. **Reject, never silently freeze a partial set.** If the overall [`JOIN_WINDOW`]
-//!    elapses without that sustained agreement (a flapping peer, an asymmetric link, or
-//!    fewer than `expect` players ever showing), the barrier fails with an error the
-//!    caller surfaces ("couldn't form a match — retry") rather than guessing a roster.
-//!    A wrong guess is the exact failure this module exists to prevent. The `expect`
-//!    floor also stops a peer from freezing a lone {self} match before discovery has
-//!    even found the others (LAN mDNS can take a second or two).
-//!
-//! The frozen set is then handed to [`crate::net_loop`], which assigns
-//! [`PlayerId`]s by sorted endpoint id over a set proven identical on every peer.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -57,51 +7,18 @@ use iroh::EndpointId;
 
 use crab_world::fnv::Fnv;
 
-/// How long a member may go without a [`Beat`] before we drop it from our live set.
-/// Comfortably longer than [`BEAT_EVERY`] so a healthy peer is never flapped out by a
-/// single late heartbeat, short enough that a crashed/stale endpoint clears within the
-/// join window and can't poison the roster.
 pub const MEMBER_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How often each peer broadcasts its view ([`Beat`] + roster). Several beats fit
-/// inside [`MEMBER_TIMEOUT`], so liveness survives isolated drops, and inside
-/// [`STABLE_FOR`], so agreement is re-confirmed continuously while we wait to close.
 pub const BEAT_EVERY: Duration = Duration::from_millis(250);
 
-/// The agreement predicate (enough players present AND every live member advertising
-/// our exact roster hash) must hold CONTINUOUSLY for this long before we close the
-/// barrier. This is the settle that absorbs a staggered launch: a peer joining 1–2 s
-/// late perturbs the set, breaking the predicate and rewinding the timer, so no one
-/// closes until the dust settles and all views match. Long enough to outlast normal
-/// mDNS discovery jitter on a LAN. Must stay comfortably below [`MEMBER_TIMEOUT`] so
-/// that once everyone agrees, every peer finishes closing before the first peer to
-/// close (which then goes quiet) could be expired by a straggler — the margin that
-/// keeps close-time skew from flipping a late closer's set.
 pub const STABLE_FOR: Duration = Duration::from_millis(1500);
 
-/// Hard cap on total formation time. If sustained agreement is not reached within this,
-/// the barrier FAILS (see module docs) rather than freezing a divergent/partial set.
-/// Generous: real LAN formation settles in 2–3 s; this only trips on a genuinely sick
-/// group (a flapping peer, an asymmetric link, or too few players showing up).
 pub const JOIN_WINDOW: Duration = Duration::from_secs(20);
 
-/// Hard cap on the TOTAL roster (us + peers), so a peer flooding a [`Beat`] with bogus
-/// relayed ids can't inflate our set without bound or push our own advertised beat past
-/// the wire cap ([`MAX_BEAT_MEMBERS`]). [`PlayerId`] is a `u8`, so the rest of the stack
-/// tops out at exactly 256 total; couch co-op is a handful. At the cap we stop ADMITTING
-/// new ids (existing members and their direct beats are unaffected) — refusing further
-/// growth only bounds memory, it can't lose a real match.
 pub const MAX_MEMBERS: usize = u8::MAX as usize + 1;
 
-/// What a peer broadcasts each [`BEAT_EVERY`] on the barrier channel: a heartbeat that
-/// proves it is alive plus its current view of the membership, so peers converge to a
-/// common set (see module docs). Self-describing — `members` always includes the
-/// sender — so a receiver needs nothing but this frame to merge a sender's view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Beat {
-    /// The sender's full current live-member set, sorted by endpoint-id bytes. Includes
-    /// the sender. The receiver unions these ids into its own view (transitive gossip)
-    /// and reads [`Beat::roster_hash`] to check agreement.
     pub members: Vec<EndpointId>,
     /// The host's synchronized-start command: `true` once the host has clicked Start,
     /// commanding the round to begin on the roster carried in THIS same beat. A joiner
@@ -109,39 +26,16 @@ pub struct Beat {
     /// so host and joiners freeze the byte-identical set the GO names. Always `false`
     /// outside the host-triggered menu path.
     pub start: bool,
-    /// The sender's crab-MODEL-asset digest, `0` for no resolvable model — the giant
-    /// crabs' rapier colliders are derived from this asset
-    /// ([`crab_world::mesh_fallback::constructed_body_digest`]), so two peers with different
-    /// crab models build different colliders and render different Sallys. Deliberately NOT
-    /// folded into [`Beat::roster_hash`]: it is a capability advertisement, not membership —
-    /// a mismatch refuses to arm the NN crabs, never breaks match formation. (The old
-    /// sibling weights digest is GONE — rl#200 increment 6: clients run no inference, so a
-    /// weights advertisement guarded nothing.)
     pub asset_digest: u64,
-    /// The sender's NN-crab count: the brain-binding count it would SERVE if it hosts (and
-    /// the render-rig count it spawns as a client); `0` = no crab stack at all (the headless
-    /// `game net` driver). A capability advertisement like `asset_digest`, feeding
-    /// [`Membership::sync_verdict`]'s count gate (rl#200): a rendering peer whose count
-    /// differs from the HOST's would show the wrong number of crabs — invisible lethal ones
-    /// or frozen ghosts — so the round refuses to arm instead.
     pub crab_count: u8,
 }
 
 impl Beat {
-    /// The agreement token: a hash of the member set. Two peers advertising the same token
-    /// have the identical participant set (the freeze precondition). FNV-1a over the raw
-    /// 32-byte ids: this is an agreement check among cooperating LAN peers, not an
-    /// adversarial digest, so a fast non-cryptographic hash is the right tool (a collision
-    /// would at worst admit a wrong freeze, which then surfaces as a roster/id-assignment
-    /// disagreement the moment the round forms).
     pub fn roster_hash(&self) -> u64 {
         roster_hash(&self.members)
     }
 }
 
-/// Hash a participant set for the agreement check. Canonicalizes (sort + dedup) first
-/// so the result is a pure function of the SET, not the order ids were added — both
-/// the advertiser and the checker must get the same number for the same membership.
 pub fn roster_hash(ids: &[EndpointId]) -> u64 {
     let mut sorted: Vec<&EndpointId> = ids.iter().collect();
     sorted.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
@@ -153,12 +47,6 @@ pub fn roster_hash(ids: &[EndpointId]) -> u64 {
     h.finish()
 }
 
-/// THE "lowest endpoint id is the host" rule — the single spelling of how a roster picks the
-/// peer that runs the authoritative server. [`crate::formation::assign_player_ids`]'s sorted
-/// assignment hands that same peer `PlayerId(0)` (cross-locked by a test there), so "host",
-/// "server", and "PlayerId(0)" all name this one pick. Every peer computes the same answer
-/// from the same set, so the star agrees on its center with no negotiation. Panics on an
-/// empty roster — every roster contains at least the caller.
 pub fn host_of(roster: &[EndpointId]) -> EndpointId {
     *roster
         .iter()
@@ -166,62 +54,19 @@ pub fn host_of(roster: &[EndpointId]) -> EndpointId {
         .expect("a roster always contains at least us")
 }
 
-/// The agreement state machine: who is currently live, what each peer is advertising,
-/// and whether the agreement predicate has held long enough to close on an identical
-/// set (see the module docs for why the CONTINUOUS hold is load-bearing). Pure and
-/// time-injected (every mutator takes `now`) so the whole protocol is unit-testable
-/// with a fake clock and no network — the async driver ([`run_barrier`]) only feeds it
-/// [`Membership::on_beat`] events and reads [`Membership::poll`].
-///
-/// Membership during the join window grows by admission and shrinks by expiry: a member
-/// that stops beating directly EXPIRES ([`MEMBER_TIMEOUT`]) — the phantom-endpoint
-/// eviction.
 pub struct Membership {
     me: EndpointId,
-    /// How many participants (incl. us) must be present before we may close. Stops a
-    /// peer from freezing a lone `{self}` match before LAN discovery has even found the
-    /// others. The caller's expected player count; a too-low real turnout times out
-    /// ([`Status::Failed`]) instead of forming a short match.
     expect: usize,
-    /// Live peers (excludes `me`): endpoint id → its view. A peer is in the match iff it
-    /// is here AND not expired. `me` is always a member implicitly (see
-    /// [`Membership::live_set`]).
     peers: BTreeMap<EndpointId, PeerView>,
-    /// Endpoint ids we recently EXPIRED, with the expiry time. A *relay* may not
-    /// re-admit an id while it sits here ([`MEMBER_TIMEOUT`] of quarantine); only the
-    /// peer's OWN direct beat clears it (a peer that genuinely came back speaks for
-    /// itself). This kills the phantom ping-pong: without it, two peers expiring a
-    /// once-seen dead endpoint at slightly different moments would relay it back and
-    /// forth, each re-admission granting a fresh lease + rewinding the agreement timer,
-    /// so the barrier never settles and spuriously fails.
     tombstones: BTreeMap<EndpointId, Instant>,
-    /// When the agreement predicate (see [`Membership::poll`]) most recently became true
-    /// AND on which roster hash, or `None` if it is currently false. Keying on the hash
-    /// (not just a bool) means *any* change to our agreed set rewinds the timer — even
-    /// the (impossible-on-a-real-LAN but cheap-to-rule-out) case where every peer's set
-    /// flips S→S′ in the same poll with no peer ever observing disagreement. Closing
-    /// requires `Some((t, h))` with `h == my_hash` and `now - t >= STABLE_FOR`. Maintained
-    /// only in `poll`.
     agreed_since: Option<(Instant, u64)>,
-    /// When formation began, for the [`JOIN_WINDOW`] hard deadline.
     started: Instant,
     /// How the barrier closes — see [`LobbyMode`]. The roster a peer freezes is the same
     /// `live_set` in every mode (only the close *moment* differs), so determinism is
     /// untouched.
     lobby: LobbyMode,
-    /// Whether we've received a direct [`Beat`] with `start` set from a peer whose roster
-    /// hash equals our CURRENT one — the host's GO landing on a roster we agree with.
-    /// Recomputed each [`Membership::poll`] from peer views, so it can never latch on a
-    /// stale roster: a GO seen while our sets disagreed does not close us, and a set change
-    /// after a GO re-gates on the new hash. The joiner's sole close trigger in the lobby.
     host_go_on_my_roster: bool,
-    /// OUR crab-model-asset digest, `0` (the default) for no resolvable model — set via
-    /// [`Membership::with_asset_digest`]. Advertised in every [`Membership::beat`] and the
-    /// basis of [`Membership::sync_verdict`].
     local_asset_digest: u64,
-    /// OUR NN-crab count (binding/rig count; `0` = no crab stack, the headless driver) — set
-    /// via [`Membership::with_crab_count`]. Advertised in every beat; the count half of
-    /// [`Membership::sync_verdict`].
     local_crab_count: u8,
 }
 
@@ -230,88 +75,38 @@ pub struct Membership {
 /// no `starting` to set).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LobbyMode {
-    /// The default barrier: close on [`STABLE_FOR`] continuous agreement, fail at
-    /// [`JOIN_WINDOW`]. Used by the headless `net` driver and the scripted entrypoints.
     Off,
-    /// Host of an interactive lobby: `started` flips true on the Start click
-    /// ([`Membership::set_starting`]); while true the host advertises the `start` GO and
-    /// closes once its own agreement predicate holds. Open-ended (no [`JOIN_WINDOW`] fail).
     Host { started: bool },
-    /// Joiner in an interactive lobby: closes only on the host's GO landing on a matching
-    /// roster (`host_go_on_my_roster`). Has no way to command a start — that's the point.
     Joiner,
 }
 
-/// Our latest knowledge of one peer. Liveness comes from `last_direct` (its OWN beats —
-/// relays don't refresh it, the phantom-eviction mechanism). `advertised` is the roster
-/// hash it last claimed, or `None` if we've only heard of it via a relay and not yet
-/// directly: a `None` can never equal our roster hash, so an unheard peer honestly
-/// blocks the close until it speaks for itself (no sentinel value that a real hash could
-/// collide with — the make-illegal-states-unrepresentable choice).
 #[derive(Debug, Clone, Copy)]
 struct PeerView {
-    /// Wall-clock of the last DIRECT beat from this peer. A relay of its id by another
-    /// peer does NOT bump this.
     last_direct: Instant,
-    /// The roster hash this peer last advertised in its own beat, or `None` if not yet
-    /// heard directly (gossip-admitted only).
     advertised: Option<u64>,
-    /// Whether this peer's most recent DIRECT beat carried the host's `start` GO.
-    /// Paired with `advertised` so the close check requires the GO and a matching roster
-    /// hash *from the same beat* — a host that commanded start on roster R can't close a
-    /// joiner that's on a different roster. A relay never sets this (only a direct beat).
     started: bool,
-    /// The crab-model-asset digest this peer last advertised in its OWN direct beat, or
-    /// `None` if heard only via relay. Like `advertised`, `None` counts as unverified, so
-    /// a peer not yet heard directly blocks the asset gate until it speaks for itself.
     asset_digest: Option<u64>,
-    /// The NN-crab count this peer last advertised in its OWN direct beat, or `None` if
-    /// heard only via relay. Read when this peer is the HOST (the count gate is host-keyed —
-    /// clients render what the host serves); `None` counts as unverified.
     crab_count: Option<u8>,
 }
 
-/// The barrier's verdict on each [`Membership::poll`]: keep waiting, freeze this exact
-/// set, or give up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
-    /// Not yet agreed; keep beating and merging. Carries the current live set size for
-    /// logging/UX (a lobby can show "2 players, waiting…").
     Forming { live: usize },
-    /// The agreement predicate held continuously for [`STABLE_FOR`]. Freeze EXACTLY
-    /// these ids (sorted, includes us). Every peer that reaches this state computed the
-    /// identical roster — that is the guarantee.
     Agreed { roster: Vec<EndpointId> },
-    /// [`JOIN_WINDOW`] elapsed without sustained agreement. The caller must surface this
-    /// and retry rather than freeze a guessed set.
     Failed,
 }
 
-/// Which side of an interactive lobby a peer is — passed to
-/// [`Membership::host_triggered`] so the barrier knows whether it may command the start. The
-/// boot menu's Host button is [`Role::Host`], Join is [`Role::Joiner`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    /// The host: commands the synchronized start ([`Membership::set_starting`]).
     Host,
-    /// A joiner: waits for the host's GO; cannot command a start.
     Joiner,
 }
 
 impl Membership {
-    /// Begin formation. `me` is our own endpoint id (always part of the set); `expect`
-    /// is the minimum participant count (incl. us) required before closing — pass the
-    /// caller's expected player count, or 1 to allow a deliberate solo-over-network run.
-    ///
-    /// `expect` MUST be the same on every peer. It's a floor on the *agreed* set, so a
-    /// mismatch is the one way two peers could diverge: a set of size N satisfies the
-    /// floor for a peer expecting ≤N but not one expecting >N, so the first could close
-    /// while the second times out. Every caller passes the same shared launch count, so
-    /// this holds; it is a launch invariant, not something negotiated on the wire.
     pub fn new(me: EndpointId, expect: usize, now: Instant) -> Self {
         Self {
             me,
-            expect: expect.max(1), // us alone is the floor; 0 would be nonsensical
+            expect: expect.max(1),
             peers: BTreeMap::new(),
             tombstones: BTreeMap::new(),
             agreed_since: None,
@@ -323,16 +118,11 @@ impl Membership {
         }
     }
 
-    /// Set OUR crab-model-asset digest. Builder form because the digest is a launch-time
-    /// constant — the installed crab model can't change mid-formation. `0` (the default)
-    /// means "no usable asset"; it never counts as synced.
     pub fn with_asset_digest(mut self, digest: u64) -> Self {
         self.local_asset_digest = digest;
         self
     }
 
-    /// Set OUR NN-crab count (binding/rig count; `0` = no crab stack). Same launch-time
-    /// builder form as [`Membership::with_asset_digest`].
     pub fn with_crab_count(mut self, count: u8) -> Self {
         self.local_crab_count = count;
         self
@@ -355,43 +145,17 @@ impl Membership {
         }
     }
 
-    /// Host: command the round to start NOW (the boot menu's Start click). The host then
-    /// advertises the GO in its [`Beat`] and closes the barrier as soon as its agreement
-    /// predicate holds; joiners close when they receive that GO on a matching roster.
-    /// Idempotent, and structurally a no-op for anything but a [`LobbyMode::Host`] — a joiner
-    /// or a timer barrier has no `started` to set, so "only the host commands the start" is
-    /// the type's guarantee, not an external one.
     pub fn set_starting(&mut self) {
         if let LobbyMode::Host { started } = &mut self.lobby {
             *started = true;
         }
     }
 
-    /// Whether admitting one more peer would keep the TOTAL roster (peers + us) within
-    /// [`MAX_MEMBERS`]. Bounds our own advertised beat to ≤ 256 ids so honest peers can
-    /// always decode it (the off-by-one that a bare `peers.len() < MAX_MEMBERS` would
-    /// miss: that allows 256 peers + us = 257, one past the wire/`PlayerId` ceiling).
     fn has_room_for_one_more(&self) -> bool {
         self.peers.len() + 1 < MAX_MEMBERS
     }
 
-    /// Record a [`Beat`] received from `from` (the QUIC-authenticated sender — never a
-    /// value read from the body, same trust rule as the rest of the netcode).
-    ///
-    /// Liveness comes ONLY from a peer's OWN direct beat: this refreshes `from`'s
-    /// `last_direct` and advertised hash, and clears any tombstone on it (it's genuinely
-    /// back). The members `from` *relays* are merely ADMITTED if new and not tombstoned
-    /// (so an id only one peer can reach propagates to everyone, converging the views) —
-    /// a relay does NOT refresh an already-known peer's liveness, nor resurrect a
-    /// tombstoned one. That split is what lets a phantom expire and stay gone: a dead
-    /// endpoint others still list is relayed to us, but since it never beats *directly*
-    /// again its `last_direct` goes stale, [`Membership::poll`] expires it, and the
-    /// tombstone keeps relays from re-admitting it. (A peer we can only ever hear via
-    /// relay, never directly, will likewise expire — correct, since we couldn't exchange
-    /// lockstep inputs with an unreachable peer, so it must not be frozen into the match.)
     pub fn on_beat(&mut self, from: EndpointId, beat: &Beat, now: Instant) {
-        // The sender's OWN direct beat: refresh liveness + advertised hash, and lift any
-        // quarantine (a genuinely-returned peer speaks for itself).
         if from != self.me {
             self.tombstones.remove(&from);
             if self.peers.contains_key(&from) || self.has_room_for_one_more() {
@@ -404,10 +168,7 @@ impl Membership {
                 });
                 view.last_direct = now;
                 view.advertised = Some(beat.roster_hash());
-                // Latch the host's GO from THIS direct beat; paired with `advertised` so the
-                // joiner close requires both the GO and a matching roster from one beat.
                 view.started = beat.start;
-                // The capability fields, like `advertised`/`started`, are set only by a direct beat.
                 view.asset_digest = Some(beat.asset_digest);
                 view.crab_count = Some(beat.crab_count);
             }
@@ -435,10 +196,6 @@ impl Membership {
         }
     }
 
-    /// Our current full live set (us + every non-expired peer), sorted by id bytes.
-    /// This is exactly what we advertise in our own [`Beat`] and what we freeze on
-    /// agreement, so advertiser and freezer can't drift. (Read-only; expiry happens in
-    /// [`Membership::poll`], so call `poll` once per round before relying on this.)
     pub fn live_set(&self) -> Vec<EndpointId> {
         let mut ids: Vec<EndpointId> = self.peers.keys().copied().collect();
         ids.push(self.me);
@@ -447,10 +204,6 @@ impl Membership {
         ids
     }
 
-    /// The [`Beat`] to broadcast this round: our full live set and (host only, once
-    /// [`Membership::set_starting`] has fired) the `start` GO commanding the round to begin on
-    /// that set. Built from [`Membership::live_set`] so what we advertise is exactly what we'd
-    /// freeze; `start` rides the same beat so the GO and the roster it commands are inseparable.
     pub fn beat(&self) -> Beat {
         Beat {
             members: self.live_set(),
@@ -460,29 +213,6 @@ impl Membership {
         }
     }
 
-    /// The shared-asset guard's verdict, the ONE value the formation carries to the arm
-    /// sites ([`crate::SyncVerdict`]).
-    ///
-    /// `assets` is peer-symmetric: true only when we have a real crab-model asset
-    /// ourselves (non-zero digest) AND every live peer's last DIRECT beat carried that
-    /// exact digest. Every peer builds its rendered crabs from this asset, so a
-    /// mismatch is a real client-side divergence even under host-auth. A `None`
-    /// (relay-only, never heard directly) or zero digest fails.
-    ///
-    /// (There is no brain/weights half — rl#200 increment 6 deleted that stale all-peers
-    /// gate; see [`crate::SyncVerdict`] for why it guarded nothing under host-authority.)
-    ///
-    /// `crabs` is HOST-keyed (rl#200): clients render exactly what the host serves, so what
-    /// must hold is "the host serves ≥1 NN crab (a `0` host is the headless driver — a
-    /// rest-pose match, the old `HostNotArmed` class) AND my own rig count matches it (or I
-    /// render nothing — count 0)". A host heard only via relay (`None`) is unverified and
-    /// blocks, like the roster rule.
-    ///
-    /// This is an OUTPUT, never a close gate: a failed verdict still FORMS the match,
-    /// but the round can't arm the NN crabs and — with no integer fallback — the windowed
-    /// client REFUSES it loudly rather than playing a fake crab
-    /// ([`crate::may_arm_external_crab`]). Call after [`Membership::poll`] (which
-    /// expires the dead) so the live set is current.
     pub fn sync_verdict(&self) -> crate::SyncVerdict {
         let host = host_of(&self.live_set());
         let host_crabs = if host == self.me {
@@ -502,17 +232,7 @@ impl Membership {
         }
     }
 
-    /// Advance the clock and return the verdict — the SINGLE per-round entry point.
-    /// Folds expiry + agreement-timer maintenance + the verdict into one call so a
-    /// caller can't read a verdict over stale liveness. Call once per beat interval.
-    ///
-    /// The agreement predicate is: at least `expect` participants are live AND every
-    /// live peer is advertising our exact roster hash (a peer not heard directly has
-    /// `advertised == None ≠ Some(my_hash)`, so it blocks). Closing requires the
-    /// predicate to have held *continuously* for [`STABLE_FOR`] (see module docs).
     pub fn poll(&mut self, now: Instant) -> Status {
-        // Expire peers silent past MEMBER_TIMEOUT and tombstone them so a relay can't
-        // immediately re-admit. Also prune tombstones older than the quarantine window.
         let expired: Vec<EndpointId> = self
             .peers
             .iter()
@@ -526,7 +246,6 @@ impl Membership {
         self.tombstones
             .retain(|_, &mut t| now.duration_since(t) < MEMBER_TIMEOUT);
 
-        // Evaluate the agreement predicate over the current live set.
         let live = self.live_set();
         let my_hash = roster_hash(&live);
         let enough = live.len() >= self.expect;
@@ -542,19 +261,11 @@ impl Membership {
         // Maintain the continuous-agreement timer — see `agreed_since` for why it is
         // keyed on the hash, not just a bool.
         self.agreed_since = match (agreed_now, self.agreed_since) {
-            (true, Some((t, h))) if h == my_hash => Some((t, h)), // same set, keep holding
-            (true, _) => Some((now, my_hash)),                    // newly agreed (or new set)
-            (false, _) => None,                                   // predicate broke → reset
+            (true, Some((t, h))) if h == my_hash => Some((t, h)),
+            (true, _) => Some((now, my_hash)),
+            (false, _) => None,
         };
 
-        // EVERY mode requires the agreement predicate to have held CONTINUOUSLY for
-        // [`STABLE_FOR`] before closing — the settle is load-bearing for the lobby modes
-        // too, NOT just the timer one (a peer that joins right as the host clicks Start
-        // can't be frozen out mid-join). The mode only adds an EXTRA gate on top: Host
-        // also requires the Start click, Joiner the host's GO on its matching roster,
-        // Off nothing. Only the lobby modes skip the [`JOIN_WINDOW`] fail (a lobby is
-        // open-ended, the user cancels); every mode freezes the IDENTICAL `live` set,
-        // so determinism is untouched.
         let held = self
             .agreed_since
             .is_some_and(|(since, _)| now.duration_since(since) >= STABLE_FOR);
@@ -576,11 +287,6 @@ impl Membership {
     }
 }
 
-/// Encode a [`Beat`] for the wire:
-/// `[start:u8][count:u16 LE][asset_digest:u64 LE][crab_count:u8][id:32]*count`,
-/// the id list sorted+deduped. Fixed 32-byte ids (an [`EndpointId`] is a 32-byte public
-/// key) so there is no per-id length. The member count is bounded on decode
-/// ([`MAX_BEAT_MEMBERS`]) so a hostile/garbled frame can't trigger a huge allocation.
 pub fn encode_beat(beat: &Beat) -> Vec<u8> {
     let canon = |ids: &[EndpointId]| -> Vec<EndpointId> {
         let mut v = ids.to_vec();
@@ -600,14 +306,8 @@ pub fn encode_beat(beat: &Beat) -> Vec<u8> {
     out
 }
 
-/// Upper bound on members in a decoded [`Beat`], so a bad length can't allocate without
-/// bound. Couch co-op is a handful of peers; [`PlayerId`] is a `u8` so 256 is the
-/// absolute ceiling the rest of the stack accepts anyway.
 const MAX_BEAT_MEMBERS: usize = 256;
 
-/// Decode a [`Beat`] produced by [`encode_beat`]. Rejects a truncated body or a member count
-/// past [`MAX_BEAT_MEMBERS`] (a malformed/hostile frame) rather than panicking or
-/// over-allocating.
 pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     anyhow::ensure!(
         body.len() >= 12,
@@ -647,11 +347,6 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
 mod tests {
     use super::*;
 
-    /// Deterministic distinct endpoint ids for tests. A raw byte pattern isn't a valid
-    /// ed25519 public key, so derive each from a distinct secret key seed (`from_bytes`
-    /// of a secret is infallible). Distinct seeds → distinct, valid public keys, which
-    /// is all the membership logic cares about (their byte order is arbitrary but
-    /// stable, which is exactly the real-world property).
     fn eid(i: u8) -> EndpointId {
         iroh::SecretKey::from_bytes(&[i; 32]).public()
     }
@@ -660,8 +355,6 @@ mod tests {
         base + Duration::from_millis(ms)
     }
 
-    /// A plain (non-start) [`Beat`] for the given members — the default heartbeat every
-    /// peer sends until a host commands the start.
     fn bt(members: Vec<EndpointId>) -> Beat {
         Beat {
             members,
@@ -671,9 +364,6 @@ mod tests {
         }
     }
 
-    /// The expected canonical (sorted) form of a set, for comparing against a roster
-    /// the code returns. Real public keys sort by their key bytes in an order unrelated
-    /// to the seed `i`, so tests must compare against this, not a hand-ordered literal.
     fn sorted(ids: &[EndpointId]) -> Vec<EndpointId> {
         let mut v = ids.to_vec();
         v.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
@@ -684,8 +374,6 @@ mod tests {
     fn beat_wire_roundtrips_and_is_order_independent() {
         let a = bt(vec![eid(3), eid(1), eid(2)]);
         let b = bt(vec![eid(1), eid(2), eid(3)]);
-        // Same set in any order → identical bytes and identical hash (the agreement
-        // token must not depend on insertion order).
         assert_eq!(encode_beat(&a), encode_beat(&b));
         assert_eq!(a.roster_hash(), b.roster_hash());
         let decoded = decode_beat(&encode_beat(&a)).unwrap();
@@ -699,25 +387,19 @@ mod tests {
             decode_beat(&[0]).is_err(),
             "too short for start+count+digests"
         );
-        // Valid header (start + count=5 + asset digest + crab count) but no member bodies.
         let mut truncated = vec![0u8];
         truncated.extend_from_slice(&5u16.to_le_bytes());
-        truncated.extend_from_slice(&0u64.to_le_bytes()); // asset digest
-        truncated.push(0); // crab count
+        truncated.extend_from_slice(&0u64.to_le_bytes());
+        truncated.push(0);
         assert!(decode_beat(&truncated).is_err(), "truncated body");
-        // count past the cap (start byte + bogus count + digest + crab count + filler).
         let mut huge = vec![0u8];
         huge.extend_from_slice(&(300u16).to_le_bytes());
-        huge.extend_from_slice(&0u64.to_le_bytes()); // asset digest
-        huge.push(0); // crab count
+        huge.extend_from_slice(&0u64.to_le_bytes());
+        huge.push(0);
         huge.resize(12 + 32 * 300, 0);
         assert!(decode_beat(&huge).is_err(), "over-large count rejected");
     }
 
-    /// The host's start GO survives the wire as a distinct field and does NOT change the
-    /// roster hash: a `start` beat and a plain beat over the SAME members hash
-    /// identically (so a host commanding the start can't accidentally fork the agreed set),
-    /// but the decoded `start` flag faithfully reflects which was sent.
     #[test]
     fn start_flag_roundtrips_without_perturbing_the_roster_hash() {
         let members = vec![eid(1), eid(2)];
@@ -746,11 +428,7 @@ mod tests {
         );
     }
 
-    // ── Asset-digest handshake (the shared-collider-asset guard) ──────────────────────
-    // See `Beat::asset_digest`. (The weights-digest handshake it was once a sibling of is
-    // deleted — rl#200 increment 6.)
 
-    /// A heartbeat carrying a crab-asset digest, for the synced-asset tests.
     fn bt_ad(members: Vec<EndpointId>, asset_digest: u64) -> Beat {
         Beat {
             members,
@@ -762,9 +440,6 @@ mod tests {
 
     #[test]
     fn asset_digest_roundtrips_on_the_wire() {
-        // The digest survives encode→decode and (like `start`) does NOT perturb the
-        // roster hash: two beats with the same members but different assets still agree on
-        // the set.
         let members = vec![eid(1), eid(2)];
         let a = bt_ad(members.clone(), 0xC0FF_EE00_1234_5678);
         let b = bt_ad(members, 0x9876_5432_10AB_CDEF);
@@ -779,9 +454,6 @@ mod tests {
 
     #[test]
     fn crab_count_gate_is_host_keyed() {
-        // rl#200: the count half of the verdict — the HOST must serve ≥1 NN crab and a
-        // RENDERING peer's own count must match it; a headless peer (count 0) never blocks
-        // itself. Beats carry the count on the wire.
         let beat_c = |members: Vec<EndpointId>, crab_count: u8| Beat {
             members,
             start: false,
@@ -796,33 +468,26 @@ mod tests {
         ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         let (host, client) = (ids[0], ids[1]);
 
-        // Rendering client matching the host's count → gate passes.
         let mut a = Membership::new(client, 2, t0).with_crab_count(2);
         a.on_beat(host, &beat_c(vec![host, client], 2), t0);
         a.poll(t0);
         assert!(a.sync_verdict().crabs, "matching host count passes");
 
-        // Host serves a DIFFERENT count than this client renders → refused.
         let mut b = Membership::new(client, 2, t0).with_crab_count(1);
         b.on_beat(host, &beat_c(vec![host, client], 2), t0);
         b.poll(t0);
         assert!(!b.sync_verdict().crabs, "a count mismatch must not arm");
 
-        // Host advertises count 0 (a headless driver hosting a rest-pose match) → refused,
-        // restoring the old HostNotArmed protection.
         let mut c = Membership::new(client, 2, t0).with_crab_count(1);
         c.on_beat(host, &beat_c(vec![host, client], 0), t0);
         c.poll(t0);
         assert!(!c.sync_verdict().crabs, "a crab-less host must not arm");
 
-        // We ARE the host: our own count is authoritative; a client's count gates nothing
-        // on OUR side (the client refuses on ITS side).
         let mut d = Membership::new(host, 2, t0).with_crab_count(2);
         d.on_beat(client, &beat_c(vec![host, client], 1), t0);
         d.poll(t0);
         assert!(d.sync_verdict().crabs, "the host self-passes on its own count");
 
-        // A relay-only host (never heard directly) is unverified → blocked.
         let mut ids3 = [eid(1), eid(2), eid(3)];
         ids3.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         let (h3, mid, top) = (ids3[0], ids3[1], ids3[2]);
@@ -838,7 +503,6 @@ mod tests {
         let (ida, idb) = (eid(1), eid(2));
         const ASSET: u64 = 0x5A11_0000_C0DE_4321;
 
-        // Matched, non-zero assets on both peers → synced.
         let mut a = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
         a.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
         a.poll(t0);
@@ -847,7 +511,6 @@ mod tests {
             "equal non-zero asset digests must be synced"
         );
 
-        // A peer on a DIFFERENT crab model → not synced (the desync the guard exists for).
         let mut b = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
         b.on_beat(idb, &bt_ad(vec![ida, idb], ASSET ^ 0xFF), t0);
         b.poll(t0);
@@ -856,7 +519,6 @@ mod tests {
             "a differing peer asset digest must not be synced"
         );
 
-        // A peer advertising a ZERO digest (no resolvable model) → not synced.
         let mut c = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
         c.on_beat(idb, &bt_ad(vec![ida, idb], 0), t0);
         c.poll(t0);
@@ -865,8 +527,7 @@ mod tests {
             "a zero peer asset digest must not be synced"
         );
 
-        // OUR OWN digest zero (no model locally) → never synced, even if a peer has one.
-        let mut d = Membership::new(ida, 2, t0); // local_asset_digest defaults to 0
+        let mut d = Membership::new(ida, 2, t0);
         d.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
         d.poll(t0);
         assert!(
@@ -877,9 +538,6 @@ mod tests {
 
     #[test]
     fn relay_only_peer_blocks_the_asset_gate() {
-        // A peer's digest counts only from its OWN direct beat: a peer known only via
-        // another peer's relay has `asset_digest: None` — an unverifiable model, blocked
-        // exactly like the roster-agreement `advertised: None` rule.
         let t0 = Instant::now();
         let (me, direct, relayed) = (eid(1), eid(2), eid(3));
         const ASSET: u64 = 0x9999_8888_7777_6666;
@@ -890,7 +548,6 @@ mod tests {
             !a.sync_verdict().assets,
             "a relay-only peer (digest None) must block the asset gate"
         );
-        // The relayed peer speaks for itself with the matching asset → synced.
         a.on_beat(relayed, &bt_ad(vec![me, direct, relayed], ASSET), t0);
         a.poll(t0);
         assert!(
@@ -901,15 +558,10 @@ mod tests {
 
     #[test]
     fn lone_peer_with_expect_one_waits_then_agrees_on_itself() {
-        // A deliberate solo run (expect=1) must still settle for STABLE_FOR, then agree
-        // on just itself. With expect>1 a lone peer would instead time out (next test).
         let t0 = Instant::now();
         let mut m = Membership::new(eid(1), 1, t0);
-        // Poll from t=0 (as the real driver does each beat) to start the agreement
-        // timer; before STABLE_FOR has elapsed since, still forming.
         assert_eq!(m.poll(t0), Status::Forming { live: 1 });
         assert_eq!(m.poll(at(t0, 500)), Status::Forming { live: 1 });
-        // Once the predicate has held continuously for STABLE_FOR: agreed on {self}.
         match m.poll(at(t0, STABLE_FOR.as_millis() as u64 + 1)) {
             Status::Agreed { roster, .. } => assert_eq!(roster, vec![eid(1)]),
             other => panic!("lone peer should agree on itself, got {other:?}"),
@@ -918,14 +570,8 @@ mod tests {
 
     #[test]
     fn lone_peer_expecting_more_times_out_instead_of_freezing_solo() {
-        // The premature-lone-close guard: a peer that expects 2 players but only ever
-        // sees itself must NOT freeze {self} — it has to FAIL at the join window so the
-        // operator relaunches, rather than start a broken 1-player "match". (On a real
-        // LAN, discovery can take a second or two; without this floor two peers that are
-        // slow to find each other would each freeze solo.)
         let t0 = Instant::now();
         let mut m = Membership::new(eid(1), 2, t0);
-        // Never reaches Agreed however long we wait — only itself is live.
         assert_eq!(
             m.poll(at(t0, STABLE_FOR.as_millis() as u64 + 100)),
             Status::Forming { live: 1 }
@@ -938,16 +584,11 @@ mod tests {
 
     #[test]
     fn two_peers_converge_and_freeze_the_identical_set() {
-        // The core guarantee: two peers that hear each other's matching beats freeze
-        // the SAME set. Drive both state machines with each other's beats and assert
-        // both reach Agreed with the identical roster.
         let t0 = Instant::now();
         let (ida, idb) = (eid(1), eid(2));
         let mut a = Membership::new(ida, 2, t0);
         let mut b = Membership::new(idb, 2, t0);
 
-        // Exchange beats every 250ms; after each, neither's set changes once both know
-        // each other, so the agreement timer runs and they converge on hash({A,B}).
         let mut t = 0u64;
         let mut agreed_a = None;
         let mut agreed_b = None;
@@ -977,34 +618,27 @@ mod tests {
 
     #[test]
     fn staggered_join_makes_everyone_wait_for_the_late_peer() {
-        // A and B form first; C joins ~1s late. The late join must perturb A/B's set
-        // and reset their settle, so NOBODY freezes {A,B} — all three converge on
-        // {A,B,C}. This is the staggered-launch failure mode, defeated.
         let t0 = Instant::now();
         let (ida, idb, idc) = (eid(1), eid(2), eid(3));
         let mut a = Membership::new(ida, 3, t0);
         let mut b = Membership::new(idb, 3, t0);
-        let mut c = Membership::new(idc, 3, t0); // exists but silent until join_at
+        let mut c = Membership::new(idc, 3, t0);
 
         let join_at = 1000u64;
         let mut froze: BTreeMap<u8, Vec<EndpointId>> = BTreeMap::new();
         let mut t = 0u64;
         while t <= 6000 && froze.len() < 3 {
             let now = at(t0, t);
-            // Everyone beats; C only participates once it has "launched".
             let (ba, bb, bc) = (a.beat(), b.beat(), c.beat());
-            // A<->B always exchange.
             a.on_beat(idb, &bb, now);
             b.on_beat(ida, &ba, now);
             if t >= join_at {
-                // C now reachable by all: full mesh exchange.
                 a.on_beat(idc, &bc, now);
                 b.on_beat(idc, &bc, now);
                 c.on_beat(ida, &ba, now);
                 c.on_beat(idb, &bb, now);
             }
             for (id, m) in [(1u8, &mut a), (2, &mut b), (3, &mut c)] {
-                // Always poll (drives the machine); record only the first Agreed per peer.
                 if let Status::Agreed { roster, .. } = m.poll(now)
                     && !froze.contains_key(&id)
                 {
@@ -1022,15 +656,11 @@ mod tests {
 
     #[test]
     fn phantom_endpoint_expires_and_is_excluded() {
-        // A stale endpoint P beats once (mDNS pulled it in) then goes silent (it had
-        // crashed). It must expire and NOT be in the frozen set — the phantom-endpoint
-        // failure mode. A and B (the real players) freeze {A,B}.
         let t0 = Instant::now();
         let (ida, idb, idp) = (eid(1), eid(2), eid(9));
         let mut a = Membership::new(ida, 2, t0);
         let mut b = Membership::new(idb, 2, t0);
 
-        // One stale DIRECT beat from P at t=0, then never again (its process crashed).
         let phantom_beat = bt(vec![idp]);
         a.on_beat(idp, &phantom_beat, t0);
         b.on_beat(idp, &phantom_beat, t0);
@@ -1040,8 +670,6 @@ mod tests {
         let mut t = 0u64;
         while t <= 8000 && (froze_a.is_none() || froze_b.is_none()) {
             let now = at(t0, t);
-            // A and B keep relaying P in their beats while it's still live in their view —
-            // the relay must NOT keep the dead P alive (only its own direct beat would).
             let (ba, bb) = (a.beat(), b.beat());
             a.on_beat(idb, &bb, now);
             b.on_beat(ida, &ba, now);
@@ -1069,42 +697,23 @@ mod tests {
 
     #[test]
     fn divergent_views_never_freeze_mismatched_sets() {
-        // The determinism-critical case: while A sees {A,B} and B (transiently) sees
-        // {A,B,C}, NEITHER may freeze — their hashes differ, so unanimity fails on both
-        // sides. We assert that during the divergence window NO peer reports Agreed
-        // with a set the other doesn't share. Here C is real-but-only-known-to-B for a
-        // stretch; once B relays C to A they converge (covered above). The point of
-        // THIS test is the negative: no freeze on a divergent hash.
         let t0 = Instant::now();
         let (ida, idb, idc) = (eid(1), eid(2), eid(3));
         let mut a = Membership::new(ida, 2, t0);
         let mut b = Membership::new(idb, 2, t0);
 
-        // B hears C directly (so C is live in B with a real advertised hash) but A has
-        // NOT — A's beats won't list C, and we deliberately feed A a doctored {A,B}-only
-        // view of B to HOLD the views divergent and check neither closes wrongly.
         let cbeat = bt(vec![idc]);
         b.on_beat(idc, &cbeat, t0);
 
         let mut t = 0u64;
         while t <= 2500 {
             let now = at(t0, t);
-            let ba = a.beat(); // lists {A,B} only (A never heard C)
-            // Keep C alive in B's view (direct beat) so B's set stays {A,B,C}.
+            let ba = a.beat();
             b.on_beat(idc, &cbeat, now);
-            // Feed A a stale {A,B}-only view of B (simulating C-bearing frames not yet
-            // arriving). B hears A's real beat.
             a.on_beat(idb, &bt(vec![ida, idb]), now);
             b.on_beat(ida, &ba, now);
             let sa = a.poll(now);
             let sb = b.poll(now);
-            // Neither may freeze a set the other doesn't hold: if A says Agreed it must
-            // be {A,B} AND B must NOT simultaneously be Agreed on {A,B,C}. (The doctored
-            // {A,B}-only beat fed to A is the artificial part — in the live protocol B's
-            // real beats carry its full {A,B,C}, so A would hear C and not close early.
-            // This isolates the safety check: a peer never closes on a hash a live member
-            // isn't echoing. B never closes here: C advertises hash({C}) ≠ B's
-            // hash({A,B,C}), so B is never unanimous.)
             if let Status::Agreed { roster, .. } = sa {
                 assert_eq!(roster, sorted(&[ida, idb]));
                 assert!(
@@ -1118,19 +727,6 @@ mod tests {
 
     #[test]
     fn flickering_agreement_never_closes() {
-        // The close needs CONTINUOUS agreement for
-        // STABLE_FOR, not a single instant of it. A peer B whose view keeps oscillating —
-        // agreeing on {A,B} one beat, then pulling in an extra member the next — must
-        // NEVER let A close, because the agreement timer rewinds whenever the predicate
-        // breaks. Without the held-timer fix, a one-poll sample of agreement at a
-        // stale-cache moment could close a set the peer is abandoning.
-        //
-        // Mechanism note (honest): B's `disagree` beat both flips B's advertised hash AND
-        // gossip-ADMITS `other` into A (any beat's members are relay-admitted). So on the
-        // `disagree` beats A's predicate breaks two ways at once — B's hash differs and
-        // `other` is an unheard member (advertised=None). EITHER alone rewinds the timer;
-        // the test asserts the outcome (never Agreed across the whole window), which is the
-        // continuous-agreement guarantee regardless of which condition fires.
         let t0 = Instant::now();
         let (ida, idb) = (eid(1), eid(2));
         let mut a = Membership::new(ida, 2, t0);
@@ -1156,19 +752,13 @@ mod tests {
 
     #[test]
     fn late_joiner_within_settle_rewinds_everyone_off_the_partial_set() {
-        // The load-bearing staggered case: with
-        // expect=2, A and B could LEGITIMATELY freeze {A,B} (the count floor does NOT save
-        // us here — 2 >= 2). C joins WITHIN STABLE_FOR of A+B's agreement, so the
-        // timer-rewind-on-set-growth is the ONLY thing that stops a premature {A,B} freeze.
-        // Assert nobody ever emits Agreed{A,B} and all three converge on {A,B,C} — the
-        // determinism invariant under a within-settle staggered join.
         let t0 = Instant::now();
         let (ida, idb, idc) = (eid(1), eid(2), eid(3));
         let mut a = Membership::new(ida, 2, t0);
         let mut b = Membership::new(idb, 2, t0);
         let mut c = Membership::new(idc, 2, t0);
 
-        let join_at = 1000u64; // < STABLE_FOR (1500): A+B are mid-settle on {A,B}
+        let join_at = 1000u64;
         let abc = sorted(&[ida, idb, idc]);
         let mut froze: BTreeMap<u8, Vec<EndpointId>> = BTreeMap::new();
         let mut t = 0u64;
@@ -1184,11 +774,9 @@ mod tests {
                 c.on_beat(idb, &bb, now);
             }
             for (id, m) in [(1u8, &mut a), (2, &mut b), (3, &mut c)] {
-                // Always poll (drives the machine); check+record only the first Agreed per peer.
                 if let Status::Agreed { roster, .. } = m.poll(now)
                     && !froze.contains_key(&id)
                 {
-                    // The crux: NO peer may ever freeze the partial {A,B}.
                     assert_eq!(roster, abc, "peer {id} froze a partial/wrong set");
                     froze.insert(id, roster);
                 }
@@ -1199,29 +787,16 @@ mod tests {
         for roster in froze.values() {
             assert_eq!(roster, &abc);
         }
-        // Sanity: the scenario really did put C in within the settle window (so the
-        // count floor alone could not have prevented an {A,B} freeze).
         assert!(join_at < STABLE_FOR.as_millis() as u64);
     }
 
     #[test]
     fn relayed_phantom_does_not_ping_pong_back_into_the_set() {
-        // The phantom ping-pong: a once-seen dead endpoint P that two
-        // peers expire at SLIGHTLY DIFFERENT times must not be relayed back and forth and
-        // re-admitted forever (each re-admission would rewind the agreement timer → the
-        // barrier would never settle and spuriously FAIL). The tombstone-on-expiry +
-        // no-relay-resurrection rule must let A and B settle on {A,B} despite B still
-        // relaying P for a beat after A has expired it.
         let t0 = Instant::now();
         let (ida, idb, idp) = (eid(1), eid(2), eid(9));
         let mut a = Membership::new(ida, 2, t0);
         let mut b = Membership::new(idb, 2, t0);
 
-        // P beats directly to A at t=0 and to B 400ms LATER, then is silent forever. So
-        // A expires P (~t=3000) a beat or two BEFORE B does (~t=3400). In that gap B is
-        // still relaying P to A — the resurrection window. The tombstone A set on expiry
-        // must make A REFUSE to re-admit the relayed P (only P's own direct beat could),
-        // so the dead P can't ping-pong back and the set settles to {A,B}.
         let pbeat = bt(vec![idp]);
         a.on_beat(idp, &pbeat, t0);
         b.on_beat(idp, &pbeat, at(t0, 400));
@@ -1233,7 +808,6 @@ mod tests {
             let now = at(t0, t);
             let ba = a.beat();
             let bb = b.beat();
-            // Each relays whatever it currently lists (P included until locally expired).
             a.on_beat(idb, &bb, now);
             b.on_beat(ida, &ba, now);
             if froze_a.is_none()
@@ -1261,20 +835,12 @@ mod tests {
 
     #[test]
     fn fails_cleanly_when_agreement_never_reached() {
-        // A peer that keeps flapping (a member appears and expires forever) must hit
-        // JOIN_WINDOW and FAIL, not freeze a guessed set. We never let the set stabilize:
-        // a new transient member id every beat keeps resetting the agreement timer so
-        // STABLE_FOR is never satisfied. (expect=1 so the failure is purely the churn, not
-        // a too-few-players timeout.)
         let t0 = Instant::now();
         let mut m = Membership::new(eid(1), 1, t0);
         let mut t = 0u64;
         let mut saw_failed = false;
         while t <= JOIN_WINDOW.as_millis() as u64 + 2000 {
             let now = at(t0, t);
-            // A brand-new transient peer each step (id derived from t), heard once
-            // directly. It expires after MEMBER_TIMEOUT, but a fresh one replaces it, so
-            // the set never holds still. (Tombstones don't block these — each id is new.)
             let transient = eid((t / 250 % 200 + 10) as u8);
             m.on_beat(transient, &bt(vec![transient]), now);
             if m.poll(now) == Status::Failed {
@@ -1291,20 +857,11 @@ mod tests {
 
     #[test]
     fn host_triggered_joiner_waits_for_the_go_then_both_freeze_the_identical_set() {
-        // A host (H) and a joiner (J) form a host-triggered barrier.
-        // Neither may close on agreement ALONE — the lobby waits for H's Start click (the
-        // STABLE_FOR settle still runs underneath, absorbing late joins, but it's not enough
-        // to close in lobby mode) — and when H clicks, BOTH must freeze the byte-identical
-        // {H,J}. The host-driven analogue of `two_peers_converge_and_freeze_the_identical_set`:
-        // the roster guarantee is unchanged, only an EXTRA close gate (the GO) is layered on.
         let t0 = Instant::now();
         let (idh, idj) = (eid(1), eid(2));
         let mut h = Membership::host_triggered(Role::Host, idh, 2, t0);
         let mut j = Membership::host_triggered(Role::Joiner, idj, 2, t0);
 
-        // Exchange beats well past STABLE_FOR with NO host click: BOTH must keep lobbying —
-        // the settle elapses but neither lobby gate (Start / GO) is satisfied, so agreement
-        // alone never closes a lobby.
         let mut t = 0u64;
         while t <= STABLE_FOR.as_millis() as u64 + 1000 {
             let now = at(t0, t);
@@ -1322,7 +879,6 @@ mod tests {
             t += 250;
         }
 
-        // Host clicks Start. Now both close — on the SAME set — within a couple beats.
         h.set_starting();
         let mut froze_h = None;
         let mut froze_j = None;
@@ -1352,18 +908,10 @@ mod tests {
 
     #[test]
     fn host_go_on_a_mismatched_roster_does_not_close_a_joiner() {
-        // The determinism SAFETY gate: a host GO closes a joiner ONLY when the GO's
-        // roster hash equals the joiner's own. Here the host commands start on {H} (it hasn't
-        // yet heard J), while J already sees {H,J}. J must NOT close — its set {H,J} ≠ the
-        // GO's {H} — so the two can never freeze divergent rosters off a premature GO. (In
-        // the live protocol the host would hear J and re-GO on {H,J}; this isolates the
-        // negative: a GO on the wrong set is inert.)
         let t0 = Instant::now();
         let (idh, idj) = (eid(1), eid(2));
         let mut j = Membership::host_triggered(Role::Joiner, idj, 2, t0);
 
-        // J has heard H directly (so {H,J} is live for J) and H is "started", but H's beat
-        // carries only {H} (it hasn't admitted J yet) with the GO set.
         let host_go_on_partial = Beat {
             members: vec![idh],
             start: true,
@@ -1374,7 +922,6 @@ mod tests {
         let mut closed = false;
         while t <= STABLE_FOR.as_millis() as u64 + 2000 {
             let now = at(t0, t);
-            // Keep H alive in J's view with the partial GO beat each round.
             j.on_beat(idh, &host_go_on_partial, now);
             if matches!(j.poll(now), Status::Agreed { .. }) {
                 closed = true;
@@ -1396,8 +943,8 @@ mod tests {
         // entitled to.
         let t0 = Instant::now();
         for mut m in [
-            Membership::new(eid(1), 1, t0), // timer barrier
-            Membership::host_triggered(Role::Joiner, eid(1), 2, t0), // a joiner
+            Membership::new(eid(1), 1, t0),
+            Membership::host_triggered(Role::Joiner, eid(1), 2, t0),
         ] {
             m.set_starting();
             assert!(
@@ -1405,7 +952,6 @@ mod tests {
                 "only a Role::Host may advertise the start GO"
             );
         }
-        // A host, by contrast, advertises the GO once it has clicked Start.
         let mut host = Membership::host_triggered(Role::Host, eid(1), 2, t0);
         assert!(!host.beat().start, "a host is silent before clicking Start");
         host.set_starting();
@@ -1414,22 +960,14 @@ mod tests {
 
     #[test]
     fn host_clicking_start_during_a_late_join_does_not_freeze_a_partial_set() {
-        // The click-during-join race: the host has clicked Start and agrees with J on
-        // {H,J}, but C joins in that same window so J's set grows to {H,J,C}. The host must
-        // NOT freeze {H,J} (which would leave it waiting forever on J's inputs while J is on a
-        // different roster). The per-mode [`STABLE_FOR`] settle is what saves it: C's arrival
-        // breaks the host's unanimity (J now advertises hash({H,J,C})) and rewinds the timer,
-        // so `held` goes false and the host keeps forming until all three converge. This is the
-        // same staggered-join guarantee `late_joiner_within_settle…` proves for the timer path,
-        // now confirmed for a host that has ALREADY clicked Start.
         let t0 = Instant::now();
         let (idh, idj, idc) = (eid(1), eid(2), eid(3));
         let mut h = Membership::host_triggered(Role::Host, idh, 3, t0);
         let mut j = Membership::host_triggered(Role::Joiner, idj, 3, t0);
         let mut c = Membership::host_triggered(Role::Joiner, idc, 3, t0);
-        h.set_starting(); // the host has committed to start from the outset
+        h.set_starting();
 
-        let join_at = 1000u64; // C joins WITHIN STABLE_FOR of H+J agreeing on {H,J}
+        let join_at = 1000u64;
         let abc = sorted(&[idh, idj, idc]);
         let mut froze: BTreeMap<u8, Vec<EndpointId>> = BTreeMap::new();
         let mut t = 0u64;
@@ -1445,11 +983,9 @@ mod tests {
                 c.on_beat(idj, &bj, now);
             }
             for (id, m) in [(1u8, &mut h), (2, &mut j), (3, &mut c)] {
-                // Always poll (drives the machine); record the first Agreed per peer.
                 if let Status::Agreed { roster, .. } = m.poll(now)
                     && !froze.contains_key(&id)
                 {
-                    // The crux: the host (or anyone) must only ever freeze the FULL {H,J,C}.
                     assert_eq!(roster, abc, "peer {id} froze a partial/wrong set");
                     froze.insert(id, roster);
                 }

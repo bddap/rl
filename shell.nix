@@ -6,13 +6,11 @@ let
 in
 pkgs.mkShell {
   buildInputs = with pkgs; [
-    # Rust toolchain
     cargo
     rustc
     clippy
     rustfmt
 
-    # Bevy system dependencies
     pkg-config
     udev
     alsa-lib
@@ -20,27 +18,20 @@ pkgs.mkShell {
     vulkan-headers
     vulkan-validation-layers
 
-    # X11
     libx11
     libxcursor
     libxi
     libxrandr
 
-    # Wayland
     libxkbcommon
     wayland
 
-    # Build tools
     clang
     mold
 
-    # Offline video render (`rl-demo --render-video`) shells out to ffmpeg to encode the
-    # captured PNG frames into an mp4. On the shell PATH so a nix-shell-driven render finds
-    # it; the binary looks it up by name.
     ffmpeg
   ];
 
-  # Point Vulkan ICD loader at the right drivers
   LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
     vulkan-loader
     udev

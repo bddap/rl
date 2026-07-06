@@ -1,16 +1,3 @@
-//! `rl-demo` — the windowed demo + screenshot of a trained crab policy. Links
-//! `crab-world` with render ON (bevy_render/bevy_pbr/wgpu), so it can put the crab on a
-//! screen; it does no training (that's the headless `rl-train` binary).
-//!
-//! Modes (mutually exclusive; one is required):
-//! - `--demo` — load a checkpoint and drive the crab with the policy (no learning)
-//!   behind an orbit camera with poke/reset controls. Borderless fullscreen unless
-//!   `--windowed`. The Steam launch target.
-//! - `--screenshot PATH` — render one settled frame to a PNG and exit (windowless,
-//!   GPU on) — inspect the trained crab without a display.
-//!
-//! This is the render half of the old single `rl` binary (rl#51); the training half
-//! is `rl-train`, the multiplayer game is `game`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,77 +6,43 @@ use bevy::prelude::*;
 use clap::Parser;
 use crab_world::{CheckpointArgs, Visuals, bot, physics, play};
 
-/// Crab Combat demo — render a trained crab policy.
-///
-/// One of `--demo` / `--screenshot` is required (a bare invocation has nothing to
-/// show). The checkpoint to load comes from `--checkpoint-dir` (the shared
-/// [`CheckpointArgs`]); training itself is the separate `rl-train` binary, and
-/// training knobs (`--envs`/`--ticks`/`--seed`) are parse errors here, not silent
-/// no-ops (rl#217).
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct Args {
     #[command(flatten)]
     pub checkpoint: CheckpointArgs,
 
-    /// Play with a trained crab: load the checkpoint, drive it with the policy
-    /// (no learning), orbit camera + poke/reset controls.
     #[arg(long)]
     demo: bool,
 
-    /// Run the demo in a window instead of the default borderless fullscreen.
     #[arg(long)]
     windowed: bool,
 
-    /// Render one frame to this PNG and exit (windowless, GPU on). For inspecting
-    /// the trained crab without a display.
     #[arg(long, value_name = "PATH")]
     screenshot: Option<PathBuf>,
 
-    /// Physics steps to simulate before taking the screenshot.
     #[arg(long, default_value_t = 200)]
     screenshot_settle: u32,
 
-    /// Render the ball-chase headless to this mp4 and exit (windowless, GPU on).
-    /// Loads the policy from `--checkpoint-dir`, drives the crab after the moving
-    /// target, captures every sim tick, and encodes with ffmpeg. Decoupled from
-    /// wall-clock — one sim tick per rendered frame — so a slower-than-realtime render
-    /// produces a true-speed clip. Also prints an objective `DRIVE_STATS` line
-    /// (mean|drive|, mean effort) for comparing two policies' actuation.
     #[arg(long, value_name = "PATH")]
     render_video: Option<PathBuf>,
 
-    /// `--render-video` clip length in SIMULATED seconds (ticks = seconds × the
-    /// physics rate). The mp4 plays this many seconds of crab time; it is unrelated to
-    /// how long the render itself takes (the render is as fast as compute allows).
     #[arg(long, default_value_t = 8.0)]
     seconds: f32,
 
-    /// Screenshot width in pixels.
     #[arg(long, default_value_t = crab_world::screenshot::DEFAULT_WIDTH)]
     width: u32,
 
-    /// Screenshot height in pixels.
     #[arg(long, default_value_t = crab_world::screenshot::DEFAULT_HEIGHT)]
     height: u32,
 
-    /// Directory the DEMO hot-reloads the policy from while running — the LIVE
-    /// training output. The demo loads its initial policy from `--checkpoint-dir`
-    /// (a stable copy) and then, every couple of seconds, swaps in a newer
-    /// checkpoint that appears here, so a left-open demo tracks training without a
-    /// relaunch. Unset, or a missing/half-written dir, = no swap. Demo mode only.
     #[arg(long, value_name = "PATH")]
     live_checkpoint_dir: Option<PathBuf>,
 
-    /// Demo only: replace the trained policy with hands-on gamepad control — D-pad
-    /// up/down picks a joint, the right stick drives its torque, all else held at
-    /// zero. A physics feel-test, not a learned driver.
     #[arg(long)]
     manual_control: bool,
 }
 
-/// What this run is rendering. Both modes always render (the binary has no headless
-/// path — that's `rl-train`).
 #[derive(Clone)]
 enum AppMode {
     Demo,
@@ -97,8 +50,6 @@ enum AppMode {
         path: PathBuf,
         settle: u32,
     },
-    /// Offline ball-chase clip: step the sim one tick per frame, render that frame,
-    /// encode to `path` at the end. `seconds` is the clip's SIMULATED length.
     RenderVideo {
         path: PathBuf,
         seconds: f32,
@@ -108,60 +59,16 @@ enum AppMode {
 fn main() {
     let args = Args::parse();
 
-    // ALL env mutation happens HERE, before `otel::init` — `otel::init` spawns the OTLP
-    // exporter's background threads (batch span/log processors, periodic metric reader) when
-    // export is enabled, and `set_var` is unsound once another thread may `getenv`.
-    //
-    // SAFETY for every `set_var` below: program start, single-threaded, before both
-    // `otel::init` and `App::new` spawn any thread — the same pattern (and justification) as
-    // `crab_world::bot::headless`'s `set_var`.
 
-    // Default the log filter to WARN. bevy's LogPlugin is disabled (`base_plugins`) so the otel
-    // subscriber is the only one, which means it ALSO governs OTLP export — and bevy/wgpu emit
-    // a torrent of INFO every frame. At the default `info` that torrent floods the telemetry
-    // sink when export is on (tens of MB per run), burying the signals that matter. WARN keeps
-    // every error/warning — the canonical-mesh error and the checkpoint-mismatch refusal
-    // included — and drops the per-frame noise. `RUST_LOG` still overrides for local debugging.
-    //
-    // Exception: `crab_world::play=info`. The blanket WARN silenced the demo's OWN
-    // low-volume INFO lines too — chiefly `play: hot-reloaded a newer checkpoint`, the
-    // one signal that says the left-open demo is tracking live training (rl#158). Those
-    // fire at PPO-save cadence (a handful/min), not per frame, so they neither flood the
-    // log nor the export; the per-frame torrent lives under `bevy`/`wgpu`, still capped at
-    // WARN. This is a level filter, not a buffering issue — WARN lines were always flowing.
     if std::env::var_os("RUST_LOG").is_none() {
         unsafe { std::env::set_var("RUST_LOG", "warn,crab_world::play=info") };
     }
 
-    // rl-demo is a PLAYER-FACING surface (the windowed couch demo and its screenshot), so the
-    // crab the player sees should be the purchased Sally mesh. But a MISSING/broken mesh is no
-    // longer a hard refuse (owner 2026-06-28: too strict): instead fall back to the honest
-    // physics-bones view — Rapier's debug-render of the REAL colliders, the same bones the body
-    // uses — and emit a LOUD OTEL error so the absent asset is visible in telemetry. The one
-    // thing still forbidden is a SILENT skinless body (the silent-fallback bug — ships a
-    // non-Sally crab with no signal). This is the explicit player-facing vs training split: the
-    // headless trainer (`rl-train`) keeps the no-skin procedural body by design.
-    // The crab mesh THIS run renders, decided ONCE from the shared full-preflight verdict
-    // (`usable_model`): the real Sally when usable, else `None` → the honest fallback. THE same
-    // verdict game/net read — rl-demo is not a second, hand-rolled copy of the load+recipe check.
-    // Inserted as `CrabModelPath` before `BotPlugin` (below) so the body, skin, and silhouette all
-    // flip together off this one explicit value — see `body::CrabModelPath` for why this replaces
-    // the old env-poison redirect. The physics bones are then made VISIBLE by booting the render-mode
-    // cycle in `colliders` (see `initial_render_mode`).
     let mesh_state =
         crab_world::bot::body::CrabModelPath(crab_world::mesh_fallback::usable_model_path());
 
-    // OTEL/tracing: install the shared subscriber after `RUST_LOG` is final (above). The guard
-    // must outlive the whole run, so it's bound here and dropped only when `main` returns.
     let _otel = otel::init("rl-demo");
 
-    // `Some(reason)` ⇒ the canonical mesh is unusable, kept so the loudness lands in THREE
-    // places, not just telemetry: the OTEL error (raised inside `initial_render_mode` below,
-    // stderr + OTLP, shared with the game surface so both name the missing Sally identically),
-    // the forced colliders render mode, and — in the windowed demo — an on-screen banner (see
-    // the Demo arm). The owner's bug (rl#706) was exactly this: a fallback he could SEE but not
-    // identify, so the failure must name itself on the screen he's looking at, not only in a
-    // log he isn't.
     let mesh_fallback_reason: Option<String> = crab_world::mesh_fallback::usable_model()
         .as_ref()
         .err()
@@ -180,8 +87,6 @@ fn main() {
     } else if args.demo {
         AppMode::Demo
     } else {
-        // A bare `rl-demo` with no mode flag has nothing to show. (Training is the
-        // `rl-train` binary.)
         eprintln!("no mode selected. rl-demo needs --demo, --screenshot, or --render-video.");
         std::process::exit(2);
     };
@@ -189,16 +94,8 @@ fn main() {
     let mut app = App::new();
 
     match &mode {
-        // Both windowless render-to-image modes share the same no-window-but-GPU-on plugin
-        // set; only their schedule-runner cadence differs (set below). The screenshot's 60 Hz
-        // loop ties render frames to simulated time so the pipeline warms over the same frames
-        // it captures; render-video instead advances the sim itself (one tick per frame, see
-        // `RenderVideoPlugin`) and runs the loop as fast as compute allows.
         AppMode::Screenshot { .. } | AppMode::RenderVideo { .. } => {
             app.add_plugins(crab_world::app_boot::base_plugins(None));
-            // Screenshot paces at 60 Hz (render frames track sim time); render-video runs the
-            // loop flat-out (Duration::ZERO) since `step_one_tick` — not wall-clock — advances
-            // the sim, so a slower-than-realtime render still produces a true-speed clip.
             let interval = if matches!(mode, AppMode::RenderVideo { .. }) {
                 Duration::ZERO
             } else {
@@ -207,8 +104,6 @@ fn main() {
             app.add_plugins(bevy::app::ScheduleRunnerPlugin::run_loop(interval));
         }
         AppMode::Demo => {
-            // The demo defaults to borderless fullscreen (the Steam launch target is
-            // a couch screen) unless --windowed.
             let fullscreen = !args.windowed;
             app.add_plugins(crab_world::app_boot::base_plugins(Some(
                 bevy::window::Window {
@@ -226,13 +121,6 @@ fn main() {
         }
     }
 
-    // The render-mode cycle: the SHARED collider wireframe + mode-naming HUD (the same
-    // `crab_view` GCR uses — ONE wireframe impl, not Rapier's debug-render). Boots from the ONE
-    // shared precedence decision (`mesh_fallback::initial_render_mode`, same as game/net's
-    // commands, so the two surfaces can't diverge): env override, else `colliders` when the
-    // canonical Sally mesh is unusable (the honest physics view IS the crab the player sees),
-    // else mesh. The demo has no --render-mode flag (`None`). The demo's Right-arrow / D-pad
-    // cycles it live (see `play::demo::demo_controls`).
     let initial_render_mode = crab_world::mesh_fallback::initial_render_mode(
         None,
         crab_world::mesh_fallback::Surface::RlDemo,
@@ -240,42 +128,23 @@ fn main() {
     // Cage gate open always: the demo has no menu phase — it renders the round for its whole
     // life, so there is no screen the gizmos could leak behind (the gate exists for GCR, rl#211).
     crab_world::crab_view::register(&mut app, initial_render_mode, || true);
-    // Joint-pivot markers: the companion diagnostic, drawn with the cage (the draw self-gates on
-    // the render mode now — see `body::draw_pivot_markers`).
     bot::body::register_pivot_markers(&mut app);
 
-    // Demo and screenshot always render and drive exactly one crab (visuals on,
-    // 1 env — parallel envs are a training concept, and training is `rl-train` only).
     app.insert_resource(Visuals(true))
         .insert_resource(bot::NumEnvs(1))
-        // The crab's physics setup as one plugin: the shared dt + sub-steps + softened
-        // contact spring, and Rapier running IN FixedUpdate (lockstep with the
-        // Sense→Think→Act brain loop, one physics step per brain step). One source with
-        // every headless test and the `rl-train learn` rollout worlds, and the init
-        // ordering is enforced internally, so the demo can't drift from the physics
-        // training optimizes (see physics::CrabPhysicsPlugin).
         .add_plugins(physics::CrabPhysicsPlugin)
         // The demo mirrors the TRAINING world (targets sampled inside the box), so it keeps
         // the walled arena; only GCR inference runs the open field (rl#209).
         .add_plugins(physics::PhysicsWorldPlugin {
             arena: physics::Arena::WalledBox,
         })
-        // The standalone arena draws no other scene, so it also dresses the colliders with the
-        // visible ground quad + lights. GCR omits this — it renders its own gray-box world (rl#160).
         .add_plugins(physics::ArenaVisualsPlugin)
-        // Hand the preflighted mesh choice to the bot plugin BEFORE it builds `CrabAssets`/skin,
-        // so the fallback decision is this explicit resource, not a poisoned env (bddap/rl#147).
         .insert_resource(mesh_state)
         .add_plugins(bot::BotPlugin)
         .add_systems(FixedUpdate, contact_audit);
 
     match mode {
         AppMode::Demo => {
-            // The windowed surface the owner is actually looking at: if the canonical mesh
-            // failed, name the failure ON SCREEN so the physics-bones fallback can never be
-            // mistaken for real Sally (rl#706). Only the windowed demo gets the banner —
-            // the screenshot/render-video arms render to image and a banner would pollute
-            // the capture; their loudness stays the OTEL error + the collider view.
             if let Some(reason) = mesh_fallback_reason {
                 app.insert_resource(MeshFallbackBanner(reason))
                     .add_systems(Startup, spawn_mesh_fallback_banner);
@@ -309,25 +178,13 @@ fn main() {
     app.run();
 }
 
-/// The human-readable cause of a canonical-mesh load failure, carried to the on-screen banner.
-/// Present (inserted) only when the mesh is unusable, so the banner system runs iff there is a
-/// failure to announce — a healthy run has no banner resource and no banner.
 #[derive(Resource)]
 struct MeshFallbackBanner(String);
 
-/// Spawn the can't-miss top-center banner for the windowed demo when the Sally mesh failed to
-/// load. The render below it is the collider view — the REAL colliders, but NOT the real Sally
-/// rig — so the banner says exactly that, killing the owner's "is this even Sally?" ambiguity
-/// (rl#706) the OTEL log alone left unanswered on the screen he's watching. The banner UI is
-/// `crab_world::mesh_fallback::spawn_banner`, shared with the game surface so neither drifts.
 fn spawn_mesh_fallback_banner(mut commands: Commands, banner: Res<MeshFallbackBanner>) {
     crab_world::mesh_fallback::spawn_banner(&mut commands, &banner.0);
 }
 
-/// Diagnostic (enable with RL_CONTACT_AUDIT=1): every 64 ticks, prints every
-/// crab-part-vs-crab-part contact pair currently penetrating more than 5 mm,
-/// deepest first. Ground contacts are excluded. Answers "are the legs
-/// actually intersecting" with numbers instead of squinting at renders.
 fn contact_audit(
     sim: Query<&bevy_rapier3d::plugin::context::RapierContextSimulation>,
     cols: Query<&bevy_rapier3d::plugin::context::RapierContextColliders>,

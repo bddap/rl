@@ -1,36 +1,3 @@
-//! The match server: the AUTHORITATIVE per-tick stepper + per-client input streams + roster
-//! coordinator.
-//!
-//! Minecraft-style separation: server code is separate from the client even in one process,
-//! and every client (the server's own local one included) dials a server. The server is
-//! AUTHORITATIVE over world state: it owns the integer [`Sim`] and steps it once per tick,
-//! emitting a [`CoreSnapshot`](crate::snapshot::CoreSnapshot) the local client APPLIES rather
-//! than stepping a sim of its own. "Solo" is the same path with a roster of one — an internal
-//! server + the single local client — so there is no separate single-player code path; SP
-//! always serializes the hand-off too (build → `to_bytes` → `from_bytes` → apply), no
-//! by-reference shortcut.
-//!
-//! **The HOST paces the match; a remote input can DELAY nothing** (rl#193/#194/#195). Each
-//! authoritative tick is assembled by [`Server::advance`] the moment the host's own input for
-//! it exists: the host's input applies at that tick, and every remote player contributes the
-//! next queued input from its per-player [`InputStream`] — or, when the stream is starved by
-//! transit lag, a HOLD of its last consumed move axes ([`Input::hold`]). Gating a tick on
-//! every rostered client's input would instead put the host's whole world — its own avatar,
-//! the crab pump, the piloted ship — at remote-input latency, applying ticks in RTT-jittered
-//! bursts against the render's wall-clock interpolation (the MP wiggle/stutter), and make a
-//! silent remote a match-wide freeze; under host pacing both failure classes are
-//! unrepresentable — there is nothing to wait on.
-//!
-//! Inputs flow UP; the authoritative [`CoreSnapshot`](crate::snapshot::CoreSnapshot) flows
-//! DOWN to every client, which ADOPTS it whole (no re-sim, no peer cross-check — the host is
-//! the source of truth). Each snapshot carries `input_next` — per player, the first
-//! [`TickMsg::issue_tick`] NOT yet consumed — so a remote client replays exactly its
-//! still-unconsumed inputs when predicting its own avatar
-//! ([`crate::lockstep::Lockstep::reconcile_local_prediction`]).
-//!
-//! The stream/roster core is pure and transport-agnostic: [`crate::transport`] /
-//! [`crate::net_loop`] move the bytes (loopback for the co-located client, QUIC for a remote
-//! one). The one impurity is the owned [`Sim`] the authoritative step advances.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -120,10 +87,6 @@ struct StarvationTally {
     last_report: Option<u64>,
 }
 
-/// The outcome of [`Server::admit`]: the stable [`PlayerId`] allocated to the joiner, the tick its
-/// roster change takes effect, and the complete new roster from that tick. The caller UNICASTS
-/// this to the joiner alone, which builds its session via [`crate::lockstep::Lockstep::join_at`];
-/// incumbents learn the new roster from the next [`crate::snapshot::CoreSnapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admission {
     pub pid: PlayerId,
@@ -131,34 +94,15 @@ pub struct Admission {
     pub roster: Vec<PlayerId>,
 }
 
-/// A would-be joiner's credentials, sent UP to the host the moment it dials a live match. The
-/// host gates admission on these BEFORE allocating a [`PlayerId`] and REFUSES LOUDLY, never
-/// silently dropping a joiner onto a mismatched body ([`may_admit_joiner`]). The joiner's
-/// WEIGHTS are deliberately absent — a joiner never executes a brain (it adopts host snapshots
-/// and renders host articulation) — and the host's own brains need no gate here either: every
-/// binding is validated fail-loud at launch (rl#200 increment 6 deleted the old `HostNotArmed`
-/// digest self-gate that duplicated it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinRequest {
-    /// Digest of the joiner's crab/collider assets — must equal the host's, or the joiner builds
-    /// and renders different-shaped crabs.
     pub asset_digest: u64,
-    /// The joiner's render-rig count (its brain-binding count; `0` = a headless peer that
-    /// renders nothing). A WINDOWED joiner must match the host's serving count, or the host's
-    /// extra crabs would be INVISIBLE on it while still grabbing players (rl#200) — the same
-    /// silent-wrong-crab class the asset gate refuses. `0` is always admissible.
     pub crab_count: u8,
 }
 
-/// Why a [`JoinRequest`] was refused — a loud, typed verdict the host sends back to the joiner and
-/// logs to telemetry (never a silent drop). Carries the offending side so the refusal message is
-/// actionable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRefusal {
-    /// The joiner's crab-asset/collider digest differs from the host's.
     AssetsMismatch { host: u64, joiner: u64 },
-    /// The joiner is a RENDERING peer whose rig count differs from the host's serving count —
-    /// it would render too few (invisible lethal crabs) or too many (frozen ghost rigs) crabs.
     CrabCountMismatch { host: u8, joiner: u8 },
 }
 
@@ -178,17 +122,9 @@ impl std::fmt::Display for AdmissionRefusal {
     }
 }
 
-/// Every verdict the host answers a peer's frames with over the Refuse channel — typed
-/// END-TO-END (rl#221): it crosses the wire as tag+fields, and the message is rendered from
-/// this one [`std::fmt::Display`] at the receiver's display edge, so the wording can't fork
-/// per surface and a consumer can dispatch on the CAUSE, not a string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// A would-be joiner failed the admission gate ([`may_admit_joiner`]).
     Admission(AdmissionRefusal),
-    /// A DEPARTED peer re-linked mid-match (the mDNS dialer runs all match) and kept sending
-    /// inputs — told once, loudly, that it was dropped, rather than left spectating with dead
-    /// controls (rl#198).
     Departed,
 }
 
@@ -203,13 +139,6 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// The admission gate: may a joiner advertising `req` enter a match the host runs on
-/// `(host_assets, host_crabs)`? `Ok(())` only when the asset digests match exactly AND the
-/// joiner's rig count is compatible (equal to the host's serving count, or `0` for a headless
-/// peer that renders nothing). The joiner's brain is deliberately ungated — a joiner never
-/// executes one — and the host's brains are validated fail-loud at launch, not here. The
-/// host→joiner analogue of the formation-time `may_arm_external_crab` gate, but per-joiner and
-/// fail-LOUD rather than a silent disarm.
 pub fn may_admit_joiner(
     host_assets: u64,
     host_crabs: u8,
@@ -256,11 +185,6 @@ impl InputStream {
         }
     }
 
-    /// File one input, then fold the queue down to [`TARGET_BACKLOG`] (see the constant). A
-    /// stale or duplicate `issue_tick` (≤ anything already queued or consumed) is dropped —
-    /// the live stream can re-deliver what [`Server::seed_early`] already queued. Returns
-    /// whether the message was accepted (fresh), so the caller's LEVEL pilot-intent state
-    /// follows only the newest message, never a stale re-delivery.
     fn record(&mut self, msg: TickMsg) -> bool {
         let next_fresh = self
             .queue
@@ -327,14 +251,6 @@ pub struct Server {
     /// Per-REMOTE-player input streams. Created on a player's first recorded input, dropped on
     /// its departure — so stream presence implies currently rostered.
     streams: BTreeMap<PlayerId, InputStream>,
-    /// Each player's LATEST piloting intent (rl#191 increment 2) — LEVEL state, entry presence
-    /// IS "piloting" (mirroring `VehicleControls` itself): the newest accepted [`TickMsg`]'s
-    /// `pilot` overwrites (or, `None`, removes) the sender's entry, the host's own rides
-    /// [`Server::advance`]. NOT part of the deterministic tick assembly — the driver reads it
-    /// ([`Server::pilot_intents`]) to file the crab world's `VehicleControls`. Pruned
-    /// LEVEL-TRIGGERED against the roster each [`Server::advance`] (not just on the departure
-    /// event): pids are reused by [`Server::lowest_free_pid`], so a leaked entry would hand a
-    /// departed pilot's craft to the next joiner.
     pilot_intents: BTreeMap<PlayerId, crate::lockstep::PilotIntent>,
     /// The AUTHORITATIVE world this server owns and steps. Its per-tick
     /// [`CoreSnapshot`](crate::snapshot::CoreSnapshot) is what every client renders. Stepped one
@@ -356,29 +272,12 @@ pub struct Server {
     pending: Option<PendingTick>,
 }
 
-/// The product of one authoritative step ([`Server::step_next`]): the tick's
-/// [`CoreSnapshot`](crate::snapshot::CoreSnapshot) already serialized to wire bytes, plus
-/// whether the tick was a RESTART edge. The edge rides the return value (an event, not
-/// state) because the tick counter can no longer signal it: a restart is a state-reset at
-/// the current tick, never a tick rewind (rl#204) — the driver hangs its per-round resets
-/// (physics cadence, crab-body respawn) off this exact edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SteppedTick {
-    /// The tick's authoritative snapshot, serialized — the always-serialized hand-off the
-    /// local client decodes and applies (no by-reference shortcut even in SP).
     pub snapshot: Vec<u8>,
-    /// Whether this tick was a RESTART edge (the sim rebuilt to spawn state at this tick).
     pub restarted: bool,
 }
 
-/// One freshly-pumped NN crab pose the authoritative server injects before stepping a tick.
-/// The driver owns the bevy `World`, so it pumps the rapier crab bodies and hands the resulting
-/// poses here — one per crab, in crab-index order (rl#200); [`Server::step_next`] injects them
-/// via [`Sim::set_external_crab_pose`] at the one snapshot construction site, so the integer
-/// crab poses and the (later) render articulation can't drift. An EMPTY slice to [`step_next`]
-/// leaves the crabs untouched (an unarmed round behind the menu, where no body steps); a
-/// non-empty slice must cover every crab — a partial set is a bridge/sim count mismatch
-/// refused loudly.
 #[derive(Debug, Clone, Copy)]
 pub struct CrabPose {
     pub pos: Pos,
@@ -387,11 +286,6 @@ pub struct CrabPose {
 }
 
 impl Server {
-    /// Start a server for `roster` (the frozen participant set, us + any remote clients) over the
-    /// authoritative `sim` it will step. `me` is the co-located host player, which must be
-    /// rostered; for solo `roster` is just `[me]`, for a hosted match the whole agreed roster.
-    /// `sim` is the tick-0 world (the caller hands a clone of the client's freshly-built sim, so
-    /// the two start byte-identical and the snapshots keep the client in sync).
     pub fn new(me: PlayerId, roster: &[PlayerId], sim: Sim) -> Self {
         debug_assert!(
             roster.contains(&me),
@@ -416,9 +310,6 @@ impl Server {
         self.sim.tick() + u64::from(self.pending.is_some())
     }
 
-    /// Read-only view of the authoritative world (for the driver's hunt-target read + restart-edge
-    /// detection, and tests). The client renders from the SNAPSHOT this sim emits, never this sim
-    /// directly.
     pub fn sim(&self) -> &Sim {
         &self.sim
     }
@@ -447,21 +338,11 @@ impl Server {
             .entry(from)
             .or_insert_with(InputStream::new)
             .record(msg);
-        // Latest-wins pilot intent, but only off an ACCEPTED (fresh) message — a stale
-        // re-delivery (seed_early overlap) must not regress the level state.
         if accepted {
             self.file_intent(from, msg.pilot);
         }
     }
 
-    /// Apply one player's freshly-arrived pilot intent to the LEVEL map — the ONE boarding
-    /// gate, shared by the remote path ([`Server::record_remote`]) and the host's own
-    /// ([`Server::advance`]): a player with NO craft boards only while its avatar is Alive
-    /// (the same rule the local E-cycle applies client-side — this is the authoritative
-    /// re-check, since a client's alive-view lags by transit); an already-piloting player
-    /// keeps its entry (kind cycles and stepping out are ungated, death mid-flight doesn't
-    /// eject). Gating at the INSERT makes `pilot_intents` the single truth of "who pilots" —
-    /// a not-alive player's boarding attempt is DROPPED, not parked to auto-board at respawn.
     fn file_intent(&mut self, pid: PlayerId, pilot: Option<crate::lockstep::PilotIntent>) {
         match pilot {
             Some(intent) => {
@@ -504,9 +385,6 @@ impl Server {
             local.issue_tick, tick,
             "the host issues exactly one input per assembled tick"
         );
-        // The host's own pilot intent (its message never streams), then the LEVEL-triggered
-        // roster prune: any intent whose pid is not rostered at this tick is dropped, so a
-        // departed pilot's craft can't outlive it — nor leak to a joiner that reuses the pid.
         self.file_intent(self.me, local.pilot);
         {
             let rostered = self.roster.at(tick);
@@ -576,16 +454,6 @@ impl Server {
         });
     }
 
-    /// Advance the authoritative sim by exactly one tick and return the resulting
-    /// [`SteppedTick`]: the [`CoreSnapshot`](crate::snapshot::CoreSnapshot) already SERIALIZED to
-    /// bytes, plus whether the tick was a RESTART edge. Injects `crabs` (the freshly-pumped NN
-    /// crab poses, one per crab in index order; empty ⇒ crabs unchanged) FIRST so this tick's
-    /// grab/extraction resolve against the real bodies, then steps the sim with this tick's
-    /// assembled input set, then builds the snapshot at
-    /// this ONE site — stamping the per-player `input_next` watermarks — and returns its wire
-    /// bytes. Returning bytes (not the struct) makes the hand-off ALWAYS serialized — the client
-    /// decodes and applies, no by-reference shortcut even in SP. Must be called only when
-    /// [`next_tick_ready`](Server::next_tick_ready) is `true`.
     pub fn step_next(&mut self, crabs: &[CrabPose]) -> SteppedTick {
         let tick = self.sim.tick();
         // Mid-game join: a pid rostered at THIS tick but absent from the authoritative sim is a
@@ -598,10 +466,6 @@ impl Server {
                 self.sim.spawn_joining_player(pid);
             }
         }
-        // The departure mirror: a sim player NOT rostered at THIS tick has left
-        // ([`Server::depart`] shrank the roster when its link died) — remove it from the live world
-        // before stepping, so this tick's input set (which no longer carries it) matches the sim's
-        // participant set and the snapshot broadcasts the removal to every client.
         let departed: Vec<PlayerId> = self
             .sim
             .players()
@@ -620,9 +484,6 @@ impl Server {
             "the assembled tick is out of step with the sim tick"
         );
         if !crabs.is_empty() {
-            // One pose per crab, index-aligned; a count mismatch is refused inside the sim
-            // (set_external_crab_pose panics past the crab set) and a SHORT slice is refused
-            // here — a partially-driven round would silently freeze the tail crabs.
             assert_eq!(
                 crabs.len(),
                 self.sim.crabs().len(),
@@ -641,21 +502,10 @@ impl Server {
         }
     }
 
-    /// The current roster (sorted) — the latest scheduled set. Grows on [`Server::admit`], shrinks
-    /// on [`Server::depart`].
     pub fn roster(&self) -> &[PlayerId] {
         self.roster.current()
     }
 
-    /// Admit a new client mid-match and return the [`Admission`] for the caller to UNICAST to the
-    /// joiner. Allocates the LOWEST [`PlayerId`] not currently in the roster — append-only, so
-    /// every existing player KEEPS its id (a positional renumber would desync every peer).
-    /// Schedules the new roster to take effect at `effective_tick` ([`JOIN_LEAD`] past the
-    /// assemble cursor) so the welcome can reach the joiner around its entry; its stream holds
-    /// neutral until its first input arrives, so a slow welcome delays nobody.
-    ///
-    /// Admission control ([`may_admit_joiner`]) is the CALLER's gate BEFORE this; `admit` is the
-    /// bookkeeping once that gate has passed.
     pub fn admit(&mut self) -> Admission {
         let pid = self.lowest_free_pid();
         // Past the assemble cursor by JOIN_LEAD, but always strictly after any change already
@@ -693,21 +543,13 @@ impl Server {
         let effective_tick = self.roster.earliest_change_at(self.next_assemble());
         self.roster.schedule_change(effective_tick, &remaining);
         self.streams.remove(&pid);
-        // Drop the leaver's craft immediately; the level prune in `advance` is the guarantee
-        // (it also covers a shrink that lands without this call), this just saves the gap ticks.
         self.pilot_intents.remove(&pid);
     }
 
-    /// Every currently-piloting player's LATEST intent — the SINGLE truth of "who pilots":
-    /// boarding is alive-gated at the insert ([`Server::file_intent`]), departures are
-    /// roster-pruned per [`Server::advance`], so the driver mirrors this into the crab
-    /// world's `VehicleControls` verbatim.
     pub fn pilot_intents(&self) -> &BTreeMap<PlayerId, crate::lockstep::PilotIntent> {
         &self.pilot_intents
     }
 
-    /// The lowest [`PlayerId`] not in the current roster — the stable allocation `admit` hands a
-    /// joiner. Couch-scale, so a free id always exists well inside `u8`.
     fn lowest_free_pid(&self) -> PlayerId {
         let in_use: std::collections::BTreeSet<PlayerId> =
             self.roster.current().iter().copied().collect();
@@ -748,9 +590,6 @@ mod tests {
         (0..n).map(PlayerId).collect()
     }
 
-    /// A server over `roster` with a tick-0 authoritative sim on `seed` (the stream/roster tests
-    /// don't read the sim; the join/lockstep tests match their clients' seed so the authoritative
-    /// world agrees).
     fn srv(seed: u64, roster: &[PlayerId]) -> Server {
         Server::new(PlayerId(0), roster, Sim::new(seed, roster))
     }
@@ -767,7 +606,6 @@ mod tests {
         }
     }
 
-    /// A neutral-axes piloting intent of `kind`, for the intent-map tests.
     fn intent(kind: crab_world::vehicle::VehicleKind) -> crate::lockstep::PilotIntent {
         crate::lockstep::PilotIntent {
             kind,
@@ -780,17 +618,12 @@ mod tests {
         }
     }
 
-    /// The pilot-intent map is LEVEL state off the tick stream (rl#191 increment 2): the newest
-    /// ACCEPTED message wins (a stale re-delivery can't regress it), the host's own rides
-    /// `advance`, on-foot (`pilot: None`) removes, and a departed player's entry dies with it —
-    /// so a joiner reusing the pid ([`Server::lowest_free_pid`]) never inherits a craft.
     #[test]
     fn pilot_intents_follow_latest_message_and_roster() {
         use crab_world::vehicle::VehicleKind;
         let p1 = PlayerId(1);
         let mut s = srv(42, &ids(2));
 
-        // A remote boards a plane; a STALE re-delivery (same issue, on foot) must not regress.
         s.record_remote(
             p1,
             TickMsg {
@@ -806,7 +639,6 @@ mod tests {
             "a stale duplicate is rejected by the stream and must not clear the intent"
         );
 
-        // The freshest message wins: cycle to the ship, then step out.
         s.record_remote(
             p1,
             TickMsg {
@@ -821,7 +653,6 @@ mod tests {
             "pilot: None is on foot — the entry is removed, not zeroed"
         );
 
-        // The host's own intent rides advance (its input never streams).
         s.advance(TickMsg {
             pilot: Some(intent(VehicleKind::Plane)),
             ..tickmsg(0, 0.0)
@@ -829,8 +660,6 @@ mod tests {
         assert_eq!(s.pilot_intents()[&PlayerId(0)].kind, VehicleKind::Plane);
         step_ready(&mut s);
 
-        // P1 flies again, then departs: its craft dies with it, and the joiner that REUSES
-        // pid 1 starts on foot — no inherited craft (the lowest_free_pid reuse trap).
         s.record_remote(
             p1,
             TickMsg {
@@ -844,7 +673,6 @@ mod tests {
             !s.pilot_intents().contains_key(&p1),
             "departure drops the craft"
         );
-        // Advance past the shrink so the reused allocation is real, then admit.
         for t in 1..=4 {
             s.advance(tickmsg(t, 0.0));
             step_ready(&mut s);
@@ -857,17 +685,11 @@ mod tests {
         );
     }
 
-    /// Boarding is alive-gated AT THE INSERT ([`Server::file_intent`] — the intent map is
-    /// the single truth of "who pilots"): a not-alive player's fresh intent is DROPPED
-    /// outright (no parked intent to auto-board at respawn), while an already-flying pilot
-    /// keeps its craft through death — only boarding is gated, matching the local E-cycle.
     #[test]
     fn boarding_is_alive_gated_at_the_intent_insert() {
         use crab_world::vehicle::VehicleKind;
         use crate::sim::{Player, PlayerStatus};
         let p1 = PlayerId(1);
-        // Down p1 in the authoritative sim before serving (snapshot surgery — the round
-        // logic owns live transitions, so a test constructs the state through the seam).
         let mut sim = Sim::new(42, &ids(2));
         let mut snap = sim.core_snapshot();
         let p = snap.players[&p1];
@@ -888,11 +710,8 @@ mod tests {
             "a downed player's boarding intent is dropped, not parked"
         );
 
-        // Hand-file the craft as if boarded while alive, then verify death doesn't eject:
-        // a downed pilot's NEXT intent still updates its existing entry.
         s.file_intent(p1, Some(intent(VehicleKind::Plane)));
         assert!(!s.pilot_intents().contains_key(&p1), "file_intent applies the same gate");
-        // Board legitimately: revive, board, re-down, then keep flying.
         let mut snap = s.sim().core_snapshot();
         let p = snap.players[&p1];
         snap.players
@@ -1299,7 +1118,7 @@ mod tests {
     /// (a positional renumber on join would desync every peer).
     #[test]
     fn admit_allocates_lowest_free_id_without_renumbering() {
-        let mut s = srv(42, &ids(2)); // [P0, P1]
+        let mut s = srv(42, &ids(2));
         let a = s.admit();
         assert_eq!(a.pid, PlayerId(2), "the lowest id not already in use");
         assert_eq!(a.roster, vec![PlayerId(0), PlayerId(1), PlayerId(2)]);
@@ -1365,12 +1184,6 @@ mod tests {
         }
     }
 
-    /// The SP-IDENTITY invariant. Over a scripted input + crab-pose log, the
-    /// host-authoritative path (the server steps its OWN sim and emits a snapshot the client applies)
-    /// produces the EXACT same per-tick `state_hash` as stepping a bare [`Sim`] by hand, tick-for-tick
-    /// — proving the authoritative step is behavior-preserving. It also checks the always-serialized
-    /// hand-off: the client (which only ever calls `apply_core_snapshot`) re-emits byte-identical
-    /// snapshots, so it faithfully mirrors the authoritative carried state.
     #[test]
     fn server_authoritative_path_is_sp_identical() {
         const SEED: u64 = 0x00C0FFEE;
@@ -1378,10 +1191,6 @@ mod tests {
         let me = PlayerId(0);
         let roster = vec![me];
 
-        // A deterministic, tick-varied crab pose. The rapier body is external to the sim; here a
-        // synthetic stand-in is fed IDENTICALLY to both paths, so the comparison isolates the
-        // sim-stepping equivalence, independent of the physics engine the live driver actually
-        // pumps (which feeds the SAME pose into both arms — see `drive_lockstep`).
         let pose_at = |tick: u64| CrabPose {
             pos: Pos {
                 x: 700 + tick as i64 * 11,
@@ -1390,8 +1199,6 @@ mod tests {
             yaw: (tick as i32).wrapping_mul(4096),
             digest: tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xABCD,
         };
-        // Scripted local input that actually moves the player (forward + a strafe wiggle + an
-        // occasional ACTION), so the round evolves and a dropped field would diverge the hash.
         let input_at = |i: u64| {
             let strafe = ((i % 3) as f32 - 1.0) * 0.6;
             let btns = if i % 5 == 4 { buttons::ACTION } else { 0 };
@@ -1430,16 +1237,11 @@ mod tests {
                         CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
                     client.apply_core_snapshot(snap);
                     server_hashes.push((server.sim().tick(), server.sim().state_hash()));
-                    // The client faithfully mirrors the authoritative CARRIED state. It can't fold
-                    // the intentionally-dropped `external_crab_digest`, so its `state_hash` differs by
-                    // design — compare the snapshot it RE-EMITS, which must be byte-identical.
                     assert_eq!(
                         client.core_snapshot().to_bytes(),
                         bytes,
                         "the client re-emits the server's exact snapshot (carried state mirrored)"
                     );
-                    // The apply cursor tracks the adopted snapshot (the client doesn't step itself),
-                    // so next_tick stays honest rather than frozen at 0 while the sim advances.
                     assert_eq!(
                         client.next_tick(),
                         client.sim().tick(),
@@ -1457,16 +1259,8 @@ mod tests {
         assert_eq!(baseline[0].0, 1);
     }
 
-    /// The rl#204 wedge, distilled at the authoritative-server seam: a RESTART press used to
-    /// rewind `Sim::tick` to 0 while the assemble-tick space stayed monotone and the match
-    /// wedged permanently. Now a restart is a state-reset at the CURRENT tick: press R
-    /// mid-round and assert the match keeps ticking — every subsequent input still assembles,
-    /// steps, and emits a monotone snapshot, and the restart tick's own snapshot carries the
-    /// spawn-state world.
     #[test]
     fn restart_does_not_wedge_the_match() {
-        // Two rostered players — the MP shape from the issue; solo hits the same mismatch and
-        // is covered by every other test's roster-of-one.
         let mut s = srv(42, &ids(2));
         let fresh_players: Vec<_> = Sim::new(42, &ids(2)).players().collect();
         const RESTART_AT: u64 = 10;
@@ -1534,8 +1328,6 @@ mod tests {
         let mut server = srv(SEED, &[host]);
         let crab_spawn = server.sim().crabs()[0].pos();
 
-        // A crab pose walked steadily away from spawn, so "crab is at its live pose, not reset" is
-        // unambiguous. Fed to `step_next` as the authoritative body pose each tick.
         let pose_at = |tick: u64| CrabPose {
             pos: Pos {
                 x: 5000 + tick as i64 * 13,
@@ -1580,15 +1372,12 @@ mod tests {
         }
 
         let (jpid, eff, _) = joiner.expect("a joiner was admitted");
-        // Snapshot ticks are strictly increasing — no reset to 0 anywhere across the join.
         for w in snaps.windows(2) {
             assert!(
                 w[1].tick > w[0].tick,
                 "the tick is monotonic — the join never resets the round"
             );
         }
-        // The pre-join snapshot AT the effective tick (produced by stepping tick eff-1, when the
-        // roster is still host-only) does NOT carry the joiner.
         let before = snaps
             .iter()
             .find(|s| s.tick == eff)
@@ -1597,7 +1386,6 @@ mod tests {
             !before.players.contains_key(&jpid),
             "no joiner before its effective tick"
         );
-        // Stepping tick `eff` spawns the joiner into the LIVE sim, so the next snapshot carries it.
         let after = snaps
             .iter()
             .find(|s| s.tick == eff + 1)
@@ -1615,8 +1403,6 @@ mod tests {
             after.roster.contains(&jpid),
             "the snapshot roster carries the joiner"
         );
-        // The crab is at its LIVE walked pose for that tick — the round kept running, NOT reset to
-        // spawn: the joiner adopts an ONGOING crab, no round-boundary rebuild.
         assert_eq!(
             after.crabs[0].pos(),
             pose_at(eff).pos,
@@ -1630,11 +1416,6 @@ mod tests {
         assert!(eff > JOIN_LEAD, "the join genuinely lands mid-round");
     }
 
-    /// The admission gate: the host admits an asset-matched, count-compatible joiner
-    /// regardless of the joiner's brain (a joiner never executes one) and refuses an asset or
-    /// rig-count mismatch loudly, typed — the host→joiner analogue of the formation gate,
-    /// fail-LOUD per joiner. (No host-brain half: the host's bindings are validated fail-loud
-    /// at launch — rl#200.)
     #[test]
     fn admission_gate_admits_match_and_refuses_mismatches() {
         let ha = 0x5A11_2233u64;

@@ -1,14 +1,3 @@
-//! The local client's per-round state on the host-authoritative path.
-//!
-//! Under host-authoritative state-resync the client does NOT step a sim of its own: the authoritative
-//! [`crate::server::Server`] steps the world at the HOST's own pace and emits a [`CoreSnapshot`] per
-//! tick, and this type ADOPTS it ([`Lockstep::apply_core_snapshot`]) as the rendered state. Its
-//! remaining jobs are: schedule the LOCAL player's input UP to the server
-//! ([`Lockstep::submit_local_input`]), adopt the server's snapshot DOWN, and — on a remote client —
-//! re-predict the local avatar over its still-unconsumed inputs
-//! ([`Lockstep::reconcile_local_prediction`]) so WASD responds at input latency, not round-trip. It
-//! owns the client's sim only as the surface the snapshot writes into and the render reads from.
-//! Inputs cross the wire; state crosses it as full snapshots.
 
 use std::collections::BTreeMap;
 
@@ -29,43 +18,21 @@ pub struct TickMsg {
     /// (rl#193/#194/#195).
     pub issue_tick: u64,
     pub input: Input,
-    /// The sender's piloting intent this tick, BESIDE the foot input (rl#191 increment 2):
-    /// `None` = on foot. Riding the ONE per-tick message keeps ordering/departure/backpressure
-    /// shared with the input stream, and deliberately OUT of the deterministic sim [`Input`] —
-    /// the craft is host-authoritative rapier state, not sim state. The host files the latest
-    /// intent per player into the crab world's `VehicleControls`
-    /// ([`crate::server::Server::pilot_intents`]).
     pub pilot: Option<PilotIntent>,
 }
 
-/// One player's craft intent for a tick — the wire form of the crab world's
-/// [`PilotCommand`], as plain POD (`f32` arrays, no bevy/glam) like every wire type, so the
-/// codec layout is explicit. Existence means "piloting `kind`"; on-foot is the absent
-/// [`TickMsg::pilot`], so a stale intent with no pilot is unrepresentable — the same
-/// presence-IS-piloting rule as `VehicleControls` itself.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PilotIntent {
-    /// Which craft to fly (cycled by the player). A change respawns the body host-side.
     pub kind: VehicleKind,
-    /// Throttle-lever trim this tick (plane), `-1..1`.
     pub throttle_trim: f32,
-    /// Direct body-frame thrust intent (ship): strafe/vertical/forward, each `-1..1`.
     pub thrust: [f32; 3],
-    /// Pitch/roll/yaw control intents, each `-1..1`.
     pub pitch: f32,
     pub roll: f32,
     pub yaw: f32,
-    /// Match-velocity brake held (ship).
     pub match_velocity: bool,
 }
 
 impl PilotIntent {
-    /// This intent as the [`PilotCommand`] the crab-world force model reads — the host's
-    /// filing seam. Every axis is SANITIZED here (non-finite → 0, then clamped to `-1..1`):
-    /// a remote client's floats are untrusted, and the force model multiplies them straight
-    /// into thrust/torque, so a hostile or garbled intent must not command unbounded force.
-    /// The local path already clamps in `flight_control`; re-clamping is idempotent, so host
-    /// and remote intents go through the ONE seam.
     pub fn to_command(&self) -> PilotCommand {
         let s = |v: f32| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
         PilotCommand {
@@ -80,26 +47,15 @@ impl PilotIntent {
     }
 }
 
-/// A peer [`TickMsg`] tagged with the sender's already-resolved [`PlayerId`]. The
-/// id is mapped from the QUIC-authenticated endpoint id via the frozen
-/// participant set (never read from the message body — see [`crate::transport::FromPeer`]),
-/// so the server can trust it as the input's true author.
 #[derive(Debug, Clone, Copy)]
 pub struct PeerMsg {
     pub pid: PlayerId,
     pub msg: TickMsg,
 }
 
-/// The local client's per-round state: schedules the local input UP, adopts the authoritative
-/// snapshot DOWN, and predicts/reconciles the local avatar. Owns the client's sim as the surface the
-/// snapshot writes into — it never steps that sim itself (the server is authoritative).
 pub struct Lockstep {
     sim: Sim,
     me: PlayerId,
-    /// The participant set at ROUND START (sorted, deduped, including `me`) — what the authoritative
-    /// server is built over ([`Self::peers`]). Read only at round start; the live roster of record is
-    /// the server's, carried on every adopted [`CoreSnapshot`] (a mid-game join grows the SIM's player
-    /// set, never this).
     peers: Vec<PlayerId>,
     /// The local player's own submitted inputs, keyed by issue tick — kept for
     /// [`Self::reconcile_local_prediction`] to replay the still-unconsumed window after adopting a
@@ -114,16 +70,10 @@ pub struct Lockstep {
     /// The tick the NEXT local input will be issued as. Incremented once per
     /// [`Self::submit_local_input`]. Starts at 0.
     next_issue_tick: u64,
-    /// The next tick to APPLY (0-based; equals the count already applied). Advanced only by
-    /// [`Self::apply_core_snapshot`] — the client no longer steps, so adopting the server's snapshot
-    /// is the one place the apply cursor moves. Kept explicitly so a JOINER ([`Self::join_at`]) can
-    /// enter at the live tick.
     next_apply_tick: u64,
 }
 
 impl Lockstep {
-    /// Start a round. `seed` is the shared match seed (identical on the server); `peers` is the full
-    /// participant set; `me` is this client's id and must be in it.
     pub fn new(seed: u64, peers: &[PlayerId], me: PlayerId) -> Self {
         let mut peers = peers.to_vec();
         peers.sort();
@@ -163,20 +113,10 @@ impl Lockstep {
         }
     }
 
-    /// The next tick to be applied (0-based; equals the count already applied).
     pub fn next_tick(&self) -> u64 {
         self.next_apply_tick
     }
 
-    /// Submit THIS client's input as the next issue in its sequence and get the message to ship UP
-    /// to the server (which consumes it — immediately for the host's own input, in arrival order
-    /// for a remote's).
-    ///
-    /// Call exactly once per tick — the issue cursor advances by one each call, so a missed or
-    /// doubled call would gap or collide the input stream. The input is also recorded locally so
-    /// [`Self::reconcile_local_prediction`] can replay the still-unconsumed window after an adopt.
-    /// `pilot` is the piloting intent riding beside the foot input (`None` = on foot); only the
-    /// foot input is recorded for prediction — the craft is host-authoritative, never predicted.
     pub fn submit_local_input(&mut self, input: Input, pilot: Option<PilotIntent>) -> TickMsg {
         let issue_tick = self.next_issue_tick;
         self.next_issue_tick += 1;
@@ -188,7 +128,6 @@ impl Lockstep {
         }
     }
 
-    /// Read-only sim view for rendering/inspection.
     pub fn sim(&self) -> &Sim {
         &self.sim
     }
@@ -206,56 +145,16 @@ impl Lockstep {
         CoreSnapshot::from_bytes(&bytes).expect("a freshly-built snapshot must round-trip")
     }
 
-    /// Adopt the authoritative server's [`CoreSnapshot`] as this client's rendered state: the
-    /// client never steps its own sim — the server steps and emits a snapshot per tick, and this
-    /// overwrites the carried game state ([`Sim::apply_core_snapshot`]).
-    /// `scene::apply_transforms` then reads [`sim`](Lockstep::sim) exactly as before, tweening from
-    /// `prev`. SP funnels the server's bytes through the SAME decode a wire client does
-    /// ([[sp-is-mp-special-case]]), so there is no by-reference SP fork.
-    ///
-    /// Also stashes the snapshot's [`CoreSnapshot::input_next`] watermarks and prunes our own
-    /// submitted inputs to the still-unconsumed window `issue_tick >= input_next[me]` (we file
-    /// inputs UP but never step to consume them, so without the prune the map grows unbounded).
-    /// The survivors are exactly what [`reconcile_local_prediction`] replays on the local avatar —
-    /// the server consumes a remote's inputs as they arrive, so its watermark (not the snapshot
-    /// tick) is the one true consumption cursor.
     pub fn apply_core_snapshot(&mut self, snapshot: CoreSnapshot) {
         let applied_tick = snapshot.tick;
         let next_unconsumed = snapshot.input_next.get(&self.me).copied().unwrap_or(0);
         self.input_next = snapshot.input_next.clone();
         self.sim.apply_core_snapshot(snapshot);
-        // Track the apply cursor to the snapshot we just adopted — the client no longer steps, so this
-        // is the one place it moves. `snapshot.tick` is the POST-step tick count (the sim is now AT
-        // it), so the next tick to apply equals it. Keeps `next_tick()` honest (it would otherwise sit
-        // at 0 forever while the sim advances, mis-stamping the `issue_tick` telemetry).
         self.next_apply_tick = applied_tick;
         // Prune to the still-unconsumed window — see the doc above.
         self.inputs = self.inputs.split_off(&next_unconsumed);
     }
 
-    /// THE remote-client adopt policy — the one shared answer to "which drained snapshots does a
-    /// client apply, in what order?" for both remote clients (the windowed driver's `RemoteAdopt`
-    /// arm and headless `game net`'s client arm): apply EVERY snapshot it is handed, in ARRIVAL
-    /// order, with NO tick gate. The reliable ordered per-peer stream delivers snapshots in the
-    /// host's send (= step) order, so arrival order IS authoritative — a `tick <=`/`max` gate or
-    /// a sort-by-tick would add nothing but a place to go wrong (and historically froze clients
-    /// across a host RESTART, back when a restart rewound the tick; ticks are monotone across a
-    /// restart now — rl#204 — so there is nothing to gate). Each snapshot is a FULL
-    /// state overwrite, so applying intermediates is cheap (~hundreds of bytes/tick) and keeps
-    /// per-adopt observers exact. (How MANY to hand over per frame is the caller's pacing
-    /// concern: the windowed driver feeds this from a small jitter buffer, one per local tick,
-    /// so burst arrivals don't render as a freeze-then-jump — rl#194. The headless client,
-    /// which renders nothing, adopts every arrival directly.)
-    ///
-    /// `on_adopt` runs after each apply (the `--hash-log` observer; pass `|_| ()` to skip). Returns
-    /// how many snapshots were adopted; callers gate POST-adopt work
-    /// ([`reconcile_local_prediction`](Lockstep::reconcile_local_prediction)) on it having been at
-    /// least one. PRE-adopt work (the driver's `prev` interpolation-source refresh) must instead be
-    /// gated on the batch being nonempty BEFORE this call — the count comes back too late.
-    ///
-    /// Scope: this polices a DRAINED REMOTE batch. Host/solo self-mirrors of the single snapshot
-    /// their own in-process server just stepped stay on raw
-    /// [`apply_core_snapshot`](Lockstep::apply_core_snapshot) — no batch, no ordering question.
     pub fn adopt_snapshots(
         &mut self,
         snapshots: impl IntoIterator<Item = CoreSnapshot>,
@@ -270,20 +169,6 @@ impl Lockstep {
         adopted
     }
 
-    /// Re-predict the LOCAL player over its still-unconsumed inputs after adopting an authoritative
-    /// snapshot, so a remote client's own avatar responds at input latency instead of round-trip
-    /// latency. Call ONCE, right after
-    /// [`apply_core_snapshot`](Lockstep::apply_core_snapshot), on the remote-adopt arm only: that call
-    /// re-seats every entity to the host's authoritative state (our avatar included, at its
-    /// round-trip-old position) and prunes `self.inputs` to the inputs the snapshot's watermark
-    /// says the server hasn't consumed; this replays those, in issue order, on the local player
-    /// alone — the same sequence the server will consume in order as they arrive. (Not exact
-    /// under starvation: a stream gap makes the server interleave HOLDS of our last move axes,
-    /// which the replay doesn't include — the residue is corrected at the next adopt.)
-    /// Remote players and the crab stay authoritative and are interpolated, never predicted
-    /// ([[render-matches-physics]] — the crab is the host's, not guessed). MUST NOT run on the
-    /// server-authoritative (solo/host) arm: there the host already applied the local input in the
-    /// same tick it emitted the snapshot, so replaying it would double-apply and run the avatar ahead.
     pub(crate) fn reconcile_local_prediction(&mut self) {
         let me = self.me;
         // Ascending `BTreeMap` order = issue order, which the facing-relative mover requires
@@ -293,9 +178,6 @@ impl Lockstep {
         }
     }
 
-    /// Drive one crab's ground position + yaw + physics digest from its real NN crab body —
-    /// forwards to [`Sim::set_external_crab_pose`], the ONLY way a crab moves. Used by the
-    /// headless screenshot/probe seed path and the round-setup crab-pose seed.
     pub fn set_external_crab_pose(
         &mut self,
         crab: usize,
@@ -306,21 +188,14 @@ impl Lockstep {
         self.sim.set_external_crab_pose(crab, pos, yaw, phys_digest);
     }
 
-    /// Set the round's crab count from the host's brain-binding list (rl#200) — forwards to
-    /// [`Sim::configure_crabs`]. Round SETUP only, before the authoritative server clones this
-    /// sim; a client's count is a placeholder its first adopted snapshot replaces.
     pub fn configure_crabs(&mut self, crabs: usize) {
         self.sim.configure_crabs(crabs);
     }
 
-    /// This client's id.
     pub fn me(&self) -> PlayerId {
         self.me
     }
 
-    /// The ROUND-START participant set (sorted, incl. `me`) — the set the authoritative server is
-    /// built over (solo ⇒ just `me`), so the client and its server agree on the roster by
-    /// construction. Read only at round start; the live roster is the sim's (snapshot-carried).
     pub fn peers(&self) -> &[PlayerId] {
         &self.peers
     }
@@ -335,9 +210,6 @@ mod tests {
         (0..n).map(PlayerId).collect()
     }
 
-    /// The filing seam sanitizes UNTRUSTED wire floats: a remote's intent reaches the force
-    /// model only through [`PilotIntent::to_command`], which zeroes non-finite axes and clamps
-    /// to `-1..1` — a hostile/garbled intent can't command unbounded thrust or torque.
     #[test]
     fn intent_to_command_sanitizes_untrusted_axes() {
         let cmd = PilotIntent {
@@ -454,10 +326,6 @@ mod tests {
         );
     }
 
-    /// A remote client follows a host RESTART (rl#204): the restart is a state-reset at the
-    /// current tick, so the wire carries a gap-free MONOTONE tick stream whose restart-tick
-    /// snapshot holds the spawn-state world. The client adopts every arrival in order and ends
-    /// on the fresh round — no gate, no freeze, no tick regression anywhere.
     #[test]
     fn adopt_snapshots_follows_a_host_restart() {
         use crate::sim::buttons;
@@ -467,7 +335,6 @@ mod tests {
         let mut client = Lockstep::new(7, &roster, me);
         let spawn = Sim::new(7, &roster).player(me).expect("rostered").pos();
 
-        // One host: walk away from spawn for 5 ticks, press RESTART, then one neutral tick.
         let mut sched = Lockstep::new(7, &roster, me);
         let mut host = Server::new(me, &roster, Sim::new(7, &roster));
         let mut arrivals = Vec::new();

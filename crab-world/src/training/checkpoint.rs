@@ -1,10 +1,3 @@
-//! Persisted training artifacts and the backend/optimizer types they serialize: the
-//! checkpoint file names/layout, the enveloped brain + Adam-optimizer + return-normalizer
-//! round trips, and the Adam construction. Every artifact ships inside a
-//! [`CheckpointEnvelope`](super::envelope) (kind + per-kind version + arch), so a loader
-//! always knows WHAT it is decoding and for WHICH architecture — see [`load_brain_file`]
-//! for the arch dispatch. The obs-normalizer round trip lives with its owner
-//! ([`super::normalizer::ObsNormalizer`]); this module owns the shared plumbing.
 
 use std::path::{Path, PathBuf};
 
@@ -21,10 +14,6 @@ use super::envelope::{
 };
 use crate::bot::arch::{AnyBrain, ArchId};
 
-/// The Adam optimizer over an [`AnyBrain`] on backend `B` — the moments key off leaf
-/// `ParamId`s, so the enum wrapper changes nothing about the record. Generic over the backend so
-/// the one PPO update ([`super::update::ppo_update_core`]) serves the live GPU learner
-/// and the CPU-backed update test from one code path.
 pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 
 /// Write a brain to `path` as its LEAF record inside a [`ArtifactKind::Brain`] envelope
@@ -193,44 +182,18 @@ pub(crate) fn check_body_identity(
     }
 }
 
-/// Build the learner's Adam optimizer (global grad-norm clip 0.5). The ONE source of
-/// the optimizer construction — the live `GpuLearner` and the CPU-backed update test
-/// both call this, so the clip constant can't silently drift between paths meant to be
-/// identical.
 pub(crate) fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {
     AdamConfig::new()
         .with_grad_clipping(Some(GradientClippingConfig::Norm(0.5)))
         .init()
 }
 
-/// Canonical checkpoint filenames. The single place each artifact's on-disk name lives;
-/// every reader and writer (training, resume, the demo's load + hot-reload, and the
-/// best-keeper's [`super::best`] snapshot) references these rather than re-typing the
-/// string, so the names can't drift between modules.
 pub(crate) const BRAIN_FILENAME: &str = "brain.bin";
 pub(crate) const NORMALIZER_FILENAME: &str = "normalizer.bin";
-/// Return (value-target) normalizer checkpoint, beside the obs normalizer, so a
-/// resumed run de-normalizes value predictions against the same scale it trained
-/// with (a cold scale on resume would briefly mis-scale the value head).
 pub(crate) const RETURN_NORMALIZER_FILENAME: &str = "return_normalizer.bin";
-/// Persisted Adam optimizer state (rl#60): the per-parameter first/second moments and step
-/// (`time`) the GPU learner carries across iterations. A resume restores these so the
-/// optimizer continues with warm momentum instead of paying the brief self-correcting
-/// transient a cold restart costs. Absent in older checkpoints, which then resume cold
-/// (see [`load_optimizer`]) rather than erroring.
 pub(crate) const OPTIMIZER_FILENAME: &str = "optimizer.bin";
-/// Tick-budget odometer, beside the checkpoint, so a restarted learner resumes the
-/// `--ticks` budget rather than restarting it (the overnight loop makes restarts the
-/// expected case). Read/written by [`super::inproc`]; policy-independent plain text,
-/// so it carries no envelope.
 pub(crate) const TICK_WATERMARK_FILENAME: &str = "ticks.txt";
 
-/// The on-disk layout of a checkpoint directory: the single place that knows which
-/// filename each artifact uses and how its path is assembled. Callers ask for
-/// [`Self::brain_file`] / [`Self::normalizer_path`] / … instead of re-deriving
-/// `dir.join(CONST)` by hand, so a layout change lands in one place and every reader and
-/// writer (training, resume, the demo's load + hot-reload) stays in lockstep. Borrows the
-/// dir, so it's free to construct at each use.
 pub(crate) struct CheckpointDir<'a> {
     dir: &'a Path,
 }
@@ -259,15 +222,6 @@ impl<'a> CheckpointDir<'a> {
     }
 }
 
-/// Persist an Adam optimizer's state (per-param first/second moments + step) to `path`,
-/// atomically, inside an [`ArtifactKind::Optimizer`] envelope tagged with `arch` — the
-/// architecture of the brain these moments belong to. The tag is the optimizer's SOLE
-/// cross-arch guard: the record is a `HashMap<ParamId, …>`, so a wrong-arch load would
-/// not even fail — every lookup would silently miss and the moments go cold. Generic over
-/// the backend so the live GPU learner and the CPU round-trip test serialize through ONE
-/// path — no save/load drift. `save_stamp` is the set stamp of the checkpoint these
-/// moments were saved beside (bddap/rl#215). Best-effort: any failure is logged, not
-/// fatal (a resume then loads cold — see [`OPTIMIZER_FILENAME`]).
 #[cfg(any(feature = "wgpu", test))]
 pub(crate) fn save_optimizer<B: AutodiffBackend>(
     optimizer: &CrabOpt<B>,
@@ -293,16 +247,6 @@ pub(crate) fn save_optimizer<B: AutodiffBackend>(
     }
 }
 
-/// Load an Adam optimizer state saved by [`save_optimizer`] onto `device`, returning the
-/// optimizer with its moments + step restored. REFUSE-AND-COLD is this artifact's whole
-/// refusal policy (bddap/rl#200 §2): the `cold` optimizer is returned UNCHANGED — logged,
-/// no error — when the file is absent, legacy, corrupt, version-unrecognized, or failing
-/// either half of `key` — the resumed brain's [`SetKey`]: a wrong arch, or a save stamp
-/// from a different save, meaning these moments were saved beside a DIFFERENT brain
-/// (bddap/rl#215). Cold moments only cost a brief self-correcting transient; wrong moments
-/// would silently miss every `ParamId` lookup. The per-parameter keys line up across an
-/// honest round trip because the resumed brain restores the SAME `ParamId`s from its own
-/// record.
 #[cfg(any(feature = "wgpu", test))]
 pub(crate) fn load_optimizer<B: AutodiffBackend>(
     cold: CrabOpt<B>,
@@ -449,9 +393,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A legacy (pre-envelope) brain file is REFUSED with the legacy-naming verdict —
-    /// the loader has no untagged-read path, so the old quiet-rest-pose degrade on a raw
-    /// record is impossible by construction.
     #[test]
     fn legacy_brain_file_is_refused_not_blind_loaded() {
         let dir = std::env::temp_dir().join("rl_test_brain_legacy_refuse");
@@ -555,8 +496,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let device = NdArrayDevice::Cpu;
 
-        // Warm an optimizer over several steps so its Adam moments + step are non-trivial,
-        // then snapshot brain + optimizer mid-run.
         let mut brain: AnyBrain<TrainBackend> = AnyBrain::init(ArchId::DEFAULT, &device);
         let mut warm = crab_optimizer::<TrainBackend>();
         for _ in 0..5 {
@@ -589,10 +528,6 @@ mod tests {
             "a cross-save optimizer must load cold"
         );
 
-        // A fresh cold optimizer loaded from the snapshot must take the NEXT step
-        // identically to the warm one (same momentum + step/bias-correction), and
-        // DIFFERENTLY from a truly cold optimizer — that difference is exactly the
-        // self-correcting transient a warm resume avoids.
         let restored = load_optimizer(
             crab_optimizer::<TrainBackend>(),
             &path,
@@ -623,8 +558,6 @@ mod tests {
                 "restored step diverged from warm at probe[{i}]: {a} vs {b}"
             );
         }
-        // The moments must actually matter: a cold optimizer's step differs from the warm
-        // one. If not, the round-trip wouldn't be exercising the persisted state.
         let differs = warm_m
             .iter()
             .zip(cold_m.iter())
@@ -661,9 +594,6 @@ mod tests {
             "an absent optimizer file must leave the optimizer cold"
         );
 
-        // (b) A legacy pre-envelope file (the old `OptimizerCheckpoint` bincode) has no
-        //     magic → refused, cold, no panic. Its only parser was the migration tool,
-        //     deleted with the rl#200 fleet migration.
         std::fs::write(&path, bincode::serialize(&(1u32, vec![0u8; 4])).unwrap()).unwrap();
         let cold2 = load_optimizer(
             crab_optimizer::<TrainBackend>(),

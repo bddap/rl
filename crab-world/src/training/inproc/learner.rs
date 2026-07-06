@@ -6,10 +6,6 @@
 
 use super::*;
 
-/// Everything one horizon's K rollouts contribute to the learner, reduced from the
-/// threads' [`RollOutcome`]s in one place: the per-env buffers the PPO update consumes,
-/// plus the aggregates the log and best-keeper read. One struct so the reduction's
-/// accumulators don't smear across the iteration body as a dozen loose locals.
 struct MergedRollout {
     rollouts: Vec<RolloutBuffer>,
     samples: u64,
@@ -158,8 +154,6 @@ fn log_iteration(r: &IterReport) {
         0.0
     };
     let (reached, finished) = r.reach;
-    // Reach fraction over finished episodes — the same signal the best-keeper gates
-    // promotion on (`SOLID_REACH_FRACTION`); `-` when no episode finished this iter.
     let reach_note = if finished > 0 {
         format!("{:.2}", reached as f64 / finished as f64)
     } else {
@@ -336,11 +330,6 @@ pub fn run_learner(
         anneal_epoch,
     );
 
-    // The target-distance band is FIXED at the full arena range: every episode samples a
-    // target across the whole arena, near and far (see `targets::sample_target`). The
-    // scale-free progress reward gives signal at any distance, so there is no growth
-    // curriculum to advance, persist, or even thread — the sampling rule reads the two
-    // band constants directly, the same on every warm resume (the bitter lesson).
 
     // Best-by-reach keeping (rl#157): mirror the checkpoint set into `<ckpt>/best/`
     // whenever the policy demonstrates a new high-water reach, so a collapse stays confined to

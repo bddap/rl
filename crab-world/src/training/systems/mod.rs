@@ -1,7 +1,3 @@
-//! The RL training loop, integrated with the Bevy game loop as ECS systems, split three ways:
-//! [`state`] owns [`TrainingState`] and the per-horizon protocol; [`step`] runs the per-tick
-//! Sense→Think→Act ([`brain_step`]); [`lifecycle`] holds the per-env episode machine and the
-//! reward/terminal finalize plus the [`reset_crab`] system.
 
 mod lifecycle;
 mod state;

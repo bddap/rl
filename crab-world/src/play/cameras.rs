@@ -1,6 +1,3 @@
-//! The demo's cameras: the windowed orbit camera (mouse/keyboard/gamepad free-look that
-//! tracks the tumbling crab) and the windowless offscreen camera the screenshot mode
-//! renders through.
 
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
@@ -14,7 +11,6 @@ use super::controls::{
     ORBIT_YAW_RIGHT_KEY, ZOOM_IN_KEY, ZOOM_IN_TRIGGER, ZOOM_OUT_KEY, ZOOM_OUT_TRIGGER, orbit_stick,
 };
 
-/// Orbit camera state. `focus` tracks the crab so it stays centered.
 #[derive(Component)]
 pub(super) struct OrbitCamera {
     focus: Vec3,
@@ -25,7 +21,6 @@ pub(super) struct OrbitCamera {
 
 impl Default for OrbitCamera {
     fn default() -> Self {
-        // Matches the screenshot framing: a 3/4 view from slightly above.
         Self {
             focus: Vec3::new(0.0, 0.4, 0.0),
             yaw: 0.64,
@@ -41,8 +36,6 @@ pub(super) fn spawn_orbit_camera(mut commands: Commands) {
         camera_transform(&orbit),
         Camera3d::default(),
         Camera {
-            // Dark fallback behind the night-sky skybox (see [`crate::sky`]); shown only
-            // until the cubemap uploads.
             clear_color: ClearColorConfig::Custom(crate::sky::NIGHT_CLEAR),
             ..default()
         },
@@ -126,7 +119,6 @@ pub(super) fn orbit_camera(
     orbit.pitch = (orbit.pitch + d_pitch).clamp(-1.3, 1.4);
     orbit.radius = (orbit.radius + d_zoom).clamp(1.0, 12.0);
 
-    // Smoothly keep the (possibly tumbling) crab centered.
     if let Ok(crab) = carapace_q.single() {
         orbit.focus = orbit.focus.lerp(crab.translation, (dt * 4.0).min(1.0));
     }
@@ -134,23 +126,14 @@ pub(super) fn orbit_camera(
     *transform = camera_transform(&orbit);
 }
 
-/// Screenshot-camera framing: the eye sits at this fixed offset from a focus
-/// pinned to the crab's horizontal position at this fixed mid-body height.
 const SHOT_CAM_OFFSET: Vec3 = Vec3::new(1.9, 0.95, 2.5);
 const SHOT_CAM_FOCUS_Y: f32 = 0.5;
 
-/// The single source for the offscreen camera's framing transform: focus pinned
-/// to the crab's horizontal position (`crab_xz.x`/`.z`) at the fixed mid-body
-/// height, eye at the fixed offset, looking at the focus. Both the initial spawn
-/// and the per-frame tracking go through here so the two can't drift.
 fn offscreen_camera_transform(crab_xz: Vec3) -> Transform {
     let focus = Vec3::new(crab_xz.x, SHOT_CAM_FOCUS_Y, crab_xz.z);
     Transform::from_translation(focus + SHOT_CAM_OFFSET).looking_at(focus, Vec3::Y)
 }
 
-/// Keep the offscreen camera aimed at the (possibly drifting) crab so it stays
-/// centered in the screenshot. Tracks horizontal position only; the vertical
-/// focus is fixed mid-body so framing doesn't bob.
 pub(super) fn track_offscreen_camera(
     carapace_q: Query<&Transform, (With<CrabCarapace>, Without<Camera3d>)>,
     mut cam_q: Query<&mut Transform, With<Camera3d>>,
@@ -170,8 +153,6 @@ pub(super) fn spawn_offscreen_camera(
 
     commands.spawn((
         screenshot::offscreen_camera_bundle(handle.clone()),
-        // Initial framing on the crab's start position (origin). `track_offscreen_camera`
-        // re-derives this every Update from the same source before any frame is captured.
         offscreen_camera_transform(Vec3::ZERO),
     ));
     commands.insert_resource(ShotTarget(handle));
@@ -181,15 +162,11 @@ pub(super) fn spawn_offscreen_camera(
 mod tests {
     use super::*;
 
-    /// The canonical framing pins the focus to the crab's horizontal position at the
-    /// fixed mid-body height and seats the eye at the fixed offset above it. Locks the
-    /// single source so a future edit can't silently re-introduce a drifting literal.
     #[test]
     fn offscreen_framing_is_canonical() {
         let t = offscreen_camera_transform(Vec3::new(3.0, 99.0, -4.0));
         let focus = Vec3::new(3.0, SHOT_CAM_FOCUS_Y, -4.0);
         assert_eq!(t.translation, focus + SHOT_CAM_OFFSET);
-        // Camera looks at the focus: forward points from eye to focus.
         let fwd = t.forward().as_vec3();
         assert!((fwd - (focus - t.translation).normalize()).length() < 1e-5);
     }

@@ -1,22 +1,4 @@
 #!/usr/bin/env bash
-# profile-game.sh — capture a CPU/GPU/FPS/frame-cost profile of an rl binary.
-#
-# Answers the recurring "why is the game slow?" question with one command instead
-# of rediscovering the toolchain each time (the 2026-06-28 GCR slideshow diag).
-# Read signals: GPU idle + slow ⇒ CPU-bound or software render; one thread pegged
-# ⇒ serial bottleneck; whole proc capped at ~1 core while loadavg ≫ cores ⇒
-# preemption starvation; backend != Vulkan/NVIDIA ⇒ software fallback.
-#
-# Two ways to point it at a process:
-#   profile-game.sh --pid <PID>            attach to a running process (read-only;
-#                                          safe against a live owner session)
-#   profile-game.sh [-- <BIN> <ARGS...>]   launch a target (default: the deployed
-#                                          /home/a/rl-game game), profile, then kill
-#
-# Sampling (nvidia-smi, top -H, /proc) is read-only — attach mode never signals the
-# target. Launched targets are pinned to cores 14-23 (botq builds are confined to
-# 0-13) so profiling isn't self-contended; for the real Vulkan client run the whole
-# script as user `a` (it owns the Wayland session and the GPU process).
 set -uo pipefail
 
 SECS=15
@@ -52,10 +34,8 @@ have "$TS" || TS="$(command -v taskset 2>/dev/null || true)"
 mkdir -p "$OUT"
 REPORT="$OUT/report.md"
 
-# --- resolve the target PID ----------------------------------------------------
 LAUNCHED=""
 if [ -z "$PID" ]; then
-  # launch mode: default to the deployed game's launcher unless a binary was given
   if [ ${#LAUNCH_CMD[@]} -eq 0 ]; then
     if [ -x "$GAME_DIR/run-game.sh" ]; then
       LAUNCH_CMD=("$GAME_DIR/run-game.sh")
@@ -66,8 +46,6 @@ if [ -z "$PID" ]; then
     fi
   fi
   echo "launching: ${LAUNCH_CMD[*]}  (pinned to cores $CORES)" >&2
-  # setsid → own process group, so cleanup kills the game even if the launcher
-  # (run-game.sh / safe-exec trampoline) forks rather than exec's into it.
   if [ -n "$TS" ] && [ -x "$TS" ]; then
     setsid "$TS" -c "$CORES" "${LAUNCH_CMD[@]}" >"$OUT/target.log" 2>&1 &
   else
@@ -75,10 +53,8 @@ if [ -z "$PID" ]; then
   fi
   PID=$!
   LAUNCHED=$PID
-  # the launcher writes the renderer's stdout/stderr (incl. the AdapterInfo line)
-  # here — read our own capture, not a stale deployed launch.log.
   [ -n "$LOG" ] || LOG="$OUT/target.log"
-  sleep 3  # let the window/renderer come up before sampling
+  sleep 3
 fi
 
 if ! kill -0 "$PID" 2>/dev/null; then
@@ -90,14 +66,12 @@ fi
 CMD="$(tr '\0' ' ' <"/proc/$PID/cmdline" 2>/dev/null | cut -c1-200)"
 PUSER="$(ps -o user= -p "$PID" 2>/dev/null | tr -d ' ')"
 
-# Only ever kill a process WE launched (its whole group) — attach mode never signals.
 cleanup() {
   [ -n "$LAUNCHED" ] || return
   kill -- "-$LAUNCHED" 2>/dev/null; sleep 1; kill -9 -- "-$LAUNCHED" 2>/dev/null
 }
 trap cleanup EXIT
 
-# --- GPU time series (nvidia-smi) ---------------------------------------------
 gpu_series() {
   have nvidia-smi || { echo "(nvidia-smi absent)"; return; }
   echo "t  gpu%  mem%  sm_mhz  watt"
@@ -113,7 +87,6 @@ gpu_proc() {
   nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv 2>/dev/null
 }
 
-# --- per-thread CPU (top -H, two snapshots SECS apart; 2nd reflects the window) -
 cpu_threads() {
   if have top; then
     top -H -b -n 2 -d "$SECS" -p "$PID" 2>/dev/null \
@@ -122,13 +95,11 @@ cpu_threads() {
     echo "(top absent)"
   fi
 }
-# involuntary context switches corroborate preemption starvation
 ctxt_switches() {
   awk '/nonvoluntary_ctxt_switches|voluntary_ctxt_switches/{print}' "/proc/$PID/status" 2>/dev/null
 }
 loadavg() { cat /proc/loadavg 2>/dev/null; nproc --all 2>/dev/null | sed 's/^/cores: /'; }
 
-# --- render backend + FPS from the target log ---------------------------------
 backend() {
   [ -n "$LOG" ] && [ -r "$LOG" ] || { echo "(no readable log: ${LOG:-none})"; return; }
   grep -aoE 'AdapterInfo \{[^}]*\}' "$LOG" | tail -1 \
@@ -144,7 +115,6 @@ fps() {
   fi
 }
 
-# --- optional perf frame-breakdown (flag-gated, degrades gracefully) ----------
 perf_breakdown() {
   [ "$PERF" = 1 ] || { echo "(skipped — pass --perf for a frame breakdown)"; return; }
   have perf || { echo "(perf not installed — frame breakdown skipped)"; return; }
@@ -158,7 +128,6 @@ perf_breakdown() {
 
 echo "profiling PID $PID ($PUSER) for ${SECS}s — report → $REPORT" >&2
 
-# GPU time-series and per-thread CPU sampled CONCURRENTLY → one overlapping window.
 gpu_series >"$OUT/gpu.txt" 2>/dev/null &
 GJOB=$!
 cpu_threads >"$OUT/cpu.txt" 2>/dev/null

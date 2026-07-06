@@ -1,20 +1,3 @@
-//! Interactive play + screenshot modes.
-//!
-//! `DemoPlugin` loads a trained checkpoint and drives the crab with the policy
-//! (deterministic, no learning) behind an orbit camera with poke/reset controls
-//! — the "launch it and play" experience.
-//!
-//! `ScreenshotPlugin` renders one frame to a PNG and exits. It runs windowless
-//! but with the GPU on (render-to-image), so the trained crab can be inspected
-//! without a display or a human in the loop.
-//!
-//! [`RenderVideoPlugin`] is the moving-clip cousin of the screenshot: it drives the
-//! ball-chase headless, captures every sim tick, and encodes an mp4 — for showing how the
-//! gait MOVES, which a still can't.
-//!
-//! These plugins live here as the wiring core; the systems they schedule are carved into
-//! focused submodules ([`policy`], [`render_video`], [`hot_reload`], [`manual_control`],
-//! [`cameras`], [`target_ball`], [`demo`], [`controls`]).
 
 mod cameras;
 mod controls;
@@ -38,16 +21,9 @@ use crate::bot::BotSet;
 use crate::bot::body::CrabCarapace;
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
-// The trained-policy inference lives at the crate root ([`crate::policy`]) so the headless
-// eval can reuse it too; re-exported here so the renderers (and net/game) keep addressing it
-// as `crab_world::play::…`.
 pub use crate::policy::{Policy, RigDims, RigFit, checkpoint_fits_rig};
 pub use render_video::RenderVideoPlugin;
 
-/// The [`RigDims`] this binary's crab rig compiles to — the spec a checkpoint must satisfy
-/// to drive the NN crab. The rig side of the fit check [`checkpoint_fits_rig`]
-/// performs, exposed so the gate can name both sides; "does this checkpoint fit this
-/// binary?" is answered by the binary itself, never a hand-maintained number that could drift.
 pub fn rig_dims() -> RigDims {
     RigDims {
         obs: crate::bot::sensor::OBS_SIZE,
@@ -63,16 +39,6 @@ use manual_control::{ManualControl, manual_control_step, spawn_manual_hud};
 use policy::{add_inference, policy_step};
 use target_ball::{spawn_target_ball, target_ball};
 
-/// The ONE seedable RNG behind every bit of demo/screenshot randomness — the goofy respawn
-/// tilt, the poke impulse, and the target-ball relocation. It replaces the scattered
-/// `rand::thread_rng()` those sites used: a wall-clock-seeded RNG made an evidence screenshot
-/// or a rendered clip impossible to reproduce (the exact reason `RL_TARGET_BALL_AT` had to
-/// exist to pin the ball). Defaults to entropy so a live demo still varies run-to-run; set
-/// `RL_DEMO_SEED=<u64>` to pin the whole demo's randomness for a reproducible frame or video.
-///
-/// This is the DEMO's RNG only — it never feeds the policy or the physics solver. The
-/// determinism-critical sim/training core carries its own seeded `StdRng` and seeds the
-/// weight-init backend separately (see `training::systems`); the two never cross.
 #[derive(Resource)]
 pub(super) struct DemoRng(pub(super) StdRng);
 
@@ -86,19 +52,8 @@ impl Default for DemoRng {
     }
 }
 
-/// The screen height the demo's HUD is sized for — the Steam Deck's 1280×800 panel, the
-/// surface the owner actually watches the streamed demo on. Every HUD size (glyph px, font px,
-/// padding) is authored against this height.
 const UI_REFERENCE_HEIGHT: f32 = 800.0;
 
-/// Keep the UI a constant FRACTION of the screen by scaling it to the live window height
-/// against [`UI_REFERENCE_HEIGHT`]. The demo renders borderless-fullscreen at the host
-/// monitor's resolution, then Steam Remote Play scales that whole frame to the deck's
-/// 1280×800; with fixed-pixel UI and no scaling the HUD came out wrong-sized on the deck
-/// (tiny on a tall host, huge on a short one). Tying `UiScale` to height/800 makes the HUD
-/// look deck-correct whatever the host monitor is. Windowed demo only — the windowless
-/// screenshot/render paths have no window and render at the requested size with `UiScale`
-/// 1.0, which IS the 800-px reference, so the evidence frame matches the deck.
 fn sync_ui_scale(
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut ui_scale: ResMut<UiScale>,
@@ -106,23 +61,16 @@ fn sync_ui_scale(
     let Ok(window) = windows.single() else {
         return;
     };
-    // `clamp` guards a degenerate (e.g. minimized, ~0-height) window from zeroing the UI.
     let scale = (window.resolution.height() / UI_REFERENCE_HEIGHT).clamp(0.5, 3.0);
     if (ui_scale.0 - scale).abs() > 1e-3 {
         ui_scale.0 = scale;
     }
 }
 
-// ---------------------------------------------------------------------------
-// Demo: windowed, interactive
-// ---------------------------------------------------------------------------
 
-/// Windowed "play with the trained crab" mode.
 pub struct DemoPlugin {
     pub checkpoint_dir: PathBuf,
     pub live_checkpoint_dir: Option<PathBuf>,
-    /// Start in hands-on gamepad control instead of the policy (toggle live with
-    /// Y). See [`manual_control`] — a physics feel-test, not a learned driver.
     pub manual_control: bool,
 }
 
@@ -130,35 +78,21 @@ impl Plugin for DemoPlugin {
     fn build(&self, app: &mut App) {
         add_inference(app, &self.checkpoint_dir, self.live_checkpoint_dir.clone());
         graph::register(app);
-        // Night-sky skybox behind the orbit view.
         app.add_plugins(crate::sky::NightSkyPlugin);
-        // The reusable controls overlay (corner hint + hold-to-reveal panel), driven by the
-        // demo's own [`controls::DEMO_BINDINGS`].
         app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default());
         app.init_resource::<DemoSettle>()
             .init_resource::<PokeBurst>()
-            // Seeds the demo's tilt/poke/ball randomness (entropy, or RL_DEMO_SEED).
             .init_resource::<DemoRng>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_target_ball))
             .add_systems(Update, (orbit_camera, demo_controls, sync_ui_scale))
             .add_systems(
                 FixedUpdate,
                 (
-                    // Settle zeroes the actions a fresh crab holds, so it must land
-                    // before Act applies them (not merely after Think) — otherwise the
-                    // crab takes a tick of stale policy torque mid-drop. The
-                    // Sense→Think→Act chain alone leaves settle-vs-Act to Bevy's
-                    // implicit conflict ordering; pin it.
                     demo_settle.after(BotSet::Think).before(BotSet::Act),
                     demo_poke.after(BotSet::Act).before(PhysicsSet::SyncBackend),
-                    // After Sense so it reads the same post-physics claw-tip and target
-                    // state the observation just consumed — touch detection and the ball
-                    // then agree with what the policy saw this tick.
                     target_ball.after(BotSet::Sense),
                 ),
             );
-        // Both drivers are always present; `ManualControl.active` (seeded by the
-        // flag, toggled live with B/circle) decides which one writes the actions each tick.
         app.insert_resource(ManualControl {
             active: self.manual_control,
             selected: None,
@@ -172,11 +106,7 @@ impl Plugin for DemoPlugin {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Screenshot: windowless render-to-PNG
-// ---------------------------------------------------------------------------
 
-/// Renders one frame to a PNG after the crab settles, then exits.
 pub struct ScreenshotPlugin {
     pub checkpoint_dir: PathBuf,
     pub path: PathBuf,
@@ -197,11 +127,7 @@ impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
         add_inference(app, &self.checkpoint_dir, None);
         app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
-        // Night-sky skybox behind the captured frame (same sky as the windowed demo).
         app.add_plugins(crate::sky::NightSkyPlugin);
-        // RL_RIG_POSE: drive the chelipeds to their shoulder stop with the body pinned, so
-        // a rig limit/axis change can be inspected headless in the offending pose. Inert by
-        // default — a plain screenshot is unchanged. See [`rig_pose`].
         if let Some(pose) = rig_pose::rig_pose_from_env() {
             app.insert_resource(pose)
                 .init_resource::<rig_pose::RigPosePin>()
@@ -218,13 +144,7 @@ impl Plugin for ScreenshotPlugin {
                         .before(PhysicsSet::SyncBackend),
                 );
         }
-        // RL_TARGET_BALL=1: render the demo's red target ball in the screenshot too,
-        // off the same `CrabTargets` state, so the reach-target viz can be inspected
-        // headless. `target_ball` seeds (honoring RL_TARGET_BALL_AT), drives, and
-        // teleports the target exactly as in the demo. Inert by default — a plain
-        // screenshot is unchanged.
         if std::env::var_os("RL_TARGET_BALL").is_some() {
-            // `target_ball` relocates off DemoRng; seed it (RL_DEMO_SEED pins the frame).
             app.init_resource::<DemoRng>()
                 .add_systems(Startup, spawn_target_ball)
                 .add_systems(FixedUpdate, target_ball.after(BotSet::Sense));
@@ -241,10 +161,6 @@ impl Plugin for ScreenshotPlugin {
             Update,
             (track_offscreen_camera, capture_when_settled).chain(),
         );
-        // Controls overlay on the screenshot path too, so an evidence frame can prove the
-        // demo's hold-to-reveal legend renders. The convenience plugin spawns the UI + seeds
-        // `ForceRevealControls(false)`; the shared env override (see
-        // [`crate::controls::reveal_overrides_from_env`]) opens it for the headless shot.
         let (force_reveal, active_device, active_context) =
             crate::controls::reveal_overrides_from_env::<DemoControls>();
         app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default())
@@ -266,9 +182,6 @@ fn capture_when_settled(
     lights_q: Query<(), With<DirectionalLight>>,
     cams_q: Query<&Camera>,
 ) {
-    // settle counted in RENDER frames (the GPU pipeline renders black for the first
-    // few dozen frames while shaders/pipelines compile and assets upload); the shared
-    // helper owns that gate + the post-capture exit countdown.
     let Some(frame) = screenshot::advance_capture(&mut progress, cfg.settle, &mut exit) else {
         return;
     };

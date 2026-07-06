@@ -37,13 +37,6 @@ impl Plugin for PhysicsWorldPlugin {
     }
 }
 
-/// Render-only arena dressing — the visible ground quad + lights — for a host that draws NO
-/// other scene of its own (the standalone rl-demo arena). Kept OUT of [`PhysicsWorldPlugin`]
-/// (which lays only the colliders) so the GCR client, which renders its own gray-box world,
-/// gets the colliders WITHOUT a redundant second ground quad and lights coplanar with its own
-/// (rl#160). The material/mesh-asset types this needs don't exist in the headless build, so the
-/// whole plugin is render-only; it still honors `Visuals(false)` so a render-on caller that
-/// wants no scene gets none.
 #[cfg(feature = "render")]
 pub struct ArenaVisualsPlugin;
 
@@ -54,18 +47,11 @@ impl Plugin for ArenaVisualsPlugin {
     }
 }
 
-/// Half-extent of the square arena (ground + walls) in metres. `pub(crate)` so the
-/// reward's target-spawn clamp ([`crate::training::targets`]) can derive its inset
-/// from the true wall position rather than hand-copying it — a wall move then can't
-/// strand far targets inside a wall.
 pub(crate) const ARENA_HALF_SIZE: f32 = 10.0;
 const GROUND_THICKNESS: f32 = 0.1;
 const WALL_HEIGHT: f32 = 2.0;
 const WALL_THICKNESS: f32 = 0.5;
 
-/// The four wall colliders' (center, half-extents). One source so the collider setup
-/// and the render-only wall meshes describe the SAME walls — a wall move can't leave
-/// the mesh behind the collider.
 fn wall_boxes() -> [(Vec3, Vec3); 4] {
     [
         (
@@ -91,8 +77,6 @@ fn wall_boxes() -> [(Vec3, Vec3); 4] {
 /// No meshes or lights (those are render-only — see [`setup_arena_visuals`]), so this is
 /// the one arena setup the headless trainer runs, touching no graphics types.
 fn setup_walled_box(mut commands: Commands) {
-    // Ground plane collider. The visible quad (render builds) is spawned separately and
-    // sits exactly on this — see `setup_arena_visuals`.
     commands.spawn((
         RigidBody::Fixed,
         Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
@@ -100,7 +84,6 @@ fn setup_walled_box(mut commands: Commands) {
         Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
     ));
 
-    // Arena walls (just colliders; the demo doesn't render them).
     for (pos, half_extents) in wall_boxes() {
         commands.spawn((
             RigidBody::Fixed,
@@ -124,11 +107,6 @@ fn setup_open_field(mut commands: Commands) {
     ));
 }
 
-/// Render-only: the visible ground quad + lights, added by [`ArenaVisualsPlugin`] for a
-/// standalone arena (rl-demo). Sits exactly on the collider [`setup_walled_box`] laid. Gated out of
-/// the headless trainer entirely (its bevy build has no `StandardMaterial`/`Mesh3d`/
-/// `DirectionalLight`). Still honors `Visuals(false)` so a render-on caller that wants no scene
-/// gets none.
 #[cfg(feature = "render")]
 fn setup_arena_visuals(
     mut commands: Commands,
@@ -149,7 +127,6 @@ fn setup_arena_visuals(
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.3, 0.0)),
     ));
 
-    // Ambient light so shadows aren't pitch black.
     commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: 300.0,

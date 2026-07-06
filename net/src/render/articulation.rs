@@ -1,19 +1,3 @@
-//! Render-side capture + apply for the crab pose extension frame — the render-only halves
-//! of [`crate::articulation`].
-//!
-//! Under host-authority the windowed HOST runs every rapier Sally; a windowed remote CLIENT
-//! renders the host's exact poses without simulating physics ([[silent-fallback-antipattern]]: no
-//! second "run my own crab for visuals" path). So the host [`capture`]s each live crab's per-part
-//! transforms + game-spot placement each stepped tick — one [`CrabFrame`] per env, in env
-//! order (rl#200: a multi-brain round runs several crabs) — and broadcasts them beside the
-//! snapshot; the client [`apply`]s each frame onto its OWN matching env's crab entities — which
-//! it spawns but never physics-steps, so the writes stick and
-//! `crab_world::bot::skin::drive_bones` skins each mesh to the host's pose.
-//!
-//! Only the parts a skin bone actually follows are carried: those with a stable `PartId` (each
-//! actuated joint link + the carapace). The cosmetic eye-stalk links carry no `PartId` and no bone
-//! keys off them (their bones ride the carapace), so they need no sync — and couldn't be matched
-//! across the wire without a stable key anyway.
 
 use bevy::prelude::*;
 
@@ -24,23 +8,11 @@ use crab_world::vehicle::Vehicle;
 
 use crate::articulation::{CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire};
 
-/// (Client) Every piloting player's craft pose off the wire (rl#191: one per pilot, ascending
-/// pilot order; empty = nobody flies). A remote client runs none of the vehicles' rapier
-/// (host-authoritative), so this mirror is all it knows of the crafts; `render_mode`'s
-/// wireframe drawer renders them (rl#192). Written by [`apply`] each adopted tick; stays empty
-/// on the host/solo, whose crafts are the live bodies.
 #[derive(Resource, Default)]
 pub(super) struct RemoteVehicle(pub(super) Vec<VehiclePoseWire>);
 
-/// The part tag is `1 + joint.index()` in a `u8`, so the joint set must stay small enough that the
-/// tag can't wrap — pin it at compile time (COUNT is 38 today; the wire format would need a rev long
-/// before this fired, but the invariant is why the tag is a `u8`).
 const _: () = assert!(CrabJointId::COUNT < u8::MAX as usize);
 
-/// Wire tag for a body part's identity: `0` = the carapace, `1 + joint.index()` = an actuated
-/// joint's link. Host and client compute it identically from the same rig, so a transform matches
-/// its own part entity across the wire. `None` for an unkeyed part (an eye-stalk) — not a skin
-/// drive target, so it is skipped rather than mis-matched.
 fn part_tag(is_carapace: bool, joint: Option<&CrabJoint>) -> Option<u8> {
     match (is_carapace, joint) {
         (true, _) => Some(0),
@@ -49,16 +21,7 @@ fn part_tag(is_carapace: bool, joint: Option<&CrabJoint>) -> Option<u8> {
     }
 }
 
-/// (Host) Snapshot every crab's render pose for `tick`: per env, each keyed body part's
-/// arena-frame transform (world-space — the parts are top-level, so `Transform` already is) plus
-/// that crab's current game-spot placement. Frames are emitted for envs `0..n_crabs`
-/// contiguously (`n_crabs` = the bridge's binding count via [`CrabSkinRepose`]'s keys ∪ spawned
-/// envs), so the frame index IS the crab index on the wire. Called right after
-/// `Server::step_next`, so it is this tick's settled pose (`integrate_crab`/
-/// `publish_skin_repose` ran during the physics pump). A frame's `repose` is `None` only before
-/// the bridge has published one for that crab (transiently at spawn).
 pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
-    // Group each env's keyed parts. BTreeMap so envs emit in index order.
     let mut by_env: std::collections::BTreeMap<usize, Vec<PartTransform>> = Default::default();
     let mut q = world.query_filtered::<(
         &Transform,
@@ -90,14 +53,10 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         .map(|l| l.0.clone())
         .unwrap_or_default();
 
-    // One frame per env, contiguous from 0 — the wire's index IS the crab index. Spawned envs
-    // are contiguous by construction (`spawn_initial_crabs` fills 0..NumEnvs), so this covers
-    // exactly the armed crabs.
     let n_crabs = by_env.keys().last().map_or(0, |&max| max + 1);
     let crabs = (0..n_crabs)
         .map(|env| {
             let mut parts = by_env.remove(&env).unwrap_or_default();
-            // Ascending tag order — a deterministic wire, and the client matches by tag anyway.
             parts.sort_by_key(|p| p.part);
             let repose = reposes.get(&env).map(|s| ReposeWire {
                 shift: s.shift.to_array(),
@@ -110,10 +69,6 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         })
         .collect();
 
-    // EVERY pilot's craft (rl#191: one body per piloting player, host-simulated); a pilot on
-    // foot has no body (`manage_vehicles` despawns it), so the query itself is the presence
-    // signal. Sorted by pilot for a deterministic wire. Each `Transform` is arena-frame like
-    // the parts (top-level rapier bodies).
     let mut vehicles: Vec<VehiclePoseWire> = world
         .query::<(&Transform, &Vehicle)>()
         .iter(world)
@@ -132,13 +87,6 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
     }
 }
 
-/// (Client) Write a received crab pose onto each env's own crab render entities — overwriting
-/// every keyed part's `Transform` and each crab's game-spot placement, routing frame `i` to
-/// env `i`. The client never pumps the crab physics, so these writes are not fought back by the
-/// rapier solver and persist for `crab_world::bot::skin::drive_bones` (PostUpdate) to skin the
-/// meshes from. A part in a frame with no matching local entity (or vice versa, including a
-/// whole env the client hasn't spawned) is simply skipped — the rigs are identical on both
-/// peers, so this only elides the transient pre-spawn frames.
 pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
     let by_env_tag: std::collections::HashMap<(usize, u8), &PartTransform> = art
         .crabs
@@ -164,11 +112,6 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
     }
 
     if let Some(mut repose) = world.get_resource_mut::<CrabSkinRepose>() {
-        // MERGE, never replace wholesale: a frame's `None` repose is "not published this
-        // tick" (transient — spawn, or the rescue tick that clears the carapace sample), and
-        // the documented contract is the client LEAVES its placement untouched then. Wiping
-        // the entry would snap that crab to identity (the arena origin) for a
-        // frame — a visible glitch for an honest one-tick gap.
         for (env, frame) in art.crabs.iter().enumerate() {
             if let Some(r) = frame.repose {
                 repose.0.insert(
@@ -179,7 +122,6 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
                 );
             }
         }
-        // A crab the host no longer carries at all (a smaller adopted round) does drop out.
         repose.0.retain(|env, _| *env < art.crabs.len());
     }
 
@@ -191,9 +133,6 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
         world.insert_resource(CrabBrainLabels(labels));
     }
 
-    // Mirror every pilot's craft — including the EMPTY list (everyone stepped out; a stale
-    // mirror would freeze a ghost craft mid-air). Insert rather than get-mut so the mirror
-    // exists from the first adopted frame.
     world.insert_resource(RemoteVehicle(art.vehicles.clone()));
 }
 
@@ -202,8 +141,6 @@ mod tests {
     use super::*;
     use crab_world::bot::body::{CrabJointId, Side};
 
-    /// Spawn one env's crab's keyed render parts — a carapace + one joint link — at the given
-    /// transforms, the minimal rig [`capture`]/[`apply`] key off (no physics/GPU needed).
     fn spawn_parts(
         world: &mut World,
         env: usize,
@@ -234,13 +171,10 @@ mod tests {
         let cara_t = Transform::from_xyz(1.0, 2.0, 3.0).with_rotation(Quat::from_rotation_y(0.5));
         let joint_t =
             Transform::from_xyz(-4.0, 0.25, 9.0).with_rotation(Quat::from_rotation_x(0.3));
-        // A SECOND crab (rl#200) at distinct poses, so cross-env routing is actually pinned —
-        // a capture/apply that collapsed envs would smear one crab onto the other.
         let cara_t1 = Transform::from_xyz(9.0, 1.0, -6.0).with_rotation(Quat::from_rotation_y(1.2));
         let joint_t1 =
             Transform::from_xyz(8.0, 0.5, -5.0).with_rotation(Quat::from_rotation_x(0.9));
 
-        // HOST: known part poses per env + a published env-0 placement + a piloted craft.
         let mut host = World::new();
         spawn_parts(&mut host, 0, cara_t, joint_id, joint_t);
         spawn_parts(&mut host, 1, cara_t1, joint_id, joint_t1);
@@ -269,7 +203,6 @@ mod tests {
             bevy_rapier3d::prelude::Velocity::default(),
         );
 
-        // Capture and send it exactly as the transport does — through the wire codec.
         let art = capture(&mut host, 42);
         assert_eq!(art.tick, 42);
         assert_eq!(art.crabs.len(), 2, "one frame per env");
@@ -279,8 +212,6 @@ mod tests {
         assert!(art.crabs[1].repose.is_none(), "env 1 has no placement yet");
         let art = crate::articulation::CrabArticulation::from_bytes(&art.to_bytes()).unwrap();
 
-        // CLIENT: the SAME rigs at DIFFERENT poses with no placement yet (frozen just-spawned
-        // crabs).
         let mut client = World::new();
         let (c_cara, c_joint) = spawn_parts(
             &mut client,
@@ -300,8 +231,6 @@ mod tests {
 
         apply(&mut client, &art);
 
-        // Each env's parts + placement now match the host's EXACTLY — the client renders the
-        // host's poses, never its own physics, and never crab 1's pose on crab 0.
         let tf = |world: &mut World, e: Entity| *world.entity(e).get::<Transform>().unwrap();
         let got_cara = tf(&mut client, c_cara);
         let got_joint = tf(&mut client, c_joint);
@@ -332,8 +261,6 @@ mod tests {
                 "REFUSED: wrong rig".to_string()
             ]
         );
-        // The piloted craft crossed too, keyed by its pilot — the client's mirror holds its
-        // exact pose (rl#192: this is what the second player's wireframe drawer renders).
         let crafts = &client.resource::<RemoteVehicle>().0;
         assert_eq!(crafts.len(), 1, "one piloted craft applied");
         assert_eq!(crafts[0].pilot, 0, "the ram helper spawns pilot 0's craft");

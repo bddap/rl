@@ -1,22 +1,3 @@
-//! `rl-update-ui` — the windowed transfer-info UI for the Steam Deck "Update" shortcut.
-//!
-//! The "Update" shortcut pulls the latest rl build from the bothouse release store via
-//! `rl-update` (deck-control). That puller is headless and prints a single result line;
-//! in Game Mode there is no terminal to see it, and the owner wanted a real window:
-//! live transfer progress, then hold until dismissed by an on-screen tap OR a physical
-//! controller/keyboard button.
-//!
-//! This binary IS that window. It spawns `rl-update --json` — which emits one JSON
-//! progress event per line (see deck-control rl-update's `Event`) — renders the stream
-//! as a Bevy UI (overall bar, current file, bytes/MB), and on completion shows the
-//! result and waits for ANY dismissal (gamepad button / key / mouse click / touch)
-//! before closing with the puller's exit code. `rl-update` stays the SINGLE source of
-//! the transfer (one implementation); this only renders what it reports.
-//!
-//! `--screenshot PATH` renders one representative frame (mid-transfer, or the done
-//! screen with `--screenshot-done`) and exits — how the daemon surfaces the UI to the
-//! owner. It renders through the SAME windowed path the deck uses (the proven UI render
-//! route), so it needs a display: on bothouse, Xvfb + the lavapipe software-Vulkan ICD.
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -30,9 +11,6 @@ use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::window::{MonitorSelection, WindowMode};
 use clap::Parser;
 
-// --- palette -----------------------------------------------------------------------
-// Inline `Color::srgb` calls (it isn't const), wrapped in tiny fns so the few accents
-// have one definition each.
 fn accent() -> Color {
     Color::srgb(0.30, 0.69, 0.96)
 }
@@ -49,33 +27,20 @@ fn err_red() -> Color {
 #[derive(Parser, Debug, Clone)]
 #[command(about = "Windowed transfer-info UI for the rl Update shortcut (drives rl-update --json)")]
 struct Args {
-    /// The bothouse `rl-release-server`'s endpoint id — passed straight through to
-    /// `rl-update`. (Mirrors rl-update's `--server`.)
     #[arg(long, env = "RL_RELEASE_SERVER")]
     server: String,
-    /// The local install dir — passed through to `rl-update`.
     #[arg(long, env = "RL_INSTALL_DIR")]
     install_dir: PathBuf,
-    /// The deck pull key — passed through to `rl-update`.
     #[arg(long, env = "RL_UPDATE_KEY")]
     key_file: PathBuf,
-    /// Path to the `rl-update` binary to drive. Defaults to `./rl-update` (the Update
-    /// shortcut `cd`s into the install dir, where the deck-owned copy sits beside it).
     #[arg(long, default_value = "./rl-update")]
     rl_update: PathBuf,
-    /// Run in a window instead of borderless fullscreen (the Deck Game-Mode default).
     #[arg(long)]
     windowed: bool,
-    /// Render one representative mid-transfer frame to PATH headless and exit — no
-    /// window, software Vulkan. Used by the daemon to surface the UI to the owner.
     #[arg(long)]
     screenshot: Option<PathBuf>,
-    /// Settle frames before the screenshot capture (GPU pipeline warm-up). Only used
-    /// with `--screenshot`.
     #[arg(long, default_value_t = 120)]
     screenshot_settle: u32,
-    /// With `--screenshot`, render the completed/dismiss screen instead of the default
-    /// mid-transfer frame (so the daemon can surface both states from one binary).
     #[arg(long)]
     screenshot_done: bool,
 }
@@ -91,7 +56,6 @@ impl Args {
     }
 }
 
-/// The args `rl-update` needs, separated from the UI-only flags.
 struct PullerArgs {
     rl_update: PathBuf,
     server: String,
@@ -99,11 +63,7 @@ struct PullerArgs {
     key_file: PathBuf,
 }
 
-// --- shared transfer state ---------------------------------------------------------
 
-/// Where the transfer is. `Connecting` until the first `file_start`, `Transferring`
-/// during the pull, `Done` once the puller reports its terminal result. Dismissal is
-/// only honored in `Done` (see [`handle_dismiss`]).
 #[derive(Default, PartialEq, Clone, Copy)]
 enum Phase {
     #[default]
@@ -112,15 +72,11 @@ enum Phase {
     Done,
 }
 
-/// The terminal result the done-screen shows.
 struct DoneInfo {
     ok: bool,
     message: String,
 }
 
-/// The transfer state the reader thread writes and the Bevy systems read each frame.
-/// Behind one `Mutex`: a single coarse lock is plenty (events arrive at most a few
-/// hundred times over a transfer; the UI reads it 60×/s).
 #[derive(Default)]
 struct State {
     phase: Phase,
@@ -131,26 +87,17 @@ struct State {
     cur_of: usize,
     cur_path: String,
     result: Option<DoneInfo>,
-    /// `rl-update`'s exit code once it exits — propagated as this process's code so
-    /// Steam/tooling sees pass/fail (the same contract the old shell wrapper had).
     child_code: Option<i32>,
 }
 
 #[derive(Resource, Clone)]
 struct Ui(Arc<Mutex<State>>);
 
-/// Lock the shared state, recovering from poisoning. A `State` left by a panicking
-/// holder is still perfectly readable (it's plain data), so a poison must not cascade
-/// into aborting the Bevy main thread or the reader thread — that would turn a
-/// recoverable hiccup into a hung, non-dismissable window.
 fn lock(m: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-// --- puller subprocess + JSON event reader -----------------------------------------
 
-/// Spawn `rl-update --json` and a thread that parses its event stream into `state`.
-/// A spawn failure (binary missing) is itself a terminal failure shown in the window.
 fn spawn_puller(args: &PullerArgs, state: Arc<Mutex<State>>) {
     let child = Command::new(&args.rl_update)
         .arg("--json")
@@ -161,7 +108,6 @@ fn spawn_puller(args: &PullerArgs, state: Arc<Mutex<State>>) {
         .arg("--key-file")
         .arg(&args.key_file)
         .stdout(Stdio::piped())
-        // stderr is rl-update's tracing — let it flow to the shortcut's launch.log.
         .stderr(Stdio::inherit())
         .spawn();
     match child {
@@ -175,18 +121,11 @@ fn spawn_puller(args: &PullerArgs, state: Arc<Mutex<State>>) {
                 ok: false,
                 message: format!("could not launch {}: {e}", args.rl_update.display()),
             });
-            // Exit 1 (a normal "failed" outcome the UI just displayed), NOT a crash code:
-            // the window rendered the error and held for dismissal, so the shell wrapper
-            // should trust it, not fall through to a headless retry that would re-run the
-            // same unlaunchable `rl-update` and surface the identical error twice.
             s.child_code = Some(1);
         }
     }
 }
 
-/// Read the puller's JSON-lines stdout to EOF, applying each event, then reap the child
-/// for its exit code. If the child dies WITHOUT a `done` event (a crash), synthesize a
-/// failure so the window never hangs on a stale "transferring".
 fn read_events(mut child: Child, state: Arc<Mutex<State>>) {
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines() {
@@ -195,7 +134,6 @@ fn read_events(mut child: Child, state: Arc<Mutex<State>>) {
             if line.is_empty() {
                 continue;
             }
-            // A non-JSON line (shouldn't happen in --json mode) is skipped, not fatal.
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
                 apply_event(&state, &v);
             }
@@ -216,8 +154,6 @@ fn read_events(mut child: Child, state: Arc<Mutex<State>>) {
     }
 }
 
-/// Fold one parsed event into `state`. Field names match deck-control rl-update's
-/// `Event` serde shape (pinned by its `event_json_wire_shape` test).
 fn apply_event(state: &Arc<Mutex<State>>, v: &serde_json::Value) {
     let event = v.get("event").and_then(|e| e.as_str()).unwrap_or("");
     let u64f = |k: &str| v.get(k).and_then(|x| x.as_u64());
@@ -261,8 +197,6 @@ fn apply_event(state: &Arc<Mutex<State>>, v: &serde_json::Value) {
                 .to_string();
             s.phase = Phase::Done;
             let ok = result != "failed";
-            // On a successful transfer fill the bar exactly (the last progress tick may
-            // sit a hair short of total); leave it where it is for already/failed.
             if ok && result == "updated" && s.total > 0 {
                 s.done = s.total;
             }
@@ -272,10 +206,7 @@ fn apply_event(state: &Arc<Mutex<State>>, v: &serde_json::Value) {
     }
 }
 
-// --- UI ----------------------------------------------------------------------------
 
-/// One text node's role, so a single query can update them all (distinct `With<>`
-/// queries over `&mut Text` would alias; a label discriminant avoids that).
 #[derive(Component, Clone, Copy)]
 enum Slot {
     Status,
@@ -285,7 +216,6 @@ enum Slot {
     Hint,
 }
 
-/// The progress-bar fill node (its width is set to the percent each frame).
 #[derive(Component)]
 struct BarFill;
 
@@ -293,16 +223,13 @@ fn mb(bytes: u64) -> f64 {
     bytes as f64 / 1_000_000.0
 }
 
-/// Map the few non-ASCII glyphs in rl-update's result line to ASCII the bundled default
-/// font actually has (it renders unknown glyphs as tofu boxes). Color already carries
-/// pass/fail, so the leading status emoji is dropped rather than transliterated.
 fn ascii_clean(s: &str) -> String {
     s.chars()
         .map(|c| match c {
             '✅' | '✓' | '✗' => ' ',
             '—' | '–' => '-',
             '·' => '-',
-            '…' => '.', // a lone '.' is fine; the source rarely uses '…'
+            '…' => '.',
             other => other,
         })
         .collect::<String>()
@@ -315,9 +242,6 @@ fn setup_windowed(mut commands: Commands) {
     build_ui(&mut commands);
 }
 
-/// Build the UI tree. With a single camera present, bevy_ui composites onto it as the
-/// implicit default target (the same plain setup the demo's build-info overlay uses) —
-/// no explicit camera tag needed.
 fn build_ui(commands: &mut Commands) {
     commands
         .spawn((
@@ -369,7 +293,6 @@ fn build_ui(commands: &mut Commands) {
                 TextColor(Color::srgb(0.80, 0.80, 0.86)),
                 Slot::File,
             ));
-            // Progress-bar track with an inner fill node.
             p.spawn((
                 Node {
                     width: Val::Px(660.0),
@@ -411,8 +334,6 @@ fn build_ui(commands: &mut Commands) {
         });
 }
 
-/// Redraw the UI from the shared state each frame: the bar width, the status line +
-/// color, the version/file/bytes labels, and the dismissal hint once done.
 fn update_ui(
     ui: Res<Ui>,
     mut texts: Query<(&mut Text, &mut TextColor, &Slot)>,
@@ -476,9 +397,6 @@ fn update_ui(
     }
 }
 
-/// Close the window on ANY input — but ONLY once the transfer is done, so a stray
-/// press mid-pull can't dismiss the result screen. Honors all the ways a Deck user
-/// might press: a controller button, a keyboard key, a mouse click, or a touch/tap.
 fn handle_dismiss(
     ui: Res<Ui>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -501,15 +419,11 @@ fn handle_dismiss(
     }
 }
 
-// --- entry points ------------------------------------------------------------------
 
 fn main() {
     let args = Args::parse();
     let state = Arc::new(Mutex::new(State::default()));
 
-    // `--screenshot` injects a representative snapshot and captures one frame (it must
-    // run under a display — e.g. Xvfb + lavapipe on bothouse — since it renders through
-    // the same windowed path the deck uses, the proven UI render route).
     if args.screenshot.is_some() {
         *lock(&state) = synthetic_state(args.screenshot_done);
     }
@@ -521,8 +435,6 @@ fn main() {
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "rl Update".into(),
-            // Screenshot mode wants a fixed-size window to capture; the live shortcut
-            // wants borderless fullscreen on the Deck (unless --windowed for dev).
             mode: if args.windowed || args.screenshot.is_some() {
                 WindowMode::Windowed
             } else {
@@ -540,23 +452,12 @@ fn main() {
         app.init_resource::<ShotFrames>();
         app.add_systems(Update, (update_ui, capture_when_settled));
     } else {
-        // Spawn the puller from a STARTUP system — i.e. only AFTER DefaultPlugins
-        // (winit + GPU) initialized successfully. If render init panics on the Deck
-        // (no display, bad Vulkan), Startup never runs, so no orphan child is left
-        // pulling headless behind a dead window — and update-and-play.sh's crash-code
-        // fallback can safely run a fresh headless pull without racing a live puller.
         app.insert_resource(PullerCfg(args.puller()));
         app.add_systems(Startup, start_puller);
         app.add_systems(Update, (update_ui, handle_dismiss));
     }
     app.run();
 
-    // Propagate the puller's exit code. `child_code` holds the reaped code once the
-    // reader thread sees stdout EOF + `wait()`; on a fast dismissal (user closes the
-    // result screen before the thread reaps) it may still be None, so reconstruct from
-    // the terminal result — rl-update only ever exits 0 (updated/already) or 1 (failed),
-    // so the reconstruction matches. A render-init panic never reaches here (exits 101);
-    // the shell wrapper treats that as a crash and falls back.
     let code = {
         let s = lock(&state);
         s.child_code.unwrap_or_else(|| {
@@ -570,22 +471,14 @@ fn main() {
     std::process::exit(code);
 }
 
-/// Config for [`start_puller`] (held as a resource so the Startup system can read it).
 #[derive(Resource)]
 struct PullerCfg(PullerArgs);
 
-/// Startup system: launch `rl-update` once the window/GPU are up. See the spawn-timing
-/// rationale in [`main`].
 fn start_puller(cfg: Res<PullerCfg>, ui: Res<Ui>) {
     spawn_puller(&cfg.0, ui.0.clone());
 }
 
-// --- screenshot (windowed render path; run under a display) -------------------------
 
-/// A plausible mid-transfer snapshot for `--screenshot`: 3 files, ~180 MB, ~40% through
-/// file 2 — enough to show the bar, current file, version, and byte readout. With
-/// `done`, render the completed/dismiss screen instead (so the daemon can surface both
-/// states from the same binary).
 fn synthetic_state(done: bool) -> State {
     if done {
         return State {
@@ -626,9 +519,6 @@ struct ShotFrames {
     countdown: Option<u32>,
 }
 
-/// After the window + GPU pipeline warm (a few dozen frames), capture one PNG of the
-/// primary window and run a short exit countdown so the async readback + encode finish
-/// before the app exits.
 fn capture_when_settled(
     mut commands: Commands,
     settle: Res<ShotSettle>,

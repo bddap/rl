@@ -1,29 +1,3 @@
-//! Skin lifecycle: pair each deform bone to its physics link, drive it every frame,
-//! and re-pair after an episode reset.
-//!
-//! How following works: when the scene instance is ready, every deform bone is
-//! matched to a physics link by name ([`crate::bot::rig::part_for_bone`]), and the bone's world
-//! pose relative to its link is captured once: `offset = link⁻¹ · bone`. Each
-//! frame after that the bone's world transform is set to `link · offset`, so
-//! bones reproduce link *motion* exactly while keeping the model's own
-//! proportions. Captured at spawn rest, where the model's bind pose and the
-//! physics rest stance agree closely; residual mismatch is a constant
-//! per-bone offset, not drift. Driven bones are reparented flat under the
-//! skin root (identity transform), so their `Transform` IS their world pose —
-//! no per-frame parent-chain inversions. Non-bone scene nodes (the skinned
-//! mesh entity itself) are left alone; skinning reads joint GlobalTransforms,
-//! which keep working across the reparent.
-//!
-//! Re-pairing on reset: an episode reset ([`crate::bot::respawn_crab`]) despawns
-//! an env's physics parts and spawns fresh ones under the SAME env id. The skin
-//! (keyed by env id) survives — `attach_skins` sees one already exists and
-//! `reap_orphan_skins` sees the env still populated — but every [`BoneDrive`]
-//! still points at a now-despawned part entity, so [`drive_bones`] reads dead
-//! transforms and the model freezes in place. [`repair_skins`] detects this
-//! (a bone's link entity went dead) and re-points each bone at the fresh part
-//! playing the same role, reusing the captured offset: the respawn reproduces
-//! the identical rest pose at the same origin, so the offset is still exact and
-//! the skin stays visible the whole time — no re-settle, no flicker, no leak.
 
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
@@ -31,87 +5,40 @@ use bevy::prelude::*;
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabRestPose};
 use crate::bot::meshfit::PartId;
 
-/// One skin instance, attached to one crab (by env id).
 #[derive(Component)]
 struct CrabSkin {
     env: usize,
     phase: Pairing,
 }
 
-/// The skin's pairing lifecycle. A skin spawns before its glTF scene has
-/// instantiated, settles with the body, then pairs its bones to the physics
-/// links — strictly in that order. One enum makes the settle counter live only
-/// inside [`Settling`](Pairing::Settling), so being [`Paired`](Pairing::Paired)
-/// with a settle still outstanding is unrepresentable rather than merely avoided.
 enum Pairing {
-    /// Scene instance has no children yet, so its bind-pose GlobalTransforms
-    /// aren't readable. The skin is a bind-pose statue off the body, kept hidden.
     Spawning,
-    /// Scene is up; counting render frames so the body can settle before offsets
-    /// are captured. Offsets taken against the crab still up at spawn height bake
-    /// the subsequent ~0.2 m settle into every carapace-bound bone and sink the
-    /// shell into the ground, so capture waits for [`SETTLE_FRAMES`]. Still hidden.
     Settling { frames: u32 },
-    /// Bones captured and driven; `BoneDrive`s exist below this root and the skin
-    /// is shown.
     Paired,
 }
 
-/// Render frames between scene readiness and offset capture — enough for the
-/// spawned crab to settle onto its feet (~1.5 s at 60 fps).
 const SETTLE_FRAMES: u32 = 90;
 
-/// A driven bone: follow `link`'s world transform with a fixed local offset.
 #[derive(Component)]
 struct BoneDrive {
     link: Entity,
     offset: Mat4,
 }
 
-/// Render-only placement applied to each crab's skin so the ~1 m physics rigs draw at the GCR
-/// game-world spots: translate a rig from its small arena frame to that crab's game-world
-/// position. Keyed by crab-world env id — one entry per
-/// armed crab (rl#200 multi-brain rounds run several); an env with no entry (the default,
-/// and always the demo/trainer) renders at identity, i.e. its true physics pose.
-///
-/// WHY a render-only repose, applied to the skin BONES in [`drive_bones`] and NEVER to the
-/// rapier-driven `CrabBodyPart` `Transform`s: bevy_rapier syncs a changed body `Transform` BACK
-/// into the physics body (`force_update_from_transform_changes` only skips UNCHANGED ones), so a
-/// system that mutated a link's `Transform` to "cosmetically" move it teleported the rapier body
-/// ~12 m every step, exploding the multibody solver into a NaN-motor panic that crashed the armed
-/// client on launch (the play-day "there is no game to play"). The bones are render-only entities
-/// (flat children of an identity skin root, no rapier body), so reposing THEM is free of physics.
-/// Set each step by `net::external_crab` while the giant NN crabs are armed.
-///
-/// Lives in `bot::skin` because [`drive_bones`] is its sole consumer (the renderer owns its own
-/// render contract); `net::external_crab` only PUBLISHES into it — so there's no `bot`→`net` cycle.
 #[derive(Resource, Default, Clone)]
 pub struct CrabSkinRepose(pub std::collections::BTreeMap<usize, SkinRepose>);
 
-/// One crab's repose (metres), in bevy world space — a pure rigid translate. Render==physics:
-/// a crab renders at its TRUE physics size (the giant FEEL comes from the world rendering
-/// smaller around it, `net::render`'s `world_render_scale`), so no scale exists here — and the
-/// consumers depend on that isometry (the collider cage overlays the mesh exactly;
-/// `crate::crab_view`'s brain-label lift adds its metres AFTER this transform). rl#222 deleted
-/// the dead scale/pivot fields rather than leave two silent scale==1 assumers.
 #[derive(Clone, Copy)]
 pub struct SkinRepose {
-    /// Arena→game-world translation added to each part's raw pose.
     pub shift: Vec3,
 }
 
 impl SkinRepose {
-    /// The world-space repose matrix — translation by `shift`. A `Mat4` (not a bare `Vec3` add)
-    /// and `pub` so the shared collider wireframe (`crate::crab_view`) can repose the
-    /// live crab colliders by the SAME transform the skin uses — one source, so the cage can't
-    /// drift from the rendered crab.
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_translation(self.shift)
     }
 }
 
-/// The physics-link query shared by pairing and re-pairing: every part entity
-/// of every crab, tagged with its env and its role (joint id or carapace).
 type LinkQuery<'w, 's> = Query<
     'w,
     's,
@@ -123,11 +50,6 @@ type LinkQuery<'w, 's> = Query<
     ),
 >;
 
-/// Map one env's physics parts by the role a deform bone keys off. Built fresh
-/// each time because a reset replaces the entities; [`crate::bot::rig::part_for_bone`]
-/// resolves a bone name to a [`PartId`], this resolves that part to the live
-/// entity. Eye-stalk links carry neither component, so they're absent here — the
-/// eye bones ride the carapace cosmetically (the eye link is fixed to it).
 fn link_map(links: &LinkQuery, env: usize) -> std::collections::HashMap<PartId, Entity> {
     links
         .iter()
@@ -141,14 +63,11 @@ fn link_map(links: &LinkQuery, env: usize) -> std::collections::HashMap<PartId, 
 }
 
 pub(super) fn register(app: &mut App) {
-    // Identity until the GCR giant crab is armed; `net::external_crab` sets it each step.
     app.init_resource::<CrabSkinRepose>();
     app.add_systems(Update, (attach_skins, reap_orphan_skins, reveal_skin));
     app.add_systems(
         PostUpdate,
         (
-            // Re-point bones at the fresh parts BEFORE driving them, so a reset
-            // frame already follows the new crab instead of the dead one.
             repair_skins.before(drive_bones),
             drive_bones.before(TransformSystems::Propagate),
             pair_bones.after(TransformSystems::Propagate),
@@ -156,8 +75,6 @@ pub(super) fn register(app: &mut App) {
     );
 }
 
-/// Give every skinless crab a skin root at its spawn point. Reactive, so
-/// respawned crabs (episode resets, NaN rescues) are re-skinned automatically.
 fn attach_skins(
     mut commands: Commands,
     model: Res<super::CrabModel>,
@@ -165,14 +82,6 @@ fn attach_skins(
     crabs: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
     skins: Query<&CrabSkin>,
 ) {
-    // The body's carapace root spawns at the leg hub's bind-world position; the skin
-    // renders its bones at glTF bind-world from this root, so subtracting the hub puts
-    // the skin's skeleton in the body's exact frame — bone-for-link aligned at rest.
-    // (`register` only runs the skin systems when a model resolves, so the hub here is
-    // always the real model's. A model-less skinless body is intentional only on the
-    // training/headless path and the GCR physics-bones silhouette; player-facing render
-    // surfaces require the canonical mesh upstream — rl-demo's preflight fails loud without
-    // it — so this never silently ships a skinless crab to a screen.)
     let hub = assets.hub_bind_world();
     for (env, t) in crabs.iter() {
         if skins.iter().any(|s| s.env == env.0) {
@@ -181,7 +90,6 @@ fn attach_skins(
         commands.spawn((
             SceneRoot(model.scene.clone()),
             Transform::from_translation(t.translation - hub),
-            // Hidden until paired: until then it would be a bind-pose statue.
             Visibility::Hidden,
             CrabSkin {
                 env: env.0,
@@ -191,8 +99,6 @@ fn attach_skins(
     }
 }
 
-/// A skin whose crab is gone (despawn-respawn reset) despawns with all its
-/// (reparented) bones; `attach_skins` re-creates it for the replacement crab.
 fn reap_orphan_skins(
     mut commands: Commands,
     skins: Query<(Entity, &CrabSkin)>,
@@ -205,10 +111,6 @@ fn reap_orphan_skins(
     }
 }
 
-/// Once the glTF instance exists (one frame after its children appear, so
-/// GlobalTransforms hold the bind pose), capture per-bone offsets and flatten
-/// driven bones under the root. Reaching [`Pairing::Paired`] hands visibility to
-/// [`reveal_skin`], which shows the now-driven skin.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn pair_bones(
     mut commands: Commands,
@@ -247,10 +149,6 @@ fn pair_bones(
             if let Ok(c) = children.get(e) {
                 stack.extend(c.iter());
             }
-            // A skinned mesh keeps the AABB of its bind pose; once the crab
-            // walks far enough that those stale bounds leave the frustum, the
-            // whole mesh is culled and the model vanishes mid-scene. One crab
-            // is cheap to always draw.
             if meshes.get(e).is_ok() {
                 commands.entity(e).insert(NoFrustumCulling);
             }
@@ -264,12 +162,6 @@ fn pair_bones(
             let (Ok(bone_g), Ok(link_rest)) = (globals.get(e), rest_poses.get(link)) else {
                 continue;
             };
-            // Pair against the link's REST (bind) pose, not its live transform: the
-            // body has already begun settling by now, and using the live pose would
-            // bake that sag into the offset, leaving the skin riding above the
-            // colliders. `drive_bones` then composes the LIVE link pose with this
-            // bind offset, so the mesh reproduces the bind pose at rest and tracks
-            // the physics exactly as it moves.
             let offset = link_rest.0.to_matrix().inverse() * bone_g.to_matrix();
             commands.entity(e).insert((
                 BoneDrive { link, offset },
@@ -283,22 +175,11 @@ fn pair_bones(
             "crab skin paired: env {} ({} bones driven)",
             skin.env, paired
         );
-        // Driven bones now carry absolute world poses (see module docs), so the
-        // root must be identity. attach_skins gave it the spawn translation; left in
-        // place that transform would be applied a SECOND time on top of the
-        // already-world bone poses, rendering the skin offset from the physics body.
         commands.entity(root).insert(Transform::default());
         skin.phase = Pairing::Paired;
     }
 }
 
-/// Re-point a reset crab's bones at its fresh physics parts. A paired skin
-/// whose env was respawned ([`crate::bot::respawn_crab`]) still drives the
-/// despawned parts; this catches that — any one bone's link entity gone dead
-/// flags the whole skin stale — and re-resolves every bone from its name to
-/// the live part of the same role, keeping the captured offset (the respawn
-/// reproduces the same rest pose at the same origin, so it stays exact). No
-/// re-settle and no visibility change, so the skin never flickers.
 fn repair_skins(
     mut commands: Commands,
     mut bones: Query<(&mut BoneDrive, &Name)>,
@@ -307,10 +188,8 @@ fn repair_skins(
 ) {
     for (skin, kids) in skins.iter() {
         if !matches!(skin.phase, Pairing::Paired) {
-            continue; // pair_bones owns first-time pairing.
+            continue;
         }
-        // Stale iff a bone targets a despawned link. `get` on a dead entity
-        // fails; one such bone means the whole env was respawned.
         let stale = kids
             .iter()
             .filter_map(|b| bones.get(b).ok())
@@ -332,12 +211,6 @@ fn repair_skins(
                     drive.link = link;
                     repaired += 1;
                 }
-                // A respawn reproduces every role, so a bone that can't re-resolve means
-                // its physics part is genuinely gone. NEVER leave it driving the despawned
-                // link — that is a dangling driver `drive_bones` silently skips forever,
-                // freezing the bone at stale garbage with no trace. Surface it loudly and
-                // drop the dead drive so the stale handle can't linger (the bone is removed
-                // from the driven set rather than animated off nothing).
                 None => {
                     error!(
                         "crab skin repair: env {} bone {:?} has no live link after respawn \
@@ -356,13 +229,6 @@ fn repair_skins(
     }
 }
 
-/// Reveal a paired skin — UNLESS the render mode hides the mesh. A skin spawns `Hidden`
-/// because an unpaired one is a bind-pose statue sitting off the physics body; the moment its
-/// bones are driven it should show. But the colliders-only render mode
-/// ([`crate::crab_view::RenderMode::Colliders`] — the player's view toggle, and the missing-glb
-/// fallback) hides the mesh so the wireframe cage reads clean, so the target visibility is
-/// `paired AND mode.shows_mesh()`. `Option<Res<RenderMode>>`: absent in the headless trainer
-/// (no cycle) ⇒ default to showing the paired skin, the prior behavior. Writes only on change.
 fn reveal_skin(
     mode: Option<Res<crate::crab_view::RenderMode>>,
     mut roots: Query<(&CrabSkin, &mut Visibility)>,
@@ -380,20 +246,12 @@ fn reveal_skin(
     }
 }
 
-/// Every frame: driven bones follow their physics link. Links are top-level
-/// entities, so their `Transform` is already world-space (and fresher than
-/// `GlobalTransform`, which lags until propagation). Bones are top-level
-/// children of an identity root, so writing world poses into `Transform` is
-/// exact.
 #[allow(clippy::type_complexity)]
 fn drive_bones(
     mut bones: Query<(&BoneDrive, &mut Transform)>,
     links: Query<(&Transform, &CrabEnvId), (With<CrabBodyPart>, Without<BoneDrive>)>,
     repose: Res<CrabSkinRepose>,
 ) {
-    // The GCR game-spot placement rides the render bones ONLY (see [`CrabSkinRepose`]), per env
-    // so each armed crab carries its own game spot; identity for an env with no entry (the
-    // demo/trainer), so their skins render the crab at its raw physics pose unchanged.
     for (drive, mut t) in bones.iter_mut() {
         if let Ok((link, env)) = links.get(drive.link) {
             let m = repose
@@ -418,12 +276,6 @@ mod tests {
 
     use super::{BoneDrive, CrabSkin, Pairing, PartId, repair_skins, reveal_skin};
 
-    /// The role-resolving half of pairing: a bone name must map to the physics
-    /// link the re-pair then targets. Pins the cases the test relies on so a
-    /// mapping change can't make the re-pair test pass against the wrong link —
-    /// including `002`, which rides the basis (the coxo-basal split owns `001`/`002`),
-    /// distinct from the coxa (`000`) and the merus (`003`), so a bracket slip across
-    /// the chain is caught here.
     #[test]
     fn bone_names_resolve_to_expected_links() {
         use crate::bot::rig::part_for_bone;
@@ -442,22 +294,12 @@ mod tests {
         );
     }
 
-    /// The re-pair invariant: after an episode reset ([`respawn_crab`]) replaces
-    /// an env's physics parts, a paired skin's bones must point at the NEW, live
-    /// parts — not the despawned ones [`super::drive_bones`] would otherwise read as
-    /// frozen garbage. Builds a skin by hand (no glTF needed: the bone→link
-    /// contract is name-based) bound to the live crab, resets, and checks every
-    /// bone re-homed onto the matching fresh part.
     #[test]
     fn skin_repairs_onto_fresh_parts_after_respawn() {
         let mut app = headless_app();
-        // `repair_skins` is only auto-registered with a model loaded; add it
-        // alone so the test drives exactly the system under test.
         app.add_systems(PostUpdate, repair_skins);
-        tick(&mut app, 192); // spawn + settle the env-0 crab
+        tick(&mut app, 192);
 
-        // Bind a synthetic skin to two live parts of distinct roles: the
-        // carapace and the left front coxa.
         let carapace = find_part(&mut app, Role::Carapace);
         let coxa = find_part(&mut app, Role::Coxa);
         let (shell_bone, leg_bone) = app
@@ -492,16 +334,12 @@ mod tests {
             })
             .unwrap();
 
-        // Precondition: bones currently target the live OLD parts (not stale),
-        // so the test proves the reset transition, not an already-correct state.
         assert_eq!(bone_link(&mut app, shell_bone), carapace);
         assert_eq!(bone_link(&mut app, leg_bone), coxa);
 
         respawn_env0(&mut app);
-        // One update flushes the despawn+respawn and runs `repair_skins`.
         tick(&mut app, 1);
 
-        // The old part entities are gone; the bones must now point at live ones.
         let new_carapace = find_part(&mut app, Role::Carapace);
         let new_coxa = find_part(&mut app, Role::Coxa);
         assert_ne!(new_carapace, carapace, "respawn should make new entities");
@@ -515,20 +353,14 @@ mod tests {
             new_coxa,
             "leg bone must re-home onto the fresh coxa"
         );
-        // And both targets are live entities (a despawned id would not resolve).
         assert!(is_live(&mut app, new_carapace) && is_live(&mut app, new_coxa));
     }
 
-    /// A bone that can't re-resolve to a live link after a reset must NOT be left
-    /// silently driving the despawned part (rl#126): `repair_skins` drops its
-    /// `BoneDrive` (and logs loudly) so no dangling, frozen driver lingers. Built
-    /// with a non-rig bone name (`part_for_bone` → `None`) so the re-resolve fails,
-    /// alongside a real bone that re-homes normally — proving the drop is targeted.
     #[test]
     fn repair_skins_drops_dead_drive_when_unresolvable() {
         let mut app = headless_app();
         app.add_systems(PostUpdate, repair_skins);
-        tick(&mut app, 192); // spawn + settle the env-0 crab
+        tick(&mut app, 192);
 
         let carapace = find_part(&mut app, Role::Carapace);
         let (shell_bone, orphan_bone) = app
@@ -557,9 +389,6 @@ mod tests {
                         ))
                         .id()
                 };
-                // A real bone (re-homes) and a bone whose name maps to no part
-                // (`part_for_bone` returns `None`) so it can't re-resolve. Both target
-                // the live carapace now, so the respawn makes both links go stale.
                 let shell = bone(&mut commands, "Def_shell", carapace);
                 let orphan = bone(&mut commands, "NotARigBone", carapace);
                 (shell, orphan)
@@ -567,12 +396,10 @@ mod tests {
             .unwrap();
 
         respawn_env0(&mut app);
-        tick(&mut app, 1); // flush despawn+respawn and run repair_skins
+        tick(&mut app, 1);
 
         let new_carapace = find_part(&mut app, Role::Carapace);
         assert_ne!(new_carapace, carapace, "respawn should make new entities");
-        // The resolvable bone re-homes; the unresolvable one loses its dead drive
-        // entirely rather than being left pointing at the despawned carapace.
         assert_eq!(
             bone_link(&mut app, shell_bone),
             new_carapace,
@@ -584,9 +411,6 @@ mod tests {
         );
     }
 
-    /// `reveal_skin` shows a skin only once it pairs: an unpaired root is a
-    /// bind-pose statue off the body, so it must stay hidden, and the moment
-    /// `paired` flips the skin must become (and remain) visible.
     #[test]
     fn reveal_skin_shows_only_after_pairing() {
         let mut app = headless_app();
@@ -614,11 +438,9 @@ mod tests {
             )
         };
 
-        // Unpaired: stays hidden.
         tick(&mut app, 1);
         assert!(!visible(&app), "unpaired skin must stay hidden");
 
-        // Pair it; reveal_skin flips it visible and leaves it there.
         app.world_mut().get_mut::<CrabSkin>(root).unwrap().phase = Pairing::Paired;
         tick(&mut app, 1);
         assert!(visible(&app), "paired skin must become visible");

@@ -1,21 +1,3 @@
-//! The tagged checkpoint envelope (bddap/rl#200 §2): every persisted training artifact —
-//! brain, optimizer, obs normalizer, return normalizer — ships inside a
-//! [`CheckpointEnvelope`] that names its artifact kind, per-kind format version, and
-//! policy architecture. Identity lives IN the file, not a sidecar (the release packer
-//! drops sidecars), so no code path can blind-load a record into a guessed architecture:
-//! a mis-copied file fails the kind check, a wrong-arch file fails the arch check, and a
-//! pre-envelope file fails the magic check — each a distinct, attributable refusal
-//! instead of the old quiet-rest-pose degrade.
-//!
-//! On disk: [`MAGIC`] then bincode of the envelope, with `kind` and `arch` encoded as
-//! their stable kebab-case STRINGS — never a bare serde enum, because bincode-1 encodes
-//! enum variants by index and ignores rename attrs, so culling an architecture variant
-//! would silently re-map every tagged file. String on the wire, enum in process.
-//!
-//! Legacy (pre-envelope) files are parsed NOWHERE: their sole parser, the one-shot
-//! `migrate-checkpoint` tool, was deleted once the fleet was migrated (rl#200
-//! increment 3). A stray legacy file today is refused; its bytes are recoverable only
-//! via that tool in git history.
 
 use std::path::Path;
 
@@ -23,10 +5,6 @@ use crate::bot::arch::ArchId;
 
 use super::atomic_write;
 
-/// File magic identifying an enveloped artifact. Its ONE job is to make "legacy
-/// untagged file" a distinct, attributable verdict ([`EnvelopeError::Legacy`]) instead
-/// of a probabilistic bincode decode failure indistinguishable from corruption. Format
-/// evolution rides the per-kind `version` field inside the envelope, not this constant.
 pub(crate) const MAGIC: &[u8; 8] = b"CRABCKPT";
 
 /// Which artifact an envelope carries. A mis-copied file (an optimizer renamed to
@@ -176,9 +154,6 @@ pub(crate) enum EnvelopeError {
     /// saved yet", every other variant as a fault.
     Absent,
     Io(std::io::Error),
-    /// No [`MAGIC`]: a pre-envelope legacy file. The loader has no untagged-read path;
-    /// the fix is re-copying from a migrated checkpoint (the fleet migrated in rl#200,
-    /// then the one-shot migration tool was deleted).
     Legacy,
     /// Magic present but the envelope doesn't decode — a torn or corrupt file.
     Corrupt(String),
@@ -609,8 +584,6 @@ mod tests {
             Err(EnvelopeError::Absent)
         ));
 
-        // A pre-envelope file (no magic) is Legacy, not Corrupt — "predates the fleet
-        // migration" and "damaged" are different diagnoses.
         std::fs::write(&path, b"old raw burn record bytes").unwrap();
         assert!(matches!(
             read_envelope(&path, ArtifactKind::Brain),
