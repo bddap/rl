@@ -86,10 +86,11 @@ pub struct CrabArticulation {
     /// One frame per crab, in crab-index order (index = the snapshot's crab index = the host's
     /// crab-world env id).
     pub crabs: Vec<CrabFrame>,
-    /// Every currently-piloting player's craft pose, in ascending pilot order (rl#191
-    /// increment 2: one body per pilot). A pilot absent from the list is ON FOOT — its body is
-    /// despawned host-side, so absence IS the on-foot signal and a client clears that craft
-    /// rather than freezing a stale one. Empty when nobody flies.
+    /// Every currently-piloting player's craft pose, in strictly-ascending pilot order
+    /// (rl#191 increment 2: one body per pilot; the order is enforced on decode, so a
+    /// duplicate pilot is unrepresentable). A pilot absent from the list is ON FOOT — its
+    /// body is despawned host-side, so absence IS the on-foot signal and a client clears
+    /// that craft rather than freezing a stale one. Empty when nobody flies.
     pub vehicles: Vec<VehiclePoseWire>,
 }
 
@@ -122,6 +123,9 @@ pub enum ArticulationDecodeError {
     TrailingBytes,
     /// A brain label's bytes were not valid UTF-8.
     BadLabel,
+    /// The vehicles list was not in strictly-ascending pilot order — a drifted/hostile
+    /// sender; a tolerated duplicate would render two cages for one pilot's craft.
+    UnorderedVehicles,
 }
 
 impl std::fmt::Display for ArticulationDecodeError {
@@ -131,6 +135,7 @@ impl std::fmt::Display for ArticulationDecodeError {
             Self::BadFlag => "articulation present-flag was neither 0 nor 1",
             Self::TrailingBytes => "trailing bytes after a complete articulation",
             Self::BadLabel => "articulation brain label was not valid UTF-8",
+            Self::UnorderedVehicles => "articulation vehicles were not in ascending pilot order",
         };
         f.write_str(msg)
     }
@@ -222,13 +227,20 @@ impl CrabArticulation {
             });
         }
         let n_vehicles = u16::from_le_bytes(r.take::<2>()?) as usize;
-        let mut vehicles = Vec::new();
+        let mut vehicles: Vec<VehiclePoseWire> = Vec::new();
         for _ in 0..n_vehicles {
-            vehicles.push(VehiclePoseWire {
+            let v = VehiclePoseWire {
                 pilot: r.byte()?,
                 pos: read_vec3(&mut r)?,
                 rot: read_vec4(&mut r)?,
-            });
+            };
+            // Strictly ascending, which also makes a duplicate pilot unrepresentable — the
+            // encoder sorts, so an unordered list is a drifted peer, rejected like every
+            // other malformation rather than rendered as a ghost second cage.
+            if vehicles.last().is_some_and(|prev| prev.pilot >= v.pilot) {
+                return Err(ArticulationDecodeError::UnorderedVehicles);
+            }
+            vehicles.push(v);
         }
         if !r.is_empty() {
             return Err(ArticulationDecodeError::TrailingBytes);
@@ -480,6 +492,24 @@ mod tests {
         assert_eq!(
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::Truncated)
+        );
+    }
+
+    #[test]
+    fn unordered_or_duplicate_vehicle_pilots_are_rejected() {
+        // sample()'s vehicles are pilots [0, 2]; a swapped or duplicated pilot must be a loud
+        // decode error, never a ghost second cage for one pilot's craft.
+        let mut a = sample();
+        a.vehicles.swap(0, 1);
+        assert_eq!(
+            CrabArticulation::from_bytes(&a.to_bytes()),
+            Err(ArticulationDecodeError::UnorderedVehicles)
+        );
+        let mut a = sample();
+        a.vehicles[1].pilot = a.vehicles[0].pilot;
+        assert_eq!(
+            CrabArticulation::from_bytes(&a.to_bytes()),
+            Err(ArticulationDecodeError::UnorderedVehicles)
         );
     }
 }

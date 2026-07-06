@@ -57,9 +57,9 @@ fn install_round(world: &mut World, ls: Lockstep, coord: Box<Coordinator>) {
     world.insert_resource(CameraPitch::default());
     world.insert_resource(CameraYaw::default());
     world.insert_resource(LocalVehicle::default());
-    // The remote-host craft mirror too: only the RemoteAdopt arm ever writes it, so a round
-    // entered as solo/host after a remote round would otherwise draw the previous host's
-    // craft frozen at its last adopted pose, forever.
+    // The remote craft-pose mirror too: only the RemoteAdopt arm ever writes it, so a round
+    // entered as solo/host after a remote round would otherwise draw the previous round's
+    // pilots' crafts frozen at their last adopted poses, forever.
     world.insert_resource(super::articulation::RemoteVehicle::default());
 }
 
@@ -718,27 +718,6 @@ impl LocalVehicle {
 /// yet). At most one body per pilot — `manage_vehicles` enforces it. Keyed by pilot because the
 /// host's world will also carry REMOTE pilots' crafts (rl#191): the cockpit camera must fly from
 /// ours alone. The renderer shifts this arena pose to the crab's render spot in `cockpit_camera`.
-/// Overwrite the crab world's [`VehicleControls`] from the server's intent map — the ONE
-/// writer, run each tick on the server-authoritative arm. `entries` is `(pilot, alive,
-/// command)` for every player with a live intent; the map is REBUILT wholesale, so the
-/// level-triggered roster prune upstream ([`crate::server::Server::advance`]) is what despawns
-/// a departed pilot's craft. BOARDING is alive-gated — the same rule as the local E-cycle: a
-/// pilot with no existing entry files only while its foot avatar is alive, while an
-/// already-flying pilot keeps its craft (cycling kinds and stepping out are ungated, and death
-/// mid-flight doesn't eject). Pure (no World) so the gate is unit-testable.
-fn sync_pilot_entries(
-    controls: &mut BTreeMap<PilotId, PilotCommand>,
-    entries: &[(PilotId, bool, PilotCommand)],
-) {
-    let was_flying: Vec<PilotId> = controls.keys().copied().collect();
-    controls.clear();
-    for (pilot, alive, cmd) in entries {
-        if *alive || was_flying.contains(pilot) {
-            controls.insert(*pilot, *cmd);
-        }
-    }
-}
-
 fn read_vehicle_pose(world: &mut World, me: PilotId) -> Option<CockpitPose> {
     let mut q = world.query::<(&Transform, &Vehicle)>();
     q.iter(world)
@@ -1081,25 +1060,19 @@ pub(super) fn drive_lockstep(world: &mut World) {
         // craft beside the host's — the second-implementation trap. A remote client's piloting
         // goes UP the wire; only the server-authoritative arm writes the crab world's controls.
         if role == PeerRole::ServerAuth && world.get_resource::<VehicleControls>().is_some() {
-            let entries: Vec<(PilotId, bool, PilotCommand)> = {
+            // A verbatim MIRROR of the server's intent map — `pilot_intents` is the single
+            // truth of "who pilots what" (boarding alive-gated at ITS insert, departures
+            // roster-pruned there), so no policy lives on this side to drift from it.
+            let entries: BTreeMap<PilotId, PilotCommand> = {
                 let state = world.non_send_resource::<GameState>();
                 let server = state.coord.server().expect("server_auth ⇒ a server");
                 server
                     .pilot_intents()
                     .iter()
-                    .map(|(&pid, intent)| {
-                        // Alive as of the last stepped tick of the AUTHORITATIVE sim — the
-                        // boarding gate below is the same rule the local E-cycle applies.
-                        let alive = server
-                            .sim()
-                            .player(pid)
-                            .is_some_and(|p| p.status() == PlayerStatus::Alive);
-                        (pilot_of(pid), alive, intent.to_command())
-                    })
+                    .map(|(&pid, intent)| (pilot_of(pid), intent.to_command()))
                     .collect()
             };
-            let mut ctrl = world.resource_mut::<VehicleControls>();
-            sync_pilot_entries(&mut ctrl.0, &entries);
+            world.resource_mut::<VehicleControls>().0 = entries;
         }
 
         // Apply every now-ready tick, ONE at a time. Per applied tick: snapshot the pre-step state
@@ -1307,10 +1280,9 @@ pub(super) fn drive_lockstep(world: &mut World) {
 mod tests {
     use super::{
         FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, PeerRole, jitter_take,
-        sync_pilot_entries,
     };
     use crate::sim::{Input, buttons};
-    use crab_world::vehicle::{PilotCommand, PilotId, VehicleKind};
+    use crab_world::vehicle::VehicleKind;
 
     /// The tagged-control invariant: the deterministic sim only ever applies a FOOT
     /// [`Input`] — the real walker input on foot, a neutral one while piloting. A piloting player
@@ -1341,32 +1313,6 @@ mod tests {
             Input::default(),
             "piloting: the sim gets a neutral foot input, never a flight axis"
         );
-    }
-
-    /// The one [`VehicleControls`] writer applies the local-boarding rule to EVERY pilot
-    /// (rl#191 increment 2): a dead newcomer can't board, an alive one can, a pilot that dies
-    /// MID-FLIGHT keeps its craft (only boarding is gated), and a vanished intent (stepped
-    /// out, or roster-pruned upstream) removes the entry — despawning the body.
-    #[test]
-    fn vehicle_entry_boarding_is_alive_gated_but_flight_survives_death() {
-        let p1 = PilotId(1);
-        let cmd = PilotCommand::new(VehicleKind::Plane);
-        let mut controls = std::collections::BTreeMap::new();
-
-        sync_pilot_entries(&mut controls, &[(p1, false, cmd)]);
-        assert!(controls.is_empty(), "a dead newcomer cannot board");
-
-        sync_pilot_entries(&mut controls, &[(p1, true, cmd)]);
-        assert!(controls.contains_key(&p1), "an alive pilot boards");
-
-        sync_pilot_entries(&mut controls, &[(p1, false, cmd)]);
-        assert!(
-            controls.contains_key(&p1),
-            "death mid-flight does not eject — only boarding is alive-gated"
-        );
-
-        sync_pilot_entries(&mut controls, &[]);
-        assert!(controls.is_empty(), "no intent ⇒ entry removed, body despawns");
     }
 
     #[test]

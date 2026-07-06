@@ -170,11 +170,24 @@ pub(crate) trait Codec: Sized {
 }
 
 /// Byte tag for [`VehicleKind`] in the pilot-intent block. `0` is reserved for "on foot"
-/// (no intent), so a kind is always nonzero — the one place the enum meets the wire.
+/// (no intent), so a kind is always nonzero — this pair of functions is the one place the
+/// enum meets the wire; keep them adjacent so the two directions can't drift (the exhaustive
+/// match makes a new variant a compile error HERE, which is the reminder to extend the
+/// inverse below and bump the ALPN).
 fn vehicle_kind_byte(kind: crab_world::vehicle::VehicleKind) -> u8 {
     match kind {
         crab_world::vehicle::VehicleKind::Plane => 1,
         crab_world::vehicle::VehicleKind::Ship => 2,
+    }
+}
+
+/// Inverse of [`vehicle_kind_byte`]. `None` for `0` (on foot — handled by the caller) and
+/// any unknown byte (a wire mismatch, rejected loudly).
+fn vehicle_kind_from_byte(b: u8) -> Option<crab_world::vehicle::VehicleKind> {
+    match b {
+        1 => Some(crab_world::vehicle::VehicleKind::Plane),
+        2 => Some(crab_world::vehicle::VehicleKind::Ship),
+        _ => None,
     }
 }
 
@@ -219,12 +232,9 @@ impl Codec for TickMsg {
                 );
                 None
             }
-            kind @ (1 | 2) => {
-                let kind = if kind == 1 {
-                    crab_world::vehicle::VehicleKind::Plane
-                } else {
-                    crab_world::vehicle::VehicleKind::Ship
-                };
+            b => {
+                let kind = vehicle_kind_from_byte(b)
+                    .with_context(|| format!("unknown pilot-intent kind byte {b:#x}"))?;
                 let match_velocity = match p[29] {
                     0 => false,
                     1 => true,
@@ -240,7 +250,6 @@ impl Codec for TickMsg {
                     match_velocity,
                 })
             }
-            x => anyhow::bail!("unknown pilot-intent kind byte {x:#x}"),
         };
         Ok(TickMsg {
             issue_tick: u64::from_le_bytes(b[0..OFF_INPUT].try_into().unwrap()),
@@ -928,9 +937,12 @@ async fn wire_connection(
 /// allocating. The largest legitimate frames all fit comfortably: a full-roster [`Beat`]
 /// (start + count + asset digest + 256×32-byte ids ≈ 8 KiB), a full-roster
 /// [`CoreSnapshot`] (~14 B/player + ~20 B/crab, ≈ 4 KiB at 256), and a [`CrabArticulation`]
-/// (rl#192: per crab 39 parts × 29 B each + repose, + ~30 B per piloted craft ≈ 1.2 KiB/crab); 16 KiB is
-/// generous slack for any sane binding count and still bounds a bad length to a small
-/// allocation.
+/// of two independent terms — crabs (rl#192: 39 parts × 29 B + repose + label ≈ 1.2 KiB
+/// each) and piloted crafts (rl#191: 29 B per pilot, ≈ 7.4 KiB at the 256-pid ceiling).
+/// 16 KiB is generous slack for couch scale (a few crabs, a handful of pilots); a
+/// pathological max-roster-AND-many-crabs combination could exceed it, which the sender-side
+/// assert in [`write_frame`] surfaces AT THE SENDER instead of as every receiver dropping
+/// the link on a "length exceeds cap" that reads like corruption.
 const MAX_FRAME_LEN: usize = 16 * 1024;
 
 /// Read `[len:u32 LE][kind:u8][body]` frames from a peer's recv stream until it closes,
@@ -990,6 +1002,14 @@ async fn drop_if_same(links: &Links, id: EndpointId, failed: &LinkId) {
 /// Write one `[len:u32 LE][kind:u8][body]` frame to a send stream. The length covers
 /// the kind byte plus the body, so the reader allocates exactly the right buffer.
 async fn write_frame(send: &mut SendStream, kind: Frame, body: &[u8]) -> Result<()> {
+    // Every RECEIVER enforces MAX_FRAME_LEN; catching an oversized legitimate frame here
+    // names the real bug at the sender, instead of every peer dropping the link on a
+    // "length exceeds cap" that reads like corruption.
+    debug_assert!(
+        body.len() < MAX_FRAME_LEN,
+        "outbound {kind:?} frame is {} B, over the {MAX_FRAME_LEN} B cap every receiver enforces",
+        1 + body.len()
+    );
     let len = (1 + body.len()) as u32;
     send.write_all(&len.to_le_bytes()).await?;
     send.write_all(&[kind as u8]).await?;
