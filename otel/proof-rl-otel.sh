@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Full app→iroh→sink proof for the rl OTEL instrumentation: the rl `otel` crate's Rust
-# SDK emits real OTLP (trace + log + metric) which traverses the iroh tunnel and lands in
-# the stock collector's sink. Proves (a) the 0.28 thread-based exporters work with NO
-# tokio runtime, and (b) rl-emitted OTLP is valid end to end.
-#
-#   otel SDK (this example) → :14318 iroh-tunnel forward → iroh → serve → :4318 otelcol → JSONL
 set -euo pipefail
 
 OTELCOL="${OTELCOL:?set OTELCOL to the otelcol-contrib store path}"

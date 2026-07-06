@@ -9,25 +9,11 @@ name = "rl-train"
 path = "src/main.rs"
 
 [features]
-# DEFAULT-ON: the PPO update runs ONLY on the GPU (rl#49; ~1.5–4.3× the CPU update on
-# the RTX 2080), so the trainer links burn-wgpu on a bare `cargo build` — no opt-in flag.
-# `wgpu` forwards to crab-world's GPU backend WITHOUT pulling `render`, so the headless
-# trainer gets burn-wgpu (wgpu 26) but still NO bevy_render/wgpu 27. Building it OFF
-# (`--no-default-features`) leaves the learn path with no update backend, which is a hard
-# compile error (see crab-world/src/training/inproc.rs), never a silent CPU fallback.
 default = ["wgpu"]
 wgpu = ["crab-world/wgpu"]
 
 [dependencies]
-# render OFF (crab-world's default) — the headless trainer links NO bevy_render/wgpu27.
 crab-world = { path = "../crab-world" }
-# bevy for the `Vec3`/math types the DEV verify modes use; clap for arg parsing. No
-# bevy_rapier3d here — the verify entries don't touch it directly (crab-world does,
-# transitively).
 bevy.workspace = true
 clap.workspace = true
-# The shared OTEL init owns the tracing subscriber (stderr fmt — so crab-world's
-# `info!`/`warn!`/`error!` still surface headless, where there is no bevy LogPlugin — plus
-# OTLP export of traces/metrics/logs when a telemetry endpoint is configured). One init for
-# every rl binary; see the `otel` crate + bddap/bothouse telemetry/README.md.
 otel = { path = "../otel" }

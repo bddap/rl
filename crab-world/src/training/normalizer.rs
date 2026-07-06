@@ -1,19 +1,3 @@
-//! Running observation normalizer (Welford) shared by the learner's master stats and
-//! each rollout thread's per-horizon increment.
-//!
-//! # The snapshot → increment → merge contract
-//!
-//! The master stats flow learner→worker as a [`NormalizerSnapshot`] (the full
-//! cumulative baseline), and a worker's per-horizon samples flow worker→learner as a
-//! [`NormalizerIncrement`] (only the observations THIS horizon added). [`ObsNormalizer::merge`]
-//! accepts only the latter: the parallel-Welford combine is exact only for two
-//! DISJOINT streams, so folding in a cumulative snapshot would re-count the baseline
-//! the master already holds. That invariant is enforced by the type system here, not
-//! by prose + a regression test — a snapshot and an increment are distinct types, and
-//! only an increment can reach `merge`. The two are also produced by distinct types:
-//! a baseline-carrying [`ObsNormalizer`] yields only snapshots, a zero-baseline
-//! [`IncrementAccumulator`] yields only increments, so an increment can never smuggle
-//! a baseline in.
 
 use std::path::Path;
 
@@ -25,18 +9,11 @@ use crate::bot::sensor::OBS_SIZE;
 
 use super::envelope::{ArtifactKind, EnvelopeError, SetKey, read_envelope_expecting, write_envelope};
 
-/// Per-element Welford state: running `(count, mean, M2)` for each of the `OBS_SIZE`
-/// observation elements. The fold and the parallel combine live here once, so the
-/// master normalizer and a worker's increment cannot compute them differently.
-///
-/// Per-element counts (not one shared count) because the NaN-skip lets an element be
-/// observed while its neighbours are not; variance is derived from `m2` on demand, so
-/// there is no separate `var` to drift from `m2`/`count`.
 #[derive(Clone)]
 struct Welford {
     mean: [f64; OBS_SIZE],
-    m2: [f64; OBS_SIZE],    // sum of squared differences from mean
-    count: [u64; OBS_SIZE], // per-element count (NaN-skipped elements don't inflate others)
+    m2: [f64; OBS_SIZE],
+    count: [u64; OBS_SIZE],
 }
 
 impl Welford {
@@ -48,9 +25,6 @@ impl Welford {
         }
     }
 
-    /// Per-element variance `m2 / (count-1)`. Defaults to 1.0 for an element seen at
-    /// most once (no spread estimate yet), matching the unit-variance starting point a
-    /// fresh normalizer uses.
     fn variance(&self, i: usize) -> f64 {
         if self.count[i] > 1 {
             (self.m2[i] / (self.count[i] as f64 - 1.0)).max(0.0)
@@ -59,10 +33,6 @@ impl Welford {
         }
     }
 
-    /// Fold one finite sample of element `i` into the running `(count, mean, m2)` — the
-    /// inner Welford step. Returns `true` if `raw` was NON-finite and therefore skipped
-    /// from the stats, so the caller can count a vanished sensor reading instead of
-    /// losing it silently (bddap/rl#181).
     fn observe_element(&mut self, i: usize, raw: f32) -> bool {
         if !raw.is_finite() {
             return true;
@@ -77,9 +47,6 @@ impl Welford {
         false
     }
 
-    /// Fold one observation, returning how many of its elements were non-finite and so
-    /// skipped from the running stats (0 on a clean obs). The skip is a deliberate
-    /// fail-safe; the count is what keeps it from being silent (bddap/rl#181).
     fn observe(&mut self, obs: &[f32; OBS_SIZE]) -> u32 {
         let mut nonfinite = 0;
         for (i, &raw) in obs.iter().enumerate() {
@@ -90,9 +57,6 @@ impl Welford {
         nonfinite
     }
 
-    /// Parallel Welford combine: fold a DISJOINT `other` stream's per-element
-    /// `(count, mean, M2)` into this one. Exact only when `other` shares no samples
-    /// with `self`. Per element because the NaN-skip lets counts differ across elements.
     fn merge(&mut self, other: &Welford) {
         for i in 0..OBS_SIZE {
             let na = self.count[i] as f64;
@@ -112,20 +76,11 @@ impl Welford {
     }
 }
 
-/// Running observation normalizer using Welford's online algorithm. Normalizes
-/// observations to zero mean, unit variance; the only Welford that carries a `clip`
-/// and a loaded baseline, so it produces a [`NormalizerSnapshot`], never an increment.
 pub(crate) struct ObsNormalizer {
     welford: Welford,
-    clip: f32, // max absolute normalized value
+    clip: f32,
 }
 
-/// The on-disk checkpoint format AND the cumulative baseline shipped learner→rollout
-/// thread (in-process, not over a wire). Serde-friendly because arrays > 32 don't
-/// auto-derive. The master's FULL cumulative stats.
-///
-/// The field set and order are the bincode wire format on disk; changing them breaks
-/// resuming existing checkpoints, so a format change must bump a version and cold-start.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct NormalizerSnapshot {
     mean: Vec<f64>,
@@ -134,20 +89,8 @@ pub(crate) struct NormalizerSnapshot {
     clip: f32,
 }
 
-/// A worker's disjoint per-horizon delta: a Welford over ONLY the observations one
-/// rollout thread saw since its last reset, counted from a zero baseline. The single
-/// input [`ObsNormalizer::merge`] accepts. In-process only (worker→learner over a
-/// channel), so it carries no `clip` and no serde: the merge reads only
-/// `(count, mean, M2)`, and the fixed-size arrays make the old runtime size-mismatch
-/// check unrepresentable. Boxed because the `Welford` is ~2KB of inline arrays;
-/// keeping it off the `RollOutcome` enum (whose other variant is empty) avoids
-/// bloating every outcome that crosses the channel.
 pub(crate) struct NormalizerIncrement(Box<Welford>);
 
-/// Accumulates ONLY one horizon's observations from a zero baseline — the delta a
-/// rollout thread ships back for the learner to [`ObsNormalizer::merge`]. Distinct
-/// from [`ObsNormalizer`] precisely so it can never be loaded with a baseline or used
-/// to normalize: it only `observe`s and yields a [`NormalizerIncrement`].
 pub(crate) struct IncrementAccumulator {
     welford: Welford,
 }
@@ -159,25 +102,15 @@ impl IncrementAccumulator {
         }
     }
 
-    /// Count one observation toward this horizon's increment (NaN-skipped per element),
-    /// WITHOUT normalizing it — the policy's normalized value comes from the master copy
-    /// (full baseline+horizon stats), so the increment only needs to tally the samples.
-    /// Returns how many elements were non-finite and skipped, so the rollout thread can
-    /// surface a sensor/physics anomaly at the horizon boundary (bddap/rl#181).
     pub(crate) fn observe(&mut self, obs: &[f32; OBS_SIZE]) -> u32 {
         self.welford.observe(obs)
     }
 
-    /// The disjoint delta to ship to the learner. A by-value `Welford` clone; the
-    /// accumulator is reset (replaced) at the next horizon, so no aliasing.
     pub(crate) fn increment(&self) -> NormalizerIncrement {
         NormalizerIncrement(Box::new(self.welford.clone()))
     }
 }
 
-/// Max absolute normalized observation value (Welford clip). One source of truth for
-/// every `ObsNormalizer::new`, so the learner's master and a checkpoint reload share
-/// the same clip and can't drift.
 pub(crate) const NORMALIZER_CLIP: f32 = 5.0;
 
 impl ObsNormalizer {
@@ -188,15 +121,11 @@ impl ObsNormalizer {
         }
     }
 
-    /// Update running stats, then return the normalized observation.
     pub(crate) fn normalize(&mut self, obs: &[f32; OBS_SIZE]) -> [f32; OBS_SIZE] {
         self.welford.observe(obs);
         self.normalize_frozen(obs)
     }
 
-    /// Normalize against the current statistics WITHOUT updating them. Inference
-    /// (play/demo) uses this so the running mean/var stay fixed at the values learned
-    /// during training rather than drifting toward demo observations.
     pub(crate) fn normalize_frozen(&self, obs: &[f32; OBS_SIZE]) -> [f32; OBS_SIZE] {
         let clip = self.clip;
         let mut normalized = [0.0f32; OBS_SIZE];
@@ -227,8 +156,6 @@ impl ObsNormalizer {
         write_envelope(path, ArtifactKind::ObsNormalizer, arch, bytes, None, save_stamp)
     }
 
-    /// The cumulative baseline as the serde mirror — handed to a rollout thread, and
-    /// persisted as the checkpoint.
     pub(crate) fn snapshot(&self) -> NormalizerSnapshot {
         NormalizerSnapshot {
             mean: self.welford.mean.to_vec(),
@@ -238,9 +165,6 @@ impl ObsNormalizer {
         }
     }
 
-    /// Replace this normalizer's stats with a master `snapshot` (e.g. handed to a
-    /// rollout thread before its next rollout). Returns false on a size/validity
-    /// mismatch, leaving self unchanged.
     pub(crate) fn load_snapshot(&mut self, snapshot: NormalizerSnapshot) -> bool {
         match Self::from_snapshot(snapshot) {
             Some(n) => {
@@ -270,8 +194,6 @@ impl ObsNormalizer {
         Some(n)
     }
 
-    /// Fold a rollout thread's disjoint per-horizon [`NormalizerIncrement`] into the
-    /// master — only an increment, never a cumulative snapshot (module-level contract).
     pub(crate) fn merge(&mut self, increment: &NormalizerIncrement) {
         self.welford.merge(&increment.0);
     }
@@ -323,9 +245,6 @@ mod tests {
 
     #[test]
     fn observe_counts_nonfinite_elements_skipped() {
-        // bddap/rl#181: the per-element finite-skip is a deliberate fail-safe, but it must not be
-        // silent — `observe` reports how many elements it dropped so a sensor/physics anomaly is
-        // visible at the horizon boundary. A clean obs reports 0; NaN and ±inf each count once.
         let mut inc = IncrementAccumulator::new();
 
         let clean = [0.5f32; OBS_SIZE];
@@ -341,8 +260,6 @@ mod tests {
             "NaN and ±inf elements are each counted as one skipped sample"
         );
 
-        // The skipped elements are excluded from the running stats (count stays put), while a
-        // finite neighbour in the same obs is still folded — the count tracks exactly the drop.
         assert_eq!(inc.welford.count[0], 1, "the NaN element was never folded");
         assert_eq!(
             inc.welford.count[3], 2,
@@ -352,10 +269,6 @@ mod tests {
 
     #[test]
     fn load_snapshot_rejects_a_malformed_snapshot_and_leaves_self_unchanged() {
-        // bddap/rl#177: a failed snapshot load must report `false` (so the rollout thread can
-        // REFUSE the horizon instead of rolling mis-normalized obs) AND leave the existing stats
-        // intact — never a half-applied normalizer. Pin both: a wrong-width snapshot is rejected,
-        // and the normalizer keeps the stats it had.
         let mut norm = ObsNormalizer::new(5.0);
         for i in 0..30 {
             let mut obs = [0.0f32; OBS_SIZE];
@@ -364,7 +277,7 @@ mod tests {
         }
         let before = norm.welford.mean[0];
         let bad = NormalizerSnapshot {
-            mean: vec![0.0; OBS_SIZE + 1], // wrong width — must be rejected
+            mean: vec![0.0; OBS_SIZE + 1],
             m2: vec![0.0; OBS_SIZE + 1],
             count: vec![0; OBS_SIZE + 1],
             clip: 5.0,
@@ -378,7 +291,6 @@ mod tests {
             "a rejected load must leave the normalizer's stats unchanged, not half-applied"
         );
 
-        // A negative-M2 (otherwise correctly-sized) snapshot is also rejected.
         let mut neg = norm.snapshot();
         neg.m2[0] = -1.0;
         assert!(
@@ -423,11 +335,6 @@ mod tests {
         assert_eq!(norm.clip, loaded.clip);
     }
 
-    /// The normalizer merge must be exact: K rollout threads each normalizing their
-    /// own slice of samples, then merged on the learner, must give the same running
-    /// stats as one single-threaded stream that saw every sample. That equivalence is
-    /// the load-bearing correctness check for the multi-threaded rollout. Includes a
-    /// NaN-skipped element to exercise the per-element count bookkeeping.
     #[test]
     fn parallel_normalizer_merge_matches_single_stream() {
         let sample = |i: usize| {
@@ -435,8 +342,6 @@ mod tests {
             o[0] = i as f32;
             o[1] = (i as f32) * 0.5 - 3.0;
             o[2] = ((i * 7) % 11) as f32;
-            // Element 3 is present only on even i: counts diverge across elements,
-            // so the merge must combine them per element, not with a shared count.
             o[3] = if i.is_multiple_of(2) {
                 i as f32
             } else {
@@ -445,14 +350,11 @@ mod tests {
             o
         };
 
-        // One stream over all 80 samples.
         let mut whole = ObsNormalizer::new(5.0);
         for i in 0..80 {
             whole.normalize(&sample(i));
         }
 
-        // Two independent half-streams: A normalizes its half, B accumulates the other
-        // half as a disjoint increment, then A merges B in.
         let mut a = ObsNormalizer::new(5.0);
         for i in 0..40 {
             a.normalize(&sample(i));
@@ -471,8 +373,6 @@ mod tests {
                 a.welford.mean[i],
                 whole.welford.mean[i]
             );
-            // M2 (and hence variance) is the part a naive mean-only merge gets
-            // wrong; assert it directly. Relative tolerance because M2 grows large.
             let scale = whole.welford.m2[i].abs().max(1.0);
             assert!(
                 (a.welford.m2[i] - whole.welford.m2[i]).abs() / scale < 1e-9,
@@ -483,14 +383,6 @@ mod tests {
         }
     }
 
-    /// CRITICAL regression: the snapshot→roll→merge LOOP must not double-count the
-    /// re-handed baseline. Each iteration the learner's master is snapshotted to the
-    /// rollout thread, the thread rolls (mutating its copy with this horizon's
-    /// samples) and hands back ONLY the per-horizon increment, which the master
-    /// merges. After N iterations the master must equal a single stream over every
-    /// sample — no doubling. The classic bug ships the cumulative snapshot, so the
-    /// master re-merges its own baseline every iteration (C → 2C+S → 4C+3S …); the
-    /// type wall now makes that a compile error, and this pins the loop end to end.
     #[test]
     fn snapshot_roll_merge_loop_matches_single_stream() {
         let sample = |i: usize| {
@@ -501,18 +393,13 @@ mod tests {
             o
         };
 
-        // Ground truth: one normalizer that sees every sample exactly once.
         let mut whole = ObsNormalizer::new(5.0);
-        // The learner's master, updated only by merging per-horizon increments.
         let mut master = ObsNormalizer::new(5.0);
 
         let iters = 5;
         let per_iter = 8;
         let mut next = 0usize;
         for _ in 0..iters {
-            // Snapshot: the thread loads the master, and starts a fresh increment over
-            // only the samples it is about to see this horizon. The thread's full copy
-            // keeps normalizing against baseline+horizon, but only the increment ships.
             let mut worker_full = ObsNormalizer::new(5.0);
             assert!(
                 worker_full.load_snapshot(master.snapshot()),
@@ -523,10 +410,9 @@ mod tests {
                 let obs = sample(next);
                 next += 1;
                 whole.normalize(&obs);
-                worker_full.normalize(&obs); // policy normalizes with full stats
-                increment.observe(&obs); // but only this horizon's samples ship
+                worker_full.normalize(&obs);
+                increment.observe(&obs);
             }
-            // Ship the increment; the master merges samples it has not counted.
             master.merge(&increment.increment());
         }
 

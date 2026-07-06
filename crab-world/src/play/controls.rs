@@ -1,18 +1,3 @@
-//! The demo's control scheme — the demo's verbs for the reusable controls overlay
-//! (`crate::controls`). This is the single source of BOTH the on-screen legend AND the
-//! discrete-verb dispatch: the tap verbs (rebuild/poke/quit/render-view/joint-graph/manual)
-//! are polled through [`crate::controls::just_pressed`], which resolves [`DEMO_BINDINGS`]
-//! via the [`ControlInput`] glue — rebind the table and the poll and legend move together,
-//! so the legend can't lie. Only the genuinely analog/directional inputs (orbit, zoom, the manual
-//! joint pick + torque stick) are read directly in their own systems
-//! (`cameras::orbit_camera`, `manual_control::manual_control_step`), at the display
-//! granularity that reads well (orbit's four keys show as one "Arrows" glyph).
-//!
-//! The demo never switches context (one inspection screen), so it has a single
-//! [`DemoContext`] whose row list ([`DEMO_ROWS`]) names every demo verb. The split between
-//! the binding table ([`DEMO_BINDINGS`], action → keys) and the row list (action → label) is
-//! the framework's uniform shape; for a single-context app the two simply parallel each
-//! other once.
 
 use bevy::prelude::*;
 
@@ -20,66 +5,49 @@ use crate::controls::{
     Binding, ContextRow, ControlInput, ControlScheme, Glyph, KbBinding, PadBinding,
 };
 
-/// The demo's control scheme — a zero-size marker the overlay framework is instantiated
-/// with. Disjoint from GCR's `net::controls::GcrControls`: different verbs, own data.
 pub(crate) struct DemoControls;
 
-/// The demo's single input context (it never switches screens). One variant, the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum DemoContext {
     #[default]
     Inspect,
 }
 
-/// The demo's controllable verbs. The row key of [`DEMO_BINDINGS`]; the per-app test forces
-/// every variant to have exactly one binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DemoAction {
     Orbit,
     Zoom,
-    /// Rebuild the crab at a fresh random tilt.
     Rebuild,
-    /// A random force/torque burst.
     Poke,
     RenderView,
     JointGraph,
-    /// Hands-on manual gamepad control; the next two only apply while it's active.
     Manual,
     PickJoint,
     Torque,
     Quit,
-    /// Hold to reveal the full control overlay.
     RevealControls,
 }
 
-/// The demo's keyboard glyph tokens. Some resolve to bundled icons (R/Space/Esc/Tab),
-/// others to text keycaps for keys with no bundled icon (arrows/zoom/G) — see [`Glyph`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DemoKey {
     R,
     Space,
     Escape,
     Tab,
-    /// The orbit arrow keys (←/↑/↓ + comma), shown as one "Arrows" glyph.
     Arrows,
-    /// The zoom keys (−/=), shown as one glyph.
     ZoomKeys,
     /// The render-view-cycle key (→ / right arrow).
     RenderViewKey,
-    /// The joint-graph key (G).
     Graph,
 }
 
-/// The demo's mouse glyph tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DemoMouse {
     /// Hold-and-drag to orbit (reuses the move icon; button: [`ORBIT_DRAG_BUTTON`]).
     Drag,
-    /// Wheel to zoom (text glyph; no bundled wheel icon).
     Wheel,
 }
 
-/// The demo's gamepad glyph tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DemoPad {
     LeftStick,
@@ -167,7 +135,6 @@ impl ControlScheme for DemoControls {
             DemoPad::Start => Glyph::Icon("controls/xbox_button_menu.png"),
             DemoPad::DpadRight | DemoPad::DpadUpDown => Glyph::Icon("controls/xbox_dpad.png"),
             DemoPad::View => Glyph::Icon("controls/xbox_button_view.png"),
-            // No bundled icon for these — text keycaps.
             DemoPad::LeftTrigger => Glyph::Label("LT"),
             DemoPad::West => Glyph::Label("X"),
             DemoPad::East => Glyph::Label("B"),
@@ -322,8 +289,6 @@ pub(super) fn torque_stick_y(gp: &Gamepad) -> f32 {
     gp.right_stick().y
 }
 
-/// The demo's one context's legend, in display order — each verb's human label. (The demo
-/// never switches context, so this is the whole legend.)
 pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 11] = [
     ContextRow {
         action: DemoAction::Orbit,
@@ -375,11 +340,6 @@ pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 11] = [
 mod tests {
     use super::*;
 
-    /// Per-app scheme invariant: every [`DemoAction`] has exactly one [`DEMO_BINDINGS`] row,
-    /// is bound on at least one device, and the single context shows it + the reveal control.
-    /// The exhaustive `match` forces a new variant to be added to `ALL` (so it can't slip in
-    /// unmapped); the framework does the runtime checks. Manual / PickJoint / Torque are
-    /// gamepad-only — legitimately unbound on keyboard.
     #[test]
     fn demo_scheme_is_well_formed() {
         use crate::controls::assert_scheme_well_formed;
@@ -451,8 +411,6 @@ mod tests {
         }
     }
 
-    /// Every icon glyph the demo bindings surface points under `controls/`; the text-keycap
-    /// glyphs (arrows/zoom/G/LT/X/B/Wheel) are intentional and need no asset.
     #[test]
     fn demo_icon_glyphs_are_under_controls_dir() {
         use crate::controls::{Device, Glyph};

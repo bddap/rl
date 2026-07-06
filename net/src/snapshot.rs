@@ -1,60 +1,16 @@
-//! `CoreSnapshot` — the host-authoritative game-state seam.
-//!
-//! The host-authoritative MP design (`docs/gcr-mp-host-authoritative.md`) makes the integer
-//! [`Sim`](crate::sim::Sim) the authoritative state and ships it whole each tick: the host
-//! steps the sim and broadcasts a snapshot; every client — including the host's own local
-//! client, and in single-player the *only* client — reads game state from that snapshot
-//! rather than from a sim it stepped itself. SP is MP with zero remote clients, one path
-//! ([[sp-is-mp-special-case]]), so SP **always serializes too** — no by-reference-in-SP
-//! fork ([[silent-fallback-antipattern]]).
-//!
-//! `CoreSnapshot` carries the authoritative integer game state and **nothing render-only** —
-//! the ~13 crab body-part transforms the skinned mesh needs ride a SEPARATE
-//! `#[cfg(feature = "render")]` extension frame, never this struct, so the no-render trainer
-//! build never pulls a render type through here.
-//!
-//! It reuses [`Sim`](crate::sim::Sim)'s own field types ([`Player`], [`Crab`], …) instead
-//! of re-encoding into parallel structs, so completeness is caught at the one construction
-//! site, [`Sim::core_snapshot`](crate::sim::Sim::core_snapshot): an exhaustive no-`..`
-//! destructure stops the build until a newly-added authoritative field is carried, exactly
-//! the discipline [`Sim::state_hash`](crate::sim::Sim::state_hash) uses. A hand-mirrored
-//! copy struct would have dropped the field silently.
-//!
-//! The encoding is hand-rolled little-endian — like [`Input::to_bytes`](crate::sim::Input)
-//! and the sim's own `state_hash` — which keeps the deterministic sim module free of serde
-//! (the same split telemetry's `Outcome` shim keeps). The fields are POD integers, so the
-//! wire is fully deterministic; serializing at the snapshot boundary is inert w.r.t. the
-//! determinism firewall, which governs the *step* (no `HashMap` walk / `thread_rng` /
-//! wall-clock), not the wire.
 
 use std::collections::BTreeMap;
 
 use crate::sim::{Crab, Outcome, Player, PlayerId, PlayerStatus, Pos};
 
-/// The authoritative game state for one tick — everything game logic and rendering need,
-/// and nothing else. Reuses [`Sim`](crate::sim::Sim)'s own entity types so the carried set
-/// can't drift from the sim's (see the module docs). ~100–200 bytes for a whole match.
-///
-/// Built only by [`Sim::core_snapshot`](crate::sim::Sim::core_snapshot) and consumed by
-/// [`Sim::apply_core_snapshot`](crate::sim::Sim::apply_core_snapshot); [`to_bytes`] /
-/// [`from_bytes`] are the deterministic wire form between them.
-///
-/// [`to_bytes`]: CoreSnapshot::to_bytes
-/// [`from_bytes`]: CoreSnapshot::from_bytes
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreSnapshot {
     /// The tick this snapshot is OF. A snapshot is a FULL state, so it versions the roster
     /// too — no separate roster epoch. (Clients adopt snapshots in arrival order:
     /// [`crate::lockstep::Lockstep::adopt_snapshots`].)
     pub tick: u64,
-    /// First-person players, in `PlayerId` order. Reuses [`Sim`](crate::sim::Sim)'s own
-    /// `BTreeMap` so a new `Player` field is carried by construction, not re-encoded.
     pub players: BTreeMap<PlayerId, Player>,
-    /// The giant crabs' authoritative integer poses (`Pos` + yaw), in crab-index order — one
-    /// per brain binding (rl#200). The float rapier bodies and their per-tick physics digests
-    /// are NOT carried — the client renders the poses, never the solvers.
     pub crabs: Vec<Crab>,
-    /// The round result the client reads to end the round.
     pub outcome: Outcome,
     /// The participant set the server owns (sorted, deduped) — the server ships the roster;
     /// clients adopt it, never negotiate it. Not in
@@ -74,20 +30,11 @@ pub struct CoreSnapshot {
     pub input_next: BTreeMap<PlayerId, u64>,
 }
 
-/// Why decoding a [`CoreSnapshot`] from bytes failed. A snapshot is host-authored and a
-/// client must never silently render a half-decoded state ([[silent-fallback-antipattern]]),
-/// so every malformed buffer is a hard, typed error rather than a best-effort partial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotDecodeError {
-    /// The buffer ended before a field that the format requires was fully read.
     Truncated,
-    /// A 1-byte enum tag (player status or outcome) held a value no variant maps to.
     BadTag,
-    /// The snapshot carried ZERO crabs — a round always runs at least one (rl#114), and
-    /// applying an empty set would leave `crabs()[0]` sites to panic later; refuse at the
-    /// decode boundary instead.
     NoCrabs,
-    /// Bytes remained after a complete snapshot was decoded — a framing/length mismatch.
     TrailingBytes,
 }
 
@@ -106,10 +53,6 @@ impl std::fmt::Display for SnapshotDecodeError {
 impl std::error::Error for SnapshotDecodeError {}
 
 impl CoreSnapshot {
-    /// Deterministic little-endian wire form. The fields are POD integers, so the same
-    /// `CoreSnapshot` always encodes to the same bytes on every target — no map-order or
-    /// float nondeterminism (`players` iterates in `PlayerId` order; `roster` is already
-    /// sorted). [`from_bytes`](CoreSnapshot::from_bytes) is its exact inverse.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.tick.to_le_bytes());
@@ -143,9 +86,6 @@ impl CoreSnapshot {
         out
     }
 
-    /// Inverse of [`to_bytes`](CoreSnapshot::to_bytes). Rejects any buffer that is too
-    /// short, carries an unknown enum tag, or has bytes left over — a host snapshot is
-    /// trusted to be well-formed, so a malformed one is a hard error, never a partial apply.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SnapshotDecodeError> {
         let mut r = Reader::new(bytes);
 
@@ -165,7 +105,6 @@ impl CoreSnapshot {
         if n_crabs == 0 {
             return Err(SnapshotDecodeError::NoCrabs);
         }
-        // Growth bounded by the buffer, not the untrusted count (see `roster` below).
         let mut crabs = Vec::new();
         for _ in 0..n_crabs {
             let pos = read_pos(&mut r)?;
@@ -176,9 +115,6 @@ impl CoreSnapshot {
         let outcome = Outcome::from_tag(r.byte()?).ok_or(SnapshotDecodeError::BadTag)?;
 
         let n_roster = u32::from_le_bytes(r.take::<4>()?) as usize;
-        // Don't pre-allocate from the untrusted count — a corrupt length would reserve
-        // gigabytes before any bounds check. Each `byte()` Truncates the moment the real
-        // bytes run out, so growth is bounded by the buffer, not the claimed count.
         let mut roster = Vec::new();
         for _ in 0..n_roster {
             roster.push(PlayerId(r.byte()?));
@@ -205,7 +141,6 @@ impl CoreSnapshot {
     }
 }
 
-/// Append a [`Pos`] as `x` then `z`, little-endian — the same order [`read_pos`] reads back.
 fn write_pos(out: &mut Vec<u8>, p: Pos) {
     out.extend_from_slice(&p.x.to_le_bytes());
     out.extend_from_slice(&p.z.to_le_bytes());
@@ -217,8 +152,6 @@ fn read_pos(r: &mut Reader<'_>) -> Result<Pos, SnapshotDecodeError> {
     Ok(Pos { x, z })
 }
 
-/// A bounds-checked forward cursor over the snapshot bytes. Every read advances and returns
-/// [`SnapshotDecodeError::Truncated`] past the end, so a short buffer can never read past it.
 struct Reader<'a> {
     buf: &'a [u8],
     at: usize,
@@ -229,7 +162,6 @@ impl<'a> Reader<'a> {
         Self { buf, at: 0 }
     }
 
-    /// Read a fixed `N`-byte array, advancing the cursor.
     fn take<const N: usize>(&mut self) -> Result<[u8; N], SnapshotDecodeError> {
         let end = self
             .at
@@ -243,12 +175,10 @@ impl<'a> Reader<'a> {
         Ok(slice.try_into().expect("slice length checked above"))
     }
 
-    /// Read one byte, advancing the cursor.
     fn byte(&mut self) -> Result<u8, SnapshotDecodeError> {
         Ok(self.take::<1>()?[0])
     }
 
-    /// Whether every byte has been consumed.
     fn is_empty(&self) -> bool {
         self.at == self.buf.len()
     }
@@ -300,9 +230,6 @@ mod tests {
 
     #[test]
     fn unknown_status_tag_is_rejected() {
-        // Layout: tick(8) + player_count(4) + per player[ id(1) pos.x(8) pos.z(8) yaw(4)
-        // status(1) ]… — so the first player's status byte sits at this offset. Corrupt it
-        // to a value no variant maps to and decoding must fail loudly, not default.
         let status_off = 8 + 4 + 1 + 8 + 8 + 4;
         let mut bytes = sample().to_bytes();
         bytes[status_off] = 99;

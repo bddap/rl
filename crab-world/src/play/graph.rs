@@ -1,19 +1,3 @@
-//! Togglable transparent joint telemetry overlay for the demo.
-//!
-//! Two scrolling line graphs drawn over the scene: every joint's **angle**
-//! (the revolute coordinate, radians) on top and its **commanded torque** on
-//! the bottom. The crab is torque-controlled; the policy emits an unbounded
-//! drive, so the trace clamps it to [-1, 1] — the signed torque command the sim
-//! runs. The angle is read off the links' orientations with the
-//! same helper the observation uses, so the plot shows exactly what the policy
-//! senses.
-//!
-//! Lines are drawn with gizmos through a dedicated 2D overlay camera on its own
-//! render layer, so they composite on top of the 3D view without a second
-//! opaque pass — the overlay is transparent by construction. Toggle with `G`
-//! or the gamepad's North button. `RL_GRAPH=1` starts it visible;
-//! `RL_GRAPH_SHOT=<path>` forces it on, captures the window after it settles,
-//! and exits (headless self-check of the overlay).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -32,10 +16,7 @@ use super::controls::{DemoAction, DemoControls};
 
 /// Samples kept per joint trace — one per physics step, so 3.75 s at `PHYSICS_HZ` = 64.
 const CAPACITY: usize = 240;
-/// The overlay camera's render layer, isolated from the 3D scene (layer 0) so
-/// its gizmos draw only here.
 const OVERLAY_LAYER: usize = 1;
-/// Fixed y-extent of the angle plot (radians); joint coords stay within ±π.
 const ANGLE_RANGE: f32 = std::f32::consts::PI;
 
 #[derive(Resource)]
@@ -56,21 +37,13 @@ impl Default for JointGraph {
     }
 }
 
-/// Marks the labels/help text so visibility can follow the toggle.
 #[derive(Component)]
 struct GraphUi;
 
-/// The graph's own gizmo group, pinned to [`OVERLAY_LAYER`]. It must NOT share
-/// the default group: Rapier's collider debug-render draws into the default
-/// group, so forcing that group onto the overlay layer (as this used to) dragged
-/// the wireframes off the 3D camera and they vanished. A dedicated group keeps
-/// the plot on the 2D overlay while the wireframes stay on the scene camera.
 #[derive(Default, Reflect, GizmoConfigGroup)]
 #[reflect(Default)]
 struct GraphGizmos;
 
-/// Drives the `RL_GRAPH_SHOT` self-check: capture the window once the scene has
-/// settled, then exit. Absent when the env var is unset.
 #[derive(Resource)]
 struct GraphShot {
     path: PathBuf,
@@ -79,8 +52,6 @@ struct GraphShot {
 
 pub fn register(app: &mut App) {
     app.init_resource::<JointGraph>();
-    // The graph's lines draw through this group (configured in `setup_overlay`),
-    // not the default group Rapier's wireframes use.
     app.init_gizmo_group::<GraphGizmos>();
     if let Ok(path) = std::env::var("RL_GRAPH_SHOT") {
         app.insert_resource(GraphShot {
@@ -99,9 +70,6 @@ fn setup_overlay(
     mut configs: ResMut<GizmoConfigStore>,
     graph: Res<JointGraph>,
 ) {
-    // Pin only the graph's OWN gizmo group to the overlay layer, so its lines
-    // render through the 2D camera. The default group is left alone — Rapier's
-    // collider wireframes live there and must stay on the 3D scene camera.
     let (config, _) = configs.config_mut::<GraphGizmos>();
     config.render_layers = RenderLayers::layer(OVERLAY_LAYER);
     config.line.width = 1.5;
@@ -158,8 +126,6 @@ fn toggle_graph(
     }
 }
 
-/// Samples each joint's angle and commanded torque for env 0 every physics
-/// step. Runs unconditionally so toggling the overlay on shows recent history.
 fn sample_graph(
     actions: Res<CrabActions>,
     mut graph: ResMut<JointGraph>,
@@ -180,9 +146,6 @@ fn sample_graph(
         let idx = id.index();
 
         let angle = joint_angle(joint.axis_local, parent_tf.rotation, child_tf.rotation);
-        // `actions.envs` holds the policy's UNBOUNDED drive `μ+σ·ε`; the actuator's own bound
-        // recovers the signed command the sim actually runs for the plot (a non-finite drive
-        // plots as the 0 the actuator applies, not a plot-breaking NaN).
         let torque = crate::bot::actuator::bounded_drive(action[idx]);
 
         push(&mut graph.angle[idx], angle);
@@ -231,9 +194,6 @@ fn draw_graph(graph: Res<JointGraph>, windows: Query<&Window>, mut gizmos: Gizmo
     );
 }
 
-/// Draws one plot: a faint frame, a zero line, and one colored trace per joint.
-/// `top` is the plot's top edge (center-origin, +y up); values map symmetric
-/// about the vertical midpoint with the given half-range.
 fn draw_plot(
     gizmos: &mut Gizmos<GraphGizmos>,
     series: &[VecDeque<f32>],
@@ -272,8 +232,6 @@ fn draw_plot(
     }
 }
 
-/// `RL_GRAPH_SHOT`: let the scene settle, capture the composited window
-/// (overlay included), then exit — a human-free check that the overlay renders.
 fn graph_shot_capture(
     mut commands: Commands,
     mut shot: ResMut<GraphShot>,

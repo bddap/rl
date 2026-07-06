@@ -9,17 +9,8 @@ name = "game"
 path = "src/main.rs"
 
 [dependencies]
-# render ON: the `play` / `fp-screenshot` modes are the windowed first-person client
-# (net::render). The headless modes (net/solo/nn-crab-probe) live in the same binary.
-# net drives the multiplayer sim; crab-world supplies the crab-asset digest the arm
-# handshake folds in (net depends on crab-world, but game names it directly because it
-# calls `crab_world::bot::meshfit::crab_asset_digest` itself).
 net = { path = "../net", features = ["render"] }
 crab-world = { path = "../crab-world", features = ["render"] }
-# tracing → OTLP bridge: installs the stderr fmt subscriber (always) and exports OTLP
-# traces/logs/metrics when a telemetry endpoint is configured (inert otherwise). Routes the
-# missing-mesh error and other game faults onto the telemetry stream — the "rl-game next
-# wiring" the otel crate was built for.
 otel = { path = "../otel" }
 anyhow.workspace = true
 clap.workspace = true

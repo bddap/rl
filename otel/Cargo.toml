@@ -9,14 +9,6 @@ name = "otel"
 path = "src/lib.rs"
 
 [dependencies]
-# Vanilla OpenTelemetry, app side. We emit standard OTLP (traces, metrics, logs) over
-# OTLP/HTTP to a localhost endpoint — the iroh tunnel's `forward` port — so the app stays
-# 100% stock OTEL and never knows iroh exists. See bothouse telemetry/README.md.
-#
-# The 0.28 line runs batch span/log export and the periodic metric reader on DEDICATED
-# THREADS (no async runtime arg), so the headless trainer — which has no tokio runtime —
-# can export without spinning one up. reqwest-blocking-client is the matching no-runtime
-# HTTP transport.
 opentelemetry = { version = "0.28", features = ["trace", "metrics", "logs"] }
 opentelemetry_sdk = { version = "0.28", features = ["trace", "metrics", "logs"] }
 opentelemetry-otlp = { version = "0.28", default-features = false, features = [
@@ -26,9 +18,6 @@ opentelemetry-otlp = { version = "0.28", default-features = false, features = [
     "http-proto",
     "reqwest-blocking-client",
 ] }
-# Bridges: tracing spans -> OTLP traces, tracing events -> OTLP logs. Keeps app code on
-# the stock `tracing` macros; OTEL is wired once here. tracing-opentelemetry 0.29 tracks
-# opentelemetry 0.28.
 tracing-opentelemetry = "0.29"
 opentelemetry-appender-tracing = "0.28"
 tracing = { workspace = true }

@@ -1,32 +1,3 @@
-//! First-person Bevy client for the deterministic gray-box.
-//!
-//! This is the windowed `play` mode of the `game` binary: it makes the
-//! giant-crab-rescue sim VISIBLE and PLAYABLE on top of the existing lockstep +
-//! transport netcode. It boots to a client-side Host / Join menu
-//! ([`AppPhase`]/[`menu`]) and builds the round only once the player chooses — the
-//! menu is gated to its own pre-round phases and never touches the sim. The split it
-//! honors is the one documented at the top of
-//! [`crate::sim`]: **the sim is the authority, this client is a read-only
-//! consumer that produces [`Input`]**. Rendering, the camera, mouse/gamepad input,
-//! and tween interpolation are ALL client-side and add ZERO nondeterminism — the
-//! only thing that ever crosses back into sim state is the per-tick [`Input`] each
-//! peer ships to the server; none of the code here touches the sim except
-//! through [`Lockstep::submit_local_input`].
-//!
-//! How the three layers wire together:
-//! - **Lockstep** runs on a fixed-timestep accumulator ([`drive_lockstep`]) inside
-//!   the Bevy app, NOT in Bevy's `FixedUpdate` — the sim's tick rate ([`TICK_HZ`])
-//!   is its own clock, independent of the render/display rate. Each ready tick:
-//!   drain the local [`PendingInput`] into `submit_local_input`, exchange through the
-//!   [`Coordinator`] (ship our input to the server, get the assembled set back), then advance.
-//! - **Render** ([`apply_transforms`]) reads `Lockstep::sim()` and tweens every
-//!   entity between the previous tick's pose and the current one by the fractional
-//!   accumulator, so motion is smooth at any frame rate even though the sim steps in
-//!   discrete 30 Hz jumps.
-//! - **Input** ([`gather_input`]) samples WASD + mouse + gamepad every render frame
-//!   into [`PendingInput`]; the lockstep driver quantizes it to one [`Input`] per
-//!   tick. Look pitch is integrated here and kept client-side (the sim models yaw
-//!   only); the camera reads the authoritative yaw back from the sim.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -51,41 +22,21 @@ use crab_world::controls::{
     track_active_device, update_controls_ui,
 };
 
-/// Sim tick rate (Hz). Re-exported from [`crate::sim::TICK_HZ`] (the one source)
-/// so this windowed client and the headless driver advance at the same rate and stay
-/// in lockstep; the client renders faster and interpolates between ticks.
 pub use crate::sim::TICK_HZ;
 
-/// Seconds per sim tick — the fixed dt the lockstep accumulator drains in. Re-exported
-/// from [`crate::sim::TICK_DT`] (the one source) so the render accumulator and the
-/// headless pacers can't disagree.
 pub use crate::sim::TICK_DT;
 
-/// Most sim ticks to apply in a single render frame, so a long stall (window drag,
-/// GPU hitch) can't trigger an unbounded catch-up spiral that freezes the client.
-/// Extra accumulated time past this is dropped — the sim falls a little behind real
-/// time rather than locking up.
 const MAX_TICKS_PER_FRAME: u32 = 8;
 
-/// Eye height of the first-person camera above the player's ground position, in
-/// meters (a ~1.8 m capsule on the ground at Y=0; eyes near the top).
 const EYE_HEIGHT: f32 = 1.6;
 
-/// Player capsule dimensions (meters): a person-sized avatar for the other peers.
 const PLAYER_RADIUS: f32 = 0.4;
 const PLAYER_HEIGHT: f32 = 1.8;
 
-/// Mouse look sensitivity (radians per pixel of motion). Yaw feeds the sim as a
-/// per-tick delta; pitch stays client-side.
 const MOUSE_SENS: f32 = 0.0022;
 
-/// Mouse sensitivity for FLIGHT (client-local vehicle): pixels of motion → a unit attitude/aim
-/// intent (clamped to ±1 downstream). Tuned so a normal flick is firm but not twitchy; the vehicle
-/// is off the sim wire, so this only affects feel, never determinism.
 const FLIGHT_MOUSE_SENS: f32 = 0.01;
 
-/// Gamepad look speed (radians/second at full right-stick deflection), scaled by the
-/// frame dt so it's frame-rate independent.
 const PAD_LOOK_SPEED: f32 = 2.5;
 
 /// How long the pad Quit button (North/Y) must be HELD to quit (seconds). A hold, not a
@@ -94,15 +45,8 @@ const PAD_LOOK_SPEED: f32 = 2.5;
 /// desync a peer.
 const PAD_QUIT_HOLD_SECS: f32 = 1.0;
 
-/// Pitch clamp (radians) so the FP camera can't flip over the poles.
 const PITCH_LIMIT: f32 = 1.5;
 
-/// A sim ground position (XZ at Y=0) as a Bevy world point at height `y`. The sim's
-/// right-handed XZ frame (+X right, +Z forward, +Y up) IS Bevy's frame, so this is a
-/// direct unit conversion ([`Pos::to_meters`]) with no axis remap — then shrunk by
-/// [`scene::world_render_scale`] so the human world renders small around the
-/// true-physics-size giant crab (render==physics; the crab is NOT inflated). `y` (an
-/// eye/capsule height) scales with the rest of the frame.
 fn world(pos: Pos, y: f32) -> Vec3 {
     let (x, z) = pos.to_meters();
     Vec3::new(x, y, z) * scene::world_render_scale()

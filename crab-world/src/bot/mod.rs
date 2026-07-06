@@ -10,46 +10,26 @@ pub mod rig;
 pub mod sensor;
 #[cfg(test)]
 mod sim_truth_test;
-// Render-only: the skinned-mesh setup drives bevy's renderer (SkinnedMesh, materials,
-// mesh assets), absent in the headless trainer's bevy build. Headless training spawns
-// the colliders only — no skin — so the trainer loses nothing by gating this out.
 #[cfg(feature = "render")]
 pub mod skin;
-// Not test-only: the `--check-rest-colliders` diagnostic ships in the binary and
-// reuses `headless_app`/`tick` to build and settle the same windowless physics
-// world the sim tests run, so one app builder serves both.
 pub mod headless;
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;
 
-/// System sets that enforce Sense → Think → Act ordering across plugins.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BotSet {
-    /// Build observations from physics state.
     Sense,
-    /// Neural network forward pass and RL bookkeeping.
     Think,
-    /// Apply motor commands to joints.
     Act,
 }
 
-/// How many crab environments to run in this world (training parallelism).
-/// Demo/screenshot always use 1. Set from `--envs` before BotPlugin builds.
 #[derive(Resource, Clone, Copy)]
 pub struct NumEnvs(pub usize);
 
-/// Ground-plane spawn origin of each env's crab, indexed by env id. Resets
-/// teleport back here, and observations report carapace position relative to
-/// it so the policy can't read its env identity (or absolute drift) from x/z.
 #[derive(Resource, Default)]
 pub struct CrabSpawns(pub Vec<Vec3>);
 
-/// Crabs spaced on a grid: 4 m apart, centered on the origin, so the whole grid
-/// fits the ±10 m arena up to N=16. With far targets the crabs WALK and their paths
-/// cross, but each env owns a private collision bit (see [`body::crab_collision`]),
-/// so neighbours pass through one another — the grid is just the start layout, not a
-/// no-touch guarantee.
 fn grid_offset(env: usize, n: usize) -> Vec3 {
     let cols = (n as f32).sqrt().ceil() as usize;
     let spacing = 4.0;
@@ -63,15 +43,10 @@ fn grid_offset(env: usize, n: usize) -> Vec3 {
     )
 }
 
-/// Plugin that manages bot spawning and per-frame sensor/actuator updates.
 pub struct BotPlugin;
 
 impl Plugin for BotPlugin {
     fn build(&self, app: &mut App) {
-        // Enforce ordering: Sense → Think → Act, and run the whole loop BEFORE the
-        // physics step (Rapier now lives in FixedUpdate too). So each tick observes
-        // last step's state, picks an action, writes motor targets, THEN physics
-        // integrates — one clean RL step per physics step.
         app.configure_sets(
             FixedUpdate,
             (BotSet::Sense, BotSet::Think, BotSet::Act)
@@ -81,14 +56,8 @@ impl Plugin for BotPlugin {
 
         app.init_resource::<actuator::CrabActions>()
             .init_resource::<sensor::CrabObservation>()
-            // Always present so `build_observation` (shared with the demo) can read
-            // it; the training plugin populates a real target per env, the demo
-            // leaves it empty (a zero target vector in the obs).
             .init_resource::<sensor::CrabTargets>()
             .init_resource::<CrabSpawns>()
-            // Resolve [`body::CrabModelPath`] (which crab this app shows) BEFORE `CrabAssets`,
-            // whose `FromWorld` reads it. A surface that pre-inserted it keeps its choice; everyone
-            // else gets the live `meshfit::model_path()` default. See `CrabModelPath` for why.
             .init_resource::<body::CrabModelPath>()
             .init_resource::<body::CrabAssets>()
             .init_resource::<RescueStats>()
@@ -98,9 +67,6 @@ impl Plugin for BotPlugin {
             .add_systems(FixedUpdate, sensor::build_observation.in_set(BotSet::Sense))
             .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act));
 
-        // The optional skinned model only renders with visuals on, and `skin` is
-        // render-gated out of the headless trainer entirely — so the whole block is
-        // render-only. (Headless training has no AssetServer to load the model with.)
         #[cfg(feature = "render")]
         if app
             .world()
@@ -112,12 +78,6 @@ impl Plugin for BotPlugin {
     }
 }
 
-/// Which crab body part [`rescue_nonfinite_crabs`] found non-finite first, named for the
-/// loud log + the aggregated hub telemetry. `Carapace` is the multibody root; `Joint`
-/// carries the actuated joint id (so `LegBasis(Left, 2)` pinpoints the offender). `Unknown`
-/// is a defensive fallback that should be unreachable — every spawned [`body::CrabBodyPart`]
-/// is either the carapace or an actuated joint (locked links like the eye-stalks aren't
-/// spawned as parts), so it only fires if a future body part is added without either marker.
 #[derive(Clone, Copy, Debug)]
 pub enum RescueBody {
     Carapace,
@@ -135,24 +95,9 @@ impl std::fmt::Display for RescueBody {
     }
 }
 
-/// Present iff this world runs the ONE trained "Sally" as the single armed crab — solo or
-/// networked play and the headless NN-crab probes — where a stable trained policy must NEVER
-/// drive the body non-finite. There a [`rescue_nonfinite_crabs`] fire is a physics-correctness
-/// FAULT to surface LOUDLY (and hard-fail in dev/debug/test builds), never a silent
-/// catch-and-respawn (rl#137 — the silent rescue hid a frame-by-frame blowup for weeks).
-/// Deliberately ABSENT in TRAINING, where a fresh/random policy plus the randomized
-/// starts drive crabs non-finite constantly BY DESIGN and the rescue is the routine
-/// per-episode reward terminator — making every training rescue a loud error or a panic would
-/// drown the signal and kill the run. Inserted by [`net::external_crab::arm`] — the ONE arm
-/// path every armed-Sally site (windowed play, screenshot, the headless probes) funnels through.
 #[derive(Resource)]
 pub struct CrabRescueIsFault;
 
-/// Running tally of [`rescue_nonfinite_crabs`] fires, so a rescue is OBSERVABLE rather than
-/// silent (rl#137). `total` is monotonic (a stable solo round leaves it at 0 — the verification
-/// bar); `since_report` is drained+zeroed by the windowed driver each telemetry window to emit
-/// ONE aggregated hub event per window instead of a per-step flood; `last_body` names the most
-/// recent offender for that event.
 #[derive(Resource, Default)]
 pub struct RescueStats {
     pub total: u64,
@@ -160,36 +105,12 @@ pub struct RescueStats {
     pub last_body: Option<RescueBody>,
 }
 
-/// Sent when [`rescue_nonfinite_crabs`] had to rebuild an env's crab.
-/// Training must treat it as an episode terminator: the replacement crab is
-/// back at spawn, and letting the episode run on would smear that teleport
-/// into the reward stream. `body` names the offending part for the loud surface.
 #[derive(Message)]
 pub struct CrabRescued {
     pub env: usize,
     pub body: RescueBody,
 }
 
-/// System: rebuilds any crab whose pose has gone non-finite (solver blowup,
-/// tunneling). Runs ahead of Sense — so observations never see NaN — and
-/// ahead of the physics sync, so the poisoned multibody is removed before
-/// rapier's solver touches it again: NaN joint coordinates make the motor
-/// constraint clamp on NaN bounds and panic the app. This catches corruption
-/// on the tick after it happens; a NaN that panics the solver within the very
-/// step that created it is still fatal, and the outer auto-resume loop is the
-/// backstop for that rarer case.
-///
-/// LOUD by construction (rl#137): for the single armed Sally (the [`CrabRescueIsFault`]
-/// marker present) every fire is a physics-correctness fault — an `error!` naming the
-/// offending body + its non-finite value, a drained [`RescueStats`] tally the driver turns
-/// into an aggregated hub telemetry event, and a HARD PANIC in dev/debug/test builds so a
-/// regression can't hide. The deployed playtest is a release build (`debug_assertions` off):
-/// it logs + counts + respawns as a VISIBLE last resort rather than crashing the family's
-/// game, but never silently. In training (no marker) the fire stays quiet — it is the routine
-/// episode terminator, not a fault.
-// A Bevy system: its arguments ARE its dependency injection (the queries/resources it
-// reads) and the `parts` Query's tuple is the data dependency it operates on — neither the
-// arg count nor the tuple shape is reducible without inventing a one-use SystemParam bundle.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn rescue_nonfinite_crabs(
     mut commands: Commands,
@@ -207,15 +128,10 @@ pub fn rescue_nonfinite_crabs(
     >,
     mut rescued: MessageWriter<CrabRescued>,
     mut stats: ResMut<RescueStats>,
-    // Present only for the single armed Sally (see [`CrabRescueIsFault`]); absent in training.
     is_fault: Option<Res<CrabRescueIsFault>>,
     time: Res<Time>,
-    // Throttle the LOUD log to ~1/s (fixed clock) so an every-step blowup names the offender
-    // without flooding the journal — the aggregated count rides the telemetry window instead.
     mut last_log_secs: Local<Option<f64>>,
 ) {
-    // First non-finite part per sick env, captured WITH its offending value so the loud
-    // surface can NAME the body (carapace root, else the actuated joint) and the number.
     let mut sick: Vec<(usize, RescueBody, Vec3, Quat)> = Vec::new();
     for (_, id, t, carapace, joint) in parts.iter() {
         if (!t.translation.is_finite() || !t.rotation.is_finite())
@@ -253,9 +169,6 @@ pub fn rescue_nonfinite_crabs(
                 );
                 *last_log_secs = Some(now);
             }
-            // Dev/training/debug + tests hard-fail at the step boundary, surfaced at the source,
-            // so a regression can't hide. The DEPLOYED playtest (release, debug_assertions off)
-            // must NOT crash the family's game — it falls through to the loud respawn below.
             #[cfg(debug_assertions)]
             panic!(
                 "rescue_nonfinite_crabs: armed crab (env {env}) went NON-FINITE at `{body}` \
@@ -281,13 +194,6 @@ pub fn rescue_nonfinite_crabs(
     }
 }
 
-/// Tears down every entity of one env's crab and spawns a fresh one at
-/// `origin`. This is the only reliable reset: rapier 0.32 cannot rewrite
-/// multibody joint coordinates in place, so a crab whose multibody state has
-/// gone non-finite (e.g. tunneled through the floor at speed) is
-/// unrecoverable by teleport-and-zero — the poisoned joint state survives any
-/// amount of Transform/Velocity writing and every "reset" reproduces the same
-/// wedged pose. Dropping the whole tree and rebuilding always works.
 pub fn respawn_crab(
     commands: &mut Commands,
     assets: &body::CrabAssets,
@@ -298,31 +204,12 @@ pub fn respawn_crab(
     respawn_crab_rotated(commands, assets, parts, origin, env, Quat::IDENTITY);
 }
 
-/// Settle ticks after a respawn: the fresh crab spawns in the rest pose with
-/// the builder motors already holding it, so this only covers the drop from
-/// spawn height onto the ground and the motors taking the load (0.5 s).
-///
-/// This is the ONE settle window for the whole project: the training reset path
-/// (`training::systems::reset_crab`), the demo's post-respawn settle
-/// (`play::demo_settle`), and the net crab-bridge all reuse it via
-/// [`settle_countdown`] so a change to the drop window keeps every surface in
-/// lock-step — they must hold zero actions for the same number of ticks or the
-/// streamed demo stops mirroring the crab the policy was actually trained to settle.
-/// It lives here beside [`respawn_crab`] because the settle is a property of the
-/// respawn, not of training — every respawn consumer needs it, training included.
 pub const RESET_GRACE_TICKS: u32 = 32;
 
-/// Advance a settle countdown by one tick: returns the grace for the next tick, or 0
-/// once the window is spent (the caller then resumes normal control — `Recording` for
-/// training, policy drive for the demo). Sole source of the post-respawn settle
-/// arithmetic so every reset path decrements the exact same way.
 pub fn settle_countdown(grace: u32) -> u32 {
     grace.saturating_sub(1)
 }
 
-/// Like [`respawn_crab`] but spawns the fresh crab rigidly rotated by `init_rotation`
-/// (training's randomized starts — see `reset_crab`). `Quat::IDENTITY`
-/// reproduces the upright respawn exactly.
 pub fn respawn_crab_rotated(
     commands: &mut Commands,
     assets: &body::CrabAssets,
@@ -337,12 +224,6 @@ pub fn respawn_crab_rotated(
     body::spawn_crab(commands, assets, origin, env, init_rotation);
 }
 
-/// Spawn `NumEnvs` crabs and size the per-env buffers to match — the [`BotPlugin`] Startup
-/// system, also reusable as a deferred spawn. The boot-menu solo NN crab (rl#58) leaves
-/// `NumEnvs` at 0 through the menu (so no crab spawns behind it), then bumps it to 1 and
-/// runs THIS at the solo round transition, so the one crab-spawn path is shared (no second
-/// spawn routine to drift from training/demo). Idempotent only via the caller's gating —
-/// it appends, so run it exactly once per intended spawn.
 pub fn spawn_initial_crabs(
     mut commands: Commands,
     assets: Res<body::CrabAssets>,
@@ -359,9 +240,6 @@ pub fn spawn_initial_crabs(
     for env in 0..n {
         let origin = grid_offset(env, n);
         spawns.0.push(origin);
-        // Initial spawn stays upright; the randomized starts kick in on the
-        // first reset (see `reset_crab`). A clean first frame also keeps any non-training
-        // caller of this system (the demo) upright.
         body::spawn_crab(&mut commands, &assets, origin, env, Quat::IDENTITY);
     }
 }

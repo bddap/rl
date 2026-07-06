@@ -1,17 +1,3 @@
-//! `rl-train` — the HEADLESS trainer. Links `crab-world` with render OFF, so it pulls NO
-//! bevy_render/bevy_pbr/wgpu27: the crab machinery (bot / physics / training) and the
-//! shared `TrainConfig` come from the library, this binary is a thin entry that parses
-//! its modes and dispatches. It DOES link burn-wgpu (the GPU PPO update is the sole
-//! update path, rl#49) — that is wgpu 26 for compute, still no bevy_render/wgpu 27.
-//!
-//! Modes (all headless, no window, no GPU renderer):
-//! - `learn` — the trainer: K rollout threads (CPU inference) + the GPU PPO update.
-//! - `--verify-colliders` / `--verify-pivots` / `--check-rest-colliders` — DEV rig
-//!   audits that build a windowless physics world, print a report, and exit.
-//!
-//! The windowed demo + screenshot live in the separate `rl-demo` binary (render on);
-//! the multiplayer game in `game`. Splitting them off is what lets THIS binary link no
-//! graphics crate (rl#51).
 
 
 use bevy::prelude::*;
@@ -20,13 +6,6 @@ use crab_world::{CheckpointArgs, TrainConfig, bot, training};
 
 use training::systems::STEPS_PER_ROLLOUT;
 
-/// Crab Combat — RL-trained crab bots learn to stand, walk, and fight.
-///
-/// Training is the `learn` subcommand (the sole trainer). With no subcommand the
-/// binary runs one of the DEV rig audits (`--verify-colliders` / `--verify-pivots` /
-/// `--check-rest-colliders`) from the flags below, else errors. The training knobs
-/// live on the `learn` subcommand, so a stray `--workers` without it is a parse error
-/// rather than a silent no-op. (The windowed demo/screenshot moved to `rl-demo`.)
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct Cli {
@@ -37,69 +16,30 @@ pub struct Cli {
     command: Option<Command>,
 }
 
-/// The headless DEV rig audits — no subcommand, no window. Each loads the crab model,
-/// runs a containment/agreement check, prints a table, and exits with a pass/fail
-/// code, so each doubles as a regression gate on rig changes.
 #[derive(Parser, Debug, Clone)]
 struct DevArgs {
-    /// DEV: score every live collider against the mesh it stands in for and print a
-    /// per-part agreement table (signed surface distance, in model units), then exit.
-    /// Exits nonzero if any part fails. Model is `CRAB_MODEL_PATH`, else the dev
-    /// `sally.glb`.
     #[arg(long)]
     verify_colliders: bool,
 
-    /// DEV: test whether every joint pivot and collider endpoint lies INSIDE the
-    /// bind-pose mesh, via the generalized winding number against the model's triangle
-    /// soup, then exit. Reports per-point winding number + signed nearest-surface
-    /// distance and ranks the worst out-of-mesh offenders. Model is `CRAB_MODEL_PATH`,
-    /// else the dev `sally.glb`.
     #[arg(long)]
     verify_pivots: bool,
 
-    /// DEV: spawn the crab, settle it to rest, then test every pair of body colliders
-    /// for interpenetration at the settled pose and flag any overlap the solver is
-    /// actively fighting. Expected overlaps (jointed anchors, group-filtered nested
-    /// links) are reported but never failed. Exits nonzero on any illegal one, so it
-    /// gates rig changes.
     #[arg(long)]
     check_rest_colliders: bool,
 }
 
-/// The trainer. One learner (the main thread) owns the policy + optimizer +
-/// normalizer; K rollout THREADS each step their own rapier world on their own core
-/// and feed buffers back over a channel — wall-clock-parallel rollouts, crash-
-/// isolated per worker, with no multiprocess IPC. See `training::inproc`.
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
-    /// Run the trainer: spawn K rollout threads, snapshot the policy to each, collect
-    /// their rollouts, and run the PPO update. Resumes from `--checkpoint-dir` and
-    /// stops at the `--ticks` budget.
     Learn(LearnArgs),
 
-    /// Judge a checkpoint's TRAINING SUCCESS directly (not by reward): headless, load the
-    /// checkpoint, place a ball at a FIXED far distance, drive the policy DETERMINISTICALLY, and
-    /// print two honest numbers — real metres of progress the crab closed toward the ball, and
-    /// the total applied joint torque (lower = done with minimal torque). Deterministic + fast,
-    /// so the daemon can run it against the live checkpoint on demand to plot progress-toward-ball
-    /// over training instead of watching the reward curve.
     Eval(EvalArgs),
 }
 
-/// Learner orchestration: the shared training config plus how many rollout threads
-/// to fan out.
 #[derive(Parser, Debug, Clone)]
 struct LearnArgs {
     #[command(flatten)]
     train: TrainConfig,
 
-    /// Number of rollout threads K, each stepping its own world on its own core.
-    /// Default is PHYSICAL cores minus 2 (floored at one) — physical, not logical,
-    /// so it never oversubscribes a hyperthreaded pair onto one core — leaving the
-    /// rest of the machine a couple of cores. Pass an explicit value to use more.
-    /// Clamped to 1..=64. Concurrent per-arch runs (bddap/rl#200) MUST each pass an
-    /// explicit value partitioning the physical cores: two default-workers processes
-    /// would EACH take physical−2 and oversubscribe the machine.
     #[arg(long)]
     workers: Option<usize>,
 
@@ -110,22 +50,12 @@ struct LearnArgs {
     #[arg(long, value_parser = parse_arch)]
     arch: Option<bot::arch::ArchId>,
 
-    /// Rollout horizon H: physics ticks each thread rolls per iteration before
-    /// handing its buffers back. Per-iteration sample count is K·(--envs)·H.
     #[arg(long, default_value_t = STEPS_PER_ROLLOUT as u64)]
     horizon: u64,
 
-    /// Stop after this many PPO iterations (0 = unbounded). A benchmark / A-B knob;
-    /// the production budget is `--ticks` (total physics ticks). Whichever limit is
-    /// hit first stops the run.
     #[arg(long, default_value_t = 0)]
     iters: u64,
 
-    /// Niceness applied to the whole process — the learner and its rollout threads
-    /// share it (POSIX priority is per-process; higher = yields more CPU). Positive
-    /// so a foreground game always preempts training even when the threads saturate
-    /// their cores. Clamped to 0..=19 (0 disables; a negative nice would raise
-    /// priority and needs privilege, so it is floored to 0 rather than attempted).
     #[arg(long, default_value_t = 10)]
     nice: i32,
 
@@ -137,9 +67,6 @@ struct LearnArgs {
     allow_fallback_body: bool,
 }
 
-/// The `eval` subcommand: which checkpoint to judge, how long to roll, and how far to place the
-/// ball. Deterministic — no seed knob, because the eval fixes the spawn, the target, and takes the
-/// policy mean, so the report reproduces from these args alone.
 #[derive(Parser, Debug, Clone)]
 struct EvalArgs {
     // The daemon points `--checkpoint-dir` at the LIVE training checkpoint to judge
@@ -153,9 +80,6 @@ struct EvalArgs {
     #[arg(long, default_value_t = crab_world::training::systems::MAX_EPISODE_TICKS as u64)]
     ticks: u64,
 
-    /// Fixed planar distance (m) to place the ball from the crab's spawn. Default is the far edge
-    /// of the training band ([`crab_world::eval::DEFAULT_TARGET_DISTANCE_M`]) — the hardest
-    /// in-distribution target, challenging but reachable.
     #[arg(long)]
     distance: Option<f32>,
 
@@ -191,23 +115,12 @@ fn require_canonical_body_or_exit(
 }
 
 fn main() {
-    // Installs the tracing subscriber (stderr fmt, so the trainer's `info!`/`warn!`/`error!`
-    // still surface headless where there is no bevy `LogPlugin` — a fail-loud guard that
-    // never speaks is no guard). Also exports OTLP traces/metrics/logs when a telemetry
-    // endpoint is configured (off otherwise). The guard flushes on drop, so it must live
-    // for all of `main`, including the early-return `Learn` branch below. `RUST_LOG`
-    // overrides the default `info` level.
     let _otel = otel::init("rl-train");
     let cli = Cli::parse();
 
-    // The subcommands. `learn` steps no world itself (it owns the policy and runs PPO) and spawns
-    // K rollout threads that each drive their own headless app; `eval` judges a checkpoint's
-    // training success headlessly. Both return; a bare invocation falls through to the DEV audits.
     match cli.command {
         Some(Command::Learn(l)) => {
             let body_gate = require_canonical_body_or_exit("learn", l.allow_fallback_body);
-            // run_learner owns nicing (it lowers process priority before building any
-            // world) so a foreground game preempts training.
             training::inproc::run_learner(
                 body_gate,
                 &l.train,
@@ -236,9 +149,6 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            // The two headline numbers first (progress_m, total_torque), then the context that
-            // lets them be trusted at face value. `EVAL_RESULT` is a stable, greppable prefix the
-            // daemon parses to plot progress-toward-ball over training.
             println!(
                 "EVAL_RESULT progress_m={:.4} total_torque={:.2} mean_torque_per_tick={:.4} \
                  initial_m={:.4} closest_m={:.4} final_m={:.4} target_m={:.2} reached={} \
@@ -268,30 +178,20 @@ fn main() {
 
     let dev = cli.dev;
 
-    // DEV verify: score the live colliders against the mesh, print, exit.
     if dev.verify_colliders {
         std::process::exit(verify_colliders());
     }
 
-    // DEV verify: test joint pivots + collider endpoints for mesh containment, exit.
     if dev.verify_pivots {
         std::process::exit(verify_pivots());
     }
 
-    // The rest-collider check spawns the rig-derived body, so preflight a PRESENT model
-    // first: a broken asset then fails fast with the real reason instead of panicking
-    // deep in Startup (or blaming CRAB_MODEL_PATH for a parse error in a model that was
-    // present). NO model is NOT an error: the body falls back to the procedural
-    // stand-in (built in `CrabAssets::from_world`).
     if let Some(p) = bot::meshfit::model_path() {
         match bot::meshfit::LoadedModel::load(&p) {
             Err(e) => {
                 eprintln!("crab model {p:?}: {e}");
                 std::process::exit(1);
             }
-            // A model that loads but lacks the expected crab bones builds no recipe.
-            // Reject it here, not as `spawn_crab`'s expect deep in Startup with a
-            // message that wrongly blames a missing/corrupt file.
             Ok(model) => {
                 if bot::rig::build_recipe(&model).is_none() {
                     eprintln!(
@@ -303,15 +203,10 @@ fn main() {
         }
     }
 
-    // DEV check: settle the crab and audit its rest-pose colliders for illegal
-    // interpenetration, then exit. After the model preflight so a missing model fails
-    // with the message above, not a spawn panic deep in the check.
     if dev.check_rest_colliders {
         std::process::exit(bot::collider_check::run());
     }
 
-    // No mode: this binary trains (`rl-train learn`) or runs a DEV audit; the windowed
-    // demo/screenshot live in `rl-demo`.
     eprintln!(
         "no mode selected. Train with `rl-train learn` (the sole trainer), or run a DEV \
          rig audit (--verify-colliders / --verify-pivots / --check-rest-colliders). The \
@@ -320,12 +215,6 @@ fn main() {
     std::process::exit(2);
 }
 
-/// DEV `--verify-colliders`: load the model, reconstruct every live collider in
-/// bind-pose world, and score it against the mesh vertices it stands in for. Prints
-/// a per-part agreement table (signed surface distance, model units) + a worst-
-/// offender ranking, and returns a process exit code (0 = all pass, 1 = a part
-/// fails or the model is unavailable) so it serves as both a diagnostic and a
-/// regression gate.
 fn verify_colliders() -> i32 {
     use bot::meshfit::{score_box, score_capsule};
     use bot::rig::RestShape;
@@ -356,10 +245,7 @@ fn verify_colliders() -> i32 {
         "part", "n", "r", "fOut%", "pk95", "pkMax", "bulge", "skew", "rRat", "verdict"
     );
 
-    // A capsule-only diagnostic prints as a number, or "-" when it doesn't apply
-    // (a box, or a cloud too small to have a principal axis).
     let fmt = |x: Option<f32>| x.map_or_else(|| "-".to_string(), |v| format!("{v:.2}"));
-    // (label, severity = pk95/r, failed) for the worst-offender ranking.
     let mut ranking: Vec<(String, f32, bool)> = Vec::new();
     let mut any_fail = false;
 
@@ -369,11 +255,6 @@ fn verify_colliders() -> i32 {
             RestShape::Capsule { a, b, radius } => {
                 let pts = clouds.get(&rc.part).map(|p| p.as_slice()).unwrap_or(&[]);
                 let s = score_capsule(pts, a, b, radius);
-                // Pass: little flesh escapes, the worst poke is shallow vs the part's
-                // own radius, the collider isn't grossly oversized, the axis tracks
-                // the limb, and the radius isn't starved/ballooned. The axis/radius
-                // diagnostics only exist for a fittable cloud (`Some`); absent, those
-                // two checks simply don't apply.
                 let fail = s.frac_outside > 0.05
                     || s.poke_out_p95 > (0.15 * radius).max(0.005)
                     || s.bulge_p95 > 0.5 * radius
@@ -384,8 +265,6 @@ fn verify_colliders() -> i32 {
             }
             RestShape::Cuboid { center, half } => {
                 let s = score_box(&trunk, center, half);
-                // A box over-covering the shell is cosmetically fine; only flag flesh
-                // escaping it (absolute, since a box has no single radius).
                 let fail = s.frac_outside > 0.03 || s.poke_out_p95 > 0.02;
                 (s, half.min_element().max(1e-3), fail)
             }
@@ -425,12 +304,6 @@ fn verify_colliders() -> i32 {
     i32::from(any_fail)
 }
 
-/// DEV `--verify-pivots`: empirically test whether each joint pivot and each fitted
-/// collider endpoint lies INSIDE the crab's bind-pose visual mesh. Loads the model's
-/// triangle soup (bind-world-skinned, same frame as the bone origins + clouds), then
-/// for every query point computes the generalized winding number (inside/outside,
-/// robust to a non-watertight mesh) and the signed nearest-surface distance (how far
-/// in/out). Prints a per-link table + a worst-offender ranking, and exits 0/1.
 fn verify_pivots() -> i32 {
     use bot::rig::RestShape;
 
@@ -463,26 +336,14 @@ fn verify_pivots() -> i32 {
 
     let (lo, hi) = bot::meshfit::aabb(pos);
 
-    // Mesh-containment probe over the bind soup — the same single path the skin-diag
-    // audit uses. Its `orient` is the global winding sign from the soup's signed
-    // volume: makes interior points read +1 whatever the triangle order, without
-    // trusting any single "is this inside?" probe. The crab's vertex centroid sits in
-    // a cavity (legs splayed, hollow shell), so it reads ~0 and is useless as the
-    // orientation reference — the earlier bug. The carapace pivot (leg-hub centroid,
-    // deep in the thorax) is the honest interior probe, used below only to *report*
-    // the self-check, not to set the sign.
     let soup = bot::meshfit::MeshContainment::new(pos, tris);
     let signed_vol = soup.signed_vol();
     let orient = soup.orient();
-    // Adapt the verdict to this reporter's `(wn, signed_dist, inside)` table layout.
     let probe = |p: Vec3| {
         let c = soup.probe(p);
         (c.wn, c.signed_dist, c.inside)
     };
 
-    // Self-checks. Interior reference = the leg-hub centroid (the carapace pivot the
-    // rig anchors every limb to), which is solidly inside the body shell; it must
-    // read ~+1. A point 10 units past the bbox must read ~0.
     let hub = bot::rig::rest_colliders(&recipe)
         .iter()
         .find(|rc| rc.part == bot::meshfit::PartId::Carapace)
@@ -521,10 +382,6 @@ fn verify_pivots() -> i32 {
         "link", "piv.wn", "piv.dist", "in?", "a.wn", "a.dist", "in?", "b.wn", "b.dist", "in?"
     );
 
-    // (label, signed outside distance) for the worst-offender ranking; only OUTSIDE
-    // points (positive signed distance) are offenders. `windings` collects every
-    // query point's winding so the watertight verdict can measure how tightly they
-    // cluster at integers (clean) vs scatter fractionally (open/non-manifold).
     let mut pivots_out = 0usize;
     let mut endpoints_out = 0usize;
     let mut offenders: Vec<(String, f32)> = Vec::new();
@@ -566,8 +423,6 @@ fn verify_pivots() -> i32 {
                 );
             }
             RestShape::Cuboid { center, half } => {
-                // The carapace box has no segment endpoints; test its 8 corners + the
-                // center so we still learn whether the box surface escapes the shell.
                 println!(
                     "  {:<24} | {:>+7.3} {:>+8.4} {:>4} | {:>7} {:>8} {:>4} | {:>7} {:>8} {:>4}",
                     label,
@@ -617,10 +472,6 @@ fn verify_pivots() -> i32 {
         }
     }
 
-    // Watertight verdict: a clean closed mesh makes every winding land near an
-    // integer (0 outside, ±1 inside). Count query points whose winding is clearly
-    // fractional (off the nearest integer by >0.1) — many ⇒ the surface is open or
-    // non-manifold and the IN/OUT calls near the boundary are soft.
     let fractional = windings
         .iter()
         .filter(|&&w| (w - w.round()).abs() > 0.1)

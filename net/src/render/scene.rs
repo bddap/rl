@@ -1,7 +1,3 @@
-//! Scene spawn + interpolated transforms: the gray-box world, avatars, the giant crab
-//! silhouette, and the per-frame pose interpolation that smooths the 30 Hz sim to the
-//! render rate. Reads the sim read-only; writes only Bevy `Transform`s (and the
-//! client-side [`super::input::CameraYaw`] while alive).
 
 use super::driver::{CockpitPose, GameState, LocalVehicle};
 use super::input::{CameraPitch, CameraYaw};
@@ -11,27 +7,16 @@ use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::Affine2;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-// ---------------------------------------------------------------------------
-// Entity markers
-// ---------------------------------------------------------------------------
 
-/// A rendered avatar for sim player `id`. The local player's own avatar is hidden
-/// (we see from its eyes) but still spawned so status handling stays uniform.
 #[derive(Component)]
 pub(super) struct PlayerAvatar(PlayerId);
 
-/// Marks one giant crab's render root — the entity [`apply_transforms`] re-poses to the sim
-/// crab of the carried index each frame (rl#200: one root per brain binding).
 #[derive(Component)]
 pub(super) struct CrabAvatar(pub(super) usize);
 
-/// The first-person camera, anchored to the local player each frame.
 #[derive(Component)]
 pub(super) struct FpCamera;
 
-// ---------------------------------------------------------------------------
-// Scene + interpolated transforms
-// ---------------------------------------------------------------------------
 
 /// Visual ground quad edge length (render m). The quad is re-centered on the camera
 /// every frame ([`follow_ground`]), so all that matters is that its edge sits past the
@@ -128,26 +113,13 @@ fn ground_checker(images: &mut Assets<Image>) -> Handle<Image> {
     images.add(image)
 }
 
-/// Spawn the static gray-box world (ground + extraction marker + a light) and the giant
-/// crab. Player avatars are spawned by [`reconcile_avatars`] as sim players appear. Poses
-/// are placed every frame by [`apply_transforms`]; here we just create the meshes once.
 pub(super) fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     state: NonSend<GameState>,
-    // Whether the NN crab is ACTIVE this round: when so AND a skin model resolves, the
-    // physics-bones silhouette is spawned hidden (the skinned NN rig is the visible crab). A
-    // real round always arms it (rl#114); the silhouette stays visible on the headless
-    // screenshot path (a plain sim with no NN stack) and whenever no model resolves (the
-    // silhouette is the allowed physics-bones view). Keyed on the active gate, NOT the
-    // bridge's presence.
     external_crab_armed: Option<Res<crate::external_crab::ExternalCrabArmed>>,
-    // A primary window exists on the WINDOWED play/solo surface (one `BorderlessFullscreen`
-    // window) but NOT on the windowless fp-screenshot path (`primary_window: None`). The
-    // missing-mesh banner is spawned only when a window exists, so it never pollutes a captured
-    // screenshot frame.
     windows: Query<(), With<Window>>,
 ) {
     // The render-frame shrink (see [`world_render_scale`]). `world` already applies it to
@@ -155,13 +127,6 @@ pub(super) fn spawn_world(
     // lone exception — it renders at native physics size.
     let rs = world_render_scale();
 
-    // Ground: a checkered gray plane at Y=0, camera-following ([`follow_ground`]) so it
-    // has no reachable edge — the physics ground is unbounded, and a fixed quad puts
-    // "the end of the world" seconds of flight out (rl#197). The checker's optic flow
-    // is what gives the pilot altitude and speed; plain gray gave none. Every round
-    // entity here is DespawnOnExit(Playing): leaving the round (rl#203's disconnect
-    // return to the menu) tears the scene down, so re-entering Playing respawns it
-    // fresh instead of stacking a second world.
     commands.spawn((
         DespawnOnExit(AppPhase::Playing),
         GroundPlane,
@@ -178,8 +143,6 @@ pub(super) fn spawn_world(
         Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 
-    // Sun-ish directional light so the gray-box reads with shape, plus a little
-    // ambient so shadowed faces aren't pure black.
     commands.spawn((
         DespawnOnExit(AppPhase::Playing),
         DirectionalLight {
@@ -194,11 +157,6 @@ pub(super) fn spawn_world(
         ..default()
     });
 
-    // Extraction point: a tall bright glowing pillar — the objective beacon. Made
-    // taller than the giant crab (CRAB_SCALE players high) and thick enough to read at
-    // the far end of the map, so the goal stays legible even when the towering crab is
-    // between you and it. (No ground disc: a flat EXTRACT_RADIUS marker at y=0 z-fought
-    // the ground plane, and the pillar alone already marks the point unmistakably.)
     let ex = state.ls.sim().extraction().pos();
     let pillar_h = PLAYER_HEIGHT * CRAB_SCALE as f32 * 1.2;
     commands.spawn((
@@ -212,10 +170,6 @@ pub(super) fn spawn_world(
         Transform::from_translation(world(ex, pillar_h * 0.5)),
     ));
 
-    // Player avatars are NOT spawned here — [`reconcile_avatars`] owns the render roster
-    // (rl#205). Here we just create their shared assets once: one capsule mesh and one
-    // material per color, cloned per spawn (the same handle-sharing the crab silhouette's
-    // materials use), so roster churn never accretes duplicate assets.
     commands.insert_resource(AvatarAssets {
         mesh: meshes.add(Capsule3d::new(
             PLAYER_RADIUS * rs,
@@ -231,34 +185,10 @@ pub(super) fn spawn_world(
         }),
     });
 
-    // The giant crab: Sally's collider silhouette (see `spawn_crab_silhouette`), at TRUE physics
-    // size ([`world_render_scale`]). Hidden only when the armed NN rig has a skin model
-    // to be the visible crab; with no model the rig is mesh-less, so the silhouette must stay shown
-    // or the crab vanishes. Always spawned so `apply_transforms`'s crab query is satisfied. The
-    // silhouette and the skin both render at native size, so they can't mis-size relative to each
-    // other or to the colliders.
     let armed = external_crab_armed.is_some();
-    // net's single asset source is the global preflight verdict: `CrabModelPath` is a `BotPlugin`
-    // resource and the silhouette path runs WITHOUT the bot stack (the unarmed screenshot), so it
-    // can't read that resource. net never overrides the resolver anyway, so `usable_model()` here and
-    // the body's `CrabModelPath` (which defaults to the same verdict) agree — see
-    // `crab_world::bot::body::CrabModelPath`. Preflighted (not existence-only `model_path()`), so a
-    // present-but-broken glb resolves to `None` → the silhouette below draws the fallback recipe
-    // instead of the real one.
     let have_model = crab_world::mesh_fallback::usable_model_path().is_some();
     let crab_hidden = armed && have_model;
-    // With the crab armed but NO model, the silhouette (the real colliders, NOT the real Sally
-    // rig) stays shown AS the crab. Shipping that with no signal is a silent fallback, so on
-    // the WINDOWED surface name it on screen with the banner
-    // shared with rl-demo. The OTEL companion already fires in
-    // `crab_world::mesh_fallback::initial_render_mode` (via `game::resolve_render_mode`); only
-    // the live window adds the banner here. The screenshot path has no window (`primary_window:
-    // None`) so a UI band can't pollute the capture — there the OTEL error + visible silhouette
-    // are the signal.
     if armed && !have_model && !windows.is_empty() {
-        // `!have_model` ⇒ the verdict is `Err`, so name the ACTUAL cause (absent vs broken) on
-        // screen; `MESH_ABSENT_REASON` is only the fallback if the verdict somehow
-        // lacks a reason.
         let reason = crab_world::mesh_fallback::usable_model()
             .as_ref()
             .err()
@@ -266,14 +196,10 @@ pub(super) fn spawn_world(
                 s.as_str()
             });
         let banner = crab_world::mesh_fallback::spawn_banner(&mut commands, reason);
-        // Round-scoped like everything else spawned here — without the tag the band would
-        // persist over the menu after a disconnect return and stack on re-entry.
         commands
             .entity(banner)
             .insert(DespawnOnExit(AppPhase::Playing));
     }
-    // One root per sim crab (rl#200: a multi-brain round runs several), each re-posed to its
-    // own sim crab every frame by `apply_transforms`.
     for (idx, crab) in state.ls.sim().crabs().iter().enumerate() {
         let crab_root = commands
             .spawn((
@@ -287,9 +213,6 @@ pub(super) fn spawn_world(
                 CrabAvatar(idx),
             ))
             .id();
-        // Body: Sally's ACTUAL physics colliders (carapace box + every leg/eye/claw capsule
-        // from the render recipe), not a featureless placeholder box (#108). The shapes ride
-        // `crab_root`, which `apply_transforms` re-poses to the sim crab every frame.
         spawn_crab_silhouette(
             &mut commands,
             &mut meshes,
@@ -300,8 +223,6 @@ pub(super) fn spawn_world(
     }
 }
 
-/// The avatar capsule's shared render assets — ONE mesh, one material per color — created
-/// once in [`spawn_world`] and cloned per spawn.
 #[derive(Resource)]
 pub(super) struct AvatarAssets {
     mesh: Handle<Mesh>,
@@ -309,19 +230,6 @@ pub(super) struct AvatarAssets {
     remote: Handle<StandardMaterial>,
 }
 
-/// The SINGLE owner of the render-side player roster: every frame, spawn a capsule avatar
-/// for each sim player that lacks one and despawn each avatar whose player left the sim.
-/// A one-shot setup spawn left the roster static — a mid-game joiner with a genuinely new
-/// `PlayerId` was invisible to incumbents (rl#205) — and a departed player's capsule froze
-/// at its last pose (#198); deriving the roster from sim state each frame makes both
-/// unrepresentable, with no join/leave event channel to miss. A rejoiner reusing a freed
-/// pid gets a fresh spawn — or, when the depart and rejoin ticks land in one frame's
-/// batch, recycles the still-live capsule, which is indistinguishable: pose and
-/// visibility re-derive from the sim each frame, and a recycled pid is always
-/// remote→remote (the local pid can't be freed while this client runs), so the
-/// spawn-time material stays right. Chained ahead of [`apply_transforms`], whose
-/// auto-inserted sync point applies the spawns/despawns the same frame; it re-poses and
-/// re-hides every avatar each frame, so the placeholder transform here never shows.
 pub(super) fn reconcile_avatars(
     mut commands: Commands,
     assets: Res<AvatarAssets>,
@@ -335,8 +243,6 @@ pub(super) fn reconcile_avatars(
             if sim.player(avatar.0).is_some() {
                 Some(avatar.0)
             } else {
-                // The player DEPARTED mid-match (the adopted snapshot no longer carries
-                // them): drop the capsule, freeing its pid for a fresh rejoin spawn.
                 commands.entity(entity).despawn();
                 None
             }
@@ -347,8 +253,6 @@ pub(super) fn reconcile_avatars(
         if have.contains(&id) {
             continue;
         }
-        // The local player's avatar is spawned too (kept hidden in apply_transforms — we
-        // view from its eyes) so status handling stays uniform.
         let material = if id == local {
             &assets.local
         } else {
@@ -364,27 +268,11 @@ pub(super) fn reconcile_avatars(
     }
 }
 
-/// The giant crab's apparent-height target: a player's height times [`CRAB_SCALE`] — the crab
-/// reads CRAB_SCALE players tall. Hit by shrinking the rest of the world, never the crab
-/// (see [`world_render_scale`]). Kept only to derive the world scale.
 const CRAB_RENDER_HEIGHT: f32 = PLAYER_HEIGHT * CRAB_SCALE as f32;
 
-/// The crab rig's natural standing height (m) — the span of its REAL physics colliders. Memoized:
-/// the recipe + silhouette geometry it derives are a property of the fixed binary+asset that never
-/// changes at runtime, yet this is read to set the world render scale on a per-frame path, so the
-/// derivation is cached rather than re-run each read. The underlying 36 MB glb parse + fit is
-/// itself memoized once in [`crab_world::mesh_fallback::usable_model`], so
-/// [`crab_world::bot::body::render_recipe`] here only clones that recipe. `None` for a degenerate
-/// (zero-height) recipe — a broken collider asset with no honest geometry, which callers fail LOUD on
-/// rather than drawing a stand-in.
 fn natural_crab_height() -> Option<f32> {
     static H: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
     *H.get_or_init(|| {
-        // Flips off the preflight verdict (`mesh_fallback::usable_model_path`), NOT the per-app
-        // `CrabModelPath` resource: this answers "how big is the crab this run draws?" to set the
-        // world render scale, a fixed binary+asset constant. Preflighted so a present-but-broken glb
-        // draws the fallback recipe's height (what's actually rendered) instead of the real one.
-        // net has one asset source, so this and the silhouette below flip together.
         let h = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe(
             crab_world::mesh_fallback::usable_model_path().is_some(),
         ))
@@ -393,38 +281,12 @@ fn natural_crab_height() -> Option<f32> {
     })
 }
 
-/// Display-only render-frame scale: rendered metres per sim metre for the HUMAN world — players,
-/// planes, the arena, the camera. The giant crab renders at its TRUE physics size (1×, so a
-/// collider wireframe overlays it natively — render==physics); the giant FEEL comes from rendering
-/// everything ELSE this much smaller, so the crab still reads [`CRAB_SCALE`]× a player WITHOUT
-/// inflating it (which would desync the wireframe from the colliders and force retraining Sally at
-/// a bigger collider scale). The crab's natural height over the giant target height.
-/// The ONE scale source — every sim→render ground position ([`world`])
-/// and the human-world mesh sizes multiply by it, the crab does not (and the piloted vehicle, which
-/// lives at true arena scale with the crab, doesn't either — its cockpit camera is shifted, not
-/// shrunk).
-/// Physics/training are untouched: this multiplies only Bevy `Transform`s. `1.0` on a degenerate
-/// recipe (the silhouette path fails loud there anyway).
 pub(crate) fn world_render_scale() -> f32 {
     natural_crab_height()
         .map(|h| h / CRAB_RENDER_HEIGHT)
         .unwrap_or(1.0)
 }
 
-/// Draw the giant crab as its REAL physics colliders — the carapace cuboid and every link
-/// capsule that [`crab_world::bot::body::render_recipe`] yields, scaled to the giant height and
-/// oriented claws-forward (+Z, the crab's facing) — and parent them to `crab_root`. Drawing the
-/// SAME shapes the sim body uses means the cosmetic crab can't drift from the body
-/// it depicts, and it reads as Sally instead of a box. `render_recipe` is the single
-/// model-vs-fallback selector (shared with the trainer), so this never invents a second source of
-/// geometry. This static silhouette is the honest physics-bones view (no articulation): the
-/// headless-screenshot render, and the in-game view whenever no skin model resolves — the rest
-/// stance posed rigidly, so the legs don't walk, but it is the REAL colliders, never a stand-in
-/// box. The real armed round with a model shows the walking skinned NN rig instead. `have_model` is
-/// the preflight verdict's flip (`mesh_fallback::usable_model_path().is_some()`) resolved ONCE in
-/// `spawn_world` — net's single asset source, the SAME verdict the body's `CrabModelPath` defaults to,
-/// so they agree — and `false` (absent or broken glb) draws the fallback recipe; `true` draws the
-/// memoized real recipe the verdict already built, never a re-parse or an `.expect()`.
 fn spawn_crab_silhouette(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -438,11 +300,6 @@ fn spawn_crab_silhouette(
         crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe(have_model));
     let shapes = || sil.shapes();
 
-    // Orient the rig claws-forward (+Z). The recipe's forward axis isn't necessarily +Z,
-    // so DERIVE it from the geometry — carapace-center → limb centroid, flattened to the
-    // ground plane — rather than hard-code a constant that could drift if the asset
-    // changes. Both vectors are horizontal, so `from_rotation_arc` yields a pure yaw; a
-    // degenerate recipe (no limbs) leaves the rig as-is (Vec3::Z → identity).
     let shape_mid = |s: &RestShape| match *s {
         RestShape::Capsule { a, b, .. } => (a + b) * 0.5,
         RestShape::Cuboid { center, .. } => center,
@@ -465,8 +322,6 @@ fn spawn_crab_silhouette(
         Vec3::Z,
     );
 
-    // AABB in the claws-forward frame, so we can scale the rig to the giant height and
-    // stand its base (min-y) on the ground.
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
     let mut grow = |p: Vec3| {
@@ -494,20 +349,12 @@ fn spawn_crab_silhouette(
             }
         }
     }
-    // The crab draws at its TRUE physics size ([`world_render_scale`]).
-    // A degenerate recipe (zero natural height) is the ONE refusal: it can only mean the collider
-    // recipe is broken (a real OR absent model both yield a positive-height procedural recipe), so
-    // there is no honest crab geometry to draw. We refuse to paper over that with a placeholder box
-    // (the silent-fallback bug — the only crabs allowed are the Sally mesh and this physics-bones
-    // silhouette); fail LOUD instead.
     let Some(_h) = natural_crab_height() else {
         unreachable!(
             "crab silhouette: render_recipe yielded a degenerate (zero natural-height) crab \
              — the collider recipe is broken"
         );
     };
-    // Recenter horizontally on the root and stand the base on the ground (y=0). No scale: native
-    // physics size.
     let origin = Vec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5);
     let map = |p: Vec3| r * p - origin;
 
@@ -556,11 +403,6 @@ fn spawn_crab_silhouette(
     commands.entity(crab_root).add_children(&children);
 }
 
-/// The three `&mut Transform` queries [`apply_transforms`] writes — player avatars,
-/// the crab, the camera. Aliased (not inline) because Bevy needs the marker
-/// `With`/`Without` filters to prove the three don't alias the same `Transform`, and
-/// spelled inline that's the kind of type clippy's `type_complexity` flags. The
-/// filters ARE the disjointness proof, so they can't be dropped — only named.
 type AvatarXf<'w, 's> = Query<
     'w,
     's,
@@ -578,10 +420,6 @@ type CrabXf<'w, 's> = Query<
     (Without<PlayerAvatar>, Without<FpCamera>),
 >;
 type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
-/// Read-only access to the crab carapaces' ARENA-frame Transforms (tagged by env) — env 0's is
-/// the anchor the cockpit camera shifts the vehicle's arena pose against. Disjoint from the
-/// mutable Transform queries above by the `Without` filters (a carapace is none of those
-/// entities), so Bevy lets them coexist.
 type CarapaceXf<'w, 's> = Query<
     'w,
     's,
@@ -594,12 +432,6 @@ type CarapaceXf<'w, 's> = Query<
     ),
 >;
 
-/// Place the FP camera and the dynamic avatars each frame, INTERPOLATED between the
-/// previous tick's snapshot and the live sim by the fractional accumulator. This is
-/// the smoothness layer: the sim jumps in 30 Hz steps, but every rendered frame
-/// shows a pose `alpha` of the way from last tick to this one. Reads sim state
-/// read-only; writes Bevy `Transform`s and (while the local player is alive) keeps the
-/// client-side [`CameraYaw`] tracking the authoritative sim yaw — never the sim.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_transforms(
     state: NonSend<GameState>,
@@ -615,13 +447,8 @@ pub(super) fn apply_transforms(
     let alpha = (state.accumulator / TICK_DT).clamp(0.0, 1.0) as f32;
     let local = state.ls.me();
 
-    // Player avatars: lerp position and yaw from the previous snapshot to now.
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
         let Some(now) = sim.player(avatar.0) else {
-            // [`reconcile_avatars`] (chained just ahead, and the sim only changes in
-            // `drive_lockstep` before both) despawned every avatar without a sim player,
-            // so one here can only mean the roster reconcile was unwired — fail loud
-            // rather than pose a ghost.
             unreachable!(
                 "avatar for departed player {:?} survived reconcile_avatars",
                 avatar.0
@@ -630,17 +457,14 @@ pub(super) fn apply_transforms(
         let prev = state.prev.players.get(&avatar.0).copied().unwrap_or(now);
         let pos = lerp_pos(prev.pos(), now.pos(), alpha);
         let yaw = lerp_yaw(prev.yaw(), now.yaw(), alpha);
-        // Capsule center sits at half-height above the ground.
         *tf = Transform::from_translation(world(pos, PLAYER_HEIGHT * 0.5))
             .with_rotation(Quat::from_rotation_y(yaw));
-        // Hide the local avatar (first-person), and any extracted player (gone safe).
         let hidden = avatar.0 == local || now.status() == PlayerStatus::Extracted;
         *vis = if hidden {
             Visibility::Hidden
         } else {
             Visibility::Visible
         };
-        // A downed player falls onto its side so its status reads from the avatar.
         if now.status() == PlayerStatus::Downed {
             *tf = Transform::from_translation(world(pos, PLAYER_RADIUS)).with_rotation(
                 Quat::from_rotation_y(yaw) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
@@ -648,10 +472,9 @@ pub(super) fn apply_transforms(
         }
     }
 
-    // Crabs: interpolate each root's position + yaw from its own sim crab (matched by index).
     for (avatar, mut tf) in crab_q.iter_mut() {
         let Some(crab_now) = sim.crabs().get(avatar.0).copied() else {
-            continue; // the adopted crab set shrank below this root's index — leave it parked
+            continue;
         };
         let crab_prev = state.prev.crabs.get(avatar.0).copied().unwrap_or(crab_now);
         let pos = lerp_pos(crab_prev.pos(), crab_now.pos(), alpha);
@@ -660,17 +483,8 @@ pub(super) fn apply_transforms(
             Transform::from_translation(world(pos, 0.0)).with_rotation(Quat::from_rotation_y(yaw));
     }
 
-    // FP camera. A PILOT flies from the cockpit: anchor the camera to the vehicle's
-    // interpolated pose, looking along its heading+pitch and BANKED by its roll. The mouse
-    // now flies the craft (pitch/roll), so there is no separate free-look while piloting —
-    // the view IS the craft's attitude. An on-foot player keeps the ground eye view.
     if let Ok(mut cam) = cam_q.single_mut() {
         if let Some((prev, now)) = vehicle.cockpit_poses() {
-            // Single-player: fly from the rapier vehicle body (host-authoritative crab-world state,
-            // not in the integer sim). Its pose is in the ARENA frame, so map it to render space
-            // with the same shift the crab body uses — `world(crab) − arena_carapace` — so vehicle
-            // and crab share one render frame and collide where they're drawn. Crab 0 is the
-            // frame reference (the carapace query below reads env 0's body first too).
             let crab_now = sim.crabs()[0];
             let crab_prev = state.prev.crabs.first().copied().unwrap_or(crab_now);
             let crab_anchor = world(lerp_pos(crab_prev.pos(), crab_now.pos(), alpha), 0.0);
@@ -688,10 +502,6 @@ pub(super) fn apply_transforms(
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
-            // Alive: aim by the AUTHORITATIVE sim yaw (so the view matches the avatar and
-            // peers) and keep the free-look yaw tracking it. Downed/Extracted: the sim
-            // freezes our yaw, so aim by the client-side CameraYaw instead — full
-            // free-look (yaw+pitch) for a spectator, decoupled from the gated movement.
             let cam_yaw = if now.status() == PlayerStatus::Alive {
                 let sim_yaw = lerp_yaw(prev.yaw(), now.yaw(), alpha);
                 yaw.0 = sim_yaw;
@@ -706,30 +516,13 @@ pub(super) fn apply_transforms(
     }
 }
 
-/// The first-person cockpit camera for a flyer: eye at the interpolated 3D position, looking along
-/// the craft's nose with the horizon banked/pitched/rolled by its full attitude — so a banked turn,
-/// a loop, or inverted flight all look right. The ONE cockpit-view formula, flying EVERY craft (the
-/// plane and the ship) from the shared [`CockpitPose`] with no copy to drift.
-///
-/// The pose is in the crab's ARENA frame (the rapier vehicle body lives on the open inference
-/// field with Sally — rl#209). `shift` is the pure XZ translate that carries an arena point to its
-/// render spot anchored
-/// at the giant crab — the same `world(crab) − arena_carapace` the crab body's render uses — so the
-/// vehicle and the crab share one render frame and collide where they're drawn. Altitude (Y) is kept
-/// at TRUE arena scale (no shrink), like the crab's own bones, so a small craft reads correctly
-/// against the giant Sally. The two ticks' attitudes are SLERPed (shortest-arc) for a smooth tween.
 fn cockpit_camera(prev: CockpitPose, now: CockpitPose, alpha: f32, shift: Vec3) -> Transform {
     let eye = prev.pos.lerp(now.pos, alpha) + shift;
     let rot = prev.orient.slerp(now.orient, alpha);
-    // Look along the craft's nose (+Z), with up its own up-vector (+Y) — so the pilot looks where
-    // the craft is pointed, banked/pitched/rolled by its full attitude.
     Transform::from_translation(eye).looking_at(eye + rot * Vec3::Z, rot * Vec3::Y)
 }
 
-/// Linear-interpolate two sim positions (in meters) by `alpha`.
 pub(super) fn lerp_pos(a: Pos, b: Pos, alpha: f32) -> Pos {
-    // Interpolate in fixed-point space, then `world()` converts to meters — keeps the
-    // unit handling in one place. (a + (b-a)*alpha, rounded.)
     let lx = a.x as f32 + (b.x - a.x) as f32 * alpha;
     let lz = a.z as f32 + (b.z - a.z) as f32 * alpha;
     Pos {
@@ -738,9 +531,6 @@ pub(super) fn lerp_pos(a: Pos, b: Pos, alpha: f32) -> Pos {
     }
 }
 
-/// Interpolate two sim yaws (turn-unit integers) by `alpha`, taking the SHORTEST way
-/// around the circle so a wrap from 359°→1° tweens through 0°, not backward through
-/// the whole turn. Returns radians for the camera/avatar rotation.
 pub(super) fn lerp_yaw(a: i32, b: i32, alpha: f32) -> f32 {
     let ar = trig_client::turns_to_radians(a);
     let br = trig_client::turns_to_radians(b);
@@ -754,11 +544,6 @@ pub(super) fn lerp_yaw(a: i32, b: i32, alpha: f32) -> f32 {
     ar + diff * alpha
 }
 
-/// The camera's look direction from a ground yaw and a client pitch. Compose yaw
-/// (about +Y) with pitch (about the camera's local right axis, +X) and apply to the
-/// base forward +Z: pitch tilts forward up/down in the YZ plane, then yaw swings it
-/// horizontally. Pitch is negated because a positive rotation about +X sends +Z
-/// toward −Y (down), and the control convention is positive-pitch = look UP.
 pub(super) fn look_direction(yaw_radians: f32, pitch_radians: f32) -> Vec3 {
     let rot = Quat::from_rotation_y(yaw_radians) * Quat::from_rotation_x(-pitch_radians);
     (rot * Vec3::Z).normalize()
@@ -782,9 +567,6 @@ pub(super) fn fp_perspective() -> PerspectiveProjection {
     }
 }
 
-/// Spawn the windowed first-person camera. Its transform is overwritten every frame
-/// by [`apply_transforms`]; the night-sky skybox ([`crab_world::sky`]) paints the
-/// background, with this dark clear color as the pre-upload fallback.
 pub(super) fn spawn_fp_camera(mut commands: Commands) {
     commands.spawn((
         DespawnOnExit(AppPhase::Playing),

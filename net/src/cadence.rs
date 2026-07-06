@@ -1,41 +1,13 @@
-//! Deterministic physics/sim cadence reconciliation for the networked NN crab (GCR).
-//!
-//! The crab body + its Sense→Think→Act brain step at [`crab_world::physics::PHYSICS_HZ`] (64 Hz);
-//! the sim advances at [`crate::sim::TICK_HZ`] (30 Hz). Host-authoritative: the HOST is the
-//! only peer that steps the crab (clients render its broadcast pose), and this is the host's
-//! 64:30 pacer — how many physics steps to pump per applied sim tick. Wall clock must not
-//! decide that count (it differs per frame rate and per run, and the per-tick
-//! `phys_digest` folded into [`crate::sim::Sim::state_hash`] would then be irreproducible),
-//! so this is a pure INTEGER accumulator keyed off the tick index alone: the same tick
-//! sequence always pumps the same steps, which is what keeps restarts and the determinism
-//! probes exact.
-//!
-//! 64 / 30 is not an integer, so the per-tick step count alternates (mostly 2, periodically
-//! 3). The Bresenham-style accumulator emits a deterministic sequence that sums to exactly
-//! [`PHYSICS_HZ`] steps over any [`TICK_HZ`] ticks, so the body advances exactly one second
-//! of physics per one second of sim with no long-run drift.
 
 use crate::sim::TICK_HZ;
 use crab_world::physics::PHYSICS_HZ;
 
-/// Doles out [`PHYSICS_HZ`] physics steps across [`TICK_HZ`] lockstep ticks. Each tick adds
-/// `PHYSICS_HZ` of credit, emits the whole steps that buys (`credit / TICK_HZ`), and carries
-/// the remainder — so over `TICK_HZ` ticks it emits exactly `PHYSICS_HZ` steps.
-///
-/// `Copy` and its whole state is one `u64`: any two runs starting from [`Default`] and
-/// stepping the same number of ticks agree on the per-tick AND cumulative step counts, which
-/// is the reproducibility the GCR fold relies on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PhysicsCadence {
-    /// Physics-step credit not yet spent as a whole step, in `PHYSICS_HZ·tick` units. Always
-    /// `< TICK_HZ` once [`Self::steps_for_next_tick`] has returned; starts at 0.
     acc: u64,
 }
 
 impl PhysicsCadence {
-    /// Physics steps to run for the next sim tick. Call EXACTLY once per ADVANCED tick
-    /// (never for a stalled/attempted tick), so the accumulator stays in phase with the sim
-    /// and the same tick sequence always maps to the same physics-step sequence.
     pub fn steps_for_next_tick(&mut self) -> u32 {
         self.acc += PHYSICS_HZ;
         let n = self.acc / TICK_HZ;
@@ -48,18 +20,14 @@ impl PhysicsCadence {
 mod tests {
     use super::*;
 
-    /// Over exactly `TICK_HZ` ticks the cadence emits exactly `PHYSICS_HZ` steps — one second
-    /// of physics per one second of sim, the no-drift invariant.
     #[test]
     fn one_second_emits_exactly_physics_hz_steps() {
         let mut c = PhysicsCadence::default();
         let total: u32 = (0..TICK_HZ).map(|_| c.steps_for_next_tick()).sum();
         assert_eq!(total as u64, PHYSICS_HZ);
-        // And the accumulator has returned to its start, so it repeats cleanly forever.
         assert_eq!(c, PhysicsCadence::default());
     }
 
-    /// No long-run drift: over many seconds the cumulative count stays exactly `k·PHYSICS_HZ`.
     #[test]
     fn no_drift_over_many_seconds() {
         let mut c = PhysicsCadence::default();
@@ -71,8 +39,6 @@ mod tests {
         assert_eq!(total, secs * PHYSICS_HZ);
     }
 
-    /// Every per-tick count is the floor or ceil of `PHYSICS_HZ / TICK_HZ` — the body never
-    /// lurches by a big variable batch (which would read as a stutter and stress the solver).
     #[test]
     fn per_tick_count_is_floor_or_ceil() {
         let mut c = PhysicsCadence::default();
@@ -87,8 +53,6 @@ mod tests {
         }
     }
 
-    /// Determinism: two independently-constructed cadences (the two peers) produce the
-    /// identical step sequence — the whole point of an integer, wall-clock-free accumulator.
     #[test]
     fn two_peers_agree_step_for_step() {
         let mut a = PhysicsCadence::default();
