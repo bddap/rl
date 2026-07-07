@@ -36,6 +36,10 @@ pub(crate) struct Args {
     /// the real wire (rl#191).
     #[arg(long, value_name = "FRAME")]
     pilot_toggle_at: Vec<u64>,
+    /// From this frame on, the scripted pilot walks a gentle arc on foot (a moving target for
+    /// the hunting crab).
+    #[arg(long, value_name = "FRAME")]
+    pilot_walk_at: Option<u64>,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -75,8 +79,11 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .with_cam_offset(0.0, args.cam_pitch)
         .with_fov(Some(args.cam_fov));
     let mut app = render::build_net_screenshot_app(ls, driver, cfg, external_crab, render_mode);
-    if !args.pilot_toggle_at.is_empty() {
-        app.insert_resource(render::PilotScript::new(args.pilot_toggle_at));
+    if !args.pilot_toggle_at.is_empty() || args.pilot_walk_at.is_some() {
+        app.insert_resource(render::PilotScript::new(
+            args.pilot_toggle_at,
+            args.pilot_walk_at,
+        ));
     }
     app.run();
     Ok(())
