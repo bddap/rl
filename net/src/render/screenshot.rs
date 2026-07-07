@@ -1,6 +1,8 @@
 
 use super::app::{install_armed_nn_crab, seed_round_crabs};
-use super::driver::{ScriptedPackInput, coordinator, drive_lockstep, insert_core};
+use super::driver::{
+    FlightInput, PendingInput, ScriptedPackInput, coordinator, drive_lockstep, insert_core,
+};
 use super::hud::{spawn_hud, update_hud};
 use super::input::gather_input;
 use super::scene::{FpCamera, apply_transforms, follow_ground, reconcile_avatars, spawn_world};
@@ -85,6 +87,7 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
             Update,
             (
                 gather_input,
+                drive_pilot_script,
                 drive_lockstep,
                 reconcile_avatars,
                 apply_transforms,
@@ -99,6 +102,48 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
     super::render_mode::register(app, render_mode);
 }
 
+
+/// A scripted local pilot for the offscreen apps: press the E-cycle at the given frames and
+/// hold a constant forward drive while piloting. This drives the REAL input seams — the same
+/// `PendingInput`/`FlightInput` the keyboard writes, feeding the real intent-on-the-wire path —
+/// so a two-peer `net-screenshot` run is a live board/fly/cycle/exit verification (rl#191
+/// increment 4), not a code-path fork.
+#[derive(Resource, Clone)]
+pub struct PilotScript {
+    toggle_at: Vec<u64>,
+    frame: u64,
+}
+
+impl PilotScript {
+    pub fn new(toggle_at: Vec<u64>) -> Self {
+        Self {
+            toggle_at,
+            frame: 0,
+        }
+    }
+}
+
+fn drive_pilot_script(
+    script: Option<ResMut<PilotScript>>,
+    vehicle: Res<super::driver::LocalVehicle>,
+    mut pending: ResMut<PendingInput>,
+    mut flight: ResMut<FlightInput>,
+) {
+    let Some(mut script) = script else {
+        return;
+    };
+    script.frame += 1;
+    if script.toggle_at.contains(&script.frame) {
+        pending.toggle_vehicle = true;
+    }
+    // While piloting, drive forward: plane throttle (wasd.y + rt), ship forward thrust + lift.
+    // Runs after `gather_input` (which zeroes FlightInput off the absent devices), so the
+    // script's hold wins the frame.
+    if vehicle.kind().is_some() {
+        flight.wasd = bevy::math::Vec2::new(0.0, 1.0);
+        flight.rt = 0.5;
+    }
+}
 
 #[derive(Resource, Clone)]
 pub struct ScreenshotConfig {
