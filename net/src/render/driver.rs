@@ -30,6 +30,7 @@ fn install_round(world: &mut World, ls: Lockstep, coord: Box<Coordinator>) {
         cadence: PhysicsCadence::default(),
         snap_buf: std::collections::VecDeque::new(),
         art_buf: std::collections::VecDeque::new(),
+        logged_statuses: BTreeMap::new(),
     });
     world.insert_resource(PendingInput::default());
     world.insert_resource(FlightInput::default());
@@ -166,6 +167,9 @@ pub(super) struct GameState {
     cadence: PhysicsCadence,
     snap_buf: std::collections::VecDeque<crate::snapshot::CoreSnapshot>,
     art_buf: std::collections::VecDeque<crate::articulation::CrabArticulation>,
+    /// Last logged per-player status, so Alive→Downed/Extracted edges (a crab strike landing,
+    /// an extraction) each leave exactly one log line on every peer.
+    logged_statuses: BTreeMap<PlayerId, PlayerStatus>,
 }
 
 const JITTER_BUF_MAX: usize = 3;
@@ -491,7 +495,9 @@ pub(super) fn drive_lockstep(world: &mut World) {
             let mut vehicle = world.resource_mut::<LocalVehicle>();
             let boarding_from_foot = matches!(*vehicle, LocalVehicle::OnFoot);
             if !boarding_from_foot || alive {
-                *vehicle = vehicle.cycled();
+                let next = vehicle.cycled();
+                info!("vehicle: {:?} -> {:?}", vehicle.context(), next.context());
+                *vehicle = next;
             }
         }
     }
@@ -602,7 +608,13 @@ pub(super) fn drive_lockstep(world: &mut World) {
             crate::render::articulation::apply(world, &art);
             super::articulation::publish_remote_vehicles(world, &art.vehicles, me);
             if let Some(p) = own_wire_pose(&art, me) {
-                world.resource_mut::<LocalVehicle>().update_pose(p);
+                let mut vehicle = world.resource_mut::<LocalVehicle>();
+                if matches!(&*vehicle, LocalVehicle::Flying { pose: None, .. }) {
+                    // The request→grant edge (rl#191): the host accepted our intent and our
+                    // craft's first pose just crossed the wire — the cockpit camera engages.
+                    info!("cockpit engaged: own craft pose arrived on the wire");
+                }
+                vehicle.update_pose(p);
             }
         }
         if let Some(down) = server_down {
@@ -769,6 +781,16 @@ pub(super) fn drive_lockstep(world: &mut World) {
     }
 
     let mut state = world.non_send_resource_mut::<GameState>();
+    let state = &mut *state;
+    for (pid, p) in state.ls.sim().players() {
+        match state.logged_statuses.insert(pid, p.status()) {
+            Some(prev) if prev != p.status() => {
+                info!("player {:?}: {:?} -> {:?}", pid, prev, p.status());
+            }
+            _ => {}
+        }
+    }
+    state.logged_statuses.retain(|pid, _| state.ls.sim().player(*pid).is_some());
     let outcome = state.ls.sim().outcome();
     if !state.reported_outcome && outcome != Outcome::Ongoing {
         state.reported_outcome = true;

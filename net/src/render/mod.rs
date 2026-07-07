@@ -75,4 +75,6 @@ mod tests;
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use render_mode::RenderMode;
 pub(crate) use scene::world_render_scale;
-pub use screenshot::{ScreenshotConfig, build_net_screenshot_app, build_screenshot_app};
+pub use screenshot::{
+    PilotScript, ScreenshotConfig, build_net_screenshot_app, build_screenshot_app,
+};

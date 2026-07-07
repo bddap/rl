@@ -31,6 +31,11 @@ pub(crate) struct Args {
     nn_crab_checkpoint: Option<std::path::PathBuf>,
     #[arg(long, value_name = "mesh|mesh+colliders|colliders")]
     render_mode: Option<String>,
+    /// Press the vehicle E-cycle at this frame (repeatable) and hold a forward drive while
+    /// piloting — a scripted pilot, so a two-peer run live-verifies board/fly/cycle/exit over
+    /// the real wire (rl#191).
+    #[arg(long, value_name = "FRAME")]
+    pilot_toggle_at: Vec<u64>,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -70,6 +75,9 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .with_cam_offset(0.0, args.cam_pitch)
         .with_fov(Some(args.cam_fov));
     let mut app = render::build_net_screenshot_app(ls, driver, cfg, external_crab, render_mode);
+    if !args.pilot_toggle_at.is_empty() {
+        app.insert_resource(render::PilotScript::new(args.pilot_toggle_at));
+    }
     app.run();
     Ok(())
 }
