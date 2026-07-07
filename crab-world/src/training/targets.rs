@@ -6,7 +6,13 @@ use crate::bot::sensor::CrabTargets;
 pub(crate) const BAND_START_MIN: f32 = 1.5;
 pub(crate) const TARGET_Y_MIN: f32 = 0.15;
 pub(crate) const TARGET_Y_MAX: f32 = 0.7;
-pub(crate) const TARGET_ARENA_HALF: f32 = crate::physics::world::ARENA_HALF_SIZE - 1.0;
+/// Far edge of the trained chase band — the ONE source for "how far a target can
+/// be". Doubles as the coordinate bound sampling clamps targets to (|x|,|z| ≤
+/// this), so extending the band past the wall margin needs a bigger arena, not
+/// just a bigger constant. GCR's bridge (`net::external_crab`) clamps its posed
+/// hunt target to this same constant; a copied literal there would drift when the
+/// band moves.
+pub const TARGET_ARENA_HALF: f32 = crate::physics::world::ARENA_HALF_SIZE - 1.0;
 
 pub(crate) const REACH_RADIUS: f32 = 0.8;
 

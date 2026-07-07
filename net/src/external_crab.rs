@@ -1,3 +1,22 @@
+//! Drives NN "Sally" crabs in GCR: each crab runs its trained policy in a local
+//! physics arena; the bridge poses its hunt target from the sim and integrates
+//! carapace deltas back into world position.
+//!
+//! The posed hunt target is clamped to the training band's far edge
+//! ([`TARGET_ARENA_HALF`], ~9 m) along the true crab→player bearing, re-posed each
+//! tick as she closes — heading stays honest, and the target_local obs channel
+//! stays in-distribution. Without the clamp Sally always starts OOD: players spawn
+//! ≥12 m out (`sim::MIN_CRAB_SPAWN_DISTANCE`) and roam farther mid-game, and
+//! measured (rl#144) a healthy brain closes ~7× slower on a ~21 m target than the
+//! chase eval's in-band rate — the ±5σ obs clamp alone does NOT yield a full-tilt
+//! walk. The clamp tracks the same constant training draws targets from, so it
+//! stays correct if the band is later extended.
+//!
+//! Necessary, not sufficient: closure is also bearing-dependent (the brain strides
+//! +X but shuffles at other bearings, and the chase eval only poses +X — rl#239),
+//! and the spawn-relative body.pos obs channel still drifts OOD on a long
+//! open-field chase (rl#240) — neither is fixable at the posing layer.
+
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
@@ -8,6 +27,7 @@ use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns};
 use crab_world::crab_view::CrabBrainLabels;
 use crab_world::play::Policy;
+use crab_world::training::targets::TARGET_ARENA_HALF;
 
 const CLAW_TARGET_Y: f32 = 0.3;
 
@@ -286,6 +306,9 @@ fn set_crab_walk_target(
         if to_prey.length_squared() < 1e-6 {
             continue;
         }
+        // In-distribution guard (rl#144, module header): pose the target at most one
+        // band-edge away along the true bearing.
+        let to_prey = to_prey.clamp_length_max(TARGET_ARENA_HALF);
 
         let origin = spawns.0.get(idx).copied().unwrap_or(Vec3::ZERO);
         let carapace = carapace_q
