@@ -359,8 +359,7 @@ impl TrainingState {
     /// member stamped with one freshly-drawn save_stamp (bddap/rl#215) so a loader can
     /// verify the set was written together. `extra` writes anything saved AS PART OF
     /// the set beyond the core members — the learner passes the optimizer here — into
-    /// the same staged generation, stamped with the same save_stamp. Returns that
-    /// save_stamp on a complete save, or `None` when any member failed.
+    /// the same staged generation, stamped with the same save_stamp.
     ///
     /// The whole set lands in ONE atomic dir swap ([`replace_dir_atomically`],
     /// bddap/rl#238): members are staged in a sibling temp dir — the live dir's
@@ -370,7 +369,7 @@ impl TrainingState {
     /// The brain (the largest member, the one ENOSPC kills) is staged first so a full
     /// disk aborts before any cheap member is written. The #215 stamps stay as the
     /// load-time backstop for out-of-band copies.
-    pub(crate) fn save_checkpoint(&self, extra: impl FnOnce(&CheckpointDir, u64)) -> Option<u64> {
+    pub(crate) fn save_checkpoint(&self, extra: impl FnOnce(&CheckpointDir, u64)) {
         let arch = self.brain.train().arch();
         let save_stamp: u64 = rand::random();
         let staged = replace_dir_atomically(&self.checkpoint_dir, |staging| {
@@ -388,21 +387,12 @@ impl TrainingState {
             hardlink_missing_entries(&self.checkpoint_dir, staging)
         });
         match staged {
-            Ok(()) => {
-                info!(
-                    "Saved checkpoint set to {}",
-                    self.checkpoint_dir.display()
-                );
-                Some(save_stamp)
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to save checkpoint set to {}: {e} — the previous set stays \
-                     intact and coherent",
-                    self.checkpoint_dir.display()
-                );
-                None
-            }
+            Ok(()) => info!("Saved checkpoint set to {}", self.checkpoint_dir.display()),
+            Err(e) => warn!(
+                "Failed to save checkpoint set to {}: {e} — the previous set stays \
+                 intact and coherent",
+                self.checkpoint_dir.display()
+            ),
         }
     }
 
@@ -634,6 +624,57 @@ mod tests {
         let (brain_c, want_c) = fresh_brain_differing_from(&want_b);
         *cached.train_mut() = brain_c;
         assert_eq!(cached.with_inference(&policy_bits), want_c);
+    }
+
+    /// `save_checkpoint` at its real call shape: the set lands complete under ONE
+    /// pairing key (#215 ∘ #238 — a torn or mixed-generation dir cannot load), and the
+    /// live dir's non-set entries (`best/`, the tick watermark) survive the swap — the
+    /// carry is load-bearing, so a save must never silently destroy the best snapshot
+    /// or reset the odometer.
+    #[test]
+    fn save_checkpoint_lands_one_coherent_set_and_preserves_non_set_entries() {
+        let dir = std::env::temp_dir().join("rl_test_save_checkpoint_set");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("best")).unwrap();
+        std::fs::write(dir.join("best/brain.bin"), b"incumbent-best").unwrap();
+        std::fs::write(dir.join("ticks.txt"), b"777").unwrap();
+
+        let config = crate::TrainConfig {
+            checkpoint: crate::CheckpointArgs {
+                checkpoint_dir: dir.clone(),
+            },
+            ticks: 0,
+            envs: 1,
+            seed: Some(42),
+        };
+        let state = TrainingState::new(&config, None);
+        let extra_saw_staged_dir = RefCell::new(false);
+        state.save_checkpoint(|paths, _stamp| {
+            assert_ne!(
+                paths.brain_file().parent().unwrap(),
+                dir,
+                "extra members are written into the staged generation, never the live dir"
+            );
+            *extra_saw_staged_dir.borrow_mut() = true;
+        });
+        assert!(*extra_saw_staged_dir.borrow());
+
+        let paths = CheckpointDir::new(&dir);
+        let brain = load_brain_file::<TrainBackend>(&paths.brain_file(), &NdArrayDevice::Cpu)
+            .expect("saved brain loads");
+        let key = brain.set_key();
+        assert!(key.save_stamp.is_some(), "the set is stamped");
+        ObsNormalizer::load(&paths.normalizer_path(), key)
+            .expect("obs normalizer pairs with the brain's key");
+        load_return_normalizer(&paths.return_normalizer_path(), key)
+            .expect("return normalizer pairs with the brain's key");
+        assert_eq!(
+            std::fs::read(dir.join("best/brain.bin")).unwrap(),
+            b"incumbent-best",
+            "best/ survives the swap"
+        );
+        assert_eq!(std::fs::read(dir.join("ticks.txt")).unwrap(), b"777");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
