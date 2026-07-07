@@ -115,13 +115,15 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
 #[derive(Resource, Clone)]
 pub struct PilotScript {
     toggle_at: Vec<u64>,
+    walk_at: Option<u64>,
     frame: u64,
 }
 
 impl PilotScript {
-    pub fn new(toggle_at: Vec<u64>) -> Self {
+    pub fn new(toggle_at: Vec<u64>, walk_at: Option<u64>) -> Self {
         Self {
             toggle_at,
+            walk_at,
             frame: 0,
         }
     }
@@ -146,6 +148,12 @@ fn drive_pilot_script(
     if vehicle.kind().is_some() {
         flight.wasd = bevy::math::Vec2::new(0.0, 1.0);
         flight.rt = 0.5;
+    } else if script.walk_at.is_some_and(|at| script.frame >= at) {
+        // Walk a gentle arc on foot — a moving target the hunting crab's path will cross
+        // (a standing player can sit under the carapace without the 2D grab-center ever
+        // reaching them).
+        pending.forward = 1.0;
+        pending.yaw_delta = 0.02;
     }
 }
 
