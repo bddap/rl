@@ -502,3 +502,54 @@ fn fp_camera_effective_clip_is_the_scaled_near() {
         "near plane must shrink with the render frame"
     );
 }
+
+/// The menu egui context must survive a full Menu → Playing → Menu cycle. bevy_egui's
+/// auto-create fires ONCE (a `Local<bool>` latch): after `despawn_menu_camera` took the
+/// first context down with its camera, a respawned menu camera stayed context-less and
+/// `menu_screen` errored every frame (rl#237). The camera therefore carries an explicit
+/// `PrimaryEguiContext` — pin that every (re)spawn has one.
+#[test]
+fn menu_camera_regains_egui_context_after_round_over() {
+    use super::menu::{MenuCamera, despawn_menu_camera, spawn_menu_camera};
+    use bevy_egui::PrimaryEguiContext;
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(bevy::state::app::StatesPlugin)
+        .init_state::<AppPhase>()
+        .add_systems(OnEnter(AppPhase::Menu), spawn_menu_camera)
+        .add_systems(OnEnter(AppPhase::Playing), despawn_menu_camera);
+
+    let menu_cam_with_ctx = |app: &mut App| {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<Has<PrimaryEguiContext>, With<MenuCamera>>();
+        q.iter(app.world()).collect::<Vec<_>>()
+    };
+
+    app.update();
+    assert_eq!(
+        menu_cam_with_ctx(&mut app),
+        vec![true],
+        "boot: the initial OnEnter(Menu) spawn carries the context"
+    );
+
+    app.world_mut()
+        .resource_mut::<NextState<AppPhase>>()
+        .set(AppPhase::Playing);
+    app.update();
+    assert!(
+        menu_cam_with_ctx(&mut app).is_empty(),
+        "Playing must tear the menu camera down"
+    );
+
+    app.world_mut()
+        .resource_mut::<NextState<AppPhase>>()
+        .set(AppPhase::Menu);
+    app.update();
+    assert_eq!(
+        menu_cam_with_ctx(&mut app),
+        vec![true],
+        "the respawned menu camera must carry its own PrimaryEguiContext"
+    );
+}

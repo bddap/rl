@@ -1,7 +1,10 @@
 use std::sync::mpsc;
 
 use bevy::prelude::*;
-use bevy_egui::{EguiContextSettings, EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use bevy_egui::{
+    EguiContextSettings, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass,
+    PrimaryEguiContext, egui,
+};
 
 use super::AppPhase;
 use super::app::RoundOver;
@@ -20,7 +23,7 @@ pub struct MenuPlugin {
 }
 
 #[derive(Component)]
-struct MenuCamera;
+pub(super) struct MenuCamera;
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
@@ -30,6 +33,15 @@ impl Plugin for MenuPlugin {
             // any future egui surface inherits the workspace UI-scale rule for free.
             app.add_systems(Update, sync_egui_scale);
         }
+        // The menu camera carries its own PrimaryEguiContext (spawn_menu_camera), so
+        // auto-creation is off: bevy_egui's auto-create latches on the FIRST camera and
+        // never fires again (Local<bool>, bevy_egui-0.39.1), which left the menu
+        // context-less after a round-over respawn (rl#237). One creation path: ours —
+        // flipped unconditionally (idempotent) so an EguiPlugin added elsewhere first
+        // can't silently re-arm auto-create.
+        app.world_mut()
+            .resource_mut::<EguiGlobalSettings>()
+            .auto_create_primary_context = false;
         app.insert_non_send_resource(MenuState::new(
             self.seed,
             self.telemetry,
@@ -64,14 +76,17 @@ fn sync_egui_scale(ui_scale: Res<UiScale>, mut contexts: Query<&mut EguiContextS
     }
 }
 
-fn spawn_menu_camera(mut commands: Commands, existing: Query<Entity, With<MenuCamera>>) {
+pub(super) fn spawn_menu_camera(mut commands: Commands, existing: Query<Entity, With<MenuCamera>>) {
     for e in existing.iter() {
         commands.entity(e).despawn();
     }
-    commands.spawn((Camera2d, MenuCamera));
+    // Explicit PrimaryEguiContext (it #[require]s EguiContext): the context must live
+    // and die with THIS camera on every Menu entry, not depend on a one-shot global
+    // auto-create that already fired on a previous life (rl#237).
+    commands.spawn((Camera2d, MenuCamera, PrimaryEguiContext));
 }
 
-fn despawn_menu_camera(mut commands: Commands, cams: Query<Entity, With<MenuCamera>>) {
+pub(super) fn despawn_menu_camera(mut commands: Commands, cams: Query<Entity, With<MenuCamera>>) {
     for e in cams.iter() {
         commands.entity(e).despawn();
     }
