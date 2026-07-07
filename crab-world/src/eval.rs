@@ -17,6 +17,12 @@ use crate::training::targets::{REACH_RADIUS, TARGET_ARENA_HALF, TARGET_Y_MAX, TA
 
 pub const DEFAULT_TARGET_DISTANCE_M: f32 = TARGET_ARENA_HALF;
 
+/// The default eval episode length — one training episode horizon (~23 s of crab time
+/// at 64 Hz), enough for a working gait to traverse a far target. The (ticks, distance)
+/// PAIR defines "the chase eval"; every judge — the CLI (release gate, monitor) and the
+/// trainer's keep-best gate — must take its defaults from HERE or the metric forks.
+pub const DEFAULT_EVAL_TICKS: u64 = crate::training::systems::MAX_EPISODE_TICKS as u64;
+
 const TARGET_Y: f32 = (TARGET_Y_MIN + TARGET_Y_MAX) / 2.0;
 
 #[derive(Debug, Clone, Copy)]
