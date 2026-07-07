@@ -40,7 +40,7 @@ mod desync_test {
     use rand_chacha::ChaCha8Rng;
 
     use crate::SyncVerdict;
-    use crate::sim::{Input, Outcome, PlayerId, Pos, Sim, buttons};
+    use crate::sim::{Input, Outcome, PlayerId, Sim, buttons};
 
     fn input_log(seed: u64, players: &[PlayerId], ticks: usize) -> Vec<BTreeMap<PlayerId, Input>> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -203,44 +203,6 @@ mod desync_test {
 
         assert!(!would_arm_external_crab(None, None));
         assert!(!would_arm_external_crab(synced(true), None));
-    }
-
-    #[test]
-    fn external_crab_with_mismatched_weights_desyncs() {
-        let seed = 0x5151_8202;
-        let players: Vec<PlayerId> = (0..2).map(PlayerId).collect();
-        let neutral: BTreeMap<PlayerId, Input> =
-            players.iter().map(|&p| (p, Input::default())).collect();
-        let pose = Pos { x: 1234, z: -567 };
-        let (weights_a, weights_b) = (0xAAAA_AAAA_AAAA_AAAA, 0xBBBB_BBBB_BBBB_BBBB);
-
-        let mut a = Sim::new(seed, &players);
-        let mut b = Sim::new(seed, &players);
-        for _ in 0..10u64 {
-            a.set_external_crab_pose(0, pose, 7, weights_a);
-            b.set_external_crab_pose(0, pose, 7, weights_b);
-            a.step(&neutral);
-            b.step(&neutral);
-        }
-        assert_ne!(
-            a.state_hash(),
-            b.state_hash(),
-            "identical pose + DIFFERENT weights digest must desync (shared-checkpoint guard)"
-        );
-
-        let mut c = Sim::new(seed, &players);
-        let mut d = Sim::new(seed, &players);
-        for _ in 0..10u64 {
-            c.set_external_crab_pose(0, pose, 7, weights_a);
-            d.set_external_crab_pose(0, pose, 7, weights_a);
-            c.step(&neutral);
-            d.step(&neutral);
-        }
-        assert_eq!(
-            c.state_hash(),
-            d.state_hash(),
-            "identical pose + SAME weights digest must stay in sync"
-        );
     }
 
     #[test]

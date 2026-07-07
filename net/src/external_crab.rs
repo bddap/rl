@@ -4,7 +4,7 @@ use bevy_rapier3d::prelude::*;
 
 use crate::sim::Pos;
 use crab_world::Visuals;
-use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint};
+use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId};
 use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns};
 use crab_world::crab_view::CrabBrainLabels;
@@ -25,7 +25,6 @@ struct CrabBridge {
     yaw_turns: i32,
     settle: u32,
     hunt_target_m: Option<Vec2>,
-    phys_digest: u64,
 }
 
 fn pos_to_m(p: Pos) -> Vec2 {
@@ -47,7 +46,6 @@ impl CrabBridge {
             yaw_turns: 0,
             hunt_target_m: None,
             settle: crab_world::bot::RESET_GRACE_TICKS,
-            phys_digest: 0,
         }
     }
 
@@ -93,7 +91,6 @@ impl ExternalCrabBridge {
             .map(|c| crate::server::CrabPose {
                 pos: c.world_pos(),
                 yaw: c.yaw_turns,
-                digest: c.phys_digest,
             })
             .collect()
     }
@@ -141,42 +138,11 @@ pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
 
 pub fn sync_external_crab(sim: &mut crate::sim::Sim, bridge: &mut ExternalCrabBridge) {
     for (idx, pose) in bridge.crab_poses().into_iter().enumerate() {
-        sim.set_external_crab_pose(idx, pose.pos, pose.yaw, pose.digest);
+        sim.set_external_crab_pose(idx, pose.pos, pose.yaw);
     }
     for idx in 0..bridge.crab_count() {
         let prey = sim.nearest_living_player_pos(idx);
         bridge.set_hunt_target(idx, prey);
-    }
-}
-
-#[allow(clippy::type_complexity)]
-fn hash_crab_physics(
-    policies: NonSend<CrabPolicies>,
-    mut bridge: ResMut<ExternalCrabBridge>,
-    bodies: Query<
-        (
-            &CrabEnvId,
-            &Transform,
-            &Velocity,
-            Option<&CrabJoint>,
-            Option<&CrabCarapace>,
-        ),
-        With<CrabBodyPart>,
-    >,
-) {
-    assert_eq!(
-        policies.0.len(),
-        bridge.crabs.len(),
-        "one policy per bridged crab"
-    );
-    for (idx, (policy, crab)) in policies.0.iter().zip(bridge.crabs.iter_mut()).enumerate() {
-        let phys = crab_world::bot::physics_digest::crab_state_digest(
-            bodies
-                .iter()
-                .filter(|(env, ..)| env.0 == idx)
-                .map(|(_, t, v, j, c)| (t, v, j, c)),
-        );
-        crab.phys_digest = phys ^ policy.weights_digest().map_or(0, std::num::NonZeroU64::get);
     }
 }
 
@@ -262,13 +228,6 @@ impl Plugin for ExternalCrabPlugin {
         app.add_systems(
             FixedUpdate,
             integrate_crab
-                .after(PhysicsSet::Writeback)
-                .run_if(external_crab_armed),
-        );
-        app.add_systems(
-            FixedUpdate,
-            hash_crab_physics
-                .after(integrate_crab)
                 .after(PhysicsSet::Writeback)
                 .run_if(external_crab_armed),
         );

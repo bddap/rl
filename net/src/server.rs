@@ -282,7 +282,6 @@ pub struct SteppedTick {
 pub struct CrabPose {
     pub pos: Pos,
     pub yaw: i32,
-    pub digest: u64,
 }
 
 impl Server {
@@ -499,7 +498,7 @@ impl Server {
                 "the driver's crab poses must cover every sim crab"
             );
             for (idx, c) in crabs.iter().enumerate() {
-                self.sim.set_external_crab_pose(idx, c.pos, c.yaw, c.digest);
+                self.sim.set_external_crab_pose(idx, c.pos, c.yaw);
             }
         }
         let restarted = self.sim.step(&pending.inputs);
@@ -1259,7 +1258,6 @@ mod tests {
                 z: -300 - tick as i64 * 7,
             },
             yaw: (tick as i32).wrapping_mul(4096),
-            digest: tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xABCD,
         };
         let input_at = |i: u64| {
             let strafe = ((i % 3) as f32 - 1.0) * 0.6;
@@ -1275,7 +1273,7 @@ mod tests {
             let mut sim = Sim::new(SEED, &roster);
             for i in 0..SUBMITS {
                 let p = pose_at(i);
-                sim.set_external_crab_pose(0, p.pos, p.yaw, p.digest);
+                sim.set_external_crab_pose(0, p.pos, p.yaw);
                 sim.step(&BTreeMap::from([(me, input_at(i))]));
                 baseline.push((sim.tick(), sim.state_hash()));
             }
@@ -1396,7 +1394,6 @@ mod tests {
                 z: -4000 - tick as i64 * 9,
             },
             yaw: (tick as i32).wrapping_mul(2048),
-            digest: tick.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x1234,
         };
         let input_at = |i: u64| Input::from_axes(((i % 3) as f32 - 1.0) * 0.5, 1.0);
 

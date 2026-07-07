@@ -211,7 +211,7 @@ pub(super) fn seed_round_crabs(ls: &mut Lockstep, crabs: usize) -> Vec<Pos> {
     ls.configure_crabs(crabs);
     let spawns: Vec<Pos> = ls.sim().crabs().iter().map(|c| c.pos()).collect();
     for (idx, crab) in ls.sim().crabs().to_vec().into_iter().enumerate() {
-        ls.set_external_crab_pose(idx, crab.pos(), crab.yaw(), 0);
+        ls.set_external_crab_pose(idx, crab.pos(), crab.yaw());
     }
     spawns
 }

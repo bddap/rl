@@ -32,7 +32,7 @@ physics. Per tick it owns: `tick`, a few `Player{pos,yaw,status}` (BTreeMap), `c
 yaw}`, the fixed `extraction`, `outcome`, the restart latch, the RNG stream position — the
 exact fields `Sim::state_hash` (`sim.rs:749`) destructures exhaustively. ~100–200 bytes for
 the whole match. The float rapier crab is a side-car: the NN policy drives it, and only its
-quantized `Pos{i64 x,i64 z} + yaw_turns` + a physics digest are injected into the integer
+quantized `Pos{i64 x,i64 z} + yaw_turns` are injected into the integer
 sim via `set_external_crab_pose` (`sim.rs:435`). Game logic (grab, extract, outcome) is all
 integer.
 

@@ -178,14 +178,8 @@ impl Lockstep {
         }
     }
 
-    pub fn set_external_crab_pose(
-        &mut self,
-        crab: usize,
-        pos: crate::sim::Pos,
-        yaw: i32,
-        phys_digest: u64,
-    ) {
-        self.sim.set_external_crab_pose(crab, pos, yaw, phys_digest);
+    pub fn set_external_crab_pose(&mut self, crab: usize, pos: crate::sim::Pos, yaw: i32) {
+        self.sim.set_external_crab_pose(crab, pos, yaw);
     }
 
     pub fn configure_crabs(&mut self, crabs: usize) {
