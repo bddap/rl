@@ -136,10 +136,6 @@ impl PeerRole {
             PeerRole::ServerAuth
         }
     }
-
-    fn can_pilot(self) -> bool {
-        matches!(self, PeerRole::ServerAuth)
-    }
 }
 
 fn pilot_of(pid: PlayerId) -> PilotId {
@@ -417,6 +413,20 @@ fn read_vehicle_pose(world: &mut World, me: PilotId) -> Option<CockpitPose> {
         })
 }
 
+/// The remote-client twin of [`read_vehicle_pose`]: our own craft's arena-frame pose out of an
+/// adopted articulation. The host simulates the craft; its pose comes back per-pilot on the
+/// wire. `None` is the request→grant window — boarding set `Flying { pose: None }` and the
+/// intent is still in flight, so the cockpit camera holds off until the grant lands.
+fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Option<CockpitPose> {
+    art.vehicles
+        .iter()
+        .find(|v| v.pilot == me.0)
+        .map(|v| CockpitPose {
+            pos: Vec3::from_array(v.pos),
+            orient: Quat::from_array(v.rot),
+        })
+}
+
 
 pub(crate) fn pump_fixed_steps(world: &mut World, steps: u32) {
     use bevy::app::FixedMain;
@@ -466,7 +476,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
 
     {
         let toggle = std::mem::take(&mut world.resource_mut::<PendingInput>().toggle_vehicle);
-        if toggle && role.can_pilot() {
+        if toggle {
             let alive = {
                 let state = world.non_send_resource::<GameState>();
                 let me = state.ls.me();
@@ -587,7 +597,11 @@ pub(super) fn drive_lockstep(world: &mut World) {
             issue_tick
         };
         if let Some(art) = pending_art {
-            crate::render::articulation::apply(world, &art);
+            let me = local_pilot(world.non_send_resource::<GameState>());
+            crate::render::articulation::apply(world, &art, me);
+            if let Some(p) = own_wire_pose(&art, me) {
+                world.resource_mut::<LocalVehicle>().update_pose(p);
+            }
         }
         if let Some(down) = server_down {
             end_round_server_down(world, down, tel.as_ref());
@@ -674,6 +688,10 @@ pub(super) fn drive_lockstep(world: &mut World) {
                 {
                     let state = world.non_send_resource::<GameState>();
                     state.coord.broadcast_step(&snap, articulation.as_ref());
+                }
+                if let Some(art) = &articulation {
+                    let me = local_pilot(world.non_send_resource::<GameState>());
+                    super::articulation::publish_remote_vehicles(world, &art.vehicles, me);
                 }
                 {
                     let mut state = world.non_send_resource_mut::<GameState>();
@@ -763,9 +781,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, PeerRole, jitter_take,
-    };
+    use super::{FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, jitter_take};
     use crate::sim::{Input, buttons};
     use crab_world::vehicle::VehicleKind;
 
@@ -796,14 +812,30 @@ mod tests {
     }
 
     #[test]
-    fn only_the_server_authoritative_arm_can_pilot() {
+    fn own_wire_pose_picks_exactly_our_pilots_craft() {
+        use crate::articulation::{CrabArticulation, VehiclePoseWire};
+        use crab_world::vehicle::PilotId;
+        let art = CrabArticulation {
+            tick: 7,
+            crabs: Vec::new(),
+            vehicles: vec![
+                VehiclePoseWire {
+                    pilot: 0,
+                    pos: [1.0, 2.0, 3.0],
+                    rot: [0.0, 0.0, 0.0, 1.0],
+                },
+                VehiclePoseWire {
+                    pilot: 2,
+                    pos: [9.0, 8.0, 7.0],
+                    rot: [0.0, 1.0, 0.0, 0.0],
+                },
+            ],
+        };
+        let ours = super::own_wire_pose(&art, PilotId(2)).expect("our craft is on the wire");
+        assert_eq!(ours.pos.to_array(), [9.0, 8.0, 7.0]);
         assert!(
-            PeerRole::ServerAuth.can_pilot(),
-            "solo/host pumps physics ⇒ can pilot"
-        );
-        assert!(
-            !PeerRole::RemoteAdopt.can_pilot(),
-            "a remote client pumps no physics ⇒ no craft can spawn ⇒ cannot pilot yet"
+            super::own_wire_pose(&art, PilotId(1)).is_none(),
+            "no craft on the wire = the request→grant window: the camera holds off"
         );
     }
 

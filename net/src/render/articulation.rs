@@ -4,12 +4,25 @@ use bevy::prelude::*;
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
 use crab_world::bot::skin::{CrabSkinRepose, SkinRepose};
 use crab_world::crab_view::CrabBrainLabels;
-use crab_world::vehicle::Vehicle;
+use crab_world::vehicle::{PilotId, Vehicle};
 
 use crate::articulation::{CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire};
 
+/// Every NON-LOCAL pilot's craft pose, for the always-on wireframe pass (rl#191). The local
+/// pilot's own craft is excluded: the cockpit camera flies from it instead. Fed per tick from
+/// the same articulation on both arms — the host from its capture, a client from its adopt.
 #[derive(Resource, Default)]
 pub(super) struct RemoteVehicle(pub(super) Vec<VehiclePoseWire>);
+
+pub(super) fn publish_remote_vehicles(
+    world: &mut World,
+    vehicles: &[VehiclePoseWire],
+    me: PilotId,
+) {
+    world.insert_resource(RemoteVehicle(
+        vehicles.iter().filter(|v| v.pilot != me.0).copied().collect(),
+    ));
+}
 
 const _: () = assert!(CrabJointId::COUNT < u8::MAX as usize);
 
@@ -87,7 +100,7 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
     }
 }
 
-pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
+pub(super) fn apply(world: &mut World, art: &CrabArticulation, me: PilotId) {
     let by_env_tag: std::collections::HashMap<(usize, u8), &PartTransform> = art
         .crabs
         .iter()
@@ -133,7 +146,7 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
         world.insert_resource(CrabBrainLabels(labels));
     }
 
-    world.insert_resource(RemoteVehicle(art.vehicles.clone()));
+    publish_remote_vehicles(world, &art.vehicles, me);
 }
 
 #[cfg(test)]
@@ -229,7 +242,8 @@ mod tests {
         );
         client.insert_resource(CrabSkinRepose::default());
 
-        apply(&mut client, &art);
+        // Viewed as pilot 7: pilot 0's craft is somebody else's ⇒ it lands in RemoteVehicle.
+        apply(&mut client, &art, PilotId(7));
 
         let tf = |world: &mut World, e: Entity| *world.entity(e).get::<Transform>().unwrap();
         let got_cara = tf(&mut client, c_cara);
@@ -261,10 +275,17 @@ mod tests {
                 "REFUSED: wrong rig".to_string()
             ]
         );
-        let crafts = &client.resource::<RemoteVehicle>().0;
+        let crafts = client.resource::<RemoteVehicle>().0.clone();
         assert_eq!(crafts.len(), 1, "one piloted craft applied");
         assert_eq!(crafts[0].pilot, 0, "the ram helper spawns pilot 0's craft");
         assert_eq!(Vec3::from_array(crafts[0].pos), craft_t.translation);
         assert_eq!(Quat::from_array(crafts[0].rot), craft_t.rotation);
+
+        // Viewed as pilot 0 the same craft is OURS — the cockpit, not a wireframe.
+        apply(&mut client, &art, PilotId(0));
+        assert!(
+            client.resource::<RemoteVehicle>().0.is_empty(),
+            "the local pilot's own craft never enters the remote wireframe set"
+        );
     }
 }

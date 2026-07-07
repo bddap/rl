@@ -445,6 +445,15 @@ impl Server {
                 }
                 input
             };
+            // A piloting player walks nowhere: substitute a neutral foot input at assembly.
+            // The client already sends neutral while piloting (`LocalControl::sim_input`), but
+            // the server doesn't TRUST it to (rl#191) — and a starved HOLD would otherwise
+            // replay the last pre-boarding walk input underneath the craft.
+            let input = if self.pilot_intents.contains_key(&pid) {
+                Input::default()
+            } else {
+                input
+            };
             inputs.insert(pid, input);
         }
         self.pending = Some(PendingTick {
@@ -742,6 +751,48 @@ mod tests {
             VehicleKind::Ship,
             "death mid-flight does not eject — the flying pilot's intent still applies"
         );
+    }
+
+    /// The assembly-side trust boundary (rl#191): a piloting player's foot input is neutralized
+    /// by the SERVER, whatever the client sent — a lying client can't walk and fly at once, and
+    /// a starved HOLD can't replay a stale walk underneath the craft.
+    #[test]
+    fn a_piloting_players_foot_input_is_neutralized_at_assembly() {
+        use crab_world::vehicle::VehicleKind;
+        let p1 = PlayerId(1);
+        let mut s = srv(42, &ids(2));
+
+        // Claims to walk AND pilot in the same message.
+        s.record_remote(
+            p1,
+            TickMsg {
+                pilot: Some(intent(VehicleKind::Plane)),
+                ..tickmsg(0, 1.0)
+            },
+        );
+        s.advance(TickMsg {
+            pilot: Some(intent(VehicleKind::Ship)),
+            ..tickmsg(0, -1.0)
+        });
+        let assembled = s.pending.as_ref().expect("advance assembled").inputs.clone();
+        assert_eq!(
+            assembled[&p1],
+            Input::default(),
+            "the remote's walk axis is overridden while its intent is filed"
+        );
+        assert_eq!(
+            assembled[&PlayerId(0)],
+            Input::default(),
+            "the same rule covers the host's own seat"
+        );
+        step_ready(&mut s);
+
+        // Off the craft, the very next walk input applies again.
+        s.record_remote(p1, tickmsg(1, 1.0));
+        s.advance(tickmsg(1, 0.5));
+        let assembled = s.pending.as_ref().expect("advance assembled").inputs.clone();
+        assert_eq!(assembled[&p1], input(1.0), "on foot again ⇒ input passes through");
+        assert_eq!(assembled[&PlayerId(0)], input(0.5));
     }
 
     /// Step every tick `advance` has assembled and return the decoded snapshots.
