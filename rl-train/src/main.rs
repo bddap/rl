@@ -83,6 +83,16 @@ struct EvalArgs {
     #[arg(long)]
     distance: Option<f32>,
 
+    /// Gate mode: exit nonzero (after printing `EVAL_RESULT`) unless a real policy
+    /// loaded AND it closed at least this many meters toward the target. Binds the
+    /// pass/fail verdict to THIS eval — the one chase metric shared with the demo and
+    /// GCR — so a release/promotion gate delegates here instead of growing a second
+    /// behavior probe that drifts (bddap/bothouse#134). Without the flag, a missing
+    /// checkpoint stays the legitimate exit-0 zero-action baseline the training
+    /// monitor plots.
+    #[arg(long)]
+    min_progress: Option<f32>,
+
     /// DEV: judge on the procedural fallback body when no usable `sally.glb` resolves,
     /// instead of refusing to start (bddap/rl#214). Only meaningful against a
     /// checkpoint trained on the fallback (body digest 0) or an unstamped pre-#214
@@ -170,6 +180,25 @@ fn main() {
                      rest-pose baseline, NOT a trained policy",
                     e.checkpoint.checkpoint_dir.display()
                 );
+            }
+            if let Some(min) = e.min_progress {
+                if !r.policy_loaded {
+                    eprintln!(
+                        "eval: FAIL — --min-progress {min} demands a loaded policy, but no \
+                         usable checkpoint loaded from {}",
+                        e.checkpoint.checkpoint_dir.display()
+                    );
+                    std::process::exit(1);
+                }
+                if r.progress_m < min {
+                    eprintln!(
+                        "eval: FAIL — policy closed {:.4} m toward the {:.2} m target, below \
+                         the required --min-progress {min} m (dead/collapsed policy)",
+                        r.progress_m, r.target_distance_m
+                    );
+                    std::process::exit(1);
+                }
+                println!("eval: PASS — progress {:.4} m ≥ --min-progress {min} m", r.progress_m);
             }
             return;
         }
