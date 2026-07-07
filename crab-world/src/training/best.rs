@@ -1,5 +1,6 @@
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
@@ -7,11 +8,17 @@ use super::checkpoint::{
     BRAIN_FILENAME, NORMALIZER_FILENAME, OPTIMIZER_FILENAME, RETURN_NORMALIZER_FILENAME,
     TICK_WATERMARK_FILENAME,
 };
-use super::targets::SOLID_REACH_FRACTION;
+use super::systems::MAX_EPISODE_TICKS;
+use crate::eval::{DEFAULT_TARGET_DISTANCE_M, EvalReport};
+use crate::mesh_fallback::BodyGate;
 
 const BEST_SUBDIR: &str = "best";
 
-const REACH_SIDECAR: &str = "reach.txt";
+const PROGRESS_SIDECAR: &str = "progress.txt";
+
+/// Sidecar of the pre-#233 reach-keyed gate; removed whenever the progress bar is
+/// (re)stamped so a `best/` never carries two competing scores.
+const LEGACY_REACH_SIDECAR: &str = "reach.txt";
 
 struct BestFile {
     name: &'static str,
@@ -41,104 +48,158 @@ const BEST_FILES: &[BestFile] = &[
     },
 ];
 
-const REACH_EMA_ALPHA: f32 = 0.05;
+/// How often to spend one chase-eval (~6 s, read-only) scoring the live checkpoint.
+/// Periodic rather than reach-triggered: a trigger derived from near-heavy TRAIN
+/// episodes is blind to far-approach movement in either direction — exactly the
+/// divergence that let a 6.92 m brain displace the 8.93 m one (bddap/rl#233).
+const EVAL_PERIOD: Duration = Duration::from_secs(600);
 
-const REACH_MARGIN: f32 = 0.02;
-
-const MIN_EMA_UPDATES: u32 = 30;
+/// Meters of chase progress a candidate must add over the incumbent to displace it.
+/// The eval is deterministic per brain, so this only suppresses churn from
+/// meaningfully-equal policies, not noise.
+const PROGRESS_MARGIN_M: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Reach(f32);
+struct Progress(f32);
 
-impl Reach {
+impl Progress {
     fn new(v: f32) -> Option<Self> {
-        (v.is_finite() && (0.0..=1.0).contains(&v)).then_some(Self(v))
+        (v.is_finite() && v >= 0.0).then_some(Self(v))
     }
 
     fn get(self) -> f32 {
         self.0
     }
 
-    fn is_solid(self) -> bool {
-        self.0 >= SOLID_REACH_FRACTION
-    }
-
-    fn beats(self, other: Reach) -> bool {
-        self.is_solid() && self.0 > other.0 + REACH_MARGIN
+    fn beats(self, other: Progress) -> bool {
+        self.0 > other.0 + PROGRESS_MARGIN_M
     }
 
     fn load(path: &Path) -> Option<Self> {
         let text = std::fs::read_to_string(path).ok()?;
-        Reach::new(text.split_whitespace().next()?.parse().ok()?)
+        Progress::new(text.split_whitespace().next()?.parse().ok()?)
     }
 }
 
+/// The chase-eval seam. Production is [`crate::eval::run_eval`] — THE far-ball metric
+/// every gate shares (bddap/bothouse#134); tests inject canned reports so gate
+/// decisions are testable without a bevy world per case.
+type Evaluator = Box<dyn FnMut(&Path) -> Result<EvalReport, String>>;
+
 pub(crate) struct BestKeeper {
     checkpoint_dir: PathBuf,
-    smoothed_reach: Option<f32>,
-    ema_updates: u32,
-    best: Option<Reach>,
+    evaluate: Evaluator,
+    eval_period: Duration,
+    last_eval: Instant,
+    best: Option<Progress>,
 }
 
 impl BestKeeper {
-    pub(crate) fn new(checkpoint_dir: &Path) -> Self {
-        let best = Reach::load(&checkpoint_dir.join(BEST_SUBDIR).join(REACH_SIDECAR));
+    pub(crate) fn new(checkpoint_dir: &Path, body_gate: BodyGate) -> Self {
+        Self::with_evaluator(
+            checkpoint_dir,
+            EVAL_PERIOD,
+            Box::new(move |dir| {
+                // The CLI's own defaults (`rl-train eval`), so the gate judges the
+                // IDENTICAL episode the release gate and rl-eval-monitor judge.
+                crate::eval::run_eval(
+                    body_gate,
+                    dir,
+                    MAX_EPISODE_TICKS as u64,
+                    DEFAULT_TARGET_DISTANCE_M,
+                )
+            }),
+        )
+    }
+
+    fn with_evaluator(checkpoint_dir: &Path, eval_period: Duration, evaluate: Evaluator) -> Self {
+        let best = Progress::load(&checkpoint_dir.join(BEST_SUBDIR).join(PROGRESS_SIDECAR));
         match best {
-            Some(r) => info!(
-                "[best] keeping best-by-reach in {}/{BEST_SUBDIR} | resumed best reach {:.3}",
+            Some(p) => info!(
+                "[best] keeping best-by-chase-eval in {}/{BEST_SUBDIR} | resumed best progress {:.3} m",
                 checkpoint_dir.display(),
-                r.get()
+                p.get()
             ),
             None => info!(
-                "[best] keeping best-by-reach in {}/{BEST_SUBDIR} | no prior best — first solid policy seeds it",
+                "[best] keeping best-by-chase-eval in {}/{BEST_SUBDIR} | no progress bar yet — \
+                 an existing best/ is scored before any candidate can displace it",
                 checkpoint_dir.display()
             ),
         }
         Self {
             checkpoint_dir: checkpoint_dir.to_path_buf(),
-            smoothed_reach: None,
-            ema_updates: 0,
+            evaluate,
+            eval_period,
+            last_eval: Instant::now(),
             best,
         }
     }
 
-    pub(crate) fn observe(&mut self, reach: Option<f32>) {
-        if let Some(r) = reach {
-            self.smoothed_reach = Some(match self.smoothed_reach {
-                Some(prev) => prev + REACH_EMA_ALPHA * (r - prev),
-                None => r,
-            });
-            self.ema_updates += 1;
+    /// Once per [`EVAL_PERIOD`]: chase-eval the checkpoint on disk and mirror it into
+    /// `best/` iff it beats the incumbent's progress. Runs between learner iterations
+    /// (rollout threads idle for the eval's ~6 s), so it costs wall clock only — no
+    /// training data or update is touched.
+    pub(crate) fn maybe_snapshot(&mut self) {
+        if self.last_eval.elapsed() < self.eval_period {
+            return;
+        }
+        // Reset even when nothing promotes: the period paces eval SPEND, not successes.
+        self.last_eval = Instant::now();
+
+        // A best/ from the reach-keyed era carries no progress bar; score the incumbent
+        // FIRST so it cannot be displaced unscored (the bddap/rl#233 failure). Until the
+        // incumbent scores cleanly, no candidate is considered.
+        if self.best.is_none()
+            && self.checkpoint_dir.join(BEST_SUBDIR).join(BRAIN_FILENAME).exists()
+            && !self.score_incumbent()
+        {
+            return;
         }
 
-        if self.ema_updates < MIN_EMA_UPDATES {
+        let report = match (self.evaluate)(&self.checkpoint_dir) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("[best] chase-eval of candidate failed: {e} — keeping previous best");
+                return;
+            }
+        };
+        if !report.policy_loaded {
+            warn!("[best] chase-eval loaded no policy from the live checkpoint — not eligible");
             return;
         }
-        let Some(smoothed) = self.smoothed_reach else {
-            return;
-        };
-        let Some(candidate) = Reach::new(smoothed) else {
-            warn!("[best] non-finite reach ({smoothed}) — not eligible for snapshot");
+        let Some(candidate) = Progress::new(report.progress_m) else {
+            warn!(
+                "[best] non-finite chase progress ({}) — not eligible for snapshot",
+                report.progress_m
+            );
             return;
         };
 
         let beats = match self.best {
             Some(best) => candidate.beats(best),
-            None => candidate.is_solid(),
+            None => true,
         };
+        let bar = self
+            .best
+            .map(|p| format!("{:.3} m", p.get()))
+            .unwrap_or_else(|| "none".to_string());
         if !beats {
+            info!(
+                "[best] chase-eval: progress {:.3} m (reached={}) vs bar {bar} — keeping incumbent",
+                candidate.get(),
+                report.reached
+            );
             return;
         }
 
         match self.snapshot(candidate) {
             Ok(()) => {
                 info!(
-                    "[best] new best snapshot → {}/{BEST_SUBDIR} | reach {:.3} (was {})",
+                    "[best] new best snapshot → {}/{BEST_SUBDIR} | chase progress {:.3} m \
+                     (reached={}) beats {bar}",
                     self.checkpoint_dir.display(),
                     candidate.get(),
-                    self.best
-                        .map(|r| format!("reach {:.3}", r.get()))
-                        .unwrap_or_else(|| "none".to_string()),
+                    report.reached
                 );
                 self.best = Some(candidate);
             }
@@ -149,7 +210,40 @@ impl BestKeeper {
         }
     }
 
-    fn snapshot(&self, reach: Reach) -> std::io::Result<()> {
+    /// Establish the progress bar for a pre-existing `best/` by chase-evaling it in
+    /// place. Returns whether the bar now exists; on any failure the incumbent stays
+    /// protected (no candidate is scored this round, retried next period).
+    fn score_incumbent(&mut self) -> bool {
+        let best_dir = self.checkpoint_dir.join(BEST_SUBDIR);
+        let report = match (self.evaluate)(&best_dir) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("[best] chase-eval of incumbent best/ failed: {e} — protecting it unscored");
+                return false;
+            }
+        };
+        let scored = Progress::new(report.progress_m).filter(|_| report.policy_loaded);
+        let Some(progress) = scored else {
+            warn!(
+                "[best] incumbent best/ produced no usable score (policy_loaded={}, progress={}) \
+                 — protecting it unscored",
+                report.policy_loaded, report.progress_m
+            );
+            return false;
+        };
+        if let Err(e) = write_progress_sidecar(&best_dir, progress) {
+            warn!("[best] failed to stamp incumbent progress sidecar: {e}");
+        }
+        info!(
+            "[best] incumbent best/ scored: chase progress {:.3} m (reached={}) — bar established",
+            progress.get(),
+            report.reached
+        );
+        self.best = Some(progress);
+        true
+    }
+
+    fn snapshot(&self, progress: Progress) -> std::io::Result<()> {
         for f in BEST_FILES.iter().filter(|f| f.required) {
             let src = self.checkpoint_dir.join(f.name);
             if !src.exists() {
@@ -177,39 +271,75 @@ impl BestKeeper {
             std::fs::copy(&src, &tmp)?;
             super::fsync_rename(&tmp, &dst)?;
         }
-        let sidecar = best_dir.join(REACH_SIDECAR);
-        super::atomic_write(&sidecar, format!("{}\n", reach.get()).as_bytes())?;
-        Ok(())
+        write_progress_sidecar(&best_dir, progress)
     }
+}
+
+fn write_progress_sidecar(best_dir: &Path, progress: Progress) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(best_dir.join(LEGACY_REACH_SIDECAR));
+    super::atomic_write(
+        &best_dir.join(PROGRESS_SIDECAR),
+        format!("{}\n", progress.get()).as_bytes(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
 
-    fn reach(v: f32) -> Reach {
-        Reach::new(v).expect("test reach in range")
+    fn progress(v: f32) -> Progress {
+        Progress::new(v).expect("test progress in range")
+    }
+
+    fn report(progress_m: f32, policy_loaded: bool) -> EvalReport {
+        EvalReport {
+            progress_m,
+            total_torque: 0.0,
+            mean_torque_per_tick: 0.0,
+            initial_distance_m: DEFAULT_TARGET_DISTANCE_M,
+            closest_distance_m: DEFAULT_TARGET_DISTANCE_M - progress_m,
+            final_distance_m: DEFAULT_TARGET_DISTANCE_M - progress_m,
+            target_distance_m: DEFAULT_TARGET_DISTANCE_M,
+            reached: false,
+            active_ticks: MAX_EPISODE_TICKS as u64,
+            policy_loaded,
+        }
+    }
+
+    /// Keeper whose evaluator returns the current value of `score` — `Err` for a
+    /// negative sentinel — and counts calls, tagged by whether it scored `best/`.
+    fn scripted_keeper(
+        dir: &Path,
+        score: Rc<RefCell<Result<EvalReport, String>>>,
+        calls: Rc<RefCell<Vec<bool>>>,
+    ) -> BestKeeper {
+        BestKeeper::with_evaluator(
+            dir,
+            Duration::ZERO,
+            Box::new(move |d| {
+                calls.borrow_mut().push(d.ends_with(BEST_SUBDIR));
+                score.borrow().clone()
+            }),
+        )
     }
 
     #[test]
-    fn reach_rejects_non_finite_and_out_of_range() {
-        assert!(Reach::new(f32::NAN).is_none());
-        assert!(Reach::new(f32::INFINITY).is_none());
-        assert!(Reach::new(-0.1).is_none());
-        assert!(Reach::new(1.1).is_none());
-        assert!(Reach::new(0.6).is_some());
+    fn progress_rejects_non_finite_and_negative() {
+        assert!(Progress::new(f32::NAN).is_none());
+        assert!(Progress::new(f32::INFINITY).is_none());
+        assert!(Progress::new(-0.1).is_none());
+        assert!(Progress::new(0.0).is_some());
+        assert!(Progress::new(8.93).is_some());
     }
 
     #[test]
-    fn higher_reach_needs_margin() {
-        assert!(reach(0.90).beats(reach(0.80)));
-        assert!(!reach(0.805).beats(reach(0.80)));
-    }
-
-    #[test]
-    fn collapse_never_promotes() {
-        assert!(!reach(0.3).beats(reach(0.0)));
-        assert!(!reach(0.59).beats(reach(0.10)));
+    fn higher_progress_needs_margin() {
+        assert!(progress(8.93).beats(progress(6.92)));
+        assert!(!progress(6.93).beats(progress(6.92)));
+        assert!(!progress(6.92).beats(progress(8.93)));
     }
 
     fn scratch_ckpt(tag: &str) -> PathBuf {
@@ -228,91 +358,198 @@ mod tests {
     }
 
     #[test]
-    fn warmup_then_snapshot_then_immune_to_collapse() {
+    fn seeds_then_rejects_regression_then_ratchets() {
         let dir = scratch_ckpt("lifecycle");
-        let mut k = BestKeeper::new(&dir);
+        let score = Rc::new(RefCell::new(Ok(report(5.0, true))));
+        let mut k = scripted_keeper(&dir, score.clone(), Rc::default());
         let best_brain = dir.join(BEST_SUBDIR).join("brain.bin");
 
-        for _ in 0..MIN_EMA_UPDATES - 1 {
-            k.observe(Some(0.7));
-        }
-        assert!(!best_brain.exists(), "no snapshot during warmup");
+        k.maybe_snapshot();
+        assert_eq!(std::fs::read(&best_brain).unwrap(), b"brain-v1", "first score seeds");
+        let bar = Progress::load(&dir.join(BEST_SUBDIR).join(PROGRESS_SIDECAR)).unwrap();
+        assert!((bar.get() - 5.0).abs() < 1e-6);
 
-        k.observe(Some(0.7));
-        assert_eq!(std::fs::read(&best_brain).unwrap(), b"brain-v1");
-        let r = Reach::load(&dir.join(BEST_SUBDIR).join(REACH_SIDECAR)).unwrap();
-        assert!((r.get() - 0.7).abs() < 1e-6);
-
-        std::fs::write(dir.join("brain.bin"), b"brain-collapsed").unwrap();
-        for _ in 0..200 {
-            k.observe(Some(0.0));
-        }
+        std::fs::write(dir.join("brain.bin"), b"brain-worse").unwrap();
+        *score.borrow_mut() = Ok(report(4.0, true));
+        k.maybe_snapshot();
         assert_eq!(
             std::fs::read(&best_brain).unwrap(),
             b"brain-v1",
-            "collapse must not overwrite the best snapshot"
+            "a lower chase-eval must not displace the best"
         );
 
         std::fs::write(dir.join("brain.bin"), b"brain-v2").unwrap();
-        for _ in 0..200 {
-            k.observe(Some(1.0));
-        }
+        *score.borrow_mut() = Ok(report(6.0, true));
+        k.maybe_snapshot();
         assert_eq!(std::fs::read(&best_brain).unwrap(), b"brain-v2");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn resumes_best_across_restart() {
-        let dir = scratch_ckpt("resume");
-        let mut k1 = BestKeeper::new(&dir);
-        for _ in 0..MIN_EMA_UPDATES {
-            k1.observe(Some(1.0));
-        }
-        assert!(dir.join(BEST_SUBDIR).join(REACH_SIDECAR).exists());
+    fn collapse_and_errors_never_promote() {
+        let dir = scratch_ckpt("collapse");
+        let score = Rc::new(RefCell::new(Ok(report(5.0, true))));
+        let mut k = scripted_keeper(&dir, score.clone(), Rc::default());
+        k.maybe_snapshot();
 
         std::fs::write(dir.join("brain.bin"), b"brain-collapsed").unwrap();
-        let mut k2 = BestKeeper::new(&dir);
-        for _ in 0..MIN_EMA_UPDATES {
-            k2.observe(Some(0.5));
+        let best_brain = dir.join(BEST_SUBDIR).join("brain.bin");
+        for bad in [
+            Ok(report(0.0, true)),
+            Ok(report(f32::NAN, true)),
+            Ok(report(9.0, false)),
+            Err("eval exploded".to_string()),
+        ] {
+            *score.borrow_mut() = bad;
+            k.maybe_snapshot();
+            assert_eq!(
+                std::fs::read(&best_brain).unwrap(),
+                b"brain-v1",
+                "collapse/NaN/rest-baseline/error must not overwrite the best snapshot"
+            );
         }
-        assert_eq!(
-            std::fs::read(dir.join(BEST_SUBDIR).join("brain.bin")).unwrap(),
-            b"brain-v1",
-            "resumed bar must reject a post-restart sub-floor policy"
-        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn nan_reach_never_snapshots() {
-        let dir = scratch_ckpt("nan");
-        let mut k = BestKeeper::new(&dir);
-        for _ in 0..MIN_EMA_UPDATES + 5 {
-            k.observe(Some(f32::NAN));
-        }
+    fn no_policy_never_seeds() {
+        let dir = scratch_ckpt("no-policy");
+        let score = Rc::new(RefCell::new(Ok(report(9.0, false))));
+        let mut k = scripted_keeper(&dir, score, Rc::default());
+        k.maybe_snapshot();
         assert!(
             !dir.join(BEST_SUBDIR).join("brain.bin").exists(),
-            "a NaN reach must never produce a best snapshot"
+            "a zero-action rest baseline must never become best"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bddap/rl#233 scenario: a reach-era `best/` (8.93 m brain, reach.txt sidecar,
+    /// no progress bar) must be scored in place before a weaker candidate (6.92 m) can
+    /// be considered — and must survive it.
+    #[test]
+    fn legacy_best_is_scored_before_any_candidate_displaces_it() {
+        let dir = scratch_ckpt("migration");
+        let best_dir = dir.join(BEST_SUBDIR);
+        std::fs::create_dir_all(&best_dir).unwrap();
+        for (name, body) in [
+            ("brain.bin", b"brain-893" as &[u8]),
+            ("normalizer.bin", b"norm"),
+            ("return_normalizer.bin", b"rnorm"),
+            ("reach.txt", b"0.729"),
+        ] {
+            std::fs::write(best_dir.join(name), body).unwrap();
+        }
+
+        let score = Rc::new(RefCell::new(Ok(report(8.93, true))));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut k = scripted_keeper(&dir, score.clone(), calls.clone());
+        assert!(k.best.is_none(), "legacy sidecar carries no progress bar");
+
+        // Incumbent scores 8.93; the candidate (same scripted score here) then fails
+        // the margin — incumbent kept, bar stamped, legacy sidecar gone.
+        k.maybe_snapshot();
+        assert_eq!(*calls.borrow(), vec![true, false], "incumbent scored FIRST");
+        assert_eq!(std::fs::read(best_dir.join("brain.bin")).unwrap(), b"brain-893");
+        let bar = Progress::load(&best_dir.join(PROGRESS_SIDECAR)).unwrap();
+        assert!((bar.get() - 8.93).abs() < 1e-6);
+        assert!(!best_dir.join("reach.txt").exists(), "legacy sidecar replaced");
+
+        *score.borrow_mut() = Ok(report(6.92, true));
+        k.maybe_snapshot();
+        assert_eq!(
+            std::fs::read(best_dir.join("brain.bin")).unwrap(),
+            b"brain-893",
+            "the 6.92 m candidate must not displace the 8.93 m incumbent"
+        );
+
+        *score.borrow_mut() = Ok(report(9.5, true));
+        k.maybe_snapshot();
+        assert_eq!(std::fs::read(best_dir.join("brain.bin")).unwrap(), b"brain-v1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An incumbent that fails to score is protected: nothing is evaluated as a
+    /// candidate and nothing overwrites `best/` until the incumbent scores cleanly.
+    #[test]
+    fn unscorable_incumbent_blocks_candidates() {
+        let dir = scratch_ckpt("unscorable");
+        let best_dir = dir.join(BEST_SUBDIR);
+        std::fs::create_dir_all(&best_dir).unwrap();
+        std::fs::write(best_dir.join("brain.bin"), b"brain-incumbent").unwrap();
+
+        let score = Rc::new(RefCell::new(Err("refused".to_string())));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut k = scripted_keeper(&dir, score, calls.clone());
+        k.maybe_snapshot();
+        assert_eq!(*calls.borrow(), vec![true], "only the incumbent was evaluated");
+        assert_eq!(
+            std::fs::read(best_dir.join("brain.bin")).unwrap(),
+            b"brain-incumbent",
+            "an unscored incumbent must never be displaced"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resumes_bar_across_restart() {
+        let dir = scratch_ckpt("resume");
+        let score = Rc::new(RefCell::new(Ok(report(7.0, true))));
+        let mut k1 = scripted_keeper(&dir, score.clone(), Rc::default());
+        k1.maybe_snapshot();
+
+        std::fs::write(dir.join("brain.bin"), b"brain-collapsed").unwrap();
+        *score.borrow_mut() = Ok(report(3.0, true));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut k2 = scripted_keeper(&dir, score, calls.clone());
+        k2.maybe_snapshot();
+        assert_eq!(
+            *calls.borrow(),
+            vec![false],
+            "a stamped bar resumes without re-scoring the incumbent"
+        );
+        assert_eq!(
+            std::fs::read(dir.join(BEST_SUBDIR).join("brain.bin")).unwrap(),
+            b"brain-v1",
+            "resumed bar must reject a post-restart regression"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn period_gates_eval_spend() {
+        let dir = scratch_ckpt("period");
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut k = BestKeeper::with_evaluator(&dir, Duration::from_secs(3600), {
+            let calls = calls.clone();
+            Box::new(move |_| {
+                calls.borrow_mut().push(false);
+                Ok(report(5.0, true))
+            })
+        });
+        for _ in 0..100 {
+            k.maybe_snapshot();
+        }
+        assert!(calls.borrow().is_empty(), "no eval inside the period window");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn missing_required_file_fails_loud_and_keeps_previous() {
         let dir = scratch_ckpt("missing-required");
-        let mut k = BestKeeper::new(&dir);
-        for _ in 0..MIN_EMA_UPDATES {
-            k.observe(Some(0.7));
-        }
+        let score = Rc::new(RefCell::new(Ok(report(5.0, true))));
+        let mut k = scripted_keeper(&dir, score.clone(), Rc::default());
+        k.maybe_snapshot();
         let best_brain = dir.join(BEST_SUBDIR).join("brain.bin");
         assert_eq!(std::fs::read(&best_brain).unwrap(), b"brain-v1", "seeded");
 
         std::fs::remove_file(dir.join("normalizer.bin")).unwrap();
         std::fs::write(dir.join("brain.bin"), b"brain-v2").unwrap();
         assert!(
-            k.snapshot(reach(1.0)).is_err(),
+            k.snapshot(progress(9.0)).is_err(),
             "a missing required source must fail the snapshot"
         );
         assert_eq!(
@@ -323,7 +560,7 @@ mod tests {
 
         std::fs::write(dir.join("normalizer.bin"), b"norm").unwrap();
         assert!(
-            k.snapshot(reach(1.0)).is_ok(),
+            k.snapshot(progress(9.0)).is_ok(),
             "an absent optional optimizer must not block a snapshot"
         );
         assert_eq!(std::fs::read(&best_brain).unwrap(), b"brain-v2");

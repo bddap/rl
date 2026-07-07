@@ -10,7 +10,6 @@ pub(crate) const TARGET_Y_MAX: f32 = 0.7;
 pub(crate) const TARGET_ARENA_HALF: f32 = crate::physics::world::ARENA_HALF_SIZE - 1.0;
 
 pub(crate) const REACH_RADIUS: f32 = 0.8;
-pub(crate) const SOLID_REACH_FRACTION: f32 = 0.6;
 
 const NEAR_BIAS_EXP: f32 = 2.0;
 

@@ -242,11 +242,12 @@ fn log_iteration(r: &IterReport) {
 /// than a learner with no update path. (crab-world builds without `wgpu` for the render
 /// bins, which only do CPU inference and never call this.)
 ///
-/// `_body_gate` does nothing at runtime — it is the PROOF the bddap/rl#214 body
-/// preflight ran ([`crate::mesh_fallback::require_canonical_body`]), required here so a
-/// new entry point can't build training worlds while silently on the fallback body.
+/// `body_gate` is the PROOF the bddap/rl#214 body preflight ran
+/// ([`crate::mesh_fallback::require_canonical_body`]), required here so a new entry
+/// point can't build training worlds while silently on the fallback body; the
+/// best-keeper carries it into its periodic chase-evals.
 pub fn run_learner(
-    _body_gate: crate::mesh_fallback::BodyGate,
+    body_gate: crate::mesh_fallback::BodyGate,
     config: &TrainConfig,
     requested_arch: Option<ArchId>,
     k: usize,
@@ -331,11 +332,12 @@ pub fn run_learner(
     );
 
 
-    // Best-by-reach keeping (rl#157): mirror the checkpoint set into `<ckpt>/best/`
-    // whenever the policy demonstrates a new high-water reach, so a collapse stays confined to
-    // `<ckpt>/` (the trainer resumes from it) while the demo/release — which mirror
-    // `best/` — hold the high-water-mark gait. Resumes the running best from the sidecar.
-    let mut best_keeper = crate::training::best::BestKeeper::new(&checkpoint_dir);
+    // Best-by-chase-eval keeping (rl#157, rekeyed by rl#233): periodically chase-eval
+    // the checkpoint and mirror it into `<ckpt>/best/` when it beats the incumbent's
+    // progress, so a collapse stays confined to `<ckpt>/` (the trainer resumes from it)
+    // while the demo/release — which mirror `best/` — hold the best-by-THE-metric gait.
+    // Resumes the running bar from the sidecar.
+    let mut best_keeper = crate::training::best::BestKeeper::new(&checkpoint_dir, body_gate);
 
     let compute_threads = bevy::tasks::ComputeTaskPool::get().thread_num();
     eprintln!(
@@ -448,14 +450,11 @@ pub fn run_learner(
             nonfinite_obs: merged.nonfinite_obs,
         });
 
-        // Consider this iter's policy for `<ckpt>/best/`. The reach signal is over THIS
-        // iter's finished episodes (None when none finished — the EMA holds). `<ckpt>/` on
-        // disk still holds this iter's policy (persisted at the top, not rewritten until the
-        // next iter), so a snapshot now captures the policy that earned the reach. See
-        // `BestKeeper::observe`.
-        let (reached, finished) = merged.reach;
-        let reach_fraction = (finished > 0).then(|| reached as f32 / finished as f32);
-        best_keeper.observe(reach_fraction);
+        // Consider this iter's policy for `<ckpt>/best/`. `<ckpt>/` on disk still holds
+        // this iter's policy (persisted at the top, not rewritten until the next iter),
+        // so the keeper's chase-eval scores exactly the policy a snapshot would capture.
+        // See `BestKeeper::maybe_snapshot`.
+        best_keeper.maybe_snapshot();
 
         iter += 1;
 
