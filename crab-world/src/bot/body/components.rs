@@ -1,4 +1,3 @@
-
 use bevy::prelude::*;
 
 use super::joint_id::CrabJointId;

@@ -331,7 +331,6 @@ pub fn run_learner(
         anneal_epoch,
     );
 
-
     // Best-by-chase-eval keeping (rl#157, rekeyed by rl#233): periodically chase-eval
     // the checkpoint and mirror it into `<ckpt>/best/` when it beats the incumbent's
     // progress, so a collapse stays confined to `<ckpt>/` (the trainer resumes from it)

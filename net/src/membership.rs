@@ -1,4 +1,3 @@
-
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -428,7 +427,6 @@ mod tests {
         );
     }
 
-
     fn bt_ad(members: Vec<EndpointId>, asset_digest: u64) -> Beat {
         Beat {
             members,
@@ -486,7 +484,10 @@ mod tests {
         let mut d = Membership::new(host, 2, t0).with_crab_count(2);
         d.on_beat(client, &beat_c(vec![host, client], 1), t0);
         d.poll(t0);
-        assert!(d.sync_verdict().crabs, "the host self-passes on its own count");
+        assert!(
+            d.sync_verdict().crabs,
+            "the host self-passes on its own count"
+        );
 
         let mut ids3 = [eid(1), eid(2), eid(3)];
         ids3.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));

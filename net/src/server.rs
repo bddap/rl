@@ -1,4 +1,3 @@
-
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::lockstep::TickMsg;
@@ -133,7 +132,10 @@ impl std::fmt::Display for Refusal {
         match self {
             Refusal::Admission(r) => r.fmt(f),
             Refusal::Departed => {
-                write!(f, "you were dropped from the match (connection lost) — rejoin")
+                write!(
+                    f,
+                    "you were dropped from the match (connection lost) — rejoin"
+                )
             }
         }
     }
@@ -695,14 +697,16 @@ mod tests {
 
     #[test]
     fn boarding_is_alive_gated_at_the_intent_insert() {
-        use crab_world::vehicle::VehicleKind;
         use crate::sim::{Player, PlayerStatus};
+        use crab_world::vehicle::VehicleKind;
         let p1 = PlayerId(1);
         let mut sim = Sim::new(42, &ids(2));
         let mut snap = sim.core_snapshot();
         let p = snap.players[&p1];
-        snap.players
-            .insert(p1, Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed));
+        snap.players.insert(
+            p1,
+            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed),
+        );
         sim.apply_core_snapshot(snap);
         let mut s = Server::new(PlayerId(0), &ids(2), sim);
 
@@ -719,11 +723,16 @@ mod tests {
         );
 
         s.file_intent(p1, Some(intent(VehicleKind::Plane)));
-        assert!(!s.pilot_intents().contains_key(&p1), "file_intent applies the same gate");
+        assert!(
+            !s.pilot_intents().contains_key(&p1),
+            "file_intent applies the same gate"
+        );
         let mut snap = s.sim().core_snapshot();
         let p = snap.players[&p1];
-        snap.players
-            .insert(p1, Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Alive));
+        snap.players.insert(
+            p1,
+            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Alive),
+        );
         s.sim.apply_core_snapshot(snap);
         s.record_remote(
             p1,
@@ -735,8 +744,10 @@ mod tests {
         assert!(s.pilot_intents().contains_key(&p1), "alive ⇒ boards");
         let mut snap = s.sim().core_snapshot();
         let p = snap.players[&p1];
-        snap.players
-            .insert(p1, Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed));
+        snap.players.insert(
+            p1,
+            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed),
+        );
         s.sim.apply_core_snapshot(snap);
         s.record_remote(
             p1,
@@ -773,7 +784,12 @@ mod tests {
             pilot: Some(intent(VehicleKind::Ship)),
             ..tickmsg(0, -1.0)
         });
-        let assembled = s.pending.as_ref().expect("advance assembled").inputs.clone();
+        let assembled = s
+            .pending
+            .as_ref()
+            .expect("advance assembled")
+            .inputs
+            .clone();
         assert_eq!(
             assembled[&p1],
             Input::default(),
@@ -789,7 +805,12 @@ mod tests {
         // The remote goes silent while still piloting: the starved HOLD would replay its
         // last (walk) input — the intent persists through starvation, so it stays neutral.
         s.advance(tickmsg(1, 0.0));
-        let assembled = s.pending.as_ref().expect("advance assembled").inputs.clone();
+        let assembled = s
+            .pending
+            .as_ref()
+            .expect("advance assembled")
+            .inputs
+            .clone();
         assert_eq!(
             assembled[&p1],
             Input::default(),
@@ -800,8 +821,17 @@ mod tests {
         // Off the craft, the very next walk input applies again.
         s.record_remote(p1, tickmsg(1, 1.0));
         s.advance(tickmsg(2, 0.5));
-        let assembled = s.pending.as_ref().expect("advance assembled").inputs.clone();
-        assert_eq!(assembled[&p1], input(1.0), "on foot again ⇒ input passes through");
+        let assembled = s
+            .pending
+            .as_ref()
+            .expect("advance assembled")
+            .inputs
+            .clone();
+        assert_eq!(
+            assembled[&p1],
+            input(1.0),
+            "on foot again ⇒ input passes through"
+        );
         assert_eq!(assembled[&PlayerId(0)], input(0.5));
     }
 
@@ -1290,9 +1320,7 @@ mod tests {
                 let msg = client.submit_local_input(input_at(i), None);
                 server.advance(msg);
                 while server.next_tick_ready() {
-                    let bytes = server
-                        .step_next(&[pose_at(server.sim().tick())])
-                        .snapshot;
+                    let bytes = server.step_next(&[pose_at(server.sim().tick())]).snapshot;
                     let snap =
                         CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
                     client.apply_core_snapshot(snap);

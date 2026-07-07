@@ -1,4 +1,3 @@
-
 use super::driver::{CockpitPose, GameState, LocalVehicle};
 use super::input::{CameraPitch, CameraYaw};
 use super::*;
@@ -6,7 +5,6 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::Affine2;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-
 
 #[derive(Component)]
 pub(super) struct PlayerAvatar(PlayerId);
@@ -16,7 +14,6 @@ pub(super) struct CrabAvatar(pub(super) usize);
 
 #[derive(Component)]
 pub(super) struct FpCamera;
-
 
 /// Visual ground quad edge length (render m). The quad is re-centered on the camera
 /// every frame ([`follow_ground`]), so all that matters is that its edge sits past the
@@ -423,7 +420,10 @@ type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
 type CarapaceXf<'w, 's> = Query<
     'w,
     's,
-    (&'static Transform, &'static crab_world::bot::body::CrabEnvId),
+    (
+        &'static Transform,
+        &'static crab_world::bot::body::CrabEnvId,
+    ),
     (
         With<crab_world::bot::body::CrabCarapace>,
         Without<CrabAvatar>,

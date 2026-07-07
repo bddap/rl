@@ -1,4 +1,3 @@
-
 use bevy::prelude::Vec3;
 
 use crate::bot::CrabSpawns;

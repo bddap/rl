@@ -1,4 +1,3 @@
-
 use crate::sim::TICK_HZ;
 use crab_world::physics::PHYSICS_HZ;
 

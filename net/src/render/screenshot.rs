@@ -1,4 +1,3 @@
-
 use super::app::{install_armed_nn_crab, seed_round_crabs};
 use super::driver::{
     FlightInput, PendingInput, ScriptedPackInput, coordinator, drive_lockstep, insert_core,
@@ -105,7 +104,6 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
         );
     super::render_mode::register(app, render_mode);
 }
-
 
 /// A scripted local pilot for the offscreen apps: press the E-cycle at the given frames and
 /// hold a constant forward drive while piloting. This drives the REAL input seams — the same

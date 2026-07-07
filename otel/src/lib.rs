@@ -1,4 +1,3 @@
-
 use std::env;
 
 use opentelemetry::KeyValue;

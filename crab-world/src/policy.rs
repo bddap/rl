@@ -1,4 +1,3 @@
-
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -31,7 +30,9 @@ pub struct Policy {
 
 #[allow(clippy::large_enum_variant)]
 enum PolicyState {
-    Rest { refused: Option<String> },
+    Rest {
+        refused: Option<String>,
+    },
     Diagnostic {
         brain: AnyBrain<InferBackend>,
         normalizer: ObsNormalizer,
@@ -640,7 +641,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
     }
 
-    fn save_brain_record(dir: &Path, record: crate::bot::arch::mlp512x3::Mlp512x3Record<TrainBackend>) {
+    fn save_brain_record(
+        dir: &Path,
+        record: crate::bot::arch::mlp512x3::Mlp512x3Record<TrainBackend>,
+    ) {
         std::fs::create_dir_all(dir).unwrap();
         let bytes = BinBytesRecorder::<FullPrecisionSettings>::default()
             .record(record, ())

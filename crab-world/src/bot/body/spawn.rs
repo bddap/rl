@@ -1,4 +1,3 @@
-
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
@@ -9,7 +8,6 @@ use super::components::{
 use super::joint_id::CrabJointId;
 use crate::bot::rig;
 
-
 pub const SPAWN_HEIGHT: f32 = 0.05;
 
 const FRICTION_RAMP: f32 = 4.0;
@@ -19,7 +17,6 @@ pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f3
         natural_frequency: 400.0,
         damping_ratio: 2.0,
     };
-
 
 /// A random spawn orientation for respawns (every training reset, and demo resets):
 /// ~80% a mild tilt (≤ ~25°) off upright, ~20% a heavy tilt up to fully inverted —

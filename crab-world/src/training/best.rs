@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -108,7 +107,12 @@ impl BestKeeper {
                 // in-process only because the trainer already ran the identical
                 // thread-pool pin at boot (`init_process_pools`), making run_eval's
                 // own pin a pure read.
-                crate::eval::run_eval(body_gate, dir, DEFAULT_EVAL_TICKS, DEFAULT_TARGET_DISTANCE_M)
+                crate::eval::run_eval(
+                    body_gate,
+                    dir,
+                    DEFAULT_EVAL_TICKS,
+                    DEFAULT_TARGET_DISTANCE_M,
+                )
             }),
         )
     }
@@ -161,7 +165,11 @@ impl BestKeeper {
         // FIRST so it cannot be displaced unscored (the bddap/rl#233 failure). Until the
         // incumbent scores cleanly, no candidate is considered.
         if self.best.is_none()
-            && self.checkpoint_dir.join(BEST_SUBDIR).join(BRAIN_FILENAME).exists()
+            && self
+                .checkpoint_dir
+                .join(BEST_SUBDIR)
+                .join(BRAIN_FILENAME)
+                .exists()
             && !self.score_incumbent()
         {
             return;
@@ -389,7 +397,11 @@ mod tests {
         let best_brain = dir.join(BEST_SUBDIR).join("brain.bin");
 
         k.maybe_snapshot();
-        assert_eq!(std::fs::read(&best_brain).unwrap(), b"brain-v1", "first score seeds");
+        assert_eq!(
+            std::fs::read(&best_brain).unwrap(),
+            b"brain-v1",
+            "first score seeds"
+        );
         let bar = Progress::load(&dir.join(BEST_SUBDIR).join(PROGRESS_SIDECAR)).unwrap();
         assert!((bar.get() - 5.0).abs() < 1e-6);
 
@@ -476,10 +488,16 @@ mod tests {
         // the margin — incumbent kept, bar stamped, legacy sidecar gone.
         k.maybe_snapshot();
         assert_eq!(*calls.borrow(), vec![true, false], "incumbent scored FIRST");
-        assert_eq!(std::fs::read(best_dir.join("brain.bin")).unwrap(), b"brain-893");
+        assert_eq!(
+            std::fs::read(best_dir.join("brain.bin")).unwrap(),
+            b"brain-893"
+        );
         let bar = Progress::load(&best_dir.join(PROGRESS_SIDECAR)).unwrap();
         assert!((bar.get() - 8.93).abs() < 1e-6);
-        assert!(!best_dir.join("reach.txt").exists(), "legacy sidecar replaced");
+        assert!(
+            !best_dir.join("reach.txt").exists(),
+            "legacy sidecar replaced"
+        );
 
         *score.borrow_mut() = Ok(report(6.92, true));
         k.maybe_snapshot();
@@ -514,7 +532,11 @@ mod tests {
         let calls = Rc::new(RefCell::new(Vec::new()));
         let mut k = scripted_keeper(&dir, score, calls.clone());
         k.maybe_snapshot();
-        assert_eq!(*calls.borrow(), vec![true], "only the incumbent was evaluated");
+        assert_eq!(
+            *calls.borrow(),
+            vec![true],
+            "only the incumbent was evaluated"
+        );
         assert_eq!(
             std::fs::read(best_dir.join("brain.bin")).unwrap(),
             b"brain-incumbent",

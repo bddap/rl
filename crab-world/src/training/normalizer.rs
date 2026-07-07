@@ -1,4 +1,3 @@
-
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -7,7 +6,9 @@ use tracing::warn;
 use crate::bot::arch::ArchId;
 use crate::bot::sensor::OBS_SIZE;
 
-use super::envelope::{ArtifactKind, EnvelopeError, SetKey, read_envelope_expecting, write_envelope};
+use super::envelope::{
+    ArtifactKind, EnvelopeError, SetKey, read_envelope_expecting, write_envelope,
+};
 
 #[derive(Clone)]
 struct Welford {
@@ -153,7 +154,14 @@ impl ObsNormalizer {
     /// on a member failure so a partial save never poses as a complete one.
     pub(crate) fn save(&self, arch: ArchId, path: &Path, save_stamp: u64) -> std::io::Result<()> {
         let bytes = bincode::serialize(&self.snapshot()).map_err(std::io::Error::other)?;
-        write_envelope(path, ArtifactKind::ObsNormalizer, arch, bytes, None, save_stamp)
+        write_envelope(
+            path,
+            ArtifactKind::ObsNormalizer,
+            arch,
+            bytes,
+            None,
+            save_stamp,
+        )
     }
 
     pub(crate) fn snapshot(&self) -> NormalizerSnapshot {

@@ -1,4 +1,3 @@
-
 use anyhow::Result;
 use clap::Parser;
 
@@ -87,7 +86,9 @@ pub(crate) fn run(args: Args) -> Result<()> {
     // pass/fail lives in the one shared chase metric, `rl-train eval --min-progress`
     // (bddap/bothouse#134) — never a second gate here that drifts from it.
     if traj_match {
-        println!("nn-crab-probe: PASS — trajectory reproducible (closed {closed:.3} m, diagnostic only)");
+        println!(
+            "nn-crab-probe: PASS — trajectory reproducible (closed {closed:.3} m, diagnostic only)"
+        );
         Ok(())
     } else {
         anyhow::bail!("nn-crab-probe: FAIL — trajectory not reproducible (closed {closed:.3} m)")

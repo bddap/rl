@@ -1,4 +1,3 @@
-
 use super::app::{ArmedRound, ExternalCrabStackInstalled};
 use super::input::{CameraPitch, CameraYaw};
 use super::*;
@@ -121,7 +120,6 @@ fn end_round_server_down(
         world.write_message(AppExit::error());
     }
 }
-
 
 #[derive(Resource, Clone, Copy)]
 pub(super) struct ScriptedPackInput(pub(super) Input);
@@ -793,7 +791,9 @@ pub(super) fn drive_lockstep(world: &mut World) {
             _ => {}
         }
     }
-    state.logged_statuses.retain(|pid, _| state.ls.sim().player(*pid).is_some());
+    state
+        .logged_statuses
+        .retain(|pid, _| state.ls.sim().player(*pid).is_some());
     let outcome = state.ls.sim().outcome();
     if !state.reported_outcome && outcome != Outcome::Ongoing {
         state.reported_outcome = true;

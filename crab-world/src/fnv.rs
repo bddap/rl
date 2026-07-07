@@ -1,4 +1,3 @@
-
 pub const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 
 pub const PRIME: u64 = 0x0000_0100_0000_01b3;

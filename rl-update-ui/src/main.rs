@@ -1,4 +1,3 @@
-
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -63,7 +62,6 @@ struct PullerArgs {
     key_file: PathBuf,
 }
 
-
 #[derive(Default, PartialEq, Clone, Copy)]
 enum Phase {
     #[default]
@@ -96,7 +94,6 @@ struct Ui(Arc<Mutex<State>>);
 fn lock(m: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
-
 
 fn spawn_puller(args: &PullerArgs, state: Arc<Mutex<State>>) {
     let child = Command::new(&args.rl_update)
@@ -205,7 +202,6 @@ fn apply_event(state: &Arc<Mutex<State>>, v: &serde_json::Value) {
         _ => {}
     }
 }
-
 
 #[derive(Component, Clone, Copy)]
 enum Slot {
@@ -419,7 +415,6 @@ fn handle_dismiss(
     }
 }
 
-
 fn main() {
     let args = Args::parse();
     let state = Arc::new(Mutex::new(State::default()));
@@ -477,7 +472,6 @@ struct PullerCfg(PullerArgs);
 fn start_puller(cfg: Res<PullerCfg>, ui: Res<Ui>) {
     spawn_puller(&cfg.0, ui.0.clone());
 }
-
 
 fn synthetic_state(done: bool) -> State {
     if done {

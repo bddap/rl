@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 
 pub fn asset_root() -> PathBuf {

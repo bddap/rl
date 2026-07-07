@@ -1,4 +1,3 @@
-
 use std::collections::BTreeMap;
 
 use rand::SeedableRng;
@@ -417,7 +416,6 @@ impl Sim {
 
         let armed = self.tick > self.round_start + STARTUP_GRACE_TICKS;
 
-
         if armed {
             for crab in &self.crabs {
                 for p in self.players.values_mut() {
@@ -471,7 +469,8 @@ impl Sim {
     }
 
     pub fn nearest_living_player_pos(&self, crab: usize) -> Option<Pos> {
-        self.nearest_living_player(self.crabs[crab].pos).map(|p| p.pos)
+        self.nearest_living_player(self.crabs[crab].pos)
+            .map(|p| p.pos)
     }
 
     fn nearest_living_player(&self, c: Pos) -> Option<Player> {
@@ -903,7 +902,14 @@ mod tests {
         assert_eq!(sim.crabs()[0].pos(), pos, "must seed the pose");
         assert_eq!(sim.crabs()[0].yaw(), yaw, "must seed the yaw");
         let h_seed = sim.state_hash();
-        sim.set_external_crab_pose(0, Pos { x: pos.x + 1, ..pos }, yaw);
+        sim.set_external_crab_pose(
+            0,
+            Pos {
+                x: pos.x + 1,
+                ..pos
+            },
+            yaw,
+        );
         assert_ne!(
             h_seed,
             sim.state_hash(),
@@ -1016,7 +1022,6 @@ mod tests {
         partial.insert(PlayerId(0), Input::from_axes(0.0, 1.0));
         sim.step(&partial);
     }
-
 
     #[test]
     fn trig_table_hits_cardinal_points() {
@@ -1230,7 +1235,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn crab_holds_and_cannot_grab_during_startup_grace() {
         let mut sim = Sim::new(0, &players(1));
@@ -1239,7 +1243,11 @@ mod tests {
         let neutral = neutral_for(&sim);
         for _ in 0..STARTUP_GRACE_TICKS {
             sim.step(&neutral);
-            assert_eq!(sim.crabs()[0].pos(), crab0, "crab holds its spawn during grace");
+            assert_eq!(
+                sim.crabs()[0].pos(),
+                crab0,
+                "crab holds its spawn during grace"
+            );
             assert_eq!(
                 sim.player(PlayerId(0)).unwrap().status(),
                 PlayerStatus::Alive,
@@ -1416,7 +1424,10 @@ mod tests {
                 .min()
                 .unwrap();
             let min = MIN_CRAB_SPAWN_DISTANCE as i128;
-            assert!(nearest >= min * min, "crab {i} spawns clear of every player");
+            assert!(
+                nearest >= min * min,
+                "crab {i} spawns clear of every player"
+            );
         }
 
         assert_ne!(sim.state_hash(), Sim::new(0, &players(2)).state_hash());
@@ -1456,7 +1467,11 @@ mod tests {
         let mut restart = neutral_for(&sim);
         restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
         assert!(sim.step(&restart));
-        assert_eq!(sim.crabs().len(), 2, "restart rebuilds the configured count");
+        assert_eq!(
+            sim.crabs().len(),
+            2,
+            "restart rebuilds the configured count"
+        );
     }
 
     #[test]

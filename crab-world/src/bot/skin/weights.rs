@@ -1,4 +1,3 @@
-
 use bevy::mesh::VertexAttributeValues;
 use bevy::mesh::skinning::SkinnedMesh;
 use bevy::platform::collections::HashSet;

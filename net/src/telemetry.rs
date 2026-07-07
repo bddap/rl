@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,7 +36,10 @@ pub const DEFAULT_KEY_PATH: &str = "~/.config/rl-telemetry/collector.key";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TelemetryEvent {
-    RosterForming { live: usize, expect: usize },
+    RosterForming {
+        live: usize,
+        expect: usize,
+    },
     RosterAgreed {
         members: Vec<String>,
         roster_hash: u64,
@@ -45,11 +47,16 @@ pub enum TelemetryEvent {
     },
     /// A roster change that DIDN'T happen: formation failed (timed out without
     /// agreement — the round never started) or a mid-game join was refused.
-    RosterFailed { reason: String },
+    RosterFailed {
+        reason: String,
+    },
     /// A rostered player DEPARTED mid-match — their link closed (clean exit, dead
     /// connection, or wedged-peer eviction) and the match continues without them
     /// (rl#198). `endpoint` is the short endpoint id.
-    Departed { player: u8, endpoint: String },
+    Departed {
+        player: u8,
+        endpoint: String,
+    },
     /// A mid-game joiner was ADMITTED as `player`; the roster change lands at
     /// `effective_tick`. A refused joiner reports as
     /// [`RosterFailed`](TelemetryEvent::RosterFailed) instead.
@@ -76,7 +83,9 @@ pub enum TelemetryEvent {
         tick: u64,
         state_hash: u64,
     },
-    Fault { msg: String },
+    Fault {
+        msg: String,
+    },
 }
 
 impl TelemetryEvent {
@@ -333,7 +342,6 @@ async fn dial_collector(endpoint: &Endpoint, collector: EndpointId) -> Result<Co
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no dial attempts")))
 }
 
-
 pub async fn run_collector(key_path: &Path) -> Result<()> {
     let secret = load_or_create_key(key_path)?;
     let endpoint = Endpoint::builder(presets::Minimal)
@@ -421,7 +429,6 @@ fn clock(wall_ms: u64) -> String {
 fn hex8(id: &[u8; 32]) -> String {
     id[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
-
 
 fn attach_lan_mdns(endpoint: &Endpoint) -> Result<()> {
     let mdns = MdnsAddressLookup::builder()

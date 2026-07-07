@@ -1,4 +1,3 @@
-
 use super::scene::CrabAvatar;
 use super::*;
 use crate::controls::{self, Action};

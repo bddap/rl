@@ -1,6 +1,4 @@
-
 use bevy::prelude::*;
-
 
 const COXA_TORQUE_CEILING: f32 = 6.0;
 const FEMUR_TORQUE_CEILING: f32 = 4.0;

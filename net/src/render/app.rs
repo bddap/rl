@@ -1,4 +1,3 @@
-
 use super::driver::{
     PendingRound, drive_lockstep, ensure_round_installed, insert_core, park_fixed_auto_pump,
     teardown_round,
@@ -238,7 +237,6 @@ pub(super) fn add_external_nn_crab(
         });
 
     park_fixed_auto_pump(app.world_mut());
-
 }
 
 pub(super) fn install_armed_nn_crab(

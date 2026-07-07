@@ -1,4 +1,3 @@
-
 use std::cell::RefCell;
 use std::path::PathBuf;
 
@@ -381,7 +380,9 @@ impl TrainingState {
         let arch = self.brain.train().arch();
         let save_stamp: u64 = rand::random();
         if let Err(e) = save_brain(self.brain.train(), &paths.brain_file(), save_stamp) {
-            warn!("Failed to save brain: {e} — skipping the rest of the checkpoint set so the previous save stays coherent");
+            warn!(
+                "Failed to save brain: {e} — skipping the rest of the checkpoint set so the previous save stays coherent"
+            );
             return None;
         }
         info!("Saved brain to {}", paths.brain_file().display());
@@ -389,7 +390,9 @@ impl TrainingState {
             .obs_normalizer
             .save(arch, &paths.normalizer_path(), save_stamp)
         {
-            warn!("Failed to save obs normalizer: {e} — checkpoint set incomplete (the stamp makes this refuse at load)");
+            warn!(
+                "Failed to save obs normalizer: {e} — checkpoint set incomplete (the stamp makes this refuse at load)"
+            );
             return None;
         }
         if let Err(e) = save_return_normalizer(
@@ -398,12 +401,13 @@ impl TrainingState {
             &paths.return_normalizer_path(),
             save_stamp,
         ) {
-            warn!("Failed to save return normalizer: {e} — checkpoint set incomplete (the stamp makes this refuse at load)");
+            warn!(
+                "Failed to save return normalizer: {e} — checkpoint set incomplete (the stamp makes this refuse at load)"
+            );
             return None;
         }
         Some(save_stamp)
     }
-
 
     #[must_use = "a failed horizon open must be refused, not rolled on a stale/mis-normalized policy"]
     pub(crate) fn begin_horizon(&mut self, req: HorizonRequest) -> bool {

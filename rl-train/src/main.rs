@@ -1,5 +1,3 @@
-
-
 use bevy::prelude::*;
 use clap::{Parser, Subcommand};
 use crab_world::{CheckpointArgs, TrainConfig, bot, training};
@@ -151,8 +149,12 @@ fn main() {
             // (the daemon greps that prefix; wrong-body baseline numbers plotted as
             // training progress would be the eval-side rl#214). Absent stays the
             // legitimate zero-action baseline below.
-            let r = match crab_world::eval::run_eval(body_gate, &e.checkpoint.checkpoint_dir, e.ticks, distance)
-            {
+            let r = match crab_world::eval::run_eval(
+                body_gate,
+                &e.checkpoint.checkpoint_dir,
+                e.ticks,
+                distance,
+            ) {
                 Ok(r) => r,
                 Err(refusal) => {
                     eprintln!("eval: {refusal}");
@@ -198,7 +200,10 @@ fn main() {
                     );
                     std::process::exit(1);
                 }
-                println!("eval: PASS — progress {:.4} m ≥ --min-progress {min} m", r.progress_m);
+                println!(
+                    "eval: PASS — progress {:.4} m ≥ --min-progress {min} m",
+                    r.progress_m
+                );
             }
             return;
         }

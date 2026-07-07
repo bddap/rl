@@ -1,4 +1,3 @@
-
 use std::path::Path;
 
 use bevy::prelude::*;
@@ -70,7 +69,10 @@ pub fn run_eval(
     match crate::policy::checkpoint_fits_rig(checkpoint_dir) {
         crate::policy::RigFit::Ok | crate::policy::RigFit::Missing => {}
         crate::policy::RigFit::Refused(why) => {
-            return Err(format!("checkpoint at {} refused: {why}", checkpoint_dir.display()));
+            return Err(format!(
+                "checkpoint at {} refused: {why}",
+                checkpoint_dir.display()
+            ));
         }
         crate::policy::RigFit::Mismatch(dims) => {
             return Err(format!(

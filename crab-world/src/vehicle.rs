@@ -1,9 +1,7 @@
-
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 use crate::bot::body::vehicle_collision;
-
 
 const VEHICLE_HALF: Vec3 = Vec3::new(0.11, 0.035, 0.17);
 
@@ -237,7 +235,12 @@ const VEHICLE_SPAWN_SPACING: f32 = 1.0;
 fn spawn_vehicle(commands: &mut Commands, pilot: PilotId, kind: VehicleKind) {
     let mut transform = kind.spawn_transform();
     transform.translation.x += pilot.0 as f32 * VEHICLE_SPAWN_SPACING;
-    commands.spawn(vehicle_bundle(pilot, kind, transform, kind.spawn_velocity()));
+    commands.spawn(vehicle_bundle(
+        pilot,
+        kind,
+        transform,
+        kind.spawn_velocity(),
+    ));
 }
 
 pub fn spawn_ram_vehicle(
