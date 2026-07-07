@@ -74,10 +74,10 @@ struct EvalArgs {
     #[command(flatten)]
     checkpoint: CheckpointArgs,
 
-    /// Physics ticks to run the policy for (after a short settle drop). Defaults to one
-    /// training episode horizon ([`crab_world::training::systems::MAX_EPISODE_TICKS`],
-    /// ~23 s of crab time at 64 Hz) — enough for a working gait to traverse a far target.
-    #[arg(long, default_value_t = crab_world::training::systems::MAX_EPISODE_TICKS as u64)]
+    /// Physics ticks to run the policy for (after a short settle drop). The default is
+    /// [`crab_world::eval::DEFAULT_EVAL_TICKS`] — the one place the chase-eval episode
+    /// is defined, shared with the trainer's keep-best gate (bddap/rl#233).
+    #[arg(long, default_value_t = crab_world::eval::DEFAULT_EVAL_TICKS)]
     ticks: u64,
 
     #[arg(long)]

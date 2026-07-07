@@ -2,14 +2,13 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::checkpoint::{
     BRAIN_FILENAME, NORMALIZER_FILENAME, OPTIMIZER_FILENAME, RETURN_NORMALIZER_FILENAME,
     TICK_WATERMARK_FILENAME,
 };
-use super::systems::MAX_EPISODE_TICKS;
-use crate::eval::{DEFAULT_TARGET_DISTANCE_M, EvalReport};
+use crate::eval::{DEFAULT_EVAL_TICKS, DEFAULT_TARGET_DISTANCE_M, EvalReport};
 use crate::mesh_fallback::BodyGate;
 
 const BEST_SUBDIR: &str = "best";
@@ -90,7 +89,11 @@ pub(crate) struct BestKeeper {
     checkpoint_dir: PathBuf,
     evaluate: Evaluator,
     eval_period: Duration,
-    last_eval: Instant,
+    /// `None` until the first eval so it fires on the first call: a restart-looping
+    /// trainer must not accumulate unevaluated 10-minute dead zones, and a legacy
+    /// (reach-era) `best/` gets its progress bar established promptly, not after a
+    /// full period of exposure.
+    last_eval: Option<Instant>,
     best: Option<Progress>,
 }
 
@@ -101,13 +104,11 @@ impl BestKeeper {
             EVAL_PERIOD,
             Box::new(move |dir| {
                 // The CLI's own defaults (`rl-train eval`), so the gate judges the
-                // IDENTICAL episode the release gate and rl-eval-monitor judge.
-                crate::eval::run_eval(
-                    body_gate,
-                    dir,
-                    MAX_EPISODE_TICKS as u64,
-                    DEFAULT_TARGET_DISTANCE_M,
-                )
+                // IDENTICAL episode the release gate and rl-eval-monitor judge. Safe
+                // in-process only because the trainer already ran the identical
+                // thread-pool pin at boot (`init_process_pools`), making run_eval's
+                // own pin a pure read.
+                crate::eval::run_eval(body_gate, dir, DEFAULT_EVAL_TICKS, DEFAULT_TARGET_DISTANCE_M)
             }),
         )
     }
@@ -130,9 +131,17 @@ impl BestKeeper {
             checkpoint_dir: checkpoint_dir.to_path_buf(),
             evaluate,
             eval_period,
-            last_eval: Instant::now(),
+            last_eval: None,
             best,
         }
+    }
+
+    /// Run the evaluator with a panic firewall: the eval builds a whole physics world
+    /// in the learner thread, and a panic there must degrade to a skipped stamp — not
+    /// take down the live training run every period.
+    fn eval_dir(&mut self, dir: &Path) -> Result<EvalReport, String> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.evaluate)(dir)))
+            .unwrap_or_else(|_| Err("chase-eval panicked".to_string()))
     }
 
     /// Once per [`EVAL_PERIOD`]: chase-eval the checkpoint on disk and mirror it into
@@ -140,11 +149,13 @@ impl BestKeeper {
     /// (rollout threads idle for the eval's ~6 s), so it costs wall clock only — no
     /// training data or update is touched.
     pub(crate) fn maybe_snapshot(&mut self) {
-        if self.last_eval.elapsed() < self.eval_period {
+        if let Some(last) = self.last_eval
+            && last.elapsed() < self.eval_period
+        {
             return;
         }
         // Reset even when nothing promotes: the period paces eval SPEND, not successes.
-        self.last_eval = Instant::now();
+        self.last_eval = Some(Instant::now());
 
         // A best/ from the reach-keyed era carries no progress bar; score the incumbent
         // FIRST so it cannot be displaced unscored (the bddap/rl#233 failure). Until the
@@ -156,7 +167,7 @@ impl BestKeeper {
             return;
         }
 
-        let report = match (self.evaluate)(&self.checkpoint_dir) {
+        let report = match self.eval_dir(&self.checkpoint_dir.clone()) {
             Ok(r) => r,
             Err(e) => {
                 warn!("[best] chase-eval of candidate failed: {e} — keeping previous best");
@@ -215,24 +226,30 @@ impl BestKeeper {
     /// protected (no candidate is scored this round, retried next period).
     fn score_incumbent(&mut self) -> bool {
         let best_dir = self.checkpoint_dir.join(BEST_SUBDIR);
-        let report = match (self.evaluate)(&best_dir) {
+        // error!, not warn!: a persistently unscorable incumbent (e.g. a rig-mismatched
+        // brain after a rig change) wedges promotion entirely — that must surface on
+        // fleet-error, not scroll by at warn level every period.
+        let report = match self.eval_dir(&best_dir) {
             Ok(r) => r,
             Err(e) => {
-                warn!("[best] chase-eval of incumbent best/ failed: {e} — protecting it unscored");
+                error!("[best] chase-eval of incumbent best/ failed: {e} — protecting it unscored");
                 return false;
             }
         };
         let scored = Progress::new(report.progress_m).filter(|_| report.policy_loaded);
         let Some(progress) = scored else {
-            warn!(
+            error!(
                 "[best] incumbent best/ produced no usable score (policy_loaded={}, progress={}) \
                  — protecting it unscored",
                 report.policy_loaded, report.progress_m
             );
             return false;
         };
+        // The DISK sidecar is the durable bar; if it can't be stamped, stay unscored and
+        // retry next period (the eval is deterministic, so the re-score is free of drift).
         if let Err(e) = write_progress_sidecar(&best_dir, progress) {
-            warn!("[best] failed to stamp incumbent progress sidecar: {e}");
+            error!("[best] failed to stamp incumbent progress sidecar: {e}");
+            return false;
         }
         info!(
             "[best] incumbent best/ scored: chase progress {:.3} m (reached={}) — bar established",
@@ -263,10 +280,14 @@ impl BestKeeper {
         std::fs::create_dir_all(&best_dir)?;
         for f in BEST_FILES {
             let src = self.checkpoint_dir.join(f.name);
+            let dst = best_dir.join(f.name);
             if !src.exists() {
+                // An optional file from an earlier snapshot must not survive into a new
+                // one — best/ is one generation, never a mix (e.g. an old optimizer
+                // paired with a new brain).
+                let _ = std::fs::remove_file(&dst);
                 continue;
             }
-            let dst = best_dir.join(f.name);
             let tmp = best_dir.join(format!("{}.tmp", f.name));
             std::fs::copy(&src, &tmp)?;
             super::fsync_rename(&tmp, &dst)?;
@@ -304,7 +325,7 @@ mod tests {
             final_distance_m: DEFAULT_TARGET_DISTANCE_M - progress_m,
             target_distance_m: DEFAULT_TARGET_DISTANCE_M,
             reached: false,
-            active_ticks: MAX_EPISODE_TICKS as u64,
+            active_ticks: DEFAULT_EVAL_TICKS,
             policy_loaded,
         }
     }
@@ -467,7 +488,12 @@ mod tests {
 
         *score.borrow_mut() = Ok(report(9.5, true));
         k.maybe_snapshot();
-        assert_eq!(std::fs::read(best_dir.join("brain.bin")).unwrap(), b"brain-v1");
+        assert_eq!(
+            std::fs::read(best_dir.join("brain.bin")).unwrap(),
+            b"brain-v1",
+            "a genuinely better candidate (the LIVE ckpt brain) finally displaces the \
+             migrated incumbent"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -533,7 +559,27 @@ mod tests {
         for _ in 0..100 {
             k.maybe_snapshot();
         }
-        assert!(calls.borrow().is_empty(), "no eval inside the period window");
+        assert_eq!(
+            calls.borrow().len(),
+            1,
+            "the first call evals immediately (no boot dead zone); the rest wait out the period"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn evaluator_panic_is_contained() {
+        let dir = scratch_ckpt("panic");
+        let mut k = BestKeeper::with_evaluator(
+            &dir,
+            Duration::ZERO,
+            Box::new(|_| panic!("physics world exploded")),
+        );
+        k.maybe_snapshot();
+        assert!(
+            !dir.join(BEST_SUBDIR).join("brain.bin").exists(),
+            "a panicking eval must skip the stamp, not unwind into the learner"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

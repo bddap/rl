@@ -97,15 +97,18 @@ pub fn pin_single_thread_pools() {
     if std::env::var_os("RAYON_NUM_THREADS").is_none() {
         unsafe { std::env::set_var("RAYON_NUM_THREADS", "1") };
     }
-    if let Ok(prev) = std::env::var("MATMUL_NUM_THREADS")
-        && prev != "1"
-    {
-        eprintln!(
-            "MATMUL_NUM_THREADS={prev} re-enables the shared matmul tree (deadlock risk \
-             under K>1 rollout threads, nondeterministic reduction order); forcing 1"
-        );
+    // Only write when the value is wrong: this runs again for every in-process eval
+    // (the keep-best gate, bddap/rl#233), and `set_var` in a threaded process races any
+    // concurrent `getenv` — an already-correct pin must be a pure read.
+    if std::env::var("MATMUL_NUM_THREADS").as_deref() != Ok("1") {
+        if let Ok(prev) = std::env::var("MATMUL_NUM_THREADS") {
+            eprintln!(
+                "MATMUL_NUM_THREADS={prev} re-enables the shared matmul tree (deadlock risk \
+                 under K>1 rollout threads, nondeterministic reduction order); forcing 1"
+            );
+        }
+        unsafe { std::env::set_var("MATMUL_NUM_THREADS", "1") };
     }
-    unsafe { std::env::set_var("MATMUL_NUM_THREADS", "1") };
     TaskPoolOptions::with_num_threads(1).create_default_pools();
 }
 
