@@ -1,4 +1,3 @@
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -748,11 +747,17 @@ mod tests {
         };
         let mut b = TickMsg::encode(&on_foot);
         b[TICKMSG_LEN - 1] = 1;
-        assert!(TickMsg::decode(&b).is_err(), "nonzero on-foot tail rejected");
+        assert!(
+            TickMsg::decode(&b).is_err(),
+            "nonzero on-foot tail rejected"
+        );
         let mut b = TickMsg::encode(&on_foot);
         b[OFF_PILOT] = 3;
         assert!(TickMsg::decode(&b).is_err(), "unknown kind byte rejected");
-        assert!(TickMsg::decode(&b[..OFF_PILOT]).is_err(), "short frame rejected");
+        assert!(
+            TickMsg::decode(&b[..OFF_PILOT]).is_err(),
+            "short frame rejected"
+        );
     }
 
     #[test]

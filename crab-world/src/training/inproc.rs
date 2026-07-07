@@ -1,4 +1,3 @@
-
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -128,7 +127,6 @@ fn read_or_init_anneal_epoch(dir: &Path, total_ticks: u64) -> u64 {
     }
 }
 
-
 #[derive(Clone)]
 struct RollRequest {
     brain_bytes: Arc<Vec<u8>>,
@@ -137,10 +135,7 @@ struct RollRequest {
 }
 
 enum RollOutcome {
-    Rolled {
-        output: HorizonOutput,
-        ticks: u64,
-    },
+    Rolled { output: HorizonOutput, ticks: u64 },
     Panicked,
     SnapshotLoadFailed,
 }
@@ -285,13 +280,12 @@ fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: us
     });
 
     let state = systems::TrainingState::new_worker(config, id, arch);
-    app.insert_non_send_resource(state)
-        .add_systems(
-            FixedUpdate,
-            (brain_step, reset_crab)
-                .chain()
-                .in_set(crate::bot::BotSet::Think),
-        );
+    app.insert_non_send_resource(state).add_systems(
+        FixedUpdate,
+        (brain_step, reset_crab)
+            .chain()
+            .in_set(crate::bot::BotSet::Think),
+    );
 
     crate::bot::headless::force_serial_schedules(&mut app);
 

@@ -1,4 +1,3 @@
-
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -189,7 +188,9 @@ pub enum Coordinator {
         server: Box<Server>,
         net: Option<NetDriver>,
     },
-    Client { net: NetDriver },
+    Client {
+        net: NetDriver,
+    },
 }
 
 impl Coordinator {

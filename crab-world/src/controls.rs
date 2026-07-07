@@ -1,4 +1,3 @@
-
 use std::fmt::Debug;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -235,7 +234,6 @@ pub fn icon_asset_paths<S: ControlScheme + ?Sized>() -> Vec<&'static str> {
     }
     paths
 }
-
 
 #[cfg(feature = "render")]
 mod overlay {

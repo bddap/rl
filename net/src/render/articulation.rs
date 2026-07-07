@@ -1,4 +1,3 @@
-
 use bevy::prelude::*;
 
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
@@ -6,7 +5,9 @@ use crab_world::bot::skin::{CrabSkinRepose, SkinRepose};
 use crab_world::crab_view::CrabBrainLabels;
 use crab_world::vehicle::{PilotId, Vehicle};
 
-use crate::articulation::{CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire};
+use crate::articulation::{
+    CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire,
+};
 
 /// Every NON-LOCAL pilot's craft pose, for the always-on wireframe pass (rl#191). The local
 /// pilot's own craft is excluded: the cockpit camera flies from it instead. Fed per tick from
@@ -31,14 +32,22 @@ pub(super) fn publish_remote_vehicles(
     vehicles: &[VehiclePoseWire],
     me: PilotId,
 ) {
-    let remote: Vec<VehiclePoseWire> =
-        vehicles.iter().filter(|v| v.pilot != me.0).copied().collect();
+    let remote: Vec<VehiclePoseWire> = vehicles
+        .iter()
+        .filter(|v| v.pilot != me.0)
+        .copied()
+        .collect();
     let mut watch = world.get_resource_or_insert_with(RemoteCraftWatch::default);
     let pilots: Vec<u8> = remote.iter().map(|v| v.pilot).collect();
     if pilots != watch.pilots {
-        info!("remote crafts: pilots {:?} (was {:?})", pilots, watch.pilots);
+        info!(
+            "remote crafts: pilots {:?} (was {:?})",
+            pilots, watch.pilots
+        );
         watch.pilots = pilots;
-        watch.first_pose.retain(|p, _| remote.iter().any(|v| v.pilot == *p));
+        watch
+            .first_pose
+            .retain(|p, _| remote.iter().any(|v| v.pilot == *p));
         watch.moved.retain(|p| remote.iter().any(|v| v.pilot == *p));
     }
     for v in &remote {
@@ -177,7 +186,6 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
     if world.get_resource::<CrabBrainLabels>().map(|l| &l.0) != Some(&labels) {
         world.insert_resource(CrabBrainLabels(labels));
     }
-
 }
 
 #[cfg(test)]

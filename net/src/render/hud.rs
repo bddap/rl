@@ -1,4 +1,3 @@
-
 use super::driver::{GameState, LocalVehicle};
 use super::*;
 
@@ -14,7 +13,6 @@ pub(super) fn sync_controls_context(
 
 #[derive(Component)]
 pub(super) struct StatusHud;
-
 
 pub(super) fn spawn_hud(mut commands: Commands) {
     commands.spawn((

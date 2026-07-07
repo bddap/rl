@@ -1,4 +1,3 @@
-
 use super::driver::{FlightInput, PendingInput};
 use super::*;
 
@@ -33,7 +32,6 @@ pub(super) struct CameraPitch(pub(super) f32);
 
 #[derive(Resource, Default)]
 pub(super) struct CameraYaw(pub(super) f32);
-
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn gather_input(

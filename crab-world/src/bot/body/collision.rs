@@ -1,4 +1,3 @@
-
 use bevy_rapier3d::prelude::*;
 
 pub const ARENA_COLLISION: CollisionGroups =

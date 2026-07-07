@@ -1,4 +1,3 @@
-
 pub mod trig {
     use std::sync::OnceLock;
 

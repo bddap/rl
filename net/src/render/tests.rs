@@ -1,4 +1,3 @@
-
 use super::app::ExternalCrabStackInstalled;
 use super::driver::{
     FlightInput, GameState, PendingRound, VEHICLE_STICK_SENS, ensure_round_installed,

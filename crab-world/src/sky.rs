@@ -1,4 +1,3 @@
-
 use bevy::asset::RenderAssetUsages;
 use bevy::core_pipeline::Skybox;
 use bevy::image::Image;

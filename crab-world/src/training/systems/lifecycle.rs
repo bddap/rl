@@ -1,5 +1,3 @@
-
-
 use bevy::prelude::*;
 
 use crate::bot::actuator::{ACTION_SIZE, CrabActions};
@@ -90,7 +88,9 @@ pub(crate) enum EnvPhase {
     #[default]
     Recording,
     AwaitingRespawn,
-    Settling { grace: u32 },
+    Settling {
+        grace: u32,
+    },
 }
 
 #[derive(Clone)]

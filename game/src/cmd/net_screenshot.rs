@@ -1,4 +1,3 @@
-
 use anyhow::Result;
 use clap::Parser;
 use net::{net_loop, render};

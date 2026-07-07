@@ -1,4 +1,3 @@
-
 pub mod articulation;
 pub mod cadence;
 pub mod controls;
@@ -174,7 +173,6 @@ mod desync_test {
         );
     }
 
-
     fn would_arm_external_crab(sync: Option<SyncVerdict>, checkpoint: Option<()>) -> bool {
         checkpoint.is_some() && super::may_arm_external_crab(sync)
     }
@@ -188,7 +186,6 @@ mod desync_test {
 
     #[test]
     fn arm_gate_keys_on_solo_or_synced_assets() {
-
         assert!(
             !would_arm_external_crab(synced(false), Some(())),
             "a networked round with mismatched crab ASSETS must NOT arm the NN crab (round refused)"

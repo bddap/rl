@@ -1,4 +1,3 @@
-
 use std::path::Path;
 
 use crate::bot::arch::ArchId;
@@ -543,8 +542,13 @@ mod tests {
         )
         .unwrap();
         let unstamped = dir.join("unstamped.bin");
-        write_v1_envelope(&unstamped, ArtifactKind::ObsNormalizer, ArchId::DEFAULT, vec![1])
-            .unwrap();
+        write_v1_envelope(
+            &unstamped,
+            ArtifactKind::ObsNormalizer,
+            ArchId::DEFAULT,
+            vec![1],
+        )
+        .unwrap();
 
         let read = |path, save_stamp| {
             read_envelope_expecting(
@@ -557,10 +561,13 @@ mod tests {
             )
         };
         assert!(read(&stamped, Some(77)).is_ok(), "matching stamps pair");
-        assert!(read(&unstamped, None).is_ok(), "a wholly pre-stamp set pairs on trust");
+        assert!(
+            read(&unstamped, None).is_ok(),
+            "a wholly pre-stamp set pairs on trust"
+        );
         for (path, expected) in [
-            (&stamped, Some(78)), // different saves
-            (&stamped, None),     // stamped member, unstamped brain (brain write failed)
+            (&stamped, Some(78)),   // different saves
+            (&stamped, None),       // stamped member, unstamped brain (brain write failed)
             (&unstamped, Some(77)), // unstamped member, stamped brain (member write failed)
         ] {
             match read(path, expected) {
@@ -598,7 +605,15 @@ mod tests {
         ));
 
         // A mis-copied file: optimizer envelope read as the brain.
-        write_envelope(&path, ArtifactKind::Optimizer, ArchId::DEFAULT, vec![], None, 1).unwrap();
+        write_envelope(
+            &path,
+            ArtifactKind::Optimizer,
+            ArchId::DEFAULT,
+            vec![],
+            None,
+            1,
+        )
+        .unwrap();
         assert!(matches!(
             read_envelope(&path, ArtifactKind::Brain),
             Err(EnvelopeError::WrongKind { .. })

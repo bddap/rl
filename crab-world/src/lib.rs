@@ -1,4 +1,3 @@
-
 #![cfg_attr(feature = "wgpu", recursion_limit = "512")]
 
 use std::path::PathBuf;

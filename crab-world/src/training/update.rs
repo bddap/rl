@@ -1,4 +1,3 @@
-
 use burn::optim::{GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{ElementConversion, Int, Tensor, TensorData};

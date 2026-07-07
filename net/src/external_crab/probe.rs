@@ -1,4 +1,3 @@
-
 use bevy::prelude::*;
 
 use bevy_rapier3d::prelude::Velocity;
@@ -163,7 +162,6 @@ pub fn run_headless_probe(
         .map(|d| d.samples.clone())
         .unwrap_or_default()
 }
-
 
 pub struct StabilityResult {
     pub samples: Vec<ProbeSample>,

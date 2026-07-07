@@ -1,4 +1,3 @@
-
 use crab_world::controls::{Binding, ContextRow, ControlScheme, Glyph, KbBinding, PadBinding};
 
 pub struct GcrControls;
@@ -388,7 +387,6 @@ pub const SHIP_ROWS: [ContextRow<GcrControls>; 10] = [
         label: "Controls",
     },
 ];
-
 
 #[cfg(feature = "render")]
 mod bevy_glue {

@@ -1,4 +1,3 @@
-
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -46,19 +45,12 @@ pub struct Args {
 #[derive(Clone)]
 enum AppMode {
     Demo,
-    Screenshot {
-        path: PathBuf,
-        settle: u32,
-    },
-    RenderVideo {
-        path: PathBuf,
-        seconds: f32,
-    },
+    Screenshot { path: PathBuf, settle: u32 },
+    RenderVideo { path: PathBuf, seconds: f32 },
 }
 
 fn main() {
     let args = Args::parse();
-
 
     if std::env::var_os("RUST_LOG").is_none() {
         unsafe { std::env::set_var("RUST_LOG", "warn,crab_world::play=info") };

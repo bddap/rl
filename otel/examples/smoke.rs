@@ -1,4 +1,3 @@
-
 fn main() {
     let _otel = otel::init("rl-otel-smoke");
 

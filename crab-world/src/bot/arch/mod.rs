@@ -1,4 +1,3 @@
-
 pub mod mlp512x3;
 
 use burn::module::Module;

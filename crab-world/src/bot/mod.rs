@@ -2,6 +2,7 @@ pub mod actuator;
 pub mod arch;
 pub mod body;
 pub mod collider_check;
+pub mod headless;
 pub mod meshfit;
 pub mod physics_digest;
 #[cfg(test)]
@@ -12,7 +13,6 @@ pub mod sensor;
 mod sim_truth_test;
 #[cfg(feature = "render")]
 pub mod skin;
-pub mod headless;
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;

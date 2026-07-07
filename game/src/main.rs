@@ -1,4 +1,3 @@
-
 mod cmd;
 
 use anyhow::Result;

@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 
 use bevy::prelude::*;
@@ -28,7 +27,6 @@ impl PartId {
         matches!(self, PartId::Carapace)
     }
 }
-
 
 struct SkinnedVertex {
     pos: Vec3,

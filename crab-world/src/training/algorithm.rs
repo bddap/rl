@@ -1,4 +1,3 @@
-
 use rand::Rng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};

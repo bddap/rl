@@ -1,4 +1,3 @@
-
 use std::sync::mpsc;
 use std::thread;
 
@@ -165,7 +164,6 @@ pub fn solo_round(seed: u64) -> ReadyMatch {
         net: None,
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChooserItem {
@@ -382,7 +380,6 @@ mod tests {
             "a cancelled lobby yields no round"
         );
     }
-
 
     #[test]
     fn chooser_navigates_between_host_and_join() {

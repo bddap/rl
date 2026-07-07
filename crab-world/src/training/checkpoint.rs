@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 
 use burn::grad_clipping::GradientClippingConfig;
@@ -426,7 +425,14 @@ mod tests {
         let norm = ReturnNormalizer::new();
         save_return_normalizer(&norm, ArchId::DEFAULT, &path, 3).expect("save return normalizer");
         assert!(
-            load_return_normalizer(&path, SetKey { arch: ArchId::DEFAULT, save_stamp: Some(3) }).is_ok(),
+            load_return_normalizer(
+                &path,
+                SetKey {
+                    arch: ArchId::DEFAULT,
+                    save_stamp: Some(3)
+                }
+            )
+            .is_ok(),
             "matching arch + save stamp loads"
         );
         // A save stamp from a different save refuses — the bddap/rl#215 mis-pair
@@ -434,7 +440,13 @@ mod tests {
         // an older save's).
         assert!(
             matches!(
-                load_return_normalizer(&path, SetKey { arch: ArchId::DEFAULT, save_stamp: Some(4) }),
+                load_return_normalizer(
+                    &path,
+                    SetKey {
+                        arch: ArchId::DEFAULT,
+                        save_stamp: Some(4)
+                    }
+                ),
                 Err(EnvelopeError::SaveStampMismatch { .. })
             ),
             "a cross-save return normalizer must refuse by save stamp"

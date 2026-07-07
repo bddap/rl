@@ -1,4 +1,3 @@
-
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
 
@@ -254,10 +253,7 @@ fn drive_bones(
 ) {
     for (drive, mut t) in bones.iter_mut() {
         if let Ok((link, env)) = links.get(drive.link) {
-            let m = repose
-                .0
-                .get(&env.0)
-                .map_or(Mat4::IDENTITY, |r| r.matrix());
+            let m = repose.0.get(&env.0).map_or(Mat4::IDENTITY, |r| r.matrix());
             *t = Transform::from_matrix(m * link.to_matrix() * drive.offset);
         }
     }

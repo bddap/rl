@@ -1,4 +1,3 @@
-
 use std::collections::BTreeMap;
 
 use crate::sim::{Crab, Outcome, Player, PlayerId, PlayerStatus, Pos};

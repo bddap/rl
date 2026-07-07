@@ -1,4 +1,3 @@
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct CapsuleMass {

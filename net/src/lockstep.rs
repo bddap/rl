@@ -1,4 +1,3 @@
-
 use std::collections::BTreeMap;
 
 use crab_world::vehicle::{PilotCommand, VehicleKind};
@@ -34,7 +33,13 @@ pub struct PilotIntent {
 
 impl PilotIntent {
     pub fn to_command(&self) -> PilotCommand {
-        let s = |v: f32| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
+        let s = |v: f32| {
+            if v.is_finite() {
+                v.clamp(-1.0, 1.0)
+            } else {
+                0.0
+            }
+        };
         PilotCommand {
             kind: self.kind,
             throttle_trim: s(self.throttle_trim),

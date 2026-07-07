@@ -1,4 +1,3 @@
-
 use bevy::app::AppExit;
 use bevy::prelude::*;
 use burn::backend::ndarray::{NdArray, NdArrayDevice};
@@ -275,7 +274,6 @@ pub(crate) fn brain_step(
         }
     }
 
-
     let inputs = StepInputs {
         body: &body,
         min_tip_dists: &min_tip_dists,
@@ -397,13 +395,12 @@ mod tests {
         });
 
         let state = TrainingState::new_worker(&config, 0, crate::bot::arch::ArchId::DEFAULT);
-        app.insert_non_send_resource(state)
-            .add_systems(
-                FixedUpdate,
-                (brain_step, reset_crab)
-                    .chain()
-                    .in_set(crate::bot::BotSet::Think),
-            );
+        app.insert_non_send_resource(state).add_systems(
+            FixedUpdate,
+            (brain_step, reset_crab)
+                .chain()
+                .in_set(crate::bot::BotSet::Think),
+        );
         app
     }
 
@@ -517,7 +514,6 @@ mod tests {
             let mut t = q.single_mut(app.world_mut()).expect("carapace");
             t.translation = Vec3::splat(f32::NAN);
         }
-
 
         app.world_mut()
             .run_system_once(crate::bot::rescue_nonfinite_crabs)
