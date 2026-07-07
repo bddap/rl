@@ -284,8 +284,11 @@ impl BestKeeper {
             if !src.exists() {
                 // An optional file from an earlier snapshot must not survive into a new
                 // one — best/ is one generation, never a mix (e.g. an old optimizer
-                // paired with a new brain).
-                let _ = std::fs::remove_file(&dst);
+                // paired with a new brain). Never remove a REQUIRED dst: a required src
+                // vanishing after the precheck must not strip the incumbent's set.
+                if !f.required {
+                    let _ = std::fs::remove_file(&dst);
+                }
                 continue;
             }
             let tmp = best_dir.join(format!("{}.tmp", f.name));
