@@ -14,7 +14,6 @@ render = [
     "bevy/default",
     "bevy_rapier3d/default",
     "dep:bevy_egui",
-    "enhanced-determinism",
 ]
 
 enhanced-determinism = ["crab-world/enhanced-determinism"]

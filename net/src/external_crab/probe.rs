@@ -1,13 +1,14 @@
 
 use bevy::prelude::*;
 
+use bevy_rapier3d::prelude::Velocity;
+
 use crate::sim::{Input, PlayerId, Pos, Sim};
-use crab_world::bot::body::{CrabCarapace, CrabEnvId};
+use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint};
+use crab_world::bot::physics_digest::crab_state_digest;
 use crab_world::bot::sensor::CrabTargets;
 
-use super::{
-    ExternalCrabBridge, ExternalCrabPlugin, hash_crab_physics, integrate_crab, sync_external_crab,
-};
+use super::{ExternalCrabBridge, ExternalCrabPlugin, integrate_crab, sync_external_crab};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ProbeSample {
@@ -28,12 +29,25 @@ struct ProbeDriver {
     log_every: u64,
 }
 
+#[allow(clippy::type_complexity)]
 fn probe_step(
     mut driver: NonSendMut<ProbeDriver>,
     mut bridge: ResMut<ExternalCrabBridge>,
     targets: Res<CrabTargets>,
     carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
     claw_q: Query<(&CrabEnvId, &Transform), With<crab_world::bot::body::CrabClawTip>>,
+    // Unscoped by CrabEnvId: the probe app is single-env by construction (both harnesses
+    // build `num_envs: 1`), and `crab_state_digest`'s body keys collide across envs — scope
+    // the query before ever probing multi-crab.
+    bodies: Query<
+        (
+            &Transform,
+            &Velocity,
+            Option<&CrabJoint>,
+            Option<&CrabCarapace>,
+        ),
+        With<CrabBodyPart>,
+    >,
 ) {
     sync_external_crab(&mut driver.sim, &mut bridge);
     let prey = driver.sim.nearest_living_player_pos(0);
@@ -60,7 +74,12 @@ fn probe_step(
                 (dx * dx + dz * dz).sqrt()
             })
             .unwrap_or(f32::NAN);
-        let state_hash = driver.sim.state_hash();
+        // The probe's hash-log contract: the sim hash PLUS the full-body crab digest, so a
+        // run-vs-run diff catches float divergence anywhere in the crab's rapier state. This
+        // fold is probe-only — the runtime sim hash stopped carrying it in rl#223 (clients
+        // adopt host state and never step, so a cross-peer digest compared host values with
+        // themselves).
+        let state_hash = driver.sim.state_hash() ^ crab_state_digest(bodies.iter());
 
         let (carapace_arena_x, carapace_y, carapace_arena_z) = carapace_q
             .iter()
@@ -126,7 +145,7 @@ pub fn run_headless_probe(
     let mut sim = Sim::new(seed, &[me]);
     let crab_spawn = sim.crabs()[0].pos();
     let crab = sim.crabs()[0];
-    sim.set_external_crab_pose(0, crab.pos(), crab.yaw(), 0);
+    sim.set_external_crab_pose(0, crab.pos(), crab.yaw());
 
     let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
     app.insert_non_send_resource(ProbeDriver {
@@ -134,10 +153,7 @@ pub fn run_headless_probe(
         samples: Vec::new(),
         log_every: log_every.max(1),
     });
-    app.add_systems(
-        FixedUpdate,
-        probe_step.after(integrate_crab).after(hash_crab_physics),
-    );
+    app.add_systems(FixedUpdate, probe_step.after(integrate_crab));
 
     for _ in 0..ticks {
         app.update();
@@ -170,14 +186,13 @@ pub fn run_vehicle_stability_probe(
     warmup: u64,
     post: u64,
 ) -> StabilityResult {
-    use bevy_rapier3d::prelude::Velocity;
     use crab_world::vehicle::{VehicleKind, spawn_ram_vehicle};
 
     let me = PlayerId(0);
     let mut sim = Sim::new(seed, &[me]);
     let crab_spawn = sim.crabs()[0].pos();
     let crab = sim.crabs()[0];
-    sim.set_external_crab_pose(0, crab.pos(), crab.yaw(), 0);
+    sim.set_external_crab_pose(0, crab.pos(), crab.yaw());
 
     let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
     app.insert_non_send_resource(ProbeDriver {
@@ -185,10 +200,7 @@ pub fn run_vehicle_stability_probe(
         samples: Vec::new(),
         log_every: 1,
     });
-    app.add_systems(
-        FixedUpdate,
-        probe_step.after(integrate_crab).after(hash_crab_physics),
-    );
+    app.add_systems(FixedUpdate, probe_step.after(integrate_crab));
 
     for _ in 0..warmup {
         app.update();

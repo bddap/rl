@@ -191,7 +191,7 @@ mod tests {
 
     fn sample() -> CoreSnapshot {
         let mut sim = Sim::new(9, &[PlayerId(0), PlayerId(1)]);
-        sim.set_external_crab_pose(0, Pos { x: 1234, z: -5678 }, 42, 0);
+        sim.set_external_crab_pose(0, Pos { x: 1234, z: -5678 }, 42);
         let mut snap = sim.core_snapshot();
         // Server-stamped watermarks (`Sim::core_snapshot` leaves them empty) — nonempty here so
         // the roundtrip exercises the map encoding.

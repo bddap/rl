@@ -109,7 +109,7 @@ pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) {
             pos.x += (dx as i128 * CRAB_SPEED as i128 / dist) as i64;
             pos.z += (dz as i128 * CRAB_SPEED as i128 / dist) as i64;
         }
-        sim.set_external_crab_pose(idx, pos, yaw, 0);
+        sim.set_external_crab_pose(idx, pos, yaw);
     }
 }
 
@@ -227,7 +227,6 @@ pub struct Sim {
     restart_held: bool,
     round_start: u64,
     config: RoundConfig,
-    external_crab_digests: Vec<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -248,7 +247,6 @@ impl Sim {
             crabs: 1,
         };
         let (players, crabs, extraction) = Self::spawn_state(&config);
-        let n_crabs = crabs.len();
         Self {
             tick: 0,
             players,
@@ -259,7 +257,6 @@ impl Sim {
             restart_held: false,
             round_start: 0,
             config,
-            external_crab_digests: vec![0; n_crabs],
         }
     }
 
@@ -274,10 +271,9 @@ impl Sim {
         self.players = players;
         self.crabs = crabs;
         self.extraction = extraction;
-        self.external_crab_digests = vec![0; self.config.crabs];
     }
 
-    pub fn set_external_crab_pose(&mut self, crab: usize, pos: Pos, yaw: i32, phys_digest: u64) {
+    pub fn set_external_crab_pose(&mut self, crab: usize, pos: Pos, yaw: i32) {
         assert!(
             crab < self.crabs.len(),
             "external crab pose for crab {crab}, but the round has {} — the bridge and the sim \
@@ -286,7 +282,6 @@ impl Sim {
         );
         self.crabs[crab].pos = pos;
         self.crabs[crab].yaw = yaw;
-        self.external_crab_digests[crab] = phys_digest;
     }
 
     fn reset(&mut self) {
@@ -523,7 +518,6 @@ impl Sim {
             restart_held,
             round_start,
             config: _,
-            external_crab_digests,
         } = self;
 
         let mut h = Fnv::new();
@@ -547,9 +541,6 @@ impl Sim {
         h.write(&[u8::from(*restart_held)]);
         h.write(&round_start.to_le_bytes());
         h.write(&rand::Rng::r#gen::<u64>(&mut rng.clone()).to_le_bytes());
-        for digest in external_crab_digests {
-            h.write(&digest.to_le_bytes());
-        }
         h.finish()
     }
 
@@ -592,7 +583,6 @@ impl Sim {
             restart_held: _,
             round_start: _,
             config,
-            external_crab_digests: _,
         } = self;
         CoreSnapshot {
             tick: *tick,
@@ -620,7 +610,6 @@ impl Sim {
         } = snapshot;
         self.tick = tick;
         self.players = players;
-        self.external_crab_digests.resize(crabs.len(), 0);
         self.config.crabs = crabs.len();
         self.crabs = crabs;
         self.outcome = outcome;
@@ -902,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn external_crab_pose_seeds_and_digest_is_hashed() {
+    fn external_crab_pose_seeds_and_is_hashed() {
         let pos = Pos {
             x: 7 * UNIT,
             z: -3 * UNIT,
@@ -910,16 +899,15 @@ mod tests {
         let yaw = 123;
 
         let mut sim = Sim::new(0, &players(1));
-        let digest = 0xFEED_FACE_DEAD_BEEF;
-        sim.set_external_crab_pose(0, pos, yaw, digest);
+        sim.set_external_crab_pose(0, pos, yaw);
         assert_eq!(sim.crabs()[0].pos(), pos, "must seed the pose");
         assert_eq!(sim.crabs()[0].yaw(), yaw, "must seed the yaw");
         let h_seed = sim.state_hash();
-        sim.set_external_crab_pose(0, pos, yaw, digest ^ 1);
+        sim.set_external_crab_pose(0, Pos { x: pos.x + 1, ..pos }, yaw);
         assert_ne!(
             h_seed,
             sim.state_hash(),
-            "the external crab digest must be folded into the state hash"
+            "the external crab pose must be folded into the state hash"
         );
     }
 
@@ -1203,18 +1191,13 @@ mod tests {
             h0,
             "config is deliberately not hashed (see Sim::config)"
         );
-        assert_ne!(
-            hash_after(&|s| s.external_crab_digests[0] ^= 0xdead_beef),
-            h0,
-            "external_crab_digests must be hashed (always folded since rl#114)"
-        );
     }
 
     #[test]
     fn core_snapshot_roundtrip_reproduces_authoritative_state() {
         let mut original = Sim::new(7, &players(3));
         for _ in 0..5 {
-            original.set_external_crab_pose(0, Pos { x: 4200, z: -1300 }, 77, 0);
+            original.set_external_crab_pose(0, Pos { x: 4200, z: -1300 }, 77);
             let mut inputs = neutral_for(&original);
             *inputs.get_mut(&PlayerId(0)).unwrap() = Input::from_axes(0.3, 1.0);
             original.step(&inputs);
@@ -1439,15 +1422,19 @@ mod tests {
         assert_ne!(sim.state_hash(), Sim::new(0, &players(2)).state_hash());
         let h0 = sim.state_hash();
         let c1 = sim.crabs()[1];
-        sim.set_external_crab_pose(1, c1.pos(), c1.yaw(), 0xBEEF);
-        assert_ne!(sim.state_hash(), h0, "crab 1's digest folds into the hash");
+        let nudged = Pos {
+            x: c1.pos().x + 1,
+            z: c1.pos().z,
+        };
+        sim.set_external_crab_pose(1, nudged, c1.yaw());
+        assert_ne!(sim.state_hash(), h0, "crab 1's pose folds into the hash");
 
         let neutral = neutral_for(&sim);
         for _ in 0..=STARTUP_GRACE_TICKS {
             sim.step(&neutral);
         }
         let prey = sim.player(PlayerId(1)).unwrap().pos();
-        sim.set_external_crab_pose(1, prey, 0, 0);
+        sim.set_external_crab_pose(1, prey, 0);
         sim.step(&neutral);
         assert_eq!(
             sim.player(PlayerId(1)).unwrap().status(),
@@ -1476,7 +1463,7 @@ mod tests {
     #[should_panic(expected = "disagree on the binding count")]
     fn pose_for_an_unconfigured_crab_panics() {
         let mut sim = Sim::new(0, &players(1));
-        sim.set_external_crab_pose(1, Pos::default(), 0, 0);
+        sim.set_external_crab_pose(1, Pos::default(), 0);
     }
 
     fn dist2(a: Pos, b: Pos) -> i128 {

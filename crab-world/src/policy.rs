@@ -321,13 +321,6 @@ impl Policy {
         !matches!(self.state, PolicyState::Rest { .. })
     }
 
-    pub fn weights_digest(&self) -> Option<NonZeroU64> {
-        match &self.state {
-            PolicyState::Loaded { digest, .. } => Some(*digest),
-            PolicyState::Rest { .. } | PolicyState::Diagnostic { .. } => None,
-        }
-    }
-
     /// The human-facing identity of the brain driving this policy — the on-screen crab label
     /// (rl#200 increment 7): `arch @shortdigest` for a real checkpoint, and every OTHER state
     /// attributed honestly ("who's who" includes who FAILED and why). THE one label formatter:
@@ -572,11 +565,6 @@ mod tests {
             !policy.is_loaded(),
             "empty checkpoint dir should give an unloaded policy"
         );
-        assert_eq!(
-            policy.weights_digest(),
-            None,
-            "an unloaded policy has no weight digest (no `0` sentinel)"
-        );
         assert!(
             !policy.try_hot_reload(),
             "no live_dir set → nothing to reload"
@@ -596,10 +584,6 @@ mod tests {
         assert!(
             policy.is_loaded(),
             "a successful hot-reload marks the policy loaded"
-        );
-        assert!(
-            policy.weights_digest().is_some(),
-            "a hot-reloaded real checkpoint carries a nonzero weight digest"
         );
         assert!(
             !policy.try_hot_reload(),

@@ -8,6 +8,11 @@ license.workspace = true
 name = "game"
 path = "src/main.rs"
 
+[features]
+# Cross-platform bit-equality probing (`game nn-crab-probe` on two machines): pulls
+# rapier's libm transcendentals in. Never on by default — see crab-world's feature note.
+enhanced-determinism = ["net/enhanced-determinism", "crab-world/enhanced-determinism"]
+
 [dependencies]
 net = { path = "../net", features = ["render"] }
 crab-world = { path = "../crab-world", features = ["render"] }

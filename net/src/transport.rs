@@ -835,7 +835,7 @@ mod tests {
     fn snapshot_wire_roundtrips() {
         use crate::sim::{PlayerId, Pos, Sim};
         let mut sim = Sim::new(3, &[PlayerId(0), PlayerId(1)]);
-        sim.set_external_crab_pose(0, Pos { x: 77, z: -88 }, 5, 0);
+        sim.set_external_crab_pose(0, Pos { x: 77, z: -88 }, 5);
         let snap = sim.core_snapshot();
         let body = CoreSnapshot::encode(&snap);
         assert_eq!(CoreSnapshot::decode(&body).unwrap(), snap);

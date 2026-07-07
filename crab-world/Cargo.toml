@@ -9,8 +9,11 @@ name = "crab_world"
 path = "src/lib.rs"
 
 [features]
-render = ["bevy/default", "bevy_rapier3d/default", "enhanced-determinism"]
+render = ["bevy/default", "bevy_rapier3d/default"]
 
+# Rapier's libm transcendentals, for cross-platform bit-equality probes ONLY. Deliberately
+# NOT part of `render`: the trainer builds render-off (ED off), so shipping ED in game
+# builds would fork shipped float behavior from what the policy trained on (rl#223).
 enhanced-determinism = ["rapier3d/enhanced-determinism"]
 
 wgpu = ["burn/wgpu", "dep:naga", "naga/termcolor"]

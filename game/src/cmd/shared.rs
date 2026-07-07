@@ -67,7 +67,9 @@ pub(crate) fn nn_crab_checkpoint_dirs(
 /// One determinism-log line, `<tick> <hash>` (zero-padded 16-hex) — the format two
 /// peers/runs `diff` to prove byte-identical sims. The line IS the cross-peer diff
 /// contract, so every writer (this file's whole-log writer and `game net`'s streaming
-/// host/client writers) formats through here (#133).
+/// host/client writers) formats through here (#133). The FORMAT is shared; the hashed
+/// QUANTITY is not: `game net` logs the bare sim hash, while the probe folds the crab
+/// body digest in (rl#223) — diff only logs written by the same writer.
 pub(crate) fn tick_hash_line(tick: u64, hash: u64) -> String {
     format!("{tick} {hash:#018x}")
 }
