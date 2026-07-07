@@ -1,8 +1,7 @@
-
 use std::sync::mpsc;
 
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use bevy_egui::{EguiContextSettings, EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
 use super::AppPhase;
 use super::app::RoundOver;
@@ -27,6 +26,9 @@ impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
         if !app.is_plugin_added::<EguiPlugin>() {
             app.add_plugins(EguiPlugin::default());
+            // Registered with the egui bootstrap itself (not the menu systems below) so
+            // any future egui surface inherits the workspace UI-scale rule for free.
+            app.add_systems(Update, sync_egui_scale);
         }
         app.insert_non_send_resource(MenuState::new(
             self.seed,
@@ -47,6 +49,18 @@ impl Plugin for MenuPlugin {
             EguiPrimaryContextPass,
             menu_screen.run_if(not(in_state(AppPhase::Playing))),
         );
+    }
+}
+
+// egui renders at points × window scale factor × settings.scale_factor — the same
+// composition bevy UI gives UiScale — so mirroring the already-synced UiScale (kept on
+// the workspace rule by crab_world::app_boot) makes egui/bevy-UI divergence impossible
+// (rl#227).
+fn sync_egui_scale(ui_scale: Res<UiScale>, mut contexts: Query<&mut EguiContextSettings>) {
+    for mut settings in &mut contexts {
+        if (settings.scale_factor - ui_scale.0).abs() > 1e-3 {
+            settings.scale_factor = ui_scale.0;
+        }
     }
 }
 
