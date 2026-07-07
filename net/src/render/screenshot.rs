@@ -3,7 +3,7 @@ use super::app::{install_armed_nn_crab, seed_round_crabs};
 use super::driver::{
     FlightInput, PendingInput, ScriptedPackInput, coordinator, drive_lockstep, insert_core,
 };
-use super::hud::{spawn_hud, update_hud};
+use super::hud::{spawn_hud, sync_controls_context, update_hud};
 use super::input::gather_input;
 use super::scene::{FpCamera, apply_transforms, follow_ground, reconcile_avatars, spawn_world};
 use super::*;
@@ -93,6 +93,10 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
                 apply_transforms,
                 follow_ground,
                 apply_shot_cam_offset,
+                // Keep the controls HUD's context live like the windowed app — unless an
+                // evidence shot forced one via RL_SHOW_CONTROLS_CONTEXT.
+                sync_controls_context
+                    .run_if(|| std::env::var_os("RL_SHOW_CONTROLS_CONTEXT").is_none()),
                 update_hud,
                 update_controls_ui::<GcrControls>,
                 capture_when_settled,
