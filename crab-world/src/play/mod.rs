@@ -1,4 +1,3 @@
-
 mod cameras;
 mod controls;
 mod demo;
@@ -52,22 +51,6 @@ impl Default for DemoRng {
     }
 }
 
-const UI_REFERENCE_HEIGHT: f32 = 800.0;
-
-fn sync_ui_scale(
-    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    mut ui_scale: ResMut<UiScale>,
-) {
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let scale = (window.resolution.height() / UI_REFERENCE_HEIGHT).clamp(0.5, 3.0);
-    if (ui_scale.0 - scale).abs() > 1e-3 {
-        ui_scale.0 = scale;
-    }
-}
-
-
 pub struct DemoPlugin {
     pub checkpoint_dir: PathBuf,
     pub live_checkpoint_dir: Option<PathBuf>,
@@ -84,7 +67,7 @@ impl Plugin for DemoPlugin {
             .init_resource::<PokeBurst>()
             .init_resource::<DemoRng>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_target_ball))
-            .add_systems(Update, (orbit_camera, demo_controls, sync_ui_scale))
+            .add_systems(Update, (orbit_camera, demo_controls))
             .add_systems(
                 FixedUpdate,
                 (
@@ -105,7 +88,6 @@ impl Plugin for DemoPlugin {
         .add_systems(Update, hot_reload_policy);
     }
 }
-
 
 pub struct ScreenshotPlugin {
     pub checkpoint_dir: PathBuf,

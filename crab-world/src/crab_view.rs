@@ -1,4 +1,3 @@
-
 use bevy::prelude::*;
 use bevy::ui::{IsDefaultUiCamera, UiScale};
 use bevy_rapier3d::geometry::ColliderView;
@@ -217,25 +216,26 @@ fn position_brain_labels(
             *vis = Visibility::Hidden;
             continue;
         }
-        let anchor = carapaces.iter().find(|(_, env)| env.0 == node.0).map(
-            |(carapace, env)| {
+        let anchor = carapaces
+            .iter()
+            .find(|(_, env)| env.0 == node.0)
+            .map(|(carapace, env)| {
                 let placement = repose
                     .as_deref()
                     .and_then(|r| r.0.get(&env.0))
                     .map(|s| s.matrix())
                     .unwrap_or(Mat4::IDENTITY);
                 placement.transform_point3(carapace.translation()) + Vec3::Y * BRAIN_LABEL_LIFT
-            },
-        );
+            });
         let projected = camera
             .zip(anchor)
             .and_then(|((cam, cam_gt), anchor)| cam.world_to_viewport(cam_gt, anchor).ok());
         match projected {
             Some(vp) => {
                 // `world_to_viewport` is in viewport-logical pixels but `Val::Px` is in
-                // UI-logical pixels — they differ by `UiScale` (the demo scales its HUD
-                // by window height), so divide it out or every label drifts off its crab
-                // on any non-reference window size.
+                // UI-logical pixels — they differ by `UiScale` (kept on the workspace
+                // rule by `crate::app_boot::ui_scale_for`), so divide it out or every
+                // label drifts off its crab on any non-reference window size.
                 let vp = vp / ui_scale.0;
                 // X-centered on the anchor, text bottom sitting AT the anchor.
                 let size = computed.size() * computed.inverse_scale_factor();
