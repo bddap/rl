@@ -34,11 +34,11 @@ pub(crate) struct Args {
     /// Press the vehicle E-cycle at this frame (repeatable) and hold a forward drive while
     /// piloting — a scripted pilot, so a two-peer run live-verifies board/fly/cycle/exit over
     /// the real wire (rl#191).
-    #[arg(long, value_name = "FRAME")]
+    #[arg(long, value_name = "FRAME", value_parser = clap::value_parser!(u64).range(1..))]
     pilot_toggle_at: Vec<u64>,
     /// From this frame on, the scripted pilot walks a gentle arc on foot (a moving target for
     /// the hunting crab).
-    #[arg(long, value_name = "FRAME")]
+    #[arg(long, value_name = "FRAME", value_parser = clap::value_parser!(u64).range(1..))]
     pilot_walk_at: Option<u64>,
 }
 
