@@ -19,7 +19,9 @@ use crate::training::envelope::{EnvelopeError, SetKey};
 use crate::training::normalizer::{
     IncrementAccumulator, NORMALIZER_CLIP, NormalizerIncrement, NormalizerSnapshot, ObsNormalizer,
 };
-use crate::training::{InferBackend, TrainBackend};
+use crate::training::{
+    InferBackend, TrainBackend, hardlink_missing_entries, replace_dir_atomically,
+};
 
 use super::lifecycle::EnvEpisode;
 
@@ -177,8 +179,7 @@ impl TrainingState {
         // normalizer are replaced by the learner's snapshot at the first `begin_horizon`
         // (a failed load there refuses the horizon), and the return normalizer /
         // `resumed` key are learner-side state — so a worker read would be K redundant
-        // disk loads that RACE the learner's non-atomic set write (brain lands before
-        // the normalizers), where this abort policy would misfire on a fresh dir.
+        // disk loads, where this abort policy would misfire on a fresh dir.
         // `Some(key)` once the brain warm-starts: the resumed set's pairing key
         // (bddap/rl#200 §2 + #215), which every paired artifact must match. Stays `None`
         // on every cold start.
@@ -356,57 +357,53 @@ impl TrainingState {
 
     /// Save the checkpoint SET (brain + obs normalizer + return normalizer), every
     /// member stamped with one freshly-drawn save_stamp (bddap/rl#215) so a loader can
-    /// verify the set was written together. Returns that save_stamp on a complete save —
-    /// the caller stamps anything saved BESIDE the set (the optimizer) with it — or
-    /// `None` when any member failed.
+    /// verify the set was written together. `extra` writes anything saved AS PART OF
+    /// the set beyond the core members — the learner passes the optimizer here — into
+    /// the same staged generation, stamped with the same save_stamp. Returns that
+    /// save_stamp on a complete save, or `None` when any member failed.
     ///
-    /// Failure policy: each file is written atomically (temp + fsync-rename inside the
-    /// envelope writer), but the set is not — so on the FIRST member failure the
-    /// remaining writes are SKIPPED, not warn-and-proceed. The brain (the largest file,
-    /// the one ENOSPC kills) goes first: its failure leaves the previous set intact and
-    /// loadable, instead of landing fresh normalizers under a stale brain every
-    /// iteration. A failure between members still mis-pairs the dir, but the save_stamp
-    /// stamps make that a loud load-time refusal, never a clean mis-paired load.
-    pub(crate) fn save_checkpoint(&self) -> Option<u64> {
-        if let Err(e) = std::fs::create_dir_all(&self.checkpoint_dir) {
-            warn!(
-                "Failed to create checkpoint dir {}: {e}",
-                self.checkpoint_dir.display()
-            );
-            return None;
-        }
-
-        let paths = CheckpointDir::new(&self.checkpoint_dir);
+    /// The whole set lands in ONE atomic dir swap ([`replace_dir_atomically`],
+    /// bddap/rl#238): members are staged in a sibling temp dir — the live dir's
+    /// non-set entries (`best/`, the watermarks) hardlinked in beside them — then
+    /// swapped into place, so a concurrent reader sees the old complete set or the new
+    /// complete set, never a mix, and a member failure leaves the live dir untouched.
+    /// The brain (the largest member, the one ENOSPC kills) is staged first so a full
+    /// disk aborts before any cheap member is written. The #215 stamps stay as the
+    /// load-time backstop for out-of-band copies.
+    pub(crate) fn save_checkpoint(&self, extra: impl FnOnce(&CheckpointDir, u64)) -> Option<u64> {
         let arch = self.brain.train().arch();
         let save_stamp: u64 = rand::random();
-        if let Err(e) = save_brain(self.brain.train(), &paths.brain_file(), save_stamp) {
-            warn!(
-                "Failed to save brain: {e} — skipping the rest of the checkpoint set so the previous save stays coherent"
-            );
-            return None;
+        let staged = replace_dir_atomically(&self.checkpoint_dir, |staging| {
+            let paths = CheckpointDir::new(staging);
+            save_brain(self.brain.train(), &paths.brain_file(), save_stamp)?;
+            self.obs_normalizer
+                .save(arch, &paths.normalizer_path(), save_stamp)?;
+            save_return_normalizer(
+                &self.return_normalizer,
+                arch,
+                &paths.return_normalizer_path(),
+                save_stamp,
+            )?;
+            extra(&paths, save_stamp);
+            hardlink_missing_entries(&self.checkpoint_dir, staging)
+        });
+        match staged {
+            Ok(()) => {
+                info!(
+                    "Saved checkpoint set to {}",
+                    self.checkpoint_dir.display()
+                );
+                Some(save_stamp)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to save checkpoint set to {}: {e} — the previous set stays \
+                     intact and coherent",
+                    self.checkpoint_dir.display()
+                );
+                None
+            }
         }
-        info!("Saved brain to {}", paths.brain_file().display());
-        if let Err(e) = self
-            .obs_normalizer
-            .save(arch, &paths.normalizer_path(), save_stamp)
-        {
-            warn!(
-                "Failed to save obs normalizer: {e} — checkpoint set incomplete (the stamp makes this refuse at load)"
-            );
-            return None;
-        }
-        if let Err(e) = save_return_normalizer(
-            &self.return_normalizer,
-            arch,
-            &paths.return_normalizer_path(),
-            save_stamp,
-        ) {
-            warn!(
-                "Failed to save return normalizer: {e} — checkpoint set incomplete (the stamp makes this refuse at load)"
-            );
-            return None;
-        }
-        Some(save_stamp)
     }
 
     #[must_use = "a failed horizon open must be refused, not rolled on a stale/mis-normalized policy"]
