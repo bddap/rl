@@ -73,10 +73,10 @@ fn usable_cores() -> usize {
                     .split(':')
                     .nth(1)
                     .and_then(|s| s.trim().parse::<u32>().ok());
-            } else if line.trim().is_empty() {
-                if let (Some(p), Some(c)) = (phys.take(), core.take()) {
-                    pairs.insert((p, c));
-                }
+            } else if line.trim().is_empty()
+                && let (Some(p), Some(c)) = (phys.take(), core.take())
+            {
+                pairs.insert((p, c));
             }
         }
         if let (Some(p), Some(c)) = (phys, core) {
