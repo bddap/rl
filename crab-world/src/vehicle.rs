@@ -14,7 +14,11 @@ const MATCH_VEL_DAMP: f32 = 0.9;
 const PLANE: VehicleParams = VehicleParams {
     lever_thrust: 4.0,
     direct_thrust: Vec3::ZERO,
-    lift: 1.8,
+    // 0.9 puts level flight at ~2.9 m/s — above PLANE_SPAWN_SPEED (no free ballooning at
+    // spawn) and ~64% of the full-throttle terminal ~4.5 m/s, so climb costs throttle. At
+    // 1.8 the plane out-lifted its ~2.6 N weight from 1.4 m/s (owner: "Bernoulli overdone",
+    // rl#230); the level-flight band is pinned by `spawn_speed_sinks_high_speed_climbs`.
+    lift: 0.9,
     drag_lin: 0.2,
     drag_quad: 0.15,
     angular_drag: 0.06,
@@ -396,6 +400,35 @@ mod tests {
         assert!(
             fast > slow,
             "lift did not rise with airspeed: Δvy slow={slow} fast={fast}"
+        );
+    }
+
+    /// Pins the rl#230 feel-call: level flight lives strictly between spawn speed and the
+    /// full-throttle terminal — at spawn speed (2 m/s) lift < weight so the plane settles
+    /// instead of ballooning off the runway, while near terminal (4 m/s) lift > weight so
+    /// altitude is still winnable with throttle. Both sides sample vertical velocity over a
+    /// few zero-throttle ticks, level attitude, so lift vs gravity is the only vertical term.
+    #[test]
+    fn spawn_speed_sinks_high_speed_climbs() {
+        let dvy = |speed: f32| {
+            let (mut app, e) =
+                app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, speed));
+            set_cmd(&mut app, |c| c.throttle_trim = -1.0); // throttle to 0
+            let y0 = body(&app, e).1.linear.y;
+            for _ in 0..5 {
+                app.update();
+            }
+            body(&app, e).1.linear.y - y0
+        };
+        let at_spawn = dvy(PLANE_SPAWN_SPEED);
+        assert!(
+            at_spawn < 0.0,
+            "plane must sink at spawn speed (lift < weight), got Δvy={at_spawn}"
+        );
+        let near_terminal = dvy(4.0);
+        assert!(
+            near_terminal > 0.0,
+            "plane must climb near full-throttle terminal speed, got Δvy={near_terminal}"
         );
     }
 
