@@ -23,6 +23,7 @@ pub(crate) enum DemoAction {
     Manual,
     PickJoint,
     Torque,
+    SwapBrain,
     Quit,
     RevealControls,
 }
@@ -30,6 +31,7 @@ pub(crate) enum DemoAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DemoKey {
     R,
+    B,
     Space,
     Escape,
     Tab,
@@ -61,6 +63,8 @@ pub(crate) enum DemoPad {
     /// D-pad Right (render-view cycle). Split from [`DemoPad::DpadUpDown`] so the discrete
     /// verb resolves to its one button; both show the same D-pad glyph.
     DpadRight,
+    /// D-pad Left (brain swap, rl#232) — same split as [`DemoPad::DpadRight`].
+    DpadLeft,
     /// D-pad Up/Down (joint pick in manual mode) — a directional pair, read directly in
     /// `manual_control`, so it resolves to no single button.
     DpadUpDown,
@@ -114,6 +118,7 @@ impl ControlScheme for DemoControls {
     fn key_glyph(key: DemoKey) -> Glyph {
         match key {
             DemoKey::R => Glyph::Icon("controls/keyboard_r.png"),
+            DemoKey::B => Glyph::Label("B"),
             DemoKey::Space => Glyph::Icon("controls/keyboard_space.png"),
             DemoKey::Escape => Glyph::Icon("controls/keyboard_escape.png"),
             DemoKey::Tab => Glyph::Icon("controls/keyboard_tab.png"),
@@ -132,7 +137,9 @@ impl ControlScheme for DemoControls {
             DemoPad::South => Glyph::Icon("controls/xbox_button_a.png"),
             DemoPad::North => Glyph::Icon("controls/xbox_button_y.png"),
             DemoPad::Start => Glyph::Icon("controls/xbox_button_menu.png"),
-            DemoPad::DpadRight | DemoPad::DpadUpDown => Glyph::Icon("controls/xbox_dpad.png"),
+            DemoPad::DpadRight | DemoPad::DpadLeft | DemoPad::DpadUpDown => {
+                Glyph::Icon("controls/xbox_dpad.png")
+            }
             DemoPad::View => Glyph::Icon("controls/xbox_button_view.png"),
             DemoPad::LeftTrigger => Glyph::Label("LT"),
             DemoPad::West => Glyph::Label("X"),
@@ -152,6 +159,7 @@ impl ControlInput for DemoControls {
     fn key_code(key: DemoKey) -> Option<KeyCode> {
         match key {
             DemoKey::R => Some(KeyCode::KeyR),
+            DemoKey::B => Some(KeyCode::KeyB),
             DemoKey::Space => Some(KeyCode::Space),
             DemoKey::Escape => Some(KeyCode::Escape),
             DemoKey::Tab => Some(KeyCode::Tab),
@@ -171,6 +179,7 @@ impl ControlInput for DemoControls {
             DemoPad::North => Some(GamepadButton::North),
             DemoPad::Start => Some(GamepadButton::Start),
             DemoPad::DpadRight => Some(GamepadButton::DPadRight),
+            DemoPad::DpadLeft => Some(GamepadButton::DPadLeft),
             DemoPad::View => Some(GamepadButton::Select),
             // Analog/directional tokens (sticks, the zoom triggers, the joint-pick D-pad
             // pair) — read via their own axis/multi-button APIs in their systems.
@@ -191,7 +200,7 @@ impl ControlInput for DemoControls {
 /// hold pad View — both free in the demo's input set. Manual, PickJoint, and Torque are
 /// gamepad-only (no keyboard binding), so the keyboard legend omits them. Labels live in
 /// [`DEMO_ROWS`].
-pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [
+pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 12] = [
     Binding {
         action: DemoAction::Orbit,
         keyboard: KbBinding::new(&[DemoKey::Arrows], &[DemoMouse::Drag]),
@@ -236,6 +245,11 @@ pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [
         action: DemoAction::Torque,
         keyboard: KbBinding::NONE,
         pad: PadBinding::new(&[DemoPad::RightStick]),
+    },
+    Binding {
+        action: DemoAction::SwapBrain,
+        keyboard: KbBinding::new(&[DemoKey::B], &[]),
+        pad: PadBinding::new(&[DemoPad::DpadLeft]),
     },
     Binding {
         action: DemoAction::Quit,
@@ -288,7 +302,7 @@ pub(super) fn torque_stick_y(gp: &Gamepad) -> f32 {
     gp.right_stick().y
 }
 
-pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 11] = [
+pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 12] = [
     ContextRow {
         action: DemoAction::Orbit,
         label: "Orbit camera",
@@ -326,6 +340,10 @@ pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 11] = [
         label: "Joint torque (manual)",
     },
     ContextRow {
+        action: DemoAction::SwapBrain,
+        label: "Swap brain",
+    },
+    ContextRow {
         action: DemoAction::Quit,
         label: "Quit",
     },
@@ -342,7 +360,7 @@ mod tests {
     #[test]
     fn demo_scheme_is_well_formed() {
         use crate::controls::assert_scheme_well_formed;
-        const ALL: [DemoAction; 11] = [
+        const ALL: [DemoAction; 12] = [
             DemoAction::Orbit,
             DemoAction::Zoom,
             DemoAction::Rebuild,
@@ -352,6 +370,7 @@ mod tests {
             DemoAction::Manual,
             DemoAction::PickJoint,
             DemoAction::Torque,
+            DemoAction::SwapBrain,
             DemoAction::Quit,
             DemoAction::RevealControls,
         ];
@@ -366,6 +385,7 @@ mod tests {
                 | DemoAction::Manual
                 | DemoAction::PickJoint
                 | DemoAction::Torque
+                | DemoAction::SwapBrain
                 | DemoAction::Quit
                 | DemoAction::RevealControls => true,
             }

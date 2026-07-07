@@ -22,6 +22,7 @@ pub enum Action {
     Quit,
     EnterExit,
     CycleRenderMode,
+    SwapBrain,
     RevealControls,
 
     PlaneAttitude,
@@ -44,6 +45,7 @@ pub enum Key {
     E,
     R,
     V,
+    B,
     Tab,
     Space,
     Escape,
@@ -69,6 +71,9 @@ pub enum PadButton {
     Back,
     LeftStick,
     RightStick,
+    /// Right-stick CLICK (R3) — distinct from [`PadButton::RightStick`], the analog
+    /// aim/look token; the click is the one pad button free in every context (rl#232).
+    RightStickClick,
     Dpad,
 }
 
@@ -133,6 +138,7 @@ impl ControlScheme for GcrControls {
             Key::E => "controls/keyboard_e.png",
             Key::R => "controls/keyboard_r.png",
             Key::V => "controls/keyboard_v.png",
+            Key::B => return Glyph::Label("B"),
             Key::Tab => "controls/keyboard_tab.png",
             Key::Space => "controls/keyboard_space.png",
             Key::Escape => "controls/keyboard_escape.png",
@@ -153,6 +159,7 @@ impl ControlScheme for GcrControls {
             PadButton::Back => Glyph::Icon("controls/xbox_button_view.png"),
             PadButton::LeftStick => Glyph::Icon("controls/xbox_stick_l.png"),
             PadButton::RightStick => Glyph::Icon("controls/xbox_stick_r.png"),
+            PadButton::RightStickClick => Glyph::Label("R3"),
             PadButton::Dpad => Glyph::Icon("controls/xbox_dpad.png"),
         }
     }
@@ -165,7 +172,7 @@ impl ControlScheme for GcrControls {
     }
 }
 
-pub const BINDINGS: [Binding<GcrControls>; 19] = [
+pub const BINDINGS: [Binding<GcrControls>; 20] = [
     Binding {
         action: Action::MoveForward,
         keyboard: KbBinding::new(&[Key::W], &[]),
@@ -217,6 +224,11 @@ pub const BINDINGS: [Binding<GcrControls>; 19] = [
         pad: PadBinding::new(&[PadButton::East]),
     },
     Binding {
+        action: Action::SwapBrain,
+        keyboard: KbBinding::new(&[Key::B], &[]),
+        pad: PadBinding::new(&[PadButton::RightStickClick]),
+    },
+    Binding {
         action: Action::RevealControls,
         keyboard: KbBinding::hold(&[Key::Tab], &[]),
         pad: PadBinding::hold(&[PadButton::Back]),
@@ -263,7 +275,7 @@ pub const BINDINGS: [Binding<GcrControls>; 19] = [
     },
 ];
 
-pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
+pub const FOOT_ROWS: [ContextRow<GcrControls>; 12] = [
     ContextRow {
         action: Action::MoveForward,
         label: "Forward",
@@ -295,6 +307,10 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
     ContextRow {
         action: Action::CycleRenderMode,
         label: "Render view",
+    },
+    ContextRow {
+        action: Action::SwapBrain,
+        label: "Swap Sally brain",
     },
     ContextRow {
         action: Action::Restart,
@@ -404,6 +420,7 @@ mod bevy_glue {
                 Key::E => KeyCode::KeyE,
                 Key::R => KeyCode::KeyR,
                 Key::V => KeyCode::KeyV,
+                Key::B => KeyCode::KeyB,
                 Key::Tab => KeyCode::Tab,
                 Key::Space => KeyCode::Space,
                 Key::Escape => KeyCode::Escape,
@@ -433,6 +450,7 @@ mod bevy_glue {
                 PadButton::RightBumper => Some(GamepadButton::RightTrigger),
                 PadButton::Start => Some(GamepadButton::Start),
                 PadButton::Back => Some(GamepadButton::Select),
+                PadButton::RightStickClick => Some(GamepadButton::RightThumb),
                 PadButton::LeftStick | PadButton::RightStick | PadButton::Dpad => None,
             }
         }
@@ -470,7 +488,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 19] = [
+    const ALL_ACTIONS: [Action; 20] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -481,6 +499,7 @@ mod tests {
         Action::Quit,
         Action::EnterExit,
         Action::CycleRenderMode,
+        Action::SwapBrain,
         Action::RevealControls,
         Action::PlaneAttitude,
         Action::PlaneThrottle,
@@ -508,6 +527,7 @@ mod tests {
                 | Action::Quit
                 | Action::EnterExit
                 | Action::CycleRenderMode
+                | Action::SwapBrain
                 | Action::RevealControls
                 | Action::PlaneAttitude
                 | Action::PlaneThrottle
@@ -692,8 +712,9 @@ mod tests {
                             b.action
                         ),
                         Glyph::Label(l) => assert!(
-                            matches!(l, "LT" | "LB" | "RB"),
-                            "unexpected text glyph {l:?} for {:?} (only the art-less triggers/bumpers)",
+                            matches!(l, "LT" | "LB" | "RB" | "R3" | "B"),
+                            "unexpected text glyph {l:?} for {:?} (only the art-less \
+                             triggers/bumpers and the rl#232 swap inputs)",
                             b.action
                         ),
                     }

@@ -85,6 +85,7 @@ pub fn build_windowed_app(
             (
                 grab_cursor,
                 quit_game,
+                super::brain_swap::swap_brain,
                 (
                     track_active_device,
                     sync_controls_context,
