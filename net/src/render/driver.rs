@@ -88,6 +88,9 @@ pub(super) fn teardown_round(world: &mut World) {
     if let Some(mut ctrl) = world.get_resource_mut::<VehicleControls>() {
         ctrl.0.clear();
     }
+    // Round state like the labels above: a survivor would suppress (or mis-measure) the next
+    // round's remote-craft appeared/moved edges.
+    world.remove_resource::<super::articulation::RemoteCraftWatch>();
 }
 
 fn end_round_server_down(

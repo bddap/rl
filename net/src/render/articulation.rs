@@ -18,7 +18,7 @@ pub(super) struct RemoteVehicle(pub(super) Vec<VehiclePoseWire>);
 /// peer) and each craft's first real displacement (proof the other pilot's craft is moving here,
 /// rl#191 increment 4) — instead of a per-tick pose flood.
 #[derive(Resource, Default)]
-struct RemoteCraftWatch {
+pub(super) struct RemoteCraftWatch {
     pilots: Vec<u8>,
     first_pose: std::collections::BTreeMap<u8, Vec3>,
     moved: std::collections::BTreeSet<u8>,
