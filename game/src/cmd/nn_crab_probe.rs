@@ -81,13 +81,15 @@ pub(crate) fn run(args: Args) -> Result<()> {
         if traj_match { "MATCHES" } else { "DIFFERS" },
     );
 
-    if closed > 1.0 && traj_match {
-        println!("nn-crab-probe: PASS — NN crab walked toward the player, reproducibly");
+    // Verdict binds to reproducibility ONLY. The distance table above is a diagnostic:
+    // this scenario (a ~21 m player spawn) is outside the trained chase domain, so a
+    // distance threshold here fails known-good policies (bddap/rl#144). Behavioral
+    // pass/fail lives in the one shared chase metric, `rl-train eval --min-progress`
+    // (bddap/bothouse#134) — never a second gate here that drifts from it.
+    if traj_match {
+        println!("nn-crab-probe: PASS — trajectory reproducible (closed {closed:.3} m, diagnostic only)");
         Ok(())
     } else {
-        anyhow::bail!(
-            "nn-crab-probe: FAIL — closed {closed:.3} m (want > 1.0) / trajectory \
-             reproducible = {traj_match}"
-        )
+        anyhow::bail!("nn-crab-probe: FAIL — trajectory not reproducible (closed {closed:.3} m)")
     }
 }
