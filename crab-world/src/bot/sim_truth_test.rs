@@ -318,9 +318,10 @@ fn crab_settles_quietly_at_rest() {
     );
 
     assert!(
-        ang_mean < 0.3,
+        ang_mean < super::collider_check::QUIET_ANG_RADPS,
         "carapace still twitching at rest: angular speed mean {ang_mean:.3} rad/s \
-         (want <0.3; 12 Hz contact sits ~0.61, the 30 Hz / substeps=1 regressions ~1.5)"
+         (want <{}; 12 Hz contact sits ~0.61, the 30 Hz / substeps=1 regressions ~1.5)",
+        super::collider_check::QUIET_ANG_RADPS
     );
     assert!(
         bounce < 0.024,
@@ -379,14 +380,18 @@ fn claws_quiet_at_rest() {
         "claws at rest: mean worst-link linear {lin_mean:.3} m/s, angular {ang_mean:.3} rad/s"
     );
     assert!(
-        lin_mean < 0.2,
+        lin_mean < super::collider_check::QUIET_LIN_MPS,
         "claw links shaking at rest: mean worst-link linear speed {lin_mean:.3} m/s \
-         (want <0.2) — the contact spring regressed stiffer"
+         (want <{}) — the contact spring regressed stiffer",
+        super::collider_check::QUIET_LIN_MPS
     );
     assert!(
-        ang_mean < 0.3,
+        ang_mean < super::collider_check::QUIET_ANG_RADPS,
         "claw links shaking at rest: mean worst-link angular speed {ang_mean:.3} rad/s \
-         (want <0.3; the carapace-nesting fix brought this from ~0.77 to ~0.20)"
+         (want <{}; the claws are HELD by load-bearing rest contacts — pincer on \
+         shoulder, shell on leg bases; collision-group changes that remove that \
+         support make this 3-4x worse, rl#109)",
+        super::collider_check::QUIET_ANG_RADPS
     );
 }
 
