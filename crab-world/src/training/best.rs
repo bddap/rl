@@ -268,42 +268,30 @@ impl BestKeeper {
         true
     }
 
+    /// Mirror the live set into `best/` as ONE staged generation swapped in atomically
+    /// ([`super::replace_dir_atomically`], bddap/rl#238): a concurrent reader of
+    /// `best/` sees the old or the new complete set, never a mix; a missing REQUIRED
+    /// source or any copy failure aborts the swap with the incumbent untouched; and an
+    /// optional file from an earlier generation never survives into a new one (the
+    /// staging starts empty), so `best/` is one generation, never e.g. an old
+    /// optimizer paired with a new brain.
     fn snapshot(&self, progress: Progress) -> std::io::Result<()> {
-        for f in BEST_FILES.iter().filter(|f| f.required) {
-            let src = self.checkpoint_dir.join(f.name);
-            if !src.exists() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!(
-                        "required checkpoint file {} missing from {} — refusing to write an \
-                         incomplete best set",
-                        f.name,
-                        self.checkpoint_dir.display()
-                    ),
-                ));
-            }
-        }
-
-        let best_dir = self.checkpoint_dir.join(BEST_SUBDIR);
-        std::fs::create_dir_all(&best_dir)?;
-        for f in BEST_FILES {
-            let src = self.checkpoint_dir.join(f.name);
-            let dst = best_dir.join(f.name);
-            if !src.exists() {
-                // An optional file from an earlier snapshot must not survive into a new
-                // one — best/ is one generation, never a mix (e.g. an old optimizer
-                // paired with a new brain). Never remove a REQUIRED dst: a required src
-                // vanishing after the precheck must not strip the incumbent's set.
-                if !f.required {
-                    let _ = std::fs::remove_file(&dst);
+        super::replace_dir_atomically(&self.checkpoint_dir.join(BEST_SUBDIR), |staging| {
+            for f in BEST_FILES {
+                let src = self.checkpoint_dir.join(f.name);
+                match std::fs::copy(&src, staging.join(f.name)) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound && !f.required => {}
+                    Err(e) => {
+                        return Err(std::io::Error::new(
+                            e.kind(),
+                            format!("staging {} from {}: {e}", f.name, src.display()),
+                        ));
+                    }
                 }
-                continue;
             }
-            let tmp = best_dir.join(format!("{}.tmp", f.name));
-            std::fs::copy(&src, &tmp)?;
-            super::fsync_rename(&tmp, &dst)?;
-        }
-        write_progress_sidecar(&best_dir, progress)
+            write_progress_sidecar(staging, progress)
+        })
     }
 }
 

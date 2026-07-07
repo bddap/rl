@@ -41,20 +41,14 @@ fn snapshot_policy(state: &TrainingState, log_std_floor: f32) -> RollRequest {
 
 /// Phase 1 (durability) — persist the checkpoint so a live demo / a restart picks up
 /// the latest weights, normalizer, and Adam moments. Not a handoff to the threads (they
-/// get the in-memory snapshot); the Adam state lives on the GPU learner, so it is saved
-/// here beside the brain, stamped with the set's save stamp so a resume can verify the
-/// moments belong to this brain (bddap/rl#215). If the set itself didn't complete, the
-/// optimizer is skipped too — the previous save's optimizer stays paired with the
-/// previous save's brain.
-fn persist_checkpoint(
-    state: &TrainingState,
-    gpu_learner: &crate::training::gpu::GpuLearner,
-    checkpoint_dir: &Path,
-) {
-    let paths = CheckpointDir::new(checkpoint_dir);
-    if let Some(save_stamp) = state.save_checkpoint() {
+/// get the in-memory snapshot); the Adam state lives on the GPU learner, so it is
+/// written into the same staged set as the brain — one save stamp, one atomic dir swap
+/// (bddap/rl#215, #238) — so neither a reader nor a resume can pair the moments with a
+/// brain from a different save.
+fn persist_checkpoint(state: &TrainingState, gpu_learner: &crate::training::gpu::GpuLearner) {
+    state.save_checkpoint(|paths, save_stamp| {
         gpu_learner.save_adam_state(&paths.optimizer_path(), state.brain().arch(), save_stamp);
-    }
+    });
 }
 
 /// Phase 2 — roll one synchronous horizon across all threads: send each its request,
@@ -381,7 +375,7 @@ pub fn run_learner(
         // 1) Capture the consistent per-iteration snapshot (weights + master normalizer,
         //    none half-updated) and persist a checkpoint.
         let request = snapshot_policy(&state, log_std_floor);
-        persist_checkpoint(&state, &gpu_learner, &checkpoint_dir);
+        persist_checkpoint(&state, &gpu_learner);
 
         // 2) Roll one synchronous horizon across all threads.
         let rollout_start = Instant::now();
@@ -470,7 +464,7 @@ pub fn run_learner(
     // and a later resume warm-starts the moments instead of refusing a stale stamp
     // (bddap/rl#215). The rollout threads are torn down by their Drop (channel close +
     // join) when `threads` drops.
-    persist_checkpoint(&state, &gpu_learner, &checkpoint_dir);
+    persist_checkpoint(&state, &gpu_learner);
     if timed_samples > 0 {
         let rollout_sps = timed_samples as f64 / timed_rollout_secs.max(1e-9);
         let e2e_sps = timed_samples as f64 / timed_wall_secs.max(1e-9);
