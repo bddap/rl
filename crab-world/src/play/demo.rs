@@ -75,8 +75,9 @@ pub(super) fn demo_controls(
     mut settle: ResMut<DemoSettle>,
     mut render_mode: ResMut<crate::crab_view::RenderMode>,
     mut rng: ResMut<super::DemoRng>,
+    mut policy: NonSendMut<crate::policy::Policy>,
 ) {
-    // All four verbs dispatch from DEMO_BINDINGS, so they trigger on exactly the inputs the
+    // The tap verbs dispatch from DEMO_BINDINGS, so they trigger on exactly the inputs the
     // legend shows. RenderView (→ / D-pad Right) CYCLES the render view (mesh →
     // mesh+colliders → colliders); the other arrow keys are the orbit camera — its
     // right-yaw moved to the comma key so → isn't double-bound (mouse right-drag still
@@ -93,6 +94,11 @@ pub(super) fn demo_controls(
     if cycle_view {
         *render_mode = render_mode.next();
         info!("demo render mode: {:?}", *render_mode);
+    }
+    // The swapped label reaches the screen through the every-frame `publish_brain_label`;
+    // a failed swap keeps the current brain (the one swap path already logs it loudly).
+    if just(DemoAction::SwapBrain) {
+        policy.cycle_brain();
     }
     if reset {
         demo_respawn(

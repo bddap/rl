@@ -1,0 +1,688 @@
+commit af9b1c2569ca8f00164a8854999aab2a7b29f006
+Author: bddap-bot <bddap.bot@gmail.com>
+Date:   Tue Jul 7 05:16:17 2026 -0700
+
+    rl#232: controller button swaps Sally's brain at runtime (demo + GCR)
+    
+    One swap path (crab_world::policy::cycle_brain) for both surfaces: the
+    roster is the primary checkpoint dir ("latest") plus every brain-holding
+    subdir (keep-best's best/ today; drop in more run/arch dirs and they join
+    the cycle — data-driven, arch from each checkpoint's envelope). A swap
+    that refuses to load keeps the current brain; the slot name rides the ONE
+    label formatter, so the crab's on-screen brain label (and the GCR
+    articulation wire to clients) shows the active slot.
+    
+    Demo: B / D-pad Left; a policy that hot-follows a live dir follows the
+    swapped slot (so "latest" keeps streaming the trainer, "best" tracks
+    keep-best promotions). GCR: B / R3 on the solo/host peer — Sally's brain
+    selection stays where Sally is simulated; a remote client's button is a
+    no-op and its label adopts the host's via articulation.
+    
+    Both bindings + controls-HUD rows come from the one scheme table per the
+    standing controls rule.
+
+diff --git a/.warm-copy-done b/.warm-copy-done
+new file mode 100644
+index 0000000..e69de29
+diff --git a/crab-world/src/play/controls.rs b/crab-world/src/play/controls.rs
+index 81c141c..817c841 100644
+--- a/crab-world/src/play/controls.rs
++++ b/crab-world/src/play/controls.rs
+@@ -23,6 +23,7 @@ pub(crate) enum DemoAction {
+     Manual,
+     PickJoint,
+     Torque,
++    SwapBrain,
+     Quit,
+     RevealControls,
+ }
+@@ -30,6 +31,8 @@ pub(crate) enum DemoAction {
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum DemoKey {
+     R,
++    /// The brain-swap key (rl#232).
++    B,
+     Space,
+     Escape,
+     Tab,
+@@ -61,6 +64,8 @@ pub(crate) enum DemoPad {
+     /// D-pad Right (render-view cycle). Split from [`DemoPad::DpadUpDown`] so the discrete
+     /// verb resolves to its one button; both show the same D-pad glyph.
+     DpadRight,
++    /// D-pad Left (brain swap, rl#232) — same split as [`DemoPad::DpadRight`].
++    DpadLeft,
+     /// D-pad Up/Down (joint pick in manual mode) — a directional pair, read directly in
+     /// `manual_control`, so it resolves to no single button.
+     DpadUpDown,
+@@ -114,6 +119,7 @@ impl ControlScheme for DemoControls {
+     fn key_glyph(key: DemoKey) -> Glyph {
+         match key {
+             DemoKey::R => Glyph::Icon("controls/keyboard_r.png"),
++            DemoKey::B => Glyph::Label("B"),
+             DemoKey::Space => Glyph::Icon("controls/keyboard_space.png"),
+             DemoKey::Escape => Glyph::Icon("controls/keyboard_escape.png"),
+             DemoKey::Tab => Glyph::Icon("controls/keyboard_tab.png"),
+@@ -132,7 +138,9 @@ impl ControlScheme for DemoControls {
+             DemoPad::South => Glyph::Icon("controls/xbox_button_a.png"),
+             DemoPad::North => Glyph::Icon("controls/xbox_button_y.png"),
+             DemoPad::Start => Glyph::Icon("controls/xbox_button_menu.png"),
+-            DemoPad::DpadRight | DemoPad::DpadUpDown => Glyph::Icon("controls/xbox_dpad.png"),
++            DemoPad::DpadRight | DemoPad::DpadLeft | DemoPad::DpadUpDown => {
++                Glyph::Icon("controls/xbox_dpad.png")
++            }
+             DemoPad::View => Glyph::Icon("controls/xbox_button_view.png"),
+             DemoPad::LeftTrigger => Glyph::Label("LT"),
+             DemoPad::West => Glyph::Label("X"),
+@@ -152,6 +160,7 @@ impl ControlInput for DemoControls {
+     fn key_code(key: DemoKey) -> Option<KeyCode> {
+         match key {
+             DemoKey::R => Some(KeyCode::KeyR),
++            DemoKey::B => Some(KeyCode::KeyB),
+             DemoKey::Space => Some(KeyCode::Space),
+             DemoKey::Escape => Some(KeyCode::Escape),
+             DemoKey::Tab => Some(KeyCode::Tab),
+@@ -171,6 +180,7 @@ impl ControlInput for DemoControls {
+             DemoPad::North => Some(GamepadButton::North),
+             DemoPad::Start => Some(GamepadButton::Start),
+             DemoPad::DpadRight => Some(GamepadButton::DPadRight),
++            DemoPad::DpadLeft => Some(GamepadButton::DPadLeft),
+             DemoPad::View => Some(GamepadButton::Select),
+             // Analog/directional tokens (sticks, the zoom triggers, the joint-pick D-pad
+             // pair) — read via their own axis/multi-button APIs in their systems.
+@@ -191,7 +201,7 @@ impl ControlInput for DemoControls {
+ /// hold pad View — both free in the demo's input set. Manual, PickJoint, and Torque are
+ /// gamepad-only (no keyboard binding), so the keyboard legend omits them. Labels live in
+ /// [`DEMO_ROWS`].
+-pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [
++pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 12] = [
+     Binding {
+         action: DemoAction::Orbit,
+         keyboard: KbBinding::new(&[DemoKey::Arrows], &[DemoMouse::Drag]),
+@@ -237,6 +247,11 @@ pub(crate) const DEMO_BINDINGS: [Binding<DemoControls>; 11] = [
+         keyboard: KbBinding::NONE,
+         pad: PadBinding::new(&[DemoPad::RightStick]),
+     },
++    Binding {
++        action: DemoAction::SwapBrain,
++        keyboard: KbBinding::new(&[DemoKey::B], &[]),
++        pad: PadBinding::new(&[DemoPad::DpadLeft]),
++    },
+     Binding {
+         action: DemoAction::Quit,
+         keyboard: KbBinding::new(&[DemoKey::Escape], &[]),
+@@ -288,7 +303,7 @@ pub(super) fn torque_stick_y(gp: &Gamepad) -> f32 {
+     gp.right_stick().y
+ }
+ 
+-pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 11] = [
++pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 12] = [
+     ContextRow {
+         action: DemoAction::Orbit,
+         label: "Orbit camera",
+@@ -325,6 +340,10 @@ pub(crate) const DEMO_ROWS: [ContextRow<DemoControls>; 11] = [
+         action: DemoAction::Torque,
+         label: "Joint torque (manual)",
+     },
++    ContextRow {
++        action: DemoAction::SwapBrain,
++        label: "Swap brain",
++    },
+     ContextRow {
+         action: DemoAction::Quit,
+         label: "Quit",
+@@ -342,7 +361,7 @@ mod tests {
+     #[test]
+     fn demo_scheme_is_well_formed() {
+         use crate::controls::assert_scheme_well_formed;
+-        const ALL: [DemoAction; 11] = [
++        const ALL: [DemoAction; 12] = [
+             DemoAction::Orbit,
+             DemoAction::Zoom,
+             DemoAction::Rebuild,
+@@ -352,6 +371,7 @@ mod tests {
+             DemoAction::Manual,
+             DemoAction::PickJoint,
+             DemoAction::Torque,
++            DemoAction::SwapBrain,
+             DemoAction::Quit,
+             DemoAction::RevealControls,
+         ];
+@@ -366,6 +386,7 @@ mod tests {
+                 | DemoAction::Manual
+                 | DemoAction::PickJoint
+                 | DemoAction::Torque
++                | DemoAction::SwapBrain
+                 | DemoAction::Quit
+                 | DemoAction::RevealControls => true,
+             }
+diff --git a/crab-world/src/play/demo.rs b/crab-world/src/play/demo.rs
+index d40f03f..db4ac30 100644
+--- a/crab-world/src/play/demo.rs
++++ b/crab-world/src/play/demo.rs
+@@ -75,6 +75,8 @@ pub(super) fn demo_controls(
+     mut settle: ResMut<DemoSettle>,
+     mut render_mode: ResMut<crate::crab_view::RenderMode>,
+     mut rng: ResMut<super::DemoRng>,
++    mut policy: NonSendMut<crate::policy::Policy>,
++    swap_root: Res<super::policy::BrainSwapRoot>,
+ ) {
+     // All four verbs dispatch from DEMO_BINDINGS, so they trigger on exactly the inputs the
+     // legend shows. RenderView (→ / D-pad Right) CYCLES the render view (mesh →
+@@ -94,6 +96,11 @@ pub(super) fn demo_controls(
+         *render_mode = render_mode.next();
+         info!("demo render mode: {:?}", *render_mode);
+     }
++    // The swapped label reaches the screen through the every-frame `publish_brain_label`;
++    // a failed swap keeps the current brain (the one swap path already logs it loudly).
++    if just(DemoAction::SwapBrain) {
++        crate::policy::cycle_brain(&mut policy, &swap_root.0);
++    }
+     if reset {
+         demo_respawn(
+             &mut commands,
+diff --git a/crab-world/src/play/mod.rs b/crab-world/src/play/mod.rs
+index 693e289..544832e 100644
+--- a/crab-world/src/play/mod.rs
++++ b/crab-world/src/play/mod.rs
+@@ -20,7 +20,7 @@ use crate::bot::BotSet;
+ use crate::bot::body::CrabCarapace;
+ use crate::screenshot::{self, ShotProgress, ShotTarget};
+ 
+-pub use crate::policy::{Policy, RigDims, RigFit, checkpoint_fits_rig};
++pub use crate::policy::{Policy, RigDims, RigFit, checkpoint_fits_rig, cycle_brain};
+ pub use render_video::RenderVideoPlugin;
+ 
+ pub fn rig_dims() -> RigDims {
+diff --git a/crab-world/src/play/policy.rs b/crab-world/src/play/policy.rs
+index 22dcaf5..eec4eef 100644
+--- a/crab-world/src/play/policy.rs
++++ b/crab-world/src/play/policy.rs
+@@ -29,8 +29,19 @@ pub(super) fn policy_step(
+     *a = policy.act(o);
+ }
+ 
++/// The roster root the demo's brain-swap button cycles under
++/// ([`crate::policy::cycle_brain`], rl#232): the live dir when one is set (that is the
++/// dir being DRIVEN on the TV), else the boot checkpoint dir.
++#[derive(Resource)]
++pub(super) struct BrainSwapRoot(pub(super) PathBuf);
++
+ pub(super) fn add_inference(app: &mut App, checkpoint_dir: &Path, live_dir: Option<PathBuf>) {
+     let mut policy = Policy::load(checkpoint_dir);
++    app.insert_resource(BrainSwapRoot(
++        live_dir
++            .clone()
++            .unwrap_or_else(|| checkpoint_dir.to_owned()),
++    ));
+     policy.set_live_dir(live_dir);
+     app.insert_non_send_resource(policy);
+     // The demo's single crab wears its brain's identity on screen (rl#200 increment 7).
+diff --git a/crab-world/src/policy.rs b/crab-world/src/policy.rs
+index 1e3a098..16f3ced 100644
+--- a/crab-world/src/policy.rs
++++ b/crab-world/src/policy.rs
+@@ -15,6 +15,13 @@ use crate::training::normalizer::{NORMALIZER_CLIP, ObsNormalizer};
+ 
+ pub struct Policy {
+     device: NdArrayDevice,
++    /// The checkpoint dir whose brain currently drives [`Self::state`] — the identity
++    /// [`cycle_brain`] keys its cursor off.
++    dir: PathBuf,
++    /// The roster slot name once the operator has swapped brains ([`cycle_brain`]);
++    /// `None` until the first swap, so the label is unchanged on surfaces that never
++    /// swap.
++    slot: Option<String>,
+     #[cfg_attr(not(feature = "render"), allow(dead_code))]
+     live_dir: Option<PathBuf>,
+     #[cfg_attr(not(feature = "render"), allow(dead_code))]
+@@ -250,6 +257,8 @@ impl Policy {
+ 
+         Self {
+             device,
++            dir: checkpoint_dir.to_owned(),
++            slot: None,
+             live_dir: None,
+             last_loaded: None,
+             last_refused: None,
+@@ -257,6 +266,52 @@ impl Policy {
+         }
+     }
+ 
++    /// Point this policy at a different checkpoint dir NOW — the one brain-swap
++    /// primitive ([`cycle_brain`]; the demo's button and the GCR host's button both land
++    /// here). Only a `Fit` load replaces the driving state; any other verdict is logged
++    /// loudly and keeps the current brain, exactly like a hot-reload of a bad file — a
++    /// swap must never blank a working Sally. A policy that hot-follows a live dir
++    /// follows the SWITCHED dir from now on (so "latest" keeps streaming the trainer and
++    /// "best" tracks keep-best promotions), one that never hot-reloads stays static on
++    /// the new brain.
++    fn switch_dir(&mut self, slot: &str, dir: &Path) -> bool {
++        match load_brain_normalizer(dir, &self.device) {
++            Loaded::Fit(brain, normalizer) => {
++                self.state = loaded_state(brain, normalizer, checkpoint_digest(dir));
++                self.dir = dir.to_owned();
++                self.slot = Some(slot.to_owned());
++                if self.live_dir.is_some() {
++                    self.live_dir = Some(dir.to_owned());
++                }
++                self.last_loaded = std::fs::metadata(CheckpointDir::new(dir).brain_file())
++                    .and_then(|m| m.modified())
++                    .ok();
++                self.last_refused = None;
++                info!(
++                    "brain swap: '{slot}' now driving from {} — {}",
++                    dir.display(),
++                    self.brain_label()
++                );
++                true
++            }
++            Loaded::Absent => {
++                warn!(
++                    "brain swap: no brain at {} — keeping the current brain",
++                    dir.display()
++                );
++                false
++            }
++            Loaded::Mismatch(dims) => {
++                log_rig_mismatch("brain swap", dir, dims);
++                false
++            }
++            Loaded::Refused(why) => {
++                log_checkpoint_refusal("brain swap", dir, &why);
++                false
++            }
++        }
++    }
++
+     #[cfg_attr(not(feature = "render"), allow(dead_code))]
+     pub(crate) fn set_live_dir(&mut self, dir: Option<PathBuf>) {
+         self.live_dir = dir;
+@@ -277,6 +332,7 @@ impl Policy {
+         match load_brain_normalizer(&dir, &self.device) {
+             Loaded::Fit(brain, normalizer) => {
+                 self.state = loaded_state(brain, normalizer, checkpoint_digest(&dir));
++                self.dir = dir;
+                 self.last_loaded = Some(mtime);
+                 true
+             }
+@@ -328,6 +384,16 @@ impl Policy {
+     /// the demo, the GCR host, and (via the articulation wire) every GCR client render this
+     /// exact string, so the label can't drift per surface.
+     pub fn brain_label(&self) -> String {
++        let core = self.state_label();
++        match &self.slot {
++            // Once the operator swaps brains, the label carries the roster slot — that
++            // prefix IS the "which brain is Sally running" answer on every surface.
++            Some(slot) => format!("{slot} · {core}"),
++            None => core,
++        }
++    }
++
++    fn state_label(&self) -> String {
+         match &self.state {
+             PolicyState::Loaded { brain, digest, .. } => {
+                 // First 8 hex chars of the full checkpoint digest — enough to tell two live
+@@ -369,6 +435,61 @@ impl Policy {
+     }
+ }
+ 
++/// The roster name of the primary checkpoint dir itself — the trainer's live/deployed
++/// weights, as opposed to a named subdir like keep-best's `best/`.
++pub const PRIMARY_BRAIN_SLOT: &str = "latest";
++
++/// The swap list rooted at one primary checkpoint dir: the dir itself
++/// ([`PRIMARY_BRAIN_SLOT`]) plus every direct subdirectory holding a `brain.bin`, named
++/// by its dir name and sorted. Data-driven by construction (rl#232): keep-best's `best/`
++/// joins because it is such a subdir, and dropping in more dirs (or symlinks — another
++/// run's ckpt, another architecture) extends the cycle with no code change; each brain's
++/// arch comes from its own envelope at load time.
++pub fn brain_slots(primary: &Path) -> Vec<(String, PathBuf)> {
++    let mut subs: Vec<(String, PathBuf)> = std::fs::read_dir(primary)
++        .into_iter()
++        .flatten()
++        .flatten()
++        .filter_map(|entry| {
++            let dir = entry.path();
++            (dir.is_dir() && CheckpointDir::new(&dir).brain_file().is_file())
++                .then(|| (entry.file_name().to_string_lossy().into_owned(), dir))
++        })
++        .collect();
++    subs.sort();
++    let mut slots = vec![(PRIMARY_BRAIN_SLOT.to_string(), primary.to_owned())];
++    slots.append(&mut subs);
++    slots
++}
++
++/// Swap `policy` to the next loadable brain in the roster under `primary` — THE one
++/// brain-swap code path (rl#232): the demo's button and the GCR host's button both call
++/// this, so the two surfaces can't drift. Re-enumerates the roster per press (a `best/`
++/// promoted since boot, or a run dir dropped in, joins without a restart), skips slots
++/// that refuse to load (each refusal already logged loudly), and returns the slot name it
++/// switched to — `None` when there is nothing to swap to or every other slot refused.
++pub fn cycle_brain(policy: &mut Policy, primary: &Path) -> Option<String> {
++    let slots = brain_slots(primary);
++    if slots.len() < 2 {
++        info!(
++            "brain swap: only one brain under {} — nothing to swap to",
++            primary.display()
++        );
++        return None;
++    }
++    let current = slots
++        .iter()
++        .position(|(_, d)| *d == policy.dir)
++        .unwrap_or(0);
++    for step in 1..slots.len() {
++        let (slot, dir) = &slots[(current + step) % slots.len()];
++        if policy.switch_dir(slot, dir) {
++            return Some(slot.clone());
++        }
++    }
++    None
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -757,4 +878,65 @@ mod tests {
+ 
+         let _ = std::fs::remove_dir_all(&dir);
+     }
++
++    /// rl#232: the swap roster is the primary dir + every brain-holding subdir, and the
++    /// cycle walks it latest → best → latest, stamping the slot into the label; a slot
++    /// that refuses to load is skipped, and a roster of one is a no-op.
++    #[test]
++    fn cycle_brain_walks_the_roster_and_labels_the_slot() {
++        let root = std::env::temp_dir().join(format!("rl-brain-cycle-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&root);
++        save_brain(&root);
++        save_brain(&root.join("best"));
++        // A non-checkpoint subdir (keep-best's own sidecar litter, a stray dir) never
++        // becomes a slot.
++        std::fs::create_dir_all(root.join("not-a-brain")).unwrap();
++
++        let slots = brain_slots(&root);
++        assert_eq!(
++            slots.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
++            vec![PRIMARY_BRAIN_SLOT, "best"],
++        );
++
++        let mut policy = Policy::load(&root);
++        assert!(policy.is_loaded());
++        let boot_label = policy.brain_label();
++        assert!(
++            !boot_label.contains('·'),
++            "no slot prefix before the first swap: {boot_label}"
++        );
++
++        assert_eq!(cycle_brain(&mut policy, &root).as_deref(), Some("best"));
++        assert!(
++            policy.brain_label().starts_with("best · "),
++            "{}",
++            policy.brain_label()
++        );
++        assert_eq!(policy.dir, root.join("best"));
++
++        assert_eq!(
++            cycle_brain(&mut policy, &root).as_deref(),
++            Some(PRIMARY_BRAIN_SLOT)
++        );
++        assert!(
++            policy.brain_label().starts_with("latest · "),
++            "{}",
++            policy.brain_label()
++        );
++        assert_eq!(policy.dir, root);
++
++        // A corrupt slot never lands: the swap reports nothing to switch to and the
++        // driving brain never blanks.
++        std::fs::write(CheckpointDir::new(&root.join("best")).brain_file(), b"junk").unwrap();
++        assert_eq!(cycle_brain(&mut policy, &root), None);
++        assert!(policy.is_loaded());
++        assert_eq!(policy.dir, root, "a failed swap keeps the current slot");
++
++        // Roster of one: nothing to swap to.
++        std::fs::remove_dir_all(root.join("best")).unwrap();
++        let mut solo = Policy::load(&root);
++        assert_eq!(cycle_brain(&mut solo, &root), None);
++
++        let _ = std::fs::remove_dir_all(&root);
++    }
+ }
+diff --git a/net/src/controls.rs b/net/src/controls.rs
+index 65cae58..e7a3607 100644
+--- a/net/src/controls.rs
++++ b/net/src/controls.rs
+@@ -22,6 +22,7 @@ pub enum Action {
+     Quit,
+     EnterExit,
+     CycleRenderMode,
++    SwapBrain,
+     RevealControls,
+ 
+     PlaneAttitude,
+@@ -44,6 +45,8 @@ pub enum Key {
+     E,
+     R,
+     V,
++    /// The brain-swap key (rl#232).
++    B,
+     Tab,
+     Space,
+     Escape,
+@@ -69,6 +72,9 @@ pub enum PadButton {
+     Back,
+     LeftStick,
+     RightStick,
++    /// Right-stick CLICK (R3) — distinct from [`PadButton::RightStick`], the analog
++    /// aim/look token; the click is the one pad button free in every context (rl#232).
++    RightStickClick,
+     Dpad,
+ }
+ 
+@@ -133,6 +139,7 @@ impl ControlScheme for GcrControls {
+             Key::E => "controls/keyboard_e.png",
+             Key::R => "controls/keyboard_r.png",
+             Key::V => "controls/keyboard_v.png",
++            Key::B => return Glyph::Label("B"),
+             Key::Tab => "controls/keyboard_tab.png",
+             Key::Space => "controls/keyboard_space.png",
+             Key::Escape => "controls/keyboard_escape.png",
+@@ -153,6 +160,7 @@ impl ControlScheme for GcrControls {
+             PadButton::Back => Glyph::Icon("controls/xbox_button_view.png"),
+             PadButton::LeftStick => Glyph::Icon("controls/xbox_stick_l.png"),
+             PadButton::RightStick => Glyph::Icon("controls/xbox_stick_r.png"),
++            PadButton::RightStickClick => Glyph::Label("R3"),
+             PadButton::Dpad => Glyph::Icon("controls/xbox_dpad.png"),
+         }
+     }
+@@ -165,7 +173,7 @@ impl ControlScheme for GcrControls {
+     }
+ }
+ 
+-pub const BINDINGS: [Binding<GcrControls>; 19] = [
++pub const BINDINGS: [Binding<GcrControls>; 20] = [
+     Binding {
+         action: Action::MoveForward,
+         keyboard: KbBinding::new(&[Key::W], &[]),
+@@ -216,6 +224,11 @@ pub const BINDINGS: [Binding<GcrControls>; 19] = [
+         keyboard: KbBinding::new(&[Key::V], &[]),
+         pad: PadBinding::new(&[PadButton::East]),
+     },
++    Binding {
++        action: Action::SwapBrain,
++        keyboard: KbBinding::new(&[Key::B], &[]),
++        pad: PadBinding::new(&[PadButton::RightStickClick]),
++    },
+     Binding {
+         action: Action::RevealControls,
+         keyboard: KbBinding::hold(&[Key::Tab], &[]),
+@@ -263,7 +276,7 @@ pub const BINDINGS: [Binding<GcrControls>; 19] = [
+     },
+ ];
+ 
+-pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
++pub const FOOT_ROWS: [ContextRow<GcrControls>; 12] = [
+     ContextRow {
+         action: Action::MoveForward,
+         label: "Forward",
+@@ -296,6 +309,10 @@ pub const FOOT_ROWS: [ContextRow<GcrControls>; 11] = [
+         action: Action::CycleRenderMode,
+         label: "Render view",
+     },
++    ContextRow {
++        action: Action::SwapBrain,
++        label: "Swap Sally brain",
++    },
+     ContextRow {
+         action: Action::Restart,
+         label: "Restart round",
+@@ -404,6 +421,7 @@ mod bevy_glue {
+                 Key::E => KeyCode::KeyE,
+                 Key::R => KeyCode::KeyR,
+                 Key::V => KeyCode::KeyV,
++                Key::B => KeyCode::KeyB,
+                 Key::Tab => KeyCode::Tab,
+                 Key::Space => KeyCode::Space,
+                 Key::Escape => KeyCode::Escape,
+@@ -433,6 +451,7 @@ mod bevy_glue {
+                 PadButton::RightBumper => Some(GamepadButton::RightTrigger),
+                 PadButton::Start => Some(GamepadButton::Start),
+                 PadButton::Back => Some(GamepadButton::Select),
++                PadButton::RightStickClick => Some(GamepadButton::RightThumb),
+                 PadButton::LeftStick | PadButton::RightStick | PadButton::Dpad => None,
+             }
+         }
+@@ -470,7 +489,7 @@ mod tests {
+         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
+     };
+ 
+-    const ALL_ACTIONS: [Action; 19] = [
++    const ALL_ACTIONS: [Action; 20] = [
+         Action::MoveForward,
+         Action::MoveBack,
+         Action::StrafeLeft,
+@@ -481,6 +500,7 @@ mod tests {
+         Action::Quit,
+         Action::EnterExit,
+         Action::CycleRenderMode,
++        Action::SwapBrain,
+         Action::RevealControls,
+         Action::PlaneAttitude,
+         Action::PlaneThrottle,
+@@ -508,6 +528,7 @@ mod tests {
+                 | Action::Quit
+                 | Action::EnterExit
+                 | Action::CycleRenderMode
++                | Action::SwapBrain
+                 | Action::RevealControls
+                 | Action::PlaneAttitude
+                 | Action::PlaneThrottle
+@@ -692,8 +713,9 @@ mod tests {
+                             b.action
+                         ),
+                         Glyph::Label(l) => assert!(
+-                            matches!(l, "LT" | "LB" | "RB"),
+-                            "unexpected text glyph {l:?} for {:?} (only the art-less triggers/bumpers)",
++                            matches!(l, "LT" | "LB" | "RB" | "R3" | "B"),
++                            "unexpected text glyph {l:?} for {:?} (only the art-less \
++                             triggers/bumpers and the rl#232 swap inputs)",
+                             b.action
+                         ),
+                     }
+diff --git a/net/src/external_crab.rs b/net/src/external_crab.rs
+index 284f1ad..9f98256 100644
+--- a/net/src/external_crab.rs
++++ b/net/src/external_crab.rs
+@@ -145,6 +145,12 @@ pub fn sync_external_crab(sim: &mut crate::sim::Sim, bridge: &mut ExternalCrabBr
+     }
+ }
+ 
++/// The per-crab roster roots the host's brain-swap button cycles under (rl#232) — the
++/// dirs the policies booted from, kept because [`CrabPolicies`] consumes them and the
++/// swap re-enumerates each root's slots per press.
++#[derive(Resource)]
++pub struct CrabBrainDirs(pub Vec<std::path::PathBuf>);
++
+ #[derive(Resource)]
+ pub struct ExternalCrabArmed;
+ 
+@@ -190,6 +196,7 @@ impl Plugin for ExternalCrabPlugin {
+             })
+             .collect();
+         app.insert_non_send_resource(CrabPolicies(policies));
++        app.insert_resource(CrabBrainDirs(self.checkpoint_dirs.clone()));
+         app.insert_resource(ExternalCrabBridge::new(&self.crab_spawns));
+ 
+         app.add_systems(
+diff --git a/net/src/render/app.rs b/net/src/render/app.rs
+index 891aa15..030daa5 100644
+--- a/net/src/render/app.rs
++++ b/net/src/render/app.rs
+@@ -85,6 +85,7 @@ pub fn build_windowed_app(
+             (
+                 grab_cursor,
+                 quit_game,
++                super::brain_swap::swap_brain,
+                 (
+                     track_active_device,
+                     sync_controls_context,
+diff --git a/net/src/render/brain_swap.rs b/net/src/render/brain_swap.rs
+new file mode 100644
+index 0000000..122edbd
+--- /dev/null
++++ b/net/src/render/brain_swap.rs
+@@ -0,0 +1,40 @@
++//! The GCR brain-swap button (rl#232): cycle which trained brain drives each NN crab,
++//! live, through the ONE swap path ([`crab_world::play::cycle_brain`]) the demo also
++//! uses. Sally's brain selection stays where Sally is simulated — the solo/host peer;
++//! a remote-adopt client renders whatever the host drives (its label arrives on the
++//! articulation wire), so its button is a no-op by design, not a second code path.
++
++use bevy::prelude::*;
++
++use crate::controls::{Action, GcrControls};
++use crate::external_crab::{CrabBrainDirs, CrabPolicies};
++
++use super::driver::GameState;
++
++pub(super) fn swap_brain(
++    keys: Res<ButtonInput<KeyCode>>,
++    pads: Query<&Gamepad>,
++    state: Option<NonSend<GameState>>,
++    policies: Option<NonSendMut<CrabPolicies>>,
++    dirs: Option<Res<CrabBrainDirs>>,
++) {
++    if !crab_world::controls::just_pressed::<GcrControls>(Action::SwapBrain, &keys, &pads) {
++        return;
++    }
++    let Some(state) = state else {
++        return;
++    };
++    if state.coord.is_remote_client() {
++        info!("brain swap: this peer adopts the host's Sally — only the host swaps brains");
++        return;
++    }
++    let (Some(mut policies), Some(dirs)) = (policies, dirs) else {
++        return;
++    };
++    // Every bridged crab cycles within its OWN roster (its boot dir + that dir's brain
++    // subdirs) — with one crab this is the latest↔keep-best toggle; the swapped label
++    // reaches every peer through `publish_brain_labels` and the articulation wire.
++    for (policy, root) in policies.0.iter_mut().zip(&dirs.0) {
++        crab_world::play::cycle_brain(policy, root);
++    }
++}
+diff --git a/net/src/render/mod.rs b/net/src/render/mod.rs
+index 2c42274..62d0522 100644
+--- a/net/src/render/mod.rs
++++ b/net/src/render/mod.rs
+@@ -61,6 +61,7 @@ const MAX_YAW_PER_TICK_RADIANS: f32 =
+ 
+ mod app;
+ mod articulation;
++mod brain_swap;
+ mod driver;
+ mod hud;
+ mod input;

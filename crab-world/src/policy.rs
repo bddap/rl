@@ -15,6 +15,14 @@ use crate::training::normalizer::{NORMALIZER_CLIP, ObsNormalizer};
 
 pub struct Policy {
     device: NdArrayDevice,
+    /// The checkpoint dir whose brain currently drives [`Self::state`] — the identity
+    /// [`Self::cycle_brain`] keys its cursor off.
+    dir: PathBuf,
+    /// The roster root the brain-swap button cycles under (rl#232): the boot checkpoint
+    /// dir, retargeted to the live dir when one is set (that is the dir being DRIVEN).
+    /// `dir == swap_root` IS the "latest" slot, so an unprefixed label always means
+    /// latest — no cached slot name to drift.
+    swap_root: PathBuf,
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
     live_dir: Option<PathBuf>,
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
@@ -340,6 +348,8 @@ impl Policy {
 
         Self {
             device,
+            dir: checkpoint_dir.to_owned(),
+            swap_root: checkpoint_dir.to_owned(),
             live_dir: None,
             last_loaded: None,
             last_refused: None,
@@ -347,8 +357,60 @@ impl Policy {
         }
     }
 
+    /// Point this policy at a different checkpoint dir NOW — the one brain-swap
+    /// primitive ([`Self::cycle_brain`]; the demo's button and the GCR host's button
+    /// both land here). Only a `Fit` load replaces the driving state; any other verdict
+    /// is logged loudly and keeps the current brain, exactly like a hot-reload of a bad
+    /// file — a swap must never blank a working Sally. A policy that hot-follows a live
+    /// dir follows the SWITCHED dir from now on (so "latest" keeps streaming the trainer
+    /// and "best" tracks keep-best promotions), one that never hot-reloads stays static
+    /// on the new brain.
+    fn switch_dir(&mut self, dir: &Path) -> bool {
+        // Stat BEFORE loading (mirroring `try_hot_reload`): stamping a post-load mtime
+        // would skip a save that landed mid-load — forever, if it was the run's final
+        // save (the rl#215 class). A stale-early stamp costs one redundant reload.
+        let mtime = std::fs::metadata(CheckpointDir::new(dir).brain_file())
+            .and_then(|m| m.modified())
+            .ok();
+        match load_brain_normalizer(dir, &self.device) {
+            Loaded::Fit(brain, normalizer) => {
+                self.state = loaded_state(brain, normalizer, checkpoint_digest(dir));
+                self.dir = dir.to_owned();
+                if self.live_dir.is_some() {
+                    self.live_dir = Some(dir.to_owned());
+                }
+                self.last_loaded = mtime;
+                self.last_refused = None;
+                info!(
+                    "brain swap: {} now driving from {}",
+                    self.brain_label(),
+                    dir.display(),
+                );
+                true
+            }
+            Loaded::Absent => {
+                warn!(
+                    "brain swap: no brain at {} — keeping the current brain",
+                    dir.display()
+                );
+                false
+            }
+            Loaded::Mismatch(dims) => {
+                log_rig_mismatch("brain swap", dir, dims);
+                false
+            }
+            Loaded::Refused(why) => {
+                log_checkpoint_refusal("brain swap", dir, &why);
+                false
+            }
+        }
+    }
+
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
     pub(crate) fn set_live_dir(&mut self, dir: Option<PathBuf>) {
+        if let Some(d) = &dir {
+            self.swap_root = d.clone();
+        }
         self.live_dir = dir;
     }
 
@@ -367,6 +429,7 @@ impl Policy {
         match load_brain_normalizer(&dir, &self.device) {
             Loaded::Fit(brain, normalizer) => {
                 self.state = loaded_state(brain, normalizer, checkpoint_digest(&dir));
+                self.dir = dir;
                 self.last_loaded = Some(mtime);
                 true
             }
@@ -418,6 +481,20 @@ impl Policy {
     /// the demo, the GCR host, and (via the articulation wire) every GCR client render this
     /// exact string, so the label can't drift per surface.
     pub fn brain_label(&self) -> String {
+        let core = self.state_label();
+        // Driving a roster subdir (a brain swap, rl#232) carries the slot's dir name as
+        // a prefix — derived from `dir` vs `swap_root` at read time, never cached, so an
+        // unprefixed label always MEANS the latest/primary brain. ASCII separator: the
+        // in-world label font has no '·' glyph (renders tofu on the TV).
+        match self.dir.file_name() {
+            Some(name) if self.dir != self.swap_root => {
+                format!("{}: {core}", name.to_string_lossy())
+            }
+            _ => core,
+        }
+    }
+
+    fn state_label(&self) -> String {
         match &self.state {
             PolicyState::Loaded { brain, digest, .. } => {
                 // First 8 hex chars of the full checkpoint digest — enough to tell two live
@@ -457,6 +534,56 @@ impl Policy {
         flat.try_into()
             .expect("policy mean count == ACTION_SIZE (the rig gates refuse mismatched brains)")
     }
+
+    /// Swap to the next loadable brain in the roster under [`Self::swap_root`] — THE one
+    /// brain-swap code path (rl#232): the demo's button and the GCR host's button both
+    /// call this, so the two surfaces can't drift. Re-enumerates the roster per press (a
+    /// `best/` promoted since boot, or a run dir dropped in, joins without a restart)
+    /// and skips slots that refuse to load (each refusal already logged loudly); `false`
+    /// when there is nothing to swap to or every other slot refused.
+    pub fn cycle_brain(&mut self) -> bool {
+        let slots = brain_slots(&self.swap_root);
+        if slots.len() < 2 {
+            info!(
+                "brain swap: only one brain under {} — nothing to swap to",
+                self.swap_root.display()
+            );
+            return false;
+        }
+        // An off-roster cursor (the boot dir before the first hot-reload retargets onto
+        // the live root) resolves so the next step lands on slot 0 — the primary brain
+        // is always the first stop.
+        let current = slots
+            .iter()
+            .position(|d| *d == self.dir)
+            .unwrap_or(slots.len() - 1);
+        for step in 1..slots.len() {
+            if self.switch_dir(&slots[(current + step) % slots.len()]) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// The swap list rooted at one primary checkpoint dir: the dir itself (the "latest"
+/// slot) plus every direct subdirectory holding a `brain.bin`, sorted. Data-driven by
+/// construction (rl#232): keep-best's `best/` joins because it is such a subdir, and
+/// dropping in more dirs (or symlinks — another run's ckpt, another architecture)
+/// extends the cycle with no code change; each brain's arch comes from its own envelope
+/// at load time.
+fn brain_slots(primary: &Path) -> Vec<PathBuf> {
+    let mut subs: Vec<PathBuf> = std::fs::read_dir(primary)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|dir| dir.is_dir() && CheckpointDir::new(dir).brain_file().is_file())
+        .collect();
+    subs.sort();
+    let mut slots = vec![primary.to_owned()];
+    slots.append(&mut subs);
+    slots
 }
 
 #[cfg(test)]
@@ -891,5 +1018,59 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rl#232: the swap roster is the primary dir + every brain-holding subdir, and the
+    /// cycle walks it latest → best → latest, stamping the slot into the label; a slot
+    /// that refuses to load is skipped, and a roster of one is a no-op.
+    #[test]
+    fn cycle_brain_walks_the_roster_and_labels_the_slot() {
+        let root = std::env::temp_dir().join(format!("rl-brain-cycle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        save_brain(&root);
+        save_brain(&root.join("best"));
+        // A non-checkpoint subdir (keep-best's own sidecar litter, a stray dir) never
+        // becomes a slot.
+        std::fs::create_dir_all(root.join("not-a-brain")).unwrap();
+
+        assert_eq!(brain_slots(&root), vec![root.clone(), root.join("best")]);
+
+        let mut policy = Policy::load(&root);
+        assert!(policy.is_loaded());
+        let boot_label = policy.brain_label();
+        assert!(
+            !boot_label.contains('·'),
+            "no slot prefix on the primary brain: {boot_label}"
+        );
+
+        assert!(policy.cycle_brain());
+        assert!(
+            policy.brain_label().starts_with("best: "),
+            "{}",
+            policy.brain_label()
+        );
+        assert_eq!(policy.dir, root.join("best"));
+
+        assert!(policy.cycle_brain());
+        assert!(
+            !policy.brain_label().contains('·'),
+            "back on the primary brain the prefix drops: {}",
+            policy.brain_label()
+        );
+        assert_eq!(policy.dir, root);
+
+        // A corrupt slot never lands: the swap reports nothing to switch to and the
+        // driving brain never blanks.
+        std::fs::write(CheckpointDir::new(&root.join("best")).brain_file(), b"junk").unwrap();
+        assert!(!policy.cycle_brain());
+        assert!(policy.is_loaded());
+        assert_eq!(policy.dir, root, "a failed swap keeps the current slot");
+
+        // Roster of one: nothing to swap to.
+        std::fs::remove_dir_all(root.join("best")).unwrap();
+        let mut solo = Policy::load(&root);
+        assert!(!solo.cycle_brain());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
