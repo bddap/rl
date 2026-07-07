@@ -415,8 +415,10 @@ fn read_vehicle_pose(world: &mut World, me: PilotId) -> Option<CockpitPose> {
 
 /// The remote-client twin of [`read_vehicle_pose`]: our own craft's arena-frame pose out of an
 /// adopted articulation. The host simulates the craft; its pose comes back per-pilot on the
-/// wire. `None` is the request→grant window — boarding set `Flying { pose: None }` and the
-/// intent is still in flight, so the cockpit camera holds off until the grant lands.
+/// wire. `None` keeps the cockpit camera off while `Flying { pose: None }` — usually the
+/// request→grant window, but also a silent HOST REFUSAL (`file_intent`'s alive gate saw us
+/// non-Alive; the client can't tell the two apart) and the unarmed round (no articulation at
+/// all). Either way the camera simply holds off.
 fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Option<CockpitPose> {
     art.vehicles
         .iter()
@@ -426,7 +428,6 @@ fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Op
             orient: Quat::from_array(v.rot),
         })
 }
-
 
 pub(crate) fn pump_fixed_steps(world: &mut World, steps: u32) {
     use bevy::app::FixedMain;
@@ -463,6 +464,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
         .is_some();
 
     let role = PeerRole::of(world.non_send_resource::<GameState>());
+    let me = local_pilot(world.non_send_resource::<GameState>());
 
     let delta = world.resource::<Time>().delta().as_secs_f64();
 
@@ -597,8 +599,8 @@ pub(super) fn drive_lockstep(world: &mut World) {
             issue_tick
         };
         if let Some(art) = pending_art {
-            let me = local_pilot(world.non_send_resource::<GameState>());
-            crate::render::articulation::apply(world, &art, me);
+            crate::render::articulation::apply(world, &art);
+            super::articulation::publish_remote_vehicles(world, &art.vehicles, me);
             if let Some(p) = own_wire_pose(&art, me) {
                 world.resource_mut::<LocalVehicle>().update_pose(p);
             }
@@ -662,7 +664,6 @@ pub(super) fn drive_lockstep(world: &mut World) {
                             poses
                         },
                     );
-                    let me = local_pilot(world.non_send_resource::<GameState>());
                     if let Some(p) = read_vehicle_pose(world, me) {
                         world.resource_mut::<LocalVehicle>().update_pose(p);
                     }
@@ -690,7 +691,6 @@ pub(super) fn drive_lockstep(world: &mut World) {
                     state.coord.broadcast_step(&snap, articulation.as_ref());
                 }
                 if let Some(art) = &articulation {
-                    let me = local_pilot(world.non_send_resource::<GameState>());
                     super::articulation::publish_remote_vehicles(world, &art.vehicles, me);
                 }
                 {
@@ -833,6 +833,7 @@ mod tests {
         };
         let ours = super::own_wire_pose(&art, PilotId(2)).expect("our craft is on the wire");
         assert_eq!(ours.pos.to_array(), [9.0, 8.0, 7.0]);
+        assert_eq!(ours.orient.to_array(), [0.0, 1.0, 0.0, 0.0]);
         assert!(
             super::own_wire_pose(&art, PilotId(1)).is_none(),
             "no craft on the wire = the request→grant window: the camera holds off"

@@ -787,9 +787,20 @@ mod tests {
         );
         step_ready(&mut s);
 
+        // The remote goes silent while still piloting: the starved HOLD would replay its
+        // last (walk) input — the intent persists through starvation, so it stays neutral.
+        s.advance(tickmsg(1, 0.0));
+        let assembled = s.pending.as_ref().expect("advance assembled").inputs.clone();
+        assert_eq!(
+            assembled[&p1],
+            Input::default(),
+            "a starved HOLD never replays a walk input underneath the craft"
+        );
+        step_ready(&mut s);
+
         // Off the craft, the very next walk input applies again.
         s.record_remote(p1, tickmsg(1, 1.0));
-        s.advance(tickmsg(1, 0.5));
+        s.advance(tickmsg(2, 0.5));
         let assembled = s.pending.as_ref().expect("advance assembled").inputs.clone();
         assert_eq!(assembled[&p1], input(1.0), "on foot again ⇒ input passes through");
         assert_eq!(assembled[&PlayerId(0)], input(0.5));

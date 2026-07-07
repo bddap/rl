@@ -100,7 +100,7 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
     }
 }
 
-pub(super) fn apply(world: &mut World, art: &CrabArticulation, me: PilotId) {
+pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
     let by_env_tag: std::collections::HashMap<(usize, u8), &PartTransform> = art
         .crabs
         .iter()
@@ -146,7 +146,6 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation, me: PilotId) {
         world.insert_resource(CrabBrainLabels(labels));
     }
 
-    publish_remote_vehicles(world, &art.vehicles, me);
 }
 
 #[cfg(test)]
@@ -242,8 +241,9 @@ mod tests {
         );
         client.insert_resource(CrabSkinRepose::default());
 
+        apply(&mut client, &art);
         // Viewed as pilot 7: pilot 0's craft is somebody else's ⇒ it lands in RemoteVehicle.
-        apply(&mut client, &art, PilotId(7));
+        publish_remote_vehicles(&mut client, &art.vehicles, PilotId(7));
 
         let tf = |world: &mut World, e: Entity| *world.entity(e).get::<Transform>().unwrap();
         let got_cara = tf(&mut client, c_cara);
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(Quat::from_array(crafts[0].rot), craft_t.rotation);
 
         // Viewed as pilot 0 the same craft is OURS — the cockpit, not a wireframe.
-        apply(&mut client, &art, PilotId(0));
+        publish_remote_vehicles(&mut client, &art.vehicles, PilotId(0));
         assert!(
             client.resource::<RemoteVehicle>().0.is_empty(),
             "the local pilot's own craft never enters the remote wireframe set"

@@ -76,7 +76,7 @@ fn draw_vehicle_collider_wireframe(
         .and_then(|r| r.0.get(&0).copied())
         .map(|s| s.matrix())
         .unwrap_or(Mat4::IDENTITY);
-    if mode.shows_colliders() {
+    if mode.shows_colliders() && !vehicles.is_empty() {
         for (gt, collider) in &vehicles {
             let world = placement * gt.to_matrix();
             draw_collider_wireframe(
@@ -86,6 +86,10 @@ fn draw_vehicle_collider_wireframe(
                 COLLIDER_WIREFRAME_COLOR,
             );
         }
+        // On the HOST the entity query covers EVERY craft (its world simulates all pilots'),
+        // so the RemoteVehicle pass below would ghost each remote craft a tick behind its
+        // live entity. A client has no Vehicle entities and always takes the wire pass.
+        return;
     }
     for v in &remote.0 {
         let world = placement
