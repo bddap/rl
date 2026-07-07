@@ -75,12 +75,15 @@ pub(crate) struct CheckpointEnvelope {
     /// authority the paired artifacts are checked against).
     pub(crate) body_digest: Option<u64>,
     /// The checkpoint-SET save stamp (bddap/rl#215): one random value drawn per
-    /// `save_checkpoint`, written into every member saved together, so a partial save
-    /// (e.g. ENOSPC landing the small normalizer while the big brain write fails) is
+    /// `save_checkpoint`, written into every member saved together, so a mixed set is
     /// DETECTABLE at load — a paired member whose stamp differs from the brain's comes
-    /// from a different save and must not pair with it. `None` = predates the stamp
-    /// (brain ≤v2, paired v1), checked as a set: an all-`None` set is trusted on first
-    /// use, a mixed set is exactly a partial save straddling the upgrade and refuses.
+    /// from a different save and must not pair with it. The writers themselves can no
+    /// longer put a mixed set on disk (the whole set lands in one atomic dir swap,
+    /// bddap/rl#238); the stamp is the backstop for out-of-band copies that read
+    /// member files by separate path lookups mid-swap, and for a stale optional
+    /// member carried past a failed write. `None` = predates the stamp (brain ≤v2,
+    /// paired v1), checked as a set: an all-`None` set is trusted on first use, a
+    /// mixed set refuses.
     pub(crate) save_stamp: Option<u64>,
 }
 

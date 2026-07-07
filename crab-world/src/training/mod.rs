@@ -71,8 +71,20 @@ pub(crate) fn replace_dir_atomically(
         _ => PathBuf::from("."),
     };
     let staging = parent.join(format!(".{}.staging", name.to_string_lossy()));
-    // A leftover from a crash mid-save MUST go before staging anew: entries a crashed
-    // generation wrote but this one doesn't would otherwise ride into the new set.
+    let aside = parent.join(format!(".{}.aside", name.to_string_lossy()));
+    // Crash recovery, in dependency order. An aside dir exists only if a FALLBACK swap
+    // (no RENAME_EXCHANGE) crashed mid-sequence: if the target vanished with it, the
+    // aside IS the previous live generation — restore it rather than let this save
+    // build a fresh target that silently drops the non-staged entries (`best/`, the
+    // watermarks). Then discard any leftover staging: entries a crashed generation
+    // wrote but this one doesn't must never ride into the new set.
+    if aside.exists() {
+        if target.exists() {
+            std::fs::remove_dir_all(&aside)?;
+        } else {
+            std::fs::rename(&aside, target)?;
+        }
+    }
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
     }
@@ -86,7 +98,7 @@ pub(crate) fn replace_dir_atomically(
     }
 
     if target.exists() {
-        exchange_paths(&staging, target)?;
+        exchange_paths(&staging, target, &aside)?;
         // The old generation now sits at the staging path; its removal is cleanup, not
         // part of the swap — a failure here leaves garbage the next call's leftover
         // sweep discards, so it must not fail a save that already landed.
@@ -98,8 +110,9 @@ pub(crate) fn replace_dir_atomically(
 }
 
 /// Atomically swap the directories at `a` and `b` (same filesystem), with a
-/// rename-aside fallback where the filesystem lacks `RENAME_EXCHANGE`.
-fn exchange_paths(a: &Path, b: &Path) -> std::io::Result<()> {
+/// rename-aside fallback (through the caller's `aside` path, so the caller's crash
+/// sweep can recover it) where the filesystem lacks `RENAME_EXCHANGE`.
+fn exchange_paths(a: &Path, b: &Path, aside: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let ac = std::ffi::CString::new(a.as_os_str().as_bytes())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
@@ -120,12 +133,13 @@ fn exchange_paths(a: &Path, b: &Path) -> std::io::Result<()> {
     let err = std::io::Error::last_os_error();
     match err.raw_os_error() {
         // Kernel or filesystem without EXCHANGE — the documented lesser-evil fallback:
-        // a reader can see `b` absent between the two renames, but never a torn set.
+        // a reader can see `b` absent between the two renames (and a crash there
+        // leaves `b` absent until the next call's aside sweep restores it), but a
+        // torn set is still impossible.
         Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::ENOTSUP) => {
-            let aside = b.with_extension("exchange-aside");
-            std::fs::rename(b, &aside)?;
+            std::fs::rename(b, aside)?;
             std::fs::rename(a, b)?;
-            std::fs::rename(&aside, a)?;
+            std::fs::rename(aside, a)?;
             Ok(())
         }
         _ => Err(err),
@@ -135,14 +149,29 @@ fn exchange_paths(a: &Path, b: &Path) -> std::io::Result<()> {
 /// Hardlink every entry of `from` that `to` lacks, recursing into subdirectories —
 /// how a set writer carries the live dir's NON-set entries (`best/`, the tick
 /// watermark, the σ-anneal epoch) into the staged generation without copying bytes.
-/// Entries the stage already wrote are never overwritten.
+/// Entries the stage already wrote are never overwritten. Sound only because every
+/// writer in this crate replaces files whole by rename ([`atomic_write`] / the
+/// envelope writers), never mutates in place — an in-place write through one link
+/// would mutate the carried generation through the shared inode.
+///
+/// Writer debris (`*.tmp` from an interrupted [`atomic_write`], a crashed swap's
+/// staging/aside dirs) is skipped: carrying it would immortalize into every future
+/// generation what used to be transient garbage.
 pub(crate) fn hardlink_missing_entries(from: &Path, to: &Path) -> std::io::Result<()> {
+    const TRANSIENT_SUFFIXES: &[&str] = &[".tmp", ".staging", ".aside"];
     if !from.exists() {
         return Ok(());
     }
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
-        let dst = to.join(entry.file_name());
+        let name = entry.file_name();
+        if TRANSIENT_SUFFIXES
+            .iter()
+            .any(|s| name.to_string_lossy().ends_with(s))
+        {
+            continue;
+        }
+        let dst = to.join(name);
         if entry.file_type()?.is_dir() {
             if !dst.exists() {
                 std::fs::create_dir(&dst)?;
@@ -307,6 +336,7 @@ mod swap_tests {
         std::fs::write(live.join("brain.bin"), b"old-brain").unwrap();
         std::fs::write(live.join("ticks.txt"), b"123").unwrap();
         std::fs::write(live.join("best/brain.bin"), b"best-brain").unwrap();
+        std::fs::write(live.join("optimizer.tmp"), b"interrupted write").unwrap();
         std::fs::create_dir(&staging).unwrap();
         std::fs::write(staging.join("brain.bin"), b"new-brain").unwrap();
 
@@ -318,6 +348,63 @@ mod swap_tests {
         );
         assert_eq!(std::fs::read(staging.join("ticks.txt")).unwrap(), b"123");
         assert_eq!(std::fs::read(staging.join("best/brain.bin")).unwrap(), b"best-brain");
+        assert!(
+            !staging.join("optimizer.tmp").exists(),
+            "writer debris must stay transient, never immortalized into the next generation"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The #238 headline property is that the live path never goes absent — pinned at
+    /// the syscall seam: after an exchange BOTH paths still exist, contents swapped.
+    /// A regression to remove-then-rename (which has an absent window by construction)
+    /// leaves `a` gone and fails here.
+    #[test]
+    fn exchange_leaves_both_paths_present_with_contents_swapped() {
+        let root = scratch("exchange");
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        std::fs::write(a.join("who.txt"), b"was-a").unwrap();
+        std::fs::write(b.join("who.txt"), b"was-b").unwrap();
+
+        exchange_paths(&a, &b, &root.join(".b.aside")).unwrap();
+        assert_eq!(std::fs::read(a.join("who.txt")).unwrap(), b"was-b");
+        assert_eq!(std::fs::read(b.join("who.txt")).unwrap(), b"was-a");
+        assert!(
+            !root.join(".b.aside").exists(),
+            "the aside is fallback-only scratch, empty after a completed swap"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A fallback swap that crashed between its renames leaves the live dir ABSENT and
+    /// the old generation at the aside path; the next save must restore it first —
+    /// otherwise the caller's carry (`best/`, watermarks) reads an empty live dir and
+    /// silently drops them from the new generation.
+    #[test]
+    fn crashed_fallback_swap_is_recovered_from_the_aside() {
+        let root = scratch("aside-recovery");
+        let target = root.join("ckpt");
+        let aside = root.join(".ckpt.aside");
+        std::fs::create_dir(&aside).unwrap();
+        write_set(&aside, "old");
+        std::fs::write(aside.join("ticks.txt"), b"999").unwrap();
+
+        replace_dir_atomically(&target, |staging| {
+            write_set(staging, "new");
+            assert_eq!(
+                std::fs::read(target.join("ticks.txt")).unwrap(),
+                b"999",
+                "the restored generation is visible to the stage for carry-over"
+            );
+            hardlink_missing_entries(&target, staging)
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(target.join("brain.bin")).unwrap(), b"new-brain.bin");
+        assert_eq!(std::fs::read(target.join("ticks.txt")).unwrap(), b"999");
+        assert!(!aside.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

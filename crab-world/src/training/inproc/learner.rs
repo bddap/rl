@@ -43,8 +43,11 @@ fn snapshot_policy(state: &TrainingState, log_std_floor: f32) -> RollRequest {
 /// the latest weights, normalizer, and Adam moments. Not a handoff to the threads (they
 /// get the in-memory snapshot); the Adam state lives on the GPU learner, so it is
 /// written into the same staged set as the brain — one save stamp, one atomic dir swap
-/// (bddap/rl#215, #238) — so neither a reader nor a resume can pair the moments with a
-/// brain from a different save.
+/// (bddap/rl#215, #238). The optimizer stays the set's OPTIONAL member: if its write
+/// fails (`save_adam_state` warns and writes nothing), the set still lands and the
+/// carried previous-generation `optimizer.bin` refuses at load by stamp — a resume
+/// then starts the moments cold rather than blocking every future checkpoint on a
+/// persistent optimizer-serialize fault.
 fn persist_checkpoint(state: &TrainingState, gpu_learner: &crate::training::gpu::GpuLearner) {
     state.save_checkpoint(|paths, save_stamp| {
         gpu_learner.save_adam_state(&paths.optimizer_path(), state.brain().arch(), save_stamp);
