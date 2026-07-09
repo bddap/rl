@@ -41,7 +41,12 @@ impl BodyObs {
 
 const TARGET_LEN: usize = 3;
 
-pub(crate) const TARGET_SLOT: usize = CrabJointId::COUNT * JointObs::LEN + BodyObs::LEN;
+/// First slot of the spawn-relative body.pos triple (x, y, z) — the channel that is
+/// bounded only by the training arena's walls, so GCR's open-field drift guard
+/// (rl#240) watches it by name.
+pub const BODY_POS_SLOT: usize = CrabJointId::COUNT * JointObs::LEN;
+
+pub(crate) const TARGET_SLOT: usize = BODY_POS_SLOT + BodyObs::LEN;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Observation {
@@ -210,7 +215,7 @@ mod tests {
             want[idx * 2] = idx as f32 + 0.5;
             want[idx * 2 + 1] = -(idx as f32) - 0.25;
         }
-        let body_base = CrabJointId::COUNT * 2;
+        let body_base = BODY_POS_SLOT;
         want[body_base] = 1.0;
         want[body_base + 1] = 2.0;
         want[body_base + 2] = 3.0;
