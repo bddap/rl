@@ -102,23 +102,64 @@ enum Loaded {
     Refused(String),
 }
 
+/// A cross-member coherence refusal (the normalizer's save stamp / arch vs the brain's
+/// set key) can be a STRADDLED READ rather than a bad set on disk: the set lands in one
+/// atomic dir swap (bddap/rl#238), but the two member opens below are separate path
+/// lookups, so a swap landing between them pairs generation N's brain with generation
+/// N+1's normalizer — both files valid, stamps mismatched (2026-07-09: a false
+/// rl-release red from exactly this). Re-reading disambiguates: a straddle heals on the
+/// next read, a genuine on-disk mis-pair (an out-of-band torn copy) persists through
+/// every read and still refuses.
+const SET_READ_ATTEMPTS: u32 = 3;
+const SET_READ_RETRY: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// Read a brain + normalizer from `dir`, classifying the result for the caller — THE one
 /// checkpoint classifier: the runtime loaders (initial + hot-reload) and the gates
-/// ([`checkpoint_fits_rig`]) all speak this verdict, so they can't drift. The brain load
-/// dispatches on the envelope's arch tag ([`load_brain_file`]); the normalizer is
-/// brain-PAIRED — it must exist and carry the brain's own arch tag, because a real brain
-/// normalizing against cold or mis-paired stats acts silently wrong, a worse failure
-/// than not arming.
+/// ([`checkpoint_fits_rig`]) all speak this verdict, so they can't drift — and all get
+/// the straddled-read retry ([`SET_READ_ATTEMPTS`]) for free.
 fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
+    let mut mispair = None;
+    for attempt in 1..=SET_READ_ATTEMPTS {
+        if attempt > 1 {
+            std::thread::sleep(SET_READ_RETRY);
+        }
+        match load_set_once(dir, device) {
+            SetRead::Done(loaded) => return loaded,
+            SetRead::Mispaired(why) => mispair = Some(why),
+        }
+    }
+    let why = mispair.expect("the loop always runs");
+    Loaded::Refused(format!(
+        "{why} — persisted across {SET_READ_ATTEMPTS} re-reads, so this is a real \
+         mis-pair on disk, not a read racing a concurrent set swap"
+    ))
+}
+
+/// One verdict from a single read of the set, split so [`load_brain_normalizer`] can
+/// retry the possibly-transient case without string-matching the refusal.
+#[allow(clippy::large_enum_variant)]
+enum SetRead {
+    Done(Loaded),
+    /// The normalizer refused against the brain's set key — possibly a straddled read.
+    Mispaired(String),
+}
+
+/// One read of the checkpoint set. The brain load dispatches on the envelope's arch tag
+/// ([`load_brain_file`]); the normalizer is brain-PAIRED — it must exist and carry the
+/// brain's own set key, because a real brain normalizing against cold or mis-paired
+/// stats acts silently wrong, a worse failure than not arming.
+fn load_set_once(dir: &Path, device: &NdArrayDevice) -> SetRead {
     let paths = CheckpointDir::new(dir);
     let loaded = match load_brain_file::<InferBackend>(&paths.brain_file(), device) {
         Ok(loaded) => loaded,
-        Err(BrainLoadError::Envelope(EnvelopeError::Absent)) => return Loaded::Absent,
+        Err(BrainLoadError::Envelope(EnvelopeError::Absent)) => {
+            return SetRead::Done(Loaded::Absent);
+        }
         Err(e) => {
-            return Loaded::Refused(format!(
+            return SetRead::Done(Loaded::Refused(format!(
                 "{}: {e}",
                 crate::training::checkpoint::BRAIN_FILENAME
-            ));
+            )));
         }
     };
     // Body↔policy identity (bddap/rl#214): a policy trained on a different body than the
@@ -130,27 +171,35 @@ fn load_brain_normalizer(dir: &Path, device: &NdArrayDevice) -> Loaded {
         loaded.body_digest,
         crate::mesh_fallback::constructed_body_digest(),
     ) {
-        return Loaded::Refused(format!(
+        return SetRead::Done(Loaded::Refused(format!(
             "{}: {why}",
             crate::training::checkpoint::BRAIN_FILENAME
-        ));
+        )));
     }
     let key = loaded.set_key();
     let brain = loaded.brain;
     let (obs, action) = brain.io_dims();
     if !dims_fit_rig(obs, action) {
-        return Loaded::Mismatch(RigDims { obs, action });
+        return SetRead::Done(Loaded::Mismatch(RigDims { obs, action }));
     }
     // The set key (bddap/rl#215) keys the pairing to the brain's own SAVE, not
     // just its arch: a partial save (or a copy torn across one) leaves one member from an
     // older set, which would normalize this brain with another save's statistics —
     // refused here like any other mis-pair.
     match ObsNormalizer::load(&paths.normalizer_path(), key) {
-        Ok(normalizer) => Loaded::Fit(brain, normalizer),
-        Err(e) => Loaded::Refused(format!(
+        Ok(normalizer) => SetRead::Done(Loaded::Fit(brain, normalizer)),
+        // The two coherence variants are the ones a straddled read can produce — every
+        // other refusal is a property of the file itself and re-reading can't change it.
+        Err(
+            e @ (EnvelopeError::SaveStampMismatch { .. } | EnvelopeError::ArchMismatch { .. }),
+        ) => SetRead::Mispaired(format!(
             "{}: {e} (a brain never arms without its paired obs normalizer)",
             crate::training::checkpoint::NORMALIZER_FILENAME
         )),
+        Err(e) => SetRead::Done(Loaded::Refused(format!(
+            "{}: {e} (a brain never arms without its paired obs normalizer)",
+            crate::training::checkpoint::NORMALIZER_FILENAME
+        ))),
     }
 }
 
@@ -595,12 +644,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
     }
 
-    /// bddap/rl#215: the trainer renames `brain.bin` BEFORE the normalizers, so a poll
-    /// can catch a set-torn dir (new brain, previous save's normalizer). The refusal
-    /// must keep the current policy AND not cache the verdict against the brain's mtime:
-    /// the trailing normalizer lands WITHOUT touching `brain.bin`, so the next poll must
-    /// arm the completed set. (Stamping `last_loaded` on the refusal would refuse a
-    /// run's FINAL save forever — there is no later save to bump the mtime.)
+    /// bddap/rl#215: an out-of-band copy can land a set-torn dir (new brain, previous
+    /// save's normalizer). The refusal must keep the current policy AND not cache the
+    /// verdict against the brain's mtime: the healing normalizer can land WITHOUT
+    /// touching `brain.bin`, so the next poll must arm the completed set. (Stamping
+    /// `last_loaded` on the refusal would refuse a run's FINAL save forever — there is
+    /// no later save to bump the mtime.)
     #[test]
     fn hot_reload_retries_a_set_torn_refusal_once_the_set_completes() {
         let tmp = std::env::temp_dir();
@@ -639,6 +688,42 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&live);
         let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// The straddled-read retry (`SET_READ_ATTEMPTS`): a stamp mis-pair that PERSISTS
+    /// across the re-reads is a real on-disk mis-pair and must still refuse — and the
+    /// refusal must SAY the re-reads happened, so an operator reading it doesn't chase
+    /// the concurrent-swap race the retry already ruled out. (The heal-on-re-read half
+    /// needs a mid-load concurrent swap, which has no deterministic test; production
+    /// coverage is the 2026-07-09 rl-release false red this exists to end.)
+    #[test]
+    fn persistent_mispair_still_refuses_and_names_the_re_reads() {
+        let dir = std::env::temp_dir().join(format!("rl-mispair-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let device = NdArrayDevice::Cpu;
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
+        let paths = CheckpointDir::new(&dir);
+        crate::training::checkpoint::save_brain(&brain, &paths.brain_file(), 22).unwrap();
+        ObsNormalizer::new(NORMALIZER_CLIP)
+            .save(brain.arch(), &paths.normalizer_path(), 21)
+            .unwrap();
+
+        match checkpoint_fits_rig(&dir) {
+            RigFit::Refused(why) => {
+                assert!(
+                    why.contains("DIFFERENT saves"),
+                    "the refusal must name the mis-pair, got: {why}"
+                );
+                assert!(
+                    why.contains("re-reads"),
+                    "the refusal must attribute the ruled-out swap race, got: {why}"
+                );
+            }
+            _ => panic!("a persistently mis-paired set must classify as Refused"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn save_brain_record(
