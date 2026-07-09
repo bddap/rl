@@ -262,7 +262,10 @@ mod swap_tests {
         .unwrap();
 
         assert_eq!(read_set(&target), ["brain.bin", "normalizer.bin"]);
-        assert_eq!(std::fs::read(target.join("brain.bin")).unwrap(), b"new-brain.bin");
+        assert_eq!(
+            std::fs::read(target.join("brain.bin")).unwrap(),
+            b"new-brain.bin"
+        );
         assert_eq!(
             std::fs::read(target.join("normalizer.bin")).unwrap(),
             b"new-normalizer.bin"
@@ -288,7 +291,10 @@ mod swap_tests {
             Err(std::io::Error::other("disk full"))
         });
         assert!(err.is_err());
-        assert_eq!(std::fs::read(target.join("brain.bin")).unwrap(), b"old-brain.bin");
+        assert_eq!(
+            std::fs::read(target.join("brain.bin")).unwrap(),
+            b"old-brain.bin"
+        );
         assert_eq!(
             std::fs::read(target.join("normalizer.bin")).unwrap(),
             b"old-normalizer.bin"
@@ -306,7 +312,10 @@ mod swap_tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(std::fs::read(target.join("brain.bin")).unwrap(), b"new-brain.bin");
+        assert_eq!(
+            std::fs::read(target.join("brain.bin")).unwrap(),
+            b"new-brain.bin"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -356,7 +365,10 @@ mod swap_tests {
             "a staged member is never overwritten by the carry"
         );
         assert_eq!(std::fs::read(staging.join("ticks.txt")).unwrap(), b"123");
-        assert_eq!(std::fs::read(staging.join("best/brain.bin")).unwrap(), b"best-brain");
+        assert_eq!(
+            std::fs::read(staging.join("best/brain.bin")).unwrap(),
+            b"best-brain"
+        );
         assert!(
             !staging.join("optimizer.tmp").exists(),
             "writer debris must stay transient, never immortalized into the next generation"
@@ -442,7 +454,10 @@ mod swap_tests {
             hardlink_missing_entries(&target, staging)
         })
         .unwrap();
-        assert_eq!(std::fs::read(target.join("brain.bin")).unwrap(), b"new-brain.bin");
+        assert_eq!(
+            std::fs::read(target.join("brain.bin")).unwrap(),
+            b"new-brain.bin"
+        );
         assert_eq!(std::fs::read(target.join("ticks.txt")).unwrap(), b"999");
         assert!(!aside.exists());
         let _ = std::fs::remove_dir_all(&root);

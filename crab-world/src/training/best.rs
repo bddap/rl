@@ -12,11 +12,17 @@ use crate::mesh_fallback::BodyGate;
 
 const BEST_SUBDIR: &str = "best";
 
-const PROGRESS_SIDECAR: &str = "progress.txt";
+/// The min-over-bearings chase-progress bar (rl#239). The sidecar name IS the metric
+/// version: a `best/` stamped under a retired metric carries none of THIS sidecar, so
+/// the score-incumbent-first machinery re-baselines it under the current eval before
+/// any candidate is considered — never a new-metric candidate judged against an
+/// old-metric bar.
+const PROGRESS_SIDECAR: &str = "min_progress.txt";
 
-/// Sidecar of the pre-#233 reach-keyed gate; removed whenever the progress bar is
+/// Sidecars of retired metrics — `reach.txt` (pre-#233 reach-keyed gate) and
+/// `progress.txt` (the +X-only chase eval, rl#239) — removed whenever the bar is
 /// (re)stamped so a `best/` never carries two competing scores.
-const LEGACY_REACH_SIDECAR: &str = "reach.txt";
+const LEGACY_SIDECARS: &[&str] = &["reach.txt", "progress.txt"];
 
 struct BestFile {
     name: &'static str,
@@ -46,11 +52,15 @@ const BEST_FILES: &[BestFile] = &[
     },
 ];
 
-/// How often to spend one chase-eval (~6 s, read-only) scoring the live checkpoint.
-/// Periodic rather than reach-triggered: a trigger derived from near-heavy TRAIN
-/// episodes is blind to far-approach movement in either direction — exactly the
-/// divergence that let a 6.92 m brain displace the 8.93 m one (bddap/rl#233).
-const EVAL_PERIOD: Duration = Duration::from_secs(600);
+/// How often to spend one chase-eval scoring the live checkpoint. Periodic rather than
+/// reach-triggered: a trigger derived from near-heavy TRAIN episodes is blind to
+/// far-approach movement in either direction — exactly the divergence that let a
+/// 6.92 m brain displace the 8.93 m one (bddap/rl#233). The compass eval runs one
+/// episode per bearing (rl#239), ~8× the single-episode cost (~2 min measured on the
+/// training box), so the period is 3× the pre-compass 600 s — eval spend stays under
+/// ~7% of training wall-clock (rollout threads idle while the learner-thread eval
+/// runs).
+const EVAL_PERIOD: Duration = Duration::from_secs(1800);
 
 /// Meters of chase progress a candidate must add over the incumbent to displace it.
 /// The eval is deterministic per brain, so this only suppresses churn from
@@ -150,8 +160,8 @@ impl BestKeeper {
 
     /// Once per [`EVAL_PERIOD`]: chase-eval the checkpoint on disk and mirror it into
     /// `best/` iff it beats the incumbent's progress. Runs between learner iterations
-    /// (rollout threads idle for the eval's ~6 s), so it costs wall clock only — no
-    /// training data or update is touched.
+    /// (rollout threads idle for the eval's ~2 min compass sweep), so it costs wall
+    /// clock only — no training data or update is touched.
     pub(crate) fn maybe_snapshot(&mut self) {
         if let Some(last) = self.last_eval
             && last.elapsed() < self.eval_period
@@ -161,9 +171,10 @@ impl BestKeeper {
         // Reset even when nothing promotes: the period paces eval SPEND, not successes.
         self.last_eval = Some(Instant::now());
 
-        // A best/ from the reach-keyed era carries no progress bar; score the incumbent
-        // FIRST so it cannot be displaced unscored (the bddap/rl#233 failure). Until the
-        // incumbent scores cleanly, no candidate is considered.
+        // A best/ scored under a retired metric (reach-keyed era, or the +X-only eval)
+        // carries no current-metric bar; score the incumbent FIRST so it cannot be
+        // displaced unscored (the bddap/rl#233 failure). Until the incumbent scores
+        // cleanly, no candidate is considered.
         if self.best.is_none()
             && self
                 .checkpoint_dir
@@ -186,10 +197,10 @@ impl BestKeeper {
             warn!("[best] chase-eval loaded no policy from the live checkpoint — not eligible");
             return;
         }
-        let Some(candidate) = Progress::new(report.progress_m) else {
+        let Some(candidate) = Progress::new(report.progress_m()) else {
             warn!(
                 "[best] non-finite chase progress ({}) — not eligible for snapshot",
-                report.progress_m
+                report.progress_m()
             );
             return;
         };
@@ -204,9 +215,9 @@ impl BestKeeper {
             .unwrap_or_else(|| "none".to_string());
         if !beats {
             info!(
-                "[best] chase-eval: progress {:.3} m (reached={}) vs bar {bar} — keeping incumbent",
+                "[best] chase-eval: min-bearing progress {:.3} m (reached={}) vs bar {bar} — keeping incumbent",
                 candidate.get(),
-                report.reached
+                report.reached()
             );
             return;
         }
@@ -214,11 +225,11 @@ impl BestKeeper {
         match self.snapshot(candidate) {
             Ok(()) => {
                 info!(
-                    "[best] new best snapshot → {}/{BEST_SUBDIR} | chase progress {:.3} m \
+                    "[best] new best snapshot → {}/{BEST_SUBDIR} | min-bearing chase progress {:.3} m \
                      (reached={}) beats {bar}",
                     self.checkpoint_dir.display(),
                     candidate.get(),
-                    report.reached
+                    report.reached()
                 );
                 self.best = Some(candidate);
             }
@@ -244,12 +255,13 @@ impl BestKeeper {
                 return false;
             }
         };
-        let scored = Progress::new(report.progress_m).filter(|_| report.policy_loaded);
+        let scored = Progress::new(report.progress_m()).filter(|_| report.policy_loaded);
         let Some(progress) = scored else {
             error!(
                 "[best] incumbent best/ produced no usable score (policy_loaded={}, progress={}) \
                  — protecting it unscored",
-                report.policy_loaded, report.progress_m
+                report.policy_loaded,
+                report.progress_m()
             );
             return false;
         };
@@ -260,9 +272,9 @@ impl BestKeeper {
             return false;
         }
         info!(
-            "[best] incumbent best/ scored: chase progress {:.3} m (reached={}) — bar established",
+            "[best] incumbent best/ scored: min-bearing chase progress {:.3} m (reached={}) — bar established",
             progress.get(),
-            report.reached
+            report.reached()
         );
         self.best = Some(progress);
         true
@@ -296,7 +308,9 @@ impl BestKeeper {
 }
 
 fn write_progress_sidecar(best_dir: &Path, progress: Progress) -> std::io::Result<()> {
-    let _ = std::fs::remove_file(best_dir.join(LEGACY_REACH_SIDECAR));
+    for legacy in LEGACY_SIDECARS {
+        let _ = std::fs::remove_file(best_dir.join(legacy));
+    }
     super::atomic_write(
         &best_dir.join(PROGRESS_SIDECAR),
         format!("{}\n", progress.get()).as_bytes(),
@@ -315,17 +329,21 @@ mod tests {
     }
 
     fn report(progress_m: f32, policy_loaded: bool) -> EvalReport {
-        EvalReport {
+        let bearing = crate::eval::BearingReport {
+            bearing_rad: 0.0,
             progress_m,
             total_torque: 0.0,
             mean_torque_per_tick: 0.0,
             initial_distance_m: DEFAULT_TARGET_DISTANCE_M,
             closest_distance_m: DEFAULT_TARGET_DISTANCE_M - progress_m,
             final_distance_m: DEFAULT_TARGET_DISTANCE_M - progress_m,
-            target_distance_m: DEFAULT_TARGET_DISTANCE_M,
             reached: false,
             active_ticks: DEFAULT_EVAL_TICKS,
+        };
+        EvalReport {
+            target_distance_m: DEFAULT_TARGET_DISTANCE_M,
             policy_loaded,
+            per_bearing: [bearing; crate::eval::EVAL_BEARINGS],
         }
     }
 
@@ -450,9 +468,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The bddap/rl#233 scenario: a reach-era `best/` (8.93 m brain, reach.txt sidecar,
-    /// no progress bar) must be scored in place before a weaker candidate (6.92 m) can
-    /// be considered — and must survive it.
+    /// The bddap/rl#233 and rl#239 migration scenario: a `best/` scored under a retired
+    /// metric (a reach.txt AND a +X-era progress.txt, no min_progress.txt) must be
+    /// re-scored in place under the CURRENT eval before a weaker candidate can be
+    /// considered — and must survive it. This re-baseline is what keeps promotions
+    /// apples-to-apples across a metric change.
     #[test]
     fn legacy_best_is_scored_before_any_candidate_displaces_it() {
         let dir = scratch_ckpt("migration");
@@ -463,6 +483,7 @@ mod tests {
             ("normalizer.bin", b"norm"),
             ("return_normalizer.bin", b"rnorm"),
             ("reach.txt", b"0.729"),
+            ("progress.txt", b"8.9315"),
         ] {
             std::fs::write(best_dir.join(name), body).unwrap();
         }
@@ -470,10 +491,13 @@ mod tests {
         let score = Rc::new(RefCell::new(Ok(report(8.93, true))));
         let calls = Rc::new(RefCell::new(Vec::new()));
         let mut k = scripted_keeper(&dir, score.clone(), calls.clone());
-        assert!(k.best.is_none(), "legacy sidecar carries no progress bar");
+        assert!(
+            k.best.is_none(),
+            "retired-metric sidecars carry no current-metric bar"
+        );
 
         // Incumbent scores 8.93; the candidate (same scripted score here) then fails
-        // the margin — incumbent kept, bar stamped, legacy sidecar gone.
+        // the margin — incumbent kept, bar stamped, legacy sidecars gone.
         k.maybe_snapshot();
         assert_eq!(*calls.borrow(), vec![true, false], "incumbent scored FIRST");
         assert_eq!(
@@ -482,10 +506,12 @@ mod tests {
         );
         let bar = Progress::load(&best_dir.join(PROGRESS_SIDECAR)).unwrap();
         assert!((bar.get() - 8.93).abs() < 1e-6);
-        assert!(
-            !best_dir.join("reach.txt").exists(),
-            "legacy sidecar replaced"
-        );
+        for legacy in LEGACY_SIDECARS {
+            assert!(
+                !best_dir.join(legacy).exists(),
+                "retired sidecar {legacy} replaced"
+            );
+        }
 
         *score.borrow_mut() = Ok(report(6.92, true));
         k.maybe_snapshot();

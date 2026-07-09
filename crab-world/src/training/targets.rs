@@ -18,18 +18,23 @@ pub(crate) const REACH_RADIUS: f32 = 0.8;
 
 const NEAR_BIAS_EXP: f32 = 2.0;
 
+/// The ONE polar target-placement formula — `theta` from `origin` in the ground plane,
+/// (cos, ·, sin) — shared by training sampling and the eval compass so the bearing
+/// convention cannot drift between them.
+pub(crate) fn polar_target(origin: Vec3, theta: f32, dist: f32, y: f32) -> Vec3 {
+    Vec3::new(
+        origin.x + dist * theta.cos(),
+        y,
+        origin.z + dist * theta.sin(),
+    )
+}
+
 pub(crate) fn sample_target(origin: Vec3, rng: &mut impl rand::Rng) -> Vec3 {
     let (min, max) = (BAND_START_MIN, TARGET_ARENA_HALF);
     let u: f32 = rng.gen_range(0.0..1.0);
     let dist = min + (max - min) * u.powf(NEAR_BIAS_EXP);
     let y = rng.gen_range(TARGET_Y_MIN..TARGET_Y_MAX);
-    let at = |theta: f32| {
-        Vec3::new(
-            origin.x + dist * theta.cos(),
-            y,
-            origin.z + dist * theta.sin(),
-        )
-    };
+    let at = |theta: f32| polar_target(origin, theta, dist, y);
     let in_arena = |p: &Vec3| p.x.abs() <= TARGET_ARENA_HALF && p.z.abs() <= TARGET_ARENA_HALF;
 
     for _ in 0..32 {
