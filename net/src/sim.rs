@@ -59,6 +59,12 @@ impl Input {
     }
 
     pub fn to_bytes(self) -> [u8; Self::WIRE_LEN] {
+        debug_assert!(
+            [self.move_strafe, self.move_forward, self.look_yaw]
+                .iter()
+                .all(|a| (-Self::AXIS_SCALE..=Self::AXIS_SCALE).contains(a)),
+            "encoding an out-of-range axis; construct via Input::new"
+        );
         let mut b = [0u8; Self::WIRE_LEN];
         b[0..2].copy_from_slice(&self.move_strafe.to_le_bytes());
         b[2..4].copy_from_slice(&self.move_forward.to_le_bytes());
@@ -67,11 +73,18 @@ impl Input {
         b
     }
 
+    /// Axes clamp to ±[`AXIS_SCALE`](Self::AXIS_SCALE) on decode: the wire carries a
+    /// full `i16` per axis, so a forged frame could otherwise push one 32× past full
+    /// deflection. Honest senders already clamp at construction ([`new`](Self::new)),
+    /// so this bites only forged bytes — and only the forger's own prediction diverges
+    /// from the authoritative snapshots. Unknown button bits pass through deliberately;
+    /// readers mask via [`pressed`](Self::pressed).
     pub fn from_bytes(b: [u8; Self::WIRE_LEN]) -> Self {
+        let axis = |lo, hi| i16::from_le_bytes([lo, hi]).clamp(-Self::AXIS_SCALE, Self::AXIS_SCALE);
         Self {
-            move_strafe: i16::from_le_bytes([b[0], b[1]]),
-            move_forward: i16::from_le_bytes([b[2], b[3]]),
-            look_yaw: i16::from_le_bytes([b[4], b[5]]),
+            move_strafe: axis(b[0], b[1]),
+            move_forward: axis(b[2], b[3]),
+            look_yaw: axis(b[4], b[5]),
             buttons: b[6],
         }
     }
@@ -702,19 +715,39 @@ mod tests {
 
     #[test]
     fn input_bytes_roundtrip() {
+        // Identity holds on the in-range axis domain; out-of-range bytes clamp on
+        // decode (next test) and out-of-range structs fail to_bytes' debug_assert.
         for inp in [
             Input::default(),
             Input::from_axes(1.0, -1.0),
             Input::new(-0.5, 0.25, 1.0, buttons::ACTION),
             Input {
-                move_strafe: i16::MIN,
-                move_forward: i16::MAX,
+                move_strafe: -Input::AXIS_SCALE,
+                move_forward: Input::AXIS_SCALE,
                 look_yaw: -123,
                 buttons: 0xFF,
             },
         ] {
             assert_eq!(Input::from_bytes(inp.to_bytes()), inp);
         }
+    }
+
+    #[test]
+    fn input_from_bytes_clamps_out_of_range_axes() {
+        let mut b = [0u8; Input::WIRE_LEN];
+        b[0..2].copy_from_slice(&i16::MIN.to_le_bytes());
+        b[2..4].copy_from_slice(&i16::MAX.to_le_bytes());
+        b[4..6].copy_from_slice(&(-Input::AXIS_SCALE - 1).to_le_bytes());
+        b[6] = 0xFF;
+        assert_eq!(
+            Input::from_bytes(b),
+            Input {
+                move_strafe: -Input::AXIS_SCALE,
+                move_forward: Input::AXIS_SCALE,
+                look_yaw: -Input::AXIS_SCALE,
+                buttons: 0xFF,
+            }
+        );
     }
 
     #[test]
