@@ -72,9 +72,11 @@ struct EvalArgs {
     #[command(flatten)]
     checkpoint: CheckpointArgs,
 
-    /// Physics ticks to run the policy for (after a short settle drop). The default is
-    /// [`crab_world::eval::DEFAULT_EVAL_TICKS`] — the one place the chase-eval episode
-    /// is defined, shared with the trainer's keep-best gate (bddap/rl#233).
+    /// Physics ticks to run the policy for PER COMPASS BEARING (after a short settle
+    /// drop each). The default is [`crab_world::eval::DEFAULT_EVAL_TICKS`] — the one
+    /// place the chase-eval episode is defined, shared with the trainer's keep-best
+    /// gate (bddap/rl#233); the bearing compass is [`crab_world::eval::EVAL_BEARINGS`]
+    /// (bddap/rl#239).
     #[arg(long, default_value_t = crab_world::eval::DEFAULT_EVAL_TICKS)]
     ticks: u64,
 
@@ -161,20 +163,41 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            // One line per compass bearing (`EVAL_RESULT_BEARING`, no trailing space in
+            // the prefix match), then the headline `EVAL_RESULT ` line whose keys are
+            // unchanged from the +X-only era — its numbers now describe the WORST
+            // bearing (rl#239) — so line-oriented consumers (rl-eval-monitor,
+            // rl-release-build) parse both eras with the same `^EVAL_RESULT ` grep.
+            for b in &r.per_bearing {
+                println!(
+                    "EVAL_RESULT_BEARING deg={:.0} progress_m={:.4} closest_m={:.4} \
+                     final_m={:.4} total_torque={:.2} reached={} ticks={}",
+                    b.bearing_rad.to_degrees(),
+                    b.progress_m,
+                    b.closest_distance_m,
+                    b.final_distance_m,
+                    b.total_torque,
+                    b.reached,
+                    b.active_ticks,
+                );
+            }
+            let worst = r.worst();
             println!(
                 "EVAL_RESULT progress_m={:.4} total_torque={:.2} mean_torque_per_tick={:.4} \
                  initial_m={:.4} closest_m={:.4} final_m={:.4} target_m={:.2} reached={} \
-                 ticks={} policy_loaded={}",
-                r.progress_m,
-                r.total_torque,
-                r.mean_torque_per_tick,
-                r.initial_distance_m,
-                r.closest_distance_m,
-                r.final_distance_m,
+                 ticks={} policy_loaded={} bearings={} worst_deg={:.0}",
+                worst.progress_m,
+                worst.total_torque,
+                worst.mean_torque_per_tick,
+                worst.initial_distance_m,
+                worst.closest_distance_m,
+                worst.final_distance_m,
                 r.target_distance_m,
-                r.reached,
-                r.active_ticks,
+                worst.reached,
+                worst.active_ticks,
                 r.policy_loaded,
+                crab_world::eval::EVAL_BEARINGS,
+                worst.bearing_rad.to_degrees(),
             );
             if !r.policy_loaded {
                 eprintln!(
@@ -192,17 +215,20 @@ fn main() {
                     );
                     std::process::exit(1);
                 }
-                if r.progress_m < min {
+                if r.progress_m() < min {
                     eprintln!(
-                        "eval: FAIL — policy closed {:.4} m toward the {:.2} m target, below \
-                         the required --min-progress {min} m (dead/collapsed policy)",
-                        r.progress_m, r.target_distance_m
+                        "eval: FAIL — policy closed {:.4} m toward the {:.2} m target at its \
+                         worst bearing ({:.0}°), below the required --min-progress {min} m \
+                         (dead/collapsed policy, or a dead bearing)",
+                        r.progress_m(),
+                        r.target_distance_m,
+                        r.worst().bearing_rad.to_degrees()
                     );
                     std::process::exit(1);
                 }
                 println!(
-                    "eval: PASS — progress {:.4} m ≥ --min-progress {min} m",
-                    r.progress_m
+                    "eval: PASS — worst-bearing progress {:.4} m ≥ --min-progress {min} m",
+                    r.progress_m()
                 );
             }
             return;
