@@ -156,22 +156,31 @@ fn exchange_paths(a: &Path, b: &Path, aside: &Path) -> std::io::Result<()> {
 ///
 /// Writer debris (`*.tmp` from an interrupted [`atomic_write`], a crashed swap's
 /// staging/aside dirs) is skipped: carrying it would immortalize into every future
-/// generation what used to be transient garbage.
+/// generation what used to be transient garbage. ONE exception: a `.X.aside` whose
+/// `X` is ABSENT is the sole surviving copy of `X` — a NESTED fallback swap (e.g.
+/// `best/` inside the checkpoint dir) crashed between its renames, and
+/// [`replace_dir_atomically`]'s own sweep only recovers asides for its OWN target —
+/// so it is carried AS `X`, or a parent-dir swap would destroy the incumbent with
+/// the retired generation.
 pub(crate) fn hardlink_missing_entries(from: &Path, to: &Path) -> std::io::Result<()> {
-    const TRANSIENT_SUFFIXES: &[&str] = &[".tmp", ".staging", ".aside"];
     if !from.exists() {
         return Ok(());
     }
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let name = entry.file_name();
-        if TRANSIENT_SUFFIXES
-            .iter()
-            .any(|s| name.to_string_lossy().ends_with(s))
+        let lossy = name.to_string_lossy();
+        let carry_as = match lossy
+            .strip_prefix('.')
+            .and_then(|s| s.strip_suffix(".aside"))
         {
-            continue;
-        }
-        let dst = to.join(name);
+            // An aside shadowed by a live `X` is debris; an unshadowed one IS `X`.
+            Some(orig) if !from.join(orig).exists() => std::ffi::OsString::from(orig),
+            Some(_) => continue,
+            None if lossy.ends_with(".tmp") || lossy.ends_with(".staging") => continue,
+            None => name,
+        };
+        let dst = to.join(carry_as);
         if entry.file_type()?.is_dir() {
             if !dst.exists() {
                 std::fs::create_dir(&dst)?;
@@ -351,6 +360,37 @@ mod swap_tests {
         assert!(
             !staging.join("optimizer.tmp").exists(),
             "writer debris must stay transient, never immortalized into the next generation"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A NESTED dir's crashed fallback swap (e.g. `best/` inside the checkpoint dir)
+    /// leaves `.best.aside` as the only copy of the incumbent; the parent-dir carry
+    /// must resurrect it as `best/` — treating it as debris would let the parent swap
+    /// destroy the incumbent with the retired generation. A shadowed aside (the
+    /// original also present) IS debris and stays behind.
+    #[test]
+    fn unshadowed_nested_aside_is_carried_as_the_original() {
+        let root = scratch("nested-aside");
+        let live = root.join("live");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(live.join(".best.aside")).unwrap();
+        std::fs::write(live.join(".best.aside/brain.bin"), b"incumbent").unwrap();
+        std::fs::write(live.join("ticks.txt"), b"1").unwrap();
+        std::fs::write(live.join(".ticks.txt.aside"), b"stale").unwrap();
+        std::fs::create_dir(&staging).unwrap();
+
+        hardlink_missing_entries(&live, &staging).unwrap();
+        assert_eq!(
+            std::fs::read(staging.join("best/brain.bin")).unwrap(),
+            b"incumbent",
+            "the sole surviving copy of best/ is carried as best/"
+        );
+        assert!(!staging.join(".best.aside").exists());
+        assert_eq!(std::fs::read(staging.join("ticks.txt")).unwrap(), b"1");
+        assert!(
+            !staging.join(".ticks.txt.aside").exists(),
+            "an aside shadowed by its live original is debris"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
