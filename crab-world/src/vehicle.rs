@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use crate::bot::body::vehicle_collision;
+use crate::bot::body::VEHICLE_COLLISION;
 
 const VEHICLE_HALF: Vec3 = Vec3::new(0.11, 0.035, 0.17);
 
@@ -173,7 +173,7 @@ impl Plugin for VehiclePlugin {
 /// provided bodies enter play only through this system (the headless gates spawn ram craft into
 /// worlds WITHOUT the plugin): a body only spawns for a pilot with no matching body, and a
 /// mismatched one is despawned in the same pass. Each body is a dynamic box with the
-/// [`vehicle_collision`] groups (arena + every crab), so it bounces off the walls and strikes
+/// [`VEHICLE_COLLISION`] groups (arena + every crab), so it bounces off the walls and strikes
 /// Sally.
 fn manage_vehicles(
     mut commands: Commands,
@@ -214,7 +214,7 @@ fn vehicle_bundle(
         vehicle_collider(),
         ColliderMassProperties::Density(VEHICLE_DENSITY),
         GravityScale(kind.gravity_scale()),
-        vehicle_collision(),
+        VEHICLE_COLLISION,
         transform,
         velocity,
         ExternalForce::default(),
@@ -226,7 +226,7 @@ pub fn vehicle_collider() -> Collider {
 }
 
 /// Lateral spacing between different pilots' spawn spots (m). Crafts don't collide with each
-/// other ([`vehicle_collision`] filters only arena + crabs), so this is about legibility, not
+/// other ([`VEHICLE_COLLISION`]'s filter omits VEHICLE_GROUP), so this is about legibility, not
 /// physics: two players boarding the same tick must not materialise inside one another. Pilot 0
 /// keeps the exact arena-centre pose solo always had. Unbounded by design: pilot ids are
 /// couch-scale (the server allocates lowest-free), so the offset stays well inside the ±10 m
@@ -370,6 +370,56 @@ mod tests {
     }
 
     const FAR: Vec3 = Vec3::new(500.0, 300.0, 500.0);
+
+    /// rl#235 regression: nested (coxa) links were vehicle-transparent — neither
+    /// NESTED_COLLISION's filter nor VEHICLE_COLLISION's carried the other side, so a
+    /// low ram ghosted through a hip capsule under the shell edge. A vehicle overlapping
+    /// a NESTED-grouped capsule must register a narrow-phase contact. The coxa is a
+    /// proxy capsule carrying the exact groups `spawn_crab` gives a shell-nested link,
+    /// because only the mesh-fitted Sally body nests links — the fallback body this test
+    /// env spawns nests none.
+    #[test]
+    fn vehicle_contacts_nested_coxa() {
+        use crate::bot::body::NESTED_COLLISION;
+        use crate::bot::headless::tick;
+        use bevy_rapier3d::plugin::context::{RapierContextColliders, RapierContextSimulation};
+
+        let mut app = headless_app();
+        tick(&mut app, 1);
+
+        let coxa = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Collider::capsule_y(0.03, 0.02),
+                NESTED_COLLISION,
+                Transform::from_translation(FAR),
+            ))
+            .id();
+        let vehicle = app
+            .world_mut()
+            .spawn(vehicle_bundle(
+                P0,
+                VehicleKind::Plane,
+                Transform::from_translation(FAR),
+                Velocity::default(),
+            ))
+            .id();
+        tick(&mut app, 2);
+
+        let mut q = app
+            .world_mut()
+            .query::<(&RapierContextColliders, &RapierContextSimulation)>();
+        let (cols, sim) = q.single(app.world()).expect("one rapier context");
+        let handle = |e: Entity| *cols.entity2collider().get(&e).expect("collider handle");
+        assert!(
+            sim.narrow_phase
+                .contact_pair(handle(vehicle), handle(coxa))
+                .is_some_and(|p| p.has_any_active_contact()),
+            "vehicle overlapping a coxa produced no contact — NESTED_COLLISION and \
+             VEHICLE_COLLISION must include each other's group (rl#235)"
+        );
+    }
 
     #[test]
     fn plane_thrust_accelerates_forward() {

@@ -7,7 +7,7 @@ mod spawn;
 mod debug_gizmos;
 
 pub use collision::{
-    ARENA_COLLISION, MAX_ENVS, NESTED_COLLISION, crab_collision, vehicle_collision,
+    ARENA_COLLISION, MAX_ENVS, NESTED_COLLISION, VEHICLE_COLLISION, crab_collision,
 };
 
 pub use components::{
