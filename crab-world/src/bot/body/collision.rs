@@ -3,8 +3,6 @@ use bevy_rapier3d::prelude::*;
 pub const ARENA_COLLISION: CollisionGroups =
     CollisionGroups::new(Group::GROUP_1, Group::ALL.difference(Group::GROUP_1));
 
-pub const NESTED_COLLISION: CollisionGroups = CollisionGroups::new(Group::GROUP_2, Group::GROUP_1);
-
 pub const MAX_ENVS: usize = 16;
 
 const VEHICLE_GROUP: Group = Group::GROUP_19;
@@ -12,15 +10,35 @@ const VEHICLE_GROUP: Group = Group::GROUP_19;
 const _: () = assert!(MAX_ENVS + 2 < 32);
 const _: () = assert!(VEHICLE_GROUP.bits() == 1 << (MAX_ENVS + 2));
 
-pub fn vehicle_collision() -> CollisionGroups {
+/// Links tucked inside the carapace (the coxae) skip crab-vs-crab contacts but must
+/// still be solid to the arena AND to vehicles — without VEHICLE_GROUP here a low ram
+/// ghosts through a hip capsule under the shell edge (rl#235).
+pub const NESTED_COLLISION: CollisionGroups =
+    CollisionGroups::new(Group::GROUP_2, Group::GROUP_1.union(VEHICLE_GROUP));
+
+pub const VEHICLE_COLLISION: CollisionGroups = {
     let mut env_bits = Group::empty();
     let mut e = 0;
     while e < MAX_ENVS {
         env_bits = env_bits.union(Group::from_bits_truncate(1 << (e + 2)));
         e += 1;
     }
-    CollisionGroups::new(VEHICLE_GROUP, Group::GROUP_1.union(env_bits))
-}
+    CollisionGroups::new(
+        VEHICLE_GROUP,
+        Group::GROUP_1.union(Group::GROUP_2).union(env_bits),
+    )
+};
+
+// Rapier activates a pair only when EACH side's filter names the other's membership —
+// one direction alone is silent non-contact (rl#235).
+const _: () = assert!(
+    VEHICLE_COLLISION
+        .filters
+        .intersects(NESTED_COLLISION.memberships)
+        && NESTED_COLLISION
+            .filters
+            .intersects(VEHICLE_COLLISION.memberships)
+);
 
 pub fn crab_collision(env: usize) -> CollisionGroups {
     debug_assert!(
