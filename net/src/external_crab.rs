@@ -15,7 +15,11 @@
 //! Necessary, not sufficient: closure is also bearing-dependent (the brain strides
 //! +X but shuffles at other bearings, and the chase eval only poses +X — rl#239),
 //! and the spawn-relative body.pos obs channel still drifts OOD on a long
-//! open-field chase (rl#240) — neither is fixable at the posing layer.
+//! open-field chase (rl#240) — neither is fixable at the posing layer. For the
+//! latter, [`bound_body_pos_drift`] measures the drift every tick and carries the
+//! fix — recenter the local arena by teleporting the drifted crab back onto its
+//! spawn origin — behind [`ARM_BODY_POS_RECENTER`] (default off, see its doc for
+//! the sequencing gate).
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
@@ -31,6 +35,26 @@ use crab_world::training::targets::TARGET_ARENA_HALF;
 
 const CLAW_TARGET_Y: f32 = 0.3;
 
+/// rl#240 flip: recenter the local arena (teleport the drifted crab back onto its spawn
+/// origin) whenever the spawn-relative body.pos obs channel leaves the training band.
+/// GATED OFF: flipping changes what the net observes mid-chase — a training-relevant
+/// change — and is sequenced behind the rl#239 honest-bearing eval deploy and the σ-floor
+/// experiment's conclusion (one live training change at a time). Until then
+/// [`bound_body_pos_drift`] only measures. Flip = set `true`; behavior is otherwise
+/// bit-identical for existing brains. Flip precondition beyond the sequencing gate:
+/// vehicles share the crab's arena frame (rl#235 rams, and the render anchor derives
+/// from it), so the teleport must carry co-arena vehicles too — see rl#240.
+const ARM_BODY_POS_RECENTER: bool = false;
+
+/// Arms [`bound_body_pos_drift`]'s recenter teleport. Inserted by the plugin iff
+/// [`ARM_BODY_POS_RECENTER`], which stays the sole authority; private so nothing else
+/// can arm it (tests live in this module).
+#[derive(Resource)]
+struct BodyPosRecenter;
+
+/// Each further [`DRIFT_LOG_STEP_M`] of unrecentered peak drift earns one more log line.
+const DRIFT_LOG_STEP_M: f32 = 5.0;
+
 pub struct CrabPolicies(pub Vec<Policy>);
 
 #[derive(Resource)]
@@ -44,6 +68,13 @@ struct CrabBridge {
     yaw_turns: i32,
     settle: u32,
     hunt_target_m: Option<Vec2>,
+    /// Log cursor for [`bound_body_pos_drift`]'s measurement: the next spawn-relative
+    /// drift (m) worth a log line. Starts at the in-distribution edge, then advances by
+    /// [`DRIFT_LOG_STEP_M`] per line so a long unrecentered chase is quantified without
+    /// flooding.
+    next_drift_log_m: f32,
+    /// Recenter teleports this round (rl#240) — stays 0 while the flip is gated off.
+    recenters: u32,
 }
 
 fn pos_to_m(p: Pos) -> Vec2 {
@@ -65,6 +96,8 @@ impl CrabBridge {
             yaw_turns: 0,
             hunt_target_m: None,
             settle: crab_world::bot::RESET_GRACE_TICKS,
+            next_drift_log_m: TARGET_ARENA_HALF,
+            recenters: 0,
         }
     }
 
@@ -90,6 +123,8 @@ impl CrabBridge {
         self.world_pos_m = pos_to_m(spawn);
         self.last_carapace_m = None;
         self.settle = crab_world::bot::RESET_GRACE_TICKS;
+        self.next_drift_log_m = TARGET_ARENA_HALF;
+        self.recenters = 0;
     }
 }
 
@@ -225,9 +260,18 @@ impl Plugin for ExternalCrabPlugin {
                 .run_if(crab_not_yet_spawned),
         );
 
+        if ARM_BODY_POS_RECENTER {
+            app.insert_resource(BodyPosRecenter);
+        }
         app.add_systems(
             FixedUpdate,
             (
+                // After rescue: both write crab Transforms before Sense; the edge makes the
+                // interleaving deterministic (a rescued env respawns at origin, so the guard
+                // then sees ~0 drift instead of racing the respawn).
+                bound_body_pos_drift
+                    .after(crab_world::bot::rescue_nonfinite_crabs)
+                    .before(set_crab_walk_target),
                 set_crab_walk_target.before(BotSet::Sense),
                 run_crab_policy.in_set(BotSet::Think),
             )
@@ -286,6 +330,76 @@ fn publish_brain_labels(policies: NonSend<CrabPolicies>, mut labels: ResMut<Crab
 
 fn crab_not_yet_spawned(crabs: Query<(), With<CrabCarapace>>) -> bool {
     crabs.is_empty()
+}
+
+/// rl#240 guard for the spawn-relative body.pos obs channel: training bounds it to the
+/// walled box, OpenField doesn't, so a long chase walks it arbitrarily OOD. Always
+/// MEASURES (rate-limited warn lines quantify the drift); when [`BodyPosRecenter`] is
+/// armed it also FIXES it — teleport every part of the drifted env back onto its spawn
+/// origin in one tick (a uniform Transform shift, a clean multibody teleport through
+/// rapier — pinned by crab-world's `uniform_part_shift_teleports_the_multibody_cleanly`)
+/// and shift the world-pos integrator's `prev` by the same delta so the teleport never
+/// counts as motion. body.pos snaps to ~0, exactly the every-episode spawn distribution.
+///
+/// Ordering: before [`set_crab_walk_target`] (so the target is posed from the
+/// post-teleport carapace) and hence before Sense and rapier's SyncBackend.
+fn bound_body_pos_drift(
+    mut bridge: ResMut<ExternalCrabBridge>,
+    spawns: Res<CrabSpawns>,
+    armed: Option<Res<BodyPosRecenter>>,
+    mut targets: ResMut<CrabTargets>,
+    mut parts: Query<(&CrabEnvId, &mut Transform, Option<&CrabCarapace>), With<CrabBodyPart>>,
+) {
+    for (idx, crab) in bridge.crabs.iter_mut().enumerate() {
+        let Some(carapace) = parts
+            .iter()
+            .find(|(env, _, cara)| env.0 == idx && cara.is_some())
+            .map(|(_, t, _)| t.translation)
+        else {
+            continue;
+        };
+        if !carapace.is_finite() {
+            continue; // the rescue path owns non-finite crabs
+        }
+        let origin = spawns.0.get(idx).copied().unwrap_or(Vec3::ZERO);
+        let drift = Vec2::new(carapace.x - origin.x, carapace.z - origin.z);
+        let drift_m = drift.length();
+        if drift_m <= TARGET_ARENA_HALF {
+            continue;
+        }
+
+        if armed.is_some() {
+            let delta = Vec3::new(-drift.x, 0.0, -drift.y);
+            for (env, mut t, _) in parts.iter_mut() {
+                if env.0 == idx {
+                    t.translation += delta;
+                }
+            }
+            if let Some(prev) = crab.last_carapace_m.as_mut() {
+                *prev += Vec2::new(delta.x, delta.z);
+            }
+            // Carry the posed target into the new frame too: set_crab_walk_target normally
+            // re-poses it right after, but its prey-on-top-of-crab early-out (`to_prey ≈ 0`)
+            // keeps the previous slot — which would be a whole `-delta` stale after this
+            // teleport, exactly the OOD spike this system exists to prevent.
+            if let Some(t) = targets.envs.get_mut(idx).and_then(|s| s.as_mut()) {
+                *t += delta;
+            }
+            crab.recenters += 1;
+            info!(
+                "external_crab: recentered env {idx}'s local arena by {drift_m:.1} m \
+                 (recenter #{} this round, rl#240)",
+                crab.recenters
+            );
+        } else if drift_m >= crab.next_drift_log_m {
+            warn!(
+                "external_crab: env {idx} body.pos drifted {drift_m:.1} m from spawn — outside \
+                 the {TARGET_ARENA_HALF} m in-distribution radius, obs OOD (rl#240; recenter \
+                 gated off)"
+            );
+            crab.next_drift_log_m = drift_m + DRIFT_LOG_STEP_M;
+        }
+    }
 }
 
 fn set_crab_walk_target(
@@ -361,6 +475,8 @@ fn integrate_crab(
         if rescued_envs.contains(&idx) {
             crab.last_carapace_m = None;
             crab.settle = crab_world::bot::RESET_GRACE_TICKS;
+            // The rescue respawned it at the origin — re-arm the drift measurement.
+            crab.next_drift_log_m = TARGET_ARENA_HALF;
         }
 
         let Some((_, t, vel)) = carapace_q.iter().find(|(env, _, _)| env.0 == idx) else {
@@ -414,3 +530,107 @@ fn publish_skin_repose(
 mod probe;
 
 pub use probe::{ProbeSample, StabilityResult, run_headless_probe, run_vehicle_stability_probe};
+
+#[cfg(test)]
+mod recenter_tests {
+    use crab_world::bot::body::CrabBodyPart;
+    use crab_world::bot::headless::{
+        HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
+    };
+    use crab_world::bot::sensor::BODY_POS_SLOT;
+
+    use super::*;
+
+    /// The GCR client's stack minus the sim: OpenField arena, one bridged crab. The bogus
+    /// checkpoint dir loads no policy, so the crab just stands — drift is injected by hand.
+    fn gcr_like_app() -> App {
+        pin_single_thread_pools();
+        let mut app = headless_stack(HeadlessStack {
+            num_envs: 1,
+            role: WorldRole::Standalone,
+            arena: crab_world::physics::Arena::OpenField,
+        });
+        app.add_plugins(ExternalCrabPlugin {
+            checkpoint_dirs: vec![std::path::PathBuf::from("/nonexistent-rl240-test")],
+            crab_spawns: vec![Pos::from_meters(0.0, 0.0)],
+        });
+        arm(app.world_mut());
+        force_serial_schedules(&mut app);
+        // Past bridge settle (RESET_GRACE_TICKS) so the world-pos integrator is live.
+        for _ in 0..64 {
+            app.update();
+        }
+        app
+    }
+
+    /// Emulate a long chase's walk: move the whole crab without touching the bridge.
+    fn shift_parts(app: &mut App, delta: Vec3) {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<CrabBodyPart>>();
+        for mut t in q.iter_mut(app.world_mut()) {
+            t.translation += delta;
+        }
+    }
+
+    fn carapace_xz(app: &mut App) -> Vec2 {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, With<CrabCarapace>>();
+        let t = q.single(app.world()).expect("carapace").translation;
+        Vec2::new(t.x, t.z)
+    }
+
+    #[test]
+    fn recenter_bounds_local_drift_and_keeps_world_pos_honest() {
+        let mut app = gcr_like_app();
+        app.insert_resource(BodyPosRecenter);
+        let w0 = app.world().resource::<ExternalCrabBridge>().crabs[0].world_pos_m;
+
+        shift_parts(&mut app, Vec3::new(20.0, 0.0, 0.0));
+        for _ in 0..2 {
+            app.update();
+        }
+
+        let crab = &app.world().resource::<ExternalCrabBridge>().crabs[0];
+        assert_eq!(crab.recenters, 1, "a 20 m drift must trigger one recenter");
+        // The walk folds into world_pos_m exactly once; the teleport back never counts.
+        let walked = crab.world_pos_m - w0;
+        assert!(
+            (walked - Vec2::new(20.0, 0.0)).length() < 0.5,
+            "world_pos_m must gain the walk and nothing else, gained {walked:?}"
+        );
+        assert!(
+            carapace_xz(&mut app).length() < 1.0,
+            "carapace must be back on its spawn origin"
+        );
+        let obs = app.world().resource::<crab_world::bot::sensor::CrabObservation>();
+        let pos_xz = Vec2::new(obs.envs[0][BODY_POS_SLOT], obs.envs[0][BODY_POS_SLOT + 2]);
+        assert!(
+            pos_xz.length() < 1.0,
+            "body.pos obs channel must be back in distribution, got {pos_xz:?}"
+        );
+    }
+
+    #[test]
+    fn gated_off_only_measures_and_never_teleports() {
+        let mut app = gcr_like_app();
+
+        shift_parts(&mut app, Vec3::new(20.0, 0.0, 0.0));
+        for _ in 0..2 {
+            app.update();
+        }
+
+        let crab = &app.world().resource::<ExternalCrabBridge>().crabs[0];
+        assert_eq!(crab.recenters, 0, "unarmed: never teleport");
+        assert!(
+            crab.next_drift_log_m > TARGET_ARENA_HALF + DRIFT_LOG_STEP_M,
+            "the drift crossing must advance the log cursor, got {}",
+            crab.next_drift_log_m
+        );
+        assert!(
+            carapace_xz(&mut app).x > 15.0,
+            "unarmed: the crab stays where it walked"
+        );
+    }
+}

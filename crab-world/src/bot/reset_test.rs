@@ -74,6 +74,49 @@ fn despawn_respawn_survives_rapier_and_lands_sane() {
     assert_crab_sane(&mut app, n_parts, "after respawn");
 }
 
+/// GCR's rl#240 recenter guard teleports a drifted crab by writing every part's
+/// Transform in one tick. This pins the mechanism it rides on: bevy_rapier treats a
+/// uniform Transform shift as a clean multibody teleport — joints intact, nothing
+/// scattered or snapped back.
+#[test]
+fn uniform_part_shift_teleports_the_multibody_cleanly() {
+    use super::headless::{HeadlessStack, WorldRole, headless_stack};
+
+    // OpenField: the landing spot must still have ground — the real teleport happens
+    // far outside the walled box.
+    let mut app = headless_stack(HeadlessStack {
+        num_envs: 1,
+        role: WorldRole::Standalone,
+        arena: crate::physics::Arena::OpenField,
+    });
+    tick(&mut app, 192);
+
+    let before = part_translations(&mut app);
+    let delta = Vec3::new(12.0, 0.0, -7.0);
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<CrabBodyPart>>();
+        for mut t in q.iter_mut(app.world_mut()) {
+            t.translation += delta;
+        }
+    }
+    tick(&mut app, 64);
+
+    let after = part_translations(&mut app);
+    assert_eq!(after.len(), before.len(), "no part lost in the teleport");
+    // No structural change between the two reads, so query order is stable and the
+    // lists pair up. Loose tolerance: the standing crab keeps micro-settling.
+    for (b, a) in before.iter().zip(&after) {
+        assert!(a.is_finite(), "non-finite part after teleport: {a:?}");
+        assert!(
+            (*a - (*b + delta)).length() < 0.5,
+            "part scattered by teleport: {b:?} + {delta:?} -> {a:?}"
+        );
+    }
+    assert_transforms_match_rapier(&mut app);
+}
+
 #[derive(Resource, Default)]
 struct TestShove(Vec3);
 
