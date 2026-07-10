@@ -89,6 +89,8 @@ pub fn load_armed(checkpoint_dir: &Path) -> Result<Policy, CheckpointUnusable> {
             info!("loaded armed checkpoint from {}", checkpoint_dir.display());
             Ok(Policy {
                 device,
+                dir: checkpoint_dir.to_owned(),
+                swap_root: checkpoint_dir.to_owned(),
                 live_dir: None,
                 last_loaded: None,
                 last_refused: None,
@@ -291,6 +293,10 @@ impl Policy {
     pub fn rest() -> Self {
         Self {
             device: NdArrayDevice::Cpu,
+            // No checkpoint identity: empty and equal, so the label is unprefixed
+            // ("latest") and a swap cycle finds an empty roster rather than a phantom.
+            dir: PathBuf::new(),
+            swap_root: PathBuf::new(),
             live_dir: None,
             last_loaded: None,
             last_refused: None,
