@@ -1,7 +1,9 @@
-use bevy::prelude::Vec3;
+use bevy::prelude::*;
 
 use crate::bot::CrabSpawns;
+use crate::bot::body::{CrabClawTip, CrabEnvId};
 use crate::bot::sensor::CrabTargets;
+use crate::training::reward::dist_3d;
 
 pub(crate) const BAND_START_MIN: f32 = 1.5;
 pub(crate) const TARGET_Y_MIN: f32 = 0.15;
@@ -14,7 +16,40 @@ pub(crate) const TARGET_Y_MAX: f32 = 0.7;
 /// band moves.
 pub const TARGET_ARENA_HALF: f32 = crate::physics::world::ARENA_HALF_SIZE - 1.0;
 
-pub(crate) const REACH_RADIUS: f32 = 0.8;
+/// Claw-tip "touch" distance for [`tip_touch`]. Finer than the crab (rl#253):
+/// inside the carapace footprint's inscribed radius, with the rest pose's claw
+/// tips clear of the whole under-body disc (both pinned by
+/// `reach_radius_is_finer_than_the_crab`), so a target seeded under the
+/// carapace (rl#250) is only touchable by an actual claw strike — the skill
+/// GCR's collider-contact downing (rl#249) needs. The floor is GCR's contact
+/// scale, claw capsule radius + bridged `CLAW_DOWN_BUFFER` (`net::sim`) ≈
+/// 0.1 m in these metres: 0.2 stays ~2× that, so exploration can plausibly
+/// discover the grab.
+pub(crate) const REACH_RADIUS: f32 = 0.2;
+
+/// THE touch predicate — a claw tip within [`REACH_RADIUS`] of the target —
+/// one source, so "touched" cannot drift between surfaces.
+pub(crate) fn tip_touch(min_tip_dist: f32) -> bool {
+    min_tip_dist < REACH_RADIUS
+}
+
+/// Closest claw tip to `target` for one env — the single-env form of the
+/// measurement [`tip_touch`] judges (training's batched form is
+/// `closest_tip_dists` in `systems::step`). `None` until a finite tip is seen.
+pub(crate) fn closest_tip_dist(
+    env: usize,
+    target: Vec3,
+    tips: &Query<(&CrabEnvId, &Transform), With<CrabClawTip>>,
+) -> Option<f32> {
+    let mut min: Option<f32> = None;
+    for (e, tip) in tips.iter() {
+        if e.0 == env && tip.translation.is_finite() {
+            let d = dist_3d(tip.translation, target);
+            min = Some(min.map_or(d, |cur| cur.min(d)));
+        }
+    }
+    min
+}
 
 const NEAR_BIAS_EXP: f32 = 2.0;
 
@@ -79,6 +114,53 @@ pub(crate) fn seed_target(
 mod tests {
     use super::*;
     use crate::training::reward::planar_dist;
+
+    /// rl#253's invariant, geometrically: the touch sphere is finer than the crab.
+    /// If REACH_RADIUS out-reaches the carapace footprint or the rest pose's claw
+    /// tips can already touch under-footprint points, the close-disc curriculum
+    /// (rl#250) degenerates back to re-seed-everything and under-body touch is
+    /// untrainable. Planar clearance bounds the 3D distance from below, so no
+    /// settled-pose y is needed. Checks every recipe buildable on this host.
+    /// Pins the bind pose only; tilted spawns and post-settle drift are
+    /// backstopped at runtime by `pre_touched_target`'s re-seed.
+    #[test]
+    fn reach_radius_is_finer_than_the_crab() {
+        use crate::bot::body::CrabJointId;
+        use crate::bot::rig::{fallback_recipe, link_world_origins};
+
+        let mut recipes = vec![("fallback", fallback_recipe())];
+        if let Ok(u) = crate::mesh_fallback::usable_model() {
+            recipes.push(("fitted", u.recipe.clone()));
+        }
+        for (name, recipe) in &recipes {
+            let inscribed = recipe.carapace_half.x.min(recipe.carapace_half.z);
+            assert!(
+                REACH_RADIUS < inscribed,
+                "{name}: REACH_RADIUS {REACH_RADIUS} m out-reaches the carapace's inscribed \
+                 footprint radius {inscribed} m — touch is not finer than the crab"
+            );
+
+            let origins = link_world_origins(&recipe.links, recipe.hub_bind_world);
+            let footprint_center = recipe.hub_bind_world + recipe.carapace_offset;
+            let mut tips = 0usize;
+            for (link, &tip) in recipe.links.iter().zip(&origins) {
+                if !matches!(link.actuated, Some(CrabJointId::ClawPincer(_))) {
+                    continue;
+                }
+                tips += 1;
+                let dx = ((tip.x - footprint_center.x).abs() - recipe.carapace_half.x).max(0.0);
+                let dz = ((tip.z - footprint_center.z).abs() - recipe.carapace_half.z).max(0.0);
+                let clearance = dx.hypot(dz);
+                assert!(
+                    clearance > REACH_RADIUS,
+                    "{name}: rest claw tip {tip:?} clears the carapace footprint by only \
+                     {clearance} m ≤ REACH_RADIUS {REACH_RADIUS} m — the rest pose would \
+                     auto-touch under-carapace targets"
+                );
+            }
+            assert_eq!(tips, 2, "{name}: two claw-tip links measure the grab");
+        }
+    }
 
     #[test]
     fn sampled_targets_lie_at_the_band_distance_and_inside_the_arena() {

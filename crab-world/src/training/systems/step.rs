@@ -196,6 +196,8 @@ fn gather_body_state(
     }
 }
 
+/// Batched, one query pass for N envs — the multi-env form of
+/// `targets::closest_tip_dist` (eval/demo use that single-env one).
 fn closest_tip_dists(
     n: usize,
     targets: &CrabTargets,

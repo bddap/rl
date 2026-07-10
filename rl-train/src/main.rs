@@ -164,18 +164,20 @@ fn main() {
                 }
             };
             // One line per compass bearing (`EVAL_RESULT_BEARING`, no trailing space in
-            // the prefix match), then the headline `EVAL_RESULT ` line whose keys are
-            // unchanged from the +X-only era — its numbers now describe the WORST
-            // bearing (rl#239) — so line-oriented consumers (rl-eval-monitor,
-            // rl-release-build) parse both eras with the same `^EVAL_RESULT ` grep.
+            // the prefix match), then the headline `EVAL_RESULT ` line — its numbers
+            // describe the WORST bearing (rl#239). Consumers (rl-eval-monitor,
+            // rl-release-build) grep `^EVAL_RESULT ` and extract keys BY NAME, so
+            // adding a key (tip_m, rl#253) is safe; renaming or reordering the first
+            // two bearing-line keys is not (the monitor's profile regex is positional).
             let bearing_lines = |prefix: &str, sweep: &crab_world::eval::CompassSweep| {
                 for b in &sweep.per_bearing {
                     println!(
                         "{prefix} deg={:.0} progress_m={:.4} closest_m={:.4} \
-                         final_m={:.4} total_torque={:.2} reached={} ticks={}",
+                         tip_m={:.4} final_m={:.4} total_torque={:.2} reached={} ticks={}",
                         b.bearing_rad.to_degrees(),
                         b.progress_m,
                         b.closest_distance_m,
+                        b.closest_tip_distance_m,
                         b.final_distance_m,
                         b.total_torque,
                         b.reached,
@@ -193,10 +195,11 @@ fn main() {
             bearing_lines("EVAL_RESULT_CLOSE_BEARING", &r.close);
             let close_worst = r.close.worst();
             println!(
-                "EVAL_RESULT_CLOSE progress_m={:.4} closest_m={:.4} target_m={:.2} \
+                "EVAL_RESULT_CLOSE progress_m={:.4} closest_m={:.4} tip_m={:.4} target_m={:.2} \
                  reached_count={} bearings={} worst_deg={:.0}",
                 close_worst.progress_m,
                 close_worst.closest_distance_m,
+                close_worst.closest_tip_distance_m,
                 r.close.target_distance_m,
                 r.close.reached_count(),
                 crab_world::eval::EVAL_BEARINGS,
@@ -205,13 +208,14 @@ fn main() {
             let worst = r.far.worst();
             println!(
                 "EVAL_RESULT progress_m={:.4} total_torque={:.2} mean_torque_per_tick={:.4} \
-                 initial_m={:.4} closest_m={:.4} final_m={:.4} target_m={:.2} reached={} \
-                 ticks={} policy_loaded={} bearings={} worst_deg={:.0}",
+                 initial_m={:.4} closest_m={:.4} tip_m={:.4} final_m={:.4} target_m={:.2} \
+                 reached={} ticks={} policy_loaded={} bearings={} worst_deg={:.0}",
                 worst.progress_m,
                 worst.total_torque,
                 worst.mean_torque_per_tick,
                 worst.initial_distance_m,
                 worst.closest_distance_m,
+                worst.closest_tip_distance_m,
                 worst.final_distance_m,
                 r.far.target_distance_m,
                 worst.reached,

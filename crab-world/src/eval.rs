@@ -4,7 +4,7 @@ use bevy::prelude::*;
 
 use crate::bot::RESET_GRACE_TICKS;
 use crate::bot::actuator::{ACTION_SIZE, CrabActions, applied_torque};
-use crate::bot::body::{CrabCarapace, CrabEnvId, CrabJoint};
+use crate::bot::body::{CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint};
 use crate::bot::headless::{
     HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
 };
@@ -13,7 +13,8 @@ use crate::bot::{BotSet, CrabSpawns};
 use crate::policy::Policy;
 use crate::training::reward::dist_3d;
 use crate::training::targets::{
-    BAND_START_MIN, REACH_RADIUS, TARGET_ARENA_HALF, TARGET_Y_MAX, TARGET_Y_MIN, polar_target,
+    BAND_START_MIN, REACH_RADIUS, TARGET_ARENA_HALF, TARGET_Y_MAX, TARGET_Y_MIN, closest_tip_dist,
+    polar_target, tip_touch,
 };
 
 pub const DEFAULT_TARGET_DISTANCE_M: f32 = TARGET_ARENA_HALF;
@@ -23,13 +24,14 @@ pub const DEFAULT_TARGET_DISTANCE_M: f32 = TARGET_ARENA_HALF;
 /// rl#250 close-target curriculum shows only its downside (far-chase regression) and
 /// one-change-at-a-time loses its readout. Pinned between [`REACH_RADIUS`] and
 /// [`BAND_START_MIN`]: inside the close disc the rl#250 curriculum trains (which the
-/// far band never samples), and outside the reach radius at spawn. The probe's floor is
-/// NOT zero, though: Sally's zero-action rest pose passively slumps up to ~0.55 m
-/// toward its ~270° side over a full episode (measured on the live body), so ~3/8
-/// bearings drift-cross the reach radius with no policy at all — and no distance under
-/// [`BAND_START_MIN`] escapes that. The probe is deterministic per brain, so the flip
-/// is judged on the DELTA against the pre-flip baseline, which is why this instrument
-/// must be in the record before the flip lands.
+/// far band never samples), and outside the reach radius at spawn. The probe's floor
+/// is zero under the tip-based touch (rl#253): Sally's zero-action rest pose passively
+/// slumps up to ~0.55 m toward its ~270° side over a full episode, which drift-crossed
+/// the old carapace-distance reach at ~3/8 bearings, but the slump carries her claw
+/// tips AWAY from the ball (measured on the live body: min tip distance 0.51 m across
+/// the compass, never near [`REACH_RADIUS`]) — so any reached bearing here is a real
+/// strike, not drift. The probe is deterministic per brain; it landed BEFORE the
+/// rl#250 flip so the flip is judged as a delta against a recorded baseline.
 pub const CLOSE_PROBE_DISTANCE_M: f32 = 1.0;
 const _: () = assert!(
     REACH_RADIUS < CLOSE_PROBE_DISTANCE_M && CLOSE_PROBE_DISTANCE_M < BAND_START_MIN,
@@ -66,6 +68,11 @@ pub struct BearingReport {
     pub initial_distance_m: f32,
     pub closest_distance_m: f32,
     pub final_distance_m: f32,
+    /// Closest any claw tip came to the target (infinite if no tip was seen) —
+    /// the measure `reached` derives from. Distinct from `closest_distance_m`,
+    /// which tracks the CARAPACE and stays the locomotion/progress measure:
+    /// reaching is a claw strike, not a body-near pass (rl#253).
+    pub closest_tip_distance_m: f32,
     pub reached: bool,
     pub active_ticks: u64,
 }
@@ -93,9 +100,8 @@ impl CompassSweep {
     }
 
     /// How many bearings reached the ball. For the close probe this is the rl#250
-    /// emergence readout — as a DELTA against the pre-flip baseline, not from zero:
-    /// passive rest-pose slump already drift-crosses reach at some bearings (see
-    /// [`CLOSE_PROBE_DISTANCE_M`]).
+    /// emergence readout, diffed against the pre-flip baseline (zero for the rest
+    /// pose under the tip-based touch — see [`CLOSE_PROBE_DISTANCE_M`]).
     pub fn reached_count(&self) -> usize {
         self.per_bearing.iter().filter(|b| b.reached).count()
     }
@@ -140,6 +146,7 @@ struct EvalState {
     initial_dist: f32,
     closest_dist: f32,
     last_dist: f32,
+    closest_tip_dist: Option<f32>,
     torque_sum: f64,
     torque_ticks: u64,
 }
@@ -261,6 +268,9 @@ fn run_bearing(
     } else {
         0.0
     };
+    // One binding feeds both fields, so `reached ⇔ tip_touch(closest_tip_distance_m)`
+    // holds structurally (`tip_touch(INFINITY)` = false covers the no-tip-seen case).
+    let closest_tip = state.closest_tip_dist.unwrap_or(f32::INFINITY);
     BearingReport {
         bearing_rad,
         progress_m,
@@ -269,7 +279,8 @@ fn run_bearing(
         initial_distance_m: state.initial_dist,
         closest_distance_m: state.closest_dist,
         final_distance_m: state.last_dist,
-        reached: state.closest_dist <= REACH_RADIUS,
+        closest_tip_distance_m: closest_tip,
+        reached: tip_touch(closest_tip),
         active_ticks: state.torque_ticks,
     }
 }
@@ -291,6 +302,7 @@ fn eval_step(
     obs: Res<CrabObservation>,
     mut actions: ResMut<CrabActions>,
     carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
+    claw_tips_q: Query<(&CrabEnvId, &Transform), With<CrabClawTip>>,
     joints: Query<(&CrabJoint, &CrabEnvId)>,
 ) {
     if !state.target_set
@@ -339,6 +351,12 @@ fn eval_step(
         state.last_dist = d;
     }
 
+    // Settle ticks are excluded so a spawn transient can't score a touch the
+    // policy never earned.
+    if !settling && let Some(d) = closest_tip_dist(0, target, &claw_tips_q) {
+        state.closest_tip_dist = Some(state.closest_tip_dist.map_or(d, |cur| cur.min(d)));
+    }
+
     if !settling && let Some(a) = actions.envs.first() {
         let mut tick_torque = 0.0f32;
         for (joint, env) in joints.iter() {
@@ -357,6 +375,7 @@ fn eval_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::training::targets::REACH_RADIUS;
 
     #[test]
     fn default_far_distance_is_the_training_band_edge() {
@@ -419,10 +438,9 @@ mod tests {
 
         assert!(!r.policy_loaded, "an empty dir loads no policy (rest pose)");
         assert!(!r.reached(), "a rest-pose crab never reaches a far ball");
-        // ==0 holds for THIS body and horizon only (fallback body, 200 ticks): the
-        // real Sally slumps far enough over a full episode to drift-cross the reach
-        // radius at ~3/8 bearings (see CLOSE_PROBE_DISTANCE_M) — the probe's floor is
-        // a baseline to diff against, not zero.
+        // Zero floor: under the tip-based touch (rl#253) even the real Sally's
+        // full-episode slump never brings a claw tip near the ball (see
+        // CLOSE_PROBE_DISTANCE_M), so rest-pose reached_count is 0 on every body.
         assert_eq!(r.close.reached_count(), 0);
         assert_eq!(r.close.target_distance_m, CLOSE_PROBE_DISTANCE_M);
         for b in &r.close.per_bearing {
