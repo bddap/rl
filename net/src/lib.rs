@@ -12,6 +12,7 @@ pub mod sim;
 pub mod snapshot;
 pub mod telemetry;
 pub mod transport;
+pub mod wire;
 
 #[cfg(feature = "render")]
 pub mod external_crab;
