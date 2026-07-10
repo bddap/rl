@@ -20,9 +20,11 @@ const TOUCH_EPS: f32 = 1e-4;
 /// Sally's rest pose carries standing load through deep contacts — carapace
 /// box on the leg bases (~70mm), folded pincer on the claw shoulder — and
 /// collision-group experiments that removed them made claw rest jitter 3-4x
-/// worse (rl#109), so overlap alone cannot be the illegal test. Whether the
-/// 70mm render/physics disagreement itself should shrink is an open
-/// collider-fit question, tracked separately.
+/// worse (rl#109), so overlap alone cannot be the illegal test. The 70mm is
+/// internal-only and benign (rl#234): her legs root under the shell skirt, so
+/// the mesh volumes overlap the same way, and no external object can observe
+/// it — render/physics honesty binds collider-vs-mesh at the surface the
+/// world touches, not collider-vs-collider inside the body.
 pub(crate) const QUIET_LIN_MPS: f32 = 0.2;
 pub(crate) const QUIET_ANG_RADPS: f32 = 0.3;
 
