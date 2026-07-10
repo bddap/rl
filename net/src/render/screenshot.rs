@@ -12,7 +12,7 @@ use crab_world::screenshot::{self, ShotProgress, ShotTarget};
 pub fn build_screenshot_app(
     mut client: ClientSim,
     cfg: ScreenshotConfig,
-    external_crab: Option<crab_world::play::Policy>,
+    external_crab: Option<crab_world::policy::Policy>,
     render_mode: super::RenderMode,
     pack: Input,
 ) -> App {
@@ -32,7 +32,7 @@ pub fn build_net_screenshot_app(
     mut client: ClientSim,
     net: NetDriver,
     cfg: ScreenshotConfig,
-    external_crab: crab_world::play::Policy,
+    external_crab: crab_world::policy::Policy,
     render_mode: super::RenderMode,
 ) -> App {
     let mut app = offscreen_app_scaffold();

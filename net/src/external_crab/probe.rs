@@ -112,7 +112,7 @@ fn probe_step(
 }
 
 fn headless_nn_crab_app(
-    policy: crab_world::play::Policy,
+    policy: crab_world::policy::Policy,
     crab_spawn: Pos,
     visuals: crab_world::Visuals,
 ) -> bevy::app::App {
@@ -141,7 +141,7 @@ fn headless_nn_crab_app(
 /// exact configuration the GCR play-day crash showed no headless test covered. The
 /// determinism/behavior probes pass `Visuals(false)`, matching what they hash.
 pub fn run_headless_probe(
-    policy: crab_world::play::Policy,
+    policy: crab_world::policy::Policy,
     seed: u64,
     ticks: u64,
     log_every: u64,
@@ -186,7 +186,7 @@ impl StabilityResult {
 }
 
 pub fn run_vehicle_stability_probe(
-    policy: crab_world::play::Policy,
+    policy: crab_world::policy::Policy,
     seed: u64,
     warmup: u64,
     post: u64,

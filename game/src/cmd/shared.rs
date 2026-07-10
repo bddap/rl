@@ -12,8 +12,8 @@ pub(crate) const MATCH_SEED: u64 = 0x6372_6162;
 /// it never vetted). Returns the resolved dir alongside for operator-facing labels.
 pub(crate) fn nn_crab_policy(
     flag: Option<std::path::PathBuf>,
-) -> Result<(std::path::PathBuf, crab_world::play::Policy)> {
-    use crab_world::play::{CheckpointUnusable, RigDims};
+) -> Result<(std::path::PathBuf, crab_world::policy::Policy)> {
+    use crab_world::policy::{CheckpointUnusable, RigDims};
     let dir = flag
         .or_else(|| std::env::var_os("RL_CRAB_CHECKPOINT_DIR").map(std::path::PathBuf::from))
         .unwrap_or_else(|| {
@@ -21,7 +21,7 @@ pub(crate) fn nn_crab_policy(
                 .join("assets")
                 .join("weights")
         });
-    match crab_world::play::load_armed(&dir) {
+    match crab_world::policy::load_armed(&dir) {
         Ok(policy) => Ok((dir, policy)),
         Err(CheckpointUnusable::Missing) => anyhow::bail!(
             "rl#114: no trained crab brain (brain.bin) under {} — the giant crab IS the trained NN \
@@ -55,7 +55,7 @@ pub(crate) fn nn_crab_policy(
 /// none given) — the armed policies, one per crab.
 pub(crate) fn nn_crab_policies(
     flags: Vec<std::path::PathBuf>,
-) -> Result<Vec<crab_world::play::Policy>> {
+) -> Result<Vec<crab_world::policy::Policy>> {
     if flags.is_empty() {
         return Ok(vec![nn_crab_policy(None)?.1]);
     }

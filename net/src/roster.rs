@@ -31,7 +31,7 @@ impl RosterSchedule {
             .expect("a schedule always holds at least the initial set")
     }
 
-    pub fn latest_change_tick(&self) -> u64 {
+    fn latest_change_tick(&self) -> u64 {
         *self.points.keys().next_back().expect("non-empty schedule")
     }
 

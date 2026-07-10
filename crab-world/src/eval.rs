@@ -219,7 +219,7 @@ fn run_compass(
 }
 
 /// The compass bearings in sweep order: bearing i = i·2π/[`EVAL_BEARINGS`].
-pub fn eval_bearings() -> impl Iterator<Item = f32> {
+fn eval_bearings() -> impl Iterator<Item = f32> {
     (0..EVAL_BEARINGS).map(|i| i as f32 * std::f32::consts::TAU / EVAL_BEARINGS as f32)
 }
 

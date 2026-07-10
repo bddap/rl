@@ -8,13 +8,13 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    use crab_world::play::{CheckpointUnusable, RigDims};
+    use crab_world::policy::{CheckpointUnusable, RigDims};
     let RigDims {
         obs: rig_obs,
         action: rig_act,
     } = crab_world::play::rig_dims();
     let dir = args.checkpoint.display();
-    match crab_world::play::checkpoint_fits_rig(&args.checkpoint) {
+    match crab_world::policy::checkpoint_fits_rig(&args.checkpoint) {
         Ok(()) => {
             println!("checkpoint-check OK: {dir} matches the rig ({rig_obs} obs, {rig_act} act)");
             Ok(())
