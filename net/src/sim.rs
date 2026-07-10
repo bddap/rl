@@ -127,11 +127,24 @@ pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) {
 
 pub const CRAB_SCALE: i64 = 12;
 
-pub const CRAB_GRAB_RADIUS: i64 = 3 * UNIT / 2;
+/// Player height in sim meters — the anchor of the crab sizing rule (the crab stands
+/// [`CRAB_SCALE`] player-heights tall). Render capsules and the crab's world scale both
+/// derive from this one constant.
+pub const PLAYER_HEIGHT: f32 = 1.8;
+
+/// 2D reach of the grab around the crab's sim pos (the carapace ground point): the circle
+/// inscribed in her carapace footprint, in sim meters — "under her body" means "grabbed"
+/// (rl#236; the old 1.5 m reach was ~7× smaller than her own carapace and almost never
+/// landed). Pinned as an integer for the fixed-point sim; `grab_reach_matches_crab_body`
+/// re-derives it from the rig silhouette so body and reach cannot drift apart.
+pub const CRAB_GRAB_RADIUS: i64 = 21 * UNIT / 2;
 
 const STARTUP_GRACE_TICKS: u64 = 30;
 
-const MIN_CRAB_SPAWN_DISTANCE: i64 = 12 * UNIT;
+/// Spawn clearance from the crab's sim pos: outside her entire carapace footprint (corner
+/// reach ~18 m at sim scale), so nobody spawns under her body or inside
+/// [`CRAB_GRAB_RADIUS`]. Also cross-checked by `grab_reach_matches_crab_body`.
+const MIN_CRAB_SPAWN_DISTANCE: i64 = 19 * UNIT;
 
 pub const EXTRACT_RADIUS: i64 = 2 * UNIT;
 
@@ -954,14 +967,22 @@ mod tests {
     fn reaching_extraction_with_action_wins() {
         let mut sim = Sim::new(0, &players(1));
         let ex = sim.extraction().pos();
+        // The dodge must clear CRAB_GRAB_RADIUS, not just her center: swing wide west,
+        // overshoot north PAST the extraction point, and come back down onto it, so the
+        // pure-pursuit crab trails behind the whole way instead of being run past on the
+        // final approach (rl#236 — a route inside her reach is a loss, and that's correct).
         let route = [
             Pos {
-                x: -30 * UNIT,
+                x: -60 * UNIT,
                 z: 0,
             },
             Pos {
-                x: -30 * UNIT,
-                z: ex.z,
+                x: -60 * UNIT,
+                z: 90 * UNIT,
+            },
+            Pos {
+                x: 0,
+                z: 90 * UNIT,
             },
             ex,
         ];
@@ -1313,6 +1334,36 @@ mod tests {
                 isqrt_i128(nearest)
             );
         }
+    }
+
+    /// Pins [`CRAB_GRAB_RADIUS`] and [`MIN_CRAB_SPAWN_DISTANCE`] to the crab's actual body
+    /// (rl#236). Sim meters relate to the rig's natural meters by the sizing rule: her
+    /// natural height spans [`CRAB_SCALE`] × [`PLAYER_HEIGHT`]. The grab reach must be the
+    /// inscribed circle of her carapace footprint (never grabbing beyond the body, never
+    /// shrinking below ~85% of it), and spawns must clear the footprint's corner reach.
+    #[test]
+    fn grab_reach_matches_crab_body() {
+        use crab_world::bot::rig::{RestShape, fallback_recipe, recipe_silhouette};
+
+        let sil = recipe_silhouette(&fallback_recipe());
+        let natural_height = sil.natural_height();
+        let RestShape::Cuboid { half, .. } = sil.carapace else {
+            panic!("the carapace silhouette is a cuboid");
+        };
+        let to_sim_m = CRAB_SCALE as f32 * PLAYER_HEIGHT / natural_height;
+        let inscribed_m = half.x.min(half.z) * to_sim_m;
+        let corner_m = half.x.hypot(half.z) * to_sim_m;
+
+        let grab_m = CRAB_GRAB_RADIUS as f32 / UNIT as f32;
+        assert!(
+            grab_m <= inscribed_m && grab_m >= 0.85 * inscribed_m,
+            "grab reach {grab_m:.2} m must track the carapace's inscribed footprint radius \
+             {inscribed_m:.2} m"
+        );
+        assert!(
+            (MIN_CRAB_SPAWN_DISTANCE as f32 / UNIT as f32) > corner_m,
+            "spawn clearance must exceed the carapace's corner reach {corner_m:.2} m"
+        );
     }
 
     #[test]

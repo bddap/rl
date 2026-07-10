@@ -12,8 +12,8 @@ use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::lockstep::{Lockstep, TickMsg};
 use crate::net_loop::{Coordinator, Exchanged, NetDriver};
 use crate::sim::{
-    CRAB_SCALE, Crab, Input, Outcome, Player, PlayerId, PlayerStatus, Pos, buttons, trig,
-    trig_client,
+    CRAB_SCALE, Crab, Input, Outcome, PLAYER_HEIGHT, Player, PlayerId, PlayerStatus, Pos, buttons,
+    trig, trig_client,
 };
 use crate::telemetry::{TelemetryEvent, next_sample_tick};
 use crab_world::controls::{
@@ -30,7 +30,6 @@ const MAX_TICKS_PER_FRAME: u32 = 8;
 const EYE_HEIGHT: f32 = 1.6;
 
 const PLAYER_RADIUS: f32 = 0.4;
-const PLAYER_HEIGHT: f32 = 1.8;
 
 const MOUSE_SENS: f32 = 0.0022;
 
