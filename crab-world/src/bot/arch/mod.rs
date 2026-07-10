@@ -6,7 +6,13 @@ use burn::record::{Recorder, RecorderError};
 
 pub use mlp512x3::Mlp512x3;
 
+// These consts and `GaussianHead` are used only from `training`, whose liveness root
+// is the wgpu-gated learner (see `training`'s module allow) — dead without `wgpu`.
+// They stay HERE because the clamp contract couples to the policy nets' raw output
+// (see `mlp512x3`).
+#[cfg_attr(not(feature = "wgpu"), allow(dead_code))]
 pub(crate) const LOG_STD_MIN: f32 = -2.0;
+#[cfg_attr(not(feature = "wgpu"), allow(dead_code))]
 pub(crate) const LOG_STD_MAX: f32 = 0.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,11 +125,13 @@ impl<B: Backend> AnyBrain<B> {
     }
 }
 
+#[cfg_attr(not(feature = "wgpu"), allow(dead_code))]
 pub(crate) struct GaussianHead<B: Backend> {
     means: Tensor<B, 2>,
     log_std: Tensor<B, 2>,
 }
 
+#[cfg_attr(not(feature = "wgpu"), allow(dead_code))]
 impl<B: Backend> GaussianHead<B> {
     pub(crate) fn new(raw: (Tensor<B, 2>, Tensor<B, 2>), log_std_floor: f32) -> Self {
         let (means, log_std) = raw;

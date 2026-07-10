@@ -1,4 +1,11 @@
-#![cfg_attr(feature = "render", allow(dead_code, unused_imports, unused_variables))]
+// The learner (`inproc::learner`, gated on `wgpu`) is the liveness root for the PPO
+// machinery here: without it most of this subtree is dead code, whatever other features
+// are on. Keying this allow on anything else (it used to say `render`, rl#162) leaves
+// per-package clippy runs red (rl#248). With `wgpu` ON the allow is inert, so genuinely
+// dead training code is still caught — in the workspace gate via rl-train's
+// `default = ["wgpu"]` unifying `wgpu` on (if that default ever goes, this safety net
+// goes with it), and directly by `clippy -p crab-world --features wgpu`.
+#![cfg_attr(not(feature = "wgpu"), allow(dead_code, unused_imports))]
 
 use std::path::{Path, PathBuf};
 
