@@ -29,25 +29,13 @@ pub(crate) fn polar_target(origin: Vec3, theta: f32, dist: f32, y: f32) -> Vec3 
     )
 }
 
-/// Fraction of episodes whose target lands in the close disc [0, BAND_START_MIN)
-/// — under-carapace included — instead of the chase band, so claw-reach can emerge
-/// (rl#250). Same y range, bearing, reward, and grab rule; only the task
-/// distribution varies. Default 0.0 keeps the pure chase band: raising it is a
-/// TRAINING change, flipped per-run via env under one-change-at-a-time. Targets
-/// the rest pose already touches are re-seeded at episode start (see
-/// `pre_touched_target`), so the close disc never pays a free grab.
-fn close_frac() -> f32 {
-    static FRAC: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *FRAC.get_or_init(|| {
-        crate::training::algorithm::env_or("RL_TARGET_CLOSE_FRAC", 0.0_f32).clamp(0.0, 1.0)
-    })
-}
-
-pub(crate) fn sample_target(origin: Vec3, rng: &mut impl rand::Rng) -> Vec3 {
-    sample_target_mixed(origin, close_frac(), rng)
-}
-
-pub(crate) fn sample_target_mixed(origin: Vec3, close_frac: f32, rng: &mut impl rand::Rng) -> Vec3 {
+/// `close_frac` mixes close-disc [0, BAND_START_MIN) targets — under-carapace
+/// included — into the chase band, so claw-reach can emerge from task variety
+/// alone (rl#250): same y range, bearing, reward, and grab rule. Uniform-in-radius
+/// on purpose: the density concentrates where the new skill lives, and targets the
+/// rest pose already touches are re-seeded at episode start (`pre_touched_target`),
+/// which carves the true no-op boundary better than any hand-drawn annulus could.
+pub(crate) fn sample_target(origin: Vec3, close_frac: f32, rng: &mut impl rand::Rng) -> Vec3 {
     let dist = if rng.gen_range(0.0..1.0) < close_frac {
         rng.gen_range(0.0..BAND_START_MIN)
     } else {
@@ -78,11 +66,12 @@ pub(crate) fn seed_target(
     targets: &mut CrabTargets,
     spawns: &CrabSpawns,
     e: usize,
+    close_frac: f32,
     rng: &mut rand::rngs::StdRng,
 ) {
     if let Some(slot) = targets.envs.get_mut(e) {
         let origin = spawns.origin(e);
-        *slot = Some(sample_target(origin, rng));
+        *slot = Some(sample_target(origin, close_frac, rng));
     }
 }
 
@@ -101,7 +90,7 @@ mod tests {
             Vec3::new(8.0, 0.0, -8.0),
         ] {
             for _ in 0..2000 {
-                let t = sample_target(origin, &mut rng);
+                let t = sample_target(origin, 0.0, &mut rng);
                 assert!(t.is_finite(), "a sampled target is always finite");
                 assert!(
                     t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF,
@@ -130,7 +119,7 @@ mod tests {
         let far_edge = 6.0;
         let (mut near, mut far, n) = (0u32, 0u32, 20_000u32);
         for _ in 0..n {
-            let d = planar_dist(sample_target(origin, &mut rng), origin);
+            let d = planar_dist(sample_target(origin, 0.0, &mut rng), origin);
             if d < near_edge {
                 near += 1;
             }
@@ -156,7 +145,7 @@ mod tests {
         for origin in [Vec3::ZERO, Vec3::new(8.0, 0.0, -8.0)] {
             let mut under_body = 0u32;
             for _ in 0..5000 {
-                let t = sample_target_mixed(origin, 1.0, &mut rng);
+                let t = sample_target(origin, 1.0, &mut rng);
                 assert!(t.is_finite());
                 assert!(t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF);
                 assert!(t.y >= TARGET_Y_MIN && t.y <= TARGET_Y_MAX);
@@ -182,9 +171,7 @@ mod tests {
         let origin = Vec3::ZERO;
         let n = 20_000u32;
         let close = (0..n)
-            .filter(|_| {
-                planar_dist(sample_target_mixed(origin, 0.25, &mut rng), origin) < BAND_START_MIN
-            })
+            .filter(|_| planar_dist(sample_target(origin, 0.25, &mut rng), origin) < BAND_START_MIN)
             .count() as f32
             / n as f32;
         assert!(
@@ -192,7 +179,7 @@ mod tests {
             "close fraction {close} should track the requested 0.25"
         );
         for _ in 0..2000 {
-            let d = planar_dist(sample_target_mixed(origin, 0.0, &mut rng), origin);
+            let d = planar_dist(sample_target(origin, 0.0, &mut rng), origin);
             assert!(
                 d >= BAND_START_MIN - 1e-3,
                 "frac 0 must never sample close ({d})"

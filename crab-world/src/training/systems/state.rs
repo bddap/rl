@@ -84,6 +84,12 @@ pub(crate) struct TrainingState {
 
     pub(super) log_std_floor: f32,
 
+    /// Fraction of episodes whose target samples the close disc instead of the
+    /// chase band (rl#250). Env-read once at construction like the RL_LOG_STD_*
+    /// knobs; default 0.0 keeps the pure chase band, so raising it per-run is the
+    /// deliberate TRAINING change, sequenced under one-change-at-a-time.
+    pub(super) close_frac: f32,
+
     pub(super) checkpoint_dir: PathBuf,
 
     /// `Some` iff the brain warm-started from the checkpoint dir at build time,
@@ -320,6 +326,13 @@ impl TrainingState {
 
         let n = config.envs.max(1) as usize;
         let normalizer_increment = worker_mode.then(IncrementAccumulator::new);
+        let close_frac =
+            crate::training::algorithm::env_or("RL_TARGET_CLOSE_FRAC", 0.0_f32).clamp(0.0, 1.0);
+        if close_frac > 0.0 {
+            // train.log is multi-run; without this line nobody can later tell which
+            // segments trained with the close-target mix.
+            info!("Close-target curriculum active: RL_TARGET_CLOSE_FRAC={close_frac} (rl#250)");
+        }
         Self {
             brain: InferenceCachedBrain::new(brain),
             config: PpoConfig::default(),
@@ -328,6 +341,7 @@ impl TrainingState {
             envs: vec![EnvEpisode::default(); n],
             explore_noise: OuNoise::new(n),
             log_std_floor: crate::bot::arch::LOG_STD_MIN,
+            close_frac,
             episode_count: 0,
             recent_rewards: Vec::new(),
             total_steps: 0,
