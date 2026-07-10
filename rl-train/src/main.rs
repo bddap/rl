@@ -168,20 +168,41 @@ fn main() {
             // unchanged from the +X-only era — its numbers now describe the WORST
             // bearing (rl#239) — so line-oriented consumers (rl-eval-monitor,
             // rl-release-build) parse both eras with the same `^EVAL_RESULT ` grep.
-            for b in &r.per_bearing {
-                println!(
-                    "EVAL_RESULT_BEARING deg={:.0} progress_m={:.4} closest_m={:.4} \
-                     final_m={:.4} total_torque={:.2} reached={} ticks={}",
-                    b.bearing_rad.to_degrees(),
-                    b.progress_m,
-                    b.closest_distance_m,
-                    b.final_distance_m,
-                    b.total_torque,
-                    b.reached,
-                    b.active_ticks,
-                );
-            }
-            let worst = r.worst();
+            let bearing_lines = |prefix: &str, sweep: &crab_world::eval::CompassSweep| {
+                for b in &sweep.per_bearing {
+                    println!(
+                        "{prefix} deg={:.0} progress_m={:.4} closest_m={:.4} \
+                         final_m={:.4} total_torque={:.2} reached={} ticks={}",
+                        b.bearing_rad.to_degrees(),
+                        b.progress_m,
+                        b.closest_distance_m,
+                        b.final_distance_m,
+                        b.total_torque,
+                        b.reached,
+                        b.active_ticks,
+                    );
+                }
+            };
+            bearing_lines("EVAL_RESULT_BEARING", &r.far);
+            // The rl#252 close-range probe — same compass at CLOSE_PROBE_DISTANCE_M,
+            // asking whether the rl#250 curriculum's upside (close reach) emerged.
+            // Sidecar lines only: the `EVAL_RESULT_CLOSE*` prefixes match neither the
+            // `^EVAL_RESULT ` nor the `^EVAL_RESULT_BEARING deg=` greps of the
+            // line-oriented consumers, and the headline keys and the --min-progress
+            // verdict below stay far-only.
+            bearing_lines("EVAL_RESULT_CLOSE_BEARING", &r.close);
+            let close_worst = r.close.worst();
+            println!(
+                "EVAL_RESULT_CLOSE progress_m={:.4} closest_m={:.4} target_m={:.2} \
+                 reached_count={} bearings={} worst_deg={:.0}",
+                close_worst.progress_m,
+                close_worst.closest_distance_m,
+                r.close.target_distance_m,
+                r.close.reached_count(),
+                crab_world::eval::EVAL_BEARINGS,
+                close_worst.bearing_rad.to_degrees(),
+            );
+            let worst = r.far.worst();
             println!(
                 "EVAL_RESULT progress_m={:.4} total_torque={:.2} mean_torque_per_tick={:.4} \
                  initial_m={:.4} closest_m={:.4} final_m={:.4} target_m={:.2} reached={} \
@@ -192,7 +213,7 @@ fn main() {
                 worst.initial_distance_m,
                 worst.closest_distance_m,
                 worst.final_distance_m,
-                r.target_distance_m,
+                r.far.target_distance_m,
                 worst.reached,
                 worst.active_ticks,
                 r.policy_loaded,
@@ -221,8 +242,8 @@ fn main() {
                          worst bearing ({:.0}°), below the required --min-progress {min} m \
                          (dead/collapsed policy, or a dead bearing)",
                         r.progress_m(),
-                        r.target_distance_m,
-                        r.worst().bearing_rad.to_degrees()
+                        r.far.target_distance_m,
+                        r.far.worst().bearing_rad.to_degrees()
                     );
                     std::process::exit(1);
                 }

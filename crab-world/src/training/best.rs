@@ -56,10 +56,10 @@ const BEST_FILES: &[BestFile] = &[
 /// reach-triggered: a trigger derived from near-heavy TRAIN episodes is blind to
 /// far-approach movement in either direction — exactly the divergence that let a
 /// 6.92 m brain displace the 8.93 m one (bddap/rl#233). The compass eval runs one
-/// episode per bearing (rl#239), ~8× the single-episode cost (~2 min measured on the
-/// training box), so the period is 3× the pre-compass 600 s — eval spend stays under
-/// ~7% of training wall-clock (rollout threads idle while the learner-thread eval
-/// runs).
+/// episode per bearing at the far distance (rl#239, ~2 min measured on the training
+/// box) plus the same compass again for the rl#252 close probe (~4 min total), so with
+/// the period at 3× the pre-compass 600 s, eval spend stays around ~13% of training
+/// wall-clock (rollout threads idle while the learner-thread eval runs).
 const EVAL_PERIOD: Duration = Duration::from_secs(1800);
 
 /// Meters of chase progress a candidate must add over the incumbent to displace it.
@@ -160,7 +160,7 @@ impl BestKeeper {
 
     /// Once per [`EVAL_PERIOD`]: chase-eval the checkpoint on disk and mirror it into
     /// `best/` iff it beats the incumbent's progress. Runs between learner iterations
-    /// (rollout threads idle for the eval's ~2 min compass sweep), so it costs wall
+    /// (rollout threads idle for the eval's ~4 min far+close sweep), so it costs wall
     /// clock only — no training data or update is touched.
     pub(crate) fn maybe_snapshot(&mut self) {
         if let Some(last) = self.last_eval
@@ -213,9 +213,18 @@ impl BestKeeper {
             .best
             .map(|p| format!("{:.3} m", p.get()))
             .unwrap_or_else(|| "none".to_string());
+        // The close-probe numbers ride every candidate log line so train.log carries a
+        // periodic close-range time series (the rl#250 flip's upside readout, rl#252);
+        // they never feed the promotion decision.
+        let close = format!(
+            "close probe min {:.3} m, reached {}/{}",
+            report.close.worst().progress_m,
+            report.close.reached_count(),
+            crate::eval::EVAL_BEARINGS
+        );
         if !beats {
             info!(
-                "[best] chase-eval: min-bearing progress {:.3} m (reached={}) vs bar {bar} — keeping incumbent",
+                "[best] chase-eval: min-bearing progress {:.3} m (reached={}) vs bar {bar} — keeping incumbent | {close}",
                 candidate.get(),
                 report.reached()
             );
@@ -226,7 +235,7 @@ impl BestKeeper {
             Ok(()) => {
                 info!(
                     "[best] new best snapshot → {}/{BEST_SUBDIR} | min-bearing chase progress {:.3} m \
-                     (reached={}) beats {bar}",
+                     (reached={}) beats {bar} | {close}",
                     self.checkpoint_dir.display(),
                     candidate.get(),
                     report.reached()
@@ -340,10 +349,29 @@ mod tests {
             reached: false,
             active_ticks: DEFAULT_EVAL_TICKS,
         };
+        // The close probe is scripted to beat every bar in the suite (100 m — canned
+        // reports needn't be physically plausible), so each no-promotion test below
+        // doubles as proof the sidecar never rescues a candidate: if close numbers
+        // ever leaked into the promotion decision, the regression/collapse/NaN cases
+        // would start promoting and fail.
+        let close_bearing = crate::eval::BearingReport {
+            progress_m: 100.0,
+            initial_distance_m: 100.0,
+            closest_distance_m: 0.0,
+            final_distance_m: 0.0,
+            reached: true,
+            ..bearing
+        };
         EvalReport {
-            target_distance_m: DEFAULT_TARGET_DISTANCE_M,
             policy_loaded,
-            per_bearing: [bearing; crate::eval::EVAL_BEARINGS],
+            far: crate::eval::CompassSweep {
+                target_distance_m: DEFAULT_TARGET_DISTANCE_M,
+                per_bearing: [bearing; crate::eval::EVAL_BEARINGS],
+            },
+            close: crate::eval::CompassSweep {
+                target_distance_m: crate::eval::CLOSE_PROBE_DISTANCE_M,
+                per_bearing: [close_bearing; crate::eval::EVAL_BEARINGS],
+            },
         }
     }
 
