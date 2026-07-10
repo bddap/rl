@@ -200,6 +200,9 @@ pub enum MenuAction {
     StartSolo,
     Cancel,
     Rejoin,
+    /// The user declined the "Connection lost" rejoin offer — the app drops `last_host`
+    /// so re-entering the menu lands on the chooser, not the dead offer.
+    DismissRejoin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,12 +307,12 @@ impl MenuNav {
                     }
                     DisconnectedItem::Leave => {
                         *self = MenuNav::new();
-                        MenuAction::None
+                        MenuAction::DismissRejoin
                     }
                 },
                 MenuInput::Back => {
                     *self = MenuNav::new();
-                    MenuAction::None
+                    MenuAction::DismissRejoin
                 }
             },
             MenuNav::Rejoining => match input {
@@ -520,11 +523,15 @@ mod tests {
 
         let mut decline = MenuNav::disconnected();
         decline.step(MenuInput::Down, 0);
-        assert_eq!(decline.step(MenuInput::Confirm, 0), MenuAction::None);
+        assert_eq!(
+            decline.step(MenuInput::Confirm, 0),
+            MenuAction::DismissRejoin
+        );
         assert_eq!(decline, MenuNav::new());
-        let mut back = MenuNav::disconnected();
-        assert_eq!(back.step(MenuInput::Back, 0), MenuAction::None);
-        assert_eq!(back, MenuNav::new());
+
+        let mut backed = MenuNav::disconnected();
+        assert_eq!(backed.step(MenuInput::Back, 0), MenuAction::DismissRejoin);
+        assert_eq!(backed, MenuNav::new());
     }
 
     #[test]

@@ -282,6 +282,7 @@ impl Codec for Refusal {
                 vec![1, *host, *joiner]
             }
             Refusal::Departed => vec![2],
+            Refusal::Forming => vec![3],
         }
     }
 
@@ -297,6 +298,7 @@ impl Codec for Refusal {
                 joiner: take(&mut r, 1, "joiner crab count")?[0],
             }),
             2 => Refusal::Departed,
+            3 => Refusal::Forming,
             x => anyhow::bail!("unknown refusal tag {x:#x}"),
         };
         anyhow::ensure!(r.is_empty(), "refuse frame has {} trailing bytes", r.len());
@@ -772,6 +774,7 @@ mod tests {
             }),
             Refusal::Admission(AdmissionRefusal::CrabCountMismatch { host: 3, joiner: 1 }),
             Refusal::Departed,
+            Refusal::Forming,
         ] {
             assert_eq!(
                 Refusal::decode(Refusal::encode(&verdict).as_ref()).unwrap(),

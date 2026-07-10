@@ -181,9 +181,17 @@ async fn run_barrier(
                     m.on_beat(from.from, &beat, now);
                 }
                 PeerWire::Tick(msg) => early.push((from.from, msg)),
+                // A dialer that catches us mid-formation would otherwise get silence and
+                // misdiagnose "host unreachable" (rl#245) — tell it we're busy instead.
+                PeerWire::JoinRequest(_) => {
+                    tracing::warn!(
+                        "refusing mid-formation join from {}: still forming",
+                        from.from.fmt_short()
+                    );
+                    session.send(from.from, &crate::server::Refusal::Forming).await;
+                }
                 PeerWire::Snapshot(_)
                 | PeerWire::Articulation(_)
-                | PeerWire::JoinRequest(_)
                 | PeerWire::Refuse(_)
                 | PeerWire::Welcome(_) => {}
             }

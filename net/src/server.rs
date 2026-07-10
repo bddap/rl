@@ -125,6 +125,10 @@ impl std::fmt::Display for AdmissionRefusal {
 pub enum Refusal {
     Admission(AdmissionRefusal),
     Departed,
+    /// The host is mid-formation (pre-round barrier) and not admitting joiners yet — a
+    /// correct "busy" diagnosis for the dialer, instead of the silent drop that decayed
+    /// into a misattributed "host unreachable" timeout (rl#245).
+    Forming,
 }
 
 impl std::fmt::Display for Refusal {
@@ -135,6 +139,12 @@ impl std::fmt::Display for Refusal {
                 write!(
                     f,
                     "you were dropped from the match (connection lost) — rejoin"
+                )
+            }
+            Refusal::Forming => {
+                write!(
+                    f,
+                    "the host is still forming its match — try again in a few seconds"
                 )
             }
         }
