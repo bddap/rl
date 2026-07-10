@@ -155,7 +155,7 @@ impl CrabBridge {
         }
     }
 
-    fn carapace_found(&mut self) {
+    fn note_carapace_found(&mut self) {
         self.missed_carapace_ticks = 0;
         self.next_miss_log_ticks = 1;
     }
@@ -447,8 +447,11 @@ fn set_crab_walk_target(
     carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
 ) {
     for (idx, crab) in bridge.crabs.iter().enumerate() {
+        // Pre-spawn the slots don't exist (settle grace); post-settle a miss is the
+        // slot-desync class `run_crab_policy` panics on the same tick — skip THIS crab
+        // only, never abort the whole loop.
         let Some(slot) = targets.envs.get_mut(idx) else {
-            return;
+            continue;
         };
         let Some(hunt) = crab.hunt_target_m else {
             *slot = None;
@@ -536,7 +539,7 @@ fn integrate_crab(
             }
             continue;
         };
-        crab.carapace_found();
+        crab.note_carapace_found();
         if !t.translation.is_finite() {
             continue; // the rescue path owns non-finite crabs (a Fault when armed)
         }

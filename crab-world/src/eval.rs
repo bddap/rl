@@ -111,11 +111,17 @@ pub fn run_eval(
 ) -> Result<EvalReport, String> {
     pin_single_thread_pools();
 
-    // Classify BEFORE judging (the same one classifier every arming surface uses):
-    // an eval of a checkpoint the runtime would refuse to arm must be a refusal, not a
-    // rest-pose baseline quietly printed as the run's training progress.
-    match crate::policy::checkpoint_fits_rig(checkpoint_dir) {
-        Ok(()) | Err(crate::policy::CheckpointUnusable::Missing) => {}
+    // ONE read arms-or-refuses (rl#241 — a classify-then-load pair could straddle a
+    // checkpoint swap): a checkpoint the runtime would refuse to arm must refuse the
+    // eval too, not become a rest-pose baseline quietly printed as the run's training
+    // progress. Missing is the legitimate no-brain-yet case — judge the explicit rest
+    // baseline. One load also means every bearing judges the SAME weights: the CLI is
+    // pointed at a LIVE checkpoint dir (rl-eval-monitor, the release gate), and a
+    // per-bearing reload across the ~2 min sweep could min over a composite of
+    // adjacent brains that no single brain achieved.
+    let policy = match crate::policy::load_armed(checkpoint_dir) {
+        Ok(policy) => policy,
+        Err(crate::policy::CheckpointUnusable::Missing) => Policy::rest(),
         Err(crate::policy::CheckpointUnusable::Refused(why)) => {
             return Err(format!(
                 "checkpoint at {} refused: {why}",
@@ -130,14 +136,9 @@ pub fn run_eval(
                 dims.action,
             ));
         }
-    }
-
-    // Load the policy ONCE and judge the same weights at every bearing: the CLI is
-    // pointed at a LIVE checkpoint dir (rl-eval-monitor, the release gate), and a
-    // per-bearing reload across the ~2 min sweep could straddle checkpoint swaps —
-    // a min over a composite of adjacent brains that no single brain achieved.
-    let policy = std::rc::Rc::new(Policy::load(checkpoint_dir));
+    };
     let policy_loaded = policy.is_loaded();
+    let policy = std::rc::Rc::new(policy);
 
     let mut per_bearing = [None; EVAL_BEARINGS];
     for (slot, bearing_rad) in per_bearing.iter_mut().zip(eval_bearings()) {

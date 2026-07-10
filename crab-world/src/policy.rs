@@ -60,10 +60,9 @@ pub(crate) fn dims_fit_rig(obs: usize, action: usize) -> bool {
 }
 
 /// Classify the on-disk checkpoint without arming it — for surfaces that only ever
-/// report a verdict (`checkpoint-check`, eval's pre-flight). A launch gate whose Ok
-/// leads to ARMING must use [`load_armed`] instead: classify-then-reload is two reads,
-/// and a checkpoint swap landing between them arms a policy the gate never vetted
-/// (bddap/rl#241).
+/// report a verdict (`checkpoint-check`). Any caller whose Ok leads to DRIVING a crab
+/// must use [`load_armed`] instead: classify-then-reload is two reads, and a checkpoint
+/// swap landing between them arms a policy the gate never vetted (bddap/rl#241).
 pub fn checkpoint_fits_rig(dir: &Path) -> Result<(), CheckpointUnusable> {
     match load_brain_normalizer(dir, &NdArrayDevice::Cpu) {
         Loaded::Fit(..) => Ok(()),
@@ -79,7 +78,10 @@ pub fn load_armed(checkpoint_dir: &Path) -> Result<Policy, CheckpointUnusable> {
     let device = NdArrayDevice::Cpu;
     match load_brain_normalizer(checkpoint_dir, &device) {
         Loaded::Fit(brain, normalizer) => {
-            info!("play: loaded checkpoint from {}", checkpoint_dir.display());
+            info!(
+                "loaded armed checkpoint from {}",
+                checkpoint_dir.display()
+            );
             Ok(Policy {
                 device,
                 live_dir: None,
@@ -102,6 +104,7 @@ pub struct RigDims {
 
 /// Why a checkpoint cannot arm — the one refusal classification both
 /// [`checkpoint_fits_rig`] and [`load_armed`] speak.
+#[derive(Debug)]
 pub enum CheckpointUnusable {
     /// No `brain.bin` — the legitimate "no brain yet" case.
     Missing,
