@@ -107,9 +107,9 @@ fn parse_arch(s: &str) -> Result<bot::arch::ArchId, String> {
     bot::arch::ArchId::try_from(s.to_string())
 }
 
-/// The bddap/rl#214 body preflight, MANDATORY for the two subcommands that build rollout
-/// worlds: without it, `learn`/`eval` reached the body's SILENT fallback and trained or
-/// judged the procedural body as if it were Sally. The lib half logs the verdict (loud
+/// The bddap/rl#214 body preflight, MANDATORY for every mode that builds a crab world
+/// (`learn`/`eval`/`--check-rest-colliders`): without it, they reached the body's SILENT
+/// fallback and trained, judged, or audited the procedural body as if it were Sally. The lib half logs the verdict (loud
 /// refusal / latched fallback error / positive body line); a refusal exits nonzero here,
 /// before any world is built. Placed on the subcommands, not in the lib entry points,
 /// so the glb-less lib tests (which call `headless_stack`/`run_eval` directly on the
@@ -264,6 +264,10 @@ fn main() {
     }
 
     if dev.check_rest_colliders {
+        // The audit answers questions about SALLY's rest pose; on the fallback body it
+        // prints an identical-format report with unrelated numbers (rl#234 was first
+        // "measured" that way in a glb-less checkout). No fallback opt-in on purpose.
+        require_canonical_body_or_exit("check-rest-colliders", false);
         std::process::exit(bot::collider_check::run());
     }
 
