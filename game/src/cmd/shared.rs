@@ -6,10 +6,14 @@ use net::sim::{Input, PlayerId, TICK_DT};
 
 pub(crate) const MATCH_SEED: u64 = 0x6372_6162;
 
-pub(crate) fn nn_crab_checkpoint_dir(
+/// The launch gate: resolve the checkpoint dir and load it in ONE read — the returned
+/// [`Policy`] is armed by construction, never re-read by the plugin (rl#241: a
+/// classify-then-reload gate can straddle a checkpoint swap and arm a rest-pose statue
+/// it never vetted). Returns the resolved dir alongside for operator-facing labels.
+pub(crate) fn nn_crab_policy(
     flag: Option<std::path::PathBuf>,
-) -> Result<std::path::PathBuf> {
-    use crab_world::play::{RigDims, RigFit};
+) -> Result<(std::path::PathBuf, crab_world::play::Policy)> {
+    use crab_world::play::{CheckpointUnusable, RigDims};
     let dir = flag
         .or_else(|| std::env::var_os("RL_CRAB_CHECKPOINT_DIR").map(std::path::PathBuf::from))
         .unwrap_or_else(|| {
@@ -17,20 +21,20 @@ pub(crate) fn nn_crab_checkpoint_dir(
                 .join("assets")
                 .join("weights")
         });
-    match crab_world::play::checkpoint_fits_rig(&dir) {
-        RigFit::Ok => Ok(dir),
-        RigFit::Missing => anyhow::bail!(
+    match crab_world::play::load_armed(&dir) {
+        Ok(policy) => Ok((dir, policy)),
+        Err(CheckpointUnusable::Missing) => anyhow::bail!(
             "rl#114: no trained crab brain (brain.bin) under {} — the giant crab IS the trained NN \
              body (\"Sally\"), and there is no integer stand-in. Point --nn-crab-checkpoint or the \
              RL_CRAB_CHECKPOINT_DIR env var at a trained checkpoint dir (deploy/rl-update must set \
              it, and EVERY device needs the IDENTICAL brain + crab model), then relaunch.",
             dir.display()
         ),
-        RigFit::Refused(why) => anyhow::bail!(
+        Err(CheckpointUnusable::Refused(why)) => anyhow::bail!(
             "checkpoint under {} was REFUSED — {why}. Fix the checkpoint, then relaunch.",
             dir.display()
         ),
-        RigFit::Mismatch(RigDims { obs, action }) => {
+        Err(CheckpointUnusable::Mismatch(RigDims { obs, action })) => {
             let RigDims {
                 obs: rig_obs,
                 action: rig_act,
@@ -47,17 +51,20 @@ pub(crate) fn nn_crab_checkpoint_dir(
     }
 }
 
-pub(crate) fn nn_crab_checkpoint_dirs(
+/// [`nn_crab_policy`] over every `--nn-crab-checkpoint` binding (default binding when
+/// none given) — the armed policies, one per crab.
+pub(crate) fn nn_crab_policies(
     flags: Vec<std::path::PathBuf>,
-) -> Result<Vec<std::path::PathBuf>> {
+) -> Result<Vec<crab_world::play::Policy>> {
     if flags.is_empty() {
-        return Ok(vec![nn_crab_checkpoint_dir(None)?]);
+        return Ok(vec![nn_crab_policy(None)?.1]);
     }
     flags
         .into_iter()
         .enumerate()
         .map(|(idx, dir)| {
-            nn_crab_checkpoint_dir(Some(dir))
+            nn_crab_policy(Some(dir))
+                .map(|(_, policy)| policy)
                 .with_context(|| format!("crab {idx}'s brain binding is unusable (rl#200)"))
         })
         .collect()

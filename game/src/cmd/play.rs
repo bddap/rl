@@ -3,7 +3,7 @@ use clap::Parser;
 use iroh::EndpointId;
 use net::{formation, net_loop, render};
 
-use super::shared::{MATCH_SEED, nn_crab_checkpoint_dirs, parse_join_dial, resolve_render_mode};
+use super::shared::{MATCH_SEED, nn_crab_policies, parse_join_dial, resolve_render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -32,7 +32,7 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    let external_crab = nn_crab_checkpoint_dirs(args.nn_crab_checkpoint)?;
+    let external_crab = nn_crab_policies(args.nn_crab_checkpoint)?;
     let boot = if args.host || args.join.is_some() {
         let dial = parse_join_dial(args.join.as_deref())?;
         let result = net_loop::connect_and_form_dialing(

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use super::shared::{nn_crab_checkpoint_dir, write_tick_hash_log};
+use super::shared::{nn_crab_policy, write_tick_hash_log};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -20,7 +20,7 @@ pub(crate) struct Args {
 pub(crate) fn run(args: Args) -> Result<()> {
     use net::external_crab::run_headless_probe;
 
-    let dir = nn_crab_checkpoint_dir(args.checkpoint)?;
+    let (dir, policy) = nn_crab_policy(args.checkpoint.clone())?;
     println!("nn-crab-probe: checkpoint={}", dir.display());
     println!("nn-crab-probe: seed={:#x} ticks={}", args.seed, args.ticks);
 
@@ -29,7 +29,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     } else {
         args.log_every
     };
-    let samples = run_headless_probe(&dir, args.seed, args.ticks, log_every);
+    let samples = run_headless_probe(policy, args.seed, args.ticks, log_every);
     if samples.is_empty() {
         anyhow::bail!("nn-crab-probe: no samples — the crab never stepped");
     }
@@ -65,7 +65,11 @@ pub(crate) fn run(args: Args) -> Result<()> {
         "\nnn-crab-probe: distance to player {first:.3} m → {last:.3} m  (closed {closed:.3} m)"
     );
 
-    let again = run_headless_probe(&dir, args.seed, args.ticks, log_every);
+    // The determinism re-run loads its own policy (Policy is arm-on-load, rl#241). A
+    // checkpoint swap landing between the two loads fails the diff LOUDLY — fine for an
+    // offline gate; what must never happen is a silent statue run.
+    let (_, policy_b) = nn_crab_policy(args.checkpoint)?;
+    let again = run_headless_probe(policy_b, args.seed, args.ticks, log_every);
     let hash_a = samples.last().unwrap().state_hash;
     let hash_b = again.last().map(|s| s.state_hash).unwrap_or(0);
     let traj_match = samples.len() == again.len()

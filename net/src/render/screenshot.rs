@@ -12,17 +12,16 @@ use crab_world::screenshot::{self, ShotProgress, ShotTarget};
 pub fn build_screenshot_app(
     mut ls: Lockstep,
     cfg: ScreenshotConfig,
-    external_crab: Option<std::path::PathBuf>,
+    external_crab: Option<crab_world::play::Policy>,
     render_mode: super::RenderMode,
 ) -> App {
     let mut app = offscreen_app_scaffold();
-    let armed_crab: Option<(std::path::PathBuf, Vec<Pos>)> =
-        external_crab.map(|dir| (dir, seed_round_crabs(&mut ls, 1)));
+    let armed_crab = external_crab.map(|policy| (policy, seed_round_crabs(&mut ls, 1)));
     let coord = coordinator(None, ls.peers(), ls.me(), ls.sim().clone());
     insert_core(&mut app, ls, coord);
     app.insert_resource(ScriptedPackInput(Input::new(0.0, 1.0, 0.0, 0)));
-    if let Some((dir, spawns)) = armed_crab {
-        install_armed_nn_crab(&mut app, vec![dir], spawns);
+    if let Some((policy, spawns)) = armed_crab {
+        install_armed_nn_crab(&mut app, vec![policy], spawns);
     }
     finish_offscreen_app(&mut app, cfg, render_mode);
     app
@@ -32,7 +31,7 @@ pub fn build_net_screenshot_app(
     mut ls: Lockstep,
     net: NetDriver,
     cfg: ScreenshotConfig,
-    external_crab: std::path::PathBuf,
+    external_crab: crab_world::play::Policy,
     render_mode: super::RenderMode,
 ) -> App {
     let mut app = offscreen_app_scaffold();

@@ -59,12 +59,38 @@ pub(crate) fn dims_fit_rig(obs: usize, action: usize) -> bool {
     (obs, action) == (OBS_SIZE, ACTION_SIZE)
 }
 
-pub fn checkpoint_fits_rig(dir: &Path) -> RigFit {
+/// Classify the on-disk checkpoint without arming it — for surfaces that only ever
+/// report a verdict (`checkpoint-check`, eval's pre-flight). A launch gate whose Ok
+/// leads to ARMING must use [`load_armed`] instead: classify-then-reload is two reads,
+/// and a checkpoint swap landing between them arms a policy the gate never vetted
+/// (bddap/rl#241).
+pub fn checkpoint_fits_rig(dir: &Path) -> Result<(), CheckpointUnusable> {
     match load_brain_normalizer(dir, &NdArrayDevice::Cpu) {
-        Loaded::Fit(..) => RigFit::Ok,
-        Loaded::Absent => RigFit::Missing,
-        Loaded::Mismatch(dims) => RigFit::Mismatch(dims),
-        Loaded::Refused(why) => RigFit::Refused(why),
+        Loaded::Fit(..) => Ok(()),
+        Loaded::Absent => Err(CheckpointUnusable::Missing),
+        Loaded::Mismatch(dims) => Err(CheckpointUnusable::Mismatch(dims)),
+        Loaded::Refused(why) => Err(CheckpointUnusable::Refused(why)),
+    }
+}
+
+/// Load AND arm in one read — the Ok IS the armed policy, so there is no second read
+/// for a checkpoint swap to straddle (bddap/rl#241).
+pub fn load_armed(checkpoint_dir: &Path) -> Result<Policy, CheckpointUnusable> {
+    let device = NdArrayDevice::Cpu;
+    match load_brain_normalizer(checkpoint_dir, &device) {
+        Loaded::Fit(brain, normalizer) => {
+            info!("play: loaded checkpoint from {}", checkpoint_dir.display());
+            Ok(Policy {
+                device,
+                live_dir: None,
+                last_loaded: None,
+                last_refused: None,
+                state: loaded_state(brain, normalizer, checkpoint_digest(checkpoint_dir)),
+            })
+        }
+        Loaded::Absent => Err(CheckpointUnusable::Missing),
+        Loaded::Mismatch(dims) => Err(CheckpointUnusable::Mismatch(dims)),
+        Loaded::Refused(why) => Err(CheckpointUnusable::Refused(why)),
     }
 }
 
@@ -74,8 +100,10 @@ pub struct RigDims {
     pub action: usize,
 }
 
-pub enum RigFit {
-    Ok,
+/// Why a checkpoint cannot arm — the one refusal classification both
+/// [`checkpoint_fits_rig`] and [`load_armed`] speak.
+pub enum CheckpointUnusable {
+    /// No `brain.bin` — the legitimate "no brain yet" case.
     Missing,
     /// The checkpoint was refused before any dims existed to compare, with the reason
     /// preformatted: a truncated/corrupt file (distinct from `Missing` so the operator
@@ -249,6 +277,19 @@ fn loaded_state(
 }
 
 impl Policy {
+    /// The explicit zero-action rest-pose policy — for tests and neutral-pose
+    /// inspection. Arming paths never construct this; they go through [`load_armed`],
+    /// whose failure is a refusal, not a quiet statue (bddap/rl#241).
+    pub fn rest() -> Self {
+        Self {
+            device: NdArrayDevice::Cpu,
+            live_dir: None,
+            last_loaded: None,
+            last_refused: None,
+            state: PolicyState::Rest { refused: None },
+        }
+    }
+
     /// Load brain + normalizer from a checkpoint dir. A missing checkpoint falls back
     /// QUIETLY to the zero-action rest pose so the app still launches (useful before the
     /// first checkpoint exists, and to inspect the body's neutral pose); a present-but-
@@ -513,7 +554,7 @@ mod tests {
         assert_eq!(policy.act(&golden_obs()), [0.0; ACTION_SIZE]);
 
         match checkpoint_fits_rig(&dir) {
-            RigFit::Refused(why) => assert!(
+            Err(CheckpointUnusable::Refused(why)) => assert!(
                 why.contains("pre-envelope"),
                 "the refusal must name the legacy (pre-envelope) diagnosis, got: {why}"
             ),
@@ -592,7 +633,7 @@ mod tests {
         let policy = Policy::load(&dir);
         assert!(!policy.is_loaded(), "a wrong-body checkpoint must not arm");
         match checkpoint_fits_rig(&dir) {
-            RigFit::Refused(why) => assert!(
+            Err(CheckpointUnusable::Refused(why)) => assert!(
                 why.contains("DIFFERENT crab body"),
                 "the refusal must name the body mismatch, got: {why}"
             ),
@@ -711,7 +752,7 @@ mod tests {
             .unwrap();
 
         match checkpoint_fits_rig(&dir) {
-            RigFit::Refused(why) => {
+            Err(CheckpointUnusable::Refused(why)) => {
                 assert!(
                     why.contains("DIFFERENT saves"),
                     "the refusal must name the mis-pair, got: {why}"
@@ -818,27 +859,27 @@ mod tests {
         let dir = tmp.join(format!("rl-rigfit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Missing));
+        assert!(matches!(checkpoint_fits_rig(&dir), Err(CheckpointUnusable::Missing)));
 
         // A current-rig brain (with its paired normalizer) fits.
         save_brain(&dir);
-        assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Ok));
+        assert!(checkpoint_fits_rig(&dir).is_ok());
 
         // A brain whose paired normalizer is MISSING is Refused — a real brain must never
         // arm against silently-cold normalizer stats.
         std::fs::remove_file(CheckpointDir::new(&dir).normalizer_path()).unwrap();
-        assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Refused(_)));
+        assert!(matches!(checkpoint_fits_rig(&dir), Err(CheckpointUnusable::Refused(_))));
         save_brain(&dir); // restore the pair
 
         save_brain_with_obs_dim(&dir, OBS_SIZE + 4);
         assert!(matches!(
             checkpoint_fits_rig(&dir),
-            RigFit::Mismatch(RigDims { obs, .. }) if obs == OBS_SIZE + 4
+            Err(CheckpointUnusable::Mismatch(RigDims { obs, .. })) if obs == OBS_SIZE + 4
         ));
 
         // A present-but-corrupt brain.bin is Refused, not Missing.
         std::fs::write(CheckpointDir::new(&dir).brain_file(), b"truncated garbage").unwrap();
-        assert!(matches!(checkpoint_fits_rig(&dir), RigFit::Refused(_)));
+        assert!(matches!(checkpoint_fits_rig(&dir), Err(CheckpointUnusable::Refused(_))));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

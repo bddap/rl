@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
-use super::shared::nn_crab_checkpoint_dir;
+use super::shared::nn_crab_policy;
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -19,14 +19,14 @@ pub(crate) struct Args {
 pub(crate) fn run(args: Args) -> Result<()> {
     use net::external_crab::run_vehicle_stability_probe;
 
-    let dir = nn_crab_checkpoint_dir(args.checkpoint)?;
+    let (dir, policy) = nn_crab_policy(args.checkpoint)?;
     println!("nn-crab-vehicle-stability: checkpoint={}", dir.display());
     println!(
         "nn-crab-vehicle-stability: seed={:#x} warmup={} post={}",
         args.seed, args.warmup, args.post
     );
 
-    let result = run_vehicle_stability_probe(&dir, args.seed, args.warmup, args.post);
+    let result = run_vehicle_stability_probe(policy, args.seed, args.warmup, args.post);
     if result.samples.is_empty() {
         anyhow::bail!("nn-crab-vehicle-stability: no samples — the crab never stepped");
     }
