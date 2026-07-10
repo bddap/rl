@@ -2,7 +2,6 @@ use super::scene::CrabAvatar;
 use super::*;
 use crate::controls::{self, Action};
 use bevy_rapier3d::prelude::Collider;
-use crab_world::bot::skin::CrabSkinRepose;
 pub use crab_world::crab_view::RenderMode;
 use crab_world::crab_view::{COLLIDER_WIREFRAME_COLOR, draw_collider_wireframe};
 use crab_world::vehicle::Vehicle;
@@ -65,16 +64,14 @@ fn manage_silhouette_visibility(
 
 fn draw_vehicle_collider_wireframe(
     mode: Res<RenderMode>,
-    repose: Option<Res<CrabSkinRepose>>,
+    anchor: Res<crate::external_crab::ArenaPlacement>,
     remote: Res<super::articulation::RemoteVehicle>,
     vehicles: Query<(&GlobalTransform, &Collider), With<Vehicle>>,
     mut gizmos: Gizmos,
 ) {
-    let placement = repose
-        .as_deref()
-        .and_then(|r| r.0.get(&0).copied())
-        .map(|s| s.matrix())
-        .unwrap_or(Mat4::IDENTITY);
+    // The STATIC arena→render frame (rl#224) — never the per-crab skin repose, which tracks
+    // the live carapace and would drag Sally's every wiggle into each craft's rendered pose.
+    let placement = Mat4::from_translation(anchor.0);
     if mode.shows_colliders() && !vehicles.is_empty() {
         for (gt, collider) in &vehicles {
             let world = placement * gt.to_matrix();

@@ -820,6 +820,7 @@ mod tests {
                 }),
                 brain_label: "mlp512x3 @deadbeef".to_string(),
             }],
+            arena_anchor: [4.25, 0.0, -0.5],
             vehicles: vec![VehiclePoseWire {
                 pilot: 1,
                 pos: [2.0, 5.5, -1.0],

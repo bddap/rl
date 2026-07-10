@@ -957,10 +957,7 @@ mod tests {
                 x: -60 * UNIT,
                 z: 90 * UNIT,
             },
-            Pos {
-                x: 0,
-                z: 90 * UNIT,
-            },
+            Pos { x: 0, z: 90 * UNIT },
             ex,
         ];
         let mut wp = 0usize;

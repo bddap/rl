@@ -64,6 +64,9 @@ pub struct ExternalCrabBridge {
 
 struct CrabBridge {
     world_pos_m: Vec2,
+    /// `world_pos_m` as of the round's (re)spawn — the game-world end of the STATIC
+    /// arena↔world correspondence [`publish_arena_placement`] anchors on (rl#224).
+    spawn_world_pos_m: Vec2,
     last_carapace_m: Option<Vec2>,
     yaw_turns: i32,
     settle: u32,
@@ -113,6 +116,7 @@ impl CrabBridge {
     fn new(spawn: Pos) -> Self {
         Self {
             world_pos_m: pos_to_m(spawn),
+            spawn_world_pos_m: pos_to_m(spawn),
             last_carapace_m: None,
             yaw_turns: 0,
             hunt_target_m: None,
@@ -167,6 +171,7 @@ impl CrabBridge {
 
     fn restart_to_spawn(&mut self, spawn: Pos) {
         self.world_pos_m = pos_to_m(spawn);
+        self.spawn_world_pos_m = pos_to_m(spawn);
         self.last_carapace_m = None;
         self.settle = crab_world::bot::RESET_GRACE_TICKS;
         self.next_drift_log_m = TARGET_ARENA_HALF;
@@ -361,9 +366,10 @@ impl Plugin for ExternalCrabPlugin {
         // so this is host-only by construction; on a remote-adopt client the articulation
         // `apply` is the sole label writer and the two can't fight over the resource.
         app.init_resource::<CrabBrainLabels>();
+        app.init_resource::<ArenaPlacement>();
         app.add_systems(
             FixedUpdate,
-            publish_brain_labels.run_if(external_crab_armed),
+            (publish_brain_labels, publish_arena_placement).run_if(external_crab_armed),
         );
         app.add_systems(
             FixedUpdate,
@@ -621,6 +627,36 @@ fn integrate_crab(
     }
 }
 
+/// Where the shared physics arena sits in the render world — a STATIC per-round translate,
+/// pinned by crab 0's spawn correspondence (game spawn · render-scale ↔ arena spawn origin).
+/// Vehicles and the cockpit camera render through THIS, never through the per-crab skin
+/// repose: the repose re-tracks the live carapace every tick to pin Sally's skin to her sim
+/// spot, so borrowing it as the arena transform dragged ~(1−rs) of her every movement into
+/// every craft's rendered pose — the ship visibly danced whenever she wiggled (rl#224).
+/// The trade: a pilot's aim at her SKIN drifts from her collider by (1−rs)·(her arena drift
+/// since spawn); the rl#240 recenter, once armed, bounds that drift — and under a static
+/// anchor its teleport can carry co-arena vehicles with no visual pop.
+///
+/// Host-authored ([`publish_arena_placement`], FixedUpdate ⇒ host-only like the brain
+/// labels) and shipped on the articulation wire; a client adopts it verbatim in `apply`.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+pub struct ArenaPlacement(pub Vec3);
+
+fn publish_arena_placement(
+    bridge: Res<ExternalCrabBridge>,
+    spawns: Res<CrabSpawns>,
+    mut out: ResMut<ArenaPlacement>,
+) {
+    let (Some(crab), Some(origin)) = (bridge.crabs.first(), spawns.0.first()) else {
+        return;
+    };
+    let w = crab.spawn_world_pos_m * crate::render::world_render_scale();
+    let want = ArenaPlacement(Vec3::new(w.x - origin.x, 0.0, w.y - origin.z));
+    if *out != want {
+        *out = want;
+    }
+}
+
 fn publish_skin_repose(
     bridge: Res<ExternalCrabBridge>,
     repose_out: Option<ResMut<crab_world::bot::skin::CrabSkinRepose>>,
@@ -650,6 +686,134 @@ fn publish_skin_repose(
 mod probe;
 
 pub use probe::{ProbeSample, StabilityResult, run_headless_probe, run_vehicle_stability_probe};
+
+/// rl#224 gates: a wiggling (even violently flailing) Sally must not move a ship she isn't
+/// touching — neither its arena body (physics) nor its RENDERED pose (arena pose + the
+/// [`ArenaPlacement`] anchor, which is static by construction). Before the fix the anchor
+/// tracked her live carapace, so her 9.6 m flail-walk dragged the parked ship's rendered
+/// pose 9.3 m; and the boarding spawn at 0.5 m altitude materialised the craft inside her
+/// body, so contact batted it ~8 m.
+#[cfg(test)]
+mod ship_wiggle_tests {
+    use crab_world::bot::actuator::{ACTION_SIZE, CrabActions};
+    use crab_world::bot::headless::{
+        HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
+    };
+    use crab_world::vehicle::{
+        PilotCommand, PilotId, Vehicle, VehicleControls, VehicleKind, VehiclePlugin,
+    };
+
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct Wiggle(f32);
+
+    /// Overwrite the (unloaded ⇒ zero-action) policy's output with a full-scale square wave
+    /// — a flail far more violent than any idle wiggle, so the gates bound the worst case.
+    fn drive_wiggle(w: Res<Wiggle>, mut actions: ResMut<CrabActions>) {
+        if let Some(a) = actions.envs.get_mut(0) {
+            *a = [w.0; ACTION_SIZE];
+        }
+    }
+
+    fn gcr_like_app_with_vehicles() -> App {
+        pin_single_thread_pools();
+        let mut app = headless_stack(HeadlessStack {
+            num_envs: 1,
+            role: WorldRole::Standalone,
+            arena: crab_world::physics::Arena::OpenField,
+        });
+        app.add_plugins(VehiclePlugin);
+        app.add_plugins(ExternalCrabPlugin {
+            checkpoint_dirs: vec![std::path::PathBuf::from("/nonexistent-rl224-test")],
+            // A nonzero GAME spawn (the arena spawn stays at the grid origin): the arena
+            // anchor is then nonzero, so the static-anchor assertions can't pass vacuously.
+            crab_spawns: vec![Pos::from_meters(30.0, -14.0)],
+        });
+        app.init_resource::<Wiggle>();
+        app.add_systems(
+            FixedUpdate,
+            drive_wiggle
+                .after(run_crab_policy)
+                .in_set(crab_world::bot::BotSet::Think),
+        );
+        arm(app.world_mut());
+        force_serial_schedules(&mut app);
+        app
+    }
+
+    fn ship_pos(app: &mut App) -> Vec3 {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, With<Vehicle>>();
+        q.single(app.world()).expect("one ship").translation
+    }
+
+    fn flail(app: &mut App, ticks: u32) {
+        for t in 0..ticks {
+            app.world_mut().resource_mut::<Wiggle>().0 = if (t / 5) % 2 == 0 { 1.0 } else { -1.0 };
+            app.update();
+        }
+    }
+
+    #[test]
+    fn parked_ship_stays_put_in_arena_and_on_screen_while_sally_flails() {
+        let mut app = gcr_like_app_with_vehicles();
+        crab_world::vehicle::spawn_ram_vehicle(
+            app.world_mut(),
+            VehicleKind::Ship,
+            Transform::from_xyz(5.0, 0.5, 5.0),
+            bevy_rapier3d::prelude::Velocity::default(),
+        );
+        app.world_mut()
+            .resource_mut::<VehicleControls>()
+            .0
+            .insert(PilotId(0), PilotCommand::new(VehicleKind::Ship));
+        for _ in 0..64 {
+            app.update();
+        }
+        let ship0 = ship_pos(&mut app);
+        let anchor0 = *app.world().resource::<ArenaPlacement>();
+        assert_ne!(anchor0.0, Vec3::ZERO, "the armed round published an anchor");
+
+        let mut max_ship_d = 0.0f32;
+        for t in 0..400u32 {
+            app.world_mut().resource_mut::<Wiggle>().0 = if (t / 5) % 2 == 0 { 1.0 } else { -1.0 };
+            app.update();
+            max_ship_d = max_ship_d.max(ship_pos(&mut app).distance(ship0));
+            assert_eq!(
+                *app.world().resource::<ArenaPlacement>(),
+                anchor0,
+                "the arena anchor is static for the round — a moving anchor is exactly \
+                 the rendered-ship-follows-Sally bug"
+            );
+        }
+        assert!(
+            max_ship_d < 1e-3,
+            "an untouched parked ship must not move while Sally flails, moved {max_ship_d} m"
+        );
+    }
+
+    #[test]
+    fn boarded_ship_spawns_clear_of_a_flailing_sally() {
+        let mut app = gcr_like_app_with_vehicles();
+        app.world_mut()
+            .resource_mut::<VehicleControls>()
+            .0
+            .insert(PilotId(0), PilotCommand::new(VehicleKind::Ship));
+        for _ in 0..64 {
+            app.update();
+        }
+        let ship0 = ship_pos(&mut app);
+        flail(&mut app, 200);
+        let moved = ship_pos(&mut app).distance(ship0);
+        assert!(
+            moved < 0.05,
+            "a freshly boarded craft must materialise clear of the crab's body — \
+             contact shoved it {moved} m"
+        );
+    }
+}
 
 #[cfg(test)]
 mod gcr_crab_tests {

@@ -40,9 +40,11 @@ const SHIP: VehicleParams = VehicleParams {
     yaw_torque: SHIP_AIM_TORQUE,
 };
 
-const PLANE_SPAWN_ALTITUDE: f32 = 2.0;
+/// One spawn altitude for every craft, above the crab's standing-plus-flail reach: the ship
+/// used to spawn at 0.5 m — inside Sally's body when she stood at her arena spawn, so her
+/// wiggle physically batted the fresh craft meters away (rl#224).
+const SPAWN_ALTITUDE: f32 = 2.0;
 const PLANE_SPAWN_SPEED: f32 = 2.0;
-const SHIP_SPAWN_ALTITUDE: f32 = 0.5;
 
 #[derive(Clone, Copy)]
 struct VehicleParams {
@@ -73,11 +75,7 @@ impl VehicleKind {
     }
 
     fn spawn_transform(self) -> Transform {
-        let y = match self {
-            VehicleKind::Plane => PLANE_SPAWN_ALTITUDE,
-            VehicleKind::Ship => SHIP_SPAWN_ALTITUDE,
-        };
-        Transform::from_xyz(0.0, y, 0.0)
+        Transform::from_xyz(0.0, SPAWN_ALTITUDE, 0.0)
     }
 
     fn spawn_velocity(self) -> Velocity {

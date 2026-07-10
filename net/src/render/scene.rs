@@ -417,20 +417,6 @@ type CrabXf<'w, 's> = Query<
     (Without<PlayerAvatar>, Without<FpCamera>),
 >;
 type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
-type CarapaceXf<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static Transform,
-        &'static crab_world::bot::body::CrabEnvId,
-    ),
-    (
-        With<crab_world::bot::body::CrabCarapace>,
-        Without<CrabAvatar>,
-        Without<PlayerAvatar>,
-        Without<FpCamera>,
-    ),
->;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_transforms(
@@ -438,10 +424,10 @@ pub(super) fn apply_transforms(
     pitch: Res<CameraPitch>,
     mut yaw: ResMut<CameraYaw>,
     vehicle: Res<LocalVehicle>,
+    placement: Res<crate::external_crab::ArenaPlacement>,
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
     mut cam_q: CamXf,
-    carapace_q: CarapaceXf,
 ) {
     let sim = state.ls.sim();
     let alpha = (state.accumulator / TICK_DT).clamp(0.0, 1.0) as f32;
@@ -485,20 +471,9 @@ pub(super) fn apply_transforms(
 
     if let Ok(mut cam) = cam_q.single_mut() {
         if let Some((prev, now)) = vehicle.cockpit_poses() {
-            let crab_now = sim.crabs()[0];
-            let crab_prev = state.prev.crabs.first().copied().unwrap_or(crab_now);
-            let crab_anchor = world(lerp_pos(crab_prev.pos(), crab_now.pos(), alpha), 0.0);
-            let arena_carapace = carapace_q
-                .iter()
-                .find(|(_, env)| env.0 == 0)
-                .map(|(t, _)| t.translation)
-                .unwrap_or(Vec3::ZERO);
-            let shift = Vec3::new(
-                crab_anchor.x - arena_carapace.x,
-                0.0,
-                crab_anchor.z - arena_carapace.z,
-            );
-            *cam = cockpit_camera(prev, now, alpha, shift);
+            // The STATIC arena→render frame (rl#224): anchoring on the live carapace here
+            // made the whole cockpit view judder with Sally's every wiggle.
+            *cam = cockpit_camera(prev, now, alpha, placement.0);
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);

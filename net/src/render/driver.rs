@@ -87,6 +87,11 @@ pub(super) fn teardown_round(world: &mut World) {
     if let Some(mut ctrl) = world.get_resource_mut::<VehicleControls>() {
         ctrl.0.clear();
     }
+    // Round state like the labels: the next round's arm republishes (host) or re-adopts
+    // (client) its own arena anchor.
+    if let Some(mut anchor) = world.get_resource_mut::<crate::external_crab::ArenaPlacement>() {
+        *anchor = Default::default();
+    }
     // Round state like the labels above: a survivor would suppress (or mis-measure) the next
     // round's remote-craft appeared/moved edges.
     world.remove_resource::<super::articulation::RemoteCraftWatch>();
@@ -861,6 +866,7 @@ mod tests {
         let art = CrabArticulation {
             tick: 7,
             crabs: Vec::new(),
+            arena_anchor: [0.0; 3],
             vehicles: vec![
                 VehiclePoseWire {
                     pilot: 0,

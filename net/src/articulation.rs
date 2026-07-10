@@ -28,6 +28,10 @@ pub struct CrabFrame {
 pub struct CrabArticulation {
     pub tick: u64,
     pub crabs: Vec<CrabFrame>,
+    /// The host's static arena→render translate (`ArenaPlacement`, rl#224) — the frame the
+    /// `vehicles` arena poses render through. Shipped verbatim like the brain labels: a
+    /// client never re-derives the anchor, so host and client place every craft identically.
+    pub arena_anchor: [f32; 3],
     pub vehicles: Vec<VehiclePoseWire>,
 }
 
@@ -92,6 +96,9 @@ impl CrabArticulation {
             out.push(label.len() as u8);
             out.extend_from_slice(label.as_bytes());
         }
+        for v in self.arena_anchor {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
         out.extend_from_slice(&(self.vehicles.len() as u16).to_le_bytes());
         for v in &self.vehicles {
             out.push(v.pilot);
@@ -136,6 +143,7 @@ impl CrabArticulation {
                 brain_label,
             });
         }
+        let arena_anchor = read_vec3(&mut r)?;
         let n_vehicles = u16::from_le_bytes(r.take::<2>()?) as usize;
         let mut vehicles: Vec<VehiclePoseWire> = Vec::new();
         for _ in 0..n_vehicles {
@@ -155,6 +163,7 @@ impl CrabArticulation {
         Ok(Self {
             tick,
             crabs,
+            arena_anchor,
             vehicles,
         })
     }
@@ -268,6 +277,7 @@ mod tests {
                     brain_label: "REFUSED: wrong rig".to_string(),
                 },
             ],
+            arena_anchor: [0.75, 0.0, -12.5],
             vehicles: vec![
                 VehiclePoseWire {
                     pilot: 0,
@@ -313,6 +323,7 @@ mod tests {
         let a = CrabArticulation {
             tick: 0,
             crabs: vec![],
+            arena_anchor: [0.0; 3],
             vehicles: vec![],
         };
         assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
@@ -335,7 +346,7 @@ mod tests {
         let mut a = sample();
         a.crabs[1].brain_label = "x".to_string();
         let mut bytes = a.to_bytes();
-        let label_off = bytes.len() - (2 + 2 * (1 + 12 + 16)) - 1;
+        let label_off = bytes.len() - 12 - (2 + 2 * (1 + 12 + 16)) - 1;
         assert_eq!(bytes[label_off], b'x');
         bytes[label_off] = 0xFF;
         assert_eq!(
