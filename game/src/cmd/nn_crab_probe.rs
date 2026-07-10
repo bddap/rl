@@ -18,6 +18,7 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
+    use crab_world::Visuals;
     use net::external_crab::run_headless_probe;
 
     let (dir, policy) = nn_crab_policy(args.checkpoint.clone())?;
@@ -29,7 +30,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     } else {
         args.log_every
     };
-    let samples = run_headless_probe(policy, args.seed, args.ticks, log_every);
+    let samples = run_headless_probe(policy, args.seed, args.ticks, log_every, Visuals(false));
     if samples.is_empty() {
         anyhow::bail!("nn-crab-probe: no samples — the crab never stepped");
     }
@@ -69,7 +70,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     // checkpoint swap landing between the two loads fails the diff LOUDLY — fine for an
     // offline gate; what must never happen is a silent statue run.
     let (_, policy_b) = nn_crab_policy(args.checkpoint)?;
-    let again = run_headless_probe(policy_b, args.seed, args.ticks, log_every);
+    let again = run_headless_probe(policy_b, args.seed, args.ticks, log_every, Visuals(false));
     let hash_a = samples.last().unwrap().state_hash;
     let hash_b = again.last().map(|s| s.state_hash).unwrap_or(0);
     let traj_match = samples.len() == again.len()

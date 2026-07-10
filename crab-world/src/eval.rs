@@ -175,6 +175,7 @@ fn run_bearing(
         num_envs: 1,
         role: WorldRole::Standalone,
         arena: crate::physics::Arena::WalledBox,
+        visuals: crate::Visuals(false),
     });
     app.insert_resource(EvalConfig {
         target_distance,

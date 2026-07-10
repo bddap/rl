@@ -111,7 +111,11 @@ fn probe_step(
     }
 }
 
-fn headless_nn_crab_app(policy: crab_world::play::Policy, crab_spawn: Pos) -> bevy::app::App {
+fn headless_nn_crab_app(
+    policy: crab_world::play::Policy,
+    crab_spawn: Pos,
+    visuals: crab_world::Visuals,
+) -> bevy::app::App {
     use crab_world::bot::headless::{
         HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
     };
@@ -124,6 +128,7 @@ fn headless_nn_crab_app(policy: crab_world::play::Policy, crab_spawn: Pos) -> be
         // The probe models the GCR client, so it steps the client's OPEN inference
         // field (rl#209), not the walled training box.
         arena: crab_world::physics::Arena::OpenField,
+        visuals,
     });
     app.add_plugins(ExternalCrabPlugin::new(vec![policy], vec![crab_spawn]));
     super::arm(app.world_mut());
@@ -131,11 +136,16 @@ fn headless_nn_crab_app(policy: crab_world::play::Policy, crab_spawn: Pos) -> be
     app
 }
 
+/// `visuals`: `Visuals(true)` steps the ARMED-RENDER configuration headless — the
+/// skin, the repose publisher, and the rl#116 pose sentinel all live — which is the
+/// exact configuration the GCR play-day crash showed no headless test covered. The
+/// determinism/behavior probes pass `Visuals(false)`, matching what they hash.
 pub fn run_headless_probe(
     policy: crab_world::play::Policy,
     seed: u64,
     ticks: u64,
     log_every: u64,
+    visuals: crab_world::Visuals,
 ) -> Vec<ProbeSample> {
     let me = PlayerId(0);
     let mut sim = Sim::new(seed, &[me]);
@@ -143,7 +153,7 @@ pub fn run_headless_probe(
     let crab = sim.crabs()[0];
     sim.set_external_crab_pose(0, crab.pos(), crab.yaw());
 
-    let mut app = headless_nn_crab_app(policy, crab_spawn);
+    let mut app = headless_nn_crab_app(policy, crab_spawn, visuals);
     app.insert_non_send_resource(ProbeDriver {
         sim,
         samples: Vec::new(),
@@ -189,7 +199,7 @@ pub fn run_vehicle_stability_probe(
     let crab = sim.crabs()[0];
     sim.set_external_crab_pose(0, crab.pos(), crab.yaw());
 
-    let mut app = headless_nn_crab_app(policy, crab_spawn);
+    let mut app = headless_nn_crab_app(policy, crab_spawn, crab_world::Visuals(false));
     app.insert_non_send_resource(ProbeDriver {
         sim,
         samples: Vec::new(),

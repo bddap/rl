@@ -49,6 +49,12 @@ pub struct CrabCarapace;
 #[derive(Component)]
 pub struct CrabClawTip;
 
+/// A rapier-driven rigid-body part of the crab. Its `Transform` belongs to the
+/// physics solver: in any world that pumps `FixedUpdate`, a foreign write gets
+/// synced back into the body at `SyncBackend` and blows up the multibody (the
+/// GCR play-day crash, rl#116). Cosmetic/render placement rides the render-only
+/// skin bones / `CrabSkinRepose` instead; [`crate::bot::pose_sentinel`] enforces
+/// this at runtime in visual worlds.
 #[derive(Component)]
 pub struct CrabBodyPart;
 

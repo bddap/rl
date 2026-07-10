@@ -88,6 +88,7 @@ fn uniform_part_shift_teleports_the_multibody_cleanly() {
         num_envs: 1,
         role: WorldRole::Standalone,
         arena: crate::physics::Arena::OpenField,
+        visuals: crate::Visuals(false),
     });
     tick(&mut app, 192);
 

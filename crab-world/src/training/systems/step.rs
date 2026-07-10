@@ -392,6 +392,7 @@ mod tests {
             num_envs: 1,
             role: WorldRole::Standalone,
             arena: crate::physics::Arena::WalledBox,
+            visuals: crate::Visuals(false),
         });
 
         let state = TrainingState::new_worker(&config, 0, crate::bot::arch::ArchId::DEFAULT);

@@ -163,6 +163,11 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
     }
 }
 
+/// Writes wire poses straight onto the local `CrabBodyPart` `Transform`s. That is the
+/// one sanctioned mutation of body-part transforms outside physics (rl#116): it runs
+/// only on a remote-adopt client, whose `FixedUpdate` is parked — rapier never steps
+/// there, so these puppet writes never reach a solver. The pose sentinel and the
+/// transform-ownership gate both allowlist exactly this path.
 pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
     let by_env_tag: std::collections::HashMap<(usize, u8), &PartTransform> = art
         .crabs
