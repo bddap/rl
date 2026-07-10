@@ -28,6 +28,12 @@ pub(crate) struct Args {
 
     #[arg(long, value_name = "mesh|mesh+colliders|colliders")]
     render_mode: Option<String>,
+
+    /// Yaw axis held by the scripted pack (−1..1): non-zero makes the pack orbit instead
+    /// of bee-lining, presenting the crab flank/bystander geometry (the claw-down regime,
+    /// rl#249) rather than only frontal pursuit.
+    #[arg(long, default_value_t = 0.0)]
+    pack_look_yaw: f32,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -42,6 +48,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .map(|flag| nn_crab_policy(Some(flag)).map(|(_, policy)| policy))
         .transpose()?;
     let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
-    render::build_screenshot_app(ls, cfg, external_crab, render_mode).run();
+    let pack = net::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
+    render::build_screenshot_app(ls, cfg, external_crab, render_mode, pack).run();
     Ok(())
 }

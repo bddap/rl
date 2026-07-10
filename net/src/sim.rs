@@ -104,20 +104,21 @@ pub const CRAB_SCALE: i64 = 12;
 pub const PLAYER_HEIGHT: f32 = 1.8;
 
 /// 2D reach of the grab around the crab's sim pos (the carapace ground point — the bridge
-/// integrates carapace deltas): the circle inscribed in her carapace footprint, in sim
-/// meters — "under her body" means "grabbed" (rl#236; the old 1.5 m reach was ~7× smaller
-/// than her own carapace and almost never landed). Legs deliberately do NOT grab; claw
-/// contact downs separately, against the real claw colliders ([`ClawPose`], rl#249).
-/// Pinned as an integer for the fixed-point sim; `grab_reach_matches_crab_body`
-/// re-derives it from the rig silhouettes (the fitted body too, wherever the model asset
-/// resolves) so body and reach cannot drift apart.
-pub const CRAB_GRAB_RADIUS: i64 = 21 * UNIT / 2;
+/// integrates carapace deltas): deep under her body core, in sim meters. rl#236 pinned
+/// this to the full inscribed carapace footprint (10.5 m); rl#249 shrank it, because that
+/// disc reached past the ~9 m hunt-target band (`TARGET_ARENA_HALF`) and downed prey
+/// before her TRAINED near-field claw strike could ever engage — the circle shadowed the
+/// claw mechanic rl#249 asks for (rl#236's own side observation). Now the core disc covers
+/// only "she is standing on you"; the 6–17 m shell belongs to real claw contact
+/// ([`ClawPose`]). Legs still deliberately do not grab. `grab_reach_matches_crab_body`
+/// pins both bounds: within the carapace footprint, and short of the claw-strike band.
+pub const CRAB_GRAB_RADIUS: i64 = 6 * UNIT;
 
 /// "Very close" slack around a claw collider (rl#249): the sim player is a point, so this
 /// covers their body radius plus the near-miss feel margin — and absorbs one tick of claw
-/// sweep (the capsule is sampled per tick, not swept). Pure feel parameter; tune on
-/// playtest.
-pub const CLAW_DOWN_BUFFER: i64 = UNIT;
+/// sweep (the capsule is sampled per tick, not swept). At her 21.6 m scale a 2 m graze
+/// reads as a hit. Pure feel parameter; tune on playtest.
+pub const CLAW_DOWN_BUFFER: i64 = 2 * UNIT;
 
 /// The player's height span for the claw check, on the fixed-point grid: a claw passing
 /// clear overhead must not down anyone.
@@ -1398,13 +1399,16 @@ mod tests {
     }
 
     /// Pins [`CRAB_GRAB_RADIUS`] and [`MIN_CRAB_SPAWN_DISTANCE`] to the crab's actual body
-    /// (rl#236). Sim meters relate to a rig's natural meters by the sizing rule: her
-    /// natural height spans [`CRAB_SCALE`] × [`PLAYER_HEIGHT`]. Against EVERY rig she can
-    /// wear (the procedural fallback always; the mesh-fitted recipe when sally.glb
-    /// resolves): the grab never reaches beyond the carapace footprint's inscribed circle
-    /// (the disc is anchored on the carapace, so inscribed = "certainly under her body"
-    /// whatever her yaw), and spawns clear the footprint's corner reach. Against the
-    /// smallest such body the pin is tight: within the half-meter it was floored to.
+    /// (rl#236) and the grab to the claw-strike band (rl#249). Sim meters relate to a
+    /// rig's natural meters by the sizing rule: her natural height spans [`CRAB_SCALE`] ×
+    /// [`PLAYER_HEIGHT`]. Against EVERY rig she can wear (the procedural fallback always;
+    /// the mesh-fitted recipe when sally.glb resolves): the grab never reaches beyond the
+    /// carapace footprint's inscribed circle (the disc is anchored on the carapace, so
+    /// inscribed = "certainly under her body" whatever her yaw), and spawns clear the
+    /// footprint's corner reach. The rl#249 upper bound: the grab disc must stop short of
+    /// the hunt-target band's far edge, else it downs prey before the trained near-field
+    /// claw strike can engage and the claw trigger ([`ClawPose`]) is unreachable — exactly
+    /// the shadowing rl#236 observed.
     #[test]
     fn grab_reach_matches_crab_body() {
         use crab_world::bot::rig::{RestShape, fallback_recipe, recipe_silhouette};
@@ -1422,7 +1426,6 @@ mod tests {
         }
 
         let grab_m = CRAB_GRAB_RADIUS as f32 / UNIT as f32;
-        let mut tightest = f32::INFINITY;
         for (name, recipe) in &recipes {
             let sil = recipe_silhouette(recipe);
             let RestShape::Cuboid { half, .. } = sil.carapace else {
@@ -1440,12 +1443,12 @@ mod tests {
                 (MIN_CRAB_SPAWN_DISTANCE as f32 / UNIT as f32) > corner_m,
                 "{name}: spawn clearance must exceed the carapace's corner reach {corner_m:.2} m"
             );
-            tightest = tightest.min(inscribed_m);
         }
+        let band_m = crab_world::training::targets::TARGET_ARENA_HALF;
         assert!(
-            tightest - grab_m < 0.5,
-            "grab reach {grab_m:.2} m is looser than the half-meter floor of the smallest \
-             body's inscribed radius {tightest:.2} m — re-pin it"
+            grab_m < band_m - 1.0,
+            "grab reach {grab_m:.2} m crowds the {band_m:.1} m hunt-target band: prey \
+             would down on the disc before the near-field claw strike engages (rl#249)"
         );
     }
 
