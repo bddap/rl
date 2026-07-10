@@ -272,6 +272,12 @@ pub fn spawn_initial_crabs(
     targets.resize(n);
     spawns.rebuild(n);
     for env in 0..n {
-        body::spawn_crab(&mut commands, &assets, spawns.origin(env), env, Quat::IDENTITY);
+        body::spawn_crab(
+            &mut commands,
+            &assets,
+            spawns.origin(env),
+            env,
+            Quat::IDENTITY,
+        );
     }
 }

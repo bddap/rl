@@ -1,0 +1,552 @@
+diff --git a/crab-world/src/policy.rs b/crab-world/src/policy.rs
+index 75a8f7fc..ab51c934 100644
+--- a/crab-world/src/policy.rs
++++ b/crab-world/src/policy.rs
+@@ -190,12 +190,12 @@ fn load_set_once(dir: &Path, device: &NdArrayDevice) -> SetRead {
+         Ok(normalizer) => SetRead::Done(Loaded::Fit(brain, normalizer)),
+         // The two coherence variants are the ones a straddled read can produce — every
+         // other refusal is a property of the file itself and re-reading can't change it.
+-        Err(
+-            e @ (EnvelopeError::SaveStampMismatch { .. } | EnvelopeError::ArchMismatch { .. }),
+-        ) => SetRead::Mispaired(format!(
+-            "{}: {e} (a brain never arms without its paired obs normalizer)",
+-            crate::training::checkpoint::NORMALIZER_FILENAME
+-        )),
++        Err(e @ (EnvelopeError::SaveStampMismatch { .. } | EnvelopeError::ArchMismatch { .. })) => {
++            SetRead::Mispaired(format!(
++                "{}: {e} (a brain never arms without its paired obs normalizer)",
++                crate::training::checkpoint::NORMALIZER_FILENAME
++            ))
++        }
+         Err(e) => SetRead::Done(Loaded::Refused(format!(
+             "{}: {e} (a brain never arms without its paired obs normalizer)",
+             crate::training::checkpoint::NORMALIZER_FILENAME
+diff --git a/crab-world/src/vehicle.rs b/crab-world/src/vehicle.rs
+index 5e0c029f..b3893aad 100644
+--- a/crab-world/src/vehicle.rs
++++ b/crab-world/src/vehicle.rs
+@@ -40,9 +40,11 @@ const SHIP: VehicleParams = VehicleParams {
+     yaw_torque: SHIP_AIM_TORQUE,
+ };
+ 
+-const PLANE_SPAWN_ALTITUDE: f32 = 2.0;
++/// One spawn altitude for every craft, above the crab's standing-plus-flail reach: the ship
++/// used to spawn at 0.5 m — inside Sally's body when she stood at her arena spawn, so her
++/// wiggle physically batted the fresh craft meters away (rl#224).
++const SPAWN_ALTITUDE: f32 = 2.0;
+ const PLANE_SPAWN_SPEED: f32 = 2.0;
+-const SHIP_SPAWN_ALTITUDE: f32 = 0.5;
+ 
+ #[derive(Clone, Copy)]
+ struct VehicleParams {
+@@ -73,11 +75,7 @@ impl VehicleKind {
+     }
+ 
+     fn spawn_transform(self) -> Transform {
+-        let y = match self {
+-            VehicleKind::Plane => PLANE_SPAWN_ALTITUDE,
+-            VehicleKind::Ship => SHIP_SPAWN_ALTITUDE,
+-        };
+-        Transform::from_xyz(0.0, y, 0.0)
++        Transform::from_xyz(0.0, SPAWN_ALTITUDE, 0.0)
+     }
+ 
+     fn spawn_velocity(self) -> Velocity {
+diff --git a/net/src/articulation.rs b/net/src/articulation.rs
+index 89e1a5ce..48e8587c 100644
+--- a/net/src/articulation.rs
++++ b/net/src/articulation.rs
+@@ -28,6 +28,10 @@ pub struct CrabFrame {
+ pub struct CrabArticulation {
+     pub tick: u64,
+     pub crabs: Vec<CrabFrame>,
++    /// The host's static arena→render translate (`ArenaPlacement`, rl#224) — the frame the
++    /// `vehicles` arena poses render through. Shipped verbatim like the brain labels: a
++    /// client never re-derives the anchor, so host and client place every craft identically.
++    pub arena_anchor: [f32; 3],
+     pub vehicles: Vec<VehiclePoseWire>,
+ }
+ 
+@@ -92,6 +96,9 @@ impl CrabArticulation {
+             out.push(label.len() as u8);
+             out.extend_from_slice(label.as_bytes());
+         }
++        for v in self.arena_anchor {
++            out.extend_from_slice(&v.to_le_bytes());
++        }
+         out.extend_from_slice(&(self.vehicles.len() as u16).to_le_bytes());
+         for v in &self.vehicles {
+             out.push(v.pilot);
+@@ -136,6 +143,7 @@ impl CrabArticulation {
+                 brain_label,
+             });
+         }
++        let arena_anchor = read_vec3(&mut r)?;
+         let n_vehicles = u16::from_le_bytes(r.take::<2>()?) as usize;
+         let mut vehicles: Vec<VehiclePoseWire> = Vec::new();
+         for _ in 0..n_vehicles {
+@@ -155,6 +163,7 @@ impl CrabArticulation {
+         Ok(Self {
+             tick,
+             crabs,
++            arena_anchor,
+             vehicles,
+         })
+     }
+@@ -268,6 +277,7 @@ mod tests {
+                     brain_label: "REFUSED: wrong rig".to_string(),
+                 },
+             ],
++            arena_anchor: [0.75, 0.0, -12.5],
+             vehicles: vec![
+                 VehiclePoseWire {
+                     pilot: 0,
+@@ -313,6 +323,7 @@ mod tests {
+         let a = CrabArticulation {
+             tick: 0,
+             crabs: vec![],
++            arena_anchor: [0.0; 3],
+             vehicles: vec![],
+         };
+         assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
+@@ -335,7 +346,7 @@ mod tests {
+         let mut a = sample();
+         a.crabs[1].brain_label = "x".to_string();
+         let mut bytes = a.to_bytes();
+-        let label_off = bytes.len() - (2 + 2 * (1 + 12 + 16)) - 1;
++        let label_off = bytes.len() - 12 - (2 + 2 * (1 + 12 + 16)) - 1;
+         assert_eq!(bytes[label_off], b'x');
+         bytes[label_off] = 0xFF;
+         assert_eq!(
+diff --git a/net/src/external_crab.rs b/net/src/external_crab.rs
+index 1126c7bc..32c4a1a7 100644
+--- a/net/src/external_crab.rs
++++ b/net/src/external_crab.rs
+@@ -64,6 +64,9 @@ pub struct ExternalCrabBridge {
+ 
+ struct CrabBridge {
+     world_pos_m: Vec2,
++    /// `world_pos_m` as of the round's (re)spawn — the game-world end of the STATIC
++    /// arena↔world correspondence [`publish_arena_placement`] anchors on (rl#224).
++    spawn_world_pos_m: Vec2,
+     last_carapace_m: Option<Vec2>,
+     yaw_turns: i32,
+     settle: u32,
+@@ -92,6 +95,7 @@ impl CrabBridge {
+     fn new(spawn: Pos) -> Self {
+         Self {
+             world_pos_m: pos_to_m(spawn),
++            spawn_world_pos_m: pos_to_m(spawn),
+             last_carapace_m: None,
+             yaw_turns: 0,
+             hunt_target_m: None,
+@@ -121,6 +125,7 @@ impl CrabBridge {
+ 
+     fn restart_to_spawn(&mut self, spawn: Pos) {
+         self.world_pos_m = pos_to_m(spawn);
++        self.spawn_world_pos_m = pos_to_m(spawn);
+         self.last_carapace_m = None;
+         self.settle = crab_world::bot::RESET_GRACE_TICKS;
+         self.next_drift_log_m = TARGET_ARENA_HALF;
+@@ -284,9 +289,10 @@ impl Plugin for ExternalCrabPlugin {
+         // so this is host-only by construction; on a remote-adopt client the articulation
+         // `apply` is the sole label writer and the two can't fight over the resource.
+         app.init_resource::<CrabBrainLabels>();
++        app.init_resource::<ArenaPlacement>();
+         app.add_systems(
+             FixedUpdate,
+-            publish_brain_labels.run_if(external_crab_armed),
++            (publish_brain_labels, publish_arena_placement).run_if(external_crab_armed),
+         );
+         app.add_systems(
+             FixedUpdate,
+@@ -501,6 +507,36 @@ fn integrate_crab(
+     }
+ }
+ 
++/// Where the shared physics arena sits in the render world — a STATIC per-round translate,
++/// pinned by crab 0's spawn correspondence (game spawn · render-scale ↔ arena spawn origin).
++/// Vehicles and the cockpit camera render through THIS, never through the per-crab skin
++/// repose: the repose re-tracks the live carapace every tick to pin Sally's skin to her sim
++/// spot, so borrowing it as the arena transform dragged ~(1−rs) of her every movement into
++/// every craft's rendered pose — the ship visibly danced whenever she wiggled (rl#224).
++/// The trade: a pilot's aim at her SKIN drifts from her collider by (1−rs)·(her arena drift
++/// since spawn); the rl#240 recenter, once armed, bounds that drift — and under a static
++/// anchor its teleport can carry co-arena vehicles with no visual pop.
++///
++/// Host-authored ([`publish_arena_placement`], FixedUpdate ⇒ host-only like the brain
++/// labels) and shipped on the articulation wire; a client adopts it verbatim in `apply`.
++#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
++pub struct ArenaPlacement(pub Vec3);
++
++fn publish_arena_placement(
++    bridge: Res<ExternalCrabBridge>,
++    spawns: Res<CrabSpawns>,
++    mut out: ResMut<ArenaPlacement>,
++) {
++    let (Some(crab), Some(origin)) = (bridge.crabs.first(), spawns.0.first()) else {
++        return;
++    };
++    let w = crab.spawn_world_pos_m * crate::render::world_render_scale();
++    let want = ArenaPlacement(Vec3::new(w.x - origin.x, 0.0, w.y - origin.z));
++    if *out != want {
++        *out = want;
++    }
++}
++
+ fn publish_skin_repose(
+     bridge: Res<ExternalCrabBridge>,
+     repose_out: Option<ResMut<crab_world::bot::skin::CrabSkinRepose>>,
+@@ -531,6 +567,134 @@ mod probe;
+ 
+ pub use probe::{ProbeSample, StabilityResult, run_headless_probe, run_vehicle_stability_probe};
+ 
++/// rl#224 gates: a wiggling (even violently flailing) Sally must not move a ship she isn't
++/// touching — neither its arena body (physics) nor its RENDERED pose (arena pose + the
++/// [`ArenaPlacement`] anchor, which is static by construction). Before the fix the anchor
++/// tracked her live carapace, so her 9.6 m flail-walk dragged the parked ship's rendered
++/// pose 9.3 m; and the boarding spawn at 0.5 m altitude materialised the craft inside her
++/// body, so contact batted it ~8 m.
++#[cfg(test)]
++mod ship_wiggle_tests {
++    use crab_world::bot::actuator::{ACTION_SIZE, CrabActions};
++    use crab_world::bot::headless::{
++        HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
++    };
++    use crab_world::vehicle::{
++        PilotCommand, PilotId, Vehicle, VehicleControls, VehicleKind, VehiclePlugin,
++    };
++
++    use super::*;
++
++    #[derive(Resource, Default)]
++    struct Wiggle(f32);
++
++    /// Overwrite the (unloaded ⇒ zero-action) policy's output with a full-scale square wave
++    /// — a flail far more violent than any idle wiggle, so the gates bound the worst case.
++    fn drive_wiggle(w: Res<Wiggle>, mut actions: ResMut<CrabActions>) {
++        if let Some(a) = actions.envs.get_mut(0) {
++            *a = [w.0; ACTION_SIZE];
++        }
++    }
++
++    fn gcr_like_app_with_vehicles() -> App {
++        pin_single_thread_pools();
++        let mut app = headless_stack(HeadlessStack {
++            num_envs: 1,
++            role: WorldRole::Standalone,
++            arena: crab_world::physics::Arena::OpenField,
++        });
++        app.add_plugins(VehiclePlugin);
++        app.add_plugins(ExternalCrabPlugin {
++            checkpoint_dirs: vec![std::path::PathBuf::from("/nonexistent-rl224-test")],
++            // A nonzero GAME spawn (the arena spawn stays at the grid origin): the arena
++            // anchor is then nonzero, so the static-anchor assertions can't pass vacuously.
++            crab_spawns: vec![Pos::from_meters(30.0, -14.0)],
++        });
++        app.init_resource::<Wiggle>();
++        app.add_systems(
++            FixedUpdate,
++            drive_wiggle
++                .after(run_crab_policy)
++                .in_set(crab_world::bot::BotSet::Think),
++        );
++        arm(app.world_mut());
++        force_serial_schedules(&mut app);
++        app
++    }
++
++    fn ship_pos(app: &mut App) -> Vec3 {
++        let mut q = app
++            .world_mut()
++            .query_filtered::<&Transform, With<Vehicle>>();
++        q.single(app.world()).expect("one ship").translation
++    }
++
++    fn flail(app: &mut App, ticks: u32) {
++        for t in 0..ticks {
++            app.world_mut().resource_mut::<Wiggle>().0 = if (t / 5) % 2 == 0 { 1.0 } else { -1.0 };
++            app.update();
++        }
++    }
++
++    #[test]
++    fn parked_ship_stays_put_in_arena_and_on_screen_while_sally_flails() {
++        let mut app = gcr_like_app_with_vehicles();
++        crab_world::vehicle::spawn_ram_vehicle(
++            app.world_mut(),
++            VehicleKind::Ship,
++            Transform::from_xyz(5.0, 0.5, 5.0),
++            bevy_rapier3d::prelude::Velocity::default(),
++        );
++        app.world_mut()
++            .resource_mut::<VehicleControls>()
++            .0
++            .insert(PilotId(0), PilotCommand::new(VehicleKind::Ship));
++        for _ in 0..64 {
++            app.update();
++        }
++        let ship0 = ship_pos(&mut app);
++        let anchor0 = *app.world().resource::<ArenaPlacement>();
++        assert_ne!(anchor0.0, Vec3::ZERO, "the armed round published an anchor");
++
++        let mut max_ship_d = 0.0f32;
++        for t in 0..400u32 {
++            app.world_mut().resource_mut::<Wiggle>().0 = if (t / 5) % 2 == 0 { 1.0 } else { -1.0 };
++            app.update();
++            max_ship_d = max_ship_d.max(ship_pos(&mut app).distance(ship0));
++            assert_eq!(
++                *app.world().resource::<ArenaPlacement>(),
++                anchor0,
++                "the arena anchor is static for the round — a moving anchor is exactly \
++                 the rendered-ship-follows-Sally bug"
++            );
++        }
++        assert!(
++            max_ship_d < 1e-3,
++            "an untouched parked ship must not move while Sally flails, moved {max_ship_d} m"
++        );
++    }
++
++    #[test]
++    fn boarded_ship_spawns_clear_of_a_flailing_sally() {
++        let mut app = gcr_like_app_with_vehicles();
++        app.world_mut()
++            .resource_mut::<VehicleControls>()
++            .0
++            .insert(PilotId(0), PilotCommand::new(VehicleKind::Ship));
++        for _ in 0..64 {
++            app.update();
++        }
++        let ship0 = ship_pos(&mut app);
++        flail(&mut app, 200);
++        let moved = ship_pos(&mut app).distance(ship0);
++        assert!(
++            moved < 0.05,
++            "a freshly boarded craft must materialise clear of the crab's body — \
++             contact shoved it {moved} m"
++        );
++    }
++}
++
+ #[cfg(test)]
+ mod recenter_tests {
+     use crab_world::bot::body::CrabBodyPart;
+@@ -604,7 +768,9 @@ mod recenter_tests {
+             carapace_xz(&mut app).length() < 1.0,
+             "carapace must be back on its spawn origin"
+         );
+-        let obs = app.world().resource::<crab_world::bot::sensor::CrabObservation>();
++        let obs = app
++            .world()
++            .resource::<crab_world::bot::sensor::CrabObservation>();
+         let pos_xz = Vec2::new(obs.envs[0][BODY_POS_SLOT], obs.envs[0][BODY_POS_SLOT + 2]);
+         assert!(
+             pos_xz.length() < 1.0,
+diff --git a/net/src/render/articulation.rs b/net/src/render/articulation.rs
+index daa04a6e..52cfd7ef 100644
+--- a/net/src/render/articulation.rs
++++ b/net/src/render/articulation.rs
+@@ -134,9 +134,15 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
+         .collect();
+     vehicles.sort_by_key(|v| v.pilot);
+ 
++    let arena_anchor = world
++        .get_resource::<crate::external_crab::ArenaPlacement>()
++        .map(|a| a.0.to_array())
++        .unwrap_or_default();
++
+     CrabArticulation {
+         tick,
+         crabs,
++        arena_anchor,
+         vehicles,
+     }
+ }
+@@ -179,6 +185,17 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
+         repose.0.retain(|env, _| *env < art.crabs.len());
+     }
+ 
++    // Adopt the host's arena anchor — the client-side write of [`ArenaPlacement`]; the
++    // host-side publisher runs in FixedUpdate, so the two can't fight (see the resource doc).
++    let anchor = crate::external_crab::ArenaPlacement(Vec3::from_array(art.arena_anchor));
++    if world
++        .get_resource::<crate::external_crab::ArenaPlacement>()
++        .copied()
++        != Some(anchor)
++    {
++        world.insert_resource(anchor);
++    }
++
+     // Adopt the host's brain labels (write-on-change so the shared label UI only reconciles
+     // when something actually changed). Like the parts, the client renders these verbatim —
+     // it never re-derives who's who.
+@@ -246,6 +263,9 @@ mod tests {
+             "mlp512x3 @cafef00d".to_string(),
+             "REFUSED: wrong rig".to_string(),
+         ]));
++        host.insert_resource(crate::external_crab::ArenaPlacement(Vec3::new(
++            3.5, 0.0, -7.25,
++        )));
+         let craft_t = Transform::from_xyz(2.0, 5.5, -1.0)
+             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+         crab_world::vehicle::spawn_ram_vehicle(
+@@ -315,6 +335,12 @@ mod tests {
+                 "REFUSED: wrong rig".to_string()
+             ]
+         );
++        // The host's arena anchor crossed verbatim — the client renders crafts through the
++        // exact frame the host authored (rl#224), never a re-derived one.
++        assert_eq!(
++            client.resource::<crate::external_crab::ArenaPlacement>().0,
++            Vec3::new(3.5, 0.0, -7.25)
++        );
+         let crafts = client.resource::<RemoteVehicle>().0.clone();
+         assert_eq!(crafts.len(), 1, "one piloted craft applied");
+         assert_eq!(crafts[0].pilot, 0, "the ram helper spawns pilot 0's craft");
+diff --git a/net/src/render/driver.rs b/net/src/render/driver.rs
+index e375693b..66cb33f4 100644
+--- a/net/src/render/driver.rs
++++ b/net/src/render/driver.rs
+@@ -87,6 +87,11 @@ pub(super) fn teardown_round(world: &mut World) {
+     if let Some(mut ctrl) = world.get_resource_mut::<VehicleControls>() {
+         ctrl.0.clear();
+     }
++    // Round state like the labels: the next round's arm republishes (host) or re-adopts
++    // (client) its own arena anchor.
++    if let Some(mut anchor) = world.get_resource_mut::<crate::external_crab::ArenaPlacement>() {
++        *anchor = Default::default();
++    }
+     // Round state like the labels above: a survivor would suppress (or mis-measure) the next
+     // round's remote-craft appeared/moved edges.
+     world.remove_resource::<super::articulation::RemoteCraftWatch>();
+@@ -843,6 +848,7 @@ mod tests {
+         let art = CrabArticulation {
+             tick: 7,
+             crabs: Vec::new(),
++            arena_anchor: [0.0; 3],
+             vehicles: vec![
+                 VehiclePoseWire {
+                     pilot: 0,
+diff --git a/net/src/render/render_mode.rs b/net/src/render/render_mode.rs
+index ff56b216..3f59157a 100644
+--- a/net/src/render/render_mode.rs
++++ b/net/src/render/render_mode.rs
+@@ -2,7 +2,6 @@ use super::scene::CrabAvatar;
+ use super::*;
+ use crate::controls::{self, Action};
+ use bevy_rapier3d::prelude::Collider;
+-use crab_world::bot::skin::CrabSkinRepose;
+ pub use crab_world::crab_view::RenderMode;
+ use crab_world::crab_view::{COLLIDER_WIREFRAME_COLOR, draw_collider_wireframe};
+ use crab_world::vehicle::Vehicle;
+@@ -65,16 +64,14 @@ fn manage_silhouette_visibility(
+ 
+ fn draw_vehicle_collider_wireframe(
+     mode: Res<RenderMode>,
+-    repose: Option<Res<CrabSkinRepose>>,
++    anchor: Res<crate::external_crab::ArenaPlacement>,
+     remote: Res<super::articulation::RemoteVehicle>,
+     vehicles: Query<(&GlobalTransform, &Collider), With<Vehicle>>,
+     mut gizmos: Gizmos,
+ ) {
+-    let placement = repose
+-        .as_deref()
+-        .and_then(|r| r.0.get(&0).copied())
+-        .map(|s| s.matrix())
+-        .unwrap_or(Mat4::IDENTITY);
++    // The STATIC arena→render frame (rl#224) — never the per-crab skin repose, which tracks
++    // the live carapace and would drag Sally's every wiggle into each craft's rendered pose.
++    let placement = Mat4::from_translation(anchor.0);
+     if mode.shows_colliders() && !vehicles.is_empty() {
+         for (gt, collider) in &vehicles {
+             let world = placement * gt.to_matrix();
+diff --git a/net/src/render/scene.rs b/net/src/render/scene.rs
+index 40d8901d..eab1a124 100644
+--- a/net/src/render/scene.rs
++++ b/net/src/render/scene.rs
+@@ -417,20 +417,6 @@ type CrabXf<'w, 's> = Query<
+     (Without<PlayerAvatar>, Without<FpCamera>),
+ >;
+ type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
+-type CarapaceXf<'w, 's> = Query<
+-    'w,
+-    's,
+-    (
+-        &'static Transform,
+-        &'static crab_world::bot::body::CrabEnvId,
+-    ),
+-    (
+-        With<crab_world::bot::body::CrabCarapace>,
+-        Without<CrabAvatar>,
+-        Without<PlayerAvatar>,
+-        Without<FpCamera>,
+-    ),
+->;
+ 
+ #[allow(clippy::too_many_arguments)]
+ pub(super) fn apply_transforms(
+@@ -438,10 +424,10 @@ pub(super) fn apply_transforms(
+     pitch: Res<CameraPitch>,
+     mut yaw: ResMut<CameraYaw>,
+     vehicle: Res<LocalVehicle>,
++    placement: Res<crate::external_crab::ArenaPlacement>,
+     mut avatars: AvatarXf,
+     mut crab_q: CrabXf,
+     mut cam_q: CamXf,
+-    carapace_q: CarapaceXf,
+ ) {
+     let sim = state.ls.sim();
+     let alpha = (state.accumulator / TICK_DT).clamp(0.0, 1.0) as f32;
+@@ -485,20 +471,9 @@ pub(super) fn apply_transforms(
+ 
+     if let Ok(mut cam) = cam_q.single_mut() {
+         if let Some((prev, now)) = vehicle.cockpit_poses() {
+-            let crab_now = sim.crabs()[0];
+-            let crab_prev = state.prev.crabs.first().copied().unwrap_or(crab_now);
+-            let crab_anchor = world(lerp_pos(crab_prev.pos(), crab_now.pos(), alpha), 0.0);
+-            let arena_carapace = carapace_q
+-                .iter()
+-                .find(|(_, env)| env.0 == 0)
+-                .map(|(t, _)| t.translation)
+-                .unwrap_or(Vec3::ZERO);
+-            let shift = Vec3::new(
+-                crab_anchor.x - arena_carapace.x,
+-                0.0,
+-                crab_anchor.z - arena_carapace.z,
+-            );
+-            *cam = cockpit_camera(prev, now, alpha, shift);
++            // The STATIC arena→render frame (rl#224): anchoring on the live carapace here
++            // made the whole cockpit view judder with Sally's every wiggle.
++            *cam = cockpit_camera(prev, now, alpha, placement.0);
+         } else if let Some(now) = sim.player(local) {
+             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
+             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
+diff --git a/net/src/sim.rs b/net/src/sim.rs
+index dc56003f..7951d03c 100644
+--- a/net/src/sim.rs
++++ b/net/src/sim.rs
+@@ -983,10 +983,7 @@ mod tests {
+                 x: -60 * UNIT,
+                 z: 90 * UNIT,
+             },
+-            Pos {
+-                x: 0,
+-                z: 90 * UNIT,
+-            },
++            Pos { x: 0, z: 90 * UNIT },
+             ex,
+         ];
+         let mut wp = 0usize;
+diff --git a/net/src/transport.rs b/net/src/transport.rs
+index a8205344..ea88b41b 100644
+--- a/net/src/transport.rs
++++ b/net/src/transport.rs
+@@ -820,6 +820,7 @@ mod tests {
+                 }),
+                 brain_label: "mlp512x3 @deadbeef".to_string(),
+             }],
++            arena_anchor: [4.25, 0.0, -0.5],
+             vehicles: vec![VehiclePoseWire {
+                 pilot: 1,
+                 pos: [2.0, 5.5, -1.0],

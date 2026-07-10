@@ -280,8 +280,8 @@ mod tests {
         world.resource_mut::<CrabTargets>().envs[0] = Some(target);
 
         let body_rot = Quat::from_axis_angle(Vec3::Y, 0.7);
-        let body_t = Transform::from_translation(Vec3::new(11.5, 0.25, -19.0))
-            .with_rotation(body_rot);
+        let body_t =
+            Transform::from_translation(Vec3::new(11.5, 0.25, -19.0)).with_rotation(body_rot);
         let body_vel = Velocity {
             linear: Vec3::new(0.1, -0.2, 0.3),
             angular: Vec3::new(-0.4, 0.5, -0.6),
@@ -293,8 +293,8 @@ mod tests {
         let axis = Vec3::X;
         let joint_id = CrabJointId::LegCoxa(Side::Left, 0);
         let joint_rot = Quat::from_axis_angle(Vec3::X, 0.3) * body_rot;
-        let joint_t = Transform::from_translation(Vec3::new(11.6, 0.2, -19.1))
-            .with_rotation(joint_rot);
+        let joint_t =
+            Transform::from_translation(Vec3::new(11.6, 0.2, -19.1)).with_rotation(joint_rot);
         let joint_vel = Velocity {
             linear: Vec3::new(0.7, 0.8, 0.9),
             angular: Vec3::new(1.0, -1.1, 1.2),
@@ -324,7 +324,11 @@ mod tests {
         want.body.linvel = body_vel.linear;
         want.body.angvel = body_vel.angular;
         want.target_local = body_rot.inverse() * (target - body_t.translation);
-        assert_eq!(got, want.serialize(), "valid-input obs drifted (rl#242 pin)");
+        assert_eq!(
+            got,
+            want.serialize(),
+            "valid-input obs drifted (rl#242 pin)"
+        );
     }
 
     /// rl#242: a spawn-origin miss must be LOUD, never a silent Vec3::ZERO substitute

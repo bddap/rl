@@ -78,10 +78,7 @@ pub fn load_armed(checkpoint_dir: &Path) -> Result<Policy, CheckpointUnusable> {
     let device = NdArrayDevice::Cpu;
     match load_brain_normalizer(checkpoint_dir, &device) {
         Loaded::Fit(brain, normalizer) => {
-            info!(
-                "loaded armed checkpoint from {}",
-                checkpoint_dir.display()
-            );
+            info!("loaded armed checkpoint from {}", checkpoint_dir.display());
             Ok(Policy {
                 device,
                 live_dir: None,
@@ -862,7 +859,10 @@ mod tests {
         let dir = tmp.join(format!("rl-rigfit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(matches!(checkpoint_fits_rig(&dir), Err(CheckpointUnusable::Missing)));
+        assert!(matches!(
+            checkpoint_fits_rig(&dir),
+            Err(CheckpointUnusable::Missing)
+        ));
 
         // A current-rig brain (with its paired normalizer) fits.
         save_brain(&dir);
@@ -871,7 +871,10 @@ mod tests {
         // A brain whose paired normalizer is MISSING is Refused — a real brain must never
         // arm against silently-cold normalizer stats.
         std::fs::remove_file(CheckpointDir::new(&dir).normalizer_path()).unwrap();
-        assert!(matches!(checkpoint_fits_rig(&dir), Err(CheckpointUnusable::Refused(_))));
+        assert!(matches!(
+            checkpoint_fits_rig(&dir),
+            Err(CheckpointUnusable::Refused(_))
+        ));
         save_brain(&dir); // restore the pair
 
         save_brain_with_obs_dim(&dir, OBS_SIZE + 4);
@@ -882,7 +885,10 @@ mod tests {
 
         // A present-but-corrupt brain.bin is Refused, not Missing.
         std::fs::write(CheckpointDir::new(&dir).brain_file(), b"truncated garbage").unwrap();
-        assert!(matches!(checkpoint_fits_rig(&dir), Err(CheckpointUnusable::Refused(_))));
+        assert!(matches!(
+            checkpoint_fits_rig(&dir),
+            Err(CheckpointUnusable::Refused(_))
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
