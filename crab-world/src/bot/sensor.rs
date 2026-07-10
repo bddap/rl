@@ -159,14 +159,9 @@ pub fn build_observation(
         let Some(o) = built.get_mut(env.0) else {
             continue;
         };
-        // Infallible by construction: `spawn_initial_crabs` rebuilds CrabSpawns and sizes
-        // the obs slots from the same n. A miss would feed ABSOLUTE world coords into a
-        // channel trained as spawn-relative — instantly OOD, never logged (rl#242).
-        let origin = spawns
-            .0
-            .get(env.0)
-            .copied()
-            .expect("CrabSpawns has no origin for a live env — spawn wiring bug (rl#242)");
+        // A miss would feed ABSOLUTE world coords into a channel trained as
+        // spawn-relative — instantly OOD, never logged — so origin() panics (rl#242).
+        let origin = spawns.origin(env.0);
         o.body.pos = transform.translation - origin;
         o.body.rot = transform.rotation;
         o.body.linvel = vel.linear;
@@ -270,7 +265,7 @@ mod tests {
         targets.resize(1);
         world.insert_resource(obs);
         world.insert_resource(targets);
-        world.insert_resource(CrabSpawns(spawns));
+        world.insert_resource(CrabSpawns::from_origins(spawns));
         world
     }
 

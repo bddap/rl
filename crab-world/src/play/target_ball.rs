@@ -37,7 +37,7 @@ pub(super) fn target_ball(
     mut ball_q: Query<&mut Transform, (With<TargetBall>, Without<CrabClawTip>)>,
     mut rng: ResMut<super::DemoRng>,
 ) {
-    let origin = spawns.0.first().copied().unwrap_or(Vec3::ZERO);
+    let origin = spawns.origin(0);
 
     let mut target = match targets.get(0) {
         Some(t) => t,

@@ -27,8 +27,34 @@ pub enum BotSet {
 #[derive(Resource, Clone, Copy)]
 pub struct NumEnvs(pub usize);
 
-#[derive(Resource, Default)]
-pub struct CrabSpawns(pub Vec<Vec3>);
+#[derive(Resource, Default, Clone)]
+pub struct CrabSpawns(Vec<Vec3>);
+
+impl CrabSpawns {
+    /// Explicit whole-set construction for tests and bootstrap — there is deliberately
+    /// no way to append (rl#242: an append across two `spawn_initial_crabs` runs left
+    /// stale origins live at current indices).
+    pub fn from_origins(origins: Vec<Vec3>) -> Self {
+        Self(origins)
+    }
+
+    fn rebuild(&mut self, n: usize) {
+        self.0 = (0..n).map(|env| grid_offset(env, n)).collect();
+    }
+
+    /// The spawn origin of a live env. Infallible by construction: every crab entity's
+    /// env index comes from `spawn_initial_crabs`, which rebuilds this resource and
+    /// sizes obs/targets/actions from the same n. A miss is a wiring bug, and
+    /// substituting a finite default here silently corrupts everything downstream —
+    /// the spawn-relative obs channel, respawn placement, reward drift (rl#242) — so
+    /// it panics instead.
+    pub fn origin(&self, env: usize) -> Vec3 {
+        *self
+            .0
+            .get(env)
+            .expect("CrabSpawns has no origin for a live env — spawn wiring bug (rl#242)")
+    }
+}
 
 fn grid_offset(env: usize, n: usize) -> Vec3 {
     let cols = (n as f32).sqrt().ceil() as usize;
@@ -179,7 +205,7 @@ pub fn rescue_nonfinite_crabs(
     }
 
     for &(env, body, ..) in &sick {
-        let origin = spawns.0.get(env).copied().unwrap_or(Vec3::ZERO);
+        let origin = spawns.origin(env);
         respawn_crab(
             &mut commands,
             &assets,
@@ -237,13 +263,8 @@ pub fn spawn_initial_crabs(
     actions.resize(n);
     obs.resize(n);
     targets.resize(n);
-    // Rebuild, don't append: a second run (GCR arms after a round teardown) would
-    // otherwise leave the previous run's origins at the live indices while the crabs
-    // spawn at grid_offset(env, n) for the NEW n — silently corrupting the
-    // spawn-relative obs channel (rl#242). Rebuilding keeps spawns.len() == n, the
-    // invariant the obs builder's expect()s lean on.
-    spawns.0 = (0..n).map(|env| grid_offset(env, n)).collect();
-    for (env, &origin) in spawns.0.iter().enumerate() {
-        body::spawn_crab(&mut commands, &assets, origin, env, Quat::IDENTITY);
+    spawns.rebuild(n);
+    for env in 0..n {
+        body::spawn_crab(&mut commands, &assets, spawns.origin(env), env, Quat::IDENTITY);
     }
 }

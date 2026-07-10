@@ -486,7 +486,7 @@ mod tests {
                  assets: Res<CrabAssets>,
                  spawns: Res<CrabSpawns>,
                  parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>| {
-                    let origin = spawns.0.first().copied().unwrap_or(Vec3::ZERO);
+                    let origin = spawns.origin(0);
                     respawn_crab(
                         &mut commands,
                         &assets,

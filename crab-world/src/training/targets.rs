@@ -59,7 +59,7 @@ pub(crate) fn seed_target(
     rng: &mut rand::rngs::StdRng,
 ) {
     if let Some(slot) = targets.envs.get_mut(e) {
-        let origin = spawns.0.get(e).copied().unwrap_or(Vec3::ZERO);
+        let origin = spawns.origin(e);
         *slot = Some(sample_target(origin, rng));
     }
 }
