@@ -31,7 +31,7 @@ impl PpoConfig {
     }
 }
 
-fn env_or<T: std::str::FromStr>(var: &str, default: T) -> T {
+pub(crate) fn env_or<T: std::str::FromStr>(var: &str, default: T) -> T {
     match std::env::var(var) {
         Ok(s) => s.trim().parse().unwrap_or_else(|_| {
             eprintln!("[config] {var}={s:?} did not parse; using default");

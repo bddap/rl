@@ -29,10 +29,32 @@ pub(crate) fn polar_target(origin: Vec3, theta: f32, dist: f32, y: f32) -> Vec3 
     )
 }
 
+/// Fraction of episodes whose target lands in the close disc [0, BAND_START_MIN)
+/// — under-carapace included — instead of the chase band, so claw-reach can emerge
+/// (rl#250). Same y range, bearing, reward, and grab rule; only the task
+/// distribution varies. Default 0.0 keeps the pure chase band: raising it is a
+/// TRAINING change, flipped per-run via env under one-change-at-a-time. Targets
+/// the rest pose already touches are re-seeded at episode start (see
+/// `pre_touched_target`), so the close disc never pays a free grab.
+fn close_frac() -> f32 {
+    static FRAC: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *FRAC.get_or_init(|| {
+        crate::training::algorithm::env_or("RL_TARGET_CLOSE_FRAC", 0.0_f32).clamp(0.0, 1.0)
+    })
+}
+
 pub(crate) fn sample_target(origin: Vec3, rng: &mut impl rand::Rng) -> Vec3 {
-    let (min, max) = (BAND_START_MIN, TARGET_ARENA_HALF);
-    let u: f32 = rng.gen_range(0.0..1.0);
-    let dist = min + (max - min) * u.powf(NEAR_BIAS_EXP);
+    sample_target_mixed(origin, close_frac(), rng)
+}
+
+pub(crate) fn sample_target_mixed(origin: Vec3, close_frac: f32, rng: &mut impl rand::Rng) -> Vec3 {
+    let dist = if rng.gen_range(0.0..1.0) < close_frac {
+        rng.gen_range(0.0..BAND_START_MIN)
+    } else {
+        let (min, max) = (BAND_START_MIN, TARGET_ARENA_HALF);
+        let u: f32 = rng.gen_range(0.0..1.0);
+        min + (max - min) * u.powf(NEAR_BIAS_EXP)
+    };
     let y = rng.gen_range(TARGET_Y_MIN..TARGET_Y_MAX);
     let at = |theta: f32| polar_target(origin, theta, dist, y);
     let in_arena = |p: &Vec3| p.x.abs() <= TARGET_ARENA_HALF && p.z.abs() <= TARGET_ARENA_HALF;
@@ -126,5 +148,55 @@ mod tests {
             far_frac > 0.15,
             "far (>{far_edge} m, up to {max} m) fraction {far_frac} must keep a FAT tail (EXP=2 ~0.22), not starve far"
         );
+    }
+
+    #[test]
+    fn close_targets_cover_the_under_carapace_disc() {
+        let mut rng = rand::thread_rng();
+        for origin in [Vec3::ZERO, Vec3::new(8.0, 0.0, -8.0)] {
+            let mut under_body = 0u32;
+            for _ in 0..5000 {
+                let t = sample_target_mixed(origin, 1.0, &mut rng);
+                assert!(t.is_finite());
+                assert!(t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF);
+                assert!(t.y >= TARGET_Y_MIN && t.y <= TARGET_Y_MAX);
+                let d = planar_dist(t, origin);
+                assert!(
+                    d < BAND_START_MIN,
+                    "close target from {origin:?} is at {d} m, outside [0, {BAND_START_MIN})"
+                );
+                if d < 0.5 {
+                    under_body += 1;
+                }
+            }
+            assert!(
+                under_body > 500,
+                "under-carapace (<0.5 m) draws {under_body}/5000 — the disc must reach under the body (uniform radius ~1/3)"
+            );
+        }
+    }
+
+    #[test]
+    fn close_frac_mixes_and_zero_is_the_pure_band() {
+        let mut rng = rand::thread_rng();
+        let origin = Vec3::ZERO;
+        let n = 20_000u32;
+        let close = (0..n)
+            .filter(|_| {
+                planar_dist(sample_target_mixed(origin, 0.25, &mut rng), origin) < BAND_START_MIN
+            })
+            .count() as f32
+            / n as f32;
+        assert!(
+            (0.20..0.30).contains(&close),
+            "close fraction {close} should track the requested 0.25"
+        );
+        for _ in 0..2000 {
+            let d = planar_dist(sample_target_mixed(origin, 0.0, &mut rng), origin);
+            assert!(
+                d >= BAND_START_MIN - 1e-3,
+                "frac 0 must never sample close ({d})"
+            );
+        }
     }
 }
