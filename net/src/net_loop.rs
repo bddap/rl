@@ -599,10 +599,9 @@ async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVe
 /// [`connect_and_form`]. Connect to `host`, send our collider digest as a [`JoinRequest`], and
 /// await the host's verdict: admitted (become a remote-adopt [`Coordinator::Client`] that boots
 /// from the host's next authoritative snapshot — the host spawns us into its LIVE round at
-/// `effective_tick`, so we drop into the ongoing match rather than resetting it), refused (a
-/// collider mismatch OR a zero-digest host the gate turned away LOUDLY — relayed, never a silent
-/// wrong/fake-crab), or unreachable. `seed` is the shared [`crate::sim`] match constant every
-/// peer holds.
+/// `effective_tick`, so we drop into the ongoing match rather than resetting it), refused (the
+/// host's [`Refusal`] verdict relayed LOUDLY — never a silent wrong/fake-crab), or unreachable.
+/// `seed` is the shared [`crate::sim`] match constant every peer holds.
 pub fn connect_and_join(
     seed: u64,
     host: EndpointId,

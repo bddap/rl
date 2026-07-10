@@ -50,7 +50,8 @@ impl Plugin for MenuPlugin {
         ))
         .add_systems(
             OnEnter(AppPhase::Menu),
-            (spawn_menu_camera, reset_menu_nav, consume_round_over).chain(),
+            // consume_round_over first: it feeds last_host, which reset_menu_nav reads.
+            (spawn_menu_camera, consume_round_over, reset_menu_nav).chain(),
         )
         // Tear it down as the round begins, before the FP Camera3d spawns, so the
         // two never coexist.
@@ -125,7 +126,14 @@ impl MenuState {
 }
 
 fn reset_menu_nav(mut state: NonSendMut<MenuState>) {
-    state.nav = MenuNav::new();
+    // The ONE place that decides where entering the menu lands: a live rejoin offer
+    // (last_host set by a round-over, or preserved across a transient Forming refusal)
+    // reopens the "Connection lost" window; otherwise the chooser.
+    state.nav = if state.last_host.is_some() {
+        MenuNav::disconnected()
+    } else {
+        MenuNav::new()
+    };
     state.stick_latched = false;
 }
 
@@ -136,7 +144,6 @@ fn consume_round_over(world: &mut World) {
     let mut state = world.non_send_resource_mut::<MenuState>();
     state.error = Some(over.message);
     state.last_host = Some(over.host);
-    state.nav = MenuNav::disconnected();
 }
 
 fn menu_screen(
@@ -333,6 +340,14 @@ fn apply_action(
             next.set(AppPhase::Menu);
             true
         }
+        MenuAction::DismissRejoin => {
+            // The nav already stepped to the chooser; dropping last_host keeps the
+            // invariant "last_host is Some ⟺ the rejoin offer stands" (reset_menu_nav
+            // keys the Disconnected window off it).
+            state.last_host = None;
+            state.error = None;
+            false
+        }
         MenuAction::Rejoin => {
             let Some(host) = state.last_host else {
                 state.nav = MenuNav::new();
@@ -400,7 +415,6 @@ fn poll_rejoin(
         }
     };
     state.rejoining = None;
-    state.nav = MenuNav::new();
     match result {
         Ok(JoinResult::Joined(joined)) => {
             let (client, net) = *joined;
@@ -417,7 +431,11 @@ fn poll_rejoin(
         }
         Ok(JoinResult::Refused(reason)) => {
             state.error = Some(format!("The host refused our rejoin: {reason}"));
-            state.last_host = None;
+            // Forming is transient ("try again in a few seconds") — keep last_host so
+            // OnEnter(Menu) reopens the rejoin offer; the other refusals are terminal.
+            if reason != crate::server::Refusal::Forming {
+                state.last_host = None;
+            }
             next.set(AppPhase::Menu);
         }
         Ok(JoinResult::Unreachable) => {

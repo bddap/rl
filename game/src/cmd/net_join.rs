@@ -35,10 +35,16 @@ pub(crate) fn run(args: Args) -> Result<()> {
             render::Boot::Round(Box::new((client, Some(driver))))
         }
         net_loop::JoinResult::Refused(reason) => {
-            bail!(
-                "host refused our join: {reason}. Run rl-update so every device carries the same \
-                 build and assets, then re-join."
-            )
+            // rl-update only remedies build/asset mismatches — don't prescribe it for the
+            // transient (Forming) or connection-loss (Departed) refusals.
+            let advice = match reason {
+                net::server::Refusal::Admission(_) => {
+                    " Run rl-update so every device carries the same build and assets, then \
+                     re-join."
+                }
+                net::server::Refusal::Departed | net::server::Refusal::Forming => "",
+            };
+            bail!("host refused our join: {reason}.{advice}")
         }
         net_loop::JoinResult::Unreachable => {
             bail!(
