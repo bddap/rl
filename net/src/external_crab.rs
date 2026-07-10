@@ -6,7 +6,7 @@
 //! ([`TARGET_ARENA_HALF`], ~9 m) along the true crab→player bearing, re-posed each
 //! tick as she closes — heading stays honest, and the target_local obs channel
 //! stays in-distribution. Without the clamp Sally always starts OOD: players spawn
-//! ≥12 m out (`sim::MIN_CRAB_SPAWN_DISTANCE`) and roam farther mid-game, and
+//! beyond `sim::MIN_CRAB_SPAWN_DISTANCE` (well past the band) and roam farther mid-game, and
 //! measured (rl#144) a healthy brain closes ~7× slower on a ~21 m target than the
 //! chase eval's in-band rate — the ±5σ obs clamp alone does NOT yield a full-tilt
 //! walk. The clamp tracks the same constant training draws targets from, so it

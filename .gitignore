@@ -10,6 +10,9 @@
 .cargo-home/
 .sandbox-env
 *.png
+# Verify-run evidence frames referenced from issues/commits are the exception —
+# an ignored evidence PNG dies with its scratch worktree (rl#236).
+!docs/evidence/**/*.png
 vendor/
 # The paid, non-redistributable Sally mesh (see NOTICE). fetch-sally.sh writes it
 # to the asset root the renderers resolve against (crab-world/assets); ignore it by

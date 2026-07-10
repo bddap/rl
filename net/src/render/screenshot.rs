@@ -147,9 +147,8 @@ fn drive_pilot_script(
         flight.wasd = bevy::math::Vec2::new(0.0, 1.0);
         flight.rt = 0.5;
     } else if script.walk_at.is_some_and(|at| script.frame >= at) {
-        // Walk a gentle arc on foot — a moving target the hunting crab's path will cross
-        // (a standing player can sit under the carapace without the 2D grab-center ever
-        // reaching them).
+        // Walk a gentle arc on foot — a moving target, so the run exercises the hunt
+        // against evasion, not just a standing grab (rl#236).
         pending.forward = 1.0;
         pending.yaw_delta = 0.02;
     }
