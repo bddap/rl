@@ -60,6 +60,10 @@ fn offscreen_app_scaffold() -> App {
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_secs_f64(TICK_DT),
     ));
+    // Everywhere else `ExternalCrabPlugin` provides this, but the crab-less screenshot path
+    // (`fp-screenshot` without a checkpoint) skips the plugin, and `apply_transforms` /
+    // `draw_vehicle_collider_wireframe` take it as a hard `Res` (rl#224).
+    app.init_resource::<crate::external_crab::ArenaAnchor>();
     app
 }
 

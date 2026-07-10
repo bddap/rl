@@ -64,7 +64,7 @@ fn manage_silhouette_visibility(
 
 fn draw_vehicle_collider_wireframe(
     mode: Res<RenderMode>,
-    anchor: Res<crate::external_crab::ArenaPlacement>,
+    anchor: Res<crate::external_crab::ArenaAnchor>,
     remote: Res<super::articulation::RemoteVehicle>,
     vehicles: Query<(&GlobalTransform, &Collider), With<Vehicle>>,
     mut gizmos: Gizmos,

@@ -151,7 +151,7 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
     vehicles.sort_by_key(|v| v.pilot);
 
     let arena_anchor = world
-        .get_resource::<crate::external_crab::ArenaPlacement>()
+        .get_resource::<crate::external_crab::ArenaAnchor>()
         .map(|a| a.0.to_array())
         .unwrap_or_default();
 
@@ -201,11 +201,11 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
         repose.0.retain(|env, _| *env < art.crabs.len());
     }
 
-    // Adopt the host's arena anchor — the client-side write of [`ArenaPlacement`]; the
+    // Adopt the host's arena anchor — the client-side write of [`ArenaAnchor`]; the
     // host-side publisher runs in FixedUpdate, so the two can't fight (see the resource doc).
-    let anchor = crate::external_crab::ArenaPlacement(Vec3::from_array(art.arena_anchor));
+    let anchor = crate::external_crab::ArenaAnchor(Vec3::from_array(art.arena_anchor));
     if world
-        .get_resource::<crate::external_crab::ArenaPlacement>()
+        .get_resource::<crate::external_crab::ArenaAnchor>()
         .copied()
         != Some(anchor)
     {
@@ -279,7 +279,7 @@ mod tests {
             "mlp512x3 @cafef00d".to_string(),
             "REFUSED: wrong rig".to_string(),
         ]));
-        host.insert_resource(crate::external_crab::ArenaPlacement(Vec3::new(
+        host.insert_resource(crate::external_crab::ArenaAnchor(Vec3::new(
             3.5, 0.0, -7.25,
         )));
         let craft_t = Transform::from_xyz(2.0, 5.5, -1.0)
@@ -354,7 +354,7 @@ mod tests {
         // The host's arena anchor crossed verbatim — the client renders crafts through the
         // exact frame the host authored (rl#224), never a re-derived one.
         assert_eq!(
-            client.resource::<crate::external_crab::ArenaPlacement>().0,
+            client.resource::<crate::external_crab::ArenaAnchor>().0,
             Vec3::new(3.5, 0.0, -7.25)
         );
         let crafts = client.resource::<RemoteVehicle>().0.clone();

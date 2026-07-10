@@ -89,7 +89,7 @@ pub(super) fn teardown_round(world: &mut World) {
     }
     // Round state like the labels: the next round's arm republishes (host) or re-adopts
     // (client) its own arena anchor.
-    if let Some(mut anchor) = world.get_resource_mut::<crate::external_crab::ArenaPlacement>() {
+    if let Some(mut anchor) = world.get_resource_mut::<crate::external_crab::ArenaAnchor>() {
         *anchor = Default::default();
     }
     // Round state like the labels above: a survivor would suppress (or mis-measure) the next

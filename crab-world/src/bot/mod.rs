@@ -42,6 +42,13 @@ impl CrabSpawns {
         self.0 = (0..n).map(|env| grid_offset(env, n)).collect();
     }
 
+    /// Not yet rebuilt by `spawn_initial_crabs` — the pre-spawn frames a FixedUpdate
+    /// consumer (net's arena-anchor publisher, rl#224) must sit out rather than hit
+    /// [`Self::origin`]'s wiring-bug panic.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// The spawn origin of a live env. Infallible by construction: every crab entity's
     /// env index comes from `spawn_initial_crabs`, which rebuilds this resource and
     /// sizes obs/targets/actions from the same n. A miss is a wiring bug, and
