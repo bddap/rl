@@ -424,7 +424,7 @@ pub(super) fn apply_transforms(
     pitch: Res<CameraPitch>,
     mut yaw: ResMut<CameraYaw>,
     vehicle: Res<LocalVehicle>,
-    placement: Res<crate::external_crab::ArenaPlacement>,
+    placement: Res<crate::external_crab::ArenaAnchor>,
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
     mut cam_q: CamXf,

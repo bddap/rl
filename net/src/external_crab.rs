@@ -41,9 +41,12 @@ const CLAW_TARGET_Y: f32 = 0.3;
 /// change — and is sequenced behind the rl#239 honest-bearing eval deploy and the σ-floor
 /// experiment's conclusion (one live training change at a time). Until then
 /// [`bound_body_pos_drift`] only measures. Flip = set `true`; behavior is otherwise
-/// bit-identical for existing brains. Flip precondition beyond the sequencing gate:
-/// vehicles share the crab's arena frame (rl#235 rams, and the render anchor derives
-/// from it), so the teleport must carry co-arena vehicles too — see rl#240.
+/// bit-identical for existing brains. Flip preconditions beyond the sequencing gate:
+/// vehicles share the crab's arena frame (rl#235 rams), so the teleport must carry
+/// co-arena vehicles too, AND must bump [`ArenaAnchor`] by the same arena-frame delta —
+/// carried crafts (and the cockpit camera) otherwise pop on screen by the full recenter
+/// distance, since crafts render as arena pose + anchor. The anchor then becomes static
+/// per recenter EPOCH rather than per round. See rl#240.
 const ARM_BODY_POS_RECENTER: bool = false;
 
 /// Arms [`bound_body_pos_drift`]'s recenter teleport. Inserted by the plugin iff
@@ -65,7 +68,7 @@ pub struct ExternalCrabBridge {
 struct CrabBridge {
     world_pos_m: Vec2,
     /// `world_pos_m` as of the round's (re)spawn — the game-world end of the STATIC
-    /// arena↔world correspondence [`publish_arena_placement`] anchors on (rl#224).
+    /// arena↔world correspondence [`publish_arena_anchor`] anchors on (rl#224).
     spawn_world_pos_m: Vec2,
     last_carapace_m: Option<Vec2>,
     yaw_turns: i32,
@@ -366,10 +369,10 @@ impl Plugin for ExternalCrabPlugin {
         // so this is host-only by construction; on a remote-adopt client the articulation
         // `apply` is the sole label writer and the two can't fight over the resource.
         app.init_resource::<CrabBrainLabels>();
-        app.init_resource::<ArenaPlacement>();
+        app.init_resource::<ArenaAnchor>();
         app.add_systems(
             FixedUpdate,
-            (publish_brain_labels, publish_arena_placement).run_if(external_crab_armed),
+            (publish_brain_labels, publish_arena_anchor).run_if(external_crab_armed),
         );
         app.add_systems(
             FixedUpdate,
@@ -634,24 +637,31 @@ fn integrate_crab(
 /// spot, so borrowing it as the arena transform dragged ~(1−rs) of her every movement into
 /// every craft's rendered pose — the ship visibly danced whenever she wiggled (rl#224).
 /// The trade: a pilot's aim at her SKIN drifts from her collider by (1−rs)·(her arena drift
-/// since spawn); the rl#240 recenter, once armed, bounds that drift — and under a static
-/// anchor its teleport can carry co-arena vehicles with no visual pop.
+/// since spawn) — the rl#240 recenter, once armed, bounds that drift. For crabs beyond 0 the
+/// skin-vs-collider offset is nonzero from tick 0 (inter-crab spawn deltas render ·rs via the
+/// sim but ·1 in the arena) — pre-existing with the old borrowed-repose anchor too.
 ///
-/// Host-authored ([`publish_arena_placement`], FixedUpdate ⇒ host-only like the brain
-/// labels) and shipped on the articulation wire; a client adopts it verbatim in `apply`.
+/// Host-authored ([`publish_arena_anchor`], FixedUpdate ⇒ host-only like the brain labels:
+/// only the physics-pumping ServerAuth peer advances FixedUpdate — if client-side FixedUpdate
+/// pumping ever lands, this publisher would fight `apply`'s adopted value and must gain a
+/// role gate) and shipped on the articulation wire; a client adopts it verbatim in `apply`.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
-pub struct ArenaPlacement(pub Vec3);
+pub struct ArenaAnchor(pub Vec3);
 
-fn publish_arena_placement(
+fn publish_arena_anchor(
     bridge: Res<ExternalCrabBridge>,
     spawns: Res<CrabSpawns>,
-    mut out: ResMut<ArenaPlacement>,
+    mut out: ResMut<ArenaAnchor>,
 ) {
-    let (Some(crab), Some(origin)) = (bridge.crabs.first(), spawns.0.first()) else {
+    let Some(crab) = bridge.crabs.first() else {
         return;
     };
+    if spawns.is_empty() {
+        return; // pre-spawn frame — `spawn_initial_crabs` hasn't rebuilt the origins yet
+    }
+    let origin = spawns.origin(0);
     let w = crab.spawn_world_pos_m * crate::render::world_render_scale();
-    let want = ArenaPlacement(Vec3::new(w.x - origin.x, 0.0, w.y - origin.z));
+    let want = ArenaAnchor(Vec3::new(w.x - origin.x, 0.0, w.y - origin.z));
     if *out != want {
         *out = want;
     }
@@ -689,7 +699,7 @@ pub use probe::{ProbeSample, StabilityResult, run_headless_probe, run_vehicle_st
 
 /// rl#224 gates: a wiggling (even violently flailing) Sally must not move a ship she isn't
 /// touching — neither its arena body (physics) nor its RENDERED pose (arena pose + the
-/// [`ArenaPlacement`] anchor, which is static by construction). Before the fix the anchor
+/// [`ArenaAnchor`] anchor, which is static by construction). Before the fix the anchor
 /// tracked her live carapace, so her 9.6 m flail-walk dragged the parked ship's rendered
 /// pose 9.3 m; and the boarding spawn at 0.5 m altitude materialised the craft inside her
 /// body, so contact batted it ~8 m.
@@ -724,12 +734,12 @@ mod ship_wiggle_tests {
             arena: crab_world::physics::Arena::OpenField,
         });
         app.add_plugins(VehiclePlugin);
-        app.add_plugins(ExternalCrabPlugin {
-            checkpoint_dirs: vec![std::path::PathBuf::from("/nonexistent-rl224-test")],
+        app.add_plugins(ExternalCrabPlugin::new(
+            vec![Policy::rest()],
             // A nonzero GAME spawn (the arena spawn stays at the grid origin): the arena
             // anchor is then nonzero, so the static-anchor assertions can't pass vacuously.
-            crab_spawns: vec![Pos::from_meters(30.0, -14.0)],
-        });
+            vec![Pos::from_meters(30.0, -14.0)],
+        ));
         app.init_resource::<Wiggle>();
         app.add_systems(
             FixedUpdate,
@@ -773,7 +783,7 @@ mod ship_wiggle_tests {
             app.update();
         }
         let ship0 = ship_pos(&mut app);
-        let anchor0 = *app.world().resource::<ArenaPlacement>();
+        let anchor0 = *app.world().resource::<ArenaAnchor>();
         assert_ne!(anchor0.0, Vec3::ZERO, "the armed round published an anchor");
 
         let mut max_ship_d = 0.0f32;
@@ -782,7 +792,7 @@ mod ship_wiggle_tests {
             app.update();
             max_ship_d = max_ship_d.max(ship_pos(&mut app).distance(ship0));
             assert_eq!(
-                *app.world().resource::<ArenaPlacement>(),
+                *app.world().resource::<ArenaAnchor>(),
                 anchor0,
                 "the arena anchor is static for the round — a moving anchor is exactly \
                  the rendered-ship-follows-Sally bug"
