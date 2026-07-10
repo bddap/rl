@@ -527,6 +527,9 @@ impl Sim {
         p.pos.z += vz * PLAYER_SPEED / denom;
     }
 
+    // Live only via `Lockstep::reconcile_local_prediction` (render-only) outside
+    // tests — dead render-off (rl#248).
+    #[cfg_attr(not(feature = "render"), allow(dead_code))]
     pub(crate) fn predict_player(&mut self, id: PlayerId, inp: Input) {
         if self.outcome != Outcome::Ongoing {
             return;

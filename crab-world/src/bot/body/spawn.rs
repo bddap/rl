@@ -23,6 +23,10 @@ pub const LIMIT_SOFTNESS: bevy_rapier3d::rapier::dynamics::SpringCoefficients<f3
 /// each about a random horizontal axis, with a random yaw on top. Forces the policy
 /// to stand and right itself from a varied start rather than memorising the one bind
 /// pose.
+///
+/// Callers are training resets (live iff `wgpu` — see `training`'s module allow) and
+/// demo resets (`play`, render-gated), hence the two-feature allow.
+#[cfg_attr(not(any(feature = "wgpu", feature = "render")), allow(dead_code))]
 pub(crate) fn random_spawn_rotation(rng: &mut impl rand::Rng) -> Quat {
     use std::f32::consts::{PI, TAU};
     let yaw = rng.gen_range(0.0..TAU);
