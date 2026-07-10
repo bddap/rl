@@ -786,7 +786,25 @@ pub(super) fn drive_lockstep(world: &mut World) {
     for (pid, p) in state.ls.sim().players() {
         match state.logged_statuses.insert(pid, p.status()) {
             Some(prev) if prev != p.status() => {
-                info!("player {:?}: {:?} -> {:?}", pid, prev, p.status());
+                // Crab distance names the down's trigger: within CRAB_GRAB_RADIUS it was
+                // the under-body grab; beyond, a claw touch (rl#249).
+                let (px, pz) = p.pos().to_meters();
+                let from_crab = state
+                    .ls
+                    .sim()
+                    .crabs()
+                    .iter()
+                    .map(|c| {
+                        let (cx, cz) = c.pos().to_meters();
+                        (px - cx).hypot(pz - cz)
+                    })
+                    .fold(f32::INFINITY, f32::min);
+                info!(
+                    "player {:?}: {:?} -> {:?} ({from_crab:.1} m from crab center)",
+                    pid,
+                    prev,
+                    p.status()
+                );
             }
             _ => {}
         }

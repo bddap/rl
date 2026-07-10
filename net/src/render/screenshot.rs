@@ -14,12 +14,13 @@ pub fn build_screenshot_app(
     cfg: ScreenshotConfig,
     external_crab: Option<crab_world::play::Policy>,
     render_mode: super::RenderMode,
+    pack: Input,
 ) -> App {
     let mut app = offscreen_app_scaffold();
     let armed_crab = external_crab.map(|policy| (policy, seed_round_crabs(&mut ls, 1)));
     let coord = coordinator(None, ls.peers(), ls.me(), ls.sim().clone());
     insert_core(&mut app, ls, coord);
-    app.insert_resource(ScriptedPackInput(Input::new(0.0, 1.0, 0.0, 0)));
+    app.insert_resource(ScriptedPackInput(pack));
     if let Some((policy, spawns)) = armed_crab {
         install_armed_nn_crab(&mut app, vec![policy], spawns);
     }
