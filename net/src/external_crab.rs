@@ -590,7 +590,7 @@ mod probe;
 pub use probe::{ProbeSample, StabilityResult, run_headless_probe, run_vehicle_stability_probe};
 
 #[cfg(test)]
-mod recenter_tests {
+mod gcr_crab_tests {
     use crab_world::bot::body::CrabBodyPart;
     use crab_world::bot::headless::{
         HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
@@ -663,7 +663,9 @@ mod recenter_tests {
             carapace_xz(&mut app).length() < 1.0,
             "carapace must be back on its spawn origin"
         );
-        let obs = app.world().resource::<crab_world::bot::sensor::CrabObservation>();
+        let obs = app
+            .world()
+            .resource::<crab_world::bot::sensor::CrabObservation>();
         let pos_xz = Vec2::new(obs.envs[0][BODY_POS_SLOT], obs.envs[0][BODY_POS_SLOT + 2]);
         assert!(
             pos_xz.length() < 1.0,
@@ -691,5 +693,45 @@ mod recenter_tests {
             carapace_xz(&mut app).x > 15.0,
             "unarmed: the crab stays where it walked"
         );
+    }
+
+    /// rl#225 pin, component dimension: a body part not matched by the cage pass's query
+    /// silently vanishes from the collider render modes. Count coverage with the pass's OWN
+    /// query aliases ([`crab_world::crab_view::CrabCagePartData`]/`CrabCagePartFilter` — one
+    /// source, so this pin can't drift from the system) through both paths that create GCR
+    /// crab bodies: the initial armed spawn and the round-boundary cold respawn (the rescue
+    /// path funnels into the same `respawn_crab`). The other invisibility dimension — a
+    /// collider SHAPE the drawer can't trace — is loud by construction instead
+    /// (`error_once` in `draw_collider_wireframe`).
+    #[test]
+    fn every_body_part_is_visible_to_the_collider_wireframe_query() {
+        use crab_world::crab_view::{CrabCagePartData, CrabCagePartFilter};
+
+        fn assert_cage_covers_all(app: &mut App, ctx: &str) {
+            let all = app
+                .world_mut()
+                .query_filtered::<Entity, With<CrabBodyPart>>()
+                .iter(app.world())
+                .count();
+            let caged = app
+                .world_mut()
+                .query_filtered::<CrabCagePartData, CrabCagePartFilter>()
+                .iter(app.world())
+                .count();
+            assert!(all > 0, "{ctx}: no crab body parts spawned");
+            assert_eq!(
+                caged,
+                all,
+                "{ctx}: {} of {all} body parts are invisible to the collider wireframe \
+                 query (rl#225)",
+                all - caged
+            );
+        }
+
+        let mut app = gcr_like_app();
+        assert_cage_covers_all(&mut app, "initial armed spawn");
+
+        cold_respawn_armed_crab(app.world_mut());
+        assert_cage_covers_all(&mut app, "after a round-boundary cold respawn");
     }
 }

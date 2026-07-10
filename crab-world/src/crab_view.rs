@@ -248,10 +248,16 @@ fn position_brain_labels(
     }
 }
 
+/// The crab-cage pass's exact view of a body part — the ONE definition of what the collider
+/// wireframe draws. Tests pin coverage against these same aliases, so the pin can't drift
+/// from the system (rl#225).
+pub type CrabCagePartData<'a> = (&'a GlobalTransform, &'a Collider, &'a CrabEnvId);
+pub type CrabCagePartFilter = With<CrabBodyPart>;
+
 fn draw_crab_collider_wireframe(
     mode: Res<RenderMode>,
     repose: Option<Res<CrabSkinRepose>>,
-    parts: Query<(&GlobalTransform, &Collider, &CrabEnvId), With<CrabBodyPart>>,
+    parts: Query<CrabCagePartData, CrabCagePartFilter>,
     mut gizmos: Gizmos,
 ) {
     if !mode.shows_colliders() {
@@ -291,7 +297,16 @@ pub fn draw_collider_wireframe(
                 draw_collider_wireframe(gizmos, sub, sub_world, color);
             }
         }
-        _ => {}
+        // A shape this drawer can't trace would vanish from the collider view and read as
+        // "colliders missing" (rl#225) — so say so instead of silently dropping it. ERROR,
+        // not warn: only ERROR-level lines surface through the fleet telemetry, and an
+        // untraceable shape is a code defect (we built a collider our own drawer can't render).
+        other => {
+            error_once!(
+                "collider wireframe: no tracer for {other:?} — this collider is INVISIBLE in \
+                 the collider render modes"
+            );
+        }
     }
 }
 
