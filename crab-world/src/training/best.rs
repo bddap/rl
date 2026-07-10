@@ -346,6 +346,7 @@ mod tests {
             initial_distance_m: DEFAULT_TARGET_DISTANCE_M,
             closest_distance_m: DEFAULT_TARGET_DISTANCE_M - progress_m,
             final_distance_m: DEFAULT_TARGET_DISTANCE_M - progress_m,
+            closest_tip_distance_m: f32::INFINITY,
             reached: false,
             active_ticks: DEFAULT_EVAL_TICKS,
         };

@@ -3,13 +3,10 @@ use bevy::prelude::*;
 use crate::bot::CrabSpawns;
 use crate::bot::body::{self, CrabClawTip};
 use crate::bot::sensor::CrabTargets;
-use crate::training::reward::dist_3d;
-use crate::training::targets::sample_target;
+use crate::training::targets::{closest_tip_dist, sample_target, tip_touch};
 
 #[derive(Component)]
 pub(super) struct TargetBall;
-
-const DEMO_REACH_RADIUS: f32 = crate::training::targets::REACH_RADIUS;
 
 /// The demo chase ball stays on the chase band; the close-disc curriculum
 /// (rl#250) is a training-only mix, threaded explicitly so no ambient env var
@@ -50,14 +47,7 @@ pub(super) fn target_ball(
             .unwrap_or_else(|| sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0)),
     };
 
-    let mut min_dist = f32::INFINITY;
-    for (env, tip) in claw_tips_q.iter() {
-        if env.0 == 0 && tip.translation.is_finite() {
-            min_dist = min_dist.min(dist_3d(tip.translation, target));
-        }
-    }
-
-    if min_dist <= DEMO_REACH_RADIUS {
+    if closest_tip_dist(0, target, &claw_tips_q).is_some_and(tip_touch) {
         target = sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0);
     }
 

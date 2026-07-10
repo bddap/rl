@@ -6,7 +6,7 @@ use crate::bot::sensor::{CrabTargets, OBS_SIZE};
 use crate::bot::{CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown};
 use crate::training::algorithm::{NormalizedValue, StepEnd, Transition};
 use crate::training::reward::{GRAB_REWARD, compute_reward, is_progress_glitch, planar_dist};
-use crate::training::targets::{REACH_RADIUS, seed_target};
+use crate::training::targets::{seed_target, tip_touch};
 
 use super::state::TrainingState;
 use super::step::{BodyState, StepInputs};
@@ -71,7 +71,7 @@ fn finalize_pending_step(
 
     let blowing_up = max_speed > 100.0 || !height.is_finite();
     let fell = !(0.02..=50.0).contains(&height) || blowing_up;
-    let grabbed = min_tip_dist.is_some_and(|d| d < REACH_RADIUS);
+    let grabbed = min_tip_dist.is_some_and(tip_touch);
     if grabbed {
         reward += GRAB_REWARD;
     }
@@ -180,7 +180,7 @@ impl TrainingState {
             if episode_ended {
                 let ep = &self.envs[e];
                 let ep_reward = ep.reward;
-                let reached = ep.min_tip_dist.is_some_and(|d| d < REACH_RADIUS);
+                let reached = ep.min_tip_dist.is_some_and(tip_touch);
                 self.envs[e] = EnvEpisode {
                     phase: if rescued_envs.contains(&e) {
                         EnvPhase::Settling {
@@ -243,7 +243,7 @@ impl TrainingState {
 fn pre_touched_target(ep: &EnvEpisode, min_tip_dist: Option<f32>) -> bool {
     matches!(ep.phase, EnvPhase::Recording)
         && ep.pending.is_none()
-        && min_tip_dist.is_some_and(|d| d < REACH_RADIUS)
+        && min_tip_dist.is_some_and(tip_touch)
 }
 
 fn carapace_target_dist(body: &BodyState, targets: &CrabTargets, e: usize) -> Option<f32> {
@@ -294,6 +294,7 @@ pub(crate) fn reset_crab(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::training::targets::REACH_RADIUS;
 
     #[test]
     fn classify_step_end_terminal_vs_truncation() {
