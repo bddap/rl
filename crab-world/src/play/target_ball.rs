@@ -11,6 +11,11 @@ pub(super) struct TargetBall;
 
 const DEMO_REACH_RADIUS: f32 = crate::training::targets::REACH_RADIUS;
 
+/// The demo chase ball stays on the chase band; the close-disc curriculum
+/// (rl#250) is a training-only mix, threaded explicitly so no ambient env var
+/// can move the demo's ball.
+const DEMO_CLOSE_FRAC: f32 = 0.0;
+
 const TARGET_BALL_RADIUS: f32 = 0.08;
 
 pub(super) fn spawn_target_ball(
@@ -41,7 +46,8 @@ pub(super) fn target_ball(
 
     let mut target = match targets.get(0) {
         Some(t) => t,
-        None => target_ball_at_from_env().unwrap_or_else(|| sample_target(origin, &mut rng.0)),
+        None => target_ball_at_from_env()
+            .unwrap_or_else(|| sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0)),
     };
 
     let mut min_dist = f32::INFINITY;
@@ -52,7 +58,7 @@ pub(super) fn target_ball(
     }
 
     if min_dist <= DEMO_REACH_RADIUS {
-        target = sample_target(origin, &mut rng.0);
+        target = sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0);
     }
 
     if let Some(slot) = targets.envs.first_mut() {

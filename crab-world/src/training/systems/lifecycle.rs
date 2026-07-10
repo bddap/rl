@@ -129,8 +129,10 @@ impl TrainingState {
             }
 
             if pre_touched_target(&self.envs[e], min_tip_dists[e]) {
+                debug_assert_eq!(self.envs[e].steps, 0, "Recording with no pending ⇒ virgin");
                 self.envs[e].min_tip_dist = None;
-                seed_target(targets, spawns, e, &mut self.rng);
+                let close_frac = self.close_frac;
+                seed_target(targets, spawns, e, close_frac, &mut self.rng);
                 continue;
             }
 
@@ -190,7 +192,8 @@ impl TrainingState {
                     ..EnvEpisode::default()
                 };
 
-                seed_target(targets, spawns, e, &mut self.rng);
+                let close_frac = self.close_frac;
+                seed_target(targets, spawns, e, close_frac, &mut self.rng);
 
                 self.reach_finished += 1;
                 if reached {
@@ -231,14 +234,15 @@ impl TrainingState {
 
 /// A target the settled rest pose is ALREADY touching (claw tip inside
 /// REACH_RADIUS before the episode records a single step) would pay GRAB_REWARD
-/// for doing nothing and inflate the reach stat the best-keeper floors on. Only
-/// the close-disc curriculum (rl#250) can produce one — rest tips sit ~0.5 m from
+/// for doing nothing — a stream of do-nothing/+50 transitions poisoning the
+/// update, and a fake `reached` in the logged stat. Only the close-disc
+/// curriculum (rl#250) can realistically produce one — rest tips sit ~0.5 m from
 /// origin, inside the ≥1.5 m chase band — so re-seed and try again instead of
-/// scoring it.
+/// scoring it. (Recording with no pending implies a virgin episode: every
+/// non-ending tick re-arms pending and an ending tick resets the EnvEpisode.)
 fn pre_touched_target(ep: &EnvEpisode, min_tip_dist: Option<f32>) -> bool {
     matches!(ep.phase, EnvPhase::Recording)
         && ep.pending.is_none()
-        && ep.steps == 0
         && min_tip_dist.is_some_and(|d| d < REACH_RADIUS)
 }
 
@@ -305,29 +309,19 @@ mod tests {
 
     #[test]
     fn pre_touched_only_gates_a_virgin_recording_episode() {
-        let ep = |phase, steps, pending| EnvEpisode {
+        let ep = |phase, pending| EnvEpisode {
             phase,
-            steps,
             pending,
             ..Default::default()
         };
         let touching = Some(REACH_RADIUS * 0.5);
         assert!(
-            pre_touched_target(&ep(EnvPhase::Recording, 0, None), touching),
+            pre_touched_target(&ep(EnvPhase::Recording, None), touching),
             "a rest-pose touch before any recorded step re-seeds"
         );
         assert!(!pre_touched_target(
-            &ep(EnvPhase::Recording, 0, None),
+            &ep(EnvPhase::Recording, None),
             Some(REACH_RADIUS * 4.0)
-        ));
-        assert!(!pre_touched_target(&ep(EnvPhase::Recording, 0, None), None));
-        assert!(
-            !pre_touched_target(&ep(EnvPhase::Recording, 1, None), touching),
-            "a touch after steps were recorded is an earned grab, not a re-seed"
-        );
-        assert!(!pre_touched_target(
-            &ep(EnvPhase::Settling { grace: 3 }, 0, None),
-            touching
         ));
         let pending = Pending {
             obs: [0.0; OBS_SIZE],
@@ -338,9 +332,55 @@ mod tests {
             target_dist: None,
         };
         assert!(
-            !pre_touched_target(&ep(EnvPhase::Recording, 0, Some(pending)), touching),
-            "an in-flight step is finalized normally"
+            !pre_touched_target(&ep(EnvPhase::Recording, Some(pending)), touching),
+            "an in-flight step is an earned grab, finalized normally"
         );
+    }
+
+    /// The guard's actual promise: a pre-touched start records NOTHING — no
+    /// transition, no reach tally, no leftover min_tip_dist — and the target is
+    /// replaced, so the rest pose can never farm GRAB_REWARD.
+    #[test]
+    fn a_pre_touched_start_reseeds_without_scoring() {
+        let config = crate::TrainConfig {
+            checkpoint: crate::CheckpointArgs {
+                checkpoint_dir: std::env::temp_dir().join("rl_test_pre_touched_reseed"),
+            },
+            ticks: 0,
+            envs: 1,
+            seed: Some(7),
+        };
+        let mut ts = TrainingState::new(&config, None);
+        ts.envs[0].min_tip_dist = Some(0.1);
+
+        let mut targets = CrabTargets::default();
+        targets.resize(1);
+        let touched = Vec3::new(0.5, 0.2, 0.4);
+        targets.envs[0] = Some(touched);
+        let spawns = CrabSpawns::from_origins(vec![Vec3::ZERO]);
+        let body = BodyState {
+            poses: vec![Some((1.0, 1.0))],
+            carapace_pos: vec![Some(Vec3::ZERO)],
+            drifts: vec![None],
+            max_speeds: vec![0.0],
+        };
+        let inputs = StepInputs {
+            body: &body,
+            min_tip_dists: &[Some(0.1)],
+            obs: &[[0.0; OBS_SIZE]],
+            drives: &[[0.0; ACTION_SIZE]],
+            values: &[NormalizedValue(0.0)],
+            log_probs: &[0.0],
+            efforts: &[0.0],
+            rescued_envs: &[],
+        };
+        ts.finalize_transitions(&inputs, &mut targets, &spawns);
+
+        assert_eq!(ts.rollouts[0].len(), 0, "no transition recorded");
+        assert_eq!(ts.reach_finished, 0, "no episode counted");
+        assert!(ts.envs[0].pending.is_none(), "the episode did not start");
+        assert_eq!(ts.envs[0].min_tip_dist, None, "stale touch cleared");
+        assert_ne!(targets.envs[0], Some(touched), "target replaced");
     }
 
     #[test]
