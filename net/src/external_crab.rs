@@ -353,8 +353,11 @@ impl Plugin for ExternalCrabPlugin {
             (
                 // After rescue: both write crab Transforms before Sense; the edge makes the
                 // interleaving deterministic (a rescued env respawns at origin, so the guard
-                // then sees ~0 drift instead of racing the respawn).
+                // then sees ~0 drift instead of racing the respawn). After the pose sentinel:
+                // the recenter is a sanctioned physics teleport (rl#116) — ordered there, the
+                // same tick's SyncBackend consumes it before the sentinel ever sees it.
                 bound_body_pos_drift
+                    .after(crab_world::bot::PoseSentinelSet)
                     .after(crab_world::bot::rescue_nonfinite_crabs)
                     .before(set_crab_walk_target),
                 set_crab_walk_target.before(BotSet::Sense),
@@ -732,6 +735,7 @@ mod ship_wiggle_tests {
             num_envs: 1,
             role: WorldRole::Standalone,
             arena: crab_world::physics::Arena::OpenField,
+            visuals: crab_world::Visuals(false),
         });
         app.add_plugins(VehiclePlugin);
         app.add_plugins(ExternalCrabPlugin::new(
@@ -844,6 +848,7 @@ mod gcr_crab_tests {
             num_envs: 1,
             role: WorldRole::Standalone,
             arena: crab_world::physics::Arena::OpenField,
+            visuals: crab_world::Visuals(false),
         });
         app.add_plugins(ExternalCrabPlugin::new(
             vec![Policy::rest()],

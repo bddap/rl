@@ -5,6 +5,7 @@ pub mod collider_check;
 pub mod headless;
 pub mod meshfit;
 pub mod physics_digest;
+pub mod pose_sentinel;
 #[cfg(test)]
 mod reset_test;
 pub mod rig;
@@ -23,6 +24,16 @@ pub enum BotSet {
     Think,
     Act,
 }
+
+/// The rl#116 pose sentinel's slot, ordered before `BotSet::Sense` and
+/// `PhysicsSet::SyncBackend` (NOT guaranteed first in `FixedUpdate` — an unordered
+/// system can still sneak in ahead of it). A legitimate physics-side teleport (e.g.
+/// the rl#240 recenter) MUST order `.after(PoseSentinelSet)` — the same tick's
+/// `SyncBackend` then consumes it without the sentinel ever seeing it. Foreign
+/// writes from other schedules (where render systems live) always land between
+/// fixed ticks, before this set, and are caught.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PoseSentinelSet;
 
 #[derive(Resource, Clone, Copy)]
 pub struct NumEnvs(pub usize);
@@ -97,6 +108,18 @@ impl Plugin for BotPlugin {
             .add_message::<CrabRescued>()
             .add_systems(Startup, spawn_initial_crabs)
             .add_systems(FixedUpdate, rescue_nonfinite_crabs.before(BotSet::Sense))
+            .configure_sets(
+                FixedUpdate,
+                PoseSentinelSet
+                    .before(BotSet::Sense)
+                    .before(PhysicsSet::SyncBackend),
+            )
+            .add_systems(
+                FixedUpdate,
+                pose_sentinel::assert_body_transforms_rapier_owned
+                    .in_set(PoseSentinelSet)
+                    .run_if(pose_sentinel::visuals_on),
+            )
             .add_systems(FixedUpdate, sensor::build_observation.in_set(BotSet::Sense))
             .add_systems(FixedUpdate, actuator::apply_actions.in_set(BotSet::Act));
 

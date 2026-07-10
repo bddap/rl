@@ -17,6 +17,12 @@ pub struct HeadlessStack {
     /// models the GCR client (the NN-crab probes, the pump-equivalence test) MUST pick
     /// `OpenField` so it steps the same world the client does.
     pub arena: crate::physics::Arena,
+    /// `Visuals` for this world. `true` arms the render-gated systems (the skin, the
+    /// GCR repose publisher) AND the rl#116 pose sentinel — the armed-render smoke
+    /// test steps this exact configuration headless, the one the play-day crash
+    /// showed no test covered. Headless training/eval/probe worlds stay `false`,
+    /// which also keeps the write-`Transform`-to-teleport test idiom legal there.
+    pub visuals: Visuals,
 }
 
 pub enum WorldRole {
@@ -70,7 +76,7 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
         Duration::from_secs_f32(crate::physics::PHYSICS_DT),
     ));
 
-    app.insert_resource(Visuals(false))
+    app.insert_resource(cfg.visuals)
         .insert_resource(NumEnvs(cfg.num_envs))
         .add_plugins(crate::physics::CrabPhysicsPlugin)
         .add_plugins(PhysicsWorldPlugin { arena: cfg.arena })
@@ -83,6 +89,7 @@ pub fn headless_app() -> App {
         num_envs: 1,
         role: WorldRole::Standalone,
         arena: crate::physics::Arena::WalledBox,
+        visuals: Visuals(false),
     })
 }
 
@@ -146,15 +153,11 @@ pub fn assert_transforms_match_rapier(app: &mut App) {
         let pt: Vec3 = iso.translation;
         let pq: Quat = iso.rotation;
         assert!(
-            (t.translation - pt).length() < 1e-3,
-            "{e:?}: bevy Transform {:?} != rapier body {:?}",
+            !super::pose_sentinel::pose_diverges(&t, pt, pq),
+            "{e:?}: bevy Transform {:?}/{:?} != rapier body {:?}/{:?}",
             t.translation,
-            pt
-        );
-        assert!(
-            t.rotation.dot(pq).abs() > 1.0 - 1e-4,
-            "{e:?}: bevy rotation {:?} != rapier rotation {:?}",
             t.rotation,
+            pt,
             pq
         );
     }

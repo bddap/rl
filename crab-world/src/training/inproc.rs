@@ -277,6 +277,7 @@ fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: us
         num_envs,
         role: WorldRole::RolloutWorker,
         arena: crate::physics::Arena::WalledBox,
+        visuals: crate::Visuals(false),
     });
 
     let state = systems::TrainingState::new_worker(config, id, arch);
