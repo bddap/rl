@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::sim::{Crab, Outcome, Player, PlayerId, PlayerStatus, Pos};
+use crate::sim::{Crab, Outcome, Player, PlayerId, PlayerStatus};
+use crate::wire::{pos_bytes, pos_from_bytes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreSnapshot {
@@ -59,14 +60,14 @@ impl CoreSnapshot {
         out.extend_from_slice(&(self.players.len() as u32).to_le_bytes());
         for (id, player) in &self.players {
             out.push(id.0);
-            write_pos(&mut out, player.pos());
+            out.extend_from_slice(&pos_bytes(player.pos()));
             out.extend_from_slice(&player.yaw().to_le_bytes());
             out.push(player.status().tag());
         }
 
         out.extend_from_slice(&(self.crabs.len() as u32).to_le_bytes());
         for crab in &self.crabs {
-            write_pos(&mut out, crab.pos());
+            out.extend_from_slice(&pos_bytes(crab.pos()));
             out.extend_from_slice(&crab.yaw().to_le_bytes());
         }
 
@@ -94,7 +95,7 @@ impl CoreSnapshot {
         let mut players = BTreeMap::new();
         for _ in 0..n_players {
             let id = PlayerId(r.byte()?);
-            let pos = read_pos(&mut r)?;
+            let pos = pos_from_bytes(r.take()?);
             let yaw = i32::from_le_bytes(r.take()?);
             let status = PlayerStatus::from_tag(r.byte()?).ok_or(SnapshotDecodeError::BadTag)?;
             players.insert(id, Player::from_parts(pos, yaw, status));
@@ -106,7 +107,7 @@ impl CoreSnapshot {
         }
         let mut crabs = Vec::new();
         for _ in 0..n_crabs {
-            let pos = read_pos(&mut r)?;
+            let pos = pos_from_bytes(r.take()?);
             let yaw = i32::from_le_bytes(r.take()?);
             crabs.push(Crab::from_parts(pos, yaw));
         }
@@ -138,17 +139,6 @@ impl CoreSnapshot {
             input_next,
         })
     }
-}
-
-fn write_pos(out: &mut Vec<u8>, p: Pos) {
-    out.extend_from_slice(&p.x.to_le_bytes());
-    out.extend_from_slice(&p.z.to_le_bytes());
-}
-
-fn read_pos(r: &mut Reader<'_>) -> Result<Pos, SnapshotDecodeError> {
-    let x = i64::from_le_bytes(r.take()?);
-    let z = i64::from_le_bytes(r.take()?);
-    Ok(Pos { x, z })
 }
 
 struct Reader<'a> {
@@ -186,7 +176,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::Sim;
+    use crate::sim::{Pos, Sim};
 
     fn sample() -> CoreSnapshot {
         let mut sim = Sim::new(9, &[PlayerId(0), PlayerId(1)]);
