@@ -1,7 +1,7 @@
 use super::app::{ArmedRound, ExternalCrabStackInstalled};
 use super::input::{CameraPitch, CameraYaw};
 use super::*;
-use crate::lockstep::PilotIntent;
+use crate::client::PilotIntent;
 use crab_world::vehicle::{PilotCommand, PilotId, Vehicle, VehicleControls, VehicleKind};
 
 pub(super) fn coordinator(
@@ -13,14 +13,14 @@ pub(super) fn coordinator(
     Box::new(Coordinator::for_round(net, peers, me, initial_sim))
 }
 
-pub(super) fn insert_core(app: &mut App, ls: Lockstep, coord: Box<Coordinator>) {
-    install_round(app.world_mut(), ls, coord);
+pub(super) fn insert_core(app: &mut App, client: ClientSim, coord: Box<Coordinator>) {
+    install_round(app.world_mut(), client, coord);
 }
 
-fn install_round(world: &mut World, ls: Lockstep, coord: Box<Coordinator>) {
-    let prev = SimSnapshot::capture(&ls);
+fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) {
+    let prev = SimSnapshot::capture(&client);
     world.insert_non_send_resource(GameState {
-        ls,
+        client,
         coord,
         accumulator: 0.0,
         prev,
@@ -58,7 +58,7 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     let spawns = match world.get_resource::<crate::external_crab::ExternalCrabBridge>() {
         Some(bridge) => {
             let n = bridge.crab_count();
-            super::app::seed_round_crabs(&mut ready.lockstep, n)
+            super::app::seed_round_crabs(&mut ready.client, n)
         }
         None => Vec::new(),
     };
@@ -68,11 +68,11 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     }
     let coord = coordinator(
         ready.net,
-        ready.lockstep.peers(),
-        ready.lockstep.me(),
-        ready.lockstep.sim().clone(),
+        ready.client.peers(),
+        ready.client.me(),
+        ready.client.sim().clone(),
     );
-    install_round(world, ready.lockstep, coord);
+    install_round(world, ready.client, coord);
 }
 
 pub(super) fn teardown_round(world: &mut World) {
@@ -150,21 +150,21 @@ fn pilot_of(pid: PlayerId) -> PilotId {
 }
 
 fn local_pilot(state: &GameState) -> PilotId {
-    pilot_of(state.ls.me())
+    pilot_of(state.client.me())
 }
 
 pub(super) struct GameState {
-    pub(super) ls: Lockstep,
+    pub(super) client: ClientSim,
     pub(super) coord: Box<Coordinator>,
     pub(super) accumulator: f64,
     pub(super) prev: SimSnapshot,
     /// Round-decided latch: set when this round's decided outcome has been reported, cleared
-    /// per Ongoing snapshot inside [`drive_lockstep`]'s drain arms (a RESTART revives a decided
+    /// per Ongoing snapshot inside [`drive_client_sim`]'s drain arms (a RESTART revives a decided
     /// round without rewinding the tick, rl#204). Lives here — not a system `Local` — so a new
     /// round starts unlatched by construction (rl#210).
     reported_outcome: bool,
     /// The next telemetry sampling boundary ([`next_sample_tick`]), in this ROUND's ticks.
-    /// Per-round for the same reason: a fresh Lockstep restarts at tick 0, so a surviving
+    /// Per-round for the same reason: a fresh ClientSim restarts at tick 0, so a surviving
     /// watermark would suppress tick telemetry until the counter climbed past it (rl#210).
     next_tel_tick: u64,
     /// The deterministic 64:30 physics/sim cadence, advanced once per APPLIED tick while
@@ -206,8 +206,8 @@ pub(super) struct SimSnapshot {
 }
 
 impl SimSnapshot {
-    fn capture(ls: &Lockstep) -> Self {
-        let snap = ls.core_snapshot();
+    fn capture(client: &ClientSim) -> Self {
+        let snap = client.core_snapshot();
         Self {
             players: snap.players,
             crabs: snap.crabs,
@@ -468,7 +468,7 @@ fn restart_crab_to_spawn(world: &mut World, spawns: &[crate::sim::Pos]) {
     crate::external_crab::cold_respawn_armed_crab(world);
 }
 
-pub(super) fn drive_lockstep(world: &mut World) {
+pub(super) fn drive_client_sim(world: &mut World) {
     let armed = world
         .get_resource::<crate::external_crab::ExternalCrabArmed>()
         .is_some();
@@ -481,7 +481,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
     let (tel, roster_len) = {
         let state = world.non_send_resource::<GameState>();
         let tel = state.coord.telemetry().cloned();
-        (tel, state.ls.sim().players().count())
+        (tel, state.client.sim().players().count())
     };
 
     world.non_send_resource_mut::<GameState>().accumulator += delta;
@@ -491,9 +491,9 @@ pub(super) fn drive_lockstep(world: &mut World) {
         if toggle {
             let alive = {
                 let state = world.non_send_resource::<GameState>();
-                let me = state.ls.me();
+                let me = state.client.me();
                 state
-                    .ls
+                    .client
                     .sim()
                     .player(me)
                     .is_some_and(|p| p.status() == PlayerStatus::Alive)
@@ -547,12 +547,12 @@ pub(super) fn drive_lockstep(world: &mut World) {
         let issue_tick = {
             let mut state = world.non_send_resource_mut::<GameState>();
             // Plain `&mut GameState` (not `Mut`) so the adopt closure below can borrow the
-            // `reported_outcome` field disjointly from the `ls` it runs against.
+            // `reported_outcome` field disjointly from the `client` it runs against.
             let state = &mut *state;
-            let me = state.ls.me();
-            let msg = state.ls.submit_local_input(sim_input, pilot_intent);
+            let me = state.client.me();
+            let msg = state.client.submit_local_input(sim_input, pilot_intent);
             // The tick this input was ISSUED as — the telemetry stamp. On a remote client this
-            // differs from `ls.next_tick()` (the snapshot-apply cursor) by the transit lag.
+            // differs from `client.next_tick()` (the snapshot-apply cursor) by the transit lag.
             let issue_tick = msg.issue_tick;
             if let Some(bot) = scripted_pack
                 && let Some(server) = state.coord.server_mut()
@@ -588,16 +588,16 @@ pub(super) fn drive_lockstep(world: &mut World) {
                     state.art_buf.extend(exch.articulations);
                     let take = jitter_take(state.snap_buf.len());
                     if take > 0 {
-                        state.prev = SimSnapshot::capture(&state.ls);
+                        state.prev = SimSnapshot::capture(&state.client);
                         let reported_outcome = &mut state.reported_outcome;
                         let snaps: Vec<_> = state.snap_buf.drain(..take).collect();
-                        state.ls.adopt_snapshots(snaps, |c| {
+                        state.client.adopt_snapshots(snaps, |c| {
                             if c.sim().outcome() == Outcome::Ongoing {
                                 *reported_outcome = false;
                             }
                         });
-                        state.ls.reconcile_local_prediction();
-                        let adopted_tick = state.ls.next_tick();
+                        state.client.reconcile_local_prediction();
+                        let adopted_tick = state.client.next_tick();
                         while state
                             .art_buf
                             .front()
@@ -659,7 +659,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
             }
             {
                 let mut state = world.non_send_resource_mut::<GameState>();
-                state.prev = SimSnapshot::capture(&state.ls);
+                state.prev = SimSnapshot::capture(&state.client);
             }
 
             {
@@ -719,7 +719,7 @@ pub(super) fn drive_lockstep(world: &mut World) {
                     if snap.outcome == Outcome::Ongoing {
                         state.reported_outcome = false;
                     }
-                    state.ls.apply_core_snapshot(snap);
+                    state.client.apply_core_snapshot(snap);
                 }
                 if restarted && armed {
                     let spawns: Vec<crate::sim::Pos> = world
@@ -739,10 +739,10 @@ pub(super) fn drive_lockstep(world: &mut World) {
         if let Some(t) = &tel {
             let due = {
                 let mut state = world.non_send_resource_mut::<GameState>();
-                let due = state.ls.sim().tick() >= state.next_tel_tick;
+                let due = state.client.sim().tick() >= state.next_tel_tick;
                 if due {
-                    state.next_tel_tick = next_sample_tick(state.ls.sim().tick());
-                    t.send(TelemetryEvent::tick(state.ls.sim(), roster_len));
+                    state.next_tel_tick = next_sample_tick(state.client.sim().tick());
+                    t.send(TelemetryEvent::tick(state.client.sim(), roster_len));
                     t.send(TelemetryEvent::input(issue_tick, sim_input));
                 }
                 due
@@ -788,14 +788,14 @@ pub(super) fn drive_lockstep(world: &mut World) {
 
     let mut state = world.non_send_resource_mut::<GameState>();
     let state = &mut *state;
-    for (pid, p) in state.ls.sim().players() {
+    for (pid, p) in state.client.sim().players() {
         match state.logged_statuses.insert(pid, p.status()) {
             Some(prev) if prev != p.status() => {
                 // Crab distance names the down's trigger: within CRAB_GRAB_RADIUS it was
                 // the under-body grab; beyond, a claw touch (rl#249).
                 let (px, pz) = p.pos().to_meters();
                 let from_crab = state
-                    .ls
+                    .client
                     .sim()
                     .crabs()
                     .iter()
@@ -816,13 +816,13 @@ pub(super) fn drive_lockstep(world: &mut World) {
     }
     state
         .logged_statuses
-        .retain(|pid, _| state.ls.sim().player(*pid).is_some());
-    let outcome = state.ls.sim().outcome();
+        .retain(|pid, _| state.client.sim().player(*pid).is_some());
+    let outcome = state.client.sim().outcome();
     if !state.reported_outcome && outcome != Outcome::Ongoing {
         state.reported_outcome = true;
         info!("round decided: {outcome:?}");
         if let Some(t) = &tel {
-            t.send(TelemetryEvent::round_decided(state.ls.sim()));
+            t.send(TelemetryEvent::round_decided(state.client.sim()));
         }
     }
 }

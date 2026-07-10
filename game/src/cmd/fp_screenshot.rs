@@ -39,7 +39,7 @@ pub(crate) struct Args {
 pub(crate) fn run(args: Args) -> Result<()> {
     let me = PlayerId(0);
     let players: Vec<PlayerId> = (0..args.players.max(1)).map(PlayerId).collect();
-    let ls = net::lockstep::Lockstep::new(MATCH_SEED, &players, me);
+    let client = net::client::ClientSim::new(MATCH_SEED, &players, me);
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(args.cam_yaw, args.cam_pitch)
         .with_fov(args.cam_fov);
@@ -49,6 +49,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .transpose()?;
     let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
     let pack = net::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
-    render::build_screenshot_app(ls, cfg, external_crab, render_mode, pack).run();
+    render::build_screenshot_app(client, cfg, external_crab, render_mode, pack).run();
     Ok(())
 }

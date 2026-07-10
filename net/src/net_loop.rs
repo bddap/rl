@@ -5,8 +5,8 @@ use anyhow::Result;
 use iroh::EndpointId;
 
 use crate::articulation::CrabArticulation;
+use crate::client::{ClientSim, PeerMsg, TickMsg};
 use crate::formation::{Formation, LobbyControl, early_peer_msgs, form_match};
-use crate::lockstep::{Lockstep, PeerMsg, TickMsg};
 use crate::server::{Admission, JoinRequest, Refusal, Server, may_admit_joiner};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
@@ -31,7 +31,7 @@ pub struct NetDriver {
 #[derive(Default)]
 pub struct Exchanged {
     /// Host-authoritative game states this remote client drained, in ARRIVAL order: the driver
-    /// adopts every one via [`Lockstep::adopt_snapshots`] (the one shared adopt policy — see its
+    /// adopts every one via [`ClientSim::adopt_snapshots`] (the one shared adopt policy — see its
     /// doc). Empty on the solo/host arm (its client reads the server it runs).
     pub snapshots: Vec<CoreSnapshot>,
     pub articulations: Vec<CrabArticulation>,
@@ -222,9 +222,9 @@ impl Coordinator {
                     net: Some(d),
                 }
             }
-            // A remote client ADOPTS the host's per-tick snapshot into its OWN `ls` (no re-sim),
+            // A remote client ADOPTS the host's per-tick snapshot into its OWN `client` (no re-sim),
             // so the Coordinator holds no authoritative server and this tick-0 `sim` goes unused
-            // (the client's `GameState.ls` is what the snapshots advance).
+            // (the client's `GameState.client` is what the snapshots advance).
             Some(d) => {
                 let _ = sim;
                 Coordinator::Client { net: d }
@@ -270,7 +270,7 @@ impl Coordinator {
             Coordinator::Client { net } => {
                 // Ship our input UP and drain the host's STATE down (snapshots + render
                 // articulation), never an input set to re-step. The driver adopts every drained
-                // snapshot ([`Lockstep::adopt_snapshots`]) and renders the last-arrived
+                // snapshot ([`ClientSim::adopt_snapshots`]) and renders the last-arrived
                 // articulation.
                 net.send_to_server(&msg);
                 let down = net.drain_server_down()?;
@@ -406,7 +406,7 @@ fn admit_joiners(server: &mut Server, net: &mut NetDriver, joins: Vec<(EndpointI
 }
 
 pub enum MatchResult {
-    Joined(Box<(Lockstep, NetDriver)>),
+    Joined(Box<(ClientSim, NetDriver)>),
     /// Discovery completed with only us on the LAN — the caller starts a deterministic
     /// solo round (see [`crate::formation`]'s solo fallback).
     Alone,
@@ -542,7 +542,7 @@ fn connect_and_form_inner(
     // Every peer spawns the byte-identical foot-only round. Early inputs ride the driver to
     // seed the host's server (see [`Coordinator::for_round`]) — never replayed into the client
     // sim, which would bypass the server's input streams.
-    let ls = Lockstep::new(seed, &all_ids, frozen.me);
+    let client = ClientSim::new(seed, &all_ids, frozen.me);
     let server_eid = server_endpoint(&frozen.id_map);
     let early = early_peer_msgs(&frozen);
     let driver = NetDriver {
@@ -558,13 +558,13 @@ fn connect_and_form_inner(
         asset_digest: local_asset_digest,
         crab_count: local_crab_count,
     };
-    Ok(MatchResult::Joined(Box::new((ls, driver))))
+    Ok(MatchResult::Joined(Box::new((client, driver))))
 }
 
 const JOIN_WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub enum JoinResult {
-    Joined(Box<(Lockstep, NetDriver)>),
+    Joined(Box<(ClientSim, NetDriver)>),
     Refused(Refusal),
     Unreachable,
 }
@@ -661,14 +661,14 @@ pub fn connect_and_join(
                 "admitted as {me:?}; joining at tick {} over roster {:?}",
                 adm.effective_tick, adm.roster
             );
-            // This `ls` is only a placeholder the remote-adopt client boots from — the driver is
+            // This `client` is only a placeholder the remote-adopt client boots from — the driver is
             // a CLIENT (not host), so `for_round` makes this a `Coordinator::Client` that ADOPTS
             // the host's per-tick snapshots and never steps a sim of its own. The host spawns us
             // into its LIVE authoritative round at `effective_tick` (`Server::step_next` →
             // `Sim::spawn_joining_player`), so we render the host's output, never re-simming its
             // warm rapier world. `join_at` seeds the placeholder cursors/roster; the adopted
             // snapshot supersedes.
-            let ls = Lockstep::join_at(seed, &adm.roster, me, adm.effective_tick);
+            let client = ClientSim::join_at(seed, &adm.roster, me, adm.effective_tick);
             let my_eid = session.endpoint_id();
             debug_assert!(
                 adm.roster.contains(&PlayerId(0)),
@@ -693,7 +693,7 @@ pub fn connect_and_join(
                 asset_digest: local_asset_digest,
                 crab_count: local_crab_count,
             };
-            Ok(JoinResult::Joined(Box::new((ls, driver))))
+            Ok(JoinResult::Joined(Box::new((client, driver))))
         }
     }
 }
@@ -728,15 +728,15 @@ mod tests {
     fn solo_round_advances_through_the_coordinator() {
         use crate::sim::Input;
         let me = PlayerId(0);
-        let mut ls = Lockstep::new(0x5A11, &[me], me);
-        let mut coord = Coordinator::for_round(None, ls.peers(), me, ls.sim().clone());
+        let mut client = ClientSim::new(0x5A11, &[me], me);
+        let mut coord = Coordinator::for_round(None, client.peers(), me, client.sim().clone());
         assert!(
             matches!(coord, Coordinator::Server { net: None, .. }),
             "no driver ⇒ a solo internal-server coordinator"
         );
         let submits = 5u64;
         for _ in 0..submits {
-            let msg = ls.submit_local_input(Input::from_axes(1.0, 0.0), None);
+            let msg = client.submit_local_input(Input::from_axes(1.0, 0.0), None);
             let exch = coord
                 .exchange(msg)
                 .expect("the solo/host arm can never lose its in-process server (rl#203)");
@@ -749,11 +749,11 @@ mod tests {
                 let bytes = server.step_next(&[]).snapshot;
                 let snap =
                     crate::snapshot::CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes");
-                ls.apply_core_snapshot(snap);
+                client.apply_core_snapshot(snap);
             }
         }
         assert_eq!(
-            ls.sim().tick(),
+            client.sim().tick(),
             submits,
             "solo advances one tick per submit through the host-authoritative path"
         );

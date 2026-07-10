@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use iroh::EndpointId;
-use net::lockstep::Lockstep;
+use net::client::ClientSim;
 use net::sim::{Input, PlayerId, TICK_DT, TICK_HZ};
 use net::telemetry::{TelemetryEvent, next_sample_tick};
 use net::{formation, net_loop, transport};
@@ -67,7 +67,7 @@ async fn run_net(args: Args) -> Result<()> {
         my_eid.fmt_short()
     );
 
-    let mut ls = Lockstep::new(super::shared::MATCH_SEED, &all_ids, me);
+    let mut client = ClientSim::new(super::shared::MATCH_SEED, &all_ids, me);
 
     let am_host = me == PlayerId(0);
     let server_eid = *id_map
@@ -76,7 +76,7 @@ async fn run_net(args: Args) -> Result<()> {
         .map(|(eid, _)| eid)
         .expect("a frozen roster always contains PlayerId(0)");
     let mut server = am_host.then(|| {
-        let mut s = net::server::Server::new(me, &all_ids, ls.sim().clone());
+        let mut s = net::server::Server::new(me, &all_ids, client.sim().clone());
         s.seed_early(&formation::early_peer_msgs(&frozen));
         s
     });
@@ -102,13 +102,13 @@ async fn run_net(args: Args) -> Result<()> {
 
         let mut server_down: Option<net_loop::ServerDown> = None;
 
-        let mut remote_inputs: Vec<net::lockstep::PeerMsg> = Vec::new();
+        let mut remote_inputs: Vec<net::client::PeerMsg> = Vec::new();
         let mut snapshots: Vec<net::snapshot::CoreSnapshot> = Vec::new();
         while let Some(m) = session.try_recv() {
             match m.msg {
                 transport::PeerWire::Tick(msg) => {
                     if let Some(&pid) = id_map.get(&m.from) {
-                        remote_inputs.push(net::lockstep::PeerMsg { pid, msg });
+                        remote_inputs.push(net::client::PeerMsg { pid, msg });
                     }
                 }
                 transport::PeerWire::Snapshot(snap) => {
@@ -127,10 +127,10 @@ async fn run_net(args: Args) -> Result<()> {
             }
         }
 
-        let t = ls.next_tick() as f32 * 0.1;
+        let t = client.next_tick() as f32 * 0.1;
         let input = Input::from_axes(t.cos(), t.sin());
-        let msg = ls.submit_local_input(input, None);
-        // The telemetry stamp is the ISSUE tick — on a remote client `ls.next_tick()` (the
+        let msg = client.submit_local_input(input, None);
+        // The telemetry stamp is the ISSUE tick — on a remote client `client.next_tick()` (the
         // snapshot-apply cursor) trails it by the transit lag.
         let issue_tick = msg.issue_tick;
 
@@ -157,7 +157,7 @@ async fn run_net(args: Args) -> Result<()> {
                     .expect("the authoritative server's snapshot must decode");
                 session.broadcast_snapshot(&snap).await;
                 snapshots_io += 1;
-                ls.apply_core_snapshot(snap);
+                client.apply_core_snapshot(snap);
                 if let Some(w) = hash_log.as_mut() {
                     use std::io::Write as _;
                     let applied = srv.sim().tick().saturating_sub(1);
@@ -172,9 +172,12 @@ async fn run_net(args: Args) -> Result<()> {
             // The adopt callback can't `?`; collect the per-adopt observations and write them after,
             // where the error propagates through normal control flow.
             let mut adopted_hashes: Vec<(u64, u64)> = Vec::new();
-            snapshots_io += ls.adopt_snapshots(snapshots, |ls| {
+            snapshots_io += client.adopt_snapshots(snapshots, |client| {
                 if hash_log.is_some() {
-                    adopted_hashes.push((ls.sim().tick().saturating_sub(1), ls.sim().state_hash()));
+                    adopted_hashes.push((
+                        client.sim().tick().saturating_sub(1),
+                        client.sim().state_hash(),
+                    ));
                 }
             });
             if let Some(w) = hash_log.as_mut() {
@@ -190,47 +193,54 @@ async fn run_net(args: Args) -> Result<()> {
         }
 
         if let Some(down) = server_down {
-            warn!("ending run at tick {}: {down}", ls.sim().tick());
+            warn!("ending run at tick {}: {down}", client.sim().tick());
             break;
         }
 
-        if ls.sim().tick() >= next_report_tick {
-            next_report_tick = (ls.sim().tick() / TICK_HZ + 1) * TICK_HZ;
+        if client.sim().tick() >= next_report_tick {
+            next_report_tick = (client.sim().tick() / TICK_HZ + 1) * TICK_HZ;
             info!(
                 "tick={:>5} peers={} statehash={:#018x}",
-                ls.sim().tick(),
+                client.sim().tick(),
                 session.connected_peers().await.len(),
-                ls.sim().state_hash(),
+                client.sim().state_hash(),
             );
         }
 
         if let Some(t) = tel.as_ref() {
-            if ls.sim().tick() >= next_tel_tick {
-                next_tel_tick = next_sample_tick(ls.sim().tick());
-                t.send(TelemetryEvent::tick(ls.sim(), ls.sim().players().count()));
+            if client.sim().tick() >= next_tel_tick {
+                next_tel_tick = next_sample_tick(client.sim().tick());
+                t.send(TelemetryEvent::tick(
+                    client.sim(),
+                    client.sim().players().count(),
+                ));
                 t.send(TelemetryEvent::input(issue_tick, input));
             }
-            if !reported_outcome && ls.sim().outcome() != net::sim::Outcome::Ongoing {
+            if !reported_outcome && client.sim().outcome() != net::sim::Outcome::Ongoing {
                 reported_outcome = true;
-                t.send(TelemetryEvent::round_decided(ls.sim()));
+                t.send(TelemetryEvent::round_decided(client.sim()));
             }
         }
     }
 
     info!(
         "done: {} ticks applied, {} snapshots {}, final hash {:#018x}",
-        ls.sim().tick(),
+        client.sim().tick(),
         snapshots_io,
         if am_host { "broadcast" } else { "adopted" },
-        ls.sim().state_hash()
+        client.sim().state_hash()
     );
     if let Some(t) = tel.as_ref() {
-        t.send(TelemetryEvent::tick(ls.sim(), ls.sim().players().count()));
+        t.send(TelemetryEvent::tick(
+            client.sim(),
+            client.sim().players().count(),
+        ));
     }
-    if all_ids.len() > 1 && ls.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(TICK_HZ) {
+    if all_ids.len() > 1 && client.sim().tick() < (args.run_secs * TICK_HZ).saturating_sub(TICK_HZ)
+    {
         warn!(
             "only {} ticks in {}s — peer link stalled (missing inputs)",
-            ls.sim().tick(),
+            client.sim().tick(),
             args.run_secs
         );
     }

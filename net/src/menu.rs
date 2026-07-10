@@ -4,8 +4,8 @@ use std::thread;
 use anyhow::Result;
 pub use iroh::EndpointId;
 
+use crate::client::ClientSim;
 use crate::formation::{self, LobbyControl};
-use crate::lockstep::Lockstep;
 use crate::membership::Role;
 use crate::net_loop::{self, MatchResult, NetDriver};
 
@@ -140,16 +140,16 @@ pub fn begin(
 }
 
 pub struct ReadyMatch {
-    pub lockstep: Lockstep,
+    pub client: ClientSim,
     pub net: Option<NetDriver>,
 }
 
 pub fn ready_from(result: MatchResult, seed: u64) -> Option<ReadyMatch> {
     match result {
         MatchResult::Joined(joined) => {
-            let (lockstep, net) = *joined;
+            let (client, net) = *joined;
             Some(ReadyMatch {
-                lockstep,
+                client,
                 net: Some(net),
             })
         }
@@ -160,7 +160,7 @@ pub fn ready_from(result: MatchResult, seed: u64) -> Option<ReadyMatch> {
 
 pub fn solo_round(seed: u64) -> ReadyMatch {
     ReadyMatch {
-        lockstep: formation::solo_lockstep_for(seed),
+        client: formation::solo_client_for(seed),
         net: None,
     }
 }
@@ -370,7 +370,7 @@ mod tests {
         let seed = 0xABCD;
         let m = ready_from(MatchResult::Alone, seed).expect("Alone is a playable solo round");
         assert!(m.net.is_none(), "Alone is offline — no NetDriver");
-        assert_eq!(m.lockstep.me().0, 0, "solo player is id 0");
+        assert_eq!(m.client.me().0, 0, "solo player is id 0");
     }
 
     #[test]

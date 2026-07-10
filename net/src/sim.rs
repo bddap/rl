@@ -473,7 +473,7 @@ impl Sim {
         for id in self.participant_ids() {
             assert!(
                 inputs.contains_key(&id),
-                "lockstep input incomplete: no input for {id:?} (have {:?}); defaulting \
+                "tick input incomplete: no input for {id:?} (have {:?}); defaulting \
                  to neutral would desync peers — refusing",
                 inputs.keys().collect::<Vec<_>>(),
             );
@@ -554,7 +554,7 @@ impl Sim {
         p.pos.z += vz * PLAYER_SPEED / denom;
     }
 
-    // Live only via `Lockstep::reconcile_local_prediction` (render-only) outside
+    // Live only via `ClientSim::reconcile_local_prediction` (render-only) outside
     // tests — dead render-off (rl#248).
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
     pub(crate) fn predict_player(&mut self, id: PlayerId, inp: Input) {
@@ -695,7 +695,7 @@ impl Sim {
             outcome: *outcome,
             roster: config.players.clone(),
             // Input watermarks are SERVER coordination metadata, not sim state — the sim holds
-            // none. [`crate::server::Server::step_next`] stamps them; the client's `Lockstep`
+            // none. [`crate::server::Server::step_next`] stamps them; the client's `ClientSim`
             // stashes + re-stamps them for its mirror re-emit.
             input_next: std::collections::BTreeMap::new(),
         }
@@ -708,7 +708,7 @@ impl Sim {
             crabs,
             outcome,
             roster,
-            // Coordination metadata, not sim state — the client's `Lockstep` stashes it
+            // Coordination metadata, not sim state — the client's `ClientSim` stashes it
             // (prediction-window prune + mirror re-emit) before handing the snapshot here.
             input_next: _,
         } = snapshot;
@@ -1120,8 +1120,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "lockstep input incomplete")]
-    fn missing_lockstep_input_panics_not_defaults_to_neutral() {
+    #[should_panic(expected = "tick input incomplete")]
+    fn missing_tick_input_panics_not_defaults_to_neutral() {
         let mut sim = Sim::new(0, &players(2));
         let mut partial = BTreeMap::new();
         partial.insert(PlayerId(0), Input::from_axes(0.0, 1.0));

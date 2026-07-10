@@ -13,12 +13,15 @@ use n0_future::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::articulation::CrabArticulation;
-use crate::lockstep::{PilotIntent, TickMsg};
+use crate::client::{PilotIntent, TickMsg};
 use crate::membership::{self, Beat};
 use crate::server::{Admission, AdmissionRefusal, JoinRequest, Refusal};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
 
+// "lockstep" is stale vocabulary (rl#151 deleted that model) but the string is
+// compat-breaking, so rename it (e.g. `hostauth/15`) with the next protocol bump
+// instead of burning a rev on it (rl#244).
 pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/14";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
@@ -501,7 +504,7 @@ pub async fn start_session() -> Result<Session> {
     let (inbox_tx, inbox_rx) = mpsc::channel(256);
     let links: Links = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
 
-    let handler = LockstepProto {
+    let handler = GameProto {
         my_id,
         inbox: inbox_tx.clone(),
         links: links.clone(),
@@ -556,13 +559,13 @@ pub async fn start_session() -> Result<Session> {
 }
 
 #[derive(Clone, Debug)]
-struct LockstepProto {
+struct GameProto {
     my_id: EndpointId,
     inbox: mpsc::Sender<FromPeer>,
     links: Links,
 }
 
-impl ProtocolHandler for LockstepProto {
+impl ProtocolHandler for GameProto {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         if let Err(e) = wire_connection(
             self.my_id,
@@ -572,7 +575,7 @@ impl ProtocolHandler for LockstepProto {
         )
         .await
         {
-            tracing::warn!("accepting lockstep connection failed: {e:#}");
+            tracing::warn!("accepting game connection failed: {e:#}");
         }
         Ok(())
     }

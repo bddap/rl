@@ -1,6 +1,6 @@
 use super::app::{install_armed_nn_crab, seed_round_crabs};
 use super::driver::{
-    FlightInput, PendingInput, ScriptedPackInput, coordinator, drive_lockstep, insert_core,
+    FlightInput, PendingInput, ScriptedPackInput, coordinator, drive_client_sim, insert_core,
 };
 use super::hud::{spawn_hud, sync_controls_context, update_hud};
 use super::input::gather_input;
@@ -10,16 +10,16 @@ use crate::net_loop::NetDriver;
 use crab_world::screenshot::{self, ShotProgress, ShotTarget};
 
 pub fn build_screenshot_app(
-    mut ls: Lockstep,
+    mut client: ClientSim,
     cfg: ScreenshotConfig,
     external_crab: Option<crab_world::play::Policy>,
     render_mode: super::RenderMode,
     pack: Input,
 ) -> App {
     let mut app = offscreen_app_scaffold();
-    let armed_crab = external_crab.map(|policy| (policy, seed_round_crabs(&mut ls, 1)));
-    let coord = coordinator(None, ls.peers(), ls.me(), ls.sim().clone());
-    insert_core(&mut app, ls, coord);
+    let armed_crab = external_crab.map(|policy| (policy, seed_round_crabs(&mut client, 1)));
+    let coord = coordinator(None, client.peers(), client.me(), client.sim().clone());
+    insert_core(&mut app, client, coord);
     app.insert_resource(ScriptedPackInput(pack));
     if let Some((policy, spawns)) = armed_crab {
         install_armed_nn_crab(&mut app, vec![policy], spawns);
@@ -29,16 +29,16 @@ pub fn build_screenshot_app(
 }
 
 pub fn build_net_screenshot_app(
-    mut ls: Lockstep,
+    mut client: ClientSim,
     net: NetDriver,
     cfg: ScreenshotConfig,
     external_crab: crab_world::play::Policy,
     render_mode: super::RenderMode,
 ) -> App {
     let mut app = offscreen_app_scaffold();
-    let spawns = seed_round_crabs(&mut ls, 1);
-    let coord = coordinator(Some(net), ls.peers(), ls.me(), ls.sim().clone());
-    insert_core(&mut app, ls, coord);
+    let spawns = seed_round_crabs(&mut client, 1);
+    let coord = coordinator(Some(net), client.peers(), client.me(), client.sim().clone());
+    insert_core(&mut app, client, coord);
     install_armed_nn_crab(&mut app, vec![external_crab], spawns);
     finish_offscreen_app(&mut app, cfg, render_mode);
     app
@@ -91,7 +91,7 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
             (
                 gather_input,
                 drive_pilot_script,
-                drive_lockstep,
+                drive_client_sim,
                 reconcile_avatars,
                 apply_transforms,
                 follow_ground,

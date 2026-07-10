@@ -23,7 +23,7 @@ fn menu_handoff_installs_the_chosen_round() {
 
     let seed = 0x1234_5678;
     let armed = super::app::arm_round(ReadyMatch {
-        lockstep: crate::formation::solo_lockstep_for(seed),
+        client: crate::formation::solo_client_for(seed),
         net: None,
     })
     .expect("a solo round always arms");
@@ -44,7 +44,7 @@ fn menu_handoff_installs_the_chosen_round() {
         .world()
         .get_non_send_resource::<GameState>()
         .expect("ensure_round_installed must build GameState from the parked round");
-    assert_eq!(gs.ls.me(), crate::sim::PlayerId(0), "solo player id 0");
+    assert_eq!(gs.client.me(), crate::sim::PlayerId(0), "solo player id 0");
     assert!(
         matches!(
             *gs.coord,
