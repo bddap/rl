@@ -19,6 +19,10 @@ const PLANE: VehicleParams = VehicleParams {
     // 1.8 the plane out-lifted its ~2.6 N weight from 1.4 m/s (owner: "Bernoulli overdone",
     // rl#230); the level-flight band is pinned by `spawn_speed_sinks_high_speed_climbs`.
     lift: 0.9,
+    // Alignment time-constant ≈ mass/grip ≈ 0.3 s — velocity follows the nose well inside
+    // one turn's sweep, so a coordinated turn stays near-aligned and pays only the
+    // second-order grip loss (rl#255).
+    grip: 0.8,
     drag_lin: 0.2,
     drag_quad: 0.15,
     angular_drag: 0.06,
@@ -32,6 +36,7 @@ const SHIP: VehicleParams = VehicleParams {
     lever_thrust: 0.0,
     direct_thrust: Vec3::new(0.3, 0.3, 0.4),
     lift: 0.0,
+    grip: 0.0,
     drag_lin: 0.05,
     drag_quad: 0.02,
     angular_drag: 0.07,
@@ -51,6 +56,7 @@ struct VehicleParams {
     lever_thrust: f32,
     direct_thrust: Vec3,
     lift: f32,
+    grip: f32,
     drag_lin: f32,
     drag_quad: f32,
     angular_drag: f32,
@@ -302,7 +308,14 @@ fn apply_vehicle_forces(
         };
         let drag = -v * (p.drag_lin + match_damp + p.drag_quad * speed);
 
-        ef.force = thrust + lift + drag;
+        // Grip: the sideslip force of the wing+fuselage, as a spring from v to
+        // `forward·|v|` — it mostly REDIRECTS momentum toward the nose; the along-track
+        // component grip·|v|·(cosθ−1) ≤ 0 can never add speed and is second-order in the
+        // slip angle θ, so a coordinated turn carries its speed instead of skidding it
+        // off, and a sink converts into airspeed instead of a sideways fall (rl#255).
+        let grip = (forward * speed - v) * p.grip;
+
+        ef.force = thrust + lift + drag + grip;
 
         let body_torque = Vec3::new(
             -control.pitch * p.pitch_torque,
@@ -523,6 +536,68 @@ mod tests {
         assert!(
             went_inverted,
             "held pitch never inverted the craft — a cap or auto-level crept in"
+        );
+    }
+
+    /// rl#255 regression: a sharp full-throttle turn must CARRY its speed, not skid it
+    /// off. Hold hard yaw through a big nose sweep and require (a) the nose really swept,
+    /// (b) the velocity followed the nose (the mechanism — the 0.93 floor is what grip
+    /// buys: thrust alone re-aligns only to ~0.87 here, grip holds ~0.97), (c) most of
+    /// the speed survived (the symptom).
+    #[test]
+    fn sharp_turn_carries_speed_and_velocity_follows_nose() {
+        let (mut app, e) =
+            app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
+        set_cmd(&mut app, |c| c.yaw = 1.0);
+        let s0 = body(&app, e).1.linear.length();
+        for _ in 0..120 {
+            app.update();
+        }
+        let (t, vel) = body(&app, e);
+        let nose = t.rotation * Vec3::Z;
+        assert!(
+            nose.z < 0.5,
+            "hard yaw did not sweep the nose far enough to test the turn: nose.z={}",
+            nose.z
+        );
+        let v = vel.linear;
+        let alignment = v.normalize().dot(nose);
+        assert!(
+            alignment > 0.93,
+            "velocity lagged the nose (skid) — grip must swing v to the new heading, \
+             got v̂·nose={alignment}"
+        );
+        let s1 = v.length();
+        assert!(
+            s1 > 0.7 * s0,
+            "sharp turn bled speed: {s0} -> {s1} (rl#255)"
+        );
+    }
+
+    /// The grip term redirects, never adds: a velocity 90° off the nose must swing toward
+    /// it without the speed growing. Gravity off and throttle zero, so grip's ≤ 0 power
+    /// is the only term that could be caught adding energy.
+    #[test]
+    fn grip_swings_velocity_toward_nose_without_adding_speed() {
+        let (mut app, e) =
+            app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(3.0, 0.0, 0.0));
+        let mut ent = app.world_mut().entity_mut(e);
+        ent.get_mut::<Vehicle>().unwrap().throttle = 0.0;
+        ent.insert(GravityScale(0.0));
+        let v0 = body(&app, e).1.linear;
+        for _ in 0..60 {
+            app.update();
+        }
+        let v1 = body(&app, e).1.linear;
+        assert!(
+            v1.z > v1.x.abs(),
+            "velocity did not swing toward the nose (+Z): {v1}"
+        );
+        assert!(
+            v1.length() <= v0.length(),
+            "grip added speed with zero throttle: {} -> {}",
+            v0.length(),
+            v1.length()
         );
     }
 
