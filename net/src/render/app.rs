@@ -225,7 +225,8 @@ pub(super) fn add_external_nn_crab(
         .add_plugins(crab_world::physics::CrabPhysicsPlugin)
         // The OPEN inference field — unbounded ground, no walls — so the crab's per-round
         // travel isn't capped at the ±10 m training box and it can chase a player (spawned
-        // ≥12 m out) clear across the map (rl#209). Training keeps the walled box.
+        // beyond sim::MIN_CRAB_SPAWN_DISTANCE) clear across the map (rl#209). Training keeps
+        // the walled box.
         .add_plugins(crab_world::physics::PhysicsWorldPlugin {
             arena: crab_world::physics::Arena::OpenField,
         })

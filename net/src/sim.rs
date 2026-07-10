@@ -132,11 +132,14 @@ pub const CRAB_SCALE: i64 = 12;
 /// derive from this one constant.
 pub const PLAYER_HEIGHT: f32 = 1.8;
 
-/// 2D reach of the grab around the crab's sim pos (the carapace ground point): the circle
-/// inscribed in her carapace footprint, in sim meters — "under her body" means "grabbed"
-/// (rl#236; the old 1.5 m reach was ~7× smaller than her own carapace and almost never
-/// landed). Pinned as an integer for the fixed-point sim; `grab_reach_matches_crab_body`
-/// re-derives it from the rig silhouette so body and reach cannot drift apart.
+/// 2D reach of the grab around the crab's sim pos (the carapace ground point — the bridge
+/// integrates carapace deltas): the circle inscribed in her carapace footprint, in sim
+/// meters — "under her body" means "grabbed" (rl#236; the old 1.5 m reach was ~7× smaller
+/// than her own carapace and almost never landed). Legs and claws deliberately do NOT
+/// grab — whether limb contact should is an open feel call (rl#236). Pinned as an integer
+/// for the fixed-point sim; `grab_reach_matches_crab_body` re-derives it from the rig
+/// silhouettes (the fitted body too, wherever the model asset resolves) so body and
+/// reach cannot drift apart.
 pub const CRAB_GRAB_RADIUS: i64 = 21 * UNIT / 2;
 
 const STARTUP_GRACE_TICKS: u64 = 30;
@@ -1337,32 +1340,54 @@ mod tests {
     }
 
     /// Pins [`CRAB_GRAB_RADIUS`] and [`MIN_CRAB_SPAWN_DISTANCE`] to the crab's actual body
-    /// (rl#236). Sim meters relate to the rig's natural meters by the sizing rule: her
-    /// natural height spans [`CRAB_SCALE`] × [`PLAYER_HEIGHT`]. The grab reach must be the
-    /// inscribed circle of her carapace footprint (never grabbing beyond the body, never
-    /// shrinking below ~85% of it), and spawns must clear the footprint's corner reach.
+    /// (rl#236). Sim meters relate to a rig's natural meters by the sizing rule: her
+    /// natural height spans [`CRAB_SCALE`] × [`PLAYER_HEIGHT`]. Against EVERY rig she can
+    /// wear (the procedural fallback always; the mesh-fitted recipe when sally.glb
+    /// resolves): the grab never reaches beyond the carapace footprint's inscribed circle
+    /// (the disc is anchored on the carapace, so inscribed = "certainly under her body"
+    /// whatever her yaw), and spawns clear the footprint's corner reach. Against the
+    /// smallest such body the pin is tight: within the half-meter it was floored to.
     #[test]
     fn grab_reach_matches_crab_body() {
         use crab_world::bot::rig::{RestShape, fallback_recipe, recipe_silhouette};
 
-        let sil = recipe_silhouette(&fallback_recipe());
-        let natural_height = sil.natural_height();
-        let RestShape::Cuboid { half, .. } = sil.carapace else {
-            panic!("the carapace silhouette is a cuboid");
-        };
-        let to_sim_m = CRAB_SCALE as f32 * PLAYER_HEIGHT / natural_height;
-        let inscribed_m = half.x.min(half.z) * to_sim_m;
-        let corner_m = half.x.hypot(half.z) * to_sim_m;
+        let mut recipes = vec![("fallback", fallback_recipe())];
+        match crab_world::mesh_fallback::usable_model() {
+            Ok(u) => recipes.push(("fitted", u.recipe.clone())),
+            // No asset on this host is a legitimate degrade (sally.glb is not in git);
+            // an asset that RESOLVES but can't be used is a breakage this test must not
+            // paper over.
+            Err(e) => assert!(
+                crab_world::bot::meshfit::model_path().is_none(),
+                "sally.glb resolves but is unusable: {e}"
+            ),
+        }
 
         let grab_m = CRAB_GRAB_RADIUS as f32 / UNIT as f32;
+        let mut tightest = f32::INFINITY;
+        for (name, recipe) in &recipes {
+            let sil = recipe_silhouette(recipe);
+            let RestShape::Cuboid { half, .. } = sil.carapace else {
+                panic!("the carapace silhouette is a cuboid");
+            };
+            let to_sim_m = CRAB_SCALE as f32 * PLAYER_HEIGHT / sil.natural_height();
+            let inscribed_m = half.x.min(half.z) * to_sim_m;
+            let corner_m = half.x.hypot(half.z) * to_sim_m;
+            assert!(
+                grab_m <= inscribed_m,
+                "{name}: grab reach {grab_m:.2} m pokes beyond the carapace's inscribed \
+                 footprint radius {inscribed_m:.2} m"
+            );
+            assert!(
+                (MIN_CRAB_SPAWN_DISTANCE as f32 / UNIT as f32) > corner_m,
+                "{name}: spawn clearance must exceed the carapace's corner reach {corner_m:.2} m"
+            );
+            tightest = tightest.min(inscribed_m);
+        }
         assert!(
-            grab_m <= inscribed_m && grab_m >= 0.85 * inscribed_m,
-            "grab reach {grab_m:.2} m must track the carapace's inscribed footprint radius \
-             {inscribed_m:.2} m"
-        );
-        assert!(
-            (MIN_CRAB_SPAWN_DISTANCE as f32 / UNIT as f32) > corner_m,
-            "spawn clearance must exceed the carapace's corner reach {corner_m:.2} m"
+            tightest - grab_m < 0.5,
+            "grab reach {grab_m:.2} m is looser than the half-meter floor of the smallest \
+             body's inscribed radius {tightest:.2} m — re-pin it"
         );
     }
 
