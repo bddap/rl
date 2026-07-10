@@ -242,7 +242,7 @@ fn eval_step(
     if !state.target_set
         && let Some(slot) = targets.envs.first_mut()
     {
-        let origin = spawns.0.first().copied().unwrap_or(Vec3::ZERO);
+        let origin = spawns.origin(0);
         *slot = Some(polar_target(
             origin,
             cfg.bearing_rad,

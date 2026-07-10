@@ -49,7 +49,7 @@ fn demo_respawn(
     actions: &mut CrabActions,
     init_rotation: Quat,
 ) {
-    let origin = spawns.0.first().copied().unwrap_or(Vec3::ZERO);
+    let origin = spawns.origin(0);
     respawn_crab_rotated(commands, assets, parts, origin, 0, init_rotation);
     settle.0 = RESET_GRACE_TICKS;
     if let Some(a) = actions.envs.first_mut() {

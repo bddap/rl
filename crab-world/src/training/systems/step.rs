@@ -171,7 +171,7 @@ fn gather_body_state(
             *c = Some(transform.translation);
         }
         if let Some(d) = drifts.get_mut(env.0) {
-            let origin = spawns.0.get(env.0).copied().unwrap_or(Vec3::ZERO);
+            let origin = spawns.origin(env.0);
             *d = Some(planar_dist(transform.translation, origin));
         }
     }
@@ -324,7 +324,7 @@ mod tests {
         targets.envs[0] = target;
         world.insert_resource(obs);
         world.insert_resource(targets);
-        world.insert_resource(CrabSpawns(vec![Vec3::ZERO]));
+        world.insert_resource(CrabSpawns::from_origins(vec![Vec3::ZERO]));
         world.spawn((CrabCarapace, CrabEnvId(0), carapace, Velocity::default()));
         world
             .run_system_once(crate::bot::sensor::build_observation)

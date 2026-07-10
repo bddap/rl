@@ -245,7 +245,7 @@ pub(crate) fn reset_crab(
             if let Some(v) = actions.envs.get_mut(e) {
                 *v = [0.0; ACTION_SIZE];
             }
-            let origin = spawns.0.get(e).copied().unwrap_or(Vec3::ZERO);
+            let origin = spawns.origin(e);
             let init_rotation = random_spawn_rotation(&mut training.rng);
             respawn_crab_rotated(
                 &mut commands,
