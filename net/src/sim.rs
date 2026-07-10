@@ -131,6 +131,9 @@ const STARTUP_GRACE_TICKS: u64 = 30;
 /// [`CRAB_GRAB_RADIUS`]. Also cross-checked by `grab_reach_matches_crab_body`.
 const MIN_CRAB_SPAWN_DISTANCE: i64 = 19 * UNIT;
 
+/// Spacing between player spawn slots along the z=0 spawn line.
+const SPAWN_SLOT_PITCH: i64 = 2 * UNIT;
+
 pub const EXTRACT_RADIUS: i64 = 2 * UNIT;
 
 pub(crate) const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
@@ -370,15 +373,39 @@ impl Sim {
             .position(|p| *p == pid)
             .unwrap_or(0) as i64;
         let n = self.config.players.len() as i64;
-        let x = (idx - n / 2) * 2 * UNIT;
+        let x = (idx - n / 2) * SPAWN_SLOT_PITCH;
         self.players.insert(
             pid,
             Player {
-                pos: Pos { x, z: 0 },
+                pos: self.nearest_clear_join_slot(x),
                 yaw: 0,
                 status: PlayerStatus::Alive,
             },
         );
+    }
+
+    /// Nearest spawn-line slot to `x` clear of every crab by [`MIN_CRAB_SPAWN_DISTANCE`]
+    /// — the same clearance round-start [`Self::spawn_crab`] keeps toward players, so a
+    /// mid-round joiner gets the round-start guarantee and is never Downed before its
+    /// first input (rl#247). Walks slots outward, alternating east/west, staying on the
+    /// z=0 line (no per-join grace: that would need wire-format state, and re-arming
+    /// `round_start` would grace everyone mid-fight).
+    fn nearest_clear_join_slot(&self, x: i64) -> Pos {
+        // A crab blocks a closed 2·MIN chord of the line: at most this many slots. The
+        // scan offers 2·blocked·crabs + 1 candidates, so one is always clear.
+        let blocked_per_crab = 2 * MIN_CRAB_SPAWN_DISTANCE / SPAWN_SLOT_PITCH + 1;
+        (0..=blocked_per_crab * self.crabs.len() as i64)
+            .flat_map(|d| [d, -d])
+            .map(|d| Pos {
+                x: x + d * SPAWN_SLOT_PITCH,
+                z: 0,
+            })
+            .find(|p| {
+                self.crabs
+                    .iter()
+                    .all(|c| !within(p.x, p.z, c.pos.x, c.pos.z, MIN_CRAB_SPAWN_DISTANCE))
+            })
+            .expect("the candidate count outnumbers the slots the crabs can block")
     }
 
     pub fn has_player(&self, pid: PlayerId) -> bool {
@@ -394,7 +421,7 @@ impl Sim {
         let mut map = BTreeMap::new();
         let n = cfg.players.len() as i64;
         for (i, &id) in cfg.players.iter().enumerate() {
-            let x = (i as i64 - n / 2) * 2 * UNIT;
+            let x = (i as i64 - n / 2) * SPAWN_SLOT_PITCH;
             map.insert(
                 id,
                 Player {
@@ -999,6 +1026,50 @@ mod tests {
         assert!(
             won,
             "a player who dodges the crab, reaches the point, and holds ACTION should extract"
+        );
+    }
+
+    /// rl#247: a mid-round joiner must never materialize inside a crab's lethal reach —
+    /// grace armed long ago, so an unlucky slot would Down them before their first input.
+    #[test]
+    fn joiner_never_spawns_inside_a_crab_grab_disc() {
+        let mut sim = Sim::new(0, &players(1));
+        let neutral = neutral_for(&sim);
+        for _ in 0..=STARTUP_GRACE_TICKS {
+            sim.step(&neutral);
+        }
+        // Park the crab dead on the joiner's roster slot (x=0 for idx 1 of 2).
+        let parked = Pos { x: 0, z: 0 };
+        sim.set_external_crab_pose(0, parked, 0);
+        sim.spawn_joining_player(PlayerId(1));
+        let pos = sim.player(PlayerId(1)).unwrap().pos();
+        assert_eq!(pos.z, 0, "slot selection stays on the spawn line");
+        assert!(
+            !within(pos.x, pos.z, parked.x, parked.z, MIN_CRAB_SPAWN_DISTANCE),
+            "joiner slot {pos:?} sits within the crab's spawn-clearance disc"
+        );
+        sim.step(&neutral_for(&sim));
+        assert_eq!(
+            sim.player(PlayerId(0)).unwrap().status(),
+            PlayerStatus::Downed,
+            "the parked crab grabs the host — proving the round is armed"
+        );
+        assert_eq!(
+            sim.player(PlayerId(1)).unwrap().status(),
+            PlayerStatus::Alive,
+            "the joiner survives its first armed tick"
+        );
+    }
+
+    #[test]
+    fn joiner_keeps_its_roster_slot_when_clear() {
+        let mut sim = Sim::new(0, &players(1));
+        // The default crab spawn (~21 m out) already clears the join slot.
+        sim.spawn_joining_player(PlayerId(1));
+        assert_eq!(
+            sim.player(PlayerId(1)).unwrap().pos(),
+            Pos { x: 0, z: 0 },
+            "an unobstructed joiner takes its roster slot exactly"
         );
     }
 
