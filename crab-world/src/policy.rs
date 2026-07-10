@@ -221,12 +221,12 @@ fn load_set_once(dir: &Path, device: &NdArrayDevice) -> SetRead {
         Ok(normalizer) => SetRead::Done(Loaded::Fit(brain, normalizer)),
         // The two coherence variants are the ones a straddled read can produce — every
         // other refusal is a property of the file itself and re-reading can't change it.
-        Err(
-            e @ (EnvelopeError::SaveStampMismatch { .. } | EnvelopeError::ArchMismatch { .. }),
-        ) => SetRead::Mispaired(format!(
-            "{}: {e} (a brain never arms without its paired obs normalizer)",
-            crate::training::checkpoint::NORMALIZER_FILENAME
-        )),
+        Err(e @ (EnvelopeError::SaveStampMismatch { .. } | EnvelopeError::ArchMismatch { .. })) => {
+            SetRead::Mispaired(format!(
+                "{}: {e} (a brain never arms without its paired obs normalizer)",
+                crate::training::checkpoint::NORMALIZER_FILENAME
+            ))
+        }
         Err(e) => SetRead::Done(Loaded::Refused(format!(
             "{}: {e} (a brain never arms without its paired obs normalizer)",
             crate::training::checkpoint::NORMALIZER_FILENAME
