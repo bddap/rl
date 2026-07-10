@@ -31,8 +31,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
 
     let boot = match result {
         net_loop::JoinResult::Joined(joined) => {
-            let (ls, driver) = *joined;
-            render::Boot::Round(Box::new((ls, Some(driver))))
+            let (client, driver) = *joined;
+            render::Boot::Round(Box::new((client, Some(driver))))
         }
         net_loop::JoinResult::Refused(reason) => {
             bail!(

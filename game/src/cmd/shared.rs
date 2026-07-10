@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use net::lockstep::Lockstep;
+use net::client::ClientSim;
 use net::sim::{Input, PlayerId, TICK_DT};
 
 pub(crate) const MATCH_SEED: u64 = 0x6372_6162;
@@ -123,38 +123,38 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
     use net::snapshot::CoreSnapshot;
 
     let me = PlayerId(0);
-    let mut ls = Lockstep::new(MATCH_SEED, &[me], me);
-    let mut server = Server::new(me, &[me], ls.sim().clone());
+    let mut client = ClientSim::new(MATCH_SEED, &[me], me);
+    let mut server = Server::new(me, &[me], client.sim().clone());
     let tick_dt = Duration::from_secs_f64(TICK_DT);
     let end = Instant::now() + Duration::from_secs(run_secs);
     let mut next = Instant::now();
     while Instant::now() < end {
-        let t = ls.next_tick() as f32 * 0.1;
-        let msg = ls.submit_local_input(Input::from_axes(t.cos(), t.sin()), None);
+        let t = client.next_tick() as f32 * 0.1;
+        let msg = client.submit_local_input(Input::from_axes(t.cos(), t.sin()), None);
         server.advance(msg);
         while server.next_tick_ready() {
             let bytes = server.step_next(&[]).snapshot;
-            ls.apply_core_snapshot(
+            client.apply_core_snapshot(
                 CoreSnapshot::from_bytes(&bytes).expect("the server's snapshot must decode"),
             );
         }
         next += tick_dt;
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
     }
-    let p = ls.sim().player(me).unwrap();
+    let p = client.sim().player(me).unwrap();
     let pos = p.pos();
-    let crab = ls.sim().crabs()[0].pos();
+    let crab = client.sim().crabs()[0].pos();
     println!(
         "solo: {} ticks, player=({}, {}) yaw={} status={:?}, crab=({}, {}), outcome={:?}, hash={:#018x}",
-        ls.sim().tick(),
+        client.sim().tick(),
         pos.x,
         pos.z,
         p.yaw(),
         p.status(),
         crab.x,
         crab.z,
-        ls.sim().outcome(),
-        ls.sim().state_hash()
+        client.sim().outcome(),
+        client.sim().state_hash()
     );
     Ok(())
 }

@@ -57,7 +57,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         1,
     )?;
 
-    let (ls, driver) = match result {
+    let (client, driver) = match result {
         net_loop::MatchResult::Joined(joined) => *joined,
         net_loop::MatchResult::Alone => {
             anyhow::bail!(
@@ -77,7 +77,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(0.0, args.cam_pitch)
         .with_fov(Some(args.cam_fov));
-    let mut app = render::build_net_screenshot_app(ls, driver, cfg, external_crab, render_mode);
+    let mut app = render::build_net_screenshot_app(client, driver, cfg, external_crab, render_mode);
     if !args.pilot_toggle_at.is_empty() || args.pilot_walk_at.is_some() {
         app.insert_resource(render::PilotScript::new(
             args.pilot_toggle_at,

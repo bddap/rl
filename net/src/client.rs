@@ -58,7 +58,7 @@ pub struct PeerMsg {
     pub msg: TickMsg,
 }
 
-pub struct Lockstep {
+pub struct ClientSim {
     sim: Sim,
     me: PlayerId,
     peers: Vec<PlayerId>,
@@ -78,7 +78,7 @@ pub struct Lockstep {
     next_apply_tick: u64,
 }
 
-impl Lockstep {
+impl ClientSim {
     pub fn new(seed: u64, peers: &[PlayerId], me: PlayerId) -> Self {
         let mut peers = peers.to_vec();
         peers.sort();
@@ -243,11 +243,11 @@ mod tests {
         let me = PlayerId(1);
         let roster = ids(2);
         let mut server = Server::new(host, &roster, Sim::new(42, &roster));
-        let mut host_sched = Lockstep::new(42, &roster, host); // the host's own input scheduler
-        let mut client = Lockstep::new(42, &roster, me);
+        let mut host_sched = ClientSim::new(42, &roster, host); // the host's own input scheduler
+        let mut client = ClientSim::new(42, &roster, me);
         // The pure-replay reference: our avatar driven by every issued input, in order — what a
         // zero-latency link would render. Prediction must match it exactly.
-        let mut reference = Lockstep::new(42, &roster, me);
+        let mut reference = ClientSim::new(42, &roster, me);
 
         const LATENCY: usize = 4; // ticks of one-way transit, both directions
         let mut wire_up: std::collections::VecDeque<TickMsg> = Default::default();
@@ -333,10 +333,10 @@ mod tests {
 
         let me = PlayerId(0);
         let roster = ids(1);
-        let mut client = Lockstep::new(7, &roster, me);
+        let mut client = ClientSim::new(7, &roster, me);
         let spawn = Sim::new(7, &roster).player(me).expect("rostered").pos();
 
-        let mut sched = Lockstep::new(7, &roster, me);
+        let mut sched = ClientSim::new(7, &roster, me);
         let mut host = Server::new(me, &roster, Sim::new(7, &roster));
         let mut arrivals = Vec::new();
         for t in 0..7u64 {
@@ -371,7 +371,7 @@ mod tests {
     fn prune_follows_the_watermark_not_the_tick() {
         let me = PlayerId(1);
         let roster = ids(2);
-        let mut client = Lockstep::new(9, &roster, me);
+        let mut client = ClientSim::new(9, &roster, me);
         for _ in 0..3 {
             let _ = client.submit_local_input(Input::from_axes(1.0, 0.0), None);
         }

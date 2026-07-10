@@ -47,11 +47,11 @@ pub(crate) fn run(args: Args) -> Result<()> {
         )?;
         match result {
             net_loop::MatchResult::Joined(joined) => {
-                let (ls, driver) = *joined;
-                render::Boot::Round(Box::new((ls, Some(driver))))
+                let (client, driver) = *joined;
+                render::Boot::Round(Box::new((client, Some(driver))))
             }
             net_loop::MatchResult::Alone => {
-                render::Boot::Round(Box::new((formation::solo_lockstep_for(MATCH_SEED), None)))
+                render::Boot::Round(Box::new((formation::solo_client_for(MATCH_SEED), None)))
             }
             net_loop::MatchResult::Cancelled => {
                 unreachable!("scripted --host/--join has no lobby to cancel")

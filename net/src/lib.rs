@@ -1,9 +1,9 @@
 pub mod articulation;
 pub mod cadence;
+pub mod client;
 pub mod controls;
 pub mod cordic;
 pub mod formation;
-pub mod lockstep;
 pub mod membership;
 pub mod net_loop;
 pub mod roster;

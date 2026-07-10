@@ -154,7 +154,7 @@ pub(super) fn spawn_world(
         ..default()
     });
 
-    let ex = state.ls.sim().extraction().pos();
+    let ex = state.client.sim().extraction().pos();
     let pillar_h = PLAYER_HEIGHT * CRAB_SCALE as f32 * 1.2;
     commands.spawn((
         DespawnOnExit(AppPhase::Playing),
@@ -197,7 +197,7 @@ pub(super) fn spawn_world(
             .entity(banner)
             .insert(DespawnOnExit(AppPhase::Playing));
     }
-    for (idx, crab) in state.ls.sim().crabs().iter().enumerate() {
+    for (idx, crab) in state.client.sim().crabs().iter().enumerate() {
         let crab_root = commands
             .spawn((
                 DespawnOnExit(AppPhase::Playing),
@@ -233,7 +233,7 @@ pub(super) fn reconcile_avatars(
     state: NonSend<GameState>,
     avatars: Query<(Entity, &PlayerAvatar)>,
 ) {
-    let sim = state.ls.sim();
+    let sim = state.client.sim();
     let have: std::collections::HashSet<PlayerId> = avatars
         .iter()
         .filter_map(|(entity, avatar)| {
@@ -245,7 +245,7 @@ pub(super) fn reconcile_avatars(
             }
         })
         .collect();
-    let local = state.ls.me();
+    let local = state.client.me();
     for (id, p) in sim.players() {
         if have.contains(&id) {
             continue;
@@ -429,9 +429,9 @@ pub(super) fn apply_transforms(
     mut crab_q: CrabXf,
     mut cam_q: CamXf,
 ) {
-    let sim = state.ls.sim();
+    let sim = state.client.sim();
     let alpha = (state.accumulator / TICK_DT).clamp(0.0, 1.0) as f32;
-    let local = state.ls.me();
+    let local = state.client.me();
 
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
         let Some(now) = sim.player(avatar.0) else {

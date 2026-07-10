@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use iroh::EndpointId;
 
-use crate::lockstep::{Lockstep, PeerMsg, TickMsg};
+use crate::client::{ClientSim, PeerMsg, TickMsg};
 use crate::membership::{BEAT_EVERY, Membership, Role, Status};
 use crate::sim::PlayerId;
 use crate::telemetry::{self, TelemetryEvent, TelemetrySender};
@@ -247,9 +247,9 @@ fn is_alone_at_timeout(expect: usize, live: usize) -> bool {
     expect > 1 && live == 1
 }
 
-pub fn solo_lockstep_for(seed: u64) -> Lockstep {
+pub fn solo_client_for(seed: u64) -> ClientSim {
     let me = PlayerId(0);
-    Lockstep::new(seed, &[me], me)
+    ClientSim::new(seed, &[me], me)
 }
 
 pub fn early_peer_msgs(frozen: &Frozen) -> Vec<PeerMsg> {

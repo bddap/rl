@@ -403,11 +403,11 @@ fn poll_rejoin(
     state.nav = MenuNav::new();
     match result {
         Ok(JoinResult::Joined(joined)) => {
-            let (lockstep, net) = *joined;
+            let (client, net) = *joined;
             state.last_host = None;
             arm_and_play(
                 menu::ReadyMatch {
-                    lockstep,
+                    client,
                     net: Some(net),
                 },
                 state,

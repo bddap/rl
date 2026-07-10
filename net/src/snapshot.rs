@@ -7,7 +7,7 @@ use crate::wire::{pos_bytes, pos_from_bytes};
 pub struct CoreSnapshot {
     /// The tick this snapshot is OF. A snapshot is a FULL state, so it versions the roster
     /// too — no separate roster epoch. (Clients adopt snapshots in arrival order:
-    /// [`crate::lockstep::Lockstep::adopt_snapshots`].)
+    /// [`crate::client::ClientSim::adopt_snapshots`].)
     pub tick: u64,
     pub players: BTreeMap<PlayerId, Player>,
     pub crabs: Vec<Crab>,
@@ -17,15 +17,15 @@ pub struct CoreSnapshot {
     /// [`Sim::state_hash`](crate::sim::Sim::state_hash) (config-level, not evolving state),
     /// so the round-trip test asserts it separately.
     pub roster: Vec<PlayerId>,
-    /// Per player, the first [`TickMsg::issue_tick`](crate::lockstep::TickMsg::issue_tick) NOT
+    /// Per player, the first [`TickMsg::issue_tick`](crate::client::TickMsg::issue_tick) NOT
     /// yet consumed into this state — the input watermark a remote client prunes + replays its
     /// own prediction window against
-    /// ([`Lockstep::reconcile_local_prediction`](crate::lockstep::Lockstep::reconcile_local_prediction)).
+    /// ([`ClientSim::reconcile_local_prediction`](crate::client::ClientSim::reconcile_local_prediction)).
     /// The host steps at its own pace and consumes a remote's inputs as they arrive
     /// ([`crate::server`]), so consumption trails issuance by the transit lag — this map is
     /// what keeps the client's replay exact. SERVER-owned coordination metadata, not sim state:
     /// [`Sim::core_snapshot`](crate::sim::Sim::core_snapshot) leaves it empty, the server
-    /// stamps it, and the client's `Lockstep` stashes + re-stamps it, so it is outside
+    /// stamps it, and the client's `ClientSim` stashes + re-stamps it, so it is outside
     /// `state_hash` (like `roster`).
     pub input_next: BTreeMap<PlayerId, u64>,
 }

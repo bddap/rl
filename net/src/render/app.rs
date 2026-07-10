@@ -1,5 +1,5 @@
 use super::driver::{
-    PendingRound, drive_lockstep, ensure_round_installed, insert_core, park_fixed_auto_pump,
+    PendingRound, drive_client_sim, ensure_round_installed, insert_core, park_fixed_auto_pump,
     teardown_round,
 };
 use super::hud::{spawn_hud, sync_controls_context, update_hud};
@@ -14,7 +14,7 @@ pub enum Boot {
         seed: u64,
         telemetry: Option<crate::menu::EndpointId>,
     },
-    Round(Box<(Lockstep, Option<NetDriver>)>),
+    Round(Box<(ClientSim, Option<NetDriver>)>),
 }
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -70,7 +70,7 @@ pub fn build_windowed_app(
             Update,
             (
                 gather_input,
-                drive_lockstep,
+                drive_client_sim,
                 reconcile_avatars,
                 apply_transforms,
                 follow_ground,
@@ -100,16 +100,14 @@ pub fn build_windowed_app(
 
     match boot {
         Boot::Round(round) => {
-            let (ls, net) = *round;
-            let armed = arm_round(crate::menu::ReadyMatch { lockstep: ls, net })
+            let (client, net) = *round;
+            let armed = arm_round(crate::menu::ReadyMatch { client, net })
                 .map_err(|msg| anyhow::anyhow!(msg))?;
-            let crate::menu::ReadyMatch {
-                lockstep: mut ls,
-                net,
-            } = armed.into_ready();
-            let spawns = seed_round_crabs(&mut ls, external_crab.len());
-            let coord = super::driver::coordinator(net, ls.peers(), ls.me(), ls.sim().clone());
-            insert_core(&mut app, ls, coord);
+            let crate::menu::ReadyMatch { mut client, net } = armed.into_ready();
+            let spawns = seed_round_crabs(&mut client, external_crab.len());
+            let coord =
+                super::driver::coordinator(net, client.peers(), client.me(), client.sim().clone());
+            insert_core(&mut app, client, coord);
             install_armed_nn_crab(&mut app, external_crab, spawns);
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
@@ -125,7 +123,7 @@ pub fn build_windowed_app(
             });
             {
                 let policies = external_crab;
-                let mut throwaway = crate::formation::solo_lockstep_for(seed);
+                let mut throwaway = crate::formation::solo_client_for(seed);
                 throwaway.configure_crabs(policies.len());
                 let crab_spawns: Vec<Pos> =
                     throwaway.sim().crabs().iter().map(|c| c.pos()).collect();
@@ -207,11 +205,11 @@ pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), Stri
     ))
 }
 
-pub(super) fn seed_round_crabs(ls: &mut Lockstep, crabs: usize) -> Vec<Pos> {
-    ls.configure_crabs(crabs);
-    let spawns: Vec<Pos> = ls.sim().crabs().iter().map(|c| c.pos()).collect();
-    for (idx, crab) in ls.sim().crabs().to_vec().into_iter().enumerate() {
-        ls.set_external_crab_pose(idx, crab.pos(), crab.yaw());
+pub(super) fn seed_round_crabs(client: &mut ClientSim, crabs: usize) -> Vec<Pos> {
+    client.configure_crabs(crabs);
+    let spawns: Vec<Pos> = client.sim().crabs().iter().map(|c| c.pos()).collect();
+    for (idx, crab) in client.sim().crabs().to_vec().into_iter().enumerate() {
+        client.set_external_crab_pose(idx, crab.pos(), crab.yaw());
     }
     spawns
 }

@@ -37,9 +37,9 @@ pub(super) fn update_hud(state: NonSend<GameState>, mut hud: Query<&mut Text, Wi
     let Ok(mut text) = hud.single_mut() else {
         return;
     };
-    let sim = state.ls.sim();
+    let sim = state.client.sim();
     let status = sim
-        .player(state.ls.me())
+        .player(state.client.me())
         .map(|p| match p.status() {
             PlayerStatus::Alive => "ALIVE",
             PlayerStatus::Downed => "DOWNED",

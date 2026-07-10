@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::lockstep::TickMsg;
+use crate::client::TickMsg;
 use crate::roster::RosterSchedule;
 use crate::sim::{Input, PlayerId, Pos, Sim};
 
@@ -253,7 +253,7 @@ pub struct Server {
     /// Per-REMOTE-player input streams. Created on a player's first recorded input, dropped on
     /// its departure — so stream presence implies currently rostered.
     streams: BTreeMap<PlayerId, InputStream>,
-    pilot_intents: BTreeMap<PlayerId, crate::lockstep::PilotIntent>,
+    pilot_intents: BTreeMap<PlayerId, crate::client::PilotIntent>,
     /// The AUTHORITATIVE world this server owns and steps. Its per-tick
     /// [`CoreSnapshot`](crate::snapshot::CoreSnapshot) is what every client renders. Stepped one
     /// tick at a time by [`Server::step_next`], gated by [`Server::next_tick_ready`].
@@ -347,7 +347,7 @@ impl Server {
         }
     }
 
-    fn file_intent(&mut self, pid: PlayerId, pilot: Option<crate::lockstep::PilotIntent>) {
+    fn file_intent(&mut self, pid: PlayerId, pilot: Option<crate::client::PilotIntent>) {
         match pilot {
             Some(intent) => {
                 let may_board = self.pilot_intents.contains_key(&pid)
@@ -561,7 +561,7 @@ impl Server {
         self.pilot_intents.remove(&pid);
     }
 
-    pub fn pilot_intents(&self) -> &BTreeMap<PlayerId, crate::lockstep::PilotIntent> {
+    pub fn pilot_intents(&self) -> &BTreeMap<PlayerId, crate::client::PilotIntent> {
         &self.pilot_intents
     }
 
@@ -578,7 +578,7 @@ impl Server {
     /// during formation) into their senders' streams. Nothing is discarded: the first assembled
     /// ticks consume them in issue order, and the live stream's re-delivery of the same issues
     /// is deduped by the stream itself.
-    pub fn seed_early(&mut self, early: &[crate::lockstep::PeerMsg]) {
+    pub fn seed_early(&mut self, early: &[crate::client::PeerMsg]) {
         for pm in early {
             self.record_remote(pm.pid, pm.msg);
         }
@@ -597,7 +597,7 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lockstep::Lockstep;
+    use crate::client::ClientSim;
     use crate::sim::buttons;
     use crate::snapshot::CoreSnapshot;
 
@@ -621,8 +621,8 @@ mod tests {
         }
     }
 
-    fn intent(kind: crab_world::vehicle::VehicleKind) -> crate::lockstep::PilotIntent {
-        crate::lockstep::PilotIntent {
+    fn intent(kind: crab_world::vehicle::VehicleKind) -> crate::client::PilotIntent {
+        crate::client::PilotIntent {
             kind,
             throttle_trim: 0.0,
             thrust: [0.0; 3],
@@ -1245,7 +1245,7 @@ mod tests {
     fn joiner_inputs_queue_until_the_effective_tick() {
         let mut s = srv(42, &ids(1));
         let adm = s.admit();
-        // The joiner starts issuing at its effective tick (`Lockstep::join_at`) the moment its
+        // The joiner starts issuing at its effective tick (`ClientSim::join_at`) the moment its
         // welcome lands — these arrive while the host is still assembling pre-join ticks.
         s.record_remote(
             adm.pid,
@@ -1318,11 +1318,11 @@ mod tests {
         }
 
         // --- Path B: the server steps its OWN sim and emits a serialized snapshot; a SEPARATE
-        // client sim is advanced SOLELY by `apply_core_snapshot`. The client [`Lockstep`] is
+        // client sim is advanced SOLELY by `apply_core_snapshot`. The client [`ClientSim`] is
         // exactly what the real driver holds (submit_local_input UP, apply snapshot DOWN).
         let mut server_hashes = Vec::new();
         {
-            let mut client = Lockstep::new(SEED, &roster, me);
+            let mut client = ClientSim::new(SEED, &roster, me);
             let mut server = Server::new(me, &roster, Sim::new(SEED, &roster));
             for i in 0..SUBMITS {
                 let msg = client.submit_local_input(input_at(i), None);
@@ -1510,7 +1510,7 @@ mod tests {
         assert_ne!(
             after.crabs[0].pos(),
             crab_spawn,
-            "the crab did NOT reset to spawn (no lockstep rebuild)"
+            "the crab did NOT reset to spawn (no rebuild-on-join)"
         );
         assert!(eff > JOIN_LEAD, "the join genuinely lands mid-round");
     }
