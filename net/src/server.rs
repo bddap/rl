@@ -280,10 +280,13 @@ pub struct SteppedTick {
     pub restarted: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct CrabPose {
     pub pos: Pos,
     pub yaw: i32,
+    /// This crab's claw colliders, bridged into sim space (rl#249) — empty on the paths
+    /// with no physics crab (they pass no poses at all).
+    pub claws: Vec<crate::sim::ClawPose>,
 }
 
 impl Server {
@@ -502,6 +505,8 @@ impl Server {
             for (idx, c) in crabs.iter().enumerate() {
                 self.sim.set_external_crab_pose(idx, c.pos, c.yaw);
             }
+            self.sim
+                .set_external_claws(crabs.iter().flat_map(|c| c.claws.iter().copied()).collect());
         }
         let restarted = self.sim.step(&pending.inputs);
         let mut snapshot = self.sim.core_snapshot();
@@ -1290,6 +1295,7 @@ mod tests {
                 z: -12_000 - tick as i64 * 7,
             },
             yaw: (tick as i32).wrapping_mul(4096),
+            claws: Vec::new(),
         };
         let input_at = |i: u64| {
             let strafe = ((i % 3) as f32 - 1.0) * 0.6;
@@ -1427,6 +1433,7 @@ mod tests {
                 z: -13_000 - tick as i64 * 9,
             },
             yaw: (tick as i32).wrapping_mul(2048),
+            claws: Vec::new(),
         };
         let input_at = |i: u64| Input::from_axes(((i % 3) as f32 - 1.0) * 0.5, 1.0);
 

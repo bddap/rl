@@ -26,7 +26,7 @@ use bevy_rapier3d::prelude::*;
 
 use crate::sim::Pos;
 use crab_world::Visuals;
-use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId};
+use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns};
 use crab_world::crab_view::CrabBrainLabels;
@@ -84,6 +84,18 @@ struct CrabBridge {
     /// count worth a log line (doubles per line, so a persistent miss is quantified
     /// without flooding).
     next_miss_log_ticks: u64,
+    /// Her claw pincers' REAL physics capsules as of the last physics tick (rl#249), in
+    /// arena meters: XZ relative to the same-tick carapace ground point (so the offsets
+    /// survive arena↔world drift and recenter teleports), y absolute (both grounds are
+    /// y = 0).
+    claws: Vec<ArenaClaw>,
+}
+
+/// One captured claw capsule — see [`CrabBridge::claws`] for the coordinate convention.
+struct ArenaClaw {
+    a: Vec3,
+    b: Vec3,
+    radius: f32,
 }
 
 fn pos_to_m(p: Pos) -> Vec2 {
@@ -109,6 +121,7 @@ impl CrabBridge {
             recenters: 0,
             missed_carapace_ticks: 0,
             next_miss_log_ticks: 1,
+            claws: Vec::new(),
         }
     }
 
@@ -121,6 +134,28 @@ impl CrabBridge {
             self.world_pos_m
         );
         Pos::from_meters(self.world_pos_m.x, self.world_pos_m.y)
+    }
+
+    /// Her captured claw capsules in sim space (rl#249): carapace-relative arena offsets
+    /// scaled by `to_sim` about her sim ground point (XZ) and the shared ground plane (y).
+    fn claw_poses(&self, to_sim: f32) -> Vec<crate::sim::ClawPose> {
+        let xz = |v: Vec3| {
+            crate::sim::Pos::from_meters(
+                self.world_pos_m.x + v.x * to_sim,
+                self.world_pos_m.y + v.z * to_sim,
+            )
+        };
+        let y = |v: Vec3| crate::sim::meters_to_grid(v.y * to_sim);
+        self.claws
+            .iter()
+            .map(|c| crate::sim::ClawPose {
+                a: xz(c.a),
+                b: xz(c.b),
+                a_y: y(c.a),
+                b_y: y(c.b),
+                radius: crate::sim::meters_to_grid(c.radius * to_sim),
+            })
+            .collect()
     }
 
     fn render_placement_m(&self) -> Option<CrabPlacement> {
@@ -138,6 +173,7 @@ impl CrabBridge {
         self.recenters = 0;
         self.missed_carapace_ticks = 0;
         self.next_miss_log_ticks = 1;
+        self.claws.clear();
     }
 
     /// One post-settle tick with no carapace to integrate: count it, and report at
@@ -173,11 +209,16 @@ impl ExternalCrabBridge {
     }
 
     pub fn crab_poses(&self) -> Vec<crate::server::CrabPose> {
+        // Natural rig meters → sim meters: the inverse of the ONE render-scale rule, the
+        // same anchoring `grab_reach_matches_crab_body` pins (her body spans
+        // CRAB_SCALE × PLAYER_HEIGHT in sim space).
+        let to_sim = 1.0 / crate::render::world_render_scale();
         self.crabs
             .iter()
             .map(|c| crate::server::CrabPose {
                 pos: c.world_pos(),
                 yaw: c.yaw_turns,
+                claws: c.claw_poses(to_sim),
             })
             .collect()
     }
@@ -520,6 +561,7 @@ fn integrate_crab(
     mut bridge: ResMut<ExternalCrabBridge>,
     mut rescued: MessageReader<crab_world::bot::CrabRescued>,
     carapace_q: Query<(&CrabEnvId, &Transform, &Velocity), With<CrabCarapace>>,
+    claw_q: Query<(&CrabEnvId, &Transform, &Collider), With<CrabClawTip>>,
 ) {
     let rescued_envs: std::collections::BTreeSet<usize> = rescued.read().map(|m| m.env).collect();
     for (idx, crab) in bridge.crabs.iter_mut().enumerate() {
@@ -556,6 +598,26 @@ fn integrate_crab(
             let radians = v.x.atan2(v.y);
             crab.yaw_turns = crate::sim::trig_client::radians_to_turns(radians);
         }
+
+        // Capture her claw pincers' REAL colliders against the same-tick carapace point
+        // (rl#249) — the sim decides claw-touch downs against these, so there is no
+        // second hitbox to drift from the physics claw.
+        crab.claws = claw_q
+            .iter()
+            .filter(|(env, ..)| env.0 == idx)
+            .filter_map(|(_, t, col)| {
+                let cap = col.as_capsule()?;
+                let rel = |p: Vec3| {
+                    let w = t.transform_point(p);
+                    Vec3::new(w.x - here.x, w.y, w.z - here.y)
+                };
+                Some(ArenaClaw {
+                    a: rel(cap.segment().a()),
+                    b: rel(cap.segment().b()),
+                    radius: cap.radius(),
+                })
+            })
+            .collect();
     }
 }
 

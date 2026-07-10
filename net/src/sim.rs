@@ -106,12 +106,22 @@ pub const PLAYER_HEIGHT: f32 = 1.8;
 /// 2D reach of the grab around the crab's sim pos (the carapace ground point — the bridge
 /// integrates carapace deltas): the circle inscribed in her carapace footprint, in sim
 /// meters — "under her body" means "grabbed" (rl#236; the old 1.5 m reach was ~7× smaller
-/// than her own carapace and almost never landed). Legs and claws deliberately do NOT
-/// grab — whether limb contact should is an open feel call (rl#236). Pinned as an integer
-/// for the fixed-point sim; `grab_reach_matches_crab_body` re-derives it from the rig
-/// silhouettes (the fitted body too, wherever the model asset resolves) so body and
-/// reach cannot drift apart.
+/// than her own carapace and almost never landed). Legs deliberately do NOT grab; claw
+/// contact downs separately, against the real claw colliders ([`ClawPose`], rl#249).
+/// Pinned as an integer for the fixed-point sim; `grab_reach_matches_crab_body`
+/// re-derives it from the rig silhouettes (the fitted body too, wherever the model asset
+/// resolves) so body and reach cannot drift apart.
 pub const CRAB_GRAB_RADIUS: i64 = 21 * UNIT / 2;
+
+/// "Very close" slack around a claw collider (rl#249): the sim player is a point, so this
+/// covers their body radius plus the near-miss feel margin — and absorbs one tick of claw
+/// sweep (the capsule is sampled per tick, not swept). Pure feel parameter; tune on
+/// playtest.
+pub const CLAW_DOWN_BUFFER: i64 = UNIT;
+
+/// The player's height span for the claw check, on the fixed-point grid: a claw passing
+/// clear overhead must not down anyone.
+const PLAYER_HEIGHT_FP: i64 = (PLAYER_HEIGHT * UNIT as f32) as i64;
 
 const STARTUP_GRACE_TICKS: u64 = 30;
 
@@ -149,10 +159,16 @@ impl Pos {
     /// exactly the cast the external-crab bridge has always used).
     pub fn from_meters(x_m: f32, z_m: f32) -> Self {
         Pos {
-            x: (x_m * UNIT as f32) as i64,
-            z: (z_m * UNIT as f32) as i64,
+            x: meters_to_grid(x_m),
+            z: meters_to_grid(z_m),
         }
     }
+}
+
+/// Scalar leg of [`Pos::from_meters`], for the heights that ride beside a `Pos`
+/// (a claw capsule's y — [`ClawPose`]).
+pub fn meters_to_grid(m: f32) -> i64 {
+    (m * UNIT as f32) as i64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +198,37 @@ impl Player {
 pub struct Crab {
     pos: Pos,
     yaw: i32,
+}
+
+/// One of Sally's claw colliders as of this tick, bridged into sim space: the pincer's
+/// real physics capsule (rl#249 — no separate hitbox to drift), as an XZ segment with
+/// per-end heights and the capsule radius, all on the fixed-point grid. Like the crab
+/// pose this is external per-tick INPUT, not round state: the server's bridge refreshes
+/// it before every step, clients never see it (they receive the resulting
+/// [`PlayerStatus`] via snapshot), so it is excluded from `state_hash` and
+/// `core_snapshot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClawPose {
+    pub a: Pos,
+    pub b: Pos,
+    pub a_y: i64,
+    pub b_y: i64,
+    pub radius: i64,
+}
+
+impl ClawPose {
+    /// Whether this claw touches (within [`CLAW_DOWN_BUFFER`]) a player standing at `p`:
+    /// the player's vertical span must meet the capsule's reach-fattened height band, and
+    /// their XZ point must lie within reach of the capsule's XZ segment.
+    fn downs(&self, p: Pos) -> bool {
+        let reach = self.radius + CLAW_DOWN_BUFFER;
+        let (lo, hi) = (self.a_y.min(self.b_y) - reach, self.a_y.max(self.b_y) + reach);
+        if hi < 0 || lo > PLAYER_HEIGHT_FP {
+            return false;
+        }
+        let (cx, cz) = closest_on_segment(self.a, self.b, p);
+        within(p.x, p.z, cx, cz, reach)
+    }
 }
 
 impl Crab {
@@ -220,6 +267,9 @@ pub struct Sim {
     tick: u64,
     players: BTreeMap<PlayerId, Player>,
     crabs: Vec<Crab>,
+    /// All crabs' claw colliders as of this tick, pooled (the down check doesn't care
+    /// which crab owns a claw). External per-tick input, not state — see [`ClawPose`].
+    claws: Vec<ClawPose>,
     extraction: ExtractionPoint,
     outcome: Outcome,
     rng: ChaCha8Rng,
@@ -250,6 +300,7 @@ impl Sim {
             tick: 0,
             players,
             crabs,
+            claws: Vec::new(),
             extraction,
             outcome: Outcome::Ongoing,
             rng: ChaCha8Rng::seed_from_u64(seed),
@@ -283,11 +334,19 @@ impl Sim {
         self.crabs[crab].yaw = yaw;
     }
 
+    /// Refresh this tick's claw colliders (rl#249). Server-only, before each step; stale
+    /// claws must not outlive the tick that measured them, so the bridge overwrites the
+    /// whole set every time.
+    pub fn set_external_claws(&mut self, claws: Vec<ClawPose>) {
+        self.claws = claws;
+    }
+
     fn reset(&mut self) {
         let (players, crabs, extraction) = Self::spawn_state(&self.config);
         self.round_start = self.tick;
         self.players = players;
         self.crabs = crabs;
+        self.claws.clear();
         self.extraction = extraction;
         self.outcome = Outcome::Ongoing;
         self.rng = ChaCha8Rng::seed_from_u64(self.config.seed);
@@ -426,6 +485,13 @@ impl Sim {
                     }
                 }
             }
+            for claw in &self.claws {
+                for p in self.players.values_mut() {
+                    if p.status == PlayerStatus::Alive && claw.downs(p.pos) {
+                        p.status = PlayerStatus::Downed;
+                    }
+                }
+            }
         }
 
         let ex = self.extraction.pos;
@@ -511,6 +577,9 @@ impl Sim {
             tick,
             players,
             crabs,
+            // External per-tick input, server-only — never replicated, so hashing it
+            // would desync every host/client comparison (see [`ClawPose`]).
+            claws: _,
             extraction,
             outcome,
             rng,
@@ -576,6 +645,8 @@ impl Sim {
             tick,
             players,
             crabs,
+            // Input, not state — the down decisions it produced are already in `players`.
+            claws: _,
             extraction: _,
             outcome,
             rng: _,
@@ -624,6 +695,23 @@ fn dist2_i128(dx: i64, dz: i64) -> i128 {
 
 fn within(ax: i64, az: i64, bx: i64, bz: i64, r: i64) -> bool {
     dist2_i128(ax - bx, az - bz) <= (r as i128) * (r as i128)
+}
+
+/// The point on segment `a`–`b` nearest to `p`, on the fixed-point grid. i128
+/// intermediates: coordinates are bounded (|x| ≤ 100 km · UNIT, segments are claw-sized),
+/// so the products stay far inside the type; the one truncating division costs at most a
+/// grid unit (1 mm) — noise against [`CLAW_DOWN_BUFFER`].
+fn closest_on_segment(a: Pos, b: Pos, p: Pos) -> (i64, i64) {
+    let (dx, dz) = ((b.x - a.x) as i128, (b.z - a.z) as i128);
+    let len2 = dx * dx + dz * dz;
+    if len2 == 0 {
+        return (a.x, a.z);
+    }
+    let t = ((p.x - a.x) as i128 * dx + (p.z - a.z) as i128 * dz).clamp(0, len2);
+    (
+        (a.x as i128 + dx * t / len2) as i64,
+        (a.z as i128 + dz * t / len2) as i64,
+    )
 }
 
 fn isqrt_i128(n: i128) -> i128 {
@@ -1202,6 +1290,91 @@ mod tests {
             sim.player(PlayerId(0)).unwrap().status(),
             PlayerStatus::Downed,
             "crab arms and grabs once the grace ends"
+        );
+    }
+
+    /// A claw capsule at body height. `dx` slides it sideways off the player so the
+    /// near-miss cases stay one call.
+    fn claw_at(p: Pos, dx: i64, y: i64) -> ClawPose {
+        ClawPose {
+            a: Pos {
+                x: p.x + dx - 2 * UNIT,
+                z: p.z,
+            },
+            b: Pos {
+                x: p.x + dx + 2 * UNIT,
+                z: p.z,
+            },
+            a_y: y,
+            b_y: y,
+            radius: UNIT / 2,
+        }
+    }
+
+    #[test]
+    fn claw_touch_downs_a_player_after_the_grace() {
+        let mut sim = Sim::new(0, &players(1));
+        let p = sim.player(PlayerId(0)).unwrap().pos();
+        assert!(
+            !within(
+                p.x,
+                p.z,
+                sim.crabs()[0].pos().x,
+                sim.crabs()[0].pos().z,
+                CRAB_GRAB_RADIUS
+            ),
+            "the player must spawn outside the grab circle for this to isolate the claw path"
+        );
+        sim.set_external_claws(vec![claw_at(p, 0, UNIT)]);
+        let neutral = neutral_for(&sim);
+        for _ in 0..STARTUP_GRACE_TICKS {
+            sim.step(&neutral);
+            assert_eq!(
+                sim.player(PlayerId(0)).unwrap().status(),
+                PlayerStatus::Alive,
+                "no claw down during the startup grace"
+            );
+        }
+        sim.step(&neutral);
+        assert_eq!(
+            sim.player(PlayerId(0)).unwrap().status(),
+            PlayerStatus::Downed,
+            "a touching claw downs the player once armed"
+        );
+    }
+
+    #[test]
+    fn claw_misses_do_not_down() {
+        let mut sim = Sim::new(0, &players(1));
+        let p = sim.player(PlayerId(0)).unwrap().pos();
+        let neutral = neutral_for(&sim);
+        let step_armed = |sim: &mut Sim, claw: ClawPose| {
+            sim.set_external_claws(vec![claw]);
+            for _ in 0..=STARTUP_GRACE_TICKS + 1 {
+                sim.step(&neutral);
+            }
+            sim.player(PlayerId(0)).unwrap().status()
+        };
+
+        // Sweeping clear overhead: same XZ, but above the player's height span.
+        assert_eq!(
+            step_armed(&mut sim, claw_at(p, 0, 10 * UNIT)),
+            PlayerStatus::Alive,
+            "a claw passing overhead must not down anyone"
+        );
+        // Beside the player at body height, just past radius + buffer (measured from the
+        // segment's near END — the segment check, not an endpoint/center approximation).
+        let reach = UNIT / 2 + CLAW_DOWN_BUFFER;
+        assert_eq!(
+            step_armed(&mut sim, claw_at(p, 2 * UNIT + reach + UNIT / 10, UNIT)),
+            PlayerStatus::Alive,
+            "a near miss beyond the buffer must not down"
+        );
+        // Same offset, but within reach of the near end: downs.
+        assert_eq!(
+            step_armed(&mut sim, claw_at(p, 2 * UNIT + reach - UNIT / 10, UNIT)),
+            PlayerStatus::Downed,
+            "within the buffer of the capsule segment downs"
         );
     }
 
