@@ -29,7 +29,7 @@ pub enum AppPhase {
 
 pub fn build_windowed_app(
     boot: Boot,
-    external_crab: Vec<std::path::PathBuf>,
+    external_crab: Vec<crab_world::play::Policy>,
     render_mode: super::RenderMode,
 ) -> anyhow::Result<App> {
     // NO determinism pin, on ANY boot (rl#199): only the solo/host peer steps the float NN
@@ -123,12 +123,12 @@ pub fn build_windowed_app(
                 crab_count: external_crab.len() as u8,
             });
             {
-                let dirs = external_crab;
+                let policies = external_crab;
                 let mut throwaway = crate::formation::solo_lockstep_for(seed);
-                throwaway.configure_crabs(dirs.len());
+                throwaway.configure_crabs(policies.len());
                 let crab_spawns: Vec<Pos> =
                     throwaway.sim().crabs().iter().map(|c| c.pos()).collect();
-                add_external_nn_crab(&mut app, dirs, crab_spawns);
+                add_external_nn_crab(&mut app, policies, crab_spawns);
                 app.insert_resource(crab_world::bot::NumEnvs(0));
                 app.insert_resource(ExternalCrabStackInstalled);
             }
@@ -217,11 +217,11 @@ pub(super) fn seed_round_crabs(ls: &mut Lockstep, crabs: usize) -> Vec<Pos> {
 
 pub(super) fn add_external_nn_crab(
     app: &mut App,
-    checkpoint_dirs: Vec<std::path::PathBuf>,
+    policies: Vec<crab_world::play::Policy>,
     crab_spawns: Vec<Pos>,
 ) {
     app.insert_resource(crab_world::Visuals(true))
-        .insert_resource(crab_world::bot::NumEnvs(checkpoint_dirs.len()))
+        .insert_resource(crab_world::bot::NumEnvs(policies.len()))
         .add_plugins(crab_world::physics::CrabPhysicsPlugin)
         // The OPEN inference field — unbounded ground, no walls — so the crab's per-round
         // travel isn't capped at the ±10 m training box and it can chase a player (spawned
@@ -232,19 +232,19 @@ pub(super) fn add_external_nn_crab(
         })
         .add_plugins(crab_world::bot::BotPlugin)
         .add_plugins(crab_world::vehicle::VehiclePlugin)
-        .add_plugins(crate::external_crab::ExternalCrabPlugin {
-            checkpoint_dirs,
+        .add_plugins(crate::external_crab::ExternalCrabPlugin::new(
+            policies,
             crab_spawns,
-        });
+        ));
 
     park_fixed_auto_pump(app.world_mut());
 }
 
 pub(super) fn install_armed_nn_crab(
     app: &mut App,
-    checkpoint_dirs: Vec<std::path::PathBuf>,
+    policies: Vec<crab_world::play::Policy>,
     crab_spawns: Vec<Pos>,
 ) {
-    add_external_nn_crab(app, checkpoint_dirs, crab_spawns);
+    add_external_nn_crab(app, policies, crab_spawns);
     crate::external_crab::arm(app.world_mut());
 }

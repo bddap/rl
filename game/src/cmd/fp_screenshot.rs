@@ -3,7 +3,7 @@ use clap::Parser;
 use net::render;
 use net::sim::PlayerId;
 
-use super::shared::{MATCH_SEED, nn_crab_checkpoint_dir, resolve_render_mode};
+use super::shared::{MATCH_SEED, nn_crab_policy, resolve_render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -39,7 +39,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .with_fov(args.cam_fov);
     let external_crab = args
         .nn_crab_checkpoint
-        .map(|flag| nn_crab_checkpoint_dir(Some(flag)))
+        .map(|flag| nn_crab_policy(Some(flag)).map(|(_, policy)| policy))
         .transpose()?;
     let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
     render::build_screenshot_app(ls, cfg, external_crab, render_mode).run();

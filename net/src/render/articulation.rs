@@ -108,6 +108,14 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         .unwrap_or_default();
 
     let n_crabs = by_env.keys().last().map_or(0, |&max| max + 1);
+    // Labels publish once the armed FixedUpdate first ticks — empty is the legitimate
+    // pre-tick frame. A NON-empty mismatch is the rl#241 slot-desync class: it would
+    // silently blank a crab's rl#200 who's-who attribution on every client.
+    debug_assert!(
+        labels.is_empty() || labels.len() == n_crabs,
+        "brain labels desynced from crab envs: {} labels for {n_crabs} crabs",
+        labels.len()
+    );
     let crabs = (0..n_crabs)
         .map(|env| {
             let mut parts = by_env.remove(&env).unwrap_or_default();

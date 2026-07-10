@@ -75,6 +75,15 @@ struct CrabBridge {
     next_drift_log_m: f32,
     /// Recenter teleports this round (rl#240) — stays 0 while the flip is gated off.
     recenters: u32,
+    /// Consecutive post-settle ticks [`integrate_crab`] found no carapace for this env —
+    /// the crab's world pos freezes at its last integrate (still lethal there) while the
+    /// sim looks healthy, so the miss is counted and reported like drift, never skipped
+    /// silently (rl#241). Resets when the carapace comes back.
+    missed_carapace_ticks: u64,
+    /// Log cursor for the miss counter, [`next_drift_log_m`]'s sibling: the next miss
+    /// count worth a log line (doubles per line, so a persistent miss is quantified
+    /// without flooding).
+    next_miss_log_ticks: u64,
 }
 
 fn pos_to_m(p: Pos) -> Vec2 {
@@ -98,6 +107,8 @@ impl CrabBridge {
             settle: crab_world::bot::RESET_GRACE_TICKS,
             next_drift_log_m: TARGET_ARENA_HALF,
             recenters: 0,
+            missed_carapace_ticks: 0,
+            next_miss_log_ticks: 1,
         }
     }
 
@@ -125,6 +136,28 @@ impl CrabBridge {
         self.settle = crab_world::bot::RESET_GRACE_TICKS;
         self.next_drift_log_m = TARGET_ARENA_HALF;
         self.recenters = 0;
+        self.missed_carapace_ticks = 0;
+        self.next_miss_log_ticks = 1;
+    }
+
+    /// One post-settle tick with no carapace to integrate: count it, and report at
+    /// doubling thresholds — loud but bounded, the drift guard's reporting shape (rl#241).
+    fn note_missed_carapace(&mut self, idx: usize) {
+        self.missed_carapace_ticks += 1;
+        if self.missed_carapace_ticks >= self.next_miss_log_ticks {
+            error!(
+                "external_crab: env {idx} has no carapace to integrate — world pos frozen \
+                 for {} ticks (the crab still kills players at its stale position); a \
+                 despawn/wiring bug, not a legitimate state (rl#241)",
+                self.missed_carapace_ticks
+            );
+            self.next_miss_log_ticks = self.missed_carapace_ticks * 2;
+        }
+    }
+
+    fn carapace_found(&mut self) {
+        self.missed_carapace_ticks = 0;
+        self.next_miss_log_ticks = 1;
     }
 }
 
@@ -213,37 +246,40 @@ pub fn arm(world: &mut World) {
 }
 
 pub struct ExternalCrabPlugin {
-    pub checkpoint_dirs: Vec<std::path::PathBuf>,
-    pub crab_spawns: Vec<Pos>,
+    /// The policies the launch gate loaded and vetted — the plugin never touches disk, so
+    /// what the gate armed IS what drives (rl#241: the old plugin-side re-load could race
+    /// a checkpoint swap and warn-and-arm a rest-pose statue the gate never saw). `Mutex<
+    /// Option<…>>` only because `Plugin::build` takes `&self`; `build` moves them out.
+    policies: std::sync::Mutex<Option<Vec<Policy>>>,
+    crab_spawns: Vec<Pos>,
+}
+
+impl ExternalCrabPlugin {
+    pub fn new(policies: Vec<Policy>, crab_spawns: Vec<Pos>) -> Self {
+        Self {
+            policies: std::sync::Mutex::new(Some(policies)),
+            crab_spawns,
+        }
+    }
 }
 
 impl Plugin for ExternalCrabPlugin {
     fn build(&self, app: &mut App) {
+        let policies = self
+            .policies
+            .lock()
+            .unwrap()
+            .take()
+            .expect("ExternalCrabPlugin is built once");
         assert!(
-            !self.checkpoint_dirs.is_empty(),
+            !policies.is_empty(),
             "a round runs at least one brain binding (rl#114)"
         );
         assert_eq!(
-            self.checkpoint_dirs.len(),
+            policies.len(),
             self.crab_spawns.len(),
             "one crab spawn per brain binding — the sim's crab count must match the bindings"
         );
-        let policies: Vec<Policy> = self
-            .checkpoint_dirs
-            .iter()
-            .enumerate()
-            .map(|(idx, dir)| {
-                let policy = Policy::load(dir);
-                if !policy.is_loaded() {
-                    warn!(
-                        "external_crab: no usable checkpoint for crab {idx} at {} — that NN \
-                         crab holds rest pose",
-                        dir.display()
-                    );
-                }
-                policy
-            })
-            .collect();
         app.insert_non_send_resource(CrabPolicies(policies));
         app.insert_resource(ExternalCrabBridge::new(&self.crab_spawns));
 
@@ -356,6 +392,8 @@ fn bound_body_pos_drift(
             .find(|(env, _, cara)| env.0 == idx && cara.is_some())
             .map(|(_, t, _)| t.translation)
         else {
+            // Same absence [`integrate_crab`] counts and reports this tick (rl#241) —
+            // one counter, not two log streams for one missing entity.
             continue;
         };
         if !carapace.is_finite() {
@@ -446,22 +484,32 @@ fn run_crab_policy(
     obs: Res<crab_world::bot::sensor::CrabObservation>,
     mut actions: ResMut<crab_world::bot::actuator::CrabActions>,
 ) {
-    assert_eq!(
-        policies.0.len(),
-        bridge.crabs.len(),
-        "one policy per bridged crab"
-    );
+    let crab_count = bridge.crabs.len();
+    assert_eq!(policies.0.len(), crab_count, "one policy per bridged crab");
     for (idx, (policy, crab)) in policies.0.iter().zip(bridge.crabs.iter_mut()).enumerate() {
         if crab.settle > 0 {
             crab.settle = crab_world::bot::settle_countdown(crab.settle);
+            // Pre-spawn the env slots don't exist yet (`spawn_initial_crabs` sizes them on
+            // the first armed Update, and FixedUpdate can tick first) — that window lives
+            // entirely inside the settle grace, which is why the slot check below is a
+            // hard assert and not a skip.
             if let Some(a) = actions.envs.get_mut(idx) {
                 *a = [0.0; crab_world::bot::actuator::ACTION_SIZE];
             }
             continue;
         }
-        if let (Some(o), Some(a)) = (obs.envs.get(idx), actions.envs.get_mut(idx)) {
-            *a = policy.act(o);
-        }
+        // Post-settle, a missing slot means this crab would hold rest pose in a live
+        // round — a wiring bug, never a condition to skip past silently (rl#241).
+        let (Some(o), Some(a)) = (obs.envs.get(idx), actions.envs.get_mut(idx)) else {
+            panic!(
+                "external_crab: crab {idx} has no env slot ({} obs / {} action slots sized \
+                 for {} crabs) — it would silently hold rest pose in a live round (rl#241)",
+                obs.envs.len(),
+                actions.envs.len(),
+                crab_count,
+            );
+        };
+        *a = policy.act(o);
     }
 }
 
@@ -480,10 +528,17 @@ fn integrate_crab(
         }
 
         let Some((_, t, vel)) = carapace_q.iter().find(|(env, _, _)| env.0 == idx) else {
+            // Pre-spawn (inside the settle grace) the carapace legitimately doesn't
+            // exist yet; past it, a miss freezes this crab's world pos — count and
+            // report it (rl#241).
+            if crab.settle == 0 {
+                crab.note_missed_carapace(idx);
+            }
             continue;
         };
+        crab.carapace_found();
         if !t.translation.is_finite() {
-            continue;
+            continue; // the rescue path owns non-finite crabs (a Fault when armed)
         }
         let here = Vec2::new(t.translation.x, t.translation.z);
         if crab.settle == 0
@@ -541,8 +596,9 @@ mod recenter_tests {
 
     use super::*;
 
-    /// The GCR client's stack minus the sim: OpenField arena, one bridged crab. The bogus
-    /// checkpoint dir loads no policy, so the crab just stands — drift is injected by hand.
+    /// The GCR client's stack minus the sim: OpenField arena, one bridged crab. The
+    /// explicit rest-pose policy drives nothing, so the crab just stands — drift is
+    /// injected by hand.
     fn gcr_like_app() -> App {
         pin_single_thread_pools();
         let mut app = headless_stack(HeadlessStack {
@@ -550,10 +606,10 @@ mod recenter_tests {
             role: WorldRole::Standalone,
             arena: crab_world::physics::Arena::OpenField,
         });
-        app.add_plugins(ExternalCrabPlugin {
-            checkpoint_dirs: vec![std::path::PathBuf::from("/nonexistent-rl240-test")],
-            crab_spawns: vec![Pos::from_meters(0.0, 0.0)],
-        });
+        app.add_plugins(ExternalCrabPlugin::new(
+            vec![Policy::rest()],
+            vec![Pos::from_meters(0.0, 0.0)],
+        ));
         arm(app.world_mut());
         force_serial_schedules(&mut app);
         // Past bridge settle (RESET_GRACE_TICKS) so the world-pos integrator is live.

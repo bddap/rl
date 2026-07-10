@@ -3,7 +3,7 @@ use clap::Parser;
 use iroh::EndpointId;
 use net::{net_loop, render};
 
-use super::shared::{MATCH_SEED, nn_crab_checkpoint_dirs, resolve_render_mode};
+use super::shared::{MATCH_SEED, nn_crab_policies, resolve_render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -18,7 +18,7 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    let external_crab = nn_crab_checkpoint_dirs(args.nn_crab_checkpoint)?;
+    let external_crab = nn_crab_policies(args.nn_crab_checkpoint)?;
     let asset_digest = crab_world::mesh_fallback::constructed_body_digest();
 
     let result = net_loop::connect_and_join(

@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use net::{net_loop, render};
 
-use super::shared::{MATCH_SEED, nn_crab_checkpoint_dir, parse_join_dial, resolve_render_mode};
+use super::shared::{MATCH_SEED, nn_crab_policy, parse_join_dial, resolve_render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -42,7 +42,7 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    let external_crab = nn_crab_checkpoint_dir(args.nn_crab_checkpoint)?;
+    let (_, external_crab) = nn_crab_policy(args.nn_crab_checkpoint)?;
     let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
 
     let dial = parse_join_dial(args.join.as_deref())?;

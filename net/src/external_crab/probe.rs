@@ -111,7 +111,7 @@ fn probe_step(
     }
 }
 
-fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> bevy::app::App {
+fn headless_nn_crab_app(policy: crab_world::play::Policy, crab_spawn: Pos) -> bevy::app::App {
     use crab_world::bot::headless::{
         HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
     };
@@ -125,17 +125,14 @@ fn headless_nn_crab_app(checkpoint_dir: &std::path::Path, crab_spawn: Pos) -> be
         // field (rl#209), not the walled training box.
         arena: crab_world::physics::Arena::OpenField,
     });
-    app.add_plugins(ExternalCrabPlugin {
-        checkpoint_dirs: vec![checkpoint_dir.to_path_buf()],
-        crab_spawns: vec![crab_spawn],
-    });
+    app.add_plugins(ExternalCrabPlugin::new(vec![policy], vec![crab_spawn]));
     super::arm(app.world_mut());
     force_serial_schedules(&mut app);
     app
 }
 
 pub fn run_headless_probe(
-    checkpoint_dir: &std::path::Path,
+    policy: crab_world::play::Policy,
     seed: u64,
     ticks: u64,
     log_every: u64,
@@ -146,7 +143,7 @@ pub fn run_headless_probe(
     let crab = sim.crabs()[0];
     sim.set_external_crab_pose(0, crab.pos(), crab.yaw());
 
-    let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
+    let mut app = headless_nn_crab_app(policy, crab_spawn);
     app.insert_non_send_resource(ProbeDriver {
         sim,
         samples: Vec::new(),
@@ -179,7 +176,7 @@ impl StabilityResult {
 }
 
 pub fn run_vehicle_stability_probe(
-    checkpoint_dir: &std::path::Path,
+    policy: crab_world::play::Policy,
     seed: u64,
     warmup: u64,
     post: u64,
@@ -192,7 +189,7 @@ pub fn run_vehicle_stability_probe(
     let crab = sim.crabs()[0];
     sim.set_external_crab_pose(0, crab.pos(), crab.yaw());
 
-    let mut app = headless_nn_crab_app(checkpoint_dir, crab_spawn);
+    let mut app = headless_nn_crab_app(policy, crab_spawn);
     app.insert_non_send_resource(ProbeDriver {
         sim,
         samples: Vec::new(),
