@@ -223,7 +223,10 @@ impl ClawPose {
     /// their XZ point must lie within reach of the capsule's XZ segment.
     fn downs(&self, p: Pos) -> bool {
         let reach = self.radius + CLAW_DOWN_BUFFER;
-        let (lo, hi) = (self.a_y.min(self.b_y) - reach, self.a_y.max(self.b_y) + reach);
+        let (lo, hi) = (
+            self.a_y.min(self.b_y) - reach,
+            self.a_y.max(self.b_y) + reach,
+        );
         if hi < 0 || lo > PLAYER_HEIGHT_FP {
             return false;
         }
