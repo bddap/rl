@@ -106,12 +106,11 @@ pub const PLAYER_HEIGHT: f32 = 1.8;
 /// 2D reach of the grab around the crab's sim pos (the carapace ground point — the bridge
 /// integrates carapace deltas): deep under her body core, in sim meters. rl#236 pinned
 /// this to the full inscribed carapace footprint (10.5 m); rl#249 shrank it, because that
-/// disc reached past the ~9 m hunt-target band (`TARGET_ARENA_HALF`) and downed prey
-/// before her TRAINED near-field claw strike could ever engage — the circle shadowed the
-/// claw mechanic rl#249 asks for (rl#236's own side observation). Now the core disc covers
-/// only "she is standing on you"; the 6–17 m shell belongs to real claw contact
+/// disc downed prey her TRAINED near-field claw strike should engage — the circle shadowed
+/// the claw mechanic rl#249 asks for (rl#236's own side observation). Now the core disc
+/// covers only "she is standing on you"; the 6–17 m shell belongs to real claw contact
 /// ([`ClawPose`]). Legs still deliberately do not grab. `grab_reach_matches_crab_body`
-/// pins both bounds: within the carapace footprint, and short of the claw-strike band.
+/// pins the disc within the carapace footprint, under the claw shell.
 pub const CRAB_GRAB_RADIUS: i64 = 6 * UNIT;
 
 /// "Very close" slack around a claw collider (rl#249): the sim player is a point, so this
@@ -1518,12 +1517,9 @@ mod tests {
                 "{name}: spawn clearance must exceed the carapace's corner reach {corner_m:.2} m"
             );
         }
-        let band_m = crab_world::training::targets::TARGET_ARENA_HALF;
-        assert!(
-            grab_m < band_m - 1.0,
-            "grab reach {grab_m:.2} m crowds the {band_m:.1} m hunt-target band: prey \
-             would down on the disc before the near-field claw strike engages (rl#249)"
-        );
+        // (An rl#249 stanza compared grab_m against TARGET_ARENA_HALF — an ARENA-meter
+        // band, ~318 sim m since the rl#254 frame fix, so the comparison pinned nothing.
+        // The inscribed-footprint bound above carries the disc-vs-claw-shell intent.)
     }
 
     #[test]
