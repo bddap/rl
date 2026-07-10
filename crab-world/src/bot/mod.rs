@@ -237,9 +237,13 @@ pub fn spawn_initial_crabs(
     actions.resize(n);
     obs.resize(n);
     targets.resize(n);
-    for env in 0..n {
-        let origin = grid_offset(env, n);
-        spawns.0.push(origin);
+    // Rebuild, don't append: a second run (GCR arms after a round teardown) would
+    // otherwise leave the previous run's origins at the live indices while the crabs
+    // spawn at grid_offset(env, n) for the NEW n — silently corrupting the
+    // spawn-relative obs channel (rl#242). Rebuilding keeps spawns.len() == n, the
+    // invariant the obs builder's expect()s lean on.
+    spawns.0 = (0..n).map(|env| grid_offset(env, n)).collect();
+    for (env, &origin) in spawns.0.iter().enumerate() {
         body::spawn_crab(&mut commands, &assets, origin, env, Quat::IDENTITY);
     }
 }

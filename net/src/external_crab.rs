@@ -216,7 +216,13 @@ pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
         let mut queue = CommandQueue::default();
         let mut commands = Commands::new(&mut queue, world);
         for (env, parts) in by_env {
-            let origin = origins.get(env).copied().unwrap_or(Vec3::ZERO);
+            // A live part's env always has a spawn origin (spawn_initial_crabs rebuilds
+            // CrabSpawns to exactly n). Respawning at a substituted Vec3::ZERO would
+            // silently relocate the crab to world origin (rl#242).
+            let origin = origins
+                .get(env)
+                .copied()
+                .expect("CrabSpawns has no origin for a live env — spawn wiring bug (rl#242)");
             crab_world::bot::respawn_crab(&mut commands, &assets, parts.into_iter(), origin, env);
         }
         queue.apply(world);
@@ -399,7 +405,13 @@ fn bound_body_pos_drift(
         if !carapace.is_finite() {
             continue; // the rescue path owns non-finite crabs
         }
-        let origin = spawns.0.get(idx).copied().unwrap_or(Vec3::ZERO);
+        // Reached only with a live carapace for idx, so the origin exists. Measuring
+        // drift against a substituted Vec3::ZERO would mis-teleport the env (rl#242).
+        let origin = spawns
+            .0
+            .get(idx)
+            .copied()
+            .expect("CrabSpawns has no origin for a live env — spawn wiring bug (rl#242)");
         let drift = Vec2::new(carapace.x - origin.x, carapace.z - origin.z);
         let drift_m = drift.length();
         if drift_m <= TARGET_ARENA_HALF {
@@ -465,7 +477,14 @@ fn set_crab_walk_target(
         // band-edge away along the true bearing.
         let to_prey = to_prey.clamp_length_max(TARGET_ARENA_HALF);
 
-        let origin = spawns.0.get(idx).copied().unwrap_or(Vec3::ZERO);
+        // Reached only when targets has slot idx, and spawn_initial_crabs sizes targets
+        // and CrabSpawns from the same n — a miss is a wiring bug, and posing the walk
+        // target relative to a substituted Vec3::ZERO would corrupt the chase (rl#242).
+        let origin = spawns
+            .0
+            .get(idx)
+            .copied()
+            .expect("CrabSpawns has no origin for a live env — spawn wiring bug (rl#242)");
         let carapace = carapace_q
             .iter()
             .find(|(env, _)| env.0 == idx)
