@@ -128,6 +128,12 @@ impl TrainingState {
                 continue;
             }
 
+            if pre_touched_target(&self.envs[e], min_tip_dists[e]) {
+                self.envs[e].min_tip_dist = None;
+                seed_target(targets, spawns, e, &mut self.rng);
+                continue;
+            }
+
             let episode_ended = if let Some(pending) = self.envs[e].pending.take() {
                 let (height, _upright) = body.poses[e].expect("poses[e].is_none() handled above");
                 let d_now = carapace_target_dist(body, targets, e);
@@ -223,6 +229,19 @@ impl TrainingState {
     }
 }
 
+/// A target the settled rest pose is ALREADY touching (claw tip inside
+/// REACH_RADIUS before the episode records a single step) would pay GRAB_REWARD
+/// for doing nothing and inflate the reach stat the best-keeper floors on. Only
+/// the close-disc curriculum (rl#250) can produce one — rest tips sit ~0.5 m from
+/// origin, inside the ≥1.5 m chase band — so re-seed and try again instead of
+/// scoring it.
+fn pre_touched_target(ep: &EnvEpisode, min_tip_dist: Option<f32>) -> bool {
+    matches!(ep.phase, EnvPhase::Recording)
+        && ep.pending.is_none()
+        && ep.steps == 0
+        && min_tip_dist.is_some_and(|d| d < REACH_RADIUS)
+}
+
 fn carapace_target_dist(body: &BodyState, targets: &CrabTargets, e: usize) -> Option<f32> {
     body.carapace_pos[e]
         .zip(targets.get(e))
@@ -282,6 +301,46 @@ mod tests {
         assert!(classify_step_end(true, false, false).ends_segment());
         assert!(classify_step_end(false, false, true).ends_segment());
         assert!(!classify_step_end(false, false, false).ends_segment());
+    }
+
+    #[test]
+    fn pre_touched_only_gates_a_virgin_recording_episode() {
+        let ep = |phase, steps, pending| EnvEpisode {
+            phase,
+            steps,
+            pending,
+            ..Default::default()
+        };
+        let touching = Some(REACH_RADIUS * 0.5);
+        assert!(
+            pre_touched_target(&ep(EnvPhase::Recording, 0, None), touching),
+            "a rest-pose touch before any recorded step re-seeds"
+        );
+        assert!(!pre_touched_target(
+            &ep(EnvPhase::Recording, 0, None),
+            Some(REACH_RADIUS * 4.0)
+        ));
+        assert!(!pre_touched_target(&ep(EnvPhase::Recording, 0, None), None));
+        assert!(
+            !pre_touched_target(&ep(EnvPhase::Recording, 1, None), touching),
+            "a touch after steps were recorded is an earned grab, not a re-seed"
+        );
+        assert!(!pre_touched_target(
+            &ep(EnvPhase::Settling { grace: 3 }, 0, None),
+            touching
+        ));
+        let pending = Pending {
+            obs: [0.0; OBS_SIZE],
+            action: [0.0; ACTION_SIZE],
+            value: NormalizedValue(0.0),
+            log_prob: 0.0,
+            effort: 0.0,
+            target_dist: None,
+        };
+        assert!(
+            !pre_touched_target(&ep(EnvPhase::Recording, 0, Some(pending)), touching),
+            "an in-flight step is finalized normally"
+        );
     }
 
     #[test]
