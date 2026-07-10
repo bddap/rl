@@ -13,10 +13,28 @@ use crate::bot::{BotSet, CrabSpawns};
 use crate::policy::Policy;
 use crate::training::reward::dist_3d;
 use crate::training::targets::{
-    REACH_RADIUS, TARGET_ARENA_HALF, TARGET_Y_MAX, TARGET_Y_MIN, polar_target,
+    BAND_START_MIN, REACH_RADIUS, TARGET_ARENA_HALF, TARGET_Y_MAX, TARGET_Y_MIN, polar_target,
 };
 
 pub const DEFAULT_TARGET_DISTANCE_M: f32 = TARGET_ARENA_HALF;
+
+/// The close-range probe distance (rl#252): the same compass swept with the ball just
+/// outside the claw, so close-range reach has an instrument — without one, flipping the
+/// rl#250 close-target curriculum shows only its downside (far-chase regression) and
+/// one-change-at-a-time loses its readout. Pinned between [`REACH_RADIUS`] and
+/// [`BAND_START_MIN`]: inside the close disc the rl#250 curriculum trains (which the
+/// far band never samples), and outside the reach radius at spawn. The probe's floor is
+/// NOT zero, though: Sally's zero-action rest pose passively slumps up to ~0.55 m
+/// toward its ~270° side over a full episode (measured on the live body), so ~3/8
+/// bearings drift-cross the reach radius with no policy at all — and no distance under
+/// [`BAND_START_MIN`] escapes that. The probe is deterministic per brain, so the flip
+/// is judged on the DELTA against the pre-flip baseline, which is why this instrument
+/// must be in the record before the flip lands.
+pub const CLOSE_PROBE_DISTANCE_M: f32 = 1.0;
+const _: () = assert!(
+    REACH_RADIUS < CLOSE_PROBE_DISTANCE_M && CLOSE_PROBE_DISTANCE_M < BAND_START_MIN,
+    "the close probe must sit between the reach radius and the chase-band start"
+);
 
 /// The default eval episode length PER BEARING — one training episode horizon (~23 s of
 /// crab time at 64 Hz), enough for a working gait to traverse a far target. The (ticks,
@@ -52,20 +70,20 @@ pub struct BearingReport {
     pub active_ticks: u64,
 }
 
-/// The full compass of bearing episodes. The headline the gates key off is
-/// [`Self::worst`] — DERIVED, never stored, so it cannot drift from `per_bearing`.
+/// One full compass of bearing episodes at one target distance — the distance travels
+/// with the sweep's data so a printed line can never pair one sweep's numbers with the
+/// other's distance.
 #[derive(Debug, Clone, Copy)]
-pub struct EvalReport {
+pub struct CompassSweep {
     pub target_distance_m: f32,
-    pub policy_loaded: bool,
     pub per_bearing: [BearingReport; EVAL_BEARINGS],
 }
 
-impl EvalReport {
+impl CompassSweep {
     /// The WORST (min-progress) bearing's episode — one coherent real episode, so
     /// `reached`/torque/distances all describe the same run. MIN over bearings is the
-    /// anti-gaming headline: a mean would let seven striding bearings hide one dead
-    /// one. `total_cmp` only for a deterministic pick; `progress_m` is never NaN
+    /// anti-gaming pick: a mean would let seven striding bearings hide one dead one.
+    /// `total_cmp` only for a deterministic pick; `progress_m` is never NaN
     /// (`(a-b).max(0.0)` scrubs it).
     pub fn worst(&self) -> &BearingReport {
         self.per_bearing
@@ -74,14 +92,37 @@ impl EvalReport {
             .expect("compass is non-empty")
     }
 
-    /// Min-over-bearings chase progress — THE headline scalar every gate compares.
+    /// How many bearings reached the ball. For the close probe this is the rl#250
+    /// emergence readout — as a DELTA against the pre-flip baseline, not from zero:
+    /// passive rest-pose slump already drift-crosses reach at some bearings (see
+    /// [`CLOSE_PROBE_DISTANCE_M`]).
+    pub fn reached_count(&self) -> usize {
+        self.per_bearing.iter().filter(|b| b.reached).count()
+    }
+}
+
+/// Both sweeps of one eval, judging one load of one brain.
+#[derive(Debug, Clone, Copy)]
+pub struct EvalReport {
+    pub policy_loaded: bool,
+    /// The far sweep — the chase eval proper, sole source of the headline.
+    pub far: CompassSweep,
+    /// The rl#252 close-range probe at [`CLOSE_PROBE_DISTANCE_M`]. SIDECAR ONLY —
+    /// nothing here may feed [`Self::progress_m`]/[`Self::reached`], the headline
+    /// every gate keys off: folding it in would be a training-adjacent metric change
+    /// riding along with a measurement.
+    pub close: CompassSweep,
+}
+
+impl EvalReport {
+    /// Min-over-bearings FAR chase progress — THE headline scalar every gate compares.
     pub fn progress_m(&self) -> f32 {
-        self.worst().progress_m
+        self.far.worst().progress_m
     }
 
-    /// Whether the crab reached the ball at its WORST bearing.
+    /// Whether the crab reached the far ball at its WORST bearing.
     pub fn reached(&self) -> bool {
-        self.worst().reached
+        self.far.worst().reached
     }
 }
 
@@ -115,10 +156,10 @@ pub fn run_eval(
     // checkpoint swap): a checkpoint the runtime would refuse to arm must refuse the
     // eval too, not become a rest-pose baseline quietly printed as the run's training
     // progress. Missing is the legitimate no-brain-yet case — judge the explicit rest
-    // baseline. One load also means every bearing judges the SAME weights: the CLI is
+    // baseline. One load also means every episode judges the SAME weights: the CLI is
     // pointed at a LIVE checkpoint dir (rl-eval-monitor, the release gate), and a
-    // per-bearing reload across the ~2 min sweep could min over a composite of
-    // adjacent brains that no single brain achieved.
+    // per-episode reload across the ~4 min far+close sweep could min over a composite
+    // of adjacent brains that no single brain achieved.
     let policy = match crate::policy::load_armed(checkpoint_dir) {
         Ok(policy) => policy,
         Err(crate::policy::CheckpointUnusable::Missing) => Policy::rest(),
@@ -140,6 +181,21 @@ pub fn run_eval(
     let policy_loaded = policy.is_loaded();
     let policy = std::rc::Rc::new(policy);
 
+    // The close probe reuses the far sweep's episode definition whole (same ticks, same
+    // compass, same fresh-world episode) so its numbers read on the same scale — only
+    // the distance differs.
+    Ok(EvalReport {
+        policy_loaded,
+        far: run_compass(&policy, active_ticks, target_distance),
+        close: run_compass(&policy, active_ticks, CLOSE_PROBE_DISTANCE_M),
+    })
+}
+
+fn run_compass(
+    policy: &std::rc::Rc<Policy>,
+    active_ticks: u64,
+    target_distance: f32,
+) -> CompassSweep {
     let mut per_bearing = [None; EVAL_BEARINGS];
     for (slot, bearing_rad) in per_bearing.iter_mut().zip(eval_bearings()) {
         *slot = Some(run_bearing(
@@ -149,13 +205,10 @@ pub fn run_eval(
             bearing_rad,
         ));
     }
-    let per_bearing = per_bearing.map(|r| r.expect("compass and slots are the same length"));
-
-    Ok(EvalReport {
+    CompassSweep {
         target_distance_m: target_distance,
-        policy_loaded,
-        per_bearing,
-    })
+        per_bearing: per_bearing.map(|r| r.expect("compass and slots are the same length")),
+    }
 }
 
 /// The compass bearings in sweep order: bearing i = i·2π/[`EVAL_BEARINGS`].
@@ -366,12 +419,31 @@ mod tests {
 
         assert!(!r.policy_loaded, "an empty dir loads no policy (rest pose)");
         assert!(!r.reached(), "a rest-pose crab never reaches a far ball");
+        // ==0 holds for THIS body and horizon only (fallback body, 200 ticks): the
+        // real Sally slumps far enough over a full episode to drift-cross the reach
+        // radius at ~3/8 bearings (see CLOSE_PROBE_DISTANCE_M) — the probe's floor is
+        // a baseline to diff against, not zero.
+        assert_eq!(r.close.reached_count(), 0);
+        assert_eq!(r.close.target_distance_m, CLOSE_PROBE_DISTANCE_M);
+        for b in &r.close.per_bearing {
+            assert_eq!(b.total_torque, 0.0);
+            assert!(
+                b.initial_distance_m > REACH_RADIUS,
+                "close probe starts outside reach ({} m) at bearing {:.0}°",
+                b.initial_distance_m,
+                b.bearing_rad.to_degrees()
+            );
+            assert!(
+                b.initial_distance_m < DEFAULT_TARGET_DISTANCE_M,
+                "close probe is the CLOSE sweep, not another far one"
+            );
+        }
         assert!(
             (0.0..1.0).contains(&r.progress_m()),
             "rest-pose progress should be ~0, got {} m",
             r.progress_m()
         );
-        for b in &r.per_bearing {
+        for b in &r.far.per_bearing {
             assert_eq!(
                 b.total_torque, 0.0,
                 "the rest pose applies no joint torque, so total_torque must be exactly 0"
