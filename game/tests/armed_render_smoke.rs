@@ -10,7 +10,7 @@
 //! `render` feature, so plain workspace `cargo test` runs it.
 
 use crab_world::Visuals;
-use crab_world::play::Policy;
+use crab_world::policy::Policy;
 use net::external_crab::run_headless_probe;
 
 #[test]

@@ -29,7 +29,7 @@ pub enum AppPhase {
 
 pub fn build_windowed_app(
     boot: Boot,
-    external_crab: Vec<crab_world::play::Policy>,
+    external_crab: Vec<crab_world::policy::Policy>,
     render_mode: super::RenderMode,
 ) -> anyhow::Result<App> {
     // NO determinism pin, on ANY boot (rl#199): only the solo/host peer steps the float NN
@@ -216,7 +216,7 @@ pub(super) fn seed_round_crabs(client: &mut ClientSim, crabs: usize) -> Vec<Pos>
 
 pub(super) fn add_external_nn_crab(
     app: &mut App,
-    policies: Vec<crab_world::play::Policy>,
+    policies: Vec<crab_world::policy::Policy>,
     crab_spawns: Vec<Pos>,
 ) {
     app.insert_resource(crab_world::Visuals(true))
@@ -241,7 +241,7 @@ pub(super) fn add_external_nn_crab(
 
 pub(super) fn install_armed_nn_crab(
     app: &mut App,
-    policies: Vec<crab_world::play::Policy>,
+    policies: Vec<crab_world::policy::Policy>,
     crab_spawns: Vec<Pos>,
 ) {
     add_external_nn_crab(app, policies, crab_spawns);

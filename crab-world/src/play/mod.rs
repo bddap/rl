@@ -20,7 +20,7 @@ use crate::bot::BotSet;
 use crate::bot::body::CrabCarapace;
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
-pub use crate::policy::{CheckpointUnusable, Policy, RigDims, checkpoint_fits_rig, load_armed};
+use crate::policy::RigDims;
 pub use render_video::RenderVideoPlugin;
 
 pub fn rig_dims() -> RigDims {

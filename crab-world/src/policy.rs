@@ -52,7 +52,7 @@ enum PolicyState {
     },
 }
 
-pub fn checkpoint_digest(dir: &Path) -> u64 {
+fn checkpoint_digest(dir: &Path) -> u64 {
     let paths = CheckpointDir::new(dir);
     let Ok(mut bytes) = std::fs::read(paths.brain_file()) else {
         return 0;

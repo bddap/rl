@@ -11,10 +11,6 @@ impl Fnv {
         Self(OFFSET_BASIS)
     }
 
-    pub fn resume(state: u64) -> Self {
-        Self(state)
-    }
-
     pub fn write(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.0 ^= b as u64;
@@ -56,14 +52,6 @@ mod tests {
     fn streaming_matches_one_shot() {
         let mut h = Fnv::new();
         h.write(b"foo");
-        h.write(b"bar");
-        assert_eq!(h.finish(), fnv1a(b"foobar"));
-    }
-
-    #[test]
-    fn resume_continues_the_fold() {
-        let a = fnv1a(b"foo");
-        let mut h = Fnv::resume(a);
         h.write(b"bar");
         assert_eq!(h.finish(), fnv1a(b"foobar"));
     }

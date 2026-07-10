@@ -30,7 +30,7 @@ use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns};
 use crab_world::crab_view::CrabBrainLabels;
-use crab_world::play::Policy;
+use crab_world::policy::Policy;
 use crab_world::training::targets::TARGET_ARENA_HALF;
 
 const CLAW_TARGET_Y: f32 = 0.3;

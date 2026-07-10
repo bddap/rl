@@ -1,5 +1,5 @@
 //! The GCR brain-swap button (rl#232): cycle which trained brain drives each NN crab,
-//! live, through the ONE swap path ([`crab_world::play::Policy::cycle_brain`]) the demo
+//! live, through the ONE swap path ([`crab_world::policy::Policy::cycle_brain`]) the demo
 //! also uses. Sally's brain selection stays where Sally is simulated — the solo/host
 //! peer; a remote-adopt client renders whatever the host drives (its label arrives on
 //! the articulation wire), so its button is a no-op by design, not a second code path.

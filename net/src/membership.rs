@@ -6,15 +6,15 @@ use iroh::EndpointId;
 
 use crab_world::fnv::Fnv;
 
-pub const MEMBER_TIMEOUT: Duration = Duration::from_secs(3);
+const MEMBER_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub const BEAT_EVERY: Duration = Duration::from_millis(250);
 
-pub const STABLE_FOR: Duration = Duration::from_millis(1500);
+const STABLE_FOR: Duration = Duration::from_millis(1500);
 
 pub const JOIN_WINDOW: Duration = Duration::from_secs(20);
 
-pub const MAX_MEMBERS: usize = u8::MAX as usize + 1;
+const MAX_MEMBERS: usize = u8::MAX as usize + 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Beat {

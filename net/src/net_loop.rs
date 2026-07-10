@@ -76,7 +76,7 @@ impl NetDriver {
         self.id_map.values().copied().collect()
     }
 
-    pub fn take_early(&mut self) -> Vec<PeerMsg> {
+    fn take_early(&mut self) -> Vec<PeerMsg> {
         std::mem::take(&mut self.early)
     }
 
@@ -114,7 +114,7 @@ impl NetDriver {
         self.crab_count
     }
 
-    pub fn admit_endpoint(&mut self, eid: EndpointId, pid: PlayerId) {
+    fn admit_endpoint(&mut self, eid: EndpointId, pid: PlayerId) {
         self.id_map.insert(eid, pid);
     }
 
@@ -122,7 +122,7 @@ impl NetDriver {
         self.id_map.contains_key(&eid)
     }
 
-    pub fn welcome_joiner(&self, eid: EndpointId, adm: &Admission) {
+    fn welcome_joiner(&self, eid: EndpointId, adm: &Admission) {
         self.rt.block_on(self.session.send(eid, adm));
     }
 
@@ -298,10 +298,6 @@ impl Coordinator {
         matches!(self, Coordinator::Client { .. })
     }
 
-    pub fn is_server_authoritative(&self) -> bool {
-        matches!(self, Coordinator::Server { .. })
-    }
-
     pub fn server_endpoint(&self) -> Option<EndpointId> {
         match self {
             Coordinator::Server { .. } => None,
@@ -411,24 +407,6 @@ pub enum MatchResult {
     /// solo round (see [`crate::formation`]'s solo fallback).
     Alone,
     Cancelled,
-}
-
-pub fn connect_and_form(
-    seed: u64,
-    discover_secs: u64,
-    expect: usize,
-    collector: Option<iroh::EndpointId>,
-) -> Result<MatchResult> {
-    connect_and_form_dialing(
-        seed,
-        discover_secs,
-        expect,
-        None,
-        collector,
-        None,
-        crab_world::mesh_fallback::constructed_body_digest(),
-        0,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -595,8 +573,8 @@ async fn await_admission(session: &mut Session, host: EndpointId) -> AdmissionVe
     deadline.unwrap_or(AdmissionVerdict::Timeout)
 }
 
-/// Dial INTO a live match as a host-authoritative mid-game joiner — the dialing analogue of
-/// [`connect_and_form`]. Connect to `host`, send our collider digest as a [`JoinRequest`], and
+/// Dial INTO a live match as a host-authoritative mid-game joiner — the mid-game analogue of
+/// forming via [`connect_and_form_dialing`]. Connect to `host`, send our collider digest as a [`JoinRequest`], and
 /// await the host's verdict: admitted (become a remote-adopt [`Coordinator::Client`] that boots
 /// from the host's next authoritative snapshot — the host spawns us into its LIVE round at
 /// `effective_tick`, so we drop into the ongoing match rather than resetting it), refused (the
