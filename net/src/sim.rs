@@ -144,6 +144,15 @@ pub enum PlayerStatus {
     Extracted,
 }
 
+impl PlayerStatus {
+    /// The vehicle-boarding ability gate — the ONE formula; the host's intent filter and the
+    /// client's toggle both consult it. Downed may board, provisionally (playtest 1, rl#262:
+    /// "for now") — flip the balance here. Extracted is out of the round.
+    pub fn may_board(self) -> bool {
+        matches!(self, PlayerStatus::Alive | PlayerStatus::Downed)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Pos {
     pub x: i64,

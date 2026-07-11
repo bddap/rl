@@ -361,10 +361,7 @@ impl Server {
         match pilot {
             Some(intent) => {
                 let may_board = self.pilot_intents.contains_key(&pid)
-                    || self
-                        .sim
-                        .player(pid)
-                        .is_some_and(|p| p.status() == crate::sim::PlayerStatus::Alive);
+                    || self.sim.player(pid).is_some_and(|p| p.status().may_board());
                 if may_board {
                     self.pilot_intents.insert(pid, intent);
                 }
@@ -711,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn boarding_is_alive_gated_at_the_intent_insert() {
+    fn boarding_is_gated_by_may_board_at_the_intent_insert() {
         use crate::sim::{Player, PlayerStatus};
         use crab_world::vehicle::VehicleKind;
         let p1 = PlayerId(1);
@@ -720,7 +717,7 @@ mod tests {
         let p = snap.players[&p1];
         snap.players.insert(
             p1,
-            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed),
+            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Extracted),
         );
         sim.apply_core_snapshot(snap);
         let mut s = Server::new(PlayerId(0), &ids(2), sim);
@@ -734,7 +731,7 @@ mod tests {
         );
         assert!(
             !s.pilot_intents().contains_key(&p1),
-            "a downed player's boarding intent is dropped, not parked"
+            "an extracted player's boarding intent is dropped, not parked"
         );
 
         s.file_intent(p1, Some(intent(VehicleKind::Plane)));
@@ -746,7 +743,7 @@ mod tests {
         let p = snap.players[&p1];
         snap.players.insert(
             p1,
-            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Alive),
+            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed),
         );
         s.sim.apply_core_snapshot(snap);
         s.record_remote(
@@ -756,12 +753,15 @@ mod tests {
                 ..tickmsg(1, 0.0)
             },
         );
-        assert!(s.pilot_intents().contains_key(&p1), "alive ⇒ boards");
+        assert!(
+            s.pilot_intents().contains_key(&p1),
+            "downed ⇒ boards (rl#262, provisional)"
+        );
         let mut snap = s.sim().core_snapshot();
         let p = snap.players[&p1];
         snap.players.insert(
             p1,
-            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Downed),
+            Player::from_parts(p.pos(), p.yaw(), PlayerStatus::Extracted),
         );
         s.sim.apply_core_snapshot(snap);
         s.record_remote(
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(
             s.pilot_intents()[&p1].kind,
             VehicleKind::Ship,
-            "death mid-flight does not eject — the flying pilot's intent still applies"
+            "extraction mid-flight does not eject — the flying pilot's intent still applies"
         );
     }
 
