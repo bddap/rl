@@ -86,7 +86,7 @@ pub const TICK_DT: f64 = 1.0 / TICK_HZ as f64;
 
 pub const UNIT: i64 = 1000;
 
-const PLAYER_SPEED: i64 = 166;
+pub(crate) const PLAYER_SPEED: i64 = 166;
 
 #[cfg(test)]
 const CRAB_SPEED: i64 = 130;

@@ -87,15 +87,25 @@ pub(super) fn teardown_round(world: &mut World) {
     if let Some(mut ctrl) = world.get_resource_mut::<VehicleControls>() {
         ctrl.0.clear();
     }
+    // Craft bodies are round state like the controls that spawned them: FixedUpdate is
+    // parked outside Playing, so a survivor would sit at its stale pose until the next
+    // round's first pump — and a board landing on that round's first tick would match it
+    // there instead of transforming at the walker (rl#258).
+    let crafts: Vec<Entity> = world
+        .query_filtered::<Entity, With<Vehicle>>()
+        .iter(world)
+        .collect();
+    for e in crafts {
+        world.despawn(e);
+    }
     // Round state like the labels: the next round's arm republishes (host) or re-adopts
     // (client) its own arena anchor.
     if let Some(mut anchor) = world.get_resource_mut::<crate::external_crab::ArenaAnchor>() {
         *anchor = Default::default();
     }
     // Round state like the labels above: a survivor would suppress (or mis-measure) the next
-    // round's remote-craft appeared/moved edges — or keep hiding a walker whose craft is gone.
+    // round's remote-craft appeared/moved edges.
     world.remove_resource::<super::articulation::RemoteCraftWatch>();
-    world.remove_resource::<super::articulation::PilotingPilots>();
 }
 
 fn end_round_server_down(
@@ -150,17 +160,18 @@ fn pilot_of(pid: PlayerId) -> PilotId {
     PilotId(pid.0)
 }
 
-/// The ONE sim↔arena correspondence, both directions (rl#258): render = sim · rs =
-/// arena + anchor, so arena = sim · rs − anchor and sim = (arena + anchor) / rs.
-/// `rs` is [`crate::render::world_render_scale`]; `anchor` is the round's static
+/// The sim↔arena correspondence, both directions (rl#258): render = sim / to_sim =
+/// arena + anchor. The scale is [`crate::external_crab::arena_to_sim`] — the ONE guarded
+/// owner of the factor (rl#254: it fails loud on a degenerate render scale instead of
+/// silently converting 1:1). `anchor` is the round's static
 /// [`crate::external_crab::ArenaAnchor`] (y = 0 by construction).
-fn sim_to_arena(pos: crate::sim::Pos, anchor: Vec3, rs: f32) -> Vec3 {
+fn sim_to_arena(pos: crate::sim::Pos, anchor: Vec3) -> Vec3 {
     let (x, z) = pos.to_meters();
-    Vec3::new(x * rs, 0.0, z * rs) - anchor
+    Vec3::new(x, 0.0, z) / crate::external_crab::arena_to_sim() - anchor
 }
 
-fn arena_to_sim_pos(arena: Vec3, anchor: Vec3, rs: f32) -> crate::sim::Pos {
-    let w = (arena + anchor) / rs;
+fn arena_to_sim_pos(arena: Vec3, anchor: Vec3) -> crate::sim::Pos {
+    let w = (arena + anchor) * crate::external_crab::arena_to_sim();
     crate::sim::Pos::from_meters(w.x, w.z)
 }
 
@@ -172,10 +183,19 @@ fn boarding_of(
     now: crate::sim::Player,
     prev: crate::sim::Player,
     anchor: Vec3,
-    rs: f32,
 ) -> crab_world::vehicle::Boarding {
-    let here = sim_to_arena(now.pos(), anchor, rs);
-    let velocity = (here - sim_to_arena(prev.pos(), anchor, rs)) / TICK_DT as f32;
+    let here = sim_to_arena(now.pos(), anchor);
+    let velocity = (here - sim_to_arena(prev.pos(), anchor)) / TICK_DT as f32;
+    // A walker can't out-run its walk speed: a bigger per-tick delta is a TELEPORT (the
+    // round-RESTART respawn, a join slot), not motion — a craft boarded right after one
+    // must start at rest, not inherit a cross-map fling.
+    let max_walk = 2.0 * (crate::sim::PLAYER_SPEED as f32 * crate::sim::TICK_HZ as f32)
+        / (crate::sim::UNIT as f32 * crate::external_crab::arena_to_sim());
+    let velocity = if velocity.length() <= max_walk {
+        velocity
+    } else {
+        Vec3::ZERO
+    };
     crab_world::vehicle::Boarding {
         pos: here,
         yaw: crate::sim::trig_client::turns_to_radians(now.yaw()),
@@ -188,7 +208,6 @@ fn boarding_of(
 /// rides its craft, so the sim never keeps a husk at the boarding spot.
 fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose> {
     let anchor = world.resource::<crate::external_crab::ArenaAnchor>().0;
-    let rs = crate::render::world_render_scale();
     let mut q = world.query::<(&Transform, &Vehicle)>();
     q.iter(world)
         .map(|(t, v)| {
@@ -196,7 +215,7 @@ fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose>
             (
                 PlayerId(v.pilot.0),
                 crate::sim::PilotPose {
-                    pos: arena_to_sim_pos(t.translation, anchor, rs),
+                    pos: arena_to_sim_pos(t.translation, anchor),
                     yaw: crate::sim::trig_client::radians_to_turns(nose.x.atan2(nose.z)),
                 },
             )
@@ -689,7 +708,6 @@ pub(super) fn drive_client_sim(world: &mut World) {
 
         if role == PeerRole::ServerAuth && world.get_resource::<VehicleControls>().is_some() {
             let anchor = world.resource::<crate::external_crab::ArenaAnchor>().0;
-            let rs = crate::render::world_render_scale();
             let entries: BTreeMap<PilotId, PilotCommand> = {
                 let state = world.non_send_resource::<GameState>();
                 let server = state.coord.server().expect("server_auth ⇒ a server");
@@ -701,7 +719,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                         // to transform — the intent simply files no command this tick.
                         let now = server.sim().player(pid)?;
                         let prev = state.prev.players.get(&pid).copied().unwrap_or(now);
-                        let boarding = boarding_of(now, prev, anchor, rs);
+                        let boarding = boarding_of(now, prev, anchor);
                         Some((pilot_of(pid), intent.to_command(boarding)))
                     })
                     .collect()
@@ -944,13 +962,12 @@ mod tests {
     #[test]
     fn sim_arena_conversion_roundtrips() {
         let anchor = bevy::math::Vec3::new(3.5, 0.0, -7.25);
-        let rs = 1.0 / 35.0;
         let p = crate::sim::Pos {
             x: 12_340,
             z: -5_670,
         };
-        let arena = super::sim_to_arena(p, anchor, rs);
-        let back = super::arena_to_sim_pos(arena, anchor, rs);
+        let arena = super::sim_to_arena(p, anchor);
+        let back = super::arena_to_sim_pos(arena, anchor);
         assert!(
             (back.x - p.x).abs() <= 1 && (back.z - p.z).abs() <= 1,
             "sim→arena→sim drifted beyond grid quantization: {p:?} -> {back:?}"
