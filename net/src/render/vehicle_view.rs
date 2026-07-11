@@ -130,3 +130,136 @@ fn reconcile_craft_models(
             });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
+    use super::*;
+    use crate::articulation::VehiclePoseWire;
+
+    /// [`CraftAssets`] with default (empty) handles but the REAL per-kind part counts, so
+    /// the reconcile logic runs without any render stack.
+    fn stub_assets() -> CraftAssets {
+        let stub = |kind: VehicleKind| CraftKindAssets {
+            material: Handle::default(),
+            parts: kind
+                .silhouette()
+                .iter()
+                .map(|p| (Handle::default(), p.offset))
+                .collect(),
+        };
+        CraftAssets {
+            plane: stub(VehicleKind::Plane),
+            ship: stub(VehicleKind::Ship),
+        }
+    }
+
+    const ANCHOR: Vec3 = Vec3::new(3.0, 0.0, -7.0);
+
+    fn world_with(remote: Vec<VehiclePoseWire>, mode: RenderMode) -> World {
+        let mut w = World::new();
+        w.insert_resource(stub_assets());
+        w.insert_resource(RemoteVehicle(remote));
+        w.insert_resource(crate::external_crab::ArenaAnchor(ANCHOR));
+        w.insert_resource(mode);
+        w
+    }
+
+    fn wire(pilot: u8, kind: VehicleKind, pos: [f32; 3]) -> VehiclePoseWire {
+        VehiclePoseWire {
+            pilot,
+            kind,
+            pos,
+            rot: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    fn models(w: &mut World) -> Vec<(u8, VehicleKind, Vec3, Visibility, usize)> {
+        let mut out: Vec<_> = w
+            .query::<(&CraftModel, &Transform, &Visibility, &Children)>()
+            .iter(w)
+            .map(|(m, t, v, c)| (m.pilot, m.kind, t.translation, *v, c.len()))
+            .collect();
+        out.sort_by_key(|e| e.0);
+        out
+    }
+
+    #[test]
+    fn spawns_tracks_and_despawns_remote_craft_models() {
+        let mut w = world_with(
+            vec![wire(1, VehicleKind::Plane, [2.0, 5.0, -1.0])],
+            RenderMode::Mesh,
+        );
+        w.run_system_once(reconcile_craft_models).unwrap();
+        let got = models(&mut w);
+        assert_eq!(got.len(), 1, "one model per remote craft");
+        let (pilot, kind, at, vis, n_parts) = got[0];
+        assert_eq!((pilot, kind), (1, VehicleKind::Plane));
+        assert_eq!(
+            at,
+            ANCHOR + Vec3::new(2.0, 5.0, -1.0),
+            "pose places through the arena anchor, like the wireframe pass"
+        );
+        assert_eq!(vis, Visibility::Visible);
+        assert_eq!(
+            n_parts,
+            VehicleKind::Plane.silhouette().len(),
+            "one child per silhouette part"
+        );
+
+        // The craft moves: the SAME entity tracks (still exactly one model).
+        w.insert_resource(RemoteVehicle(vec![wire(
+            1,
+            VehicleKind::Plane,
+            [4.0, 6.0, 0.0],
+        )]));
+        w.run_system_once(reconcile_craft_models).unwrap();
+        let got = models(&mut w);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].2, ANCHOR + Vec3::new(4.0, 6.0, 0.0));
+
+        // Pilot steps out: the model despawns, children included.
+        w.insert_resource(RemoteVehicle(Vec::new()));
+        w.run_system_once(reconcile_craft_models).unwrap();
+        assert!(models(&mut w).is_empty(), "step-out despawns the model");
+        assert_eq!(
+            w.query::<&Mesh3d>().iter(&w).count(),
+            0,
+            "no orphaned part meshes"
+        );
+    }
+
+    #[test]
+    fn kind_cycle_swaps_the_model_in_one_pass() {
+        let mut w = world_with(
+            vec![wire(2, VehicleKind::Plane, [0.0, 2.0, 0.0])],
+            RenderMode::Mesh,
+        );
+        w.run_system_once(reconcile_craft_models).unwrap();
+        w.insert_resource(RemoteVehicle(vec![wire(
+            2,
+            VehicleKind::Ship,
+            [0.0, 2.0, 0.0],
+        )]));
+        w.run_system_once(reconcile_craft_models).unwrap();
+        let got = models(&mut w);
+        assert_eq!(got.len(), 1, "the stale kind's model is gone");
+        assert_eq!(got[0].1, VehicleKind::Ship);
+        assert_eq!(got[0].4, VehicleKind::Ship.silhouette().len());
+    }
+
+    #[test]
+    fn colliders_mode_hides_the_models() {
+        let mut w = world_with(
+            vec![wire(1, VehicleKind::Ship, [0.0, 2.0, 0.0])],
+            RenderMode::Colliders,
+        );
+        w.run_system_once(reconcile_craft_models).unwrap();
+        assert_eq!(
+            models(&mut w)[0].3,
+            Visibility::Hidden,
+            "colliders mode shows the wireframe, not the model"
+        );
+    }
+}
