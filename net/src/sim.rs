@@ -144,10 +144,23 @@ const PLAYER_HEIGHT_FP: i64 = (PLAYER_HEIGHT * UNIT as f32) as i64;
 
 const STARTUP_GRACE_TICKS: u64 = 30;
 
-/// Spawn clearance from the crab's sim pos: outside her entire carapace footprint (corner
-/// reach ~18 m at sim scale), so nobody spawns under her body or inside
-/// [`CRAB_GRAB_RADIUS`]. Also cross-checked by `grab_reach_matches_crab_body`.
-const MIN_CRAB_SPAWN_DISTANCE: i64 = 19 * UNIT;
+/// Sally's sustained full-charge ground speed, sim units per second (~8.5 m/s) —
+/// MEASURED, not commanded: her speed is whatever the trained gait strides across the
+/// arena→sim seam, ~1.7× player run speed at the rl#254 close-out playtest, plus a
+/// faster opening lunge. Re-measure after a retrain that changes locomotion.
+const CRAB_CHARGE_SPEED_PER_S: i64 = 8_500;
+
+/// How long a fresh spawn is guaranteed before Sally at full charge can be on them —
+/// the spawn-safety feel knob (rl#257). The old bare 19 m was tuned pre-rl#254 at
+/// 1/35th her real speed and played as "seconds to live"; five seconds of charge is
+/// time to orient and run. Tune on playtest.
+const SPAWN_GRACE_SECS: i64 = 5;
+
+/// Spawn clearance from the crab's sim pos, round-start and joiners alike (rl#247):
+/// [`SPAWN_GRACE_SECS`] of her full charge, not a bare meter count (rl#257). Far
+/// outside her carapace footprint (corner reach ~18 m) and [`CRAB_GRAB_RADIUS`];
+/// `grab_reach_matches_crab_body` cross-checks that floor against every rig.
+const MIN_CRAB_SPAWN_DISTANCE: i64 = CRAB_CHARGE_SPEED_PER_S * SPAWN_GRACE_SECS;
 
 /// Spacing between player spawn slots along the z=0 spawn line.
 const SPAWN_SLOT_PITCH: i64 = 2 * UNIT;
@@ -490,6 +503,9 @@ impl Sim {
     }
 
     fn spawn_crab(players: &BTreeMap<PlayerId, Player>, idx: usize) -> Crab {
+        // The base pos staggers crabs and seeds the push-out BEARING; the clearance
+        // clamp below (always binding since rl#257 grew MIN past this base) sets the
+        // actual distance, so round-start and joiner safety share the one constant.
         let mut pos = Pos {
             x: (6 + 8 * idx as i64) * UNIT,
             z: 20 * UNIT,
@@ -509,8 +525,16 @@ impl Sim {
                 } else {
                     (1, 0, 1)
                 };
-                pos.x = nearest.pos.x + (ux * min / len) as i64;
-                pos.z = nearest.pos.z + (uz * min / len) as i64;
+                // Round each component AWAY from zero: truncation can land a hair
+                // inside `min` (unseen while the clamp almost never bound; rl#257's
+                // larger MIN binds every round). `len` is itself floored, which only
+                // over-scales — so outward rounding guarantees distance ≥ min.
+                let scale = |c: i128| {
+                    let num = c * min;
+                    (num / len + (num % len).signum()) as i64
+                };
+                pos.x = nearest.pos.x + scale(ux);
+                pos.z = nearest.pos.z + scale(uz);
             }
         }
         Crab { pos, yaw: 0 }
