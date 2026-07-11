@@ -25,7 +25,7 @@ pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/15";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub(crate) enum Frame {
     Tick = 0,
@@ -54,10 +54,10 @@ impl Frame {
 
     /// State frames ride unreliable unordered QUIC datagrams; everything else (inputs,
     /// formation, admission) stays on the reliable ordered bi-stream, where a retransmit
-    /// stall is the price of ordering. ONE source for the routing: senders pick the path by
-    /// this, and each receive path rejects the other's kinds, so a kind can never ride both
-    /// (rl#259).
-    fn via_datagram(self) -> bool {
+    /// stall is the price of ordering. ONE source for the routing: senders const-assert the
+    /// path at monomorphization, and each receive path rejects the other's kinds, so a kind
+    /// can never ride both (rl#259).
+    const fn via_datagram(self) -> bool {
         matches!(self, Frame::Snapshot | Frame::Articulation)
     }
 }
@@ -595,13 +595,13 @@ impl Session {
     }
 
     pub(crate) async fn send<M: Codec>(&self, peer: EndpointId, msg: &M) {
-        debug_assert!(!M::KIND.via_datagram(), "state frames go via broadcast_state");
+        const { assert!(!M::KIND.via_datagram(), "state frames go via broadcast_state") }
         let bytes = msg.encode();
         self.send_frame(peer, M::KIND, bytes.as_ref().into()).await;
     }
 
     pub(crate) async fn broadcast<M: Codec>(&self, msg: &M) {
-        debug_assert!(!M::KIND.via_datagram(), "state frames go via broadcast_state");
+        const { assert!(!M::KIND.via_datagram(), "state frames go via broadcast_state") }
         let bytes = msg.encode();
         self.broadcast_frame(M::KIND, bytes.as_ref().into()).await;
     }
@@ -611,8 +611,27 @@ impl Session {
     /// drops the OLDEST buffered datagram first, which for full-state frames is exactly
     /// right (stale state is worthless).
     pub(crate) async fn broadcast_state<M: StateCodec>(&self, msg: &M) {
+        const { assert!(M::KIND.via_datagram(), "StateCodec kinds must route via datagram") }
         let bytes = msg.encode();
-        let frags = state_datagrams(M::KIND, msg.tick(), bytes.as_ref());
+        let body = bytes.as_ref();
+        if body.len() > MAX_FRAME_LEN {
+            // A real check, not debug-only: an over-cap frame's fragments would be rejected
+            // by EVERY receiver, dropping every link at the broadcast rate — a deterministic
+            // full-disconnect loop. Skipping the frame loses one tick of state (the next one
+            // supersedes it); the latch keeps the design violation loud without the flood.
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::error!(
+                    "outbound {:?} frame is {} B, over the {MAX_FRAME_LEN} B cap — skipped \
+                     (and every same-size successor with it)",
+                    M::KIND,
+                    body.len()
+                );
+            }
+            return;
+        }
+        let frags = state_datagrams(M::KIND, msg.tick(), body);
         let links = self.links.lock().await;
         for link in links.values() {
             for frag in &frags {
@@ -625,6 +644,8 @@ impl Session {
         self.send(peer, msg).await;
     }
 
+    // The public faces of `broadcast_state` — `Codec`/`StateCodec` are crate-internal, so
+    // out-of-crate callers (the game harnesses) get typed entry points instead.
     pub async fn broadcast_snapshot(&self, snapshot: &CoreSnapshot) {
         self.broadcast_state(snapshot).await;
     }
@@ -810,17 +831,18 @@ async fn wire_connection(
     let (tx, mut rx) = mpsc::channel::<OutFrame>(OUT_QUEUE_FRAMES);
     let tx = Arc::new(tx);
     let link_id: LinkId = Arc::downgrade(&tx);
-    if let Some(old) = links.lock().await.insert(
+    // A crossed dial (both sides connecting at once) replaces the old link WITHOUT closing
+    // its connection: the two sides can wire the duplicate connections in opposite orders, so
+    // "close the one I replaced" can close the one the PEER kept — a distributed coin-flip
+    // that kills both. The loser link's tasks linger on a live connection instead; each side
+    // simply sends on whichever link it kept.
+    links.lock().await.insert(
         peer,
         PeerLink {
             send: tx,
             conn: conn.clone(),
         },
-    ) {
-        // A re-dial replaced a live link: close the old connection so its tasks exit now,
-        // instead of two links feeding the inbox for the same peer until the old one idles out.
-        old.conn.close(0u32.into(), b"link replaced");
-    }
+    );
 
     let links_for_writer = links.clone();
     let writer_id = link_id.clone();
@@ -882,13 +904,13 @@ async fn datagram_loop(
     peer: EndpointId,
     inbox: mpsc::Sender<FromPeer>,
 ) -> Result<()> {
-    let mut assemblers: BTreeMap<u8, StateAssembler> = BTreeMap::new();
+    let mut assemblers: BTreeMap<Frame, StateAssembler> = BTreeMap::new();
     loop {
         let Ok(d) = conn.read_datagram().await else {
             return Ok(());
         };
         let frag = parse_state_datagram(&d)?;
-        let asm = assemblers.entry(frag.kind as u8).or_default();
+        let asm = assemblers.entry(frag.kind).or_default();
         if let Some(body) = asm.accept(&frag)? {
             let msg = decode_peer_wire(frag.kind, &body)?;
             if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
