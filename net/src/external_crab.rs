@@ -118,7 +118,7 @@ fn pos_to_m(p: Pos) -> Vec2 {
 /// `PLAYER_HEIGHT` in sim space, the anchoring `grab_reach_matches_crab_body` pins).
 /// EVERY quantity crossing the arena↔sim seam converts through this factor —
 /// positions, deltas, reaches (rl#254).
-fn arena_to_sim() -> f32 {
+pub(crate) fn arena_to_sim() -> f32 {
     let rs = crate::render::world_render_scale();
     // world_render_scale's degenerate-silhouette fallback is 1.0 — cosmetic for
     // rendering, but HERE an identity conversion silently re-opens the exact rl#254

@@ -18,7 +18,7 @@ const PLANE: VehicleParams = VehicleParams {
     // freshly-boarded craft can't free-balloon) and ~64% of the full-throttle terminal
     // ~4.5 m/s, so climb costs throttle. At
     // 1.8 the plane out-lifted its ~2.6 N weight from 1.4 m/s (owner: "Bernoulli overdone",
-    // rl#230); the level-flight band is pinned by `spawn_speed_sinks_high_speed_climbs`.
+    // rl#230); the level-flight band is pinned by `slow_flight_sinks_high_speed_climbs`.
     lift: 0.9,
     // Alignment time-constant ≈ mass/grip ≈ 0.3 s — velocity follows the nose well inside
     // one turn's sweep, so a coordinated turn stays near-aligned and pays only the
@@ -207,6 +207,8 @@ fn manage_vehicles(
         match controls.0.get(&v.pilot) {
             Some(cmd) => {
                 if cmd.kind != v.kind {
+                    // Everything kind-dependent in [`vehicle_bundle`] must be re-derived
+                    // here, or a morphed craft drifts from a fresh one.
                     v.kind = cmd.kind;
                     v.throttle = 0.0;
                     *gravity = GravityScale(cmd.kind.gravity_scale());

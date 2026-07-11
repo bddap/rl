@@ -425,7 +425,7 @@ pub(super) fn apply_transforms(
     mut yaw: ResMut<CameraYaw>,
     vehicle: Res<LocalVehicle>,
     placement: Res<crate::external_crab::ArenaAnchor>,
-    piloting: Option<Res<super::articulation::PilotingPilots>>,
+    remote_crafts: Res<super::articulation::RemoteVehicle>,
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
     mut cam_q: CamXf,
@@ -447,10 +447,9 @@ pub(super) fn apply_transforms(
         *tf = Transform::from_translation(world(pos, PLAYER_HEIGHT * 0.5))
             .with_rotation(Quat::from_rotation_y(yaw));
         // A piloting player's ONE visible body is its craft (rl#258): the walker avatar
-        // hides for every peer while a craft flies under that pilot's id.
-        let in_craft = piloting
-            .as_ref()
-            .is_some_and(|p| p.0.contains(&avatar.0.0));
+        // hides while a craft flies under that pilot's id. `RemoteVehicle` already excludes
+        // the local pilot, whose avatar the first branch hides regardless.
+        let in_craft = remote_crafts.0.iter().any(|v| v.pilot == avatar.0.0);
         let hidden = avatar.0 == local || now.status() == PlayerStatus::Extracted || in_craft;
         *vis = if hidden {
             Visibility::Hidden
