@@ -97,21 +97,6 @@ pub(crate) trait StateCodec: Codec {
     fn tick(&self) -> u64;
 }
 
-fn vehicle_kind_byte(kind: crab_world::vehicle::VehicleKind) -> u8 {
-    match kind {
-        crab_world::vehicle::VehicleKind::Plane => 1,
-        crab_world::vehicle::VehicleKind::Ship => 2,
-    }
-}
-
-fn vehicle_kind_from_byte(b: u8) -> Option<crab_world::vehicle::VehicleKind> {
-    match b {
-        1 => Some(crab_world::vehicle::VehicleKind::Plane),
-        2 => Some(crab_world::vehicle::VehicleKind::Ship),
-        _ => None,
-    }
-}
-
 impl Codec for TickMsg {
     const KIND: Frame = Frame::Tick;
     type Bytes = [u8; TICKMSG_LEN];
@@ -122,7 +107,7 @@ impl Codec for TickMsg {
         b[OFF_INPUT..OFF_PILOT].copy_from_slice(&self.input.to_bytes());
         if let Some(p) = &self.pilot {
             let w = &mut b[OFF_PILOT..];
-            w[0] = vehicle_kind_byte(p.kind);
+            w[0] = p.kind.wire_byte();
             w[1..5].copy_from_slice(&p.throttle_trim.to_le_bytes());
             for (i, t) in p.thrust.iter().enumerate() {
                 w[5 + 4 * i..9 + 4 * i].copy_from_slice(&t.to_le_bytes());
@@ -150,7 +135,7 @@ impl Codec for TickMsg {
                 None
             }
             b => {
-                let kind = vehicle_kind_from_byte(b)
+                let kind = crab_world::vehicle::VehicleKind::from_wire_byte(b)
                     .with_context(|| format!("unknown pilot-intent kind byte {b:#x}"))?;
                 let match_velocity = match p[29] {
                     0 => false,
@@ -1233,6 +1218,7 @@ mod tests {
             arena_anchor: [4.25, 0.0, -0.5],
             vehicles: vec![VehiclePoseWire {
                 pilot: 1,
+                kind: crab_world::vehicle::VehicleKind::Ship,
                 pos: [2.0, 5.5, -1.0],
                 rot: [
                     0.0,

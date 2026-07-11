@@ -73,6 +73,24 @@ pub enum VehicleKind {
 }
 
 impl VehicleKind {
+    /// The craft's ONE wire byte, shared by every codec that ships a kind (the pilot-intent
+    /// frame and the articulation vehicle poses) so two mappings can't drift. 0 is reserved
+    /// for "no craft".
+    pub fn wire_byte(self) -> u8 {
+        match self {
+            VehicleKind::Plane => 1,
+            VehicleKind::Ship => 2,
+        }
+    }
+
+    pub fn from_wire_byte(b: u8) -> Option<Self> {
+        match b {
+            1 => Some(VehicleKind::Plane),
+            2 => Some(VehicleKind::Ship),
+            _ => None,
+        }
+    }
+
     fn params(self) -> VehicleParams {
         match self {
             VehicleKind::Plane => PLANE,
@@ -227,6 +245,42 @@ fn vehicle_bundle(
 
 pub fn vehicle_collider() -> Collider {
     Collider::cuboid(VEHICLE_HALF.x, VEHICLE_HALF.y, VEHICLE_HALF.z)
+}
+
+/// One cuboid of a craft's rendered silhouette, in the craft's body frame (+Z is the nose).
+pub struct VehiclePart {
+    pub offset: Vec3,
+    pub half: Vec3,
+}
+
+impl VehicleKind {
+    /// The craft's rendered shape: a few cuboids, every one inside the one collider box.
+    /// Offsets and half-extents are FRACTIONS of [`VEHICLE_HALF`] (each axis's |offset| +
+    /// half ≤ 1), so the mesh can never visually exceed the physics body and a collider
+    /// resize rescales the model with it (rl#260); `silhouettes_stay_inside_the_collider`
+    /// is the backstop.
+    pub fn silhouette(self) -> Vec<VehiclePart> {
+        let part = |offset: Vec3, half: Vec3| VehiclePart {
+            offset: offset * VEHICLE_HALF,
+            half: half * VEHICLE_HALF,
+        };
+        match self {
+            // Slim full-length fuselage, full-span main wing, tailplane + fin at the stern.
+            VehicleKind::Plane => vec![
+                part(Vec3::ZERO, Vec3::new(0.2, 0.8, 1.0)),
+                part(Vec3::new(0.0, 0.1, 0.18), Vec3::new(1.0, 0.15, 0.26)),
+                part(Vec3::new(0.0, 0.2, -0.85), Vec3::new(0.5, 0.12, 0.12)),
+                part(Vec3::new(0.0, 0.54, -0.85), Vec3::new(0.05, 0.45, 0.12)),
+            ],
+            // Catamaran: a broad hull slung low between two pontoons, bridge aft.
+            VehicleKind::Ship => vec![
+                part(Vec3::new(0.0, -0.25, 0.0), Vec3::new(0.6, 0.6, 1.0)),
+                part(Vec3::new(0.74, -0.4, -0.1), Vec3::new(0.25, 0.5, 0.75)),
+                part(Vec3::new(-0.74, -0.4, -0.1), Vec3::new(0.25, 0.5, 0.75)),
+                part(Vec3::new(0.0, 0.58, -0.35), Vec3::new(0.35, 0.4, 0.3)),
+            ],
+        }
+    }
 }
 
 /// Lateral spacing between different pilots' spawn spots (m). Crafts don't collide with each
@@ -430,6 +484,26 @@ mod tests {
             "vehicle overlapping a coxa produced no contact — NESTED_COLLISION and \
              VEHICLE_COLLISION must include each other's group (rl#235)"
         );
+    }
+
+    /// rl#260: the rendered silhouette must never poke outside the physics collider — for
+    /// every part, |offset| + half must fit inside [`VEHICLE_HALF`] on every axis.
+    #[test]
+    fn silhouettes_stay_inside_the_collider() {
+        for kind in [VehicleKind::Plane, VehicleKind::Ship] {
+            for (i, p) in kind.silhouette().iter().enumerate() {
+                assert!(
+                    p.half.cmpgt(Vec3::ZERO).all(),
+                    "{kind:?} part {i} is degenerate: half {}",
+                    p.half
+                );
+                let reach = p.offset.abs() + p.half;
+                assert!(
+                    reach.cmple(VEHICLE_HALF).all(),
+                    "{kind:?} part {i} pokes outside the collider: reach {reach} > {VEHICLE_HALF}"
+                );
+            }
+        }
     }
 
     #[test]
