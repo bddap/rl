@@ -53,10 +53,10 @@ fn manage_silhouette_visibility(
 ) {
     let skin_is_the_crab =
         armed.is_some() && crab_world::mesh_fallback::usable_model_path().is_some();
-    let want = if !skin_is_the_crab && mode.shows_mesh() {
-        Visibility::Visible
-    } else {
+    let want = if skin_is_the_crab {
         Visibility::Hidden
+    } else {
+        mode.mesh_visibility()
     };
     for mut vis in &mut q {
         if *vis != want {
@@ -74,8 +74,12 @@ fn draw_vehicle_collider_wireframe(
 ) {
     // The STATIC arena→render frame (rl#224) — never the per-crab skin repose, which tracks
     // the live carapace and would drag Sally's every wiggle into each craft's rendered pose.
+    // Mesh mode: the craft models (`vehicle_view`, rl#260) are the visual.
+    if !mode.shows_colliders() {
+        return;
+    }
     let placement = Mat4::from_translation(anchor.0);
-    if mode.shows_colliders() && !vehicles.is_empty() {
+    if !vehicles.is_empty() {
         for (gt, collider) in &vehicles {
             let world = placement * gt.to_matrix();
             draw_collider_wireframe(
@@ -88,11 +92,6 @@ fn draw_vehicle_collider_wireframe(
         // On the HOST the entity query covers EVERY craft (its world simulates all pilots'),
         // so the RemoteVehicle pass below would ghost each remote craft a tick behind its
         // live entity. A client has no Vehicle entities and always takes the wire pass.
-        return;
-    }
-    if !mode.shows_colliders() {
-        // Mesh mode: the craft models (`vehicle_view`, rl#260) are the visual; before they
-        // existed this pass was always-on so remote craft weren't invisible.
         return;
     }
     for v in &remote.0 {

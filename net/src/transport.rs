@@ -21,7 +21,8 @@ use crate::snapshot::CoreSnapshot;
 
 // v15: state frames (snapshot/articulation) moved off the reliable bi-stream onto QUIC
 // datagrams (rl#259), and the stale "lockstep" vocabulary retired with the same bump (rl#244).
-pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/15";
+// v16: articulation vehicle poses carry a kind byte (rl#260).
+pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/16";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
 
