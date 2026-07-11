@@ -169,6 +169,7 @@ pub fn solo_round(seed: u64) -> ReadyMatch {
 pub enum ChooserItem {
     Host,
     Join,
+    Quit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +204,9 @@ pub enum MenuAction {
     /// The user declined the "Connection lost" rejoin offer — the app drops `last_host`
     /// so re-entering the menu lands on the chooser, not the dead offer.
     DismissRejoin,
+    /// Close the whole app from the boot menu (rl#263 — the only way out used to be
+    /// starting a round and quitting from inside it).
+    Quit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,23 +244,40 @@ impl MenuNav {
     pub fn step(&mut self, input: MenuInput, lobby_len: usize) -> MenuAction {
         match self {
             MenuNav::Chooser { focus } => match input {
-                MenuInput::Up | MenuInput::Down => {
+                MenuInput::Up => {
                     *focus = match focus {
-                        ChooserItem::Host => ChooserItem::Join,
+                        ChooserItem::Host => ChooserItem::Quit,
                         ChooserItem::Join => ChooserItem::Host,
+                        ChooserItem::Quit => ChooserItem::Join,
                     };
                     MenuAction::None
                 }
-                MenuInput::Confirm => {
-                    let hosting = matches!(focus, ChooserItem::Host);
-                    *self = MenuNav::lobby(hosting);
-                    if hosting {
+                MenuInput::Down => {
+                    *focus = match focus {
+                        ChooserItem::Host => ChooserItem::Join,
+                        ChooserItem::Join => ChooserItem::Quit,
+                        ChooserItem::Quit => ChooserItem::Host,
+                    };
+                    MenuAction::None
+                }
+                MenuInput::Confirm => match focus {
+                    ChooserItem::Host => {
+                        *self = MenuNav::lobby(true);
                         MenuAction::Host
-                    } else {
+                    }
+                    ChooserItem::Join => {
+                        *self = MenuNav::lobby(false);
                         MenuAction::Join
                     }
+                    ChooserItem::Quit => MenuAction::Quit,
+                },
+                // Console convention: Back at the root highlights Quit rather than
+                // exiting outright — B is muscle-memory for leaving nested screens,
+                // so a raw B here must not kill the app.
+                MenuInput::Back => {
+                    *focus = ChooserItem::Quit;
+                    MenuAction::None
                 }
-                MenuInput::Back => MenuAction::None,
             },
             MenuNav::HostLobby { focus } => match input {
                 MenuInput::Up | MenuInput::Down => {
@@ -414,13 +435,44 @@ mod tests {
                 focus: ChooserItem::Join
             }
         );
+    }
+
+    #[test]
+    fn chooser_quit_is_one_press_away_and_leaves_nav_intact() {
+        // Up from boot wraps straight to Quit (rl#263).
+        let mut nav = MenuNav::new();
+        assert_eq!(nav.step(MenuInput::Up, 0), MenuAction::None);
+        assert_eq!(
+            nav,
+            MenuNav::Chooser {
+                focus: ChooserItem::Quit
+            }
+        );
+        assert_eq!(nav.step(MenuInput::Confirm, 0), MenuAction::Quit);
+        assert_eq!(
+            nav,
+            MenuNav::Chooser {
+                focus: ChooserItem::Quit
+            },
+            "Quit doesn't change screens — the app is exiting"
+        );
+
+        // Down past Join reaches it too.
+        let mut nav = MenuNav::new();
+        nav.step(MenuInput::Down, 0);
+        nav.step(MenuInput::Down, 0);
+        assert_eq!(nav.step(MenuInput::Confirm, 0), MenuAction::Quit);
+
+        // Back highlights Quit but never exits by itself — quitting stays two presses.
+        let mut nav = MenuNav::new();
         assert_eq!(nav.step(MenuInput::Back, 0), MenuAction::None);
         assert_eq!(
             nav,
             MenuNav::Chooser {
-                focus: ChooserItem::Join
+                focus: ChooserItem::Quit
             }
         );
+        assert_eq!(nav.step(MenuInput::Confirm, 0), MenuAction::Quit);
     }
 
     #[test]
