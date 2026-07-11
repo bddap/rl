@@ -62,6 +62,10 @@ struct BodyPosRecenter;
 /// Each further [`DRIFT_LOG_STEP_M`] of unrecentered peak drift earns one more log line.
 const DRIFT_LOG_STEP_M: f32 = 5.0;
 
+/// Pursuit-heartbeat cadence: one range line per this many hunt-fed ticks (~5 s at the
+/// 60 Hz fixed step).
+const HUNT_LOG_EVERY_TICKS: u64 = 300;
+
 pub struct CrabPolicies(pub Vec<Policy>);
 
 #[derive(Resource)]
@@ -94,6 +98,9 @@ struct CrabBridge {
     /// count worth a log line (doubles per line, so a persistent miss is quantified
     /// without flooding).
     next_miss_log_ticks: u64,
+    /// Ticks with a hunt target fed, driving the pursuit heartbeat in
+    /// [`ExternalCrabBridge::set_hunt_target`].
+    hunt_log_ticks: u64,
     /// Her claw pincers' REAL physics capsules as of the last physics tick (rl#249), in
     /// arena meters: XZ relative to the same-tick carapace ground point (so the offsets
     /// survive arena↔world drift and recenter teleports), y absolute (both grounds are
@@ -151,6 +158,7 @@ impl CrabBridge {
             recenters: 0,
             missed_carapace_ticks: 0,
             next_miss_log_ticks: 1,
+            hunt_log_ticks: 0,
             claws: Vec::new(),
         }
     }
@@ -204,6 +212,7 @@ impl CrabBridge {
         self.recenters = 0;
         self.missed_carapace_ticks = 0;
         self.next_miss_log_ticks = 1;
+        self.hunt_log_ticks = 0;
         self.claws.clear();
     }
 
@@ -252,7 +261,21 @@ impl ExternalCrabBridge {
     }
 
     pub fn set_hunt_target(&mut self, idx: usize, prey: Option<Pos>) {
-        self.crabs[idx].hunt_target_m = prey.map(pos_to_m);
+        let crab = &mut self.crabs[idx];
+        crab.hunt_target_m = prey.map(pos_to_m);
+        // Pursuit heartbeat: the crab→prey range (sim m) every ~5 s. The prey feed is
+        // wherever the sim says the player IS — a craft pose while piloting (rl#258) —
+        // so a "she stopped giving chase" report (rl#265) is diagnosable from any run's
+        // log, live deck telemetry included, without a repro.
+        crab.hunt_log_ticks += 1;
+        if crab.hunt_log_ticks.is_multiple_of(HUNT_LOG_EVERY_TICKS)
+            && let Some(prey_m) = crab.hunt_target_m
+        {
+            info!(
+                "external_crab: env {idx} prey {:.1} m away",
+                (prey_m - crab.world_pos_m).length()
+            );
+        }
     }
 
     pub fn restart_to_spawns(&mut self, spawns: &[Pos]) {
