@@ -418,6 +418,12 @@ struct PeerLink {
     /// The QUIC connection itself — the datagram send path ([`Frame::via_datagram`]), and
     /// what link teardown closes so every per-link task exits promptly.
     conn: Connection,
+    /// Who DIALED this connection — a property of the connection itself, so both ends agree
+    /// on it. On a crossed dial (both sides connecting at once) each side keeps the link with
+    /// the LOWER dialer id: a rule both compute identically, so the duplicate converges on
+    /// the same survivor everywhere instead of a distributed coin-flip where each side closes
+    /// (or stream-resets, by dropping the writer) the connection the other kept.
+    dialer: EndpointId,
 }
 
 // State frames ride datagrams so a lost/reordered packet costs ONE stale frame (superseded a
@@ -590,6 +596,7 @@ impl Session {
             conn,
             self.inbox_tx.clone(),
             self.links.clone(),
+            true,
         )
         .await
     }
@@ -740,7 +747,8 @@ pub async fn start_session() -> Result<Session> {
                     match endpoint.connect(peer, ALPN).await {
                         Ok(conn) => {
                             if let Err(e) =
-                                wire_connection(my_id, conn, inbox.clone(), links.clone()).await
+                                wire_connection(my_id, conn, inbox.clone(), links.clone(), true)
+                                    .await
                             {
                                 tracing::warn!(%peer, "dialing peer failed: {e:#}");
                             }
@@ -776,6 +784,7 @@ impl ProtocolHandler for GameProto {
             connection,
             self.inbox.clone(),
             self.links.clone(),
+            false,
         )
         .await
         {
@@ -812,15 +821,18 @@ async fn wire_connection(
     conn: Connection,
     inbox: mpsc::Sender<FromPeer>,
     links: Links,
+    dialed_by_me: bool,
 ) -> Result<()> {
     let peer = conn.remote_id();
-    let dialer = my_id.as_bytes() < peer.as_bytes();
-    let (mut send, mut recv) = if dialer {
+    // Stream direction is by ID ORDER, not by who dialed: on a crossed dial both duplicate
+    // connections then behave identically, so either can survive the dedup below.
+    let opener = my_id.as_bytes() < peer.as_bytes();
+    let (mut send, mut recv) = if opener {
         conn.open_bi().await.context("opening bi-stream")?
     } else {
         conn.accept_bi().await.context("accepting bi-stream")?
     };
-    if dialer {
+    if opener {
         send.write_all(&[HELLO]).await.context("sending hello")?;
     } else {
         let mut h = [0u8; 1];
@@ -828,21 +840,32 @@ async fn wire_connection(
         anyhow::ensure!(h[0] == HELLO, "bad stream-open byte {:#x}", h[0]);
     }
 
+    let dialer = if dialed_by_me { my_id } else { peer };
     let (tx, mut rx) = mpsc::channel::<OutFrame>(OUT_QUEUE_FRAMES);
     let tx = Arc::new(tx);
     let link_id: LinkId = Arc::downgrade(&tx);
-    // A crossed dial (both sides connecting at once) replaces the old link WITHOUT closing
-    // its connection: the two sides can wire the duplicate connections in opposite orders, so
-    // "close the one I replaced" can close the one the PEER kept — a distributed coin-flip
-    // that kills both. The loser link's tasks linger on a live connection instead; each side
-    // simply sends on whichever link it kept.
-    links.lock().await.insert(
-        peer,
-        PeerLink {
-            send: tx,
-            conn: conn.clone(),
-        },
-    );
+    {
+        let mut links = links.lock().await;
+        if let Some(existing) = links.get(&peer) {
+            // Duplicate link. Keep the lower-dialer connection (see PeerLink::dialer); on a
+            // SAME-dialer duplicate (a re-dial) the newer one wins — the old is stale.
+            if existing.dialer.as_bytes() < dialer.as_bytes() {
+                drop(links);
+                conn.close(0u32.into(), b"crossed dial: lower-dialer link kept");
+                return Ok(());
+            }
+        }
+        if let Some(old) = links.insert(
+            peer,
+            PeerLink {
+                send: tx,
+                conn: conn.clone(),
+                dialer,
+            },
+        ) {
+            old.conn.close(0u32.into(), b"crossed dial: lower-dialer link kept");
+        }
+    }
 
     let links_for_writer = links.clone();
     let writer_id = link_id.clone();
