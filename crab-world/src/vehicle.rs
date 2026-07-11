@@ -171,8 +171,10 @@ impl PilotCommand {
 
 /// Every currently-piloting player's command, keyed by pilot: an entry spawns + drives that
 /// pilot's body; removing it despawns the body ([`manage_vehicles`]). The single seam the net
-/// layer writes — solo/host write their own entry today; remote pilots' entries arrive off the
-/// wire in a later rl#191 increment.
+/// layer writes — the host authors an entry for EVERY filed pilot intent, its own and remote
+/// pilots' alike (intents ride each client's input submission), so every craft has a real
+/// body in the host's one physics world and the crab hunts boarded players wherever they fly
+/// (rl#265).
 #[derive(Resource, Default)]
 pub struct VehicleControls(pub std::collections::BTreeMap<PilotId, PilotCommand>);
 
