@@ -36,6 +36,7 @@ bincode.workspace = true
 rand_chacha.workspace = true
 
 iroh.workspace = true
+bytes.workspace = true
 iroh-mdns-address-lookup.workspace = true
 n0-future.workspace = true
 tokio.workspace = true

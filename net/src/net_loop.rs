@@ -131,8 +131,8 @@ impl NetDriver {
     }
 
     /// (Host) Broadcast the host-authoritative [`CoreSnapshot`] DOWN to every client — the full
-    /// game STATE, so a remote client renders it instead of re-stepping. Non-blocking: enqueued to
-    /// each link's writer task, so a dead peer can never hold this (main-thread) call.
+    /// game STATE, so a remote client renders it instead of re-stepping. Non-blocking:
+    /// fire-and-forget datagrams (rl#259), so a dead peer can never hold this (main-thread) call.
     pub fn broadcast_snapshot(&self, snapshot: &CoreSnapshot) {
         self.rt.block_on(self.session.broadcast_snapshot(snapshot));
     }
