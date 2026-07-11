@@ -70,6 +70,7 @@ mod scene;
 mod screenshot;
 #[cfg(test)]
 mod tests;
+mod vehicle_view;
 
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use render_mode::RenderMode;

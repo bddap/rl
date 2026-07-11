@@ -41,6 +41,9 @@ pub struct CrabArticulation {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VehiclePoseWire {
     pub pilot: u8,
+    /// Which craft this is — a client renders the kind's silhouette and can't infer it
+    /// from the pose (rl#260).
+    pub kind: crab_world::vehicle::VehicleKind,
     pub pos: [f32; 3],
     pub rot: [f32; 4],
 }
@@ -53,6 +56,8 @@ pub enum ArticulationDecodeError {
     /// A brain label's bytes were not valid UTF-8.
     BadLabel,
     UnorderedVehicles,
+    /// A vehicle pose's kind byte mapped to no [`crab_world::vehicle::VehicleKind`].
+    BadVehicleKind,
 }
 
 impl std::fmt::Display for ArticulationDecodeError {
@@ -63,6 +68,7 @@ impl std::fmt::Display for ArticulationDecodeError {
             Self::TrailingBytes => "trailing bytes after a complete articulation",
             Self::BadLabel => "articulation brain label was not valid UTF-8",
             Self::UnorderedVehicles => "articulation vehicles were not in ascending pilot order",
+            Self::BadVehicleKind => "articulation vehicle carried an unknown kind byte",
         };
         f.write_str(msg)
     }
@@ -105,6 +111,7 @@ impl CrabArticulation {
         out.extend_from_slice(&(self.vehicles.len() as u16).to_le_bytes());
         for v in &self.vehicles {
             out.push(v.pilot);
+            out.push(v.kind.wire_byte());
             for c in v.pos {
                 out.extend_from_slice(&c.to_le_bytes());
             }
@@ -152,6 +159,8 @@ impl CrabArticulation {
         for _ in 0..n_vehicles {
             let v = VehiclePoseWire {
                 pilot: r.byte()?,
+                kind: crab_world::vehicle::VehicleKind::from_wire_byte(r.byte()?)
+                    .ok_or(ArticulationDecodeError::BadVehicleKind)?,
                 pos: read_vec3(&mut r)?,
                 rot: read_vec4(&mut r)?,
             };
@@ -284,6 +293,7 @@ mod tests {
             vehicles: vec![
                 VehiclePoseWire {
                     pilot: 0,
+                    kind: crab_world::vehicle::VehicleKind::Plane,
                     pos: [2.0, 5.5, -1.0],
                     rot: [
                         0.0,
@@ -294,6 +304,7 @@ mod tests {
                 },
                 VehiclePoseWire {
                     pilot: 2,
+                    kind: crab_world::vehicle::VehicleKind::Ship,
                     pos: [-3.0, 1.5, 4.0],
                     rot: [0.0, 0.0, 0.0, 1.0],
                 },
@@ -349,7 +360,7 @@ mod tests {
         let mut a = sample();
         a.crabs[1].brain_label = "x".to_string();
         let mut bytes = a.to_bytes();
-        let label_off = bytes.len() - 12 - (2 + 2 * (1 + 12 + 16)) - 1;
+        let label_off = bytes.len() - 12 - (2 + 2 * (1 + 1 + 12 + 16)) - 1;
         assert_eq!(bytes[label_off], b'x');
         bytes[label_off] = 0xFF;
         assert_eq!(
@@ -396,12 +407,26 @@ mod tests {
     fn vehicle_count_past_the_bytes_is_rejected() {
         let a = sample();
         let mut bytes = a.to_bytes();
-        let count_off = bytes.len() - 2 * (1 + 12 + 16) - 2;
+        let count_off = bytes.len() - 2 * (1 + 1 + 12 + 16) - 2;
         assert_eq!(bytes[count_off], a.vehicles.len() as u8);
         bytes[count_off] += 1;
         assert_eq!(
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::Truncated)
+        );
+    }
+
+    #[test]
+    fn unknown_vehicle_kind_byte_is_rejected() {
+        let a = sample();
+        let mut bytes = a.to_bytes();
+        // First vehicle record follows the u16 count: pilot byte, then the kind byte.
+        let kind_off = bytes.len() - 2 * (1 + 1 + 12 + 16) + 1;
+        assert_eq!(bytes[kind_off], a.vehicles[0].kind.wire_byte());
+        bytes[kind_off] = 0xEE;
+        assert_eq!(
+            CrabArticulation::from_bytes(&bytes),
+            Err(ArticulationDecodeError::BadVehicleKind)
         );
     }
 

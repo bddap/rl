@@ -13,6 +13,9 @@ pub fn register(app: &mut App, initial: RenderMode) {
     // ungated cycle input means dismissing that screen cycles the mode. Both callers hold the
     // state: the windowed app inits it, the screenshot app boots pinned to Playing.
     crab_world::crab_view::register(app, initial, in_state(AppPhase::Playing));
+    // Craft models ride the same registration seam so the windowed and screenshot apps
+    // both get them (rl#260).
+    super::vehicle_view::register(app);
     app.add_systems(
         Update,
         (
@@ -85,6 +88,11 @@ fn draw_vehicle_collider_wireframe(
         // On the HOST the entity query covers EVERY craft (its world simulates all pilots'),
         // so the RemoteVehicle pass below would ghost each remote craft a tick behind its
         // live entity. A client has no Vehicle entities and always takes the wire pass.
+        return;
+    }
+    if !mode.shows_colliders() {
+        // Mesh mode: the craft models (`vehicle_view`, rl#260) are the visual; before they
+        // existed this pass was always-on so remote craft weren't invisible.
         return;
     }
     for v in &remote.0 {

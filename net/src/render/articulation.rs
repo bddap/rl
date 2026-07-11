@@ -9,9 +9,10 @@ use crate::articulation::{
     CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire,
 };
 
-/// Every NON-LOCAL pilot's craft pose, for the always-on wireframe pass (rl#191). The local
-/// pilot's own craft is excluded: the cockpit camera flies from it instead. Fed per tick from
-/// the same articulation on both arms — the host from its capture, a client from its adopt.
+/// Every NON-LOCAL pilot's craft kind + pose (rl#191), feeding the craft models
+/// (`vehicle_view`, rl#260) and the colliders-mode wireframe. The local pilot's own craft is
+/// excluded: the cockpit camera flies from it instead. Fed per tick from the same
+/// articulation on both arms — the host from its capture, a client from its adopt.
 #[derive(Resource, Default)]
 pub(super) struct RemoteVehicle(pub(super) Vec<VehiclePoseWire>);
 
@@ -144,6 +145,7 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         .iter(world)
         .map(|(t, v)| VehiclePoseWire {
             pilot: v.pilot.0,
+            kind: v.kind,
             pos: t.translation.to_array(),
             rot: t.rotation.to_array(),
         })
