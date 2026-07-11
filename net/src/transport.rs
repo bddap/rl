@@ -19,10 +19,9 @@ use crate::server::{Admission, AdmissionRefusal, JoinRequest, Refusal};
 use crate::sim::PlayerId;
 use crate::snapshot::CoreSnapshot;
 
-// "lockstep" is stale vocabulary (rl#151 deleted that model) but the string is
-// compat-breaking, so rename it (e.g. `hostauth/15`) with the next protocol bump
-// instead of burning a rev on it (rl#244).
-pub const ALPN: &[u8] = b"bddap/rl-game/lockstep/14";
+// v15: state frames (snapshot/articulation) moved off the reliable bi-stream onto QUIC
+// datagrams (rl#259), and the stale "lockstep" vocabulary retired with the same bump (rl#244).
+pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/15";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
 
@@ -52,6 +51,15 @@ impl Frame {
             _ => None,
         }
     }
+
+    /// State frames ride unreliable unordered QUIC datagrams; everything else (inputs,
+    /// formation, admission) stays on the reliable ordered bi-stream, where a retransmit
+    /// stall is the price of ordering. ONE source for the routing: senders pick the path by
+    /// this, and each receive path rejects the other's kinds, so a kind can never ride both
+    /// (rl#259).
+    fn via_datagram(self) -> bool {
+        matches!(self, Frame::Snapshot | Frame::Articulation)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +85,16 @@ pub(crate) trait Codec: Sized {
     type Bytes: AsRef<[u8]>;
     fn encode(&self) -> Self::Bytes;
     fn decode(body: &[u8]) -> Result<Self>;
+}
+
+/// A tick-stamped full-state frame — safe to LOSE (the next tick's frame supersedes it) and
+/// safe to REORDER (the receiver drops anything at or below the newest tick it delivered) —
+/// which is what qualifies it for the datagram path ([`Frame::via_datagram`]). `tick` is the
+/// frame's sim tick: it keys both fragment reassembly and the receiver's stale-drop, and the
+/// sim tick is monotone even across an in-round RESTART, so "newest tick wins" is always
+/// correct within a connection's lifetime.
+pub(crate) trait StateCodec: Codec {
+    fn tick(&self) -> u64;
 }
 
 fn vehicle_kind_byte(kind: crab_world::vehicle::VehicleKind) -> u8 {
@@ -178,6 +196,12 @@ impl Codec for CoreSnapshot {
     }
 }
 
+impl StateCodec for CoreSnapshot {
+    fn tick(&self) -> u64 {
+        self.tick
+    }
+}
+
 impl Codec for CrabArticulation {
     const KIND: Frame = Frame::Articulation;
     type Bytes = Vec<u8>;
@@ -189,6 +213,12 @@ impl Codec for CrabArticulation {
     fn decode(body: &[u8]) -> Result<Self> {
         CrabArticulation::from_bytes(body)
             .map_err(|e| anyhow::anyhow!("decoding articulation frame: {e}"))
+    }
+}
+
+impl StateCodec for CrabArticulation {
+    fn tick(&self) -> u64 {
+        self.tick
     }
 }
 
@@ -385,6 +415,140 @@ type Links = Arc<tokio::sync::Mutex<BTreeMap<EndpointId, PeerLink>>>;
 #[derive(Clone, Debug)]
 struct PeerLink {
     send: Link,
+    /// The QUIC connection itself — the datagram send path ([`Frame::via_datagram`]), and
+    /// what link teardown closes so every per-link task exits promptly.
+    conn: Connection,
+}
+
+// State frames ride datagrams so a lost/reordered packet costs ONE stale frame (superseded a
+// tick later) instead of stalling every later message behind a retransmit — the rl#259
+// "feels like tcp synchronization" jitter. A frame bigger than one datagram is split into
+// tick-stamped fragments; a lost fragment drops that WHOLE frame (never blocks, never
+// retransmits — the next tick's frame replaces it).
+//
+// Datagram layout: kind(1) ++ tick(8 LE) ++ frag_idx(1) ++ frag_count(1) ++ payload.
+const DGRAM_HDR_LEN: usize = 11;
+/// Sized so header + payload stays under QUIC's guaranteed datagram floor ("a little over a
+/// kilobyte" before path-MTU discovery grows it) — a fragment can never hit `TooLarge`.
+const DGRAM_FRAG_PAYLOAD: usize = 1024;
+const DGRAM_MAX_FRAGS: usize = MAX_FRAME_LEN.div_ceil(DGRAM_FRAG_PAYLOAD);
+
+fn state_datagrams(kind: Frame, tick: u64, body: &[u8]) -> Vec<bytes::Bytes> {
+    let count = body.len().div_ceil(DGRAM_FRAG_PAYLOAD).max(1);
+    debug_assert!(
+        count <= DGRAM_MAX_FRAGS,
+        "outbound {kind:?} frame is {} B, over the {MAX_FRAME_LEN} B cap every receiver enforces",
+        body.len()
+    );
+    (0..count)
+        .map(|i| {
+            let chunk = &body[i * DGRAM_FRAG_PAYLOAD..((i + 1) * DGRAM_FRAG_PAYLOAD).min(body.len())];
+            let mut d = Vec::with_capacity(DGRAM_HDR_LEN + chunk.len());
+            d.push(kind as u8);
+            d.extend_from_slice(&tick.to_le_bytes());
+            d.push(i as u8);
+            d.push(count as u8);
+            d.extend_from_slice(chunk);
+            bytes::Bytes::from(d)
+        })
+        .collect()
+}
+
+struct DgramFrag<'a> {
+    kind: Frame,
+    tick: u64,
+    idx: u8,
+    count: u8,
+    payload: &'a [u8],
+}
+
+fn parse_state_datagram(d: &[u8]) -> Result<DgramFrag<'_>> {
+    anyhow::ensure!(
+        d.len() >= DGRAM_HDR_LEN,
+        "datagram is {} B, too short for a fragment header",
+        d.len()
+    );
+    let kind = Frame::from_byte(d[0])
+        .with_context(|| format!("unknown datagram frame kind {:#x}", d[0]))?;
+    anyhow::ensure!(
+        kind.via_datagram(),
+        "control frame {kind:?} arrived as a datagram"
+    );
+    let tick = u64::from_le_bytes(d[1..9].try_into().expect("length checked above"));
+    let (idx, count) = (d[9], d[10]);
+    anyhow::ensure!(
+        idx < count && (count as usize) <= DGRAM_MAX_FRAGS,
+        "datagram fragment {idx}/{count} is out of range"
+    );
+    let payload = &d[DGRAM_HDR_LEN..];
+    let last = idx + 1 == count;
+    anyhow::ensure!(
+        if last {
+            payload.len() <= DGRAM_FRAG_PAYLOAD
+        } else {
+            payload.len() == DGRAM_FRAG_PAYLOAD
+        },
+        "datagram fragment {idx}/{count} payload is {} B",
+        payload.len()
+    );
+    Ok(DgramFrag {
+        kind,
+        tick,
+        idx,
+        count,
+        payload,
+    })
+}
+
+/// Reassembles ONE state-frame kind's fragments, delivering each complete body at most once
+/// and strictly newer-than-last: the wire is unordered, so the receiver enforces monotonicity
+/// (a stale frame is dropped, never delivered late), and a newer tick's first fragment
+/// abandons any incomplete older assembly — loss costs one frame, never a stall.
+#[derive(Default)]
+struct StateAssembler {
+    delivered: Option<u64>,
+    tick: u64,
+    frags: Vec<Option<Vec<u8>>>,
+    have: usize,
+}
+
+impl StateAssembler {
+    fn accept(&mut self, f: &DgramFrag) -> Result<Option<Vec<u8>>> {
+        if self.delivered.is_some_and(|d| f.tick <= d) {
+            return Ok(None);
+        }
+        if self.frags.is_empty() || self.tick != f.tick {
+            if !self.frags.is_empty() && f.tick < self.tick {
+                // Older than the frame mid-assembly — superseded before it completed.
+                return Ok(None);
+            }
+            self.tick = f.tick;
+            self.frags = vec![None; f.count as usize];
+            self.have = 0;
+        }
+        anyhow::ensure!(
+            self.frags.len() == f.count as usize,
+            "tick {} re-announced with fragment count {} (was {})",
+            f.tick,
+            f.count,
+            self.frags.len()
+        );
+        let slot = &mut self.frags[f.idx as usize];
+        if slot.is_none() {
+            self.have += 1;
+        }
+        *slot = Some(f.payload.to_vec());
+        if self.have < self.frags.len() {
+            return Ok(None);
+        }
+        self.delivered = Some(self.tick);
+        let body = std::mem::take(&mut self.frags)
+            .into_iter()
+            .flat_map(|s| s.expect("all fragments present"))
+            .collect();
+        self.have = 0;
+        Ok(Some(body))
+    }
 }
 
 pub struct Session {
@@ -431,13 +595,30 @@ impl Session {
     }
 
     pub(crate) async fn send<M: Codec>(&self, peer: EndpointId, msg: &M) {
+        debug_assert!(!M::KIND.via_datagram(), "state frames go via broadcast_state");
         let bytes = msg.encode();
         self.send_frame(peer, M::KIND, bytes.as_ref().into()).await;
     }
 
     pub(crate) async fn broadcast<M: Codec>(&self, msg: &M) {
+        debug_assert!(!M::KIND.via_datagram(), "state frames go via broadcast_state");
         let bytes = msg.encode();
         self.broadcast_frame(M::KIND, bytes.as_ref().into()).await;
+    }
+
+    /// Broadcast a state frame over unreliable unordered datagrams — fire-and-forget: no
+    /// retransmit, no ordering, no writer queue to wedge. Under congestion the QUIC buffer
+    /// drops the OLDEST buffered datagram first, which for full-state frames is exactly
+    /// right (stale state is worthless).
+    pub(crate) async fn broadcast_state<M: StateCodec>(&self, msg: &M) {
+        let bytes = msg.encode();
+        let frags = state_datagrams(M::KIND, msg.tick(), bytes.as_ref());
+        let links = self.links.lock().await;
+        for link in links.values() {
+            for frag in &frags {
+                send_state_datagram(&link.conn, frag.clone());
+            }
+        }
     }
 
     pub async fn send_to(&self, peer: EndpointId, msg: &TickMsg) {
@@ -445,11 +626,11 @@ impl Session {
     }
 
     pub async fn broadcast_snapshot(&self, snapshot: &CoreSnapshot) {
-        self.broadcast(snapshot).await;
+        self.broadcast_state(snapshot).await;
     }
 
     pub async fn broadcast_articulation(&self, articulation: &CrabArticulation) {
-        self.broadcast(articulation).await;
+        self.broadcast_state(articulation).await;
     }
 
     async fn send_frame(&self, peer: EndpointId, kind: Frame, body: Arc<[u8]>) {
@@ -583,6 +764,26 @@ impl ProtocolHandler for GameProto {
     }
 }
 
+fn send_state_datagram(conn: &Connection, frag: bytes::Bytes) {
+    use iroh::endpoint::SendDatagramError;
+    if let Err(e) = conn.send_datagram(frag) {
+        // ConnectionLost: the per-link stream tasks are already tearing this link down —
+        // nothing to report. Every other variant is a design violation (both ends are our
+        // build via the pinned ALPN, and fragments are sized under QUIC's guaranteed
+        // datagram floor), and it means state frames silently stop flowing to that peer —
+        // latch ONE loud error instead of a 60 Hz flood.
+        if !matches!(e, SendDatagramError::ConnectionLost(_)) {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::error!(
+                    "state datagram refused ({e}) — remote peers stop receiving game state"
+                );
+            }
+        }
+    }
+}
+
 const HELLO: u8 = 0xA5;
 
 async fn wire_connection(
@@ -609,7 +810,17 @@ async fn wire_connection(
     let (tx, mut rx) = mpsc::channel::<OutFrame>(OUT_QUEUE_FRAMES);
     let tx = Arc::new(tx);
     let link_id: LinkId = Arc::downgrade(&tx);
-    links.lock().await.insert(peer, PeerLink { send: tx });
+    if let Some(old) = links.lock().await.insert(
+        peer,
+        PeerLink {
+            send: tx,
+            conn: conn.clone(),
+        },
+    ) {
+        // A re-dial replaced a live link: close the old connection so its tasks exit now,
+        // instead of two links feeding the inbox for the same peer until the old one idles out.
+        old.conn.close(0u32.into(), b"link replaced");
+    }
 
     let links_for_writer = links.clone();
     let writer_id = link_id.clone();
@@ -636,17 +847,55 @@ async fn wire_connection(
     });
 
     let links_for_reader = links.clone();
+    let reader_id = link_id.clone();
+    let reader_inbox = inbox.clone();
     tokio::spawn(async move {
         // WARN, not debug: read_loop returns Ok on every normal ending (clean EOF, session drop),
         // so an Err here is a real protocol violation — a mis-framed/unknown/truncated frame (e.g.
         // an ALPN-matched build with a drifted codec) — and must be visible, not a silent link
         // drop the joiner mis-reads as "host unreachable" ([[silent-fallback-antipattern]]).
-        if let Err(e) = read_loop(recv, peer, inbox).await {
+        if let Err(e) = read_loop(recv, peer, reader_inbox).await {
             tracing::warn!(%peer, "peer read loop ended on a protocol violation: {e:#}");
         }
-        drop_if_same(&links_for_reader, peer, &link_id).await;
+        drop_if_same(&links_for_reader, peer, &reader_id).await;
+    });
+
+    let links_for_dgram = links.clone();
+    tokio::spawn(async move {
+        // Same loudness contract as the stream reader: Ok is every normal ending (the
+        // connection closed), Err is a protocol violation. Dropping the link on either keeps
+        // the failure mode LOUD — a peer whose state stopped flowing must read as departed,
+        // never as a silently frozen world.
+        if let Err(e) = datagram_loop(conn, peer, inbox).await {
+            tracing::warn!(%peer, "peer datagram loop ended on a protocol violation: {e:#}");
+        }
+        drop_if_same(&links_for_dgram, peer, &link_id).await;
     });
     Ok(())
+}
+
+/// Receives state frames ([`Frame::via_datagram`]) — the unreliable unordered lane beside
+/// [`read_loop`]'s reliable stream. Reassembles fragments per kind and delivers each complete
+/// frame to the same inbox, strictly newest-first ([`StateAssembler`]).
+async fn datagram_loop(
+    conn: Connection,
+    peer: EndpointId,
+    inbox: mpsc::Sender<FromPeer>,
+) -> Result<()> {
+    let mut assemblers: BTreeMap<u8, StateAssembler> = BTreeMap::new();
+    loop {
+        let Ok(d) = conn.read_datagram().await else {
+            return Ok(());
+        };
+        let frag = parse_state_datagram(&d)?;
+        let asm = assemblers.entry(frag.kind as u8).or_default();
+        if let Some(body) = asm.accept(&frag)? {
+            let msg = decode_peer_wire(frag.kind, &body)?;
+            if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
+                return Ok(());
+            }
+        }
+    }
 }
 
 const MAX_FRAME_LEN: usize = 16 * 1024;
@@ -670,20 +919,27 @@ async fn read_loop(
             .context("reading frame body")?;
         let kind = Frame::from_byte(buf[0])
             .with_context(|| format!("unknown frame kind {:#x}", buf[0]))?;
-        let body = &buf[1..];
-        let msg = match kind {
-            Frame::Tick => PeerWire::Tick(TickMsg::decode(body)?),
-            Frame::Beat => PeerWire::Beat(Beat::decode(body)?),
-            Frame::JoinRequest => PeerWire::JoinRequest(JoinRequest::decode(body)?),
-            Frame::Refuse => PeerWire::Refuse(Refusal::decode(body)?),
-            Frame::Welcome => PeerWire::Welcome(Admission::decode(body)?),
-            Frame::Snapshot => PeerWire::Snapshot(CoreSnapshot::decode(body)?),
-            Frame::Articulation => PeerWire::Articulation(CrabArticulation::decode(body)?),
-        };
+        anyhow::ensure!(
+            !kind.via_datagram(),
+            "state frame {kind:?} arrived on the reliable stream"
+        );
+        let msg = decode_peer_wire(kind, &buf[1..])?;
         if inbox.send(FromPeer { from: peer, msg }).await.is_err() {
             return Ok(());
         }
     }
+}
+
+fn decode_peer_wire(kind: Frame, body: &[u8]) -> Result<PeerWire> {
+    Ok(match kind {
+        Frame::Tick => PeerWire::Tick(TickMsg::decode(body)?),
+        Frame::Beat => PeerWire::Beat(Beat::decode(body)?),
+        Frame::JoinRequest => PeerWire::JoinRequest(JoinRequest::decode(body)?),
+        Frame::Refuse => PeerWire::Refuse(Refusal::decode(body)?),
+        Frame::Welcome => PeerWire::Welcome(Admission::decode(body)?),
+        Frame::Snapshot => PeerWire::Snapshot(CoreSnapshot::decode(body)?),
+        Frame::Articulation => PeerWire::Articulation(CrabArticulation::decode(body)?),
+    })
 }
 
 async fn drop_if_same(links: &Links, id: EndpointId, failed: &LinkId) {
@@ -691,8 +947,12 @@ async fn drop_if_same(links: &Links, id: EndpointId, failed: &LinkId) {
     if links
         .get(&id)
         .is_some_and(|l| std::sync::Weak::ptr_eq(&Arc::downgrade(&l.send), failed))
+        && let Some(l) = links.remove(&id)
     {
-        links.remove(&id);
+        // Explicit close, not handle-drop: the datagram loop holds a Connection clone, so
+        // stream teardown alone would keep a dropped link's connection (and that loop)
+        // alive until idle timeout.
+        l.conn.close(0u32.into(), b"link dropped");
     }
 }
 
@@ -784,6 +1044,105 @@ mod tests {
         assert!(Refusal::decode(&[9]).is_err());
         assert!(Refusal::decode(&[2, 0]).is_err());
         assert!(Refusal::decode(b"host gone").is_err());
+    }
+
+    /// Push one fragment through an assembler, unwrapping the protocol-violation layer.
+    fn feed(asm: &mut StateAssembler, d: &bytes::Bytes) -> Option<Vec<u8>> {
+        asm.accept(&parse_state_datagram(d).expect("well-formed fragment"))
+            .expect("well-formed fragment sequence")
+    }
+
+    #[test]
+    fn state_datagrams_fragment_and_reassemble() {
+        let mut asm = StateAssembler::default();
+
+        // A small body: one fragment, delivered immediately.
+        let small = b"tiny state".to_vec();
+        let frags = state_datagrams(Frame::Snapshot, 3, &small);
+        assert_eq!(frags.len(), 1);
+        assert_eq!(feed(&mut asm, &frags[0]), Some(small));
+
+        // A multi-fragment body reassembles exactly, even arriving out of order.
+        let big: Vec<u8> = (0..2 * DGRAM_FRAG_PAYLOAD + 100).map(|i| i as u8).collect();
+        let frags = state_datagrams(Frame::Snapshot, 4, &big);
+        assert_eq!(frags.len(), 3);
+        assert_eq!(feed(&mut asm, &frags[2]), None);
+        assert_eq!(feed(&mut asm, &frags[0]), None);
+        assert_eq!(feed(&mut asm, &frags[1]), Some(big));
+    }
+
+    #[test]
+    fn assembler_drops_stale_and_duplicate_ticks() {
+        let mut asm = StateAssembler::default();
+        let newer = state_datagrams(Frame::Snapshot, 10, b"ten");
+        let stale = state_datagrams(Frame::Snapshot, 9, b"nine");
+        assert_eq!(feed(&mut asm, &newer[0]), Some(b"ten".to_vec()));
+        assert_eq!(feed(&mut asm, &stale[0]), None, "older than delivered");
+        assert_eq!(feed(&mut asm, &newer[0]), None, "duplicate of delivered");
+    }
+
+    #[test]
+    fn assembler_newer_tick_preempts_incomplete_older() {
+        // Tick 5 loses a fragment (the wire may drop any datagram); tick 6 must still deliver —
+        // loss costs one frame, never a stall. A late tick-5 straggler after 6 is stale.
+        let mut asm = StateAssembler::default();
+        let body5: Vec<u8> = vec![5; DGRAM_FRAG_PAYLOAD + 1];
+        let body6: Vec<u8> = vec![6; DGRAM_FRAG_PAYLOAD + 1];
+        let f5 = state_datagrams(Frame::Articulation, 5, &body5);
+        let f6 = state_datagrams(Frame::Articulation, 6, &body6);
+        assert_eq!(feed(&mut asm, &f5[0]), None);
+        assert_eq!(feed(&mut asm, &f6[1]), None, "preempts the incomplete tick 5");
+        assert_eq!(feed(&mut asm, &f5[1]), None, "tick-5 straggler dropped");
+        assert_eq!(feed(&mut asm, &f6[0]), Some(body6));
+    }
+
+    #[test]
+    fn malformed_datagrams_are_rejected() {
+        // Header too short.
+        assert!(parse_state_datagram(&[Frame::Snapshot as u8; DGRAM_HDR_LEN - 1]).is_err());
+        // A control kind must never arrive as a datagram (and vice versa on the stream —
+        // Frame::via_datagram is the single routing source both receive paths enforce).
+        let mut d = state_datagrams(Frame::Snapshot, 1, b"x")[0].to_vec();
+        d[0] = Frame::Tick as u8;
+        assert!(parse_state_datagram(&d).is_err());
+        // Fragment index out of range.
+        let mut d = state_datagrams(Frame::Snapshot, 1, b"x")[0].to_vec();
+        d[9] = 1; // idx == count
+        assert!(parse_state_datagram(&d).is_err());
+        // A non-final fragment must carry a full payload (else reassembly is ambiguous).
+        let big: Vec<u8> = vec![0; DGRAM_FRAG_PAYLOAD + 1];
+        let mut d = state_datagrams(Frame::Snapshot, 1, &big)[0].to_vec();
+        d.pop();
+        assert!(parse_state_datagram(&d).is_err());
+        // Fragment count over the frame cap.
+        let mut d = state_datagrams(Frame::Snapshot, 1, &big)[0].to_vec();
+        d[10] = u8::MAX;
+        assert!(parse_state_datagram(&d).is_err());
+        // The same tick re-announced with a different fragment count is a protocol violation.
+        let mut asm = StateAssembler::default();
+        let frags = state_datagrams(Frame::Snapshot, 7, &big);
+        assert_eq!(feed(&mut asm, &frags[0]), None);
+        let conflicting = state_datagrams(Frame::Snapshot, 7, b"short");
+        assert!(
+            asm.accept(&parse_state_datagram(&conflicting[0]).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn state_frames_and_only_state_frames_ride_datagrams() {
+        for kind in [
+            Frame::Tick,
+            Frame::Beat,
+            Frame::JoinRequest,
+            Frame::Refuse,
+            Frame::Welcome,
+        ] {
+            assert!(!kind.via_datagram(), "{kind:?} is control traffic");
+        }
+        for kind in [Frame::Snapshot, Frame::Articulation] {
+            assert!(kind.via_datagram(), "{kind:?} is tick-stamped full state");
+        }
     }
 
     #[test]
