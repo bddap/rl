@@ -112,7 +112,9 @@ async fn run_net(args: Args) -> Result<()> {
                     }
                 }
                 transport::PeerWire::Snapshot(snap) => {
-                    if !am_host {
+                    // Server-only, like Refuse below: mesh peers hold live links, and only
+                    // the host's word is game state (same gate as `drain_server_down`).
+                    if !am_host && m.from == server_eid {
                         snapshots.push(snap);
                     }
                 }
