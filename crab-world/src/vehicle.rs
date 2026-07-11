@@ -65,30 +65,26 @@ struct VehicleParams {
     yaw_torque: f32,
 }
 
+/// Discriminants are the wire bytes (0 reserved for "no craft" in the pilot-intent frame).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(u8)]
 pub enum VehicleKind {
     #[default]
-    Plane,
-    Ship,
+    Plane = 1,
+    Ship = 2,
 }
 
 impl VehicleKind {
+    pub const ALL: [Self; 2] = [VehicleKind::Plane, VehicleKind::Ship];
+
     /// The craft's ONE wire byte, shared by every codec that ships a kind (the pilot-intent
-    /// frame and the articulation vehicle poses) so two mappings can't drift. 0 is reserved
-    /// for "no craft".
+    /// frame and the articulation vehicle poses) so two mappings can't drift.
     pub fn wire_byte(self) -> u8 {
-        match self {
-            VehicleKind::Plane => 1,
-            VehicleKind::Ship => 2,
-        }
+        self as u8
     }
 
     pub fn from_wire_byte(b: u8) -> Option<Self> {
-        match b {
-            1 => Some(VehicleKind::Plane),
-            2 => Some(VehicleKind::Ship),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|k| k.wire_byte() == b)
     }
 
     fn params(self) -> VehicleParams {
@@ -490,7 +486,7 @@ mod tests {
     /// every part, |offset| + half must fit inside [`VEHICLE_HALF`] on every axis.
     #[test]
     fn silhouettes_stay_inside_the_collider() {
-        for kind in [VehicleKind::Plane, VehicleKind::Ship] {
+        for kind in VehicleKind::ALL {
             for (i, p) in kind.silhouette().iter().enumerate() {
                 assert!(
                     p.half.cmpgt(Vec3::ZERO).all(),

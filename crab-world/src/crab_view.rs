@@ -33,6 +33,16 @@ impl RenderMode {
         !matches!(self, RenderMode::Colliders)
     }
 
+    /// The ONE mode→mesh-visibility mapping, shared by every entity-visibility toggle (crab
+    /// silhouette, craft models) so they can't drift.
+    pub fn mesh_visibility(self) -> Visibility {
+        if self.shows_mesh() {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        }
+    }
+
     pub fn shows_colliders(self) -> bool {
         matches!(self, RenderMode::MeshColliders | RenderMode::Colliders)
     }

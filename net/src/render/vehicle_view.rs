@@ -12,19 +12,19 @@ use super::articulation::RemoteVehicle;
 use super::*;
 
 #[derive(Resource)]
-struct CraftAssets {
-    plane: CraftKindAssets,
-    ship: CraftKindAssets,
+struct VehicleAssets {
+    plane: KindAssets,
+    ship: KindAssets,
 }
 
-struct CraftKindAssets {
+struct KindAssets {
     material: Handle<StandardMaterial>,
     /// One mesh per silhouette part (dims baked in), with its body-frame offset.
     parts: Vec<(Handle<Mesh>, Vec3)>,
 }
 
-impl CraftAssets {
-    fn of(&self, kind: VehicleKind) -> &CraftKindAssets {
+impl VehicleAssets {
+    fn of(&self, kind: VehicleKind) -> &KindAssets {
         match kind {
             VehicleKind::Plane => &self.plane,
             VehicleKind::Ship => &self.ship,
@@ -34,17 +34,23 @@ impl CraftAssets {
 
 /// Marks one remote craft's model root, keyed by the wire identity that spawned it.
 #[derive(Component)]
-struct CraftModel {
+struct VehicleModel {
     pilot: u8,
     kind: VehicleKind,
 }
 
 pub(super) fn register(app: &mut App) {
-    app.init_resource::<RemoteVehicle>();
+    // RemoteVehicle is round state — `install_round` inserts it on every path into Playing.
     app.add_systems(Startup, build_assets);
+    // PostUpdate, after the Update chain has published this frame's RemoteVehicle (an
+    // unordered Update slot could run first and leave every model a tick stale, visibly
+    // shearing off the fresh wireframe in mesh+colliders mode), before propagation so the
+    // root pose lands in this frame's GlobalTransforms.
     app.add_systems(
-        Update,
-        reconcile_craft_models.run_if(in_state(AppPhase::Playing)),
+        PostUpdate,
+        reconcile_vehicle_models
+            .before(TransformSystems::Propagate)
+            .run_if(in_state(AppPhase::Playing)),
     );
 }
 
@@ -53,7 +59,7 @@ fn build_assets(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let mut build = |kind: VehicleKind, color: Color| CraftKindAssets {
+    let mut build = |kind: VehicleKind, color: Color| KindAssets {
         material: materials.add(StandardMaterial {
             base_color: color,
             ..default()
@@ -64,7 +70,7 @@ fn build_assets(
             .map(|p| (meshes.add(Cuboid::from_size(p.half * 2.0)), p.offset))
             .collect(),
     };
-    commands.insert_resource(CraftAssets {
+    commands.insert_resource(VehicleAssets {
         plane: build(VehicleKind::Plane, Color::srgb(0.85, 0.86, 0.9)),
         ship: build(VehicleKind::Ship, Color::srgb(0.35, 0.5, 0.75)),
     });
@@ -74,19 +80,15 @@ fn build_assets(
 /// the stale model despawns and a fresh one spawns in the same pass), track the pose while
 /// it flies, despawn on step-out. Poses place through the STATIC arena→render frame
 /// (rl#224), exactly like the wireframe pass.
-fn reconcile_craft_models(
+fn reconcile_vehicle_models(
     mut commands: Commands,
-    assets: Res<CraftAssets>,
+    assets: Res<VehicleAssets>,
     remote: Res<RemoteVehicle>,
     anchor: Res<crate::external_crab::ArenaAnchor>,
     mode: Res<RenderMode>,
-    mut models: Query<(Entity, &CraftModel, &mut Transform, &mut Visibility)>,
+    mut models: Query<(Entity, &VehicleModel, &mut Transform, &mut Visibility)>,
 ) {
-    let want_vis = if mode.shows_mesh() {
-        Visibility::Visible
-    } else {
-        Visibility::Hidden
-    };
+    let want_vis = mode.mesh_visibility();
     let placed = |v: &crate::articulation::VehiclePoseWire| {
         Transform::from_translation(anchor.0 + Vec3::from_array(v.pos))
             .with_rotation(Quat::from_array(v.rot))
@@ -112,7 +114,7 @@ fn reconcile_craft_models(
         commands
             .spawn((
                 DespawnOnExit(AppPhase::Playing),
-                CraftModel {
+                VehicleModel {
                     pilot: v.pilot,
                     kind: v.kind,
                 },
@@ -138,10 +140,10 @@ mod tests {
     use super::*;
     use crate::articulation::VehiclePoseWire;
 
-    /// [`CraftAssets`] with default (empty) handles but the REAL per-kind part counts, so
+    /// [`VehicleAssets`] with default (empty) handles but the REAL per-kind part counts, so
     /// the reconcile logic runs without any render stack.
-    fn stub_assets() -> CraftAssets {
-        let stub = |kind: VehicleKind| CraftKindAssets {
+    fn stub_assets() -> VehicleAssets {
+        let stub = |kind: VehicleKind| KindAssets {
             material: Handle::default(),
             parts: kind
                 .silhouette()
@@ -149,7 +151,7 @@ mod tests {
                 .map(|p| (Handle::default(), p.offset))
                 .collect(),
         };
-        CraftAssets {
+        VehicleAssets {
             plane: stub(VehicleKind::Plane),
             ship: stub(VehicleKind::Ship),
         }
@@ -177,7 +179,7 @@ mod tests {
 
     fn models(w: &mut World) -> Vec<(u8, VehicleKind, Vec3, Visibility, usize)> {
         let mut out: Vec<_> = w
-            .query::<(&CraftModel, &Transform, &Visibility, &Children)>()
+            .query::<(&VehicleModel, &Transform, &Visibility, &Children)>()
             .iter(w)
             .map(|(m, t, v, c)| (m.pilot, m.kind, t.translation, *v, c.len()))
             .collect();
@@ -191,7 +193,7 @@ mod tests {
             vec![wire(1, VehicleKind::Plane, [2.0, 5.0, -1.0])],
             RenderMode::Mesh,
         );
-        w.run_system_once(reconcile_craft_models).unwrap();
+        w.run_system_once(reconcile_vehicle_models).unwrap();
         let got = models(&mut w);
         assert_eq!(got.len(), 1, "one model per remote craft");
         let (pilot, kind, at, vis, n_parts) = got[0];
@@ -214,14 +216,14 @@ mod tests {
             VehicleKind::Plane,
             [4.0, 6.0, 0.0],
         )]));
-        w.run_system_once(reconcile_craft_models).unwrap();
+        w.run_system_once(reconcile_vehicle_models).unwrap();
         let got = models(&mut w);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].2, ANCHOR + Vec3::new(4.0, 6.0, 0.0));
 
         // Pilot steps out: the model despawns, children included.
         w.insert_resource(RemoteVehicle(Vec::new()));
-        w.run_system_once(reconcile_craft_models).unwrap();
+        w.run_system_once(reconcile_vehicle_models).unwrap();
         assert!(models(&mut w).is_empty(), "step-out despawns the model");
         assert_eq!(
             w.query::<&Mesh3d>().iter(&w).count(),
@@ -236,13 +238,13 @@ mod tests {
             vec![wire(2, VehicleKind::Plane, [0.0, 2.0, 0.0])],
             RenderMode::Mesh,
         );
-        w.run_system_once(reconcile_craft_models).unwrap();
+        w.run_system_once(reconcile_vehicle_models).unwrap();
         w.insert_resource(RemoteVehicle(vec![wire(
             2,
             VehicleKind::Ship,
             [0.0, 2.0, 0.0],
         )]));
-        w.run_system_once(reconcile_craft_models).unwrap();
+        w.run_system_once(reconcile_vehicle_models).unwrap();
         let got = models(&mut w);
         assert_eq!(got.len(), 1, "the stale kind's model is gone");
         assert_eq!(got[0].1, VehicleKind::Ship);
@@ -255,7 +257,7 @@ mod tests {
             vec![wire(1, VehicleKind::Ship, [0.0, 2.0, 0.0])],
             RenderMode::Colliders,
         );
-        w.run_system_once(reconcile_craft_models).unwrap();
+        w.run_system_once(reconcile_vehicle_models).unwrap();
         assert_eq!(
             models(&mut w)[0].3,
             Visibility::Hidden,
