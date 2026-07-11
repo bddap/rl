@@ -154,7 +154,7 @@ async fn run_net(args: Args) -> Result<()> {
             let _ = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected, tel.as_ref());
             srv.advance(msg);
             while srv.next_tick_ready() {
-                let bytes = srv.step_next(&[]).snapshot;
+                let bytes = srv.step_next(&[], Default::default()).snapshot;
                 let snap = net::snapshot::CoreSnapshot::from_bytes(&bytes)
                     .expect("the authoritative server's snapshot must decode");
                 session.broadcast_snapshot(&snap).await;

@@ -133,7 +133,7 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
         let msg = client.submit_local_input(Input::from_axes(t.cos(), t.sin()), None);
         server.advance(msg);
         while server.next_tick_ready() {
-            let bytes = server.step_next(&[]).snapshot;
+            let bytes = server.step_next(&[], Default::default()).snapshot;
             client.apply_core_snapshot(
                 CoreSnapshot::from_bytes(&bytes).expect("the server's snapshot must decode"),
             );

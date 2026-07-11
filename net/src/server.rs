@@ -475,7 +475,14 @@ impl Server {
         });
     }
 
-    pub fn step_next(&mut self, crabs: &[CrabPose]) -> SteppedTick {
+    /// `pilots` is the driver's per-tick bridge of every spawned craft's pose back into
+    /// sim space (rl#258) — filtered here against the filed intents, so only a player
+    /// actually piloting can ride (or be down-exempted by) a craft pose.
+    pub fn step_next(
+        &mut self,
+        crabs: &[CrabPose],
+        mut pilots: BTreeMap<PlayerId, crate::sim::PilotPose>,
+    ) -> SteppedTick {
         let tick = self.sim.tick();
         // Mid-game join: a pid rostered at THIS tick but absent from the authoritative sim is a
         // joiner whose admission ([`Server::admit`]) takes effect now — spawn it into the LIVE
@@ -516,6 +523,8 @@ impl Server {
             self.sim
                 .set_external_claws(crabs.iter().flat_map(|c| c.claws.iter().copied()).collect());
         }
+        pilots.retain(|pid, _| self.pilot_intents.contains_key(pid));
+        self.sim.set_external_pilots(pilots);
         let restarted = self.sim.step(&pending.inputs);
         let mut snapshot = self.sim.core_snapshot();
         snapshot.input_next = pending.input_next;
@@ -884,7 +893,7 @@ mod tests {
             "walk axes and ACTION are masked; RESTART passes"
         );
         assert!(
-            s.step_next(&[]).restarted,
+            s.step_next(&[], Default::default()).restarted,
             "the piloting player's RESTART press restarts the round"
         );
     }
@@ -893,7 +902,7 @@ mod tests {
     fn step_ready(s: &mut Server) -> Vec<CoreSnapshot> {
         let mut out = Vec::new();
         while s.next_tick_ready() {
-            let bytes = s.step_next(&[]).snapshot;
+            let bytes = s.step_next(&[], Default::default()).snapshot;
             out.push(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
         }
         out
@@ -927,7 +936,7 @@ mod tests {
         for t in 0..10 {
             s.advance(tickmsg(t, 1.0));
             assert!(s.next_tick_ready(), "tick {t} steps with no remote input");
-            let _ = s.step_next(&[]);
+            let _ = s.step_next(&[], Default::default());
         }
         assert_eq!(s.sim().tick(), 10, "the match ran at host pace");
         assert_eq!(
@@ -992,7 +1001,7 @@ mod tests {
                 issue += 1;
             }
             s.advance(tickmsg(t, 0.0));
-            let _ = s.step_next(&[]);
+            let _ = s.step_next(&[], Default::default());
             reports.extend(s.take_starvation_reports());
         }
         reports
@@ -1105,7 +1114,7 @@ mod tests {
         let mut positions = vec![s.sim().player(PlayerId(1)).expect("rostered").pos()];
         for t in 0..3 {
             s.advance(tickmsg(t, 0.0));
-            let _ = s.step_next(&[]);
+            let _ = s.step_next(&[], Default::default());
             positions.push(s.sim().player(PlayerId(1)).expect("rostered").pos());
         }
         let step0 = positions[1].x - positions[0].x;
@@ -1377,7 +1386,7 @@ mod tests {
                 let msg = client.submit_local_input(input_at(i), None);
                 server.advance(msg);
                 while server.next_tick_ready() {
-                    let bytes = server.step_next(&[pose_at(server.sim().tick())]).snapshot;
+                    let bytes = server.step_next(&[pose_at(server.sim().tick())], Default::default()).snapshot;
                     let snap =
                         CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
                     client.apply_core_snapshot(snap);
@@ -1423,7 +1432,7 @@ mod tests {
             );
             s.advance(tickmsg(t, 1.0));
             assert!(s.next_tick_ready(), "tick {t} is steppable — no wedge");
-            let stepped = s.step_next(&[]);
+            let stepped = s.step_next(&[], Default::default());
             assert_eq!(
                 stepped.restarted,
                 t == RESTART_AT,
@@ -1514,7 +1523,7 @@ mod tests {
             });
             while server.next_tick_ready() {
                 let tick = server.sim().tick();
-                let bytes = server.step_next(&[pose_at(tick)]).snapshot;
+                let bytes = server.step_next(&[pose_at(tick)], Default::default()).snapshot;
                 snaps.push(CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes"));
             }
         }

@@ -729,7 +729,7 @@ mod tests {
             );
             let server = coord.server_mut().expect("solo runs an internal server");
             while server.next_tick_ready() {
-                let bytes = server.step_next(&[]).snapshot;
+                let bytes = server.step_next(&[], Default::default()).snapshot;
                 let snap =
                     crate::snapshot::CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes");
                 client.apply_core_snapshot(snap);

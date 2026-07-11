@@ -278,6 +278,13 @@ impl Crab {
     }
 }
 
+/// A piloting player's craft pose in sim space — see [`Sim::set_external_pilots`].
+#[derive(Debug, Clone, Copy)]
+pub struct PilotPose {
+    pub pos: Pos,
+    pub yaw: i32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtractionPoint {
     pos: Pos,
@@ -304,6 +311,15 @@ pub struct Sim {
     /// All crabs' claw colliders as of this tick, pooled (the down check doesn't care
     /// which crab owns a claw). External per-tick input, not state — see [`ClawPose`].
     claws: Vec<ClawPose>,
+    /// Every piloting player's craft pose, bridged back into sim space (rl#258): while a
+    /// player flies, its ONE position is the craft's — the walker rides the craft instead
+    /// of standing as a husk at the boarding spot, so the crab hunts the craft's shadow
+    /// and stepping out resumes on foot right there. Membership doubles as the down
+    /// exemption: a pilot is inside a hull, so grabs and claws act on the craft's REAL
+    /// collider (rapier), never the walker. External per-tick input like [`ClawPose`]:
+    /// server-only, overwritten before every step, excluded from `state_hash`/snapshots
+    /// (clients see the resulting player pos).
+    pilots: BTreeMap<PlayerId, PilotPose>,
     extraction: ExtractionPoint,
     outcome: Outcome,
     rng: ChaCha8Rng,
@@ -335,6 +351,7 @@ impl Sim {
             players,
             crabs,
             claws: Vec::new(),
+            pilots: BTreeMap::new(),
             extraction,
             outcome: Outcome::Ongoing,
             rng: ChaCha8Rng::seed_from_u64(seed),
@@ -375,12 +392,19 @@ impl Sim {
         self.claws = claws;
     }
 
+    /// Refresh this tick's piloting set + craft poses (rl#258). Server-only, before each
+    /// step, whole-set overwrite like [`Self::set_external_claws`] — see [`Sim::pilots`].
+    pub fn set_external_pilots(&mut self, pilots: BTreeMap<PlayerId, PilotPose>) {
+        self.pilots = pilots;
+    }
+
     fn reset(&mut self) {
         let (players, crabs, extraction) = Self::spawn_state(&self.config);
         self.round_start = self.tick;
         self.players = players;
         self.crabs = crabs;
         self.claws.clear();
+        self.pilots.clear();
         self.extraction = extraction;
         self.outcome = Outcome::Ongoing;
         self.rng = ChaCha8Rng::seed_from_u64(self.config.seed);
@@ -531,12 +555,25 @@ impl Sim {
             Self::advance_player(p, inp);
         }
 
+        // A piloting player IS its craft (rl#258): its walker rides the craft's sim-space
+        // shadow — one position whichever form the entity wears — so hunting, extraction
+        // range and stepping out all resume from where the craft actually is.
+        for (id, pp) in &self.pilots {
+            if let Some(p) = self.players.get_mut(id) {
+                p.pos = pp.pos;
+                p.yaw = pp.yaw;
+            }
+        }
+
         let armed = self.tick > self.round_start + STARTUP_GRACE_TICKS;
 
         if armed {
+            // Pilots are exempt: inside a hull there is no walker to grab or claw — the
+            // crab strikes the craft's REAL collider in the physics arena instead (rl#258).
             for crab in &self.crabs {
-                for p in self.players.values_mut() {
+                for (id, p) in self.players.iter_mut() {
                     if p.status == PlayerStatus::Alive
+                        && !self.pilots.contains_key(id)
                         && within(p.pos.x, p.pos.z, crab.pos.x, crab.pos.z, CRAB_GRAB_RADIUS)
                     {
                         p.status = PlayerStatus::Downed;
@@ -544,8 +581,11 @@ impl Sim {
                 }
             }
             for claw in &self.claws {
-                for p in self.players.values_mut() {
-                    if p.status == PlayerStatus::Alive && claw.downs(p.pos) {
+                for (id, p) in self.players.iter_mut() {
+                    if p.status == PlayerStatus::Alive
+                        && !self.pilots.contains_key(id)
+                        && claw.downs(p.pos)
+                    {
                         p.status = PlayerStatus::Downed;
                     }
                 }
@@ -641,6 +681,7 @@ impl Sim {
             // External per-tick input, server-only — never replicated, so hashing it
             // would desync every host/client comparison (see [`ClawPose`]).
             claws: _,
+            pilots: _,
             extraction,
             outcome,
             rng,
@@ -708,6 +749,7 @@ impl Sim {
             crabs,
             // Input, not state — the down decisions it produced are already in `players`.
             claws: _,
+            pilots: _,
             extraction: _,
             outcome,
             rng: _,
@@ -1457,6 +1499,57 @@ mod tests {
             sim.player(PlayerId(0)).unwrap().status(),
             PlayerStatus::Downed,
             "a touching claw downs the player once armed"
+        );
+    }
+
+    /// rl#258: a piloting player IS its craft — its walker rides the fed craft pose (one
+    /// position, so the hunt targets the craft's shadow and stepping out resumes there),
+    /// and neither the grab circle nor a touching claw downs it (the crab strikes the
+    /// craft's real collider in the physics arena instead). A non-pilot at the same spot
+    /// still goes down, so the exemption is the pilot set, not a weakened check.
+    #[test]
+    fn a_piloting_player_rides_its_craft_and_cannot_be_downed() {
+        let mut sim = Sim::new(0, &players(2));
+        let neutral = neutral_for(&sim);
+        // Park both players' positions on the crab: inside the grab circle AND touched by
+        // a claw. The pilot gets there via its craft pose; the walker via the same feed
+        // minus pilot membership (set_external_pilots is filtered upstream, so feeding it
+        // directly stands in for "standing there on foot").
+        let crab = sim.crabs()[0].pos();
+        let claw = claw_at(crab, 0, UNIT);
+        let both = |pilots: &[PlayerId]| {
+            let mut m = BTreeMap::new();
+            for &pid in pilots {
+                m.insert(pid, PilotPose { pos: crab, yaw: 7 });
+            }
+            m
+        };
+        for _ in 0..=STARTUP_GRACE_TICKS + 1 {
+            sim.set_external_claws(vec![claw]);
+            sim.set_external_pilots(both(&[PlayerId(0), PlayerId(1)]));
+            sim.step(&neutral);
+        }
+        let p0 = sim.player(PlayerId(0)).unwrap();
+        assert_eq!(p0.pos(), crab, "the walker rides the fed craft pose");
+        assert_eq!(p0.yaw(), 7, "facing follows the craft too");
+        assert_eq!(
+            p0.status(),
+            PlayerStatus::Alive,
+            "inside a hull there is no walker to grab or claw"
+        );
+        // Same spot, on foot: player 1 stops piloting (drops from the fed set) and downs.
+        sim.set_external_claws(vec![claw]);
+        sim.set_external_pilots(both(&[PlayerId(0)]));
+        sim.step(&neutral);
+        assert_eq!(
+            sim.player(PlayerId(1)).unwrap().status(),
+            PlayerStatus::Downed,
+            "the exemption ends the moment the player is on foot again"
+        );
+        assert_eq!(
+            sim.player(PlayerId(0)).unwrap().status(),
+            PlayerStatus::Alive,
+            "the still-piloting player stays exempt"
         );
     }
 

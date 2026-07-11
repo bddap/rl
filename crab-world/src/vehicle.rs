@@ -14,8 +14,9 @@ const MATCH_VEL_DAMP: f32 = 0.9;
 const PLANE: VehicleParams = VehicleParams {
     lever_thrust: 4.0,
     direct_thrust: Vec3::ZERO,
-    // 0.9 puts level flight at ~2.9 m/s — above PLANE_SPAWN_SPEED (no free ballooning at
-    // spawn) and ~64% of the full-throttle terminal ~4.5 m/s, so climb costs throttle. At
+    // 0.9 puts level flight at ~2.9 m/s — above the ~2 m/s slow-flight band (a
+    // freshly-boarded craft can't free-balloon) and ~64% of the full-throttle terminal
+    // ~4.5 m/s, so climb costs throttle. At
     // 1.8 the plane out-lifted its ~2.6 N weight from 1.4 m/s (owner: "Bernoulli overdone",
     // rl#230); the level-flight band is pinned by `spawn_speed_sinks_high_speed_climbs`.
     lift: 0.9,
@@ -45,11 +46,10 @@ const SHIP: VehicleParams = VehicleParams {
     yaw_torque: SHIP_AIM_TORQUE,
 };
 
-/// One spawn altitude for every craft, above the crab's standing-plus-flail reach: the ship
-/// used to spawn at 0.5 m — inside Sally's body when she stood at her arena spawn, so her
-/// wiggle physically batted the fresh craft meters away (rl#224).
-const SPAWN_ALTITUDE: f32 = 2.0;
-const PLANE_SPAWN_SPEED: f32 = 2.0;
+/// How far above the boarding spot's ground point the craft's collider bottom
+/// materialises: the craft's box is bigger than the walker, so an un-nudged in-place
+/// spawn would intersect the ground and get a depenetration kick (rl#258).
+const GROUND_CLEARANCE: f32 = 0.01;
 
 #[derive(Clone, Copy)]
 struct VehicleParams {
@@ -94,21 +94,6 @@ impl VehicleKind {
         }
     }
 
-    fn spawn_transform(self) -> Transform {
-        Transform::from_xyz(0.0, SPAWN_ALTITUDE, 0.0)
-    }
-
-    fn spawn_velocity(self) -> Velocity {
-        let linear = match self {
-            VehicleKind::Plane => Vec3::new(0.0, 0.0, PLANE_SPAWN_SPEED),
-            VehicleKind::Ship => Vec3::ZERO,
-        };
-        Velocity {
-            linear,
-            angular: Vec3::ZERO,
-        }
-    }
-
     fn gravity_scale(self) -> f32 {
         match self {
             VehicleKind::Plane => 1.0,
@@ -136,10 +121,28 @@ pub struct Vehicle {
     throttle: f32,
 }
 
+/// The boarding player's walker state in the arena frame — where a fresh craft
+/// materialises (rl#258: the vehicle appears where the player is, one entity swaps form,
+/// velocity conserved). The net bridge authors it from the authoritative sim;
+/// [`spawn_vehicle`] only adds the ground-clearance nudge.
+#[derive(Clone, Copy, Debug)]
+pub struct Boarding {
+    /// The walker's ground point (arena m).
+    pub pos: Vec3,
+    /// Facing, radians about +Y — the craft's nose starts along it.
+    pub yaw: f32,
+    /// The walker's velocity (arena m/s), conserved through the transform.
+    pub velocity: Vec3,
+}
+
 #[derive(Clone, Copy)]
 pub struct PilotCommand {
-    /// Which craft to be (cycled by the player). A change while piloting respawns the body.
+    /// Which craft to be (cycled by the player). A change while piloting morphs the body
+    /// in place ([`manage_vehicles`]).
     pub kind: VehicleKind,
+    /// Where the pilot's body was when this command was authored — read only on the
+    /// spawn edge (a pilot with no body yet).
+    pub boarding: Boarding,
     pub throttle_trim: f32,
     pub thrust: Vec3,
     pub pitch: f32,
@@ -149,12 +152,13 @@ pub struct PilotCommand {
 }
 
 impl PilotCommand {
-    /// Board `kind` with every axis neutral — the boarding-edge command (the per-tick axes are
-    /// overwritten by the bridge each tick anyway). The one constructor, so choosing a craft is
-    /// always explicit.
-    pub fn new(kind: VehicleKind) -> Self {
+    /// Board `kind` at `boarding` with every axis neutral — the boarding-edge command
+    /// (the per-tick axes are overwritten by the bridge each tick anyway). The one
+    /// constructor, so choosing a craft and where it materialises is always explicit.
+    pub fn new(kind: VehicleKind, boarding: Boarding) -> Self {
         Self {
             kind,
+            boarding,
             throttle_trim: 0.0,
             thrust: Vec3::ZERO,
             pitch: 0.0,
@@ -186,32 +190,36 @@ impl Plugin for VehiclePlugin {
 }
 
 /// Keep the spawned bodies matched to [`VehicleControls`]: a new entry spawns that pilot's craft
-/// (a kind change respawns it — the fresh body starts at its spawn pose + a zero throttle lever,
-/// the known state, not the old craft's); a removed entry despawns it. At most one body per pilot,
+/// at its command's [`Boarding`] pose; a kind change MORPHS the existing body in place — same
+/// entity, pose and velocity carried through (rl#258), only the throttle lever resetting to the
+/// known zero a fresh craft starts at; a removed entry despawns it. At most one body per pilot,
 /// provided bodies enter play only through this system (the headless gates spawn ram craft into
-/// worlds WITHOUT the plugin): a body only spawns for a pilot with no matching body, and a
-/// mismatched one is despawned in the same pass. Each body is a dynamic box with the
-/// [`VEHICLE_COLLISION`] groups (arena + every crab), so it bounces off the walls and strikes
-/// Sally.
+/// worlds WITHOUT the plugin): a body only spawns for a pilot with no matching body. Each body is
+/// a dynamic box with the [`VEHICLE_COLLISION`] groups (arena + every crab), so it bounces off
+/// the walls and strikes Sally.
 fn manage_vehicles(
     mut commands: Commands,
     controls: Res<VehicleControls>,
-    existing: Query<(Entity, &Vehicle)>,
+    mut existing: Query<(Entity, &mut Vehicle, &mut GravityScale)>,
 ) {
     let mut matched = std::collections::BTreeSet::new();
-    for (e, v) in existing.iter() {
+    for (e, mut v, mut gravity) in existing.iter_mut() {
         match controls.0.get(&v.pilot) {
-            // This pilot's body already is the chosen craft — keep it.
-            Some(cmd) if cmd.kind == v.kind => {
+            Some(cmd) => {
+                if cmd.kind != v.kind {
+                    v.kind = cmd.kind;
+                    v.throttle = 0.0;
+                    *gravity = GravityScale(cmd.kind.gravity_scale());
+                }
                 matched.insert(v.pilot);
             }
-            // Kind changed or the pilot stepped out: despawn (a kind change spawns fresh below).
-            _ => commands.entity(e).despawn(),
+            // The pilot stepped out: the craft despawns (the walker is the body again).
+            None => commands.entity(e).despawn(),
         }
     }
     for (&pilot, cmd) in &controls.0 {
         if !matched.contains(&pilot) {
-            spawn_vehicle(&mut commands, pilot, cmd.kind);
+            spawn_vehicle(&mut commands, pilot, cmd);
         }
     }
 }
@@ -279,25 +287,25 @@ impl VehicleKind {
     }
 }
 
-/// Lateral spacing between different pilots' spawn spots (m). Crafts don't collide with each
-/// other ([`VEHICLE_COLLISION`]'s filter omits VEHICLE_GROUP), so this is about legibility, not
-/// physics: two players boarding the same tick must not materialise inside one another. Pilot 0
-/// keeps the exact arena-centre pose solo always had. Unbounded by design: pilot ids are
-/// couch-scale (the server allocates lowest-free), so the offset stays well inside the ±10 m
-/// arena.
-const VEHICLE_SPAWN_SPACING: f32 = 1.0;
-
-/// Spawn `pilot`'s vehicle rigidbody of `kind` at its arena spawn pose — the boarding path
-/// ([`manage_vehicles`]). Each pilot's spot is offset along +X by its id so simultaneous
-/// boarders don't overlap.
-fn spawn_vehicle(commands: &mut Commands, pilot: PilotId, kind: VehicleKind) {
-    let mut transform = kind.spawn_transform();
-    transform.translation.x += pilot.0 as f32 * VEHICLE_SPAWN_SPACING;
+/// Spawn `pilot`'s vehicle rigidbody where its walker stands — the boarding path
+/// ([`manage_vehicles`]): the craft materialises at the command's [`Boarding`] pose with the
+/// walker's facing and velocity (rl#258), lifted just enough that the collider clears the
+/// ground.
+fn spawn_vehicle(commands: &mut Commands, pilot: PilotId, cmd: &PilotCommand) {
+    let Boarding {
+        mut pos,
+        yaw,
+        velocity,
+    } = cmd.boarding;
+    pos.y = pos.y.max(VEHICLE_HALF.y + GROUND_CLEARANCE);
     commands.spawn(vehicle_bundle(
         pilot,
-        kind,
-        transform,
-        kind.spawn_velocity(),
+        cmd.kind,
+        Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
+        Velocity {
+            linear: velocity,
+            angular: Vec3::ZERO,
+        },
     ));
 }
 
@@ -384,12 +392,26 @@ mod tests {
     /// The tests' one pilot (the server-authoritative local player's id).
     const P0: PilotId = PilotId(0);
 
-    /// Board `pilot` into `kind` (neutral axes) — the tests' rising edge.
-    fn board(app: &mut App, pilot: PilotId, kind: VehicleKind) {
+    /// A test boarding pose: standing at `pos`, facing +Z, at rest.
+    fn standing_at(pos: Vec3) -> Boarding {
+        Boarding {
+            pos,
+            yaw: 0.0,
+            velocity: Vec3::ZERO,
+        }
+    }
+
+    /// Board `pilot` into `kind` at `pos` (neutral axes) — the tests' rising edge.
+    fn board_at(app: &mut App, pilot: PilotId, kind: VehicleKind, pos: Vec3) {
         app.world_mut()
             .resource_mut::<VehicleControls>()
             .0
-            .insert(pilot, PilotCommand::new(kind));
+            .insert(pilot, PilotCommand::new(kind, standing_at(pos)));
+    }
+
+    /// [`board_at`] at the arena origin.
+    fn board(app: &mut App, pilot: PilotId, kind: VehicleKind) {
+        board_at(app, pilot, kind, Vec3::ZERO);
     }
 
     /// Mutate pilot 0's [`PilotCommand`] in place (it must have [`board`]ed).
@@ -534,13 +556,13 @@ mod tests {
         );
     }
 
-    /// Pins the rl#230 feel-call: level flight lives strictly between spawn speed and the
-    /// full-throttle terminal — at spawn speed (2 m/s) lift < weight so the plane settles
+    /// Pins the rl#230 feel-call: level flight lives strictly between slow flight and the
+    /// full-throttle terminal — at slow flight (2 m/s) lift < weight so the plane settles
     /// instead of ballooning off the runway, while near terminal (4 m/s) lift > weight so
     /// altitude is still winnable with throttle. Both sides sample vertical velocity over a
     /// few zero-throttle ticks, level attitude, so lift vs gravity is the only vertical term.
     #[test]
-    fn spawn_speed_sinks_high_speed_climbs() {
+    fn slow_flight_sinks_high_speed_climbs() {
         let dvy = |speed: f32| {
             let (mut app, e) =
                 app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, speed));
@@ -551,10 +573,10 @@ mod tests {
             }
             body(&app, e).1.linear.y - y0
         };
-        let at_spawn = dvy(PLANE_SPAWN_SPEED);
+        let slow = dvy(2.0);
         assert!(
-            at_spawn < 0.0,
-            "plane must sink at spawn speed (lift < weight), got Δvy={at_spawn}"
+            slow < 0.0,
+            "plane must sink in slow flight (lift < weight), got Δvy={slow}"
         );
         let near_terminal = dvy(4.0);
         assert!(
@@ -720,8 +742,84 @@ mod tests {
         assert_eq!(count(&mut app), 0, "vehicle despawned on step-out");
     }
 
+    /// rl#258: boarding transforms in place — the craft materialises at the walker's spot
+    /// with its facing and velocity, lifted just enough that the collider clears the ground.
+    #[test]
+    fn boarding_spawns_at_the_walker_with_velocity_conserved() {
+        let mut app = headless_app();
+        app.add_plugins(VehiclePlugin);
+        app.update();
+        let vel = Vec3::new(0.4, 0.0, 0.1);
+        app.world_mut().resource_mut::<VehicleControls>().0.insert(
+            P0,
+            PilotCommand::new(
+                VehicleKind::Plane,
+                Boarding {
+                    pos: Vec3::new(3.0, 0.0, -2.0),
+                    yaw: std::f32::consts::FRAC_PI_2,
+                    velocity: vel,
+                },
+            ),
+        );
+        app.update();
+        let mut q = app.world_mut().query::<(&Transform, &Velocity, &Vehicle)>();
+        let (t, v, _) = q.single(app.world()).expect("one craft");
+        // A physics tick already ran between the spawn and this read — small tolerances.
+        assert!(
+            (t.translation.x - 3.0).abs() < 0.05 && (t.translation.z - -2.0).abs() < 0.05,
+            "the craft must materialise at the walker's spot, got {}",
+            t.translation
+        );
+        assert!(
+            t.translation.y >= VEHICLE_HALF.y - 0.01,
+            "collider bottom must clear the ground, got centre y={}",
+            t.translation.y
+        );
+        let nose = t.rotation * Vec3::Z;
+        assert!(
+            nose.x > 0.99,
+            "yaw π/2 must point the nose along +X, got {nose}"
+        );
+        assert!(
+            v.linear.distance(vel) < 0.2,
+            "the walker's velocity is conserved (want {vel}, got {})",
+            v.linear
+        );
+    }
+
+    /// rl#258: a kind cycle morphs the SAME body in place — entity, pose and velocity all
+    /// carry through; only the throttle lever and gravity scale become the new kind's.
+    #[test]
+    fn kind_cycle_morphs_the_body_in_place() {
+        let at = Vec3::new(1.0, 4.0, 2.0);
+        let vel = Vec3::new(0.0, 0.0, 3.0);
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, at, vel);
+        app.update();
+        set_cmd(&mut app, |c| c.kind = VehicleKind::Ship);
+        app.update();
+        let ent = app.world().entity(e);
+        let v = ent.get::<Vehicle>().expect("the SAME entity swapped form");
+        assert_eq!(v.kind, VehicleKind::Ship);
+        assert_eq!(v.throttle, 0.0, "the lever resets to the known fresh state");
+        assert_eq!(
+            ent.get::<GravityScale>().unwrap().0,
+            VehicleKind::Ship.gravity_scale(),
+            "gravity follows the new kind"
+        );
+        let pos = ent.get::<Transform>().unwrap().translation;
+        assert!(
+            pos.distance(at) < 1.0,
+            "the body stays put through the morph (drifted to {pos})"
+        );
+        let linear = ent.get::<Velocity>().unwrap().linear;
+        assert!(
+            linear.distance(vel) < 1.0,
+            "velocity carries through the morph (was {vel}, got {linear})"
+        );
+    }
+
     /// Per-pilot multiplicity (rl#191): two pilots board on the same tick ⇒ two bodies, each the
-    /// kind ITS pilot chose, at distinct spawn spots (the per-pilot offset); one pilot stepping
+    /// kind ITS pilot chose, each where ITS walker stood (rl#258); one pilot stepping
     /// out despawns only ITS craft. Spawn/despawn bookkeeping only — a couple of ticks, so the
     /// crab standing at the arena origin never comes into play.
     #[test]
@@ -732,8 +830,8 @@ mod tests {
         // Warm the clock: the first update's zero delta runs no FixedUpdate (same dance as
         // `manage_spawns_and_despawns_one_vehicle`).
         app.update();
-        board(&mut app, P0, VehicleKind::Ship);
-        board(&mut app, p1, VehicleKind::Plane);
+        board_at(&mut app, P0, VehicleKind::Ship, Vec3::new(-2.0, 0.0, 0.0));
+        board_at(&mut app, p1, VehicleKind::Plane, Vec3::new(3.0, 0.0, 1.0));
         app.update();
 
         let crafts: Vec<(PilotId, VehicleKind, f32)> = app
@@ -746,11 +844,8 @@ mod tests {
         let by = |p: PilotId| crafts.iter().find(|(o, ..)| *o == p).unwrap();
         assert_eq!(by(P0).1, VehicleKind::Ship, "pilot 0 got ITS chosen kind");
         assert_eq!(by(p1).1, VehicleKind::Plane, "pilot 1 got ITS chosen kind");
-        assert_ne!(
-            by(P0).2,
-            by(p1).2,
-            "pilots spawn at distinct spots (per-pilot offset)"
-        );
+        assert_eq!(by(P0).2, -2.0, "pilot 0's craft is where ITS walker stood");
+        assert_eq!(by(p1).2, 3.0, "pilot 1's craft is where ITS walker stood");
 
         // Pilot 1 steps out: only ITS body despawns.
         app.world_mut()
