@@ -787,6 +787,16 @@ mod ship_wiggle_tests {
         q.single(app.world()).expect("one ship").translation
     }
 
+    /// A boarding pose at `(x, z)`, at rest — clear of the origin-standing Sally, like a
+    /// real walker's spot would be (rl#258: crafts materialise where the player is).
+    fn boarding_at(x: f32, z: f32) -> crab_world::vehicle::Boarding {
+        crab_world::vehicle::Boarding {
+            pos: Vec3::new(x, 0.0, z),
+            yaw: 0.0,
+            velocity: Vec3::ZERO,
+        }
+    }
+
     fn flail(app: &mut App, ticks: u32) {
         for t in 0..ticks {
             app.world_mut().resource_mut::<Wiggle>().0 = if (t / 5) % 2 == 0 { 1.0 } else { -1.0 };
@@ -806,7 +816,10 @@ mod ship_wiggle_tests {
         app.world_mut()
             .resource_mut::<VehicleControls>()
             .0
-            .insert(PilotId(0), PilotCommand::new(VehicleKind::Ship));
+            .insert(
+                PilotId(0),
+                PilotCommand::new(VehicleKind::Ship, boarding_at(5.0, 5.0)),
+            );
         for _ in 0..64 {
             app.update();
         }
@@ -838,7 +851,10 @@ mod ship_wiggle_tests {
         app.world_mut()
             .resource_mut::<VehicleControls>()
             .0
-            .insert(PilotId(0), PilotCommand::new(VehicleKind::Ship));
+            .insert(
+                PilotId(0),
+                PilotCommand::new(VehicleKind::Ship, boarding_at(5.0, 5.0)),
+            );
         for _ in 0..64 {
             app.update();
         }

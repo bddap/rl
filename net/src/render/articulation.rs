@@ -16,6 +16,13 @@ use crate::articulation::{
 #[derive(Resource, Default)]
 pub(super) struct RemoteVehicle(pub(super) Vec<VehiclePoseWire>);
 
+/// Every pilot currently in a craft — local included — refreshed per tick from the same
+/// articulation feed on both arms. The walker-avatar hide gate (rl#258: the transform
+/// leaves no body behind; while this set holds a player, its ONE visible body is the
+/// craft).
+#[derive(Resource, Default)]
+pub(super) struct PilotingPilots(pub(super) std::collections::BTreeSet<u8>);
+
 /// One log line per remote-craft EDGE — the pilot set changing (a boarding/exit seen from this
 /// peer) and each craft's first real displacement (proof the other pilot's craft is moving here,
 /// rl#191 increment 4) — instead of a per-tick pose flood.
@@ -64,6 +71,7 @@ pub(super) fn publish_remote_vehicles(
         }
     }
     world.insert_resource(RemoteVehicle(remote));
+    world.insert_resource(PilotingPilots(vehicles.iter().map(|v| v.pilot).collect()));
 }
 
 const _: () = assert!(CrabJointId::COUNT < u8::MAX as usize);

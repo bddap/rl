@@ -32,7 +32,9 @@ pub struct PilotIntent {
 }
 
 impl PilotIntent {
-    pub fn to_command(&self) -> PilotCommand {
+    /// `boarding` is host-authored from the authoritative sim (never the wire): where the
+    /// pilot's walker is, for the craft to materialise at on the spawn edge (rl#258).
+    pub fn to_command(&self, boarding: crab_world::vehicle::Boarding) -> PilotCommand {
         let s = |v: f32| {
             if v.is_finite() {
                 v.clamp(-1.0, 1.0)
@@ -42,6 +44,7 @@ impl PilotIntent {
         };
         PilotCommand {
             kind: self.kind,
+            boarding,
             throttle_trim: s(self.throttle_trim),
             thrust: bevy::math::Vec3::new(s(self.thrust[0]), s(self.thrust[1]), s(self.thrust[2])),
             pitch: s(self.pitch),
@@ -222,7 +225,11 @@ mod tests {
             yaw: f32::INFINITY,
             match_velocity: true,
         }
-        .to_command();
+        .to_command(crab_world::vehicle::Boarding {
+            pos: bevy::math::Vec3::ZERO,
+            yaw: 0.0,
+            velocity: bevy::math::Vec3::ZERO,
+        });
         assert_eq!(cmd.kind, VehicleKind::Ship);
         assert_eq!(cmd.throttle_trim, 0.0, "NaN → neutral");
         assert_eq!(cmd.thrust.to_array(), [1.0, 0.0, -0.5], "clamped / zeroed");
@@ -273,7 +280,7 @@ mod tests {
             }
             server.advance(host_sched.submit_local_input(Input::default(), None));
             while server.next_tick_ready() {
-                let bytes = server.step_next(&[]).snapshot;
+                let bytes = server.step_next(&[], Default::default()).snapshot;
                 wire_down.push_back(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
             if wire_down.len() > LATENCY {
@@ -300,7 +307,7 @@ mod tests {
             }
             server.advance(host_sched.submit_local_input(Input::default(), None));
             while server.next_tick_ready() {
-                let bytes = server.step_next(&[]).snapshot;
+                let bytes = server.step_next(&[], Default::default()).snapshot;
                 wire_down.push_back(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
             let mut adopted = false;
@@ -344,7 +351,7 @@ mod tests {
             let input = Input::new(0.0, if t < 5 { 1.0 } else { 0.0 }, 0.0, btns);
             host.advance(sched.submit_local_input(input, None));
             while host.next_tick_ready() {
-                let bytes = host.step_next(&[]).snapshot;
+                let bytes = host.step_next(&[], Default::default()).snapshot;
                 arrivals.push(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
         }
