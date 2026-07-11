@@ -188,7 +188,9 @@ async fn run_barrier(
                         "refusing mid-formation join from {}: still forming",
                         from.from.fmt_short()
                     );
-                    session.send(from.from, &crate::server::Refusal::Forming).await;
+                    session
+                        .send(from.from, &crate::server::Refusal::Forming)
+                        .await;
                 }
                 PeerWire::Snapshot(_)
                 | PeerWire::Articulation(_)

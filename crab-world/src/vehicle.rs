@@ -546,8 +546,7 @@ mod tests {
     /// the speed survived (the symptom).
     #[test]
     fn sharp_turn_carries_speed_and_velocity_follows_nose() {
-        let (mut app, e) =
-            app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(0.0, 0.0, 3.0));
         set_cmd(&mut app, |c| c.yaw = 1.0);
         let s0 = body(&app, e).1.linear.length();
         for _ in 0..120 {
@@ -579,8 +578,7 @@ mod tests {
     /// is the only term that could be caught adding energy.
     #[test]
     fn grip_swings_velocity_toward_nose_without_adding_speed() {
-        let (mut app, e) =
-            app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(3.0, 0.0, 0.0));
+        let (mut app, e) = app_with_vehicle(VehicleKind::Plane, FAR, Vec3::new(3.0, 0.0, 0.0));
         let mut ent = app.world_mut().entity_mut(e);
         ent.get_mut::<Vehicle>().unwrap().throttle = 0.0;
         ent.insert(GravityScale(0.0));
