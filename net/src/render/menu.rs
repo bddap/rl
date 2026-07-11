@@ -1,5 +1,6 @@
 use std::sync::mpsc;
 
+use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy_egui::{
     EguiContextSettings, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass,
@@ -146,6 +147,7 @@ fn consume_round_over(world: &mut World) {
     state.last_host = Some(over.host);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn menu_screen(
     mut contexts: EguiContexts,
     mut state: NonSendMut<MenuState>,
@@ -154,6 +156,7 @@ fn menu_screen(
     mut next: ResMut<NextState<AppPhase>>,
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
+    mut exit: MessageWriter<AppExit>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
@@ -171,7 +174,7 @@ fn menu_screen(
     let inputs = gather_menu_inputs(&keys, &gamepads, typing, &mut state.stick_latched);
     for input in inputs {
         let action = state.nav.step(input, lobby_len);
-        if apply_action(action, &mut state, &mut pending, &mut next) {
+        if apply_action(action, &mut state, &mut pending, &mut next, &mut exit) {
             return Ok(());
         }
     }
@@ -182,19 +185,19 @@ fn menu_screen(
                 if let Some(item) = draw_disconnected(ctx, &state) {
                     state.nav.focus_disconnected(item);
                     let action = state.nav.step(MenuInput::Confirm, lobby_len);
-                    apply_action(action, &mut state, &mut pending, &mut next);
+                    apply_action(action, &mut state, &mut pending, &mut next, &mut exit);
                 }
             } else if let Some(item) = draw_chooser(ctx, &mut state) {
                 state.nav.focus_chooser(item);
                 let action = state.nav.step(MenuInput::Confirm, lobby_len);
-                apply_action(action, &mut state, &mut pending, &mut next);
+                apply_action(action, &mut state, &mut pending, &mut next, &mut exit);
             }
         }
         AppPhase::Connecting => {
             if state.rejoining.is_some() {
                 if draw_rejoining(ctx, &state) {
                     let action = state.nav.step(MenuInput::Confirm, lobby_len);
-                    apply_action(action, &mut state, &mut pending, &mut next);
+                    apply_action(action, &mut state, &mut pending, &mut next, &mut exit);
                 }
             } else {
                 let lobby = state
@@ -205,7 +208,7 @@ fn menu_screen(
                 if let Some(item) = draw_lobby(ctx, &state, &lobby) {
                     state.nav.focus_lobby(item);
                     let action = state.nav.step(MenuInput::Confirm, lobby_len);
-                    apply_action(action, &mut state, &mut pending, &mut next);
+                    apply_action(action, &mut state, &mut pending, &mut next, &mut exit);
                 }
             }
         }
@@ -245,14 +248,19 @@ fn gather_menu_inputs(
     let mut confirm = false;
     let mut back = false;
     let mut stick_y = 0.0f32;
-    for gp in gamepads.iter() {
-        up |= gp.just_pressed(GamepadButton::DPadUp);
-        down |= gp.just_pressed(GamepadButton::DPadDown);
-        confirm |= gp.just_pressed(GamepadButton::South);
-        back |= gp.just_pressed(GamepadButton::East);
-        let y = gp.left_stick().y;
-        if y.abs() > stick_y.abs() {
-            stick_y = y;
+    // Typing suspends menu nav for every device, not just the keyboard: now that
+    // Back retargets focus to Quit, an ungated pad B while the join-code field has
+    // focus would silently arm a one-press exit (A) that discards the typed code.
+    if !typing {
+        for gp in gamepads.iter() {
+            up |= gp.just_pressed(GamepadButton::DPadUp);
+            down |= gp.just_pressed(GamepadButton::DPadDown);
+            confirm |= gp.just_pressed(GamepadButton::South);
+            back |= gp.just_pressed(GamepadButton::East);
+            let y = gp.left_stick().y;
+            if y.abs() > stick_y.abs() {
+                stick_y = y;
+            }
         }
     }
     const NAV_THRESH: f32 = 0.6;
@@ -287,9 +295,14 @@ fn apply_action(
     state: &mut MenuState,
     pending: &mut PendingRound,
     next: &mut NextState<AppPhase>,
+    exit: &mut MessageWriter<AppExit>,
 ) -> bool {
     match action {
         MenuAction::None => false,
+        MenuAction::Quit => {
+            exit.write(AppExit::Success);
+            true
+        }
         MenuAction::Host => {
             start_forming(state, &StartChoice::Host, next);
             true
@@ -528,7 +541,15 @@ fn draw_chooser(ctx: &egui::Context, state: &mut MenuState) -> Option<ChooserIte
             }
 
             ui.separator();
-            ui.label("Keyboard: arrows / WASD · Enter to select · Esc to back.");
+            if ui
+                .selectable_label(focus == ChooserItem::Quit, "Quit")
+                .clicked()
+            {
+                clicked = Some(ChooserItem::Quit);
+            }
+
+            ui.separator();
+            ui.label("Controller: D-pad · A to select. Keyboard: arrows / WASD · Enter · Esc.");
 
             if let Some(err) = &state.error {
                 ui.separator();
