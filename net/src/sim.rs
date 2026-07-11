@@ -88,8 +88,11 @@ pub const UNIT: i64 = 1000;
 
 pub(crate) const PLAYER_SPEED: i64 = 166;
 
+/// Test-driver step per tick, folded from the ONE measured speed
+/// ([`CRAB_CHARGE_SPEED_PER_S`], rl#257) so pursuit/grace tests exercise her honest
+/// pace — a second bare speed here would drift from reality (and did: 130).
 #[cfg(test)]
-const CRAB_SPEED: i64 = 130;
+const CRAB_SPEED: i64 = CRAB_CHARGE_SPEED_PER_S / TICK_HZ as i64;
 
 #[cfg(test)]
 pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) {
@@ -495,8 +498,16 @@ impl Sim {
                 },
             );
         }
+        // The objective sits BEYOND the crab's spawn ring by more than her ~17 m
+        // claw-contact shell (see [`CRAB_GRAB_RADIUS`]), preserving the layout
+        // invariant spawn line < crab < extraction whatever MIN becomes — at a bare
+        // 40 m the rl#257 clearance bump parked her ON the objective, its disc
+        // inside her claw shell at round start.
         let extraction = ExtractionPoint {
-            pos: Pos { x: 0, z: 40 * UNIT },
+            pos: Pos {
+                x: 0,
+                z: MIN_CRAB_SPAWN_DISTANCE + 18 * UNIT,
+            },
         };
         let crabs = (0..cfg.crabs).map(|i| Self::spawn_crab(&map, i)).collect();
         (map, crabs, extraction)
@@ -504,8 +515,9 @@ impl Sim {
 
     fn spawn_crab(players: &BTreeMap<PlayerId, Player>, idx: usize) -> Crab {
         // The base pos staggers crabs and seeds the push-out BEARING; the clearance
-        // clamp below (always binding since rl#257 grew MIN past this base) sets the
-        // actual distance, so round-start and joiner safety share the one constant.
+        // clamp below (binding whenever the base sits inside MIN — every near-field
+        // crab since rl#257 grew MIN past this base) sets the actual distance, so
+        // round-start and joiner safety share the one constant.
         let mut pos = Pos {
             x: (6 + 8 * idx as i64) * UNIT,
             z: 20 * UNIT,
@@ -1085,22 +1097,13 @@ mod tests {
     fn reaching_extraction_with_action_wins() {
         let mut sim = Sim::new(0, &players(1));
         let ex = sim.extraction().pos();
-        // The dodge must clear CRAB_GRAB_RADIUS, not just her center: swing wide west,
-        // overshoot north PAST the extraction point, and come back down onto it, so the
-        // pure-pursuit crab trails behind the whole way instead of being run past on the
-        // final approach (rl#236 — a route inside her reach is a loss, and that's correct).
-        let route = [
-            Pos {
-                x: -60 * UNIT,
-                z: 0,
-            },
-            Pos {
-                x: -60 * UNIT,
-                z: 90 * UNIT,
-            },
-            Pos { x: 0, z: 90 * UNIT },
-            ex,
-        ];
+        // The crab stays parked at her spawn: at her honest ~1.7× speed (rl#257) the
+        // pure-pursuit test driver catches EVERY on-foot route, so the old wide-dodge
+        // choreography can't win — pursuit-always-catches is pinned by
+        // `crab_pursues_and_grabs_a_lone_player`; THIS test pins the extraction
+        // mechanic. Her spawn ring still makes the run real: the straight line to the
+        // point passes ~12 m from her, clearing [`CRAB_GRAB_RADIUS`] of an armed crab.
+        let route = [ex];
         let mut wp = 0usize;
         let mut won = false;
         for _ in 0..4000 {
@@ -1124,7 +1127,6 @@ mod tests {
             };
             let mut inp = BTreeMap::new();
             inp.insert(PlayerId(0), Input::new(0.0, 1.0, look, buttons::ACTION));
-            drive_crab_toward_prey(&mut sim);
             sim.step(&inp);
             if sim.outcome() == Outcome::Extracted {
                 won = true;
