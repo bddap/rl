@@ -1097,12 +1097,18 @@ mod tests {
     fn reaching_extraction_with_action_wins() {
         let mut sim = Sim::new(0, &players(1));
         let ex = sim.extraction().pos();
-        // The crab stays parked at her spawn: at her honest ~1.7× speed (rl#257) the
-        // pure-pursuit test driver catches EVERY on-foot route, so the old wide-dodge
-        // choreography can't win — pursuit-always-catches is pinned by
-        // `crab_pursues_and_grabs_a_lone_player`; THIS test pins the extraction
-        // mechanic. Her spawn ring still makes the run real: the straight line to the
-        // point passes ~12 m from her, clearing [`CRAB_GRAB_RADIUS`] of an armed crab.
+        // The crab stays parked at her spawn: while CRAB_SPEED > PLAYER_SPEED (asserted
+        // below — her honest pace since rl#257) the pure-pursuit test driver catches
+        // EVERY on-foot route, so the old wide-dodge choreography can't win; catching a
+        // standing player is pinned by `crab_pursues_and_grabs_a_lone_player`, and THIS
+        // test pins the extraction mechanic. Her spawn ring still makes the run real:
+        // the straight line to the point passes ~12 m from her, clearing
+        // [`CRAB_GRAB_RADIUS`] of an armed crab.
+        assert!(
+            CRAB_SPEED > PLAYER_SPEED,
+            "the parked-crab premise inverted: re-measured charge speed no longer \
+             outruns players, a dodge route could win again"
+        );
         let route = [ex];
         let mut wp = 0usize;
         let mut won = false;
@@ -1135,7 +1141,7 @@ mod tests {
         }
         assert!(
             won,
-            "a player who dodges the crab, reaches the point, and holds ACTION should extract"
+            "a player who reaches the point clear of the crab and holds ACTION should extract"
         );
     }
 
@@ -1174,7 +1180,17 @@ mod tests {
     #[test]
     fn joiner_keeps_its_roster_slot_when_clear() {
         let mut sim = Sim::new(0, &players(1));
-        // The default crab spawn (~21 m out) already clears the join slot.
+        // Park the crab well clear: the round-start spawn sits ON the clearance ring
+        // (within ~2 units of MIN since the rl#257 clamp binds), so relying on it
+        // would hang this test's meaning off rounding crumbs.
+        sim.set_external_crab_pose(
+            0,
+            Pos {
+                x: 0,
+                z: 100 * UNIT,
+            },
+            0,
+        );
         sim.spawn_joining_player(PlayerId(1));
         assert_eq!(
             sim.player(PlayerId(1)).unwrap().pos(),
