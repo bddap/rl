@@ -14,6 +14,12 @@ pub struct PlayerId(pub u8);
 pub mod buttons {
     pub const ACTION: u8 = 1 << 0;
     pub const RESTART: u8 = 1 << 1;
+    /// The foot buttons that stay live while piloting ([`super::Input::pilot_masked`]):
+    /// RESTART works in every context (rl#261 — every cockpit legend in
+    /// `net::controls` promises "Restart round"), while ACTION must NOT — the ship's
+    /// brake shares Space/South with Extract, so a braking pilot over the pad would
+    /// extract.
+    pub const PILOT_MASK: u8 = RESTART;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -55,6 +61,19 @@ impl Input {
             move_forward: self.move_forward,
             look_yaw: 0,
             buttons: 0,
+        }
+    }
+
+    /// The input a PILOTING player contributes to a tick — the craft flies on its
+    /// `PilotIntent`, so the walk axes are zeroed and the buttons masked to
+    /// [`buttons::PILOT_MASK`]. Applied by the client (`LocalControl::sim_input`) and
+    /// RE-applied by the server at assembly, which doesn't trust the client to have
+    /// (rl#191); one implementation so the two can't drift. A starved hold can't
+    /// re-fire the surviving button ([`Input::hold`] zeroes buttons).
+    pub fn pilot_masked(self) -> Self {
+        Self {
+            buttons: self.buttons & buttons::PILOT_MASK,
+            ..Self::default()
         }
     }
 }
@@ -823,6 +842,21 @@ mod tests {
         assert_eq!((i.move_strafe, i.move_forward), (1000, -1000));
         assert_eq!((i.look_yaw, i.buttons), (0, 0));
         assert_eq!(Input::from_axes(0.0, 0.0), Input::default());
+    }
+
+    #[test]
+    fn pilot_mask_keeps_restart_only_and_holds_cannot_refire_it() {
+        let walking = Input::new(1.0, -1.0, 0.5, buttons::ACTION | buttons::RESTART);
+        assert_eq!(
+            walking.pilot_masked(),
+            Input::new(0.0, 0.0, 0.0, buttons::RESTART),
+            "piloting: walk axes and ACTION are stripped, RESTART survives (rl#261)"
+        );
+        assert_eq!(
+            walking.pilot_masked().hold(),
+            Input::default(),
+            "a starved hold of a masked input can't re-fire RESTART"
+        );
     }
 
     #[test]

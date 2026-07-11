@@ -296,6 +296,9 @@ enum LocalControl {
     Piloting {
         kind: VehicleKind,
         control: FlightControl,
+        /// This tick's foot input — only its pilot-surviving parts
+        /// ([`Input::pilot_masked`]) reach the sim while the craft flies on `control`.
+        foot: Input,
     },
 }
 
@@ -303,14 +306,14 @@ impl LocalControl {
     fn sim_input(&self) -> Input {
         match self {
             LocalControl::OnFoot(input) => *input,
-            LocalControl::Piloting { .. } => Input::default(),
+            LocalControl::Piloting { foot, .. } => foot.pilot_masked(),
         }
     }
 
     fn pilot_intent(&self) -> Option<PilotIntent> {
         match self {
             LocalControl::OnFoot(_) => None,
-            LocalControl::Piloting { kind, control } => {
+            LocalControl::Piloting { kind, control, .. } => {
                 let FlightControl {
                     throttle_trim,
                     thrust,
@@ -536,6 +539,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
             Some(kind) => LocalControl::Piloting {
                 kind,
                 control: flight_control(kind, world.resource::<FlightInput>()),
+                foot: foot_input,
             },
         };
         let sim_input = local.sim_input();
@@ -834,14 +838,14 @@ mod tests {
     use crab_world::vehicle::VehicleKind;
 
     #[test]
-    fn piloting_feeds_the_sim_a_neutral_foot_input() {
+    fn piloting_feeds_the_sim_a_neutral_foot_input_except_restart() {
         let walk = Input::new(0.5, -0.5, 0.25, buttons::ACTION);
         assert_eq!(
             LocalControl::OnFoot(walk).sim_input(),
             walk,
             "on foot the real walker input drives the sim unchanged"
         );
-        let flying = LocalControl::Piloting {
+        let flying = |foot| LocalControl::Piloting {
             kind: VehicleKind::Plane,
             control: FlightControl {
                 throttle_trim: 1.0,
@@ -851,11 +855,23 @@ mod tests {
                 match_velocity: true,
                 ..Default::default()
             },
+            foot,
         };
         assert_eq!(
-            flying.sim_input(),
+            flying(walk).sim_input(),
             Input::default(),
-            "piloting: the sim gets a neutral foot input, never a flight axis"
+            "piloting: walk axes and ACTION never reach the sim, nor any flight axis"
+        );
+        assert_eq!(
+            flying(Input::new(
+                1.0,
+                0.0,
+                0.0,
+                buttons::RESTART | buttons::ACTION
+            ))
+            .sim_input(),
+            Input::new(0.0, 0.0, 0.0, buttons::RESTART),
+            "RESTART is available in every context (rl#261) — it alone rides along"
         );
     }
 

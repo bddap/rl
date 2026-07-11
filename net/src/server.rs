@@ -456,12 +456,13 @@ impl Server {
                 }
                 input
             };
-            // A piloting player walks nowhere: substitute a neutral foot input at assembly.
-            // The client already sends neutral while piloting (`LocalControl::sim_input`), but
-            // the server doesn't TRUST it to (rl#191) — and a starved HOLD would otherwise
-            // replay the last pre-boarding walk input underneath the craft.
+            // A piloting player walks nowhere: re-apply the pilot mask at assembly. The
+            // client already masks (`LocalControl::sim_input`), but the server doesn't
+            // TRUST it to (rl#191) — and a starved HOLD would otherwise replay the last
+            // pre-boarding walk input underneath the craft. `Input::pilot_masked` owns
+            // what survives (RESTART, rl#261) and why.
             let input = if self.pilot_intents.contains_key(&pid) {
-                Input::default()
+                input.pilot_masked()
             } else {
                 input
             };
@@ -848,6 +849,44 @@ mod tests {
             "on foot again ⇒ input passes through"
         );
         assert_eq!(assembled[&PlayerId(0)], input(0.5));
+    }
+
+    /// RESTART works from every seat (rl#261): the pilot mask strips walk axes and ACTION
+    /// (the ship's brake shares physical inputs with Extract) but passes RESTART through,
+    /// and the round actually restarts on the piloting player's press.
+    #[test]
+    fn a_piloting_players_restart_survives_the_assembly_mask() {
+        use crab_world::vehicle::VehicleKind;
+        let p1 = PlayerId(1);
+        let mut s = srv(42, &ids(2));
+
+        s.record_remote(
+            p1,
+            TickMsg {
+                issue_tick: 0,
+                input: Input::new(1.0, 1.0, 0.0, buttons::RESTART | buttons::ACTION),
+                pilot: Some(intent(VehicleKind::Plane)),
+            },
+        );
+        s.advance(TickMsg {
+            pilot: Some(intent(VehicleKind::Ship)),
+            ..tickmsg(0, -1.0)
+        });
+        let assembled = s
+            .pending
+            .as_ref()
+            .expect("advance assembled")
+            .inputs
+            .clone();
+        assert_eq!(
+            assembled[&p1],
+            Input::new(0.0, 0.0, 0.0, buttons::RESTART),
+            "walk axes and ACTION are masked; RESTART passes"
+        );
+        assert!(
+            s.step_next(&[]).restarted,
+            "the piloting player's RESTART press restarts the round"
+        );
     }
 
     /// Step every tick `advance` has assembled and return the decoded snapshots.

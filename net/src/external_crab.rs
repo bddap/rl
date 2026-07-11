@@ -998,7 +998,10 @@ mod gcr_crab_tests {
             app.world_mut()
                 .run_system_once(publish_skin_repose)
                 .expect("publish_skin_repose runs");
-            app.world().resource::<crab_world::bot::skin::CrabSkinRepose>().0[&0].shift
+            app.world()
+                .resource::<crab_world::bot::skin::CrabSkinRepose>()
+                .0[&0]
+                .shift
         };
         let shift0 = read_shift(&mut app);
 
