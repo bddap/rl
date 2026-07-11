@@ -434,7 +434,8 @@ fn state_datagrams(kind: Frame, tick: u64, body: &[u8]) -> Vec<bytes::Bytes> {
     );
     (0..count)
         .map(|i| {
-            let chunk = &body[i * DGRAM_FRAG_PAYLOAD..((i + 1) * DGRAM_FRAG_PAYLOAD).min(body.len())];
+            let chunk =
+                &body[i * DGRAM_FRAG_PAYLOAD..((i + 1) * DGRAM_FRAG_PAYLOAD).min(body.len())];
             let mut d = Vec::with_capacity(DGRAM_HDR_LEN + chunk.len());
             d.push(kind as u8);
             d.extend_from_slice(&tick.to_le_bytes());
@@ -588,13 +589,23 @@ impl Session {
     }
 
     pub(crate) async fn send<M: Codec>(&self, peer: EndpointId, msg: &M) {
-        const { assert!(!M::KIND.via_datagram(), "state frames go via broadcast_state") }
+        const {
+            assert!(
+                !M::KIND.via_datagram(),
+                "state frames go via broadcast_state"
+            )
+        }
         let bytes = msg.encode();
         self.send_frame(peer, M::KIND, bytes.as_ref().into()).await;
     }
 
     pub(crate) async fn broadcast<M: Codec>(&self, msg: &M) {
-        const { assert!(!M::KIND.via_datagram(), "state frames go via broadcast_state") }
+        const {
+            assert!(
+                !M::KIND.via_datagram(),
+                "state frames go via broadcast_state"
+            )
+        }
         let bytes = msg.encode();
         self.broadcast_frame(M::KIND, bytes.as_ref().into()).await;
     }
@@ -604,7 +615,12 @@ impl Session {
     /// drops the OLDEST buffered datagram first, which for full-state frames is exactly
     /// right (stale state is worthless).
     pub(crate) async fn broadcast_state<M: StateCodec>(&self, msg: &M) {
-        const { assert!(M::KIND.via_datagram(), "StateCodec kinds must route via datagram") }
+        const {
+            assert!(
+                M::KIND.via_datagram(),
+                "StateCodec kinds must route via datagram"
+            )
+        }
         let bytes = msg.encode();
         let body = bytes.as_ref();
         if body.len() > MAX_FRAME_LEN {
@@ -849,7 +865,8 @@ async fn wire_connection(
                 dialer,
             },
         ) {
-            old.conn.close(0u32.into(), b"crossed dial: lower-dialer link kept");
+            old.conn
+                .close(0u32.into(), b"crossed dial: lower-dialer link kept");
         }
     }
 
@@ -1122,7 +1139,11 @@ mod tests {
         let f5 = state_datagrams(Frame::Articulation, 5, &body5);
         let f6 = state_datagrams(Frame::Articulation, 6, &body6);
         assert_eq!(feed(&mut asm, &f5[0]), None);
-        assert_eq!(feed(&mut asm, &f6[1]), None, "preempts the incomplete tick 5");
+        assert_eq!(
+            feed(&mut asm, &f6[1]),
+            None,
+            "preempts the incomplete tick 5"
+        );
         assert_eq!(feed(&mut asm, &f5[1]), None, "tick-5 straggler dropped");
         assert_eq!(feed(&mut asm, &f6[0]), Some(body6));
     }
