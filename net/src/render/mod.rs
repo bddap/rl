@@ -7,7 +7,6 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, MonitorSelection, PrimaryWindow, WindowMode};
 
-use crate::cadence::PhysicsCadence;
 use crate::client::{ClientSim, TickMsg};
 use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::net_loop::{Coordinator, Exchanged, NetDriver};

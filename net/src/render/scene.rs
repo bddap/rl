@@ -475,10 +475,10 @@ pub(super) fn apply_transforms(
     }
 
     if let Ok(mut cam) = cam_q.single_mut() {
-        if let Some((prev, now)) = vehicle.cockpit_poses() {
+        if let Some(pose) = vehicle.cockpit_sample(sim.tick(), alpha) {
             // The STATIC arena→render frame (rl#224): anchoring on the live carapace here
             // made the whole cockpit view judder with Sally's every wiggle.
-            *cam = cockpit_camera(prev, now, alpha, placement.0);
+            *cam = cockpit_camera(pose, placement.0);
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
@@ -496,9 +496,9 @@ pub(super) fn apply_transforms(
     }
 }
 
-fn cockpit_camera(prev: CockpitPose, now: CockpitPose, alpha: f32, shift: Vec3) -> Transform {
-    let eye = prev.pos.lerp(now.pos, alpha) + shift;
-    let rot = prev.orient.slerp(now.orient, alpha);
+fn cockpit_camera(pose: CockpitPose, shift: Vec3) -> Transform {
+    let eye = pose.pos + shift;
+    let rot = pose.orient;
     Transform::from_translation(eye).looking_at(eye + rot * Vec3::Z, rot * Vec3::Y)
 }
 

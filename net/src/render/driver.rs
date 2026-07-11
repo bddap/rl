@@ -26,7 +26,6 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
         prev,
         reported_outcome: false,
         next_tel_tick: next_sample_tick(0),
-        cadence: PhysicsCadence::default(),
         snap_buf: std::collections::VecDeque::new(),
         art_buf: std::collections::VecDeque::new(),
         logged_statuses: BTreeMap::new(),
@@ -241,10 +240,6 @@ pub(super) struct GameState {
     /// Per-round for the same reason: a fresh ClientSim restarts at tick 0, so a surviving
     /// watermark would suppress tick telemetry until the counter climbed past it (rl#210).
     next_tel_tick: u64,
-    /// The deterministic 64:30 physics/sim cadence, advanced once per APPLIED tick while
-    /// armed and reset on the restart edge (reported by `step_next`, rl#204) so every round
-    /// pumps the same physics-step schedule from tick 0.
-    cadence: PhysicsCadence,
     snap_buf: std::collections::VecDeque<crate::snapshot::CoreSnapshot>,
     art_buf: std::collections::VecDeque<crate::articulation::CrabArticulation>,
     /// Last logged per-player status, so Alive→Downed/Extracted edges (a crab strike landing,
@@ -416,13 +411,76 @@ pub(super) struct CockpitPose {
     pub orient: Quat,
 }
 
+/// The last three tick-stamped cockpit poses, a sliding window oldest→newest. Craft
+/// state advances a VARIABLE number of physics steps per sim tick (the 64:30
+/// staircase, [`crate::cadence::cumulative_steps`]), so interpolating the newest
+/// pose pair by tick-fraction surges rendered velocity ±50% ~4×/s — the rl#264
+/// "ground wiggles" from the pilot seat. [`Self::sample`] instead walks a uniform
+/// physics-step clock held ONE step behind the newest pose: the staircase never
+/// strays a full step from ideal (pinned by `staircase_stays_within_one_step_of_ideal`),
+/// so the sample point always lands inside this window and rendered motion is
+/// uniform by construction (cost: 1 step ≈ 16 ms of camera latency). Both arms feed
+/// it the same way — the host from its rigidbody each stepped tick, a remote client
+/// from its own craft's wire pose each adopted tick — and tick gaps (a lost
+/// articulation datagram) interpolate across naturally.
+#[derive(Clone, Copy, Default)]
+pub(super) struct PoseWindow {
+    buf: [Option<(u64, CockpitPose)>; 3],
+}
+
+impl PoseWindow {
+    fn push(&mut self, tick: u64, p: CockpitPose) {
+        // A non-advancing tick means the clock rewound under us (defensive; neither
+        // arm currently produces one) — stale history would mis-scale, so drop it.
+        if self.buf[2].is_some_and(|(t, _)| tick <= t) {
+            *self = Self::default();
+        }
+        self.buf.rotate_left(1);
+        self.buf[2] = Some((tick, p));
+    }
+
+    pub(super) fn sample(&self, now_tick: u64, tick_frac: f32) -> Option<CockpitPose> {
+        use crate::cadence::cumulative_steps;
+        use crate::sim::TICK_HZ;
+        use crab_world::physics::PHYSICS_HZ;
+
+        let entries: [(u64, CockpitPose); 3] = match self.buf {
+            [Some(a), Some(b), Some(c)] => [a, b, c],
+            // Engage grace: hold the newest pose until the window fills (1–2 ticks).
+            _ => return self.buf.iter().flatten().last().map(|&(_, p)| p),
+        };
+        let r = PHYSICS_HZ as f64 / TICK_HZ as f64;
+        // Render time in ticks is (now_tick − 1) + frac — a frame interpolates the
+        // tick interval ENDING at the last stepped tick, same clock as scene.rs's
+        // accumulator alpha. The trailing −1.0 is the one-step latency hold that
+        // keeps the target inside the window (see the type doc).
+        let ideal = r * (now_tick.saturating_sub(1) as f64 + tick_frac as f64) - 1.0;
+        let steps = entries.map(|(t, _)| cumulative_steps(t) as f64);
+        let target = ideal.clamp(steps[0], steps[2]);
+        let (i0, i1) = if target <= steps[1] { (0, 1) } else { (1, 2) };
+        let w = if steps[i1] > steps[i0] {
+            ((target - steps[i0]) / (steps[i1] - steps[i0])) as f32
+        } else {
+            1.0
+        };
+        Some(CockpitPose {
+            pos: entries[i0].1.pos.lerp(entries[i1].1.pos, w),
+            orient: entries[i0].1.orient.slerp(entries[i1].1.orient, w),
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.buf[2].is_none()
+    }
+}
+
 #[derive(Resource, Default)]
 pub(super) enum LocalVehicle {
     #[default]
     OnFoot,
     Flying {
         kind: VehicleKind,
-        pose: Option<(CockpitPose, CockpitPose)>,
+        poses: PoseWindow,
     },
 }
 
@@ -448,19 +506,16 @@ impl LocalVehicle {
         }
     }
 
-    pub(super) fn cockpit_poses(&self) -> Option<(CockpitPose, CockpitPose)> {
+    pub(super) fn cockpit_sample(&self, now_tick: u64, tick_frac: f32) -> Option<CockpitPose> {
         match self {
             Self::OnFoot => None,
-            Self::Flying { pose, .. } => *pose,
+            Self::Flying { poses, .. } => poses.sample(now_tick, tick_frac),
         }
     }
 
-    fn update_pose(&mut self, p: CockpitPose) {
-        if let Self::Flying { pose, .. } = self {
-            *pose = Some(match *pose {
-                Some((_, now)) => (now, p),
-                None => (p, p),
-            });
+    fn update_pose(&mut self, tick: u64, p: CockpitPose) {
+        if let Self::Flying { poses, .. } = self {
+            poses.push(tick, p);
         }
     }
 
@@ -468,14 +523,14 @@ impl LocalVehicle {
         match self {
             Self::OnFoot => Self::Flying {
                 kind: VehicleKind::Plane,
-                pose: None,
+                poses: PoseWindow::default(),
             },
             Self::Flying {
                 kind: VehicleKind::Plane,
                 ..
             } => Self::Flying {
                 kind: VehicleKind::Ship,
-                pose: None,
+                poses: PoseWindow::default(),
             },
             Self::Flying {
                 kind: VehicleKind::Ship,
@@ -502,7 +557,7 @@ fn read_vehicle_pose(world: &mut World, me: PilotId) -> Option<CockpitPose> {
 
 /// The remote-client twin of [`read_vehicle_pose`]: our own craft's arena-frame pose out of an
 /// adopted articulation. The host simulates the craft; its pose comes back per-pilot on the
-/// wire. `None` keeps the cockpit camera off while `Flying { pose: None }` — usually the
+/// wire. `None` keeps the cockpit camera off while the pose ring is empty — usually the
 /// request→grant window, but also a silent HOST REFUSAL (`file_intent` saw
 /// [`crate::sim::PlayerStatus::may_board`] false; the client can't tell the two apart) and
 /// the unarmed round (no articulation at all). Either way the camera simply holds off.
@@ -693,12 +748,12 @@ pub(super) fn drive_client_sim(world: &mut World) {
             super::articulation::publish_remote_vehicles(world, &art.vehicles, me);
             if let Some(p) = own_wire_pose(&art, me) {
                 let mut vehicle = world.resource_mut::<LocalVehicle>();
-                if matches!(&*vehicle, LocalVehicle::Flying { pose: None, .. }) {
+                if matches!(&*vehicle, LocalVehicle::Flying { poses, .. } if poses.is_empty()) {
                     // The request→grant edge (rl#191): the host accepted our intent and our
                     // craft's first pose just crossed the wire — the cockpit camera engages.
                     info!("cockpit engaged: own craft pose arrived on the wire");
                 }
-                vehicle.update_pose(p);
+                vehicle.update_pose(art.tick, p);
             }
         }
         if let Some(down) = server_down {
@@ -750,11 +805,11 @@ pub(super) fn drive_client_sim(world: &mut World) {
 
             {
                 let (crab_poses, shadows) = if armed {
-                    let steps = world
-                        .non_send_resource_mut::<GameState>()
-                        .cadence
-                        .steps_for_next_tick();
-                    pump_fixed_steps(world, steps);
+                    let stepping_into = {
+                        let state = world.non_send_resource::<GameState>();
+                        state.server().expect("server_auth ⇒ a server").sim().tick() + 1
+                    };
+                    pump_fixed_steps(world, crate::cadence::steps_for_tick(stepping_into));
                     let poses = world.resource_scope(
                         |world, mut bridge: Mut<crate::external_crab::ExternalCrabBridge>| {
                             let poses = bridge.crab_poses();
@@ -769,7 +824,9 @@ pub(super) fn drive_client_sim(world: &mut World) {
                         },
                     );
                     if let Some(p) = read_vehicle_pose(world, me) {
-                        world.resource_mut::<LocalVehicle>().update_pose(p);
+                        world
+                            .resource_mut::<LocalVehicle>()
+                            .update_pose(stepping_into, p);
                     }
                     (poses, pilot_shadows(world))
                 } else {
@@ -781,9 +838,6 @@ pub(super) fn drive_client_sim(world: &mut World) {
                         .server_mut()
                         .expect("server_auth ⇒ a server")
                         .step_next(&crab_poses, shadows);
-                    if stepped.restarted {
-                        state.cadence = PhysicsCadence::default();
-                    }
                     (stepped.snapshot, stepped.restarted)
                 };
                 let snap = crate::snapshot::CoreSnapshot::from_bytes(&bytes)
@@ -915,8 +969,12 @@ pub(super) fn drive_client_sim(world: &mut World) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, jitter_take};
+    use super::{
+        CockpitPose, FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, PoseWindow,
+        jitter_take,
+    };
     use crate::sim::{Input, buttons};
+    use bevy::prelude::{Quat, Vec3};
     use crab_world::vehicle::VehicleKind;
 
     #[test]
@@ -1018,5 +1076,55 @@ mod tests {
             "past the margin ⇒ drain to the target in one tick"
         );
         assert_eq!(jitter_take(10), 10 - JITTER_BUF_TARGET);
+    }
+
+    #[test]
+    fn pose_window_renders_uniform_velocity_through_the_staircase() {
+        // The rl#264 pin: a craft moving at CONSTANT velocity in physics time (one
+        // unit per step) must render at velocity UNIFORM IN RENDER TIME, even though
+        // the 64:30 cadence bunches 2 vs 3 steps per tick — the old tick-fraction
+        // interpolation surged ±50% on the 3-step ticks. When render time pauses and
+        // jumps (a tick gap: both peers' clocks stall together on loss), the covered
+        // distance must stay proportional to the jump — no surge, no shortfall.
+        use crate::cadence::cumulative_steps;
+        let r = crab_world::physics::PHYSICS_HZ as f64 / crate::sim::TICK_HZ as f64;
+        let pose_at = |tick: u64| CockpitPose {
+            pos: Vec3::new(cumulative_steps(tick) as f32, 0.0, 0.0),
+            orient: Quat::IDENTITY,
+        };
+        let mut window = PoseWindow::default();
+        let mut last: Option<(f64, f32)> = None; // (render time in ticks, sampled x)
+        let frames_per_tick = 4; // a 120 fps render against 30 Hz ticks
+        let mut checked = 0u32;
+        for tick in 1..200u64 {
+            // Ticks 100/101 never land (lost datagrams; frames pace on adopted
+            // ticks, so render time stalls with the window and jumps 3 ticks at 102).
+            if tick == 100 || tick == 101 {
+                continue;
+            }
+            window.push(tick, pose_at(tick));
+            if tick < 4 {
+                continue; // window fill
+            }
+            for f in 0..frames_per_tick {
+                let frac = f as f32 / frames_per_tick as f32;
+                let t_render = (tick - 1) as f64 + frac as f64;
+                let x = window.sample(tick, frac).unwrap().pos.x;
+                if let Some((t0, x0)) = last {
+                    let expected = r * (t_render - t0);
+                    assert!(
+                        ((x - x0) as f64 - expected).abs() < 1e-3,
+                        "tick {tick} frac {frac}: moved {} for {} render-ticks \
+                         (expected {expected}) — the staircase leaked into rendered \
+                         motion",
+                        x - x0,
+                        t_render - t0,
+                    );
+                    checked += 1;
+                }
+                last = Some((t_render, x));
+            }
+        }
+        assert!(checked > 700, "the sweep must actually cover the run");
     }
 }
