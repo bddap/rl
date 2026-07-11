@@ -426,9 +426,9 @@ fn read_vehicle_pose(world: &mut World, me: PilotId) -> Option<CockpitPose> {
 /// The remote-client twin of [`read_vehicle_pose`]: our own craft's arena-frame pose out of an
 /// adopted articulation. The host simulates the craft; its pose comes back per-pilot on the
 /// wire. `None` keeps the cockpit camera off while `Flying { pose: None }` — usually the
-/// request→grant window, but also a silent HOST REFUSAL (`file_intent`'s alive gate saw us
-/// non-Alive; the client can't tell the two apart) and the unarmed round (no articulation at
-/// all). Either way the camera simply holds off.
+/// request→grant window, but also a silent HOST REFUSAL (`file_intent` saw
+/// [`crate::sim::PlayerStatus::may_board`] false; the client can't tell the two apart) and
+/// the unarmed round (no articulation at all). Either way the camera simply holds off.
 fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Option<CockpitPose> {
     art.vehicles
         .iter()
@@ -489,18 +489,18 @@ pub(super) fn drive_client_sim(world: &mut World) {
     {
         let toggle = std::mem::take(&mut world.resource_mut::<PendingInput>().toggle_vehicle);
         if toggle {
-            let alive = {
+            let may_board = {
                 let state = world.non_send_resource::<GameState>();
                 let me = state.client.me();
                 state
                     .client
                     .sim()
                     .player(me)
-                    .is_some_and(|p| p.status() == PlayerStatus::Alive)
+                    .is_some_and(|p| p.status().may_board())
             };
             let mut vehicle = world.resource_mut::<LocalVehicle>();
             let boarding_from_foot = matches!(*vehicle, LocalVehicle::OnFoot);
-            if !boarding_from_foot || alive {
+            if !boarding_from_foot || may_board {
                 let next = vehicle.cycled();
                 info!("vehicle: {:?} -> {:?}", vehicle.context(), next.context());
                 *vehicle = next;
