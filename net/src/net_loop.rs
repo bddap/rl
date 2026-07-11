@@ -134,15 +134,14 @@ impl NetDriver {
     /// game STATE, so a remote client renders it instead of re-stepping. Non-blocking:
     /// fire-and-forget datagrams (rl#259), so a dead peer can never hold this (main-thread) call.
     pub fn broadcast_snapshot(&self, snapshot: &CoreSnapshot) {
-        self.rt.block_on(self.session.broadcast_snapshot(snapshot));
+        self.rt.block_on(self.session.broadcast_state(snapshot));
     }
 
     /// (Host) Broadcast the render-only [`CrabArticulation`] DOWN to every client, beside the
     /// snapshot, so a remote client renders the host's exact crab pose without simulating
     /// physics. Non-blocking, like [`Self::broadcast_snapshot`].
     pub fn broadcast_articulation(&self, articulation: &CrabArticulation) {
-        self.rt
-            .block_on(self.session.broadcast_articulation(articulation));
+        self.rt.block_on(self.session.broadcast_state(articulation));
     }
 
     pub fn connected_peers_now(&self) -> Vec<EndpointId> {
@@ -163,8 +162,15 @@ impl NetDriver {
         let mut down = Exchanged::default();
         while let Some(from) = self.session.try_recv() {
             match from.msg {
-                PeerWire::Snapshot(snap) => down.snapshots.push(snap),
-                PeerWire::Articulation(art) => down.articulations.push(art),
+                // Only the SERVER's word is game state: formation is a mesh (and discovery
+                // dials every LAN peer), so a non-host peer can hold a live authenticated
+                // link — its snapshots must never be adopted as authority.
+                PeerWire::Snapshot(snap) if from.from == self.server_eid => {
+                    down.snapshots.push(snap)
+                }
+                PeerWire::Articulation(art) if from.from == self.server_eid => {
+                    down.articulations.push(art)
+                }
                 PeerWire::Refuse(verdict) if from.from == self.server_eid => {
                     tracing::error!("server refused us mid-match: {verdict}");
                     return Err(ServerDown::Refused(verdict));
