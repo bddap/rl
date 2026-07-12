@@ -267,19 +267,8 @@ pub(super) fn reconcile_avatars(
 
 const CRAB_RENDER_HEIGHT: f32 = PLAYER_HEIGHT * CRAB_SCALE as f32;
 
-fn natural_crab_height() -> Option<f32> {
-    static H: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
-    *H.get_or_init(|| {
-        let h = crab_world::bot::rig::recipe_silhouette(&crab_world::bot::body::render_recipe(
-            crab_world::mesh_fallback::usable_model_path().is_some(),
-        ))
-        .natural_height();
-        (h > 1e-4).then_some(h)
-    })
-}
-
 pub(crate) fn world_render_scale() -> f32 {
-    natural_crab_height()
+    crab_world::mesh_fallback::natural_body_height()
         .map(|h| h / CRAB_RENDER_HEIGHT)
         .unwrap_or(1.0)
 }
@@ -346,7 +335,7 @@ fn spawn_crab_silhouette(
             }
         }
     }
-    let Some(_h) = natural_crab_height() else {
+    let Some(_h) = crab_world::mesh_fallback::natural_body_height() else {
         unreachable!(
             "crab silhouette: render_recipe yielded a degenerate (zero natural-height) crab \
              — the collider recipe is broken"

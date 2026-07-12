@@ -57,6 +57,42 @@ pub const EVAL_BEARINGS: usize = 8;
 
 const TARGET_Y: f32 = (TARGET_Y_MIN + TARGET_Y_MAX) / 2.0;
 
+/// Sally's sustained full-charge pace in BODY HEIGHTS per second — THE pinned measured
+/// speed (rl#266), scale-free so each domain folds in its OWN sizing rule: net derives
+/// the sim-side charge speed (× her `CRAB_SCALE` player-heights sim stature) that spawn
+/// clearance and the pursuit-test driver build on, and this eval re-derives the arena
+/// value (× the natural rig height) to re-measure her every run. Pinned FROM the eval's
+/// own instrument ([`BearingReport::sustained_pace_m_per_s`], best far bearing) so pin
+/// and measurement can never diverge in method; [`run_eval`] flags when a retrain
+/// drifts the real gait outside [`CHARGE_SPEED_DRIFT_TOL`] — re-measure and re-pin then.
+///
+/// Measured 2026-07-11 on the live mlp512x3-s2 brain (this instrument, deterministic
+/// per brain). 4.4× the rl#254 close-out's 8.5 sim m/s — locomotion training kept
+/// accelerating her while `progress_m` sat saturated at the 9 m target, which is how
+/// the old hand-pinned value rotted unnoticed (rl#266). Strictly her best
+/// 5-seconds-from-rest pace, not a cruise speed: for a decaying speed profile the max
+/// prefix lands at the [`PACE_WINDOW_MIN_S`] floor, so the opening lunge inflates it a
+/// little — the safe direction for the spawn clearance derived from it.
+pub const CRAB_CHARGE_SPEED_HEIGHTS_PER_S: f32 = 1.74;
+
+/// Fractional drift band around [`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] before the eval
+/// flags. Wide enough for brain-to-brain wobble in the measured pace and the residual
+/// lunge-vs-sustained blur; a retrain that changes her locomotion regime lands well
+/// outside it. At ±25% the spawn-grace guarantee (5 s of charge, net's
+/// `SPAWN_GRACE_SECS`) stays within 4–6.7 s of truth — feel-tolerable; beyond that the
+/// spawn-safety derivation is lying and the pin must be re-measured.
+pub const CHARGE_SPEED_DRIFT_TOL: f32 = 0.25;
+
+/// Prefix paces count only once this much active time has elapsed: her opening lunge
+/// outpaces the sustained gait (rl#257) and a tiny elapsed divisor would let one
+/// spawn-transient hop dominate. Five seconds is past the lunge and happens to be the
+/// horizon the constant serves (spawn grace) — but it is a measurement floor, not that
+/// feel knob. Ceiling to be aware of: a brain that reaches the far ball inside this
+/// window saturates the instrument at target_distance / PACE_WINDOW_MIN_S — the guard
+/// still flags (saturation is itself far off any honest pin), but the measured number
+/// stops tracking her true pace and the eval needs a farther ball.
+const PACE_WINDOW_MIN_S: f32 = 5.0;
+
 /// One bearing's episode — the same measurements the pre-compass eval reported for its
 /// single +X episode.
 #[derive(Debug, Clone, Copy)]
@@ -75,6 +111,12 @@ pub struct BearingReport {
     pub closest_tip_distance_m: f32,
     pub reached: bool,
     pub active_ticks: u64,
+    /// Best prefix pace toward the target (arena m/s): max over active ticks past
+    /// [`PACE_WINDOW_MIN_S`] of progress-so-far / time-so-far. The max is taken right
+    /// when she arrives at the ball, so parking there for the rest of the episode
+    /// (which dilutes `progress_m / active_ticks`) can't understate her charge — this
+    /// is the rl#266 speed-guard instrument. 0.0 when she never progressed.
+    pub sustained_pace_m_per_s: f32,
 }
 
 /// One full compass of bearing episodes at one target distance — the distance travels
@@ -105,6 +147,16 @@ impl CompassSweep {
     pub fn reached_count(&self) -> usize {
         self.per_bearing.iter().filter(|b| b.reached).count()
     }
+
+    /// The BEST bearing's sustained pace (arena m/s) — her full charge. Max, not min:
+    /// the speed guard asks how fast she really is (spawn safety cares about her top
+    /// pace), while dead bearings are the headline min-progress gate's problem.
+    fn best_sustained_pace_m_per_s(&self) -> f32 {
+        self.per_bearing
+            .iter()
+            .map(|b| b.sustained_pace_m_per_s)
+            .fold(0.0, f32::max)
+    }
 }
 
 /// Both sweeps of one eval, judging one load of one brain.
@@ -130,6 +182,32 @@ impl EvalReport {
     pub fn reached(&self) -> bool {
         self.far.worst().reached
     }
+
+    /// Sally's measured charge speed in body-heights/s — the far sweep's best sustained
+    /// pace over the natural rig height, the same height net's arena→sim seam divides
+    /// by, so this number and the sim-side charge constant live on one scale. `None`
+    /// when unmeasurable: no loaded policy (the rest pose measures the baseline, not
+    /// her), no progress, a degenerate silhouette — or a non-default target distance:
+    /// the pin was measured at [`DEFAULT_TARGET_DISTANCE_M`], and a shorter `--distance`
+    /// lowers the instrument's saturation ceiling (target / [`PACE_WINDOW_MIN_S`]), so
+    /// comparing that against the pin would flag a geometry artifact as drift and
+    /// invite a corrupting re-pin.
+    pub fn measured_charge_heights_per_s(&self) -> Option<f32> {
+        if !self.policy_loaded || self.far.target_distance_m != DEFAULT_TARGET_DISTANCE_M {
+            return None;
+        }
+        let pace = self.far.best_sustained_pace_m_per_s();
+        let height = crate::mesh_fallback::natural_body_height()?;
+        (pace > 0.0).then(|| pace / height)
+    }
+
+    /// Fractional drift of the measured charge speed from the pinned
+    /// [`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] (+ = faster than pinned). Outside
+    /// [`CHARGE_SPEED_DRIFT_TOL`] the spawn-safety derivation is stale — rl#266.
+    pub fn charge_speed_drift(&self) -> Option<f32> {
+        self.measured_charge_heights_per_s()
+            .map(|m| m / CRAB_CHARGE_SPEED_HEIGHTS_PER_S - 1.0)
+    }
 }
 
 #[derive(Resource, Clone, Copy)]
@@ -149,6 +227,7 @@ struct EvalState {
     closest_tip_dist: Option<f32>,
     torque_sum: f64,
     torque_ticks: u64,
+    best_pace_m_per_s: f32,
 }
 
 pub fn run_eval(
@@ -191,11 +270,27 @@ pub fn run_eval(
     // The close probe reuses the far sweep's episode definition whole (same ticks, same
     // compass, same fresh-world episode) so its numbers read on the same scale — only
     // the distance differs.
-    Ok(EvalReport {
+    let report = EvalReport {
         policy_loaded,
         far: run_compass(&policy, active_ticks, target_distance),
         close: run_compass(&policy, active_ticks, CLOSE_PROBE_DISTANCE_M),
-    })
+    };
+    // The rl#266 speed guard, HERE so every judge (CLI, keep-best gate) flags for free:
+    // a flag, not a verdict — a drifted pin is a re-measure chore, not a bad brain.
+    if let (Some(measured), Some(drift)) = (
+        report.measured_charge_heights_per_s(),
+        report.charge_speed_drift(),
+    ) && drift.abs() > CHARGE_SPEED_DRIFT_TOL
+    {
+        tracing::warn!(
+            "charge speed drift (rl#266): measured {measured:.3} body-heights/s vs pinned \
+             {CRAB_CHARGE_SPEED_HEIGHTS_PER_S} ({:+.0}%) — re-measure and re-pin \
+             CRAB_CHARGE_SPEED_HEIGHTS_PER_S; spawn clearance and the pursuit-test pace \
+             derive from it",
+            drift * 100.0,
+        );
+    }
+    Ok(report)
 }
 
 fn run_compass(
@@ -282,6 +377,7 @@ fn run_bearing(
         closest_tip_distance_m: closest_tip,
         reached: tip_touch(closest_tip),
         active_ticks: state.torque_ticks,
+        sustained_pace_m_per_s: state.best_pace_m_per_s,
     }
 }
 
@@ -347,6 +443,12 @@ fn eval_step(
             state.closest_dist = d;
         } else {
             state.closest_dist = state.closest_dist.min(d);
+            let elapsed_s = state.torque_ticks as f32 / crate::physics::PHYSICS_HZ as f32;
+            if elapsed_s >= PACE_WINDOW_MIN_S {
+                state.best_pace_m_per_s = state
+                    .best_pace_m_per_s
+                    .max((state.initial_dist - d) / elapsed_s);
+            }
         }
         state.last_dist = d;
     }
@@ -376,6 +478,78 @@ fn eval_step(
 mod tests {
     use super::*;
     use crate::training::targets::REACH_RADIUS;
+
+    /// A canned report at the given target distance with ONE bearing pacing at `pace`
+    /// (arena m/s) — the speed guard's inputs, nothing else non-zero.
+    fn paced_report(policy_loaded: bool, target_distance_m: f32, pace: f32) -> EvalReport {
+        let mut bearing = BearingReport {
+            bearing_rad: 0.0,
+            progress_m: 0.0,
+            total_torque: 0.0,
+            mean_torque_per_tick: 0.0,
+            initial_distance_m: target_distance_m,
+            closest_distance_m: target_distance_m,
+            final_distance_m: target_distance_m,
+            closest_tip_distance_m: f32::INFINITY,
+            reached: false,
+            active_ticks: DEFAULT_EVAL_TICKS,
+            sustained_pace_m_per_s: 0.0,
+        };
+        let sweep = CompassSweep {
+            target_distance_m,
+            per_bearing: [bearing; EVAL_BEARINGS],
+        };
+        bearing.sustained_pace_m_per_s = pace;
+        let mut far = sweep;
+        far.per_bearing[3] = bearing;
+        EvalReport {
+            policy_loaded,
+            far,
+            close: sweep,
+        }
+    }
+
+    /// Pins the rl#266 guard: drift is measured pace over the pin (best bearing, in
+    /// body heights), and every unmeasurable case is None — NOT a spurious drift.
+    #[test]
+    fn charge_speed_guard_measures_and_refuses() {
+        let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");
+        let fast = CRAB_CHARGE_SPEED_HEIGHTS_PER_S * h * 1.5;
+
+        let r = paced_report(true, DEFAULT_TARGET_DISTANCE_M, fast);
+        let drift = r.charge_speed_drift().expect("measurable");
+        assert!((drift - 0.5).abs() < 1e-3, "drift {drift} should be +50%");
+        assert!(drift > CHARGE_SPEED_DRIFT_TOL);
+
+        // Non-default distance: the saturation ceiling moved — a geometry artifact,
+        // not her gait; comparing it to the pin would invite a corrupting re-pin.
+        let short = paced_report(true, DEFAULT_TARGET_DISTANCE_M - 1.0, fast);
+        assert_eq!(short.measured_charge_heights_per_s(), None);
+
+        // The rest-pose baseline measures the baseline, not her.
+        let unloaded = paced_report(false, DEFAULT_TARGET_DISTANCE_M, fast);
+        assert_eq!(unloaded.measured_charge_heights_per_s(), None);
+
+        // No progress at all: nothing to measure.
+        let parked = paced_report(true, DEFAULT_TARGET_DISTANCE_M, 0.0);
+        assert_eq!(parked.measured_charge_heights_per_s(), None);
+    }
+
+    /// The instrument saturates at target/[`PACE_WINDOW_MIN_S`] (a brain arriving
+    /// inside the pace window measures the ceiling, not its gait). If the pin's drift
+    /// band ever reaches that ceiling, a fast retrain would read "within tolerance"
+    /// and the guard would be silently defeated in exactly the direction (faster)
+    /// history shows happens — so pin the headroom.
+    #[test]
+    fn charge_speed_guard_keeps_saturation_headroom() {
+        let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");
+        let ceiling_heights_per_s = DEFAULT_TARGET_DISTANCE_M / PACE_WINDOW_MIN_S / h;
+        assert!(
+            ceiling_heights_per_s > CRAB_CHARGE_SPEED_HEIGHTS_PER_S * (1.0 + CHARGE_SPEED_DRIFT_TOL),
+            "instrument ceiling {ceiling_heights_per_s} heights/s is inside the drift band — \
+             the eval needs a farther ball before this pin can be trusted"
+        );
+    }
 
     #[test]
     fn default_far_distance_is_the_training_band_edge() {
