@@ -68,6 +68,23 @@ pub fn usable_model_path() -> Option<PathBuf> {
     usable_model().as_ref().ok().map(|u| u.path.clone())
 }
 
+/// Natural rest-pose height of the crab body THIS process constructs (arena m) — THE
+/// scale bridge between her rig and any sized frame: net's arena→sim render seam and
+/// the eval's rl#266 charge-speed guard both divide by this one measurement, so the
+/// two can never disagree on what "one crab height" is. `None` when the silhouette is
+/// degenerate — callers must treat that as unmeasurable, never as scale 1.0 (an
+/// identity conversion silently re-opens the rl#254 creep).
+pub fn natural_body_height() -> Option<f32> {
+    static H: OnceLock<Option<f32>> = OnceLock::new();
+    *H.get_or_init(|| {
+        let h = bot::rig::recipe_silhouette(&bot::body::render_recipe(
+            usable_model_path().is_some(),
+        ))
+        .natural_height();
+        (h > 1e-4).then_some(h)
+    })
+}
+
 /// Digest of the crab body THIS process constructs — THE one "which body is this?"
 /// value: the checkpoint body-identity stamp (bddap/rl#214) AND the per-peer collider
 /// digest the MP membership handshake advertises (rl#100/rl#114). The [`usable_model`]

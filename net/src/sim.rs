@@ -147,11 +147,17 @@ const PLAYER_HEIGHT_FP: i64 = (PLAYER_HEIGHT * UNIT as f32) as i64;
 
 const STARTUP_GRACE_TICKS: u64 = 30;
 
-/// Sally's sustained full-charge ground speed, sim units per second (~8.5 m/s) —
-/// MEASURED, not commanded: her speed is whatever the trained gait strides across the
-/// arena→sim seam, ~1.7× player run speed at the rl#254 close-out playtest, plus a
-/// faster opening lunge. Re-measure after a retrain that changes locomotion.
-const CRAB_CHARGE_SPEED_PER_S: i64 = 8_500;
+/// Sally's sustained full-charge ground speed, sim units per second — MEASURED, not
+/// commanded: her speed is whatever the trained gait strides across the arena→sim
+/// seam. Folded from the ONE scale-free pinned pace
+/// ([`crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S`]) × her sim stature
+/// ([`CRAB_SCALE`] × [`PLAYER_HEIGHT`]) — the same multiply the render seam applies —
+/// so the chase eval re-measures it every run and flags drift after a retrain (rl#266)
+/// instead of the old bare 8_500 rotting silently.
+const CRAB_CHARGE_SPEED_PER_S: i64 = (crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S
+    * (CRAB_SCALE as f32)
+    * PLAYER_HEIGHT
+    * UNIT as f32) as i64;
 
 /// How long a fresh spawn is guaranteed before Sally at full charge can be on them —
 /// the spawn-safety feel knob (rl#257). The old bare 19 m was tuned pre-rl#254 at
@@ -1102,13 +1108,16 @@ mod tests {
         // EVERY on-foot route, so the old wide-dodge choreography can't win; catching a
         // standing player is pinned by `crab_pursues_and_grabs_a_lone_player`, and THIS
         // test pins the extraction mechanic. Her spawn ring still makes the run real:
-        // the straight line to the point passes ~12 m from her, clearing
+        // the straight line to the point passes MIN_CRAB_SPAWN_DISTANCE-proportional
+        // meters from her (the push-out bearing has a fixed x component), far clear of
         // [`CRAB_GRAB_RADIUS`] of an armed crab.
-        assert!(
-            CRAB_SPEED > PLAYER_SPEED,
-            "the parked-crab premise inverted: re-measured charge speed no longer \
-             outruns players, a dodge route could win again"
-        );
+        const {
+            assert!(
+                CRAB_SPEED > PLAYER_SPEED,
+                "the parked-crab premise inverted: re-measured charge speed no longer \
+                 outruns players, a dodge route could win again"
+            );
+        }
         let route = [ex];
         let mut wp = 0usize;
         let mut won = false;
@@ -1182,12 +1191,14 @@ mod tests {
         let mut sim = Sim::new(0, &players(1));
         // Park the crab well clear: the round-start spawn sits ON the clearance ring
         // (within ~2 units of MIN since the rl#257 clamp binds), so relying on it
-        // would hang this test's meaning off rounding crumbs.
+        // would hang this test's meaning off rounding crumbs. 2×MIN, not a bare meter
+        // count — a re-measured charge speed grows the ring and a fixed park could
+        // land back inside it (it did: 100 m vs the rl#266 ring).
         sim.set_external_crab_pose(
             0,
             Pos {
                 x: 0,
-                z: 100 * UNIT,
+                z: 2 * MIN_CRAB_SPAWN_DISTANCE,
             },
             0,
         );

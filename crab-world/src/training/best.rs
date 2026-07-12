@@ -349,6 +349,7 @@ mod tests {
             closest_tip_distance_m: f32::INFINITY,
             reached: false,
             active_ticks: DEFAULT_EVAL_TICKS,
+            sustained_pace_m_per_s: 0.0,
         };
         // The close probe is scripted to beat every bar in the suite (100 m — canned
         // reports needn't be physically plausible), so each no-promotion test below

@@ -224,6 +224,23 @@ fn main() {
                 crab_world::eval::EVAL_BEARINGS,
                 worst.bearing_rad.to_degrees(),
             );
+            // The rl#266 speed-guard sidecar: Sally's measured charge pace vs the
+            // pinned constant every sim-side clearance derives from. Its own prefix
+            // (matches neither `^EVAL_RESULT ` nor the bearing grep), drift verdict
+            // included so a consumer needn't re-derive the tolerance; the human-facing
+            // WARN on drift is run_eval's (crab-world), shared with the keep-best gate.
+            if let (Some(measured), Some(drift)) =
+                (r.measured_charge_heights_per_s(), r.charge_speed_drift())
+            {
+                println!(
+                    "EVAL_CHARGE_SPEED heights_per_s={:.4} pinned={:.4} drift_frac={:.4} \
+                     drifted={}",
+                    measured,
+                    crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S,
+                    drift,
+                    drift.abs() > crab_world::eval::CHARGE_SPEED_DRIFT_TOL,
+                );
+            }
             if !r.policy_loaded {
                 eprintln!(
                     "eval: no usable checkpoint at {} — the numbers above are the zero-action \
