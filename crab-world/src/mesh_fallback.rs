@@ -77,10 +77,9 @@ pub fn usable_model_path() -> Option<PathBuf> {
 pub fn natural_body_height() -> Option<f32> {
     static H: OnceLock<Option<f32>> = OnceLock::new();
     *H.get_or_init(|| {
-        let h = bot::rig::recipe_silhouette(&bot::body::render_recipe(
-            usable_model_path().is_some(),
-        ))
-        .natural_height();
+        let h =
+            bot::rig::recipe_silhouette(&bot::body::render_recipe(usable_model_path().is_some()))
+                .natural_height();
         (h > 1e-4).then_some(h)
     })
 }
