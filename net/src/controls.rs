@@ -8,6 +8,9 @@ pub enum GcrContext {
     OnFoot,
     Plane,
     Ship,
+    /// The boot menu + lobby (`AppPhase::Menu`/`Connecting`) — nav is egui-drawn but the
+    /// KEYS/BUTTONS come from this table, same as every in-round context (rl#117).
+    Menu,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,6 +37,11 @@ pub enum Action {
     ShipLift,
     ShipRoll,
     MatchVelocity,
+
+    MenuUp,
+    MenuDown,
+    MenuConfirm,
+    MenuBack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -49,6 +57,9 @@ pub enum Key {
     Tab,
     Space,
     Escape,
+    ArrowUp,
+    ArrowDown,
+    Enter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -75,6 +86,11 @@ pub enum PadButton {
     /// aim/look token; the click is the one pad button free in every context (rl#232).
     RightStickClick,
     Dpad,
+    /// Single D-pad directions — unlike [`PadButton::Dpad`] (the whole cluster, an
+    /// analog-style multi-input) these resolve to one `GamepadButton`, so menu nav can
+    /// poll them straight from the binding table.
+    DpadUp,
+    DpadDown,
 }
 
 impl ControlScheme for GcrControls {
@@ -89,7 +105,12 @@ impl ControlScheme for GcrControls {
     }
 
     fn contexts() -> &'static [GcrContext] {
-        &[GcrContext::OnFoot, GcrContext::Plane, GcrContext::Ship]
+        &[
+            GcrContext::OnFoot,
+            GcrContext::Plane,
+            GcrContext::Ship,
+            GcrContext::Menu,
+        ]
     }
 
     fn context_rows(ctx: GcrContext) -> &'static [ContextRow<Self>] {
@@ -97,6 +118,7 @@ impl ControlScheme for GcrControls {
             GcrContext::OnFoot => &FOOT_ROWS,
             GcrContext::Plane => &PLANE_ROWS,
             GcrContext::Ship => &SHIP_ROWS,
+            GcrContext::Menu => &MENU_ROWS,
         }
     }
 
@@ -105,6 +127,7 @@ impl ControlScheme for GcrControls {
             GcrContext::OnFoot => "On foot",
             GcrContext::Plane => "Piloting plane",
             GcrContext::Ship => "Piloting ship",
+            GcrContext::Menu => "Menu",
         }
     }
 
@@ -113,6 +136,7 @@ impl ControlScheme for GcrControls {
             GcrContext::OnFoot => "foot",
             GcrContext::Plane => "plane",
             GcrContext::Ship => "ship",
+            GcrContext::Menu => "menu",
         }
     }
 
@@ -121,6 +145,7 @@ impl ControlScheme for GcrControls {
             "foot" => Some(GcrContext::OnFoot),
             "plane" => Some(GcrContext::Plane),
             "ship" => Some(GcrContext::Ship),
+            "menu" => Some(GcrContext::Menu),
             _ => None,
         }
     }
@@ -142,6 +167,10 @@ impl ControlScheme for GcrControls {
             Key::Tab => "controls/keyboard_tab.png",
             Key::Space => "controls/keyboard_space.png",
             Key::Escape => "controls/keyboard_escape.png",
+            // No key art for these — text chips, like the art-less triggers/bumpers.
+            Key::ArrowUp => return Glyph::Label("Up"),
+            Key::ArrowDown => return Glyph::Label("Down"),
+            Key::Enter => return Glyph::Label("Enter"),
         })
     }
 
@@ -160,7 +189,9 @@ impl ControlScheme for GcrControls {
             PadButton::LeftStick => Glyph::Icon("controls/xbox_stick_l.png"),
             PadButton::RightStick => Glyph::Icon("controls/xbox_stick_r.png"),
             PadButton::RightStickClick => Glyph::Label("R3"),
-            PadButton::Dpad => Glyph::Icon("controls/xbox_dpad.png"),
+            PadButton::Dpad | PadButton::DpadUp | PadButton::DpadDown => {
+                Glyph::Icon("controls/xbox_dpad.png")
+            }
         }
     }
 
@@ -172,7 +203,7 @@ impl ControlScheme for GcrControls {
     }
 }
 
-pub const BINDINGS: [Binding<GcrControls>; 20] = [
+pub const BINDINGS: [Binding<GcrControls>; 24] = [
     Binding {
         action: Action::MoveForward,
         keyboard: KbBinding::new(&[Key::W], &[]),
@@ -272,6 +303,29 @@ pub const BINDINGS: [Binding<GcrControls>; 20] = [
         action: Action::MatchVelocity,
         keyboard: KbBinding::new(&[Key::Space], &[]),
         pad: PadBinding::new(&[PadButton::South]),
+    },
+    // Menu nav (rl#117). The analog stick also navigates (a latched axis read, app-side
+    // like every stick) — LeftStick here is its legend token, DpadUp/DpadDown the
+    // pollable buttons.
+    Binding {
+        action: Action::MenuUp,
+        keyboard: KbBinding::new(&[Key::ArrowUp, Key::W], &[]),
+        pad: PadBinding::new(&[PadButton::DpadUp, PadButton::LeftStick]),
+    },
+    Binding {
+        action: Action::MenuDown,
+        keyboard: KbBinding::new(&[Key::ArrowDown, Key::S], &[]),
+        pad: PadBinding::new(&[PadButton::DpadDown, PadButton::LeftStick]),
+    },
+    Binding {
+        action: Action::MenuConfirm,
+        keyboard: KbBinding::new(&[Key::Enter, Key::Space], &[]),
+        pad: PadBinding::new(&[PadButton::South]),
+    },
+    Binding {
+        action: Action::MenuBack,
+        keyboard: KbBinding::new(&[Key::Escape], &[]),
+        pad: PadBinding::new(&[PadButton::East]),
     },
 ];
 
@@ -404,6 +458,29 @@ pub const SHIP_ROWS: [ContextRow<GcrControls>; 10] = [
     },
 ];
 
+pub const MENU_ROWS: [ContextRow<GcrControls>; 5] = [
+    ContextRow {
+        action: Action::MenuUp,
+        label: "Up",
+    },
+    ContextRow {
+        action: Action::MenuDown,
+        label: "Down",
+    },
+    ContextRow {
+        action: Action::MenuConfirm,
+        label: "Select",
+    },
+    ContextRow {
+        action: Action::MenuBack,
+        label: "Back",
+    },
+    ContextRow {
+        action: Action::RevealControls,
+        label: "Controls",
+    },
+];
+
 #[cfg(feature = "render")]
 mod bevy_glue {
     use super::*;
@@ -424,6 +501,9 @@ mod bevy_glue {
                 Key::Tab => KeyCode::Tab,
                 Key::Space => KeyCode::Space,
                 Key::Escape => KeyCode::Escape,
+                Key::ArrowUp => KeyCode::ArrowUp,
+                Key::ArrowDown => KeyCode::ArrowDown,
+                Key::Enter => KeyCode::Enter,
             }
         }
     }
@@ -451,6 +531,8 @@ mod bevy_glue {
                 PadButton::Start => Some(GamepadButton::Start),
                 PadButton::Back => Some(GamepadButton::Select),
                 PadButton::RightStickClick => Some(GamepadButton::RightThumb),
+                PadButton::DpadUp => Some(GamepadButton::DPadUp),
+                PadButton::DpadDown => Some(GamepadButton::DPadDown),
                 PadButton::LeftStick | PadButton::RightStick | PadButton::Dpad => None,
             }
         }
@@ -488,7 +570,7 @@ mod tests {
         Device, Glyph, assert_scheme_well_formed, binding, legend, reveal_glyph,
     };
 
-    const ALL_ACTIONS: [Action; 20] = [
+    const ALL_ACTIONS: [Action; 24] = [
         Action::MoveForward,
         Action::MoveBack,
         Action::StrafeLeft,
@@ -509,9 +591,18 @@ mod tests {
         Action::ShipLift,
         Action::ShipRoll,
         Action::MatchVelocity,
+        Action::MenuUp,
+        Action::MenuDown,
+        Action::MenuConfirm,
+        Action::MenuBack,
     ];
 
-    const ALL_CONTEXTS: [GcrContext; 3] = [GcrContext::OnFoot, GcrContext::Plane, GcrContext::Ship];
+    const ALL_CONTEXTS: [GcrContext; 4] = [
+        GcrContext::OnFoot,
+        GcrContext::Plane,
+        GcrContext::Ship,
+        GcrContext::Menu,
+    ];
 
     #[test]
     fn scheme_is_well_formed() {
@@ -536,12 +627,18 @@ mod tests {
                 | Action::ShipAim
                 | Action::ShipLift
                 | Action::ShipRoll
-                | Action::MatchVelocity => true,
+                | Action::MatchVelocity
+                | Action::MenuUp
+                | Action::MenuDown
+                | Action::MenuConfirm
+                | Action::MenuBack => true,
             }
         }
         fn ctx_classified(c: GcrContext) -> bool {
             match c {
-                GcrContext::OnFoot | GcrContext::Plane | GcrContext::Ship => true,
+                GcrContext::OnFoot | GcrContext::Plane | GcrContext::Ship | GcrContext::Menu => {
+                    true
+                }
             }
         }
         assert!(ALL_ACTIONS.iter().copied().all(action_classified));
@@ -627,6 +724,32 @@ mod tests {
         );
     }
 
+    /// The menu polls and the menu legend both come from the one table (rl#117): the
+    /// bindings here are the ones `gather_menu_inputs` resolves at runtime.
+    #[test]
+    fn menu_context_rides_the_one_binding_table() {
+        let keys = |a| binding::<GcrControls>(a).unwrap().keyboard.keys;
+        let pad = |a| binding::<GcrControls>(a).unwrap().pad.buttons;
+        assert_eq!(keys(Action::MenuUp), &[Key::ArrowUp, Key::W]);
+        assert_eq!(keys(Action::MenuDown), &[Key::ArrowDown, Key::S]);
+        assert_eq!(keys(Action::MenuConfirm), &[Key::Enter, Key::Space]);
+        assert_eq!(keys(Action::MenuBack), &[Key::Escape]);
+        assert_eq!(pad(Action::MenuConfirm), &[PadButton::South]);
+        assert_eq!(pad(Action::MenuBack), &[PadButton::East]);
+        assert!(pad(Action::MenuUp).contains(&PadButton::DpadUp));
+        assert!(pad(Action::MenuDown).contains(&PadButton::DpadDown));
+
+        let menu = legend::<GcrControls>(GcrContext::Menu, Device::Gamepad);
+        for label in ["Up", "Down", "Select", "Back", "Controls"] {
+            assert!(menu.iter().any(|l| l.label == label), "menu misses {label}");
+        }
+        assert!(
+            !menu.iter().any(|l| l.label == "Extract"),
+            "no round verbs in the menu"
+        );
+        assert_eq!(GcrControls::context_label(GcrContext::Menu), "Menu");
+    }
+
     #[test]
     fn flight_rides_the_one_binding_table() {
         assert!(
@@ -697,6 +820,7 @@ mod tests {
             Some(GcrContext::Plane)
         );
         assert_eq!(GcrControls::context_from_id("ship"), Some(GcrContext::Ship));
+        assert_eq!(GcrControls::context_from_id("menu"), Some(GcrContext::Menu));
         assert_eq!(GcrControls::context_from_id("nope"), None);
     }
 
@@ -712,9 +836,9 @@ mod tests {
                             b.action
                         ),
                         Glyph::Label(l) => assert!(
-                            matches!(l, "LT" | "LB" | "RB" | "R3" | "B"),
+                            matches!(l, "LT" | "LB" | "RB" | "R3" | "B" | "Up" | "Down" | "Enter"),
                             "unexpected text glyph {l:?} for {:?} (only the art-less \
-                             triggers/bumpers and the rl#232 swap inputs)",
+                             triggers/bumpers, the rl#232 swap inputs, and the menu keys)",
                             b.action
                         ),
                     }

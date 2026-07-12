@@ -10,6 +10,9 @@ use bevy_egui::{
 use super::AppPhase;
 use super::app::RoundOver;
 use super::driver::PendingRound;
+use crate::controls::{Action, GcrControls};
+use crab_world::controls::{ForceRevealControls, just_pressed, pressed};
+
 use crate::menu::{
     self, ChooserItem, DisconnectedItem, EndpointId, Formation, LobbyItem, MenuAction, MenuInput,
     MenuNav, StartChoice,
@@ -156,6 +159,7 @@ fn menu_screen(
     mut next: ResMut<NextState<AppPhase>>,
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
+    force_reveal: Res<ForceRevealControls>,
     mut exit: MessageWriter<AppExit>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -164,6 +168,12 @@ fn menu_screen(
         && (poll_formation(&mut state, &mut pending, &mut next)
             || poll_rejoin(&mut state, &mut pending, &mut next))
     {
+        return Ok(());
+    }
+
+    // While the controls overlay is revealed, yield the screen to it — the egui pass
+    // draws OVER bevy UI, so a centered menu window would cover the centered legend.
+    if force_reveal.0 || pressed::<GcrControls>(Action::RevealControls, &keys, &gamepads) {
         return Ok(());
     }
 
@@ -223,44 +233,27 @@ fn gather_menu_inputs(
     typing: bool,
     stick_latched: &mut bool,
 ) -> Vec<MenuInput> {
-    let mut out = Vec::new();
-
-    if !typing {
-        if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::KeyW) {
-            out.push(MenuInput::Up);
-        }
-        if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::KeyS) {
-            out.push(MenuInput::Down);
-        }
-        if keys.just_pressed(KeyCode::Enter)
-            || keys.just_pressed(KeyCode::NumpadEnter)
-            || keys.just_pressed(KeyCode::Space)
-        {
-            out.push(MenuInput::Confirm);
-        }
-        if keys.just_pressed(KeyCode::Escape) {
-            out.push(MenuInput::Back);
-        }
-    }
-
-    let mut up = false;
-    let mut down = false;
-    let mut confirm = false;
-    let mut back = false;
-    let mut stick_y = 0.0f32;
     // Typing suspends menu nav for every device, not just the keyboard: now that
     // Back retargets focus to Quit, an ungated pad B while the join-code field has
     // focus would silently arm a one-press exit (A) that discards the typed code.
-    if !typing {
-        for gp in gamepads.iter() {
-            up |= gp.just_pressed(GamepadButton::DPadUp);
-            down |= gp.just_pressed(GamepadButton::DPadDown);
-            confirm |= gp.just_pressed(GamepadButton::South);
-            back |= gp.just_pressed(GamepadButton::East);
-            let y = gp.left_stick().y;
-            if y.abs() > stick_y.abs() {
-                stick_y = y;
-            }
+    if typing {
+        *stick_latched = false;
+        return Vec::new();
+    }
+
+    // Keys and buttons resolve from the one binding table (rl#117) — the same rows the
+    // controls HUD renders for GcrContext::Menu, so poll and legend can't drift.
+    let mut up = just_pressed::<GcrControls>(Action::MenuUp, keys, gamepads);
+    let mut down = just_pressed::<GcrControls>(Action::MenuDown, keys, gamepads);
+    let confirm = just_pressed::<GcrControls>(Action::MenuConfirm, keys, gamepads);
+    let back = just_pressed::<GcrControls>(Action::MenuBack, keys, gamepads);
+
+    // The stick is analog — read via its own axis API with a latch, like every stick.
+    let mut stick_y = 0.0f32;
+    for gp in gamepads.iter() {
+        let y = gp.left_stick().y;
+        if y.abs() > stick_y.abs() {
+            stick_y = y;
         }
     }
     const NAV_THRESH: f32 = 0.6;
@@ -275,6 +268,7 @@ fn gather_menu_inputs(
         }
     }
 
+    let mut out = Vec::new();
     if up {
         out.push(MenuInput::Up);
     }
@@ -548,9 +542,6 @@ fn draw_chooser(ctx: &egui::Context, state: &mut MenuState) -> Option<ChooserIte
                 clicked = Some(ChooserItem::Quit);
             }
 
-            ui.separator();
-            ui.label("Controller: D-pad · A to select. Keyboard: arrows / WASD · Enter · Esc.");
-
             if let Some(err) = &state.error {
                 ui.separator();
                 ui.colored_label(egui::Color32::from_rgb(230, 120, 120), err);
@@ -591,8 +582,6 @@ fn draw_disconnected(ctx: &egui::Context, state: &MenuState) -> Option<Disconnec
             {
                 clicked = Some(DisconnectedItem::Leave);
             }
-            ui.separator();
-            ui.label("Controller: A to select · B to back. Keyboard: Enter · Esc.");
         });
     clicked
 }
@@ -613,8 +602,6 @@ fn draw_rejoining(ctx: &egui::Context, state: &MenuState) -> bool {
             if ui.selectable_label(true, "Cancel").clicked() {
                 clicked = true;
             }
-            ui.separator();
-            ui.label("Controller: A or B to cancel. Keyboard: Enter · Esc.");
         });
     clicked
 }
@@ -687,9 +674,6 @@ fn draw_lobby(ctx: &egui::Context, state: &MenuState, lobby: &[EndpointId]) -> O
             {
                 clicked = Some(LobbyItem::Cancel);
             }
-
-            ui.separator();
-            ui.label("Controller: A to select · B to cancel. Keyboard: Enter · Esc.");
         });
     clicked
 }
