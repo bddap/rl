@@ -836,13 +836,10 @@ mod ship_wiggle_tests {
             Transform::from_xyz(5.0, 0.5, 5.0),
             bevy_rapier3d::prelude::Velocity::default(),
         );
-        app.world_mut()
-            .resource_mut::<VehicleControls>()
-            .0
-            .insert(
-                PilotId(0),
-                PilotCommand::new(VehicleKind::Ship, boarding_at(5.0, 5.0)),
-            );
+        app.world_mut().resource_mut::<VehicleControls>().0.insert(
+            PilotId(0),
+            PilotCommand::new(VehicleKind::Ship, boarding_at(5.0, 5.0)),
+        );
         for _ in 0..64 {
             app.update();
         }
@@ -871,13 +868,10 @@ mod ship_wiggle_tests {
     #[test]
     fn boarded_ship_spawns_clear_of_a_flailing_sally() {
         let mut app = gcr_like_app_with_vehicles();
-        app.world_mut()
-            .resource_mut::<VehicleControls>()
-            .0
-            .insert(
-                PilotId(0),
-                PilotCommand::new(VehicleKind::Ship, boarding_at(5.0, 5.0)),
-            );
+        app.world_mut().resource_mut::<VehicleControls>().0.insert(
+            PilotId(0),
+            PilotCommand::new(VehicleKind::Ship, boarding_at(5.0, 5.0)),
+        );
         for _ in 0..64 {
             app.update();
         }

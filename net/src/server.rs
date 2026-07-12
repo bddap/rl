@@ -1386,7 +1386,9 @@ mod tests {
                 let msg = client.submit_local_input(input_at(i), None);
                 server.advance(msg);
                 while server.next_tick_ready() {
-                    let bytes = server.step_next(&[pose_at(server.sim().tick())], Default::default()).snapshot;
+                    let bytes = server
+                        .step_next(&[pose_at(server.sim().tick())], Default::default())
+                        .snapshot;
                     let snap =
                         CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes");
                     client.apply_core_snapshot(snap);
@@ -1523,7 +1525,9 @@ mod tests {
             });
             while server.next_tick_ready() {
                 let tick = server.sim().tick();
-                let bytes = server.step_next(&[pose_at(tick)], Default::default()).snapshot;
+                let bytes = server
+                    .step_next(&[pose_at(tick)], Default::default())
+                    .snapshot;
                 snaps.push(CoreSnapshot::from_bytes(&bytes).expect("the server snapshot decodes"));
             }
         }

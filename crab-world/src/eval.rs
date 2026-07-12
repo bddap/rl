@@ -545,7 +545,8 @@ mod tests {
         let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");
         let ceiling_heights_per_s = DEFAULT_TARGET_DISTANCE_M / PACE_WINDOW_MIN_S / h;
         assert!(
-            ceiling_heights_per_s > CRAB_CHARGE_SPEED_HEIGHTS_PER_S * (1.0 + CHARGE_SPEED_DRIFT_TOL),
+            ceiling_heights_per_s
+                > CRAB_CHARGE_SPEED_HEIGHTS_PER_S * (1.0 + CHARGE_SPEED_DRIFT_TOL),
             "instrument ceiling {ceiling_heights_per_s} heights/s is inside the drift band — \
              the eval needs a farther ball before this pin can be trusted"
         );
