@@ -2,7 +2,7 @@ use super::driver::{
     PendingRound, drive_client_sim, ensure_round_installed, insert_core, park_fixed_auto_pump,
     teardown_round,
 };
-use super::hud::{spawn_hud, sync_controls_context, update_hud};
+use super::hud::{spawn_hud, sync_controls_context, sync_menu_controls_context, update_hud};
 use super::input::{gather_input, grab_cursor, quit_game, release_cursor};
 use super::scene::{
     apply_transforms, follow_ground, reconcile_avatars, spawn_fp_camera, spawn_world,
@@ -54,6 +54,9 @@ pub fn build_windowed_app(
         .init_resource::<ActiveDevice>()
         .init_resource::<ActiveContext<GcrControls>>()
         .insert_resource(ForceRevealControls(false))
+        // The controls hint/overlay is app-global chrome (rl#117): it lives across every
+        // phase, and per-phase systems only retarget its ActiveContext (Menu ↔ vehicles).
+        .add_systems(Startup, spawn_controls_ui::<GcrControls>)
         .add_systems(
             OnEnter(AppPhase::Playing),
             (
@@ -61,8 +64,6 @@ pub fn build_windowed_app(
                 spawn_world,
                 spawn_fp_camera,
                 spawn_hud,
-                spawn_controls_ui::<GcrControls>,
-                tag_controls_ui_for_round,
             )
                 .chain(),
         )
@@ -82,18 +83,18 @@ pub fn build_windowed_app(
         .add_systems(OnExit(AppPhase::Playing), (teardown_round, release_cursor))
         .add_systems(
             Update,
-            (
-                grab_cursor,
-                quit_game,
-                super::brain_swap::swap_brain,
-                (
-                    track_active_device,
-                    sync_controls_context,
-                    update_controls_ui::<GcrControls>,
-                )
-                    .chain(),
-            )
+            (grab_cursor, quit_game, super::brain_swap::swap_brain)
                 .run_if(in_state(AppPhase::Playing)),
+        )
+        .add_systems(
+            Update,
+            (
+                track_active_device,
+                sync_controls_context.run_if(in_state(AppPhase::Playing)),
+                sync_menu_controls_context.run_if(not(in_state(AppPhase::Playing))),
+                update_controls_ui::<GcrControls>,
+            )
+                .chain(),
         );
 
     let asset_digest = crab_world::mesh_fallback::constructed_body_digest();
@@ -137,22 +138,6 @@ pub fn build_windowed_app(
     super::render_mode::register(&mut app, render_mode);
 
     Ok(app)
-}
-
-#[allow(clippy::type_complexity)]
-fn tag_controls_ui_for_round(
-    mut commands: Commands,
-    roots: Query<
-        Entity,
-        Or<(
-            With<crab_world::controls::ControlsHintRoot>,
-            With<crab_world::controls::ControlsOverlayRoot>,
-        )>,
-    >,
-) {
-    for e in roots.iter() {
-        commands.entity(e).insert(DespawnOnExit(AppPhase::Playing));
-    }
 }
 
 #[derive(Resource, Clone, Copy)]
