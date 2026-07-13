@@ -10,7 +10,7 @@ use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns};
 use crate::training::algorithm::NormalizedValue;
-use crate::training::reward::{EFFORT_WEIGHT, action_effort, dist_3d, planar_dist};
+use crate::training::reward::{action_effort, dist_3d, effort_weight, planar_dist};
 use crate::training::targets::seed_target;
 
 use super::lifecycle::{EnvEpisode, EnvPhase};
@@ -32,7 +32,7 @@ fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32]) {
         let mean_effort = effort_sum / count as f32;
         info!(
             "EFFORTLOG n={count} mean_effort={mean_effort:.3} mean_tax={:.4}",
-            EFFORT_WEIGHT * mean_effort,
+            effort_weight() * mean_effort,
         );
     }
 }

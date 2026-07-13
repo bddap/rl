@@ -2,7 +2,27 @@ use bevy::prelude::Vec3;
 
 use crate::bot::actuator::ACTION_SIZE;
 
-pub(crate) const EFFORT_WEIGHT: f32 = 0.0006;
+/// Historical effort-tax coefficient; the live baseline runs train with this value.
+const EFFORT_WEIGHT_DEFAULT: f32 = 0.0006;
+
+/// Effort-tax coefficient on Σ|drive|^EFFORT_EXP — the reward's only economy term.
+/// Per-run env knob `RL_EFFORT_WEIGHT` (read once), same one-seam-N-leaves pattern as
+/// the σ-floor knobs: experiment runs raise it without touching the baselines'
+/// default. rl#268: at 0.0006 the tax is ~14× too weak to bend the policy off the
+/// torque ceiling, so bang-bang saturation is the optimal gait.
+pub(crate) fn effort_weight() -> f32 {
+    static WEIGHT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *WEIGHT.get_or_init(|| {
+        let w = crate::training::algorithm::env_or("RL_EFFORT_WEIGHT", EFFORT_WEIGHT_DEFAULT);
+        // Negative would PAY for flailing; NaN would poison every reward in the run.
+        assert!(
+            w.is_finite() && w >= 0.0,
+            "RL_EFFORT_WEIGHT must be a finite non-negative f32, got {w}"
+        );
+        w
+    })
+}
+
 const EFFORT_EXP: f32 = 2.0;
 
 pub(crate) fn action_effort(drives: &[f32; ACTION_SIZE]) -> f32 {
@@ -31,7 +51,7 @@ pub(crate) fn is_progress_glitch(distance_closed: Option<f32>) -> bool {
 }
 
 pub(crate) fn compute_reward(distance_closed: Option<f32>, effort: f32) -> f32 {
-    progress_reward(distance_closed) - EFFORT_WEIGHT * effort
+    progress_reward(distance_closed) - effort_weight() * effort
 }
 
 pub(crate) fn planar_dist(a: Vec3, b: Vec3) -> f32 {
@@ -180,7 +200,7 @@ mod tests {
         );
         let p = Some(0.01);
         let e = action_effort(&[0.2; ACTION_SIZE]);
-        let expected = progress_reward(p) - EFFORT_WEIGHT * e;
+        let expected = progress_reward(p) - effort_weight() * e;
         assert!(
             (compute_reward(p, e) - expected).abs() < 1e-6,
             "reward is exactly progress − K·effort"
@@ -249,7 +269,7 @@ mod tests {
             "a real stride must net positive after the tax, on progress alone: {stride}"
         );
         let stride_progress = progress_reward(Some(per_tick_closed(0.5)));
-        let big_gait_tax = EFFORT_WEIGHT * action_effort(&[2.0; ACTION_SIZE]);
+        let big_gait_tax = effort_weight() * action_effort(&[2.0; ACTION_SIZE]);
         assert!(
             big_gait_tax < stride_progress,
             "break-even must sit above |d|=2/joint: tax {big_gait_tax} vs stride progress {stride_progress}"
@@ -266,16 +286,17 @@ mod tests {
 
     #[test]
     fn progress_episode_dominates_freezing() {
-        // Episode-scale check: a full band traverse must CLEARLY out-earn standing still
-        // over a whole MAX_EPISODE_TICKS episode, and the integrated effort tax must stay
-        // a regularizer, never the dominant term (~4:1 progress-dominant at the current
-        // EFFORT_WEIGHT).
+        // Episode-scale check AT THE DEFAULT WEIGHT (env unset under test): a full band
+        // traverse must CLEARLY out-earn standing still over a whole MAX_EPISODE_TICKS
+        // episode, and the integrated effort tax must stay a regularizer, never the
+        // dominant term (~4:1 progress-dominant). Experiment runs that raise
+        // RL_EFFORT_WEIGHT (rl#268) deliberately opt out of this economy.
         let ticks = MAX_EPISODE_TICKS as f32;
         let traverse_m = 3.0_f32;
         let walk_progress = PROGRESS_WEIGHT * traverse_m;
-        let walk_tax = ticks * EFFORT_WEIGHT * action_effort(&[0.7; ACTION_SIZE]);
+        let walk_tax = ticks * effort_weight() * action_effort(&[0.7; ACTION_SIZE]);
         let walk_total = walk_progress - walk_tax;
-        let freeze_total = -(ticks * EFFORT_WEIGHT * action_effort(&[0.1; ACTION_SIZE]));
+        let freeze_total = -(ticks * effort_weight() * action_effort(&[0.1; ACTION_SIZE]));
         assert!(
             walk_total > 0.0,
             "a full traverse must net positive over an episode: {walk_total}"
