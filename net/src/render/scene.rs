@@ -149,10 +149,10 @@ pub(super) fn spawn_world(
     });
 
     let ex = state.client.sim().extraction().pos();
-    let pillar_h = PLAYER_HEIGHT * CRAB_SCALE as f32 * 1.2;
+    let pillar_h = crate::sim::CRAB_STATURE * 1.2;
     commands.spawn((
         DespawnOnExit(AppPhase::Playing),
-        Mesh3d(meshes.add(Cylinder::new(0.014, pillar_h))),
+        Mesh3d(meshes.add(Cylinder::new(0.5 / 1.8 * PLAYER_HEIGHT, pillar_h))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.1, 0.95, 0.3),
             emissive: LinearRgba::new(0.0, 2.2, 0.4, 1.0),
@@ -508,14 +508,14 @@ pub(super) fn look_direction(yaw_radians: f32, pitch_radians: f32) -> Vec3 {
 /// The FP cameras' perspective: Bevy's stock 0.1 m near plane assumes a 1.8 m human;
 /// at the world's ~0.051 m player (rl#256) it would sit a player-height-and-a-half out
 /// and clip near geometry (the looming crab's nearest legs, a cockpit), so it scales
-/// with stature: 0.056 × [`PLAYER_HEIGHT`] ≈ 2.9 mm. What actually clips in Bevy 0.18 is the oblique
+/// with stature: the stock plane's fraction of the stock human, ≈ 2.8 mm. What actually clips in Bevy 0.18 is the oblique
 /// `near_clip_plane` (a portals/mirrors feature), which DEFAULTS to the stock 0.1 m plane
 /// independent of `near` — leave it stale and the view still clips at 0.1 render-m, ~2
 /// eye-heights out (looking down while standing saw through the floor, rl#196) — so the two
 /// move together here. The ONE perspective source for the windowed and screenshot FP
 /// cameras, so their clips can't drift.
 pub(super) fn fp_perspective() -> PerspectiveProjection {
-    let near = 0.056 * PLAYER_HEIGHT;
+    let near = 0.1 / 1.8 * PLAYER_HEIGHT;
     PerspectiveProjection {
         near,
         near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -near),
