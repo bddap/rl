@@ -23,9 +23,11 @@ pub use crate::sim::TICK_DT;
 
 const MAX_TICKS_PER_FRAME: u32 = 8;
 
-const EYE_HEIGHT: f32 = 1.6;
+/// Eye level at ~89% of stature — the pre-rl#256 1.6 m eyes on the 1.8 m player.
+const EYE_HEIGHT: f32 = 0.89 * crate::sim::PLAYER_HEIGHT;
 
-const PLAYER_RADIUS: f32 = 0.4;
+/// Avatar capsule radius, 2/9 of stature — the pre-rl#256 0.4 m on the 1.8 m player.
+const PLAYER_RADIUS: f32 = crate::sim::PLAYER_HEIGHT * 2.0 / 9.0;
 
 const MOUSE_SENS: f32 = 0.0022;
 
@@ -43,7 +45,7 @@ const PITCH_LIMIT: f32 = 1.5;
 
 fn world(pos: Pos, y: f32) -> Vec3 {
     let (x, z) = pos.to_meters();
-    Vec3::new(x, y, z) * scene::world_render_scale()
+    Vec3::new(x, y, z)
 }
 
 /// The sim's per-tick yaw turn cap, in radians. We normalize our accrued look radians
@@ -71,7 +73,6 @@ mod vehicle_view;
 
 pub use app::{AppPhase, Boot, build_windowed_app};
 pub use render_mode::RenderMode;
-pub(crate) use scene::world_render_scale;
 pub use screenshot::{
     PilotScript, ScreenshotConfig, build_net_screenshot_app, build_screenshot_app,
 };

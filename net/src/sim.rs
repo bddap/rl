@@ -84,9 +84,20 @@ pub const TICK_HZ: u64 = 30;
 
 pub const TICK_DT: f64 = 1.0 / TICK_HZ as f64;
 
-pub const UNIT: i64 = 1000;
+/// Fixed-point grid units per world meter. The world runs at the RIG's scale (rl#256):
+/// one frame shared by the sim, the crab's physics arena, and the render — no
+/// arena↔sim conversion, no render shrink. A player is ~0.051 m, so the grid is sized
+/// for resolution at that stature: 10 µm, ~3× finer than the 1 mm cell the pre-rl#256
+/// 35×-larger sim frame used.
+pub const UNIT: i64 = 100_000;
 
-pub(crate) const PLAYER_SPEED: i64 = 166;
+/// On-foot pace, player heights per second — scale-free like
+/// [`crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S`]. 2.77 h/s is the pre-rl#256
+/// tuning (166 grid/tick at the old 1 mm grid and 1.8 m stature) carried over exactly.
+const PLAYER_SPEED_HEIGHTS_PER_S: f32 = 2.77;
+
+pub(crate) const PLAYER_SPEED: i64 =
+    (PLAYER_SPEED_HEIGHTS_PER_S * PLAYER_HEIGHT * UNIT as f32 / TICK_HZ as f32) as i64;
 
 /// Test-driver step per tick, folded from the ONE measured speed
 /// ([`CRAB_CHARGE_SPEED_PER_S`], rl#257) so pursuit/grace tests exercise her honest
@@ -120,26 +131,34 @@ pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) {
 
 pub const CRAB_SCALE: i64 = 12;
 
-/// Player height in sim meters — the anchor of the crab sizing rule (the crab stands
-/// [`CRAB_SCALE`] player-heights tall). Render capsules and the crab's world scale both
-/// derive from this one constant.
-pub const PLAYER_HEIGHT: f32 = 1.8;
+/// Sally's nominal stature in world meters. The world's absolute scale IS the rig's
+/// (rl#256), so this is a pinned copy of the rigs' measured natural height — fallback
+/// 0.61146 m, mesh-fitted 0.61150 m; `nominal_stature_matches_rigs` holds it within 1%
+/// of every rig she can wear. Human-scale constants derive from it via the sizing rule.
+pub const CRAB_STATURE: f32 = 0.6115;
+
+/// Player height in world meters — the crab sizing rule (she stands [`CRAB_SCALE`]
+/// player-heights tall), inverted: the crab's stature is the world's ground truth and
+/// players derive from HER (rl#256). Render capsules derive from this one constant.
+pub const PLAYER_HEIGHT: f32 = CRAB_STATURE / CRAB_SCALE as f32;
 
 /// 2D reach of the grab around the crab's sim pos (the carapace ground point — the bridge
 /// integrates carapace deltas): deep under her body core, in sim meters. rl#236 pinned
 /// this to the full inscribed carapace footprint (10.5 m); rl#249 shrank it, because that
 /// disc downed prey her TRAINED near-field claw strike should engage — the circle shadowed
 /// the claw mechanic rl#249 asks for (rl#236's own side observation). Now the core disc
-/// covers only "she is standing on you"; the 6–17 m shell belongs to real claw contact
-/// ([`ClawPose`]). Legs still deliberately do not grab. `grab_reach_matches_crab_body`
-/// pins the disc within the carapace footprint, under the claw shell.
-pub const CRAB_GRAB_RADIUS: i64 = 6 * UNIT;
+/// covers only "she is standing on you"; the 0.17–0.48 m shell belongs to real claw
+/// contact ([`ClawPose`]). Legs still deliberately do not grab.
+/// `grab_reach_matches_crab_body` pins the disc within the carapace footprint, under
+/// the claw shell. (0.17 world-m = the pre-rl#256 6 sim-m, tuning carried over.)
+pub const CRAB_GRAB_RADIUS: i64 = (0.17 * UNIT as f32) as i64;
 
 /// "Very close" slack around a claw collider (rl#249): the sim player is a point, so this
 /// covers their body radius plus the near-miss feel margin — and absorbs one tick of claw
-/// sweep (the capsule is sampled per tick, not swept). At her 21.6 m scale a 2 m graze
-/// reads as a hit. Pure feel parameter; tune on playtest.
-pub const CLAW_DOWN_BUFFER: i64 = 2 * UNIT;
+/// sweep (the capsule is sampled per tick, not swept). At her scale a graze this wide
+/// (~1.1 player heights) reads as a hit. Pure feel parameter; tune on playtest.
+/// (0.057 world-m = the pre-rl#256 2 sim-m.)
+pub const CLAW_DOWN_BUFFER: i64 = (0.057 * UNIT as f32) as i64;
 
 /// The player's height span for the claw check, on the fixed-point grid: a claw passing
 /// clear overhead must not down anyone.
@@ -147,17 +166,13 @@ const PLAYER_HEIGHT_FP: i64 = (PLAYER_HEIGHT * UNIT as f32) as i64;
 
 const STARTUP_GRACE_TICKS: u64 = 30;
 
-/// Sally's sustained full-charge ground speed, sim units per second — MEASURED, not
-/// commanded: her speed is whatever the trained gait strides across the arena→sim
-/// seam. Folded from the ONE scale-free pinned pace
-/// ([`crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S`]) × her sim stature
-/// ([`CRAB_SCALE`] × [`PLAYER_HEIGHT`]) — the same multiply the render seam applies —
-/// so the chase eval re-measures it every run and flags drift after a retrain (rl#266)
-/// instead of the old bare 8_500 rotting silently.
-const CRAB_CHARGE_SPEED_PER_S: i64 = (crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S
-    * (CRAB_SCALE as f32)
-    * PLAYER_HEIGHT
-    * UNIT as f32) as i64;
+/// Sally's sustained full-charge ground speed, grid units per second — MEASURED, not
+/// commanded: her speed is whatever the trained gait strides. Folded from the ONE
+/// scale-free pinned pace ([`crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S`]) ×
+/// her stature ([`CRAB_STATURE`]) so the chase eval re-measures it every run and flags
+/// drift after a retrain (rl#266) instead of the old bare 8_500 rotting silently.
+const CRAB_CHARGE_SPEED_PER_S: i64 =
+    (crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S * CRAB_STATURE * UNIT as f32) as i64;
 
 /// How long a fresh spawn is guaranteed before Sally at full charge can be on them —
 /// the spawn-safety feel knob (rl#257). The old bare 19 m was tuned pre-rl#254 at
@@ -167,14 +182,16 @@ const SPAWN_GRACE_SECS: i64 = 5;
 
 /// Spawn clearance from the crab's sim pos, round-start and joiners alike (rl#247):
 /// [`SPAWN_GRACE_SECS`] of her full charge, not a bare meter count (rl#257). Far
-/// outside her carapace footprint (corner reach ~18 m) and [`CRAB_GRAB_RADIUS`];
+/// outside her carapace footprint (corner reach ~0.51 m) and [`CRAB_GRAB_RADIUS`];
 /// `grab_reach_matches_crab_body` cross-checks that floor against every rig.
 const MIN_CRAB_SPAWN_DISTANCE: i64 = CRAB_CHARGE_SPEED_PER_S * SPAWN_GRACE_SECS;
 
-/// Spacing between player spawn slots along the z=0 spawn line.
-const SPAWN_SLOT_PITCH: i64 = 2 * UNIT;
+/// Spacing between player spawn slots along the z=0 spawn line (~1.1 player heights;
+/// the pre-rl#256 2 sim-m).
+const SPAWN_SLOT_PITCH: i64 = (0.057 * UNIT as f32) as i64;
 
-pub const EXTRACT_RADIUS: i64 = 2 * UNIT;
+/// Reach-the-objective radius (~1.1 player heights; the pre-rl#256 2 sim-m).
+pub const EXTRACT_RADIUS: i64 = (0.057 * UNIT as f32) as i64;
 
 pub(crate) const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
 
@@ -504,15 +521,15 @@ impl Sim {
                 },
             );
         }
-        // The objective sits BEYOND the crab's spawn ring by more than her ~17 m
+        // The objective sits BEYOND the crab's spawn ring by more than her ~0.48 m
         // claw-contact shell (see [`CRAB_GRAB_RADIUS`]), preserving the layout
-        // invariant spawn line < crab < extraction whatever MIN becomes — at a bare
-        // 40 m the rl#257 clearance bump parked her ON the objective, its disc
+        // invariant spawn line < crab < extraction whatever MIN becomes — with a margin barely
+        // past her ring the rl#257 clearance bump parked her ON the objective, its disc
         // inside her claw shell at round start.
         let extraction = ExtractionPoint {
             pos: Pos {
                 x: 0,
-                z: MIN_CRAB_SPAWN_DISTANCE + 18 * UNIT,
+                z: MIN_CRAB_SPAWN_DISTANCE + (0.51 * UNIT as f32) as i64,
             },
         };
         let crabs = (0..cfg.crabs).map(|i| Self::spawn_crab(&map, i)).collect();
@@ -525,8 +542,8 @@ impl Sim {
         // crab since rl#257 grew MIN past this base) sets the actual distance, so
         // round-start and joiner safety share the one constant.
         let mut pos = Pos {
-            x: (6 + 8 * idx as i64) * UNIT,
-            z: 20 * UNIT,
+            x: (0.17 * UNIT as f32) as i64 + idx as i64 * (0.23 * UNIT as f32) as i64,
+            z: (0.57 * UNIT as f32) as i64,
         };
         if let Some(nearest) = players
             .values()
@@ -845,7 +862,7 @@ fn within(ax: i64, az: i64, bx: i64, bz: i64, r: i64) -> bool {
 /// The point on segment `a`–`b` nearest to `p`, on the fixed-point grid. i128
 /// intermediates: coordinates are bounded (|x| ≤ 100 km · UNIT, segments are claw-sized),
 /// so the products stay far inside the type; the one truncating division costs at most a
-/// grid unit (1 mm) — noise against [`CLAW_DOWN_BUFFER`].
+/// grid unit (10 µm) — noise against [`CLAW_DOWN_BUFFER`].
 fn closest_on_segment(a: Pos, b: Pos, p: Pos) -> (i64, i64) {
     let (dx, dz) = ((b.x - a.x) as i128, (b.z - a.z) as i128);
     let len2 = dx * dx + dz * dz;
@@ -1505,21 +1522,26 @@ mod tests {
         );
     }
 
+    /// The claw tests' yardstick: half a [`CLAW_DOWN_BUFFER`] (≈0.0285 m, at body
+    /// height against the ~0.051 m player) — every claw-test length is a multiple, so
+    /// the geometry keeps one legible scale.
+    const CLAW_M: i64 = CLAW_DOWN_BUFFER / 2;
+
     /// A claw capsule at body height. `dx` slides it sideways off the player so the
     /// near-miss cases stay one call.
     fn claw_at(p: Pos, dx: i64, y: i64) -> ClawPose {
         ClawPose {
             a: Pos {
-                x: p.x + dx - 2 * UNIT,
+                x: p.x + dx - 2 * CLAW_M,
                 z: p.z,
             },
             b: Pos {
-                x: p.x + dx + 2 * UNIT,
+                x: p.x + dx + 2 * CLAW_M,
                 z: p.z,
             },
             a_y: y,
             b_y: y,
-            radius: UNIT / 2,
+            radius: CLAW_M / 2,
         }
     }
 
@@ -1537,7 +1559,7 @@ mod tests {
             ),
             "the player must spawn outside the grab circle for this to isolate the claw path"
         );
-        sim.set_external_claws(vec![claw_at(p, 0, UNIT)]);
+        sim.set_external_claws(vec![claw_at(p, 0, CLAW_M)]);
         let neutral = neutral_for(&sim);
         for _ in 0..STARTUP_GRACE_TICKS {
             sim.step(&neutral);
@@ -1569,7 +1591,7 @@ mod tests {
         // minus pilot membership (set_external_pilots is filtered upstream, so feeding it
         // directly stands in for "standing there on foot").
         let crab = sim.crabs()[0].pos();
-        let claw = claw_at(crab, 0, UNIT);
+        let claw = claw_at(crab, 0, CLAW_M);
         let both = |pilots: &[PlayerId]| {
             let mut m = BTreeMap::new();
             for &pid in pilots {
@@ -1621,21 +1643,21 @@ mod tests {
 
         // Sweeping clear overhead: same XZ, but above the player's height span.
         assert_eq!(
-            step_armed(&mut sim, claw_at(p, 0, 10 * UNIT)),
+            step_armed(&mut sim, claw_at(p, 0, 10 * CLAW_M)),
             PlayerStatus::Alive,
             "a claw passing overhead must not down anyone"
         );
         // Beside the player at body height, just past radius + buffer (measured from the
         // segment's near END — the segment check, not an endpoint/center approximation).
-        let reach = UNIT / 2 + CLAW_DOWN_BUFFER;
+        let reach = CLAW_M / 2 + CLAW_DOWN_BUFFER;
         assert_eq!(
-            step_armed(&mut sim, claw_at(p, 2 * UNIT + reach + UNIT / 10, UNIT)),
+            step_armed(&mut sim, claw_at(p, 2 * CLAW_M + reach + CLAW_M / 10, CLAW_M)),
             PlayerStatus::Alive,
             "a near miss beyond the buffer must not down"
         );
         // Same offset, but within reach of the near end: downs.
         assert_eq!(
-            step_armed(&mut sim, claw_at(p, 2 * UNIT + reach - UNIT / 10, UNIT)),
+            step_armed(&mut sim, claw_at(p, 2 * CLAW_M + reach - CLAW_M / 10, CLAW_M)),
             PlayerStatus::Downed,
             "within the buffer of the capsule segment downs"
         );
@@ -1661,9 +1683,9 @@ mod tests {
     }
 
     /// Pins [`CRAB_GRAB_RADIUS`] and [`MIN_CRAB_SPAWN_DISTANCE`] to the crab's actual body
-    /// (rl#236) and the grab to the claw-strike band (rl#249). Sim meters relate to a
-    /// rig's natural meters by the sizing rule: her natural height spans [`CRAB_SCALE`] ×
-    /// [`PLAYER_HEIGHT`]. Against EVERY rig she can wear (the procedural fallback always;
+    /// (rl#236) and the grab to the claw-strike band (rl#249). The world runs at rig
+    /// scale (rl#256), so rig meters ARE world meters; [`CRAB_STATURE`] is pinned to
+    /// every rig here. Against EVERY rig she can wear (the procedural fallback always;
     /// the mesh-fitted recipe when sally.glb resolves): the grab never reaches beyond the
     /// carapace footprint's inscribed circle (the disc is anchored on the carapace, so
     /// inscribed = "certainly under her body" whatever her yaw), and spawns clear the
@@ -1693,9 +1715,15 @@ mod tests {
             let RestShape::Cuboid { half, .. } = sil.carapace else {
                 panic!("the carapace silhouette is a cuboid");
             };
-            let to_sim_m = CRAB_SCALE as f32 * PLAYER_HEIGHT / sil.natural_height();
-            let inscribed_m = half.x.min(half.z) * to_sim_m;
-            let corner_m = half.x.hypot(half.z) * to_sim_m;
+            // One frame (rl#256): the rig IS world-scale. Pin the nominal stature to
+            // every wearable rig so the derived human constants stay honest.
+            assert!(
+                (sil.natural_height() - CRAB_STATURE).abs() / CRAB_STATURE < 0.01,
+                "{name}: natural height {} strays >1% from CRAB_STATURE {CRAB_STATURE}",
+                sil.natural_height()
+            );
+            let inscribed_m = half.x.min(half.z);
+            let corner_m = half.x.hypot(half.z);
             assert!(
                 grab_m <= inscribed_m,
                 "{name}: grab reach {grab_m:.2} m pokes beyond the carapace's inscribed \

@@ -24,11 +24,9 @@ pub(super) struct FpCamera;
 const GROUND_SIZE: f32 = 4000.0;
 
 /// Checker repeat period (render m): one texture repeat is 2×2 coarse cells, each a
-/// 16×16 sub-checker. Deliberately RENDER-frame meters, NOT human-world meters shrunk
-/// by [`world_render_scale`]: the pilot flies at TRUE arena scale ([`cockpit_camera`])
-/// and is who the cue serves (rl#197) — the 2 m coarse cells read from cruise altitude,
-/// the 0.125 m fine sub-cells (≈4.5 human-m) give optic flow at landing height and on
-/// foot.
+/// 16×16 sub-checker. Sized for the PILOT, who the cue serves (rl#197): the 2 m coarse
+/// cells read from cruise altitude, the 0.125 m fine sub-cells (~2.5 player heights)
+/// give optic flow at landing height and on foot.
 const CHECKER_PERIOD: f32 = 4.0;
 
 /// The ground quad, re-centered on the camera each frame by [`follow_ground`].
@@ -120,11 +118,6 @@ pub(super) fn spawn_world(
     external_crab_armed: Option<Res<crate::external_crab::ExternalCrabArmed>>,
     windows: Query<(), With<Window>>,
 ) {
-    // The render-frame shrink (see [`world_render_scale`]). `world` already applies it to
-    // ground POSITIONS; here it sizes the human-world MESHES. The crab silhouette is the
-    // lone exception — it renders at native physics size.
-    let rs = world_render_scale();
-
     commands.spawn((
         DespawnOnExit(AppPhase::Playing),
         GroundPlane,
@@ -159,7 +152,7 @@ pub(super) fn spawn_world(
     let pillar_h = PLAYER_HEIGHT * CRAB_SCALE as f32 * 1.2;
     commands.spawn((
         DespawnOnExit(AppPhase::Playing),
-        Mesh3d(meshes.add(Cylinder::new(0.5 * rs, pillar_h * rs))),
+        Mesh3d(meshes.add(Cylinder::new(0.014, pillar_h))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.1, 0.95, 0.3),
             emissive: LinearRgba::new(0.0, 2.2, 0.4, 1.0),
@@ -170,8 +163,8 @@ pub(super) fn spawn_world(
 
     commands.insert_resource(AvatarAssets {
         mesh: meshes.add(Capsule3d::new(
-            PLAYER_RADIUS * rs,
-            (PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS) * rs,
+            PLAYER_RADIUS,
+            PLAYER_HEIGHT - 2.0 * PLAYER_RADIUS,
         )),
         local: materials.add(StandardMaterial {
             base_color: Color::srgb(0.9, 0.8, 0.2),
@@ -264,14 +257,6 @@ pub(super) fn reconcile_avatars(
             PlayerAvatar(id),
         ));
     }
-}
-
-const CRAB_RENDER_HEIGHT: f32 = PLAYER_HEIGHT * CRAB_SCALE as f32;
-
-pub(crate) fn world_render_scale() -> f32 {
-    crab_world::mesh_fallback::natural_body_height()
-        .map(|h| h / CRAB_RENDER_HEIGHT)
-        .unwrap_or(1.0)
 }
 
 fn spawn_crab_silhouette(
@@ -520,17 +505,17 @@ pub(super) fn look_direction(yaw_radians: f32, pitch_radians: f32) -> Vec3 {
     (rot * Vec3::Z).normalize()
 }
 
-/// The FP cameras' perspective: Bevy's default 0.1 m near plane, shrunk by
-/// [`world_render_scale`] like the rest of the human frame — the world renders ~36× smaller,
-/// so unscaled it would sit a player-height-and-a-half out and clip near geometry (the
-/// looming crab's nearest legs, a cockpit). What actually clips in Bevy 0.18 is the oblique
+/// The FP cameras' perspective: Bevy's stock 0.1 m near plane assumes a 1.8 m human;
+/// at the world's ~0.051 m player (rl#256) it would sit a player-height-and-a-half out
+/// and clip near geometry (the looming crab's nearest legs, a cockpit), so it scales
+/// with stature: 0.056 × [`PLAYER_HEIGHT`] ≈ 2.9 mm. What actually clips in Bevy 0.18 is the oblique
 /// `near_clip_plane` (a portals/mirrors feature), which DEFAULTS to the stock 0.1 m plane
 /// independent of `near` — leave it stale and the view still clips at 0.1 render-m, ~2
 /// eye-heights out (looking down while standing saw through the floor, rl#196) — so the two
 /// move together here. The ONE perspective source for the windowed and screenshot FP
 /// cameras, so their clips can't drift.
 pub(super) fn fp_perspective() -> PerspectiveProjection {
-    let near = 0.1 * world_render_scale();
+    let near = 0.056 * PLAYER_HEIGHT;
     PerspectiveProjection {
         near,
         near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -near),

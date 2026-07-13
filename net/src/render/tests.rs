@@ -163,9 +163,8 @@ fn world_maps_sim_frame_directly() {
         x: 2 * UNIT,
         z: 5 * UNIT,
     };
-    let rs = world_render_scale();
     let v = world(p, 1.6);
-    assert_eq!(v, Vec3::new(2.0, 1.6, 5.0) * rs);
+    assert_eq!(v, Vec3::new(2.0, 1.6, 5.0));
 }
 
 #[test]

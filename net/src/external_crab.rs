@@ -2,22 +2,19 @@
 //! physics arena; the bridge poses its hunt target from the sim and integrates
 //! carapace deltas back into world position.
 //!
-//! TWO frames meet at this seam and every crossing converts through
-//! [`arena_to_sim`] (rl#254): the local rig ARENA (meters where the crab stands its
-//! natural rig height) and the SIM (meters where she stands `CRAB_SCALE` player
-//! heights, ~35× larger). Getting a crossing wrong is not cosmetic — the un-scaled
-//! carapace integration made her sim position creep at 1/35 of her trained stride
-//! (players read it as an invisible barrier) while her true-size render treadmilled
-//! in place (read as the ground wiggling with her gait).
+//! ONE scale since rl#256: the world runs at the rig's own meters, so the local
+//! arena and the sim differ only by a per-round TRANSLATION (the spawn-anchored
+//! [`ArenaAnchor`]) — deltas cross freely, absolute positions add the anchor. The
+//! deleted 35× scale seam is the bug class rl#253/rl#254 came from: an un-scaled
+//! carapace integration once made her sim position creep at 1/35 of her trained
+//! stride while her true-size render treadmilled in place.
 //!
-//! The posed hunt target is the sim prey offset expressed in arena meters, re-posed
-//! each tick as she closes, clamped to the training band's far edge
-//! ([`TARGET_ARENA_HALF`], ~9 arena m) along the true crab→player bearing. On the
-//! current map every prey offset lands well inside the band (~40 sim m ≈ 1.1 arena
-//! m), in the close-range regime the rl#252 probe measures and the rl#250
-//! curriculum trains — the clamp is a dormant guard that keeps a future larger map
-//! in-distribution. (The rl#144 "7× slower on a ~21 m target" measurement predates
-//! the conversion: it was feeding sim meters to the arena-frame band.)
+//! The posed hunt target is the prey offset, re-posed each tick as she closes,
+//! clamped to the training band's far edge ([`TARGET_ARENA_HALF`], ~9 m) along the
+//! true crab→player bearing. On the current map every prey offset lands well inside
+//! the band (~1.1 m), in the close-range regime the rl#252 probe measures and the
+//! rl#250 curriculum trains — the clamp is a dormant guard that keeps a future
+//! larger map in-distribution.
 //!
 //! The spawn-relative body.pos obs channel still drifts OOD on a long open-field
 //! chase (rl#240) — not fixable at the posing layer. [`bound_body_pos_drift`]
@@ -120,28 +117,10 @@ fn pos_to_m(p: Pos) -> Vec2 {
     Vec2::new(x, z)
 }
 
-/// Local rig-arena meters → sim meters: the inverse of the ONE render-scale rule (her
-/// body spans its natural rig height in the local physics arena but `CRAB_SCALE` ×
-/// `PLAYER_HEIGHT` in sim space, the anchoring `grab_reach_matches_crab_body` pins).
-/// EVERY quantity crossing the arena↔sim seam converts through this factor —
-/// positions, deltas, reaches (rl#254).
-pub(crate) fn arena_to_sim() -> f32 {
-    let rs = crate::render::world_render_scale();
-    // world_render_scale's degenerate-silhouette fallback is 1.0 — cosmetic for
-    // rendering, but HERE an identity conversion silently re-opens the exact rl#254
-    // creep. A real crab recipe yields ~1/35; fail loud instead of falling back.
-    assert!(
-        rs < 0.5,
-        "world_render_scale {rs} — the crab silhouette failed to measure, and an \
-         identity arena↔sim conversion is the rl#254 bug reborn"
-    );
-    1.0 / rs
-}
-
 struct CrabPlacement {
-    /// The crab's arena carapace ground point (XZ, arena meters).
+    /// The crab's arena carapace ground point (XZ, arena frame).
     carapace_m: Vec2,
-    /// The crab's game-world ground point (XZ, sim meters).
+    /// The crab's game-world ground point (XZ, world frame).
     game_spot: Vec2,
 }
 
@@ -174,16 +153,13 @@ impl CrabBridge {
         Pos::from_meters(self.world_pos_m.x, self.world_pos_m.y)
     }
 
-    /// Her captured claw capsules in sim space (rl#249): carapace-relative arena offsets
-    /// scaled by `to_sim` about her sim ground point (XZ) and the shared ground plane (y).
-    fn claw_poses(&self, to_sim: f32) -> Vec<crate::sim::ClawPose> {
+    /// Her captured claw capsules in sim space (rl#249): carapace-relative offsets about
+    /// her sim ground point (XZ) and the shared ground plane (y) — one scale, rl#256.
+    fn claw_poses(&self) -> Vec<crate::sim::ClawPose> {
         let xz = |v: Vec3| {
-            crate::sim::Pos::from_meters(
-                self.world_pos_m.x + v.x * to_sim,
-                self.world_pos_m.y + v.z * to_sim,
-            )
+            crate::sim::Pos::from_meters(self.world_pos_m.x + v.x, self.world_pos_m.y + v.z)
         };
-        let y = |v: Vec3| crate::sim::meters_to_grid(v.y * to_sim);
+        let y = |v: Vec3| crate::sim::meters_to_grid(v.y);
         self.claws
             .iter()
             .map(|c| crate::sim::ClawPose {
@@ -191,7 +167,7 @@ impl CrabBridge {
                 b: xz(c.b),
                 a_y: y(c.a),
                 b_y: y(c.b),
-                radius: crate::sim::meters_to_grid(c.radius * to_sim),
+                radius: crate::sim::meters_to_grid(c.radius),
             })
             .collect()
     }
@@ -249,13 +225,12 @@ impl ExternalCrabBridge {
     }
 
     pub fn crab_poses(&self) -> Vec<crate::server::CrabPose> {
-        let to_sim = arena_to_sim();
         self.crabs
             .iter()
             .map(|c| crate::server::CrabPose {
                 pos: c.world_pos(),
                 yaw: c.yaw_turns,
-                claws: c.claw_poses(to_sim),
+                claws: c.claw_poses(),
             })
             .collect()
     }
@@ -263,7 +238,7 @@ impl ExternalCrabBridge {
     pub fn set_hunt_target(&mut self, idx: usize, prey: Option<Pos>) {
         let crab = &mut self.crabs[idx];
         crab.hunt_target_m = prey.map(pos_to_m);
-        // Pursuit heartbeat: the crab→prey range (sim m) every ~5 s. The prey feed is
+        // Pursuit heartbeat: the crab→prey range (m) every ~5 s. The prey feed is
         // wherever the sim says the player IS — a craft pose while piloting (rl#258) —
         // so a "she stopped giving chase" report (rl#265) is diagnosable from any run's
         // log, live deck telemetry included, without a repro.
@@ -553,10 +528,10 @@ fn set_crab_walk_target(
             *slot = None;
             continue;
         };
-        // Sim prey offset → arena meters (rl#254), then the in-distribution guard
-        // (module header): pose the target at most one band-edge away along the true
-        // bearing. Current-map offsets sit well inside the band, so the clamp is dormant.
-        let to_prey = (hunt - crab.world_pos_m) / arena_to_sim();
+        // Prey offset, then the in-distribution guard (module header): pose the target
+        // at most one band-edge away along the true bearing. Current-map offsets sit
+        // well inside the band, so the clamp is dormant.
+        let to_prey = hunt - crab.world_pos_m;
         if to_prey.length_squared() < 1e-6 {
             continue;
         }
@@ -645,9 +620,8 @@ fn integrate_crab(
         if crab.settle == 0
             && let Some(prev) = crab.last_carapace_m
         {
-            // Arena delta → sim delta (rl#254): un-scaled, her trained stride moved her
-            // sim position at 1/35 speed — the "invisible barrier" creep.
-            crab.world_pos_m += (here - prev) * arena_to_sim();
+            // One scale (rl#256): her trained stride IS her world stride.
+            crab.world_pos_m += here - prev;
         }
         crab.last_carapace_m = Some(here);
 
@@ -680,7 +654,7 @@ fn integrate_crab(
 }
 
 /// Where the shared physics arena sits in the render world — a STATIC per-round translate,
-/// pinned by crab 0's spawn correspondence (game spawn · render-scale ↔ arena spawn origin).
+/// pinned by crab 0's spawn correspondence (game spawn ↔ arena spawn origin).
 /// Vehicles and the cockpit camera render through THIS, never through the per-crab skin
 /// repose: the repose re-tracks the live carapace every tick to pin Sally's skin to her sim
 /// spot, so borrowing it as the arena transform dragged ~(1−rs) of her every movement into
@@ -710,7 +684,7 @@ fn publish_arena_anchor(
         return; // pre-spawn frame — `spawn_initial_crabs` hasn't rebuilt the origins yet
     }
     let origin = spawns.origin(0);
-    let w = crab.spawn_world_pos_m * crate::render::world_render_scale();
+    let w = crab.spawn_world_pos_m;
     let want = ArenaAnchor(Vec3::new(w.x - origin.x, 0.0, w.y - origin.z));
     if *out != want {
         *out = want;
@@ -724,14 +698,13 @@ fn publish_skin_repose(
     let Some(mut out) = repose_out else {
         return;
     };
-    let rs = crate::render::world_render_scale();
     out.0 = bridge
         .crabs
         .iter()
         .enumerate()
         .filter_map(|(idx, crab)| {
             crab.render_placement_m().map(|r| {
-                let s = r.game_spot * rs - r.carapace_m;
+                let s = r.game_spot - r.carapace_m;
                 (
                     idx,
                     crab_world::bot::skin::SkinRepose {
@@ -951,13 +924,13 @@ mod gcr_crab_tests {
 
         let crab = &app.world().resource::<ExternalCrabBridge>().crabs[0];
         assert_eq!(crab.recenters, 1, "a 20 m drift must trigger one recenter");
-        // The walk folds into world_pos_m exactly once, scaled into sim meters
-        // (rl#254); the teleport back never counts.
+        // The walk folds into world_pos_m exactly once, 1:1 (rl#256); the teleport
+        // back never counts.
         let walked = crab.world_pos_m - w0;
-        let want = Vec2::new(20.0, 0.0) * arena_to_sim();
+        let want = Vec2::new(20.0, 0.0);
         assert!(
-            (walked - want).length() < 0.5 * arena_to_sim(),
-            "world_pos_m must gain the walk (in sim meters) and nothing else, \
+            (walked - want).length() < 0.5,
+            "world_pos_m must gain the walk and nothing else, \
              gained {walked:?}, want {want:?}"
         );
         assert!(
@@ -996,11 +969,11 @@ mod gcr_crab_tests {
         );
     }
 
-    /// rl#254 pin: carapace deltas cross the arena→sim seam scaled by [`arena_to_sim`].
-    /// Un-scaled (the bug), a trained ~0.25 arena-m/s stride crept the sim position at
-    /// 1/35 speed — Sally never reached anyone and her render treadmilled in place.
+    /// rl#254 pin, rl#256 form: carapace deltas integrate into the world position 1:1
+    /// — there is no scale left to miss. (Pre-rl#256 a missed 35× conversion crept the
+    /// sim position at 1/35 of her stride; one frame makes that bug unrepresentable.)
     #[test]
-    fn world_pos_integrates_arena_deltas_at_sim_scale() {
+    fn world_pos_integrates_carapace_deltas_one_to_one() {
         let mut app = gcr_like_app();
         let w0 = app.world().resource::<ExternalCrabBridge>().crabs[0].world_pos_m;
 
@@ -1010,15 +983,15 @@ mod gcr_crab_tests {
         }
 
         let walked = app.world().resource::<ExternalCrabBridge>().crabs[0].world_pos_m - w0;
-        let want = Vec2::new(0.5, 0.0) * arena_to_sim();
+        let want = Vec2::new(0.5, 0.0);
         assert!(
-            (walked - want).length() < 0.05 * arena_to_sim(),
-            "a 0.5 arena-m walk must integrate as {want:?} sim m, got {walked:?}"
+            (walked - want).length() < 0.05,
+            "a 0.5 m walk must integrate as {want:?}, got {walked:?}"
         );
     }
 
     /// rl#254 pin, render half: the skin repose shift is CONSTANT while she walks —
-    /// `d(game_spot·rs) = d(carapace)` exactly. Under the un-scaled integration the
+    /// `d(game_spot) = d(carapace)` exactly (one frame, rl#256). Under the un-scaled integration the
     /// shift grew every step, so her true-size skin treadmilled in place while her
     /// legs strode (the owner's "ground wiggles with her movements").
     #[test]
@@ -1051,22 +1024,23 @@ mod gcr_crab_tests {
         );
     }
 
-    /// rl#254 pin: the posed walk target is the SIM prey offset expressed in ARENA
-    /// meters. Un-converted (the bug), an in-band prey posed ~35× too far and the
-    /// clamp turned every chase into a fixed 9-arena-m carrot.
+    /// rl#254 pin, rl#256 form: the posed walk target is the prey offset, 1:1, clamped
+    /// to the training band's far edge. (Pre-rl#256 a missed 35× conversion posed
+    /// in-band prey ~35× too far and the clamp turned every chase into a fixed
+    /// 9-m carrot.)
     #[test]
-    fn walk_target_poses_sim_prey_offset_in_arena_meters() {
+    fn walk_target_poses_prey_offset_clamped_to_band() {
         let mut app = gcr_like_app();
         let cara = carapace_xz(&mut app);
 
-        // In-band prey: 200 sim m ≈ 5.7 arena m — must pose unclamped.
-        let hunt = Pos::from_meters(200.0, 0.0);
+        // In-band prey, 5 m from her origin spawn — must pose unclamped.
+        let hunt = Pos::from_meters(5.0, 0.0);
         app.world_mut()
             .resource_mut::<ExternalCrabBridge>()
             .set_hunt_target(0, Some(hunt));
         app.update();
         let posed = app.world().resource::<CrabTargets>().envs[0].expect("target posed");
-        let want = cara + Vec2::new(200.0, 0.0) / arena_to_sim();
+        let want = cara + Vec2::new(5.0, 0.0);
         let got = Vec2::new(posed.x, posed.z);
         assert!(
             (got - want).length() < 0.05,
@@ -1074,7 +1048,7 @@ mod gcr_crab_tests {
         );
 
         // Beyond-band prey (only reachable on a future larger map): clamps to the edge.
-        let hunt = Pos::from_meters(500.0, 0.0);
+        let hunt = Pos::from_meters(50.0, 0.0);
         app.world_mut()
             .resource_mut::<ExternalCrabBridge>()
             .set_hunt_target(0, Some(hunt));
@@ -1083,7 +1057,7 @@ mod gcr_crab_tests {
         let d = (Vec2::new(posed.x, posed.z) - carapace_xz(&mut app)).length();
         assert!(
             (d - TARGET_ARENA_HALF).abs() < 0.05,
-            "beyond-band prey must clamp to the {TARGET_ARENA_HALF} arena-m edge, posed {d}"
+            "beyond-band prey must clamp to the {TARGET_ARENA_HALF} m edge, posed {d}"
         );
     }
 
