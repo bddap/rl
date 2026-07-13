@@ -10,35 +10,38 @@ pub(super) struct RigPose {
     slots: Vec<usize>,
 }
 
+/// Which joints `--rig-pose` drives (rl-demo screenshot mode).
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Default)]
+pub enum RigPosePart {
+    #[default]
+    Shoulder,
+    #[value(name = "legbasis")]
+    LegBasis,
+}
+
 #[derive(Resource, Default)]
 pub(super) struct RigPosePin {
     target: Option<Transform>,
 }
 
-pub(super) fn rig_pose_from_env() -> Option<RigPose> {
-    let raw = std::env::var("RL_RIG_POSE").ok()?;
-    let action = raw.trim().parse::<f32>().ok().filter(|a| a.is_finite())?;
-    let part = std::env::var("RL_RIG_POSE_PART").unwrap_or_default();
-    let slots = match part.trim() {
-        "legbasis" => (0..4)
-            .flat_map(|leg| {
-                [
-                    CrabJointId::LegBasis(Side::Left, leg).index(),
-                    CrabJointId::LegBasis(Side::Right, leg).index(),
-                ]
-            })
-            .collect(),
-        other => {
-            if !other.is_empty() && other != "shoulder" {
-                eprintln!("RL_RIG_POSE_PART={other:?} unrecognized — driving the shoulders");
-            }
-            vec![
+impl RigPose {
+    pub(super) fn new(action: f32, part: RigPosePart) -> Self {
+        let slots = match part {
+            RigPosePart::LegBasis => (0..4)
+                .flat_map(|leg| {
+                    [
+                        CrabJointId::LegBasis(Side::Left, leg).index(),
+                        CrabJointId::LegBasis(Side::Right, leg).index(),
+                    ]
+                })
+                .collect(),
+            RigPosePart::Shoulder => vec![
                 CrabJointId::ClawShoulder(Side::Left).index(),
                 CrabJointId::ClawShoulder(Side::Right).index(),
-            ]
-        }
-    };
-    Some(RigPose { action, slots })
+            ],
+        };
+        Self { action, slots }
+    }
 }
 
 pub(super) fn rig_pose_drive(pose: Res<RigPose>, mut actions: ResMut<CrabActions>) {

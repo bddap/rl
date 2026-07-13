@@ -40,6 +40,70 @@ pub struct Args {
 
     #[arg(long)]
     manual_control: bool,
+
+    /// Seed for the demo RNG (ball placement, pokes); random when unset.
+    #[arg(long, env = "RL_DEMO_SEED")]
+    seed: Option<u64>,
+
+    /// DIAGNOSTIC: when no usable checkpoint loads, drive an untrained random brain
+    /// instead of the zero-action rest pose.
+    #[arg(long, env = "RL_RANDOM_POLICY",
+          value_parser = clap::builder::FalseyValueParser::new())]
+    random_policy: bool,
+
+    /// Spawn the chase target ball in --screenshot mode (the demo and --render-video
+    /// always have one).
+    #[arg(long, env = "RL_TARGET_BALL",
+          value_parser = clap::builder::FalseyValueParser::new())]
+    target_ball: bool,
+
+    /// Pin the target ball here instead of sampling positions (a claw touch still
+    /// re-rolls it).
+    #[arg(long, env = "RL_TARGET_BALL_AT", value_name = "X,Y,Z", value_parser = parse_vec3)]
+    target_ball_at: Option<Vec3>,
+
+    /// Drive the selected joints at this action value in --screenshot mode (pose stills).
+    #[arg(long, env = "RL_RIG_POSE", allow_negative_numbers = true,
+          value_parser = parse_finite_f32)]
+    rig_pose: Option<f32>,
+
+    /// Which joints --rig-pose drives.
+    #[arg(
+        long,
+        env = "RL_RIG_POSE_PART",
+        value_enum,
+        default_value_t,
+        requires = "rig_pose"
+    )]
+    rig_pose_part: play::RigPosePart,
+
+    /// Show the joint-trace graph overlay from launch (demo mode; also toggleable in-app).
+    #[arg(long, env = "RL_GRAPH", value_parser = clap::builder::FalseyValueParser::new())]
+    graph: bool,
+
+    /// Capture the graph overlay to PATH once its traces fill (demo mode; implies --graph).
+    #[arg(long, env = "RL_GRAPH_SHOT", value_name = "PATH")]
+    graph_shot: Option<PathBuf>,
+}
+
+fn parse_vec3(s: &str) -> Result<Vec3, String> {
+    let parts: Vec<f32> = s
+        .split(',')
+        .map(|p| p.trim().parse::<f32>().map_err(|e| format!("{p:?}: {e}")))
+        .collect::<Result<_, _>>()?;
+    match parts.as_slice() {
+        [x, y, z] => Ok(Vec3::new(*x, *y, *z)),
+        _ => Err(format!("expected X,Y,Z (got {} components)", parts.len())),
+    }
+}
+
+fn parse_finite_f32(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if v.is_finite() {
+        Ok(v)
+    } else {
+        Err(format!("{v} is not finite"))
+    }
 }
 
 #[derive(Clone)]
@@ -135,6 +199,12 @@ fn main() {
         .add_plugins(bot::BotPlugin)
         .add_systems(FixedUpdate, contact_audit);
 
+    let overrides = play::PlayOverrides {
+        seed: args.seed,
+        random_policy: args.random_policy,
+        target_ball_at: args.target_ball_at,
+    };
+
     match mode {
         AppMode::Demo => {
             if let Some(reason) = mesh_fallback_reason {
@@ -145,6 +215,9 @@ fn main() {
                 checkpoint_dir: args.checkpoint.checkpoint_dir.clone(),
                 live_checkpoint_dir: args.live_checkpoint_dir.clone(),
                 manual_control: args.manual_control,
+                overrides,
+                graph: args.graph,
+                graph_shot: args.graph_shot.clone(),
             });
         }
         AppMode::Screenshot { path, settle } => {
@@ -154,6 +227,9 @@ fn main() {
                 settle,
                 width: args.width,
                 height: args.height,
+                overrides,
+                target_ball: args.target_ball || args.target_ball_at.is_some(),
+                rig_pose: args.rig_pose.map(|a| (a, args.rig_pose_part)),
             });
         }
         AppMode::RenderVideo { path, seconds } => {
@@ -163,6 +239,7 @@ fn main() {
                 seconds,
                 width: args.width,
                 height: args.height,
+                overrides,
             });
         }
     }

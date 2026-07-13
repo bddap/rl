@@ -85,10 +85,13 @@ pub(crate) struct TrainingState {
     pub(super) log_std_floor: f32,
 
     /// Fraction of episodes whose target samples the close disc instead of the
-    /// chase band (rl#250). Env-read once at construction like the RL_LOG_STD_*
-    /// knobs; default 0.0 keeps the pure chase band, so raising it per-run is the
-    /// deliberate TRAINING change, sequenced under one-change-at-a-time.
+    /// chase band (rl#250) — `TrainConfig::target_close_frac`. Default 0.0 keeps
+    /// the pure chase band, so raising it per-run is the deliberate TRAINING
+    /// change, sequenced under one-change-at-a-time.
     pub(super) close_frac: f32,
+
+    /// Effort-tax coefficient (rl#268) — `TrainConfig::effort_weight`.
+    pub(super) effort_weight: f32,
 
     pub(super) checkpoint_dir: PathBuf,
 
@@ -326,22 +329,27 @@ impl TrainingState {
 
         let n = config.envs.max(1) as usize;
         let normalizer_increment = worker_mode.then(IncrementAccumulator::new);
-        let close_frac =
-            crate::training::algorithm::env_or("RL_TARGET_CLOSE_FRAC", 0.0_f32).clamp(0.0, 1.0);
+        let close_frac = config.target_close_frac;
         if close_frac > 0.0 {
             // train.log is multi-run; without this line nobody can later tell which
             // segments trained with the close-target mix.
-            info!("Close-target curriculum active: RL_TARGET_CLOSE_FRAC={close_frac} (rl#250)");
+            info!("Close-target curriculum active: --target-close-frac {close_frac} (rl#250)");
         }
         Self {
             brain: InferenceCachedBrain::new(brain),
-            config: PpoConfig::default(),
+            config: PpoConfig {
+                log_std_floor_start: config.log_std_floor_start,
+                log_std_floor_end: config.log_std_floor_end,
+                log_std_anneal_ticks: config.log_std_anneal_ticks,
+                ..PpoConfig::default()
+            },
             rollouts: (0..n).map(|_| RolloutBuffer::new()).collect(),
             device,
             envs: vec![EnvEpisode::default(); n],
             explore_noise: OuNoise::new(n),
             log_std_floor: crate::bot::arch::LOG_STD_MIN,
             close_frac,
+            effort_weight: config.effort_weight,
             episode_count: 0,
             recent_rewards: Vec::new(),
             total_steps: 0,
@@ -653,14 +661,7 @@ mod tests {
         std::fs::write(dir.join("best/brain.bin"), b"incumbent-best").unwrap();
         std::fs::write(dir.join("ticks.txt"), b"777").unwrap();
 
-        let config = crate::TrainConfig {
-            checkpoint: crate::CheckpointArgs {
-                checkpoint_dir: dir.clone(),
-            },
-            ticks: 0,
-            envs: 1,
-            seed: Some(42),
-        };
+        let config = crate::TrainConfig::scratch(&dir, 1, 42);
         let state = TrainingState::new(&config, None);
         let extra_saw_staged_dir = RefCell::new(false);
         state.save_checkpoint(|paths, _stamp| {

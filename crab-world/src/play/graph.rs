@@ -25,11 +25,10 @@ pub struct JointGraph {
     torque: Vec<VecDeque<f32>>,
 }
 
-impl Default for JointGraph {
-    fn default() -> Self {
+impl JointGraph {
+    fn new(visible: bool) -> Self {
         Self {
-            visible: std::env::var("RL_GRAPH").is_ok_and(|v| v == "1")
-                || std::env::var("RL_GRAPH_SHOT").is_ok(),
+            visible,
             angle: vec![VecDeque::with_capacity(CAPACITY); CrabJointId::COUNT],
             torque: vec![VecDeque::with_capacity(CAPACITY); CrabJointId::COUNT],
         }
@@ -49,14 +48,13 @@ struct GraphShot {
     frame: u32,
 }
 
-pub fn register(app: &mut App) {
-    app.init_resource::<JointGraph>();
+/// `visible` shows the overlay from launch (it stays toggleable at runtime);
+/// `shot` additionally captures it to that path once the traces fill.
+pub fn register(app: &mut App, visible: bool, shot: Option<PathBuf>) {
+    app.insert_resource(JointGraph::new(visible || shot.is_some()));
     app.init_gizmo_group::<GraphGizmos>();
-    if let Ok(path) = std::env::var("RL_GRAPH_SHOT") {
-        app.insert_resource(GraphShot {
-            path: path.into(),
-            frame: 0,
-        });
+    if let Some(path) = shot {
+        app.insert_resource(GraphShot { path, frame: 0 });
         app.add_systems(Update, graph_shot_capture);
     }
     app.add_systems(Startup, setup_overlay);

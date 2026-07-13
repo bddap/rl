@@ -3,25 +3,12 @@ use bevy::prelude::Vec3;
 use crate::bot::actuator::ACTION_SIZE;
 
 /// Historical effort-tax coefficient; the live baseline runs train with this value.
-const EFFORT_WEIGHT_DEFAULT: f32 = 0.0006;
-
-/// Effort-tax coefficient on Σ|drive|^EFFORT_EXP — the reward's only economy term.
-/// Per-run env knob `RL_EFFORT_WEIGHT` (read once), same one-seam-N-leaves pattern as
-/// the σ-floor knobs: experiment runs raise it without touching the baselines'
-/// default. rl#268: at 0.0006 the tax is ~14× too weak to bend the policy off the
-/// torque ceiling, so bang-bang saturation is the optimal gait.
-pub(crate) fn effort_weight() -> f32 {
-    static WEIGHT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *WEIGHT.get_or_init(|| {
-        let w = crate::training::algorithm::env_or("RL_EFFORT_WEIGHT", EFFORT_WEIGHT_DEFAULT);
-        // Negative would PAY for flailing; NaN would poison every reward in the run.
-        assert!(
-            w.is_finite() && w >= 0.0,
-            "RL_EFFORT_WEIGHT must be a finite non-negative f32, got {w}"
-        );
-        w
-    })
-}
+/// The per-run override is `TrainConfig::effort_weight` (`--effort-weight` /
+/// `RL_EFFORT_WEIGHT`), threaded through `TrainingState` — experiment runs raise it
+/// without touching the baselines' default. rl#268: at 0.0006 the tax is ~14× too
+/// weak to bend the policy off the torque ceiling, so bang-bang saturation is the
+/// optimal gait.
+pub(crate) const EFFORT_WEIGHT_DEFAULT: f32 = 0.0006;
 
 const EFFORT_EXP: f32 = 2.0;
 
@@ -50,8 +37,8 @@ pub(crate) fn is_progress_glitch(distance_closed: Option<f32>) -> bool {
     matches!(distance_closed, Some(delta) if !is_physical_step(delta))
 }
 
-pub(crate) fn compute_reward(distance_closed: Option<f32>, effort: f32) -> f32 {
-    progress_reward(distance_closed) - effort_weight() * effort
+pub(crate) fn compute_reward(distance_closed: Option<f32>, effort: f32, effort_weight: f32) -> f32 {
+    progress_reward(distance_closed) - effort_weight * effort
 }
 
 pub(crate) fn planar_dist(a: Vec3, b: Vec3) -> f32 {
@@ -69,6 +56,12 @@ mod tests {
     use crate::physics::PHYSICS_DT;
     use crate::training::systems::MAX_EPISODE_TICKS;
 
+    /// The default-economy reward — every calibration below judges the economy runs
+    /// actually train under unless a flag deliberately opts out.
+    fn reward(distance_closed: Option<f32>, effort: f32) -> f32 {
+        compute_reward(distance_closed, effort, EFFORT_WEIGHT_DEFAULT)
+    }
+
     fn per_tick_closed(v: f32) -> f32 {
         v * PHYSICS_DT
     }
@@ -76,10 +69,10 @@ mod tests {
     #[test]
     fn progress_closing_raises_receding_lowers() {
         let effort = action_effort(&[0.3; ACTION_SIZE]);
-        let still = compute_reward(Some(0.0), effort);
-        let closing = compute_reward(Some(0.01), effort);
-        let closing_more = compute_reward(Some(0.02), effort);
-        let receding = compute_reward(Some(-0.01), effort);
+        let still = reward(Some(0.0), effort);
+        let closing = reward(Some(0.01), effort);
+        let closing_more = reward(Some(0.02), effort);
+        let receding = reward(Some(-0.01), effort);
         assert!(closing > still, "closing ground out-earns standing still");
         assert!(
             closing_more > closing,
@@ -94,7 +87,7 @@ mod tests {
             "the progress term is symmetric: +δ closing gains what −δ receding loses"
         );
         assert!(
-            (compute_reward(None, effort) - still).abs() < 1e-6,
+            (reward(None, effort) - still).abs() < 1e-6,
             "a teleported/rescued body earns no progress (neutral, like standing still)"
         );
     }
@@ -195,21 +188,21 @@ mod tests {
     #[test]
     fn reward_is_progress_minus_effort_no_reach_term() {
         assert!(
-            compute_reward(None, 0.0).abs() < 1e-6,
+            reward(None, 0.0).abs() < 1e-6,
             "with no progress and no effort, reward is exactly zero"
         );
         let p = Some(0.01);
         let e = action_effort(&[0.2; ACTION_SIZE]);
-        let expected = progress_reward(p) - effort_weight() * e;
+        let expected = progress_reward(p) - EFFORT_WEIGHT_DEFAULT * e;
         assert!(
-            (compute_reward(p, e) - expected).abs() < 1e-6,
+            (reward(p, e) - expected).abs() < 1e-6,
             "reward is exactly progress − K·effort"
         );
     }
 
     #[test]
     fn holding_at_target_accrues_no_reward() {
-        let held = compute_reward(Some(0.0), action_effort(&[0.1; ACTION_SIZE]));
+        let held = reward(Some(0.0), action_effort(&[0.1; ACTION_SIZE]));
         assert!(
             held <= 0.0,
             "a crab holding on the target with no progress must accrue no positive reward: {held}"
@@ -218,9 +211,9 @@ mod tests {
 
     #[test]
     fn higher_drive_lowers_the_reward() {
-        let still = compute_reward(None, action_effort(&[0.0; ACTION_SIZE]));
-        let gentle = compute_reward(None, action_effort(&[0.3; ACTION_SIZE]));
-        let hard = compute_reward(None, action_effort(&[0.9; ACTION_SIZE]));
+        let still = reward(None, action_effort(&[0.0; ACTION_SIZE]));
+        let gentle = reward(None, action_effort(&[0.3; ACTION_SIZE]));
+        let hard = reward(None, action_effort(&[0.9; ACTION_SIZE]));
         assert!(
             still > gentle && gentle > hard,
             "reward must fall as drive magnitude rises: still {still} > gentle {gentle} > hard {hard}"
@@ -244,8 +237,8 @@ mod tests {
             gentle_cmd, sat_cmd,
             "both drives produce the identical clamped command"
         );
-        let r_gentle = compute_reward(Some(0.01), action_effort(&gentle_drive));
-        let r_sat = compute_reward(Some(0.01), action_effort(&saturating_drive));
+        let r_gentle = reward(Some(0.01), action_effort(&gentle_drive));
+        let r_sat = reward(Some(0.01), action_effort(&saturating_drive));
         assert!(
             r_sat < r_gentle,
             "a saturating drive must cost STRICTLY MORE than a gentle one at the same command: \
@@ -255,12 +248,12 @@ mod tests {
 
     #[test]
     fn effort_cost_calibration() {
-        let still = compute_reward(None, action_effort(&[0.0; ACTION_SIZE]));
+        let still = reward(None, action_effort(&[0.0; ACTION_SIZE]));
         assert!(
             still.abs() < 1e-6,
             "a still policy with no progress is zero: {still}"
         );
-        let stride = compute_reward(
+        let stride = reward(
             Some(per_tick_closed(0.5)),
             action_effort(&[0.7; ACTION_SIZE]),
         );
@@ -269,12 +262,12 @@ mod tests {
             "a real stride must net positive after the tax, on progress alone: {stride}"
         );
         let stride_progress = progress_reward(Some(per_tick_closed(0.5)));
-        let big_gait_tax = effort_weight() * action_effort(&[2.0; ACTION_SIZE]);
+        let big_gait_tax = EFFORT_WEIGHT_DEFAULT * action_effort(&[2.0; ACTION_SIZE]);
         assert!(
             big_gait_tax < stride_progress,
             "break-even must sit above |d|=2/joint: tax {big_gait_tax} vs stride progress {stride_progress}"
         );
-        let oversaturated = compute_reward(
+        let oversaturated = reward(
             Some(per_tick_closed(0.5)),
             action_effort(&[3.0; ACTION_SIZE]),
         );
@@ -286,17 +279,17 @@ mod tests {
 
     #[test]
     fn progress_episode_dominates_freezing() {
-        // Episode-scale check AT THE DEFAULT WEIGHT (env unset under test): a full band
-        // traverse must CLEARLY out-earn standing still over a whole MAX_EPISODE_TICKS
-        // episode, and the integrated effort tax must stay a regularizer, never the
-        // dominant term (~4:1 progress-dominant). Experiment runs that raise
-        // RL_EFFORT_WEIGHT (rl#268) deliberately opt out of this economy.
+        // Episode-scale check AT THE DEFAULT WEIGHT: a full band traverse must CLEARLY
+        // out-earn standing still over a whole MAX_EPISODE_TICKS episode, and the
+        // integrated effort tax must stay a regularizer, never the dominant term
+        // (~4:1 progress-dominant). Experiment runs that raise --effort-weight
+        // (rl#268) deliberately opt out of this economy.
         let ticks = MAX_EPISODE_TICKS as f32;
         let traverse_m = 3.0_f32;
         let walk_progress = PROGRESS_WEIGHT * traverse_m;
-        let walk_tax = ticks * effort_weight() * action_effort(&[0.7; ACTION_SIZE]);
+        let walk_tax = ticks * EFFORT_WEIGHT_DEFAULT * action_effort(&[0.7; ACTION_SIZE]);
         let walk_total = walk_progress - walk_tax;
-        let freeze_total = -(ticks * effort_weight() * action_effort(&[0.1; ACTION_SIZE]));
+        let freeze_total = -(ticks * EFFORT_WEIGHT_DEFAULT * action_effort(&[0.1; ACTION_SIZE]));
         assert!(
             walk_total > 0.0,
             "a full traverse must net positive over an episode: {walk_total}"

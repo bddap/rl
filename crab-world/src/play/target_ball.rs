@@ -8,6 +8,11 @@ use crate::training::targets::{closest_tip_dist, sample_target, tip_touch};
 #[derive(Component)]
 pub(super) struct TargetBall;
 
+/// A pinned target position (rl-demo `--target-ball-at x,y,z`): the ball holds here
+/// instead of sampling, until a claw touch re-rolls it. `None` = sample normally.
+#[derive(Resource, Default, Clone, Copy)]
+pub(super) struct TargetBallAt(pub(super) Option<Vec3>);
+
 /// The demo chase ball stays on the chase band; the close-disc curriculum
 /// (rl#250) is a training-only mix, threaded explicitly so no ambient env var
 /// can move the demo's ball.
@@ -38,12 +43,14 @@ pub(super) fn target_ball(
     claw_tips_q: Query<(&body::CrabEnvId, &Transform), With<CrabClawTip>>,
     mut ball_q: Query<&mut Transform, (With<TargetBall>, Without<CrabClawTip>)>,
     mut rng: ResMut<super::DemoRng>,
+    pinned: Res<TargetBallAt>,
 ) {
     let origin = spawns.origin(0);
 
     let mut target = match targets.get(0) {
         Some(t) => t,
-        None => target_ball_at_from_env()
+        None => pinned
+            .0
             .unwrap_or_else(|| sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0)),
     };
 
@@ -56,18 +63,6 @@ pub(super) fn target_ball(
     }
     if let Ok(mut ball) = ball_q.single_mut() {
         ball.translation = target;
-    }
-}
-
-fn target_ball_at_from_env() -> Option<Vec3> {
-    let raw = std::env::var("RL_TARGET_BALL_AT").ok()?;
-    let parts: Vec<f32> = raw
-        .split(',')
-        .filter_map(|s| s.trim().parse::<f32>().ok())
-        .collect();
-    match parts.as_slice() {
-        [x, y, z] => Some(Vec3::new(*x, *y, *z)),
-        _ => None,
     }
 }
 
@@ -104,6 +99,7 @@ mod tests {
     fn demo_target_obs_tracks_moved_ball() {
         let mut app = headless_app();
         app.init_resource::<super::super::DemoRng>();
+        app.init_resource::<TargetBallAt>();
         // The demo/render-video schedule for this system, minus rendering: after Sense,
         // so it reads the post-physics state the observation consumed.
         app.add_systems(FixedUpdate, target_ball.after(BotSet::Sense));

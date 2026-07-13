@@ -22,6 +22,7 @@ use crate::screenshot::{self, ShotProgress, ShotTarget};
 
 use crate::policy::RigDims;
 pub use render_video::RenderVideoPlugin;
+pub use rig_pose::RigPosePart;
 
 pub fn rig_dims() -> RigDims {
     RigDims {
@@ -41,13 +42,32 @@ use target_ball::{spawn_target_ball, target_ball};
 #[derive(Resource)]
 pub(super) struct DemoRng(pub(super) StdRng);
 
+impl DemoRng {
+    fn seeded(seed: Option<u64>) -> Self {
+        Self(StdRng::seed_from_u64(seed.unwrap_or_else(rand::random)))
+    }
+}
+
 impl Default for DemoRng {
     fn default() -> Self {
-        let seed = std::env::var("RL_DEMO_SEED")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or_else(rand::random);
-        Self(StdRng::seed_from_u64(seed))
+        Self::seeded(None)
+    }
+}
+
+/// The rl-demo knobs shared by every play mode, parsed at the entrypoint (rl#272):
+/// which seed drives the demo RNG, whether a rest-bound policy load drives a random
+/// diagnostic brain instead, and whether the target ball holds a pinned position.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlayOverrides {
+    pub seed: Option<u64>,
+    pub random_policy: bool,
+    pub target_ball_at: Option<Vec3>,
+}
+
+impl PlayOverrides {
+    fn apply_rng_and_ball(&self, app: &mut App) {
+        app.insert_resource(DemoRng::seeded(self.seed));
+        app.insert_resource(target_ball::TargetBallAt(self.target_ball_at));
     }
 }
 
@@ -55,17 +75,27 @@ pub struct DemoPlugin {
     pub checkpoint_dir: PathBuf,
     pub live_checkpoint_dir: Option<PathBuf>,
     pub manual_control: bool,
+    pub overrides: PlayOverrides,
+    /// Show the joint-trace graph overlay from launch.
+    pub graph: bool,
+    /// Capture the graph overlay to this path once its traces fill.
+    pub graph_shot: Option<PathBuf>,
 }
 
 impl Plugin for DemoPlugin {
     fn build(&self, app: &mut App) {
-        add_inference(app, &self.checkpoint_dir, self.live_checkpoint_dir.clone());
-        graph::register(app);
+        add_inference(
+            app,
+            &self.checkpoint_dir,
+            self.live_checkpoint_dir.clone(),
+            self.overrides.random_policy,
+        );
+        graph::register(app, self.graph, self.graph_shot.clone());
+        self.overrides.apply_rng_and_ball(app);
         app.add_plugins(crate::sky::NightSkyPlugin);
         app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default());
         app.init_resource::<DemoSettle>()
             .init_resource::<PokeBurst>()
-            .init_resource::<DemoRng>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_target_ball))
             .add_systems(Update, (orbit_camera, demo_controls))
             .add_systems(
@@ -95,6 +125,11 @@ pub struct ScreenshotPlugin {
     pub settle: u32,
     pub width: u32,
     pub height: u32,
+    pub overrides: PlayOverrides,
+    /// Spawn the chase target ball (the demo/video modes always have one).
+    pub target_ball: bool,
+    /// Drive these joints at this action value for a pose still.
+    pub rig_pose: Option<(f32, RigPosePart)>,
 }
 
 #[derive(Resource)]
@@ -107,11 +142,16 @@ pub(in crate::play) struct ShotConfig {
 
 impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
-        add_inference(app, &self.checkpoint_dir, None);
+        add_inference(
+            app,
+            &self.checkpoint_dir,
+            None,
+            self.overrides.random_policy,
+        );
         app.add_systems(FixedUpdate, policy_step.in_set(BotSet::Think));
         app.add_plugins(crate::sky::NightSkyPlugin);
-        if let Some(pose) = rig_pose::rig_pose_from_env() {
-            app.insert_resource(pose)
+        if let Some((action, part)) = self.rig_pose {
+            app.insert_resource(rig_pose::RigPose::new(action, part))
                 .init_resource::<rig_pose::RigPosePin>()
                 .add_systems(
                     FixedUpdate,
@@ -126,9 +166,9 @@ impl Plugin for ScreenshotPlugin {
                         .before(PhysicsSet::SyncBackend),
                 );
         }
-        if std::env::var_os("RL_TARGET_BALL").is_some() {
-            app.init_resource::<DemoRng>()
-                .add_systems(Startup, spawn_target_ball)
+        if self.target_ball {
+            self.overrides.apply_rng_and_ball(app);
+            app.add_systems(Startup, spawn_target_ball)
                 .add_systems(FixedUpdate, target_ball.after(BotSet::Sense));
         }
         app.insert_resource(ShotConfig {

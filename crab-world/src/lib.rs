@@ -67,6 +67,11 @@ pub struct CheckpointArgs {
 
 /// Training config, consumed by the learner and its rollout threads (which build a
 /// `TrainingState`). Parsed only by the `learn` subcommand.
+///
+/// The run-shaping knobs below keep an `env` fallback for the overnight loop's
+/// existing `RL_*` exports, but they are real flags: visible in `--help`, echoed by
+/// the argv a run was launched with, and a malformed value (flag OR env) is a parse
+/// error at t=0 — never a silent fallback mid-run (rl#272).
 #[derive(Parser, Debug, Clone)]
 pub struct TrainConfig {
     #[command(flatten)]
@@ -80,4 +85,67 @@ pub struct TrainConfig {
 
     #[arg(long)]
     pub seed: Option<u64>,
+
+    /// Exploration σ-floor (log-space) at the start of the anneal (rl#161).
+    #[arg(long, env = "RL_LOG_STD_FLOOR_START", allow_negative_numbers = true,
+          default_value_t = training::algorithm::LOG_STD_FLOOR_START_DEFAULT)]
+    pub log_std_floor_start: f32,
+
+    /// Exploration σ-floor (log-space) the anneal refines down to.
+    #[arg(long, env = "RL_LOG_STD_FLOOR_END", allow_negative_numbers = true,
+          default_value_t = bot::arch::LOG_STD_MIN)]
+    pub log_std_floor_end: f32,
+
+    /// Ticks over which the σ-floor anneals from start to end (0 = pinned at end).
+    #[arg(long, env = "RL_LOG_STD_ANNEAL_TICKS",
+          default_value_t = training::algorithm::LOG_STD_ANNEAL_TICKS_DEFAULT)]
+    pub log_std_anneal_ticks: u64,
+
+    /// Fraction of episodes whose target samples the close disc instead of the chase
+    /// band — the rl#250 curriculum mix. 0.0 keeps the pure chase band.
+    #[arg(long, env = "RL_TARGET_CLOSE_FRAC", value_parser = parse_unit_frac,
+          default_value_t = 0.0)]
+    pub target_close_frac: f32,
+
+    /// Effort-tax coefficient on Σ|drive|² — the reward's only economy term (rl#268).
+    #[arg(long, env = "RL_EFFORT_WEIGHT", value_parser = parse_effort_weight,
+          default_value_t = training::reward::EFFORT_WEIGHT_DEFAULT)]
+    pub effort_weight: f32,
+}
+
+#[cfg(test)]
+impl TrainConfig {
+    /// Test config CLAP-PARSED so every knob carries its real default — a struct
+    /// literal here would grow a second default source that drifts.
+    pub(crate) fn scratch(checkpoint_dir: &std::path::Path, envs: u64, seed: u64) -> Self {
+        Self::try_parse_from([
+            "rl",
+            "--checkpoint-dir",
+            checkpoint_dir.to_str().unwrap(),
+            "--envs",
+            &envs.to_string(),
+            "--seed",
+            &seed.to_string(),
+        ])
+        .expect("parse scratch TrainConfig")
+    }
+}
+
+fn parse_unit_frac(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("{v} is outside 0..=1"))
+    }
+}
+
+fn parse_effort_weight(s: &str) -> Result<f32, String> {
+    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
+    // Negative would PAY for flailing; NaN would poison every reward in the run.
+    if v.is_finite() && v >= 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("{v} is not a finite non-negative weight"))
+    }
 }

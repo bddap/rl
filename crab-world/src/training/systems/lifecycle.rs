@@ -41,6 +41,7 @@ fn finalize_pending_step(
     pose: PostStepPose,
     over_cap: bool,
     rescued: bool,
+    effort_weight: f32,
 ) -> StepFinalize {
     let PostStepPose {
         height,
@@ -59,7 +60,10 @@ fn finalize_pending_step(
 
     if rescued {
         return StepFinalize {
-            transition: transition(compute_reward(None, pending.effort), StepEnd::Terminal),
+            transition: transition(
+                compute_reward(None, pending.effort, effort_weight),
+                StepEnd::Terminal,
+            ),
             ended: true,
             progress_glitch: false,
         };
@@ -67,7 +71,7 @@ fn finalize_pending_step(
 
     let distance_closed = pending.target_dist.zip(d_now).map(|(prev, now)| prev - now);
     let progress_glitch = is_progress_glitch(distance_closed);
-    let mut reward = compute_reward(distance_closed, pending.effort);
+    let mut reward = compute_reward(distance_closed, pending.effort, effort_weight);
 
     let blowing_up = max_speed > 100.0 || !height.is_finite();
     let fell = !(0.02..=50.0).contains(&height) || blowing_up;
@@ -151,6 +155,7 @@ impl TrainingState {
                     },
                     over_cap,
                     rescued,
+                    self.effort_weight,
                 );
                 if fin.progress_glitch {
                     self.progress_glitch_drops += 1;
@@ -294,6 +299,7 @@ pub(crate) fn reset_crab(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::training::reward::EFFORT_WEIGHT_DEFAULT;
     use crate::training::targets::REACH_RADIUS;
 
     #[test]
@@ -343,14 +349,11 @@ mod tests {
     /// replaced, so the rest pose can never farm GRAB_REWARD.
     #[test]
     fn a_pre_touched_start_reseeds_without_scoring() {
-        let config = crate::TrainConfig {
-            checkpoint: crate::CheckpointArgs {
-                checkpoint_dir: std::env::temp_dir().join("rl_test_pre_touched_reseed"),
-            },
-            ticks: 0,
-            envs: 1,
-            seed: Some(7),
-        };
+        let config = crate::TrainConfig::scratch(
+            &std::env::temp_dir().join("rl_test_pre_touched_reseed"),
+            1,
+            7,
+        );
         let mut ts = TrainingState::new(&config, None);
         ts.envs[0].min_tip_dist = Some(0.1);
 
@@ -414,6 +417,7 @@ mod tests {
             },
             true,
             true,
+            EFFORT_WEIGHT_DEFAULT,
         );
         assert_eq!(r.transition.end, StepEnd::Terminal);
         assert!(r.ended);
@@ -423,7 +427,7 @@ mod tests {
         );
         assert_eq!(
             r.transition.reward.to_bits(),
-            compute_reward(None, 0.7).to_bits(),
+            compute_reward(None, 0.7, EFFORT_WEIGHT_DEFAULT).to_bits(),
             "a rescued step earns only the effort tax (no progress/grab credit)"
         );
 
@@ -432,12 +436,13 @@ mod tests {
             pose(Some(1.0), far_tip),
             false,
             false,
+            EFFORT_WEIGHT_DEFAULT,
         );
         assert_eq!(r.transition.end, StepEnd::Continues);
         assert!(!r.ended);
         assert_eq!(
             r.transition.reward.to_bits(),
-            compute_reward(Some(0.25), 0.0).to_bits()
+            compute_reward(Some(0.25), 0.0, EFFORT_WEIGHT_DEFAULT).to_bits()
         );
 
         let r = finalize_pending_step(
@@ -445,6 +450,7 @@ mod tests {
             pose(Some(1.0), Some(0.0)),
             false,
             false,
+            EFFORT_WEIGHT_DEFAULT,
         );
         assert_eq!(
             r.transition.end,
@@ -454,7 +460,7 @@ mod tests {
         assert!(r.ended);
         assert_eq!(
             r.transition.reward.to_bits(),
-            (compute_reward(Some(0.0), 0.0) + GRAB_REWARD).to_bits()
+            (compute_reward(Some(0.0), 0.0, EFFORT_WEIGHT_DEFAULT) + GRAB_REWARD).to_bits()
         );
 
         let r = finalize_pending_step(
@@ -467,6 +473,7 @@ mod tests {
             },
             false,
             false,
+            EFFORT_WEIGHT_DEFAULT,
         );
         assert_eq!(
             r.transition.end,
@@ -475,7 +482,13 @@ mod tests {
         );
         assert!(r.ended);
 
-        let r = finalize_pending_step(&pend(0.0, Some(1.0)), pose(Some(1.0), far_tip), true, false);
+        let r = finalize_pending_step(
+            &pend(0.0, Some(1.0)),
+            pose(Some(1.0), far_tip),
+            true,
+            false,
+            EFFORT_WEIGHT_DEFAULT,
+        );
         assert_eq!(r.transition.end, StepEnd::Truncated);
         assert!(r.ended);
 
@@ -484,6 +497,7 @@ mod tests {
             pose(Some(0.0), far_tip),
             false,
             false,
+            EFFORT_WEIGHT_DEFAULT,
         );
         assert!(
             r.progress_glitch,
@@ -491,7 +505,7 @@ mod tests {
         );
         assert_eq!(
             r.transition.reward.to_bits(),
-            compute_reward(None, 0.0).to_bits(),
+            compute_reward(None, 0.0, EFFORT_WEIGHT_DEFAULT).to_bits(),
             "the glitched progress is dropped to zero (effort tax only)"
         );
     }

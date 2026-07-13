@@ -31,18 +31,11 @@ impl PpoConfig {
     }
 }
 
-/// An UNSET var means the default; a var that is set but unparseable ABORTS the
-/// launch. Falling back silently would train a multi-day run at the economy the
-/// experiment exists to leave — a typo must fail loud at t=0, not in a post-mortem.
-pub(crate) fn env_or<T: std::str::FromStr>(var: &str, default: T) -> T {
-    match std::env::var(var) {
-        Ok(s) => s
-            .trim()
-            .parse()
-            .unwrap_or_else(|_| panic!("[config] {var}={s:?} did not parse; refusing to launch")),
-        Err(_) => default,
-    }
-}
+/// σ-floor anneal defaults — the live baseline's exploration schedule (rl#161).
+/// Per-run overrides are `TrainConfig` flags, so `Default` here is PURE: no ambient
+/// process state can move a training run (rl#272).
+pub(crate) const LOG_STD_FLOOR_START_DEFAULT: f32 = -0.7;
+pub(crate) const LOG_STD_ANNEAL_TICKS_DEFAULT: u64 = 5_000_000;
 
 impl Default for PpoConfig {
     fn default() -> Self {
@@ -57,9 +50,9 @@ impl Default for PpoConfig {
             batch_size: 64,
             value_loss_clip: 3.0,
             target_kl: 0.03,
-            log_std_floor_start: env_or("RL_LOG_STD_FLOOR_START", -0.7),
-            log_std_floor_end: env_or("RL_LOG_STD_FLOOR_END", crate::bot::arch::LOG_STD_MIN),
-            log_std_anneal_ticks: env_or("RL_LOG_STD_ANNEAL_TICKS", 5_000_000),
+            log_std_floor_start: LOG_STD_FLOOR_START_DEFAULT,
+            log_std_floor_end: crate::bot::arch::LOG_STD_MIN,
+            log_std_anneal_ticks: LOG_STD_ANNEAL_TICKS_DEFAULT,
         }
     }
 }
