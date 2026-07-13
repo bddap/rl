@@ -29,6 +29,7 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
         next_tel_tick: next_sample_tick(0),
         snap_buf: std::collections::VecDeque::new(),
         art_buf: std::collections::VecDeque::new(),
+        stalled: false,
         logged_statuses: BTreeMap::new(),
     });
     world.insert_resource(PendingInput::default());
@@ -243,6 +244,11 @@ pub(super) struct GameState {
     next_tel_tick: u64,
     snap_buf: std::collections::VecDeque<crate::snapshot::CoreSnapshot>,
     art_buf: std::collections::VecDeque<crate::articulation::CrabArticulation>,
+    /// Snapshot-stall latch (rl#273): the last remote-adopt drain iteration consumed a tick
+    /// of render time but adopted nothing. While set, [`render_frac`] pins the clock at the
+    /// end of the last adopted interval instead of wrapping — a stall renders as a clean
+    /// hold, not a 30 Hz replay. Always false on the host: its drain steps every tick.
+    stalled: bool,
     /// Last logged per-player status, so Alive→Downed/Extracted edges (a crab strike landing,
     /// an extraction) each leave exactly one log line on every peer.
     logged_statuses: BTreeMap<PlayerId, PlayerStatus>,
@@ -256,6 +262,21 @@ fn jitter_take(buffered: usize) -> usize {
         buffered - JITTER_BUF_TARGET
     } else {
         usize::from(buffered > 0)
+    }
+}
+
+/// The [`RenderClock`] fraction for this frame. Stalled (rl#273), the drain keeps
+/// consuming `accumulator -= TICK_DT` to pace input submission while the sim tick
+/// freezes, so the raw fraction would sweep 0→1 and wrap ~30×/s — every interpolated
+/// surface replaying its last tick interval. Pinning at 1.0 holds the end of the last
+/// adopted interval. Entry advances render time by at most one frame's sweep — the
+/// same quantization every normal tick-crossing frame has — and recovery captures
+/// `prev` at exactly the held pose before adopting, so the resume edge is seamless.
+fn render_frac(accumulator: f64, stalled: bool) -> f32 {
+    if stalled {
+        1.0
+    } else {
+        (accumulator / TICK_DT).clamp(0.0, 1.0) as f32
     }
 }
 
@@ -660,6 +681,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                     state.snap_buf.extend(exch.snapshots);
                     state.art_buf.extend(exch.articulations);
                     let take = jitter_take(state.snap_buf.len());
+                    state.stalled = take == 0;
                     if take > 0 {
                         state.prev = SimSnapshot::capture(&state.client);
                         let reported_outcome = &mut state.reported_outcome;
@@ -912,14 +934,16 @@ pub(super) fn drive_client_sim(world: &mut World) {
     }
     let clock = RenderClock {
         tick: state.client.sim().tick(),
-        frac: (state.accumulator / TICK_DT).clamp(0.0, 1.0) as f32,
+        frac: render_frac(state.accumulator, state.stalled),
     };
     world.insert_resource(clock);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, jitter_take};
+    use super::{
+        FlightControl, JITTER_BUF_MAX, JITTER_BUF_TARGET, LocalControl, jitter_take, render_frac,
+    };
     use crate::sim::{Input, buttons};
     use crab_world::vehicle::VehicleKind;
 
@@ -1022,5 +1046,21 @@ mod tests {
             "past the margin ⇒ drain to the target in one tick"
         );
         assert_eq!(jitter_take(10), 10 - JITTER_BUF_TARGET);
+    }
+
+    #[test]
+    fn render_frac_holds_at_one_through_a_snapshot_stall() {
+        use crate::sim::TICK_DT;
+        assert_eq!(render_frac(0.0, false), 0.0);
+        assert_eq!(render_frac(TICK_DT * 0.5, false), 0.5);
+        // The rl#273 wrap: a stalled drain keeps consuming TICK_DT to pace input
+        // submission, so the raw fraction would rewind to ~0 here and replay the
+        // last tick interval at 30 Hz. Pinned, the stall renders as a hold.
+        assert_eq!(render_frac(TICK_DT * 0.02, true), 1.0);
+        assert_eq!(render_frac(TICK_DT, false), 1.0);
+        // The latch wiring itself (`stalled = take == 0` in the RemoteAdopt drain
+        // arm, cleared by any adopting iteration and surviving zero-drain frames) is
+        // not unit-tested: a remote-adopt GameState needs a live NetDriver. This
+        // pins the pure half; the arm is the one line beside jitter_take's call.
     }
 }

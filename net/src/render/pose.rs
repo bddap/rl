@@ -145,6 +145,53 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_stall_holds_still_then_resumes_forward() {
+        // rl#273: during a snapshot stall the driver freezes its clock at
+        // (last adopted tick, frac = 1.0) instead of letting frac wrap. Pin the
+        // window's side of that contract: the frozen clock samples a CONSTANT pose,
+        // and the resume sweep continues forward from exactly the held position.
+        use crate::cadence::cumulative_steps;
+        const STEP_METERS: f64 = 0.1;
+        let pose_at = |tick: u64| Pose {
+            pos: Vec3::new(
+                (cumulative_steps(tick) as f64 * STEP_METERS) as f32,
+                0.0,
+                0.0,
+            ),
+            orient: Quat::IDENTITY,
+        };
+        let mut w = PoseWindow::default();
+        for tick in 1..=9u64 {
+            w.push(tick, pose_at(tick));
+        }
+        let held = w.sample(9, 1.0).unwrap().pos.x;
+        for _ in 0..30 {
+            assert_eq!(
+                w.sample(9, 1.0).unwrap().pos.x,
+                held,
+                "a stall must render a clean hold"
+            );
+        }
+        let wrapped = w.sample(9, 0.02).unwrap().pos.x;
+        assert!(
+            wrapped < held,
+            "sanity: an un-pinned wrapping clock really would rewind the pose"
+        );
+        // Recovery adopts tick 10 with frac back near 0 — same render time as the
+        // hold (both (9-1)+1.0 and (10-1)+0.0 are 9 ticks), so no seam.
+        let mut last = held;
+        for tick in 10..=12u64 {
+            w.push(tick, pose_at(tick));
+            for f in 0..4 {
+                let x = w.sample(tick, f as f32 / 4.0).unwrap().pos.x;
+                assert!(x >= last - 1e-4, "resume must not rewind: {x} < {last}");
+                last = x;
+            }
+        }
+        assert!(last > held, "the resume sweep must actually move forward");
+    }
+
+    #[test]
     fn teleport_resets_the_window_instead_of_smearing() {
         let at = |x: f32| Pose {
             pos: Vec3::new(x, 0.0, 0.0),
