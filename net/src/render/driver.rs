@@ -162,18 +162,16 @@ fn pilot_of(pid: PlayerId) -> PilotId {
     PilotId(pid.0)
 }
 
-/// The sim↔arena correspondence, both directions (rl#258): render = sim / to_sim =
-/// arena + anchor. The scale is [`crate::external_crab::arena_to_sim`] — the ONE guarded
-/// owner of the factor (rl#254: it fails loud on a degenerate render scale instead of
-/// silently converting 1:1). `anchor` is the round's static
-/// [`crate::external_crab::ArenaAnchor`] (y = 0 by construction).
+/// The sim↔arena correspondence, both directions (rl#258): arena = sim − anchor.
+/// One scale since rl#256 — the frames differ only by the round's static
+/// translation [`crate::external_crab::ArenaAnchor`] (y = 0 by construction).
 fn sim_to_arena(pos: crate::sim::Pos, anchor: Vec3) -> Vec3 {
     let (x, z) = pos.to_meters();
-    Vec3::new(x, 0.0, z) / crate::external_crab::arena_to_sim() - anchor
+    Vec3::new(x, 0.0, z) - anchor
 }
 
 fn arena_to_sim_pos(arena: Vec3, anchor: Vec3) -> crate::sim::Pos {
-    let w = (arena + anchor) * crate::external_crab::arena_to_sim();
+    let w = arena + anchor;
     crate::sim::Pos::from_meters(w.x, w.z)
 }
 
@@ -191,8 +189,8 @@ fn boarding_of(
     // A walker can't out-run its walk speed: a bigger per-tick delta is a TELEPORT (the
     // round-RESTART respawn, a join slot), not motion — a craft boarded right after one
     // must start at rest, not inherit a cross-map fling.
-    let max_walk = 2.0 * (crate::sim::PLAYER_SPEED as f32 * crate::sim::TICK_HZ as f32)
-        / (crate::sim::UNIT as f32 * crate::external_crab::arena_to_sim());
+    let max_walk =
+        2.0 * (crate::sim::PLAYER_SPEED as f32 * crate::sim::TICK_HZ as f32) / crate::sim::UNIT as f32;
     let velocity = if velocity.length() <= max_walk {
         velocity
     } else {
