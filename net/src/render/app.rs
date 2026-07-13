@@ -50,13 +50,12 @@ pub fn build_windowed_app(
     app.add_plugins(crab_world::sky::NightSkyPlugin);
     app.init_state::<AppPhase>();
 
+    // The controls hint/overlay is app-global chrome (rl#117): the plugin owns its whole
+    // lifecycle, and the per-phase sync systems below only retarget its ActiveContext
+    // (Menu ↔ vehicles).
+    app.add_plugins(crab_world::controls::ControlsOverlayPlugin::<GcrControls>::default());
+
     app.init_non_send_resource::<PendingRound>()
-        .init_resource::<ActiveDevice>()
-        .init_resource::<ActiveContext<GcrControls>>()
-        .insert_resource(ForceRevealControls(false))
-        // The controls hint/overlay is app-global chrome (rl#117): it lives across every
-        // phase, and per-phase systems only retarget its ActiveContext (Menu ↔ vehicles).
-        .add_systems(Startup, spawn_controls_ui::<GcrControls>)
         .add_systems(
             OnEnter(AppPhase::Playing),
             (
@@ -89,12 +88,10 @@ pub fn build_windowed_app(
         .add_systems(
             Update,
             (
-                track_active_device,
                 sync_controls_context.run_if(in_state(AppPhase::Playing)),
                 sync_menu_controls_context.run_if(not(in_state(AppPhase::Playing))),
-                update_controls_ui::<GcrControls>,
             )
-                .chain(),
+                .before(update_controls_ui::<GcrControls>),
         );
 
     let asset_digest = crab_world::mesh_fallback::constructed_body_digest();

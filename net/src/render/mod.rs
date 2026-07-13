@@ -16,8 +16,7 @@ use crate::sim::{
 };
 use crate::telemetry::{TelemetryEvent, next_sample_tick};
 use crab_world::controls::{
-    ActiveContext, ActiveDevice, ForceRevealControls, PAD_STICK_DEADZONE, spawn_controls_ui,
-    track_active_device, update_controls_ui,
+    ActiveContext, PAD_STICK_DEADZONE, spawn_controls_ui, update_controls_ui,
 };
 
 pub use crate::sim::TICK_HZ;

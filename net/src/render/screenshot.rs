@@ -74,6 +74,7 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
         crab_world::controls::reveal_overrides_from_env::<GcrControls>();
     app.insert_resource(cfg)
         .init_resource::<ShotProgress>()
+        .init_resource::<crab_world::controls::ControlsRevealed>()
         .insert_resource(force_reveal)
         .insert_resource(active_device)
         .insert_resource(active_context)
