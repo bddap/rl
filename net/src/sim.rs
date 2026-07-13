@@ -98,7 +98,7 @@ pub const UNIT: i64 = 100_000;
 const PLAYER_SPEED_HEIGHTS_PER_S: f32 = 166.0 * 30.0 / (1000.0 * 1.8);
 
 pub(crate) const PLAYER_SPEED: i64 =
-    (PLAYER_SPEED_HEIGHTS_PER_S * PLAYER_HEIGHT * UNIT as f32 / TICK_HZ as f32) as i64;
+    (PLAYER_SPEED_HEIGHTS_PER_S * PLAYER_HEIGHT * UNIT as f32 / TICK_HZ as f32 + 0.5) as i64;
 
 /// Test-driver step per tick, folded from the ONE measured speed
 /// ([`CRAB_CHARGE_SPEED_PER_S`], rl#257) so pursuit/grace tests exercise her honest

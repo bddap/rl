@@ -11,8 +11,8 @@ use crate::client::{ClientSim, TickMsg};
 use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::net_loop::{Coordinator, Exchanged, NetDriver};
 use crate::sim::{
-    Crab, Input, Outcome, PLAYER_HEIGHT, Player, PlayerId, PlayerStatus, Pos, buttons,
-    trig, trig_client,
+    Crab, Input, Outcome, PLAYER_HEIGHT, Player, PlayerId, PlayerStatus, Pos, buttons, trig,
+    trig_client,
 };
 use crate::telemetry::{TelemetryEvent, next_sample_tick};
 use crab_world::controls::{ActiveContext, PAD_STICK_DEADZONE, update_controls_ui};
