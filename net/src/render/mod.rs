@@ -61,6 +61,7 @@ mod driver;
 mod hud;
 mod input;
 mod menu;
+mod pose;
 mod render_mode;
 mod scene;
 mod screenshot;

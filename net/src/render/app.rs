@@ -71,6 +71,7 @@ pub fn build_windowed_app(
             (
                 gather_input,
                 drive_client_sim,
+                super::articulation::sample_puppet_parts,
                 reconcile_avatars,
                 apply_transforms,
                 follow_ground,

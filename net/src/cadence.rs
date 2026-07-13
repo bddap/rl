@@ -3,8 +3,8 @@ use crab_world::physics::PHYSICS_HZ;
 
 /// Cumulative physics steps after `tick` whole sim ticks: the 64:30 staircase in
 /// closed form, anchored at absolute tick 0. THE one source for the step bunching —
-/// the host's per-tick pump and the renderer's physics-step-time cockpit
-/// interpolation (rl#264) both derive from it, so they cannot disagree. Only the
+/// the host's per-tick pump and the renderer's physics-step-time pose
+/// interpolation (rl#264/rl#267) both derive from it, so they cannot disagree. Only the
 /// server pumps physics (a remote-adopt client's `FixedUpdate` is parked), so no
 /// cross-peer alignment state is needed — and none exists to reset on restart.
 pub fn cumulative_steps(tick: u64) -> u64 {

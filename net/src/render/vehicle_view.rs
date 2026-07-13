@@ -6,9 +6,9 @@
 //! pass remains the colliders-mode view ([`render_mode`]).
 
 use crab_world::crab_view::RenderMode;
-use crab_world::vehicle::VehicleKind;
+use crab_world::vehicle::{PilotId, VehicleKind};
 
-use super::articulation::RemoteVehicle;
+use super::articulation::{RemoteVehicle, SampledCraft};
 use super::*;
 
 #[derive(Resource)]
@@ -35,7 +35,7 @@ impl VehicleAssets {
 /// Marks one remote craft's model root, keyed by the wire identity that spawned it.
 #[derive(Component)]
 struct VehicleModel {
-    pilot: u8,
+    pilot: PilotId,
     kind: VehicleKind,
 }
 
@@ -78,24 +78,27 @@ fn build_assets(
 
 /// Keep one model per remote craft: spawn on a pilot's first wire pose (or a kind cycle —
 /// the stale model despawns and a fresh one spawns in the same pass), track the pose while
-/// it flies, despawn on step-out. Poses place through the STATIC arena→render frame
-/// (rl#224), exactly like the wireframe pass.
+/// it flies, despawn on step-out. Poses sample per frame on the uniform physics-step
+/// clock (rl#267) — the same [`super::pose::PoseWindow`] law as the cockpit, so a watched
+/// craft doesn't step at raw tick cadence — and place through the STATIC arena→render
+/// frame (rl#224), exactly like the wireframe pass.
 fn reconcile_vehicle_models(
     mut commands: Commands,
     assets: Res<VehicleAssets>,
     remote: Res<RemoteVehicle>,
+    clock: Res<super::driver::RenderClock>,
     anchor: Res<crate::external_crab::ArenaAnchor>,
     mode: Res<RenderMode>,
     mut models: Query<(Entity, &VehicleModel, &mut Transform, &mut Visibility)>,
 ) {
+    let sampled = remote.sample(clock.tick, clock.frac);
     let want_vis = mode.mesh_visibility();
-    let placed = |v: &crate::articulation::VehiclePoseWire| {
-        Transform::from_translation(anchor.0 + Vec3::from_array(v.pos))
-            .with_rotation(Quat::from_array(v.rot))
+    let placed = |c: &SampledCraft| {
+        Transform::from_translation(anchor.0 + c.pose.pos).with_rotation(c.pose.orient)
     };
     let mut matched = std::collections::BTreeSet::new();
     for (entity, model, mut tf, mut vis) in &mut models {
-        match remote.0.iter().find(|v| v.pilot == model.pilot) {
+        match sampled.iter().find(|v| v.pilot == model.pilot) {
             Some(v) if v.kind == model.kind => {
                 matched.insert(model.pilot);
                 *tf = placed(v);
@@ -106,7 +109,7 @@ fn reconcile_vehicle_models(
             _ => commands.entity(entity).despawn(),
         }
     }
-    for v in &remote.0 {
+    for v in &sampled {
         if matched.contains(&v.pilot) {
             continue;
         }
@@ -162,10 +165,22 @@ mod tests {
     fn world_with(remote: Vec<VehiclePoseWire>, mode: RenderMode) -> World {
         let mut w = World::new();
         w.insert_resource(stub_assets());
-        w.insert_resource(RemoteVehicle(remote));
+        let mut rv = RemoteVehicle::default();
+        rv.adopt(1, &remote);
+        w.insert_resource(rv);
+        // A 1-deep window samples its newest pose raw, so these reconcile tests see the
+        // exact wire poses they fed; the interpolation law itself is pinned in pose.rs
+        // and articulation.rs.
+        w.insert_resource(super::super::driver::RenderClock { tick: 1, frac: 0.0 });
         w.insert_resource(crate::external_crab::ArenaAnchor(ANCHOR));
         w.insert_resource(mode);
         w
+    }
+
+    /// Adopt a fresh wire set at the next tick and move the render clock with it.
+    fn readopt(w: &mut World, tick: u64, remote: Vec<VehiclePoseWire>) {
+        w.resource_mut::<RemoteVehicle>().adopt(tick, &remote);
+        w.insert_resource(super::super::driver::RenderClock { tick, frac: 0.0 });
     }
 
     fn wire(pilot: u8, kind: VehicleKind, pos: [f32; 3]) -> VehiclePoseWire {
@@ -177,7 +192,7 @@ mod tests {
         }
     }
 
-    fn models(w: &mut World) -> Vec<(u8, VehicleKind, Vec3, Visibility, usize)> {
+    fn models(w: &mut World) -> Vec<(PilotId, VehicleKind, Vec3, Visibility, usize)> {
         let mut out: Vec<_> = w
             .query::<(&VehicleModel, &Transform, &Visibility, &Children)>()
             .iter(w)
@@ -197,7 +212,7 @@ mod tests {
         let got = models(&mut w);
         assert_eq!(got.len(), 1, "one model per remote craft");
         let (pilot, kind, at, vis, n_parts) = got[0];
-        assert_eq!((pilot, kind), (1, VehicleKind::Plane));
+        assert_eq!((pilot, kind), (PilotId(1), VehicleKind::Plane));
         assert_eq!(
             at,
             ANCHOR + Vec3::new(2.0, 5.0, -1.0),
@@ -211,18 +226,18 @@ mod tests {
         );
 
         // The craft moves: the SAME entity tracks (still exactly one model).
-        w.insert_resource(RemoteVehicle(vec![wire(
-            1,
-            VehicleKind::Plane,
-            [4.0, 6.0, 0.0],
-        )]));
+        readopt(
+            &mut w,
+            2,
+            vec![wire(1, VehicleKind::Plane, [4.0, 6.0, 0.0])],
+        );
         w.run_system_once(reconcile_vehicle_models).unwrap();
         let got = models(&mut w);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].2, ANCHOR + Vec3::new(4.0, 6.0, 0.0));
 
         // Pilot steps out: the model despawns, children included.
-        w.insert_resource(RemoteVehicle(Vec::new()));
+        readopt(&mut w, 3, Vec::new());
         w.run_system_once(reconcile_vehicle_models).unwrap();
         assert!(models(&mut w).is_empty(), "step-out despawns the model");
         assert_eq!(
@@ -239,11 +254,7 @@ mod tests {
             RenderMode::Mesh,
         );
         w.run_system_once(reconcile_vehicle_models).unwrap();
-        w.insert_resource(RemoteVehicle(vec![wire(
-            2,
-            VehicleKind::Ship,
-            [0.0, 2.0, 0.0],
-        )]));
+        readopt(&mut w, 2, vec![wire(2, VehicleKind::Ship, [0.0, 2.0, 0.0])]);
         w.run_system_once(reconcile_vehicle_models).unwrap();
         let got = models(&mut w);
         assert_eq!(got.len(), 1, "the stale kind's model is gone");

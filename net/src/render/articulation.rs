@@ -3,18 +3,82 @@ use bevy::prelude::*;
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
 use crab_world::bot::skin::{CrabSkinRepose, SkinRepose};
 use crab_world::crab_view::CrabBrainLabels;
-use crab_world::vehicle::{PilotId, Vehicle};
+use crab_world::vehicle::{PilotId, Vehicle, VehicleKind};
 
+use super::driver::RenderClock;
+use super::pose::{Pose, PoseWindow};
 use crate::articulation::{
     CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire,
 };
 
-/// Every NON-LOCAL pilot's craft kind + pose (rl#191), feeding the craft models
-/// (`vehicle_view`, rl#260) and the colliders-mode wireframe. The local pilot's own craft is
-/// excluded: the cockpit camera flies from it instead. Fed per tick from the same
-/// articulation on both arms — the host from its capture, a client from its adopt.
+/// Every NON-LOCAL pilot's craft kind + tick-stamped pose window (rl#191), feeding the
+/// craft models (`vehicle_view`, rl#260) and the colliders-mode wireframe. The local
+/// pilot's own craft is excluded: the cockpit camera flies from it instead. Fed per tick
+/// from the same articulation on both arms — the host from its capture, a client from
+/// its adopt — and sampled per frame on the uniform physics-step clock
+/// ([`PoseWindow`]), so a watched craft moves as smoothly as the cockpit (rl#267).
 #[derive(Resource, Default)]
-pub(super) struct RemoteVehicle(pub(super) Vec<VehiclePoseWire>);
+pub(super) struct RemoteVehicle(std::collections::BTreeMap<PilotId, RemoteCraft>);
+
+struct RemoteCraft {
+    kind: VehicleKind,
+    poses: PoseWindow,
+}
+
+/// One remote craft at render time — [`RemoteVehicle::sample`]'s output, so consumers
+/// are agnostic to the interpolation behind it.
+pub(super) struct SampledCraft {
+    pub pilot: PilotId,
+    pub kind: VehicleKind,
+    pub pose: Pose,
+}
+
+impl RemoteVehicle {
+    /// Adopt one tick's remote wire set: an absent pilot's craft drops (step-out — the
+    /// model despawns this frame), a kind change restarts its window (the cycle swap
+    /// teleports the new silhouette in; interpolating across it would smear one craft
+    /// into the other).
+    pub(super) fn adopt(&mut self, tick: u64, remote: &[VehiclePoseWire]) {
+        self.0.retain(|pilot, craft| {
+            remote
+                .iter()
+                .any(|v| PilotId(v.pilot) == *pilot && v.kind == craft.kind)
+        });
+        for v in remote {
+            let craft = self
+                .0
+                .entry(PilotId(v.pilot))
+                .or_insert_with(|| RemoteCraft {
+                    kind: v.kind,
+                    poses: PoseWindow::default(),
+                });
+            craft.poses.push(
+                tick,
+                Pose {
+                    pos: Vec3::from_array(v.pos),
+                    orient: Quat::from_array(v.rot),
+                },
+            );
+        }
+    }
+
+    pub(super) fn contains(&self, pilot: PilotId) -> bool {
+        self.0.contains_key(&pilot)
+    }
+
+    pub(super) fn sample(&self, now_tick: u64, frac: f32) -> Vec<SampledCraft> {
+        self.0
+            .iter()
+            .filter_map(|(&pilot, craft)| {
+                Some(SampledCraft {
+                    pilot,
+                    kind: craft.kind,
+                    pose: craft.poses.sample(now_tick, frac)?,
+                })
+            })
+            .collect()
+    }
+}
 
 /// One log line per remote-craft EDGE — the pilot set changing (a boarding/exit seen from this
 /// peer) and each craft's first real displacement (proof the other pilot's craft is moving here,
@@ -30,6 +94,7 @@ const REMOTE_MOVED_LOG_METERS: f32 = 5.0;
 
 pub(super) fn publish_remote_vehicles(
     world: &mut World,
+    tick: u64,
     vehicles: &[VehiclePoseWire],
     me: PilotId,
 ) {
@@ -63,7 +128,9 @@ pub(super) fn publish_remote_vehicles(
             );
         }
     }
-    world.insert_resource(RemoteVehicle(remote));
+    // `install_round` owns creation — a missing resource here is a broken install, not
+    // a case to paper over.
+    world.resource_mut::<RemoteVehicle>().adopt(tick, &remote);
 }
 
 const _: () = assert!(CrabJointId::COUNT < u8::MAX as usize);
@@ -165,32 +232,34 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
     }
 }
 
-/// Writes wire poses straight onto the local `CrabBodyPart` `Transform`s. That is the
-/// one sanctioned mutation of body-part transforms outside physics (rl#116): it runs
-/// only on a remote-adopt client, whose `FixedUpdate` is parked — rapier never steps
-/// there, so these puppet writes never reach a solver. The pose sentinel and the
-/// transform-ownership gate both allowlist exactly this path.
-pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
-    let by_env_tag: std::collections::HashMap<(usize, u8), &PartTransform> = art
-        .crabs
-        .iter()
-        .enumerate()
-        .flat_map(|(env, frame)| frame.parts.iter().map(move |p| ((env, p.part), p)))
-        .collect();
+/// The adopted crab puppet's tick-stamped pose windows, one per (env, part-tag).
+/// Fed by [`adopt`] each adopted tick, drained by [`sample_puppet_parts`] each frame:
+/// the host steps the parts in physics, so applying its frames raw replays the 64:30
+/// step bunching on every client — the same surge rl#264 fixed for the cockpit (rl#267).
+/// Only the remote-adopt arm ever feeds this; on the host it stays empty and the
+/// sampler writes nothing.
+#[derive(Resource, Default)]
+pub(super) struct PuppetWindows(std::collections::BTreeMap<(usize, u8), PoseWindow>);
 
-    let mut q = world.query_filtered::<(
-        &mut Transform,
-        &CrabEnvId,
-        Option<&CrabJoint>,
-        Option<&CrabCarapace>,
-    ), With<CrabBodyPart>>();
-    for (mut t, env, joint, carapace) in q.iter_mut(world) {
-        let Some(tag) = part_tag(carapace.is_some(), joint) else {
-            continue;
-        };
-        if let Some(p) = by_env_tag.get(&(env.0, tag)) {
-            t.translation = Vec3::from_array(p.pos);
-            t.rotation = Quat::from_array(p.rot);
+/// Adopts one articulation tick: crab body parts land in [`PuppetWindows`] (rendered by
+/// [`sample_puppet_parts`]); repose, arena anchor, and brain labels adopt directly —
+/// they are discrete state, not stepped motion.
+pub(super) fn adopt(world: &mut World, art: &CrabArticulation) {
+    {
+        // `install_round` owns creation, like `RemoteVehicle` above.
+        let mut windows = world.resource_mut::<PuppetWindows>();
+        // A shrunk crab set (a fresh round's re-adopt) drops the stale envs' windows.
+        windows.0.retain(|(env, _), _| *env < art.crabs.len());
+        for (env, frame) in art.crabs.iter().enumerate() {
+            for p in &frame.parts {
+                windows.0.entry((env, p.part)).or_default().push(
+                    art.tick,
+                    Pose {
+                        pos: Vec3::from_array(p.pos),
+                        orient: Quat::from_array(p.rot),
+                    },
+                );
+            }
         }
     }
 
@@ -225,6 +294,50 @@ pub(super) fn apply(world: &mut World, art: &CrabArticulation) {
     let labels: Vec<String> = art.crabs.iter().map(|f| f.brain_label.clone()).collect();
     if world.get_resource::<CrabBrainLabels>().map(|l| &l.0) != Some(&labels) {
         world.insert_resource(CrabBrainLabels(labels));
+    }
+}
+
+type PuppetPartXf<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Transform,
+        &'static CrabEnvId,
+        Option<&'static CrabJoint>,
+        Option<&'static CrabCarapace>,
+    ),
+    With<CrabBodyPart>,
+>;
+
+/// Writes the [`PuppetWindows`] samples onto the local `CrabBodyPart` `Transform`s each
+/// frame. That is the one sanctioned mutation of body-part transforms outside physics
+/// (rl#116): the windows fill only on a remote-adopt client, whose `FixedUpdate` is
+/// parked — rapier never steps there, so these puppet writes never reach a solver (on
+/// the host this is a no-op by construction). The pose sentinel and the
+/// transform-ownership gate both allowlist exactly this path. Must run after the
+/// frame's articulation [`adopt`] + `RenderClock` write, and before the skin's
+/// PostUpdate `drive_bones`, so bones follow this frame's sampled parts.
+pub(super) fn sample_puppet_parts(
+    clock: Res<RenderClock>,
+    windows: Res<PuppetWindows>,
+    mut parts: PuppetPartXf,
+) {
+    if windows.0.is_empty() {
+        return;
+    }
+    for (mut t, env, joint, carapace) in &mut parts {
+        let Some(tag) = part_tag(carapace.is_some(), joint) else {
+            continue;
+        };
+        let Some(p) = windows
+            .0
+            .get(&(env.0, tag))
+            .and_then(|w| w.sample(clock.tick, clock.frac))
+        else {
+            continue;
+        };
+        t.translation = p.pos;
+        t.rotation = p.orient;
     }
 }
 
@@ -307,6 +420,7 @@ mod tests {
         assert!(art.crabs[1].repose.is_none(), "env 1 has no placement yet");
         let art = crate::articulation::CrabArticulation::from_bytes(&art.to_bytes()).unwrap();
 
+        use bevy::ecs::system::RunSystemOnce;
         let mut client = World::new();
         let (c_cara, c_joint) = spawn_parts(
             &mut client,
@@ -323,10 +437,21 @@ mod tests {
             Transform::from_xyz(6.0, 6.0, 6.0),
         );
         client.insert_resource(CrabSkinRepose::default());
+        client.insert_resource(PuppetWindows::default());
+        client.insert_resource(RemoteVehicle::default());
 
-        apply(&mut client, &art);
+        adopt(&mut client, &art);
+        // Adopted parts render through the per-frame sampler (rl#267): a 1-deep window
+        // holds the newest pose, so sampling at the adopt tick reproduces the frame raw.
+        client.insert_resource(RenderClock {
+            tick: 42,
+            frac: 0.0,
+        });
+        client
+            .run_system_once(sample_puppet_parts)
+            .expect("sampler runs on a bare world");
         // Viewed as pilot 7: pilot 0's craft is somebody else's ⇒ it lands in RemoteVehicle.
-        publish_remote_vehicles(&mut client, &art.vehicles, PilotId(7));
+        publish_remote_vehicles(&mut client, 42, &art.vehicles, PilotId(7));
 
         let tf = |world: &mut World, e: Entity| *world.entity(e).get::<Transform>().unwrap();
         let got_cara = tf(&mut client, c_cara);
@@ -364,17 +489,122 @@ mod tests {
             client.resource::<crate::external_crab::ArenaAnchor>().0,
             Vec3::new(3.5, 0.0, -7.25)
         );
-        let crafts = client.resource::<RemoteVehicle>().0.clone();
+        let crafts = client.resource::<RemoteVehicle>().sample(42, 0.0);
         assert_eq!(crafts.len(), 1, "one piloted craft applied");
-        assert_eq!(crafts[0].pilot, 0, "the ram helper spawns pilot 0's craft");
-        assert_eq!(Vec3::from_array(crafts[0].pos), craft_t.translation);
-        assert_eq!(Quat::from_array(crafts[0].rot), craft_t.rotation);
+        assert_eq!(
+            crafts[0].pilot,
+            PilotId(0),
+            "the ram helper spawns pilot 0's craft"
+        );
+        assert_eq!(crafts[0].pose.pos, craft_t.translation);
+        assert_eq!(crafts[0].pose.orient, craft_t.rotation);
 
         // Viewed as pilot 0 the same craft is OURS — the cockpit, not a wireframe.
-        publish_remote_vehicles(&mut client, &art.vehicles, PilotId(0));
+        publish_remote_vehicles(&mut client, 42, &art.vehicles, PilotId(0));
         assert!(
-            client.resource::<RemoteVehicle>().0.is_empty(),
+            client
+                .resource::<RemoteVehicle>()
+                .sample(42, 0.0)
+                .is_empty(),
             "the local pilot's own craft never enters the remote wireframe set"
+        );
+    }
+
+    /// The rl#267 pin for remote crafts: wire poses adopted per tick sample back out
+    /// interpolated on the uniform physics-step clock — the same [`PoseWindow`] law the
+    /// cockpit follows (its uniform-velocity sweep is pinned in `pose.rs`) — while a
+    /// step-out drops the craft and a kind cycle restarts its window instead of
+    /// smearing one silhouette into the other.
+    #[test]
+    fn remote_crafts_interpolate_and_reset_on_kind_cycle() {
+        let wire = |pilot: u8, kind, x: f32| VehiclePoseWire {
+            pilot,
+            kind,
+            pos: [x, 0.0, 0.0],
+            rot: [0.0, 0.0, 0.0, 1.0],
+        };
+        let mut rv = RemoteVehicle::default();
+        for tick in 1..=3u64 {
+            rv.adopt(tick, &[wire(1, VehicleKind::Plane, tick as f32)]);
+        }
+        // Mid-frame between ticks 2 and 3: strictly between the two wire poses.
+        let mid = rv.sample(3, 0.5);
+        assert_eq!(mid.len(), 1);
+        assert!(
+            mid[0].pose.pos.x > 2.0 && mid[0].pose.pos.x < 3.0,
+            "sampled x {} must interpolate, not snap to a raw tick pose",
+            mid[0].pose.pos.x
+        );
+        assert!(rv.contains(PilotId(1)) && !rv.contains(PilotId(2)));
+
+        // Kind cycle: the window restarts — the ship samples at its own first pose.
+        rv.adopt(4, &[wire(1, VehicleKind::Ship, 10.0)]);
+        let swapped = rv.sample(4, 0.5);
+        assert_eq!(swapped[0].kind, VehicleKind::Ship);
+        assert_eq!(
+            swapped[0].pose.pos.x, 10.0,
+            "a fresh window holds the newest pose; interpolating across the swap would \
+             smear the plane into the ship"
+        );
+
+        // Step-out: absent from the wire set ⇒ dropped immediately.
+        rv.adopt(5, &[]);
+        assert!(rv.sample(5, 0.0).is_empty());
+    }
+
+    /// The rl#267 pin for the crab puppet: adopted part frames render through the same
+    /// physics-step-clock sampling, not raw per tick.
+    #[test]
+    fn puppet_parts_interpolate_between_adopted_ticks() {
+        use bevy::ecs::system::RunSystemOnce;
+        let joint_id = CrabJointId::ClawShoulder(Side::Left);
+        let mut client = World::new();
+        let (cara, _) = spawn_parts(
+            &mut client,
+            0,
+            Transform::IDENTITY,
+            joint_id,
+            Transform::IDENTITY,
+        );
+        client.insert_resource(CrabSkinRepose::default());
+        client.insert_resource(PuppetWindows::default());
+        for tick in 1..=3u64 {
+            let art = CrabArticulation {
+                tick,
+                crabs: vec![CrabFrame {
+                    parts: vec![
+                        PartTransform {
+                            part: 0,
+                            pos: [tick as f32, 0.0, 0.0],
+                            rot: [0.0, 0.0, 0.0, 1.0],
+                        },
+                        PartTransform {
+                            part: 1 + joint_id.index() as u8,
+                            pos: [0.0, tick as f32, 0.0],
+                            rot: [0.0, 0.0, 0.0, 1.0],
+                        },
+                    ],
+                    repose: None,
+                    brain_label: String::new(),
+                }],
+                arena_anchor: [0.0; 3],
+                vehicles: Vec::new(),
+            };
+            adopt(&mut client, &art);
+        }
+        client.insert_resource(RenderClock { tick: 3, frac: 0.5 });
+        client
+            .run_system_once(sample_puppet_parts)
+            .expect("sampler runs on a bare world");
+        let x = client
+            .entity(cara)
+            .get::<Transform>()
+            .unwrap()
+            .translation
+            .x;
+        assert!(
+            x > 2.0 && x < 3.0,
+            "carapace x {x} must interpolate between adopted ticks, not snap raw"
         );
     }
 }

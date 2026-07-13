@@ -69,6 +69,7 @@ fn draw_vehicle_collider_wireframe(
     mode: Res<RenderMode>,
     anchor: Res<crate::external_crab::ArenaAnchor>,
     remote: Res<super::articulation::RemoteVehicle>,
+    clock: Res<super::driver::RenderClock>,
     vehicles: Query<(&GlobalTransform, &Collider), With<Vehicle>>,
     mut gizmos: Gizmos,
 ) {
@@ -89,14 +90,16 @@ fn draw_vehicle_collider_wireframe(
                 COLLIDER_WIREFRAME_COLOR,
             );
         }
-        // On the HOST the entity query covers EVERY craft (its world simulates all pilots'),
-        // so the RemoteVehicle pass below would ghost each remote craft a tick behind its
-        // live entity. A client has no Vehicle entities and always takes the wire pass.
+        // On the HOST the entity query covers EVERY craft (its world simulates all
+        // pilots'), and this pass deliberately draws the LIVE rigidbody poses: the
+        // colliders view is a physics debug surface, so it shows where physics IS —
+        // in mesh+colliders mode it leads the sampled craft models by the window's
+        // one-step render latency (rl#267), which is that latency made visible, not a
+        // bug. A client has no Vehicle entities and always takes the sampled pass.
         return;
     }
-    for v in &remote.0 {
-        let world = placement
-            * Mat4::from_rotation_translation(Quat::from_array(v.rot), Vec3::from_array(v.pos));
+    for c in &remote.sample(clock.tick, clock.frac) {
+        let world = placement * Mat4::from_rotation_translation(c.pose.orient, c.pose.pos);
         draw_collider_wireframe(
             &mut gizmos,
             crab_world::vehicle::vehicle_collider().as_typed_shape(),
