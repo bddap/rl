@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::bot::meshfit::PartId;
 
 use super::recipe::link_world_origins;
-use super::{RigLink, RigRecipe};
+use super::{LinkShape, RigLink, RigRecipe};
 
 pub struct RestCollider {
     pub part: PartId,
@@ -13,7 +13,19 @@ pub struct RestCollider {
 
 pub enum RestShape {
     Capsule { a: Vec3, b: Vec3, radius: f32 },
-    Cuboid { center: Vec3, half: Vec3 },
+    Cuboid { center: Vec3, rot: Quat, half: Vec3 },
+}
+
+/// The eight world-space corners of an oriented cuboid.
+pub fn cuboid_corners(center: Vec3, rot: Quat, half: Vec3) -> [Vec3; 8] {
+    std::array::from_fn(|i| {
+        let s = Vec3::new(
+            if i & 1 == 0 { -1.0 } else { 1.0 },
+            if i & 2 == 0 { -1.0 } else { 1.0 },
+            if i & 4 == 0 { -1.0 } else { 1.0 },
+        );
+        center + rot * (s * half)
+    })
 }
 
 pub fn rest_colliders(recipe: &RigRecipe) -> Vec<RestCollider> {
@@ -24,7 +36,7 @@ pub fn rest_colliders(recipe: &RigRecipe) -> Vec<RestCollider> {
         if let Some(id) = link.actuated {
             out.push(RestCollider {
                 part: PartId::Joint(id),
-                shape: link_capsule(link, origin).into(),
+                shape: link_rest_shape(link, origin),
                 pivot: origin,
             });
         }
@@ -55,9 +67,11 @@ impl CrabSilhouette {
                     lo = lo.min(a.y - radius).min(b.y - radius);
                     hi = hi.max(a.y + radius).max(b.y + radius);
                 }
-                RestShape::Cuboid { center, half } => {
-                    lo = lo.min(center.y - half.y);
-                    hi = hi.max(center.y + half.y);
+                RestShape::Cuboid { center, rot, half } => {
+                    for c in cuboid_corners(center, rot, half) {
+                        lo = lo.min(c.y);
+                        hi = hi.max(c.y);
+                    }
                 }
             }
         }
@@ -76,7 +90,7 @@ pub fn recipe_silhouette(recipe: &RigRecipe) -> CrabSilhouette {
         .links
         .iter()
         .zip(&world_origin)
-        .map(|(link, &origin)| link_capsule(link, origin).into())
+        .map(|(link, &origin)| link_rest_shape(link, origin))
         .collect();
     CrabSilhouette {
         limbs,
@@ -84,35 +98,32 @@ pub fn recipe_silhouette(recipe: &RigRecipe) -> CrabSilhouette {
     }
 }
 
-pub(crate) struct LinkCapsule {
-    pub a: Vec3,
-    pub b: Vec3,
-    pub radius: f32,
-}
-
-impl From<LinkCapsule> for RestShape {
-    fn from(c: LinkCapsule) -> Self {
-        RestShape::Capsule {
-            a: c.a,
-            b: c.b,
-            radius: c.radius,
-        }
-    }
-}
-
-pub(crate) fn link_capsule(link: &RigLink, origin: Vec3) -> LinkCapsule {
-    let axis = link.col_rot * Vec3::Y * link.half_height;
+pub(crate) fn link_rest_shape(link: &RigLink, origin: Vec3) -> RestShape {
     let c = origin + link.center;
-    LinkCapsule {
-        a: c - axis,
-        b: c + axis,
-        radius: link.radius,
+    match link.shape {
+        LinkShape::Capsule {
+            half_height,
+            radius,
+        } => {
+            let axis = link.col_rot * Vec3::Y * half_height;
+            RestShape::Capsule {
+                a: c - axis,
+                b: c + axis,
+                radius,
+            }
+        }
+        LinkShape::Cuboid { half } => RestShape::Cuboid {
+            center: c,
+            rot: link.col_rot,
+            half,
+        },
     }
 }
 
 fn carapace_cuboid(recipe: &RigRecipe, hub: Vec3) -> RestShape {
     RestShape::Cuboid {
         center: hub + recipe.carapace_offset,
+        rot: Quat::IDENTITY,
         half: recipe.carapace_half,
     }
 }
@@ -136,8 +147,13 @@ mod tests {
                 RestShape::Capsule { a, b, radius } => {
                     assert!(a.is_finite() && b.is_finite() && radius.is_finite() && radius > 0.0);
                 }
-                RestShape::Cuboid { center, half } => {
-                    assert!(center.is_finite() && half.is_finite() && half.min_element() > 0.0);
+                RestShape::Cuboid { center, rot, half } => {
+                    assert!(
+                        center.is_finite()
+                            && rot.is_finite()
+                            && half.is_finite()
+                            && half.min_element() > 0.0
+                    );
                 }
             }
         }

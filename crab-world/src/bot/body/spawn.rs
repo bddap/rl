@@ -56,7 +56,7 @@ pub fn spawn_crab(
     let mut low_unrot = origin.y - carapace_r;
     let mut low_rot = origin.y - carapace_r;
     for (link, &p) in recipe.links.iter().zip(&world_pos) {
-        let r = link.center.length() + link.half_height + link.radius;
+        let r = link.bounding_radius();
         low_unrot = low_unrot.min(p.y - r);
         low_rot = low_rot.min((origin + init_rotation * (p - origin)).y - r);
     }
@@ -107,8 +107,14 @@ pub fn spawn_crab(
             Some(idx) => ents[idx],
         };
         let here = world_pos[i];
-        let cap = rig::link_capsule(link, Vec3::ZERO);
-        let collider = Collider::capsule(cap.a, cap.b, cap.radius);
+        let collider = match rig::link_rest_shape(link, Vec3::ZERO) {
+            rig::RestShape::Capsule { a, b, radius } => Collider::capsule(a, b, radius),
+            rig::RestShape::Cuboid { center, rot, half } => Collider::compound(vec![(
+                center,
+                rot,
+                Collider::cuboid(half.x, half.y, half.z),
+            )]),
+        };
         let groups = if inside_carapace(here + link.center) {
             NESTED_COLLISION
         } else {

@@ -40,8 +40,10 @@ const FIGHT_MIN_DEPTH: f32 = 0.005;
 
 /// Rest contacts the crab is allowed to carry standing load through — the
 /// structural patterns observed on the settled real model: shell skirt on
-/// the thigh (basis) capsules, same-side adjacent thighs/knees stacking in
-/// the crumple, and the folded claws resting on themselves and each other.
+/// the thigh (basis) colliders, same-side adjacent thighs/knees stacking in
+/// the crumple, the folded claws resting on themselves and each other, and
+/// the front thigh nesting against its claw shoulder (a contact the mesh
+/// really makes; it only registered once rl#20 Phase 1 fit the flesh fully).
 /// Quietness exempts a contact from the illegal verdict ONLY on these pairs;
 /// a quiet deep wedge anywhere else (the historical coxa-coxa class) stays
 /// illegal.
@@ -63,6 +65,7 @@ fn allowed_rest_contact(a: Option<PartId>, b: Option<PartId>) -> bool {
         (PartId::Joint(x), PartId::Joint(y)) => match (x, y) {
             (ClawShoulder(s), ClawPincer(t)) | (ClawPincer(s), ClawShoulder(t)) => s == t,
             (ClawShoulder(_), ClawShoulder(_)) => true,
+            (ClawShoulder(s), LegBasis(t, 0)) | (LegBasis(s, 0), ClawShoulder(t)) => s == t,
             _ => adjacent_stack(x, y),
         },
         _ => false,
@@ -283,11 +286,14 @@ fn report(n_colliders: usize, findings: &[Finding]) -> i32 {
         );
         for f in &illegal {
             println!(
-                "  {:<26} <-> {:<26} {:>8.2} mm  ({})",
+                "  {:<26} <-> {:<26} {:>8.2} mm  ({}, {})",
                 f.a,
                 f.b,
                 f.depth * 1000.0,
-                f.adjacency()
+                f.adjacency(),
+                // Quiet-but-unallowed vs actively fought decides the remedy:
+                // allowlist a structural rest contact, refit a fought one.
+                if f.quiet { "quiet" } else { "FOUGHT" }
             );
         }
     }
@@ -400,6 +406,18 @@ mod tests {
             j(LegMerus(Side::Left, 1)),
             j(LegMerus(Side::Left, 2))
         ));
+        assert!(allowed_rest_contact(
+            j(LegBasis(Side::Left, 0)),
+            j(ClawShoulder(Side::Left))
+        ));
+        assert!(
+            !allowed_rest_contact(j(LegBasis(Side::Left, 0)), j(ClawShoulder(Side::Right))),
+            "front-thigh-on-shoulder nesting is same-side only"
+        );
+        assert!(
+            !allowed_rest_contact(j(LegBasis(Side::Left, 1)), j(ClawShoulder(Side::Left))),
+            "only the FRONT leg nests against the claw shoulder"
+        );
         assert!(!allowed_rest_contact(
             j(LegMerus(Side::Left, 1)),
             j(LegMerus(Side::Right, 1))
