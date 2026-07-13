@@ -327,6 +327,11 @@ pub fn run_learner(
         state.config.log_std_anneal_ticks,
         anneal_epoch,
     );
+    // Loud so a run's train.log proves which reward economy it trained under (rl#268).
+    eprintln!(
+        "[learner] reward economy: effort_weight {} (RL_EFFORT_WEIGHT)",
+        crate::training::reward::effort_weight(),
+    );
 
     // Best-by-chase-eval keeping (rl#157, rekeyed by rl#233): periodically chase-eval
     // the checkpoint and mirror it into `<ckpt>/best/` when it beats the incumbent's
