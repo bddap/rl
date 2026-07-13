@@ -171,15 +171,18 @@ fn menu_screen(
         return Ok(());
     }
 
-    // While the controls overlay is revealed, yield the screen to it — the egui pass
-    // draws OVER bevy UI, so a centered menu window would cover the centered legend.
-    if revealed.0 {
+    let typing = ctx.wants_keyboard_input();
+
+    // While the controls overlay is revealed, yield the screen to it — the egui pass draws
+    // OVER bevy UI, so a centered menu window would cover the centered legend. NOT while a
+    // text field has focus: egui drops the focus of any widget it doesn't draw, and losing
+    // it would un-gate `typing` — arming the very one-press Confirm the gate below exists
+    // to prevent (Tab, the reveal key, is also the reflexive next-field key).
+    if revealed.0 && !typing {
         return Ok(());
     }
 
     let lobby_len = state.forming.as_ref().map(|f| f.lobby_len()).unwrap_or(0);
-
-    let typing = ctx.wants_keyboard_input();
 
     let inputs = gather_menu_inputs(&keys, &gamepads, typing, &mut state.stick_latched);
     for input in inputs {

@@ -70,23 +70,18 @@ fn offscreen_app_scaffold() -> App {
 /// Wire the offscreen screenshot systems + render-mode onto a scaffolded app whose round is
 /// already installed — shared by both builders so the capture path can't drift.
 fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super::RenderMode) {
+    // The overlay rides its plugin here too — one wiring of it, app-wide (the demo's
+    // offscreen app does the same): the env overrides land after, replacing the plugin's
+    // defaults, so an evidence shot can force reveal/device/context.
     let (force_reveal, active_device, active_context) =
         crab_world::controls::reveal_overrides_from_env::<GcrControls>();
-    app.insert_resource(cfg)
+    app.add_plugins(crab_world::controls::ControlsOverlayPlugin::<GcrControls>::default())
+        .insert_resource(cfg)
         .init_resource::<ShotProgress>()
-        .init_resource::<crab_world::controls::ControlsRevealed>()
         .insert_resource(force_reveal)
         .insert_resource(active_device)
         .insert_resource(active_context)
-        .add_systems(
-            Startup,
-            (
-                spawn_world,
-                spawn_offscreen_camera,
-                spawn_hud,
-                spawn_controls_ui::<GcrControls>,
-            ),
-        )
+        .add_systems(Startup, (spawn_world, spawn_offscreen_camera, spawn_hud))
         .add_systems(
             Update,
             (
@@ -100,9 +95,9 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
                 // Keep the controls HUD's context live like the windowed app — unless an
                 // evidence shot forced one via RL_SHOW_CONTROLS_CONTEXT.
                 sync_controls_context
-                    .run_if(|| std::env::var_os("RL_SHOW_CONTROLS_CONTEXT").is_none()),
+                    .run_if(|| std::env::var_os("RL_SHOW_CONTROLS_CONTEXT").is_none())
+                    .before(update_controls_ui::<GcrControls>),
                 update_hud,
-                update_controls_ui::<GcrControls>,
                 capture_when_settled,
             )
                 .chain(),

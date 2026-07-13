@@ -488,22 +488,24 @@ mod bevy_glue {
     use crab_world::controls::ControlInput;
 
     impl Key {
-        fn key_code(self) -> KeyCode {
+        fn key_codes(self) -> &'static [KeyCode] {
             match self {
-                Key::W => KeyCode::KeyW,
-                Key::A => KeyCode::KeyA,
-                Key::S => KeyCode::KeyS,
-                Key::D => KeyCode::KeyD,
-                Key::E => KeyCode::KeyE,
-                Key::R => KeyCode::KeyR,
-                Key::V => KeyCode::KeyV,
-                Key::B => KeyCode::KeyB,
-                Key::Tab => KeyCode::Tab,
-                Key::Space => KeyCode::Space,
-                Key::Escape => KeyCode::Escape,
-                Key::ArrowUp => KeyCode::ArrowUp,
-                Key::ArrowDown => KeyCode::ArrowDown,
-                Key::Enter => KeyCode::Enter,
+                Key::W => &[KeyCode::KeyW],
+                Key::A => &[KeyCode::KeyA],
+                Key::S => &[KeyCode::KeyS],
+                Key::D => &[KeyCode::KeyD],
+                Key::E => &[KeyCode::KeyE],
+                Key::R => &[KeyCode::KeyR],
+                Key::V => &[KeyCode::KeyV],
+                Key::B => &[KeyCode::KeyB],
+                Key::Tab => &[KeyCode::Tab],
+                Key::Space => &[KeyCode::Space],
+                Key::Escape => &[KeyCode::Escape],
+                Key::ArrowUp => &[KeyCode::ArrowUp],
+                Key::ArrowDown => &[KeyCode::ArrowDown],
+                // One control to the player, two physical keys — full-size keyboards
+                // confirm with either.
+                Key::Enter => &[KeyCode::Enter, KeyCode::NumpadEnter],
             }
         }
     }
@@ -539,8 +541,8 @@ mod bevy_glue {
     }
 
     impl ControlInput for GcrControls {
-        fn key_code(key: Key) -> Option<KeyCode> {
-            Some(key.key_code())
+        fn key_codes(key: Key) -> &'static [KeyCode] {
+            key.key_codes()
         }
         fn gamepad_button(pad: PadButton) -> Option<GamepadButton> {
             pad.gamepad_button()
@@ -806,6 +808,27 @@ mod tests {
         assert_eq!(keys(Action::PlaneThrottle), &[Key::W, Key::S]);
         assert_eq!(keys(Action::PlaneRudder), &[Key::A, Key::D]);
         assert_eq!(keys(Action::MatchVelocity), &[Key::Space]);
+    }
+
+    /// One legend token, several physical keys: the numpad's Enter confirms too, and it
+    /// does so without printing a second chip in the legend (rl#117).
+    #[cfg(feature = "render")]
+    #[test]
+    fn confirm_accepts_both_enter_keys_but_shows_one_chip() {
+        use bevy::prelude::KeyCode;
+        let codes: Vec<KeyCode> = key_codes_for(Action::MenuConfirm).collect();
+        assert!(codes.contains(&KeyCode::Enter));
+        assert!(codes.contains(&KeyCode::NumpadEnter));
+        assert!(codes.contains(&KeyCode::Space));
+        assert_eq!(
+            binding::<GcrControls>(Action::MenuConfirm)
+                .unwrap()
+                .glyphs(Device::KeyboardMouse),
+            vec![
+                Glyph::Label("Enter"),
+                Glyph::Icon("controls/keyboard_space.png")
+            ]
+        );
     }
 
     /// The screenshot context override round-trips the ids the evidence harness uses.

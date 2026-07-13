@@ -15,9 +15,7 @@ use crate::sim::{
     trig, trig_client,
 };
 use crate::telemetry::{TelemetryEvent, next_sample_tick};
-use crab_world::controls::{
-    ActiveContext, PAD_STICK_DEADZONE, spawn_controls_ui, update_controls_ui,
-};
+use crab_world::controls::{ActiveContext, PAD_STICK_DEADZONE, update_controls_ui};
 
 pub use crate::sim::TICK_HZ;
 
