@@ -54,7 +54,10 @@ pub struct CrabClawTip;
 /// synced back into the body at `SyncBackend` and blows up the multibody (the
 /// GCR play-day crash, rl#116). Cosmetic/render placement rides the render-only
 /// skin bones / `CrabSkinRepose` instead; [`crate::bot::pose_sentinel`] enforces
-/// this at runtime in visual worlds.
+/// this at runtime in visual worlds. Render consumers must also not READ this
+/// `Transform` as the rendered pose directly — resolve it through
+/// [`crate::bot::skin::CrabRenderPose::rendered`], or the 64:30 step staircase
+/// leaks back into rendered motion (rl#274).
 #[derive(Component)]
 pub struct CrabBodyPart;
 

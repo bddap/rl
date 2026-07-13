@@ -234,19 +234,19 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
 
 /// The crab body parts' tick-stamped pose windows, one per (env, part-tag), fed per tick
 /// on BOTH arms — the host from its own capture, a client from its adopt (rl#274) — and
-/// sampled per frame by [`sample_puppet_parts`] into the render-only
+/// sampled per frame by [`sample_crab_part_poses`] into the render-only
 /// [`CrabRenderPose`]: the parts step in physics at the 64:30 cadence, so rendering
 /// their raw transforms replays the step bunching rl#264 fixed for the cockpit — on the
 /// host's own screen too, not just on a client (rl#267).
 #[derive(Resource, Default)]
-pub(super) struct PuppetWindows(std::collections::BTreeMap<(usize, u8), PoseWindow>);
+pub(super) struct CrabPartWindows(std::collections::BTreeMap<(usize, u8), PoseWindow>);
 
-/// Feed one articulation tick's crab body-part poses into [`PuppetWindows`] — the ONE
+/// Feed one articulation tick's crab body-part poses into [`CrabPartWindows`] — the ONE
 /// interpolation feed on both arms (rl#274): the host calls it on the articulation it
 /// just captured, a client inside [`adopt`] on the one it adopted.
-pub(super) fn feed_puppet_windows(world: &mut World, art: &CrabArticulation) {
+pub(super) fn feed_crab_part_windows(world: &mut World, art: &CrabArticulation) {
     // `install_round` owns creation, like `RemoteVehicle` above.
-    let mut windows = world.resource_mut::<PuppetWindows>();
+    let mut windows = world.resource_mut::<CrabPartWindows>();
     // A shrunk crab set (a fresh round's re-adopt) drops the stale envs' windows.
     windows.0.retain(|(env, _), _| *env < art.crabs.len());
     for (env, frame) in art.crabs.iter().enumerate() {
@@ -262,11 +262,11 @@ pub(super) fn feed_puppet_windows(world: &mut World, art: &CrabArticulation) {
     }
 }
 
-/// Adopts one articulation tick: crab body parts land in [`PuppetWindows`] (rendered by
-/// [`sample_puppet_parts`]); repose, arena anchor, and brain labels adopt directly —
+/// Adopts one articulation tick: crab body parts land in [`CrabPartWindows`] (rendered by
+/// [`sample_crab_part_poses`]); repose, arena anchor, and brain labels adopt directly —
 /// they are discrete state, not stepped motion.
 pub(super) fn adopt(world: &mut World, art: &CrabArticulation) {
-    feed_puppet_windows(world, art);
+    feed_crab_part_windows(world, art);
 
     if let Some(mut repose) = world.get_resource_mut::<CrabSkinRepose>() {
         for (env, frame) in art.crabs.iter().enumerate() {
@@ -302,7 +302,7 @@ pub(super) fn adopt(world: &mut World, art: &CrabArticulation) {
     }
 }
 
-type PuppetPart<'w, 's> = Query<
+type CrabPartQuery<'w, 's> = Query<
     'w,
     's,
     (
@@ -314,18 +314,20 @@ type PuppetPart<'w, 's> = Query<
     With<CrabBodyPart>,
 >;
 
-/// Samples [`PuppetWindows`] on the uniform physics-step clock into the render-only
+/// Samples [`CrabPartWindows`] on the uniform physics-step clock into the render-only
 /// [`CrabRenderPose`] each frame — the pose every crab visual consumer (skin bones,
 /// collider cage, brain labels) reads. Body-part `Transform`s stay rapier's alone
 /// (rl#116): nothing outside physics writes them anymore (rl#274), so this one path
-/// serves host and client alike. Rebuilt per frame; a part whose window hasn't filled
-/// yet (engage grace, an unarmed world) gets no entry and renders its physics
-/// transform. Must run after the frame's window feed + `RenderClock` write, and before
-/// the skin's PostUpdate `drive_bones`, so bones follow this frame's samples.
-pub(super) fn sample_puppet_parts(
+/// serves host and client alike. Rebuilt per frame; a part is absent only while its
+/// window has NEVER been fed (an unarmed/streamless world, the pre-first-articulation
+/// frames) and renders its physics transform then — a partially-filled window already
+/// holds its newest pose (`PoseWindow::sample`'s engage grace). Must run after the
+/// frame's window feed + `RenderClock` write, and before the skin's PostUpdate
+/// `drive_bones`, so bones follow this frame's samples.
+pub(super) fn sample_crab_part_poses(
     clock: Res<RenderClock>,
-    windows: Res<PuppetWindows>,
-    parts: PuppetPart,
+    windows: Res<CrabPartWindows>,
+    parts: CrabPartQuery,
     mut sampled: ResMut<CrabRenderPose>,
 ) {
     sampled.0.clear();
@@ -386,7 +388,7 @@ mod tests {
             Transform::from_xyz(8.0, 0.5, -5.0).with_rotation(Quat::from_rotation_x(0.9));
 
         let mut host = World::new();
-        spawn_parts(&mut host, 0, cara_t, joint_id, joint_t);
+        let (h_cara, _) = spawn_parts(&mut host, 0, cara_t, joint_id, joint_t);
         spawn_parts(&mut host, 1, cara_t1, joint_id, joint_t1);
         host.insert_resource(CrabSkinRepose(
             [(
@@ -426,6 +428,32 @@ mod tests {
         let art = crate::articulation::CrabArticulation::from_bytes(&art.to_bytes()).unwrap();
 
         use bevy::ecs::system::RunSystemOnce;
+
+        // The HOST arm (rl#274): the same articulation it just captured feeds its own
+        // windows, and sampling reproduces its own parts' exact poses in the overlay —
+        // while the rapier-owned Transforms it renders FROM stay untouched.
+        host.insert_resource(CrabPartWindows::default());
+        host.insert_resource(CrabRenderPose::default());
+        host.insert_resource(RenderClock {
+            tick: 42,
+            frac: 0.0,
+        });
+        feed_crab_part_windows(&mut host, &art);
+        host.run_system_once(sample_crab_part_poses)
+            .expect("sampler runs on a bare world");
+        let h_sampled = *host
+            .resource::<CrabRenderPose>()
+            .0
+            .get(&h_cara)
+            .expect("the host's own carapace has a sampled render pose");
+        assert_eq!(h_sampled.translation, cara_t.translation);
+        assert_eq!(h_sampled.rotation, cara_t.rotation);
+        assert_eq!(
+            host.entity(h_cara).get::<Transform>().unwrap().translation,
+            cara_t.translation,
+            "the host's rapier-owned Transform is read, never written (rl#116/rl#274)"
+        );
+
         let mut client = World::new();
         let (c_cara, c_joint) = spawn_parts(
             &mut client,
@@ -442,7 +470,7 @@ mod tests {
             Transform::from_xyz(6.0, 6.0, 6.0),
         );
         client.insert_resource(CrabSkinRepose::default());
-        client.insert_resource(PuppetWindows::default());
+        client.insert_resource(CrabPartWindows::default());
         client.insert_resource(CrabRenderPose::default());
         client.insert_resource(RemoteVehicle::default());
 
@@ -454,7 +482,7 @@ mod tests {
             frac: 0.0,
         });
         client
-            .run_system_once(sample_puppet_parts)
+            .run_system_once(sample_crab_part_poses)
             .expect("sampler runs on a bare world");
         // Viewed as pilot 7: pilot 0's craft is somebody else's ⇒ it lands in RemoteVehicle.
         publish_remote_vehicles(&mut client, 42, &art.vehicles, PilotId(7));
@@ -577,7 +605,7 @@ mod tests {
     /// overlay, not raw per tick, and the parts' rapier-owned `Transform`s are never
     /// touched.
     #[test]
-    fn puppet_parts_interpolate_between_adopted_ticks() {
+    fn crab_parts_interpolate_between_fed_ticks() {
         use bevy::ecs::system::RunSystemOnce;
         let joint_id = CrabJointId::ClawShoulder(Side::Left);
         let mut client = World::new();
@@ -589,7 +617,7 @@ mod tests {
             Transform::IDENTITY,
         );
         client.insert_resource(CrabSkinRepose::default());
-        client.insert_resource(PuppetWindows::default());
+        client.insert_resource(CrabPartWindows::default());
         client.insert_resource(CrabRenderPose::default());
         for tick in 1..=3u64 {
             let art = CrabArticulation {
@@ -617,7 +645,7 @@ mod tests {
         }
         client.insert_resource(RenderClock { tick: 3, frac: 0.5 });
         client
-            .run_system_once(sample_puppet_parts)
+            .run_system_once(sample_crab_part_poses)
             .expect("sampler runs on a bare world");
         let x = client
             .resource::<CrabRenderPose>()
