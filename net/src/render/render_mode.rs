@@ -41,7 +41,9 @@ pub fn register(app: &mut App, initial: RenderMode) {
 /// flag accepts and the states a code reaches are one list. Both knobs are pure
 /// dressing — neither reaches simulated state, so switching mid-round changes nothing
 /// an eval or a peer would see.
-pub(crate) trait ViewKnob: Resource + crab_world::CyclableView {
+pub(crate) trait ViewKnob:
+    Resource<Mutability = bevy::ecs::component::Mutable> + crab_world::CyclableView
+{
     /// How the knob names itself in the log line.
     const LOG_LABEL: &'static str;
     /// The variant's chord action. Exhaustive by construction: a new variant with no

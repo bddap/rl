@@ -47,7 +47,7 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
     );
     let mut scope: Vec<fn(&mut World)> = Vec::new();
     let prev = SimSnapshot::capture(&client);
-    world.insert_non_send_resource(GameState {
+    world.insert_non_send(GameState {
         client,
         coord,
         accumulator: 0.0,
@@ -60,7 +60,7 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
         logged_statuses: BTreeMap::new(),
     });
     scope.push(|w| {
-        w.remove_non_send_resource::<GameState>();
+        w.remove_non_send::<GameState>();
     });
     round_resource::<PendingInput>(world, &mut scope);
     round_resource::<FlightInput>(world, &mut scope);
@@ -116,11 +116,11 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
 pub(super) struct PendingRound(pub(super) Option<ArmedRound>);
 
 pub(super) fn ensure_round_installed(world: &mut World) {
-    if world.get_non_send_resource::<GameState>().is_some() {
+    if world.get_non_send::<GameState>().is_some() {
         return;
     }
     let mut ready = world
-        .get_non_send_resource_mut::<PendingRound>()
+        .get_non_send_mut::<PendingRound>()
         .and_then(|mut p| p.0.take())
         .expect("entered Playing with no round to install — the menu must park a round before transitioning")
         .into_ready();
@@ -128,7 +128,7 @@ pub(super) fn ensure_round_installed(world: &mut World) {
         world.get_resource::<NnCrabStackInstalled>().is_some(),
         "the NN-crab stack must be installed before Playing (rl#114: the checkpoint is required)"
     );
-    let spawns = match world.get_non_send_resource::<crate::crab_slot::CrabPolicies>() {
+    let spawns = match world.get_non_send::<crate::crab_slot::CrabPolicies>() {
         Some(p) => super::app::seed_round_crabs(&mut ready.client, p.0.len()),
         None => Vec::new(),
     };

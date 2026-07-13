@@ -76,7 +76,7 @@ const INTEGRITY_BOUND: f32 = 100.0;
 /// The rl#347 flail brake actually lands on the multibody: after spawn,
 /// every crab articulation's joint dof carries [`CrabJointId::drive_damping`],
 /// not rapier's 0.1 default. Guards the `set_flail_damping` wiring (system
-/// ordering, `Added` detection, the fork's `set_joint_damping` API) — a silent
+/// ordering, `Added` detection, the `damping_mut` row fill) — a silent
 /// miss would leave the plant on default damping with no error.
 #[test]
 fn flail_damping_lands_on_every_articulation() {
@@ -103,7 +103,9 @@ fn flail_damping_lands_on_every_articulation() {
             .multibody_joints
             .get_mut(handle)
             .expect("every crab joint is a multibody joint");
-        let damping = mb.joint_damping(link_id).expect("handle names a live link");
+        let link = mb.link(link_id).expect("handle names a live link");
+        let (assembly_id, ndofs) = (link.assembly_id(), link.joint().ndofs());
+        let damping: Vec<f32> = mb.damping().as_slice()[assembly_id..assembly_id + ndofs].to_vec();
         assert_eq!(
             damping,
             &[id.drive_damping()][..],

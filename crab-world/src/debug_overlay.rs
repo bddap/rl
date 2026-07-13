@@ -225,7 +225,7 @@ fn spawn_overlay(mut commands: Commands) {
             root.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: 18.0,
+                    font_size: FontSize::Px(18.0),
                     ..default()
                 },
                 TextColor(Color::srgb(0.95, 0.95, 0.95)),

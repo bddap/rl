@@ -500,16 +500,12 @@ pub(super) fn look_direction(yaw_radians: f32, pitch_radians: f32) -> Vec3 {
 /// The FP cameras' perspective: Bevy's stock 0.1 m near plane assumes a 1.8 m human;
 /// at the world's ~0.051 m player (rl#256) it would sit a player-height-and-a-half out
 /// and clip near geometry (the looming crab's nearest legs, a cockpit), so it scales
-/// with stature: the stock plane's fraction of the stock human, ≈ 2.8 mm. What actually clips in Bevy 0.18 is the oblique
-/// `near_clip_plane` (a portals/mirrors feature), which DEFAULTS to the stock 0.1 m plane
-/// independent of `near` — leave it stale and the view still clips at 0.1 render-m, ~2
-/// eye-heights out (looking down while standing saw through the floor, rl#196) — so the two
-/// move together here. The ONE perspective source for the windowed and screenshot FP
-/// cameras, so their clips can't drift.
+/// with stature: the stock plane's fraction of the stock human, ≈ 2.8 mm. The ONE
+/// perspective source for the windowed and screenshot FP cameras, so their clips
+/// can't drift.
 pub(super) fn fp_perspective() -> PerspectiveProjection {
     PerspectiveProjection {
         near: FP_NEAR,
-        near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -FP_NEAR),
         ..default()
     }
 }

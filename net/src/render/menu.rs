@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy_egui::{
-    EguiContextSettings, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass,
+    EguiContext, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass,
     PrimaryEguiContext, egui,
 };
 
@@ -45,7 +45,7 @@ impl Plugin for MenuPlugin {
         app.world_mut()
             .resource_mut::<EguiGlobalSettings>()
             .auto_create_primary_context = false;
-        app.insert_non_send_resource(MenuState::new(self.seed, self.telemetry, self.stamp))
+        app.insert_non_send(MenuState::new(self.seed, self.telemetry, self.stamp))
             .add_systems(
                 OnEnter(AppPhase::Menu),
                 // consume_round_over first: it feeds last_host, which reset_menu_nav reads.
@@ -63,14 +63,15 @@ impl Plugin for MenuPlugin {
     }
 }
 
-// egui renders at points × window scale factor × settings.scale_factor — the same
+// egui renders at points × window scale factor × zoom factor — the same
 // composition bevy UI gives UiScale — so mirroring the already-synced UiScale (kept on
 // the workspace rule by crab_world::app_boot) makes egui/bevy-UI divergence impossible
 // (rl#227).
-fn sync_egui_scale(ui_scale: Res<UiScale>, mut contexts: Query<&mut EguiContextSettings>) {
-    for mut settings in &mut contexts {
-        if (settings.scale_factor - ui_scale.0).abs() > 1e-3 {
-            settings.scale_factor = ui_scale.0;
+fn sync_egui_scale(ui_scale: Res<UiScale>, mut contexts: Query<&mut EguiContext>) {
+    for mut ctx in &mut contexts {
+        let ctx = ctx.get_mut();
+        if (ctx.zoom_factor() - ui_scale.0).abs() > 1e-3 {
+            ctx.set_zoom_factor(ui_scale.0);
         }
     }
 }
@@ -163,7 +164,7 @@ fn menu_screen(
         return Ok(());
     }
 
-    let typing = ctx.wants_keyboard_input();
+    let typing = ctx.egui_wants_keyboard_input();
 
     // While the controls overlay is revealed, yield the screen to it — the egui pass draws
     // OVER bevy UI, so a centered menu window would cover the centered legend. NOT while a
