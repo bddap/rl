@@ -4,7 +4,7 @@ use bevy_rapier3d::geometry::ColliderView;
 use bevy_rapier3d::prelude::Collider;
 
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId};
-use crate::bot::skin::CrabSkinRepose;
+use crate::bot::skin::{CrabRenderPose, CrabSkinRepose};
 
 pub const COLLIDER_WIREFRAME_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
 
@@ -84,6 +84,7 @@ struct RenderModeLabel;
 pub fn register<M>(app: &mut App, initial: RenderMode, cage_gate: impl SystemCondition<M>) {
     app.insert_resource(initial);
     app.init_resource::<CrabSkinRepose>();
+    app.init_resource::<CrabRenderPose>();
     app.add_systems(Startup, spawn_render_mode_label);
     app.add_systems(Update, update_render_mode_label);
     // The per-crab brain labels (rl#200 increment 7). Visibility follows the DATA, not a
@@ -207,8 +208,9 @@ fn sync_brain_label_nodes(
 /// 3D camera), and hides a label whose crab is missing, behind the camera, or off-screen.
 fn position_brain_labels(
     repose: Option<Res<CrabSkinRepose>>,
+    sampled: Option<Res<CrabRenderPose>>,
     ui_scale: Res<UiScale>,
-    carapaces: Query<(&GlobalTransform, &CrabEnvId), With<CrabCarapace>>,
+    carapaces: Query<(Entity, &GlobalTransform, &CrabEnvId), With<CrabCarapace>>,
     cameras: Query<(&Camera, &GlobalTransform, Has<IsDefaultUiCamera>), With<Camera3d>>,
     mut nodes: Query<(&BrainLabelNode, &mut Node, &mut Visibility, &ComputedNode)>,
 ) {
@@ -228,14 +230,22 @@ fn position_brain_labels(
         }
         let anchor = carapaces
             .iter()
-            .find(|(_, env)| env.0 == node.0)
-            .map(|(carapace, env)| {
+            .find(|(.., env)| env.0 == node.0)
+            .map(|(entity, carapace, env)| {
                 let placement = repose
                     .as_deref()
                     .and_then(|r| r.0.get(&env.0))
                     .map(|s| s.matrix())
                     .unwrap_or(Mat4::IDENTITY);
-                placement.transform_point3(carapace.translation()) + Vec3::Y * BRAIN_LABEL_LIFT
+                // The RENDERED carapace is the sampled pose where a stream feeds one
+                // (rl#274) — anchoring to the raw physics pose would let the label lead
+                // the skin by the sampling window's latency.
+                let carapace = sampled
+                    .as_deref()
+                    .and_then(|s| s.0.get(&entity))
+                    .map(|t| t.translation)
+                    .unwrap_or_else(|| carapace.translation());
+                placement.transform_point3(carapace) + Vec3::Y * BRAIN_LABEL_LIFT
             });
         let projected = camera
             .zip(anchor)
@@ -261,25 +271,33 @@ fn position_brain_labels(
 /// The crab-cage pass's exact view of a body part — the ONE definition of what the collider
 /// wireframe draws. Tests pin coverage against these same aliases, so the pin can't drift
 /// from the system (rl#225).
-pub type CrabCagePartData<'a> = (&'a GlobalTransform, &'a Collider, &'a CrabEnvId);
+pub type CrabCagePartData<'a> = (Entity, &'a GlobalTransform, &'a Collider, &'a CrabEnvId);
 pub type CrabCagePartFilter = With<CrabBodyPart>;
 
 fn draw_crab_collider_wireframe(
     mode: Res<RenderMode>,
     repose: Option<Res<CrabSkinRepose>>,
+    sampled: Option<Res<CrabRenderPose>>,
     parts: Query<CrabCagePartData, CrabCagePartFilter>,
     mut gizmos: Gizmos,
 ) {
     if !mode.shows_colliders() {
         return;
     }
-    for (gt, collider, env) in &parts {
+    for (entity, gt, collider, env) in &parts {
         let placement = repose
             .as_deref()
             .and_then(|r| r.0.get(&env.0))
             .map(|s| s.matrix())
             .unwrap_or(Mat4::IDENTITY);
-        let world = placement * gt.to_matrix();
+        // The cage cages the crab you SEE — it already rides the render-side repose, so
+        // it draws at the sampled render pose too where a stream feeds one (rl#274).
+        let part = sampled
+            .as_deref()
+            .and_then(|s| s.0.get(&entity))
+            .map(Transform::to_matrix)
+            .unwrap_or_else(|| gt.to_matrix());
+        let world = placement * part;
         draw_collider_wireframe(
             &mut gizmos,
             collider.as_typed_shape(),

@@ -27,6 +27,17 @@ struct BoneDrive {
 #[derive(Resource, Default, Clone)]
 pub struct CrabSkinRepose(pub std::collections::BTreeMap<usize, SkinRepose>);
 
+/// The physics-step-clock SAMPLED pose each crab body part renders at this frame, keyed
+/// by part entity (rl#274). GCR's articulation sampler rebuilds it per frame on BOTH
+/// arms — the host from its own capture, a client from its adopt — so every render
+/// consumer (the skin's `drive_bones`, the collider cage, the brain labels) shows motion
+/// uniform in render time without anything writing a rapier-owned `Transform` (rl#116).
+/// A missing entry means no tick-stamped stream feeds this part (the standalone viewer,
+/// training visuals, the window-fill grace frames): consumers render the physics
+/// `Transform` directly.
+#[derive(Resource, Default)]
+pub struct CrabRenderPose(pub std::collections::BTreeMap<Entity, Transform>);
+
 #[derive(Clone, Copy)]
 pub struct SkinRepose {
     pub shift: Vec3,
@@ -63,6 +74,7 @@ fn link_map(links: &LinkQuery, env: usize) -> std::collections::HashMap<PartId, 
 
 pub(super) fn register(app: &mut App) {
     app.init_resource::<CrabSkinRepose>();
+    app.init_resource::<CrabRenderPose>();
     app.add_systems(Update, (attach_skins, reap_orphan_skins, reveal_skin));
     app.add_systems(
         PostUpdate,
@@ -249,11 +261,13 @@ fn reveal_skin(
 fn drive_bones(
     mut bones: Query<(&BoneDrive, &mut Transform)>,
     links: Query<(&Transform, &CrabEnvId), (With<CrabBodyPart>, Without<BoneDrive>)>,
+    sampled: Res<CrabRenderPose>,
     repose: Res<CrabSkinRepose>,
 ) {
     for (drive, mut t) in bones.iter_mut() {
         if let Ok((link, env)) = links.get(drive.link) {
             let m = repose.0.get(&env.0).map_or(Mat4::IDENTITY, |r| r.matrix());
+            let link = sampled.0.get(&drive.link).unwrap_or(link);
             *t = Transform::from_matrix(m * link.to_matrix() * drive.offset);
         }
     }
@@ -271,6 +285,56 @@ mod tests {
     use crate::bot::{CrabSpawns, respawn_crab};
 
     use super::{BoneDrive, CrabSkin, Pairing, PartId, repair_skins, reveal_skin};
+
+    /// The rl#274 seam: a sampled render pose, when present, is what a bone follows —
+    /// the raw (rapier-owned) link `Transform` drives only where no stream feeds it.
+    #[test]
+    fn bones_follow_the_sampled_render_pose_when_present() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        use super::{CrabRenderPose, CrabSkinRepose, drive_bones};
+        use crate::bot::body::CrabBodyPart;
+
+        let mut world = World::new();
+        world.init_resource::<CrabSkinRepose>();
+        world.init_resource::<CrabRenderPose>();
+        let link = world
+            .spawn((
+                CrabBodyPart,
+                CrabCarapace,
+                CrabEnvId(0),
+                Transform::from_xyz(1.0, 2.0, 3.0),
+            ))
+            .id();
+        let bone = world
+            .spawn((
+                BoneDrive {
+                    link,
+                    offset: Mat4::IDENTITY,
+                },
+                Transform::IDENTITY,
+            ))
+            .id();
+
+        world
+            .resource_mut::<CrabRenderPose>()
+            .0
+            .insert(link, Transform::from_xyz(5.0, 6.0, 7.0));
+        world.run_system_once(drive_bones).expect("bare world");
+        assert_eq!(
+            world.entity(bone).get::<Transform>().unwrap().translation,
+            Vec3::new(5.0, 6.0, 7.0),
+            "with a sampled pose the bone must follow it, not the physics Transform"
+        );
+
+        world.resource_mut::<CrabRenderPose>().0.clear();
+        world.run_system_once(drive_bones).expect("bare world");
+        assert_eq!(
+            world.entity(bone).get::<Transform>().unwrap().translation,
+            Vec3::new(1.0, 2.0, 3.0),
+            "no stream (standalone viewer / grace frames): the physics Transform drives"
+        );
+    }
 
     #[test]
     fn bone_names_resolve_to_expected_links() {
