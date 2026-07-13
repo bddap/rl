@@ -202,7 +202,7 @@ fn spawn_offscreen_camera(
         Transform::default(),
         FpCamera,
     ));
-    // The windowed FP camera's perspective (shared render-frame-scaled near clip), plus an
+    // The windowed FP camera's perspective (shared stature-scaled near clip), plus an
     // optional wider FOV so the towering giant crab fits in one evidence frame.
     let mut projection = super::scene::fp_perspective();
     if let Some(fov_deg) = cfg.cam_fov_deg {

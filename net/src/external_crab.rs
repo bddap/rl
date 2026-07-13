@@ -12,9 +12,9 @@
 //! The posed hunt target is the prey offset, re-posed each tick as she closes,
 //! clamped to the training band's far edge ([`TARGET_ARENA_HALF`], ~9 m) along the
 //! true crab→player bearing. On the current map every prey offset lands well inside
-//! the band (~1.1 m), in the close-range regime the rl#252 probe measures and the
-//! rl#250 curriculum trains — the clamp is a dormant guard that keeps a future
-//! larger map in-distribution.
+//! the band (~5.3 m at round start — the spawn clearance), in the close-range
+//! regime the rl#252 probe measures and the rl#250 curriculum trains — the clamp
+//! is a dormant guard that keeps a future larger map in-distribution.
 //!
 //! The spawn-relative body.pos obs channel still drifts OOD on a long open-field
 //! chase (rl#240) — not fixable at the posing layer. [`bound_body_pos_drift`]

@@ -499,7 +499,7 @@ fn fp_camera_effective_clip_is_the_scaled_near() {
     assert_eq!(clip_from_view.w_axis.z, projection.near);
     assert!(
         projection.near < 0.01,
-        "near plane must shrink with the render frame"
+        "near plane must scale with player stature"
     );
 }
 
