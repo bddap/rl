@@ -88,6 +88,7 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
                 gather_input,
                 drive_pilot_script,
                 drive_client_sim,
+                super::articulation::sample_puppet_parts,
                 reconcile_avatars,
                 apply_transforms,
                 follow_ground,

@@ -1,5 +1,6 @@
-use super::driver::{CockpitPose, GameState, LocalVehicle};
+use super::driver::{GameState, LocalVehicle, RenderClock};
 use super::input::{CameraPitch, CameraYaw};
+use super::pose::Pose;
 use super::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
@@ -410,6 +411,7 @@ type CamXf<'w, 's> = Query<'w, 's, &'static mut Transform, With<FpCamera>>;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_transforms(
     state: NonSend<GameState>,
+    clock: Res<RenderClock>,
     pitch: Res<CameraPitch>,
     mut yaw: ResMut<CameraYaw>,
     vehicle: Res<LocalVehicle>,
@@ -420,7 +422,7 @@ pub(super) fn apply_transforms(
     mut cam_q: CamXf,
 ) {
     let sim = state.client.sim();
-    let alpha = (state.accumulator / TICK_DT).clamp(0.0, 1.0) as f32;
+    let alpha = clock.frac;
     let local = state.client.me();
 
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
@@ -438,7 +440,7 @@ pub(super) fn apply_transforms(
         // A piloting player's ONE visible body is its craft (rl#258): the walker avatar
         // hides while a craft flies under that pilot's id. `RemoteVehicle` already excludes
         // the local pilot, whose avatar the first branch hides regardless.
-        let in_craft = remote_crafts.0.iter().any(|v| v.pilot == avatar.0.0);
+        let in_craft = remote_crafts.contains(crab_world::vehicle::PilotId(avatar.0.0));
         let hidden = avatar.0 == local || now.status() == PlayerStatus::Extracted || in_craft;
         *vis = if hidden {
             Visibility::Hidden
@@ -464,7 +466,7 @@ pub(super) fn apply_transforms(
     }
 
     if let Ok(mut cam) = cam_q.single_mut() {
-        if let Some(pose) = vehicle.cockpit_sample(sim.tick(), alpha) {
+        if let Some(pose) = vehicle.cockpit_sample(clock.tick, alpha) {
             // The STATIC arena→render frame (rl#224): anchoring on the live carapace here
             // made the whole cockpit view judder with Sally's every wiggle.
             *cam = cockpit_camera(pose, placement.0);
@@ -485,7 +487,7 @@ pub(super) fn apply_transforms(
     }
 }
 
-fn cockpit_camera(pose: CockpitPose, shift: Vec3) -> Transform {
+fn cockpit_camera(pose: Pose, shift: Vec3) -> Transform {
     let eye = pose.pos + shift;
     let rot = pose.orient;
     Transform::from_translation(eye).looking_at(eye + rot * Vec3::Z, rot * Vec3::Y)
