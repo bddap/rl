@@ -391,9 +391,7 @@ pub fn run_learner(
         // 4) PPO update on the GPU — the SOLE update path (rl#49). The CPU policy is
         //    mirrored CPU→GPU, the one `ppo_update_core` runs on the device, and the
         //    result is mirrored back into the CPU brain (the source of truth the next
-        //    rollout snapshot + the checkpoint read). The trailing bootstrap per buffer
-        //    is recomputed inside from the current brain (which IS the snapshot the
-        //    threads just rolled with), so no per-env value crosses any boundary.
+        //    rollout snapshot + the checkpoint read).
         //    `update_secs` spans the whole phase — including the host↔device copies —
         //    so it is the honest per-iter update cost.
         let update_start = Instant::now();
