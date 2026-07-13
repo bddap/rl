@@ -329,8 +329,8 @@ pub fn run_learner(
     );
     // Loud so a run's train.log proves which reward economy it trained under (rl#268).
     eprintln!(
-        "[learner] reward economy: effort_weight {} (RL_EFFORT_WEIGHT)",
-        crate::training::reward::effort_weight(),
+        "[learner] reward economy: effort_weight {} (--effort-weight)",
+        config.effort_weight,
     );
 
     // Best-by-chase-eval keeping (rl#157, rekeyed by rl#233): periodically chase-eval

@@ -24,6 +24,7 @@ pub struct RenderVideoPlugin {
     pub seconds: f32,
     pub width: u32,
     pub height: u32,
+    pub overrides: super::PlayOverrides,
 }
 
 #[derive(Resource)]
@@ -65,7 +66,13 @@ impl Plugin for RenderVideoPlugin {
             panic!("render-video: cannot create frame dir {frame_dir:?}: {e}");
         }
 
-        add_inference(app, &self.checkpoint_dir, None);
+        add_inference(
+            app,
+            &self.checkpoint_dir,
+            None,
+            self.overrides.random_policy,
+        );
+        self.overrides.apply_rng_and_ball(app);
         app.add_plugins(crate::sky::NightSkyPlugin);
         app.insert_resource(ShotConfig {
             path: self.path.clone(),
@@ -81,7 +88,6 @@ impl Plugin for RenderVideoPlugin {
         })
         .init_resource::<VideoProgress>()
         .init_resource::<DriveStats>()
-        .init_resource::<super::DemoRng>()
         .add_systems(FixedUpdate, policy_step.in_set(BotSet::Think))
         .add_systems(FixedUpdate, accumulate_drive_stats.after(BotSet::Think))
         .add_systems(Startup, (spawn_offscreen_camera, spawn_target_ball))

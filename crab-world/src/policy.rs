@@ -63,6 +63,15 @@ fn checkpoint_digest(dir: &Path) -> u64 {
     crate::fnv::fnv1a(&bytes)
 }
 
+/// What a rest-bound [`Policy::load`] arms when no usable checkpoint loads.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RestFallback {
+    /// Hold the zero-action rest pose (the default).
+    Rest,
+    /// DIAGNOSTIC: drive an untrained random brain (rl-demo `--random-policy`).
+    RandomBrain,
+}
+
 pub(crate) fn dims_fit_rig(obs: usize, action: usize) -> bool {
     (obs, action) == (OBS_SIZE, ACTION_SIZE)
 }
@@ -308,10 +317,10 @@ impl Policy {
     /// QUIETLY to the zero-action rest pose so the app still launches (useful before the
     /// first checkpoint exists, and to inspect the body's neutral pose); a present-but-
     /// unusable one (wrong rig, or envelope-refused — corrupt/legacy/wrong-arch) is
-    /// refused LOUDLY and also rests.
-    pub fn load(checkpoint_dir: &Path) -> Self {
+    /// refused LOUDLY and also rests. `fallback` picks what a rest-bound load arms
+    /// instead — an explicit caller decision, never ambient process state (rl#272).
+    pub fn load(checkpoint_dir: &Path, fallback: RestFallback) -> Self {
         let device = NdArrayDevice::Cpu;
-        let random_override = std::env::var("RL_RANDOM_POLICY").is_ok_and(|v| v == "1");
         let loaded = load_brain_normalizer(checkpoint_dir, &device);
         // The loud refusals fire FIRST, unconditionally — the diagnostic override below
         // must not swallow the reason (a corrupt/legacy/wrong-rig checkpoint is exactly
@@ -326,9 +335,11 @@ impl Policy {
                 info!("play: loaded checkpoint from {}", checkpoint_dir.display());
                 loaded_state(brain, normalizer, checkpoint_digest(checkpoint_dir))
             }
-            Loaded::Absent | Loaded::Mismatch(_) | Loaded::Refused(_) if random_override => {
+            Loaded::Absent | Loaded::Mismatch(_) | Loaded::Refused(_)
+                if fallback == RestFallback::RandomBrain =>
+            {
                 warn!(
-                    "play: RL_RANDOM_POLICY — driving with an untrained random brain \
+                    "play: --random-policy — driving with an untrained random brain \
                      (no usable checkpoint at {})",
                     checkpoint_dir.display()
                 );
@@ -645,7 +656,7 @@ mod tests {
     /// ONLY on a deliberate format version bump or an arch cull.
     #[test]
     fn golden_enveloped_checkpoint_loads_and_acts_bit_identically() {
-        let policy = Policy::load(&golden_dir());
+        let policy = Policy::load(&golden_dir(), RestFallback::Rest);
         assert!(
             policy.is_loaded(),
             "the enveloped golden checkpoint no longer loads — the tagged on-disk format \
@@ -678,7 +689,7 @@ mod tests {
             .unwrap();
         std::fs::write(CheckpointDir::new(&dir).brain_file(), raw).unwrap();
 
-        let policy = Policy::load(&dir);
+        let policy = Policy::load(&dir, RestFallback::Rest);
         assert!(
             !policy.is_loaded(),
             "a legacy untagged brain.bin must not load — the loader has no untagged path"
@@ -722,7 +733,7 @@ mod tests {
         )
         .unwrap();
 
-        let policy = Policy::load(&dir);
+        let policy = Policy::load(&dir, RestFallback::Rest);
         assert!(policy.is_loaded(), "the fixture just written must load");
         let bits: Vec<String> = policy
             .act(&golden_obs())
@@ -763,7 +774,7 @@ mod tests {
             .save(ArchId::DEFAULT, &paths.normalizer_path(), 21)
             .unwrap();
 
-        let policy = Policy::load(&dir);
+        let policy = Policy::load(&dir, RestFallback::Rest);
         assert!(!policy.is_loaded(), "a wrong-body checkpoint must not arm");
         match checkpoint_fits_rig(&dir) {
             Err(CheckpointUnusable::Refused(why)) => assert!(
@@ -784,7 +795,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
         std::fs::create_dir_all(&empty).unwrap();
 
-        let mut policy = Policy::load(&empty);
+        let mut policy = Policy::load(&empty, RestFallback::Rest);
         assert!(
             !policy.is_loaded(),
             "empty checkpoint dir should give an unloaded policy"
@@ -843,7 +854,7 @@ mod tests {
             .save(brain.arch(), &paths.normalizer_path(), 21)
             .unwrap();
 
-        let mut policy = Policy::load(&empty);
+        let mut policy = Policy::load(&empty, RestFallback::Rest);
         policy.live_dir = Some(live.clone());
         assert!(
             !policy.try_hot_reload(),
@@ -941,7 +952,7 @@ mod tests {
 
         save_brain_with_obs_dim(&dir, OBS_SIZE + 4);
 
-        let policy = Policy::load(&dir);
+        let policy = Policy::load(&dir, RestFallback::Rest);
         assert!(
             !policy.is_loaded(),
             "a dim-mismatched checkpoint must fall back to unloaded, not load"
@@ -971,7 +982,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         save_nan_brain(&dir);
 
-        let policy = Policy::load(&dir);
+        let policy = Policy::load(&dir, RestFallback::Rest);
         assert!(
             policy.is_loaded(),
             "the NaN brain is shape-valid, so the dim gates must load it"
@@ -1041,7 +1052,7 @@ mod tests {
 
         assert_eq!(brain_slots(&root), vec![root.clone(), root.join("best")]);
 
-        let mut policy = Policy::load(&root);
+        let mut policy = Policy::load(&root, RestFallback::Rest);
         assert!(policy.is_loaded());
         let boot_label = policy.brain_label();
         assert!(
@@ -1074,7 +1085,7 @@ mod tests {
 
         // Roster of one: nothing to swap to.
         std::fs::remove_dir_all(root.join("best")).unwrap();
-        let mut solo = Policy::load(&root);
+        let mut solo = Policy::load(&root, RestFallback::Rest);
         assert!(!solo.cycle_brain());
 
         let _ = std::fs::remove_dir_all(&root);

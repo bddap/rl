@@ -10,13 +10,13 @@ use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crate::bot::sensor::{CrabObservation, CrabTargets, OBS_SIZE};
 use crate::bot::{CrabRescued, CrabSpawns};
 use crate::training::algorithm::NormalizedValue;
-use crate::training::reward::{action_effort, dist_3d, effort_weight, planar_dist};
+use crate::training::reward::{action_effort, dist_3d, planar_dist};
 use crate::training::targets::seed_target;
 
 use super::lifecycle::{EnvEpisode, EnvPhase};
 use super::state::TrainingState;
 
-fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32]) {
+fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32], effort_weight: f32) {
     if std::env::var_os("RL_LOG_EFFORT").is_none() {
         return;
     }
@@ -32,7 +32,7 @@ fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32]) {
         let mean_effort = effort_sum / count as f32;
         info!(
             "EFFORTLOG n={count} mean_effort={mean_effort:.3} mean_tax={:.4}",
-            effort_weight() * mean_effort,
+            effort_weight * mean_effort,
         );
     }
 }
@@ -289,7 +289,7 @@ pub(crate) fn brain_step(
     };
     training.finalize_transitions(&inputs, &mut targets, &spawns);
 
-    log_effort_probe(&training.envs, &efforts);
+    log_effort_probe(&training.envs, &efforts, training.effort_weight);
     training.accumulate_drift(&body.drifts);
 
     training.total_steps += 1;

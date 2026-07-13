@@ -19,7 +19,7 @@ gltf = { version = "1.4.1", default-features = false, features = ["utils", "name
 
 burn = { version = "0.20", features = ["autodiff", "ndarray"] }
 naga = { version = "26" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 bincode = "1"
 # One POSIX syscall std doesn't expose: setpriority (nice the in-process trainer so a
 # foreground game preempts it — `training/inproc.rs`). Already in the tree
