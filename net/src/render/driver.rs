@@ -40,6 +40,7 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
     world.insert_resource(RenderClock::default());
     world.insert_resource(super::articulation::RemoteVehicle::default());
     world.insert_resource(super::articulation::PuppetWindows::default());
+    world.insert_resource(crab_world::bot::skin::CrabRenderPose::default());
 }
 
 #[derive(Default)]
@@ -431,7 +432,8 @@ impl LocalControl {
 /// [`drive_client_sim`]: the last stepped/adopted sim tick plus the accumulator
 /// fraction into the next. THE one clock every [`super::pose::PoseWindow`] sampler
 /// reads — the cockpit, the remote craft models, the wireframe pass, and the crab
-/// puppet — so their notions of "now" cannot drift apart within a frame.
+/// body parts (both arms, rl#274) — so their notions of "now" cannot drift apart
+/// within a frame.
 #[derive(Resource, Clone, Copy, Default)]
 pub(super) struct RenderClock {
     pub tick: u64,
@@ -811,6 +813,9 @@ pub(super) fn drive_client_sim(world: &mut World) {
                     state.coord.broadcast_step(&snap, articulation.as_ref());
                 }
                 if let Some(art) = &articulation {
+                    // The host renders its OWN Sally through the same windows a client
+                    // adopts (rl#274) — one interpolation mechanism on both arms.
+                    super::articulation::feed_puppet_windows(world, art);
                     super::articulation::publish_remote_vehicles(
                         world,
                         art.tick,

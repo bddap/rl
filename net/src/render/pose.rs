@@ -4,9 +4,10 @@
 //! [`crate::cadence::cumulative_steps`]), so interpolating a pose pair by
 //! tick-fraction surges rendered velocity ±50% ~4×/s. Every consumer — the local
 //! cockpit ([`super::driver::LocalVehicle`]), remote pilots' craft models
-//! ([`super::articulation::RemoteVehicle`]), and the adopted crab puppet's body
-//! parts ([`super::articulation::PuppetWindows`]) — samples through this window
-//! instead; a second interpolation mechanism is a bug (rl#267).
+//! ([`super::articulation::RemoteVehicle`]), and the crab body parts on both arms
+//! ([`super::articulation::PuppetWindows`], host and client alike since rl#274) —
+//! samples through this window instead; a second interpolation mechanism is a bug
+//! (rl#267).
 
 use bevy::prelude::*;
 

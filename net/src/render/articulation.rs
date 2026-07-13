@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
-use crab_world::bot::skin::{CrabSkinRepose, SkinRepose};
+use crab_world::bot::skin::{CrabRenderPose, CrabSkinRepose, SkinRepose};
 use crab_world::crab_view::CrabBrainLabels;
 use crab_world::vehicle::{PilotId, Vehicle, VehicleKind};
 
@@ -232,36 +232,41 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
     }
 }
 
-/// The adopted crab puppet's tick-stamped pose windows, one per (env, part-tag).
-/// Fed by [`adopt`] each adopted tick, drained by [`sample_puppet_parts`] each frame:
-/// the host steps the parts in physics, so applying its frames raw replays the 64:30
-/// step bunching on every client — the same surge rl#264 fixed for the cockpit (rl#267).
-/// Only the remote-adopt arm ever feeds this; on the host it stays empty and the
-/// sampler writes nothing.
+/// The crab body parts' tick-stamped pose windows, one per (env, part-tag), fed per tick
+/// on BOTH arms — the host from its own capture, a client from its adopt (rl#274) — and
+/// sampled per frame by [`sample_puppet_parts`] into the render-only
+/// [`CrabRenderPose`]: the parts step in physics at the 64:30 cadence, so rendering
+/// their raw transforms replays the step bunching rl#264 fixed for the cockpit — on the
+/// host's own screen too, not just on a client (rl#267).
 #[derive(Resource, Default)]
 pub(super) struct PuppetWindows(std::collections::BTreeMap<(usize, u8), PoseWindow>);
+
+/// Feed one articulation tick's crab body-part poses into [`PuppetWindows`] — the ONE
+/// interpolation feed on both arms (rl#274): the host calls it on the articulation it
+/// just captured, a client inside [`adopt`] on the one it adopted.
+pub(super) fn feed_puppet_windows(world: &mut World, art: &CrabArticulation) {
+    // `install_round` owns creation, like `RemoteVehicle` above.
+    let mut windows = world.resource_mut::<PuppetWindows>();
+    // A shrunk crab set (a fresh round's re-adopt) drops the stale envs' windows.
+    windows.0.retain(|(env, _), _| *env < art.crabs.len());
+    for (env, frame) in art.crabs.iter().enumerate() {
+        for p in &frame.parts {
+            windows.0.entry((env, p.part)).or_default().push(
+                art.tick,
+                Pose {
+                    pos: Vec3::from_array(p.pos),
+                    orient: Quat::from_array(p.rot),
+                },
+            );
+        }
+    }
+}
 
 /// Adopts one articulation tick: crab body parts land in [`PuppetWindows`] (rendered by
 /// [`sample_puppet_parts`]); repose, arena anchor, and brain labels adopt directly —
 /// they are discrete state, not stepped motion.
 pub(super) fn adopt(world: &mut World, art: &CrabArticulation) {
-    {
-        // `install_round` owns creation, like `RemoteVehicle` above.
-        let mut windows = world.resource_mut::<PuppetWindows>();
-        // A shrunk crab set (a fresh round's re-adopt) drops the stale envs' windows.
-        windows.0.retain(|(env, _), _| *env < art.crabs.len());
-        for (env, frame) in art.crabs.iter().enumerate() {
-            for p in &frame.parts {
-                windows.0.entry((env, p.part)).or_default().push(
-                    art.tick,
-                    Pose {
-                        pos: Vec3::from_array(p.pos),
-                        orient: Quat::from_array(p.rot),
-                    },
-                );
-            }
-        }
-    }
+    feed_puppet_windows(world, art);
 
     if let Some(mut repose) = world.get_resource_mut::<CrabSkinRepose>() {
         for (env, frame) in art.crabs.iter().enumerate() {
@@ -297,11 +302,11 @@ pub(super) fn adopt(world: &mut World, art: &CrabArticulation) {
     }
 }
 
-type PuppetPartXf<'w, 's> = Query<
+type PuppetPart<'w, 's> = Query<
     'w,
     's,
     (
-        &'static mut Transform,
+        Entity,
         &'static CrabEnvId,
         Option<&'static CrabJoint>,
         Option<&'static CrabCarapace>,
@@ -309,23 +314,22 @@ type PuppetPartXf<'w, 's> = Query<
     With<CrabBodyPart>,
 >;
 
-/// Writes the [`PuppetWindows`] samples onto the local `CrabBodyPart` `Transform`s each
-/// frame. That is the one sanctioned mutation of body-part transforms outside physics
-/// (rl#116): the windows fill only on a remote-adopt client, whose `FixedUpdate` is
-/// parked — rapier never steps there, so these puppet writes never reach a solver (on
-/// the host this is a no-op by construction). The pose sentinel and the
-/// transform-ownership gate both allowlist exactly this path. Must run after the
-/// frame's articulation [`adopt`] + `RenderClock` write, and before the skin's
-/// PostUpdate `drive_bones`, so bones follow this frame's sampled parts.
+/// Samples [`PuppetWindows`] on the uniform physics-step clock into the render-only
+/// [`CrabRenderPose`] each frame — the pose every crab visual consumer (skin bones,
+/// collider cage, brain labels) reads. Body-part `Transform`s stay rapier's alone
+/// (rl#116): nothing outside physics writes them anymore (rl#274), so this one path
+/// serves host and client alike. Rebuilt per frame; a part whose window hasn't filled
+/// yet (engage grace, an unarmed world) gets no entry and renders its physics
+/// transform. Must run after the frame's window feed + `RenderClock` write, and before
+/// the skin's PostUpdate `drive_bones`, so bones follow this frame's samples.
 pub(super) fn sample_puppet_parts(
     clock: Res<RenderClock>,
     windows: Res<PuppetWindows>,
-    mut parts: PuppetPartXf,
+    parts: PuppetPart,
+    mut sampled: ResMut<CrabRenderPose>,
 ) {
-    if windows.0.is_empty() {
-        return;
-    }
-    for (mut t, env, joint, carapace) in &mut parts {
+    sampled.0.clear();
+    for (entity, env, joint, carapace) in &parts {
         let Some(tag) = part_tag(carapace.is_some(), joint) else {
             continue;
         };
@@ -336,8 +340,9 @@ pub(super) fn sample_puppet_parts(
         else {
             continue;
         };
-        t.translation = p.pos;
-        t.rotation = p.orient;
+        sampled
+            .0
+            .insert(entity, Transform::from_translation(p.pos).with_rotation(p.orient));
     }
 }
 
@@ -438,6 +443,7 @@ mod tests {
         );
         client.insert_resource(CrabSkinRepose::default());
         client.insert_resource(PuppetWindows::default());
+        client.insert_resource(CrabRenderPose::default());
         client.insert_resource(RemoteVehicle::default());
 
         adopt(&mut client, &art);
@@ -453,19 +459,32 @@ mod tests {
         // Viewed as pilot 7: pilot 0's craft is somebody else's ⇒ it lands in RemoteVehicle.
         publish_remote_vehicles(&mut client, 42, &art.vehicles, PilotId(7));
 
-        let tf = |world: &mut World, e: Entity| *world.entity(e).get::<Transform>().unwrap();
-        let got_cara = tf(&mut client, c_cara);
-        let got_joint = tf(&mut client, c_joint);
+        // The samples land in the render-only overlay, never on the parts' own
+        // `Transform`s — those stay rapier's (rl#116/rl#274).
+        let sampled = |world: &World, e: Entity| {
+            *world
+                .resource::<CrabRenderPose>()
+                .0
+                .get(&e)
+                .expect("every adopted part has a sampled render pose")
+        };
+        let got_cara = sampled(&client, c_cara);
+        let got_joint = sampled(&client, c_joint);
         assert_eq!(got_cara.translation, cara_t.translation);
         assert_eq!(got_cara.rotation, cara_t.rotation);
         assert_eq!(got_joint.translation, joint_t.translation);
         assert_eq!(got_joint.rotation, joint_t.rotation);
-        let got_cara1 = tf(&mut client, c_cara1);
-        let got_joint1 = tf(&mut client, c_joint1);
+        let got_cara1 = sampled(&client, c_cara1);
+        let got_joint1 = sampled(&client, c_joint1);
         assert_eq!(got_cara1.translation, cara_t1.translation);
         assert_eq!(got_cara1.rotation, cara_t1.rotation);
         assert_eq!(got_joint1.translation, joint_t1.translation);
         assert_eq!(got_joint1.rotation, joint_t1.rotation);
+        assert_eq!(
+            client.entity(c_cara).get::<Transform>().unwrap().translation,
+            Vec3::new(-1.0, -1.0, -1.0),
+            "sampling must never write a body-part Transform (rl#116/rl#274)"
+        );
 
         let reposes = client.resource::<CrabSkinRepose>().0.clone();
         let repose0 = reposes.get(&0).expect("env 0's repose applied");
@@ -552,8 +571,11 @@ mod tests {
         assert!(rv.sample(5, 0.0).is_empty());
     }
 
-    /// The rl#267 pin for the crab puppet: adopted part frames render through the same
-    /// physics-step-clock sampling, not raw per tick.
+    /// The rl#267 pin for the crab body parts — and the rl#274 pin that the HOST's own
+    /// view takes the identical path: fed part frames (capture on the host, adopt on a
+    /// client) render through the same physics-step-clock sampling into the render-only
+    /// overlay, not raw per tick, and the parts' rapier-owned `Transform`s are never
+    /// touched.
     #[test]
     fn puppet_parts_interpolate_between_adopted_ticks() {
         use bevy::ecs::system::RunSystemOnce;
@@ -568,6 +590,7 @@ mod tests {
         );
         client.insert_resource(CrabSkinRepose::default());
         client.insert_resource(PuppetWindows::default());
+        client.insert_resource(CrabRenderPose::default());
         for tick in 1..=3u64 {
             let art = CrabArticulation {
                 tick,
@@ -597,14 +620,21 @@ mod tests {
             .run_system_once(sample_puppet_parts)
             .expect("sampler runs on a bare world");
         let x = client
-            .entity(cara)
-            .get::<Transform>()
-            .unwrap()
+            .resource::<CrabRenderPose>()
+            .0
+            .get(&cara)
+            .expect("fed carapace has a sampled render pose")
             .translation
             .x;
         assert!(
             x > 2.0 && x < 3.0,
             "carapace x {x} must interpolate between adopted ticks, not snap raw"
+        );
+        assert_eq!(
+            client.entity(cara).get::<Transform>().unwrap().translation,
+            Vec3::ZERO,
+            "the rapier-owned Transform stays untouched — on the host it feeds a live \
+             solver (rl#116/rl#274)"
         );
     }
 }

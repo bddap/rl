@@ -22,15 +22,16 @@ const BODY_MARKERS: [&str; 4] = ["CrabBodyPart", "CrabCarapace", "CrabClawTip", 
 ///   EXCEPT `bot/skin/` (see `DENIED`).
 /// - `crab-world/src/training/`: test-only reset teleports (all under `#[cfg(test)]`,
 ///   headless `Visuals(false)` worlds; the scan can't see cfg, so the dir is listed).
-/// - `net/src/render/articulation.rs`: the remote-adopt client's mirror. Its `FixedUpdate`
-///   is parked, so rapier never steps there and never syncs the puppet writes back.
 /// - `net/src/external_crab.rs`: the GCR bridge. Its rl#240 recenter is a sanctioned
 ///   physics teleport riding the `PoseSentinelSet` lane (ordered after the sentinel,
 ///   consumed by the same tick's SyncBackend).
-const ALLOWED: [&str; 4] = [
+///
+/// Rendering has NO exception: since rl#274 every render consumer reads the sampled
+/// `CrabRenderPose` overlay (the remote-adopt puppet writes this list used to carve out
+/// for `net/src/render/articulation.rs` are gone).
+const ALLOWED: [&str; 3] = [
     "crab-world/src/bot/",
     "crab-world/src/training/",
-    "net/src/render/articulation.rs",
     "net/src/external_crab.rs",
 ];
 

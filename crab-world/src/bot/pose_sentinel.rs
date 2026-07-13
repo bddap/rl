@@ -5,7 +5,8 @@
 //! `PhysicsSet::SyncBackend`, so a "cosmetic" write to a [`CrabBodyPart`]
 //! teleports the body every step and blows up the multibody solver (the GCR
 //! play-day NaN crash, fixed in 931936a9). Cosmetic placement must ride the
-//! render-only proxies instead: [`super::skin`]'s bones / `CrabSkinRepose`.
+//! render-only proxies instead: [`super::skin`]'s bones / `CrabSkinRepose` /
+//! the sampled `CrabRenderPose` overlay (rl#274).
 //!
 //! Enforcement: between two `SyncBackend`s the only legitimate writer of a live
 //! body part's `Transform` is rapier's own writeback, which mirrors the rigid
@@ -26,12 +27,10 @@
 //!
 //! Armed only in visual worlds (`Visuals(true)`) — the configuration where
 //! render systems exist and which no headless test used to cover. Headless
-//! training/test worlds keep the write-`Transform`-to-teleport idiom. A
-//! remote-adopt GCR client holds `Visuals(true)` but never advances
-//! `FixedUpdate` (the auto-pump is parked — to an ~86400 s timestep, so "never"
-//! means "not within a real session"; only the physics-pumping peer steps), so
-//! the articulation mirror writing puppet parts there never meets this check —
-//! nor a solver.
+//! training/test worlds keep the write-`Transform`-to-teleport idiom. Since
+//! rl#274 no render system writes a body-part `Transform` at all — GCR renders
+//! every part through the sampled `CrabRenderPose` overlay on both arms — so in
+//! a correct build this sentinel is a pure tripwire for regressions.
 //!
 //! Non-finite poses are skipped: NaN is [`super::rescue_nonfinite_crabs`]'s
 //! case (a visible respawn), and a foreign write is caught at its first finite
