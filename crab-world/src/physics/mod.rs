@@ -60,8 +60,7 @@ impl bevy::app::Plugin for CrabPhysicsPlugin {
     }
 }
 
-/// Runtime backstop that the spawned context carries [`CONTACT_SOFTNESS`] — see
-/// [`CrabPhysicsPlugin`] for the last-write-wins trap this guards.
+/// Runtime backstop that the spawned context carries [`CONTACT_SOFTNESS`].
 fn assert_contact_spring_applied(
     ctx: bevy::ecs::system::Query<
         &bevy_rapier3d::plugin::context::RapierContextSimulation,
@@ -85,9 +84,9 @@ fn assert_contact_spring_applied(
     );
 }
 
-/// Runtime backstop that the spawned context's gravity is [`PHYSICS_GRAVITY`] — see
-/// [`CrabPhysicsPlugin`] for the last-write-wins trap this guards. Gravity lives on
-/// `RapierConfiguration` (not the integration parameters), hence its own query.
+/// Runtime backstop that the spawned context's gravity is [`PHYSICS_GRAVITY`].
+/// Gravity lives on `RapierConfiguration` (not the integration parameters), hence
+/// its own query.
 fn assert_gravity_applied(
     config: bevy::ecs::system::Query<
         &RapierConfiguration,

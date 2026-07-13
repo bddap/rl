@@ -325,7 +325,7 @@ pub fn spawn_ram_vehicle(
         .id()
 }
 
-/// The ONE flight force model (see the module docs). For each spawned body, reads ITS pilot's
+/// The ONE flight force model. For each spawned body, reads ITS pilot's
 /// command + the body's own pose and velocity, integrates the throttle lever, and overwrites the
 /// body's [`ExternalForce`] with thrust + lift + drag (force) and the body-frame control torque +
 /// angular drag (torque). Gravity is rapier's. Runs before the solve; the body's presence (not a
