@@ -1651,13 +1651,19 @@ mod tests {
         // segment's near END — the segment check, not an endpoint/center approximation).
         let reach = CLAW_M / 2 + CLAW_DOWN_BUFFER;
         assert_eq!(
-            step_armed(&mut sim, claw_at(p, 2 * CLAW_M + reach + CLAW_M / 10, CLAW_M)),
+            step_armed(
+                &mut sim,
+                claw_at(p, 2 * CLAW_M + reach + CLAW_M / 10, CLAW_M)
+            ),
             PlayerStatus::Alive,
             "a near miss beyond the buffer must not down"
         );
         // Same offset, but within reach of the near end: downs.
         assert_eq!(
-            step_armed(&mut sim, claw_at(p, 2 * CLAW_M + reach - CLAW_M / 10, CLAW_M)),
+            step_armed(
+                &mut sim,
+                claw_at(p, 2 * CLAW_M + reach - CLAW_M / 10, CLAW_M)
+            ),
             PlayerStatus::Downed,
             "within the buffer of the capsule segment downs"
         );

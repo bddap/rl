@@ -189,8 +189,8 @@ fn boarding_of(
     // A walker can't out-run its walk speed: a bigger per-tick delta is a TELEPORT (the
     // round-RESTART respawn, a join slot), not motion — a craft boarded right after one
     // must start at rest, not inherit a cross-map fling.
-    let max_walk =
-        2.0 * (crate::sim::PLAYER_SPEED as f32 * crate::sim::TICK_HZ as f32) / crate::sim::UNIT as f32;
+    let max_walk = 2.0 * (crate::sim::PLAYER_SPEED as f32 * crate::sim::TICK_HZ as f32)
+        / crate::sim::UNIT as f32;
     let velocity = if velocity.length() <= max_walk {
         velocity
     } else {
