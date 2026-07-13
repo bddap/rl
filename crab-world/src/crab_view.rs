@@ -29,7 +29,7 @@ pub(crate) fn hud_corner_label(row: HudRow) -> impl Bundle {
     (
         Text::new(""),
         TextFont {
-            font_size: FONT_SIZE,
+            font_size: FontSize::Px(FONT_SIZE),
             ..default()
         },
         TextColor(HUD_TEXT_COLOR),
@@ -192,7 +192,7 @@ fn sync_brain_label_nodes(
         commands.spawn((
             Text::new(label.clone()),
             TextFont {
-                font_size: 16.0,
+                font_size: FontSize::Px(16.0),
                 ..default()
             },
             TextColor(HUD_TEXT_COLOR),

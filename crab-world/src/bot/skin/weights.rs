@@ -38,7 +38,7 @@ fn strip_cross_part_weights(
             continue;
         }
 
-        let Some(mesh) = meshes.get_mut(&mesh3d.0) else {
+        let Some(mut mesh) = meshes.get_mut(&mesh3d.0) else {
             continue;
         };
         let positions: Option<Vec<Vec3>> = mesh
@@ -46,8 +46,8 @@ fn strip_cross_part_weights(
             .and_then(|a| a.as_float3())
             .map(|p| p.iter().map(|v| Vec3::from_array(*v)).collect());
         let (Some(joints), Some(weights)) = (
-            read_u16x4(mesh, Mesh::ATTRIBUTE_JOINT_INDEX),
-            read_f32x4(mesh, Mesh::ATTRIBUTE_JOINT_WEIGHT),
+            read_u16x4(&mesh, Mesh::ATTRIBUTE_JOINT_INDEX),
+            read_f32x4(&mesh, Mesh::ATTRIBUTE_JOINT_WEIGHT),
         ) else {
             stripped.0.insert(id);
             continue;

@@ -266,7 +266,20 @@ pub(in crate::bot) fn set_flail_damping(
     for (handle, joint) in new.iter() {
         match joints.multibody_joints.get_mut(handle.0) {
             Some((multibody, link_id)) => {
-                multibody.set_joint_damping(link_id, joint.id.drive_damping());
+                // rapier 0.35 exposes the raw per-dof damping DVector rather than the
+                // fork's per-link setter; fill this link's dof rows ourselves.
+                let Some(link) = multibody.link(link_id) else {
+                    error!(
+                        "flail brake NOT armed on {:?}: multibody link {link_id} is stale (rl#347)",
+                        joint.id
+                    );
+                    continue;
+                };
+                let (assembly_id, ndofs) = (link.assembly_id(), link.joint().ndofs());
+                multibody
+                    .damping_mut()
+                    .rows_mut(assembly_id, ndofs)
+                    .fill(joint.id.drive_damping());
             }
             // A miss would leave the joint on rapier's 0.1 default — a silently
             // weaker flail brake, so it must announce itself.

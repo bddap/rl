@@ -137,7 +137,7 @@ fn setup_arena_visuals(
     // (30 m grid pitch makes coarse far cascades invisible).
     commands.spawn((
         DirectionalLight {
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             illuminance: 9500.0,
             color: Color::srgb(0.85, 0.90, 1.0),
             ..default()
