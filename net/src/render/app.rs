@@ -71,7 +71,7 @@ pub fn build_windowed_app(
             .run_if(not(in_state(AppPhase::Playing))),
     );
 
-    app.init_non_send_resource::<PendingRound>()
+    app.init_non_send::<PendingRound>()
         .add_systems(
             OnEnter(AppPhase::Playing),
             (

@@ -97,7 +97,7 @@ fn attach_skins(
             continue;
         }
         commands.spawn((
-            SceneRoot(model.scene.clone()),
+            WorldAssetRoot(model.scene.clone()),
             Transform::from_translation(t.translation - hub),
             Visibility::Hidden,
             CrabSkin {

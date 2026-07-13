@@ -514,7 +514,7 @@ mod overlay {
                         chip.spawn((
                             Text::new(text),
                             TextFont {
-                                font_size: 16.0,
+                                font_size: FontSize::Px(16.0),
                                 ..default()
                             },
                             TextColor(Color::srgb(0.95, 0.95, 0.95)),
@@ -574,7 +574,7 @@ mod overlay {
                         row.spawn((
                             Text::new(label),
                             TextFont {
-                                font_size: 17.0,
+                                font_size: FontSize::Px(17.0),
                                 ..default()
                             },
                             TextColor(Color::srgb(0.95, 0.95, 0.95)),
@@ -656,7 +656,7 @@ mod overlay {
                     overlay.spawn((
                         Text::new(default_label),
                         TextFont {
-                            font_size: 26.0,
+                            font_size: FontSize::Px(26.0),
                             ..default()
                         },
                         TextColor(Color::srgb(1.0, 0.95, 0.6)),
@@ -665,7 +665,7 @@ mod overlay {
                     overlay.spawn((
                         Text::new("Controls"),
                         TextFont {
-                            font_size: 16.0,
+                            font_size: FontSize::Px(16.0),
                             ..default()
                         },
                         TextColor(Color::srgb(0.7, 0.7, 0.7)),

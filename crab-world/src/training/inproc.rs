@@ -154,7 +154,7 @@ pub(crate) fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usi
     use super::systems::{self, brain_step, reset_crab};
 
     let state = systems::WorkerState::new_worker(config, id, arch);
-    app.insert_non_send_resource(state).add_systems(
+    app.insert_non_send(state).add_systems(
         FixedUpdate,
         (brain_step, reset_crab)
             .chain()
@@ -258,7 +258,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
     {
         let mut st = app
             .world_mut()
-            .get_non_send_resource_mut::<WorkerState>()
+            .get_non_send_mut::<WorkerState>()
             .expect("rollout WorkerState");
         let opened = st.begin_horizon(HorizonRequest {
             brain_bytes: &req.brain_bytes,
@@ -278,7 +278,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
 
     let mut st = app
         .world_mut()
-        .get_non_send_resource_mut::<WorkerState>()
+        .get_non_send_mut::<WorkerState>()
         .expect("rollout WorkerState");
     RollOutcome::Rolled {
         output: Box::new(st.end_horizon()),
@@ -288,7 +288,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
 
 fn horizon_tick(app: &mut App) -> u64 {
     app.world()
-        .get_non_send_resource::<WorkerState>()
+        .get_non_send::<WorkerState>()
         .map(|st| st.total_steps())
         .unwrap_or(0)
 }
@@ -299,7 +299,7 @@ fn warm_up_app(app: &mut App) {
     }
     let mut st = app
         .world_mut()
-        .get_non_send_resource_mut::<WorkerState>()
+        .get_non_send_mut::<WorkerState>()
         .expect("rollout WorkerState");
     let _ = st.end_horizon();
 }

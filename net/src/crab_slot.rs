@@ -140,7 +140,7 @@ impl Plugin for NnCrabPlugin {
             self.crab_spawns.len(),
             "one crab spawn per brain binding — the sim's crab count must match the bindings"
         );
-        app.insert_non_send_resource(CrabPolicies(policies));
+        app.insert_non_send(CrabPolicies(policies));
         app.insert_resource(SlotMisses(
             self.crab_spawns.iter().map(|_| Miss::default()).collect(),
         ));
