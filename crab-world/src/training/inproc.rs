@@ -222,7 +222,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
     {
         let mut st = app
             .world_mut()
-            .get_non_send_resource_mut::<TrainingState>()
+            .get_non_send_mut::<TrainingState>()
             .expect("rollout TrainingState");
         let opened = st.begin_horizon(HorizonRequest {
             brain_bytes: &req.brain_bytes,
@@ -242,7 +242,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
 
     let mut st = app
         .world_mut()
-        .get_non_send_resource_mut::<TrainingState>()
+        .get_non_send_mut::<TrainingState>()
         .expect("rollout TrainingState");
     RollOutcome::Rolled {
         output: st.end_horizon(),
@@ -252,7 +252,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
 
 fn horizon_tick(app: &mut App) -> u64 {
     app.world()
-        .get_non_send_resource::<TrainingState>()
+        .get_non_send::<TrainingState>()
         .map(|st| st.total_steps)
         .unwrap_or(0)
 }
@@ -263,7 +263,7 @@ fn warm_up_app(app: &mut App) {
     }
     let mut st = app
         .world_mut()
-        .get_non_send_resource_mut::<TrainingState>()
+        .get_non_send_mut::<TrainingState>()
         .expect("rollout TrainingState");
     let _ = st.end_horizon();
 }
@@ -281,7 +281,7 @@ fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: us
     });
 
     let state = systems::TrainingState::new_worker(config, id, arch);
-    app.insert_non_send_resource(state).add_systems(
+    app.insert_non_send(state).add_systems(
         FixedUpdate,
         (brain_step, reset_crab)
             .chain()

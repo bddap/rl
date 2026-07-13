@@ -19,7 +19,7 @@ pub(super) fn insert_core(app: &mut App, client: ClientSim, coord: Box<Coordinat
 
 fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) {
     let prev = SimSnapshot::capture(&client);
-    world.insert_non_send_resource(GameState {
+    world.insert_non_send(GameState {
         client,
         coord,
         accumulator: 0.0,
@@ -42,11 +42,11 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
 pub(super) struct PendingRound(pub(super) Option<ArmedRound>);
 
 pub(super) fn ensure_round_installed(world: &mut World) {
-    if world.get_non_send_resource::<GameState>().is_some() {
+    if world.get_non_send::<GameState>().is_some() {
         return;
     }
     let mut ready = world
-        .get_non_send_resource_mut::<PendingRound>()
+        .get_non_send_mut::<PendingRound>()
         .and_then(|mut p| p.0.take())
         .expect("entered Playing with no round to install — the menu must park a round before transitioning")
         .into_ready();
@@ -75,7 +75,7 @@ pub(super) fn ensure_round_installed(world: &mut World) {
 }
 
 pub(super) fn teardown_round(world: &mut World) {
-    world.remove_non_send_resource::<GameState>();
+    world.remove_non_send::<GameState>();
     world.remove_resource::<crate::external_crab::ExternalCrabArmed>();
     // Un-label the crab bodies that persist across rounds: labels are round state (the host
     // republishes on the next arm; a client re-adopts from the next round's articulation),
@@ -121,7 +121,7 @@ fn end_round_server_down(
     }
     if world.get_resource::<super::app::BootedWithMenu>().is_some() {
         let host = world
-            .non_send_resource::<GameState>()
+            .non_send::<GameState>()
             .coord
             .server_endpoint()
             .expect(
@@ -605,24 +605,24 @@ pub(super) fn drive_client_sim(world: &mut World) {
         .get_resource::<crate::external_crab::ExternalCrabArmed>()
         .is_some();
 
-    let role = PeerRole::of(world.non_send_resource::<GameState>());
-    let me = local_pilot(world.non_send_resource::<GameState>());
+    let role = PeerRole::of(world.non_send::<GameState>());
+    let me = local_pilot(world.non_send::<GameState>());
 
     let delta = world.resource::<Time>().delta().as_secs_f64();
 
     let (tel, roster_len) = {
-        let state = world.non_send_resource::<GameState>();
+        let state = world.non_send::<GameState>();
         let tel = state.coord.telemetry().cloned();
         (tel, state.client.sim().players().count())
     };
 
-    world.non_send_resource_mut::<GameState>().accumulator += delta;
+    world.non_send_mut::<GameState>().accumulator += delta;
 
     {
         let toggle = std::mem::take(&mut world.resource_mut::<PendingInput>().toggle_vehicle);
         if toggle {
             let may_board = {
-                let state = world.non_send_resource::<GameState>();
+                let state = world.non_send::<GameState>();
                 let me = state.client.me();
                 state
                     .client
@@ -643,12 +643,12 @@ pub(super) fn drive_client_sim(world: &mut World) {
     let mut applied = 0u32;
     loop {
         {
-            let state = world.non_send_resource::<GameState>();
+            let state = world.non_send::<GameState>();
             if state.accumulator < TICK_DT || applied >= MAX_TICKS_PER_FRAME {
                 break;
             }
         }
-        world.non_send_resource_mut::<GameState>().accumulator -= TICK_DT;
+        world.non_send_mut::<GameState>().accumulator -= TICK_DT;
         applied += 1;
 
         let foot_input = {
@@ -678,7 +678,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
         let mut pending_art: Option<crate::articulation::CrabArticulation> = None;
         let mut server_down: Option<crate::net_loop::ServerDown> = None;
         let issue_tick = {
-            let mut state = world.non_send_resource_mut::<GameState>();
+            let mut state = world.non_send_mut::<GameState>();
             // Plain `&mut GameState` (not `Mut`) so the adopt closure below can borrow the
             // `reported_outcome` field disjointly from the `client` it runs against.
             let state = &mut *state;
@@ -764,7 +764,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
         if role == PeerRole::ServerAuth && world.get_resource::<VehicleControls>().is_some() {
             let anchor = world.resource::<crate::external_crab::ArenaAnchor>().0;
             let entries: BTreeMap<PilotId, PilotCommand> = {
-                let state = world.non_send_resource::<GameState>();
+                let state = world.non_send::<GameState>();
                 let server = state.coord.server().expect("server_auth ⇒ a server");
                 server
                     .pilot_intents()
@@ -789,7 +789,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
             // Ready? Host-paced: `exchange` assembled one tick per issued local input, so this
             // drains exactly what this frame issued (a remote can delay nothing — rl#195).
             {
-                let state = world.non_send_resource::<GameState>();
+                let state = world.non_send::<GameState>();
                 if !state
                     .server()
                     .expect("server_auth ⇒ a server")
@@ -799,21 +799,21 @@ pub(super) fn drive_client_sim(world: &mut World) {
                 }
             }
             {
-                let mut state = world.non_send_resource_mut::<GameState>();
+                let mut state = world.non_send_mut::<GameState>();
                 state.prev = SimSnapshot::capture(&state.client);
             }
 
             {
                 let (crab_poses, shadows) = if armed {
                     let stepping_into = {
-                        let state = world.non_send_resource::<GameState>();
+                        let state = world.non_send::<GameState>();
                         state.server().expect("server_auth ⇒ a server").sim().tick() + 1
                     };
                     pump_fixed_steps(world, crate::cadence::steps_for_tick(stepping_into));
                     let poses = world.resource_scope(
                         |world, mut bridge: Mut<crate::external_crab::ExternalCrabBridge>| {
                             let poses = bridge.crab_poses();
-                            let state = world.non_send_resource::<GameState>();
+                            let state = world.non_send::<GameState>();
                             for idx in 0..bridge.crab_count() {
                                 let hunt = state
                                     .server()
@@ -833,7 +833,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                     (Vec::new(), BTreeMap::new())
                 };
                 let (bytes, restarted) = {
-                    let mut state = world.non_send_resource_mut::<GameState>();
+                    let mut state = world.non_send_mut::<GameState>();
                     let stepped = state
                         .server_mut()
                         .expect("server_auth ⇒ a server")
@@ -845,14 +845,14 @@ pub(super) fn drive_client_sim(world: &mut World) {
                 let articulation =
                     armed.then(|| crate::render::articulation::capture(world, snap.tick));
                 {
-                    let state = world.non_send_resource::<GameState>();
+                    let state = world.non_send::<GameState>();
                     state.coord.broadcast_step(&snap, articulation.as_ref());
                 }
                 if let Some(art) = &articulation {
                     super::articulation::publish_remote_vehicles(world, &art.vehicles, me);
                 }
                 {
-                    let mut state = world.non_send_resource_mut::<GameState>();
+                    let mut state = world.non_send_mut::<GameState>();
                     // Same per-tick latch clear as the adopt arm: an Ongoing tick means the
                     // round is (or just became, via RESTART) live, so the next decision must
                     // report even if this frame's unbounded catch-up drain also re-decides it.
@@ -863,7 +863,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                 }
                 if restarted && armed {
                     let spawns: Vec<crate::sim::Pos> = world
-                        .non_send_resource::<GameState>()
+                        .non_send::<GameState>()
                         .server()
                         .expect("server_auth ⇒ a server")
                         .sim()
@@ -878,7 +878,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
 
         if let Some(t) = &tel {
             let due = {
-                let mut state = world.non_send_resource_mut::<GameState>();
+                let mut state = world.non_send_mut::<GameState>();
                 let due = state.client.sim().tick() >= state.next_tel_tick;
                 if due {
                     state.next_tel_tick = next_sample_tick(state.client.sim().tick());
@@ -917,16 +917,16 @@ pub(super) fn drive_client_sim(world: &mut World) {
     // player, so once per frame — after the tick drain — is plenty. A remote-adopt client has
     // no server and drains nothing.
     crate::telemetry::surface_starvation(
-        world.non_send_resource_mut::<GameState>().server_mut(),
+        world.non_send_mut::<GameState>().server_mut(),
         tel.as_ref(),
     );
 
     if applied == MAX_TICKS_PER_FRAME {
-        let mut state = world.non_send_resource_mut::<GameState>();
+        let mut state = world.non_send_mut::<GameState>();
         state.accumulator = state.accumulator.min(TICK_DT);
     }
 
-    let mut state = world.non_send_resource_mut::<GameState>();
+    let mut state = world.non_send_mut::<GameState>();
     let state = &mut *state;
     for (pid, p) in state.client.sim().players() {
         match state.logged_statuses.insert(pid, p.status()) {

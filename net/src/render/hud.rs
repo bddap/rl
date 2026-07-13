@@ -27,7 +27,7 @@ pub(super) fn spawn_hud(mut commands: Commands) {
         DespawnOnExit(AppPhase::Playing),
         Text::new("…"),
         TextFont {
-            font_size: 22.0,
+            font_size: FontSize::Px(22.0),
             ..default()
         },
         TextColor(Color::srgb(1.0, 1.0, 1.0)),

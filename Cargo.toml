@@ -8,9 +8,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-bevy = { version = "0.18", default-features = false }
-bevy_rapier3d = { version = "0.34", default-features = false }
-bevy_egui = "0.39"
+bevy = { version = "0.19", default-features = false }
+bevy_rapier3d = { version = "0.35", default-features = false }
+bevy_egui = "0.41"
 
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -45,6 +45,3 @@ opt-level = 3
 
 [profile.release]
 strip = true
-
-[patch.crates-io]
-rapier3d = { git = "https://github.com/bddap-bot/rapier", rev = "3ccc03d91ec0cff7ddd370c8e9a34240991f9875" }

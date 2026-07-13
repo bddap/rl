@@ -37,7 +37,7 @@ fn attach_skybox(
     let Some(sky) = sky else { return };
     for cam in &cams {
         commands.entity(cam).insert(Skybox {
-            image: sky.0.clone(),
+            image: Some(sky.0.clone()),
             brightness: SKY_BRIGHTNESS,
             rotation: Quat::IDENTITY,
         });

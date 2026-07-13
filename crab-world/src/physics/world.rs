@@ -120,7 +120,7 @@ fn setup_arena_visuals(
 
     commands.spawn((
         DirectionalLight {
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             illuminance: 10000.0,
             ..default()
         },

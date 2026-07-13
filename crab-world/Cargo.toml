@@ -16,7 +16,7 @@ render = ["bevy/default", "bevy_rapier3d/default"]
 # builds would fork shipped float behavior from what the policy trained on (rl#223).
 enhanced-determinism = ["rapier3d/enhanced-determinism"]
 
-wgpu = ["burn/wgpu", "dep:naga", "naga/termcolor"]
+wgpu = ["burn/wgpu"]
 
 [dependencies]
 bevy = { workspace = true, features = [
@@ -28,12 +28,20 @@ bevy = { workspace = true, features = [
     "bevy_log",
 ] }
 bevy_rapier3d = { workspace = true, features = ["dim3"] }
-rapier3d = { version = "0.32", default-features = false }
+# Pinned to exactly what bevy_rapier3d 0.35 pins (`=0.33.0-alpha`) so this direct
+# dep (for the `enhanced-determinism` feature passthrough) unifies with it.
+rapier3d = { version = "=0.33.0-alpha", default-features = false }
 rand.workspace = true
 serde.workspace = true
 gltf.workspace = true
 burn.workspace = true
-naga = { workspace = true, optional = true }
+# burn's cubecl-wgpu backend pulls naga 26 into every build (via `autodiff` → cubecl),
+# regardless of the `wgpu` feature. Bevy ≤0.18 used naga 26 too and enabled its
+# `termcolor` feature; bevy 0.19 moved to naga 29, so nothing turns on naga 26's
+# `termcolor` anymore and it fails to compile (`WriteColor for String` in its WGSL
+# diagnostics). Re-enable it here — naga 26 is already in the graph, so this adds only
+# the feature, not a crate.
+naga = { workspace = true, features = ["termcolor"] }
 clap.workspace = true
 bincode.workspace = true
 libc.workspace = true

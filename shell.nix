@@ -1,7 +1,7 @@
 let
   pkgs = import (fetchTarball {
-    url = "https://github.com/NixOS/nixpkgs/archive/d6c71932130818840fc8fe9509cf50be8c64634f.tar.gz";
-    sha256 = "1klgyhj98j3gfsql5sn9rapyx62qk5g8adk5zh9mnc4d0fj61gdr";
+    url = "https://github.com/NixOS/nixpkgs/archive/e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3.tar.gz";
+    sha256 = "1h4jkfjbdp9y0alp86z38g60mqw7rzx89gn16dbvw8wn2z7r002j";
   }) {};
 in
 pkgs.mkShell {

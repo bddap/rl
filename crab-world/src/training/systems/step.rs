@@ -399,7 +399,7 @@ mod tests {
         });
 
         let state = TrainingState::new_worker(&config, 0, crate::bot::arch::ArchId::DEFAULT);
-        app.insert_non_send_resource(state).add_systems(
+        app.insert_non_send(state).add_systems(
             FixedUpdate,
             (brain_step, reset_crab)
                 .chain()
@@ -427,7 +427,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             let mut app = headless_training_app(&dir, seed);
             app.world_mut()
-                .non_send_resource_mut::<TrainingState>()
+                .non_send_mut::<TrainingState>()
                 .brain
                 .set(initial_brain.clone());
             for t in 0..TICKS {
@@ -441,7 +441,7 @@ mod tests {
                 }
                 app.update();
             }
-            let traj = app.world().non_send_resource::<TrainingState>().rollouts[0]
+            let traj = app.world().non_send::<TrainingState>().rollouts[0]
                 .transitions
                 .clone();
             let _ = std::fs::remove_dir_all(&dir);
@@ -453,7 +453,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&seed_dir);
         let brain = headless_training_app(&seed_dir, SEED)
             .world()
-            .non_send_resource::<TrainingState>()
+            .non_send::<TrainingState>()
             .brain()
             .clone();
         let _ = std::fs::remove_dir_all(&seed_dir);
@@ -499,7 +499,7 @@ mod tests {
             app.update();
         }
         {
-            let st = app.world().non_send_resource::<TrainingState>();
+            let st = app.world().non_send::<TrainingState>();
             assert!(
                 matches!(st.envs[0].phase, EnvPhase::Recording),
                 "settle grace elapsed and no reset pending — env is recording"
@@ -508,7 +508,7 @@ mod tests {
         }
         let episodes_before = app
             .world()
-            .non_send_resource::<TrainingState>()
+            .non_send::<TrainingState>()
             .episode_count;
 
         {
@@ -540,7 +540,7 @@ mod tests {
             .expect("brain_step");
 
         {
-            let st = app.world().non_send_resource::<TrainingState>();
+            let st = app.world().non_send::<TrainingState>();
             assert!(
                 matches!(st.envs[0].phase, EnvPhase::Settling { grace } if grace == RESET_GRACE_TICKS),
                 "rescue path takes the settle grace itself (Settling, not AwaitingRespawn) — \
@@ -579,14 +579,14 @@ mod tests {
         }
         assert!(
             matches!(
-                app.world().non_send_resource::<TrainingState>().envs[0].phase,
+                app.world().non_send::<TrainingState>().envs[0].phase,
                 EnvPhase::Recording
             ),
             "env 0 must be live-recording before the grab"
         );
         let episodes_before = app
             .world()
-            .non_send_resource::<TrainingState>()
+            .non_send::<TrainingState>()
             .episode_count;
 
         let tip_pos = {
@@ -602,7 +602,7 @@ mod tests {
 
         app.update();
 
-        let st = app.world().non_send_resource::<TrainingState>();
+        let st = app.world().non_send::<TrainingState>();
         let last = st.rollouts[0]
             .transitions
             .last()
@@ -642,7 +642,7 @@ mod tests {
         }
         assert!(
             matches!(
-                app.world().non_send_resource::<TrainingState>().envs[0].phase,
+                app.world().non_send::<TrainingState>().envs[0].phase,
                 EnvPhase::Recording
             ),
             "env must be recording before the hand-driven ticks"
@@ -664,7 +664,7 @@ mod tests {
             t.translation.y = -1.0;
         }
 
-        let transitions_before = app.world().non_send_resource::<TrainingState>().rollouts[0].len();
+        let transitions_before = app.world().non_send::<TrainingState>().rollouts[0].len();
 
         app.world_mut()
             .run_system_once(crate::bot::sensor::build_observation)
@@ -674,7 +674,7 @@ mod tests {
             .expect("brain_step B");
         let act_b = app.world().resource::<CrabActions>().envs[0];
 
-        let st = app.world().non_send_resource::<TrainingState>();
+        let st = app.world().non_send::<TrainingState>();
         let last = st.rollouts[0]
             .transitions
             .last()

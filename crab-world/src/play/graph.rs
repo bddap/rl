@@ -93,7 +93,7 @@ fn setup_overlay(
         vis,
         Text::new("joint telemetry (G)\ntop: angle (rad)   bottom: commanded torque"),
         TextFont {
-            font_size: 14.0,
+            font_size: FontSize::Px(14.0),
             ..default()
         },
         TextColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),

@@ -154,7 +154,7 @@ pub fn run_headless_probe(
     sim.set_external_crab_pose(0, crab.pos(), crab.yaw());
 
     let mut app = headless_nn_crab_app(policy, crab_spawn, visuals);
-    app.insert_non_send_resource(ProbeDriver {
+    app.insert_non_send(ProbeDriver {
         sim,
         samples: Vec::new(),
         log_every: log_every.max(1),
@@ -165,7 +165,7 @@ pub fn run_headless_probe(
         app.update();
     }
     app.world()
-        .get_non_send_resource::<ProbeDriver>()
+        .get_non_send::<ProbeDriver>()
         .map(|d| d.samples.clone())
         .unwrap_or_default()
 }
@@ -200,7 +200,7 @@ pub fn run_vehicle_stability_probe(
     sim.set_external_crab_pose(0, crab.pos(), crab.yaw());
 
     let mut app = headless_nn_crab_app(policy, crab_spawn, crab_world::Visuals(false));
-    app.insert_non_send_resource(ProbeDriver {
+    app.insert_non_send(ProbeDriver {
         sim,
         samples: Vec::new(),
         log_every: 1,
@@ -212,7 +212,7 @@ pub fn run_vehicle_stability_probe(
     }
     let ram_tick = app
         .world()
-        .get_non_send_resource::<ProbeDriver>()
+        .get_non_send::<ProbeDriver>()
         .map(|d| d.sim.tick())
         .unwrap_or(warmup);
 
@@ -238,7 +238,7 @@ pub fn run_vehicle_stability_probe(
 
     let samples = app
         .world()
-        .get_non_send_resource::<ProbeDriver>()
+        .get_non_send::<ProbeDriver>()
         .map(|d| d.samples.clone())
         .unwrap_or_default();
     StabilityResult { samples, ram_tick }

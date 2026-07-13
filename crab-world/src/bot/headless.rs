@@ -45,12 +45,12 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
                 ..default()
             })
             .set(bevy::render::RenderPlugin {
-                render_creation: bevy::render::settings::RenderCreation::Automatic(
+                render_creation: bevy::render::settings::RenderCreation::Automatic(Box::new(
                     bevy::render::settings::WgpuSettings {
                         backends: None,
                         ..default()
                     },
-                ),
+                )),
                 ..default()
             })
             .disable::<bevy::winit::WinitPlugin>()
@@ -119,10 +119,10 @@ pub fn pin_single_thread_pools() {
 }
 
 pub fn force_serial_schedules(app: &mut App) {
-    use bevy::ecs::schedule::{ExecutorKind, Schedules};
+    use bevy::ecs::schedule::{Schedules, SingleThreadedExecutor};
     let mut schedules = app.world_mut().resource_mut::<Schedules>();
     for (_label, schedule) in schedules.iter_mut() {
-        schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+        schedule.set_executor(SingleThreadedExecutor::new());
     }
 }
 

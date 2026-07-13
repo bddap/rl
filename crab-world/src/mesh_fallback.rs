@@ -246,7 +246,7 @@ mod banner {
                 b.spawn((
                     Text::new(BANNER_HEADLINE),
                     TextFont {
-                        font_size: 20.0,
+                        font_size: FontSize::Px(20.0),
                         ..default()
                     },
                     TextColor(Color::srgb(1.0, 0.5, 0.5)),
@@ -254,7 +254,7 @@ mod banner {
                 b.spawn((
                     Text::new(format!("{reason}  —  fetch with scripts/fetch-sally.sh")),
                     TextFont {
-                        font_size: 13.0,
+                        font_size: FontSize::Px(13.0),
                         ..default()
                     },
                     TextColor(Color::srgba(0.95, 0.85, 0.85, 0.9)),

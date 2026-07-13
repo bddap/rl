@@ -338,7 +338,7 @@ fn run_bearing(
         settle_ticks: RESET_GRACE_TICKS as u64,
     })
     .init_resource::<EvalState>()
-    .insert_non_send_resource(policy)
+    .insert_non_send(policy)
     .add_systems(FixedUpdate, eval_step.in_set(BotSet::Think));
 
     force_serial_schedules(&mut app);

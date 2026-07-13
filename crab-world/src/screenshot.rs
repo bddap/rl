@@ -23,7 +23,7 @@ pub const DEFAULT_WIDTH: u32 = 1280;
 pub const DEFAULT_HEIGHT: u32 = 720;
 
 pub fn new_render_target(width: u32, height: u32) -> Image {
-    let mut image = Image::new_target_texture(width, height, TextureFormat::bevy_default(), None);
+    let mut image = Image::new_target_texture(width, height, TextureFormat::Rgba8UnormSrgb, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     image
 }

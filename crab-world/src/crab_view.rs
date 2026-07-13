@@ -111,7 +111,7 @@ fn spawn_render_mode_label(mut commands: Commands) {
     commands.spawn((
         Text::new(""),
         TextFont {
-            font_size: 18.0,
+            font_size: FontSize::Px(18.0),
             ..default()
         },
         TextColor(HUD_TEXT_COLOR),
@@ -186,7 +186,7 @@ fn sync_brain_label_nodes(
         commands.spawn((
             Text::new(label.clone()),
             TextFont {
-                font_size: 16.0,
+                font_size: FontSize::Px(16.0),
                 ..default()
             },
             TextColor(HUD_TEXT_COLOR),

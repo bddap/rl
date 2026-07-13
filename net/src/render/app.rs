@@ -55,7 +55,7 @@ pub fn build_windowed_app(
     // (Menu ↔ vehicles).
     app.add_plugins(crab_world::controls::ControlsOverlayPlugin::<GcrControls>::default());
 
-    app.init_non_send_resource::<PendingRound>()
+    app.init_non_send::<PendingRound>()
         .add_systems(
             OnEnter(AppPhase::Playing),
             (

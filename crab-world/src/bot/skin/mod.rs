@@ -7,7 +7,7 @@ pub use pairing::{CrabSkinRepose, SkinRepose};
 
 #[derive(Resource)]
 struct CrabModel {
-    scene: Handle<Scene>,
+    scene: Handle<WorldAsset>,
 }
 
 pub fn register(app: &mut App) {

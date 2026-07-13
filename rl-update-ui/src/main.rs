@@ -257,7 +257,7 @@ fn build_ui(commands: &mut Commands) {
             p.spawn((
                 Text::new("rl Update"),
                 TextFont {
-                    font_size: 46.0,
+                    font_size: FontSize::Px(46.0),
                     ..default()
                 },
                 TextColor(Color::srgb(0.95, 0.95, 0.97)),
@@ -265,7 +265,7 @@ fn build_ui(commands: &mut Commands) {
             p.spawn((
                 Text::new("Checking for updates…"),
                 TextFont {
-                    font_size: 24.0,
+                    font_size: FontSize::Px(24.0),
                     ..default()
                 },
                 TextColor(accent()),
@@ -274,7 +274,7 @@ fn build_ui(commands: &mut Commands) {
             p.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: 15.0,
+                    font_size: FontSize::Px(15.0),
                     ..default()
                 },
                 TextColor(dim()),
@@ -283,7 +283,7 @@ fn build_ui(commands: &mut Commands) {
             p.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: 18.0,
+                    font_size: FontSize::Px(18.0),
                     ..default()
                 },
                 TextColor(Color::srgb(0.80, 0.80, 0.86)),
@@ -312,7 +312,7 @@ fn build_ui(commands: &mut Commands) {
             p.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: 19.0,
+                    font_size: FontSize::Px(19.0),
                     ..default()
                 },
                 TextColor(Color::srgb(0.85, 0.85, 0.90)),
@@ -321,7 +321,7 @@ fn build_ui(commands: &mut Commands) {
             p.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: 18.0,
+                    font_size: FontSize::Px(18.0),
                     ..default()
                 },
                 TextColor(dim()),

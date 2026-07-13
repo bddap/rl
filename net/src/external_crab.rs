@@ -372,7 +372,7 @@ impl Plugin for ExternalCrabPlugin {
             self.crab_spawns.len(),
             "one crab spawn per brain binding — the sim's crab count must match the bindings"
         );
-        app.insert_non_send_resource(CrabPolicies(policies));
+        app.insert_non_send(CrabPolicies(policies));
         app.insert_resource(ExternalCrabBridge::new(&self.crab_spawns));
 
         app.add_systems(

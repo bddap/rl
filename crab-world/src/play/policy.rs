@@ -32,7 +32,7 @@ pub(super) fn policy_step(
 pub(super) fn add_inference(app: &mut App, checkpoint_dir: &Path, live_dir: Option<PathBuf>) {
     let mut policy = Policy::load(checkpoint_dir);
     policy.set_live_dir(live_dir);
-    app.insert_non_send_resource(policy);
+    app.insert_non_send(policy);
     // The demo's single crab wears its brain's identity on screen (rl#200 increment 7).
     // Republished every frame (write-on-change) rather than set once so a hot-reload swap
     // relabels the crab the same tick the new brain takes over.

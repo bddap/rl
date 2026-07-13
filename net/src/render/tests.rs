@@ -16,7 +16,7 @@ fn menu_handoff_installs_the_chosen_round() {
     app.add_plugins(MinimalPlugins)
         .add_plugins(bevy::state::app::StatesPlugin)
         .init_state::<AppPhase>()
-        .init_non_send_resource::<PendingRound>()
+        .init_non_send::<PendingRound>()
         .add_systems(OnEnter(AppPhase::Playing), ensure_round_installed);
 
     app.world_mut().insert_resource(ExternalCrabStackInstalled);
@@ -28,7 +28,7 @@ fn menu_handoff_installs_the_chosen_round() {
     })
     .expect("a solo round always arms");
     app.world_mut()
-        .insert_non_send_resource(PendingRound(Some(armed)));
+        .insert_non_send(PendingRound(Some(armed)));
     app.world_mut()
         .resource_mut::<NextState<AppPhase>>()
         .set(AppPhase::Playing);
@@ -42,7 +42,7 @@ fn menu_handoff_installs_the_chosen_round() {
     );
     let gs = app
         .world()
-        .get_non_send_resource::<GameState>()
+        .get_non_send::<GameState>()
         .expect("ensure_round_installed must build GameState from the parked round");
     assert_eq!(gs.client.me(), crate::sim::PlayerId(0), "solo player id 0");
     assert!(
@@ -54,7 +54,7 @@ fn menu_handoff_installs_the_chosen_round() {
     );
     assert!(
         app.world()
-            .get_non_send_resource::<PendingRound>()
+            .get_non_send::<PendingRound>()
             .is_some_and(|p| p.0.is_none()),
         "the chosen round must be taken out of PendingRound"
     );
@@ -484,14 +484,10 @@ fn ship_flight_control_is_outer_wilds() {
     );
 }
 
-/// The FP perspective's EFFECTIVE clip must sit at its configured `near`. Bevy 0.18
-/// clips by `PerspectiveProjection::near_clip_plane` (an oblique portals/mirrors
-/// plane), not `near` — its default is the stock 0.1 m plane, so a custom `near` with
-/// a stale default plane still clips at 0.1 render-m ≈ 2 eye-heights: looking down
-/// while standing saw straight through the floor (rl#196). For a straight-ahead
-/// (non-oblique) plane matching `near`, the oblique adjustment is a no-op and the
-/// infinite-reverse matrix carries `near` at w_axis.z — pin that so the pair can't
-/// drift apart again on a bevy bump.
+/// The FP perspective's EFFECTIVE clip must sit at its configured `near`, not at the
+/// stock 0.1 m default — an unscaled clip let a standing player look down through the
+/// floor (rl#196). The infinite-reverse projection carries `near` at w_axis.z; pin that
+/// so a bevy bump can't silently move the effective clip off `near` again.
 #[test]
 fn fp_camera_effective_clip_is_the_scaled_near() {
     use bevy::camera::CameraProjection;
