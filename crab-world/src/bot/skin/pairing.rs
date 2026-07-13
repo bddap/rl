@@ -42,7 +42,10 @@ impl CrabRenderPose {
     /// THE sampled-or-physics rule, one seam for every render consumer: the pose a body
     /// part renders at is its sampled pose where a stream feeds one, else the physics
     /// pose the caller read from the entity. (Parts are unscaled top-level entities, so
-    /// a `GlobalTransform` caller passes `compute_transform()` losslessly.)
+    /// a `GlobalTransform` caller passes `compute_transform()` losslessly.) Caution:
+    /// the fallback is also what a WRONG key (a mesh child instead of the part) or a
+    /// pre-sampler read looks like — a new consumer must run after the frame's sampling
+    /// and be verified against a fed window, or it silently re-steps at raw cadence.
     pub fn rendered(&self, part: Entity, physics: Transform) -> Transform {
         self.0.get(&part).copied().unwrap_or(physics)
     }
