@@ -92,9 +92,10 @@ pub const TICK_DT: f64 = 1.0 / TICK_HZ as f64;
 pub const UNIT: i64 = 100_000;
 
 /// On-foot pace, player heights per second — scale-free like
-/// [`crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S`]. 2.77 h/s is the pre-rl#256
-/// tuning (166 grid/tick at the old 1 mm grid and 1.8 m stature) carried over exactly.
-const PLAYER_SPEED_HEIGHTS_PER_S: f32 = 2.77;
+/// [`crab_world::eval::CRAB_CHARGE_SPEED_HEIGHTS_PER_S`]. The expression is the
+/// pre-rl#256 tuning verbatim: 166 grid/tick at the old 1 mm grid, 30 Hz, 1.8 m
+/// stature.
+const PLAYER_SPEED_HEIGHTS_PER_S: f32 = 166.0 * 30.0 / (1000.0 * 1.8);
 
 pub(crate) const PLAYER_SPEED: i64 =
     (PLAYER_SPEED_HEIGHTS_PER_S * PLAYER_HEIGHT * UNIT as f32 / TICK_HZ as f32) as i64;
@@ -133,7 +134,7 @@ pub const CRAB_SCALE: i64 = 12;
 
 /// Sally's nominal stature in world meters. The world's absolute scale IS the rig's
 /// (rl#256), so this is a pinned copy of the rigs' measured natural height — fallback
-/// 0.61146 m, mesh-fitted 0.61150 m; `nominal_stature_matches_rigs` holds it within 1%
+/// 0.61146 m, mesh-fitted 0.61150 m; `grab_reach_matches_crab_body` holds it within 1%
 /// of every rig she can wear. Human-scale constants derive from it via the sizing rule.
 pub const CRAB_STATURE: f32 = 0.6115;
 
@@ -142,27 +143,34 @@ pub const CRAB_STATURE: f32 = 0.6115;
 /// players derive from HER (rl#256). Render capsules derive from this one constant.
 pub const PLAYER_HEIGHT: f32 = CRAB_STATURE / CRAB_SCALE as f32;
 
+/// `h` player heights on the fixed-point grid, rounded to the nearest unit — THE way
+/// human-scale gameplay constants are written: the docs already reason in player
+/// heights, and a ratio like `6.0 / 1.8` keeps a carried-over pre-rl#256 tuning's
+/// provenance in the code instead of a rotting meter footnote.
+const fn player_heights(h: f32) -> i64 {
+    (h * PLAYER_HEIGHT * UNIT as f32 + 0.5) as i64
+}
+
 /// 2D reach of the grab around the crab's sim pos (the carapace ground point — the bridge
-/// integrates carapace deltas): deep under her body core, in sim meters. rl#236 pinned
-/// this to the full inscribed carapace footprint (10.5 m); rl#249 shrank it, because that
+/// integrates carapace deltas): deep under her body core. rl#236 pinned this to the
+/// full inscribed carapace footprint (~0.30 m); rl#249 shrank it, because that
 /// disc downed prey her TRAINED near-field claw strike should engage — the circle shadowed
 /// the claw mechanic rl#249 asks for (rl#236's own side observation). Now the core disc
 /// covers only "she is standing on you"; the 0.17–0.48 m shell belongs to real claw
 /// contact ([`ClawPose`]). Legs still deliberately do not grab.
 /// `grab_reach_matches_crab_body` pins the disc within the carapace footprint, under
-/// the claw shell. (0.17 world-m = the pre-rl#256 6 sim-m, tuning carried over.)
-pub const CRAB_GRAB_RADIUS: i64 = (0.17 * UNIT as f32) as i64;
+/// the claw shell.
+pub const CRAB_GRAB_RADIUS: i64 = player_heights(6.0 / 1.8);
 
 /// "Very close" slack around a claw collider (rl#249): the sim player is a point, so this
 /// covers their body radius plus the near-miss feel margin — and absorbs one tick of claw
 /// sweep (the capsule is sampled per tick, not swept). At her scale a graze this wide
 /// (~1.1 player heights) reads as a hit. Pure feel parameter; tune on playtest.
-/// (0.057 world-m = the pre-rl#256 2 sim-m.)
-pub const CLAW_DOWN_BUFFER: i64 = (0.057 * UNIT as f32) as i64;
+pub const CLAW_DOWN_BUFFER: i64 = player_heights(2.0 / 1.8);
 
 /// The player's height span for the claw check, on the fixed-point grid: a claw passing
 /// clear overhead must not down anyone.
-const PLAYER_HEIGHT_FP: i64 = (PLAYER_HEIGHT * UNIT as f32) as i64;
+const PLAYER_HEIGHT_FP: i64 = player_heights(1.0);
 
 const STARTUP_GRACE_TICKS: u64 = 30;
 
@@ -186,12 +194,11 @@ const SPAWN_GRACE_SECS: i64 = 5;
 /// `grab_reach_matches_crab_body` cross-checks that floor against every rig.
 const MIN_CRAB_SPAWN_DISTANCE: i64 = CRAB_CHARGE_SPEED_PER_S * SPAWN_GRACE_SECS;
 
-/// Spacing between player spawn slots along the z=0 spawn line (~1.1 player heights;
-/// the pre-rl#256 2 sim-m).
-const SPAWN_SLOT_PITCH: i64 = (0.057 * UNIT as f32) as i64;
+/// Spacing between player spawn slots along the z=0 spawn line.
+const SPAWN_SLOT_PITCH: i64 = player_heights(2.0 / 1.8);
 
-/// Reach-the-objective radius (~1.1 player heights; the pre-rl#256 2 sim-m).
-pub const EXTRACT_RADIUS: i64 = (0.057 * UNIT as f32) as i64;
+/// Reach-the-objective radius.
+pub const EXTRACT_RADIUS: i64 = player_heights(2.0 / 1.8);
 
 pub(crate) const MAX_YAW_TURNS_PER_TICK: i32 = trig::TURN / 24;
 
@@ -529,7 +536,7 @@ impl Sim {
         let extraction = ExtractionPoint {
             pos: Pos {
                 x: 0,
-                z: MIN_CRAB_SPAWN_DISTANCE + (0.51 * UNIT as f32) as i64,
+                z: MIN_CRAB_SPAWN_DISTANCE + player_heights(10.0),
             },
         };
         let crabs = (0..cfg.crabs).map(|i| Self::spawn_crab(&map, i)).collect();
@@ -542,8 +549,8 @@ impl Sim {
         // crab since rl#257 grew MIN past this base) sets the actual distance, so
         // round-start and joiner safety share the one constant.
         let mut pos = Pos {
-            x: (0.17 * UNIT as f32) as i64 + idx as i64 * (0.23 * UNIT as f32) as i64,
-            z: (0.57 * UNIT as f32) as i64,
+            x: player_heights(6.0 / 1.8) + idx as i64 * player_heights(8.0 / 1.8),
+            z: player_heights(20.0 / 1.8),
         };
         if let Some(nearest) = players
             .values()
@@ -1522,10 +1529,12 @@ mod tests {
         );
     }
 
-    /// The claw tests' yardstick: half a [`CLAW_DOWN_BUFFER`] (≈0.0285 m, at body
-    /// height against the ~0.051 m player) — every claw-test length is a multiple, so
-    /// the geometry keeps one legible scale.
-    const CLAW_M: i64 = CLAW_DOWN_BUFFER / 2;
+    /// The claw tests' yardstick, 5/9 of a player height (≈0.028 m) — every claw-test
+    /// length is a multiple, so the geometry keeps one legible scale. Anchored on the
+    /// player, NOT on [`CLAW_DOWN_BUFFER`]: that's the tune-on-playtest feel knob, and
+    /// retuning it must not silently rescale this geometry (e.g. drop the "overhead"
+    /// claw under the player's height span).
+    const CLAW_M: i64 = PLAYER_HEIGHT_FP * 5 / 9;
 
     /// A claw capsule at body height. `dx` slides it sideways off the player so the
     /// near-miss cases stay one call.

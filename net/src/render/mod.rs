@@ -11,7 +11,7 @@ use crate::client::{ClientSim, TickMsg};
 use crate::controls::{self, Action, GcrContext, GcrControls};
 use crate::net_loop::{Coordinator, Exchanged, NetDriver};
 use crate::sim::{
-    CRAB_SCALE, Crab, Input, Outcome, PLAYER_HEIGHT, Player, PlayerId, PlayerStatus, Pos, buttons,
+    Crab, Input, Outcome, PLAYER_HEIGHT, Player, PlayerId, PlayerStatus, Pos, buttons,
     trig, trig_client,
 };
 use crate::telemetry::{TelemetryEvent, next_sample_tick};
@@ -23,11 +23,11 @@ pub use crate::sim::TICK_DT;
 
 const MAX_TICKS_PER_FRAME: u32 = 8;
 
-/// Eye level at ~89% of stature — the pre-rl#256 1.6 m eyes on the 1.8 m player.
-const EYE_HEIGHT: f32 = 0.89 * crate::sim::PLAYER_HEIGHT;
+/// Eye level: the pre-rl#256 1.6 m eyes on the 1.8 m player, as a stature fraction.
+const EYE_HEIGHT: f32 = 1.6 / 1.8 * crate::sim::PLAYER_HEIGHT;
 
-/// Avatar capsule radius, 2/9 of stature — the pre-rl#256 0.4 m on the 1.8 m player.
-const PLAYER_RADIUS: f32 = crate::sim::PLAYER_HEIGHT * 2.0 / 9.0;
+/// Avatar capsule radius: the pre-rl#256 0.4 m on the 1.8 m player, as a stature fraction.
+const PLAYER_RADIUS: f32 = 0.4 / 1.8 * crate::sim::PLAYER_HEIGHT;
 
 const MOUSE_SENS: f32 = 0.0022;
 

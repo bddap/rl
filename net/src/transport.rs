@@ -22,6 +22,8 @@ use crate::snapshot::CoreSnapshot;
 // v15: state frames (snapshot/articulation) moved off the reliable bi-stream onto QUIC
 // datagrams (rl#259), and the stale "lockstep" vocabulary retired with the same bump (rl#244).
 // v16: articulation vehicle poses carry a kind byte (rl#260).
+// v17: world re-based to rig scale — UNIT 1000→100_000 grid/m and every constant's
+// physical meaning changed with it (rl#256); absolute wire positions are incompatible.
 pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/17";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";

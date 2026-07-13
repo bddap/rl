@@ -170,7 +170,7 @@ fn sim_to_arena(pos: crate::sim::Pos, anchor: Vec3) -> Vec3 {
     Vec3::new(x, 0.0, z) - anchor
 }
 
-fn arena_to_sim_pos(arena: Vec3, anchor: Vec3) -> crate::sim::Pos {
+fn arena_to_sim(arena: Vec3, anchor: Vec3) -> crate::sim::Pos {
     let w = arena + anchor;
     crate::sim::Pos::from_meters(w.x, w.z)
 }
@@ -215,7 +215,7 @@ fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose>
             (
                 PlayerId(v.pilot.0),
                 crate::sim::PilotPose {
-                    pos: arena_to_sim_pos(t.translation, anchor),
+                    pos: arena_to_sim(t.translation, anchor),
                     yaw: crate::sim::trig_client::radians_to_turns(nose.x.atan2(nose.z)),
                 },
             )
@@ -876,8 +876,8 @@ pub(super) fn drive_client_sim(world: &mut World) {
     for (pid, p) in state.client.sim().players() {
         match state.logged_statuses.insert(pid, p.status()) {
             Some(prev) if prev != p.status() => {
-                // Crab distance names the down's trigger: within CRAB_GRAB_RADIUS it was
-                // the under-body grab; beyond, a claw touch (rl#249).
+                // Crab distance names the down's trigger: within CRAB_GRAB_RADIUS (0.17 m)
+                // it was the under-body grab; beyond, a claw touch (rl#249).
                 let (px, pz) = p.pos().to_meters();
                 let from_crab = state
                     .client
@@ -890,7 +890,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                     })
                     .fold(f32::INFINITY, f32::min);
                 info!(
-                    "player {:?}: {:?} -> {:?} ({from_crab:.1} m from crab center)",
+                    "player {:?}: {:?} -> {:?} ({from_crab:.2} m from crab center)",
                     pid,
                     prev,
                     p.status()
@@ -971,7 +971,7 @@ mod tests {
             z: -5_670,
         };
         let arena = super::sim_to_arena(p, anchor);
-        let back = super::arena_to_sim_pos(arena, anchor);
+        let back = super::arena_to_sim(arena, anchor);
         assert!(
             (back.x - p.x).abs() <= 1 && (back.z - p.z).abs() <= 1,
             "sim→arena→sim drifted beyond grid quantization: {p:?} -> {back:?}"
