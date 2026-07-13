@@ -357,22 +357,35 @@ fn verify_colliders() -> i32 {
 
     for rc in bot::rig::rest_colliders(&recipe) {
         let label = format!("{:?}", rc.part);
+        // The carapace is fit against the trunk-bone cloud; every limb against its
+        // own part cloud (limbs can be capsules OR cuboids since rl#20 Phase 1).
+        let pts = if rc.part == bot::meshfit::PartId::Carapace {
+            trunk.as_slice()
+        } else {
+            clouds.get(&rc.part).map(|p| p.as_slice()).unwrap_or(&[])
+        };
         let (score, rnorm, fail) = match rc.shape {
             RestShape::Capsule { a, b, radius } => {
-                let pts = clouds.get(&rc.part).map(|p| p.as_slice()).unwrap_or(&[]);
                 let s = score_capsule(pts, a, b, radius);
+                // Axis skew vs the cloud PCA is printed as a diagnostic but no longer
+                // fails: the fitter may deliberately choose the bone-chain axis when
+                // it scores better (rl#20 Phase 1), and poke/bulge already measure
+                // the agreement the audit exists to check.
                 let fail = s.frac_outside > 0.05
                     || s.poke_out_p95 > (0.15 * radius).max(0.005)
                     || s.bulge_p95 > 0.5 * radius
-                    || s.capsule.is_some_and(|c| {
-                        c.axis_skew_deg > 15.0 || !(0.85..=1.4).contains(&c.radius_ratio)
-                    });
+                    || s.capsule
+                        .is_some_and(|c| !(0.85..=1.4).contains(&c.radius_ratio));
                 (s, radius.max(1e-3), fail)
             }
-            RestShape::Cuboid { center, half } => {
-                let s = score_box(&trunk, center, half);
-                let fail = s.frac_outside > 0.03 || s.poke_out_p95 > 0.02;
-                (s, half.min_element().max(1e-3), fail)
+            RestShape::Cuboid { center, rot, half } => {
+                let s = score_box(pts, center, rot, half);
+                let rnorm = half.min_element().max(1e-3);
+                // Same outside-fraction bar as capsules; poke bound scales with the
+                // box's thinnest extent exactly as the capsule bound does with radius
+                // (the old fixed 0.02 was the carapace slab's 0.15 * min-extent).
+                let fail = s.frac_outside > 0.05 || s.poke_out_p95 > (0.15 * rnorm).max(0.005);
+                (s, rnorm, fail)
             }
         };
         any_fail |= fail;
@@ -528,7 +541,10 @@ fn verify_pivots() -> i32 {
                     yn(bin)
                 );
             }
-            RestShape::Cuboid { center, half } => {
+            RestShape::Cuboid { center, rot, half } => {
+                // A tight box's CORNERS sit outside rounded flesh by construction, so
+                // they say nothing; the capsule-endpoint analogue is the face centers
+                // — one outside means the box protrudes past the mesh on that axis.
                 println!(
                     "  {:<24} | {:>+7.3} {:>+8.4} {:>4} | {:>7} {:>8} {:>4} | {:>7} {:>8} {:>4}",
                     label,
@@ -536,35 +552,34 @@ fn verify_pivots() -> i32 {
                     pdist,
                     yn(pin),
                     "(box)",
-                    "corners",
+                    "faces",
                     "↓",
                     "",
                     "",
                     ""
                 );
-                for sx in [-1.0f32, 1.0] {
-                    for sy in [-1.0f32, 1.0] {
-                        for sz in [-1.0f32, 1.0] {
-                            let corner = center + half * Vec3::new(sx, sy, sz);
-                            let (cwn, cdist, cin) = probe(corner);
-                            windings.push(cwn);
-                            if !cin {
-                                endpoints_out += 1;
-                                offenders.push((
-                                    format!("{label} corner({sx:+.0},{sy:+.0},{sz:+.0})"),
-                                    cdist,
-                                ));
-                            }
-                            println!(
-                                "      corner ({:+.0},{:+.0},{:+.0})         | {:>+7.3} {:>+8.4} {:>4}",
-                                sx,
-                                sy,
-                                sz,
-                                cwn,
-                                cdist,
-                                yn(cin)
-                            );
+                for axis in 0..3 {
+                    for sign in [-1.0f32, 1.0] {
+                        let mut off = Vec3::ZERO;
+                        off[axis] = sign * half[axis];
+                        let face = center + rot * off;
+                        let (fwn, fdist, fin) = probe(face);
+                        windings.push(fwn);
+                        if !fin {
+                            endpoints_out += 1;
+                            offenders.push((
+                                format!("{label} face({}{:+.0})", ["x", "y", "z"][axis], sign),
+                                fdist,
+                            ));
                         }
+                        println!(
+                            "      face {}{:+.0}                    | {:>+7.3} {:>+8.4} {:>4}",
+                            ["x", "y", "z"][axis],
+                            sign,
+                            fwn,
+                            fdist,
+                            yn(fin)
+                        );
                     }
                 }
                 let (ccwn, ccdist, ccin) = probe(center);
