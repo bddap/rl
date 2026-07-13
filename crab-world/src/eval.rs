@@ -982,7 +982,7 @@ fn run_pairs(
         pace_probe,
     })
     .insert_resource(EvalState::new(pairs.len()))
-    .insert_non_send_resource(policy.clone())
+    .insert_non_send(policy.clone())
     .add_systems(FixedUpdate, eval_step.in_set(BotSet::Think));
     if pace_probe {
         // Crab, real ball, and posed lure all carry by one delta, so measurement and

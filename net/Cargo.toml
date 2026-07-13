@@ -17,8 +17,6 @@ render = [
     "dep:cpal",
 ]
 
-enhanced-determinism = ["crab-world/enhanced-determinism"]
-
 [dependencies]
 crab-world = { path = "../crab-world" }
 bevy = { workspace = true, features = [

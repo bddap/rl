@@ -101,7 +101,7 @@ mod tests {
         // Park the env outside Recording for the whole test: the draw gate stays
         // cold, so no spontaneous burst can contaminate the measured displacement.
         state.mode.envs[0].phase = EnvPhase::Settling { grace: u32::MAX };
-        app.insert_non_send_resource(state);
+        app.insert_non_send(state);
         app.add_systems(
             FixedUpdate,
             shove_crabs
@@ -123,7 +123,7 @@ mod tests {
         {
             let mut st = app
                 .world_mut()
-                .get_non_send_resource_mut::<WorkerState>()
+                .get_non_send_mut::<WorkerState>()
                 .expect("training state");
             st.mode.envs[0].shove = ShoveState {
                 remaining: SHOVE_TICKS,
@@ -139,7 +139,7 @@ mod tests {
         );
         let st = app
             .world()
-            .get_non_send_resource::<WorkerState>()
+            .get_non_send::<WorkerState>()
             .expect("training state");
         assert_eq!(st.mode.envs[0].shove.remaining, 0, "the burst must age out");
         let _ = std::fs::remove_dir_all(&dir);
