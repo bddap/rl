@@ -243,23 +243,28 @@ mod overlay {
     /// The Bevy-input glue a scheme needs so its DISCRETE controls can be polled from the
     /// binding table — the overlay's reveal control and any tap verb an app dispatches via
     /// [`key_codes_for`]/[`gamepad_buttons_for`]. Analog/multi-role inputs (sticks, mouse
-    /// motion, wheel, directional D-pad pairs) return `None` — they're read via their own
+    /// motion, wheel, directional D-pad pairs) map to NO key — they're read via their own
     /// axis/multi-input APIs in the app's systems.
+    ///
+    /// A key token maps to a SLICE, not one `KeyCode`: one legend chip may legitimately
+    /// stand for several physical keys (Enter and the numpad's Enter are one control to
+    /// the player), and the alternative — a second token per synonym — would print a
+    /// duplicate chip in the legend.
     pub trait ControlInput: ControlScheme {
-        fn key_code(key: Self::Key) -> Option<KeyCode>;
+        fn key_codes(key: Self::Key) -> &'static [KeyCode];
         fn gamepad_button(pad: Self::Pad) -> Option<GamepadButton>;
     }
 
     /// Every `KeyCode` bound to `action`, resolved from the scheme's binding table through
     /// its [`ControlInput`] glue — so a handler polls exactly the keys the legend shows;
     /// rebind the table and the poll and legend move together (the no-drift round-trip).
-    /// Tokens with no single `KeyCode` (analog/multi-key) drop out. An iterator, not a
-    /// `Vec`: callers just `.any(...)` each frame, so no heap alloc.
+    /// Tokens that map to no key (analog/multi-key) drop out. An iterator, not a `Vec`:
+    /// callers just `.any(...)` each frame, so no heap alloc.
     pub fn key_codes_for<S: ControlInput>(action: S::Action) -> impl Iterator<Item = KeyCode> {
         binding::<S>(action)
             .into_iter()
             .flat_map(|b| b.keyboard.keys.iter().copied())
-            .filter_map(S::key_code)
+            .flat_map(|k| S::key_codes(k).iter().copied())
     }
 
     /// Every pad `GamepadButton` bound to `action` — the pad half of [`key_codes_for`].
@@ -322,9 +327,6 @@ mod overlay {
     /// the real visibility.
     #[derive(Resource, Clone, Copy, Default)]
     pub struct ControlsRevealed(pub bool);
-
-    #[derive(Component)]
-    pub struct ControlsHintRoot;
 
     #[derive(Component)]
     pub struct ContextHintLabel;
@@ -449,18 +451,15 @@ mod overlay {
         let default_label = S::context_label(default_ctx);
 
         commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    bottom: Val::Px(14.0),
-                    left: Val::Px(14.0),
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::Center,
-                    column_gap: Val::Px(8.0),
-                    ..default()
-                },
-                ControlsHintRoot,
-            ))
+            .spawn(Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(14.0),
+                left: Val::Px(14.0),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(8.0),
+                ..default()
+            })
             .with_children(|hint| {
                 hint.spawn((
                     Text::new(default_label),
@@ -681,9 +680,9 @@ mod overlay {
 
 #[cfg(feature = "render")]
 pub use overlay::{
-    ActiveContext, ActiveDevice, ControlInput, ControlsHintRoot, ControlsOverlayPlugin,
-    ControlsOverlayRoot, ControlsRevealed, ForceRevealControls, gamepad_buttons_for, just_pressed,
-    key_codes_for, pressed, spawn_controls_ui, track_active_device, update_controls_ui,
+    ActiveContext, ActiveDevice, ControlInput, ControlsOverlayPlugin, ControlsOverlayRoot,
+    ControlsRevealed, ForceRevealControls, gamepad_buttons_for, just_pressed, key_codes_for,
+    pressed, spawn_controls_ui, track_active_device, update_controls_ui,
 };
 
 #[cfg(feature = "render")]

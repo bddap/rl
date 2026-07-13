@@ -156,18 +156,18 @@ impl ControlScheme for DemoControls {
 }
 
 impl ControlInput for DemoControls {
-    fn key_code(key: DemoKey) -> Option<KeyCode> {
+    fn key_codes(key: DemoKey) -> &'static [KeyCode] {
         match key {
-            DemoKey::R => Some(KeyCode::KeyR),
-            DemoKey::B => Some(KeyCode::KeyB),
-            DemoKey::Space => Some(KeyCode::Space),
-            DemoKey::Escape => Some(KeyCode::Escape),
-            DemoKey::Tab => Some(KeyCode::Tab),
-            DemoKey::RenderViewKey => Some(KeyCode::ArrowRight),
-            DemoKey::Graph => Some(KeyCode::KeyG),
+            DemoKey::R => &[KeyCode::KeyR],
+            DemoKey::B => &[KeyCode::KeyB],
+            DemoKey::Space => &[KeyCode::Space],
+            DemoKey::Escape => &[KeyCode::Escape],
+            DemoKey::Tab => &[KeyCode::Tab],
+            DemoKey::RenderViewKey => &[KeyCode::ArrowRight],
+            DemoKey::Graph => &[KeyCode::KeyG],
             // Multi-key analog tokens (orbit's four keys, the zoom pair) — read directly
-            // in `cameras::orbit_camera`, so no single KeyCode.
-            DemoKey::Arrows | DemoKey::ZoomKeys => None,
+            // in `cameras::orbit_camera`, so they bind no discrete key here.
+            DemoKey::Arrows | DemoKey::ZoomKeys => &[],
         }
     }
 
@@ -415,7 +415,7 @@ mod tests {
             }
             for &k in b.keyboard.keys {
                 assert!(
-                    DemoControls::key_code(k).is_some(),
+                    !DemoControls::key_codes(k).is_empty(),
                     "{:?}: key token {k:?} resolves to no KeyCode — legend would show a dead key",
                     b.action
                 );
