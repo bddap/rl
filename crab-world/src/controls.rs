@@ -316,6 +316,13 @@ mod overlay {
     #[derive(Resource, Clone, Copy, Default)]
     pub struct ForceRevealControls(pub bool);
 
+    /// Whether the overlay is showing THIS frame — written by [`update_controls_ui`], the
+    /// one place that decides it. Readers (e.g. a menu yielding the screen to the overlay)
+    /// take this instead of re-deriving reveal from the inputs, so they can't drift from
+    /// the real visibility.
+    #[derive(Resource, Clone, Copy, Default)]
+    pub struct ControlsRevealed(pub bool);
+
     #[derive(Component)]
     pub struct ControlsHintRoot;
 
@@ -590,6 +597,7 @@ mod overlay {
         device: Res<ActiveDevice>,
         context: Res<ActiveContext<S>>,
         force_reveal: Res<ForceRevealControls>,
+        mut revealed_out: ResMut<ControlsRevealed>,
         mut overlay: Query<
             &mut Node,
             (
@@ -610,6 +618,7 @@ mod overlay {
         mut hint_labels: Query<&mut Text, (With<ContextHintLabel>, Without<ContextHeading>)>,
     ) {
         let revealed = force_reveal.0 || pressed::<S>(S::reveal_action(), &keys, &gamepads);
+        revealed_out.0 = revealed;
 
         if let Ok(mut node) = overlay.single_mut() {
             node.display = if revealed {
@@ -659,6 +668,7 @@ mod overlay {
         fn build(&self, app: &mut App) {
             app.init_resource::<ActiveDevice>()
                 .init_resource::<ActiveContext<S>>()
+                .init_resource::<ControlsRevealed>()
                 .insert_resource(ForceRevealControls(false))
                 .add_systems(Startup, spawn_controls_ui::<S>)
                 .add_systems(
@@ -672,8 +682,8 @@ mod overlay {
 #[cfg(feature = "render")]
 pub use overlay::{
     ActiveContext, ActiveDevice, ControlInput, ControlsHintRoot, ControlsOverlayPlugin,
-    ControlsOverlayRoot, ForceRevealControls, gamepad_buttons_for, just_pressed, key_codes_for,
-    pressed, spawn_controls_ui, track_active_device, update_controls_ui,
+    ControlsOverlayRoot, ControlsRevealed, ForceRevealControls, gamepad_buttons_for, just_pressed,
+    key_codes_for, pressed, spawn_controls_ui, track_active_device, update_controls_ui,
 };
 
 #[cfg(feature = "render")]

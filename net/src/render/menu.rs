@@ -11,7 +11,7 @@ use super::AppPhase;
 use super::app::RoundOver;
 use super::driver::PendingRound;
 use crate::controls::{Action, GcrControls};
-use crab_world::controls::{ForceRevealControls, just_pressed, pressed};
+use crab_world::controls::{ControlsRevealed, just_pressed};
 
 use crate::menu::{
     self, ChooserItem, DisconnectedItem, EndpointId, Formation, LobbyItem, MenuAction, MenuInput,
@@ -159,7 +159,7 @@ fn menu_screen(
     mut next: ResMut<NextState<AppPhase>>,
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
-    force_reveal: Res<ForceRevealControls>,
+    revealed: Res<ControlsRevealed>,
     mut exit: MessageWriter<AppExit>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -173,7 +173,7 @@ fn menu_screen(
 
     // While the controls overlay is revealed, yield the screen to it — the egui pass
     // draws OVER bevy UI, so a centered menu window would cover the centered legend.
-    if force_reveal.0 || pressed::<GcrControls>(Action::RevealControls, &keys, &gamepads) {
+    if revealed.0 {
         return Ok(());
     }
 
