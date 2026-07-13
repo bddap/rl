@@ -39,6 +39,13 @@ const TELEPORT_RESET_METERS: f32 = 5.0;
 
 impl PoseWindow {
     pub(super) fn push(&mut self, tick: u64, p: Pose) {
+        // A non-finite pose never enters the window: the rescue (rl#137) is its loud
+        // surface, and one NaN entry would lerp NaN into every sample for the window's
+        // span — while its NaN distance makes the teleport guard below unable to fire.
+        // Hold the last finite pose; the respawn pose that follows resets via the guard.
+        if !p.pos.is_finite() || !p.orient.is_finite() {
+            return;
+        }
         // A non-advancing tick means the clock rewound under us (defensive; no
         // feeder currently produces one) — stale history would mis-scale, so drop it.
         if self.buf[2]
@@ -190,6 +197,33 @@ mod tests {
             }
         }
         assert!(last > held, "the resume sweep must actually move forward");
+    }
+
+    /// A captured non-finite pose (the solver blowing up in a tick's last physics
+    /// step, before the next FixedUpdate's rescue) must never reach a sample: NaN
+    /// would lerp into every consumer for the window's span, and a NaN distance
+    /// can't trigger the teleport reset. The window holds the last finite pose and
+    /// the respawn teleport-resets as usual.
+    #[test]
+    fn non_finite_poses_never_enter_the_window() {
+        let at = |x: f32| Pose {
+            pos: Vec3::new(x, 0.0, 0.0),
+            orient: Quat::IDENTITY,
+        };
+        let mut w = PoseWindow::default();
+        for tick in 1..=3u64 {
+            w.push(tick, at(tick as f32 * 0.1));
+        }
+        w.push(4, at(f32::NAN));
+        let held = w.sample(4, 0.5).expect("window still holds finite history");
+        assert!(
+            held.pos.is_finite(),
+            "a NaN capture must not corrupt sampling: got {:?}",
+            held.pos
+        );
+        // The rescue respawn lands across the arena: a normal teleport reset.
+        w.push(5, at(50.0));
+        assert_eq!(w.sample(5, 0.5).unwrap().pos.x, 50.0);
     }
 
     #[test]
