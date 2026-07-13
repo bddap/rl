@@ -240,12 +240,11 @@ fn position_brain_labels(
                 // The RENDERED carapace is the sampled pose where a stream feeds one
                 // (rl#274) — anchoring to the raw physics pose would let the label lead
                 // the skin by the sampling window's latency.
-                let carapace = sampled
-                    .as_deref()
-                    .and_then(|s| s.0.get(&entity))
-                    .map(|t| t.translation)
-                    .unwrap_or_else(|| carapace.translation());
-                placement.transform_point3(carapace) + Vec3::Y * BRAIN_LABEL_LIFT
+                let carapace = sampled.as_deref().map_or_else(
+                    || carapace.compute_transform(),
+                    |s| s.rendered(entity, carapace.compute_transform()),
+                );
+                placement.transform_point3(carapace.translation) + Vec3::Y * BRAIN_LABEL_LIFT
             });
         let projected = camera
             .zip(anchor)
@@ -292,12 +291,11 @@ fn draw_crab_collider_wireframe(
             .unwrap_or(Mat4::IDENTITY);
         // The cage cages the crab you SEE — it already rides the render-side repose, so
         // it draws at the sampled render pose too where a stream feeds one (rl#274).
-        let part = sampled
-            .as_deref()
-            .and_then(|s| s.0.get(&entity))
-            .map(Transform::to_matrix)
-            .unwrap_or_else(|| gt.to_matrix());
-        let world = placement * part;
+        let part = sampled.as_deref().map_or_else(
+            || gt.compute_transform(),
+            |s| s.rendered(entity, gt.compute_transform()),
+        );
+        let world = placement * part.to_matrix();
         draw_collider_wireframe(
             &mut gizmos,
             collider.as_typed_shape(),

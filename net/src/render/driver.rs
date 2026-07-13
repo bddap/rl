@@ -39,7 +39,7 @@ fn install_round(world: &mut World, client: ClientSim, coord: Box<Coordinator>) 
     world.insert_resource(LocalVehicle::default());
     world.insert_resource(RenderClock::default());
     world.insert_resource(super::articulation::RemoteVehicle::default());
-    world.insert_resource(super::articulation::PuppetWindows::default());
+    world.insert_resource(super::articulation::CrabPartWindows::default());
     world.insert_resource(crab_world::bot::skin::CrabRenderPose::default());
 }
 
@@ -110,6 +110,15 @@ pub(super) fn teardown_round(world: &mut World) {
     // Round state like the labels above: a survivor would suppress (or mis-measure) the next
     // round's remote-craft appeared/moved edges.
     world.remove_resource::<super::articulation::RemoteCraftWatch>();
+    // Round state like the anchor: the sampler is Playing-gated, so a stale sampled pose
+    // would otherwise sit under `drive_bones` (ungated) until the next round's install
+    // replaces these — the rl#211 stale-survivor class, cleared at the boundary instead.
+    if let Some(mut windows) = world.get_resource_mut::<super::articulation::CrabPartWindows>() {
+        *windows = Default::default();
+    }
+    if let Some(mut sampled) = world.get_resource_mut::<crab_world::bot::skin::CrabRenderPose>() {
+        sampled.0.clear();
+    }
 }
 
 fn end_round_server_down(
@@ -815,7 +824,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                 if let Some(art) = &articulation {
                     // The host renders its OWN Sally through the same windows a client
                     // adopts (rl#274) — one interpolation mechanism on both arms.
-                    super::articulation::feed_puppet_windows(world, art);
+                    super::articulation::feed_crab_part_windows(world, art);
                     super::articulation::publish_remote_vehicles(
                         world,
                         art.tick,

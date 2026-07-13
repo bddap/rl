@@ -32,11 +32,21 @@ pub struct CrabSkinRepose(pub std::collections::BTreeMap<usize, SkinRepose>);
 /// arms — the host from its own capture, a client from its adopt — so every render
 /// consumer (the skin's `drive_bones`, the collider cage, the brain labels) shows motion
 /// uniform in render time without anything writing a rapier-owned `Transform` (rl#116).
-/// A missing entry means no tick-stamped stream feeds this part (the standalone viewer,
-/// training visuals, the window-fill grace frames): consumers render the physics
-/// `Transform` directly.
+/// A missing entry means the part was NEVER fed by a tick-stamped stream (the standalone
+/// viewer, training visuals, the pre-first-articulation frames): [`Self::rendered`]
+/// falls back to the physics pose there.
 #[derive(Resource, Default)]
 pub struct CrabRenderPose(pub std::collections::BTreeMap<Entity, Transform>);
+
+impl CrabRenderPose {
+    /// THE sampled-or-physics rule, one seam for every render consumer: the pose a body
+    /// part renders at is its sampled pose where a stream feeds one, else the physics
+    /// pose the caller read from the entity. (Parts are unscaled top-level entities, so
+    /// a `GlobalTransform` caller passes `compute_transform()` losslessly.)
+    pub fn rendered(&self, part: Entity, physics: Transform) -> Transform {
+        self.0.get(&part).copied().unwrap_or(physics)
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct SkinRepose {
@@ -267,7 +277,7 @@ fn drive_bones(
     for (drive, mut t) in bones.iter_mut() {
         if let Ok((link, env)) = links.get(drive.link) {
             let m = repose.0.get(&env.0).map_or(Mat4::IDENTITY, |r| r.matrix());
-            let link = sampled.0.get(&drive.link).unwrap_or(link);
+            let link = sampled.rendered(drive.link, *link);
             *t = Transform::from_matrix(m * link.to_matrix() * drive.offset);
         }
     }
@@ -332,7 +342,8 @@ mod tests {
         assert_eq!(
             world.entity(bone).get::<Transform>().unwrap().translation,
             Vec3::new(1.0, 2.0, 3.0),
-            "no stream (standalone viewer / grace frames): the physics Transform drives"
+            "never fed (standalone viewer / pre-first-articulation): the physics \
+             Transform drives"
         );
     }
 

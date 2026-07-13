@@ -27,8 +27,8 @@ const BODY_MARKERS: [&str; 4] = ["CrabBodyPart", "CrabCarapace", "CrabClawTip", 
 ///   consumed by the same tick's SyncBackend).
 ///
 /// Rendering has NO exception: since rl#274 every render consumer reads the sampled
-/// `CrabRenderPose` overlay (the remote-adopt puppet writes this list used to carve out
-/// for `net/src/render/articulation.rs` are gone).
+/// `CrabRenderPose` overlay — the remote-adopt puppet-write carve-out this list used to
+/// hold for `net/src/render/articulation.rs` is gone.
 const ALLOWED: [&str; 3] = [
     "crab-world/src/bot/",
     "crab-world/src/training/",
