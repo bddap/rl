@@ -46,7 +46,8 @@ impl RigPose {
 
 pub(super) fn rig_pose_drive(pose: Res<RigPose>, mut actions: ResMut<CrabActions>) {
     for &joint in &pose.joints {
-        actions.set_drive(0, joint, pose.action);
+        // Deliberate skip pre-spawn (env 0 not sized yet).
+        let _ = actions.set_drive(0, joint, pose.action);
     }
 }
 

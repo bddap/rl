@@ -270,7 +270,7 @@ pub(crate) fn reset_crab(
             training.envs[e].phase = EnvPhase::Settling {
                 grace: RESET_GRACE_TICKS,
             };
-            actions.rest(e);
+            let _ = actions.rest(e); // deliberate skip pre-spawn
             let origin = spawns.origin(e);
             let init_rotation = random_spawn_rotation(&mut training.rng);
             respawn_crab_rotated(

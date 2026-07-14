@@ -568,7 +568,7 @@ fn run_crab_policy(
             // the first armed Update, and FixedUpdate can tick first) — that window lives
             // entirely inside the settle grace, which is why the slot check below is a
             // hard assert and not a skip.
-            actions.rest(idx);
+            let _ = actions.rest(idx); // deliberate skip pre-spawn (see comment above)
             continue;
         }
         // Post-settle, a missing slot means this crab would hold rest pose in a live
@@ -744,7 +744,8 @@ mod ship_wiggle_tests {
     /// Overwrite the (unloaded ⇒ zero-action) policy's output with a full-scale square wave
     /// — a flail far more violent than any idle wiggle, so the gates bound the worst case.
     fn drive_wiggle(w: Res<Wiggle>, mut actions: ResMut<CrabActions>) {
-        actions.fill(0, w.0);
+        // Every-tick system: pre-spawn skips are fine, later ticks land the flail.
+        let _ = actions.fill(0, w.0);
     }
 
     fn gcr_like_app_with_vehicles() -> App {

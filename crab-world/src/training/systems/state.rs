@@ -264,6 +264,10 @@ impl TrainingState {
                 let built_layout = crate::bot::channel_layout_digest();
                 match check_channel_layout(layout_digest, built_layout) {
                     Ok(StampIdentity::Match) => {}
+                    // TOFU's residual risk: a pre-#271 brain trained on a DIFFERENT
+                    // same-dims layout resumes remapped and the next save stamps the
+                    // current digest onto that lineage. Undetectable (the digest didn't
+                    // exist yet) — the same one-time migration window body TOFU accepted.
                     Ok(StampIdentity::TrustOnFirstUse) => warn!(
                         "checkpoint at {} predates channel-layout stamping (bddap/rl#271) — \
                          trusting on first use; the next save stamps layout digest \
@@ -290,6 +294,10 @@ impl TrainingState {
                          the actuated DOF set changed) — starting the policy fresh",
                         paths.brain_file().display()
                     );
+                    // Reachable only for pre-#271 (layout-unstamped) brains: a DOF
+                    // change also changes the layout digest, so a v4-stamped brain
+                    // aborts at the layout check above instead — stricter by design
+                    // (fresh dir over silently overwriting the lineage in place).
                     // The deliberate DOF cold start stays on the CHECKPOINT's arch (tag
                     // still authoritative — without a flag the default above could
                     // otherwise silently switch a non-default run's architecture).
