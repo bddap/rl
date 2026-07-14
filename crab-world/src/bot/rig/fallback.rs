@@ -171,10 +171,7 @@ mod tests {
                 .links
                 .iter()
                 .find(|l| l.actuated.is_some_and(pred))
-                .map(|l| match l.shape {
-                    super::super::LinkShape::Capsule { radius, .. } => radius,
-                    other => panic!("fallback links are always capsules, got {other:?}"),
-                })
+                .map(|l| l.radius)
                 .expect("link present")
         };
         let leg_r = radius_of(|id| matches!(id, CrabJointId::LegMerus(..)));

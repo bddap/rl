@@ -4,9 +4,9 @@ use std::sync::OnceLock;
 use bevy::prelude::*;
 
 use crate::bot::body::{CrabJointId, Side};
-use crate::bot::meshfit::{FittedShape, PartId, ShapePolicy};
+use crate::bot::meshfit::PartId;
 
-use super::{BindSource, LinkShape, RigLink, RigRecipe};
+use super::{BindSource, RigLink, RigRecipe};
 
 const LEG_DENSITY: f32 = 8.0;
 const CLAW_DENSITY: f32 = 1.0;
@@ -318,27 +318,18 @@ fn derive_link(
     let axis_local = bend_axis(actuated, in_dir, chain_dir);
 
     let fitted = match cloud {
-        Some(pts) if pts.len() >= 8 => crate::bot::meshfit::fit_link_shape(
-            pts,
-            (chain_dir.length_squared() > 0.5).then_some(chain_dir),
-            shape_policy(actuated),
-        ),
+        Some(pts) if pts.len() >= 8 => crate::bot::meshfit::fit_capsule(pts),
         _ => None,
     };
-    let (center, col_rot, shape) = match fitted {
-        Some(FittedShape::Capsule(cap)) => {
+    let (center, col_rot, half_height, radius) = match fitted {
+        Some(cap) => {
             let seg = cap.b - cap.a;
             (
                 (cap.a + cap.b) * 0.5 - c_origin,
                 arc_to(Vec3::Y, seg),
-                LinkShape::Capsule {
-                    half_height: seg.length() * 0.5,
-                    radius: cap.radius,
-                },
+                seg.length() * 0.5,
+                cap.radius,
             )
-        }
-        Some(FittedShape::Cuboid { center, rot, half }) => {
-            (center - c_origin, rot, LinkShape::Cuboid { half })
         }
         None => {
             let seg_world = match tip_name.and_then(|t| model.bone_origin(t)) {
@@ -349,10 +340,8 @@ fn derive_link(
             (
                 seg_world * 0.5,
                 arc_to(Vec3::Y, seg_world / seg_len),
-                LinkShape::Capsule {
-                    half_height: (seg_len * 0.5 - fixed_radius).max(0.01),
-                    radius: fixed_radius,
-                },
+                (seg_len * 0.5 - fixed_radius).max(0.01),
+                fixed_radius,
             )
         }
     };
@@ -362,22 +351,13 @@ fn derive_link(
         parent: parent_idx,
         anchor1,
         axis_local,
-        shape,
+        half_height,
+        radius,
         center,
         col_rot,
         density,
         actuated,
     })
-}
-
-/// Feet plant and roll on their spherical capsule tips, and the pincer collider is
-/// read back via `as_capsule` for the sim's claw-touch decisions
-/// (net::external_crab) — both stay capsules whatever the fit score says.
-fn shape_policy(actuated: Option<CrabJointId>) -> ShapePolicy {
-    match actuated {
-        Some(CrabJointId::LegCarpus(..) | CrabJointId::ClawPincer(_)) => ShapePolicy::CapsuleOnly,
-        _ => ShapePolicy::Any,
-    }
 }
 
 fn bend_axis(actuated: Option<CrabJointId>, in_dir: Vec3, out_dir: Vec3) -> Vec3 {
@@ -443,6 +423,7 @@ fn carapace_box(model: &impl BindSource, center: Vec3) -> (Vec3, Vec3) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::colliders::{LinkCapsule, link_capsule};
     use super::*;
     use crate::bot::meshfit::{LoadedModel, model_path};
     use crate::bot::rig::fallback_recipe;
@@ -566,9 +547,6 @@ mod tests {
         let hub = leg_hub_centroid(&model).expect("hub");
         let box_top = (hub + recipe.carapace_offset).y + recipe.carapace_half.y;
         let world = link_world_origins(&recipe.links, hub);
-        // The check swings the arm FLESH (the skinned part clouds), not the fitted
-        // colliders: a cuboid's empty corners would overstate the flesh reach.
-        let clouds = model.vertices_by_part();
         for side in [Side::Left, Side::Right] {
             let sh_idx = recipe
                 .links
@@ -578,22 +556,27 @@ mod tests {
             let pivot = world[sh_idx];
             let [lo, _hi] = CrabJointId::ClawShoulder(side).limits();
             let rot = Quat::from_axis_angle(recipe.links[sh_idx].axis_local, lo);
-            for id in [
-                CrabJointId::ClawShoulder(side),
-                CrabJointId::ClawWrist(side),
-                CrabJointId::ClawPincer(side),
-            ] {
-                let pts = clouds.get(&PartId::Joint(id)).expect("cheliped cloud");
-                let top = pts
-                    .iter()
-                    .map(|&p| (pivot + rot * (p - pivot)).y)
-                    .fold(f32::NEG_INFINITY, f32::max);
-                assert!(
-                    top <= box_top + 1e-3,
-                    "{side:?} cheliped {id:?} flesh reaches y={top:.3} at the up-stop \
-                     θ={lo:.3}, above the carapace top {box_top:.3} — arm flesh clips \
-                     the shell/eye band"
-                );
+            for (i, link) in recipe.links.iter().enumerate().filter(|(_, l)| {
+                matches!(
+                    l.actuated,
+                    Some(
+                        CrabJointId::ClawShoulder(s)
+                            | CrabJointId::ClawWrist(s)
+                            | CrabJointId::ClawPincer(s)
+                    ) if s == side
+                )
+            }) {
+                let LinkCapsule { a, b, radius } = link_capsule(link, world[i]);
+                for cap in [a, b] {
+                    let top = (pivot + rot * (cap - pivot)).y + radius;
+                    assert!(
+                        top <= box_top + 1e-3,
+                        "{side:?} cheliped {} capsule reaches y={top:.3} at the up-stop \
+                         θ={lo:.3}, above the carapace top {box_top:.3} — arm flesh clips \
+                         the shell/eye band",
+                        link.bone
+                    );
+                }
             }
         }
     }
@@ -668,150 +651,50 @@ mod tests {
     }
 
     const GOLDEN_ASSET_DIGEST: u64 = 0x5b29_217e_ad4c_7c57;
-
-    #[derive(Clone, Copy, Debug)]
-    enum GoldenShape {
-        Capsule { half_height: f32, radius: f32 },
-        Cuboid { half: [f32; 3] },
-    }
-
-    struct GoldenLink {
-        bone: &'static str,
-        shape: GoldenShape,
-        center: [f32; 3],
-        rot: [f32; 4],
-    }
-
-    const fn cap(
-        bone: &'static str,
-        half_height: f32,
-        radius: f32,
-        center: [f32; 3],
-        rot: [f32; 4],
-    ) -> GoldenLink {
-        GoldenLink {
-            bone,
-            shape: GoldenShape::Capsule {
-                half_height,
-                radius,
-            },
-            center,
-            rot,
-        }
-    }
-
-    const fn cub(
-        bone: &'static str,
-        half: [f32; 3],
-        center: [f32; 3],
-        rot: [f32; 4],
-    ) -> GoldenLink {
-        GoldenLink {
-            bone,
-            shape: GoldenShape::Cuboid { half },
-            center,
-            rot,
-        }
-    }
-
-    /// Sign-canonicalised quat components — `from_rotation_arc`/`from_mat3` may land
-    /// on either cover of the same rotation.
-    fn canon_quat(q: Quat) -> [f32; 4] {
-        let a = q.to_array();
-        let flip = match a.iter().rev().find(|c| c.abs() > 1e-6) {
-            Some(&c) => c < 0.0,
-            None => false,
-        };
-        if flip {
-            [-a[0], -a[1], -a[2], -a[3]]
-        } else {
-            a
-        }
-    }
-
-    // Regenerates the FITTED_GOLDEN literal below — run with --ignored --nocapture
-    // after a deliberate geometry change and paste the output over the table.
-    #[test]
-    #[ignore = "golden regeneration helper, not a check"]
-    fn dump_fitted_golden() {
-        let Some(path) = model_path() else {
-            eprintln!("dump_fitted_golden: no model — skipping");
-            return;
-        };
-        let recipe = build_recipe(&LoadedModel::load(&path).expect("load model")).expect("recipe");
-        let f = |v: f32| format!("{v:.6}");
-        let arr = |v: &[f32]| {
-            format!(
-                "[{}]",
-                v.iter().map(|&x| f(x)).collect::<Vec<_>>().join(", ")
-            )
-        };
-        for link in &recipe.links {
-            let c = arr(&link.center.to_array());
-            let q = arr(&canon_quat(link.col_rot));
-            match link.shape {
-                LinkShape::Capsule {
-                    half_height,
-                    radius,
-                } => println!(
-                    "        cap(\"{}\", {}, {}, {c}, {q}),",
-                    link.bone,
-                    f(half_height),
-                    f(radius)
-                ),
-                LinkShape::Cuboid { half } => println!(
-                    "        cub(\"{}\", {}, {c}, {q}),",
-                    link.bone,
-                    arr(&half.to_array())
-                ),
-            }
-        }
-    }
-
     #[rustfmt::skip]
-    const FITTED_GOLDEN: &[GoldenLink] = &[
-        cub("Def_leg_01.000.L", [0.152088, 0.076075, 0.041194], [0.021144, -0.017276, 0.012287], [0.611172, -0.099488, 0.133927, 0.773715]),
-        cub("Def_leg_01.001.L", [0.204055, 0.087031, 0.053179], [0.168491, 0.034778, 0.062931], [0.306499, -0.143787, 0.084574, 0.937140]),
-        cub("Def_leg_01.003.L", [0.122308, 0.072334, 0.037688], [0.089255, -0.029936, -0.011805], [0.318536, -0.000803, -0.318508, 0.892797]),
-        cap("Def_leg_01.004.L", 0.122645, 0.054299, [0.068538, -0.154283, -0.023502], [0.109015, -0.000000, 0.167599, 0.979809]),
-        cub("Def_leg_02.000.L", [0.155243, 0.133579, 0.074599], [0.026584, 0.075285, 0.006483], [0.000000, 0.000000, 0.000000, 1.000000]),
-        cub("Def_leg_02.001.L", [0.247724, 0.087315, 0.055857], [0.213114, 0.029489, 0.041325], [0.294107, -0.074708, 0.068380, 0.950391]),
-        cub("Def_leg_02.003.L", [0.125603, 0.081812, 0.036506], [0.095694, -0.036064, -0.030874], [0.377896, 0.001468, -0.280721, 0.882263]),
-        cap("Def_leg_02.004.L", 0.123662, 0.057603, [0.079551, -0.152684, -0.029877], [0.127793, -0.000000, 0.188765, 0.973672]),
-        cub("Def_leg_03.000.L", [0.140454, 0.113343, 0.062148], [0.096656, 0.042294, -0.032425], [-0.054584, 0.111633, -0.131877, 0.983447]),
-        cub("Def_leg_03.001.L", [0.239433, 0.089718, 0.054107], [0.211514, 0.028718, -0.009547], [0.302863, 0.002104, 0.029747, 0.952567]),
-        cub("Def_leg_03.003.L", [0.132601, 0.076186, 0.039267], [0.093246, -0.039953, -0.053762], [0.321689, 0.148990, -0.311887, 0.881501]),
-        cap("Def_leg_03.004.L", 0.128524, 0.056455, [0.071998, -0.156979, -0.078652], [0.187891, -0.000000, 0.169116, 0.967521]),
-        cub("Def_leg_04.000.L", [0.184580, 0.079608, 0.042361], [0.014989, -0.014968, -0.047346], [0.644533, 0.232046, -0.174906, 0.707206]),
-        cub("Def_leg_04.001.L", [0.196948, 0.075875, 0.051187], [0.175866, 0.031600, -0.040112], [0.342983, 0.115145, -0.004672, 0.932246]),
-        cub("Def_leg_04.003.L", [0.124543, 0.066511, 0.032990], [0.078340, -0.044795, -0.070163], [0.284312, 0.237543, -0.330143, 0.868185]),
-        cap("Def_leg_04.004.L", 0.134749, 0.049772, [0.050016, -0.158901, -0.078713], [0.200942, -0.000000, 0.120450, 0.972170]),
-        cub("Def_pincer.000a.L", [0.327987, 0.119014, 0.091226], [0.156361, -0.105584, 0.195727], [-0.588974, -0.440968, -0.369851, 0.567333]),
-        cub("Def_pincer.005.L", [0.086848, 0.167349, 0.091270], [-0.033627, -0.107730, 0.018923], [0.000000, 0.000000, 0.000000, 1.000000]),
-        cap("Def_pincer.006b.L", 0.082743, 0.063441, [-0.031627, -0.083131, 0.008357], [0.173875, -0.000000, 0.971086, 0.163580]),
-        cub("Def_leg_01.000.R", [0.164229, 0.076084, 0.041290], [-0.009473, -0.016347, 0.007631], [0.611800, 0.107336, -0.133123, 0.772307]),
-        cub("Def_leg_01.001.R", [0.204055, 0.087031, 0.053179], [-0.168491, 0.034778, 0.062931], [0.306499, 0.143787, -0.084574, 0.937140]),
-        cub("Def_leg_01.003.R", [0.122308, 0.072334, 0.037688], [-0.089254, -0.029936, -0.011805], [0.318536, 0.000803, 0.318508, 0.892797]),
-        cap("Def_leg_01.004.R", 0.122645, 0.054299, [-0.068537, -0.154283, -0.023502], [0.109015, 0.000000, -0.167599, 0.979809]),
-        cub("Def_leg_02.000.R", [0.167668, 0.135392, 0.088010], [-0.014160, 0.077098, 0.019894], [0.000000, 0.000000, 0.000000, 1.000000]),
-        cub("Def_leg_02.001.R", [0.247724, 0.087315, 0.055857], [-0.213114, 0.029489, 0.041325], [0.294107, 0.074708, -0.068380, 0.950391]),
-        cub("Def_leg_02.003.R", [0.125603, 0.081812, 0.036506], [-0.095694, -0.036064, -0.030875], [0.377896, -0.001468, 0.280721, 0.882263]),
-        cap("Def_leg_02.004.R", 0.123662, 0.057603, [-0.079551, -0.152684, -0.029877], [0.127793, 0.000000, -0.188765, 0.973672]),
-        cub("Def_leg_03.000.R", [0.140454, 0.113343, 0.062148], [-0.096656, 0.042294, -0.032425], [-0.054584, -0.111633, 0.131877, 0.983447]),
-        cub("Def_leg_03.001.R", [0.239433, 0.089718, 0.054107], [-0.211514, 0.028718, -0.009547], [0.302863, -0.002104, -0.029747, 0.952567]),
-        cub("Def_leg_03.003.R", [0.132601, 0.076186, 0.039267], [-0.093245, -0.039953, -0.053762], [0.321689, -0.148990, 0.311887, 0.881502]),
-        cap("Def_leg_03.004.R", 0.128524, 0.056455, [-0.071998, -0.156979, -0.078652], [0.187891, 0.000000, -0.169116, 0.967521]),
-        cub("Def_leg_04.000.R", [0.173168, 0.080259, 0.042373], [-0.026232, -0.014095, -0.051513], [0.648582, -0.221440, 0.163258, 0.709685]),
-        cub("Def_leg_04.001.R", [0.196948, 0.075875, 0.051187], [-0.175866, 0.031601, -0.040112], [0.342983, -0.115145, 0.004671, 0.932246]),
-        cub("Def_leg_04.003.R", [0.124543, 0.066511, 0.032990], [-0.078340, -0.044795, -0.070163], [0.284312, -0.237542, 0.330143, 0.868185]),
-        cap("Def_leg_04.004.R", 0.134749, 0.049772, [-0.050016, -0.158901, -0.078713], [0.200942, 0.000000, -0.120450, 0.972170]),
-        cub("Def_pincer.000a.R", [0.339604, 0.118920, 0.090338], [-0.152483, -0.106471, 0.185150], [-0.441178, -0.584980, -0.571307, 0.369823]),
-        cub("Def_pincer.005.R", [0.090010, 0.167350, 0.091270], [0.036789, -0.107730, 0.018923], [0.000000, 0.000000, 0.000000, 1.000000]),
-        cap("Def_pincer.006b.R", 0.087952, 0.058100, [0.035186, -0.094717, 0.010937], [0.173878, 0.000000, -0.971086, 0.163581]),
-        cap("Def_antennae.L", 0.011954, 0.030000, [0.023860, 0.021847, 0.026712], [0.365085, 0.000000, -0.326101, 0.871993]),
-        cap("Def_antennae_top.L", 0.015000, 0.030000, [0.025592, 0.023433, 0.028652], [0.365085, 0.000000, -0.326101, 0.871993]),
-        cap("Def_antennae.R", 0.011954, 0.030000, [-0.023860, 0.021847, 0.026712], [0.365085, -0.000000, 0.326101, 0.871993]),
-        cap("Def_antennae_top.R", 0.015000, 0.030000, [-0.025592, 0.023433, 0.028652], [0.365085, -0.000000, 0.326101, 0.871993]),
+    const FITTED_GOLDEN: &[(&str, [f32; 5])] = &[
+        ("Def_leg_01.000.L", [0.094680, 0.057408,  0.024866, -0.016562,  0.001032]),
+        ("Def_leg_01.001.L", [0.142467, 0.061588,  0.174220,  0.018777,  0.049600]),
+        ("Def_leg_01.003.L", [0.060660, 0.061648,  0.087472, -0.032786, -0.010803]),
+        ("Def_leg_01.004.L", [0.122645, 0.054299,  0.068538, -0.154283, -0.023502]),
+        ("Def_leg_02.000.L", [0.000000, 0.176261,  0.026321, -0.013589, -0.001256]),
+        ("Def_leg_02.001.L", [0.181178, 0.066546,  0.216730,  0.015234,  0.028623]),
+        ("Def_leg_02.003.L", [0.054145, 0.071458,  0.097444, -0.034404, -0.027830]),
+        ("Def_leg_02.004.L", [0.123662, 0.057603,  0.079551, -0.152684, -0.029877]),
+        ("Def_leg_03.000.L", [0.073876, 0.066578,  0.087574,  0.007707, -0.028267]),
+        ("Def_leg_03.001.L", [0.170628, 0.068805,  0.212199,  0.018997, -0.018147]),
+        ("Def_leg_03.003.L", [0.066288, 0.066312,  0.095621, -0.037249, -0.052509]),
+        ("Def_leg_03.004.L", [0.128524, 0.056455,  0.071998, -0.156979, -0.078652]),
+        ("Def_leg_04.000.L", [0.123769, 0.060811,  0.022075, -0.015847, -0.036792]),
+        ("Def_leg_04.001.L", [0.140865, 0.056084,  0.175245,  0.012156, -0.049158]),
+        ("Def_leg_04.003.L", [0.067575, 0.056968,  0.080249, -0.043055, -0.069306]),
+        ("Def_leg_04.004.L", [0.134749, 0.049772,  0.050016, -0.158901, -0.078713]),
+        ("Def_pincer.000a.L", [0.228180, 0.099807,  0.146852, -0.112937,  0.199940]),
+        ("Def_pincer.005.L", [0.106954, 0.073292, -0.054414, -0.106502,  0.033880]),
+        ("Def_pincer.006b.L", [0.095839, 0.050577, -0.036690, -0.090157,  0.008504]),
+        ("Def_leg_01.000.R", [0.106833, 0.057397, -0.013619, -0.016628, -0.004180]),
+        ("Def_leg_01.001.R", [0.142467, 0.061588, -0.174220,  0.018777,  0.049600]),
+        ("Def_leg_01.003.R", [0.060660, 0.061648, -0.087472, -0.032786, -0.010803]),
+        ("Def_leg_01.004.R", [0.122645, 0.054299, -0.068537, -0.154283, -0.023502]),
+        ("Def_leg_02.000.R", [0.006161, 0.164457, -0.013849, -0.016922, -0.001611]),
+        ("Def_leg_02.001.R", [0.181178, 0.066546, -0.216730,  0.015234,  0.028623]),
+        ("Def_leg_02.003.R", [0.054145, 0.071458, -0.097443, -0.034404, -0.027830]),
+        ("Def_leg_02.004.R", [0.123662, 0.057603, -0.079551, -0.152684, -0.029877]),
+        ("Def_leg_03.000.R", [0.073876, 0.066578, -0.087574,  0.007707, -0.028267]),
+        ("Def_leg_03.001.R", [0.170628, 0.068806, -0.212199,  0.018997, -0.018147]),
+        ("Def_leg_03.003.R", [0.066288, 0.066312, -0.095621, -0.037249, -0.052509]),
+        ("Def_leg_03.004.R", [0.128524, 0.056455, -0.071998, -0.156979, -0.078652]),
+        ("Def_leg_04.000.R", [0.113170, 0.059998, -0.030447, -0.015496, -0.044862]),
+        ("Def_leg_04.001.R", [0.140865, 0.056084, -0.175245,  0.012156, -0.049158]),
+        ("Def_leg_04.003.R", [0.067575, 0.056968, -0.080249, -0.043055, -0.069305]),
+        ("Def_leg_04.004.R", [0.134749, 0.049772, -0.050016, -0.158901, -0.078713]),
+        ("Def_pincer.000a.R", [0.239028, 0.100576, -0.142431, -0.113873,  0.189508]),
+        ("Def_pincer.005.R", [0.103558, 0.076635,  0.058884, -0.105650,  0.032336]),
+        ("Def_pincer.006b.R", [0.091664, 0.045815,  0.037039, -0.098493,  0.011171]),
+        ("Def_antennae.L", [0.011954, 0.030000,  0.023860,  0.021847,  0.026712]),
+        ("Def_antennae_top.L", [0.015000, 0.030000,  0.025592,  0.023433,  0.028652]),
+        ("Def_antennae.R", [0.011954, 0.030000, -0.023860,  0.021847,  0.026712]),
+        ("Def_antennae_top.R", [0.015000, 0.030000, -0.025592,  0.023433,  0.028652]),
     ];
 
     #[test]
@@ -829,8 +712,8 @@ mod tests {
         );
 
         let recipe = build_recipe(&LoadedModel::load(&path).expect("load model")).expect("recipe");
-        let golden: HashMap<&str, &GoldenLink> =
-            FITTED_GOLDEN.iter().map(|g| (g.bone, g)).collect();
+        let golden: std::collections::HashMap<&str, [f32; 5]> =
+            FITTED_GOLDEN.iter().map(|(b, g)| (*b, *g)).collect();
         assert_eq!(
             golden.len(),
             FITTED_GOLDEN.len(),
@@ -844,47 +727,25 @@ mod tests {
             FITTED_GOLDEN.len()
         );
         const TOL: f32 = 1e-4;
-        let check = |bone: &str, field: &str, a: f32, b: f32| {
-            assert!(
-                (a - b).abs() <= TOL,
-                "{bone}: {field} drifted {a:.6} vs golden {b:.6} (Δ={:.6} > {TOL})",
-                (a - b).abs()
-            );
-        };
         for link in &recipe.links {
             let g = golden
                 .get(link.bone.as_str())
                 .unwrap_or_else(|| panic!("fitted link {} absent from golden", link.bone));
-            for (k, (a, b)) in link.center.to_array().iter().zip(&g.center).enumerate() {
-                check(&link.bone, ["center.x", "center.y", "center.z"][k], *a, *b);
-            }
-            for (k, (a, b)) in canon_quat(link.col_rot).iter().zip(&g.rot).enumerate() {
-                check(&link.bone, ["rot.x", "rot.y", "rot.z", "rot.w"][k], *a, *b);
-            }
-            match (link.shape, g.shape) {
-                (
-                    LinkShape::Capsule {
-                        half_height,
-                        radius,
-                    },
-                    GoldenShape::Capsule {
-                        half_height: gh,
-                        radius: gr,
-                    },
-                ) => {
-                    check(&link.bone, "half_height", half_height, gh);
-                    check(&link.bone, "radius", radius, gr);
-                }
-                (LinkShape::Cuboid { half }, GoldenShape::Cuboid { half: gh }) => {
-                    for (k, (a, b)) in half.to_array().iter().zip(&gh).enumerate() {
-                        check(&link.bone, ["half.x", "half.y", "half.z"][k], *a, *b);
-                    }
-                }
-                (got, want) => panic!(
-                    "{}: primitive KIND changed — fitted {got:?} vs golden {want:?}; \
-                     that is a new MDP and a determinism break, re-capture deliberately",
-                    link.bone
-                ),
+            let got = [
+                link.half_height,
+                link.radius,
+                link.center.x,
+                link.center.y,
+                link.center.z,
+            ];
+            for (k, (a, b)) in got.iter().zip(g).enumerate() {
+                let field = ["half_height", "radius", "center.x", "center.y", "center.z"][k];
+                assert!(
+                    (a - b).abs() <= TOL,
+                    "{}: {field} drifted {a:.6} vs golden {b:.6} (Δ={:.6} > {TOL})",
+                    link.bone,
+                    (a - b).abs()
+                );
             }
         }
     }

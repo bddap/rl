@@ -309,9 +309,14 @@ fn spawn_crab_silhouette(
                     grow(p + rad);
                 }
             }
-            RestShape::Cuboid { center, rot, half } => {
-                for c in crab_world::bot::rig::cuboid_corners(center, rot, half) {
-                    grow(r * c);
+            RestShape::Cuboid { center, half } => {
+                let cen = r * center;
+                for sx in [-1.0_f32, 1.0] {
+                    for sy in [-1.0_f32, 1.0] {
+                        for sz in [-1.0_f32, 1.0] {
+                            grow(cen + r * Vec3::new(sx * half.x, sy * half.y, sz * half.z));
+                        }
+                    }
                 }
             }
         }
@@ -337,15 +342,7 @@ fn spawn_crab_silhouette(
     });
 
     let mut children: Vec<Entity> = Vec::with_capacity(sil.limbs.len() + 1);
-    let carapace_ptr = &sil.carapace as *const RestShape;
     for s in shapes() {
-        // Limb cuboids exist since rl#20 Phase 1; only the carapace slab wears the
-        // carapace colour.
-        let mat = if std::ptr::eq(s, carapace_ptr) {
-            carapace_mat.clone()
-        } else {
-            limb_mat.clone()
-        };
         let child = match *s {
             RestShape::Capsule { a, b, radius } => {
                 let a = map(a);
@@ -360,16 +357,16 @@ fn spawn_crab_silhouette(
                 commands
                     .spawn((
                         Mesh3d(meshes.add(Capsule3d::new(radius, len))),
-                        MeshMaterial3d(mat),
+                        MeshMaterial3d(limb_mat.clone()),
                         Transform::from_translation((a + b) * 0.5).with_rotation(rot),
                     ))
                     .id()
             }
-            RestShape::Cuboid { center, rot, half } => commands
+            RestShape::Cuboid { center, half } => commands
                 .spawn((
                     Mesh3d(meshes.add(Cuboid::new(half.x * 2.0, half.y * 2.0, half.z * 2.0))),
-                    MeshMaterial3d(mat),
-                    Transform::from_translation(map(center)).with_rotation(r * rot),
+                    MeshMaterial3d(carapace_mat.clone()),
+                    Transform::from_translation(map(center)).with_rotation(r),
                 ))
                 .id(),
         };
