@@ -164,6 +164,17 @@ pub(crate) enum StampIdentity {
     TrustOnFirstUse,
 }
 
+/// The ONE stamp-vs-constructed matrix (`None` → TOFU, equal → match, else the
+/// mismatched stamp) shared by both identity axes; the wrappers own their refusal
+/// messages, which is where the two differ.
+fn check_stamp(checkpoint: Option<u64>, constructed: u64) -> Result<StampIdentity, u64> {
+    match checkpoint {
+        None => Ok(StampIdentity::TrustOnFirstUse),
+        Some(d) if d == constructed => Ok(StampIdentity::Match),
+        Some(d) => Err(d),
+    }
+}
+
 /// THE body↔policy identity check (bddap/rl#214): a checkpoint stamped with one body
 /// digest must never drive or train the body this process actually constructs if the two
 /// differ — that policy is not this crab. Pure over (checkpoint stamp, constructed
@@ -174,10 +185,8 @@ pub(crate) fn check_body_identity(
     checkpoint: Option<u64>,
     constructed: u64,
 ) -> Result<StampIdentity, String> {
-    match checkpoint {
-        None => Ok(StampIdentity::TrustOnFirstUse),
-        Some(d) if d == constructed => Ok(StampIdentity::Match),
-        Some(d) => Err(format!(
+    check_stamp(checkpoint, constructed).map_err(|d| {
+        format!(
             "checkpoint is stamped body digest {d:#018x} but this process constructs body \
              digest {constructed:#018x} ({}) — the policy was trained on a DIFFERENT crab \
              body (the asset changed, or one side is the procedural fallback; digest 0 = \
@@ -188,8 +197,8 @@ pub(crate) fn check_body_identity(
             } else {
                 "the canonical mesh"
             },
-        )),
-    }
+        )
+    })
 }
 
 /// THE layout↔policy identity check (bddap/rl#271), [`check_body_identity`]'s sibling
@@ -203,17 +212,15 @@ pub(crate) fn check_channel_layout(
     checkpoint: Option<u64>,
     built: u64,
 ) -> Result<StampIdentity, String> {
-    match checkpoint {
-        None => Ok(StampIdentity::TrustOnFirstUse),
-        Some(d) if d == built => Ok(StampIdentity::Match),
-        Some(d) => Err(format!(
+    check_stamp(checkpoint, built).map_err(|d| {
+        format!(
             "checkpoint is stamped channel-layout digest {d:#018x} but this build's \
              obs/action layout digests to {built:#018x} — the channel order or slot map \
              changed since the policy was trained, so loading it would SILENTLY REMAP \
              channels (right dims, wrong joints; bddap/rl#271). Use a checkpoint trained \
              on this layout, or point at a fresh dir to train one.",
-        )),
-    }
+        )
+    })
 }
 
 pub(crate) fn crab_optimizer<B: AutodiffBackend>() -> CrabOpt<B> {

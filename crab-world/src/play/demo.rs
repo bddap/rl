@@ -52,7 +52,7 @@ fn demo_respawn(
     let origin = spawns.origin(0);
     respawn_crab_rotated(commands, assets, parts, origin, 0, init_rotation);
     settle.0 = RESET_GRACE_TICKS;
-    actions.rest(0);
+    let _ = actions.rest(0); // deliberate skip pre-spawn
 }
 
 fn random_demo_tilt(rng: &mut impl Rng) -> Quat {
@@ -126,6 +126,6 @@ pub(super) fn demo_settle(mut settle: ResMut<DemoSettle>, mut actions: ResMut<Cr
     if settle.0 == 0 {
         return;
     }
-    actions.rest(0);
+    let _ = actions.rest(0); // deliberate skip pre-spawn
     settle.0 = settle_countdown(settle.0);
 }

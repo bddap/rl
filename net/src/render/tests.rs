@@ -133,7 +133,7 @@ fn manual_pump_matches_auto_pump_step_for_step() {
         crab_state_digest(q.iter(app.world()))
     };
     let set_torque = |app: &mut App, a: [f32; ACTION_SIZE]| {
-        app.world_mut().resource_mut::<CrabActions>().set_row(0, a);
+        assert!(app.world_mut().resource_mut::<CrabActions>().set_row(0, a));
     };
 
     let mut lcg: u64 = 0x1234_5678_9abc_def0;

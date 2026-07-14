@@ -420,10 +420,14 @@ fn eval_step(
 
     let settling = state.tick < cfg.settle_ticks;
 
-    match obs.rows().first().filter(|_| !settling) {
-        Some(o) => actions.set_row(0, policy.act(o)),
-        None => actions.rest(0),
-    };
+    // Skips are deliberate: env 0 unsized = the pre-spawn window.
+    if settling {
+        let _ = actions.rest(0);
+    } else if let Some(o) = obs.rows().first() {
+        let _ = actions.set_row(0, policy.act(o));
+    } else {
+        let _ = actions.rest(0);
+    }
 
     if let Some(cpos) = carapace_q
         .iter()

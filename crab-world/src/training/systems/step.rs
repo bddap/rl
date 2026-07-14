@@ -249,7 +249,7 @@ pub(crate) fn brain_step(
     actions.set_rows(&drive_arrays);
     for (e, ep) in training.envs.iter().enumerate() {
         if matches!(ep.phase, EnvPhase::Settling { .. }) {
-            actions.rest(e);
+            let _ = actions.rest(e); // deliberate skip pre-spawn
         }
     }
 

@@ -21,9 +21,11 @@ pub(super) fn action_channel_labels() -> Vec<String> {
 /// [`Self::set_row`], [`Self::set_rows`]); per-joint access is by [`CrabJointId`],
 /// never by raw index.
 ///
-/// The env-indexed writers are deliberate no-ops (returning `false`) on an unsized
-/// env: `spawn_initial_crabs` sizes the rows on the first armed Update and FixedUpdate
-/// can tick first, so callers in that window skip rather than panic.
+/// The env-indexed writers return `false` (a no-op) on an unsized env:
+/// `spawn_initial_crabs` sizes the rows on the first armed Update and FixedUpdate can
+/// tick first, so callers in that window skip rather than panic. The `#[must_use]`
+/// forces every caller to either act on the miss or mark the skip deliberate
+/// (`let _ =`) — an unmarked drop is exactly a silent unlanded drive.
 #[derive(Resource, Default)]
 pub struct CrabActions {
     envs: Vec<[f32; ACTION_SIZE]>,
@@ -48,26 +50,35 @@ impl CrabActions {
     }
 
     /// Land a whole policy-output row on env `e`.
+    #[must_use = "false = env not sized; the drive did not land"]
     pub fn set_row(&mut self, e: usize, row: [f32; ACTION_SIZE]) -> bool {
         self.write(e, |r| *r = row)
     }
 
-    /// Land the policy's whole batch — row count must match the sized envs.
+    /// Land the policy's whole batch.
     pub fn set_rows(&mut self, rows: &[[f32; ACTION_SIZE]]) {
+        assert_eq!(
+            rows.len(),
+            self.envs.len(),
+            "policy batch row count != sized envs"
+        );
         self.envs.copy_from_slice(rows);
     }
 
     /// Rest pose: zero every drive of env `e`.
+    #[must_use = "false = env not sized; the drive did not land"]
     pub fn rest(&mut self, e: usize) -> bool {
-        self.write(e, |r| *r = [0.0; ACTION_SIZE])
+        self.fill(e, 0.0)
     }
 
-    /// The same drive on every joint of env `e` (test flails, worst-case wiggles).
+    /// The same drive on every joint of env `e`.
+    #[must_use = "false = env not sized; the drive did not land"]
     pub fn fill(&mut self, e: usize, v: f32) -> bool {
         self.write(e, |r| *r = [v; ACTION_SIZE])
     }
 
     /// Drive one named joint of env `e`.
+    #[must_use = "false = env not sized; the drive did not land"]
     pub fn set_drive(&mut self, e: usize, id: CrabJointId, v: f32) -> bool {
         self.write(e, |r| r[id.index()] = v)
     }

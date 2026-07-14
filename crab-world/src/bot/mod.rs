@@ -328,7 +328,10 @@ mod layout_digest_tests {
     /// Golden pin of the channel-layout digest (bddap/rl#271). Red means you changed the
     /// action/obs channel order or slot map — every trained checkpoint stops loading on
     /// the new layout (by design: loading would silently remap channels). If the change
-    /// is deliberate, update this constant and plan fresh checkpoint dirs.
+    /// is deliberate, update this constant and plan fresh checkpoint dirs. Labels are
+    /// `{id:?}` Debug names, so a pure VARIANT RENAME also trips this — a false
+    /// invalidation, the price of making reorders detectable; re-pinning after a rename
+    /// (no semantic layout change) is safe and torches nothing.
     #[test]
     fn channel_layout_digest_is_pinned() {
         assert_eq!(super::channel_layout_digest(), GOLDEN, "see doc comment");

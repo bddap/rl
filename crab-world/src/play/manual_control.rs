@@ -51,7 +51,8 @@ pub(super) fn manual_control_step(
             line = match manual.selected {
                 Some(id) => {
                     let v = torque_stick_y(gp).clamp(-1.0, 1.0);
-                    actions.set_drive(0, id, v);
+                    // The rest(0) above proved env 0 is sized.
+                    let _ = actions.set_drive(0, id, v);
                     format!("MANUAL · {id:?} {}/{n} · torque {v:+.2}", id.index() + 1)
                 }
                 None => "MANUAL · pick a joint (D-pad)".to_string(),

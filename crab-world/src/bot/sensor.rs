@@ -257,6 +257,10 @@ pub fn build_observation(
 mod tests {
     use super::*;
 
+    /// Pins `serialize` AGAINST the digest's input: every expected slot index is looked
+    /// up in `obs_channel_labels()`, so a serialize reorder can't go green by editing
+    /// offsets here — it forces the matching label move, which moves the layout digest
+    /// (bddap/rl#271). Don't rewrite this with literal indices.
     #[test]
     fn serialize_is_slot_identical() {
         let mut o = Observation::default();
@@ -272,30 +276,43 @@ mod tests {
 
         let got = o.serialize();
 
+        let labels = obs_channel_labels();
+        let slot = |name: &str| {
+            labels
+                .iter()
+                .position(|l| l == name)
+                .unwrap_or_else(|| panic!("no obs channel labeled {name:?}"))
+        };
         let mut want = [0.0f32; OBS_SIZE];
-        for idx in 0..CrabJointId::COUNT {
-            want[idx * 2] = idx as f32 + 0.5;
-            want[idx * 2 + 1] = -(idx as f32) - 0.25;
+        for (idx, id) in CrabJointId::all().iter().enumerate() {
+            want[slot(&format!("joint:{id:?}:angle"))] = idx as f32 + 0.5;
+            want[slot(&format!("joint:{id:?}:rate"))] = -(idx as f32) - 0.25;
         }
-        let body_base = BODY_POS_SLOT;
-        want[body_base] = 1.0;
-        want[body_base + 1] = 2.0;
-        want[body_base + 2] = 3.0;
-        want[body_base + 3] = 0.1;
-        want[body_base + 4] = 0.2;
-        want[body_base + 5] = 0.3;
-        want[body_base + 6] = 0.4;
-        want[body_base + 7] = 4.0;
-        want[body_base + 8] = 5.0;
-        want[body_base + 9] = 6.0;
-        want[body_base + 10] = 7.0;
-        want[body_base + 11] = 8.0;
-        want[body_base + 12] = 9.0;
-        want[body_base + 13] = -1.0;
-        want[body_base + 14] = -2.0;
-        want[body_base + 15] = -3.0;
+        for (name, v) in [
+            ("body:pos.x", 1.0),
+            ("body:pos.y", 2.0),
+            ("body:pos.z", 3.0),
+            ("body:rot.x", 0.1),
+            ("body:rot.y", 0.2),
+            ("body:rot.z", 0.3),
+            ("body:rot.w", 0.4),
+            ("body:linvel.x", 4.0),
+            ("body:linvel.y", 5.0),
+            ("body:linvel.z", 6.0),
+            ("body:angvel.x", 7.0),
+            ("body:angvel.y", 8.0),
+            ("body:angvel.z", 9.0),
+            ("target:x", -1.0),
+            ("target:y", -2.0),
+            ("target:z", -3.0),
+        ] {
+            want[slot(name)] = v;
+        }
 
-        assert_eq!(got, want, "serialize() drifted from the pinned obs layout");
+        assert_eq!(
+            got, want,
+            "serialize() drifted from the labeled obs layout (rl#271)"
+        );
     }
 
     #[test]
