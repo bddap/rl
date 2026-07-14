@@ -53,12 +53,9 @@ pub fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-// The one knob shared by every mode that loads a checkpoint (`learn`, `eval`, rl-demo). Split
-// out of `TrainConfig` so binaries that only LOAD flatten just this, and a stray training knob
-// like `--envs` is a parse error there instead of a silent no-op (bddap/rl#217).
-//
-// Deliberately NOT a doc comment: clap adopts a flattened struct's docs as the enclosing
-// command's `about`, which would overwrite the description of every subcommand flattening it.
+/// The one knob shared by every mode that loads a checkpoint (`learn`, `eval`, rl-demo). Split
+/// out of [`TrainConfig`] so binaries that only LOAD flatten just this, and a stray training
+/// knob like `--envs` is a parse error there instead of a silent no-op (bddap/rl#217).
 #[derive(clap::Args, Debug, Clone)]
 pub struct CheckpointArgs {
     /// Directory of checkpoint files: loaded on startup if one is present; the
@@ -67,16 +64,10 @@ pub struct CheckpointArgs {
     pub checkpoint_dir: PathBuf,
 }
 
-// The render-surface knob, flattened by every binary that opens a view on the crab world
-// (rl-demo, `game play`/`net-join`/`fp-screenshot`/`net-screenshot`) — the ONE declaration of
-// `--render-mode` and its env fallback. It used to be parsed deep in the view code, where a
-// malformed value was warned about and IGNORED (leaving the default mode, as if the override
-// had taken) and a hand-rolled `flag.or_else(env)` sat beside clap's own `env` (rl#275).
-// `RL_DEBUG_COLLIDERS` is gone with it: it was a second, less expressive spelling of
-// `--render-mode colliders`.
-//
-// Deliberately NOT a doc comment: clap adopts a flattened struct's docs as the enclosing
-// command's `about`, which would overwrite the description of every subcommand flattening it.
+/// The render-surface knob, flattened by every binary that opens a view on the crab world —
+/// the ONE declaration of `--render-mode` and its env fallback, so a malformed value is a parse
+/// error at t=0 on every surface (rl#275). `RL_DEBUG_COLLIDERS` is gone with it: it was a
+/// second, less expressive spelling of `--render-mode colliders`.
 #[cfg(feature = "render")]
 #[derive(clap::Args, Debug, Clone, Copy, Default)]
 pub struct RenderArgs {
@@ -89,9 +80,10 @@ pub struct RenderArgs {
 #[cfg(feature = "render")]
 impl RenderArgs {
     /// The mode `surface` boots in. With no usable canonical body, the flagless default is
-    /// the collider wireframe, and the fallback is latched for `surface` — the render stays
-    /// honest about what it is drawing (never a procedural stand-in posing as Sally).
-    pub fn initial(self, surface: mesh_fallback::Surface) -> crab_view::RenderMode {
+    /// the collider wireframe, and the fallback is LOGGED (latched for `surface`) — the render
+    /// stays honest about what it is drawing, never a procedural stand-in posing as Sally.
+    /// That logging is why this is `resolve` and not a getter: call it once, at the entrypoint.
+    pub fn resolve(self, surface: mesh_fallback::Surface) -> crab_view::RenderMode {
         let mesh_err = mesh_fallback::usable_model().as_ref().err();
         if let Some(reason) = mesh_err {
             mesh_fallback::log_fallback(surface, reason);
@@ -104,16 +96,13 @@ impl RenderArgs {
     }
 }
 
-// Training config, consumed by the learner and its rollout threads (which build a
-// `TrainingState`). Parsed only by the `learn` subcommand.
-//
-// The run-shaping knobs below keep an `env` fallback for the overnight loop's existing `RL_*`
-// exports, but they are real flags: visible in `--help`, echoed by the argv a run was launched
-// with, and a malformed value (flag OR env) is a parse error at t=0 — never a silent fallback
-// mid-run (rl#272).
-//
-// Deliberately NOT a doc comment: clap adopts a flattened struct's docs as the enclosing
-// command's `about`, which would overwrite the description of every subcommand flattening it.
+/// Training config, consumed by the learner and its rollout threads (which build a
+/// `TrainingState`). Parsed only by the `learn` subcommand.
+///
+/// The run-shaping knobs keep an `env` fallback for the overnight loop's existing `RL_*`
+/// exports, but they are real flags: visible in `--help`, echoed by the argv a run was launched
+/// with, and a malformed value (flag OR env) is a parse error at t=0 — never a silent fallback
+/// mid-run (rl#272).
 #[derive(Parser, Debug, Clone)]
 pub struct TrainConfig {
     #[command(flatten)]

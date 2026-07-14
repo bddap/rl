@@ -17,15 +17,24 @@ mod telemetry_collector;
 pub(crate) enum Command {
     /// Networked headless run: discover LAN peers over iroh and run the host-authoritative loop.
     Net(net::Args),
+    /// Headless single-peer round: run the sim for a few seconds and print its state hash.
     Solo(solo::Args),
     /// Windowed first-person client: see + play the gray-box.
     Play(play::Args),
+    /// Windowed client that joins a specific host by endpoint id (no lobby).
     NetJoin(net_join::Args),
+    /// Offscreen first-person screenshot of a local round — the evidence shot.
     FpScreenshot(fp_screenshot::Args),
+    /// Offscreen screenshot from inside a live two-peer match (the remote-client render).
     NetScreenshot(net_screenshot::Args),
+    /// Receive the fleet's telemetry over iroh and forward it to the local OTLP sink.
     TelemetryCollector(telemetry_collector::Args),
+    /// Drive the NN crab headlessly and log a per-tick state hash — the cross-machine
+    /// bit-equality probe.
     NnCrabProbe(nn_crab_probe::Args),
+    /// Verdict on a checkpoint dir: is it loadable, and does it match this binary's rig?
     CheckpointCheck(checkpoint_check::Args),
+    /// Probe whether an armed crab destabilizes a vehicle it stands on.
     NnCrabVehicleStability(nn_crab_vehicle_stability::Args),
 }
 

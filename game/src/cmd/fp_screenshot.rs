@@ -5,9 +5,8 @@ use net::sim::PlayerId;
 
 use crab_world::RenderArgs;
 use crab_world::controls::ControlsOverlayArgs;
-use net::controls::GcrControls;
 
-use super::shared::{MATCH_SEED, nn_crab_policy};
+use super::shared::{MATCH_SEED, gcr_controls, nn_crab_policy, render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -27,7 +26,10 @@ pub(crate) struct Args {
     cam_pitch: f32,
     #[arg(long)]
     cam_fov: Option<f32>,
-    #[arg(long, value_name = "DIR", env = "RL_CRAB_CHECKPOINT_DIR")]
+    // No `env` here, unlike the other surfaces: this flag is the OPT-IN to arm a crab at all
+    // (`.map(..)` below), so an exported RL_CRAB_CHECKPOINT_DIR would silently seed a crab into
+    // an evidence shot that is meant to have none.
+    #[arg(long, value_name = "DIR")]
     nn_crab_checkpoint: Option<std::path::PathBuf>,
 
     #[command(flatten)]
@@ -54,13 +56,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .nn_crab_checkpoint
         .map(|flag| nn_crab_policy(Some(flag)).map(|(_, policy)| policy))
         .transpose()?;
-    let render_mode = args
-        .render
-        .initial(crab_world::mesh_fallback::Surface::Game);
-    let controls = args
-        .controls
-        .resolve::<GcrControls>()
-        .map_err(anyhow::Error::msg)?;
+    let render_mode = render_mode(args.render);
+    let controls = gcr_controls(&args.controls)?;
     let pack = net::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
     render::build_screenshot_app(client, cfg, external_crab, render_mode, controls, pack).run();
     Ok(())

@@ -13,15 +13,13 @@ pub const COLLIDER_WIREFRAME_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
 const HUD_TEXT_COLOR: Color = Color::srgb(0.4, 1.0, 0.55);
 
 /// Which view of the crab a render surface shows. A [`clap::ValueEnum`] because it IS a CLI
-/// value — `--render-mode` / `RL_RENDER_MODE` on every surface that opens a view (see
-/// [`crate::RenderArgs`]): clap owns the string→mode mapping, so an unrecognized value is a
-/// parse error at t=0 instead of the warn-and-ignore that left the surface in the DEFAULT
-/// mode as if the override had taken (rl#275).
+/// value ([`crate::RenderArgs`]): clap owns the string→mode mapping, so an unrecognized value
+/// is a parse error at t=0 rather than anything this code has to decide.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Default, Debug, clap::ValueEnum)]
 pub enum RenderMode {
     #[default]
     Mesh,
-    #[value(name = "mesh+colliders", alias = "mesh-colliders")]
+    #[value(name = "mesh+colliders")]
     MeshColliders,
     Colliders,
 }

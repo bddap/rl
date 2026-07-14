@@ -29,23 +29,19 @@ impl Drop for OtelGuard {
     }
 }
 
-// The project's own telemetry switch, flattened by every binary that calls `init` — ONE
-// declaration of `--otel` and its `RL_OTEL` env fallback, so a value clap doesn't recognize as
-// falsey turns export ON instead of silently leaving it off (`RL_OTEL=true` used to mean OFF:
-// the read was `v == "1"`, rl#275).
-//
-// The `OTEL_*` vars stay env-only on purpose: they are OTel ecosystem convention, and the SDK's
-// own contract with whatever launches the process.
-//
-// Deliberately NOT a doc comment: clap adopts a flattened struct's docs as the enclosing
-// command's `about`, which would overwrite the description of every binary that flattens this.
+/// The project's own telemetry switch, flattened by every binary that calls [`init`] — one
+/// declaration of `--otel` and its `RL_OTEL` env fallback, so a value clap does not recognize
+/// as falsey turns export ON rather than silently leaving it off (rl#275).
+///
+/// The `OTEL_*` vars stay env-only by design: they are OTel ecosystem convention, the SDK's
+/// contract with whatever launches the process.
 #[derive(clap::Args, Debug, Clone, Copy, Default)]
 pub struct OtelArgs {
     /// Export traces/metrics/logs to the built-in OTLP endpoint. Setting
     /// `OTEL_EXPORTER_OTLP_ENDPOINT` enables export on its own, and wins.
     #[arg(long = "otel", env = "RL_OTEL", global = true,
           value_parser = clap::builder::FalseyValueParser::new())]
-    pub otel: bool,
+    pub enabled: bool,
 }
 
 pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
@@ -57,7 +53,7 @@ pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
-    let endpoint = resolve_endpoint(args.otel);
+    let endpoint = resolve_endpoint(args.enabled);
     let Some(endpoint) = endpoint else {
         tracing_subscriber::registry()
             .with(filter)

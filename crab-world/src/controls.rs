@@ -309,12 +309,42 @@ mod overlay {
     #[derive(Resource, Clone, Copy, Default)]
     pub struct ActiveDevice(pub Device);
 
-    #[derive(Resource, Clone, Copy)]
-    pub struct ActiveContext<S: ControlScheme>(pub S::Context);
+    /// The context whose legend the overlay is showing.
+    ///
+    /// PINNABLE: `--show-controls-context` fixes it for the life of the surface, and the pin
+    /// is enforced INSIDE [`ActiveContext::sync`] — the only way to drive the context from live
+    /// state. A surface therefore cannot forget to honor it; honoring used to be a convention
+    /// each caller had to remember, gated on its own separate read of the knob (rl#275).
+    #[derive(Resource)]
+    pub struct ActiveContext<S: ControlScheme> {
+        ctx: S::Context,
+        pinned: bool,
+    }
 
     impl<S: ControlScheme> Default for ActiveContext<S> {
         fn default() -> Self {
-            Self(S::Context::default())
+            Self {
+                ctx: S::Context::default(),
+                pinned: false,
+            }
+        }
+    }
+
+    impl<S: ControlScheme> ActiveContext<S> {
+        pub(crate) fn pinned_to(ctx: S::Context, pinned: bool) -> Self {
+            Self { ctx, pinned }
+        }
+
+        pub fn get(&self) -> S::Context {
+            self.ctx
+        }
+
+        /// Retarget the legend from live state (the vehicle you're in, the menu you're on).
+        /// A no-op while pinned: an evidence shot keeps the legend it asked for.
+        pub fn sync(&mut self, ctx: S::Context) {
+            if !self.pinned && self.ctx != ctx {
+                self.ctx = ctx;
+            }
         }
     }
 
@@ -628,7 +658,7 @@ mod overlay {
         }
 
         for (col, mut node) in &mut columns {
-            node.display = if col.ctx == context.0 && col.device == device.0 {
+            node.display = if col.ctx == context.get() && col.device == device.0 {
                 Display::Flex
             } else {
                 Display::None
@@ -642,7 +672,7 @@ mod overlay {
             };
         }
 
-        let label = S::context_label(context.0);
+        let label = S::context_label(context.get());
         for mut text in &mut headings {
             if text.0 != label {
                 text.0 = label.to_string();
@@ -688,16 +718,8 @@ pub use overlay::{
 #[cfg(feature = "render")]
 pub use overlay::PAD_STICK_DEADZONE;
 
-// DIAGNOSTIC force-knobs for the controls overlay: they pin what the legend shows so an
-// evidence shot can prove a binding renders. Flattened by the entrypoints whose surface HAS the
-// overlay and does not drive it from live state — rl-demo, `game fp-screenshot`, `game
-// net-screenshot`. The windowed GCR client is deliberately absent: it syncs the HUD context
-// from the live vehicle every frame, so a pin there would be overwritten silently.
-//
-// The knobs were three env reads deep in the surfaces, one of them read TWICE (rl#275).
-//
-// Deliberately NOT a doc comment: clap adopts a flattened struct's docs as the enclosing
-// command's `about`, which would overwrite the description of every subcommand flattening it.
+/// DIAGNOSTIC force-knobs for the controls overlay: they pin what the legend shows, so an
+/// evidence shot can prove a binding renders. Flattened by every surface that shows the legend.
 #[cfg(feature = "render")]
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct ControlsOverlayArgs {
@@ -715,42 +737,49 @@ pub struct ControlsOverlayArgs {
     pub show_controls_context: Option<String>,
 }
 
-/// [`ControlsOverlayArgs`] resolved against a scheme — the context id is checked HERE, at the
-/// entrypoint, so [`install_overlay`] cannot fail. An unknown id used to fall through to the
-/// DEFAULT context: the shot captured the wrong legend and read as if the override had taken
-/// (rl#275).
+/// [`ControlsOverlayArgs`] resolved against a scheme. The context id is checked at the
+/// ENTRYPOINT, so [`install_overlay`] cannot fail and an unknown id can never fall through to
+/// the default context — which would capture the wrong legend in a shot that reads as if the
+/// override had taken (rl#275).
 #[cfg(feature = "render")]
 pub struct ControlsOverrides<S: ControlScheme> {
     reveal: bool,
     device: Device,
-    context: S::Context,
-    pinned: bool,
+    /// `Some` IS the pin — one field, so the context and "is it pinned" cannot disagree.
+    context: Option<S::Context>,
 }
 
+/// No force-knobs: what a surface that exposes none installs. Hand-written because deriving it
+/// would demand `S: Default` — the scheme is a marker type, only its `Context` needs a default.
 #[cfg(feature = "render")]
-impl<S: ControlScheme> ControlsOverrides<S> {
-    /// Whether the context is PINNED. A surface that syncs the HUD context from live state
-    /// must stop while it is, or it would overwrite the pin every frame — the gate reads the
-    /// same value it gates, so the two can't drift (they were two independent env reads).
-    pub fn context_pinned(&self) -> bool {
-        self.pinned
+impl<S: ControlScheme> Default for ControlsOverrides<S> {
+    fn default() -> Self {
+        Self {
+            reveal: false,
+            device: Device::default(),
+            context: None,
+        }
     }
 }
 
 #[cfg(feature = "render")]
 impl ControlsOverlayArgs {
     pub fn resolve<S: ControlScheme>(&self) -> Result<ControlsOverrides<S>, String> {
-        let context = match &self.show_controls_context {
-            None => S::Context::default(),
-            Some(id) => S::context_from_id(id).ok_or_else(|| {
-                let known: Vec<&str> = S::contexts().iter().map(|&c| S::context_id(c)).collect();
-                format!(
-                    "--show-controls-context {id:?} is not a context of this surface; \
-                     want one of: {}",
-                    known.join(", ")
-                )
-            })?,
-        };
+        let context = self
+            .show_controls_context
+            .as_deref()
+            .map(|id| {
+                S::context_from_id(id).ok_or_else(|| {
+                    let known: Vec<&str> =
+                        S::contexts().iter().map(|&c| S::context_id(c)).collect();
+                    format!(
+                        "--show-controls-context {id:?} is not a context of this surface; \
+                         want one of: {}",
+                        known.join(", ")
+                    )
+                })
+            })
+            .transpose()?;
         Ok(ControlsOverrides {
             reveal: self.show_controls,
             device: if self.show_controls_pad {
@@ -759,14 +788,13 @@ impl ControlsOverlayArgs {
                 Device::KeyboardMouse
             },
             context,
-            pinned: self.show_controls_context.is_some(),
         })
     }
 }
 
 /// Install the overlay with `overrides` applied — the ONE wiring of plugin + force-knobs,
-/// shared by every surface that shows the legend. The resources land AFTER the plugin, so
-/// they replace its defaults rather than racing them.
+/// shared by every surface that shows the legend (pass `&Default::default()` for a surface
+/// that exposes no knobs). The resources land AFTER the plugin, replacing its defaults.
 #[cfg(feature = "render")]
 pub fn install_overlay<S: ControlInput>(
     app: &mut bevy::app::App,
@@ -775,5 +803,8 @@ pub fn install_overlay<S: ControlInput>(
     app.add_plugins(ControlsOverlayPlugin::<S>::default())
         .insert_resource(ForceRevealControls(overrides.reveal))
         .insert_resource(ActiveDevice(overrides.device))
-        .insert_resource(ActiveContext::<S>(overrides.context));
+        .insert_resource(ActiveContext::<S>::pinned_to(
+            overrides.context.unwrap_or_default(),
+            overrides.context.is_some(),
+        ));
 }

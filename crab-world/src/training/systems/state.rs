@@ -93,8 +93,7 @@ pub(crate) struct TrainingState {
     /// Effort-tax coefficient (rl#268) — `TrainConfig::effort_weight`.
     pub(super) effort_weight: f32,
 
-    /// DIAGNOSTIC effort probe (`TrainConfig::log_effort`), a run-shaping flag like the
-    /// rest — not an env var re-read on every step (rl#275).
+    /// DIAGNOSTIC effort probe — `TrainConfig::log_effort`.
     pub(super) log_effort: bool,
 
     pub(super) checkpoint_dir: PathBuf,

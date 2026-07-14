@@ -6,6 +6,7 @@ use clap::Parser;
 use crab_world::controls::ControlsOverlayArgs;
 use crab_world::{CheckpointArgs, RenderArgs, Visuals, bot, physics, play};
 
+/// Watch the trained crab: a live demo window, a still, or a rendered video.
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct Args {
@@ -133,9 +134,8 @@ enum AppMode {
 fn main() {
     let args = Args::parse();
 
-    // The demo's control scheme is the one the legend force-knobs are checked against: an
-    // unknown context id dies HERE, at t=0, rather than silently capturing the default
-    // legend (rl#275).
+    // Resolved against the demo's scheme before any world is built: an unknown context id dies
+    // HERE, at t=0, rather than silently capturing the default legend (rl#275).
     let controls = match args.controls.resolve::<play::DemoControls>() {
         Ok(controls) => controls,
         Err(err) => {
@@ -207,7 +207,7 @@ fn main() {
 
     let initial_render_mode = args
         .render
-        .initial(crab_world::mesh_fallback::Surface::RlDemo);
+        .resolve(crab_world::mesh_fallback::Surface::RlDemo);
     // Cage gate open always: the demo has no menu phase — it renders the round for its whole
     // life, so there is no screen the gizmos could leak behind (the gate exists for GCR, rl#211).
     crab_world::crab_view::register(&mut app, initial_render_mode, || true);
@@ -286,8 +286,8 @@ fn spawn_mesh_fallback_banner(mut commands: Commands, banner: Res<MeshFallbackBa
     crab_world::mesh_fallback::spawn_banner(&mut commands, &banner.0);
 }
 
-/// Added only under `--contact-audit` — the gate is the system's PRESENCE, not an env read
-/// on every tick of every run (rl#275).
+/// Added only under `--contact-audit`: the gate is the system's PRESENCE, so an off run pays
+/// nothing.
 fn contact_audit(
     sim: Query<&bevy_rapier3d::plugin::context::RapierContextSimulation>,
     cols: Query<&bevy_rapier3d::plugin::context::RapierContextColliders>,

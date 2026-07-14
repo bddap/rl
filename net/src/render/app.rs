@@ -52,8 +52,10 @@ pub fn build_windowed_app(
 
     // The controls hint/overlay is app-global chrome (rl#117): the plugin owns its whole
     // lifecycle, and the per-phase sync systems below only retarget its ActiveContext
-    // (Menu ↔ vehicles).
-    app.add_plugins(crab_world::controls::ControlsOverlayPlugin::<GcrControls>::default());
+    // (Menu ↔ vehicles). No force-knobs — the windowed client exposes none, so live state
+    // drives the legend; it goes through the one installer anyway so there is no second
+    // wiring of the overlay to drift.
+    crab_world::controls::install_overlay::<GcrControls>(&mut app, &Default::default());
 
     app.init_non_send_resource::<PendingRound>()
         .add_systems(
