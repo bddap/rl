@@ -368,3 +368,41 @@ fn draw_capsule(gizmos: &mut Gizmos, world: Mat4, a: Vec3, b: Vec3, radius: f32,
         color,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::ValueEnum;
+
+    /// The CLI spellings are a contract with the deploy scripts and the operator's muscle
+    /// memory, and they are no longer written down anywhere else (the hand-rolled `parse` that
+    /// used to hold them is gone, rl#275). Pin them.
+    #[test]
+    fn value_enum_spellings_are_what_the_cli_promises() {
+        let spelling = |m: RenderMode| m.to_possible_value().unwrap().get_name().to_string();
+        assert_eq!(spelling(RenderMode::Mesh), "mesh");
+        assert_eq!(spelling(RenderMode::MeshColliders), "mesh+colliders");
+        assert_eq!(spelling(RenderMode::Colliders), "colliders");
+    }
+
+    /// Cycling the render mode must visit every mode and return home — the in-app E-cycle and
+    /// the `--render-mode` values are the same three states.
+    #[test]
+    fn next_cycles_through_every_mode() {
+        let mut seen = vec![RenderMode::Mesh];
+        let mut m = RenderMode::Mesh;
+        for _ in 0..2 {
+            m = m.next();
+            seen.push(m);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                RenderMode::Mesh,
+                RenderMode::MeshColliders,
+                RenderMode::Colliders
+            ]
+        );
+        assert_eq!(m.next(), RenderMode::Mesh, "the cycle must close");
+    }
+}

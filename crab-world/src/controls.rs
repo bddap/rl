@@ -306,8 +306,37 @@ mod overlay {
                 .any(|gp| gamepad_buttons_for::<S>(action).any(|b| gp.pressed(b)))
     }
 
+    /// The device whose glyphs the legend is drawing.
+    ///
+    /// PINNABLE, exactly like [`ActiveContext`]: `--show-controls-pad` fixes it, and the pin is
+    /// enforced inside [`ActiveDevice::sync`] — the only way to drive it from live input. On a
+    /// WINDOWED surface [`track_active_device`] would otherwise flip the legend back to
+    /// keyboard glyphs on the first mouse twitch, so the knob would work in a still and quietly
+    /// not in a window.
     #[derive(Resource, Clone, Copy, Default)]
-    pub struct ActiveDevice(pub Device);
+    pub struct ActiveDevice {
+        device: Device,
+        pinned: bool,
+    }
+
+    impl ActiveDevice {
+        pub(crate) fn pinned_to(device: Device, pinned: bool) -> Self {
+            Self { device, pinned }
+        }
+
+        pub fn get(&self) -> Device {
+            self.device
+        }
+
+        /// Retarget from live input. A no-op while pinned. Takes the `ResMut` rather than
+        /// `&mut self` so the guard runs BEFORE any `DerefMut` — else the resource would be
+        /// flagged changed every frame and a `resource_changed` filter would never filter.
+        pub fn sync(res: &mut ResMut<'_, Self>, device: Device) {
+            if !res.pinned && res.device != device {
+                res.device = device;
+            }
+        }
+    }
 
     /// The context whose legend the overlay is showing.
     ///
@@ -340,10 +369,13 @@ mod overlay {
         }
 
         /// Retarget the legend from live state (the vehicle you're in, the menu you're on).
-        /// A no-op while pinned: an evidence shot keeps the legend it asked for.
-        pub fn sync(&mut self, ctx: S::Context) {
-            if !self.pinned && self.ctx != ctx {
-                self.ctx = ctx;
+        /// A no-op while pinned: an evidence shot keeps the legend it asked for. Takes the
+        /// `ResMut` rather than `&mut self` so the guard runs BEFORE any `DerefMut` — else the
+        /// resource would be flagged changed every frame and a `resource_changed` filter (the
+        /// obvious optimization for a legend that repaints dozens of nodes) would never filter.
+        pub fn sync(res: &mut ResMut<'_, Self>, ctx: S::Context) {
+            if !res.pinned && res.ctx != ctx {
+                res.ctx = ctx;
             }
         }
     }
@@ -612,10 +644,10 @@ mod overlay {
                 || gp.right_stick().length() > PAD_STICK_DEADZONE
         });
         if kb_active {
-            device.0 = Device::KeyboardMouse;
+            ActiveDevice::sync(&mut device, Device::KeyboardMouse);
         }
         if pad_active {
-            device.0 = Device::Gamepad;
+            ActiveDevice::sync(&mut device, Device::Gamepad);
         }
     }
 
@@ -658,14 +690,14 @@ mod overlay {
         }
 
         for (col, mut node) in &mut columns {
-            node.display = if col.ctx == context.get() && col.device == device.0 {
+            node.display = if col.ctx == context.get() && col.device == device.get() {
                 Display::Flex
             } else {
                 Display::None
             };
         }
         for (hint, mut node) in &mut hints {
-            node.display = if hint.0 == device.0 {
+            node.display = if hint.0 == device.get() {
                 Display::Flex
             } else {
                 Display::None
@@ -708,12 +740,16 @@ mod overlay {
     }
 }
 
-#[cfg(feature = "render")]
 pub use overlay::{
-    ActiveContext, ActiveDevice, ControlInput, ControlsOverlayPlugin, ControlsOverlayRoot,
-    ControlsRevealed, ForceRevealControls, gamepad_buttons_for, just_pressed, key_codes_for,
-    pressed, spawn_controls_ui, track_active_device, update_controls_ui,
+    ActiveContext, ActiveDevice, ControlInput, ControlsOverlayRoot, ControlsRevealed,
+    gamepad_buttons_for, just_pressed, key_codes_for, pressed, spawn_controls_ui,
+    track_active_device, update_controls_ui,
 };
+#[cfg(feature = "render")]
+// `ControlsOverlayPlugin` and `ForceRevealControls` are deliberately NOT re-exported: adding the
+// plugin directly would install the overlay with its bare defaults and silently ignore every
+// `--show-controls*` knob. [`install_overlay`] is the one door in.
+use overlay::{ControlsOverlayPlugin, ForceRevealControls};
 
 #[cfg(feature = "render")]
 pub use overlay::PAD_STICK_DEADZONE;
@@ -744,8 +780,9 @@ pub struct ControlsOverlayArgs {
 #[cfg(feature = "render")]
 pub struct ControlsOverrides<S: ControlScheme> {
     reveal: bool,
-    device: Device,
-    /// `Some` IS the pin — one field, so the context and "is it pinned" cannot disagree.
+    /// `Some` IS the pin, for both — one field each, so a pinned value and "is it pinned"
+    /// cannot disagree. `None` leaves live input/state driving it.
+    device: Option<Device>,
     context: Option<S::Context>,
 }
 
@@ -756,7 +793,7 @@ impl<S: ControlScheme> Default for ControlsOverrides<S> {
     fn default() -> Self {
         Self {
             reveal: false,
-            device: Device::default(),
+            device: None,
             context: None,
         }
     }
@@ -782,11 +819,7 @@ impl ControlsOverlayArgs {
             .transpose()?;
         Ok(ControlsOverrides {
             reveal: self.show_controls,
-            device: if self.show_controls_pad {
-                Device::Gamepad
-            } else {
-                Device::KeyboardMouse
-            },
+            device: self.show_controls_pad.then_some(Device::Gamepad),
             context,
         })
     }
@@ -802,9 +835,138 @@ pub fn install_overlay<S: ControlInput>(
 ) {
     app.add_plugins(ControlsOverlayPlugin::<S>::default())
         .insert_resource(ForceRevealControls(overrides.reveal))
-        .insert_resource(ActiveDevice(overrides.device))
+        .insert_resource(ActiveDevice::pinned_to(
+            overrides.device.unwrap_or_default(),
+            overrides.device.is_some(),
+        ))
         .insert_resource(ActiveContext::<S>::pinned_to(
             overrides.context.unwrap_or_default(),
             overrides.context.is_some(),
         ));
+}
+
+#[cfg(all(test, feature = "render"))]
+mod tests {
+    use super::*;
+
+    /// A control scheme with two contexts, enough to exercise the id round-trip.
+    struct TestScheme;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    enum TestCtx {
+        #[default]
+        Foot,
+        Plane,
+    }
+
+    impl ControlScheme for TestScheme {
+        type Action = ();
+        type Key = ();
+        type Pad = ();
+        type Mouse = ();
+        type Context = TestCtx;
+
+        fn bindings() -> &'static [Binding<Self>] {
+            &[]
+        }
+        fn contexts() -> &'static [TestCtx] {
+            &[TestCtx::Foot, TestCtx::Plane]
+        }
+        fn context_rows(_: TestCtx) -> &'static [ContextRow<Self>] {
+            &[]
+        }
+        fn context_label(_: TestCtx) -> &'static str {
+            "test"
+        }
+        fn context_id(ctx: TestCtx) -> &'static str {
+            match ctx {
+                TestCtx::Foot => "foot",
+                TestCtx::Plane => "plane",
+            }
+        }
+        fn context_from_id(id: &str) -> Option<TestCtx> {
+            match id {
+                "foot" => Some(TestCtx::Foot),
+                "plane" => Some(TestCtx::Plane),
+                _ => None,
+            }
+        }
+        fn reveal_action() {}
+        fn key_glyph(_: ()) -> Glyph {
+            Glyph::Label("k")
+        }
+        fn pad_glyph(_: ()) -> Glyph {
+            Glyph::Label("p")
+        }
+        fn mouse_glyph(_: ()) -> Glyph {
+            Glyph::Label("m")
+        }
+    }
+
+    fn args(context: Option<&str>) -> ControlsOverlayArgs {
+        ControlsOverlayArgs {
+            show_controls_context: context.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// The whole point of rl#275: an unknown context id is an ERROR naming the valid ids, not
+    /// a silent fall-through to the default context (which captured the wrong legend in a shot
+    /// that read as if the override had taken).
+    #[test]
+    fn unknown_context_id_is_an_error_listing_the_valid_ids() {
+        let err = args(Some("nope"))
+            .resolve::<TestScheme>()
+            .err()
+            .expect("an unknown context id must not resolve");
+        assert!(err.contains("nope"), "{err}");
+        assert!(err.contains("foot") && err.contains("plane"), "{err}");
+    }
+
+    #[test]
+    fn a_known_context_id_pins_it_and_no_flag_leaves_it_live() {
+        let pinned = args(Some("plane")).resolve::<TestScheme>().unwrap();
+        assert_eq!(pinned.context, Some(TestCtx::Plane));
+
+        let live = args(None).resolve::<TestScheme>().unwrap();
+        assert_eq!(
+            live.context, None,
+            "no flag must leave the context unpinned"
+        );
+    }
+
+    /// `sync` is the ONLY way to drive the context from live state, and it must be INERT while
+    /// pinned — the offscreen and windowed surfaces both sync every frame, so a pin that `sync`
+    /// honored only by convention would be silently overwritten and `--show-controls-context`
+    /// would do nothing. Driven through a real `ResMut`, i.e. the seam the surfaces use.
+    #[test]
+    fn sync_moves_a_live_context_and_never_a_pinned_one() {
+        use bevy::prelude::*;
+
+        fn drive_to_plane(mut ctx: ResMut<ActiveContext<TestScheme>>) {
+            ActiveContext::sync(&mut ctx, TestCtx::Plane);
+        }
+
+        let settled = |pinned: bool| {
+            let mut app = App::new();
+            app.insert_resource(ActiveContext::<TestScheme>::pinned_to(
+                TestCtx::Foot,
+                pinned,
+            ))
+            .add_systems(Update, drive_to_plane);
+            app.update();
+            app.world().resource::<ActiveContext<TestScheme>>().get()
+        };
+
+        assert_eq!(
+            settled(true),
+            TestCtx::Foot,
+            "a PINNED context must ignore the live sync"
+        );
+        assert_eq!(
+            settled(false),
+            TestCtx::Plane,
+            "an unpinned context must follow live state"
+        );
+    }
 }
