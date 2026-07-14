@@ -9,10 +9,8 @@ mod colliders;
 mod fallback;
 mod recipe;
 
-pub(crate) use colliders::link_rest_shape;
-pub use colliders::{
-    CrabSilhouette, RestCollider, RestShape, cuboid_corners, recipe_silhouette, rest_colliders,
-};
+pub(crate) use colliders::link_capsule;
+pub use colliders::{CrabSilhouette, RestCollider, RestShape, recipe_silhouette, rest_colliders};
 pub use fallback::fallback_recipe;
 pub(crate) use recipe::link_world_origins;
 pub use recipe::{TRUNK_BONES, build_recipe, part_for_bone, parts_adjacent};
@@ -38,22 +36,14 @@ impl BindSource for LoadedModel {
     }
 }
 
-/// A link collider's local shape, placed at [`RigLink::center`] with
-/// [`RigLink::col_rot`]. Capsules extend along local Y; cuboid extents are half
-/// sizes along the rotated frame's axes.
-#[derive(Clone, Copy, Debug)]
-pub enum LinkShape {
-    Capsule { half_height: f32, radius: f32 },
-    Cuboid { half: Vec3 },
-}
-
 #[derive(Clone)]
 pub struct RigLink {
     pub bone: String,
     pub parent: Option<usize>,
     pub anchor1: Vec3,
     pub axis_local: Vec3,
-    pub shape: LinkShape,
+    pub half_height: f32,
+    pub radius: f32,
     pub center: Vec3,
     pub col_rot: Quat,
     pub density: f32,
@@ -83,27 +73,10 @@ impl RigLink {
     fn is_finite(&self) -> bool {
         self.anchor1.is_finite()
             && self.axis_local.is_finite()
+            && self.half_height.is_finite()
+            && self.radius.is_finite()
             && self.center.is_finite()
             && self.col_rot.is_finite()
             && self.density.is_finite()
-            && match self.shape {
-                LinkShape::Capsule {
-                    half_height,
-                    radius,
-                } => half_height.is_finite() && radius.is_finite(),
-                LinkShape::Cuboid { half } => half.is_finite(),
-            }
-    }
-
-    /// Conservative bounding radius about the link origin — the spawn-height bound.
-    pub fn bounding_radius(&self) -> f32 {
-        self.center.length()
-            + match self.shape {
-                LinkShape::Capsule {
-                    half_height,
-                    radius,
-                } => half_height + radius,
-                LinkShape::Cuboid { half } => half.length(),
-            }
     }
 }

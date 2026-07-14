@@ -11,8 +11,7 @@ mod mass;
 
 pub use containment::{Containment, MeshContainment, aabb};
 pub use fit::{
-    CapsuleDiagnostics, ColliderScore, FittedCapsule, FittedShape, ShapePolicy, fit_link_shape,
-    score_box, score_capsule,
+    CapsuleDiagnostics, ColliderScore, FittedCapsule, fit_capsule, score_box, score_capsule,
 };
 #[cfg(test)]
 pub use mass::{CapsuleMass, capsule_mass};
