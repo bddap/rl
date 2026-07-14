@@ -223,6 +223,18 @@ fn load_set_once(dir: &Path, device: &NdArrayDevice) -> SetRead {
             crate::training::checkpoint::BRAIN_FILENAME
         )));
     }
+    // Channel-layout identity (bddap/rl#271): the dims gate below checks only COUNTS, so
+    // a same-count channel reorder would arm clean and drive the wrong joints — refuse
+    // it like a wrong body.
+    if let Err(why) = crate::training::checkpoint::check_channel_layout(
+        loaded.layout_digest,
+        crate::bot::channel_layout_digest(),
+    ) {
+        return SetRead::Done(Loaded::Refused(format!(
+            "{}: {why}",
+            crate::training::checkpoint::BRAIN_FILENAME
+        )));
+    }
     let key = loaded.set_key();
     let brain = loaded.brain;
     let (obs, action) = brain.io_dims();
@@ -611,7 +623,7 @@ mod tests {
 
     use crate::bot::arch::Mlp512x3;
     use crate::training::TrainBackend;
-    use crate::training::envelope::{ArtifactKind, write_envelope};
+    use crate::training::envelope::{ArtifactKind, BrainStamps, write_envelope};
 
     fn save_brain(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
@@ -759,14 +771,18 @@ mod tests {
             .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
             .unwrap();
         let paths = CheckpointDir::new(&dir);
-        // Differs from the constructed digest whatever the test env's body is.
+        // Differs from the constructed digest whatever the test env's body is; the
+        // layout stamp is CORRECT so this test isolates the body axis.
         let wrong = crate::mesh_fallback::constructed_body_digest() ^ 0xdead_beef;
         write_envelope(
             &paths.brain_file(),
             ArtifactKind::Brain,
             ArchId::DEFAULT,
             bytes,
-            Some(wrong),
+            Some(BrainStamps {
+                body_digest: wrong,
+                layout_digest: crate::bot::channel_layout_digest(),
+            }),
             21,
         )
         .unwrap();
@@ -782,6 +798,53 @@ mod tests {
                 "the refusal must name the body mismatch, got: {why}"
             ),
             _ => panic!("a wrong-body checkpoint must classify as Refused"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// bddap/rl#271 WIRING guard, `wrong_body_digest_checkpoint_refuses_to_arm`'s
+    /// layout sibling: a brain whose channel-layout stamp differs from this build's
+    /// layout has the right dims but remapped channels, and must refuse to arm.
+    #[test]
+    fn wrong_layout_digest_checkpoint_refuses_to_arm() {
+        let dir = std::env::temp_dir().join(format!("rl-layoutdigest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let device = NdArrayDevice::Cpu;
+
+        let brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
+        let bytes = brain
+            .record_leaf(&BinBytesRecorder::<FullPrecisionSettings>::default(), ())
+            .unwrap();
+        let paths = CheckpointDir::new(&dir);
+        // The body stamp is CORRECT so this test isolates the layout axis.
+        write_envelope(
+            &paths.brain_file(),
+            ArtifactKind::Brain,
+            ArchId::DEFAULT,
+            bytes,
+            Some(BrainStamps {
+                body_digest: crate::mesh_fallback::constructed_body_digest(),
+                layout_digest: crate::bot::channel_layout_digest() ^ 0xdead_beef,
+            }),
+            21,
+        )
+        .unwrap();
+        ObsNormalizer::new(NORMALIZER_CLIP)
+            .save(ArchId::DEFAULT, &paths.normalizer_path(), 21)
+            .unwrap();
+
+        let policy = Policy::load(&dir, RestFallback::Rest);
+        assert!(
+            !policy.is_loaded(),
+            "a wrong-layout checkpoint must not arm"
+        );
+        match checkpoint_fits_rig(&dir) {
+            Err(CheckpointUnusable::Refused(why)) => assert!(
+                why.contains("SILENTLY REMAP"),
+                "the refusal must name the layout remap hazard, got: {why}"
+            ),
+            _ => panic!("a wrong-layout checkpoint must classify as Refused"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -925,7 +988,10 @@ mod tests {
             ArtifactKind::Brain,
             ArchId::DEFAULT,
             bytes,
-            Some(crate::mesh_fallback::constructed_body_digest()),
+            Some(BrainStamps {
+                body_digest: crate::mesh_fallback::constructed_body_digest(),
+                layout_digest: crate::bot::channel_layout_digest(),
+            }),
             21,
         )
         .unwrap();

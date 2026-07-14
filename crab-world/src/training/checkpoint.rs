@@ -9,7 +9,8 @@ use tracing::warn;
 
 use super::algorithm::{ReturnNormalizer, ReturnNormalizerData};
 use super::envelope::{
-    ArtifactKind, EnvelopeError, SetKey, read_envelope, read_envelope_expecting, write_envelope,
+    ArtifactKind, BrainStamps, EnvelopeError, SetKey, read_envelope, read_envelope_expecting,
+    write_envelope,
 };
 use crate::bot::arch::{AnyBrain, ArchId};
 
@@ -24,11 +25,13 @@ pub(crate) type CrabOpt<B> = OptimizerAdaptor<Adam, AnyBrain<B>, B>;
 /// Atomic (temp + fsync-rename), so a crash mid-write can't leave a torn `brain.bin`.
 ///
 /// The envelope is stamped with THIS process's constructed body digest
-/// ([`crate::mesh_fallback::constructed_body_digest`], bddap/rl#214) — read here, not
-/// taken as a parameter, so no caller can stamp a body the process didn't actually
-/// build; the resume check ([`check_body_identity`]) aborts a mismatch BEFORE any save,
-/// so the stamp can never launder a wrong-body resume either. `save_stamp` is the
-/// checkpoint-set stamp shared with the paired artifacts saved beside it (bddap/rl#215).
+/// ([`crate::mesh_fallback::constructed_body_digest`], bddap/rl#214) and channel-layout
+/// digest ([`crate::bot::channel_layout_digest`], bddap/rl#271) — read here, not taken
+/// as parameters, so no caller can stamp an identity the process didn't actually build;
+/// the resume checks ([`check_body_identity`], [`check_channel_layout`]) abort a
+/// mismatch BEFORE any save, so the stamps can never launder a wrong resume either.
+/// `save_stamp` is the checkpoint-set stamp shared with the paired artifacts saved
+/// beside it (bddap/rl#215).
 pub(crate) fn save_brain<B: Backend>(
     brain: &AnyBrain<B>,
     path: &Path,
@@ -42,7 +45,10 @@ pub(crate) fn save_brain<B: Backend>(
         ArtifactKind::Brain,
         brain.arch(),
         bytes,
-        Some(crate::mesh_fallback::constructed_body_digest()),
+        Some(BrainStamps {
+            body_digest: crate::mesh_fallback::constructed_body_digest(),
+            layout_digest: crate::bot::channel_layout_digest(),
+        }),
         save_stamp,
     )
 }
@@ -106,6 +112,9 @@ pub(crate) struct BrainFile<B: Backend> {
     /// See [`CheckpointEnvelope::body_digest`](super::envelope::CheckpointEnvelope):
     /// `None` = a pre-#214 v1 brain (trust-on-first-use).
     pub(crate) body_digest: Option<u64>,
+    /// See [`CheckpointEnvelope::layout_digest`](super::envelope::CheckpointEnvelope):
+    /// `None` = a pre-#271 brain (trust-on-first-use).
+    pub(crate) layout_digest: Option<u64>,
     /// The checkpoint-set save stamp the paired artifacts must carry to load with this
     /// brain (bddap/rl#215); `None` = a pre-stamp brain, pairing only with unstamped
     /// partners. See [`CheckpointEnvelope::save_stamp`](super::envelope::CheckpointEnvelope).
@@ -141,14 +150,16 @@ pub(crate) fn load_brain_file<B: Backend>(
     Ok(BrainFile {
         brain,
         body_digest: env.body_digest,
+        layout_digest: env.layout_digest,
         save_stamp: env.save_stamp,
     })
 }
 
-/// A [`check_body_identity`] pass: the checkpoint matches the constructed body, or
-/// predates the stamp and is trusted on first use (the next save stamps it).
+/// An identity-stamp check pass: the checkpoint matches what this process constructs,
+/// or predates the stamp and is trusted on first use (the next save stamps it). Shared
+/// verdict of [`check_body_identity`] and [`check_channel_layout`].
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum BodyIdentity {
+pub(crate) enum StampIdentity {
     Match,
     TrustOnFirstUse,
 }
@@ -162,10 +173,10 @@ pub(crate) enum BodyIdentity {
 pub(crate) fn check_body_identity(
     checkpoint: Option<u64>,
     constructed: u64,
-) -> Result<BodyIdentity, String> {
+) -> Result<StampIdentity, String> {
     match checkpoint {
-        None => Ok(BodyIdentity::TrustOnFirstUse),
-        Some(d) if d == constructed => Ok(BodyIdentity::Match),
+        None => Ok(StampIdentity::TrustOnFirstUse),
+        Some(d) if d == constructed => Ok(StampIdentity::Match),
         Some(d) => Err(format!(
             "checkpoint is stamped body digest {d:#018x} but this process constructs body \
              digest {constructed:#018x} ({}) — the policy was trained on a DIFFERENT crab \
@@ -177,6 +188,30 @@ pub(crate) fn check_body_identity(
             } else {
                 "the canonical mesh"
             },
+        )),
+    }
+}
+
+/// THE layout↔policy identity check (bddap/rl#271), [`check_body_identity`]'s sibling
+/// for the obs/action CHANNEL LAYOUT: the rig-dims gate checks only counts, so a
+/// same-count channel reorder (e.g. reordering `CrabJointId::all()`) loads clean and
+/// silently remaps a trained checkpoint's channels — the wrong joints get driven by
+/// plausible-looking values. Pure over (checkpoint stamp, built digest) so the matrix is
+/// unit-testable; callers pass [`crate::bot::channel_layout_digest`] and apply their
+/// refusal policy to the `Err` (the trainer aborts, inference refuses to arm).
+pub(crate) fn check_channel_layout(
+    checkpoint: Option<u64>,
+    built: u64,
+) -> Result<StampIdentity, String> {
+    match checkpoint {
+        None => Ok(StampIdentity::TrustOnFirstUse),
+        Some(d) if d == built => Ok(StampIdentity::Match),
+        Some(d) => Err(format!(
+            "checkpoint is stamped channel-layout digest {d:#018x} but this build's \
+             obs/action layout digests to {built:#018x} — the channel order or slot map \
+             changed since the policy was trained, so loading it would SILENTLY REMAP \
+             channels (right dims, wrong joints; bddap/rl#271). Use a checkpoint trained \
+             on this layout, or point at a fresh dir to train one.",
         )),
     }
 }
@@ -628,7 +663,10 @@ mod tests {
             ArtifactKind::Brain,
             ArchId::DEFAULT,
             vec![1, 2, 3],
-            Some(0),
+            Some(BrainStamps {
+                body_digest: 0,
+                layout_digest: 0,
+            }),
             9,
         )
         .unwrap();
@@ -683,13 +721,13 @@ mod tests {
     fn body_identity_matrix() {
         assert_eq!(
             check_body_identity(None, 0xabc),
-            Ok(BodyIdentity::TrustOnFirstUse)
+            Ok(StampIdentity::TrustOnFirstUse)
         );
         assert_eq!(
             check_body_identity(Some(0xabc), 0xabc),
-            Ok(BodyIdentity::Match)
+            Ok(StampIdentity::Match)
         );
-        assert_eq!(check_body_identity(Some(0), 0), Ok(BodyIdentity::Match));
+        assert_eq!(check_body_identity(Some(0), 0), Ok(StampIdentity::Match));
         let err = check_body_identity(Some(0xabc), 0).unwrap_err();
         assert!(err.contains("DIFFERENT crab body"), "{err}");
         assert!(check_body_identity(Some(0), 0xabc).is_err());
@@ -715,9 +753,33 @@ mod tests {
         assert_eq!(loaded.save_stamp, Some(11), "the set stamp round-trips");
         assert_eq!(
             check_body_identity(loaded.body_digest, constructed),
-            Ok(BodyIdentity::Match)
+            Ok(StampIdentity::Match)
+        );
+        let built = crate::bot::channel_layout_digest();
+        assert_eq!(loaded.layout_digest, Some(built));
+        assert_eq!(
+            check_channel_layout(loaded.layout_digest, built),
+            Ok(StampIdentity::Match)
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bddap/rl#271 layout↔policy matrix, `body_identity_matrix`'s sibling:
+    /// pre-stamp brains are trusted on first use, a matching stamp passes, and a
+    /// mismatch — a channel reorder that dims-only gates would load clean — is the
+    /// loud refusal naming the silent-remap hazard.
+    #[test]
+    fn channel_layout_matrix() {
+        assert_eq!(
+            check_channel_layout(None, 0xabc),
+            Ok(StampIdentity::TrustOnFirstUse)
+        );
+        assert_eq!(
+            check_channel_layout(Some(0xabc), 0xabc),
+            Ok(StampIdentity::Match)
+        );
+        let err = check_channel_layout(Some(0xdef), 0xabc).unwrap_err();
+        assert!(err.contains("SILENTLY REMAP"), "{err}");
     }
 }

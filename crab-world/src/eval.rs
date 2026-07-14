@@ -3,7 +3,7 @@ use std::path::Path;
 use bevy::prelude::*;
 
 use crate::bot::RESET_GRACE_TICKS;
-use crate::bot::actuator::{ACTION_SIZE, CrabActions, applied_torque};
+use crate::bot::actuator::{CrabActions, applied_torque};
 use crate::bot::body::{CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint};
 use crate::bot::headless::{
     HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
@@ -420,16 +420,10 @@ fn eval_step(
 
     let settling = state.tick < cfg.settle_ticks;
 
-    if let Some(a) = actions.envs.first_mut() {
-        *a = if settling {
-            [0.0; ACTION_SIZE]
-        } else {
-            obs.envs
-                .first()
-                .map(|o| policy.act(o))
-                .unwrap_or([0.0; ACTION_SIZE])
-        };
-    }
+    match obs.rows().first().filter(|_| !settling) {
+        Some(o) => actions.set_row(0, policy.act(o)),
+        None => actions.rest(0),
+    };
 
     if let Some(cpos) = carapace_q
         .iter()
@@ -459,13 +453,15 @@ fn eval_step(
         state.closest_tip_dist = Some(state.closest_tip_dist.map_or(d, |cur| cur.min(d)));
     }
 
-    if !settling && let Some(a) = actions.envs.first() {
+    if !settling && !actions.is_empty() {
         let mut tick_torque = 0.0f32;
         for (joint, env) in joints.iter() {
             if env.0 != 0 {
                 continue;
             }
-            tick_torque += applied_torque(joint.id, a[joint.id.index()]).abs();
+            if let Some(drive) = actions.drive(0, joint.id) {
+                tick_torque += applied_torque(joint.id, drive).abs();
+            }
         }
         state.torque_sum += tick_torque as f64;
         state.torque_ticks += 1;

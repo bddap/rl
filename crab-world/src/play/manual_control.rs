@@ -47,14 +47,12 @@ pub(super) fn manual_control_step(
             manual.selected =
                 CrabJointId::from_index(manual.selected.map_or(0, |j| (j.index() + n - 1) % n));
         }
-        if let Some(a) = actions.envs.first_mut() {
-            *a = [0.0; CrabJointId::COUNT];
+        if actions.rest(0) {
             line = match manual.selected {
                 Some(id) => {
                     let v = torque_stick_y(gp).clamp(-1.0, 1.0);
-                    let sel = id.index();
-                    a[sel] = v;
-                    format!("MANUAL · {id:?} {}/{n} · torque {v:+.2}", sel + 1)
+                    actions.set_drive(0, id, v);
+                    format!("MANUAL · {id:?} {}/{n} · torque {v:+.2}", id.index() + 1)
                 }
                 None => "MANUAL · pick a joint (D-pad)".to_string(),
             };

@@ -19,14 +19,14 @@ pub(super) fn policy_step(
     if manual.is_some_and(|m| m.active) {
         return;
     }
-    let (Some(o), Some(a)) = (obs.envs.first(), actions.envs.first_mut()) else {
-        if !*warned_no_env {
-            error!("play: env-0 observation/action slot missing — policy cannot drive the crab");
-            *warned_no_env = true;
-        }
-        return;
+    let landed = match obs.rows().first() {
+        Some(o) => actions.set_row(0, policy.act(o)),
+        None => false,
     };
-    *a = policy.act(o);
+    if !landed && !*warned_no_env {
+        error!("play: env-0 observation/action slot missing — policy cannot drive the crab");
+        *warned_no_env = true;
+    }
 }
 
 pub(super) fn add_inference(

@@ -72,7 +72,7 @@ mod tests {
     use crate::bot::BotSet;
     use crate::bot::body::CrabCarapace;
     use crate::bot::headless::{headless_app, tick};
-    use crate::bot::sensor::{CrabObservation, TARGET_SLOT};
+    use crate::bot::sensor::CrabObservation;
 
     /// Env 0's carapace transform, read straight off the world.
     fn carapace(app: &mut App) -> Transform {
@@ -85,8 +85,8 @@ mod tests {
     /// The target slots of env 0's serialized observation — exactly the floats
     /// `policy_step` hands the network.
     fn obs_target(app: &App) -> Vec3 {
-        let o = app.world().resource::<CrabObservation>().envs[0];
-        Vec3::new(o[TARGET_SLOT], o[TARGET_SLOT + 1], o[TARGET_SLOT + 2])
+        let obs = app.world().resource::<CrabObservation>();
+        obs.env(0).expect("env 0 sized").target_local()
     }
 
     /// Pins the demo's target WIRE end to end: [`target_ball`] seeds/holds

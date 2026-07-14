@@ -122,7 +122,7 @@ fn accumulate_drive_stats(
     if progress.frames < cfg.settle {
         return;
     }
-    let Some(a) = actions.envs.first() else {
+    let Some(a) = actions.rows().first() else {
         return;
     };
     let mean_abs = a.iter().map(|d| d.abs() as f64).sum::<f64>() / ACTION_SIZE as f64;
