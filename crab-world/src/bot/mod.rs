@@ -9,6 +9,7 @@ pub mod pose_sentinel;
 #[cfg(test)]
 mod reset_test;
 pub mod rig;
+pub mod rig_audit;
 pub mod sensor;
 #[cfg(test)]
 mod sim_truth_test;
@@ -17,6 +18,21 @@ pub mod skin;
 
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;
+
+/// One rig audit's outcome: it RAN and judged (the report explains the verdict on
+/// stdout). "Couldn't run at all" is the audits' `Err(String)` instead — the two were
+/// indistinguishable when the audits returned bare exit-code i32s (rl#270).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditVerdict {
+    Pass,
+    Fail,
+}
+
+impl AuditVerdict {
+    pub fn failed(fail: bool) -> Self {
+        if fail { Self::Fail } else { Self::Pass }
+    }
+}
 
 /// Identity of this build's obs/action CHANNEL LAYOUT (bddap/rl#271): an FNV-1a fold of
 /// one label per channel — action channels in [`body::CrabJointId::all`] order, then obs

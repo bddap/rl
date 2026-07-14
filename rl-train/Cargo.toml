@@ -14,6 +14,5 @@ wgpu = ["crab-world/wgpu"]
 
 [dependencies]
 crab-world = { path = "../crab-world" }
-bevy.workspace = true
 clap.workspace = true
 otel = { path = "../otel" }

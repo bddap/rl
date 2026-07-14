@@ -104,17 +104,16 @@ impl Finding {
     }
 }
 
-pub fn run() -> i32 {
+pub fn run() -> Result<super::AuditVerdict, String> {
     let mut app = headless_app();
     tick(&mut app, SETTLE_TICKS);
 
     let parts = collect_parts(&mut app);
     if parts.len() < 10 {
-        eprintln!(
+        return Err(format!(
             "check-rest-colliders: only {} crab colliders after settle — crab failed to spawn (no model?)",
             parts.len()
-        );
-        return 1;
+        ));
     }
     let quiet = quiet_parts(&mut app);
     debug_assert!(
@@ -124,7 +123,7 @@ pub fn run() -> i32 {
     let joints_apart = joint_distances(&mut app);
 
     let findings = intersecting_pairs(&mut app, &parts, &joints_apart, &quiet);
-    report(parts.len(), &findings)
+    Ok(report(parts.len(), &findings))
 }
 
 /// Mean speeds per body part over a post-settle window, reduced to "is this
@@ -266,7 +265,7 @@ fn intersecting_pairs(
     findings
 }
 
-fn report(n_colliders: usize, findings: &[Finding]) -> i32 {
+fn report(n_colliders: usize, findings: &[Finding]) -> super::AuditVerdict {
     let illegal: Vec<&Finding> = findings.iter().filter(|f| f.is_illegal()).collect();
 
     println!(
@@ -327,7 +326,7 @@ fn report(n_colliders: usize, findings: &[Finding]) -> i32 {
         }
     }
 
-    i32::from(!illegal.is_empty())
+    super::AuditVerdict::failed(!illegal.is_empty())
 }
 
 #[cfg(test)]

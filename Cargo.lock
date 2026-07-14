@@ -9512,7 +9512,6 @@ dependencies = [
 name = "rl-train"
 version = "0.1.0"
 dependencies = [
- "bevy",
  "clap",
  "crab-world",
  "otel",
