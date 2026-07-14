@@ -7,7 +7,7 @@ use crate::bot::body::{CrabCarapace, CrabJointId, Side};
 #[derive(Resource, Clone)]
 pub(super) struct RigPose {
     action: f32,
-    slots: Vec<usize>,
+    joints: Vec<CrabJointId>,
 }
 
 /// Which joints `--rig-pose` drives (rl-demo screenshot mode).
@@ -26,30 +26,27 @@ pub(super) struct RigPosePin {
 
 impl RigPose {
     pub(super) fn new(action: f32, part: RigPosePart) -> Self {
-        let slots = match part {
+        let joints = match part {
             RigPosePart::LegBasis => (0..4)
                 .flat_map(|leg| {
                     [
-                        CrabJointId::LegBasis(Side::Left, leg).index(),
-                        CrabJointId::LegBasis(Side::Right, leg).index(),
+                        CrabJointId::LegBasis(Side::Left, leg),
+                        CrabJointId::LegBasis(Side::Right, leg),
                     ]
                 })
                 .collect(),
             RigPosePart::Shoulder => vec![
-                CrabJointId::ClawShoulder(Side::Left).index(),
-                CrabJointId::ClawShoulder(Side::Right).index(),
+                CrabJointId::ClawShoulder(Side::Left),
+                CrabJointId::ClawShoulder(Side::Right),
             ],
         };
-        Self { action, slots }
+        Self { action, joints }
     }
 }
 
 pub(super) fn rig_pose_drive(pose: Res<RigPose>, mut actions: ResMut<CrabActions>) {
-    let Some(a) = actions.envs.first_mut() else {
-        return;
-    };
-    for &slot in &pose.slots {
-        a[slot] = pose.action;
+    for &joint in &pose.joints {
+        actions.set_drive(0, joint, pose.action);
     }
 }
 

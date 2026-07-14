@@ -568,23 +568,23 @@ fn run_crab_policy(
             // the first armed Update, and FixedUpdate can tick first) — that window lives
             // entirely inside the settle grace, which is why the slot check below is a
             // hard assert and not a skip.
-            if let Some(a) = actions.envs.get_mut(idx) {
-                *a = [0.0; crab_world::bot::actuator::ACTION_SIZE];
-            }
+            actions.rest(idx);
             continue;
         }
         // Post-settle, a missing slot means this crab would hold rest pose in a live
         // round — a wiring bug, never a condition to skip past silently (rl#241).
-        let (Some(o), Some(a)) = (obs.envs.get(idx), actions.envs.get_mut(idx)) else {
-            panic!(
-                "external_crab: crab {idx} has no env slot ({} obs / {} action slots sized \
-                 for {} crabs) — it would silently hold rest pose in a live round (rl#241)",
-                obs.envs.len(),
-                actions.envs.len(),
-                crab_count,
-            );
-        };
-        *a = policy.act(o);
+        let landed = obs
+            .rows()
+            .get(idx)
+            .is_some_and(|o| actions.set_row(idx, policy.act(o)));
+        assert!(
+            landed,
+            "external_crab: crab {idx} has no env slot ({} obs / {} action slots sized \
+             for {} crabs) — it would silently hold rest pose in a live round (rl#241)",
+            obs.rows().len(),
+            actions.len(),
+            crab_count,
+        );
     }
 }
 
@@ -728,7 +728,7 @@ pub use probe::{ProbeSample, StabilityResult, run_headless_probe, run_vehicle_st
 /// body, so contact batted it ~8 m.
 #[cfg(test)]
 mod ship_wiggle_tests {
-    use crab_world::bot::actuator::{ACTION_SIZE, CrabActions};
+    use crab_world::bot::actuator::CrabActions;
     use crab_world::bot::headless::{
         HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
     };
@@ -744,9 +744,7 @@ mod ship_wiggle_tests {
     /// Overwrite the (unloaded ⇒ zero-action) policy's output with a full-scale square wave
     /// — a flail far more violent than any idle wiggle, so the gates bound the worst case.
     fn drive_wiggle(w: Res<Wiggle>, mut actions: ResMut<CrabActions>) {
-        if let Some(a) = actions.envs.get_mut(0) {
-            *a = [w.0; ACTION_SIZE];
-        }
+        actions.fill(0, w.0);
     }
 
     fn gcr_like_app_with_vehicles() -> App {
@@ -865,7 +863,6 @@ mod gcr_crab_tests {
     use crab_world::bot::headless::{
         HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
     };
-    use crab_world::bot::sensor::BODY_POS_SLOT;
 
     use super::*;
 
@@ -940,7 +937,8 @@ mod gcr_crab_tests {
         let obs = app
             .world()
             .resource::<crab_world::bot::sensor::CrabObservation>();
-        let pos_xz = Vec2::new(obs.envs[0][BODY_POS_SLOT], obs.envs[0][BODY_POS_SLOT + 2]);
+        let body_pos = obs.env(0).expect("env 0 sized").body_pos();
+        let pos_xz = Vec2::new(body_pos.x, body_pos.z);
         assert!(
             pos_xz.length() < 1.0,
             "body.pos obs channel must be back in distribution, got {pos_xz:?}"

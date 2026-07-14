@@ -129,9 +129,6 @@ fn sample_graph(
     joints: Query<(&CrabJoint, &CrabEnvId, &MultibodyJoint, &Transform)>,
     transforms: Query<&Transform>,
 ) {
-    let Some(action) = actions.envs.first() else {
-        return;
-    };
     for (joint, env, mj, child_tf) in joints.iter() {
         if env.0 != 0 {
             continue;
@@ -141,9 +138,12 @@ fn sample_graph(
         };
         let id = joint.id;
         let idx = id.index();
+        let Some(drive) = actions.drive(0, id) else {
+            return;
+        };
 
         let angle = joint_angle(joint.axis_local, parent_tf.rotation, child_tf.rotation);
-        let torque = crate::bot::actuator::bounded_drive(action[idx]);
+        let torque = crate::bot::actuator::bounded_drive(drive);
 
         push(&mut graph.angle[idx], angle);
         push(&mut graph.torque[idx], torque);

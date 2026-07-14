@@ -18,6 +18,24 @@ pub mod skin;
 use bevy::prelude::*;
 use bevy_rapier3d::plugin::PhysicsSet;
 
+/// Identity of this build's obs/action CHANNEL LAYOUT (bddap/rl#271): an FNV-1a fold of
+/// one label per channel — action channels in [`body::CrabJointId::all`] order, then obs
+/// slots in serialize order. Dims-only gates pass a same-count reorder, which would load
+/// a trained checkpoint clean and drive the wrong joints; this digest is stamped into
+/// brain envelopes so a layout change REFUSES stale brains instead of silently remapping
+/// them (the body-digest pattern, bddap/rl#214).
+pub fn channel_layout_digest() -> u64 {
+    let mut h = crate::fnv::Fnv::new();
+    for label in actuator::action_channel_labels()
+        .iter()
+        .chain(sensor::obs_channel_labels().iter())
+    {
+        h.write(label.as_bytes());
+        h.write(b"\n");
+    }
+    h.finish()
+}
+
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BotSet {
     Sense,
@@ -303,4 +321,18 @@ pub fn spawn_initial_crabs(
             Quat::IDENTITY,
         );
     }
+}
+
+#[cfg(test)]
+mod layout_digest_tests {
+    /// Golden pin of the channel-layout digest (bddap/rl#271). Red means you changed the
+    /// action/obs channel order or slot map — every trained checkpoint stops loading on
+    /// the new layout (by design: loading would silently remap channels). If the change
+    /// is deliberate, update this constant and plan fresh checkpoint dirs.
+    #[test]
+    fn channel_layout_digest_is_pinned() {
+        assert_eq!(super::channel_layout_digest(), GOLDEN, "see doc comment");
+    }
+
+    const GOLDEN: u64 = 0xd3a0_7749_ac5d_4870;
 }

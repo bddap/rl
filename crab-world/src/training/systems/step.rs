@@ -63,10 +63,10 @@ fn normalize_observations(
 ) -> Vec<[f32; OBS_SIZE]> {
     let n = training.envs.len();
     let mut obs_arrays: Vec<[f32; OBS_SIZE]> = Vec::with_capacity(n);
-    for e in 0..n {
-        let normalized = training.obs_normalizer.normalize(&obs.envs[e]);
+    for row in &obs.rows()[..n] {
+        let normalized = training.obs_normalizer.normalize(row);
         let nonfinite = match training.normalizer_increment.as_mut() {
-            Some(inc) => inc.observe(&obs.envs[e]),
+            Some(inc) => inc.observe(row),
             None => 0,
         };
         training.nonfinite_obs_elements += u64::from(nonfinite);
@@ -232,7 +232,7 @@ pub(crate) fn brain_step(
 ) {
     let n = training.envs.len();
     let rescued_envs: Vec<usize> = rescued.read().map(|m| m.env).collect();
-    if obs.envs.len() != n || actions.envs.len() != n {
+    if obs.rows().len() != n || actions.len() != n {
         return;
     }
     let device = training.device;
@@ -246,12 +246,10 @@ pub(crate) fn brain_step(
     let log_probs: Vec<f32> = sampled.iter().map(|s| s.log_prob).collect();
     let efforts: Vec<f32> = sampled.iter().map(|s| action_effort(&s.drive)).collect();
 
-    actions.envs.copy_from_slice(&drive_arrays);
+    actions.set_rows(&drive_arrays);
     for (e, ep) in training.envs.iter().enumerate() {
-        if matches!(ep.phase, EnvPhase::Settling { .. })
-            && let Some(v) = actions.envs.get_mut(e)
-        {
-            *v = [0.0; ACTION_SIZE];
+        if matches!(ep.phase, EnvPhase::Settling { .. }) {
+            actions.rest(e);
         }
     }
 
@@ -315,7 +313,9 @@ mod tests {
 
     use super::super::lifecycle::reset_crab;
 
-    fn observe_one_carapace(carapace: Transform, target: Option<Vec3>) -> [f32; OBS_SIZE] {
+    /// Env 0's target-local obs channels after a Sense pass over one hand-built
+    /// carapace — read through the named-slot view, exactly what the policy steers by.
+    fn observe_target_local(carapace: Transform, target: Option<Vec3>) -> Vec3 {
         use bevy_rapier3d::prelude::Velocity;
 
         let mut world = bevy::ecs::world::World::new();
@@ -331,18 +331,14 @@ mod tests {
         world
             .run_system_once(crate::bot::sensor::build_observation)
             .expect("build observation");
-        world.resource::<CrabObservation>().envs[0]
+        let obs = world.resource::<CrabObservation>();
+        obs.env(0).expect("env 0 sized").target_local()
     }
-
-    const TARGET_LOCAL_BASE: usize = crate::bot::sensor::TARGET_SLOT;
 
     #[test]
     fn target_obs_points_toward_target() {
-        let base = TARGET_LOCAL_BASE;
-
         let offset = Vec3::new(2.0, 0.5, -1.0);
-        let obs = observe_one_carapace(Transform::IDENTITY, Some(offset));
-        let local = Vec3::new(obs[base], obs[base + 1], obs[base + 2]);
+        let local = observe_target_local(Transform::IDENTITY, Some(offset));
         assert!(
             (local - offset).length() < 1e-5,
             "identity pose: target-local {local:?} must equal the world offset {offset:?} \
@@ -350,8 +346,7 @@ mod tests {
         );
 
         let yaw = Quat::from_rotation_y(std::f32::consts::PI);
-        let obs_rot = observe_one_carapace(Transform::from_rotation(yaw), Some(offset));
-        let local_rot = Vec3::new(obs_rot[base], obs_rot[base + 1], obs_rot[base + 2]);
+        let local_rot = observe_target_local(Transform::from_rotation(yaw), Some(offset));
         let expected_rot = yaw.inverse() * offset;
         assert!(
             (local_rot - expected_rot).length() < 1e-5,
@@ -369,8 +364,7 @@ mod tests {
         );
 
         let pos = Vec3::new(3.0, 0.0, 4.0);
-        let obs_at = observe_one_carapace(Transform::from_translation(pos), Some(pos));
-        let local_at = Vec3::new(obs_at[base], obs_at[base + 1], obs_at[base + 2]);
+        let local_at = observe_target_local(Transform::from_translation(pos), Some(pos));
         assert!(
             local_at.length() < 1e-5,
             "carapace sitting on the target reads a zero target-local vector, got {local_at:?}"
@@ -653,7 +647,7 @@ mod tests {
         app.world_mut()
             .run_system_once(brain_step)
             .expect("brain_step A");
-        let act_a = app.world().resource::<CrabActions>().envs[0];
+        let act_a = app.world().resource::<CrabActions>().rows()[0];
 
         {
             let mut q = app
@@ -671,7 +665,7 @@ mod tests {
         app.world_mut()
             .run_system_once(brain_step)
             .expect("brain_step B");
-        let act_b = app.world().resource::<CrabActions>().envs[0];
+        let act_b = app.world().resource::<CrabActions>().rows()[0];
 
         let st = app.world().non_send_resource::<TrainingState>();
         let last = st.rollouts[0]

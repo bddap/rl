@@ -43,12 +43,13 @@ impl ArtifactKind {
     /// A file tagged with any other version is refused, never deserialized blind
     /// (the `OptimizerCheckpoint` precedent this module generalizes) — with deliberate
     /// BACKWARD exceptions so the fleet's live checkpoints resume instead of being
-    /// invalidated: every kind's v1 is still read (predates both stamps), and a v2 BRAIN
-    /// (predates the bddap/rl#215 save-stamp field) is still read — each with the absent
-    /// stamps as `None` (trust-on-first-use); the next save writes the current version.
+    /// invalidated: every kind's v1 is still read (predates all stamps), and v2/v3
+    /// BRAINS (v2 predates the bddap/rl#215 save stamp, v3 the bddap/rl#271 layout
+    /// digest) are still read — each with the absent stamps as `None`
+    /// (trust-on-first-use); the next save writes the current version.
     pub(crate) fn current_version(self) -> u32 {
         match self {
-            Self::Brain => 3,
+            Self::Brain => 4,
             Self::Optimizer | Self::ObsNormalizer | Self::ReturnNormalizer => 2,
         }
     }
@@ -74,6 +75,10 @@ pub(crate) struct CheckpointEnvelope {
     /// carries one (the BRAIN is the body authority, as its arch tag is the arch
     /// authority the paired artifacts are checked against).
     pub(crate) body_digest: Option<u64>,
+    /// The obs/action channel-layout identity the brain was trained against
+    /// ([`crate::bot::channel_layout_digest`], bddap/rl#271). `None` = a pre-v4 brain
+    /// (trust-on-first-use) or a paired kind (the brain is the layout authority).
+    pub(crate) layout_digest: Option<u64>,
     /// The checkpoint-SET save stamp (bddap/rl#215): one random value drawn per
     /// `save_checkpoint`, written into every member saved together, so a mixed set is
     /// DETECTABLE at load — a paired member whose stamp differs from the brain's comes
@@ -123,6 +128,18 @@ struct RawEnvelopeV3 {
     payload: Vec<u8>,
     body_digest: u64,
     save_stamp: u64,
+}
+
+/// Brain V4: V3 plus the obs/action channel-layout digest (bddap/rl#271).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RawEnvelopeV4 {
+    kind: String,
+    version: u32,
+    arch: String,
+    payload: Vec<u8>,
+    body_digest: u64,
+    save_stamp: u64,
+    layout_digest: u64,
 }
 
 /// Paired-kind V2 (optimizer, normalizers): V1 plus the save stamp (bddap/rl#215).
@@ -239,10 +256,21 @@ impl std::fmt::Display for EnvelopeError {
     }
 }
 
+/// The identity stamps only BRAIN envelopes carry — one type, so a writer can't stamp a
+/// body without a channel layout or vice versa (the paired kinds carry neither: the
+/// brain is the identity authority they are checked against).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BrainStamps {
+    /// [`crate::mesh_fallback::constructed_body_digest`] (bddap/rl#214).
+    pub(crate) body_digest: u64,
+    /// [`crate::bot::channel_layout_digest`] (bddap/rl#271).
+    pub(crate) layout_digest: u64,
+}
+
 /// Wrap `payload` in an envelope for `kind`/`arch` and write it atomically. The ONE
 /// writer — every artifact save goes through here, so a file without magic + tags can't
 /// be produced by any production path. Always writes the kind's CURRENT version, so
-/// `body_digest` is required exactly when the kind carries one (the brain) and forbidden
+/// `stamps` is required exactly when the kind carries them (the brain) and forbidden
 /// otherwise — a call that disagrees is a programming error, caught by every save-path
 /// test, never a silently mis-shaped file. `save_stamp` is the checkpoint-set stamp
 /// (bddap/rl#215), required on every kind: all members of one save share one value.
@@ -251,7 +279,7 @@ pub(crate) fn write_envelope(
     kind: ArtifactKind,
     arch: ArchId,
     payload: Vec<u8>,
-    body_digest: Option<u64>,
+    stamps: Option<BrainStamps>,
     save_stamp: u64,
 ) -> std::io::Result<()> {
     let kind_name = kind.name().to_string();
@@ -262,22 +290,24 @@ pub(crate) fn write_envelope(
             // Loud at the FIRST save, not at some later load: bumping `current_version`
             // without teaching this arm the new shape would otherwise write files that
             // claim the new version with the old shape — refused by every reader.
-            assert_eq!(version, 3, "no writer arm for brain envelope v{version}");
-            bincode::serialize(&RawEnvelopeV3 {
+            assert_eq!(version, 4, "no writer arm for brain envelope v{version}");
+            let stamps = stamps
+                .unwrap_or_else(|| panic!("{kind} envelopes require the brain identity stamps"));
+            bincode::serialize(&RawEnvelopeV4 {
                 kind: kind_name,
                 version,
                 arch: arch_name,
                 payload,
-                body_digest: body_digest
-                    .unwrap_or_else(|| panic!("{kind} envelopes require a body digest")),
+                body_digest: stamps.body_digest,
                 save_stamp,
+                layout_digest: stamps.layout_digest,
             })
         }
         ArtifactKind::Optimizer | ArtifactKind::ObsNormalizer | ArtifactKind::ReturnNormalizer => {
             assert_eq!(version, 2, "no writer arm for {kind} envelope v{version}");
             assert!(
-                body_digest.is_none(),
-                "{kind} envelopes carry no body digest (the brain is the body authority)"
+                stamps.is_none(),
+                "{kind} envelopes carry no identity stamps (the brain is the authority)"
             );
             bincode::serialize(&RawEnvelopePairedV2 {
                 kind: kind_name,
@@ -347,9 +377,21 @@ pub(crate) fn read_envelope(
         });
     }
     // Accepted versions per kind: the current one, plus the pre-stamp backward reads —
-    // every kind's v1 (predates both stamps) and the brain's v2 (pre-#215) — each with
-    // the absent stamps as `None` (trust-on-first-use). Anything else is refused.
-    let (arch, payload, body_digest, save_stamp) = match (expected, hdr.version) {
+    // every kind's v1 (predates all stamps), the brain's v2 (pre-#215) and v3
+    // (pre-#271) — each with the absent stamps as `None` (trust-on-first-use).
+    // Anything else is refused.
+    let (arch, payload, body_digest, save_stamp, layout_digest) = match (expected, hdr.version) {
+        (ArtifactKind::Brain, 4) => {
+            let raw: RawEnvelopeV4 =
+                bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
+            (
+                raw.arch,
+                raw.payload,
+                Some(raw.body_digest),
+                Some(raw.save_stamp),
+                Some(raw.layout_digest),
+            )
+        }
         (ArtifactKind::Brain, 3) => {
             let raw: RawEnvelopeV3 =
                 bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
@@ -358,12 +400,13 @@ pub(crate) fn read_envelope(
                 raw.payload,
                 Some(raw.body_digest),
                 Some(raw.save_stamp),
+                None,
             )
         }
         (ArtifactKind::Brain, 2) => {
             let raw: RawEnvelopeV2 =
                 bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
-            (raw.arch, raw.payload, Some(raw.body_digest), None)
+            (raw.arch, raw.payload, Some(raw.body_digest), None, None)
         }
         (
             ArtifactKind::Optimizer | ArtifactKind::ObsNormalizer | ArtifactKind::ReturnNormalizer,
@@ -371,12 +414,12 @@ pub(crate) fn read_envelope(
         ) => {
             let raw: RawEnvelopePairedV2 =
                 bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
-            (raw.arch, raw.payload, None, Some(raw.save_stamp))
+            (raw.arch, raw.payload, None, Some(raw.save_stamp), None)
         }
         (_, 1) => {
             let raw: RawEnvelopeV1 =
                 bincode::deserialize(body).map_err(|e| EnvelopeError::Corrupt(e.to_string()))?;
-            (raw.arch, raw.payload, None, None)
+            (raw.arch, raw.payload, None, None, None)
         }
         (_, found) => {
             return Err(EnvelopeError::UnknownVersion {
@@ -391,6 +434,7 @@ pub(crate) fn read_envelope(
         payload,
         body_digest,
         save_stamp,
+        layout_digest,
     })
 }
 
@@ -449,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_payload_arch_body_digest_and_save_stamp() {
+    fn round_trips_payload_arch_stamps_and_save_stamp() {
         let dir = scratch("roundtrip");
         let path = dir.join("brain.bin");
         write_envelope(
@@ -457,7 +501,10 @@ mod tests {
             ArtifactKind::Brain,
             ArchId::DEFAULT,
             vec![1, 2, 3],
-            Some(0xfeed_beef),
+            Some(BrainStamps {
+                body_digest: 0xfeed_beef,
+                layout_digest: 0x1a_0e57,
+            }),
             0x6e6e_7261_7469_6f6e,
         )
         .unwrap();
@@ -466,8 +513,9 @@ mod tests {
         assert_eq!(env.payload, vec![1, 2, 3]);
         assert_eq!(env.body_digest, Some(0xfeed_beef));
         assert_eq!(env.save_stamp, Some(0x6e6e_7261_7469_6f6e));
+        assert_eq!(env.layout_digest, Some(0x1a_0e57));
 
-        // Paired kinds carry the save stamp but never a body digest.
+        // Paired kinds carry the save stamp but never the brain identity stamps.
         let path = dir.join("optimizer.bin");
         write_envelope(
             &path,
@@ -481,6 +529,7 @@ mod tests {
         let env = read_envelope(&path, ArtifactKind::Optimizer).unwrap();
         assert_eq!(env.payload, vec![9]);
         assert_eq!(env.body_digest, None);
+        assert_eq!(env.layout_digest, None);
         assert_eq!(env.save_stamp, Some(0x6e6e_7261_7469_6f6e));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -516,6 +565,27 @@ mod tests {
         let env = read_envelope(&path, ArtifactKind::Brain).unwrap();
         assert_eq!(env.body_digest, Some(0xabc));
         assert_eq!(env.save_stamp, None);
+        assert_eq!(env.layout_digest, None);
+
+        // A v3 brain (bddap/rl#215, pre-#271): body digest + save stamp present,
+        // layout_digest None — the fleet's live brains at the #271 upgrade.
+        let raw = RawEnvelopeV3 {
+            kind: "brain".into(),
+            version: 3,
+            arch: ArchId::DEFAULT.name().into(),
+            payload: vec![8],
+            body_digest: 0xabc,
+            save_stamp: 42,
+        };
+        std::fs::write(
+            &path,
+            [MAGIC.as_slice(), &bincode::serialize(&raw).unwrap()].concat(),
+        )
+        .unwrap();
+        let env = read_envelope(&path, ArtifactKind::Brain).unwrap();
+        assert_eq!(env.body_digest, Some(0xabc));
+        assert_eq!(env.save_stamp, Some(42));
+        assert_eq!(env.layout_digest, None);
 
         // A v1 paired artifact: no stamps at all.
         let path = dir.join("normalizer.bin");

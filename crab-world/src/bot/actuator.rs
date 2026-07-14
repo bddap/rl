@@ -7,14 +7,84 @@ use super::body::{CrabBodyPart, CrabEnvId, CrabJoint, CrabJointId};
 
 pub const ACTION_SIZE: usize = CrabJointId::COUNT;
 
+/// One label per action channel, in [`CrabJointId::all`] order — the action half of
+/// [`crate::bot::channel_layout_digest`] (bddap/rl#271).
+pub(super) fn action_channel_labels() -> Vec<String> {
+    CrabJointId::all()
+        .iter()
+        .map(|id| format!("drive:{id:?}"))
+        .collect()
+}
+
+/// The per-env drive rows the actuator applies. The channel order is PRIVATE
+/// (bddap/rl#271): whole rows move across the NN boundary ([`Self::rows`],
+/// [`Self::set_row`], [`Self::set_rows`]); per-joint access is by [`CrabJointId`],
+/// never by raw index.
+///
+/// The env-indexed writers are deliberate no-ops (returning `false`) on an unsized
+/// env: `spawn_initial_crabs` sizes the rows on the first armed Update and FixedUpdate
+/// can tick first, so callers in that window skip rather than panic.
 #[derive(Resource, Default)]
 pub struct CrabActions {
-    pub envs: Vec<[f32; ACTION_SIZE]>,
+    envs: Vec<[f32; ACTION_SIZE]>,
 }
 
 impl CrabActions {
     pub fn resize(&mut self, n: usize) {
         self.envs = vec![[0.0; ACTION_SIZE]; n];
+    }
+
+    pub fn len(&self) -> usize {
+        self.envs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.envs.is_empty()
+    }
+
+    /// Whole drive rows, one per env — for aggregates and row-level comparisons.
+    pub fn rows(&self) -> &[[f32; ACTION_SIZE]] {
+        &self.envs
+    }
+
+    /// Land a whole policy-output row on env `e`.
+    pub fn set_row(&mut self, e: usize, row: [f32; ACTION_SIZE]) -> bool {
+        self.write(e, |r| *r = row)
+    }
+
+    /// Land the policy's whole batch — row count must match the sized envs.
+    pub fn set_rows(&mut self, rows: &[[f32; ACTION_SIZE]]) {
+        self.envs.copy_from_slice(rows);
+    }
+
+    /// Rest pose: zero every drive of env `e`.
+    pub fn rest(&mut self, e: usize) -> bool {
+        self.write(e, |r| *r = [0.0; ACTION_SIZE])
+    }
+
+    /// The same drive on every joint of env `e` (test flails, worst-case wiggles).
+    pub fn fill(&mut self, e: usize, v: f32) -> bool {
+        self.write(e, |r| *r = [v; ACTION_SIZE])
+    }
+
+    /// Drive one named joint of env `e`.
+    pub fn set_drive(&mut self, e: usize, id: CrabJointId, v: f32) -> bool {
+        self.write(e, |r| r[id.index()] = v)
+    }
+
+    /// Env `e`'s drive on one named joint; `None` if that env isn't sized yet.
+    pub fn drive(&self, e: usize, id: CrabJointId) -> Option<f32> {
+        self.envs.get(e).map(|r| r[id.index()])
+    }
+
+    fn write(&mut self, e: usize, f: impl FnOnce(&mut [f32; ACTION_SIZE])) -> bool {
+        match self.envs.get_mut(e) {
+            Some(row) => {
+                f(row);
+                true
+            }
+            None => false,
+        }
     }
 }
 

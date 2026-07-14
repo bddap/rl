@@ -12,8 +12,9 @@ use crate::TrainConfig;
 use crate::bot::arch::{AnyBrain, ArchId};
 use crate::training::algorithm::{OuNoise, PpoConfig, ReturnNormalizer, RolloutBuffer};
 use crate::training::checkpoint::{
-    BodyIdentity, BrainFile, BrainLoadError, CheckpointDir, check_body_identity, load_brain_file,
-    load_return_normalizer, save_brain, save_return_normalizer,
+    BrainFile, BrainLoadError, CheckpointDir, StampIdentity, check_body_identity,
+    check_channel_layout, load_brain_file, load_return_normalizer, save_brain,
+    save_return_normalizer,
 };
 use crate::training::envelope::{EnvelopeError, SetKey};
 use crate::training::normalizer::{
@@ -204,6 +205,7 @@ impl TrainingState {
                 let BrainFile {
                     brain: loaded,
                     body_digest,
+                    layout_digest,
                     ..
                 } = file;
                 // Resume is TAG-authoritative; an explicit `--arch` that disagrees with
@@ -229,14 +231,14 @@ impl TrainingState {
                 // stamps it (the one-time migration, never an invalidation).
                 let constructed = crate::mesh_fallback::constructed_body_digest();
                 match check_body_identity(body_digest, constructed) {
-                    Ok(BodyIdentity::Match) => {}
+                    Ok(StampIdentity::Match) => {}
                     // TOFU exists to grandfather the fleet's live pre-stamp checkpoints
                     // ONTO SALLY — a pre-stamp checkpoint is almost certainly
                     // Sally-trained, so trusting it onto the FALLBACK body
                     // (--allow-fallback-body on a mesh-less box) would retrain it wrong
                     // AND stamp it `0` on the next save, irreversibly relabelling a
                     // Sally lineage as fallback-trained. Fallback runs get a fresh dir.
-                    Ok(BodyIdentity::TrustOnFirstUse) if constructed == 0 => panic!(
+                    Ok(StampIdentity::TrustOnFirstUse) if constructed == 0 => panic!(
                         "REFUSING to train over checkpoint dir {}: this run constructs \
                          the procedural fallback body, but the checkpoint predates \
                          body-identity stamps (bddap/rl#214) and is presumably \
@@ -244,10 +246,28 @@ impl TrainingState {
                          fallback run.",
                         config.checkpoint.checkpoint_dir.display()
                     ),
-                    Ok(BodyIdentity::TrustOnFirstUse) => warn!(
+                    Ok(StampIdentity::TrustOnFirstUse) => warn!(
                         "checkpoint at {} predates body-identity stamping (bddap/rl#214) — \
                          trusting on first use; the next save stamps body digest \
                          {constructed:#018x}",
+                        paths.brain_file().display(),
+                    ),
+                    Err(why) => panic!(
+                        "REFUSING to train over checkpoint dir {}: {why}",
+                        config.checkpoint.checkpoint_dir.display()
+                    ),
+                }
+                // Channel-layout identity (bddap/rl#271): same class as the body check —
+                // a layout change under unchanged dims would pass the DOF gate below and
+                // silently retrain with every channel remapped. Abort so the operator
+                // picks a fresh dir instead of the run destroying the trained lineage.
+                let built_layout = crate::bot::channel_layout_digest();
+                match check_channel_layout(layout_digest, built_layout) {
+                    Ok(StampIdentity::Match) => {}
+                    Ok(StampIdentity::TrustOnFirstUse) => warn!(
+                        "checkpoint at {} predates channel-layout stamping (bddap/rl#271) — \
+                         trusting on first use; the next save stamps layout digest \
+                         {built_layout:#018x}",
                         paths.brain_file().display(),
                     ),
                     Err(why) => panic!(

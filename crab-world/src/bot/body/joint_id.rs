@@ -37,7 +37,11 @@ pub enum Side {
 }
 
 impl CrabJointId {
-    const fn all() -> [CrabJointId; 38] {
+    /// The canonical joint enumeration — THE channel order of the action vector and the
+    /// per-joint obs channels. Reordering it remaps a trained checkpoint's channels, so
+    /// the order is folded into [`crate::bot::channel_layout_digest`] and stale brains
+    /// refuse to load (bddap/rl#271).
+    pub(crate) const fn all() -> [CrabJointId; 38] {
         [
             CrabJointId::LegCoxa(Side::Left, 0),
             CrabJointId::LegBasis(Side::Left, 0),

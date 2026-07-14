@@ -42,11 +42,11 @@ impl BodyObs {
 const TARGET_LEN: usize = 3;
 
 /// First slot of the spawn-relative body.pos triple (x, y, z) — the channel that is
-/// bounded only by the training arena's walls, so GCR's open-field drift guard
-/// (rl#240) watches it by name.
-pub const BODY_POS_SLOT: usize = CrabJointId::COUNT * JointObs::LEN;
+/// bounded only by the training arena's walls; GCR's open-field drift guard (rl#240)
+/// watches it through [`ObsView::body_pos`].
+const BODY_POS_SLOT: usize = CrabJointId::COUNT * JointObs::LEN;
 
-pub(crate) const TARGET_SLOT: usize = BODY_POS_SLOT + BodyObs::LEN;
+const TARGET_SLOT: usize = BODY_POS_SLOT + BodyObs::LEN;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Observation {
@@ -86,14 +86,71 @@ impl Observation {
     }
 }
 
+/// One label per obs channel, in [`Observation::serialize`]'s slot order — the obs half
+/// of [`crate::bot::channel_layout_digest`] (bddap/rl#271). Kept beside `serialize` so
+/// the two evolve together; `serialize_is_slot_identical` pins the slot semantics the
+/// labels describe.
+pub(super) fn obs_channel_labels() -> Vec<String> {
+    let mut labels = Vec::with_capacity(OBS_SIZE);
+    for id in CrabJointId::all() {
+        labels.push(format!("joint:{id:?}:angle"));
+        labels.push(format!("joint:{id:?}:rate"));
+    }
+    for c in [
+        "pos.x", "pos.y", "pos.z", "rot.x", "rot.y", "rot.z", "rot.w", "linvel.x", "linvel.y",
+        "linvel.z", "angvel.x", "angvel.y", "angvel.z",
+    ] {
+        labels.push(format!("body:{c}"));
+    }
+    for c in ["x", "y", "z"] {
+        labels.push(format!("target:{c}"));
+    }
+    labels
+}
+
+/// The per-env observation rows the policy consumes. The slot layout is PRIVATE to this
+/// module (bddap/rl#271): consumers move whole rows (the NN boundary) via [`Self::rows`]
+/// or read named slots via [`Self::env`] — nobody outside computes indices into a row.
 #[derive(Resource, Default)]
 pub struct CrabObservation {
-    pub envs: Vec<[f32; OBS_SIZE]>,
+    envs: Vec<[f32; OBS_SIZE]>,
 }
 
 impl CrabObservation {
     pub fn resize(&mut self, n: usize) {
         self.envs = vec![[0.0; OBS_SIZE]; n];
+    }
+
+    /// Whole serialized rows, one per env — the NN-boundary view (tensor builds,
+    /// [`crate::policy::Policy::act`]). A row is opaque; slot meanings live behind
+    /// [`Self::env`].
+    pub fn rows(&self) -> &[[f32; OBS_SIZE]] {
+        &self.envs
+    }
+
+    /// Named-slot view of env `e`'s observation; `None` if that env isn't sized yet.
+    pub fn env(&self, e: usize) -> Option<ObsView<'_>> {
+        self.envs.get(e).map(ObsView)
+    }
+}
+
+/// Named-slot reads over one env's serialized observation row.
+pub struct ObsView<'a>(&'a [f32; OBS_SIZE]);
+
+impl ObsView<'_> {
+    fn vec3_at(&self, base: usize) -> Vec3 {
+        Vec3::new(self.0[base], self.0[base + 1], self.0[base + 2])
+    }
+
+    /// Spawn-relative carapace position — the channel the open-field drift guard
+    /// (rl#240) watches.
+    pub fn body_pos(&self) -> Vec3 {
+        self.vec3_at(BODY_POS_SLOT)
+    }
+
+    /// The target position rotated into the body frame — the slots the policy steers by.
+    pub fn target_local(&self) -> Vec3 {
+        self.vec3_at(TARGET_SLOT)
     }
 }
 
@@ -244,6 +301,16 @@ mod tests {
     #[test]
     fn obs_size_is_unchanged() {
         assert_eq!(OBS_SIZE, CrabJointId::COUNT * 2 + 13 + 3);
+    }
+
+    /// The layout-digest labels must describe every obs slot exactly once, or the digest
+    /// stops covering the layout it exists to guard (bddap/rl#271).
+    #[test]
+    fn obs_labels_cover_every_slot() {
+        let labels = obs_channel_labels();
+        assert_eq!(labels.len(), OBS_SIZE);
+        let unique: std::collections::HashSet<&String> = labels.iter().collect();
+        assert_eq!(unique.len(), OBS_SIZE, "duplicate obs channel label");
     }
 
     #[test]

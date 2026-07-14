@@ -20,8 +20,8 @@ fn mean_merus_angle_under_torque(torque: f32, check_render: bool) -> f32 {
         let mut actions = app.world_mut().resource_mut::<CrabActions>();
         for side in [Side::Left, Side::Right] {
             for leg in 0u8..4 {
-                actions.envs[0][CrabJointId::LegMerus(side, leg).index()] = torque;
-                actions.envs[0][CrabJointId::LegCarpus(side, leg).index()] = torque;
+                actions.set_drive(0, CrabJointId::LegMerus(side, leg), torque);
+                actions.set_drive(0, CrabJointId::LegCarpus(side, leg), torque);
             }
         }
     }
@@ -71,10 +71,7 @@ fn joint_friction_bounds_limb_speed() {
     let mut app = headless_app();
     tick(&mut app, 1);
     {
-        let mut actions = app.world_mut().resource_mut::<CrabActions>();
-        for v in actions.envs[0].iter_mut() {
-            *v = 1.0;
-        }
+        app.world_mut().resource_mut::<CrabActions>().fill(0, 1.0);
     }
     tick(&mut app, 160);
 
@@ -141,10 +138,7 @@ fn actuator_injects_no_net_wrench() {
     let mut app = headless_app();
     tick(&mut app, 1);
     {
-        let mut actions = app.world_mut().resource_mut::<CrabActions>();
-        for v in actions.envs[0].iter_mut() {
-            *v = 1.0;
-        }
+        app.world_mut().resource_mut::<CrabActions>().fill(0, 1.0);
     }
     tick(&mut app, 40);
 
@@ -563,10 +557,12 @@ fn airborne_crab_conserves_angular_momentum() {
     let mut peak = l0;
     let mut total_contacts = 0usize;
     for _ in 0..800u32 {
-        for (i, a) in action.iter_mut().enumerate() {
+        for a in action.iter_mut() {
             *a = (*a + rng.gen_range(-0.02..0.02)).clamp(-1.0, 1.0);
-            app.world_mut().resource_mut::<CrabActions>().envs[0][i] = *a;
         }
+        app.world_mut()
+            .resource_mut::<CrabActions>()
+            .set_row(0, action);
         tick(&mut app, 1);
         peak = peak.max(crab_angular_momentum(&mut app).length());
         total_contacts += contacts(&mut app);
