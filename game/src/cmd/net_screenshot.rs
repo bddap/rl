@@ -47,9 +47,11 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    let (_, external_crab) = nn_crab_policy(args.nn_crab_checkpoint)?;
-    let render_mode = render_mode(args.render);
+    // Args before I/O: a bad --show-controls-context must fail on its own terms, not hide
+    // behind whatever the checkpoint load happens to say first.
     let controls = gcr_controls(&args.controls)?;
+    let render_mode = render_mode(args.render);
+    let (_, external_crab) = nn_crab_policy(args.nn_crab_checkpoint)?;
 
     let dial = parse_join_dial(args.join.as_deref())?;
     let result = net_loop::connect_and_form_dialing(
