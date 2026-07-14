@@ -3,10 +3,8 @@ mod cmd;
 use anyhow::Result;
 use clap::Parser;
 
+/// Giant-crab rescue — Phase 1 gray-box extraction loop, host-authoritative over iroh.
 #[derive(Parser)]
-#[command(
-    about = "Giant-crab rescue — Phase 1 gray-box extraction loop, host-authoritative over iroh"
-)]
 struct Cli {
     #[command(flatten)]
     otel: otel::OtelArgs,

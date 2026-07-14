@@ -6,6 +6,25 @@ use net::sim::{Input, PlayerId, TICK_DT};
 
 pub(crate) const MATCH_SEED: u64 = 0x6372_6162;
 
+/// The checkpoint-dir env fallback the deploy scripts export (deploy/rl-update sets it).
+/// Named ONCE here and referenced by every `--nn-crab-checkpoint` / `--checkpoint` flag that
+/// honors it, so the flags and the error prose below can't drift apart.
+pub(crate) const CHECKPOINT_ENV: &str = "RL_CRAB_CHECKPOINT_DIR";
+
+/// The render mode this binary boots in — every GCR surface is [`Surface::Game`], so the
+/// surface is named once rather than at each entrypoint.
+pub(crate) fn render_mode(args: crab_world::RenderArgs) -> net::render::RenderMode {
+    args.resolve(crab_world::mesh_fallback::Surface::Game)
+}
+
+/// The controls-overlay force-knobs resolved against GCR's control scheme — an unknown
+/// context id dies here, at t=0, naming the valid ids.
+pub(crate) fn gcr_controls(
+    args: &crab_world::controls::ControlsOverlayArgs,
+) -> Result<crab_world::controls::ControlsOverrides<net::controls::GcrControls>> {
+    args.resolve().map_err(anyhow::Error::msg)
+}
+
 /// The launch gate: resolve the checkpoint dir and load it in ONE read — the returned
 /// [`Policy`] is armed by construction, never re-read by the plugin (rl#241: a
 /// classify-then-reload gate can straddle a checkpoint swap and arm a rest-pose statue
@@ -14,8 +33,9 @@ pub(crate) fn nn_crab_policy(
     flag: Option<std::path::PathBuf>,
 ) -> Result<(std::path::PathBuf, crab_world::policy::Policy)> {
     use crab_world::policy::{CheckpointUnusable, RigDims};
-    // The `RL_CRAB_CHECKPOINT_DIR` fallback the deploy scripts rely on is clap's, declared on
-    // the `--nn-crab-checkpoint` flag itself (rl#275) — not a second, hand-rolled resolve here.
+    // The env fallback is clap's, declared on each subcommand's checkpoint flag ([`CHECKPOINT_ENV`]).
+    // `fp-screenshot` deliberately opts OUT of it: there the flag ARMS a crab at all, so the env
+    // would seed one into a shot meant to have none.
     let dir = flag.unwrap_or_else(|| {
         crab_world::assets::asset_root()
             .join("assets")
@@ -25,9 +45,9 @@ pub(crate) fn nn_crab_policy(
         Ok(policy) => Ok((dir, policy)),
         Err(CheckpointUnusable::Missing) => anyhow::bail!(
             "rl#114: no trained crab brain (brain.bin) under {} — the giant crab IS the trained NN \
-             body (\"Sally\"), and there is no integer stand-in. Point --nn-crab-checkpoint or the \
-             RL_CRAB_CHECKPOINT_DIR env var at a trained checkpoint dir (deploy/rl-update must set \
-             it, and EVERY device needs the IDENTICAL brain + crab model), then relaunch.",
+             body (\"Sally\"), and there is no integer stand-in. Point this command's checkpoint \
+             flag or {CHECKPOINT_ENV} at a trained checkpoint dir (deploy/rl-update must set it, \
+             and EVERY device needs the IDENTICAL brain + crab model), then relaunch.",
             dir.display()
         ),
         Err(CheckpointUnusable::Refused(why)) => anyhow::bail!(

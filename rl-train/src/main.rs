@@ -4,6 +4,7 @@ use crab_world::{CheckpointArgs, TrainConfig, bot, training};
 
 use training::systems::STEPS_PER_ROLLOUT;
 
+/// Train and evaluate the crab policy.
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct Cli {
@@ -31,8 +32,10 @@ struct DevArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
+    /// Run PPO against the crab world, checkpointing as it goes.
     Learn(LearnArgs),
 
+    /// The chase eval: drive a checkpoint at a far ball and report metres closed.
     Eval(EvalArgs),
 }
 

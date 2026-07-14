@@ -5,7 +5,7 @@ use super::shared::{nn_crab_policy, write_tick_hash_log};
 
 #[derive(Parser)]
 pub(crate) struct Args {
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", env = super::shared::CHECKPOINT_ENV)]
     checkpoint: Option<std::path::PathBuf>,
     #[arg(long, default_value_t = 1200)]
     ticks: u64,

@@ -5,7 +5,7 @@ use net::{net_loop, render};
 
 use crab_world::RenderArgs;
 
-use super::shared::{MATCH_SEED, nn_crab_policies};
+use super::shared::{MATCH_SEED, nn_crab_policies, render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -13,7 +13,7 @@ pub(crate) struct Args {
     host: EndpointId,
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
-    #[arg(long, value_name = "DIR", env = "RL_CRAB_CHECKPOINT_DIR")]
+    #[arg(long, value_name = "DIR", env = super::shared::CHECKPOINT_ENV)]
     nn_crab_checkpoint: Vec<std::path::PathBuf>,
     #[command(flatten)]
     render: RenderArgs,
@@ -57,9 +57,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         }
     };
 
-    let render_mode = args
-        .render
-        .initial(crab_world::mesh_fallback::Surface::Game);
+    let render_mode = render_mode(args.render);
     render::build_windowed_app(boot, external_crab, render_mode)?.run();
     Ok(())
 }

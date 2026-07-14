@@ -4,9 +4,8 @@ use net::{net_loop, render};
 
 use crab_world::RenderArgs;
 use crab_world::controls::ControlsOverlayArgs;
-use net::controls::GcrControls;
 
-use super::shared::{MATCH_SEED, nn_crab_policy, parse_join_dial};
+use super::shared::{MATCH_SEED, gcr_controls, nn_crab_policy, parse_join_dial, render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -30,7 +29,7 @@ pub(crate) struct Args {
     cam_fov: f32,
     #[arg(long, default_value_t = 8.0)]
     cam_pitch: f32,
-    #[arg(long, value_name = "DIR", env = "RL_CRAB_CHECKPOINT_DIR")]
+    #[arg(long, value_name = "DIR", env = super::shared::CHECKPOINT_ENV)]
     nn_crab_checkpoint: Option<std::path::PathBuf>,
     #[command(flatten)]
     render: RenderArgs,
@@ -49,13 +48,8 @@ pub(crate) struct Args {
 
 pub(crate) fn run(args: Args) -> Result<()> {
     let (_, external_crab) = nn_crab_policy(args.nn_crab_checkpoint)?;
-    let render_mode = args
-        .render
-        .initial(crab_world::mesh_fallback::Surface::Game);
-    let controls = args
-        .controls
-        .resolve::<GcrControls>()
-        .map_err(anyhow::Error::msg)?;
+    let render_mode = render_mode(args.render);
+    let controls = gcr_controls(&args.controls)?;
 
     let dial = parse_join_dial(args.join.as_deref())?;
     let result = net_loop::connect_and_form_dialing(

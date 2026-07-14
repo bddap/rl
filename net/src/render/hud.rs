@@ -5,18 +5,13 @@ pub(super) fn sync_controls_context(
     vehicle: Res<LocalVehicle>,
     mut ctx: ResMut<ActiveContext<GcrControls>>,
 ) {
-    let want = vehicle.context();
-    if ctx.0 != want {
-        ctx.0 = want;
-    }
+    ctx.sync(vehicle.context());
 }
 
 /// The not-Playing twin of [`sync_controls_context`]: menu and lobby (Connecting) share
 /// the one Menu context (rl#117).
 pub(super) fn sync_menu_controls_context(mut ctx: ResMut<ActiveContext<GcrControls>>) {
-    if ctx.0 != GcrContext::Menu {
-        ctx.0 = GcrContext::Menu;
-    }
+    ctx.sync(GcrContext::Menu);
 }
 
 #[derive(Component)]

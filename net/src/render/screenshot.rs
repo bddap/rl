@@ -78,10 +78,6 @@ fn finish_offscreen_app(
     render_mode: super::RenderMode,
     controls: ControlsOverrides<GcrControls>,
 ) {
-    // Keep the controls HUD's context live like the windowed app — unless the shot PINNED
-    // one, which would just be overwritten every frame. Gate and value come from the same
-    // resolved override, so they can't disagree (they were two independent env reads, rl#275).
-    let context_pinned = controls.context_pinned();
     crab_world::controls::install_overlay(app, &controls);
     app.insert_resource(cfg)
         .init_resource::<ShotProgress>()
@@ -97,9 +93,9 @@ fn finish_offscreen_app(
                 apply_transforms,
                 follow_ground,
                 apply_shot_cam_offset,
-                sync_controls_context
-                    .run_if(move || !context_pinned)
-                    .before(update_controls_ui::<GcrControls>),
+                // Keeps the HUD context live like the windowed app. A shot that PINNED a
+                // context is unaffected: ActiveContext::sync is a no-op while pinned.
+                sync_controls_context.before(update_controls_ui::<GcrControls>),
                 update_hud,
                 capture_when_settled,
             )
