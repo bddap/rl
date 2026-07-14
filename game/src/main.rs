@@ -20,3 +20,18 @@ fn main() -> Result<()> {
     let _otel = otel::init("game", cli.otel);
     cmd::dispatch(cli.command.unwrap_or_else(cmd::default_command))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// clap validates a command (duplicate longs, a bad `global`, an action/value-parser
+    /// mismatch) only when that command is BUILT — and subcommands build lazily, so a
+    /// misconfiguration would otherwise surface as a panic for whoever first ran that one
+    /// subcommand. This builds the whole tree, including every flattened Args struct.
+    #[test]
+    fn cli_is_well_formed() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+}

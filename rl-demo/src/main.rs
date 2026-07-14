@@ -339,3 +339,15 @@ fn contact_audit(
         println!("  {:>4.0}mm {a} vs {b}", d * 1000.0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// See `game`'s twin: clap's own validity checks only run when the command is built.
+    #[test]
+    fn cli_is_well_formed() {
+        use clap::CommandFactory;
+        Args::command().debug_assert();
+    }
+}
