@@ -93,6 +93,10 @@ pub(crate) struct TrainingState {
     /// Effort-tax coefficient (rl#268) — `TrainConfig::effort_weight`.
     pub(super) effort_weight: f32,
 
+    /// DIAGNOSTIC effort probe (`TrainConfig::log_effort`), a run-shaping flag like the
+    /// rest — not an env var re-read on every step (rl#275).
+    pub(super) log_effort: bool,
+
     pub(super) checkpoint_dir: PathBuf,
 
     /// `Some` iff the brain warm-started from the checkpoint dir at build time,
@@ -350,6 +354,7 @@ impl TrainingState {
             log_std_floor: crate::bot::arch::LOG_STD_MIN,
             close_frac,
             effort_weight: config.effort_weight,
+            log_effort: config.log_effort,
             episode_count: 0,
             recent_rewards: Vec::new(),
             total_steps: 0,

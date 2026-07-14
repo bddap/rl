@@ -21,6 +21,9 @@ use crate::bot::body::CrabCarapace;
 use crate::screenshot::{self, ShotProgress, ShotTarget};
 
 use crate::policy::RigDims;
+/// The demo's control scheme — the ONE source of its bindings AND its legend. Public so the
+/// entrypoint can resolve `--show-controls-context` against it at t=0 (rl#275).
+pub use controls::DemoControls;
 pub use render_video::RenderVideoPlugin;
 pub use rig_pose::RigPosePart;
 
@@ -32,7 +35,6 @@ pub fn rig_dims() -> RigDims {
 }
 
 use cameras::{orbit_camera, spawn_offscreen_camera, spawn_orbit_camera, track_offscreen_camera};
-use controls::DemoControls;
 use demo::{DemoSettle, PokeBurst, demo_controls, demo_poke, demo_settle};
 use hot_reload::hot_reload_policy;
 use manual_control::{ManualControl, manual_control_step, spawn_manual_hud};
@@ -80,6 +82,7 @@ pub struct DemoPlugin {
     pub graph: bool,
     /// Capture the graph overlay to this path once its traces fill.
     pub graph_shot: Option<PathBuf>,
+    pub controls: crate::controls::ControlsOverrides<DemoControls>,
 }
 
 impl Plugin for DemoPlugin {
@@ -93,7 +96,7 @@ impl Plugin for DemoPlugin {
         graph::register(app, self.graph, self.graph_shot.clone());
         self.overrides.apply_rng_and_ball(app);
         app.add_plugins(crate::sky::NightSkyPlugin);
-        app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default());
+        crate::controls::install_overlay(app, &self.controls);
         app.init_resource::<DemoSettle>()
             .init_resource::<PokeBurst>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_target_ball))
@@ -130,6 +133,7 @@ pub struct ScreenshotPlugin {
     pub target_ball: bool,
     /// Drive these joints at this action value for a pose still.
     pub rig_pose: Option<(f32, RigPosePart)>,
+    pub controls: crate::controls::ControlsOverrides<DemoControls>,
 }
 
 #[derive(Resource)]
@@ -183,12 +187,7 @@ impl Plugin for ScreenshotPlugin {
             Update,
             (track_offscreen_camera, capture_when_settled).chain(),
         );
-        let (force_reveal, active_device, active_context) =
-            crate::controls::reveal_overrides_from_env::<DemoControls>();
-        app.add_plugins(crate::controls::ControlsOverlayPlugin::<DemoControls>::default())
-            .insert_resource(force_reveal)
-            .insert_resource(active_device)
-            .insert_resource(active_context);
+        crate::controls::install_overlay(app, &self.controls);
     }
 }
 

@@ -181,24 +181,6 @@ pub fn require_canonical_body(context: &str, allow_fallback: bool) -> Result<Bod
     gate
 }
 
-#[cfg(feature = "render")]
-pub fn initial_render_mode(
-    flag: Option<crate::crab_view::RenderMode>,
-    surface: Surface,
-) -> crate::crab_view::RenderMode {
-    use crate::crab_view::RenderMode;
-    let mesh_err = usable_model().as_ref().err();
-    if let Some(reason) = mesh_err {
-        log_fallback(surface, reason);
-    }
-    flag.or_else(RenderMode::env_mode)
-        .unwrap_or(if mesh_err.is_some() {
-            RenderMode::Colliders
-        } else {
-            RenderMode::Mesh
-        })
-}
-
 pub fn log_fallback(surface: Surface, reason: &str) {
     tracing::error!(
         target: "crab_world::canonical_mesh",

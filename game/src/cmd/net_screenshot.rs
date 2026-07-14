@@ -2,7 +2,11 @@ use anyhow::Result;
 use clap::Parser;
 use net::{net_loop, render};
 
-use super::shared::{MATCH_SEED, nn_crab_policy, parse_join_dial, resolve_render_mode};
+use crab_world::RenderArgs;
+use crab_world::controls::ControlsOverlayArgs;
+use net::controls::GcrControls;
+
+use super::shared::{MATCH_SEED, nn_crab_policy, parse_join_dial};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -26,10 +30,12 @@ pub(crate) struct Args {
     cam_fov: f32,
     #[arg(long, default_value_t = 8.0)]
     cam_pitch: f32,
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", env = "RL_CRAB_CHECKPOINT_DIR")]
     nn_crab_checkpoint: Option<std::path::PathBuf>,
-    #[arg(long, value_name = "mesh|mesh+colliders|colliders")]
-    render_mode: Option<String>,
+    #[command(flatten)]
+    render: RenderArgs,
+    #[command(flatten)]
+    controls: ControlsOverlayArgs,
     /// Press the vehicle E-cycle at this frame (repeatable) and hold a forward drive while
     /// piloting — a scripted pilot, so a two-peer run live-verifies board/fly/cycle/exit over
     /// the real wire (rl#191).
@@ -43,7 +49,13 @@ pub(crate) struct Args {
 
 pub(crate) fn run(args: Args) -> Result<()> {
     let (_, external_crab) = nn_crab_policy(args.nn_crab_checkpoint)?;
-    let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
+    let render_mode = args
+        .render
+        .initial(crab_world::mesh_fallback::Surface::Game);
+    let controls = args
+        .controls
+        .resolve::<GcrControls>()
+        .map_err(anyhow::Error::msg)?;
 
     let dial = parse_join_dial(args.join.as_deref())?;
     let result = net_loop::connect_and_form_dialing(
@@ -77,7 +89,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(0.0, args.cam_pitch)
         .with_fov(Some(args.cam_fov));
-    let mut app = render::build_net_screenshot_app(client, driver, cfg, external_crab, render_mode);
+    let mut app =
+        render::build_net_screenshot_app(client, driver, cfg, external_crab, render_mode, controls);
     if !args.pilot_toggle_at.is_empty() || args.pilot_walk_at.is_some() {
         app.insert_resource(render::PilotScript::new(
             args.pilot_toggle_at,

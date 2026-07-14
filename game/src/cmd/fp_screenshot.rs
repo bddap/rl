@@ -3,7 +3,11 @@ use clap::Parser;
 use net::render;
 use net::sim::PlayerId;
 
-use super::shared::{MATCH_SEED, nn_crab_policy, resolve_render_mode};
+use crab_world::RenderArgs;
+use crab_world::controls::ControlsOverlayArgs;
+use net::controls::GcrControls;
+
+use super::shared::{MATCH_SEED, nn_crab_policy};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -23,11 +27,14 @@ pub(crate) struct Args {
     cam_pitch: f32,
     #[arg(long)]
     cam_fov: Option<f32>,
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", env = "RL_CRAB_CHECKPOINT_DIR")]
     nn_crab_checkpoint: Option<std::path::PathBuf>,
 
-    #[arg(long, value_name = "mesh|mesh+colliders|colliders")]
-    render_mode: Option<String>,
+    #[command(flatten)]
+    render: RenderArgs,
+
+    #[command(flatten)]
+    controls: ControlsOverlayArgs,
 
     /// Yaw axis held by the scripted pack (−1..1): non-zero makes the pack orbit instead
     /// of bee-lining, presenting the crab flank/bystander geometry (the claw-down regime,
@@ -47,8 +54,14 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .nn_crab_checkpoint
         .map(|flag| nn_crab_policy(Some(flag)).map(|(_, policy)| policy))
         .transpose()?;
-    let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
+    let render_mode = args
+        .render
+        .initial(crab_world::mesh_fallback::Surface::Game);
+    let controls = args
+        .controls
+        .resolve::<GcrControls>()
+        .map_err(anyhow::Error::msg)?;
     let pack = net::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
-    render::build_screenshot_app(client, cfg, external_crab, render_mode, pack).run();
+    render::build_screenshot_app(client, cfg, external_crab, render_mode, controls, pack).run();
     Ok(())
 }

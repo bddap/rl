@@ -29,7 +29,26 @@ impl Drop for OtelGuard {
     }
 }
 
-pub fn init(service_name: &str) -> OtelGuard {
+// The project's own telemetry switch, flattened by every binary that calls `init` — ONE
+// declaration of `--otel` and its `RL_OTEL` env fallback, so a value clap doesn't recognize as
+// falsey turns export ON instead of silently leaving it off (`RL_OTEL=true` used to mean OFF:
+// the read was `v == "1"`, rl#275).
+//
+// The `OTEL_*` vars stay env-only on purpose: they are OTel ecosystem convention, and the SDK's
+// own contract with whatever launches the process.
+//
+// Deliberately NOT a doc comment: clap adopts a flattened struct's docs as the enclosing
+// command's `about`, which would overwrite the description of every binary that flattens this.
+#[derive(clap::Args, Debug, Clone, Copy, Default)]
+pub struct OtelArgs {
+    /// Export traces/metrics/logs to the built-in OTLP endpoint. Setting
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT` enables export on its own, and wins.
+    #[arg(long = "otel", env = "RL_OTEL", global = true,
+          value_parser = clap::builder::FalseyValueParser::new())]
+    pub otel: bool,
+}
+
+pub fn init(service_name: &str, args: OtelArgs) -> OtelGuard {
     // `log`-crate records (wgpu_hal, rapier, …) reach this subscriber via
     // tracing-subscriber's default `tracing-log` feature: every `.init()` below installs
     // the LogTracer bridge itself. Do NOT also call `tracing_log::LogTracer::init()` here —
@@ -38,7 +57,7 @@ pub fn init(service_name: &str) -> OtelGuard {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
-    let endpoint = resolve_endpoint();
+    let endpoint = resolve_endpoint(args.otel);
     let Some(endpoint) = endpoint else {
         tracing_subscriber::registry()
             .with(filter)
@@ -101,16 +120,13 @@ fn not_otel_internal(meta: &tracing::Metadata<'_>) -> bool {
         || t.starts_with("tower"))
 }
 
-fn resolve_endpoint() -> Option<String> {
+fn resolve_endpoint(otel: bool) -> Option<String> {
     if let Ok(ep) = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         && !ep.is_empty()
     {
         return Some(ep);
     }
-    if env::var("RL_OTEL").map(|v| v == "1").unwrap_or(false) {
-        return Some(DEFAULT_ENDPOINT.to_string());
-    }
-    None
+    otel.then(|| DEFAULT_ENDPOINT.to_string())
 }
 
 type Providers = (
