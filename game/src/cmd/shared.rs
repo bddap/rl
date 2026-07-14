@@ -14,13 +14,13 @@ pub(crate) fn nn_crab_policy(
     flag: Option<std::path::PathBuf>,
 ) -> Result<(std::path::PathBuf, crab_world::policy::Policy)> {
     use crab_world::policy::{CheckpointUnusable, RigDims};
-    let dir = flag
-        .or_else(|| std::env::var_os("RL_CRAB_CHECKPOINT_DIR").map(std::path::PathBuf::from))
-        .unwrap_or_else(|| {
-            crab_world::assets::asset_root()
-                .join("assets")
-                .join("weights")
-        });
+    // The `RL_CRAB_CHECKPOINT_DIR` fallback the deploy scripts rely on is clap's, declared on
+    // the `--nn-crab-checkpoint` flag itself (rl#275) — not a second, hand-rolled resolve here.
+    let dir = flag.unwrap_or_else(|| {
+        crab_world::assets::asset_root()
+            .join("assets")
+            .join("weights")
+    });
     match crab_world::policy::load_armed(&dir) {
         Ok(policy) => Ok((dir, policy)),
         Err(CheckpointUnusable::Missing) => anyhow::bail!(
@@ -92,20 +92,6 @@ pub(crate) fn write_tick_hash_log(
         writeln!(out, "{}", tick_hash_line(tick, hash)).unwrap();
     }
     std::fs::write(path, out).with_context(|| format!("writing hash log to {}", path.display()))
-}
-
-pub(crate) fn resolve_render_mode(flag: Option<&str>) -> Result<net::render::RenderMode> {
-    let flag = flag
-        .map(|s| {
-            net::render::RenderMode::parse(s).ok_or_else(|| {
-                anyhow::anyhow!("--render-mode must be one of mesh|mesh+colliders|colliders")
-            })
-        })
-        .transpose()?;
-    Ok(crab_world::mesh_fallback::initial_render_mode(
-        flag,
-        crab_world::mesh_fallback::Surface::Game,
-    ))
 }
 
 pub(crate) fn parse_join_dial(join: Option<&str>) -> Result<Option<iroh::EndpointId>> {

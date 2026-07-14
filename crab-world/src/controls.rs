@@ -30,9 +30,9 @@ pub trait ControlScheme: 'static + Send + Sync {
 
     fn context_id(ctx: Self::Context) -> &'static str;
 
-    /// Resolve a canonical [`context_id`](ControlScheme::context_id) (from
-    /// `RL_SHOW_CONTROLS_CONTEXT`) back to its context. `None` for an unknown id (the
-    /// override then leaves the default context).
+    /// Resolve a canonical [`context_id`](ControlScheme::context_id) back to its context.
+    /// `None` for an unknown id — which `--show-controls-context` reports as an error
+    /// naming [`contexts`](ControlScheme::contexts), never a silent default (rl#275).
     fn context_from_id(id: &str) -> Option<Self::Context>;
 
     fn reveal_action() -> Self::Action;
@@ -688,20 +688,92 @@ pub use overlay::{
 #[cfg(feature = "render")]
 pub use overlay::PAD_STICK_DEADZONE;
 
+// DIAGNOSTIC force-knobs for the controls overlay: they pin what the legend shows so an
+// evidence shot can prove a binding renders. Flattened by the entrypoints whose surface HAS the
+// overlay and does not drive it from live state — rl-demo, `game fp-screenshot`, `game
+// net-screenshot`. The windowed GCR client is deliberately absent: it syncs the HUD context
+// from the live vehicle every frame, so a pin there would be overwritten silently.
+//
+// The knobs were three env reads deep in the surfaces, one of them read TWICE (rl#275).
+//
+// Deliberately NOT a doc comment: clap adopts a flattened struct's docs as the enclosing
+// command's `about`, which would overwrite the description of every subcommand flattening it.
 #[cfg(feature = "render")]
-pub fn reveal_overrides_from_env<S: ControlScheme>()
--> (ForceRevealControls, ActiveDevice, ActiveContext<S>) {
-    let ctx = std::env::var("RL_SHOW_CONTROLS_CONTEXT")
-        .ok()
-        .and_then(|id| S::context_from_id(&id))
-        .unwrap_or_default();
-    (
-        ForceRevealControls(std::env::var_os("RL_SHOW_CONTROLS").is_some()),
-        ActiveDevice(if std::env::var_os("RL_SHOW_CONTROLS_PAD").is_some() {
-            Device::Gamepad
-        } else {
-            Device::KeyboardMouse
-        }),
-        ActiveContext(ctx),
-    )
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct ControlsOverlayArgs {
+    /// Hold the controls legend open (it is otherwise revealed by holding the reveal control).
+    #[arg(long, env = "RL_SHOW_CONTROLS", value_parser = clap::builder::FalseyValueParser::new())]
+    pub show_controls: bool,
+
+    /// Draw the legend with gamepad glyphs instead of keyboard/mouse.
+    #[arg(long, env = "RL_SHOW_CONTROLS_PAD", value_parser = clap::builder::FalseyValueParser::new())]
+    pub show_controls_pad: bool,
+
+    /// Pin the legend to this control context, by its scheme id (e.g. `foot`, `plane`).
+    /// Unset lets the surface's live state drive it.
+    #[arg(long, env = "RL_SHOW_CONTROLS_CONTEXT", value_name = "ID")]
+    pub show_controls_context: Option<String>,
+}
+
+/// [`ControlsOverlayArgs`] resolved against a scheme — the context id is checked HERE, at the
+/// entrypoint, so [`install_overlay`] cannot fail. An unknown id used to fall through to the
+/// DEFAULT context: the shot captured the wrong legend and read as if the override had taken
+/// (rl#275).
+#[cfg(feature = "render")]
+pub struct ControlsOverrides<S: ControlScheme> {
+    reveal: bool,
+    device: Device,
+    context: S::Context,
+    pinned: bool,
+}
+
+#[cfg(feature = "render")]
+impl<S: ControlScheme> ControlsOverrides<S> {
+    /// Whether the context is PINNED. A surface that syncs the HUD context from live state
+    /// must stop while it is, or it would overwrite the pin every frame — the gate reads the
+    /// same value it gates, so the two can't drift (they were two independent env reads).
+    pub fn context_pinned(&self) -> bool {
+        self.pinned
+    }
+}
+
+#[cfg(feature = "render")]
+impl ControlsOverlayArgs {
+    pub fn resolve<S: ControlScheme>(&self) -> Result<ControlsOverrides<S>, String> {
+        let context = match &self.show_controls_context {
+            None => S::Context::default(),
+            Some(id) => S::context_from_id(id).ok_or_else(|| {
+                let known: Vec<&str> = S::contexts().iter().map(|&c| S::context_id(c)).collect();
+                format!(
+                    "--show-controls-context {id:?} is not a context of this surface; \
+                     want one of: {}",
+                    known.join(", ")
+                )
+            })?,
+        };
+        Ok(ControlsOverrides {
+            reveal: self.show_controls,
+            device: if self.show_controls_pad {
+                Device::Gamepad
+            } else {
+                Device::KeyboardMouse
+            },
+            context,
+            pinned: self.show_controls_context.is_some(),
+        })
+    }
+}
+
+/// Install the overlay with `overrides` applied — the ONE wiring of plugin + force-knobs,
+/// shared by every surface that shows the legend. The resources land AFTER the plugin, so
+/// they replace its defaults rather than racing them.
+#[cfg(feature = "render")]
+pub fn install_overlay<S: ControlInput>(
+    app: &mut bevy::app::App,
+    overrides: &ControlsOverrides<S>,
+) {
+    app.add_plugins(ControlsOverlayPlugin::<S>::default())
+        .insert_resource(ForceRevealControls(overrides.reveal))
+        .insert_resource(ActiveDevice(overrides.device))
+        .insert_resource(ActiveContext::<S>(overrides.context));
 }

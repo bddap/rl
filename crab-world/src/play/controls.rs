@@ -4,16 +4,16 @@ use crate::controls::{
     Binding, ContextRow, ControlInput, ControlScheme, Glyph, KbBinding, PadBinding,
 };
 
-pub(crate) struct DemoControls;
+pub struct DemoControls;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum DemoContext {
+pub enum DemoContext {
     #[default]
     Inspect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DemoAction {
+pub enum DemoAction {
     Orbit,
     Zoom,
     Rebuild,
@@ -29,7 +29,7 @@ pub(crate) enum DemoAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DemoKey {
+pub enum DemoKey {
     R,
     B,
     Space,
@@ -43,14 +43,14 @@ pub(crate) enum DemoKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DemoMouse {
+pub enum DemoMouse {
     /// Hold-and-drag to orbit (reuses the move icon; button: [`ORBIT_DRAG_BUTTON`]).
     Drag,
     Wheel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DemoPad {
+pub enum DemoPad {
     LeftStick,
     RightStick,
     RightTrigger,

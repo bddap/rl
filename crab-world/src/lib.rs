@@ -53,10 +53,12 @@ pub fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// The one knob shared by every mode that loads a checkpoint (`learn`, `eval`,
-/// rl-demo). Split out of [`TrainConfig`] so binaries that only LOAD flatten just
-/// this, and a stray training knob like `--envs` is a parse error there instead of
-/// a silent no-op (bddap/rl#217).
+// The one knob shared by every mode that loads a checkpoint (`learn`, `eval`, rl-demo). Split
+// out of `TrainConfig` so binaries that only LOAD flatten just this, and a stray training knob
+// like `--envs` is a parse error there instead of a silent no-op (bddap/rl#217).
+//
+// Deliberately NOT a doc comment: clap adopts a flattened struct's docs as the enclosing
+// command's `about`, which would overwrite the description of every subcommand flattening it.
 #[derive(clap::Args, Debug, Clone)]
 pub struct CheckpointArgs {
     /// Directory of checkpoint files: loaded on startup if one is present; the
@@ -65,13 +67,53 @@ pub struct CheckpointArgs {
     pub checkpoint_dir: PathBuf,
 }
 
-/// Training config, consumed by the learner and its rollout threads (which build a
-/// `TrainingState`). Parsed only by the `learn` subcommand.
-///
-/// The run-shaping knobs below keep an `env` fallback for the overnight loop's
-/// existing `RL_*` exports, but they are real flags: visible in `--help`, echoed by
-/// the argv a run was launched with, and a malformed value (flag OR env) is a parse
-/// error at t=0 — never a silent fallback mid-run (rl#272).
+// The render-surface knob, flattened by every binary that opens a view on the crab world
+// (rl-demo, `game play`/`net-join`/`fp-screenshot`/`net-screenshot`) — the ONE declaration of
+// `--render-mode` and its env fallback. It used to be parsed deep in the view code, where a
+// malformed value was warned about and IGNORED (leaving the default mode, as if the override
+// had taken) and a hand-rolled `flag.or_else(env)` sat beside clap's own `env` (rl#275).
+// `RL_DEBUG_COLLIDERS` is gone with it: it was a second, less expressive spelling of
+// `--render-mode colliders`.
+//
+// Deliberately NOT a doc comment: clap adopts a flattened struct's docs as the enclosing
+// command's `about`, which would overwrite the description of every subcommand flattening it.
+#[cfg(feature = "render")]
+#[derive(clap::Args, Debug, Clone, Copy, Default)]
+pub struct RenderArgs {
+    /// Which view to boot in. Unset: the mesh — or the honest collider wireframe when the
+    /// canonical Sally mesh can't be resolved.
+    #[arg(long, env = "RL_RENDER_MODE", value_enum)]
+    pub render_mode: Option<crab_view::RenderMode>,
+}
+
+#[cfg(feature = "render")]
+impl RenderArgs {
+    /// The mode `surface` boots in. With no usable canonical body, the flagless default is
+    /// the collider wireframe, and the fallback is latched for `surface` — the render stays
+    /// honest about what it is drawing (never a procedural stand-in posing as Sally).
+    pub fn initial(self, surface: mesh_fallback::Surface) -> crab_view::RenderMode {
+        let mesh_err = mesh_fallback::usable_model().as_ref().err();
+        if let Some(reason) = mesh_err {
+            mesh_fallback::log_fallback(surface, reason);
+        }
+        self.render_mode.unwrap_or(if mesh_err.is_some() {
+            crab_view::RenderMode::Colliders
+        } else {
+            crab_view::RenderMode::Mesh
+        })
+    }
+}
+
+// Training config, consumed by the learner and its rollout threads (which build a
+// `TrainingState`). Parsed only by the `learn` subcommand.
+//
+// The run-shaping knobs below keep an `env` fallback for the overnight loop's existing `RL_*`
+// exports, but they are real flags: visible in `--help`, echoed by the argv a run was launched
+// with, and a malformed value (flag OR env) is a parse error at t=0 — never a silent fallback
+// mid-run (rl#272).
+//
+// Deliberately NOT a doc comment: clap adopts a flattened struct's docs as the enclosing
+// command's `about`, which would overwrite the description of every subcommand flattening it.
 #[derive(Parser, Debug, Clone)]
 pub struct TrainConfig {
     #[command(flatten)]
@@ -111,6 +153,10 @@ pub struct TrainConfig {
     #[arg(long, env = "RL_EFFORT_WEIGHT", value_parser = parse_effort_weight,
           default_value_t = training::reward::EFFORT_WEIGHT_DEFAULT)]
     pub effort_weight: f32,
+
+    /// DIAGNOSTIC: log the rollout's mean Σ|drive|² and the tax it pays, per step.
+    #[arg(long, env = "RL_LOG_EFFORT", value_parser = clap::builder::FalseyValueParser::new())]
+    pub log_effort: bool,
 }
 
 #[cfg(test)]

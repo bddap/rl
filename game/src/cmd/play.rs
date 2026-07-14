@@ -3,7 +3,9 @@ use clap::Parser;
 use iroh::EndpointId;
 use net::{formation, net_loop, render};
 
-use super::shared::{MATCH_SEED, nn_crab_policies, parse_join_dial, resolve_render_mode};
+use crab_world::RenderArgs;
+
+use super::shared::{MATCH_SEED, nn_crab_policies, parse_join_dial};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -24,11 +26,11 @@ pub(crate) struct Args {
     #[arg(long, value_name = "COLLECTOR_ENDPOINT_ID")]
     telemetry: Option<EndpointId>,
 
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", env = "RL_CRAB_CHECKPOINT_DIR")]
     nn_crab_checkpoint: Vec<std::path::PathBuf>,
 
-    #[arg(long, value_name = "mesh|mesh+colliders|colliders")]
-    render_mode: Option<String>,
+    #[command(flatten)]
+    render: RenderArgs,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -63,7 +65,9 @@ pub(crate) fn run(args: Args) -> Result<()> {
             telemetry: args.telemetry,
         }
     };
-    let render_mode = resolve_render_mode(args.render_mode.as_deref())?;
+    let render_mode = args
+        .render
+        .initial(crab_world::mesh_fallback::Surface::Game);
     render::build_windowed_app(boot, external_crab, render_mode)?.run();
     Ok(())
 }

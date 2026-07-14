@@ -7,6 +7,7 @@ use super::input::gather_input;
 use super::scene::{FpCamera, apply_transforms, follow_ground, reconcile_avatars, spawn_world};
 use super::*;
 use crate::net_loop::NetDriver;
+use crab_world::controls::ControlsOverrides;
 use crab_world::screenshot::{self, ShotProgress, ShotTarget};
 
 pub fn build_screenshot_app(
@@ -14,6 +15,7 @@ pub fn build_screenshot_app(
     cfg: ScreenshotConfig,
     external_crab: Option<crab_world::policy::Policy>,
     render_mode: super::RenderMode,
+    controls: ControlsOverrides<GcrControls>,
     pack: Input,
 ) -> App {
     let mut app = offscreen_app_scaffold();
@@ -24,7 +26,7 @@ pub fn build_screenshot_app(
     if let Some((policy, spawns)) = armed_crab {
         install_armed_nn_crab(&mut app, vec![policy], spawns);
     }
-    finish_offscreen_app(&mut app, cfg, render_mode);
+    finish_offscreen_app(&mut app, cfg, render_mode, controls);
     app
 }
 
@@ -34,13 +36,14 @@ pub fn build_net_screenshot_app(
     cfg: ScreenshotConfig,
     external_crab: crab_world::policy::Policy,
     render_mode: super::RenderMode,
+    controls: ControlsOverrides<GcrControls>,
 ) -> App {
     let mut app = offscreen_app_scaffold();
     let spawns = seed_round_crabs(&mut client, 1);
     let coord = coordinator(Some(net), client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
     install_armed_nn_crab(&mut app, vec![external_crab], spawns);
-    finish_offscreen_app(&mut app, cfg, render_mode);
+    finish_offscreen_app(&mut app, cfg, render_mode, controls);
     app
 }
 
@@ -69,18 +72,19 @@ fn offscreen_app_scaffold() -> App {
 
 /// Wire the offscreen screenshot systems + render-mode onto a scaffolded app whose round is
 /// already installed — shared by both builders so the capture path can't drift.
-fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super::RenderMode) {
-    // The overlay rides its plugin here too — one wiring of it, app-wide (the demo's
-    // offscreen app does the same): the env overrides land after, replacing the plugin's
-    // defaults, so an evidence shot can force reveal/device/context.
-    let (force_reveal, active_device, active_context) =
-        crab_world::controls::reveal_overrides_from_env::<GcrControls>();
-    app.add_plugins(crab_world::controls::ControlsOverlayPlugin::<GcrControls>::default())
-        .insert_resource(cfg)
+fn finish_offscreen_app(
+    app: &mut App,
+    cfg: ScreenshotConfig,
+    render_mode: super::RenderMode,
+    controls: ControlsOverrides<GcrControls>,
+) {
+    // Keep the controls HUD's context live like the windowed app — unless the shot PINNED
+    // one, which would just be overwritten every frame. Gate and value come from the same
+    // resolved override, so they can't disagree (they were two independent env reads, rl#275).
+    let context_pinned = controls.context_pinned();
+    crab_world::controls::install_overlay(app, &controls);
+    app.insert_resource(cfg)
         .init_resource::<ShotProgress>()
-        .insert_resource(force_reveal)
-        .insert_resource(active_device)
-        .insert_resource(active_context)
         .add_systems(Startup, (spawn_world, spawn_offscreen_camera, spawn_hud))
         .add_systems(
             Update,
@@ -93,10 +97,8 @@ fn finish_offscreen_app(app: &mut App, cfg: ScreenshotConfig, render_mode: super
                 apply_transforms,
                 follow_ground,
                 apply_shot_cam_offset,
-                // Keep the controls HUD's context live like the windowed app — unless an
-                // evidence shot forced one via RL_SHOW_CONTROLS_CONTEXT.
                 sync_controls_context
-                    .run_if(|| std::env::var_os("RL_SHOW_CONTROLS_CONTEXT").is_none())
+                    .run_if(move || !context_pinned)
                     .before(update_controls_ui::<GcrControls>),
                 update_hud,
                 capture_when_settled,

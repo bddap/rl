@@ -17,9 +17,6 @@ use super::lifecycle::{EnvEpisode, EnvPhase};
 use super::state::TrainingState;
 
 fn log_effort_probe(envs: &[EnvEpisode], efforts: &[f32], effort_weight: f32) {
-    if std::env::var_os("RL_LOG_EFFORT").is_none() {
-        return;
-    }
     let mut count = 0usize;
     let mut effort_sum = 0.0f32;
     for (e, ep) in envs.iter().enumerate() {
@@ -289,7 +286,9 @@ pub(crate) fn brain_step(
     };
     training.finalize_transitions(&inputs, &mut targets, &spawns);
 
-    log_effort_probe(&training.envs, &efforts, training.effort_weight);
+    if training.log_effort {
+        log_effort_probe(&training.envs, &efforts, training.effort_weight);
+    }
     training.accumulate_drift(&body.drifts);
 
     training.total_steps += 1;

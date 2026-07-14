@@ -12,10 +12,16 @@ pub const COLLIDER_WIREFRAME_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
 /// labels — one source, so the overlay can't drift into two near-greens.
 const HUD_TEXT_COLOR: Color = Color::srgb(0.4, 1.0, 0.55);
 
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Default, Debug)]
+/// Which view of the crab a render surface shows. A [`clap::ValueEnum`] because it IS a CLI
+/// value — `--render-mode` / `RL_RENDER_MODE` on every surface that opens a view (see
+/// [`crate::RenderArgs`]): clap owns the string→mode mapping, so an unrecognized value is a
+/// parse error at t=0 instead of the warn-and-ignore that left the surface in the DEFAULT
+/// mode as if the override had taken (rl#275).
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Default, Debug, clap::ValueEnum)]
 pub enum RenderMode {
     #[default]
     Mesh,
+    #[value(name = "mesh+colliders", alias = "mesh-colliders")]
     MeshColliders,
     Colliders,
 }
@@ -53,28 +59,6 @@ impl RenderMode {
             RenderMode::MeshColliders => "mesh + colliders",
             RenderMode::Colliders => "colliders",
         }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "mesh" => Some(RenderMode::Mesh),
-            "mesh+colliders" | "mesh-colliders" => Some(RenderMode::MeshColliders),
-            "colliders" => Some(RenderMode::Colliders),
-            _ => None,
-        }
-    }
-
-    pub fn env_mode() -> Option<Self> {
-        if let Ok(v) = std::env::var("RL_RENDER_MODE") {
-            let parsed = RenderMode::parse(&v);
-            if parsed.is_none() {
-                warn!("RL_RENDER_MODE={v:?} not one of mesh|mesh+colliders|colliders; ignoring it");
-            }
-            return parsed;
-        }
-        std::env::var_os("RL_DEBUG_COLLIDERS")
-            .is_some()
-            .then_some(RenderMode::Colliders)
     }
 }
 
@@ -228,24 +212,25 @@ fn position_brain_labels(
             *vis = Visibility::Hidden;
             continue;
         }
-        let anchor = carapaces
-            .iter()
-            .find(|(.., env)| env.0 == node.0)
-            .map(|(entity, carapace, env)| {
-                let placement = repose
-                    .as_deref()
-                    .and_then(|r| r.0.get(&env.0))
-                    .map(|s| s.matrix())
-                    .unwrap_or(Mat4::IDENTITY);
-                // The RENDERED carapace is the sampled pose where a stream feeds one
-                // (rl#274) — anchoring to the raw physics pose would let the label lead
-                // the skin by the sampling window's latency.
-                let carapace = sampled.as_deref().map_or_else(
-                    || carapace.compute_transform(),
-                    |s| s.rendered(entity, carapace.compute_transform()),
-                );
-                placement.transform_point3(carapace.translation) + Vec3::Y * BRAIN_LABEL_LIFT
-            });
+        let anchor =
+            carapaces
+                .iter()
+                .find(|(.., env)| env.0 == node.0)
+                .map(|(entity, carapace, env)| {
+                    let placement = repose
+                        .as_deref()
+                        .and_then(|r| r.0.get(&env.0))
+                        .map(|s| s.matrix())
+                        .unwrap_or(Mat4::IDENTITY);
+                    // The RENDERED carapace is the sampled pose where a stream feeds one
+                    // (rl#274) — anchoring to the raw physics pose would let the label lead
+                    // the skin by the sampling window's latency.
+                    let carapace = sampled.as_deref().map_or_else(
+                        || carapace.compute_transform(),
+                        |s| s.rendered(entity, carapace.compute_transform()),
+                    );
+                    placement.transform_point3(carapace.translation) + Vec3::Y * BRAIN_LABEL_LIFT
+                });
         let projected = camera
             .zip(anchor)
             .and_then(|((cam, cam_gt), anchor)| cam.world_to_viewport(cam_gt, anchor).ok());

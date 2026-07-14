@@ -3,13 +3,25 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use clap::Parser;
-use crab_world::{CheckpointArgs, Visuals, bot, physics, play};
+use crab_world::controls::ControlsOverlayArgs;
+use crab_world::{CheckpointArgs, RenderArgs, Visuals, bot, physics, play};
 
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct Args {
     #[command(flatten)]
     pub checkpoint: CheckpointArgs,
+
+    #[command(flatten)]
+    pub render: RenderArgs,
+
+    /// Force-knobs for the controls legend — they act on the surfaces that HAVE one
+    /// (`--demo`, `--screenshot`); `--render-video` shows no overlay.
+    #[command(flatten)]
+    pub controls: ControlsOverlayArgs,
+
+    #[command(flatten)]
+    pub otel: otel::OtelArgs,
 
     #[arg(long)]
     demo: bool,
@@ -84,6 +96,11 @@ pub struct Args {
     /// Capture the graph overlay to PATH once its traces fill (demo mode; implies --graph).
     #[arg(long, env = "RL_GRAPH_SHOT", value_name = "PATH")]
     graph_shot: Option<PathBuf>,
+
+    /// DIAGNOSTIC: every 64th tick, log the deepest crab self-intersections (which body
+    /// parts, by how much).
+    #[arg(long, env = "RL_CONTACT_AUDIT", value_parser = clap::builder::FalseyValueParser::new())]
+    contact_audit: bool,
 }
 
 fn parse_vec3(s: &str) -> Result<Vec3, String> {
@@ -116,6 +133,17 @@ enum AppMode {
 fn main() {
     let args = Args::parse();
 
+    // The demo's control scheme is the one the legend force-knobs are checked against: an
+    // unknown context id dies HERE, at t=0, rather than silently capturing the default
+    // legend (rl#275).
+    let controls = match args.controls.resolve::<play::DemoControls>() {
+        Ok(controls) => controls,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
+
     if std::env::var_os("RUST_LOG").is_none() {
         unsafe { std::env::set_var("RUST_LOG", "warn,crab_world::play=info") };
     }
@@ -123,7 +151,7 @@ fn main() {
     let mesh_state =
         crab_world::bot::body::CrabModelPath(crab_world::mesh_fallback::usable_model_path());
 
-    let _otel = otel::init("rl-demo");
+    let _otel = otel::init("rl-demo", args.otel);
 
     let mesh_fallback_reason: Option<String> = crab_world::mesh_fallback::usable_model()
         .as_ref()
@@ -177,10 +205,9 @@ fn main() {
         }
     }
 
-    let initial_render_mode = crab_world::mesh_fallback::initial_render_mode(
-        None,
-        crab_world::mesh_fallback::Surface::RlDemo,
-    );
+    let initial_render_mode = args
+        .render
+        .initial(crab_world::mesh_fallback::Surface::RlDemo);
     // Cage gate open always: the demo has no menu phase — it renders the round for its whole
     // life, so there is no screen the gizmos could leak behind (the gate exists for GCR, rl#211).
     crab_world::crab_view::register(&mut app, initial_render_mode, || true);
@@ -196,8 +223,11 @@ fn main() {
         })
         .add_plugins(physics::ArenaVisualsPlugin)
         .insert_resource(mesh_state)
-        .add_plugins(bot::BotPlugin)
-        .add_systems(FixedUpdate, contact_audit);
+        .add_plugins(bot::BotPlugin);
+
+    if args.contact_audit {
+        app.add_systems(FixedUpdate, contact_audit);
+    }
 
     let overrides = play::PlayOverrides {
         seed: args.seed,
@@ -218,6 +248,7 @@ fn main() {
                 overrides,
                 graph: args.graph,
                 graph_shot: args.graph_shot.clone(),
+                controls,
             });
         }
         AppMode::Screenshot { path, settle } => {
@@ -230,6 +261,7 @@ fn main() {
                 overrides,
                 target_ball: args.target_ball || args.target_ball_at.is_some(),
                 rig_pose: args.rig_pose.map(|a| (a, args.rig_pose_part)),
+                controls,
             });
         }
         AppMode::RenderVideo { path, seconds } => {
@@ -254,6 +286,8 @@ fn spawn_mesh_fallback_banner(mut commands: Commands, banner: Res<MeshFallbackBa
     crab_world::mesh_fallback::spawn_banner(&mut commands, &banner.0);
 }
 
+/// Added only under `--contact-audit` — the gate is the system's PRESENCE, not an env read
+/// on every tick of every run (rl#275).
 fn contact_audit(
     sim: Query<&bevy_rapier3d::plugin::context::RapierContextSimulation>,
     cols: Query<&bevy_rapier3d::plugin::context::RapierContextColliders>,
@@ -263,9 +297,6 @@ fn contact_audit(
     >,
     mut tick: Local<u32>,
 ) {
-    if std::env::var_os("RL_CONTACT_AUDIT").is_none() {
-        return;
-    }
     *tick += 1;
     if *tick % 64 != 2 {
         return;

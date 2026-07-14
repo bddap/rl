@@ -26,3 +26,6 @@ tracing = { workspace = true }
 # LogTracer makes `.init()` panic (see init()).
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 anyhow = { workspace = true }
+# The `--otel` flag is declared beside the code that reads it (rl#275) — one declaration of
+# the knob and its RL_OTEL env fallback, flattened by every binary that calls `init`.
+clap = { workspace = true }

@@ -1,5 +1,5 @@
 fn main() {
-    let _otel = otel::init("rl-otel-smoke");
+    let _otel = otel::init("rl-otel-smoke", otel::OtelArgs { otel: true });
 
     let span = tracing::info_span!("smoke_span", phase = "demo");
     let _e = span.enter();

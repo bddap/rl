@@ -342,9 +342,10 @@ pub(super) fn sample_crab_part_poses(
         else {
             continue;
         };
-        sampled
-            .0
-            .insert(entity, Transform::from_translation(p.pos).with_rotation(p.orient));
+        sampled.0.insert(
+            entity,
+            Transform::from_translation(p.pos).with_rotation(p.orient),
+        );
     }
 }
 
@@ -509,7 +510,11 @@ mod tests {
         assert_eq!(got_joint1.translation, joint_t1.translation);
         assert_eq!(got_joint1.rotation, joint_t1.rotation);
         assert_eq!(
-            client.entity(c_cara).get::<Transform>().unwrap().translation,
+            client
+                .entity(c_cara)
+                .get::<Transform>()
+                .unwrap()
+                .translation,
             Vec3::new(-1.0, -1.0, -1.0),
             "sampling must never write a body-part Transform (rl#116/rl#274)"
         );

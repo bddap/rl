@@ -8,6 +8,9 @@ use training::systems::STEPS_PER_ROLLOUT;
 #[command(version)]
 pub struct Cli {
     #[command(flatten)]
+    otel: otel::OtelArgs,
+
+    #[command(flatten)]
     dev: DevArgs,
 
     #[command(subcommand)]
@@ -125,8 +128,8 @@ fn require_canonical_body_or_exit(
 }
 
 fn main() {
-    let _otel = otel::init("rl-train");
     let cli = Cli::parse();
+    let _otel = otel::init("rl-train", cli.otel);
 
     match cli.command {
         Some(Command::Learn(l)) => {
