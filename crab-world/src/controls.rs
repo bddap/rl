@@ -740,6 +740,7 @@ mod overlay {
     }
 }
 
+#[cfg(feature = "render")]
 pub use overlay::{
     ActiveContext, ActiveDevice, ControlInput, ControlsOverlayRoot, ControlsRevealed,
     gamepad_buttons_for, just_pressed, key_codes_for, pressed, spawn_controls_ui,
