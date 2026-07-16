@@ -295,6 +295,11 @@ pub fn run_eval(
     active_ticks: u64,
     target_distance: f32,
 ) -> Result<EvalReport, String> {
+    // Judge the policy on the plant it trained on (bddap/rl#268): a checkpoint's
+    // recorded plant is adopted before any world spawns, so the invoker (the standing
+    // rl-eval-monitor, the release gate, a hand eval) needs no plant knowledge — and a
+    // conflicting env refuses rather than mismeasures.
+    crate::bot::body::adopt_recorded_plant(checkpoint_dir)?;
     pin_single_thread_pools();
 
     // ONE read arms-or-refuses (rl#241 — a classify-then-load pair could straddle a
