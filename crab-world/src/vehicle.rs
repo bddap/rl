@@ -191,7 +191,10 @@ impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VehicleControls>().add_systems(
             FixedUpdate,
-            (manage_vehicles.in_set(VehicleManageSet), apply_vehicle_forces)
+            (
+                manage_vehicles.in_set(VehicleManageSet),
+                apply_vehicle_forces,
+            )
                 .chain()
                 .before(PhysicsSet::SyncBackend),
         );

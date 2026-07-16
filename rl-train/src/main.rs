@@ -125,8 +125,11 @@ fn canonical_body(
     context: &str,
     allow_fallback: bool,
 ) -> Result<crab_world::mesh_fallback::BodyGate, String> {
-    crab_world::mesh_fallback::require_canonical_body(context, allow_fallback)
-        .map_err(|_| format!("{context}: refusing to run on a non-canonical body (see the preflight verdict above)"))
+    crab_world::mesh_fallback::require_canonical_body(context, allow_fallback).map_err(|_| {
+        format!(
+            "{context}: refusing to run on a non-canonical body (see the preflight verdict above)"
+        )
+    })
 }
 
 fn main() -> ExitCode {
