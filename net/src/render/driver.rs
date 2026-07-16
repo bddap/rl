@@ -566,9 +566,7 @@ pub(crate) fn park_fixed_auto_pump(world: &mut World) {
 }
 
 fn restart_crab_to_spawn(world: &mut World, spawns: &[crate::sim::Pos]) {
-    world
-        .resource_mut::<crate::external_crab::ExternalCrabBridge>()
-        .restart_to_spawns(spawns);
+    crate::external_crab::restart_bridge_to_spawns(world, spawns);
     crate::external_crab::cold_respawn_armed_crab(world);
 }
 

@@ -259,7 +259,10 @@ impl ExternalCrabBridge {
         }
     }
 
-    pub fn restart_to_spawns(&mut self, spawns: &[Pos]) {
+    /// Private: every restart must go through [`restart_bridge_to_spawns`], which also
+    /// carries surviving crafts by the anchor-reset delta — a bare bridge reset after a
+    /// recenter would teleport them on screen.
+    fn restart_to_spawns(&mut self, spawns: &[Pos]) {
         assert_eq!(
             spawns.len(),
             self.crabs.len(),
@@ -270,6 +273,36 @@ impl ExternalCrabBridge {
         }
         if let Some(&spawn) = spawns.first() {
             self.anchor_world_m = pos_to_m(spawn);
+        }
+    }
+}
+
+/// The rl#204 RESTART for the arena↔world correspondence: reset the bridge to the new
+/// spawns and carry every surviving craft (and pending boarding pose) by the anchor's
+/// world-frame reset delta. Crafts persist through a RESTART (only round teardown
+/// despawns them), so an anchor snapping back from its recenter-advanced value — or to
+/// a different spawn — must not move a still-flying craft on screen: the same
+/// world = arena + anchor invariance the recenter itself keeps ([`ARM_BODY_POS_RECENTER`]).
+/// With no recenters and unchanged spawns the delta is zero and this is exactly the old
+/// bare `restart_to_spawns`.
+pub(crate) fn restart_bridge_to_spawns(world: &mut World, spawns: &[Pos]) {
+    let old_w = {
+        let mut bridge = world.resource_mut::<ExternalCrabBridge>();
+        let old_w = bridge.anchor_world_m;
+        bridge.restart_to_spawns(spawns);
+        old_w
+    };
+    let carry = old_w - world.resource::<ExternalCrabBridge>().anchor_world_m;
+    if carry != Vec2::ZERO {
+        let delta = Vec3::new(carry.x, 0.0, carry.y);
+        let mut q = world.query_filtered::<&mut Transform, With<Vehicle>>();
+        for mut t in q.iter_mut(world) {
+            t.translation += delta;
+        }
+        if let Some(mut controls) = world.get_resource_mut::<VehicleControls>() {
+            for cmd in controls.0.values_mut() {
+                cmd.boarding.pos += delta;
+            }
         }
     }
 }
@@ -1036,6 +1069,64 @@ mod ship_wiggle_tests {
             miss < 1.0,
             "a boarding authored pre-recenter must still materialise at its walker's \
              world spot, landed {miss} m off"
+        );
+    }
+
+    /// rl#204 RESTART after a recenter: the bridge's anchor snaps back to spawn, so the
+    /// surviving craft must be carried by that reset delta — uncarried, the anchor drop
+    /// would teleport a still-flying craft (and its pilot-follow feed) by the full
+    /// accumulated recenter distance on screen.
+    #[test]
+    fn restart_after_recenter_keeps_surviving_craft_on_screen() {
+        use crab_world::bot::body::CrabBodyPart;
+
+        let mut app = gcr_like_app_with_vehicles();
+        crab_world::vehicle::spawn_ram_vehicle(
+            app.world_mut(),
+            VehicleKind::Ship,
+            Transform::from_xyz(5.0, 0.5, 5.0),
+            bevy_rapier3d::prelude::Velocity::default(),
+        );
+        app.world_mut().resource_mut::<VehicleControls>().0.insert(
+            PilotId(0),
+            PilotCommand::new(VehicleKind::Ship, boarding_at(5.0, 5.0)),
+        );
+        for _ in 0..64 {
+            app.update();
+        }
+        let render0 = ship_render_pos(&mut app);
+
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<CrabBodyPart>>();
+        for mut t in q.iter_mut(app.world_mut()) {
+            t.translation += Vec3::new(20.0, 0.0, 0.0);
+        }
+        for _ in 0..2 {
+            app.update();
+        }
+        assert_eq!(recenters(&app), 1, "the drift must recenter before the restart");
+
+        let spawn = Pos::from_meters(30.0, -14.0);
+        restart_bridge_to_spawns(app.world_mut(), &[spawn]);
+        cold_respawn_armed_crab(app.world_mut());
+        app.update();
+
+        let anchor = app.world().resource::<ArenaAnchor>().0;
+        let moved = ship_render_pos(&mut app).distance(render0);
+        assert!(
+            moved < 0.05,
+            "a surviving craft must not move ON SCREEN through a round restart \
+             (anchor reset must carry it), moved {moved} m"
+        );
+        // And the correspondence really did reset: the anchor is the spawn-pinned value
+        // again, not the recenter-advanced one.
+        let origin = app.world().resource::<CrabSpawns>().origin(0);
+        let want = Vec3::new(30.0 - origin.x, 0.0, -14.0 - origin.z);
+        assert!(
+            (anchor - want).length() < 1e-3,
+            "the restart must re-pin the anchor to the spawn correspondence, \
+             got {anchor:?}, want {want:?}"
         );
     }
 }
