@@ -5,7 +5,7 @@ use std::path::Path;
 use bevy::prelude::*;
 
 use crate::bot::RESET_GRACE_TICKS;
-use crate::bot::actuator::{CrabActions, applied_torque, total_drive_torque_ceiling};
+use crate::bot::actuator::{ACTION_SIZE, CrabActions, applied_torque, total_drive_torque_ceiling};
 use crate::bot::body::{CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint};
 use crate::bot::headless::{
     HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
@@ -259,9 +259,66 @@ struct EvalConfig {
     target_distance: f32,
     bearing_rad: f32,
     settle_ticks: u64,
+    smoothing: ActionSmoothing,
 }
 
-#[derive(Resource, Default)]
+/// PROBE-ONLY (rl#268 hyper-actuation ablation): low-pass / decimate the policy's
+/// action stream at eval time to measure whether high-frequency actuation is
+/// load-bearing for chase progress. Read once from env; strict-parse so a typo'd
+/// sweep aborts instead of silently measuring the default.
+#[derive(Clone, Copy, Debug)]
+struct ActionSmoothing {
+    /// EMA weight of the NEW sample in (0, 1]; 1.0 = filter off.
+    ema_alpha: f32,
+    /// Query the policy every N active ticks, zero-order-hold between; 1 = off.
+    hold_ticks: u64,
+}
+
+impl ActionSmoothing {
+    fn from_env() -> Result<Self, String> {
+        let ema_alpha = match std::env::var("RL_EVAL_ACTION_EMA") {
+            Err(_) => 1.0,
+            Ok(s) => {
+                let v: f32 = s
+                    .parse()
+                    .map_err(|e| format!("RL_EVAL_ACTION_EMA={s:?} unparseable: {e}"))?;
+                if !(v > 0.0 && v <= 1.0) {
+                    return Err(format!("RL_EVAL_ACTION_EMA={v} outside (0, 1]"));
+                }
+                v
+            }
+        };
+        let hold_ticks = match std::env::var("RL_EVAL_ACTION_HOLD") {
+            Err(_) => 1,
+            Ok(s) => {
+                let v: u64 = s
+                    .parse()
+                    .map_err(|e| format!("RL_EVAL_ACTION_HOLD={s:?} unparseable: {e}"))?;
+                if v == 0 {
+                    return Err("RL_EVAL_ACTION_HOLD=0 (must be >= 1)".to_string());
+                }
+                v
+            }
+        };
+        let smoothing = Self {
+            ema_alpha,
+            hold_ticks,
+        };
+        if smoothing.active() {
+            eprintln!(
+                "eval: ACTION SMOOTHING ACTIVE (rl#268 probe): ema_alpha={ema_alpha} \
+                 hold_ticks={hold_ticks} — NOT an honest-eval number"
+            );
+        }
+        Ok(smoothing)
+    }
+
+    fn active(&self) -> bool {
+        self.ema_alpha < 1.0 || self.hold_ticks > 1
+    }
+}
+
+#[derive(Resource)]
 struct EvalState {
     tick: u64,
     target_set: bool,
@@ -273,6 +330,30 @@ struct EvalState {
     work_sum: f64,
     torque_ticks: u64,
     best_pace_m_per_s: f32,
+    /// The last policy output, replayed on non-query ticks under zero-order hold.
+    held: [f32; ACTION_SIZE],
+    /// The EMA-filtered command actually applied; starts from rest (all zero).
+    filtered: [f32; ACTION_SIZE],
+}
+
+// Hand-written: `[f32; ACTION_SIZE]` (38 > 32) has no derived `Default`.
+impl Default for EvalState {
+    fn default() -> Self {
+        Self {
+            tick: 0,
+            target_set: false,
+            initial_dist: 0.0,
+            closest_dist: 0.0,
+            last_dist: 0.0,
+            closest_tip_dist: None,
+            torque_sum: 0.0,
+            work_sum: 0.0,
+            torque_ticks: 0,
+            best_pace_m_per_s: 0.0,
+            held: [0.0; ACTION_SIZE],
+            filtered: [0.0; ACTION_SIZE],
+        }
+    }
 }
 
 pub fn run_eval(
@@ -311,14 +392,15 @@ pub fn run_eval(
     };
     let policy_loaded = policy.is_loaded();
     let policy = std::rc::Rc::new(policy);
+    let smoothing = ActionSmoothing::from_env()?;
 
     // The close probe reuses the far sweep's episode definition whole (same ticks, same
     // compass, same fresh-world episode) so its numbers read on the same scale — only
     // the distance differs.
     let report = EvalReport {
         policy_loaded,
-        far: run_compass(&policy, active_ticks, target_distance),
-        close: run_compass(&policy, active_ticks, CLOSE_PROBE_DISTANCE_M),
+        far: run_compass(&policy, active_ticks, target_distance, smoothing),
+        close: run_compass(&policy, active_ticks, CLOSE_PROBE_DISTANCE_M, smoothing),
     };
     // The rl#266 speed guard, HERE so every judge (CLI, keep-best gate) flags for free:
     // a flag, not a verdict — a drifted pin is a re-measure chore, not a bad brain.
@@ -342,6 +424,7 @@ fn run_compass(
     policy: &std::rc::Rc<Policy>,
     active_ticks: u64,
     target_distance: f32,
+    smoothing: ActionSmoothing,
 ) -> CompassSweep {
     let mut per_bearing = [None; EVAL_BEARINGS];
     for (slot, bearing_rad) in per_bearing.iter_mut().zip(eval_bearings()) {
@@ -350,6 +433,7 @@ fn run_compass(
             active_ticks,
             target_distance,
             bearing_rad,
+            smoothing,
         ));
     }
     CompassSweep {
@@ -370,6 +454,7 @@ fn run_bearing(
     active_ticks: u64,
     target_distance: f32,
     bearing_rad: f32,
+    smoothing: ActionSmoothing,
 ) -> BearingReport {
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
@@ -381,6 +466,7 @@ fn run_bearing(
         target_distance,
         bearing_rad,
         settle_ticks: RESET_GRACE_TICKS as u64,
+        smoothing,
     })
     .init_resource::<EvalState>()
     .insert_non_send_resource(policy)
@@ -471,7 +557,18 @@ fn eval_step(
     if settling {
         let _ = actions.rest(0);
     } else if let Some(o) = obs.rows().first() {
-        let _ = actions.set_row(0, policy.act(o));
+        // rl#268 probe: decimate (zero-order hold) then low-pass (EMA, from rest)
+        // the policy's command stream. With the default config (alpha 1.0, hold 1)
+        // this is exactly `set_row(0, policy.act(o))`.
+        if state.torque_ticks.is_multiple_of(cfg.smoothing.hold_ticks) {
+            state.held = policy.act(o);
+        }
+        let a = cfg.smoothing.ema_alpha;
+        let held = state.held;
+        for (f, h) in state.filtered.iter_mut().zip(held.iter()) {
+            *f = a * h + (1.0 - a) * *f;
+        }
+        let _ = actions.set_row(0, state.filtered);
     } else {
         let _ = actions.rest(0);
     }
