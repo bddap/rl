@@ -28,7 +28,8 @@ pub struct CrabFrame {
 pub struct CrabArticulation {
     pub tick: u64,
     pub crabs: Vec<CrabFrame>,
-    /// The host's static arena→render translate (`ArenaAnchor`, rl#224) — the frame the
+    /// The host's arena→render translate (`ArenaAnchor`, rl#224; static between rl#240
+    /// recenters) — the frame the
     /// `vehicles` arena poses render through. Shipped verbatim like the brain labels
     /// because a client CANNOT derive it: a mid-join client never saw the crab's spawn,
     /// and after an rl#204 RESTART only the host resyncs its bridge. Riding the same
