@@ -42,7 +42,10 @@ pub(super) fn update_hud(state: NonSend<GameState>, mut hud: Query<&mut Text, Wi
     };
     let sim = state.client.sim();
     let me = state.client.me();
-    let status = sim.player(me).map(|p| status_str(p.status())).unwrap_or("—");
+    let status = sim
+        .player(me)
+        .map(|p| status_str(p.status()))
+        .unwrap_or("—");
     // In a multiplayer round, a second line tracks the whole party — whether a teammate is
     // downed or already out decides what you do next, and their avatar may be out of view.
     let party: Vec<String> = sim

@@ -184,7 +184,11 @@ impl CompassSweep {
     /// Mean cost of transport over the bearings that measured one (rl#279) — `None`
     /// when no bearing cleared [`WORK_PER_M_MIN_PROGRESS_M`].
     pub fn mean_j_per_m(&self) -> Option<f32> {
-        let measured: Vec<f32> = self.per_bearing.iter().filter_map(|b| b.j_per_m()).collect();
+        let measured: Vec<f32> = self
+            .per_bearing
+            .iter()
+            .filter_map(|b| b.j_per_m())
+            .collect();
         (!measured.is_empty()).then(|| measured.iter().sum::<f32>() / measured.len() as f32)
     }
 
@@ -620,7 +624,10 @@ mod tests {
         r.far.per_bearing[0].progress_m = WORK_PER_M_MIN_PROGRESS_M - 0.01;
         assert_eq!(r.far.per_bearing[0].j_per_m(), None);
         r.far.per_bearing[1].progress_m = WORK_PER_M_MIN_PROGRESS_M;
-        assert_eq!(r.far.per_bearing[1].j_per_m(), Some(10.0 / WORK_PER_M_MIN_PROGRESS_M));
+        assert_eq!(
+            r.far.per_bearing[1].j_per_m(),
+            Some(10.0 / WORK_PER_M_MIN_PROGRESS_M)
+        );
         r.far.per_bearing[2].progress_m = 4.0;
         assert_eq!(r.far.per_bearing[2].j_per_m(), Some(2.5));
         // Mean over the two measured bearings only — the six guarded ones don't drag it.

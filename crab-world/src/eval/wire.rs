@@ -99,9 +99,10 @@ impl EvalReport {
         if let Some(jpm_mean) = self.far.mean_j_per_m() {
             write!(out, " j_per_m_mean={jpm_mean:.2}").expect("writing to a String never fails");
         }
-        if let (Some(measured), Some(drift)) =
-            (self.measured_charge_heights_per_s(), self.charge_speed_drift())
-        {
+        if let (Some(measured), Some(drift)) = (
+            self.measured_charge_heights_per_s(),
+            self.charge_speed_drift(),
+        ) {
             write!(
                 out,
                 " charge_heights_per_s={measured:.4} charge_pinned={:.4} \
@@ -233,10 +234,9 @@ mod tests {
         assert!(headline.contains(" charge_heights_per_s="));
         // The pin's VALUE is a sanctioned re-measure chore (rl#266) — assert the key
         // and format, not the number, so a re-pin can't break the schema test.
-        assert!(
-            headline
-                .contains(&format!(" charge_pinned={CRAB_CHARGE_SPEED_HEIGHTS_PER_S:.4}"))
-        );
+        assert!(headline.contains(&format!(
+            " charge_pinned={CRAB_CHARGE_SPEED_HEIGHTS_PER_S:.4}"
+        )));
         assert!(headline.contains(" charge_drift_frac="));
         assert!(headline.ends_with(" charge_drifted=false"));
 

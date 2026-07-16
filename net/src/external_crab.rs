@@ -29,12 +29,12 @@ use bevy_rapier3d::prelude::*;
 use crate::sim::Pos;
 use crab_world::Visuals;
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
-use crab_world::vehicle::{Vehicle, VehicleControls};
 use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns};
 use crab_world::crab_view::CrabBrainLabels;
 use crab_world::policy::Policy;
 use crab_world::training::targets::TARGET_ARENA_HALF;
+use crab_world::vehicle::{Vehicle, VehicleControls};
 
 const CLAW_TARGET_Y: f32 = 0.3;
 
@@ -924,7 +924,11 @@ mod ship_wiggle_tests {
         }
         let render0 = ship_render_pos(&mut app);
         let mut prev_anchor = *app.world().resource::<ArenaAnchor>();
-        assert_ne!(prev_anchor.0, Vec3::ZERO, "the armed round published an anchor");
+        assert_ne!(
+            prev_anchor.0,
+            Vec3::ZERO,
+            "the armed round published an anchor"
+        );
         let mut prev_recenters = recenters(&app);
 
         let mut max_ship_d = 0.0f32;
@@ -1105,7 +1109,11 @@ mod ship_wiggle_tests {
         for _ in 0..2 {
             app.update();
         }
-        assert_eq!(recenters(&app), 1, "the drift must recenter before the restart");
+        assert_eq!(
+            recenters(&app),
+            1,
+            "the drift must recenter before the restart"
+        );
 
         let spawn = Pos::from_meters(30.0, -14.0);
         restart_bridge_to_spawns(app.world_mut(), &[spawn]);

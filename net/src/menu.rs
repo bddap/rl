@@ -495,7 +495,10 @@ mod tests {
         join.cancel();
         let result = wait_for(15, "the joiner's formation to resolve", || join.poll());
         assert!(
-            matches!(result.expect("cancel is not an error"), MatchResult::Cancelled),
+            matches!(
+                result.expect("cancel is not an error"),
+                MatchResult::Cancelled
+            ),
             "a cancelled joiner resolves Cancelled"
         );
         assert!(
@@ -506,7 +509,10 @@ mod tests {
         host.cancel();
         let result = wait_for(15, "the host's formation to resolve", || host.poll());
         assert!(
-            matches!(result.expect("cancel is not an error"), MatchResult::Cancelled),
+            matches!(
+                result.expect("cancel is not an error"),
+                MatchResult::Cancelled
+            ),
             "a cancelled host resolves Cancelled"
         );
     }
