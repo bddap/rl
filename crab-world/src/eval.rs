@@ -74,10 +74,10 @@ const TARGET_Y: f32 = (TARGET_Y_MIN + TARGET_Y_MAX) / 2.0;
 /// unnoticed while `progress_m` sat saturated at the 9 m target (rl#266). Strictly her
 /// best 5-seconds-from-rest pace, not a cruise speed: for a decaying speed profile the
 /// max prefix lands at the [`PACE_WINDOW_MIN_S`] floor, so the opening lunge inflates
-/// it a little — the safe direction for the spawn clearance derived from it. NOTE the
-/// instrument's saturation ceiling at the default 9 m ball is ~2.94 heights/s
-/// (`charge_speed_guard_keeps_saturation_headroom`): the next faster re-pin needs a
-/// farther ball first.
+/// it a little — the safe direction for the spawn clearance derived from it. The
+/// instrument's saturation ceiling is [`PACE_PROBE_DISTANCE_M`] / [`PACE_WINDOW_MIN_S`]
+/// ≈ 5.9 heights/s (`charge_speed_guard_keeps_saturation_headroom`); when a re-pin
+/// approaches it, the probe needs an even farther ball (rl#280).
 pub const CRAB_CHARGE_SPEED_HEIGHTS_PER_S: f32 = 2.31;
 
 /// Fractional drift band around [`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] before the eval
@@ -92,11 +92,35 @@ pub const CHARGE_SPEED_DRIFT_TOL: f32 = 0.25;
 /// outpaces the sustained gait (rl#257) and a tiny elapsed divisor would let one
 /// spawn-transient hop dominate. Five seconds is past the lunge and happens to be the
 /// horizon the constant serves (spawn grace) — but it is a measurement floor, not that
-/// feel knob. Ceiling to be aware of: a brain that reaches the far ball inside this
-/// window saturates the instrument at target_distance / PACE_WINDOW_MIN_S — the guard
-/// still flags (saturation is itself far off any honest pin), but the measured number
-/// stops tracking her true pace and the eval needs a farther ball.
+/// feel knob. Ceiling to be aware of: a brain that reaches the ball inside this window
+/// saturates the instrument at target_distance / PACE_WINDOW_MIN_S — the guard still
+/// flags (saturation is itself far off any honest pin), but the measured number stops
+/// tracking her true pace. That ceiling is why the charge metric reads from the
+/// [`PACE_PROBE_DISTANCE_M`] probe, not the far sweep (rl#280).
 const PACE_WINDOW_MIN_S: f32 = 5.0;
+
+/// The pace probe's real ball distance (rl#280) — the charge-speed instrument's own
+/// sweep, so its saturation ceiling (this / [`PACE_WINDOW_MIN_S`] ≈ 3.6 m/s ≈ 5.9
+/// heights/s) no longer sits 1.9% above the pin's drift band the way the 9 m far ball's
+/// did after the 2026-07-16 re-pin. Double the training band edge, NOT a training
+/// change: the far sweep (the headline chase metric) keeps its
+/// [`DEFAULT_TARGET_DISTANCE_M`] band-edge ball; only this measurement runs farther.
+/// A ball past the band edge is out of distribution for the raw obs (rl#240), so the
+/// probe presents it through the SAME two seams production (net's `external_crab`)
+/// uses to hunt a distant player — the [`lure_point`] clamp and the [`pace_recenter`]
+/// body.pos recenter — which also makes the probe measure her pace in exactly the
+/// obs regime GCR play happens in.
+pub const PACE_PROBE_DISTANCE_M: f32 = 2.0 * TARGET_ARENA_HALF;
+
+/// The pace probe's episode length: twice the [`PACE_WINDOW_MIN_S`] floor, so the
+/// prefix max scans [5 s, 10 s] — past where the current pin's 9 m runs ever reached
+/// (arrival ended them around 6.4 s) — while costing well under a third far-distance
+/// sweep at [`DEFAULT_EVAL_TICKS`] would (the keep-best gate runs this eval inline on
+/// the learner thread). Paces up to the distance ceiling stay measurable: only a run
+/// FASTER than [`PACE_PROBE_DISTANCE_M`] / [`PACE_WINDOW_MIN_S`] can arrive before the
+/// window opens.
+pub const PACE_PROBE_TICKS: u64 =
+    (2.0 * PACE_WINDOW_MIN_S * crate::physics::PHYSICS_HZ as f32) as u64;
 
 /// Net chase progress below which a bearing's J/m is not reported (rl#279): work over
 /// a near-zero distance explodes toward ∞ without describing the gait — a parked or
@@ -228,6 +252,11 @@ pub struct EvalReport {
     /// every gate keys off: folding it in would be a training-adjacent metric change
     /// riding along with a measurement.
     pub close: CompassSweep,
+    /// The rl#280 pace probe at [`PACE_PROBE_DISTANCE_M`] — the charge-speed
+    /// instrument's own sweep (short lured episodes in the open field). SIDECAR like
+    /// the close probe: sole source of [`Self::measured_charge_heights_per_s`], never
+    /// of the headline.
+    pub pace: CompassSweep,
 }
 
 impl EvalReport {
@@ -241,20 +270,22 @@ impl EvalReport {
         self.far.worst().reached
     }
 
-    /// Sally's measured charge speed in body-heights/s — the far sweep's best sustained
-    /// pace over the natural rig height, the same height net's arena→sim seam divides
-    /// by, so this number and the sim-side charge constant live on one scale. `None`
-    /// when unmeasurable: no loaded policy (the rest pose measures the baseline, not
-    /// her), no progress, a degenerate silhouette — or a non-default target distance:
-    /// the pin was measured at [`DEFAULT_TARGET_DISTANCE_M`], and a shorter `--distance`
-    /// lowers the instrument's saturation ceiling (target / [`PACE_WINDOW_MIN_S`]), so
-    /// comparing that against the pin would flag a geometry artifact as drift and
-    /// invite a corrupting re-pin.
+    /// Sally's measured charge speed in body-heights/s — the pace probe's best
+    /// sustained pace over the natural rig height, the same height net's arena→sim
+    /// seam divides by, so this number and the sim-side charge constant live on one
+    /// scale. `None` when unmeasurable: no loaded policy (the rest pose measures the
+    /// baseline, not her), no progress, a degenerate silhouette — or a pace sweep not
+    /// at [`PACE_PROBE_DISTANCE_M`]: the pin was measured at the probe distance, and a
+    /// different one moves the instrument's saturation ceiling (target /
+    /// [`PACE_WINDOW_MIN_S`]), so comparing that against the pin would flag a geometry
+    /// artifact as drift and invite a corrupting re-pin. (The far sweep's `--distance`
+    /// no longer matters here — the probe always runs at its own distance, which is
+    /// what decoupled the charge metric from the chase eval's geometry, rl#280.)
     pub fn measured_charge_heights_per_s(&self) -> Option<f32> {
-        if !self.policy_loaded || self.far.target_distance_m != DEFAULT_TARGET_DISTANCE_M {
+        if !self.policy_loaded || self.pace.target_distance_m != PACE_PROBE_DISTANCE_M {
             return None;
         }
-        let pace = self.far.best_sustained_pace_m_per_s();
+        let pace = self.pace.best_sustained_pace_m_per_s();
         let height = crate::mesh_fallback::natural_body_height()?;
         (pace > 0.0).then(|| pace / height)
     }
@@ -273,12 +304,20 @@ struct EvalConfig {
     target_distance: f32,
     bearing_rad: f32,
     settle_ticks: u64,
+    /// Pace-probe mode (rl#280): the real ball sits past the training band edge, so
+    /// the obs target is posed through [`lure_point`] and body.pos drift through
+    /// [`pace_recenter`] — the production seams — while every measurement stays
+    /// against the real ball.
+    pace_probe: bool,
 }
 
 #[derive(Resource, Default)]
 struct EvalState {
     tick: u64,
-    target_set: bool,
+    /// The REAL ball every distance/pace/tip measurement is taken against — the obs
+    /// slot equals it except in pace-probe mode, where the slot holds the lure.
+    /// `None` until the env slots exist (the pre-spawn window).
+    real_target: Option<Vec3>,
     initial_dist: f32,
     closest_dist: f32,
     last_dist: f32,
@@ -316,8 +355,8 @@ pub fn run_eval(
     // progress. Missing is the legitimate no-brain-yet case — judge the explicit rest
     // baseline. One load also means every episode judges the SAME weights: the CLI is
     // pointed at a LIVE checkpoint dir (rl-eval-monitor, the release gate), and a
-    // per-episode reload across the ~4 min far+close sweep could min over a composite
-    // of adjacent brains that no single brain achieved.
+    // per-episode reload across the ~5 min far+close+pace sweeps could min over a
+    // composite of adjacent brains that no single brain achieved.
     let policy = match crate::policy::load_armed(checkpoint_dir) {
         Ok(policy) => policy,
         Err(crate::policy::CheckpointUnusable::Missing) => Policy::rest(),
@@ -339,13 +378,22 @@ pub fn run_eval(
     let policy_loaded = policy.is_loaded();
     let policy = std::rc::Rc::new(policy);
 
-    // The close probe reuses the far sweep's episode definition whole (same ticks, same
-    // compass, same fresh-world episode) so its numbers read on the same scale — only
-    // the distance differs.
+    // The close and pace probes reuse the far sweep's episode definition (same
+    // compass, same fresh-world episode) so their numbers read on the same scale. The
+    // pace probe (rl#280) differs where its farther ball forces it to: open field,
+    // lured obs, and episodes capped at [`PACE_PROBE_TICKS`] — the pace prefix window
+    // is all it measures, and the extra sweep rides every keep-best gate eval. The
+    // `min` keeps a caller's smaller tick budget (smoke tests) binding.
     let report = EvalReport {
         policy_loaded,
-        far: run_compass(&policy, active_ticks, target_distance),
-        close: run_compass(&policy, active_ticks, CLOSE_PROBE_DISTANCE_M),
+        far: run_compass(&policy, active_ticks, target_distance, false),
+        close: run_compass(&policy, active_ticks, CLOSE_PROBE_DISTANCE_M, false),
+        pace: run_compass(
+            &policy,
+            active_ticks.min(PACE_PROBE_TICKS),
+            PACE_PROBE_DISTANCE_M,
+            true,
+        ),
     };
     // The rl#266 speed guard, HERE so every judge (CLI, keep-best gate) flags for free:
     // a flag, not a verdict — a drifted pin is a re-measure chore, not a bad brain.
@@ -369,6 +417,7 @@ fn run_compass(
     policy: &std::rc::Rc<Policy>,
     active_ticks: u64,
     target_distance: f32,
+    pace_probe: bool,
 ) -> CompassSweep {
     let mut per_bearing = [None; EVAL_BEARINGS];
     for (slot, bearing_rad) in per_bearing.iter_mut().zip(eval_bearings()) {
@@ -377,6 +426,7 @@ fn run_compass(
             active_ticks,
             target_distance,
             bearing_rad,
+            pace_probe,
         ));
     }
     CompassSweep {
@@ -403,27 +453,45 @@ pub(crate) fn bearing_bin(theta_rad: f32) -> usize {
 }
 
 /// One episode at one bearing — a fresh world per bearing, so each episode is exactly
-/// the pre-compass eval (deterministic per brain) with the target rotated.
+/// the pre-compass eval (deterministic per brain) with the target rotated. A pace
+/// probe episode swaps the training box for the open field — its ball sits past the
+/// box walls, and the unwalled flat grid is the plant GCR inference runs on — and adds
+/// the [`pace_recenter`] seam.
 fn run_bearing(
     policy: std::rc::Rc<Policy>,
     active_ticks: u64,
     target_distance: f32,
     bearing_rad: f32,
+    pace_probe: bool,
 ) -> BearingReport {
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
-        arena: crate::physics::Arena::WalledBox,
+        arena: if pace_probe {
+            crate::physics::Arena::OpenField
+        } else {
+            crate::physics::Arena::WalledBox
+        },
         visuals: crate::Visuals(false),
     });
     app.insert_resource(EvalConfig {
         target_distance,
         bearing_rad,
         settle_ticks: RESET_GRACE_TICKS as u64,
+        pace_probe,
     })
     .init_resource::<EvalState>()
     .insert_non_send_resource(policy)
     .add_systems(FixedUpdate, eval_step.in_set(BotSet::Think));
+    if pace_probe {
+        // Before eval_step only for determinism of WHICH tick's obs see the shifted
+        // frame — the recenter moves crab and real ball by one delta, so every
+        // distance eval_step measures is invariant across it.
+        app.add_systems(
+            FixedUpdate,
+            pace_recenter.in_set(BotSet::Think).before(eval_step),
+        );
+    }
 
     force_serial_schedules(&mut app);
     app.finish();
@@ -488,15 +556,21 @@ fn eval_step(
     claw_tips_q: Query<(&CrabEnvId, &Transform), With<CrabClawTip>>,
     joints: Query<(&CrabJoint, &CrabEnvId)>,
 ) {
-    if !state.target_set
+    if state.real_target.is_none()
         && let Some(slot) = targets.envs.first_mut()
     {
         let origin = spawns.origin(0);
         let p = polar_target(origin, cfg.bearing_rad, cfg.target_distance, TARGET_Y);
-        *slot = Some(terrain.place(Vec2::new(p.x, p.z), TARGET_Y));
-        state.target_set = true;
+        let real = terrain.place(Vec2::new(p.x, p.z), TARGET_Y);
+        state.real_target = Some(real);
+        // In probe mode the crab is still at its origin, so the lure is exact here.
+        *slot = Some(if cfg.pace_probe {
+            lure_point(origin, real)
+        } else {
+            real
+        });
     }
-    let Some(target) = targets.get(0) else {
+    let Some(target) = state.real_target else {
         state.tick += 1;
         return;
     };
@@ -518,6 +592,14 @@ fn eval_step(
         .map(|(_, t)| t.translation)
         .filter(|p| p.is_finite())
     {
+        // Probe mode re-poses the lure every tick from her CURRENT position — net's
+        // `set_crab_walk_target` cadence — so the obs ball recedes ahead of her until
+        // the real ball comes inside the band, then converges onto it.
+        if cfg.pace_probe
+            && let Some(slot) = targets.envs.first_mut()
+        {
+            *slot = Some(lure_point(cpos, target));
+        }
         let d = dist_3d(cpos, target);
         if settling {
             state.initial_dist = d;
@@ -567,6 +649,59 @@ fn eval_step(
     state.tick += 1;
 }
 
+/// The pace probe's posed obs target: the real ball clamped to at most one band edge
+/// away along the true planar bearing — net `external_crab`'s `set_crab_walk_target`
+/// seam (rl#240), the in-distribution guard under which every GCR chase of a distant
+/// player already happens. Beyond the band the policy sees a ball a constant
+/// [`TARGET_ARENA_HALF`] ahead; inside it, the real ball itself.
+fn lure_point(carapace: Vec3, real_target: Vec3) -> Vec3 {
+    let to_real = Vec2::new(real_target.x - carapace.x, real_target.z - carapace.z)
+        .clamp_length_max(TARGET_ARENA_HALF);
+    Vec3::new(
+        carapace.x + to_real.x,
+        real_target.y,
+        carapace.z + to_real.y,
+    )
+}
+
+/// The rl#240 recenter, probe-side: once the carapace drifts more than one band edge
+/// from its spawn origin, shift every crab part back onto the origin planar-wise —
+/// production's sanctioned multibody teleport (rl#116), a symmetry on the open field's
+/// flat ground — and carry the real ball by the same delta so the remaining chase
+/// geometry (and every distance already measured against it) is untouched. Without
+/// this the probe's farther ball walks the spawn-relative body.pos obs channel out of
+/// the training band, and the pace measured would be an OOD artifact, not her gait.
+fn pace_recenter(
+    spawns: Res<CrabSpawns>,
+    mut state: ResMut<EvalState>,
+    mut parts: Query<(&CrabEnvId, &mut Transform, Has<CrabCarapace>)>,
+) {
+    // real_target set ⇒ env slots exist ⇒ origin(0) is wired (rl#242).
+    let Some(real_target) = state.real_target else {
+        return;
+    };
+    let Some(carapace) = parts
+        .iter()
+        .find(|(env, _, cara)| env.0 == 0 && *cara)
+        .map(|(_, t, _)| t.translation)
+        .filter(|p| p.is_finite())
+    else {
+        return;
+    };
+    let origin = spawns.origin(0);
+    let drift = Vec2::new(carapace.x - origin.x, carapace.z - origin.z);
+    if drift.length() <= TARGET_ARENA_HALF {
+        return;
+    }
+    let delta = Vec3::new(-drift.x, 0.0, -drift.y);
+    for (env, mut t, _) in parts.iter_mut() {
+        if env.0 == 0 {
+            t.translation += delta;
+        }
+    }
+    state.real_target = Some(real_target + delta);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,79 +738,121 @@ mod tests {
         );
     }
 
-    /// A canned report at the given target distance with ONE bearing pacing at `pace`
-    /// (arena m/s) — the speed guard's inputs, nothing else non-zero.
-    fn paced_report(policy_loaded: bool, target_distance_m: f32, pace: f32) -> EvalReport {
-        let mut bearing = BearingReport {
+    /// A canned report whose PACE sweep runs at `pace_distance_m` with ONE bearing
+    /// pacing at `pace` (arena m/s) — the speed guard's inputs, nothing else non-zero.
+    fn paced_report(policy_loaded: bool, pace_distance_m: f32, pace: f32) -> EvalReport {
+        let bearing_at = |distance: f32| BearingReport {
             bearing_rad: 0.0,
             progress_m: 0.0,
             total_torque: 0.0,
             mean_torque_per_tick: 0.0,
             saturation: 0.0,
             work_j: 0.0,
-            initial_distance_m: target_distance_m,
-            closest_distance_m: target_distance_m,
-            final_distance_m: target_distance_m,
+            initial_distance_m: distance,
+            closest_distance_m: distance,
+            final_distance_m: distance,
             closest_tip_distance_m: f32::INFINITY,
             reached: false,
             active_ticks: DEFAULT_EVAL_TICKS,
             sustained_pace_m_per_s: 0.0,
         };
-        let sweep = CompassSweep {
-            target_distance_m,
-            per_bearing: [bearing; EVAL_BEARINGS],
+        let sweep_at = |distance: f32| CompassSweep {
+            target_distance_m: distance,
+            per_bearing: [bearing_at(distance); EVAL_BEARINGS],
         };
-        bearing.sustained_pace_m_per_s = pace;
-        let mut far = sweep;
-        far.per_bearing[3] = bearing;
+        let mut paced = bearing_at(pace_distance_m);
+        paced.sustained_pace_m_per_s = pace;
+        let mut pace_sweep = sweep_at(pace_distance_m);
+        pace_sweep.per_bearing[3] = paced;
         EvalReport {
             policy_loaded,
-            far,
-            close: sweep,
+            far: sweep_at(DEFAULT_TARGET_DISTANCE_M),
+            close: sweep_at(CLOSE_PROBE_DISTANCE_M),
+            pace: pace_sweep,
         }
     }
 
-    /// Pins the rl#266 guard: drift is measured pace over the pin (best bearing, in
-    /// body heights), and every unmeasurable case is None — NOT a spurious drift.
+    /// Pins the rl#266 guard: drift is measured pace over the pin (best pace-probe
+    /// bearing, in body heights), and every unmeasurable case is None — NOT a
+    /// spurious drift.
     #[test]
     fn charge_speed_guard_measures_and_refuses() {
         let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");
         let fast = CRAB_CHARGE_SPEED_HEIGHTS_PER_S * h * 1.5;
 
-        let r = paced_report(true, DEFAULT_TARGET_DISTANCE_M, fast);
+        let r = paced_report(true, PACE_PROBE_DISTANCE_M, fast);
         let drift = r.charge_speed_drift().expect("measurable");
         assert!((drift - 0.5).abs() < 1e-3, "drift {drift} should be +50%");
         assert!(drift > CHARGE_SPEED_DRIFT_TOL);
 
-        // Non-default distance: the saturation ceiling moved — a geometry artifact,
-        // not her gait; comparing it to the pin would invite a corrupting re-pin.
-        let short = paced_report(true, DEFAULT_TARGET_DISTANCE_M - 1.0, fast);
+        // A pace sweep off the probe distance: the saturation ceiling moved — a
+        // geometry artifact, not her gait; comparing it to the pin would invite a
+        // corrupting re-pin.
+        let short = paced_report(true, PACE_PROBE_DISTANCE_M - 1.0, fast);
         assert_eq!(short.measured_charge_heights_per_s(), None);
 
         // The rest-pose baseline measures the baseline, not her.
-        let unloaded = paced_report(false, DEFAULT_TARGET_DISTANCE_M, fast);
+        let unloaded = paced_report(false, PACE_PROBE_DISTANCE_M, fast);
         assert_eq!(unloaded.measured_charge_heights_per_s(), None);
 
         // No progress at all: nothing to measure.
-        let parked = paced_report(true, DEFAULT_TARGET_DISTANCE_M, 0.0);
+        let parked = paced_report(true, PACE_PROBE_DISTANCE_M, 0.0);
         assert_eq!(parked.measured_charge_heights_per_s(), None);
     }
 
-    /// The instrument saturates at target/[`PACE_WINDOW_MIN_S`] (a brain arriving
-    /// inside the pace window measures the ceiling, not its gait). If the pin's drift
-    /// band ever reaches that ceiling, a fast retrain would read "within tolerance"
-    /// and the guard would be silently defeated in exactly the direction (faster)
-    /// history shows happens — so pin the headroom.
+    /// The instrument saturates at probe-distance/[`PACE_WINDOW_MIN_S`] (a brain
+    /// arriving inside the pace window measures the ceiling, not its gait). If the
+    /// pin's drift band ever reaches that ceiling, a fast retrain would read "within
+    /// tolerance" and the guard would be silently defeated in exactly the direction
+    /// (faster) history shows happens — so pin the headroom. rl#280 acceptance bar:
+    /// the probe ball moves farther BEFORE this fails, never after.
     #[test]
     fn charge_speed_guard_keeps_saturation_headroom() {
         let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");
-        let ceiling_heights_per_s = DEFAULT_TARGET_DISTANCE_M / PACE_WINDOW_MIN_S / h;
+        let ceiling_heights_per_s = PACE_PROBE_DISTANCE_M / PACE_WINDOW_MIN_S / h;
         assert!(
             ceiling_heights_per_s
                 > CRAB_CHARGE_SPEED_HEIGHTS_PER_S * (1.0 + CHARGE_SPEED_DRIFT_TOL),
             "instrument ceiling {ceiling_heights_per_s} heights/s is inside the drift band — \
-             the eval needs a farther ball before this pin can be trusted"
+             the pace probe needs a farther ball before this pin can be trusted"
         );
+    }
+
+    /// The rl#280 probe's geometry: the ball sits past the band edge (the whole
+    /// point), the episode covers the pace window with room for the prefix max to
+    /// move, and the window itself fits (a probe shorter than the window would
+    /// measure nothing, silently).
+    #[test]
+    fn pace_probe_outruns_the_far_ball_and_covers_the_window() {
+        assert_eq!(PACE_PROBE_DISTANCE_M, 2.0 * TARGET_ARENA_HALF);
+        const {
+            assert!(PACE_PROBE_DISTANCE_M > DEFAULT_TARGET_DISTANCE_M);
+        }
+        let window_ticks = PACE_WINDOW_MIN_S * crate::physics::PHYSICS_HZ as f32;
+        assert!(PACE_PROBE_TICKS as f32 >= 2.0 * window_ticks);
+    }
+
+    /// The lure is net `external_crab`'s in-distribution guard (rl#240): beyond the
+    /// band the posed ball rides exactly one band edge ahead along the true bearing;
+    /// inside it, the posed ball IS the real ball.
+    #[test]
+    fn lure_clamps_to_the_band_edge_along_the_true_bearing() {
+        let carapace = Vec3::new(1.0, 0.4, -2.0);
+        let real = polar_target(carapace, 0.7, PACE_PROBE_DISTANCE_M, TARGET_Y);
+
+        let lure = lure_point(carapace, real);
+        let planar = Vec2::new(lure.x - carapace.x, lure.z - carapace.z);
+        assert!((planar.length() - TARGET_ARENA_HALF).abs() < 1e-4);
+        let to_real = Vec2::new(real.x - carapace.x, real.z - carapace.z);
+        assert!(
+            planar.normalize().dot(to_real.normalize()) > 1.0 - 1e-6,
+            "the lure sits on the real bearing"
+        );
+        assert_eq!(lure.y, real.y);
+
+        // Inside the band nothing is clamped — the chase end is a real approach.
+        let near = polar_target(carapace, 0.7, 3.0, TARGET_Y);
+        assert_eq!(lure_point(carapace, near), near);
     }
 
     /// Pins the rl#279 J/m guard: below the progress floor no cost of transport is

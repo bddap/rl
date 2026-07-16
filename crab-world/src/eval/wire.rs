@@ -26,10 +26,11 @@
 //!   the progress floor) — effort is REPORTED here, never folded into the headline
 //!   scalar or the keep-best gate. When the rl#266 charge-speed guard can measure,
 //!   it appends
-//!   `charge_heights_per_s= charge_pinned= charge_drift_frac= charge_drifted=`
-//!   (these keys replaced the old `EVAL_CHARGE_SPEED` sidecar line, which no
-//!   consumer parsed — and which the release gate's `EVAL_RESULT` line filter never
-//!   even logged).
+//!   `charge_heights_per_s= charge_pinned= charge_drift_frac= charge_drifted=
+//!   charge_target_m=` (the first four replaced the old `EVAL_CHARGE_SPEED` sidecar
+//!   line, which no consumer parsed — and which the release gate's `EVAL_RESULT`
+//!   line filter never even logged; `charge_target_m` is the rl#280 pace probe's
+//!   ball distance, which the headline's own `target_m` no longer describes).
 //!
 //! # Consumer contract
 //!
@@ -106,9 +107,10 @@ impl EvalReport {
             write!(
                 out,
                 " charge_heights_per_s={measured:.4} charge_pinned={:.4} \
-                 charge_drift_frac={drift:.4} charge_drifted={}",
+                 charge_drift_frac={drift:.4} charge_drifted={} charge_target_m={:.2}",
                 CRAB_CHARGE_SPEED_HEIGHTS_PER_S,
                 drift.abs() > CHARGE_SPEED_DRIFT_TOL,
+                self.pace.target_distance_m,
             )
             .expect("writing to a String never fails");
         }
@@ -144,7 +146,9 @@ fn bearing_lines(out: &mut String, prefix: &str, sweep: &CompassSweep) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BearingReport, CLOSE_PROBE_DISTANCE_M, DEFAULT_TARGET_DISTANCE_M};
+    use super::super::{
+        BearingReport, CLOSE_PROBE_DISTANCE_M, DEFAULT_TARGET_DISTANCE_M, PACE_PROBE_DISTANCE_M,
+    };
     use super::*;
 
     fn report(policy_loaded: bool, pace: f32) -> EvalReport {
@@ -172,6 +176,7 @@ mod tests {
             policy_loaded,
             far: sweep(DEFAULT_TARGET_DISTANCE_M),
             close: sweep(CLOSE_PROBE_DISTANCE_M),
+            pace: sweep(PACE_PROBE_DISTANCE_M),
         }
     }
 
@@ -238,7 +243,8 @@ mod tests {
             " charge_pinned={CRAB_CHARGE_SPEED_HEIGHTS_PER_S:.4}"
         )));
         assert!(headline.contains(" charge_drift_frac="));
-        assert!(headline.ends_with(" charge_drifted=false"));
+        assert!(headline.contains(" charge_drifted=false"));
+        assert!(headline.ends_with(&format!(" charge_target_m={PACE_PROBE_DISTANCE_M:.2}")));
 
         let baseline = report(false, 1.0).wire_report();
         assert!(!baseline.contains("charge_"), "rest pose measures nothing");
