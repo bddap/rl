@@ -68,14 +68,17 @@ const TARGET_Y: f32 = (TARGET_Y_MIN + TARGET_Y_MAX) / 2.0;
 /// and measurement can never diverge in method; [`run_eval`] flags when a retrain
 /// drifts the real gait outside [`CHARGE_SPEED_DRIFT_TOL`] — re-measure and re-pin then.
 ///
-/// Measured 2026-07-11 on the live mlp512x3-s2 brain (this instrument, deterministic
-/// per brain). 4.4× the rl#254 close-out's 8.5 sim m/s — locomotion training kept
-/// accelerating her while `progress_m` sat saturated at the 9 m target, which is how
-/// the old hand-pinned value rotted unnoticed (rl#266). Strictly her best
-/// 5-seconds-from-rest pace, not a cruise speed: for a decaying speed profile the max
-/// prefix lands at the [`PACE_WINDOW_MIN_S`] floor, so the opening lunge inflates it a
-/// little — the safe direction for the spawn clearance derived from it.
-pub const CRAB_CHARGE_SPEED_HEIGHTS_PER_S: f32 = 1.74;
+/// Measured 2026-07-16 on the live mlp512x3-s2 brain (this instrument, deterministic
+/// per brain) — the second re-pin in five days (1.74 → 2.31): locomotion training is
+/// still accelerating her, which is how the original hand-pinned 8.5 sim m/s rotted
+/// unnoticed while `progress_m` sat saturated at the 9 m target (rl#266). Strictly her
+/// best 5-seconds-from-rest pace, not a cruise speed: for a decaying speed profile the
+/// max prefix lands at the [`PACE_WINDOW_MIN_S`] floor, so the opening lunge inflates
+/// it a little — the safe direction for the spawn clearance derived from it. NOTE the
+/// instrument's saturation ceiling at the default 9 m ball is ~2.94 heights/s
+/// (`charge_speed_guard_keeps_saturation_headroom`): the next faster re-pin needs a
+/// farther ball first.
+pub const CRAB_CHARGE_SPEED_HEIGHTS_PER_S: f32 = 2.31;
 
 /// Fractional drift band around [`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] before the eval
 /// flags. Wide enough for brain-to-brain wobble in the measured pace and the residual
