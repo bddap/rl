@@ -1,38 +1,44 @@
-use std::collections::HashMap;
-
 use bevy::prelude::*;
 
 use crate::bot::body::CrabJointId;
-use crate::bot::meshfit::{LoadedModel, PartId};
 
+mod baked;
 mod colliders;
 mod fallback;
 mod recipe;
 
+pub use baked::{BAKED_ASSET_DIGEST, baked_recipe};
 pub(crate) use colliders::link_capsule;
 pub use colliders::{CrabSilhouette, RestCollider, RestShape, recipe_silhouette, rest_colliders};
 pub use fallback::fallback_recipe;
 pub(crate) use recipe::link_world_origins;
-pub use recipe::{TRUNK_BONES, build_recipe, part_for_bone, parts_adjacent};
+pub use recipe::{TRUNK_BONES, arc_to, build_recipe, part_for_bone, parts_adjacent};
 
-pub trait BindSource {
-    fn bone_origin(&self, name: &str) -> Option<Vec3>;
-    fn vertices_by_part(&self) -> HashMap<PartId, Vec<Vec3>>;
-    fn vertices_for_bones(&self, names: &[&str]) -> Vec<Vec3>;
-    fn radius_hint(&self, _part: PartId) -> Option<f32> {
-        None
+/// Which physics part a skinned bone's flesh belongs to.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum PartId {
+    Carapace,
+    Joint(CrabJointId),
+}
+
+impl PartId {
+    pub fn is_rigid(self) -> bool {
+        matches!(self, PartId::Carapace)
     }
 }
 
-impl BindSource for LoadedModel {
-    fn bone_origin(&self, name: &str) -> Option<Vec3> {
-        LoadedModel::bone_origin(self, name)
-    }
-    fn vertices_by_part(&self) -> HashMap<PartId, Vec<Vec3>> {
-        LoadedModel::vertices_by_part(self)
-    }
-    fn vertices_for_bones(&self, names: &[&str]) -> Vec<Vec3> {
-        LoadedModel::vertices_for_bones(self, names)
+/// A skeleton the rig recipe can be derived from: bone origins for topology and
+/// anchors, a trunk vertex cloud for the carapace box. Implemented by the procedural
+/// [`fallback::FallbackModel`] here and by the offline `meshfit` tool's glTF loader —
+/// the runtime itself never reads mesh data for physics; it consumes
+/// [`baked_recipe`] (bddap/rl#20).
+pub trait BindSource {
+    fn bone_origin(&self, name: &str) -> Option<Vec3>;
+    /// The vertex cloud the carapace box is sized from ([`TRUNK_BONES`] flesh on a
+    /// real model, synthetic box corners on the fallback).
+    fn trunk_vertices(&self) -> Vec<Vec3>;
+    fn radius_hint(&self, _part: PartId) -> Option<f32> {
+        None
     }
 }
 

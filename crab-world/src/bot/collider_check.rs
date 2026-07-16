@@ -7,7 +7,7 @@ use bevy_rapier3d::rapier::parry::query::contact;
 
 use super::body::{CrabBodyPart, CrabCarapace, CrabJoint, CrabJointId};
 use super::headless::{headless_app, tick};
-use super::meshfit::PartId;
+use super::rig::PartId;
 
 const SETTLE_TICKS: u32 = 576;
 

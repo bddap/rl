@@ -1,9 +1,7 @@
 use bevy::prelude::*;
 
-use crate::bot::meshfit::PartId;
-
 use super::recipe::link_world_origins;
-use super::{RigLink, RigRecipe};
+use super::{PartId, RigLink, RigRecipe};
 
 pub struct RestCollider {
     pub part: PartId,

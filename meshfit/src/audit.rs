@@ -1,18 +1,23 @@
-//! The dev rig-geometry audits behind `rl-train --verify-colliders` /
-//! `--verify-pivots` — table-formatted reports over the canonical model, shaped like
-//! [`super::collider_check::run`] (an [`AuditVerdict`] when the audit ran, `Err` when
-//! it couldn't) so the CLI stays thin dispatch. The pass/fail bars are pure
-//! predicates over the fit scores, unit-tested here without a model file.
+//! The rig-geometry audits behind `meshfit verify-colliders` / `verify-pivots` —
+//! table-formatted reports over the canonical model, shaped like crab-world's
+//! `collider_check::run` (an [`AuditVerdict`] when the audit ran, `Err` when it
+//! couldn't) so the CLI stays thin dispatch. The pass/fail bars are pure predicates
+//! over the fit scores, unit-tested here without a model file.
+//!
+//! The audits judge the CURRENT fit of the CURRENT asset (`bake::fitted_recipe`), so
+//! a fitter change can be audited before it's baked; `bake::tests::baked_matches_refit`
+//! is what binds that fit to the committed table the runtime actually runs.
 
 use bevy::prelude::*;
 
-use super::AuditVerdict;
+use crab_world::bot::AuditVerdict;
+use crab_world::bot::rig::{self, PartId, RestShape, RigRecipe};
+use crab_world::mesh_fallback::model_path;
 
-use super::meshfit::{
-    self, ColliderScore, LoadedModel, MeshContainment, PartId, aabb, load_bind_mesh, score_box,
-    score_capsule,
-};
-use super::rig::{self, RestShape, RigRecipe};
+use crate::bake::fitted_recipe;
+use crate::containment::{MeshContainment, aabb};
+use crate::fit::{ColliderScore, score_box, score_capsule};
+use crate::gltf_load::{LoadedModel, load_bind_mesh};
 
 /// The capsule<->cloud agreement bar: too much of the cloud outside, a p95 poke past
 /// 15% of the radius (5 mm floor), a bulge past half the radius, or a fitted
@@ -47,7 +52,7 @@ fn mesh_is_watertight(hub_wn: f32, far_wn: f32, fractional: usize) -> bool {
 /// The shared audit preamble: resolve, load, and rig the canonical model. The error
 /// string is the reason the audit cannot run at all (distinct from a FAIL verdict).
 fn load_rigged_model(audit: &str) -> Result<(std::path::PathBuf, LoadedModel, RigRecipe), String> {
-    let Some(model_path) = meshfit::model_path() else {
+    let Some(model_path) = model_path() else {
         return Err(format!(
             "{audit}: no model — set CRAB_MODEL_PATH or place sally.glb at the dev path"
         ));
@@ -55,7 +60,7 @@ fn load_rigged_model(audit: &str) -> Result<(std::path::PathBuf, LoadedModel, Ri
     let model =
         LoadedModel::load(&model_path).map_err(|e| format!("{audit}: load {model_path:?}: {e}"))?;
     let recipe =
-        rig::build_recipe(&model).ok_or_else(|| format!("{audit}: model built no rig recipe"))?;
+        fitted_recipe(&model).ok_or_else(|| format!("{audit}: model built no rig recipe"))?;
     Ok((model_path, model, recipe))
 }
 
@@ -313,7 +318,7 @@ pub fn verify_pivots() -> Result<AuditVerdict, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bot::meshfit::CapsuleDiagnostics;
+    use crate::fit::CapsuleDiagnostics;
 
     fn clean_score() -> ColliderScore {
         ColliderScore {

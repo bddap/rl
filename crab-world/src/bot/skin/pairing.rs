@@ -2,7 +2,7 @@ use bevy::camera::visibility::NoFrustumCulling;
 use bevy::prelude::*;
 
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabRestPose};
-use crate::bot::meshfit::PartId;
+use crate::bot::rig::PartId;
 
 #[derive(Component)]
 struct CrabSkin {
