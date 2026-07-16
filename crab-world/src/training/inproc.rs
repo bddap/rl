@@ -135,7 +135,13 @@ struct RollRequest {
 }
 
 enum RollOutcome {
-    Rolled { output: HorizonOutput, ticks: u64 },
+    // Boxed: the per-bearing reach array (rl#276) grew the payload past clippy's
+    // large-enum-variant line, and one channel send per thread per iter makes the
+    // indirection free.
+    Rolled {
+        output: Box<HorizonOutput>,
+        ticks: u64,
+    },
     Panicked,
     SnapshotLoadFailed,
 }
@@ -245,7 +251,7 @@ fn roll_one_horizon(app: &mut App, req: &RollRequest, horizon: u64) -> RollOutco
         .get_non_send_resource_mut::<TrainingState>()
         .expect("rollout TrainingState");
     RollOutcome::Rolled {
-        output: st.end_horizon(),
+        output: Box::new(st.end_horizon()),
         ticks: rolled,
     }
 }
@@ -437,15 +443,16 @@ mod tests {
         let r2 = roll_with_recovery(
             &mut app,
             |_app| RollOutcome::Rolled {
-                output: HorizonOutput {
+                output: Box::new(HorizonOutput {
                     envs: vec![RolloutBuffer::new()],
                     increment: empty_normalizer_increment(),
                     rewards: vec![1.5],
                     drift: (0.0, 0),
                     reach: (0, 0),
+                    reach_by_bearing: [(0, 0); crate::eval::EVAL_BEARINGS],
                     glitch_drops: 0,
                     nonfinite_obs: 0,
-                },
+                }),
                 ticks: 64,
             },
             || panic!("rebuild must NOT run on a successful roll"),
