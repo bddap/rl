@@ -343,6 +343,8 @@ mod tests {
             progress_m,
             total_torque: 0.0,
             mean_torque_per_tick: 0.0,
+            saturation: 0.0,
+            work_j: 0.0,
             initial_distance_m: DEFAULT_TARGET_DISTANCE_M,
             closest_distance_m: DEFAULT_TARGET_DISTANCE_M - progress_m,
             final_distance_m: DEFAULT_TARGET_DISTANCE_M - progress_m,

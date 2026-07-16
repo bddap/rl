@@ -152,6 +152,13 @@ impl ObsView<'_> {
     pub fn target_local(&self) -> Vec3 {
         self.vec3_at(TARGET_SLOT)
     }
+
+    /// Joint `id`'s hinge rate (rad/s about its axis) — the same channel the policy
+    /// reads, re-read by name so the eval's mechanical-work instrument (rl#279) shares
+    /// this module's ONE angle/rate implementation instead of re-deriving it.
+    pub fn joint_rate(&self, id: CrabJointId) -> f32 {
+        self.0[id.index() * JointObs::LEN + 1]
+    }
 }
 
 #[derive(Resource, Default)]
