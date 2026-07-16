@@ -377,11 +377,16 @@ pub fn run_learner(
         "[learner] reward economy: effort_weight {} (--effort-weight)",
         config.effort_weight,
     );
-    // Loud so train.log proves which PLANT it trained under (rl#268 damping run).
+    // Loud so train.log proves which PLANT it trained under (rl#268 damping run), and
+    // recorded beside the checkpoint so evals adopt it — abort a mismatched relaunch
+    // BEFORE the rollout threads spawn (a worker-thread panic wouldn't kill us).
     eprintln!(
         "[learner] plant: {}",
         crate::bot::body::friction_cap_provenance()
     );
+    if let Err(e) = crate::bot::body::record_plant(&checkpoint_dir) {
+        panic!("[learner] plant record refused: {e}");
+    }
 
     // Best-by-chase-eval keeping (rl#157, rekeyed by rl#233): periodically chase-eval
     // the checkpoint and mirror it into `<ckpt>/best/` when it beats the incumbent's

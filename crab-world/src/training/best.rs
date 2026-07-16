@@ -50,6 +50,13 @@ const BEST_FILES: &[BestFile] = &[
         name: BRAIN_FILENAME,
         required: true,
     },
+    // The plant the brain trained on (rl#268) — without it an eval of `best/` would
+    // silently judge a damped policy on the default plant. Optional: absent means the
+    // default plant (every pre-sidecar checkpoint).
+    BestFile {
+        name: crate::bot::body::PLANT_FILENAME,
+        required: false,
+    },
 ];
 
 /// How often to spend one chase-eval scoring the live checkpoint. Periodic rather than

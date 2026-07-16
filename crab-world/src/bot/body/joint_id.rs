@@ -22,18 +22,23 @@ const CLAW_FRICTION_CAP: f32 = 0.04;
 /// a PLANT property that must reach binaries with no CLI at all — game/rl-demo spawn
 /// this same crab — as well as every sim inside one process: the learn rollout
 /// threads, the in-process keep-best chase-eval, and the external honest-eval binary.
-/// A damped policy measured on an undamped plant is a mismeasure, so evals of a
-/// damped run must export this too; `learn` and `eval` both log the resolved value to
-/// make the plant provable from their artifacts (checkpoints do NOT carry their
-/// plant). Unset keeps the legacy constants bit-identical for every binary.
+/// A damped policy measured on an undamped plant is a mismeasure, so checkpoints
+/// carry their plant ([`PLANT_FILENAME`]) and `run_eval` adopts it; `learn` and
+/// `eval` both log the resolved value to make the plant provable from their
+/// artifacts. Unset keeps the legacy constants bit-identical for every binary.
 pub const JOINT_FRICTION_CAP_ENV: &str = "RL_JOINT_FRICTION_CAP";
+
+static OVERRIDE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
 
 /// The resolved per-run cap override, read once per process. A SET-but-invalid value
 /// aborts instead of defaulting: silently training days on the wrong plant is the
 /// failure mode this knob exists to prevent (same policy as the rl#272 run knobs).
 pub fn friction_cap_override() -> Option<f32> {
-    static OVERRIDE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
-    *OVERRIDE.get_or_init(|| match std::env::var(JOINT_FRICTION_CAP_ENV) {
+    *OVERRIDE.get_or_init(env_override)
+}
+
+fn env_override() -> Option<f32> {
+    match std::env::var(JOINT_FRICTION_CAP_ENV) {
         Err(std::env::VarError::NotPresent) => None,
         Ok(raw) => Some(parse_friction_cap(&raw).unwrap_or_else(|e| {
             panic!("{JOINT_FRICTION_CAP_ENV}={raw}: {e} — refusing an ambiguous plant")
@@ -41,7 +46,97 @@ pub fn friction_cap_override() -> Option<f32> {
         Err(e @ std::env::VarError::NotUnicode(_)) => {
             panic!("{JOINT_FRICTION_CAP_ENV}: {e} — refusing an ambiguous plant")
         }
-    })
+    }
+}
+
+/// The plant sidecar: a checkpoint dir carries the non-default plant it trained on, so
+/// measurement can never silently disagree with training (bddap/rl#268). The learner
+/// writes it once at startup; `run_eval` ADOPTS it (or refuses a conflict), so an
+/// eval invoker needs no plant knowledge at all — the standing rl-eval-monitor keeps
+/// measuring every run correctly with zero configuration. Key-value lines so future
+/// plant knobs (torque slew is the reserved next lever) extend it; an eval binary
+/// that meets an unknown key REFUSES rather than mismeasure a plant it can't build.
+pub const PLANT_FILENAME: &str = "plant.txt";
+const PLANT_KEY: &str = "joint_friction_cap";
+
+/// Learner-side: record the resolved plant into `<ckpt>/plant.txt`, or refuse a
+/// launch whose plant disagrees with what the checkpoint trained on — resuming a run
+/// on a different plant would silently poison the whole experiment. Absent knob +
+/// absent sidecar writes nothing (legacy runs stay byte-identical on disk).
+pub fn record_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
+    let path = ckpt_dir.join(PLANT_FILENAME);
+    let recorded = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(parse_plant(&text).map_err(|e| format!("{}: {e}", path.display()))?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    match (recorded, friction_cap_override()) {
+        (Some(r), Some(v)) if r == v => Ok(()),
+        (Some(r), resolved) => Err(format!(
+            "{}: checkpoint trained with {PLANT_KEY} {r}, but this launch resolves {} — \
+             fix the run's {JOINT_FRICTION_CAP_ENV}, never change a run's plant mid-flight",
+            path.display(),
+            resolved.map_or("the default plant".into(), |v| v.to_string()),
+        )),
+        (None, Some(v)) => {
+            // A brain that already trained here has UNKNOWN plant provenance (pre-knob
+            // or default); stamping the knob onto it would be a mid-run plant change.
+            if ckpt_dir
+                .join(crate::training::checkpoint::BRAIN_FILENAME)
+                .exists()
+            {
+                return Err(format!(
+                    "{}: {JOINT_FRICTION_CAP_ENV} is set but the existing checkpoint \
+                     carries no plant record — start a fresh run for a new plant",
+                    ckpt_dir.display()
+                ));
+            }
+            std::fs::create_dir_all(ckpt_dir)
+                .map_err(|e| format!("{}: {e}", ckpt_dir.display()))?;
+            std::fs::write(&path, format!("{PLANT_KEY} {v}\n"))
+                .map_err(|e| format!("{}: {e}", path.display()))
+        }
+        (None, None) => Ok(()),
+    }
+}
+
+/// Eval-side: make the sim use the plant the checkpoint trained on. Sidecar present →
+/// install it as the process override (or verify an already-resolved env agrees);
+/// absent → env/default as-is (every pre-sidecar checkpoint is the default plant).
+/// MUST run before the first crab spawn — the override is read-once.
+pub fn adopt_recorded_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
+    let path = ckpt_dir.join(PLANT_FILENAME);
+    let recorded = match std::fs::read_to_string(&path) {
+        Ok(text) => parse_plant(&text).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    if OVERRIDE.set(Some(recorded)).is_ok() {
+        return Ok(());
+    }
+    // Already resolved (env set, or a prior spawn in this process): agreement or bust.
+    match friction_cap_override() {
+        Some(v) if v == recorded => Ok(()),
+        resolved => Err(format!(
+            "{}: checkpoint trained with {PLANT_KEY} {recorded}, but this process \
+             already resolved {} — refusing to mismeasure",
+            path.display(),
+            resolved.map_or("the default plant".into(), |v| v.to_string()),
+        )),
+    }
+}
+
+fn parse_plant(text: &str) -> Result<f32, String> {
+    let mut cap = None;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        match line.split_once(' ') {
+            Some((PLANT_KEY, value)) if cap.is_none() => {
+                cap = Some(parse_friction_cap(value)?);
+            }
+            _ => return Err(format!("unknown or duplicate plant entry {line:?}")),
+        }
+    }
+    cap.ok_or_else(|| "no plant entries".to_string())
 }
 
 /// One human-readable source for "which plant is this?" — logged by `learn` (into
@@ -215,6 +310,21 @@ mod tests {
             "all() yielded the wrong joint count"
         );
         assert!(seen.iter().all(|&s| s), "index leaves a slot unfilled");
+    }
+
+    #[test]
+    fn plant_sidecar_roundtrips_and_rejects_unknown_keys() {
+        assert_eq!(parse_plant("joint_friction_cap 2.5\n"), Ok(2.5));
+        assert_eq!(parse_plant("joint_friction_cap 0.04"), Ok(0.04));
+        for bad in [
+            "",
+            "torque_slew 3.0\n", // future knob: old bin must refuse
+            "joint_friction_cap 2.5\ntorque_slew 3.0\n", // ditto, alongside a known key
+            "joint_friction_cap 2.5\njoint_friction_cap 2.5\n", // duplicate = ambiguous
+            "joint_friction_cap NaN\n",
+        ] {
+            assert!(parse_plant(bad).is_err(), "{bad:?} must refuse");
+        }
     }
 
     // Pure-parse tests only: the env read is process-global (OnceLock) and tests run
