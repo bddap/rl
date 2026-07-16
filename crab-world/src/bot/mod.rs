@@ -83,8 +83,13 @@ impl CrabSpawns {
         Self(origins)
     }
 
-    fn rebuild(&mut self, n: usize) {
-        self.0 = (0..n).map(|env| grid_offset(env, n)).collect();
+    /// Rebuild the spawn grid ON the terrain surface (rl#281): each origin's y is the
+    /// ground height at its (x, z), so every consumer — initial spawn, episode respawn,
+    /// rescue, the spawn-relative obs channel — is surface-relative through this one seam.
+    fn rebuild(&mut self, n: usize, terrain: &crate::terrain::TerrainGrid) {
+        self.0 = (0..n)
+            .map(|env| terrain.on_surface(grid_offset(env, n)))
+            .collect();
     }
 
     /// Not yet rebuilt by `spawn_initial_crabs` — the pre-spawn frames a FixedUpdate
@@ -314,10 +319,12 @@ pub fn respawn_crab_rotated(
     body::spawn_crab(commands, assets, origin, env, init_rotation);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_initial_crabs(
     mut commands: Commands,
     assets: Res<body::CrabAssets>,
     num_envs: Res<NumEnvs>,
+    terrain: Res<crate::terrain::Terrain>,
     mut spawns: ResMut<CrabSpawns>,
     mut actions: ResMut<actuator::CrabActions>,
     mut obs: ResMut<sensor::CrabObservation>,
@@ -327,7 +334,7 @@ pub fn spawn_initial_crabs(
     actions.resize(n);
     obs.resize(n);
     targets.resize(n);
-    spawns.rebuild(n);
+    spawns.rebuild(n, &terrain.0);
     for env in 0..n {
         body::spawn_crab(
             &mut commands,

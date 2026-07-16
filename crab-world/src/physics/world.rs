@@ -1,39 +1,62 @@
+use std::sync::Arc;
+
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
 use crate::bot::body::ARENA_COLLISION;
+use crate::terrain::{Terrain, TerrainGrid};
 
-/// Which arena PHYSICS a world gets. The training/demo box and the GCR inference field
-/// legitimately differ — training samples targets inside a ±10 m walled box, while the
-/// GCR crab hunts a real player who can be anywhere on the map (players spawn ≥12 m out,
-/// past the box walls — rl#209) — so the choice is an explicit parameter of the ONE
-/// [`PhysicsWorldPlugin`], not a second parallel arena implementation.
+/// Which arena PHYSICS a world gets. The training/demo box, the GCR inference field, and
+/// the baked terrain tile legitimately differ — training samples targets inside a ±10 m
+/// walled box, while the GCR crab hunts a real player who can be anywhere on the map
+/// (players spawn ≥12 m out, past the box walls — rl#209) — so the choice is an explicit
+/// parameter of the ONE [`PhysicsWorldPlugin`], not a second parallel arena
+/// implementation. Every variant is a height grid through the ONE terrain path
+/// ([`crate::terrain`], rl#281): the ground collider is always [`TerrainGrid::collider`],
+/// only the grid (and the walls) differ.
 pub enum Arena {
-    /// The ±10 m walled box the policy trains in ([`ARENA_HALF_SIZE`]): a finite ground
-    /// slab plus four walls. The trainer, its tests/eval, and the standalone rl-demo.
+    /// The ±10 m walled box the policy trains in ([`ARENA_HALF_SIZE`]): a flat grid
+    /// plus four walls. The trainer, its tests/eval, and the standalone rl-demo.
     WalledBox,
-    /// An unbounded flat ground (a halfspace at the walled box's same y=0 surface) with NO
-    /// walls, for GCR inference: the crab's per-round travel is unbounded so it can chase a
-    /// player clear across the map (rl#209), and the player's flight vehicle — which clears
-    /// the 2 m walls anyway — can never overfly a ground edge and fall forever.
+    /// An unwalled flat grid at the walled box's same y=0 surface, for GCR inference:
+    /// the crab's per-round travel is unbounded so it can chase a player clear across
+    /// the map (rl#209). Spans ±[`OPEN_FIELD_HALF_SIZE`] — far past the cameras, the
+    /// round clock, and every speed cap; kept flat until GCR's planar server sim learns
+    /// terrain (rl#281 stages 3-5).
     OpenField,
+    /// The committed GCR terrain bake ([`TerrainGrid::gcr`], rl#281) — real mountains,
+    /// no walls. Live in rl-demo (`--terrain`) for the stage-3 taste loop; GCR itself
+    /// flips once its sim and render are terrain-aware.
+    Terrain,
 }
 
-/// Plugin that lays the arena PHYSICS — the ground (+ wall) colliders per [`Arena`]. No
-/// meshes or lights: the visible dressing is a SEPARATE [`ArenaVisualsPlugin`], so a host
-/// that draws its own scene (the GCR client's gray-box world) adds the colliders alone and
-/// never spawns a second coplanar ground quad to z-fight its own (rl#160). The standalone
-/// rl-demo arena, which draws no other scene, adds both.
+impl Arena {
+    fn grid(&self) -> Arc<TerrainGrid> {
+        match self {
+            Arena::WalledBox => Arc::new(TerrainGrid::flat(ARENA_HALF_SIZE)),
+            Arena::OpenField => Arc::new(TerrainGrid::flat(OPEN_FIELD_HALF_SIZE)),
+            Arena::Terrain => TerrainGrid::gcr(),
+        }
+    }
+}
+
+/// Plugin that lays the arena PHYSICS — the ground (+ wall) colliders per [`Arena`] —
+/// and publishes the [`Terrain`] resource spawn-on-surface consumers sample. No meshes
+/// or lights: the visible dressing is a SEPARATE [`ArenaVisualsPlugin`], so a host that
+/// draws its own scene (the GCR client's gray-box world) adds the colliders alone and
+/// never spawns a second coplanar ground quad to z-fight its own (rl#160). The
+/// standalone rl-demo arena, which draws no other scene, adds both.
 pub struct PhysicsWorldPlugin {
     pub arena: Arena,
 }
 
 impl Plugin for PhysicsWorldPlugin {
     fn build(&self, app: &mut App) {
-        match self.arena {
-            Arena::WalledBox => app.add_systems(Startup, setup_walled_box),
-            Arena::OpenField => app.add_systems(Startup, setup_open_field),
-        };
+        app.insert_resource(Terrain(self.arena.grid()));
+        app.add_systems(Startup, setup_ground);
+        if matches!(self.arena, Arena::WalledBox) {
+            app.add_systems(Startup, setup_walls);
+        }
     }
 }
 
@@ -48,7 +71,11 @@ impl Plugin for ArenaVisualsPlugin {
 }
 
 pub(crate) const ARENA_HALF_SIZE: f32 = 10.0;
-const GROUND_THICKNESS: f32 = 0.1;
+/// Half-span of the [`Arena::OpenField`] flat grid. The old halfspace was truly
+/// unbounded; a grid has an edge, so this is sized to make the edge unreachable in
+/// practice (≥ the GCR terrain tile's own ~±15 km span). A real world-bounds policy is a
+/// later stage of rl#281.
+const OPEN_FIELD_HALF_SIZE: f32 = 16_384.0;
 const WALL_HEIGHT: f32 = 2.0;
 const WALL_THICKNESS: f32 = 0.5;
 
@@ -73,17 +100,21 @@ fn wall_boxes() -> [(Vec3, Vec3); 4] {
     ]
 }
 
-/// Lay the [`Arena::WalledBox`] PHYSICS: the ground collider + the four wall colliders.
-/// No meshes or lights (those are render-only — see [`setup_arena_visuals`]), so this is
-/// the one arena setup the headless trainer runs, touching no graphics types.
-fn setup_walled_box(mut commands: Commands) {
+/// Lay the ground collider — the one terrain heightfield, whatever the arena. No meshes
+/// or lights (those are render-only — see [`setup_arena_visuals`]), so this is the one
+/// arena setup the headless trainer runs, touching no graphics types.
+fn setup_ground(mut commands: Commands, terrain: Res<Terrain>) {
     commands.spawn((
         RigidBody::Fixed,
-        Collider::cuboid(ARENA_HALF_SIZE, GROUND_THICKNESS, ARENA_HALF_SIZE),
+        terrain.0.collider(),
         ARENA_COLLISION,
-        Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
+        Transform::IDENTITY,
     ));
+}
 
+/// The [`Arena::WalledBox`] walls (same contact identity as the ground:
+/// [`ARENA_COLLISION`]).
+fn setup_walls(mut commands: Commands) {
     for (pos, half_extents) in wall_boxes() {
         commands.spawn((
             RigidBody::Fixed,
@@ -94,23 +125,11 @@ fn setup_walled_box(mut commands: Commands) {
     }
 }
 
-/// Lay the [`Arena::OpenField`] PHYSICS: one unbounded halfspace ground whose surface is
-/// the SAME y=0 plane the walled box's slab tops out at (default material, same
-/// [`ARENA_COLLISION`] groups), so the crab plants and walks on contact dynamics identical
-/// to what the policy trained under — only the walls and the ground's edge are gone.
-fn setup_open_field(mut commands: Commands) {
-    commands.spawn((
-        RigidBody::Fixed,
-        Collider::halfspace(Vec3::Y).expect("+Y is a unit normal"),
-        ARENA_COLLISION,
-        Transform::IDENTITY,
-    ));
-}
-
 #[cfg(feature = "render")]
 fn setup_arena_visuals(
     mut commands: Commands,
     visuals: Res<crate::Visuals>,
+    terrain: Res<Terrain>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -133,18 +152,17 @@ fn setup_arena_visuals(
         ..default()
     });
 
-    // The visible ground quad, sitting exactly on the collider laid in `setup_walled_box`.
+    // The visible ground: the SAME grid the collider was built from (rl#281 — render
+    // matches physics by construction). Flat arenas get their old flat green floor;
+    // the terrain arena gets the actual mountains. Looks beyond correct geometry
+    // (material, LOD, biome tint) are rl#281 stage 3.
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(
-            ARENA_HALF_SIZE * 2.0,
-            GROUND_THICKNESS * 2.0,
-            ARENA_HALF_SIZE * 2.0,
-        ))),
+        Mesh3d(meshes.add(terrain.0.mesh())),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.35, 0.55, 0.35),
             perceptual_roughness: 0.9,
             ..default()
         })),
-        Transform::from_xyz(0.0, -GROUND_THICKNESS, 0.0),
+        Transform::IDENTITY,
     ));
 }

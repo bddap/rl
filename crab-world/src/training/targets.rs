@@ -3,9 +3,13 @@ use bevy::prelude::*;
 use crate::bot::CrabSpawns;
 use crate::bot::body::{CrabClawTip, CrabEnvId};
 use crate::bot::sensor::CrabTargets;
+use crate::terrain::TerrainGrid;
 use crate::training::reward::dist_3d;
 
 pub(crate) const BAND_START_MIN: f32 = 1.5;
+/// Target height band, meters ABOVE the terrain surface at the target's own (x, z) —
+/// on the flat arenas that is the old absolute y band; on terrain (rl#281) the ball
+/// hugs the ground wherever it lands.
 pub(crate) const TARGET_Y_MIN: f32 = 0.15;
 pub(crate) const TARGET_Y_MAX: f32 = 0.7;
 /// Far edge of the trained chase band — the ONE source for "how far a target can
@@ -70,7 +74,12 @@ pub(crate) fn polar_target(origin: Vec3, theta: f32, dist: f32, y: f32) -> Vec3 
 /// on purpose: the density concentrates where the new skill lives, and targets the
 /// rest pose already touches are re-seeded at episode start (`pre_touched_target`),
 /// which carves the true no-op boundary better than any hand-drawn annulus could.
-pub(crate) fn sample_target(origin: Vec3, close_frac: f32, rng: &mut impl rand::Rng) -> Vec3 {
+pub(crate) fn sample_target(
+    origin: Vec3,
+    close_frac: f32,
+    rng: &mut impl rand::Rng,
+    terrain: &TerrainGrid,
+) -> Vec3 {
     let dist = if rng.gen_range(0.0..1.0) < close_frac {
         rng.gen_range(0.0..BAND_START_MIN)
     } else {
@@ -79,7 +88,7 @@ pub(crate) fn sample_target(origin: Vec3, close_frac: f32, rng: &mut impl rand::
         min + (max - min) * u.powf(NEAR_BIAS_EXP)
     };
     let y = rng.gen_range(TARGET_Y_MIN..TARGET_Y_MAX);
-    let at = |theta: f32| polar_target(origin, theta, dist, y);
+    let at = |theta: f32| terrain.on_surface(polar_target(origin, theta, dist, y));
     let in_arena = |p: &Vec3| p.x.abs() <= TARGET_ARENA_HALF && p.z.abs() <= TARGET_ARENA_HALF;
 
     for _ in 0..32 {
@@ -103,10 +112,11 @@ pub(crate) fn seed_target(
     e: usize,
     close_frac: f32,
     rng: &mut rand::rngs::StdRng,
+    terrain: &TerrainGrid,
 ) {
     if let Some(slot) = targets.envs.get_mut(e) {
         let origin = spawns.origin(e);
-        *slot = Some(sample_target(origin, close_frac, rng));
+        *slot = Some(sample_target(origin, close_frac, rng, terrain));
     }
 }
 
@@ -114,6 +124,11 @@ pub(crate) fn seed_target(
 mod tests {
     use super::*;
     use crate::training::reward::planar_dist;
+
+    /// The training arena's flat grid — these tests pin the FLAT-arena band semantics.
+    fn flat() -> TerrainGrid {
+        TerrainGrid::flat(crate::physics::world::ARENA_HALF_SIZE)
+    }
 
     /// rl#253's invariant, geometrically: the touch sphere is finer than the crab.
     /// If REACH_RADIUS out-reaches the carapace footprint or the rest pose's claw
@@ -172,7 +187,7 @@ mod tests {
             Vec3::new(8.0, 0.0, -8.0),
         ] {
             for _ in 0..2000 {
-                let t = sample_target(origin, 0.0, &mut rng);
+                let t = sample_target(origin, 0.0, &mut rng, &flat());
                 assert!(t.is_finite(), "a sampled target is always finite");
                 assert!(
                     t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF,
@@ -201,7 +216,7 @@ mod tests {
         let far_edge = 6.0;
         let (mut near, mut far, n) = (0u32, 0u32, 20_000u32);
         for _ in 0..n {
-            let d = planar_dist(sample_target(origin, 0.0, &mut rng), origin);
+            let d = planar_dist(sample_target(origin, 0.0, &mut rng, &flat()), origin);
             if d < near_edge {
                 near += 1;
             }
@@ -227,7 +242,7 @@ mod tests {
         for origin in [Vec3::ZERO, Vec3::new(8.0, 0.0, -8.0)] {
             let mut under_body = 0u32;
             for _ in 0..5000 {
-                let t = sample_target(origin, 1.0, &mut rng);
+                let t = sample_target(origin, 1.0, &mut rng, &flat());
                 assert!(t.is_finite());
                 assert!(t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF);
                 assert!(t.y >= TARGET_Y_MIN && t.y <= TARGET_Y_MAX);
@@ -253,7 +268,9 @@ mod tests {
         let origin = Vec3::ZERO;
         let n = 20_000u32;
         let close = (0..n)
-            .filter(|_| planar_dist(sample_target(origin, 0.25, &mut rng), origin) < BAND_START_MIN)
+            .filter(|_| {
+                planar_dist(sample_target(origin, 0.25, &mut rng, &flat()), origin) < BAND_START_MIN
+            })
             .count() as f32
             / n as f32;
         assert!(
@@ -261,7 +278,7 @@ mod tests {
             "close fraction {close} should track the requested 0.25"
         );
         for _ in 0..2000 {
-            let d = planar_dist(sample_target(origin, 0.0, &mut rng), origin);
+            let d = planar_dist(sample_target(origin, 0.0, &mut rng, &flat()), origin);
             assert!(
                 d >= BAND_START_MIN - 1e-3,
                 "frac 0 must never sample close ({d})"

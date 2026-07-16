@@ -932,7 +932,7 @@ mod ship_wiggle_tests {
         let mut prev_recenters = recenters(&app);
 
         let mut max_ship_d = 0.0f32;
-        for t in 0..400u32 {
+        for t in 0..1200u32 {
             app.world_mut().resource_mut::<Wiggle>().0 = if (t / 5) % 2 == 0 { 1.0 } else { -1.0 };
             app.update();
             max_ship_d = max_ship_d.max(ship_render_pos(&mut app).distance(render0));
@@ -952,9 +952,10 @@ mod ship_wiggle_tests {
         }
         assert!(
             recenters(&app) >= 1,
-            "the 400-tick flail-walk (9.6 m pre-fix) must cross the band and recenter — \
-             if physics changed enough that it no longer does, the epoch assertions \
-             above went vacuous; re-pin this test"
+            "the 1200-tick flail-walk (first recenter ~t=500 on the rl#281 heightfield \
+             ground; 9.6 m per 400 ticks on the pre-rl#281 halfspace) must cross the \
+             band and recenter — if physics changed enough that it no longer does, the \
+             epoch assertions above went vacuous; re-pin this test"
         );
         assert!(
             max_ship_d < 1e-3,

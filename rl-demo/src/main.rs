@@ -27,6 +27,11 @@ pub struct Args {
     #[arg(long)]
     demo: bool,
 
+    /// Run on the baked GCR terrain tile (rl#281) instead of the training walled box —
+    /// the stage-3 taste-loop surface: real mountains, spawn-on-surface, no walls.
+    #[arg(long)]
+    terrain: bool,
+
     #[arg(long)]
     windowed: bool,
 
@@ -217,9 +222,14 @@ fn main() {
         .insert_resource(bot::NumEnvs(1))
         .add_plugins(physics::CrabPhysicsPlugin)
         // The demo mirrors the TRAINING world (targets sampled inside the box), so it keeps
-        // the walled arena; only GCR inference runs the open field (rl#209).
+        // the walled arena; only GCR inference runs the open field (rl#209). `--terrain`
+        // swaps in the baked GCR tile (rl#281) for terrain viewing.
         .add_plugins(physics::PhysicsWorldPlugin {
-            arena: physics::Arena::WalledBox,
+            arena: if args.terrain {
+                physics::Arena::Terrain
+            } else {
+                physics::Arena::WalledBox
+            },
         })
         .add_plugins(physics::ArenaVisualsPlugin)
         .insert_resource(mesh_state)
