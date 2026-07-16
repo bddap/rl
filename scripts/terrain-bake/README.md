@@ -33,9 +33,17 @@ returns stats-worthy int16 directly). `gcr-seed281` came from origin
 ## Artifact format (`.terrain`)
 
 Little-endian: `b"RLTERR01"` · `u32` JSON length · JSON metadata ·
-`width*height` int16 elevation meters, row-major.
+`rows*cols` int16 elevation meters, row-major.
+
+Orientation: `grid[row][col]`, `origin` is the window's top-left `(i, j)` in
+the model's target-resolution pixel space (i = row, j = col), and row 0 is the
+top of the preview PNG. The world-axis mapping (which of row/col is x vs z) is
+the runtime sampler's decision, not the artifact's — the artifact only promises
+it matches its own preview.
 
 Metadata carries the scale knobs the runtime sampler applies — `cell_size_m`
 (horizontal stretch) and `height_scale` (vertical exaggeration) — plus full
-provenance (seed, origin, model, optional FBM params). Knobs are declarative:
-re-tuning world scale edits metadata, no re-bake, no GPU.
+provenance (seed, origin, model + `model_rev`, optional FBM params). Knobs are
+declarative: re-tuning world scale edits metadata, no re-bake, no GPU.
+`serve-model.sh` pins the upstream rev (`UPSTREAM_REV`) so a bake is
+reproducible; bump the pin deliberately, alongside a re-bake.
