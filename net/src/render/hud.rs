@@ -45,15 +45,15 @@ pub(super) fn update_hud(state: NonSend<GameState>, mut hud: Query<&mut Text, Wi
     let status = sim.player(me).map(|p| status_str(p.status())).unwrap_or("—");
     // In a multiplayer round, a second line tracks the whole party — whether a teammate is
     // downed or already out decides what you do next, and their avatar may be out of view.
-    let party = if sim.players().count() > 1 {
-        let list: Vec<String> = sim
-            .players()
-            .filter(|(id, _)| *id != me)
-            .map(|(id, p)| format!("P{}: {}", id.0, status_str(p.status())))
-            .collect();
-        format!("\nParty: {}", list.join("   "))
-    } else {
+    let party: Vec<String> = sim
+        .players()
+        .filter(|(id, _)| *id != me)
+        .map(|(id, p)| format!("P{}: {}", id.0, status_str(p.status())))
+        .collect();
+    let party = if party.is_empty() {
         String::new()
+    } else {
+        format!("\nParty: {}", party.join("   "))
     };
     let outcome = match sim.outcome() {
         Outcome::Ongoing => String::new(),

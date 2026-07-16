@@ -339,6 +339,7 @@ mod tests {
     async fn three_endpoints_form_the_identical_match_over_iroh() {
         use std::collections::BTreeMap;
 
+        let _serial = crate::real_net_serial();
         let mut s0 = transport::start_session().await.expect("start s0");
         let mut s1 = transport::start_session().await.expect("start s1");
         let mut s2 = transport::start_session().await.expect("start s2");

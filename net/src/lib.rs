@@ -31,6 +31,17 @@ pub fn may_arm_external_crab(sync: Option<SyncVerdict>) -> bool {
     sync.is_none_or(|v| v.assets && v.crabs)
 }
 
+/// Serializes the `#[ignore]`d real-endpoint tests: every live iroh endpoint on the box
+/// mDNS-discovers and dials every other, so two lobby tests running at once merge into
+/// one oversized roster. A lock they all take beats a `--test-threads=1` flag someone
+/// must remember to pass.
+#[cfg(test)]
+pub(crate) fn real_net_serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod desync_test {
 

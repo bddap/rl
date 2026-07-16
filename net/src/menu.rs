@@ -40,8 +40,8 @@ impl Formation {
         }
     }
 
-    /// This peer's own endpoint id, once its session has bound (either role — the wire
-    /// sends it unconditionally). The lobby roster tags this entry "(you)".
+    /// This peer's own endpoint id, once its session has bound — available in either
+    /// role (the wire sends it unconditionally).
     pub fn my_id(&self) -> Option<EndpointId> {
         if self.bound.get().is_none()
             && let Ok(id) = self.bound_rx.try_recv()
@@ -397,18 +397,15 @@ mod tests {
         }
     }
 
-    /// The full 2-peer lobby flow the egui menu drives, over real iroh on this box —
-    /// exactly the objects `render::menu` holds: share the host's code, join by it,
-    /// both rosters fill, only the host's Start forms the match (rl#94 liveness).
-    #[test]
-    #[ignore = "binds real iroh UDP endpoints via begin(); run explicitly with --ignored"]
-    fn two_peer_lobby_forms_one_match_on_host_start() {
+    /// Share the host's code, join by it, and wait for both rosters to see 2 peers —
+    /// the lobby state every scenario below starts from.
+    fn two_peer_lobby() -> (Formation, Formation) {
         let host = begin(&StartChoice::Host, 7, None, 0, 0);
-        assert!(host.hosting);
+        assert!(host.hosting, "Host formation is flagged hosting");
         let code = wait_for(15, "the host's shareable join code", || host.display_code());
 
         let join = begin(&StartChoice::Join(Some(code)), 7, None, 0, 0);
-        assert!(!join.hosting);
+        assert!(!join.hosting, "Join formation is not hosting");
         assert_eq!(
             join.display_code(),
             Some(code),
@@ -418,47 +415,67 @@ mod tests {
         wait_for(30, "both rosters to reach 2 peers", || {
             (host.roster().len() == 2 && join.roster().len() == 2).then_some(())
         });
-        let join_id = wait_for(15, "the joiner's own endpoint id", || join.my_id());
-        assert!(
-            join.roster().contains(&join_id),
-            "the joiner finds itself in its roster (the \"(you)\" tag)"
-        );
-        assert!(
-            host.roster().contains(&code),
-            "the host finds itself in its roster"
-        );
+        (host, join)
+    }
+
+    /// The full 2-peer lobby flow the egui menu drives, over real iroh on this box —
+    /// exactly the objects `render::menu` holds: share the host's code, join by it,
+    /// both rosters fill, only the host's Start forms the match (rl#94 liveness).
+    #[test]
+    #[ignore = "binds real iroh UDP endpoints via begin(); run explicitly with --ignored"]
+    fn two_peer_lobby_forms_one_match_on_host_start() {
+        let _serial = crate::real_net_serial();
+        let (host, join) = two_peer_lobby();
+
+        for (f, who) in [(&host, "host"), (&join, "joiner")] {
+            let id = wait_for(15, "this peer's own endpoint id", || f.my_id());
+            assert!(
+                f.roster().contains(&id),
+                "the {who} finds itself in its roster (the \"(you)\" tag)"
+            );
+        }
+
+        // Only the host holds the start command — a joiner's Start is inert.
+        join.request_start();
         assert!(
             host.poll().is_none() && join.poll().is_none(),
-            "nobody forms before the host presses Start"
+            "nobody forms before the HOST presses Start"
         );
 
         host.request_start();
-        let formed = |f: &Formation, who: &str| -> ClientSim {
-            let result = wait_for(30, "formation after Start", || f.poll());
-            match result.expect(who) {
+        // Resolve BOTH formations before touching either result: unwrapping one drops its
+        // NetDriver (endpoint and all), and the other peer may still be mid-barrier.
+        let mut results = (None, None);
+        wait_for(30, "both formations after Start", || {
+            if results.0.is_none() {
+                results.0 = host.poll();
+            }
+            if results.1.is_none() {
+                results.1 = join.poll();
+            }
+            (results.0.is_some() && results.1.is_some()).then_some(())
+        });
+        let sim_of = |r: Option<Result<MatchResult>>, who: &str| -> ClientSim {
+            match r.unwrap().expect(who) {
                 MatchResult::Joined(joined) => joined.0,
                 MatchResult::Alone => panic!("{who}: fell back to solo with a peer in the lobby"),
                 MatchResult::Cancelled => panic!("{who}: cancelled without a cancel"),
             }
         };
-        let h = formed(&host, "host forms");
-        let j = formed(&join, "joiner forms");
+        let h = sim_of(results.0, "host forms");
+        let j = sim_of(results.1, "joiner forms");
         assert_eq!(h.peers(), j.peers(), "one match: identical rosters");
         assert_eq!(h.peers().len(), 2);
         assert_ne!(h.me(), j.me(), "distinct player ids");
     }
 
-    /// The joiner's Cancel path: leaving the lobby resolves its formation as Cancelled
-    /// (no round), which `ready_from` maps back to the chooser.
+    /// Cancel from either role resolves that peer's formation as Cancelled (no round) —
+    /// which `ready_from` maps back to the chooser.
     #[test]
     #[ignore = "binds real iroh UDP endpoints via begin(); run explicitly with --ignored"]
-    fn joiner_cancel_leaves_the_lobby_cleanly() {
-        let host = begin(&StartChoice::Host, 7, None, 0, 0);
-        let code = wait_for(15, "the host's shareable join code", || host.display_code());
-        let join = begin(&StartChoice::Join(Some(code)), 7, None, 0, 0);
-        wait_for(30, "both rosters to reach 2 peers", || {
-            (host.roster().len() == 2 && join.roster().len() == 2).then_some(())
-        });
+    fn cancel_leaves_the_lobby_cleanly() {
+        let _serial = crate::real_net_serial();
+        let (host, join) = two_peer_lobby();
 
         join.cancel();
         let result = wait_for(15, "the joiner's formation to resolve", || join.poll());
@@ -470,21 +487,13 @@ mod tests {
             ready_from(MatchResult::Cancelled, 7).is_none(),
             "…which arms no round"
         );
-        host.cancel();
-    }
 
-    #[test]
-    #[ignore = "binds a real iroh UDP endpoint via begin(); run explicitly with --ignored"]
-    fn only_host_holds_the_start_command() {
-        let host = begin(&StartChoice::Host, 0, None, 0, 1);
-        assert!(host.hosting, "Host formation is flagged hosting");
-        host.request_start();
         host.cancel();
-
-        let join = begin(&StartChoice::Join(None), 0, None, 0, 1);
-        assert!(!join.hosting, "Join formation is not hosting");
-        join.request_start();
-        join.cancel();
+        let result = wait_for(15, "the host's formation to resolve", || host.poll());
+        assert!(
+            matches!(result.expect("cancel is not an error"), MatchResult::Cancelled),
+            "a cancelled host resolves Cancelled"
+        );
     }
 
     #[test]
