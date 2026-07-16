@@ -334,26 +334,45 @@ mod tests {
         assert_eq!(map[&host], PlayerId(0), "host_of must hold PlayerId(0)");
     }
 
-    #[tokio::test]
+    #[test]
     #[ignore = "binds real iroh UDP endpoints; run explicitly with --ignored"]
-    async fn three_endpoints_form_the_identical_match_over_iroh() {
+    fn three_endpoints_form_the_identical_match_over_iroh() {
+        // A sync test so the serialization guard is held across the whole async body
+        // without tripping `await_holding_lock` — it excludes sibling TESTS, not tasks.
+        let _serial = crate::real_net_serial();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(three_endpoints_body());
+    }
+
+    async fn three_endpoints_body() {
         use std::collections::BTreeMap;
 
-        let _serial = crate::real_net_serial();
         let mut s0 = transport::start_session().await.expect("start s0");
         let mut s1 = transport::start_session().await.expect("start s1");
         let mut s2 = transport::start_session().await.expect("start s2");
         let (a0, a1) = (s0.local_addr(), s1.local_addr());
         let (e0, e1, e2) = (s0.endpoint_id(), s1.endpoint_id(), s2.endpoint_id());
 
-        s0.connect_direct(a1.clone()).await.expect("s0->s1");
+        // A dial can LOSE the crossed-dial dedup to the peer's concurrent discovery-dial
+        // (the kept link still serves — transport closes only the duplicate), so a dial
+        // error is benign here exactly as in production (`connect_and_form_inner` warns
+        // and proceeds); the formation assertions below are the real check.
+        let dial = |r: Result<()>, leg: &str| {
+            if let Err(e) = r {
+                eprintln!("{leg} dial lost benignly: {e:#}");
+            }
+        };
+        dial(s0.connect_direct(a1.clone()).await, "s0->s1");
 
         let f0 = form_match(&mut s0, 1, 3, None, None, 0, 0);
         let f1 = form_match(&mut s1, 1, 3, None, None, 0, 0);
         let f2 = async {
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            s2.connect_direct(a0.clone()).await.expect("s2->s0");
-            s2.connect_direct(a1.clone()).await.expect("s2->s1");
+            dial(s2.connect_direct(a0.clone()).await, "s2->s0");
+            dial(s2.connect_direct(a1.clone()).await, "s2->s1");
             form_match(&mut s2, 1, 3, None, None, 0, 0).await
         };
         let (r0, r1, r2) = tokio::join!(f0, f1, f2);

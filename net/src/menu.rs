@@ -412,7 +412,16 @@ mod tests {
             "the joiner's lobby shows the code it is dialing"
         );
 
+        // A dead formation thread would otherwise strand this wait in a blind timeout —
+        // resolving (either way) before the host presses Start is itself a failure.
+        let unresolved = |f: &Formation, who: &str| match f.poll() {
+            None => (),
+            Some(Ok(_)) => panic!("{who} formation resolved before Start"),
+            Some(Err(e)) => panic!("{who} formation failed: {e:#}"),
+        };
         wait_for(30, "both rosters to reach 2 peers", || {
+            unresolved(&host, "host");
+            unresolved(&join, "joiner");
             (host.roster().len() == 2 && join.roster().len() == 2).then_some(())
         });
         (host, join)
@@ -435,7 +444,13 @@ mod tests {
             );
         }
 
-        // Only the host holds the start command — a joiner's Start is inert.
+        // Only the host holds the start command — structural: a joiner formation never
+        // carries a start sender, so its request_start is inert by construction (an
+        // immediate poll() couldn't falsify this; the barrier takes wall-clock time).
+        assert!(
+            join.start_tx.take().is_none(),
+            "a joiner holds no start command"
+        );
         join.request_start();
         assert!(
             host.poll().is_none() && join.poll().is_none(),
