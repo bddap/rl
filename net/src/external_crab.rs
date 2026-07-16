@@ -21,7 +21,7 @@
 //! measures the drift every tick and bounds it ([`ARM_BODY_POS_RECENTER`]): recenter
 //! the local arena by teleporting the drifted env — crab parts, every co-arena craft,
 //! pending boardings — back onto its spawn origin in one uniform shift, advancing the
-//! arena↔world anchor in lockstep so nothing observable moves.
+//! arena↔world anchor in lockstep so nothing observable moves (to f32 rounding).
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
@@ -46,15 +46,17 @@ const CLAW_TARGET_Y: f32 = 0.3;
 /// and the posed hunt target shift by one delta while [`ArenaAnchor`]'s world end
 /// advances by the opposite one — world = arena + anchor is invariant, so rendered
 /// poses, the pilot-follow feed, world_pos_m, and imminent contacts (rl#235 rams) all
-/// survive the teleport exactly; only body.pos snaps back to the spawn distribution.
+/// survive the teleport to f32 rounding (interpolation windows see a >5 m jump, reset,
+/// and hold the arrival pose); only body.pos snaps back to the spawn distribution.
 /// SINGLE-CRAB rounds only: per-env deltas conflict on the one shared craft set and the
 /// one crab-0-pinned anchor, so multi-crab rounds stay measure-only until crafts anchor
 /// per-env (see rl#240). Flip back = set `false`.
 const ARM_BODY_POS_RECENTER: bool = true;
 
 /// Arms [`bound_body_pos_drift`]'s recenter teleport. Inserted by the plugin iff
-/// [`ARM_BODY_POS_RECENTER`], which stays the sole authority; private so nothing else
-/// can arm it (tests live in this module).
+/// [`ARM_BODY_POS_RECENTER`] and the round is single-crab — the build-time decision is
+/// the sole authority, so an armed-but-restricted state is unrepresentable at runtime;
+/// private so nothing else can arm it (tests live in this module).
 #[derive(Resource)]
 struct BodyPosRecenter;
 
@@ -70,15 +72,16 @@ pub struct CrabPolicies(pub Vec<Policy>);
 #[derive(Resource)]
 pub struct ExternalCrabBridge {
     crabs: Vec<CrabBridge>,
+    /// The game-world point corresponding to crab 0's arena spawn origin — the world end
+    /// of the ONE arena↔world correspondence [`publish_arena_anchor`] anchors on
+    /// (rl#224); on the bridge, not per-crab, because there IS exactly one anchor.
+    /// Spawn-pinned per round, then advanced in lockstep by each rl#240 recenter —
+    /// static BETWEEN recenters, never tracking her walk.
+    anchor_world_m: Vec2,
 }
 
 struct CrabBridge {
     world_pos_m: Vec2,
-    /// The game-world point corresponding to this env's arena spawn origin — the world
-    /// end of the arena↔world correspondence [`publish_arena_anchor`] anchors on
-    /// (rl#224). Spawn-pinned per round, then advanced in lockstep by each rl#240
-    /// recenter — static BETWEEN recenters, never tracking her walk.
-    anchor_world_m: Vec2,
     last_carapace_m: Option<Vec2>,
     yaw_turns: i32,
     settle: u32,
@@ -132,7 +135,6 @@ impl CrabBridge {
     fn new(spawn: Pos) -> Self {
         Self {
             world_pos_m: pos_to_m(spawn),
-            anchor_world_m: pos_to_m(spawn),
             last_carapace_m: None,
             yaw_turns: 0,
             hunt_target_m: None,
@@ -185,7 +187,6 @@ impl CrabBridge {
 
     fn restart_to_spawn(&mut self, spawn: Pos) {
         self.world_pos_m = pos_to_m(spawn);
-        self.anchor_world_m = pos_to_m(spawn);
         self.last_carapace_m = None;
         self.settle = crab_world::bot::RESET_GRACE_TICKS;
         self.next_drift_log_m = TARGET_ARENA_HALF;
@@ -221,6 +222,7 @@ impl ExternalCrabBridge {
     pub fn new(spawns: &[Pos]) -> Self {
         Self {
             crabs: spawns.iter().map(|&s| CrabBridge::new(s)).collect(),
+            anchor_world_m: spawns.first().copied().map(pos_to_m).unwrap_or_default(),
         }
     }
 
@@ -265,6 +267,9 @@ impl ExternalCrabBridge {
         );
         for (crab, &spawn) in self.crabs.iter_mut().zip(spawns) {
             crab.restart_to_spawn(spawn);
+        }
+        if let Some(&spawn) = spawns.first() {
+            self.anchor_world_m = pos_to_m(spawn);
         }
     }
 }
@@ -368,8 +373,21 @@ impl Plugin for ExternalCrabPlugin {
         );
 
         if ARM_BODY_POS_RECENTER {
-            app.insert_resource(BodyPosRecenter);
+            if self.crab_spawns.len() == 1 {
+                app.insert_resource(BodyPosRecenter);
+            } else {
+                warn!(
+                    "external_crab: {} crabs — rl#240 recenter disarmed for this round \
+                     (per-env deltas conflict on the shared craft set and the crab-0 \
+                     anchor); body.pos drift is measured only",
+                    self.crab_spawns.len()
+                );
+            }
         }
+        // The recenter's boarding carry reads VehicleControls unconditionally; probe and
+        // test stacks legitimately run without VehiclePlugin, so guarantee the (empty)
+        // resource here rather than making the carry an optional silent skip.
+        app.init_resource::<VehicleControls>();
         app.add_systems(
             FixedUpdate,
             (
@@ -378,10 +396,14 @@ impl Plugin for ExternalCrabPlugin {
                 // then sees ~0 drift instead of racing the respawn). After the pose sentinel:
                 // the recenter is a sanctioned physics teleport (rl#116) — ordered there, the
                 // same tick's SyncBackend consumes it before the sentinel ever sees it.
+                // Before the boarding spawn edge: a pending boarding must be carried into
+                // the recentered frame BEFORE it is consumed, or the craft materialises a
+                // full recenter distance from its walker.
                 bound_body_pos_drift
                     .after(crab_world::bot::PoseSentinelSet)
                     .after(crab_world::bot::rescue_nonfinite_crabs)
-                    .before(set_crab_walk_target),
+                    .before(set_crab_walk_target)
+                    .before(crab_world::vehicle::VehicleManageSet),
                 set_crab_walk_target.before(BotSet::Sense),
                 run_crab_policy.in_set(BotSet::Think),
             )
@@ -459,14 +481,15 @@ fn crab_not_yet_spawned(crabs: Query<(), With<CrabCarapace>>) -> bool {
 /// and shift the world-pos integrator's `prev` by the same delta so the teleport never
 /// counts as motion. body.pos snaps to ~0, exactly the every-episode spawn distribution.
 /// Crafts share the arena frame, so the shift carries them (and every pending boarding
-/// pose) too, and [`CrabBridge::anchor_world_m`] advances by the opposite delta —
-/// world = arena + anchor stays invariant (see [`ARM_BODY_POS_RECENTER`]).
+/// pose) too, and [`ExternalCrabBridge::anchor_world_m`] advances by the opposite delta
+/// — world = arena + anchor stays invariant (see [`ARM_BODY_POS_RECENTER`]).
 ///
 /// Ordering: before [`set_crab_walk_target`] (so the target is posed from the
 /// post-teleport carapace) and hence before Sense and rapier's SyncBackend; before
-/// [`publish_arena_anchor`] (so the carried crafts and the advanced anchor land on the
-/// wire in the same tick — a stale anchor would pop every craft by the full delta).
-#[allow(clippy::too_many_arguments)]
+/// the boarding spawn edge (`VehicleManageSet` — a pending boarding is carried before
+/// it is consumed); before [`publish_arena_anchor`] (so the carried crafts and the
+/// advanced anchor land on the wire in the same tick — a stale anchor would pop every
+/// craft by the full delta).
 fn bound_body_pos_drift(
     mut bridge: ResMut<ExternalCrabBridge>,
     spawns: Res<CrabSpawns>,
@@ -474,19 +497,13 @@ fn bound_body_pos_drift(
     mut targets: ResMut<CrabTargets>,
     mut parts: Query<(&CrabEnvId, &mut Transform, Option<&CrabCarapace>), With<CrabBodyPart>>,
     mut crafts: Query<&mut Transform, (With<Vehicle>, Without<CrabBodyPart>)>,
-    // Optional: probe/headless stacks run crab-only worlds without `VehiclePlugin`.
-    mut controls: Option<ResMut<VehicleControls>>,
+    mut controls: ResMut<VehicleControls>,
 ) {
-    // Per-env recenter deltas conflict on the SHARED craft set and the single crab-0
-    // anchor — multi-crab rounds measure only (ARM_BODY_POS_RECENTER's doc has the full
-    // story), and the warn line says which gate held the teleport back.
-    let recenter = armed.is_some() && bridge.crabs.len() == 1;
-    let gate_note = if armed.is_none() {
-        "recenter gated off"
-    } else {
-        "recenter is single-crab-only"
-    };
-    for (idx, crab) in bridge.crabs.iter_mut().enumerate() {
+    let ExternalCrabBridge {
+        crabs,
+        anchor_world_m,
+    } = bridge.as_mut();
+    for (idx, crab) in crabs.iter_mut().enumerate() {
         let Some(carapace) = parts
             .iter()
             .find(|(env, _, cara)| env.0 == idx && cara.is_some())
@@ -506,7 +523,7 @@ fn bound_body_pos_drift(
             continue;
         }
 
-        if recenter {
+        if armed.is_some() {
             let delta = Vec3::new(-drift.x, 0.0, -drift.y);
             for (env, mut t, _) in parts.iter_mut() {
                 if env.0 == idx {
@@ -516,19 +533,17 @@ fn bound_body_pos_drift(
             // Crafts live in the same arena frame (rl#235 rams are real contacts;
             // boardings pose in arena m): carry every body and every pending boarding by
             // the same delta, and advance the anchor's world end by the opposite one —
-            // rendered poses, the pilot-follow feed, and imminent contacts all cancel out.
-            // Boardings too because a command authored pre-recenter is read on a later
-            // tick's spawn edge; uncarried, that craft would materialise a full recenter
-            // distance from its walker.
+            // rendered poses, the pilot-follow feed, and imminent contacts all cancel
+            // out. Boardings too because a command authored pre-recenter is consumed at
+            // the spawn edge AFTER this system (the VehicleManageSet edge); uncarried,
+            // that craft would materialise a full recenter distance from its walker.
             for mut t in crafts.iter_mut() {
                 t.translation += delta;
             }
-            if let Some(controls) = controls.as_mut() {
-                for cmd in controls.0.values_mut() {
-                    cmd.boarding.pos += delta;
-                }
+            for cmd in controls.0.values_mut() {
+                cmd.boarding.pos += delta;
             }
-            crab.anchor_world_m -= Vec2::new(delta.x, delta.z);
+            *anchor_world_m -= Vec2::new(delta.x, delta.z);
             if let Some(prev) = crab.last_carapace_m.as_mut() {
                 *prev += Vec2::new(delta.x, delta.z);
             }
@@ -548,7 +563,8 @@ fn bound_body_pos_drift(
         } else if drift_m >= crab.next_drift_log_m {
             warn!(
                 "external_crab: env {idx} body.pos drifted {drift_m:.1} m from spawn — outside \
-                 the {TARGET_ARENA_HALF} m in-distribution radius, obs OOD (rl#240; {gate_note})"
+                 the {TARGET_ARENA_HALF} m in-distribution radius, obs OOD (rl#240; recenter \
+                 disarmed)"
             );
             crab.next_drift_log_m = drift_m + DRIFT_LOG_STEP_M;
         }
@@ -723,14 +739,14 @@ fn publish_arena_anchor(
     spawns: Res<CrabSpawns>,
     mut out: ResMut<ArenaAnchor>,
 ) {
-    let Some(crab) = bridge.crabs.first() else {
+    if bridge.crabs.is_empty() {
         return;
-    };
+    }
     if spawns.is_empty() {
         return; // pre-spawn frame — `spawn_initial_crabs` hasn't rebuilt the origins yet
     }
     let origin = spawns.origin(0);
-    let w = crab.anchor_world_m;
+    let w = bridge.anchor_world_m;
     let want = ArenaAnchor(Vec3::new(w.x - origin.x, 0.0, w.y - origin.z));
     if *out != want {
         *out = want;
@@ -898,6 +914,12 @@ mod ship_wiggle_tests {
             prev_recenters = recs;
         }
         assert!(
+            recenters(&app) >= 1,
+            "the 400-tick flail-walk (9.6 m pre-fix) must cross the band and recenter — \
+             if physics changed enough that it no longer does, the epoch assertions \
+             above went vacuous; re-pin this test"
+        );
+        assert!(
             max_ship_d < 1e-3,
             "an untouched parked ship must not move ON SCREEN while Sally flails \
              (recenter teleports must cancel against the anchor), moved {max_ship_d} m"
@@ -958,6 +980,14 @@ mod ship_wiggle_tests {
             PilotId(1),
             PilotCommand::new(VehicleKind::Ship, boarding_at(7.0, -3.0)),
         );
+        // The command is still PENDING here (its craft spawns on the next tick — the
+        // same tick the recenter fires), so this pins the boarding-carry path, not the
+        // entity carry.
+        let crafts_now = {
+            let mut q = app.world_mut().query_filtered::<(), With<Vehicle>>();
+            q.iter(app.world()).count()
+        };
+        assert_eq!(crafts_now, 1, "pilot 1's craft must not exist pre-recenter");
 
         // Emulate a long chase: walk the whole crab 20 m out in one step.
         let mut q = app
@@ -1128,11 +1158,6 @@ mod gcr_crab_tests {
     /// teleports — even armed.
     #[test]
     fn multi_crab_rounds_measure_but_never_teleport() {
-        use crab_world::bot::headless::{
-            HeadlessStack, WorldRole, force_serial_schedules, headless_stack,
-            pin_single_thread_pools,
-        };
-
         pin_single_thread_pools();
         let mut app = headless_stack(HeadlessStack {
             num_envs: 2,

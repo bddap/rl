@@ -180,11 +180,18 @@ pub struct VehicleControls(pub std::collections::BTreeMap<PilotId, PilotCommand>
 
 pub struct VehiclePlugin;
 
+/// The boarding spawn edge ([`manage_vehicles`]) as an orderable seam: a system that
+/// shifts the arena frame (the rl#240 recenter) must run BEFORE it, so a pending
+/// [`Boarding`] is carried into the new frame before the spawn edge consumes it —
+/// unordered, the craft could materialise a full frame-shift from its walker.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VehicleManageSet;
+
 impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VehicleControls>().add_systems(
             FixedUpdate,
-            (manage_vehicles, apply_vehicle_forces)
+            (manage_vehicles.in_set(VehicleManageSet), apply_vehicle_forces)
                 .chain()
                 .before(PhysicsSet::SyncBackend),
         );
