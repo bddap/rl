@@ -11,15 +11,21 @@
 //! prefix:
 //!
 //! - `EVAL_RESULT_BEARING deg= progress_m= closest_m= tip_m= final_m= total_torque=
-//!   reached= ticks=` — one per far-compass bearing (rl#239).
+//!   saturation= work_j= reached= ticks=` — one per far-compass bearing (rl#239),
+//!   plus ` j_per_m=` when that bearing cleared the rl#279 progress floor.
 //! - `EVAL_RESULT_CLOSE_BEARING …` — the same keys, one per close-probe bearing
 //!   (rl#252); diagnostic, no consumer parses them today.
 //! - `EVAL_RESULT_CLOSE progress_m= closest_m= tip_m= target_m= reached_count=
 //!   bearings= worst_deg=` — the close probe's worst-bearing summary.
 //! - `EVAL_RESULT progress_m= total_torque= mean_torque_per_tick= initial_m=
 //!   closest_m= tip_m= final_m= target_m= reached= ticks= policy_loaded= bearings=
-//!   worst_deg=` — the HEADLINE, last: its numbers describe the far sweep's WORST
-//!   bearing. When the rl#266 charge-speed guard can measure, it appends
+//!   worst_deg= saturation_mean=` — the HEADLINE, last: its numbers describe the far
+//!   sweep's WORST bearing; `saturation_mean` (rl#279) is the far compass's mean
+//!   torque saturation in [0, 1]. When measurable it appends ` j_per_m=` (the worst
+//!   bearing's cost of transport) and ` j_per_m_mean=` (mean over the bearings past
+//!   the progress floor) — effort is REPORTED here, never folded into the headline
+//!   scalar or the keep-best gate. When the rl#266 charge-speed guard can measure,
+//!   it appends
 //!   `charge_heights_per_s= charge_pinned= charge_drift_frac= charge_drifted=`
 //!   (these keys replaced the old `EVAL_CHARGE_SPEED` sidecar line, which no
 //!   consumer parsed — and which the release gate's `EVAL_RESULT` line filter never
@@ -69,7 +75,8 @@ impl EvalReport {
             out,
             "EVAL_RESULT progress_m={:.4} total_torque={:.2} mean_torque_per_tick={:.4} \
              initial_m={:.4} closest_m={:.4} tip_m={:.4} final_m={:.4} target_m={:.2} \
-             reached={} ticks={} policy_loaded={} bearings={} worst_deg={:.0}",
+             reached={} ticks={} policy_loaded={} bearings={} worst_deg={:.0} \
+             saturation_mean={:.4}",
             worst.progress_m,
             worst.total_torque,
             worst.mean_torque_per_tick,
@@ -83,8 +90,15 @@ impl EvalReport {
             self.policy_loaded,
             EVAL_BEARINGS,
             worst.bearing_rad.to_degrees(),
+            self.far.mean_saturation(),
         )
         .expect("writing to a String never fails");
+        if let Some(jpm) = worst.j_per_m() {
+            write!(out, " j_per_m={jpm:.2}").expect("writing to a String never fails");
+        }
+        if let Some(jpm_mean) = self.far.mean_j_per_m() {
+            write!(out, " j_per_m_mean={jpm_mean:.2}").expect("writing to a String never fails");
+        }
         if let (Some(measured), Some(drift)) =
             (self.measured_charge_heights_per_s(), self.charge_speed_drift())
         {
@@ -104,20 +118,26 @@ impl EvalReport {
 
 fn bearing_lines(out: &mut String, prefix: &str, sweep: &CompassSweep) {
     for b in &sweep.per_bearing {
-        writeln!(
+        write!(
             out,
             "{prefix} deg={:.0} progress_m={:.4} closest_m={:.4} tip_m={:.4} final_m={:.4} \
-             total_torque={:.2} reached={} ticks={}",
+             total_torque={:.2} saturation={:.4} work_j={:.2} reached={} ticks={}",
             b.bearing_rad.to_degrees(),
             b.progress_m,
             b.closest_distance_m,
             b.closest_tip_distance_m,
             b.final_distance_m,
             b.total_torque,
+            b.saturation,
+            b.work_j,
             b.reached,
             b.active_ticks,
         )
         .expect("writing to a String never fails");
+        if let Some(jpm) = b.j_per_m() {
+            write!(out, " j_per_m={jpm:.2}").expect("writing to a String never fails");
+        }
+        out.push('\n');
     }
 }
 
@@ -132,6 +152,9 @@ mod tests {
             progress_m: 1.0 + i as f32,
             total_torque: 10.0,
             mean_torque_per_tick: 0.5,
+            saturation: 0.25,
+            // 2 J per metre closed at every bearing, so worst and mean J/m agree.
+            work_j: 2.0 * (1.0 + i as f32),
             initial_distance_m: 9.0,
             closest_distance_m: 8.0 - i as f32,
             final_distance_m: 8.5,
@@ -162,7 +185,8 @@ mod tests {
         assert_eq!(
             lines[0],
             "EVAL_RESULT_BEARING deg=0 progress_m=1.0000 closest_m=8.0000 tip_m=inf \
-             final_m=8.5000 total_torque=10.00 reached=false ticks=200"
+             final_m=8.5000 total_torque=10.00 saturation=0.2500 work_j=2.00 reached=false \
+             ticks=200 j_per_m=2.00"
         );
         assert!(lines[EVAL_BEARINGS].starts_with("EVAL_RESULT_CLOSE_BEARING deg=0 "));
         assert_eq!(
@@ -174,9 +198,28 @@ mod tests {
             lines[2 * EVAL_BEARINGS + 1],
             "EVAL_RESULT progress_m=1.0000 total_torque=10.00 mean_torque_per_tick=0.5000 \
              initial_m=9.0000 closest_m=8.0000 tip_m=inf final_m=8.5000 target_m=9.00 \
-             reached=false ticks=200 policy_loaded=true bearings=8 worst_deg=0"
+             reached=false ticks=200 policy_loaded=true bearings=8 worst_deg=0 \
+             saturation_mean=0.2500 j_per_m=2.00 j_per_m_mean=2.00"
         );
         assert!(wire.ends_with('\n'));
+    }
+
+    /// The rl#279 guard on the wire: saturation keys always print; J/m keys vanish
+    /// (never a nan/inf token) on every line whose bearing missed the progress floor.
+    #[test]
+    fn j_per_m_keys_are_guarded() {
+        let mut r = report(true, 0.0);
+        for b in r.far.per_bearing.iter_mut() {
+            b.progress_m = 0.1;
+        }
+        for b in r.close.per_bearing.iter_mut() {
+            b.progress_m = 0.1;
+        }
+        let wire = r.wire_report();
+        let headline = wire.lines().last().unwrap();
+        assert!(headline.contains(" saturation_mean=0.2500"));
+        assert!(!wire.contains(" j_per_m="));
+        assert!(!headline.contains(" j_per_m_mean="));
     }
 
     /// The charge keys ride the headline only when the guard can measure (rl#266):

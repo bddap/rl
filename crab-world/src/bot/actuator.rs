@@ -111,6 +111,16 @@ pub fn applied_torque(id: CrabJointId, raw: f32) -> f32 {
     bounded_drive(raw) * id.drive_torque_ceiling()
 }
 
+/// Σ of every joint's drive ceiling — the most |torque| one tick can command across
+/// the whole rig, hence the denominator that normalizes a tick's summed |torque| into
+/// the [0, 1] saturation fraction the eval reports (rl#279).
+pub fn total_drive_torque_ceiling() -> f32 {
+    CrabJointId::all()
+        .iter()
+        .map(|id| id.drive_torque_ceiling())
+        .sum()
+}
+
 pub fn apply_actions(
     actions: Res<CrabActions>,
     joints: Query<(Entity, &CrabJoint, &CrabEnvId, &MultibodyJoint)>,

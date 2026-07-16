@@ -5,7 +5,7 @@ use std::path::Path;
 use bevy::prelude::*;
 
 use crate::bot::RESET_GRACE_TICKS;
-use crate::bot::actuator::{CrabActions, applied_torque};
+use crate::bot::actuator::{CrabActions, applied_torque, total_drive_torque_ceiling};
 use crate::bot::body::{CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint};
 use crate::bot::headless::{
     HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
@@ -95,6 +95,11 @@ pub const CHARGE_SPEED_DRIFT_TOL: f32 = 0.25;
 /// stops tracking her true pace and the eval needs a farther ball.
 const PACE_WINDOW_MIN_S: f32 = 5.0;
 
+/// Net chase progress below which a bearing's J/m is not reported (rl#279): work over
+/// a near-zero distance explodes toward ∞ without describing the gait — a parked or
+/// dead bearing has a saturation number (always emitted) but no cost of transport.
+pub const WORK_PER_M_MIN_PROGRESS_M: f32 = 0.5;
+
 /// One bearing's episode — the same measurements the pre-compass eval reported for its
 /// single +X episode.
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +108,15 @@ pub struct BearingReport {
     pub progress_m: f32,
     pub total_torque: f32,
     pub mean_torque_per_tick: f32,
+    /// Mean commanded |torque| per tick as a fraction of the rig's total drive ceiling
+    /// (rl#279) — in [0, 1] by construction (each joint's drive is clamped to its own
+    /// ceiling). Effort observability only: never folded into the headline, never
+    /// selected on.
+    pub saturation: f32,
+    /// Total mechanical work Σ|τ·ω|·Δt over the active ticks (rl#279), in joules of
+    /// the sim's unit system. Commanded torque times the sensor's measured hinge rate
+    /// — the same estimator either sign of back-driving counts as effort spent.
+    pub work_j: f32,
     pub initial_distance_m: f32,
     pub closest_distance_m: f32,
     pub final_distance_m: f32,
@@ -119,6 +133,15 @@ pub struct BearingReport {
     /// (which dilutes `progress_m / active_ticks`) can't understate her charge — this
     /// is the rl#266 speed-guard instrument. 0.0 when she never progressed.
     pub sustained_pace_m_per_s: f32,
+}
+
+impl BearingReport {
+    /// Cost of transport (rl#279): total mechanical work over net chase progress,
+    /// `None` below [`WORK_PER_M_MIN_PROGRESS_M`] — a near-zero denominator would
+    /// print an ∞-ish number that describes the guard, not the gait.
+    pub fn j_per_m(&self) -> Option<f32> {
+        (self.progress_m >= WORK_PER_M_MIN_PROGRESS_M).then(|| self.work_j / self.progress_m)
+    }
 }
 
 /// One full compass of bearing episodes at one target distance — the distance travels
@@ -148,6 +171,21 @@ impl CompassSweep {
     /// pose under the tip-based touch — see [`CLOSE_PROBE_DISTANCE_M`]).
     pub fn reached_count(&self) -> usize {
         self.per_bearing.iter().filter(|b| b.reached).count()
+    }
+
+    /// Mean torque saturation over the compass (rl#279) — the sweep-level effort
+    /// readout. A MEAN, unlike the min-progress headline: effort is observability,
+    /// so the aggregate should describe the whole gait, not one adversarial bearing.
+    pub fn mean_saturation(&self) -> f32 {
+        let sum: f32 = self.per_bearing.iter().map(|b| b.saturation).sum();
+        sum / EVAL_BEARINGS as f32
+    }
+
+    /// Mean cost of transport over the bearings that measured one (rl#279) — `None`
+    /// when no bearing cleared [`WORK_PER_M_MIN_PROGRESS_M`].
+    pub fn mean_j_per_m(&self) -> Option<f32> {
+        let measured: Vec<f32> = self.per_bearing.iter().filter_map(|b| b.j_per_m()).collect();
+        (!measured.is_empty()).then(|| measured.iter().sum::<f32>() / measured.len() as f32)
     }
 
     /// The BEST bearing's sustained pace (arena m/s) — her full charge. Max, not min:
@@ -228,6 +266,7 @@ struct EvalState {
     last_dist: f32,
     closest_tip_dist: Option<f32>,
     torque_sum: f64,
+    work_sum: f64,
     torque_ticks: u64,
     best_pace_m_per_s: f32,
 }
@@ -373,6 +412,8 @@ fn run_bearing(
         progress_m,
         total_torque: state.torque_sum as f32,
         mean_torque_per_tick,
+        saturation: mean_torque_per_tick / total_drive_torque_ceiling(),
+        work_j: state.work_sum as f32,
         initial_distance_m: state.initial_dist,
         closest_distance_m: state.closest_dist,
         final_distance_m: state.last_dist,
@@ -460,16 +501,26 @@ fn eval_step(
     }
 
     if !settling && !actions.is_empty() {
+        // Pure observation of what Sense/Think already computed (rl#279): commanded
+        // torque × the sensor's measured hinge rate, so the accumulator can never
+        // perturb the rollout it measures.
+        let rates = obs.env(0);
         let mut tick_torque = 0.0f32;
+        let mut tick_power = 0.0f32;
         for (joint, env) in joints.iter() {
             if env.0 != 0 {
                 continue;
             }
             if let Some(drive) = actions.drive(0, joint.id) {
-                tick_torque += applied_torque(joint.id, drive).abs();
+                let torque = applied_torque(joint.id, drive);
+                tick_torque += torque.abs();
+                if let Some(view) = &rates {
+                    tick_power += (torque * view.joint_rate(joint.id)).abs();
+                }
             }
         }
         state.torque_sum += tick_torque as f64;
+        state.work_sum += (tick_power / crate::physics::PHYSICS_HZ as f32) as f64;
         state.torque_ticks += 1;
     }
 
@@ -489,6 +540,8 @@ mod tests {
             progress_m: 0.0,
             total_torque: 0.0,
             mean_torque_per_tick: 0.0,
+            saturation: 0.0,
+            work_j: 0.0,
             initial_distance_m: target_distance_m,
             closest_distance_m: target_distance_m,
             final_distance_m: target_distance_m,
@@ -552,6 +605,32 @@ mod tests {
             "instrument ceiling {ceiling_heights_per_s} heights/s is inside the drift band — \
              the eval needs a farther ball before this pin can be trusted"
         );
+    }
+
+    /// Pins the rl#279 J/m guard: below the progress floor no cost of transport is
+    /// reported (work over ~zero distance describes the guard, not the gait); at or
+    /// above it the number is exactly work over net progress. And the compass mean
+    /// averages only the bearings that measured one.
+    #[test]
+    fn j_per_m_is_guarded_by_the_progress_floor() {
+        let mut r = paced_report(true, DEFAULT_TARGET_DISTANCE_M, 0.0);
+        for b in &mut r.far.per_bearing {
+            b.work_j = 10.0;
+        }
+        r.far.per_bearing[0].progress_m = WORK_PER_M_MIN_PROGRESS_M - 0.01;
+        assert_eq!(r.far.per_bearing[0].j_per_m(), None);
+        r.far.per_bearing[1].progress_m = WORK_PER_M_MIN_PROGRESS_M;
+        assert_eq!(r.far.per_bearing[1].j_per_m(), Some(10.0 / WORK_PER_M_MIN_PROGRESS_M));
+        r.far.per_bearing[2].progress_m = 4.0;
+        assert_eq!(r.far.per_bearing[2].j_per_m(), Some(2.5));
+        // Mean over the two measured bearings only — the six guarded ones don't drag it.
+        let mean = r.far.mean_j_per_m().expect("two bearings measured");
+        assert!((mean - (20.0 + 2.5) / 2.0).abs() < 1e-4);
+
+        // All bearings guarded → no sweep mean at all, never a 0/0.
+        let parked = paced_report(true, DEFAULT_TARGET_DISTANCE_M, 0.0);
+        assert_eq!(parked.far.mean_j_per_m(), None);
+        assert_eq!(parked.far.mean_saturation(), 0.0);
     }
 
     #[test]
@@ -644,6 +723,11 @@ mod tests {
                 "the rest pose applies no joint torque, so total_torque must be exactly 0"
             );
             assert_eq!(b.mean_torque_per_tick, 0.0);
+            assert_eq!(b.saturation, 0.0, "zero drive saturates nothing");
+            assert_eq!(b.work_j, 0.0, "zero torque does zero mechanical work");
+            // Passive slump CAN clear the J/m floor (~0.55 m on some bodies) —
+            // measurable or not, zero work means a zero cost of transport.
+            assert_eq!(b.j_per_m().unwrap_or(0.0), 0.0);
             assert_eq!(b.active_ticks, 200, "all active ticks are measured");
             assert!(
                 b.initial_distance_m.is_finite() && b.closest_distance_m.is_finite(),
