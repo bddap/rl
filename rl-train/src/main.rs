@@ -169,6 +169,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 
 fn eval(e: EvalArgs) -> Result<ExitCode, String> {
     let body_gate = canonical_body("eval", e.allow_fallback_body)?;
+    // A damped-run policy judged on the default plant (or vice versa) is a mismeasure
+    // with no digest gate to catch it — make the plant provable from the artifact.
+    // stdout, NOT stderr: the `EVAL_RESULT` lines land on stdout and consumers filter
+    // by prefix (eval/wire.rs), so this rides the same capture without breaking them.
+    println!(
+        "eval: plant: {}",
+        crab_world::bot::body::friction_cap_provenance()
+    );
     let distance = e
         .distance
         .unwrap_or(crab_world::eval::DEFAULT_TARGET_DISTANCE_M);

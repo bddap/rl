@@ -10,8 +10,64 @@ const CLAW_WRIST_TORQUE_CEILING: f32 = 3.0;
 const CLAW_SHOULDER_UP_STOP: f32 = -0.35;
 const CLAW_SHOULDER_DOWN_STOP: f32 = 1.0;
 
-pub const LEG_FRICTION_CAP: f32 = 0.04;
+const LEG_FRICTION_CAP: f32 = 0.04;
 const CLAW_FRICTION_CAP: f32 = 0.04;
+
+/// Joint-damping experiment knob (bddap/rl#268): overrides the friction-motor torque
+/// cap, in N·m, on EVERY crab joint. The 0.04 defaults give the plant ~1% of drive
+/// authority in damping — flailing is free, so torque-saturating bang-bang is the
+/// optimal policy; raising the cap toward drive authority prices oscillation.
+///
+/// An env var rather than a clap flag (the rl#272 run-knob front door) because it is
+/// a PLANT property that must reach binaries with no CLI at all — game/rl-demo spawn
+/// this same crab — as well as every sim inside one process: the learn rollout
+/// threads, the in-process keep-best chase-eval, and the external honest-eval binary.
+/// A damped policy measured on an undamped plant is a mismeasure, so evals of a
+/// damped run must export this too; `learn` and `eval` both log the resolved value to
+/// make the plant provable from their artifacts (checkpoints do NOT carry their
+/// plant). Unset keeps the legacy constants bit-identical for every binary.
+pub const JOINT_FRICTION_CAP_ENV: &str = "RL_JOINT_FRICTION_CAP";
+
+/// The resolved per-run cap override, read once per process. A SET-but-invalid value
+/// aborts instead of defaulting: silently training days on the wrong plant is the
+/// failure mode this knob exists to prevent (same policy as the rl#272 run knobs).
+pub fn friction_cap_override() -> Option<f32> {
+    static OVERRIDE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *OVERRIDE.get_or_init(|| match std::env::var(JOINT_FRICTION_CAP_ENV) {
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(raw) => Some(parse_friction_cap(&raw).unwrap_or_else(|e| {
+            panic!("{JOINT_FRICTION_CAP_ENV}={raw}: {e} — refusing an ambiguous plant")
+        })),
+        Err(e @ std::env::VarError::NotUnicode(_)) => {
+            panic!("{JOINT_FRICTION_CAP_ENV}: {e} — refusing an ambiguous plant")
+        }
+    })
+}
+
+/// One human-readable source for "which plant is this?" — logged by `learn` (into
+/// train.log) and `eval` (beside the `EVAL_RESULT` lines) so run and measurement
+/// artifacts both prove the friction cap they ran under.
+pub fn friction_cap_provenance() -> String {
+    match friction_cap_override() {
+        Some(cap) => format!("joint friction cap {cap} N·m ({JOINT_FRICTION_CAP_ENV})"),
+        None => format!(
+            "joint friction cap leg {LEG_FRICTION_CAP} / claw {CLAW_FRICTION_CAP} N·m (default)"
+        ),
+    }
+}
+
+fn parse_friction_cap(raw: &str) -> Result<f32, String> {
+    let v: f32 = raw
+        .trim()
+        .parse()
+        .map_err(|e| format!("not a float: {e}"))?;
+    // Negative is meaningless for a force cap; NaN/inf would poison the solver.
+    if v.is_finite() && v >= 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("{v} is not a finite non-negative torque cap"))
+    }
+}
 
 pub fn joint_angle(axis_local: Vec3, parent_rot: Quat, child_rot: Quat) -> f32 {
     let q = (parent_rot.inverse() * child_rot).normalize();
@@ -111,6 +167,9 @@ impl CrabJointId {
     }
 
     pub fn friction_cap(&self) -> f32 {
+        if let Some(cap) = friction_cap_override() {
+            return cap;
+        }
         match self {
             CrabJointId::LegCoxa(..)
             | CrabJointId::LegBasis(..)
@@ -156,5 +215,24 @@ mod tests {
             "all() yielded the wrong joint count"
         );
         assert!(seen.iter().all(|&s| s), "index leaves a slot unfilled");
+    }
+
+    // Pure-parse tests only: the env read is process-global (OnceLock) and tests run
+    // multi-threaded, so exercising the var itself would race sibling tests.
+    #[test]
+    fn friction_cap_parse_accepts_plausible_and_zero() {
+        assert_eq!(parse_friction_cap("2.5"), Ok(2.5));
+        assert_eq!(parse_friction_cap(" 0.04 "), Ok(0.04));
+        assert_eq!(parse_friction_cap("0"), Ok(0.0));
+    }
+
+    #[test]
+    fn friction_cap_parse_rejects_ambiguous_plants() {
+        for bad in ["-0.5", "NaN", "inf", "2.5Nm", ""] {
+            assert!(
+                parse_friction_cap(bad).is_err(),
+                "{bad:?} must not launch a run"
+            );
+        }
     }
 }
