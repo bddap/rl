@@ -298,8 +298,16 @@ pub fn run_eval(
     // Judge the policy on the plant it trained on (bddap/rl#268): a checkpoint's
     // recorded plant is adopted before any world spawns, so the invoker (the standing
     // rl-eval-monitor, the release gate, a hand eval) needs no plant knowledge — and a
-    // conflicting env refuses rather than mismeasures.
+    // conflicting env refuses rather than mismeasures. The provenance line prints
+    // HERE, after adoption — printing it earlier would itself resolve the override
+    // from the env and turn every sidecar adoption into a refusal. stdout, beside the
+    // `EVAL_RESULT` lines: consumers filter by prefix (eval/wire.rs), so an artifact
+    // that shows the numbers shows the plant they were measured on.
     crate::bot::body::adopt_recorded_plant(checkpoint_dir)?;
+    println!(
+        "eval: plant: {}",
+        crate::bot::body::friction_cap_provenance()
+    );
     pin_single_thread_pools();
 
     // ONE read arms-or-refuses (rl#241 — a classify-then-load pair could straddle a
