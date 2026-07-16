@@ -1,7 +1,8 @@
 //! The ONE terrain path (rl#281): a baked height grid drives BOTH the rapier
-//! [`Collider`] and (render-gated) the visible mesh, so what the crab stands on and
-//! what the player sees can never diverge. The flat arenas are trivial constant grids
-//! through this same seam — there is deliberately no flat-vs-terrain fork anywhere.
+//! [`Collider`] and (render-gated) the visible mesh, so wherever this module's mesh is
+//! what's drawn (rl-demo; GCR once its scene adopts it in stage 3) it cannot diverge
+//! from what the crab stands on. The flat arenas are trivial constant grids through
+//! this same seam — there is deliberately no flat-vs-terrain fork anywhere.
 //!
 //! Coordinates: the grid is centered on the world origin, +x = artifact column
 //! (preview-PNG right), +z = artifact row (preview-PNG down), heights along +y.
@@ -19,6 +20,14 @@ use bevy_rapier3d::prelude::Collider;
 static GCR_TERRAIN_BYTES: &[u8] = include_bytes!("../assets/terrain/gcr-seed281.terrain");
 
 const MAGIC: &[u8; 8] = b"RLTERR01";
+
+/// Cell-size cap for [`TerrainGrid::flat`], for f32 contact precision — parry solves
+/// heightfield contacts against the containing cell's triangle, and one tile-spanning
+/// cell on the ±16 km open field puts that triangle's vertices where f32 ulp is ~2 mm,
+/// comparable to contact tolerances (and it measurably perturbed the rl#224 flail-walk).
+/// 256 m keeps near-origin triangle vertices small at 129² points for the open field,
+/// instead of megabytes of zeros per world on the probe-rebuild path.
+const FLAT_CELL_MAX_M: f32 = 256.0;
 
 /// The `.terrain` metadata fields the runtime consumes; the rest of the header
 /// (seed, model rev, elevation range, …) is bake provenance and stays in the file.
@@ -45,7 +54,7 @@ pub struct TerrainGrid {
 
 impl TerrainGrid {
     /// Parse a `RLTERR01` artifact (see `scripts/terrain-bake/README.md`).
-    pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, String> {
         let header = bytes.get(..12).ok_or("artifact shorter than its header")?;
         if &header[..8] != MAGIC {
             return Err(format!("bad magic {:?}", &header[..8]));
@@ -59,8 +68,22 @@ impl TerrainGrid {
         if meta.rows < 2 || meta.cols < 2 {
             return Err(format!("degenerate grid {}x{}", meta.rows, meta.cols));
         }
+        if !(meta.cell_size_m > 0.0
+            && meta.cell_size_m.is_finite()
+            && meta.height_scale.is_finite())
+        {
+            return Err(format!(
+                "bad scale knobs: cell_size_m={} height_scale={}",
+                meta.cell_size_m, meta.height_scale
+            ));
+        }
         let grid = &bytes[12 + json_len..];
-        if grid.len() != meta.rows * meta.cols * 2 {
+        let want = meta
+            .rows
+            .checked_mul(meta.cols)
+            .and_then(|n| n.checked_mul(2))
+            .ok_or("grid dimensions overflow")?;
+        if grid.len() != want {
             return Err(format!(
                 "grid is {} bytes, want {}x{}x2",
                 grid.len(),
@@ -87,15 +110,8 @@ impl TerrainGrid {
 
     /// A constant y=0 grid spanning ±`half_extent` — the flat arena, expressed through
     /// the one terrain path instead of a bespoke slab or halfspace.
-    ///
-    /// Cells are capped at ~32 m (the GCR bake's own pitch): parry solves heightfield
-    /// contacts against the cell's triangles in local space, and one tile-spanning cell
-    /// puts triangle vertices `half_extent` from a near-origin contact — at 16 km that
-    /// costs enough f32 mantissa to visibly change crab-ground contact (measured on the
-    /// rl#224 flail-walk: 9.6 m → 7.3 m per 400 ticks). Small cells keep the local
-    /// triangle small wherever play happens.
     pub fn flat(half_extent: f32) -> Self {
-        let cells = ((half_extent * 2.0) / 32.0).ceil().max(1.0) as usize;
+        let cells = ((half_extent * 2.0) / FLAT_CELL_MAX_M).ceil().max(1.0) as usize;
         let n = cells + 1;
         Self {
             rows: n,
@@ -117,12 +133,12 @@ impl TerrainGrid {
     }
 
     /// Full world-x span (grid columns).
-    pub fn extent_x(&self) -> f32 {
+    pub(crate) fn extent_x(&self) -> f32 {
         (self.cols - 1) as f32 * self.cell
     }
 
     /// Full world-z span (grid rows).
-    pub fn extent_z(&self) -> f32 {
+    pub(crate) fn extent_z(&self) -> f32 {
         (self.rows - 1) as f32 * self.cell
     }
 
@@ -153,28 +169,38 @@ impl TerrainGrid {
         }
     }
 
-    /// Lift a surface-relative point onto the terrain: `p.y` is treated as height ABOVE
-    /// the surface at `(p.x, p.z)`. THE spawn-on-surface primitive — spawns and targets
-    /// go through this so nothing seeds below a hill or floats over a valley.
-    pub fn on_surface(&self, p: Vec3) -> Vec3 {
-        Vec3::new(p.x, self.height(p.x, p.z) + p.y, p.z)
+    /// THE spawn-on-surface primitive: the world point `height_above` meters over the
+    /// surface at `xz`. Spawns and targets go through this so nothing seeds below a
+    /// hill or floats over a valley. Takes the offset as a separate scalar — not a Vec3
+    /// whose y is secretly an offset — so an already-lifted point can't be lifted twice.
+    pub fn place(&self, xz: Vec2, height_above: f32) -> Vec3 {
+        Vec3::new(xz.x, self.height(xz.x, xz.y) + height_above, xz.y)
     }
 
     /// The whole-tile static collider. Same grid as [`Self::height`] and [`Self::mesh`],
     /// transposed to parry's column-major layout (rows along +z, columns along +x).
+    /// Built with `FIX_INTERNAL_EDGES`: the crab's soft contacts rest with ~cm
+    /// penetration, and without the flag a foot straddling a cell seam takes a tilted
+    /// ghost impulse from the neighbor triangle's edge — on the flat arenas the seam
+    /// diagonal passes through the spawn origin, so the flag is what keeps the
+    /// heightfield floor contact-equivalent to the slab it replaced.
     pub fn collider(&self) -> Collider {
+        use bevy_rapier3d::rapier::geometry::SharedShape;
+        use bevy_rapier3d::rapier::parry::shape::{HeightField, HeightFieldFlags};
+        use bevy_rapier3d::rapier::parry::utils::Array2;
+
         let mut col_major = vec![0.0f32; self.rows * self.cols];
         for col in 0..self.cols {
             for row in 0..self.rows {
                 col_major[col * self.rows + row] = self.at(row, col);
             }
         }
-        Collider::heightfield(
-            col_major,
-            self.rows,
-            self.cols,
+        let field = HeightField::with_flags(
+            Array2::new(self.rows, self.cols, col_major),
             Vec3::new(self.extent_x(), 1.0, self.extent_z()),
-        )
+            HeightFieldFlags::FIX_INTERNAL_EDGES,
+        );
+        SharedShape::new(field).into()
     }
 
     /// The visible terrain surface — the SAME vertices and cell diagonal as the
@@ -227,15 +253,24 @@ impl TerrainGrid {
 ///
 /// [`Arena`]: crate::physics::Arena
 #[derive(Resource, Clone)]
-pub struct Terrain(pub Arc<TerrainGrid>);
+pub struct Terrain(Arc<TerrainGrid>);
 
-impl Default for Terrain {
-    /// The training arena's flat grid — the default so minimal test worlds that skip
-    /// `PhysicsWorldPlugin` can `init_resource` and match the walled box exactly.
-    fn default() -> Self {
-        Terrain(Arc::new(TerrainGrid::flat(
-            crate::physics::world::ARENA_HALF_SIZE,
-        )))
+impl Terrain {
+    /// Only `PhysicsWorldPlugin` constructs this, from its `Arena` — the grid the
+    /// resource carries is BY CONSTRUCTION the one the ground collider was built from.
+    /// Deliberately no `Default`: a defaulted flat grid where the arena's real grid was
+    /// meant is exactly the sampler/collider divergence this module exists to prevent
+    /// (a missing resource panics loudly instead).
+    pub(crate) fn new(grid: Arc<TerrainGrid>) -> Self {
+        Terrain(grid)
+    }
+}
+
+impl std::ops::Deref for Terrain {
+    type Target = TerrainGrid;
+
+    fn deref(&self) -> &TerrainGrid {
+        &self.0
     }
 }
 
@@ -272,7 +307,7 @@ mod tests {
             assert_eq!(g.height(x, z), 0.0, "flat at ({x},{z})");
         }
         assert_eq!(
-            g.on_surface(Vec3::new(1.0, 0.3, -2.0)),
+            g.place(Vec2::new(1.0, -2.0), 0.3),
             Vec3::new(1.0, 0.3, -2.0)
         );
     }

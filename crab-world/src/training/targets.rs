@@ -8,8 +8,8 @@ use crate::training::reward::dist_3d;
 
 pub(crate) const BAND_START_MIN: f32 = 1.5;
 /// Target height band, meters ABOVE the terrain surface at the target's own (x, z) —
-/// on the flat arenas that is the old absolute y band; on terrain (rl#281) the ball
-/// hugs the ground wherever it lands.
+/// equal to absolute y on the flat arenas; on terrain (rl#281) the ball hugs the
+/// ground wherever it lands.
 pub(crate) const TARGET_Y_MIN: f32 = 0.15;
 pub(crate) const TARGET_Y_MAX: f32 = 0.7;
 /// Far edge of the trained chase band — the ONE source for "how far a target can
@@ -59,7 +59,8 @@ const NEAR_BIAS_EXP: f32 = 2.0;
 
 /// The ONE polar target-placement formula — `theta` from `origin` in the ground plane,
 /// (cos, ·, sin) — shared by training sampling and the eval compass so the bearing
-/// convention cannot drift between them.
+/// convention cannot drift between them. `y` is copied through verbatim; callers that
+/// place on terrain re-lift the point with [`TerrainGrid::place`](crate::terrain::TerrainGrid::place).
 pub(crate) fn polar_target(origin: Vec3, theta: f32, dist: f32, y: f32) -> Vec3 {
     Vec3::new(
         origin.x + dist * theta.cos(),
@@ -88,7 +89,10 @@ pub(crate) fn sample_target(
         min + (max - min) * u.powf(NEAR_BIAS_EXP)
     };
     let y = rng.gen_range(TARGET_Y_MIN..TARGET_Y_MAX);
-    let at = |theta: f32| terrain.on_surface(polar_target(origin, theta, dist, y));
+    let at = |theta: f32| {
+        let p = polar_target(origin, theta, dist, y);
+        terrain.place(Vec2::new(p.x, p.z), y)
+    };
     let in_arena = |p: &Vec3| p.x.abs() <= TARGET_ARENA_HALF && p.z.abs() <= TARGET_ARENA_HALF;
 
     for _ in 0..32 {

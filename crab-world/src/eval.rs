@@ -492,12 +492,8 @@ fn eval_step(
         && let Some(slot) = targets.envs.first_mut()
     {
         let origin = spawns.origin(0);
-        *slot = Some(terrain.0.on_surface(polar_target(
-            origin,
-            cfg.bearing_rad,
-            cfg.target_distance,
-            TARGET_Y,
-        )));
+        let p = polar_target(origin, cfg.bearing_rad, cfg.target_distance, TARGET_Y);
+        *slot = Some(terrain.place(Vec2::new(p.x, p.z), TARGET_Y));
         state.target_set = true;
     }
     let Some(target) = targets.get(0) else {

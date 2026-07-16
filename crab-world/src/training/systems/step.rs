@@ -259,7 +259,7 @@ pub(crate) fn brain_step(
         }
     }
 
-    let body = gather_body_state(n, &spawns, &terrain.0, &carapace_q, &parts_q);
+    let body = gather_body_state(n, &spawns, &terrain, &carapace_q, &parts_q);
 
     let close_frac = training.close_frac;
     for e in 0..n {
@@ -270,7 +270,7 @@ pub(crate) fn brain_step(
                 e,
                 close_frac,
                 &mut training.rng,
-                &terrain.0,
+                &terrain,
             );
         }
     }
@@ -295,7 +295,7 @@ pub(crate) fn brain_step(
         efforts: &efforts,
         rescued_envs: &rescued_envs,
     };
-    training.finalize_transitions(&inputs, &mut targets, &spawns, &terrain.0);
+    training.finalize_transitions(&inputs, &mut targets, &spawns, &terrain);
 
     if training.log_effort {
         log_effort_probe(&training.envs, &efforts, training.effort_weight);
