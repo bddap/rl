@@ -117,8 +117,10 @@ def main() -> None:
     p.add_argument("--api", default="http://127.0.0.1:8017")
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--size", type=int, default=1024, help="grid edge, pixels")
-    p.add_argument("--origin", type=int, nargs=2, default=[0, 0], metavar=("I", "J"))
+    p.add_argument("--origin", type=int, nargs=2, default=[0, 0], metavar=("I", "J"),
+                   help="window top-left (i=row, j=col) in target-resolution pixels")
     p.add_argument("--api-scale", type=int, default=1, help="upsample factor relative to model-native pitch")
+    p.add_argument("--model-rev", default=None, help="upstream terrain-diffusion git rev (provenance)")
     p.add_argument("--native-pitch-m", type=float, default=30.0, help="model-native meters/pixel")
     p.add_argument("--cell-size-m", type=float, default=None,
                    help="declared horizontal stretch knob (default: native pitch / api-scale)")
@@ -147,14 +149,18 @@ def main() -> None:
 
     cell = args.cell_size_m if args.cell_size_m is not None else args.native_pitch_m / args.api_scale
     meta = {
-        "width": elev.shape[1],
-        "height": elev.shape[0],
+        "rows": elev.shape[0],
+        "cols": elev.shape[1],
+        # Fixed by construction (numpy row-major + PIL): stage-2 readers rely
+        # on this string matching reality, not on guessing.
+        "layout": "row-major int16-le; grid[row][col]; origin=(i,j)=top-left; row 0 = preview PNG top",
         "cell_size_m": cell,
         "height_scale": args.height_scale,
         "seed": args.seed,
         "origin": list(args.origin),
         "api_scale": args.api_scale,
         "model": "xandergos/terrain-diffusion-30m",
+        "model_rev": args.model_rev,
         "fbm": fbm_meta,
         "elev_min_m": int(elev.min()),
         "elev_max_m": int(elev.max()),

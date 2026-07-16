@@ -12,11 +12,13 @@ WORK="${1:-$HOME/.cache/terrain-bake}"
 PORT="${2:-8017}"
 UPSTREAM=https://github.com/xandergos/terrain-diffusion
 # Pin: the artifact must be re-bakeable; a moving master is not a provenance.
-UPSTREAM_REV="${UPSTREAM_REV:-master}"
+# gcr-seed281 was baked at this rev (recorded in its metadata as model_rev).
+UPSTREAM_REV="${UPSTREAM_REV:-82a0431281f21a6ec3d691a12ee61525de5b0790}"
 PY="$(nix-shell -p python312 --run 'command -v python3')"
 
 mkdir -p "$WORK"
 [ -d "$WORK/terrain-diffusion" ] || git clone "$UPSTREAM" "$WORK/terrain-diffusion"
+git -C "$WORK/terrain-diffusion" fetch -q origin
 git -C "$WORK/terrain-diffusion" checkout -q "$UPSTREAM_REV"
 
 cd "$WORK"
@@ -25,7 +27,9 @@ set -euo pipefail
 export LD_LIBRARY_PATH=/run/current-system/sw/share/nix-ld/lib:/run/opengl-driver/lib
 export PIP_CACHE_DIR=\$PWD/pipcache
 export HF_HOME=\$PWD/hf
-[ -d venv ] || $PY -m venv venv
+# -x probe, not -d: a GC'd store python leaves a venv of dangling shebangs,
+# and an interrupted first run leaves a half-made dir; both must rebuild.
+[ -x venv/bin/pip ] && venv/bin/pip --version >/dev/null 2>&1 || { rm -rf venv; $PY -m venv venv; }
 # Inference-only subset of upstream requirements.txt (skips wandb/optuna/
 # earthengine/cartopy + the rest of the training stack).
 ./venv/bin/pip install -q --no-input torch torchvision numpy diffusers \
