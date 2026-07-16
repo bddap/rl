@@ -88,7 +88,10 @@ impl CrabSpawns {
     /// rescue, the spawn-relative obs channel — is surface-relative through this one seam.
     fn rebuild(&mut self, n: usize, terrain: &crate::terrain::TerrainGrid) {
         self.0 = (0..n)
-            .map(|env| terrain.on_surface(grid_offset(env, n)))
+            .map(|env| {
+                let p = grid_offset(env, n);
+                terrain.place(Vec2::new(p.x, p.z), 0.0)
+            })
             .collect();
     }
 
@@ -334,7 +337,7 @@ pub fn spawn_initial_crabs(
     actions.resize(n);
     obs.resize(n);
     targets.resize(n);
-    spawns.rebuild(n, &terrain.0);
+    spawns.rebuild(n, &terrain);
     for env in 0..n {
         body::spawn_crab(
             &mut commands,

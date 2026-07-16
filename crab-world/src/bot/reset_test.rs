@@ -184,3 +184,37 @@ fn rescue_system_recovers_a_nan_poisoned_crab() {
     tick(&mut app, 64);
     assert_crab_sane(&mut app, n_parts, "64 ticks later");
 }
+
+/// rl#281 stage 2 end-to-end: on the REAL baked terrain arena the crab must spawn on
+/// the mountainside and settle standing ON the heightfield — surface-relative, since
+/// the local ground is hundreds of meters from y=0. Falling through (thin-surface
+/// tunneling) or launching would show up as a wild relative height.
+#[test]
+fn crab_lands_sane_on_the_terrain_arena() {
+    use super::headless::{HeadlessStack, WorldRole, headless_stack};
+    use crate::terrain::TerrainGrid;
+
+    let mut app = headless_stack(HeadlessStack {
+        num_envs: 1,
+        role: WorldRole::Standalone,
+        arena: crate::physics::Arena::Terrain,
+        visuals: crate::Visuals(false),
+    });
+    tick(&mut app, 192);
+
+    let g = TerrainGrid::gcr();
+    for t in part_translations(&mut app) {
+        assert!(t.is_finite(), "non-finite part on terrain: {t:?}");
+    }
+    let mut q = app
+        .world_mut()
+        .query_filtered::<&Transform, With<CrabCarapace>>();
+    let c = q.single(app.world()).expect("carapace").translation;
+    let rel = c.y - g.height(c.x, c.z);
+    assert!(
+        (-0.2..1.5).contains(&rel),
+        "carapace {rel} m above the local terrain surface at ({}, {}) — tunneled or launched",
+        c.x,
+        c.z
+    );
+}

@@ -52,7 +52,7 @@ pub struct PhysicsWorldPlugin {
 
 impl Plugin for PhysicsWorldPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(Terrain(self.arena.grid()));
+        app.insert_resource(Terrain::new(self.arena.grid()));
         app.add_systems(Startup, setup_ground);
         if matches!(self.arena, Arena::WalledBox) {
             app.add_systems(Startup, setup_walls);
@@ -106,7 +106,7 @@ fn wall_boxes() -> [(Vec3, Vec3); 4] {
 fn setup_ground(mut commands: Commands, terrain: Res<Terrain>) {
     commands.spawn((
         RigidBody::Fixed,
-        terrain.0.collider(),
+        terrain.collider(),
         ARENA_COLLISION,
         Transform::IDENTITY,
     ));
@@ -157,7 +157,7 @@ fn setup_arena_visuals(
     // the terrain arena gets the actual mountains. Looks beyond correct geometry
     // (material, LOD, biome tint) are rl#281 stage 3.
     commands.spawn((
-        Mesh3d(meshes.add(terrain.0.mesh())),
+        Mesh3d(meshes.add(terrain.mesh())),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.35, 0.55, 0.35),
             perceptual_roughness: 0.9,
@@ -165,4 +165,19 @@ fn setup_arena_visuals(
         })),
         Transform::IDENTITY,
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The open field must span at least the GCR terrain tile — the prose rationale for
+    /// [`OPEN_FIELD_HALF_SIZE`] ("edge unreachable in practice") silently rots if a
+    /// bigger tile is baked.
+    #[test]
+    fn open_field_spans_the_gcr_tile() {
+        let g = TerrainGrid::gcr();
+        assert!(OPEN_FIELD_HALF_SIZE >= g.extent_x() / 2.0);
+        assert!(OPEN_FIELD_HALF_SIZE >= g.extent_z() / 2.0);
+    }
 }
