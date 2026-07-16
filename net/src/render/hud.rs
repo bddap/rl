@@ -41,19 +41,34 @@ pub(super) fn update_hud(state: NonSend<GameState>, mut hud: Query<&mut Text, Wi
         return;
     };
     let sim = state.client.sim();
-    let status = sim
-        .player(state.client.me())
-        .map(|p| match p.status() {
-            PlayerStatus::Alive => "ALIVE",
-            PlayerStatus::Downed => "DOWNED",
-            PlayerStatus::Extracted => "EXTRACTED",
-        })
-        .unwrap_or("—");
+    let me = state.client.me();
+    let status = sim.player(me).map(|p| status_str(p.status())).unwrap_or("—");
+    // In a multiplayer round, a second line tracks the whole party — whether a teammate is
+    // downed or already out decides what you do next, and their avatar may be out of view.
+    let party = if sim.players().count() > 1 {
+        let list: Vec<String> = sim
+            .players()
+            .filter(|(id, _)| *id != me)
+            .map(|(id, p)| format!("P{}: {}", id.0, status_str(p.status())))
+            .collect();
+        format!("\nParty: {}", list.join("   "))
+    } else {
+        String::new()
+    };
     let outcome = match sim.outcome() {
         Outcome::Ongoing => String::new(),
         Outcome::Extracted => "\nROUND WON — extracted!".to_string(),
         Outcome::Wiped => "\nROUND LOST — wiped".to_string(),
     };
-    **text =
-        format!("You: {status}   |   reach the green pillar, extract - dodge the crab{outcome}",);
+    **text = format!(
+        "You: {status}   |   reach the green pillar, extract - dodge the crab{party}{outcome}",
+    );
+}
+
+fn status_str(s: PlayerStatus) -> &'static str {
+    match s {
+        PlayerStatus::Alive => "ALIVE",
+        PlayerStatus::Downed => "DOWNED",
+        PlayerStatus::Extracted => "EXTRACTED",
+    }
 }

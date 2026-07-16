@@ -650,8 +650,7 @@ fn draw_lobby(ctx: &egui::Context, state: &MenuState, lobby: &[EndpointId]) -> O
             }
 
             ui.separator();
-            let me = if hosting { display_code } else { None };
-            lobby_roster(ui, lobby, me);
+            lobby_roster(ui, lobby, state.forming.as_ref().and_then(|f| f.my_id()));
 
             ui.separator();
             if hosting {
