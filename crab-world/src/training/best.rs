@@ -64,9 +64,10 @@ const BEST_FILES: &[BestFile] = &[
 /// far-approach movement in either direction — exactly the divergence that let a
 /// 6.92 m brain displace the 8.93 m one (bddap/rl#233). The compass eval runs one
 /// episode per bearing at the far distance (rl#239, ~2 min measured on the training
-/// box) plus the same compass again for the rl#252 close probe (~4 min total), so with
-/// the period at 3× the pre-compass 600 s, eval spend stays around ~13% of training
-/// wall-clock (rollout threads idle while the learner-thread eval runs).
+/// box), the same compass again for the rl#252 close probe, plus the short rl#280
+/// pace-probe compass (~10 s episodes; ~5 min total), so with the period at 3× the
+/// pre-compass 600 s, eval spend stays under ~17% of training wall-clock (rollout
+/// threads idle while the learner-thread eval runs).
 const EVAL_PERIOD: Duration = Duration::from_secs(1800);
 
 /// Meters of chase progress a candidate must add over the incumbent to displace it.
@@ -389,6 +390,12 @@ mod tests {
             },
             close: crate::eval::CompassSweep {
                 target_distance_m: crate::eval::CLOSE_PROBE_DISTANCE_M,
+                per_bearing: [close_bearing; crate::eval::EVAL_BEARINGS],
+            },
+            // Scripted to beat every bar for the same reason as the close probe: a
+            // pace number leaking into promotion would flip the cases below.
+            pace: crate::eval::CompassSweep {
+                target_distance_m: crate::eval::PACE_PROBE_DISTANCE_M,
                 per_bearing: [close_bearing; crate::eval::EVAL_BEARINGS],
             },
         }
