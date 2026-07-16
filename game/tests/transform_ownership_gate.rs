@@ -25,14 +25,18 @@ const BODY_MARKERS: [&str; 4] = ["CrabBodyPart", "CrabCarapace", "CrabClawTip", 
 /// - `net/src/external_crab.rs`: the GCR bridge. Its rl#240 recenter is a sanctioned
 ///   physics teleport riding the `PoseSentinelSet` lane (ordered after the sentinel,
 ///   consumed by the same tick's SyncBackend).
+/// - `crab-world/src/eval.rs`: the pace probe's `pace_recenter` (rl#280) — the same
+///   rl#240 recenter teleport in the eval's headless `Visuals(false)` worlds,
+///   consumed by the same tick's SyncBackend.
 ///
 /// Rendering has NO exception: since rl#274 every render consumer reads the sampled
 /// `CrabRenderPose` overlay — the remote-adopt puppet-write carve-out this list used to
 /// hold for `net/src/render/articulation.rs` is gone.
-const ALLOWED: [&str; 3] = [
+const ALLOWED: [&str; 4] = [
     "crab-world/src/bot/",
     "crab-world/src/training/",
     "net/src/external_crab.rs",
+    "crab-world/src/eval.rs",
 ];
 
 /// Carve-outs from `ALLOWED`, checked first: `bot/skin/` is the render-side cosmetic
