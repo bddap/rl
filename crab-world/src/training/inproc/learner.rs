@@ -377,6 +377,11 @@ pub fn run_learner(
         "[learner] reward economy: effort_weight {} (--effort-weight)",
         config.effort_weight,
     );
+    // Loud so train.log proves which PLANT it trained under (rl#268 damping run).
+    eprintln!(
+        "[learner] plant: {}",
+        crate::bot::body::friction_cap_provenance()
+    );
 
     // Best-by-chase-eval keeping (rl#157, rekeyed by rl#233): periodically chase-eval
     // the checkpoint and mirror it into `<ckpt>/best/` when it beats the incumbent's
