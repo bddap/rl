@@ -162,11 +162,15 @@ impl BestKeeper {
     /// `best/` iff it beats the incumbent's progress. Runs between learner iterations
     /// (rollout threads idle for the eval's ~4 min far+close sweep), so it costs wall
     /// clock only — no training data or update is touched.
-    pub(crate) fn maybe_snapshot(&mut self) {
+    ///
+    /// Returns whether the eval period elapsed this call (an eval was spent, whatever
+    /// its outcome) — the learner keys its per-bearing training-reach window (rl#276)
+    /// off this so both readouts cover the same train.log stretch.
+    pub(crate) fn maybe_snapshot(&mut self) -> bool {
         if let Some(last) = self.last_eval
             && last.elapsed() < self.eval_period
         {
-            return;
+            return false;
         }
         // Reset even when nothing promotes: the period paces eval SPEND, not successes.
         self.last_eval = Some(Instant::now());
@@ -183,26 +187,26 @@ impl BestKeeper {
                 .exists()
             && !self.score_incumbent()
         {
-            return;
+            return true;
         }
 
         let report = match self.eval_dir(&self.checkpoint_dir.clone()) {
             Ok(r) => r,
             Err(e) => {
                 warn!("[best] chase-eval of candidate failed: {e} — keeping previous best");
-                return;
+                return true;
             }
         };
         if !report.policy_loaded {
             warn!("[best] chase-eval loaded no policy from the live checkpoint — not eligible");
-            return;
+            return true;
         }
         let Some(candidate) = Progress::new(report.progress_m()) else {
             warn!(
                 "[best] non-finite chase progress ({}) — not eligible for snapshot",
                 report.progress_m()
             );
-            return;
+            return true;
         };
 
         let beats = match self.best {
@@ -215,27 +219,30 @@ impl BestKeeper {
             .unwrap_or_else(|| "none".to_string());
         // The close-probe numbers ride every candidate log line so train.log carries a
         // periodic close-range time series (the rl#250 flip's upside readout, rl#252);
-        // they never feed the promotion decision.
+        // they never feed the promotion decision. The far per-bearing vector rides too
+        // (rl#276): the min headline collapses a one-bearing hole into an ambiguous
+        // scalar — the vector names the failing bearing the moment it opens.
         let close = format!(
             "close probe min {:.3} m, reached {}/{}",
             report.close.worst().progress_m,
             report.close.reached_count(),
             crate::eval::EVAL_BEARINGS
         );
+        let far = format!("far bearings {}", report.far.progress_line());
         if !beats {
             info!(
-                "[best] chase-eval: min-bearing progress {:.3} m (reached={}) vs bar {bar} — keeping incumbent | {close}",
+                "[best] chase-eval: min-bearing progress {:.3} m (reached={}) vs bar {bar} — keeping incumbent | {far} | {close}",
                 candidate.get(),
                 report.reached()
             );
-            return;
+            return true;
         }
 
         match self.snapshot(candidate) {
             Ok(()) => {
                 info!(
                     "[best] new best snapshot → {}/{BEST_SUBDIR} | min-bearing chase progress {:.3} m \
-                     (reached={}) beats {bar} | {close}",
+                     (reached={}) beats {bar} | {far} | {close}",
                     self.checkpoint_dir.display(),
                     candidate.get(),
                     report.reached()
@@ -247,6 +254,7 @@ impl BestKeeper {
                 self.checkpoint_dir.display()
             ),
         }
+        true
     }
 
     /// Establish the progress bar for a pre-existing `best/` by chase-evaling it in

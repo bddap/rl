@@ -197,12 +197,27 @@ impl TrainingState {
                     ..EnvEpisode::default()
                 };
 
+                // The episode's target bearing from the spawn origin — read BEFORE
+                // seed_target replaces the target, binned onto the eval compass
+                // (rl#276) so the per-bearing tally below and the chase eval speak
+                // the same bearings.
+                let bearing = targets.envs.get(e).copied().flatten().map(|t| {
+                    let origin = spawns.origin(e);
+                    crate::eval::bearing_bin((t.z - origin.z).atan2(t.x - origin.x))
+                });
+
                 let close_frac = self.close_frac;
                 seed_target(targets, spawns, e, close_frac, &mut self.rng);
 
                 self.reach_finished += 1;
                 if reached {
                     self.reach_reached += 1;
+                }
+                if let Some(bin) = bearing {
+                    self.reach_by_bearing[bin].1 += 1;
+                    if reached {
+                        self.reach_by_bearing[bin].0 += 1;
+                    }
                 }
 
                 self.recent_rewards.push(ep_reward);
@@ -383,6 +398,57 @@ mod tests {
         assert!(ts.envs[0].pending.is_none(), "the episode did not start");
         assert_eq!(ts.envs[0].min_tip_dist, None, "stale touch cleared");
         assert_ne!(targets.envs[0], Some(touched), "target replaced");
+    }
+
+    /// The rl#276 tally: a finished episode lands in the compass bin of ITS target
+    /// (+Z of the spawn origin = 90° = bin 2), read before the reseed replaces it.
+    #[test]
+    fn a_finished_episode_bins_reach_by_target_bearing() {
+        let config = crate::TrainConfig::scratch(
+            &std::env::temp_dir().join("rl_test_bearing_bin_tally"),
+            1,
+            7,
+        );
+        let mut ts = TrainingState::new(&config, None);
+        ts.envs[0].pending = Some(Pending {
+            obs: [0.0; OBS_SIZE],
+            action: [0.0; ACTION_SIZE],
+            value: NormalizedValue(0.0),
+            log_prob: 0.0,
+            effort: 0.0,
+            target_dist: None,
+        });
+
+        let mut targets = CrabTargets::default();
+        targets.resize(1);
+        targets.envs[0] = Some(Vec3::new(0.0, 0.2, 5.0));
+        let spawns = CrabSpawns::from_origins(vec![Vec3::ZERO]);
+        let body = BodyState {
+            poses: vec![Some((1.0, 1.0))],
+            carapace_pos: vec![Some(Vec3::ZERO)],
+            drifts: vec![None],
+            max_speeds: vec![0.0],
+        };
+        let inputs = StepInputs {
+            body: &body,
+            min_tip_dists: &[Some(REACH_RADIUS * 4.0)],
+            obs: &[[0.0; OBS_SIZE]],
+            drives: &[[0.0; ACTION_SIZE]],
+            values: &[NormalizedValue(0.0)],
+            log_probs: &[0.0],
+            efforts: &[0.0],
+            // A rescue ends the episode without needing a whole physics run.
+            rescued_envs: &[0],
+        };
+        ts.finalize_transitions(&inputs, &mut targets, &spawns);
+
+        assert_eq!(ts.reach_finished, 1, "the episode finished and was counted");
+        let mut want = [(0, 0); crate::eval::EVAL_BEARINGS];
+        want[2] = (0, 1);
+        assert_eq!(
+            ts.reach_by_bearing, want,
+            "the episode tallies (unreached) in its target's compass bin"
+        );
     }
 
     #[test]

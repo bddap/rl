@@ -195,6 +195,17 @@ impl CompassSweep {
         (!measured.is_empty()).then(|| measured.iter().sum::<f32>() / measured.len() as f32)
     }
 
+    /// Compact per-bearing progress readout for log lines (rl#276): the full vector
+    /// the headline min collapses to one number, so a directional hole names its
+    /// bearing in train.log at onset instead of after a forensic per-bearing job.
+    pub fn progress_line(&self) -> String {
+        self.per_bearing
+            .iter()
+            .map(|b| format!("{:.0}°:{:.2}", b.bearing_rad.to_degrees(), b.progress_m))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// The BEST bearing's sustained pace (arena m/s) — her full charge. Max, not min:
     /// the speed guard asks how fast she really is (spawn safety cares about her top
     /// pace), while dead bearings are the headline min-progress gate's problem.
@@ -362,8 +373,20 @@ fn run_compass(
 }
 
 /// The compass bearings in sweep order: bearing i = i·2π/[`EVAL_BEARINGS`].
-fn eval_bearings() -> impl Iterator<Item = f32> {
+/// `pub(crate)` so training-side per-bearing readouts (rl#276) label their bins from
+/// THIS sequence rather than a second formula that could drift.
+pub(crate) fn eval_bearings() -> impl Iterator<Item = f32> {
     (0..EVAL_BEARINGS).map(|i| i as f32 * std::f32::consts::TAU / EVAL_BEARINGS as f32)
+}
+
+/// Nearest compass bearing index for an arbitrary planar bearing in radians
+/// (the [`polar_target`](crate::training::targets) convention: 0 = +X, toward +Z) —
+/// how training episodes, whose bearings are sampled uniformly rather than swept,
+/// bin onto [`eval_bearings`] for the rl#276 per-bearing reach tally. Lives beside
+/// the compass definition so bin i and swept bearing i can never disagree.
+pub(crate) fn bearing_bin(theta_rad: f32) -> usize {
+    let step = std::f32::consts::TAU / EVAL_BEARINGS as f32;
+    ((theta_rad / step).round().rem_euclid(EVAL_BEARINGS as f32)) as usize
 }
 
 /// One episode at one bearing — a fresh world per bearing, so each episode is exactly
@@ -538,6 +561,37 @@ fn eval_step(
 mod tests {
     use super::*;
     use crate::training::targets::REACH_RADIUS;
+
+    /// The rl#276 binning contract: every swept compass bearing bins to its own
+    /// index — including off the compass (nearest wins, ties round away from zero)
+    /// and for the negative-angle aliases `atan2` hands training episodes.
+    #[test]
+    fn bearing_bin_agrees_with_the_swept_compass() {
+        let step = std::f32::consts::TAU / EVAL_BEARINGS as f32;
+        for (i, bearing) in eval_bearings().enumerate() {
+            assert_eq!(bearing_bin(bearing), i, "swept bearing {i} is its own bin");
+            assert_eq!(
+                bearing_bin(bearing + 0.4 * step),
+                i,
+                "nearest below midpoint"
+            );
+            assert_eq!(
+                bearing_bin(bearing - 0.4 * step),
+                i,
+                "nearest above midpoint"
+            );
+            assert_eq!(
+                bearing_bin(bearing - std::f32::consts::TAU),
+                i,
+                "the atan2 negative alias of bearing {i} bins identically"
+            );
+        }
+        assert_eq!(
+            bearing_bin(-step),
+            EVAL_BEARINGS - 1,
+            "-45° is the last bin"
+        );
+    }
 
     /// A canned report at the given target distance with ONE bearing pacing at `pace`
     /// (arena m/s) — the speed guard's inputs, nothing else non-zero.
