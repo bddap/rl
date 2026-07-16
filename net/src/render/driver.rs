@@ -718,7 +718,13 @@ pub(super) fn drive_client_sim(world: &mut World) {
         };
         if let Some(art) = pending_art {
             crate::render::articulation::adopt(world, &art);
-            super::articulation::publish_remote_vehicles(world, art.tick, &art.vehicles, me);
+            super::articulation::publish_remote_vehicles(
+                world,
+                art.tick,
+                &art.vehicles,
+                Vec3::from_array(art.arena_anchor),
+                me,
+            );
             if let Some(p) = own_wire_pose(&art, me) {
                 let mut vehicle = world.resource_mut::<LocalVehicle>();
                 if matches!(&*vehicle, LocalVehicle::Flying { poses, .. } if poses.is_empty()) {
@@ -829,6 +835,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                         world,
                         art.tick,
                         &art.vehicles,
+                        Vec3::from_array(art.arena_anchor),
                         me,
                     );
                 }

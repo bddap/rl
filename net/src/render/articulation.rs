@@ -82,7 +82,9 @@ impl RemoteVehicle {
 
 /// One log line per remote-craft EDGE — the pilot set changing (a boarding/exit seen from this
 /// peer) and each craft's first real displacement (proof the other pilot's craft is moving here,
-/// rl#191 increment 4) — instead of a per-tick pose flood.
+/// rl#191 increment 4) — instead of a per-tick pose flood. Poses are watched in WORLD frame
+/// (arena + the message's anchor): an rl#240 recenter shifts every craft's arena pose by >5 m
+/// without moving anything on screen, and "has moved" must mean moved on screen.
 #[derive(Resource, Default)]
 pub(super) struct RemoteCraftWatch {
     pilots: Vec<u8>,
@@ -96,6 +98,7 @@ pub(super) fn publish_remote_vehicles(
     world: &mut World,
     tick: u64,
     vehicles: &[VehiclePoseWire],
+    anchor: Vec3,
     me: PilotId,
 ) {
     let remote: Vec<VehiclePoseWire> = vehicles
@@ -117,7 +120,7 @@ pub(super) fn publish_remote_vehicles(
         watch.moved.retain(|p| remote.iter().any(|v| v.pilot == *p));
     }
     for v in &remote {
-        let pos = Vec3::from_array(v.pos);
+        let pos = Vec3::from_array(v.pos) + anchor;
         let first = *watch.first_pose.entry(v.pilot).or_insert(pos);
         if !watch.moved.contains(&v.pilot) && first.distance(pos) > REMOTE_MOVED_LOG_METERS {
             watch.moved.insert(v.pilot);
@@ -486,7 +489,13 @@ mod tests {
             .run_system_once(sample_crab_part_poses)
             .expect("sampler runs on a bare world");
         // Viewed as pilot 7: pilot 0's craft is somebody else's ⇒ it lands in RemoteVehicle.
-        publish_remote_vehicles(&mut client, 42, &art.vehicles, PilotId(7));
+        publish_remote_vehicles(
+            &mut client,
+            42,
+            &art.vehicles,
+            Vec3::from_array(art.arena_anchor),
+            PilotId(7),
+        );
 
         // The samples land in the render-only overlay, never on the parts' own
         // `Transform`s — those stay rapier's (rl#116/rl#274).
@@ -552,7 +561,13 @@ mod tests {
         assert_eq!(crafts[0].pose.orient, craft_t.rotation);
 
         // Viewed as pilot 0 the same craft is OURS — the cockpit, not a wireframe.
-        publish_remote_vehicles(&mut client, 42, &art.vehicles, PilotId(0));
+        publish_remote_vehicles(
+            &mut client,
+            42,
+            &art.vehicles,
+            Vec3::from_array(art.arena_anchor),
+            PilotId(0),
+        );
         assert!(
             client
                 .resource::<RemoteVehicle>()
