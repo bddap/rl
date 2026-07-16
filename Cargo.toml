@@ -1,6 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["crab-world", "net", "rl-train", "rl-demo", "game", "rl-update-ui", "otel"]
+members = [
+    "crab-world",
+    "net",
+    "rl-train",
+    "rl-demo",
+    "game",
+    "rl-update-ui",
+    "otel",
+    "meshfit",
+]
 
 [workspace.package]
 version = "0.1.0"

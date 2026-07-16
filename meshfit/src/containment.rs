@@ -44,10 +44,6 @@ impl<'a> MeshContainment<'a> {
             inside,
         }
     }
-
-    pub fn signed_dist(&self, p: Vec3) -> f32 {
-        self.probe(p).signed_dist
-    }
 }
 
 pub fn aabb(pts: &[Vec3]) -> (Vec3, Vec3) {

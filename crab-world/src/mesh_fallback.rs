@@ -25,38 +25,66 @@ impl Surface {
     }
 }
 
+/// Resolve the crab model file: `CRAB_MODEL_PATH` (absolute, or relative to the
+/// asset root) with `sally.glb` under `BEVY_ASSET_ROOT/assets` as the default.
+pub fn model_path() -> Option<PathBuf> {
+    resolve(
+        std::env::var_os("CRAB_MODEL_PATH").as_deref(),
+        &crate::assets::asset_root(),
+        |p| p.exists(),
+    )
+}
+
+fn resolve(
+    crab_model_path: Option<&std::ffi::OsStr>,
+    asset_root: &std::path::Path,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<PathBuf> {
+    let rel = crab_model_path.map_or_else(|| PathBuf::from("sally.glb"), PathBuf::from);
+    if rel.is_absolute() {
+        return exists(&rel).then_some(rel);
+    }
+    let asset = asset_root.join("assets").join(rel);
+    exists(&asset).then_some(asset)
+}
+
+/// A verified-usable crab model: the path whose bytes matched
+/// [`bot::rig::BAKED_ASSET_DIGEST`] (any other byte state is refused, so there is no
+/// digest field to carry — the const IS the digest) and the baked collider recipe.
 pub struct UsableModel {
     pub path: PathBuf,
     pub recipe: bot::rig::RigRecipe,
-    /// FNV-1a/64 of the exact file bytes the `recipe` was built from — hashed and
-    /// parsed from ONE read ([`checked_recipe`]), so the digest can never describe a
-    /// different file state than the body actually spawned (bddap/rl#214). Never `0`
-    /// (that value means "fallback/no asset", see [`constructed_body_digest`]).
-    pub digest: u64,
 }
 
 fn checked_model() -> Result<UsableModel, String> {
-    let Some(path) = bot::meshfit::model_path() else {
+    let Some(path) = model_path() else {
         return Err(MESH_ABSENT_REASON.to_string());
     };
-    let (recipe, digest) = checked_recipe(&path)?;
-    Ok(UsableModel {
-        path,
-        recipe,
-        digest,
-    })
+    let recipe = checked_recipe(&path)?;
+    Ok(UsableModel { path, recipe })
 }
 
-fn checked_recipe(p: &std::path::Path) -> Result<(bot::rig::RigRecipe, u64), String> {
+/// The bddap/rl#20 Phase 2 gate: the runtime does not fit colliders from the mesh —
+/// it verifies the asset's bytes are EXACTLY the ones the committed
+/// [`bot::rig::baked_recipe`] table was baked from, then serves that table. Any other
+/// byte state (a changed model, a corrupt download) is refused loudly: serving a
+/// stale table under a new mesh would silently fork physics from render, and a
+/// re-fit is a deliberate offline event (`cargo run -p meshfit -- bake`), never a
+/// side effect of swapping a file.
+fn checked_recipe(p: &std::path::Path) -> Result<bot::rig::RigRecipe, String> {
     let bytes = std::fs::read(p).map_err(|e| format!("crab model {p:?}: read: {e}"))?;
-    let model = bot::meshfit::LoadedModel::from_slice(&bytes)
-        .map_err(|e| format!("crab model {p:?}: {e}"))?;
-    let recipe = bot::rig::build_recipe(&model).ok_or_else(|| {
-        format!(
-            "crab model {p:?}: loaded but has none of the expected crab bones (e.g. Def_leg_01.000.L)"
-        )
-    })?;
-    Ok((recipe, crate::fnv::fnv1a(&bytes)))
+    let digest = crate::fnv::fnv1a(&bytes);
+    if digest != bot::rig::BAKED_ASSET_DIGEST {
+        return Err(format!(
+            "crab model {p:?}: digest {digest:#018x} does not match the baked collider \
+             table ({:#018x}) — the asset changed (or is corrupt) without a re-bake. \
+             Fetch the canonical sally.glb (scripts/fetch-sally.sh), or re-bake \
+             deliberately (`cargo run -p meshfit -- bake`): a geometry change is a new \
+             MDP — review the baked.rs diff and plan a retrain (rl#277)",
+            bot::rig::BAKED_ASSET_DIGEST
+        ));
+    }
+    Ok(bot::rig::baked_recipe())
 }
 
 pub fn usable_model() -> &'static Result<UsableModel, String> {
@@ -94,18 +122,22 @@ pub fn natural_body_height() -> Option<f32> {
 /// advertise/stamp `0`, not the broken file's hash (two identically-corrupt peers must
 /// not "agree on the collider asset" while both run not-Sally bodies).
 ///
-/// WHY hash the raw file bytes (not the post-load mesh or the fitted capsule spec): the
-/// giant crab's rapier colliders are a DETERMINISTIC pure function of this file's bytes
-/// GIVEN a fixed binary — glb → skin-to-bind-world → capsule/box fit. The binary is
-/// already an unstated GCR baseline (two peers on different binaries desync on
-/// everything, not just colliders), so the only collider-affecting input left to guard
-/// is the asset — hashed conservatively (any byte change ⇒ mismatch ⇒ refuse) and
-/// WITHOUT re-introducing float-reproducibility questions that hashing the skinned
-/// vertex cloud or fitted f32 spec would. Same caveat for the checkpoint stamp: it
-/// guards the ASSET axis only; a meshfit/rig code change alters the body under an
-/// unchanged digest (the binary axis stays unguarded, as in the handshake).
+/// WHY hash the raw file bytes (not the post-load mesh or the collider spec): hashed
+/// conservatively (any byte change ⇒ mismatch ⇒ refuse) and WITHOUT the
+/// float-reproducibility questions hashing a vertex cloud or f32 spec would raise.
+/// Since bddap/rl#20 Phase 2 the collider geometry itself is the COMMITTED
+/// [`bot::rig::baked_recipe`] table compiled into the binary, and [`checked_recipe`]
+/// refuses any asset whose bytes aren't the ones the table was baked from — so a
+/// digest match now certifies the exact collider table too, not just the render mesh.
+/// Remaining caveat: the binary axis stays unguarded (as in the handshake) — spawn
+/// /joint code changes, or a re-bake, alter the body under an unchanged asset digest;
+/// a re-bake at least is always a loud, reviewed baked.rs diff.
 pub fn constructed_body_digest() -> u64 {
-    usable_model().as_ref().map(|u| u.digest).unwrap_or(0)
+    if usable_model().is_ok() {
+        bot::rig::BAKED_ASSET_DIGEST
+    } else {
+        0
+    }
 }
 
 /// The trainer/eval body-preflight verdict: proceed (on which body), or refuse. A value
@@ -165,7 +197,7 @@ pub fn require_canonical_body(context: &str, allow_fallback: bool) -> Result<Bod
         (Ok(BodyGate::RealSally), Ok(u)) => tracing::info!(
             "canonical Sally mesh preflight OK for {context}: {} (body digest {:#018x})",
             u.path.display(),
-            u.digest,
+            bot::rig::BAKED_ASSET_DIGEST,
         ),
         (Ok(BodyGate::FallbackAllowed), Err(reason)) => {
             log_fallback(Surface::Trainer, reason);
@@ -243,6 +275,44 @@ mod banner {
                 ));
             })
             .id()
+    }
+}
+
+#[cfg(test)]
+mod model_path_tests {
+    use super::resolve;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn relative_resolves_under_asset_root() {
+        let got = resolve(Some("sally.glb".as_ref()), Path::new("/srv/app"), |p| {
+            p == Path::new("/srv/app/assets/sally.glb")
+        });
+        assert_eq!(got, Some(PathBuf::from("/srv/app/assets/sally.glb")));
+    }
+
+    #[test]
+    fn defaults_to_sally_under_asset_root() {
+        let got = resolve(None, Path::new("/crate"), |p| {
+            p == Path::new("/crate/assets/sally.glb")
+        });
+        assert_eq!(got, Some(PathBuf::from("/crate/assets/sally.glb")));
+    }
+
+    #[test]
+    fn absolute_path_used_as_is() {
+        let got = resolve(Some("/models/x.glb".as_ref()), Path::new("/srv"), |p| {
+            p == Path::new("/models/x.glb")
+        });
+        assert_eq!(got, Some(PathBuf::from("/models/x.glb")));
+    }
+
+    #[test]
+    fn none_when_missing() {
+        assert_eq!(
+            resolve(Some("sally.glb".as_ref()), Path::new("/srv"), |_| false),
+            None
+        );
     }
 }
 

@@ -3,7 +3,7 @@ use bevy::mesh::skinning::SkinnedMesh;
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 
-use crate::bot::meshfit::PartId;
+use crate::bot::rig::PartId;
 
 pub(super) fn register(app: &mut App) {
     app.init_resource::<StrippedMeshes>();
@@ -321,8 +321,8 @@ mod tests {
 
     #[test]
     fn seam_drag_audit_on_model() {
-        use crate::bot::meshfit::model_path;
         use crate::bot::rig::{part_for_bone, parts_adjacent};
+        use crate::mesh_fallback::model_path;
 
         let Some(path) = model_path() else {
             eprintln!("seam_drag_audit_on_model: no model — skipping");
@@ -432,8 +432,8 @@ mod tests {
 
     #[test]
     fn carapace_region_verts_never_deform() {
-        use crate::bot::meshfit::model_path;
         use crate::bot::rig::part_for_bone;
+        use crate::mesh_fallback::model_path;
 
         let Some(path) = model_path() else {
             eprintln!("carapace_region_verts_never_deform: no model — skipping");

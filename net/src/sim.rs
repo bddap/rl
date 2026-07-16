@@ -1719,7 +1719,7 @@ mod tests {
             // an asset that RESOLVES but can't be used is a breakage this test must not
             // paper over.
             Err(e) => assert!(
-                crab_world::bot::meshfit::model_path().is_none(),
+                crab_world::mesh_fallback::model_path().is_none(),
                 "sally.glb resolves but is unusable: {e}"
             ),
         }

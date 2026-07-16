@@ -3,13 +3,11 @@ pub mod arch;
 pub mod body;
 pub mod collider_check;
 pub mod headless;
-pub mod meshfit;
 pub mod physics_digest;
 pub mod pose_sentinel;
 #[cfg(test)]
 mod reset_test;
 pub mod rig;
-pub mod rig_audit;
 pub mod sensor;
 #[cfg(test)]
 mod sim_truth_test;
@@ -31,6 +29,17 @@ pub enum AuditVerdict {
 impl AuditVerdict {
     pub fn failed(fail: bool) -> Self {
         if fail { Self::Fail } else { Self::Pass }
+    }
+}
+
+/// One verdict→exit-code mapping for every audit CLI (rl-train and the offline
+/// `meshfit` tool), so the two can't diverge on what FAIL exits with.
+impl From<AuditVerdict> for std::process::ExitCode {
+    fn from(v: AuditVerdict) -> Self {
+        match v {
+            AuditVerdict::Pass => std::process::ExitCode::SUCCESS,
+            AuditVerdict::Fail => std::process::ExitCode::FAILURE,
+        }
     }
 }
 

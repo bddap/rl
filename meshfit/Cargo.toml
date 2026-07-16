@@ -1,0 +1,11 @@
+[package]
+name = "meshfit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crab-world = { path = "../crab-world" }
+bevy = { workspace = true, features = ["std"] }
+gltf.workspace = true
+clap.workspace = true

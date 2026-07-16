@@ -1,32 +1,12 @@
+//! Skinned-glTF loading for the offline fitter: bind-pose vertex clouds per physics
+//! part, bone bind poses, and the watertight bind mesh. Moved out of `crab-world`
+//! with the rest of the fitter (bddap/rl#20 Phase 2) — the runtime never parses the
+//! glb for physics anymore; it digests the bytes and reads the baked table.
+
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
-
-use super::body::CrabJointId;
-
-mod containment;
-mod fit;
-mod mass;
-
-pub use containment::{Containment, MeshContainment, aabb};
-pub use fit::{
-    CapsuleDiagnostics, ColliderScore, FittedCapsule, fit_capsule, score_box, score_capsule,
-};
-#[cfg(test)]
-pub use mass::{CapsuleMass, capsule_mass};
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum PartId {
-    Carapace,
-    Joint(CrabJointId),
-}
-
-impl PartId {
-    pub fn is_rigid(self) -> bool {
-        matches!(self, PartId::Carapace)
-    }
-}
+use crab_world::bot::rig::{self, PartId};
 
 struct SkinnedVertex {
     pos: Vec3,
@@ -37,66 +17,6 @@ pub struct LoadedModel {
     bind_world: HashMap<usize, Mat4>,
     node_name: HashMap<usize, String>,
     verts: Vec<SkinnedVertex>,
-}
-
-pub fn model_path() -> Option<std::path::PathBuf> {
-    resolve(
-        std::env::var_os("CRAB_MODEL_PATH").as_deref(),
-        &crate::assets::asset_root(),
-        |p| p.exists(),
-    )
-}
-
-fn resolve(
-    crab_model_path: Option<&std::ffi::OsStr>,
-    asset_root: &std::path::Path,
-    exists: impl Fn(&std::path::Path) -> bool,
-) -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
-    let rel = crab_model_path.map_or_else(|| PathBuf::from("sally.glb"), PathBuf::from);
-    if rel.is_absolute() {
-        return exists(&rel).then_some(rel);
-    }
-    let asset = asset_root.join("assets").join(rel);
-    exists(&asset).then_some(asset)
-}
-
-#[cfg(test)]
-mod model_path_tests {
-    use super::resolve;
-    use std::path::{Path, PathBuf};
-
-    #[test]
-    fn relative_resolves_under_asset_root() {
-        let got = resolve(Some("sally.glb".as_ref()), Path::new("/srv/app"), |p| {
-            p == Path::new("/srv/app/assets/sally.glb")
-        });
-        assert_eq!(got, Some(PathBuf::from("/srv/app/assets/sally.glb")));
-    }
-
-    #[test]
-    fn defaults_to_sally_under_asset_root() {
-        let got = resolve(None, Path::new("/crate"), |p| {
-            p == Path::new("/crate/assets/sally.glb")
-        });
-        assert_eq!(got, Some(PathBuf::from("/crate/assets/sally.glb")));
-    }
-
-    #[test]
-    fn absolute_path_used_as_is() {
-        let got = resolve(Some("/models/x.glb".as_ref()), Path::new("/srv"), |p| {
-            p == Path::new("/models/x.glb")
-        });
-        assert_eq!(got, Some(PathBuf::from("/models/x.glb")));
-    }
-
-    #[test]
-    fn none_when_missing() {
-        assert_eq!(
-            resolve(Some("sally.glb".as_ref()), Path::new("/srv"), |_| false),
-            None
-        );
-    }
 }
 
 struct ParsedGltf {
@@ -113,10 +33,6 @@ impl ParsedGltf {
         Self::from_slice(&bytes)
     }
 
-    /// Decode from bytes already in hand — split from [`Self::open`] so a caller that
-    /// also DIGESTS the asset (the canonical-mesh verdict, bddap/rl#214) parses the
-    /// exact bytes it hashed: one read, so the recipe and the digest cannot describe
-    /// two different file states.
     fn from_slice(bytes: &[u8]) -> Result<Self, String> {
         let gltf = gltf::Gltf::from_slice(bytes).map_err(|e| format!("parse glb: {e}"))?;
         let blob = gltf.blob.clone().ok_or("GLB has no binary chunk")?;
@@ -195,8 +111,6 @@ impl LoadedModel {
         Self::from_slice(&bytes)
     }
 
-    /// Parse a GLB from bytes already in hand — see [`ParsedGltf::from_slice`] for why
-    /// the digesting caller must parse the exact bytes it hashed.
     pub fn from_slice(bytes: &[u8]) -> Result<Self, String> {
         let parsed = ParsedGltf::from_slice(bytes)?;
         let node_name: HashMap<usize, String> = parsed
@@ -239,7 +153,7 @@ impl LoadedModel {
             let Some(name) = self.node_name.get(&v.dominant_node) else {
                 continue;
             };
-            let Some(part) = super::rig::part_for_bone(name) else {
+            let Some(part) = rig::part_for_bone(name) else {
                 continue;
             };
             out.entry(part).or_default().push(v.pos);
@@ -270,12 +184,34 @@ impl LoadedModel {
             .map(|(i, _)| *i)
     }
 
-    pub(crate) fn bone_bind_pose(&self, name: &str) -> Option<(Vec3, Quat)> {
+    fn bone_bind_pose(&self, name: &str) -> Option<(Vec3, Quat)> {
         let idx = self.node_index(name)?;
         self.bind_world.get(&idx).map(|m| {
             let (_, rot, trans) = m.to_scale_rotation_translation();
             (trans, rot)
         })
+    }
+
+    /// Bones the model names that map to no physics part — must be empty for a
+    /// bake to be honest (an unmapped bone's flesh would fit into nothing).
+    pub fn unmapped_bones(&self) -> Vec<String> {
+        self.node_name
+            .values()
+            .filter(|name| {
+                (name.starts_with("Def_") || name.starts_with("Ctrl_"))
+                    && rig::part_for_bone(name).is_none()
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+impl rig::BindSource for LoadedModel {
+    fn bone_origin(&self, name: &str) -> Option<Vec3> {
+        LoadedModel::bone_origin(self, name)
+    }
+    fn trunk_vertices(&self) -> Vec<Vec3> {
+        self.vertices_for_bones(&rig::TRUNK_BONES)
     }
 }
 
@@ -370,29 +306,6 @@ fn compose_world<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bone_map_covers_all_model_bones() {
-        let Some(path) = model_path() else {
-            eprintln!(
-                "meshfit: no model (set CRAB_MODEL_PATH under BEVY_ASSET_ROOT/assets) — skipping"
-            );
-            return;
-        };
-        let model = LoadedModel::load(&path).expect("load model");
-        let mut unmapped = Vec::new();
-        for (idx, name) in &model.node_name {
-            if (name.starts_with("Def_") || name.starts_with("Ctrl_"))
-                && super::super::rig::part_for_bone(name).is_none()
-            {
-                unmapped.push((*idx, name.clone()));
-            }
-        }
-        assert!(
-            unmapped.is_empty(),
-            "bones map to no physics part: {unmapped:?}"
-        );
-    }
 
     #[test]
     fn out_of_range_joint_index_errors() {

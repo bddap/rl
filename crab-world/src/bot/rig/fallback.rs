@@ -3,10 +3,9 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use crate::bot::body::{CrabJointId, Side};
-use crate::bot::meshfit::PartId;
 
 use super::recipe::{antennae_bone, antennae_top_bone, build_recipe, leg_bone, pincer_bone};
-use super::{BindSource, RigRecipe};
+use super::{BindSource, PartId, RigRecipe};
 
 const FB_CARAPACE_HALF_W: f32 = 0.40;
 const FB_CARAPACE_HALF_D: f32 = 0.30;
@@ -71,11 +70,7 @@ impl BindSource for FallbackModel {
         self.origins.get(name).copied()
     }
 
-    fn vertices_by_part(&self) -> HashMap<PartId, Vec<Vec3>> {
-        HashMap::new()
-    }
-
-    fn vertices_for_bones(&self, _names: &[&str]) -> Vec<Vec3> {
+    fn trunk_vertices(&self) -> Vec<Vec3> {
         let c = Vec3::new(0.0, FB_HUB_HEIGHT, 0.0);
         let h = Vec3::new(FB_CARAPACE_HALF_W, FB_CARAPACE_HALF_H, FB_CARAPACE_HALF_D);
         let mut pts = Vec::with_capacity(8);

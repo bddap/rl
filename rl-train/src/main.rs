@@ -22,12 +22,6 @@ pub struct Cli {
 #[derive(Parser, Debug, Clone)]
 struct DevArgs {
     #[arg(long)]
-    verify_colliders: bool,
-
-    #[arg(long)]
-    verify_pivots: bool,
-
-    #[arg(long)]
     check_rest_colliders: bool,
 }
 
@@ -218,16 +212,12 @@ fn eval(e: EvalArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The no-subcommand DEV modes: rig-geometry audits, each a thin dispatch into
+/// The no-subcommand DEV mode: the rest-pose collider audit, a thin dispatch into
 /// `crab-world` (rl#270). The audit prints its own report and verdict; a can't-run
-/// error rides the main spine.
+/// error rides the main spine. (The collider<->mesh fit audits moved to the offline
+/// fitter with the rest of the fitting code: `cargo run -p meshfit -- verify-colliders`
+/// / `verify-pivots`, bddap/rl#20.)
 fn dev_audit(dev: DevArgs) -> Result<ExitCode, String> {
-    if dev.verify_colliders {
-        return audit(bot::rig_audit::verify_colliders());
-    }
-    if dev.verify_pivots {
-        return audit(bot::rig_audit::verify_pivots());
-    }
     if dev.check_rest_colliders {
         // The audit answers questions about SALLY's rest pose; on the fallback body it
         // prints an identical-format report with unrelated numbers (rl#234 was first
@@ -237,18 +227,15 @@ fn dev_audit(dev: DevArgs) -> Result<ExitCode, String> {
     }
 
     eprintln!(
-        "no mode selected. Train with `rl-train learn` (the sole trainer), or run a DEV \
-         rig audit (--verify-colliders / --verify-pivots / --check-rest-colliders). The \
-         windowed demo + screenshot are the `rl-demo` binary."
+        "no mode selected. Train with `rl-train learn` (the sole trainer), or run the DEV \
+         rest-pose audit (--check-rest-colliders; the mesh-fit audits live in the offline \
+         `meshfit` tool). The windowed demo + screenshot are the `rl-demo` binary."
     );
     Ok(ExitCode::from(2))
 }
 
 fn audit(verdict: Result<bot::AuditVerdict, String>) -> Result<ExitCode, String> {
-    verdict.map(|v| match v {
-        bot::AuditVerdict::Pass => ExitCode::SUCCESS,
-        bot::AuditVerdict::Fail => ExitCode::FAILURE,
-    })
+    verdict.map(ExitCode::from)
 }
 
 #[cfg(test)]

@@ -280,8 +280,10 @@ fn crab_settles_quietly_at_rest() {
         (v.angular.length(), t.translation.y)
     }
 
-    if super::meshfit::model_path().is_none() {
-        eprintln!("crab_settles_quietly_at_rest: no model — skipping (fallback body)");
+    // Keyed on the VERDICT, not path presence: a present-but-digest-mismatched glb
+    // constructs the FALLBACK body (rl#20 Phase 2), and these are Sally assertions.
+    if crate::mesh_fallback::usable_model().is_err() {
+        eprintln!("crab_settles_quietly_at_rest: no usable model — skipping (fallback body)");
         return;
     }
 
@@ -338,8 +340,8 @@ fn crab_settles_quietly_at_rest() {
 fn claws_quiet_at_rest() {
     use bevy_rapier3d::prelude::Velocity;
 
-    if super::meshfit::model_path().is_none() {
-        eprintln!("claws_quiet_at_rest: no model — skipping (fallback body)");
+    if crate::mesh_fallback::usable_model().is_err() {
+        eprintln!("claws_quiet_at_rest: no usable model — skipping (fallback body)");
         return;
     }
 
@@ -393,9 +395,9 @@ fn fallback_body_settles_without_blowing_up() {
     use super::body::{CrabBodyPart, CrabCarapace};
     use bevy_rapier3d::prelude::Velocity;
 
-    if super::meshfit::model_path().is_some() {
+    if crate::mesh_fallback::usable_model().is_ok() {
         eprintln!(
-            "fallback_body_settles_without_blowing_up: model present — skipping (not the fallback body)"
+            "fallback_body_settles_without_blowing_up: usable model present — skipping (not the fallback body)"
         );
         return;
     }

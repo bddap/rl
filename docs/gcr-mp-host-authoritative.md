@@ -170,11 +170,13 @@ run, so it must **add the upstream guard host-auth needs** rather than drop it:
    formation collapse, one rule per invariant.
 3. **Asset digest already protects the joiner's render.** Under host-sends-pose the joiner
    *renders the Sally mesh skinned to the host's pose*. The existing `asset_digest` is
-   `crab_asset_digest()`, which **hashes the raw `sally.glb` file bytes** (`crab-world/src/
-   bot/meshfit.rs:107`) — so it binds the render mesh + rig *and* the colliders (the colliders
-   are a deterministic pure function of those bytes). The current admission check therefore
-   already gates exactly what the joiner renders; no `mesh_digest`/collider split is needed.
-   Keep the asset check as-is — a joiner with the wrong `sally.glb` is refused loudly.
+   `crab_asset_digest()`, which **hashes the raw `sally.glb` file bytes**
+   (`crab-world/src/mesh_fallback.rs`) — so it binds the render mesh + rig *and* the
+   colliders (since rl#20 Phase 2 the colliders are the committed baked table, and the
+   runtime refuses any asset whose bytes aren't the ones it was baked from). The current
+   admission check therefore already gates exactly what the joiner renders; no
+   `mesh_digest`/collider split is needed. Keep the asset check as-is — a joiner with the
+   wrong `sally.glb` is refused loudly.
 
 `may_arm_external_crab` thus reduces *on the authoritative host* to "the host has a real
 (non-zero) checkpoint" — but the weights guarantee **relocates** to (1)+(2), it does not
