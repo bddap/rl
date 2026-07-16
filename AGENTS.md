@@ -20,7 +20,7 @@ the one he asked for; he appreciates the pushback. Dry sass too.
 ## Pre-submission checks
 - `cargo fmt --check`
 - `cargo clippy --quiet --all-targets -- --deny warnings` (`--all-targets` lints test/bench/example code too, so test-only lints can't slip in)
-- `cargo test -q`
+- `cargo test -q` (on bothouse add `-- --test-threads=2`: the live trainer saturates the cores and the heavy physics tests hang at default parallelism)
 
 ## Profiling
 "Why is the game slow?" → `scripts/profile-game.sh` instead of rediscovering the
