@@ -33,7 +33,7 @@ use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns};
 use crab_world::crab_view::CrabBrainLabels;
 use crab_world::policy::Policy;
-use crab_world::training::targets::TARGET_ARENA_HALF;
+use crab_world::training::targets::{TARGET_ARENA_HALF, band_lure, recenter_delta};
 use crab_world::vehicle::{Vehicle, VehicleControls};
 
 const CLAW_TARGET_Y: f32 = 0.3;
@@ -550,14 +550,14 @@ fn bound_body_pos_drift(
             continue; // the rescue path owns non-finite crabs
         }
         let origin = spawns.origin(idx);
-        let drift = Vec2::new(carapace.x - origin.x, carapace.z - origin.z);
-        let drift_m = drift.length();
-        if drift_m <= TARGET_ARENA_HALF {
+        // Trigger and delta are the shared rl#240 formula (crab_world::training::
+        // targets), the same one the eval's pace probe recenters by (rl#280).
+        let Some(delta) = recenter_delta(origin, carapace) else {
             continue;
-        }
+        };
+        let drift_m = Vec2::new(delta.x, delta.z).length();
 
         if armed.is_some() {
-            let delta = Vec3::new(-drift.x, 0.0, -drift.y);
             for (env, mut t, _) in parts.iter_mut() {
                 if env.0 == idx {
                     t.translation += delta;
@@ -622,13 +622,14 @@ fn set_crab_walk_target(
             continue;
         };
         // Prey offset, then the in-distribution guard (module header): pose the target
-        // at most one band-edge away along the true bearing. Current-map offsets sit
-        // well inside the band, so the clamp is dormant.
+        // at most one band-edge away along the true bearing — the shared rl#240 lure
+        // (crab_world::training::targets), the same clamp the eval's pace probe
+        // measures under (rl#280). Current-map offsets sit well inside the band, so
+        // the clamp is dormant.
         let to_prey = hunt - crab.world_pos_m;
         if to_prey.length_squared() < 1e-6 {
             continue;
         }
-        let to_prey = to_prey.clamp_length_max(TARGET_ARENA_HALF);
 
         let origin = spawns.origin(idx);
         let carapace = carapace_q
@@ -637,12 +638,7 @@ fn set_crab_walk_target(
             .map(|(_, t)| t.translation)
             .unwrap_or(origin);
 
-        let target = Vec3::new(
-            carapace.x + to_prey.x,
-            CLAW_TARGET_Y,
-            carapace.z + to_prey.y,
-        );
-        *slot = Some(target);
+        *slot = Some(band_lure(carapace, to_prey, CLAW_TARGET_Y));
     }
 }
 

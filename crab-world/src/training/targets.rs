@@ -69,6 +69,29 @@ pub(crate) fn polar_target(origin: Vec3, theta: f32, dist: f32, y: f32) -> Vec3 
     )
 }
 
+/// The rl#240 in-distribution guard's posed walk target: the real target re-posed at
+/// most one band edge ([`TARGET_ARENA_HALF`]) from the crab along the true planar
+/// bearing, `y` the caller's (net poses at its claw height, the eval at the real
+/// ball's). THE one copy of the clamp both consumers share — net's
+/// `set_crab_walk_target` (a distant GCR player) and the eval's pace probe (a distant
+/// ball, rl#280) — so the band semantics cannot drift between the plant she is
+/// deployed on and the instrument that measures her for it.
+pub fn band_lure(carapace: Vec3, planar_to_target: Vec2, y: f32) -> Vec3 {
+    let to_target = planar_to_target.clamp_length_max(TARGET_ARENA_HALF);
+    Vec3::new(carapace.x + to_target.x, y, carapace.z + to_target.y)
+}
+
+/// The rl#240 recenter's trigger and delta: once the carapace's planar drift from its
+/// spawn origin leaves the band, teleporting every crab part by exactly this delta
+/// puts it back onto the origin (y untouched); inside the band, `None`. ONE copy for
+/// the same reason as [`band_lure`]: net's `bound_body_pos_drift` and the eval's
+/// `pace_recenter` must agree on when the spawn-relative body.pos obs channel is out
+/// of distribution.
+pub fn recenter_delta(origin: Vec3, carapace: Vec3) -> Option<Vec3> {
+    let drift = Vec2::new(carapace.x - origin.x, carapace.z - origin.z);
+    (drift.length() > TARGET_ARENA_HALF).then(|| Vec3::new(-drift.x, 0.0, -drift.y))
+}
+
 /// `close_frac` mixes close-disc [0, BAND_START_MIN) targets — under-carapace
 /// included — into the chase band, so claw-reach can emerge from task variety
 /// alone (rl#250): same y range, bearing, reward, and grab rule. Uniform-in-radius
@@ -288,5 +311,46 @@ mod tests {
                 "frac 0 must never sample close ({d})"
             );
         }
+    }
+
+    /// The rl#240 lure: beyond the band the posed ball rides exactly one band edge
+    /// ahead along the true bearing; inside it, the posed ball IS the real ball.
+    #[test]
+    fn band_lure_clamps_to_the_band_edge_along_the_true_bearing() {
+        let carapace = Vec3::new(1.0, 0.4, -2.0);
+        let far = polar_target(carapace, 0.7, 2.0 * TARGET_ARENA_HALF, 0.6);
+        let to_far = Vec2::new(far.x - carapace.x, far.z - carapace.z);
+
+        let lure = band_lure(carapace, to_far, far.y);
+        let planar = Vec2::new(lure.x - carapace.x, lure.z - carapace.z);
+        assert!((planar.length() - TARGET_ARENA_HALF).abs() < 1e-4);
+        assert!(
+            planar.normalize().dot(to_far.normalize()) > 1.0 - 1e-6,
+            "the lure sits on the real bearing"
+        );
+        assert_eq!(lure.y, far.y);
+
+        // Inside the band nothing is clamped — the chase end is a real approach.
+        let near = polar_target(carapace, 0.7, 3.0, 0.6);
+        let to_near = Vec2::new(near.x - carapace.x, near.z - carapace.z);
+        assert!((band_lure(carapace, to_near, near.y) - near).length() < 1e-5);
+    }
+
+    /// The rl#240 recenter formula: dormant inside the band; one band-edge step
+    /// outside it, the delta lands the carapace back on its origin planar-wise with
+    /// y untouched.
+    #[test]
+    fn recenter_delta_snaps_planar_drift_back_onto_the_origin() {
+        let origin = Vec3::new(2.0, 0.0, -3.0);
+
+        let inside = origin + Vec3::new(TARGET_ARENA_HALF - 0.1, 0.5, 0.0);
+        assert_eq!(recenter_delta(origin, inside), None);
+
+        let out = origin + Vec3::new(TARGET_ARENA_HALF * 0.8, 0.5, TARGET_ARENA_HALF * 0.8);
+        let delta = recenter_delta(origin, out).expect("outside the band");
+        assert_eq!(delta.y, 0.0);
+        let back = out + delta;
+        assert!((back.x - origin.x).abs() < 1e-5 && (back.z - origin.z).abs() < 1e-5);
+        assert_eq!(back.y, out.y, "the recenter never touches height");
     }
 }
