@@ -31,6 +31,7 @@ bevy_rapier3d = { workspace = true, features = ["dim3"] }
 rapier3d = { version = "0.32", default-features = false }
 rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 gltf.workspace = true
 burn.workspace = true
 naga = { workspace = true, optional = true }

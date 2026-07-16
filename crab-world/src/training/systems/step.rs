@@ -153,6 +153,7 @@ fn sample_actions(
 fn gather_body_state(
     n: usize,
     spawns: &CrabSpawns,
+    terrain: &crate::terrain::TerrainGrid,
     carapace_q: &Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
     parts_q: &Query<(&CrabEnvId, &bevy_rapier3d::prelude::Velocity), With<CrabBodyPart>>,
 ) -> BodyState {
@@ -162,7 +163,11 @@ fn gather_body_state(
     for (env, transform) in carapace_q.iter() {
         if let Some(p) = poses.get_mut(env.0) {
             let up = transform.rotation * Vec3::Y;
-            *p = Some((transform.translation.y, up.dot(Vec3::Y)));
+            // Height ABOVE the local ground (rl#281) — identical to absolute y on the
+            // flat arenas, and the quantity the fall terminal and height reward mean.
+            let t = transform.translation;
+            let height = t.y - terrain.height(t.x, t.z);
+            *p = Some((height, up.dot(Vec3::Y)));
         }
         if let Some(c) = carapace_pos.get_mut(env.0) {
             *c = Some(transform.translation);
@@ -224,6 +229,7 @@ pub(crate) fn brain_step(
     mut actions: ResMut<CrabActions>,
     mut targets: ResMut<CrabTargets>,
     spawns: Res<CrabSpawns>,
+    terrain: Res<crate::terrain::Terrain>,
     carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
     parts_q: Query<(&CrabEnvId, &bevy_rapier3d::prelude::Velocity), With<CrabBodyPart>>,
     claw_tips_q: Query<(&CrabEnvId, &Transform), With<CrabClawTip>>,
@@ -253,12 +259,19 @@ pub(crate) fn brain_step(
         }
     }
 
-    let body = gather_body_state(n, &spawns, &carapace_q, &parts_q);
+    let body = gather_body_state(n, &spawns, &terrain.0, &carapace_q, &parts_q);
 
     let close_frac = training.close_frac;
     for e in 0..n {
         if targets.get(e).is_none() {
-            seed_target(&mut targets, &spawns, e, close_frac, &mut training.rng);
+            seed_target(
+                &mut targets,
+                &spawns,
+                e,
+                close_frac,
+                &mut training.rng,
+                &terrain.0,
+            );
         }
     }
 
@@ -282,7 +295,7 @@ pub(crate) fn brain_step(
         efforts: &efforts,
         rescued_envs: &rescued_envs,
     };
-    training.finalize_transitions(&inputs, &mut targets, &spawns);
+    training.finalize_transitions(&inputs, &mut targets, &spawns, &terrain.0);
 
     if training.log_effort {
         log_effort_probe(&training.envs, &efforts, training.effort_weight);

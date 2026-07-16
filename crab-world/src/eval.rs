@@ -480,6 +480,7 @@ fn eval_step(
     cfg: Res<EvalConfig>,
     mut state: ResMut<EvalState>,
     spawns: Res<CrabSpawns>,
+    terrain: Res<crate::terrain::Terrain>,
     mut targets: ResMut<CrabTargets>,
     obs: Res<CrabObservation>,
     mut actions: ResMut<CrabActions>,
@@ -491,12 +492,12 @@ fn eval_step(
         && let Some(slot) = targets.envs.first_mut()
     {
         let origin = spawns.origin(0);
-        *slot = Some(polar_target(
+        *slot = Some(terrain.0.on_surface(polar_target(
             origin,
             cfg.bearing_rad,
             cfg.target_distance,
             TARGET_Y,
-        ));
+        )));
         state.target_set = true;
     }
     let Some(target) = targets.get(0) else {

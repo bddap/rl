@@ -39,6 +39,7 @@ pub(super) fn spawn_target_ball(
 
 pub(super) fn target_ball(
     spawns: Res<CrabSpawns>,
+    terrain: Res<crate::terrain::Terrain>,
     mut targets: ResMut<CrabTargets>,
     claw_tips_q: Query<(&body::CrabEnvId, &Transform), With<CrabClawTip>>,
     mut ball_q: Query<&mut Transform, (With<TargetBall>, Without<CrabClawTip>)>,
@@ -51,11 +52,11 @@ pub(super) fn target_ball(
         Some(t) => t,
         None => pinned
             .0
-            .unwrap_or_else(|| sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0)),
+            .unwrap_or_else(|| sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0, &terrain.0)),
     };
 
     if closest_tip_dist(0, target, &claw_tips_q).is_some_and(tip_touch) {
-        target = sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0);
+        target = sample_target(origin, DEMO_CLOSE_FRAC, &mut rng.0, &terrain.0);
     }
 
     if let Some(slot) = targets.envs.first_mut() {

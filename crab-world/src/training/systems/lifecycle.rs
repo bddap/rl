@@ -122,6 +122,7 @@ impl TrainingState {
         inputs: &StepInputs,
         targets: &mut CrabTargets,
         spawns: &CrabSpawns,
+        terrain: &crate::terrain::TerrainGrid,
     ) {
         let body = inputs.body;
         let min_tip_dists = inputs.min_tip_dists;
@@ -136,7 +137,7 @@ impl TrainingState {
                 debug_assert_eq!(self.envs[e].steps, 0, "Recording with no pending ⇒ virgin");
                 self.envs[e].min_tip_dist = None;
                 let close_frac = self.close_frac;
-                seed_target(targets, spawns, e, close_frac, &mut self.rng);
+                seed_target(targets, spawns, e, close_frac, &mut self.rng, terrain);
                 continue;
             }
 
@@ -207,7 +208,7 @@ impl TrainingState {
                 });
 
                 let close_frac = self.close_frac;
-                seed_target(targets, spawns, e, close_frac, &mut self.rng);
+                seed_target(targets, spawns, e, close_frac, &mut self.rng, terrain);
 
                 self.reach_finished += 1;
                 if reached {
@@ -315,6 +316,11 @@ mod tests {
     use crate::training::reward::EFFORT_WEIGHT_DEFAULT;
     use crate::training::targets::REACH_RADIUS;
 
+    /// The training arena's flat grid — these tests pin FLAT-arena lifecycle behavior.
+    fn flat() -> crate::terrain::TerrainGrid {
+        crate::terrain::TerrainGrid::flat(crate::physics::world::ARENA_HALF_SIZE)
+    }
+
     #[test]
     fn classify_step_end_terminal_vs_truncation() {
         assert_eq!(classify_step_end(true, false, false), StepEnd::Terminal);
@@ -391,7 +397,7 @@ mod tests {
             efforts: &[0.0],
             rescued_envs: &[],
         };
-        ts.finalize_transitions(&inputs, &mut targets, &spawns);
+        ts.finalize_transitions(&inputs, &mut targets, &spawns, &flat());
 
         assert_eq!(ts.rollouts[0].len(), 0, "no transition recorded");
         assert_eq!(ts.reach_finished, 0, "no episode counted");
@@ -440,7 +446,7 @@ mod tests {
             // A rescue ends the episode without needing a whole physics run.
             rescued_envs: &[0],
         };
-        ts.finalize_transitions(&inputs, &mut targets, &spawns);
+        ts.finalize_transitions(&inputs, &mut targets, &spawns, &flat());
 
         assert_eq!(ts.reach_finished, 1, "the episode finished and was counted");
         let mut want = [(0, 0); crate::eval::EVAL_BEARINGS];

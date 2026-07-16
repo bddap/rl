@@ -18,6 +18,7 @@ pub mod fnv;
 pub mod mesh_fallback;
 pub mod physics;
 pub mod policy;
+pub mod terrain;
 pub mod training;
 pub mod vehicle;
 
