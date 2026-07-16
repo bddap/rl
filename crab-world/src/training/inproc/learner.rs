@@ -20,6 +20,10 @@ struct MergedRollout {
     /// Per-episode reach tally `(reached, finished)` pooled across threads; feeds the
     /// best-keeper's solid-reach floor and the log's reach fraction.
     reach: (u64, u64),
+    /// The reach tally split by compass bearing bin of each episode's target
+    /// (rl#276), pooled across threads; accumulated into the learner's
+    /// per-eval-period window for the `[bearing-reach]` line.
+    reach_by_bearing: [(u64, u64); crate::eval::EVAL_BEARINGS],
     /// Progress-term drops (non-physical deltas the reward zeroed; bddap/rl#175) pooled across
     /// threads this iter; surfaced on the log so a silent reward dropout is visible. 0 normally.
     glitch_drops: u64,
@@ -84,6 +88,7 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
         snapshot_load_failures: 0,
         drift: (0.0, 0),
         reach: (0, 0),
+        reach_by_bearing: [(0, 0); crate::eval::EVAL_BEARINGS],
         glitch_drops: 0,
         nonfinite_obs: 0,
     };
@@ -99,6 +104,14 @@ fn merge_rollouts(state: &mut TrainingState, results: Vec<RollOutcome>) -> Merge
                 merged.drift.1 += output.drift.1;
                 merged.reach.0 += output.reach.0;
                 merged.reach.1 += output.reach.1;
+                for (m, o) in merged
+                    .reach_by_bearing
+                    .iter_mut()
+                    .zip(output.reach_by_bearing)
+                {
+                    m.0 += o.0;
+                    m.1 += o.1;
+                }
                 merged.glitch_drops += output.glitch_drops;
                 merged.nonfinite_obs += output.nonfinite_obs;
                 for buf in output.envs {
@@ -218,6 +231,38 @@ fn log_iteration(r: &IterReport) {
         metrics.kl,
         metrics.steps,
         metrics.behavior_backend_div,
+    );
+}
+
+/// Emit the per-bearing training-episode reach window (rl#276) — the TRAINING-data
+/// side of the directional readout, on the same cadence (and covering the same
+/// train.log stretch) as the keep-best chase-eval's per-bearing vector: the eval
+/// says where the POLICY is weak, this says whether the weakness shows in the data
+/// the update actually learns from. Bins are the eval compass
+/// ([`crate::eval::eval_bearings`]); episodes bin to the nearest bearing since
+/// training samples bearings uniformly rather than sweeping.
+fn log_bearing_reach(window: &[(u64, u64); crate::eval::EVAL_BEARINGS]) {
+    let cell = |&(reached, finished): &(u64, u64)| {
+        if finished > 0 {
+            format!("{:.2}/{finished}", reached as f64 / finished as f64)
+        } else {
+            "-/0".to_string()
+        }
+    };
+    let cells: Vec<String> = crate::eval::eval_bearings()
+        .zip(window.iter())
+        .map(|(bearing, tally)| format!("{:.0}°:{}", bearing.to_degrees(), cell(tally)))
+        .collect();
+    let min_note = crate::eval::eval_bearings()
+        .zip(window.iter())
+        .filter(|&(_, &(_, finished))| finished > 0)
+        .map(|(bearing, &(reached, finished))| (reached as f64 / finished as f64, bearing))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(frac, bearing)| format!(" | min {frac:.2} @ {:.0}°", bearing.to_degrees()))
+        .unwrap_or_default();
+    eprintln!(
+        "[bearing-reach] train-episode reach (reached-fraction/episodes) by target bearing since last chase-eval: {}{min_note}",
+        cells.join(" ")
     );
 }
 
@@ -358,6 +403,9 @@ pub fn run_learner(
     let mut timed_wall_secs = 0f64;
     let mut total_samples = 0u64;
     let mut budget_hit = false;
+    // Per-bearing training-reach window (rl#276), flushed by `log_bearing_reach` on
+    // the keep-best eval cadence so both directional readouts cover the same stretch.
+    let mut bearing_reach_window = [(0u64, 0u64); crate::eval::EVAL_BEARINGS];
 
     let mut iter = 0u64;
     loop {
@@ -446,11 +494,19 @@ pub fn run_learner(
             nonfinite_obs: merged.nonfinite_obs,
         });
 
+        for (w, m) in bearing_reach_window.iter_mut().zip(merged.reach_by_bearing) {
+            w.0 += m.0;
+            w.1 += m.1;
+        }
+
         // Consider this iter's policy for `<ckpt>/best/`. `<ckpt>/` on disk still holds
         // this iter's policy (persisted at the top, not rewritten until the next iter),
         // so the keeper's chase-eval scores exactly the policy a snapshot would capture.
         // See `BestKeeper::maybe_snapshot`.
-        best_keeper.maybe_snapshot();
+        if best_keeper.maybe_snapshot() {
+            log_bearing_reach(&bearing_reach_window);
+            bearing_reach_window = [(0, 0); crate::eval::EVAL_BEARINGS];
+        }
 
         iter += 1;
 
@@ -502,15 +558,25 @@ mod tests {
 
         let results = vec![
             RollOutcome::Rolled {
-                output: HorizonOutput {
+                output: Box::new(HorizonOutput {
                     envs: vec![],                            // no env buffers → zero samples
                     increment: empty_normalizer_increment(), // a no-op merge
                     rewards: vec![1.0],
                     drift: (0.5, 2),
                     reach: (1, 3),
+                    reach_by_bearing: [
+                        (0, 0),
+                        (1, 2),
+                        (0, 1),
+                        (0, 0),
+                        (0, 0),
+                        (0, 0),
+                        (0, 0),
+                        (0, 0),
+                    ],
                     glitch_drops: 3,
                     nonfinite_obs: 7,
-                },
+                }),
                 ticks: 64,
             },
             RollOutcome::SnapshotLoadFailed,
@@ -550,6 +616,12 @@ mod tests {
             (1, 3),
             "the Rolled thread's reach flows through"
         );
+        assert_eq!(
+            merged.reach_by_bearing[1],
+            (1, 2),
+            "the Rolled thread's per-bearing reach flows through (rl#276)"
+        );
+        assert_eq!(merged.reach_by_bearing[3], (0, 0));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

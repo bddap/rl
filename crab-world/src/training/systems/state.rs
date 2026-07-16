@@ -105,6 +105,14 @@ pub(crate) struct TrainingState {
     pub(super) reach_reached: u64,
     pub(super) reach_finished: u64,
 
+    /// `(reached, finished)` per compass bearing bin (rl#276) — the aggregate reach
+    /// split by [`crate::eval::bearing_bin`] of each episode's target, so a
+    /// one-sector competence hole shows in train.log instead of hiding behind
+    /// seven healthy bearings (the s2 90° collapse cost aggregate reach only
+    /// 0.91→0.83). Sums to the aggregate tally above, minus episodes with no
+    /// target at end (unrepresentable in practice).
+    pub(super) reach_by_bearing: [(u64, u64); crate::eval::EVAL_BEARINGS],
+
     pub(super) progress_glitch_drops: u64,
 
     pub(super) nonfinite_obs_elements: u64,
@@ -122,6 +130,7 @@ pub(crate) struct HorizonOutput {
     pub rewards: Vec<f32>,
     pub drift: (f64, u64),
     pub reach: (u64, u64),
+    pub reach_by_bearing: [(u64, u64); crate::eval::EVAL_BEARINGS],
     pub glitch_drops: u64,
     pub nonfinite_obs: u64,
 }
@@ -351,6 +360,7 @@ impl TrainingState {
             drift_count: 0,
             reach_reached: 0,
             reach_finished: 0,
+            reach_by_bearing: [(0, 0); crate::eval::EVAL_BEARINGS],
             progress_glitch_drops: 0,
             nonfinite_obs_elements: 0,
         }
@@ -427,6 +437,10 @@ impl TrainingState {
             rewards: self.drain_finished_episode_rewards(),
             drift: self.drain_drift(),
             reach: self.drain_reach(),
+            reach_by_bearing: std::mem::replace(
+                &mut self.reach_by_bearing,
+                [(0, 0); crate::eval::EVAL_BEARINGS],
+            ),
             glitch_drops: self.drain_progress_glitches(),
             nonfinite_obs: self.drain_nonfinite_obs(),
         }
