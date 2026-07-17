@@ -273,12 +273,14 @@ fn carapace_target_dist(body: &BodyState, targets: &CrabTargets, e: usize) -> Op
         .map(|(pos, target)| planar_dist(pos, target))
 }
 
+#[allow(clippy::too_many_arguments)] // a bevy system's params are its dependency list
 pub(crate) fn reset_crab(
     mut commands: Commands,
     mut training: NonSendMut<TrainingState>,
     mut actions: ResMut<CrabActions>,
     assets: Res<CrabAssets>,
     mut spawns: ResMut<CrabSpawns>,
+    mut targets: ResMut<CrabTargets>,
     terrain: Res<crate::terrain::Terrain>,
     parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>,
 ) {
@@ -290,13 +292,27 @@ pub(crate) fn reset_crab(
             let _ = actions.rest(e); // deliberate skip pre-spawn
             // Terrain training samples a fresh locale per episode — the tile's whole
             // slope/relief distribution is the curriculum (rl#281 stage 4). Flat
-            // arenas keep their fixed spawn grid bit-identical.
+            // arenas keep their fixed spawn grid bit-identical (neither branch below
+            // runs: origin never moves, no extra RNG draws).
             let origin = if terrain.is_flat() {
                 spawns.origin(e)
             } else {
                 let o =
                     crate::training::targets::random_episode_origin(&mut training.rng, &terrain);
                 spawns.set_origin(e, o);
+                // The episode-end seeding (`finalize_transitions`, earlier this tick)
+                // banded the target around the PREVIOUS locale — re-seed from the new
+                // origin or every post-first episode would chase a point up to a tile
+                // away (its obs/reward kilometers out of the trained band).
+                let close_frac = training.close_frac;
+                seed_target(
+                    &mut targets,
+                    &spawns,
+                    e,
+                    close_frac,
+                    &mut training.rng,
+                    &terrain,
+                );
                 o
             };
             let init_rotation = random_spawn_rotation(&mut training.rng);

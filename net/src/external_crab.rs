@@ -565,6 +565,13 @@ fn bound_body_pos_drift(
         let Some(delta) = recenter_delta(origin, carapace, &terrain) else {
             continue;
         };
+        // This system's bookkeeping (anchor_world_m, last_carapace_m) is planar-only,
+        // sound while net worlds run the flat OpenField (y delta is exactly 0). The
+        // GCR terrain flip (rl#281 stage 5+) must extend the anchor to 3D first.
+        debug_assert_eq!(
+            delta.y, 0.0,
+            "net recenter met a non-flat grid; anchor y-compensation is not built"
+        );
         let drift_m = Vec2::new(delta.x, delta.z).length();
 
         if armed.is_some() {

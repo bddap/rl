@@ -77,17 +77,29 @@ impl Plant {
         }
     }
 
+    /// The default plant — no sidecar on disk. Every per-knob method below opens with
+    /// an exhaustive destructure so the reserved next knob (torque slew) cannot be
+    /// silently dropped from one of them: a slew-only plant missed by `is_default`
+    /// would record NO sidecar, the exact mismeasure class this file exists to refuse.
     fn is_default(&self) -> bool {
-        self.friction_cap.is_none() && self.arena.is_none()
+        let Plant {
+            friction_cap,
+            arena,
+        } = *self;
+        friction_cap.is_none() && arena.is_none()
     }
 
     /// The sidecar file body — one `key value` line per set knob.
     fn render(&self) -> String {
+        let Plant {
+            friction_cap,
+            arena,
+        } = *self;
         let mut out = String::new();
-        if let Some(cap) = self.friction_cap {
+        if let Some(cap) = friction_cap {
             out.push_str(&format!("{FRICTION_KEY} {cap}\n"));
         }
-        if let Some(arena) = self.arena {
+        if let Some(arena) = arena {
             out.push_str(&format!("{ARENA_KEY} {}\n", arena.key()));
         }
         out
@@ -96,15 +108,19 @@ impl Plant {
 
 impl std::fmt::Display for Plant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Plant {
+            friction_cap,
+            arena,
+        } = *self;
         if self.is_default() {
             return write!(f, "the default plant");
         }
         let mut sep = "";
-        if let Some(cap) = self.friction_cap {
+        if let Some(cap) = friction_cap {
             write!(f, "{FRICTION_KEY} {cap}")?;
             sep = ", ";
         }
-        if let Some(arena) = self.arena {
+        if let Some(arena) = arena {
             write!(f, "{sep}{ARENA_KEY} {}", arena.key())?;
         }
         Ok(())
@@ -153,39 +169,37 @@ pub fn record_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// Eval-side: make the sim use the plant the checkpoint trained on. Sidecar present →
-/// install each recorded knob as the process override (or verify an already-resolved
-/// env agrees); absent → env/default as-is (every pre-sidecar checkpoint is the
-/// default plant). MUST run before the first world spawns — the overrides are
-/// read-once.
+/// Eval-side: make the sim use the plant the checkpoint trained on — the WHOLE plant,
+/// absent keys included: an absent key (or absent file — pre-sidecar and default-plant
+/// checkpoints alike) means that knob's DEFAULT, so a stray env override is pinned out
+/// (or, if the env was already read, refused) rather than silently bending the
+/// measurement. MUST run before the first world spawns — the overrides are read-once.
 pub fn adopt_recorded_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
     let path = ckpt_dir.join(PLANT_FILENAME);
     let recorded = match std::fs::read_to_string(&path) {
         Ok(text) => parse_plant(&text).map_err(|e| format!("{}: {e}", path.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Plant {
+            friction_cap: None,
+            arena: None,
+        },
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    if let Some(cap) = recorded.friction_cap
-        && OVERRIDE.set(Some(cap)).is_err()
+    if OVERRIDE.set(recorded.friction_cap).is_err()
+        && friction_cap_override() != recorded.friction_cap
     {
         // Already resolved (env set, or a prior spawn in this process): agreement or bust.
-        match friction_cap_override() {
-            Some(v) if v == cap => {}
-            resolved => {
-                return Err(format!(
-                    "{}: checkpoint trained with {FRICTION_KEY} {cap}, but this process \
-                     already resolved {} — refusing to mismeasure",
-                    path.display(),
-                    resolved.map_or("the default plant".into(), |v| v.to_string()),
-                ));
-            }
-        }
+        return Err(format!(
+            "{}: checkpoint plant has {FRICTION_KEY} {}, but this process already \
+             resolved {} — refusing to mismeasure",
+            path.display(),
+            recorded
+                .friction_cap
+                .map_or("<default>".into(), |v| v.to_string()),
+            friction_cap_override().map_or("<default>".into(), |v| v.to_string()),
+        ));
     }
-    if let Some(arena) = recorded.arena {
-        crate::physics::world::adopt_train_arena(arena)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-    }
-    Ok(())
+    crate::physics::world::adopt_train_arena(recorded.arena)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn parse_plant(text: &str) -> Result<Plant, String> {

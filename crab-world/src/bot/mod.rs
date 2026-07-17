@@ -105,11 +105,13 @@ impl CrabSpawns {
     }
 
     /// Re-place a LIVE env's origin — terrain training draws a fresh locale per
-    /// episode (rl#281 stage 4), and the caller (`reset_crab`) respawns the crab onto
-    /// it in the same tick, so origin and body never disagree. Update-only: an
-    /// out-of-range env is the same wiring bug [`Self::origin`] panics on, and
-    /// appending is still impossible (rl#242).
-    pub fn set_origin(&mut self, env: usize, origin: Vec3) {
+    /// episode (rl#281 stage 4), and the sole caller (`reset_crab`) respawns the crab
+    /// onto it in the same tick, so origin and body never disagree. `pub(crate)`
+    /// because that safety argument is the caller's, not this method's — exposing it
+    /// wider reopens the rl#242 stale-origin bug class. Update-only: an out-of-range
+    /// env is the same wiring bug [`Self::origin`] panics on, and appending is still
+    /// impossible.
+    pub(crate) fn set_origin(&mut self, env: usize, origin: Vec3) {
         *self
             .0
             .get_mut(env)

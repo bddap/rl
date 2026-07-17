@@ -97,18 +97,19 @@ pub fn train_arena() -> TrainArena {
 }
 
 /// Sidecar adoption (the arena leg of `adopt_recorded_plant`): install the recorded
-/// arena as this process's override, or verify an already-resolved one agrees.
-pub(crate) fn adopt_train_arena(recorded: TrainArena) -> Result<(), String> {
-    if ARENA_OVERRIDE.set(Some(recorded)).is_ok() {
+/// arena override — `None` = the checkpoint trained in the default arena, which pins
+/// a stray env override out — or verify an already-resolved one agrees.
+pub(crate) fn adopt_train_arena(recorded: Option<TrainArena>) -> Result<(), String> {
+    if ARENA_OVERRIDE.set(recorded).is_ok() {
         return Ok(());
     }
     match train_arena_override() {
-        Some(a) if a == recorded => Ok(()),
+        resolved if resolved == recorded => Ok(()),
         resolved => Err(format!(
             "checkpoint trained in arena {}, but this process already resolved {} — \
              refusing to mismeasure",
-            recorded.key(),
-            resolved.map_or("the default arena".into(), |a| a.key().to_string()),
+            recorded.map_or("<default>".into(), |a| a.key().to_string()),
+            resolved.map_or("<default>".into(), |a| a.key().to_string()),
         )),
     }
 }

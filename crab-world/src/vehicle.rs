@@ -888,6 +888,7 @@ mod tests {
             let mut q = app.world_mut().query::<(&Transform, &Vehicle)>();
             q.single(app.world()).expect("one craft").0.translation
         };
+        let mut max_above = f32::MIN;
         for tick in 0..300 {
             app.update();
             let (t, g) = {
@@ -904,6 +905,7 @@ mod tests {
                 "craft sank through the terrain at tick {tick}: y={} surface={g}",
                 t.y
             );
+            max_above = max_above.max(t.y - g);
         }
         let end = {
             let mut q = app.world_mut().query::<(&Transform, &Vehicle)>();
@@ -913,6 +915,12 @@ mod tests {
         assert!(
             way > 2.0,
             "full throttle for 300 ticks must make real forward way over terrain, got {way} m"
+        );
+        // FLIGHT, not a skid: at some point the craft is clearly off the local ground
+        // (several body heights — a grounded skid never leaves ~VEHICLE_HALF.y).
+        assert!(
+            max_above > 10.0 * VEHICLE_HALF.y,
+            "craft never got airborne over the terrain, max clearance {max_above} m"
         );
     }
 

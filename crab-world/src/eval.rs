@@ -493,12 +493,15 @@ fn run_bearing(
         num_envs: 1,
         role: WorldRole::Standalone,
         // A terrain plant is judged on the terrain tile — pace probe included: its
-        // unwalled long-trek analog of the open field IS the tile (targets and the
-        // recenter are already surface-aware). Flat plants keep the legacy pair.
-        arena: match (crate::physics::train_arena(), pace_probe) {
-            (crate::physics::TrainArena::Terrain, _) => crate::physics::Arena::Terrain,
-            (crate::physics::TrainArena::WalledBox, true) => crate::physics::Arena::OpenField,
-            (crate::physics::TrainArena::WalledBox, false) => crate::physics::Arena::WalledBox,
+        // unwalled long-trek analog of the open field IS the tile (targets, lure and
+        // recenter are surface-aware). A flat plant keeps the legacy pair: the box,
+        // or the open field for the probe's past-the-walls ball.
+        arena: if pace_probe
+            && crate::physics::train_arena() == crate::physics::TrainArena::WalledBox
+        {
+            crate::physics::Arena::OpenField
+        } else {
+            crate::physics::train_arena().arena()
         },
         visuals: crate::Visuals(false),
     });
@@ -593,7 +596,7 @@ fn eval_step(
         state.real_target = Some(real);
         // In probe mode the crab is still at its origin, so the lure is exact here.
         *slot = Some(if cfg.pace_probe {
-            probe_lure(origin, real)
+            probe_lure(origin, real, &terrain)
         } else {
             real
         });
@@ -626,7 +629,7 @@ fn eval_step(
         if cfg.pace_probe
             && let Some(slot) = targets.envs.first_mut()
         {
-            *slot = Some(probe_lure(cpos, target));
+            *slot = Some(probe_lure(cpos, target, &terrain));
         }
         let d = dist_3d(cpos, target);
         if settling {
@@ -679,20 +682,31 @@ fn eval_step(
 
 /// The pace probe's posed obs target: [`band_lure`] of the real ball — beyond the
 /// band the policy sees a ball a constant [`TARGET_ARENA_HALF`] ahead on the true
-/// bearing; inside it, the real ball itself.
-fn probe_lure(carapace: Vec3, real_target: Vec3) -> Vec3 {
+/// bearing; inside it, the real ball itself. The posed point is re-landed at the real
+/// ball's height-above-surface over the LURE'S own ground: its absolute y is surface +
+/// band at the distant xz, which on a slope can sit meters off the trained y band at
+/// the lure's xz — an OOD obs target, the exact artifact the lure exists to prevent.
+/// Flat grids (and an in-band real ball, same xz): bit-identical passthrough.
+fn probe_lure(carapace: Vec3, real_target: Vec3, terrain: &crate::terrain::TerrainGrid) -> Vec3 {
     let to_real = Vec2::new(real_target.x - carapace.x, real_target.z - carapace.z);
-    band_lure(carapace, to_real, real_target.y)
+    let posed = band_lure(carapace, to_real, real_target.y);
+    terrain.place(
+        Vec2::new(posed.x, posed.z),
+        real_target.y - terrain.height(real_target.x, real_target.z),
+    )
 }
 
 /// The rl#240 recenter, probe-side: past [`recenter_delta`]'s band edge, shift every
 /// crab part back onto the spawn origin planar-wise — production's sanctioned
-/// multibody teleport (rl#116), a symmetry on the open field's flat ground — and
-/// carry the real ball AND the posed lure by the same delta, so both the remaining
-/// chase geometry (every distance eval_step measures) and the obs frame are invariant
-/// across the shift. Without this the probe's farther ball walks the spawn-relative
-/// body.pos obs channel out of the training band, and the pace measured would be an
-/// OOD artifact, not her gait.
+/// multibody teleport (rl#116) — and carry the real ball AND the posed lure by the
+/// same delta, so both the remaining chase geometry (every distance eval_step
+/// measures) and the obs frame are invariant across the shift. Without this the
+/// probe's farther ball walks the spawn-relative body.pos obs channel out of the
+/// training band, and the pace measured would be an OOD artifact, not her gait. On
+/// the flat grids the shift is an exact ground symmetry; on a terrain plant the y
+/// carry is carapace-exact only — the re-landed feet meet differently-sloped ground
+/// and physics resolves the mismatch over the next ticks, an accepted approximation
+/// (the alternative, no recenter, is the guaranteed OOD artifact).
 fn pace_recenter(
     spawns: Res<CrabSpawns>,
     terrain: Res<crate::terrain::Terrain>,
