@@ -229,19 +229,27 @@ fn main() {
     crab_world::crab_view::register(&mut app, initial_render_mode, || true);
     bot::body::register_pivot_markers(&mut app);
 
+    // The demo simulates the plant the checkpoint TRAINED on (rl#281 stage 5): the
+    // sidecar drives the arena (and friction cap), so a terrain-trained brain shipped to
+    // the TV/decks gets its mountains with no launcher flag to drift out of sync with
+    // the weights. `--terrain` stays as a force for weight-less viewing (the stage-3
+    // taste-loop recipe) and skips adoption — it is a VIEWING override, not a plant.
+    // Adoption is boot-time: a live-checkpoint sync that changes the sidecar mid-run
+    // takes effect on the next launch.
+    let arena = if args.terrain {
+        physics::Arena::Terrain
+    } else {
+        if let Err(err) = bot::body::adopt_recorded_plant(&args.checkpoint.checkpoint_dir) {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+        physics::train_arena().arena()
+    };
+
     app.insert_resource(Visuals(true))
         .insert_resource(bot::NumEnvs(1))
         .add_plugins(physics::CrabPhysicsPlugin)
-        // The demo mirrors the TRAINING world (targets sampled inside the box), so it keeps
-        // the walled arena; only GCR inference runs the open field (rl#209). `--terrain`
-        // swaps in the baked GCR tile (rl#281) for terrain viewing.
-        .add_plugins(physics::PhysicsWorldPlugin {
-            arena: if args.terrain {
-                physics::Arena::Terrain
-            } else {
-                physics::Arena::WalledBox
-            },
-        })
+        .add_plugins(physics::PhysicsWorldPlugin { arena })
         .add_plugins(physics::ArenaVisualsPlugin)
         .insert_resource(mesh_state)
         .add_plugins(bot::BotPlugin);
