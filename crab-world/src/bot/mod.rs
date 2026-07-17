@@ -104,6 +104,18 @@ impl CrabSpawns {
             .collect();
     }
 
+    /// Re-place a LIVE env's origin — terrain training draws a fresh locale per
+    /// episode (rl#281 stage 4), and the caller (`reset_crab`) respawns the crab onto
+    /// it in the same tick, so origin and body never disagree. Update-only: an
+    /// out-of-range env is the same wiring bug [`Self::origin`] panics on, and
+    /// appending is still impossible (rl#242).
+    pub fn set_origin(&mut self, env: usize, origin: Vec3) {
+        *self
+            .0
+            .get_mut(env)
+            .expect("CrabSpawns has no origin for a live env — spawn wiring bug (rl#242)") = origin;
+    }
+
     /// Not yet rebuilt by `spawn_initial_crabs` — the pre-spawn frames a FixedUpdate
     /// consumer (net's arena-anchor publisher, rl#224) must sit out rather than hit
     /// [`Self::origin`]'s wiring-bug panic.

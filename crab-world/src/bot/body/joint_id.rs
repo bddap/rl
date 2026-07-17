@@ -57,11 +57,63 @@ fn env_override() -> Option<f32> {
 /// plant knobs (torque slew is the reserved next lever) extend it; an eval binary
 /// that meets an unknown key REFUSES rather than mismeasure a plant it can't build.
 pub const PLANT_FILENAME: &str = "plant.txt";
-const PLANT_KEY: &str = "joint_friction_cap";
+const FRICTION_KEY: &str = "joint_friction_cap";
+const ARENA_KEY: &str = "arena";
+
+/// The set-override half of the plant — exactly what the sidecar records. Absent key =
+/// that knob's default; the file exists only when some knob is non-default, so legacy
+/// runs stay byte-identical on disk.
+#[derive(Clone, Copy, PartialEq)]
+struct Plant {
+    friction_cap: Option<f32>,
+    arena: Option<crate::physics::TrainArena>,
+}
+
+impl Plant {
+    fn resolved() -> Self {
+        Plant {
+            friction_cap: friction_cap_override(),
+            arena: crate::physics::train_arena_override(),
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        self.friction_cap.is_none() && self.arena.is_none()
+    }
+
+    /// The sidecar file body — one `key value` line per set knob.
+    fn render(&self) -> String {
+        let mut out = String::new();
+        if let Some(cap) = self.friction_cap {
+            out.push_str(&format!("{FRICTION_KEY} {cap}\n"));
+        }
+        if let Some(arena) = self.arena {
+            out.push_str(&format!("{ARENA_KEY} {}\n", arena.key()));
+        }
+        out
+    }
+}
+
+impl std::fmt::Display for Plant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_default() {
+            return write!(f, "the default plant");
+        }
+        let mut sep = "";
+        if let Some(cap) = self.friction_cap {
+            write!(f, "{FRICTION_KEY} {cap}")?;
+            sep = ", ";
+        }
+        if let Some(arena) = self.arena {
+            write!(f, "{sep}{ARENA_KEY} {}", arena.key())?;
+        }
+        Ok(())
+    }
+}
 
 /// Learner-side: record the resolved plant into `<ckpt>/plant.txt`, or refuse a
 /// launch whose plant disagrees with what the checkpoint trained on — resuming a run
-/// on a different plant would silently poison the whole experiment. Absent knob +
+/// on a different plant would silently poison the whole experiment. Default plant +
 /// absent sidecar writes nothing (legacy runs stay byte-identical on disk).
 pub fn record_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
     let path = ckpt_dir.join(PLANT_FILENAME);
@@ -70,15 +122,18 @@ pub fn record_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    match (recorded, friction_cap_override()) {
-        (Some(r), Some(v)) if r == v => Ok(()),
-        (Some(r), resolved) => Err(format!(
-            "{}: checkpoint trained with {PLANT_KEY} {r}, but this launch resolves {} — \
-             fix the run's {JOINT_FRICTION_CAP_ENV}, never change a run's plant mid-flight",
+    let resolved = Plant::resolved();
+    match recorded {
+        Some(r) if r == resolved => Ok(()),
+        Some(r) => Err(format!(
+            "{}: checkpoint trained with [{r}], but this launch resolves [{resolved}] — \
+             fix the run's {JOINT_FRICTION_CAP_ENV}/{}, never change a run's plant \
+             mid-flight",
             path.display(),
-            resolved.map_or("the default plant".into(), |v| v.to_string()),
+            crate::physics::ARENA_ENV,
         )),
-        (None, Some(v)) => {
+        None if resolved.is_default() => Ok(()),
+        None => {
             // A brain that already trained here has UNKNOWN plant provenance (pre-knob
             // or default); stamping the knob onto it would be a mid-run plant change.
             if ckpt_dir
@@ -86,24 +141,23 @@ pub fn record_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
                 .exists()
             {
                 return Err(format!(
-                    "{}: {JOINT_FRICTION_CAP_ENV} is set but the existing checkpoint \
+                    "{}: a non-default plant is set but the existing checkpoint \
                      carries no plant record — start a fresh run for a new plant",
                     ckpt_dir.display()
                 ));
             }
             std::fs::create_dir_all(ckpt_dir)
                 .map_err(|e| format!("{}: {e}", ckpt_dir.display()))?;
-            std::fs::write(&path, format!("{PLANT_KEY} {v}\n"))
-                .map_err(|e| format!("{}: {e}", path.display()))
+            std::fs::write(&path, resolved.render()).map_err(|e| format!("{}: {e}", path.display()))
         }
-        (None, None) => Ok(()),
     }
 }
 
 /// Eval-side: make the sim use the plant the checkpoint trained on. Sidecar present →
-/// install it as the process override (or verify an already-resolved env agrees);
-/// absent → env/default as-is (every pre-sidecar checkpoint is the default plant).
-/// MUST run before the first crab spawn — the override is read-once.
+/// install each recorded knob as the process override (or verify an already-resolved
+/// env agrees); absent → env/default as-is (every pre-sidecar checkpoint is the
+/// default plant). MUST run before the first world spawns — the overrides are
+/// read-once.
 pub fn adopt_recorded_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
     let path = ckpt_dir.join(PLANT_FILENAME);
     let recorded = match std::fs::read_to_string(&path) {
@@ -111,44 +165,66 @@ pub fn adopt_recorded_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    if OVERRIDE.set(Some(recorded)).is_ok() {
-        return Ok(());
+    if let Some(cap) = recorded.friction_cap
+        && OVERRIDE.set(Some(cap)).is_err()
+    {
+        // Already resolved (env set, or a prior spawn in this process): agreement or bust.
+        match friction_cap_override() {
+            Some(v) if v == cap => {}
+            resolved => {
+                return Err(format!(
+                    "{}: checkpoint trained with {FRICTION_KEY} {cap}, but this process \
+                     already resolved {} — refusing to mismeasure",
+                    path.display(),
+                    resolved.map_or("the default plant".into(), |v| v.to_string()),
+                ));
+            }
+        }
     }
-    // Already resolved (env set, or a prior spawn in this process): agreement or bust.
-    match friction_cap_override() {
-        Some(v) if v == recorded => Ok(()),
-        resolved => Err(format!(
-            "{}: checkpoint trained with {PLANT_KEY} {recorded}, but this process \
-             already resolved {} — refusing to mismeasure",
-            path.display(),
-            resolved.map_or("the default plant".into(), |v| v.to_string()),
-        )),
+    if let Some(arena) = recorded.arena {
+        crate::physics::world::adopt_train_arena(arena)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
     }
+    Ok(())
 }
 
-fn parse_plant(text: &str) -> Result<f32, String> {
-    let mut cap = None;
+fn parse_plant(text: &str) -> Result<Plant, String> {
+    let mut plant = Plant {
+        friction_cap: None,
+        arena: None,
+    };
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         match line.split_once(' ') {
-            Some((PLANT_KEY, value)) if cap.is_none() => {
-                cap = Some(parse_friction_cap(value)?);
+            Some((FRICTION_KEY, value)) if plant.friction_cap.is_none() => {
+                plant.friction_cap = Some(parse_friction_cap(value)?);
+            }
+            Some((ARENA_KEY, value)) if plant.arena.is_none() => {
+                plant.arena = Some(crate::physics::TrainArena::parse(value)?);
             }
             _ => return Err(format!("unknown or duplicate plant entry {line:?}")),
         }
     }
-    cap.ok_or_else(|| "no plant entries".to_string())
+    if plant.is_default() {
+        return Err("no plant entries".to_string());
+    }
+    Ok(plant)
 }
 
 /// One human-readable source for "which plant is this?" — logged by `learn` (into
 /// train.log) and `eval` (beside the `EVAL_RESULT` lines) so run and measurement
-/// artifacts both prove the friction cap they ran under.
-pub fn friction_cap_provenance() -> String {
-    match friction_cap_override() {
+/// artifacts both prove the friction cap and arena they ran under.
+pub fn plant_provenance() -> String {
+    let cap = match friction_cap_override() {
         Some(cap) => format!("joint friction cap {cap} N·m ({JOINT_FRICTION_CAP_ENV})"),
         None => format!(
             "joint friction cap leg {LEG_FRICTION_CAP} / claw {CLAW_FRICTION_CAP} N·m (default)"
         ),
-    }
+    };
+    let arena = match crate::physics::train_arena_override() {
+        Some(a) => format!("arena {} ({})", a.key(), crate::physics::ARENA_ENV),
+        None => format!("arena {} (default)", crate::physics::train_arena().key()),
+    };
+    format!("{cap}; {arena}")
 }
 
 fn parse_friction_cap(raw: &str) -> Result<f32, String> {
@@ -314,14 +390,29 @@ mod tests {
 
     #[test]
     fn plant_sidecar_roundtrips_and_rejects_unknown_keys() {
-        assert_eq!(parse_plant("joint_friction_cap 2.5\n"), Ok(2.5));
-        assert_eq!(parse_plant("joint_friction_cap 0.04"), Ok(0.04));
+        let cap = |text: &str| parse_plant(text).map(|p| p.friction_cap);
+        assert_eq!(cap("joint_friction_cap 2.5\n"), Ok(Some(2.5)));
+        assert_eq!(cap("joint_friction_cap 0.04"), Ok(Some(0.04)));
+        let arena = |text: &str| parse_plant(text).map(|p| p.arena);
+        assert_eq!(
+            arena("arena terrain\n"),
+            Ok(Some(crate::physics::TrainArena::Terrain))
+        );
+        let both = parse_plant("joint_friction_cap 2.5\narena terrain\n").expect("both keys");
+        assert_eq!(
+            (both.friction_cap, both.arena),
+            (Some(2.5), Some(crate::physics::TrainArena::Terrain))
+        );
+        // render/parse round-trip: what record_plant writes, adopt reads back equal.
+        assert!(parse_plant(&both.render()).expect("round-trip") == both);
         for bad in [
             "",
             "torque_slew 3.0\n", // future knob: old bin must refuse
             "joint_friction_cap 2.5\ntorque_slew 3.0\n", // ditto, alongside a known key
             "joint_friction_cap 2.5\njoint_friction_cap 2.5\n", // duplicate = ambiguous
             "joint_friction_cap NaN\n",
+            "arena mars\n",                   // unknown arena
+            "arena terrain\narena terrain\n", // duplicate = ambiguous
         ] {
             assert!(parse_plant(bad).is_err(), "{bad:?} must refuse");
         }

@@ -351,10 +351,7 @@ pub fn run_eval(
     // `EVAL_RESULT` lines: consumers filter by prefix (eval/wire.rs), so an artifact
     // that shows the numbers shows the plant they were measured on.
     crate::bot::body::adopt_recorded_plant(checkpoint_dir)?;
-    println!(
-        "eval: plant: {}",
-        crate::bot::body::friction_cap_provenance()
-    );
+    println!("eval: plant: {}", crate::bot::body::plant_provenance());
     pin_single_thread_pools();
 
     // ONE read arms-or-refuses (rl#241 — a classify-then-load pair could straddle a
@@ -480,10 +477,11 @@ pub(crate) fn bearing_bin(theta_rad: f32) -> usize {
 }
 
 /// One episode at one bearing — a fresh world per bearing, so each episode is exactly
-/// the pre-compass eval (deterministic per brain) with the target rotated. A pace
-/// probe episode swaps the training box for the open field — its ball sits past the
-/// box walls, and the unwalled flat grid is the plant GCR inference runs on — and adds
-/// the [`pace_recenter`] seam.
+/// the pre-compass eval (deterministic per brain) with the target rotated. On the
+/// flat plant a pace probe episode swaps the training box for the open field — its
+/// ball sits past the box walls, and the unwalled flat grid is the plant GCR
+/// inference runs on; on a terrain plant every sweep (probe included) runs on the
+/// tile the policy trained on. The probe adds the [`pace_recenter`] seam either way.
 fn run_bearing(
     policy: std::rc::Rc<Policy>,
     active_ticks: u64,
@@ -494,10 +492,13 @@ fn run_bearing(
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
-        arena: if pace_probe {
-            crate::physics::Arena::OpenField
-        } else {
-            crate::physics::Arena::WalledBox
+        // A terrain plant is judged on the terrain tile — pace probe included: its
+        // unwalled long-trek analog of the open field IS the tile (targets and the
+        // recenter are already surface-aware). Flat plants keep the legacy pair.
+        arena: match (crate::physics::train_arena(), pace_probe) {
+            (crate::physics::TrainArena::Terrain, _) => crate::physics::Arena::Terrain,
+            (crate::physics::TrainArena::WalledBox, true) => crate::physics::Arena::OpenField,
+            (crate::physics::TrainArena::WalledBox, false) => crate::physics::Arena::WalledBox,
         },
         visuals: crate::Visuals(false),
     });
@@ -694,6 +695,7 @@ fn probe_lure(carapace: Vec3, real_target: Vec3) -> Vec3 {
 /// OOD artifact, not her gait.
 fn pace_recenter(
     spawns: Res<CrabSpawns>,
+    terrain: Res<crate::terrain::Terrain>,
     mut state: ResMut<EvalState>,
     mut targets: ResMut<CrabTargets>,
     mut parts: Query<(&CrabEnvId, &mut Transform, Has<CrabCarapace>), With<CrabBodyPart>>,
@@ -710,7 +712,7 @@ fn pace_recenter(
     else {
         return;
     };
-    let Some(delta) = recenter_delta(spawns.origin(0), carapace) else {
+    let Some(delta) = recenter_delta(spawns.origin(0), carapace, &terrain) else {
         return;
     };
     for (env, mut t, _) in parts.iter_mut() {
