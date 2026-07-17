@@ -41,6 +41,16 @@ pub(crate) fn nn_crab_policy(
             .join("assets")
             .join("weights")
     });
+    // Weights↔world (rl#281 stage 6, the rl-demo pattern): adopt the checkpoint's
+    // recorded plant — arena + friction cap — before arming, so the brain plays in the
+    // world it trained in and GCR serves a terrain brain its baked tile. Multi-binding
+    // launches adopt each dir in turn; a disagreeing sidecar refuses here, at t=0.
+    if let Err(err) = crab_world::bot::body::adopt_recorded_plant(&dir) {
+        anyhow::bail!(
+            "checkpoint under {} records a plant this launch can't adopt — {err}",
+            dir.display()
+        );
+    }
     match crab_world::policy::load_armed(&dir) {
         Ok(policy) => Ok((dir, policy)),
         Err(CheckpointUnusable::Missing) => anyhow::bail!(

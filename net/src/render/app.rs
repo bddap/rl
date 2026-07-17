@@ -5,7 +5,8 @@ use super::driver::{
 use super::hud::{spawn_hud, sync_controls_context, sync_menu_controls_context, update_hud};
 use super::input::{gather_input, grab_cursor, quit_game, release_cursor};
 use super::scene::{
-    apply_transforms, follow_ground, reconcile_avatars, spawn_fp_camera, spawn_world,
+    apply_transforms, place_extraction_pillar, reconcile_avatars, spawn_fp_camera, spawn_world,
+    sync_arena_surface,
 };
 use super::*;
 
@@ -76,7 +77,8 @@ pub fn build_windowed_app(
                 super::articulation::sample_crab_part_poses,
                 reconcile_avatars,
                 apply_transforms,
-                follow_ground,
+                sync_arena_surface,
+                place_extraction_pillar,
                 update_hud,
             )
                 .chain()
@@ -204,16 +206,24 @@ pub(super) fn add_external_nn_crab(
     policies: Vec<crab_world::policy::Policy>,
     crab_spawns: Vec<Pos>,
 ) {
+    // The world half of the plant rides the checkpoint (rl#281 stage 6): the launch gate
+    // adopted the recorded arena before arming, so a terrain brain gets its baked tile —
+    // GCR's world IS the arena, rendered through the anchor. The flat case unwalls: the
+    // ±10 m training cage would cap the chase, and the open grid lets the crab pursue a
+    // player (spawned beyond sim::MIN_CRAB_SPAWN_DISTANCE) clear across the map (rl#209).
+    let arena = match crab_world::physics::train_arena() {
+        crab_world::physics::TrainArena::WalledBox => crab_world::physics::Arena::OpenField,
+        crab_world::physics::TrainArena::Terrain => crab_world::physics::Arena::Terrain,
+    };
     app.insert_resource(crab_world::Visuals(true))
         .insert_resource(crab_world::bot::NumEnvs(policies.len()))
         .add_plugins(crab_world::physics::CrabPhysicsPlugin)
-        // The OPEN inference field — unbounded ground, no walls — so the crab's per-round
-        // travel isn't capped at the ±10 m training box and it can chase a player (spawned
-        // beyond sim::MIN_CRAB_SPAWN_DISTANCE) clear across the map (rl#209). Training keeps
-        // the walled box.
-        .add_plugins(crab_world::physics::PhysicsWorldPlugin {
-            arena: crab_world::physics::Arena::OpenField,
-        })
+        .add_plugins(crab_world::physics::PhysicsWorldPlugin { arena })
+        // The arena's own dressing — terrain mesh + biome tint, vista or flat lighting,
+        // fog — replaces GCR's old bespoke checker quad (one ground path, rl#281):
+        // [`sync_arena_surface`] keeps the drawn surface at the arena anchor so it renders
+        // exactly where the physics stands.
+        .add_plugins(crab_world::physics::ArenaVisualsPlugin)
         .add_plugins(crab_world::bot::BotPlugin)
         .add_plugins(crab_world::vehicle::VehiclePlugin)
         .add_plugins(crate::external_crab::ExternalCrabPlugin::new(

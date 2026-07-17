@@ -4,7 +4,10 @@ use super::driver::{
 };
 use super::hud::{spawn_hud, sync_controls_context, update_hud};
 use super::input::gather_input;
-use super::scene::{FpCamera, apply_transforms, follow_ground, reconcile_avatars, spawn_world};
+use super::scene::{
+    FpCamera, apply_transforms, place_extraction_pillar, reconcile_avatars, spawn_world,
+    sync_arena_surface,
+};
 use super::*;
 use crate::net_loop::NetDriver;
 use crab_world::controls::ControlsOverrides;
@@ -91,7 +94,8 @@ fn finish_offscreen_app(
                 super::articulation::sample_crab_part_poses,
                 reconcile_avatars,
                 apply_transforms,
-                follow_ground,
+                sync_arena_surface,
+                place_extraction_pillar,
                 apply_shot_cam_offset,
                 // Keeps the HUD context live like the windowed app. A shot that PINNED a
                 // context is unaffected: ActiveContext::sync is a no-op while pinned.
