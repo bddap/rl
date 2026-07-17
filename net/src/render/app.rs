@@ -240,6 +240,10 @@ pub(super) fn install_armed_nn_crab(
     policies: Vec<crab_world::policy::Policy>,
     crab_spawns: Vec<Pos>,
 ) {
-    add_external_nn_crab(app, policies, crab_spawns);
+    add_external_nn_crab(app, policies, crab_spawns.clone());
     crate::external_crab::arm(app.world_mut());
+    // Same install shape as `ensure_round_installed` (rl#290): the restart is THE one
+    // path that pins the arena origin layout to the sim spawns — here, pre-spawn, it
+    // stashes the layout for `spawn_initial_crabs`.
+    crate::external_crab::restart_crabs_to_spawns(app.world_mut(), &crab_spawns);
 }
