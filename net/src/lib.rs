@@ -30,10 +30,60 @@ pub mod render;
 pub struct SyncVerdict {
     pub body: bool,
     pub crabs: bool,
+    /// Every peer runs the same effective plant — arena, terrain bake, friction caps
+    /// ([`crab_world::bot::body::constructed_plant_digest`], rl#286). Without it two
+    /// peers arm DISAGREEING WORLDS: a flat-arena client adopts terrain-height poses,
+    /// so Sally and every craft float or bury by the tile's relief on that screen.
+    pub plant: bool,
 }
 
 pub fn may_arm_external_crab(sync: Option<SyncVerdict>) -> bool {
-    sync.is_none_or(|v| v.body && v.crabs)
+    // Destructure so a new verdict axis is a compile error here, not a silently
+    // un-gated bool.
+    sync.is_none_or(|v| {
+        let SyncVerdict { body, crabs, plant } = v;
+        body && crabs && plant
+    })
+}
+
+/// What a peer advertises about its local world during formation/admission — the
+/// digests the [`SyncVerdict`] is judged from. One value threaded from the launch
+/// site to [`membership::Membership`], so a new identity axis rides the existing
+/// plumbing instead of growing every signature by another scalar.
+/// Fields are `pub(crate)` so [`SyncStamp::local`] is the only cross-crate
+/// constructor BY CONSTRUCTION — a launcher cannot hand-roll a dishonest stamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncStamp {
+    /// [`crab_world::mesh_fallback::constructed_body_digest`] — 0 = no usable model.
+    pub(crate) body_digest: u64,
+    /// [`crab_world::bot::body::constructed_plant_digest`] — never legitimately 0.
+    pub(crate) plant_digest: u64,
+    /// NN crabs this peer would render; 0 = crabless viewer, host count rules.
+    pub(crate) crab_count: u8,
+}
+
+impl SyncStamp {
+    /// No-model, no-plant, crabless: [`membership::Membership`]'s pre-`with_stamp`
+    /// start, and tests exercising formation mechanics rather than the sync verdict.
+    pub(crate) const ZERO: SyncStamp = SyncStamp {
+        body_digest: 0,
+        plant_digest: 0,
+        crab_count: 0,
+    };
+
+    /// The honest local stamp. Call AFTER any checkpoint plant is adopted
+    /// (`adopt_recorded_plant`) — a pre-adopt call latches the wrong plant, which
+    /// adoption then refuses loudly. Launch paths that load policies do so before
+    /// forming a match; checkpoint-less ones (headless `game net`) advertise the
+    /// env-default plant and are refused by checkpoint-bearing peers unless the
+    /// plants genuinely agree — that refusal is the rl#286 guard, not a bug.
+    pub fn local(crab_count: u8) -> Self {
+        Self {
+            body_digest: crab_world::mesh_fallback::constructed_body_digest(),
+            plant_digest: crab_world::bot::body::constructed_plant_digest(),
+            crab_count,
+        }
+    }
 }
 
 /// Serializes the `#[ignore]`d real-endpoint tests: every live iroh endpoint on the box
@@ -195,7 +245,11 @@ mod desync_test {
     }
 
     fn synced(body: bool) -> Option<SyncVerdict> {
-        Some(SyncVerdict { body, crabs: true })
+        Some(SyncVerdict {
+            body,
+            crabs: true,
+            plant: true,
+        })
     }
 
     #[test]
@@ -208,6 +262,19 @@ mod desync_test {
         assert!(
             would_arm_external_crab(synced(true), Some(())),
             "a networked round with SYNCED assets must arm the NN crab"
+        );
+
+        assert!(
+            !would_arm_external_crab(
+                Some(SyncVerdict {
+                    body: true,
+                    crabs: true,
+                    plant: false,
+                }),
+                Some(())
+            ),
+            "a networked round with mismatched PLANTS (arena/bake/friction) must NOT arm — \
+             the peers would render disagreeing worlds (rl#286)"
         );
 
         assert!(would_arm_external_crab(None, Some(())));

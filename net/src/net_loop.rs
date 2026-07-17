@@ -24,8 +24,7 @@ pub struct NetDriver {
     telemetry: Option<TelemetrySender>,
     /// The formation barrier's shared-asset verdict — see [`NetDriver::sync_verdict`].
     sync: crate::SyncVerdict,
-    body_digest: u64,
-    crab_count: u8,
+    stamp: crate::SyncStamp,
 }
 
 #[derive(Default)]
@@ -106,12 +105,8 @@ impl NetDriver {
         (inputs, joins)
     }
 
-    pub fn local_body_digest(&self) -> u64 {
-        self.body_digest
-    }
-
-    pub fn local_crab_count(&self) -> u8 {
-        self.crab_count
+    pub(crate) fn local_stamp(&self) -> crate::SyncStamp {
+        self.stamp
     }
 
     fn admit_endpoint(&mut self, eid: EndpointId, pid: PlayerId) {
@@ -369,13 +364,12 @@ pub fn depart_gone_peers(
 }
 
 fn admit_joiners(server: &mut Server, net: &mut NetDriver, joins: Vec<(EndpointId, JoinRequest)>) {
-    let host_body = net.local_body_digest();
-    let host_crabs = net.local_crab_count();
+    let host = net.local_stamp();
     for (eid, req) in joins {
         if net.is_rostered(eid) {
             continue;
         }
-        match may_admit_joiner(host_body, host_crabs, &req) {
+        match may_admit_joiner(host, &req) {
             Ok(()) => {
                 let adm = server.admit();
                 net.admit_endpoint(eid, adm.pid);
@@ -415,7 +409,6 @@ pub enum MatchResult {
     Cancelled,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn connect_and_form_dialing(
     seed: u64,
     discover_secs: u64,
@@ -423,8 +416,7 @@ pub fn connect_and_form_dialing(
     dial: Option<iroh::EndpointId>,
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
-    local_body_digest: u64,
-    local_crab_count: u8,
+    stamp: crate::SyncStamp,
 ) -> Result<MatchResult> {
     connect_and_form_inner(
         seed,
@@ -434,12 +426,10 @@ pub fn connect_and_form_dialing(
         collector,
         on_bound,
         None,
-        local_body_digest,
-        local_crab_count,
+        stamp,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn connect_and_form_lobby(
     seed: u64,
     expect: usize,
@@ -447,8 +437,7 @@ pub fn connect_and_form_lobby(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     control: LobbyControl,
-    local_body_digest: u64,
-    local_crab_count: u8,
+    stamp: crate::SyncStamp,
 ) -> Result<MatchResult> {
     connect_and_form_inner(
         seed,
@@ -458,8 +447,7 @@ pub fn connect_and_form_lobby(
         collector,
         on_bound,
         Some(control),
-        local_body_digest,
-        local_crab_count,
+        stamp,
     )
 }
 
@@ -472,8 +460,7 @@ fn connect_and_form_inner(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     lobby: Option<LobbyControl>,
-    local_body_digest: u64,
-    local_crab_count: u8,
+    stamp: crate::SyncStamp,
 ) -> Result<MatchResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -500,8 +487,7 @@ fn connect_and_form_inner(
             expect,
             telemetry.as_ref(),
             lobby.as_ref(),
-            local_body_digest,
-            local_crab_count,
+            stamp,
         )
         .await?;
         anyhow::Ok((session, formation, telemetry))
@@ -539,8 +525,7 @@ fn connect_and_form_inner(
         departed: Default::default(),
         telemetry,
         sync: frozen.sync,
-        body_digest: local_body_digest,
-        crab_count: local_crab_count,
+        stamp,
     };
     Ok(MatchResult::Joined(Box::new((client, driver))))
 }
@@ -590,8 +575,7 @@ pub fn connect_and_join(
     seed: u64,
     host: EndpointId,
     collector: Option<EndpointId>,
-    local_body_digest: u64,
-    local_crab_count: u8,
+    stamp: crate::SyncStamp,
 ) -> Result<JoinResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -614,15 +598,7 @@ pub fn connect_and_join(
             }
         }
         let telemetry = connect_telemetry(collector, my_eid).await;
-        session
-            .send(
-                host,
-                &JoinRequest {
-                    body_digest: local_body_digest,
-                    crab_count: local_crab_count,
-                },
-            )
-            .await;
+        session.send(host, &JoinRequest { stamp }).await;
         let verdict = await_admission(&mut session, host).await;
         anyhow::Ok((session, verdict, telemetry))
     })?;
@@ -669,12 +645,16 @@ pub fn connect_and_join(
                 id_map,
                 departed: Default::default(),
                 telemetry,
+                // All-true is EARNED, not assumed: the host's admission gate
+                // (`may_admit_joiner`) compared our full stamp against its own before
+                // sending Welcome, so every verdict axis was proven equal. A new axis
+                // must be added to that gate, not just here.
                 sync: crate::SyncVerdict {
                     body: true,
                     crabs: true,
+                    plant: true,
                 },
-                body_digest: local_body_digest,
-                crab_count: local_crab_count,
+                stamp,
             };
             Ok(JoinResult::Joined(Box::new((client, driver))))
         }

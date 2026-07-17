@@ -38,8 +38,7 @@ pub async fn form_match(
     expect: usize,
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
-    local_body_digest: u64,
-    local_crab_count: u8,
+    stamp: crate::SyncStamp,
 ) -> Result<Formation> {
     let my_eid = session.endpoint_id();
     println!(
@@ -53,8 +52,7 @@ pub async fn form_match(
         expect,
         telemetry,
         lobby,
-        local_body_digest,
-        local_crab_count,
+        stamp,
     )
     .await
     {
@@ -90,7 +88,7 @@ pub async fn form_match(
             me: me.0,
         });
     }
-    if local_body_digest != 0 {
+    if stamp.body_digest != 0 {
         if !outcome.sync.body {
             tracing::warn!(
                 "GCR: crab BODY NOT synced across peers (a peer has a different sally.glb \
@@ -102,6 +100,22 @@ pub async fn form_match(
         } else {
             println!(
                 "GCR: the crab body is synced across all {} peer(s) — NN crabs eligible",
+                id_map.len()
+            );
+        }
+    }
+    if stamp.plant_digest != 0 {
+        if !outcome.sync.plant {
+            tracing::warn!(
+                "GCR: the PLANT is NOT synced across peers (a peer resolves a different arena, \
+                 terrain bake, or joint-friction cap — its ground would disagree with the poses \
+                 it adopts, floating/burying every crab and craft on that screen); the windowed \
+                 client will REFUSE this round (rl#286, same policy as rl#114). Run rl-update on \
+                 every device so all carry the identical build + checkpoint."
+            );
+        } else {
+            println!(
+                "GCR: the plant (arena/bake/friction) is synced across all {} peer(s)",
                 id_map.len()
             );
         }
@@ -128,7 +142,6 @@ enum BarrierResult {
     Cancelled,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_barrier(
     session: &mut Session,
     me: EndpointId,
@@ -136,16 +149,14 @@ async fn run_barrier(
     expect: usize,
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
-    local_body_digest: u64,
-    local_crab_count: u8,
+    stamp: crate::SyncStamp,
 ) -> Result<BarrierResult> {
     let start = Instant::now();
     let mut m = match lobby {
         Some(c) => Membership::host_triggered(c.role, me, expect, start),
         None => Membership::new(me, expect, start),
     }
-    .with_body_digest(local_body_digest)
-    .with_crab_count(local_crab_count);
+    .with_stamp(stamp);
     let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
     let mut ticker = tokio::time::interval(BEAT_EVERY);
     let mut last_live = 0usize;
@@ -298,6 +309,7 @@ pub fn assign_player_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SyncStamp;
 
     fn eid(i: u8) -> EndpointId {
         iroh::SecretKey::from_bytes(&[i; 32]).public()
@@ -367,13 +379,13 @@ mod tests {
         };
         dial(s0.connect_direct(a1.clone()).await, "s0->s1");
 
-        let f0 = form_match(&mut s0, 1, 3, None, None, 0, 0);
-        let f1 = form_match(&mut s1, 1, 3, None, None, 0, 0);
+        let f0 = form_match(&mut s0, 1, 3, None, None, SyncStamp::ZERO);
+        let f1 = form_match(&mut s1, 1, 3, None, None, SyncStamp::ZERO);
         let f2 = async {
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
             dial(s2.connect_direct(a0.clone()).await, "s2->s0");
             dial(s2.connect_direct(a1.clone()).await, "s2->s1");
-            form_match(&mut s2, 1, 3, None, None, 0, 0).await
+            form_match(&mut s2, 1, 3, None, None, SyncStamp::ZERO).await
         };
         let (r0, r1, r2) = tokio::join!(f0, f1, f2);
         let unwrap_agreed = |r: Result<Formation>, who: &str| match r.expect(who) {

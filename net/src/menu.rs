@@ -86,8 +86,7 @@ fn spawn_formation(
     join: Option<EndpointId>,
     hosting: bool,
     telemetry: Option<EndpointId>,
-    body_digest: u64,
-    crab_count: u8,
+    stamp: crate::SyncStamp,
 ) -> Formation {
     let (tx, rx) = mpsc::channel();
     let (bound_tx, bound_rx) = mpsc::channel();
@@ -112,8 +111,7 @@ fn spawn_formation(
                 cancel_rx,
                 roster_tx,
             },
-            body_digest,
-            crab_count,
+            stamp,
         );
         let _ = tx.send(result);
     });
@@ -134,14 +132,11 @@ pub fn begin(
     choice: &StartChoice,
     seed: u64,
     telemetry: Option<EndpointId>,
-    body_digest: u64,
-    crab_count: u8,
+    stamp: crate::SyncStamp,
 ) -> Formation {
     match choice {
-        StartChoice::Host => spawn_formation(seed, None, true, telemetry, body_digest, crab_count),
-        StartChoice::Join(host) => {
-            spawn_formation(seed, *host, false, telemetry, body_digest, crab_count)
-        }
+        StartChoice::Host => spawn_formation(seed, None, true, telemetry, stamp),
+        StartChoice::Join(host) => spawn_formation(seed, *host, false, telemetry, stamp),
     }
 }
 
@@ -380,6 +375,7 @@ impl MenuNav {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SyncStamp;
 
     /// Poll `f` until it yields, or fail after `secs` — real-iroh lobby formation involves
     /// endpoint binding, discovery, and the membership barrier, all wall-clock.
@@ -400,11 +396,11 @@ mod tests {
     /// Share the host's code, join by it, and wait for both rosters to see 2 peers —
     /// the lobby state every scenario below starts from.
     fn two_peer_lobby() -> (Formation, Formation) {
-        let host = begin(&StartChoice::Host, 7, None, 0, 0);
+        let host = begin(&StartChoice::Host, 7, None, SyncStamp::ZERO);
         assert!(host.hosting, "Host formation is flagged hosting");
         let code = wait_for(15, "the host's shareable join code", || host.display_code());
 
-        let join = begin(&StartChoice::Join(Some(code)), 7, None, 0, 0);
+        let join = begin(&StartChoice::Join(Some(code)), 7, None, SyncStamp::ZERO);
         assert!(!join.hosting, "Join formation is not hosting");
         assert_eq!(
             join.display_code(),

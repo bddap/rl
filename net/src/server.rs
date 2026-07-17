@@ -93,15 +93,18 @@ pub struct Admission {
     pub roster: Vec<PlayerId>,
 }
 
+/// The joiner's world identity, verbatim — the same [`crate::SyncStamp`] shape the
+/// membership beat advertises, so an identity axis cannot exist in one exchange and
+/// be forgotten in the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinRequest {
-    pub body_digest: u64,
-    pub crab_count: u8,
+    pub stamp: crate::SyncStamp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRefusal {
     BodyMismatch { host: u64, joiner: u64 },
+    PlantMismatch { host: u64, joiner: u64 },
     CrabCountMismatch { host: u8, joiner: u8 },
 }
 
@@ -111,6 +114,13 @@ impl std::fmt::Display for AdmissionRefusal {
             AdmissionRefusal::BodyMismatch { host, joiner } => write!(
                 f,
                 "body digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — a different sally.glb, a different baked collider table, or binaries straddling a digest-formula change (rl#20)"
+            ),
+            AdmissionRefusal::PlantMismatch { host, joiner } => write!(
+                f,
+                "plant digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — a different \
+                 arena, terrain bake, or joint-friction cap (rl#286): the joiner would render a \
+                 different world than the poses it adopts; run rl-update / launch with the \
+                 host's checkpoint"
             ),
             AdmissionRefusal::CrabCountMismatch { host, joiner } => write!(
                 f,
@@ -151,21 +161,30 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-pub fn may_admit_joiner(
-    host_body: u64,
-    host_crabs: u8,
-    req: &JoinRequest,
-) -> Result<(), AdmissionRefusal> {
-    if req.body_digest != host_body {
+pub fn may_admit_joiner(host: crate::SyncStamp, req: &JoinRequest) -> Result<(), AdmissionRefusal> {
+    // Destructure so a new stamp axis is a compile error at THIS gate — the joiner's
+    // post-admission verdict (net_loop) trusts that admission compared every axis.
+    let crate::SyncStamp {
+        body_digest,
+        plant_digest,
+        crab_count,
+    } = req.stamp;
+    if body_digest != host.body_digest {
         return Err(AdmissionRefusal::BodyMismatch {
-            host: host_body,
-            joiner: req.body_digest,
+            host: host.body_digest,
+            joiner: body_digest,
         });
     }
-    if req.crab_count != 0 && req.crab_count != host_crabs {
+    if plant_digest != host.plant_digest {
+        return Err(AdmissionRefusal::PlantMismatch {
+            host: host.plant_digest,
+            joiner: plant_digest,
+        });
+    }
+    if crab_count != 0 && crab_count != host.crab_count {
         return Err(AdmissionRefusal::CrabCountMismatch {
-            host: host_crabs,
-            joiner: req.crab_count,
+            host: host.crab_count,
+            joiner: crab_count,
         });
     }
     Ok(())
@@ -1580,22 +1599,31 @@ mod tests {
     #[test]
     fn admission_gate_admits_match_and_refuses_mismatches() {
         let ha = 0x5A11_2233u64;
-        let req = |body_digest, crab_count| JoinRequest {
-            body_digest,
-            crab_count,
+        let hp = 0x7E44_A100u64;
+        let host = crate::SyncStamp {
+            body_digest: ha,
+            plant_digest: hp,
+            crab_count: 2,
+        };
+        let req = |body_digest, plant_digest, crab_count| JoinRequest {
+            stamp: crate::SyncStamp {
+                body_digest,
+                plant_digest,
+                crab_count,
+            },
         };
         assert_eq!(
-            may_admit_joiner(ha, 2, &req(ha, 2)),
+            may_admit_joiner(host, &req(ha, hp, 2)),
             Ok(()),
             "the host admits a matching joiner"
         );
         assert_eq!(
-            may_admit_joiner(ha, 2, &req(ha, 0)),
+            may_admit_joiner(host, &req(ha, hp, 0)),
             Ok(()),
             "a headless joiner (rig count 0) renders nothing — always count-admissible"
         );
         assert_eq!(
-            may_admit_joiner(ha, 2, &req(ha ^ 1, 2)),
+            may_admit_joiner(host, &req(ha ^ 1, hp, 2)),
             Err(AdmissionRefusal::BodyMismatch {
                 host: ha,
                 joiner: ha ^ 1
@@ -1603,7 +1631,16 @@ mod tests {
             "a different Sally/colliders is refused"
         );
         assert_eq!(
-            may_admit_joiner(ha, 2, &req(ha, 1)),
+            may_admit_joiner(host, &req(ha, hp ^ 1, 2)),
+            Err(AdmissionRefusal::PlantMismatch {
+                host: hp,
+                joiner: hp ^ 1
+            }),
+            "a different arena/bake/friction plant is refused (the joiner would render a \
+             different world than the poses it adopts, rl#286)"
+        );
+        assert_eq!(
+            may_admit_joiner(host, &req(ha, hp, 1)),
             Err(AdmissionRefusal::CrabCountMismatch { host: 2, joiner: 1 }),
             "a rendering joiner with the wrong rig count is refused (it would show the wrong \
              number of crabs)"
