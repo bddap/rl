@@ -737,11 +737,13 @@ fn integrate_crab(
 }
 
 /// Resolve a claw-tip collider to its capsule — segment endpoints in entity-local
-/// space plus radius — reading through compound wrappers (`spawn_crab` emits cuboid
-/// links as one-shape compounds, so a wrapped capsule must stay readable). `None` =
-/// not capsule-readable (including the ambiguous multi-capsule compound); the caller
-/// screams — a bare `as_capsule` here silently dropped the claw from MP claw-touch
-/// (rl#288).
+/// space plus radius. `spawn_crab` wraps every placed shape as a ONE-shape compound
+/// (today only cuboid links; the read-through is future-proofing so the pincer stays
+/// readable if capsules ever ship wrapped the same way), so readable = a bare capsule,
+/// or a one-shape compound resolving to one. `None` = anything else — a multi-shape
+/// compound is a shape our claw model can't honestly reduce, not a wrapper — and the
+/// caller screams: a bare `as_capsule` here silently dropped the claw from MP
+/// claw-touch (rl#288).
 fn claw_tip_capsule(view: ColliderView<'_>, local: Mat4) -> Option<(Vec3, Vec3, f32)> {
     match view {
         ColliderView::Capsule(c) => {
@@ -753,11 +755,13 @@ fn claw_tip_capsule(view: ColliderView<'_>, local: Mat4) -> Option<(Vec3, Vec3, 
             ))
         }
         ColliderView::Compound(c) => {
-            let mut caps = c.shapes().filter_map(|(pos, rot, sub)| {
-                claw_tip_capsule(sub, local * Mat4::from_rotation_translation(rot, pos))
-            });
-            let cap = caps.next();
-            if caps.next().is_some() { None } else { cap }
+            let mut shapes = c.shapes();
+            match (shapes.next(), shapes.next()) {
+                (Some((pos, rot, sub)), None) => {
+                    claw_tip_capsule(sub, local * Mat4::from_rotation_translation(rot, pos))
+                }
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -836,12 +840,6 @@ mod probe;
 
 pub use probe::{ProbeSample, StabilityResult, run_headless_probe, run_vehicle_stability_probe};
 
-/// rl#224 gates: a wiggling (even violently flailing) Sally must not move a ship she isn't
-/// touching — neither its arena body (physics) nor its RENDERED pose (arena pose + the
-/// [`ArenaAnchor`] anchor, which is static by construction). Before the fix the anchor
-/// tracked her live carapace, so her 9.6 m flail-walk dragged the parked ship's rendered
-/// pose 9.3 m; and the boarding spawn at 0.5 m altitude materialised the craft inside her
-/// body, so contact batted it ~8 m.
 #[cfg(test)]
 mod claw_tip_capsule_tests {
     use super::*;
@@ -854,8 +852,8 @@ mod claw_tip_capsule_tests {
         let (ba, bb, br) = claw_tip_capsule(bare.as_typed_shape(), Mat4::IDENTITY).unwrap();
         assert!((ba - a).length() < 1e-6 && (bb - b).length() < 1e-6 && (br - 0.02).abs() < 1e-6);
 
-        // spawn_crab's cuboid links ship as one-shape compounds; a compound-wrapped
-        // capsule must read through with the sub-shape placement folded in.
+        // A one-shape-compound-wrapped capsule (spawn_crab's wrapping convention)
+        // must read through with the sub-shape placement folded in.
         let off = Vec3::new(0.1, 0.2, 0.3);
         let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
         let wrapped = Collider::compound(vec![(off, rot, Collider::capsule(a, b, 0.02))]);
@@ -875,9 +873,22 @@ mod claw_tip_capsule_tests {
         assert!(claw_tip_capsule(boxy.as_typed_shape(), Mat4::IDENTITY).is_none());
         let bare_box = Collider::cuboid(0.1, 0.1, 0.1);
         assert!(claw_tip_capsule(bare_box.as_typed_shape(), Mat4::IDENTITY).is_none());
+        // A multi-shape compound is not a wrapper — even one containing a capsule
+        // cannot be honestly reduced to the claw model, so it must refuse.
+        let multi = Collider::compound(vec![
+            (Vec3::ZERO, Quat::IDENTITY, Collider::capsule_y(0.05, 0.02)),
+            (Vec3::X, Quat::IDENTITY, Collider::cuboid(0.1, 0.1, 0.1)),
+        ]);
+        assert!(claw_tip_capsule(multi.as_typed_shape(), Mat4::IDENTITY).is_none());
     }
 }
 
+/// rl#224 gates: a wiggling (even violently flailing) Sally must not move a ship she isn't
+/// touching — neither its arena body (physics) nor its RENDERED pose (arena pose + the
+/// [`ArenaAnchor`] anchor, which is static by construction). Before the fix the anchor
+/// tracked her live carapace, so her 9.6 m flail-walk dragged the parked ship's rendered
+/// pose 9.3 m; and the boarding spawn at 0.5 m altitude materialised the craft inside her
+/// body, so contact batted it ~8 m.
 #[cfg(test)]
 mod ship_wiggle_tests {
     use crab_world::bot::actuator::CrabActions;
