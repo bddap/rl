@@ -97,7 +97,7 @@ pub fn build_windowed_app(
                 .before(update_controls_ui::<GcrControls>),
         );
 
-    let asset_digest = crab_world::mesh_fallback::constructed_body_digest();
+    let body_digest = crab_world::mesh_fallback::constructed_body_digest();
 
     match boot {
         Boot::Round(round) => {
@@ -119,7 +119,7 @@ pub fn build_windowed_app(
             app.add_plugins(menu::MenuPlugin {
                 seed,
                 telemetry,
-                asset_digest,
+                body_digest,
                 crab_count: external_crab.len() as u8,
             });
             {
@@ -177,9 +177,9 @@ pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), Stri
         )
     } else {
         (
-            "the crab colliders (the sally.glb model) differ on a peer — it would build and \
-             render a different crab",
-            "run rl-update on every device so all peers share the same crab model",
+            "the crab body differs on a peer (a different sally.glb, baked collider table, \
+             or binary version) — it would build and render a different crab",
+            "run rl-update on every device so all peers share the same build + model",
         )
     };
     Err(format!(

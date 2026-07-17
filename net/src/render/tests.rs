@@ -64,7 +64,7 @@ fn menu_handoff_installs_the_chosen_round() {
 fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
     use super::app::check_armable;
     use crate::SyncVerdict;
-    let synced = |assets, crabs| Some(SyncVerdict { assets, crabs });
+    let synced = |body, crabs| Some(SyncVerdict { body, crabs });
     assert!(
         check_armable(None).is_ok(),
         "solo (no net, no formation verdict) always arms"

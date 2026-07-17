@@ -229,14 +229,14 @@ impl Codec for JoinRequest {
 
     fn encode(&self) -> [u8; 9] {
         let mut out = [0u8; 9];
-        out[0..8].copy_from_slice(&self.asset_digest.to_le_bytes());
+        out[0..8].copy_from_slice(&self.body_digest.to_le_bytes());
         out[8] = self.crab_count;
         out
     }
 
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = body;
-        let asset_digest = u64::from_le_bytes(take(&mut r, 8, "asset_digest")?.try_into().unwrap());
+        let body_digest = u64::from_le_bytes(take(&mut r, 8, "body_digest")?.try_into().unwrap());
         let crab_count = take(&mut r, 1, "crab_count")?[0];
         anyhow::ensure!(
             r.is_empty(),
@@ -244,7 +244,7 @@ impl Codec for JoinRequest {
             r.len()
         );
         Ok(JoinRequest {
-            asset_digest,
+            body_digest,
             crab_count,
         })
     }
@@ -290,7 +290,7 @@ impl Codec for Refusal {
 
     fn encode(&self) -> Vec<u8> {
         match self {
-            Refusal::Admission(AdmissionRefusal::AssetsMismatch { host, joiner }) => {
+            Refusal::Admission(AdmissionRefusal::BodyMismatch { host, joiner }) => {
                 let mut b = vec![0u8];
                 b.extend_from_slice(&host.to_le_bytes());
                 b.extend_from_slice(&joiner.to_le_bytes());
@@ -307,7 +307,7 @@ impl Codec for Refusal {
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = body;
         let verdict = match take(&mut r, 1, "refusal tag")?[0] {
-            0 => Refusal::Admission(AdmissionRefusal::AssetsMismatch {
+            0 => Refusal::Admission(AdmissionRefusal::BodyMismatch {
                 host: u64::from_le_bytes(take(&mut r, 8, "host digest")?.try_into().unwrap()),
                 joiner: u64::from_le_bytes(take(&mut r, 8, "joiner digest")?.try_into().unwrap()),
             }),
@@ -1078,7 +1078,7 @@ mod tests {
     #[test]
     fn refusal_wire_roundtrips_typed() {
         for verdict in [
-            Refusal::Admission(AdmissionRefusal::AssetsMismatch {
+            Refusal::Admission(AdmissionRefusal::BodyMismatch {
                 host: 0x1122_3344_5566_7788,
                 joiner: 0x99aa_bbcc_ddee_ff00,
             }),
@@ -1271,7 +1271,7 @@ mod tests {
     #[test]
     fn join_request_wire_roundtrips() {
         let req = JoinRequest {
-            asset_digest: 0xdead_beef_cafe_f00d,
+            body_digest: 0xdead_beef_cafe_f00d,
             crab_count: 3,
         };
         assert_eq!(

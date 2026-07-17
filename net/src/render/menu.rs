@@ -22,7 +22,7 @@ use crate::net_loop::{self, JoinResult};
 pub struct MenuPlugin {
     pub seed: u64,
     pub telemetry: Option<EndpointId>,
-    pub asset_digest: u64,
+    pub body_digest: u64,
     pub crab_count: u8,
 }
 
@@ -49,7 +49,7 @@ impl Plugin for MenuPlugin {
         app.insert_non_send_resource(MenuState::new(
             self.seed,
             self.telemetry,
-            self.asset_digest,
+            self.body_digest,
             self.crab_count,
         ))
         .add_systems(
@@ -100,7 +100,7 @@ pub(super) fn despawn_menu_camera(mut commands: Commands, cams: Query<Entity, Wi
 struct MenuState {
     seed: u64,
     telemetry: Option<EndpointId>,
-    asset_digest: u64,
+    body_digest: u64,
     crab_count: u8,
     nav: MenuNav,
     stick_latched: bool,
@@ -112,11 +112,11 @@ struct MenuState {
 }
 
 impl MenuState {
-    fn new(seed: u64, telemetry: Option<EndpointId>, asset_digest: u64, crab_count: u8) -> Self {
+    fn new(seed: u64, telemetry: Option<EndpointId>, body_digest: u64, crab_count: u8) -> Self {
         Self {
             seed,
             telemetry,
-            asset_digest,
+            body_digest,
             crab_count,
             nav: MenuNav::new(),
             stick_latched: false,
@@ -365,10 +365,10 @@ fn apply_action(
             };
             state.error = None;
             let (tx, rx) = mpsc::channel();
-            let (seed, telemetry, asset_digest, crab_count) = (
+            let (seed, telemetry, body_digest, crab_count) = (
                 state.seed,
                 state.telemetry,
-                state.asset_digest,
+                state.body_digest,
                 state.crab_count,
             );
             std::thread::spawn(move || {
@@ -376,7 +376,7 @@ fn apply_action(
                     seed,
                     host,
                     telemetry,
-                    asset_digest,
+                    body_digest,
                     crab_count,
                 ));
             });
@@ -489,7 +489,7 @@ fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextSta
         choice,
         state.seed,
         state.telemetry,
-        state.asset_digest,
+        state.body_digest,
         state.crab_count,
     ));
     next.set(AppPhase::Connecting);

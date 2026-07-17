@@ -23,12 +23,12 @@ pub mod render;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncVerdict {
-    pub assets: bool,
+    pub body: bool,
     pub crabs: bool,
 }
 
 pub fn may_arm_external_crab(sync: Option<SyncVerdict>) -> bool {
-    sync.is_none_or(|v| v.assets && v.crabs)
+    sync.is_none_or(|v| v.body && v.crabs)
 }
 
 /// Serializes the `#[ignore]`d real-endpoint tests: every live iroh endpoint on the box
@@ -189,11 +189,8 @@ mod desync_test {
         checkpoint.is_some() && super::may_arm_external_crab(sync)
     }
 
-    fn synced(assets: bool) -> Option<SyncVerdict> {
-        Some(SyncVerdict {
-            assets,
-            crabs: true,
-        })
+    fn synced(body: bool) -> Option<SyncVerdict> {
+        Some(SyncVerdict { body, crabs: true })
     }
 
     #[test]

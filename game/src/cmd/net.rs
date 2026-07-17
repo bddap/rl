@@ -42,7 +42,7 @@ async fn run_net(args: Args) -> Result<()> {
         args.expect,
         tel.as_ref(),
         None,
-        crab_world::mesh_fallback::constructed_body_digest(), // honest crab-asset digest (rl#100)
+        crab_world::mesh_fallback::constructed_body_digest(), // honest body digest (rl#100, rl#20)
         0,
     )
     .await?
