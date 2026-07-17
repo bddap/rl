@@ -266,7 +266,7 @@ impl ExternalCrabBridge {
         }
     }
 
-    /// Private: every restart must go through [`restart_bridge_to_spawns`], which also
+    /// Private: every restart must go through [`restart_crabs_to_spawns`], which also
     /// carries surviving crafts by the anchor-reset delta — a bare bridge reset after a
     /// recenter would teleport them on screen.
     fn restart_to_spawns(&mut self, spawns: &[Pos]) {
@@ -285,40 +285,35 @@ impl ExternalCrabBridge {
 }
 
 /// The rl#204 RESTART for the arena↔world correspondence: reset the bridge to the new
-/// spawns and carry every surviving craft (and pending boarding pose) by the anchor's
-/// world-frame reset delta. Crafts persist through a RESTART (only round teardown
-/// despawns them), so an anchor snapping back from its recenter-advanced value — or to
-/// a different spawn — must not move a still-flying craft on screen: the same
-/// world = arena + anchor invariance the recenter itself keeps ([`ARM_BODY_POS_RECENTER`]).
-/// With no recenters and unchanged spawns the delta is zero and this is exactly the old
-/// bare `restart_to_spawns`.
-pub(crate) fn restart_bridge_to_spawns(world: &mut World, spawns: &[Pos]) {
+/// spawns, re-pin every env's origin to the new spawn layout
+/// ([`CrabSpawns::repin_layout`], rl#289), cold-respawn every crab onto its origin —
+/// same call, so origin and body never disagree (rl#242) — and carry every surviving
+/// craft (and pending boarding pose) by the anchor's world-frame reset delta. Crafts
+/// persist through a RESTART (only round teardown despawns them), so an anchor
+/// snapping back from its recenter-advanced value — or to a different spawn — must not
+/// move a still-flying craft on screen: the same world = arena + anchor invariance the
+/// recenter itself keeps ([`ARM_BODY_POS_RECENTER`]). With no recenters and unchanged
+/// spawns the delta is zero and this is exactly the old bare `restart_to_spawns`.
+pub(crate) fn restart_crabs_to_spawns(world: &mut World, spawns: &[Pos]) {
     let old_w = {
         let mut bridge = world.resource_mut::<ExternalCrabBridge>();
         let old_w = bridge.anchor_world_m;
         bridge.restart_to_spawns(spawns);
         old_w
     };
-    // rl#289: the bridge reset re-pins only env 0's arena end (the anchor); every other
-    // env's origin still carries last round's rebased wander while its sim end respawns
-    // fresh, so env≠0's arena↔sim offset would differ from the shared anchor by the
-    // accumulated differential wander — its skin (repose-pinned to the sim spot) would
-    // render horizontally off its arena body (the ram target, rendered through the
-    // anchor) and off the local ground height (the repose shift is planar, exact only
-    // where it equals the y = 0 anchor). Re-pin every origin to the sim spawn LAYOUT
-    // about env 0's kept origin, so world = arena + anchor holds per-env at respawn —
-    // the caller cold-respawns every crab onto these origins in the same call. Skipped
-    // while the origins aren't built yet (fresh-app install: `spawn_initial_crabs` runs
-    // after arm and rebuilds the grid layout; that first round's tick-0 offset is the
-    // pre-existing [`ArenaAnchor`] note, not restart wander).
-    if let Some(&w0) = spawns.first() {
+    // Skipped while the origins aren't built yet (fresh-app install:
+    // `spawn_initial_crabs` runs after arm and rebuilds the grid layout; that first
+    // round's tick-0 env≠0 offset is the pre-existing [`ArenaAnchor`] note, not
+    // restart wander).
+    {
         let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
         let mut origins = world.resource_mut::<CrabSpawns>();
         if !origins.is_empty() {
-            let offsets: Vec<Vec2> = spawns.iter().map(|&s| pos_to_m(s) - pos_to_m(w0)).collect();
-            origins.repin_layout(&offsets, &terrain);
+            let layout: Vec<Vec2> = spawns.iter().map(|&s| pos_to_m(s)).collect();
+            origins.repin_layout(&layout, &terrain);
         }
     }
+    cold_respawn_armed_crab(world);
     let carry = old_w - world.resource::<ExternalCrabBridge>().anchor_world_m;
     if carry != Vec2::ZERO {
         let delta = Vec3::new(carry.x, 0.0, carry.y);
@@ -802,7 +797,7 @@ fn claw_tip_capsule(view: ColliderView<'_>, local: Mat4) -> Option<(Vec3, Vec3, 
 /// Since rl#254 the skin and arena frames advance identically as she walks (the trade the
 /// pre-fix (1−rs)-per-step drift posed is gone); a pilot's aim at her SKIN differs from her
 /// collider only by her settle-window motion, a small per-round constant. For crabs beyond 0
-/// the same holds from every round RESTART on — [`restart_bridge_to_spawns`] re-pins the whole
+/// the same holds from every round RESTART on — [`restart_crabs_to_spawns`] re-pins the whole
 /// origin layout to the sim spawns (rl#289) — but the fresh-app FIRST round keeps a nonzero
 /// tick-0 offset (`spawn_initial_crabs` lays origins on its own grid, not the sim spawn
 /// layout), pre-existing with the old borrowed-repose anchor too.
@@ -1205,8 +1200,7 @@ mod ship_wiggle_tests {
         );
 
         let spawn = Pos::from_meters(30.0, -14.0);
-        restart_bridge_to_spawns(app.world_mut(), &[spawn]);
-        cold_respawn_armed_crab(app.world_mut());
+        restart_crabs_to_spawns(app.world_mut(), &[spawn]);
         app.update();
 
         let anchor = app.world().resource::<ArenaAnchor>().0;
@@ -1405,11 +1399,7 @@ mod gcr_crab_tests {
     }
 
     /// rl#289: a round RESTART re-pins EVERY env's origin to the fresh sim spawn
-    /// layout, not just env 0's anchor end. Without it, an env≠0 origin keeps last
-    /// round's rebased wander while its sim end respawns fresh, so its arena↔sim
-    /// offset diverges from the shared anchor by the accumulated differential wander —
-    /// the crab's skin renders horizontally off its ram collider and off the local
-    /// ground height.
+    /// layout, not just env 0's anchor end — see [`CrabSpawns::repin_layout`].
     #[test]
     fn restart_repins_every_env_origin_to_the_sim_spawn_layout() {
         pin_single_thread_pools();
@@ -1449,8 +1439,7 @@ mod gcr_crab_tests {
         );
 
         let spawns = [Pos::from_meters(3.0, -2.0), Pos::from_meters(9.0, 4.0)];
-        restart_bridge_to_spawns(app.world_mut(), &spawns);
-        cold_respawn_armed_crab(app.world_mut());
+        restart_crabs_to_spawns(app.world_mut(), &spawns);
         app.update();
 
         let (o0, o1) = {

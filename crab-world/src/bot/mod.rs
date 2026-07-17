@@ -140,24 +140,29 @@ impl CrabSpawns {
     }
 
     /// [`Self::rebase_origin_to`]'s whole-set sibling, for a round RESTART (rl#289):
-    /// re-place every live origin so the arena layout reproduces a caller-supplied
-    /// spawn layout — `offsets_m[env]` is env's planar offset from env 0's spawn —
-    /// about env 0's KEPT origin (the arena locale is a gauge; keeping it leaves the
-    /// spawn-pinned anchor correspondence untouched). Without this, a restart resets
-    /// every env's sim end to a fresh spawn while env≠0 origins keep last round's
-    /// rebased wander, so the per-env arena↔sim offset diverges from the shared
-    /// anchor by the accumulated differential wander. Same rl#242 invariant as
-    /// [`Self::set_origin`], same argument: the sole caller cold-respawns every crab
-    /// onto the new origins in the same call, so origin and body never disagree.
-    pub fn repin_layout(&mut self, offsets_m: &[Vec2], terrain: &crate::terrain::TerrainGrid) {
+    /// re-place every live origin so the arena layout reproduces the given planar
+    /// spawn layout (meters), about env 0's KEPT origin — env 0's spawn maps onto its
+    /// current origin, so only the layout is adopted, never an absolute position (the
+    /// arena locale is a gauge; keeping it leaves the spawn-pinned anchor
+    /// correspondence untouched). Without this, a restart resets every env's sim end
+    /// to a fresh spawn while env≠0 origins keep last round's rebased wander, so the
+    /// per-env arena↔sim offset diverges from the shared anchor by the accumulated
+    /// differential wander — env≠0's skin renders off its arena body and off the
+    /// local ground height. Same rl#242 invariant as [`Self::set_origin`], same
+    /// argument: the sole caller respawns every crab onto the new origins in the same
+    /// call, so origin and body never disagree.
+    pub fn repin_layout(&mut self, spawns_m: &[Vec2], terrain: &crate::terrain::TerrainGrid) {
         assert_eq!(
-            offsets_m.len(),
+            spawns_m.len(),
             self.0.len(),
             "a restart layout must cover every live env's origin (rl#242)"
         );
+        let Some(&s0) = spawns_m.first() else {
+            return;
+        };
         let base = self.origin(0);
-        for (env, off) in offsets_m.iter().enumerate() {
-            let xz = Vec2::new(base.x + off.x, base.z + off.y);
+        for (env, &s) in spawns_m.iter().enumerate() {
+            let xz = Vec2::new(base.x, base.z) + (s - s0);
             self.set_origin(env, terrain.place(xz, 0.0));
         }
     }
