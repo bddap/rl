@@ -9,14 +9,26 @@ use bevy::prelude::*;
 use crab_world::bot::body::{CrabJointId, Side};
 use crab_world::bot::rig::{LinkShape, PartId, RigLink, RigRecipe, arc_to};
 
-use crate::fit::fit_capsule;
+use crate::fit::{FittedShape, ShapePolicy, fit_link_shape};
 use crate::gltf_load::LoadedModel;
 
+/// Feet plant and roll on their spherical capsule tips, and the pincer collider is
+/// read back via `as_capsule` for the sim's claw-touch decisions
+/// (net::external_crab) — both stay capsules whatever the fit score says.
+fn shape_policy(id: CrabJointId) -> ShapePolicy {
+    match id {
+        CrabJointId::LegCarpus(..) | CrabJointId::ClawPincer(_) => ShapePolicy::CapsuleOnly,
+        _ => ShapePolicy::Any,
+    }
+}
+
 /// The fitted recipe: `rig::build_recipe`'s bone-chain skeleton with each link's
-/// collider geometry replaced by the principal-axis capsule fit of its skinned vertex
-/// cloud (≥ 8 points; smaller/missing clouds keep the bone-chain stub). This is the
-/// fit that used to run at every spawn (pre-rl#277 revert re-land); it now runs only
-/// here, at bake time.
+/// collider geometry replaced by the best-scoring primitive fit of its skinned
+/// vertex cloud (≥ 8 points; smaller/missing clouds keep the bone-chain stub), then
+/// every density re-derived so the link keeps the mass it carries in the committed
+/// [`baked_recipe`] table (rl#20 Phase 3 — the rl#277 charge-gait collapse was the
+/// fuller shapes under the old volume-tuned densities). This fit runs only here, at
+/// bake time; the runtime consumes the committed table.
 pub fn fitted_recipe(model: &LoadedModel) -> Option<RigRecipe> {
     let mut recipe = crab_world::bot::rig::build_recipe(model)?;
     let clouds = model.vertices_by_part();
@@ -30,21 +42,84 @@ pub fn fitted_recipe(model: &LoadedModel) -> Option<RigRecipe> {
         if pts.len() < 8 {
             continue;
         }
-        let Some(cap) = fit_capsule(pts) else {
+        // The stub collider points down the bone chain by construction, so its
+        // center direction IS the chain axis — the hint that rescues isotropic
+        // clouds whose PCA axis is noise (the degenerate middle coxae).
+        let chain_dir = link.center.normalize_or_zero();
+        let Some(fitted) = fit_link_shape(
+            pts,
+            (chain_dir.length_squared() > 0.5).then_some(chain_dir),
+            shape_policy(id),
+        ) else {
             continue;
         };
         let origin = model
             .bone_origin(&link.bone)
             .expect("build_recipe only emits links whose pivot bone exists");
-        let seg = cap.b - cap.a;
-        link.center = (cap.a + cap.b) * 0.5 - origin;
-        link.col_rot = arc_to(Vec3::Y, seg);
-        link.shape = LinkShape::Capsule {
-            half_height: seg.length() * 0.5,
-            radius: cap.radius,
-        };
+        match fitted {
+            FittedShape::Capsule(cap) => {
+                let seg = cap.b - cap.a;
+                link.center = (cap.a + cap.b) * 0.5 - origin;
+                link.col_rot = arc_to(Vec3::Y, seg);
+                link.shape = LinkShape::Capsule {
+                    half_height: seg.length() * 0.5,
+                    radius: cap.radius,
+                };
+            }
+            FittedShape::Cuboid { center, rot, half } => {
+                link.center = center - origin;
+                link.col_rot = rot;
+                link.shape = LinkShape::Cuboid { half };
+            }
+        }
     }
+    rederive_densities(&mut recipe, &crab_world::bot::rig::baked_recipe());
     Some(recipe)
+}
+
+fn shape_volume(shape: LinkShape) -> f32 {
+    match shape {
+        LinkShape::Capsule {
+            half_height,
+            radius,
+        } => {
+            let r = radius.max(1e-6);
+            std::f32::consts::PI * r * r * (2.0 * half_height)
+                + (4.0 / 3.0) * std::f32::consts::PI * r * r * r
+        }
+        LinkShape::Cuboid { half } => 8.0 * half.x * half.y * half.z,
+    }
+}
+
+/// rl#20 Phase 3: every link keeps the MASS it carries in the reference (committed)
+/// table — density_new = density_ref · V_ref / V_new — so a geometry re-fit changes
+/// contact surfaces, never the tuned mass distribution or balance. Mass, not
+/// density, is the gameplay tuning (the hand-coded densities were volume-tuned for
+/// stick-thin colliders; carrying them onto fuller shapes tripled her mass and cut
+/// the charge gait −90%, rl#277). Masses chain forward across re-bakes: the
+/// committed table is definitionally the body every current checkpoint drives.
+/// When the fit reproduces the reference geometry exactly (an unchanged-asset
+/// re-bake), V_ref/V_new is exactly 1.0 and densities pass through bit-identical —
+/// `baked_matches_refit` stays a fixed point.
+fn rederive_densities(recipe: &mut RigRecipe, reference: &RigRecipe) {
+    assert_eq!(
+        recipe.links.len(),
+        reference.links.len(),
+        "link topology diverged from the committed table — a mass-reference decision \
+         is needed per new link; re-derive by hand"
+    );
+    for (link, ref_link) in recipe.links.iter_mut().zip(&reference.links) {
+        assert_eq!(
+            link.bone, ref_link.bone,
+            "link order diverged from the committed table"
+        );
+        link.density = ref_link.density * shape_volume(ref_link.shape) / shape_volume(link.shape);
+    }
+    let ref_carapace_vol =
+        8.0 * reference.carapace_half.x * reference.carapace_half.y * reference.carapace_half.z;
+    let carapace_vol =
+        8.0 * recipe.carapace_half.x * recipe.carapace_half.y * recipe.carapace_half.z;
+    recipe.carapace_density = reference.carapace_density * ref_carapace_vol / carapace_vol;
 }
 
 fn f(x: f32) -> String {
@@ -213,6 +288,59 @@ mod tests {
             assert_eq!(r.center, b.center, "link {i} ({}): center", r.bone);
             assert_eq!(r.col_rot, b.col_rot, "link {i} ({}): col_rot", r.bone);
             assert_eq!(r.density, b.density, "link {i} ({}): density", r.bone);
+        }
+    }
+
+    /// At the shoulder's up-stop, no part of the cheliped may reach above the
+    /// carapace top — arm flesh would clip the shell/eye band. The check swings the
+    /// skinned FLESH clouds, not the fitted colliders: a cuboid's empty corners
+    /// would overstate the arm's reach (rl#20 Phase 1). Moved here from the runtime
+    /// crate because flesh needs the model; skips without it.
+    #[test]
+    fn shoulder_upswing_stays_below_carapace() {
+        use crab_world::bot::body::{CrabJointId, Side};
+
+        let Some(path) = model_path() else {
+            eprintln!("shoulder_upswing_stays_below_carapace: no model — skipping");
+            return;
+        };
+        let model = LoadedModel::load(&path).expect("load model");
+        let recipe = crab_world::bot::rig::build_recipe(&model).expect("recipe");
+        let box_top = (recipe.hub_bind_world + recipe.carapace_offset).y + recipe.carapace_half.y;
+        let pivots = crab_world::bot::rig::rest_colliders(&recipe);
+        let clouds = model.vertices_by_part();
+        for side in [Side::Left, Side::Right] {
+            let shoulder = CrabJointId::ClawShoulder(side);
+            let pivot = pivots
+                .iter()
+                .find(|rc| rc.part == PartId::Joint(shoulder))
+                .expect("shoulder collider present")
+                .pivot;
+            let axis = recipe
+                .links
+                .iter()
+                .find(|l| l.actuated == Some(shoulder))
+                .expect("shoulder link present")
+                .axis_local;
+            let [lo, _hi] = shoulder.limits();
+            let rot = Quat::from_axis_angle(axis, lo);
+            for id in [
+                shoulder,
+                CrabJointId::ClawWrist(side),
+                CrabJointId::ClawPincer(side),
+            ] {
+                let pts = clouds.get(&PartId::Joint(id)).expect("cheliped cloud");
+                let top = pts
+                    .iter()
+                    .map(|&p| (pivot + rot * (p - pivot)).y)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    top <= box_top + 1e-3,
+                    "{side:?} cheliped {id:?} flesh reaches y={top:.3} at the up-stop \
+                     θ={lo:.3}, above the carapace top {box_top:.3} — arm flesh clips \
+                     the shell/eye band"
+                );
+            }
         }
     }
 

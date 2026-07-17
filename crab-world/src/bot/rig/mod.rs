@@ -229,6 +229,20 @@ impl RigLink {
 mod digest_tests {
     use super::{Vec3, baked_recipe};
 
+    fn capsule_idx(r: &super::RigRecipe) -> usize {
+        r.links
+            .iter()
+            .position(|l| matches!(l.shape, super::LinkShape::Capsule { .. }))
+            .expect("the committed table carries at least one capsule")
+    }
+
+    fn cuboid_idx(r: &super::RigRecipe) -> usize {
+        r.links
+            .iter()
+            .position(|l| matches!(l.shape, super::LinkShape::Cuboid { .. }))
+            .expect("the committed table carries at least one cuboid (rl#20 Phase 1)")
+    }
+
     /// Every field of `RigRecipe`/`RigLink` gets a nudge case here — if `digest()`
     /// silently stops covering one, the corresponding `assert_ne` fails. A single-ULP
     /// f32 nudge must change the digest: the rl#20 stage-1 guard is bit-exact.
@@ -264,14 +278,15 @@ mod digest_tests {
             }),
             ("link capsule radius", {
                 let mut r = baked_recipe();
+                let i = capsule_idx(&r);
                 let super::LinkShape::Capsule {
                     half_height,
                     radius,
-                } = r.links[0].shape
+                } = r.links[i].shape
                 else {
-                    panic!("link 0 is a capsule in the committed table");
+                    unreachable!()
                 };
-                r.links[0].shape = super::LinkShape::Capsule {
+                r.links[i].shape = super::LinkShape::Capsule {
                     half_height,
                     radius: f32::from_bits(radius.to_bits() ^ 1),
                 };
@@ -279,22 +294,34 @@ mod digest_tests {
             }),
             ("link capsule half_height", {
                 let mut r = baked_recipe();
+                let i = capsule_idx(&r);
                 let super::LinkShape::Capsule {
                     half_height,
                     radius,
-                } = r.links[7].shape
+                } = r.links[i].shape
                 else {
-                    panic!("link 7 is a capsule in the committed table");
+                    unreachable!()
                 };
-                r.links[7].shape = super::LinkShape::Capsule {
+                r.links[i].shape = super::LinkShape::Capsule {
                     half_height: half_height * (1.0 + 1e-6),
                     radius,
                 };
                 r
             }),
+            ("link cuboid half", {
+                let mut r = baked_recipe();
+                let i = cuboid_idx(&r);
+                let super::LinkShape::Cuboid { mut half } = r.links[i].shape else {
+                    unreachable!()
+                };
+                half.y = f32::from_bits(half.y.to_bits() ^ 1);
+                r.links[i].shape = super::LinkShape::Cuboid { half };
+                r
+            }),
             ("link shape variant", {
                 let mut r = baked_recipe();
-                r.links[0].shape = super::LinkShape::Cuboid {
+                let i = capsule_idx(&r);
+                r.links[i].shape = super::LinkShape::Cuboid {
                     half: Vec3::splat(0.1),
                 };
                 r
@@ -363,5 +390,5 @@ mod digest_tests {
         assert_eq!(super::baked_body_digest(), GOLDEN_BODY_DIGEST);
     }
 
-    const GOLDEN_BODY_DIGEST: u64 = 0xcb56_1c71_d8fa_a748;
+    const GOLDEN_BODY_DIGEST: u64 = 0x3362_8dfe_aeb2_9dd3;
 }
