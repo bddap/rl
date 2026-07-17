@@ -112,29 +112,43 @@ pub fn natural_body_height() -> Option<f32> {
     })
 }
 
+/// The full Sally body digest: the asset-byte digest chained with the committed
+/// [`bot::rig::baked_recipe`] table's geometry digest. Model-free by construction
+/// (both inputs are compiled into the binary), so tests and the rl#20 legacy-stamp pin
+/// can compute it without an asset on disk; whether a process ADVERTISES it is
+/// [`constructed_body_digest`]'s verdict-gated call.
+pub(crate) fn sally_body_digest() -> u64 {
+    static D: OnceLock<u64> = OnceLock::new();
+    *D.get_or_init(|| {
+        let mut h = crate::fnv::Fnv::new();
+        h.write(&bot::rig::BAKED_ASSET_DIGEST.to_le_bytes());
+        h.write(&bot::rig::baked_recipe().digest().to_le_bytes());
+        h.finish()
+    })
+}
+
 /// Digest of the crab body THIS process constructs — THE one "which body is this?"
 /// value: the checkpoint body-identity stamp (bddap/rl#214) AND the per-peer collider
-/// digest the MP membership handshake advertises (rl#100/rl#114). The [`usable_model`]
-/// verdict's own byte digest when it is `Ok` (the body spawns the mesh-fitted recipe),
-/// else `0` — the fallback/no-asset value, which never counts as synced in the handshake
-/// and never passes for Sally at a checkpoint load. Keyed off the VERDICT, not bare
+/// digest the MP membership handshake advertises (rl#100/rl#114). When the
+/// [`usable_model`] verdict is `Ok`, [`sally_body_digest`] — asset bytes chained with
+/// the baked collider table ([`bot::rig::RigRecipe::digest`]) — else `0`: the
+/// fallback/no-asset value, which never counts as synced in the handshake and never
+/// passes for Sally at a checkpoint load. Keyed off the VERDICT, not bare
 /// `model_path()`: a present-but-unloadable glb constructs the fallback body, so it must
 /// advertise/stamp `0`, not the broken file's hash (two identically-corrupt peers must
 /// not "agree on the collider asset" while both run not-Sally bodies).
 ///
-/// WHY hash the raw file bytes (not the post-load mesh or the collider spec): hashed
-/// conservatively (any byte change ⇒ mismatch ⇒ refuse) and WITHOUT the
-/// float-reproducibility questions hashing a vertex cloud or f32 spec would raise.
-/// Since bddap/rl#20 Phase 2 the collider geometry itself is the COMMITTED
-/// [`bot::rig::baked_recipe`] table compiled into the binary, and [`checked_recipe`]
-/// refuses any asset whose bytes aren't the ones the table was baked from — so a
-/// digest match now certifies the exact collider table too, not just the render mesh.
-/// Remaining caveat: the binary axis stays unguarded (as in the handshake) — spawn
-/// /joint code changes, or a re-bake, alter the body under an unchanged asset digest;
-/// a re-bake at least is always a loud, reviewed baked.rs diff.
+/// WHY both halves (bddap/rl#20 stage 1): the asset digest alone certified the render
+/// mesh but NOT the body — a `baked.rs` regen (a re-fit of the same sally.glb) changes
+/// every collider under an unchanged asset digest, which is a new MDP no live
+/// checkpoint can drive (rl#277). Folding the table's own bit-exact digest in makes a
+/// table move refuse loudly at trainer resume, eval, demo arm, and the MP handshake —
+/// no float-reproducibility risk, since both halves hash compiled constants.
+/// Remaining caveat: the binary axis beyond the table stays unguarded — spawn/joint
+/// CODE changes still alter the body under an unchanged digest.
 pub fn constructed_body_digest() -> u64 {
     if usable_model().is_ok() {
-        bot::rig::BAKED_ASSET_DIGEST
+        sally_body_digest()
     } else {
         0
     }
@@ -197,7 +211,7 @@ pub fn require_canonical_body(context: &str, allow_fallback: bool) -> Result<Bod
         (Ok(BodyGate::RealSally), Ok(u)) => tracing::info!(
             "canonical Sally mesh preflight OK for {context}: {} (body digest {:#018x})",
             u.path.display(),
-            bot::rig::BAKED_ASSET_DIGEST,
+            constructed_body_digest(),
         ),
         (Ok(BodyGate::FallbackAllowed), Err(reason)) => {
             log_fallback(Surface::Trainer, reason);
