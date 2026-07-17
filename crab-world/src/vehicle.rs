@@ -812,6 +812,22 @@ mod tests {
         );
     }
 
+    /// A deterministic hill on the APP'S OWN grid: the committed bake is fixed, so
+    /// scan a coarse lattice around the origin for ground well above y=0 — the
+    /// terrain tests' shared boarding spot.
+    fn hill_on_the_tile(app: &App) -> (f32, f32) {
+        let g = app.world().resource::<crate::terrain::Terrain>();
+        (0..10_000)
+            .map(|i| {
+                (
+                    ((i % 100) as f32 - 50.0) * 100.0,
+                    ((i / 100) as f32 - 50.0) * 100.0,
+                )
+            })
+            .find(|&(x, z)| g.height(x, z) > 10.0)
+            .expect("a hill within ±5 km of the origin")
+    }
+
     /// rl#283: the boarding clamp is keyed to the TERRAIN surface at the boarding spot,
     /// not y=0 — a walker boarding on a mountainside gets a craft on the local ground,
     /// not one buried inside the hill.
@@ -828,21 +844,10 @@ mod tests {
         app.add_plugins(VehiclePlugin);
         app.update();
 
-        // A deterministic hill on the APP'S OWN grid (the surface the clamp must track):
-        // the committed bake is fixed, so scan a coarse lattice around the origin for
-        // ground well above y=0.
-        let (x, z, want) = {
+        let (x, z) = hill_on_the_tile(&app);
+        let want = {
             let g = app.world().resource::<crate::terrain::Terrain>();
-            let (x, z) = (0..10_000)
-                .map(|i| {
-                    (
-                        ((i % 100) as f32 - 50.0) * 100.0,
-                        ((i / 100) as f32 - 50.0) * 100.0,
-                    )
-                })
-                .find(|&(x, z)| g.height(x, z) > 10.0)
-                .expect("a hill within ±5 km of the origin");
-            (x, z, g.height(x, z) + VEHICLE_HALF.y + GROUND_CLEARANCE)
+            g.height(x, z) + VEHICLE_HALF.y + GROUND_CLEARANCE
         };
 
         board_at(&mut app, P0, VehicleKind::Plane, Vec3::new(x, 0.0, z));
@@ -853,6 +858,61 @@ mod tests {
             (t.translation.y - want).abs() < 0.1,
             "craft must materialise on the local surface: y={}, want ≈{want}",
             t.translation.y
+        );
+    }
+
+    /// rl#281 stage 4: a plane FLIES over the real tile — full throttle from a
+    /// mountainside boarding, it makes real forward way and the heightfield holds it
+    /// up the whole run (never sinks through the surface). With the boarding-clamp
+    /// test above this is the vehicles-on-terrain verification: materialise on the
+    /// local ground, then fly, with terrain contact live throughout.
+    #[test]
+    fn plane_flies_over_terrain_without_sinking_through() {
+        use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack};
+
+        let mut app = headless_stack(HeadlessStack {
+            num_envs: 1,
+            role: WorldRole::Standalone,
+            arena: crate::physics::Arena::Terrain,
+            visuals: crate::Visuals(false),
+        });
+        app.add_plugins(VehiclePlugin);
+        app.update();
+
+        let (x, z) = hill_on_the_tile(&app);
+        board_at(&mut app, P0, VehicleKind::Plane, Vec3::new(x, 0.0, z));
+        app.update();
+        set_cmd(&mut app, |c| c.throttle_trim = 1.0);
+
+        let start = {
+            let mut q = app.world_mut().query::<(&Transform, &Vehicle)>();
+            q.single(app.world()).expect("one craft").0.translation
+        };
+        for tick in 0..300 {
+            app.update();
+            let (t, g) = {
+                let mut q = app.world_mut().query::<(&Transform, &Vehicle)>();
+                let t = q.single(app.world()).expect("one craft").0.translation;
+                let g = app.world().resource::<crate::terrain::Terrain>();
+                (t, g.height(t.x, t.z))
+            };
+            assert!(t.is_finite(), "craft blew up at tick {tick}: {t}");
+            // Soft contacts rest with ~cm penetration; anything past half a body
+            // below the surface means the heightfield stopped holding.
+            assert!(
+                t.y > g - VEHICLE_HALF.y,
+                "craft sank through the terrain at tick {tick}: y={} surface={g}",
+                t.y
+            );
+        }
+        let end = {
+            let mut q = app.world_mut().query::<(&Transform, &Vehicle)>();
+            q.single(app.world()).expect("one craft").0.translation
+        };
+        let way = Vec2::new(end.x - start.x, end.z - start.z).length();
+        assert!(
+            way > 2.0,
+            "full throttle for 300 ticks must make real forward way over terrain, got {way} m"
         );
     }
 

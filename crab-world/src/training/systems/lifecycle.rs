@@ -278,7 +278,7 @@ pub(crate) fn reset_crab(
     mut training: NonSendMut<TrainingState>,
     mut actions: ResMut<CrabActions>,
     assets: Res<CrabAssets>,
-    spawns: Res<CrabSpawns>,
+    mut spawns: ResMut<CrabSpawns>,
     terrain: Res<crate::terrain::Terrain>,
     parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>,
 ) {
@@ -288,7 +288,17 @@ pub(crate) fn reset_crab(
                 grace: RESET_GRACE_TICKS,
             };
             let _ = actions.rest(e); // deliberate skip pre-spawn
-            let origin = spawns.origin(e);
+            // Terrain training samples a fresh locale per episode — the tile's whole
+            // slope/relief distribution is the curriculum (rl#281 stage 4). Flat
+            // arenas keep their fixed spawn grid bit-identical.
+            let origin = if terrain.is_flat() {
+                spawns.origin(e)
+            } else {
+                let o =
+                    crate::training::targets::random_episode_origin(&mut training.rng, &terrain);
+                spawns.set_origin(e, o);
+                o
+            };
             let init_rotation = random_spawn_rotation(&mut training.rng);
             respawn_crab_rotated(
                 &mut commands,

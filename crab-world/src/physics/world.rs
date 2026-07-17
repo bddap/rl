@@ -25,9 +25,92 @@ pub enum Arena {
     /// terrain (rl#281 stages 3-5).
     OpenField,
     /// The committed GCR terrain bake ([`TerrainGrid::gcr`], rl#281) — real mountains,
-    /// no walls. Live in rl-demo (`--terrain`) for the stage-3 taste loop; GCR itself
-    /// flips once its sim and render are terrain-aware.
+    /// no walls. Live in rl-demo (`--terrain`) for the stage-3 taste loop and, via
+    /// [`RL_ARENA`], as the training/eval plant (stage 4); GCR itself flips once its
+    /// sim and render are terrain-aware.
     Terrain,
+}
+
+/// Which arena the TRAINING stack builds — the world half of the plant, beside
+/// `RL_JOINT_FRICTION_CAP` (bddap/rl#268): it must reach every sim inside one process
+/// (the rollout workers, the in-process keep-best chase-eval) and the external
+/// honest-eval binary, so it is the same read-once env knob pattern, recorded in the
+/// checkpoint's plant sidecar and adopted by `run_eval` — a terrain-trained policy
+/// measured on the flat box (or vice versa) is a mismeasure. Unset keeps the legacy
+/// walled box bit-identical. Values: `walled_box`, `terrain`.
+pub const ARENA_ENV: &str = "RL_ARENA";
+
+/// The [`RL_ARENA`](ARENA_ENV) choices — the arenas a policy can TRAIN in. A subset of
+/// [`Arena`] on purpose: `OpenField` is GCR's inference field, not a training plant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrainArena {
+    WalledBox,
+    Terrain,
+}
+
+impl TrainArena {
+    pub fn arena(self) -> Arena {
+        match self {
+            TrainArena::WalledBox => Arena::WalledBox,
+            TrainArena::Terrain => Arena::Terrain,
+        }
+    }
+
+    /// The knob/sidecar spelling — one source for parse + record.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            TrainArena::WalledBox => "walled_box",
+            TrainArena::Terrain => "terrain",
+        }
+    }
+
+    pub(crate) fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim() {
+            "walled_box" => Ok(TrainArena::WalledBox),
+            "terrain" => Ok(TrainArena::Terrain),
+            other => Err(format!("unknown arena {other:?} (walled_box | terrain)")),
+        }
+    }
+}
+
+static ARENA_OVERRIDE: std::sync::OnceLock<Option<TrainArena>> = std::sync::OnceLock::new();
+
+/// The resolved per-run arena override, read once per process. A SET-but-invalid value
+/// aborts instead of defaulting — silently training days in the wrong world is the
+/// failure mode the knob exists to prevent (same policy as the plant knobs).
+pub fn train_arena_override() -> Option<TrainArena> {
+    *ARENA_OVERRIDE.get_or_init(|| match std::env::var(ARENA_ENV) {
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(raw) => Some(
+            TrainArena::parse(&raw)
+                .unwrap_or_else(|e| panic!("{ARENA_ENV}={raw}: {e} — refusing an ambiguous plant")),
+        ),
+        Err(e @ std::env::VarError::NotUnicode(_)) => {
+            panic!("{ARENA_ENV}: {e} — refusing an ambiguous plant")
+        }
+    })
+}
+
+/// The arena the training stack (rollout workers, keep-best gate, honest eval) builds.
+pub fn train_arena() -> TrainArena {
+    train_arena_override().unwrap_or(TrainArena::WalledBox)
+}
+
+/// Sidecar adoption (the arena leg of `adopt_recorded_plant`): install the recorded
+/// arena as this process's override, or verify an already-resolved one agrees.
+pub(crate) fn adopt_train_arena(recorded: TrainArena) -> Result<(), String> {
+    if ARENA_OVERRIDE.set(Some(recorded)).is_ok() {
+        return Ok(());
+    }
+    match train_arena_override() {
+        Some(a) if a == recorded => Ok(()),
+        resolved => Err(format!(
+            "checkpoint trained in arena {}, but this process already resolved {} — \
+             refusing to mismeasure",
+            recorded.key(),
+            resolved.map_or("the default arena".into(), |a| a.key().to_string()),
+        )),
+    }
 }
 
 impl Arena {

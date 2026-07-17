@@ -531,9 +531,11 @@ fn crab_not_yet_spawned(crabs: Query<(), With<CrabCarapace>>) -> bool {
 /// it is consumed); before [`publish_arena_anchor`] (so the carried crafts and the
 /// advanced anchor land on the wire in the same tick — a stale anchor would pop every
 /// craft by the full delta).
+#[allow(clippy::too_many_arguments)] // a bevy system's params are its dependency list
 fn bound_body_pos_drift(
     mut bridge: ResMut<ExternalCrabBridge>,
     spawns: Res<CrabSpawns>,
+    terrain: Res<crab_world::terrain::Terrain>,
     armed: Option<Res<BodyPosRecenter>>,
     mut targets: ResMut<CrabTargets>,
     mut parts: Query<(&CrabEnvId, &mut Transform, Option<&CrabCarapace>), With<CrabBodyPart>>,
@@ -560,7 +562,7 @@ fn bound_body_pos_drift(
         let origin = spawns.origin(idx);
         // Trigger and delta are the shared rl#240 formula (crab_world::training::
         // targets), the same one the eval's pace probe recenters by (rl#280).
-        let Some(delta) = recenter_delta(origin, carapace) else {
+        let Some(delta) = recenter_delta(origin, carapace, &terrain) else {
             continue;
         };
         let drift_m = Vec2::new(delta.x, delta.z).length();

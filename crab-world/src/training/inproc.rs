@@ -282,7 +282,9 @@ fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: us
     let mut app = headless_stack(HeadlessStack {
         num_envs,
         role: WorldRole::RolloutWorker,
-        arena: crate::physics::Arena::WalledBox,
+        // The plant's world half (rl#281 stage 4): the run's RL_ARENA, recorded in
+        // the checkpoint sidecar beside the friction cap.
+        arena: crate::physics::train_arena().arena(),
         visuals: crate::Visuals(false),
     });
 

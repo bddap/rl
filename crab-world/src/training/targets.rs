@@ -13,12 +13,41 @@ pub(crate) const BAND_START_MIN: f32 = 1.5;
 pub(crate) const TARGET_Y_MIN: f32 = 0.15;
 pub(crate) const TARGET_Y_MAX: f32 = 0.7;
 /// Far edge of the trained chase band — the ONE source for "how far a target can
-/// be". Doubles as the coordinate bound sampling clamps targets to (|x|,|z| ≤
-/// this), so extending the band past the wall margin needs a bigger arena, not
-/// just a bigger constant. GCR's bridge (`net::external_crab`) clamps its posed
-/// hunt target to this same constant; a copied literal there would drift when the
-/// band moves.
+/// be". On the flat training box it doubles as the coordinate bound sampling clamps
+/// targets to (|x|,|z| ≤ this), so extending the band past the wall margin needs a
+/// bigger arena, not just a bigger constant. GCR's bridge (`net::external_crab`)
+/// clamps its posed hunt target to this same constant; a copied literal there would
+/// drift when the band moves.
 pub const TARGET_ARENA_HALF: f32 = crate::physics::world::ARENA_HALF_SIZE - 1.0;
+
+/// Margin kept off the terrain tile's edge when sampling spawns/targets — past the
+/// last grid row the surface continues as a flat clamp-extension (see
+/// [`TerrainGrid::height`]), real relief stops, and the rl#283 y-floor backstop is
+/// the only netting; one chase band plus slack keeps every episode's whole geometry
+/// on real terrain.
+const TERRAIN_EDGE_MARGIN: f32 = 2.0 * TARGET_ARENA_HALF;
+
+/// Absolute |x|,|z| bound for spawn/target sampling — the wall-derived clamp on the
+/// flat training box, the tile interior on terrain (rl#281 stage 4). ONE source: the
+/// per-episode spawn draw and [`sample_target`]'s in-arena check share it, so a spawn
+/// can never be placed where its own targets don't fit.
+pub(crate) fn sample_clamp_half(terrain: &TerrainGrid) -> f32 {
+    if terrain.is_flat() {
+        TARGET_ARENA_HALF
+    } else {
+        terrain.extent_x().min(terrain.extent_z()) / 2.0 - TERRAIN_EDGE_MARGIN
+    }
+}
+
+/// A fresh episode locale on terrain: uniform over the tile interior, on the surface.
+/// Terrain training re-draws this every respawn (`reset_crab`) so the policy sees the
+/// tile's whole slope/relief distribution instead of the fixed spawn grid's one
+/// locale; flat arenas never call it (the walled box IS one locale).
+pub(crate) fn random_episode_origin(rng: &mut impl rand::Rng, terrain: &TerrainGrid) -> Vec3 {
+    let clamp = sample_clamp_half(terrain);
+    let xz = Vec2::new(rng.gen_range(-clamp..clamp), rng.gen_range(-clamp..clamp));
+    terrain.place(xz, 0.0)
+}
 
 /// Claw-tip "touch" distance for [`tip_touch`]. Finer than the crab (rl#253):
 /// inside the carapace footprint's inscribed radius, with the rest pose's claw
@@ -83,13 +112,23 @@ pub fn band_lure(carapace: Vec3, planar_to_target: Vec2, y: f32) -> Vec3 {
 
 /// The rl#240 recenter's trigger and delta: once the carapace's planar drift from its
 /// spawn origin leaves the band, teleporting every crab part by exactly this delta
-/// puts it back onto the origin (y untouched); inside the band, `None`. ONE copy for
-/// the same reason as [`band_lure`]: net's `bound_body_pos_drift` and the eval's
-/// `pace_recenter` must agree on when the spawn-relative body.pos obs channel is out
-/// of distribution.
-pub fn recenter_delta(origin: Vec3, carapace: Vec3) -> Option<Vec3> {
+/// puts it back onto the origin planar-wise; inside the band, `None`. The y component
+/// carries the terrain's surface-height difference across the shift, so
+/// height-above-ground (and with it the spawn-relative body:pos.y obs channel, which
+/// walks with elevation on terrain — rl#283's stage-4 audit item) is invariant; on the
+/// flat grids both heights are exactly 0 and the legacy y=0 delta falls out
+/// bit-identical. ONE copy for the same reason as [`band_lure`]: net's
+/// `bound_body_pos_drift` and the eval's `pace_recenter` must agree on when the
+/// spawn-relative body.pos obs channel is out of distribution.
+pub fn recenter_delta(origin: Vec3, carapace: Vec3, terrain: &TerrainGrid) -> Option<Vec3> {
     let drift = Vec2::new(carapace.x - origin.x, carapace.z - origin.z);
-    (drift.length() > TARGET_ARENA_HALF).then(|| Vec3::new(-drift.x, 0.0, -drift.y))
+    (drift.length() > TARGET_ARENA_HALF).then(|| {
+        Vec3::new(
+            -drift.x,
+            terrain.height(origin.x, origin.z) - terrain.height(carapace.x, carapace.z),
+            -drift.y,
+        )
+    })
 }
 
 /// `close_frac` mixes close-disc [0, BAND_START_MIN) targets — under-carapace
@@ -116,7 +155,8 @@ pub(crate) fn sample_target(
         let p = polar_target(origin, theta, dist, y);
         terrain.place(Vec2::new(p.x, p.z), y)
     };
-    let in_arena = |p: &Vec3| p.x.abs() <= TARGET_ARENA_HALF && p.z.abs() <= TARGET_ARENA_HALF;
+    let clamp = sample_clamp_half(terrain);
+    let in_arena = |p: &Vec3| p.x.abs() <= clamp && p.z.abs() <= clamp;
 
     for _ in 0..32 {
         let p = at(rng.gen_range(0.0..std::f32::consts::TAU));
@@ -338,19 +378,79 @@ mod tests {
 
     /// The rl#240 recenter formula: dormant inside the band; one band-edge step
     /// outside it, the delta lands the carapace back on its origin planar-wise with
-    /// y untouched.
+    /// y untouched on the flat grid.
     #[test]
     fn recenter_delta_snaps_planar_drift_back_onto_the_origin() {
         let origin = Vec3::new(2.0, 0.0, -3.0);
 
         let inside = origin + Vec3::new(TARGET_ARENA_HALF - 0.1, 0.5, 0.0);
-        assert_eq!(recenter_delta(origin, inside), None);
+        assert_eq!(recenter_delta(origin, inside, &flat()), None);
 
         let out = origin + Vec3::new(TARGET_ARENA_HALF * 0.8, 0.5, TARGET_ARENA_HALF * 0.8);
-        let delta = recenter_delta(origin, out).expect("outside the band");
-        assert_eq!(delta.y, 0.0);
+        let delta = recenter_delta(origin, out, &flat()).expect("outside the band");
+        assert_eq!(
+            delta.y, 0.0,
+            "flat grid: the legacy y=0 delta, bit-identical"
+        );
         let back = out + delta;
         assert!((back.x - origin.x).abs() < 1e-5 && (back.z - origin.z).abs() < 1e-5);
-        assert_eq!(back.y, out.y, "the recenter never touches height");
+        assert_eq!(back.y, out.y, "flat recenter never touches height");
+    }
+
+    /// On terrain the recenter carries the surface-height difference: after the
+    /// shift, height-above-ground at the origin equals what it was at the drifted
+    /// spot — the spawn-relative body:pos.y channel is invariant across the teleport.
+    #[test]
+    fn recenter_delta_preserves_height_above_terrain() {
+        let g = TerrainGrid::gcr();
+        // Two on-tile points a band-plus step apart with real relief between them.
+        let origin = g.place(Vec2::new(500.0, -700.0), 0.0);
+        let out_xz = Vec2::new(500.0 + TARGET_ARENA_HALF * 1.5, -700.0);
+        let clearance = 0.4;
+        let out = g.place(out_xz, clearance);
+        let delta = recenter_delta(origin, out, &g).expect("outside the band");
+        let back = out + delta;
+        let height_above = back.y - g.height(back.x, back.z);
+        assert!(
+            (height_above - clearance).abs() < 1e-3,
+            "height above surface must survive the recenter, got {height_above}"
+        );
+    }
+
+    /// Terrain sampling (rl#281 stage 4): from a random on-tile origin, targets stay
+    /// in the trained band around THAT origin, on the surface's y band, inside the
+    /// tile interior; the flat clamp stays the wall-derived constant.
+    #[test]
+    fn terrain_targets_band_around_the_origin_on_the_surface() {
+        let g = TerrainGrid::gcr();
+        assert_eq!(sample_clamp_half(&flat()), TARGET_ARENA_HALF);
+        let clamp = sample_clamp_half(&g);
+        assert!(
+            clamp > 15_000.0,
+            "the GCR tile interior is huge, got {clamp}"
+        );
+
+        let mut rng = rand::thread_rng();
+        for _ in 0..64 {
+            let origin = random_episode_origin(&mut rng, &g);
+            assert!(origin.x.abs() <= clamp && origin.z.abs() <= clamp);
+            assert!(
+                (origin.y - g.height(origin.x, origin.z)).abs() < 1e-3,
+                "episode origins sit on the surface"
+            );
+            for _ in 0..32 {
+                let t = sample_target(origin, 0.0, &mut rng, &g);
+                let d = planar_dist(t, origin);
+                assert!(
+                    (BAND_START_MIN - 1e-3..=TARGET_ARENA_HALF + 1e-3).contains(&d),
+                    "target at {d} m is outside the band from its origin"
+                );
+                let above = t.y - g.height(t.x, t.z);
+                assert!(
+                    (TARGET_Y_MIN - 1e-3..=TARGET_Y_MAX + 1e-3).contains(&above),
+                    "target rides {above} m above the surface, outside the y band"
+                );
+            }
+        }
     }
 }
