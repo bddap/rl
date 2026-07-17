@@ -1,10 +1,10 @@
 pub mod world;
 
-#[cfg(feature = "render")]
-pub use world::ArenaVisualsPlugin;
 pub use world::{
     ARENA_ENV, Arena, PhysicsWorldPlugin, TrainArena, train_arena, train_arena_override,
 };
+#[cfg(feature = "render")]
+pub use world::{ArenaSurface, ArenaVisualsPlugin};
 
 use bevy_rapier3d::math::Vect;
 use bevy_rapier3d::plugin::RapierContextInitialization;

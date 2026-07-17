@@ -118,6 +118,27 @@ impl CrabSpawns {
             .expect("CrabSpawns has no origin for a live env — spawn wiring bug (rl#242)") = origin;
     }
 
+    /// The rl#240 recenter for a world that must stay glued to its terrain (net/GCR,
+    /// rl#281 stage 6): move the ORIGIN to the crab instead of teleporting the crab to
+    /// the origin. The origin becomes the carapace's own ground point, so the
+    /// spawn-relative obs channel snaps back into the spawn distribution while every
+    /// Transform — the crab's, the crafts', the terrain the player sees — stays
+    /// untouched. (The trainer/eval teleport is fine mid-episode where nothing rendered
+    /// is watching; under a rendered world it would swap the terrain locale beneath the
+    /// crab's feet while the drawn mountain stayed put.) Same rl#242 invariant as
+    /// [`Self::set_origin`], reached from the other end: origin and body agree in the
+    /// same tick because the origin is DERIVED from the body. Returns the new origin.
+    pub fn rebase_origin_to(
+        &mut self,
+        env: usize,
+        carapace: Vec3,
+        terrain: &crate::terrain::TerrainGrid,
+    ) -> Vec3 {
+        let origin = terrain.place(Vec2::new(carapace.x, carapace.z), 0.0);
+        self.set_origin(env, origin);
+        origin
+    }
+
     /// Not yet rebuilt by `spawn_initial_crabs` — the pre-spawn frames a FixedUpdate
     /// consumer (net's arena-anchor publisher, rl#224) must sit out rather than hit
     /// [`Self::origin`]'s wiring-bug panic.
