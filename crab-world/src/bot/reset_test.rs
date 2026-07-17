@@ -25,11 +25,13 @@ fn respawn_env0(app: &mut App) {
             |mut commands: Commands,
              assets: Res<CrabAssets>,
              spawns: Res<CrabSpawns>,
+             terrain: Res<crate::terrain::Terrain>,
              parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>| {
                 let origin = spawns.origin(0);
                 respawn_crab(
                     &mut commands,
                     &assets,
+                    &terrain,
                     parts.iter().filter(|(_, id)| id.0 == 0).map(|(e, _)| e),
                     origin,
                     0,
@@ -183,6 +185,28 @@ fn rescue_system_recovers_a_nan_poisoned_crab() {
 
     tick(&mut app, 64);
     assert_crab_sane(&mut app, n_parts, "64 ticks later");
+}
+
+/// rl#283: the heightfield is a zero-thickness sheet — a crab knocked clean below it
+/// would fall forever (the old halfspace made that impossible). The y-floor rescue must
+/// catch it and respawn it on the surface.
+#[test]
+fn rescue_system_recovers_a_crab_knocked_below_the_floor() {
+    let mut app = headless_app();
+    tick(&mut app, 192);
+    let n_parts = part_translations(&mut app).len();
+
+    {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<CrabBodyPart>>();
+        for mut t in q.iter_mut(app.world_mut()) {
+            t.translation.y -= super::BELOW_TERRAIN_RESCUE_M + 8.0;
+        }
+    }
+
+    tick(&mut app, 192);
+    assert_crab_sane(&mut app, n_parts, "after rescue from below the floor");
 }
 
 /// rl#281 stage 2 end-to-end: on the REAL baked terrain arena the crab must spawn on

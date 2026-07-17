@@ -40,17 +40,19 @@ pub(super) fn demo_poke(
     f.torque += burst.torque;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn demo_respawn(
     commands: &mut Commands,
     assets: &CrabAssets,
     spawns: &CrabSpawns,
+    terrain: &crate::terrain::TerrainGrid,
     parts: impl Iterator<Item = Entity>,
     settle: &mut DemoSettle,
     actions: &mut CrabActions,
     init_rotation: Quat,
 ) {
     let origin = spawns.origin(0);
-    respawn_crab_rotated(commands, assets, parts, origin, 0, init_rotation);
+    respawn_crab_rotated(commands, assets, terrain, parts, origin, 0, init_rotation);
     settle.0 = RESET_GRACE_TICKS;
     let _ = actions.rest(0); // deliberate skip pre-spawn
 }
@@ -67,6 +69,7 @@ pub(super) fn demo_controls(
     mut commands: Commands,
     assets: Res<CrabAssets>,
     spawns: Res<CrabSpawns>,
+    terrain: Res<crate::terrain::Terrain>,
     parts_q: Query<Entity, With<CrabBodyPart>>,
     mut poke_burst: ResMut<PokeBurst>,
     mut actions: ResMut<CrabActions>,
@@ -103,6 +106,7 @@ pub(super) fn demo_controls(
             &mut commands,
             &assets,
             &spawns,
+            &terrain,
             parts_q.iter(),
             &mut settle,
             &mut actions,

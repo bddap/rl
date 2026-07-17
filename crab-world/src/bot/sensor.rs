@@ -255,7 +255,7 @@ pub fn build_observation(
     if nonfinite > 0 {
         error!(
             "build_observation sanitized {nonfinite} non-finite observation slot(s) \
-             this tick — corrupt physics upstream of Sense (see rescue_nonfinite_crabs)"
+             this tick — corrupt physics upstream of Sense (see rescue_lost_crabs)"
         );
     }
 }

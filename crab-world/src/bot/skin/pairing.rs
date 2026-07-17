@@ -563,11 +563,13 @@ mod tests {
                 |mut commands: Commands,
                  assets: Res<CrabAssets>,
                  spawns: Res<CrabSpawns>,
+                 terrain: Res<crate::terrain::Terrain>,
                  parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>| {
                     let origin = spawns.origin(0);
                     respawn_crab(
                         &mut commands,
                         &assets,
+                        &terrain,
                         parts.iter().filter(|(_, id)| id.0 == 0).map(|(e, _)| e),
                         origin,
                         0,

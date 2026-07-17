@@ -526,7 +526,7 @@ mod tests {
         }
 
         app.world_mut()
-            .run_system_once(crate::bot::rescue_nonfinite_crabs)
+            .run_system_once(crate::bot::rescue_lost_crabs)
             .expect("rescue system");
         let rescued_set = body_part_entities(&mut app);
         assert!(

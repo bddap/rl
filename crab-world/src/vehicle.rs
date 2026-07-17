@@ -212,6 +212,7 @@ impl Plugin for VehiclePlugin {
 fn manage_vehicles(
     mut commands: Commands,
     controls: Res<VehicleControls>,
+    terrain: Res<crate::terrain::Terrain>,
     mut existing: Query<(Entity, &mut Vehicle, &mut GravityScale)>,
 ) {
     let mut matched = std::collections::BTreeSet::new();
@@ -233,7 +234,7 @@ fn manage_vehicles(
     }
     for (&pilot, cmd) in &controls.0 {
         if !matched.contains(&pilot) {
-            spawn_vehicle(&mut commands, pilot, cmd);
+            spawn_vehicle(&mut commands, &terrain, pilot, cmd);
         }
     }
 }
@@ -304,14 +305,24 @@ impl VehicleKind {
 /// Spawn `pilot`'s vehicle rigidbody where its walker stands — the boarding path
 /// ([`manage_vehicles`]): the craft materialises at the command's [`Boarding`] pose with the
 /// walker's facing and velocity (rl#258), lifted just enough that the collider clears the
-/// ground.
-fn spawn_vehicle(commands: &mut Commands, pilot: PilotId, cmd: &PilotCommand) {
+/// ground — the TERRAIN surface at the boarding spot, not y=0 (rl#283: a flat clamp buries
+/// the craft inside a hill). Being a floor, it cannot pull a too-high pose DOWN into a
+/// valley: that needs the production [`Boarding`] author (net's planar sim bridge, which
+/// pins pos.y = 0 today) to go terrain-aware — rl#281 stages 3-5.
+fn spawn_vehicle(
+    commands: &mut Commands,
+    terrain: &crate::terrain::TerrainGrid,
+    pilot: PilotId,
+    cmd: &PilotCommand,
+) {
     let Boarding {
         mut pos,
         yaw,
         velocity,
     } = cmd.boarding;
-    pos.y = pos.y.max(VEHICLE_HALF.y + GROUND_CLEARANCE);
+    pos.y = pos
+        .y
+        .max(terrain.height(pos.x, pos.z) + VEHICLE_HALF.y + GROUND_CLEARANCE);
     commands.spawn(vehicle_bundle(
         pilot,
         cmd.kind,
@@ -798,6 +809,50 @@ mod tests {
             v.linear.distance(vel) < 0.2,
             "the walker's velocity is conserved (want {vel}, got {})",
             v.linear
+        );
+    }
+
+    /// rl#283: the boarding clamp is keyed to the TERRAIN surface at the boarding spot,
+    /// not y=0 — a walker boarding on a mountainside gets a craft on the local ground,
+    /// not one buried inside the hill.
+    #[test]
+    fn boarding_clamp_tracks_the_terrain_surface() {
+        use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack};
+
+        let mut app = headless_stack(HeadlessStack {
+            num_envs: 1,
+            role: WorldRole::Standalone,
+            arena: crate::physics::Arena::Terrain,
+            visuals: crate::Visuals(false),
+        });
+        app.add_plugins(VehiclePlugin);
+        app.update();
+
+        // A deterministic hill on the APP'S OWN grid (the surface the clamp must track):
+        // the committed bake is fixed, so scan a coarse lattice around the origin for
+        // ground well above y=0.
+        let (x, z, want) = {
+            let g = app.world().resource::<crate::terrain::Terrain>();
+            let (x, z) = (0..10_000)
+                .map(|i| {
+                    (
+                        ((i % 100) as f32 - 50.0) * 100.0,
+                        ((i / 100) as f32 - 50.0) * 100.0,
+                    )
+                })
+                .find(|&(x, z)| g.height(x, z) > 10.0)
+                .expect("a hill within ±5 km of the origin");
+            (x, z, g.height(x, z) + VEHICLE_HALF.y + GROUND_CLEARANCE)
+        };
+
+        board_at(&mut app, P0, VehicleKind::Plane, Vec3::new(x, 0.0, z));
+        app.update();
+        let mut q = app.world_mut().query::<(&Transform, &Vehicle)>();
+        let (t, _) = q.single(app.world()).expect("one craft");
+        assert!(
+            (t.translation.y - want).abs() < 0.1,
+            "craft must materialise on the local surface: y={}, want ≈{want}",
+            t.translation.y
         );
     }
 
