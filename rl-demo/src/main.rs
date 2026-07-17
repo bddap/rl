@@ -233,18 +233,23 @@ fn main() {
     // sidecar drives the arena (and friction cap), so a terrain-trained brain shipped to
     // the TV/decks gets its mountains with no launcher flag to drift out of sync with
     // the weights. `--terrain` stays as a force for weight-less viewing (the stage-3
-    // taste-loop recipe) and skips adoption — it is a VIEWING override, not a plant.
+    // taste-loop recipe) — but it overrides only the ARENA leg (rl#285): the friction
+    // leg is still adopted, so the weights keep their trained joint damping.
     // Adoption is boot-time: a live-checkpoint sync that changes the sidecar mid-run
-    // takes effect on the next launch.
-    let arena = if args.terrain {
-        physics::Arena::Terrain
+    // takes effect on the next launch (or is refused by the hot-reload plant guard).
+    let adopted = if args.terrain {
+        bot::body::adopt_recorded_plant_forcing_arena(
+            &args.checkpoint.checkpoint_dir,
+            physics::TrainArena::Terrain,
+        )
     } else {
-        if let Err(err) = bot::body::adopt_recorded_plant(&args.checkpoint.checkpoint_dir) {
-            eprintln!("{err}");
-            std::process::exit(2);
-        }
-        physics::train_arena().arena()
+        bot::body::adopt_recorded_plant(&args.checkpoint.checkpoint_dir)
     };
+    if let Err(err) = adopted {
+        eprintln!("{err}");
+        std::process::exit(2);
+    }
+    let arena = physics::train_arena().arena();
 
     app.insert_resource(Visuals(true))
         .insert_resource(bot::NumEnvs(1))

@@ -33,6 +33,11 @@ pub struct Policy {
     /// be the transient mid-save window (see [`Self::try_hot_reload`], bddap/rl#215).
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
     last_refused: Option<std::time::SystemTime>,
+    /// `last_refused`'s plant sibling (bddap/rl#285), kept separate: deduping both
+    /// refusal classes on one field would suppress the log when the CLASS flips at an
+    /// unchanged brain mtime (a sidecar can heal or flip without touching the brain).
+    #[cfg_attr(not(feature = "render"), allow(dead_code))]
+    last_plant_refused: Option<std::time::SystemTime>,
     state: PolicyState,
 }
 
@@ -103,6 +108,7 @@ pub fn load_armed(checkpoint_dir: &Path) -> Result<Policy, CheckpointUnusable> {
                 live_dir: None,
                 last_loaded: None,
                 last_refused: None,
+                last_plant_refused: None,
                 state: loaded_state(brain, normalizer, checkpoint_digest(checkpoint_dir)),
             })
         }
@@ -292,6 +298,32 @@ fn log_checkpoint_refusal(surface: &str, dir: &Path, why: &str) {
     );
 }
 
+/// bddap/rl#285: refuse to arm a checkpoint whose recorded plant disagrees with the
+/// plant this process resolved. A feed flip (e.g. terrain→flat) swaps a NEW RUN into
+/// the live dir under a long-lived kiosk, and hot-reloading that run's weights into
+/// the old run's arena drives them in a world they never trained in — indefinitely,
+/// since nothing restarts the demo on deploy. Force-resolving both plant locks first
+/// makes `adopt_recorded_plant` agreement-or-error BY CONSTRUCTION: an embedder that
+/// never adopted at boot resolves from env here rather than silently adopting the
+/// checkpoint's plant into a world that was already built without it. Reuses the one
+/// adoption primitive instead of growing a second comparison path.
+fn plant_agreement(dir: &Path) -> Result<(), String> {
+    let _ = crate::bot::body::friction_cap_override();
+    let _ = crate::physics::train_arena_override();
+    crate::bot::body::adopt_recorded_plant(dir)
+}
+
+/// The loud refusal for a plant disagreement (bddap/rl#285) — `log_rig_mismatch`'s
+/// third sibling: the checkpoint is healthy but trained in a different world than
+/// this process simulates.
+fn log_plant_refusal(surface: &str, dir: &Path, why: &str) {
+    error!(
+        "{surface}: REFUSING checkpoint at {} — {why}. The current brain keeps \
+         driving; the checkpoint arms once its plant agrees (a fresh launch adopts it).",
+        dir.display(),
+    );
+}
+
 fn loaded_state(
     brain: AnyBrain<InferBackend>,
     normalizer: ObsNormalizer,
@@ -321,6 +353,7 @@ impl Policy {
             live_dir: None,
             last_loaded: None,
             last_refused: None,
+            last_plant_refused: None,
             state: PolicyState::Rest { refused: None },
         }
     }
@@ -382,6 +415,7 @@ impl Policy {
             live_dir: None,
             last_loaded: None,
             last_refused: None,
+            last_plant_refused: None,
             state,
         }
     }
@@ -403,6 +437,13 @@ impl Policy {
             .ok();
         match load_brain_normalizer(dir, &self.device) {
             Loaded::Fit(brain, normalizer) => {
+                // rl#285: a roster slot synced from a different run must not arm into
+                // this process's world. Checked on Fit only — an empty slot stays the
+                // gentle "no brain" refusal below, not a phantom plant mismatch.
+                if let Err(why) = plant_agreement(dir) {
+                    log_plant_refusal("brain swap", dir, &why);
+                    return false;
+                }
                 self.state = loaded_state(brain, normalizer, checkpoint_digest(dir));
                 self.dir = dir.to_owned();
                 if self.live_dir.is_some() {
@@ -410,6 +451,7 @@ impl Policy {
                 }
                 self.last_loaded = mtime;
                 self.last_refused = None;
+                self.last_plant_refused = None;
                 info!(
                     "brain swap: {} now driving from {}",
                     self.brain_label(),
@@ -443,6 +485,20 @@ impl Policy {
         self.live_dir = dir;
     }
 
+    /// Hot-reload's plant-refusal bookkeeping (bddap/rl#285): log once per distinct
+    /// save, and give an UNARMED policy the refusal attribution (same promise as the
+    /// rig-mismatch and envelope-refusal arms) — a driving brain is left untouched.
+    #[cfg_attr(not(feature = "render"), allow(dead_code))]
+    fn refuse_plant(&mut self, dir: &Path, mtime: std::time::SystemTime, why: String) {
+        if self.last_plant_refused != Some(mtime) {
+            log_plant_refusal("play (hot-reload)", dir, &why);
+            self.last_plant_refused = Some(mtime);
+        }
+        if matches!(self.state, PolicyState::Rest { .. }) {
+            self.state = PolicyState::Rest { refused: Some(why) };
+        }
+    }
+
     #[cfg_attr(not(feature = "render"), allow(dead_code))]
     pub(crate) fn try_hot_reload(&mut self) -> bool {
         let Some(dir) = self.live_dir.clone() else {
@@ -455,8 +511,27 @@ impl Policy {
         if self.last_loaded == Some(mtime) {
             return false;
         }
+        // rl#285: a feed flip swaps a NEW RUN into the live dir; its weights must not
+        // arm into the old run's world. Checked BEFORE the load so a persistently-
+        // disagreeing run costs one sidecar read per poll, not a brain load — and NOT
+        // stamped into `last_loaded`: the healing sidecar can land without touching the
+        // brain's mtime (the torn-set reasoning below), so every poll re-checks until
+        // agreement. `last_plant_refused` keeps the log at once per distinct save.
+        if let Err(why) = plant_agreement(&dir) {
+            self.refuse_plant(&dir, mtime, why);
+            return false;
+        }
         match load_brain_normalizer(&dir, &self.device) {
             Loaded::Fit(brain, normalizer) => {
+                // Re-checked between the coherent set read and arming: a flip landing
+                // mid-load would arm behind the stale pre-check (the rl#241 classify-
+                // then-act straddle). A brain landing before its sidecar within one
+                // sync tick remains uncovered — this guard is a mismatch net, not a
+                // transaction; the durable close is a plant leg in the save-stamped set.
+                if let Err(why) = plant_agreement(&dir) {
+                    self.refuse_plant(&dir, mtime, why);
+                    return false;
+                }
                 self.state = loaded_state(brain, normalizer, checkpoint_digest(&dir));
                 self.dir = dir;
                 self.last_loaded = Some(mtime);
@@ -887,6 +962,63 @@ mod tests {
             !policy.try_hot_reload(),
             "the same checkpoint must not reload again"
         );
+
+        let _ = std::fs::remove_dir_all(&live);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// bddap/rl#285: a feed flip swaps a NEW RUN into the live dir; hot-reload must not
+    /// arm its weights into the OLD run's world. With the process plant resolved (here:
+    /// the default), a live checkpoint recording a different plant must refuse — keeping
+    /// the policy unarmed with the refusal attributed — and must arm the moment the
+    /// sidecar agrees again, even with no new save (the lagging per-file-sync case).
+    #[test]
+    fn hot_reload_refuses_a_plant_disagreeing_checkpoint() {
+        // Resolve the process plant FIRST (env-unset → the default) so adoption inside
+        // the guard is the agreement check, not first-adoption — mirroring a booted
+        // demo. Also keeps this test from installing a non-default plant into the
+        // process-global overrides shared with sibling tests.
+        let _ = crate::physics::train_arena_override();
+        let tmp = std::env::temp_dir();
+        let live = tmp.join(format!("rl-hotreload-plant-{}", std::process::id()));
+        let empty = tmp.join(format!("rl-hotreload-plant-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&live);
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+
+        std::fs::write(
+            live.join(crate::bot::body::PLANT_FILENAME),
+            "arena terrain\n",
+        )
+        .unwrap();
+        save_brain(&live);
+
+        let mut policy = Policy::load(&empty, RestFallback::Rest);
+        policy.live_dir = Some(live.clone());
+        assert!(
+            !policy.try_hot_reload(),
+            "a plant-disagreeing checkpoint must refuse, keeping the current policy"
+        );
+        assert!(!policy.is_loaded());
+        assert!(
+            policy.brain_label().contains("REFUSED"),
+            "the unarmed rest state must carry the plant refusal, got: {}",
+            policy.brain_label()
+        );
+        assert!(
+            !policy.try_hot_reload(),
+            "still disagreeing — every poll re-checks, still refusing"
+        );
+
+        // The sidecar heals WITHOUT the brain's mtime changing (a lagging per-file
+        // sync): the unstamped refusal must re-check and arm on the very next poll.
+        std::fs::remove_file(live.join(crate::bot::body::PLANT_FILENAME)).unwrap();
+        assert!(
+            policy.try_hot_reload(),
+            "an agreeing plant must arm on the next poll, no new save needed"
+        );
+        assert!(policy.is_loaded());
 
         let _ = std::fs::remove_dir_all(&live);
         let _ = std::fs::remove_dir_all(&empty);
