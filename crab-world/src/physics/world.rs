@@ -144,6 +144,15 @@ impl Plugin for PhysicsWorldPlugin {
     }
 }
 
+/// The visible arena ground spawned by [`setup_arena_visuals`]. The PHYSICS ground
+/// (collider) always sits at the physics-frame origin; a host whose render frame is a
+/// translation of the physics frame (net's arena↔world anchor, rl#224) uses this
+/// handle to keep the drawn surface at that translation. Hosts whose two frames
+/// coincide (rl-demo) leave it at IDENTITY.
+#[cfg(feature = "render")]
+#[derive(Component)]
+pub struct ArenaSurface;
+
 #[cfg(feature = "render")]
 pub struct ArenaVisualsPlugin;
 
@@ -270,6 +279,7 @@ fn setup_arena_visuals(
     // bands on terrain, the old flat green on flat arenas), so the material stays
     // white and ONE material serves every arena.
     commands.spawn((
+        ArenaSurface,
         Mesh3d(meshes.add(terrain.mesh())),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE,
