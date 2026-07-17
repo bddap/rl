@@ -320,9 +320,17 @@ impl TrainingState {
 
         let n = config.envs.max(1) as usize;
         let normalizer_increment = worker_mode.then(IncrementAccumulator::new);
+        if let Some(cap) = config.ppo_steps_cap {
+            // train.log is multi-run; without this line nobody can later tell which
+            // segments trained under the step cap.
+            info!("PPO step cap active: --ppo-steps-cap {cap} (rl#276)");
+        }
         Self {
             brain: InferenceCachedBrain::new(brain),
-            config: PpoConfig::default(),
+            config: PpoConfig {
+                steps_cap: config.ppo_steps_cap,
+                ..PpoConfig::default()
+            },
             rollouts: (0..n).map(|_| RolloutBuffer::new()).collect(),
             device,
             envs: vec![EnvEpisode::default(); n],
@@ -646,6 +654,7 @@ mod tests {
             ticks: 0,
             envs: 1,
             seed: Some(42),
+            ppo_steps_cap: None,
         };
         let state = TrainingState::new(&config, None);
         let extra_saw_staged_dir = RefCell::new(false);
