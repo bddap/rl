@@ -13,14 +13,11 @@ use crab_world::Visuals;
 use crab_world::policy::Policy;
 use net::external_crab::run_headless_probe;
 
-/// rl#282: this probe (~3 s normally) has wedged indefinitely (0% CPU,
-/// futex_wait, 45+ min) under trainer saturation — NOT a wgpu device request:
-/// `headless_stack` passes `backends: None`, so bevy skips renderer init
-/// entirely. The stall watchdog bounds it with a loud abort.
-#[ctor::ctor(unsafe)]
-fn arm_stall_watchdog() {
-    test_watchdog::arm();
-}
+// rl#282: this probe (~3 s normally) has wedged indefinitely (0% CPU,
+// futex_wait, 45+ min) under trainer saturation — NOT a wgpu device request:
+// `headless_stack` passes `backends: None`, so bevy skips renderer init
+// entirely. The stall watchdog bounds it with a loud abort.
+test_watchdog::arm!();
 
 #[test]
 fn armed_visual_crab_stays_finite_and_grounded() {

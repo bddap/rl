@@ -8,23 +8,32 @@
 //! on a saturated box cannot false-fire: a starved-but-runnable thread still
 //! accrues CPU every scheduler pass; a wedged one accrues none.
 //!
-//! Arm once per test binary (in a lib suite, under `#[cfg(test)]`):
-//! ```ignore
-//! #[ctor::ctor]
-//! fn arm_stall_watchdog() {
-//!     test_watchdog::arm();
-//! }
-//! ```
-//! On a stall it dumps every thread's name and state — libtest names worker
-//! threads after the test they run, so the dump names the wedged test — then
-//! aborts, turning an hour-plus silent hang into a loud, attributable failure.
+//! Arm once per test binary with `test_watchdog::arm!();` (in a lib suite, gate
+//! the invocation with `#[cfg(test)]`). On a stall it dumps every thread's name
+//! and state — libtest names worker threads after the test they run, so the dump
+//! names the wedged test — then aborts, turning an hour-plus silent hang into a
+//! loud, attributable failure.
 
 use std::fmt::Write as _;
 use std::sync::Once;
 use std::time::Duration;
 
-/// CPU flatline long enough to declare the wedge. Overridable via
-/// `TEST_WATCHDOG_STALL_SECS` (this crate's own fire-path test shrinks it).
+#[doc(hidden)]
+pub use ctor;
+
+/// Arm the watchdog at test-binary load, before any test runs — expands to a
+/// `ctor` constructor so no individual test has to remember to call [`arm`].
+#[macro_export]
+macro_rules! arm {
+    () => {
+        #[$crate::ctor::ctor(unsafe, crate_path = $crate::ctor)]
+        fn __rl282_arm_stall_watchdog() {
+            $crate::arm();
+        }
+    };
+}
+
+/// CPU flatline long enough to declare the wedge.
 const STALL_WINDOW: Duration = Duration::from_secs(120);
 
 /// Progress = at least this much fresh CPU since the last anchor. Far above the
@@ -33,15 +42,26 @@ const STALL_WINDOW: Duration = Duration::from_secs(120);
 const PROGRESS_MIN: Duration = Duration::from_millis(250);
 
 pub fn arm() {
+    arm_with(STALL_WINDOW);
+}
+
+fn arm_with(window: Duration) {
     static ARMED: Once = Once::new();
     ARMED.call_once(|| {
-        let window = std::env::var("TEST_WATCHDOG_STALL_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .map_or(STALL_WINDOW, Duration::from_secs);
         std::thread::Builder::new()
             .name("stall-watchdog".into())
-            .spawn(move || watch(window))
+            .spawn(move || {
+                // A dead watchdog is a silently un-guarded suite — the failure
+                // shape this crate exists to kill. Nothing in the loop should
+                // panic on Linux; if it does, go down loudly.
+                let _ = std::panic::catch_unwind(move || watch(window));
+                eprintln!(
+                    "test-watchdog: stall-watchdog thread died — this suite is no \
+                     longer guarded against the rl#282 wedge; aborting rather than \
+                     running unprotected"
+                );
+                std::process::abort();
+            })
             .expect("spawn stall watchdog");
     });
 }
@@ -87,6 +107,10 @@ impl StallDetector {
 }
 
 /// utime+stime of the whole process (every thread), from /proc/self/stat.
+/// Excludes live child-process CPU (cutime/cstime land only after wait), so an
+/// armed test that parked a full window while a subprocess worked would
+/// false-fire — no armed suite spawns subprocesses today; keep it that way or
+/// widen this.
 fn process_cpu() -> Duration {
     let stat = std::fs::read_to_string("/proc/self/stat").expect("read /proc/self/stat");
     // comm may contain spaces or parens; real fields resume after the LAST ')'.
@@ -177,14 +201,16 @@ mod tests {
     fn fires_and_aborts_the_wedged_process() {
         const CHILD: &str = "TEST_WATCHDOG_WEDGED_CHILD";
         if std::env::var_os(CHILD).is_some() {
-            arm();
-            std::thread::sleep(Duration::from_secs(3600));
+            arm_with(Duration::from_secs(1));
+            // Long enough that only the watchdog's abort can end the child in
+            // time, short enough that a broken watchdog fails this test in ~1 min
+            // instead of wedging the suite.
+            std::thread::sleep(Duration::from_secs(60));
             unreachable!("watchdog should have aborted the wedged child");
         }
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["fires_and_aborts_the_wedged_process", "--nocapture"])
             .env(CHILD, "1")
-            .env("TEST_WATCHDOG_STALL_SECS", "1")
             .output()
             .expect("spawn wedged child");
         assert!(

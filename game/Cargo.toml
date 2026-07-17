@@ -26,5 +26,4 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-ctor.workspace = true
 test-watchdog = { path = "../test-watchdog" }
