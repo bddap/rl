@@ -81,6 +81,16 @@ pub struct PoseSentinelSet;
 #[derive(Resource, Clone, Copy)]
 pub struct NumEnvs(pub usize);
 
+/// The planar spawn layout (meters) the FIRST `spawn_initial_crabs` must lay the
+/// origins on, instead of the training grid. Inserted by net's GCR restart — the
+/// holder of the arena↔sim spawn correspondence — whenever it runs while the origins
+/// are still unlaid, and consumed (removed) by the spawn, so a later respawn can never
+/// read a stale round's layout. Training never inserts it and keeps the grid. Closes
+/// the fresh-app first-round exception of rl#290: origins used to start on the grid
+/// and only a round RESTART re-pinned them ([`CrabSpawns::repin_layout`], rl#289).
+#[derive(Resource)]
+pub struct InitialCrabLayout(pub Vec<Vec2>);
+
 #[derive(Resource, Default, Clone)]
 pub struct CrabSpawns(Vec<Vec3>);
 
@@ -102,6 +112,33 @@ impl CrabSpawns {
                 terrain.place(Vec2::new(p.x, p.z), 0.0)
             })
             .collect();
+    }
+
+    /// THE layout→origins formula (rl#289/rl#290, one owner): env i's origin lands
+    /// surface-placed at `base_xz + (sᵢ − s₀)` — only the layout's SHAPE is adopted;
+    /// the base is the caller's gauge choice.
+    fn lay_layout(
+        &mut self,
+        base_xz: Vec2,
+        spawns_m: &[Vec2],
+        terrain: &crate::terrain::TerrainGrid,
+    ) {
+        let Some(&s0) = spawns_m.first() else {
+            self.0.clear();
+            return;
+        };
+        self.0 = spawns_m
+            .iter()
+            .map(|&s| terrain.place(base_xz + (s - s0), 0.0))
+            .collect();
+    }
+
+    /// [`Self::rebuild`]'s layout twin ([`InitialCrabLayout`], rl#290): lay the initial
+    /// origins on the given planar spawn layout instead of the grid, env 0 at the arena
+    /// origin — the arena locale is a gauge, and this base is the same "keep the
+    /// anchor end" choice [`Self::repin_layout`] makes on a restart.
+    fn rebuild_from_layout(&mut self, spawns_m: &[Vec2], terrain: &crate::terrain::TerrainGrid) {
+        self.lay_layout(Vec2::ZERO, spawns_m, terrain);
     }
 
     /// Re-place a LIVE env's origin — terrain training draws a fresh locale per
@@ -157,14 +194,11 @@ impl CrabSpawns {
             self.0.len(),
             "a restart layout must cover every live env's origin (rl#242)"
         );
-        let Some(&s0) = spawns_m.first() else {
+        if spawns_m.is_empty() {
             return;
-        };
-        let base = self.origin(0);
-        for (env, &s) in spawns_m.iter().enumerate() {
-            let xz = Vec2::new(base.x, base.z) + (s - s0);
-            self.set_origin(env, terrain.place(xz, 0.0));
         }
+        let base = self.origin(0);
+        self.lay_layout(Vec2::new(base.x, base.z), spawns_m, terrain);
     }
 
     /// Not yet rebuilt by `spawn_initial_crabs` — the pre-spawn frames a FixedUpdate
@@ -493,6 +527,7 @@ pub fn spawn_initial_crabs(
     num_envs: Res<NumEnvs>,
     terrain: Res<crate::terrain::Terrain>,
     mut spawns: ResMut<CrabSpawns>,
+    layout: Option<Res<InitialCrabLayout>>,
     mut actions: ResMut<actuator::CrabActions>,
     mut obs: ResMut<sensor::CrabObservation>,
     mut targets: ResMut<sensor::CrabTargets>,
@@ -501,7 +536,18 @@ pub fn spawn_initial_crabs(
     actions.resize(n);
     obs.resize(n);
     targets.resize(n);
-    spawns.rebuild(n, &terrain);
+    match &layout {
+        Some(l) => {
+            assert_eq!(
+                l.0.len(),
+                n,
+                "the installed spawn layout must cover every env (rl#290)"
+            );
+            spawns.rebuild_from_layout(&l.0, &terrain);
+            commands.remove_resource::<InitialCrabLayout>();
+        }
+        None => spawns.rebuild(n, &terrain),
+    }
     for env in 0..n {
         body::spawn_crab(
             &mut commands,

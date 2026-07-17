@@ -301,16 +301,18 @@ pub(crate) fn restart_crabs_to_spawns(world: &mut World, spawns: &[Pos]) {
         bridge.restart_to_spawns(spawns);
         old_w
     };
-    // Skipped while the origins aren't built yet (fresh-app install:
-    // `spawn_initial_crabs` runs after arm and rebuilds the grid layout; that first
-    // round's tick-0 env≠0 offset is the pre-existing [`ArenaAnchor`] note, not
-    // restart wander).
     {
-        let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
-        let mut origins = world.resource_mut::<CrabSpawns>();
-        if !origins.is_empty() {
-            let layout: Vec<Vec2> = spawns.iter().map(|&s| pos_to_m(s)).collect();
-            origins.repin_layout(&layout, &terrain);
+        let layout: Vec<Vec2> = spawns.iter().map(|&s| pos_to_m(s)).collect();
+        if world.resource::<CrabSpawns>().is_empty() {
+            // Fresh app: `spawn_initial_crabs` hasn't laid the origins yet — hand it
+            // the layout so the FIRST origins are the sim spawns too, never the
+            // training grid (rl#290).
+            world.insert_resource(crab_world::bot::InitialCrabLayout(layout));
+        } else {
+            let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
+            world
+                .resource_mut::<CrabSpawns>()
+                .repin_layout(&layout, &terrain);
         }
     }
     cold_respawn_armed_crab(world);
@@ -797,10 +799,9 @@ fn claw_tip_capsule(view: ColliderView<'_>, local: Mat4) -> Option<(Vec3, Vec3, 
 /// Since rl#254 the skin and arena frames advance identically as she walks (the trade the
 /// pre-fix (1−rs)-per-step drift posed is gone); a pilot's aim at her SKIN differs from her
 /// collider only by her settle-window motion, a small per-round constant. For crabs beyond 0
-/// the same holds from every round RESTART on — [`restart_crabs_to_spawns`] re-pins the whole
-/// origin layout to the sim spawns (rl#289) — but the fresh-app FIRST round keeps a nonzero
-/// tick-0 offset (`spawn_initial_crabs` lays origins on its own grid, not the sim spawn
-/// layout), pre-existing with the old borrowed-repose anchor too.
+/// the same holds from tick 0: the install path lays the initial origins on the sim spawn
+/// layout ([`crab_world::bot::InitialCrabLayout`], rl#290) and every round RESTART re-pins
+/// them to the fresh one ([`restart_crabs_to_spawns`], rl#289).
 ///
 /// Host-authored ([`publish_arena_anchor`], FixedUpdate ⇒ host-only like the brain labels:
 /// only the physics-pumping ServerAuth peer advances FixedUpdate — if client-side FixedUpdate
@@ -1469,6 +1470,59 @@ mod gcr_crab_tests {
             Vec2::new(carapace1.x - o1.x, carapace1.z - o1.z).length() < 1.0,
             "env 1's crab must respawn on its re-pinned origin, carapace {carapace1:?} \
              vs origin {o1:?}"
+        );
+    }
+
+    /// rl#290: a fresh app's FIRST round lays the origins on the sim spawn layout, not
+    /// the training grid — arm + restart run BEFORE `spawn_initial_crabs` (both boot
+    /// paths), and the restart stashes the layout the spawn then consumes
+    /// ([`crab_world::bot::InitialCrabLayout`]).
+    #[test]
+    fn fresh_app_first_round_lays_origins_on_the_sim_spawn_layout() {
+        pin_single_thread_pools();
+        let mut app = headless_stack(HeadlessStack {
+            num_envs: 2,
+            role: WorldRole::Standalone,
+            arena: crab_world::physics::Arena::OpenField,
+            visuals: crab_world::Visuals(false),
+        });
+        // Nonzero s0: adopting ABSOLUTE sim coordinates instead of the layout about
+        // the arena origin would move env 0 to (3, 4) and fail the gauge assert below.
+        let spawns = [Pos::from_meters(3.0, 4.0), Pos::from_meters(11.0, 4.0)];
+        app.add_plugins(ExternalCrabPlugin::new(
+            vec![Policy::rest(), Policy::rest()],
+            spawns.to_vec(),
+        ));
+        // The install order of both boot paths: arm, then restart, before any update
+        // has run `spawn_initial_crabs`.
+        arm(app.world_mut());
+        restart_crabs_to_spawns(app.world_mut(), &spawns);
+        force_serial_schedules(&mut app);
+        for _ in 0..2 {
+            app.update();
+        }
+
+        assert!(
+            app.world()
+                .get_resource::<crab_world::bot::InitialCrabLayout>()
+                .is_none(),
+            "the spawn must consume the stashed layout"
+        );
+        let (o0, o1) = {
+            let origins = app.world().resource::<CrabSpawns>();
+            (origins.origin(0), origins.origin(1))
+        };
+        let got = Vec2::new(o1.x - o0.x, o1.z - o0.z);
+        let want = pos_to_m(spawns[1]) - pos_to_m(spawns[0]);
+        assert!(
+            (got - want).length() < 1e-3,
+            "first-round origins must reproduce the sim spawn layout, not the 4 m \
+             training grid: inter-origin delta {got:?}, want {want:?}"
+        );
+        assert!(
+            Vec2::new(o0.x, o0.z).length() < 1e-3,
+            "only the layout's SHAPE is adopted — env 0 stays at the arena origin \
+             (the gauge), never at its absolute sim coordinates, got {o0:?}"
         );
     }
 
