@@ -406,63 +406,12 @@ fn carapace_box(model: &impl BindSource, center: Vec3) -> (Vec3, Vec3) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::colliders::{RestShape, cuboid_corners, link_rest_shape};
     use super::*;
     use crate::bot::rig::{baked_recipe, fallback_recipe};
 
-    #[test]
-    fn shoulder_upswing_stays_below_carapace() {
-        let recipe = baked_recipe();
-        let hub = recipe.hub_bind_world;
-        let box_top = (hub + recipe.carapace_offset).y + recipe.carapace_half.y;
-        let world = link_world_origins(&recipe.links, hub);
-        for side in [Side::Left, Side::Right] {
-            let sh_idx = recipe
-                .links
-                .iter()
-                .position(|l| l.actuated == Some(CrabJointId::ClawShoulder(side)))
-                .expect("shoulder link present");
-            let pivot = world[sh_idx];
-            let [lo, _hi] = CrabJointId::ClawShoulder(side).limits();
-            let rot = Quat::from_axis_angle(recipe.links[sh_idx].axis_local, lo);
-            for (i, link) in recipe.links.iter().enumerate().filter(|(_, l)| {
-                matches!(
-                    l.actuated,
-                    Some(
-                        CrabJointId::ClawShoulder(s)
-                            | CrabJointId::ClawWrist(s)
-                            | CrabJointId::ClawPincer(s)
-                    ) if s == side
-                )
-            }) {
-                // Highest point each collider can reach at the up-stop: capsule cap
-                // centers plus radius, or oriented box corners.
-                let tops: Vec<f32> = match link_rest_shape(link, world[i]) {
-                    RestShape::Capsule { a, b, radius } => [a, b]
-                        .iter()
-                        .map(|&cap| (pivot + rot * (cap - pivot)).y + radius)
-                        .collect(),
-                    RestShape::Cuboid {
-                        center,
-                        rot: r,
-                        half,
-                    } => cuboid_corners(center, r, half)
-                        .iter()
-                        .map(|&c| (pivot + rot * (c - pivot)).y)
-                        .collect(),
-                };
-                for top in tops {
-                    assert!(
-                        top <= box_top + 1e-3,
-                        "{side:?} cheliped {} collider reaches y={top:.3} at the up-stop \
-                         θ={lo:.3}, above the carapace top {box_top:.3} — arm flesh clips \
-                         the shell/eye band",
-                        link.bone
-                    );
-                }
-            }
-        }
-    }
+    // (The shoulder-upswing clearance check lives in the offline `meshfit` tool's
+    // tests: the honest bound swings the skinned FLESH clouds, which need the model —
+    // a fitted cuboid's empty corners would overstate the arm's reach, rl#20 Phase 1.)
 
     #[test]
     fn joint_specs_cover_every_actuated_joint() {
