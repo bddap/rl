@@ -30,6 +30,12 @@ pub const JOINT_FRICTION_CAP_ENV: &str = "RL_JOINT_FRICTION_CAP";
 
 static OVERRIDE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
 
+/// The process-wide arena force, set only by [`adopt_recorded_plant_forcing_arena`]
+/// (bddap/rl#285). Distinct from `ARENA_OVERRIDE` (the resolved arena, which the force
+/// FEEDS): the force must survive later re-adoptions, which need to know the arena was
+/// an operator's choice rather than the sidecar's.
+static FORCED_ARENA: std::sync::OnceLock<crate::physics::TrainArena> = std::sync::OnceLock::new();
+
 /// The resolved per-run cap override, read once per process. A SET-but-invalid value
 /// aborts instead of defaulting: silently training days on the wrong plant is the
 /// failure mode this knob exists to prevent (same policy as the rl#272 run knobs).
@@ -198,8 +204,32 @@ pub fn adopt_recorded_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
             friction_cap_override().map_or("<default>".into(), |v| v.to_string()),
         ));
     }
-    crate::physics::world::adopt_train_arena(recorded.arena)
-        .map_err(|e| format!("{}: {e}", path.display()))
+    // The process-wide arena force (a `--terrain` viewing override) outranks every
+    // sidecar's arena leg — including re-adoptions from the hot-reload/brain-swap
+    // agreement guard, which must honor the operator's force rather than refuse every
+    // checkpoint under it. Friction has no force: it always adopts-or-agrees.
+    let arena = match FORCED_ARENA.get() {
+        Some(&forced) => Some(forced),
+        None => recorded.arena,
+    };
+    crate::physics::world::adopt_train_arena(arena).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The rl-demo `--terrain` viewing override (bddap/rl#285): pin this PROCESS's arena,
+/// then adopt the checkpoint's remaining plant (the friction leg). The pin outlives
+/// this call — every later adoption resolves its arena leg to the same force, so a
+/// deliberately-overridden arena is never re-litigated against a checkpoint the
+/// operator chose to view off-plant. Forcing through the same override the sidecar
+/// uses keeps ONE arena source per process (`plant_provenance` and the demo's arena
+/// pick both read it).
+pub fn adopt_recorded_plant_forcing_arena(
+    ckpt_dir: &std::path::Path,
+    arena: crate::physics::TrainArena,
+) -> Result<(), String> {
+    FORCED_ARENA
+        .set(arena)
+        .expect("the arena force is set once, at boot");
+    adopt_recorded_plant(ckpt_dir)
 }
 
 fn parse_plant(text: &str) -> Result<Plant, String> {
