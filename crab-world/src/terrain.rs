@@ -203,9 +203,23 @@ impl TerrainGrid {
         SharedShape::new(field).into()
     }
 
+    /// Height span over the whole grid — 0 for the flat arenas. Visual dressing keys
+    /// on this (vista lighting/fog vs the training-box look), so "is this a real
+    /// terrain world" is read off the ONE grid instead of a parallel config flag.
+    pub fn relief(&self) -> f32 {
+        let (min, max) = self
+            .heights
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
+        max - min
+    }
+
     /// The visible terrain surface — the SAME vertices and cell diagonal as the
     /// collider's triangles, so render matches physics by construction. Smooth
-    /// per-vertex normals via central differences (stage 3 owns looks beyond that).
+    /// per-vertex normals via central differences; per-vertex biome tint from
+    /// elevation + slope (rl#281 stage 3). No LOD: the 1024² tile is ~2M triangles in
+    /// one static buffer, which the demo already renders live at full rate — decimation
+    /// would only buy back memory we don't miss and open a render/physics seam gap.
     #[cfg(feature = "render")]
     pub fn mesh(&self) -> Mesh {
         use bevy::asset::RenderAssetUsages;
@@ -213,18 +227,28 @@ impl TerrainGrid {
 
         let (rows, cols) = (self.rows, self.cols);
         let (ex, ez) = (self.extent_x(), self.extent_z());
+        let span = self.relief();
         let mut positions = Vec::with_capacity(rows * cols);
         let mut normals = Vec::with_capacity(rows * cols);
+        let mut colors = Vec::with_capacity(rows * cols);
         for row in 0..rows {
             for col in 0..cols {
                 let x = (col as f32 / (cols - 1) as f32 - 0.5) * ex;
                 let z = (row as f32 / (rows - 1) as f32 - 0.5) * ez;
-                positions.push([x, self.at(row, col), z]);
+                let h = self.at(row, col);
+                positions.push([x, h, z]);
                 let (c0, c1) = (col.saturating_sub(1), (col + 1).min(cols - 1));
                 let (r0, r1) = (row.saturating_sub(1), (row + 1).min(rows - 1));
                 let dhdx = (self.at(row, c1) - self.at(row, c0)) / (self.cell * (c1 - c0) as f32);
                 let dhdz = (self.at(r1, col) - self.at(r0, col)) / (self.cell * (r1 - r0) as f32);
-                normals.push(Vec3::new(-dhdx, 1.0, -dhdz).normalize().to_array());
+                let normal = Vec3::new(-dhdx, 1.0, -dhdz).normalize();
+                normals.push(normal.to_array());
+                let tint_h = if span >= FLAT_RELIEF_MAX {
+                    h
+                } else {
+                    f32::NAN // flat arena: biome_tint ignores h, returns the arena green
+                };
+                colors.push(biome_tint(tint_h, normal.y, row as u32, col as u32));
             }
         }
         let mut indices = Vec::with_capacity((rows - 1) * (cols - 1) * 6);
@@ -243,8 +267,78 @@ impl TerrainGrid {
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
         .with_inserted_indices(Indices::U32(indices))
     }
+}
+
+/// Relief below this is "flat" for visual purposes: the flat arenas keep their
+/// original uniform green floor and the box-arena lighting instead of biome bands
+/// (which would paint the training box as a valley) and vista dressing.
+pub const FLAT_RELIEF_MAX: f32 = 0.5;
+
+/// The flat arenas' floor tint — the exact green the pre-terrain demo floor used, kept
+/// so the stage-3 biome pass changes nothing about the training-box look.
+#[cfg(feature = "render")]
+const ARENA_GREEN: Color = Color::srgb(0.35, 0.55, 0.35);
+
+/// Per-vertex biome color (linear RGBA — multiplied into the terrain material):
+/// a hypsometric ramp over datum-shifted elevation `h` in METERS — not the tile's
+/// normalized range, because the datum shift puts y=0 where the crab lives (the tile's
+/// center sample), so bands stay anchored to gameplay ground whatever a bake's absolute
+/// span is (a normalized ramp painted the whole origin plateau as snow). Rock on steep
+/// slopes, snow only on gentle high peaks, and a per-vertex hash jitter so
+/// kilometer-scale bands don't read as flat paint. `h = NaN` marks a flat arena:
+/// uniform [`ARENA_GREEN`].
+#[cfg(feature = "render")]
+fn biome_tint(h: f32, normal_y: f32, row: u32, col: u32) -> [f32; 4] {
+    // (elevation m, srgb color) stops, low → high (bake.py's hillshade palette).
+    const LAND: [(f32, [f32; 3]); 5] = [
+        (-3200.0, [0.20, 0.36, 0.16]), // deep valley green
+        (-1400.0, [0.27, 0.42, 0.18]), // lowland green
+        (-500.0, [0.40, 0.50, 0.24]),  // dry grass
+        (100.0, [0.60, 0.50, 0.32]),   // tan scree (crab country rim)
+        (600.0, [0.59, 0.47, 0.39]),   // high brown
+    ];
+    const ROCK: [f32; 3] = [0.42, 0.39, 0.36];
+    const SNOW: [f32; 3] = [0.88, 0.89, 0.93];
+    const SNOWLINE_M: (f32, f32) = (350.0, 650.0);
+
+    let lin = |c: [f32; 3]| LinearRgba::from(Color::srgb(c[0], c[1], c[2]));
+    if h.is_nan() {
+        let c = LinearRgba::from(ARENA_GREEN);
+        return [c.red, c.green, c.blue, 1.0];
+    }
+
+    let mut c = lin(LAND[LAND.len() - 1].1);
+    for w in LAND.windows(2) {
+        let ((h0, c0), (h1, c1)) = (w[0], w[1]);
+        if h < h1 {
+            c = lin(c0).mix(&lin(c1), ((h - h0) / (h1 - h0)).clamp(0.0, 1.0));
+            break;
+        }
+    }
+
+    // Slope 0 → normal_y 1. Rock takes over from ~35° and owns ~55°+.
+    let steep = 1.0 - normal_y;
+    c = c.mix(&lin(ROCK), smoothstep(0.18, 0.42, steep));
+    // Snowline: high AND not too steep (snow doesn't hold on cliffs).
+    let snow = smoothstep(SNOWLINE_M.0, SNOWLINE_M.1, h) * (1.0 - smoothstep(0.18, 0.38, steep));
+    c = c.mix(&lin(SNOW), snow);
+
+    // ±6% value jitter, deterministic per vertex.
+    let mut h = row.wrapping_mul(0x8da6_b343) ^ col.wrapping_mul(0xd816_3841);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0x1656_67b1);
+    h ^= h >> 16;
+    let jitter = 1.0 + 0.06 * ((h & 0xffff) as f32 / 32767.5 - 1.0);
+    [c.red * jitter, c.green * jitter, c.blue * jitter, 1.0]
+}
+
+#[cfg(feature = "render")]
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// The world's terrain, inserted by `PhysicsWorldPlugin` from its [`Arena`] choice.
@@ -351,6 +445,52 @@ mod tests {
         assert_eq!(g.height(-hx, -hz), g.at(0, 0));
         assert_eq!(g.height(hx, -hz), g.at(0, 1023));
         assert_eq!(g.height(-hx, hz), g.at(1023, 0));
+    }
+
+    #[test]
+    fn relief_is_zero_flat_and_full_span_on_gcr() {
+        assert_eq!(TerrainGrid::flat(10.0).relief(), 0.0);
+        assert_eq!(TerrainGrid::gcr().relief(), (4508 - 295) as f32);
+        // The vista/flat visual fork keys on relief crossing FLAT_RELIEF_MAX.
+        assert!(TerrainGrid::flat(10.0).relief() < FLAT_RELIEF_MAX);
+        assert!(TerrainGrid::gcr().relief() >= FLAT_RELIEF_MAX);
+    }
+
+    /// The biome tint contract the taste loop leans on: flat arenas keep ONE uniform
+    /// green (the pre-terrain floor color), real terrain gets banded colors with
+    /// snow-bright peaks and darker valleys.
+    #[cfg(feature = "render")]
+    #[test]
+    fn mesh_tint_flat_uniform_terrain_banded() {
+        use bevy::mesh::VertexAttributeValues;
+
+        let colors = |m: &Mesh| match m.attribute(Mesh::ATTRIBUTE_COLOR) {
+            Some(VertexAttributeValues::Float32x4(v)) => v.clone(),
+            other => panic!("expected Float32x4 colors, got {other:?}"),
+        };
+
+        let flat = colors(&TerrainGrid::flat(10.0).mesh());
+        let green: LinearRgba = ARENA_GREEN.into();
+        for c in &flat {
+            assert_eq!(c, &[green.red, green.green, green.blue, 1.0]);
+        }
+
+        let g = TerrainGrid::gcr();
+        let terr = colors(&g.mesh());
+        let luma = |c: &[f32; 4]| c[0] + c[1] + c[2];
+        // Somewhere up high there is snow (only the snow stop reaches this luma)...
+        let max_luma = terr.iter().map(luma).fold(f32::MIN, f32::max);
+        assert!(max_luma > 2.0, "no snow-bright vertex: max luma {max_luma}");
+        // ...and a real population of dark green valley ground (not one lucky vertex).
+        let green_dark = terr
+            .iter()
+            .filter(|c| luma(c) < 0.5 && c[1] > c[0] && c[1] > c[2])
+            .count();
+        assert!(
+            green_dark > terr.len() / 100,
+            "expected ≥1% dark green vertices, got {green_dark}/{}",
+            terr.len()
+        );
     }
 
     #[test]
