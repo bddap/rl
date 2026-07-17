@@ -175,6 +175,21 @@ fn check_stamp(checkpoint: Option<u64>, constructed: u64) -> Result<StampIdentit
     }
 }
 
+/// The body-digest value pre-rl#20-stage-1 checkpoints are stamped with: the bare
+/// sally.glb byte digest, from before `constructed_body_digest` covered the baked
+/// collider table. FROZEN LITERAL — deliberately not [`crate::bot::rig::BAKED_ASSET_DIGEST`]:
+/// this is the digest of the asset those checkpoints were trained under, which must not
+/// track a future asset swap.
+const LEGACY_ASSET_ONLY_STAMP: u64 = 0x5b29217ead4c7c57;
+
+/// The full body digest of the body [`LEGACY_ASSET_ONLY_STAMP`] checkpoints actually
+/// trained on — today's asset + today's baked table. FROZEN LITERAL, pinned by
+/// `legacy_stamp_pin_matches_current_body`: when `baked.rs` regenerates (rl#20 stage
+/// 2+), that test fails — DELETE the shim (both consts, the `check_body_identity` arm,
+/// and the pin test), do NOT update this value: legacy stamps must then refuse, because
+/// the body they trained on no longer exists in the binary.
+const LEGACY_STAMP_BODY_DIGEST: u64 = 0x7ebe_445a_91f8_88f9;
+
 /// THE body↔policy identity check (bddap/rl#214): a checkpoint stamped with one body
 /// digest must never drive or train the body this process actually constructs if the two
 /// differ — that policy is not this crab. Pure over (checkpoint stamp, constructed
@@ -185,6 +200,15 @@ pub(crate) fn check_body_identity(
     checkpoint: Option<u64>,
     constructed: u64,
 ) -> Result<StampIdentity, String> {
+    // rl#20 stage 1 migration shim: the fleet's live checkpoints are stamped with the
+    // bare asset digest, and the body they trained on is provably the current one (the
+    // table has never moved since baking) — accept them as a verified match rather than
+    // brick every resume on the digest-formula change. The next save re-stamps the full
+    // digest. Both sides are frozen: once `constructed` is any OTHER body, legacy
+    // stamps refuse like any mismatch.
+    if checkpoint == Some(LEGACY_ASSET_ONLY_STAMP) && constructed == LEGACY_STAMP_BODY_DIGEST {
+        return Ok(StampIdentity::Match);
+    }
     check_stamp(checkpoint, constructed).map_err(|d| {
         format!(
             "checkpoint is stamped body digest {d:#018x} but this process constructs body \
@@ -738,6 +762,43 @@ mod tests {
         let err = check_body_identity(Some(0xabc), 0).unwrap_err();
         assert!(err.contains("DIFFERENT crab body"), "{err}");
         assert!(check_body_identity(Some(0), 0xabc).is_err());
+    }
+
+    /// The rl#20 stage-1 legacy shim's pin: [`LEGACY_STAMP_BODY_DIGEST`] must be the
+    /// full digest of the CURRENT asset + baked table, because that is provably the
+    /// body every legacy-stamped checkpoint trained on. THIS TEST FAILING MEANS THE
+    /// BODY MOVED (a `baked.rs` regen or asset swap, rl#20 stage 2+): DELETE the shim —
+    /// both consts, the accept arm in `check_body_identity`, and this test. Do NOT
+    /// "fix" it by updating the pin: legacy stamps must refuse on the new body, which
+    /// the frozen mismatch now does by construction.
+    #[test]
+    fn legacy_stamp_pin_matches_current_body() {
+        assert_eq!(
+            LEGACY_STAMP_BODY_DIGEST,
+            crate::mesh_fallback::sally_body_digest(),
+            "baked collider geometry (or the asset digest) changed — delete the \
+             legacy-stamp shim instead of re-pinning (see this test's doc)"
+        );
+    }
+
+    /// The legacy-shim matrix: a bare-asset-digest stamp is a verified match ONLY
+    /// against the exact body it trained on; against any other constructed body
+    /// (including the fallback's 0) it refuses like every mismatch. And the full digest
+    /// must actually differ from the legacy value — the whole point of stage 1 is that
+    /// the stamp now covers more than the asset bytes.
+    #[test]
+    fn legacy_asset_only_stamp_matrix() {
+        assert_eq!(
+            check_body_identity(Some(LEGACY_ASSET_ONLY_STAMP), LEGACY_STAMP_BODY_DIGEST),
+            Ok(StampIdentity::Match)
+        );
+        assert!(check_body_identity(Some(LEGACY_ASSET_ONLY_STAMP), 0).is_err());
+        assert!(check_body_identity(Some(LEGACY_ASSET_ONLY_STAMP), 0xabc).is_err());
+        assert_ne!(
+            crate::mesh_fallback::sally_body_digest(),
+            LEGACY_ASSET_ONLY_STAMP,
+            "the full body digest degenerated to the bare asset digest"
+        );
     }
 
     /// `save_brain` stamps the CONSTRUCTED body digest and `load_brain_file` hands it
