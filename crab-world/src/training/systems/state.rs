@@ -375,9 +375,13 @@ impl TrainingState {
             // segments trained with the close-target mix.
             info!("Close-target curriculum active: --target-close-frac {close_frac} (rl#250)");
         }
+        if let Some(cap) = config.ppo_steps_cap {
+            info!("PPO step cap active: --ppo-steps-cap {cap} (rl#276)");
+        }
         Self {
             brain: InferenceCachedBrain::new(brain),
             config: PpoConfig {
+                steps_cap: config.ppo_steps_cap,
                 log_std_floor_start: config.log_std_floor_start,
                 log_std_floor_end: config.log_std_floor_end,
                 log_std_anneal_ticks: config.log_std_anneal_ticks,
