@@ -68,7 +68,7 @@ pub(super) fn ensure_round_installed(world: &mut World) {
     };
     crate::external_crab::arm(world);
     if !spawns.is_empty() {
-        restart_crab_to_spawn(world, &spawns);
+        crate::external_crab::restart_crabs_to_spawns(world, &spawns);
     }
     let coord = coordinator(
         ready.net,
@@ -575,11 +575,6 @@ pub(crate) fn park_fixed_auto_pump(world: &mut World) {
         .set_timestep(std::time::Duration::from_secs(86_400));
 }
 
-fn restart_crab_to_spawn(world: &mut World, spawns: &[crate::sim::Pos]) {
-    crate::external_crab::restart_bridge_to_spawns(world, spawns);
-    crate::external_crab::cold_respawn_armed_crab(world);
-}
-
 pub(super) fn drive_client_sim(world: &mut World) {
     let armed = world
         .get_resource::<crate::external_crab::ExternalCrabArmed>()
@@ -868,7 +863,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                         .iter()
                         .map(|c| c.pos())
                         .collect();
-                    restart_crab_to_spawn(world, &spawns);
+                    crate::external_crab::restart_crabs_to_spawns(world, &spawns);
                 }
             }
         }
