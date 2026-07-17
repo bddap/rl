@@ -8,8 +8,10 @@ mod fallback;
 mod recipe;
 
 pub use baked::{BAKED_ASSET_DIGEST, baked_recipe};
-pub(crate) use colliders::link_capsule;
-pub use colliders::{CrabSilhouette, RestCollider, RestShape, recipe_silhouette, rest_colliders};
+pub use colliders::{
+    CrabSilhouette, RestCollider, RestShape, cuboid_corners, link_rest_shape, recipe_silhouette,
+    rest_colliders,
+};
 pub use fallback::fallback_recipe;
 pub(crate) use recipe::link_world_origins;
 pub use recipe::{TRUNK_BONES, arc_to, build_recipe, part_for_bone, parts_adjacent};
@@ -58,18 +60,59 @@ pub trait BindSource {
     }
 }
 
+/// A link's collider primitive, in the frame set by [`RigLink::center`] /
+/// [`RigLink::col_rot`]. Capsules stand on the local Y axis (half_height to each
+/// cap center); cuboids carry half-extents per local axis. Which primitive a part
+/// wears is the offline fitter's scored choice (bddap/rl#20 Phase 1) — the runtime
+/// only consumes the baked result.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum LinkShape {
+    Capsule { half_height: f32, radius: f32 },
+    Cuboid { half: Vec3 },
+}
+
+impl LinkShape {
+    fn is_finite(&self) -> bool {
+        match *self {
+            LinkShape::Capsule {
+                half_height,
+                radius,
+            } => half_height.is_finite() && radius.is_finite(),
+            LinkShape::Cuboid { half } => half.is_finite(),
+        }
+    }
+
+    /// Radius of the shape's bounding sphere about its own center.
+    pub fn bounding_radius(&self) -> f32 {
+        match *self {
+            LinkShape::Capsule {
+                half_height,
+                radius,
+            } => half_height + radius,
+            LinkShape::Cuboid { half } => half.length(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RigLink {
     pub bone: String,
     pub parent: Option<usize>,
     pub anchor1: Vec3,
     pub axis_local: Vec3,
-    pub half_height: f32,
-    pub radius: f32,
+    pub shape: LinkShape,
     pub center: Vec3,
     pub col_rot: Quat,
     pub density: f32,
     pub actuated: Option<CrabJointId>,
+}
+
+impl RigLink {
+    /// Bounding-sphere radius about the link's pivot (covers the collider wherever
+    /// `center` offsets it) — the spawn clearance bound.
+    pub fn bounding_radius(&self) -> f32 {
+        self.center.length() + self.shape.bounding_radius()
+    }
 }
 
 #[derive(Clone)]
@@ -116,8 +159,24 @@ impl RigRecipe {
             write_opt_index(&mut h, link.parent.map(|p| p as u64));
             write_vec3(&mut h, link.anchor1);
             write_vec3(&mut h, link.axis_local);
-            write_f32(&mut h, link.half_height);
-            write_f32(&mut h, link.radius);
+            // Capsules hash exactly as the pre-LinkShape encoding (half_height then
+            // radius, no tag) so an all-capsule table keeps its fleet-stamped digest
+            // across the enum introduction. Cuboids lead with CUBOID_TAG — 8 bytes a
+            // capsule can never emit (its first field would have to be a NaN bit
+            // pattern, and `is_finite` bars that), so the variants cannot alias.
+            match link.shape {
+                LinkShape::Capsule {
+                    half_height,
+                    radius,
+                } => {
+                    write_f32(&mut h, half_height);
+                    write_f32(&mut h, radius);
+                }
+                LinkShape::Cuboid { half } => {
+                    h.write(&CUBOID_TAG.to_le_bytes());
+                    write_vec3(&mut h, half);
+                }
+            }
             write_vec3(&mut h, link.center);
             for c in [
                 link.col_rot.x,
@@ -133,6 +192,10 @@ impl RigRecipe {
         h.finish()
     }
 }
+
+/// Shape-variant discriminator in [`RigRecipe::digest`]'s cuboid arm. All-ones is
+/// NaN as an f32 bit pattern, which no finite capsule field can produce.
+const CUBOID_TAG: u64 = u64::MAX;
 
 fn write_f32(h: &mut crate::fnv::Fnv, v: f32) {
     h.write(&v.to_bits().to_le_bytes());
@@ -155,8 +218,7 @@ impl RigLink {
     fn is_finite(&self) -> bool {
         self.anchor1.is_finite()
             && self.axis_local.is_finite()
-            && self.half_height.is_finite()
-            && self.radius.is_finite()
+            && self.shape.is_finite()
             && self.center.is_finite()
             && self.col_rot.is_finite()
             && self.density.is_finite()
@@ -165,7 +227,7 @@ impl RigLink {
 
 #[cfg(test)]
 mod digest_tests {
-    use super::baked_recipe;
+    use super::{Vec3, baked_recipe};
 
     /// Every field of `RigRecipe`/`RigLink` gets a nudge case here — if `digest()`
     /// silently stops covering one, the corresponding `assert_ne` fails. A single-ULP
@@ -200,14 +262,41 @@ mod digest_tests {
                 r.carapace_density += 1.0;
                 r
             }),
-            ("link radius", {
+            ("link capsule radius", {
                 let mut r = baked_recipe();
-                r.links[0].radius = f32::from_bits(r.links[0].radius.to_bits() ^ 1);
+                let super::LinkShape::Capsule {
+                    half_height,
+                    radius,
+                } = r.links[0].shape
+                else {
+                    panic!("link 0 is a capsule in the committed table");
+                };
+                r.links[0].shape = super::LinkShape::Capsule {
+                    half_height,
+                    radius: f32::from_bits(radius.to_bits() ^ 1),
+                };
                 r
             }),
-            ("link half_height", {
+            ("link capsule half_height", {
                 let mut r = baked_recipe();
-                r.links[7].half_height *= 1.0 + 1e-6;
+                let super::LinkShape::Capsule {
+                    half_height,
+                    radius,
+                } = r.links[7].shape
+                else {
+                    panic!("link 7 is a capsule in the committed table");
+                };
+                r.links[7].shape = super::LinkShape::Capsule {
+                    half_height: half_height * (1.0 + 1e-6),
+                    radius,
+                };
+                r
+            }),
+            ("link shape variant", {
+                let mut r = baked_recipe();
+                r.links[0].shape = super::LinkShape::Cuboid {
+                    half: Vec3::splat(0.1),
+                };
                 r
             }),
             ("link center", {

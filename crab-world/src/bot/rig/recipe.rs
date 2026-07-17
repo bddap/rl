@@ -5,7 +5,7 @@ use bevy::prelude::*;
 
 use crate::bot::body::{CrabJointId, Side};
 
-use super::{BindSource, PartId, RigLink, RigRecipe};
+use super::{BindSource, LinkShape, PartId, RigLink, RigRecipe};
 
 const LEG_DENSITY: f32 = 8.0;
 const CLAW_DENSITY: f32 = 1.0;
@@ -317,11 +317,13 @@ fn derive_link(
         None => in_dir * (fixed_radius * 3.0),
     };
     let seg_len = seg_world.length().max(1e-4);
-    let (center, col_rot, half_height, radius) = (
+    let (center, col_rot, shape) = (
         seg_world * 0.5,
         arc_to(Vec3::Y, seg_world / seg_len),
-        (seg_len * 0.5 - fixed_radius).max(0.01),
-        fixed_radius,
+        LinkShape::Capsule {
+            half_height: (seg_len * 0.5 - fixed_radius).max(0.01),
+            radius: fixed_radius,
+        },
     );
 
     Some(RigLink {
@@ -329,8 +331,7 @@ fn derive_link(
         parent: parent_idx,
         anchor1,
         axis_local,
-        half_height,
-        radius,
+        shape,
         center,
         col_rot,
         density,
@@ -405,7 +406,7 @@ fn carapace_box(model: &impl BindSource, center: Vec3) -> (Vec3, Vec3) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::colliders::{LinkCapsule, link_capsule};
+    use super::super::colliders::{RestShape, cuboid_corners, link_rest_shape};
     use super::*;
     use crate::bot::rig::{baked_recipe, fallback_recipe};
 
@@ -434,12 +435,26 @@ mod tests {
                     ) if s == side
                 )
             }) {
-                let LinkCapsule { a, b, radius } = link_capsule(link, world[i]);
-                for cap in [a, b] {
-                    let top = (pivot + rot * (cap - pivot)).y + radius;
+                // Highest point each collider can reach at the up-stop: capsule cap
+                // centers plus radius, or oriented box corners.
+                let tops: Vec<f32> = match link_rest_shape(link, world[i]) {
+                    RestShape::Capsule { a, b, radius } => [a, b]
+                        .iter()
+                        .map(|&cap| (pivot + rot * (cap - pivot)).y + radius)
+                        .collect(),
+                    RestShape::Cuboid {
+                        center,
+                        rot: r,
+                        half,
+                    } => cuboid_corners(center, r, half)
+                        .iter()
+                        .map(|&c| (pivot + rot * (c - pivot)).y)
+                        .collect(),
+                };
+                for top in tops {
                     assert!(
                         top <= box_top + 1e-3,
-                        "{side:?} cheliped {} capsule reaches y={top:.3} at the up-stop \
+                        "{side:?} cheliped {} collider reaches y={top:.3} at the up-stop \
                          θ={lo:.3}, above the carapace top {box_top:.3} — arm flesh clips \
                          the shell/eye band",
                         link.bone

@@ -20,19 +20,25 @@ use crate::fit::{ColliderScore, score_box, score_capsule};
 use crate::gltf_load::{LoadedModel, load_bind_mesh};
 
 /// The capsule<->cloud agreement bar: too much of the cloud outside, a p95 poke past
-/// 15% of the radius (5 mm floor), a bulge past half the radius, or a fitted
-/// axis/radius far off the collider's.
+/// 15% of the radius (5 mm floor), a bulge past half the radius, or a fitted radius
+/// far off the collider's. Axis skew vs the cloud PCA is printed as a diagnostic but
+/// no longer fails: the fitter may deliberately choose the bone-chain axis when it
+/// scores better (rl#20 Phase 1), and poke/bulge already measure the agreement the
+/// audit exists to check.
 fn capsule_fit_fails(s: &ColliderScore, radius: f32) -> bool {
     s.frac_outside > 0.05
         || s.poke_out_p95 > (0.15 * radius).max(0.005)
         || s.bulge_p95 > 0.5 * radius
         || s.capsule
-            .is_some_and(|c| c.axis_skew_deg > 15.0 || !(0.85..=1.4).contains(&c.radius_ratio))
+            .is_some_and(|c| !(0.85..=1.4).contains(&c.radius_ratio))
 }
 
-/// The carapace-slab bar: the trunk cloud mostly inside, at most a 2 cm p95 poke.
-fn cuboid_fit_fails(s: &ColliderScore) -> bool {
-    s.frac_outside > 0.03 || s.poke_out_p95 > 0.02
+/// The cuboid<->cloud bar, carapace slab and limb boxes alike: same outside-fraction
+/// bar as capsules; the poke bound scales with the box's thinnest half-extent exactly
+/// as the capsule bound does with radius (the historical fixed 2 cm carapace bar was
+/// that slab's 0.15 × min-extent).
+fn cuboid_fit_fails(s: &ColliderScore, min_half: f32) -> bool {
+    s.frac_outside > 0.05 || s.poke_out_p95 > (0.15 * min_half).max(0.005)
 }
 
 /// Winding numbers a closed mesh never produces: off-integer by more than 0.1.
@@ -83,18 +89,24 @@ pub fn verify_colliders() -> Result<AuditVerdict, String> {
 
     for rc in rig::rest_colliders(&recipe) {
         let label = format!("{:?}", rc.part);
+        // The carapace is fit against the trunk-bone cloud; every limb against its
+        // own part cloud (limbs can be capsules OR cuboids since rl#20 Phase 1).
+        let pts = if rc.part == PartId::Carapace {
+            trunk.as_slice()
+        } else {
+            clouds.get(&rc.part).map(|p| p.as_slice()).unwrap_or(&[])
+        };
         let (score, rnorm, fail) = match rc.shape {
             RestShape::Capsule { a, b, radius } => {
-                let pts = clouds.get(&rc.part).map(|p| p.as_slice()).unwrap_or(&[]);
                 let s = score_capsule(pts, a, b, radius);
                 let fail = capsule_fit_fails(&s, radius);
                 (s, radius.max(1e-3), fail)
             }
-            RestShape::Cuboid { center, half } => {
-                // The carapace slab is fit against the trunk-bone cloud.
-                let s = score_box(&trunk, center, half);
-                let fail = cuboid_fit_fails(&s);
-                (s, half.min_element().max(1e-3), fail)
+            RestShape::Cuboid { center, rot, half } => {
+                let s = score_box(pts, center, rot, half);
+                let rnorm = half.min_element().max(1e-3);
+                let fail = cuboid_fit_fails(&s, rnorm);
+                (s, rnorm, fail)
             }
         };
         any_fail |= fail;
@@ -229,7 +241,7 @@ pub fn verify_pivots() -> Result<AuditVerdict, String> {
                     yn(bin)
                 );
             }
-            RestShape::Cuboid { center, half } => {
+            RestShape::Cuboid { center, rot, half } => {
                 println!(
                     "  {:<24} | {:>+7.3} {:>+8.4} {:>4} | {:>7} {:>8} {:>4} | {:>7} {:>8} {:>4}",
                     label,
@@ -237,35 +249,37 @@ pub fn verify_pivots() -> Result<AuditVerdict, String> {
                     pdist,
                     yn(pin),
                     "(box)",
-                    "corners",
+                    "faces",
                     "↓",
                     "",
                     "",
                     ""
                 );
-                for sx in [-1.0f32, 1.0] {
-                    for sy in [-1.0f32, 1.0] {
-                        for sz in [-1.0f32, 1.0] {
-                            let corner = center + half * Vec3::new(sx, sy, sz);
-                            let (cwn, cdist, cin) = probe(corner);
-                            windings.push(cwn);
-                            if !cin {
-                                endpoints_out += 1;
-                                offenders.push((
-                                    format!("{label} corner({sx:+.0},{sy:+.0},{sz:+.0})"),
-                                    cdist,
-                                ));
-                            }
-                            println!(
-                                "      corner ({:+.0},{:+.0},{:+.0})         | {:>+7.3} {:>+8.4} {:>4}",
-                                sx,
-                                sy,
-                                sz,
-                                cwn,
-                                cdist,
-                                yn(cin)
-                            );
+                // A tight box's CORNERS sit outside rounded flesh by construction, so
+                // they say nothing; the capsule-endpoint analogue is the face centers
+                // — one outside means the box protrudes past the mesh on that axis.
+                for axis in 0..3 {
+                    for sign in [-1.0f32, 1.0] {
+                        let mut off = Vec3::ZERO;
+                        off[axis] = sign * half[axis];
+                        let face = center + rot * off;
+                        let (fwn, fdist, fin) = probe(face);
+                        windings.push(fwn);
+                        if !fin {
+                            endpoints_out += 1;
+                            offenders.push((
+                                format!("{label} face({}{:+.0})", ["x", "y", "z"][axis], sign),
+                                fdist,
+                            ));
                         }
+                        println!(
+                            "      face {}{:+.0}                    | {:>+7.3} {:>+8.4} {:>4}",
+                            ["x", "y", "z"][axis],
+                            sign,
+                            fwn,
+                            fdist,
+                            yn(fin)
+                        );
                     }
                 }
                 let (ccwn, ccdist, ccin) = probe(center);
@@ -355,36 +369,38 @@ mod tests {
 
         let mut s = clean_score();
         s.capsule = Some(CapsuleDiagnostics {
-            axis_skew_deg: 16.0,
-            radius_ratio: 1.0,
-        });
-        assert!(capsule_fit_fails(&s, r), "axis skew past 15° fails");
-        s.capsule = Some(CapsuleDiagnostics {
             axis_skew_deg: 0.0,
             radius_ratio: 1.5,
         });
         assert!(capsule_fit_fails(&s, r), "fitted radius far off fails");
         s.capsule = Some(CapsuleDiagnostics {
-            axis_skew_deg: 14.0,
+            axis_skew_deg: 40.0,
             radius_ratio: 1.0,
         });
-        assert!(!capsule_fit_fails(&s, r), "in-band diagnostics pass");
+        assert!(
+            !capsule_fit_fails(&s, r),
+            "axis skew is a diagnostic, not a failure — the fitter may pick the chain axis"
+        );
     }
 
-    /// The carapace-slab bars are absolute: 3% outside, 2 cm p95 poke.
+    /// The cuboid bars scale with the thinnest half-extent, capsule-style.
     #[test]
-    fn cuboid_bars_are_absolute() {
-        assert!(!cuboid_fit_fails(&clean_score()));
+    fn cuboid_bars_scale_with_min_extent() {
+        let min_half = 0.13;
+        assert!(!cuboid_fit_fails(&clean_score(), min_half));
 
         let mut s = clean_score();
-        s.frac_outside = 0.04;
-        assert!(cuboid_fit_fails(&s));
+        s.frac_outside = 0.06;
+        assert!(cuboid_fit_fails(&s, min_half));
 
         let mut s = clean_score();
-        s.poke_out_p95 = 0.021;
-        assert!(cuboid_fit_fails(&s));
-        s.poke_out_p95 = 0.019;
-        assert!(!cuboid_fit_fails(&s));
+        s.poke_out_p95 = 0.15 * min_half + 1e-4;
+        assert!(cuboid_fit_fails(&s, min_half));
+        s.poke_out_p95 = 0.15 * min_half - 1e-4;
+        assert!(!cuboid_fit_fails(&s, min_half));
+        // The 5 mm floor keeps hairline pokes on a thin box out of the verdict.
+        s.poke_out_p95 = 0.004;
+        assert!(!cuboid_fit_fails(&s, 0.01));
     }
 
     /// The watertight verdict: interior ~+1, exterior ~0, integer windings.
