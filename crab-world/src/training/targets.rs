@@ -408,6 +408,11 @@ mod tests {
         let out_xz = Vec2::new(500.0 + TARGET_ARENA_HALF * 1.5, -700.0);
         let clearance = 0.4;
         let out = g.place(out_xz, clearance);
+        assert!(
+            (g.height(origin.x, origin.z) - g.height(out.x, out.z)).abs() > 0.5,
+            "a re-bake flattened this spot — pick points with real relief or the \
+             test degenerates to the flat case"
+        );
         let delta = recenter_delta(origin, out, &g).expect("outside the band");
         let back = out + delta;
         let height_above = back.y - g.height(back.x, back.z);
