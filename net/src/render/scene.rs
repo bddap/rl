@@ -2,10 +2,6 @@ use super::driver::{GameState, LocalVehicle, RenderClock};
 use super::input::{CameraPitch, CameraYaw};
 use super::pose::Pose;
 use super::*;
-use bevy::asset::RenderAssetUsages;
-use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
-use bevy::math::Affine2;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 #[derive(Component)]
 pub(super) struct PlayerAvatar(PlayerId);
@@ -16,142 +12,71 @@ pub(super) struct CrabAvatar(pub(super) usize);
 #[derive(Component)]
 pub(super) struct FpCamera;
 
-/// Visual ground quad edge length (render m). The quad is re-centered on the camera
-/// every frame ([`follow_ground`]), so all that matters is that its edge sits past the
-/// cameras' 1000 render-m far plane in every direction — 4000 gives 2× margin. Together
-/// the two make the visual ground unbounded by construction, matching the unbounded
-/// physics ground: there is no reachable edge.
-const GROUND_SIZE: f32 = 4000.0;
-
-/// Checker repeat period (render m): one texture repeat is 2×2 coarse cells, each a
-/// 16×16 sub-checker. Sized for the PILOT, who the cue serves (rl#197): the 2 m coarse
-/// cells read from cruise altitude, the 0.125 m fine sub-cells (~2.5 player heights)
-/// give optic flow at landing height and on foot.
-const CHECKER_PERIOD: f32 = 4.0;
-
-/// The ground quad, re-centered on the camera each frame by [`follow_ground`].
+/// The extraction beacon, placed on the ground each frame by
+/// [`place_extraction_pillar`] — spawn-time placement would freeze a client's pillar at
+/// anchor ZERO, before the round's real anchor arrives on the articulation wire.
 #[derive(Component)]
-pub(super) struct GroundPlane;
+pub(super) struct ExtractionPillar;
 
-/// Re-center the ground quad on the camera, snapped to the checker repeat period so the
-/// pattern stays world-stationary (a non-multiple shift would make it swim underfoot).
-/// With the quad's edge past the far plane ([`GROUND_SIZE`]), flying off the ground is
-/// impossible, not merely far away.
-pub(super) fn follow_ground(
-    cams: Query<&Transform, (With<FpCamera>, Without<GroundPlane>)>,
-    mut grounds: Query<&mut Transform, (With<GroundPlane>, Without<FpCamera>)>,
+/// The rendered ground height under a sim point: the arena surface sampled at the
+/// point's arena-frame xz, lifted back through the anchor — world = arena + anchor
+/// (anchor.y = 0 by construction, [`crate::external_crab::ArenaAnchor`]). Every sim
+/// entity stands ON this surface; on the flat grids it is exactly the old y = 0.
+fn ground_y(pos: Pos, terrain: &crab_world::terrain::Terrain, anchor: Vec3) -> f32 {
+    let (x, z) = pos.to_meters();
+    terrain.height(x - anchor.x, z - anchor.z) + anchor.y
+}
+
+/// Keep the drawn arena surface ([`crab_world::physics::ArenaSurface`]) at the arena
+/// anchor: the mesh's vertices are arena-frame (they ARE the physics grid), so
+/// translating the entity by the anchor renders the ground exactly where the physics
+/// stands — the crab's articulated parts and every craft render through the same
+/// anchor. Follows the resource rather than spawning at it because a joining client
+/// adopts the anchor from the wire after Startup (and a round RESTART re-pins it).
+pub(super) fn sync_arena_surface(
+    placement: Res<crate::external_crab::ArenaAnchor>,
+    mut surfaces: Query<&mut Transform, With<crab_world::physics::ArenaSurface>>,
 ) {
-    let Ok(cam) = cams.single() else { return };
-    for mut ground in &mut grounds {
-        ground.translation.x = (cam.translation.x / CHECKER_PERIOD).round() * CHECKER_PERIOD;
-        ground.translation.z = (cam.translation.z / CHECKER_PERIOD).round() * CHECKER_PERIOD;
+    for mut t in &mut surfaces {
+        if t.translation != placement.0 {
+            t.translation = placement.0;
+        }
     }
 }
 
-/// The ground's repeat-tiled checker texture: a coarse 2×2 checker with a fainter
-/// sub-checker on top (two spatial frequencies — see [`CHECKER_PERIOD`]), tinting the
-/// material's `base_color` so the ground keeps its gray-box tone. Built with a full mip
-/// chain — box-filtering per level — so the pattern fades to flat gray in the distance
-/// instead of shimmering (a generated `Image` gets no auto-mips).
-fn ground_checker(images: &mut Assets<Image>) -> Handle<Image> {
-    const SIZE: usize = 256; // level-0 px; power of two so mip dims match wgpu's size>>level
-    let mut levels: Vec<Vec<u8>> = vec![
-        (0..SIZE * SIZE)
-            .flat_map(|i| {
-                let (x, y) = (i % SIZE, i / SIZE);
-                let coarse = (x / (SIZE / 2) + y / (SIZE / 2)).is_multiple_of(2);
-                let fine = (x / (SIZE / 32) + y / (SIZE / 32)).is_multiple_of(2);
-                let v = 225 + if coarse { 16u8 } else { 0 } + if fine { 14 } else { 0 };
-                [v, v, v, 255]
-            })
-            .collect(),
-    ];
-    let mut w = SIZE;
-    while w > 1 {
-        let prev = levels.last().unwrap();
-        let half = w / 2;
-        levels.push(
-            (0..half * half)
-                .flat_map(|i| {
-                    let (x, y) = ((i % half) * 2, (i / half) * 2);
-                    let at = |x: usize, y: usize| prev[(y * w + x) * 4] as u16;
-                    let v = ((at(x, y) + at(x + 1, y) + at(x, y + 1) + at(x + 1, y + 1)) / 4) as u8;
-                    [v, v, v, 255]
-                })
-                .collect(),
-        );
-        w = half;
+/// Stand the extraction pillar on the ground under its sim point — per frame, like the
+/// avatars, because both the anchor and (through it) the local surface height can move
+/// under a fixed sim point (see [`ExtractionPillar`]).
+pub(super) fn place_extraction_pillar(
+    state: NonSend<GameState>,
+    placement: Res<crate::external_crab::ArenaAnchor>,
+    terrain: Res<crab_world::terrain::Terrain>,
+    mut pillars: Query<&mut Transform, With<ExtractionPillar>>,
+) {
+    let ex = state.client.sim().extraction().pos();
+    let pillar_h = crate::sim::CRAB_STATURE * 1.2;
+    for mut t in &mut pillars {
+        t.translation = world(ex, ground_y(ex, &terrain, placement.0) + pillar_h * 0.5);
     }
-    let mip_count = levels.len() as u32;
-    // `Image::new` asserts data == level-0 size, so build uninit and attach the full
-    // mip chain (levels concatenated largest-first, bevy's expected layout) by hand.
-    let mut image = Image::new_uninit(
-        Extent3d {
-            width: SIZE as u32,
-            height: SIZE as u32,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.data = Some(levels.concat());
-    image.texture_descriptor.mip_level_count = mip_count;
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
-        // Most of a cockpit view meets the ground at grazing angles, where isotropic
-        // trilinear blurs the checker to flat gray — right where the optic-flow cue
-        // matters most.
-        anisotropy_clamp: 16,
-        ..ImageSamplerDescriptor::linear()
-    });
-    images.add(image)
 }
 
 pub(super) fn spawn_world(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
     state: NonSend<GameState>,
     external_crab_armed: Option<Res<crate::external_crab::ExternalCrabArmed>>,
     windows: Query<(), With<Window>>,
 ) {
-    commands.spawn((
-        DespawnOnExit(AppPhase::Playing),
-        GroundPlane,
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(GROUND_SIZE, GROUND_SIZE))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.30, 0.32, 0.34),
-            base_color_texture: Some(ground_checker(&mut images)),
-            // Plane3d UVs span 0..1 across the whole quad; scale them so one texture
-            // repeat covers CHECKER_PERIOD meters.
-            uv_transform: Affine2::from_scale(Vec2::splat(GROUND_SIZE / CHECKER_PERIOD)),
-            perceptual_roughness: 0.95,
-            ..default()
-        })),
-        Transform::from_xyz(0.0, 0.0, 0.0),
-    ));
-
-    commands.spawn((
-        DespawnOnExit(AppPhase::Playing),
-        DirectionalLight {
-            illuminance: 12_000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(20.0, 40.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-    commands.insert_resource(bevy::light::GlobalAmbientLight {
-        brightness: 220.0,
-        ..default()
-    });
+    // Ground and lighting are the arena's own dressing (ArenaVisualsPlugin, rl#281):
+    // the same grid the crab's physics runs on, terrain or flat, kept at the arena
+    // anchor by [`sync_arena_surface`]. Nothing arena-shaped is spawned here.
 
     let ex = state.client.sim().extraction().pos();
     let pillar_h = crate::sim::CRAB_STATURE * 1.2;
     commands.spawn((
         DespawnOnExit(AppPhase::Playing),
+        ExtractionPillar,
         Mesh3d(meshes.add(Cylinder::new(0.5 / 1.8 * PLAYER_HEIGHT, pillar_h))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.1, 0.95, 0.3),
@@ -401,6 +326,7 @@ pub(super) fn apply_transforms(
     mut yaw: ResMut<CameraYaw>,
     vehicle: Res<LocalVehicle>,
     placement: Res<crate::external_crab::ArenaAnchor>,
+    terrain: Res<crab_world::terrain::Terrain>,
     remote_crafts: Res<super::articulation::RemoteVehicle>,
     mut avatars: AvatarXf,
     mut crab_q: CrabXf,
@@ -409,6 +335,9 @@ pub(super) fn apply_transforms(
     let sim = state.client.sim();
     let alpha = clock.frac;
     let local = state.client.me();
+    // Sim entities stand ON the arena surface (rl#281): every lift below is height
+    // above the local ground, sampled at the entity's own interpolated spot.
+    let ground = |pos: Pos| ground_y(pos, &terrain, placement.0);
 
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
         let Some(now) = sim.player(avatar.0) else {
@@ -420,7 +349,7 @@ pub(super) fn apply_transforms(
         let prev = state.prev.players.get(&avatar.0).copied().unwrap_or(now);
         let pos = lerp_pos(prev.pos(), now.pos(), alpha);
         let yaw = lerp_yaw(prev.yaw(), now.yaw(), alpha);
-        *tf = Transform::from_translation(world(pos, PLAYER_HEIGHT * 0.5))
+        *tf = Transform::from_translation(world(pos, ground(pos) + PLAYER_HEIGHT * 0.5))
             .with_rotation(Quat::from_rotation_y(yaw));
         // A piloting player's ONE visible body is its craft (rl#258): the walker avatar
         // hides while a craft flies under that pilot's id. `RemoteVehicle` already excludes
@@ -433,9 +362,10 @@ pub(super) fn apply_transforms(
             Visibility::Visible
         };
         if now.status() == PlayerStatus::Downed {
-            *tf = Transform::from_translation(world(pos, PLAYER_RADIUS)).with_rotation(
-                Quat::from_rotation_y(yaw) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-            );
+            *tf = Transform::from_translation(world(pos, ground(pos) + PLAYER_RADIUS))
+                .with_rotation(
+                    Quat::from_rotation_y(yaw) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                );
         }
     }
 
@@ -446,8 +376,8 @@ pub(super) fn apply_transforms(
         let crab_prev = state.prev.crabs.get(avatar.0).copied().unwrap_or(crab_now);
         let pos = lerp_pos(crab_prev.pos(), crab_now.pos(), alpha);
         let yaw = lerp_yaw(crab_prev.yaw(), crab_now.yaw(), alpha);
-        *tf =
-            Transform::from_translation(world(pos, 0.0)).with_rotation(Quat::from_rotation_y(yaw));
+        *tf = Transform::from_translation(world(pos, ground(pos)))
+            .with_rotation(Quat::from_rotation_y(yaw));
     }
 
     if let Ok(mut cam) = cam_q.single_mut() {
@@ -465,7 +395,7 @@ pub(super) fn apply_transforms(
             } else {
                 yaw.0
             };
-            let eye = world(pos, EYE_HEIGHT);
+            let eye = world(pos, ground(pos) + EYE_HEIGHT);
             let look_dir = look_direction(cam_yaw, pitch.0);
             *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
         }

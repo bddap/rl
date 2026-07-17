@@ -307,8 +307,8 @@ impl VehicleKind {
 /// walker's facing and velocity (rl#258), lifted just enough that the collider clears the
 /// ground — the TERRAIN surface at the boarding spot, not y=0 (rl#283: a flat clamp buries
 /// the craft inside a hill). Being a floor, it cannot pull a too-high pose DOWN into a
-/// valley: that needs the production [`Boarding`] author (net's planar sim bridge, which
-/// pins pos.y = 0 today) to go terrain-aware — rl#281 stages 3-5.
+/// valley; since rl#281 stage 6 the production [`Boarding`] author (net's sim bridge)
+/// poses y on the surface itself, so the floor is a backstop, not the lift.
 fn spawn_vehicle(
     commands: &mut Commands,
     terrain: &crate::terrain::TerrainGrid,

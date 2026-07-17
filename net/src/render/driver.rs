@@ -173,12 +173,21 @@ fn pilot_of(pid: PlayerId) -> PilotId {
     PilotId(pid.0)
 }
 
-/// The sim↔arena correspondence, both directions (rl#258): arena = sim − anchor.
-/// One scale since rl#256 — the frames differ only by the round's static
-/// translation [`crate::external_crab::ArenaAnchor`] (y = 0 by construction).
-fn sim_to_arena(pos: crate::sim::Pos, anchor: Vec3) -> Vec3 {
+/// The sim↔arena correspondence, both directions (rl#258): arena = sim − anchor, and a
+/// sim point stands ON the ground — its arena y is the surface height at that spot, so
+/// a boarding on a mountainside authors its craft at the walker's real elevation
+/// (rl#281 stage 6; on the flat grids the height is exactly 0, the old planar bridge).
+/// One scale since rl#256 — the frames differ only by the round's static translation
+/// [`crate::external_crab::ArenaAnchor`] (y = 0 by construction). `arena_to_sim` is
+/// planar (drops y), so the two stay inverses.
+fn sim_to_arena(
+    pos: crate::sim::Pos,
+    anchor: Vec3,
+    terrain: &crab_world::terrain::TerrainGrid,
+) -> Vec3 {
     let (x, z) = pos.to_meters();
-    Vec3::new(x, 0.0, z) - anchor
+    let a = Vec3::new(x, 0.0, z) - anchor;
+    Vec3::new(a.x, terrain.height(a.x, a.z), a.z)
 }
 
 fn arena_to_sim(arena: Vec3, anchor: Vec3) -> crate::sim::Pos {
@@ -194,9 +203,10 @@ fn boarding_of(
     now: crate::sim::Player,
     prev: crate::sim::Player,
     anchor: Vec3,
+    terrain: &crab_world::terrain::TerrainGrid,
 ) -> crab_world::vehicle::Boarding {
-    let here = sim_to_arena(now.pos(), anchor);
-    let velocity = (here - sim_to_arena(prev.pos(), anchor)) / TICK_DT as f32;
+    let here = sim_to_arena(now.pos(), anchor, terrain);
+    let velocity = (here - sim_to_arena(prev.pos(), anchor, terrain)) / TICK_DT as f32;
     // A walker can't out-run its walk speed: a bigger per-tick delta is a TELEPORT (the
     // round-RESTART respawn, a join slot), not motion — a craft boarded right after one
     // must start at rest, not inherit a cross-map fling.
@@ -740,6 +750,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
 
         if role == PeerRole::ServerAuth && world.get_resource::<VehicleControls>().is_some() {
             let anchor = world.resource::<crate::external_crab::ArenaAnchor>().0;
+            let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
             let entries: BTreeMap<PilotId, PilotCommand> = {
                 let state = world.non_send_resource::<GameState>();
                 let server = state.coord.server().expect("server_auth ⇒ a server");
@@ -751,7 +762,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                         // to transform — the intent simply files no command this tick.
                         let now = server.sim().player(pid)?;
                         let prev = state.prev.players.get(&pid).copied().unwrap_or(now);
-                        let boarding = boarding_of(now, prev, anchor);
+                        let boarding = boarding_of(now, prev, anchor, &terrain);
                         Some((pilot_of(pid), intent.to_command(boarding)))
                     })
                     .collect()
@@ -1020,7 +1031,9 @@ mod tests {
     }
 
     /// The two directions of the rl#258 sim↔arena bridge (boarding spawn vs pilot follow)
-    /// must be exact inverses, or a board+exit round-trip would drift the player.
+    /// must be exact inverses, or a board+exit round-trip would drift the player —
+    /// including on terrain, where sim_to_arena lifts to the surface (arena_to_sim is
+    /// planar, so the lift can't leak back).
     #[test]
     fn sim_arena_conversion_roundtrips() {
         let anchor = bevy::math::Vec3::new(3.5, 0.0, -7.25);
@@ -1028,12 +1041,16 @@ mod tests {
             x: 12_340,
             z: -5_670,
         };
-        let arena = super::sim_to_arena(p, anchor);
-        let back = super::arena_to_sim(arena, anchor);
-        assert!(
-            (back.x - p.x).abs() <= 1 && (back.z - p.z).abs() <= 1,
-            "sim→arena→sim drifted beyond grid quantization: {p:?} -> {back:?}"
-        );
+        let flat = crab_world::terrain::TerrainGrid::flat(16.0);
+        let gcr = crab_world::terrain::TerrainGrid::gcr();
+        for terrain in [&flat, &*gcr] {
+            let arena = super::sim_to_arena(p, anchor, terrain);
+            let back = super::arena_to_sim(arena, anchor);
+            assert!(
+                (back.x - p.x).abs() <= 1 && (back.z - p.z).abs() <= 1,
+                "sim→arena→sim drifted beyond grid quantization: {p:?} -> {back:?}"
+            );
+        }
     }
 
     #[test]

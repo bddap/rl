@@ -126,10 +126,9 @@ impl Arena {
 
 /// Plugin that lays the arena PHYSICS — the ground (+ wall) colliders per [`Arena`] —
 /// and publishes the [`Terrain`] resource spawn-on-surface consumers sample. No meshes
-/// or lights: the visible dressing is a SEPARATE [`ArenaVisualsPlugin`], so a host that
-/// draws its own scene (the GCR client's gray-box world) adds the colliders alone and
-/// never spawns a second coplanar ground quad to z-fight its own (rl#160). The
-/// standalone rl-demo arena, which draws no other scene, adds both.
+/// or lights: the visible dressing is a SEPARATE [`ArenaVisualsPlugin`] (split rl#160),
+/// so a headless host adds the colliders alone. Every rendered surface — rl-demo and,
+/// since rl#281 stage 6, GCR — adds both: there is ONE way an arena looks.
 pub struct PhysicsWorldPlugin {
     pub arena: Arena,
 }

@@ -22,9 +22,10 @@ const BODY_MARKERS: [&str; 4] = ["CrabBodyPart", "CrabCarapace", "CrabClawTip", 
 ///   EXCEPT `bot/skin/` (see `DENIED`).
 /// - `crab-world/src/training/`: test-only reset teleports (all under `#[cfg(test)]`,
 ///   headless `Visuals(false)` worlds; the scan can't see cfg, so the dir is listed).
-/// - `net/src/external_crab.rs`: the GCR bridge. Its rl#240 recenter is a sanctioned
-///   physics teleport riding the `PoseSentinelSet` lane (ordered after the sentinel,
-///   consumed by the same tick's SyncBackend).
+/// - `net/src/external_crab.rs`: the GCR bridge's `#[cfg(test)]` drift helpers
+///   (`shift_parts` — the scan can't see cfg). Production code there no longer writes
+///   body Transforms at all: the rl#240 recenter became an origin REBASE (rl#281
+///   stage 6), so the old sanctioned-teleport carve-out is test-only now.
 /// - `crab-world/src/eval.rs`: the pace probe's `pace_recenter` (rl#280) — the same
 ///   rl#240 recenter teleport in the eval's headless `Visuals(false)` worlds,
 ///   consumed by the same tick's SyncBackend.
