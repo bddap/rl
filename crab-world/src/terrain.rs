@@ -16,6 +16,9 @@ use std::sync::{Arc, OnceLock};
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::Collider;
 
+#[cfg(feature = "render")]
+use crate::sky::{hash3, rand01, smoothstep};
+
 /// The stage-1 bake artifact for GCR (rl#281): seed 281, 1024², 30 m pitch.
 static GCR_TERRAIN_BYTES: &[u8] = include_bytes!("../assets/terrain/gcr-seed281.terrain");
 
@@ -50,6 +53,9 @@ pub struct TerrainGrid {
     cell: f32,
     /// Row-major `[row * cols + col]`, like the artifact.
     heights: Vec<f32>,
+    /// Height span over the whole grid, computed once at construction — [`Self::is_flat`]
+    /// is read per frame (vista fog attach), so it must not re-scan a 1M-cell grid.
+    relief: f32,
 }
 
 impl TerrainGrid {
@@ -96,15 +102,19 @@ impl TerrainGrid {
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         let datum = raw[(meta.rows / 2) * meta.cols + meta.cols / 2];
-        let heights = raw
+        let heights: Vec<f32> = raw
             .iter()
             .map(|&h| (i32::from(h) - i32::from(datum)) as f32 * meta.height_scale)
             .collect();
+        let (min, max) = heights
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
         Ok(Self {
             rows: meta.rows,
             cols: meta.cols,
             cell: meta.cell_size_m,
             heights,
+            relief: max - min,
         })
     }
 
@@ -118,6 +128,7 @@ impl TerrainGrid {
             cols: n,
             cell: half_extent * 2.0 / cells as f32,
             heights: vec![0.0; n * n],
+            relief: 0.0,
         }
     }
 
@@ -203,15 +214,17 @@ impl TerrainGrid {
         SharedShape::new(field).into()
     }
 
-    /// Height span over the whole grid — 0 for the flat arenas. Visual dressing keys
-    /// on this (vista lighting/fog vs the training-box look), so "is this a real
-    /// terrain world" is read off the ONE grid instead of a parallel config flag.
+    /// Height span over the whole grid — 0 for the flat arenas.
     pub fn relief(&self) -> f32 {
-        let (min, max) = self
-            .heights
-            .iter()
-            .fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
-        max - min
+        self.relief
+    }
+
+    /// Whether this grid is visually a flat arena (relief below [`FLAT_RELIEF_MAX`]).
+    /// Visual dressing keys on this — vista lighting/fog/biome bands vs the
+    /// training-box look — so "is this a real terrain world" is read off the ONE grid
+    /// instead of a parallel config flag. O(1): read per frame.
+    pub fn is_flat(&self) -> bool {
+        self.relief < FLAT_RELIEF_MAX
     }
 
     /// The visible terrain surface — the SAME vertices and cell diagonal as the
@@ -227,7 +240,11 @@ impl TerrainGrid {
 
         let (rows, cols) = (self.rows, self.cols);
         let (ex, ez) = (self.extent_x(), self.extent_z());
-        let span = self.relief();
+        let flat = self.is_flat();
+        let arena_green = {
+            let c = LinearRgba::from(ARENA_GREEN);
+            [c.red, c.green, c.blue, 1.0]
+        };
         let mut positions = Vec::with_capacity(rows * cols);
         let mut normals = Vec::with_capacity(rows * cols);
         let mut colors = Vec::with_capacity(rows * cols);
@@ -243,12 +260,11 @@ impl TerrainGrid {
                 let dhdz = (self.at(r1, col) - self.at(r0, col)) / (self.cell * (r1 - r0) as f32);
                 let normal = Vec3::new(-dhdx, 1.0, -dhdz).normalize();
                 normals.push(normal.to_array());
-                let tint_h = if span >= FLAT_RELIEF_MAX {
-                    h
+                colors.push(if flat {
+                    arena_green
                 } else {
-                    f32::NAN // flat arena: biome_tint ignores h, returns the arena green
-                };
-                colors.push(biome_tint(tint_h, normal.y, row as u32, col as u32));
+                    biome_tint(h, normal.y, row as i32, col as i32)
+                });
             }
         }
         let mut indices = Vec::with_capacity((rows - 1) * (cols - 1) * 6);
@@ -275,7 +291,7 @@ impl TerrainGrid {
 /// Relief below this is "flat" for visual purposes: the flat arenas keep their
 /// original uniform green floor and the box-arena lighting instead of biome bands
 /// (which would paint the training box as a valley) and vista dressing.
-pub const FLAT_RELIEF_MAX: f32 = 0.5;
+const FLAT_RELIEF_MAX: f32 = 0.5;
 
 /// The flat arenas' floor tint — the exact green the pre-terrain demo floor used, kept
 /// so the stage-3 biome pass changes nothing about the training-box look.
@@ -288,10 +304,10 @@ const ARENA_GREEN: Color = Color::srgb(0.35, 0.55, 0.35);
 /// center sample), so bands stay anchored to gameplay ground whatever a bake's absolute
 /// span is (a normalized ramp painted the whole origin plateau as snow). Rock on steep
 /// slopes, snow only on gentle high peaks, and a per-vertex hash jitter so
-/// kilometer-scale bands don't read as flat paint. `h = NaN` marks a flat arena:
-/// uniform [`ARENA_GREEN`].
+/// kilometer-scale bands don't read as flat paint. Real terrain only — flat arenas
+/// take the uniform [`ARENA_GREEN`] in [`TerrainGrid::mesh`] and never reach this.
 #[cfg(feature = "render")]
-fn biome_tint(h: f32, normal_y: f32, row: u32, col: u32) -> [f32; 4] {
+fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
     // (elevation m, srgb color) stops, low → high (bake.py's hillshade palette).
     const LAND: [(f32, [f32; 3]); 5] = [
         (-3200.0, [0.20, 0.36, 0.16]), // deep valley green
@@ -305,11 +321,6 @@ fn biome_tint(h: f32, normal_y: f32, row: u32, col: u32) -> [f32; 4] {
     const SNOWLINE_M: (f32, f32) = (350.0, 650.0);
 
     let lin = |c: [f32; 3]| LinearRgba::from(Color::srgb(c[0], c[1], c[2]));
-    if h.is_nan() {
-        let c = LinearRgba::from(ARENA_GREEN);
-        return [c.red, c.green, c.blue, 1.0];
-    }
-
     let mut c = lin(LAND[LAND.len() - 1].1);
     for w in LAND.windows(2) {
         let ((h0, c0), (h1, c1)) = (w[0], w[1]);
@@ -327,18 +338,8 @@ fn biome_tint(h: f32, normal_y: f32, row: u32, col: u32) -> [f32; 4] {
     c = c.mix(&lin(SNOW), snow);
 
     // ±6% value jitter, deterministic per vertex.
-    let mut h = row.wrapping_mul(0x8da6_b343) ^ col.wrapping_mul(0xd816_3841);
-    h ^= h >> 13;
-    h = h.wrapping_mul(0x1656_67b1);
-    h ^= h >> 16;
-    let jitter = 1.0 + 0.06 * ((h & 0xffff) as f32 / 32767.5 - 1.0);
+    let jitter = 1.0 + 0.06 * (2.0 * rand01(hash3(row, col, 0)) - 1.0);
     [c.red * jitter, c.green * jitter, c.blue * jitter, 1.0]
-}
-
-#[cfg(feature = "render")]
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 /// The world's terrain, inserted by `PhysicsWorldPlugin` from its [`Arena`] choice.
@@ -451,9 +452,9 @@ mod tests {
     fn relief_is_zero_flat_and_full_span_on_gcr() {
         assert_eq!(TerrainGrid::flat(10.0).relief(), 0.0);
         assert_eq!(TerrainGrid::gcr().relief(), (4508 - 295) as f32);
-        // The vista/flat visual fork keys on relief crossing FLAT_RELIEF_MAX.
-        assert!(TerrainGrid::flat(10.0).relief() < FLAT_RELIEF_MAX);
-        assert!(TerrainGrid::gcr().relief() >= FLAT_RELIEF_MAX);
+        // The vista/flat visual fork (lighting, fog, biome tint) keys on this.
+        assert!(TerrainGrid::flat(10.0).is_flat());
+        assert!(!TerrainGrid::gcr().is_flat());
     }
 
     /// The biome tint contract the taste loop leans on: flat arenas keep ONE uniform
