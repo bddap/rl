@@ -38,7 +38,7 @@ pub async fn form_match(
     expect: usize,
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
-    local_asset_digest: u64,
+    local_body_digest: u64,
     local_crab_count: u8,
 ) -> Result<Formation> {
     let my_eid = session.endpoint_id();
@@ -53,7 +53,7 @@ pub async fn form_match(
         expect,
         telemetry,
         lobby,
-        local_asset_digest,
+        local_body_digest,
         local_crab_count,
     )
     .await
@@ -90,18 +90,18 @@ pub async fn form_match(
             me: me.0,
         });
     }
-    if local_asset_digest != 0 {
-        if !outcome.sync.assets {
+    if local_body_digest != 0 {
+        if !outcome.sync.body {
             tracing::warn!(
-                "GCR: crab MODEL ASSET NOT synced across peers (a peer has a different \
-                 sally.glb / no model — it would build and render a different crab) — cannot \
-                 arm the NN crabs; the windowed client will REFUSE this round (rl#114, no \
-                 integer fallback). Run rl-update on every device so all carry the identical \
-                 crab model."
+                "GCR: crab BODY NOT synced across peers (a peer has a different sally.glb \
+                 / no model / a different baked collider table or binary version — it \
+                 would build and render a different crab) — cannot arm the NN crabs; the \
+                 windowed client will REFUSE this round (rl#114, no integer fallback). \
+                 Run rl-update on every device so all carry the identical build + model."
             );
         } else {
             println!(
-                "GCR: the crab asset is synced across all {} peer(s) — NN crabs eligible",
+                "GCR: the crab body is synced across all {} peer(s) — NN crabs eligible",
                 id_map.len()
             );
         }
@@ -136,7 +136,7 @@ async fn run_barrier(
     expect: usize,
     telemetry: Option<&TelemetrySender>,
     lobby: Option<&LobbyControl>,
-    local_asset_digest: u64,
+    local_body_digest: u64,
     local_crab_count: u8,
 ) -> Result<BarrierResult> {
     let start = Instant::now();
@@ -144,7 +144,7 @@ async fn run_barrier(
         Some(c) => Membership::host_triggered(c.role, me, expect, start),
         None => Membership::new(me, expect, start),
     }
-    .with_asset_digest(local_asset_digest)
+    .with_body_digest(local_body_digest)
     .with_crab_count(local_crab_count);
     let mut early: Vec<(EndpointId, TickMsg)> = Vec::new();
     let mut ticker = tokio::time::interval(BEAT_EVERY);

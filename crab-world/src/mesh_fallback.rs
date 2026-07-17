@@ -112,26 +112,11 @@ pub fn natural_body_height() -> Option<f32> {
     })
 }
 
-/// The full Sally body digest: the asset-byte digest chained with the committed
-/// [`bot::rig::baked_recipe`] table's geometry digest. Model-free by construction
-/// (both inputs are compiled into the binary), so tests and the rl#20 legacy-stamp pin
-/// can compute it without an asset on disk; whether a process ADVERTISES it is
-/// [`constructed_body_digest`]'s verdict-gated call.
-pub(crate) fn sally_body_digest() -> u64 {
-    static D: OnceLock<u64> = OnceLock::new();
-    *D.get_or_init(|| {
-        let mut h = crate::fnv::Fnv::new();
-        h.write(&bot::rig::BAKED_ASSET_DIGEST.to_le_bytes());
-        h.write(&bot::rig::baked_recipe().digest().to_le_bytes());
-        h.finish()
-    })
-}
-
 /// Digest of the crab body THIS process constructs — THE one "which body is this?"
 /// value: the checkpoint body-identity stamp (bddap/rl#214) AND the per-peer collider
 /// digest the MP membership handshake advertises (rl#100/rl#114). When the
-/// [`usable_model`] verdict is `Ok`, [`sally_body_digest`] — asset bytes chained with
-/// the baked collider table ([`bot::rig::RigRecipe::digest`]) — else `0`: the
+/// [`usable_model`] verdict is `Ok`, [`bot::rig::baked_body_digest`] — asset bytes
+/// chained with the baked collider table's [`bot::rig::RigRecipe::digest`] — else `0`: the
 /// fallback/no-asset value, which never counts as synced in the handshake and never
 /// passes for Sally at a checkpoint load. Keyed off the VERDICT, not bare
 /// `model_path()`: a present-but-unloadable glb constructs the fallback body, so it must
@@ -148,7 +133,7 @@ pub(crate) fn sally_body_digest() -> u64 {
 /// CODE changes still alter the body under an unchanged digest.
 pub fn constructed_body_digest() -> u64 {
     if usable_model().is_ok() {
-        sally_body_digest()
+        bot::rig::baked_body_digest()
     } else {
         0
     }

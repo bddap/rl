@@ -188,7 +188,7 @@ const LEGACY_ASSET_ONLY_STAMP: u64 = 0x5b29217ead4c7c57;
 /// 2+), that test fails — DELETE the shim (both consts, the `check_body_identity` arm,
 /// and the pin test), do NOT update this value: legacy stamps must then refuse, because
 /// the body they trained on no longer exists in the binary.
-const LEGACY_STAMP_BODY_DIGEST: u64 = 0x7ebe_445a_91f8_88f9;
+const LEGACY_STAMP_BODY_DIGEST: u64 = 0xcb56_1c71_d8fa_a748;
 
 /// THE body↔policy identity check (bddap/rl#214): a checkpoint stamped with one body
 /// digest must never drive or train the body this process actually constructs if the two
@@ -201,21 +201,29 @@ pub(crate) fn check_body_identity(
     constructed: u64,
 ) -> Result<StampIdentity, String> {
     // rl#20 stage 1 migration shim: the fleet's live checkpoints are stamped with the
-    // bare asset digest, and the body they trained on is provably the current one (the
-    // table has never moved since baking) — accept them as a verified match rather than
-    // brick every resume on the digest-formula change. The next save re-stamps the full
-    // digest. Both sides are frozen: once `constructed` is any OTHER body, legacy
-    // stamps refuse like any mismatch.
+    // bare asset digest, and every live lineage postdates the Phase 2 bake, whose
+    // landing verified the geometry byte-identical through the fit-at-spawn→table
+    // transition — so the body they trained on IS the current one. Accept them as a
+    // verified match rather than brick every resume on the digest-formula change; the
+    // next save re-stamps the full digest. Both sides are frozen: once `constructed`
+    // is any OTHER body, legacy stamps refuse like any mismatch.
     if checkpoint == Some(LEGACY_ASSET_ONLY_STAMP) && constructed == LEGACY_STAMP_BODY_DIGEST {
+        tracing::info!(
+            "accepting a legacy bare-asset body stamp ({LEGACY_ASSET_ONLY_STAMP:#018x}) \
+             against the unmoved baked body (rl#20 stage 1); a trainer's next save \
+             re-stamps the full digest"
+        );
         return Ok(StampIdentity::Match);
     }
     check_stamp(checkpoint, constructed).map_err(|d| {
         format!(
             "checkpoint is stamped body digest {d:#018x} but this process constructs body \
              digest {constructed:#018x} ({}) — the policy was trained on a DIFFERENT crab \
-             body (the asset changed, or one side is the procedural fallback; digest 0 = \
-             fallback). A policy is only Sally on the body it trained on (bddap/rl#214); \
-             restore the matching sally.glb or use a checkpoint trained on this body.",
+             body: the asset or the baked collider table changed (a re-bake is a new MDP, \
+             rl#277), the binaries straddle a digest-formula change (rl#20 stage 1), or \
+             one side is the procedural fallback (digest 0). A policy is only Sally on \
+             the body it trained on (bddap/rl#214); use a checkpoint trained on this \
+             body, or the binary/asset pair it was trained under.",
             if constructed == 0 {
                 "the procedural fallback"
             } else {
@@ -775,7 +783,7 @@ mod tests {
     fn legacy_stamp_pin_matches_current_body() {
         assert_eq!(
             LEGACY_STAMP_BODY_DIGEST,
-            crate::mesh_fallback::sally_body_digest(),
+            crate::bot::rig::baked_body_digest(),
             "baked collider geometry (or the asset digest) changed — delete the \
              legacy-stamp shim instead of re-pinning (see this test's doc)"
         );
@@ -795,9 +803,17 @@ mod tests {
         assert!(check_body_identity(Some(LEGACY_ASSET_ONLY_STAMP), 0).is_err());
         assert!(check_body_identity(Some(LEGACY_ASSET_ONLY_STAMP), 0xabc).is_err());
         assert_ne!(
-            crate::mesh_fallback::sally_body_digest(),
+            crate::bot::rig::baked_body_digest(),
             LEGACY_ASSET_ONLY_STAMP,
             "the full body digest degenerated to the bare asset digest"
+        );
+        // While the shim lives the two MUST coincide (an asset swap would fire the body
+        // pin first) — this is what catches a typo'd frozen literal, which would
+        // otherwise make the shim dead code and refuse every fleet resume.
+        assert_eq!(
+            LEGACY_ASSET_ONLY_STAMP,
+            crate::bot::rig::BAKED_ASSET_DIGEST,
+            "shim literal no longer matches the stamp live checkpoints carry"
         );
     }
 

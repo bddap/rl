@@ -14,6 +14,22 @@ pub use fallback::fallback_recipe;
 pub(crate) use recipe::link_world_origins;
 pub use recipe::{TRUNK_BONES, arc_to, build_recipe, part_for_bone, parts_adjacent};
 
+/// The full digest of THE baked Sally body this binary carries: the asset-byte digest
+/// chained with the committed [`baked_recipe`] table's [`RigRecipe::digest`]. Both
+/// inputs are compiled constants — no asset on disk needed — which is what lets the
+/// rl#20 legacy-stamp pin and the golden test check it model-free. Whether a process
+/// ADVERTISES it is [`crate::mesh_fallback::constructed_body_digest`]'s verdict-gated
+/// call.
+pub fn baked_body_digest() -> u64 {
+    static D: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *D.get_or_init(|| {
+        let mut h = crate::fnv::Fnv::new();
+        h.write(&BAKED_ASSET_DIGEST.to_le_bytes());
+        h.write(&baked_recipe().digest().to_le_bytes());
+        h.finish()
+    })
+}
+
 /// Which physics part a skinned bone's flesh belongs to.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum PartId {
@@ -82,7 +98,10 @@ impl RigRecipe {
     /// what makes that change refuse loudly at every checkpoint load and MP handshake.
     /// Densities and joint anchors/axes are included deliberately — mass distribution
     /// and joint placement are as much "which body is this?" as the collider shapes
-    /// (the rl#277 charge-gait collapse was a mass/geometry interaction).
+    /// (the rl#277 charge-gait collapse was a mass/geometry interaction). `actuated`
+    /// hashes as [`CrabJointId::index`] — the canonical channel ordinal — not the
+    /// variant's name, so an enum rename stays where it belongs: the channel-layout
+    /// guard's re-pin, not a fleet-wide body refusal.
     pub fn digest(&self) -> u64 {
         let mut h = crate::fnv::Fnv::new();
         write_vec3(&mut h, self.hub_bind_world);
@@ -90,9 +109,11 @@ impl RigRecipe {
         write_vec3(&mut h, self.carapace_offset);
         write_f32(&mut h, self.carapace_density);
         for link in &self.links {
+            // Length-prefixed: bone is the one variable-length field, and a byte-exact
+            // frame is what lets nothing alias across field boundaries.
+            h.write(&(link.bone.len() as u64).to_le_bytes());
             h.write(link.bone.as_bytes());
-            h.write(b"\n");
-            h.write(&link.parent.map_or(u64::MAX, |p| p as u64).to_le_bytes());
+            write_opt_index(&mut h, link.parent.map(|p| p as u64));
             write_vec3(&mut h, link.anchor1);
             write_vec3(&mut h, link.axis_local);
             write_f32(&mut h, link.half_height);
@@ -107,10 +128,7 @@ impl RigRecipe {
                 write_f32(&mut h, c);
             }
             write_f32(&mut h, link.density);
-            match link.actuated {
-                Some(id) => h.write(format!("{id:?}\n").as_bytes()),
-                None => h.write(b"-\n"),
-            }
+            write_opt_index(&mut h, link.actuated.map(|id| id.index() as u64));
         }
         h.finish()
     }
@@ -118,6 +136,13 @@ impl RigRecipe {
 
 fn write_f32(h: &mut crate::fnv::Fnv, v: f32) {
     h.write(&v.to_bits().to_le_bytes());
+}
+
+/// `None` = `u64::MAX` — safe as a sentinel for both users (link indices and
+/// [`CrabJointId::index`] ordinals are tiny), and ONE `Option` framing keeps the next
+/// optional field from coining a third.
+fn write_opt_index(h: &mut crate::fnv::Fnv, v: Option<u64>) {
+    h.write(&v.unwrap_or(u64::MAX).to_le_bytes());
 }
 
 fn write_vec3(h: &mut crate::fnv::Fnv, v: Vec3) {
@@ -142,10 +167,9 @@ impl RigLink {
 mod digest_tests {
     use super::baked_recipe;
 
-    /// The recipe digest is deterministic across calls (it feeds a OnceLock'd global)
-    /// and covers every geometry axis a `baked.rs` regen could move: shape dims,
-    /// placement, orientation, mass, topology, and actuation. A single-ULP f32 nudge
-    /// on any of them must change the digest — the rl#20 stage-1 guard is bit-exact.
+    /// Every field of `RigRecipe`/`RigLink` gets a nudge case here — if `digest()`
+    /// silently stops covering one, the corresponding `assert_ne` fails. A single-ULP
+    /// f32 nudge must change the digest: the rl#20 stage-1 guard is bit-exact.
     #[test]
     fn recipe_digest_is_deterministic_and_field_sensitive() {
         let base = baked_recipe().digest();
@@ -156,6 +180,16 @@ mod digest_tests {
         );
 
         let nudged: Vec<(&str, super::RigRecipe)> = vec![
+            ("hub_bind_world", {
+                let mut r = baked_recipe();
+                r.hub_bind_world.y = f32::from_bits(r.hub_bind_world.y.to_bits() ^ 1);
+                r
+            }),
+            ("carapace_offset", {
+                let mut r = baked_recipe();
+                r.carapace_offset.z = f32::from_bits(r.carapace_offset.z.to_bits() ^ 1);
+                r
+            }),
             ("carapace_half", {
                 let mut r = baked_recipe();
                 r.carapace_half.x = f32::from_bits(r.carapace_half.x.to_bits() ^ 1);
@@ -226,4 +260,19 @@ mod digest_tests {
             assert_ne!(recipe.digest(), base, "digest must cover {what}");
         }
     }
+
+    /// GOLDEN pin of the full body digest, the durable sibling of the rl#20
+    /// legacy-stamp shim's pin (which deletes itself with the shim): every stamped
+    /// checkpoint in the fleet keys off this value, so an ACCIDENTAL change — a
+    /// `digest()` encoding refactor as much as a table edit — must never slip through
+    /// as a green build. On a DELIBERATE, reviewed `baked.rs` regen (a new MDP, plan
+    /// the retrain per rl#277), re-pin this golden in the same commit — and delete
+    /// the legacy shim per `legacy_stamp_pin_matches_current_body`, which forbids
+    /// re-pinning ITS constant.
+    #[test]
+    fn body_digest_golden() {
+        assert_eq!(super::baked_body_digest(), GOLDEN_BODY_DIGEST);
+    }
+
+    const GOLDEN_BODY_DIGEST: u64 = 0xcb56_1c71_d8fa_a748;
 }

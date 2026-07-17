@@ -95,22 +95,22 @@ pub struct Admission {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinRequest {
-    pub asset_digest: u64,
+    pub body_digest: u64,
     pub crab_count: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRefusal {
-    AssetsMismatch { host: u64, joiner: u64 },
+    BodyMismatch { host: u64, joiner: u64 },
     CrabCountMismatch { host: u8, joiner: u8 },
 }
 
 impl std::fmt::Display for AdmissionRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AdmissionRefusal::AssetsMismatch { host, joiner } => write!(
+            AdmissionRefusal::BodyMismatch { host, joiner } => write!(
                 f,
-                "crab-asset digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — different Sally/colliders"
+                "body digest mismatch (host {host:#018x}, joiner {joiner:#018x}) — a different sally.glb, a different baked collider table, or binaries straddling a digest-formula change (rl#20)"
             ),
             AdmissionRefusal::CrabCountMismatch { host, joiner } => write!(
                 f,
@@ -152,14 +152,14 @@ impl std::fmt::Display for Refusal {
 }
 
 pub fn may_admit_joiner(
-    host_assets: u64,
+    host_body: u64,
     host_crabs: u8,
     req: &JoinRequest,
 ) -> Result<(), AdmissionRefusal> {
-    if req.asset_digest != host_assets {
-        return Err(AdmissionRefusal::AssetsMismatch {
-            host: host_assets,
-            joiner: req.asset_digest,
+    if req.body_digest != host_body {
+        return Err(AdmissionRefusal::BodyMismatch {
+            host: host_body,
+            joiner: req.body_digest,
         });
     }
     if req.crab_count != 0 && req.crab_count != host_crabs {
@@ -1580,8 +1580,8 @@ mod tests {
     #[test]
     fn admission_gate_admits_match_and_refuses_mismatches() {
         let ha = 0x5A11_2233u64;
-        let req = |asset_digest, crab_count| JoinRequest {
-            asset_digest,
+        let req = |body_digest, crab_count| JoinRequest {
+            body_digest,
             crab_count,
         };
         assert_eq!(
@@ -1596,7 +1596,7 @@ mod tests {
         );
         assert_eq!(
             may_admit_joiner(ha, 2, &req(ha ^ 1, 2)),
-            Err(AdmissionRefusal::AssetsMismatch {
+            Err(AdmissionRefusal::BodyMismatch {
                 host: ha,
                 joiner: ha ^ 1
             }),

@@ -24,7 +24,7 @@ pub struct NetDriver {
     telemetry: Option<TelemetrySender>,
     /// The formation barrier's shared-asset verdict — see [`NetDriver::sync_verdict`].
     sync: crate::SyncVerdict,
-    asset_digest: u64,
+    body_digest: u64,
     crab_count: u8,
 }
 
@@ -106,8 +106,8 @@ impl NetDriver {
         (inputs, joins)
     }
 
-    pub fn local_asset_digest(&self) -> u64 {
-        self.asset_digest
+    pub fn local_body_digest(&self) -> u64 {
+        self.body_digest
     }
 
     pub fn local_crab_count(&self) -> u8 {
@@ -369,13 +369,13 @@ pub fn depart_gone_peers(
 }
 
 fn admit_joiners(server: &mut Server, net: &mut NetDriver, joins: Vec<(EndpointId, JoinRequest)>) {
-    let host_assets = net.local_asset_digest();
+    let host_body = net.local_body_digest();
     let host_crabs = net.local_crab_count();
     for (eid, req) in joins {
         if net.is_rostered(eid) {
             continue;
         }
-        match may_admit_joiner(host_assets, host_crabs, &req) {
+        match may_admit_joiner(host_body, host_crabs, &req) {
             Ok(()) => {
                 let adm = server.admit();
                 net.admit_endpoint(eid, adm.pid);
@@ -423,7 +423,7 @@ pub fn connect_and_form_dialing(
     dial: Option<iroh::EndpointId>,
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
-    local_asset_digest: u64,
+    local_body_digest: u64,
     local_crab_count: u8,
 ) -> Result<MatchResult> {
     connect_and_form_inner(
@@ -434,7 +434,7 @@ pub fn connect_and_form_dialing(
         collector,
         on_bound,
         None,
-        local_asset_digest,
+        local_body_digest,
         local_crab_count,
     )
 }
@@ -447,7 +447,7 @@ pub fn connect_and_form_lobby(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     control: LobbyControl,
-    local_asset_digest: u64,
+    local_body_digest: u64,
     local_crab_count: u8,
 ) -> Result<MatchResult> {
     connect_and_form_inner(
@@ -458,7 +458,7 @@ pub fn connect_and_form_lobby(
         collector,
         on_bound,
         Some(control),
-        local_asset_digest,
+        local_body_digest,
         local_crab_count,
     )
 }
@@ -472,7 +472,7 @@ fn connect_and_form_inner(
     collector: Option<iroh::EndpointId>,
     on_bound: Option<std::sync::mpsc::Sender<iroh::EndpointId>>,
     lobby: Option<LobbyControl>,
-    local_asset_digest: u64,
+    local_body_digest: u64,
     local_crab_count: u8,
 ) -> Result<MatchResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -500,7 +500,7 @@ fn connect_and_form_inner(
             expect,
             telemetry.as_ref(),
             lobby.as_ref(),
-            local_asset_digest,
+            local_body_digest,
             local_crab_count,
         )
         .await?;
@@ -539,7 +539,7 @@ fn connect_and_form_inner(
         departed: Default::default(),
         telemetry,
         sync: frozen.sync,
-        asset_digest: local_asset_digest,
+        body_digest: local_body_digest,
         crab_count: local_crab_count,
     };
     Ok(MatchResult::Joined(Box::new((client, driver))))
@@ -590,7 +590,7 @@ pub fn connect_and_join(
     seed: u64,
     host: EndpointId,
     collector: Option<EndpointId>,
-    local_asset_digest: u64,
+    local_body_digest: u64,
     local_crab_count: u8,
 ) -> Result<JoinResult> {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -618,7 +618,7 @@ pub fn connect_and_join(
             .send(
                 host,
                 &JoinRequest {
-                    asset_digest: local_asset_digest,
+                    body_digest: local_body_digest,
                     crab_count: local_crab_count,
                 },
             )
@@ -670,10 +670,10 @@ pub fn connect_and_join(
                 departed: Default::default(),
                 telemetry,
                 sync: crate::SyncVerdict {
-                    assets: true,
+                    body: true,
                     crabs: true,
                 },
-                asset_digest: local_asset_digest,
+                body_digest: local_body_digest,
                 crab_count: local_crab_count,
             };
             Ok(JoinResult::Joined(Box::new((client, driver))))

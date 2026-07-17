@@ -25,7 +25,7 @@ pub struct Beat {
     /// so host and joiners freeze the byte-identical set the GO names. Always `false`
     /// outside the host-triggered menu path.
     pub start: bool,
-    pub asset_digest: u64,
+    pub body_digest: u64,
     pub crab_count: u8,
 }
 
@@ -65,7 +65,7 @@ pub struct Membership {
     /// untouched.
     lobby: LobbyMode,
     host_go_on_my_roster: bool,
-    local_asset_digest: u64,
+    local_body_digest: u64,
     local_crab_count: u8,
 }
 
@@ -84,7 +84,7 @@ struct PeerView {
     last_direct: Instant,
     advertised: Option<u64>,
     started: bool,
-    asset_digest: Option<u64>,
+    body_digest: Option<u64>,
     crab_count: Option<u8>,
 }
 
@@ -112,13 +112,13 @@ impl Membership {
             started: now,
             lobby: LobbyMode::Off,
             host_go_on_my_roster: false,
-            local_asset_digest: 0,
+            local_body_digest: 0,
             local_crab_count: 0,
         }
     }
 
-    pub fn with_asset_digest(mut self, digest: u64) -> Self {
-        self.local_asset_digest = digest;
+    pub fn with_body_digest(mut self, digest: u64) -> Self {
+        self.local_body_digest = digest;
         self
     }
 
@@ -162,13 +162,13 @@ impl Membership {
                     last_direct: now,
                     advertised: None,
                     started: false,
-                    asset_digest: None,
+                    body_digest: None,
                     crab_count: None,
                 });
                 view.last_direct = now;
                 view.advertised = Some(beat.roster_hash());
                 view.started = beat.start;
-                view.asset_digest = Some(beat.asset_digest);
+                view.body_digest = Some(beat.body_digest);
                 view.crab_count = Some(beat.crab_count);
             }
         }
@@ -187,7 +187,7 @@ impl Membership {
                         last_direct: now,
                         advertised: None,
                         started: false,
-                        asset_digest: None,
+                        body_digest: None,
                         crab_count: None,
                     },
                 );
@@ -207,7 +207,7 @@ impl Membership {
         Beat {
             members: self.live_set(),
             start: matches!(self.lobby, LobbyMode::Host { started: true }),
-            asset_digest: self.local_asset_digest,
+            body_digest: self.local_body_digest,
             crab_count: self.local_crab_count,
         }
     }
@@ -220,11 +220,11 @@ impl Membership {
             self.peers.get(&host).and_then(|v| v.crab_count)
         };
         crate::SyncVerdict {
-            assets: self.local_asset_digest != 0
+            body: self.local_body_digest != 0
                 && self
                     .peers
                     .values()
-                    .all(|v| v.asset_digest == Some(self.local_asset_digest)),
+                    .all(|v| v.body_digest == Some(self.local_body_digest)),
             crabs: host_crabs.is_some_and(|h| {
                 h >= 1 && (self.local_crab_count == 0 || self.local_crab_count == h)
             }),
@@ -297,7 +297,7 @@ pub fn encode_beat(beat: &Beat) -> Vec<u8> {
     let mut out = Vec::with_capacity(12 + 32 * members.len());
     out.push(beat.start as u8);
     out.extend_from_slice(&(members.len() as u16).to_le_bytes());
-    out.extend_from_slice(&beat.asset_digest.to_le_bytes());
+    out.extend_from_slice(&beat.body_digest.to_le_bytes());
     out.push(beat.crab_count);
     for id in &members {
         out.extend_from_slice(id.as_bytes());
@@ -318,7 +318,7 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
         count <= MAX_BEAT_MEMBERS,
         "barrier frame claims {count} members (> {MAX_BEAT_MEMBERS})"
     );
-    let asset_digest = u64::from_le_bytes(body[3..11].try_into().expect("8-byte slice"));
+    let body_digest = u64::from_le_bytes(body[3..11].try_into().expect("8-byte slice"));
     let crab_count = body[11];
     let need = 12 + 32 * count;
     anyhow::ensure!(
@@ -337,7 +337,7 @@ pub fn decode_beat(body: &[u8]) -> Result<Beat> {
     Ok(Beat {
         members,
         start,
-        asset_digest,
+        body_digest,
         crab_count,
     })
 }
@@ -358,7 +358,7 @@ mod tests {
         Beat {
             members,
             start: false,
-            asset_digest: 0,
+            body_digest: 0,
             crab_count: 0,
         }
     }
@@ -406,7 +406,7 @@ mod tests {
         let go = Beat {
             members,
             start: true,
-            asset_digest: 0,
+            body_digest: 0,
             crab_count: 0,
         };
         assert_eq!(
@@ -427,17 +427,17 @@ mod tests {
         );
     }
 
-    fn bt_ad(members: Vec<EndpointId>, asset_digest: u64) -> Beat {
+    fn bt_ad(members: Vec<EndpointId>, body_digest: u64) -> Beat {
         Beat {
             members,
             start: false,
-            asset_digest,
+            body_digest,
             crab_count: 1,
         }
     }
 
     #[test]
-    fn asset_digest_roundtrips_on_the_wire() {
+    fn body_digest_roundtrips_on_the_wire() {
         let members = vec![eid(1), eid(2)];
         let a = bt_ad(members.clone(), 0xC0FF_EE00_1234_5678);
         let b = bt_ad(members, 0x9876_5432_10AB_CDEF);
@@ -447,7 +447,7 @@ mod tests {
             "the asset digest must not be part of the roster hash"
         );
         let decoded = decode_beat(&encode_beat(&a)).unwrap();
-        assert_eq!(decoded.asset_digest, 0xC0FF_EE00_1234_5678);
+        assert_eq!(decoded.body_digest, 0xC0FF_EE00_1234_5678);
     }
 
     #[test]
@@ -455,7 +455,7 @@ mod tests {
         let beat_c = |members: Vec<EndpointId>, crab_count: u8| Beat {
             members,
             start: false,
-            asset_digest: 0,
+            body_digest: 0,
             crab_count,
         };
         let decoded = decode_beat(&encode_beat(&beat_c(vec![eid(1)], 3))).unwrap();
@@ -504,27 +504,27 @@ mod tests {
         let (ida, idb) = (eid(1), eid(2));
         const ASSET: u64 = 0x5A11_0000_C0DE_4321;
 
-        let mut a = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
+        let mut a = Membership::new(ida, 2, t0).with_body_digest(ASSET);
         a.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
         a.poll(t0);
         assert!(
-            a.sync_verdict().assets,
+            a.sync_verdict().body,
             "equal non-zero asset digests must be synced"
         );
 
-        let mut b = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
+        let mut b = Membership::new(ida, 2, t0).with_body_digest(ASSET);
         b.on_beat(idb, &bt_ad(vec![ida, idb], ASSET ^ 0xFF), t0);
         b.poll(t0);
         assert!(
-            !b.sync_verdict().assets,
+            !b.sync_verdict().body,
             "a differing peer asset digest must not be synced"
         );
 
-        let mut c = Membership::new(ida, 2, t0).with_asset_digest(ASSET);
+        let mut c = Membership::new(ida, 2, t0).with_body_digest(ASSET);
         c.on_beat(idb, &bt_ad(vec![ida, idb], 0), t0);
         c.poll(t0);
         assert!(
-            !c.sync_verdict().assets,
+            !c.sync_verdict().body,
             "a zero peer asset digest must not be synced"
         );
 
@@ -532,7 +532,7 @@ mod tests {
         d.on_beat(idb, &bt_ad(vec![ida, idb], ASSET), t0);
         d.poll(t0);
         assert!(
-            !d.sync_verdict().assets,
+            !d.sync_verdict().body,
             "a zero local asset digest is never synced"
         );
     }
@@ -542,17 +542,17 @@ mod tests {
         let t0 = Instant::now();
         let (me, direct, relayed) = (eid(1), eid(2), eid(3));
         const ASSET: u64 = 0x9999_8888_7777_6666;
-        let mut a = Membership::new(me, 3, t0).with_asset_digest(ASSET);
+        let mut a = Membership::new(me, 3, t0).with_body_digest(ASSET);
         a.on_beat(direct, &bt_ad(vec![me, direct, relayed], ASSET), t0);
         a.poll(t0);
         assert!(
-            !a.sync_verdict().assets,
+            !a.sync_verdict().body,
             "a relay-only peer (digest None) must block the asset gate"
         );
         a.on_beat(relayed, &bt_ad(vec![me, direct, relayed], ASSET), t0);
         a.poll(t0);
         assert!(
-            a.sync_verdict().assets,
+            a.sync_verdict().body,
             "once every peer is heard directly with the same asset, synced"
         );
     }
@@ -916,7 +916,7 @@ mod tests {
         let host_go_on_partial = Beat {
             members: vec![idh],
             start: true,
-            asset_digest: 0,
+            body_digest: 0,
             crab_count: 0,
         };
         let mut t = 0u64;

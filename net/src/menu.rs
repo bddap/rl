@@ -86,7 +86,7 @@ fn spawn_formation(
     join: Option<EndpointId>,
     hosting: bool,
     telemetry: Option<EndpointId>,
-    asset_digest: u64,
+    body_digest: u64,
     crab_count: u8,
 ) -> Formation {
     let (tx, rx) = mpsc::channel();
@@ -112,7 +112,7 @@ fn spawn_formation(
                 cancel_rx,
                 roster_tx,
             },
-            asset_digest,
+            body_digest,
             crab_count,
         );
         let _ = tx.send(result);
@@ -134,13 +134,13 @@ pub fn begin(
     choice: &StartChoice,
     seed: u64,
     telemetry: Option<EndpointId>,
-    asset_digest: u64,
+    body_digest: u64,
     crab_count: u8,
 ) -> Formation {
     match choice {
-        StartChoice::Host => spawn_formation(seed, None, true, telemetry, asset_digest, crab_count),
+        StartChoice::Host => spawn_formation(seed, None, true, telemetry, body_digest, crab_count),
         StartChoice::Join(host) => {
-            spawn_formation(seed, *host, false, telemetry, asset_digest, crab_count)
+            spawn_formation(seed, *host, false, telemetry, body_digest, crab_count)
         }
     }
 }
