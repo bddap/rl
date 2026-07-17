@@ -26,6 +26,7 @@ sally.glb
 # .bin dumps into the repo regardless of the chosen name (cost: 68367d2d, 5.6MB).
 *ckpt*/
 .nixshell.err
+__pycache__/
 
 # stray test/build output logs (do not commit)
 /*.log

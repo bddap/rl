@@ -67,6 +67,9 @@ pub struct ArenaVisualsPlugin;
 impl Plugin for ArenaVisualsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_arena_visuals);
+        // Update, not Startup: cameras spawn after Startup in some modes (same
+        // pattern as NightSkyPlugin's skybox attach).
+        app.add_systems(Update, attach_vista_fog);
     }
 }
 
@@ -125,6 +128,12 @@ fn setup_walls(mut commands: Commands) {
     }
 }
 
+/// Marks this world as a vista (real relief): [`setup_arena_visuals`] inserts it so
+/// [`attach_vista_fog`] doesn't recompute relief per frame.
+#[cfg(feature = "render")]
+#[derive(Resource)]
+struct Vista;
+
 #[cfg(feature = "render")]
 fn setup_arena_visuals(
     mut commands: Commands,
@@ -137,34 +146,86 @@ fn setup_arena_visuals(
         return;
     }
 
-    commands.spawn((
-        DirectionalLight {
-            shadows_enabled: true,
-            illuminance: 10000.0,
+    // Flat arenas keep the pre-terrain training-box light exactly; a vista world
+    // (rl#281 stage 3) gets a lower, cooler moon-sun for long relief shadows, plus
+    // cascades stretched from the ~150 m default to mountain scale (30 m grid pitch
+    // makes coarse far cascades invisible).
+    let vista = terrain.relief() >= crate::terrain::FLAT_RELIEF_MAX;
+    if vista {
+        commands.insert_resource(Vista);
+        commands.spawn((
+            DirectionalLight {
+                shadows_enabled: true,
+                illuminance: 9500.0,
+                color: Color::srgb(0.85, 0.90, 1.0),
+                ..default()
+            },
+            bevy::light::CascadeShadowConfigBuilder {
+                maximum_distance: 9000.0,
+                first_cascade_far_bound: 20.0,
+                ..default()
+            }
+            .build(),
+            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.5, 0.7, 0.0)),
+        ));
+        commands.insert_resource(GlobalAmbientLight {
+            color: Color::srgb(0.75, 0.82, 1.0),
+            brightness: 400.0,
             ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.3, 0.0)),
-    ));
-
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::WHITE,
-        brightness: 300.0,
-        ..default()
-    });
+        });
+    } else {
+        commands.spawn((
+            DirectionalLight {
+                shadows_enabled: true,
+                illuminance: 10000.0,
+                ..default()
+            },
+            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, 0.3, 0.0)),
+        ));
+        commands.insert_resource(GlobalAmbientLight {
+            color: Color::WHITE,
+            brightness: 300.0,
+            ..default()
+        });
+    }
 
     // The visible ground: the SAME grid the collider was built from (rl#281 — render
-    // matches physics by construction). Flat arenas get their old flat green floor;
-    // the terrain arena gets the actual mountains. Looks beyond correct geometry
-    // (material, LOD, biome tint) are rl#281 stage 3.
+    // matches physics by construction). Tint rides the mesh's vertex colors (biome
+    // bands on terrain, the old flat green on flat arenas), so the material stays
+    // white and ONE material serves every arena.
     commands.spawn((
         Mesh3d(meshes.add(terrain.mesh())),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.35, 0.55, 0.35),
-            perceptual_roughness: 0.9,
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.95,
             ..default()
         })),
         Transform::IDENTITY,
     ));
+}
+
+/// Give every camera in a [`Vista`] world aerial-perspective fog toward the night
+/// sky's horizon color. Runs in `Update` because cameras can spawn any time (the
+/// demo's orbit cam, the offscreen shot cam); same attach pattern as the skybox.
+#[cfg(feature = "render")]
+fn attach_vista_fog(
+    mut commands: Commands,
+    vista: Option<Res<Vista>>,
+    cams: Query<Entity, (With<Camera3d>, Without<DistanceFog>)>,
+) {
+    if vista.is_none() {
+        return;
+    }
+    for cam in &cams {
+        commands.entity(cam).insert(DistanceFog {
+            color: crate::sky::horizon_fog_color(),
+            falloff: FogFalloff::Linear {
+                start: 600.0,
+                end: 11000.0,
+            },
+            ..default()
+        });
+    }
 }
 
 #[cfg(test)]
