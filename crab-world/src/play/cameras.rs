@@ -127,32 +127,50 @@ pub(super) fn orbit_camera(
 
 const SHOT_CAM_OFFSET: Vec3 = Vec3::new(1.9, 0.95, 2.5);
 const SHOT_CAM_FOCUS_Y: f32 = 0.5;
+/// Terrain can rise between the crab and the canonical camera offset; keep the eye at
+/// least this far above the surface so it never sinks into a hillside (where backface
+/// culling shows the valley BEHIND the hill instead of the crab).
+const SHOT_CAM_CLEARANCE: f32 = 0.6;
 
-fn offscreen_camera_transform(crab_xz: Vec3) -> Transform {
-    let focus = Vec3::new(crab_xz.x, SHOT_CAM_FOCUS_Y, crab_xz.z);
-    Transform::from_translation(focus + SHOT_CAM_OFFSET).looking_at(focus, Vec3::Y)
+fn offscreen_camera_transform(crab_xz: Vec3, terrain: &crate::terrain::TerrainGrid) -> Transform {
+    // Surface-relative, not absolute: on the flat arenas this is exactly the historic
+    // framing (surface height 0), on terrain both ends ride the local ground.
+    let focus = terrain.place(Vec2::new(crab_xz.x, crab_xz.z), SHOT_CAM_FOCUS_Y);
+    let mut eye = focus + SHOT_CAM_OFFSET;
+    eye.y = eye.y.max(terrain.height(eye.x, eye.z) + SHOT_CAM_CLEARANCE);
+    Transform::from_translation(eye).looking_at(focus, Vec3::Y)
 }
 
 pub(super) fn track_offscreen_camera(
+    cfg: Res<ShotConfig>,
+    terrain: Res<crate::terrain::Terrain>,
     carapace_q: Query<&Transform, (With<CrabCarapace>, Without<Camera3d>)>,
     mut cam_q: Query<&mut Transform, With<Camera3d>>,
 ) {
+    if cfg.view.is_some() {
+        return; // fixed vista framing — the camera stays where it was spawned
+    }
     let (Ok(crab), Ok(mut cam)) = (carapace_q.single(), cam_q.single_mut()) else {
         return;
     };
-    *cam = offscreen_camera_transform(crab.translation);
+    *cam = offscreen_camera_transform(crab.translation, &terrain);
 }
 
 pub(super) fn spawn_offscreen_camera(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     cfg: Res<ShotConfig>,
+    terrain: Res<crate::terrain::Terrain>,
 ) {
     let handle = images.add(screenshot::new_render_target(cfg.width, cfg.height));
 
+    let transform = match cfg.view {
+        Some((eye, focus)) => Transform::from_translation(eye).looking_at(focus, Vec3::Y),
+        None => offscreen_camera_transform(Vec3::ZERO, &terrain),
+    };
     commands.spawn((
         screenshot::offscreen_camera_bundle(handle.clone()),
-        offscreen_camera_transform(Vec3::ZERO),
+        transform,
     ));
     commands.insert_resource(ShotTarget(handle));
 }
@@ -162,11 +180,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn offscreen_framing_is_canonical() {
-        let t = offscreen_camera_transform(Vec3::new(3.0, 99.0, -4.0));
+    fn offscreen_framing_is_canonical_on_flat_ground() {
+        let flat = crate::terrain::TerrainGrid::flat(10.0);
+        let t = offscreen_camera_transform(Vec3::new(3.0, 99.0, -4.0), &flat);
         let focus = Vec3::new(3.0, SHOT_CAM_FOCUS_Y, -4.0);
         assert_eq!(t.translation, focus + SHOT_CAM_OFFSET);
         let fwd = t.forward().as_vec3();
         assert!((fwd - (focus - t.translation).normalize()).length() < 1e-5);
+    }
+
+    /// On real terrain the eye must clear the local surface even when the canonical
+    /// offset would bury it in a hillside.
+    #[test]
+    fn offscreen_camera_stays_above_terrain() {
+        let g = crate::terrain::TerrainGrid::gcr();
+        for xz in [
+            Vec2::ZERO,
+            Vec2::new(4000.0, -1200.0),
+            Vec2::new(-3465.0, 6285.0),
+        ] {
+            let crab = g.place(xz, 0.3);
+            let t = offscreen_camera_transform(crab, &g);
+            let ground = g.height(t.translation.x, t.translation.z);
+            assert!(
+                t.translation.y >= ground + SHOT_CAM_CLEARANCE - 1e-3,
+                "camera at {:?} sunk below surface {ground}",
+                t.translation
+            );
+        }
     }
 }
