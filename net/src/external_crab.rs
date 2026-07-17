@@ -25,6 +25,7 @@
 //! under every foot and craft (rl#281 stage 6).
 
 use bevy::prelude::*;
+use bevy_rapier3d::geometry::ColliderView;
 use bevy_rapier3d::prelude::*;
 
 use crate::sim::Pos;
@@ -708,7 +709,17 @@ fn integrate_crab(
             .iter()
             .filter(|(env, ..)| env.0 == idx)
             .filter_map(|(_, t, col)| {
-                let cap = col.as_capsule()?;
+                let Some((a, b, radius)) = claw_tip_capsule(col.as_typed_shape(), Mat4::IDENTITY)
+                else {
+                    // A claw the sim can't model is a code defect, never a skippable
+                    // row: this claw would stop touching players in MP with no other
+                    // symptom (rl#288). ERROR so it surfaces through fleet telemetry.
+                    error_once!(
+                        "claw capture: claw-tip collider is not capsule-readable — \
+                         this claw is INVISIBLE to MP claw-touch (rl#288)"
+                    );
+                    return None;
+                };
                 let rel = |p: Vec3| {
                     let w = t.transform_point(p);
                     // y is height above the surface under the claw point, so the sim's
@@ -716,12 +727,39 @@ fn integrate_crab(
                     Vec3::new(w.x - here.x, w.y - terrain.height(w.x, w.z), w.z - here.y)
                 };
                 Some(ArenaClaw {
-                    a: rel(cap.segment().a()),
-                    b: rel(cap.segment().b()),
-                    radius: cap.radius(),
+                    a: rel(a),
+                    b: rel(b),
+                    radius,
                 })
             })
             .collect();
+    }
+}
+
+/// Resolve a claw-tip collider to its capsule — segment endpoints in entity-local
+/// space plus radius — reading through compound wrappers (`spawn_crab` emits cuboid
+/// links as one-shape compounds, so a wrapped capsule must stay readable). `None` =
+/// not capsule-readable (including the ambiguous multi-capsule compound); the caller
+/// screams — a bare `as_capsule` here silently dropped the claw from MP claw-touch
+/// (rl#288).
+fn claw_tip_capsule(view: ColliderView<'_>, local: Mat4) -> Option<(Vec3, Vec3, f32)> {
+    match view {
+        ColliderView::Capsule(c) => {
+            let seg = c.segment();
+            Some((
+                local.transform_point3(seg.a()),
+                local.transform_point3(seg.b()),
+                c.radius(),
+            ))
+        }
+        ColliderView::Compound(c) => {
+            let mut caps = c.shapes().filter_map(|(pos, rot, sub)| {
+                claw_tip_capsule(sub, local * Mat4::from_rotation_translation(rot, pos))
+            });
+            let cap = caps.next();
+            if caps.next().is_some() { None } else { cap }
+        }
+        _ => None,
     }
 }
 
@@ -804,6 +842,42 @@ pub use probe::{ProbeSample, StabilityResult, run_headless_probe, run_vehicle_st
 /// tracked her live carapace, so her 9.6 m flail-walk dragged the parked ship's rendered
 /// pose 9.3 m; and the boarding spawn at 0.5 m altitude materialised the craft inside her
 /// body, so contact batted it ~8 m.
+#[cfg(test)]
+mod claw_tip_capsule_tests {
+    use super::*;
+
+    #[test]
+    fn reads_bare_and_compound_wrapped_capsules() {
+        let a = Vec3::new(0.0, -0.05, 0.0);
+        let b = Vec3::new(0.0, 0.05, 0.0);
+        let bare = Collider::capsule(a, b, 0.02);
+        let (ba, bb, br) = claw_tip_capsule(bare.as_typed_shape(), Mat4::IDENTITY).unwrap();
+        assert!((ba - a).length() < 1e-6 && (bb - b).length() < 1e-6 && (br - 0.02).abs() < 1e-6);
+
+        // spawn_crab's cuboid links ship as one-shape compounds; a compound-wrapped
+        // capsule must read through with the sub-shape placement folded in.
+        let off = Vec3::new(0.1, 0.2, 0.3);
+        let rot = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let wrapped = Collider::compound(vec![(off, rot, Collider::capsule(a, b, 0.02))]);
+        let (wa, wb, wr) = claw_tip_capsule(wrapped.as_typed_shape(), Mat4::IDENTITY).unwrap();
+        assert!((wa - (off + rot * a)).length() < 1e-5);
+        assert!((wb - (off + rot * b)).length() < 1e-5);
+        assert!((wr - 0.02).abs() < 1e-6);
+    }
+
+    #[test]
+    fn refuses_non_capsule_shapes() {
+        let boxy = Collider::compound(vec![(
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Collider::cuboid(0.1, 0.1, 0.1),
+        )]);
+        assert!(claw_tip_capsule(boxy.as_typed_shape(), Mat4::IDENTITY).is_none());
+        let bare_box = Collider::cuboid(0.1, 0.1, 0.1);
+        assert!(claw_tip_capsule(bare_box.as_typed_shape(), Mat4::IDENTITY).is_none());
+    }
+}
+
 #[cfg(test)]
 mod ship_wiggle_tests {
     use crab_world::bot::actuator::CrabActions;
