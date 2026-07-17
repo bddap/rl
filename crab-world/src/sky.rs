@@ -167,7 +167,7 @@ fn star(dir: Vec3) -> Vec3 {
     tint * (bright * falloff)
 }
 
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+pub(crate) fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -193,7 +193,7 @@ fn value_noise(p: Vec3) -> f32 {
     lerp(y0, y1, w.z)
 }
 
-fn hash3(x: i32, y: i32, z: i32) -> u32 {
+pub(crate) fn hash3(x: i32, y: i32, z: i32) -> u32 {
     let mut h = (x as u32).wrapping_mul(0x8da6_b343)
         ^ (y as u32).wrapping_mul(0xd816_3841)
         ^ (z as u32).wrapping_mul(0xcb1a_b31f);
@@ -203,7 +203,7 @@ fn hash3(x: i32, y: i32, z: i32) -> u32 {
     h
 }
 
-fn rand01(h: u32) -> f32 {
+pub(crate) fn rand01(h: u32) -> f32 {
     (h & 0x00ff_ffff) as f32 / 0x0100_0000 as f32
 }
 

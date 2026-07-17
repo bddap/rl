@@ -128,12 +128,6 @@ fn setup_walls(mut commands: Commands) {
     }
 }
 
-/// Marks this world as a vista (real relief): [`setup_arena_visuals`] inserts it so
-/// [`attach_vista_fog`] doesn't recompute relief per frame.
-#[cfg(feature = "render")]
-#[derive(Resource)]
-struct Vista;
-
 #[cfg(feature = "render")]
 fn setup_arena_visuals(
     mut commands: Commands,
@@ -150,9 +144,7 @@ fn setup_arena_visuals(
     // (rl#281 stage 3) gets a lower, cooler moon-sun for long relief shadows, plus
     // cascades stretched from the ~150 m default to mountain scale (30 m grid pitch
     // makes coarse far cascades invisible).
-    let vista = terrain.relief() >= crate::terrain::FLAT_RELIEF_MAX;
-    if vista {
-        commands.insert_resource(Vista);
+    if !terrain.is_flat() {
         commands.spawn((
             DirectionalLight {
                 shadows_enabled: true,
@@ -204,16 +196,17 @@ fn setup_arena_visuals(
     ));
 }
 
-/// Give every camera in a [`Vista`] world aerial-perspective fog toward the night
+/// Give every camera in a vista (real-relief, rendered) world aerial-perspective fog toward the night
 /// sky's horizon color. Runs in `Update` because cameras can spawn any time (the
 /// demo's orbit cam, the offscreen shot cam); same attach pattern as the skybox.
 #[cfg(feature = "render")]
 fn attach_vista_fog(
     mut commands: Commands,
-    vista: Option<Res<Vista>>,
+    visuals: Res<crate::Visuals>,
+    terrain: Res<crate::terrain::Terrain>,
     cams: Query<Entity, (With<Camera3d>, Without<DistanceFog>)>,
 ) {
-    if vista.is_none() {
+    if !visuals.0 || terrain.is_flat() {
         return;
     }
     for cam in &cams {

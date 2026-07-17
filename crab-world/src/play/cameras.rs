@@ -127,9 +127,10 @@ pub(super) fn orbit_camera(
 
 const SHOT_CAM_OFFSET: Vec3 = Vec3::new(1.9, 0.95, 2.5);
 const SHOT_CAM_FOCUS_Y: f32 = 0.5;
-/// Terrain can rise between the crab and the canonical camera offset; keep the eye at
-/// least this far above the surface so it never sinks into a hillside (where backface
-/// culling shows the valley BEHIND the hill instead of the crab).
+/// Terrain can rise between the crab and the canonical camera offset; keep the sight
+/// line at least this far above the surface (tapering to the focus, which sits at its
+/// own surface-relative height) so it never clips a hillside (where backface culling
+/// shows the valley BEHIND the hill instead of the crab).
 const SHOT_CAM_CLEARANCE: f32 = 0.6;
 
 fn offscreen_camera_transform(crab_xz: Vec3, terrain: &crate::terrain::TerrainGrid) -> Transform {
@@ -137,7 +138,16 @@ fn offscreen_camera_transform(crab_xz: Vec3, terrain: &crate::terrain::TerrainGr
     // framing (surface height 0), on terrain both ends ride the local ground.
     let focus = terrain.place(Vec2::new(crab_xz.x, crab_xz.z), SHOT_CAM_FOCUS_Y);
     let mut eye = focus + SHOT_CAM_OFFSET;
-    eye.y = eye.y.max(terrain.height(eye.x, eye.z) + SHOT_CAM_CLEARANCE);
+    // Clearing the eye POINT is not enough: a ridge between eye and focus can still
+    // cut the sight line even when both endpoints clear their own triangles. Sample
+    // the segment (xz is fixed; only eye.y varies) and lift the eye until every
+    // sample clears — raising eye.y only raises the segment, so one max pass is exact.
+    for t in [0.0f32, 0.25, 0.5, 0.75] {
+        let at = eye.lerp(focus, t);
+        let need = terrain.height(at.x, at.z) + SHOT_CAM_CLEARANCE * (1.0 - t);
+        // seg(t).y = eye.y * (1 - t) + focus.y * t
+        eye.y = eye.y.max((need - focus.y * t) / (1.0 - t));
+    }
     Transform::from_translation(eye).looking_at(focus, Vec3::Y)
 }
 
@@ -189,10 +199,10 @@ mod tests {
         assert!((fwd - (focus - t.translation).normalize()).length() < 1e-5);
     }
 
-    /// On real terrain the eye must clear the local surface even when the canonical
-    /// offset would bury it in a hillside.
+    /// On real terrain the whole sight line — not just the eye point — must clear the
+    /// surface even when the canonical offset would bury it in a hillside.
     #[test]
-    fn offscreen_camera_stays_above_terrain() {
+    fn offscreen_sight_line_stays_above_terrain() {
         let g = crate::terrain::TerrainGrid::gcr();
         for xz in [
             Vec2::ZERO,
@@ -201,12 +211,16 @@ mod tests {
         ] {
             let crab = g.place(xz, 0.3);
             let t = offscreen_camera_transform(crab, &g);
-            let ground = g.height(t.translation.x, t.translation.z);
-            assert!(
-                t.translation.y >= ground + SHOT_CAM_CLEARANCE - 1e-3,
-                "camera at {:?} sunk below surface {ground}",
-                t.translation
-            );
+            let focus = g.place(xz, SHOT_CAM_FOCUS_Y);
+            for s in [0.0f32, 0.25, 0.5, 0.75] {
+                let at = t.translation.lerp(focus, s);
+                let ground = g.height(at.x, at.z);
+                let margin = SHOT_CAM_CLEARANCE * (1.0 - s);
+                assert!(
+                    at.y >= ground + margin - 1e-3,
+                    "sight line at t={s} ({at:?}) sunk below surface {ground} at {xz}"
+                );
+            }
         }
     }
 }
