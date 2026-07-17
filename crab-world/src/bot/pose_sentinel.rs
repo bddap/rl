@@ -12,7 +12,7 @@
 //! body part's `Transform` is rapier's own writeback, which mirrors the rigid
 //! body's pose. So immediately before `SyncBackend` would consume a change, a
 //! `Transform` that diverged from its rigid body's pose is a foreign write.
-//! Failure tier mirrors `rescue_nonfinite_crabs` (rl#137): debug panics naming
+//! Failure tier mirrors `rescue_lost_crabs` (rl#137): debug panics naming
 //! the write; release logs the same message (rate-limited) and snaps the
 //! `Transform` back to the body's pose — a visible, loud self-heal that keeps a
 //! play session alive with correct physics instead of crashing it.
@@ -32,7 +32,7 @@
 //! every part through the sampled `CrabRenderPose` overlay on both arms — so in
 //! a correct build this sentinel is a pure tripwire for regressions.
 //!
-//! Non-finite poses are skipped: NaN is [`super::rescue_nonfinite_crabs`]'s
+//! Non-finite poses are skipped: NaN is [`super::rescue_lost_crabs`]'s
 //! case (a visible respawn), and a foreign write is caught at its first finite
 //! divergence, before NaN develops.
 //!

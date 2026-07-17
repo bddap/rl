@@ -158,7 +158,7 @@ impl Plugin for BotPlugin {
             .init_resource::<RescueStats>()
             .add_message::<CrabRescued>()
             .add_systems(Startup, spawn_initial_crabs)
-            .add_systems(FixedUpdate, rescue_nonfinite_crabs.before(BotSet::Sense))
+            .add_systems(FixedUpdate, rescue_lost_crabs.before(BotSet::Sense))
             .configure_sets(
                 FixedUpdate,
                 PoseSentinelSet
@@ -208,7 +208,11 @@ pub struct CrabRescueIsFault;
 #[derive(Resource, Default)]
 pub struct RescueStats {
     pub total: u64,
-    pub since_report: u32,
+    /// Rescues since the telemetry drain last cleared, tallied PER REASON: the
+    /// fault/warn split must survive aggregation, or a legitimate tunneling rescue
+    /// surfaces on the hub feed as an rl#137 non-finite fault — a false alarm.
+    pub since_nonfinite: u32,
+    pub since_below_terrain: u32,
     pub last_body: Option<RescueBody>,
 }
 
@@ -218,11 +222,48 @@ pub struct CrabRescued {
     pub body: RescueBody,
 }
 
+/// How far below the local terrain surface a part must sink before the y-floor rescue
+/// fires (rl#283). The heightfield is a zero-thickness sheet — a body knocked through it
+/// (vertical tunneling starts around 1.5-4 m/s for cm-scale feet at this tick rate)
+/// falls forever, where the old halfspace made that impossible. Soft contacts rest with
+/// ~cm penetration, so metres below the surface is unambiguous.
+const BELOW_TERRAIN_RESCUE_M: f32 = 2.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RescueReason {
+    /// NaN/inf pose — a physics-correctness fault (rl#137): error + debug-panic when
+    /// armed. Wins over [`Self::BelowTerrain`] when one env shows both.
+    NonFinite,
+    /// Tunneled through the heightfield sheet (rl#283) — reachable by legitimate hard
+    /// hits, so it warns when armed instead of faulting. Also catches a body fallen
+    /// past the tile EDGE (the sampler clamps flat there but the collider ends): the
+    /// interim backstop until rl#281's real world-bounds policy.
+    BelowTerrain,
+}
+
+impl RescueReason {
+    /// Per-reason rate-limit slot — shared limiting would let a warn-tier tunneling
+    /// stream starve the rl#137 error line, which in release is the only fault signal.
+    fn log_slot(self) -> usize {
+        match self {
+            RescueReason::NonFinite => 0,
+            RescueReason::BelowTerrain => 1,
+        }
+    }
+}
+
+/// Respawn crabs physics can no longer recover: non-finite poses (rl#137) and bodies
+/// fallen through the terrain sheet (rl#283 — the y-floor that restores the old
+/// halfspace's no-fall-forever guarantee, keyed to [`TerrainGrid::height`] so it tracks
+/// mountains and valleys alike).
+///
+/// [`TerrainGrid::height`]: crate::terrain::TerrainGrid::height
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn rescue_nonfinite_crabs(
+pub fn rescue_lost_crabs(
     mut commands: Commands,
     assets: Res<body::CrabAssets>,
     spawns: Res<CrabSpawns>,
+    terrain: Res<crate::terrain::Terrain>,
     parts: Query<
         (
             Entity,
@@ -237,59 +278,100 @@ pub fn rescue_nonfinite_crabs(
     mut stats: ResMut<RescueStats>,
     is_fault: Option<Res<CrabRescueIsFault>>,
     time: Res<Time>,
-    mut last_log_secs: Local<Option<f64>>,
+    mut last_log_secs: Local<[Option<f64>; 2]>,
 ) {
-    let mut sick: Vec<(usize, RescueBody, Vec3, Quat)> = Vec::new();
+    // Worst reason wins per env: a blowup plausibly leaves some parts NaN and others
+    // flung finite-but-deep-below in the same tick, and query order is arbitrary — the
+    // env must still register as the rl#137 fault, not a mere tunneling warn.
+    let mut sick: std::collections::BTreeMap<usize, (RescueBody, Vec3, Quat, RescueReason)> =
+        Default::default();
     for (_, id, t, carapace, joint) in parts.iter() {
-        if (!t.translation.is_finite() || !t.rotation.is_finite())
-            && !sick.iter().any(|(e, ..)| *e == id.0)
+        let reason = if !t.translation.is_finite() || !t.rotation.is_finite() {
+            RescueReason::NonFinite
+        } else if t.translation.y
+            < terrain.height(t.translation.x, t.translation.z) - BELOW_TERRAIN_RESCUE_M
         {
-            let body = if carapace.is_some() {
-                RescueBody::Carapace
-            } else if let Some(j) = joint {
-                RescueBody::Joint(j.id)
-            } else {
-                RescueBody::Unknown
-            };
-            sick.push((id.0, body, t.translation, t.rotation));
+            RescueReason::BelowTerrain
+        } else {
+            continue;
+        };
+        match sick.get(&id.0) {
+            Some(&(.., RescueReason::NonFinite)) => continue,
+            Some(_) if reason == RescueReason::BelowTerrain => continue,
+            _ => {}
         }
+        let body = if carapace.is_some() {
+            RescueBody::Carapace
+        } else if let Some(j) = joint {
+            RescueBody::Joint(j.id)
+        } else {
+            RescueBody::Unknown
+        };
+        sick.insert(id.0, (body, t.translation, t.rotation, reason));
     }
     if sick.is_empty() {
         return;
     }
 
     let fault = is_fault.is_some();
-    for &(env, body, translation, rotation) in &sick {
+    for (&env, &(body, translation, rotation, reason)) in &sick {
         stats.total += 1;
-        stats.since_report = stats.since_report.saturating_add(1);
+        match reason {
+            RescueReason::NonFinite => {
+                stats.since_nonfinite = stats.since_nonfinite.saturating_add(1);
+            }
+            RescueReason::BelowTerrain => {
+                stats.since_below_terrain = stats.since_below_terrain.saturating_add(1);
+            }
+        }
         stats.last_body = Some(body);
 
-        if fault {
-            let now = time.elapsed_secs_f64();
-            if last_log_secs.is_none_or(|t| now - t >= 1.0) {
-                error!(
-                    "rescue_nonfinite_crabs: armed crab (env {env}) went NON-FINITE at `{body}` \
-                     translation={translation:?} rotation={rotation:?} — respawning as a VISIBLE \
-                     last resort (physics-correctness fault, rl#137; rescue total={}). A stable \
-                     trained Sally must never trip this.",
-                    stats.total
+        if !fault {
+            continue;
+        }
+        let now = time.elapsed_secs_f64();
+        let log_ok = last_log_secs[reason.log_slot()].is_none_or(|t| now - t >= 1.0);
+        if log_ok {
+            last_log_secs[reason.log_slot()] = Some(now);
+        }
+        match reason {
+            RescueReason::NonFinite => {
+                if log_ok {
+                    error!(
+                        "rescue_lost_crabs: armed crab (env {env}) went NON-FINITE at `{body}` \
+                         translation={translation:?} rotation={rotation:?} — respawning as a \
+                         VISIBLE last resort (physics-correctness fault, rl#137; rescue \
+                         total={}). A stable trained Sally must never trip this.",
+                        stats.total
+                    );
+                }
+                #[cfg(debug_assertions)]
+                panic!(
+                    "rescue_lost_crabs: armed crab (env {env}) went NON-FINITE at `{body}` \
+                     translation={translation:?} rotation={rotation:?} (rl#137 — a stable \
+                     trained Sally must never go non-finite; this is a physics-correctness \
+                     regression)"
                 );
-                *last_log_secs = Some(now);
             }
-            #[cfg(debug_assertions)]
-            panic!(
-                "rescue_nonfinite_crabs: armed crab (env {env}) went NON-FINITE at `{body}` \
-                 translation={translation:?} rotation={rotation:?} (rl#137 — a stable trained \
-                 Sally must never go non-finite; this is a physics-correctness regression)"
-            );
+            RescueReason::BelowTerrain => {
+                if log_ok {
+                    warn!(
+                        "rescue_lost_crabs: armed crab (env {env}) fell through the terrain at \
+                         `{body}` translation={translation:?} — respawning (rl#283 y-floor; \
+                         rescue total={})",
+                        stats.total
+                    );
+                }
+            }
         }
     }
 
-    for &(env, body, ..) in &sick {
+    for (&env, &(body, ..)) in &sick {
         let origin = spawns.origin(env);
         respawn_crab(
             &mut commands,
             &assets,
+            &terrain,
             parts
                 .iter()
                 .filter(|(_, id, ..)| id.0 == env)
@@ -304,11 +386,20 @@ pub fn rescue_nonfinite_crabs(
 pub fn respawn_crab(
     commands: &mut Commands,
     assets: &body::CrabAssets,
+    terrain: &crate::terrain::TerrainGrid,
     parts: impl Iterator<Item = Entity>,
     origin: Vec3,
     env: usize,
 ) {
-    respawn_crab_rotated(commands, assets, parts, origin, env, Quat::IDENTITY);
+    respawn_crab_rotated(
+        commands,
+        assets,
+        terrain,
+        parts,
+        origin,
+        env,
+        Quat::IDENTITY,
+    );
 }
 
 pub const RESET_GRACE_TICKS: u32 = 32;
@@ -320,6 +411,7 @@ pub fn settle_countdown(grace: u32) -> u32 {
 pub fn respawn_crab_rotated(
     commands: &mut Commands,
     assets: &body::CrabAssets,
+    terrain: &crate::terrain::TerrainGrid,
     parts: impl Iterator<Item = Entity>,
     origin: Vec3,
     env: usize,
@@ -328,7 +420,7 @@ pub fn respawn_crab_rotated(
     for e in parts {
         commands.entity(e).despawn();
     }
-    body::spawn_crab(commands, assets, origin, env, init_rotation);
+    body::spawn_crab(commands, assets, terrain, origin, env, init_rotation);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -351,6 +443,7 @@ pub fn spawn_initial_crabs(
         body::spawn_crab(
             &mut commands,
             &assets,
+            &terrain,
             spawns.origin(env),
             env,
             Quat::IDENTITY,

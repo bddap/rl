@@ -321,12 +321,20 @@ pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
         return;
     }
     let origins = world.resource::<CrabSpawns>().clone();
+    let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
     world.resource_scope(|world, assets: Mut<crab_world::bot::body::CrabAssets>| {
         let mut queue = CommandQueue::default();
         let mut commands = Commands::new(&mut queue, world);
         for (env, parts) in by_env {
             let origin = origins.origin(env);
-            crab_world::bot::respawn_crab(&mut commands, &assets, parts.into_iter(), origin, env);
+            crab_world::bot::respawn_crab(
+                &mut commands,
+                &assets,
+                &terrain,
+                parts.into_iter(),
+                origin,
+                env,
+            );
         }
         queue.apply(world);
     });
@@ -434,7 +442,7 @@ impl Plugin for ExternalCrabPlugin {
                 // full recenter distance from its walker.
                 bound_body_pos_drift
                     .after(crab_world::bot::PoseSentinelSet)
-                    .after(crab_world::bot::rescue_nonfinite_crabs)
+                    .after(crab_world::bot::rescue_lost_crabs)
                     .before(set_crab_walk_target)
                     .before(crab_world::vehicle::VehicleManageSet),
                 set_crab_walk_target.before(BotSet::Sense),

@@ -279,6 +279,7 @@ pub(crate) fn reset_crab(
     mut actions: ResMut<CrabActions>,
     assets: Res<CrabAssets>,
     spawns: Res<CrabSpawns>,
+    terrain: Res<crate::terrain::Terrain>,
     parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>,
 ) {
     for e in 0..training.envs.len() {
@@ -292,6 +293,7 @@ pub(crate) fn reset_crab(
             respawn_crab_rotated(
                 &mut commands,
                 &assets,
+                &terrain,
                 parts.iter().filter(|(_, id)| id.0 == e).map(|(ent, _)| ent),
                 origin,
                 e,

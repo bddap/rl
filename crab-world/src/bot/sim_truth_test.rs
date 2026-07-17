@@ -519,10 +519,12 @@ fn airborne_crab_conserves_angular_momentum() {
         .run_system_once(
             |mut commands: Commands,
              assets: Res<CrabAssets>,
+             terrain: Res<crate::terrain::Terrain>,
              parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>| {
                 respawn_crab(
                     &mut commands,
                     &assets,
+                    &terrain,
                     parts.iter().filter(|(_, id)| id.0 == 0).map(|(e, _)| e),
                     Vec3::new(0.0, 80.0, 0.0),
                     0,
