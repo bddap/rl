@@ -64,7 +64,13 @@ fn menu_handoff_installs_the_chosen_round() {
 fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
     use super::app::check_armable;
     use crate::SyncVerdict;
-    let synced = |body, crabs| Some(SyncVerdict { body, crabs });
+    let synced = |body, crabs| {
+        Some(SyncVerdict {
+            body,
+            crabs,
+            plant: true,
+        })
+    };
     assert!(
         check_armable(None).is_ok(),
         "solo (no net, no formation verdict) always arms"
@@ -96,6 +102,20 @@ fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
     assert!(
         colliders.contains("refusing"),
         "the round REFUSES (no silent integer fallback): {colliders}"
+    );
+    let plant = check_armable(Some(SyncVerdict {
+        body: true,
+        crabs: true,
+        plant: false,
+    }))
+    .expect_err("a plant-mismatched networked round must refuse — the worlds disagree (rl#286)");
+    assert!(
+        plant.contains("arena") && plant.contains("terrain bake"),
+        "names the plant cause: {plant}"
+    );
+    assert!(
+        plant.contains("rl-update"),
+        "tells the operator the fix: {plant}"
     );
 }
 

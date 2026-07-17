@@ -224,6 +224,32 @@ fn parse_plant(text: &str) -> Result<Plant, String> {
     Ok(plant)
 }
 
+/// The effective-plant digest the MP membership handshake advertises (rl#286),
+/// the world-identity sibling of [`crate::mesh_fallback::constructed_body_digest`]:
+/// arena tag, the terrain bake's byte digest when that arena stands on one, and the
+/// per-joint friction caps the solver will actually run. Peers whose digests differ
+/// would simulate/render DIFFERENT WORLDS under identical body digests — a flat
+/// client adopting terrain-height poses floats/buries every crab and craft — so the
+/// sync verdict refuses to arm the round instead.
+///
+/// Digests the RESOLVED physics, not the override provenance: an env/sidecar cap set
+/// to the default value hashes identically to no override, and a changed default
+/// constant changes the digest. MUST run after [`adopt_recorded_plant`] (it reads the
+/// same read-once overrides — reading first would latch the pre-adopt plant, which
+/// adoption then refuses loudly rather than mismeasure).
+pub fn constructed_plant_digest() -> u64 {
+    let mut h = crate::fnv::Fnv::new();
+    let arena = crate::physics::train_arena();
+    h.write(arena.key().as_bytes());
+    if arena == crate::physics::TrainArena::Terrain {
+        h.write(&crate::terrain::gcr_bake_digest().to_le_bytes());
+    }
+    let cap = friction_cap_override();
+    h.write(&cap.unwrap_or(LEG_FRICTION_CAP).to_bits().to_le_bytes());
+    h.write(&cap.unwrap_or(CLAW_FRICTION_CAP).to_bits().to_le_bytes());
+    h.finish()
+}
+
 /// One human-readable source for "which plant is this?" — logged by `learn` (into
 /// train.log) and `eval` (beside the `EVAL_RESULT` lines) so run and measurement
 /// artifacts both prove the friction cap and arena they ran under.

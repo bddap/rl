@@ -22,8 +22,7 @@ use crate::net_loop::{self, JoinResult};
 pub struct MenuPlugin {
     pub seed: u64,
     pub telemetry: Option<EndpointId>,
-    pub body_digest: u64,
-    pub crab_count: u8,
+    pub stamp: crate::SyncStamp,
 }
 
 #[derive(Component)]
@@ -46,26 +45,21 @@ impl Plugin for MenuPlugin {
         app.world_mut()
             .resource_mut::<EguiGlobalSettings>()
             .auto_create_primary_context = false;
-        app.insert_non_send_resource(MenuState::new(
-            self.seed,
-            self.telemetry,
-            self.body_digest,
-            self.crab_count,
-        ))
-        .add_systems(
-            OnEnter(AppPhase::Menu),
-            // consume_round_over first: it feeds last_host, which reset_menu_nav reads.
-            (spawn_menu_camera, consume_round_over, reset_menu_nav).chain(),
-        )
-        // Tear it down as the round begins, before the FP Camera3d spawns, so the
-        // two never coexist.
-        .add_systems(OnEnter(AppPhase::Playing), despawn_menu_camera)
-        // The menu + connecting poll draw in the egui pass (per render frame),
-        // gated to the two pre-round phases so they vanish once Playing.
-        .add_systems(
-            EguiPrimaryContextPass,
-            menu_screen.run_if(not(in_state(AppPhase::Playing))),
-        );
+        app.insert_non_send_resource(MenuState::new(self.seed, self.telemetry, self.stamp))
+            .add_systems(
+                OnEnter(AppPhase::Menu),
+                // consume_round_over first: it feeds last_host, which reset_menu_nav reads.
+                (spawn_menu_camera, consume_round_over, reset_menu_nav).chain(),
+            )
+            // Tear it down as the round begins, before the FP Camera3d spawns, so the
+            // two never coexist.
+            .add_systems(OnEnter(AppPhase::Playing), despawn_menu_camera)
+            // The menu + connecting poll draw in the egui pass (per render frame),
+            // gated to the two pre-round phases so they vanish once Playing.
+            .add_systems(
+                EguiPrimaryContextPass,
+                menu_screen.run_if(not(in_state(AppPhase::Playing))),
+            );
     }
 }
 
@@ -100,8 +94,7 @@ pub(super) fn despawn_menu_camera(mut commands: Commands, cams: Query<Entity, Wi
 struct MenuState {
     seed: u64,
     telemetry: Option<EndpointId>,
-    body_digest: u64,
-    crab_count: u8,
+    stamp: crate::SyncStamp,
     nav: MenuNav,
     stick_latched: bool,
     code_input: String,
@@ -112,12 +105,11 @@ struct MenuState {
 }
 
 impl MenuState {
-    fn new(seed: u64, telemetry: Option<EndpointId>, body_digest: u64, crab_count: u8) -> Self {
+    fn new(seed: u64, telemetry: Option<EndpointId>, stamp: crate::SyncStamp) -> Self {
         Self {
             seed,
             telemetry,
-            body_digest,
-            crab_count,
+            stamp,
             nav: MenuNav::new(),
             stick_latched: false,
             code_input: String::new(),
@@ -365,20 +357,9 @@ fn apply_action(
             };
             state.error = None;
             let (tx, rx) = mpsc::channel();
-            let (seed, telemetry, body_digest, crab_count) = (
-                state.seed,
-                state.telemetry,
-                state.body_digest,
-                state.crab_count,
-            );
+            let (seed, telemetry, stamp) = (state.seed, state.telemetry, state.stamp);
             std::thread::spawn(move || {
-                let _ = tx.send(net_loop::connect_and_join(
-                    seed,
-                    host,
-                    telemetry,
-                    body_digest,
-                    crab_count,
-                ));
+                let _ = tx.send(net_loop::connect_and_join(seed, host, telemetry, stamp));
             });
             state.rejoining = Some(rx);
             next.set(AppPhase::Connecting);
@@ -489,8 +470,7 @@ fn start_forming(state: &mut MenuState, choice: &StartChoice, next: &mut NextSta
         choice,
         state.seed,
         state.telemetry,
-        state.body_digest,
-        state.crab_count,
+        state.stamp,
     ));
     next.set(AppPhase::Connecting);
 }

@@ -16,8 +16,8 @@ pub use components::{
 };
 
 pub use joint_id::{
-    CrabJointId, PLANT_FILENAME, Side, adopt_recorded_plant, joint_angle, plant_provenance,
-    record_plant,
+    CrabJointId, PLANT_FILENAME, Side, adopt_recorded_plant, constructed_plant_digest, joint_angle,
+    plant_provenance, record_plant,
 };
 
 pub(crate) use spawn::random_spawn_rotation;

@@ -22,6 +22,14 @@ use crate::sky::{hash3, rand01, smoothstep};
 /// The stage-1 bake artifact for GCR (rl#281): seed 281, 1024², 30 m pitch.
 static GCR_TERRAIN_BYTES: &[u8] = include_bytes!("../assets/terrain/gcr-seed281.terrain");
 
+/// Digest of the committed bake artifact, for the MP plant handshake (rl#286): two
+/// peers whose binaries embed different bakes stand on different mountains even when
+/// both say "terrain", so the bytes themselves are what the digest must witness.
+pub fn gcr_bake_digest() -> u64 {
+    static DIGEST: OnceLock<u64> = OnceLock::new();
+    *DIGEST.get_or_init(|| crate::fnv::fnv1a(GCR_TERRAIN_BYTES))
+}
+
 const MAGIC: &[u8; 8] = b"RLTERR01";
 
 /// Cell-size cap for [`TerrainGrid::flat`], for f32 contact precision — parry solves

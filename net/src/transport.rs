@@ -24,7 +24,9 @@ use crate::snapshot::CoreSnapshot;
 // v16: articulation vehicle poses carry a kind byte (rl#260).
 // v17: world re-based to rig scale — UNIT 1000→100_000 grid/m and every constant's
 // physical meaning changed with it (rl#256); absolute wire positions are incompatible.
-pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/17";
+// v18: beats + join requests carry the effective-plant digest (arena/bake/friction,
+// rl#286); the widened frames are incompatible.
+pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/18";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
 
@@ -225,18 +227,20 @@ impl Codec for Beat {
 
 impl Codec for JoinRequest {
     const KIND: Frame = Frame::JoinRequest;
-    type Bytes = [u8; 9];
+    type Bytes = [u8; 17];
 
-    fn encode(&self) -> [u8; 9] {
-        let mut out = [0u8; 9];
-        out[0..8].copy_from_slice(&self.body_digest.to_le_bytes());
-        out[8] = self.crab_count;
+    fn encode(&self) -> [u8; 17] {
+        let mut out = [0u8; 17];
+        out[0..8].copy_from_slice(&self.stamp.body_digest.to_le_bytes());
+        out[8..16].copy_from_slice(&self.stamp.plant_digest.to_le_bytes());
+        out[16] = self.stamp.crab_count;
         out
     }
 
     fn decode(body: &[u8]) -> Result<Self> {
         let mut r = body;
         let body_digest = u64::from_le_bytes(take(&mut r, 8, "body_digest")?.try_into().unwrap());
+        let plant_digest = u64::from_le_bytes(take(&mut r, 8, "plant_digest")?.try_into().unwrap());
         let crab_count = take(&mut r, 1, "crab_count")?[0];
         anyhow::ensure!(
             r.is_empty(),
@@ -244,8 +248,11 @@ impl Codec for JoinRequest {
             r.len()
         );
         Ok(JoinRequest {
-            body_digest,
-            crab_count,
+            stamp: crate::SyncStamp {
+                body_digest,
+                plant_digest,
+                crab_count,
+            },
         })
     }
 }
@@ -301,6 +308,12 @@ impl Codec for Refusal {
             }
             Refusal::Departed => vec![2],
             Refusal::Forming => vec![3],
+            Refusal::Admission(AdmissionRefusal::PlantMismatch { host, joiner }) => {
+                let mut b = vec![4u8];
+                b.extend_from_slice(&host.to_le_bytes());
+                b.extend_from_slice(&joiner.to_le_bytes());
+                b
+            }
         }
     }
 
@@ -317,6 +330,12 @@ impl Codec for Refusal {
             }),
             2 => Refusal::Departed,
             3 => Refusal::Forming,
+            4 => Refusal::Admission(AdmissionRefusal::PlantMismatch {
+                host: u64::from_le_bytes(take(&mut r, 8, "host plant digest")?.try_into().unwrap()),
+                joiner: u64::from_le_bytes(
+                    take(&mut r, 8, "joiner plant digest")?.try_into().unwrap(),
+                ),
+            }),
             x => anyhow::bail!("unknown refusal tag {x:#x}"),
         };
         anyhow::ensure!(r.is_empty(), "refuse frame has {} trailing bytes", r.len());
@@ -1083,6 +1102,10 @@ mod tests {
                 joiner: 0x99aa_bbcc_ddee_ff00,
             }),
             Refusal::Admission(AdmissionRefusal::CrabCountMismatch { host: 3, joiner: 1 }),
+            Refusal::Admission(AdmissionRefusal::PlantMismatch {
+                host: 0x7e44_a100_0bad_5eed,
+                joiner: 0x7e44_a100_0bad_5eee,
+            }),
             Refusal::Departed,
             Refusal::Forming,
         ] {
@@ -1271,17 +1294,21 @@ mod tests {
     #[test]
     fn join_request_wire_roundtrips() {
         let req = JoinRequest {
-            body_digest: 0xdead_beef_cafe_f00d,
-            crab_count: 3,
+            stamp: crate::SyncStamp {
+                body_digest: 0xdead_beef_cafe_f00d,
+                plant_digest: 0x7e44_a100_0bad_5eed,
+                crab_count: 3,
+            },
         };
         assert_eq!(
             JoinRequest::decode(JoinRequest::encode(&req).as_ref()).unwrap(),
             req
         );
         assert!(JoinRequest::decode(&[0u8; 4]).is_err());
-        // Trailing bytes too — notably a pre-rl#206 16-byte (weights|assets) frame must be a loud
-        // version-skew error, never silently truncated to just its first field.
-        assert!(JoinRequest::decode(&[0u8; 16]).is_err());
+        // Trailing bytes too — notably a pre-rl#286 9-byte (body|count) frame must be a loud
+        // version-skew error, never silently defaulted to plant digest 0.
+        assert!(JoinRequest::decode(&[0u8; 9]).is_err());
+        assert!(JoinRequest::decode(&[0u8; 18]).is_err());
     }
 
     #[test]

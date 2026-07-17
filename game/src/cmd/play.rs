@@ -44,8 +44,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             dial,
             args.telemetry,
             None,
-            crab_world::mesh_fallback::constructed_body_digest(),
-            external_crab.len() as u8,
+            net::SyncStamp::local(external_crab.len() as u8),
         )?;
         match result {
             net_loop::MatchResult::Joined(joined) => {

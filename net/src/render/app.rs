@@ -99,7 +99,7 @@ pub fn build_windowed_app(
                 .before(update_controls_ui::<GcrControls>),
         );
 
-    let body_digest = crab_world::mesh_fallback::constructed_body_digest();
+    let stamp = crate::SyncStamp::local(external_crab.len() as u8);
 
     match boot {
         Boot::Round(round) => {
@@ -121,8 +121,7 @@ pub fn build_windowed_app(
             app.add_plugins(menu::MenuPlugin {
                 seed,
                 telemetry,
-                body_digest,
-                crab_count: external_crab.len() as u8,
+                stamp,
             });
             {
                 let policies = external_crab;
@@ -170,14 +169,26 @@ pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), Stri
     if crate::may_arm_external_crab(sync) {
         return Ok(());
     }
-    let (cause, fix) = if !sync.is_some_and(|v| v.crabs) {
+    // Arming only fails on a formed verdict (None always arms), and the destructure
+    // makes a new verdict axis a compile error here — it must pick its message.
+    let crate::SyncVerdict { body, crabs, plant } =
+        sync.expect("armability only fails on a formed verdict");
+    let (cause, fix) = if !crabs {
         (
             "the HOST's NN-crab count doesn't line up — it serves no crabs at all (a headless \
              driver hosting a rest-pose match) or a different count than this device renders",
             "host from a windowed device, and launch every device with the same \
              --nn-crab-checkpoint binding list",
         )
+    } else if !plant {
+        (
+            "the PLANT differs on a peer (a different arena, terrain bake, or joint-friction \
+             cap, rl#286) — its ground would disagree with the poses it adopts, floating or \
+             burying Sally and every craft on that screen",
+            "run rl-update on every device and launch all of them from the same checkpoint",
+        )
     } else {
+        debug_assert!(!body, "some axis must be false when arming is refused");
         (
             "the crab body differs on a peer (a different sally.glb, baked collider table, \
              or binary version) — it would build and render a different crab",

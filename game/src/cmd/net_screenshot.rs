@@ -61,8 +61,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         dial,
         None,
         None,
-        crab_world::mesh_fallback::constructed_body_digest(),
-        1,
+        net::SyncStamp::local(1),
     )?;
 
     let (client, driver) = match result {
