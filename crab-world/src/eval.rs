@@ -707,6 +707,12 @@ fn probe_lure(carapace: Vec3, real_target: Vec3, terrain: &crate::terrain::Terra
 /// carry is carapace-exact only — the re-landed feet meet differently-sloped ground
 /// and physics resolves the mismatch over the next ticks, an accepted approximation
 /// (the alternative, no recenter, is the guaranteed OOD artifact).
+///
+/// Deliberately a TELEPORT, not net's origin rebase (rl#281 stage 6): the probe is a
+/// MEASUREMENT — teleporting keeps the whole trek on the spawn's fixed locale, so
+/// pace numbers are comparable across checkpoints and reproducible per seed, where a
+/// rebase would let each run wander its own terrain path. Net inverts the trade: a
+/// rendered world must stay glued under her feet, and nothing there is a measurement.
 fn pace_recenter(
     spawns: Res<CrabSpawns>,
     terrain: Res<crate::terrain::Terrain>,

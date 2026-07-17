@@ -305,24 +305,18 @@ impl VehicleKind {
 /// Spawn `pilot`'s vehicle rigidbody where its walker stands — the boarding path
 /// ([`manage_vehicles`]): the craft materialises at the command's [`Boarding`] pose with the
 /// walker's facing and velocity (rl#258), lifted just enough that the collider clears the
-/// ground — the TERRAIN surface at the boarding spot, not y=0 (rl#283: a flat clamp buries
-/// the craft inside a hill). Being a floor, it cannot pull a too-high pose DOWN into a
-/// valley; since rl#281 stage 6 the production [`Boarding`] author (net's sim bridge)
-/// poses y on the surface itself, so the floor is a backstop, not the lift.
+/// ground ([`clear_of_ground`] — the TERRAIN surface at the boarding spot, not y=0;
+/// rl#283: a flat clamp buries the craft inside a hill). Since rl#281 stage 6 the
+/// production [`Boarding`] author (net's sim bridge) poses y on the surface itself, so
+/// the floor is a backstop, not the lift.
 fn spawn_vehicle(
     commands: &mut Commands,
     terrain: &crate::terrain::TerrainGrid,
     pilot: PilotId,
     cmd: &PilotCommand,
 ) {
-    let Boarding {
-        mut pos,
-        yaw,
-        velocity,
-    } = cmd.boarding;
-    pos.y = pos
-        .y
-        .max(terrain.height(pos.x, pos.z) + VEHICLE_HALF.y + GROUND_CLEARANCE);
+    let Boarding { pos, yaw, velocity } = cmd.boarding;
+    let pos = clear_of_ground(pos, GROUND_CLEARANCE, terrain);
     commands.spawn(vehicle_bundle(
         pilot,
         cmd.kind,
@@ -332,6 +326,20 @@ fn spawn_vehicle(
             angular: Vec3::ZERO,
         },
     ));
+}
+
+/// Lift a craft pose just enough that its collider clears the terrain surface at its
+/// xz (plus `clearance`); never pulls a higher pose down (a flying craft is
+/// untouched). ONE formula for every path that poses a craft against ground it didn't
+/// measure: the boarding spawn above (with [`GROUND_CLEARANCE`]), and net's
+/// round-RESTART carry (with zero clearance — a settled craft must not pop upward,
+/// and rapier resolves a touching contact gently), which preserves a surviving
+/// craft's WORLD pose while the anchor re-pins, shifting its arena xz onto
+/// differently-tall terrain — an uncleaned carry can embed a parked craft in the new
+/// locale's hillside (rl#281 stage 6).
+pub fn clear_of_ground(pos: Vec3, clearance: f32, terrain: &crate::terrain::TerrainGrid) -> Vec3 {
+    let floor = terrain.height(pos.x, pos.z) + VEHICLE_HALF.y + clearance;
+    Vec3::new(pos.x, pos.y.max(floor), pos.z)
 }
 
 pub fn spawn_ram_vehicle(

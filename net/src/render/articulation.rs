@@ -287,6 +287,11 @@ pub(super) fn adopt(world: &mut World, art: &CrabArticulation) {
 
     // Adopt the host's arena anchor — the client-side write of [`ArenaAnchor`]; the
     // host-side publisher runs in FixedUpdate, so the two can't fight (see the resource doc).
+    debug_assert_eq!(
+        art.arena_anchor[1], 0.0,
+        "wire anchor grew a y leg — ArenaAnchor's y = 0 gauge (rl#281 stage 6) has a \
+         second writer, and ground_y would double-lift through it"
+    );
     let anchor = crate::external_crab::ArenaAnchor(Vec3::from_array(art.arena_anchor));
     if world
         .get_resource::<crate::external_crab::ArenaAnchor>()
