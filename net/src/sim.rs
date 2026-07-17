@@ -279,7 +279,10 @@ pub struct Crab {
 
 /// One of Sally's claw colliders as of this tick, bridged into sim space: the pincer's
 /// real physics capsule (rl#249 — no separate hitbox to drift), as an XZ segment with
-/// per-end heights and the capsule radius, all on the fixed-point grid. Like the crab
+/// per-end heights ABOVE THE LOCAL GROUND SURFACE and the capsule radius, all on the
+/// fixed-point grid. Surface-relative y is what makes [`Self::downs`]'s player span
+/// (`0..=PLAYER_HEIGHT_FP`, a walker standing ON the ground) hold on the baked terrain
+/// tile exactly as on the flat grids (rl#281 stage 6). Like the crab
 /// pose this is external per-tick INPUT, not round state: the server's bridge refreshes
 /// it before every step, clients never see it (they receive the resulting
 /// [`PlayerStatus`] via snapshot), so it is excluded from `state_hash` and
