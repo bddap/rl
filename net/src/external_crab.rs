@@ -37,6 +37,9 @@ use crab_world::policy::Policy;
 use crab_world::training::targets::{TARGET_ARENA_HALF, band_lure, recenter_delta};
 use crab_world::vehicle::{Vehicle, VehicleControls};
 
+/// The posed hunt target's height ABOVE THE LOCAL SURFACE at the target's own xz —
+/// training's convention (`sample_target` bands height-above-surface), so `target:y`
+/// stays in-distribution on terrain; flat grids reduce to the old absolute 0.3.
 const CLAW_TARGET_Y: f32 = 0.3;
 
 /// rl#240 flip: recenter the spawn-relative body.pos obs channel whenever a long chase
@@ -54,7 +57,8 @@ const ARM_BODY_POS_RECENTER: bool = true;
 
 /// Arms [`bound_body_pos_drift`]'s origin rebase. Inserted by the plugin iff
 /// [`ARM_BODY_POS_RECENTER`] — the build-time decision is the sole authority; private
-/// so nothing else can arm it (tests live in this module).
+/// so nothing else can arm it. With the flip const-true, its runtime absence is now
+/// solely the tests' disarm lever (the measure-only pin).
 #[derive(Resource)]
 struct BodyPosRecenter;
 
@@ -297,12 +301,20 @@ pub(crate) fn restart_bridge_to_spawns(world: &mut World, spawns: &[Pos]) {
     let carry = old_w - world.resource::<ExternalCrabBridge>().anchor_world_m;
     if carry != Vec2::ZERO {
         let delta = Vec3::new(carry.x, 0.0, carry.y);
+        let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
         let mut q = world.query_filtered::<&mut Transform, With<Vehicle>>();
         for mut t in q.iter_mut(world) {
-            t.translation += delta;
+            // The carry preserves the craft's WORLD pose, which shifts its arena xz
+            // onto terrain the craft never measured — floor it clear of the new
+            // locale's ground. Zero clearance: a settled craft must not pop upward
+            // (flat grids: a no-op to contact slop).
+            t.translation =
+                crab_world::vehicle::clear_of_ground(t.translation + delta, 0.0, &terrain);
         }
         if let Some(mut controls) = world.get_resource_mut::<VehicleControls>() {
             for cmd in controls.0.values_mut() {
+                // Pending boardings get the same floor at their spawn edge
+                // (`spawn_vehicle`), so the raw carry suffices here.
                 cmd.boarding.pos += delta;
             }
         }
@@ -570,6 +582,7 @@ fn bound_body_pos_drift(
 fn set_crab_walk_target(
     bridge: Res<ExternalCrabBridge>,
     spawns: Res<CrabSpawns>,
+    terrain: Res<crab_world::terrain::Terrain>,
     mut targets: ResMut<CrabTargets>,
     carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
 ) {
@@ -601,7 +614,11 @@ fn set_crab_walk_target(
             .map(|(_, t)| t.translation)
             .unwrap_or(origin);
 
-        *slot = Some(band_lure(carapace, to_prey, CLAW_TARGET_Y));
+        // The lure's y rides the surface at the LURE's xz ([`CLAW_TARGET_Y`]) — an
+        // absolute y here would feed `target:y` an obs off by the local elevation,
+        // unmeasured by the rl#240 drift guard (which watches only body.pos).
+        let lure = band_lure(carapace, to_prey, 0.0);
+        *slot = Some(terrain.place(Vec2::new(lure.x, lure.z), CLAW_TARGET_Y));
     }
 }
 
@@ -1369,6 +1386,68 @@ mod gcr_crab_tests {
         assert!(
             (d - TARGET_ARENA_HALF).abs() < 0.05,
             "beyond-band prey must clamp to the {TARGET_ARENA_HALF} m edge, posed {d}"
+        );
+    }
+
+    /// rl#281 stage-6 review catch: the posed hunt target's y must ride the SURFACE at
+    /// the lure's own xz. An absolute y feeds `target:y` an obs off by the full local
+    /// elevation — and nothing measures it: the rl#240 drift guard watches only
+    /// body.pos, which the origin rebase keeps in-band.
+    #[test]
+    fn walk_target_y_rides_the_surface_on_terrain() {
+        pin_single_thread_pools();
+        let mut app = headless_stack(HeadlessStack {
+            num_envs: 1,
+            role: WorldRole::Standalone,
+            arena: crab_world::physics::Arena::Terrain,
+            visuals: crab_world::Visuals(false),
+        });
+        app.add_plugins(ExternalCrabPlugin::new(
+            vec![Policy::rest()],
+            vec![Pos::from_meters(0.0, 0.0)],
+        ));
+        arm(app.world_mut());
+        force_serial_schedules(&mut app);
+        for _ in 0..64 {
+            app.update();
+        }
+
+        // Walk her to unambiguous elevation (the tile center's datum is ~0, which
+        // couldn't distinguish surface-relative from absolute): scan outward for a
+        // ≥20 m spot, teleport onto its surface, and let the recenter rebase there.
+        let terrain = app
+            .world()
+            .resource::<crab_world::terrain::Terrain>()
+            .clone();
+        let cara0 = carapace_xz(&mut app);
+        let spot = (1..40)
+            .flat_map(|r| [(r as f32 * 100.0, 0.0), (0.0, r as f32 * 100.0)])
+            .map(|(x, z)| Vec2::new(x, z))
+            .find(|p| terrain.height(p.x, p.y).abs() > 20.0)
+            .expect("the seed-281 tile has >20 m relief within 4 km of center");
+        let dh = terrain.height(spot.x, spot.y) - terrain.height(cara0.x, cara0.y);
+        shift_parts(&mut app, Vec3::new(spot.x - cara0.x, dh, spot.y - cara0.y));
+        for _ in 0..2 {
+            app.update();
+        }
+
+        let cara = carapace_xz(&mut app);
+        let prey = cara + Vec2::new(50.0, 0.0); // beyond band ⇒ clamps to the 9 m edge
+        app.world_mut()
+            .resource_mut::<ExternalCrabBridge>()
+            .set_hunt_target(0, Some(Pos::from_meters(prey.x, prey.y)));
+        app.update();
+        let posed = app.world().resource::<CrabTargets>().envs[0].expect("target posed");
+        let surface = terrain.height(posed.x, posed.z);
+        assert!(
+            surface.abs() > 1.0,
+            "non-vacuous: the lure must sit on real elevation, surface {surface}"
+        );
+        assert!(
+            (posed.y - (surface + CLAW_TARGET_Y)).abs() < 0.05,
+            "target y must be {CLAW_TARGET_Y} above the surface at ITS xz \
+             (surface {surface}), got {}",
+            posed.y
         );
     }
 

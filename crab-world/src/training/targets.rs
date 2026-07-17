@@ -111,15 +111,18 @@ pub fn band_lure(carapace: Vec3, planar_to_target: Vec2, y: f32) -> Vec3 {
 }
 
 /// The rl#240 recenter's trigger and delta: once the carapace's planar drift from its
-/// spawn origin leaves the band, teleporting every crab part by exactly this delta
-/// puts it back onto the origin planar-wise; inside the band, `None`. The y component
-/// carries the terrain's surface-height difference across the shift, so
-/// height-above-ground (and with it the spawn-relative body:pos.y obs channel, which
-/// walks with elevation on terrain — rl#283's stage-4 audit item) is invariant; on the
-/// flat grids both heights are exactly 0 and the legacy y=0 delta falls out
-/// bit-identical. ONE copy for the same reason as [`band_lure`]: net's
-/// `bound_body_pos_drift` and the eval's `pace_recenter` must agree on when the
-/// spawn-relative body.pos obs channel is out of distribution.
+/// spawn origin leaves the band, this is the exact shift back onto the origin;
+/// inside the band, `None`. Consumers apply it two ways (rl#281 stage 6): the eval's
+/// `pace_recenter` TELEPORTS the crab by the delta (fixed-locale measurement — see its
+/// doc), while net's `bound_body_pos_drift` uses only the trigger and REBASES the
+/// origin instead (`CrabSpawns::rebase_origin_to` — a rendered world must stay glued
+/// under her feet). The y component carries the terrain's surface-height difference
+/// across the teleport, so height-above-ground (and with it the spawn-relative
+/// body:pos.y obs channel, which walks with elevation on terrain — rl#283's stage-4
+/// audit item) is invariant; on the flat grids both heights are exactly 0 and the
+/// legacy y=0 delta falls out bit-identical. ONE copy for the same reason as
+/// [`band_lure`]: every consumer must agree on when the spawn-relative body.pos obs
+/// channel is out of distribution.
 pub fn recenter_delta(origin: Vec3, carapace: Vec3, terrain: &TerrainGrid) -> Option<Vec3> {
     let drift = Vec2::new(carapace.x - origin.x, carapace.z - origin.z);
     (drift.length() > TARGET_ARENA_HALF).then(|| {
