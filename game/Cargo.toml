@@ -24,3 +24,7 @@ tokio.workspace = true
 # The headless net loop reports progress/faults as tracing events (not println), so they
 # ride the same subscriber + OTLP export as every other game fault (#133).
 tracing.workspace = true
+
+[dev-dependencies]
+ctor.workspace = true
+test-watchdog = { path = "../test-watchdog" }

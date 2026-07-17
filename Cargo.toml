@@ -9,6 +9,7 @@ members = [
     "rl-update-ui",
     "otel",
     "meshfit",
+    "test-watchdog",
 ]
 
 [workspace.package]
@@ -35,6 +36,7 @@ bincode = "1"
 # foreground game preempts it — `training/inproc.rs`). Already in the tree
 # transitively, so it adds no new crate.
 libc = "0.2"
+ctor = "1.0.9"
 
 iroh = "1"
 # The type iroh's send_datagram takes; already in the tree transitively via iroh.

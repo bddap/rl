@@ -9,45 +9,17 @@
 //! the bounds below. Lives in `game` because this crate always arms the
 //! `render` feature, so plain workspace `cargo test` runs it.
 
-use std::sync::mpsc;
-use std::time::Duration;
-
 use crab_world::Visuals;
 use crab_world::policy::Policy;
-use net::external_crab::{ProbeSample, run_headless_probe};
+use net::external_crab::run_headless_probe;
 
-/// rl#282: normally ~3 s, but observed wedged indefinitely (0% CPU, futex_wait,
-/// 45+ min) with 4+ live trainers saturating the box. Mechanism undiagnosed — NOT
-/// a wgpu device request: `headless_stack` passes `backends: None`, so bevy skips
-/// renderer init entirely. Run the probe on a watchdog thread so a wedge fails
-/// loudly instead of hanging every pre-push test run. The wedged thread can't be
-/// cancelled; it idles at 0% CPU until process exit reaps it.
-fn probe_with_watchdog(ticks: u64) -> Vec<ProbeSample> {
-    const WATCHDOG: Duration = Duration::from_secs(120);
-    let (tx, rx) = mpsc::channel();
-    let probe = std::thread::spawn(move || {
-        let _ = tx.send(run_headless_probe(
-            Policy::rest(),
-            0x116,
-            ticks,
-            1,
-            Visuals(true),
-        ));
-    });
-    match rx.recv_timeout(WATCHDOG) {
-        Ok(samples) => samples,
-        // Probe thread died without sending: a real in-probe panic (e.g. the pose
-        // sentinel) — surface it as itself, not as a timeout.
-        Err(mpsc::RecvTimeoutError::Disconnected) => match probe.join() {
-            Err(panic) => std::panic::resume_unwind(panic),
-            Ok(()) => unreachable!("probe thread exited without sending or panicking"),
-        },
-        Err(mpsc::RecvTimeoutError::Timeout) => panic!(
-            "armed render probe exceeded {WATCHDOG:?} (normal: ~3 s) — the rl#282 wedge \
-             shape, so far seen only alongside 4+ live trainers; check machine load \
-             before suspecting this change"
-        ),
-    }
+/// rl#282: this probe (~3 s normally) has wedged indefinitely (0% CPU,
+/// futex_wait, 45+ min) under trainer saturation — NOT a wgpu device request:
+/// `headless_stack` passes `backends: None`, so bevy skips renderer init
+/// entirely. The stall watchdog bounds it with a loud abort.
+#[ctor::ctor(unsafe)]
+fn arm_stall_watchdog() {
+    test_watchdog::arm();
 }
 
 #[test]
@@ -55,7 +27,7 @@ fn armed_visual_crab_stays_finite_and_grounded() {
     // Rest-pose policy on purpose: the guard is about the render/physics seam,
     // not the brain.
     let ticks = 256;
-    let samples = probe_with_watchdog(ticks);
+    let samples = run_headless_probe(Policy::rest(), 0x116, ticks, 1, Visuals(true));
     // One sample per FIXED step; the first app.update() has a zero delta and
     // fires no FixedUpdate, so N updates yield N-1 steps.
     assert!(
