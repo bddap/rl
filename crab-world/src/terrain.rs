@@ -248,12 +248,21 @@ impl TerrainGrid {
         let mut positions = Vec::with_capacity(rows * cols);
         let mut normals = Vec::with_capacity(rows * cols);
         let mut colors = Vec::with_capacity(rows * cols);
+        // Flat arenas carry UVs in mesh-local METERS (uv = xz) so the ground material
+        // can tile the rl#197 pilot checker at a scale IT owns (bddap/rl#287); linear
+        // interpolation is exact on a plane. Terrain self-cues (relief, biome bands,
+        // fog) and skips the attribute — no texture, no ~8 MB of dead UVs on the
+        // 1M-vert tile.
+        let mut uvs = flat.then(|| Vec::with_capacity(rows * cols));
         for row in 0..rows {
             for col in 0..cols {
                 let x = (col as f32 / (cols - 1) as f32 - 0.5) * ex;
                 let z = (row as f32 / (rows - 1) as f32 - 0.5) * ez;
                 let h = self.at(row, col);
                 positions.push([x, h, z]);
+                if let Some(uvs) = &mut uvs {
+                    uvs.push([x, z]);
+                }
                 let (c0, c1) = (col.saturating_sub(1), (col + 1).min(cols - 1));
                 let (r0, r1) = (row.saturating_sub(1), (row + 1).min(rows - 1));
                 let dhdx = (self.at(row, c1) - self.at(row, c0)) / (self.cell * (c1 - c0) as f32);
@@ -277,14 +286,18 @@ impl TerrainGrid {
                 indices.extend([v00, v10, v01, v10, v11, v01]);
             }
         }
-        Mesh::new(
+        let mut mesh = Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-        .with_inserted_indices(Indices::U32(indices))
+        .with_inserted_indices(Indices::U32(indices));
+        if let Some(uvs) = uvs {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        }
+        mesh
     }
 }
 
@@ -455,6 +468,38 @@ mod tests {
         // The vista/flat visual fork (lighting, fog, biome tint) keys on this.
         assert!(TerrainGrid::flat(10.0).is_flat());
         assert!(!TerrainGrid::gcr().is_flat());
+    }
+
+    /// The rl#197 pilot-cue contract (bddap/rl#287): a flat arena's mesh carries UVs in
+    /// mesh-local METERS (uv = xz) so the ground material can tile the checker at a
+    /// scale it owns; terrain skips the attribute (it self-cues, and the material only
+    /// textures flat ground).
+    #[cfg(feature = "render")]
+    #[test]
+    fn mesh_uvs_flat_mesh_local_meters_terrain_none() {
+        use bevy::mesh::VertexAttributeValues;
+
+        let flat = TerrainGrid::flat(10.0).mesh();
+        let (pos, uv) = match (
+            flat.attribute(Mesh::ATTRIBUTE_POSITION),
+            flat.attribute(Mesh::ATTRIBUTE_UV_0),
+        ) {
+            (
+                Some(VertexAttributeValues::Float32x3(p)),
+                Some(VertexAttributeValues::Float32x2(u)),
+            ) => (p, u),
+            other => panic!("expected positions + Float32x2 UVs on flat mesh, got {other:?}"),
+        };
+        for (p, u) in pos.iter().zip(uv) {
+            assert_eq!([p[0], p[2]], *u);
+        }
+
+        assert!(
+            TerrainGrid::gcr()
+                .mesh()
+                .attribute(Mesh::ATTRIBUTE_UV_0)
+                .is_none()
+        );
     }
 
     /// The biome tint contract the taste loop leans on: flat arenas keep ONE uniform
