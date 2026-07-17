@@ -80,6 +80,17 @@ pub struct Args {
     #[arg(long, env = "RL_TARGET_BALL_AT", value_name = "X,Y,Z", value_parser = parse_vec3)]
     target_ball_at: Option<Vec3>,
 
+    /// Fix the --screenshot camera at this world position instead of the crab-tracking
+    /// close-up (vista framing, rl#281). Pairs with --shot-focus.
+    #[arg(long, value_name = "X,Y,Z", value_parser = parse_vec3, requires = "shot_focus",
+          allow_hyphen_values = true)]
+    shot_cam: Option<Vec3>,
+
+    /// Where the fixed --shot-cam camera looks.
+    #[arg(long, value_name = "X,Y,Z", value_parser = parse_vec3, requires = "shot_cam",
+          allow_hyphen_values = true)]
+    shot_focus: Option<Vec3>,
+
     /// Drive the selected joints at this action value in --screenshot mode (pose stills).
     #[arg(long, env = "RL_RIG_POSE", allow_negative_numbers = true,
           value_parser = parse_finite_f32)]
@@ -271,6 +282,7 @@ fn main() {
                 overrides,
                 target_ball: args.target_ball || args.target_ball_at.is_some(),
                 rig_pose: args.rig_pose.map(|a| (a, args.rig_pose_part)),
+                shot_view: args.shot_cam.zip(args.shot_focus),
                 controls,
             });
         }

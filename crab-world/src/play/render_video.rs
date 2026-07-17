@@ -79,6 +79,7 @@ impl Plugin for RenderVideoPlugin {
             settle: 0,
             width: self.width,
             height: self.height,
+            view: None,
         });
         app.insert_resource(VideoConfig {
             out_path: self.path.clone(),

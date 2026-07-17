@@ -133,6 +133,9 @@ pub struct ScreenshotPlugin {
     pub target_ball: bool,
     /// Drive these joints at this action value for a pose still.
     pub rig_pose: Option<(f32, RigPosePart)>,
+    /// Fixed `(eye, look-at)` for the shot camera instead of the crab-tracking
+    /// close-up — vista framing for the rl#281 terrain taste loop.
+    pub shot_view: Option<(Vec3, Vec3)>,
     pub controls: crate::controls::ControlsOverrides<DemoControls>,
 }
 
@@ -142,6 +145,7 @@ pub(in crate::play) struct ShotConfig {
     settle: u32,
     pub(in crate::play) width: u32,
     pub(in crate::play) height: u32,
+    pub(in crate::play) view: Option<(Vec3, Vec3)>,
 }
 
 impl Plugin for ScreenshotPlugin {
@@ -180,6 +184,7 @@ impl Plugin for ScreenshotPlugin {
             settle: self.settle,
             width: self.width,
             height: self.height,
+            view: self.shot_view,
         })
         .init_resource::<ShotProgress>()
         .add_systems(Startup, spawn_offscreen_camera)

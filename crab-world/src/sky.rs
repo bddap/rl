@@ -104,11 +104,27 @@ fn sky_color(dir: Vec3) -> [u8; 3] {
     [to_u8(c.x), to_u8(c.y), to_u8(c.z)]
 }
 
+/// Sky-gradient tone at the horizon (srgb). Lifted out of [`base_gradient`] because it
+/// is also what vista fog must converge to for terrain to dissolve into this sky
+/// ([`horizon_fog_color`]).
+const HORIZON: Vec3 = Vec3::new(0.078, 0.122, 0.235);
+
 fn base_gradient(dir: Vec3) -> Vec3 {
-    let horizon = Vec3::new(0.078, 0.122, 0.235);
     let zenith = Vec3::new(0.024, 0.039, 0.110);
     let t = smoothstep(0.0, 0.9, dir.y.max(0.0));
-    horizon.lerp(zenith, t)
+    HORIZON.lerp(zenith, t)
+}
+
+/// The color the skybox actually RENDERS at the horizon, for camera fog: distant
+/// geometry then fades INTO the sky rather than into a mismatched haze (rl#281 stage 3
+/// — it is also what hides the baked tile's hard edge). Plain srgb, no HDR scaling:
+/// bevy pre-exposes lights, and the fog mix runs on those exposed values, so
+/// `DistanceFog.color` is display-relative — and [`SKY_BRIGHTNESS`] = 1000 ≈ cancels
+/// the default exposure (1/(1.2·2^9.7) ≈ 1/998), so the skybox's horizon texel lands
+/// on screen at ~its authored srgb value. An HDR-scaled fog color here renders every
+/// fogged pixel cyan-white (found the hard way).
+pub(crate) fn horizon_fog_color() -> Color {
+    Color::srgb(HORIZON.x, HORIZON.y, HORIZON.z)
 }
 
 fn milky_way(dir: Vec3) -> Vec3 {
