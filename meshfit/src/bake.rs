@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 
 use bevy::prelude::*;
 use crab_world::bot::body::{CrabJointId, Side};
-use crab_world::bot::rig::{PartId, RigLink, RigRecipe, arc_to};
+use crab_world::bot::rig::{LinkShape, PartId, RigLink, RigRecipe, arc_to};
 
 use crate::fit::fit_capsule;
 use crate::gltf_load::LoadedModel;
@@ -39,8 +39,10 @@ pub fn fitted_recipe(model: &LoadedModel) -> Option<RigRecipe> {
         let seg = cap.b - cap.a;
         link.center = (cap.a + cap.b) * 0.5 - origin;
         link.col_rot = arc_to(Vec3::Y, seg);
-        link.half_height = seg.length() * 0.5;
-        link.radius = cap.radius;
+        link.shape = LinkShape::Capsule {
+            half_height: seg.length() * 0.5,
+            radius: cap.radius,
+        };
     }
     Some(recipe)
 }
@@ -84,6 +86,20 @@ fn joint(id: CrabJointId) -> String {
     }
 }
 
+fn shape(s: LinkShape) -> String {
+    match s {
+        LinkShape::Capsule {
+            half_height,
+            radius,
+        } => format!(
+            "LinkShape::Capsule {{ half_height: {}, radius: {} }}",
+            f(half_height),
+            f(radius)
+        ),
+        LinkShape::Cuboid { half } => format!("LinkShape::Cuboid {{ half: {} }}", vec3(half)),
+    }
+}
+
 fn push_link(out: &mut String, l: &RigLink) {
     let parent = match l.parent {
         None => "None".to_string(),
@@ -95,12 +111,11 @@ fn push_link(out: &mut String, l: &RigLink) {
     };
     let _ = write!(
         out,
-        "            RigLink {{\n                bone: {:?}.to_string(),\n                parent: {parent},\n                anchor1: {},\n                axis_local: {},\n                half_height: {},\n                radius: {},\n                center: {},\n                col_rot: {},\n                density: {},\n                actuated: {actuated},\n            }},\n",
+        "            RigLink {{\n                bone: {:?}.to_string(),\n                parent: {parent},\n                anchor1: {},\n                axis_local: {},\n                shape: {},\n                center: {},\n                col_rot: {},\n                density: {},\n                actuated: {actuated},\n            }},\n",
         l.bone,
         vec3(l.anchor1),
         vec3(l.axis_local),
-        f(l.half_height),
-        f(l.radius),
+        shape(l.shape),
         vec3(l.center),
         quat(l.col_rot),
         f(l.density),
@@ -122,7 +137,7 @@ pub fn render_baked_rs(recipe: &RigRecipe, asset_digest: u64) -> String {
          //! tag strands every deployed binary on the refusal path.\n\n\
          use bevy::prelude::*;\n\n\
          use crate::bot::body::{{CrabJointId, Side}};\n\n\
-         use super::{{RigLink, RigRecipe}};\n\n\
+         use super::{{LinkShape, RigLink, RigRecipe}};\n\n\
          /// FNV-1a/64 of the exact sally.glb bytes this table was fitted from.\n\
          pub const BAKED_ASSET_DIGEST: u64 = {asset_digest:#018x};\n\n\
          #[rustfmt::skip]\n\
@@ -194,12 +209,7 @@ mod tests {
                 "link {i} ({}): axis_local",
                 r.bone
             );
-            assert_eq!(
-                r.half_height, b.half_height,
-                "link {i} ({}): half_height",
-                r.bone
-            );
-            assert_eq!(r.radius, b.radius, "link {i} ({}): radius", r.bone);
+            assert_eq!(r.shape, b.shape, "link {i} ({}): shape", r.bone);
             assert_eq!(r.center, b.center, "link {i} ({}): center", r.bone);
             assert_eq!(r.col_rot, b.col_rot, "link {i} ({}): col_rot", r.bone);
             assert_eq!(r.density, b.density, "link {i} ({}): density", r.bone);

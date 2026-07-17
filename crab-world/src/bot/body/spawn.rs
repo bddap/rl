@@ -63,7 +63,7 @@ pub fn spawn_crab(
                 .links
                 .iter()
                 .zip(&world_pos)
-                .map(|(link, &p)| (p, link.center.length() + link.half_height + link.radius)),
+                .map(|(link, &p)| (p, link.bounding_radius())),
         )
         .collect();
     let rotated = |p: Vec3| origin + init_rotation * (p - origin);
@@ -150,8 +150,16 @@ pub fn spawn_crab(
             Some(idx) => ents[idx],
         };
         let here = world_pos[i];
-        let cap = rig::link_capsule(link, Vec3::ZERO);
-        let collider = Collider::capsule(cap.a, cap.b, cap.radius);
+        let collider = match rig::link_rest_shape(link, Vec3::ZERO) {
+            rig::RestShape::Capsule { a, b, radius } => Collider::capsule(a, b, radius),
+            // An oriented box has no direct bevy_rapier constructor; a one-shape
+            // compound carries the rotation.
+            rig::RestShape::Cuboid { center, rot, half } => Collider::compound(vec![(
+                center,
+                rot,
+                Collider::cuboid(half.x, half.y, half.z),
+            )]),
+        };
         let groups = if inside_carapace(here + link.center) {
             NESTED_COLLISION
         } else {

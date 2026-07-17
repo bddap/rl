@@ -128,11 +128,12 @@ pub fn score_capsule(points: &[Vec3], a: Vec3, b: Vec3, radius: f32) -> Collider
     s
 }
 
-pub fn score_box(points: &[Vec3], center: Vec3, half: Vec3) -> ColliderScore {
+pub fn score_box(points: &[Vec3], center: Vec3, rot: Quat, half: Vec3) -> ColliderScore {
+    let inv_rot = rot.inverse();
     let sd: Vec<f32> = points
         .iter()
         .map(|&p| {
-            let local = (p - center).abs() - half;
+            let local = (inv_rot * (p - center)).abs() - half;
             let outside = local.max(Vec3::ZERO).length();
             let inside = local.max_element().min(0.0);
             outside + inside
@@ -243,7 +244,7 @@ mod tests {
     fn box_and_tiny_cloud_have_no_capsule_diagnostics() {
         let pts = [Vec3::ZERO, Vec3::X, Vec3::Y];
         assert!(
-            score_box(&pts, Vec3::ZERO, Vec3::splat(1.0))
+            score_box(&pts, Vec3::ZERO, Quat::IDENTITY, Vec3::splat(1.0))
                 .capsule
                 .is_none(),
             "a box has no capsule diagnostics"
@@ -262,6 +263,27 @@ mod tests {
                 .capsule
                 .is_some(),
             "a fittable capsule cloud has diagnostics"
+        );
+    }
+
+    #[test]
+    fn oriented_score_box_matches_rotated_points() {
+        let rot = Quat::from_rotation_z(0.7);
+        let pts: Vec<Vec3> = [
+            Vec3::new(0.3, 0.05, -0.1),
+            Vec3::new(-0.3, -0.05, 0.1),
+            Vec3::new(0.1, 0.0, 0.0),
+            Vec3::new(0.35, 0.0, 0.0),
+        ]
+        .iter()
+        .map(|&p| rot * p + Vec3::splat(2.0))
+        .collect();
+        let s = score_box(&pts, Vec3::splat(2.0), rot, Vec3::new(0.3, 0.05, 0.1));
+        assert_eq!(s.n, 4);
+        assert!(
+            (s.poke_out_max - 0.05).abs() < 1e-3,
+            "the one poking point sticks out 0.05, got {}",
+            s.poke_out_max
         );
     }
 }
