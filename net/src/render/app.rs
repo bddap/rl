@@ -220,7 +220,8 @@ pub(super) fn add_external_nn_crab(
         .add_plugins(crab_world::physics::CrabPhysicsPlugin)
         .add_plugins(crab_world::physics::PhysicsWorldPlugin { arena })
         // The arena's own dressing — terrain mesh + biome tint, vista or flat lighting,
-        // fog — replaces GCR's old bespoke checker quad (one ground path, rl#281):
+        // fog, and on flat arenas the rl#197 checker texture (rl#287) — replaces GCR's
+        // old bespoke checker quad (one ground path, rl#281):
         // [`sync_arena_surface`] keeps the drawn surface at the arena anchor so it renders
         // exactly where the physics stands.
         .add_plugins(crab_world::physics::ArenaVisualsPlugin)

@@ -1,6 +1,13 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
+#[cfg(feature = "render")]
+use bevy::{
+    asset::RenderAssetUsages,
+    image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
+    math::Affine2,
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+};
 use bevy_rapier3d::prelude::*;
 
 use crate::bot::body::ARENA_COLLISION;
@@ -227,6 +234,7 @@ fn setup_arena_visuals(
     terrain: Res<Terrain>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     if !visuals.0 {
         return;
@@ -276,17 +284,95 @@ fn setup_arena_visuals(
     // The visible ground: the SAME grid the collider was built from (rl#281 — render
     // matches physics by construction). Tint rides the mesh's vertex colors (biome
     // bands on terrain, the old flat green on flat arenas), so the material stays
-    // white and ONE material serves every arena.
+    // white and ONE material serves every arena. A FLAT arena is otherwise a
+    // featureless plane — no ground-speed or landing-height cue — so it alone layers
+    // the rl#197 pilot checker over the green (bddap/rl#287); terrain self-cues with
+    // relief, biome bands, and fog.
     commands.spawn((
         ArenaSurface,
         Mesh3d(meshes.add(terrain.mesh())),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE,
+            base_color_texture: terrain.is_flat().then(|| ground_checker(&mut images)),
+            // Flat-mesh UVs are mesh-local METERS (terrain.rs); scale so one texture
+            // repeat covers CHECKER_PERIOD meters — hosts move ArenaSurface by
+            // translation only (net's anchor sync), so mesh meters stay render meters
+            // and the pilot-scale cells hold. Inert without a texture.
+            uv_transform: Affine2::from_scale(Vec2::splat(1.0 / CHECKER_PERIOD)),
             perceptual_roughness: 0.95,
             ..default()
         })),
         Transform::IDENTITY,
     ));
+}
+
+/// Checker repeat period (render m): one texture repeat is 2×2 coarse cells, each a
+/// 16×16 sub-checker. Sized for the PILOT, who the cue serves (rl#197): the 2 m coarse
+/// cells read from cruise altitude, the 0.125 m fine sub-cells (~2.5 player heights)
+/// give optic flow at landing height and on foot.
+#[cfg(feature = "render")]
+const CHECKER_PERIOD: f32 = 4.0;
+
+/// The flat ground's repeat-tiled checker texture: a coarse 2×2 checker with a fainter
+/// sub-checker on top (two spatial frequencies — see [`CHECKER_PERIOD`]), tinting the
+/// mesh's vertex-color green so the flat arenas keep their tone. Built with a full mip
+/// chain — box-filtering per level — so the pattern fades to flat tint in the distance
+/// instead of shimmering (a generated `Image` gets no auto-mips).
+#[cfg(feature = "render")]
+fn ground_checker(images: &mut Assets<Image>) -> Handle<Image> {
+    const SIZE: usize = 256; // level-0 px; power of two so mip dims match wgpu's size>>level
+    let mut levels: Vec<Vec<u8>> = vec![
+        (0..SIZE * SIZE)
+            .flat_map(|i| {
+                let (x, y) = (i % SIZE, i / SIZE);
+                let coarse = (x / (SIZE / 2) + y / (SIZE / 2)).is_multiple_of(2);
+                let fine = (x / (SIZE / 32) + y / (SIZE / 32)).is_multiple_of(2);
+                let v = 225 + if coarse { 16u8 } else { 0 } + if fine { 14 } else { 0 };
+                [v, v, v, 255]
+            })
+            .collect(),
+    ];
+    let mut w = SIZE;
+    while w > 1 {
+        let prev = levels.last().unwrap();
+        let half = w / 2;
+        levels.push(
+            (0..half * half)
+                .flat_map(|i| {
+                    let (x, y) = ((i % half) * 2, (i / half) * 2);
+                    let at = |x: usize, y: usize| prev[(y * w + x) * 4] as u16;
+                    let v = ((at(x, y) + at(x + 1, y) + at(x, y + 1) + at(x + 1, y + 1)) / 4) as u8;
+                    [v, v, v, 255]
+                })
+                .collect(),
+        );
+        w = half;
+    }
+    let mip_count = levels.len() as u32;
+    // `Image::new` asserts data == level-0 size, so build uninit and attach the full
+    // mip chain (levels concatenated largest-first, bevy's expected layout) by hand.
+    let mut image = Image::new_uninit(
+        Extent3d {
+            width: SIZE as u32,
+            height: SIZE as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.data = Some(levels.concat());
+    image.texture_descriptor.mip_level_count = mip_count;
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        // Most of a cockpit view meets the ground at grazing angles, where isotropic
+        // trilinear blurs the checker to flat tint — right where the optic-flow cue
+        // matters most.
+        anisotropy_clamp: 16,
+        ..ImageSamplerDescriptor::linear()
+    });
+    images.add(image)
 }
 
 /// Give every camera in a vista (real-relief, rendered) world aerial-perspective fog toward the night
