@@ -125,6 +125,12 @@ pub(crate) fn ppo_update_core<B: AutodiffBackend>(
             let num_batches = n.div_ceil(bs);
 
             for batch_idx in 0..num_batches {
+                if config
+                    .steps_cap
+                    .is_some_and(|cap| update_count >= cap.get())
+                {
+                    break 'update;
+                }
                 let start = batch_idx * bs;
                 let end = (start + bs).min(n);
                 let batch_n = end - start;
@@ -356,6 +362,43 @@ mod tests {
             after.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
             "the policy must be bit-identical after a refused NaN update — the brain was stepped"
         );
+    }
+
+    #[test]
+    fn ppo_steps_cap_bounds_the_update() {
+        let device = NdArrayDevice::Cpu;
+        let rollouts = make_rollouts();
+
+        let run = |cap: Option<std::num::NonZeroU32>| -> PpoMetrics {
+            let mut brain = AnyBrain::<TrainBackend>::init(ArchId::DEFAULT, &device);
+            let mut optimizer = crab_optimizer::<TrainBackend>();
+            let config = PpoConfig {
+                target_kl: f32::INFINITY,
+                steps_cap: cap,
+                ..PpoConfig::default()
+            };
+            let mut ret_norm = ReturnNormalizer::new();
+            let mut rng = StdRng::seed_from_u64(0x276);
+            ppo_update_core(
+                &mut brain,
+                &mut optimizer,
+                &config,
+                &rollouts,
+                &device,
+                &mut ret_norm,
+                &mut rng,
+                crate::bot::arch::LOG_STD_MIN,
+            )
+        };
+
+        let uncapped = run(None);
+        assert!(
+            uncapped.steps > 2,
+            "fixture must exceed the cap uncapped to make the test meaningful (got {})",
+            uncapped.steps
+        );
+        let capped = run(std::num::NonZeroU32::new(2));
+        assert_eq!(capped.steps, 2, "cap of 2 must stop after exactly 2 steps");
     }
 
     #[test]

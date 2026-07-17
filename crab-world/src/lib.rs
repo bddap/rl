@@ -147,6 +147,11 @@ pub struct TrainConfig {
     /// DIAGNOSTIC: log the rollout's mean Σ|drive|² and the tax it pays, per step.
     #[arg(long, env = "RL_LOG_EFFORT", value_parser = clap::builder::FalseyValueParser::new())]
     pub log_effort: bool,
+
+    /// Hard cap on PPO minibatch steps per update — the rl#276 escalation lever: fewer
+    /// steps per iteration slows the per-checkpoint policy walk at the σ-floor.
+    #[arg(long, env = "RL_PPO_STEPS_CAP")]
+    pub ppo_steps_cap: Option<std::num::NonZeroU32>,
 }
 
 #[cfg(test)]
