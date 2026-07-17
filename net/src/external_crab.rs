@@ -946,20 +946,12 @@ mod ship_wiggle_tests {
             if t == 600 {
                 let mut cq = app
                     .world_mut()
-                    .query_filtered::<&Transform, With<crab_world::bot::body::CrabCarapace>>();
+                    .query_filtered::<&Transform, With<CrabCarapace>>();
                 let carapace_x = cq.single(app.world()).expect("carapace").translation.x;
                 // Absolute, not relative: her chaotic shuffle may sit anywhere inside
                 // the band, so land the CARAPACE at band + 2 m from the origin.
                 let dx = (TARGET_ARENA_HALF + 2.0) - carapace_x;
-                let mut q = app
-                    .world_mut()
-                    .query_filtered::<&mut Transform, With<crab_world::bot::body::CrabBodyPart>>();
-                let mut moved = 0;
-                for mut part in q.iter_mut(app.world_mut()) {
-                    part.translation.x += dx;
-                    moved += 1;
-                }
-                assert!(moved > 0, "teleport found no crab body parts");
+                super::gcr_crab_tests::shift_parts(&mut app, Vec3::new(dx, 0.0, 0.0));
             }
             app.update();
             max_ship_d = max_ship_d.max(ship_render_pos(&mut app).distance(render0));
@@ -1017,8 +1009,6 @@ mod ship_wiggle_tests {
     /// carry; uncarried it would spawn a full recenter distance away).
     #[test]
     fn recenter_carries_crafts_and_boardings_and_advances_the_anchor() {
-        use crab_world::bot::body::CrabBodyPart;
-
         let mut app = gcr_like_app_with_vehicles();
         crab_world::vehicle::spawn_ram_vehicle(
             app.world_mut(),
@@ -1054,12 +1044,7 @@ mod ship_wiggle_tests {
         assert_eq!(crafts_now, 1, "pilot 1's craft must not exist pre-recenter");
 
         // Emulate a long chase: walk the whole crab 20 m out in one step.
-        let mut q = app
-            .world_mut()
-            .query_filtered::<&mut Transform, With<CrabBodyPart>>();
-        for mut t in q.iter_mut(app.world_mut()) {
-            t.translation += Vec3::new(20.0, 0.0, 0.0);
-        }
+        super::gcr_crab_tests::shift_parts(&mut app, Vec3::new(20.0, 0.0, 0.0));
         for _ in 0..2 {
             app.update();
         }
@@ -1109,8 +1094,6 @@ mod ship_wiggle_tests {
     /// accumulated recenter distance on screen.
     #[test]
     fn restart_after_recenter_keeps_surviving_craft_on_screen() {
-        use crab_world::bot::body::CrabBodyPart;
-
         let mut app = gcr_like_app_with_vehicles();
         crab_world::vehicle::spawn_ram_vehicle(
             app.world_mut(),
@@ -1127,12 +1110,7 @@ mod ship_wiggle_tests {
         }
         let render0 = ship_render_pos(&mut app);
 
-        let mut q = app
-            .world_mut()
-            .query_filtered::<&mut Transform, With<CrabBodyPart>>();
-        for mut t in q.iter_mut(app.world_mut()) {
-            t.translation += Vec3::new(20.0, 0.0, 0.0);
-        }
+        super::gcr_crab_tests::shift_parts(&mut app, Vec3::new(20.0, 0.0, 0.0));
         for _ in 0..2 {
             app.update();
         }
@@ -1200,7 +1178,7 @@ mod gcr_crab_tests {
     }
 
     /// Emulate a long chase's walk: move the whole crab without touching the bridge.
-    fn shift_parts(app: &mut App, delta: Vec3) {
+    pub(super) fn shift_parts(app: &mut App, delta: Vec3) {
         let mut q = app
             .world_mut()
             .query_filtered::<&mut Transform, With<CrabBodyPart>>();
