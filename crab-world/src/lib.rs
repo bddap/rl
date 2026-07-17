@@ -80,4 +80,9 @@ pub struct TrainConfig {
 
     #[arg(long)]
     pub seed: Option<u64>,
+
+    /// Hard cap on PPO minibatch steps per update — the rl#276 escalation lever: fewer
+    /// steps per iteration slows the per-checkpoint policy walk at the σ-floor.
+    #[arg(long)]
+    pub ppo_steps_cap: Option<std::num::NonZeroU32>,
 }

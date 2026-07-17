@@ -16,6 +16,8 @@ pub(crate) struct PpoConfig {
     pub(crate) batch_size: usize,
     pub(crate) value_loss_clip: f32,
     pub(crate) target_kl: f32,
+    /// Hard cap on minibatch steps per update; `None` = uncapped (rl#276).
+    pub(crate) steps_cap: Option<std::num::NonZeroU32>,
     pub(crate) log_std_floor_start: f32,
     pub(crate) log_std_floor_end: f32,
     pub(crate) log_std_anneal_ticks: u64,
@@ -54,6 +56,7 @@ impl Default for PpoConfig {
             batch_size: 64,
             value_loss_clip: 3.0,
             target_kl: 0.03,
+            steps_cap: None,
             log_std_floor_start: env_or("RL_LOG_STD_FLOOR_START", -0.7),
             log_std_floor_end: env_or("RL_LOG_STD_FLOOR_END", crate::bot::arch::LOG_STD_MIN),
             log_std_anneal_ticks: env_or("RL_LOG_STD_ANNEAL_TICKS", 5_000_000),
