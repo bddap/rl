@@ -5,6 +5,14 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use clap::Parser;
 
+/// rl#282: this suite has wedged for 1 h+ (every thread futex_wait at 0% CPU)
+/// under trainer saturation; abort loudly on a process-wide CPU flatline instead.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn arm_stall_watchdog() {
+    test_watchdog::arm();
+}
+
 pub mod assets;
 pub mod bot;
 pub mod controls;

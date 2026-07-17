@@ -1,3 +1,11 @@
+/// rl#282: sibling sim suites have wedged (all threads futex_wait, 0% CPU) under
+/// trainer saturation; abort loudly on a process-wide CPU flatline instead.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn arm_stall_watchdog() {
+    test_watchdog::arm();
+}
+
 pub mod articulation;
 pub mod cadence;
 pub mod client;

@@ -42,3 +42,7 @@ n0-future.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+ctor.workspace = true
+test-watchdog = { path = "../test-watchdog" }

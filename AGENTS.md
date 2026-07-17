@@ -20,7 +20,7 @@ the one he asked for; he appreciates the pushback. Dry sass too.
 ## Pre-submission checks
 - `cargo fmt --check`
 - `cargo clippy --quiet --all-targets -- --deny warnings` (`--all-targets` lints test/bench/example code too, so test-only lints can't slip in)
-- `cargo test -q` (on bothouse add `-- --test-threads=2`: the live trainer saturates the cores and the heavy physics tests hang at default parallelism)
+- `cargo test -q` (on bothouse add `-- --test-threads=2`: the live trainer saturates the cores and the heavy physics tests hang at default parallelism). The sim suites arm `test-watchdog` — a rare 0%-CPU wedge under trainer load (rl#282) aborts loudly after ~2 min instead of hanging; rerun on a quieter box.
 
 ## Profiling
 "Why is the game slow?" → `scripts/profile-game.sh` instead of rediscovering the

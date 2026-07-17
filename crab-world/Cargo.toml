@@ -40,6 +40,8 @@ libc.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+ctor.workspace = true
+test-watchdog = { path = "../test-watchdog" }
 # The runtime never parses the glb (colliders come from the baked table, bddap/rl#20);
 # only the skin-weight audit tests still read it directly.
 gltf.workspace = true
