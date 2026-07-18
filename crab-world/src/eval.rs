@@ -25,8 +25,10 @@ use crate::training::targets::{
 /// forever and arrival vanishes from the headline). 24 m ≈ 65% of the pinned charge's
 /// flat-ground horizon traverse ([`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] ≈ 1.6 m/s ×
 /// [`DEFAULT_EVAL_TICKS`] ≈ 23 s ≈ 37 m), so arrival stays measurable for a competent
-/// brain even on relief, while sitting well past the [`DRIFT_REBASE_M`]
-/// (`training::targets`) recenter radius and mid-band for the obs. Re-pin from pace
+/// brain even on relief, and mid-band for the obs. NOTE: the far sweep runs NO
+/// mid-episode recenter — matching the training regime, where `body.pos` runs out to
+/// the per-episode traverse un-regauged; only the pace probe wires the
+/// `pace_recenter` seam (the obs regime net's 9 m rebase produces). Re-pin from pace
 /// evidence when the gait regime moves; numbers across a distance re-pin are
 /// incomparable by design.
 pub const DEFAULT_TARGET_DISTANCE_M: f32 = 24.0;
@@ -40,19 +42,19 @@ pub const DEFAULT_TARGET_DISTANCE_M: f32 = 24.0;
 /// pace probes run there, keeping the charge instrument's geometry fixed.
 pub const EVAL_LOCALES: usize = 3;
 
-/// The fixed eval locales: tile center plus [`EVAL_LOCALES`]−1 seeded interior draws.
-/// Deterministic BY the committed bake (fixed seed over the tile interior), so every
-/// eval of every brain sweeps the same ground until the bake itself changes.
+/// The fixed eval locales: tile center plus [`EVAL_LOCALES`]−1 pinned interior
+/// coordinates. LITERALS on purpose — deriving them from the training sampler (a
+/// seeded `random_episode_origin`) would silently move the instrument whenever a
+/// training knob (band, edge margin) or the RNG's stream changes, making headlines
+/// incomparable with no signal. These move only when the bake or this constant does.
+/// Both points sit kilometers inside the ±15 km tile with the full band clear of the
+/// edge extension.
 fn eval_locales() -> [Vec2; EVAL_LOCALES] {
-    use rand::SeedableRng;
-    let g = crate::terrain::TerrainGrid::gcr();
-    let mut rng = rand::rngs::StdRng::seed_from_u64(0x293_1092);
-    let mut locales = [Vec2::ZERO; EVAL_LOCALES];
-    for slot in locales.iter_mut().skip(1) {
-        let p = crate::training::targets::random_episode_origin(&mut rng, &g);
-        *slot = Vec2::new(p.x, p.z);
-    }
-    locales
+    [
+        Vec2::ZERO,
+        Vec2::new(4800.0, -3600.0),
+        Vec2::new(-6400.0, 5200.0),
+    ]
 }
 
 /// The close-range probe distance (rl#252): the same compass swept with the ball just
@@ -967,10 +969,11 @@ mod tests {
                 DEFAULT_TARGET_DISTANCE_M > REACH_RADIUS,
                 "the ball must start FAR — well outside the reach radius"
             );
-            // rl#292/rl#293: the far ball is pace-pinned, in-band (in-distribution
-            // obs), and past the drift radius (the recenter seam is exercised) — but
-            // NOT the band edge: an unreachable ball would make min-progress measure
-            // the locale's worst obstruction instead of her chase.
+            // rl#292/rl#293: the far ball is pace-pinned and in-band (in-distribution
+            // obs) — NOT the band edge: an unreachable ball would make min-progress
+            // measure the locale's worst obstruction instead of her chase. Past the
+            // drift radius only so the sweep covers body.pos states beyond net's 9 m
+            // rebase window (the far sweep itself runs no recenter, like training).
             assert!(DEFAULT_TARGET_DISTANCE_M < BAND_MAX_M);
             assert!(DEFAULT_TARGET_DISTANCE_M > DRIFT_REBASE_M);
             assert!(TARGET_Y > TARGET_Y_MIN && TARGET_Y < TARGET_Y_MAX);

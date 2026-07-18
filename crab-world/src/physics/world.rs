@@ -38,18 +38,16 @@ pub enum Arena {
 /// worlds never refuse-to-arm between peers on either side of it.
 pub(crate) const ARENA_TERRAIN_KEY: &str = "terrain";
 
-/// Validate a plant sidecar's `arena` value. Only `terrain` is loadable since rl#293;
-/// `walled_box` names a real pre-flip checkpoint, so it gets the historical error
-/// rather than "unknown".
-pub(crate) fn validate_arena_key(raw: &str) -> Result<(), String> {
+/// Parse a plant sidecar's `arena` value: `Ok(true)` = terrain, `Ok(false)` =
+/// `walled_box` (a real pre-flip record — it PARSES so adoption can refuse it with
+/// provenance intact, or the rl-demo `--terrain` waiver can view it; a parse-time
+/// refusal would rank honest flat records below recordless ones). Unknown spellings
+/// refuse: an unreadable plant must never load.
+pub(crate) fn parse_arena_key(raw: &str) -> Result<bool, String> {
     match raw.trim() {
-        k if k == ARENA_TERRAIN_KEY => Ok(()),
-        "walled_box" => Err(
-            "this checkpoint trained on the deleted flat walled box — flat plants are \
-             unloadable since the terrain flip (rl#293); keep it archived or retrain"
-                .to_string(),
-        ),
-        other => Err(format!("unknown arena {other:?} (terrain)")),
+        k if k == ARENA_TERRAIN_KEY => Ok(true),
+        "walled_box" => Ok(false),
+        other => Err(format!("unknown arena {other:?} (terrain | walled_box)")),
     }
 }
 

@@ -12,17 +12,20 @@ use crate::mesh_fallback::BodyGate;
 
 const BEST_SUBDIR: &str = "best";
 
-/// The min-over-bearings chase-progress bar (rl#239). The sidecar name IS the metric
-/// version: a `best/` stamped under a retired metric carries none of THIS sidecar, so
-/// the score-incumbent-first machinery re-baselines it under the current eval before
-/// any candidate is considered — never a new-metric candidate judged against an
-/// old-metric bar.
-const PROGRESS_SIDECAR: &str = "min_progress.txt";
+/// The median-locale min-over-bearings chase-progress bar (rl#239/rl#293). The
+/// sidecar name IS the metric version: a `best/` stamped under a retired metric
+/// carries none of THIS sidecar, so the score-incumbent-first machinery re-baselines
+/// it under the current eval before any candidate is considered — never a new-metric
+/// candidate judged against an old-metric bar. Versioned `.terrain24` at the rl#293
+/// flip: the far ball moved 9→24 m and the headline became median-over-locales, so a
+/// pre-flip bar (physically capped near 9 m) must not gate 24 m-scale candidates.
+const PROGRESS_SIDECAR: &str = "min_progress.terrain24.txt";
 
-/// Sidecars of retired metrics — `reach.txt` (pre-#233 reach-keyed gate) and
-/// `progress.txt` (the +X-only chase eval, rl#239) — removed whenever the bar is
-/// (re)stamped so a `best/` never carries two competing scores.
-const LEGACY_SIDECARS: &[&str] = &["reach.txt", "progress.txt"];
+/// Sidecars of retired metrics — `reach.txt` (pre-#233 reach-keyed gate),
+/// `progress.txt` (the +X-only chase eval, rl#239), and `min_progress.txt` (the 9 m
+/// single-locale bar retired by the rl#293 terrain flip) — removed whenever the bar
+/// is (re)stamped so a `best/` never carries two competing scores.
+const LEGACY_SIDECARS: &[&str] = &["reach.txt", "progress.txt", "min_progress.txt"];
 
 struct BestFile {
     name: &'static str,
@@ -51,8 +54,9 @@ const BEST_FILES: &[BestFile] = &[
         required: true,
     },
     // The plant the brain trained on (rl#268) — without it an eval of `best/` would
-    // silently judge a damped policy on the default plant. Optional: absent means the
-    // default plant (every pre-sidecar checkpoint).
+    // refuse to load at all since rl#293 (the arena record is the load condition).
+    // Still optional at the copy layer: a legacy `best/` may lack it, and the eval's
+    // own refusal is the guard, not this copier.
     BestFile {
         name: crate::bot::body::PLANT_FILENAME,
         required: false,
@@ -63,12 +67,13 @@ const BEST_FILES: &[BestFile] = &[
 /// reach-triggered: a trigger derived from near-heavy TRAIN episodes is blind to
 /// far-approach movement in either direction — exactly the divergence that let a
 /// 6.92 m brain displace the 8.93 m one (bddap/rl#233). The compass eval runs one
-/// episode per bearing at the far distance (rl#239, ~2 min measured on the training
-/// box), the same compass again for the rl#252 close probe, plus the short rl#280
-/// pace-probe compass (~10 s episodes; ~5 min total), so with the period at 3× the
-/// pre-compass 600 s, eval spend stays under ~17% of training wall-clock (rollout
-/// threads idle while the learner-thread eval runs).
-const EVAL_PERIOD: Duration = Duration::from_secs(1800);
+/// episode per bearing at the far distance PER LOCALE (rl#293: the far compass runs
+/// 3×), the close-probe compass, plus the short rl#280 pace-probe compass — roughly
+/// 2× the pre-locale spend, so the period stretches with it to keep eval spend in
+/// the same ~15-20% band of training wall-clock (rollout threads idle while the
+/// learner-thread eval runs). Promotion latency is the trade, and keep-best is a
+/// ratchet — a later eval still catches any brain an earlier tick missed.
+const EVAL_PERIOD: Duration = Duration::from_secs(3600);
 
 /// Meters of chase progress a candidate must add over the incumbent to displace it.
 /// The eval is deterministic per brain, so this only suppresses churn from
