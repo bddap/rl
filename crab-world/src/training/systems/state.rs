@@ -85,12 +85,6 @@ pub(crate) struct TrainingState {
 
     pub(super) log_std_floor: f32,
 
-    /// Fraction of episodes whose target samples the close disc instead of the
-    /// chase band (rl#250) — `TrainConfig::target_close_frac`. Default 0.0 keeps
-    /// the pure chase band, so raising it per-run is the deliberate TRAINING
-    /// change, sequenced under one-change-at-a-time.
-    pub(super) close_frac: f32,
-
     /// Effort-tax coefficient (rl#268) — `TrainConfig::effort_weight`.
     pub(super) effort_weight: f32,
 
@@ -369,12 +363,6 @@ impl TrainingState {
 
         let n = config.envs.max(1) as usize;
         let normalizer_increment = worker_mode.then(IncrementAccumulator::new);
-        let close_frac = config.target_close_frac;
-        if close_frac > 0.0 {
-            // train.log is multi-run; without this line nobody can later tell which
-            // segments trained with the close-target mix.
-            info!("Close-target curriculum active: --target-close-frac {close_frac} (rl#250)");
-        }
         if let Some(cap) = config.ppo_steps_cap {
             info!("PPO step cap active: --ppo-steps-cap {cap} (rl#276)");
         }
@@ -392,7 +380,6 @@ impl TrainingState {
             envs: vec![EnvEpisode::default(); n],
             explore_noise: OuNoise::new(n),
             log_std_floor: crate::bot::arch::LOG_STD_MIN,
-            close_frac,
             effort_weight: config.effort_weight,
             log_effort: config.log_effort,
             episode_count: 0,

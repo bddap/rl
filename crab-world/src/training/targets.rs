@@ -8,35 +8,46 @@ use crate::training::reward::dist_3d;
 
 pub(crate) const BAND_START_MIN: f32 = 1.5;
 /// Target height band, meters ABOVE the terrain surface at the target's own (x, z) —
-/// equal to absolute y on the flat arenas; on terrain (rl#281) the ball hugs the
-/// ground wherever it lands.
+/// the ball hugs the ground wherever it lands (rl#281).
 pub(crate) const TARGET_Y_MIN: f32 = 0.15;
 pub(crate) const TARGET_Y_MAX: f32 = 0.7;
 /// Far edge of the trained chase band — the ONE source for "how far a target can
-/// be". On the flat training box it doubles as the coordinate bound sampling clamps
-/// targets to (|x|,|z| ≤ this), so extending the band past the wall margin needs a
-/// bigger arena, not just a bigger constant. GCR's bridge (`net::external_crab`)
-/// clamps its posed hunt target to this same constant; a copied literal there would
-/// drift when the band moves.
-pub const TARGET_ARENA_HALF: f32 = crate::physics::world::ARENA_HALF_SIZE - 1.0;
+/// be" (rl#292: 0→100 m+ genuinely in-distribution; the old 9 m edge was the flat
+/// box's wall margin, not a design choice). GCR's bridge (`net::external_crab`)
+/// clamps its posed hunt target to this same constant, so Sally sees prey truly out
+/// to the band edge; a copied literal there would drift when the band moves.
+pub const BAND_MAX_M: f32 = 128.0;
+
+/// The spawn-relative `body.pos` obs-support radius — the recenter/rebase trigger
+/// ([`recenter_delta`]), SPLIT from the target band (rl#292/rl#293): the band is how
+/// far a ball may SPAWN, this is how far the obs channel may drift from the episode
+/// origin before consumers re-gauge, bounded by per-episode traverse (~35 m at the
+/// pinned pace over one horizon), NOT by the band. Kept at the historic 9 m the
+/// deployed brains trained under; re-pin from pace evidence, never by tying it back
+/// to [`BAND_MAX_M`] — at 128 m GCR would run `body.pos` ~4× past anything training
+/// ever saw (the exact OOD class the recenter seam closes).
+pub const DRIFT_REBASE_M: f32 = 9.0;
+
+/// Fraction of target draws seeded in the close disc [0, [`BAND_START_MIN`]) —
+/// under-carapace included — so claw-reach stays in-distribution beside the chase
+/// (rl#250). A canonical constant since rl#292: ball-under is a standing directive,
+/// not a per-run curriculum flag.
+pub(crate) const CLOSE_FRAC: f32 = 0.1;
 
 /// Margin kept off the terrain tile's edge when sampling spawns/targets — past the
 /// last grid row the surface continues as a flat clamp-extension (see
 /// [`TerrainGrid::height`]), real relief stops, and the rl#283 y-floor backstop is
 /// the only netting; one chase band plus slack keeps every episode's whole geometry
 /// on real terrain.
-const TERRAIN_EDGE_MARGIN: f32 = 2.0 * TARGET_ARENA_HALF;
+const TERRAIN_EDGE_MARGIN: f32 = 2.0 * BAND_MAX_M;
 
-/// Absolute |x|,|z| bound for spawn/target sampling — the wall-derived clamp on the
-/// flat training box, the tile interior on terrain (rl#281 stage 4). ONE source: the
-/// per-episode spawn draw and [`sample_target`]'s in-arena check share it, so a spawn
-/// can never be placed where its own targets don't fit.
+/// Absolute |x|,|z| bound for spawn/target sampling — the grid interior less the
+/// edge margin, whatever the grid (rl#293: one formula, no flat fork). ONE source:
+/// the per-episode spawn draw and [`sample_target`]'s in-arena check share it, so a
+/// spawn can never be placed where its own targets don't fit. Flat TEST grids must
+/// be ≥ [`TERRAIN_EDGE_MARGIN`] + band half-extents wherever band logic runs.
 pub(crate) fn sample_clamp_half(terrain: &TerrainGrid) -> f32 {
-    if terrain.is_flat() {
-        TARGET_ARENA_HALF
-    } else {
-        terrain.extent_x().min(terrain.extent_z()) / 2.0 - TERRAIN_EDGE_MARGIN
-    }
+    terrain.extent_x().min(terrain.extent_z()) / 2.0 - TERRAIN_EDGE_MARGIN
 }
 
 /// A fresh episode locale on terrain: uniform over the tile interior, on the surface.
@@ -84,8 +95,6 @@ pub(crate) fn closest_tip_dist(
     min
 }
 
-const NEAR_BIAS_EXP: f32 = 2.0;
-
 /// The ONE polar target-placement formula — `theta` from `origin` in the ground plane,
 /// (cos, ·, sin) — shared by training sampling and the eval compass so the bearing
 /// convention cannot drift between them. `y` is copied through verbatim; callers that
@@ -99,20 +108,21 @@ pub(crate) fn polar_target(origin: Vec3, theta: f32, dist: f32, y: f32) -> Vec3 
 }
 
 /// The rl#240 in-distribution guard's posed walk target: the real target re-posed at
-/// most one band edge ([`TARGET_ARENA_HALF`]) from the crab along the true planar
-/// bearing, `y` the caller's (net poses at its claw height, the eval at the real
-/// ball's). THE one copy of the clamp both consumers share — net's
-/// `set_crab_walk_target` (a distant GCR player) and the eval's pace probe (a distant
-/// ball, rl#280) — so the band semantics cannot drift between the plant she is
-/// deployed on and the instrument that measures her for it.
+/// most one band edge ([`BAND_MAX_M`]) from the crab along the true planar bearing,
+/// `y` the caller's (net poses at its claw height, the eval at the real ball's). THE
+/// one copy of the clamp both consumers share — net's `set_crab_walk_target` (a
+/// distant GCR player) and the eval's pace probe (a distant ball, rl#280) — so the
+/// band semantics cannot drift between the plant she is deployed on and the
+/// instrument that measures her for it. Since rl#292 the edge is 128 m: prey inside
+/// that is presented WHERE IT IS, not lured nearer.
 pub fn band_lure(carapace: Vec3, planar_to_target: Vec2, y: f32) -> Vec3 {
-    let to_target = planar_to_target.clamp_length_max(TARGET_ARENA_HALF);
+    let to_target = planar_to_target.clamp_length_max(BAND_MAX_M);
     Vec3::new(carapace.x + to_target.x, y, carapace.z + to_target.y)
 }
 
 /// The rl#240 recenter's trigger and delta: once the carapace's planar drift from its
-/// spawn origin leaves the band, this is the exact shift back onto the origin;
-/// inside the band, `None`. Consumers apply it two ways (rl#281 stage 6): the eval's
+/// spawn origin leaves the obs-support radius ([`DRIFT_REBASE_M`] — NOT the target
+/// band, rl#292), this is the exact shift back onto the origin; inside it, `None`. Consumers apply it two ways (rl#281 stage 6): the eval's
 /// `pace_recenter` TELEPORTS the crab by the delta (fixed-locale measurement — see its
 /// doc), while net's `bound_body_pos_drift` uses only the trigger and REBASES the
 /// origin instead (`CrabSpawns::rebase_origin_to` — a rendered world must stay glued
@@ -125,7 +135,7 @@ pub fn band_lure(carapace: Vec3, planar_to_target: Vec2, y: f32) -> Vec3 {
 /// channel is out of distribution.
 pub fn recenter_delta(origin: Vec3, carapace: Vec3, terrain: &TerrainGrid) -> Option<Vec3> {
     let drift = Vec2::new(carapace.x - origin.x, carapace.z - origin.z);
-    (drift.length() > TARGET_ARENA_HALF).then(|| {
+    (drift.length() > DRIFT_REBASE_M).then(|| {
         Vec3::new(
             -drift.x,
             terrain.height(origin.x, origin.z) - terrain.height(carapace.x, carapace.z),
@@ -140,6 +150,10 @@ pub fn recenter_delta(origin: Vec3, carapace: Vec3, terrain: &TerrainGrid) -> Op
 /// on purpose: the density concentrates where the new skill lives, and targets the
 /// rest pose already touches are re-seeded at episode start (`pre_touched_target`),
 /// which carves the true no-op boundary better than any hand-drawn annulus could.
+/// The band draw is LOG-UNIFORM over [BAND_START_MIN, BAND_MAX_M] (rl#292): equal
+/// probability mass per distance octave, so ~40% of draws land inside the old 9 m
+/// regime (near-field skill keeps its gradient) while 100 m+ treks carry real mass —
+/// a uniform draw at this range would starve the near field to ~6%.
 pub(crate) fn sample_target(
     origin: Vec3,
     close_frac: f32,
@@ -149,9 +163,9 @@ pub(crate) fn sample_target(
     let dist = if rng.gen_range(0.0..1.0) < close_frac {
         rng.gen_range(0.0..BAND_START_MIN)
     } else {
-        let (min, max) = (BAND_START_MIN, TARGET_ARENA_HALF);
+        let (min, max) = (BAND_START_MIN, BAND_MAX_M);
         let u: f32 = rng.gen_range(0.0..1.0);
-        min + (max - min) * u.powf(NEAR_BIAS_EXP)
+        min * (max / min).powf(u)
     };
     let y = rng.gen_range(TARGET_Y_MIN..TARGET_Y_MAX);
     let at = |theta: f32| {
@@ -180,13 +194,12 @@ pub(crate) fn seed_target(
     targets: &mut CrabTargets,
     spawns: &CrabSpawns,
     e: usize,
-    close_frac: f32,
     rng: &mut rand::rngs::StdRng,
     terrain: &TerrainGrid,
 ) {
     if let Some(slot) = targets.envs.get_mut(e) {
         let origin = spawns.origin(e);
-        *slot = Some(sample_target(origin, close_frac, rng, terrain));
+        *slot = Some(sample_target(origin, CLOSE_FRAC, rng, terrain));
     }
 }
 
@@ -195,9 +208,15 @@ mod tests {
     use super::*;
     use crate::training::reward::planar_dist;
 
-    /// The training arena's flat grid — these tests pin the FLAT-arena band semantics.
+    /// A flat TEST grid big enough for the rl#292 band: clamp = half − edge margin
+    /// must clear [`BAND_MAX_M`] plus the test origins (see [`sample_clamp_half`]).
     fn flat() -> TerrainGrid {
-        TerrainGrid::flat(crate::physics::world::ARENA_HALF_SIZE)
+        TerrainGrid::flat(512.0)
+    }
+
+    /// The flat test grid's sampling clamp — the arena bound the in-arena asserts use.
+    fn flat_clamp() -> f32 {
+        sample_clamp_half(&flat())
     }
 
     /// rl#253's invariant, geometrically: the touch sphere is finer than the crab.
@@ -250,18 +269,19 @@ mod tests {
     #[test]
     fn sampled_targets_lie_at_the_band_distance_and_inside_the_arena() {
         let mut rng = rand::thread_rng();
-        let (min, max) = (BAND_START_MIN, TARGET_ARENA_HALF);
+        let (min, max) = (BAND_START_MIN, BAND_MAX_M);
+        let clamp = flat_clamp();
         for origin in [
             Vec3::ZERO,
-            Vec3::new(6.0, 0.0, 0.0),
-            Vec3::new(8.0, 0.0, -8.0),
+            Vec3::new(60.0, 0.0, 0.0),
+            Vec3::new(80.0, 0.0, -80.0),
         ] {
             for _ in 0..2000 {
                 let t = sample_target(origin, 0.0, &mut rng, &flat());
                 assert!(t.is_finite(), "a sampled target is always finite");
                 assert!(
-                    t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF,
-                    "target {t:?} from {origin:?} must stay inside ±{TARGET_ARENA_HALF} m"
+                    t.x.abs() <= clamp && t.z.abs() <= clamp,
+                    "target {t:?} from {origin:?} must stay inside ±{clamp} m"
                 );
                 assert!(t.y >= TARGET_Y_MIN && t.y <= TARGET_Y_MAX);
                 let d = planar_dist(t, origin);
@@ -275,46 +295,60 @@ mod tests {
 
     // (No "band is the full arena" test: with TargetBand deleted the band IS the two
     // constants — a test would just restate them. The honest-distance test above pins
-    // that samples span [BAND_START_MIN, TARGET_ARENA_HALF].)
+    // that samples span [BAND_START_MIN, BAND_MAX_M].)
 
+    /// The rl#292 log-uniform draw: equal mass per distance octave — the old 9 m
+    /// regime keeps ~40% of draws (near-field skill keeps its gradient), 100 m+
+    /// carries real mass (a uniform draw would put ~94% of mass past 9 m and starve
+    /// the near field; a near-biased power draw starves 100 m+ — this pins both
+    /// tails at once).
     #[test]
-    fn distance_draw_is_near_heavy_with_a_real_far_tail() {
+    fn distance_draw_is_log_uniform_near_heavy_with_a_real_100m_tail() {
         let mut rng = rand::thread_rng();
         let origin = Vec3::ZERO;
-        let (min, max) = (BAND_START_MIN, TARGET_ARENA_HALF);
-        let near_edge = 3.0;
-        let far_edge = 6.0;
-        let (mut near, mut far, n) = (0u32, 0u32, 20_000u32);
+        let n = 20_000u32;
+        let (mut near9, mut far32, mut far100) = (0u32, 0u32, 0u32);
         for _ in 0..n {
             let d = planar_dist(sample_target(origin, 0.0, &mut rng, &flat()), origin);
-            if d < near_edge {
-                near += 1;
+            if d < 9.0 {
+                near9 += 1;
             }
-            if d > far_edge {
-                far += 1;
+            if d > 32.0 {
+                far32 += 1;
+            }
+            if d > 100.0 {
+                far100 += 1;
             }
         }
-        let near_frac = near as f32 / n as f32;
-        let far_frac = far as f32 / n as f32;
-        assert!(
-            near_frac > 0.40,
-            "near ({min}-{near_edge} m) fraction {near_frac} should dominate (uniform would be ~0.2; EXP=2 ~0.45)"
+        let (near9, far32, far100) = (
+            near9 as f32 / n as f32,
+            far32 as f32 / n as f32,
+            far100 as f32 / n as f32,
         );
         assert!(
-            far_frac > 0.15,
-            "far (>{far_edge} m, up to {max} m) fraction {far_frac} must keep a FAT tail (EXP=2 ~0.22), not starve far"
+            near9 > 0.35,
+            "old-band (<9 m) fraction {near9} must stay near-heavy (log-uniform ~0.40)"
+        );
+        assert!(
+            far32 > 0.25,
+            "far (>32 m) fraction {far32} must carry real mass (log-uniform ~0.31)"
+        );
+        assert!(
+            far100 > 0.03,
+            "100 m+ fraction {far100} must be genuinely in-distribution (log-uniform ~0.055), \
+             not a vanishing tail"
         );
     }
 
     #[test]
     fn close_targets_cover_the_under_carapace_disc() {
         let mut rng = rand::thread_rng();
-        for origin in [Vec3::ZERO, Vec3::new(8.0, 0.0, -8.0)] {
+        for origin in [Vec3::ZERO, Vec3::new(80.0, 0.0, -80.0)] {
             let mut under_body = 0u32;
             for _ in 0..5000 {
                 let t = sample_target(origin, 1.0, &mut rng, &flat());
                 assert!(t.is_finite());
-                assert!(t.x.abs() <= TARGET_ARENA_HALF && t.z.abs() <= TARGET_ARENA_HALF);
+                assert!(t.x.abs() <= flat_clamp() && t.z.abs() <= flat_clamp());
                 assert!(t.y >= TARGET_Y_MIN && t.y <= TARGET_Y_MAX);
                 let d = planar_dist(t, origin);
                 assert!(
@@ -361,12 +395,12 @@ mod tests {
     #[test]
     fn band_lure_clamps_to_the_band_edge_along_the_true_bearing() {
         let carapace = Vec3::new(1.0, 0.4, -2.0);
-        let far = polar_target(carapace, 0.7, 2.0 * TARGET_ARENA_HALF, 0.6);
+        let far = polar_target(carapace, 0.7, 2.0 * BAND_MAX_M, 0.6);
         let to_far = Vec2::new(far.x - carapace.x, far.z - carapace.z);
 
         let lure = band_lure(carapace, to_far, far.y);
         let planar = Vec2::new(lure.x - carapace.x, lure.z - carapace.z);
-        assert!((planar.length() - TARGET_ARENA_HALF).abs() < 1e-4);
+        assert!((planar.length() - BAND_MAX_M).abs() < 1e-2);
         assert!(
             planar.normalize().dot(to_far.normalize()) > 1.0 - 1e-6,
             "the lure sits on the real bearing"
@@ -379,17 +413,17 @@ mod tests {
         assert!((band_lure(carapace, to_near, near.y) - near).length() < 1e-5);
     }
 
-    /// The rl#240 recenter formula: dormant inside the band; one band-edge step
+    /// The rl#240 recenter formula: dormant inside the obs-support radius; one step
     /// outside it, the delta lands the carapace back on its origin planar-wise with
     /// y untouched on the flat grid.
     #[test]
     fn recenter_delta_snaps_planar_drift_back_onto_the_origin() {
         let origin = Vec3::new(2.0, 0.0, -3.0);
 
-        let inside = origin + Vec3::new(TARGET_ARENA_HALF - 0.1, 0.5, 0.0);
+        let inside = origin + Vec3::new(DRIFT_REBASE_M - 0.1, 0.5, 0.0);
         assert_eq!(recenter_delta(origin, inside, &flat()), None);
 
-        let out = origin + Vec3::new(TARGET_ARENA_HALF * 0.8, 0.5, TARGET_ARENA_HALF * 0.8);
+        let out = origin + Vec3::new(DRIFT_REBASE_M * 0.8, 0.5, DRIFT_REBASE_M * 0.8);
         let delta = recenter_delta(origin, out, &flat()).expect("outside the band");
         assert_eq!(
             delta.y, 0.0,
@@ -408,7 +442,7 @@ mod tests {
         let g = TerrainGrid::gcr();
         // Two on-tile points a band-plus step apart with real relief between them.
         let origin = g.place(Vec2::new(500.0, -700.0), 0.0);
-        let out_xz = Vec2::new(500.0 + TARGET_ARENA_HALF * 1.5, -700.0);
+        let out_xz = Vec2::new(500.0 + DRIFT_REBASE_M * 1.5, -700.0);
         let clearance = 0.4;
         let out = g.place(out_xz, clearance);
         assert!(
@@ -427,11 +461,11 @@ mod tests {
 
     /// Terrain sampling (rl#281 stage 4): from a random on-tile origin, targets stay
     /// in the trained band around THAT origin, on the surface's y band, inside the
-    /// tile interior; the flat clamp stays the wall-derived constant.
+    /// tile interior; the one clamp formula serves flat grids too (rl#293).
     #[test]
     fn terrain_targets_band_around_the_origin_on_the_surface() {
         let g = TerrainGrid::gcr();
-        assert_eq!(sample_clamp_half(&flat()), TARGET_ARENA_HALF);
+        assert_eq!(flat_clamp(), 512.0 - TERRAIN_EDGE_MARGIN);
         let clamp = sample_clamp_half(&g);
         assert!(
             clamp > 15_000.0,
@@ -450,7 +484,7 @@ mod tests {
                 let t = sample_target(origin, 0.0, &mut rng, &g);
                 let d = planar_dist(t, origin);
                 assert!(
-                    (BAND_START_MIN - 1e-3..=TARGET_ARENA_HALF + 1e-3).contains(&d),
+                    (BAND_START_MIN - 1e-3..=BAND_MAX_M + 1e-3).contains(&d),
                     "target at {d} m is outside the band from its origin"
                 );
                 let above = t.y - g.height(t.x, t.z);

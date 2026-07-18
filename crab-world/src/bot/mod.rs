@@ -88,8 +88,16 @@ pub struct NumEnvs(pub usize);
 /// read a stale round's layout. Training never inserts it and keeps the grid. Closes
 /// the fresh-app first-round exception of rl#290: origins used to start on the grid
 /// and only a round RESTART re-pinned them ([`CrabSpawns::repin_layout`], rl#289).
+///
+/// `base_xz` is the caller's gauge choice (`CrabSpawns::lay_layout`): env 0's spawn
+/// lands surface-placed AT the base. Net keeps [`Vec2::ZERO`] — for GCR the arena
+/// locale is a gauge and the anchor correspondence pins it; the eval passes its
+/// terrain locale (rl#293), which is an ABSOLUTE spot on the one shared tile.
 #[derive(Resource)]
-pub struct InitialCrabLayout(pub Vec<Vec2>);
+pub struct InitialCrabLayout {
+    pub base_xz: Vec2,
+    pub spawns_m: Vec<Vec2>,
+}
 
 #[derive(Resource, Default, Clone)]
 pub struct CrabSpawns(Vec<Vec3>);
@@ -134,11 +142,16 @@ impl CrabSpawns {
     }
 
     /// [`Self::rebuild`]'s layout twin ([`InitialCrabLayout`], rl#290): lay the initial
-    /// origins on the given planar spawn layout instead of the grid, env 0 at the arena
-    /// origin — the arena locale is a gauge, and this base is the same "keep the
-    /// anchor end" choice [`Self::repin_layout`] makes on a restart.
-    fn rebuild_from_layout(&mut self, spawns_m: &[Vec2], terrain: &crate::terrain::TerrainGrid) {
-        self.lay_layout(Vec2::ZERO, spawns_m, terrain);
+    /// origins on the given planar spawn layout instead of the grid, env 0 at the
+    /// layout's base — the caller's gauge choice (net keeps the arena origin, the
+    /// same "keep the anchor end" choice [`Self::repin_layout`] makes on a restart;
+    /// the eval passes its terrain locale, rl#293).
+    fn rebuild_from_layout(
+        &mut self,
+        layout: &InitialCrabLayout,
+        terrain: &crate::terrain::TerrainGrid,
+    ) {
+        self.lay_layout(layout.base_xz, &layout.spawns_m, terrain);
     }
 
     /// Re-place a LIVE env's origin — terrain training draws a fresh locale per
@@ -539,11 +552,11 @@ pub fn spawn_initial_crabs(
     match &layout {
         Some(l) => {
             assert_eq!(
-                l.0.len(),
+                l.spawns_m.len(),
                 n,
                 "the installed spawn layout must cover every env (rl#290)"
             );
-            spawns.rebuild_from_layout(&l.0, &terrain);
+            spawns.rebuild_from_layout(l, &terrain);
             commands.remove_resource::<InitialCrabLayout>();
         }
         None => spawns.rebuild(n, &terrain),

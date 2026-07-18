@@ -138,12 +138,6 @@ pub struct TrainConfig {
           default_value_t = training::algorithm::LOG_STD_ANNEAL_TICKS_DEFAULT)]
     pub log_std_anneal_ticks: u64,
 
-    /// Fraction of episodes whose target samples the close disc instead of the chase
-    /// band — the rl#250 curriculum mix. 0.0 keeps the pure chase band.
-    #[arg(long, env = "RL_TARGET_CLOSE_FRAC", value_parser = parse_unit_frac,
-          default_value_t = 0.0)]
-    pub target_close_frac: f32,
-
     /// Effort-tax coefficient on Σ|drive|² — the reward's only economy term (rl#268).
     #[arg(long, env = "RL_EFFORT_WEIGHT", value_parser = parse_effort_weight,
           default_value_t = training::reward::EFFORT_WEIGHT_DEFAULT)]
@@ -174,15 +168,6 @@ impl TrainConfig {
             &seed.to_string(),
         ])
         .expect("parse scratch TrainConfig")
-    }
-}
-
-fn parse_unit_frac(s: &str) -> Result<f32, String> {
-    let v: f32 = s.parse().map_err(|e| format!("{e}"))?;
-    if (0.0..=1.0).contains(&v) {
-        Ok(v)
-    } else {
-        Err(format!("{v} is outside 0..=1"))
     }
 }
 

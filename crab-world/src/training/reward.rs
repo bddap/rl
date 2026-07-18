@@ -167,9 +167,9 @@ mod tests {
 
     #[test]
     fn grab_bonus_dominates_a_near_band_traverse() {
-        use crate::training::targets::{BAND_START_MIN, REACH_RADIUS, TARGET_ARENA_HALF};
+        use crate::training::targets::{BAND_MAX_M, BAND_START_MIN, REACH_RADIUS};
         let near_approach = PROGRESS_WEIGHT * (BAND_START_MIN - REACH_RADIUS);
-        let far_approach = PROGRESS_WEIGHT * (TARGET_ARENA_HALF - REACH_RADIUS);
+        let far_approach = PROGRESS_WEIGHT * (BAND_MAX_M - REACH_RADIUS);
         assert!(
             GRAB_REWARD > near_approach,
             "the grab bonus must dominate a near-band approach's progress: {GRAB_REWARD} vs {near_approach}"

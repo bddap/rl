@@ -236,7 +236,8 @@ impl BestKeeper {
             report.close.reached_count(),
             crate::eval::EVAL_BEARINGS
         );
-        let far = format!("far bearings {}", report.far.progress_line());
+        // Median locale's compass (rl#293) — the one the headline min collapsed.
+        let far = format!("far bearings {}", report.median_far().progress_line());
         if !beats {
             info!(
                 "[best] chase-eval: min-bearing progress {:.3} m (reached={}) vs bar {bar} — keeping incumbent | {far} | {close}",
@@ -384,10 +385,10 @@ mod tests {
         };
         EvalReport {
             policy_loaded,
-            far: crate::eval::CompassSweep {
+            far: [crate::eval::CompassSweep {
                 target_distance_m: DEFAULT_TARGET_DISTANCE_M,
                 per_bearing: [bearing; crate::eval::EVAL_BEARINGS],
-            },
+            }; crate::eval::EVAL_LOCALES],
             close: crate::eval::CompassSweep {
                 target_distance_m: crate::eval::CLOSE_PROBE_DISTANCE_M,
                 per_bearing: [close_bearing; crate::eval::EVAL_BEARINGS],

@@ -11,17 +11,20 @@
 //! prefix:
 //!
 //! - `EVAL_RESULT_BEARING deg= progress_m= closest_m= tip_m= final_m= total_torque=
-//!   saturation= work_j= reached= ticks=` — one per far-compass bearing (rl#239),
-//!   plus ` j_per_m=` when that bearing cleared the rl#279 progress floor.
+//!   saturation= work_j= reached= ticks= locale=` — one per far-compass bearing
+//!   (rl#239) per locale (rl#293: the far sweep repeats over `EVAL_LOCALES` terrain
+//!   locales), plus ` j_per_m=` when that bearing cleared the rl#279 progress floor.
 //! - `EVAL_RESULT_CLOSE_BEARING …` — the same keys, one per close-probe bearing
 //!   (rl#252); diagnostic, no consumer parses them today.
 //! - `EVAL_RESULT_CLOSE progress_m= closest_m= tip_m= target_m= reached_count=
 //!   bearings= worst_deg=` — the close probe's worst-bearing summary.
 //! - `EVAL_RESULT progress_m= total_torque= mean_torque_per_tick= initial_m=
 //!   closest_m= tip_m= final_m= target_m= reached= ticks= policy_loaded= bearings=
-//!   worst_deg= saturation_mean=` — the HEADLINE, last: its numbers describe the far
-//!   sweep's WORST bearing; `saturation_mean` (rl#279) is the far compass's mean
-//!   torque saturation in [0, 1]. When measurable it appends ` j_per_m=` (the worst
+//!   worst_deg= saturation_mean= locales= locale_worst_m=` — the HEADLINE, last: its
+//!   numbers describe the MEDIAN locale's WORST bearing (rl#293 — `progress_m` is
+//!   the median-over-locales of min-over-bearings); `locale_worst_m` lists every
+//!   locale's min-over-bearings progress comma-joined in locale order;
+//!   `saturation_mean` (rl#279) is that compass's mean torque saturation in [0, 1]. When measurable it appends ` j_per_m=` (the worst
 //!   bearing's cost of transport) and ` j_per_m_mean=` (mean over the bearings past
 //!   the progress floor) — effort is REPORTED here, never folded into the headline
 //!   scalar or the keep-best gate. When the rl#266 charge-speed guard can measure,
@@ -45,16 +48,21 @@ use std::fmt::Write;
 
 use super::{
     CHARGE_SPEED_DRIFT_TOL, CRAB_CHARGE_SPEED_HEIGHTS_PER_S, CompassSweep, EVAL_BEARINGS,
-    EvalReport,
+    EVAL_LOCALES, EvalReport,
 };
 
 impl EvalReport {
     /// Every wire line of one eval, newline-terminated, in schema order (bearing
-    /// profiles first, headline last).
+    /// profiles first, headline last). Far bearing lines carry a `locale=` key
+    /// (rl#293) and repeat per locale; the headline's episode fields describe the
+    /// MEDIAN locale's worst bearing and its `locale_worst_m=` key lists every
+    /// locale's min-over-bearings progress, comma-joined in locale order.
     pub fn wire_report(&self) -> String {
         let mut out = String::new();
-        bearing_lines(&mut out, "EVAL_RESULT_BEARING", &self.far);
-        bearing_lines(&mut out, "EVAL_RESULT_CLOSE_BEARING", &self.close);
+        for (locale, sweep) in self.far.iter().enumerate() {
+            bearing_lines(&mut out, "EVAL_RESULT_BEARING", sweep, Some(locale));
+        }
+        bearing_lines(&mut out, "EVAL_RESULT_CLOSE_BEARING", &self.close, None);
 
         let close_worst = self.close.worst();
         writeln!(
@@ -71,13 +79,14 @@ impl EvalReport {
         )
         .expect("writing to a String never fails");
 
-        let worst = self.far.worst();
+        let median = self.median_far();
+        let worst = median.worst();
         write!(
             out,
             "EVAL_RESULT progress_m={:.4} total_torque={:.2} mean_torque_per_tick={:.4} \
              initial_m={:.4} closest_m={:.4} tip_m={:.4} final_m={:.4} target_m={:.2} \
              reached={} ticks={} policy_loaded={} bearings={} worst_deg={:.0} \
-             saturation_mean={:.4}",
+             saturation_mean={:.4} locales={} locale_worst_m={}",
             worst.progress_m,
             worst.total_torque,
             worst.mean_torque_per_tick,
@@ -85,19 +94,25 @@ impl EvalReport {
             worst.closest_distance_m,
             worst.closest_tip_distance_m,
             worst.final_distance_m,
-            self.far.target_distance_m,
+            median.target_distance_m,
             worst.reached,
             worst.active_ticks,
             self.policy_loaded,
             EVAL_BEARINGS,
             worst.bearing_rad.to_degrees(),
-            self.far.mean_saturation(),
+            median.mean_saturation(),
+            EVAL_LOCALES,
+            self.far
+                .iter()
+                .map(|s| format!("{:.4}", s.worst().progress_m))
+                .collect::<Vec<_>>()
+                .join(","),
         )
         .expect("writing to a String never fails");
         if let Some(jpm) = worst.j_per_m() {
             write!(out, " j_per_m={jpm:.2}").expect("writing to a String never fails");
         }
-        if let Some(jpm_mean) = self.far.mean_j_per_m() {
+        if let Some(jpm_mean) = median.mean_j_per_m() {
             write!(out, " j_per_m_mean={jpm_mean:.2}").expect("writing to a String never fails");
         }
         if let (Some(measured), Some(drift)) = (
@@ -119,7 +134,7 @@ impl EvalReport {
     }
 }
 
-fn bearing_lines(out: &mut String, prefix: &str, sweep: &CompassSweep) {
+fn bearing_lines(out: &mut String, prefix: &str, sweep: &CompassSweep, locale: Option<usize>) {
     for b in &sweep.per_bearing {
         write!(
             out,
@@ -137,6 +152,9 @@ fn bearing_lines(out: &mut String, prefix: &str, sweep: &CompassSweep) {
             b.active_ticks,
         )
         .expect("writing to a String never fails");
+        if let Some(l) = locale {
+            write!(out, " locale={l}").expect("writing to a String never fails");
+        }
         if let Some(jpm) = b.j_per_m() {
             write!(out, " j_per_m={jpm:.2}").expect("writing to a String never fails");
         }
@@ -174,7 +192,7 @@ mod tests {
         };
         EvalReport {
             policy_loaded,
-            far: sweep(DEFAULT_TARGET_DISTANCE_M),
+            far: [sweep(DEFAULT_TARGET_DISTANCE_M); EVAL_LOCALES],
             close: sweep(CLOSE_PROBE_DISTANCE_M),
             pace: sweep(PACE_PROBE_DISTANCE_M),
         }
@@ -186,26 +204,30 @@ mod tests {
     fn wire_report_matches_the_pinned_schema() {
         let wire = report(true, 0.0).wire_report();
         let lines: Vec<&str> = wire.lines().collect();
-        assert_eq!(lines.len(), 2 * EVAL_BEARINGS + 2);
+        assert_eq!(lines.len(), (EVAL_LOCALES + 1) * EVAL_BEARINGS + 2);
 
         assert_eq!(
             lines[0],
             "EVAL_RESULT_BEARING deg=0 progress_m=1.0000 closest_m=8.0000 tip_m=inf \
              final_m=8.5000 total_torque=10.00 saturation=0.2500 work_j=2.00 reached=false \
-             ticks=200 j_per_m=2.00"
+             ticks=200 locale=0 j_per_m=2.00"
         );
-        assert!(lines[EVAL_BEARINGS].starts_with("EVAL_RESULT_CLOSE_BEARING deg=0 "));
+        assert!(lines[EVAL_BEARINGS].contains(" locale=1 "));
+        assert!(
+            lines[EVAL_LOCALES * EVAL_BEARINGS].starts_with("EVAL_RESULT_CLOSE_BEARING deg=0 ")
+        );
         assert_eq!(
-            lines[2 * EVAL_BEARINGS],
+            lines[(EVAL_LOCALES + 1) * EVAL_BEARINGS],
             "EVAL_RESULT_CLOSE progress_m=1.0000 closest_m=8.0000 tip_m=inf target_m=1.00 \
              reached_count=0 bearings=8 worst_deg=0"
         );
         assert_eq!(
-            lines[2 * EVAL_BEARINGS + 1],
+            lines[(EVAL_LOCALES + 1) * EVAL_BEARINGS + 1],
             "EVAL_RESULT progress_m=1.0000 total_torque=10.00 mean_torque_per_tick=0.5000 \
-             initial_m=9.0000 closest_m=8.0000 tip_m=inf final_m=8.5000 target_m=9.00 \
+             initial_m=9.0000 closest_m=8.0000 tip_m=inf final_m=8.5000 target_m=24.00 \
              reached=false ticks=200 policy_loaded=true bearings=8 worst_deg=0 \
-             saturation_mean=0.2500 j_per_m=2.00 j_per_m_mean=2.00"
+             saturation_mean=0.2500 locales=3 locale_worst_m=1.0000,1.0000,1.0000 \
+             j_per_m=2.00 j_per_m_mean=2.00"
         );
         assert!(wire.ends_with('\n'));
     }
@@ -215,7 +237,7 @@ mod tests {
     #[test]
     fn j_per_m_keys_are_guarded() {
         let mut r = report(true, 0.0);
-        for b in r.far.per_bearing.iter_mut() {
+        for b in r.far.iter_mut().flat_map(|s| s.per_bearing.iter_mut()) {
             b.progress_m = 0.1;
         }
         for b in r.close.per_bearing.iter_mut() {
