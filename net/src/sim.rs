@@ -54,7 +54,7 @@ impl Input {
     /// The input the server substitutes for a tick where this player's stream is STARVED
     /// (transit lag): keep the held-state move axes, zero the rest — `look_yaw` is a per-tick
     /// DELTA (re-applying it would keep the avatar turning) and a re-fired button tap would
-    /// double a grab/restart. See [`crate::server`]'s hold semantics.
+    /// double an extract/restart. See [`crate::server`]'s hold semantics.
     pub fn hold(self) -> Self {
         Self {
             move_strafe: self.move_strafe,
@@ -106,11 +106,39 @@ pub(crate) const PLAYER_SPEED: i64 =
 #[cfg(test)]
 const CRAB_SPEED: i64 = CRAB_CHARGE_SPEED_PER_S / TICK_HZ as i64;
 
+/// The claw tests' yardstick, 5/9 of a player height (≈0.028 m) — every claw-test
+/// length is a multiple, so the geometry keeps one legible scale. Anchored on the
+/// player, NOT on [`CLAW_DOWN_BUFFER`]: that's the tune-on-playtest feel knob, and
+/// retuning it must not silently rescale this geometry (e.g. drop the "overhead"
+/// claw under the player's height span).
+#[cfg(test)]
+const CLAW_M: i64 = PLAYER_HEIGHT_FP * 5 / 9;
+
+/// A claw capsule at body height. `dx` slides it sideways off the player so the
+/// near-miss cases stay one call.
+#[cfg(test)]
+fn claw_at(p: Pos, dx: i64, y: i64) -> ClawPose {
+    ClawPose {
+        a: Pos {
+            x: p.x + dx - 2 * CLAW_M,
+            z: p.z,
+        },
+        b: Pos {
+            x: p.x + dx + 2 * CLAW_M,
+            z: p.z,
+        },
+        a_y: y,
+        b_y: y,
+        radius: CLAW_M / 2,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) {
     if sim.tick() < sim.round_start + STARTUP_GRACE_TICKS {
         return;
     }
+    let mut claws = Vec::new();
     for idx in 0..sim.crabs().len() {
         let Some(target) = sim.nearest_living_player_pos(idx) else {
             continue;
@@ -127,14 +155,19 @@ pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) {
             pos.z += (dz as i128 * CRAB_SPEED as i128 / dist) as i64;
         }
         sim.set_external_crab_pose(idx, pos, yaw);
+        // A claw riding her carapace point, refreshed per tick like the server bridge's
+        // capture — downs are claw contact only (rl#236), so the pursuit driver must
+        // bring claws, not just a pose, for a catch to land.
+        claws.push(claw_at(pos, 0, CLAW_M));
     }
+    sim.set_external_claws(claws);
 }
 
 pub const CRAB_SCALE: i64 = 12;
 
 /// Sally's nominal stature in world meters. The world's absolute scale IS the rig's
 /// (rl#256), so this is a pinned copy of the rigs' measured natural height — fallback
-/// 0.61146 m, mesh-fitted 0.61150 m; `grab_reach_matches_crab_body` holds it within 1%
+/// 0.61146 m, mesh-fitted 0.61150 m; `spawn_clearance_matches_crab_body` holds it within 1%
 /// of every rig she can wear. Human-scale constants derive from it via the sizing rule.
 pub const CRAB_STATURE: f32 = 0.6115;
 
@@ -150,17 +183,6 @@ pub const PLAYER_HEIGHT: f32 = CRAB_STATURE / CRAB_SCALE as f32;
 const fn player_heights(h: f32) -> i64 {
     (h * PLAYER_HEIGHT * UNIT as f32 + 0.5) as i64
 }
-
-/// 2D reach of the grab around the crab's sim pos (the carapace ground point — the bridge
-/// integrates carapace deltas): deep under her body core. rl#236 pinned this to the
-/// full inscribed carapace footprint (~0.30 m); rl#249 shrank it, because that
-/// disc downed prey her TRAINED near-field claw strike should engage — the circle shadowed
-/// the claw mechanic rl#249 asks for (rl#236's own side observation). Now the core disc
-/// covers only "she is standing on you"; the 0.17–0.48 m shell belongs to real claw
-/// contact ([`ClawPose`]). Legs still deliberately do not grab.
-/// `grab_reach_matches_crab_body` pins the disc within the carapace footprint, under
-/// the claw shell.
-pub const CRAB_GRAB_RADIUS: i64 = player_heights(6.0 / 1.8);
 
 /// "Very close" slack around a claw collider (rl#249): the sim player is a point, so this
 /// covers their body radius plus the near-miss feel margin — and absorbs one tick of claw
@@ -190,8 +212,9 @@ const SPAWN_GRACE_SECS: i64 = 5;
 
 /// Spawn clearance from the crab's sim pos, round-start and joiners alike (rl#247):
 /// [`SPAWN_GRACE_SECS`] of her full charge, not a bare meter count (rl#257). Far
-/// outside her carapace footprint (corner reach ~0.51 m) and [`CRAB_GRAB_RADIUS`];
-/// `grab_reach_matches_crab_body` cross-checks that floor against every rig.
+/// outside her carapace footprint (corner reach ~0.51 m), so no spawn lands inside
+/// her claw shell; `spawn_clearance_matches_crab_body` cross-checks that floor
+/// against every rig.
 const MIN_CRAB_SPAWN_DISTANCE: i64 = CRAB_CHARGE_SPEED_PER_S * SPAWN_GRACE_SECS;
 
 /// Spacing between player spawn slots along the z=0 spawn line.
@@ -277,7 +300,10 @@ pub struct Crab {
     yaw: i32,
 }
 
-/// One of Sally's claw colliders as of this tick, bridged into sim space: the pincer's
+/// One of Sally's claw colliders as of this tick, bridged into sim space — THE down
+/// mechanism, alone (rl#236 owner call): standing under her carapace is deliberately
+/// safe-and-fun, so no center/footprint disc downs anyone; only a pincer touch does.
+/// The capsule is the pincer's
 /// real physics capsule (rl#249 — no separate hitbox to drift), as an XZ segment with
 /// per-end heights ABOVE THE LOCAL GROUND SURFACE and the capsule radius, all on the
 /// fixed-point grid. Surface-relative y is what makes [`Self::downs`]'s player span
@@ -364,7 +390,7 @@ pub struct Sim {
     /// player flies, its ONE position is the craft's — the walker rides the craft instead
     /// of standing as a husk at the boarding spot, so the crab hunts the craft's shadow
     /// and stepping out resumes on foot right there. Membership doubles as the down
-    /// exemption: a pilot is inside a hull, so grabs and claws act on the craft's REAL
+    /// exemption: a pilot is inside a hull, so claws act on the craft's REAL
     /// collider (rapier), never the walker. External per-tick input like [`ClawPose`]:
     /// server-only, overwritten before every step, excluded from `state_hash`/snapshots
     /// (clients see the resulting player pos).
@@ -532,10 +558,10 @@ impl Sim {
             );
         }
         // The objective sits BEYOND the crab's spawn ring by more than her ~0.48 m
-        // claw-contact shell (see [`CRAB_GRAB_RADIUS`]), preserving the layout
-        // invariant spawn line < crab < extraction whatever MIN becomes — with a margin barely
-        // past her ring the rl#257 clearance bump parked her ON the objective, its disc
-        // inside her claw shell at round start.
+        // claw-contact shell ([`ClawPose`] reach off her corner-most pincer), preserving
+        // the layout invariant spawn line < crab < extraction whatever MIN becomes — with
+        // a margin barely past her ring the rl#257 clearance bump parked her ON the
+        // objective, its disc inside her claw shell at round start.
         let extraction = ExtractionPoint {
             pos: Pos {
                 x: 0,
@@ -637,18 +663,9 @@ impl Sim {
         let armed = self.tick > self.round_start + STARTUP_GRACE_TICKS;
 
         if armed {
-            // Pilots are exempt: inside a hull there is no walker to grab or claw — the
-            // crab strikes the craft's REAL collider in the physics arena instead (rl#258).
-            for crab in &self.crabs {
-                for (id, p) in self.players.iter_mut() {
-                    if p.status == PlayerStatus::Alive
-                        && !self.pilots.contains_key(id)
-                        && within(p.pos.x, p.pos.z, crab.pos.x, crab.pos.z, CRAB_GRAB_RADIUS)
-                    {
-                        p.status = PlayerStatus::Downed;
-                    }
-                }
-            }
+            // Claw contact is the ONE down mechanism (rl#236) — see [`ClawPose`]. Pilots
+            // are exempt: inside a hull there is no walker to claw — the crab strikes the
+            // craft's REAL collider in the physics arena instead (rl#258).
             for claw in &self.claws {
                 for (id, p) in self.players.iter_mut() {
                     if p.status == PlayerStatus::Alive
@@ -1066,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn crab_pursues_and_grabs_a_lone_player() {
+    fn crab_pursues_and_claws_a_lone_player() {
         let mut sim = Sim::new(0, &players(1));
         let neutral = neutral_for(&sim);
         for _ in 0..STARTUP_GRACE_TICKS {
@@ -1133,11 +1150,9 @@ mod tests {
         // The crab stays parked at her spawn: while CRAB_SPEED > PLAYER_SPEED (asserted
         // below — her honest pace since rl#257) the pure-pursuit test driver catches
         // EVERY on-foot route, so the old wide-dodge choreography can't win; catching a
-        // standing player is pinned by `crab_pursues_and_grabs_a_lone_player`, and THIS
-        // test pins the extraction mechanic. Her spawn ring still makes the run real:
-        // the straight line to the point passes MIN_CRAB_SPAWN_DISTANCE-proportional
-        // meters from her (the push-out bearing has a fixed x component), far clear of
-        // [`CRAB_GRAB_RADIUS`] of an armed crab.
+        // standing player is pinned by `crab_pursues_and_claws_a_lone_player`, and THIS
+        // test pins the extraction mechanic. No claws are fed here — a parked, clawless
+        // crab cannot down anyone (rl#236) — so the run is a pure extraction exercise.
         const {
             assert!(
                 CRAB_SPEED > PLAYER_SPEED,
@@ -1184,15 +1199,17 @@ mod tests {
     /// rl#247: a mid-round joiner must never materialize inside a crab's lethal reach —
     /// grace armed long ago, so an unlucky slot would Down them before their first input.
     #[test]
-    fn joiner_never_spawns_inside_a_crab_grab_disc() {
+    fn joiner_never_spawns_inside_a_crab_spawn_clearance_disc() {
         let mut sim = Sim::new(0, &players(1));
         let neutral = neutral_for(&sim);
         for _ in 0..=STARTUP_GRACE_TICKS {
             sim.step(&neutral);
         }
-        // Park the crab dead on the joiner's roster slot (x=0 for idx 1 of 2).
+        // Park the crab dead on the joiner's roster slot (x=0 for idx 1 of 2), claw at
+        // her carapace point — downs are claw contact only (rl#236).
         let parked = Pos { x: 0, z: 0 };
         sim.set_external_crab_pose(0, parked, 0);
+        sim.set_external_claws(vec![claw_at(parked, 0, CLAW_M)]);
         sim.spawn_joining_player(PlayerId(1));
         let pos = sim.player(PlayerId(1)).unwrap().pos();
         assert_eq!(pos.z, 0, "slot selection stays on the spawn line");
@@ -1204,7 +1221,7 @@ mod tests {
         assert_eq!(
             sim.player(PlayerId(0)).unwrap().status(),
             PlayerStatus::Downed,
-            "the parked crab grabs the host — proving the round is armed"
+            "the parked crab claws the host — proving the round is armed"
         );
         assert_eq!(
             sim.player(PlayerId(1)).unwrap().status(),
@@ -1505,72 +1522,9 @@ mod tests {
     }
 
     #[test]
-    fn crab_holds_and_cannot_grab_during_startup_grace() {
-        let mut sim = Sim::new(0, &players(1));
-        let crab0 = sim.crabs()[0].pos();
-        sim.players.get_mut(&PlayerId(0)).unwrap().pos = crab0;
-        let neutral = neutral_for(&sim);
-        for _ in 0..STARTUP_GRACE_TICKS {
-            sim.step(&neutral);
-            assert_eq!(
-                sim.crabs()[0].pos(),
-                crab0,
-                "crab holds its spawn during grace"
-            );
-            assert_eq!(
-                sim.player(PlayerId(0)).unwrap().status(),
-                PlayerStatus::Alive,
-                "no grab during the startup grace"
-            );
-            assert_eq!(sim.outcome(), Outcome::Ongoing);
-        }
-        sim.step(&neutral);
-        assert_eq!(
-            sim.player(PlayerId(0)).unwrap().status(),
-            PlayerStatus::Downed,
-            "crab arms and grabs once the grace ends"
-        );
-    }
-
-    /// The claw tests' yardstick, 5/9 of a player height (≈0.028 m) — every claw-test
-    /// length is a multiple, so the geometry keeps one legible scale. Anchored on the
-    /// player, NOT on [`CLAW_DOWN_BUFFER`]: that's the tune-on-playtest feel knob, and
-    /// retuning it must not silently rescale this geometry (e.g. drop the "overhead"
-    /// claw under the player's height span).
-    const CLAW_M: i64 = PLAYER_HEIGHT_FP * 5 / 9;
-
-    /// A claw capsule at body height. `dx` slides it sideways off the player so the
-    /// near-miss cases stay one call.
-    fn claw_at(p: Pos, dx: i64, y: i64) -> ClawPose {
-        ClawPose {
-            a: Pos {
-                x: p.x + dx - 2 * CLAW_M,
-                z: p.z,
-            },
-            b: Pos {
-                x: p.x + dx + 2 * CLAW_M,
-                z: p.z,
-            },
-            a_y: y,
-            b_y: y,
-            radius: CLAW_M / 2,
-        }
-    }
-
-    #[test]
     fn claw_touch_downs_a_player_after_the_grace() {
         let mut sim = Sim::new(0, &players(1));
         let p = sim.player(PlayerId(0)).unwrap().pos();
-        assert!(
-            !within(
-                p.x,
-                p.z,
-                sim.crabs()[0].pos().x,
-                sim.crabs()[0].pos().z,
-                CRAB_GRAB_RADIUS
-            ),
-            "the player must spawn outside the grab circle for this to isolate the claw path"
-        );
         sim.set_external_claws(vec![claw_at(p, 0, CLAW_M)]);
         let neutral = neutral_for(&sim);
         for _ in 0..STARTUP_GRACE_TICKS {
@@ -1591,17 +1545,17 @@ mod tests {
 
     /// rl#258: a piloting player IS its craft — its walker rides the fed craft pose (one
     /// position, so the hunt targets the craft's shadow and stepping out resumes there),
-    /// and neither the grab circle nor a touching claw downs it (the crab strikes the
-    /// craft's real collider in the physics arena instead). A non-pilot at the same spot
-    /// still goes down, so the exemption is the pilot set, not a weakened check.
+    /// and a touching claw never downs it (the crab strikes the craft's real collider in
+    /// the physics arena instead). A non-pilot at the same spot still goes down, so the
+    /// exemption is the pilot set, not a weakened check.
     #[test]
     fn a_piloting_player_rides_its_craft_and_cannot_be_downed() {
         let mut sim = Sim::new(0, &players(2));
         let neutral = neutral_for(&sim);
-        // Park both players' positions on the crab: inside the grab circle AND touched by
-        // a claw. The pilot gets there via its craft pose; the walker via the same feed
-        // minus pilot membership (set_external_pilots is filtered upstream, so feeding it
-        // directly stands in for "standing there on foot").
+        // Park both players' positions on the crab, touched by a claw. The pilot gets
+        // there via its craft pose; the walker via the same feed minus pilot membership
+        // (set_external_pilots is filtered upstream, so feeding it directly stands in
+        // for "standing there on foot").
         let crab = sim.crabs()[0].pos();
         let claw = claw_at(crab, 0, CLAW_M);
         let both = |pilots: &[PlayerId]| {
@@ -1622,7 +1576,7 @@ mod tests {
         assert_eq!(
             p0.status(),
             PlayerStatus::Alive,
-            "inside a hull there is no walker to grab or claw"
+            "inside a hull there is no walker to claw"
         );
         // Same spot, on foot: player 1 stops piloting (drops from the fed set) and downs.
         sim.set_external_claws(vec![claw]);
@@ -1700,19 +1654,14 @@ mod tests {
         }
     }
 
-    /// Pins [`CRAB_GRAB_RADIUS`] and [`MIN_CRAB_SPAWN_DISTANCE`] to the crab's actual body
-    /// (rl#236) and the grab to the claw-strike band (rl#249). The world runs at rig
-    /// scale (rl#256), so rig meters ARE world meters; [`CRAB_STATURE`] is pinned to
-    /// every rig here. Against EVERY rig she can wear (the procedural fallback always;
-    /// the mesh-fitted recipe when sally.glb resolves): the grab never reaches beyond the
-    /// carapace footprint's inscribed circle (the disc is anchored on the carapace, so
-    /// inscribed = "certainly under her body" whatever her yaw), and spawns clear the
-    /// footprint's corner reach. The rl#249 upper bound: the grab disc must stop short of
-    /// the hunt-target band's far edge, else it downs prey before the trained near-field
-    /// claw strike can engage and the claw trigger ([`ClawPose`]) is unreachable — exactly
-    /// the shadowing rl#236 observed.
+    /// Pins [`MIN_CRAB_SPAWN_DISTANCE`] to the crab's actual body (rl#236). The world
+    /// runs at rig scale (rl#256), so rig meters ARE world meters; [`CRAB_STATURE`] is
+    /// pinned to every rig here. Against EVERY rig she can wear (the procedural fallback
+    /// always; the mesh-fitted recipe when sally.glb resolves): spawns clear the carapace
+    /// footprint's corner reach, so no spawn materializes under her body with her claws
+    /// ([`ClawPose`] — the ONE down mechanism) already overhead.
     #[test]
-    fn grab_reach_matches_crab_body() {
+    fn spawn_clearance_matches_crab_body() {
         use crab_world::bot::rig::{RestShape, fallback_recipe, recipe_silhouette};
 
         let mut recipes = vec![("fallback", fallback_recipe())];
@@ -1727,7 +1676,6 @@ mod tests {
             ),
         }
 
-        let grab_m = CRAB_GRAB_RADIUS as f32 / UNIT as f32;
         for (name, recipe) in &recipes {
             let sil = recipe_silhouette(recipe);
             let RestShape::Cuboid { half, .. } = sil.carapace else {
@@ -1740,21 +1688,12 @@ mod tests {
                 "{name}: natural height {} strays >1% from CRAB_STATURE {CRAB_STATURE}",
                 sil.natural_height()
             );
-            let inscribed_m = half.x.min(half.z);
             let corner_m = half.x.hypot(half.z);
-            assert!(
-                grab_m <= inscribed_m,
-                "{name}: grab reach {grab_m:.2} m pokes beyond the carapace's inscribed \
-                 footprint radius {inscribed_m:.2} m"
-            );
             assert!(
                 (MIN_CRAB_SPAWN_DISTANCE as f32 / UNIT as f32) > corner_m,
                 "{name}: spawn clearance must exceed the carapace's corner reach {corner_m:.2} m"
             );
         }
-        // (An rl#249 stanza compared grab_m against TARGET_ARENA_HALF — an ARENA-meter
-        // band, ~318 sim m since the rl#254 frame fix, so the comparison pinned nothing.
-        // The inscribed-footprint bound above carries the disc-vs-claw-shell intent.)
     }
 
     #[test]
@@ -1866,12 +1805,15 @@ mod tests {
         assert!(sim.step(&restart), "the restart fires");
         let crab0 = sim.crabs()[0].pos();
         sim.players.get_mut(&PlayerId(0)).unwrap().pos = crab0;
+        // Fed AFTER the restart (reset cleared the claw feed, as on a real round change):
+        // a claw touching the parked player, so only the grace keeps them up.
+        sim.set_external_claws(vec![claw_at(crab0, 0, CLAW_M)]);
         for i in 0..STARTUP_GRACE_TICKS {
             sim.step(&neutral);
             assert_eq!(
                 sim.player(PlayerId(0)).unwrap().status(),
                 PlayerStatus::Alive,
-                "no grab during the post-restart grace (tick {i} into the round)"
+                "no claw down during the post-restart grace (tick {i} into the round)"
             );
         }
         sim.step(&neutral);
@@ -1883,7 +1825,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_crab_round_spawns_hashes_and_grabs_per_crab() {
+    fn multi_crab_round_spawns_hashes_and_snapshots_per_crab() {
         let mut sim = Sim::new(0, &players(2));
         sim.configure_crabs(2);
         assert_eq!(sim.crabs().len(), 2);
@@ -1915,19 +1857,8 @@ mod tests {
         sim.set_external_crab_pose(1, nudged, c1.yaw());
         assert_ne!(sim.state_hash(), h0, "crab 1's pose folds into the hash");
 
-        let neutral = neutral_for(&sim);
-        for _ in 0..=STARTUP_GRACE_TICKS {
-            sim.step(&neutral);
-        }
-        let prey = sim.player(PlayerId(1)).unwrap().pos();
-        sim.set_external_crab_pose(1, prey, 0);
-        sim.step(&neutral);
-        assert_eq!(
-            sim.player(PlayerId(1)).unwrap().status(),
-            PlayerStatus::Downed,
-            "the second crab's reach downs a player"
-        );
-
+        // (Downing needs no per-crab leg: claws are a pooled, crab-agnostic feed —
+        // the single-crab claw tests cover the mechanism, rl#236.)
         let snap = sim.core_snapshot();
         assert_eq!(snap.crabs.len(), 2);
         let restored = CoreSnapshot::from_bytes(&snap.to_bytes()).unwrap();

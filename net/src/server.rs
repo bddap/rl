@@ -1364,8 +1364,9 @@ mod tests {
         let me = PlayerId(0);
         let roster = vec![me];
 
-        // Off past CRAB_GRAB_RADIUS and receding — the equivalence claim needs a LIVE world
-        // every tick, so the scripted crab must never down the walking player (rl#236).
+        // Clawless (downs are claw contact only, rl#236) and receding — the equivalence
+        // claim needs a LIVE world every tick, so the scripted crab must never down the
+        // walking player.
         let pose_at = |tick: u64| CrabPose {
             pos: Pos {
                 x: 15_000 + tick as i64 * 11,
@@ -1505,9 +1506,8 @@ mod tests {
 
         let pose_at = |tick: u64| CrabPose {
             pos: Pos {
-                // Past CRAB_GRAB_RADIUS of both the host line and the join slots, and
-                // receding — a mid-test down would freeze the very state this test
-                // transfers (rl#236).
+                // Clawless (downs are claw contact only, rl#236) and receding — a
+                // mid-test down would freeze the very state this test transfers.
                 x: 16_000 + tick as i64 * 13,
                 z: -13_000 - tick as i64 * 9,
             },
