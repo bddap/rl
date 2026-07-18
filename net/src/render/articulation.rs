@@ -224,7 +224,7 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
 
     let arena_anchor = world
         .get_resource::<crate::external_crab::ArenaAnchor>()
-        .map(|a| a.0.to_array())
+        .map(|a| a.translation().to_array())
         .unwrap_or_default();
 
     CrabArticulation {
@@ -289,10 +289,11 @@ pub(super) fn adopt(world: &mut World, art: &CrabArticulation) {
     // host-side publisher runs in FixedUpdate, so the two can't fight (see the resource doc).
     debug_assert_eq!(
         art.arena_anchor[1], 0.0,
-        "wire anchor grew a y leg — ArenaAnchor's y = 0 gauge (rl#281 stage 6) has a \
-         second writer, and ground_y would double-lift through it"
+        "wire anchor grew a y leg — some host writer broke the planar contract (rl#281 \
+         stage 6), and the xz adopt below would silently DROP it in release"
     );
-    let anchor = crate::external_crab::ArenaAnchor(Vec3::from_array(art.arena_anchor));
+    let anchor =
+        crate::external_crab::ArenaAnchor(Vec2::new(art.arena_anchor[0], art.arena_anchor[2]));
     if world
         .get_resource::<crate::external_crab::ArenaAnchor>()
         .copied()
@@ -415,9 +416,7 @@ mod tests {
             "mlp512x3 @cafef00d".to_string(),
             "REFUSED: wrong rig".to_string(),
         ]));
-        host.insert_resource(crate::external_crab::ArenaAnchor(Vec3::new(
-            3.5, 0.0, -7.25,
-        )));
+        host.insert_resource(crate::external_crab::ArenaAnchor(Vec2::new(3.5, -7.25)));
         let craft_t = Transform::from_xyz(2.0, 5.5, -1.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
         crab_world::vehicle::spawn_ram_vehicle(
@@ -553,7 +552,7 @@ mod tests {
         // exact frame the host authored (rl#224), never a re-derived one.
         assert_eq!(
             client.resource::<crate::external_crab::ArenaAnchor>().0,
-            Vec3::new(3.5, 0.0, -7.25)
+            Vec2::new(3.5, -7.25)
         );
         let crafts = client.resource::<RemoteVehicle>().sample(42, 0.0);
         assert_eq!(crafts.len(), 1, "one piloted craft applied");

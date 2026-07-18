@@ -94,7 +94,7 @@ fn reconcile_vehicle_models(
     let sampled = remote.sample(clock.tick, clock.frac);
     let want_vis = mode.mesh_visibility();
     let placed = |c: &SampledCraft| {
-        Transform::from_translation(anchor.0 + c.pose.pos).with_rotation(c.pose.orient)
+        Transform::from_translation(anchor.translation() + c.pose.pos).with_rotation(c.pose.orient)
     };
     let mut matched = std::collections::BTreeSet::new();
     for (entity, model, mut tf, mut vis) in &mut models {
@@ -160,7 +160,8 @@ mod tests {
         }
     }
 
-    const ANCHOR: Vec3 = Vec3::new(3.0, 0.0, -7.0);
+    const ANCHOR: crate::external_crab::ArenaAnchor =
+        crate::external_crab::ArenaAnchor(Vec2::new(3.0, -7.0));
 
     fn world_with(remote: Vec<VehiclePoseWire>, mode: RenderMode) -> World {
         let mut w = World::new();
@@ -172,7 +173,7 @@ mod tests {
         // exact wire poses they fed; the interpolation law itself is pinned in pose.rs
         // and articulation.rs.
         w.insert_resource(super::super::driver::RenderClock { tick: 1, frac: 0.0 });
-        w.insert_resource(crate::external_crab::ArenaAnchor(ANCHOR));
+        w.insert_resource(ANCHOR);
         w.insert_resource(mode);
         w
     }
@@ -215,7 +216,7 @@ mod tests {
         assert_eq!((pilot, kind), (PilotId(1), VehicleKind::Plane));
         assert_eq!(
             at,
-            ANCHOR + Vec3::new(2.0, 5.0, -1.0),
+            ANCHOR.translation() + Vec3::new(2.0, 5.0, -1.0),
             "pose places through the arena anchor, like the wireframe pass"
         );
         assert_eq!(vis, Visibility::Visible);
@@ -234,7 +235,7 @@ mod tests {
         w.run_system_once(reconcile_vehicle_models).unwrap();
         let got = models(&mut w);
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].2, ANCHOR + Vec3::new(4.0, 6.0, 0.0));
+        assert_eq!(got[0].2, ANCHOR.translation() + Vec3::new(4.0, 6.0, 0.0));
 
         // Pilot steps out: the model despawns, children included.
         readopt(&mut w, 3, Vec::new());

@@ -19,12 +19,16 @@ pub(super) struct FpCamera;
 pub(super) struct ExtractionPillar;
 
 /// The rendered ground height under a sim point: the arena surface sampled at the
-/// point's arena-frame xz, lifted back through the anchor — world = arena + anchor
-/// (anchor.y = 0 by construction, [`crate::external_crab::ArenaAnchor`]). Every sim
+/// point's arena-frame xz — world = arena + anchor, and the anchor is planar by type
+/// ([`crate::external_crab::ArenaAnchor`]), so no y lift crosses back. Every sim
 /// entity stands ON this surface; on the flat grids it is exactly the old y = 0.
-fn ground_y(pos: Pos, terrain: &crab_world::terrain::Terrain, anchor: Vec3) -> f32 {
+fn ground_y(
+    pos: Pos,
+    terrain: &crab_world::terrain::Terrain,
+    anchor: crate::external_crab::ArenaAnchor,
+) -> f32 {
     let (x, z) = pos.to_meters();
-    terrain.height(x - anchor.x, z - anchor.z) + anchor.y
+    terrain.height(x - anchor.0.x, z - anchor.0.y)
 }
 
 /// Keep the drawn arena surface ([`crab_world::physics::ArenaSurface`]) at the arena
@@ -37,9 +41,10 @@ pub(super) fn sync_arena_surface(
     placement: Res<crate::external_crab::ArenaAnchor>,
     mut surfaces: Query<&mut Transform, With<crab_world::physics::ArenaSurface>>,
 ) {
+    let want = placement.translation();
     for mut t in &mut surfaces {
-        if t.translation != placement.0 {
-            t.translation = placement.0;
+        if t.translation != want {
+            t.translation = want;
         }
     }
 }
@@ -56,7 +61,7 @@ pub(super) fn place_extraction_pillar(
     let ex = state.client.sim().extraction().pos();
     let pillar_h = crate::sim::CRAB_STATURE * 1.2;
     for mut t in &mut pillars {
-        t.translation = world(ex, ground_y(ex, &terrain, placement.0) + pillar_h * 0.5);
+        t.translation = world(ex, ground_y(ex, &terrain, *placement) + pillar_h * 0.5);
     }
 }
 
@@ -340,7 +345,7 @@ pub(super) fn apply_transforms(
     let local = state.client.me();
     // Sim entities stand ON the arena surface (rl#281): every lift below is height
     // above the local ground, sampled at the entity's own interpolated spot.
-    let ground = |pos: Pos| ground_y(pos, &terrain, placement.0);
+    let ground = |pos: Pos| ground_y(pos, &terrain, *placement);
 
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
         let Some(now) = sim.player(avatar.0) else {
@@ -387,7 +392,7 @@ pub(super) fn apply_transforms(
         if let Some(pose) = vehicle.cockpit_sample(clock.tick, alpha) {
             // The STATIC arena→render frame (rl#224): anchoring on the live carapace here
             // made the whole cockpit view judder with Sally's every wiggle.
-            *cam = cockpit_camera(pose, placement.0);
+            *cam = cockpit_camera(pose, placement.translation());
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
