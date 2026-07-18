@@ -135,31 +135,33 @@ fn claw_at(p: Pos, dx: i64, y: i64) -> ClawPose {
 
 #[cfg(test)]
 pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) {
-    if sim.tick() < sim.round_start + STARTUP_GRACE_TICKS {
-        return;
-    }
     let mut claws = Vec::new();
-    for idx in 0..sim.crabs().len() {
-        let Some(target) = sim.nearest_living_player_pos(idx) else {
-            continue;
-        };
-        let mut pos = sim.crabs()[idx].pos();
-        let dx = target.x - pos.x;
-        let dz = target.z - pos.z;
-        let yaw = trig::atan2_turns(dx, dz);
-        let dist = isqrt_i128(dist2_i128(dx, dz));
-        if dist <= CRAB_SPEED as i128 {
-            pos = target;
-        } else if dist > 0 {
-            pos.x += (dx as i128 * CRAB_SPEED as i128 / dist) as i64;
-            pos.z += (dz as i128 * CRAB_SPEED as i128 / dist) as i64;
+    if sim.tick() >= sim.round_start + STARTUP_GRACE_TICKS {
+        for idx in 0..sim.crabs().len() {
+            let Some(target) = sim.nearest_living_player_pos(idx) else {
+                continue;
+            };
+            let mut pos = sim.crabs()[idx].pos();
+            let dx = target.x - pos.x;
+            let dz = target.z - pos.z;
+            let yaw = trig::atan2_turns(dx, dz);
+            let dist = isqrt_i128(dist2_i128(dx, dz));
+            if dist <= CRAB_SPEED as i128 {
+                pos = target;
+            } else if dist > 0 {
+                pos.x += (dx as i128 * CRAB_SPEED as i128 / dist) as i64;
+                pos.z += (dz as i128 * CRAB_SPEED as i128 / dist) as i64;
+            }
+            sim.set_external_crab_pose(idx, pos, yaw);
+            // A claw riding her carapace point — downs are claw contact only (rl#236),
+            // so the pursuit driver must bring claws, not just a pose, for a catch to
+            // land.
+            claws.push(claw_at(pos, 0, CLAW_M));
         }
-        sim.set_external_crab_pose(idx, pos, yaw);
-        // A claw riding her carapace point, refreshed per tick like the server bridge's
-        // capture — downs are claw contact only (rl#236), so the pursuit driver must
-        // bring claws, not just a pose, for a catch to land.
-        claws.push(claw_at(pos, 0, CLAW_M));
     }
+    // Unconditionally, empty during grace: claws are refreshed EVERY tick like the
+    // server bridge's capture — a stale claw must not outlive the tick that measured
+    // it (see [`Sim::set_external_claws`]).
     sim.set_external_claws(claws);
 }
 
@@ -1518,6 +1520,33 @@ mod tests {
         assert_eq!(
             target.config.players, original.config.players,
             "the snapshot must carry the roster too"
+        );
+    }
+
+    /// THE rl#236 owner call, pinned: standing under her carapace with no claw touching
+    /// is SAFE — her body core downs nobody. A center-disc regression (the exact
+    /// mechanism rl#236 deleted) fails here, not in a playtest.
+    #[test]
+    fn crab_body_overhead_without_a_claw_never_downs() {
+        let mut sim = Sim::new(0, &players(1));
+        let p = sim.player(PlayerId(0)).unwrap().pos();
+        sim.set_external_crab_pose(0, p, 0);
+        let neutral = neutral_for(&sim);
+        for _ in 0..=STARTUP_GRACE_TICKS + 10 {
+            sim.step(&neutral);
+            assert_eq!(
+                sim.player(PlayerId(0)).unwrap().status(),
+                PlayerStatus::Alive,
+                "her body core alone must never down (claw contact is the ONE mechanism)"
+            );
+        }
+        // Same spot, now with a touching claw: downs — proving the round was armed and
+        // the survival above was the mechanic, not a disarmed world.
+        sim.set_external_claws(vec![claw_at(p, 0, CLAW_M)]);
+        sim.step(&neutral);
+        assert_eq!(
+            sim.player(PlayerId(0)).unwrap().status(),
+            PlayerStatus::Downed,
         );
     }
 

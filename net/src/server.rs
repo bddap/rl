@@ -198,7 +198,7 @@ struct InputStream {
     queue: VecDeque<TickMsg>,
     /// The last input actually consumed — the HOLD source while the queue is starved. Held as
     /// [`Input::hold`] (move axes only): `look_yaw` is a per-tick DELTA (re-applying it would
-    /// spin the avatar) and a re-fired button tap would double a grab/restart.
+    /// spin the avatar) and a re-fired button tap would double an extract/restart.
     held: Input,
     /// The first [`TickMsg::issue_tick`] NOT yet consumed — this player's
     /// [`CoreSnapshot::input_next`](crate::snapshot::CoreSnapshot::input_next) watermark, which
@@ -1101,7 +1101,7 @@ mod tests {
     }
 
     /// A starved stream HOLDS the last consumed move axes but zeroes the per-tick look delta
-    /// (else the avatar spins) and the button taps (else a grab/restart re-fires).
+    /// (else the avatar spins) and the button taps (else an extract/restart re-fires).
     #[test]
     fn starved_stream_holds_axes_and_strips_edges() {
         let mut stream = InputStream::new();
