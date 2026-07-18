@@ -261,17 +261,9 @@ pub(crate) fn brain_step(
 
     let body = gather_body_state(n, &spawns, &terrain, &carapace_q, &parts_q);
 
-    let close_frac = training.close_frac;
     for e in 0..n {
         if targets.get(e).is_none() {
-            seed_target(
-                &mut targets,
-                &spawns,
-                e,
-                close_frac,
-                &mut training.rng,
-                &terrain,
-            );
+            seed_target(&mut targets, &spawns, e, &mut training.rng, &terrain);
         }
     }
 

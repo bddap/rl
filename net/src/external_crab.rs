@@ -10,11 +10,11 @@
 //! stride while her true-size render treadmilled in place.
 //!
 //! The posed hunt target is the prey offset, re-posed each tick as she closes,
-//! clamped to the training band's far edge ([`TARGET_ARENA_HALF`], ~9 m) along the
-//! true crab→player bearing. On the current map every prey offset lands well inside
-//! the band (~5.3 m at round start — the spawn clearance), in the close-range
-//! regime the rl#252 probe measures and the rl#250 curriculum trains — the clamp
-//! is a dormant guard that keeps a future larger map in-distribution.
+//! clamped to the training band's far edge ([`BAND_MAX_M`], 128 m since rl#292)
+//! along the true crab→player bearing. On the current map every prey offset lands
+//! far inside the band (~5.3 m at round start — the spawn clearance), so she hunts
+//! prey where it actually is; the clamp is a dormant guard that keeps a future
+//! larger map in-distribution.
 //!
 //! The spawn-relative body.pos obs channel would drift OOD on a long open-field
 //! chase (rl#240) — not fixable at the posing layer. [`bound_body_pos_drift`]
@@ -35,7 +35,7 @@ use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns};
 use crab_world::crab_view::CrabBrainLabels;
 use crab_world::policy::Policy;
-use crab_world::training::targets::{TARGET_ARENA_HALF, band_lure, recenter_delta};
+use crab_world::training::targets::{DRIFT_REBASE_M, band_lure, recenter_delta};
 use crab_world::vehicle::{Vehicle, VehicleControls};
 
 /// The posed hunt target's height ABOVE THE LOCAL SURFACE at the target's own xz —
@@ -145,7 +145,7 @@ impl CrabBridge {
             yaw_turns: 0,
             hunt_target_m: None,
             settle: crab_world::bot::RESET_GRACE_TICKS,
-            next_drift_log_m: TARGET_ARENA_HALF,
+            next_drift_log_m: DRIFT_REBASE_M,
             recenters: 0,
             missed_carapace_ticks: 0,
             next_miss_log_ticks: 1,
@@ -196,7 +196,7 @@ impl CrabBridge {
         self.world_pos_m = pos_to_m(spawn);
         self.last_carapace_m = None;
         self.settle = crab_world::bot::RESET_GRACE_TICKS;
-        self.next_drift_log_m = TARGET_ARENA_HALF;
+        self.next_drift_log_m = DRIFT_REBASE_M;
         self.recenters = 0;
         self.missed_carapace_ticks = 0;
         self.next_miss_log_ticks = 1;
@@ -307,7 +307,12 @@ pub(crate) fn restart_crabs_to_spawns(world: &mut World, spawns: &[Pos]) {
             // Fresh app: `spawn_initial_crabs` hasn't laid the origins yet — hand it
             // the layout so the FIRST origins are the sim spawns too, never the
             // training grid (rl#290).
-            world.insert_resource(crab_world::bot::InitialCrabLayout(layout));
+            // Base ZERO: for GCR the arena locale is a gauge — only the layout's
+            // shape matters; the anchor correspondence pins the rest.
+            world.insert_resource(crab_world::bot::InitialCrabLayout {
+                base_xz: Vec2::ZERO,
+                spawns_m: layout,
+            });
         } else {
             let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
             world
@@ -589,7 +594,7 @@ fn bound_body_pos_drift(
         } else if drift_m >= crab.next_drift_log_m {
             warn!(
                 "external_crab: env {idx} body.pos drifted {drift_m:.1} m from spawn — outside \
-                 the {TARGET_ARENA_HALF} m in-distribution radius, obs OOD (rl#240; recenter \
+                 the {DRIFT_REBASE_M} m in-distribution radius, obs OOD (rl#240; recenter \
                  disarmed)"
             );
             crab.next_drift_log_m = drift_m + DRIFT_LOG_STEP_M;
@@ -688,7 +693,7 @@ fn integrate_crab(
             crab.last_carapace_m = None;
             crab.settle = crab_world::bot::RESET_GRACE_TICKS;
             // The rescue respawned it at the origin — re-arm the drift measurement.
-            crab.next_drift_log_m = TARGET_ARENA_HALF;
+            crab.next_drift_log_m = DRIFT_REBASE_M;
         }
 
         let Some((_, t, vel)) = carapace_q.iter().find(|(env, _, _)| env.0 == idx) else {
@@ -1032,7 +1037,7 @@ mod ship_wiggle_tests {
             // The pre-rl#20 flail marched 9.6 m/400 ticks and crossed the band on its
             // own; the baked-collider-table crab (rl#20 phase 2) only shuffles 3-7 m,
             // so chaos no longer arms the recenter this test exists to exercise.
-            // Teleport her past the band once instead — the same drift trigger
+            // Teleport her past the drift radius once instead — the same drift trigger
             // production sees, minus the chaotic-gait pin that keeps rotting.
             if t == 600 {
                 let mut cq = app
@@ -1040,8 +1045,8 @@ mod ship_wiggle_tests {
                     .query_filtered::<&Transform, With<CrabCarapace>>();
                 let carapace_x = cq.single(app.world()).expect("carapace").translation.x;
                 // Absolute, not relative: her chaotic shuffle may sit anywhere inside
-                // the band, so land the CARAPACE at band + 2 m from the origin.
-                let dx = (TARGET_ARENA_HALF + 2.0) - carapace_x;
+                // the drift radius, so land the CARAPACE 2 m past it from the origin.
+                let dx = (DRIFT_REBASE_M + 2.0) - carapace_x;
                 super::gcr_crab_tests::shift_parts(&mut app, Vec3::new(dx, 0.0, 0.0));
             }
             app.update();
@@ -1238,6 +1243,7 @@ mod gcr_crab_tests {
     use crab_world::bot::headless::{
         HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
     };
+    use crab_world::training::targets::BAND_MAX_M;
 
     use super::*;
 
@@ -1340,7 +1346,7 @@ mod gcr_crab_tests {
         let crab = &app.world().resource::<ExternalCrabBridge>().crabs[0];
         assert_eq!(crab.recenters, 0, "unarmed: never recenter");
         assert!(
-            crab.next_drift_log_m > TARGET_ARENA_HALF + DRIFT_LOG_STEP_M,
+            crab.next_drift_log_m > DRIFT_REBASE_M + DRIFT_LOG_STEP_M,
             "the drift crossing must advance the log cursor, got {}",
             crab.next_drift_log_m
         );
@@ -1613,7 +1619,8 @@ mod gcr_crab_tests {
             "in-band prey must pose at the converted offset {want:?}, got {got:?}"
         );
 
-        // Beyond-band prey (only reachable on a future larger map): clamps to the edge.
+        // Mid-range prey (in-band since rl#292 widened the edge to 128 m): posed
+        // where it is — the old 9 m lure would have pulled this one nearer.
         let hunt = Pos::from_meters(50.0, 0.0);
         app.world_mut()
             .resource_mut::<ExternalCrabBridge>()
@@ -1622,8 +1629,21 @@ mod gcr_crab_tests {
         let posed = app.world().resource::<CrabTargets>().envs[0].expect("target posed");
         let d = (Vec2::new(posed.x, posed.z) - carapace_xz(&mut app)).length();
         assert!(
-            (d - TARGET_ARENA_HALF).abs() < 0.05,
-            "beyond-band prey must clamp to the {TARGET_ARENA_HALF} m edge, posed {d}"
+            (d - 50.0).abs() < 0.5,
+            "in-band mid-range prey must pose at its true distance, posed {d}"
+        );
+
+        // Beyond-band prey (only reachable on a future larger map): clamps to the edge.
+        let hunt = Pos::from_meters(BAND_MAX_M + 40.0, 0.0);
+        app.world_mut()
+            .resource_mut::<ExternalCrabBridge>()
+            .set_hunt_target(0, Some(hunt));
+        app.update();
+        let posed = app.world().resource::<CrabTargets>().envs[0].expect("target posed");
+        let d = (Vec2::new(posed.x, posed.z) - carapace_xz(&mut app)).length();
+        assert!(
+            (d - BAND_MAX_M).abs() < 0.5,
+            "beyond-band prey must clamp to the {BAND_MAX_M} m edge, posed {d}"
         );
     }
 

@@ -196,16 +196,16 @@ fn eval(e: EvalArgs) -> Result<ExitCode, String> {
         if r.progress_m() < min {
             eprintln!(
                 "eval: FAIL — policy closed {:.4} m toward the {:.2} m target at its \
-                 worst bearing ({:.0}°), below the required --min-progress {min} m \
-                 (dead/collapsed policy, or a dead bearing)",
+                 worst bearing ({:.0}°, median locale), below the required \
+                 --min-progress {min} m (dead/collapsed policy, or a dead bearing)",
                 r.progress_m(),
-                r.far.target_distance_m,
-                r.far.worst().bearing_rad.to_degrees()
+                r.median_far().target_distance_m,
+                r.median_far().worst().bearing_rad.to_degrees()
             );
             return Ok(ExitCode::FAILURE);
         }
         println!(
-            "eval: PASS — worst-bearing progress {:.4} m ≥ --min-progress {min} m",
+            "eval: PASS — median-locale worst-bearing progress {:.4} m ≥ --min-progress {min} m",
             r.progress_m()
         );
     }

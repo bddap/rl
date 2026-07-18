@@ -15,11 +15,45 @@ use crate::bot::{BotSet, CrabSpawns};
 use crate::policy::Policy;
 use crate::training::reward::dist_3d;
 use crate::training::targets::{
-    BAND_START_MIN, REACH_RADIUS, TARGET_ARENA_HALF, TARGET_Y_MAX, TARGET_Y_MIN, band_lure,
-    closest_tip_dist, polar_target, recenter_delta, tip_touch,
+    BAND_START_MIN, REACH_RADIUS, TARGET_Y_MAX, TARGET_Y_MIN, band_lure, closest_tip_dist,
+    polar_target, recenter_delta, tip_touch,
 };
 
-pub const DEFAULT_TARGET_DISTANCE_M: f32 = TARGET_ARENA_HALF;
+/// The far sweep's ball distance — pinned from measured pace, NOT the band edge
+/// (rl#292/rl#293): at the 128 m band edge an unreachable ball would make min-progress
+/// measure the eval locale's worst obstruction (one cliffed bearing caps the min
+/// forever and arrival vanishes from the headline). 24 m ≈ 65% of the pinned charge's
+/// flat-ground horizon traverse ([`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] ≈ 1.6 m/s ×
+/// [`DEFAULT_EVAL_TICKS`] ≈ 23 s ≈ 37 m), so arrival stays measurable for a competent
+/// brain even on relief, while sitting well past the [`DRIFT_REBASE_M`]
+/// (`training::targets`) recenter radius and mid-band for the obs. Re-pin from pace
+/// evidence when the gait regime moves; numbers across a distance re-pin are
+/// incomparable by design.
+pub const DEFAULT_TARGET_DISTANCE_M: f32 = 24.0;
+
+/// How many terrain locales the far sweep samples (rl#293): one compass per locale,
+/// headline = MEDIAN over locales of min-over-bearings. The median keeps one
+/// pathological locale (a cliff ring) from capping the headline forever the way a
+/// min-over-locales would, while still refusing to let a single lucky meadow carry
+/// it. Locales are drawn deterministically from the bake ([`eval_locales`]), so the
+/// eval stays reproducible per brain; locale 0 is the tile center — the close and
+/// pace probes run there, keeping the charge instrument's geometry fixed.
+pub const EVAL_LOCALES: usize = 3;
+
+/// The fixed eval locales: tile center plus [`EVAL_LOCALES`]−1 seeded interior draws.
+/// Deterministic BY the committed bake (fixed seed over the tile interior), so every
+/// eval of every brain sweeps the same ground until the bake itself changes.
+fn eval_locales() -> [Vec2; EVAL_LOCALES] {
+    use rand::SeedableRng;
+    let g = crate::terrain::TerrainGrid::gcr();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x293_1092);
+    let mut locales = [Vec2::ZERO; EVAL_LOCALES];
+    for slot in locales.iter_mut().skip(1) {
+        let p = crate::training::targets::random_episode_origin(&mut rng, &g);
+        *slot = Vec2::new(p.x, p.z);
+    }
+    locales
+}
 
 /// The close-range probe distance (rl#252): the same compass swept with the ball just
 /// outside the claw, so close-range reach has an instrument — without one, flipping the
@@ -107,16 +141,16 @@ const PACE_WINDOW_MIN_S: f32 = 5.0;
 
 /// The pace probe's real ball distance (rl#280) — the charge-speed instrument's own
 /// sweep, so its saturation ceiling (this / [`PACE_WINDOW_MIN_S`] ≈ 3.6 m/s ≈ 5.9
-/// heights/s) no longer sits 1.9% above the pin's drift band the way the 9 m far ball's
-/// did after the 2026-07-16 re-pin. Double the training band edge, NOT a training
-/// change: the far sweep (the headline chase metric) keeps its
-/// [`DEFAULT_TARGET_DISTANCE_M`] band-edge ball; only this measurement runs farther.
-/// A ball past the band edge is out of distribution for the raw obs (rl#240), so the
-/// probe presents it through the SAME two seams production (net's `external_crab`)
-/// uses to hunt a distant player — the [`band_lure`] clamp and the [`pace_recenter`]
-/// body.pos recenter — which also makes the probe measure her pace in exactly the
-/// obs regime GCR play happens in.
-pub const PACE_PROBE_DISTANCE_M: f32 = 2.0 * TARGET_ARENA_HALF;
+/// heights/s) keeps headroom over the pin's drift band. A LITERAL since rl#292
+/// decoupled it from the band constant (it was 2× the old 9 m band edge): this is the
+/// instrument's own geometry — the [`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] pin was
+/// measured at exactly this distance, and moving it moves the saturation ceiling,
+/// so it re-pins only WITH a charge re-measure, never by riding a band change.
+/// The probe still presents the ball through the SAME two seams production (net's
+/// `external_crab`) uses to hunt a distant player — the [`band_lure`] clamp and the
+/// [`pace_recenter`] body.pos recenter — which keeps the probe measuring her pace in
+/// exactly the obs regime GCR play happens in.
+pub const PACE_PROBE_DISTANCE_M: f32 = 18.0;
 
 /// The pace probe's episode length: twice the [`PACE_WINDOW_MIN_S`] floor, so the
 /// prefix max scans [5 s, 10 s] — past where the old instrument's 9 m runs ever
@@ -253,29 +287,42 @@ impl CompassSweep {
 #[derive(Debug, Clone, Copy)]
 pub struct EvalReport {
     pub policy_loaded: bool,
-    /// The far sweep — the chase eval proper, sole source of the headline.
-    pub far: CompassSweep,
-    /// The rl#252 close-range probe at [`CLOSE_PROBE_DISTANCE_M`]. SIDECAR ONLY —
-    /// nothing here may feed [`Self::progress_m`]/[`Self::reached`], the headline
-    /// every gate keys off: folding it in would be a training-adjacent metric change
-    /// riding along with a measurement.
+    /// The far sweeps, one compass per [`eval_locales`] locale — the chase eval
+    /// proper, sole source of the headline (the MEDIAN locale's worst bearing).
+    pub far: [CompassSweep; EVAL_LOCALES],
+    /// The rl#252 close-range probe at [`CLOSE_PROBE_DISTANCE_M`], locale 0 only
+    /// (fixed geometry — the emergence readout diffs against recorded baselines).
+    /// SIDECAR ONLY — nothing here may feed [`Self::progress_m`]/[`Self::reached`],
+    /// the headline every gate keys off: folding it in would be a training-adjacent
+    /// metric change riding along with a measurement.
     pub close: CompassSweep,
-    /// The rl#280 pace probe at [`PACE_PROBE_DISTANCE_M`] — the charge-speed
-    /// instrument's own sweep (short lured episodes in the open field). SIDECAR like
-    /// the close probe: sole source of [`Self::measured_charge_heights_per_s`], never
-    /// of the headline.
+    /// The rl#280 pace probe at [`PACE_PROBE_DISTANCE_M`], locale 0 only (the
+    /// charge instrument's geometry stays fixed so the pin stays comparable).
+    /// SIDECAR like the close probe: sole source of
+    /// [`Self::measured_charge_heights_per_s`], never of the headline.
     pub pace: CompassSweep,
 }
 
 impl EvalReport {
-    /// Min-over-bearings FAR chase progress — THE headline scalar every gate compares.
-    pub fn progress_m(&self) -> f32 {
-        self.far.worst().progress_m
+    /// The MEDIAN locale's far sweep, by worst-bearing progress — the headline's one
+    /// coherent compass (see [`EVAL_LOCALES`] for why median, not min, over locales).
+    /// `total_cmp` for a deterministic pick.
+    pub fn median_far(&self) -> &CompassSweep {
+        let mut by_worst: [&CompassSweep; EVAL_LOCALES] = std::array::from_fn(|i| &self.far[i]);
+        by_worst.sort_by(|a, b| a.worst().progress_m.total_cmp(&b.worst().progress_m));
+        by_worst[EVAL_LOCALES / 2]
     }
 
-    /// Whether the crab reached the far ball at its WORST bearing.
+    /// Median-over-locales of min-over-bearings FAR chase progress — THE headline
+    /// scalar every gate compares.
+    pub fn progress_m(&self) -> f32 {
+        self.median_far().worst().progress_m
+    }
+
+    /// Whether the crab reached the far ball at the headline (median locale's worst)
+    /// bearing.
     pub fn reached(&self) -> bool {
-        self.far.worst().reached
+        self.median_far().worst().reached
     }
 
     /// Sally's measured charge speed in body-heights/s — the pace probe's best
@@ -385,12 +432,21 @@ pub fn run_eval(
 
     // The close and pace probes reuse the far sweep's episode definition (same
     // compass, same fresh-world episode) so their numbers read on the same scale; the
-    // pace probe differs only where its farther ball forces it to (rl#280).
+    // pace probe differs only where its geometry forces it to (rl#280). Only the far
+    // sweep fans over locales (rl#293) — the probes are instruments with fixed
+    // geometry at locale 0, the tile center.
+    let locales = eval_locales();
     let report = EvalReport {
         policy_loaded,
-        far: run_compass(&policy, active_ticks, target_distance, false),
-        close: run_compass(&policy, active_ticks, CLOSE_PROBE_DISTANCE_M, false),
-        pace: run_pace_probe(&policy, active_ticks),
+        far: locales.map(|l| run_compass(&policy, active_ticks, target_distance, false, l)),
+        close: run_compass(
+            &policy,
+            active_ticks,
+            CLOSE_PROBE_DISTANCE_M,
+            false,
+            locales[0],
+        ),
+        pace: run_pace_probe(&policy, active_ticks, locales[0]),
     };
     // The rl#266 speed guard, HERE so every judge (CLI, keep-best gate) flags for free:
     // a flag, not a verdict — a drifted pin is a re-measure chore, not a bad brain.
@@ -426,6 +482,7 @@ fn run_compass(
     active_ticks: u64,
     target_distance: f32,
     pace_probe: bool,
+    locale_xz: Vec2,
 ) -> CompassSweep {
     let mut per_bearing = [None; EVAL_BEARINGS];
     for (slot, bearing_rad) in per_bearing.iter_mut().zip(eval_bearings()) {
@@ -435,6 +492,7 @@ fn run_compass(
             target_distance,
             bearing_rad,
             pace_probe,
+            locale_xz,
         ));
     }
     CompassSweep {
@@ -450,12 +508,13 @@ fn run_compass(
 /// caller's smaller tick budget (smoke tests) binding; a full-budget caller pays only
 /// [`PACE_PROBE_TICKS`] per bearing — the pace prefix window is all the probe
 /// measures, and this sweep rides every keep-best gate eval.
-fn run_pace_probe(policy: &std::rc::Rc<Policy>, tick_budget: u64) -> CompassSweep {
+fn run_pace_probe(policy: &std::rc::Rc<Policy>, tick_budget: u64, locale_xz: Vec2) -> CompassSweep {
     run_compass(
         policy,
         tick_budget.min(PACE_PROBE_TICKS),
         PACE_PROBE_DISTANCE_M,
         true,
+        locale_xz,
     )
 }
 
@@ -477,17 +536,18 @@ pub(crate) fn bearing_bin(theta_rad: f32) -> usize {
 }
 
 /// One episode at one bearing — a fresh world per bearing, so each episode is exactly
-/// the pre-compass eval (deterministic per brain) with the target rotated. On the
-/// flat plant a pace probe episode swaps the training box for the open field — its
-/// ball sits past the box walls, and the unwalled flat grid is the plant GCR
-/// inference runs on; on a terrain plant every sweep (probe included) runs on the
-/// tile the policy trained on. The probe adds the [`pace_recenter`] seam either way.
+/// the pre-compass eval (deterministic per brain) with the target rotated, spawned at
+/// the sweep's locale (rl#293: the crab starts surface-placed at `locale_xz` via the
+/// same [`InitialCrabLayout`](crate::bot::InitialCrabLayout) seam net's GCR restart
+/// uses, so the eval locale rides the ONE spawn-layout path). The probe adds the
+/// [`pace_recenter`] seam.
 fn run_bearing(
     policy: std::rc::Rc<Policy>,
     active_ticks: u64,
     target_distance: f32,
     bearing_rad: f32,
     pace_probe: bool,
+    locale_xz: Vec2,
 ) -> BearingReport {
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
@@ -497,6 +557,10 @@ fn run_bearing(
         // recenter are surface-aware.
         arena: crate::physics::Arena::Terrain,
         visuals: crate::Visuals(false),
+    });
+    app.insert_resource(crate::bot::InitialCrabLayout {
+        base_xz: locale_xz,
+        spawns_m: vec![locale_xz],
     });
     app.insert_resource(EvalConfig {
         target_distance,
@@ -674,8 +738,9 @@ fn eval_step(
 }
 
 /// The pace probe's posed obs target: [`band_lure`] of the real ball — beyond the
-/// band the policy sees a ball a constant [`TARGET_ARENA_HALF`] ahead on the true
-/// bearing; inside it, the real ball itself. The posed point is re-landed at the real
+/// band the policy sees a ball a constant band edge ahead on the true bearing;
+/// inside it (every probe ball, since rl#292 widened the band), the real ball
+/// itself. The posed point is re-landed at the real
 /// ball's height-above-surface over the LURE'S own ground: its absolute y is surface +
 /// band at the distant xz, which on a slope can sit meters off the trained y band at
 /// the lure's xz — an OOD obs target, the exact artifact the lure exists to prevent.
@@ -803,7 +868,7 @@ mod tests {
         pace_sweep.per_bearing[3] = paced;
         EvalReport {
             policy_loaded,
-            far: sweep_at(DEFAULT_TARGET_DISTANCE_M),
+            far: [sweep_at(DEFAULT_TARGET_DISTANCE_M); EVAL_LOCALES],
             close: sweep_at(CLOSE_PROBE_DISTANCE_M),
             pace: pace_sweep,
         }
@@ -855,16 +920,12 @@ mod tests {
         );
     }
 
-    /// The rl#280 probe's geometry: the ball sits past the band edge (the whole
-    /// point), and the episode covers the pace window with room for the prefix max
-    /// to move (a probe shorter than the window would measure nothing, silently).
-    /// The lure/recenter seams themselves are pinned where they live,
-    /// `training::targets`.
+    /// The rl#280 probe's geometry: the episode covers the pace window with room for
+    /// the prefix max to move (a probe shorter than the window would measure
+    /// nothing, silently). The lure/recenter seams themselves are pinned where they
+    /// live, `training::targets`.
     #[test]
-    fn pace_probe_outruns_the_far_ball_and_covers_the_window() {
-        const {
-            assert!(PACE_PROBE_DISTANCE_M > DEFAULT_TARGET_DISTANCE_M);
-        }
+    fn pace_probe_covers_the_window() {
         let window_ticks = PACE_WINDOW_MIN_S * crate::physics::PHYSICS_HZ as f32;
         assert!(PACE_PROBE_TICKS as f32 >= 2.0 * window_ticks);
     }
@@ -876,38 +937,54 @@ mod tests {
     #[test]
     fn j_per_m_is_guarded_by_the_progress_floor() {
         let mut r = paced_report(true, DEFAULT_TARGET_DISTANCE_M, 0.0);
-        for b in &mut r.far.per_bearing {
+        for b in &mut r.far[0].per_bearing {
             b.work_j = 10.0;
         }
-        r.far.per_bearing[0].progress_m = WORK_PER_M_MIN_PROGRESS_M - 0.01;
-        assert_eq!(r.far.per_bearing[0].j_per_m(), None);
-        r.far.per_bearing[1].progress_m = WORK_PER_M_MIN_PROGRESS_M;
+        r.far[0].per_bearing[0].progress_m = WORK_PER_M_MIN_PROGRESS_M - 0.01;
+        assert_eq!(r.far[0].per_bearing[0].j_per_m(), None);
+        r.far[0].per_bearing[1].progress_m = WORK_PER_M_MIN_PROGRESS_M;
         assert_eq!(
-            r.far.per_bearing[1].j_per_m(),
+            r.far[0].per_bearing[1].j_per_m(),
             Some(10.0 / WORK_PER_M_MIN_PROGRESS_M)
         );
-        r.far.per_bearing[2].progress_m = 4.0;
-        assert_eq!(r.far.per_bearing[2].j_per_m(), Some(2.5));
+        r.far[0].per_bearing[2].progress_m = 4.0;
+        assert_eq!(r.far[0].per_bearing[2].j_per_m(), Some(2.5));
         // Mean over the two measured bearings only — the six guarded ones don't drag it.
-        let mean = r.far.mean_j_per_m().expect("two bearings measured");
+        let mean = r.far[0].mean_j_per_m().expect("two bearings measured");
         assert!((mean - (20.0 + 2.5) / 2.0).abs() < 1e-4);
 
         // All bearings guarded → no sweep mean at all, never a 0/0.
         let parked = paced_report(true, DEFAULT_TARGET_DISTANCE_M, 0.0);
-        assert_eq!(parked.far.mean_j_per_m(), None);
-        assert_eq!(parked.far.mean_saturation(), 0.0);
+        assert_eq!(parked.far[0].mean_j_per_m(), None);
+        assert_eq!(parked.far[0].mean_saturation(), 0.0);
     }
 
     #[test]
-    fn default_far_distance_is_the_training_band_edge() {
-        assert_eq!(DEFAULT_TARGET_DISTANCE_M, TARGET_ARENA_HALF);
+    fn default_far_distance_sits_inside_band_and_horizon() {
+        use crate::training::targets::{BAND_MAX_M, DRIFT_REBASE_M};
         const {
             assert!(
                 DEFAULT_TARGET_DISTANCE_M > REACH_RADIUS,
                 "the ball must start FAR — well outside the reach radius"
             );
+            // rl#292/rl#293: the far ball is pace-pinned, in-band (in-distribution
+            // obs), and past the drift radius (the recenter seam is exercised) — but
+            // NOT the band edge: an unreachable ball would make min-progress measure
+            // the locale's worst obstruction instead of her chase.
+            assert!(DEFAULT_TARGET_DISTANCE_M < BAND_MAX_M);
+            assert!(DEFAULT_TARGET_DISTANCE_M > DRIFT_REBASE_M);
             assert!(TARGET_Y > TARGET_Y_MIN && TARGET_Y < TARGET_Y_MAX);
         }
+        // Within-horizon arrival at the pinned pace (flat-ground bound): the far
+        // ball must be reachable inside one episode with real margin.
+        let h = crate::mesh_fallback::natural_body_height().expect("rig height measures");
+        let flat_traverse = CRAB_CHARGE_SPEED_HEIGHTS_PER_S * h * (DEFAULT_EVAL_TICKS as f32)
+            / crate::physics::PHYSICS_HZ as f32;
+        assert!(
+            DEFAULT_TARGET_DISTANCE_M < 0.75 * flat_traverse,
+            "far ball {DEFAULT_TARGET_DISTANCE_M} m leaves no arrival margin against the \
+             pinned-pace horizon traverse {flat_traverse} m — re-pin from pace evidence"
+        );
     }
 
     #[test]
@@ -982,7 +1059,7 @@ mod tests {
             "rest-pose progress should be ~0, got {} m",
             r.progress_m()
         );
-        for b in &r.far.per_bearing {
+        for b in r.far.iter().flat_map(|s| &s.per_bearing) {
             assert_eq!(
                 b.total_torque, 0.0,
                 "the rest pose applies no joint torque, so total_torque must be exactly 0"
