@@ -938,7 +938,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
         match state.logged_statuses.insert(pid, p.status()) {
             Some(prev) if prev != p.status() => {
                 // A down is always a claw touch (rl#236 — no under-body disc); the crab
-                // distance locates where in her footprint the strike landed.
+                // distance locates where near her body the strike landed.
                 let (px, pz) = p.pos().to_meters();
                 let from_crab = state
                     .client
