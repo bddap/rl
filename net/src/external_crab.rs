@@ -788,10 +788,11 @@ fn claw_tip_capsule(view: ColliderView<'_>, local: Mat4) -> Option<(Vec3, Vec3, 
 /// by crab 0's spawn correspondence (game spawn ↔ arena spawn origin), static for the
 /// whole round: an rl#240 recenter moves both ends of the correspondence together
 /// (origin rebase + `anchor_world_m` advance), so the published difference never
-/// changes; only a round RESTART re-pins it. Its y is 0 by construction — the world's
-/// y datum IS the arena's (the terrain surface renders untranslated in y and sim
-/// heights are surface-relative), so world = arena + anchor holds componentwise on the
-/// baked tile with no vertical leg to compensate (rl#281 stage 6).
+/// changes; only a round RESTART re-pins it. It is planar BY TYPE (an xz `Vec2`,
+/// rl#291) — the world's y datum IS the arena's (the terrain surface renders
+/// untranslated in y and sim heights are surface-relative), so world = arena + anchor
+/// holds componentwise on the baked tile with no vertical leg to compensate (rl#281
+/// stage 6); [`Self::translation`] is the full 3D translate.
 /// Vehicles and the cockpit camera render through THIS, never through the per-crab skin
 /// repose: the repose re-tracks the live carapace every tick to pin Sally's skin to her sim
 /// spot, so borrowing it as the arena transform dragged ~(1−rs) of her every movement into
@@ -808,7 +809,15 @@ fn claw_tip_capsule(view: ColliderView<'_>, local: Mat4) -> Option<(Vec3, Vec3, 
 /// pumping ever lands, this publisher would fight `apply`'s adopted value and must gain a
 /// role gate) and shipped on the articulation wire; a client adopts it verbatim in `apply`.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
-pub struct ArenaAnchor(pub Vec3);
+pub struct ArenaAnchor(pub Vec2);
+
+impl ArenaAnchor {
+    /// The full arena→world translate (only the wire still carries a y byte,
+    /// asserted zero on adopt).
+    pub const fn translation(self) -> Vec3 {
+        Vec3::new(self.0.x, 0.0, self.0.y)
+    }
+}
 
 fn publish_arena_anchor(
     bridge: Res<ExternalCrabBridge>,
@@ -823,7 +832,7 @@ fn publish_arena_anchor(
     }
     let origin = spawns.origin(0);
     let w = bridge.anchor_world_m;
-    let want = ArenaAnchor(Vec3::new(w.x - origin.x, 0.0, w.y - origin.z));
+    let want = ArenaAnchor(Vec2::new(w.x - origin.x, w.y - origin.z));
     if *out != want {
         *out = want;
     }
@@ -984,7 +993,7 @@ mod ship_wiggle_tests {
     /// through. The recenter-armed invariant is about THIS sum: a recenter may shift
     /// both ends, never what the player sees.
     fn ship_render_pos(app: &mut App) -> Vec3 {
-        let anchor = app.world().resource::<ArenaAnchor>().0;
+        let anchor = app.world().resource::<ArenaAnchor>().translation();
         ship_pos(app) + anchor
     }
 
@@ -1012,7 +1021,7 @@ mod ship_wiggle_tests {
         let mut prev_anchor = *app.world().resource::<ArenaAnchor>();
         assert_ne!(
             prev_anchor.0,
-            Vec3::ZERO,
+            Vec2::ZERO,
             "the armed round published an anchor"
         );
         let mut prev_recenters = recenters(&app);
@@ -1214,7 +1223,7 @@ mod ship_wiggle_tests {
         // And the correspondence really did reset: the anchor is the spawn-pinned value
         // again, not the recenter-advanced one.
         let origin = app.world().resource::<CrabSpawns>().origin(0);
-        let want = Vec3::new(30.0 - origin.x, 0.0, -14.0 - origin.z);
+        let want = Vec2::new(30.0 - origin.x, -14.0 - origin.z);
         assert!(
             (anchor - want).length() < 1e-3,
             "the restart must re-pin the anchor to the spawn correspondence, \

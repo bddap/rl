@@ -178,21 +178,20 @@ fn pilot_of(pid: PlayerId) -> PilotId {
 /// a boarding on a mountainside authors its craft at the walker's real elevation
 /// (rl#281 stage 6; on the flat grids the height is exactly 0, the old planar bridge).
 /// One scale since rl#256 — the frames differ only by the round's static translation
-/// [`crate::external_crab::ArenaAnchor`] (y = 0 by construction). `arena_to_sim` is
-/// planar (drops y), so the two stay inverses.
+/// [`crate::external_crab::ArenaAnchor`]. `arena_to_sim` is planar (drops y), so the
+/// two stay inverses.
 fn sim_to_arena(
     pos: crate::sim::Pos,
-    anchor: Vec3,
+    anchor: crate::external_crab::ArenaAnchor,
     terrain: &crab_world::terrain::TerrainGrid,
 ) -> Vec3 {
     let (x, z) = pos.to_meters();
-    let a = Vec3::new(x, 0.0, z) - anchor;
-    Vec3::new(a.x, terrain.height(a.x, a.z), a.z)
+    let (ax, az) = (x - anchor.0.x, z - anchor.0.y);
+    Vec3::new(ax, terrain.height(ax, az), az)
 }
 
-fn arena_to_sim(arena: Vec3, anchor: Vec3) -> crate::sim::Pos {
-    let w = arena + anchor;
-    crate::sim::Pos::from_meters(w.x, w.z)
+fn arena_to_sim(arena: Vec3, anchor: crate::external_crab::ArenaAnchor) -> crate::sim::Pos {
+    crate::sim::Pos::from_meters(arena.x + anchor.0.x, arena.z + anchor.0.y)
 }
 
 /// The boarding player's walker state bridged into the arena frame (rl#258): where the
@@ -202,7 +201,7 @@ fn arena_to_sim(arena: Vec3, anchor: Vec3) -> crate::sim::Pos {
 fn boarding_of(
     now: crate::sim::Player,
     prev: crate::sim::Player,
-    anchor: Vec3,
+    anchor: crate::external_crab::ArenaAnchor,
     terrain: &crab_world::terrain::TerrainGrid,
 ) -> crab_world::vehicle::Boarding {
     let here = sim_to_arena(now.pos(), anchor, terrain);
@@ -228,7 +227,7 @@ fn boarding_of(
 /// feed for [`crate::server::Server::step_next`] (rl#258): a piloting player's walker
 /// rides its craft, so the sim never keeps a husk at the boarding spot.
 fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose> {
-    let anchor = world.resource::<crate::external_crab::ArenaAnchor>().0;
+    let anchor = *world.resource::<crate::external_crab::ArenaAnchor>();
     let mut q = world.query::<(&Transform, &Vehicle)>();
     q.iter(world)
         .map(|(t, v)| {
@@ -744,7 +743,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
         }
 
         if role == PeerRole::ServerAuth && world.get_resource::<VehicleControls>().is_some() {
-            let anchor = world.resource::<crate::external_crab::ArenaAnchor>().0;
+            let anchor = *world.resource::<crate::external_crab::ArenaAnchor>();
             let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
             let entries: BTreeMap<PilotId, PilotCommand> = {
                 let state = world.non_send_resource::<GameState>();
@@ -1031,7 +1030,7 @@ mod tests {
     /// planar, so the lift can't leak back).
     #[test]
     fn sim_arena_conversion_roundtrips() {
-        let anchor = bevy::math::Vec3::new(3.5, 0.0, -7.25);
+        let anchor = crate::external_crab::ArenaAnchor(bevy::math::Vec2::new(3.5, -7.25));
         let p = crate::sim::Pos {
             x: 12_340,
             z: -5_670,

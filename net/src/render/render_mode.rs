@@ -79,7 +79,7 @@ fn draw_vehicle_collider_wireframe(
     if !mode.shows_colliders() {
         return;
     }
-    let placement = Mat4::from_translation(anchor.0);
+    let placement = Mat4::from_translation(anchor.translation());
     if !vehicles.is_empty() {
         for (gt, collider) in &vehicles {
             let world = placement * gt.to_matrix();
