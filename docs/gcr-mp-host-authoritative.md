@@ -33,8 +33,8 @@ yaw}`, the fixed `extraction`, `outcome`, the restart latch, the RNG stream posi
 exact fields `Sim::state_hash` (`sim.rs:749`) destructures exhaustively. ~100–200 bytes for
 the whole match. The float rapier crab is a side-car: the NN policy drives it, and only its
 quantized `Pos{i64 x,i64 z} + yaw_turns` are injected into the integer
-sim via `set_external_crab_pose` (`sim.rs:435`). Game logic (grab, extract, outcome) is all
-integer.
+sim via `set_external_crab_pose` (`sim.rs:435`). Game logic (claw downs, extract, outcome)
+is all integer.
 
 Consequence: **the snapshot is cheap and already enumerated.** Full-state-every-tick is
 viable at ~KB/s; no delta compression, no interest management, no AAA netcode — fit the

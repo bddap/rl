@@ -937,8 +937,8 @@ pub(super) fn drive_client_sim(world: &mut World) {
     for (pid, p) in state.client.sim().players() {
         match state.logged_statuses.insert(pid, p.status()) {
             Some(prev) if prev != p.status() => {
-                // Crab distance names the down's trigger: within CRAB_GRAB_RADIUS (0.17 m)
-                // it was the under-body grab; beyond, a claw touch (rl#249).
+                // A down is always a claw touch (rl#236 — no under-body disc); the crab
+                // distance locates where in her footprint the strike landed.
                 let (px, pz) = p.pos().to_meters();
                 let from_crab = state
                     .client
