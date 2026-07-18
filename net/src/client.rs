@@ -260,7 +260,7 @@ mod tests {
         let mut wire_up: std::collections::VecDeque<TickMsg> = Default::default();
         let mut wire_down: std::collections::VecDeque<CoreSnapshot> = Default::default();
 
-        // Stay within STARTUP_GRACE_TICKS (30): the crab stays disarmed (no grabs) and the round
+        // Stay within STARTUP_GRACE_TICKS (30): the crab stays disarmed (no claw downs) and the round
         // stays Ongoing — pure movement, so the convergence is EXACT.
         const FRAMES: u64 = 20;
         for f in 0..FRAMES {

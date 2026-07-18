@@ -151,7 +151,7 @@ fn drive_pilot_script(
         flight.rt = 0.5;
     } else if script.walk_at.is_some_and(|at| script.frame >= at) {
         // Walk a gentle arc on foot — a moving target, so the run exercises the hunt
-        // against evasion, not just a standing grab (rl#236).
+        // against evasion, not just a standing kill (rl#236).
         pending.forward = 1.0;
         pending.yaw_delta = 0.02;
     }
