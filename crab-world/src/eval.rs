@@ -492,17 +492,10 @@ fn run_bearing(
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
-        // A terrain plant is judged on the terrain tile — pace probe included: its
-        // unwalled long-trek analog of the open field IS the tile (targets, lure and
-        // recenter are surface-aware). A flat plant keeps the legacy pair: the box,
-        // or the open field for the probe's past-the-walls ball.
-        arena: if pace_probe
-            && crate::physics::train_arena() == crate::physics::TrainArena::WalledBox
-        {
-            crate::physics::Arena::OpenField
-        } else {
-            crate::physics::train_arena().arena()
-        },
+        // Every sweep — pace probe included — runs on the canonical terrain tile,
+        // the only ground a loadable plant trains on (rl#293); targets, lure and
+        // recenter are surface-aware.
+        arena: crate::physics::Arena::Terrain,
         visuals: crate::Visuals(false),
     });
     app.insert_resource(EvalConfig {

@@ -309,7 +309,6 @@ fn log_checkpoint_refusal(surface: &str, dir: &Path, why: &str) {
 /// adoption primitive instead of growing a second comparison path.
 fn plant_agreement(dir: &Path) -> Result<(), String> {
     let _ = crate::bot::body::friction_cap_override();
-    let _ = crate::physics::train_arena_override();
     crate::bot::body::adopt_recorded_plant(dir)
 }
 
@@ -709,6 +708,12 @@ mod tests {
         ObsNormalizer::new(NORMALIZER_CLIP)
             .save(brain.arch(), &paths.normalizer_path(), 21)
             .unwrap();
+        // Every real checkpoint records its terrain arena (rl#293's load condition).
+        std::fs::write(
+            dir.join(crate::bot::body::PLANT_FILENAME),
+            "arena terrain\n",
+        )
+        .unwrap();
     }
 
     /// The fixture obs the golden `actions.hex` was generated over: deterministic,
@@ -974,11 +979,6 @@ mod tests {
     /// sidecar agrees again, even with no new save (the lagging per-file-sync case).
     #[test]
     fn hot_reload_refuses_a_plant_disagreeing_checkpoint() {
-        // Resolve the process plant FIRST (env-unset → the default) so adoption inside
-        // the guard is the agreement check, not first-adoption — mirroring a booted
-        // demo. Also keeps this test from installing a non-default plant into the
-        // process-global overrides shared with sibling tests.
-        let _ = crate::physics::train_arena_override();
         let tmp = std::env::temp_dir();
         let live = tmp.join(format!("rl-hotreload-plant-{}", std::process::id()));
         let empty = tmp.join(format!("rl-hotreload-plant-empty-{}", std::process::id()));
@@ -987,12 +987,16 @@ mod tests {
         std::fs::create_dir_all(&live).unwrap();
         std::fs::create_dir_all(&empty).unwrap();
 
+        save_brain(&live);
+        // A friction cap the process (env-unset → default) never resolved: the
+        // agreement check must refuse it. The arena record is present and canonical —
+        // the friction leg alone carries the disagreement. (After save_brain: the
+        // fixture writes the canonical sidecar this test then perturbs.)
         std::fs::write(
             live.join(crate::bot::body::PLANT_FILENAME),
-            "arena terrain\n",
+            "joint_friction_cap 2.5\narena terrain\n",
         )
         .unwrap();
-        save_brain(&live);
 
         let mut policy = Policy::load(&empty, RestFallback::Rest);
         policy.live_dir = Some(live.clone());
@@ -1013,7 +1017,11 @@ mod tests {
 
         // The sidecar heals WITHOUT the brain's mtime changing (a lagging per-file
         // sync): the unstamped refusal must re-check and arm on the very next poll.
-        std::fs::remove_file(live.join(crate::bot::body::PLANT_FILENAME)).unwrap();
+        std::fs::write(
+            live.join(crate::bot::body::PLANT_FILENAME),
+            "arena terrain\n",
+        )
+        .unwrap();
         assert!(
             policy.try_hot_reload(),
             "an agreeing plant must arm on the next poll, no new save needed"
@@ -1048,6 +1056,11 @@ mod tests {
         ObsNormalizer::new(NORMALIZER_CLIP)
             .save(brain.arch(), &paths.normalizer_path(), 21)
             .unwrap();
+        std::fs::write(
+            live.join(crate::bot::body::PLANT_FILENAME),
+            "arena terrain\n",
+        )
+        .unwrap();
 
         let mut policy = Policy::load(&empty, RestFallback::Rest);
         policy.live_dir = Some(live.clone());

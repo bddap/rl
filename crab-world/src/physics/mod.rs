@@ -1,8 +1,6 @@
 pub mod world;
 
-pub use world::{
-    ARENA_ENV, Arena, PhysicsWorldPlugin, TrainArena, train_arena, train_arena_override,
-};
+pub use world::{Arena, PhysicsWorldPlugin};
 #[cfg(feature = "render")]
 pub use world::{ArenaSurface, ArenaVisualsPlugin};
 
