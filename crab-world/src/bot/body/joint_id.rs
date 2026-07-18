@@ -69,33 +69,34 @@ const FRICTION_KEY: &str = "joint_friction_cap";
 const ARENA_KEY: &str = "arena";
 
 /// What the sidecar records. `friction_cap`: absent key = the default cap. `arena`:
-/// since the rl#293 flip every NEW checkpoint records `arena terrain` — an explicit
-/// record is the LOAD condition (a sidecar without it has flat/unknown provenance and
-/// refuses), so the flag is presence-of-record, not a choice of ground.
+/// since the rl#293 flip every NEW checkpoint records `arena terrain`, and an
+/// explicit terrain record is the LOAD condition — `Some(false)` (a pre-flip
+/// `walled_box` record) and `None` (no record: flat/unknown provenance) both refuse
+/// at adoption, with the rl-demo `--terrain` waiver as the one bypass for either.
 #[derive(Clone, Copy, PartialEq)]
 struct Plant {
     friction_cap: Option<f32>,
-    /// The sidecar carries `arena terrain` — always true for the resolved plant,
-    /// possibly false for a parsed pre-flip sidecar (which adoption then refuses).
-    arena_terrain: bool,
+    /// `Some(true)` = `arena terrain` recorded, `Some(false)` = `arena walled_box`
+    /// recorded, `None` = no record. Always `Some(true)` for the resolved plant.
+    arena_terrain: Option<bool>,
 }
 
 impl Plant {
     fn resolved() -> Self {
         Plant {
             friction_cap: friction_cap_override(),
-            arena_terrain: true,
+            arena_terrain: Some(true),
         }
     }
 
-    /// A plant with NO entries at all — only reachable by parsing, and only as the
+    /// A plant with NO entries at all — only reachable by parsing, as the
     /// empty-file guard: the resolved plant always records its terrain arena.
     fn is_default(&self) -> bool {
         let Plant {
             friction_cap,
             arena_terrain,
         } = *self;
-        friction_cap.is_none() && !arena_terrain
+        friction_cap.is_none() && arena_terrain.is_none()
     }
 
     /// The sidecar file body — one `key value` line per set knob.
@@ -108,13 +109,19 @@ impl Plant {
         if let Some(cap) = friction_cap {
             out.push_str(&format!("{FRICTION_KEY} {cap}\n"));
         }
-        if arena_terrain {
-            out.push_str(&format!(
-                "{ARENA_KEY} {}\n",
-                crate::physics::world::ARENA_TERRAIN_KEY
-            ));
+        if let Some(terrain) = arena_terrain {
+            out.push_str(&format!("{ARENA_KEY} {}\n", arena_key_str(terrain)));
         }
         out
+    }
+}
+
+/// The sidecar spelling for a parsed/rendered arena record.
+fn arena_key_str(terrain: bool) -> &'static str {
+    if terrain {
+        crate::physics::world::ARENA_TERRAIN_KEY
+    } else {
+        "walled_box"
     }
 }
 
@@ -124,20 +131,13 @@ impl std::fmt::Display for Plant {
             friction_cap,
             arena_terrain,
         } = *self;
-        if self.is_default() {
-            return write!(f, "the default plant");
-        }
         let mut sep = "";
         if let Some(cap) = friction_cap {
             write!(f, "{FRICTION_KEY} {cap}")?;
             sep = ", ";
         }
-        if arena_terrain {
-            write!(
-                f,
-                "{sep}{ARENA_KEY} {}",
-                crate::physics::world::ARENA_TERRAIN_KEY
-            )?;
+        if let Some(terrain) = arena_terrain {
+            write!(f, "{sep}{ARENA_KEY} {}", arena_key_str(terrain))?;
         }
         Ok(())
     }
@@ -165,7 +165,9 @@ pub fn record_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
              are unloadable since the rl#293 flip — start a fresh run)",
             path.display(),
         )),
-        None if resolved.is_default() => Ok(()),
+        // No `None if resolved.is_default()` arm: the resolved plant always carries
+        // its terrain arena record (rl#293), so a recordless dir always takes the
+        // stamp-or-refuse path below.
         None => {
             // A brain that already trained here has UNKNOWN plant provenance (pre-knob
             // or default); stamping the knob onto it would be a mid-run plant change.
@@ -190,18 +192,19 @@ pub fn record_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
 /// For the friction leg an absent key (or absent file) means the DEFAULT, so a stray
 /// env override is pinned out (or, if the env was already read, refused) rather than
 /// silently bending the measurement. The arena leg is stricter since the rl#293 flip:
-/// a checkpoint loads ONLY with an explicit `arena terrain` record — `walled_box` AND
-/// an absent record both refuse, because a sidecar-less checkpoint would otherwise
-/// silently inherit terrain it never trained on (the flat runs launched before the
-/// arena knob existed recorded nothing). The rl-demo `--terrain` viewing force is the
-/// one bypass. MUST run before the first world spawns — the overrides are read-once.
+/// a checkpoint loads ONLY with an explicit `arena terrain` record — a `walled_box`
+/// record AND an absent record both refuse, because a sidecar-less checkpoint would
+/// otherwise silently inherit terrain it never trained on (the flat runs launched
+/// before the arena knob existed recorded nothing). The rl-demo `--terrain` viewing
+/// force is the one bypass, covering BOTH refusal shapes. MUST run before the first
+/// world spawns — the overrides are read-once.
 pub fn adopt_recorded_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
     let path = ckpt_dir.join(PLANT_FILENAME);
     let recorded = match std::fs::read_to_string(&path) {
         Ok(text) => parse_plant(&text).map_err(|e| format!("{}: {e}", path.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Plant {
             friction_cap: None,
-            arena_terrain: false,
+            arena_terrain: None,
         },
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
@@ -223,17 +226,23 @@ pub fn adopt_recorded_plant(ckpt_dir: &std::path::Path) -> Result<(), String> {
     // including on re-adoptions from the hot-reload/brain-swap agreement guard, which
     // must honor the operator's force rather than refuse every recordless checkpoint
     // under it. Friction has no force: it always adopts-or-agrees.
-    if recorded.arena_terrain || FORCED_TERRAIN.get().is_some() {
-        Ok(())
-    } else {
-        Err(format!(
+    match recorded.arena_terrain {
+        _ if FORCED_TERRAIN.get().is_some() => Ok(()),
+        Some(true) => Ok(()),
+        Some(false) => Err(format!(
+            "{}: this checkpoint recorded `{ARENA_KEY} walled_box` — it trained on \
+             the deleted flat box, unloadable since the terrain flip (rl#293); keep \
+             it archived, or view it anyway with the rl-demo --terrain force",
+            path.display(),
+        )),
+        None => Err(format!(
             "{}: no `{ARENA_KEY} {}` record — this checkpoint's ground provenance is \
              flat or unknown, and flat plants are unloadable since the terrain flip \
              (rl#293); keep it archived, or view it anyway with the rl-demo --terrain \
              force",
             path.display(),
             crate::physics::world::ARENA_TERRAIN_KEY,
-        ))
+        )),
     }
 }
 
@@ -252,16 +261,15 @@ pub fn adopt_recorded_plant_forcing_terrain(ckpt_dir: &std::path::Path) -> Resul
 fn parse_plant(text: &str) -> Result<Plant, String> {
     let mut plant = Plant {
         friction_cap: None,
-        arena_terrain: false,
+        arena_terrain: None,
     };
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         match line.split_once(' ') {
             Some((FRICTION_KEY, value)) if plant.friction_cap.is_none() => {
                 plant.friction_cap = Some(parse_friction_cap(value)?);
             }
-            Some((ARENA_KEY, value)) if !plant.arena_terrain => {
-                crate::physics::world::validate_arena_key(value)?;
-                plant.arena_terrain = true;
+            Some((ARENA_KEY, value)) if plant.arena_terrain.is_none() => {
+                plant.arena_terrain = Some(crate::physics::world::parse_arena_key(value)?);
             }
             _ => return Err(format!("unknown or duplicate plant entry {line:?}")),
         }
@@ -482,16 +490,24 @@ mod tests {
         assert_eq!(cap("joint_friction_cap 2.5\n"), Ok(Some(2.5)));
         assert_eq!(cap("joint_friction_cap 0.04"), Ok(Some(0.04)));
         let arena = |text: &str| parse_plant(text).map(|p| p.arena_terrain);
-        assert_eq!(arena("arena terrain\n"), Ok(true));
+        assert_eq!(arena("arena terrain\n"), Ok(Some(true)));
+        // A pre-flip walled_box record PARSES (so adoption can refuse it with
+        // provenance, and the --terrain waiver can view it) — loading it is refused
+        // at adoption, not here.
+        assert_eq!(arena("arena walled_box\n"), Ok(Some(false)));
         let both = parse_plant("joint_friction_cap 2.5\narena terrain\n").expect("both keys");
-        assert_eq!((both.friction_cap, both.arena_terrain), (Some(2.5), true));
+        assert_eq!(
+            (both.friction_cap, both.arena_terrain),
+            (Some(2.5), Some(true))
+        );
         // render/parse round-trip: what record_plant writes, adopt reads back equal.
         assert!(parse_plant(&both.render()).expect("round-trip") == both);
         // The resolved plant always renders an arena record — the rl#293 load condition.
-        assert!(
+        assert_eq!(
             parse_plant(&Plant::resolved().render())
                 .expect("resolved")
-                .arena_terrain
+                .arena_terrain,
+            Some(true)
         );
         for bad in [
             "",
@@ -500,7 +516,6 @@ mod tests {
             "joint_friction_cap 2.5\njoint_friction_cap 2.5\n", // duplicate = ambiguous
             "joint_friction_cap NaN\n",
             "arena mars\n",                   // unknown arena
-            "arena walled_box\n",             // flat plants are unloadable since rl#293
             "arena terrain\narena terrain\n", // duplicate = ambiguous
         ] {
             assert!(parse_plant(bad).is_err(), "{bad:?} must refuse");
