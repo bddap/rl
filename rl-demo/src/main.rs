@@ -27,8 +27,9 @@ pub struct Args {
     #[arg(long)]
     demo: bool,
 
-    /// Run on the baked GCR terrain tile (rl#281) instead of the training walled box —
-    /// the stage-3 taste-loop surface: real mountains, spawn-on-surface, no walls.
+    /// Waive the checkpoint's `arena terrain` record requirement (rl#293): view a
+    /// pre-terrain/recordless checkpoint on the canonical tile anyway. Terrain is the
+    /// only ground — this flag no longer picks one, it only unlocks archive viewing.
     #[arg(long)]
     terrain: bool,
 
@@ -230,18 +231,14 @@ fn main() {
     bot::body::register_pivot_markers(&mut app);
 
     // The demo simulates the plant the checkpoint TRAINED on (rl#281 stage 5): the
-    // sidecar drives the arena (and friction cap), so a terrain-trained brain shipped to
-    // the TV/decks gets its mountains with no launcher flag to drift out of sync with
-    // the weights. `--terrain` stays as a force for weight-less viewing (the stage-3
-    // taste-loop recipe) — but it overrides only the ARENA leg (rl#285): the friction
-    // leg is still adopted, so the weights keep their trained joint damping.
-    // Adoption is boot-time: a live-checkpoint sync that changes the sidecar mid-run
-    // takes effect on the next launch (or is refused by the hot-reload plant guard).
+    // sidecar's friction cap is adopted, and its `arena terrain` record is the load
+    // condition (rl#293 — flat plants refuse). `--terrain` waives that record
+    // requirement for weight-less or archive viewing (rl#285): the friction leg is
+    // still adopted, so the weights keep their trained joint damping. Adoption is
+    // boot-time: a live-checkpoint sync that changes the sidecar mid-run takes
+    // effect on the next launch (or is refused by the hot-reload plant guard).
     let adopted = if args.terrain {
-        bot::body::adopt_recorded_plant_forcing_arena(
-            &args.checkpoint.checkpoint_dir,
-            physics::TrainArena::Terrain,
-        )
+        bot::body::adopt_recorded_plant_forcing_terrain(&args.checkpoint.checkpoint_dir)
     } else {
         bot::body::adopt_recorded_plant(&args.checkpoint.checkpoint_dir)
     };
@@ -249,7 +246,7 @@ fn main() {
         eprintln!("{err}");
         std::process::exit(2);
     }
-    let arena = physics::train_arena().arena();
+    let arena = physics::Arena::Terrain;
 
     app.insert_resource(Visuals(true))
         .insert_resource(bot::NumEnvs(1))

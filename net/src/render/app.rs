@@ -217,15 +217,10 @@ pub(super) fn add_external_nn_crab(
     policies: Vec<crab_world::policy::Policy>,
     crab_spawns: Vec<Pos>,
 ) {
-    // The world half of the plant rides the checkpoint (rl#281 stage 6): the launch gate
-    // adopted the recorded arena before arming, so a terrain brain gets its baked tile —
-    // GCR's world IS the arena, rendered through the anchor. The flat case unwalls: the
-    // ±10 m training cage would cap the chase, and the open grid lets the crab pursue a
-    // player (spawned beyond sim::MIN_CRAB_SPAWN_DISTANCE) clear across the map (rl#209).
-    let arena = match crab_world::physics::train_arena() {
-        crab_world::physics::TrainArena::WalledBox => crab_world::physics::Arena::OpenField,
-        crab_world::physics::TrainArena::Terrain => crab_world::physics::Arena::Terrain,
-    };
+    // The world half of the plant rides the checkpoint (rl#281 stage 6): the launch
+    // gate adopted the recorded plant before arming, and terrain is the only loadable
+    // ground since rl#293 — GCR's world IS the baked tile, rendered through the anchor.
+    let arena = crab_world::physics::Arena::Terrain;
     app.insert_resource(crab_world::Visuals(true))
         .insert_resource(crab_world::bot::NumEnvs(policies.len()))
         .add_plugins(crab_world::physics::CrabPhysicsPlugin)

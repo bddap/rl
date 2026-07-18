@@ -13,111 +13,43 @@ use bevy_rapier3d::prelude::*;
 use crate::bot::body::ARENA_COLLISION;
 use crate::terrain::{Terrain, TerrainGrid};
 
-/// Which arena PHYSICS a world gets. The training/demo box, the GCR inference field, and
-/// the baked terrain tile legitimately differ — training samples targets inside a ±10 m
-/// walled box, while the GCR crab hunts a real player who can be anywhere on the map
-/// (players spawn ≥12 m out, past the box walls — rl#209) — so the choice is an explicit
-/// parameter of the ONE [`PhysicsWorldPlugin`], not a second parallel arena
-/// implementation. Every variant is a height grid through the ONE terrain path
-/// ([`crate::terrain`], rl#281): the ground collider is always [`TerrainGrid::collider`],
-/// only the grid (and the walls) differ.
+/// Which arena PHYSICS a world gets. Since the rl#293 flip the baked terrain tile is
+/// THE production ground — training, eval, GCR, demo — so `Terrain` is the only
+/// variant a production world builds; the flat variants exist for tests that pin
+/// flat-grid semantics until the stage-3 deletion removes them. Every variant is a
+/// height grid through the ONE terrain path ([`crate::terrain`], rl#281): the ground
+/// collider is always [`TerrainGrid::collider`], only the grid (and the walls) differ.
 pub enum Arena {
-    /// The ±10 m walled box the policy trains in ([`ARENA_HALF_SIZE`]): a flat grid
-    /// plus four walls. The trainer, its tests/eval, and the standalone rl-demo.
+    /// The legacy ±10 m walled training box ([`ARENA_HALF_SIZE`]): a flat grid plus
+    /// four walls. Test-only since rl#293 (flat plants refuse to load); deleted in
+    /// the epic's stage 3.
     WalledBox,
-    /// An unwalled flat grid at the walled box's same y=0 surface, for GCR inference:
-    /// the crab's per-round travel is unbounded so it can chase a player clear across
-    /// the map (rl#209). Spans ±[`OPEN_FIELD_HALF_SIZE`] — far past the cameras, the
-    /// round clock, and every speed cap; kept flat until GCR's planar server sim learns
-    /// terrain (rl#281 stages 3-5).
+    /// An unwalled flat grid at y=0 spanning ±[`OPEN_FIELD_HALF_SIZE`] — GCR's
+    /// pre-terrain inference field. Test-only since rl#293; deleted in stage 3.
     OpenField,
-    /// The committed GCR terrain bake ([`TerrainGrid::gcr`], rl#281) — real mountains,
-    /// no walls. Live in rl-demo (`--terrain`) for the stage-3 taste loop and, via
-    /// [`RL_ARENA`], as the training/eval plant (stage 4); GCR itself flips once its
-    /// sim and render are terrain-aware.
+    /// The committed GCR terrain bake ([`TerrainGrid::gcr`], rl#281) — real
+    /// mountains, no walls. THE canonical ground (rl#293): the trainer, the
+    /// keep-best/honest evals, GCR, and rl-demo all build exactly this.
     Terrain,
 }
 
-/// Which arena the TRAINING stack builds — the world half of the plant, beside
-/// `RL_JOINT_FRICTION_CAP` (bddap/rl#268): it must reach every sim inside one process
-/// (the rollout workers, the in-process keep-best chase-eval) and the external
-/// honest-eval binary, so it is the same read-once env knob pattern, recorded in the
-/// checkpoint's plant sidecar and adopted by `run_eval` — a terrain-trained policy
-/// measured on the flat box (or vice versa) is a mismeasure. Unset keeps the legacy
-/// walled box bit-identical. Values: `walled_box`, `terrain`.
-pub const ARENA_ENV: &str = "RL_ARENA";
+/// The plant sidecar's arena spelling — the one string a loadable checkpoint may
+/// record. Kept as the digest/sidecar preimage across the rl#293 flip so identical
+/// worlds never refuse-to-arm between peers on either side of it.
+pub(crate) const ARENA_TERRAIN_KEY: &str = "terrain";
 
-/// The [`RL_ARENA`](ARENA_ENV) choices — the arenas a policy can TRAIN in. A subset of
-/// [`Arena`] on purpose: `OpenField` is GCR's inference field, not a training plant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TrainArena {
-    WalledBox,
-    Terrain,
-}
-
-impl TrainArena {
-    pub fn arena(self) -> Arena {
-        match self {
-            TrainArena::WalledBox => Arena::WalledBox,
-            TrainArena::Terrain => Arena::Terrain,
-        }
-    }
-
-    /// The knob/sidecar spelling — one source for parse + record.
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            TrainArena::WalledBox => "walled_box",
-            TrainArena::Terrain => "terrain",
-        }
-    }
-
-    pub(crate) fn parse(raw: &str) -> Result<Self, String> {
-        match raw.trim() {
-            "walled_box" => Ok(TrainArena::WalledBox),
-            "terrain" => Ok(TrainArena::Terrain),
-            other => Err(format!("unknown arena {other:?} (walled_box | terrain)")),
-        }
-    }
-}
-
-static ARENA_OVERRIDE: std::sync::OnceLock<Option<TrainArena>> = std::sync::OnceLock::new();
-
-/// The resolved per-run arena override, read once per process. A SET-but-invalid value
-/// aborts instead of defaulting — silently training days in the wrong world is the
-/// failure mode the knob exists to prevent (same policy as the plant knobs).
-pub fn train_arena_override() -> Option<TrainArena> {
-    *ARENA_OVERRIDE.get_or_init(|| match std::env::var(ARENA_ENV) {
-        Err(std::env::VarError::NotPresent) => None,
-        Ok(raw) => Some(
-            TrainArena::parse(&raw)
-                .unwrap_or_else(|e| panic!("{ARENA_ENV}={raw}: {e} — refusing an ambiguous plant")),
+/// Validate a plant sidecar's `arena` value. Only `terrain` is loadable since rl#293;
+/// `walled_box` names a real pre-flip checkpoint, so it gets the historical error
+/// rather than "unknown".
+pub(crate) fn validate_arena_key(raw: &str) -> Result<(), String> {
+    match raw.trim() {
+        k if k == ARENA_TERRAIN_KEY => Ok(()),
+        "walled_box" => Err(
+            "this checkpoint trained on the deleted flat walled box — flat plants are \
+             unloadable since the terrain flip (rl#293); keep it archived or retrain"
+                .to_string(),
         ),
-        Err(e @ std::env::VarError::NotUnicode(_)) => {
-            panic!("{ARENA_ENV}: {e} — refusing an ambiguous plant")
-        }
-    })
-}
-
-/// The arena the training stack (rollout workers, keep-best gate, honest eval) builds.
-pub fn train_arena() -> TrainArena {
-    train_arena_override().unwrap_or(TrainArena::WalledBox)
-}
-
-/// Sidecar adoption (the arena leg of `adopt_recorded_plant`): install the recorded
-/// arena override — `None` = the checkpoint trained in the default arena, which pins
-/// a stray env override out — or verify an already-resolved one agrees.
-pub(crate) fn adopt_train_arena(recorded: Option<TrainArena>) -> Result<(), String> {
-    if ARENA_OVERRIDE.set(recorded).is_ok() {
-        return Ok(());
-    }
-    match train_arena_override() {
-        resolved if resolved == recorded => Ok(()),
-        resolved => Err(format!(
-            "checkpoint trained in arena {}, but this process already resolved {} — \
-             refusing to mismeasure",
-            recorded.map_or("<default>".into(), |a| a.key().to_string()),
-            resolved.map_or("<default>".into(), |a| a.key().to_string()),
-        )),
+        other => Err(format!("unknown arena {other:?} (terrain)")),
     }
 }
 

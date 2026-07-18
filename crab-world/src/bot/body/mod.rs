@@ -16,7 +16,7 @@ pub use components::{
 };
 
 pub use joint_id::{
-    CrabJointId, PLANT_FILENAME, Side, adopt_recorded_plant, adopt_recorded_plant_forcing_arena,
+    CrabJointId, PLANT_FILENAME, Side, adopt_recorded_plant, adopt_recorded_plant_forcing_terrain,
     constructed_plant_digest, friction_cap_override, joint_angle, plant_provenance, record_plant,
 };
 
