@@ -169,7 +169,7 @@ fn ground_checker(images: &mut Assets<Image>) -> Handle<Image> {
                 let (x, y) = (i % SIZE, i / SIZE);
                 let coarse = (x / (SIZE / 2) + y / (SIZE / 2)).is_multiple_of(2);
                 let fine = (x / (SIZE / 32) + y / (SIZE / 32)).is_multiple_of(2);
-                let v = 225 + if coarse { 16u8 } else { 0 } + if fine { 14 } else { 0 };
+                let v = 190 + if coarse { 40u8 } else { 0 } + if fine { 25 } else { 0 };
                 [v, v, v, 255]
             })
             .collect(),
