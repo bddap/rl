@@ -54,8 +54,9 @@ pub fn visuals_on(v: Option<Res<crate::Visuals>>) -> bool {
     v.is_some_and(|v| v.0)
 }
 
-/// Rapier's writeback round-trip is float-noisy at worst; a cosmetic edit is
-/// macroscopic. Deliberate blind band: a writer nudging under these thresholds
+/// Rapier's writeback round-trip is angle-wise float-noisy at worst (quat NORM
+/// drift is unbounded but excluded by construction — see [`pose_diverges`],
+/// rl#297); a cosmetic edit is macroscopic. Deliberate blind band: a writer nudging under these thresholds
 /// per fixed step stays invisible (SyncBackend itself consumes ANY change), but
 /// the incident class — placing a crab somewhere — is orders of magnitude above
 /// them. Shared with `headless::assert_transforms_match_rapier`.
@@ -63,8 +64,15 @@ pub const TRANSLATION_EPS: f32 = 1e-3;
 pub const ROTATION_DOT_EPS: f32 = 1e-4;
 
 pub fn pose_diverges(t: &Transform, body_pos: Vec3, body_rot: Quat) -> bool {
+    // dot(a, b) = |a||b|·cos(θ/2), and rapier's pose integration never renormalizes
+    // (rapier3d `RigidBodyVelocity::integrate` has renormalize_fast commented out), so
+    // |body_rot| drifts off unit over thousands of steps. A raw dot conflates that norm
+    // drift with angular divergence: once |q|² ≤ 1 - ROTATION_DOT_EPS the sentinel fired
+    // on bitwise-EQUAL poses every step — and the snap-back rewrote the same drifted
+    // quat, so it re-fired forever (rl#297). Scale by the norms to measure ANGLE only.
     (t.translation - body_pos).length() >= TRANSLATION_EPS
-        || t.rotation.dot(body_rot).abs() <= 1.0 - ROTATION_DOT_EPS
+        || t.rotation.dot(body_rot).abs()
+            <= (1.0 - ROTATION_DOT_EPS) * t.rotation.length() * body_rot.length()
 }
 
 /// Log the 1st, 2nd, 4th, 8th… snap-back. Wall/fixed clocks are unusable here:
@@ -154,8 +162,44 @@ pub fn assert_body_transforms_rapier_owned(
 mod tests {
     use bevy::prelude::*;
 
+    use super::pose_diverges;
     use crate::bot::body::CrabCarapace;
     use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack, tick};
+
+    /// A body quat after rapier's non-renormalizing integration drifted its norm to
+    /// |q|² ≈ 0.9999 — captured verbatim from the rl#297 lavapipe repro log.
+    const DRIFTED: Quat = Quat::from_xyzw(-0.64817595, -0.2963903, 0.46590018, 0.52426875);
+
+    #[test]
+    fn equal_poses_with_drifted_norm_do_not_diverge() {
+        // The captured quat sits 0 ulps under the old firing threshold (it was logged
+        // at the first step the inclusive `<=` fired); nudge it a hair further under
+        // so the guard doesn't hinge on glam's exact summation order.
+        let drifted = DRIFTED * 0.99997;
+        assert!(
+            drifted.length_squared() <= 1.0 - super::ROTATION_DOT_EPS,
+            "fixture must reproduce the drift that made the raw dot fire on equality"
+        );
+        let t = Transform::from_translation(Vec3::new(70.4351, -235.33363, -305.16962))
+            .with_rotation(drifted);
+        assert!(!pose_diverges(&t, t.translation, drifted));
+    }
+
+    #[test]
+    fn real_divergence_still_fires_despite_drifted_norm() {
+        let pos = Vec3::new(70.4351, -235.33363, -305.16962);
+        let rotated =
+            Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(0.1) * DRIFTED);
+        assert!(
+            pose_diverges(&rotated, pos, DRIFTED),
+            "a ~5.7° foreign rotation"
+        );
+        let moved = Transform::from_translation(pos + Vec3::X * 0.01).with_rotation(DRIFTED);
+        assert!(
+            pose_diverges(&moved, pos, DRIFTED),
+            "a 1cm foreign translation"
+        );
+    }
 
     fn visual_app() -> App {
         let mut app = headless_stack(HeadlessStack {
