@@ -63,6 +63,7 @@ fn offscreen_app_scaffold() -> App {
         Duration::from_secs_f64(1.0 / 60.0),
     ));
     app.add_plugins(crab_world::sky::NightSkyPlugin);
+    app.add_plugins(crab_world::physics::ArenaWorldPlugin);
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_secs_f64(TICK_DT),
     ));
