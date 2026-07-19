@@ -332,6 +332,9 @@ mod tests {
         world.insert_resource(obs);
         world.insert_resource(targets);
         world.insert_resource(CrabSpawns::from_origins(vec![Vec3::ZERO]));
+        world.insert_resource(crate::terrain::Terrain::new(std::sync::Arc::new(
+            crate::terrain::TerrainGrid::flat(64.0),
+        )));
         world.spawn((CrabCarapace, CrabEnvId(0), carapace, Velocity::default()));
         world
             .run_system_once(crate::bot::sensor::build_observation)

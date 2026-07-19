@@ -48,11 +48,99 @@ const BODY_POS_SLOT: usize = CrabJointId::COUNT * JointObs::LEN;
 
 const TARGET_SLOT: usize = BODY_POS_SLOT + BodyObs::LEN;
 
+const TERRAIN_SLOT: usize = TARGET_SLOT + TARGET_LEN;
+
+/// One terrain-scan sample: a polar offset in the crab's yaw frame — bearing 0 is the
+/// carapace forward axis (local +Z, the pincer side; the vehicle nose shares the
+/// convention), positive bearings sweep toward local +X. Radius 0 is the center
+/// sample under the carapace.
+#[derive(Clone, Copy)]
+struct TerrainSample {
+    radius_m: f32,
+    bearing_deg: u32,
+}
+
+impl TerrainSample {
+    /// THE label for this sample's channel, formatted FROM the pattern entry so any
+    /// geometry change (radius, bearing count, start angle) moves
+    /// [`super::channel_layout_digest`] and refuses stale brains by construction
+    /// (rl#271) — a hardcoded label list would let a radius edit slip past the digest.
+    /// The same property covers the expected future swap to direction-cast rays when
+    /// non-heightfield obstacles land (rl#295): new geometry, new digest, no silent
+    /// remap.
+    fn label(&self) -> String {
+        if self.radius_m == 0.0 {
+            "terrain:c".to_string()
+        } else {
+            format!("terrain:r{}:a{}", self.radius_m, self.bearing_deg)
+        }
+    }
+
+    /// Planar offset in the yaw frame: (toward local +X, toward local +Z) meters.
+    fn offset(&self) -> Vec2 {
+        let (sin_b, cos_b) = (self.bearing_deg as f32).to_radians().sin_cos();
+        Vec2::new(self.radius_m * sin_b, self.radius_m * cos_b)
+    }
+}
+
+/// Scan radii (meters), sized to the bake that exists (30 m cell pitch) and the target
+/// band trained on it: 3 m measures the plane she stands on (a de-noised
+/// inclinometer), 9 m ≈ the cell inradius (always sees past that plane), 27 m ≈ one
+/// cell — route preview ~18 s ahead at chase pace (rl#295).
+const TERRAIN_RADII_M: [f32; 3] = [3.0, 9.0, 27.0];
+
+const TERRAIN_BEARING_STEP_DEG: u32 = 45;
+
+const TERRAIN_BEARINGS: usize = (360 / TERRAIN_BEARING_STEP_DEG) as usize;
+
+/// Center sample + the bearing rings.
+pub const TERRAIN_SAMPLES: usize = 1 + TERRAIN_RADII_M.len() * TERRAIN_BEARINGS;
+
+/// The pattern table (rl#295): the ONE source driving both the sampler and the
+/// channel labels, in slot order.
+fn terrain_scan_pattern() -> [TerrainSample; TERRAIN_SAMPLES] {
+    let mut table = [TerrainSample {
+        radius_m: 0.0,
+        bearing_deg: 0,
+    }; TERRAIN_SAMPLES];
+    let mut i = 1;
+    for radius_m in TERRAIN_RADII_M {
+        for b in 0..TERRAIN_BEARINGS {
+            table[i] = TerrainSample {
+                radius_m,
+                bearing_deg: b as u32 * TERRAIN_BEARING_STEP_DEG,
+            };
+            i += 1;
+        }
+    }
+    table
+}
+
+/// The unit XZ direction the scan's bearing-0 ray points along. Yaw-only on purpose
+/// (rl#295): a pattern tilting with the body would conflate attitude with terrain
+/// shape (and its ground projection degenerates with pitch), while `body:rot` already
+/// carries the full attitude — the scan keeps "what shape is the ground" in its own
+/// frame. Near vertical pitch the forward projection is ill-conditioned, so the local
+/// +Y axis — well-conditioned exactly there — takes over, signed so a nose-down or
+/// nose-up crab keeps its heading instead of flipping it.
+fn ground_heading(rot: Quat) -> Vec2 {
+    let fwd = rot * Vec3::Z;
+    let mut planar = Vec2::new(fwd.x, fwd.z);
+    if planar.length_squared() < 1e-6 {
+        let up = rot * Vec3::Y;
+        planar = Vec2::new(up.x, up.z) * -fwd.y.signum();
+    }
+    planar.normalize_or(Vec2::Y)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Observation {
     joints: [JointObs; CrabJointId::COUNT],
     body: BodyObs,
     target_local: Vec3,
+    /// Heightfield samples on the yaw-frame pattern, each `height(sample) − carapace.y`
+    /// in raw meters (rl#295) — per-channel Welford normalization absorbs the scale.
+    terrain: [f32; TERRAIN_SAMPLES],
 }
 
 impl Default for Observation {
@@ -61,11 +149,12 @@ impl Default for Observation {
             joints: [JointObs::default(); CrabJointId::COUNT],
             body: BodyObs::default(),
             target_local: Vec3::ZERO,
+            terrain: [0.0; TERRAIN_SAMPLES],
         }
     }
 }
 
-pub const OBS_SIZE: usize = TARGET_SLOT + TARGET_LEN;
+pub const OBS_SIZE: usize = TERRAIN_SLOT + TERRAIN_SAMPLES;
 
 impl Observation {
     pub(crate) fn serialize(&self) -> [f32; OBS_SIZE] {
@@ -82,6 +171,8 @@ impl Observation {
         v[i + 10..i + 13].copy_from_slice(&self.body.angvel.to_array());
         i += BodyObs::LEN;
         v[i..i + TARGET_LEN].copy_from_slice(&self.target_local.to_array());
+        i += TARGET_LEN;
+        v[i..i + TERRAIN_SAMPLES].copy_from_slice(&self.terrain);
         v
     }
 }
@@ -104,6 +195,9 @@ pub(super) fn obs_channel_labels() -> Vec<String> {
     }
     for c in ["x", "y", "z"] {
         labels.push(format!("target:{c}"));
+    }
+    for s in terrain_scan_pattern() {
+        labels.push(s.label());
     }
     labels
 }
@@ -153,6 +247,13 @@ impl ObsView<'_> {
         self.vec3_at(TARGET_SLOT)
     }
 
+    /// The terrain height-scan channels (rl#295), in pattern-table order.
+    pub fn terrain_scan(&self) -> [f32; TERRAIN_SAMPLES] {
+        self.0[TERRAIN_SLOT..TERRAIN_SLOT + TERRAIN_SAMPLES]
+            .try_into()
+            .expect("slot range")
+    }
+
     /// Joint `id`'s hinge rate (rad/s about its axis) — the same channel the policy
     /// reads, re-read by name so the eval's mechanical-work instrument (rl#279) shares
     /// this module's ONE angle/rate implementation instead of re-deriving it.
@@ -179,6 +280,7 @@ impl CrabTargets {
 pub fn build_observation(
     spawns: Res<CrabSpawns>,
     targets: Res<CrabTargets>,
+    terrain: Res<crate::terrain::Terrain>,
     mut obs: ResMut<CrabObservation>,
     carapace_q: Query<(Entity, &CrabEnvId, &Transform, &Velocity), With<CrabCarapace>>,
     joint_q: Query<(
@@ -219,6 +321,7 @@ pub fn build_observation(
         joint.rate = (vel.angular - parent_ang).dot(axis_world);
     }
 
+    let scan_offsets = terrain_scan_pattern().map(|s| s.offset());
     for (_, env, transform, vel) in carapace_q.iter() {
         let Some(o) = built.get_mut(env.0) else {
             continue;
@@ -235,6 +338,14 @@ pub fn build_observation(
             .get(env.0)
             .map(|t| transform.rotation.inverse() * (t - transform.translation))
             .unwrap_or(Vec3::ZERO);
+
+        let heading = ground_heading(transform.rotation);
+        let right = Vec2::new(heading.y, -heading.x);
+        let base = Vec2::new(transform.translation.x, transform.translation.z);
+        for (slot, off) in scan_offsets.iter().enumerate() {
+            let p = base + right * off.x + heading * off.y;
+            o.terrain[slot] = terrain.height(p.x, p.y) - transform.translation.y;
+        }
     }
 
     let mut nonfinite = 0usize;
@@ -280,6 +391,9 @@ mod tests {
         o.body.linvel = Vec3::new(4.0, 5.0, 6.0);
         o.body.angvel = Vec3::new(7.0, 8.0, 9.0);
         o.target_local = Vec3::new(-1.0, -2.0, -3.0);
+        for (k, t) in o.terrain.iter_mut().enumerate() {
+            *t = 100.0 + k as f32;
+        }
 
         let got = o.serialize();
 
@@ -315,6 +429,9 @@ mod tests {
         ] {
             want[slot(name)] = v;
         }
+        for (k, s) in terrain_scan_pattern().iter().enumerate() {
+            want[slot(&s.label())] = 100.0 + k as f32;
+        }
 
         assert_eq!(
             got, want,
@@ -324,7 +441,7 @@ mod tests {
 
     #[test]
     fn obs_size_is_unchanged() {
-        assert_eq!(OBS_SIZE, CrabJointId::COUNT * 2 + 13 + 3);
+        assert_eq!(OBS_SIZE, CrabJointId::COUNT * 2 + 13 + 3 + TERRAIN_SAMPLES);
     }
 
     /// The layout-digest labels must describe every obs slot exactly once, or the digest
@@ -349,6 +466,10 @@ mod tests {
     use super::super::body::Side;
 
     fn obs_world(spawns: Vec<Vec3>) -> World {
+        obs_world_on(spawns, crate::terrain::TerrainGrid::flat(64.0))
+    }
+
+    fn obs_world_on(spawns: Vec<Vec3>, grid: crate::terrain::TerrainGrid) -> World {
         let mut world = World::new();
         let mut obs = CrabObservation::default();
         obs.resize(1);
@@ -357,6 +478,7 @@ mod tests {
         world.insert_resource(obs);
         world.insert_resource(targets);
         world.insert_resource(CrabSpawns::from_origins(spawns));
+        world.insert_resource(crate::terrain::Terrain::new(std::sync::Arc::new(grid)));
         world
     }
 
@@ -415,11 +537,89 @@ mod tests {
         want.body.linvel = body_vel.linear;
         want.body.angvel = body_vel.angular;
         want.target_local = body_rot.inverse() * (target - body_t.translation);
+        // Flat grid: every scan sample reads 0 − carapace.y.
+        want.terrain = [-body_t.translation.y; TERRAIN_SAMPLES];
         assert_eq!(
             got,
             want.serialize(),
             "valid-input obs drifted (rl#242 pin)"
         );
+    }
+
+    /// A 2×2 grid sloping only along +x — h(x) = x/10 − 5 over a ±50 m tile (parse
+    /// datum-shifts by the center sample, raw index 3) — so scan values reveal WHERE
+    /// each sample landed.
+    fn slope_x_grid() -> crate::terrain::TerrainGrid {
+        let meta = br#"{"rows":2,"cols":2,"cell_size_m":100.0,"height_scale":1.0}"#;
+        let mut bytes = b"RLTERR01".to_vec();
+        bytes.extend((meta.len() as u32).to_le_bytes());
+        bytes.extend(meta);
+        for h in [0i16, 10, 0, 10] {
+            bytes.extend(h.to_le_bytes());
+        }
+        crate::terrain::TerrainGrid::parse(&bytes).expect("synthetic grid parses")
+    }
+
+    fn scan_at(rotation: Quat) -> [f32; TERRAIN_SAMPLES] {
+        use bevy_rapier3d::prelude::Velocity;
+
+        let mut world = obs_world_on(vec![Vec3::ZERO], slope_x_grid());
+        world.spawn((
+            CrabCarapace,
+            CrabEnvId(0),
+            Transform::from_translation(Vec3::new(0.0, 0.6, 0.0)).with_rotation(rotation),
+            Velocity::default(),
+        ));
+        world
+            .run_system_once(build_observation)
+            .expect("build observation");
+        let obs = world.resource::<CrabObservation>();
+        obs.env(0).expect("env 0 sized").terrain_scan()
+    }
+
+    fn scan_slot(label: &str) -> usize {
+        terrain_scan_pattern()
+            .iter()
+            .position(|s| s.label() == label)
+            .unwrap_or_else(|| panic!("no terrain sample labeled {label:?}"))
+    }
+
+    /// The scan samples in the YAW frame (rl#295): bearing 0 tracks the carapace
+    /// forward axis (+Z), so a 90° yaw moves the a0 sample onto the ground the a90
+    /// sample read at identity — same slope, same reading, rotated slot.
+    #[test]
+    fn terrain_scan_is_yaw_framed_and_carapace_relative() {
+        // h(x) = x/10 − 5; carapace at x=0, y=0.6 ⇒ channel = h − 0.6.
+        let scan = scan_at(Quat::IDENTITY);
+        let expect = |x: f32| (x / 10.0 - 5.0) - 0.6;
+        assert_eq!(scan[scan_slot("terrain:c")], expect(0.0));
+        // a0 = forward = world +Z at identity: no x displacement.
+        assert!((scan[scan_slot("terrain:r3:a0")] - expect(0.0)).abs() < 1e-5);
+        // a90 sweeps toward local +X.
+        assert!((scan[scan_slot("terrain:r3:a90")] - expect(3.0)).abs() < 1e-5);
+        assert!((scan[scan_slot("terrain:r3:a270")] - expect(-3.0)).abs() < 1e-5);
+        assert!((scan[scan_slot("terrain:r27:a90")] - expect(27.0)).abs() < 1e-4);
+
+        // Yaw +90°: forward now points at world +X — a0 reads what a90 read above.
+        let yawed = scan_at(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        assert!((yawed[scan_slot("terrain:r3:a0")] - expect(3.0)).abs() < 1e-5);
+        // ...and a90 (local +X → world −Z) is back on the level line.
+        assert!((yawed[scan_slot("terrain:r3:a90")] - expect(0.0)).abs() < 1e-5);
+    }
+
+    /// Near vertical pitch the forward axis stops defining a heading; the up-axis
+    /// fallback must keep the scan on the SAME ground pattern — nose-down and nose-up
+    /// poses read bit-identically to the level pose (rl#295).
+    #[test]
+    fn terrain_scan_heading_survives_vertical_pitch() {
+        let level = scan_at(Quat::IDENTITY);
+        for pitch in [std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2] {
+            let tumbled = scan_at(Quat::from_rotation_x(pitch));
+            assert_eq!(
+                level, tumbled,
+                "vertical pitch {pitch} changed the scan's ground pattern"
+            );
+        }
     }
 
     /// rl#242: a spawn-origin miss must be LOUD, never a silent Vec3::ZERO substitute

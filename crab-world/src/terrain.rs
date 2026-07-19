@@ -152,12 +152,12 @@ impl TerrainGrid {
     }
 
     /// Full world-x span (grid columns).
-    pub(crate) fn extent_x(&self) -> f32 {
+    pub fn extent_x(&self) -> f32 {
         (self.cols - 1) as f32 * self.cell
     }
 
     /// Full world-z span (grid rows).
-    pub(crate) fn extent_z(&self) -> f32 {
+    pub fn extent_z(&self) -> f32 {
         (self.rows - 1) as f32 * self.cell
     }
 
