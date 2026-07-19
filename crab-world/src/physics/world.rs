@@ -61,6 +61,26 @@ impl Plugin for PhysicsWorldPlugin {
 #[derive(Component)]
 pub struct ArenaSurface;
 
+/// The one arena every rendered surface installs — terrain physics on the
+/// committed gcr bake plus the visible dressing, visuals on. The world exists
+/// whether or not a crab is armed (rl#296), so this is deliberately separate from
+/// any crab stack: GCR's windowed and screenshot scaffolds and rl-demo all add
+/// exactly this plugin, one formula that cannot drift per-surface. Headless hosts
+/// keep composing [`PhysicsWorldPlugin`] alone.
+#[cfg(feature = "render")]
+pub struct ArenaWorldPlugin;
+
+#[cfg(feature = "render")]
+impl Plugin for ArenaWorldPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(crate::Visuals(true))
+            .add_plugins(PhysicsWorldPlugin {
+                grid: TerrainGrid::gcr(),
+            })
+            .add_plugins(ArenaVisualsPlugin);
+    }
+}
+
 #[cfg(feature = "render")]
 pub struct ArenaVisualsPlugin;
 

@@ -4,7 +4,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use clap::Parser;
 use crab_world::controls::ControlsOverlayArgs;
-use crab_world::{CheckpointArgs, RenderArgs, Visuals, bot, physics, play, terrain};
+use crab_world::{CheckpointArgs, RenderArgs, bot, physics, play};
 
 /// Watch the trained crab: a live demo window, a still, or a rendered video.
 #[derive(Parser, Debug, Clone)]
@@ -246,13 +246,9 @@ fn main() {
         eprintln!("{err}");
         std::process::exit(2);
     }
-    app.insert_resource(Visuals(true))
-        .insert_resource(bot::NumEnvs(1))
+    app.insert_resource(bot::NumEnvs(1))
         .add_plugins(physics::CrabPhysicsPlugin)
-        .add_plugins(physics::PhysicsWorldPlugin {
-            grid: terrain::TerrainGrid::gcr(),
-        })
-        .add_plugins(physics::ArenaVisualsPlugin)
+        .add_plugins(physics::ArenaWorldPlugin)
         .insert_resource(mesh_state)
         .add_plugins(bot::BotPlugin);
 
