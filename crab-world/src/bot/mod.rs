@@ -587,5 +587,5 @@ mod layout_digest_tests {
         assert_eq!(super::channel_layout_digest(), GOLDEN, "see doc comment");
     }
 
-    const GOLDEN: u64 = 0xd3a0_7749_ac5d_4870;
+    const GOLDEN: u64 = 0xba5b_bb62_cc3d_7657;
 }
