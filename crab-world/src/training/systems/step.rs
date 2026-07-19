@@ -380,7 +380,7 @@ mod tests {
     }
 
     fn headless_training_app(checkpoint_dir: &std::path::Path, seed: u64) -> App {
-        use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack};
+        use crate::bot::headless::headless_app;
         use clap::Parser;
 
         let config = TrainConfig::try_parse_from([
@@ -392,12 +392,7 @@ mod tests {
         ])
         .expect("parse default TrainConfig");
 
-        let mut app = headless_stack(HeadlessStack {
-            num_envs: 1,
-            role: WorldRole::Standalone,
-            grid: crate::terrain::TerrainGrid::gcr(),
-            visuals: crate::Visuals(false),
-        });
+        let mut app = headless_app();
 
         let state = TrainingState::new_worker(&config, 0, crate::bot::arch::ArchId::DEFAULT);
         app.insert_non_send_resource(state).add_systems(

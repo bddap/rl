@@ -922,6 +922,15 @@ mod claw_tip_capsule_tests {
 /// tracked her live carapace, so her 9.6 m flail-walk dragged the parked ship's rendered
 /// pose 9.3 m; and the boarding spawn at 0.5 m altitude materialised the craft inside her
 /// body, so contact batted it ~8 m.
+/// The bridge tests' flat fixture grid — the old open field's exact geometry
+/// (129² points, 254 m cells). These tests pin bridge/boarding bookkeeping with
+/// hand-computed planar expectations; the surface-lift legs are covered by
+/// `walk_target_y_rides_the_surface_on_terrain`.
+#[cfg(test)]
+fn flat_field_grid() -> std::sync::Arc<crab_world::terrain::TerrainGrid> {
+    std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(16_384.0))
+}
+
 #[cfg(test)]
 mod ship_wiggle_tests {
     use crab_world::bot::actuator::CrabActions;
@@ -949,10 +958,7 @@ mod ship_wiggle_tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
-            // Flat fixture grid (the old open field's exact geometry): these tests pin
-            // bridge/boarding arithmetic with hand-computed planar expectations;
-            // ground handling has its own on-terrain tests.
-            grid: std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(16_384.0)),
+            grid: super::flat_field_grid(),
             visuals: crab_world::Visuals(false),
         });
         app.add_plugins(VehiclePlugin);
@@ -1251,7 +1257,9 @@ mod gcr_crab_tests {
 
     use super::*;
 
-    /// The GCR client's stack minus the sim: the canonical terrain, one bridged crab. The
+    /// The GCR client's stack minus the sim — one bridged crab on a flat fixture grid
+    /// (these tests hand-compute planar bridge bookkeeping; the terrain legs are
+    /// covered by `walk_target_y_rides_the_surface_on_terrain`). The
     /// explicit rest-pose policy drives nothing, so the crab just stands — drift is
     /// injected by hand.
     fn gcr_like_app() -> App {
@@ -1259,11 +1267,7 @@ mod gcr_crab_tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
-            // Flat fixture grid (the old open field's exact geometry): these tests pin
-            // bridge bookkeeping — 1:1 walk integration, band-clamped posing — with
-            // hand-computed planar expectations; the surface-lift legs are covered by
-            // walk_target_y_rides_the_surface_on_terrain below.
-            grid: std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(16_384.0)),
+            grid: super::flat_field_grid(),
             visuals: crab_world::Visuals(false),
         });
         app.add_plugins(ExternalCrabPlugin::new(

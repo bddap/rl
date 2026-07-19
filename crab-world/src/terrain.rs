@@ -336,17 +336,15 @@ fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
     [c.red * jitter, c.green * jitter, c.blue * jitter, 1.0]
 }
 
-/// The world's terrain, inserted by `PhysicsWorldPlugin` from its [`Arena`] choice.
-/// `Arc` because eval worlds are rebuilt per bearing and training worlds per env batch —
-/// the (possibly 4 MB) grid is shared, not re-parsed.
-///
-/// [`Arena`]: crate::physics::Arena
+/// The world's terrain, inserted by `PhysicsWorldPlugin` from its grid. `Arc` because
+/// eval worlds are rebuilt per bearing and training worlds per env batch — the
+/// (possibly 4 MB) grid is shared, not re-parsed.
 #[derive(Resource, Clone)]
 pub struct Terrain(Arc<TerrainGrid>);
 
 impl Terrain {
-    /// Only `PhysicsWorldPlugin` constructs this, from its `Arena` — the grid the
-    /// resource carries is BY CONSTRUCTION the one the ground collider was built from.
+    /// Only `PhysicsWorldPlugin` constructs this — the grid the resource carries is
+    /// BY CONSTRUCTION the one the ground collider was built from.
     /// Deliberately no `Default`: a defaulted flat grid where the arena's real grid was
     /// meant is exactly the sampler/collider divergence this module exists to prevent
     /// (a missing resource panics loudly instead).
