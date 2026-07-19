@@ -7,7 +7,7 @@ use super::input::pad_stick_axes;
 use super::scene::{lerp_pos, lerp_yaw, look_direction};
 use super::*;
 use crate::menu::ReadyMatch;
-use crate::sim::{Sim, UNIT};
+use crate::sim::{Externals, Sim, UNIT};
 use crab_world::vehicle::VehicleKind;
 
 #[test]
@@ -242,7 +242,7 @@ fn full_look_axis_turns_one_tick_cap() {
     let input = Input::new(0.0, 0.0, look_axis, 0);
     let mut inputs = BTreeMap::new();
     inputs.insert(PlayerId(0), input);
-    sim.step(&inputs);
+    sim.step(&inputs, Externals::NONE);
     let after = sim.player(PlayerId(0)).unwrap().yaw();
     let cap = trig::TURN / 24;
     assert_eq!(
