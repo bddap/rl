@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 
 use crab_world::terrain::TerrainGrid;
 
-/// The rl#295 scan shape: center + 8 bearings × radii {3, 9, 27} m.
+/// The rl#295 scan shape: center + 8 bearings × radii {3, 9, 27} m. Probe placement
+/// only (the ratio is shape-independent); the assert against the sensor's own
+/// TERRAIN_SAMPLES below keeps the headline per-wall-second budget from going stale
+/// if the scan pattern changes.
 const SCAN_RADII_M: [f32; 3] = [3.0, 9.0, 27.0];
 const SCAN_BEARINGS: usize = 8;
 const SAMPLES_PER_ENV: usize = 1 + SCAN_RADII_M.len() * SCAN_BEARINGS;
@@ -85,6 +88,7 @@ fn cast_ray_vs_height_lookup_at_training_shape() {
         RigidBodySet,
     };
 
+    assert_eq!(SAMPLES_PER_ENV, crab_world::bot::sensor::TERRAIN_SAMPLES);
     let grid = TerrainGrid::gcr();
     let points = sample_points(&grid);
     assert_eq!(points.len(), ENVS * SAMPLES_PER_ENV);
