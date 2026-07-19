@@ -36,8 +36,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
         let ys: Vec<f32> = result
             .samples
             .iter()
-            .filter(|s| s.tick >= from && s.tick < to && s.carapace_y.is_finite())
-            .map(|s| s.carapace_y)
+            .filter(|s| s.tick >= from && s.tick < to && s.carapace_above_ground.is_finite())
+            .map(|s| s.carapace_above_ground)
             .collect();
         (!ys.is_empty()).then(|| ys.iter().sum::<f32>() / ys.len() as f32)
     };
@@ -48,7 +48,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let max_y = result
         .samples
         .iter()
-        .map(|s| s.carapace_y.abs())
+        .map(|s| s.carapace_above_ground.abs())
         .fold(0.0_f32, f32::max);
     let reach_after = result
         .samples
@@ -58,7 +58,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .filter(|d| d.is_finite())
         .fold(f32::INFINITY, f32::min);
 
-    println!("\n  tick   dist   carapace_y   claw→tgt   (ram at tick {ram_tick})");
+    println!("\n  tick   dist   cara_above   claw→tgt   (ram at tick {ram_tick})");
     for s in result
         .samples
         .iter()
@@ -67,7 +67,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         let mark = if s.tick == ram_tick { " <<< RAM" } else { "" };
         println!(
             "  {:>5}  {:>5.2}  {:>9.3}  {:>9.3}{}",
-            s.tick, s.dist_to_prey_m, s.carapace_y, s.min_claw_to_target_m, mark
+            s.tick, s.dist_to_prey_m, s.carapace_above_ground, s.min_claw_to_target_m, mark
         );
     }
 
@@ -80,8 +80,8 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let still_reaching = reach_after.is_finite() && reach_after < 6.0;
 
     println!(
-        "\nnn-crab-vehicle-stability: carapace_y before={y_before:.3} → after={y_after:.3} m \
-         (max |y|={max_y:.2}); post-ram reach={reach_after:.3} m"
+        "\nnn-crab-vehicle-stability: carapace above-ground before={y_before:.3} → after={y_after:.3} m \
+         (max |above|={max_y:.2}); post-ram reach={reach_after:.3} m"
     );
     println!(
         "  finite={finite} bounded={bounded} stood_back_up={stood_back_up} still_reaching={still_reaching}"

@@ -215,15 +215,9 @@ fn rescue_system_recovers_a_crab_knocked_below_the_floor() {
 /// tunneling) or launching would show up as a wild relative height.
 #[test]
 fn crab_lands_sane_on_the_terrain_arena() {
-    use super::headless::{HeadlessStack, WorldRole, headless_stack};
     use crate::terrain::TerrainGrid;
 
-    let mut app = headless_stack(HeadlessStack {
-        num_envs: 1,
-        role: WorldRole::Standalone,
-        grid: crate::terrain::TerrainGrid::gcr(),
-        visuals: crate::Visuals(false),
-    });
+    let mut app = headless_app();
     tick(&mut app, 192);
 
     let g = TerrainGrid::gcr();
