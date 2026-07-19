@@ -44,16 +44,25 @@ const TERRAIN_EDGE_MARGIN: f32 = 2.0 * BAND_MAX_M;
 /// Absolute |x|,|z| bound for spawn/target sampling — the grid interior less the
 /// edge margin, whatever the grid (rl#293: one formula, no flat fork). ONE source:
 /// the per-episode spawn draw and [`sample_target`]'s in-arena check share it, so a
-/// spawn can never be placed where its own targets don't fit. Flat TEST grids must
-/// be ≥ [`TERRAIN_EDGE_MARGIN`] + band half-extents wherever band logic runs.
+/// spawn can never be placed where its own targets don't fit. The assert makes a
+/// too-small grid — a future undersized bake, or a flat TEST grid under
+/// [`TERRAIN_EDGE_MARGIN`] + band — fail at first sample instead of silently
+/// sampling nonsense (a negative clamp NaNs band distances and panics the origin
+/// draw's `gen_range`).
 pub(crate) fn sample_clamp_half(terrain: &TerrainGrid) -> f32 {
-    terrain.extent_x().min(terrain.extent_z()) / 2.0 - TERRAIN_EDGE_MARGIN
+    let clamp = terrain.extent_x().min(terrain.extent_z()) / 2.0 - TERRAIN_EDGE_MARGIN;
+    assert!(
+        clamp > BAND_MAX_M,
+        "grid half-span {} m leaves sampling clamp {clamp} m ≤ the {BAND_MAX_M} m band \
+         — the whole chase geometry must fit on real ground",
+        terrain.extent_x().min(terrain.extent_z()) / 2.0,
+    );
+    clamp
 }
 
-/// A fresh episode locale on terrain: uniform over the tile interior, on the surface.
-/// Terrain training re-draws this every respawn (`reset_crab`) so the policy sees the
-/// tile's whole slope/relief distribution instead of the fixed spawn grid's one
-/// locale; flat arenas never call it (the walled box IS one locale).
+/// A fresh episode locale: uniform over the tile interior, on the surface. Training
+/// re-draws this every respawn (`reset_crab`) so the policy sees the tile's whole
+/// slope/relief distribution instead of the fixed spawn grid's one locale.
 pub(crate) fn random_episode_origin(rng: &mut impl rand::Rng, terrain: &TerrainGrid) -> Vec3 {
     let clamp = sample_clamp_half(terrain);
     let xz = Vec2::new(rng.gen_range(-clamp..clamp), rng.gen_range(-clamp..clamp));

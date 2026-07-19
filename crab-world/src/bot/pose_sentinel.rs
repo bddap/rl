@@ -161,7 +161,7 @@ mod tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
-            arena: crate::physics::Arena::WalledBox,
+            grid: crate::terrain::TerrainGrid::gcr(),
             visuals: crate::Visuals(true),
         });
         tick(&mut app, 64);

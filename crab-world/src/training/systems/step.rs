@@ -163,8 +163,8 @@ fn gather_body_state(
     for (env, transform) in carapace_q.iter() {
         if let Some(p) = poses.get_mut(env.0) {
             let up = transform.rotation * Vec3::Y;
-            // Height ABOVE the local ground (rl#281) — identical to absolute y on the
-            // flat arenas, and the quantity the fall terminal and height reward mean.
+            // Height ABOVE the local ground (rl#281) — the quantity the fall terminal
+            // and height reward mean.
             let t = transform.translation;
             let height = t.y - terrain.height(t.x, t.z);
             *p = Some((height, up.dot(Vec3::Y)));
@@ -395,7 +395,7 @@ mod tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
-            arena: crate::physics::Arena::WalledBox,
+            grid: crate::terrain::TerrainGrid::gcr(),
             visuals: crate::Visuals(false),
         });
 

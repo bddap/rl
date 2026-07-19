@@ -1,8 +1,9 @@
 //! The ONE terrain path (rl#281): a baked height grid drives BOTH the rapier
 //! [`Collider`] and (render-gated) the visible mesh, so wherever this module's mesh is
-//! what's drawn (rl-demo; GCR once its scene adopts it in stage 3) it cannot diverge
-//! from what the crab stands on. The flat arenas are trivial constant grids through
-//! this same seam — there is deliberately no flat-vs-terrain fork anywhere.
+//! what's drawn (rl-demo, GCR) it cannot diverge from what the crab stands on. Since
+//! the rl#293 flip the committed GCR bake is the only production grid; tests may build
+//! constant grids through this same seam ([`TerrainGrid::flat`], test-gated) — there
+//! is deliberately no flat-vs-terrain fork anywhere.
 //!
 //! Coordinates: the grid is centered on the world origin, +x = artifact column
 //! (preview-PNG right), +z = artifact row (preview-PNG down), heights along +y.
@@ -33,11 +34,12 @@ pub fn gcr_bake_digest() -> u64 {
 const MAGIC: &[u8; 8] = b"RLTERR01";
 
 /// Cell-size cap for [`TerrainGrid::flat`], for f32 contact precision — parry solves
-/// heightfield contacts against the containing cell's triangle, and one tile-spanning
-/// cell on the ±16 km open field puts that triangle's vertices where f32 ulp is ~2 mm,
+/// heightfield contacts against the containing cell's triangle, and one grid-spanning
+/// cell on a ±16 km fixture puts that triangle's vertices where f32 ulp is ~2 mm,
 /// comparable to contact tolerances (and it measurably perturbed the rl#224 flail-walk).
-/// 256 m keeps near-origin triangle vertices small at 129² points for the open field,
-/// instead of megabytes of zeros per world on the probe-rebuild path.
+/// 256 m keeps near-origin triangle vertices small at 129² points for the largest
+/// fixtures, instead of megabytes of zeros per world.
+#[cfg(any(test, feature = "test-grid"))]
 const FLAT_CELL_MAX_M: f32 = 256.0;
 
 /// The `.terrain` metadata fields the runtime consumes; the rest of the header
@@ -61,8 +63,7 @@ pub struct TerrainGrid {
     cell: f32,
     /// Row-major `[row * cols + col]`, like the artifact.
     heights: Vec<f32>,
-    /// Height span over the whole grid, computed once at construction — [`Self::is_flat`]
-    /// is read per frame (vista fog attach), so it must not re-scan a 1M-cell grid.
+    /// Height span over the whole grid, computed once at construction.
     relief: f32,
 }
 
@@ -126,8 +127,14 @@ impl TerrainGrid {
         })
     }
 
-    /// A constant y=0 grid spanning ±`half_extent` — the flat arena, expressed through
-    /// the one terrain path instead of a bespoke slab or halfspace.
+    /// A constant y=0 TEST grid spanning ±`half_extent`, expressed through the one
+    /// terrain path instead of a bespoke slab or halfspace — for tests whose expected
+    /// geometry is hand-computed on a plane. Test-gated since the rl#293 flat-arena
+    /// deletion (production ground is [`Self::gcr`], impossible to fork by
+    /// construction); net's tests reach it via the `test-grid` dev-dependency
+    /// feature. Grids that run band logic ([`crate::training::targets`]) must span
+    /// ≥ the edge margin + band — smaller grids fail the sampling clamp's assert.
+    #[cfg(any(test, feature = "test-grid"))]
     pub fn flat(half_extent: f32) -> Self {
         let cells = ((half_extent * 2.0) / FLAT_CELL_MAX_M).ceil().max(1.0) as usize;
         let n = cells + 1;
@@ -200,7 +207,7 @@ impl TerrainGrid {
     /// transposed to parry's column-major layout (rows along +z, columns along +x).
     /// Built with `FIX_INTERNAL_EDGES`: the crab's soft contacts rest with ~cm
     /// penetration, and without the flag a foot straddling a cell seam takes a tilted
-    /// ghost impulse from the neighbor triangle's edge — on the flat arenas the seam
+    /// ghost impulse from the neighbor triangle's edge — on a flat grid the seam
     /// diagonal passes through the spawn origin, so the flag is what keeps the
     /// heightfield floor contact-equivalent to the slab it replaced.
     pub fn collider(&self) -> Collider {
@@ -222,17 +229,9 @@ impl TerrainGrid {
         SharedShape::new(field).into()
     }
 
-    /// Height span over the whole grid — 0 for the flat arenas.
+    /// Height span over the whole grid — 0 for the flat test grids.
     pub fn relief(&self) -> f32 {
         self.relief
-    }
-
-    /// Whether this grid is visually a flat arena (relief below [`FLAT_RELIEF_MAX`]).
-    /// Visual dressing keys on this — vista lighting/fog/biome bands vs the
-    /// training-box look — so "is this a real terrain world" is read off the ONE grid
-    /// instead of a parallel config flag. O(1): read per frame.
-    pub fn is_flat(&self) -> bool {
-        self.relief < FLAT_RELIEF_MAX
     }
 
     /// The visible terrain surface — the SAME vertices and cell diagonal as the
@@ -248,40 +247,28 @@ impl TerrainGrid {
 
         let (rows, cols) = (self.rows, self.cols);
         let (ex, ez) = (self.extent_x(), self.extent_z());
-        let flat = self.is_flat();
-        let arena_green = {
-            let c = LinearRgba::from(ARENA_GREEN);
-            [c.red, c.green, c.blue, 1.0]
-        };
         let mut positions = Vec::with_capacity(rows * cols);
         let mut normals = Vec::with_capacity(rows * cols);
         let mut colors = Vec::with_capacity(rows * cols);
-        // Flat arenas carry UVs in mesh-local METERS (uv = xz) so the ground material
-        // can tile the rl#197 pilot checker at a scale IT owns (bddap/rl#287); linear
-        // interpolation is exact on a plane. Terrain self-cues (relief, biome bands,
-        // fog) and skips the attribute — no texture, no ~8 MB of dead UVs on the
-        // 1M-vert tile.
-        let mut uvs = flat.then(|| Vec::with_capacity(rows * cols));
+        // UVs in mesh-local METERS (uv = xz) so the ground material can tile the
+        // rl#197 pilot checker at a scale IT owns (bddap/rl#287): the 30 m-pitch
+        // surface carries no high-frequency detail of its own, so the checker is the
+        // landing-height/on-foot optic-flow cue (rl#293).
+        let mut uvs = Vec::with_capacity(rows * cols);
         for row in 0..rows {
             for col in 0..cols {
                 let x = (col as f32 / (cols - 1) as f32 - 0.5) * ex;
                 let z = (row as f32 / (rows - 1) as f32 - 0.5) * ez;
                 let h = self.at(row, col);
                 positions.push([x, h, z]);
-                if let Some(uvs) = &mut uvs {
-                    uvs.push([x, z]);
-                }
+                uvs.push([x, z]);
                 let (c0, c1) = (col.saturating_sub(1), (col + 1).min(cols - 1));
                 let (r0, r1) = (row.saturating_sub(1), (row + 1).min(rows - 1));
                 let dhdx = (self.at(row, c1) - self.at(row, c0)) / (self.cell * (c1 - c0) as f32);
                 let dhdz = (self.at(r1, col) - self.at(r0, col)) / (self.cell * (r1 - r0) as f32);
                 let normal = Vec3::new(-dhdx, 1.0, -dhdz).normalize();
                 normals.push(normal.to_array());
-                colors.push(if flat {
-                    arena_green
-                } else {
-                    biome_tint(h, normal.y, row as i32, col as i32)
-                });
+                colors.push(biome_tint(h, normal.y, row as i32, col as i32));
             }
         }
         let mut indices = Vec::with_capacity((rows - 1) * (cols - 1) * 6);
@@ -294,30 +281,17 @@ impl TerrainGrid {
                 indices.extend([v00, v10, v01, v10, v11, v01]);
             }
         }
-        let mut mesh = Mesh::new(
+        Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-        .with_inserted_indices(Indices::U32(indices));
-        if let Some(uvs) = uvs {
-            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-        }
-        mesh
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(indices))
     }
 }
-
-/// Relief below this is "flat" for visual purposes: the flat arenas keep their
-/// original uniform green floor and the box-arena lighting instead of biome bands
-/// (which would paint the training box as a valley) and vista dressing.
-const FLAT_RELIEF_MAX: f32 = 0.5;
-
-/// The flat arenas' floor tint — the exact green the pre-terrain demo floor used, kept
-/// so the stage-3 biome pass changes nothing about the training-box look.
-#[cfg(feature = "render")]
-const ARENA_GREEN: Color = Color::srgb(0.35, 0.55, 0.35);
 
 /// Per-vertex biome color (linear RGBA — multiplied into the terrain material):
 /// a hypsometric ramp over datum-shifted elevation `h` in METERS — not the tile's
@@ -325,8 +299,7 @@ const ARENA_GREEN: Color = Color::srgb(0.35, 0.55, 0.35);
 /// center sample), so bands stay anchored to gameplay ground whatever a bake's absolute
 /// span is (a normalized ramp painted the whole origin plateau as snow). Rock on steep
 /// slopes, snow only on gentle high peaks, and a per-vertex hash jitter so
-/// kilometer-scale bands don't read as flat paint. Real terrain only — flat arenas
-/// take the uniform [`ARENA_GREEN`] in [`TerrainGrid::mesh`] and never reach this.
+/// kilometer-scale bands don't read as flat paint.
 #[cfg(feature = "render")]
 fn biome_tint(h: f32, normal_y: f32, row: i32, col: i32) -> [f32; 4] {
     // (elevation m, srgb color) stops, low → high (bake.py's hillshade palette).
@@ -473,61 +446,43 @@ mod tests {
     fn relief_is_zero_flat_and_full_span_on_gcr() {
         assert_eq!(TerrainGrid::flat(10.0).relief(), 0.0);
         assert_eq!(TerrainGrid::gcr().relief(), (4508 - 295) as f32);
-        // The vista/flat visual fork (lighting, fog, biome tint) keys on this.
-        assert!(TerrainGrid::flat(10.0).is_flat());
-        assert!(!TerrainGrid::gcr().is_flat());
     }
 
-    /// The rl#197 pilot-cue contract (bddap/rl#287): a flat arena's mesh carries UVs in
-    /// mesh-local METERS (uv = xz) so the ground material can tile the checker at a
-    /// scale it owns; terrain skips the attribute (it self-cues, and the material only
-    /// textures flat ground).
+    /// The rl#197 pilot-cue contract (bddap/rl#287 → rl#293): every ground mesh
+    /// carries UVs in mesh-local METERS (uv = xz) so the ground material can tile the
+    /// checker detail texture at a scale it owns.
     #[cfg(feature = "render")]
     #[test]
-    fn mesh_uvs_flat_mesh_local_meters_terrain_none() {
+    fn mesh_uvs_are_mesh_local_meters() {
         use bevy::mesh::VertexAttributeValues;
 
-        let flat = TerrainGrid::flat(10.0).mesh();
+        let mesh = TerrainGrid::gcr().mesh();
         let (pos, uv) = match (
-            flat.attribute(Mesh::ATTRIBUTE_POSITION),
-            flat.attribute(Mesh::ATTRIBUTE_UV_0),
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION),
+            mesh.attribute(Mesh::ATTRIBUTE_UV_0),
         ) {
             (
                 Some(VertexAttributeValues::Float32x3(p)),
                 Some(VertexAttributeValues::Float32x2(u)),
             ) => (p, u),
-            other => panic!("expected positions + Float32x2 UVs on flat mesh, got {other:?}"),
+            other => panic!("expected positions + Float32x2 UVs, got {other:?}"),
         };
         for (p, u) in pos.iter().zip(uv) {
             assert_eq!([p[0], p[2]], *u);
         }
-
-        assert!(
-            TerrainGrid::gcr()
-                .mesh()
-                .attribute(Mesh::ATTRIBUTE_UV_0)
-                .is_none()
-        );
     }
 
-    /// The biome tint contract the taste loop leans on: flat arenas keep ONE uniform
-    /// green (the pre-terrain floor color), real terrain gets banded colors with
+    /// The biome tint contract the taste loop leans on: banded colors with
     /// snow-bright peaks and darker valleys.
     #[cfg(feature = "render")]
     #[test]
-    fn mesh_tint_flat_uniform_terrain_banded() {
+    fn mesh_tint_terrain_banded() {
         use bevy::mesh::VertexAttributeValues;
 
         let colors = |m: &Mesh| match m.attribute(Mesh::ATTRIBUTE_COLOR) {
             Some(VertexAttributeValues::Float32x4(v)) => v.clone(),
             other => panic!("expected Float32x4 colors, got {other:?}"),
         };
-
-        let flat = colors(&TerrainGrid::flat(10.0).mesh());
-        let green: LinearRgba = ARENA_GREEN.into();
-        for c in &flat {
-            assert_eq!(c, &[green.red, green.green, green.blue, 1.0]);
-        }
 
         let g = TerrainGrid::gcr();
         let terr = colors(&g.mesh());

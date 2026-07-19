@@ -12,11 +12,13 @@ use crate::physics::PhysicsWorldPlugin;
 pub struct HeadlessStack {
     pub num_envs: usize,
     pub role: WorldRole,
-    /// Which arena physics this world gets: the ±10 m walled training box, or the
-    /// unbounded GCR inference field ([`crate::physics::Arena`]). A headless world that
-    /// models the GCR client (the NN-crab probes, the pump-equivalence test) MUST pick
-    /// `OpenField` so it steps the same world the client does.
-    pub arena: crate::physics::Arena,
+    /// The ground this world gets. Production worlds have exactly one choice —
+    /// [`TerrainGrid::gcr`](crate::terrain::TerrainGrid::gcr), the canonical bake
+    /// (rl#293) — and a headless world that models a production peer (the NN-crab
+    /// probes, the pump-equivalence test) must pass it so it steps the same world the
+    /// client does. Tests pinning hand-computed planar geometry pass a flat fixture
+    /// grid (test-gated).
+    pub grid: std::sync::Arc<crate::terrain::TerrainGrid>,
     /// `Visuals` for this world. `true` arms the render-gated systems (the skin, the
     /// GCR repose publisher) AND the rl#116 pose sentinel — the armed-render smoke
     /// test steps this exact configuration headless, the one the play-day crash
@@ -79,16 +81,33 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
     app.insert_resource(cfg.visuals)
         .insert_resource(NumEnvs(cfg.num_envs))
         .add_plugins(crate::physics::CrabPhysicsPlugin)
-        .add_plugins(PhysicsWorldPlugin { arena: cfg.arena })
+        .add_plugins(PhysicsWorldPlugin { grid: cfg.grid })
         .add_plugins(BotPlugin);
     app
 }
 
+/// The one-crab world on the canonical production ground — used by tests AND by the
+/// `rl-train collider-check` rest-pose audit, which must measure the crab on the
+/// ground it actually lives on (rl#293).
 pub fn headless_app() -> App {
     headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
-        arena: crate::physics::Arena::WalledBox,
+        grid: crate::terrain::TerrainGrid::gcr(),
+        visuals: Visuals(false),
+    })
+}
+
+/// [`headless_app`] on a planar fixture grid, for tests that hand-compute geometry
+/// (part positions, boarding spots, absolute heights) that is only exact on
+/// constant-height ground. 512 m half-extent so band sampling fits
+/// ([`crate::training::targets`]'s clamp assert).
+#[cfg(test)]
+pub fn flat_headless_app() -> App {
+    headless_stack(HeadlessStack {
+        num_envs: 1,
+        role: WorldRole::Standalone,
+        grid: std::sync::Arc::new(crate::terrain::TerrainGrid::flat(512.0)),
         visuals: Visuals(false),
     })
 }

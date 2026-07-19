@@ -557,7 +557,7 @@ fn run_bearing(
         // Every sweep — pace probe included — runs on the canonical terrain tile,
         // the only ground a loadable plant trains on (rl#293); targets, lure and
         // recenter are surface-aware.
-        arena: crate::physics::Arena::Terrain,
+        grid: crate::terrain::TerrainGrid::gcr(),
         visuals: crate::Visuals(false),
     });
     app.insert_resource(crate::bot::InitialCrabLayout {

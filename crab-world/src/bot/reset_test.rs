@@ -2,7 +2,7 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::prelude::*;
 
 use super::body::{CrabAssets, CrabBodyPart, CrabCarapace, CrabEnvId};
-use super::headless::{assert_transforms_match_rapier, headless_app, tick};
+use super::headless::{assert_transforms_match_rapier, flat_headless_app, headless_app, tick};
 use super::{CrabSpawns, respawn_crab};
 
 fn part_translations(app: &mut App) -> Vec<Vec3> {
@@ -58,7 +58,7 @@ fn assert_crab_sane(app: &mut App, n_parts: usize, context: &str) {
 
 #[test]
 fn despawn_respawn_survives_rapier_and_lands_sane() {
-    let mut app = headless_app();
+    let mut app = flat_headless_app();
     tick(&mut app, 192);
 
     let n_parts = part_translations(&mut app).len();
@@ -84,12 +84,12 @@ fn despawn_respawn_survives_rapier_and_lands_sane() {
 fn uniform_part_shift_teleports_the_multibody_cleanly() {
     use super::headless::{HeadlessStack, WorldRole, headless_stack};
 
-    // OpenField: the landing spot must still have ground — the real teleport happens
-    // far outside the walled box.
+    // A flat fixture grid: the ±0.5 m part-position asserts below hand-compute the
+    // teleport as a pure planar shift, which only a constant-height ground makes exact.
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
-        arena: crate::physics::Arena::OpenField,
+        grid: std::sync::Arc::new(crate::terrain::TerrainGrid::flat(64.0)),
         visuals: crate::Visuals(false),
     });
     tick(&mut app, 192);
@@ -168,7 +168,7 @@ fn external_force_shoves_a_multibody_root() {
 
 #[test]
 fn rescue_system_recovers_a_nan_poisoned_crab() {
-    let mut app = headless_app();
+    let mut app = flat_headless_app();
     tick(&mut app, 192);
     let n_parts = part_translations(&mut app).len();
 
@@ -192,7 +192,7 @@ fn rescue_system_recovers_a_nan_poisoned_crab() {
 /// catch it and respawn it on the surface.
 #[test]
 fn rescue_system_recovers_a_crab_knocked_below_the_floor() {
-    let mut app = headless_app();
+    let mut app = flat_headless_app();
     tick(&mut app, 192);
     let n_parts = part_translations(&mut app).len();
 
@@ -221,7 +221,7 @@ fn crab_lands_sane_on_the_terrain_arena() {
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
-        arena: crate::physics::Arena::Terrain,
+        grid: crate::terrain::TerrainGrid::gcr(),
         visuals: crate::Visuals(false),
     });
     tick(&mut app, 192);
