@@ -340,6 +340,32 @@ mod tests {
         );
     }
 
+    /// rl#292 owner constraint: NO target ever spawns below the terrain surface — at
+    /// any bearing and any distance across the WHOLE distribution (under-carapace
+    /// disc through the 100 m+ band), the one placement path samples the heightfield
+    /// at the target's own (x, z) and lands the ball on the surface's y band. A fixed
+    /// spawn height would fail this the moment a draw reaches a hilly cell.
+    #[test]
+    fn no_target_ever_spawns_below_the_terrain_surface() {
+        let g = TerrainGrid::gcr();
+        let mut rng = rand::thread_rng();
+        for close_frac in [0.0, 1.0] {
+            for _ in 0..32 {
+                let origin = random_episode_origin(&mut rng, &g);
+                for _ in 0..64 {
+                    let t = sample_target(origin, close_frac, &mut rng, &g);
+                    let above = t.y - g.height(t.x, t.z);
+                    assert!(
+                        (TARGET_Y_MIN - 1e-3..=TARGET_Y_MAX + 1e-3).contains(&above),
+                        "target {t:?} (close_frac {close_frac}) rides {above} m above \
+                         the surface — outside [{TARGET_Y_MIN}, {TARGET_Y_MAX}]; \
+                         negative would be IN the ground"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn close_targets_cover_the_under_carapace_disc() {
         let mut rng = rand::thread_rng();
