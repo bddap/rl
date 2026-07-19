@@ -13,10 +13,11 @@ pub(super) struct TargetBall;
 #[derive(Resource, Default, Clone, Copy)]
 pub(super) struct TargetBallAt(pub(super) Option<Vec3>);
 
-/// The demo chase ball stays on the chase band; the close-disc curriculum
-/// (rl#250) is a training-only mix, threaded explicitly so no ambient env var
-/// can move the demo's ball.
-const DEMO_CLOSE_FRAC: f32 = 0.0;
+/// The demo ball mirrors the trained distribution, close disc included (rl#292:
+/// ball-under is canonical, not a curriculum flag — and a ball she grabs at her
+/// feet is the skill on display). One source with training's mix on purpose; a
+/// demo pinned to the band would show a distribution she no longer trains.
+const DEMO_CLOSE_FRAC: f32 = crate::training::targets::CLOSE_FRAC;
 
 const TARGET_BALL_RADIUS: f32 = 0.08;
 
