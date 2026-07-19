@@ -52,10 +52,10 @@ fn probe_step(
     let prey = driver.sim.nearest_living_player_pos(0);
 
     let me = PlayerId(0);
-    driver.sim.step(&std::collections::BTreeMap::from([(
-        me,
-        Input::from_axes(0.0, 0.0),
-    )]));
+    driver.sim.step(
+        &std::collections::BTreeMap::from([(me, Input::from_axes(0.0, 0.0))]),
+        crate::sim::Externals::NONE,
+    );
 
     let tick = driver.sim.tick();
     if tick == 1 || tick.is_multiple_of(driver.log_every) {

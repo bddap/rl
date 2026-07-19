@@ -106,7 +106,7 @@ mod desync_test {
     use rand_chacha::ChaCha8Rng;
 
     use crate::SyncVerdict;
-    use crate::sim::{Input, Outcome, PlayerId, Sim, buttons};
+    use crate::sim::{Externals, Input, Outcome, PlayerId, Sim, buttons};
 
     fn input_log(seed: u64, players: &[PlayerId], ticks: usize) -> Vec<BTreeMap<PlayerId, Input>> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -141,8 +141,8 @@ mod desync_test {
         assert_eq!(a.state_hash(), b.state_hash(), "initial state must match");
 
         for (t, inputs) in log.iter().enumerate() {
-            a.step(inputs);
-            b.step(inputs);
+            a.step(inputs, Externals::NONE);
+            b.step(inputs, Externals::NONE);
             assert_eq!(
                 a.state_hash(),
                 b.state_hash(),
@@ -161,10 +161,10 @@ mod desync_test {
         let mut b = Sim::new(0x5EED, &players);
         let mut resolved_at = None;
         for t in 0..1500u64 {
-            super::sim::drive_crab_toward_prey(&mut a);
-            super::sim::drive_crab_toward_prey(&mut b);
-            a.step(&neutral);
-            b.step(&neutral);
+            let claws_a = super::sim::drive_crab_toward_prey(&mut a);
+            let claws_b = super::sim::drive_crab_toward_prey(&mut b);
+            a.step(&neutral, Externals::claws_only(&claws_a));
+            b.step(&neutral, Externals::claws_only(&claws_b));
             assert_eq!(a.state_hash(), b.state_hash(), "diverged at tick {t}");
             if resolved_at.is_none() && a.outcome() != Outcome::Ongoing {
                 resolved_at = Some(t);
@@ -189,7 +189,7 @@ mod desync_test {
         let run = || {
             let mut s = Sim::new(77, &players);
             for inputs in &log {
-                s.step(inputs);
+                s.step(inputs, Externals::NONE);
             }
             s.state_hash()
         };
@@ -224,8 +224,8 @@ mod desync_test {
         assert_eq!(a.state_hash(), b.state_hash(), "initial state must match");
         let mut restarts = 0u32;
         for (t, inputs) in log.iter().enumerate() {
-            restarts += u32::from(a.step(inputs));
-            b.step(inputs);
+            restarts += u32::from(a.step(inputs, Externals::NONE));
+            b.step(inputs, Externals::NONE);
             assert_eq!(
                 a.state_hash(),
                 b.state_hash(),

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::client::TickMsg;
 use crate::roster::RosterSchedule;
-use crate::sim::{Input, PlayerId, Pos, Sim};
+use crate::sim::{ClawPose, Externals, Input, PlayerId, Pos, Sim};
 
 /// Ticks of lead between admitting a joiner and its roster change taking effect — headroom for
 /// the welcome to reach the joiner so it can start issuing input near its entry tick (its
@@ -539,12 +539,16 @@ impl Server {
             for (idx, c) in crabs.iter().enumerate() {
                 self.sim.set_external_crab_pose(idx, c.pos, c.yaw);
             }
-            self.sim
-                .set_external_claws(crabs.iter().flat_map(|c| c.claws.iter().copied()).collect());
         }
+        let claws: Vec<ClawPose> = crabs.iter().flat_map(|c| c.claws.iter().copied()).collect();
         pilots.retain(|pid, _| self.pilot_intents.contains_key(pid));
-        self.sim.set_external_pilots(pilots);
-        let restarted = self.sim.step(&pending.inputs);
+        let restarted = self.sim.step(
+            &pending.inputs,
+            Externals {
+                claws: &claws,
+                pilots: &pilots,
+            },
+        );
         let mut snapshot = self.sim.core_snapshot();
         snapshot.input_next = pending.input_next;
         SteppedTick {
@@ -1390,7 +1394,7 @@ mod tests {
             for i in 0..SUBMITS {
                 let p = pose_at(i);
                 sim.set_external_crab_pose(0, p.pos, p.yaw);
-                sim.step(&BTreeMap::from([(me, input_at(i))]));
+                sim.step(&BTreeMap::from([(me, input_at(i))]), Externals::NONE);
                 baseline.push((sim.tick(), sim.state_hash()));
             }
         }
