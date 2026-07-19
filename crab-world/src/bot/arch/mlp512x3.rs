@@ -1,6 +1,6 @@
 //! `mlp512x3` — a 512-wide THREE-layer MLP trunk feeding separate policy/value heads,
-//! with a state-independent learnable per-dim `log_std` (~730k params at the 92/38
-//! rig). Landed as bddap/rl#200 increment 5a's single-variable capacity A/B against the
+//! with a state-independent learnable per-dim `log_std` (~743k params at the 117/38
+//! rig — the rl#295 terrain scan added ~13k first-layer weights). Landed as bddap/rl#200 increment 5a's single-variable capacity A/B against the
 //! founding 1×256 leaf (`mlp256`, ~130k params; everything but trunk depth×width held
 //! equal), and became the sole surviving architecture at the 5b cull: its seed curves
 //! separated cleanly above `mlp256`'s at equal env-steps (2026-07-04, evidence on the

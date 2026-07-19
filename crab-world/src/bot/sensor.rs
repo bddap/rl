@@ -93,7 +93,6 @@ const TERRAIN_BEARING_STEP_DEG: u32 = 45;
 
 const TERRAIN_BEARINGS: usize = (360 / TERRAIN_BEARING_STEP_DEG) as usize;
 
-/// Center sample + the bearing rings.
 pub const TERRAIN_SAMPLES: usize = 1 + TERRAIN_RADII_M.len() * TERRAIN_BEARINGS;
 
 /// The pattern table (rl#295): the ONE source driving both the sampler and the
