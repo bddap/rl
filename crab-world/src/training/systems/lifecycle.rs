@@ -288,23 +288,16 @@ pub(crate) fn reset_crab(
                 grace: RESET_GRACE_TICKS,
             };
             let _ = actions.rest(e); // deliberate skip pre-spawn
-            // Terrain training samples a fresh locale per episode — the tile's whole
-            // slope/relief distribution is the curriculum (rl#281 stage 4). Flat
-            // arenas keep their fixed spawn grid bit-identical (neither branch below
-            // runs: origin never moves, no extra RNG draws).
-            let origin = if terrain.is_flat() {
-                spawns.origin(e)
-            } else {
-                let o =
-                    crate::training::targets::random_episode_origin(&mut training.rng, &terrain);
-                spawns.set_origin(e, o);
-                // The episode-end seeding (`finalize_transitions`, earlier this tick)
-                // banded the target around the PREVIOUS locale — re-seed from the new
-                // origin or every post-first episode would chase a point up to a tile
-                // away (its obs/reward kilometers out of the trained band).
-                seed_target(&mut targets, &spawns, e, &mut training.rng, &terrain);
-                o
-            };
+            // Training samples a fresh locale per episode — the tile's whole
+            // slope/relief distribution is the curriculum (rl#281 stage 4).
+            let origin =
+                crate::training::targets::random_episode_origin(&mut training.rng, &terrain);
+            spawns.set_origin(e, origin);
+            // The episode-end seeding (`finalize_transitions`, earlier this tick)
+            // banded the target around the PREVIOUS locale — re-seed from the new
+            // origin or every post-first episode would chase a point up to a tile
+            // away (its obs/reward kilometers out of the trained band).
+            seed_target(&mut targets, &spawns, e, &mut training.rng, &terrain);
             let init_rotation = random_spawn_rotation(&mut training.rng);
             respawn_crab_rotated(
                 &mut commands,
@@ -334,9 +327,10 @@ mod tests {
     use crate::training::reward::EFFORT_WEIGHT_DEFAULT;
     use crate::training::targets::REACH_RADIUS;
 
-    /// The training arena's flat grid — these tests pin FLAT-arena lifecycle behavior.
+    /// A planar fixture grid, big enough for band sampling (≥ edge margin + band) —
+    /// these tests pin lifecycle logic, and hand-checked geometry is exact on a plane.
     fn flat() -> crate::terrain::TerrainGrid {
-        crate::terrain::TerrainGrid::flat(crate::physics::world::ARENA_HALF_SIZE)
+        crate::terrain::TerrainGrid::flat(512.0)
     }
 
     #[test]

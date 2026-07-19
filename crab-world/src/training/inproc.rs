@@ -284,7 +284,7 @@ fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: us
         role: WorldRole::RolloutWorker,
         // The plant's world half: the canonical terrain tile (rl#293), recorded in
         // the checkpoint sidecar beside the friction cap.
-        arena: crate::physics::Arena::Terrain,
+        grid: crate::terrain::TerrainGrid::gcr(),
         visuals: crate::Visuals(false),
     });
 

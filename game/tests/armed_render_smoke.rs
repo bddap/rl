@@ -33,14 +33,15 @@ fn armed_visual_crab_stays_finite_and_grounded() {
         samples.len()
     );
 
-    // The probe reports (0,0,0) when no env-0 carapace exists, which every bound
+    // The probe reports zeros when no env-0 carapace exists, which every bound
     // below accepts — so first prove the crab is actually there: a spawned, settled
-    // carapace rests visibly above the ground plane.
+    // carapace rests visibly above the local surface (surface-relative — absolute y
+    // is a mountainside elevation on the terrain arena).
     assert!(
         samples
             .iter()
             .filter(|s| s.tick >= 64)
-            .all(|s| s.carapace_y > 0.05),
+            .all(|s| s.carapace_above_ground > 0.05),
         "no settled carapace above ground — the armed crab never spawned (or fell \
          through the world), so the smoke test would otherwise pass vacuously"
     );
@@ -48,7 +49,7 @@ fn armed_visual_crab_stays_finite_and_grounded() {
     for s in &samples {
         assert!(
             s.carapace_arena_x.is_finite()
-                && s.carapace_y.is_finite()
+                && s.carapace_above_ground.is_finite()
                 && s.carapace_arena_z.is_finite(),
             "tick {}: carapace went non-finite — the rl#116 failure shape",
             s.tick
@@ -56,13 +57,14 @@ fn armed_visual_crab_stays_finite_and_grounded() {
         assert!(
             s.carapace_arena_x.abs() < 20.0
                 && s.carapace_arena_z.abs() < 20.0
-                && s.carapace_y > -2.0
-                && s.carapace_y < 5.0,
-            "tick {}: carapace at ({}, {}, {}) — a rest-pose crab teleporting away from \
-             spawn means something is writing rapier-driven Transforms (rl#116)",
+                && s.carapace_above_ground > -2.0
+                && s.carapace_above_ground < 5.0,
+            "tick {}: carapace at ({}, {} above ground, {}) — a rest-pose crab \
+             teleporting away from spawn means something is writing rapier-driven \
+             Transforms (rl#116)",
             s.tick,
             s.carapace_arena_x,
-            s.carapace_y,
+            s.carapace_above_ground,
             s.carapace_arena_z,
         );
     }

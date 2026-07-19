@@ -19,6 +19,9 @@ pub struct ProbeSample {
     pub carapace_arena_x: f32,
     pub carapace_arena_z: f32,
     pub carapace_y: f32,
+    /// Carapace height above the local ground surface — the grounded-ness measure
+    /// (absolute y is a mountainside elevation on terrain, meaningless as one).
+    pub carapace_above_ground: f32,
     pub min_claw_to_target_m: f32,
 }
 
@@ -33,6 +36,7 @@ fn probe_step(
     mut driver: NonSendMut<ProbeDriver>,
     mut bridge: ResMut<ExternalCrabBridge>,
     targets: Res<CrabTargets>,
+    terrain: Res<crab_world::terrain::Terrain>,
     carapace_q: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
     claw_q: Query<(&CrabEnvId, &Transform), With<crab_world::bot::body::CrabClawTip>>,
     // Unscoped by CrabEnvId: the probe app is single-env by construction (both harnesses
@@ -80,11 +84,14 @@ fn probe_step(
         // themselves).
         let state_hash = driver.sim.state_hash() ^ crab_state_digest(bodies.iter());
 
-        let (carapace_arena_x, carapace_y, carapace_arena_z) = carapace_q
+        let (carapace_arena_x, carapace_y, carapace_arena_z, carapace_above_ground) = carapace_q
             .iter()
             .find(|(env, _)| env.0 == 0)
-            .map(|(_, t)| (t.translation.x, t.translation.y, t.translation.z))
-            .unwrap_or((0.0, 0.0, 0.0));
+            .map(|(_, t)| {
+                let p = t.translation;
+                (p.x, p.y, p.z, p.y - terrain.height(p.x, p.z))
+            })
+            .unwrap_or((0.0, 0.0, 0.0, 0.0));
 
         let min_claw_to_target_m = targets
             .get(0)
@@ -106,6 +113,7 @@ fn probe_step(
             carapace_arena_x,
             carapace_arena_z,
             carapace_y,
+            carapace_above_ground,
             min_claw_to_target_m,
         });
     }
@@ -125,9 +133,9 @@ fn headless_nn_crab_app(
     let mut app = headless_stack(HeadlessStack {
         num_envs: 1,
         role: WorldRole::Standalone,
-        // The probe models the GCR client, so it steps the client's OPEN inference
-        // field (rl#209), not the walled training box.
-        arena: crab_world::physics::Arena::OpenField,
+        // The probe models the GCR client, so it steps the client's ground — the
+        // canonical terrain bake (rl#209, rl#293).
+        grid: crab_world::terrain::TerrainGrid::gcr(),
         visuals,
     });
     app.add_plugins(ExternalCrabPlugin::new(vec![policy], vec![crab_spawn]));

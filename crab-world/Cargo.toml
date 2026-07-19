@@ -11,6 +11,10 @@ path = "src/lib.rs"
 [features]
 render = ["bevy/default", "bevy_rapier3d/default"]
 
+# TerrainGrid::flat for OTHER crates' tests (plain #[cfg(test)] cannot cross crates);
+# production builds never enable it, so a flat world stays impossible to construct.
+test-grid = []
+
 # Rapier's libm transcendentals, for cross-platform bit-equality probes ONLY. Deliberately
 # NOT part of `render`: the trainer builds render-off (ED off), so shipping ED in game
 # builds would fork shipped float behavior from what the policy trained on (rl#223).

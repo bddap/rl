@@ -420,7 +420,7 @@ fn apply_vehicle_forces(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bot::headless::headless_app;
+    use crate::bot::headless::{flat_headless_app, headless_app};
 
     /// The tests' one pilot (the server-authoritative local player's id).
     const P0: PilotId = PilotId(0);
@@ -454,7 +454,7 @@ mod tests {
     }
 
     fn app_with_vehicle(kind: VehicleKind, at: Vec3, vel: Vec3) -> (App, Entity) {
-        let mut app = headless_app();
+        let mut app = flat_headless_app();
         app.add_plugins(VehiclePlugin);
         // File pilot 0's command so `manage_vehicles` keeps the body we spawn directly below (it
         // despawns a body whose pilot has no entry). Matching kind ⇒ no respawn, our entity
@@ -779,7 +779,7 @@ mod tests {
     /// with its facing and velocity, lifted just enough that the collider clears the ground.
     #[test]
     fn boarding_spawns_at_the_walker_with_velocity_conserved() {
-        let mut app = headless_app();
+        let mut app = flat_headless_app();
         app.add_plugins(VehiclePlugin);
         app.update();
         let vel = Vec3::new(0.4, 0.0, 0.1);
@@ -846,7 +846,7 @@ mod tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
-            arena: crate::physics::Arena::Terrain,
+            grid: crate::terrain::TerrainGrid::gcr(),
             visuals: crate::Visuals(false),
         });
         app.add_plugins(VehiclePlugin);
@@ -881,7 +881,7 @@ mod tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
-            arena: crate::physics::Arena::Terrain,
+            grid: crate::terrain::TerrainGrid::gcr(),
             visuals: crate::Visuals(false),
         });
         app.add_plugins(VehiclePlugin);
@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn each_pilot_gets_its_own_craft() {
         let p1 = PilotId(1);
-        let mut app = headless_app();
+        let mut app = flat_headless_app();
         app.add_plugins(VehiclePlugin);
         // Warm the clock: the first update's zero delta runs no FixedUpdate (same dance as
         // `manage_spawns_and_despawns_one_vehicle`).

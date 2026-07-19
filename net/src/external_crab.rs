@@ -531,8 +531,9 @@ fn crab_not_yet_spawned(crabs: Query<(), With<CrabCarapace>>) -> bool {
     crabs.is_empty()
 }
 
-/// rl#240 guard for the spawn-relative body.pos obs channel: training bounds it to the
-/// walled box, the open grids don't, so a long chase walks it arbitrarily OOD. Always
+/// rl#240 guard for the spawn-relative body.pos obs channel: training re-draws the
+/// origin every episode so the channel never leaves the [`DRIFT_REBASE_M`] support,
+/// but a long GCR chase walks it arbitrarily OOD. Always
 /// MEASURES (rate-limited warn lines quantify the drift); when [`BodyPosRecenter`] is
 /// armed it also FIXES it — rebase the env's spawn origin to the carapace's own ground
 /// point ([`CrabSpawns::rebase_origin_to`]). body.pos snaps to ~0, exactly the
@@ -948,7 +949,10 @@ mod ship_wiggle_tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
-            arena: crab_world::physics::Arena::OpenField,
+            // Flat fixture grid (the old open field's exact geometry): these tests pin
+            // bridge/boarding arithmetic with hand-computed planar expectations;
+            // ground handling has its own on-terrain tests.
+            grid: std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(16_384.0)),
             visuals: crab_world::Visuals(false),
         });
         app.add_plugins(VehiclePlugin);
@@ -1247,7 +1251,7 @@ mod gcr_crab_tests {
 
     use super::*;
 
-    /// The GCR client's stack minus the sim: OpenField arena, one bridged crab. The
+    /// The GCR client's stack minus the sim: the canonical terrain, one bridged crab. The
     /// explicit rest-pose policy drives nothing, so the crab just stands — drift is
     /// injected by hand.
     fn gcr_like_app() -> App {
@@ -1255,7 +1259,11 @@ mod gcr_crab_tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
-            arena: crab_world::physics::Arena::OpenField,
+            // Flat fixture grid (the old open field's exact geometry): these tests pin
+            // bridge bookkeeping — 1:1 walk integration, band-clamped posing — with
+            // hand-computed planar expectations; the surface-lift legs are covered by
+            // walk_target_y_rides_the_surface_on_terrain below.
+            grid: std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(16_384.0)),
             visuals: crab_world::Visuals(false),
         });
         app.add_plugins(ExternalCrabPlugin::new(
@@ -1370,7 +1378,7 @@ mod gcr_crab_tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 2,
             role: WorldRole::Standalone,
-            arena: crab_world::physics::Arena::OpenField,
+            grid: crab_world::terrain::TerrainGrid::gcr(),
             visuals: crab_world::Visuals(false),
         });
         app.add_plugins(ExternalCrabPlugin::new(
@@ -1422,7 +1430,7 @@ mod gcr_crab_tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 2,
             role: WorldRole::Standalone,
-            arena: crab_world::physics::Arena::OpenField,
+            grid: crab_world::terrain::TerrainGrid::gcr(),
             visuals: crab_world::Visuals(false),
         });
         app.add_plugins(ExternalCrabPlugin::new(
@@ -1498,7 +1506,7 @@ mod gcr_crab_tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 2,
             role: WorldRole::Standalone,
-            arena: crab_world::physics::Arena::OpenField,
+            grid: crab_world::terrain::TerrainGrid::gcr(),
             visuals: crab_world::Visuals(false),
         });
         // Nonzero s0: adopting ABSOLUTE sim coordinates instead of the layout about
@@ -1657,7 +1665,7 @@ mod gcr_crab_tests {
         let mut app = headless_stack(HeadlessStack {
             num_envs: 1,
             role: WorldRole::Standalone,
-            arena: crab_world::physics::Arena::Terrain,
+            grid: crab_world::terrain::TerrainGrid::gcr(),
             visuals: crab_world::Visuals(false),
         });
         app.add_plugins(ExternalCrabPlugin::new(

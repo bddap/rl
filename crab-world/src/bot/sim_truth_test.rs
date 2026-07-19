@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use super::actuator::CrabActions;
 use super::body::{CrabJoint, CrabJointId, Side, joint_angle};
-use super::headless::{assert_transforms_match_rapier, headless_app, tick};
+use super::headless::{assert_transforms_match_rapier, flat_headless_app, headless_app, tick};
 
 fn joint_entity(app: &mut App, id: CrabJointId) -> Entity {
     let mut q = app.world_mut().query::<(Entity, &CrabJoint)>();
@@ -402,7 +402,7 @@ fn fallback_body_settles_without_blowing_up() {
         return;
     }
 
-    let mut app = headless_app();
+    let mut app = flat_headless_app();
     tick(&mut app, 1);
     tick(&mut app, 320);
 

@@ -73,7 +73,7 @@ mod tests {
     use super::*;
     use crate::bot::BotSet;
     use crate::bot::body::CrabCarapace;
-    use crate::bot::headless::{headless_app, tick};
+    use crate::bot::headless::{flat_headless_app, tick};
     use crate::bot::sensor::CrabObservation;
 
     /// Env 0's carapace transform, read straight off the world.
@@ -99,7 +99,7 @@ mod tests {
     /// constant target input.
     #[test]
     fn demo_target_obs_tracks_moved_ball() {
-        let mut app = headless_app();
+        let mut app = flat_headless_app();
         app.init_resource::<super::super::DemoRng>();
         app.init_resource::<TargetBallAt>();
         // The demo/render-video schedule for this system, minus rendering: after Sense,

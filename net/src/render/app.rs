@@ -220,13 +220,14 @@ pub(super) fn add_external_nn_crab(
     // The world half of the plant rides the checkpoint (rl#281 stage 6): the launch
     // gate adopted the recorded plant before arming, and terrain is the only loadable
     // ground since rl#293 — GCR's world IS the baked tile, rendered through the anchor.
-    let arena = crab_world::physics::Arena::Terrain;
     app.insert_resource(crab_world::Visuals(true))
         .insert_resource(crab_world::bot::NumEnvs(policies.len()))
         .add_plugins(crab_world::physics::CrabPhysicsPlugin)
-        .add_plugins(crab_world::physics::PhysicsWorldPlugin { arena })
-        // The arena's own dressing — terrain mesh + biome tint, vista or flat lighting,
-        // fog, and on flat arenas the rl#197 checker texture (rl#287) — replaces GCR's
+        .add_plugins(crab_world::physics::PhysicsWorldPlugin {
+            grid: crab_world::terrain::TerrainGrid::gcr(),
+        })
+        // The arena's own dressing — terrain mesh + biome tint, vista lighting, fog,
+        // and the rl#197 checker detail texture (rl#287 → rl#293) — replaces GCR's
         // old bespoke checker quad (one ground path, rl#281):
         // [`sync_arena_surface`] keeps the drawn surface at the arena anchor so it renders
         // exactly where the physics stands.

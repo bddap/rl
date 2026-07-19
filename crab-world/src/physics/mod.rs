@@ -1,6 +1,6 @@
 pub mod world;
 
-pub use world::{Arena, PhysicsWorldPlugin};
+pub use world::PhysicsWorldPlugin;
 #[cfg(feature = "render")]
 pub use world::{ArenaSurface, ArenaVisualsPlugin};
 

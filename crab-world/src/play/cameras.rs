@@ -134,8 +134,8 @@ const SHOT_CAM_FOCUS_Y: f32 = 0.5;
 const SHOT_CAM_CLEARANCE: f32 = 0.6;
 
 fn offscreen_camera_transform(crab_xz: Vec3, terrain: &crate::terrain::TerrainGrid) -> Transform {
-    // Surface-relative, not absolute: on the flat arenas this is exactly the historic
-    // framing (surface height 0), on terrain both ends ride the local ground.
+    // Surface-relative, not absolute: both ends of the sight line ride the local
+    // ground.
     let focus = terrain.place(Vec2::new(crab_xz.x, crab_xz.z), SHOT_CAM_FOCUS_Y);
     let mut eye = focus + SHOT_CAM_OFFSET;
     // Clearing the eye POINT is not enough: a ridge between eye and focus can still
