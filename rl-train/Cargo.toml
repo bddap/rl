@@ -14,5 +14,8 @@ wgpu = ["crab-world/wgpu"]
 
 [dependencies]
 crab-world = { path = "../crab-world" }
+# Render-free (rl#298 stage 4): the trainer's rollout env is net's headless server
+# world (`net::rollout_env`), no render stack involved.
+net = { path = "../net" }
 clap.workspace = true
 otel = { path = "../otel" }

@@ -379,8 +379,12 @@ mod tests {
         );
     }
 
+    /// One-env training world on the canonical ground: [`headless_app`]'s world with
+    /// the production training wiring ([`wire_rollout_training`] — brain, reset, AND
+    /// the shove system, so these tests run the rollout worker's exact system set).
     fn headless_training_app(checkpoint_dir: &std::path::Path, seed: u64) -> App {
         use crate::bot::headless::headless_app;
+        use crate::training::inproc::wire_rollout_training;
         use clap::Parser;
 
         let config = TrainConfig::try_parse_from([
@@ -393,14 +397,7 @@ mod tests {
         .expect("parse default TrainConfig");
 
         let mut app = headless_app();
-
-        let state = TrainingState::new_worker(&config, 0, crate::bot::arch::ArchId::DEFAULT);
-        app.insert_non_send_resource(state).add_systems(
-            FixedUpdate,
-            (brain_step, reset_crab)
-                .chain()
-                .in_set(crate::bot::BotSet::Think),
-        );
+        wire_rollout_training(&mut app, &config, 0, crate::bot::arch::ArchId::DEFAULT);
         app
     }
 
@@ -421,16 +418,10 @@ mod tests {
             let dir = std::env::temp_dir()
                 .join(format!("rl_test_determinism_{seed}_{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
+            // The production wiring includes the shove system (rl#298 stage 4), which
+            // pins the shove draw stream — it consumes the training RNG every
+            // recording tick — into the same-seed contract.
             let mut app = headless_training_app(&dir, seed);
-            // The production rollout registers the shove system (rl#298 stage 4);
-            // registering it here pins the shove draw stream — which consumes the
-            // training RNG every recording tick — into the same-seed contract.
-            app.add_systems(
-                FixedUpdate,
-                super::super::shove_crabs
-                    .after(crate::bot::BotSet::Act)
-                    .before(bevy_rapier3d::plugin::PhysicsSet::SyncBackend),
-            );
             app.world_mut()
                 .non_send_resource_mut::<TrainingState>()
                 .brain

@@ -1,8 +1,8 @@
 //! Random external shoves during training (rl#298 stage 4): in the one-world endgame
 //! anything can push Sally mid-chase — a craft ram, a falling body, terrain contact —
 //! and a policy trained unshoved meets that as out-of-distribution input. Registered
-//! only by the rollout worker (`build_rollout_app`): eval measures the policy, so it
-//! stays unshoved.
+//! only by the rollout worker (`wire_rollout_training`): eval measures the policy, so
+//! it stays unshoved.
 //!
 //! Scale is anchored to measured world contacts, not invented: the rl#298 stage-1 ram
 //! (a production craft at 8 m/s) measured ~0.2 m of carapace knockback (its pin

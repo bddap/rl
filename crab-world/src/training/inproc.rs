@@ -146,6 +146,38 @@ enum RollOutcome {
     SnapshotLoadFailed,
 }
 
+/// The rollout env constructor a worker thread builds its world with, injected by the
+/// binary (rl#298 stage 4): the ONE production implementation is
+/// `net::rollout_env::build_rollout_app` — the headless server world — passed down by
+/// `rl-train`, because this crate sits BELOW net in the dependency graph and must not
+/// grow a second world construction of its own. Args: worker id, config, arch,
+/// env count.
+pub type RolloutEnvBuilder = fn(usize, &TrainConfig, ArchId, usize) -> App;
+
+/// The training half of a rollout env: the worker's [`TrainingState`] plus the systems
+/// that drive and record her — the trainer's counterpart of net's inference driver
+/// (`run_crab_policy`). A [`RolloutEnvBuilder`] composes this onto the world half it
+/// constructs; splitting the halves is what lets the world live in net while the
+/// training systems stay crate-private here.
+pub fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usize, arch: ArchId) {
+    use super::systems::{self, brain_step, reset_crab};
+
+    let state = systems::TrainingState::new_worker(config, id, arch);
+    app.insert_non_send_resource(state).add_systems(
+        FixedUpdate,
+        (brain_step, reset_crab)
+            .chain()
+            .in_set(crate::bot::BotSet::Think),
+    );
+    // Rollouts only — eval measures the policy unshoved (rl#298 stage 4).
+    app.add_systems(
+        FixedUpdate,
+        systems::shove_crabs
+            .after(crate::bot::BotSet::Act)
+            .before(bevy_rapier3d::plugin::PhysicsSet::SyncBackend),
+    );
+}
+
 struct RolloutThread {
     request_tx: Sender<RollRequest>,
     result_rx: Receiver<RollOutcome>,
@@ -153,12 +185,20 @@ struct RolloutThread {
 }
 
 impl RolloutThread {
-    fn spawn(id: usize, config: TrainConfig, arch: ArchId, horizon: u64) -> Self {
+    fn spawn(
+        id: usize,
+        config: TrainConfig,
+        arch: ArchId,
+        horizon: u64,
+        build_env: RolloutEnvBuilder,
+    ) -> Self {
         let (request_tx, request_rx) = channel::<RollRequest>();
         let (result_tx, result_rx) = channel::<RollOutcome>();
         let handle = std::thread::Builder::new()
             .name(format!("rollout-{id}"))
-            .spawn(move || rollout_thread_main(id, config, arch, horizon, request_rx, result_tx))
+            .spawn(move || {
+                rollout_thread_main(id, config, arch, horizon, build_env, request_rx, result_tx)
+            })
             .expect("spawn rollout thread");
         Self {
             request_tx,
@@ -183,11 +223,12 @@ fn rollout_thread_main(
     config: TrainConfig,
     arch: ArchId,
     horizon: u64,
+    build_env: RolloutEnvBuilder,
     request_rx: Receiver<RollRequest>,
     result_tx: Sender<RollOutcome>,
 ) {
     let num_envs = config.envs.max(1) as usize;
-    let mut app = build_rollout_app(id, &config, arch, num_envs);
+    let mut app = build_env(id, &config, arch, num_envs);
     warm_up_app(&mut app);
 
     while let Ok(req) = request_rx.recv() {
@@ -199,7 +240,7 @@ fn rollout_thread_main(
                     "[rollout-{id}] env panicked mid-roll (likely a solver NaN); \
                      rebuilding this thread's world, run continues"
                 );
-                let mut fresh = build_rollout_app(id, &config, arch, num_envs);
+                let mut fresh = build_env(id, &config, arch, num_envs);
                 warm_up_app(&mut fresh);
                 fresh
             },
@@ -272,42 +313,6 @@ fn warm_up_app(app: &mut App) {
         .get_non_send_resource_mut::<TrainingState>()
         .expect("rollout TrainingState");
     let _ = st.end_horizon();
-}
-
-fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: usize) -> App {
-    use crate::bot::headless::{HeadlessStack, WorldRole, headless_stack};
-    use crate::training::systems;
-    use crate::training::systems::{brain_step, reset_crab};
-
-    let mut app = headless_stack(HeadlessStack {
-        num_envs,
-        role: WorldRole::RolloutWorker,
-        // The plant's world half: the canonical terrain tile (rl#293), recorded in
-        // the checkpoint sidecar beside the friction cap.
-        grid: crate::terrain::TerrainGrid::gcr(),
-        visuals: crate::Visuals(false),
-    });
-
-    let state = systems::TrainingState::new_worker(config, id, arch);
-    app.insert_non_send_resource(state).add_systems(
-        FixedUpdate,
-        (brain_step, reset_crab)
-            .chain()
-            .in_set(crate::bot::BotSet::Think),
-    );
-    // Rollouts only — eval measures the policy unshoved (rl#298 stage 4).
-    app.add_systems(
-        FixedUpdate,
-        systems::shove_crabs
-            .after(crate::bot::BotSet::Act)
-            .before(bevy_rapier3d::plugin::PhysicsSet::SyncBackend),
-    );
-
-    crate::bot::headless::force_serial_schedules(&mut app);
-
-    app.finish();
-    app.cleanup();
-    app
 }
 
 /// The learner loop ({snapshot → roll all → merge → GPU update}) — a child module so the
@@ -412,6 +417,29 @@ mod tests {
         }
     }
 
+    /// The thread-machinery tests' env builder: the same training wiring production
+    /// composes ([`wire_rollout_training`]), on a crate-local world — net's server
+    /// world (`net::rollout_env::build_rollout_app`, the production
+    /// [`RolloutEnvBuilder`]) sits above this crate in the dependency graph, and these
+    /// tests exercise the thread/channel/buffer machinery, not the env.
+    fn fixture_env(id: usize, config: &TrainConfig, arch: ArchId, num_envs: usize) -> App {
+        use crate::bot::headless::{
+            HeadlessStack, WorldRole, force_serial_schedules, headless_stack,
+        };
+
+        let mut app = headless_stack(HeadlessStack {
+            num_envs,
+            role: WorldRole::RolloutWorker,
+            grid: crate::terrain::TerrainGrid::gcr(),
+            visuals: crate::Visuals(false),
+        });
+        wire_rollout_training(&mut app, config, id, arch);
+        force_serial_schedules(&mut app);
+        app.finish();
+        app.cleanup();
+        app
+    }
+
     pub(super) fn scratch_config(tag: &str, m: u64) -> (TrainConfig, std::path::PathBuf) {
         use clap::Parser;
         let dir = std::env::temp_dir().join(format!("rl_test_{tag}_{}", std::process::id()));
@@ -507,7 +535,13 @@ mod tests {
         let mut state = TrainingState::new(&config, None);
         let before = snapshot_brain_bytes(state.brain());
 
-        let thread = RolloutThread::spawn(0, config.clone(), state.brain().arch(), horizon);
+        let thread = RolloutThread::spawn(
+            0,
+            config.clone(),
+            state.brain().arch(),
+            horizon,
+            fixture_env,
+        );
         thread
             .request_tx
             .send(RollRequest {
@@ -575,7 +609,15 @@ mod tests {
         let normalizer = Arc::new(state.normalizer_snapshot());
 
         let threads: Vec<RolloutThread> = (0..k)
-            .map(|id| RolloutThread::spawn(id, config.clone(), state.brain().arch(), horizon))
+            .map(|id| {
+                RolloutThread::spawn(
+                    id,
+                    config.clone(),
+                    state.brain().arch(),
+                    horizon,
+                    fixture_env,
+                )
+            })
             .collect();
         for t in &threads {
             t.request_tx

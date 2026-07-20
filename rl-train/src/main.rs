@@ -153,6 +153,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 l.horizon,
                 l.iters,
                 l.nice,
+                net::rollout_env::build_rollout_app,
             );
             Ok(ExitCode::SUCCESS)
         }
