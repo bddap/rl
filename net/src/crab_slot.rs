@@ -16,7 +16,18 @@ use bevy::prelude::*;
 
 use crate::external_crab::ExternalCrabBridge;
 use crate::server::CrabPose;
-use crate::sim::Pos;
+use crate::sim::{Pos, Sim};
+
+/// The caller's half of the slot contract, computed from the authoritative sim BEFORE
+/// the pump: the tick being stepped INTO, and each crab's hunt target. One
+/// implementation for every caller of [`pump_crab_slot`], so the pre-read (which tick,
+/// which hunt source) cannot drift between the windowed driver and a renderless host.
+pub(crate) fn slot_inputs(sim: &Sim) -> (u64, Vec<Option<Pos>>) {
+    let hunt = (0..sim.crabs().len())
+        .map(|idx| sim.nearest_living_player_pos(idx))
+        .collect();
+    (sim.tick() + 1, hunt)
+}
 
 /// Run the crab slot for the tick being stepped INTO: pump the owed fixed steps
 /// (sensing, policy forward, actuation, physics, integration), collect the crabs'
@@ -183,13 +194,7 @@ mod tests {
         });
         let mut last = None;
         while server.next_tick_ready() {
-            let (stepping_into, hunt) = {
-                let sim = server.sim();
-                let hunt: Vec<Option<Pos>> = (0..sim.crabs().len())
-                    .map(|idx| sim.nearest_living_player_pos(idx))
-                    .collect();
-                (sim.tick() + 1, hunt)
-            };
+            let (stepping_into, hunt) = slot_inputs(server.sim());
             let poses = pump_crab_slot(app.world_mut(), stepping_into, &hunt);
             let stepped = server.step_next(&poses, Default::default());
             last = Some(
@@ -232,6 +237,11 @@ mod tests {
         }
 
         let obs = app.world().resource::<CrabObservation>().rows()[0];
+        assert!(
+            obs.iter().any(|v| *v != 0.0),
+            "the sensor must have built a LIVE obs this pump — on the defaulted all-zero \
+             row the forward-pass pin below would hold vacuously"
+        );
         let expected = app.world().non_send_resource::<CrabPolicies>().0[0].act(&obs);
         let got = app.world().resource::<CrabActions>().rows()[0];
         assert_eq!(
@@ -257,11 +267,14 @@ mod tests {
         let spawn = server.sim().crabs()[0].pos();
         let mut app = headless_host_app(Policy::rest(), spawn);
         app.init_resource::<Wave>();
+        // After Think (the policy's set), before Act (apply_actions): the wave is the
+        // last CrabActions writer of the pump, same guarantee as ordering directly
+        // against the private run_crab_policy.
         app.add_systems(
             FixedUpdate,
             drive_wave
-                .after(crate::external_crab::run_crab_policy)
-                .in_set(crab_world::bot::BotSet::Think),
+                .after(crab_world::bot::BotSet::Think)
+                .before(crab_world::bot::BotSet::Act),
         );
 
         let mut tick = 0u64;

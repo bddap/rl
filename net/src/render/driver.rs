@@ -767,11 +767,9 @@ pub(super) fn drive_client_sim(world: &mut World) {
                 let (crab_poses, shadows) = if armed {
                     let (stepping_into, hunt) = {
                         let state = world.non_send_resource::<GameState>();
-                        let sim = state.server().expect("server_auth ⇒ a server").sim();
-                        let hunt: Vec<_> = (0..sim.crabs().len())
-                            .map(|idx| sim.nearest_living_player_pos(idx))
-                            .collect();
-                        (sim.tick() + 1, hunt)
+                        crate::crab_slot::slot_inputs(
+                            state.server().expect("server_auth ⇒ a server").sim(),
+                        )
                     };
                     let poses = crate::crab_slot::pump_crab_slot(world, stepping_into, &hunt);
                     if let Some(p) = read_vehicle_pose(world, me) {
