@@ -5,7 +5,6 @@ use super::hud::{spawn_hud, sync_controls_context, sync_menu_controls_context, u
 use super::input::{gather_input, grab_cursor, quit_game, release_cursor};
 use super::scene::{
     apply_transforms, place_extraction_pillar, reconcile_avatars, spawn_fp_camera, spawn_world,
-    sync_arena_surface,
 };
 use super::*;
 
@@ -29,7 +28,7 @@ pub enum AppPhase {
 
 pub fn build_windowed_app(
     boot: Boot,
-    external_crab: Vec<crab_world::policy::Policy>,
+    nn_crabs: Vec<crab_world::policy::Policy>,
     render_mode: super::RenderMode,
 ) -> anyhow::Result<App> {
     // NO determinism pin, on ANY boot (rl#199): only the solo/host peer steps the float NN
@@ -77,7 +76,6 @@ pub fn build_windowed_app(
                 super::articulation::sample_crab_part_poses,
                 reconcile_avatars,
                 apply_transforms,
-                sync_arena_surface,
                 place_extraction_pillar,
                 update_hud,
             )
@@ -99,7 +97,7 @@ pub fn build_windowed_app(
                 .before(update_controls_ui::<GcrControls>),
         );
 
-    let stamp = crate::SyncStamp::local(external_crab.len() as u8);
+    let stamp = crate::SyncStamp::local(nn_crabs.len() as u8);
 
     match boot {
         Boot::Round(round) => {
@@ -107,11 +105,11 @@ pub fn build_windowed_app(
             let armed = arm_round(crate::menu::ReadyMatch { client, net })
                 .map_err(|msg| anyhow::anyhow!(msg))?;
             let crate::menu::ReadyMatch { mut client, net } = armed.into_ready();
-            let spawns = seed_round_crabs(&mut client, external_crab.len());
+            let spawns = seed_round_crabs(&mut client, nn_crabs.len());
             let coord =
                 super::driver::coordinator(net, client.peers(), client.me(), client.sim().clone());
             insert_core(&mut app, client, coord);
-            install_armed_nn_crab(&mut app, external_crab, spawns);
+            install_armed_nn_crab(&mut app, nn_crabs, spawns);
             app.world_mut()
                 .resource_mut::<NextState<AppPhase>>()
                 .set(AppPhase::Playing);
@@ -124,14 +122,14 @@ pub fn build_windowed_app(
                 stamp,
             });
             {
-                let policies = external_crab;
+                let policies = nn_crabs;
                 let mut throwaway = crate::formation::solo_client_for(seed);
                 throwaway.configure_crabs(policies.len());
                 let crab_spawns: Vec<Pos> =
                     throwaway.sim().crabs().iter().map(|c| c.pos()).collect();
                 add_external_nn_crab(&mut app, policies, crab_spawns);
                 app.insert_resource(crab_world::bot::NumEnvs(0));
-                app.insert_resource(ExternalCrabStackInstalled);
+                app.insert_resource(NnCrabStackInstalled);
             }
         }
     }
@@ -151,7 +149,7 @@ pub(super) struct RoundOver {
 }
 
 #[derive(Resource, Clone, Copy)]
-pub(super) struct ExternalCrabStackInstalled;
+pub(super) struct NnCrabStackInstalled;
 
 pub(super) struct ArmedRound(crate::menu::ReadyMatch);
 
@@ -166,7 +164,7 @@ pub(super) fn arm_round(ready: crate::menu::ReadyMatch) -> Result<ArmedRound, St
 }
 
 pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), String> {
-    if crate::may_arm_external_crab(sync) {
+    if crate::may_arm_crabs(sync) {
         return Ok(());
     }
     // Arming only fails on a formed verdict (None always arms), and the destructure
@@ -205,11 +203,7 @@ pub(super) fn check_armable(sync: Option<crate::SyncVerdict>) -> Result<(), Stri
 
 pub(super) fn seed_round_crabs(client: &mut ClientSim, crabs: usize) -> Vec<Pos> {
     client.configure_crabs(crabs);
-    let spawns: Vec<Pos> = client.sim().crabs().iter().map(|c| c.pos()).collect();
-    for (idx, crab) in client.sim().crabs().to_vec().into_iter().enumerate() {
-        client.set_external_crab_pose(idx, crab.pos(), crab.yaw());
-    }
-    spawns
+    client.sim().crabs().iter().map(|c| c.pos()).collect()
 }
 
 pub(super) fn add_external_nn_crab(
@@ -221,10 +215,7 @@ pub(super) fn add_external_nn_crab(
         .add_plugins(crab_world::physics::CrabPhysicsPlugin)
         .add_plugins(crab_world::bot::BotPlugin)
         .add_plugins(crab_world::vehicle::VehiclePlugin)
-        .add_plugins(crate::external_crab::ExternalCrabPlugin::new(
-            policies,
-            crab_spawns,
-        ));
+        .add_plugins(crate::crab_slot::NnCrabPlugin::new(policies, crab_spawns));
 
     crate::crab_slot::park_fixed_auto_pump(app);
 }
@@ -235,9 +226,9 @@ pub(super) fn install_armed_nn_crab(
     crab_spawns: Vec<Pos>,
 ) {
     add_external_nn_crab(app, policies, crab_spawns.clone());
-    crate::external_crab::arm(app.world_mut());
+    crate::crab_slot::arm(app.world_mut());
     // Same install shape as `ensure_round_installed` (rl#290): the restart is THE one
     // path that pins the arena origin layout to the sim spawns — here, pre-spawn, it
     // stashes the layout for `spawn_initial_crabs`.
-    crate::external_crab::restart_crabs_to_spawns(app.world_mut(), &crab_spawns);
+    crate::crab_slot::restart_crabs_to_spawns(app.world_mut(), &crab_spawns);
 }

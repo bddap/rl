@@ -19,12 +19,12 @@ pub mod telemetry;
 pub mod transport;
 pub mod wire;
 
-// Render-free since rl#298 stage 4: only the label/skin publishers inside stay
-// render-gated — they feed UI.
-pub(crate) mod crab_slot;
-pub mod external_crab;
+// Render-free since rl#298 stage 4: only the label publisher inside stays
+// render-gated — it feeds UI.
+pub mod crab_slot;
 #[cfg(feature = "render")]
 pub mod menu;
+pub mod probe;
 #[cfg(feature = "render")]
 pub mod render;
 
@@ -39,7 +39,7 @@ pub struct SyncVerdict {
     pub plant: bool,
 }
 
-pub fn may_arm_external_crab(sync: Option<SyncVerdict>) -> bool {
+pub fn may_arm_crabs(sync: Option<SyncVerdict>) -> bool {
     // Destructure so a new verdict axis is a compile error here, not a silently
     // un-gated bool.
     sync.is_none_or(|v| {
@@ -108,7 +108,7 @@ mod desync_test {
     use rand_chacha::ChaCha8Rng;
 
     use crate::SyncVerdict;
-    use crate::sim::{Externals, Input, Outcome, PlayerId, Sim, buttons};
+    use crate::sim::{Externals, Input, Outcome, PlayerId, Sim, buttons, hold_poses};
 
     fn input_log(seed: u64, players: &[PlayerId], ticks: usize) -> Vec<BTreeMap<PlayerId, Input>> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -143,8 +143,14 @@ mod desync_test {
         assert_eq!(a.state_hash(), b.state_hash(), "initial state must match");
 
         for (t, inputs) in log.iter().enumerate() {
-            a.step(inputs, Externals::NONE);
-            b.step(inputs, Externals::NONE);
+            {
+                let poses = hold_poses(&a);
+                a.step(inputs, Externals::crabs_only(&poses))
+            };
+            {
+                let poses = hold_poses(&b);
+                b.step(inputs, Externals::crabs_only(&poses))
+            };
             assert_eq!(
                 a.state_hash(),
                 b.state_hash(),
@@ -163,10 +169,10 @@ mod desync_test {
         let mut b = Sim::new(0x5EED, &players);
         let mut resolved_at = None;
         for t in 0..1500u64 {
-            let claws_a = super::sim::drive_crab_toward_prey(&mut a);
-            let claws_b = super::sim::drive_crab_toward_prey(&mut b);
-            a.step(&neutral, Externals::claws_only(&claws_a));
-            b.step(&neutral, Externals::claws_only(&claws_b));
+            let poses_a = super::sim::drive_crab_toward_prey(&a);
+            let poses_b = super::sim::drive_crab_toward_prey(&b);
+            a.step(&neutral, Externals::crabs_only(&poses_a));
+            b.step(&neutral, Externals::crabs_only(&poses_b));
             assert_eq!(a.state_hash(), b.state_hash(), "diverged at tick {t}");
             if resolved_at.is_none() && a.outcome() != Outcome::Ongoing {
                 resolved_at = Some(t);
@@ -191,7 +197,10 @@ mod desync_test {
         let run = || {
             let mut s = Sim::new(77, &players);
             for inputs in &log {
-                s.step(inputs, Externals::NONE);
+                {
+                    let poses = hold_poses(&s);
+                    s.step(inputs, Externals::crabs_only(&poses));
+                }
             }
             s.state_hash()
         };
@@ -226,8 +235,14 @@ mod desync_test {
         assert_eq!(a.state_hash(), b.state_hash(), "initial state must match");
         let mut restarts = 0u32;
         for (t, inputs) in log.iter().enumerate() {
-            restarts += u32::from(a.step(inputs, Externals::NONE));
-            b.step(inputs, Externals::NONE);
+            restarts += u32::from({
+                let poses = hold_poses(&a);
+                a.step(inputs, Externals::crabs_only(&poses))
+            });
+            {
+                let poses = hold_poses(&b);
+                b.step(inputs, Externals::crabs_only(&poses))
+            };
             assert_eq!(
                 a.state_hash(),
                 b.state_hash(),
@@ -242,8 +257,8 @@ mod desync_test {
         );
     }
 
-    fn would_arm_external_crab(sync: Option<SyncVerdict>, checkpoint: Option<()>) -> bool {
-        checkpoint.is_some() && super::may_arm_external_crab(sync)
+    fn would_arm_crabs(sync: Option<SyncVerdict>, checkpoint: Option<()>) -> bool {
+        checkpoint.is_some() && super::may_arm_crabs(sync)
     }
 
     fn synced(body: bool) -> Option<SyncVerdict> {
@@ -257,17 +272,17 @@ mod desync_test {
     #[test]
     fn arm_gate_keys_on_solo_or_synced_assets() {
         assert!(
-            !would_arm_external_crab(synced(false), Some(())),
+            !would_arm_crabs(synced(false), Some(())),
             "a networked round with mismatched crab ASSETS must NOT arm the NN crab (round refused)"
         );
 
         assert!(
-            would_arm_external_crab(synced(true), Some(())),
+            would_arm_crabs(synced(true), Some(())),
             "a networked round with SYNCED assets must arm the NN crab"
         );
 
         assert!(
-            !would_arm_external_crab(
+            !would_arm_crabs(
                 Some(SyncVerdict {
                     body: true,
                     crabs: true,
@@ -279,24 +294,24 @@ mod desync_test {
              the peers would render disagreeing worlds (rl#286)"
         );
 
-        assert!(would_arm_external_crab(None, Some(())));
+        assert!(would_arm_crabs(None, Some(())));
 
-        assert!(!would_arm_external_crab(None, None));
-        assert!(!would_arm_external_crab(synced(true), None));
+        assert!(!would_arm_crabs(None, None));
+        assert!(!would_arm_crabs(synced(true), None));
     }
 
     #[test]
-    fn may_arm_external_crab_rules() {
+    fn may_arm_crabs_rules() {
         assert!(
-            super::may_arm_external_crab(None),
+            super::may_arm_crabs(None),
             "solo (no formation ran, no verdict) always arms"
         );
         assert!(
-            super::may_arm_external_crab(synced(true)),
+            super::may_arm_crabs(synced(true)),
             "networked + synced assets → may arm (the GCR path)"
         );
         assert!(
-            !super::may_arm_external_crab(synced(false)),
+            !super::may_arm_crabs(synced(false)),
             "networked + UNSYNCED crab assets → must NOT arm (different colliders render \
              different Sallys)"
         );

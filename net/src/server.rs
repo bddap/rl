@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::client::TickMsg;
 use crate::roster::RosterSchedule;
-use crate::sim::{ClawPose, Externals, Input, PlayerId, Pos, Sim};
+use crate::sim::{CrabPose, Externals, Input, PlayerId, Sim};
 
 /// Ticks of lead between admitting a joiner and its roster change taking effect — headroom for
 /// the welcome to reach the joiner so it can start issuing input near its entry tick (its
@@ -310,15 +310,6 @@ pub struct SteppedTick {
     pub restarted: bool,
 }
 
-#[derive(Debug, Clone)]
-pub struct CrabPose {
-    pub pos: Pos,
-    pub yaw: i32,
-    /// This crab's claw colliders, bridged into sim space (rl#249) — empty on the paths
-    /// with no physics crab (they pass no poses at all).
-    pub claws: Vec<crate::sim::ClawPose>,
-}
-
 impl Server {
     pub fn new(me: PlayerId, roster: &[PlayerId], sim: Sim) -> Self {
         debug_assert!(
@@ -531,22 +522,13 @@ impl Server {
             pending.tick, tick,
             "the assembled tick is out of step with the sim tick"
         );
-        if !crabs.is_empty() {
-            assert_eq!(
-                crabs.len(),
-                self.sim.crabs().len(),
-                "the driver's crab poses must cover every sim crab"
-            );
-            for (idx, c) in crabs.iter().enumerate() {
-                self.sim.set_external_crab_pose(idx, c.pos, c.yaw);
-            }
-        }
-        let claws: Vec<ClawPose> = crabs.iter().flat_map(|c| c.claws.iter().copied()).collect();
+        // Poses are MANDATORY (rl#298 stage 5): every host runs the crab world, so
+        // there is no inert-crab escape — the count assert lives in the sim's adopt.
         pilots.retain(|pid, _| self.pilot_intents.contains_key(pid));
         let restarted = self.sim.step(
             &pending.inputs,
             Externals {
-                claws: &claws,
+                crabs,
                 pilots: &pilots,
             },
         );
@@ -639,7 +621,7 @@ impl Server {
 mod tests {
     use super::*;
     use crate::client::ClientSim;
-    use crate::sim::buttons;
+    use crate::sim::{Pos, buttons};
     use crate::snapshot::CoreSnapshot;
 
     fn ids(n: u8) -> Vec<PlayerId> {
@@ -648,6 +630,13 @@ mod tests {
 
     fn srv(seed: u64, roster: &[PlayerId]) -> Server {
         Server::new(PlayerId(0), roster, Sim::new(seed, roster))
+    }
+
+    /// Step the assembled tick with the crabs held at their current poses, clawless —
+    /// the scenery feed for tests about the input/roster machinery.
+    fn step_held(s: &mut Server) -> crate::server::SteppedTick {
+        let poses = crate::sim::hold_poses(s.sim());
+        s.step_next(&poses, Default::default())
     }
 
     fn input(s: f32) -> Input {
@@ -917,7 +906,7 @@ mod tests {
             "walk axes and ACTION are masked; RESTART passes"
         );
         assert!(
-            s.step_next(&[], Default::default()).restarted,
+            step_held(&mut s).restarted,
             "the piloting player's RESTART press restarts the round"
         );
     }
@@ -926,7 +915,7 @@ mod tests {
     fn step_ready(s: &mut Server) -> Vec<CoreSnapshot> {
         let mut out = Vec::new();
         while s.next_tick_ready() {
-            let bytes = s.step_next(&[], Default::default()).snapshot;
+            let bytes = step_held(s).snapshot;
             out.push(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
         }
         out
@@ -960,7 +949,7 @@ mod tests {
         for t in 0..10 {
             s.advance(tickmsg(t, 1.0));
             assert!(s.next_tick_ready(), "tick {t} steps with no remote input");
-            let _ = s.step_next(&[], Default::default());
+            let _ = step_held(&mut s);
         }
         assert_eq!(s.sim().tick(), 10, "the match ran at host pace");
         assert_eq!(
@@ -1025,7 +1014,7 @@ mod tests {
                 issue += 1;
             }
             s.advance(tickmsg(t, 0.0));
-            let _ = s.step_next(&[], Default::default());
+            let _ = step_held(s);
             reports.extend(s.take_starvation_reports());
         }
         reports
@@ -1138,7 +1127,7 @@ mod tests {
         let mut positions = vec![s.sim().player(PlayerId(1)).expect("rostered").pos()];
         for t in 0..3 {
             s.advance(tickmsg(t, 0.0));
-            let _ = s.step_next(&[], Default::default());
+            let _ = step_held(&mut s);
             positions.push(s.sim().player(PlayerId(1)).expect("rostered").pos());
         }
         let step0 = positions[1].x - positions[0].x;
@@ -1393,9 +1382,10 @@ mod tests {
         {
             let mut sim = Sim::new(SEED, &roster);
             for i in 0..SUBMITS {
-                let p = pose_at(i);
-                sim.set_external_crab_pose(0, p.pos, p.yaw);
-                sim.step(&BTreeMap::from([(me, input_at(i))]), Externals::NONE);
+                sim.step(
+                    &BTreeMap::from([(me, input_at(i))]),
+                    Externals::crabs_only(&[pose_at(i)]),
+                );
                 baseline.push((sim.tick(), sim.state_hash()));
             }
         }
@@ -1459,7 +1449,7 @@ mod tests {
             );
             s.advance(tickmsg(t, 1.0));
             assert!(s.next_tick_ready(), "tick {t} is steppable — no wedge");
-            let stepped = s.step_next(&[], Default::default());
+            let stepped = step_held(&mut s);
             assert_eq!(
                 stepped.restarted,
                 t == RESTART_AT,

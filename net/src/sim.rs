@@ -133,37 +133,40 @@ fn claw_at(p: Pos, dx: i64, y: i64) -> ClawPose {
     }
 }
 
-/// Advance every crab toward its nearest living player and return the claws riding
-/// their carapace points — this tick's [`Externals::claws`] for the caller to feed
-/// `step()`. Empty during grace: like the server bridge's capture, claws exist only
-/// for the tick that measured them (rl#294).
+/// Advance every crab toward its nearest living player and return this tick's
+/// [`Externals::crabs`] poses for the caller to feed `step()` — claws riding the
+/// carapace points once past grace (downs are claw contact only, rl#236, so the
+/// pursuit driver must bring claws, not just a pose, for a catch to land).
 #[cfg(test)]
-pub(crate) fn drive_crab_toward_prey(sim: &mut Sim) -> Vec<ClawPose> {
-    let mut claws = Vec::new();
-    if sim.tick() >= sim.round_start + STARTUP_GRACE_TICKS {
-        for idx in 0..sim.crabs().len() {
-            let Some(target) = sim.nearest_living_player_pos(idx) else {
-                continue;
-            };
+pub(crate) fn drive_crab_toward_prey(sim: &Sim) -> Vec<CrabPose> {
+    let armed = sim.tick() >= sim.round_start + STARTUP_GRACE_TICKS;
+    (0..sim.crabs().len())
+        .map(|idx| {
             let mut pos = sim.crabs()[idx].pos();
-            let dx = target.x - pos.x;
-            let dz = target.z - pos.z;
-            let yaw = trig::atan2_turns(dx, dz);
-            let dist = isqrt_i128(dist2_i128(dx, dz));
-            if dist <= CRAB_SPEED as i128 {
-                pos = target;
-            } else if dist > 0 {
-                pos.x += (dx as i128 * CRAB_SPEED as i128 / dist) as i64;
-                pos.z += (dz as i128 * CRAB_SPEED as i128 / dist) as i64;
+            let mut yaw = sim.crabs()[idx].yaw();
+            if armed && let Some(target) = sim.nearest_living_player_pos(idx) {
+                let dx = target.x - pos.x;
+                let dz = target.z - pos.z;
+                yaw = trig::atan2_turns(dx, dz);
+                let dist = isqrt_i128(dist2_i128(dx, dz));
+                if dist <= CRAB_SPEED as i128 {
+                    pos = target;
+                } else if dist > 0 {
+                    pos.x += (dx as i128 * CRAB_SPEED as i128 / dist) as i64;
+                    pos.z += (dz as i128 * CRAB_SPEED as i128 / dist) as i64;
+                }
             }
-            sim.set_external_crab_pose(idx, pos, yaw);
-            // A claw riding her carapace point — downs are claw contact only (rl#236),
-            // so the pursuit driver must bring claws, not just a pose, for a catch to
-            // land.
-            claws.push(claw_at(pos, 0, CLAW_M));
-        }
-    }
-    claws
+            CrabPose {
+                pos,
+                yaw,
+                claws: if armed {
+                    vec![claw_at(pos, 0, CLAW_M)]
+                } else {
+                    Vec::new()
+                },
+            }
+        })
+        .collect()
 }
 
 pub const CRAB_SCALE: i64 = 12;
@@ -312,9 +315,9 @@ pub struct Crab {
 /// fixed-point grid. Surface-relative y is what makes [`Self::downs`]'s player span
 /// (`0..=PLAYER_HEIGHT_FP`, a walker standing ON the ground) hold on the baked terrain
 /// tile exactly as on the flat grids (rl#281 stage 6). External per-tick
-/// INPUT, not round state: the server's bridge captures it fresh into each step's
-/// [`Externals`], clients never see it (they receive the resulting
-/// [`PlayerStatus`] via snapshot), and nothing stores it to hash or snapshot.
+/// INPUT, not round state: the host's crab slot captures it fresh from the one rapier
+/// world into each step's [`Externals`], clients never see it (they receive the
+/// resulting [`PlayerStatus`] via snapshot), and nothing stores it to hash or snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClawPose {
     pub a: Pos,
@@ -362,16 +365,30 @@ pub struct PilotPose {
     pub yaw: i32,
 }
 
-/// This tick's external inputs to [`Sim::step`], captured fresh by the server's bridge
-/// every tick. Parameters rather than sim state (rl#294): nothing stores them, so a
-/// stale capture outliving the tick that measured it is unrepresentable, and their
-/// exclusion from `state_hash`/`core_snapshot` needs no destructure discipline.
+/// One crab's world pose + claw colliders as of this tick — the mandatory per-crab
+/// entry of [`Externals::crabs`] (rl#298 stage 5): Sally is world content, so her sim
+/// pose is READ from the host's one rapier world every tick, never integrated
+/// sim-side.
+#[derive(Debug, Clone)]
+pub struct CrabPose {
+    pub pos: Pos,
+    pub yaw: i32,
+    /// This crab's claw colliders — see [`ClawPose`]. Empty only pre-spawn/grace.
+    pub claws: Vec<ClawPose>,
+}
+
+/// This tick's external inputs to [`Sim::step`], captured fresh from the host's one
+/// rapier world every tick. Parameters rather than sim state (rl#294): nothing stores
+/// them, so a stale capture outliving the tick that measured it is unrepresentable, and
+/// their exclusion from `state_hash`/`core_snapshot` needs no destructure discipline.
 #[derive(Debug, Clone, Copy)]
 pub struct Externals<'a> {
-    /// All crabs' claw colliders as of this tick, pooled (the down check doesn't care
-    /// which crab owns a claw) — see [`ClawPose`].
-    pub claws: &'a [ClawPose],
-    /// Every piloting player's craft pose, bridged back into sim space (rl#258): while a
+    /// Every crab's world pose + claws, one entry per sim crab — MANDATORY (rl#298
+    /// stage 5): there is no inert-crab escape, so a host that runs no crab world
+    /// cannot serve a round. [`Sim::step`] adopts the poses, then runs the claw-touch
+    /// down check over the pooled claws (the check doesn't care which crab owns one).
+    pub crabs: &'a [CrabPose],
+    /// Every piloting player's craft pose, in sim space (rl#258): while a
     /// player flies, its ONE position is the craft's — the walker rides the craft instead
     /// of standing as a husk at the boarding spot, so the crab hunts the craft's shadow
     /// and stepping out resumes on foot right there. Membership doubles as the down
@@ -381,20 +398,28 @@ pub struct Externals<'a> {
 }
 
 impl<'a> Externals<'a> {
-    /// No bridge ran this tick — no claws, nobody piloting (setup ticks, walker tests).
-    pub const NONE: Externals<'static> = Externals {
-        claws: &[],
-        pilots: &BTreeMap::new(),
-    };
-
-    /// Claws with nobody piloting — the common test feed.
-    #[cfg(test)]
-    pub(crate) fn claws_only(claws: &'a [ClawPose]) -> Self {
+    /// Crab poses with nobody piloting.
+    pub(crate) fn crabs_only(crabs: &'a [CrabPose]) -> Self {
+        const NO_PILOTS: &BTreeMap<PlayerId, PilotPose> = &BTreeMap::new();
         Self {
-            claws,
-            ..Self::NONE
+            crabs,
+            pilots: NO_PILOTS,
         }
     }
+}
+
+/// Every crab held at its current sim pose, clawless — the test feed for steps where
+/// the crabs are scenery (setup ticks, walker tests).
+#[cfg(test)]
+pub(crate) fn hold_poses(sim: &Sim) -> Vec<CrabPose> {
+    sim.crabs()
+        .iter()
+        .map(|c| CrabPose {
+            pos: c.pos(),
+            yaw: c.yaw(),
+            claws: Vec::new(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,15 +497,19 @@ impl Sim {
         self.extraction = extraction;
     }
 
-    pub fn set_external_crab_pose(&mut self, crab: usize, pos: Pos, yaw: i32) {
-        assert!(
-            crab < self.crabs.len(),
-            "external crab pose for crab {crab}, but the round has {} — the bridge and the sim \
-             disagree on the binding count",
-            self.crabs.len()
+    /// Adopt this tick's crab world poses — [`Sim::step`]'s first act, and callable
+    /// alone only where a pose must land without stepping (a snapshot round-trip test).
+    fn adopt_crab_poses(&mut self, crabs: &[CrabPose]) {
+        assert_eq!(
+            crabs.len(),
+            self.crabs.len(),
+            "one world pose per sim crab (rl#298 stage 5) — the crab world and the sim \
+             disagree on the crab count"
         );
-        self.crabs[crab].pos = pos;
-        self.crabs[crab].yaw = yaw;
+        for (c, pose) in self.crabs.iter_mut().zip(crabs) {
+            c.pos = pose.pos;
+            c.yaw = pose.yaw;
+        }
     }
 
     fn reset(&mut self) {
@@ -636,6 +665,7 @@ impl Sim {
 
     pub fn step(&mut self, inputs: &BTreeMap<PlayerId, Input>, externals: Externals<'_>) -> bool {
         self.require_complete_inputs(inputs);
+        self.adopt_crab_poses(externals.crabs);
         self.tick += 1;
 
         let restart_now = inputs.values().any(|i| i.pressed(buttons::RESTART));
@@ -673,8 +703,9 @@ impl Sim {
         if armed {
             // Claw contact is the ONE down mechanism (rl#236) — see [`ClawPose`]. Pilots
             // are exempt: inside a hull there is no walker to claw — the crab strikes the
-            // craft's REAL collider in the physics arena instead (rl#258).
-            for claw in externals.claws {
+            // craft's REAL collider in the physics world instead (rl#258). Pooled across
+            // crabs: the down check doesn't care which crab owns a claw.
+            for claw in externals.crabs.iter().flat_map(|c| c.claws.iter()) {
                 for (id, p) in self.players.iter_mut() {
                     if p.status == PlayerStatus::Alive
                         && !externals.pilots.contains_key(id)
@@ -934,6 +965,20 @@ mod tests {
             .collect()
     }
 
+    /// Step with the crabs as scenery — held poses, no claws, nobody piloting.
+    fn step_scenery(sim: &mut Sim, inputs: &BTreeMap<PlayerId, Input>) -> bool {
+        let poses = hold_poses(sim);
+        sim.step(inputs, Externals::crabs_only(&poses))
+    }
+
+    /// Every crab held at its current pose, with `claws` riding crab 0 — the common
+    /// armed test feed.
+    fn held_with_claws(sim: &Sim, claws: Vec<ClawPose>) -> Vec<CrabPose> {
+        let mut poses = hold_poses(sim);
+        poses[0].claws = claws;
+        poses
+    }
+
     #[test]
     fn mixed_foot_and_neutral_pilot_steps_deterministically() {
         let run = || {
@@ -943,7 +988,7 @@ mod tests {
             for _ in 0..20 {
                 let mut inputs = neutral_for(&sim);
                 inputs.insert(PlayerId(0), Input::from_axes(0.0, 1.0));
-                sim.step(&inputs, Externals::NONE);
+                step_scenery(&mut sim, &inputs);
             }
             let p0_end = sim.player(PlayerId(0)).unwrap().pos();
             let p1_end = sim.player(PlayerId(1)).unwrap().pos();
@@ -1001,7 +1046,7 @@ mod tests {
         let p0 = sim.player(PlayerId(0)).unwrap().pos();
         let mut inputs = BTreeMap::new();
         inputs.insert(PlayerId(0), Input::from_axes(0.0, 1.0));
-        sim.step(&inputs, Externals::NONE);
+        step_scenery(&mut sim, &inputs);
         let p1 = sim.player(PlayerId(0)).unwrap().pos();
         assert_eq!(p1.x, p0.x, "no X drift facing +Z");
         let dz = p1.z - p0.z;
@@ -1017,7 +1062,7 @@ mod tests {
         let p0 = sim.player(PlayerId(0)).unwrap().pos();
         let mut right = BTreeMap::new();
         right.insert(PlayerId(0), Input::new(1.0, 0.0, 0.0, 0));
-        sim.step(&right, Externals::NONE);
+        step_scenery(&mut sim, &right);
         let p1 = sim.player(PlayerId(0)).unwrap().pos();
         assert_eq!(p1.z, p0.z, "no Z drift strafing at yaw 0");
         let dx = p1.x - p0.x;
@@ -1028,7 +1073,7 @@ mod tests {
         let mut sim = Sim::new(0, &players(1));
         let mut left = BTreeMap::new();
         left.insert(PlayerId(0), Input::new(-1.0, 0.0, 0.0, 0));
-        sim.step(&left, Externals::NONE);
+        step_scenery(&mut sim, &left);
         let dx_left = sim.player(PlayerId(0)).unwrap().pos().x - p0.x;
         assert_eq!(dx_left, -dx, "strafe-left mirrors strafe-right exactly");
     }
@@ -1039,7 +1084,7 @@ mod tests {
         let mut stepped = Sim::new(7, &players(1));
         let mut inputs = BTreeMap::new();
         inputs.insert(PlayerId(0), inp);
-        stepped.step(&inputs, Externals::NONE);
+        step_scenery(&mut stepped, &inputs);
 
         let mut predicted = Sim::new(7, &players(1));
         predicted.predict_player(PlayerId(0), inp);
@@ -1068,12 +1113,12 @@ mod tests {
         for _ in 0..ticks {
             let mut inp = BTreeMap::new();
             inp.insert(PlayerId(0), Input::new(0.0, 0.0, 1.0, 0));
-            sim.step(&inp, Externals::NONE);
+            step_scenery(&mut sim, &inp);
         }
         let before = sim.player(PlayerId(0)).unwrap().pos();
         let mut fwd = BTreeMap::new();
         fwd.insert(PlayerId(0), Input::from_axes(0.0, 1.0));
-        sim.step(&fwd, Externals::NONE);
+        step_scenery(&mut sim, &fwd);
         let after = sim.player(PlayerId(0)).unwrap().pos();
         let dx = after.x - before.x;
         let dz = after.z - before.z;
@@ -1088,22 +1133,22 @@ mod tests {
         let mut sim = Sim::new(0, &players(1));
         let neutral = neutral_for(&sim);
         for _ in 0..STARTUP_GRACE_TICKS {
-            let claws = drive_crab_toward_prey(&mut sim);
-            sim.step(&neutral, Externals::claws_only(&claws));
+            let poses = drive_crab_toward_prey(&sim);
+            sim.step(&neutral, Externals::crabs_only(&poses));
         }
         let crab_armed = sim.crabs()[0].pos();
         let prey = sim.player(PlayerId(0)).unwrap().pos();
         let d_start = dist2(crab_armed, prey);
-        let claws = drive_crab_toward_prey(&mut sim);
-        sim.step(&neutral, Externals::claws_only(&claws));
+        let poses = drive_crab_toward_prey(&sim);
+        sim.step(&neutral, Externals::crabs_only(&poses));
         let d_next = dist2(sim.crabs()[0].pos(), sim.player(PlayerId(0)).unwrap().pos());
         assert!(d_next < d_start, "crab must close distance once driven");
         for _ in 0..2000 {
             if sim.outcome() != Outcome::Ongoing {
                 break;
             }
-            let claws = drive_crab_toward_prey(&mut sim);
-            sim.step(&neutral, Externals::claws_only(&claws));
+            let poses = drive_crab_toward_prey(&sim);
+            sim.step(&neutral, Externals::crabs_only(&poses));
         }
         assert_eq!(
             sim.outcome(),
@@ -1117,7 +1162,7 @@ mod tests {
     }
 
     #[test]
-    fn external_crab_pose_seeds_and_is_hashed() {
+    fn adopted_crab_pose_seeds_and_is_hashed() {
         let pos = Pos {
             x: 7 * UNIT,
             z: -3 * UNIT,
@@ -1125,22 +1170,23 @@ mod tests {
         let yaw = 123;
 
         let mut sim = Sim::new(0, &players(1));
-        sim.set_external_crab_pose(0, pos, yaw);
+        let pose = |pos| CrabPose {
+            pos,
+            yaw,
+            claws: Vec::new(),
+        };
+        sim.adopt_crab_poses(&[pose(pos)]);
         assert_eq!(sim.crabs()[0].pos(), pos, "must seed the pose");
         assert_eq!(sim.crabs()[0].yaw(), yaw, "must seed the yaw");
         let h_seed = sim.state_hash();
-        sim.set_external_crab_pose(
-            0,
-            Pos {
-                x: pos.x + 1,
-                ..pos
-            },
-            yaw,
-        );
+        sim.adopt_crab_poses(&[pose(Pos {
+            x: pos.x + 1,
+            ..pos
+        })]);
         assert_ne!(
             h_seed,
             sim.state_hash(),
-            "the external crab pose must be folded into the state hash"
+            "the adopted crab pose must be folded into the state hash"
         );
     }
 
@@ -1185,7 +1231,7 @@ mod tests {
             };
             let mut inp = BTreeMap::new();
             inp.insert(PlayerId(0), Input::new(0.0, 1.0, look, buttons::ACTION));
-            sim.step(&inp, Externals::NONE);
+            step_scenery(&mut sim, &inp);
             if sim.outcome() == Outcome::Extracted {
                 won = true;
                 break;
@@ -1204,13 +1250,17 @@ mod tests {
         let mut sim = Sim::new(0, &players(1));
         let neutral = neutral_for(&sim);
         for _ in 0..=STARTUP_GRACE_TICKS {
-            sim.step(&neutral, Externals::NONE);
+            step_scenery(&mut sim, &neutral);
         }
         // Park the crab dead on the joiner's roster slot (x=0 for idx 1 of 2), claw at
         // her carapace point — downs are claw contact only (rl#236).
         let parked = Pos { x: 0, z: 0 };
-        sim.set_external_crab_pose(0, parked, 0);
-        let claws = vec![claw_at(parked, 0, CLAW_M)];
+        let poses = vec![CrabPose {
+            pos: parked,
+            yaw: 0,
+            claws: vec![claw_at(parked, 0, CLAW_M)],
+        }];
+        sim.adopt_crab_poses(&poses);
         sim.spawn_joining_player(PlayerId(1));
         let pos = sim.player(PlayerId(1)).unwrap().pos();
         assert_eq!(pos.z, 0, "slot selection stays on the spawn line");
@@ -1218,7 +1268,7 @@ mod tests {
             !within(pos.x, pos.z, parked.x, parked.z, MIN_CRAB_SPAWN_DISTANCE),
             "joiner slot {pos:?} sits within the crab's spawn-clearance disc"
         );
-        sim.step(&neutral_for(&sim), Externals::claws_only(&claws));
+        sim.step(&neutral_for(&sim), Externals::crabs_only(&poses));
         assert_eq!(
             sim.player(PlayerId(0)).unwrap().status(),
             PlayerStatus::Downed,
@@ -1239,14 +1289,14 @@ mod tests {
         // would hang this test's meaning off rounding crumbs. 2×MIN, not a bare meter
         // count — a re-measured charge speed grows the ring and a fixed park could
         // land back inside it (it did: 100 m vs the rl#266 ring).
-        sim.set_external_crab_pose(
-            0,
-            Pos {
+        sim.adopt_crab_poses(&[CrabPose {
+            pos: Pos {
                 x: 0,
                 z: 2 * MIN_CRAB_SPAWN_DISTANCE,
             },
-            0,
-        );
+            yaw: 0,
+            claws: Vec::new(),
+        }]);
         sim.spawn_joining_player(PlayerId(1));
         assert_eq!(
             sim.player(PlayerId(1)).unwrap().pos(),
@@ -1263,8 +1313,8 @@ mod tests {
             if sim.outcome() != Outcome::Ongoing {
                 break;
             }
-            let claws = drive_crab_toward_prey(&mut sim);
-            sim.step(&neutral, Externals::claws_only(&claws));
+            let poses = drive_crab_toward_prey(&sim);
+            sim.step(&neutral, Externals::crabs_only(&poses));
         }
         assert_ne!(
             sim.outcome(),
@@ -1281,8 +1331,8 @@ mod tests {
         };
         let frozen = snapshot(&sim);
         for _ in 0..10 {
-            let claws = drive_crab_toward_prey(&mut sim);
-            sim.step(&neutral, Externals::claws_only(&claws));
+            let poses = drive_crab_toward_prey(&sim);
+            sim.step(&neutral, Externals::crabs_only(&poses));
         }
         assert_eq!(
             snapshot(&sim),
@@ -1297,7 +1347,7 @@ mod tests {
         let h0 = sim.state_hash();
         let mut inputs = neutral_for(&sim);
         inputs.insert(PlayerId(0), Input::from_axes(1.0, 1.0));
-        sim.step(&inputs, Externals::NONE);
+        step_scenery(&mut sim, &inputs);
         assert_ne!(sim.state_hash(), h0);
     }
 
@@ -1307,7 +1357,7 @@ mod tests {
         let mut sim = Sim::new(0, &players(2));
         let mut partial = BTreeMap::new();
         partial.insert(PlayerId(0), Input::from_axes(0.0, 1.0));
-        sim.step(&partial, Externals::NONE);
+        step_scenery(&mut sim, &partial);
     }
 
     #[test]
@@ -1488,11 +1538,15 @@ mod tests {
     #[test]
     fn core_snapshot_roundtrip_reproduces_authoritative_state() {
         let mut original = Sim::new(7, &players(3));
+        let posed = vec![CrabPose {
+            pos: Pos { x: 4200, z: -1300 },
+            yaw: 77,
+            claws: Vec::new(),
+        }];
         for _ in 0..5 {
-            original.set_external_crab_pose(0, Pos { x: 4200, z: -1300 }, 77);
             let mut inputs = neutral_for(&original);
             *inputs.get_mut(&PlayerId(0)).unwrap() = Input::from_axes(0.3, 1.0);
-            original.step(&inputs, Externals::NONE);
+            original.step(&inputs, Externals::crabs_only(&posed));
         }
         original.players.get_mut(&PlayerId(1)).unwrap().status = PlayerStatus::Downed;
 
@@ -1529,10 +1583,14 @@ mod tests {
     fn crab_body_overhead_without_a_claw_never_downs() {
         let mut sim = Sim::new(0, &players(1));
         let p = sim.player(PlayerId(0)).unwrap().pos();
-        sim.set_external_crab_pose(0, p, 0);
+        sim.adopt_crab_poses(&[CrabPose {
+            pos: p,
+            yaw: 0,
+            claws: Vec::new(),
+        }]);
         let neutral = neutral_for(&sim);
         for _ in 0..=STARTUP_GRACE_TICKS + 10 {
-            sim.step(&neutral, Externals::NONE);
+            step_scenery(&mut sim, &neutral);
             assert_eq!(
                 sim.player(PlayerId(0)).unwrap().status(),
                 PlayerStatus::Alive,
@@ -1541,7 +1599,8 @@ mod tests {
         }
         // Same spot, now with a touching claw: downs — proving the round was armed and
         // the survival above was the mechanic, not a disarmed world.
-        sim.step(&neutral, Externals::claws_only(&[claw_at(p, 0, CLAW_M)]));
+        let poses = held_with_claws(&sim, vec![claw_at(p, 0, CLAW_M)]);
+        sim.step(&neutral, Externals::crabs_only(&poses));
         assert_eq!(
             sim.player(PlayerId(0)).unwrap().status(),
             PlayerStatus::Downed,
@@ -1552,8 +1611,8 @@ mod tests {
     fn claw_touch_downs_a_player_after_the_grace() {
         let mut sim = Sim::new(0, &players(1));
         let p = sim.player(PlayerId(0)).unwrap().pos();
-        let claws = [claw_at(p, 0, CLAW_M)];
-        let touching = Externals::claws_only(&claws);
+        let poses = held_with_claws(&sim, vec![claw_at(p, 0, CLAW_M)]);
+        let touching = Externals::crabs_only(&poses);
         let neutral = neutral_for(&sim);
         for _ in 0..STARTUP_GRACE_TICKS {
             sim.step(&neutral, touching);
@@ -1585,7 +1644,7 @@ mod tests {
         // (the server filters the pilots feed upstream, so passing it directly stands in
         // for "standing there on foot").
         let crab = sim.crabs()[0].pos();
-        let claw = claw_at(crab, 0, CLAW_M);
+        let poses = held_with_claws(&sim, vec![claw_at(crab, 0, CLAW_M)]);
         let both = |pilots: &[PlayerId]| {
             let mut m = BTreeMap::new();
             for &pid in pilots {
@@ -1597,7 +1656,7 @@ mod tests {
             sim.step(
                 &neutral,
                 Externals {
-                    claws: &[claw],
+                    crabs: &poses,
                     pilots: &both(&[PlayerId(0), PlayerId(1)]),
                 },
             );
@@ -1614,7 +1673,7 @@ mod tests {
         sim.step(
             &neutral,
             Externals {
-                claws: &[claw],
+                crabs: &poses,
                 pilots: &both(&[PlayerId(0)]),
             },
         );
@@ -1636,8 +1695,9 @@ mod tests {
         let p = sim.player(PlayerId(0)).unwrap().pos();
         let neutral = neutral_for(&sim);
         let step_armed = |sim: &mut Sim, claw: ClawPose| {
+            let poses = held_with_claws(sim, vec![claw]);
             for _ in 0..=STARTUP_GRACE_TICKS + 1 {
-                sim.step(&neutral, Externals::claws_only(&[claw]));
+                sim.step(&neutral, Externals::crabs_only(&poses));
             }
             sim.player(PlayerId(0)).unwrap().status()
         };
@@ -1739,7 +1799,7 @@ mod tests {
         fwd.insert(PlayerId(0), Input::new(0.3, 1.0, 0.5, 0));
         fwd.insert(PlayerId(1), Input::new(-0.2, 1.0, 0.0, 0));
         for _ in 0..50 {
-            sim.step(&fwd, Externals::NONE);
+            step_scenery(&mut sim, &fwd);
         }
         let world = |s: &Sim| {
             (
@@ -1757,7 +1817,7 @@ mod tests {
         let mut restart = BTreeMap::new();
         restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
         restart.insert(PlayerId(1), Input::default());
-        let edge = sim.step(&restart, Externals::NONE);
+        let edge = step_scenery(&mut sim, &restart);
         assert!(edge, "the press reports the restart edge");
         assert_eq!(sim.tick(), 51, "the tick stays monotone across a restart");
         assert_eq!(sim.outcome(), Outcome::Ongoing);
@@ -1776,14 +1836,14 @@ mod tests {
             if sim.outcome() != Outcome::Ongoing {
                 break;
             }
-            let claws = drive_crab_toward_prey(&mut sim);
-            sim.step(&neutral, Externals::claws_only(&claws));
+            let poses = drive_crab_toward_prey(&sim);
+            sim.step(&neutral, Externals::crabs_only(&poses));
         }
         assert_eq!(sim.outcome(), Outcome::Wiped, "round should have ended");
         let tick_at_loss = sim.tick();
         let mut restart = BTreeMap::new();
         restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
-        sim.step(&restart, Externals::NONE);
+        step_scenery(&mut sim, &restart);
         assert_eq!(sim.outcome(), Outcome::Ongoing, "restart revives the round");
         assert_eq!(sim.tick(), tick_at_loss + 1, "the tick keeps counting");
         assert_eq!(
@@ -1798,22 +1858,20 @@ mod tests {
         let mut sim = Sim::new(0, &players(1));
         let mut held = BTreeMap::new();
         held.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
-        assert!(sim.step(&held, Externals::NONE), "first press restarts");
+        assert!(step_scenery(&mut sim, &held), "first press restarts");
         assert!(
-            !sim.step(&held, Externals::NONE),
+            !step_scenery(&mut sim, &held),
             "a held key doesn't re-restart"
         );
         assert!(
-            !sim.step(&held, Externals::NONE),
+            !step_scenery(&mut sim, &held),
             "still held, still no re-restart"
         );
         assert_eq!(sim.tick(), 3, "every tick counted, restart included");
+        let neutral = neutral_for(&sim);
+        assert!(!step_scenery(&mut sim, &neutral), "release: no restart");
         assert!(
-            !sim.step(&neutral_for(&sim), Externals::NONE),
-            "release: no restart"
-        );
-        assert!(
-            sim.step(&held, Externals::NONE),
+            step_scenery(&mut sim, &held),
             "a new press after release restarts again"
         );
     }
@@ -1828,8 +1886,8 @@ mod tests {
             let restart_bit = if t == 40 { buttons::RESTART } else { 0 };
             inputs.insert(PlayerId(0), Input::new(0.4, 1.0, 0.2, 0));
             inputs.insert(PlayerId(1), Input::new(-0.3, 1.0, -0.1, restart_bit));
-            restarts += u32::from(a.step(&inputs, Externals::NONE));
-            b.step(&inputs, Externals::NONE);
+            restarts += u32::from(step_scenery(&mut a, &inputs));
+            step_scenery(&mut b, &inputs);
             assert_eq!(
                 a.state_hash(),
                 b.state_hash(),
@@ -1845,17 +1903,17 @@ mod tests {
         let mut sim = Sim::new(0, &players(1));
         let neutral = neutral_for(&sim);
         for _ in 0..(3 * STARTUP_GRACE_TICKS) {
-            sim.step(&neutral, Externals::NONE);
+            step_scenery(&mut sim, &neutral);
         }
         let mut restart = BTreeMap::new();
         restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
-        assert!(sim.step(&restart, Externals::NONE), "the restart fires");
+        assert!(step_scenery(&mut sim, &restart), "the restart fires");
         let crab0 = sim.crabs()[0].pos();
         sim.players.get_mut(&PlayerId(0)).unwrap().pos = crab0;
         // A claw touching the parked player on every post-restart tick, so only the
         // grace keeps them up.
-        let claws = [claw_at(crab0, 0, CLAW_M)];
-        let touching = Externals::claws_only(&claws);
+        let poses = held_with_claws(&sim, vec![claw_at(crab0, 0, CLAW_M)]);
+        let touching = Externals::crabs_only(&poses);
         for i in 0..STARTUP_GRACE_TICKS {
             sim.step(&neutral, touching);
             assert_eq!(
@@ -1897,12 +1955,9 @@ mod tests {
 
         assert_ne!(sim.state_hash(), Sim::new(0, &players(2)).state_hash());
         let h0 = sim.state_hash();
-        let c1 = sim.crabs()[1];
-        let nudged = Pos {
-            x: c1.pos().x + 1,
-            z: c1.pos().z,
-        };
-        sim.set_external_crab_pose(1, nudged, c1.yaw());
+        let mut poses = hold_poses(&sim);
+        poses[1].pos.x += 1;
+        sim.adopt_crab_poses(&poses);
         assert_ne!(sim.state_hash(), h0, "crab 1's pose folds into the hash");
 
         // (Downing needs no per-crab leg: claws are a pooled, crab-agnostic feed —
@@ -1920,7 +1975,7 @@ mod tests {
 
         let mut restart = neutral_for(&sim);
         restart.insert(PlayerId(0), Input::new(0.0, 0.0, 0.0, buttons::RESTART));
-        assert!(sim.step(&restart, Externals::NONE));
+        assert!(step_scenery(&mut sim, &restart));
         assert_eq!(
             sim.crabs().len(),
             2,
@@ -1929,10 +1984,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "disagree on the binding count")]
-    fn pose_for_an_unconfigured_crab_panics() {
+    #[should_panic(expected = "disagree on the crab count")]
+    fn pose_count_mismatch_panics() {
         let mut sim = Sim::new(0, &players(1));
-        sim.set_external_crab_pose(1, Pos::default(), 0);
+        sim.adopt_crab_poses(&[]);
     }
 
     fn dist2(a: Pos, b: Pos) -> i128 {

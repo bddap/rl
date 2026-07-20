@@ -13,55 +13,29 @@ pub(super) struct CrabAvatar(pub(super) usize);
 pub(super) struct FpCamera;
 
 /// The extraction beacon, placed on the ground each frame by
-/// [`place_extraction_pillar`] — spawn-time placement would freeze a client's pillar at
-/// anchor ZERO, before the round's real anchor arrives on the articulation wire.
+/// [`place_extraction_pillar`].
 #[derive(Component)]
 pub(super) struct ExtractionPillar;
 
-/// The rendered ground height under a sim point: the arena surface sampled at the
-/// point's arena-frame xz — world = arena + anchor, and the anchor is planar by type
-/// ([`crate::external_crab::ArenaAnchor`]), so no y lift crosses back. Every sim
-/// entity stands ON this surface; on the flat grids it is exactly the old y = 0.
-fn ground_y(
-    pos: Pos,
-    terrain: &crab_world::terrain::Terrain,
-    anchor: crate::external_crab::ArenaAnchor,
-) -> f32 {
+/// The rendered ground height under a sim point (one frame since rl#298 stage 5: the
+/// world IS the sim in meters). Every sim entity stands ON this surface; on the flat
+/// grids it is exactly the old y = 0.
+fn ground_y(pos: Pos, terrain: &crab_world::terrain::Terrain) -> f32 {
     let (x, z) = pos.to_meters();
-    terrain.height(x - anchor.0.x, z - anchor.0.y)
-}
-
-/// Keep the drawn arena surface ([`crab_world::physics::ArenaSurface`]) at the arena
-/// anchor: the mesh's vertices are arena-frame (they ARE the physics grid), so
-/// translating the entity by the anchor renders the ground exactly where the physics
-/// stands — the crab's articulated parts and every craft render through the same
-/// anchor. Follows the resource rather than spawning at it because a joining client
-/// adopts the anchor from the wire after Startup (and a round RESTART re-pins it).
-pub(super) fn sync_arena_surface(
-    placement: Res<crate::external_crab::ArenaAnchor>,
-    mut surfaces: Query<&mut Transform, With<crab_world::physics::ArenaSurface>>,
-) {
-    let want = placement.translation();
-    for mut t in &mut surfaces {
-        if t.translation != want {
-            t.translation = want;
-        }
-    }
+    terrain.height(x, z)
 }
 
 /// Stand the extraction pillar on the ground under its sim point — per frame, like the
-/// avatars, because both the anchor and (through it) the local surface height can move
-/// under a fixed sim point (see [`ExtractionPillar`]).
+/// avatars, in case a future round ever moves the extraction point.
 pub(super) fn place_extraction_pillar(
     state: NonSend<GameState>,
-    placement: Res<crate::external_crab::ArenaAnchor>,
     terrain: Res<crab_world::terrain::Terrain>,
     mut pillars: Query<&mut Transform, With<ExtractionPillar>>,
 ) {
     let ex = state.client.sim().extraction().pos();
     let pillar_h = crate::sim::CRAB_STATURE * 1.2;
     for mut t in &mut pillars {
-        t.translation = world(ex, ground_y(ex, &terrain, *placement) + pillar_h * 0.5);
+        t.translation = world(ex, ground_y(ex, &terrain) + pillar_h * 0.5);
     }
 }
 
@@ -70,12 +44,12 @@ pub(super) fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     state: NonSend<GameState>,
-    external_crab_armed: Option<Res<crate::external_crab::ExternalCrabArmed>>,
+    crabs_armed: Option<Res<crate::crab_slot::NnCrabsArmed>>,
     windows: Query<(), With<Window>>,
 ) {
-    // Ground and lighting are the arena's own dressing (ArenaVisualsPlugin, rl#281):
-    // the same grid the crab's physics runs on, terrain or flat, kept at the arena
-    // anchor by [`sync_arena_surface`]. Nothing arena-shaped is spawned here.
+    // Ground and lighting are the world's own dressing (ArenaVisualsPlugin, rl#281):
+    // the same grid the crab's physics runs on, terrain or flat, rendered where it
+    // stands (one frame). Nothing world-shaped is spawned here.
 
     let ex = state.client.sim().extraction().pos();
     let pillar_h = crate::sim::CRAB_STATURE * 1.2;
@@ -106,7 +80,7 @@ pub(super) fn spawn_world(
         }),
     });
 
-    let armed = external_crab_armed.is_some();
+    let armed = crabs_armed.is_some();
     let have_model = crab_world::mesh_fallback::usable_model_path().is_some();
     let crab_hidden = armed && have_model;
     if armed && !have_model && !windows.is_empty() {
@@ -333,7 +307,6 @@ pub(super) fn apply_transforms(
     pitch: Res<CameraPitch>,
     mut yaw: ResMut<CameraYaw>,
     vehicle: Res<LocalVehicle>,
-    placement: Res<crate::external_crab::ArenaAnchor>,
     terrain: Res<crab_world::terrain::Terrain>,
     remote_crafts: Res<super::articulation::RemoteVehicle>,
     mut avatars: AvatarXf,
@@ -343,9 +316,9 @@ pub(super) fn apply_transforms(
     let sim = state.client.sim();
     let alpha = clock.frac;
     let local = state.client.me();
-    // Sim entities stand ON the arena surface (rl#281): every lift below is height
+    // Sim entities stand ON the world surface (rl#281): every lift below is height
     // above the local ground, sampled at the entity's own interpolated spot.
-    let ground = |pos: Pos| ground_y(pos, &terrain, *placement);
+    let ground = |pos: Pos| ground_y(pos, &terrain);
 
     for (avatar, mut tf, mut vis) in avatars.iter_mut() {
         let Some(now) = sim.player(avatar.0) else {
@@ -390,9 +363,7 @@ pub(super) fn apply_transforms(
 
     if let Ok(mut cam) = cam_q.single_mut() {
         if let Some(pose) = vehicle.cockpit_sample(clock.tick, alpha) {
-            // The STATIC arena→render frame (rl#224): anchoring on the live carapace here
-            // made the whole cockpit view judder with Sally's every wiggle.
-            *cam = cockpit_camera(pose, placement.translation());
+            *cam = cockpit_camera(pose);
         } else if let Some(now) = sim.player(local) {
             let prev = state.prev.players.get(&local).copied().unwrap_or(now);
             let pos = lerp_pos(prev.pos(), now.pos(), alpha);
@@ -410,8 +381,8 @@ pub(super) fn apply_transforms(
     }
 }
 
-fn cockpit_camera(pose: Pose, shift: Vec3) -> Transform {
-    let eye = pose.pos + shift;
+fn cockpit_camera(pose: Pose) -> Transform {
+    let eye = pose.pos;
     let rot = pose.orient;
     Transform::from_translation(eye).looking_at(eye + rot * Vec3::Z, rot * Vec3::Y)
 }

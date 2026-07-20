@@ -17,7 +17,7 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    use net::external_crab::run_vehicle_stability_probe;
+    use net::probe::run_vehicle_stability_probe;
 
     let (dir, policy) = nn_crab_policy(args.checkpoint)?;
     println!("nn-crab-vehicle-stability: checkpoint={}", dir.display());

@@ -89,10 +89,10 @@ pub struct NumEnvs(pub usize);
 /// the fresh-app first-round exception of rl#290: origins used to start on the grid
 /// and only a round RESTART re-pinned them ([`CrabSpawns::repin_layout`], rl#289).
 ///
-/// `base_xz` is the caller's gauge choice (`CrabSpawns::lay_layout`): env 0's spawn
-/// lands surface-placed AT the base. Net keeps [`Vec2::ZERO`] — for GCR the arena
-/// locale is a gauge and the anchor correspondence pins it; the eval passes its
-/// terrain locale (rl#293), which is an ABSOLUTE spot on the one shared tile.
+/// `base_xz` is the caller's base choice (`CrabSpawns::lay_layout`): env 0's spawn
+/// lands surface-placed AT the base. Since rl#298 stage 5 every caller passes an
+/// ABSOLUTE spot on the one shared tile — net the sim's own first spawn (one frame:
+/// world coordinates ARE sim meters), the eval its terrain locale (rl#293).
 #[derive(Resource)]
 pub struct InitialCrabLayout {
     pub base_xz: Vec2,
@@ -191,28 +191,24 @@ impl CrabSpawns {
     }
 
     /// [`Self::rebase_origin_to`]'s whole-set sibling, for a round RESTART (rl#289):
-    /// re-place every live origin so the arena layout reproduces the given planar
-    /// spawn layout (meters), about env 0's KEPT origin — env 0's spawn maps onto its
-    /// current origin, so only the layout is adopted, never an absolute position (the
-    /// arena locale is a gauge; keeping it leaves the spawn-pinned anchor
-    /// correspondence untouched). Without this, a restart resets every env's sim end
-    /// to a fresh spawn while env≠0 origins keep last round's rebased wander, so the
-    /// per-env arena↔sim offset diverges from the shared anchor by the accumulated
-    /// differential wander — env≠0's skin renders off its arena body and off the
-    /// local ground height. Same rl#242 invariant as [`Self::set_origin`], same
-    /// argument: the sole caller respawns every crab onto the new origins in the same
-    /// call, so origin and body never disagree.
-    pub fn repin_layout(&mut self, spawns_m: &[Vec2], terrain: &crate::terrain::TerrainGrid) {
+    /// re-place every live origin on the given planar spawn layout (meters), env 0 at
+    /// `base_xz`. Since rl#298 stage 5 the caller (net's one-frame restart) passes the
+    /// layout's own first spawn as the base — origins land AT the sim spawns
+    /// absolutely, there being no arena gauge left to preserve. Same rl#242 invariant
+    /// as [`Self::set_origin`], same argument: the sole caller respawns every crab
+    /// onto the new origins in the same call, so origin and body never disagree.
+    pub fn repin_layout(
+        &mut self,
+        base_xz: Vec2,
+        spawns_m: &[Vec2],
+        terrain: &crate::terrain::TerrainGrid,
+    ) {
         assert_eq!(
             spawns_m.len(),
             self.0.len(),
             "a restart layout must cover every live env's origin (rl#242)"
         );
-        if spawns_m.is_empty() {
-            return;
-        }
-        let base = self.origin(0);
-        self.lay_layout(Vec2::new(base.x, base.z), spawns_m, terrain);
+        self.lay_layout(base_xz, spawns_m, terrain);
     }
 
     /// Not yet rebuilt by `spawn_initial_crabs` — the pre-spawn frames a FixedUpdate

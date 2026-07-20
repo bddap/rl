@@ -48,7 +48,7 @@ fn cycle_render_mode(
 
 fn manage_silhouette_visibility(
     mode: Res<RenderMode>,
-    armed: Option<Res<crate::external_crab::ExternalCrabArmed>>,
+    armed: Option<Res<crate::crab_slot::NnCrabsArmed>>,
     mut q: Query<&mut Visibility, With<CrabAvatar>>,
 ) {
     let skin_is_the_crab =
@@ -67,22 +67,18 @@ fn manage_silhouette_visibility(
 
 fn draw_vehicle_collider_wireframe(
     mode: Res<RenderMode>,
-    anchor: Res<crate::external_crab::ArenaAnchor>,
     remote: Res<super::articulation::RemoteVehicle>,
     clock: Res<super::driver::RenderClock>,
     vehicles: Query<(&GlobalTransform, &Collider), With<Vehicle>>,
     mut gizmos: Gizmos,
 ) {
-    // The STATIC arena→render frame (rl#224) — never the per-crab skin repose, which tracks
-    // the live carapace and would drag Sally's every wiggle into each craft's rendered pose.
     // Mesh mode: the craft models (`vehicle_view`, rl#260) are the visual.
     if !mode.shows_colliders() {
         return;
     }
-    let placement = Mat4::from_translation(anchor.translation());
     if !vehicles.is_empty() {
         for (gt, collider) in &vehicles {
-            let world = placement * gt.to_matrix();
+            let world = gt.to_matrix();
             draw_collider_wireframe(
                 &mut gizmos,
                 collider.as_typed_shape(),
@@ -99,7 +95,7 @@ fn draw_vehicle_collider_wireframe(
         return;
     }
     for c in &remote.sample(clock.tick, clock.frac) {
-        let world = placement * Mat4::from_rotation_translation(c.pose.orient, c.pose.pos);
+        let world = Mat4::from_rotation_translation(c.pose.orient, c.pose.pos);
         draw_collider_wireframe(
             &mut gizmos,
             crab_world::vehicle::vehicle_collider().as_typed_shape(),

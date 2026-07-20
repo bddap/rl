@@ -80,22 +80,19 @@ fn build_assets(
 /// the stale model despawns and a fresh one spawns in the same pass), track the pose while
 /// it flies, despawn on step-out. Poses sample per frame on the uniform physics-step
 /// clock (rl#267) — the same [`super::pose::PoseWindow`] law as the cockpit, so a watched
-/// craft doesn't step at raw tick cadence — and place through the STATIC arena→render
-/// frame (rl#224), exactly like the wireframe pass.
+/// craft doesn't step at raw tick cadence.
 fn reconcile_vehicle_models(
     mut commands: Commands,
     assets: Res<VehicleAssets>,
     remote: Res<RemoteVehicle>,
     clock: Res<super::driver::RenderClock>,
-    anchor: Res<crate::external_crab::ArenaAnchor>,
     mode: Res<RenderMode>,
     mut models: Query<(Entity, &VehicleModel, &mut Transform, &mut Visibility)>,
 ) {
     let sampled = remote.sample(clock.tick, clock.frac);
     let want_vis = mode.mesh_visibility();
-    let placed = |c: &SampledCraft| {
-        Transform::from_translation(anchor.translation() + c.pose.pos).with_rotation(c.pose.orient)
-    };
+    let placed =
+        |c: &SampledCraft| Transform::from_translation(c.pose.pos).with_rotation(c.pose.orient);
     let mut matched = std::collections::BTreeSet::new();
     for (entity, model, mut tf, mut vis) in &mut models {
         match sampled.iter().find(|v| v.pilot == model.pilot) {
@@ -160,9 +157,6 @@ mod tests {
         }
     }
 
-    const ANCHOR: crate::external_crab::ArenaAnchor =
-        crate::external_crab::ArenaAnchor(Vec2::new(3.0, -7.0));
-
     fn world_with(remote: Vec<VehiclePoseWire>, mode: RenderMode) -> World {
         let mut w = World::new();
         w.insert_resource(stub_assets());
@@ -173,7 +167,6 @@ mod tests {
         // exact wire poses they fed; the interpolation law itself is pinned in pose.rs
         // and articulation.rs.
         w.insert_resource(super::super::driver::RenderClock { tick: 1, frac: 0.0 });
-        w.insert_resource(ANCHOR);
         w.insert_resource(mode);
         w
     }
@@ -216,8 +209,8 @@ mod tests {
         assert_eq!((pilot, kind), (PilotId(1), VehicleKind::Plane));
         assert_eq!(
             at,
-            ANCHOR.translation() + Vec3::new(2.0, 5.0, -1.0),
-            "pose places through the arena anchor, like the wireframe pass"
+            Vec3::new(2.0, 5.0, -1.0),
+            "the wire pose IS the world pose (one frame)"
         );
         assert_eq!(vis, Visibility::Visible);
         assert_eq!(
@@ -235,7 +228,7 @@ mod tests {
         w.run_system_once(reconcile_vehicle_models).unwrap();
         let got = models(&mut w);
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].2, ANCHOR.translation() + Vec3::new(4.0, 6.0, 0.0));
+        assert_eq!(got[0].2, Vec3::new(4.0, 6.0, 0.0));
 
         // Pilot steps out: the model despawns, children included.
         readopt(&mut w, 3, Vec::new());

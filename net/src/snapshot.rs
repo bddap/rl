@@ -176,11 +176,21 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::{Pos, Sim};
+    use crate::sim::{CrabPose, Externals, Input, Pos, Sim};
 
     fn sample() -> CoreSnapshot {
         let mut sim = Sim::new(9, &[PlayerId(0), PlayerId(1)]);
-        sim.set_external_crab_pose(0, Pos { x: 1234, z: -5678 }, 42);
+        // A stepped-in crab pose, so the roundtrip carries a non-spawn crab.
+        let posed = vec![CrabPose {
+            pos: Pos { x: 1234, z: -5678 },
+            yaw: 42,
+            claws: Vec::new(),
+        }];
+        let inputs = BTreeMap::from([
+            (PlayerId(0), Input::default()),
+            (PlayerId(1), Input::default()),
+        ]);
+        sim.step(&inputs, Externals::crabs_only(&posed));
         let mut snap = sim.core_snapshot();
         // Server-stamped watermarks (`Sim::core_snapshot` leaves them empty) — nonempty here so
         // the roundtrip exercises the map encoding.
