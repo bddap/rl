@@ -32,8 +32,9 @@ use crate::sim::{Pos, Sim};
 /// which hunt source) cannot drift between the windowed driver and a renderless host.
 // The seam compiles render-free (rl#298 stage 4) but its only production caller today
 // is the windowed driver; the dead_code allowances fall away when a renderless HOST
-// driver arrives. (The trainer's env — `rollout_env` — consumes the server WORLD,
-// not the slot: it has no sim to correspond with, so nothing pumps these fns there.)
+// driver arrives. (The trainer's env consumes the server WORLD — crab-world's
+// `headless_server_world` — not the slot: it has no sim to correspond with, so
+// nothing pumps these fns there.)
 #[cfg_attr(not(feature = "render"), allow(dead_code))]
 pub(crate) fn slot_inputs(sim: &Sim) -> (u64, Vec<Option<Pos>>) {
     let hunt = (0..sim.crabs().len())
@@ -127,7 +128,8 @@ mod tests {
     use crab_world::bot::actuator::{ACTION_SIZE, CrabActions};
     use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint};
     use crab_world::bot::headless::{
-        HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
+        HeadlessStack, WorldRole, force_serial_schedules, headless_server_world, headless_stack,
+        pin_single_thread_pools,
     };
     use crab_world::bot::physics_digest::crab_state_digest;
     use crab_world::bot::sensor::CrabObservation;
@@ -256,15 +258,14 @@ mod tests {
     }
 
     /// A headless host in the LIVE configuration: the server world
-    /// ([`crate::rollout_env::headless_server_world`] — the same constructor the
-    /// trainer's rollout env builds on, rl#298 stage 4) with the crab stack armed,
-    /// the wall-clock auto-pump parked from birth (like the windowed app), so physics
-    /// advances only through the slot — no renderer anywhere. The flat grid keeps the
-    /// motion assertions attributable to the drive, not to sliding down the GCR
-    /// origin slope.
+    /// ([`headless_server_world`] — the same constructor the trainer's rollout env
+    /// builds on, rl#298 stage 4) with the crab stack armed, the wall-clock auto-pump
+    /// parked from birth (like the windowed app), so physics advances only through
+    /// the slot — no renderer anywhere. The flat grid keeps the motion assertions
+    /// attributable to the drive, not to sliding down the GCR origin slope.
     fn headless_host_app(policy: Policy, crab_spawn: Pos) -> App {
         pin_single_thread_pools();
-        let mut app = crate::rollout_env::headless_server_world(
+        let mut app = headless_server_world(
             1,
             WorldRole::Standalone,
             std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(512.0)),

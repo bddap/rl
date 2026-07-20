@@ -361,7 +361,7 @@ impl TrainingState {
             }
         }
 
-        let n = config.envs.max(1) as usize;
+        let n = config.num_envs();
         let normalizer_increment = worker_mode.then(IncrementAccumulator::new);
         if let Some(cap) = config.ppo_steps_cap {
             info!("PPO step cap active: --ppo-steps-cap {cap} (rl#276)");

@@ -153,6 +153,15 @@ pub struct TrainConfig {
     pub ppo_steps_cap: Option<std::num::NonZeroU32>,
 }
 
+impl TrainConfig {
+    /// Envs per rollout world as a count — the ONE place `--envs 0` clamps to 1, so a
+    /// world's `NumEnvs` and its `TrainingState` buffers can never be sized from
+    /// disagreeing formulas.
+    pub fn num_envs(&self) -> usize {
+        self.envs.max(1) as usize
+    }
+}
+
 #[cfg(test)]
 impl TrainConfig {
     /// Test config CLAP-PARSED so every knob carries its real default — a struct

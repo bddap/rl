@@ -379,12 +379,12 @@ mod tests {
         );
     }
 
-    /// One-env training world on the canonical ground: [`headless_app`]'s world with
-    /// the production training wiring ([`wire_rollout_training`] — brain, reset, AND
-    /// the shove system, so these tests run the rollout worker's exact system set).
+    /// One-env training world built by the PRODUCTION env constructor
+    /// ([`build_rollout_app`] — the headless server world plus the full training
+    /// system set, shove included), so these tests — the same-seed determinism
+    /// contract above all — certify the world rollouts actually run in.
     fn headless_training_app(checkpoint_dir: &std::path::Path, seed: u64) -> App {
-        use crate::bot::headless::headless_app;
-        use crate::training::inproc::wire_rollout_training;
+        use crate::training::inproc::build_rollout_app;
         use clap::Parser;
 
         let config = TrainConfig::try_parse_from([
@@ -396,9 +396,7 @@ mod tests {
         ])
         .expect("parse default TrainConfig");
 
-        let mut app = headless_app();
-        wire_rollout_training(&mut app, &config, 0, crate::bot::arch::ArchId::DEFAULT);
-        app
+        build_rollout_app(0, &config, crate::bot::arch::ArchId::DEFAULT)
     }
 
     fn body_part_entities(app: &mut App) -> std::collections::HashSet<Entity> {
