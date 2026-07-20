@@ -295,6 +295,13 @@ fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId, num_envs: us
             .chain()
             .in_set(crate::bot::BotSet::Think),
     );
+    // Rollouts only — eval measures the policy unshoved (rl#298 stage 4).
+    app.add_systems(
+        FixedUpdate,
+        systems::shove_crabs
+            .after(crate::bot::BotSet::Act)
+            .before(bevy_rapier3d::plugin::PhysicsSet::SyncBackend),
+    );
 
     crate::bot::headless::force_serial_schedules(&mut app);
 
