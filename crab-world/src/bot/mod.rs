@@ -154,9 +154,10 @@ impl CrabSpawns {
         self.lay_layout(layout.base_xz, &layout.spawns_m, terrain);
     }
 
-    /// Re-place a LIVE env's origin — terrain training draws a fresh locale per
-    /// episode (rl#281 stage 4), and the sole caller (`reset_crab`) respawns the crab
-    /// onto it in the same tick, so origin and body never disagree. `pub(crate)`
+    /// Re-place a LIVE env's origin with a fresh locale — terrain training draws one
+    /// per episode (rl#281 stage 4, `reset_crab`), the demo's reset re-rolls one per
+    /// press (rl#300, `demo_respawn`) — and every caller respawns the crab onto it in
+    /// the same tick, so origin and body never disagree. `pub(crate)`
     /// because that safety argument is the caller's, not this method's — exposing it
     /// wider reopens the rl#242 stale-origin bug class. Update-only: an out-of-range
     /// env is the same wiring bug [`Self::origin`] panics on, and appending is still
