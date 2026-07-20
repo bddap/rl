@@ -1,15 +1,13 @@
 use bevy::prelude::*;
 
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId, CrabJoint, CrabJointId};
-use crab_world::bot::skin::{CrabRenderPose, CrabSkinRepose, SkinRepose};
+use crab_world::bot::skin::CrabRenderPose;
 use crab_world::crab_view::CrabBrainLabels;
 use crab_world::vehicle::{PilotId, Vehicle, VehicleKind};
 
 use super::driver::RenderClock;
 use super::pose::{Pose, PoseWindow};
-use crate::articulation::{
-    CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire,
-};
+use crate::articulation::{CrabArticulation, CrabFrame, PartTransform, VehiclePoseWire};
 
 /// Every NON-LOCAL pilot's craft kind + tick-stamped pose window (rl#191), feeding the
 /// craft models (`vehicle_view`, rl#260) and the colliders-mode wireframe. The local
@@ -82,9 +80,7 @@ impl RemoteVehicle {
 
 /// One log line per remote-craft EDGE — the pilot set changing (a boarding/exit seen from this
 /// peer) and each craft's first real displacement (proof the other pilot's craft is moving here,
-/// rl#191 increment 4) — instead of a per-tick pose flood. Poses are watched in WORLD frame
-/// (arena + the message's anchor): an rl#240 recenter shifts every craft's arena pose by >5 m
-/// without moving anything on screen, and "has moved" must mean moved on screen.
+/// rl#191 increment 4) — instead of a per-tick pose flood.
 #[derive(Resource, Default)]
 pub(super) struct RemoteCraftWatch {
     pilots: Vec<u8>,
@@ -98,7 +94,6 @@ pub(super) fn publish_remote_vehicles(
     world: &mut World,
     tick: u64,
     vehicles: &[VehiclePoseWire],
-    anchor: Vec3,
     me: PilotId,
 ) {
     let remote: Vec<VehiclePoseWire> = vehicles
@@ -120,7 +115,7 @@ pub(super) fn publish_remote_vehicles(
         watch.moved.retain(|p| remote.iter().any(|v| v.pilot == *p));
     }
     for v in &remote {
-        let pos = Vec3::from_array(v.pos) + anchor;
+        let pos = Vec3::from_array(v.pos);
         let first = *watch.first_pose.entry(v.pilot).or_insert(pos);
         if !watch.moved.contains(&v.pilot) && first.distance(pos) > REMOTE_MOVED_LOG_METERS {
             watch.moved.insert(v.pilot);
@@ -165,13 +160,8 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         });
     }
 
-    let reposes = world
-        .get_resource::<CrabSkinRepose>()
-        .map(|r| r.0.clone())
-        .unwrap_or_default();
-
     // The host's own on-screen labels, published from its brain bindings
-    // (`external_crab`'s `publish_brain_labels`) — shipped verbatim so every client renders
+    // (`crab_slot`'s `publish_brain_labels`) — shipped verbatim so every client renders
     // the host's exact who's-who strings (rl#200 increment 7).
     let labels = world
         .get_resource::<CrabBrainLabels>()
@@ -199,12 +189,8 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         .map(|env| {
             let mut parts = by_env.remove(&env).unwrap_or_default();
             parts.sort_by_key(|p| p.part);
-            let repose = reposes.get(&env).map(|s| ReposeWire {
-                shift: s.shift.to_array(),
-            });
             CrabFrame {
                 parts,
-                repose,
                 brain_label: labels.get(env).cloned().unwrap_or_default(),
             }
         })
@@ -222,15 +208,9 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         .collect();
     vehicles.sort_by_key(|v| v.pilot);
 
-    let arena_anchor = world
-        .get_resource::<crate::external_crab::ArenaAnchor>()
-        .map(|a| a.translation().to_array())
-        .unwrap_or_default();
-
     CrabArticulation {
         tick,
         crabs,
-        arena_anchor,
         vehicles,
     }
 }
@@ -266,41 +246,10 @@ pub(super) fn feed_crab_part_windows(world: &mut World, art: &CrabArticulation) 
 }
 
 /// Adopts one articulation tick: crab body parts land in [`CrabPartWindows`] (rendered by
-/// [`sample_crab_part_poses`]); repose, arena anchor, and brain labels adopt directly —
+/// [`sample_crab_part_poses`]); brain labels adopt directly —
 /// they are discrete state, not stepped motion.
 pub(super) fn adopt(world: &mut World, art: &CrabArticulation) {
     feed_crab_part_windows(world, art);
-
-    if let Some(mut repose) = world.get_resource_mut::<CrabSkinRepose>() {
-        for (env, frame) in art.crabs.iter().enumerate() {
-            if let Some(r) = frame.repose {
-                repose.0.insert(
-                    env,
-                    SkinRepose {
-                        shift: Vec3::from_array(r.shift),
-                    },
-                );
-            }
-        }
-        repose.0.retain(|env, _| *env < art.crabs.len());
-    }
-
-    // Adopt the host's arena anchor — the client-side write of [`ArenaAnchor`]; the
-    // host-side publisher runs in FixedUpdate, so the two can't fight (see the resource doc).
-    debug_assert_eq!(
-        art.arena_anchor[1], 0.0,
-        "wire anchor grew a y leg — some host writer broke the planar contract (rl#281 \
-         stage 6), and the xz adopt below would silently DROP it in release"
-    );
-    let anchor =
-        crate::external_crab::ArenaAnchor(Vec2::new(art.arena_anchor[0], art.arena_anchor[2]));
-    if world
-        .get_resource::<crate::external_crab::ArenaAnchor>()
-        .copied()
-        != Some(anchor)
-    {
-        world.insert_resource(anchor);
-    }
 
     // Adopt the host's brain labels (write-on-change so the shared label UI only reconciles
     // when something actually changed). Like the parts, the client renders these verbatim —
@@ -400,23 +349,12 @@ mod tests {
         let mut host = World::new();
         let (h_cara, _) = spawn_parts(&mut host, 0, cara_t, joint_id, joint_t);
         spawn_parts(&mut host, 1, cara_t1, joint_id, joint_t1);
-        host.insert_resource(CrabSkinRepose(
-            [(
-                0usize,
-                SkinRepose {
-                    shift: Vec3::new(10.0, 0.0, -20.0),
-                },
-            )]
-            .into_iter()
-            .collect(),
-        ));
         // Per-crab brain labels, one a failure state — the who's-who channel crosses the
         // wire verbatim (rl#200 increment 7).
         host.insert_resource(CrabBrainLabels(vec![
             "mlp512x3 @cafef00d".to_string(),
             "REFUSED: wrong rig".to_string(),
         ]));
-        host.insert_resource(crate::external_crab::ArenaAnchor(Vec2::new(3.5, -7.25)));
         let craft_t = Transform::from_xyz(2.0, 5.5, -1.0)
             .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
         crab_world::vehicle::spawn_ram_vehicle(
@@ -431,8 +369,6 @@ mod tests {
         assert_eq!(art.crabs.len(), 2, "one frame per env");
         assert_eq!(art.crabs[0].parts.len(), 2);
         assert_eq!(art.crabs[1].parts.len(), 2);
-        assert!(art.crabs[0].repose.is_some());
-        assert!(art.crabs[1].repose.is_none(), "env 1 has no placement yet");
         let art = crate::articulation::CrabArticulation::from_bytes(&art.to_bytes()).unwrap();
 
         use bevy::ecs::system::RunSystemOnce;
@@ -477,7 +413,6 @@ mod tests {
             joint_id,
             Transform::from_xyz(6.0, 6.0, 6.0),
         );
-        client.insert_resource(CrabSkinRepose::default());
         client.insert_resource(CrabPartWindows::default());
         client.insert_resource(CrabRenderPose::default());
         client.insert_resource(RemoteVehicle::default());
@@ -493,13 +428,7 @@ mod tests {
             .run_system_once(sample_crab_part_poses)
             .expect("sampler runs on a bare world");
         // Viewed as pilot 7: pilot 0's craft is somebody else's ⇒ it lands in RemoteVehicle.
-        publish_remote_vehicles(
-            &mut client,
-            42,
-            &art.vehicles,
-            Vec3::from_array(art.arena_anchor),
-            PilotId(7),
-        );
+        publish_remote_vehicles(&mut client, 42, &art.vehicles, PilotId(7));
 
         // The samples land in the render-only overlay, never on the parts' own
         // `Transform`s — those stay rapier's (rl#116/rl#274).
@@ -532,13 +461,6 @@ mod tests {
             "sampling must never write a body-part Transform (rl#116/rl#274)"
         );
 
-        let reposes = client.resource::<CrabSkinRepose>().0.clone();
-        let repose0 = reposes.get(&0).expect("env 0's repose applied");
-        assert_eq!(repose0.shift, Vec3::new(10.0, 0.0, -20.0));
-        assert!(
-            !reposes.contains_key(&1),
-            "an unpublished env stays at identity"
-        );
         // The host's exact label strings crossed too — the client renders them verbatim,
         // never re-deriving who's who (and the failure attribution survives the wire).
         assert_eq!(
@@ -547,12 +469,6 @@ mod tests {
                 "mlp512x3 @cafef00d".to_string(),
                 "REFUSED: wrong rig".to_string()
             ]
-        );
-        // The host's arena anchor crossed verbatim — the client renders crafts through the
-        // exact frame the host authored (rl#224), never a re-derived one.
-        assert_eq!(
-            client.resource::<crate::external_crab::ArenaAnchor>().0,
-            Vec2::new(3.5, -7.25)
         );
         let crafts = client.resource::<RemoteVehicle>().sample(42, 0.0);
         assert_eq!(crafts.len(), 1, "one piloted craft applied");
@@ -565,13 +481,7 @@ mod tests {
         assert_eq!(crafts[0].pose.orient, craft_t.rotation);
 
         // Viewed as pilot 0 the same craft is OURS — the cockpit, not a wireframe.
-        publish_remote_vehicles(
-            &mut client,
-            42,
-            &art.vehicles,
-            Vec3::from_array(art.arena_anchor),
-            PilotId(0),
-        );
+        publish_remote_vehicles(&mut client, 42, &art.vehicles, PilotId(0));
         assert!(
             client
                 .resource::<RemoteVehicle>()
@@ -640,7 +550,6 @@ mod tests {
             joint_id,
             Transform::IDENTITY,
         );
-        client.insert_resource(CrabSkinRepose::default());
         client.insert_resource(CrabPartWindows::default());
         client.insert_resource(CrabRenderPose::default());
         for tick in 1..=3u64 {
@@ -659,10 +568,8 @@ mod tests {
                             rot: [0.0, 0.0, 0.0, 1.0],
                         },
                     ],
-                    repose: None,
                     brain_label: String::new(),
                 }],
-                arena_anchor: [0.0; 3],
                 vehicles: Vec::new(),
             };
             adopt(&mut client, &art);

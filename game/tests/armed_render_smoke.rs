@@ -11,7 +11,7 @@
 
 use crab_world::Visuals;
 use crab_world::policy::Policy;
-use net::external_crab::run_headless_probe;
+use net::probe::run_headless_probe;
 
 // rl#282: this probe (~3 s normally) has wedged indefinitely (0% CPU,
 // futex_wait, 45+ min) under trainer saturation — NOT a wgpu device request:
@@ -25,8 +25,7 @@ fn armed_visual_crab_stays_finite_and_grounded() {
     // not the brain.
     let ticks = 256;
     let samples = run_headless_probe(Policy::rest(), 0x116, ticks, 1, Visuals(true));
-    // One sample per FIXED step; the first app.update() has a zero delta and
-    // fires no FixedUpdate, so N updates yield N-1 steps.
+    // The probe pumps exactly one fixed step per sim tick (parked auto-pump).
     assert!(
         samples.len() as u64 >= ticks - 1,
         "expected ~one sample per tick, got {} of {ticks}",
@@ -48,24 +47,24 @@ fn armed_visual_crab_stays_finite_and_grounded() {
 
     for s in &samples {
         assert!(
-            s.carapace_arena_x.is_finite()
+            s.carapace_x.is_finite()
                 && s.carapace_above_ground.is_finite()
-                && s.carapace_arena_z.is_finite(),
+                && s.carapace_z.is_finite(),
             "tick {}: carapace went non-finite — the rl#116 failure shape",
             s.tick
         );
         assert!(
-            s.carapace_arena_x.abs() < 20.0
-                && s.carapace_arena_z.abs() < 20.0
+            s.carapace_x.abs() < 20.0
+                && s.carapace_z.abs() < 20.0
                 && s.carapace_above_ground > -2.0
                 && s.carapace_above_ground < 5.0,
             "tick {}: carapace at ({}, {} above ground, {}) — a rest-pose crab \
              teleporting away from spawn means something is writing rapier-driven \
              Transforms (rl#116)",
             s.tick,
-            s.carapace_arena_x,
+            s.carapace_x,
             s.carapace_above_ground,
-            s.carapace_arena_z,
+            s.carapace_z,
         );
     }
 }

@@ -6,7 +6,6 @@ use super::hud::{spawn_hud, sync_controls_context, update_hud};
 use super::input::gather_input;
 use super::scene::{
     FpCamera, apply_transforms, place_extraction_pillar, reconcile_avatars, spawn_world,
-    sync_arena_surface,
 };
 use super::*;
 use crate::net_loop::NetDriver;
@@ -16,13 +15,13 @@ use crab_world::screenshot::{self, ShotProgress, ShotTarget};
 pub fn build_screenshot_app(
     mut client: ClientSim,
     cfg: ScreenshotConfig,
-    external_crab: Option<crab_world::policy::Policy>,
+    nn_crab: Option<crab_world::policy::Policy>,
     render_mode: super::RenderMode,
     controls: ControlsOverrides<GcrControls>,
     pack: Input,
 ) -> App {
     let mut app = offscreen_app_scaffold();
-    let armed_crab = external_crab.map(|policy| (policy, seed_round_crabs(&mut client, 1)));
+    let armed_crab = nn_crab.map(|policy| (policy, seed_round_crabs(&mut client, 1)));
     let coord = coordinator(None, client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
     app.insert_resource(ScriptedPackInput(pack));
@@ -37,7 +36,7 @@ pub fn build_net_screenshot_app(
     mut client: ClientSim,
     net: NetDriver,
     cfg: ScreenshotConfig,
-    external_crab: crab_world::policy::Policy,
+    nn_crab: crab_world::policy::Policy,
     render_mode: super::RenderMode,
     controls: ControlsOverrides<GcrControls>,
 ) -> App {
@@ -45,7 +44,7 @@ pub fn build_net_screenshot_app(
     let spawns = seed_round_crabs(&mut client, 1);
     let coord = coordinator(Some(net), client.peers(), client.me(), client.sim().clone());
     insert_core(&mut app, client, coord);
-    install_armed_nn_crab(&mut app, vec![external_crab], spawns);
+    install_armed_nn_crab(&mut app, vec![nn_crab], spawns);
     finish_offscreen_app(&mut app, cfg, render_mode, controls);
     app
 }
@@ -67,10 +66,6 @@ fn offscreen_app_scaffold() -> App {
     app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
         Duration::from_secs_f64(TICK_DT),
     ));
-    // Everywhere else `ExternalCrabPlugin` provides this, but the crab-less screenshot path
-    // (`fp-screenshot` without a checkpoint) skips the plugin, and `apply_transforms` /
-    // `draw_vehicle_collider_wireframe` take it as a hard `Res` (rl#224).
-    app.init_resource::<crate::external_crab::ArenaAnchor>();
     app
 }
 
@@ -95,7 +90,6 @@ fn finish_offscreen_app(
                 super::articulation::sample_crab_part_poses,
                 reconcile_avatars,
                 apply_transforms,
-                sync_arena_surface,
                 place_extraction_pillar,
                 apply_shot_cam_offset,
                 // Keeps the HUD context live like the windowed app. A shot that PINNED a

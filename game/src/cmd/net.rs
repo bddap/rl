@@ -77,7 +77,14 @@ async fn run_net(args: Args) -> Result<()> {
     let mut server = am_host.then(|| {
         let mut s = net::server::Server::new(me, &all_ids, client.sim().clone());
         s.seed_early(&formation::early_peer_msgs(&frozen));
-        s
+        // Crab poses are mandatory (rl#298 stage 5): the headless host runs the one
+        // crab world too — a rest-pose brain, no checkpoint bound (the crabless
+        // SyncStamp above still keeps windowed peers from joining this harness).
+        let world = net::crab_slot::HeadlessHostWorld::new(
+            vec![crab_world::policy::Policy::rest()],
+            s.sim(),
+        );
+        (s, world)
     });
 
     let mut ticker = tokio::time::interval(Duration::from_secs_f64(TICK_DT));
@@ -135,7 +142,7 @@ async fn run_net(args: Args) -> Result<()> {
         // snapshot-apply cursor) trails it by the transit lag.
         let issue_tick = msg.issue_tick;
 
-        if let Some(srv) = server.as_mut() {
+        if let Some((srv, host_world)) = server.as_mut() {
             // HOST: file remote clients' inputs into their per-player streams, then assemble +
             // step THIS tick at our own pace (a remote can delay nothing — rl#193/#194/#195) and
             // broadcast the snapshot the instant it is stepped — the SAME host-authoritative path
@@ -152,17 +159,19 @@ async fn run_net(args: Args) -> Result<()> {
             let connected = session.connected_peers().await;
             let _ = net_loop::depart_gone_peers(srv, &mut id_map, me, &connected, tel.as_ref());
             srv.advance(msg);
-            while srv.next_tick_ready() {
-                let bytes = srv.step_next(&[], Default::default()).snapshot;
-                let snap = net::snapshot::CoreSnapshot::from_bytes(&bytes)
+            for stepped in host_world.step_ready_ticks(srv) {
+                let snap = net::snapshot::CoreSnapshot::from_bytes(&stepped.snapshot)
                     .expect("the authoritative server's snapshot must decode");
                 session.broadcast_snapshot(&snap).await;
                 snapshots_io += 1;
                 client.apply_core_snapshot(snap);
                 if let Some(w) = hash_log.as_mut() {
                     use std::io::Write as _;
-                    let applied = srv.sim().tick().saturating_sub(1);
-                    let line = super::shared::tick_hash_line(applied, srv.sim().state_hash());
+                    // Hash the mirrored client sim: it carries the host's exact
+                    // snapshot (test-pinned), and the drain has already moved the
+                    // host sim past this tick.
+                    let applied = client.sim().tick().saturating_sub(1);
+                    let line = super::shared::tick_hash_line(applied, client.sim().state_hash());
                     writeln!(w, "{line}").context("writing hash log")?;
                 }
             }

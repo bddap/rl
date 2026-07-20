@@ -1,4 +1,4 @@
-use super::app::ExternalCrabStackInstalled;
+use super::app::NnCrabStackInstalled;
 use super::driver::{
     FlightInput, GameState, PendingRound, VEHICLE_STICK_SENS, ensure_round_installed,
     flight_control,
@@ -19,7 +19,7 @@ fn menu_handoff_installs_the_chosen_round() {
         .init_non_send_resource::<PendingRound>()
         .add_systems(OnEnter(AppPhase::Playing), ensure_round_installed);
 
-    app.world_mut().insert_resource(ExternalCrabStackInstalled);
+    app.world_mut().insert_resource(NnCrabStackInstalled);
 
     let seed = 0x1234_5678;
     let armed = super::app::arm_round(ReadyMatch {
@@ -184,7 +184,8 @@ fn full_look_axis_turns_one_tick_cap() {
     let input = Input::new(0.0, 0.0, look_axis, 0);
     let mut inputs = BTreeMap::new();
     inputs.insert(PlayerId(0), input);
-    sim.step(&inputs, Externals::NONE);
+    let poses = crate::sim::hold_poses(&sim);
+    sim.step(&inputs, Externals::crabs_only(&poses));
     let after = sim.player(PlayerId(0)).unwrap().yaw();
     let cap = trig::TURN / 24;
     assert_eq!(

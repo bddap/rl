@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use crab_world::controls::ActiveContext;
 
 use crate::controls::{Action, GcrContext, GcrControls};
-use crate::external_crab::CrabPolicies;
+use crate::crab_slot::CrabPolicies;
 
 use super::driver::GameState;
 

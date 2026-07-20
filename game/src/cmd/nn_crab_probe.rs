@@ -19,7 +19,7 @@ pub(crate) struct Args {
 
 pub(crate) fn run(args: Args) -> Result<()> {
     use crab_world::Visuals;
-    use net::external_crab::run_headless_probe;
+    use net::probe::run_headless_probe;
 
     let (dir, policy) = nn_crab_policy(args.checkpoint.clone())?;
     println!("nn-crab-probe: checkpoint={}", dir.display());
@@ -52,9 +52,9 @@ pub(crate) fn run(args: Args) -> Result<()> {
             s.crab_x_m,
             s.crab_z_m,
             s.dist_to_prey_m,
-            s.carapace_arena_x,
+            s.carapace_x,
             s.carapace_y,
-            s.carapace_arena_z,
+            s.carapace_z,
             s.min_claw_to_target_m,
         );
     }

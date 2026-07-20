@@ -1,4 +1,4 @@
-use super::app::{ArmedRound, ExternalCrabStackInstalled};
+use super::app::{ArmedRound, NnCrabStackInstalled};
 use super::input::{CameraPitch, CameraYaw};
 use super::pose::{Pose, PoseWindow};
 use super::*;
@@ -56,19 +56,16 @@ pub(super) fn ensure_round_installed(world: &mut World) {
         .expect("entered Playing with no round to install — the menu must park a round before transitioning")
         .into_ready();
     assert!(
-        world.get_resource::<ExternalCrabStackInstalled>().is_some(),
+        world.get_resource::<NnCrabStackInstalled>().is_some(),
         "the NN-crab stack must be installed before Playing (rl#114: the checkpoint is required)"
     );
-    let spawns = match world.get_resource::<crate::external_crab::ExternalCrabBridge>() {
-        Some(bridge) => {
-            let n = bridge.crab_count();
-            super::app::seed_round_crabs(&mut ready.client, n)
-        }
+    let spawns = match world.get_non_send_resource::<crate::crab_slot::CrabPolicies>() {
+        Some(p) => super::app::seed_round_crabs(&mut ready.client, p.0.len()),
         None => Vec::new(),
     };
-    crate::external_crab::arm(world);
+    crate::crab_slot::arm(world);
     if !spawns.is_empty() {
-        crate::external_crab::restart_crabs_to_spawns(world, &spawns);
+        crate::crab_slot::restart_crabs_to_spawns(world, &spawns);
     }
     let coord = coordinator(
         ready.net,
@@ -81,7 +78,7 @@ pub(super) fn ensure_round_installed(world: &mut World) {
 
 pub(super) fn teardown_round(world: &mut World) {
     world.remove_non_send_resource::<GameState>();
-    world.remove_resource::<crate::external_crab::ExternalCrabArmed>();
+    world.remove_resource::<crate::crab_slot::NnCrabsArmed>();
     // Un-label the crab bodies that persist across rounds: labels are round state (the host
     // republishes on the next arm; a client re-adopts from the next round's articulation),
     // and a survivor here would float brain labels over the menu (the rl#211 class).
@@ -102,15 +99,10 @@ pub(super) fn teardown_round(world: &mut World) {
     for e in crafts {
         world.despawn(e);
     }
-    // Round state like the labels: the next round's arm republishes (host) or re-adopts
-    // (client) its own arena anchor.
-    if let Some(mut anchor) = world.get_resource_mut::<crate::external_crab::ArenaAnchor>() {
-        *anchor = Default::default();
-    }
     // Round state like the labels above: a survivor would suppress (or mis-measure) the next
     // round's remote-craft appeared/moved edges.
     world.remove_resource::<super::articulation::RemoteCraftWatch>();
-    // Round state like the anchor: the sampler is Playing-gated, so a stale sampled pose
+    // Round state like the labels: the sampler is Playing-gated, so a stale sampled pose
     // would otherwise sit under `drive_bones` (ungated) until the next round's install
     // replaces these — the rl#211 stale-survivor class, cleared at the boundary instead.
     if let Some(mut windows) = world.get_resource_mut::<super::articulation::CrabPartWindows>() {
@@ -173,39 +165,32 @@ fn pilot_of(pid: PlayerId) -> PilotId {
     PilotId(pid.0)
 }
 
-/// The sim↔arena correspondence, both directions (rl#258): arena = sim − anchor, and a
-/// sim point stands ON the ground — its arena y is the surface height at that spot, so
-/// a boarding on a mountainside authors its craft at the walker's real elevation
-/// (rl#281 stage 6; on the flat grids the height is exactly 0, the old planar bridge).
-/// One scale since rl#256 — the frames differ only by the round's static translation
-/// [`crate::external_crab::ArenaAnchor`]. `arena_to_sim` is planar (drops y), so the
-/// two stay inverses.
-fn sim_to_arena(
-    pos: crate::sim::Pos,
-    anchor: crate::external_crab::ArenaAnchor,
-    terrain: &crab_world::terrain::TerrainGrid,
-) -> Vec3 {
+/// The sim↔world correspondence, both directions (rl#258; one frame since rl#298
+/// stage 5 — the world's coordinates ARE the sim's meters): a sim point stands ON the
+/// ground, so its world y is the surface height at that spot — a boarding on a
+/// mountainside authors its craft at the walker's real elevation (rl#281 stage 6; on
+/// the flat grids the height is exactly 0). `world_to_sim` is planar (drops y), so
+/// the two stay inverses.
+fn sim_to_world(pos: crate::sim::Pos, terrain: &crab_world::terrain::TerrainGrid) -> Vec3 {
     let (x, z) = pos.to_meters();
-    let (ax, az) = (x - anchor.0.x, z - anchor.0.y);
-    Vec3::new(ax, terrain.height(ax, az), az)
+    Vec3::new(x, terrain.height(x, z), z)
 }
 
-fn arena_to_sim(arena: Vec3, anchor: crate::external_crab::ArenaAnchor) -> crate::sim::Pos {
-    crate::sim::Pos::from_meters(arena.x + anchor.0.x, arena.z + anchor.0.y)
+fn world_to_sim(world: Vec3) -> crate::sim::Pos {
+    crate::sim::Pos::from_meters(world.x, world.z)
 }
 
-/// The boarding player's walker state bridged into the arena frame (rl#258): where the
+/// The boarding player's walker state in world frame (rl#258): where the
 /// craft must materialise, its facing, and the velocity to conserve. `prev` is the
 /// walker one tick earlier (its last step is the velocity); recomputed per tick, but read
 /// only on the spawn edge — and while piloting the walker already rides the craft.
 fn boarding_of(
     now: crate::sim::Player,
     prev: crate::sim::Player,
-    anchor: crate::external_crab::ArenaAnchor,
     terrain: &crab_world::terrain::TerrainGrid,
 ) -> crab_world::vehicle::Boarding {
-    let here = sim_to_arena(now.pos(), anchor, terrain);
-    let velocity = (here - sim_to_arena(prev.pos(), anchor, terrain)) / TICK_DT as f32;
+    let here = sim_to_world(now.pos(), terrain);
+    let velocity = (here - sim_to_world(prev.pos(), terrain)) / TICK_DT as f32;
     // A walker can't out-run its walk speed: a bigger per-tick delta is a TELEPORT (the
     // round-RESTART respawn, a join slot), not motion — a craft boarded right after one
     // must start at rest, not inherit a cross-map fling.
@@ -227,7 +212,6 @@ fn boarding_of(
 /// feed for [`crate::server::Server::step_next`] (rl#258): a piloting player's walker
 /// rides its craft, so the sim never keeps a husk at the boarding spot.
 fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose> {
-    let anchor = *world.resource::<crate::external_crab::ArenaAnchor>();
     let mut q = world.query::<(&Transform, &Vehicle)>();
     q.iter(world)
         .map(|(t, v)| {
@@ -235,7 +219,7 @@ fn pilot_shadows(world: &mut World) -> BTreeMap<PlayerId, crate::sim::PilotPose>
             (
                 PlayerId(v.pilot.0),
                 crate::sim::PilotPose {
-                    pos: arena_to_sim(t.translation, anchor),
+                    pos: world_to_sim(t.translation),
                     yaw: crate::sim::trig_client::radians_to_turns(nose.x.atan2(nose.z)),
                 },
             )
@@ -554,7 +538,7 @@ fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Op
 
 pub(super) fn drive_client_sim(world: &mut World) {
     let armed = world
-        .get_resource::<crate::external_crab::ExternalCrabArmed>()
+        .get_resource::<crate::crab_slot::NnCrabsArmed>()
         .is_some();
 
     let role = PeerRole::of(world.non_send_resource::<GameState>());
@@ -698,13 +682,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
         };
         if let Some(art) = pending_art {
             crate::render::articulation::adopt(world, &art);
-            super::articulation::publish_remote_vehicles(
-                world,
-                art.tick,
-                &art.vehicles,
-                Vec3::from_array(art.arena_anchor),
-                me,
-            );
+            super::articulation::publish_remote_vehicles(world, art.tick, &art.vehicles, me);
             if let Some(p) = own_wire_pose(&art, me) {
                 let mut vehicle = world.resource_mut::<LocalVehicle>();
                 if matches!(&*vehicle, LocalVehicle::Flying { poses, .. } if poses.is_empty()) {
@@ -721,7 +699,6 @@ pub(super) fn drive_client_sim(world: &mut World) {
         }
 
         if role == PeerRole::ServerAuth && world.get_resource::<VehicleControls>().is_some() {
-            let anchor = *world.resource::<crate::external_crab::ArenaAnchor>();
             let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
             let entries: BTreeMap<PilotId, PilotCommand> = {
                 let state = world.non_send_resource::<GameState>();
@@ -734,7 +711,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                         // to transform — the intent simply files no command this tick.
                         let now = server.sim().player(pid)?;
                         let prev = state.prev.players.get(&pid).copied().unwrap_or(now);
-                        let boarding = boarding_of(now, prev, anchor, &terrain);
+                        let boarding = boarding_of(now, prev, &terrain);
                         Some((pilot_of(pid), intent.to_command(boarding)))
                     })
                     .collect()
@@ -805,7 +782,6 @@ pub(super) fn drive_client_sim(world: &mut World) {
                         world,
                         art.tick,
                         &art.vehicles,
-                        Vec3::from_array(art.arena_anchor),
                         me,
                     );
                 }
@@ -829,7 +805,7 @@ pub(super) fn drive_client_sim(world: &mut World) {
                         .iter()
                         .map(|c| c.pos())
                         .collect();
-                    crate::external_crab::restart_crabs_to_spawns(world, &spawns);
+                    crate::crab_slot::restart_crabs_to_spawns(world, &spawns);
                 }
             }
         }
@@ -991,13 +967,12 @@ mod tests {
         );
     }
 
-    /// The two directions of the rl#258 sim↔arena bridge (boarding spawn vs pilot follow)
-    /// must be exact inverses, or a board+exit round-trip would drift the player —
-    /// including on terrain, where sim_to_arena lifts to the surface (arena_to_sim is
-    /// planar, so the lift can't leak back).
+    /// The two directions of the rl#258 sim↔world conversion (boarding spawn vs pilot
+    /// follow) must be exact inverses, or a board+exit round-trip would drift the
+    /// player — including on terrain, where sim_to_world lifts to the surface
+    /// (world_to_sim is planar, so the lift can't leak back).
     #[test]
-    fn sim_arena_conversion_roundtrips() {
-        let anchor = crate::external_crab::ArenaAnchor(bevy::math::Vec2::new(3.5, -7.25));
+    fn sim_world_conversion_roundtrips() {
         let p = crate::sim::Pos {
             x: 12_340,
             z: -5_670,
@@ -1005,11 +980,11 @@ mod tests {
         let flat = crab_world::terrain::TerrainGrid::flat(16.0);
         let gcr = crab_world::terrain::TerrainGrid::gcr();
         for terrain in [&flat, &*gcr] {
-            let arena = super::sim_to_arena(p, anchor, terrain);
-            let back = super::arena_to_sim(arena, anchor);
+            let world = super::sim_to_world(p, terrain);
+            let back = super::world_to_sim(world);
             assert!(
                 (back.x - p.x).abs() <= 1 && (back.z - p.z).abs() <= 1,
-                "sim→arena→sim drifted beyond grid quantization: {p:?} -> {back:?}"
+                "sim→world→sim drifted beyond grid quantization: {p:?} -> {back:?}"
             );
         }
     }
@@ -1021,7 +996,6 @@ mod tests {
         let art = CrabArticulation {
             tick: 7,
             crabs: Vec::new(),
-            arena_anchor: [0.0; 3],
             vehicles: vec![
                 VehiclePoseWire {
                     pilot: 0,

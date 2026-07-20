@@ -188,10 +188,6 @@ impl ClientSim {
         }
     }
 
-    pub fn set_external_crab_pose(&mut self, crab: usize, pos: crate::sim::Pos, yaw: i32) {
-        self.sim.set_external_crab_pose(crab, pos, yaw);
-    }
-
     pub fn configure_crabs(&mut self, crabs: usize) {
         self.sim.configure_crabs(crabs);
     }
@@ -280,7 +276,8 @@ mod tests {
             }
             server.advance(host_sched.submit_local_input(Input::default(), None));
             while server.next_tick_ready() {
-                let bytes = server.step_next(&[], Default::default()).snapshot;
+                let poses = crate::sim::hold_poses(server.sim());
+                let bytes = server.step_next(&poses, Default::default()).snapshot;
                 wire_down.push_back(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
             if wire_down.len() > LATENCY {
@@ -307,7 +304,8 @@ mod tests {
             }
             server.advance(host_sched.submit_local_input(Input::default(), None));
             while server.next_tick_ready() {
-                let bytes = server.step_next(&[], Default::default()).snapshot;
+                let poses = crate::sim::hold_poses(server.sim());
+                let bytes = server.step_next(&poses, Default::default()).snapshot;
                 wire_down.push_back(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
             let mut adopted = false;
@@ -351,7 +349,8 @@ mod tests {
             let input = Input::new(0.0, if t < 5 { 1.0 } else { 0.0 }, 0.0, btns);
             host.advance(sched.submit_local_input(input, None));
             while host.next_tick_ready() {
-                let bytes = host.step_next(&[], Default::default()).snapshot;
+                let poses = crate::sim::hold_poses(host.sim());
+                let bytes = host.step_next(&poses, Default::default()).snapshot;
                 arrivals.push(CoreSnapshot::from_bytes(&bytes).expect("snapshot decodes"));
             }
         }

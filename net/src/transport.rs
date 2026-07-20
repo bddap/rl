@@ -1239,9 +1239,7 @@ mod tests {
 
     #[test]
     fn articulation_wire_roundtrips() {
-        use crate::articulation::{
-            CrabArticulation, CrabFrame, PartTransform, ReposeWire, VehiclePoseWire,
-        };
+        use crate::articulation::{CrabArticulation, CrabFrame, PartTransform, VehiclePoseWire};
         let art = CrabArticulation {
             tick: 909,
             crabs: vec![CrabFrame {
@@ -1257,12 +1255,8 @@ mod tests {
                         rot: [0.5, 0.5, 0.5, 0.5],
                     },
                 ],
-                repose: Some(ReposeWire {
-                    shift: [1.0, 0.0, -2.0],
-                }),
                 brain_label: "mlp512x3 @deadbeef".to_string(),
             }],
-            arena_anchor: [4.25, 0.0, -0.5],
             vehicles: vec![VehiclePoseWire {
                 pilot: 1,
                 kind: crab_world::vehicle::VehicleKind::Ship,
@@ -1282,9 +1276,20 @@ mod tests {
 
     #[test]
     fn snapshot_wire_roundtrips() {
-        use crate::sim::{PlayerId, Pos, Sim};
+        use std::collections::BTreeMap;
+
+        use crate::sim::{CrabPose, Externals, Input, PlayerId, Pos, Sim};
         let mut sim = Sim::new(3, &[PlayerId(0), PlayerId(1)]);
-        sim.set_external_crab_pose(0, Pos { x: 77, z: -88 }, 5);
+        let posed = vec![CrabPose {
+            pos: Pos { x: 77, z: -88 },
+            yaw: 5,
+            claws: Vec::new(),
+        }];
+        let inputs = BTreeMap::from([
+            (PlayerId(0), Input::default()),
+            (PlayerId(1), Input::default()),
+        ]);
+        sim.step(&inputs, Externals::crabs_only(&posed));
         let snap = sim.core_snapshot();
         let body = CoreSnapshot::encode(&snap);
         assert_eq!(CoreSnapshot::decode(&body).unwrap(), snap);

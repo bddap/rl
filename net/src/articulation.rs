@@ -5,15 +5,9 @@ pub struct PartTransform {
     pub rot: [f32; 4],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ReposeWire {
-    pub shift: [f32; 3],
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct CrabFrame {
     pub parts: Vec<PartTransform>,
-    pub repose: Option<ReposeWire>,
     /// This crab's brain label, exactly as the HOST formatted it (`Policy::brain_label` —
     /// `arch @shortdigest`, or an attributed failure state): a client renders the string
     /// verbatim, so who's-who can't be re-derived differently per peer (rl#200 increment 7).
@@ -24,19 +18,14 @@ pub struct CrabFrame {
     pub brain_label: String,
 }
 
+/// Every pose on this wire is a WORLD pose (rl#298 stage 5: one frame — the world's
+/// coordinates are the sim's meters), so a client renders parts and vehicles verbatim;
+/// the per-round `arena_anchor` translate and the per-crab skin-repose shift this
+/// message used to carry died with the bridge (both are identically zero in one frame).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CrabArticulation {
     pub tick: u64,
     pub crabs: Vec<CrabFrame>,
-    /// The host's arena→render translate (`ArenaAnchor`, rl#224; static between rl#240
-    /// recenters) — the frame the
-    /// `vehicles` arena poses render through. Shipped verbatim like the brain labels
-    /// because a client CANNOT derive it: a mid-join client never saw the crab's spawn,
-    /// and after an rl#204 RESTART only the host resyncs its bridge. Riding the same
-    /// message as the vehicle poses it frames, a craft is never rendered through a stale
-    /// anchor. The y is always 0 — the anchor is planar by type (rl#291); this wire
-    /// triple is the one place a y byte survives, asserted zero on adopt.
-    pub arena_anchor: [f32; 3],
     pub vehicles: Vec<VehiclePoseWire>,
 }
 
@@ -53,7 +42,6 @@ pub struct VehiclePoseWire {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArticulationDecodeError {
     Truncated,
-    BadFlag,
     TrailingBytes,
     /// A brain label's bytes were not valid UTF-8.
     BadLabel,
@@ -66,7 +54,6 @@ impl std::fmt::Display for ArticulationDecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let msg = match self {
             Self::Truncated => "articulation buffer ended mid-field",
-            Self::BadFlag => "articulation present-flag was neither 0 nor 1",
             Self::TrailingBytes => "trailing bytes after a complete articulation",
             Self::BadLabel => "articulation brain label was not valid UTF-8",
             Self::UnorderedVehicles => "articulation vehicles were not in ascending pilot order",
@@ -94,21 +81,9 @@ impl CrabArticulation {
                     out.extend_from_slice(&v.to_le_bytes());
                 }
             }
-            match &crab.repose {
-                None => out.push(0),
-                Some(r) => {
-                    out.push(1);
-                    for v in r.shift {
-                        out.extend_from_slice(&v.to_le_bytes());
-                    }
-                }
-            }
             let label = clamp_label(&crab.brain_label);
             out.push(label.len() as u8);
             out.extend_from_slice(label.as_bytes());
-        }
-        for v in self.arena_anchor {
-            out.extend_from_slice(&v.to_le_bytes());
         }
         out.extend_from_slice(&(self.vehicles.len() as u16).to_le_bytes());
         for v in &self.vehicles {
@@ -138,24 +113,12 @@ impl CrabArticulation {
                 let rot = read_vec4(&mut r)?;
                 parts.push(PartTransform { part, pos, rot });
             }
-            let repose = match r.byte()? {
-                0 => None,
-                1 => Some(ReposeWire {
-                    shift: read_vec3(&mut r)?,
-                }),
-                _ => return Err(ArticulationDecodeError::BadFlag),
-            };
             let label_len = r.byte()? as usize;
             let brain_label = std::str::from_utf8(r.slice(label_len)?)
                 .map_err(|_| ArticulationDecodeError::BadLabel)?
                 .to_string();
-            crabs.push(CrabFrame {
-                parts,
-                repose,
-                brain_label,
-            });
+            crabs.push(CrabFrame { parts, brain_label });
         }
-        let arena_anchor = read_vec3(&mut r)?;
         let n_vehicles = u16::from_le_bytes(r.take::<2>()?) as usize;
         let mut vehicles: Vec<VehiclePoseWire> = Vec::new();
         for _ in 0..n_vehicles {
@@ -177,7 +140,6 @@ impl CrabArticulation {
         Ok(Self {
             tick,
             crabs,
-            arena_anchor,
             vehicles,
         })
     }
@@ -274,9 +236,6 @@ mod tests {
                             rot: [0.5, 0.5, 0.5, 0.5],
                         },
                     ],
-                    repose: Some(ReposeWire {
-                        shift: [10.0, 0.0, -20.0],
-                    }),
                     brain_label: "mlp512x3 @1a2b3c4d".to_string(),
                 },
                 CrabFrame {
@@ -285,13 +244,11 @@ mod tests {
                         pos: [7.0, 0.5, -2.0],
                         rot: [0.0, 1.0, 0.0, 0.0],
                     }],
-                    repose: None,
                     // Distinct per-crab labels, and a failure state on the wire — the
                     // attribution channel is part of the format, not just the happy path.
                     brain_label: "REFUSED: wrong rig".to_string(),
                 },
             ],
-            arena_anchor: [0.75, 0.0, -12.5],
             vehicles: vec![
                 VehiclePoseWire {
                     pilot: 0,
@@ -321,13 +278,6 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_without_repose() {
-        let mut a = sample();
-        a.crabs[0].repose = None;
-        assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
-    }
-
-    #[test]
     fn roundtrip_without_vehicles() {
         let mut a = sample();
         a.vehicles.clear();
@@ -339,7 +289,6 @@ mod tests {
         let a = CrabArticulation {
             tick: 0,
             crabs: vec![],
-            arena_anchor: [0.0; 3],
             vehicles: vec![],
         };
         assert_eq!(CrabArticulation::from_bytes(&a.to_bytes()).unwrap(), a);
@@ -362,7 +311,7 @@ mod tests {
         let mut a = sample();
         a.crabs[1].brain_label = "x".to_string();
         let mut bytes = a.to_bytes();
-        let label_off = bytes.len() - 12 - (2 + 2 * (1 + 1 + 12 + 16)) - 1;
+        let label_off = bytes.len() - (2 + 2 * (1 + 1 + 12 + 16)) - 1;
         assert_eq!(bytes[label_off], b'x');
         bytes[label_off] = 0xFF;
         assert_eq!(
@@ -391,17 +340,6 @@ mod tests {
         assert_eq!(
             CrabArticulation::from_bytes(&bytes),
             Err(ArticulationDecodeError::TrailingBytes)
-        );
-    }
-
-    #[test]
-    fn bad_present_flag_is_rejected() {
-        let flag_off = 8 + 4 + 4 + 2 * (1 + 12 + 16);
-        let mut bytes = sample().to_bytes();
-        bytes[flag_off] = 2;
-        assert_eq!(
-            CrabArticulation::from_bytes(&bytes),
-            Err(ArticulationDecodeError::BadFlag)
         );
     }
 

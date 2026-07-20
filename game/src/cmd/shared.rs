@@ -135,12 +135,17 @@ pub(crate) const DEFAULT_EXPECT: usize = 2;
 pub(crate) const DEFAULT_DISCOVER_SECS: u64 = 4;
 
 pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
+    use net::crab_slot::HeadlessHostWorld;
     use net::server::Server;
     use net::snapshot::CoreSnapshot;
 
     let me = PlayerId(0);
     let mut client = ClientSim::new(MATCH_SEED, &[me], me);
     let mut server = Server::new(me, &[me], client.sim().clone());
+    // Crab poses are mandatory (rl#298 stage 5): even this headless harness runs the
+    // one crab world — a rest-pose brain, no checkpoint bound.
+    let mut host_world =
+        HeadlessHostWorld::new(vec![crab_world::policy::Policy::rest()], server.sim());
     let tick_dt = Duration::from_secs_f64(TICK_DT);
     let end = Instant::now() + Duration::from_secs(run_secs);
     let mut next = Instant::now();
@@ -148,10 +153,10 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
         let t = client.next_tick() as f32 * 0.1;
         let msg = client.submit_local_input(Input::from_axes(t.cos(), t.sin()), None);
         server.advance(msg);
-        while server.next_tick_ready() {
-            let bytes = server.step_next(&[], Default::default()).snapshot;
+        for stepped in host_world.step_ready_ticks(&mut server) {
             client.apply_core_snapshot(
-                CoreSnapshot::from_bytes(&bytes).expect("the server's snapshot must decode"),
+                CoreSnapshot::from_bytes(&stepped.snapshot)
+                    .expect("the server's snapshot must decode"),
             );
         }
         next += tick_dt;
