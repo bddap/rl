@@ -314,7 +314,7 @@ pub fn run_learner(
     }
     let config = &config_owned;
 
-    let m = config.envs as usize;
+    let m = config.num_envs();
     let tick_budget = config.ticks;
     let checkpoint_dir = config.checkpoint.checkpoint_dir.clone();
     std::fs::create_dir_all(&checkpoint_dir).expect("create checkpoint dir");
