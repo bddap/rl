@@ -41,7 +41,7 @@ use crab_world::vehicle::{Vehicle, VehicleControls};
 /// The posed hunt target's height ABOVE THE LOCAL SURFACE at the target's own xz —
 /// training's convention (`sample_target` bands height-above-surface), so `target:y`
 /// stays in-distribution on terrain; flat grids reduce to the old absolute 0.3.
-const CLAW_TARGET_Y: f32 = 0.3;
+pub(crate) const CLAW_TARGET_Y: f32 = 0.3;
 
 /// rl#240 flip: recenter the spawn-relative body.pos obs channel whenever a long chase
 /// walks it out of the training band. ARMED 2026-07-16 (the rl#239 honest-bearing eval
