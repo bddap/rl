@@ -5,7 +5,9 @@ use rand::Rng;
 
 use crate::bot::actuator::CrabActions;
 use crate::bot::body::{self, CrabAssets, CrabBodyPart, CrabCarapace};
+use crate::bot::sensor::CrabTargets;
 use crate::bot::{CrabSpawns, RESET_GRACE_TICKS, respawn_crab_rotated, settle_countdown};
+use crate::training::targets::{random_episode_origin, seed_target};
 
 use crate::controls::just_pressed;
 
@@ -40,25 +42,30 @@ pub(super) fn demo_poke(
     f.torque += burst.torque;
 }
 
+/// Reset re-rolls the LOCALE (rl#300): Sally and the ball land at a fresh random
+/// spot on the tile — the same per-episode draw training resets use — and a bad
+/// roll is handled by pressing reset again, not by slope-aware spawn selection.
 #[allow(clippy::too_many_arguments)]
 fn demo_respawn(
     commands: &mut Commands,
     assets: &CrabAssets,
-    spawns: &CrabSpawns,
+    spawns: &mut CrabSpawns,
+    targets: &mut CrabTargets,
     terrain: &crate::terrain::TerrainGrid,
     parts: impl Iterator<Item = Entity>,
     settle: &mut DemoSettle,
     actions: &mut CrabActions,
-    init_rotation: Quat,
+    rng: &mut rand::rngs::StdRng,
 ) {
-    let origin = spawns.origin(0);
+    let origin = random_episode_origin(rng, terrain);
+    spawns.set_origin(0, origin);
+    // The held target was banded around the OLD locale — re-seed from the new
+    // origin (same argument as `reset_crab`'s re-seed).
+    seed_target(targets, spawns, 0, rng, terrain);
+    let init_rotation = body::random_spawn_rotation(rng);
     respawn_crab_rotated(commands, assets, terrain, parts, origin, 0, init_rotation);
     settle.0 = RESET_GRACE_TICKS;
     let _ = actions.rest(0); // deliberate skip pre-spawn
-}
-
-fn random_demo_tilt(rng: &mut impl Rng) -> Quat {
-    body::random_spawn_rotation(rng)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -68,7 +75,8 @@ pub(super) fn demo_controls(
     mut exit: MessageWriter<AppExit>,
     mut commands: Commands,
     assets: Res<CrabAssets>,
-    spawns: Res<CrabSpawns>,
+    mut spawns: ResMut<CrabSpawns>,
+    mut targets: ResMut<CrabTargets>,
     terrain: Res<crate::terrain::Terrain>,
     parts_q: Query<Entity, With<CrabBodyPart>>,
     mut poke_burst: ResMut<PokeBurst>,
@@ -105,12 +113,13 @@ pub(super) fn demo_controls(
         demo_respawn(
             &mut commands,
             &assets,
-            &spawns,
+            &mut spawns,
+            &mut targets,
             &terrain,
             parts_q.iter(),
             &mut settle,
             &mut actions,
-            random_demo_tilt(&mut rng.0),
+            &mut rng.0,
         );
     }
     if poke {
@@ -132,4 +141,95 @@ pub(super) fn demo_settle(mut settle: ResMut<DemoSettle>, mut actions: ResMut<Cr
     }
     let _ = actions.rest(0); // deliberate skip pre-spawn
     settle.0 = settle_countdown(settle.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use rand::SeedableRng;
+
+    use crate::bot::body::CrabEnvId;
+    use crate::bot::headless::{flat_headless_app, tick};
+    use crate::training::reward::planar_dist;
+    use crate::training::targets::BAND_MAX_M;
+
+    fn reset(app: &mut App) {
+        app.world_mut()
+            .run_system_once(
+                |mut commands: Commands,
+                 assets: Res<CrabAssets>,
+                 mut spawns: ResMut<CrabSpawns>,
+                 mut targets: ResMut<CrabTargets>,
+                 terrain: Res<crate::terrain::Terrain>,
+                 parts: Query<(Entity, &CrabEnvId), With<CrabBodyPart>>,
+                 mut settle: ResMut<DemoSettle>,
+                 mut actions: ResMut<CrabActions>,
+                 mut rng: ResMut<super::super::DemoRng>| {
+                    demo_respawn(
+                        &mut commands,
+                        &assets,
+                        &mut spawns,
+                        &mut targets,
+                        &terrain,
+                        parts.iter().filter(|(_, id)| id.0 == 0).map(|(e, _)| e),
+                        &mut settle,
+                        &mut actions,
+                        &mut rng.0,
+                    );
+                },
+            )
+            .expect("demo reset system");
+    }
+
+    fn carapace(app: &mut App) -> Vec3 {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, With<CrabCarapace>>();
+        q.single(app.world()).expect("carapace").translation
+    }
+
+    /// rl#300: a reset re-rolls the locale — the origin leaves the boot spawn, the
+    /// crab respawns ON the new origin, and the target re-seeds inside the trained
+    /// band around it (the ball follows `CrabTargets`), press after press.
+    #[test]
+    fn reset_rerolls_crab_and_ball_locale() {
+        let mut app = flat_headless_app();
+        app.insert_resource(super::super::DemoRng(rand::rngs::StdRng::seed_from_u64(7)));
+        app.init_resource::<DemoSettle>();
+        tick(&mut app, 2);
+        let boot = app.world().resource::<CrabSpawns>().origin(0);
+
+        let mut origins = Vec::new();
+        for press in 0..3 {
+            reset(&mut app);
+            tick(&mut app, 1);
+            let origin = app.world().resource::<CrabSpawns>().origin(0);
+            assert!(
+                planar_dist(carapace(&mut app), origin) < 3.0,
+                "press {press}: the crab must respawn on the re-rolled origin"
+            );
+            let target = app
+                .world()
+                .resource::<CrabTargets>()
+                .get(0)
+                .expect("press re-seeds the target");
+            let d = planar_dist(target, origin);
+            assert!(
+                d <= BAND_MAX_M + 1e-3,
+                "press {press}: target sits {d} m from the new origin — banded around \
+                 the OLD locale"
+            );
+            origins.push(origin);
+        }
+        origins.push(boot);
+        for (i, a) in origins.iter().enumerate() {
+            for b in &origins[i + 1..] {
+                assert!(
+                    planar_dist(*a, *b) > 1e-3,
+                    "each press draws a fresh locale (got {a:?} twice)"
+                );
+            }
+        }
+    }
 }
