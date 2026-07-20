@@ -9,6 +9,14 @@
 //! by construction; clients only consume the resulting `CoreSnapshot` +
 //! `CrabArticulation` streams.
 //!
+//! The obs half of the seam (rl#298 stage 3): each pumped step builds the policy's
+//! observation from THIS world's ECS (`build_observation` in `BotSet::Sense`), and the
+//! in-game action period is one physics step — training's control period, by shared
+//! construction: the trainer's `brain_step` and the host's `run_crab_policy` both run
+//! in `BotSet::Think` of the same `FixedUpdate` schedule, pumped once per
+//! `PHYSICS_DT` (`headless_stack`'s manual time drive there, [`pump_fixed_steps`]
+//! here). The stage-3 tests below pin both halves.
+//!
 //! [`Server::advance`]: crate::server::Server::advance
 //! [`Server::step_next`]: crate::server::Server::step_next
 
@@ -301,6 +309,161 @@ mod tests {
             moved > 0.5,
             "the flailing in-world crab must have moved in the snapshot clients decode \
              (moved {moved:.3} m)"
+        );
+    }
+
+    /// rl#298 stage 3, obs half: the row the policy consumes IS the one world's
+    /// same-tick state. A snapshot captured between Sense and Think pins the body
+    /// channel against the live carapace and the target channel against the posed
+    /// lure — and the lure itself is re-derived from the SIM's own prey position
+    /// through the one arena↔world correspondence (sim = arena + `ArenaAnchor`),
+    /// independently of the bridge's integrated position. The first sim→obs
+    /// cross-check: a stale, defaulted, or wrong-frame row fails here, and so does
+    /// any drift in the target conventions stage 4's trainer swap must reproduce
+    /// (band lure along the true bearing, surface-relative lure height).
+    #[test]
+    fn obs_seam_reads_the_one_worlds_state_with_the_sims_prey_as_target() {
+        #[derive(Resource, Default)]
+        struct SenseSnap {
+            carapace: Option<(Vec3, Quat)>,
+            target: Option<Vec3>,
+            origin: Vec3,
+        }
+        fn snap_sense(
+            mut snap: ResMut<SenseSnap>,
+            spawns: Res<crab_world::bot::CrabSpawns>,
+            targets: Res<crab_world::bot::sensor::CrabTargets>,
+            carapace_q: Query<&Transform, With<CrabCarapace>>,
+        ) {
+            if spawns.is_empty() {
+                return; // pre-spawn pass — origins not laid yet
+            }
+            let Some(t) = carapace_q.iter().next() else {
+                return;
+            };
+            snap.carapace = Some((t.translation, t.rotation));
+            snap.target = targets.get(0);
+            snap.origin = spawns.origin(0);
+        }
+
+        let mut server = solo_server();
+        let spawn = server.sim().crabs()[0].pos();
+        let mut app = headless_host_app(Policy::rest(), spawn);
+        app.init_resource::<SenseSnap>();
+        app.add_systems(
+            FixedUpdate,
+            snap_sense
+                .after(crab_world::bot::BotSet::Sense)
+                .before(crab_world::bot::BotSet::Think),
+        );
+
+        // Past spawn + settle grace, into live sensing with a fed hunt target.
+        for t in 0..60u64 {
+            server_tick(&mut app, &mut server, t);
+        }
+
+        let (pos, rot, target, origin) = {
+            let snap = app.world().resource::<SenseSnap>();
+            let (pos, rot) = snap.carapace.expect("carapace snapshotted post-settle");
+            let target = snap
+                .target
+                .expect("the sim's living player must have posed a hunt target");
+            (pos, rot, target, snap.origin)
+        };
+        let obs = app.world().resource::<CrabObservation>();
+        let view = obs.env(0).expect("env 0 sized");
+
+        let body = view.body_pos();
+        let expected_body = pos - origin;
+        assert!(
+            (body - expected_body).length() < 1e-5,
+            "obs body.pos {body:?} must be the live carapace spawn-relative \
+             ({expected_body:?})"
+        );
+
+        let target_local = view.target_local();
+        let expected_local = rot.inverse() * (target - pos);
+        assert!(
+            (target_local - expected_local).length() < 1e-4,
+            "obs target_local {target_local:?} must be the posed target in the live \
+             body frame ({expected_local:?})"
+        );
+
+        // The seam crossing: the posed target re-derives from the sim's prey. Her
+        // sim-frame position is carapace + anchor, up to the settle-grace slide the
+        // bridge deliberately never integrates (spawn-anchored until settle ends,
+        // ~cm) — hence the 0.1 m slop, an order under the ~5 m prey range and any
+        // frame mix-up (meters).
+        let prey = server
+            .sim()
+            .nearest_living_player_pos(0)
+            .expect("player 0 is alive and stationary");
+        let (px, pz) = prey.to_meters();
+        let anchor = app
+            .world()
+            .resource::<crate::external_crab::ArenaAnchor>()
+            .0;
+        let to_prey = bevy::math::Vec2::new(px - (pos.x + anchor.x), pz - (pos.z + anchor.y));
+        let lure = crab_world::training::targets::band_lure(pos, to_prey, 0.0);
+        let terrain = app.world().resource::<crab_world::terrain::Terrain>();
+        let expected_target = terrain.place(
+            bevy::math::Vec2::new(lure.x, lure.z),
+            crate::external_crab::CLAW_TARGET_Y,
+        );
+        assert!(
+            (target - expected_target).length() < 0.1,
+            "the posed target {target:?} must re-derive from the sim's prey through \
+             the one arena↔world correspondence ({expected_target:?})"
+        );
+    }
+
+    /// rl#298 stage 3, control-rate half: the in-game action period equals training's
+    /// control period. Training acts once per physics step — `brain_step` in
+    /// `BotSet::Think` of `FixedUpdate`, pumped once per `PHYSICS_DT` by
+    /// `headless_stack`'s manual time drive (`training::inproc`'s rollout app). The
+    /// host runs `run_crab_policy` in the SAME Think slot of the SAME schedule, so
+    /// equality is by shared construction; this pins the host half: across a real
+    /// server run, every physics step the 64:30 cadence owes runs Think exactly once
+    /// (no decimation, no extra passes). If the in-game step rate ever exceeds the
+    /// control rate, action repeat must restore this equality (the epic's
+    /// parenthetical).
+    #[test]
+    fn in_game_action_period_equals_trainings_control_period() {
+        #[derive(Resource, Default)]
+        struct ThinkPasses(u64);
+        fn count_think(mut passes: ResMut<ThinkPasses>) {
+            passes.0 += 1;
+        }
+
+        let mut server = solo_server();
+        let spawn = server.sim().crabs()[0].pos();
+        let mut app = headless_host_app(Policy::rest(), spawn);
+        app.init_resource::<ThinkPasses>();
+        app.add_systems(
+            FixedUpdate,
+            count_think.after(crab_world::bot::BotSet::Think),
+        );
+
+        for t in 0..90u64 {
+            server_tick(&mut app, &mut server, t);
+        }
+
+        let ticks = server.sim().tick();
+        assert_eq!(
+            ticks, 90,
+            "one authoritative tick per advance on the solo host"
+        );
+        let passes = app.world().resource::<ThinkPasses>().0;
+        assert_eq!(
+            passes,
+            crate::cadence::cumulative_steps(ticks),
+            "every pumped physics step must run Think exactly once — the action \
+             period is one physics step (PHYSICS_DT), training's control period"
+        );
+        assert!(
+            passes > ticks,
+            "the control rate outpaces the sim tick (64:30) — the pump, not the \
+             tick, sets the action period"
         );
     }
 }
