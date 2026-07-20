@@ -148,10 +148,10 @@ const PACE_WINDOW_MIN_S: f32 = 5.0;
 /// instrument's own geometry — the [`CRAB_CHARGE_SPEED_HEIGHTS_PER_S`] pin was
 /// measured at exactly this distance, and moving it moves the saturation ceiling,
 /// so it re-pins only WITH a charge re-measure, never by riding a band change.
-/// The probe still presents the ball through the SAME two seams production (net's
-/// `external_crab`) uses to hunt a distant player — the [`band_lure`] clamp and the
-/// [`pace_recenter`] body.pos recenter — which keeps the probe measuring her pace in
-/// exactly the obs regime GCR play happens in.
+/// The probe presents the ball through the [`band_lure`] clamp and the
+/// [`pace_recenter`] body.pos recenter, matching the obs regime GCR play happens in
+/// (whose recenter shares the [`recenter_delta`] trigger; its dormant band clamp died
+/// with the bridge, rl#298 stage 5).
 pub const PACE_PROBE_DISTANCE_M: f32 = 18.0;
 
 /// The pace probe's episode length: twice the [`PACE_WINDOW_MIN_S`] floor, so the

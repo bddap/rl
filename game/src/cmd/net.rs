@@ -42,7 +42,9 @@ async fn run_net(args: Args) -> Result<()> {
         args.expect,
         tel.as_ref(),
         None,
-        net::SyncStamp::local(0), // honest digests (rl#100, rl#20, rl#286)
+        // Crabless STAMP (a rest-pose statue serves the poses, not a bound brain):
+        // windowed peers refuse this harness on the crabs axis (rl#114/rl#286).
+        net::SyncStamp::local(0),
     )
     .await?
     {

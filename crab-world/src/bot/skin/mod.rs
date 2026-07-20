@@ -3,7 +3,7 @@ use bevy::prelude::*;
 mod pairing;
 mod weights;
 
-pub use pairing::{CrabRenderPose, CrabSkinRepose, SkinRepose};
+pub use pairing::CrabRenderPose;
 
 #[derive(Resource)]
 struct CrabModel {

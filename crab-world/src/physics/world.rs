@@ -52,15 +52,6 @@ impl Plugin for PhysicsWorldPlugin {
     }
 }
 
-/// The visible arena ground spawned by [`setup_arena_visuals`]. The PHYSICS ground
-/// (collider) always sits at the physics-frame origin; a host whose render frame is a
-/// translation of the physics frame (net's arena↔world anchor, rl#224) uses this
-/// handle to keep the drawn surface at that translation. Hosts whose two frames
-/// coincide (rl-demo) leave it at IDENTITY.
-#[cfg(feature = "render")]
-#[derive(Component)]
-pub struct ArenaSurface;
-
 /// The one arena every rendered surface installs — terrain physics on the
 /// committed gcr bake plus the visible dressing, visuals on. The world exists
 /// whether or not a crab is armed (rl#296), so this is deliberately separate from
@@ -150,15 +141,14 @@ fn setup_arena_visuals(
     // its own, and the checker's fine cells are what give optic flow at landing
     // height and on foot — inside the one ground path, never a second surface.
     commands.spawn((
-        ArenaSurface,
         Mesh3d(meshes.add(terrain.mesh())),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(ground_checker(&mut images)),
             // Mesh UVs are mesh-local METERS (terrain.rs); scale so one texture
-            // repeat covers CHECKER_PERIOD meters — hosts move ArenaSurface by
-            // translation only (net's anchor sync), so mesh meters stay render meters
-            // and the pilot-scale cells hold.
+            // repeat covers CHECKER_PERIOD meters — the surface never moves (one
+            // frame, rl#298 stage 5), so mesh meters ARE render meters and the
+            // pilot-scale cells hold.
             uv_transform: Affine2::from_scale(Vec2::splat(1.0 / CHECKER_PERIOD)),
             perceptual_roughness: 0.95,
             ..default()

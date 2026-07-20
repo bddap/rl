@@ -127,7 +127,7 @@ pub fn build_windowed_app(
                 throwaway.configure_crabs(policies.len());
                 let crab_spawns: Vec<Pos> =
                     throwaway.sim().crabs().iter().map(|c| c.pos()).collect();
-                add_external_nn_crab(&mut app, policies, crab_spawns);
+                add_nn_crab_stack(&mut app, policies, crab_spawns);
                 app.insert_resource(crab_world::bot::NumEnvs(0));
                 app.insert_resource(NnCrabStackInstalled);
             }
@@ -206,7 +206,7 @@ pub(super) fn seed_round_crabs(client: &mut ClientSim, crabs: usize) -> Vec<Pos>
     client.sim().crabs().iter().map(|c| c.pos()).collect()
 }
 
-pub(super) fn add_external_nn_crab(
+pub(super) fn add_nn_crab_stack(
     app: &mut App,
     policies: Vec<crab_world::policy::Policy>,
     crab_spawns: Vec<Pos>,
@@ -225,10 +225,10 @@ pub(super) fn install_armed_nn_crab(
     policies: Vec<crab_world::policy::Policy>,
     crab_spawns: Vec<Pos>,
 ) {
-    add_external_nn_crab(app, policies, crab_spawns.clone());
+    add_nn_crab_stack(app, policies, crab_spawns.clone());
     crate::crab_slot::arm(app.world_mut());
     // Same install shape as `ensure_round_installed` (rl#290): the restart is THE one
-    // path that pins the arena origin layout to the sim spawns — here, pre-spawn, it
+    // path that lays the env origins AT the sim spawns — here, pre-spawn, it
     // stashes the layout for `spawn_initial_crabs`.
     crate::crab_slot::restart_crabs_to_spawns(app.world_mut(), &crab_spawns);
 }

@@ -53,7 +53,7 @@ pub struct CrabClawTip;
 /// physics solver: in any world that pumps `FixedUpdate`, a foreign write gets
 /// synced back into the body at `SyncBackend` and blows up the multibody (the
 /// GCR play-day crash, rl#116). Cosmetic/render placement rides the render-only
-/// skin bones / `CrabSkinRepose` instead; [`crate::bot::pose_sentinel`] enforces
+/// skin bones / `CrabRenderPose` instead; [`crate::bot::pose_sentinel`] enforces
 /// this at runtime in visual worlds. Render consumers must also not READ this
 /// `Transform` as the rendered pose directly — resolve it through
 /// [`crate::bot::skin::CrabRenderPose::rendered`], or the 64:30 step staircase

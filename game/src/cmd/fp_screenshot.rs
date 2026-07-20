@@ -52,13 +52,13 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(args.cam_yaw, args.cam_pitch)
         .with_fov(args.cam_fov);
-    let external_crab = args
+    let nn_crab = args
         .nn_crab_checkpoint
         .map(|flag| nn_crab_policy(Some(flag)).map(|(_, policy)| policy))
         .transpose()?;
     let render_mode = render_mode(args.render);
     let controls = gcr_controls(&args.controls)?;
     let pack = net::sim::Input::new(0.0, 1.0, args.pack_look_yaw, 0);
-    render::build_screenshot_app(client, cfg, external_crab, render_mode, controls, pack).run();
+    render::build_screenshot_app(client, cfg, nn_crab, render_mode, controls, pack).run();
     Ok(())
 }

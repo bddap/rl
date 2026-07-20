@@ -741,22 +741,26 @@ pub(super) fn drive_client_sim(world: &mut World) {
             }
 
             {
+                let inputs = {
+                    let state = world.non_send_resource::<GameState>();
+                    crate::crab_slot::slot_inputs(
+                        state.server().expect("server_auth ⇒ a server").sim(),
+                    )
+                };
                 let (crab_poses, shadows) = if armed {
-                    let (stepping_into, hunt) = {
-                        let state = world.non_send_resource::<GameState>();
-                        crate::crab_slot::slot_inputs(
-                            state.server().expect("server_auth ⇒ a server").sim(),
-                        )
-                    };
-                    let poses = crate::crab_slot::pump_crab_slot(world, stepping_into, &hunt);
+                    let poses = crate::crab_slot::pump_crab_slot(world, &inputs);
                     if let Some(p) = read_vehicle_pose(world, me) {
                         world
                             .resource_mut::<LocalVehicle>()
-                            .update_pose(stepping_into, p);
+                            .update_pose(inputs.stepping_into, p);
                     }
                     (poses, pilot_shadows(world))
                 } else {
-                    (Vec::new(), BTreeMap::new())
+                    // The one unarmed host: the crab-less screenshot path
+                    // (fp-screenshot without a checkpoint) — no crab world to read,
+                    // so the sim's crabs hold their spawn poses, clawless. Poses stay
+                    // mandatory; this is a diagnostics surface, not a served round.
+                    (inputs.fallback.clone(), BTreeMap::new())
                 };
                 let (bytes, restarted) = {
                     let mut state = world.non_send_resource_mut::<GameState>();

@@ -1,6 +1,6 @@
-//! Headless NN-crab probes: drive the REAL host stack — the crab slot pumping the one
-//! world (rl#298 stage 5) beside an authoritative [`Sim`] — with no renderer, and
-//! sample sim + world state per tick. Consumed by `game nn-crab-probe` (behavior/
+//! Headless NN-crab probes: the host's crab slot pumping the one world (rl#298
+//! stage 5) beside an authoritative [`Sim`], no renderer, sampling sim + world state
+//! per tick. Consumed by `game nn-crab-probe` (behavior/
 //! determinism A/B) and `game nn-crab-vehicle-stability` (the rl#137 ram test).
 //!
 //! The probe's sim is stepped 1:1 with the fixed schedule (one physics pass per sim
@@ -11,9 +11,7 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::Velocity;
 
-use crate::crab_slot::{
-    self, NnCrabPlugin, arm, park_fixed_auto_pump, pump_fixed_steps, restart_crabs_to_spawns,
-};
+use crate::crab_slot::{self, NnCrabPlugin, arm, park_fixed_auto_pump, restart_crabs_to_spawns};
 use crate::sim::{Externals, Input, PlayerId, Pos, Sim};
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint};
 use crab_world::bot::physics_digest::crab_state_digest;
@@ -55,6 +53,9 @@ impl Probe {
         let sim = Sim::new(seed, &[me]);
         let spawns: Vec<Pos> = sim.crabs().iter().map(|c| c.pos()).collect();
 
+        // The BARE crab stack, not `headless_server_world`: the stability probe
+        // hand-spawns its ram craft, which the vehicle layer's `manage_vehicles`
+        // would despawn as pilotless.
         let mut app = headless_stack(HeadlessStack {
             num_envs: spawns.len(),
             role: WorldRole::Standalone,
@@ -77,18 +78,17 @@ impl Probe {
         }
     }
 
-    /// One probe tick through the host seam: `Update` wrap, one fixed pump, poses off
-    /// the world into the sim step, next tick's hunt fed back.
+    /// One probe tick through the host seam: `Update` wrap, one fixed pump (the
+    /// probe's 1:1 cadence), poses off the world into the sim step, next tick's hunt
+    /// fed back — the same pump→collect→feed seam the hosts run ([`pump_slot_steps`]).
     fn tick(&mut self) {
-        let (_, hunt) = crab_slot::slot_inputs(&self.sim);
+        let inputs = crab_slot::slot_inputs(&self.sim);
         self.app.update();
-        pump_fixed_steps(self.app.world_mut(), 1);
-        let mut poses = crab_slot::collect_crab_poses(self.app.world_mut());
+        let mut poses = crab_slot::pump_slot_steps(self.app.world_mut(), 1, &inputs);
         for p in &mut poses {
             // Pursuit probe: no downs (module doc) — the pose crosses, the claws don't.
             p.claws.clear();
         }
-        crab_slot::feed_hunt(self.app.world_mut(), &hunt);
         let prey = self.sim.nearest_living_player_pos(0);
 
         let me = PlayerId(0);

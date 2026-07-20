@@ -5,7 +5,7 @@
 //! `PhysicsSet::SyncBackend`, so a "cosmetic" write to a [`CrabBodyPart`]
 //! teleports the body every step and blows up the multibody solver (the GCR
 //! play-day NaN crash, fixed in 931936a9). Cosmetic placement must ride the
-//! render-only proxies instead: [`super::skin`]'s bones / `CrabSkinRepose` /
+//! render-only proxies instead: [`super::skin`]'s bones / `CrabRenderPose` /
 //! the sampled `CrabRenderPose` overlay (rl#274).
 //!
 //! Enforcement: between two `SyncBackend`s the only legitimate writer of a live
@@ -139,7 +139,7 @@ pub fn assert_body_transforms_rapier_owned(
             "rl#116: a non-physics system wrote a rapier-driven Transform — crab env {} \
              `{part}` Transform is {:?}/{:?} but its rigid body is at {:?}/{:?}. SyncBackend \
              would teleport the body into this pose and blow up the solver. Cosmetic/render \
-             placement must use the render-only proxies (skin bones / CrabSkinRepose), never \
+             placement must use the render-only proxies (skin bones / CrabRenderPose), never \
              a CrabBodyPart Transform.",
             env.0, t.translation, t.rotation, body_pos, body_rot,
         );
