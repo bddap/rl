@@ -22,8 +22,12 @@ fn fixed_timestep() -> TimestepMode {
     }
 }
 
+/// Rapier's contact defaults (30 Hz / 5.0). Held explicit (with the PostStartup
+/// assert) so a bevy_rapier plumbing change can't silently swap the plant's contact
+/// stiffness. Was 5 Hz — a 36× softer spring that rested weight-bearing limbs
+/// 6–10 cm INSIDE the terrain (bddap/rl#299); at 30 Hz the same gait rests ≲1 cm.
 pub const CONTACT_SOFTNESS: SpringCoefficients<f32> = SpringCoefficients {
-    natural_frequency: 5.0,
+    natural_frequency: 30.0,
     damping_ratio: 5.0,
 };
 
