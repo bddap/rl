@@ -218,6 +218,15 @@ mod tests {
         Server::new(me, &[me], Sim::new(0x5A11, &[me]))
     }
 
+    /// A solo authoritative server plus the headless host world armed with `policy`,
+    /// crab at the sim's own spawn — the harness every slot test drives.
+    fn solo_host(policy: Policy) -> (Server, App) {
+        let server = solo_server();
+        let spawn = server.sim().crabs()[0].pos();
+        let app = headless_host_app(policy, spawn);
+        (server, app)
+    }
+
     /// rl#298 stage 2, link 1: the policy FORWARD runs inside the server's crab slot.
     /// After a slot pump, the actions driving the in-world body's motors are exactly
     /// the loaded brain's forward pass over the obs the sensor built that same pump —
@@ -235,9 +244,7 @@ mod tests {
             "the golden checkpoint must load — a Rest fallback would make this test vacuous"
         );
 
-        let mut server = solo_server();
-        let spawn = server.sim().crabs()[0].pos();
-        let mut app = headless_host_app(policy, spawn);
+        let (mut server, mut app) = solo_host(policy);
 
         // Past spawn + settle grace (32 physics ticks), into live sensing/acting.
         for t in 0..60u64 {
@@ -271,9 +278,8 @@ mod tests {
             let _ = actions.fill(0, w.0);
         }
 
-        let mut server = solo_server();
+        let (mut server, mut app) = solo_host(Policy::rest());
         let spawn = server.sim().crabs()[0].pos();
-        let mut app = headless_host_app(Policy::rest(), spawn);
         app.init_resource::<Wave>();
         // After Think (the policy's set), before Act (apply_actions): the wave is the
         // last CrabActions writer of the pump, same guarantee as ordering directly
@@ -317,15 +323,17 @@ mod tests {
     /// channel against the live carapace and the target channel against the posed
     /// lure — and the lure itself is re-derived from the SIM's own prey position
     /// through the one arena↔world correspondence (sim = arena + `ArenaAnchor`),
-    /// independently of the bridge's integrated position. The first sim→obs
-    /// cross-check: a stale, defaulted, or wrong-frame row fails here, and so does
-    /// any drift in the target conventions stage 4's trainer swap must reproduce
-    /// (band lure along the true bearing, surface-relative lure height).
+    /// independently of the bridge's integrated position. The crab is kept in motion
+    /// (the rl#224 flail) so the body moves between passes: a row stale by even one
+    /// step exceeds the body tolerance, and a defaulted or wrong-frame row misses by
+    /// meters. Also pins the target conventions stage 4's trainer swap must
+    /// reproduce (band lure along the true bearing, surface-relative lure height).
     #[test]
     fn obs_seam_reads_the_one_worlds_state_with_the_sims_prey_as_target() {
         #[derive(Resource, Default)]
         struct SenseSnap {
             carapace: Option<(Vec3, Quat)>,
+            prev_carapace: Option<Vec3>,
             target: Option<Vec3>,
             origin: Vec3,
         }
@@ -341,35 +349,61 @@ mod tests {
             let Some(t) = carapace_q.iter().next() else {
                 return;
             };
+            snap.prev_carapace = snap.carapace.map(|(p, _)| p);
             snap.carapace = Some((t.translation, t.rotation));
             snap.target = targets.get(0);
             snap.origin = spawns.origin(0);
         }
+        #[derive(Resource, Default)]
+        struct Wave(f32);
+        fn drive_wave(w: Res<Wave>, mut actions: ResMut<CrabActions>) {
+            let _ = actions.fill(0, w.0);
+        }
 
-        let mut server = solo_server();
-        let spawn = server.sim().crabs()[0].pos();
-        let mut app = headless_host_app(Policy::rest(), spawn);
+        let (mut server, mut app) = solo_host(Policy::rest());
         app.init_resource::<SenseSnap>();
+        app.init_resource::<Wave>();
         app.add_systems(
             FixedUpdate,
-            snap_sense
-                .after(crab_world::bot::BotSet::Sense)
-                .before(crab_world::bot::BotSet::Think),
+            (
+                snap_sense
+                    .after(crab_world::bot::BotSet::Sense)
+                    .before(crab_world::bot::BotSet::Think),
+                drive_wave
+                    .after(crab_world::bot::BotSet::Think)
+                    .before(crab_world::bot::BotSet::Act),
+            ),
         );
 
-        // Past spawn + settle grace, into live sensing with a fed hunt target.
+        // Past spawn + settle grace, into live sensing with a fed hunt target. The
+        // flail starts only post-settle: pre-settle motion is never integrated into
+        // her sim position (spawn-anchored until settle ends), so flailing there
+        // would widen the settle slide the seam assertion's slop must absorb.
         for t in 0..60u64 {
+            if t >= 20 {
+                app.world_mut().resource_mut::<Wave>().0 =
+                    if (t / 5) % 2 == 0 { 1.0 } else { -1.0 };
+            }
             server_tick(&mut app, &mut server, t);
         }
 
-        let (pos, rot, target, origin) = {
+        let (pos, rot, prev, target, origin) = {
             let snap = app.world().resource::<SenseSnap>();
             let (pos, rot) = snap.carapace.expect("carapace snapshotted post-settle");
             let target = snap
                 .target
                 .expect("the sim's living player must have posed a hunt target");
-            (pos, rot, target, snap.origin)
+            let prev = snap.prev_carapace.expect("two sensed passes ran");
+            (pos, rot, prev, target, snap.origin)
         };
+        // The flailing body really moves between passes — what gives the body pin
+        // below its anti-staleness teeth (inter-pass motion ≫ its tolerance).
+        assert!(
+            (pos - prev).length() > 1e-4,
+            "the flail must move the carapace between sensed passes \
+             (moved {:.6} m)",
+            (pos - prev).length()
+        );
         let obs = app.world().resource::<CrabObservation>();
         let view = obs.env(0).expect("env 0 sized");
 
@@ -417,31 +451,31 @@ mod tests {
         );
     }
 
-    /// rl#298 stage 3, control-rate half: the in-game action period equals training's
-    /// control period. Training acts once per physics step — `brain_step` in
-    /// `BotSet::Think` of `FixedUpdate`, pumped once per `PHYSICS_DT` by
-    /// `headless_stack`'s manual time drive (`training::inproc`'s rollout app). The
-    /// host runs `run_crab_policy` in the SAME Think slot of the SAME schedule, so
-    /// equality is by shared construction; this pins the host half: across a real
-    /// server run, every physics step the 64:30 cadence owes runs Think exactly once
-    /// (no decimation, no extra passes). If the in-game step rate ever exceeds the
-    /// control rate, action repeat must restore this equality (the epic's
+    /// rl#298 stage 3, control-rate half: equality with training's control period is
+    /// by shared construction (module doc); this pins the host half — across a real
+    /// server run, every physics step the 64:30 cadence owes writes the crab's
+    /// actions exactly once (no decimation, no extra passes), so the action period
+    /// is one physics step (`PHYSICS_DT`), training's control period. Counted by
+    /// change-detection on `CrabActions` in the window where `run_crab_policy` is
+    /// its only writer — a disarmed or decimated policy system fails here where a
+    /// bare pass counter would stay green. If the in-game step rate ever exceeds
+    /// the control rate, action repeat must restore this equality (the epic's
     /// parenthetical).
     #[test]
     fn in_game_action_period_equals_trainings_control_period() {
         #[derive(Resource, Default)]
-        struct ThinkPasses(u64);
-        fn count_think(mut passes: ResMut<ThinkPasses>) {
-            passes.0 += 1;
+        struct ActionWrites(u64);
+        fn count_action_writes(actions: Res<CrabActions>, mut writes: ResMut<ActionWrites>) {
+            writes.0 += u64::from(actions.is_changed());
         }
 
-        let mut server = solo_server();
-        let spawn = server.sim().crabs()[0].pos();
-        let mut app = headless_host_app(Policy::rest(), spawn);
-        app.init_resource::<ThinkPasses>();
+        let (mut server, mut app) = solo_host(Policy::rest());
+        app.init_resource::<ActionWrites>();
         app.add_systems(
             FixedUpdate,
-            count_think.after(crab_world::bot::BotSet::Think),
+            count_action_writes
+                .after(crab_world::bot::BotSet::Think)
+                .before(crab_world::bot::BotSet::Act),
         );
 
         for t in 0..90u64 {
@@ -453,17 +487,13 @@ mod tests {
             ticks, 90,
             "one authoritative tick per advance on the solo host"
         );
-        let passes = app.world().resource::<ThinkPasses>().0;
+        let writes = app.world().resource::<ActionWrites>().0;
         assert_eq!(
-            passes,
+            writes,
             crate::cadence::cumulative_steps(ticks),
-            "every pumped physics step must run Think exactly once — the action \
-             period is one physics step (PHYSICS_DT), training's control period"
-        );
-        assert!(
-            passes > ticks,
-            "the control rate outpaces the sim tick (64:30) — the pump, not the \
-             tick, sets the action period"
+            "every pumped physics step must write the crab's actions exactly once — \
+             the action period is one physics step (PHYSICS_DT), training's control \
+             period"
         );
     }
 }
