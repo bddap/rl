@@ -31,8 +31,9 @@ use crate::sim::{Pos, Sim};
 /// implementation for every caller of [`pump_crab_slot`], so the pre-read (which tick,
 /// which hunt source) cannot drift between the windowed driver and a renderless host.
 // The seam compiles render-free (rl#298 stage 4) but its only production caller today
-// is the windowed driver; the dead_code allowances fall away when a renderless
-// consumer (the trainer's server-world env) arrives.
+// is the windowed driver; the dead_code allowances fall away when a renderless HOST
+// driver arrives. (The trainer's env — `rollout_env` — consumes the server WORLD,
+// not the slot: it has no sim to correspond with, so nothing pumps these fns there.)
 #[cfg_attr(not(feature = "render"), allow(dead_code))]
 pub(crate) fn slot_inputs(sim: &Sim) -> (u64, Vec<Option<Pos>>) {
     let hunt = (0..sim.crabs().len())
@@ -123,7 +124,6 @@ fn discard_parked_overstep(mut fixed: ResMut<bevy::time::Time<bevy::time::Fixed>
 #[cfg(test)]
 mod tests {
     use bevy_rapier3d::prelude::Velocity;
-    use crab_world::Visuals;
     use crab_world::bot::actuator::{ACTION_SIZE, CrabActions};
     use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint};
     use crab_world::bot::headless::{
@@ -255,19 +255,20 @@ mod tests {
         }
     }
 
-    /// A headless host in the LIVE configuration: the crab stack armed in one world,
+    /// A headless host in the LIVE configuration: the server world
+    /// ([`crate::rollout_env::headless_server_world`] — the same constructor the
+    /// trainer's rollout env builds on, rl#298 stage 4) with the crab stack armed,
     /// the wall-clock auto-pump parked from birth (like the windowed app), so physics
     /// advances only through the slot — no renderer anywhere. The flat grid keeps the
     /// motion assertions attributable to the drive, not to sliding down the GCR
     /// origin slope.
     fn headless_host_app(policy: Policy, crab_spawn: Pos) -> App {
         pin_single_thread_pools();
-        let mut app = headless_stack(HeadlessStack {
-            num_envs: 1,
-            role: WorldRole::Standalone,
-            grid: std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(512.0)),
-            visuals: Visuals(false),
-        });
+        let mut app = crate::rollout_env::headless_server_world(
+            1,
+            WorldRole::Standalone,
+            std::sync::Arc::new(crab_world::terrain::TerrainGrid::flat(512.0)),
+        );
         app.add_plugins(ExternalCrabPlugin::new(vec![policy], vec![crab_spawn]));
         arm(app.world_mut());
         force_serial_schedules(&mut app);

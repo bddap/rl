@@ -288,6 +288,9 @@ fn log_bearing_reach(window: &[(u64, u64); crate::eval::EVAL_BEARINGS]) {
 /// ([`crate::mesh_fallback::require_canonical_body`]), required here so a new entry
 /// point can't build training worlds while silently on the fallback body; the
 /// best-keeper carries it into its periodic chase-evals.
+// One arg per CLI knob, single call site (`rl-train` Learn): a params struct here
+// would only re-bundle clap fields the caller just unbundled.
+#[allow(clippy::too_many_arguments)]
 pub fn run_learner(
     body_gate: crate::mesh_fallback::BodyGate,
     config: &TrainConfig,
@@ -296,6 +299,7 @@ pub fn run_learner(
     horizon: u64,
     iters: u64,
     nice: i32,
+    build_env: super::RolloutEnvBuilder,
 ) {
     // Own nicing here (one place): lowers this whole process's priority before any
     // world is built, so a foreground game preempts training. The rollout threads
@@ -402,7 +406,7 @@ pub fn run_learner(
 
     // Spawn the K rollout threads; each builds its App (seconds) before serving.
     let threads: Vec<RolloutThread> = (0..k)
-        .map(|id| RolloutThread::spawn(id, config.clone(), arch, horizon))
+        .map(|id| RolloutThread::spawn(id, config.clone(), arch, horizon, build_env))
         .collect();
     eprintln!("[learner] {k} rollout thread(s) building worlds…");
 

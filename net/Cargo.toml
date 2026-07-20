@@ -45,5 +45,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 test-watchdog = { path = "../test-watchdog" }
+# TrainConfig::try_parse_from in the rollout-env tests.
+clap.workspace = true
 # test-grid: TerrainGrid::flat fixtures in this crate's tests (driver roundtrip, teleport)
 crab-world = { path = "../crab-world", features = ["test-grid"] }
