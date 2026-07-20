@@ -154,9 +154,10 @@ pub struct TrainConfig {
 }
 
 impl TrainConfig {
-    /// Envs per rollout world as a count — the ONE place `--envs 0` clamps to 1, so a
-    /// world's `NumEnvs` and its `TrainingState` buffers can never be sized from
-    /// disagreeing formulas.
+    /// Envs per rollout world as a count — the ONE sizing formula, so a world's
+    /// `NumEnvs`, its `TrainingState` buffers, and the learner's accounting can never
+    /// disagree. (clap already rejects `--envs 0`; the clamp is a backstop for
+    /// hand-built configs.)
     pub fn num_envs(&self) -> usize {
         self.envs.max(1) as usize
     }
