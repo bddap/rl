@@ -478,8 +478,8 @@ impl Plugin for ExternalCrabPlugin {
         );
         // Publish each binding's on-screen brain label (rl#200 increment 7). In FixedUpdate
         // deliberately: only the physics-pumping peer (solo/host) advances FixedUpdate
-        // (the wall-clock auto-pump is PARKED — to a 86400s timestep, so "never" really
-        // means "not within a day's uptime" — and `pump_fixed_steps` is driven by the client-sim tick drain),
+        // (the wall-clock auto-pump is PARKED — `park_fixed_auto_pump`, exact since
+        // rl#298 stage 4 — and `pump_fixed_steps` is driven by the client-sim tick drain),
         // so this is host-only by construction; on a remote-adopt client the articulation
         // `apply` is the sole label writer and the two can't fight over the resource.
         // Render-gated (with the skin repose below): labels/skin feed UI a renderless

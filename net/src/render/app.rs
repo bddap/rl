@@ -226,7 +226,7 @@ pub(super) fn add_external_nn_crab(
             crab_spawns,
         ));
 
-    crate::crab_slot::park_fixed_auto_pump(app.world_mut());
+    crate::crab_slot::park_fixed_auto_pump(app);
 }
 
 pub(super) fn install_armed_nn_crab(
