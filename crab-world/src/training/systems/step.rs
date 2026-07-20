@@ -422,6 +422,15 @@ mod tests {
                 .join(format!("rl_test_determinism_{seed}_{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             let mut app = headless_training_app(&dir, seed);
+            // The production rollout registers the shove system (rl#298 stage 4);
+            // registering it here pins the shove draw stream — which consumes the
+            // training RNG every recording tick — into the same-seed contract.
+            app.add_systems(
+                FixedUpdate,
+                super::super::shove_crabs
+                    .after(crate::bot::BotSet::Act)
+                    .before(bevy_rapier3d::plugin::PhysicsSet::SyncBackend),
+            );
             app.world_mut()
                 .non_send_resource_mut::<TrainingState>()
                 .brain
