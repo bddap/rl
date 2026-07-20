@@ -30,6 +30,10 @@ use crate::sim::{Pos, Sim};
 /// the pump: the tick being stepped INTO, and each crab's hunt target. One
 /// implementation for every caller of [`pump_crab_slot`], so the pre-read (which tick,
 /// which hunt source) cannot drift between the windowed driver and a renderless host.
+// The seam compiles render-free (rl#298 stage 4) but its only production caller today
+// is the windowed driver; the dead_code allowances fall away when a renderless
+// consumer (the trainer's server-world env) arrives.
+#[cfg_attr(not(feature = "render"), allow(dead_code))]
 pub(crate) fn slot_inputs(sim: &Sim) -> (u64, Vec<Option<Pos>>) {
     let hunt = (0..sim.crabs().len())
         .map(|idx| sim.nearest_living_player_pos(idx))
@@ -46,6 +50,7 @@ pub(crate) fn slot_inputs(sim: &Sim) -> (u64, Vec<Option<Pos>>) {
 /// the pump — the pump never mutates the sim, so the values equal a post-pump read.
 /// Feeding them after the pump is deliberate: this tick's pump walks on LAST tick's
 /// targets, exactly the ordering the pre-extraction driver had.
+#[cfg_attr(not(feature = "render"), allow(dead_code))]
 pub(crate) fn pump_crab_slot(
     world: &mut World,
     stepping_into: u64,
@@ -70,6 +75,7 @@ pub(crate) fn pump_crab_slot(
 /// wall-clock auto-pump is parked ([`park_fixed_auto_pump`]), so these calls are the
 /// ONLY thing that advances `FixedMain`; the per-tick count comes from
 /// [`crate::cadence::steps_for_tick`], the one source for the 64:30 staircase.
+#[cfg_attr(not(feature = "render"), allow(dead_code))]
 pub(crate) fn pump_fixed_steps(world: &mut World, steps: u32) {
     use bevy::app::FixedMain;
     use bevy::time::{Fixed, Time, Virtual};
@@ -89,6 +95,7 @@ pub(crate) fn pump_fixed_steps(world: &mut World, steps: u32) {
 /// Park the wall-clock fixed-timestep auto-pump (to an 86400 s timestep, so "never"
 /// really means "not within a day's uptime"): every peer's `FixedUpdate` then advances
 /// only through [`pump_fixed_steps`], which only the server-auth arm calls.
+#[cfg_attr(not(feature = "render"), allow(dead_code))]
 pub(crate) fn park_fixed_auto_pump(world: &mut World) {
     world
         .resource_mut::<bevy::time::Time<bevy::time::Fixed>>()
