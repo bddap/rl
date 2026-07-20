@@ -541,13 +541,17 @@ mod tests {
     /// the SAME construction code on the host and the trainer — exchanges momentum
     /// with world content BOTH ways, not just registers a contact pair: a ramming
     /// craft knocks her carapace back (the world pushes her), and the rammer leaves
-    /// the impact slower than it arrived (she pushes back). The stack is the host's
-    /// (same plugins, same collision groups; net's pump-equivalence test pins that a
-    /// headless stack steps tick-for-tick what the client pumps) on the flat fixture
-    /// grid — a zero-action ragdoll never settles on the GCR origin slope, and aiming
-    /// a ballistic ram needs a stationary target. No `VehiclePlugin`, deliberately —
-    /// a zero-g Ship with no flight forces is ballistic, so the only thing that can
-    /// bleed its speed is her body.
+    /// the impact slower than it arrived (she pushes back). This reaches the armed
+    /// host by composition, not by rebuilding its whole assembly here: the physics
+    /// core and collision groups are the ones the host installs (net's
+    /// pump-equivalence test pins that this stack steps tick-for-tick what the client
+    /// pumps), the rammer is the production `vehicle_bundle`, the omitted bridge
+    /// never writes per-tick body poses (its recenter rebases spawn origins only),
+    /// and net's carapace-delta test pins that a carapace push folds 1:1 into her
+    /// game pose. Flat fixture grid — a zero-action ragdoll never settles on the GCR
+    /// origin slope, and aiming a ballistic ram needs a stationary target. No
+    /// `VehiclePlugin`, deliberately — a zero-g Ship with no flight forces is
+    /// ballistic, so the only thing that can bleed its speed is her body.
     #[test]
     fn ramming_craft_and_crab_exchange_momentum_both_ways() {
         use crate::bot::body::CrabCarapace;
