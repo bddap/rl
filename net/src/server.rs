@@ -296,9 +296,10 @@ pub struct Server {
     /// The assembled tick awaiting the authoritative step, if any. At most ONE by construction
     /// ([`Server::advance`] refuses to assemble past an unstepped tick), which is what lets each
     /// [`PendingTick`] carry the watermark map for exactly its own snapshot. Held (rather than
-    /// stepping inside `advance`) so the driver can pump the tick's crab physics between the
-    /// two: the rapier pump needs the bevy `World`, which this pure core can't hold. The
-    /// headless `game net` host (no bevy world, no crab pump) assembles and steps in the same
+    /// stepping inside `advance`) so the host can run the crab slot between the two
+    /// (`crab_slot::pump_crab_slot`, rl#298 stage 2): the tick's crab physics AND policy
+    /// forward, pumped in the host's one bevy `World`, which this pure core can't hold. The
+    /// headless `game net` host (no bevy world, no crab slot) assembles and steps in the same
     /// pass.
     pending: Option<PendingTick>,
 }

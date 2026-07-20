@@ -1,7 +1,7 @@
 use super::app::ExternalCrabStackInstalled;
 use super::driver::{
     FlightInput, GameState, PendingRound, VEHICLE_STICK_SENS, ensure_round_installed,
-    flight_control, park_fixed_auto_pump, pump_fixed_steps,
+    flight_control,
 };
 use super::input::pad_stick_axes;
 use super::scene::{lerp_pos, lerp_yaw, look_direction};
@@ -117,64 +117,6 @@ fn unarmable_round_refuses_with_actionable_message_not_a_crash() {
         plant.contains("rl-update"),
         "tells the operator the fix: {plant}"
     );
-}
-
-#[test]
-fn manual_pump_matches_auto_pump_step_for_step() {
-    use bevy_rapier3d::prelude::Velocity;
-    use crab_world::bot::actuator::{ACTION_SIZE, CrabActions};
-    use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabJoint};
-    use crab_world::bot::headless::{HeadlessStack, WorldRole, headless_stack};
-    use crab_world::bot::physics_digest::crab_state_digest;
-
-    let build = || {
-        headless_stack(HeadlessStack {
-            num_envs: 1,
-            role: WorldRole::Standalone,
-            // Models the GCR client's world, so it steps the client's ground — the
-            // canonical terrain bake (rl#209, rl#293).
-            grid: crab_world::terrain::TerrainGrid::gcr(),
-            visuals: crab_world::Visuals(false),
-        })
-    };
-    let mut auto = build();
-    let mut manual = build();
-    auto.update();
-    manual.update();
-    park_fixed_auto_pump(manual.world_mut());
-
-    let digest = |app: &mut App| -> u64 {
-        let mut q = app.world_mut().query_filtered::<(
-            &Transform,
-            &Velocity,
-            Option<&CrabJoint>,
-            Option<&CrabCarapace>,
-        ), With<CrabBodyPart>>();
-        crab_state_digest(q.iter(app.world()))
-    };
-    let set_torque = |app: &mut App, a: [f32; ACTION_SIZE]| {
-        assert!(app.world_mut().resource_mut::<CrabActions>().set_row(0, a));
-    };
-
-    let mut lcg: u64 = 0x1234_5678_9abc_def0;
-    for t in 0..120u32 {
-        let mut act = [0.0f32; ACTION_SIZE];
-        for slot in act.iter_mut() {
-            lcg = lcg
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            *slot = ((lcg >> 40) as u32 as f32 / (1u32 << 24) as f32) * 1.6 - 0.8;
-        }
-        set_torque(&mut auto, act);
-        set_torque(&mut manual, act);
-        auto.update();
-        pump_fixed_steps(manual.world_mut(), 1);
-        assert_eq!(
-            digest(&mut auto),
-            digest(&mut manual),
-            "manual pump diverged from auto-pump at tick {t}"
-        );
-    }
 }
 
 #[test]

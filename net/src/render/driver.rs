@@ -552,28 +552,6 @@ fn own_wire_pose(art: &crate::articulation::CrabArticulation, me: PilotId) -> Op
     })
 }
 
-pub(crate) fn pump_fixed_steps(world: &mut World, steps: u32) {
-    use bevy::app::FixedMain;
-    use bevy::time::{Fixed, Time, Virtual};
-
-    if steps == 0 {
-        return;
-    }
-    for _ in 0..steps {
-        let fixed = world.resource::<Time<Fixed>>().as_generic();
-        *world.resource_mut::<Time>() = fixed;
-        world.run_schedule(FixedMain);
-    }
-    let virt = world.resource::<Time<Virtual>>().as_generic();
-    *world.resource_mut::<Time>() = virt;
-}
-
-pub(crate) fn park_fixed_auto_pump(world: &mut World) {
-    world
-        .resource_mut::<bevy::time::Time<bevy::time::Fixed>>()
-        .set_timestep(std::time::Duration::from_secs(86_400));
-}
-
 pub(super) fn drive_client_sim(world: &mut World) {
     let armed = world
         .get_resource::<crate::external_crab::ExternalCrabArmed>()
@@ -787,24 +765,15 @@ pub(super) fn drive_client_sim(world: &mut World) {
 
             {
                 let (crab_poses, shadows) = if armed {
-                    let stepping_into = {
+                    let (stepping_into, hunt) = {
                         let state = world.non_send_resource::<GameState>();
-                        state.server().expect("server_auth ⇒ a server").sim().tick() + 1
+                        let sim = state.server().expect("server_auth ⇒ a server").sim();
+                        let hunt: Vec<_> = (0..sim.crabs().len())
+                            .map(|idx| sim.nearest_living_player_pos(idx))
+                            .collect();
+                        (sim.tick() + 1, hunt)
                     };
-                    pump_fixed_steps(world, crate::cadence::steps_for_tick(stepping_into));
-                    let poses = world.resource_scope(
-                        |world, mut bridge: Mut<crate::external_crab::ExternalCrabBridge>| {
-                            let poses = bridge.crab_poses();
-                            let state = world.non_send_resource::<GameState>();
-                            for idx in 0..bridge.crab_count() {
-                                let hunt = state
-                                    .server()
-                                    .and_then(|s| s.sim().nearest_living_player_pos(idx));
-                                bridge.set_hunt_target(idx, hunt);
-                            }
-                            poses
-                        },
-                    );
+                    let poses = crate::crab_slot::pump_crab_slot(world, stepping_into, &hunt);
                     if let Some(p) = read_vehicle_pose(world, me) {
                         world
                             .resource_mut::<LocalVehicle>()
