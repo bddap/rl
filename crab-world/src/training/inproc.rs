@@ -146,20 +146,12 @@ enum RollOutcome {
     SnapshotLoadFailed,
 }
 
-/// The rollout env constructor a worker thread builds its world with, injected by the
-/// binary (rl#298 stage 4): the ONE production implementation is
-/// `net::rollout_env::build_rollout_app` — the headless server world — passed down by
-/// `rl-train`, because this crate sits BELOW net in the dependency graph and must not
-/// grow a second world construction of its own. Args: worker id, config, arch,
-/// env count.
-pub type RolloutEnvBuilder = fn(usize, &TrainConfig, ArchId, usize) -> App;
-
 /// The training half of a rollout env: the worker's [`TrainingState`] plus the systems
 /// that drive and record her — the trainer's counterpart of net's inference driver
-/// (`run_crab_policy`). A [`RolloutEnvBuilder`] composes this onto the world half it
-/// constructs; splitting the halves is what lets the world live in net while the
-/// training systems stay crate-private here.
-pub fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usize, arch: ArchId) {
+/// (`run_crab_policy`), occupying the same `BotSet::Think` slot.
+/// [`build_rollout_app`] composes this onto the server world; the systems-level tests
+/// (`systems::step`) compose it onto their one-env fixtures.
+pub(crate) fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usize, arch: ArchId) {
     use super::systems::{self, brain_step, reset_crab};
 
     let state = systems::TrainingState::new_worker(config, id, arch);
@@ -178,6 +170,34 @@ pub fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usize, arc
     );
 }
 
+/// Build one rollout worker's env — the trainer trains in the headless server world
+/// (rl#298 stage 4): [`headless_server_world`] on the canonical ground (the plant's
+/// world half, rl#293 — recorded in the checkpoint sidecar beside the friction cap),
+/// driven by the training systems.
+///
+/// The ball target REPLACES the served world's hunt feed here, it does not ride its
+/// plumbing: the bridge's hunt poser (`set_crab_walk_target` in net) poses prey at one
+/// fixed height above the surface, which cannot express the trained height band or the
+/// under-carapace close disc the grab curriculum needs (rl#250). The target source
+/// stays the ball sampler ([`super::targets`]), whose band/bearing/surface conventions
+/// the hunt poser already shares through the one `band_lure` implementation.
+///
+/// [`headless_server_world`]: crate::bot::headless::headless_server_world
+pub(crate) fn build_rollout_app(id: usize, config: &TrainConfig, arch: ArchId) -> App {
+    use crate::bot::headless::{WorldRole, force_serial_schedules, headless_server_world};
+
+    let mut app = headless_server_world(
+        config.num_envs(),
+        WorldRole::RolloutWorker,
+        crate::terrain::TerrainGrid::gcr(),
+    );
+    wire_rollout_training(&mut app, config, id, arch);
+    force_serial_schedules(&mut app);
+    app.finish();
+    app.cleanup();
+    app
+}
+
 struct RolloutThread {
     request_tx: Sender<RollRequest>,
     result_rx: Receiver<RollOutcome>,
@@ -185,20 +205,12 @@ struct RolloutThread {
 }
 
 impl RolloutThread {
-    fn spawn(
-        id: usize,
-        config: TrainConfig,
-        arch: ArchId,
-        horizon: u64,
-        build_env: RolloutEnvBuilder,
-    ) -> Self {
+    fn spawn(id: usize, config: TrainConfig, arch: ArchId, horizon: u64) -> Self {
         let (request_tx, request_rx) = channel::<RollRequest>();
         let (result_tx, result_rx) = channel::<RollOutcome>();
         let handle = std::thread::Builder::new()
             .name(format!("rollout-{id}"))
-            .spawn(move || {
-                rollout_thread_main(id, config, arch, horizon, build_env, request_rx, result_tx)
-            })
+            .spawn(move || rollout_thread_main(id, config, arch, horizon, request_rx, result_tx))
             .expect("spawn rollout thread");
         Self {
             request_tx,
@@ -223,12 +235,10 @@ fn rollout_thread_main(
     config: TrainConfig,
     arch: ArchId,
     horizon: u64,
-    build_env: RolloutEnvBuilder,
     request_rx: Receiver<RollRequest>,
     result_tx: Sender<RollOutcome>,
 ) {
-    let num_envs = config.envs.max(1) as usize;
-    let mut app = build_env(id, &config, arch, num_envs);
+    let mut app = build_rollout_app(id, &config, arch);
     warm_up_app(&mut app);
 
     while let Ok(req) = request_rx.recv() {
@@ -240,7 +250,7 @@ fn rollout_thread_main(
                     "[rollout-{id}] env panicked mid-roll (likely a solver NaN); \
                      rebuilding this thread's world, run continues"
                 );
-                let mut fresh = build_env(id, &config, arch, num_envs);
+                let mut fresh = build_rollout_app(id, &config, arch);
                 warm_up_app(&mut fresh);
                 fresh
             },
@@ -417,27 +427,76 @@ mod tests {
         }
     }
 
-    /// The thread-machinery tests' env builder: the same training wiring production
-    /// composes ([`wire_rollout_training`]), on a crate-local world — net's server
-    /// world (`net::rollout_env::build_rollout_app`, the production
-    /// [`RolloutEnvBuilder`]) sits above this crate in the dependency graph, and these
-    /// tests exercise the thread/channel/buffer machinery, not the env.
-    fn fixture_env(id: usize, config: &TrainConfig, arch: ArchId, num_envs: usize) -> App {
-        use crate::bot::headless::{
-            HeadlessStack, WorldRole, force_serial_schedules, headless_stack,
-        };
+    /// The production rollout env end-to-end ([`build_rollout_app`]): the server
+    /// world armed (vehicle layer present), every env's crab spawned, the training
+    /// driver sampling live actions in the Think slot, and the ball target seeded to
+    /// its band + surface conventions — the rl#298 stage-4 acceptance in one world.
+    #[test]
+    fn rollout_env_is_the_server_world_driven_by_the_training_systems() {
+        use crate::bot::RESET_GRACE_TICKS;
+        use crate::bot::actuator::CrabActions;
+        use crate::bot::body::{CrabCarapace, CrabEnvId};
+        use crate::bot::sensor::CrabTargets;
+        use crate::training::targets::BAND_MAX_M;
+        use crate::vehicle::VehicleControls;
 
-        let mut app = headless_stack(HeadlessStack {
-            num_envs,
-            role: WorldRole::RolloutWorker,
-            grid: crate::terrain::TerrainGrid::gcr(),
-            visuals: crate::Visuals(false),
-        });
-        wire_rollout_training(&mut app, config, id, arch);
-        force_serial_schedules(&mut app);
-        app.finish();
-        app.cleanup();
-        app
+        let m = 2usize;
+        let (config, dir) = scratch_config("rollout_env", m as u64);
+
+        let mut app = build_rollout_app(0, &config, ArchId::DEFAULT);
+        // Past spawn + settle grace, into live recording.
+        for _ in 0..(RESET_GRACE_TICKS + 24) {
+            app.update();
+        }
+
+        assert!(
+            app.world().contains_resource::<VehicleControls>(),
+            "the rollout env must be the server world — vehicle layer armed"
+        );
+
+        let mut crabs = app
+            .world_mut()
+            .query_filtered::<&CrabEnvId, With<CrabCarapace>>();
+        let mut envs: Vec<usize> = crabs.iter(app.world()).map(|e| e.0).collect();
+        envs.sort_unstable();
+        assert_eq!(envs, vec![0, 1], "one crab per env in the one world");
+
+        let actions = app.world().resource::<CrabActions>();
+        for e in 0..m {
+            assert!(
+                actions.rows()[e].iter().any(|v| *v != 0.0),
+                "env {e}: the training driver must be sampling live actions post-settle"
+            );
+        }
+        let first: Vec<_> = (0..m).map(|e| actions.rows()[e]).collect();
+        app.update();
+        let actions = app.world().resource::<CrabActions>();
+        assert!(
+            (0..m).any(|e| actions.rows()[e] != first[e]),
+            "consecutive steps must draw fresh exploration samples — an inference \
+             (deterministic) driver would repeat under a frozen obs"
+        );
+
+        let spawns = app.world().resource::<crate::bot::CrabSpawns>();
+        let targets = app.world().resource::<CrabTargets>();
+        let terrain = app.world().resource::<crate::terrain::Terrain>();
+        for e in 0..m {
+            let t = targets.get(e).expect("the ball target must be seeded");
+            let origin = spawns.origin(e);
+            let planar = Vec2::new(t.x - origin.x, t.z - origin.z).length();
+            assert!(
+                planar <= BAND_MAX_M + 1e-3,
+                "env {e}: ball at {planar} m must sit inside the trained band"
+            );
+            let above = t.y - terrain.height(t.x, t.z);
+            assert!(
+                (0.0..1.0).contains(&above),
+                "env {e}: ball rides {above} m above the surface — the ball target's \
+                 surface-relative convention, not the hunt feed's fixed claw height"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     pub(super) fn scratch_config(tag: &str, m: u64) -> (TrainConfig, std::path::PathBuf) {
@@ -535,13 +594,7 @@ mod tests {
         let mut state = TrainingState::new(&config, None);
         let before = snapshot_brain_bytes(state.brain());
 
-        let thread = RolloutThread::spawn(
-            0,
-            config.clone(),
-            state.brain().arch(),
-            horizon,
-            fixture_env,
-        );
+        let thread = RolloutThread::spawn(0, config.clone(), state.brain().arch(), horizon);
         thread
             .request_tx
             .send(RollRequest {
@@ -609,15 +662,7 @@ mod tests {
         let normalizer = Arc::new(state.normalizer_snapshot());
 
         let threads: Vec<RolloutThread> = (0..k)
-            .map(|id| {
-                RolloutThread::spawn(
-                    id,
-                    config.clone(),
-                    state.brain().arch(),
-                    horizon,
-                    fixture_env,
-                )
-            })
+            .map(|id| RolloutThread::spawn(id, config.clone(), state.brain().arch(), horizon))
             .collect();
         for t in &threads {
             t.request_tx

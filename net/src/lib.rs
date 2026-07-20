@@ -19,17 +19,14 @@ pub mod telemetry;
 pub mod transport;
 pub mod wire;
 
-// Render-free since rl#298 stage 4, so the trainer can dep this crate without the
-// render stack: only the label/skin publishers inside stay render-gated — they feed
-// UI. The trainer's env is `rollout_env`; the slot fns' renderless production caller
-// is still pending (a headless host driver), so their dead_code allowances stay.
+// Render-free since rl#298 stage 4: only the label/skin publishers inside stay
+// render-gated — they feed UI.
 pub(crate) mod crab_slot;
 pub mod external_crab;
 #[cfg(feature = "render")]
 pub mod menu;
 #[cfg(feature = "render")]
 pub mod render;
-pub mod rollout_env;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncVerdict {
