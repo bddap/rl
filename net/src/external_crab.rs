@@ -646,7 +646,7 @@ fn set_crab_walk_target(
     }
 }
 
-pub(crate) fn run_crab_policy(
+fn run_crab_policy(
     policies: NonSend<CrabPolicies>,
     mut bridge: ResMut<ExternalCrabBridge>,
     obs: Res<crab_world::bot::sensor::CrabObservation>,
