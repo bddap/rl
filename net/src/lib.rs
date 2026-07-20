@@ -19,8 +19,8 @@ pub mod telemetry;
 pub mod transport;
 pub mod wire;
 
-// Render-free since rl#298 stage 4 (the trainer's headless server world consumes the
-// seam): only the label/skin publishers inside stay render-gated — they feed UI.
+// Render-free since rl#298 stage 4, for the trainer's headless server world to
+// consume: only the label/skin publishers inside stay render-gated — they feed UI.
 pub(crate) mod crab_slot;
 pub mod external_crab;
 #[cfg(feature = "render")]

@@ -5,10 +5,11 @@
 //! stays unshoved.
 //!
 //! Scale is anchored to measured world contacts, not invented: the rl#298 stage-1 ram
-//! pin (a production craft at 8 m/s) knocks the carapace ~0.2 m, and 70 N over the
-//! same 8-tick burst visibly displaces a settled crab (`external_force_shoves_a_
-//! multibody_root`). The force band brackets that datum on both sides so the policy
-//! sees nudges through hits harder than a ram, at ~2 shoves per max-length episode.
+//! (a production craft at 8 m/s) measured ~0.2 m of carapace knockback (its pin
+//! asserts >0.02 m), and 70 N over the same 8-tick burst visibly displaces a settled
+//! crab (`external_force_shoves_a_multibody_root`). The force band brackets that
+//! datum on both sides so the policy sees nudges through hits harder than a ram, at
+//! ~2 shoves per max-length episode.
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::ExternalForce;
@@ -43,11 +44,13 @@ pub(crate) fn shove_crabs(
 ) {
     let TrainingState { envs, rng, .. } = &mut *training;
     for ep in envs.iter_mut() {
-        if !matches!(ep.phase, EnvPhase::Recording) {
-            // A burst never bleeds into the respawn settle — the grace period exists
-            // to hand every episode a grounded start.
-            ep.shove.remaining = 0;
-        } else if ep.shove.remaining == 0 && rng.gen_range(0.0..1.0) < SHOVE_START_PROB {
+        // Starts are gated on Recording; clearing needs no code here because episode
+        // end wholesale-replaces the `EnvEpisode` (`finalize_transitions`), so a burst
+        // cannot outlive its episode — the respawn settle always starts unshoved.
+        if matches!(ep.phase, EnvPhase::Recording)
+            && ep.shove.remaining == 0
+            && rng.gen_range(0.0..1.0) < SHOVE_START_PROB
+        {
             let angle = rng.gen_range(0.0..std::f32::consts::TAU);
             let newtons = rng.gen_range(SHOVE_FORCE_MIN_N..SHOVE_FORCE_MAX_N);
             ep.shove = ShoveState {
@@ -74,8 +77,11 @@ mod tests {
 
     /// The apply path end-to-end in a real training world: a hand-armed burst on env 0
     /// must survive `apply_actions`'s per-tick force zeroing and visibly displace the
-    /// settled crab, and the burst must age out. (The draw path is a probability gate
-    /// over the same state — exercised implicitly by every seeded rollout.)
+    /// settled crab, and the burst must age out. The env is parked in `Settling` so
+    /// the random draw gate stays cold — the assertions depend on the armed burst
+    /// alone, not on the seeded RNG stream. (Draws are covered by
+    /// `same_seed_reproduces_the_rollout_trajectory`, whose harness registers this
+    /// system.)
     #[test]
     fn armed_shove_displaces_the_crab_and_expires() {
         use bevy_rapier3d::plugin::PhysicsSet;
@@ -90,11 +96,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let config = crate::TrainConfig::scratch(&dir, 1, 0x5140);
         let mut app = flat_headless_app();
-        app.insert_non_send_resource(TrainingState::new_worker(
-            &config,
-            0,
-            crate::bot::arch::ArchId::DEFAULT,
-        ));
+        let mut state = TrainingState::new_worker(&config, 0, crate::bot::arch::ArchId::DEFAULT);
+        // Park the env outside Recording for the whole test: the draw gate stays
+        // cold, so no spontaneous burst can contaminate the measured displacement.
+        state.envs[0].phase = EnvPhase::Settling { grace: u32::MAX };
+        app.insert_non_send_resource(state);
         app.add_systems(
             FixedUpdate,
             shove_crabs
