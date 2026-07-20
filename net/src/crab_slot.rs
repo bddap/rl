@@ -72,37 +72,21 @@ fn pos_to_m(p: Pos) -> Vec2 {
     Vec2::new(x, z)
 }
 
-/// Per-crab slot bookkeeping: the last world pose successfully read off the crab's
-/// body, held as the feed when a read legitimately can't happen (pre-spawn, the
-/// rescue-owned non-finite window) — the sim keeps acting on her last real spot.
-struct SlotCrab {
-    pose: CrabPose,
-    /// Consecutive ticks [`collect_crab_poses`] found no carapace for this env — the
-    /// crab's sim pose freezes at its last read (still lethal there) while the world
-    /// looks healthy, so the miss is counted and reported like drift, never skipped
-    /// silently (rl#241). Resets when the carapace comes back.
-    missed_ticks: u64,
-    /// Log cursor for the miss counter: the next miss count worth a log line (doubles
-    /// per line, so a persistent miss is quantified without flooding).
-    next_miss_log: u64,
-}
-
-impl SlotCrab {
-    fn new(spawn: Pos) -> Self {
-        Self {
-            pose: CrabPose {
-                pos: spawn,
-                yaw: 0,
-                claws: Vec::new(),
-            },
-            missed_ticks: 0,
-            next_miss_log: 1,
-        }
-    }
+/// Per-env counter of consecutive post-settle ticks [`collect_crab_poses`] found no
+/// carapace to read — the crab's sim pose holds at its last adopted spot (still lethal
+/// there) while the world looks healthy, so the miss is counted and reported like
+/// drift, never skipped silently (rl#241). Resets when the carapace comes back; the
+/// settle window and the rescue-owned non-finite state are legitimate, not misses.
+#[derive(Default)]
+struct Miss {
+    ticks: u64,
+    /// Log cursor: the next miss count worth a log line (doubles per line, so a
+    /// persistent miss is quantified without flooding).
+    next_log: u64,
 }
 
 #[derive(Resource)]
-struct SlotCrabs(Vec<SlotCrab>);
+struct SlotMisses(Vec<Miss>);
 
 /// Post-settle rest-hold countdown per env, re-armed by a respawn (round restart,
 /// rescue): the freshly-placed ragdoll settles before the policy drives it — and the
@@ -156,8 +140,8 @@ impl Plugin for NnCrabPlugin {
             "one crab spawn per brain binding — the sim's crab count must match the bindings"
         );
         app.insert_non_send_resource(CrabPolicies(policies));
-        app.insert_resource(SlotCrabs(
-            self.crab_spawns.iter().map(|&s| SlotCrab::new(s)).collect(),
+        app.insert_resource(SlotMisses(
+            self.crab_spawns.iter().map(|_| Miss::default()).collect(),
         ));
         app.insert_resource(CrabSettle(vec![
             crab_world::bot::RESET_GRACE_TICKS;
@@ -208,8 +192,8 @@ impl Plugin for NnCrabPlugin {
     }
 }
 
-fn ensure_crab_env(crabs: Res<SlotCrabs>, mut num_envs: ResMut<crab_world::bot::NumEnvs>) {
-    let want = crabs.0.len();
+fn ensure_crab_env(settle: Res<CrabSettle>, mut num_envs: ResMut<crab_world::bot::NumEnvs>) {
+    let want = settle.0.len();
     if num_envs.0 < want {
         num_envs.0 = want;
     }
@@ -333,31 +317,44 @@ fn run_crab_policy(
     }
 }
 
+/// One env's carapace read before the [`CrabPose`] materializes — `yaw` is `None`
+/// when she stands still (no planar velocity to derive a facing from): the merge
+/// holds the sim's current facing there instead of inventing one.
+struct ReadPose {
+    pos: Pos,
+    yaw: Option<i32>,
+    claws: Vec<ClawPose>,
+}
+
 /// Read every crab's world pose + claw capsules off its body — the sim feed
 /// ([`crate::sim::Externals::crabs`]). One frame: the carapace's translation IS her
 /// sim position, her claw capsules cross in world coordinates with surface-relative
 /// heights ([`ClawPose`]'s convention). Yaw derives from the carapace's planar
-/// velocity (held when she stands still); a missing or non-finite carapace holds the
-/// last read pose (miss counted loudly — rl#241; non-finite is the rescue path's).
-pub(crate) fn collect_crab_poses(world: &mut World) -> Vec<CrabPose> {
+/// velocity. `fallback` is each crab's current sim pose ([`SlotInputs::fallback`]):
+/// where the world has nothing readable, the sim keeps acting at her last adopted
+/// spot, clawless — a claw capture must never outlive the tick that measured it
+/// (rl#294), so a stale-lethal window is unrepresentable. A missing carapace past the
+/// settle window is counted loudly (rl#241); non-finite is the rescue path's.
+pub(crate) fn collect_crab_poses(world: &mut World, fallback: &[CrabPose]) -> Vec<CrabPose> {
     let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
-    let mut read: std::collections::BTreeMap<usize, CrabPose> = Default::default();
+    let mut read: std::collections::BTreeMap<usize, ReadPose> = Default::default();
+    let mut rescue_owned: std::collections::BTreeSet<usize> = Default::default();
     {
         let mut carapace_q =
             world.query_filtered::<(&CrabEnvId, &Transform, &Velocity), With<CrabCarapace>>();
         for (env, t, vel) in carapace_q.iter(world) {
             if !t.translation.is_finite() {
-                continue; // the rescue path owns non-finite crabs (a Fault when armed)
+                // The rescue path owns non-finite crabs (a Fault when armed) — present,
+                // not a miss.
+                rescue_owned.insert(env.0);
+                continue;
             }
             let here = t.translation;
             let v = Vec2::new(vel.linear.x, vel.linear.z);
-            read.entry(env.0).or_insert(CrabPose {
+            read.entry(env.0).or_insert(ReadPose {
                 pos: Pos::from_meters(here.x, here.z),
-                yaw: if v.length_squared() > 1e-4 {
-                    crate::sim::trig_client::radians_to_turns(v.x.atan2(v.y))
-                } else {
-                    i32::MIN // sentinel: hold last yaw (patched below)
-                },
+                yaw: (v.length_squared() > 1e-4)
+                    .then(|| crate::sim::trig_client::radians_to_turns(v.x.atan2(v.y))),
                 claws: Vec::new(),
             });
         }
@@ -411,98 +408,121 @@ pub(crate) fn collect_crab_poses(world: &mut World) -> Vec<CrabPose> {
         }
     }
 
-    let mut slots = world.resource_mut::<SlotCrabs>();
-    slots
-        .0
-        .iter_mut()
+    let settle = world.resource::<CrabSettle>().0.clone();
+    let mut misses = world.resource_mut::<SlotMisses>();
+    assert_eq!(
+        fallback.len(),
+        misses.0.len(),
+        "one fallback pose per slot crab — the sim's crab count must match the slot"
+    );
+    fallback
+        .iter()
         .enumerate()
-        .map(|(idx, slot)| {
-            match read.remove(&idx) {
-                Some(mut pose) => {
-                    slot.missed_ticks = 0;
-                    slot.next_miss_log = 1;
-                    if pose.yaw == i32::MIN {
-                        pose.yaw = slot.pose.yaw; // standing still: hold facing
-                    }
-                    slot.pose = pose;
-                }
-                None => {
-                    slot.missed_ticks += 1;
-                    if slot.missed_ticks >= slot.next_miss_log {
-                        error!(
-                            "crab slot: env {idx} has no carapace to read — sim pose frozen \
-                             for {} ticks (the crab still kills players at its stale \
-                             position); a despawn/wiring bug, not a legitimate state (rl#241)",
-                            slot.missed_ticks
-                        );
-                        slot.next_miss_log = slot.missed_ticks * 2;
-                    }
+        .map(|(idx, held)| match read.remove(&idx) {
+            Some(pose) => {
+                let miss = &mut misses.0[idx];
+                miss.ticks = 0;
+                miss.next_log = 0;
+                CrabPose {
+                    pos: pose.pos,
+                    // Standing still: hold the sim's current facing.
+                    yaw: pose.yaw.unwrap_or(held.yaw),
+                    claws: pose.claws,
                 }
             }
-            slot.pose.clone()
+            None => {
+                // Pre-spawn (inside the settle grace) and rescue-owned non-finite
+                // windows legitimately have nothing to read; past those, a miss is a
+                // despawn/wiring bug — count and report it (rl#241).
+                if settle.get(idx).is_none_or(|&s| s == 0) && !rescue_owned.contains(&idx) {
+                    let miss = &mut misses.0[idx];
+                    miss.ticks += 1;
+                    if miss.ticks >= miss.next_log {
+                        error!(
+                            "crab slot: env {idx} has no carapace to read — sim pose held \
+                             at her last adopted spot for {} ticks; a despawn/wiring bug, \
+                             not a legitimate state (rl#241)",
+                            miss.ticks
+                        );
+                        miss.next_log = miss.ticks * 2;
+                    }
+                }
+                held.clone()
+            }
         })
         .collect()
 }
 
 /// Feed the NEXT pump's hunt targets (and the ~5 s pursuit heartbeat, rl#265).
-pub(crate) fn feed_hunt(world: &mut World, hunt: &[Option<Pos>]) {
-    let ranges: Vec<(usize, f32)> = {
-        let slots = world.resource::<SlotCrabs>();
-        assert_eq!(
-            hunt.len(),
-            slots.0.len(),
-            "one hunt target per slot crab — the sim's crab count must match the slot"
-        );
-        hunt.iter()
-            .enumerate()
-            .filter_map(|(idx, prey)| {
-                prey.map(|p| {
-                    (
-                        idx,
-                        (pos_to_m(p) - pos_to_m(slots.0[idx].pose.pos)).length(),
-                    )
-                })
-            })
-            .collect()
-    };
+/// `poses` are the crab poses just collected — the heartbeat's range source.
+pub(crate) fn feed_hunt(world: &mut World, hunt: &[Option<Pos>], poses: &[CrabPose]) {
     let mut state = world.resource_mut::<CrabHunt>();
     state.targets = hunt.to_vec();
     state.fed_ticks += 1;
     if state.fed_ticks.is_multiple_of(HUNT_LOG_EVERY_TICKS) {
-        for (idx, range) in ranges {
-            info!("crab slot: env {idx} prey {range:.1} m away");
+        for (idx, prey) in hunt.iter().enumerate() {
+            if let (Some(p), Some(pose)) = (prey, poses.get(idx)) {
+                let range = (pos_to_m(*p) - pos_to_m(pose.pos)).length();
+                info!("crab slot: env {idx} prey {range:.1} m away");
+            }
         }
     }
 }
 
 /// The caller's half of the slot contract, computed from the authoritative sim BEFORE
-/// the pump: the tick being stepped INTO, and each crab's hunt target. One
-/// implementation for every caller of [`pump_crab_slot`], so the pre-read (which tick,
-/// which hunt source) cannot drift between the windowed driver and a renderless host.
-pub(crate) fn slot_inputs(sim: &Sim) -> (u64, Vec<Option<Pos>>) {
-    let hunt = (0..sim.crabs().len())
-        .map(|idx| sim.nearest_living_player_pos(idx))
-        .collect();
-    (sim.tick() + 1, hunt)
+/// the pump. One implementation for every caller of [`pump_crab_slot`], so the
+/// pre-read cannot drift between the windowed driver, the renderless host, and the
+/// probes.
+pub(crate) struct SlotInputs {
+    /// The tick being stepped INTO — sets the 64:30 step count.
+    pub(crate) stepping_into: u64,
+    /// Each crab's hunt target (the sim's nearest living player). The pump never
+    /// mutates the sim, so a pre-pump read equals a post-pump one; it feeds AFTER the
+    /// pump deliberately — this tick's pump walks on LAST tick's targets, exactly the
+    /// bridge-era ordering.
+    pub(crate) hunt: Vec<Option<Pos>>,
+    /// Each crab's current sim pose, clawless — [`collect_crab_poses`]'s feed for an
+    /// env with no readable carapace: the sim holds its own last adopted pose, so the
+    /// slot needs no second pose-holder.
+    pub(crate) fallback: Vec<CrabPose>,
+}
+
+pub(crate) fn slot_inputs(sim: &Sim) -> SlotInputs {
+    SlotInputs {
+        stepping_into: sim.tick() + 1,
+        hunt: (0..sim.crabs().len())
+            .map(|idx| sim.nearest_living_player_pos(idx))
+            .collect(),
+        fallback: sim
+            .crabs()
+            .iter()
+            .map(|c| CrabPose {
+                pos: c.pos(),
+                yaw: c.yaw(),
+                claws: Vec::new(),
+            })
+            .collect(),
+    }
 }
 
 /// Run the crab slot for the tick being stepped INTO: pump the owed fixed steps
 /// (sensing, policy forward, actuation, physics), read the crabs'
 /// world poses + claws for [`Server::step_next`](crate::server::Server::step_next),
-/// and feed the NEXT tick's hunt targets.
-///
-/// `hunt` is per sim crab, computed by the caller from the authoritative sim BEFORE
-/// the pump — the pump never mutates the sim, so the values equal a post-pump read.
-/// Feeding them after the pump is deliberate: this tick's pump walks on LAST tick's
-/// targets, exactly the ordering the bridge-era driver had.
-pub(crate) fn pump_crab_slot(
-    world: &mut World,
-    stepping_into: u64,
-    hunt: &[Option<Pos>],
-) -> Vec<CrabPose> {
-    pump_fixed_steps(world, crate::cadence::steps_for_tick(stepping_into));
-    let poses = collect_crab_poses(world);
-    feed_hunt(world, hunt);
+/// and feed the NEXT tick's hunt targets. [`pump_slot_steps`] is the same seam at an
+/// explicit step count (the probes' 1:1 cadence) — pump→collect→feed ordering has one
+/// owner.
+pub(crate) fn pump_crab_slot(world: &mut World, inputs: &SlotInputs) -> Vec<CrabPose> {
+    pump_slot_steps(
+        world,
+        crate::cadence::steps_for_tick(inputs.stepping_into),
+        inputs,
+    )
+}
+
+pub(crate) fn pump_slot_steps(world: &mut World, steps: u32, inputs: &SlotInputs) -> Vec<CrabPose> {
+    pump_fixed_steps(world, steps);
+    let poses = collect_crab_poses(world, &inputs.fallback);
+    feed_hunt(world, &inputs.hunt, &poses);
     poses
 }
 
@@ -513,30 +533,31 @@ pub(crate) fn pump_crab_slot(
 /// no coordinate system under them.
 pub(crate) fn restart_crabs_to_spawns(world: &mut World, spawns: &[Pos]) {
     let layout: Vec<Vec2> = spawns.iter().map(|&s| pos_to_m(s)).collect();
-    if let Some(&base) = layout.first() {
-        if world.resource::<CrabSpawns>().is_empty() {
-            // Fresh app: `spawn_initial_crabs` hasn't laid the origins yet — hand it
-            // the layout so the FIRST origins are the sim spawns too, never the
-            // training grid (rl#290).
-            world.insert_resource(crab_world::bot::InitialCrabLayout {
-                base_xz: base,
-                spawns_m: layout,
-            });
-        } else {
-            let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
-            world
-                .resource_mut::<CrabSpawns>()
-                .repin_layout(base, &layout, &terrain);
-        }
+    let base = *layout
+        .first()
+        .expect("NnCrabPlugin guarantees at least one crab (rl#114)");
+    if world.resource::<CrabSpawns>().is_empty() {
+        // Fresh app: `spawn_initial_crabs` hasn't laid the origins yet — hand it
+        // the layout so the FIRST origins are the sim spawns too, never the
+        // training grid (rl#290).
+        world.insert_resource(crab_world::bot::InitialCrabLayout {
+            base_xz: base,
+            spawns_m: layout,
+        });
+    } else {
+        let terrain = world.resource::<crab_world::terrain::Terrain>().clone();
+        world
+            .resource_mut::<CrabSpawns>()
+            .repin_layout(base, &layout, &terrain);
     }
     {
-        let mut slots = world.resource_mut::<SlotCrabs>();
+        let mut misses = world.resource_mut::<SlotMisses>();
         assert_eq!(
             spawns.len(),
-            slots.0.len(),
+            misses.0.len(),
             "restart spawns must cover every slot crab"
         );
-        slots.0 = spawns.iter().map(|&s| SlotCrab::new(s)).collect();
+        misses.0 = spawns.iter().map(|_| Miss::default()).collect();
     }
     world
         .resource_mut::<CrabSettle>()
@@ -697,9 +718,18 @@ impl HeadlessHostWorld {
         self.app.update();
         let mut out = Vec::new();
         while server.next_tick_ready() {
-            let (stepping_into, hunt) = slot_inputs(server.sim());
-            let poses = pump_crab_slot(self.app.world_mut(), stepping_into, &hunt);
-            out.push(server.step_next(&poses, Default::default()));
+            let inputs = slot_inputs(server.sim());
+            let poses = pump_crab_slot(self.app.world_mut(), &inputs);
+            let stepped = server.step_next(&poses, Default::default());
+            if stepped.restarted {
+                // Mirror the windowed driver: an rl#204 RESTART re-rolled the sim's
+                // crabs, so the world's crabs re-pin and respawn with it — without
+                // this, the next pump adopts the stale world pose and silently undoes
+                // the restart for the crab.
+                let spawns: Vec<Pos> = server.sim().crabs().iter().map(|c| c.pos()).collect();
+                restart_crabs_to_spawns(self.app.world_mut(), &spawns);
+            }
+            out.push(stepped);
         }
         out
     }
@@ -829,7 +859,12 @@ mod one_world_tests {
     fn collected_pose_is_the_carapace_and_carries_real_claws() {
         let spawn = Pos::from_meters(30.0, -14.0);
         let mut app = one_world_app(&[spawn]);
-        let poses = collect_crab_poses(app.world_mut());
+        let held = vec![CrabPose {
+            pos: spawn,
+            yaw: 0,
+            claws: Vec::new(),
+        }];
+        let poses = collect_crab_poses(app.world_mut(), &held);
         let cara = carapace_xz(&mut app);
         assert_eq!(poses.len(), 1);
         assert!(
@@ -956,7 +991,7 @@ mod one_world_tests {
     fn walk_target_poses_at_the_prey() {
         let mut app = one_world_app(&[Pos::from_meters(0.0, 0.0)]);
         let prey = Pos::from_meters(5.0, -3.0);
-        feed_hunt(app.world_mut(), &[Some(prey)]);
+        feed_hunt(app.world_mut(), &[Some(prey)], &[]);
         app.update();
         let posed = app.world().resource::<CrabTargets>().envs[0].expect("target posed");
         let want = pos_to_m(prey);
@@ -970,7 +1005,7 @@ mod one_world_tests {
             posed.y
         );
 
-        feed_hunt(app.world_mut(), &[None]);
+        feed_hunt(app.world_mut(), &[None], &[]);
         app.update();
         assert!(
             app.world().resource::<CrabTargets>().envs[0].is_none(),
@@ -1010,7 +1045,11 @@ mod one_world_tests {
             .map(|(x, z)| Vec2::new(x, z))
             .find(|p| terrain.height(p.x, p.y).abs() > 20.0)
             .expect("the seed-281 tile has >20 m relief within 4 km of center");
-        feed_hunt(app.world_mut(), &[Some(Pos::from_meters(spot.x, spot.y))]);
+        feed_hunt(
+            app.world_mut(),
+            &[Some(Pos::from_meters(spot.x, spot.y))],
+            &[],
+        );
         app.update();
         let posed = app.world().resource::<CrabTargets>().envs[0].expect("target posed");
         let surface = terrain.height(posed.x, posed.z);
@@ -1234,8 +1273,8 @@ mod tests {
         });
         let mut last = None;
         while server.next_tick_ready() {
-            let (stepping_into, hunt) = slot_inputs(server.sim());
-            let poses = pump_crab_slot(app.world_mut(), stepping_into, &hunt);
+            let inputs = slot_inputs(server.sim());
+            let poses = pump_crab_slot(app.world_mut(), &inputs);
             let stepped = server.step_next(&poses, Default::default());
             last = Some(
                 crate::snapshot::CoreSnapshot::from_bytes(&stepped.snapshot)

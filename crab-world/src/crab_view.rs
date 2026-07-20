@@ -4,7 +4,7 @@ use bevy_rapier3d::geometry::ColliderView;
 use bevy_rapier3d::prelude::Collider;
 
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabEnvId};
-use crate::bot::skin::{CrabRenderPose, CrabSkinRepose};
+use crate::bot::skin::CrabRenderPose;
 
 pub const COLLIDER_WIREFRAME_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
 
@@ -65,7 +65,6 @@ struct RenderModeLabel;
 
 pub fn register<M>(app: &mut App, initial: RenderMode, cage_gate: impl SystemCondition<M>) {
     app.insert_resource(initial);
-    app.init_resource::<CrabSkinRepose>();
     app.init_resource::<CrabRenderPose>();
     app.add_systems(Startup, spawn_render_mode_label);
     app.add_systems(Update, update_render_mode_label);
@@ -183,13 +182,11 @@ fn sync_brain_label_nodes(
     }
 }
 
-/// Project each label to the viewport point above its crab's RENDERED carapace. The world
-/// anchor is `repose · carapace_translation + lift` — the same placement the cage reuses, so
-/// a label can't drift from the crab it names. Projects through the UI's own camera (the
+/// Project each label to the viewport point above its crab's RENDERED carapace — the
+/// same placement the cage reuses, so a label can't drift from the crab it names. Projects through the UI's own camera (the
 /// `IsDefaultUiCamera` — the demo's offscreen screenshot/video target — else the one active
 /// 3D camera), and hides a label whose crab is missing, behind the camera, or off-screen.
 fn position_brain_labels(
-    repose: Option<Res<CrabSkinRepose>>,
     sampled: Option<Res<CrabRenderPose>>,
     ui_scale: Res<UiScale>,
     carapaces: Query<(Entity, &GlobalTransform, &CrabEnvId), With<CrabCarapace>>,
@@ -214,12 +211,7 @@ fn position_brain_labels(
             carapaces
                 .iter()
                 .find(|(.., env)| env.0 == node.0)
-                .map(|(entity, carapace, env)| {
-                    let placement = repose
-                        .as_deref()
-                        .and_then(|r| r.0.get(&env.0))
-                        .map(|s| s.matrix())
-                        .unwrap_or(Mat4::IDENTITY);
+                .map(|(entity, carapace, _)| {
                     // The RENDERED carapace is the sampled pose where a stream feeds one
                     // (rl#274) — anchoring to the raw physics pose would let the label lead
                     // the skin by the sampling window's latency.
@@ -227,7 +219,7 @@ fn position_brain_labels(
                         || carapace.compute_transform(),
                         |s| s.rendered(entity, carapace.compute_transform()),
                     );
-                    placement.transform_point3(carapace.translation) + Vec3::Y * BRAIN_LABEL_LIFT
+                    carapace.translation + Vec3::Y * BRAIN_LABEL_LIFT
                 });
         let projected = camera
             .zip(anchor)
@@ -258,7 +250,6 @@ pub type CrabCagePartFilter = With<CrabBodyPart>;
 
 fn draw_crab_collider_wireframe(
     mode: Res<RenderMode>,
-    repose: Option<Res<CrabSkinRepose>>,
     sampled: Option<Res<CrabRenderPose>>,
     parts: Query<CrabCagePartData, CrabCagePartFilter>,
     mut gizmos: Gizmos,
@@ -266,19 +257,14 @@ fn draw_crab_collider_wireframe(
     if !mode.shows_colliders() {
         return;
     }
-    for (entity, gt, collider, env) in &parts {
-        let placement = repose
-            .as_deref()
-            .and_then(|r| r.0.get(&env.0))
-            .map(|s| s.matrix())
-            .unwrap_or(Mat4::IDENTITY);
-        // The cage cages the crab you SEE — it already rides the render-side repose, so
-        // it draws at the sampled render pose too where a stream feeds one (rl#274).
+    for (entity, gt, collider, _env) in &parts {
+        // The cage cages the crab you SEE: the sampled render pose where a stream
+        // feeds one (rl#274), else the physics pose.
         let part = sampled.as_deref().map_or_else(
             || gt.compute_transform(),
             |s| s.rendered(entity, gt.compute_transform()),
         );
-        let world = placement * part.to_matrix();
+        let world = part.to_matrix();
         draw_collider_wireframe(
             &mut gizmos,
             collider.as_typed_shape(),

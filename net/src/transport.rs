@@ -26,7 +26,10 @@ use crate::snapshot::CoreSnapshot;
 // physical meaning changed with it (rl#256); absolute wire positions are incompatible.
 // v18: beats + join requests carry the effective-plant digest (arena/bake/friction,
 // rl#286); the widened frames are incompatible.
-pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/18";
+// v19: one frame (rl#298 stage 5) — articulation lost the arena_anchor triple and the
+// per-crab repose flag/shift, and its part/vehicle poses are WORLD poses now; a
+// pre-stage-5 peer would mis-frame every pose it decodes.
+pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/19";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
 

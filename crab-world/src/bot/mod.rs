@@ -143,9 +143,8 @@ impl CrabSpawns {
 
     /// [`Self::rebuild`]'s layout twin ([`InitialCrabLayout`], rl#290): lay the initial
     /// origins on the given planar spawn layout instead of the grid, env 0 at the
-    /// layout's base — the caller's gauge choice (net keeps the arena origin, the
-    /// same "keep the anchor end" choice [`Self::repin_layout`] makes on a restart;
-    /// the eval passes its terrain locale, rl#293).
+    /// layout's base — an ABSOLUTE spot since rl#298 stage 5 (net passes the sim's
+    /// first spawn, the eval its terrain locale, rl#293).
     fn rebuild_from_layout(
         &mut self,
         layout: &InitialCrabLayout,

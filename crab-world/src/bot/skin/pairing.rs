@@ -24,9 +24,6 @@ struct BoneDrive {
     offset: Mat4,
 }
 
-#[derive(Resource, Default, Clone)]
-pub struct CrabSkinRepose(pub std::collections::BTreeMap<usize, SkinRepose>);
-
 /// The physics-step-clock SAMPLED pose each crab body part renders at this frame, keyed
 /// by part entity (rl#274). GCR's articulation sampler rebuilds it per frame on BOTH
 /// arms — the host from its own capture, a client from its adopt — so every render
@@ -48,17 +45,6 @@ impl CrabRenderPose {
     /// and be verified against a fed window, or it silently re-steps at raw cadence.
     pub fn rendered(&self, part: Entity, physics: Transform) -> Transform {
         self.0.get(&part).copied().unwrap_or(physics)
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct SkinRepose {
-    pub shift: Vec3,
-}
-
-impl SkinRepose {
-    pub fn matrix(&self) -> Mat4 {
-        Mat4::from_translation(self.shift)
     }
 }
 
@@ -86,7 +72,6 @@ fn link_map(links: &LinkQuery, env: usize) -> std::collections::HashMap<PartId, 
 }
 
 pub(super) fn register(app: &mut App) {
-    app.init_resource::<CrabSkinRepose>();
     app.init_resource::<CrabRenderPose>();
     app.add_systems(Update, (attach_skins, reap_orphan_skins, reveal_skin));
     app.add_systems(
@@ -273,15 +258,13 @@ fn reveal_skin(
 #[allow(clippy::type_complexity)]
 fn drive_bones(
     mut bones: Query<(&BoneDrive, &mut Transform)>,
-    links: Query<(&Transform, &CrabEnvId), (With<CrabBodyPart>, Without<BoneDrive>)>,
+    links: Query<&Transform, (With<CrabBodyPart>, Without<BoneDrive>)>,
     sampled: Res<CrabRenderPose>,
-    repose: Res<CrabSkinRepose>,
 ) {
     for (drive, mut t) in bones.iter_mut() {
-        if let Ok((link, env)) = links.get(drive.link) {
-            let m = repose.0.get(&env.0).map_or(Mat4::IDENTITY, |r| r.matrix());
+        if let Ok(link) = links.get(drive.link) {
             let link = sampled.rendered(drive.link, *link);
-            *t = Transform::from_matrix(m * link.to_matrix() * drive.offset);
+            *t = Transform::from_matrix(link.to_matrix() * drive.offset);
         }
     }
 }
@@ -305,11 +288,10 @@ mod tests {
     fn bones_follow_the_sampled_render_pose_when_present() {
         use bevy::ecs::system::RunSystemOnce;
 
-        use super::{CrabRenderPose, CrabSkinRepose, drive_bones};
+        use super::{CrabRenderPose, drive_bones};
         use crate::bot::body::CrabBodyPart;
 
         let mut world = World::new();
-        world.init_resource::<CrabSkinRepose>();
         world.init_resource::<CrabRenderPose>();
         let link = world
             .spawn((

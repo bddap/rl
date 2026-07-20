@@ -13,9 +13,9 @@ pub(crate) const TARGET_Y_MIN: f32 = 0.15;
 pub(crate) const TARGET_Y_MAX: f32 = 0.7;
 /// Far edge of the trained chase band — the ONE source for "how far a target can
 /// be" (rl#292: 0→100 m+ genuinely in-distribution; the old 9 m edge was the flat
-/// box's wall margin, not a design choice). GCR's bridge (`net::external_crab`)
-/// clamps its posed hunt target to this same constant, so Sally sees prey truly out
-/// to the band edge; a copied literal there would drift when the band moves.
+/// box's wall margin, not a design choice). Since rl#298 stage 5 GCR poses its hunt
+/// target AT the prey unclamped (on the live map prey never nears the edge); the
+/// eval's pace probe is the surviving [`band_lure`] consumer.
 pub const BAND_MAX_M: f32 = 128.0;
 
 /// The spawn-relative `body.pos` obs-support radius — the recenter/rebase trigger
@@ -118,12 +118,10 @@ pub(crate) fn polar_target(origin: Vec3, theta: f32, dist: f32, y: f32) -> Vec3 
 
 /// The rl#240 in-distribution guard's posed walk target: the real target re-posed at
 /// most one band edge ([`BAND_MAX_M`]) from the crab along the true planar bearing,
-/// `y` the caller's (net poses at its claw height, the eval at the real ball's). THE
-/// one copy of the clamp both consumers share — net's `set_crab_walk_target` (a
-/// distant GCR player) and the eval's pace probe (a distant ball, rl#280) — so the
-/// band semantics cannot drift between the plant she is deployed on and the
-/// instrument that measures her for it. Since rl#292 the edge is 128 m: prey inside
-/// that is presented WHERE IT IS, not lured nearer.
+/// `y` the caller's. The eval's pace probe (a distant ball, rl#280) is the surviving
+/// consumer since rl#298 stage 5 deleted GCR's dormant clamp with the bridge. Since
+/// rl#292 the edge is 128 m: a target inside it is presented WHERE IT IS, not lured
+/// nearer.
 pub fn band_lure(carapace: Vec3, planar_to_target: Vec2, y: f32) -> Vec3 {
     let to_target = planar_to_target.clamp_length_max(BAND_MAX_M);
     Vec3::new(carapace.x + to_target.x, y, carapace.z + to_target.y)
@@ -133,7 +131,7 @@ pub fn band_lure(carapace: Vec3, planar_to_target: Vec2, y: f32) -> Vec3 {
 /// spawn origin leaves the obs-support radius ([`DRIFT_REBASE_M`] — NOT the target
 /// band, rl#292), this is the exact shift back onto the origin; inside it, `None`. Consumers apply it two ways (rl#281 stage 6): the eval's
 /// `pace_recenter` TELEPORTS the crab by the delta (fixed-locale measurement — see its
-/// doc), while net's `bound_body_pos_drift` uses only the trigger and REBASES the
+/// doc), while net's `recenter_drifted_origins` uses only the trigger and REBASES the
 /// origin instead (`CrabSpawns::rebase_origin_to` — a rendered world must stay glued
 /// under her feet). The y component carries the terrain's surface-height difference
 /// across the teleport, so height-above-ground (and with it the spawn-relative

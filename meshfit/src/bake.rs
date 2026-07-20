@@ -14,7 +14,7 @@ use crate::gltf_load::LoadedModel;
 
 /// Feet plant and roll on their spherical capsule tips, and the pincer collider is
 /// read back via `as_capsule` for the sim's claw-touch decisions
-/// (net::external_crab) — both stay capsules whatever the fit score says.
+/// (net::crab_slot) — both stay capsules whatever the fit score says.
 fn shape_policy(id: CrabJointId) -> ShapePolicy {
     match id {
         CrabJointId::LegCarpus(..) | CrabJointId::ClawPincer(_) => ShapePolicy::CapsuleOnly,

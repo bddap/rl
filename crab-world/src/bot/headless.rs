@@ -89,16 +89,17 @@ pub fn headless_stack(cfg: HeadlessStack) -> App {
 /// The headless server world (rl#298 stage 4): [`headless_stack`] plus the vehicle
 /// layer — crafts are world content that strikes Sally and gets pushed back (rl#298
 /// stage 1). The ONE constructor for the world the authoritative host serves
-/// headless: net's crab-slot host harness arms its bridge + inference policy on top
-/// of this, and the trainer's rollout env (`training::inproc::build_rollout_app`)
+/// headless: net's renderless host (`crab_slot::HeadlessHostWorld`) arms its
+/// inference policy on top of this, and the trainer's rollout env
+/// (`training::inproc::build_rollout_app`)
 /// arms the training systems instead — so the world she trains in and the world she
-/// is served in cannot drift. (The windowed host still composes the same content
-/// plugins onto its windowed base in net's `render::app`; folding that listing in
-/// here is stage-5 material, when the bridge dies.)
+/// is served in cannot drift. (The windowed host composes the same content
+/// plugins onto its windowed base in net's `render::app` — a windowed bevy App can't
+/// build on a headless one, so the listing stays duplicated there by construction.)
 ///
 /// NOT folded into [`headless_stack`]: `manage_vehicles` despawns any craft body
 /// without a `VehicleControls` entry, so the worlds that hand-spawn ram craft (the
-/// vehicle gate tests, net's bridge probe) must keep building the bare stack.
+/// vehicle gate tests, net's NN-crab probes) must keep building the bare stack.
 pub fn headless_server_world(
     num_envs: usize,
     role: WorldRole,

@@ -15,7 +15,7 @@ pub enum FittedShape {
 
 /// Which primitives a part may fit. Contact-critical parts stay capsules: feet
 /// plant and roll on their spherical tips, and the claw-strike capture reads the
-/// pincer collider back via `as_capsule` (net::external_crab), so a box there
+/// pincer collider back via `as_capsule` (net::crab_slot), so a box there
 /// would silently vanish from the sim's claw-touch decisions.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ShapePolicy {

@@ -34,7 +34,7 @@ pub(crate) struct Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
-    let external_crab = nn_crab_policies(args.nn_crab_checkpoint)?;
+    let nn_crabs = nn_crab_policies(args.nn_crab_checkpoint)?;
     let boot = if args.host || args.join.is_some() {
         let dial = parse_join_dial(args.join.as_deref())?;
         let result = net_loop::connect_and_form_dialing(
@@ -44,7 +44,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
             dial,
             args.telemetry,
             None,
-            net::SyncStamp::local(external_crab.len() as u8),
+            net::SyncStamp::local(nn_crabs.len() as u8),
         )?;
         match result {
             net_loop::MatchResult::Joined(joined) => {
@@ -65,6 +65,6 @@ pub(crate) fn run(args: Args) -> Result<()> {
         }
     };
     let render_mode = render_mode(args.render);
-    render::build_windowed_app(boot, external_crab, render_mode)?.run();
+    render::build_windowed_app(boot, nn_crabs, render_mode)?.run();
     Ok(())
 }

@@ -51,7 +51,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     // behind whatever the checkpoint load happens to say first.
     let controls = gcr_controls(&args.controls)?;
     let render_mode = render_mode(args.render);
-    let (_, external_crab) = nn_crab_policy(args.nn_crab_checkpoint)?;
+    let (_, nn_crab) = nn_crab_policy(args.nn_crab_checkpoint)?;
 
     let dial = parse_join_dial(args.join.as_deref())?;
     let result = net_loop::connect_and_form_dialing(
@@ -85,7 +85,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         .with_cam_offset(0.0, args.cam_pitch)
         .with_fov(Some(args.cam_fov));
     let mut app =
-        render::build_net_screenshot_app(client, driver, cfg, external_crab, render_mode, controls);
+        render::build_net_screenshot_app(client, driver, cfg, nn_crab, render_mode, controls);
     if !args.pilot_toggle_at.is_empty() || args.pilot_walk_at.is_some() {
         app.insert_resource(render::PilotScript::new(
             args.pilot_toggle_at,

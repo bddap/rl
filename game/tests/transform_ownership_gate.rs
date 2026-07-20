@@ -70,7 +70,7 @@ fn only_physics_takes_mut_transform_on_crab_body_parts() {
         violations.is_empty(),
         "rl#116: `&mut Transform` on a rapier-driven crab body part outside the physics \
          side. bevy_rapier syncs changed Transforms back into the body — write render-only \
-         proxies (skin bones / CrabSkinRepose) instead, or extend the documented allowlist \
+         proxies (skin bones / CrabRenderPose) instead, or extend the documented allowlist \
          in this test if the write genuinely belongs to physics.\n{}",
         violations.join("\n")
     );
