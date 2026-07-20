@@ -537,6 +537,64 @@ mod tests {
         );
     }
 
+    /// rl#298 stage 1 (one world, shared construction): the crab `spawn_crab` builds —
+    /// the SAME construction code on the host and the trainer — exchanges momentum
+    /// with world content BOTH ways, not just registers a contact pair: a ramming
+    /// craft knocks her carapace back (the world pushes her), and the rammer leaves
+    /// the impact slower than it arrived (she pushes back). The stack is the host's
+    /// (same plugins, same collision groups; net's pump-equivalence test pins that a
+    /// headless stack steps tick-for-tick what the client pumps) on the flat fixture
+    /// grid — a zero-action ragdoll never settles on the GCR origin slope, and aiming
+    /// a ballistic ram needs a stationary target. No `VehiclePlugin`, deliberately —
+    /// a zero-g Ship with no flight forces is ballistic, so the only thing that can
+    /// bleed its speed is her body.
+    #[test]
+    fn ramming_craft_and_crab_exchange_momentum_both_ways() {
+        use crate::bot::body::CrabCarapace;
+        use crate::bot::headless::tick;
+
+        let mut app = flat_headless_app();
+        tick(&mut app, 192);
+
+        let carapace = |app: &mut App| -> Vec3 {
+            let mut q = app
+                .world_mut()
+                .query_filtered::<&Transform, With<CrabCarapace>>();
+            q.single(app.world()).expect("carapace").translation
+        };
+        let p0 = carapace(&mut app);
+
+        const RAM_SPEED: f32 = 8.0;
+        let rammer = spawn_ram_vehicle(
+            app.world_mut(),
+            VehicleKind::Ship,
+            Transform::from_translation(p0 + Vec3::new(1.2, 0.0, 0.0)),
+            Velocity {
+                linear: Vec3::new(-RAM_SPEED, 0.0, 0.0),
+                angular: Vec3::ZERO,
+            },
+        );
+        tick(&mut app, 60);
+
+        let p1 = carapace(&mut app);
+        let v1 = app
+            .world()
+            .get::<Velocity>(rammer)
+            .expect("the rammer body persists — nothing despawns it in this app")
+            .linear;
+        assert!(
+            p0.x - p1.x > 0.02,
+            "the world must push her: an {RAM_SPEED} m/s ram left the carapace at \
+             x {:+.3} -> {:+.3}",
+            p0.x,
+            p1.x
+        );
+        assert!(
+            v1.x > -0.7 * RAM_SPEED,
+            "she must push back: the rammer kept {v1:?} of its {RAM_SPEED} m/s"
+        );
+    }
+
     /// rl#260: the rendered silhouette must never poke outside the physics collider — for
     /// every part, |offset| + half must fit inside [`VEHICLE_HALF`] on every axis.
     #[test]
