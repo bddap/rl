@@ -136,7 +136,11 @@ fn apply_test_shove(
 fn external_force_shoves_a_multibody_root() {
     use bevy_rapier3d::plugin::PhysicsSet;
 
-    let mut app = headless_app();
+    // Flat grid, not the GCR bake: a zero-action ragdoll slides down the GCR origin
+    // slope at ~0.1 m/tick, which dwarfs the 0.05 m threshold and makes the shove
+    // assertion vacuous — attributing the displacement to the shove needs a crab that
+    // has actually settled (rl#298 stage 1 found this).
+    let mut app = flat_headless_app();
     app.init_resource::<TestShove>();
     app.add_systems(
         FixedUpdate,
