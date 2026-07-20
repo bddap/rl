@@ -19,12 +19,9 @@ pub mod telemetry;
 pub mod transport;
 pub mod wire;
 
-// Gated only because the bridge it drives is: the seam itself is render-free
-// (crab-world's headless bot stack compiles without render) — lift the gate when the
-// trainer's headless server world needs it (rl#298 stage 4) or the bridge dies (stage 5).
-#[cfg(feature = "render")]
+// Render-free since rl#298 stage 4 (the trainer's headless server world consumes the
+// seam): only the label/skin publishers inside stay render-gated — they feed UI.
 pub(crate) mod crab_slot;
-#[cfg(feature = "render")]
 pub mod external_crab;
 #[cfg(feature = "render")]
 pub mod menu;

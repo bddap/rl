@@ -29,10 +29,12 @@ use bevy_rapier3d::geometry::ColliderView;
 use bevy_rapier3d::prelude::*;
 
 use crate::sim::Pos;
+#[cfg(feature = "render")]
 use crab_world::Visuals;
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crab_world::bot::sensor::CrabTargets;
 use crab_world::bot::{BotSet, CrabSpawns};
+#[cfg(feature = "render")]
 use crab_world::crab_view::CrabBrainLabels;
 use crab_world::policy::Policy;
 use crab_world::training::targets::{DRIFT_REBASE_M, band_lure, recenter_delta};
@@ -130,6 +132,7 @@ fn pos_to_m(p: Pos) -> Vec2 {
     Vec2::new(x, z)
 }
 
+#[cfg_attr(not(feature = "render"), allow(dead_code))]
 struct CrabPlacement {
     /// The crab's arena carapace ground point (XZ, arena frame).
     carapace_m: Vec2,
@@ -185,6 +188,7 @@ impl CrabBridge {
             .collect()
     }
 
+    #[cfg_attr(not(feature = "render"), allow(dead_code))]
     fn render_placement_m(&self) -> Option<CrabPlacement> {
         self.last_carapace_m.map(|c| CrabPlacement {
             carapace_m: c,
@@ -192,6 +196,7 @@ impl CrabBridge {
         })
     }
 
+    #[cfg_attr(not(feature = "render"), allow(dead_code))]
     fn restart_to_spawn(&mut self, spawn: Pos) {
         self.world_pos_m = pos_to_m(spawn);
         self.last_carapace_m = None;
@@ -269,6 +274,7 @@ impl ExternalCrabBridge {
     /// Private: every restart must go through [`restart_crabs_to_spawns`], which also
     /// carries surviving crafts by the anchor-reset delta — a bare bridge reset after a
     /// recenter would teleport them on screen.
+    #[cfg_attr(not(feature = "render"), allow(dead_code))]
     fn restart_to_spawns(&mut self, spawns: &[Pos]) {
         assert_eq!(
             spawns.len(),
@@ -294,6 +300,7 @@ impl ExternalCrabBridge {
 /// move a still-flying craft on screen: the same world = arena + anchor invariance the
 /// recenter itself keeps ([`ARM_BODY_POS_RECENTER`]). With no recenters and unchanged
 /// spawns the delta is zero and this is exactly the old bare `restart_to_spawns`.
+#[cfg_attr(not(feature = "render"), allow(dead_code))]
 pub(crate) fn restart_crabs_to_spawns(world: &mut World, spawns: &[Pos]) {
     let old_w = {
         let mut bridge = world.resource_mut::<ExternalCrabBridge>();
@@ -344,6 +351,7 @@ pub(crate) fn restart_crabs_to_spawns(world: &mut World, spawns: &[Pos]) {
     }
 }
 
+#[cfg_attr(not(feature = "render"), allow(dead_code))]
 pub(crate) fn cold_respawn_armed_crab(world: &mut World) {
     use bevy::ecs::world::CommandQueue;
 
@@ -474,17 +482,24 @@ impl Plugin for ExternalCrabPlugin {
         // means "not within a day's uptime" — and `pump_fixed_steps` is driven by the client-sim tick drain),
         // so this is host-only by construction; on a remote-adopt client the articulation
         // `apply` is the sole label writer and the two can't fight over the resource.
-        app.init_resource::<CrabBrainLabels>();
+        // Render-gated (with the skin repose below): labels/skin feed UI a renderless
+        // host doesn't have — the seam itself is render-free (rl#298 stage 4).
+        #[cfg(feature = "render")]
+        {
+            app.init_resource::<CrabBrainLabels>();
+            app.add_systems(
+                FixedUpdate,
+                publish_brain_labels.run_if(external_crab_armed),
+            );
+        }
         app.init_resource::<ArenaAnchor>();
         app.add_systems(
             FixedUpdate,
             // The anchor publisher runs after the recenter: a rebase moves BOTH ends of
             // the correspondence (origin and anchor_world_m) in one system, and ordered
             // after it the publisher can never observe the half-updated pair.
-            (
-                publish_brain_labels,
-                publish_arena_anchor.after(bound_body_pos_drift),
-            )
+            publish_arena_anchor
+                .after(bound_body_pos_drift)
                 .run_if(external_crab_armed),
         );
         app.add_systems(
@@ -494,6 +509,7 @@ impl Plugin for ExternalCrabPlugin {
                 .run_if(external_crab_armed),
         );
 
+        #[cfg(feature = "render")]
         if app.world().get_resource::<Visuals>().is_some_and(|v| v.0) {
             app.add_systems(
                 FixedUpdate,
@@ -519,7 +535,8 @@ fn ensure_crab_env(
 /// ONE formatter (`Policy::brain_label`), write-on-change. GCR policies never hot-reload, so
 /// this settles to one write per arm; it stays a system (not an arm-time one-shot) so the
 /// labels can never go stale against whatever drives the crabs. Teardown clears the resource
-/// ([`crate::render`]'s `teardown_round`), un-labeling the crab bodies that outlive the round.
+/// (`crate::render`'s `teardown_round`), un-labeling the crab bodies that outlive the round.
+#[cfg(feature = "render")]
 fn publish_brain_labels(policies: NonSend<CrabPolicies>, mut labels: ResMut<CrabBrainLabels>) {
     let want: Vec<String> = policies.0.iter().map(|p| p.brain_label()).collect();
     if labels.0 != want {
@@ -844,6 +861,7 @@ fn publish_arena_anchor(
     }
 }
 
+#[cfg(feature = "render")]
 fn publish_skin_repose(
     bridge: Res<ExternalCrabBridge>,
     repose_out: Option<ResMut<crab_world::bot::skin::CrabSkinRepose>>,
@@ -1578,6 +1596,7 @@ mod gcr_crab_tests {
     /// `d(game_spot) = d(carapace)` exactly (one frame, rl#256). Under the un-scaled integration the
     /// shift grew every step, so her true-size skin treadmilled in place while her
     /// legs strode (the owner's "ground wiggles with her movements").
+    #[cfg(feature = "render")]
     #[test]
     fn skin_repose_shift_is_constant_while_walking() {
         use bevy::ecs::system::RunSystemOnce;
@@ -1729,6 +1748,7 @@ mod gcr_crab_tests {
     /// path funnels into the same `respawn_crab`). The other invisibility dimension — a
     /// collider SHAPE the drawer can't trace — is loud by construction instead
     /// (`error_once` in `draw_collider_wireframe`).
+    #[cfg(feature = "render")]
     #[test]
     fn every_body_part_is_visible_to_the_collider_wireframe_query() {
         use crab_world::crab_view::{CrabCagePartData, CrabCagePartFilter};
