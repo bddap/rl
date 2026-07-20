@@ -746,6 +746,12 @@ mod tests {
     /// envelope fields would strand every fleet checkpoint while all save/load-symmetric
     /// tests stayed green). Regenerate with `regenerate_enveloped_golden_fixture` below
     /// ONLY on a deliberate format version bump or an arch cull.
+    ///
+    /// Post-rl#298 this bit-exactness guard is justified as TRAINER/EVAL REPRODUCIBILITY —
+    /// the same forward pass the host runs in its crab slot is what the trainer trains and
+    /// the eval measures, so it must stay bit-stable across toolchain/backend bumps — not as
+    /// MP correctness: clients never run the policy (the host streams poses), so no
+    /// cross-peer forward determinism is required.
     #[test]
     fn golden_enveloped_checkpoint_loads_and_acts_bit_identically() {
         let policy = Policy::load(&golden_dir(), RestFallback::Rest);

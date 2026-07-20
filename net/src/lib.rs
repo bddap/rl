@@ -20,6 +20,8 @@ pub mod transport;
 pub mod wire;
 
 #[cfg(feature = "render")]
+pub(crate) mod crab_slot;
+#[cfg(feature = "render")]
 pub mod external_crab;
 #[cfg(feature = "render")]
 pub mod menu;

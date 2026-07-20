@@ -1,6 +1,5 @@
 use super::driver::{
-    PendingRound, drive_client_sim, ensure_round_installed, insert_core, park_fixed_auto_pump,
-    teardown_round,
+    PendingRound, drive_client_sim, ensure_round_installed, insert_core, teardown_round,
 };
 use super::hud::{spawn_hud, sync_controls_context, sync_menu_controls_context, update_hud};
 use super::input::{gather_input, grab_cursor, quit_game, release_cursor};
@@ -227,7 +226,7 @@ pub(super) fn add_external_nn_crab(
             crab_spawns,
         ));
 
-    park_fixed_auto_pump(app.world_mut());
+    crate::crab_slot::park_fixed_auto_pump(app.world_mut());
 }
 
 pub(super) fn install_armed_nn_crab(
