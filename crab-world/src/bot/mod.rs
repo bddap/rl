@@ -319,6 +319,7 @@ pub struct RescueStats {
     /// surfaces on the hub feed as an rl#137 non-finite fault — a false alarm.
     pub since_nonfinite: u32,
     pub since_below_terrain: u32,
+    pub since_buried: u32,
     pub last_body: Option<RescueBody>,
 }
 
@@ -335,16 +336,33 @@ pub struct CrabRescued {
 /// ~cm penetration, so metres below the surface is unambiguous.
 const BELOW_TERRAIN_RESCUE_M: f32 = 2.0;
 
+/// The rl#303 trap the 2 m y-floor cannot see: the heightfield sheet is one-sided, so a
+/// carapace knocked just under it (a hard hit at 5 Hz-era softness; a poke burst) can
+/// hang there indefinitely — legs above the sheet hold it, no contact pushes it back
+/// up, and no part ever reaches 2 m down. A carapace centre below the surface at its
+/// own (x, z) is unreachable by legitimate posture (legs stand it at least its
+/// half-height ~0.12 m ABOVE, and a heightfield has no overhangs to duck under), so a
+/// small margin only has to clear contact-softness rest penetration (~cm).
+const CARAPACE_BURIED_RESCUE_M: f32 = 0.05;
+
+/// Impact transients legitimately dip the carapace below the sheet for a few ticks
+/// (rl#299 measured ~30 ms spring recovery); a full second of it is the trap.
+const CARAPACE_BURIED_RESCUE_TICKS: u32 = 60;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RescueReason {
     /// NaN/inf pose — a physics-correctness fault (rl#137): error + debug-panic when
-    /// armed. Wins over [`Self::BelowTerrain`] when one env shows both.
+    /// armed. Wins over the other reasons when one env shows several.
     NonFinite,
     /// Tunneled through the heightfield sheet (rl#283) — reachable by legitimate hard
     /// hits, so it warns when armed instead of faulting. Also catches a body fallen
     /// past the tile EDGE (the sampler clamps flat there but the collider ends): the
     /// interim backstop until rl#281's real world-bounds policy.
     BelowTerrain,
+    /// Carapace held under the one-sided sheet, above the 2 m floor, for
+    /// [`CARAPACE_BURIED_RESCUE_TICKS`] straight ticks (rl#303). Warn tier like
+    /// [`Self::BelowTerrain`]: same physics class, shallower.
+    Buried,
 }
 
 impl RescueReason {
@@ -354,6 +372,16 @@ impl RescueReason {
         match self {
             RescueReason::NonFinite => 0,
             RescueReason::BelowTerrain => 1,
+            RescueReason::Buried => 2,
+        }
+    }
+
+    /// Worst-reason-wins ordering for one env showing several reasons in one tick.
+    fn rank(self) -> u8 {
+        match self {
+            RescueReason::NonFinite => 2,
+            RescueReason::BelowTerrain => 1,
+            RescueReason::Buried => 0,
         }
     }
 }
@@ -384,28 +412,24 @@ pub fn rescue_lost_crabs(
     mut stats: ResMut<RescueStats>,
     is_fault: Option<Res<CrabRescueIsFault>>,
     time: Res<Time>,
-    mut last_log_secs: Local<[Option<f64>; 2]>,
+    mut last_log_secs: Local<[Option<f64>; 3]>,
+    mut buried_ticks: Local<std::collections::BTreeMap<usize, u32>>,
 ) {
     // Worst reason wins per env: a blowup plausibly leaves some parts NaN and others
     // flung finite-but-deep-below in the same tick, and query order is arbitrary — the
     // env must still register as the rl#137 fault, not a mere tunneling warn.
     let mut sick: std::collections::BTreeMap<usize, (RescueBody, Vec3, Quat, RescueReason)> =
         Default::default();
-    for (_, id, t, carapace, joint) in parts.iter() {
-        let reason = if !t.translation.is_finite() || !t.rotation.is_finite() {
-            RescueReason::NonFinite
-        } else if t.translation.y
-            < terrain.height(t.translation.x, t.translation.z) - BELOW_TERRAIN_RESCUE_M
+    let mut consider = |id: usize, body, t: &Transform, reason: RescueReason| {
+        if sick
+            .get(&id)
+            .is_none_or(|&(.., held)| reason.rank() > held.rank())
         {
-            RescueReason::BelowTerrain
-        } else {
-            continue;
-        };
-        match sick.get(&id.0) {
-            Some(&(.., RescueReason::NonFinite)) => continue,
-            Some(_) if reason == RescueReason::BelowTerrain => continue,
-            _ => {}
+            sick.insert(id, (body, t.translation, t.rotation, reason));
         }
+    };
+    let mut buried_now: std::collections::BTreeSet<usize> = Default::default();
+    for (_, id, t, carapace, joint) in parts.iter() {
         let body = if carapace.is_some() {
             RescueBody::Carapace
         } else if let Some(j) = joint {
@@ -413,8 +437,29 @@ pub fn rescue_lost_crabs(
         } else {
             RescueBody::Unknown
         };
-        sick.insert(id.0, (body, t.translation, t.rotation, reason));
+        if !t.translation.is_finite() || !t.rotation.is_finite() {
+            consider(id.0, body, t, RescueReason::NonFinite);
+            continue;
+        }
+        let depth = terrain.height(t.translation.x, t.translation.z) - t.translation.y;
+        if depth > BELOW_TERRAIN_RESCUE_M {
+            consider(id.0, body, t, RescueReason::BelowTerrain);
+        }
+        if carapace.is_some() && depth > CARAPACE_BURIED_RESCUE_M {
+            buried_now.insert(id.0);
+            let held = buried_ticks
+                .get(&id.0)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
+            buried_ticks.insert(id.0, held);
+            if held >= CARAPACE_BURIED_RESCUE_TICKS {
+                consider(id.0, body, t, RescueReason::Buried);
+            }
+        }
     }
+    // A surfaced (or rescued/respawned) carapace re-earns the full window.
+    buried_ticks.retain(|env, _| buried_now.contains(env));
     if sick.is_empty() {
         return;
     }
@@ -428,6 +473,9 @@ pub fn rescue_lost_crabs(
             }
             RescueReason::BelowTerrain => {
                 stats.since_below_terrain = stats.since_below_terrain.saturating_add(1);
+            }
+            RescueReason::Buried => {
+                stats.since_buried = stats.since_buried.saturating_add(1);
             }
         }
         stats.last_body = Some(body);
@@ -469,6 +517,17 @@ pub fn rescue_lost_crabs(
                     );
                 }
             }
+            RescueReason::Buried => {
+                if log_ok {
+                    warn!(
+                        "rescue_lost_crabs: armed crab (env {env}) carapace held under the \
+                         terrain sheet for {CARAPACE_BURIED_RESCUE_TICKS}+ ticks at \
+                         translation={translation:?} — one-sided heightfield, nothing pushes \
+                         it back out; respawning (rl#303; rescue total={})",
+                        stats.total
+                    );
+                }
+            }
         }
     }
 
@@ -486,6 +545,47 @@ pub fn rescue_lost_crabs(
             env,
         );
         rescued.write(CrabRescued { env, body });
+    }
+}
+
+/// The rl#240 guard for the spawn-relative body.pos obs channel: training re-draws the
+/// origin every episode so the channel never leaves the `DRIFT_REBASE_M` support, but a
+/// long LIVE chase — a GCR round, the TV demo's endless hunt — walks it arbitrarily
+/// OOD. Past the shared trigger ([`recenter_delta`], the same formula the eval's pace
+/// probe recenters by, rl#280), rebase the env's spawn origin to the carapace's own
+/// ground point ([`CrabSpawns::rebase_origin_to`]): body.pos snaps back to the spawn
+/// distribution and NOTHING physical moves — no Transform, no craft, no netcode
+/// surface. Side benefit: the origin trails her ground point by ≤ the drift band,
+/// which bounds the rescue teleport above. ONE implementation for every live surface
+/// (rl#303: the demo shipped without it and walked a km OOD overnight); consumers
+/// register it `.after(rescue_lost_crabs).before(BotSet::Sense)` so a rescued env sees
+/// ~0 drift and the obs reads a rebased origin the same tick it moves.
+///
+/// [`recenter_delta`]: crate::training::targets::recenter_delta
+pub fn recenter_drifted_origins(
+    mut spawns: ResMut<CrabSpawns>,
+    terrain: Res<crate::terrain::Terrain>,
+    carapaces: Query<(&body::CrabEnvId, &Transform), With<body::CrabCarapace>>,
+) {
+    if spawns.is_empty() {
+        return; // pre-spawn frame — the origins aren't laid yet
+    }
+    for (env, t) in &carapaces {
+        let carapace = t.translation;
+        if !carapace.is_finite() {
+            continue; // the rescue path owns non-finite crabs
+        }
+        let origin = spawns.origin(env.0);
+        let Some(delta) = crate::training::targets::recenter_delta(origin, carapace, &terrain)
+        else {
+            continue;
+        };
+        let drift_m = Vec2::new(delta.x, delta.z).length();
+        spawns.rebase_origin_to(env.0, carapace, &terrain);
+        info!(
+            "rl#240 recenter: env {} origin rebased {drift_m:.1} m to her ground point",
+            env.0
+        );
     }
 }
 

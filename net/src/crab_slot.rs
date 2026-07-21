@@ -35,11 +35,10 @@ use bevy_rapier3d::prelude::*;
 use crate::sim::{ClawPose, CrabPose, Pos, Sim};
 use crab_world::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId};
 use crab_world::bot::sensor::CrabTargets;
-use crab_world::bot::{BotSet, CrabSpawns};
+use crab_world::bot::{BotSet, CrabSpawns, recenter_drifted_origins};
 #[cfg(feature = "render")]
 use crab_world::crab_view::CrabBrainLabels;
 use crab_world::policy::Policy;
-use crab_world::training::targets::recenter_delta;
 
 /// The posed hunt target's height ABOVE THE LOCAL SURFACE at the target's own xz —
 /// training's convention (the ball sampler bands height-above-surface), so `target:y`
@@ -213,43 +212,6 @@ fn publish_brain_labels(policies: NonSend<CrabPolicies>, mut labels: ResMut<Crab
     let want: Vec<String> = policies.0.iter().map(|p| p.brain_label()).collect();
     if labels.0 != want {
         labels.0 = want;
-    }
-}
-
-/// The rl#240 guard for the spawn-relative body.pos obs channel: training re-draws the
-/// origin every episode so the channel never leaves the `DRIFT_REBASE_M` support, but a
-/// long GCR chase walks it arbitrarily OOD. Past the shared trigger
-/// ([`recenter_delta`], the same formula the eval's pace probe recenters by, rl#280),
-/// rebase the env's spawn origin to the carapace's own ground point
-/// ([`CrabSpawns::rebase_origin_to`]): body.pos snaps back to the spawn distribution
-/// and NOTHING physical moves — no Transform, no craft, no netcode surface. (The
-/// bridge's version co-advanced an `ArenaAnchor`; one frame leaves nothing to
-/// co-advance, so THIS is all that survives of it.) Side benefit: the origin trails
-/// her ground point by ≤ the drift band, which bounds the rescue teleport below.
-fn recenter_drifted_origins(
-    mut spawns: ResMut<CrabSpawns>,
-    terrain: Res<crab_world::terrain::Terrain>,
-    carapaces: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
-) {
-    if spawns.is_empty() {
-        return; // pre-spawn frame — the origins aren't laid yet
-    }
-    for (env, t) in &carapaces {
-        let carapace = t.translation;
-        if !carapace.is_finite() {
-            continue; // the rescue path owns non-finite crabs
-        }
-        let origin = spawns.origin(env.0);
-        let Some(delta) = recenter_delta(origin, carapace, &terrain) else {
-            continue;
-        };
-        let drift_m = Vec2::new(delta.x, delta.z).length();
-        spawns.rebase_origin_to(env.0, carapace, &terrain);
-        info!(
-            "crab slot: recentered env {} — origin rebased {drift_m:.1} m to her ground \
-             point (rl#240)",
-            env.0
-        );
     }
 }
 
