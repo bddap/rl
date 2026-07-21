@@ -198,7 +198,9 @@ fn animate_exhaust(
             .find(|c| c.pilot == plume.pilot)
             .map_or(0.0, |c| c.thrust.dot(plume.nozzle.axis).max(0.0));
         if intensity < PLUME_MIN_THRUST {
-            *vis = Visibility::Hidden;
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
             continue;
         }
         let n = plume.nozzle;
@@ -212,7 +214,9 @@ fn animate_exhaust(
         *tf = Transform::from_translation(n.offset + exhaust * (len * 0.5))
             .with_rotation(Quat::from_rotation_arc(Vec3::Y, exhaust))
             .with_scale(Vec3::new(girth, len, girth));
-        *vis = Visibility::Inherited;
+        if *vis != Visibility::Inherited {
+            *vis = Visibility::Inherited;
+        }
     }
 }
 
