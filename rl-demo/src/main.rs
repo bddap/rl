@@ -268,6 +268,10 @@ fn main() {
                 app.insert_resource(MeshFallbackBanner(reason))
                     .add_systems(Startup, spawn_mesh_fallback_banner);
             }
+            if let Some(watch) = BinarySelfRestart::capture() {
+                app.insert_resource(watch)
+                    .add_systems(Update, restart_on_new_binary);
+            }
             app.add_plugins(play::DemoPlugin {
                 checkpoint_dir: args.checkpoint.checkpoint_dir.clone(),
                 live_checkpoint_dir: args.live_checkpoint_dir.clone(),
@@ -305,6 +309,74 @@ fn main() {
     }
 
     app.run();
+}
+
+/// Exec-restart the long-lived `--demo` surface onto a newly deployed binary (rl#303:
+/// the TV ran a build 5.6 h older than the rl#299 contact fix for ~23 h because the
+/// 60 s deploy timer replaces the FILE but nothing replaced the PROCESS). The demo
+/// already keeps its weights current (`hot_reload_policy`); this is the same duty for
+/// the binary itself. `exec` keeps the PID, so Steam's reaper and gamescope see one
+/// continuous app — no focus churn, no relaunch plumbing.
+#[derive(Resource)]
+struct BinarySelfRestart {
+    /// argv[0] as launched — the deploy path. NOT `current_exe()`: the deploy `mv`
+    /// replaces the inode, and the symlink would resolve to "…/rl (deleted)".
+    exe: PathBuf,
+    argv: Vec<std::ffi::OsString>,
+    seen_mtime: std::time::SystemTime,
+    /// A changed mtime must hold for two polls before exec — cheap insurance against
+    /// a non-atomic deploy copy mid-write.
+    pending: Option<std::time::SystemTime>,
+}
+
+impl BinarySelfRestart {
+    fn capture() -> Option<Self> {
+        let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+        let exe = PathBuf::from(argv.first()?);
+        let seen_mtime = std::fs::metadata(&exe).ok()?.modified().ok()?;
+        Some(Self {
+            exe,
+            argv,
+            seen_mtime,
+            pending: None,
+        })
+    }
+}
+
+fn restart_on_new_binary(
+    time: Res<Time>,
+    mut last_poll: Local<f64>,
+    mut watch: ResMut<BinarySelfRestart>,
+) {
+    if time.elapsed_secs_f64() - *last_poll < 10.0 {
+        return;
+    }
+    *last_poll = time.elapsed_secs_f64();
+    let Ok(mtime) = std::fs::metadata(&watch.exe).and_then(|m| m.modified()) else {
+        return; // deploy mid-swap — the path will be back next poll
+    };
+    if mtime == watch.seen_mtime {
+        watch.pending = None;
+        return;
+    }
+    if watch.pending != Some(mtime) {
+        watch.pending = Some(mtime);
+        return;
+    }
+    info!(
+        "demo: {} changed on disk — exec-restarting onto the new build (rl#303)",
+        watch.exe.display()
+    );
+    let err = {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new(&watch.exe)
+            .args(&watch.argv[1..])
+            .exec()
+    };
+    error!("demo: exec-restart failed ({err}) — staying on the running build");
+    // Don't retry this mtime every poll; a NEWER deploy still triggers.
+    watch.seen_mtime = mtime;
+    watch.pending = None;
 }
 
 #[derive(Resource)]

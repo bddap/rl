@@ -97,6 +97,9 @@ impl Plugin for DemoPlugin {
         self.overrides.apply_rng_and_ball(app);
         app.add_plugins(crate::sky::NightSkyPlugin);
         crate::controls::install_overlay(app, &self.controls);
+        // The demo is a single always-armed owner-facing crab: a rescue there is a
+        // visible teleport, so it logs at the same fault/warn tier GCR arms.
+        app.insert_resource(crate::bot::CrabRescueIsFault);
         app.init_resource::<DemoSettle>()
             .init_resource::<PokeBurst>()
             .add_systems(Startup, (spawn_orbit_camera, spawn_target_ball))
@@ -104,6 +107,15 @@ impl Plugin for DemoPlugin {
             .add_systems(
                 FixedUpdate,
                 (
+                    // Same ordering contract as GCR's registration (rl#303: the demo
+                    // shipped without the rl#240 recenter and its endless hunt walked
+                    // body.pos km-scale OOD): after rescue so a respawned env sees ~0
+                    // drift, before Sense so the obs reads the rebased origin the tick
+                    // it moves. Also what keeps the target ball re-seeding near HER
+                    // locale instead of the boot spawn.
+                    crate::bot::recenter_drifted_origins
+                        .after(crate::bot::rescue_lost_crabs)
+                        .before(BotSet::Sense),
                     demo_settle.after(BotSet::Think).before(BotSet::Act),
                     demo_poke.after(BotSet::Act).before(PhysicsSet::SyncBackend),
                     target_ball.after(BotSet::Sense),

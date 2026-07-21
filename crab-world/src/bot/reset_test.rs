@@ -213,6 +213,62 @@ fn rescue_system_recovers_a_crab_knocked_below_the_floor() {
     assert_crab_sane(&mut app, n_parts, "after rescue from below the floor");
 }
 
+/// Pin the carapace just under the heightfield sheet for each tick — the rl#303 trap:
+/// legs hooked above the one-sided sheet hold the carapace under it, no contact pushes
+/// it back out, and no part ever reaches the rl#283 2 m floor.
+fn pin_carapace_below_sheet(app: &mut App, ticks: u32) {
+    for _ in 0..ticks {
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<CrabCarapace>>();
+        let mut t = q.single_mut(app.world_mut()).expect("carapace");
+        t.translation.y = -0.3;
+        tick(app, 1);
+    }
+}
+
+/// rl#303: a carapace held under the sheet — below the surface but far above the 2 m
+/// y-floor — must rescue once the sustain window fills, not persist forever.
+#[test]
+fn rescue_frees_a_carapace_pinned_under_the_sheet() {
+    let mut app = flat_headless_app();
+    tick(&mut app, 192);
+    let n_parts = part_translations(&mut app).len();
+
+    pin_carapace_below_sheet(&mut app, super::CARAPACE_BURIED_RESCUE_TICKS + 8);
+
+    let stats = app.world().resource::<super::RescueStats>();
+    assert!(
+        stats.since_buried >= 1,
+        "the buried-carapace rescue must have fired (since_buried={})",
+        stats.since_buried
+    );
+    tick(&mut app, 192);
+    assert_crab_sane(&mut app, n_parts, "after rescue from under the sheet");
+}
+
+/// The sustain window exists so impact transients (rl#299 measured ~30 ms spring
+/// recovery) never teleport her: a brief dip under the sheet must NOT rescue.
+#[test]
+fn brief_carapace_dip_below_the_sheet_does_not_rescue() {
+    let mut app = flat_headless_app();
+    tick(&mut app, 192);
+    let n_parts = part_translations(&mut app).len();
+
+    pin_carapace_below_sheet(&mut app, super::CARAPACE_BURIED_RESCUE_TICKS / 2);
+
+    let stats = app.world().resource::<super::RescueStats>();
+    assert_eq!(
+        stats.total, 0,
+        "a sub-window dip must not rescue (last body: {:?})",
+        stats.last_body
+    );
+    // Post-release she recovers however physics goes (spring back, or the rl#283
+    // y-floor if she falls clean through) — sane either way.
+    tick(&mut app, 192);
+    assert_crab_sane(&mut app, n_parts, "after a brief dip below the sheet");
+}
+
 /// rl#281 stage 2 end-to-end: on the REAL baked terrain arena the crab must spawn on
 /// the mountainside and settle standing ON the heightfield — surface-relative, since
 /// the local ground is hundreds of meters from y=0. Falling through (thin-surface

@@ -834,17 +834,26 @@ pub(super) fn drive_client_sim(world: &mut World) {
             // counters stay 0) — a nonzero count IS the alarm.
             if due
                 && let Some(mut stats) = world.get_resource_mut::<crab_world::bot::RescueStats>()
-                && (stats.since_nonfinite > 0 || stats.since_below_terrain > 0)
+                && (stats.since_nonfinite > 0
+                    || stats.since_below_terrain > 0
+                    || stats.since_buried > 0)
             {
-                let (nf, bt) = (stats.since_nonfinite, stats.since_below_terrain);
+                let (nf, bt, bu) = (
+                    stats.since_nonfinite,
+                    stats.since_below_terrain,
+                    stats.since_buried,
+                );
                 // `last_body` is reason-blind, so name it only when one reason fired —
                 // else the rl#137 event could name a below-terrain offender or vice versa.
                 let last = match stats.last_body {
-                    Some(b) if nf == 0 || bt == 0 => format!(" (last offender: {b})"),
+                    Some(b) if [nf, bt, bu].iter().filter(|&&n| n > 0).count() == 1 => {
+                        format!(" (last offender: {b})")
+                    }
                     _ => String::new(),
                 };
                 stats.since_nonfinite = 0;
                 stats.since_below_terrain = 0;
+                stats.since_buried = 0;
                 if nf > 0 {
                     t.send(TelemetryEvent::Fault {
                         msg: format!(
@@ -859,6 +868,15 @@ pub(super) fn drive_client_sim(world: &mut World) {
                             "crab rescue: {bt} below-terrain respawn(s) this telemetry \
                              window{last} — fell below the terrain surface, tunneled or \
                              off the tile edge (rl#283 y-floor)"
+                        ),
+                    });
+                }
+                if bu > 0 {
+                    t.send(TelemetryEvent::Fault {
+                        msg: format!(
+                            "crab rescue: {bu} buried-carapace respawn(s) this telemetry \
+                             window{last} — carapace pinned under the one-sided \
+                             heightfield sheet (rl#303)"
                         ),
                     });
                 }
