@@ -45,7 +45,8 @@ pub struct VehiclePoseWire {
 
 impl VehiclePoseWire {
     pub fn quantize_thrust(v: bevy::math::Vec3) -> [i8; 3] {
-        v.to_array().map(|c| (c.clamp(-1.0, 1.0) * 127.0) as i8)
+        v.to_array()
+            .map(|c| (c.clamp(-1.0, 1.0) * 127.0).round() as i8)
     }
 
     pub fn thrust_fraction(&self) -> bevy::math::Vec3 {

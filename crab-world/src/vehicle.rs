@@ -299,6 +299,13 @@ pub struct Nozzle {
     pub max_len: f32,
 }
 
+/// The plane's fuselage and the ship's starboard pontoon in fraction space (offset,
+/// half) — the cuboids nozzles root on, named once and shared by
+/// [`VehicleKind::silhouette`] and [`VehicleKind::nozzles`] so a hull reshape moves the
+/// nozzles with it (the port pontoon is the x-mirror).
+const PLANE_FUSELAGE: (Vec3, Vec3) = (Vec3::ZERO, Vec3::new(0.2, 0.8, 1.0));
+const SHIP_PONTOON: (Vec3, Vec3) = (Vec3::new(0.74, -0.4, -0.1), Vec3::new(0.25, 0.5, 0.75));
+
 impl VehicleKind {
     /// The craft's rendered shape: a few cuboids, every one inside the one collider box.
     /// Offsets and half-extents are FRACTIONS of [`VEHICLE_HALF`] (each axis's |offset| +
@@ -313,7 +320,7 @@ impl VehicleKind {
         match self {
             // Slim full-length fuselage, full-span main wing, tailplane + fin at the stern.
             VehicleKind::Plane => vec![
-                part(Vec3::ZERO, Vec3::new(0.2, 0.8, 1.0)),
+                part(PLANE_FUSELAGE.0, PLANE_FUSELAGE.1),
                 part(Vec3::new(0.0, 0.1, 0.18), Vec3::new(1.0, 0.15, 0.26)),
                 part(Vec3::new(0.0, 0.2, -0.85), Vec3::new(0.5, 0.12, 0.12)),
                 part(Vec3::new(0.0, 0.54, -0.85), Vec3::new(0.05, 0.45, 0.12)),
@@ -321,44 +328,77 @@ impl VehicleKind {
             // Catamaran: a broad hull slung low between two pontoons, bridge aft.
             VehicleKind::Ship => vec![
                 part(Vec3::new(0.0, -0.25, 0.0), Vec3::new(0.6, 0.6, 1.0)),
-                part(Vec3::new(0.74, -0.4, -0.1), Vec3::new(0.25, 0.5, 0.75)),
-                part(Vec3::new(-0.74, -0.4, -0.1), Vec3::new(0.25, 0.5, 0.75)),
+                part(SHIP_PONTOON.0, SHIP_PONTOON.1),
+                part(SHIP_PONTOON.0 * Vec3::new(-1.0, 1.0, 1.0), SHIP_PONTOON.1),
                 part(Vec3::new(0.0, 0.58, -0.35), Vec3::new(0.35, 0.4, 0.3)),
             ],
         }
     }
 
     /// The craft's exhaust nozzles (rl#308): where a plume roots and which thrust axis
-    /// fires it. Offsets are FRACTIONS of [`VEHICLE_HALF`] like [`Self::silhouette`], each
-    /// on a silhouette face, so a hull reshape moves its nozzles with it. The plane has one
-    /// engine on the throttle lever; the ship's RCS pairs mirror its per-axis direct
-    /// thrusters — a nozzle exists only where [`VehicleParams`] can actually thrust
+    /// fires it. Every nozzle sits on a face of its named hull cuboid ([`PLANE_FUSELAGE`] /
+    /// [`SHIP_PONTOON`]), and sizes are hull fractions, so a reshape or collider resize
+    /// moves and rescales the plumes with the craft (rl#260). The plane has one engine on
+    /// the throttle lever; the ship's RCS pairs mirror its per-axis direct thrusters — a
+    /// nozzle exists only on an axis [`VehicleParams`] can actually thrust
     /// (`nozzles_fire_only_thrustable_axes`).
     pub fn nozzles(self) -> Vec<Nozzle> {
+        // Radius and length are fractions of the hull's smallest half-extent.
         let nozzle = |offset: Vec3, axis: Vec3, radius: f32, max_len: f32| Nozzle {
             offset: offset * VEHICLE_HALF,
             axis,
-            radius,
-            max_len,
+            radius: radius * VEHICLE_HALF.y,
+            max_len: max_len * VEHICLE_HALF.y,
         };
         match self {
             // One main engine at the fuselage stern.
-            VehicleKind::Plane => vec![nozzle(Vec3::new(0.0, 0.0, -1.0), Vec3::Z, 0.02, 0.28)],
-            // Mains at the pontoon sterns, then RCS pairs: retro at the bows, lift under
-            // the pontoons, drop on their decks, strafe on their outboard faces.
-            VehicleKind::Ship => vec![
-                nozzle(Vec3::new(0.74, -0.4, -0.85), Vec3::Z, 0.018, 0.2),
-                nozzle(Vec3::new(-0.74, -0.4, -0.85), Vec3::Z, 0.018, 0.2),
-                nozzle(Vec3::new(0.74, -0.4, 0.65), Vec3::NEG_Z, 0.012, 0.09),
-                nozzle(Vec3::new(-0.74, -0.4, 0.65), Vec3::NEG_Z, 0.012, 0.09),
-                nozzle(Vec3::new(0.74, -0.9, -0.1), Vec3::Y, 0.014, 0.11),
-                nozzle(Vec3::new(-0.74, -0.9, -0.1), Vec3::Y, 0.014, 0.11),
-                nozzle(Vec3::new(0.74, 0.1, -0.1), Vec3::NEG_Y, 0.012, 0.09),
-                nozzle(Vec3::new(-0.74, 0.1, -0.1), Vec3::NEG_Y, 0.012, 0.09),
-                nozzle(Vec3::new(0.99, -0.4, -0.1), Vec3::NEG_X, 0.012, 0.09),
-                nozzle(Vec3::new(-0.99, -0.4, -0.1), Vec3::X, 0.012, 0.09),
-            ],
+            VehicleKind::Plane => {
+                let (c, h) = PLANE_FUSELAGE;
+                vec![nozzle(c - h * Vec3::Z, Vec3::Z, 0.6, 8.0)]
+            }
+            // Per starboard pontoon face — main at the stern, retro at the bow, lift on
+            // the keel, drop on the deck, strafe outboard — then the port x-mirror.
+            VehicleKind::Ship => {
+                let (c, h) = SHIP_PONTOON;
+                let starboard = [
+                    (c - h * Vec3::Z, Vec3::Z, 0.5, 5.7),
+                    (c + h * Vec3::Z, Vec3::NEG_Z, 0.35, 2.6),
+                    (c - h * Vec3::Y, Vec3::Y, 0.4, 3.1),
+                    (c + h * Vec3::Y, Vec3::NEG_Y, 0.35, 2.6),
+                    (c + h * Vec3::X, Vec3::NEG_X, 0.35, 2.6),
+                ];
+                let mirror = Vec3::new(-1.0, 1.0, 1.0);
+                starboard
+                    .into_iter()
+                    .flat_map(|(offset, axis, radius, max_len)| {
+                        [
+                            nozzle(offset, axis, radius, max_len),
+                            nozzle(offset * mirror, axis * mirror, radius, max_len),
+                        ]
+                    })
+                    .collect()
+            }
         }
+    }
+}
+
+impl VehicleParams {
+    /// 1.0 on each body axis the direct thrusters can fire — ONE encoding of the law
+    /// (the force law needs no mask: a zero param zeroes its own term).
+    fn direct_axes(&self) -> Vec3 {
+        Vec3::select(self.direct_thrust.cmpgt(Vec3::ZERO), Vec3::ONE, Vec3::ZERO)
+    }
+
+    /// 1.0 when the throttle lever can thrust (along the nose, +Z).
+    fn lever_live(&self) -> f32 {
+        if self.lever_thrust > 0.0 { 1.0 } else { 0.0 }
+    }
+
+    /// Every axis the craft can thrust along — what `nozzles_fire_only_thrustable_axes`
+    /// pins nozzle placement against.
+    #[cfg(test)]
+    fn live_axes(&self) -> Vec3 {
+        self.direct_axes().max(Vec3::Z * self.lever_live())
     }
 }
 
@@ -369,18 +409,8 @@ impl Vehicle {
     /// Purely observational — [`apply_vehicle_forces`] reads the raw command, never this.
     pub fn thrust_fraction(&self, control: &PilotCommand) -> Vec3 {
         let p = self.kind.params();
-        let lever = if p.lever_thrust > 0.0 {
-            self.throttle
-        } else {
-            0.0
-        };
-        let mask = |d: f32, t: f32| if d > 0.0 { t } else { 0.0 };
-        let direct = Vec3::new(
-            mask(p.direct_thrust.x, control.thrust.x),
-            mask(p.direct_thrust.y, control.thrust.y),
-            mask(p.direct_thrust.z, control.thrust.z),
-        );
-        (direct + Vec3::Z * lever).clamp(Vec3::NEG_ONE, Vec3::ONE)
+        (control.thrust * p.direct_axes() + Vec3::Z * (p.lever_live() * self.throttle))
+            .clamp(Vec3::NEG_ONE, Vec3::ONE)
     }
 }
 
@@ -721,17 +751,8 @@ mod tests {
                     n.axis
                 );
                 assert!(n.radius > 0.0 && n.max_len > 0.0);
-                let thrustable = Vec3::new(
-                    p.direct_thrust.x.signum().max(0.0),
-                    p.direct_thrust.y.signum().max(0.0),
-                    p.direct_thrust.z.signum().max(0.0),
-                ) + if p.lever_thrust > 0.0 {
-                    Vec3::Z
-                } else {
-                    Vec3::ZERO
-                };
                 assert!(
-                    n.axis.abs().dot(thrustable) > 0.99,
+                    n.axis.abs().dot(p.live_axes()) > 0.99,
                     "{kind:?} nozzle {i} fires along a dead axis {}",
                     n.axis
                 );
