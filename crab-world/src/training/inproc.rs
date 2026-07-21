@@ -176,7 +176,7 @@ pub(crate) fn wire_rollout_training(app: &mut App, config: &TrainConfig, id: usi
 /// driven by the training systems.
 ///
 /// The ball target REPLACES the served world's hunt feed here, it does not ride its
-/// plumbing: the bridge's hunt poser (`set_crab_walk_target` in net) poses prey at one
+/// plumbing: the served world's hunt poser (`set_crab_walk_target` in net) poses prey at one
 /// fixed height above the surface, which cannot express the trained height band or the
 /// under-carapace close disc the grab curriculum needs (rl#250). The target source
 /// stays the ball sampler ([`super::targets`]), whose band/bearing/surface conventions

@@ -19,8 +19,8 @@ pub struct HeadlessStack {
     /// client does. Tests pinning hand-computed planar geometry pass a flat fixture
     /// grid (test-gated).
     pub grid: std::sync::Arc<crate::terrain::TerrainGrid>,
-    /// `Visuals` for this world. `true` arms the render-gated systems (the skin, the
-    /// GCR repose publisher) AND the rl#116 pose sentinel — the armed-render smoke
+    /// `Visuals` for this world. `true` arms the render-gated systems (the skin)
+    /// AND the rl#116 pose sentinel — the armed-render smoke
     /// test steps this exact configuration headless, the one the play-day crash
     /// showed no test covered. Headless training/eval/probe worlds stay `false`,
     /// which also keeps the write-`Transform`-to-teleport test idiom legal there.

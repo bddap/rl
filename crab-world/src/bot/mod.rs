@@ -211,7 +211,7 @@ impl CrabSpawns {
     }
 
     /// Not yet rebuilt by `spawn_initial_crabs` — the pre-spawn frames a FixedUpdate
-    /// consumer (net's arena-anchor publisher, rl#224) must sit out rather than hit
+    /// consumer ([`recenter_drifted_origins`], rl#240) must sit out rather than hit
     /// [`Self::origin`]'s wiring-bug panic.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

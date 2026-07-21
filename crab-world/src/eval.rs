@@ -150,8 +150,8 @@ const PACE_WINDOW_MIN_S: f32 = 5.0;
 /// so it re-pins only WITH a charge re-measure, never by riding a band change.
 /// The probe presents the ball through the [`band_lure`] clamp and the
 /// [`pace_recenter`] body.pos recenter, matching the obs regime GCR play happens in
-/// (whose recenter shares the [`recenter_delta`] trigger; its dormant band clamp died
-/// with the bridge, rl#298 stage 5).
+/// (whose recenter shares the [`recenter_delta`] trigger and whose hunt poser shares
+/// the [`band_lure`] clamp, rl#301).
 pub const PACE_PROBE_DISTANCE_M: f32 = 18.0;
 
 /// The pace probe's episode length: twice the [`PACE_WINDOW_MIN_S`] floor, so the
@@ -748,10 +748,11 @@ fn eval_step(
 /// the lure's xz — an OOD obs target, the exact artifact the lure exists to prevent.
 /// Flat grids (and an in-band real ball, same xz): bit-identical passthrough.
 fn probe_lure(carapace: Vec3, real_target: Vec3, terrain: &crate::terrain::TerrainGrid) -> Vec3 {
+    let cxz = Vec2::new(carapace.x, carapace.z);
     let to_real = Vec2::new(real_target.x - carapace.x, real_target.z - carapace.z);
-    let posed = band_lure(carapace, to_real, real_target.y);
+    let posed = band_lure(cxz, to_real);
     terrain.place(
-        Vec2::new(posed.x, posed.z),
+        posed,
         real_target.y - terrain.height(real_target.x, real_target.z),
     )
 }

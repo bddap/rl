@@ -8,6 +8,15 @@ MP-zero-remote one path ([[sp-is-mp-special-case]]), determinism downgraded to
 cool-to-have ([[gcr-nn-crab-determinism-hard-req]]), real-Sally-or-loud-refuse
 ([[real-sally-definition]], [[silent-fallback-antipattern]]).
 
+> **Historical record — the float/integer bridge below was deleted by rl#298 stage 5
+> ("one frame").** `external_crab.rs`, `set_external_crab_pose`, and
+> `may_arm_external_crab` no longer exist: the crab is world content in the host's one
+> world, her sim pose is read OFF her carapace each tick, and the checkpoint guard
+> lives at the launch gate + `AdmissionRefusal` (`net/src/server.rs`). The live
+> architecture is the module doc of `net/src/crab_slot.rs`; file:line references below
+> are to the pre-rl#298 tree. The host-authoritative *shape* this doc designed —
+> one server, snapshot down, inputs up, SP = MP-zero-remote — is unchanged.
+
 ## Why lockstep is dead (the finding that forced this)
 
 Job 509 (probe `nn-crab-join-xpeer`) proved a warm-incumbent ↔ cold-joiner mid-game join
