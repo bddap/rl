@@ -378,7 +378,29 @@ pub(super) fn apply_transforms(
             let look_dir = look_direction(cam_yaw, pitch.0);
             *cam = Transform::from_translation(eye).looking_at(eye + look_dir, Vec3::Y);
         }
+        clamp_camera_above_terrain(&mut cam, &terrain);
     }
+}
+
+/// The eye may never come closer to the surface — sampled at its own xz, exact on
+/// both the mesh's and the collider's triangles — than this. Sized from
+/// [`fp_perspective`]'s near plane: the near frustum's corners reach ~1.3×near from
+/// the eye, so 4×near keeps them out of the sheet even nose-down on a steep slope.
+/// Well under the on-foot [`EYE_HEIGHT`], so walking never feels it.
+pub(super) const CAM_TERRAIN_CLEARANCE: f32 = 4.0 * FP_NEAR;
+
+/// Floor the camera above the terrain sheet (rl#306). The on-foot eye already rides
+/// the surface, but the cockpit flies the craft's raw physics pose: a landed or
+/// ground-skimming craft's body center sits within soft-contact penetration of the
+/// sheet — cm-scale, comparable to the whole craft at this world's stature — putting
+/// the eye and its near frustum under the ground. Translation only; the pilot still
+/// looks where the craft points.
+pub(super) fn clamp_camera_above_terrain(
+    cam: &mut Transform,
+    terrain: &crab_world::terrain::TerrainGrid,
+) {
+    let floor = terrain.height(cam.translation.x, cam.translation.z) + CAM_TERRAIN_CLEARANCE;
+    cam.translation.y = cam.translation.y.max(floor);
 }
 
 fn cockpit_camera(pose: Pose) -> Transform {
@@ -424,13 +446,16 @@ pub(super) fn look_direction(yaw_radians: f32, pitch_radians: f32) -> Vec3 {
 /// move together here. The ONE perspective source for the windowed and screenshot FP
 /// cameras, so their clips can't drift.
 pub(super) fn fp_perspective() -> PerspectiveProjection {
-    let near = 0.1 / 1.8 * PLAYER_HEIGHT;
     PerspectiveProjection {
-        near,
-        near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -near),
+        near: FP_NEAR,
+        near_clip_plane: Vec4::new(0.0, 0.0, -1.0, -FP_NEAR),
         ..default()
     }
 }
+
+/// The FP cameras' near-plane distance — the stock 0.1 m plane's fraction of the
+/// stock 1.8 m human, scaled to this world's stature (see [`fp_perspective`]).
+const FP_NEAR: f32 = 0.1 / 1.8 * PLAYER_HEIGHT;
 
 pub(super) fn spawn_fp_camera(mut commands: Commands) {
     commands.spawn((

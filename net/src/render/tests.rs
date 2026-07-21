@@ -4,7 +4,9 @@ use super::driver::{
     flight_control,
 };
 use super::input::pad_stick_axes;
-use super::scene::{lerp_pos, lerp_yaw, look_direction};
+use super::scene::{
+    CAM_TERRAIN_CLEARANCE, clamp_camera_above_terrain, lerp_pos, lerp_yaw, look_direction,
+};
 use super::*;
 use crate::menu::ReadyMatch;
 use crate::sim::{Externals, Sim, UNIT};
@@ -515,4 +517,29 @@ fn menu_camera_regains_egui_context_after_round_over() {
         vec![true],
         "the respawned menu camera must carry its own PrimaryEguiContext"
     );
+}
+
+/// rl#306: the cockpit flies the craft's raw physics pose, which a landed or
+/// ground-skimming craft holds within contact penetration of the terrain sheet —
+/// the camera must never end a frame under the surface.
+#[test]
+fn camera_never_ends_a_frame_under_the_terrain() {
+    let g = crab_world::terrain::TerrainGrid::gcr();
+    let (x, z) = (37.0, -211.0);
+    let ground = g.height(x, z);
+    let mut cam = Transform::from_translation(Vec3::new(x, ground - 0.01, z));
+    clamp_camera_above_terrain(&mut cam, &g);
+    assert!(
+        cam.translation.y >= ground + CAM_TERRAIN_CLEARANCE - 1e-6,
+        "buried camera must be lifted clear of the sheet, got y={} vs ground={ground}",
+        cam.translation.y
+    );
+
+    // Airborne stays untouched — the clamp may not disturb normal flight.
+    let fly = Vec3::new(x, ground + 5.0, z);
+    let rot = Quat::from_rotation_x(0.3);
+    let mut cam = Transform::from_translation(fly).with_rotation(rot);
+    clamp_camera_above_terrain(&mut cam, &g);
+    assert_eq!(cam.translation, fly);
+    assert_eq!(cam.rotation, rot);
 }
