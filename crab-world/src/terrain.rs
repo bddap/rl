@@ -250,18 +250,15 @@ impl TerrainGrid {
         let mut positions = Vec::with_capacity(rows * cols);
         let mut normals = Vec::with_capacity(rows * cols);
         let mut colors = Vec::with_capacity(rows * cols);
-        // UVs in mesh-local METERS (uv = xz) so the ground material can tile the
-        // rl#197 pilot checker at a scale IT owns (bddap/rl#287): the 30 m-pitch
-        // surface carries no high-frequency detail of its own, so the checker is the
-        // landing-height/on-foot optic-flow cue (rl#293).
-        let mut uvs = Vec::with_capacity(rows * cols);
+        // No UVs: the ground material's detail is generated from world-space
+        // position in the fragment shader (ground.wgsl, rl#304), so the mesh
+        // carries no texture coordinates at all.
         for row in 0..rows {
             for col in 0..cols {
                 let x = (col as f32 / (cols - 1) as f32 - 0.5) * ex;
                 let z = (row as f32 / (rows - 1) as f32 - 0.5) * ez;
                 let h = self.at(row, col);
                 positions.push([x, h, z]);
-                uvs.push([x, z]);
                 let (c0, c1) = (col.saturating_sub(1), (col + 1).min(cols - 1));
                 let (r0, r1) = (row.saturating_sub(1), (row + 1).min(rows - 1));
                 let dhdx = (self.at(row, c1) - self.at(row, c0)) / (self.cell * (c1 - c0) as f32);
@@ -288,7 +285,6 @@ impl TerrainGrid {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_inserted_indices(Indices::U32(indices))
     }
 }
@@ -444,30 +440,6 @@ mod tests {
     fn relief_is_zero_flat_and_full_span_on_gcr() {
         assert_eq!(TerrainGrid::flat(10.0).relief(), 0.0);
         assert_eq!(TerrainGrid::gcr().relief(), (4508 - 295) as f32);
-    }
-
-    /// The rl#197 pilot-cue contract (bddap/rl#287 → rl#293): every ground mesh
-    /// carries UVs in mesh-local METERS (uv = xz) so the ground material can tile the
-    /// checker detail texture at a scale it owns.
-    #[cfg(feature = "render")]
-    #[test]
-    fn mesh_uvs_are_mesh_local_meters() {
-        use bevy::mesh::VertexAttributeValues;
-
-        let mesh = TerrainGrid::gcr().mesh();
-        let (pos, uv) = match (
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION),
-            mesh.attribute(Mesh::ATTRIBUTE_UV_0),
-        ) {
-            (
-                Some(VertexAttributeValues::Float32x3(p)),
-                Some(VertexAttributeValues::Float32x2(u)),
-            ) => (p, u),
-            other => panic!("expected positions + Float32x2 UVs, got {other:?}"),
-        };
-        for (p, u) in pos.iter().zip(uv) {
-            assert_eq!([p[0], p[2]], *u);
-        }
     }
 
     /// The biome tint contract the taste loop leans on: banded colors with

@@ -160,6 +160,7 @@ pub struct ScreenshotConfig {
     height: u32,
     cam_yaw_deg: f32,
     cam_pitch_deg: f32,
+    cam_height_m: f32,
     cam_fov_deg: Option<f32>,
 }
 
@@ -172,8 +173,16 @@ impl ScreenshotConfig {
             height,
             cam_yaw_deg: 0.0,
             cam_pitch_deg: 0.0,
+            cam_height_m: 0.0,
             cam_fov_deg: None,
         }
+    }
+
+    /// Raise the camera this far above the normal eye point — vista/altitude
+    /// evidence shots (the ground art set, rl#304) without a piloted flight.
+    pub fn with_cam_height(mut self, height_m: f32) -> Self {
+        self.cam_height_m = height_m;
+        self
     }
 
     pub fn with_fov(mut self, fov_deg: Option<f32>) -> Self {
@@ -213,13 +222,13 @@ fn apply_shot_cam_offset(
     cfg: Res<ScreenshotConfig>,
     mut cam_q: Query<&mut Transform, With<FpCamera>>,
 ) {
-    if cfg.cam_yaw_deg == 0.0 && cfg.cam_pitch_deg == 0.0 {
+    if cfg.cam_yaw_deg == 0.0 && cfg.cam_pitch_deg == 0.0 && cfg.cam_height_m == 0.0 {
         return;
     }
     let Ok(mut cam) = cam_q.single_mut() else {
         return;
     };
-    let eye = cam.translation;
+    let eye = cam.translation + Vec3::Y * cfg.cam_height_m;
     let fwd = cam.forward().as_vec3();
     let right = cam.right().as_vec3();
     let rot = Quat::from_axis_angle(Vec3::Y, cfg.cam_yaw_deg.to_radians())

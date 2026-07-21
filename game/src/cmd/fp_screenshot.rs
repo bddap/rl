@@ -26,6 +26,9 @@ pub(crate) struct Args {
     cam_pitch: f32,
     #[arg(long)]
     cam_fov: Option<f32>,
+    /// Raise the camera this many meters above the eye point (vista/altitude shots).
+    #[arg(long, default_value_t = 0.0)]
+    cam_height: f32,
     // No `env` here, unlike the other surfaces: this flag is the OPT-IN to arm a crab at all
     // (`.map(..)` below), so an exported RL_CRAB_CHECKPOINT_DIR would silently seed a crab into
     // an evidence shot that is meant to have none.
@@ -51,6 +54,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let client = net::client::ClientSim::new(MATCH_SEED, &players, me);
     let cfg = render::ScreenshotConfig::new(args.out, args.settle, args.width, args.height)
         .with_cam_offset(args.cam_yaw, args.cam_pitch)
+        .with_cam_height(args.cam_height)
         .with_fov(args.cam_fov);
     let nn_crab = args
         .nn_crab_checkpoint

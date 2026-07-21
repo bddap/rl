@@ -32,6 +32,8 @@ pub mod app_boot;
 #[cfg(feature = "render")]
 pub mod crab_view;
 #[cfg(feature = "render")]
+pub mod ground;
+#[cfg(feature = "render")]
 pub mod play;
 #[cfg(feature = "render")]
 pub mod screenshot;

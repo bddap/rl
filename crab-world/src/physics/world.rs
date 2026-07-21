@@ -1,14 +1,10 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
-#[cfg(feature = "render")]
-use bevy::{
-    asset::RenderAssetUsages,
-    image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor},
-    math::Affine2,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
-};
 use bevy_rapier3d::prelude::*;
+
+#[cfg(feature = "render")]
+use crate::ground::{GroundDetail, GroundMaterial, GroundMaterialPlugin};
 
 use crate::bot::body::ARENA_COLLISION;
 use crate::terrain::{Terrain, TerrainGrid};
@@ -78,6 +74,7 @@ pub struct ArenaVisualsPlugin;
 #[cfg(feature = "render")]
 impl Plugin for ArenaVisualsPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(GroundMaterialPlugin);
         app.add_systems(Startup, setup_arena_visuals);
         // Update, not Startup: cameras spawn after Startup in some modes (same
         // pattern as NightSkyPlugin's skybox attach).
@@ -103,8 +100,7 @@ fn setup_arena_visuals(
     visuals: Res<crate::Visuals>,
     terrain: Res<Terrain>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<GroundMaterial>>,
 ) {
     if !visuals.0 {
         return;
@@ -135,96 +131,23 @@ fn setup_arena_visuals(
     });
 
     // The visible ground: the SAME grid the collider was built from (rl#281 — render
-    // matches physics by construction). Tint rides the mesh's vertex colors (biome
-    // bands), multiplied by the rl#197 pilot checker as a detail texture (rl#287 →
-    // rl#293): the 30 m-pitch interpolated surface has no high-frequency detail of
-    // its own, and the checker's fine cells are what give optic flow at landing
-    // height and on foot — inside the one ground path, never a second surface.
+    // matches physics by construction). Macro tint rides the mesh's vertex colors
+    // (biome bands); everything finer is the procedural world-space detail layer in
+    // [`GroundDetail`]'s fragment shader (rl#304 — it replaced the rl#197 checker,
+    // including its optic-flow duty) — inside the one ground path, never a second
+    // surface.
     commands.spawn((
         Mesh3d(meshes.add(terrain.mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            base_color_texture: Some(ground_checker(&mut images)),
-            // Mesh UVs are mesh-local METERS (terrain.rs); scale so one texture
-            // repeat covers CHECKER_PERIOD meters — the surface never moves (one
-            // frame, rl#298 stage 5), so mesh meters ARE render meters and the
-            // pilot-scale cells hold.
-            uv_transform: Affine2::from_scale(Vec2::splat(1.0 / CHECKER_PERIOD)),
-            perceptual_roughness: 0.95,
-            ..default()
+        MeshMaterial3d(materials.add(GroundMaterial {
+            base: StandardMaterial {
+                base_color: Color::WHITE,
+                perceptual_roughness: 0.95,
+                ..default()
+            },
+            extension: GroundDetail::default(),
         })),
         Transform::IDENTITY,
     ));
-}
-
-/// Checker repeat period (render m): one texture repeat is 2×2 coarse cells, each a
-/// 16×16 sub-checker. Sized for the PILOT, who the cue serves (rl#197): the 2 m coarse
-/// cells read from cruise altitude, the 0.125 m fine sub-cells (~2.5 player heights)
-/// give optic flow at landing height and on foot.
-#[cfg(feature = "render")]
-const CHECKER_PERIOD: f32 = 4.0;
-
-/// The ground's repeat-tiled checker detail texture: a coarse 2×2 checker with a
-/// fainter sub-checker on top (two spatial frequencies — see [`CHECKER_PERIOD`]),
-/// near-white so it modulates the mesh's biome vertex tint instead of replacing it.
-/// Built with a full mip chain — box-filtering per level — so the pattern fades to
-/// flat tint in the distance instead of shimmering (a generated `Image` gets no
-/// auto-mips).
-#[cfg(feature = "render")]
-fn ground_checker(images: &mut Assets<Image>) -> Handle<Image> {
-    const SIZE: usize = 256; // level-0 px; power of two so mip dims match wgpu's size>>level
-    let mut levels: Vec<Vec<u8>> = vec![
-        (0..SIZE * SIZE)
-            .flat_map(|i| {
-                let (x, y) = (i % SIZE, i / SIZE);
-                let coarse = (x / (SIZE / 2) + y / (SIZE / 2)).is_multiple_of(2);
-                let fine = (x / (SIZE / 32) + y / (SIZE / 32)).is_multiple_of(2);
-                let v = 190 + if coarse { 40u8 } else { 0 } + if fine { 25 } else { 0 };
-                [v, v, v, 255]
-            })
-            .collect(),
-    ];
-    let mut w = SIZE;
-    while w > 1 {
-        let prev = levels.last().unwrap();
-        let half = w / 2;
-        levels.push(
-            (0..half * half)
-                .flat_map(|i| {
-                    let (x, y) = ((i % half) * 2, (i / half) * 2);
-                    let at = |x: usize, y: usize| prev[(y * w + x) * 4] as u16;
-                    let v = ((at(x, y) + at(x + 1, y) + at(x, y + 1) + at(x + 1, y + 1)) / 4) as u8;
-                    [v, v, v, 255]
-                })
-                .collect(),
-        );
-        w = half;
-    }
-    let mip_count = levels.len() as u32;
-    // `Image::new` asserts data == level-0 size, so build uninit and attach the full
-    // mip chain (levels concatenated largest-first, bevy's expected layout) by hand.
-    let mut image = Image::new_uninit(
-        Extent3d {
-            width: SIZE as u32,
-            height: SIZE as u32,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.data = Some(levels.concat());
-    image.texture_descriptor.mip_level_count = mip_count;
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
-        // Most of a cockpit view meets the ground at grazing angles, where isotropic
-        // trilinear blurs the checker to flat tint — right where the optic-flow cue
-        // matters most.
-        anisotropy_clamp: 16,
-        ..ImageSamplerDescriptor::linear()
-    });
-    images.add(image)
 }
 
 /// Give every camera aerial-perspective fog toward the night sky's horizon color.
