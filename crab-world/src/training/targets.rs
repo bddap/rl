@@ -13,9 +13,9 @@ pub(crate) const TARGET_Y_MIN: f32 = 0.15;
 pub(crate) const TARGET_Y_MAX: f32 = 0.7;
 /// Far edge of the trained chase band — the ONE source for "how far a target can
 /// be" (rl#292: 0→100 m+ genuinely in-distribution; the old 9 m edge was the flat
-/// box's wall margin, not a design choice). Since rl#298 stage 5 GCR poses its hunt
-/// target AT the prey unclamped (on the live map prey never nears the edge); the
-/// eval's pace probe is the surviving [`band_lure`] consumer.
+/// box's wall margin, not a design choice). [`band_lure`]'s consumers: the eval's
+/// pace probe, and GCR's hunt poser (rl#301 — a piloted prey can out-range the
+/// band).
 pub const BAND_MAX_M: f32 = 128.0;
 
 /// The spawn-relative `body.pos` obs-support radius — the recenter/rebase trigger
@@ -116,24 +116,25 @@ pub(crate) fn polar_target(origin: Vec3, theta: f32, dist: f32, y: f32) -> Vec3 
     )
 }
 
-/// The rl#240 in-distribution guard's posed walk target: the real target re-posed at
-/// most one band edge ([`BAND_MAX_M`]) from the crab along the true planar bearing,
-/// `y` the caller's. The eval's pace probe (a distant ball, rl#280) is the surviving
-/// consumer since rl#298 stage 5 deleted GCR's dormant clamp with the bridge. Since
-/// rl#292 the edge is 128 m: a target inside it is presented WHERE IT IS, not lured
-/// nearer.
-pub fn band_lure(carapace: Vec3, planar_to_target: Vec2, y: f32) -> Vec3 {
-    let to_target = planar_to_target.clamp_length_max(BAND_MAX_M);
-    Vec3::new(carapace.x + to_target.x, y, carapace.z + to_target.y)
+/// The rl#240 in-distribution guard's posed walk target: the real target's xz
+/// re-posed at most one band edge ([`BAND_MAX_M`]) from the crab along the true
+/// planar bearing; every consumer derives y from the lured point (surface
+/// placement). Consumers: the eval's pace probe (a distant ball, rl#280) and GCR's
+/// hunt poser (`set_crab_walk_target` in net — deleted with the bridge at rl#298
+/// stage 5, restored world-frame at rl#301: a piloted prey's shadow can leave the
+/// band). Since rl#292 the edge is 128 m: a target inside it is presented WHERE IT
+/// IS, not lured nearer.
+pub fn band_lure(carapace_xz: Vec2, planar_to_target: Vec2) -> Vec2 {
+    carapace_xz + planar_to_target.clamp_length_max(BAND_MAX_M)
 }
 
 /// The rl#240 recenter's trigger and delta: once the carapace's planar drift from its
 /// spawn origin leaves the obs-support radius ([`DRIFT_REBASE_M`] — NOT the target
 /// band, rl#292), this is the exact shift back onto the origin; inside it, `None`. Consumers apply it two ways (rl#281 stage 6): the eval's
 /// `pace_recenter` TELEPORTS the crab by the delta (fixed-locale measurement — see its
-/// doc), while net's `recenter_drifted_origins` uses only the trigger and REBASES the
-/// origin instead (`CrabSpawns::rebase_origin_to` — a rendered world must stay glued
-/// under her feet). The y component carries the terrain's surface-height difference
+/// doc), while the shared `recenter_drifted_origins` (rl#303) uses only the trigger and
+/// REBASES the origin instead (`CrabSpawns::rebase_origin_to` — a rendered world must
+/// stay glued under her feet). The y component carries the terrain's surface-height difference
 /// across the teleport, so height-above-ground (and with it the spawn-relative
 /// body:pos.y obs channel, which walks with elevation on terrain — rl#283's stage-4
 /// audit item) is invariant; on the flat grids both heights are exactly 0 and the
@@ -431,19 +432,19 @@ mod tests {
         let far = polar_target(carapace, 0.7, 2.0 * BAND_MAX_M, 0.6);
         let to_far = Vec2::new(far.x - carapace.x, far.z - carapace.z);
 
-        let lure = band_lure(carapace, to_far, far.y);
-        let planar = Vec2::new(lure.x - carapace.x, lure.z - carapace.z);
+        let cxz = Vec2::new(carapace.x, carapace.z);
+        let lure = band_lure(cxz, to_far);
+        let planar = lure - cxz;
         assert!((planar.length() - BAND_MAX_M).abs() < 1e-2);
         assert!(
             planar.normalize().dot(to_far.normalize()) > 1.0 - 1e-6,
             "the lure sits on the real bearing"
         );
-        assert_eq!(lure.y, far.y);
 
         // Inside the band nothing is clamped — the chase end is a real approach.
         let near = polar_target(carapace, 0.7, 3.0, 0.6);
         let to_near = Vec2::new(near.x - carapace.x, near.z - carapace.z);
-        assert!((band_lure(carapace, to_near, near.y) - near).length() < 1e-5);
+        assert!((band_lure(cxz, to_near) - Vec2::new(near.x, near.z)).length() < 1e-5);
     }
 
     /// The rl#240 recenter formula: dormant inside the obs-support radius; one step

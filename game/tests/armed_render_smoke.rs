@@ -1,6 +1,6 @@
 //! rl#116 armed-render smoke: step the GCR client's armed NN-crab world with
-//! `Visuals(true)` — skin, repose publisher, and pose sentinel live — entirely
-//! headless, and require the crab to stay finite and near its spawn.
+//! `Visuals(true)` — skin and pose sentinel live — entirely headless, and require
+//! the crab to stay finite and near its spawn.
 //!
 //! This is the test the play-day crash proved was missing: the render-side
 //! cosmetic mutation only fired with `Visuals` on, and every headless test ran

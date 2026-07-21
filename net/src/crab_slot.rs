@@ -14,8 +14,9 @@
 //! ([`collect_crab_poses`]), her claws are her real physics capsules in world frame,
 //! and the deleted `external_crab` bridge's local-arena translation (per-round
 //! `ArenaAnchor`, carapace-delta integration into `world_pos_m`, drift/anchor
-//! lockstep, the dormant band clamp on the posed hunt target) has nothing left to
-//! translate.
+//! lockstep) has nothing left to translate. The bridge's band clamp on the posed hunt
+//! target came back world-frame (rl#301, [`set_crab_walk_target`]): piloted prey can
+//! out-range the training band even with one frame.
 //!
 //! The obs half of the seam (rl#298 stage 3): each pumped step builds the policy's
 //! observation from THIS world's ECS (`build_observation` in `BotSet::Sense`), and the
@@ -39,6 +40,7 @@ use crab_world::bot::{BotSet, CrabSpawns, recenter_drifted_origins};
 #[cfg(feature = "render")]
 use crab_world::crab_view::CrabBrainLabels;
 use crab_world::policy::Policy;
+use crab_world::training::targets::band_lure;
 
 /// The posed hunt target's height ABOVE THE LOCAL SURFACE at the target's own xz —
 /// training's convention (the ball sampler bands height-above-surface), so `target:y`
@@ -215,17 +217,29 @@ fn publish_brain_labels(policies: NonSend<CrabPolicies>, mut labels: ResMut<Crab
     }
 }
 
-/// Pose each env's walk target at its hunt prey — the prey's world position IS the
-/// target (one frame): y rides the surface at the target's own xz ([`CLAW_TARGET_Y`]),
-/// training's convention, so `target:y` stays in-distribution on terrain. The bridge's
-/// band-edge clamp died with it (rl#298 stage 5): on the live map every prey offset
-/// sits far inside the training band — she out-charges any walker — so the clamp was
-/// a dormant guard, and dormant guards don't survive their module.
+/// Pose each env's walk target at its hunt prey, lured to at most one band edge from
+/// the carapace ([`band_lure`], rl#301): a walking prey always sits far inside the
+/// training band — she out-charges any walker — but a PILOTED craft's shadow
+/// (`nearest_living_player_pos` carries the plane's planar pos) can leave
+/// `BAND_MAX_M` entirely, and the sensor's `target_local` is unclamped, so an
+/// unlured far flight would feed the target obs ~4× outside training support
+/// (worst case the rl#137 non-finite → rescue class). y rides the surface at the
+/// LURED point's xz ([`CLAW_TARGET_Y`]), training's convention, so `target:y` stays
+/// in-distribution on terrain.
 fn set_crab_walk_target(
     hunt: Res<CrabHunt>,
     terrain: Res<crab_world::terrain::Terrain>,
+    carapaces: Query<(&CrabEnvId, &Transform), With<CrabCarapace>>,
     mut targets: ResMut<CrabTargets>,
 ) {
+    let mut lure_from: Vec<Option<Vec2>> = vec![None; hunt.targets.len()];
+    for (env, t) in &carapaces {
+        if let Some(slot) = lure_from.get_mut(env.0)
+            && t.translation.is_finite()
+        {
+            *slot = Some(Vec2::new(t.translation.x, t.translation.z));
+        }
+    }
     for (idx, prey) in hunt.targets.iter().enumerate() {
         // Pre-spawn the slots don't exist (settle grace); post-settle a miss is the
         // slot-desync class `run_crab_policy` panics on the same tick — skip THIS crab
@@ -235,6 +249,14 @@ fn set_crab_walk_target(
         };
         *slot = prey.map(|p| {
             let m = pos_to_m(p);
+            // No finite carapace ⇒ nothing to lure FROM — pose at the prey raw. The
+            // settle-grace and rescue-owned non-finite windows hold the policy off
+            // the obs; a post-settle missing carapace is the rl#241 miss class,
+            // counted and reported by `collect_crab_poses`.
+            let m = match lure_from[idx] {
+                Some(cxz) => band_lure(cxz, m - cxz),
+                None => m,
+            };
             terrain.place(m, CLAW_TARGET_Y)
         });
     }
@@ -947,8 +969,8 @@ mod one_world_tests {
         }
     }
 
-    /// The walk target IS the prey's world position (band clamp deleted, stage 5),
-    /// lifted to [`CLAW_TARGET_Y`] above the local surface.
+    /// A prey inside the training band poses WHERE IT IS ([`band_lure`] presents an
+    /// in-band target unmoved), lifted to [`CLAW_TARGET_Y`] above the local surface.
     #[test]
     fn walk_target_poses_at_the_prey() {
         let mut app = one_world_app(&[Pos::from_meters(0.0, 0.0)]);
@@ -972,6 +994,39 @@ mod one_world_tests {
         assert!(
             app.world().resource::<CrabTargets>().envs[0].is_none(),
             "no prey ⇒ no posed target"
+        );
+    }
+
+    /// rl#301: a piloted prey's shadow can leave the training band — the posed
+    /// target is lured to at most one band edge from the carapace along the true
+    /// bearing, never presented outside training support.
+    #[test]
+    fn walk_target_lures_far_prey_to_the_band_edge() {
+        use crab_world::training::targets::BAND_MAX_M;
+        let mut app = one_world_app(&[Pos::from_meters(0.0, 0.0)]);
+        let prey = Pos::from_meters(400.0, -300.0); // 500 m out — far past the band
+        feed_hunt(app.world_mut(), &[Some(prey)], &[]);
+        app.update();
+        let posed = app.world().resource::<CrabTargets>().envs[0].expect("target posed");
+        let mut q = app
+            .world_mut()
+            .query_filtered::<&Transform, With<CrabCarapace>>();
+        let carapace = q.iter(app.world()).next().expect("carapace").translation;
+        let to_posed = Vec2::new(posed.x - carapace.x, posed.z - carapace.z);
+        let to_prey = pos_to_m(prey) - Vec2::new(carapace.x, carapace.z);
+        assert!(
+            (to_posed.length() - BAND_MAX_M).abs() < 1e-2,
+            "far prey must pose AT the band edge, got {} m from the carapace",
+            to_posed.length()
+        );
+        assert!(
+            to_posed.normalize().dot(to_prey.normalize()) > 0.9999,
+            "the lure must hold the true bearing to the prey"
+        );
+        assert!(
+            (posed.y - CLAW_TARGET_Y).abs() < 1e-3,
+            "flat grid: the lured point's y is CLAW_TARGET_Y above 0, got {}",
+            posed.y
         );
     }
 
