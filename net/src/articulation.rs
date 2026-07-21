@@ -37,6 +37,20 @@ pub struct VehiclePoseWire {
     pub kind: crab_world::vehicle::VehicleKind,
     pub pos: [f32; 3],
     pub rot: [f32; 4],
+    /// Body-frame thrust command, per-axis fractions in [-1, 1] quantized ×127 (rl#308):
+    /// what fires the craft's exhaust plumes on every peer. A byte per axis — this drives
+    /// a visual, not physics.
+    pub thrust: [i8; 3],
+}
+
+impl VehiclePoseWire {
+    pub fn quantize_thrust(v: bevy::math::Vec3) -> [i8; 3] {
+        v.to_array().map(|c| (c.clamp(-1.0, 1.0) * 127.0) as i8)
+    }
+
+    pub fn thrust_fraction(&self) -> bevy::math::Vec3 {
+        bevy::math::Vec3::from_array(self.thrust.map(|b| b as f32 / 127.0))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +109,7 @@ impl CrabArticulation {
             for c in v.rot {
                 out.extend_from_slice(&c.to_le_bytes());
             }
+            out.extend_from_slice(&v.thrust.map(|b| b as u8));
         }
         out
     }
@@ -128,6 +143,7 @@ impl CrabArticulation {
                     .ok_or(ArticulationDecodeError::BadVehicleKind)?,
                 pos: read_vec3(&mut r)?,
                 rot: read_vec4(&mut r)?,
+                thrust: r.take::<3>()?.map(|b| b as i8),
             };
             if vehicles.last().is_some_and(|prev| prev.pilot >= v.pilot) {
                 return Err(ArticulationDecodeError::UnorderedVehicles);
@@ -219,6 +235,9 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
 
+    /// One serialized vehicle record: pilot, kind, pos, rot, thrust (rl#308).
+    const VEHICLE_RECORD: usize = 1 + 1 + 12 + 16 + 3;
+
     fn sample() -> CrabArticulation {
         CrabArticulation {
             tick: 4242,
@@ -260,12 +279,14 @@ mod tests {
                         0.0,
                         std::f32::consts::FRAC_1_SQRT_2,
                     ],
+                    thrust: [127, -64, 0],
                 },
                 VehiclePoseWire {
                     pilot: 2,
                     kind: crab_world::vehicle::VehicleKind::Ship,
                     pos: [-3.0, 1.5, 4.0],
                     rot: [0.0, 0.0, 0.0, 1.0],
+                    thrust: [0, 13, -127],
                 },
             ],
         }
@@ -311,7 +332,7 @@ mod tests {
         let mut a = sample();
         a.crabs[1].brain_label = "x".to_string();
         let mut bytes = a.to_bytes();
-        let label_off = bytes.len() - (2 + 2 * (1 + 1 + 12 + 16)) - 1;
+        let label_off = bytes.len() - (2 + 2 * VEHICLE_RECORD) - 1;
         assert_eq!(bytes[label_off], b'x');
         bytes[label_off] = 0xFF;
         assert_eq!(
@@ -347,7 +368,7 @@ mod tests {
     fn vehicle_count_past_the_bytes_is_rejected() {
         let a = sample();
         let mut bytes = a.to_bytes();
-        let count_off = bytes.len() - 2 * (1 + 1 + 12 + 16) - 2;
+        let count_off = bytes.len() - 2 * VEHICLE_RECORD - 2;
         assert_eq!(bytes[count_off], a.vehicles.len() as u8);
         bytes[count_off] += 1;
         assert_eq!(
@@ -361,7 +382,7 @@ mod tests {
         let a = sample();
         let mut bytes = a.to_bytes();
         // First vehicle record follows the u16 count: pilot byte, then the kind byte.
-        let kind_off = bytes.len() - 2 * (1 + 1 + 12 + 16) + 1;
+        let kind_off = bytes.len() - 2 * VEHICLE_RECORD + 1;
         assert_eq!(bytes[kind_off], a.vehicles[0].kind.wire_byte());
         bytes[kind_off] = 0xEE;
         assert_eq!(

@@ -1024,12 +1024,14 @@ mod tests {
                     kind: crab_world::vehicle::VehicleKind::Plane,
                     pos: [1.0, 2.0, 3.0],
                     rot: [0.0, 0.0, 0.0, 1.0],
+                    thrust: [0, 0, 0],
                 },
                 VehiclePoseWire {
                     pilot: 2,
                     kind: crab_world::vehicle::VehicleKind::Ship,
                     pos: [9.0, 8.0, 7.0],
                     rot: [0.0, 1.0, 0.0, 0.0],
+                    thrust: [0, 0, 0],
                 },
             ],
         };
