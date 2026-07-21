@@ -29,7 +29,10 @@ use crate::snapshot::CoreSnapshot;
 // v19: one frame (rl#298 stage 5) — articulation lost the arena_anchor triple and the
 // per-crab repose flag/shift, and its part/vehicle poses are WORLD poses now; a
 // pre-stage-5 peer would mis-frame every pose it decodes.
-pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/19";
+// v20: snapshots carry the extraction point (rl#305 — the host draws a random spawn
+// layout, so a client can no longer derive the objective from the shared constant);
+// a pre-rl#305 peer would mis-frame every field after the crabs.
+pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/20";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
 

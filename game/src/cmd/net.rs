@@ -68,7 +68,7 @@ async fn run_net(args: Args) -> Result<()> {
         my_eid.fmt_short()
     );
 
-    let mut client = ClientSim::new(super::shared::MATCH_SEED, &all_ids, me);
+    let mut client = ClientSim::new(net::sim::random_match_seed(), &all_ids, me);
 
     let am_host = me == PlayerId(0);
     let server_eid = *id_map

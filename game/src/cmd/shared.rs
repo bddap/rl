@@ -4,6 +4,9 @@ use anyhow::{Context, Result};
 use net::client::ClientSim;
 use net::sim::{Input, PlayerId, TICK_DT};
 
+/// The PINNED seed for byte-stable tooling — screenshots and the determinism/behavior
+/// probes, where the same seed must reproduce the same run (the spawn layout derives
+/// from the seed, rl#305). Real play draws [`net::sim::random_match_seed`] instead.
 pub(crate) const MATCH_SEED: u64 = 0x6372_6162;
 
 /// The checkpoint-dir env fallback the deploy scripts export (deploy/rl-update sets it).
@@ -140,7 +143,7 @@ pub(crate) fn run_solo_round(run_secs: u64) -> Result<()> {
     use net::snapshot::CoreSnapshot;
 
     let me = PlayerId(0);
-    let mut client = ClientSim::new(MATCH_SEED, &[me], me);
+    let mut client = ClientSim::new(net::sim::random_match_seed(), &[me], me);
     let mut server = Server::new(me, &[me], client.sim().clone());
     // Crab poses are mandatory (rl#298 stage 5): even this headless harness runs the
     // one crab world — a rest-pose brain, no checkpoint bound.

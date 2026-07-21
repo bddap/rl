@@ -339,7 +339,6 @@ mod tests {
         let me = PlayerId(0);
         let roster = ids(1);
         let mut client = ClientSim::new(7, &roster, me);
-        let spawn = Sim::new(7, &roster).player(me).expect("rostered").pos();
 
         let mut sched = ClientSim::new(7, &roster, me);
         let mut host = Server::new(me, &roster, Sim::new(7, &roster));
@@ -365,8 +364,14 @@ mod tests {
         );
         assert_eq!(
             client.sim().player(me).expect("rostered").pos(),
-            spawn,
-            "the client ends on the restarted round's spawn state"
+            host.sim().player(me).expect("rostered").pos(),
+            "the client ends on the host's restarted spawn state (the restart drew a \
+             fresh layout, rl#305 — adoption must land exactly there)"
+        );
+        assert_eq!(
+            client.sim().extraction(),
+            host.sim().extraction(),
+            "the re-rolled extraction rides the snapshot to the client"
         );
     }
 

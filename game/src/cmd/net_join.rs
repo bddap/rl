@@ -5,7 +5,7 @@ use net::{net_loop, render};
 
 use crab_world::RenderArgs;
 
-use super::shared::{MATCH_SEED, nn_crab_policies, render_mode};
+use super::shared::{nn_crab_policies, render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -21,8 +21,10 @@ pub(crate) struct Args {
 
 pub(crate) fn run(args: Args) -> Result<()> {
     let nn_crabs = nn_crab_policies(args.nn_crab_checkpoint)?;
+    // The joiner's seed only shapes its pre-adopt placeholder sim — the host's
+    // snapshot (extraction included, rl#305) supersedes it.
     let result = net_loop::connect_and_join(
-        MATCH_SEED,
+        net::sim::random_match_seed(),
         args.host,
         args.telemetry,
         net::SyncStamp::local(nn_crabs.len() as u8),

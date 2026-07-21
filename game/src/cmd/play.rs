@@ -5,7 +5,7 @@ use net::{formation, net_loop, render};
 
 use crab_world::RenderArgs;
 
-use super::shared::{MATCH_SEED, nn_crab_policies, parse_join_dial, render_mode};
+use super::shared::{nn_crab_policies, parse_join_dial, render_mode};
 
 #[derive(Parser)]
 pub(crate) struct Args {
@@ -35,10 +35,15 @@ pub(crate) struct Args {
 
 pub(crate) fn run(args: Args) -> Result<()> {
     let nn_crabs = nn_crab_policies(args.nn_crab_checkpoint)?;
+    // Per-launch entropy (rl#305): the run layout derives from this seed, so real play
+    // opens somewhere fresh every launch (and every in-round RESTART re-draws); the
+    // authoritative sim logs the seed for repro. Screenshot/probe tools keep the pinned
+    // [`super::shared::MATCH_SEED`] instead.
+    let seed = net::sim::random_match_seed();
     let boot = if args.host || args.join.is_some() {
         let dial = parse_join_dial(args.join.as_deref())?;
         let result = net_loop::connect_and_form_dialing(
-            MATCH_SEED,
+            seed,
             args.discover_secs,
             args.expect,
             dial,
@@ -52,7 +57,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
                 render::Boot::Round(Box::new((client, Some(driver))))
             }
             net_loop::MatchResult::Alone => {
-                render::Boot::Round(Box::new((formation::solo_client_for(MATCH_SEED), None)))
+                render::Boot::Round(Box::new((formation::solo_client_for(seed), None)))
             }
             net_loop::MatchResult::Cancelled => {
                 unreachable!("scripted --host/--join has no lobby to cancel")
@@ -60,7 +65,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
         }
     } else {
         render::Boot::Menu {
-            seed: MATCH_SEED,
+            seed,
             telemetry: args.telemetry,
         }
     };

@@ -43,13 +43,14 @@ const TERRAIN_EDGE_MARGIN: f32 = 2.0 * BAND_MAX_M;
 
 /// Absolute |x|,|z| bound for spawn/target sampling — the grid interior less the
 /// edge margin, whatever the grid (rl#293: one formula, no flat fork). ONE source:
-/// the per-episode spawn draw and [`sample_target`]'s in-arena check share it, so a
-/// spawn can never be placed where its own targets don't fit. The assert makes a
+/// the per-episode spawn draw, [`sample_target`]'s in-arena check, and GCR's
+/// per-run spawn-frame draw (`net::sim`, rl#305) share it, so a spawn can never be
+/// placed where its own targets don't fit. The assert makes a
 /// too-small grid — a future undersized bake, or a flat TEST grid under
 /// [`TERRAIN_EDGE_MARGIN`] + band — fail at first sample instead of silently
 /// sampling nonsense (a negative clamp NaNs band distances and panics the origin
 /// draw's `gen_range`).
-pub(crate) fn sample_clamp_half(terrain: &TerrainGrid) -> f32 {
+pub fn sample_clamp_half(terrain: &TerrainGrid) -> f32 {
     let clamp = terrain.extent_x().min(terrain.extent_z()) / 2.0 - TERRAIN_EDGE_MARGIN;
     assert!(
         clamp > BAND_MAX_M,
