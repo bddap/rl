@@ -32,7 +32,10 @@ use crate::snapshot::CoreSnapshot;
 // v20: snapshots carry the extraction point (rl#305 — the host draws a random spawn
 // layout, so a client can no longer derive the objective from the shared constant);
 // a pre-rl#305 peer would mis-frame every field after the crabs.
-pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/20";
+// v21: articulation vehicle poses carry a 3-byte thrust command (rl#308 — exhaust
+// plumes track thrust on every peer); a pre-rl#308 peer would mis-frame the vehicle
+// list.
+pub const ALPN: &[u8] = b"bddap/rl-game/hostauth/21";
 
 pub const SERVICE_NAME: &str = "bddap-rl-game";
 
@@ -1273,6 +1276,7 @@ mod tests {
                     0.0,
                     std::f32::consts::FRAC_1_SQRT_2,
                 ],
+                thrust: [90, 0, -33],
             }],
         };
         let body = CrabArticulation::encode(&art);

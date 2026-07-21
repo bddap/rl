@@ -21,6 +21,9 @@ pub(super) struct RemoteVehicle(std::collections::BTreeMap<PilotId, RemoteCraft>
 struct RemoteCraft {
     kind: VehicleKind,
     poses: PoseWindow,
+    /// Newest wire thrust command, body-frame fractions (rl#308). Raw, not windowed:
+    /// it drives plume intensity, where the flicker swallows any tick step.
+    thrust: Vec3,
 }
 
 /// One remote craft at render time — [`RemoteVehicle::sample`]'s output, so consumers
@@ -29,6 +32,8 @@ pub(super) struct SampledCraft {
     pub pilot: PilotId,
     pub kind: VehicleKind,
     pub pose: Pose,
+    /// Body-frame thrust command fractions — the exhaust-plume intensity (rl#308).
+    pub thrust: Vec3,
 }
 
 impl RemoteVehicle {
@@ -49,7 +54,9 @@ impl RemoteVehicle {
                 .or_insert_with(|| RemoteCraft {
                     kind: v.kind,
                     poses: PoseWindow::default(),
+                    thrust: Vec3::ZERO,
                 });
+            craft.thrust = v.thrust_fraction();
             craft.poses.push(
                 tick,
                 Pose {
@@ -72,6 +79,7 @@ impl RemoteVehicle {
                     pilot,
                     kind: craft.kind,
                     pose: craft.poses.sample(now_tick, frac)?,
+                    thrust: craft.thrust,
                 })
             })
             .collect()
@@ -196,6 +204,13 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
         })
         .collect();
 
+    // The pilots' live commands, for the wire's thrust fractions (rl#308). Absent in
+    // plugin-less test worlds — a pilot with no command plumes nothing, like a skipped
+    // force tick.
+    let controls = world
+        .get_resource::<crab_world::vehicle::VehicleControls>()
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
     let mut vehicles: Vec<VehiclePoseWire> = world
         .query::<(&Transform, &Vehicle)>()
         .iter(world)
@@ -204,6 +219,12 @@ pub(super) fn capture(world: &mut World, tick: u64) -> CrabArticulation {
             kind: v.kind,
             pos: t.translation.to_array(),
             rot: t.rotation.to_array(),
+            thrust: VehiclePoseWire::quantize_thrust(
+                controls
+                    .get(&v.pilot)
+                    .map(|c| v.thrust_fraction(c))
+                    .unwrap_or(Vec3::ZERO),
+            ),
         })
         .collect();
     vehicles.sort_by_key(|v| v.pilot);
@@ -503,6 +524,7 @@ mod tests {
             kind,
             pos: [x, 0.0, 0.0],
             rot: [0.0, 0.0, 0.0, 1.0],
+            thrust: [0, 0, 0],
         };
         let mut rv = RemoteVehicle::default();
         for tick in 1..=3u64 {

@@ -6,7 +6,7 @@
 //! pass remains the colliders-mode view ([`render_mode`]).
 
 use crab_world::crab_view::RenderMode;
-use crab_world::vehicle::{PilotId, VehicleKind};
+use crab_world::vehicle::{Nozzle, PilotId, VehicleKind};
 
 use super::articulation::{RemoteVehicle, SampledCraft};
 use super::*;
@@ -15,6 +15,10 @@ use super::*;
 struct VehicleAssets {
     plane: KindAssets,
     ship: KindAssets,
+    /// One unit cone (radius 1, height 1, apex +Y) scaled per frame into every plume.
+    plume_mesh: Handle<Mesh>,
+    /// One emissive rocket-fire material shared by every plume.
+    plume_material: Handle<StandardMaterial>,
 }
 
 struct KindAssets {
@@ -39,6 +43,20 @@ struct VehicleModel {
     kind: VehicleKind,
 }
 
+/// One rocket-exhaust plume child of a craft model (rl#308): a shared unit cone,
+/// re-posed every frame from its nozzle's geometry and the craft's wire thrust.
+#[derive(Component)]
+struct ExhaustPlume {
+    pilot: PilotId,
+    nozzle: Nozzle,
+    /// Per-nozzle flicker phase, so a craft's plumes don't pulse in lockstep.
+    phase: f32,
+}
+
+/// Wire thrust below this fraction keeps the plume hidden — quantization noise and
+/// stick drift must not leave every nozzle faintly lit.
+const PLUME_MIN_THRUST: f32 = 0.05;
+
 pub(super) fn register(app: &mut App) {
     // RemoteVehicle is round state — `install_round` inserts it on every path into Playing.
     app.add_systems(Startup, build_assets);
@@ -48,7 +66,8 @@ pub(super) fn register(app: &mut App) {
     // root pose lands in this frame's GlobalTransforms.
     app.add_systems(
         PostUpdate,
-        reconcile_vehicle_models
+        (reconcile_vehicle_models, animate_exhaust)
+            .chain()
             .before(TransformSystems::Propagate)
             .run_if(in_state(AppPhase::Playing)),
     );
@@ -73,6 +92,17 @@ fn build_assets(
     commands.insert_resource(VehicleAssets {
         plane: build(VehicleKind::Plane, Color::srgb(0.85, 0.86, 0.9)),
         ship: build(VehicleKind::Ship, Color::srgb(0.35, 0.5, 0.75)),
+        plume_mesh: meshes.add(Cone {
+            radius: 1.0,
+            height: 1.0,
+        }),
+        // Rocket fire: emissive well past 1.0 like the extraction pillar, so the plume
+        // self-lights against the night sky and reads at TV distance.
+        plume_material: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.6, 0.15),
+            emissive: LinearRgba::new(8.0, 3.2, 0.5, 1.0),
+            ..default()
+        }),
     });
 }
 
@@ -129,7 +159,58 @@ fn reconcile_vehicle_models(
                         Transform::from_translation(*offset),
                     ));
                 }
+                // One plume per nozzle, hidden until its thrust axis fires
+                // ([`animate_exhaust`] owns pose and visibility from here on).
+                for (i, nozzle) in v.kind.nozzles().into_iter().enumerate() {
+                    parts.spawn((
+                        ExhaustPlume {
+                            pilot: v.pilot,
+                            nozzle,
+                            phase: v.pilot.0 as f32 * 0.71 + i as f32 * 2.399,
+                        },
+                        Mesh3d(assets.plume_mesh.clone()),
+                        MeshMaterial3d(assets.plume_material.clone()),
+                        Transform::from_translation(nozzle.offset).with_scale(Vec3::ZERO),
+                        Visibility::Hidden,
+                    ));
+                }
             });
+    }
+}
+
+/// Pose every plume from its craft's wire thrust (rl#308): a nozzle lights when the
+/// sampled body-frame thrust command has a component along its axis, its cone stretching
+/// with intensity and flickering on cheap per-nozzle sine noise. Transforms only — one
+/// shared mesh and material, no per-frame asset writes, so a ship's ten nozzles cost ten
+/// tiny draws (deck-safe). Parent visibility already gates render mode; a dead nozzle
+/// hides itself.
+fn animate_exhaust(
+    remote: Res<RemoteVehicle>,
+    clock: Res<super::driver::RenderClock>,
+    time: Res<Time>,
+    mut plumes: Query<(&ExhaustPlume, &mut Transform, &mut Visibility)>,
+) {
+    let sampled = remote.sample(clock.tick, clock.frac);
+    let t = time.elapsed_secs();
+    for (plume, mut tf, mut vis) in &mut plumes {
+        let intensity = sampled
+            .iter()
+            .find(|c| c.pilot == plume.pilot)
+            .map_or(0.0, |c| c.thrust.dot(plume.nozzle.axis).max(0.0));
+        if intensity < PLUME_MIN_THRUST {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        let n = plume.nozzle;
+        let flicker =
+            0.85 + 0.15 * ((t * 34.0 + plume.phase).sin() * (t * 21.0 + plume.phase).sin()).abs();
+        let len = n.max_len * intensity * flicker;
+        let girth = n.radius * (0.7 + 0.3 * intensity);
+        let exhaust = -n.axis;
+        *tf = Transform::from_translation(n.offset + exhaust * (len * 0.5))
+            .with_rotation(Quat::from_rotation_arc(Vec3::Y, exhaust))
+            .with_scale(Vec3::new(girth, len, girth));
+        *vis = Visibility::Inherited;
     }
 }
 
@@ -154,7 +235,14 @@ mod tests {
         VehicleAssets {
             plane: stub(VehicleKind::Plane),
             ship: stub(VehicleKind::Ship),
+            plume_mesh: Handle::default(),
+            plume_material: Handle::default(),
         }
+    }
+
+    /// Every child a craft model spawns: its silhouette parts plus one plume per nozzle.
+    fn expected_children(kind: VehicleKind) -> usize {
+        kind.silhouette().len() + kind.nozzles().len()
     }
 
     fn world_with(remote: Vec<VehiclePoseWire>, mode: RenderMode) -> World {
@@ -183,6 +271,7 @@ mod tests {
             kind,
             pos,
             rot: [0.0, 0.0, 0.0, 1.0],
+            thrust: [0, 0, 0],
         }
     }
 
@@ -215,8 +304,8 @@ mod tests {
         assert_eq!(vis, Visibility::Visible);
         assert_eq!(
             n_parts,
-            VehicleKind::Plane.silhouette().len(),
-            "one child per silhouette part"
+            expected_children(VehicleKind::Plane),
+            "one child per silhouette part plus one per nozzle"
         );
 
         // The craft moves: the SAME entity tracks (still exactly one model).
@@ -253,7 +342,47 @@ mod tests {
         let got = models(&mut w);
         assert_eq!(got.len(), 1, "the stale kind's model is gone");
         assert_eq!(got[0].1, VehicleKind::Ship);
-        assert_eq!(got[0].4, VehicleKind::Ship.silhouette().len());
+        assert_eq!(got[0].4, expected_children(VehicleKind::Ship));
+    }
+
+    /// rl#308: a forward thrust command lights exactly the nozzles whose axis it fires —
+    /// the ship's pontoon mains stretch aft — while every other nozzle stays dark.
+    #[test]
+    fn plumes_fire_on_their_thrust_axis_only() {
+        let mut w = world_with(
+            vec![VehiclePoseWire {
+                thrust: [0, 0, 127],
+                ..wire(1, VehicleKind::Ship, [0.0, 2.0, 0.0])
+            }],
+            RenderMode::Mesh,
+        );
+        w.insert_resource(Time::<()>::default());
+        w.run_system_once(reconcile_vehicle_models).unwrap();
+        w.run_system_once(animate_exhaust).unwrap();
+        let (mut lit, mut dark) = (0, 0);
+        for (p, tf, vis) in w
+            .query::<(&ExhaustPlume, &Transform, &Visibility)>()
+            .iter(&w)
+        {
+            if p.nozzle.axis.z > 0.5 {
+                assert_eq!(*vis, Visibility::Inherited, "a fired nozzle must show");
+                assert!(tf.scale.y > 0.0, "a fired plume has length");
+                assert!(
+                    tf.translation.z < p.nozzle.offset.z,
+                    "the plume extends aft of its nozzle"
+                );
+                lit += 1;
+            } else {
+                assert_eq!(*vis, Visibility::Hidden, "a dead axis's nozzle stays dark");
+                dark += 1;
+            }
+        }
+        assert_eq!(lit, 2, "both pontoon mains fire on forward thrust");
+        assert_eq!(
+            lit + dark,
+            VehicleKind::Ship.nozzles().len(),
+            "every nozzle spawned a plume"
+        );
     }
 
     #[test]
