@@ -8,7 +8,7 @@ use crate::bot::RESET_GRACE_TICKS;
 use crate::bot::actuator::{CrabActions, applied_torque, total_drive_torque_ceiling};
 use crate::bot::body::{CrabBodyPart, CrabCarapace, CrabClawTip, CrabEnvId, CrabJoint};
 use crate::bot::headless::{
-    HeadlessStack, WorldRole, force_serial_schedules, headless_stack, pin_single_thread_pools,
+    WorldRole, force_serial_schedules, headless_server_world, pin_single_thread_pools,
 };
 use crate::bot::sensor::{CrabObservation, CrabTargets};
 use crate::bot::{BotSet, CrabSpawns};
@@ -551,15 +551,15 @@ fn run_bearing(
     pace_probe: bool,
     locale_xz: Vec2,
 ) -> BearingReport {
-    let mut app = headless_stack(HeadlessStack {
-        num_envs: 1,
-        role: WorldRole::Standalone,
-        // Every sweep — pace probe included — runs on the canonical terrain tile,
-        // the only ground a loadable plant trains on (rl#293); targets, lure and
-        // recenter are surface-aware.
-        grid: crate::terrain::TerrainGrid::gcr(),
-        visuals: crate::Visuals(false),
-    });
+    // The server world (rl#298 stage 6): the same constructor the trainer's rollout
+    // env and net's headless host build from, vehicle layer included, so the eval
+    // judges the env she trains in and is served in — no `VehicleControls` entries
+    // means zero craft bodies, so today's sweeps measure the same world as before.
+    // Every sweep — pace probe included — runs on the canonical terrain tile, the
+    // only ground a loadable plant trains on (rl#293); targets, lure and recenter
+    // are surface-aware.
+    let mut app =
+        headless_server_world(1, WorldRole::Standalone, crate::terrain::TerrainGrid::gcr());
     app.insert_resource(crate::bot::InitialCrabLayout {
         base_xz: locale_xz,
         spawns_m: vec![locale_xz],
