@@ -32,15 +32,24 @@ const PLANE: VehicleParams = VehicleParams {
     yaw_torque: 0.1,
 };
 
-const SHIP_AIM_TORQUE: f32 = 0.2;
+const SHIP_AIM_TORQUE: f32 = 0.015;
+// rl#307 feel spec (owner): rotational inertia — a released spin persists and is bled
+// by angular drag, never clamped; gravity "a bit"; drag "a bunch" (watercraft-heavy).
+// The knob for the inertia FEEL is angular_drag: spin-down τ = I/angular_drag, and the
+// craft box's yaw inertia is tiny (~0.0036 kg·m²), so the old 0.07 stopped a spin in
+// ~50 ms — indistinguishable from a clamp. 0.005 puts yaw τ ≈ 0.7 s (roll, the bumper
+// spin, ≈ 0.23 s on its slimmer axis); torques are scaled down with it so the
+// terminal rates stay where they were (τ·rate ≈ the old feel, plus carry).
+// Linear drag is 3× the old float (coast from top speed halves in ~1 s) with thrust
+// raised to hold top speed ≈ 2.5 m/s, so "a bunch" reads as heavy stopping, not slow.
 const SHIP: VehicleParams = VehicleParams {
     lever_thrust: 0.0,
-    direct_thrust: Vec3::new(0.3, 0.3, 0.4),
+    direct_thrust: Vec3::new(0.55, 0.55, 0.75),
     lift: 0.0,
     grip: 0.0,
-    drag_lin: 0.05,
-    drag_quad: 0.02,
-    angular_drag: 0.07,
+    drag_lin: 0.15,
+    drag_quad: 0.06,
+    angular_drag: 0.005,
     pitch_torque: SHIP_AIM_TORQUE,
     roll_torque: SHIP_AIM_TORQUE * 0.25,
     yaw_torque: SHIP_AIM_TORQUE,
@@ -97,7 +106,10 @@ impl VehicleKind {
     fn gravity_scale(self) -> f32 {
         match self {
             VehicleKind::Plane => 1.0,
-            VehicleKind::Ship => 0.0,
+            // "A bit" of gravity (rl#307): idle sink settles at ~0.7 m/s against the
+            // heavy drag, and hovering costs ~23% of the vertical thruster — present,
+            // never a brick.
+            VehicleKind::Ship => 0.05,
         }
     }
 }
@@ -550,8 +562,9 @@ mod tests {
     /// and net's carapace-delta test pins that a carapace push folds 1:1 into her
     /// game pose. Flat fixture grid — a zero-action ragdoll never settles on the GCR
     /// origin slope, and aiming a ballistic ram needs a stationary target. No
-    /// `VehiclePlugin`, deliberately — a zero-g Ship with no flight forces is
-    /// ballistic, so the only thing that can bleed its speed is her body.
+    /// `VehiclePlugin`, deliberately — a near-zero-g Ship (gravity scale 0.05,
+    /// rl#307) with no flight forces is ballistic over this sub-second ram, so the
+    /// only thing that can bleed its speed is her body.
     #[test]
     fn ramming_craft_and_crab_exchange_momentum_both_ways() {
         use crate::bot::body::CrabCarapace;
@@ -1144,8 +1157,10 @@ mod tests {
         );
     }
 
+    /// rl#307: the ship is "a bit" affected by gravity — an idle ship sinks, but far
+    /// more gently than the plane falls (heavy drag caps the sink rate too).
     #[test]
-    fn ship_is_zero_g_but_plane_falls() {
+    fn ship_sinks_gently_but_plane_falls() {
         let fall = |kind: VehicleKind| {
             let (mut app, e) = app_with_vehicle(kind, FAR, Vec3::ZERO);
             app.world_mut()
@@ -1158,13 +1173,65 @@ mod tests {
             }
             body(&app, e).1.linear.y
         };
+        let ship = fall(VehicleKind::Ship);
+        assert!(ship < -0.02, "ship must feel gravity a bit, got Δvy={ship}");
         assert!(
-            fall(VehicleKind::Ship).abs() < 0.5,
-            "ship must float (zero-g), not fall"
+            ship > -0.5,
+            "but only a bit — a gentle sink, not a brick, got Δvy={ship}"
         );
         assert!(
             fall(VehicleKind::Plane) < -1.0,
             "plane must fall under gravity"
+        );
+    }
+
+    /// rl#307: rotational inertia — releasing the yaw input must NOT stop the spin;
+    /// the ship keeps rotating and angular drag brings it to rest, never an instant
+    /// clamp (with the old 0.07 angular drag the spin died in ~3 ticks and the first
+    /// assertion fails).
+    #[test]
+    fn ship_spin_persists_after_release_then_drag_stops_it() {
+        let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::ZERO);
+        set_cmd(&mut app, |c| c.yaw = 1.0);
+        // 2 s ≈ 3 spin-up τ: near the terminal yaw rate.
+        for _ in 0..128 {
+            app.update();
+        }
+        let w0 = body(&app, e).1.angular.y;
+        assert!(w0 > 1.0, "held yaw must build a real spin rate, got {w0}");
+        set_cmd(&mut app, |c| c.yaw = 0.0);
+        for _ in 0..16 {
+            app.update();
+        }
+        let w1 = body(&app, e).1.angular.y;
+        assert!(
+            w1 > 0.5 * w0,
+            "a quarter-second after release the ship must still be spinning \
+             (rotational inertia, not a clamp): {w0} -> {w1}"
+        );
+        for _ in 0..256 {
+            app.update();
+        }
+        let w2 = body(&app, e).1.angular.y;
+        assert!(
+            w2 < 0.1 * w0,
+            "angular drag must bring the released spin to rest: {w0} -> {w2}"
+        );
+    }
+
+    /// rl#307: drag "a bunch" — a coasting ship sheds half its speed within a second
+    /// (watercraft-heavy), where the old 0.05 float coasted for many seconds.
+    #[test]
+    fn ship_coast_halves_speed_within_a_second() {
+        let (mut app, e) = app_with_vehicle(VehicleKind::Ship, FAR, Vec3::new(3.0, 0.0, 0.0));
+        let s0 = body(&app, e).1.linear.length();
+        for _ in 0..64 {
+            app.update();
+        }
+        let s1 = body(&app, e).1.linear.length();
+        assert!(
+            s1 < 0.5 * s0,
+            "heavy drag must halve a 3 m/s coast within 1 s: {s0} -> {s1}"
         );
     }
 
