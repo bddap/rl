@@ -53,8 +53,8 @@ struct ExhaustPlume {
     phase: f32,
 }
 
-/// Wire thrust below this fraction keeps the plume hidden — quantization noise and
-/// stick drift must not leave every nozzle faintly lit.
+/// Wire thrust below this fraction keeps the plume hidden — stick drift must not leave
+/// every nozzle faintly lit.
 const PLUME_MIN_THRUST: f32 = 0.05;
 
 pub(super) fn register(app: &mut App) {
@@ -207,6 +207,8 @@ fn animate_exhaust(
         let len = n.max_len * intensity * flicker;
         let girth = n.radius * (0.7 + 0.3 * intensity);
         let exhaust = -n.axis;
+        // The unit cone is origin-centered (base -h/2, apex +h/2): shifting half a length
+        // downstream plants the base on the nozzle with the apex trailing.
         *tf = Transform::from_translation(n.offset + exhaust * (len * 0.5))
             .with_rotation(Quat::from_rotation_arc(Vec3::Y, exhaust))
             .with_scale(Vec3::new(girth, len, girth));
